@@ -36,8 +36,8 @@ func openTestStores(t *testing.T) (channelhost.Stores, *runtime.ChannelStores) {
 }
 
 // newTestHome creates a channelhost with a raw harness chain as writer (the
-// v2 assembly root would wrap this in a postCommitWriter, but for unit tests
-// the raw chain suffices).
+// v2 assembly root would wrap this in a notify写门, but for unit tests the raw
+// chain suffices).
 func newTestHome(t *testing.T) (*channelhost.ChannelHome, *harness.Chain) {
 	t.Helper()
 	ctx := context.Background()
@@ -156,8 +156,8 @@ func TestWriteAndReadBack(t *testing.T) {
 		ActorID:   senderID,
 		ChannelID: testChannelID,
 	})
-	// Write through the harness chain directly (v2: the assembly root's
-	// postCommitWriter would wrap this; channelhost doesn't own the write path).
+	// Write through the harness chain directly (v2: the assembly root's notify
+	// 写门 would wrap this; channelhost doesn't own the write path).
 	res, err := chain.Write(cctx, env)
 	if err != nil {
 		t.Fatalf("Write: %v", err)

@@ -54,10 +54,14 @@ type Channel struct {
 // Config assembles a channel.
 type Config struct {
 	ChannelID channel.ID
-	// System is the channel's intrinsic system cell; pass any actorrt.Actor
-	// implementation. channelkit assembles cells and does not know domain actor
-	// types.
-	System actorrt.Actor
+	// System builds the channel's intrinsic system cell GIVEN the live runtime.
+	// It is a factory, not a ready cell, because the system actor legitimately
+	// reads the runtime (presence Stat) — born before the runtime, it would need
+	// a back-filled pointer. channelkit builds the runtime first, then calls this
+	// with the real *actorrt.Runtime, so the cell holds a live reference at
+	// construction (no back-fill, no construction cycle). channelkit assembles
+	// cells and does not know domain actor types. nil → no system cell.
+	System func(rt *actorrt.Runtime) actorrt.Actor
 	// Writer + OpenRequests wire the presence-down closure (author #3). Writer is
 	// a harness.Writer the composition root injects already stamped with the
 	// system caller context.
@@ -70,7 +74,8 @@ type Config struct {
 
 // New builds the channel, subscribes to the substrate's presence-edge (the
 // Channel is the actorrt.PresenceWatcher — see OnDown) and spawns the intrinsic
-// system cell.
+// system cell. Assembly order: runtime → watcher → system cell, so the System
+// factory receives the live runtime (no back-filled presence pointer).
 func New(cfg Config) *Channel {
 	clock := cfg.Clock
 	if clock == nil {
@@ -94,8 +99,9 @@ func New(cfg Config) *Channel {
 	// Register the death watcher BEFORE spawning any cell — no presence-down edge
 	// may be missed (closure-critical path).
 	c.cells.WatchPresence(c)
+	// Spawn the intrinsic system cell, built against the live runtime.
 	if cfg.System != nil {
-		c.cells.Spawn(actor.SystemActorID, cfg.System)
+		c.cells.Spawn(actor.SystemActorID, cfg.System(c.cells))
 	}
 	return c
 }

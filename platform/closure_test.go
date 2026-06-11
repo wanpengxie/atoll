@@ -78,7 +78,8 @@ func registerActor(t *testing.T, ch *platform.ChannelHome, id actor.ActorID, kin
 }
 
 // writeRequest writes a kind=request envelope through the gateway (= full
-// postCommitWriter pipeline: harness -> append -> deliver -> notify).
+// commit pipeline: harness -> append -> notify; the delivery tap then delivers
+// the committed row to its audience cells asynchronously).
 func writeRequest(
 	t *testing.T,
 	ch *platform.ChannelHome,
@@ -149,8 +150,8 @@ func pollForTerminal(t *testing.T, ch *platform.ChannelHome, parentID message.ID
 // presence-down edge -> channelkit OnDown -> MaterialiseReceiverUnavailable
 // writes a system-authored receiver_unavailable terminal into truth.
 //
-// The full postCommitWriter pipeline is exercised: write -> harness -> sqlite
-// append -> deliver to cell -> cell panic -> death edge -> closure.
+// The full commit pipeline is exercised: write -> harness -> sqlite append ->
+// notify -> delivery tap delivers to cell -> cell panic -> death edge -> closure.
 func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T) {
 	ch := newClosureHome(t)
 
@@ -165,7 +166,7 @@ func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T
 	ch.Runtime().Spawn(workerID, panicOnReceive{})
 
 	// 3. Write a request addressed to the worker through the full pipeline.
-	//    The postCommitWriter delivers it to the worker cell, which panics.
+	//    The delivery tap delivers it to the worker cell, which panics.
 	reqID := writeRequest(t, ch, callerID, actor.KindHuman, workerID, "test.do", nil)
 
 	// 4. Wait for the receiver_unavailable terminal to appear in truth.

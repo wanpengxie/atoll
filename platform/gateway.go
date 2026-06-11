@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 
+	"github.com/wanpengxie/ActOS/platform/tap"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
@@ -10,15 +11,16 @@ import (
 )
 
 // Gateway is the client/SDK ingress (v2): it receives independent substrate
-// interfaces + the assembly-root's writer and PushHub, NOT a *channelhost.ChannelHome.
-// It exposes pure Go methods; HTTP/WS transport is the app layer's concern.
+// interfaces + the assembly-root's writer and commit Signal, NOT a
+// *channelhost.ChannelHome. It exposes pure Go methods; HTTP/WS transport is the
+// app layer's concern.
 //
 // Gateway deliberately knows nothing about sender kind, TTL, or other product
 // decisions -- those belong in the app layer. Its public surface is:
 // SendMessage, ListMessages, ListActors, MaxSeq, ChannelID.
 type Gateway struct {
-	writer    harness.Writer         // postCommitWriter from assembly root
-	hub       *PushHub               // client subscription signal
+	writer    harness.Writer         // notify写门 from assembly root
+	signal    *tap.Signal            // client subscription signal (tap fan-out)
 	channelID channel.ID
 	query     storespec.MessageQuery // read path
 	registry  storespec.Registry     // actor list

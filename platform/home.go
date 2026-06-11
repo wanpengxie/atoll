@@ -1,58 +1,63 @@
-// Package platform is the channel-home assembly root (v2): it owns the
-// postCommitWriter (harness -> deliver -> notify), the PushHub (client
-// notification), and wires channelhost (business layer) + fleet (physical
-// layer) + Gateway (client ingress) into a ChannelHome struct. The app layer
-// (cmd/server) selects concrete adapters, injects obs, and owns HTTP serving.
+// Package platform is the channel-home assembly root (v2): it owns the commit
+// write门 (harness -> notify), the commit Signal (tap fan-out), and wires
+// channelhost (business layer) + fleet (physical layer) + Gateway (client
+// ingress) into a ChannelHome struct. Post-commit effects are tap subscribers,
+// not inline writer steps: cell delivery is a Pump over the Signal (持 Deliverer,
+// DeliverResult observed here), client push is the Signal directly. The app
+// layer (cmd/server) selects concrete adapters, injects obs, and owns HTTP
+// serving.
 package platform
 
 import (
 	"context"
 	"fmt"
 	"log/slog"
-	"sync"
 
 	"github.com/wanpengxie/ActOS/platform/channelhost"
 	"github.com/wanpengxie/ActOS/platform/fleet"
+	"github.com/wanpengxie/ActOS/platform/tap"
 	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
+	channelpkg "github.com/wanpengxie/ActOS/protocol/channel"
 )
 
 // HomeConfig configures the channel-home assembly.
 type HomeConfig struct {
-	ChannelID channel.ID
+	ChannelID channelpkg.ID
 	DBPath    string
 	Logger    *slog.Logger
 }
 
 // ChannelHome is the assembled channel-home: it holds all the wired parts
-// (stores, harness, channelhost, fleet, gateway, pushHub) and exposes them
-// via accessor methods. The app layer owns HTTP/transport; ChannelHome is
-// pure Go.
+// (stores, harness, channelhost, fleet, gateway, signal, delivery tap) and
+// exposes them via accessor methods. The app layer owns HTTP/transport;
+// ChannelHome is pure Go.
 type ChannelHome struct {
-	writer *postCommitWriter
-	home   *channelhost.ChannelHome
-	cs     *runtime.ChannelStores
-	hub    *PushHub
-	flt    *fleet.Fleet
-	gw     *Gateway
+	writer   harness.Writer
+	home     *channelhost.ChannelHome
+	cs       *runtime.ChannelStores
+	signal   *tap.Signal
+	delivery *tap.Pump
+	flt      *fleet.Fleet
+	gw       *Gateway
 }
 
-// NewChannelHome assembles the channel home. Assembly sequence per v2.4:
+// NewChannelHome assembles the channel home. Assembly is linearised by the tap
+// seam (no construction cycle, no back-fill): stores -> harness -> signal ->
+// notify写门 -> channelhost(spawns sysactor against live runtime) -> taps.
 //
 //  1. Open stores via runtime.OpenChannel
 //  2. Build raw harness chain
-//  3. Create backfillWriter placeholder (breaks channelkit <-> writer cycle)
-//  4. Build channelhost.New with placeholder writer
-//  5. Build PushHub
-//  6. Build postCommitWriter with rawChain + home.Deliverer() + hub.Notify
-//  7. Backfill the placeholder
-//  8. Build fleet with writer + home.Runtime() + membership
-//  9. Build Gateway with writer + hub + query + registry
+//  3. Build the commit Signal (tap fan-out; no dependencies)
+//  4. Build the notify写门 (rawChain + signal.Notify) — the pen cells write with
+//  5. Build channelhost with the notify写门 as Writer
+//  6. Build the delivery tap: a Pump持 Deliverer, cursor start = MaxSeq, started
+//  7. Build fleet with写门 + home.Runtime() + membership
+//  8. Build Gateway with写门 + signal + query + registry
 func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 	logger := cfg.Logger
 	if logger == nil {
@@ -64,7 +69,7 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 	// 1. Open channel stores (substrate).
 	cs, err := runtime.OpenChannel(ctx, cfg.DBPath, runtime.OpenChannelOptions{})
 	if err != nil {
-		return nil, fmt.Errorf("server: open channel store: %w", err)
+		return nil, fmt.Errorf("platform: open channel store: %w", err)
 	}
 
 	// 2. Build raw harness chain (substrate).
@@ -76,14 +81,22 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 	})
 	if err != nil {
 		_ = cs.Close()
-		return nil, fmt.Errorf("server: build harness: %w", err)
+		return nil, fmt.Errorf("platform: build harness: %w", err)
 	}
 
-	// 3. Placeholder writer (breaks the cycle: channelkit needs writer,
-	//    postCommitWriter needs deliverer from channelkit).
-	var bw backfillWriter
+	// 3. Build the commit Signal (tap fan-out). It has NO dependencies — this is
+	//    what dissolves the old construction cycle: the写门's only post-commit
+	//    duty is Notify(), so it needs the Signal, not the Deliverer.
+	signal := tap.NewSignal()
 
-	// 4. Build channelhost (business layer: stores + channelkit + sysactor).
+	// 4. Build the notify写门 (assembly root glue): write -> on commit, Notify().
+	//    No业务 effect, no dependency. Every effect (cell delivery, client push)
+	//    is a downstream tap subscriber, never an inline writer step.
+	writer := &notifyWriter{inner: rawChain, notify: signal.Notify}
+
+	// 5. Build channelhost (business layer: stores + channelkit + sysactor). The
+	//    sysactor cell is spawned against the live runtime inside channelkit (no
+	//    presence back-fill).
 	home, err := channelhost.New(ctx, channelhost.Config{
 		ChannelID: cfg.ChannelID,
 		Stores: channelhost.Stores{
@@ -94,7 +107,7 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 			Membership: cs.Membership,
 			Close:      cs.Close,
 		},
-		Writer: &bw,
+		Writer: writer,
 		Logger: logger,
 	})
 	if err != nil {
@@ -102,21 +115,19 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 		return nil, err
 	}
 
-	// 5. Build PushHub (client notification).
-	hub := NewPushHub()
-
-	// 6. Build postCommitWriter (assembly root glue):
-	//    write -> deliver to audience cells -> notify client subscribers.
-	writer := &postCommitWriter{
-		inner:     rawChain,
-		deliverer: home.Deliverer(),
-		notify:    hub.Notify,
+	// 6. Build the delivery tap: a Pump over the Signal持 Deliverer. cursor start
+	//    = current MaxSeq (mailbox semantics: don't replay history, only new
+	//    commits). DeliverResult lands here as structured per-audience logs.
+	from, err := cs.Query.MaxSeq(ctx)
+	if err != nil {
+		_ = home.Close()
+		return nil, fmt.Errorf("platform: read max seq: %w", err)
 	}
+	deliver := deliveryHandle(home.Deliverer(), cfg.ChannelID, logger)
+	delivery := tap.NewPump(signal, cs.Query, from, deliver, logger)
+	delivery.Start()
 
-	// 7. Backfill the placeholder, closing the cycle.
-	bw.fill(writer)
-
-	// 8. Build fleet (physical layer: WS mux/demux for attached computes).
+	// 7. Build fleet (physical layer: WS mux/demux for attached computes).
 	flt := fleet.New(fleet.Config{
 		Writer:     writer,
 		Runtime:    home.Runtime(),
@@ -125,30 +136,31 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 		Logger:     logger,
 	})
 
-	// 9. Build Gateway (client/SDK ingress).
+	// 8. Build Gateway (client/SDK ingress).
 	gw := &Gateway{
 		writer:    writer,
-		hub:       hub,
+		signal:    signal,
 		channelID: cfg.ChannelID,
 		query:     cs.Query,
 		registry:  cs.Registry,
 	}
 
 	return &ChannelHome{
-		writer: writer,
-		home:   home,
-		cs:     cs,
-		hub:    hub,
-		flt:    flt,
-		gw:     gw,
+		writer:   writer,
+		home:     home,
+		cs:       cs,
+		signal:   signal,
+		delivery: delivery,
+		flt:      flt,
+		gw:       gw,
 	}, nil
 }
 
 // Runtime returns the actorrt.Runtime from the channelhost.
 func (ch *ChannelHome) Runtime() *actorrt.Runtime { return ch.home.Runtime() }
 
-// Writer is the post-commit write chain (harness -> deliver -> notify) —
-// the pen an in-process cell writes truth with.
+// Writer is the commit write门 (harness -> notify) — the pen an in-process cell
+// writes truth with.
 func (ch *ChannelHome) Writer() harness.Writer { return ch.writer }
 
 // SpawnCell registers + spawns one in-process actor cell (binding=embedded).
@@ -172,24 +184,29 @@ func (ch *ChannelHome) Membership() storespec.MembershipControlPlane { return ch
 // Fleet returns the fleet (physical layer: WS mux/demux for attached computes).
 func (ch *ChannelHome) Fleet() *fleet.Fleet { return ch.flt }
 
-// PushHub returns the client notification hub.
-func (ch *ChannelHome) PushHub() *PushHub { return ch.hub }
+// PushHub returns the client notification signal (tap fan-out): client streams
+// Subscribe to it and read forward from their own seq cursor.
+func (ch *ChannelHome) PushHub() *tap.Signal { return ch.signal }
 
 // Gateway returns the client/SDK ingress gateway.
 func (ch *ChannelHome) Gateway() *Gateway { return ch.gw }
 
 // Close tears down the channel home in order: fleet (WS connections + relay
-// goroutines) -> channelhost (actors + business logic) -> channel stores (DB).
+// goroutines) -> delivery tap -> channelhost (actors + business logic) ->
+// channel stores (DB).
 func (ch *ChannelHome) Close() error {
 	// 1. Fleet first: close all WS connections, tear down virtual pipes, wait
 	//    for relay goroutines. This stops all external compute traffic before
 	//    we shut down the runtime/stores underneath.
 	fltErr := ch.flt.Close()
 
-	// 2. Channelhost: stops actor cells, system actors.
+	// 2. Delivery tap: stop the pump before tearing the runtime down.
+	ch.delivery.Close()
+
+	// 3. Channelhost: stops actor cells, system actors.
 	homeErr := ch.home.Close()
 
-	// 3. Channel stores (DB) last.
+	// 4. Channel stores (DB) last.
 	csErr := ch.cs.Close()
 
 	// Return the first error encountered.
@@ -203,57 +220,72 @@ func (ch *ChannelHome) Close() error {
 }
 
 // ---------------------------------------------------------------------------
-// postCommitWriter -- assembly root private type
+// notifyWriter -- the one generic commit写门 wrapper
 // ---------------------------------------------------------------------------
 
-// postCommitWriter wraps the raw harness chain with post-commit side effects:
-// deliver the committed envelope to its audience (actor cells) and notify
-// client subscribers that new data is available.
-type postCommitWriter struct {
-	inner     harness.Writer
-	deliverer actorrt.Deliverer
-	notify    func()
+// notifyWriter wraps the raw harness chain with the single generic post-commit
+// duty: on a committed (non-rejected) write, wake the commit Signal. It has no
+// business effect and no dependency — every actual effect (cell delivery,
+// client push) is a tap subscriber reading forward from its own cursor, never
+// an inline writer step (写门零内联效果).
+type notifyWriter struct {
+	inner  harness.Writer
+	notify func()
 }
 
-func (w *postCommitWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
+func (w *notifyWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	res, err := w.inner.Write(ctx, env)
 	if err != nil || res.RejectReason != "" {
 		return res, err
 	}
-	w.deliverer.Deliver(env.Audience, env)
 	w.notify()
 	return res, err
 }
 
 // ---------------------------------------------------------------------------
-// backfillWriter -- cycle-breaking placeholder
+// delivery tap handle -- the cell-delivery Pump's per-row work
 // ---------------------------------------------------------------------------
 
-// backfillWriter is a placeholder harness.Writer that panics if Write is called
-// before fill(). It breaks the construction cycle: channelkit needs a Writer,
-// but the postCommitWriter needs Deliverer from channelkit.
-//
-// Safety: channelkit.New spawns the system actor cell, but cells only call
-// Handle (and thus Writer.Write) when they receive a Deliver'd envelope. Since
-// fill() is called before any Deliver is possible, the placeholder is never
-// actually invoked in the nil state.
-type backfillWriter struct {
-	mu sync.RWMutex
-	w  harness.Writer
-}
-
-func (b *backfillWriter) fill(w harness.Writer) {
-	b.mu.Lock()
-	b.w = w
-	b.mu.Unlock()
-}
-
-func (b *backfillWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	b.mu.RLock()
-	w := b.w
-	b.mu.RUnlock()
-	if w == nil {
-		panic("backfillWriter: Write called before fill -- construction order violated")
+// deliveryHandle is the delivery tap's per-row work: deliver the committed
+// envelope to its audience cells and OBSERVE the per-audience Outcome (the
+// substrate's structured DeliverResult lands here — NotHosted / MailboxFull /
+// Stopped are logged, never silently dropped). It is best-effort (push-mailbox
+// semantics): a not-hosted / full mailbox is observed, not retried, so the
+// handle always returns nil and the pump cursor always advances.
+func deliveryHandle(d actorrt.Deliverer, chID channelpkg.ID, logger *slog.Logger) func(storespec.StoredRow) error {
+	return func(row storespec.StoredRow) error {
+		env := row.Envelope
+		res, err := d.Deliver(env.Audience, &env)
+		if err != nil {
+			logger.Error("platform.delivery.error",
+				"channel", string(chID), "seq", row.Seq, "envelope", string(env.ID), "err", err)
+			return nil
+		}
+		for id, outcome := range res.Per {
+			if outcome == actorrt.Delivered {
+				continue
+			}
+			logger.Warn("platform.delivery.outcome",
+				"channel", string(chID), "seq", row.Seq, "envelope", string(env.ID),
+				"audience", string(id), "outcome", outcomeString(outcome))
+		}
+		return nil
 	}
-	return w.Write(ctx, env)
+}
+
+// outcomeString names an actorrt.Outcome for structured logging (an observation
+// label, not a semantic branch — the handle does not act differently per kind).
+func outcomeString(o actorrt.Outcome) string {
+	switch o {
+	case actorrt.Delivered:
+		return "delivered"
+	case actorrt.NotHosted:
+		return "not_hosted"
+	case actorrt.MailboxFull:
+		return "mailbox_full"
+	case actorrt.Stopped:
+		return "stopped"
+	default:
+		return "unknown"
+	}
 }

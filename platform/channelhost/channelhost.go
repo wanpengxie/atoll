@@ -77,31 +77,28 @@ func New(ctx context.Context, cfg Config) (*ChannelHome, error) {
 		ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: nowMs(),
 	})
 
-	// Presence stat adapter: bridges actorrt.Runtime.Stat to sysactor.PresenceStat.
-	presenceAdapter := &runtimePresenceAdapter{}
-
-	// sysactor: the channel system cell (advisory directory / actor.list).
 	clock := func() time.Time { return time.UnixMilli(nowMs()) }
-	sys := sysactor.New(sysactor.Deps{
-		Registry: st.Registry,
-		Writer:   cfg.Writer,
-		Lookup:   st.Requests,
-		Clock:    clock,
-		Stat:     presenceAdapter,
-	})
 
-	// channelkit: assembles actorrt runtime + sysactor + death edge wiring.
+	// channelkit: assembles actorrt runtime + sysactor + death edge wiring. The
+	// system cell is built against the LIVE runtime (factory): its presence Stat
+	// seam reads the real runtime at construction — no back-filled pointer, no
+	// construction cycle.
 	ch := channelkit.New(channelkit.Config{
-		ChannelID:    cfg.ChannelID,
-		System:       sys,
+		ChannelID: cfg.ChannelID,
+		System: func(rt *actorrt.Runtime) actorrt.Actor {
+			return sysactor.New(sysactor.Deps{
+				Registry: st.Registry,
+				Writer:   cfg.Writer,
+				Lookup:   st.Requests,
+				Clock:    clock,
+				Stat:     &runtimePresenceAdapter{rt: rt},
+			})
+		},
 		Writer:       cfg.Writer,
 		OpenRequests: st.Query,
 		Clock:        clock,
 		Logger:       logger,
 	})
-
-	// Back-fill presence adapter with the runtime.
-	presenceAdapter.rt = ch.Cells()
 
 	h := &ChannelHome{
 		channelID: cfg.ChannelID,
@@ -159,7 +156,8 @@ func (a *runtimePresenceAdapter) Stat(id actor.ActorID) (startedAt time.Time, pr
 func (h *ChannelHome) Runtime() *actorrt.Runtime { return h.channel.Cells() }
 
 // Deliverer returns the confined enqueue capability so the assembly root can
-// build its postCommitWriter (write -> deliver -> notify).
+// wire its delivery tap (a Pump over the commit Signal that delivers each
+// committed envelope to its audience cells).
 func (h *ChannelHome) Deliverer() actorrt.Deliverer { return h.channel.Deliverer() }
 
 // Channel exposes the assembled channelkit (cells + death wiring).

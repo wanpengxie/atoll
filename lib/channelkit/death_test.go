@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/lib/channelkit"
+	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
@@ -212,7 +213,8 @@ func TestOnDown_PerRequestWriteFault_IsLogged(t *testing.T) {
 func TestNew_DefaultClockAndSpawnsSystem(t *testing.T) {
 	ch := channelkit.New(channelkit.Config{
 		ChannelID: "ch",
-		System:    liveActor{}, // intrinsic system cell — must be spawned by New
+		// intrinsic system cell — built against the live runtime, spawned by New.
+		System: func(*actorrt.Runtime) actorrt.Actor { return liveActor{} },
 		// Clock left nil → New must default it (time.Now) without panicking.
 	})
 	if _, ok := ch.Cells().Stat(actor.SystemActorID); !ok {
