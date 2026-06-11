@@ -7,8 +7,8 @@
 //	Gate()  harness.Writer    — the commit write门 (the harness chain; commit signal fires at the store append chokepoint)
 //	View()  View              — read-only observation set (ReadAfterSeq/MaxSeq/ListActors)
 //	Spawn(ctx,id,kind,impl)   — in-process cell安置 (membership + spawn)
-//	Links() *link.Acceptor    — attach受理面 (app hands an upgraded WS here)
-//	Taps()  *tap.Signal       — subscription注册面 (client push)
+//	ServeAttach(w,r,daemonID) — attach受理面 (app hands an upgraded WS here)
+//	Subscribe() (<-chan struct{}, func()) — subscription注册面 (client push)
 //	Close() error
 //
 // Everything else (runtime, deliverer, membership, registry) is internal wiring.

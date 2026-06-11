@@ -33,7 +33,7 @@ func TestEmitIdentity_WireSelfReportCannotImpersonate(t *testing.T) {
 	// Real home↔daemon link over httptest: the daemon attaches tool:x and gets a
 	// real port presence bound to that authenticated id at the handshake.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		ch.Links().Serve(w, r, "daemon-1")
+		ch.ServeAttach(w, r, "daemon-1")
 	}))
 	defer srv.Close()
 	wsURL := "ws" + srv.URL[4:]

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/http"
 	"time"
 
 	"github.com/wanpengxie/ActOS/lib/channelkit"
@@ -241,13 +242,19 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, imp
 	return nil
 }
 
-// Links returns the link acceptor (physical layer: the app hands an upgraded WS
-// here so a daemon can attach its actor streams).
-func (h *Home) Links() *link.Acceptor { return h.links }
+// ServeAttach is the attach受理面: the app hands an upgraded WS request here so a
+// daemon can attach its actor streams. Home keeps the internal link acceptor and
+// only exposes this capability — the acceptor object never escapes.
+func (h *Home) ServeAttach(w http.ResponseWriter, r *http.Request, daemonID string) {
+	h.links.Serve(w, r, daemonID)
+}
 
-// Taps returns the commit Signal (tap fan-out): client streams Subscribe to it
-// and read forward from their own seq cursor.
-func (h *Home) Taps() *tap.Signal { return h.signal }
+// Subscribe is the subscription注册面 (client push): a client stream subscribes to
+// the commit Signal and reads forward from its own seq cursor. It returns the
+// wake channel and the unsubscribe func — the internal Signal never escapes.
+func (h *Home) Subscribe() (<-chan struct{}, func()) {
+	return h.signal.Subscribe()
+}
 
 // Close tears down the channel home in order: link acceptor (WS connections +
 // per-actor streams) -> delivery tap -> cells -> channel stores (DB).
