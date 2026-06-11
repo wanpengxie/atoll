@@ -17,7 +17,7 @@ import (
 func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "ch.sqlite")
-	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{})
+	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{}, nil)
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}
@@ -81,7 +81,7 @@ func TestOpenChannel_ReadOnlyDoesNotMkdirAll(t *testing.T) {
 	missingDir := filepath.Join(base, "does-not-exist")
 	dbPath := filepath.Join(missingDir, "ch.sqlite")
 
-	_, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{ReadOnly: true})
+	_, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{ReadOnly: true}, nil)
 	if err == nil {
 		t.Fatal("ReadOnly open of a missing path must error, not create the file")
 	}
@@ -95,7 +95,7 @@ func TestOpenChannel_ReadOnlyDoesNotMkdirAll(t *testing.T) {
 func TestOpenChannel_WriteCreatesParentDir(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "nested", "deep", "ch.sqlite")
-	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{})
+	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{}, nil)
 	if err != nil {
 		t.Fatalf("OpenChannel write: %v", err)
 	}
@@ -110,13 +110,13 @@ func TestOpenChannel_WriteCreatesParentDir(t *testing.T) {
 func TestOpenChannel_SkipDDLReopenValid(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "ch.sqlite")
-	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{})
+	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{}, nil)
 	if err != nil {
 		t.Fatalf("first open: %v", err)
 	}
 	_ = cs.Close()
 
-	cs2, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{SkipDDL: true})
+	cs2, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{SkipDDL: true}, nil)
 	if err != nil {
 		t.Fatalf("SkipDDL reopen of valid DB: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestOpenChannel_SkipDDLStaleSchemaFailsFast(t *testing.T) {
 	}
 	_ = raw.Close()
 
-	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{SkipDDL: true}); err == nil {
+	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{SkipDDL: true}, nil); err == nil {
 		t.Fatal("SkipDDL open of a DB missing the baseline schema must fail fast")
 	}
 }

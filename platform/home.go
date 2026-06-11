@@ -12,7 +12,6 @@ import (
 	"github.com/wanpengxie/ActOS/platform/tap"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	channelpkg "github.com/wanpengxie/ActOS/protocol/channel"
-	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
@@ -58,8 +57,8 @@ const reconcileInterval = 30 * time.Second
 // Open assembles the channel home. Assembly is linearised by the tap seam (no
 // construction cycle, no back-fill):
 //
-//	stores -> harness -> signal -> notify写门 -> channelkit(spawns sysactor
-//	against the live runtime) -> delivery tap -> link acceptor.
+//	signal -> stores(OnCommit=signal.Notify) -> harness -> channelkit(spawns
+//	sysactor against the live runtime) -> delivery tap -> link acceptor.
 func Open(cfg HomeConfig) (*Home, error) {
 	logger := cfg.Logger
 	if logger == nil {
@@ -71,14 +70,28 @@ func Open(cfg HomeConfig) (*Home, error) {
 	ctx := context.Background()
 	nowMs := func() int64 { return time.Now().UnixMilli() }
 
-	// 1. Open channel stores (substrate).
-	cs, err := runtime.OpenChannel(ctx, cfg.ChannelID, cfg.DBPath, runtime.OpenChannelOptions{})
+	// 1. Build the commit Signal (tap fan-out). It has NO dependencies, so it is
+	//    built first and handed to the store as its post-commit source. The
+	//    commit signal belongs to the log append chokepoint (Postgres WAL / Kafka
+	//    offset), not to any one writer — so BOTH write paths (request-path Append
+	//    and the control-plane membership mirror) fire it through the store,
+	//    instead of only the harness path being wrapped.
+	signal := tap.NewSignal()
+
+	// 2. Open channel stores (substrate), wiring the commit signal as the store's
+	//    OnCommit. Now any durable append — request or control-plane — wakes the
+	//    tap identically.
+	cs, err := runtime.OpenChannel(ctx, cfg.ChannelID, cfg.DBPath, runtime.OpenChannelOptions{
+		OnCommit: signal.Notify,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: open channel store: %w", err)
 	}
 
-	// 2. Build raw harness chain (substrate).
-	rawChain, err := harness.New(harness.Deps{
+	// 3. Build the harness chain (substrate). It is the request-path write门
+	//    directly — the post-commit Notify now lives at the store append
+	//    chokepoint, so there is no写门 wrapper layer.
+	writer, err := harness.New(harness.Deps{
 		ChannelID:     cfg.ChannelID,
 		ActorRegistry: cs.Registry,
 		Log:           cs.Log,
@@ -88,16 +101,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 		_ = cs.Close()
 		return nil, fmt.Errorf("platform: build harness: %w", err)
 	}
-
-	// 3. Build the commit Signal (tap fan-out). It has NO dependencies — this is
-	//    what dissolves the old construction cycle: the写门's only post-commit
-	//    duty is Notify(), so it needs the Signal, not the Deliverer.
-	signal := tap.NewSignal()
-
-	// 4. Build the notify写门: write -> on commit, Notify(). No业务 effect, no
-	//    dependency. Every effect (cell delivery, client push) is a downstream tap
-	//    subscriber, never an inline writer step (写门零内联效果).
-	writer := &notifyWriter{inner: rawChain, notify: signal.Notify}
 
 	// 5. Bootstrap: register the intrinsic system actor so its substrate-death
 	//    terminals pass harness sender validation.
@@ -194,8 +197,10 @@ func Open(cfg HomeConfig) (*Home, error) {
 	}, nil
 }
 
-// Gate returns the commit write门 (harness -> notify) — the pen an in-process
+// Gate returns the commit write门 (the harness chain) — the pen an in-process
 // cell, the client/SDK ingress, and the link emit-sink all write truth with.
+// The post-commit Notify lives at the store append chokepoint now, so the gate
+// is the bare harness chain, not a wrapper.
 func (h *Home) Gate() harness.Writer { return h.writer }
 
 // View returns the read-only observation set (ReadAfterSeq / MaxSeq /
@@ -314,29 +319,6 @@ func (a *runtimePresenceAdapter) Stat(id actor.ActorID) (startedAt time.Time, pr
 		return time.Time{}, false
 	}
 	return stat.StartedAt, true
-}
-
-// ---------------------------------------------------------------------------
-// notifyWriter -- the one generic commit写门 wrapper
-// ---------------------------------------------------------------------------
-
-// notifyWriter wraps the raw harness chain with the single generic post-commit
-// duty: on a committed (non-rejected) write, wake the commit Signal. It has no
-// business effect and no dependency — every actual effect (cell delivery, client
-// push) is a tap subscriber reading forward from its own cursor, never an inline
-// writer step (写门零内联效果).
-type notifyWriter struct {
-	inner  harness.Writer
-	notify func()
-}
-
-func (w *notifyWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	res, err := w.inner.Write(ctx, env)
-	if err != nil || res.RejectReason != "" {
-		return res, err
-	}
-	w.notify()
-	return res, err
 }
 
 // ---------------------------------------------------------------------------

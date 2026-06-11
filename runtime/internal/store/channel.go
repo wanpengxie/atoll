@@ -40,13 +40,19 @@ type ChannelStores struct {
 // writing a foreign-channel row into this channel's sqlite — the same truth
 // corruption the harness shape-step dies to prevent; cf. FindByID, whose channel
 // scope is likewise the binding, not a per-call arg).
-func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts OpenOptions) (*ChannelStores, error) {
+//
+// onCommit is the post-commit signal source wired into BOTH write paths (the
+// request-path Append and the control-plane mirror append): the append
+// chokepoint produces "the log advanced" so a downstream tap is woken
+// identically regardless of which path committed. nil = no subscriber. May be
+// nil for read-only / test opens.
+func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts OpenOptions, onCommit func()) (*ChannelStores, error) {
 	db, err := openChannelDB(ctx, dbPath, opts)
 	if err != nil {
 		return nil, err
 	}
-	msgs := newMessages(db)
-	reg := newActorRegistry(db, channelID)
+	msgs := newMessages(db, onCommit)
+	reg := newActorRegistry(db, channelID, onCommit)
 	cs := &ChannelStores{
 		db:         db,
 		Log:        msgs,

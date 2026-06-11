@@ -32,6 +32,12 @@ func (c *ChannelStores) Close() error {
 type OpenChannelOptions struct {
 	ReadOnly bool
 	SkipDDL  bool
+
+	// OnCommit is the post-commit signal source: the store fires it after any
+	// durable append commit (request path AND control-plane mirror), so a tap is
+	// woken identically regardless of which write path advanced the log. nil =
+	// no subscriber. The callback must be non-blocking (a lossy fan-out wake).
+	OnCommit func()
 }
 
 // OpenChannel opens the per-channel sqlite at dbPath and returns the segregated
@@ -43,7 +49,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	cs, err := store.OpenChannel(ctx, channelID, dbPath, store.OpenOptions{
 		ReadOnly: opts.ReadOnly,
 		SkipDDL:  opts.SkipDDL,
-	})
+	}, opts.OnCommit)
 	if err != nil {
 		return nil, err
 	}

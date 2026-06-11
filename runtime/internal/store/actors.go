@@ -19,14 +19,19 @@ import (
 type actorRegistry struct {
 	db        *sql.DB
 	channelID channel.ID
+	// onCommit is the same substrate commit signal source messages holds: the
+	// control-plane mirror append commits truth too, so this path fires the
+	// signal as well — both write paths are one chokepoint to the tap. nil = no
+	// subscriber wired. See messages.onCommit.
+	onCommit func()
 }
 
 // NewActorRegistry returns a registry over the given channel sqlite, bound to
 // channelID — the scope its membership mirror events are stamped with.
 // (v2: no fence / outbox — single write path by construction; the store is a
 // pure persistence sink, so same-tx side projections do not live here.)
-func newActorRegistry(db *sql.DB, channelID channel.ID) *actorRegistry {
-	return &actorRegistry{db: db, channelID: channelID}
+func newActorRegistry(db *sql.DB, channelID channel.ID, onCommit func()) *actorRegistry {
+	return &actorRegistry{db: db, channelID: channelID, onCommit: onCommit}
 }
 
 // Lookup implements storespec.Registry.
@@ -177,6 +182,10 @@ func (r *actorRegistry) ApplyMemberTransitions(
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// appended counts mirror rows that actually landed — the post-commit signal
+	// fires only when truth advanced (no-op transitions stay silent).
+	appended := 0
+
 	// v2: no fencing — the harness is the single REQUEST-PATH writer. These
 	// system.actor.* mirror events are written with is_terminal=false (events
 	// are never terminal).
@@ -211,6 +220,7 @@ func (r *actorRegistry) ApplyMemberTransitions(
 		if _, err := appendTx(ctx, tx, env, false); err != nil {
 			return fmt.Errorf("store: actor registered mirror %q: %w", add.ID, err)
 		}
+		appended++
 	}
 	for _, remove := range removes {
 		if remove.ID == "" {
@@ -230,9 +240,17 @@ func (r *actorRegistry) ApplyMemberTransitions(
 		if _, err := appendTx(ctx, tx, env, false); err != nil {
 			return fmt.Errorf("store: actor deregistered mirror %q: %w", remove.ID, err)
 		}
+		appended++
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: actor member transition commit: %w", err)
+	}
+	// A mirror row landed durably — fire the substrate commit signal so the tap
+	// sees member events as promptly as request-path commits (no second write
+	// path that silently bypasses the signal). No-op transitions append nothing,
+	// so a spurious wake is avoided.
+	if appended > 0 && r.onCommit != nil {
+		r.onCommit()
 	}
 	return nil
 }

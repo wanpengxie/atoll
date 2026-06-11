@@ -57,7 +57,7 @@ func TestRegistry_ReadRejectsPoisonKind(t *testing.T) {
 		 VALUES ('x', 'wizard', NULL, 1, NULL)`); err != nil {
 		t.Fatalf("inject poison: %v", err)
 	}
-	reg := newActorRegistry(db, "C")
+	reg := newActorRegistry(db, "C", nil)
 	if _, _, err := reg.Lookup(ctx, "x"); err == nil {
 		t.Error("Lookup must error on out-of-closed-set actor_kind, not silently cast into ADT")
 	}
@@ -70,7 +70,7 @@ func TestMessages_ReadRejectsPoisonSenderKind(t *testing.T) {
 	ctx := context.Background()
 	db := openRelaxed(t)
 	insertRawMessage(t, db, "m1", "wizard", "request", "public")
-	m := newMessages(db)
+	m := newMessages(db, nil)
 	if _, _, err := m.FindByID(ctx, "m1"); err == nil {
 		t.Error("FindByID must error on out-of-closed-set sender_kind")
 	}
@@ -80,7 +80,7 @@ func TestMessages_ReadRejectsPoisonKind(t *testing.T) {
 	ctx := context.Background()
 	db := openRelaxed(t)
 	insertRawMessage(t, db, "m1", "human", "telepathy", "public")
-	m := newMessages(db)
+	m := newMessages(db, nil)
 	if _, _, err := m.FindByID(ctx, "m1"); err == nil {
 		t.Error("FindByID must error on out-of-closed-set message kind")
 	}
@@ -90,7 +90,7 @@ func TestMessages_ReadRejectsPoisonVisibility(t *testing.T) {
 	ctx := context.Background()
 	db := openRelaxed(t)
 	insertRawMessage(t, db, "m1", "human", "event", "cosmic")
-	m := newMessages(db)
+	m := newMessages(db, nil)
 	if _, _, err := m.FindByID(ctx, "m1"); err == nil {
 		t.Error("FindByID must error on out-of-closed-set visibility")
 	}

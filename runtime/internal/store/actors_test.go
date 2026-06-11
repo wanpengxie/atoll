@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -195,6 +196,42 @@ func TestApplyMemberTransitions_AddEmitsMirror(t *testing.T) {
 	}
 	if row.IsTerminal {
 		t.Errorf("mirror event must not be terminal")
+	}
+}
+
+// The commit signal belongs to the log append chokepoint, not to one writer:
+// BOTH the request-path Append AND the control-plane membership mirror must fire
+// OnCommit (③ — the membership path used to bypass the platform writer wrapper
+// and so never woke the tap). A no-op transition (which appends nothing) must
+// NOT fire — the signal tracks truth advancing, not call attempts.
+func TestOnCommit_BothWritePathsFire_NoopSilent(t *testing.T) {
+	ctx := context.Background()
+	var fires atomic.Int64
+	cs := openTestChannelOnCommit(t, func() { fires.Add(1) })
+
+	// Control-plane path: a real member add appends a mirror row → fires once.
+	add := storespec.MemberActorAdd{ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingEmbedded, At: 7000}
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
+		t.Fatalf("ApplyMemberTransitions add: %v", err)
+	}
+	if got := fires.Load(); got != 1 {
+		t.Fatalf("control-plane add: OnCommit fires=%d want 1 (membership path must signal)", got)
+	}
+
+	// No-op path: re-adding an already-active actor appends nothing → no wake.
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
+		t.Fatalf("ApplyMemberTransitions duplicate add: %v", err)
+	}
+	if got := fires.Load(); got != 1 {
+		t.Fatalf("no-op transition: OnCommit fires=%d want still 1 (no spurious wake)", got)
+	}
+
+	// Request path: a plain Append commits one row → fires once more.
+	if _, err := cs.Log.Append(ctx, newEnv("m1", message.KindEvent, message.Audience{"tool:xhs"}), false); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if got := fires.Load(); got != 2 {
+		t.Fatalf("request-path append: OnCommit fires=%d want 2 (harness path must signal)", got)
 	}
 }
 

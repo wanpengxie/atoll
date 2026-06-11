@@ -43,6 +43,13 @@ import (
 // classification.
 type messages struct {
 	db *sql.DB
+	// onCommit is the substrate's post-commit signal source: the append
+	// chokepoint authoritatively produces "the log advanced" after a durable
+	// commit (Postgres WAL / Kafka offset — commit signal belongs to the log
+	// append point, not to any one writer). nil = no subscriber wired. The
+	// callback must be non-blocking (a lossy fan-out wake), and it fires AFTER
+	// tx.Commit so a woken reader sees the row.
+	onCommit func()
 }
 
 // NewMessages returns a *messages bound to the channel sqlite.
@@ -51,7 +58,9 @@ type messages struct {
 // (proto-v2-physical §4), so the channel-write fence is obsolete. No outbox
 // observer — the store is a pure persistence sink; any fan-out to compute is a
 // concern above this layer, not a same-tx side-table projection here.
-func newMessages(db *sql.DB) *messages { return &messages{db: db} }
+func newMessages(db *sql.DB, onCommit func()) *messages {
+	return &messages{db: db, onCommit: onCommit}
+}
 
 // Append implements storespec.MessageLog. The harness supplies the
 // pre-computed is_terminal (step 8) since the pure envelope no longer
@@ -86,6 +95,12 @@ func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 	}
 	if err := tx.Commit(); err != nil {
 		return storespec.AppendResult{}, fmt.Errorf("store: append commit: %w", err)
+	}
+	// Truth advanced durably — fire the substrate commit signal so any tap
+	// (delivery pump / client tail) wakes and reads forward. Both write paths
+	// reach a commit; this is the harness path's chokepoint.
+	if m.onCommit != nil {
+		m.onCommit()
 	}
 	return res, nil
 }

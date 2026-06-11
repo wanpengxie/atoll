@@ -21,7 +21,21 @@ func openTestChannel(t *testing.T) *store.ChannelStores {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
-	cs, err := store.OpenChannel(ctx, testChannelID, filepath.Join(dir, "messages.sqlite"), store.OpenOptions{})
+	cs, err := store.OpenChannel(ctx, testChannelID, filepath.Join(dir, "messages.sqlite"), store.OpenOptions{}, nil)
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs
+}
+
+// openTestChannelOnCommit is openTestChannel with a post-commit signal sink
+// wired — the commit-signal coverage tests assert which write paths fire it.
+func openTestChannelOnCommit(t *testing.T, onCommit func()) *store.ChannelStores {
+	t.Helper()
+	ctx := context.Background()
+	dir := t.TempDir()
+	cs, err := store.OpenChannel(ctx, testChannelID, filepath.Join(dir, "messages.sqlite"), store.OpenOptions{}, onCommit)
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}

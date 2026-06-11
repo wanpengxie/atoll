@@ -142,7 +142,7 @@ func TestScanEnvelope_CorruptAudience(t *testing.T) {
 		 VALUES ('m1', 1, 1, 'C', 'human', 's', 'event', 't', '{}', 'public', 'not-json', 0)`); err != nil {
 		t.Fatalf("inject corrupt audience: %v", err)
 	}
-	m := newMessages(db)
+	m := newMessages(db, nil)
 	if _, _, err := m.FindByID(ctx, "m1"); err == nil {
 		t.Error("FindByID must error on corrupt audience JSON")
 	}
@@ -160,7 +160,7 @@ func TestListActive_PoisonKindOnRowsPath(t *testing.T) {
 		 VALUES ('x', 'wizard', NULL, 1, NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
-	reg := newActorRegistry(db, "C")
+	reg := newActorRegistry(db, "C", nil)
 	if _, err := reg.ListActive(ctx); err == nil {
 		t.Error("ListActive must error on out-of-closed-set kind (rows path)")
 	}
@@ -190,7 +190,7 @@ func TestListActive_RawScanError(t *testing.T) {
 		 VALUES ('a', 'agent', NULL, 'not-a-number', NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
-	reg := newActorRegistry(db, "C")
+	reg := newActorRegistry(db, "C", nil)
 	if _, err := reg.ListActive(ctx); err == nil {
 		t.Error("ListActive must surface the raw rows.Scan error on a non-integer created_at")
 	}
@@ -202,7 +202,7 @@ func TestReadAfterSeq_PoisonRowScanError(t *testing.T) {
 	ctx := context.Background()
 	db := openRelaxed(t)
 	insertRawMessage(t, db, "m1", "wizard", "event", "public") // poison sender kind
-	m := newMessages(db)
+	m := newMessages(db, nil)
 	if _, err := m.ReadAfterSeq(ctx, 0, 100); err == nil {
 		t.Error("ReadAfterSeq must surface the per-row scan error on a poison row")
 	}
@@ -221,7 +221,7 @@ func TestOpenRequestsForActor_PoisonRowScanError(t *testing.T) {
 		 VALUES ('r1', 1, 1, 'C', 'wizard', 's', 'request', 't', '{}', 'public', '["a"]', 0)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
-	m := newMessages(db)
+	m := newMessages(db, nil)
 	if _, err := m.OpenRequestsForActor(ctx, "a"); err == nil {
 		t.Error("OpenRequestsForActor must surface the per-row scan error on a poison row")
 	}
@@ -233,7 +233,7 @@ func TestReadAfterSeq_NonPositiveLimitDefaults(t *testing.T) {
 	ctx := context.Background()
 	db := openRelaxed(t)
 	insertRawMessage(t, db, "m1", "human", "event", "public")
-	m := newMessages(db)
+	m := newMessages(db, nil)
 	rows, err := m.ReadAfterSeq(ctx, 0, 0) // limit<=0 → default 256
 	if err != nil {
 		t.Fatalf("ReadAfterSeq: %v", err)
@@ -271,7 +271,7 @@ func TestApplyMemberAddTx_LookupScanError(t *testing.T) {
 		`INSERT INTO actor_registry VALUES ('a','agent',NULL,1,'not-an-int')`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
-	reg := newActorRegistry(db, "C")
+	reg := newActorRegistry(db, "C", nil)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
@@ -296,7 +296,7 @@ func TestApplyMemberRemoveTx_ExecError(t *testing.T) {
 	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER)`); err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
-	reg := newActorRegistry(db, "C")
+	reg := newActorRegistry(db, "C", nil)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
@@ -321,7 +321,7 @@ func TestApplyMemberAddTx_InsertError(t *testing.T) {
 	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER, deregistered_at INTEGER)`); err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
-	reg := newActorRegistry(db, "C")
+	reg := newActorRegistry(db, "C", nil)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
@@ -338,7 +338,7 @@ func TestApplyMemberAddTx_InsertError(t *testing.T) {
 func TestApplyMemberTransitions_AddHelperError(t *testing.T) {
 	ctx := context.Background()
 	db := brokenRegistryDB(t)
-	reg := newActorRegistry(db, "C")
+	reg := newActorRegistry(db, "C", nil)
 	err := reg.ApplyMemberTransitions(ctx,
 		[]storespec.MemberActorAdd{{ID: "a", Kind: actor.KindAgent, At: 9}}, nil)
 	if err == nil {
@@ -351,7 +351,7 @@ func TestApplyMemberTransitions_AddHelperError(t *testing.T) {
 func TestApplyMemberTransitions_RemoveHelperError(t *testing.T) {
 	ctx := context.Background()
 	db := brokenRegistryDB(t)
-	reg := newActorRegistry(db, "C")
+	reg := newActorRegistry(db, "C", nil)
 	err := reg.ApplyMemberTransitions(ctx, nil,
 		[]storespec.MemberActorRemove{{ID: "a", At: 9}})
 	if err == nil {
@@ -397,7 +397,7 @@ func TestApplyMemberAddTx_ReactivateError(t *testing.T) {
 		 VALUES ('a', 'agent', 1, 5)`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	reg := newActorRegistry(db, "C")
+	reg := newActorRegistry(db, "C", nil)
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
