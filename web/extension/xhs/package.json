@@ -14,7 +14,6 @@
     "dev:shared": "pnpm --filter coagent-xhs-shared dev",
     "dev:extension": "pnpm --filter coagent-xhs-extension dev",
     "test": "pnpm -r test",
-    "check:banned-words": "bash ../../scripts/lint-banned-words.sh",
     "lint": "pnpm -r lint",
     "lint:fix": "pnpm -r lint:fix",
     "format": "pnpm -r format",

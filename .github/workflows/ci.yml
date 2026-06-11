@@ -1,13 +1,17 @@
 name: CI
 
-# CI gate for the v5 工程纪律（M1.5 §T8）。
-# Runs the full discipline pipeline: install → lint (5 类) → test → build.
+# CI gate. Pipeline: install → lint → test → build (top-level Makefile targets).
 #
-# Scope: top-level Makefile targets across the single root go module
-# (cmd/{server,daemon,worker,cli}) + pnpm workspaces (ui + xhs extension).
-# M1.5 单栈，无第二个 go module，无独立 workflow。
+# lint = `go vet` + archtest (`go test ./archtest/`) — archtest is the live
+# architecture/contract guard. NB (2026-06-11): the old "5-class lint" discipline
+# (golangci-lint + scripts/lint-*.sh referencing the deleted v1 topology
+# kernel/adapters/server/...) was ripped as dead tooling (installed-but-never-run
+# golangci + zero-invoked scripts); archtest replaced its architecture checks.
+# A v2-topology lint rebuild is deferred (痛感-driven). When rebuilt, restore:
+# INVARIANT-1 (protocol must not link `testing`) and the banned-word policy
+# (no dogfood / MCP / 1studio / lightcone) the deleted lint-banned-words.sh held.
 #
-# spec: .dalek/pm/m1.5-tickets.md §T8 #4
+# Scope: single root go module + pnpm workspaces (ui + xhs extension).
 
 on:
   push:
@@ -54,11 +58,6 @@ jobs:
           key: ${{ runner.os }}-pnpm-${{ hashFiles('**/pnpm-lock.yaml') }}
           restore-keys: |
             ${{ runner.os }}-pnpm-
-
-      - name: install golangci-lint v2 (pin)
-        run: |
-          go install github.com/golangci/golangci-lint/v2/cmd/golangci-lint@v2.1.6
-          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
 
       - name: make install
         run: make install
