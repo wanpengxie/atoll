@@ -83,6 +83,41 @@ func TestSpawn_PresencelessMember(t *testing.T) {
 	}
 }
 
+// TestOpen_RestartOverPersistentDB verifies the genesis seed is idempotent: a
+// second Open over the SAME db file (a home restart) must succeed, not PK-conflict
+// on re-seeding the intrinsic system actor. Before the Exists-guard this failed
+// at bootstrap, taking down the whole restart-recovery path.
+func TestOpen_RestartOverPersistentDB(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
+	h1, err := platform.Open(platform.HomeConfig{ChannelID: testChannelID, DBPath: dbPath})
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	if err := h1.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	// Restart: re-open the same persistent channel DB — the system actor row
+	// already exists, so the seed must no-op instead of failing.
+	h2, err := platform.Open(platform.HomeConfig{ChannelID: testChannelID, DBPath: dbPath})
+	if err != nil {
+		t.Fatalf("restart Open over existing DB: %v", err)
+	}
+	t.Cleanup(func() { _ = h2.Close() })
+	actors, err := h2.View().ListActors(context.Background())
+	if err != nil {
+		t.Fatalf("ListActors after restart: %v", err)
+	}
+	found := false
+	for _, a := range actors {
+		if a.ID == actor.SystemActorID {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("system actor missing after restart: %+v", actors)
+	}
+}
+
 // TestView_ReadAfterSeq_Empty verifies ReadAfterSeq on a fresh channel.
 func TestView_ReadAfterSeq_Empty(t *testing.T) {
 	h := openTestHome(t)

@@ -104,12 +104,23 @@ func Open(cfg HomeConfig) (*Home, error) {
 	}
 
 	// 5. Bootstrap: register the intrinsic system actor so its substrate-death
-	//    terminals pass harness sender validation.
-	if err := cs.Membership.Insert(ctx, storespec.Record{
-		ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: nowMs(),
-	}); err != nil {
+	//    terminals pass harness sender validation. Idempotent SEED: on a home
+	//    restart over a persistent channel DB the row already exists, and a raw
+	//    re-Insert would PK-conflict (actor_id is the table key) — failing Open
+	//    before the restart-recovery reconciler below can even run. Insert itself
+	//    stays strict (a duplicate is an error, locked by the store's
+	//    coverage test); the idempotent seed lives here at the genesis call site
+	//    (audit ④-a: guard at the platform bootstrap, do not relax substrate).
+	if exists, err := cs.Registry.Exists(ctx, actor.SystemActorID); err != nil {
 		_ = cs.Close()
-		return nil, fmt.Errorf("platform: register system actor: %w", err)
+		return nil, fmt.Errorf("platform: check system actor: %w", err)
+	} else if !exists {
+		if err := cs.Membership.Insert(ctx, storespec.Record{
+			ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: nowMs(),
+		}); err != nil {
+			_ = cs.Close()
+			return nil, fmt.Errorf("platform: register system actor: %w", err)
+		}
 	}
 
 	// 6. channelkit: actorrt runtime + sysactor + death-edge wiring. The system
