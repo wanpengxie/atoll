@@ -2,7 +2,6 @@ package sysactor
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
@@ -111,11 +110,7 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 			UptimeMs: uptimeMs,
 		})
 	}
-	payload, err := json.Marshal(catalog)
-	if err != nil {
-		return err
-	}
-	return s.respondReserved(ctx, env, payload)
+	return s.respondReserved(ctx, env, catalog)
 }
 
 // systemDescribe is the system actor's self-answer in the introspect contract
@@ -151,21 +146,17 @@ func (s *SystemActor) respondDescribe(ctx context.Context, env *message.Envelope
 	if !ok {
 		return nil
 	}
-	payload, err := json.Marshal(answer)
-	if err != nil {
-		return err
-	}
-	return s.respondReserved(ctx, env, payload)
+	return s.respondReserved(ctx, env, answer)
 }
 
 // respondReserved answers a reserved self-query (actor.list / actor.describe)
-// with a system-authored completed response carrying payload. It recovers the
+// with a system-authored completed response carrying result. It recovers the
 // original request via the injected RequestLookup (the serve-side truth read)
-// and delegates the build+stamp+write to behavior.Respond (author#1, ONE
-// implementation — no hand-rolled serve write here). sender = the system actor's
-// own identity; the injected writer stamps the system caller context so the
-// harness ACL authenticates the write.
-func (s *SystemActor) respondReserved(ctx context.Context, env *message.Envelope, payload []byte) error {
+// and delegates marshal+build+stamp+write to behavior.RespondJSON (the ONE
+// marshal+respond home — no hand-rolled json.Marshal at the serve site). sender =
+// the system actor's own identity; the injected writer stamps the system caller
+// context so the harness ACL authenticates the write.
+func (s *SystemActor) respondReserved(ctx context.Context, env *message.Envelope, result any) error {
 	request, ok, err := s.lookup.FindByID(ctx, env.ID)
 	if err != nil {
 		return err
@@ -173,8 +164,7 @@ func (s *SystemActor) respondReserved(ctx context.Context, env *message.Envelope
 	if !ok || request == nil {
 		return fmt.Errorf("sysactor: reserved request %s not found", env.ID)
 	}
-	_, err = behavior.Respond(ctx, s.writer, s.clock, request, sysSender,
-		behavior.ResponseSpec{Status: "completed", Payload: payload})
+	_, err = behavior.RespondJSON(ctx, s.writer, s.clock, request, sysSender, result)
 	return err
 }
 
