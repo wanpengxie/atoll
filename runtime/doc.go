@@ -15,8 +15,16 @@
 //   - ipc              — the port wire protocol (length-prefixed frames over a
 //     connection: handshake / handshake_ack / deliver / emit / down).
 //
-// Boundary rules (enforced by .go-arch-lint.yml at repo root):
+// Boundary rules (design intent — see NB on enforcement):
 //
 //   - runtime/* MAY import protocol/* and runtime/* (self).
 //   - protocol/* MUST NOT import runtime/*.
+//
+// TODO(lint-rebuild): this layering is NOT mechanically enforced right now. The
+// old .go-arch-lint.yml (which claimed to) is dead config — make lint / CI never
+// run it (lint = go vet + archtest); archtest guards only specific shapes
+// (platform dependency direction, contract-shape containment, package-doc
+// convention), NOT this inter-layer matrix. Re-mechanise "protocol/* must not
+// import runtime/*" in the deferred v2-topology lint rebuild. Until then the rule
+// holds by review, not by tooling.
 package runtime

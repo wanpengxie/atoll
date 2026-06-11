@@ -7,9 +7,15 @@ name: CI
 # (golangci-lint + scripts/lint-*.sh referencing the deleted v1 topology
 # kernel/adapters/server/...) was ripped as dead tooling (installed-but-never-run
 # golangci + zero-invoked scripts); archtest replaced its architecture checks.
-# A v2-topology lint rebuild is deferred (痛感-driven). When rebuilt, restore:
-# INVARIANT-1 (protocol must not link `testing`) and the banned-word policy
-# (no dogfood / MCP / 1studio / lightcone) the deleted lint-banned-words.sh held.
+#
+# TODO(lint-rebuild): a v2-topology lint rebuild is deferred (痛感-driven). When
+# rebuilt, restore the guards archtest does NOT currently cover — grep
+# `TODO(lint-rebuild)` for the sites:
+#   - inter-layer import matrix (protocol/* ↛ runtime/*; full component deps)
+#   - protocol/ stdlib-purity (no context/sql/http) — INVARIANT-1
+#   - protocol must not link `testing`
+#   - banned-word policy (no dogfood / MCP / 1studio / lightcone), formerly
+#     scripts/lint-banned-words.sh.
 #
 # Scope: single root go module + pnpm workspaces (ui + xhs extension).
 

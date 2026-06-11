@@ -31,12 +31,17 @@
 //     ENGINES' errno, co-evolving with their engines → runtime.
 //   - reason→HTTP-status mapping — strerror, a binding concern; lives outside protocol.
 //
-// Layering rule (enforced by go-arch-lint in T2):
+// Layering rule (design intent — see NB on enforcement):
 //
 //   - protocol/** MUST NOT import anything outside the Go standard library, and
 //     not even the stdlib seams that imply state/IO/transport: context,
 //     database/sql, net/http, or any SQL/driver/transport package. Concretely
 //     no module outside protocol may be imported.
-//   - Acceptance red line: `git grep '"context"' -- 'protocol/'` → 0 (greps the
-//     import, not prose, so it cannot self-match this doc's "no context.Context").
+//   - Manual acceptance check: `git grep '"context"' -- 'protocol/'` → 0 (greps
+//     the import, not prose, so it cannot self-match this doc's "no context").
+//
+// TODO(lint-rebuild): NOT mechanically enforced right now. The old go-arch-lint
+// config (which claimed to) is dead — make lint / CI never run it. The rule
+// holds by review + the manual grep above. Re-mechanise protocol/ stdlib-purity
+// in the deferred v2-topology lint rebuild.
 package protocol
