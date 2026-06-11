@@ -27,6 +27,17 @@ import (
 // operational-only obs vocabulary and self-answers). Substrate-source facts
 // (presence/uptime) are the only obs the substrate authoritatively produces, and
 // they ride the typed Stat bundle, not an opaque kind.
+//
+// RETENTION (reviewed 2026-06-12): a kernel audit flagged the ACTOR-source axis
+// (ObsKind/ObsValue/Observer/Observe/PublishObs/ObsWatcher/WatchObs/OnObs) as a
+// cast-but-not-yet-wired vertical slice — zero production producer/consumer, and
+// the cross-wire arm is a no-op (no ipc KindObs frame; see port.observe). Owner
+// decision: RETAIN, do NOT rip. A business consumer is imminent (the moment an
+// agent/monitor integrates it will need actor-source obs), and completing it is
+// a pure-additive wire arm. So this is a DELIBERATELY-PENDING skeleton on an
+// explicit keep decision, NOT an oversight — future audits should treat it as
+// settled. The substrate-source axis (Stat/WatchPresence/OnDown) IS wired
+// end-to-end and unaffected.
 
 // ObsKind is an opaque observation selector for ACTOR-source obs. The substrate
 // never interprets it — it routes the kind to the actor, which owns its own

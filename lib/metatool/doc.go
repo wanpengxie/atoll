@@ -12,9 +12,13 @@
 //   - the tool-result VOCABULARY: ResultValue, the ErrorCode closed set, ack
 //     shapes (AckDescriptor/AckResult), the tool-call spec
 //     (RequestSpec/WaitMode), and payload normalisation
-//   - the futures MECHANISM (Client/RequestCorrelator: subscribe-before-send
-//     plus a bounded blocking Await) that implements the async tool semantics
-//     (call_actor fast-path, await_result, abandon, list_pending)
+//   - the async tool SEMANTICS — WaitMode/RequestSpec and the Executor interface
+//     the meta-tools (call_actor fast-path, await_result, abandon, list_pending)
+//     call THROUGH. The futures MECHANISM itself (subscribe-before-send + a
+//     bounded blocking Await: Client/RequestCorrelator) is NOT in this package —
+//     it implements Executor from the executor side (actors/agent), per the
+//     boundary axiom below. metatool declares the semantics; the agent supplies
+//     the block-await machinery.
 //
 // Boundary axiom (lib-reshape spec §2.7): anything that can block-await is by
 // definition NOT an actor — the futures half therefore never merges into
