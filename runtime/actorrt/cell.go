@@ -274,6 +274,22 @@ func (c *cell) disarmRequest(id message.ID) {
 	c.flightMu.Unlock()
 }
 
+// cancelRequest implements presence: fire the in-flight reqCtx for id, off the
+// cell goroutine. This is the request-scope of cancel(scope) — it interrupts
+// exactly the one Receive holding the goroutine without queuing behind it (the
+// thing to interrupt IS the goroutine's occupant). Idempotent and unknown-id
+// safe: a request that already closed (or never existed) is a no-op, because the
+// caller's closure owns the terminal — the cancel is a best-effort hint. It does
+// NOT remove the entry; safeReceive's own defer disarms on the way out.
+func (c *cell) cancelRequest(id message.ID) {
+	c.flightMu.Lock()
+	cancel := c.inflight[id]
+	c.flightMu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
 // stop closes the mailbox, cancels the cell ctx, and waits for the goroutine to
 // exit. Safe to call multiple times. It MUST be called only from a DIFFERENT
 // goroutine than the cell's own (it joins on c.done) — the death path never

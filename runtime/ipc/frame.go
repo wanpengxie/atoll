@@ -53,6 +53,17 @@ const (
 	// receiver_unavailable for in-flight requests. Connection EOF is the
 	// equivalent terminal signal.
 	KindDown Kind = "down"
+	// KindCancel (host→remote): the request-scope of cancel(scope) crossing the
+	// wire. The home (where a request's caller lives) tells the remote host to
+	// cancel the reqCtx its cell is running one request under — interrupting
+	// exactly that in-flight Receive, not the actor. The remote MUST fire it
+	// OFF the cell goroutine (the thing to interrupt is the goroutine's occupant;
+	// queuing it behind the work it means to cancel would deadlock). It is
+	// best-effort, unidirectional, no ack: a lost KindCancel only costs the
+	// receiver a little wasted work — the request's ExpiresAt deadline still
+	// collapses its reqCtx, and the caller's closure owns the terminal. This is
+	// why it carries no ack frame and cannot reuse the on-loop KindDeliver path.
+	KindCancel Kind = "cancel"
 )
 
 // MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.
@@ -116,6 +127,16 @@ type EmitAckPayload struct {
 // presence-down edge (the actor is implicit — the connection IS that actor).
 type DownPayload struct {
 	Reason string `json:"reason,omitempty"`
+}
+
+// CancelPayload names the in-flight request to cancel on the bound actor (the
+// actor is implicit — the connection IS that actor). It carries ONLY the request
+// id: no reason rides along (deadline-driven cancel never crosses the wire — each
+// end builds its own deadline from ExpiresAt — so KindCancel carries the single
+// case of a caller actively abandoning; a diagnostic reason is additive when a
+// real consumer wants it).
+type CancelPayload struct {
+	RequestID message.ID `json:"request_id"`
 }
 
 // Codec encodes / decodes port frames on length-prefixed buffered IO. It is

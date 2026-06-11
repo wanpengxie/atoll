@@ -176,6 +176,29 @@ func (p *port) Deliver(env *message.Envelope) error {
 	}
 }
 
+// cancelRequest implements presence for an out-of-process actor: the
+// request-scope of cancel(scope) crossing the wire. It writes a KindCancel frame
+// naming the request directly onto the codec — NOT through the sendq/writeLoop —
+// because cancel is off-loop: it must not queue behind the very deliver work it
+// means to interrupt, and the codec's write mutex already serialises it against
+// concurrent deliver writes. The remote host fires the matching reqCtx off its
+// own cell goroutine. Best-effort: a write error on a dying conn is dropped (the
+// request's deadline + the caller's closure still own the terminal); a torn-down
+// port is a no-op.
+func (p *port) cancelRequest(id message.ID) {
+	p.mu.Lock()
+	closed := p.closed
+	p.mu.Unlock()
+	if closed {
+		return
+	}
+	payload, err := json.Marshal(ipc.CancelPayload{RequestID: id})
+	if err != nil {
+		return
+	}
+	_ = p.codec.Write(ipc.Frame{Kind: ipc.KindCancel, Payload: payload})
+}
+
 // start launches the write + read loops and closes done once both exit.
 func (p *port) start() {
 	p.wg.Add(2)

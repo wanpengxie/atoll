@@ -280,7 +280,8 @@ func (fakeErrPresence) observe(context.Context, ObsKind) (ObsValue, error) {
 	return nil, ErrObsUnsupported
 }
 func (p fakeErrPresence) startedAt() time.Time { return p.started }
-func (fakeErrPresence) stop()                  {}
+func (fakeErrPresence) cancelRequest(message.ID) {}
+func (fakeErrPresence) stop()                    {}
 
 // TestDeliverDefaultArmMapsToStopped: an enqueue error that is neither
 // ErrMailboxFull nor ErrCellStopped maps to Stopped (deliver's default switch

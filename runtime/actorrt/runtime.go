@@ -27,6 +27,7 @@ import (
 type presence interface {
 	Deliver(env *message.Envelope) error
 	observe(ctx context.Context, kind ObsKind) (ObsValue, error)
+	cancelRequest(id message.ID)
 	startedAt() time.Time
 	stop()
 }
@@ -219,6 +220,25 @@ func (r *Runtime) Observe(ctx context.Context, id actor.ActorID, kind ObsKind) (
 		return nil, ErrNotHosted
 	}
 	return p.observe(ctx, kind)
+}
+
+// CancelRequest fires the request-scope of cancel(scope) for one in-flight
+// request on a hosted presence: the reqCtx the addressed actor is currently
+// running that request under is cancelled, off the work goroutine. A cell fires
+// its in-flight CancelFunc directly; a port writes a KindCancel frame so the
+// remote host cancels its own cell's reqCtx (in-proc and cross-wire are the same
+// primitive, one scope down from Despawn). No-op if no presence is hosted for id
+// or the request already closed — cancel is a best-effort hint; the caller's
+// closure owns the terminal, so a lost cancel only costs the receiver a little
+// wasted work (the ExpiresAt deadline still collapses it).
+func (r *Runtime) CancelRequest(id actor.ActorID, requestID message.ID) {
+	r.mu.RLock()
+	p, ok := r.presences[id]
+	r.mu.RUnlock()
+	if !ok {
+		return
+	}
+	p.cancelRequest(requestID)
 }
 
 // Outcome is the per-audience truth Deliver reports about its own action — the

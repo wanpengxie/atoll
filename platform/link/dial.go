@@ -49,6 +49,7 @@ type actorStream struct {
 	codec    *ipc.Codec
 	writer   *ipc.RemoteWriter
 	dispatch func(env *message.Envelope) error
+	cancel   func(requestID message.ID)
 }
 
 // Dial dials the home, sends the stream-0 attach, and waits for attach_reply. It
@@ -138,9 +139,11 @@ func (d *Dialer) ChannelID() string { return d.channelID }
 // (LeaseID = actor id), and returns the cell's PEN (ipc.RemoteWriter) plus a
 // downHandler the host installs (close the stream UP on cell death). dispatch is
 // invoked for each KindDeliver frame the home sends down this stream — the host
-// routes it into the cell's mailbox. Call after Dial, before Start consumes the
-// home's first dispatch.
-func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelope) error) (harness.Writer, func(cause string), error) {
+// routes it into the cell's mailbox. cancel is invoked for each KindCancel frame
+// — the host fires the named request's reqCtx OFF the cell goroutine (the work
+// it interrupts is the goroutine's occupant). Call after Dial, before Start
+// consumes the home's first dispatch.
+func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelope) error, cancel func(requestID message.ID)) (harness.Writer, func(cause string), error) {
 	d.mu.Lock()
 	sid := d.nextID
 	d.nextID++
@@ -174,7 +177,7 @@ func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelop
 	}
 
 	rw := ipc.NewRemoteWriter(codec)
-	as := &actorStream{id: id, stream: s, codec: codec, writer: rw, dispatch: dispatch}
+	as := &actorStream{id: id, stream: s, codec: codec, writer: rw, dispatch: dispatch, cancel: cancel}
 	d.mu.Lock()
 	d.streams[id] = as
 	d.mu.Unlock()
@@ -226,6 +229,21 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 				continue
 			}
 			as.writer.DeliverAck(ap)
+		case ipc.KindCancel:
+			var cp ipc.CancelPayload
+			if err := json.Unmarshal(frame.Payload, &cp); err != nil {
+				d.logger.Error("link.cancel_decode", "actor", string(as.id), "err", err)
+				continue
+			}
+			// Fire the cancel OFF this read loop's goroutine — and crucially OFF the
+			// cell goroutine the host routes it to. The request to cancel is the one
+			// occupying that cell goroutine; queuing the cancel on-loop behind the
+			// work it means to interrupt would deadlock. The host's CancelRequest
+			// fires the reqCtx's CancelFunc (concurrent-safe), so a bare goroutine
+			// is the right vehicle. nil cancel (none installed) is a no-op.
+			if as.cancel != nil {
+				go as.cancel(cp.RequestID)
+			}
 		default:
 			d.logger.Warn("link.unknown_kind", "actor", string(as.id), "kind", string(frame.Kind))
 		}

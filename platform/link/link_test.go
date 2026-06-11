@@ -90,6 +90,26 @@ type panicCell struct{}
 
 func (panicCell) Receive(context.Context, *message.Envelope) error { panic("boom") }
 
+// blockingCell blocks in Receive until its (per-request) ctx is cancelled,
+// signalling entry on started and the ctx-cancel outcome on cancelled. It is the
+// cross-wire cancel probe: the request occupies the cell goroutine, and the only
+// way out is the reqCtx going Done — proving the home's KindCancel reached the
+// daemon and fired exactly this request's reqCtx OFF the goroutine.
+type blockingCell struct {
+	started   chan struct{}
+	cancelled chan struct{}
+}
+
+func (b *blockingCell) Receive(ctx context.Context, env *message.Envelope) error {
+	if env.Kind != message.KindRequest {
+		return nil
+	}
+	close(b.started)
+	<-ctx.Done()
+	close(b.cancelled)
+	return nil
+}
+
 // --- home rig ---
 
 type homeRig struct {
@@ -173,7 +193,7 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 
 	pen, _, err := d.OpenStream(toolID, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
-	})
+	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -238,7 +258,7 @@ func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
 
 	pen, _, err := d.OpenStream(toolID, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
-	})
+	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -302,7 +322,7 @@ func TestEndToEnd_CellDeath_ClosesStreamToOnDown(t *testing.T) {
 
 	pen, downHandler, err := d.OpenStream(toolID, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
-	})
+	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -346,7 +366,7 @@ func TestLease_NoTraffic_ExpiresToPresenceDown(t *testing.T) {
 
 	pen, downHandler, err := d.OpenStream(toolID, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
-	})
+	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -371,6 +391,75 @@ func TestLease_NoTraffic_ExpiresToPresenceDown(t *testing.T) {
 	case <-d.Done():
 	case <-time.After(time.Second):
 		t.Fatal("daemon never saw the link close after lease expiry")
+	}
+}
+
+// TestEndToEnd_CancelRequest_CrossWire proves the request-scope of cancel(scope)
+// crosses the wire: a daemon cell is parked in Receive on an in-flight request;
+// the home calls Acceptor.CancelRequest(actor, requestID) (the substrate
+// mechanism the app's caller-abandon trigger drives), which writes a KindCancel
+// frame down that actor's stream; the daemon fires the matching reqCtx OFF the
+// cell goroutine, so the parked Receive's ctx goes Done. No truth terminal is
+// written — cancel is a best-effort interrupt of in-flight work, the caller's
+// closure owns the terminal (the home stubWriter records nothing).
+func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+
+	const toolID = actor.ActorID("tool:blocker")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	h := host.New()
+	defer h.Stop()
+
+	cell := &blockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
+	pen, _, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+		return h.Dispatch(toolID, env)
+	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	_ = pen
+	h.Install(toolID, cell, nil)
+	d.Start()
+
+	// Home dispatches a request; the cell parks in Receive on it (no ExpiresAt, so
+	// the ONLY way out is an explicit cancel — not a deadline).
+	const reqID = message.ID("req-cancel-1")
+	if _, err := r.deliver.Deliver([]actor.ActorID{toolID}, &message.Envelope{
+		ID:        reqID,
+		ChannelID: testChannelID,
+		Kind:      message.KindRequest,
+		Type:      "block.do",
+		Sender:    message.Sender{ID: "user:a", Kind: actor.KindHuman},
+		Audience:  message.Audience{toolID},
+	}); err != nil {
+		t.Fatalf("home deliver: %v", err)
+	}
+
+	select {
+	case <-cell.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cell never entered Receive on the request")
+	}
+
+	// The home reaches the request-scope of cancel(scope) across the wire.
+	r.acc.CancelRequest(toolID, reqID)
+
+	select {
+	case <-cell.cancelled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cross-wire KindCancel never cancelled the hosted cell's reqCtx")
+	}
+
+	// No truth terminal: cancel is a best-effort interrupt, not a write. The home
+	// write门 recorded nothing (the caller's closure owns the terminal).
+	if got := r.writer.all(); len(got) != 0 {
+		t.Fatalf("cancel wrote truth terminal(s) %+v, want none", got)
 	}
 }
 

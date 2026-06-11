@@ -17,11 +17,12 @@ import (
 
 // --- closed Kind set ------------------------------------------------------
 
-// The port-wire Kind set is closed at exactly 6 members with fixed wire
+// The port-wire Kind set is closed at exactly 7 members with fixed wire
 // spellings. Every kind has a real producer + state transition; the dead
-// frames (fence / shutdown / heartbeat / control) are gone. If a wire spelling
-// drifts or a kind is added/removed, this trips — the two endpoints must agree
-// on the exact bytes.
+// frames (fence / shutdown / heartbeat / control) are gone. KindCancel is the
+// request-scope of cancel(scope) crossing the wire (host→remote). If a wire
+// spelling drifts or a kind is added/removed, this trips — the two endpoints
+// must agree on the exact bytes.
 func TestKindClosedSet(t *testing.T) {
 	want := map[Kind]string{
 		KindHandshake:    "handshake",
@@ -30,14 +31,15 @@ func TestKindClosedSet(t *testing.T) {
 		KindEmit:         "emit",
 		KindEmitAck:      "emit_ack",
 		KindDown:         "down",
+		KindCancel:       "cancel",
 	}
 	for k, wire := range want {
 		if string(k) != wire {
 			t.Errorf("Kind %q wire form = %q, want %q", k, string(k), wire)
 		}
 	}
-	if len(want) != 6 {
-		t.Fatalf("expected exactly 6 kinds, guard lists %d", len(want))
+	if len(want) != 7 {
+		t.Fatalf("expected exactly 7 kinds, guard lists %d", len(want))
 	}
 }
 
@@ -167,6 +169,17 @@ func TestRoundTripPerKind(t *testing.T) {
 				mustUnmarshal(t, got.Payload, &p)
 				if p.Reason != "panic: nil map" {
 					t.Errorf("reason = %q", p.Reason)
+				}
+			},
+		},
+		{
+			name:  "cancel",
+			frame: Frame{Kind: KindCancel, Payload: mustMarshal(t, CancelPayload{RequestID: message.ID("req-7")})},
+			check: func(t *testing.T, got Frame) {
+				var p CancelPayload
+				mustUnmarshal(t, got.Payload, &p)
+				if p.RequestID != message.ID("req-7") {
+					t.Errorf("request_id = %q, want req-7", p.RequestID)
 				}
 			},
 		},

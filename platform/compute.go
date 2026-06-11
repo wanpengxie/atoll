@@ -82,6 +82,8 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		target := a.ID
 		writer, downHandler, err := d.OpenStream(target, func(env *message.Envelope) error {
 			return h.Dispatch(target, env)
+		}, func(requestID message.ID) {
+			h.CancelRequest(target, requestID)
 		})
 		if err != nil {
 			return err

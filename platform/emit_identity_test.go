@@ -45,7 +45,7 @@ func TestEmitIdentity_WireSelfReportCannotImpersonate(t *testing.T) {
 	}
 	defer func() { _ = d.Close() }()
 
-	pen, _, err := d.OpenStream(toolID, func(*message.Envelope) error { return nil })
+	pen, _, err := d.OpenStream(toolID, func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}

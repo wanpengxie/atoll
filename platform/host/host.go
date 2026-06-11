@@ -69,6 +69,16 @@ func (h *Host) Dispatch(target actor.ActorID, env *message.Envelope) error {
 	return err
 }
 
+// CancelRequest cancels one in-flight request's reqCtx on a hosted cell — the
+// request-scope of cancel(scope) the home reaches across the wire (KindCancel).
+// It bypasses the mailbox: the runtime fires the cell's in-flight CancelFunc off
+// the work goroutine, so the Receive currently occupying that goroutine is
+// interrupted instead of queuing the cancel behind it. No-op if the actor is not
+// hosted or the request already closed.
+func (h *Host) CancelRequest(target actor.ActorID, requestID message.ID) {
+	h.rt.CancelRequest(target, requestID)
+}
+
 // Stop tears down all hosted cells.
 func (h *Host) Stop() { h.rt.StopAll() }
 

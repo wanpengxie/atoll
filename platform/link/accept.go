@@ -275,6 +275,19 @@ func (a *Acceptor) leaseWatch(lc *linkConn, lastSeen *atomicTime, done <-chan st
 	}
 }
 
+// CancelRequest reaches the request-scope of cancel(scope) across the wire: the
+// home (where a request's caller lives) tells the daemon hosting `actor` to
+// cancel the reqCtx its cell is running `requestID` under. The bound port
+// presence writes a KindCancel frame down that actor's stream; the daemon fires
+// the matching reqCtx off its cell goroutine. No-op if the actor is not a hosted
+// port here or the request already closed — cancel is a best-effort hint, the
+// caller's closure owns the terminal. The real producer (a caller actively
+// abandoning a request) is the app/domain trigger above the substrate; this is
+// the substrate mechanism it drives.
+func (a *Acceptor) CancelRequest(target actor.ActorID, requestID message.ID) {
+	a.runtime.CancelRequest(target, requestID)
+}
+
 // Close stops accepting new links and tears down active ones, waiting for all
 // Serve goroutines to exit.
 func (a *Acceptor) Close() error {
