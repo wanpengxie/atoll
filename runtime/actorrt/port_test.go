@@ -69,7 +69,7 @@ func staticResolve(id actor.ActorID) ResolveFunc {
 	return func(string) (actor.ActorID, error) { return id, nil }
 }
 
-func nopEmit(context.Context, *message.Envelope) (ipc.EmitResult, error) {
+func nopEmit(context.Context, actor.ActorID, *message.Envelope) (ipc.EmitResult, error) {
 	return ipc.EmitResult{}, nil
 }
 
@@ -228,22 +228,31 @@ func TestPortEmitRelayed(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	got := make(chan *message.Envelope, 1)
-	emit := func(_ context.Context, e *message.Envelope) (ipc.EmitResult, error) {
-		got <- e
+	type relayed struct {
+		id  actor.ActorID
+		env *message.Envelope
+	}
+	got := make(chan relayed, 1)
+	emit := func(_ context.Context, id actor.ActorID, e *message.Envelope) (ipc.EmitResult, error) {
+		got <- relayed{id: id, env: e}
 		return ipc.EmitResult{MessageID: "m-up-1", RejectReason: "harness_kind_invalid"}, nil
 	}
 	_, remote := dialPort(t, rt, "l", emit, staticResolve("remote-1"))
 	defer remote.conn.Close()
 
-	payload, _ := json.Marshal(ipc.EmitPayload{Envelope: message.Envelope{ID: "up-1"}})
+	// The remote self-reports a DIFFERENT sender on the wire; the substrate must
+	// hand the sink the AUTHENTICATED bound id, never the wire's self-report.
+	payload, _ := json.Marshal(ipc.EmitPayload{Envelope: message.Envelope{ID: "up-1", Sender: message.Sender{ID: "user:alice"}}})
 	if err := remote.codec.Write(ipc.Frame{Kind: ipc.KindEmit, Payload: payload}); err != nil {
 		t.Fatalf("remote emit write: %v", err)
 	}
 	select {
-	case e := <-got:
-		if e.ID != message.ID("up-1") {
-			t.Fatalf("relayed envelope ID = %q, want up-1", e.ID)
+	case r := <-got:
+		if r.env.ID != message.ID("up-1") {
+			t.Fatalf("relayed envelope ID = %q, want up-1", r.env.ID)
+		}
+		if r.id != actor.ActorID("remote-1") {
+			t.Fatalf("relayed bound id = %q, want remote-1 (the authenticated id, not the wire self-report)", r.id)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("EmitSink never received the remote emit")

@@ -229,11 +229,15 @@ func (a *Acceptor) sendReply(lc *linkConn, reply AttachReply) {
 
 // emitSink builds the per-link EmitSink: a remote cell's emit is written through
 // the home write门 with the source actor stamped as caller, and the
-// authoritative WriteResult returns as the ipc EmitAck.
+// authoritative WriteResult returns as the ipc EmitAck. The caller identity is
+// the connection's authenticated bound id (the basis stamps the author), NOT the
+// envelope's self-reported sender — the identity axiom does not downgrade across
+// the wire, so a stream authenticated as one actor emitting on behalf of another
+// falls on sender_mismatch exactly as a local cell would.
 func (a *Acceptor) emitSink(reqCtx context.Context) actorrt.EmitSink {
-	return func(ctx context.Context, env *message.Envelope) (ipc.EmitResult, error) {
+	return func(ctx context.Context, id actor.ActorID, env *message.Envelope) (ipc.EmitResult, error) {
 		cctx := harness.CtxWithCaller(ctx, harness.CallerContext{
-			ActorID:   env.Sender.ID,
+			ActorID:   id,
 			ChannelID: a.channelID,
 		})
 		res, err := a.writer.Write(cctx, env)
