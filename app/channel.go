@@ -365,18 +365,34 @@ func (a *App) handleSendMessage(c *gin.Context) {
 	for _, a := range req.Audience {
 		audience = append(audience, actor.ActorID(a))
 	}
+
+	// Product decision: no explicit audience → send to channel's agent (kind=request).
+	kind := message.Kind(req.Kind)
 	if len(audience) == 0 {
 		actors, _ := home.Gateway().ListActors(c.Request.Context())
+		var agents []actor.ActorID
 		for _, a := range actors {
-			audience = append(audience, a.ID)
+			if a.Kind == actor.KindAgent {
+				agents = append(agents, a.ID)
+			}
 		}
+		if len(agents) == 0 {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "no agent in this channel"})
+			return
+		}
+		if len(agents) > 1 {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "multiple agents in channel, specify audience"})
+			return
+		}
+		audience = agents
+		kind = message.KindRequest
 	}
 
 	gw := home.Gateway()
 	channelID := channel.ID(chID)
 
 	// App layer owns product decisions: sender kind, TTL, envelope shape.
-	env := a.newClientEnvelope(channelID, senderID, req.ID, req.Type, message.Kind(req.Kind), req.Payload, audience)
+	env := a.newClientEnvelope(channelID, senderID, req.ID, req.Type, kind, req.Payload, audience)
 	if req.Visibility != "" {
 		env.Visibility = message.Visibility(req.Visibility)
 	}
