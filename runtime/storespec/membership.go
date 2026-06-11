@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
 )
 
 // MemberActorAdd is one actor registration transition (membership control
@@ -40,6 +39,9 @@ type MemberActorRemove struct {
 type MembershipControlPlane interface {
 	MembershipWriter
 	// ApplyMemberTransitions mutates actor_registry and appends the matching
-	// system.actor.* mirror events in one tx (idempotent on retry).
-	ApplyMemberTransitions(ctx context.Context, channelID channel.ID, adds []MemberActorAdd, removes []MemberActorRemove) error
+	// system.actor.* mirror events in one tx (idempotent on retry). No channelID
+	// param: the store is bound to one channel at construction, so the mirror
+	// events' scope is the binding — a per-call channel arg would be a
+	// pseudo-parameter the caller could mis-stamp (cf. MessageLog.FindByID).
+	ApplyMemberTransitions(ctx context.Context, adds []MemberActorAdd, removes []MemberActorRemove) error
 }

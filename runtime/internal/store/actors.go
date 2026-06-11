@@ -14,15 +14,20 @@ import (
 )
 
 // actorRegistry implements runtime/storespec.Registry over a channel-local
-// sqlite. Each *actorRegistry is bound to one channel database.
+// sqlite. Each *actorRegistry is bound to one channel database AND its channel
+// id — that bound id is the scope its mirror events carry, never a per-call arg.
 type actorRegistry struct {
-	db *sql.DB
+	db        *sql.DB
+	channelID channel.ID
 }
 
-// NewActorRegistry returns a registry over the given channel sqlite.
+// NewActorRegistry returns a registry over the given channel sqlite, bound to
+// channelID — the scope its membership mirror events are stamped with.
 // (v2: no fence / outbox — single write path by construction; the store is a
 // pure persistence sink, so same-tx side projections do not live here.)
-func newActorRegistry(db *sql.DB) *actorRegistry { return &actorRegistry{db: db} }
+func newActorRegistry(db *sql.DB, channelID channel.ID) *actorRegistry {
+	return &actorRegistry{db: db, channelID: channelID}
+}
 
 // Lookup implements storespec.Registry.
 func (r *actorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec.Record, bool, error) {
@@ -152,14 +157,19 @@ func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int
 // system.actor.* mirror events in one sqlite transaction. Duplicate retries
 // are idempotent: already-active adds and already-deregistered removes do not
 // append a second event.
+//
+// No per-call channelID: the scope is the binding (r.channelID, fixed at
+// OpenChannel). A per-call channel arg was a pseudo-parameter the caller could
+// lie about — stamping a foreign-channel mirror row into this channel's sqlite.
+// The mirror event's channel is whatever this store IS, by construction (same
+// nullification of illegal state as FindByID).
 func (r *actorRegistry) ApplyMemberTransitions(
 	ctx context.Context,
-	channelID channel.ID,
 	adds []storespec.MemberActorAdd,
 	removes []storespec.MemberActorRemove,
 ) error {
-	if channelID == "" {
-		return errors.New("store: actor member transition: empty channel_id")
+	if r.channelID == "" {
+		return errors.New("store: actor member transition: registry not bound to a channel")
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -197,7 +207,7 @@ func (r *actorRegistry) ApplyMemberTransitions(
 		if !changed {
 			continue
 		}
-		env := actorRegisteredEnvelope(channelID, add)
+		env := actorRegisteredEnvelope(r.channelID, add)
 		if _, err := appendTx(ctx, tx, env, false); err != nil {
 			return fmt.Errorf("store: actor registered mirror %q: %w", add.ID, err)
 		}
@@ -216,7 +226,7 @@ func (r *actorRegistry) ApplyMemberTransitions(
 		if !changed {
 			continue
 		}
-		env := actorDeregisteredEnvelope(channelID, remove)
+		env := actorDeregisteredEnvelope(r.channelID, remove)
 		if _, err := appendTx(ctx, tx, env, false); err != nil {
 			return fmt.Errorf("store: actor deregistered mirror %q: %w", remove.ID, err)
 		}

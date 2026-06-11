@@ -21,7 +21,7 @@ func openTestChannel(t *testing.T) *store.ChannelStores {
 	t.Helper()
 	ctx := context.Background()
 	dir := t.TempDir()
-	cs, err := store.OpenChannel(ctx, filepath.Join(dir, "messages.sqlite"), store.OpenOptions{})
+	cs, err := store.OpenChannel(ctx, testChannelID, filepath.Join(dir, "messages.sqlite"), store.OpenOptions{})
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}

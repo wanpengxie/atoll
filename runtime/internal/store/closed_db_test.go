@@ -64,7 +64,7 @@ func TestClosedDB_MembershipWritesError(t *testing.T) {
 	if err := h.Membership.Deregister(ctx, "a", 1); err == nil {
 		t.Error("Deregister on closed DB must error")
 	}
-	if err := h.Membership.ApplyMemberTransitions(ctx, testChannelID,
+	if err := h.Membership.ApplyMemberTransitions(ctx,
 		[]storespec.MemberActorAdd{{ID: "a", Kind: actor.KindAgent, At: 1}}, nil); err == nil {
 		t.Error("ApplyMemberTransitions on closed DB must error (BeginTx fails)")
 	}

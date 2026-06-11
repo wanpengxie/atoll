@@ -72,7 +72,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	nowMs := func() int64 { return time.Now().UnixMilli() }
 
 	// 1. Open channel stores (substrate).
-	cs, err := runtime.OpenChannel(ctx, cfg.DBPath, runtime.OpenChannelOptions{})
+	cs, err := runtime.OpenChannel(ctx, cfg.ChannelID, cfg.DBPath, runtime.OpenChannelOptions{})
 	if err != nil {
 		return nil, fmt.Errorf("platform: open channel store: %w", err)
 	}
@@ -223,7 +223,7 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, imp
 	if impl != nil {
 		binding = actor.BindingEmbedded
 	}
-	if err := h.cs.Membership.ApplyMemberTransitions(ctx, h.channelID, []storespec.MemberActorAdd{{
+	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{{
 		ID: id, Kind: kind, Binding: binding, At: h.nowMs(),
 	}}, nil); err != nil {
 		return fmt.Errorf("platform: Spawn membership: %w", err)

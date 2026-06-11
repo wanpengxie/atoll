@@ -160,7 +160,7 @@ func TestListActive_PoisonKindOnRowsPath(t *testing.T) {
 		 VALUES ('x', 'wizard', NULL, 1, NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
-	reg := newActorRegistry(db)
+	reg := newActorRegistry(db, "C")
 	if _, err := reg.ListActive(ctx); err == nil {
 		t.Error("ListActive must error on out-of-closed-set kind (rows path)")
 	}
@@ -190,7 +190,7 @@ func TestListActive_RawScanError(t *testing.T) {
 		 VALUES ('a', 'agent', NULL, 'not-a-number', NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
-	reg := newActorRegistry(db)
+	reg := newActorRegistry(db, "C")
 	if _, err := reg.ListActive(ctx); err == nil {
 		t.Error("ListActive must surface the raw rows.Scan error on a non-integer created_at")
 	}
@@ -271,7 +271,7 @@ func TestApplyMemberAddTx_LookupScanError(t *testing.T) {
 		`INSERT INTO actor_registry VALUES ('a','agent',NULL,1,'not-an-int')`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
-	reg := newActorRegistry(db)
+	reg := newActorRegistry(db, "C")
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
@@ -296,7 +296,7 @@ func TestApplyMemberRemoveTx_ExecError(t *testing.T) {
 	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER)`); err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
-	reg := newActorRegistry(db)
+	reg := newActorRegistry(db, "C")
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
@@ -321,7 +321,7 @@ func TestApplyMemberAddTx_InsertError(t *testing.T) {
 	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER, deregistered_at INTEGER)`); err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
-	reg := newActorRegistry(db)
+	reg := newActorRegistry(db, "C")
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)
@@ -338,8 +338,8 @@ func TestApplyMemberAddTx_InsertError(t *testing.T) {
 func TestApplyMemberTransitions_AddHelperError(t *testing.T) {
 	ctx := context.Background()
 	db := brokenRegistryDB(t)
-	reg := newActorRegistry(db)
-	err := reg.ApplyMemberTransitions(ctx, "C",
+	reg := newActorRegistry(db, "C")
+	err := reg.ApplyMemberTransitions(ctx,
 		[]storespec.MemberActorAdd{{ID: "a", Kind: actor.KindAgent, At: 9}}, nil)
 	if err == nil {
 		t.Error("ApplyMemberTransitions must propagate the add-helper INSERT error")
@@ -351,8 +351,8 @@ func TestApplyMemberTransitions_AddHelperError(t *testing.T) {
 func TestApplyMemberTransitions_RemoveHelperError(t *testing.T) {
 	ctx := context.Background()
 	db := brokenRegistryDB(t)
-	reg := newActorRegistry(db)
-	err := reg.ApplyMemberTransitions(ctx, "C", nil,
+	reg := newActorRegistry(db, "C")
+	err := reg.ApplyMemberTransitions(ctx, nil,
 		[]storespec.MemberActorRemove{{ID: "a", At: 9}})
 	if err == nil {
 		t.Error("ApplyMemberTransitions must propagate the remove-helper UPDATE error")
@@ -397,7 +397,7 @@ func TestApplyMemberAddTx_ReactivateError(t *testing.T) {
 		 VALUES ('a', 'agent', 1, 5)`); err != nil {
 		t.Fatalf("seed: %v", err)
 	}
-	reg := newActorRegistry(db)
+	reg := newActorRegistry(db, "C")
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		t.Fatalf("BeginTx: %v", err)

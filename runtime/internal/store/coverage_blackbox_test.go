@@ -90,7 +90,7 @@ func TestApplyMemberTransitions_EmptyIDSkippedAndKindDefaulted(t *testing.T) {
 	removes := []storespec.MemberActorRemove{
 		{ID: "", At: 1}, // skipped: empty ID
 	}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, adds, removes); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, adds, removes); err != nil {
 		t.Fatalf("ApplyMemberTransitions: %v", err)
 	}
 	rec, ok, err := cs.Registry.Lookup(ctx, "defaulted")
@@ -116,7 +116,7 @@ func TestApplyMemberTransitions_AddMirrorAppendConflict(t *testing.T) {
 		t.Fatalf("seed squat row: %v", err)
 	}
 	add := storespec.MemberActorAdd{ID: "collide", Kind: actor.KindAgent, At: 5000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, []storespec.MemberActorAdd{add}, nil); err == nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err == nil {
 		t.Fatal("add mirror append must fail on the id collision")
 	}
 	// Rolled back: the registry row must NOT exist.
@@ -132,7 +132,7 @@ func TestApplyMemberTransitions_RemoveMirrorAppendConflict(t *testing.T) {
 	cs := openTestChannel(t)
 
 	add := storespec.MemberActorAdd{ID: "rc", Kind: actor.KindAgent, At: 1000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, []storespec.MemberActorAdd{add}, nil); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	mirrorID := "system.actor.deregistered:rc:6000"
@@ -141,7 +141,7 @@ func TestApplyMemberTransitions_RemoveMirrorAppendConflict(t *testing.T) {
 		t.Fatalf("seed squat row: %v", err)
 	}
 	rm := storespec.MemberActorRemove{ID: "rc", At: 6000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, nil, []storespec.MemberActorRemove{rm}); err == nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{rm}); err == nil {
 		t.Fatal("remove mirror append must fail on the id collision")
 	}
 	// Rolled back: the actor must still be active.

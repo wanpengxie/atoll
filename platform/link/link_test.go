@@ -52,7 +52,7 @@ type stubMembership struct {
 
 func (s *stubMembership) Insert(context.Context, storespec.Record) error         { return nil }
 func (s *stubMembership) Deregister(context.Context, actor.ActorID, int64) error { return nil }
-func (s *stubMembership) ApplyMemberTransitions(_ context.Context, _ channel.ID, adds []storespec.MemberActorAdd, _ []storespec.MemberActorRemove) error {
+func (s *stubMembership) ApplyMemberTransitions(_ context.Context, adds []storespec.MemberActorAdd, _ []storespec.MemberActorRemove) error {
 	s.mu.Lock()
 	s.adds = append(s.adds, adds...)
 	s.mu.Unlock()

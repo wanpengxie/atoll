@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 
+	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/runtime/internal/store"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
@@ -36,9 +37,10 @@ type OpenChannelOptions struct {
 // OpenChannel opens the per-channel sqlite at dbPath and returns the segregated
 // storespec interfaces. This is the public facade over runtime/internal/store
 // (which confines the raw *sql.DB). Packages outside runtime/ use this entry
-// point to obtain channel stores.
-func OpenChannel(ctx context.Context, dbPath string, opts OpenChannelOptions) (*ChannelStores, error) {
-	cs, err := store.OpenChannel(ctx, dbPath, store.OpenOptions{
+// point to obtain channel stores. channelID is the channel scope the membership
+// control plane binds to (its mirror events carry this id, never a per-call arg).
+func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts OpenChannelOptions) (*ChannelStores, error) {
+	cs, err := store.OpenChannel(ctx, channelID, dbPath, store.OpenOptions{
 		ReadOnly: opts.ReadOnly,
 		SkipDDL:  opts.SkipDDL,
 	})

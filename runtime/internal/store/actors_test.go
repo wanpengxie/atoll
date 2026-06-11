@@ -159,7 +159,7 @@ func TestApplyMemberTransitions_AddEmitsMirror(t *testing.T) {
 		ID: "tool:xhs", Kind: actor.KindTool,
 		Binding: actor.BindingRuntimeInboundViaRelay, At: 7000,
 	}}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, adds, nil); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, adds, nil); err != nil {
 		t.Fatalf("ApplyMemberTransitions: %v", err)
 	}
 
@@ -176,6 +176,11 @@ func TestApplyMemberTransitions_AddEmitsMirror(t *testing.T) {
 		t.Fatalf("mirror event ok=%v err=%v", ok, err)
 	}
 	e := row.Envelope
+	// The mirror event's channel scope is the BINDING (testChannelID, fixed at
+	// OpenChannel), never a per-call arg — F3.
+	if e.ChannelID != testChannelID {
+		t.Errorf("mirror channel_id=%q want bound %q", e.ChannelID, testChannelID)
+	}
 	if e.Kind != message.KindEvent {
 		t.Errorf("mirror kind=%q want event", e.Kind)
 	}
@@ -200,7 +205,7 @@ func TestApplyMemberTransitions_DuplicateAddIdempotent(t *testing.T) {
 	cs := openTestChannel(t)
 
 	add := storespec.MemberActorAdd{ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingEmbedded, At: 7000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, []storespec.MemberActorAdd{add}, nil); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
 		t.Fatalf("first add: %v", err)
 	}
 	// Re-apply with a different At — already active, so it must NOT emit a
@@ -208,7 +213,7 @@ func TestApplyMemberTransitions_DuplicateAddIdempotent(t *testing.T) {
 	// per-actor declaration to diff).
 	add2 := add
 	add2.At = 8000
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, []storespec.MemberActorAdd{add2}, nil); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add2}, nil); err != nil {
 		t.Fatalf("duplicate add: %v", err)
 	}
 	if _, ok, _ := cs.Log.FindByID(ctx, "system.actor.registered:tool:xhs:8000"); ok {
@@ -222,11 +227,11 @@ func TestApplyMemberTransitions_RemoveEmitsMirror(t *testing.T) {
 	cs := openTestChannel(t)
 
 	add := storespec.MemberActorAdd{ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingEmbedded, At: 7000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, []storespec.MemberActorAdd{add}, nil); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	rm := storespec.MemberActorRemove{ID: "tool:xhs", At: 9000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, nil, []storespec.MemberActorRemove{rm}); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{rm}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	rec, ok, _ := cs.Registry.Lookup(ctx, "tool:xhs")
@@ -244,15 +249,15 @@ func TestApplyMemberTransitions_DuplicateRemoveIdempotent(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 	add := storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, At: 1000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, []storespec.MemberActorAdd{add}, nil); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
 		t.Fatalf("add: %v", err)
 	}
 	rm := storespec.MemberActorRemove{ID: "a", At: 2000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, nil, []storespec.MemberActorRemove{rm}); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{rm}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	rm2 := storespec.MemberActorRemove{ID: "a", At: 3000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, nil, []storespec.MemberActorRemove{rm2}); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{rm2}); err != nil {
 		t.Fatalf("duplicate remove: %v", err)
 	}
 	if _, ok, _ := cs.Log.FindByID(ctx, "system.actor.deregistered:a:3000"); ok {
@@ -260,18 +265,17 @@ func TestApplyMemberTransitions_DuplicateRemoveIdempotent(t *testing.T) {
 	}
 }
 
-// Empty channel id and missing timestamps are rejected (no half-applied state).
+// Missing timestamps are rejected (no half-applied state). The channel scope is
+// the binding now (fixed at OpenChannel), so there is no per-call empty-channel
+// arg to guard — a normally-opened store is always bound.
 func TestApplyMemberTransitions_GuardsInputs(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	if err := cs.Membership.ApplyMemberTransitions(ctx, "", []storespec.MemberActorAdd{{ID: "a", Kind: actor.KindAgent, At: 1}}, nil); err == nil {
-		t.Error("empty channel id must error")
-	}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, []storespec.MemberActorAdd{{ID: "a", Kind: actor.KindAgent, At: 0}}, nil); err == nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{{ID: "a", Kind: actor.KindAgent, At: 0}}, nil); err == nil {
 		t.Error("add with zero timestamp must error")
 	}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, nil, []storespec.MemberActorRemove{{ID: "a", At: 0}}); err == nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{{ID: "a", At: 0}}); err == nil {
 		t.Error("remove with zero timestamp must error")
 	}
 }
@@ -283,14 +287,14 @@ func TestApplyMemberTransitions_Reactivation(t *testing.T) {
 	cs := openTestChannel(t)
 
 	add := storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, At: 1000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, []storespec.MemberActorAdd{add}, nil); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, nil, []storespec.MemberActorRemove{{ID: "a", At: 2000}}); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{{ID: "a", At: 2000}}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
 	readd := storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, Binding: actor.BindingEmbedded, At: 3000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, testChannelID, []storespec.MemberActorAdd{readd}, nil); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{readd}, nil); err != nil {
 		t.Fatalf("re-add: %v", err)
 	}
 	rec, ok, _ := cs.Registry.Lookup(ctx, "a")

@@ -57,7 +57,7 @@ func TestRegistry_ReadRejectsPoisonKind(t *testing.T) {
 		 VALUES ('x', 'wizard', NULL, 1, NULL)`); err != nil {
 		t.Fatalf("inject poison: %v", err)
 	}
-	reg := newActorRegistry(db)
+	reg := newActorRegistry(db, "C")
 	if _, _, err := reg.Lookup(ctx, "x"); err == nil {
 		t.Error("Lookup must error on out-of-closed-set actor_kind, not silently cast into ADT")
 	}

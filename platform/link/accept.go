@@ -203,7 +203,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 		for i, d := range att.Declarations {
 			adds[i] = storespec.MemberActorAdd{ID: d.ActorID, Kind: d.Kind, Binding: d.Binding, At: nowMs}
 		}
-		if err := a.membership.ApplyMemberTransitions(ctx, a.channelID, adds, nil); err != nil {
+		if err := a.membership.ApplyMemberTransitions(ctx, adds, nil); err != nil {
 			a.sendReply(lc, AttachReply{Accepted: false, Reason: "register: " + err.Error()})
 			return
 		}

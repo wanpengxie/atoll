@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 
+	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
@@ -30,16 +31,22 @@ type ChannelStores struct {
 }
 
 // OpenChannel opens the per-channel sqlite and assembles the channel stores.
-// The raw *sql.DB is owned by the returned ChannelStores and never exposed. The
-// channel scope is the sqlite file itself (dbPath) — there is no separate
-// channel-id dependency to thread in.
-func OpenChannel(ctx context.Context, dbPath string, opts OpenOptions) (*ChannelStores, error) {
+// The raw *sql.DB is owned by the returned ChannelStores and never exposed.
+//
+// channelID is the channel scope, bound at construction. The store is bound to
+// ONE channel — its scope is fixed here, not re-asserted per call. The
+// membership control plane stamps this bound id into its mirror events (a
+// per-call channelID would be a pseudo-parameter the caller could lie about,
+// writing a foreign-channel row into this channel's sqlite — the same truth
+// corruption the harness shape-step dies to prevent; cf. FindByID, whose channel
+// scope is likewise the binding, not a per-call arg).
+func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts OpenOptions) (*ChannelStores, error) {
 	db, err := openChannelDB(ctx, dbPath, opts)
 	if err != nil {
 		return nil, err
 	}
 	msgs := newMessages(db)
-	reg := newActorRegistry(db)
+	reg := newActorRegistry(db, channelID)
 	cs := &ChannelStores{
 		db:         db,
 		Log:        msgs,
