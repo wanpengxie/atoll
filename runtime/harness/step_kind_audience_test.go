@@ -154,26 +154,13 @@ func TestStepKindAndAudience_CallerExpiresPreserved(t *testing.T) {
 	}
 }
 
-// Reserved / core type→kind rules: a non-overridable core type pinned to its
-// default kind rejects a mismatching kind.
-func TestStepKindAndAudience_CoreTypeKindRule(t *testing.T) {
-	cs := newTestStore(t)
-	deps := testDeps(t, cs)
-
-	// core.system_event has AllowOverride=false, DefaultKind=event.
-	e := &message.Envelope{
-		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
-		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "core.system_event",
-		Audience: message.Audience{"x"},
-	}
-	out, err := runStep(t, newStepKindAndAudience, deps, context.Background(), e)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if out.RejectReason != HarnessKindNotAllowedForType {
-		t.Fatalf("reason = %q, want kind_not_allowed_for_type", out.RejectReason)
-	}
-}
+// NB: the core-type AllowOverride=false constraint branch (step_kind_audience:
+// "!rule.AllowOverride && env.Kind != rule.DefaultKind") no longer has any
+// subject — after the 2026-06-11 cleanup both remaining core types (human.text,
+// agent.text) are AllowOverride=true. The former test exercised it via
+// core.system_event, now removed. That branch's fate (keep as additive-ready
+// constraint machinery vs rip) is the open C7 decision; the reserved-bootstrap
+// kind rule below covers the sibling enforcement path.
 
 // Reserved bootstrap system.* type allows only kind=event.
 func TestStepKindAndAudience_ReservedBootstrapKindRule(t *testing.T) {
