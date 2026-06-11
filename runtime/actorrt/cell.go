@@ -65,6 +65,16 @@ type cell struct {
 	// closed guards inbox-send so Deliver never enqueues into a torn-down cell.
 	mu     sync.Mutex
 	closed bool
+
+	// inflight maps a live request's id to its per-request cancel. Each Receive
+	// runs under a reqCtx derived from c.ctx (deadline from ExpiresAt, else plain
+	// cancel); the entry is recorded before the call and removed when it closes.
+	// This is the request-scope of cancel(scope): an off-loop fire (P4 cross-wire
+	// KindCancel) cancels exactly the one Receive holding the goroutine without
+	// queuing behind it. Built WITH its collapse — the entry is deleted the
+	// instant the request closes, so the table never outlives its requests.
+	flightMu sync.Mutex
+	inflight map[message.ID]context.CancelFunc
 }
 
 // newCell constructs a cell. mailbox is the bounded inbox depth; onExit is the
@@ -79,17 +89,18 @@ func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, 
 	}
 	ctx, cancel := context.WithCancel(parent)
 	return &cell{
-		id:      id,
-		impl:    impl,
-		inbox:   make(chan *message.Envelope, mailbox),
-		started: started,
-		ctx:     ctx,
-		cancel:  cancel,
-		onDown:  onDown,
-		onObs:   onObs,
-		logger:  logger,
-		onExit:  onExit,
-		done:    make(chan struct{}),
+		id:       id,
+		impl:     impl,
+		inbox:    make(chan *message.Envelope, mailbox),
+		started:  started,
+		ctx:      ctx,
+		cancel:   cancel,
+		onDown:   onDown,
+		onObs:    onObs,
+		logger:   logger,
+		onExit:   onExit,
+		done:     make(chan struct{}),
+		inflight: make(map[message.ID]context.CancelFunc),
 	}
 }
 
@@ -164,6 +175,11 @@ func (c *cell) start() {
 			if r := recover(); r != nil {
 				deathCause = fmt.Errorf("actorrt: cell %s panicked: %v", c.id, r)
 			}
+			// (a0) Cancel the cell ctx so EVERY in-flight reqCtx cascades cancelled
+			// — the dead instance's downstream goroutines (tools / LLM / sub-awaits
+			// holding a reqCtx) unwind instead of leaking. cancel() is idempotent;
+			// a clean stop() already cancelled, an abnormal death cancels here.
+			c.cancel()
 			// (a) Make this instance unaddressable FIRST — pointer-identity
 			// self-eviction. Never self-stop()/join: a goroutine cannot wait on
 			// its own exit.
@@ -202,17 +218,60 @@ func (c *cell) start() {
 	}()
 }
 
-// safeReceive invokes impl.Receive. A panic propagates naturally up the cell
-// goroutine stack to the deferred recover in start(), which converts it into a
-// single presence-down publish (one death per cell, not per message) — safeReceive itself
-// does not recover. A returned (non-panic) error is NOT a death — closure
-// belongs to the sender — so it is swallowed for observability (the substrate
-// never synthesises a terminal from a handler error; an actor needing
-// observability emits it itself).
+// safeReceive invokes impl.Receive under a per-request ctx derived from c.ctx.
+// The reqCtx is the request-scope of cancel(scope): it carries the ExpiresAt
+// deadline (so an expired request's downstream work unwinds at its instant) and
+// is the handle an off-loop cancel (caller abandon / P4 cross-wire) fires to
+// interrupt exactly this Receive. The serial model is unchanged — one reqCtx is
+// live at a time; it is a per-call scope, not concurrency.
+//
+// A panic propagates naturally up the cell goroutine stack to the deferred
+// recover in start() (one death per cell, not per message) — safeReceive itself
+// does not recover, but its deferred reqCancel + table removal still run on the
+// way up, so a panicking request leaves no leaked cancel and no stale entry. A
+// returned (non-panic) error is NOT a death — closure belongs to the sender — so
+// it is swallowed for observability.
 func (c *cell) safeReceive(env *message.Envelope) {
-	if err := c.impl.Receive(c.ctx, env); err != nil {
+	reqCtx, reqCancel := c.requestCtx(env)
+	c.armRequest(env.ID, reqCancel)
+	defer func() {
+		c.disarmRequest(env.ID)
+		reqCancel()
+	}()
+	if err := c.impl.Receive(reqCtx, env); err != nil {
 		_ = err
 	}
+}
+
+// requestCtx derives the per-request ctx from c.ctx: a deadline when the
+// envelope carries ExpiresAt (the request's own expiry, in Unix millis), else a
+// plain cancel. Deriving from c.ctx is what makes cell death (c.cancel) and
+// runtime teardown cascade into every live request.
+func (c *cell) requestCtx(env *message.Envelope) (context.Context, context.CancelFunc) {
+	if env.ExpiresAt != nil {
+		return context.WithDeadline(c.ctx, time.UnixMilli(*env.ExpiresAt))
+	}
+	return context.WithCancel(c.ctx)
+}
+
+// armRequest records a live request's cancel under its id. Last-writer wins on a
+// colliding id (an at-most-one-live-per-id invariant the serial mailbox already
+// holds); the prior cancel is fired so no handle leaks.
+func (c *cell) armRequest(id message.ID, cancel context.CancelFunc) {
+	c.flightMu.Lock()
+	if prev, ok := c.inflight[id]; ok {
+		prev()
+	}
+	c.inflight[id] = cancel
+	c.flightMu.Unlock()
+}
+
+// disarmRequest removes a request's entry (the table never outlives its
+// requests). It does NOT fire the cancel — safeReceive's defer does that.
+func (c *cell) disarmRequest(id message.ID) {
+	c.flightMu.Lock()
+	delete(c.inflight, id)
+	c.flightMu.Unlock()
 }
 
 // stop closes the mailbox, cancels the cell ctx, and waits for the goroutine to

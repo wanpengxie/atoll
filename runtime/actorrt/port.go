@@ -190,6 +190,13 @@ func (p *port) writeLoop() {
 	for {
 		select {
 		case <-p.ctx.Done():
+			// A cancelled ctx is the actor-scope of cancel(scope): a cancellable
+			// parent (runtime teardown / kill) collapsed this presence. Route it
+			// through die(), not a bare return — die() closeConn (unblocks readLoop,
+			// releases the conn, retracts addressing so a level scan reads "absent")
+			// AND publishes the presence-down edge (lossy wakeup). die()'s stopping
+			// guard suppresses the redundant edge when this is an external stop().
+			p.die(p.ctx.Err())
 			return
 		case env := <-p.sendq:
 			payload, err := json.Marshal(ipc.DeliverPayload{Envelope: *env})

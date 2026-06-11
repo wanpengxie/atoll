@@ -349,6 +349,45 @@ func TestPortUnknownFrameKindFailsClosed(t *testing.T) {
 	}
 }
 
+// TestPortParentCancelDies: cancelling the cancellable parent ctx is the
+// actor-scope of cancel(scope) on a port — writeLoop routes the ctx-done through
+// die() (not a bare return), so the presence-down edge fires, the conn closes
+// (the remote sees EOF), and the port retracts from addressing (Stat reports
+// absent — a level scan reads it "not in presence"). (F1)
+func TestPortParentCancelDies(t *testing.T) {
+	t.Parallel()
+	w := &recordingWatcher{notify: make(chan struct{}, 1)}
+	ctx, cancel := context.WithCancel(context.Background())
+	rt, _ := New(Config{Parent: ctx})
+	rt.WatchPresence(w)
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	defer remote.conn.Close()
+
+	// The remote observes EOF once the port closes its conn on death.
+	eof := make(chan struct{})
+	go func() {
+		remote.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+		_, _ = remote.codec.Read()
+		close(eof)
+	}()
+
+	cancel() // collapse the actor scope
+
+	select {
+	case <-w.notify:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no presence-down edge after parent cancel — writeLoop returned bare instead of die()")
+	}
+	select {
+	case <-eof:
+	case <-time.After(2 * time.Second):
+		t.Fatal("conn not closed after parent cancel — die() did not closeConn")
+	}
+	if _, ok := rt.Stat(id); ok {
+		t.Fatal("port still addressable after parent cancel — did not retract from presence")
+	}
+}
+
 // TestPortStopIsNotDeath: an external stop() (clean despawn) tears the port down
 // WITHOUT publishing a presence-down edge — death is for positively-observed remote
 // failure, not for an orderly host-initiated teardown.
