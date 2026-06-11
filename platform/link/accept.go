@@ -33,6 +33,11 @@ var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return
 const (
 	leasePing = 10 * time.Second
 	leaseTTL  = 30 * time.Second
+	// attachHandshakeTimeout bounds one actor stream's connect-in handshake. A
+	// peer that opens a stream but never sends the ipc handshake must not pin the
+	// Attach goroutine forever; the substrate self-guards this step, the host only
+	// supplies the deadline.
+	attachHandshakeTimeout = 10 * time.Second
 )
 
 // Acceptor is the home end of the link: it upgrades attaching daemon
@@ -147,7 +152,12 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// ipc EmitAck (writer contract not downgraded across the wire).
 	onOpen := func(s *stream) {
 		go func() {
-			if _, err := a.runtime.Attach(s, a.emitSink(reqCtx), resolve); err != nil {
+			// The handshake is bounded by attachHandshakeTimeout (substrate self-
+			// guards the time limit). The port LIFETIME stays the runtime's, not
+			// this bounded ctx — Attach only uses hsCtx for the handshake read.
+			hsCtx, cancel := context.WithTimeout(reqCtx, attachHandshakeTimeout)
+			defer cancel()
+			if _, err := a.runtime.Attach(hsCtx, s, a.emitSink(reqCtx), resolve); err != nil {
 				a.logger.Info("link.attach_stream_failed", "err", err)
 				_ = s.Close()
 			}

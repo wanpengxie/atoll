@@ -54,7 +54,7 @@ func dialPort(t *testing.T, r *Runtime, leaseID string, emit EmitSink, resolve R
 		hsErr <- nil
 	}()
 
-	id, err := r.Attach(hostConn, emit, resolve)
+	id, err := r.Attach(context.Background(), hostConn, emit, resolve)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			// An EMIT frame where a handshake is required — protocol violation.
 			_ = c.Write(ipc.Frame{Kind: ipc.KindEmit})
 		}()
-		if _, err := rt.Attach(hostConn, nopEmit, staticResolve("x")); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, nopEmit, staticResolve("x")); err == nil {
 			t.Fatal("Attach accepted a non-handshake first frame")
 		}
 	})
@@ -130,7 +130,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		}()
 		resolve := func(string) (actor.ActorID, error) { return "", io.ErrUnexpectedEOF }
-		if _, err := rt.Attach(hostConn, nopEmit, resolve); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, nopEmit, resolve); err == nil {
 			t.Fatal("Attach accepted a connection whose lease failed to resolve")
 		}
 	})
@@ -144,10 +144,40 @@ func TestPortHandshakeRejects(t *testing.T) {
 			p, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "anon"})
 			_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		}()
-		if _, err := rt.Attach(hostConn, nopEmit, staticResolve("")); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, nopEmit, staticResolve("")); err == nil {
 			t.Fatal("Attach accepted an empty resolved actor id")
 		}
 	})
+}
+
+// TestAttachHandshakeBounded (F8): a peer that connects but NEVER sends a
+// handshake must not pin the Attach goroutine forever — the substrate self-
+// guards the handshake time bound via hsCtx. With a short-deadline hsCtx, Attach
+// returns an error promptly instead of blocking on the parked read.
+func TestAttachHandshakeBounded(t *testing.T) {
+	t.Parallel()
+	rt, _ := New(Config{Parent: context.Background()})
+	hostConn, remoteConn := net.Pipe()
+	// remoteConn is held open but silent — it never writes a handshake frame.
+	defer func() { _ = remoteConn.Close() }()
+
+	hsCtx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := rt.Attach(hsCtx, hostConn, nopEmit, staticResolve("x"))
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Attach accepted a silent peer that never handshook")
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Attach hung on a silent peer — handshake bound not enforced")
+	}
 }
 
 // TestPortRequiresSinks: a port cannot be constructed without an EmitSink or a
@@ -156,11 +186,11 @@ func TestPortRequiresSinks(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, _ := net.Pipe()
-	if _, err := rt.Attach(hostConn, nil, staticResolve("x")); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn, nil, staticResolve("x")); err == nil {
 		t.Fatal("Attach accepted a nil EmitSink")
 	}
 	hostConn2, _ := net.Pipe()
-	if _, err := rt.Attach(hostConn2, nopEmit, nil); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn2, nopEmit, nil); err == nil {
 		t.Fatal("Attach accepted a nil ResolveFunc")
 	}
 }

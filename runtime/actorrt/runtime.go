@@ -287,11 +287,15 @@ func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
 // emits through emit, and returns the bound id. If a presence already exists for
 // the resolved id it is stopped and replaced.
 //
-// No ctx: the bound port's lifetime is the runtime's (r.parent), NOT this call —
-// a per-call ctx would wrongly scope the port to the Attach invocation. Attach
-// itself does no cancelable wait (the handshake is bounded by conn deadlines).
-func (r *Runtime) Attach(conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc) (actor.ActorID, error) {
-	p, err := newPort(r.parent, conn, emit, resolve, r.publishDown, r.removeIf, r.clock(), r.logger)
+// hsCtx bounds ONLY the connect-in handshake (a substrate-owned protocol step
+// whose time bound is a substrate invariant — a peer that connects but never
+// sends a handshake must not pin this goroutine forever). It does NOT scope the
+// port's LIFETIME: the bound port lives for the runtime's (r.parent), not for
+// this call — a per-call lifetime ctx would wrongly tear the port down when
+// Attach returns. Pass a deadline ctx to guard the handshake; a nil/background
+// ctx degrades to an unbounded handshake read.
+func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc) (actor.ActorID, error) {
+	p, err := newPort(r.parent, hsCtx, conn, emit, resolve, r.publishDown, r.removeIf, r.clock(), r.logger)
 	if err != nil {
 		return "", err
 	}
