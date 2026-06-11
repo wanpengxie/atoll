@@ -1,22 +1,3 @@
-// Package ipc defines the PORT WIRE PROTOCOL — the length-prefixed JSON
-// byte-stream contract between the substrate (host side, hosted in
-// runtime/actorrt as a `port` presence) and ONE out-of-process actor.
-//
-// Model: ONE connection == ONE actor (the Erlang `open_port` model). The
-// connection IS the actor's identity, so NO per-frame actor id or
-// channel id. (Multiplexing many actors over one link = Erlang distribution;
-// an additive future, not pre-built here.)
-//
-// Security boundary = the CONNECTION, authenticated ONCE at handshake
-// (resolve credential → ActorID). Thereafter the point-to-point stream is
-// trusted — there is no per-frame re-auth (TCP/TLS model: you authenticate the
-// connection, not every packet). A zombie/reconnecting actor is handled by
-// connect-in REPLACE: a new connection for the same ActorID stops + closes the
-// old one (actorrt Spawn-replace). So no fence frame, no per-frame token.
-//
-// The wire is medium-agnostic: the Codec wraps io.Reader / io.Writer, so the
-// same protocol runs over a local pipe (same-node out-of-proc actor) or a
-// net.Conn (a remote out-of-proc actor across a network boundary).
 package ipc
 
 import (
