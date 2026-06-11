@@ -21,10 +21,13 @@ type Declaration struct {
 }
 
 // AttachRequest is the stream-0 control message a daemon sends ONCE to join a
-// channel home (lightcone-style: one api-key, one URL). It authenticates the
-// whole link (party-level), then N actor streams open under it.
+// channel home: the party identity + the actor streams it will open. It carries
+// NO credential — authentication is an app-layer concern resolved on the WS
+// upgrade (the URL's ?key= query) before the connection ever reaches the
+// Acceptor; the link layer is auth-agnostic (concept doc §3.2: "Link 不关心对端
+// 是什么，差异只在 ResolveFunc"). A credential field here would be a dead leak of
+// an app concern into the wire vocabulary.
 type AttachRequest struct {
-	APIKey       string        `json:"api_key"`
 	ComputeID    string        `json:"compute_id"`
 	Declarations []Declaration `json:"declarations"`
 }

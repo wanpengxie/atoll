@@ -157,7 +157,7 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
 	const toolID = actor.ActorID("tool:echo")
-	d, err := link.Dial(context.Background(), r.wsURL(), "key", "daemon-1",
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
 		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -215,6 +215,73 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	}
 }
 
+// TestDispatchInOpenStreamWindow_NotDropped pins the step-0 race fix in its
+// per-stream form: a deliver the home sends AFTER the daemon opens the stream
+// (so the home-side port is live) but BEFORE the daemon installs the cell and
+// calls Start must NOT be silently dropped. The fix defers the per-stream read
+// loop to Start, so the in-window frame buffers and is dispatched once the cell
+// is installed. Before the fix the read loop ran from OpenStream, hit NotHosted,
+// and dropped the envelope with zero trace.
+func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+
+	const toolID = actor.ActorID("tool:echo")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	h := host.New()
+	defer h.Stop()
+
+	pen, _, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+		return h.Dispatch(toolID, env)
+	})
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+
+	// The home-side port is live after the handshake. Dispatch NOW — before the
+	// cell is installed and before Start. The frame must wait in the daemon's
+	// stream buffer, not race a half-built host.
+	req := &message.Envelope{
+		ID:        "req-window",
+		ChannelID: testChannelID,
+		Kind:      message.KindRequest,
+		Type:      "echo.do",
+		Sender:    message.Sender{ID: "user:a", Kind: actor.KindHuman},
+		Audience:  message.Audience{toolID},
+	}
+	if _, err := r.deliver.Deliver([]actor.ActorID{toolID}, req); err != nil {
+		t.Fatalf("home deliver: %v", err)
+	}
+	// Give the frame ample time to cross the wire into the daemon's stream buffer
+	// while no read loop is running — this is what makes the OLD code drop it
+	// deterministically rather than racily.
+	time.Sleep(50 * time.Millisecond)
+
+	h.Install(toolID, &echoCell{w: pen}, nil)
+	d.Start()
+
+	// The buffered in-window request must now be dispatched and answered.
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := r.writer.all()
+		if len(got) >= 1 {
+			if got[0].ID != "resp-req-window" || got[0].ParentID != "req-window" {
+				t.Fatalf("emitted up = %+v, want resp-req-window/req-window", got[0])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("in-window dispatch was dropped: cell never answered")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestEndToEnd_CellDeath_ClosesStreamToOnDown proves a daemon cell's abnormal
 // death closes its link stream, the home port reads EOF, and the home publishes
 // the presence-down edge (the closure trigger). Death is the stream EOF — no
@@ -223,7 +290,7 @@ func TestEndToEnd_CellDeath_ClosesStreamToOnDown(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
 	const toolID = actor.ActorID("tool:doomed")
-	d, err := link.Dial(context.Background(), r.wsURL(), "key", "daemon-1",
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
 		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -267,7 +334,7 @@ func TestLease_NoTraffic_ExpiresToPresenceDown(t *testing.T) {
 	r := newHomeRig(t, 20*time.Millisecond, 60*time.Millisecond)
 
 	const toolID = actor.ActorID("tool:frozen")
-	d, err := link.Dial(context.Background(), r.wsURL(), "key", "daemon-1",
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
 		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)

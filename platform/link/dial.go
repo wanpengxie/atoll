@@ -38,18 +38,23 @@ type Dialer struct {
 	done chan struct{}
 }
 
-// actorStream is one hosted actor's link stream + its native ipc plumbing.
+// actorStream is one hosted actor's link stream + its native ipc plumbing. The
+// dispatch handler is captured at OpenStream but the read loop that invokes it
+// only starts at Start() — after the host has installed every cell — so an
+// inbound deliver can never race a half-built host (the frame waits in the
+// stream buffer until Start).
 type actorStream struct {
-	id     actor.ActorID
-	stream *stream
-	codec  *ipc.Codec
-	writer *ipc.RemoteWriter
+	id       actor.ActorID
+	stream   *stream
+	codec    *ipc.Codec
+	writer   *ipc.RemoteWriter
+	dispatch func(env *message.Envelope) error
 }
 
 // Dial dials the home, sends the stream-0 attach, and waits for attach_reply. It
 // does NOT open actor streams or start any demux — Start does that after the
 // host is built. Window-period frames sit in the kernel socket buffer.
-func Dial(ctx context.Context, serverURL, apiKey, computeID string, decls []Declaration, logger *slog.Logger) (*Dialer, error) {
+func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration, logger *slog.Logger) (*Dialer, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -85,17 +90,17 @@ func Dial(ctx context.Context, serverURL, apiKey, computeID string, decls []Decl
 
 	// Send attach on stream 0.
 	raw, err := encodeControl(controlFrame{Kind: ctrlAttach, Attach: &AttachRequest{
-		APIKey: apiKey, ComputeID: computeID, Declarations: decls,
+		ComputeID: computeID, Declarations: decls,
 	}})
 	if err != nil {
 		_ = ws.Close()
 		return nil, err
 	}
 
-	// The demux loop runs for the link's whole life. Starting it in Dial is safe
-	// w.r.t. the dispatch race: an actor stream exists only after OpenStream
-	// registers it AND wires its dispatch handler synchronously, so a data frame
-	// for an unopened stream is dropped — no dispatch can race a half-built host.
+	// The demux loop runs for the link's whole life. It only routes data frames
+	// into per-stream buffers; the per-stream READ loops (which invoke dispatch)
+	// start at Start(), after every cell is installed. So the demux running here
+	// cannot race a half-built host — a buffered deliver just waits for Start.
 	go func() {
 		defer close(d.done)
 		d.lc.run(nil)
@@ -169,14 +174,16 @@ func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelop
 	}
 
 	rw := ipc.NewRemoteWriter(codec)
-	as := &actorStream{id: id, stream: s, codec: codec, writer: rw}
+	as := &actorStream{id: id, stream: s, codec: codec, writer: rw, dispatch: dispatch}
 	d.mu.Lock()
 	d.streams[id] = as
 	d.mu.Unlock()
 
-	// Per-stream read loop: KindDeliver → dispatch into the cell; KindEmitAck →
-	// resolve the RemoteWriter's FIFO head; EOF → fail pending emits + close.
-	go d.streamReadLoop(as, dispatch)
+	// NB: the per-stream read loop is NOT started here — Start() launches it once
+	// the host has installed every cell. Deliver frames that arrive in the window
+	// between handshake and Start wait in the stream buffer; starting dispatch
+	// before install would let an envelope hit a not-yet-hosted actor and be
+	// silently dropped (the bug step 0 fixed, in per-stream form).
 
 	downHandler := func(cause string) {
 		downPayload, _ := json.Marshal(ipc.DownPayload{Reason: cause})
@@ -230,11 +237,22 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 	}
 }
 
-// Start begins the idle-ping keepalive (the demux loop is already running from
-// Dial). Call once, after Dial + all OpenStream + host install. The dispatch
-// handlers are already wired per stream, so no inbound dispatch races a
-// half-built host: streams are opened explicitly by OpenStream before Start.
+// Start launches every actor stream's read loop, then the idle-ping keepalive.
+// Call once, after Dial + all OpenStream + host install. Deferring the read
+// loops to here (rather than starting them in OpenStream) is the dispatch-race
+// fix: by the time any deliver is consumed, every cell is installed, so an
+// envelope can never hit a half-built host. Frames buffered during the window
+// are drained in receipt order when the loop starts.
 func (d *Dialer) Start() {
+	d.mu.Lock()
+	streams := make([]*actorStream, 0, len(d.streams))
+	for _, as := range d.streams {
+		streams = append(streams, as)
+	}
+	d.mu.Unlock()
+	for _, as := range streams {
+		go d.streamReadLoop(as, as.dispatch)
+	}
 	go d.pingLoop()
 }
 

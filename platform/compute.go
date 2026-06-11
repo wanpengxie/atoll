@@ -18,10 +18,11 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// ComputeConfig configures the attached compute.
+// ComputeConfig configures the attached compute. ServerWS carries any auth
+// credential in its query string (the ?key= the app layer resolves on WS
+// upgrade) — the link layer is auth-agnostic, so there is no separate key field.
 type ComputeConfig struct {
 	ServerWS  string
-	APIKey    string
 	ComputeID string
 	Logger    *slog.Logger
 }
@@ -60,10 +61,10 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 	}
 
 	// Dial first (WS + attach handshake, no actor streams yet), build the host,
-	// open one stream per actor (each wiring its dispatch handler synchronously
-	// before any frame is delivered), then Start the idle ping. No inbound
-	// dispatch can race a half-built host: a stream exists only after OpenStream.
-	d, err := link.Dial(ctx, cfg.ServerWS, cfg.APIKey, computeID, decls, logger)
+	// open one stream per actor + install its cell, then Start. Start launches the
+	// per-stream read loops only after every cell is installed, so no inbound
+	// dispatch can race a half-built host (deliver frames buffer until Start).
+	d, err := link.Dial(ctx, cfg.ServerWS, computeID, decls, logger)
 	if err != nil {
 		return err
 	}

@@ -211,6 +211,16 @@ const platformModulePrefix = "github.com/wanpengxie/ActOS/"
 // into the physical layer. The wire VOCABULARY (runtime/ipc + the mux) lives
 // ONLY in platform/link: no other platform package may carry it (the computebus
 // drift this reshape removed must not regrow a second home).
+//
+// Two containments enforce "no second wire vocabulary":
+//  1. runtime/ipc (the frame vocabulary) — only platform/link may import it.
+//  2. the WS transport (gorilla/websocket) — only platform/link may import it.
+//
+// (1) alone is bypassable: a regrown bus could define its OWN frame types and
+// skip runtime/ipc entirely (the exact computebus shape). But ANY second wire
+// must still MOVE bytes, and the only transport in this system is the link's WS.
+// Confining gorilla/websocket to platform/link means a rogue bus cannot actually
+// carry frames without going through link — closing the bypass.
 func TestPlatformDependencyDirection(t *testing.T) {
 	fset := token.NewFileSet()
 	var violations []string
@@ -232,6 +242,13 @@ func TestPlatformDependencyDirection(t *testing.T) {
 		rel := filepath.ToSlash(path)
 		inLink := strings.Contains(rel, "/platform/link/")
 		for _, imp := range importsOf(t, fset, path) {
+			// Transport containment: the WS transport lives ONLY in platform/link.
+			// A second wire vocabulary that defines its own frames (skipping
+			// runtime/ipc) still cannot move bytes without this import.
+			if !inLink && imp == "github.com/gorilla/websocket" {
+				violations = append(violations,
+					fmt.Sprintf("%s: platform package outside link imports the WS transport %q (a second wire cannot regrow — transport lives only in platform/link)", rel, imp))
+			}
 			if !strings.HasPrefix(imp, platformModulePrefix) {
 				continue
 			}

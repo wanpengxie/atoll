@@ -237,10 +237,15 @@ func (a *Acceptor) emitSink(reqCtx context.Context) actorrt.EmitSink {
 			ChannelID: a.channelID,
 		})
 		res, err := a.writer.Write(cctx, env)
-		if err != nil {
-			return ipc.EmitResult{MessageID: res.MessageID, RejectReason: string(res.RejectReason)}, err
-		}
-		return ipc.EmitResult{MessageID: res.MessageID, RejectReason: string(res.RejectReason)}, nil
+		// Mirror EVERY verdict field of the harness WriteResult onto the wire — the
+		// writer contract must not downgrade across the link (a remote cell's
+		// Respond observes the same verdict a local cell's would).
+		return ipc.EmitResult{
+			MessageID:    res.MessageID,
+			Seq:          res.Seq,
+			RejectReason: string(res.RejectReason),
+			RejectDetail: res.RejectDetail,
+		}, err
 	}
 }
 
