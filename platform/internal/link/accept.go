@@ -26,19 +26,11 @@ var errUndeclaredActor = errors.New("link: actor not in attach declarations")
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
-// Lease parameters: the home judges per-link liveness. last-seen is refreshed by
-// ANY inbound frame; the daemon pings stream 0 every leasePing; if no frame
-// arrives within leaseTTL the home declares the link dead (the正面观察 a frozen
-// /half-open daemon never produces a TCP EOF for). Centralised + tunable.
-const (
-	leasePing = 10 * time.Second
-	leaseTTL  = 30 * time.Second
-	// attachHandshakeTimeout bounds one actor stream's connect-in handshake. A
-	// peer that opens a stream but never sends the ipc handshake must not pin the
-	// Attach goroutine forever; the substrate self-guards this step, the host only
-	// supplies the deadline.
-	attachHandshakeTimeout = 10 * time.Second
-)
+// attachHandshakeTimeout bounds one actor stream's connect-in handshake. A
+// peer that opens a stream but never sends the ipc handshake must not pin the
+// Attach goroutine forever; the substrate self-guards this step, the host only
+// supplies the deadline.
+const attachHandshakeTimeout = 10 * time.Second
 
 // Acceptor is the home end of the link: it upgrades attaching daemon
 // connections, registers declared actors into membership, and binds each
@@ -79,14 +71,6 @@ func NewAcceptor(cfg Config) *Acceptor {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	ping := cfg.LeasePing
-	if ping <= 0 {
-		ping = leasePing
-	}
-	ttl := cfg.LeaseTTL
-	if ttl <= 0 {
-		ttl = leaseTTL
-	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Acceptor{
 		writer:     cfg.Writer,
@@ -94,8 +78,8 @@ func NewAcceptor(cfg Config) *Acceptor {
 		membership: cfg.Membership,
 		channelID:  cfg.ChannelID,
 		logger:     logger,
-		leasePing:  ping,
-		leaseTTL:   ttl,
+		leasePing:  cfg.LeasePing,
+		leaseTTL:   cfg.LeaseTTL,
 		ctx:        ctx,
 		cancel:     cancel,
 	}
@@ -165,9 +149,8 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		}()
 	}
 
-	// last-seen lease state, refreshed by any inbound frame.
-	var lastSeen atomicTime
-	lastSeen.set(time.Now())
+	// the per-link lease, refreshed by any inbound frame.
+	lease := NewLease(a.leasePing, a.leaseTTL)
 
 	var lc *linkConn
 	onControl := func(payload []byte) {
@@ -182,7 +165,10 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 
 	// Lease watchdog: tears the link down when last-seen falls behind TTL.
 	done := make(chan struct{})
-	go a.leaseWatch(lc, &lastSeen, done)
+	go lease.Watch(done, func() {
+		a.logger.Info("link.lease_expired", "channel", string(a.channelID))
+		_ = lc.Close()
+	})
 	// Acceptor Close / request cancellation also tears the link down.
 	go func() {
 		select {
@@ -194,7 +180,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		}
 	}()
 
-	lc.run(func() { lastSeen.set(time.Now()) })
+	lc.run(lease.Refresh)
 	close(done)
 }
 
@@ -261,28 +247,6 @@ func (a *Acceptor) emitSink() actorrt.EmitSink {
 			RejectReason: string(res.RejectReason),
 			RejectDetail: res.RejectDetail,
 		}, err
-	}
-}
-
-// leaseWatch is the liveness法官: every leasePing it checks last-seen; if the
-// gap exceeds leaseTTL it tears the whole link down (all actor streams EOF =
-// every presence on this party falls on the same presence-down edge — the
-// closure materialises receiver_unavailable). A frozen daemon (no TCP EOF) is
-// killed here.
-func (a *Acceptor) leaseWatch(lc *linkConn, lastSeen *atomicTime, done <-chan struct{}) {
-	t := time.NewTicker(a.leasePing)
-	defer t.Stop()
-	for {
-		select {
-		case <-done:
-			return
-		case <-t.C:
-			if time.Since(lastSeen.get()) > a.leaseTTL {
-				a.logger.Info("link.lease_expired", "channel", string(a.channelID))
-				_ = lc.Close()
-				return
-			}
-		}
 	}
 }
 

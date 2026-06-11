@@ -6,18 +6,7 @@ import (
 	"fmt"
 	"io"
 	"sync"
-	"time"
 )
-
-// atomicTime is a tiny mutex-guarded time holder — the lease's last-seen cell,
-// written by the demux loop and read by the lease watchdog.
-type atomicTime struct {
-	mu sync.Mutex
-	t  time.Time
-}
-
-func (a *atomicTime) set(t time.Time) { a.mu.Lock(); a.t = t; a.mu.Unlock() }
-func (a *atomicTime) get() time.Time  { a.mu.Lock(); defer a.mu.Unlock(); return a.t }
 
 // Op is the closed set of mux frame opcodes — exactly three. A stream's life
 // is open → data* → close; nothing reserved-but-unwired. The wire spellings are
