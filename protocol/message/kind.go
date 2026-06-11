@@ -31,19 +31,31 @@ func ParseKind(raw string) (Kind, bool) {
 	return "", false
 }
 
-// Visibility is the envelope `visibility` field — 3-value closed set
-// covering who in the channel can query-see this message.
+// Visibility is the envelope `visibility` field — a 3-value closed set recording
+// the sender's DECLARED intent for who in the channel should see this message.
+// It lives in the envelope (not the payload) because who-may-see is a
+// rule-managed ACL property of truth — the substrate's to enforce — not opaque
+// data an actor interprets. Once written, visibility is immutable.
 //
-// Authoritative spec: proto-layer0 §2.4 (round-3 cluster F). Once
-// written, visibility is immutable.
+// Authoritative spec: proto-layer0 §2.4 (round-3 cluster F).
 //
-// Semantics:
-//   - public  — visible to every channel member.
-//   - private — only sender + actors in audience may see this message.
-//   - system  — protocol-internal metadata / intermediate output
-//     (e.g. agent.text progress bubbles, placement notices, bootstrap
-//     events). View fanout suppresses these from the default UI view;
-//     they still persist in the channel message log (audit trail).
+// Declared intent (what each value MEANS):
+//   - public  — intended for every channel member.
+//   - private — intended only for the sender + actors in audience.
+//   - system  — protocol-internal metadata / intermediate output (agent.text
+//     progress bubbles, placement notices, bootstrap events), intended to be
+//     suppressed from the default UI view (still persisted as audit trail).
+//
+// NB (C5, 2026-06-11): enforcement is NOT yet wired. The read seam (storespec
+// queries / view fanout) does NOT filter on visibility today — every committed
+// message is currently readable by any reader regardless of this field. So
+// visibility is presently ADVISORY: the value is recorded faithfully, but
+// "private = only sender+audience may see" / "system = suppressed from view" are
+// the INTENDED semantics, not current behaviour. Read-side enforcement (a
+// query-see chokepoint filtering by visibility ∧ audience) is痛感-driven
+// additive — the field is the correct, already-placed data half; the filter is
+// the收口 half, added when a real privacy / multi-tenant driver lands. Do NOT
+// claim enforcement in code or UX until that seam exists.
 type Visibility string
 
 // Visibility enum — closed set per proto-layer0 §2.4.
