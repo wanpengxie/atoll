@@ -128,7 +128,7 @@ func TestEnqueueTurn_OverflowEvictsOldestAndNotes(t *testing.T) {
 func TestExecuteChannelRequest_TimeoutArmsAuthor2Terminal(t *testing.T) {
 	w := &stubWriter{}
 	b := newToolTestBridge(t, w)
-	b.caller = behavior.NewCaller(b.sender(), w, b.clock)
+	b.caller = behavior.NewCaller(b.sender(), w, b.clock, nil)
 
 	item := turnItem{env: message.Envelope{ID: "trig-t", ChannelID: "ch-tt"}}
 	res := b.executeChannelRequest(context.Background(), item, metatool.RequestSpec{

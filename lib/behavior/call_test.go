@@ -3,7 +3,9 @@ package behavior
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,7 +110,7 @@ func (c *Caller) isPending(id message.ID) bool {
 // idempotent on re-Arm.
 func TestCaller_ArmNoDeadline(t *testing.T) {
 	w := &recordingWriter{}
-	c := NewCaller(testSender(), w, fixedClock(1000))
+	c := NewCaller(testSender(), w, fixedClock(1000), nil)
 
 	req := newRequest("r1", nil)
 	c.Arm(req)
@@ -131,7 +133,7 @@ func TestCaller_ArmNoDeadline(t *testing.T) {
 
 // Arm ignores a nil request or one with an empty id.
 func TestCaller_ArmRejectsBadRequest(t *testing.T) {
-	c := NewCaller(testSender(), &recordingWriter{}, fixedClock(1000))
+	c := NewCaller(testSender(), &recordingWriter{}, fixedClock(1000), nil)
 	c.Arm(nil)
 	c.Arm(&message.Envelope{ID: ""})
 	if c.pendingLen() != 0 {
@@ -146,7 +148,7 @@ func TestCaller_ExpiredDeadlineFires(t *testing.T) {
 	sig := make(chan struct{})
 	w := &recordingWriter{signal: sig}
 	// clock now = 5000; deadline already in the past -> d clamps to 0.
-	c := NewCaller(testSender(), w, fixedClock(5000))
+	c := NewCaller(testSender(), w, fixedClock(5000), nil)
 
 	past := int64(4000)
 	req := newRequest("r1", &past)
@@ -192,7 +194,7 @@ func TestCaller_ExpiredDeadlineFires(t *testing.T) {
 func TestCaller_FireTimeoutDoesNotTouchPending(t *testing.T) {
 	sig := make(chan struct{})
 	w := &recordingWriter{signal: sig}
-	c := NewCaller(testSender(), w, fixedClock(5000))
+	c := NewCaller(testSender(), w, fixedClock(5000), nil)
 
 	past := int64(0)
 	req := newRequest("r1", &past)
@@ -210,11 +212,16 @@ func TestCaller_FireTimeoutDoesNotTouchPending(t *testing.T) {
 }
 
 // A timer-fire write that loses the one-terminal-per-request race
-// (HarnessTerminalDuplicate) is benign: fireTimeout ignores the outcome.
+// (HarnessTerminalDuplicate) is benign: fireTimeout ignores the outcome and
+// MUST NOT report an onFault — the receiver's real terminal landed, the request
+// is closed, there is no liveness break.
 func TestCaller_FireTimeoutDuplicateBenign(t *testing.T) {
 	sig := make(chan struct{})
 	w := &recordingWriter{signal: sig, duplicate: true}
-	c := NewCaller(testSender(), w, fixedClock(5000))
+	var faults int32
+	c := NewCaller(testSender(), w, fixedClock(5000), func(message.ID, error) {
+		atomic.AddInt32(&faults, 1)
+	})
 
 	req := newRequest("r1", ptr(int64(0)))
 	c.Arm(req)
@@ -227,12 +234,47 @@ func TestCaller_FireTimeoutDuplicateBenign(t *testing.T) {
 	if !c.isPending("r1") {
 		t.Fatal("duplicate write must not change pending")
 	}
+	// Give the timer goroutine a beat to finish past the write.
+	time.Sleep(50 * time.Millisecond)
+	if n := atomic.LoadInt32(&faults); n != 0 {
+		t.Fatalf("duplicate is benign — onFault must NOT fire, got %d", n)
+	}
+}
+
+// A timer-fire write that FAILS with a real error is a liveness break (the
+// caller-scoped timeout — the last-resort author — could not land, so this
+// request may now be closed by no path). The base must report it through
+// onFault rather than swallowing it (author#2 fault face, symmetric with
+// author#3 in death.go).
+func TestCaller_FireTimeoutWriteErrorReportsFault(t *testing.T) {
+	sig := make(chan struct{})
+	w := &recordingWriter{signal: sig, err: errors.New("store down")}
+	faultCh := make(chan message.ID, 1)
+	c := NewCaller(testSender(), w, fixedClock(5000), func(reqID message.ID, _ error) {
+		faultCh <- reqID
+	})
+
+	req := newRequest("r1", ptr(int64(0)))
+	c.Arm(req)
+	select {
+	case <-sig:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timer never fired")
+	}
+	select {
+	case got := <-faultCh:
+		if got != "r1" {
+			t.Fatalf("onFault reqID = %q, want r1", got)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("write error did not report an onFault")
+	}
 }
 
 // Match: a non-response, or a response whose parent is not pending, returns
 // false and does not mutate pending.
 func TestCaller_MatchIgnoresForeign(t *testing.T) {
-	c := NewCaller(testSender(), &recordingWriter{}, fixedClock(1000))
+	c := NewCaller(testSender(), &recordingWriter{}, fixedClock(1000), nil)
 	c.Arm(newRequest("r1", nil))
 
 	// not a response
@@ -253,7 +295,7 @@ func TestCaller_MatchIgnoresForeign(t *testing.T) {
 // Match on a PROVISIONAL response of ours returns true but does NOT close the
 // request — it stays in flight (and its timer, if any, keeps running).
 func TestCaller_MatchProvisionalDoesNotClose(t *testing.T) {
-	c := NewCaller(testSender(), &recordingWriter{}, fixedClock(1000))
+	c := NewCaller(testSender(), &recordingWriter{}, fixedClock(1000), nil)
 	req := newRequest("r1", nil)
 	c.Arm(req)
 
@@ -269,7 +311,7 @@ func TestCaller_MatchProvisionalDoesNotClose(t *testing.T) {
 // Match on a FINAL response of ours returns true, stops the timer, and deletes
 // the pending entry.
 func TestCaller_MatchFinalCloses(t *testing.T) {
-	c := NewCaller(testSender(), &recordingWriter{}, fixedClock(1000))
+	c := NewCaller(testSender(), &recordingWriter{}, fixedClock(1000), nil)
 	// deadline far in the future so a real timer is armed (and must be stopped).
 	future := int64(1_000_000_000_000)
 	req := newRequest("r1", &future)
@@ -290,7 +332,7 @@ func TestCaller_MatchFinalCloses(t *testing.T) {
 // Stop stops all timers and clears pending.
 func TestCaller_StopClears(t *testing.T) {
 	future := int64(1_000_000_000_000)
-	c := NewCaller(testSender(), &recordingWriter{}, fixedClock(1000))
+	c := NewCaller(testSender(), &recordingWriter{}, fixedClock(1000), nil)
 	c.Arm(newRequest("r1", nil))
 	c.Arm(newRequest("r2", &future))
 

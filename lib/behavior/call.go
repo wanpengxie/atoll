@@ -95,14 +95,23 @@ type Caller struct {
 	writer  harness.Writer
 	clock   func() time.Time
 	pending map[message.ID]*time.Timer
+	onFault func(reqID message.ID, err error)
 }
 
-func NewCaller(sender message.Sender, writer harness.Writer, clock func() time.Time) *Caller {
+// NewCaller builds a caller-scoped closure manager. onFault is the per-request
+// fault face — symmetric with death.go's author#3 onFault. fireTimeout is
+// author#2's terminal-write executor; when its write FAILS (a real store/reject
+// error, NOT a benign duplicate) the liveness guarantee has a hole that must be
+// observable, so the base reports it through onFault. A duplicate (the
+// receiver's real terminal already landed) is the happy race and is never a
+// fault. nil onFault = faults ignored (the base holds no logger).
+func NewCaller(sender message.Sender, writer harness.Writer, clock func() time.Time, onFault func(reqID message.ID, err error)) *Caller {
 	return &Caller{
 		sender:  sender,
 		writer:  writer,
 		clock:   clock,
 		pending: map[message.ID]*time.Timer{},
+		onFault: onFault,
 	}
 }
 
@@ -134,27 +143,49 @@ func (c *Caller) Arm(req *message.Envelope) {
 }
 
 // fireTimeout runs OFF the cell goroutine (the timer's goroutine). It holds
-// ONLY the immutable snapshot, the caller's sender, and the writer — it NEVER
-// touches `pending`. It commits an unanswered_timeout terminal to truth
-// (audience = caller); the result is ignored (a duplicate = benign loss to a
-// real late terminal; an error leaves the caller covered by no other path here,
-// which is the accepted guardrail — caller-scoped timeout is the last resort).
-// The caller does NOT learn of the timeout here: that terminal fans back to the
-// caller's mailbox and Match clears `pending` on the cell goroutine (mailbox is
-// the sole ingress).
+// ONLY the immutable snapshot, the caller's sender, the writer, and onFault — it
+// NEVER touches `pending`. It commits an unanswered_timeout terminal to truth
+// (audience = caller). The caller does NOT learn of the timeout here: that
+// terminal fans back to the caller's mailbox and Match clears `pending` on the
+// cell goroutine (mailbox is the sole ingress).
+//
+// The write result is no longer swallowed: a duplicate (the receiver's real
+// terminal already landed — the happy race) is benign and silent; ANY other
+// reject or a non-nil error is a liveness break (this request may now be closed
+// by no path) and MUST be observable, so it is reported through onFault — the
+// SAME fault face author#3 (death.go) already has. A liveness-guarantee author
+// that fails silently is the asymmetry §3.2 closes.
 func (c *Caller) fireTimeout(req *message.Envelope) {
 	term, err := BuildResponseFromRequest(req, c.clock, c.sender, CorrelationKey(req.ID), ResponseSpec{
 		Status: "failed",
 		Reason: string(message.TerminalUnansweredTimeout),
 	})
 	if err != nil {
+		c.fault(req.ID, fmt.Errorf("behavior: caller timeout build: %w", err))
 		return
 	}
 	ctx := harness.CtxWithCaller(context.Background(), harness.CallerContext{
 		ActorID:   c.sender.ID,
 		ChannelID: req.ChannelID,
 	})
-	_, _ = c.writer.Write(ctx, term)
+	out, werr := c.writer.Write(ctx, term)
+	if werr != nil {
+		c.fault(req.ID, fmt.Errorf("behavior: caller timeout write: %w", werr))
+		return
+	}
+	if out.RejectReason == harness.HarnessTerminalDuplicate {
+		return // the receiver's real terminal won the race — benign.
+	}
+	if out.RejectReason != "" {
+		c.fault(req.ID, fmt.Errorf("behavior: caller timeout rejected: %s (%s)", out.RejectReason, out.RejectDetail))
+	}
+}
+
+// fault reports a per-request closure fault if onFault is wired.
+func (c *Caller) fault(reqID message.ID, err error) {
+	if c.onFault != nil {
+		c.onFault(reqID, err)
+	}
 }
 
 // Match reports whether env is a response to one of this caller's in-flight

@@ -241,6 +241,7 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 			message.Sender{Kind: actor.KindHuman, ID: callerID},
 			ch.Gate(),
 			time.Now,
+			nil,
 		),
 	}
 

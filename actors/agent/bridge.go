@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -310,8 +311,13 @@ func (b *Bridge) Start(ctx context.Context, _ actorrt.ActorContext) error {
 	}
 
 	// author#2: every outbound request arms a caller-scoped timeout
-	// terminal; Receive's Match disarms it when the response lands.
-	b.caller = behavior.NewCaller(b.sender(), b.writer, b.clock)
+	// terminal; Receive's Match disarms it when the response lands. onFault is
+	// the per-request liveness-break face (symmetric with author#3): a timeout
+	// terminal that fails to land leaves the request closeable by no path, so
+	// the host logs it rather than swallowing it.
+	b.caller = behavior.NewCaller(b.sender(), b.writer, b.clock, func(reqID message.ID, err error) {
+		slog.Default().Warn("agent.caller_timeout_fault", "request_id", string(reqID), "err", err)
+	})
 
 	loopCtx, cancel := context.WithCancel(ctx)
 	b.loopStop = cancel
