@@ -157,9 +157,10 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			// this bounded ctx — Attach only uses hsCtx for the handshake read.
 			hsCtx, cancel := context.WithTimeout(reqCtx, attachHandshakeTimeout)
 			defer cancel()
-			if _, err := a.runtime.Attach(hsCtx, s, a.emitSink(reqCtx), resolve); err != nil {
+			// Attach (substrate) owns the conn from here: on failure it closes the
+			// stream itself (single owner), so we never double-close here.
+			if _, err := a.runtime.Attach(hsCtx, s, a.emitSink(), resolve); err != nil {
 				a.logger.Info("link.attach_stream_failed", "err", err)
-				_ = s.Close()
 			}
 		}()
 	}
@@ -244,7 +245,7 @@ func (a *Acceptor) sendReply(lc *linkConn, reply AttachReply) {
 // envelope's self-reported sender — the identity axiom does not downgrade across
 // the wire, so a stream authenticated as one actor emitting on behalf of another
 // falls on sender_mismatch exactly as a local cell would.
-func (a *Acceptor) emitSink(reqCtx context.Context) actorrt.EmitSink {
+func (a *Acceptor) emitSink() actorrt.EmitSink {
 	return func(ctx context.Context, id actor.ActorID, env *message.Envelope) (ipc.EmitResult, error) {
 		cctx := harness.CtxWithCaller(ctx, harness.CallerContext{
 			ActorID:   id,

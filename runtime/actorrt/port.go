@@ -98,10 +98,20 @@ type port struct {
 // read runs off-goroutine and newPort selects it against hsCtx; on expiry it
 // closes the conn (unblocking the read) and returns. parent owns the port's
 // LIFETIME (unchanged); hsCtx owns only this one read.
-func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, onDown func(actor.ActorID, error), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) (*port, error) {
+func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, onDown func(actor.ActorID, error), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) (p *port, err error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	// The conn is handed to the substrate at Attach; from here the substrate owns
+	// closing it if the port fails to build (single owner — the caller never
+	// closes on Attach failure). On a handshake-deadline expiry this close is also
+	// what unblocks the parked read, so the substrate self-guards the bound with
+	// no host watchdog.
+	defer func() {
+		if err != nil {
+			_ = conn.Close()
+		}
+	}()
 	if emit == nil {
 		return nil, errors.New("actorrt: port requires EmitSink")
 	}
@@ -109,7 +119,7 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 		return nil, errors.New("actorrt: port requires ResolveFunc")
 	}
 	codec := ipc.NewCodec(conn, conn)
-	hs, err := readHandshakeBounded(hsCtx, codec, conn)
+	hs, err := readHandshakeBounded(hsCtx, codec)
 	if err != nil {
 		return nil, fmt.Errorf("actorrt: port handshake read: %w", err)
 	}
@@ -154,12 +164,13 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 // readHandshakeBounded reads the first frame under hsCtx. ipc.Codec.Read blocks
 // on the wire with no deadline (the conn type hides SetReadDeadline), so the
 // read runs off-goroutine and we select it against hsCtx. On hsCtx expiry we
-// close the conn — that unblocks the in-flight read (it returns an EOF/closed
-// error) and the goroutine drains into the buffered channel, leaking nothing.
-// The substrate thus owns the handshake time bound itself, never leaning on a
-// host watchdog. A nil hsCtx degrades to an unbounded read (parity with the
-// pre-F8 contract for callers that opt out).
-func readHandshakeBounded(hsCtx context.Context, codec *ipc.Codec, conn io.Closer) (ipc.Frame, error) {
+// return the deadline error WITHOUT closing the conn: newPort's failure path
+// (single conn owner) closes it, and THAT close unblocks the parked read — the
+// goroutine then drains into the buffered channel, leaking nothing. So the
+// substrate still self-guards the bound (the close is the substrate's, just at
+// newPort), with one coherent owner instead of two. A nil hsCtx degrades to an
+// unbounded read (parity with the pre-F8 contract for callers that opt out).
+func readHandshakeBounded(hsCtx context.Context, codec *ipc.Codec) (ipc.Frame, error) {
 	if hsCtx == nil {
 		return codec.Read()
 	}
@@ -176,9 +187,6 @@ func readHandshakeBounded(hsCtx context.Context, codec *ipc.Codec, conn io.Close
 	case r := <-resCh:
 		return r.frame, r.err
 	case <-hsCtx.Done():
-		// Unblock the parked read by closing the conn; the goroutine then
-		// completes into the buffered channel (no leak).
-		_ = conn.Close()
 		return ipc.Frame{}, fmt.Errorf("handshake deadline: %w", hsCtx.Err())
 	}
 }

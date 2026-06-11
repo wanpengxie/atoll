@@ -2,6 +2,7 @@ package behavior
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -100,9 +101,12 @@ func ReconcileReceiverUnavailable(
 		if derr := MaterialiseReceiverUnavailable(ctx, writer, query, clock, sender, id, onFault); derr != nil {
 			// Per-receiver drain-query failure: surface it (every one of this
 			// receiver's callers is a black hole) and continue — one bad receiver
-			// must not strand the rest of the scan.
+			// must not strand the rest of the scan. This fault is per-RECEIVER, not
+			// per-request (the drain failed before any request was enumerated), so
+			// the reqID slot stays empty and the receiver id rides in the error —
+			// never pun an ActorID into the request-id position.
 			if onFault != nil {
-				onFault(message.ID(id), derr)
+				onFault("", fmt.Errorf("reconcile drain receiver %s: %w", id, derr))
 			}
 		}
 	}
