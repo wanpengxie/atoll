@@ -166,6 +166,59 @@ func TestListActive_PoisonKindOnRowsPath(t *testing.T) {
 	}
 }
 
+// Binding read path is symmetric with kind: a non-empty out-of-closed-set
+// actor_binding column is a poisoned row and must fail loudly (ParseBinding),
+// not silently raw-cast into the Record. Both read paths (ListActive rows /
+// Lookup single-row) enforce it.
+func TestListActive_PoisonBindingOnRowsPath(t *testing.T) {
+	ctx := context.Background()
+	db := openRelaxed(t)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
+		 VALUES ('x', 'agent', 'teleport', 1, NULL)`); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	reg := newActorRegistry(db, "C", nil)
+	if _, err := reg.ListActive(ctx); err == nil {
+		t.Error("ListActive must error on out-of-closed-set binding (rows path)")
+	}
+}
+
+func TestLookup_PoisonBinding(t *testing.T) {
+	ctx := context.Background()
+	db := openRelaxed(t)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
+		 VALUES ('x', 'agent', 'teleport', 1, NULL)`); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	reg := newActorRegistry(db, "C", nil)
+	if _, _, err := reg.Lookup(ctx, "x"); err == nil {
+		t.Error("Lookup must error on out-of-closed-set binding (single-row path)")
+	}
+}
+
+// Empty binding is a legitimate state (a presence-less member — e.g. a human —
+// carries no binding), so a NULL/empty actor_binding must read back cleanly as
+// "" — the validation rejects only NON-empty out-of-set values.
+func TestLookup_EmptyBindingAccepted(t *testing.T) {
+	ctx := context.Background()
+	db := openRelaxed(t)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
+		 VALUES ('h', 'human', NULL, 1, NULL)`); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	reg := newActorRegistry(db, "C", nil)
+	rec, ok, err := reg.Lookup(ctx, "h")
+	if err != nil || !ok {
+		t.Fatalf("Lookup empty-binding member: ok=%v err=%v", ok, err)
+	}
+	if rec.Binding != "" {
+		t.Errorf("empty binding must read back as \"\", got %q", rec.Binding)
+	}
+}
+
 // ListActive raw rows.Scan error: an active row whose created_at column holds
 // non-integer text cannot scan into the int64 Record.CreatedAt, hitting the
 // scan-error arm (distinct from the closed-set kind guard). Reachable only via

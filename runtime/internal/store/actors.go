@@ -55,7 +55,18 @@ func (r *actorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec
 		return storespec.Record{}, false, fmt.Errorf("store: actor %q invalid kind %q (out of closed set)", id, kind)
 	}
 	rec.Kind = k
-	rec.Binding = actor.Binding(binding)
+	// Binding read symmetric with kind: validate against the closed-set contract
+	// (the public predicate ParseBinding, per binding.go) instead of a raw cast.
+	// Empty is a legitimate state (a presence-less member — e.g. a human — has no
+	// binding), so only a non-empty value is parsed; a non-empty out-of-set value
+	// is a poisoned row and fails loudly, exactly as a poison kind does.
+	if binding != "" {
+		b, ok := actor.ParseBinding(binding)
+		if !ok {
+			return storespec.Record{}, false, fmt.Errorf("store: actor %q invalid binding %q (out of closed set)", id, binding)
+		}
+		rec.Binding = b
+	}
 	return rec, true, nil
 }
 
@@ -98,7 +109,13 @@ func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, err
 			return nil, fmt.Errorf("store: list active actors invalid kind %q (out of closed set)", kind)
 		}
 		rec.Kind = k
-		rec.Binding = actor.Binding(binding)
+		if binding != "" {
+			b, ok := actor.ParseBinding(binding)
+			if !ok {
+				return nil, fmt.Errorf("store: list active actors invalid binding %q (out of closed set)", binding)
+			}
+			rec.Binding = b
+		}
 		out = append(out, rec)
 	}
 	if err := rows.Err(); err != nil {
