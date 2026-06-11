@@ -15,7 +15,6 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 const closureTestChannelID = channel.ID("test-closure")
@@ -49,30 +48,27 @@ func (a *silentActor) Receive(_ context.Context, env *message.Envelope) error {
 // Test helpers
 // ---------------------------------------------------------------------------
 
-// newClosureHome assembles a full platform.ChannelHome backed by a temp sqlite
-// and returns it plus the channel stores for pre-registering actors.
-func newClosureHome(t *testing.T) *platform.ChannelHome {
+// newClosureHome assembles a full platform.Home backed by a temp sqlite.
+func newClosureHome(t *testing.T) *platform.Home {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "closure.sqlite")
-	ch, err := platform.NewChannelHome(platform.HomeConfig{
+	ch, err := platform.Open(platform.HomeConfig{
 		ChannelID: closureTestChannelID,
 		DBPath:    dbPath,
 	})
 	if err != nil {
-		t.Fatalf("NewChannelHome: %v", err)
+		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = ch.Close() })
 	return ch
 }
 
-// registerActor seeds a membership row so the harness accepts envelopes from /
-// addressed to this actor.
-func registerActor(t *testing.T, ch *platform.ChannelHome, id actor.ActorID, kind actor.Kind) {
+// registerActor seeds a presence-less membership row so the harness accepts
+// envelopes from / addressed to this actor (Spawn with nil impl = membership
+// only).
+func registerActor(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor.Kind) {
 	t.Helper()
-	err := ch.Membership().Insert(context.Background(), storespec.Record{
-		ID: id, Kind: kind, CreatedAt: time.Now().UnixMilli(),
-	})
-	if err != nil {
+	if err := ch.Spawn(context.Background(), id, kind, nil); err != nil {
 		t.Fatalf("register actor %s: %v", id, err)
 	}
 }
@@ -82,7 +78,7 @@ func registerActor(t *testing.T, ch *platform.ChannelHome, id actor.ActorID, kin
 // the committed row to its audience cells asynchronously).
 func writeRequest(
 	t *testing.T,
-	ch *platform.ChannelHome,
+	ch *platform.Home,
 	senderID actor.ActorID,
 	senderKind actor.Kind,
 	targetID actor.ActorID,
@@ -108,9 +104,9 @@ func writeRequest(
 		ActorID:   senderID,
 		ChannelID: closureTestChannelID,
 	})
-	res, err := ch.Gateway().SendMessage(ctx, env)
+	res, err := ch.Gate().Write(ctx, env)
 	if err != nil {
-		t.Fatalf("SendMessage: %v", err)
+		t.Fatalf("Gate().Write: %v", err)
 	}
 	if !res.Accepted() {
 		t.Fatalf("SendMessage rejected: %s (%s)", res.RejectReason, res.RejectDetail)
@@ -121,12 +117,12 @@ func writeRequest(
 // pollForTerminal waits up to timeout for a kind=response with the given
 // parentID to appear in the channel log. Returns the terminal envelope or
 // fails the test.
-func pollForTerminal(t *testing.T, ch *platform.ChannelHome, parentID message.ID, timeout time.Duration) message.Envelope {
+func pollForTerminal(t *testing.T, ch *platform.Home, parentID message.ID, timeout time.Duration) message.Envelope {
 	t.Helper()
 	ctx := context.Background()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
-		rows, err := ch.Gateway().ListMessages(ctx, 0, 1000)
+		rows, err := ch.View().ReadAfterSeq(ctx, 0, 1000)
 		if err != nil {
 			t.Fatalf("ListMessages: %v", err)
 		}
@@ -162,8 +158,11 @@ func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T
 	registerActor(t, ch, callerID, actor.KindHuman)
 	registerActor(t, ch, workerID, actor.KindAgent)
 
-	// 2. Spawn the panic actor cell in the runtime.
-	ch.Runtime().Spawn(workerID, panicOnReceive{})
+	// 2. Spawn the panic actor cell (membership already seeded above; Spawn
+	//    reactivates + places the cell).
+	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, panicOnReceive{}); err != nil {
+		t.Fatalf("spawn worker cell: %v", err)
+	}
 
 	// 3. Write a request addressed to the worker through the full pipeline.
 	//    The delivery tap delivers it to the worker cell, which panics.
@@ -240,13 +239,15 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 	sa := &silentActor{
 		caller: behavior.NewCaller(
 			message.Sender{Kind: actor.KindHuman, ID: callerID},
-			gatewayWriter(ch.Gateway()),
+			ch.Gate(),
 			time.Now,
 		),
 	}
 
-	// 3. Spawn the silent actor cell.
-	ch.Runtime().Spawn(workerID, sa)
+	// 3. Spawn the silent actor cell (membership already seeded; Spawn places it).
+	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, sa); err != nil {
+		t.Fatalf("spawn silent cell: %v", err)
+	}
 
 	// 4. Write a request with a short ExpiresAt (now + 300ms).
 	deadline := time.Now().Add(300 * time.Millisecond).UnixMilli()
@@ -283,12 +284,4 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 	}
 }
 
-// gatewayWriter adapts *platform.Gateway (SendMessage) to harness.Writer.
-type gwWriter struct{ gw *platform.Gateway }
-
-func gatewayWriter(gw *platform.Gateway) harness.Writer { return &gwWriter{gw: gw} }
-
-func (w *gwWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	return w.gw.SendMessage(ctx, env)
-}
 

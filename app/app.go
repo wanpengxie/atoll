@@ -28,7 +28,7 @@ type App struct {
 	engine *gin.Engine
 
 	mu    sync.RWMutex
-	homes map[channel.ID]*platform.ChannelHome
+	homes map[channel.ID]*platform.Home
 
 	channelDBDir string
 }
@@ -54,7 +54,7 @@ func New(cfg Config) (*App, error) {
 	a := &App{
 		db:           cfg.DB,
 		logger:       logger,
-		homes:        make(map[channel.ID]*platform.ChannelHome),
+		homes:        make(map[channel.ID]*platform.Home),
 		channelDBDir: cfg.ChannelDBDir,
 	}
 
@@ -195,14 +195,14 @@ func (a *App) registerRoutes() {
 // Channel home management
 // ---------------------------------------------------------------------------
 
-func (a *App) getHome(chID channel.ID) *platform.ChannelHome {
+func (a *App) getHome(chID channel.ID) *platform.Home {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.homes[chID]
 }
 
-func (a *App) createHome(chID channel.ID, dbPath string) (*platform.ChannelHome, error) {
-	home, err := platform.NewChannelHome(platform.HomeConfig{
+func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error) {
+	home, err := platform.Open(platform.HomeConfig{
 		ChannelID: chID,
 		DBPath:    dbPath,
 		Logger:    a.logger,
@@ -229,19 +229,19 @@ const builtinAgentID = actor.ActorID("agent:main")
 // spawnBuiltinAgent best-effort spawns the bundled agent cell. Failure is
 // logged, never fatal: a channel without its brain still serves path-1
 // (explicit audience) traffic.
-func (a *App) spawnBuiltinAgent(chID channel.ID, home *platform.ChannelHome) {
+func (a *App) spawnBuiltinAgent(chID channel.ID, home *platform.Home) {
 	cfg, err := agent.NewConfigFromEnv(agent.BuildSystemPrompt(
 		agent.Situation{Host: "server"},
 		os.Getenv(agent.EnvKeyChannelType), os.Getenv(agent.EnvKeyDomainPrompt)))
 	if err != nil {
 		return // no LLM credentials on this server — no built-in agent
 	}
-	bridge, err := agent.NewBridge(cfg, builtinAgentID, chID, home.Writer())
+	bridge, err := agent.NewBridge(cfg, builtinAgentID, chID, home.Gate())
 	if err != nil {
 		a.logger.Warn("app: builtin agent build failed", "channel", string(chID), "err", err.Error())
 		return
 	}
-	if err := home.SpawnCell(context.Background(), builtinAgentID, actor.KindAgent, bridge); err != nil {
+	if err := home.Spawn(context.Background(), builtinAgentID, actor.KindAgent, bridge); err != nil {
 		a.logger.Warn("app: builtin agent spawn failed", "channel", string(chID), "err", err.Error())
 	}
 }

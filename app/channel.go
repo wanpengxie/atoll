@@ -16,7 +16,6 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
 // ---------------------------------------------------------------------------
@@ -104,7 +103,9 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	}
 
 	actorID := actor.ActorID("user:" + userID)
-	if mErr := home.Membership().Insert(c.Request.Context(), newRecord(actorID, actor.KindHuman)); mErr != nil {
+	// Register the creating user as a presence-less channel member (a human is a
+	// member but has no cell — Spawn with nil impl is membership-only).
+	if mErr := home.Spawn(c.Request.Context(), actorID, actor.KindHuman, nil); mErr != nil {
 		a.logger.Warn("app: channel membership insert failed", "channel", chID, "err", mErr.Error())
 	}
 
@@ -180,7 +181,7 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 		return
 	}
 
-	// Close the in-memory ChannelHome (stops fleet, runtime, stores).
+	// Close the in-memory channel home (stops links, delivery tap, cells, stores).
 	cID := channel.ID(chID)
 	a.mu.Lock()
 	if home, exists := a.homes[cID]; exists {
@@ -250,7 +251,7 @@ func (a *App) handleListActors(c *gin.Context) {
 		return
 	}
 
-	actors, err := home.Gateway().ListActors(c.Request.Context())
+	actors, err := home.View().ListActors(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -283,7 +284,7 @@ func (a *App) handleCursor(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
 		return
 	}
-	seq, err := home.Gateway().MaxSeq(c.Request.Context())
+	seq, err := home.View().MaxSeq(c.Request.Context())
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -310,7 +311,7 @@ func (a *App) handleListMessages(c *gin.Context) {
 		limit = 100
 	}
 
-	rows, err := home.Gateway().ListMessages(c.Request.Context(), after, limit)
+	rows, err := home.View().ReadAfterSeq(c.Request.Context(), after, limit)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
@@ -369,7 +370,7 @@ func (a *App) handleSendMessage(c *gin.Context) {
 	// Product decision: no explicit audience → send to channel's agent (kind=request).
 	kind := message.Kind(req.Kind)
 	if len(audience) == 0 {
-		actors, _ := home.Gateway().ListActors(c.Request.Context())
+		actors, _ := home.View().ListActors(c.Request.Context())
 		var agents []actor.ActorID
 		for _, a := range actors {
 			if a.Kind == actor.KindAgent {
@@ -388,7 +389,7 @@ func (a *App) handleSendMessage(c *gin.Context) {
 		kind = message.KindRequest
 	}
 
-	gw := home.Gateway()
+	gw := homeGateway(channel.ID(chID), home)
 	channelID := channel.ID(chID)
 
 	// App layer owns product decisions: sender kind, TTL, envelope shape.
@@ -467,13 +468,5 @@ func (a *App) newClientEnvelope(
 		Audience:  aud,
 		Payload:   payload,
 		ExpiresAt: &exp,
-	}
-}
-
-func newRecord(id actor.ActorID, kind actor.Kind) storespec.Record {
-	return storespec.Record{
-		ID:        id,
-		Kind:      kind,
-		CreatedAt: time.Now().UnixMilli(),
 	}
 }

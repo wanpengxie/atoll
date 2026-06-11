@@ -8,7 +8,6 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
-	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 )
 
@@ -64,12 +63,12 @@ func (a *App) handleWS(c *gin.Context) {
 		return
 	}
 
-	// Subscribe to PushHub.
-	notify, cancel := home.PushHub().Subscribe()
+	// Subscribe to the commit Signal (tap fan-out).
+	notify, cancel := home.Taps().Subscribe()
 	defer cancel()
 
 	cursor := sub.SinceSeq
-	gw := home.Gateway()
+	gw := homeGateway(chID, home)
 
 	// Initial backfill.
 	a.wsSendMessages(ws, gw, chID, &cursor)
@@ -89,7 +88,7 @@ func (a *App) handleWS(c *gin.Context) {
 	}
 }
 
-func (a *App) wsSendMessages(ws *websocket.Conn, gw *platform.Gateway, chID channel.ID, cursor *int64) {
+func (a *App) wsSendMessages(ws *websocket.Conn, gw gateway, chID channel.ID, cursor *int64) {
 	for {
 		rows, err := gw.ListMessages(context.Background(), *cursor, 100)
 		if err != nil || len(rows) == 0 {

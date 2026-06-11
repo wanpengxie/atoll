@@ -1,7 +1,7 @@
-// Package platform is the channel-home and attached-compute assembly. compute.go
-// is the daemon (attached-compute) assembly root: link.Dial (connect to the
-// channel home) → host (business cells) → per-actor stream wiring → Start. Cloud
-// daemon and user-proxy daemon are the same binary; cmd selects concrete actors.
+// compute.go is the daemon (attached-compute) assembly root: link.Dial (connect
+// to the channel home) → host (business cells) → per-actor stream wiring → Start.
+// Cloud daemon and user-proxy daemon are the same binary; cmd selects concrete
+// actors.
 package platform
 
 import (

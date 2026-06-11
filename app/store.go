@@ -9,7 +9,7 @@ import (
 
 // OpenDB opens the app-level SQLite database (identity, workspace, channel
 // catalog, daemon registry). This is NOT channel truth -- each channel's
-// message log lives in its own DB managed by platform.ChannelHome.
+// message log lives in its own DB managed by platform.Home.
 func OpenDB(path string) (*sql.DB, error) {
 	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=5000")
 	if err != nil {

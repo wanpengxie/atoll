@@ -20,8 +20,10 @@
 //
 //   - actors/xhs imports only protocol/actor + lib/behavior + standard
 //     library. No server, no platform internals.
-//   - Device connection identity stays in platform/localdevice; payloads
-//     carry only business parameters (L4 §2.6 — device is NOT an actor).
+//   - Device connection identity stays in the daemon-side local-device
+//     bridge (an additive件, reintroduced with the concrete device actors —
+//     platform-redesign §8 拍板项 4); payloads carry only business
+//     parameters (L4 §2.6 — device is NOT an actor).
 //
 // Authoritative spec references:
 //
