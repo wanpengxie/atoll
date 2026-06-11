@@ -14,6 +14,15 @@ type TypeMeta struct {
 	// MaxPendingMs is the type's wait-budget hint for callers: how long a
 	// request of this type may reasonably stay pending. 0 = no hint
 	// (event-only types, or the actor declines to advertise one).
+	//
+	// TODO(deferred-wiring, 2026-06-11): actors PRODUCE this (xhs 300s, kimi/echo
+	// 30s) but NO consumer wires it into the call path — call_actor currently
+	// hardcodes DefaultTimeout (lib/metatool/call_actor.go), so a wait=true call
+	// to a 300s type still degrades to an ack at 30s. The field is the correct
+	// design (a type declares its own timeout), only the cross-layer wiring is
+	// missing: it must be resolved by the agent-side Executor (which holds the
+	// describe cache) and threaded into RequestSpec.Timeout. Defer until the
+	// "actor self-reports timeout" wiring is taken up; do NOT delete the field.
 	MaxPendingMs   int64           `json:"max_pending_ms,omitempty"`
 	PayloadExample json.RawMessage `json:"payload_example,omitempty"`
 	PayloadFields  []FieldDoc      `json:"payload_fields,omitempty"`
