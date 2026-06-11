@@ -209,17 +209,17 @@ const platformModulePrefix = "github.com/wanpengxie/ActOS/"
 // BELOW app/cmd and ABOVE the substrate. It must never import downstream
 // (actors/, app/) — that would let a domain actor or the HTTP layer back-flow
 // into the physical layer. The wire VOCABULARY (runtime/ipc + the mux) lives
-// ONLY in platform/link: no other platform package may carry it (the computebus
+// ONLY in platform/internal/link: no other platform package may carry it (the computebus
 // drift this reshape removed must not regrow a second home).
 //
 // Two containments enforce "no second wire vocabulary":
-//  1. runtime/ipc (the frame vocabulary) — only platform/link may import it.
-//  2. the WS transport (gorilla/websocket) — only platform/link may import it.
+//  1. runtime/ipc (the frame vocabulary) — only platform/internal/link may import it.
+//  2. the WS transport (gorilla/websocket) — only platform/internal/link may import it.
 //
 // (1) alone is bypassable: a regrown bus could define its OWN frame types and
 // skip runtime/ipc entirely (the exact computebus shape). But ANY second wire
 // must still MOVE bytes, and the only transport in this system is the link's WS.
-// Confining gorilla/websocket to platform/link means a rogue bus cannot actually
+// Confining gorilla/websocket to platform/internal/link means a rogue bus cannot actually
 // carry frames without going through link — closing the bypass.
 func TestPlatformDependencyDirection(t *testing.T) {
 	fset := token.NewFileSet()
@@ -240,14 +240,14 @@ func TestPlatformDependencyDirection(t *testing.T) {
 			return nil
 		}
 		rel := filepath.ToSlash(path)
-		inLink := strings.Contains(rel, "/platform/link/")
+		inLink := strings.Contains(rel, "/platform/internal/link/")
 		for _, imp := range importsOf(t, fset, path) {
-			// Transport containment: the WS transport lives ONLY in platform/link.
+			// Transport containment: the WS transport lives ONLY in platform/internal/link.
 			// A second wire vocabulary that defines its own frames (skipping
 			// runtime/ipc) still cannot move bytes without this import.
 			if !inLink && imp == "github.com/gorilla/websocket" {
 				violations = append(violations,
-					fmt.Sprintf("%s: platform package outside link imports the WS transport %q (a second wire cannot regrow — transport lives only in platform/link)", rel, imp))
+					fmt.Sprintf("%s: platform package outside link imports the WS transport %q (a second wire cannot regrow — transport lives only in platform/internal/link)", rel, imp))
 			}
 			if !strings.HasPrefix(imp, platformModulePrefix) {
 				continue
@@ -258,11 +258,11 @@ func TestPlatformDependencyDirection(t *testing.T) {
 				violations = append(violations,
 					fmt.Sprintf("%s: platform imports downstream %q (dependency direction violated)", rel, imp))
 			}
-			// Wire vocabulary containment: only platform/link may carry the port
+			// Wire vocabulary containment: only platform/internal/link may carry the port
 			// wire (runtime/ipc) — its mux is the single home of link framing.
 			if !inLink && (sub == "runtime/ipc" || strings.HasPrefix(sub, "runtime/ipc/")) {
 				violations = append(violations,
-					fmt.Sprintf("%s: platform package outside link imports the wire %q (frame vocabulary lives only in platform/link)", rel, imp))
+					fmt.Sprintf("%s: platform package outside link imports the wire %q (frame vocabulary lives only in platform/internal/link)", rel, imp))
 			}
 		}
 		return nil
