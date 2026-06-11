@@ -15,7 +15,7 @@ func TestEncodeDecodeRoundTrip(t *testing.T) {
 			Declarations: []AttachDeclaration{{ActorID: "xhs", Kind: actor.KindTool, Binding: actor.BindingEmbedded}},
 		}},
 		{Type: FrameAttachReply, Reply: &AttachReply{ChannelID: channel.ID("ch-1"), Accepted: true}},
-		{Type: FrameHeartbeat, Beat: &Heartbeat{ComputeID: "c1", Present: []actor.ActorID{"xhs"}}},
+		{Type: FrameHeartbeat, Beat: &Heartbeat{ComputeID: "c1"}},
 		{Type: FrameDispatch, Dispatch: &DispatchFrame{Target: "xhs", Envelope: &message.Envelope{ID: "e1"}}},
 		{Type: FrameEmit, EmitID: "emit-1", Emit: &EmitFrame{Source: "xhs", Envelope: &message.Envelope{ID: "e2"}}},
 		{Type: FrameEmitAck, Ack: &EmitAck{EmitID: "emit-1", MessageID: "e2"}},

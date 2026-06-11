@@ -5,6 +5,7 @@ package platform
 
 import (
 	"context"
+	"log"
 
 	"github.com/google/uuid"
 
@@ -56,21 +57,17 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		})
 	}
 
-	// A mutable holder so the dispatch callback can reach the host after it is
-	// constructed.
-	var h *host.Host
-	hl, err := homelink.Connect(ctx, cfg.ServerWS, cfg.APIKey, computeID, decls,
-		func(df computebus.DispatchFrame) {
-			if h != nil {
-				_ = h.Dispatch(df)
-			}
-		})
+	// Dial first (WS + attach handshake, no readLoop yet), construct the host,
+	// install every actor, then Start the readLoop. The dispatch handler is
+	// wired only after the host is fully built, so no inbound frame can race a
+	// half-constructed host — window-period frames sit in the socket buffer.
+	hl, err := homelink.Dial(ctx, cfg.ServerWS, cfg.APIKey, computeID, decls)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = hl.Close() }()
 
-	h = host.New(hl.Emit, hl.SendDeath)
+	h := host.New(hl.Emit, hl.SendDeath)
 	defer h.Stop()
 
 	// Install all declared actors as cells.
@@ -81,6 +78,13 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 			h.Install(a.ID, a.Impl)
 		}
 	}
+
+	// Handler installed with the host fully built; begin draining inbound frames.
+	hl.Start(func(df computebus.DispatchFrame) {
+		if err := h.Dispatch(df); err != nil {
+			log.Printf("compute: dispatch %s: %v", df.Target, err)
+		}
+	})
 
 	// Block until context cancellation or homelink disconnect.
 	select {

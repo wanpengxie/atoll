@@ -77,7 +77,6 @@ func New(cfg Config) *Fleet {
 type actorPipe struct {
 	actorID   actor.ActorID
 	fleetConn net.Conn // fleet side of the pipe -- relay reads from here
-	cancel    context.CancelFunc
 }
 
 // computeState tracks one attached compute's resources.
@@ -199,7 +198,6 @@ func (f *Fleet) handleAttach(ctx context.Context, ws *websocket.Conn, daemonID s
 		if err != nil {
 			// Clean up already-attached pipes.
 			for _, prev := range state.pipes {
-				prev.cancel()
 				_ = prev.fleetConn.Close()
 			}
 			// Roll back membership registration.
@@ -239,11 +237,8 @@ func (f *Fleet) handleAttach(ctx context.Context, ws *websocket.Conn, daemonID s
 func (f *Fleet) attachActor(actorID actor.ActorID) (*actorPipe, error) {
 	serverConn, fleetConn := net.Pipe()
 
-	_, cancel := context.WithCancel(context.Background())
-
 	hsPayload, err := json.Marshal(ipc.HandshakePayload{LeaseID: string(actorID)})
 	if err != nil {
-		cancel()
 		_ = serverConn.Close()
 		_ = fleetConn.Close()
 		return nil, err
@@ -286,7 +281,6 @@ func (f *Fleet) attachActor(actorID actor.ActorID) (*actorPipe, error) {
 	// KindHandshakeAck, and registers the actor as a port presence.
 	_, err = f.runtime.Attach(serverConn, noopEmit, resolve)
 	if err != nil {
-		cancel()
 		_ = serverConn.Close()
 		_ = fleetConn.Close()
 		return nil, fmt.Errorf("actorrt.Attach: %w", err)
@@ -295,7 +289,6 @@ func (f *Fleet) attachActor(actorID actor.ActorID) (*actorPipe, error) {
 	// Wait for the fleet-side handshake goroutine to complete.
 	res := <-hsDone
 	if res.err != nil {
-		cancel()
 		_ = serverConn.Close()
 		_ = fleetConn.Close()
 		return nil, res.err
@@ -304,7 +297,6 @@ func (f *Fleet) attachActor(actorID actor.ActorID) (*actorPipe, error) {
 	return &actorPipe{
 		actorID:   actorID,
 		fleetConn: fleetConn,
-		cancel:    cancel,
 	}, nil
 }
 
@@ -409,7 +401,6 @@ func (f *Fleet) handleDeath(state *computeState, fr computebus.Frame) {
 	dead := fr.Death.Actor
 	for i := range state.pipes {
 		if state.pipes[i].actorID == dead {
-			state.pipes[i].cancel()
 			_ = state.pipes[i].fleetConn.Close()
 			f.logger.Info("fleet.death", "actor", string(dead),
 				"compute", state.computeID)
@@ -427,7 +418,6 @@ func (f *Fleet) teardownCompute(state *computeState) {
 	}
 	state.teardownOnce.Do(func() {
 		for i := range state.pipes {
-			state.pipes[i].cancel()
 			_ = state.pipes[i].fleetConn.Close()
 		}
 	})

@@ -34,7 +34,6 @@ type Homelink struct {
 
 	onDispatch DispatchHandler
 	computeID  string
-	hostIDs    []actor.ActorID
 
 	// channelID is the channel the home assigned on attach (from AttachReply).
 	channelID string
@@ -42,25 +41,21 @@ type Homelink struct {
 	done chan struct{} // closed when readLoop exits
 }
 
-// Connect dials the home, sends AttachRequest, waits for AttachReply, and
-// starts the readLoop + heartbeatLoop. onDispatch receives inbound
-// DispatchFrames from the home.
-func Connect(ctx context.Context, serverURL, apiKey, computeID string, decls []computebus.AttachDeclaration, onDispatch DispatchHandler) (*Homelink, error) {
+// Dial dials the home, sends AttachRequest, and waits for AttachReply. It does
+// NOT start the readLoop or heartbeatLoop — no inbound frame is consumed until
+// Start installs the dispatch handler. Window-period frames sit safely in the
+// kernel socket buffer until Start drains them. Splitting dial from start closes
+// the dispatch race: the caller installs the host before any frame is handled.
+func Dial(ctx context.Context, serverURL, apiKey, computeID string, decls []computebus.AttachDeclaration) (*Homelink, error) {
 	ws, _, err := websocket.DefaultDialer.DialContext(ctx, serverURL, nil)
 	if err != nil {
 		return nil, err
 	}
-	hostIDs := make([]actor.ActorID, 0, len(decls))
-	for _, d := range decls {
-		hostIDs = append(hostIDs, d.ActorID)
-	}
 	h := &Homelink{
-		ws:         ws,
-		pending:    make(map[string]chan computebus.EmitAck),
-		onDispatch: onDispatch,
-		computeID:  computeID,
-		hostIDs:    hostIDs,
-		done:       make(chan struct{}),
+		ws:        ws,
+		pending:   make(map[string]chan computebus.EmitAck),
+		computeID: computeID,
+		done:      make(chan struct{}),
 	}
 
 	// Send AttachRequest.
@@ -92,10 +87,16 @@ func Connect(ctx context.Context, serverURL, apiKey, computeID string, decls []c
 		return nil, errors.New(reason)
 	}
 	h.channelID = string(reply.Reply.ChannelID)
+	return h, nil
+}
 
+// Start installs the dispatch handler and begins consuming inbound frames
+// (readLoop) and emitting keepalives (heartbeatLoop). Call exactly once after
+// Dial, with the host already constructed and all actors installed.
+func (h *Homelink) Start(onDispatch DispatchHandler) {
+	h.onDispatch = onDispatch
 	go h.readLoop()
 	go h.heartbeatLoop()
-	return h, nil
 }
 
 // ChannelID returns the channel assigned by the home on attach.
@@ -191,7 +192,6 @@ func (h *Homelink) heartbeatLoop() {
 			Type: computebus.FrameHeartbeat,
 			Beat: &computebus.Heartbeat{
 				ComputeID: h.computeID,
-				Present:   h.hostIDs,
 			},
 		}); err != nil {
 			return

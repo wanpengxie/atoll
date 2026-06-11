@@ -68,7 +68,7 @@ func (ts *testServer) close() {
 	ts.srv.Close()
 }
 
-// TestConnect_AttachHandshake proves Connect sends AttachRequest and processes
+// TestConnect_AttachHandshake proves Dial sends AttachRequest and processes
 // AttachReply.
 func TestConnect_AttachHandshake(t *testing.T) {
 	var gotReq computebus.AttachRequest
@@ -84,9 +84,9 @@ func TestConnect_AttachHandshake(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	hl, err := Connect(ctx, ts.wsURL(), "key-abc", "compute-1", decls, nil)
+	hl, err := Dial(ctx, ts.wsURL(), "key-abc", "compute-1", decls)
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatalf("Dial: %v", err)
 	}
 	defer func() { _ = hl.Close() }()
 
@@ -106,7 +106,7 @@ func TestConnect_AttachHandshake(t *testing.T) {
 	}
 }
 
-// TestConnect_AttachRejected proves Connect returns an error when the home
+// TestConnect_AttachRejected proves Dial returns an error when the home
 // rejects the attach.
 func TestConnect_AttachRejected(t *testing.T) {
 	ts := newTestServer(t, func(_ computebus.AttachRequest) computebus.AttachReply {
@@ -116,7 +116,7 @@ func TestConnect_AttachRejected(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	_, err := Connect(ctx, ts.wsURL(), "bad", "c1", nil, nil)
+	_, err := Dial(ctx, ts.wsURL(), "bad", "c1", nil)
 	if err == nil {
 		t.Fatal("expected error on rejected attach")
 	}
@@ -133,11 +133,12 @@ func TestEmit_EmitAckCorrelation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	hl, err := Connect(ctx, ts.wsURL(), "k", "c", nil, nil)
+	hl, err := Dial(ctx, ts.wsURL(), "k", "c", nil)
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatalf("Dial: %v", err)
 	}
 	defer func() { _ = hl.Close() }()
+	hl.Start(nil)
 
 	<-ts.done
 
@@ -190,13 +191,14 @@ func TestDispatchFrame_RoutesToHandler(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	hl, err := Connect(ctx, ts.wsURL(), "k", "c", nil, func(df computebus.DispatchFrame) {
-		dispatched <- df
-	})
+	hl, err := Dial(ctx, ts.wsURL(), "k", "c", nil)
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatalf("Dial: %v", err)
 	}
 	defer func() { _ = hl.Close() }()
+	hl.Start(func(df computebus.DispatchFrame) {
+		dispatched <- df
+	})
 
 	<-ts.done
 
@@ -234,9 +236,9 @@ func TestSendDeath(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	hl, err := Connect(ctx, ts.wsURL(), "k", "c", nil, nil)
+	hl, err := Dial(ctx, ts.wsURL(), "k", "c", nil)
 	if err != nil {
-		t.Fatalf("Connect: %v", err)
+		t.Fatalf("Dial: %v", err)
 	}
 	defer func() { _ = hl.Close() }()
 

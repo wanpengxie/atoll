@@ -37,12 +37,12 @@ type AttachReply struct {
 	Reason    string
 }
 
-// Heartbeat is a keepalive probe (not a fencing-lease). Missed heartbeats →
-// readLoop EOF → death (second source).
+// Heartbeat is a dumb keepalive frame (NAT/proxy liveness only — not a
+// fencing-lease). Carries no presence claim; the home判定不消费它。Death is
+// observed via readLoop EOF. (Step 3 retires this in favour of a home-judged
+// lease ping.)
 type Heartbeat struct {
 	ComputeID string
-	// Present lists the actor ids whose cells are live on this compute.
-	Present []actor.ActorID
 }
 
 // DispatchFrame carries one envelope DOWN from the home harness to a compute's
