@@ -8,7 +8,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/platform/host"
 	"github.com/wanpengxie/ActOS/platform/internal/link"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
@@ -110,6 +109,57 @@ func (b *blockingCell) Receive(ctx context.Context, env *message.Envelope) error
 	return nil
 }
 
+// --- daemon rig ---
+
+// daemonHost is the test-local daemon side: an actorrt.Runtime (the cells) plus
+// the per-actor downHandler the link installs so a dead cell closes its own
+// stream. It mirrors exactly what platform.RunCompute wires inline — cell
+// running is the kernel, the only daemon glue is the down watcher.
+type daemonHost struct {
+	rt   *actorrt.Runtime
+	del  actorrt.Deliverer
+	mu   sync.Mutex
+	down map[actor.ActorID]func(cause string)
+}
+
+func newDaemonHost() *daemonHost {
+	rt, del := actorrt.New(actorrt.Config{})
+	h := &daemonHost{rt: rt, del: del, down: map[actor.ActorID]func(cause string){}}
+	rt.WatchPresence(h)
+	return h
+}
+
+func (h *daemonHost) OnDown(_ context.Context, id actor.ActorID, cause error) {
+	h.mu.Lock()
+	handler := h.down[id]
+	h.mu.Unlock()
+	if handler != nil {
+		msg := ""
+		if cause != nil {
+			msg = cause.Error()
+		}
+		handler(msg)
+	}
+}
+
+func (h *daemonHost) Install(id actor.ActorID, impl actorrt.Actor, downHandler func(cause string)) {
+	h.mu.Lock()
+	h.down[id] = downHandler
+	h.mu.Unlock()
+	h.rt.Spawn(id, impl)
+}
+
+func (h *daemonHost) Dispatch(target actor.ActorID, env *message.Envelope) error {
+	_, err := h.del.Deliver([]actor.ActorID{target}, env)
+	return err
+}
+
+func (h *daemonHost) CancelRequest(target actor.ActorID, requestID message.ID) {
+	h.rt.CancelRequest(target, requestID)
+}
+
+func (h *daemonHost) Stop() { h.rt.StopAll() }
+
 // --- home rig ---
 
 type homeRig struct {
@@ -188,7 +238,7 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 		t.Fatalf("ChannelID = %q, want %q", d.ChannelID(), testChannelID)
 	}
 
-	h := host.New()
+	h := newDaemonHost()
 	defer h.Stop()
 
 	pen, _, err := d.OpenStream(toolID, func(env *message.Envelope) error {
@@ -253,7 +303,7 @@ func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
 	}
 	defer func() { _ = d.Close() }()
 
-	h := host.New()
+	h := newDaemonHost()
 	defer h.Stop()
 
 	pen, _, err := d.OpenStream(toolID, func(env *message.Envelope) error {
@@ -317,7 +367,7 @@ func TestEndToEnd_CellDeath_ClosesStreamToOnDown(t *testing.T) {
 	}
 	defer func() { _ = d.Close() }()
 
-	h := host.New()
+	h := newDaemonHost()
 	defer h.Stop()
 
 	pen, downHandler, err := d.OpenStream(toolID, func(env *message.Envelope) error {
@@ -361,7 +411,7 @@ func TestLease_NoTraffic_ExpiresToPresenceDown(t *testing.T) {
 	}
 	defer func() { _ = d.Close() }()
 
-	h := host.New()
+	h := newDaemonHost()
 	defer h.Stop()
 
 	pen, downHandler, err := d.OpenStream(toolID, func(env *message.Envelope) error {
@@ -413,7 +463,7 @@ func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 	}
 	defer func() { _ = d.Close() }()
 
-	h := host.New()
+	h := newDaemonHost()
 	defer h.Stop()
 
 	cell := &blockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}

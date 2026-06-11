@@ -1,23 +1,48 @@
 package platform
 
 // compute.go is the daemon (attached-compute) assembly root: link.Dial (connect
-// to the channel home) → host (business cells) → per-actor stream wiring → Start.
+// to the channel home) → actorrt.Runtime (business cells) → per-actor stream
+// wiring → Start.
 // Cloud daemon and user-proxy daemon are the same binary; cmd selects concrete
 // actors.
 
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/ActOS/platform/host"
 	"github.com/wanpengxie/ActOS/platform/internal/link"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
+
+// cellDownWatcher is the daemon's PresenceWatcher: when a hosted cell dies
+// abnormally, OnDown fires that actor's downHandler (close its stream UP the
+// link). The daemon holds no truth, so it cannot write receiver_unavailable
+// itself — the home port reads EOF and the home's closure author#3 closes
+// in-flight requests.
+type cellDownWatcher struct {
+	mu   sync.Mutex
+	down map[actor.ActorID]func(cause string)
+}
+
+// OnDown implements actorrt.PresenceWatcher.
+func (w *cellDownWatcher) OnDown(_ context.Context, id actor.ActorID, cause error) {
+	w.mu.Lock()
+	handler := w.down[id]
+	w.mu.Unlock()
+	if handler != nil {
+		msg := ""
+		if cause != nil {
+			msg = cause.Error()
+		}
+		handler(msg)
+	}
+}
 
 // ComputeConfig configures the attached compute. ServerWS carries any auth
 // credential in its query string (the ?key= the app layer resolves on WS
@@ -61,18 +86,23 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		decls = append(decls, link.Declaration{ActorID: a.ID, Kind: a.Kind, Binding: a.Binding})
 	}
 
-	// Dial first (WS + attach handshake, no actor streams yet), build the host,
-	// open one stream per actor + install its cell, then Start. Start launches the
-	// per-stream read loops only after every cell is installed, so no inbound
-	// dispatch can race a half-built host (deliver frames buffer until Start).
+	// Dial first (WS + attach handshake, no actor streams yet), build the runtime,
+	// open one stream per actor + spawn its cell, then Start. Start launches the
+	// per-stream read loops only after every cell is spawned, so no inbound
+	// dispatch can race a half-built runtime (deliver frames buffer until Start).
 	d, err := link.Dial(ctx, cfg.ServerWS, computeID, decls, logger)
 	if err != nil {
 		return err
 	}
 	defer func() { _ = d.Close() }()
 
-	h := host.New()
-	defer h.Stop()
+	// Cell running is the kernel: the daemon owns an actorrt.Runtime directly. The
+	// only daemon-specific glue is the down watcher (close a dead cell's stream UP
+	// the link); registered before any cell is spawned.
+	rt, del := actorrt.New(actorrt.Config{})
+	defer rt.StopAll()
+	watcher := &cellDownWatcher{down: map[actor.ActorID]func(cause string){}}
+	rt.WatchPresence(watcher)
 
 	for _, a := range actors {
 		// Open the actor's link stream first: the RemoteWriter (the cell's pen)
@@ -81,9 +111,10 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		// mailbox (the stream IS the target — no audience demux on the daemon).
 		target := a.ID
 		writer, downHandler, err := d.OpenStream(target, func(env *message.Envelope) error {
-			return h.Dispatch(target, env)
+			_, err := del.Deliver([]actor.ActorID{target}, env)
+			return err
 		}, func(requestID message.ID) {
-			h.CancelRequest(target, requestID)
+			rt.CancelRequest(target, requestID)
 		})
 		if err != nil {
 			return err
@@ -92,7 +123,10 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		if a.Factory != nil {
 			impl = a.Factory(writer)
 		}
-		h.Install(a.ID, impl, downHandler)
+		watcher.mu.Lock()
+		watcher.down[a.ID] = downHandler
+		watcher.mu.Unlock()
+		rt.Spawn(a.ID, impl)
 	}
 
 	d.Start()
