@@ -2,12 +2,11 @@ package agent_test
 
 // hosting_test pins the spec's dual-host acceptance: the SAME Bridge package
 // passes the SAME behavior assertions when hosted as an in-process cell on a
-// channel runtime (server shape) and when installed on a daemon host behind
-// an UplinkWriter (daemon shape). Any per-host special-casing fails here —
+// channel runtime (server shape, home harness pen) and as a daemon cell whose
+// pen emits UP an uplink (daemon shape). Both host through the SAME
+// actorrt.Runtime — host-dissolution made the hosting identical, so the only
+// axis is the pen. Any per-host special-casing in the Bridge fails here;
 // host-agnosticism is a CI assertion, not a slogan.
-//
-// platform/host is imported by this TEST ONLY (production actors/ never
-// imports platform; the test exercises host glue on purpose).
 
 import (
 	"context"
@@ -18,7 +17,6 @@ import (
 
 	"github.com/wanpengxie/ActOS/actors/agent"
 	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/platform/host"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
@@ -67,22 +65,26 @@ func (h *cellHost) deliver(t *testing.T, env *message.Envelope) {
 func (h *cellHost) emitted() []message.Envelope { return h.w.Written() }
 func (h *cellHost) stop()                       { h.rt.StopAll() }
 
-// --- daemon shape: host.Host with the cell's pen captured in-memory ---
+// --- daemon shape: actorrt cell whose pen is an uplink-style recorder ---
 //
-// In production the cell's pen is the link's ipc.RemoteWriter (emits flow UP the
-// actor's stream); the parity rigging substitutes an in-memory recording writer
-// so the SAME Bridge behaviour is asserted off the host's mailbox/emit path
-// without standing up a real link. What is pinned is host-agnosticism, not the
+// Post host-dissolution the daemon hosts cells through the SAME actorrt.Runtime
+// the server uses (RunCompute inlines it) — there is no separate host package.
+// The ONLY host difference is the cell's pen: in production a daemon cell emits
+// UP the link's ipc.RemoteWriter, whereas a server cell emits through the home
+// harness. The parity rigging substitutes an in-memory recorder for each so the
+// SAME Bridge behaviour is asserted off the mailbox/emit path without a real
+// link. What is pinned is host-agnosticism (same hosting, different pen), not the
 // wire transport.
 
 type daemonHost struct {
-	h  *host.Host
-	mu sync.Mutex
-	up []message.Envelope
+	rt  *actorrt.Runtime
+	del actorrt.Deliverer
+	mu  sync.Mutex
+	up  []message.Envelope
 }
 
 // daemonPen captures a daemon cell's emits in-memory (stands in for the link's
-// ipc.RemoteWriter).
+// ipc.RemoteWriter — the daemon cell emits UP, not through a home harness).
 type daemonPen struct{ dh *daemonHost }
 
 func (p *daemonPen) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
@@ -95,7 +97,8 @@ func (p *daemonPen) Write(_ context.Context, env *message.Envelope) (harness.Wri
 func newDaemonHost(t *testing.T) *daemonHost {
 	t.Helper()
 	dh := &daemonHost{}
-	dh.h = host.New()
+	rt, del := actorrt.New(actorrt.Config{})
+	dh.rt, dh.del = rt, del
 	pen := &daemonPen{dh: dh}
 	var b *agent.Bridge
 	bb, err := agent.NewBridge(testConfig(), testActorID, testChannelID, pen)
@@ -106,14 +109,14 @@ func newDaemonHost(t *testing.T) *daemonHost {
 	agent.SetAgentFactory(bb, func(agent.AgentConfig) (agent.Agent, error) {
 		return scriptTextTurn(&b, "parity reply"), nil
 	})
-	dh.h.Install(testActorID, bb, nil)
+	rt.Spawn(testActorID, bb)
 	return dh
 }
 
 func (h *daemonHost) deliver(t *testing.T, env *message.Envelope) {
 	t.Helper()
-	if err := h.h.Dispatch(testActorID, env); err != nil {
-		t.Fatalf("daemon dispatch: %v", err)
+	if _, err := h.del.Deliver([]actor.ActorID{testActorID}, env); err != nil {
+		t.Fatalf("daemon deliver: %v", err)
 	}
 }
 
@@ -125,7 +128,7 @@ func (h *daemonHost) emitted() []message.Envelope {
 	return out
 }
 
-func (h *daemonHost) stop() { h.h.Stop() }
+func (h *daemonHost) stop() { h.rt.StopAll() }
 
 // waitEmitted polls a host until n envelopes appeared.
 func waitEmitted(t *testing.T, h agentHost, n int, timeout time.Duration) []message.Envelope {

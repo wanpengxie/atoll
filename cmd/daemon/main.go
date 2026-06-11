@@ -160,9 +160,19 @@ func main() {
 		},
 	})
 
+	// The link layer is auth-agnostic: the api key rides the server WS url's
+	// query string (?key=), which the app layer resolves on WS upgrade. There is
+	// no separate credential field on ComputeConfig.
+	serverWS := *ws
+	if *key != "" {
+		sep := "?"
+		if strings.Contains(serverWS, "?") {
+			sep = "&"
+		}
+		serverWS += sep + "key=" + url.QueryEscape(*key)
+	}
 	if err := platform.RunCompute(ctx, platform.ComputeConfig{
-		ServerWS: *ws,
-		APIKey:   *key,
+		ServerWS: serverWS,
 	}, decls); err != nil {
 		log.Fatalf("daemon: %v", err)
 	}

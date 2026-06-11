@@ -64,7 +64,7 @@ func (a *App) handleWS(c *gin.Context) {
 	}
 
 	// Subscribe to the commit Signal (tap fan-out).
-	notify, cancel := home.Taps().Subscribe()
+	notify, cancel := home.Subscribe()
 	defer cancel()
 
 	cursor := sub.SinceSeq
@@ -147,5 +147,5 @@ func (a *App) handleCompute(c *gin.Context) {
 	}
 
 	// Delegate to the link acceptor with the pre-authenticated daemonID.
-	home.Links().Serve(c.Writer, c.Request, daemonID)
+	home.ServeAttach(c.Writer, c.Request, daemonID)
 }
