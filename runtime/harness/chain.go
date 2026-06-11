@@ -31,6 +31,13 @@ type Chain struct {
 
 // New assembles a Chain from Deps. Returns an error when Deps is
 // incomplete or any step refuses to construct.
+//
+// Construction-confined to platform: a Chain built outside the platform
+// assembly has no commit signal (store OnCommit), closure reconciler, or
+// presence-watcher wiring — a half-wired write门. New/Deps/Chain may therefore
+// only be referenced by the platform tree (enforced by
+// archtest.TestHarnessConstructionConfinedToPlatform); downstream speaks the
+// harness.Writer / WriteResult seam, never builds the chain itself.
 func New(deps Deps) (*Chain, error) {
 	if err := deps.Validate(); err != nil {
 		return nil, err

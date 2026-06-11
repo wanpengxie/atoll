@@ -42,9 +42,13 @@ type OpenChannelOptions struct {
 
 // OpenChannel opens the per-channel sqlite at dbPath and returns the segregated
 // storespec interfaces. This is the public facade over runtime/internal/store
-// (which confines the raw *sql.DB). Packages outside runtime/ use this entry
-// point to obtain channel stores. channelID is the channel scope the membership
-// control plane binds to (its mirror events carry this id, never a per-call arg).
+// (which confines the raw *sql.DB). It is the channel-store ASSEMBLY surface —
+// the returned ChannelStores.Log/Membership are raw write capabilities that
+// bypass the harness gate, so assembly is confined to platform: only the
+// platform tree may import this package (enforced by
+// archtest.TestRuntimeAssemblyConfinedToPlatform). channelID is the channel
+// scope the membership control plane binds to (its mirror events carry this id,
+// never a per-call arg).
 func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts OpenChannelOptions) (*ChannelStores, error) {
 	cs, err := store.OpenChannel(ctx, channelID, dbPath, store.OpenOptions{
 		ReadOnly: opts.ReadOnly,
