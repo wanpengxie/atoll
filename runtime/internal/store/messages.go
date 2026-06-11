@@ -181,7 +181,7 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		return storespec.AppendResult{}, classifyAppendErr(err, string(env.ID))
 	}
 	seq, _ := res.LastInsertId()
-	return storespec.AppendResult{Seq: storespec.Seq(seq)}, nil
+	return storespec.AppendResult{Seq: seq}, nil
 }
 
 // MaxSeq returns the highest committed seq in this channel's message log

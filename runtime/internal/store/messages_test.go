@@ -19,7 +19,7 @@ func TestAppend_AllocatesMonotonicSeq(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	var last storespec.Seq
+	var last int64
 	for i, id := range []string{"m1", "m2", "m3"} {
 		res, err := cs.Log.Append(ctx, newEnv(id, message.KindEvent, message.Audience{"bob"}), false)
 		if err != nil {
@@ -338,7 +338,7 @@ func TestMaxSeq(t *testing.T) {
 	if got, err := cs.Query.MaxSeq(ctx); err != nil || got != 0 {
 		t.Fatalf("empty MaxSeq=%d err=%v want 0", got, err)
 	}
-	var lastSeq storespec.Seq
+	var lastSeq int64
 	for _, id := range []string{"a", "b", "c"} {
 		res, err := cs.Log.Append(ctx, newEnv(id, message.KindEvent, message.Audience{"x"}), false)
 		if err != nil {
@@ -364,7 +364,7 @@ func TestReadAfterSeq_ForwardOrderedTail(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	var seqs []storespec.Seq
+	var seqs []int64
 	for _, id := range []string{"a", "b", "c", "d"} {
 		res, err := cs.Log.Append(ctx, newEnv(id, message.KindEvent, message.Audience{"x"}), false)
 		if err != nil {

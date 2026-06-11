@@ -7,10 +7,6 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
-// Seq is the messages.seq column — store-allocated monotonic per-channel
-// sequence (L2 §1.4.1 PRIMARY KEY AUTOINCREMENT).
-type Seq int64
-
 // StoredRow wraps a protocol Envelope with the store-derived columns kernel
 // deliberately keeps OUT of the pure Envelope (they are store-derived, not
 // protocol fields — kernel-construction-spec §1.2). Read paths return
@@ -30,7 +26,7 @@ type StoredRow struct {
 // in the result would be a dead output mirroring the caller's own input.)
 type AppendResult struct {
 	// Seq is the store-allocated monotonic position (messages.seq).
-	Seq Seq
+	Seq int64
 }
 
 // AppendError is the typed error returned for protocol-level rejects inside
