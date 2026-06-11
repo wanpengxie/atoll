@@ -12,7 +12,7 @@ import (
 // Type Set. Only the channel system actor may emit these envelope.type
 // values; any other sender is rejected per §2.5.
 //
-// Keys reference kernel/actor constants (the frozen closed set, §1.4) rather
+// Keys reference protocol/actor constants (the frozen closed set, §1.4) rather
 // than bare literals so a kernel rename can never silently diverge here.
 var reservedBootstrapTypeSet = map[string]struct{}{
 	actor.ReservedSystemChannelCreated:    {},

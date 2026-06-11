@@ -13,7 +13,9 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// Chain is the concrete runtime implementation of kernel/harness.Chain.
+// Chain is the write engine's concrete step pipeline (it has no separate
+// contract interface — the former pure-contract harness package was deleted;
+// the engine's own seams live here in runtime/harness).
 // It assembles the 9 numbered steps declared in proto-layer1 §2.0
 // (Step 0 entry gate + Step 1-9 main pipeline) and runs them in stable
 // ascending-ID order, short-circuiting on the first reject (or on the

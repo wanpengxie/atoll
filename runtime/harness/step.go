@@ -9,9 +9,10 @@ import (
 // stepID is the ordinal index inside the harness chain (proto-layer1 §2.0).
 // Lower ids run first. The chain runner executes steps strictly ascending.
 //
-// (Relocated from the deleted kernel/harness — these are the write ENGINE's
-// own contracts, runtime-construction-spec §1.4. Step numbers are impl-shaped
-// execution order, not protocol ADT.)
+// (The former pure-contract harness package was deleted; these are the write
+// ENGINE's own contracts, living with their consumer in runtime/harness —
+// runtime-construction-spec §1.4. Step numbers are impl-shaped execution order,
+// not protocol ADT.)
 type stepID int
 
 // Step 2 (StepDedupe) was retired with the v1 message-dedupe machinery;

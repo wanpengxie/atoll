@@ -13,7 +13,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// messages implements kernel/storespec.MessageLog over the messages table.
+// messages implements runtime/storespec.MessageLog over the messages table.
 //
 // Per L2 §1.4.5 engine-append ACL, messages is a PURE PERSISTENCE SINK:
 // every caller MUST run the L1 §10.2 9-step Message-Write Harness chain

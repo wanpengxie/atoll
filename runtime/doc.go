@@ -17,6 +17,6 @@
 //
 // Boundary rules (enforced by .go-arch-lint.yml at repo root):
 //
-//   - runtime/* MAY import kernel/* and runtime/* (self).
-//   - kernel/* MUST NOT import runtime/*.
+//   - runtime/* MAY import protocol/* and runtime/* (self).
+//   - protocol/* MUST NOT import runtime/*.
 package runtime

@@ -9,7 +9,7 @@
 //   - Visibility enum           — L0 §2.4
 //   - Terminal-failure reason   — proto-layer0 §2.6 (INVARIANT-10)
 //
-// The package depends on kernel/actor for L0 sender identity primitives.
+// The package depends on protocol/actor for L0 sender identity primitives.
 // Pure proto: no context, no storage, no engine interfaces. Harness reject
 // reasons + install reasons are the write/install ENGINES' errno vocabulary
 // and live with those engines outside this package; reason→HTTP mapping is

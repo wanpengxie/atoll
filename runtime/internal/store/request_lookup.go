@@ -8,7 +8,7 @@ import (
 )
 
 // requestLookupStore is the sqlite-backed implementation of
-// kernel/storespec.RequestLookup over a channel's messages table. It is a
+// runtime/storespec.RequestLookup over a channel's messages table. It is a
 // thin wrapper around store.messages.FindByID that adapts the value-typed
 // Envelope return to the pointer-typed contract callers expect (so they can
 // mutate the envelope when constructing response patches).
@@ -26,7 +26,7 @@ func newRequestLookup(messages *messages) *requestLookupStore {
 	return &requestLookupStore{messages: messages}
 }
 
-// FindByID satisfies kernel/storespec.RequestLookup. Returns nil envelope
+// FindByID satisfies runtime/storespec.RequestLookup. Returns nil envelope
 // + ok=false when the row is missing.
 func (r *requestLookupStore) FindByID(ctx context.Context, id message.ID) (*message.Envelope, bool, error) {
 	env, ok, err := r.messages.FindByID(ctx, id)

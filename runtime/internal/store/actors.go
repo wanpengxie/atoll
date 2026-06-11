@@ -13,7 +13,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// actorRegistry implements kernel/storespec.Registry over a channel-local
+// actorRegistry implements runtime/storespec.Registry over a channel-local
 // sqlite. Each *actorRegistry is bound to one channel database.
 type actorRegistry struct {
 	db *sql.DB
