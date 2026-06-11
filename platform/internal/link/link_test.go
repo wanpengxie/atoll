@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/platform/host"
-	"github.com/wanpengxie/ActOS/platform/link"
+	"github.com/wanpengxie/ActOS/platform/internal/link"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"

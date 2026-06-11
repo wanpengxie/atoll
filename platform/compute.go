@@ -12,7 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/ActOS/platform/host"
-	"github.com/wanpengxie/ActOS/platform/link"
+	"github.com/wanpengxie/ActOS/platform/internal/link"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"

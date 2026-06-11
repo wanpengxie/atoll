@@ -8,8 +8,8 @@ import (
 
 	"github.com/wanpengxie/ActOS/lib/channelkit"
 	"github.com/wanpengxie/ActOS/lib/sysactor"
-	"github.com/wanpengxie/ActOS/platform/link"
-	"github.com/wanpengxie/ActOS/platform/tap"
+	"github.com/wanpengxie/ActOS/platform/internal/link"
+	"github.com/wanpengxie/ActOS/platform/internal/tap"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	channelpkg "github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/runtime"
