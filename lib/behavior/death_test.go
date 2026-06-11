@@ -13,8 +13,10 @@ import (
 
 // queryStub satisfies storespec.MessageQuery for tests.
 type queryStub struct {
-	rows []storespec.StoredRow
-	err  error
+	rows      []storespec.StoredRow
+	err       error
+	receivers []actor.ActorID
+	recvErr   error
 }
 
 func (q *queryStub) MaxSeq(context.Context) (int64, error) { return 0, nil }
@@ -23,6 +25,9 @@ func (q *queryStub) ReadAfterSeq(context.Context, int64, int) ([]storespec.Store
 }
 func (q *queryStub) OpenRequestsForActor(_ context.Context, _ actor.ActorID) ([]storespec.StoredRow, error) {
 	return q.rows, q.err
+}
+func (q *queryStub) DistinctOpenRequestReceivers(context.Context) ([]actor.ActorID, error) {
+	return q.receivers, q.recvErr
 }
 
 func envsToRows(envs []*message.Envelope) []storespec.StoredRow {

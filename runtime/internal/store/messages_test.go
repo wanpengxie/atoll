@@ -435,3 +435,54 @@ func TestOpenRequestsForActor_ProvisionalDoesNotClose(t *testing.T) {
 		t.Fatalf("request still open after provisional response; rows=%v", rows)
 	}
 }
+
+// DistinctOpenRequestReceivers is the closure reconciler's truth-derived scan:
+// the DISTINCT first-audience receivers that still hold an open request. Same
+// open-set predicate as OpenRequestsForActor (open = kind=request, no terminal
+// response), grouped to receiver and de-duplicated.
+func TestDistinctOpenRequestReceivers(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+
+	mkReq := func(id string, audience message.Audience) {
+		t.Helper()
+		env := newEnv(id, message.KindRequest, audience,
+			withSender(actor.KindAgent, "planner"), withType("xhs.publish"))
+		if _, err := cs.Log.Append(ctx, env, false); err != nil {
+			t.Fatalf("Append request %s: %v", id, err)
+		}
+	}
+	mkTerminalResponse := func(id, parent string, audience message.Audience) {
+		t.Helper()
+		env := newEnv(id, message.KindResponse, audience,
+			withSender(actor.KindTool, "tool:xhs"), withParent(message.ID(parent)), withType("agent.text"))
+		if _, err := cs.Log.Append(ctx, env, true); err != nil {
+			t.Fatalf("Append response %s: %v", id, err)
+		}
+	}
+
+	// alpha: two open requests → counted ONCE (distinct).
+	mkReq("a1", message.Audience{"alpha"})
+	mkReq("a2", message.Audience{"alpha"})
+	// beta: one open request.
+	mkReq("b1", message.Audience{"beta"})
+	// gamma: only a CLOSED request (terminal response) → NOT a receiver of an
+	// open request, excluded.
+	mkReq("g1", message.Audience{"gamma"})
+	mkTerminalResponse("g1-final", "g1", message.Audience{"planner"})
+
+	recvs, err := cs.Query.DistinctOpenRequestReceivers(ctx)
+	if err != nil {
+		t.Fatalf("DistinctOpenRequestReceivers: %v", err)
+	}
+	got := map[actor.ActorID]bool{}
+	for _, id := range recvs {
+		got[id] = true
+	}
+	if len(got) != 2 || !got["alpha"] || !got["beta"] {
+		t.Fatalf("distinct receivers=%v, want exactly {alpha, beta}", recvs)
+	}
+	if got["gamma"] {
+		t.Fatalf("gamma has only a CLOSED request and must be excluded; got %v", recvs)
+	}
+}

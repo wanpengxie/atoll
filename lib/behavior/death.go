@@ -52,3 +52,59 @@ func MaterialiseReceiverUnavailable(
 	}
 	return nil
 }
+
+// PresenceProbe answers the substrate's authoritative "is a live instance for id
+// hosted right now" question — the `kill -0` / is_process_alive authority only
+// the substrate can answer. The reconciler uses it to decide which open-request
+// receivers are absent. present=false means closure is owed.
+type PresenceProbe interface {
+	Present(id actor.ActorID) bool
+}
+
+// ReconcileReceiverUnavailable is the closure RECONCILER (the level-triggered
+// companion to the death edge). Closure is not edge-only: a death edge can be
+// lost (clean despawn, ctx-cancel, a home restart that predates the open
+// request), and an open request whose receiver is absent must STILL be closed.
+// So closure is a level scan over truth: enumerate every receiver that holds an
+// open request, and for each one the substrate reports ABSENT, drain it via
+// MaterialiseReceiverUnavailable. It is the same author#3 terminal, reached by a
+// scan instead of an edge.
+//
+// Idempotent by construction: receiver_unavailable is a final terminal, so a
+// re-scan re-writing one collides with the ux_terminal_response_per_request
+// UNIQUE index and is rejected; a receiver that has since answered (completed
+// landed first) likewise collides. So this scan is safe to run any time, any
+// number of times — startup, a low-frequency ticker, or a lossy-edge wakeup.
+//
+// receivers() is the truth-derived set of distinct open-request receivers (a
+// derived view over the log, not membership). present probes substrate presence.
+// onFault receives both a drain-query failure (the loudest — that receiver's
+// callers are all black holes) and any per-request write fault.
+func ReconcileReceiverUnavailable(
+	ctx context.Context,
+	writer harness.Writer,
+	query storespec.MessageQuery,
+	present PresenceProbe,
+	clock func() time.Time,
+	sender message.Sender,
+	onFault func(reqID message.ID, err error),
+) error {
+	receivers, err := query.DistinctOpenRequestReceivers(ctx)
+	if err != nil {
+		return err
+	}
+	for _, id := range receivers {
+		if present.Present(id) {
+			continue // receiver is live — no closure owed, it can still answer.
+		}
+		if derr := MaterialiseReceiverUnavailable(ctx, writer, query, clock, sender, id, onFault); derr != nil {
+			// Per-receiver drain-query failure: surface it (every one of this
+			// receiver's callers is a black hole) and continue — one bad receiver
+			// must not strand the rest of the scan.
+			if onFault != nil {
+				onFault(message.ID(id), derr)
+			}
+		}
+	}
+	return nil
+}

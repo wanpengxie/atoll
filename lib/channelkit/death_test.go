@@ -59,12 +59,18 @@ func (f *fakeWriter) Write(_ context.Context, env *message.Envelope) (harness.Wr
 func (f *fakeWriter) count() int { f.mu.Lock(); defer f.mu.Unlock(); return len(f.written) }
 
 // fakeQuery satisfies storespec.MessageQuery for tests.
-type fakeQuery struct{ reqs []storespec.StoredRow }
+type fakeQuery struct {
+	reqs      []storespec.StoredRow
+	receivers []actor.ActorID
+}
 
 func (f fakeQuery) MaxSeq(context.Context) (int64, error)                              { return 0, nil }
 func (f fakeQuery) ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error) { return nil, nil }
 func (f fakeQuery) OpenRequestsForActor(context.Context, actor.ActorID) ([]storespec.StoredRow, error) {
 	return f.reqs, nil
+}
+func (f fakeQuery) DistinctOpenRequestReceivers(context.Context) ([]actor.ActorID, error) {
+	return f.receivers, nil
 }
 
 // TestOnDown_MaterialisesReceiverUnavailable proves closure author #3 is WIRED:
@@ -119,6 +125,60 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 	}
 }
 
+// TestReconcile_Despawn_ClosesWithoutCaller proves the closure reconciler (the
+// level scan) closes a CLEAN-despawned actor's inbound open request WITHOUT the
+// caller doing anything (F5: Despawn carries no "callers MUST collapse before"
+// obligation). A clean despawn fires NO death edge — only the level scan, which
+// finds the open request's receiver absent from presence and materialises
+// receiver_unavailable.
+func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
+	req := message.Envelope{
+		ID:        "req-1",
+		ChannelID: "ch",
+		Kind:      message.KindRequest,
+		Type:      "x.do",
+		Sender:    message.Sender{Kind: actor.KindAgent, ID: "caller"},
+		Audience:  message.Audience{"worker"},
+	}
+	fc := &fakeWriter{}
+	ch := channelkit.New(channelkit.Config{
+		ChannelID: "ch",
+		Writer:    fc,
+		OpenRequests: fakeQuery{
+			reqs:      []storespec.StoredRow{{Envelope: req}},
+			receivers: []actor.ActorID{"worker"}, // the open request's receiver
+		},
+		Clock: time.Now,
+	})
+	// Place the worker, then CLEAN despawn it (no panic → no death edge fires).
+	ch.Cells().Spawn("worker", liveActor{})
+
+	// While present, a sweep must NOT close it (the live receiver can answer).
+	ch.Reconcile(context.Background())
+	if fc.count() != 0 {
+		t.Fatal("reconciler closed a request whose receiver is still PRESENT")
+	}
+
+	// Clean despawn — no edge. The caller does NOTHING to collapse the request.
+	ch.Cells().Despawn("worker")
+	if _, ok := ch.Cells().Stat("worker"); ok {
+		t.Fatal("worker still present after Despawn")
+	}
+
+	// The level scan alone closes the orphan.
+	ch.Reconcile(context.Background())
+	if fc.count() != 1 {
+		t.Fatalf("despawn reconciler did not close the inbound open request (count=%d)", fc.count())
+	}
+	term := fc.written[0]
+	if term.ParentID != "req-1" || term.Sender.ID != actor.SystemActorID {
+		t.Fatalf("closure terminal = parent %s sender %s, want req-1 / system", term.ParentID, term.Sender.ID)
+	}
+	if !contains(string(term.Payload), "receiver_unavailable") {
+		t.Fatalf("terminal payload=%s, want receiver_unavailable", term.Payload)
+	}
+}
+
 // errOpenReqs fails the drain query — the worst closure case (no request can be
 // closed → every caller is a black hole). The watcher MUST NOT swallow it.
 type errQuery struct{}
@@ -126,6 +186,9 @@ type errQuery struct{}
 func (errQuery) MaxSeq(context.Context) (int64, error)                              { return 0, nil }
 func (errQuery) ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error) { return nil, nil }
 func (errQuery) OpenRequestsForActor(context.Context, actor.ActorID) ([]storespec.StoredRow, error) {
+	return nil, errors.New("store down")
+}
+func (errQuery) DistinctOpenRequestReceivers(context.Context) ([]actor.ActorID, error) {
 	return nil, errors.New("store down")
 }
 

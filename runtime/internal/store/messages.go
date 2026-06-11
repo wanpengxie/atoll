@@ -232,6 +232,43 @@ func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 	return out, nil
 }
 
+// DistinctOpenRequestReceivers returns the DISTINCT first-audience receivers of
+// every still-open request — the truth-derived view the closure reconciler
+// scans. Same open-set predicate as OpenRequestsForActor (kind=request,
+// is_terminal=0, no terminal response yet), grouped to its receiver. Unbounded
+// by construction (the reconciler must consider every receiver with an orphan
+// candidate; a cap would silently leave some receivers' callers hanging).
+func (m *messages) DistinctOpenRequestReceivers(ctx context.Context) ([]actor.ActorID, error) {
+	const q = `SELECT DISTINCT json_extract(m.audience, '$[0]') AS receiver
+	             FROM messages m
+	            WHERE m.kind = 'request'
+	              AND m.is_terminal = 0
+	              AND receiver IS NOT NULL
+	              AND NOT EXISTS (
+	                SELECT 1 FROM messages r
+	                 WHERE r.parent_id = m.id
+	                   AND r.kind = 'response'
+	                   AND r.is_terminal = 1
+	              )`
+	rows, err := m.db.QueryContext(ctx, q)
+	if err != nil {
+		return nil, fmt.Errorf("store: distinct open request receivers: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var out []actor.ActorID
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			return nil, fmt.Errorf("store: distinct open request receivers scan: %w", err)
+		}
+		out = append(out, actor.ActorID(id))
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("store: distinct open request receivers rows: %w", err)
+	}
+	return out, nil
+}
+
 // HasFinalResponse implements storespec.MessageLog. Returns true when at
 // least one kind=response row exists for parent_id=parentID with the
 // row's is_terminal column set — store layer has already materialised

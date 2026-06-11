@@ -318,9 +318,12 @@ func (r *Runtime) removeIf(id actor.ActorID, self presence) {
 }
 
 // Despawn stops and removes the current presence for id (no-op if absent). This
-// is the external deregister path; callers MUST ensure in-flight requests
-// addressed to id are collapsed (substrate writes receiver_unavailable) before
-// despawn.
+// is the external deregister path. It carries NO caller obligation to collapse
+// in-flight requests first: after despawn the id is absent from presence, and
+// the closure reconciler (a level scan over open-request × receiver-absent)
+// closes every orphan in-flight request with receiver_unavailable. The death
+// edge would only fire on abnormal exit; closure is geometry (the level scan),
+// not a despawn-caller convention.
 func (r *Runtime) Despawn(id actor.ActorID) {
 	r.mu.Lock()
 	p, ok := r.presences[id]

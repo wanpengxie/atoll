@@ -147,3 +147,47 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 			"channel", c.channelID, "dead_actor", id, "err", err)
 	}
 }
+
+// presenceProbe adapts the channel's runtime presence map to the behaviour
+// reconciler's PresenceProbe seam: present = a live instance hosted right now
+// (Stat's is_process_alive authority). Absent = closure owed.
+type presenceProbe struct{ rt *actorrt.Runtime }
+
+func (p presenceProbe) Present(id actor.ActorID) bool {
+	_, ok := p.rt.Stat(id)
+	return ok
+}
+
+// Reconcile runs the closure level scan (author #3 reconciler): for every
+// receiver that still holds an open request and is currently ABSENT from the
+// substrate presence map, materialise receiver_unavailable. This is the
+// level-triggered correctness backstop the death edge alone cannot give — a lost
+// edge (clean despawn, ctx-cancel, an open request predating a home restart)
+// leaves an orphan that only a scan can close. Idempotent: re-writing a terminal
+// collides with the per-request UNIQUE index, so repeated scans produce no
+// duplicate closure. The composition root drives it at startup and on a
+// low-frequency ticker; the death edge (OnDown) remains the lossy fast-path that
+// closes the common case immediately without waiting for the next scan.
+//
+// nil writer/openReqs → no closure capability injected → no-op (mirrors OnDown).
+func (c *Channel) Reconcile(ctx context.Context) {
+	if c.writer == nil || c.openReqs == nil {
+		return
+	}
+	ctx = harness.CtxWithCaller(ctx, harness.CallerContext{
+		ActorID:   actor.SystemActorID,
+		ChannelID: c.channelID,
+	})
+	onFault := func(reqID message.ID, err error) {
+		c.logger.Error("channelkit.closure.reconcile_fault",
+			"channel", c.channelID, "request", reqID, "err", err)
+	}
+	if err := behavior.ReconcileReceiverUnavailable(ctx,
+		c.writer, c.openReqs, presenceProbe{rt: c.cells},
+		c.clock, sysSender, onFault); err != nil {
+		// The distinct-receivers scan failed → no orphan can be enumerated →
+		// every absent receiver's callers stay black holes until the next scan.
+		c.logger.Error("channelkit.closure.reconcile_scan_failed",
+			"channel", c.channelID, "err", err)
+	}
+}

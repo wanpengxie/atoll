@@ -100,6 +100,17 @@ type MessageQuery interface {
 	// drain every one of them, so this is unbounded by construction — a limit
 	// would silently leave the overflow callers hanging (no closure).
 	OpenRequestsForActor(ctx context.Context, actorID actor.ActorID) ([]StoredRow, error)
+
+	// DistinctOpenRequestReceivers returns the set of receivers (first-audience
+	// member) that still have at least one open request. It is the truth-derived
+	// view the closure RECONCILER scans: closure is a level-triggered reconciler
+	// (orphan open-request × receiver-absent → receiver_unavailable), and the
+	// authoritative "who has an open request" question is answered by the message
+	// log, not by membership (a member with no open request needs no closure; an
+	// open request is the only thing that demands one). The reconciler intersects
+	// this set with substrate presence to find absent receivers, then drains each
+	// via OpenRequestsForActor. Unbounded by construction (same closure law).
+	DistinctOpenRequestReceivers(ctx context.Context) ([]actor.ActorID, error)
 }
 
 // RequestLookup recovers an original request envelope by id (L2 §8 F5).

@@ -24,6 +24,10 @@ type HomeConfig struct {
 	ChannelID channelpkg.ID
 	DBPath    string
 	Logger    *slog.Logger
+	// ReconcileInterval tunes the closure reconciler's level safety-net sweep
+	// period (the backstop for lost death edges). <=0 → the default. The death
+	// edge closes the common case immediately; this sweep is a rare backstop.
+	ReconcileInterval time.Duration
 }
 
 // Home is the assembled channel-home. Its public surface is the capability set in
@@ -39,7 +43,17 @@ type Home struct {
 	links     *link.Acceptor
 	logger    *slog.Logger
 	nowMs     func() int64
+
+	// reconcileStop tears down the closure reconciler ticker (level backstop).
+	reconcileStop context.CancelFunc
+	reconcileDone chan struct{}
 }
+
+// reconcileInterval is the closure reconciler's low-frequency safety-net sweep
+// period. The death edge closes the common case immediately; this level sweep
+// catches lost edges (clean despawn / ctx-cancel / open requests predating a
+// restart). It is a backstop, not the primary path, so it runs rarely.
+const reconcileInterval = 30 * time.Second
 
 // Open assembles the channel home. Assembly is linearised by the tap seam (no
 // construction cycle, no back-fill):
@@ -138,17 +152,45 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Logger:     logger,
 	})
 
+	// 9. Closure reconciler (level backstop). Run one sweep at startup — this is
+	//    the home-restart recovery path (#5): an open request whose receiver is
+	//    absent because its presence predates this process gets closed now, not
+	//    held forever. Then a low-frequency ticker keeps it as a safety net for
+	//    any lost death edge. The death edge (OnDown) remains the lossy fast-path.
+	channel.Reconcile(ctx)
+	sweepEvery := cfg.ReconcileInterval
+	if sweepEvery <= 0 {
+		sweepEvery = reconcileInterval
+	}
+	reconcileCtx, reconcileStop := context.WithCancel(context.Background())
+	reconcileDone := make(chan struct{})
+	go func() {
+		defer close(reconcileDone)
+		t := time.NewTicker(sweepEvery)
+		defer t.Stop()
+		for {
+			select {
+			case <-reconcileCtx.Done():
+				return
+			case <-t.C:
+				channel.Reconcile(reconcileCtx)
+			}
+		}
+	}()
+
 	logger.Info("platform.home.ready", "channel", string(cfg.ChannelID))
 	return &Home{
-		channelID: cfg.ChannelID,
-		writer:    writer,
-		channel:   channel,
-		cs:        cs,
-		signal:    signal,
-		delivery:  delivery,
-		links:     links,
-		logger:    logger,
-		nowMs:     nowMs,
+		channelID:     cfg.ChannelID,
+		writer:        writer,
+		channel:       channel,
+		cs:            cs,
+		signal:        signal,
+		delivery:      delivery,
+		links:         links,
+		logger:        logger,
+		nowMs:         nowMs,
+		reconcileStop: reconcileStop,
+		reconcileDone: reconcileDone,
 	}, nil
 }
 
@@ -205,6 +247,12 @@ func (h *Home) Taps() *tap.Signal { return h.signal }
 // Close tears down the channel home in order: link acceptor (WS connections +
 // per-actor streams) -> delivery tap -> cells -> channel stores (DB).
 func (h *Home) Close() error {
+	// 0. Reconciler ticker first: stop the level sweep and join it, so no
+	//    Reconcile runs against the writer/runtime/stores being torn down below.
+	if h.reconcileStop != nil {
+		h.reconcileStop()
+		<-h.reconcileDone
+	}
 	// 1. Link acceptor first: close all WS links, tear down every actor stream,
 	//    wait for Serve goroutines. Stops external compute traffic before the
 	//    runtime/stores underneath shut down.
