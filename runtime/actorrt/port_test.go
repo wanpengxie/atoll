@@ -69,7 +69,9 @@ func staticResolve(id actor.ActorID) ResolveFunc {
 	return func(string) (actor.ActorID, error) { return id, nil }
 }
 
-func nopEmit(context.Context, *message.Envelope) error { return nil }
+func nopEmit(context.Context, *message.Envelope) (ipc.EmitResult, error) {
+	return ipc.EmitResult{}, nil
+}
 
 // TestPortHandshakeBindsResolvedID: Attach resolves the presented lease to an
 // ActorID, sends the ack, and registers the presence under that id (A1 — the
@@ -219,16 +221,17 @@ func TestPortDeliverRejectsNilEnvelope(t *testing.T) {
 
 // TestPortEmitRelayed: an EMIT frame the remote writes is relayed verbatim to
 // the injected EmitSink (the port is the upward seam from out-of-process actor
-// into the channel log).
+// into the channel log), and the sink's verdict is acked back to the remote as
+// a KindEmitAck — the writer contract is not downgraded across the wire.
 func TestPortEmitRelayed(t *testing.T) {
 	t.Parallel()
 	rt, _, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
 	got := make(chan *message.Envelope, 1)
-	emit := func(_ context.Context, e *message.Envelope) error {
+	emit := func(_ context.Context, e *message.Envelope) (ipc.EmitResult, error) {
 		got <- e
-		return nil
+		return ipc.EmitResult{MessageID: "m-up-1", RejectReason: "harness_kind_invalid"}, nil
 	}
 	_, remote := dialPort(t, rt, "l", emit, staticResolve("remote-1"))
 	defer remote.conn.Close()
@@ -244,6 +247,22 @@ func TestPortEmitRelayed(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("EmitSink never received the remote emit")
+	}
+	// The host acks the emit back in receipt order (FIFO, no id): the remote
+	// must see the sink's authoritative verdict on the same connection.
+	ack, err := remote.codec.Read()
+	if err != nil {
+		t.Fatalf("remote read ack: %v", err)
+	}
+	if ack.Kind != ipc.KindEmitAck {
+		t.Fatalf("ack kind = %q, want emit_ack", ack.Kind)
+	}
+	var ap ipc.EmitAckPayload
+	if err := json.Unmarshal(ack.Payload, &ap); err != nil {
+		t.Fatalf("ack decode: %v", err)
+	}
+	if ap.MessageID != message.ID("m-up-1") || ap.RejectReason != "harness_kind_invalid" {
+		t.Fatalf("ack verdict = %+v, want {m-up-1, harness_kind_invalid}", ap)
 	}
 }
 

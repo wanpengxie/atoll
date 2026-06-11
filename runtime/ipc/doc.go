@@ -2,5 +2,5 @@
 // out-of-process actor's connection (runtime/actorrt port presence; Erlang
 // open_port model). It is the smallest possible shared surface so the host
 // side and the remote actor side agree on frame kinds and payload schemas:
-// handshake / handshake_ack / deliver / emit / down.
+// handshake / handshake_ack / deliver / control / emit / emit_ack / down.
 package ipc

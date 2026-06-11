@@ -269,7 +269,9 @@ func (f *Fleet) attachActor(actorID actor.ActorID) (*actorPipe, error) {
 
 	// noopEmitSink: non-nil (port.go requires it) but never actually called.
 	// Emits flow via WS (FrameEmit), not through the pipe.
-	noopEmit := func(_ context.Context, _ *message.Envelope) error { return nil }
+	noopEmit := func(_ context.Context, _ *message.Envelope) (ipc.EmitResult, error) {
+		return ipc.EmitResult{}, nil
+	}
 
 	// resolveFunc: the fleet already knows the actorID (it assigned it).
 	resolve := func(leaseID string) (actor.ActorID, error) {

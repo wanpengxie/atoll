@@ -57,6 +57,21 @@ const (
 	// host (port presence) relays it to the harness — the single channel-log
 	// writer.
 	KindEmit Kind = "emit"
+	// KindEmitAck (host→remote): the host's authoritative verdict for one
+	// KindEmit. The harness Writer's WriteResult (MessageID + RejectReason) is
+	// part of a cell's PEN: a remote cell's Respond/EmitEvent MUST see the same
+	// authoritative write verdict a local cell sees, so the writer contract may
+	// not be downgraded across the wire — that requires an upward ack, not a
+	// fire-and-forget emit.
+	//
+	// Correlation is FIFO with NO id: one connection == one actor, the stream is
+	// totally ordered, and the host's read loop processes each KindEmit
+	// synchronously (call EmitSink, then write its KindEmitAck) on a single
+	// goroutine. So acks are returned strictly in receipt order. The contract is
+	// pinned: the host acks emits in receipt order; the remote holds a FIFO wait
+	// queue and may pipeline. A per-emit id would reserve a field for a
+	// reordering that cannot occur — forbidden (zero reservation).
+	KindEmitAck Kind = "emit_ack"
 	// KindDown (remote→host): the bound actor died. The host publishes the
 	// presence DELETED edge (obs push); a subscriber materialises
 	// receiver_unavailable for in-flight requests. Connection EOF is the
@@ -105,6 +120,27 @@ type ControlPayload struct {
 // EmitPayload carries one envelope the bound actor emitted upward.
 type EmitPayload struct {
 	Envelope message.Envelope `json:"envelope"`
+}
+
+// EmitResult is the host's authoritative verdict for one KindEmit: the write
+// outcome the EmitSink produced. It is the wire-side mirror of the harness
+// WriteResult's verdict fields (MessageID on every path; RejectReason set when
+// the 9-step chain rejected). It is the wire contract's own type — the writer
+// contract that crosses the wire — kept here rather than borrowed from harness
+// so the wire layer owns its surface and never depends on the harness package.
+type EmitResult struct {
+	MessageID    message.ID `json:"message_id"`
+	RejectReason string     `json:"reject_reason,omitempty"`
+}
+
+// EmitAckPayload is the host's reply to one KindEmit: the EmitResult verdict
+// plus Err, the string form of the transport/write error the host's EmitSink
+// returned (empty on success). The remote side reconstructs both the verdict
+// and the error from this single frame, so a remote cell's Respond observes the
+// exact outcome a local cell would.
+type EmitAckPayload struct {
+	EmitResult
+	Err string `json:"err,omitempty"`
 }
 
 // DownPayload is the bound actor's death notification — the host turns it into a

@@ -18,7 +18,13 @@ import (
 // EmitSink is the upward relay callback the substrate invokes when a port's
 // remote actor emits an envelope. Injected so the port owns only the wire
 // boundary: the caller owns where emits land.
-type EmitSink func(ctx context.Context, env *message.Envelope) error
+//
+// It returns the authoritative write verdict (ipc.EmitResult: MessageID +
+// RejectReason) so the port can ack it back to the remote actor — the writer
+// contract is not downgraded across the wire. The error is the transport/write
+// failure (relayed to the remote as the ack's Err string); a rejected-but-
+// processed emit returns a non-zero RejectReason with a nil error.
+type EmitSink func(ctx context.Context, env *message.Envelope) (ipc.EmitResult, error)
 
 // ResolveFunc is the connect-in auth seam: it maps a connecting actor's lease
 // credential to the ActorID the substrate binds the connection to. This is the
@@ -245,7 +251,8 @@ func (p *port) writeControl(sig Signal) bool {
 	return true
 }
 
-// readLoop relays remote EMIT frames via the injected EmitSink and turns
+// readLoop relays remote EMIT frames via the injected EmitSink and writes the
+// verdict back as a KindEmitAck (FIFO, in receipt order), and turns
 // DOWN / EOF / unknown-kind into death. The wire is a closed set: an unknown kind is a
 // protocol violation and fail-closes the port (never silently ignored).
 func (p *port) readLoop() {
@@ -264,7 +271,27 @@ func (p *port) readLoop() {
 				return
 			}
 			env := ep.Envelope
-			_ = p.emit(p.ctx, &env)
+			// SYNCHRONOUS: call EmitSink, then write its verdict back as a
+			// KindEmitAck. readLoop is a single goroutine, so emits are processed
+			// in receipt order and acked in receipt order — that ordering IS the
+			// FIFO correlation (the wire contract pins acks to receipt order; no
+			// per-emit id). The writer contract is not downgraded across the wire:
+			// the remote actor's Respond observes the same MessageID/RejectReason
+			// a local cell would.
+			res, emitErr := p.emit(p.ctx, &env)
+			ackPayload := ipc.EmitAckPayload{EmitResult: res}
+			if emitErr != nil {
+				ackPayload.Err = emitErr.Error()
+			}
+			raw, err := json.Marshal(ackPayload)
+			if err != nil {
+				p.die(fmt.Errorf("actorrt: port %s emit ack marshal: %w", p.id, err))
+				return
+			}
+			if err := p.codec.Write(ipc.Frame{Kind: ipc.KindEmitAck, Payload: raw}); err != nil {
+				p.die(fmt.Errorf("actorrt: port %s emit ack write: %w", p.id, err))
+				return
+			}
 		case ipc.KindDown:
 			var dp ipc.DownPayload
 			_ = json.Unmarshal(frame.Payload, &dp)
