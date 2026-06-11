@@ -2,6 +2,7 @@ node_modules/
 .codex
 .claude
 docs/dev
+docs/
 dist/
 # T5 xhs CLI dev build product (adapters/device/xhs/cli)
 /coagent-xhs
