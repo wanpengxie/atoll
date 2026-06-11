@@ -119,7 +119,7 @@ func (a *App) wsSendMessages(ws *websocket.Conn, gw *platform.Gateway, chID chan
 func (a *App) handleCompute(c *gin.Context) {
 	// v1 approach: api-key + channel in query params. App does all auth
 	// (key verification + daemon-channel binding check) before handing off
-	// to fleet. Fleet receives the pre-authenticated daemonID.
+	// to the link acceptor, which receives the pre-authenticated daemonID.
 	apiKey := c.Query("key")
 	chIDStr := c.Query("channel")
 
@@ -147,6 +147,6 @@ func (a *App) handleCompute(c *gin.Context) {
 		return
 	}
 
-	// Delegate to fleet with pre-authenticated daemonID.
-	home.Fleet().ServeWS(c.Writer, c.Request, daemonID)
+	// Delegate to the link acceptor with the pre-authenticated daemonID.
+	home.Links().Serve(c.Writer, c.Request, daemonID)
 }

@@ -2,21 +2,42 @@ package host
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/platform/computebus"
+	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // --- test helpers ---
 
-// echoActor responds by writing back via the writer passed at construction.
+// recordingWriter captures every envelope a cell emits (the cell's pen in
+// production is the link's ipc.RemoteWriter; here we capture in memory).
+type recordingWriter struct {
+	mu  sync.Mutex
+	out []message.Envelope
+}
+
+func (w *recordingWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
+	w.mu.Lock()
+	w.out = append(w.out, *env)
+	w.mu.Unlock()
+	return harness.WriteResult{MessageID: env.ID}, nil
+}
+
+func (w *recordingWriter) written() []message.Envelope {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	out := make([]message.Envelope, len(w.out))
+	copy(out, w.out)
+	return out
+}
+
+// echoActor responds by writing back via the injected writer.
 type echoActor struct {
-	writer *UplinkWriter
+	writer harness.Writer
 }
 
 func (e *echoActor) Receive(ctx context.Context, env *message.Envelope) error {
@@ -44,163 +65,86 @@ func (noopActor) Receive(_ context.Context, _ *message.Envelope) error { return 
 
 // --- tests ---
 
-// TestUplinkWriter_ForwardsToEmit proves UplinkWriter.Write sends an EmitFrame
-// to the injected EmitFunc and returns the EmitAck as a WriteResult.
-func TestUplinkWriter_ForwardsToEmit(t *testing.T) {
-	var captured computebus.EmitFrame
-	emit := func(_ context.Context, ef computebus.EmitFrame) (computebus.EmitAck, error) {
-		captured = ef
-		return computebus.EmitAck{MessageID: "msg-123"}, nil
-	}
-
-	w := NewUplinkWriter("tool1", emit)
-	env := &message.Envelope{ID: "env-1", Kind: message.KindResponse}
-	res, err := w.Write(context.Background(), env)
-	if err != nil {
-		t.Fatalf("Write error: %v", err)
-	}
-	if res.MessageID != "msg-123" {
-		t.Fatalf("MessageID = %q, want msg-123", res.MessageID)
-	}
-	if captured.Source != "tool1" {
-		t.Fatalf("EmitFrame.Source = %q, want tool1", captured.Source)
-	}
-	if captured.Envelope != env {
-		t.Fatal("EmitFrame.Envelope should be the same pointer")
-	}
-}
-
-// TestUplinkWriter_RejectReason proves a reject reason from EmitAck surfaces
-// in the WriteResult.
-func TestUplinkWriter_RejectReason(t *testing.T) {
-	emit := func(_ context.Context, _ computebus.EmitFrame) (computebus.EmitAck, error) {
-		return computebus.EmitAck{RejectReason: "harness_terminal_duplicate"}, nil
-	}
-	w := NewUplinkWriter("tool1", emit)
-	res, err := w.Write(context.Background(), &message.Envelope{})
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
-	}
-	if res.RejectReason != "harness_terminal_duplicate" {
-		t.Fatalf("RejectReason = %q, want harness_terminal_duplicate", res.RejectReason)
-	}
-}
-
-// TestUplinkWriter_EmitError proves an Err string in EmitAck becomes a Go error.
-func TestUplinkWriter_EmitError(t *testing.T) {
-	emit := func(_ context.Context, _ computebus.EmitFrame) (computebus.EmitAck, error) {
-		return computebus.EmitAck{Err: "store broken"}, nil
-	}
-	w := NewUplinkWriter("tool1", emit)
-	_, err := w.Write(context.Background(), &message.Envelope{})
-	if err == nil || err.Error() != "store broken" {
-		t.Fatalf("expected error 'store broken', got %v", err)
-	}
-}
-
-// TestUplinkWriter_EmitFuncError proves a transport error from EmitFunc
-// propagates to Write.
-func TestUplinkWriter_EmitFuncError(t *testing.T) {
-	emit := func(_ context.Context, _ computebus.EmitFrame) (computebus.EmitAck, error) {
-		return computebus.EmitAck{}, errors.New("ws closed")
-	}
-	w := NewUplinkWriter("tool1", emit)
-	_, err := w.Write(context.Background(), &message.Envelope{})
-	if err == nil || err.Error() != "ws closed" {
-		t.Fatalf("expected 'ws closed', got %v", err)
-	}
-}
-
-// TestHost_Dispatch proves inbound DispatchFrame routes to the hosted cell.
+// TestHost_Dispatch proves an inbound envelope routes to the hosted cell's
+// mailbox and the cell's emit reaches its injected writer.
 func TestHost_Dispatch(t *testing.T) {
-	got := make(chan message.ID, 1)
-	emit := func(_ context.Context, ef computebus.EmitFrame) (computebus.EmitAck, error) {
-		got <- ef.Envelope.ID
-		return computebus.EmitAck{MessageID: ef.Envelope.ID}, nil
-	}
-
-	h := New(emit, nil)
+	w := &recordingWriter{}
+	h := New()
 	defer h.Stop()
 
-	w := h.Install("tool1", &echoActor{writer: NewUplinkWriter("tool1", emit)})
-	_ = w // writer is for the actor
+	h.Install("tool1", &echoActor{writer: w}, nil)
 
-	err := h.Dispatch(computebus.DispatchFrame{
-		Target: "tool1",
-		Envelope: &message.Envelope{
-			ID:        "req-1",
-			ChannelID: "ch1",
-			Kind:      message.KindRequest,
-			Type:      "test.echo",
-			Sender:    message.Sender{ID: "human1", Kind: actor.KindHuman},
-			Audience:  message.Audience{"tool1"},
-		},
+	err := h.Dispatch("tool1", &message.Envelope{
+		ID:        "req-1",
+		ChannelID: "ch1",
+		Kind:      message.KindRequest,
+		Type:      "test.echo",
+		Sender:    message.Sender{ID: "human1", Kind: actor.KindHuman},
+		Audience:  message.Audience{"tool1"},
 	})
 	if err != nil {
 		t.Fatalf("Dispatch error: %v", err)
 	}
 
-	select {
-	case id := <-got:
-		if id != "resp-req-1" {
-			t.Fatalf("emitted id = %q, want resp-req-1", id)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		got := w.written()
+		if len(got) >= 1 {
+			if got[0].ID != "resp-req-1" {
+				t.Fatalf("emitted id = %q, want resp-req-1", got[0].ID)
+			}
+			return
 		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("cell never processed the dispatched envelope")
+		if time.Now().After(deadline) {
+			t.Fatal("cell never processed the dispatched envelope")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
-// TestHost_DeathPropagation proves that when a hosted cell panics, Host
-// propagates the death UP via DeathFunc.
+// TestHost_DeathPropagation proves a hosted cell's abnormal death fires the
+// installed downHandler (the link layer closes that actor's stream UP).
 func TestHost_DeathPropagation(t *testing.T) {
 	var mu sync.Mutex
-	var deadActor actor.ActorID
+	var cause string
 	deaths := make(chan struct{}, 1)
-	deathFn := func(a actor.ActorID, _ string) {
-		mu.Lock()
-		deadActor = a
-		mu.Unlock()
-		deaths <- struct{}{}
-	}
 
-	h := New(nil, deathFn)
+	h := New()
 	defer h.Stop()
 
-	h.Install("doomed", panicActor{})
-
-	// Deliver triggers the panic.
-	_ = h.Dispatch(computebus.DispatchFrame{
-		Target:   "doomed",
-		Envelope: &message.Envelope{Kind: message.KindRequest, Type: "x.kill", ChannelID: "ch"},
+	h.Install("doomed", panicActor{}, func(c string) {
+		mu.Lock()
+		cause = c
+		mu.Unlock()
+		deaths <- struct{}{}
 	})
+
+	_ = h.Dispatch("doomed", &message.Envelope{Kind: message.KindRequest, Type: "x.kill", ChannelID: "ch"})
 
 	select {
 	case <-deaths:
 		mu.Lock()
-		got := deadActor
+		got := cause
 		mu.Unlock()
-		if got != "doomed" {
-			t.Fatalf("DeathFunc reported actor=%q, want doomed", got)
+		if got == "" {
+			t.Fatal("downHandler received empty cause for a panicking cell")
 		}
 	case <-time.After(2 * time.Second):
-		t.Fatal("Host never propagated the death UP -- PresenceWatcher not wired")
+		t.Fatal("Host never fired the downHandler -- PresenceWatcher not wired")
 	}
 }
 
-// TestHost_InstallMultiple proves multiple cells can coexist.
+// TestHost_InstallMultiple proves multiple cells coexist and each accepts
+// dispatch independently.
 func TestHost_InstallMultiple(t *testing.T) {
-	h := New(nil, nil)
+	h := New()
 	defer h.Stop()
 
-	h.Install("a1", noopActor{})
-	h.Install("a2", noopActor{})
+	h.Install("a1", noopActor{}, nil)
+	h.Install("a2", noopActor{}, nil)
 
-	// Both should accept dispatch without error.
 	for _, id := range []actor.ActorID{"a1", "a2"} {
-		err := h.Dispatch(computebus.DispatchFrame{
-			Target:   id,
-			Envelope: &message.Envelope{Kind: message.KindEvent, Type: "test.ping", ChannelID: "ch"},
-		})
+		err := h.Dispatch(id, &message.Envelope{Kind: message.KindEvent, Type: "test.ping", ChannelID: "ch"})
 		if err != nil {
 			t.Fatalf("Dispatch to %s error: %v", id, err)
 		}

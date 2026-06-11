@@ -1,83 +1,80 @@
+// Package host is the daemon-side holder of business cells (tool/agent actors)
+// on an attached compute. Each hosted cell's PEN is an out-of-process writer
+// (ipc.RemoteWriter over the actor's link stream): the daemon holds NO local
+// truth, so behavior.Respond / behavior.EmitEvent flow UP the wire to the home
+// harness and observe the home's authoritative write verdict. Dispatch routes an
+// inbound envelope into a hosted cell's mailbox; on a cell's abnormal death the
+// host closes that actor's stream so the home port reads EOF (the presence-down
+// edge that materialises receiver_unavailable) — death is the stream EOF, never
+// a translated frame.
 package host
 
 import (
 	"context"
+	"sync"
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/platform/computebus"
 )
 
-// DeathFunc reports a hosted cell's death UP to the home so the home can
-// materialise receiver_unavailable for its in-flight requests. homelink injects
-// a computebus DeathFrame sender.
-type DeathFunc func(actor.ActorID, string)
-
-// Host hosts business cells (tool/agent actors) on an attached compute. It maps
-// a DispatchFrame from the home to the cell mailbox, and each cell's output
-// flows UP via an UplinkWriter (NO local truth -- daemon is attached compute).
-//
-// Host registers itself as a PresenceWatcher on the actorrt.Runtime: when a
-// hosted cell dies the substrate publishes the death edge, and Host propagates
-// it UP via DeathFunc (the compute side has no truth to write).
+// Host hosts business cells on a daemon. It owns an actorrt.Runtime (the cells)
+// and, per hosted actor, a downHandler the link layer installs so a cell's death
+// closes its own stream (the home port then reads EOF). No truth, no wire
+// vocabulary — the cell's writer (the link's ipc.RemoteWriter) is injected at
+// Install.
 type Host struct {
 	rt        *actorrt.Runtime
 	deliverer actorrt.Deliverer
-	emit      EmitFunc
-	sendDeath DeathFunc
+
+	mu   sync.Mutex
+	down map[actor.ActorID]func(cause string)
 }
 
-// New constructs a host. emit is the homelink-injected uplink to the home
-// harness; sendDeath propagates cell death UP the wire.
-func New(emit EmitFunc, sendDeath DeathFunc) *Host {
+// New constructs a host. It registers itself as the runtime's PresenceWatcher:
+// when a hosted cell dies abnormally, OnDown fires the actor's downHandler
+// (close its stream UP the link).
+func New() *Host {
 	rt, del, _ := actorrt.New(actorrt.Config{})
 	h := &Host{
 		rt:        rt,
 		deliverer: del,
-		emit:      emit,
-		sendDeath: sendDeath,
+		down:      map[actor.ActorID]func(string){},
 	}
 	rt.WatchPresence(h)
 	return h
 }
 
-// OnDown implements actorrt.PresenceWatcher. A hosted cell died abnormally --
-// the compute holds no truth, so it cannot write receiver_unavailable itself.
-// It reports the death UP via DeathFunc (FrameDeath); the home's fleet calls
-// the closure author#3 to close in-flight requests.
+// Install spawns impl as a cell whose writer is the injected out-of-process pen
+// (ipc.RemoteWriter over its link stream). downHandler is invoked when the cell
+// dies — the link layer closes that actor's stream so the home port reads EOF.
+func (h *Host) Install(id actor.ActorID, impl actorrt.Actor, downHandler func(cause string)) {
+	h.mu.Lock()
+	h.down[id] = downHandler
+	h.mu.Unlock()
+	h.rt.Spawn(id, impl)
+}
+
+// OnDown implements actorrt.PresenceWatcher. A hosted cell died abnormally — the
+// daemon holds no truth, so it cannot write receiver_unavailable itself. It
+// fires the actor's downHandler (close its stream UP the link); the home port
+// reads EOF and the home's closure author#3 closes in-flight requests.
 func (h *Host) OnDown(_ context.Context, id actor.ActorID, cause error) {
-	if h.sendDeath != nil {
+	h.mu.Lock()
+	handler := h.down[id]
+	h.mu.Unlock()
+	if handler != nil {
 		msg := ""
 		if cause != nil {
 			msg = cause.Error()
 		}
-		h.sendDeath(id, msg)
+		handler(msg)
 	}
 }
 
-// Install spawns an actorrt.Actor as a cell on this compute, wiring its writer
-// to the uplink so behavior.Respond / behavior.EmitEvent flow to the home
-// harness. Returns the UplinkWriter so the caller can pass it to the actor
-// constructor if needed.
-func (h *Host) Install(id actor.ActorID, impl actorrt.Actor) *UplinkWriter {
-	w := NewUplinkWriter(id, h.emit)
-	h.rt.Spawn(id, impl)
-	return w
-}
-
-// InstallFunc spawns an actor constructed by a factory function. The factory
-// receives the UplinkWriter so it can wire the actor's output to the home
-// harness. This is useful when the actor needs the writer at construction time.
-func (h *Host) InstallFunc(id actor.ActorID, factory func(harness.Writer) actorrt.Actor) {
-	w := NewUplinkWriter(id, h.emit)
-	impl := factory(w)
-	h.rt.Spawn(id, impl)
-}
-
-// Dispatch routes an inbound DispatchFrame to the hosted cell's mailbox.
-func (h *Host) Dispatch(frame computebus.DispatchFrame) error {
-	_, err := h.deliverer.Deliver([]actor.ActorID{frame.Target}, frame.Envelope)
+// Dispatch routes an inbound envelope to the hosted cell's mailbox.
+func (h *Host) Dispatch(target actor.ActorID, env *message.Envelope) error {
+	_, err := h.deliverer.Deliver([]actor.ActorID{target}, env)
 	return err
 }
 

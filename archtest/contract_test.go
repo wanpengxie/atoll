@@ -182,3 +182,79 @@ func TestEnvelopeConstructionLivesOnlyInBehavior(t *testing.T) {
 			strings.Join(violations, "\n  "))
 	}
 }
+
+// importsOf returns the import paths of one .go file.
+func importsOf(t *testing.T, fset *token.FileSet, path string) []string {
+	t.Helper()
+	file, err := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
+	if err != nil {
+		t.Fatalf("parse imports %s: %v", path, err)
+	}
+	var out []string
+	for _, imp := range file.Imports {
+		p, uerr := strconv.Unquote(imp.Path.Value)
+		if uerr == nil {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// platformModulePrefix is this module's import path prefix; the dependency
+// guards reason about same-module package paths.
+const platformModulePrefix = "github.com/wanpengxie/ActOS/"
+
+// TestPlatformDependencyDirection enforces the platform reshape's dependency
+// figure (platform-redesign-construction §1): platform is the assembly layer
+// BELOW app/cmd and ABOVE the substrate. It must never import downstream
+// (actors/, app/) — that would let a domain actor or the HTTP layer back-flow
+// into the physical layer. The wire VOCABULARY (runtime/ipc + the mux) lives
+// ONLY in platform/link: no other platform package may carry it (the computebus
+// drift this reshape removed must not regrow a second home).
+func TestPlatformDependencyDirection(t *testing.T) {
+	fset := token.NewFileSet()
+	var violations []string
+
+	root := "../platform"
+	err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			if skipDirs[d.Name()] {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		rel := filepath.ToSlash(path)
+		inLink := strings.Contains(rel, "/platform/link/")
+		for _, imp := range importsOf(t, fset, path) {
+			if !strings.HasPrefix(imp, platformModulePrefix) {
+				continue
+			}
+			sub := strings.TrimPrefix(imp, platformModulePrefix)
+			// Downstream back-flow: platform must not import domain/app.
+			if strings.HasPrefix(sub, "actors/") || strings.HasPrefix(sub, "app/") || sub == "app" {
+				violations = append(violations,
+					fmt.Sprintf("%s: platform imports downstream %q (dependency direction violated)", rel, imp))
+			}
+			// Wire vocabulary containment: only platform/link may carry the port
+			// wire (runtime/ipc) — its mux is the single home of link framing.
+			if !inLink && (sub == "runtime/ipc" || strings.HasPrefix(sub, "runtime/ipc/")) {
+				violations = append(violations,
+					fmt.Sprintf("%s: platform package outside link imports the wire %q (frame vocabulary lives only in platform/link)", rel, imp))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", root, err)
+	}
+
+	if len(violations) > 0 {
+		t.Fatalf("platform dependency direction (construction §1):\n  %s", strings.Join(violations, "\n  "))
+	}
+}

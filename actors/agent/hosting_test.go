@@ -18,7 +18,6 @@ import (
 
 	"github.com/wanpengxie/ActOS/actors/agent"
 	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/platform/computebus"
 	"github.com/wanpengxie/ActOS/platform/host"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -68,7 +67,13 @@ func (h *cellHost) deliver(t *testing.T, env *message.Envelope) {
 func (h *cellHost) emitted() []message.Envelope { return h.w.Written() }
 func (h *cellHost) stop()                       { h.rt.StopAll() }
 
-// --- daemon shape: host.Host + UplinkWriter (uplink captured in-memory) ---
+// --- daemon shape: host.Host with the cell's pen captured in-memory ---
+//
+// In production the cell's pen is the link's ipc.RemoteWriter (emits flow UP the
+// actor's stream); the parity rigging substitutes an in-memory recording writer
+// so the SAME Bridge behaviour is asserted off the host's mailbox/emit path
+// without standing up a real link. What is pinned is host-agnosticism, not the
+// wire transport.
 
 type daemonHost struct {
 	h  *host.Host
@@ -76,34 +81,38 @@ type daemonHost struct {
 	up []message.Envelope
 }
 
+// daemonPen captures a daemon cell's emits in-memory (stands in for the link's
+// ipc.RemoteWriter).
+type daemonPen struct{ dh *daemonHost }
+
+func (p *daemonPen) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
+	p.dh.mu.Lock()
+	p.dh.up = append(p.dh.up, *env)
+	p.dh.mu.Unlock()
+	return harness.WriteResult{MessageID: env.ID}, nil
+}
+
 func newDaemonHost(t *testing.T) *daemonHost {
 	t.Helper()
 	dh := &daemonHost{}
-	emit := func(_ context.Context, frame computebus.EmitFrame) (computebus.EmitAck, error) {
-		dh.mu.Lock()
-		dh.up = append(dh.up, *frame.Envelope)
-		dh.mu.Unlock()
-		return computebus.EmitAck{MessageID: frame.Envelope.ID}, nil
-	}
-	dh.h = host.New(emit, func(actor.ActorID, string) {})
+	dh.h = host.New()
+	pen := &daemonPen{dh: dh}
 	var b *agent.Bridge
-	dh.h.InstallFunc(testActorID, func(w harness.Writer) actorrt.Actor {
-		bb, err := agent.NewBridge(testConfig(), testActorID, testChannelID, w)
-		if err != nil {
-			t.Fatalf("daemon host: NewBridge: %v", err)
-		}
-		b = bb
-		agent.SetAgentFactory(bb, func(agent.AgentConfig) (agent.Agent, error) {
-			return scriptTextTurn(&b, "parity reply"), nil
-		})
-		return bb
+	bb, err := agent.NewBridge(testConfig(), testActorID, testChannelID, pen)
+	if err != nil {
+		t.Fatalf("daemon host: NewBridge: %v", err)
+	}
+	b = bb
+	agent.SetAgentFactory(bb, func(agent.AgentConfig) (agent.Agent, error) {
+		return scriptTextTurn(&b, "parity reply"), nil
 	})
+	dh.h.Install(testActorID, bb, nil)
 	return dh
 }
 
 func (h *daemonHost) deliver(t *testing.T, env *message.Envelope) {
 	t.Helper()
-	if err := h.h.Dispatch(computebus.DispatchFrame{Target: testActorID, Envelope: env}); err != nil {
+	if err := h.h.Dispatch(testActorID, env); err != nil {
 		t.Fatalf("daemon dispatch: %v", err)
 	}
 }

@@ -1,6 +1,6 @@
 // Package platform is the channel-home assembly root (v2): it owns the commit
 // write门 (harness -> notify), the commit Signal (tap fan-out), and wires
-// channelhost (business layer) + fleet (physical layer) + Gateway (client
+// channelhost (business layer) + link acceptor (physical layer) + Gateway (client
 // ingress) into a ChannelHome struct. Post-commit effects are tap subscribers,
 // not inline writer steps: cell delivery is a Pump over the Signal (持 Deliverer,
 // DeliverResult observed here), client push is the Signal directly. The app
@@ -14,15 +14,15 @@ import (
 	"log/slog"
 
 	"github.com/wanpengxie/ActOS/platform/channelhost"
-	"github.com/wanpengxie/ActOS/platform/fleet"
+	"github.com/wanpengxie/ActOS/platform/link"
 	"github.com/wanpengxie/ActOS/platform/tap"
 	"github.com/wanpengxie/ActOS/protocol/actor"
+	channelpkg "github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
-	channelpkg "github.com/wanpengxie/ActOS/protocol/channel"
 )
 
 // HomeConfig configures the channel-home assembly.
@@ -33,8 +33,8 @@ type HomeConfig struct {
 }
 
 // ChannelHome is the assembled channel-home: it holds all the wired parts
-// (stores, harness, channelhost, fleet, gateway, signal, delivery tap) and
-// exposes them via accessor methods. The app layer owns HTTP/transport;
+// (stores, harness, channelhost, link acceptor, gateway, signal, delivery tap)
+// and exposes them via accessor methods. The app layer owns HTTP/transport;
 // ChannelHome is pure Go.
 type ChannelHome struct {
 	writer   harness.Writer
@@ -42,7 +42,7 @@ type ChannelHome struct {
 	cs       *runtime.ChannelStores
 	signal   *tap.Signal
 	delivery *tap.Pump
-	flt      *fleet.Fleet
+	links    *link.Acceptor
 	gw       *Gateway
 }
 
@@ -56,7 +56,7 @@ type ChannelHome struct {
 //  4. Build the notify写门 (rawChain + signal.Notify) — the pen cells write with
 //  5. Build channelhost with the notify写门 as Writer
 //  6. Build the delivery tap: a Pump持 Deliverer, cursor start = MaxSeq, started
-//  7. Build fleet with写门 + home.Runtime() + membership
+//  7. Build the link acceptor with写门 + home.Runtime() + membership
 //  8. Build Gateway with写门 + signal + query + registry
 func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 	logger := cfg.Logger
@@ -127,8 +127,9 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 	delivery := tap.NewPump(signal, cs.Query, from, deliver, logger)
 	delivery.Start()
 
-	// 7. Build fleet (physical layer: WS mux/demux for attached computes).
-	flt := fleet.New(fleet.Config{
+	// 7. Build the link acceptor (physical layer: WS mux + per-actor ipc streams
+	//    + lease judgement for attached computes).
+	links := link.NewAcceptor(link.Config{
 		Writer:     writer,
 		Runtime:    home.Runtime(),
 		Membership: cs.Membership,
@@ -151,7 +152,7 @@ func NewChannelHome(cfg HomeConfig) (*ChannelHome, error) {
 		cs:       cs,
 		signal:   signal,
 		delivery: delivery,
-		flt:      flt,
+		links:    links,
 		gw:       gw,
 	}, nil
 }
@@ -181,8 +182,9 @@ func (ch *ChannelHome) Registry() storespec.Registry { return ch.cs.Registry }
 // Membership returns the membership control plane store.
 func (ch *ChannelHome) Membership() storespec.MembershipControlPlane { return ch.cs.Membership }
 
-// Fleet returns the fleet (physical layer: WS mux/demux for attached computes).
-func (ch *ChannelHome) Fleet() *fleet.Fleet { return ch.flt }
+// Links returns the link acceptor (physical layer: the app hands an upgraded WS
+// here so a daemon can attach its actor streams).
+func (ch *ChannelHome) Links() *link.Acceptor { return ch.links }
 
 // PushHub returns the client notification signal (tap fan-out): client streams
 // Subscribe to it and read forward from their own seq cursor.
@@ -191,14 +193,14 @@ func (ch *ChannelHome) PushHub() *tap.Signal { return ch.signal }
 // Gateway returns the client/SDK ingress gateway.
 func (ch *ChannelHome) Gateway() *Gateway { return ch.gw }
 
-// Close tears down the channel home in order: fleet (WS connections + relay
-// goroutines) -> delivery tap -> channelhost (actors + business logic) ->
+// Close tears down the channel home in order: link acceptor (WS connections +
+// per-actor streams) -> delivery tap -> channelhost (actors + business logic) ->
 // channel stores (DB).
 func (ch *ChannelHome) Close() error {
-	// 1. Fleet first: close all WS connections, tear down virtual pipes, wait
-	//    for relay goroutines. This stops all external compute traffic before
-	//    we shut down the runtime/stores underneath.
-	fltErr := ch.flt.Close()
+	// 1. Link acceptor first: close all WS links, tear down every actor stream,
+	//    wait for Serve goroutines. This stops all external compute traffic
+	//    before we shut down the runtime/stores underneath.
+	linkErr := ch.links.Close()
 
 	// 2. Delivery tap: stop the pump before tearing the runtime down.
 	ch.delivery.Close()
@@ -210,8 +212,8 @@ func (ch *ChannelHome) Close() error {
 	csErr := ch.cs.Close()
 
 	// Return the first error encountered.
-	if fltErr != nil {
-		return fltErr
+	if linkErr != nil {
+		return linkErr
 	}
 	if homeErr != nil {
 		return homeErr
