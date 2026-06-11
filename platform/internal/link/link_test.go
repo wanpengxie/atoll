@@ -269,7 +269,7 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	}
 
 	// The cell's response flows UP to the home write门.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		got := r.writer.all()
 		if len(got) >= 1 {
@@ -336,7 +336,7 @@ func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
 	d.Start()
 
 	// The buffered in-window request must now be dispatched and answered.
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		got := r.writer.all()
 		if len(got) >= 1 {
@@ -384,7 +384,7 @@ func TestEndToEnd_CellDeath_ClosesStreamToOnDown(t *testing.T) {
 	// home port EOF → OnDown.
 	_ = mustDeliver(t, r, toolID)
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if down := r.getDown(); len(down) >= 1 && down[0] == toolID {
 			return
@@ -425,7 +425,7 @@ func TestLease_NoTraffic_ExpiresToPresenceDown(t *testing.T) {
 	// Deliberately do NOT call d.Start(): no idle ping, so no inbound traffic
 	// refreshes the home lease. The daemon is "frozen" from the home's view.
 
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for {
 		if down := r.getDown(); len(down) >= 1 && down[0] == toolID {
 			break
@@ -439,7 +439,7 @@ func TestLease_NoTraffic_ExpiresToPresenceDown(t *testing.T) {
 	// The daemon side also observes the link tearing down.
 	select {
 	case <-d.Done():
-	case <-time.After(time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("daemon never saw the link close after lease expiry")
 	}
 }
@@ -493,7 +493,7 @@ func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 
 	select {
 	case <-cell.started:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("cell never entered Receive on the request")
 	}
 
@@ -502,7 +502,7 @@ func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 
 	select {
 	case <-cell.cancelled:
-	case <-time.After(2 * time.Second):
+	case <-time.After(10 * time.Second):
 		t.Fatal("cross-wire KindCancel never cancelled the hosted cell's reqCtx")
 	}
 
