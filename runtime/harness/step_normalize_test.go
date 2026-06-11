@@ -63,16 +63,18 @@ func TestStepNormalize_DoesNotFillKind(t *testing.T) {
 	}
 }
 
-// ts default-fill uses the engine clock when caller omits ts.
-func TestStepNormalize_TSDefault(t *testing.T) {
+// ts is a caller-set CONSTRAINT, not a normalize fill: normalize must leave it
+// untouched (step_envelope_shape rejects ts==0 before this step). Symmetric with
+// DoesNotFillKind.
+func TestStepNormalize_DoesNotFillTS(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)
-	e := &message.Envelope{ID: "m1", ChannelID: testChannelID, Kind: message.KindEvent, Type: "agent.text"}
+	e := &message.Envelope{ID: "m1", TS: 42, ChannelID: testChannelID, Kind: message.KindEvent, Type: "agent.text"}
 	if _, err := runStep(t, newStepNormalize, deps, context.Background(), e); err != nil {
 		t.Fatalf("err: %v", err)
 	}
-	if e.TS != fixedNowMs {
-		t.Fatalf("ts = %d, want engine clock %d", e.TS, fixedNowMs)
+	if e.TS != 42 {
+		t.Fatalf("ts = %d, want caller value 42 (normalize must not author ts)", e.TS)
 	}
 }
 

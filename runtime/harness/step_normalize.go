@@ -73,11 +73,10 @@ func (s *stepNormalize) Run(ctx context.Context, env *message.Envelope) (outcome
 		env.ExpiresAt = nil
 	}
 
-	// ts default — caller usually sets this, but tolerate a missing
-	// value so partial test envelopes don't trip downstream checks.
-	if env.TS == 0 {
-		env.TS = s.deps.NowMs()
-	}
+	// (no ts default: TS is a caller-set CONSTRAINT, not a normalize fill —
+	// step_envelope_shape already rejects env.TS == 0 ("envelope.ts required")
+	// BEFORE this step runs, so a fill here is dead. Symmetric with kind, which
+	// became a pure constraint when its normalize default was removed.)
 
 	// time-relation guard — proto-layer1 §2.4. expires_at, when present,
 	// must be strictly after ts.
