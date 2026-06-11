@@ -36,12 +36,15 @@
 //   - protocol/** MUST NOT import anything outside the Go standard library, and
 //     not even the stdlib seams that imply state/IO/transport: context,
 //     database/sql, net/http, or any SQL/driver/transport package. Concretely
-//     no module outside protocol may be imported.
-//   - Manual acceptance check: `git grep '"context"' -- 'protocol/'` → 0 (greps
-//     the import, not prose, so it cannot self-match this doc's "no context").
+//     no module outside protocol may be imported (other protocol/ packages are
+//     the only permitted ActOS edge — all layers depend on protocol, never the
+//     reverse).
 //
-// TODO(lint-rebuild): NOT mechanically enforced right now. The old go-arch-lint
-// config (which claimed to) is dead — make lint / CI never run it. The rule
-// holds by review + the manual grep above. Re-mechanise protocol/ stdlib-purity
-// in the deferred v2-topology lint rebuild.
+// Enforcement: archtest/protocol_purity_test.go (TestProtocolPurityAndDirection)
+// mechanically enforces BOTH purity and dependency direction under
+// `go test ./...` / `make lint`, so a PR adding a forbidden import — an external
+// module, a reversed ActOS import (protocol importing runtime/lib/platform), or
+// a state/IO/transport stdlib seam — turns the build red. A Go import path is a
+// mandatory string literal, so the AST check has no computed-import escape
+// hatch: this is a structural boundary, not a review convention.
 package protocol
