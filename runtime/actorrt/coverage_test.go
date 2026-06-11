@@ -50,33 +50,15 @@ func TestCellObserveAfterStopGuarded(t *testing.T) {
 	}
 }
 
-// TestCellDeliverSignalAfterStopGuarded: both work enqueue (Deliver) and
-// control enqueue (signal) refuse a torn-down cell with ErrCellStopped.
-func TestCellDeliverSignalAfterStopGuarded(t *testing.T) {
+// TestCellDeliverAfterStopGuarded: work enqueue (Deliver) refuses a torn-down
+// cell with ErrCellStopped.
+func TestCellDeliverAfterStopGuarded(t *testing.T) {
 	t.Parallel()
 	c := newCell(context.Background(), "a", newRecordActor(), 4, nil, nil, nil, time.Now(), nil)
 	c.start()
 	c.stop()
 	if err := c.Deliver(env("x")); err != ErrCellStopped {
 		t.Fatalf("Deliver after stop = %v, want ErrCellStopped", err)
-	}
-	if err := c.signal(Signal{Kind: SignalReload}); err != ErrCellStopped {
-		t.Fatalf("signal after stop = %v, want ErrCellStopped", err)
-	}
-}
-
-// TestCellSignalControlLaneFull: a saturated control lane returns ErrMailboxFull
-// (non-blocking, exactly like the work mailbox). Constructed directly so the
-// lane can be filled without the cell goroutine draining it.
-func TestCellSignalControlLaneFull(t *testing.T) {
-	t.Parallel()
-	// Mailbox 1 => control lane cap 1. Do NOT start the cell, so nothing drains.
-	c := newCell(context.Background(), "a", newRecordActor(), 1, nil, nil, nil, time.Now(), nil)
-	if err := c.signal(Signal{Kind: SignalReload}); err != nil {
-		t.Fatalf("first signal = %v, want nil", err)
-	}
-	if err := c.signal(Signal{Kind: SignalQuota}); err != ErrMailboxFull {
-		t.Fatalf("signal into full lane = %v, want ErrMailboxFull", err)
 	}
 }
 
@@ -95,7 +77,7 @@ func (startErrActor) Start(context.Context, ActorContext) error {
 func TestCellStartErrorPublishesDown(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 	rt.Spawn("a", startErrActor{})
 	select {
@@ -106,63 +88,6 @@ func TestCellStartErrorPublishesDown(t *testing.T) {
 	if _, ok := rt.Stat("a"); ok {
 		t.Fatal("cell still addressable after Start error")
 	}
-}
-
-// idleControllableActor is Controllable but does no work — so the cell sits in
-// the BLOCKING (second) select with an empty inbox, where a control signal
-// arrives via the non-prioritized control case.
-type idleControllableActor struct {
-	notify chan SignalKind
-}
-
-func (idleControllableActor) Receive(context.Context, *message.Envelope) error { return nil }
-func (a idleControllableActor) OnControl(_ context.Context, sig Signal) {
-	a.notify <- sig.Kind
-}
-
-// TestCellControlInBlockingSelect: with an empty inbox the cell blocks in the
-// second select; a control signal raised then is delivered via that select's
-// control case (the non-prioritized arm), not the priority drain.
-func TestCellControlInBlockingSelect(t *testing.T) {
-	t.Parallel()
-	a := idleControllableActor{notify: make(chan SignalKind, 1)}
-	rt, _, ctrl := New(Config{Parent: context.Background()})
-	defer rt.StopAll()
-	rt.Spawn("a", a)
-	// Give the goroutine time to settle into the blocking select (empty inbox).
-	time.Sleep(20 * time.Millisecond)
-	if err := ctrl.Raise("a", Signal{Kind: SignalReload}); err != nil {
-		t.Fatalf("Raise: %v", err)
-	}
-	select {
-	case k := <-a.notify:
-		if k != SignalReload {
-			t.Fatalf("OnControl kind = %v, want reload", k)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("control signal never reached the blocking-select control arm")
-	}
-}
-
-// TestHandleControlDefaultIgnore: a non-Controllable actor receiving a non-Stop
-// signal gets the runtime default disposition: ignored (Unix default action for
-// an uncaught non-terminal signal). The cell stays alive and addressable.
-func TestHandleControlDefaultIgnore(t *testing.T) {
-	t.Parallel()
-	rt, _, ctrl := New(Config{Parent: context.Background()})
-	defer rt.StopAll()
-	rt.Spawn("a", newRecordActor()) // not Controllable
-	if err := ctrl.Raise("a", Signal{Kind: SignalReload}); err != nil {
-		t.Fatalf("Raise reload: %v", err)
-	}
-	// The signal is ignored — the cell must remain addressable. Poll briefly to
-	// let the control lane drain.
-	time.Sleep(50 * time.Millisecond)
-	if _, ok := rt.Stat("a"); !ok {
-		t.Fatal("default-ignore wrongly tore down the cell")
-	}
-	// And it still receives work (proves the goroutine is alive and looping).
-	mustDeliver(t, rt, "a", env("x"))
 }
 
 // errReceiveActor returns an error from Receive — NOT a death (closure belongs
@@ -186,7 +111,7 @@ func TestSafeReceiveSwallowsError(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	a := errReceiveActor{got: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 	defer rt.StopAll()
 	rt.Spawn("a", a)
@@ -213,7 +138,7 @@ func TestSafeReceiveSwallowsError(t *testing.T) {
 // (the runtime is usable and can host a cell).
 func TestNewDefaultsParent(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{}) // nil Parent, nil Clock, nil Logger, zero Mailbox
+	rt, _ := New(Config{}) // nil Parent, nil Clock, nil Logger, zero Mailbox
 	defer rt.StopAll()
 	if rt.parent == nil {
 		t.Fatal("New did not default a nil Parent")
@@ -228,7 +153,7 @@ func TestNewDefaultsParent(t *testing.T) {
 // watcher must never be enrolled (it would panic on the closure-critical path).
 func TestWatchersIgnoreNil(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.WatchPresence(nil)
 	rt.WatchObs("a", nil)
@@ -260,7 +185,7 @@ func TestPublishDownWatcherPanicGuarded(t *testing.T) {
 	t.Parallel()
 	bad := panickyPresenceWatcher{notify: make(chan struct{}, 1)}
 	good := &recordingWatcher{notify: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(bad)
 	rt.WatchPresence(good)
 	rt.Spawn("a", panicActor{})
@@ -294,7 +219,7 @@ func TestPublishObsWatcherPanicGuarded(t *testing.T) {
 	t.Parallel()
 	bad := panickyObsWatcher{notify: make(chan struct{}, 1)}
 	good := &obsCollector{notify: make(chan struct{}, 1)}
-	rt, del, _ := New(Config{Parent: context.Background()})
+	rt, del := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.WatchObs("a", bad)
 	rt.WatchObs("a", good)
@@ -314,62 +239,13 @@ func TestPublishObsWatcherPanicGuarded(t *testing.T) {
 	}
 }
 
-// TestRaiseDroppedOnFullLane: raise reports the per-condition error when the
-// presence's control lane is full (ErrMailboxFull) — the substrate surfaces the
-// drop, never silently swallows it.
-func TestRaiseDroppedOnFullLane(t *testing.T) {
-	t.Parallel()
-	// A Controllable actor that blocks forever inside OnControl, so the control
-	// lane backs up and saturates while it is wedged on the first signal.
-	block := make(chan struct{})
-	a := &blockingControllable{enter: make(chan struct{}, 1), block: block}
-	rt, _, ctrl := New(Config{Parent: context.Background(), Mailbox: 1})
-	defer func() { close(block); rt.StopAll() }()
-	rt.Spawn("a", a)
-
-	var dropped bool
-	deadline := time.After(3 * time.Second)
-	for !dropped {
-		select {
-		case <-deadline:
-			t.Fatal("control lane never saturated to report a drop")
-		default:
-		}
-		err := ctrl.Raise("a", Signal{Kind: SignalReload})
-		switch err {
-		case nil:
-			// keep filling
-		case ErrMailboxFull:
-			dropped = true
-		default:
-			t.Fatalf("Raise err = %v, want nil or ErrMailboxFull", err)
-		}
-	}
-}
-
-// blockingControllable wedges inside OnControl on the first signal, so the
-// control lane fills behind it.
-type blockingControllable struct {
-	enter chan struct{}
-	block chan struct{}
-}
-
-func (blockingControllable) Receive(context.Context, *message.Envelope) error { return nil }
-func (a *blockingControllable) OnControl(context.Context, Signal) {
-	select {
-	case a.enter <- struct{}{}:
-	default:
-	}
-	<-a.block
-}
-
 // TestDeliverStoppedAndDefaultOutcome: deliver maps a hosted-but-stopped
 // presence to Stopped (ErrCellStopped arm). Exercised by stopping a cell out of
 // band while it remains in the addressing map, then delivering to it directly
 // through the runtime's deliver path.
 func TestDeliverStoppedOutcome(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	// Insert a cell, start it, then mark it closed via stop() WITHOUT removing it
 	// from the map, so deliver() finds it and gets ErrCellStopped.
@@ -399,8 +275,7 @@ func TestDeliverStoppedOutcome(t *testing.T) {
 // the substrate refuses to report Delivered for any non-nil enqueue error).
 type fakeErrPresence struct{ started time.Time }
 
-func (fakeErrPresence) Deliver(*message.Envelope) error              { return errors.New("weird enqueue error") }
-func (fakeErrPresence) signal(Signal) error                          { return nil }
+func (fakeErrPresence) Deliver(*message.Envelope) error { return errors.New("weird enqueue error") }
 func (fakeErrPresence) observe(context.Context, ObsKind) (ObsValue, error) {
 	return nil, ErrObsUnsupported
 }
@@ -412,7 +287,7 @@ func (fakeErrPresence) stop()                  {}
 // arm — the substrate never reports Delivered for a failed enqueue).
 func TestDeliverDefaultArmMapsToStopped(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.mu.Lock()
 	rt.presences["a"] = fakeErrPresence{started: time.Now()}
 	rt.mu.Unlock()
@@ -432,126 +307,12 @@ func TestDeliverDefaultArmMapsToStopped(t *testing.T) {
 // drives it).
 func TestPortObserveUnsupported(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
 	if _, err := rt.Observe(context.Background(), id, "anything"); err != ErrObsUnsupported {
 		t.Fatalf("port Observe = %v, want ErrObsUnsupported", err)
-	}
-}
-
-// TestPortSignalReachesWireAsControlFrame: a control Signal raised at a port is
-// drained by writeLoop onto the wire as a KindControl frame (prioritized ahead
-// of work), carrying the opaque Kind + Payload verbatim.
-func TestPortSignalReachesWireAsControlFrame(t *testing.T) {
-	t.Parallel()
-	rt, _, ctrl := New(Config{Parent: context.Background()})
-	defer rt.StopAll()
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
-	defer remote.conn.Close()
-
-	if err := ctrl.Raise(id, Signal{Kind: SignalQuota, Payload: []byte("budget")}); err != nil {
-		t.Fatalf("Raise: %v", err)
-	}
-	remote.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
-	frame, err := remote.codec.Read()
-	if err != nil {
-		t.Fatalf("remote read control frame: %v", err)
-	}
-	if frame.Kind != ipc.KindControl {
-		t.Fatalf("wire frame kind = %s, want control", frame.Kind)
-	}
-	var cp ipc.ControlPayload
-	if err := json.Unmarshal(frame.Payload, &cp); err != nil {
-		t.Fatalf("decode control payload: %v", err)
-	}
-	if cp.Kind != string(SignalQuota) || string(cp.Payload) != "budget" {
-		t.Fatalf("control payload = %+v, want quota/budget", cp)
-	}
-}
-
-// TestPortSignalInBlockingWriteSelect: when writeLoop is parked in its BLOCKING
-// (second) select with an empty send queue, a control signal raised then is
-// drained via that select's control arm (not the priority drain). The sleep
-// ensures writeLoop has passed the priority check and is blocked before the
-// signal arrives.
-func TestPortSignalInBlockingWriteSelect(t *testing.T) {
-	t.Parallel()
-	rt, _, ctrl := New(Config{Parent: context.Background()})
-	defer rt.StopAll()
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
-	defer remote.conn.Close()
-
-	// A drainer so a delivered control frame is consumed off the wire.
-	gotKind := make(chan ipc.Kind, 1)
-	go func() {
-		f, err := remote.codec.Read()
-		if err != nil {
-			return
-		}
-		gotKind <- f.Kind
-	}()
-
-	// Let writeLoop settle into the blocking second select (empty controlq at the
-	// priority check, empty sendq), so the raised signal arrives via that arm.
-	time.Sleep(50 * time.Millisecond)
-	if err := ctrl.Raise(id, Signal{Kind: SignalReload}); err != nil {
-		t.Fatalf("Raise: %v", err)
-	}
-	select {
-	case k := <-gotKind:
-		if k != ipc.KindControl {
-			t.Fatalf("wire frame kind = %s, want control", k)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("control signal never reached the wire via the blocking select")
-	}
-}
-
-// TestPortSignalAfterStop: signal into a torn-down port returns ErrCellStopped
-// (the closed guard, mirroring Deliver).
-func TestPortSignalAfterStop(t *testing.T) {
-	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
-	defer remote.conn.Close()
-	rt.mu.RLock()
-	p := rt.presences[id]
-	rt.mu.RUnlock()
-	p.stop()
-	if err := p.signal(Signal{Kind: SignalReload}); err != ErrCellStopped {
-		t.Fatalf("port signal after stop = %v, want ErrCellStopped", err)
-	}
-}
-
-// TestPortSignalLaneFull: a saturated control lane returns ErrMailboxFull. The
-// remote never reads, so the wire + writeLoop's one in-flight + the bounded
-// controlq all back up.
-func TestPortSignalLaneFull(t *testing.T) {
-	t.Parallel()
-	rt, _, ctrl := New(Config{Parent: context.Background()})
-	defer rt.StopAll()
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
-	defer remote.conn.Close()
-
-	var sawFull bool
-	deadline := time.After(3 * time.Second)
-	for !sawFull {
-		select {
-		case <-deadline:
-			t.Fatal("port control lane never reported MailboxFull")
-		default:
-		}
-		err := ctrl.Raise(id, Signal{Kind: SignalReload})
-		switch err {
-		case nil:
-			// keep filling
-		case ErrMailboxFull:
-			sawFull = true
-		default:
-			t.Fatalf("Raise err = %v, want nil or ErrMailboxFull", err)
-		}
 	}
 }
 
@@ -561,7 +322,7 @@ func TestPortSignalLaneFull(t *testing.T) {
 func TestPortEmitDecodeErrorIsDeath(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
@@ -593,7 +354,7 @@ func TestPortDownEmptyReasonDefaults(t *testing.T) {
 		mu.Unlock()
 		got <- struct{}{}
 	}}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 	_, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
@@ -637,7 +398,7 @@ func contains(s, sub string) bool {
 func TestPortDeliverWriteFailsIsDeath(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 
@@ -662,33 +423,6 @@ func TestPortDeliverWriteFailsIsDeath(t *testing.T) {
 	}
 }
 
-// TestPortControlWriteFailsIsDeath: a control-frame write failure kills the port
-// via writeControl's die path (returns false → writeLoop returns).
-func TestPortControlWriteFailsIsDeath(t *testing.T) {
-	t.Parallel()
-	w := &recordingWatcher{notify: make(chan struct{}, 1)}
-	rt, _, ctrl := New(Config{Parent: context.Background()})
-	rt.WatchPresence(w)
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
-
-	remote.conn.Close()
-	deadline := time.After(3 * time.Second)
-	for {
-		select {
-		case <-w.notify:
-			if _, ok := rt.Stat(id); ok {
-				t.Fatal("port still addressable after control write failure")
-			}
-			return
-		case <-deadline:
-			t.Fatal("control write failure did not kill the port")
-		default:
-		}
-		_ = ctrl.Raise(id, Signal{Kind: SignalReload})
-		time.Sleep(2 * time.Millisecond)
-	}
-}
-
 // TestPortDeliverMalformedEnvelopeDropped: an envelope that fails to marshal
 // (invalid json.RawMessage payload) is DROPPED by writeLoop (not a transport
 // death — the log is truth, closure belongs to the sender). The port stays
@@ -696,7 +430,7 @@ func TestPortControlWriteFailsIsDeath(t *testing.T) {
 func TestPortDeliverMalformedEnvelopeDropped(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 	defer rt.StopAll()
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
@@ -748,7 +482,7 @@ func TestPortDeliverMalformedEnvelopeDropped(t *testing.T) {
 // handshake fails newPort at the handshake read (Attach returns an error).
 func TestNewPortHandshakeReadError(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, remoteConn := net.Pipe()
 	remoteConn.Close() // no handshake — read fails immediately
 	if _, err := rt.Attach(hostConn, nopEmit, staticResolve("x")); err == nil {
@@ -760,7 +494,7 @@ func TestNewPortHandshakeReadError(t *testing.T) {
 // valid HandshakePayload fails newPort at the decode step.
 func TestNewPortHandshakeDecodeError(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, remoteConn := net.Pipe()
 	go func() {
 		c := ipc.NewCodec(remoteConn, remoteConn)
@@ -778,7 +512,7 @@ func TestNewPortHandshakeDecodeError(t *testing.T) {
 // ack). Attach returns the ack-write error.
 func TestNewPortHandshakeAckWriteError(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, remoteConn := net.Pipe()
 	go func() {
 		c := ipc.NewCodec(remoteConn, remoteConn)

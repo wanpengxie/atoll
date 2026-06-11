@@ -84,7 +84,7 @@ func TestCellSerialDelivery(t *testing.T) {
 		time.Sleep(time.Millisecond)
 		done <- struct{}{}
 	}
-	rt, _, _ := New(Config{Parent: context.Background(), Mailbox: 200})
+	rt, _ := New(Config{Parent: context.Background(), Mailbox: 200})
 	rt.Spawn("a", a)
 
 	const n = 50
@@ -106,7 +106,7 @@ func TestCellSerialDelivery(t *testing.T) {
 func TestCellStartStop(t *testing.T) {
 	t.Parallel()
 	a := newRecordActor()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.Spawn("a", a)
 	select {
 	case <-a.startedCh:
@@ -129,7 +129,7 @@ func TestCellMailboxFull(t *testing.T) {
 	block := make(chan struct{})
 	a := newRecordActor()
 	a.receive = func() { <-block }
-	rt, _, _ := New(Config{Parent: context.Background(), Mailbox: 1})
+	rt, _ := New(Config{Parent: context.Background(), Mailbox: 1})
 	defer func() { close(block); rt.StopAll() }()
 	rt.Spawn("a", a)
 
@@ -155,7 +155,7 @@ func TestCellMailboxFull(t *testing.T) {
 // fast-fail receiver_unavailable. (B4)
 func TestDeliverNotHosted(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	res, err := rt.deliver([]actor.ActorID{"ghost"}, env("x"))
 	if err != nil {
 		t.Fatalf("deliver: %v", err)
@@ -194,7 +194,7 @@ func (w *recordingWatcher) OnDown(ctx context.Context, id actor.ActorID, cause e
 func TestCellPanicPublishesPresenceDown(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w) // register BEFORE spawn — no edge missed
 	rt.Spawn("a", panicActor{})
 	mustDeliver(t, rt, "a", env("x"))
@@ -234,7 +234,7 @@ func (w *despawningWatcher) OnDown(ctx context.Context, id actor.ActorID, cause 
 func TestPanicDeathWithDespawningWatcherDoesNotDeadlock(t *testing.T) {
 	t.Parallel()
 	w := &despawningWatcher{notify: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	w.rt = rt
 	rt.WatchPresence(w)
 	rt.Spawn("a", startPanicActor{})
@@ -255,7 +255,7 @@ func TestPanicDeathWithDespawningWatcherDoesNotDeadlock(t *testing.T) {
 func TestRespawnSameIDEachDeathIsIndependent(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 
 	rt.Spawn("a", startPanicActor{})
@@ -291,7 +291,7 @@ func TestCellTeardownWaitsInFlight(t *testing.T) {
 		<-release
 		finished.Store(true)
 	}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.Spawn("a", a)
 	mustDeliver(t, rt, "a", env("x"))
 	time.Sleep(10 * time.Millisecond) // ensure Receive is in-flight

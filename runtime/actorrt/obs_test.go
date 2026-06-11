@@ -35,7 +35,7 @@ func (o *observerActor) Observe(_ context.Context, kind ObsKind) (ObsValue, erro
 // actor's Observer hook, which self-answers (non-truth, out-of-band).
 func TestObserveRoutesToObserver(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.Spawn("a", &observerActor{})
 
@@ -56,7 +56,7 @@ func TestObserveRoutesToObserver(t *testing.T) {
 // no-op (ErrObsUnsupported); an unhosted id is ErrNotHosted.
 func TestObserveUnsupportedAndNotHosted(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.Spawn("plain", newRecordActor()) // no Observer
 
@@ -90,7 +90,7 @@ func (c *obsCollector) OnObs(_ context.Context, _ actor.ActorID, kind ObsKind, _
 func TestPublishObsFanout(t *testing.T) {
 	t.Parallel()
 	col := &obsCollector{notify: make(chan struct{}, 1)}
-	rt, del, _ := New(Config{Parent: context.Background()})
+	rt, del := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.WatchObs("a", col)
 	rt.Spawn("a", &observerActor{})

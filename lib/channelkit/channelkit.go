@@ -26,9 +26,6 @@ type Channel struct {
 	// broadly-shared Cells() handle, so nothing can inject into a mailbox bypassing
 	// the harness.
 	deliverer actorrt.Deliverer
-	// controller is the confined control-enqueue capability (actorrt hands it out
-	// once at New). Exposed via Controller() to the composition root only.
-	controller actorrt.Controller
 
 	// Presence-down closure (author #3): on a death edge the watcher writes
 	// receiver_unavailable for every in-flight request addressed to the dead
@@ -88,7 +85,7 @@ func New(cfg Config) *Channel {
 	// Share the channel's clock + logger with the runtime: the runtime stamps
 	// each cell's StartedAt with this clock, so the system actor's uptime
 	// (now - StartedAt) stays consistent under a test/non-realtime clock.
-	c.cells, c.deliverer, c.controller = actorrt.New(actorrt.Config{Clock: clock, Logger: logger})
+	c.cells, c.deliverer = actorrt.New(actorrt.Config{Clock: clock, Logger: logger})
 	// Register the death watcher BEFORE spawning any cell — no presence-down edge
 	// may be missed (closure-critical path).
 	c.cells.WatchPresence(c)
@@ -107,10 +104,6 @@ func (c *Channel) Cells() *actorrt.Runtime { return c.cells }
 // Deliverer returns the confined work-enqueue capability — the composition root
 // routes it to the post-harness fanout (the sole legitimate mailbox feeder).
 func (c *Channel) Deliverer() actorrt.Deliverer { return c.deliverer }
-
-// Controller returns the confined control-enqueue capability — the composition
-// root routes it to whoever raises control signals (substrate/composition root).
-func (c *Channel) Controller() actorrt.Controller { return c.controller }
 
 // OnDown implements actorrt.PresenceWatcher: death is the DELETED edge of
 // presence (obs push), and the Channel is just a subscriber. On the edge it

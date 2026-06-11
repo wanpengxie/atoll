@@ -26,7 +26,7 @@ type Host struct {
 // when a hosted cell dies abnormally, OnDown fires the actor's downHandler
 // (close its stream UP the link).
 func New() *Host {
-	rt, del, _ := actorrt.New(actorrt.Config{})
+	rt, del := actorrt.New(actorrt.Config{})
 	h := &Host{
 		rt:        rt,
 		deliverer: del,

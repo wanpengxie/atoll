@@ -44,7 +44,7 @@ type cellHost struct {
 func newCellHost(t *testing.T) *cellHost {
 	t.Helper()
 	w := &recordingWriter{}
-	rt, del, _ := actorrt.New(actorrt.Config{})
+	rt, del := actorrt.New(actorrt.Config{})
 	b, err := agent.NewBridge(testConfig(), testActorID, testChannelID, w)
 	if err != nil {
 		t.Fatalf("cell host: NewBridge: %v", err)

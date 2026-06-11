@@ -106,7 +106,7 @@ type homeRig struct {
 
 func newHomeRig(t *testing.T, leasePing, leaseTTL time.Duration) *homeRig {
 	t.Helper()
-	rt, del, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
+	rt, del := actorrt.New(actorrt.Config{Parent: context.Background()})
 	r := &homeRig{
 		rt:         rt,
 		deliver:    del,

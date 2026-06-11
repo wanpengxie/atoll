@@ -222,16 +222,6 @@ func TestNew_DefaultClockAndSpawnsSystem(t *testing.T) {
 	}
 }
 
-// TestController_ReturnsConfinedCapability locks the Controller() accessor: it
-// hands out the confined control-enqueue capability actorrt minted at New (the
-// same one the runtime produced), distinct from the Deliverer.
-func TestController_ReturnsConfinedCapability(t *testing.T) {
-	ch := channelkit.New(channelkit.Config{ChannelID: "ch", Clock: time.Now})
-	if ch.Controller() == nil {
-		t.Fatal("Controller() returned nil — confined control capability not exposed")
-	}
-}
-
 func contains(s, sub string) bool {
 	for i := 0; i+len(sub) <= len(s); i++ {
 		if s[i:i+len(sub)] == sub {

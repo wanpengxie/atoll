@@ -9,9 +9,10 @@ import (
 
 // Actor is the minimal contract the substrate requires of an actor
 // implementation (actor-runtime-redesign.md §1.2). The runtime guarantees
-// Receive (and the optional Start/Stop/OnControl hooks) are invoked serially by
+// Receive (and the optional Start/Stop lifecycle hooks) are invoked serially by
 // the cell's single goroutine, so WORK state needs no locks/atomics — the
-// mailbox IS the serialization.
+// mailbox IS the serialization. The actor entry surface is work (Receive) +
+// lifecycle (Start/Stop) + obs (Observer); there is no control lane.
 //
 // EXCEPTION: the optional obs Observer hook (PublishObs/Observe) is the only
 // surface invoked OUT-OF-BAND (concurrently with Receive, off the cell

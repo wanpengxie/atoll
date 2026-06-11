@@ -78,7 +78,7 @@ func nopEmit(context.Context, *message.Envelope) (ipc.EmitResult, error) {
 // connection IS the actor, addressable by the resolved id).
 func TestPortHandshakeBindsResolvedID(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
 	gotLease := make(chan string, 1)
@@ -108,7 +108,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 
 	t.Run("wrong first frame kind", func(t *testing.T) {
 		t.Parallel()
-		rt, _, _ := New(Config{Parent: context.Background()})
+		rt, _ := New(Config{Parent: context.Background()})
 		hostConn, remoteConn := net.Pipe()
 		go func() {
 			c := ipc.NewCodec(remoteConn, remoteConn)
@@ -122,7 +122,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 
 	t.Run("resolve error", func(t *testing.T) {
 		t.Parallel()
-		rt, _, _ := New(Config{Parent: context.Background()})
+		rt, _ := New(Config{Parent: context.Background()})
 		hostConn, remoteConn := net.Pipe()
 		go func() {
 			c := ipc.NewCodec(remoteConn, remoteConn)
@@ -137,7 +137,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 
 	t.Run("empty resolved id", func(t *testing.T) {
 		t.Parallel()
-		rt, _, _ := New(Config{Parent: context.Background()})
+		rt, _ := New(Config{Parent: context.Background()})
 		hostConn, remoteConn := net.Pipe()
 		go func() {
 			c := ipc.NewCodec(remoteConn, remoteConn)
@@ -154,7 +154,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 // ResolveFunc (the relay seam and the auth seam are both mandatory).
 func TestPortRequiresSinks(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, _ := net.Pipe()
 	if _, err := rt.Attach(hostConn, nil, staticResolve("x")); err == nil {
 		t.Fatal("Attach accepted a nil EmitSink")
@@ -170,7 +170,7 @@ func TestPortRequiresSinks(t *testing.T) {
 // side of A1: a delivered message reaches the bound remote actor verbatim).
 func TestPortDeliverReachesWire(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
@@ -204,7 +204,7 @@ func TestPortDeliverReachesWire(t *testing.T) {
 // rejects nil rather than enqueueing it (and never reports it as Delivered).
 func TestPortDeliverRejectsNilEnvelope(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
@@ -225,7 +225,7 @@ func TestPortDeliverRejectsNilEnvelope(t *testing.T) {
 // a KindEmitAck — the writer contract is not downgraded across the wire.
 func TestPortEmitRelayed(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
 	got := make(chan *message.Envelope, 1)
@@ -273,7 +273,7 @@ func TestPortEmitRelayed(t *testing.T) {
 func TestPortDownPublishesPresenceDown(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 
@@ -301,7 +301,7 @@ func TestPortDownPublishesPresenceDown(t *testing.T) {
 func TestPortEOFPublishesPresenceDown(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 
@@ -322,7 +322,7 @@ func TestPortEOFPublishesPresenceDown(t *testing.T) {
 func TestPortUnknownFrameKindFailsClosed(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
@@ -346,7 +346,7 @@ func TestPortUnknownFrameKindFailsClosed(t *testing.T) {
 func TestPortStopIsNotDeath(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 4)}
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
@@ -372,7 +372,7 @@ func TestPortStopIsNotDeath(t *testing.T) {
 // (a hosted-but-tearing-down presence is not Delivered, not NotHosted).
 func TestPortDeliverAfterStop(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
 
@@ -391,7 +391,7 @@ func TestPortDeliverAfterStop(t *testing.T) {
 // MailboxFull rather than blocking.
 func TestPortMailboxFull(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	// The remote NEVER reads, so the wire buffer + writeLoop's one in-flight
 	// frame + the bounded sendq all back up; past saturation Deliver is full.
@@ -426,7 +426,7 @@ func TestPortMailboxFull(t *testing.T) {
 // new one is the live presence. (connect-in REPLACE, the zombie-reconnect path.)
 func TestPortAttachReplaceStopsOld(t *testing.T) {
 	t.Parallel()
-	rt, _, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
 	id1, remote1 := dialPort(t, rt, "l", nopEmit, staticResolve("dup"))

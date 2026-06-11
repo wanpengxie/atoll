@@ -30,12 +30,6 @@ type cell struct {
 	id    actor.ActorID
 	impl  Actor
 	inbox chan *message.Envelope
-	// control is the separate control lane: a bounded queue the runtime's
-	// Controller enqueues Signals into, drained by the SAME cell goroutine but
-	// PRIORITIZED ahead of work. Single-serialization is preserved (one
-	// processor, one thing at a time), while control jumps the work backlog — so
-	// reload/quota/stop reach the actor even with a deep inbox.
-	control chan Signal
 
 	// started is the substrate-stamped bind instant — the obs `uptime` fact's
 	// authoritative source (uptime = now - started, derived by the consumer).
@@ -55,7 +49,7 @@ type cell struct {
 	// runtime's per-actor obs watchers. Invoked from the actor via
 	// ActorContext.PublishObs. No watcher → no-op.
 	onObs func(actor.ActorID, ObsKind, ObsValue)
-	// logger surfaces control-lane edge observability (default dispositions).
+	// logger surfaces cell-lifecycle edge observability.
 	logger *slog.Logger
 	// onExit is the pointer-identity-checked self-eviction hook the Runtime injects:
 	// on ANY exit (clean or panic) the cell removes itself from the addressing
@@ -88,7 +82,6 @@ func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, 
 		id:      id,
 		impl:    impl,
 		inbox:   make(chan *message.Envelope, mailbox),
-		control: make(chan Signal, mailbox),
 		started: started,
 		ctx:     ctx,
 		cancel:  cancel,
@@ -113,7 +106,7 @@ func (c *cell) startedAt() time.Time { return c.started }
 // non-perturbing. An actor that does not implement Observer is a no-op:
 // ErrObsUnsupported.
 func (c *cell) observe(ctx context.Context, kind ObsKind) (ObsValue, error) {
-	// Lifecycle guard (same as Deliver/signal): do not run an obs hook on a cell
+	// Lifecycle guard (same as Deliver): do not run an obs hook on a cell
 	// that has begun teardown — its Stop may be releasing the very state Observe
 	// would read.
 	c.mu.Lock()
@@ -152,25 +145,6 @@ func (c *cell) Deliver(env *message.Envelope) error {
 
 	select {
 	case c.inbox <- env:
-		return nil
-	default:
-		return ErrMailboxFull
-	}
-}
-
-// signal is the substrate enqueue path into this cell's CONTROL lane — held only
-// by the runtime's Controller, never exposed to the actor. Non-blocking: a full
-// lane returns ErrMailboxFull, a stopped cell ErrCellStopped.
-func (c *cell) signal(sig Signal) error {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return ErrCellStopped
-	}
-	c.mu.Unlock()
-
-	select {
-	case c.control <- sig:
 		return nil
 	default:
 		return ErrMailboxFull
@@ -218,45 +192,14 @@ func (c *cell) start() {
 		}
 
 		for {
-			// Control lane is PRIORITIZED: drain a pending control signal before
-			// touching work, so reload/quota/stop preempt a work backlog.
-			select {
-			case sig := <-c.control:
-				c.handleControl(sig)
-				continue
-			default:
-			}
 			select {
 			case <-c.ctx.Done():
 				return
-			case sig := <-c.control:
-				c.handleControl(sig)
 			case env := <-c.inbox:
 				c.safeReceive(env)
 			}
 		}
 	}()
-}
-
-// handleControl dispatches one control signal on the cell goroutine (serially,
-// never concurrent with Receive). If the actor implements Controllable it runs
-// OnControl (a panic there propagates to the death path, like Receive). Else the
-// runtime DEFAULT DISPOSITION applies: SignalStop self-cancels the cell (a clean
-// exit, no death edge); other kinds are ignored (Unix default action for an
-// uncaught signal). Forcible teardown of a wedged cell is the runtime's hosting
-// power (Despawn), not this cooperative path.
-func (c *cell) handleControl(sig Signal) {
-	if ctrl, ok := c.impl.(Controllable); ok {
-		ctrl.OnControl(c.ctx, sig)
-		return
-	}
-	// No Controllable → runtime default disposition (Unix default action).
-	if sig.Kind == SignalStop {
-		c.logger.Info("actorrt.control.default_stop", "actor", c.id)
-		c.cancel()
-		return
-	}
-	c.logger.Info("actorrt.control.default_ignore", "actor", c.id, "kind", sig.Kind)
 }
 
 // safeReceive invokes impl.Receive. A panic propagates naturally up the cell

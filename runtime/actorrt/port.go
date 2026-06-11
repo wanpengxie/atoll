@@ -67,10 +67,9 @@ type port struct {
 	onExit func(actor.ActorID, presence)
 	logger *slog.Logger
 
-	sendq    chan *message.Envelope
-	controlq chan Signal
-	wg       sync.WaitGroup
-	done     chan struct{}
+	sendq chan *message.Envelope
+	wg    sync.WaitGroup
+	done  chan struct{}
 
 	dieOnce   sync.Once
 	stopOnce  sync.Once
@@ -134,7 +133,6 @@ func newPort(parent context.Context, conn io.ReadWriteCloser, emit EmitSink, res
 		onExit:   onExit,
 		logger:   logger,
 		sendq:    make(chan *message.Envelope, portSendQueue),
-		controlq: make(chan Signal, portSendQueue),
 		done:     make(chan struct{}),
 	}, nil
 }
@@ -172,24 +170,6 @@ func (p *port) Deliver(env *message.Envelope) error {
 	}
 }
 
-// signal enqueues a control Signal for the remote actor, drained by writeLoop as
-// a KindControl frame (prioritized ahead of work frames). Non-blocking, like
-// Deliver: a full lane returns ErrMailboxFull, a torn-down port ErrCellStopped.
-func (p *port) signal(sig Signal) error {
-	p.mu.Lock()
-	if p.closed {
-		p.mu.Unlock()
-		return ErrCellStopped
-	}
-	p.mu.Unlock()
-	select {
-	case p.controlq <- sig:
-		return nil
-	default:
-		return ErrMailboxFull
-	}
-}
-
 // start launches the write + read loops and closes done once both exit.
 func (p *port) start() {
 	p.wg.Add(2)
@@ -198,29 +178,13 @@ func (p *port) start() {
 	go func() { p.wg.Wait(); close(p.done) }()
 }
 
-// writeLoop drains the control + send queues onto the wire — control frames are
-// PRIORITIZED ahead of work frames (same out-of-band discipline as a cell's
-// control lane), so a remote reload/quota/stop is not stuck behind a work
-// backlog.
+// writeLoop drains the send queue onto the wire.
 func (p *port) writeLoop() {
 	defer p.wg.Done()
 	for {
-		// Drain a pending control signal first.
-		select {
-		case sig := <-p.controlq:
-			if !p.writeControl(sig) {
-				return
-			}
-			continue
-		default:
-		}
 		select {
 		case <-p.ctx.Done():
 			return
-		case sig := <-p.controlq:
-			if !p.writeControl(sig) {
-				return
-			}
 		case env := <-p.sendq:
 			payload, err := json.Marshal(ipc.DeliverPayload{Envelope: *env})
 			if err != nil {
@@ -234,21 +198,6 @@ func (p *port) writeLoop() {
 			}
 		}
 	}
-}
-
-// writeControl marshals one Signal as a KindControl frame onto the wire. Returns
-// false (after die) if the write fails. The Signal's vocabulary stays opaque to
-// the wire: Kind is a string, Payload rides as raw bytes.
-func (p *port) writeControl(sig Signal) bool {
-	payload, err := json.Marshal(ipc.ControlPayload{Kind: string(sig.Kind), Payload: sig.Payload})
-	if err != nil {
-		return true // malformed control is dropped, not a transport death
-	}
-	if err := p.codec.Write(ipc.Frame{Kind: ipc.KindControl, Payload: payload}); err != nil {
-		p.die(fmt.Errorf("actorrt: port %s control write: %w", p.id, err))
-		return false
-	}
-	return true
 }
 
 // readLoop relays remote EMIT frames via the injected EmitSink and writes the

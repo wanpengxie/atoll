@@ -26,14 +26,12 @@ import (
 // actor never self-reports it), read out-of-band via Runtime.Stat.
 type presence interface {
 	Deliver(env *message.Envelope) error
-	signal(sig Signal) error
 	observe(ctx context.Context, kind ObsKind) (ObsValue, error)
 	startedAt() time.Time
 	stop()
 }
 
-// ErrNotHosted is returned by Controller.Raise when no presence is hosted for
-// the addressed id.
+// ErrNotHosted is returned when no presence is hosted for the addressed id.
 var ErrNotHosted = errors.New("actorrt: actor not hosted")
 
 // PresenceWatcher is the consumer end of the obs presence-PUSH channel. The
@@ -78,10 +76,9 @@ type Config struct {
 	// Clock stamps each presence's bind instant (obs uptime source). nil →
 	// time.Now. Injectable so tests can pin uptime deterministically.
 	Clock func() time.Time
-	// Logger surfaces the control plane's edge-case observability (signal raised
-	// / dropped / default disposition) and presence-watch faults (a watcher
-	// panic on the closure-critical death path). The control plane is mostly
-	// boundary handling, so it is observable by design. nil → discard (no-op).
+	// Logger surfaces presence-watch faults (a watcher panic on the
+	// closure-critical death path) and other cell-lifecycle edge observability.
+	// nil → discard (no-op).
 	Logger *slog.Logger
 }
 
@@ -98,14 +95,13 @@ type Deliverer interface {
 	Deliver(audience []actor.ActorID, env *message.Envelope) (DeliverResult, error)
 }
 
-// New constructs a Runtime and its two confined egress capabilities. The
+// New constructs a Runtime and its confined work-egress capability. The
 // *Runtime is the broadly-shareable management/addressing handle (Spawn/Attach/
 // Despawn/Stat/StopAll/WatchPresence); the Deliverer is the confined WORK enqueue
-// (give it ONLY to the post-harness fanout); the Controller is the confined
-// CONTROL enqueue (give it ONLY to substrate/composition root). A
-// *Runtime holder can address and observe but can inject NEITHER work NOR
-// control — both doors are the harness/substrate's private egress, structurally.
-func New(cfg Config) (*Runtime, Deliverer, Controller) {
+// (give it ONLY to the post-harness fanout). A *Runtime holder can address and
+// observe but cannot inject work — the mailbox is the harness/substrate's
+// private egress, structurally.
+func New(cfg Config) (*Runtime, Deliverer) {
 	parent := cfg.Parent
 	if parent == nil {
 		parent = context.Background()
@@ -130,7 +126,7 @@ func New(cfg Config) (*Runtime, Deliverer, Controller) {
 		obsWatch:  make(map[actor.ActorID][]ObsWatcher),
 		mailbox:   mb,
 	}
-	return r, deliverer{r}, controller{r}
+	return r, deliverer{r}
 }
 
 // deliverer is the only holder-confined implementation of Deliverer; it wraps
@@ -140,14 +136,6 @@ type deliverer struct{ r *Runtime }
 
 func (d deliverer) Deliver(audience []actor.ActorID, env *message.Envelope) (DeliverResult, error) {
 	return d.r.deliver(audience, env)
-}
-
-// controller is the only holder-confined implementation of Controller; it wraps
-// the runtime and calls its unexported control enqueue.
-type controller struct{ r *Runtime }
-
-func (c controller) Raise(id actor.ActorID, sig Signal) error {
-	return c.r.raise(id, sig)
 }
 
 // WatchPresence registers a watcher for the obs presence-PUSH channel (currently:
@@ -231,32 +219,6 @@ func (r *Runtime) Observe(ctx context.Context, id actor.ActorID, kind ObsKind) (
 		return nil, ErrNotHosted
 	}
 	return p.observe(ctx, kind)
-}
-
-// raise routes sig to id's control lane (unexported: reachable ONLY through the
-// Controller capability New hands out). Non-blocking; reports per-condition
-// error. The closed SignalKind set is ENFORCED here — an unknown kind is
-// rejected (the substrate owns the control vocabulary, à la Unix signal.h
-// numbers; it is not a free string channel).
-func (r *Runtime) raise(id actor.ActorID, sig Signal) error {
-	if !validSignalKind(sig.Kind) {
-		r.logger.Warn("actorrt.control.unknown_kind", "actor", id, "kind", sig.Kind)
-		return ErrUnknownSignal
-	}
-	r.mu.RLock()
-	p, ok := r.presences[id]
-	r.mu.RUnlock()
-	if !ok {
-		r.logger.Info("actorrt.control.not_hosted", "actor", id, "kind", sig.Kind)
-		return ErrNotHosted
-	}
-	err := p.signal(sig)
-	if err != nil {
-		r.logger.Info("actorrt.control.dropped", "actor", id, "kind", sig.Kind, "err", err)
-		return err
-	}
-	r.logger.Debug("actorrt.control.raised", "actor", id, "kind", sig.Kind)
-	return nil
 }
 
 // Outcome is the per-audience truth Deliver reports about its own action — the

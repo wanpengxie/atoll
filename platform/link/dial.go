@@ -226,11 +226,6 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 				continue
 			}
 			as.writer.DeliverAck(ap)
-		case ipc.KindControl:
-			// Control lane to a remote cell is not wired on the daemon side yet
-			// (no consumer); a control frame is dropped rather than fail-closed,
-			// since the link is the home↔daemon hop, not the cell-control path.
-			d.logger.Debug("link.control", "actor", string(as.id))
 		default:
 			d.logger.Warn("link.unknown_kind", "actor", string(as.id), "kind", string(frame.Kind))
 		}
