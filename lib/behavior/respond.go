@@ -44,7 +44,7 @@ func Respond(
 	if !message.IsFinalStatus(spec.Status) {
 		return "", fmt.Errorf("behavior: Respond status must be final; got %q", spec.Status)
 	}
-	env, err := BuildResponseFromRequest(request, clock, sender, CorrelationKey(request.ID), spec)
+	env, err := BuildResponseFromRequest(request, clock, sender, spec)
 	if err != nil {
 		return "", err
 	}

@@ -63,11 +63,10 @@ func BuildResponseFromRequest(
 	request *message.Envelope,
 	clock func() time.Time,
 	sender message.Sender,
-	requestID CorrelationKey,
 	spec ResponseSpec,
 ) (*message.Envelope, error) {
 	if request == nil {
-		return nil, fmt.Errorf("behavior: response request %s not in hand", requestID)
+		return nil, fmt.Errorf("behavior: response build: nil request in hand")
 	}
 	merged, err := MergeResponsePayload(spec.Payload, spec.Status, spec.Reason)
 	if err != nil {
@@ -90,7 +89,7 @@ func BuildResponseFromRequest(
 		Kind:          message.KindResponse,
 		Type:          request.Type,
 		Payload:       merged,
-		ParentID:      message.ID(requestID),
+		ParentID:      request.ID,
 		CorrelationID: correlationID,
 		Visibility:    vis,
 		Audience:      audience,

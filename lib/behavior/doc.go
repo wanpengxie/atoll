@@ -17,8 +17,7 @@
 //     receiver_unavailable terminal.
 //
 // Supporting files: respond.go also hosts BuildEvent/EmitEvent (kind=event
-// construction); correlation.go defines CorrelationKey and the derivation rule
-// for correlation ids.
+// construction); correlation.go holds the derivation rule for correlation ids.
 //
 // Position in the stack: behavior sits in lib/ (the stdlib layer). It imports
 // only protocol types (message, channel, actor) and runtime seams (harness,

@@ -156,7 +156,7 @@ func (c *Caller) Arm(req *message.Envelope) {
 // SAME fault face author#3 (death.go) already has. A liveness-guarantee author
 // that fails silently is the asymmetry §3.2 closes.
 func (c *Caller) fireTimeout(req *message.Envelope) {
-	term, err := BuildResponseFromRequest(req, c.clock, c.sender, CorrelationKey(req.ID), ResponseSpec{
+	term, err := BuildResponseFromRequest(req, c.clock, c.sender, ResponseSpec{
 		Status: "failed",
 		Reason: string(message.TerminalUnansweredTimeout),
 	})

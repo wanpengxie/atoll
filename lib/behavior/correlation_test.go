@@ -7,14 +7,6 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
-// CorrelationKey.String returns the wire form (the request id verbatim).
-func TestCorrelationKey_String(t *testing.T) {
-	k := CorrelationKey(message.ID("req-42"))
-	if k.String() != "req-42" {
-		t.Fatalf("String() = %q, want req-42", k.String())
-	}
-}
-
 // isFinalResponse returns false for a response whose payload is not valid JSON
 // (the unmarshal-error guard): it cannot be parsed, so it is not final.
 func TestIsFinalResponse_UnparseablePayload(t *testing.T) {
@@ -107,7 +99,7 @@ func TestCorrelationID(t *testing.T) {
 
 // BuildResponseFromRequest rejects a nil request.
 func TestBuildResponseFromRequest_NilRequest(t *testing.T) {
-	_, err := BuildResponseFromRequest(nil, fixedClock(1), svcSender(), CorrelationKey("r1"), ResponseSpec{Status: "completed"})
+	_, err := BuildResponseFromRequest(nil, fixedClock(1), svcSender(), ResponseSpec{Status: "completed"})
 	if err == nil {
 		t.Fatal("nil request must error")
 	}
@@ -120,7 +112,7 @@ func TestBuildResponseFromRequest_CorrelationDefaultsToRequestID(t *testing.T) {
 	if req.CorrelationID != "" {
 		t.Fatalf("fixture precondition: request must have empty correlation_id, got %q", req.CorrelationID)
 	}
-	env, err := BuildResponseFromRequest(req, fixedClock(1), svcSender(), CorrelationKey("r1"), ResponseSpec{Status: "completed"})
+	env, err := BuildResponseFromRequest(req, fixedClock(1), svcSender(), ResponseSpec{Status: "completed"})
 	if err != nil {
 		t.Fatalf("build err: %v", err)
 	}
@@ -133,7 +125,7 @@ func TestBuildResponseFromRequest_CorrelationDefaultsToRequestID(t *testing.T) {
 func TestBuildResponseFromRequest_InheritsCorrelationID(t *testing.T) {
 	req := newRequest("r1", nil)
 	req.CorrelationID = "corr-root"
-	env, err := BuildResponseFromRequest(req, fixedClock(1), svcSender(), CorrelationKey("r1"), ResponseSpec{Status: "completed"})
+	env, err := BuildResponseFromRequest(req, fixedClock(1), svcSender(), ResponseSpec{Status: "completed"})
 	if err != nil {
 		t.Fatalf("build err: %v", err)
 	}
@@ -146,7 +138,7 @@ func TestBuildResponseFromRequest_InheritsCorrelationID(t *testing.T) {
 // else inherits the request visibility.
 func TestBuildResponseFromRequest_VisibilityOverride(t *testing.T) {
 	req := newRequest("r1", nil) // visibility "channel"
-	env, err := BuildResponseFromRequest(req, fixedClock(1), svcSender(), CorrelationKey("r1"), ResponseSpec{
+	env, err := BuildResponseFromRequest(req, fixedClock(1), svcSender(), ResponseSpec{
 		Status:     "completed",
 		Visibility: message.Visibility("private"),
 	})
@@ -157,7 +149,7 @@ func TestBuildResponseFromRequest_VisibilityOverride(t *testing.T) {
 		t.Fatalf("visibility = %q, want override private", env.Visibility)
 	}
 
-	env2, _ := BuildResponseFromRequest(req, fixedClock(1), svcSender(), CorrelationKey("r1"), ResponseSpec{Status: "completed"})
+	env2, _ := BuildResponseFromRequest(req, fixedClock(1), svcSender(), ResponseSpec{Status: "completed"})
 	if env2.Visibility != req.Visibility {
 		t.Fatalf("visibility = %q, want inherited %q", env2.Visibility, req.Visibility)
 	}
@@ -167,7 +159,7 @@ func TestBuildResponseFromRequest_VisibilityOverride(t *testing.T) {
 // payload).
 func TestBuildResponseFromRequest_PayloadError(t *testing.T) {
 	req := newRequest("r1", nil)
-	_, err := BuildResponseFromRequest(req, fixedClock(1), svcSender(), CorrelationKey("r1"), ResponseSpec{
+	_, err := BuildResponseFromRequest(req, fixedClock(1), svcSender(), ResponseSpec{
 		Status:  "completed",
 		Payload: json.RawMessage(`[]`),
 	})
