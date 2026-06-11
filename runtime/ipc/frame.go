@@ -123,14 +123,18 @@ type EmitPayload struct {
 }
 
 // EmitResult is the host's authoritative verdict for one KindEmit: the write
-// outcome the EmitSink produced. It is the wire-side mirror of the harness
-// WriteResult's verdict fields (MessageID on every path; RejectReason set when
-// the 9-step chain rejected). It is the wire contract's own type — the writer
-// contract that crosses the wire — kept here rather than borrowed from harness
-// so the wire layer owns its surface and never depends on the harness package.
+// outcome the EmitSink produced. It mirrors EVERY verdict field of the harness
+// WriteResult — MessageID + Seq on the accepted path, RejectReason + RejectDetail
+// on the rejected path — because the writer contract crossing the wire must not
+// downgrade: a remote cell's Respond has to observe the SAME verdict a local
+// cell's writer returns, not a truncated subset. It is the wire contract's own
+// type (not borrowed from harness) so the wire layer owns its surface and never
+// depends on the harness package.
 type EmitResult struct {
 	MessageID    message.ID `json:"message_id"`
+	Seq          int64      `json:"seq,omitempty"`
 	RejectReason string     `json:"reject_reason,omitempty"`
+	RejectDetail string     `json:"reject_detail,omitempty"`
 }
 
 // EmitAckPayload is the host's reply to one KindEmit: the EmitResult verdict

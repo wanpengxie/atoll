@@ -144,7 +144,9 @@ func (w *RemoteWriter) DeliverAck(ack EmitAckPayload) {
 
 	res := harness.WriteResult{
 		MessageID:    ack.MessageID,
+		Seq:          ack.Seq,
 		RejectReason: harness.HarnessRejectReason(ack.RejectReason),
+		RejectDetail: ack.RejectDetail,
 	}
 	var err error
 	if ack.Err != "" {

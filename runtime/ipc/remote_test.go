@@ -90,7 +90,7 @@ func remotePair(t *testing.T, sink func(env message.Envelope) EmitAckPayload) (*
 func TestRemoteWriterSeesVerdict(t *testing.T) {
 	t.Parallel()
 	rw, cleanup := remotePair(t, func(env message.Envelope) EmitAckPayload {
-		return EmitAckPayload{EmitResult: EmitResult{MessageID: env.ID + "-durable"}}
+		return EmitAckPayload{EmitResult: EmitResult{MessageID: env.ID + "-durable", Seq: 42}}
 	})
 	defer cleanup()
 
@@ -100,6 +100,11 @@ func TestRemoteWriterSeesVerdict(t *testing.T) {
 	}
 	if res.MessageID != message.ID("e1-durable") {
 		t.Fatalf("MessageID = %q, want e1-durable", res.MessageID)
+	}
+	// Seq is part of the authoritative verdict — it must not be dropped on the
+	// wire (a local writer returns the store-allocated seq; so must the remote).
+	if res.Seq != 42 {
+		t.Fatalf("Seq = %d, want 42 (verdict downgraded across the wire)", res.Seq)
 	}
 	if !res.Accepted() {
 		t.Fatalf("want accepted, got reject %q", res.RejectReason)
@@ -114,6 +119,7 @@ func TestRemoteWriterSeesReject(t *testing.T) {
 		return EmitAckPayload{EmitResult: EmitResult{
 			MessageID:    env.ID,
 			RejectReason: string(harness.HarnessKindInvalid),
+			RejectDetail: "kind \"\" not in closed set",
 		}}
 	})
 	defer cleanup()
@@ -127,6 +133,11 @@ func TestRemoteWriterSeesReject(t *testing.T) {
 	}
 	if res.RejectReason != harness.HarnessKindInvalid {
 		t.Fatalf("RejectReason = %q, want %q", res.RejectReason, harness.HarnessKindInvalid)
+	}
+	// RejectDetail is part of the verdict too — the human-readable reason a local
+	// cell would see must survive the wire intact.
+	if res.RejectDetail != "kind \"\" not in closed set" {
+		t.Fatalf("RejectDetail = %q, want the full detail (verdict downgraded)", res.RejectDetail)
 	}
 }
 
