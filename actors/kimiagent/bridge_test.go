@@ -95,7 +95,7 @@ func testConfig() kimiagent.Config {
 	}
 }
 
-// newStartedBridge builds + starts a bridge with the given scripted kimiagent.
+// newStartedBridge builds + starts a bridge with the given scripted agent.
 // Cleanup stops it.
 func newStartedBridge(t *testing.T, w *recordingWriter, sa kimiagent.Agent) *kimiagent.Bridge {
 	t.Helper()

@@ -322,7 +322,11 @@ func (s *Shell) buildRequest(rc RuntimeContext, spec RequestSpec) (message.Envel
 			Audience:      message.Audience{actor.ActorID(spec.HandlerActorID)},
 			Visibility:    message.VisibilityPublic,
 			ParentID:      rc.Trigger.Envelope.ID,
-			CorrelationID: rc.Trigger.CorrelationID,
+			// Correlation root falls back to the trigger's own id when the
+			// trigger carries no correlation_id (a non-normalised trigger) —
+			// the same defensive derivation behavior.CorrelationID gives the
+			// closure, so a request never roots correlation at itself by accident.
+			CorrelationID: behavior.CorrelationID("", rc.Trigger.CorrelationID, rc.Trigger.Envelope.ID),
 			ExpiresAt:     &expiresAt,
 		})
 	if err != nil {

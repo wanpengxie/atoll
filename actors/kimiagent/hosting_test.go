@@ -148,7 +148,7 @@ func assertAgentBehavior(t *testing.T, h agentHost) {
 	t.Helper()
 	defer h.stop()
 
-	// 1. A request becomes a turn; the reply is a public kimiagent.text event
+	// 1. A request becomes a turn; the reply is a public agent.text event
 	//    threaded to the trigger and addressed to the sender.
 	trig := triggerEnv("parity-req")
 	h.deliver(t, &trig)

@@ -104,6 +104,30 @@ func TestNormalizeCallActorResultNilValue(t *testing.T) {
 	}
 }
 
+// A structured error (NewError: the CALL itself failed to build/emit/await)
+// carries a MAP under "error", not a string reason — it is already clean and
+// must pass through UNCHANGED. Regression guard: before, StringValue(map) →
+// fmt.Sprint → the LLM saw "Actor returned failure 'map[code:… message:…]'"
+// (double-wrapping a non-actor failure as an actor one).
+func TestNormalizeCallActorResultPassesStructuredError(t *testing.T) {
+	original := NewError("call_actor", InternalError,
+		"emit channel request xhs.publish: link down", "retry", nil)
+	result := NormalizeCallActorResult(original, "tool:xhs", "xhs.publish")
+	if !result.IsError {
+		t.Fatal("structured error must stay IsError=true")
+	}
+	errObj, ok := result.Value["error"].(map[string]any)
+	if !ok {
+		t.Fatalf("error must stay a structured map (not re-wrapped), got %T", result.Value["error"])
+	}
+	if errObj["code"] != string(InternalError) {
+		t.Fatalf("code must be preserved, got %v", errObj["code"])
+	}
+	if msg, _ := errObj["message"].(string); msg != "emit channel request xhs.publish: link down" {
+		t.Fatalf("message must pass through clean (no map[...] double-wrap), got %q", msg)
+	}
+}
+
 func TestNormalizeCallActorErrorNonError(t *testing.T) {
 	isErr, val := NormalizeCallActorError("call_actor", false, map[string]any{"ok": true}, "a", "t")
 	if isErr {

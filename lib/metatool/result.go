@@ -110,14 +110,18 @@ func TerminalFailureToActorCLI(toolName, actorID, typeName, reason string, detai
 }
 
 // NormalizeCallActorResult normalises a call_actor ResultValue into the
-// actor-CLI closed error set. If the result carries an "error" key, it is
-// mapped to a TerminalFailure; otherwise returned unchanged.
+// actor-CLI closed error set. An actor-RETURNED failure (ResultFromResponse sets
+// a string reason under "error") renders as the actor-CLI failure line. A
+// structured error (NewError: the CALL itself failed to build/emit/await — a
+// {ok:false, error:{code,message}} shape) is ALREADY clean and is passed through
+// unchanged; fmt.Sprint-ing that map into "returned failure 'map[code:…]'" would
+// double-wrap a non-actor failure as an actor one.
 func NormalizeCallActorResult(rv ResultValue, actorID, typeName string) ResultValue {
 	if rv.Value == nil {
 		return rv
 	}
-	if reason := StringValue(rv.Value["error"]); reason != "" {
-		return TerminalFailureToActorCLI(rv.Name, actorID, typeName, reason, rv.Value["payload"])
+	if reason, ok := rv.Value["error"].(string); ok && strings.TrimSpace(reason) != "" {
+		return TerminalFailureToActorCLI(rv.Name, actorID, typeName, strings.TrimSpace(reason), rv.Value["payload"])
 	}
 	return rv
 }
