@@ -32,8 +32,8 @@ type describeActorParams struct {
 }
 
 // ExecuteDescribeActor is the protocol-layer execute function for describe_actor.
-func ExecuteDescribeActor(ctx context.Context, params json.RawMessage, exec Executor, rc RuntimeContext) ResultValue {
-	if exec == nil {
+func ExecuteDescribeActor(ctx context.Context, params json.RawMessage, sh *Shell, rc RuntimeContext) ResultValue {
+	if sh == nil {
 		return NewError("describe_actor", InternalError, "describe_actor tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p describeActorParams
@@ -50,7 +50,7 @@ func ExecuteDescribeActor(ctx context.Context, params json.RawMessage, exec Exec
 	if !rc.InTurn() {
 		return NewError("describe_actor", InternalError, "describe_actor invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
 	}
-	return exec.ExecuteRequest(ctx, rc, RequestSpec{
+	return sh.ExecuteRequest(ctx, rc, RequestSpec{
 		ToolName:       "describe_actor",
 		EnvelopeType:   "actor.describe",
 		HandlerActorID: p.ActorID,
@@ -87,8 +87,8 @@ type describeTypeParams struct {
 }
 
 // ExecuteDescribeType is the protocol-layer execute function for describe_type.
-func ExecuteDescribeType(ctx context.Context, params json.RawMessage, exec Executor, rc RuntimeContext) ResultValue {
-	if exec == nil {
+func ExecuteDescribeType(ctx context.Context, params json.RawMessage, sh *Shell, rc RuntimeContext) ResultValue {
+	if sh == nil {
 		return NewError("describe_type", InternalError, "describe_type tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p describeTypeParams
@@ -110,7 +110,7 @@ func ExecuteDescribeType(ctx context.Context, params json.RawMessage, exec Execu
 		return NewError("describe_type", InternalError, "describe_type invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
 	}
 	payload, _ := json.Marshal(map[string]string{"type": p.Type})
-	return exec.ExecuteRequest(ctx, rc, RequestSpec{
+	return sh.ExecuteRequest(ctx, rc, RequestSpec{
 		ToolName:       "describe_type",
 		EnvelopeType:   "actor.describe",
 		HandlerActorID: p.ActorID,

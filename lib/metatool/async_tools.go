@@ -42,8 +42,8 @@ type awaitResultParams struct {
 }
 
 // ExecuteAwaitResult is the protocol-layer execute function for await_result.
-func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, exec Executor) ResultValue {
-	if exec == nil {
+func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, sh *Shell) ResultValue {
+	if sh == nil {
 		return NewError("await_result", InternalError, "await_result tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p awaitResultParams
@@ -57,7 +57,7 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, exec Execut
 		return PayloadInvalidError("await_result", "request_id is required (from a prior call_actor ack)", "")
 	}
 
-	if !exec.RequestInFlight(reqID) {
+	if !sh.InFlight(reqID) {
 		return NewError(
 			"await_result",
 			InternalError,
@@ -72,9 +72,9 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, exec Execut
 		timeout = time.Duration(p.TimeoutMs) * time.Millisecond
 	}
 
-	finalEnv, ok, err := exec.AwaitRequest(ctx, reqID, timeout)
+	finalEnv, ok, err := sh.Await(ctx, reqID, timeout)
 	if err != nil {
-		exec.AbandonRequest(reqID)
+		sh.Abandon(reqID)
 		return NewError("await_result", InternalError,
 			fmt.Sprintf("await_result %q failed: %v", reqID, err),
 			"Inspect adapter logs; the request may have been abandoned", nil)
@@ -124,8 +124,8 @@ type abandonParams struct {
 }
 
 // ExecuteAbandon is the protocol-layer execute function for abandon.
-func ExecuteAbandon(_ context.Context, params json.RawMessage, exec Executor) ResultValue {
-	if exec == nil {
+func ExecuteAbandon(_ context.Context, params json.RawMessage, sh *Shell) ResultValue {
+	if sh == nil {
 		return NewError("abandon", InternalError, "abandon tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p abandonParams
@@ -138,7 +138,7 @@ func ExecuteAbandon(_ context.Context, params json.RawMessage, exec Executor) Re
 	if reqID == "" {
 		return PayloadInvalidError("abandon", "request_id is required", "")
 	}
-	exec.AbandonRequest(reqID)
+	sh.Abandon(reqID)
 	return ResultValue{
 		Name: "abandon",
 		Value: map[string]any{
@@ -165,11 +165,11 @@ as new messages.
 }
 
 // ExecuteListPending is the protocol-layer execute function for list_pending.
-func ExecuteListPending(_ context.Context, exec Executor) ResultValue {
-	if exec == nil {
+func ExecuteListPending(_ context.Context, sh *Shell) ResultValue {
+	if sh == nil {
 		return NewError("list_pending", InternalError, "list_pending tool not configured", "Retry after the bridge is configured", nil)
 	}
-	ids := exec.PendingRequests()
+	ids := sh.Pending()
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, id.String())

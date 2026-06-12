@@ -5,16 +5,22 @@
 // daemon plugin); cell/port is the channel runtime's link attribute, never
 // this implementation's concern.
 //
+// The agent is ONE client edge that HOLDS a metatool.Shell — the channel's
+// shared actor-invocation machinery (correlation + sync/async + author#2
+// lifecycle). The agent does not re-implement the call mechanism; "100 agents,
+// 100 job-control implementations" is the anti-pattern the shell positioning
+// (bash) closes.
+//
 // Structure (async is the STRUCTURE, sync is an EXPERIENCE):
 //   - Receive (cell goroutine) never blocks: requests/events enqueue a turn;
-//     responses Match the author#2 caller (disarm the timeout timer) and
-//     Deliver to the private futures (wake a bounded-window waiter), falling
-//     through as a new turn when nobody waits.
-//   - A private LLM loop goroutine (the CLIENT EDGE — blocking is legal
-//     here, §2.7) runs go-kimi turns serially; tool calls build requests via
-//     behavior.BuildRequest, Arm author#2, and wait a bounded fast-path
-//     window for the sync experience the model's training distribution
-//     expects.
+//     responses go to shell.Deliver, which Matches author#2 (disarms the
+//     timeout) and wakes a bounded-window waiter — a final nobody consumed
+//     falls through as a new turn.
+//   - A private LLM loop goroutine (the CLIENT EDGE — blocking is legal here,
+//     §2.7) runs go-kimi turns serially; tool calls drive shell ops (the shell
+//     builds requests via behavior.BuildRequest, Arms author#2, emits, and
+//     waits a bounded fast-path window for the sync experience the model's
+//     training distribution expects).
 package agent
 
 import (
@@ -42,6 +48,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/introspect"
+	"github.com/wanpengxie/ActOS/lib/metatool"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -134,19 +141,12 @@ type Bridge struct {
 	testWireEmitter wire.Emitter                                // populated by Start; tests reach in via export_test.go
 	envelopeSeq     atomic.Uint64
 
-	// futures is the agent-PRIVATE collector for the bounded fast-path
-	// wait (the client-edge half; never exposed outside this package).
-	futures *requestCorrelator
-	// caller is closure author#2: arms a timeout terminal per outbound
-	// request, disarmed by Receive's Match on the response.
-	//
-	// behavior.Caller is lock-free by contract (all touches on one cell
-	// goroutine). This agent crosses two goroutines — Arm fires on the
-	// private LLM loop, Match on the cell goroutine — so the agent guards
-	// every caller touch with callerMu (downstream adapts; the base stays
-	// lock-free for single-goroutine actors).
-	callerMu sync.Mutex
-	caller   *behavior.Caller
+	// shell is the channel's actor-invocation shell (correlation +
+	// sync/async + author#2 lifecycle). The agent is one CLIENT EDGE that
+	// HOLDS a shell — it does not own the call machinery (that is shared,
+	// shell-level). Built in Start; go-kimi tool calls drive it from the
+	// private LLM loop; Receive feeds responses in via shell.Deliver.
+	shell *metatool.Shell
 
 	// Private LLM loop plumbing — created in Start, torn down in Stop.
 	turnQ    chan turnItem
@@ -208,11 +208,10 @@ func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Writer
 	}
 
 	b := &Bridge{
-		cfg:     cfg,
-		self:    self,
-		chID:    chID,
-		writer:  w,
-		futures: newRequestCorrelator(),
+		cfg:    cfg,
+		self:   self,
+		chID:   chID,
+		writer: w,
 	}
 	b.agentNew = b.defaultAgentFactory
 	return b, nil
@@ -232,24 +231,6 @@ func (b *Bridge) sender() message.Sender {
 }
 
 func (b *Bridge) clock() time.Time { return time.UnixMilli(b.cfg.NowFn()) }
-
-// armCaller / matchCaller serialize author#2 touches across the cell
-// goroutine (Match in Receive) and the private loop (Arm in tool calls).
-func (b *Bridge) armCaller(env *message.Envelope) {
-	b.callerMu.Lock()
-	defer b.callerMu.Unlock()
-	if b.caller != nil {
-		b.caller.Arm(env)
-	}
-}
-
-func (b *Bridge) matchCaller(env *message.Envelope) {
-	b.callerMu.Lock()
-	defer b.callerMu.Unlock()
-	if b.caller != nil {
-		b.caller.Match(env)
-	}
-}
 
 // Start boots the cognitive engine and the private LLM loop. A boot
 // failure returns the error so the cell dies fast (positive death) —
@@ -271,13 +252,22 @@ func (b *Bridge) Start(ctx context.Context, _ actorrt.ActorContext) error {
 		return err
 	}
 
-	// author#2: every outbound request arms a caller-scoped timeout
-	// terminal; Receive's Match disarms it when the response lands. onFault is
-	// the per-request liveness-break face (symmetric with author#3): a timeout
-	// terminal that fails to land leaves the request closeable by no path, so
-	// the host logs it rather than swallowing it.
-	b.caller = behavior.NewCaller(b.sender(), b.writer, b.clock, func(reqID message.ID, err error) {
-		slog.Default().Warn("agent.caller_timeout_fault", "request_id", string(reqID), "err", err)
+	// The shell owns the outbound request lifecycle (build + Arm author#2 +
+	// emit + correlate). author#2 arms a caller-scoped timeout terminal per
+	// outbound request; Deliver's Match disarms it when the response lands.
+	// OnFault is the per-request liveness-break face (symmetric with
+	// author#3): a timeout terminal that fails to land leaves the request
+	// closeable by no path, so the host logs it rather than swallowing it.
+	b.shell = metatool.NewShell(metatool.ShellConfig{
+		Writer:         b.writer,
+		ChannelID:      b.chID,
+		Sender:         b.sender(),
+		Clock:          b.clock,
+		EnvelopeID:     b.envelopeID,
+		FastPathWindow: b.cfg.FastPathWindow,
+		OnFault: func(reqID message.ID, err error) {
+			slog.Default().Warn("agent.caller_timeout_fault", "request_id", string(reqID), "err", err)
+		},
 	})
 
 	loopCtx, cancel := context.WithCancel(ctx)
@@ -304,11 +294,9 @@ func (b *Bridge) Stop(_ context.Context) error {
 			close(b.turnQ)
 		}
 		b.loopWG.Wait()
-		b.callerMu.Lock()
-		if b.caller != nil {
-			b.caller.Stop()
+		if b.shell != nil {
+			b.shell.Stop()
 		}
-		b.callerMu.Unlock()
 		if b.kagent != nil {
 			closeErr = b.kagent.Close()
 		}
@@ -342,10 +330,11 @@ func (b *Bridge) Receive(ctx context.Context, env *message.Envelope) error {
 	}
 
 	if env.Kind == message.KindResponse && env.ParentID != "" {
-		b.matchCaller(env)
+		// The shell Matches author#2 (disarms the timeout) and routes the
+		// response to any bounded-window waiter. A final nobody waited for
+		// becomes a new turn (the async result feeding the next step).
 		_, final := behavior.ParseFinalStatus(env.Payload)
-		disp := b.futures.Deliver(env)
-		if disp == noActiveWaiter && final {
+		if consumed := b.shell.Deliver(env); !consumed && final {
 			b.enqueueTurn(*env)
 		}
 		return nil

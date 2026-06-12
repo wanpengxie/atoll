@@ -61,9 +61,9 @@ type callActorParams struct {
 
 // ExecuteCallActor is the protocol-layer execute function for call_actor.
 // It validates params, normalises the payload, and delegates to the
-// Executor for envelope dispatch.
-func ExecuteCallActor(ctx context.Context, params json.RawMessage, exec Executor, rc RuntimeContext) ResultValue {
-	if exec == nil {
+// Shell for envelope dispatch.
+func ExecuteCallActor(ctx context.Context, params json.RawMessage, sh *Shell, rc RuntimeContext) ResultValue {
+	if sh == nil {
 		return NewError("call_actor", InternalError, "call_actor tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p callActorParams
@@ -99,7 +99,7 @@ func ExecuteCallActor(ctx context.Context, params json.RawMessage, exec Executor
 		}
 	}
 
-	result := exec.ExecuteRequest(ctx, rc, RequestSpec{
+	result := sh.ExecuteRequest(ctx, rc, RequestSpec{
 		ToolName:       "call_actor",
 		EnvelopeType:   p.Type,
 		HandlerActorID: p.ActorID,
