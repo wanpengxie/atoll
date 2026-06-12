@@ -73,7 +73,7 @@ func ResultFromResponse(toolName string, env message.Envelope) (ResultValue, boo
 			IsError: true,
 		}, true
 	}
-	value := payloadValue(env.Payload)
+	value := PayloadValue(env.Payload)
 	if reason := ResponseFailureReason(env.Payload); reason != "" {
 		return ResultValue{
 			Name: toolName,
@@ -91,8 +91,11 @@ func ResultFromResponse(toolName string, env message.Envelope) (ResultValue, boo
 	return ResultValue{Name: toolName, Value: map[string]any{"result": value}}, false
 }
 
-// payloadValue decodes a raw JSON payload to a Go value.
-func payloadValue(raw json.RawMessage) any {
+// PayloadValue decodes a raw JSON payload to a Go value. Exported because
+// metatool is the ONE home of LLM-facing payload decoding — adapters (the agent
+// channel-tool binding) reuse it rather than re-deriving the same coercion
+// (empty/null → {}, non-JSON → raw text, object/scalar passthrough).
+func PayloadValue(raw json.RawMessage) any {
 	text := strings.TrimSpace(string(raw))
 	if text == "" || text == "null" {
 		return map[string]any{}

@@ -390,7 +390,7 @@ func channelToolResultFromResponse(toolName string, env message.Envelope) types.
 	}
 	// Success: return the raw payload value (map, string, etc.) — not
 	// wrapped in a map — for go-kimi compatibility.
-	value := toolPayloadValue(env.Payload)
+	value := metatool.PayloadValue(env.Payload)
 	return types.ToolResult{
 		Name:  toolName,
 		Value: types.ToolReturnValue{Value: value},
@@ -405,20 +405,6 @@ func channelToolErrorResult(toolName, msg string) types.ToolResult {
 	}
 }
 
-func toolPayloadValue(raw json.RawMessage) any {
-	text := strings.TrimSpace(string(raw))
-	if text == "" || text == "null" {
-		return map[string]any{}
-	}
-	var value any
-	if err := json.Unmarshal([]byte(text), &value); err != nil {
-		return text
-	}
-	if value == nil {
-		return map[string]any{}
-	}
-	return value
-}
 
 // buildChannelRequest assembles the kind=request envelope for a channel tool
 // call through the behavior call-face builder (ONE home for request
