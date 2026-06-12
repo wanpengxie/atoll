@@ -17,6 +17,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/actors/device"
 	"github.com/wanpengxie/ActOS/actors/echo"
+	"github.com/wanpengxie/ActOS/actors/kimi"
 	agentactor "github.com/wanpengxie/ActOS/actors/kimiagent"
 	"github.com/wanpengxie/ActOS/actors/xhs"
 	"github.com/wanpengxie/ActOS/cmd/internal/dotenv"
@@ -53,6 +54,16 @@ func removeName(names []string, drop string) []string {
 	return out
 }
 
+// isSpecialActor reports whether an actor name is handled by a dedicated
+// config-injecting block (below) rather than the generic registry loop.
+func isSpecialActor(name string) bool {
+	switch name {
+	case "agent", "xhs", "kimi":
+		return true
+	}
+	return false
+}
+
 // channelFromServerURL extracts the ?channel= query from the server WS URL.
 func channelFromServerURL(raw string) string {
 	u, err := url.Parse(raw)
@@ -69,6 +80,7 @@ func main() {
 	name := flag.String("name", "", "device name; default: hostname")
 	workspace := flag.String("workspace", "", "workspace root dir; default: ~/.coagent/workspace")
 	xhsAddr := flag.String("xhs-device-addr", "127.0.0.1:8090", "local WS addr the xhs browser extension connects in to")
+	kimiAddr := flag.String("kimi-device-addr", "127.0.0.1:8091", "local WS addr the Kimi WebBridge extension connects in to")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -95,9 +107,14 @@ func main() {
 		}
 	}
 
-	// Build actor declarations with factories.
+	// Build actor declarations with factories. The special-cased actors
+	// (agent / xhs / kimi) are handled in dedicated blocks below — they need
+	// per-actor config injection — so the generic registry loop skips them.
 	var decls []platform.ActorDecl
 	for _, n := range actorNames {
+		if isSpecialActor(n) {
+			continue
+		}
 		factory, ok := registry[n]
 		if !ok {
 			log.Fatalf("daemon: unknown actor %q", n)
@@ -179,6 +196,29 @@ func main() {
 			Binding: actor.BindingRuntimeInboundViaRelay,
 			Factory: func(w harness.Writer) actorrt.Actor {
 				return xhs.NewActor(w, xhsCfg)
+			},
+		})
+	}
+
+	// The kimi (Kimi WebBridge) adapter is opt-in (--actors=kimi,...). Same shape
+	// as xhs: a PRIVATE loopback WS endpoint the browser extension connects in to
+	// (transport inlined in the adapter), special-cased here to inject its listen
+	// addr. Keyless — the 127.0.0.1 bind is the trust boundary. Binding is
+	// runtime_inbound_via_relay (the device connects IN; the substrate only
+	// records the label, it does not route the transport). The addr defaults to
+	// :8091 so it never collides with xhs's :8090.
+	if hasName(actorNames, "kimi") {
+		actorNames = removeName(actorNames, "kimi")
+		kimiCfg := kimi.Config{
+			ListenAddr: *kimiAddr,
+			Logger:     slog.Default(),
+		}
+		decls = append(decls, platform.ActorDecl{
+			ID:      kimi.DefaultActorID,
+			Kind:    actor.KindTool,
+			Binding: actor.BindingRuntimeInboundViaRelay,
+			Factory: func(w harness.Writer) actorrt.Actor {
+				return kimi.NewActor(w, kimiCfg)
 			},
 		})
 	}
