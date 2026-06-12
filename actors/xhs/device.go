@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -43,8 +44,20 @@ import (
 // keepalive + read deadlines (for a half-dead WAN peer that never sends FIN) are
 // an additive hardening — see doc.go.
 
+// deviceUpgrader gates the WS handshake. CheckOrigin closes the same-machine
+// cross-origin hole the loopback bind alone cannot: loopback keeps OTHER machines
+// out, but a malicious web page in the user's OWN browser is same-machine and can
+// open a cross-origin WS to this keyless endpoint (displacing the real extension,
+// stealing agent-issued commands). Origin defends against that page:
+//   - empty Origin → allow. Non-browser clients (the real extension's
+//     service-worker, our Go mock dialer) send no Origin header.
+//   - "chrome-extension://…" → allow. The real browser extension.
+//   - anything else (http/https web pages) → reject.
 var deviceUpgrader = websocket.Upgrader{
-	CheckOrigin: func(*http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		return origin == "" || strings.HasPrefix(origin, "chrome-extension://")
+	},
 }
 
 // maxDeviceFrameBytes caps one inbound device frame. The endpoint is local, so

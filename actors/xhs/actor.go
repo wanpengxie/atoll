@@ -91,12 +91,11 @@ var _ actorrt.Stopper = (*Actor)(nil)
 // half-listening adapter ever registers as serviceable.
 func (a *Actor) Start(ctx context.Context, _ actorrt.ActorContext) error {
 	// The trust model assumes a loopback bind (only same-machine processes can
-	// reach the keyless endpoint). A non-loopback addr silently widens that
-	// boundary — surface it rather than expose the device port to the network.
+	// reach the keyless endpoint). A non-loopback addr is a CONFIG ERROR (spec
+	// §6.1): it would expose the keyless device port to the network. Fail fast
+	// (positive death) rather than start a serviceable-but-exposed endpoint.
 	if !isLoopbackAddr(a.dev.addrCfg) {
-		a.dev.logger.Warn("xhs.device.non_loopback_bind",
-			"addr", a.dev.addrCfg,
-			"detail", "device endpoint is keyless and trusts localhost; bind 127.0.0.1")
+		return fmt.Errorf("xhs: device endpoint is keyless and trusts localhost; refusing non-loopback bind %q (use 127.0.0.1)", a.dev.addrCfg)
 	}
 	return a.dev.start(ctx)
 }

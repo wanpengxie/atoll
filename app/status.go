@@ -64,6 +64,11 @@ func (a *App) handleActorStatus(c *gin.Context) {
 	// handleSendMessage), addressed solely to the target actor.
 	env := a.newClientEnvelope(channelID, senderID, "", introspect.QueryStatus,
 		message.KindRequest, nil, []actor.ActorID{actor.ActorID(actorID)})
+	// Mark the probe (and the response threaded to it) system-visibility so the UI
+	// threading filters it out — a status probe is a UI affordance, not chat, and
+	// must not grow an actor.status thread in the conversation stream. Interim
+	// mitigation; the deeper "live state in truth" decision is owner's to make.
+	env.Visibility = message.VisibilitySystem
 
 	gw := homeGateway(channelID, home)
 	ctx := harness.CtxWithCaller(c.Request.Context(), harness.CallerContext{

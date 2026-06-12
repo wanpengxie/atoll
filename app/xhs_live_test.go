@@ -346,10 +346,15 @@ func TestXHSLiveActorStatus(t *testing.T) {
 	waitDeviceOnline(t, env, s, "tool:xhs", false, 5*time.Second)
 }
 
-// waitDeviceOnline polls GET /actors/:id/status until the actor's
-// status.device_online matches want (or fails). It tolerates transient live:false
-// (the readLoop's offline flip lags the socket close by a poll or two) by
-// retrying until the deadline.
+// waitDeviceOnline polls GET /actors/:id/status until the actor returns a
+// SUCCESSFUL actor.status answer (live:true) whose status.device_online matches
+// want (or fails). It deliberately does NOT accept live:false as proof of
+// offline: live:false means the actor was unreachable (it never answered), which
+// would let a never-answering actor pass the offline assertion vacuously. The
+// offline proof must be a real answer carrying device_online:false — that is what
+// shows the status route reflects the dropped device. It tolerates transient
+// mismatch (the readLoop's offline flip lags the socket close by a poll or two)
+// by retrying until the deadline.
 func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want bool, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
@@ -357,19 +362,15 @@ func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want
 		w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, id), nil, s.cookies)
 		assertStatus(t, w, http.StatusOK)
 		body := respJSON(t, w)
-		live, _ := body["live"].(bool)
-		if live {
+		if live, _ := body["live"].(bool); live {
 			if st, ok := body["status"].(map[string]any); ok {
 				if online, ok := st["device_online"].(bool); ok && online == want {
 					return
 				}
 			}
-		} else if !want {
-			// live:false (actor unreachable) also satisfies "device offline".
-			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("status device_online never became %v within %s (last body=%v)", want, timeout, body)
+			t.Fatalf("status device_online never became %v (via a live answer) within %s (last body=%v)", want, timeout, body)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

@@ -241,10 +241,15 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 type mockDevice struct {
 	conn *websocket.Conn
 	done chan error
+
+	mu       sync.Mutex
+	lastDown metatoolDownFrame // most recent down-frame the adapter pushed
 }
 
 // startMockDevice dials the adapter's /device endpoint (retrying until the cell
-// binds) and serves canned replies built by replyFn.
+// binds) and serves canned replies built by replyFn. It records the most recent
+// down-frame so a test can assert the adapter's type→cmd / payload mapping landed
+// on the wire (not just that the response came back).
 func startMockDevice(t *testing.T, addr string, replyFn func(down metatoolDownFrame) metatoolUpFrame) *mockDevice {
 	t.Helper()
 	conn := dialDeviceWithRetry(t, fmt.Sprintf("ws://%s/device", addr), 3*time.Second)
@@ -257,6 +262,9 @@ func startMockDevice(t *testing.T, addr string, replyFn func(down metatoolDownFr
 				return
 			}
 			t.Logf("device[%s] down: cid=%s cmd=%s params=%s", addr, down.CorrelationID, down.Cmd, string(down.Params))
+			md.mu.Lock()
+			md.lastDown = down
+			md.mu.Unlock()
 			if err := conn.WriteJSON(replyFn(down)); err != nil {
 				md.done <- err
 				return
@@ -264,6 +272,13 @@ func startMockDevice(t *testing.T, addr string, replyFn func(down metatoolDownFr
 		}
 	}()
 	return md
+}
+
+// last returns the most recent down-frame the adapter pushed to this device.
+func (m *mockDevice) last() metatoolDownFrame {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.lastDown
 }
 
 func (m *mockDevice) close() { _ = m.conn.Close() }
@@ -367,6 +382,18 @@ func TestMetatoolLiveCallActor(t *testing.T) {
 			t.Fatalf("kimi call_actor returned error: %+v", rv.Value)
 		}
 		assertStatusCompleted(t, rv)
+
+		// Assert the down-frame the adapter pushed: kimi.command's `action` must map
+		// to down.Cmd and `args` (carrying the url) must pass through as down.Params.
+		// Guards against a kimi.command→cmd mapping regression that would otherwise
+		// pass vacuously (the canned reply succeeds regardless of what arrived).
+		down := kimiDev.last()
+		if down.Cmd != "navigate" {
+			t.Fatalf("kimi down-frame cmd=%q want navigate (action→cmd mapping); down=%+v", down.Cmd, down)
+		}
+		if !strings.Contains(string(down.Params), "https://example.com") {
+			t.Fatalf("kimi down-frame params missing url; params=%s", down.Params)
+		}
 	})
 
 	// --- STAGE 3: device hang-up → call_actor surfaces device_offline ----------

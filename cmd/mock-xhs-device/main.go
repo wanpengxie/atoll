@@ -103,11 +103,12 @@ func main() {
 		Path:   "/device",
 	}
 
-	backoff := 500 * time.Millisecond
+	const initialBackoff = 500 * time.Millisecond
 	const maxBackoff = 30 * time.Second
+	backoff := initialBackoff
 
 	for ctx.Err() == nil {
-		err := runOnce(ctx, u.String())
+		err := runOnce(ctx, u.String(), func() { backoff = initialBackoff })
 		if ctx.Err() != nil {
 			break
 		}
@@ -127,13 +128,16 @@ func main() {
 }
 
 // runOnce dials the endpoint and serves down-frames until the connection drops
-// or ctx is cancelled. A clean dial resets nothing here; the caller owns backoff.
-func runOnce(ctx context.Context, wsURL string) error {
+// or ctx is cancelled. On a successful dial it calls onConnected so the caller
+// can reset its reconnect backoff: a long-lived connection that finally drops
+// should retry from the initial delay, not from the historically accumulated one.
+func runOnce(ctx context.Context, wsURL string, onConnected func()) error {
 	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, nil)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
+	onConnected()
 	log.Printf("connected to %s", wsURL)
 
 	// Close the conn when ctx is cancelled so the blocking ReadJSON unwinds.

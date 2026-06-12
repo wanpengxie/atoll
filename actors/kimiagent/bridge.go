@@ -329,9 +329,14 @@ func (b *Bridge) Receive(ctx context.Context, env *message.Envelope) error {
 		return nil
 	}
 
-	// Mechanical self-answers (actor citizenship) — never fed to the LLM.
+	// Mechanical self-answers (actor citizenship) — never fed to the LLM. These
+	// are introspection queries the actor answers from itself; routing them to a
+	// turn would burn an LLM call to restate a fact the bridge already holds.
 	if env.Kind == message.KindRequest && env.Type == introspect.QueryDescribe {
 		return b.handleDescribe(ctx, env)
+	}
+	if env.Kind == message.KindRequest && env.Type == introspect.QueryStatus {
+		return b.handleStatus(ctx, env)
 	}
 
 	if env.Kind == message.KindResponse && env.ParentID != "" {
