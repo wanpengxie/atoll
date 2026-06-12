@@ -16,12 +16,6 @@ const (
 	TypeRecentFetch = "xhs.recent.fetch"
 )
 
-// Device-facing event types the adapter emits to self-report connection state.
-const (
-	TypeDeviceOnline  = "xhs.device.online"
-	TypeDeviceOffline = "xhs.device.offline"
-)
-
 // deadlines: publish is a long site action (image upload + post); the rest are
 // quick reads. Layered per §3.3 / §6.2 of the adapter spec — a request past its
 // deadline is reaped into a timeout failure.

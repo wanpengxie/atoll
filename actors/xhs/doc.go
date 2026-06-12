@@ -29,11 +29,23 @@
 // conn flips the adapter offline and waits for a fresh connection — it does NOT
 // panic; only an untrustworthy internal state would (positive death).
 //
+// v1 scope (additive hardening deferred until the pain is concrete):
+//
+//   - Device presence is tracked INTERNALLY (an offline device fast-fails
+//     device_offline) but NOT projected as a channel event — there is no
+//     consumer yet and the audience of a presence broadcast is undefined. Emit
+//     it additively once a consumer + named audience exist.
+//   - The endpoint serves a LOCAL loopback extension, so a dropped socket
+//     surfaces as a read error and flips offline. Ping/pong keepalive + read
+//     deadlines (for a half-dead WAN peer that never sends FIN) are additive.
+//   - The downstream write carries a write deadline, so a stuck peer fails the
+//     conn instead of freezing the adapter.
+//
 // File layout (one concern per file):
 //
 //   - actor.go    Actor struct + NewActor + Start/Stop/Receive + describe dispatch.
 //   - device.go   WS listener + accept + read loop + in-flight table + reaper +
-//     downstream send + device.online/offline events.
+//     downstream send (write-deadline bounded).
 //   - wire.go     the minimal device frame structs.
 //   - types.go    inward type constants + per-type cmd mapping + per-type deadline.
 //   - describe.go the TypeMeta catalog for actor.describe.

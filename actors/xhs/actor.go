@@ -10,7 +10,6 @@ import (
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/introspect"
 	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
@@ -22,21 +21,26 @@ const DefaultActorID actor.ActorID = "tool:xhs"
 // Config drives an Actor. ListenAddr is the local address the private device WS
 // endpoint binds (e.g. "127.0.0.1:0" lets the OS pick a port — tests read the
 // resolved addr back via ListenAddr()). APIKey is the shared secret the
-// extension must present on the ?key= query.
+// extension must present on the ?key= query (empty ⇒ the endpoint fails closed,
+// rejecting all connections).
 type Config struct {
 	ListenAddr string
 	APIKey     string
-	// ChannelID scopes the cell. The adapter stamps it on the device.online/
-	// offline events it authors (a cell is channel-scoped; behavior.EmitEvent
-	// needs the channel for the envelope builder).
-	ChannelID channel.ID
 	// NowFn returns the current time; defaults to time.Now. Injectable so
 	// tests can shorten deadlines deterministically (the reaper reads it).
 	NowFn func() time.Time
+	// ReaperInterval is how often the in-flight table is swept for timeouts;
+	// defaults to defaultReaperInterval. Injectable so tests catch shortened
+	// deadlines promptly without a production-tuned constant.
+	ReaperInterval time.Duration
 	// Logger surfaces device-face edges (accept/drop/reaper). Defaults to a
 	// discard logger.
 	Logger *slog.Logger
 }
+
+// defaultReaperInterval is the production in-flight sweep cadence. The table is
+// tiny, so a 1s scan is cheap; tests inject a shorter one.
+const defaultReaperInterval = time.Second
 
 // Actor is the xhs adapter cell. The inward (channel) face is this struct's
 // Receive/describe; the outward (device) face is the embedded *device, which
@@ -50,7 +54,6 @@ type Config struct {
 type Actor struct {
 	writer  harness.Writer
 	actorID actor.ActorID
-	chID    channel.ID
 	clock   func() time.Time
 	dev     *device
 }
@@ -67,13 +70,16 @@ func NewActor(w harness.Writer, cfg Config) *Actor {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	reaperInterval := cfg.ReaperInterval
+	if reaperInterval <= 0 {
+		reaperInterval = defaultReaperInterval
+	}
 	a := &Actor{
 		writer:  w,
 		actorID: DefaultActorID,
-		chID:    cfg.ChannelID,
 		clock:   clock,
 	}
-	a.dev = newDevice(a, cfg.ListenAddr, cfg.APIKey, clock, logger)
+	a.dev = newDevice(a, cfg.ListenAddr, cfg.APIKey, clock, reaperInterval, logger)
 	return a
 }
 
@@ -85,6 +91,11 @@ var _ actorrt.Stopper = (*Actor)(nil)
 // A bind failure returns the error so the cell dies fast (positive death) — no
 // half-listening adapter ever registers as serviceable.
 func (a *Actor) Start(ctx context.Context, _ actorrt.ActorContext) error {
+	if a.dev.apiKey == "" {
+		// Fail closed: the device endpoint will reject every connection. Surface
+		// it loudly rather than appear serviceable with an unreachable device.
+		a.dev.logger.Warn("xhs.device.no_key", "detail", "XHS_DEVICE_KEY unset — device endpoint rejects all connections")
+	}
 	return a.dev.start(ctx)
 }
 
@@ -106,7 +117,13 @@ func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
 	if env == nil {
 		return nil
 	}
-	if env.Kind == message.KindRequest && env.Type == introspect.QueryDescribe {
+	// The adapter only ACTS on requests — it serves request/response types and
+	// answers describe. A non-request (event/response addressed here) has no
+	// terminal to author, so it is dropped rather than mis-handled.
+	if env.Kind != message.KindRequest {
+		return nil
+	}
+	if env.Type == introspect.QueryDescribe {
 		return a.handleDescribe(ctx, env)
 	}
 

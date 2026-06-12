@@ -58,31 +58,15 @@ func (w *recordingWriter) waitResponse(t *testing.T, parentID message.ID, timeou
 	}
 }
 
-// waitEvent polls for a kind=event envelope of the given type.
-func (w *recordingWriter) waitEvent(t *testing.T, eventType string, timeout time.Duration) bool {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		for _, env := range w.Written() {
-			if env.Kind == message.KindEvent && env.Type == eventType {
-				return true
-			}
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-}
-
-// startActor builds + starts an xhs adapter on a free port. Cleanup stops it.
+// startActor builds + starts an xhs adapter on a free port. Cleanup stops it. A
+// short reaper interval keeps the timeout test prompt without a prod constant.
 func startActor(t *testing.T, w *recordingWriter, cfg Config) *Actor {
 	t.Helper()
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = "127.0.0.1:0"
 	}
-	if cfg.ChannelID == "" {
-		cfg.ChannelID = testChannelID
+	if cfg.ReaperInterval == 0 {
+		cfg.ReaperInterval = 20 * time.Millisecond
 	}
 	a := NewActor(w, cfg)
 	if err := a.Start(context.Background(), nil); err != nil {
@@ -90,6 +74,27 @@ func startActor(t *testing.T, w *recordingWriter, cfg Config) *Actor {
 	}
 	t.Cleanup(func() { _ = a.Stop(context.Background()) })
 	return a
+}
+
+// waitOnline blocks until the adapter has registered a live device connection.
+// (Dial returns after the HTTP upgrade handshake, slightly before handleAccept
+// finishes registering the conn — this is the white-box synchronisation that the
+// dropped online event used to provide.)
+func waitOnline(t *testing.T, a *Actor) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		a.dev.mu.Lock()
+		c := a.dev.conn
+		a.dev.mu.Unlock()
+		if c != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("device never came online")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 // fakeExtension is a gorilla WS client standing in for the browser extension.
@@ -157,11 +162,7 @@ func TestRoundTrip(t *testing.T) {
 	w := &recordingWriter{}
 	a := startActor(t, w, Config{APIKey: testAPIKey})
 	ext := dialExtension(t, a, testAPIKey)
-
-	// Wait for online event to confirm the conn is registered before dispatch.
-	if !w.waitEvent(t, TypeDeviceOnline, time.Second) {
-		t.Fatal("no device.online event")
-	}
+	waitOnline(t, a)
 
 	req := request("req-1", TypeSearch, map[string]any{"keyword": "go", "limit": 5})
 	if err := a.Receive(context.Background(), req); err != nil {
@@ -233,9 +234,7 @@ func TestTimeout(t *testing.T) {
 	}
 	a := startActor(t, w, Config{APIKey: testAPIKey, NowFn: now})
 	ext := dialExtension(t, a, testAPIKey)
-	if !w.waitEvent(t, TypeDeviceOnline, time.Second) {
-		t.Fatal("no device.online event")
-	}
+	waitOnline(t, a)
 
 	req := request("req-to", TypeSearch, map[string]any{"keyword": "x"})
 	if err := a.Receive(context.Background(), req); err != nil {
@@ -294,7 +293,7 @@ func TestDescribe(t *testing.T) {
 	}
 }
 
-// authReject confirms a wrong key is rejected at upgrade.
+// 5. AuthReject: a wrong key is rejected at upgrade.
 func TestAuthReject(t *testing.T) {
 	w := &recordingWriter{}
 	a := startActor(t, w, Config{APIKey: testAPIKey})
@@ -302,5 +301,62 @@ func TestAuthReject(t *testing.T) {
 	_, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err == nil {
 		t.Fatal("expected dial rejection with wrong key")
+	}
+}
+
+//  6. FailClosed: an adapter with no configured key rejects ALL connections —
+//     the private endpoint never degrades to actor-only auth.
+func TestFailClosedNoKey(t *testing.T) {
+	w := &recordingWriter{}
+	a := startActor(t, w, Config{APIKey: ""})
+	url := "ws://" + a.ListenAddr() + "/device?actor=" + string(DefaultActorID) + "&key="
+	if _, _, err := websocket.DefaultDialer.Dial(url, nil); err == nil {
+		t.Fatal("expected rejection: an unconfigured key must fail closed")
+	}
+}
+
+//  7. ConnReplacement: a new device connection displaces the old one (one
+//     adapter, one device). The old socket is closed; the live one serves.
+func TestConnReplacement(t *testing.T) {
+	w := &recordingWriter{}
+	a := startActor(t, w, Config{APIKey: testAPIKey})
+	ext1 := dialExtension(t, a, testAPIKey)
+	waitOnline(t, a)
+
+	ext2 := dialExtension(t, a, testAPIKey)
+	waitOnline(t, a)
+
+	// ext1 must be displaced: its read errors out once the adapter closes it.
+	_ = ext1.conn.SetReadDeadline(time.Now().Add(time.Second))
+	if _, _, err := ext1.conn.ReadMessage(); err == nil {
+		t.Fatal("expected ext1 to be displaced (read should error)")
+	}
+
+	// The live connection (ext2) serves the next request.
+	req := request("req-repl", TypeSearch, map[string]any{"keyword": "x"})
+	if err := a.Receive(context.Background(), req); err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	down := ext2.read(t)
+	if down.CorrelationID != "req-repl" {
+		t.Errorf("ext2 got correlation_id=%q want req-repl", down.CorrelationID)
+	}
+}
+
+//  8. KindGuard: a non-request (event-kind) addressed to a served type is
+//     dropped — the adapter has no terminal to author, so it emits nothing.
+func TestKindGuardDropsNonRequest(t *testing.T) {
+	w := &recordingWriter{}
+	a := startActor(t, w, Config{APIKey: testAPIKey})
+
+	ev := request("ev-1", TypeSearch, map[string]any{"keyword": "x"})
+	ev.Kind = message.KindEvent
+	if err := a.Receive(context.Background(), ev); err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	// Give any erroneous async path a moment, then assert nothing was emitted.
+	time.Sleep(30 * time.Millisecond)
+	if got := w.Written(); len(got) != 0 {
+		t.Fatalf("expected no emit for non-request, got %d", len(got))
 	}
 }

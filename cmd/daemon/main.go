@@ -162,19 +162,14 @@ func main() {
 
 	// The xhs adapter is opt-in (--actors=xhs,...). It owns a PRIVATE local WS
 	// endpoint the browser extension connects in to (transport inlined in the
-	// adapter), so it is special-cased here to inject its listen addr + api key
-	// + channel id. Binding is runtime_inbound_via_relay (the device connects
-	// IN; the substrate only records the label, it does not route the transport).
+	// adapter), so it is special-cased here to inject its listen addr + api key.
+	// Binding is runtime_inbound_via_relay (the device connects IN; the substrate
+	// only records the label, it does not route the transport).
 	if hasName(actorNames, "xhs") {
 		actorNames = removeName(actorNames, "xhs")
-		chID := channelFromServerURL(*ws)
-		if chID == "" {
-			log.Fatalf("daemon: --actors=xhs requires the --server URL to carry ?channel=<id>")
-		}
 		xhsCfg := xhs.Config{
 			ListenAddr: *xhsAddr,
 			APIKey:     os.Getenv("XHS_DEVICE_KEY"),
-			ChannelID:  channel.ID(chID),
 			Logger:     slog.Default(),
 		}
 		decls = append(decls, platform.ActorDecl{
