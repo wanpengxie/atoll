@@ -16,7 +16,6 @@ import (
 )
 
 const testChannelID = channel.ID("ch-test")
-const testAPIKey = "secret"
 
 // recordingWriter is a concurrency-safe harness.Writer double (mirrors the
 // kimiagent test double — the adapter emits from the read loop + reaper
@@ -102,9 +101,9 @@ type fakeExtension struct {
 	conn *websocket.Conn
 }
 
-func dialExtension(t *testing.T, a *Actor, key string) *fakeExtension {
+func dialExtension(t *testing.T, a *Actor) *fakeExtension {
 	t.Helper()
-	url := "ws://" + a.ListenAddr() + "/device?actor=" + string(DefaultActorID) + "&key=" + key
+	url := "ws://" + a.ListenAddr() + "/device"
 	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
 	if err != nil {
 		t.Fatalf("dial extension: %v", err)
@@ -160,8 +159,8 @@ func responseStatus(t *testing.T, env message.Envelope) (status, errorCode strin
 //     comes back as a completed response carrying the result.
 func TestRoundTrip(t *testing.T) {
 	w := &recordingWriter{}
-	a := startActor(t, w, Config{APIKey: testAPIKey})
-	ext := dialExtension(t, a, testAPIKey)
+	a := startActor(t, w, Config{})
+	ext := dialExtension(t, a)
 	waitOnline(t, a)
 
 	req := request("req-1", TypeSearch, map[string]any{"keyword": "go", "limit": 5})
@@ -202,7 +201,7 @@ func TestRoundTrip(t *testing.T) {
 //     device_offline.
 func TestOffline(t *testing.T) {
 	w := &recordingWriter{}
-	a := startActor(t, w, Config{APIKey: testAPIKey})
+	a := startActor(t, w, Config{})
 
 	req := request("req-off", TypeSearch, map[string]any{"keyword": "x"})
 	if err := a.Receive(context.Background(), req); err != nil {
@@ -232,8 +231,8 @@ func TestTimeout(t *testing.T) {
 		defer mu.Unlock()
 		return base
 	}
-	a := startActor(t, w, Config{APIKey: testAPIKey, NowFn: now})
-	ext := dialExtension(t, a, testAPIKey)
+	a := startActor(t, w, Config{NowFn: now})
+	ext := dialExtension(t, a)
 	waitOnline(t, a)
 
 	req := request("req-to", TypeSearch, map[string]any{"keyword": "x"})
@@ -263,7 +262,7 @@ func TestTimeout(t *testing.T) {
 // 4. Describe: actor.describe returns the four-type catalog.
 func TestDescribe(t *testing.T) {
 	w := &recordingWriter{}
-	a := startActor(t, w, Config{APIKey: testAPIKey})
+	a := startActor(t, w, Config{})
 
 	req := request("req-desc", "actor.describe", map[string]any{})
 	if err := a.Receive(context.Background(), req); err != nil {
@@ -293,37 +292,15 @@ func TestDescribe(t *testing.T) {
 	}
 }
 
-// 5. AuthReject: a wrong key is rejected at upgrade.
-func TestAuthReject(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{APIKey: testAPIKey})
-	url := "ws://" + a.ListenAddr() + "/device?actor=" + string(DefaultActorID) + "&key=wrong"
-	_, _, err := websocket.DefaultDialer.Dial(url, nil)
-	if err == nil {
-		t.Fatal("expected dial rejection with wrong key")
-	}
-}
-
-//  6. FailClosed: an adapter with no configured key rejects ALL connections —
-//     the private endpoint never degrades to actor-only auth.
-func TestFailClosedNoKey(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{APIKey: ""})
-	url := "ws://" + a.ListenAddr() + "/device?actor=" + string(DefaultActorID) + "&key="
-	if _, _, err := websocket.DefaultDialer.Dial(url, nil); err == nil {
-		t.Fatal("expected rejection: an unconfigured key must fail closed")
-	}
-}
-
-//  7. ConnReplacement: a new device connection displaces the old one (one
+//  5. ConnReplacement: a new device connection displaces the old one (one
 //     adapter, one device). The old socket is closed; the live one serves.
 func TestConnReplacement(t *testing.T) {
 	w := &recordingWriter{}
-	a := startActor(t, w, Config{APIKey: testAPIKey})
-	ext1 := dialExtension(t, a, testAPIKey)
+	a := startActor(t, w, Config{})
+	ext1 := dialExtension(t, a)
 	waitOnline(t, a)
 
-	ext2 := dialExtension(t, a, testAPIKey)
+	ext2 := dialExtension(t, a)
 	waitOnline(t, a)
 
 	// ext1 must be displaced: its read errors out once the adapter closes it.
@@ -347,7 +324,7 @@ func TestConnReplacement(t *testing.T) {
 //     dropped — the adapter has no terminal to author, so it emits nothing.
 func TestKindGuardDropsNonRequest(t *testing.T) {
 	w := &recordingWriter{}
-	a := startActor(t, w, Config{APIKey: testAPIKey})
+	a := startActor(t, w, Config{})
 
 	ev := request("ev-1", TypeSearch, map[string]any{"keyword": "x"})
 	ev.Kind = message.KindEvent

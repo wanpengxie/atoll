@@ -26,8 +26,6 @@ import (
 // cell starts. A fixed high port on loopback is the simplest live path.
 const xhsDeviceAddr = "127.0.0.1:18090"
 
-const xhsDeviceKey = "devkey"
-
 // --- canned device behaviour (mirrors cmd/mock-xhs-device CannedReply) -------
 //
 // Kept as a few self-contained lines rather than importing the cmd binary
@@ -110,7 +108,6 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 				Factory: func(wr harness.Writer) actorrt.Actor {
 					return xhs.NewActor(wr, xhs.Config{
 						ListenAddr:     xhsDeviceAddr,
-						APIKey:         xhsDeviceKey,
 						ReaperInterval: 20 * time.Millisecond,
 						Logger:         logger,
 					})
@@ -131,7 +128,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	waitForActor(t, env, s, "tool:xhs", 5*time.Second)
 
 	// --- STAGE 2: real device connects to the cell's private /device WS -----
-	devURL := fmt.Sprintf("ws://%s/device?actor=%s&key=%s", xhsDeviceAddr, "tool:xhs", xhsDeviceKey)
+	devURL := fmt.Sprintf("ws://%s/device", xhsDeviceAddr)
 	conn := dialDeviceWithRetry(t, devURL, 3*time.Second)
 	t.Cleanup(func() { _ = conn.Close() })
 

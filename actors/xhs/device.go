@@ -67,7 +67,6 @@ type pending struct {
 type device struct {
 	owner          *Actor // back-reference for sender()/writer
 	addrCfg        string
-	apiKey         string
 	clock          func() time.Time
 	reaperInterval time.Duration
 	logger         *slog.Logger
@@ -85,11 +84,10 @@ type device struct {
 	wg       sync.WaitGroup
 }
 
-func newDevice(owner *Actor, addr, apiKey string, clock func() time.Time, reaperInterval time.Duration, logger *slog.Logger) *device {
+func newDevice(owner *Actor, addr string, clock func() time.Time, reaperInterval time.Duration, logger *slog.Logger) *device {
 	return &device{
 		owner:          owner,
 		addrCfg:        addr,
-		apiKey:         apiKey,
 		clock:          clock,
 		reaperInterval: reaperInterval,
 		logger:         logger,
@@ -160,19 +158,15 @@ func (d *device) stop(ctx context.Context) error {
 	return nil
 }
 
-// handleAccept upgrades one extension connection. Auth = ?actor match + ?key
-// match, FAIL CLOSED: an unconfigured key rejects all connections (the private
-// endpoint must never degrade to actor-only auth). A new connection REPLACES the
+// handleAccept upgrades one extension connection. A new connection REPLACES the
 // old one (one adapter, one device).
+//
+// Trust model (default-trust-local): the endpoint binds loopback (127.0.0.1),
+// so only same-machine processes — the user's local browser extension reached
+// through the local daemon — can connect. That bind IS the entire trust
+// boundary; there is no key (pre-launch minimal). Real authn (multi-user /
+// remote) is an additive layer if ever needed.
 func (d *device) handleAccept(w http.ResponseWriter, r *http.Request) {
-	if got := r.URL.Query().Get("actor"); got != string(d.owner.actorID) {
-		http.Error(w, "actor mismatch", http.StatusForbidden)
-		return
-	}
-	if d.apiKey == "" || r.URL.Query().Get("key") != d.apiKey {
-		http.Error(w, "forbidden", http.StatusForbidden)
-		return
-	}
 	conn, err := deviceUpgrader.Upgrade(w, r, nil)
 	if err != nil {
 		// Upgrade already wrote the error response.

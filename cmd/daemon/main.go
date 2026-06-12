@@ -160,16 +160,17 @@ func main() {
 		})
 	}
 
-	// The xhs adapter is opt-in (--actors=xhs,...). It owns a PRIVATE local WS
+	// The xhs adapter is opt-in (--actors=xhs,...). It owns a PRIVATE loopback WS
 	// endpoint the browser extension connects in to (transport inlined in the
-	// adapter), so it is special-cased here to inject its listen addr + api key.
-	// Binding is runtime_inbound_via_relay (the device connects IN; the substrate
-	// only records the label, it does not route the transport).
+	// adapter), so it is special-cased here to inject its listen addr. The
+	// endpoint is keyless — the 127.0.0.1 bind is the trust boundary (the device
+	// reaches it through the local daemon, same machine). Binding is
+	// runtime_inbound_via_relay (the device connects IN; the substrate only
+	// records the label, it does not route the transport).
 	if hasName(actorNames, "xhs") {
 		actorNames = removeName(actorNames, "xhs")
 		xhsCfg := xhs.Config{
 			ListenAddr: *xhsAddr,
-			APIKey:     os.Getenv("XHS_DEVICE_KEY"),
 			Logger:     slog.Default(),
 		}
 		decls = append(decls, platform.ActorDecl{

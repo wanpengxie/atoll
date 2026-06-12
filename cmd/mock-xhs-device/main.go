@@ -13,7 +13,9 @@
 //
 // Usage:
 //
-//	go run ./cmd/mock-xhs-device --addr 127.0.0.1:8090 --key devkey --actor tool:xhs
+//	go run ./cmd/mock-xhs-device --addr 127.0.0.1:8090
+//
+// The endpoint is keyless (the adapter trusts loopback), so no credential flag.
 package main
 
 import (
@@ -90,18 +92,15 @@ func CannedReply(down downFrame) upFrame {
 
 func main() {
 	addr := flag.String("addr", "127.0.0.1:8090", "adapter device endpoint host:port")
-	key := flag.String("key", "", "device api key (the adapter's ?key= secret)")
-	actorID := flag.String("actor", "tool:xhs", "adapter actor id (?actor=)")
 	flag.Parse()
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
 	u := url.URL{
-		Scheme:   "ws",
-		Host:     *addr,
-		Path:     "/device",
-		RawQuery: "actor=" + url.QueryEscape(*actorID) + "&key=" + url.QueryEscape(*key),
+		Scheme: "ws",
+		Host:   *addr,
+		Path:   "/device",
 	}
 
 	backoff := 500 * time.Millisecond

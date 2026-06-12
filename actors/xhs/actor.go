@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"time"
 
 	"github.com/wanpengxie/ActOS/lib/behavior"
@@ -18,14 +19,12 @@ import (
 // DefaultActorID is the registry id this adapter owns.
 const DefaultActorID actor.ActorID = "tool:xhs"
 
-// Config drives an Actor. ListenAddr is the local address the private device WS
-// endpoint binds (e.g. "127.0.0.1:0" lets the OS pick a port — tests read the
-// resolved addr back via ListenAddr()). APIKey is the shared secret the
-// extension must present on the ?key= query (empty ⇒ the endpoint fails closed,
-// rejecting all connections).
+// Config drives an Actor. ListenAddr is the LOOPBACK address the private device
+// WS endpoint binds (e.g. "127.0.0.1:8090", or "127.0.0.1:0" to let the OS pick
+// — tests read the resolved addr back via ListenAddr()). The loopback bind is
+// the trust boundary (default-trust-local): there is no device key.
 type Config struct {
 	ListenAddr string
-	APIKey     string
 	// NowFn returns the current time; defaults to time.Now. Injectable so
 	// tests can shorten deadlines deterministically (the reaper reads it).
 	NowFn func() time.Time
@@ -79,7 +78,7 @@ func NewActor(w harness.Writer, cfg Config) *Actor {
 		actorID: DefaultActorID,
 		clock:   clock,
 	}
-	a.dev = newDevice(a, cfg.ListenAddr, cfg.APIKey, clock, reaperInterval, logger)
+	a.dev = newDevice(a, cfg.ListenAddr, clock, reaperInterval, logger)
 	return a
 }
 
@@ -91,12 +90,30 @@ var _ actorrt.Stopper = (*Actor)(nil)
 // A bind failure returns the error so the cell dies fast (positive death) — no
 // half-listening adapter ever registers as serviceable.
 func (a *Actor) Start(ctx context.Context, _ actorrt.ActorContext) error {
-	if a.dev.apiKey == "" {
-		// Fail closed: the device endpoint will reject every connection. Surface
-		// it loudly rather than appear serviceable with an unreachable device.
-		a.dev.logger.Warn("xhs.device.no_key", "detail", "XHS_DEVICE_KEY unset — device endpoint rejects all connections")
+	// The trust model assumes a loopback bind (only same-machine processes can
+	// reach the keyless endpoint). A non-loopback addr silently widens that
+	// boundary — surface it rather than expose the device port to the network.
+	if !isLoopbackAddr(a.dev.addrCfg) {
+		a.dev.logger.Warn("xhs.device.non_loopback_bind",
+			"addr", a.dev.addrCfg,
+			"detail", "device endpoint is keyless and trusts localhost; bind 127.0.0.1")
 	}
 	return a.dev.start(ctx)
+}
+
+// isLoopbackAddr reports whether host:port binds the loopback interface (the
+// trust boundary for the keyless device endpoint). An unparseable or hostname
+// host is treated as non-loopback (warn, don't guess).
+func isLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Stop tears the device endpoint down: stop accepting, close the conn, join the
