@@ -1,7 +1,11 @@
-// Package agent is the LLM bridge — it wraps go-kimi's Agent so the
-// coagent worker can drive a real LLM (DeepSeek's anthropic-compat
-// endpoint per the cvmax deploy plan) instead of the deterministic
-// MockBridge used during e2e bring-up.
+// kimiagent is a THIN ADAPTER: go-kimi drives the cognition, a held
+// metatool.Shell drives the channel calls, and this package only bridges
+// the two — go-kimi wire frames out to envelopes, channel envelopes in to
+// shell.Deliver. It owns no call mechanism of its own (correlation,
+// sync/async, author#2 all live in the Shell) and no LLM brain of its own
+// (that is go-kimi's Agent). The package-level positioning lives on
+// bridge.go; this file documents only the wire↔envelope mapping the
+// adapter performs.
 //
 // Wire types → envelope mapping:
 //
