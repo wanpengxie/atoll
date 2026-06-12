@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -166,6 +167,65 @@ func TestChannelTools_ShellResolvesWhenBuiltBeforeStart(t *testing.T) {
 	}
 	if res.IsError {
 		t.Fatalf("pre-Start tool froze a nil shell — got error result %+v (want live shell)", res.Value)
+	}
+}
+
+// TestReceive_SelfAuthoredMessageNeverTurns pins the self-loop guard: an actor
+// must never react to its OWN emissions. A self-authored event (agent.text) and
+// a self-authored unconsumed final response (a metatool timeout terminal for the
+// agent's own outbound request, sender==self) must NOT enqueue a turn — otherwise
+// replyAudience (reply to the trigger's sender == self) spins an infinite loop.
+// A non-self message still triggers a turn (the guard is precise, not a freeze).
+func TestReceive_SelfAuthoredMessageNeverTurns(t *testing.T) {
+	w := &recordingWriter{}
+	var runs atomic.Int32
+	sa := &scriptedAgent{emitFn: func(context.Context, string) error {
+		runs.Add(1)
+		return nil
+	}}
+	b := newStartedBridge(t, w, sa)
+	ctx := context.Background()
+
+	// Self-authored event (the agent's own agent.text fed back to it).
+	selfEvent := &message.Envelope{
+		ID: "self-ev", ChannelID: testChannelID,
+		Sender: message.Sender{Kind: actor.KindAgent, ID: testActorID},
+		Kind:   message.KindEvent, Type: "agent.text",
+		Payload: json.RawMessage(`{"text":"ack"}`), Audience: message.Audience{testActorID},
+	}
+	if err := b.Receive(ctx, selfEvent); err != nil {
+		t.Fatalf("Receive self event: %v", err)
+	}
+
+	// Self-authored unconsumed final response (own outbound-request timeout
+	// terminal): still delivered to the shell, but never a turn.
+	selfResp := &message.Envelope{
+		ID: "self-resp", ChannelID: testChannelID, ParentID: "some-req",
+		Sender: message.Sender{Kind: actor.KindAgent, ID: testActorID},
+		Kind:   message.KindResponse, Type: "actor.list",
+		Payload:  json.RawMessage(`{"status":"failed","reason":"unanswered_timeout"}`),
+		Audience: message.Audience{testActorID},
+	}
+	if err := b.Receive(ctx, selfResp); err != nil {
+		t.Fatalf("Receive self response: %v", err)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	if n := runs.Load(); n != 0 {
+		t.Fatalf("self-authored messages triggered %d turn(s); want 0 (self-loop)", n)
+	}
+
+	// Sanity: a NON-self request DOES still drive a turn.
+	ext := triggerEnv("ext-req")
+	if err := b.Receive(ctx, &ext); err != nil {
+		t.Fatalf("Receive external req: %v", err)
+	}
+	deadline := time.Now().Add(time.Second)
+	for runs.Load() == 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if runs.Load() == 0 {
+		t.Fatal("a non-self request did not drive a turn — guard is too broad")
 	}
 }
 

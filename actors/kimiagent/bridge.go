@@ -342,11 +342,24 @@ func (b *Bridge) Receive(ctx context.Context, env *message.Envelope) error {
 	if env.Kind == message.KindResponse && env.ParentID != "" {
 		// The shell Matches author#2 (disarms the timeout) and routes the
 		// response to any bounded-window waiter. A final nobody waited for
-		// becomes a new turn (the async result feeding the next step).
+		// becomes a new turn (the async result feeding the next step) — EXCEPT
+		// one we authored ourselves: a metatool timeout terminal for our own
+		// outbound request carries sender==self, and feeding it back as a turn
+		// (whose reply, by `replyAudience`, is addressed to its sender == self)
+		// is an unbounded self-loop. Still Deliver it (resolve any waiter); just
+		// never let our own message become a turn.
 		_, final := behavior.ParseFinalStatus(env.Payload)
-		if consumed := b.shell.Deliver(env); !consumed && final {
+		if consumed := b.shell.Deliver(env); !consumed && final && env.Sender.ID != b.self {
 			b.enqueueTurn(*env)
 		}
+		return nil
+	}
+
+	// An actor never reacts to its OWN emissions. The agent's events (agent.text
+	// progress/done) are observability for others, never input for itself; the
+	// `replyAudience` rule (reply to the trigger's sender) would otherwise turn a
+	// self-addressed emission into an infinite turn loop.
+	if env.Sender.ID == b.self {
 		return nil
 	}
 
