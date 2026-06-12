@@ -27,10 +27,9 @@ import (
 // into the final text — never as envelope spam (chunk-spam was
 // explicitly excluded by owner).
 type turnState struct {
-	textBuf       strings.Builder
-	pendingTools  []wireToolCall
-	stepIndex     int
-	progressEmits int
+	textBuf      strings.Builder
+	pendingTools []wireToolCall
+	stepIndex    int
 }
 
 // consumeWire reads the wire stream and:
@@ -137,7 +136,6 @@ func (b *Bridge) handleWireMsg(
 			return false, err
 		}
 		state.pendingTools = state.pendingTools[:0]
-		state.progressEmits++
 		return false, nil
 	case wire.TurnEnd:
 		// If the LLM yielded with tool_use but the tools never resolved
@@ -150,7 +148,6 @@ func (b *Bridge) handleWireMsg(
 				return false, err
 			}
 			state.pendingTools = state.pendingTools[:0]
-			state.progressEmits++
 		}
 		return true, b.emitTurnEnd(ctx, item, m, state.textBuf.String(), turnIndex)
 	default:
@@ -198,72 +195,43 @@ func composeUserInput(env message.Envelope) string {
 	return senderLabel + "\n" + bodyText
 }
 
-// outputParts is the bridge-side breakdown of one TurnEnd.Output slice
-// into the three flavours we care about: plain text (the public reply),
-// tool calls (intermediate progress signal), and thinking (internal
-// reasoning preview for progress envelopes).
-type outputParts struct {
-	text     string
-	tools    []wireToolCall
-	thinking string // accumulated raw think text (pre-trim)
-}
-
 // wireToolCall is the JSON-shape of one ToolCallPart we decode from the
-// TurnEnd output stream. Field names align with go-kimi's wire format
-// so json.Unmarshal round-trips without a translator.
+// wire stream. Field names align with go-kimi's wire format so
+// json.Unmarshal round-trips without a translator.
 type wireToolCall struct {
 	ID        string          `json:"id"`
 	Name      string          `json:"name"`
 	Arguments json.RawMessage `json:"arguments,omitempty"`
 }
 
-// parseOutputParts flattens kimi ContentParts (text / think / tool_call)
-// into outputParts. Reflection-free JSON round-trip — we don't want to
-// pull go-kimi's types surface into the adapter's import set.
-func parseOutputParts(parts any) outputParts {
-	var out outputParts
+// extractTurnEndText flattens a TurnEnd.Output slice into the public reply
+// text: it concatenates every type=="text" part (and a text-bearing part
+// whose discriminator the provider dropped). Tool calls and thinking are a
+// live-stream concern (handleWireMsg's pendingTools feed the progress
+// bubbles) — TurnEnd only yields the terminal text. Reflection-free JSON
+// round-trip avoids pulling go-kimi's types surface into the import set.
+func extractTurnEndText(parts any) string {
 	if parts == nil {
-		return out
+		return ""
 	}
 	raw, err := json.Marshal(parts)
 	if err != nil {
-		return out
+		return ""
 	}
 	var slice []struct {
-		Type     string        `json:"type"`
-		Text     string        `json:"text,omitempty"`
-		Think    string        `json:"think,omitempty"`
-		ToolCall *wireToolCall `json:"tool_call,omitempty"`
+		Type string `json:"type"`
+		Text string `json:"text,omitempty"`
 	}
 	if err := json.Unmarshal(raw, &slice); err != nil {
-		return out
+		return ""
 	}
-	var (
-		textBuf  strings.Builder
-		thinkBuf strings.Builder
-	)
+	var textBuf strings.Builder
 	for i := range slice {
-		switch slice[i].Type {
-		case "text":
+		if slice[i].Type == "text" || (slice[i].Type != "think" && slice[i].Type != "tool_call" && slice[i].Text != "") {
 			textBuf.WriteString(slice[i].Text)
-		case "think":
-			thinkBuf.WriteString(slice[i].Think)
-		case "tool_call":
-			if slice[i].ToolCall != nil {
-				out.tools = append(out.tools, *slice[i].ToolCall)
-			}
-		default:
-			// Unknown discriminator. If there's a text field anyway,
-			// take it (defensive — providers sometimes drop the `type`
-			// for plain text turns).
-			if slice[i].Text != "" {
-				textBuf.WriteString(slice[i].Text)
-			}
 		}
 	}
-	out.text = textBuf.String()
-	out.thinking = thinkBuf.String()
-	return out
+	return textBuf.String()
 }
 
 // summariseToolCalls builds the `tool_calls` array carried on

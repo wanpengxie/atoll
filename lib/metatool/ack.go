@@ -9,13 +9,13 @@ import (
 // AckDescriptor is the immediate-ack shape handed back to the LLM when a
 // call outlives the fast-path window (accepted / est wait / how to collect).
 type AckDescriptor struct {
-	RequestID message.ID
-	Accepted  bool
-	Status    string // substrate-level, always "accepted" on the immediate ack
-	EstWaitMs int64  // source: type.max_pending_ms (R5)
-	Guidance  string // framework template
-	ToWait    ToWaitHint
-	NotWaitng string
+	RequestID  message.ID
+	Accepted   bool
+	Status     string // substrate-level, always "accepted" on the immediate ack
+	EstWaitMs  int64  // source: type.max_pending_ms (R5)
+	Guidance   string // framework template
+	ToWait     ToWaitHint
+	NotWaiting string
 }
 
 // ToWaitHint carries the tool + params for the "to_wait" field.
@@ -53,7 +53,7 @@ func AckResult(toolName string, ack AckDescriptor) ResultValue {
 			"est_wait_ms":    ack.EstWaitMs,
 			"guidance":       ack.Guidance,
 			"to_wait":        map[string]any{"tool": ack.ToWait.Tool, "params": ack.ToWait.Params},
-			"if_not_waiting": ack.NotWaitng,
+			"if_not_waiting": ack.NotWaiting,
 		},
 	}
 }

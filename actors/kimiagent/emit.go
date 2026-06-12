@@ -56,8 +56,8 @@ func (b *Bridge) emitTurnProgress(
 // function only produces the final reply.
 //
 // `accumulated` is the full TextDelta-buffered string; the TurnEnd's
-// own Output ContentParts (text + think) are preferred, falling back to
-// the buffered stream when Output is empty (providers vary).
+// own Output text parts are preferred, falling back to the buffered
+// stream when Output is empty (providers vary).
 func (b *Bridge) emitTurnEnd(
 	ctx context.Context,
 	item turnItem,
@@ -66,7 +66,7 @@ func (b *Bridge) emitTurnEnd(
 	turnIndex int,
 ) error {
 	stop := strings.ToLower(strings.TrimSpace(end.StopReason))
-	parts := parseOutputParts(end.Output)
+	text := extractTurnEndText(end.Output)
 
 	nextAction := "continue"
 	switch stop {
@@ -83,7 +83,6 @@ func (b *Bridge) emitTurnEnd(
 		// the UI visibility into what was attempted.
 		nextAction = "done"
 	}
-	text := parts.text
 	if text == "" {
 		text = accumulated
 	}

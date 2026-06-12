@@ -373,13 +373,13 @@ func TestExecuteCallActor_WriteErrorIsInternal(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExecuteListActors_NilShell(t *testing.T) {
-	rv := metatool.ExecuteListActors(context.Background(), nil, defaultRC())
+	rv := metatool.ExecuteListActors(context.Background(), nil, nil, defaultRC())
 	assertIsError(t, rv, "")
 }
 
 func TestExecuteListActors_OutsideTurn(t *testing.T) {
 	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteListActors(context.Background(), sh, metatool.RuntimeContext{})
+	rv := metatool.ExecuteListActors(context.Background(), nil, sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "")
 }
 
@@ -392,7 +392,7 @@ func TestExecuteListActors_RequestTimesOut(t *testing.T) {
 	// wait returns without a final.
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
-	rv := metatool.ExecuteListActors(ctx, sh, defaultRC())
+	rv := metatool.ExecuteListActors(ctx, nil, sh, defaultRC())
 	assertIsError(t, rv, "")
 }
 
@@ -401,7 +401,7 @@ func TestExecuteListActors_Success(t *testing.T) {
 	sh := newExecShell(w)
 
 	resCh := make(chan metatool.ResultValue, 1)
-	go func() { resCh <- metatool.ExecuteListActors(context.Background(), sh, defaultRC()) }()
+	go func() { resCh <- metatool.ExecuteListActors(context.Background(), nil, sh, defaultRC()) }()
 
 	req := w.lastRequest(t, 2*time.Second)
 	if req.Type != "actor.list" {
@@ -547,34 +547,34 @@ func TestExecuteDescribeType_EmitsTypePayload(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExecuteAwaitResult_NilShell(t *testing.T) {
-	rv := metatool.ExecuteAwaitResult(context.Background(), nil, nil)
+	rv := metatool.ExecuteAwaitResult(context.Background(), nil, nil, metatool.RuntimeContext{})
 	assertIsError(t, rv, "internal_error")
 }
 
 func TestExecuteAwaitResult_MissingRequestID(t *testing.T) {
 	sh := newExecShell(&recWriter{})
 	params, _ := json.Marshal(map[string]any{})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh)
+	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "payload_invalid")
 }
 
 func TestExecuteAwaitResult_InvalidJSON(t *testing.T) {
 	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteAwaitResult(context.Background(), json.RawMessage(`{bad`), sh)
+	rv := metatool.ExecuteAwaitResult(context.Background(), json.RawMessage(`{bad`), sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "payload_invalid")
 }
 
 func TestExecuteAwaitResult_NotInFlight(t *testing.T) {
 	sh := newExecShell(&recWriter{})
 	params, _ := json.Marshal(map[string]any{"request_id": "req-unknown"})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh)
+	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "internal_error")
 }
 
 func TestExecuteAwaitResult_WhitespaceRequestID(t *testing.T) {
 	sh := newExecShell(&recWriter{})
 	params, _ := json.Marshal(map[string]any{"request_id": "  "})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh)
+	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "payload_invalid")
 }
 
@@ -601,7 +601,7 @@ func TestExecuteAwaitResult_SuccessFinalDelivered(t *testing.T) {
 	}()
 
 	params, _ := json.Marshal(map[string]any{"request_id": reqID.String(), "timeout_ms": 5000})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh)
+	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
 	if rv.Name != "await_result" {
 		t.Fatalf("expected Name=await_result, got %q", rv.Name)
 	}
@@ -617,7 +617,7 @@ func TestExecuteAwaitResult_Timeout(t *testing.T) {
 	reqID := submitInFlight(t, w, sh)
 
 	params, _ := json.Marshal(map[string]any{"request_id": reqID.String(), "timeout_ms": 50})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh)
+	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
 	if rv.Name != "await_result" {
 		t.Fatalf("expected Name=await_result, got %q", rv.Name)
 	}
@@ -634,7 +634,7 @@ func TestExecuteAwaitResult_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	params, _ := json.Marshal(map[string]any{"request_id": reqID.String()})
-	rv := metatool.ExecuteAwaitResult(ctx, params, sh)
+	rv := metatool.ExecuteAwaitResult(ctx, params, sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "internal_error")
 }
 
@@ -648,7 +648,7 @@ func TestExecuteAwaitResult_CustomTimeout(t *testing.T) {
 		sh.Deliver(finalResp(reqID, map[string]any{"status": "completed", "result": "done"}))
 	}()
 	params, _ := json.Marshal(map[string]any{"request_id": reqID.String(), "timeout_ms": 5000})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh)
+	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertNotError(t, rv)
 }
 
@@ -662,7 +662,7 @@ func TestExecuteAwaitResult_FailedResponse(t *testing.T) {
 		sh.Deliver(finalResp(reqID, map[string]any{"status": "failed", "reason": "adapter_error"}))
 	}()
 	params, _ := json.Marshal(map[string]any{"request_id": reqID.String(), "timeout_ms": 5000})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh)
+	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "")
 }
 
@@ -671,20 +671,20 @@ func TestExecuteAwaitResult_FailedResponse(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExecuteAbandon_NilShell(t *testing.T) {
-	rv := metatool.ExecuteAbandon(context.Background(), nil, nil)
+	rv := metatool.ExecuteAbandon(context.Background(), nil, nil, metatool.RuntimeContext{})
 	assertIsError(t, rv, "internal_error")
 }
 
 func TestExecuteAbandon_MissingRequestID(t *testing.T) {
 	sh := newExecShell(&recWriter{})
 	params, _ := json.Marshal(map[string]any{})
-	rv := metatool.ExecuteAbandon(context.Background(), params, sh)
+	rv := metatool.ExecuteAbandon(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "payload_invalid")
 }
 
 func TestExecuteAbandon_InvalidJSON(t *testing.T) {
 	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteAbandon(context.Background(), json.RawMessage(`{bad`), sh)
+	rv := metatool.ExecuteAbandon(context.Background(), json.RawMessage(`{bad`), sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "payload_invalid")
 }
 
@@ -694,7 +694,7 @@ func TestExecuteAbandon_Success(t *testing.T) {
 	reqID := submitInFlight(t, w, sh)
 
 	params, _ := json.Marshal(map[string]any{"request_id": reqID.String()})
-	rv := metatool.ExecuteAbandon(context.Background(), params, sh)
+	rv := metatool.ExecuteAbandon(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertNotError(t, rv)
 	if rv.Value["abandoned"] != reqID.String() {
 		t.Fatalf("expected abandoned=%s, got %v", reqID, rv.Value["abandoned"])
@@ -707,14 +707,14 @@ func TestExecuteAbandon_Success(t *testing.T) {
 func TestExecuteAbandon_WhitespaceRequestID(t *testing.T) {
 	sh := newExecShell(&recWriter{})
 	params, _ := json.Marshal(map[string]any{"request_id": "  "})
-	rv := metatool.ExecuteAbandon(context.Background(), params, sh)
+	rv := metatool.ExecuteAbandon(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "payload_invalid")
 }
 
 func TestExecuteAbandon_UnknownRequestID(t *testing.T) {
 	sh := newExecShell(&recWriter{})
 	params, _ := json.Marshal(map[string]any{"request_id": "req-nonexistent"})
-	rv := metatool.ExecuteAbandon(context.Background(), params, sh)
+	rv := metatool.ExecuteAbandon(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertNotError(t, rv)
 }
 
@@ -723,13 +723,13 @@ func TestExecuteAbandon_UnknownRequestID(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestExecuteListPending_NilShell(t *testing.T) {
-	rv := metatool.ExecuteListPending(context.Background(), nil)
+	rv := metatool.ExecuteListPending(context.Background(), nil, nil, metatool.RuntimeContext{})
 	assertIsError(t, rv, "internal_error")
 }
 
 func TestExecuteListPending_EmptyList(t *testing.T) {
 	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteListPending(context.Background(), sh)
+	rv := metatool.ExecuteListPending(context.Background(), nil, sh, metatool.RuntimeContext{})
 	assertNotError(t, rv)
 	if count, _ := rv.Value["count"].(int); count != 0 {
 		t.Fatalf("expected count=0, got %d", count)
@@ -746,7 +746,7 @@ func TestExecuteListPending_WithPending(t *testing.T) {
 	id1 := submitInFlight(t, w, sh)
 	id2 := submitInFlight(t, w, sh)
 
-	rv := metatool.ExecuteListPending(context.Background(), sh)
+	rv := metatool.ExecuteListPending(context.Background(), nil, sh, metatool.RuntimeContext{})
 	assertNotError(t, rv)
 	if count, _ := rv.Value["count"].(int); count != 2 {
 		t.Fatalf("expected count=2, got %d", count)
@@ -767,7 +767,7 @@ func TestExecuteListPending_AfterAbandon(t *testing.T) {
 	reqID := submitInFlight(t, w, sh)
 	sh.Abandon(reqID)
 
-	rv := metatool.ExecuteListPending(context.Background(), sh)
+	rv := metatool.ExecuteListPending(context.Background(), nil, sh, metatool.RuntimeContext{})
 	assertNotError(t, rv)
 	if count, _ := rv.Value["count"].(int); count != 0 {
 		t.Fatalf("expected count=0 after abandon, got %d", count)

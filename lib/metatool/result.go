@@ -46,30 +46,6 @@ func PayloadInvalidError(toolName, msg, hint string) ResultValue {
 	return NewError(toolName, PayloadInvalid, msg, hint, nil)
 }
 
-// NormalizeCallActorError normalises a tool result into the actor-CLI
-// closed error set. The isError flag and value come from the upstream
-// result; this function operates on pure Go maps, not go-kimi types.
-func NormalizeCallActorError(toolName string, isError bool, value any, actorID, typeName string) (bool, any) {
-	if !isError {
-		return false, value
-	}
-	if valueMap, ok := value.(map[string]any); ok {
-		if reason := StringValue(valueMap["error"]); reason != "" {
-			rv := TerminalFailureToActorCLI(toolName, actorID, typeName, reason, valueMap["payload"])
-			return true, rv.Value
-		}
-	}
-	msg := strings.TrimSpace(fmt.Sprint(value))
-	code := InternalError
-	hint := "Inspect error.detail and adapter logs before retrying"
-	if strings.Contains(strings.ToLower(msg), "timed out") {
-		code = Timeout
-		hint = "Increase max_pending_ms or check adapter logs"
-	}
-	rv := NewError(toolName, code, msg, hint, value)
-	return true, rv.Value
-}
-
 // TerminalFailureToActorCLI maps a terminal failure reason to the
 // actor-CLI closed error set.
 func TerminalFailureToActorCLI(toolName, actorID, typeName, reason string, detail any) ResultValue {

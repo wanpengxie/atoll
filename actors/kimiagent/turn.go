@@ -38,7 +38,7 @@ type turnItem struct {
 	env message.Envelope
 }
 
-// correlationOf resolves the correlation anchor for a turn: the trigger
+// correlationID resolves the correlation anchor for a turn: the trigger
 // envelope's correlation id, falling back to its own id.
 func (t turnItem) correlationID() message.ID {
 	return behavior.CorrelationID("", t.env.CorrelationID, t.env.ID)

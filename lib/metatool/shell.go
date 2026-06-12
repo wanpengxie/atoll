@@ -316,12 +316,12 @@ func (s *Shell) buildRequest(rc RuntimeContext, spec RequestSpec) (message.Envel
 	env, err := behavior.BuildRequest(s.cfg.ChannelID, s.cfg.Sender,
 		func() time.Time { return time.UnixMilli(now) },
 		behavior.RequestSpec{
-			ID:            s.cfg.EnvelopeID(now),
-			Type:          spec.EnvelopeType,
-			Payload:       spec.Payload,
-			Audience:      message.Audience{actor.ActorID(spec.HandlerActorID)},
-			Visibility:    message.VisibilityPublic,
-			ParentID:      rc.Trigger.Envelope.ID,
+			ID:         s.cfg.EnvelopeID(now),
+			Type:       spec.EnvelopeType,
+			Payload:    spec.Payload,
+			Audience:   message.Audience{actor.ActorID(spec.HandlerActorID)},
+			Visibility: message.VisibilityPublic,
+			ParentID:   rc.Trigger.Envelope.ID,
 			// Correlation root falls back to the trigger's own id when the
 			// trigger carries no correlation_id (a non-normalised trigger) —
 			// the same defensive derivation behavior.CorrelationID gives the
@@ -474,6 +474,6 @@ func (s *Shell) ackResult(toolName string, ack AckDescriptor) ResultValue {
 		Tool:   "await_result",
 		Params: map[string]any{"request_id": id},
 	}
-	ack.NotWaitng = "result returns as kind=response, parent_id=" + id + " new turn trigger"
+	ack.NotWaiting = "result returns as kind=response, parent_id=" + id + " new turn trigger"
 	return AckResult(toolName, ack)
 }

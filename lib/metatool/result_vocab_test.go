@@ -128,60 +128,6 @@ func TestNormalizeCallActorResultPassesStructuredError(t *testing.T) {
 	}
 }
 
-func TestNormalizeCallActorErrorNonError(t *testing.T) {
-	isErr, val := NormalizeCallActorError("call_actor", false, map[string]any{"ok": true}, "a", "t")
-	if isErr {
-		t.Fatal("expected isErr=false for non-error")
-	}
-	m, _ := val.(map[string]any)
-	if m["ok"] != true {
-		t.Fatal("expected value to pass through unchanged")
-	}
-}
-
-func TestNormalizeCallActorErrorWithReason(t *testing.T) {
-	val := map[string]any{
-		"error":   "unanswered_timeout",
-		"payload": nil,
-	}
-	isErr, result := NormalizeCallActorError("call_actor", true, val, "tool:a", "a.do")
-	if !isErr {
-		t.Fatal("expected isErr=true")
-	}
-	m, ok := result.(map[string]any)
-	if !ok {
-		t.Fatalf("expected map result, got %T", result)
-	}
-	errObj, _ := m["error"].(map[string]any)
-	if errObj["code"] != "timeout" {
-		t.Fatalf("expected code=timeout, got %v", errObj["code"])
-	}
-}
-
-func TestNormalizeCallActorErrorGenericString(t *testing.T) {
-	isErr, result := NormalizeCallActorError("call_actor", true, "something broke", "a", "t")
-	if !isErr {
-		t.Fatal("expected isErr=true")
-	}
-	m, _ := result.(map[string]any)
-	errObj, _ := m["error"].(map[string]any)
-	if errObj["code"] != "internal_error" {
-		t.Fatalf("expected code=internal_error, got %v", errObj["code"])
-	}
-}
-
-func TestNormalizeCallActorErrorTimedOut(t *testing.T) {
-	isErr, result := NormalizeCallActorError("call_actor", true, "request timed out", "a", "t")
-	if !isErr {
-		t.Fatal("expected isErr=true")
-	}
-	m, _ := result.(map[string]any)
-	errObj, _ := m["error"].(map[string]any)
-	if errObj["code"] != "timeout" {
-		t.Fatalf("expected code=timeout for 'timed out' message, got %v", errObj["code"])
-	}
-}
-
 func TestTerminalFailureToActorCLI(t *testing.T) {
 	tests := []struct {
 		reason   string

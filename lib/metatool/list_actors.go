@@ -27,7 +27,7 @@ appear here. Call it whenever you need the current actor set.
 }
 
 // ExecuteListActors is the protocol-layer execute function for list_actors.
-func ExecuteListActors(ctx context.Context, sh *Shell, rc RuntimeContext) ResultValue {
+func ExecuteListActors(ctx context.Context, _ json.RawMessage, sh *Shell, rc RuntimeContext) ResultValue {
 	if sh == nil {
 		return errorResultValue("list_actors", "list_actors tool not configured")
 	}

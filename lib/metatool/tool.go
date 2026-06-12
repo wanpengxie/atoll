@@ -1,6 +1,7 @@
 package metatool
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
@@ -15,6 +16,30 @@ type ToolSpec struct {
 	Name        string
 	Description string
 	Schema      json.RawMessage
+}
+
+// MetaTool pairs a tool's spec with its Execute binding onto the Shell.
+// Every meta tool shares the one Execute shape so a runtime can wrap them
+// uniformly by iterating MetaTools() — no per-tool wiring.
+type MetaTool struct {
+	Spec    ToolSpec
+	Execute func(ctx context.Context, params json.RawMessage, sh *Shell, rc RuntimeContext) ResultValue
+}
+
+// MetaTools returns the channel's meta-tool catalog: the 7 client-edge
+// tools (invoke, collect, discover) each paired with its Execute binding.
+// This is the data-driven surface a runtime iterates to build its own
+// tool type — the catalog is authored once here, not restated per binding.
+func MetaTools() []MetaTool {
+	return []MetaTool{
+		{Spec: CallActorSpec, Execute: ExecuteCallActor},
+		{Spec: ListActorsSpec, Execute: ExecuteListActors},
+		{Spec: DescribeActorSpec, Execute: ExecuteDescribeActor},
+		{Spec: DescribeTypeSpec, Execute: ExecuteDescribeType},
+		{Spec: AwaitResultSpec, Execute: ExecuteAwaitResult},
+		{Spec: AbandonSpec, Execute: ExecuteAbandon},
+		{Spec: ListPendingSpec, Execute: ExecuteListPending},
+	}
 }
 
 // Trigger carries the envelope + correlation id that triggered the

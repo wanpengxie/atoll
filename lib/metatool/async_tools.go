@@ -23,7 +23,7 @@ return that result. Use this to collect a long call that returned an ack
     still-pending ack back (the call keeps running; try again later or let the
     result return as a new message).
 
-If the request is unknown (already collected, abandoned, or lost to a worker
+If the request is unknown (already collected, abandoned, or lost to a cell
 restart), the result is an error explaining so.
 `),
 	Schema: json.RawMessage(`{
@@ -42,7 +42,7 @@ type awaitResultParams struct {
 }
 
 // ExecuteAwaitResult is the protocol-layer execute function for await_result.
-func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, sh *Shell) ResultValue {
+func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, sh *Shell, _ RuntimeContext) ResultValue {
 	if sh == nil {
 		return NewError("await_result", InternalError, "await_result tool not configured", "Retry after the bridge is configured", nil)
 	}
@@ -61,7 +61,7 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, sh *Shell) 
 		return NewError(
 			"await_result",
 			InternalError,
-			fmt.Sprintf("request_id %q is not in flight (already collected, abandoned, or lost to a worker restart)", reqID),
+			fmt.Sprintf("request_id %q is not in flight (already collected, abandoned, or lost to a cell restart)", reqID),
 			"Call list_pending() to see in-flight request ids; resubmit the call if needed",
 			nil,
 		)
@@ -88,8 +88,8 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, sh *Shell) 
 			EstWaitMs: int64(timeout / time.Millisecond),
 			Guidance: "Still running after the wait window. The call keeps running; try await_result again, " +
 				"or do other work and react to the result when it returns as a new message.",
-			ToWait:    ToWaitHint{Tool: "await_result", Params: map[string]any{"request_id": reqID.String()}},
-			NotWaitng: "result returns as kind=response, parent_id=" + reqID.String() + " new turn trigger",
+			ToWait:     ToWaitHint{Tool: "await_result", Params: map[string]any{"request_id": reqID.String()}},
+			NotWaiting: "result returns as kind=response, parent_id=" + reqID.String() + " new turn trigger",
 		})
 	}
 	rv, _ := ResultFromResponse("await_result", *finalEnv)
@@ -124,7 +124,7 @@ type abandonParams struct {
 }
 
 // ExecuteAbandon is the protocol-layer execute function for abandon.
-func ExecuteAbandon(_ context.Context, params json.RawMessage, sh *Shell) ResultValue {
+func ExecuteAbandon(_ context.Context, params json.RawMessage, sh *Shell, _ RuntimeContext) ResultValue {
 	if sh == nil {
 		return NewError("abandon", InternalError, "abandon tool not configured", "Retry after the bridge is configured", nil)
 	}
@@ -157,7 +157,7 @@ List the request_ids of call_actor requests you have submitted that have not yet
 reached their final result. Returns only the id list — no status — as a decision aid
 for which await_result / abandon to issue next.
 
-Note: this view is per-process. If the worker restarted, the list is empty even
+Note: this view is per-process. If the cell restarted, the list is empty even
 though earlier calls may still be running in the daemon; their results will return
 as new messages.
 `),
@@ -165,7 +165,7 @@ as new messages.
 }
 
 // ExecuteListPending is the protocol-layer execute function for list_pending.
-func ExecuteListPending(_ context.Context, sh *Shell) ResultValue {
+func ExecuteListPending(_ context.Context, _ json.RawMessage, sh *Shell, _ RuntimeContext) ResultValue {
 	if sh == nil {
 		return NewError("list_pending", InternalError, "list_pending tool not configured", "Retry after the bridge is configured", nil)
 	}
