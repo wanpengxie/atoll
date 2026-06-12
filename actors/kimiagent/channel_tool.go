@@ -25,7 +25,7 @@ func (b *Bridge) channelTools() []gokimitools.Tool {
 	catalog := metatool.MetaTools()
 	tools := make([]gokimitools.Tool, 0, len(catalog))
 	for _, mt := range catalog {
-		tools = append(tools, &kimiTool{mt: mt, shell: b.shellRef()})
+		tools = append(tools, &kimiTool{mt: mt, shell: b.shellRef})
 	}
 	return tools
 }
@@ -58,9 +58,15 @@ func (b *Bridge) shellRef() *metatool.Shell {
 // kimiTool is the one generic go-kimi adapter over a metatool.MetaTool. Name /
 // description / schema come straight from the spec; Execute threads the turn's
 // RuntimeContext and materialises the ResultValue into a go-kimi ToolResult.
+//
+// shell is a LAZY resolver (b.shellRef), not a captured *Shell: the tool
+// surface is installed into the LLM loop during Start BEFORE b.shell is
+// assigned, so capturing the value would freeze a nil shell. Resolving at
+// Execute time — which only runs once the loop is live — always sees the real
+// shell, making the binding order-independent by construction.
 type kimiTool struct {
 	mt    metatool.MetaTool
-	shell *metatool.Shell
+	shell func() *metatool.Shell
 }
 
 var _ gokimitools.Tool = (*kimiTool)(nil)
@@ -74,7 +80,7 @@ func (t *kimiTool) ParameterSchema() json.RawMessage {
 
 func (t *kimiTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
 	rc := extractRuntimeContext(ctx)
-	rv := t.mt.Execute(ctx, params, t.shell, rc)
+	rv := t.mt.Execute(ctx, params, t.shell(), rc)
 	return toKimiToolResult(rv), nil
 }
 

@@ -258,6 +258,11 @@ func (b *Bridge) Start(ctx context.Context, _ actorrt.ActorContext) error {
 	// OnFault is the per-request liveness-break face (symmetric with
 	// author#3): a timeout terminal that fails to land leaves the request
 	// closeable by no path, so the host logs it rather than swallowing it.
+	//
+	// buildAgent above installs the meta-tool surface (channelTools) into the
+	// LLM loop; those tools resolve this shell LAZILY at Execute time (a
+	// b.shellRef closure), so assigning b.shell after buildAgent is safe — a
+	// tool can never capture a nil shell regardless of statement order.
 	b.shell = metatool.NewShell(metatool.ShellConfig{
 		Writer:         b.writer,
 		ChannelID:      b.chID,

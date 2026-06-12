@@ -127,6 +127,48 @@ func triggerEnv(id string) message.Envelope {
 	}
 }
 
+// TestChannelTools_ShellResolvesWhenBuiltBeforeStart pins the
+// order-independence of the meta-tool surface. buildAgent installs the tools
+// into the LLM loop DURING Start, before Start assigns b.shell — so a tool that
+// captured the *Shell value at construction would freeze a nil shell and every
+// meta call would return "tool not configured" forever. The post-Start
+// ChannelToolsForTest rebuild masks that (it sees the live shell), so this test
+// deliberately builds the tool instance BEFORE Start and executes it AFTER,
+// asserting the lazy b.shellRef resolver reached the real shell.
+func TestChannelTools_ShellResolvesWhenBuiltBeforeStart(t *testing.T) {
+	w := &recordingWriter{}
+	b, err := kimiagent.NewBridge(testConfig(), testActorID, testChannelID, w)
+	if err != nil {
+		t.Fatalf("NewBridge: %v", err)
+	}
+	// Build the surface while b.shell is still nil (mirrors buildAgent).
+	var listPending gokimitools.Tool
+	for _, raw := range kimiagent.ChannelToolsForTest(b) {
+		if raw.Name() == "list_pending" {
+			listPending = raw.(gokimitools.Tool)
+		}
+	}
+	if listPending == nil {
+		t.Fatal("list_pending tool absent before Start")
+	}
+	// Start assigns the real shell; execute the PRE-built instance.
+	kimiagent.SetAgentFactory(b, func(kimiagent.AgentConfig) (kimiagent.Agent, error) {
+		return &scriptedAgent{}, nil
+	})
+	if err := b.Start(context.Background(), nil); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = b.Stop(context.Background()) })
+
+	res, err := listPending.Execute(context.Background(), json.RawMessage(`{}`))
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
+	if res.IsError {
+		t.Fatalf("pre-Start tool froze a nil shell — got error result %+v (want live shell)", res.Value)
+	}
+}
+
 // pickToolByName looks up a channel tool by Name(). Returns nil when
 // absent — caller fails the test.
 func pickToolByName(b *kimiagent.Bridge, name string) gokimitools.Tool {
