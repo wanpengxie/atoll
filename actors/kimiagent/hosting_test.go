@@ -1,4 +1,4 @@
-package agent_test
+package kimiagent_test
 
 // hosting_test pins the spec's dual-host acceptance: the SAME Bridge package
 // passes the SAME behavior assertions when hosted as an in-process cell on a
@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/actors/agent"
+	"github.com/wanpengxie/ActOS/actors/kimiagent"
 	"github.com/wanpengxie/ActOS/lib/introspect"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -43,12 +43,12 @@ func newCellHost(t *testing.T) *cellHost {
 	t.Helper()
 	w := &recordingWriter{}
 	rt, del := actorrt.New(actorrt.Config{})
-	b, err := agent.NewBridge(testConfig(), testActorID, testChannelID, w)
+	b, err := kimiagent.NewBridge(testConfig(), testActorID, testChannelID, w)
 	if err != nil {
 		t.Fatalf("cell host: NewBridge: %v", err)
 	}
-	var bb *agent.Bridge = b
-	agent.SetAgentFactory(b, func(agent.AgentConfig) (agent.Agent, error) {
+	var bb *kimiagent.Bridge = b
+	kimiagent.SetAgentFactory(b, func(kimiagent.AgentConfig) (kimiagent.Agent, error) {
 		return scriptTextTurn(&bb, "parity reply"), nil
 	})
 	rt.Spawn(testActorID, b)
@@ -100,13 +100,13 @@ func newDaemonHost(t *testing.T) *daemonHost {
 	rt, del := actorrt.New(actorrt.Config{})
 	dh.rt, dh.del = rt, del
 	pen := &daemonPen{dh: dh}
-	var b *agent.Bridge
-	bb, err := agent.NewBridge(testConfig(), testActorID, testChannelID, pen)
+	var b *kimiagent.Bridge
+	bb, err := kimiagent.NewBridge(testConfig(), testActorID, testChannelID, pen)
 	if err != nil {
 		t.Fatalf("daemon host: NewBridge: %v", err)
 	}
 	b = bb
-	agent.SetAgentFactory(bb, func(agent.AgentConfig) (agent.Agent, error) {
+	kimiagent.SetAgentFactory(bb, func(kimiagent.AgentConfig) (kimiagent.Agent, error) {
 		return scriptTextTurn(&b, "parity reply"), nil
 	})
 	rt.Spawn(testActorID, bb)
@@ -148,7 +148,7 @@ func assertAgentBehavior(t *testing.T, h agentHost) {
 	t.Helper()
 	defer h.stop()
 
-	// 1. A request becomes a turn; the reply is a public agent.text event
+	// 1. A request becomes a turn; the reply is a public kimiagent.text event
 	//    threaded to the trigger and addressed to the sender.
 	trig := triggerEnv("parity-req")
 	h.deliver(t, &trig)

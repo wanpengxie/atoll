@@ -21,7 +21,7 @@
 //     builds requests via behavior.BuildRequest, Arms author#2, emits, and
 //     waits a bounded fast-path window for the sync experience the model's
 //     training distribution expects).
-package agent
+package kimiagent
 
 import (
 	"context"

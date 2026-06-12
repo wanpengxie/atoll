@@ -1,4 +1,4 @@
-package agent_test
+package kimiagent_test
 
 import (
 	"context"
@@ -16,7 +16,7 @@ import (
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
-	"github.com/wanpengxie/ActOS/actors/agent"
+	"github.com/wanpengxie/ActOS/actors/kimiagent"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -87,23 +87,23 @@ func (s *scriptedAgent) Run(ctx context.Context, input string) error {
 
 func (s *scriptedAgent) Close() error { return s.closeErr }
 
-func testConfig() agent.Config {
-	return agent.Config{
+func testConfig() kimiagent.Config {
+	return kimiagent.Config{
 		APIKey:       "k",
 		Model:        "m",
 		ProviderType: "anthropic",
 	}
 }
 
-// newStartedBridge builds + starts a bridge with the given scripted agent.
+// newStartedBridge builds + starts a bridge with the given scripted kimiagent.
 // Cleanup stops it.
-func newStartedBridge(t *testing.T, w *recordingWriter, sa agent.Agent) *agent.Bridge {
+func newStartedBridge(t *testing.T, w *recordingWriter, sa kimiagent.Agent) *kimiagent.Bridge {
 	t.Helper()
-	b, err := agent.NewBridge(testConfig(), testActorID, testChannelID, w)
+	b, err := kimiagent.NewBridge(testConfig(), testActorID, testChannelID, w)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
-	agent.SetAgentFactory(b, func(agent.AgentConfig) (agent.Agent, error) { return sa, nil })
+	kimiagent.SetAgentFactory(b, func(kimiagent.AgentConfig) (kimiagent.Agent, error) { return sa, nil })
 	if err := b.Start(context.Background(), nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -129,8 +129,8 @@ func triggerEnv(id string) message.Envelope {
 
 // pickToolByName looks up a channel tool by Name(). Returns nil when
 // absent — caller fails the test.
-func pickToolByName(b *agent.Bridge, name string) gokimitools.Tool {
-	for _, raw := range agent.ChannelToolsForTest(b) {
+func pickToolByName(b *kimiagent.Bridge, name string) gokimitools.Tool {
+	for _, raw := range kimiagent.ChannelToolsForTest(b) {
 		if raw.Name() == name {
 			if tool, ok := raw.(gokimitools.Tool); ok {
 				return tool
@@ -145,26 +145,26 @@ func pickToolByName(b *agent.Bridge, name string) gokimitools.Tool {
 // ---------------------------------------------------------------------------
 
 func TestNewConfigFromEnv_RequiresAPIKey(t *testing.T) {
-	t.Setenv(agent.EnvKeyAPIKey, "")
-	t.Setenv(agent.EnvKeyModel, "m")
-	if _, err := agent.NewConfigFromEnv(""); err == nil {
+	t.Setenv(kimiagent.EnvKeyAPIKey, "")
+	t.Setenv(kimiagent.EnvKeyModel, "m")
+	if _, err := kimiagent.NewConfigFromEnv(""); err == nil {
 		t.Fatal("expected error for missing api key")
 	}
 }
 
 func TestNewConfigFromEnv_RequiresModel(t *testing.T) {
-	t.Setenv(agent.EnvKeyAPIKey, "k")
-	t.Setenv(agent.EnvKeyModel, "")
-	if _, err := agent.NewConfigFromEnv(""); err == nil {
+	t.Setenv(kimiagent.EnvKeyAPIKey, "k")
+	t.Setenv(kimiagent.EnvKeyModel, "")
+	if _, err := kimiagent.NewConfigFromEnv(""); err == nil {
 		t.Fatal("expected error for missing model")
 	}
 }
 
 func TestNewConfigFromEnv_ReadsAllFields(t *testing.T) {
-	t.Setenv(agent.EnvKeyAPIKey, "k1")
-	t.Setenv(agent.EnvKeyBaseURL, "https://api.example.com/anthropic")
-	t.Setenv(agent.EnvKeyModel, "deepseek-v4")
-	cfg, err := agent.NewConfigFromEnv("sys-prompt")
+	t.Setenv(kimiagent.EnvKeyAPIKey, "k1")
+	t.Setenv(kimiagent.EnvKeyBaseURL, "https://api.example.com/anthropic")
+	t.Setenv(kimiagent.EnvKeyModel, "deepseek-v4")
+	cfg, err := kimiagent.NewConfigFromEnv("sys-prompt")
 	if err != nil {
 		t.Fatalf("NewConfigFromEnv: %v", err)
 	}
@@ -176,7 +176,7 @@ func TestNewConfigFromEnv_ReadsAllFields(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_EmptyDomain(t *testing.T) {
-	p := agent.BuildSystemPrompt(agent.Situation{Host: "server"}, "", "")
+	p := kimiagent.BuildSystemPrompt(kimiagent.Situation{Host: "server"}, "", "")
 	if !strings.Contains(p, "coagent agent") {
 		t.Fatalf("platform teaching missing: %q", p[:80])
 	}
@@ -186,7 +186,7 @@ func TestBuildSystemPrompt_EmptyDomain(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_WithDomain(t *testing.T) {
-	p := agent.BuildSystemPrompt(agent.Situation{Host: "daemon"}, "xhs-creator", "domain rules here")
+	p := kimiagent.BuildSystemPrompt(kimiagent.Situation{Host: "daemon"}, "xhs-creator", "domain rules here")
 	if !strings.Contains(p, "# Channel template: xhs-creator") {
 		t.Fatal("template header missing")
 	}
@@ -198,7 +198,7 @@ func TestBuildSystemPrompt_WithDomain(t *testing.T) {
 // TestBuildSystemPrompt_SituationDrivesBehaviour pins the two-roles-one-
 // skeleton design: facts in, behaviour out — and NO role labels anywhere.
 func TestBuildSystemPrompt_SituationDrivesBehaviour(t *testing.T) {
-	noWS := agent.BuildSystemPrompt(agent.Situation{Host: "server"}, "", "")
+	noWS := kimiagent.BuildSystemPrompt(kimiagent.Situation{Host: "server"}, "", "")
 	if !strings.Contains(noWS, "NO private workspace") {
 		t.Fatal("no-workspace fact missing")
 	}
@@ -206,7 +206,7 @@ func TestBuildSystemPrompt_SituationDrivesBehaviour(t *testing.T) {
 		t.Fatal("bootstrap-guide behaviour not derived from the no-workspace fact")
 	}
 
-	withWS := agent.BuildSystemPrompt(agent.Situation{Host: "daemon", HasWorkspace: true, WorkspaceDir: "/ws/ch-1"}, "", "")
+	withWS := kimiagent.BuildSystemPrompt(kimiagent.Situation{Host: "daemon", HasWorkspace: true, WorkspaceDir: "/ws/ch-1"}, "", "")
 	if !strings.Contains(withWS, "/ws/ch-1") {
 		t.Fatal("workspace dir missing")
 	}
@@ -224,7 +224,7 @@ func TestBuildSystemPrompt_SituationDrivesBehaviour(t *testing.T) {
 }
 
 func TestBuildSystemPrompt_NoFrozenActorSnapshot(t *testing.T) {
-	p := agent.BuildSystemPrompt(agent.Situation{}, "group", "d")
+	p := kimiagent.BuildSystemPrompt(kimiagent.Situation{}, "group", "d")
 	for _, banned := range []string{"actor_id\":", "frozen", "COAGENT_CHANNEL_CONTEXT_JSON"} {
 		if strings.Contains(p, banned) {
 			t.Fatalf("prompt carries frozen snapshot marker %q", banned)
@@ -238,19 +238,19 @@ func TestBuildSystemPrompt_NoFrozenActorSnapshot(t *testing.T) {
 
 func TestNewBridge_Validations(t *testing.T) {
 	w := &recordingWriter{}
-	if _, err := agent.NewBridge(agent.Config{Model: "m"}, testActorID, testChannelID, w); err == nil {
+	if _, err := kimiagent.NewBridge(kimiagent.Config{Model: "m"}, testActorID, testChannelID, w); err == nil {
 		t.Fatal("missing api key: want error")
 	}
-	if _, err := agent.NewBridge(agent.Config{APIKey: "k"}, testActorID, testChannelID, w); err == nil {
+	if _, err := kimiagent.NewBridge(kimiagent.Config{APIKey: "k"}, testActorID, testChannelID, w); err == nil {
 		t.Fatal("missing model: want error")
 	}
-	if _, err := agent.NewBridge(testConfig(), "", testChannelID, w); err == nil {
+	if _, err := kimiagent.NewBridge(testConfig(), "", testChannelID, w); err == nil {
 		t.Fatal("missing self: want error")
 	}
-	if _, err := agent.NewBridge(testConfig(), testActorID, "", w); err == nil {
+	if _, err := kimiagent.NewBridge(testConfig(), testActorID, "", w); err == nil {
 		t.Fatal("missing channel: want error")
 	}
-	if _, err := agent.NewBridge(testConfig(), testActorID, testChannelID, nil); err == nil {
+	if _, err := kimiagent.NewBridge(testConfig(), testActorID, testChannelID, nil); err == nil {
 		t.Fatal("nil writer: want error")
 	}
 }
@@ -260,9 +260,9 @@ func TestNewBridge_Validations(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // scriptTextTurn emits deltas + a TurnEnd through the bridge's wire channel.
-func scriptTextTurn(b **agent.Bridge, text string) *scriptedAgent {
+func scriptTextTurn(b **kimiagent.Bridge, text string) *scriptedAgent {
 	return &scriptedAgent{emitFn: func(ctx context.Context, _ string) error {
-		em := agent.BridgeWireEmitter(*b)
+		em := kimiagent.BridgeWireEmitter(*b)
 		em.Emit(wire.TextDelta{Delta: text})
 		em.Emit(wire.TurnEnd{StopReason: "end_turn"})
 		return nil
@@ -271,7 +271,7 @@ func scriptTextTurn(b **agent.Bridge, text string) *scriptedAgent {
 
 func TestReceive_RequestRunsTurnAndEmitsSingleTerminal(t *testing.T) {
 	w := &recordingWriter{}
-	var b *agent.Bridge
+	var b *kimiagent.Bridge
 	b = newStartedBridge(t, w, scriptTextTurn(&b, "hello there"))
 
 	env := triggerEnv("req-1")
@@ -305,9 +305,9 @@ func TestReceive_RequestRunsTurnAndEmitsSingleTerminal(t *testing.T) {
 
 func TestReceive_ProgressPerToolStep(t *testing.T) {
 	w := &recordingWriter{}
-	var b *agent.Bridge
+	var b *kimiagent.Bridge
 	sa := &scriptedAgent{emitFn: func(ctx context.Context, _ string) error {
-		em := agent.BridgeWireEmitter(b)
+		em := kimiagent.BridgeWireEmitter(b)
 		em.Emit(wire.ToolCallRequest{ToolCall: types.ToolCall{ID: "t1", Name: "call_actor", Arguments: map[string]any{"cmd": "ls"}}})
 		em.Emit(wire.ToolCallResult{})
 		em.Emit(wire.ToolCallRequest{ToolCall: types.ToolCall{ID: "t2", Name: "call_actor"}})
@@ -364,14 +364,14 @@ func TestReceive_LLMErrorEmitsFailedTerminal(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // startToolCall invokes call_actor in a goroutine and returns the result chan.
-func startToolCall(t *testing.T, b *agent.Bridge, trigger message.Envelope, params map[string]any) <-chan types.ToolResult {
+func startToolCall(t *testing.T, b *kimiagent.Bridge, trigger message.Envelope, params map[string]any) <-chan types.ToolResult {
 	t.Helper()
 	tool := pickToolByName(b, "call_actor")
 	if tool == nil {
 		t.Fatal("call_actor tool absent")
 	}
 	raw, _ := json.Marshal(params)
-	ctx := agent.WithTurnContext(context.Background(), trigger)
+	ctx := kimiagent.WithTurnContext(context.Background(), trigger)
 	out := make(chan types.ToolResult, 1)
 	go func() {
 		res, _ := tool.Execute(ctx, raw)
@@ -382,7 +382,7 @@ func startToolCall(t *testing.T, b *agent.Bridge, trigger message.Envelope, para
 
 func TestCallActor_EmitsRequestAndReturnsInlineResponse(t *testing.T) {
 	w := &recordingWriter{}
-	var b *agent.Bridge
+	var b *kimiagent.Bridge
 	b = newStartedBridge(t, w, &scriptedAgent{})
 
 	trigger := triggerEnv("trig-1")
@@ -438,15 +438,15 @@ func TestCallActor_EmitsRequestAndReturnsInlineResponse(t *testing.T) {
 
 func TestCallActor_OverWindowReturnsAck(t *testing.T) {
 	w := &recordingWriter{}
-	var b *agent.Bridge
+	var b *kimiagent.Bridge
 	cfg := testConfig()
 	cfg.FastPathWindow = 30 * time.Millisecond
-	bb, err := agent.NewBridge(cfg, testActorID, testChannelID, w)
+	bb, err := kimiagent.NewBridge(cfg, testActorID, testChannelID, w)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
 	b = bb
-	agent.SetAgentFactory(b, func(agent.AgentConfig) (agent.Agent, error) { return &scriptedAgent{}, nil })
+	kimiagent.SetAgentFactory(b, func(kimiagent.AgentConfig) (kimiagent.Agent, error) { return &scriptedAgent{}, nil })
 	if err := b.Start(context.Background(), nil); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -473,7 +473,7 @@ func TestCallActor_OverWindowReturnsAck(t *testing.T) {
 
 func TestCallActor_TerminalFailureReturnsErrorResult(t *testing.T) {
 	w := &recordingWriter{}
-	var b *agent.Bridge
+	var b *kimiagent.Bridge
 	b = newStartedBridge(t, w, &scriptedAgent{})
 
 	trigger := triggerEnv("trig-f")
@@ -507,7 +507,7 @@ func TestCallActor_TerminalFailureReturnsErrorResult(t *testing.T) {
 
 func TestCallActor_ProvisionalBeforeFinalDoesNotResolveEarly(t *testing.T) {
 	w := &recordingWriter{}
-	var b *agent.Bridge
+	var b *kimiagent.Bridge
 	b = newStartedBridge(t, w, &scriptedAgent{})
 
 	trigger := triggerEnv("trig-prov")
@@ -556,14 +556,14 @@ func TestCallActor_ProvisionalBeforeFinalDoesNotResolveEarly(t *testing.T) {
 // final response nobody waits for feeds the LLM as a new turn.
 func TestReceive_UnawaitedFinalBecomesNewTurn(t *testing.T) {
 	w := &recordingWriter{}
-	var b *agent.Bridge
+	var b *kimiagent.Bridge
 	var inputs []string
 	var inputsMu sync.Mutex
 	sa := &scriptedAgent{emitFn: func(ctx context.Context, input string) error {
 		inputsMu.Lock()
 		inputs = append(inputs, input)
 		inputsMu.Unlock()
-		em := agent.BridgeWireEmitter(b)
+		em := kimiagent.BridgeWireEmitter(b)
 		em.Emit(wire.TextDelta{Delta: "ok"})
 		em.Emit(wire.TurnEnd{StopReason: "end_turn"})
 		return nil
@@ -596,13 +596,13 @@ func TestReceive_UnawaitedFinalBecomesNewTurn(t *testing.T) {
 
 func TestEnvelopeIDUniqueWithinSameMillisecond(t *testing.T) {
 	w := &recordingWriter{}
-	b, err := agent.NewBridge(testConfig(), testActorID, testChannelID, w)
+	b, err := kimiagent.NewBridge(testConfig(), testActorID, testChannelID, w)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
 	seen := map[string]bool{}
 	for i := 0; i < 100; i++ {
-		id := agent.EnvelopeIDForTest(b, 1234567890)
+		id := kimiagent.EnvelopeIDForTest(b, 1234567890)
 		if seen[id] {
 			t.Fatalf("duplicate id %s", id)
 		}
@@ -624,7 +624,7 @@ func TestClassifyLLMError_NetworkBuckets(t *testing.T) {
 		{fmt.Errorf("opaque"), "llm_unknown"},
 	}
 	for _, c := range cases {
-		if got := agent.ClassifyLLMError(c.err); got != c.want {
+		if got := kimiagent.ClassifyLLMError(c.err); got != c.want {
 			t.Fatalf("classify(%v) = %s want %s", c.err, got, c.want)
 		}
 	}
@@ -632,7 +632,7 @@ func TestClassifyLLMError_NetworkBuckets(t *testing.T) {
 
 func TestStop_TearsDownCleanly(t *testing.T) {
 	w := &recordingWriter{}
-	var b *agent.Bridge
+	var b *kimiagent.Bridge
 	b = newStartedBridge(t, w, scriptTextTurn(&b, "x"))
 
 	env := triggerEnv("req-stop")

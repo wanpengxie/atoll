@@ -19,4 +19,4 @@
 // Failure path: a single failed-terminal envelope is emitted from the
 // LLM error classifier (see emitTerminalLLMError) carrying the full
 // error description in payload.text + payload.reason bucket.
-package agent
+package kimiagent

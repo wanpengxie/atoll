@@ -15,9 +15,9 @@ import (
 	"strings"
 	"syscall"
 
-	agentactor "github.com/wanpengxie/ActOS/actors/agent"
 	"github.com/wanpengxie/ActOS/actors/device"
 	"github.com/wanpengxie/ActOS/actors/echo"
+	agentactor "github.com/wanpengxie/ActOS/actors/kimiagent"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"

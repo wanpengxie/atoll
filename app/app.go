@@ -15,7 +15,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/wanpengxie/ActOS/actors/agent"
+	"github.com/wanpengxie/ActOS/actors/kimiagent"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
@@ -262,13 +262,13 @@ func (a *App) spawnBuiltinAgent(chID channel.ID, home *platform.Home) {
 		}
 		impl = built
 	} else {
-		cfg, err := agent.NewConfigFromEnv(agent.BuildSystemPrompt(
-			agent.Situation{Host: "server"},
-			os.Getenv(agent.EnvKeyChannelType), os.Getenv(agent.EnvKeyDomainPrompt)))
+		cfg, err := kimiagent.NewConfigFromEnv(kimiagent.BuildSystemPrompt(
+			kimiagent.Situation{Host: "server"},
+			os.Getenv(kimiagent.EnvKeyChannelType), os.Getenv(kimiagent.EnvKeyDomainPrompt)))
 		if err != nil {
 			return // no LLM credentials on this server — no built-in agent
 		}
-		bridge, err := agent.NewBridge(cfg, builtinAgentID, chID, pen)
+		bridge, err := kimiagent.NewBridge(cfg, builtinAgentID, chID, pen)
 		if err != nil {
 			a.logger.Warn("app: builtin agent build failed", "channel", string(chID), "err", err.Error())
 			return
