@@ -16,14 +16,13 @@ const (
 	QueryList = "actor.list"
 )
 
-// NOTE: there is no actor.status query. "Is this actor serviceable right now"
-// is not a queryable 存量 — it is the OUTCOME of send→terminal (the substrate
-// presence-down edge materialises receiver_unavailable when the actor is gone). A
-// status query could only answer a trivial constant available=true, which
-// carries no truth — a half-built slice that misleads later readers. When a
-// concrete actor has non-trivial domain state worth surfacing proactively
-// (e.g. an actor with non-trivial login state), an optional status self-answer
-// is added additively — pain-driven, not pre-built.
+// NOTE: "Is this actor serviceable for one request right now" is NOT actor.status
+// — that remains the OUTCOME of send→terminal (the substrate presence-down edge
+// materialises receiver_unavailable when the actor is gone). actor.status
+// (QueryStatus, status.go) is the additive, pain-driven self-answer for an actor
+// whose non-trivial LIVE state (e.g. a device adapter's attach online/offline
+// flag) is knowable independent of any in-flight request — a真存量 the actor
+// alone can report, not a trivial constant.
 
 // DescribeRequest is the actor.describe request payload. Empty = the full
 // self-answer (Describe); Type set = the single-type answer (DescribeType).

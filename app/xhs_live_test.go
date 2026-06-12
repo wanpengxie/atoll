@@ -270,3 +270,107 @@ func dialDeviceWithRetry(t *testing.T, url string, timeout time.Duration) *webso
 		time.Sleep(25 * time.Millisecond)
 	}
 }
+
+// xhsStatusDeviceAddr is a SEPARATE fixed loopback port for the status live
+// test's adapter device endpoint (distinct from xhsDeviceAddr so the two live
+// tests never collide on the port).
+const xhsStatusDeviceAddr = "127.0.0.1:18091"
+
+// TestXHSLiveActorStatus is the green gate for the app status route under REAL
+// live conditions: a real server + real daemon hosting the tool:xhs cell + a real
+// mock device over the cell's private /device WS.
+//
+//  1. device connected → GET /actors/tool:xhs/status reports device_online:true
+//  2. device disconnects → the same probe reports device_online:false
+//
+// This proves the end-to-end path the frontend uses to sense a daemon-hosted
+// adapter's device presence: app sends actor.status → adapter self-answers from
+// its live conn state → app returns it. No substrate obs frame is involved.
+func TestXHSLiveActorStatus(t *testing.T) {
+	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
+
+	s := fullSetup(t, env)
+
+	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID),
+		map[string]any{"name": "xhs-status-daemon"}, s.cookies)
+	assertStatus(t, w, http.StatusCreated)
+	apiKey := respJSON(t, w)["api_key"].(string)
+	if apiKey == "" {
+		t.Fatal("daemon api_key empty")
+	}
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- platform.RunCompute(ctx,
+			platform.ComputeConfig{ServerWS: serverWS, Logger: logger},
+			[]platform.ActorDecl{{
+				ID:      xhs.DefaultActorID,
+				Kind:    actor.KindTool,
+				Binding: actor.BindingRuntimeInboundViaRelay,
+				Factory: func(wr harness.Writer) actorrt.Actor {
+					return xhs.NewActor(wr, xhs.Config{
+						ListenAddr:     xhsStatusDeviceAddr,
+						ReaperInterval: 20 * time.Millisecond,
+						Logger:         logger,
+					})
+				},
+			}},
+		)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case <-runErr:
+		case <-time.After(3 * time.Second):
+			t.Log("RunCompute did not return within 3s after cancel")
+		}
+	})
+
+	// Daemon attach → tool:xhs registers as a channel member.
+	waitForActor(t, env, s, "tool:xhs", 5*time.Second)
+
+	// --- STAGE 1: device connected → status reports device_online:true --------
+	devURL := fmt.Sprintf("ws://%s/device", xhsStatusDeviceAddr)
+	conn := dialDeviceWithRetry(t, devURL, 3*time.Second)
+
+	waitDeviceOnline(t, env, s, "tool:xhs", true, 5*time.Second)
+
+	// --- STAGE 2: device disconnects → status reports device_online:false -----
+	_ = conn.Close()
+	waitDeviceOnline(t, env, s, "tool:xhs", false, 5*time.Second)
+}
+
+// waitDeviceOnline polls GET /actors/:id/status until the actor's
+// status.device_online matches want (or fails). It tolerates transient live:false
+// (the readLoop's offline flip lags the socket close by a poll or two) by
+// retrying until the deadline.
+func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want bool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, id), nil, s.cookies)
+		assertStatus(t, w, http.StatusOK)
+		body := respJSON(t, w)
+		live, _ := body["live"].(bool)
+		if live {
+			if st, ok := body["status"].(map[string]any); ok {
+				if online, ok := st["device_online"].(bool); ok && online == want {
+					return
+				}
+			}
+		} else if !want {
+			// live:false (actor unreachable) also satisfies "device offline".
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("status device_online never became %v within %s (last body=%v)", want, timeout, body)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}

@@ -320,6 +320,67 @@ func TestConnReplacement(t *testing.T) {
 	}
 }
 
+//  6. Status (online): with a device attached, actor.status answers
+//     device_online=true.
+func TestStatusOnline(t *testing.T) {
+	w := &recordingWriter{}
+	a := startActor(t, w, Config{})
+	_ = dialExtension(t, a)
+	waitOnline(t, a)
+
+	req := request("req-st-on", "actor.status", map[string]any{})
+	if err := a.Receive(context.Background(), req); err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	resp, ok := w.waitResponse(t, "req-st-on", time.Second)
+	if !ok {
+		t.Fatal("no status response")
+	}
+	if online := statusDeviceOnline(t, resp); !online {
+		t.Errorf("device_online=false want true (device attached)")
+	}
+}
+
+//  7. Status (offline): with no device, actor.status answers
+//     device_online=false. The request still completes (status is a self-answer,
+//     never a device round-trip — unlike a business request which would fail
+//     device_offline).
+func TestStatusOffline(t *testing.T) {
+	w := &recordingWriter{}
+	a := startActor(t, w, Config{})
+
+	req := request("req-st-off", "actor.status", map[string]any{})
+	if err := a.Receive(context.Background(), req); err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	resp, ok := w.waitResponse(t, "req-st-off", time.Second)
+	if !ok {
+		t.Fatal("no status response")
+	}
+	status, _, _ := responseStatus(t, resp)
+	if status != "completed" {
+		t.Errorf("status=%q want completed (self-answer, not a device round-trip)", status)
+	}
+	if online := statusDeviceOnline(t, resp); online {
+		t.Errorf("device_online=true want false (no device attached)")
+	}
+}
+
+// statusDeviceOnline extracts status_snapshot.device_online from an actor.status
+// response envelope.
+func statusDeviceOnline(t *testing.T, env message.Envelope) bool {
+	t.Helper()
+	var payload struct {
+		Snapshot struct {
+			DeviceOnline bool `json:"device_online"`
+		} `json:"status_snapshot"`
+	}
+	if err := json.Unmarshal(env.Payload, &payload); err != nil {
+		t.Fatalf("decode status payload: %v\nraw: %s", err, env.Payload)
+	}
+	return payload.Snapshot.DeviceOnline
+}
+
 //  8. KindGuard: a non-request (event-kind) addressed to a served type is
 //     dropped — the adapter has no terminal to author, so it emits nothing.
 func TestKindGuardDropsNonRequest(t *testing.T) {

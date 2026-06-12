@@ -158,6 +158,7 @@ func (a *App) registerRoutes() {
 		api.DELETE("/channels/:chID", a.handleDeleteChannel)
 		api.GET("/channels/:chID/members", a.handleListChannelMembers)
 		api.GET("/channels/:chID/actors", a.handleListActors)
+		api.GET("/channels/:chID/actors/:actorID/status", a.handleActorStatus)
 
 		api.GET("/channels/:chID/cursor", a.handleCursor)
 		api.GET("/channels/:chID/messages", a.handleListMessages)

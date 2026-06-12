@@ -143,6 +143,9 @@ func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
 	if env.Type == introspect.QueryDescribe {
 		return a.handleDescribe(ctx, env)
 	}
+	if env.Type == introspect.QueryStatus {
+		return a.handleStatus(ctx, env)
+	}
 
 	spec, ok := lookupType(env.Type)
 	if !ok {
@@ -184,6 +187,21 @@ func (a *Actor) handleDescribe(ctx context.Context, env *message.Envelope) error
 	if !ok {
 		return a.fail(ctx, env, "type_unsupported", fmt.Sprintf("xhs adapter does not handle %s", req.Type))
 	}
+	_, rerr := behavior.RespondJSON(ctx, a.writer, a.clock, env, a.sender(), answer)
+	return rerr
+}
+
+// handleStatus answers actor.status with this adapter's live snapshot: whether a
+// device is currently attached. This is the adapter's non-trivial live state
+// (knowable independent of any in-flight request), surfaced over the ordinary
+// request/response path so the app can probe it without a substrate obs frame.
+func (a *Actor) handleStatus(ctx context.Context, env *message.Envelope) error {
+	if _, err := introspect.ParseStatusRequest(env.Payload); err != nil {
+		return a.fail(ctx, env, "payload_invalid", fmt.Sprintf("decode status payload: %v", err))
+	}
+	answer := introspect.AnswerStatus(string(a.actorID), map[string]any{
+		"device_online": a.dev.online(),
+	})
 	_, rerr := behavior.RespondJSON(ctx, a.writer, a.clock, env, a.sender(), answer)
 	return rerr
 }
