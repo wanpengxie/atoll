@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/ActOS/actors/device"
 	"github.com/wanpengxie/ActOS/actors/echo"
 	agentactor "github.com/wanpengxie/ActOS/actors/kimiagent"
+	"github.com/wanpengxie/ActOS/cmd/internal/dotenv"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
@@ -70,6 +71,15 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
+
+	// Seed config from .env (dev convenience) before reading the environment.
+	// An already-exported variable wins; a missing file is a no-op. The agent
+	// cell's KIMI_* creds enter the process here.
+	if n, err := dotenv.Load(".env"); err != nil {
+		logger.Warn("daemon: .env load failed", "err", err.Error())
+	} else if n > 0 {
+		logger.Info("daemon: loaded .env", "vars_set", n)
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
