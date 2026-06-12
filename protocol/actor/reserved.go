@@ -36,8 +36,15 @@ const (
 	ReservedSystemChannelCreated    = "system.channel.created"
 	ReservedSystemActorRegistered   = "system.actor.registered"
 	ReservedSystemActorDeregistered = "system.actor.deregistered"
-	ReservedSystemConfigUpdated     = "system.config.updated"
 )
+
+// NOTE: there is NO system.config.updated event. The substrate has no
+// channel-level config as a first-class concept: a config surface is only
+// admissible as one complete vertical slice — the state, its guardian (who
+// may mutate it, harness-enforced), and the mirror event together. Vocabulary
+// without the guardian would be an unguarded mutation surface on the channel.
+// If rule-managed channel config ever becomes substrate-essential, the whole
+// slice comes back additively (protocol revision).
 
 // NOTE: there are NO system.type.installed/deprecated events. A "type" is not a
 // substrate/truth first-class entity — it is an actor's method, discovered live

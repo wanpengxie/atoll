@@ -151,7 +151,6 @@ func TestReservedSystemEventTypeValues(t *testing.T) {
 		actor.ReservedSystemChannelCreated:    "system.channel.created",
 		actor.ReservedSystemActorRegistered:   "system.actor.registered",
 		actor.ReservedSystemActorDeregistered: "system.actor.deregistered",
-		actor.ReservedSystemConfigUpdated:     "system.config.updated",
 	}
 	for got, want := range cases {
 		if got != want {

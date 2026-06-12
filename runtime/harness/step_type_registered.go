@@ -18,7 +18,6 @@ var reservedBootstrapTypeSet = map[string]struct{}{
 	actor.ReservedSystemChannelCreated:    {},
 	actor.ReservedSystemActorRegistered:   {},
 	actor.ReservedSystemActorDeregistered: {},
-	actor.ReservedSystemConfigUpdated:     {},
 }
 
 // stepTypeRegistered enforces the substrate's RESERVED-NAMESPACE AUTHORITY for
