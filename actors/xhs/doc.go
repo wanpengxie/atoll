@@ -1,35 +1,40 @@
-// Package xhs is the first concrete v5 device adapter — it owns the
-// `tool:xhs` actor on every channel that carries an xhs binding
-// and translates kind=request envelopes (`xhs.publish`, `xhs.search`,
-// `xhs.note.fetch`, `xhs.recent.fetch`, `xhs.cookie.sync`) into device
-// commands carried by the runtime_inbound_via_relay binding (L1 §11.7) +
-// device_transit frame set (T1.3 / L4 §2.6.4).
+// Package xhs is the first concrete device-backed adapter actor — the
+// boundary translator between the channel (actor/message world) and a real
+// Xiaohongshu browser extension that speaks no actor primitives.
 //
-// File layout (each file holds one concern):
+// It is the reference adapter (adapter-actor-spec.md): two faces, complexity
+// pressed into one stateful actor.
 //
-//   - proto.go        wire schema (Command, Callback, type constants,
-//     per-type allow-list helpers).
-//   - device_type.go  per-type request encoder + callback decoder built
-//     on top of proto.go.
-//   - describe.go     TypeMeta / FieldDoc / ErrorDoc for actor describe
-//     responses (discovery = actor self-answer).
-//   - template.go     xhs-creator channel template (ChannelType +
-//     CreatorTemplate + domain prompt).
+//   - Inward (channel face): a plain channel actor. Receive(env) switches on a
+//     small closed type set (xhs.publish / xhs.search / xhs.note.fetch /
+//     xhs.recent.fetch), answers actor.describe, and emits channel primitives
+//     through lib/behavior. No other actor ever learns what a browser
+//     extension is.
 //
-// Boundary discipline (go-arch-lint T2):
+//   - Outward (device face): a PRIVATE WS endpoint owned by this package (the
+//     extension connect-ins to it). The wire is the minimal request/response
+//     primitive {correlation_id, cmd, params} down / {correlation_id, ok,
+//     result|error} up — NOT a channel envelope, NOT any device_transit frame
+//     family. correlation_id pairs a reply to its request.
 //
-//   - actors/xhs imports only protocol/actor + lib/behavior + standard
-//     library. No server, no platform internals.
-//   - Device connection identity stays in the daemon-side local-device
-//     bridge (an additive件, reintroduced with the concrete device actors —
-//     platform-redesign §8 拍板项 4); payloads carry only business
-//     parameters (L4 §2.6 — device is NOT an actor).
+// Statefulness (substrate cell hosts one long-lived instance): the adapter
+// holds the current device conn + an in-flight table keyed by correlation_id.
+// Because the substrate has no self-send, device replies are emitted to the
+// channel directly from the read-loop goroutine via the writer; an internal
+// mutex guards the conn + in-flight table (the one cross-goroutine state).
 //
-// Authoritative spec references:
+// Fault posture (let-it-crash): a single request that times out or hits an
+// offline device fails as a business response (the actor digests it). A reaper
+// goroutine sweeps the in-flight table for past-deadline requests. A dropped
+// conn flips the adapter offline and waits for a fresh connection — it does NOT
+// panic; only an untrustworthy internal state would (positive death).
 //
-//   - launch-ticket notes §T5      (device transit 完整链路)
-//   - launch-ticket notes §T1.3    (device_transit frame field set)
-//   - .dalek/pm/domain-xhs-spec.md §2.6  (device-not-actor invariant)
-//   - .dalek/pm/domain-xhs-spec.md §2.2  (xhs response schemas — per-type
-//     allow-list source)
+// File layout (one concern per file):
+//
+//   - actor.go    Actor struct + NewActor + Start/Stop/Receive + describe dispatch.
+//   - device.go   WS listener + accept + read loop + in-flight table + reaper +
+//     downstream send + device.online/offline events.
+//   - wire.go     the minimal device frame structs.
+//   - types.go    inward type constants + per-type cmd mapping + per-type deadline.
+//   - describe.go the TypeMeta catalog for actor.describe.
 package xhs

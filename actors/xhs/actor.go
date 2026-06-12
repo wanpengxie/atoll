@@ -1,0 +1,155 @@
+package xhs
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"time"
+
+	"github.com/wanpengxie/ActOS/lib/behavior"
+	"github.com/wanpengxie/ActOS/lib/introspect"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/channel"
+	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	"github.com/wanpengxie/ActOS/runtime/harness"
+)
+
+// DefaultActorID is the registry id this adapter owns.
+const DefaultActorID actor.ActorID = "tool:xhs"
+
+// Config drives an Actor. ListenAddr is the local address the private device WS
+// endpoint binds (e.g. "127.0.0.1:0" lets the OS pick a port — tests read the
+// resolved addr back via ListenAddr()). APIKey is the shared secret the
+// extension must present on the ?key= query.
+type Config struct {
+	ListenAddr string
+	APIKey     string
+	// ChannelID scopes the cell. The adapter stamps it on the device.online/
+	// offline events it authors (a cell is channel-scoped; behavior.EmitEvent
+	// needs the channel for the envelope builder).
+	ChannelID channel.ID
+	// NowFn returns the current time; defaults to time.Now. Injectable so
+	// tests can shorten deadlines deterministically (the reaper reads it).
+	NowFn func() time.Time
+	// Logger surfaces device-face edges (accept/drop/reaper). Defaults to a
+	// discard logger.
+	Logger *slog.Logger
+}
+
+// Actor is the xhs adapter cell. The inward (channel) face is this struct's
+// Receive/describe; the outward (device) face is the embedded *device, which
+// owns the WS endpoint, the connection, the in-flight table, and the reaper.
+//
+// The substrate runs Start/Stop/Receive serially on the cell goroutine, so the
+// inward face needs no locks. The device read loop + reaper run on their own
+// goroutines and emit channel responses directly through the writer; their
+// shared state is guarded inside *device (the one cross-goroutine boundary,
+// adapter-actor-spec §4).
+type Actor struct {
+	writer  harness.Writer
+	actorID actor.ActorID
+	chID    channel.ID
+	clock   func() time.Time
+	dev     *device
+}
+
+// NewActor builds an xhs adapter bound to its writer + identity + config. The
+// device endpoint is constructed here but only LISTENS at Start (cell
+// lifecycle): a half-built actor must never bind a port.
+func NewActor(w harness.Writer, cfg Config) *Actor {
+	clock := cfg.NowFn
+	if clock == nil {
+		clock = time.Now
+	}
+	logger := cfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	a := &Actor{
+		writer:  w,
+		actorID: DefaultActorID,
+		chID:    cfg.ChannelID,
+		clock:   clock,
+	}
+	a.dev = newDevice(a, cfg.ListenAddr, cfg.APIKey, clock, logger)
+	return a
+}
+
+var _ actorrt.Actor = (*Actor)(nil)
+var _ actorrt.Starter = (*Actor)(nil)
+var _ actorrt.Stopper = (*Actor)(nil)
+
+// Start binds the device WS endpoint and boots the accept + reaper goroutines.
+// A bind failure returns the error so the cell dies fast (positive death) — no
+// half-listening adapter ever registers as serviceable.
+func (a *Actor) Start(ctx context.Context, _ actorrt.ActorContext) error {
+	return a.dev.start(ctx)
+}
+
+// Stop tears the device endpoint down: stop accepting, close the conn, join the
+// read loop + reaper. The runtime guarantees no Receive is in flight.
+func (a *Actor) Stop(ctx context.Context) error {
+	return a.dev.stop(ctx)
+}
+
+// ListenAddr returns the resolved device-endpoint address (useful when the
+// config asked for port 0). Empty until Start has bound.
+func (a *Actor) ListenAddr() string { return a.dev.addr() }
+
+// Receive is the inward mailbox entry. It NEVER blocks on the device: a
+// supported request is encoded, registered in the in-flight table, and pushed
+// down the conn — the reply comes back asynchronously through the read loop. An
+// offline device fails the request immediately (digested, not crashed).
+func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
+	if env == nil {
+		return nil
+	}
+	if env.Kind == message.KindRequest && env.Type == introspect.QueryDescribe {
+		return a.handleDescribe(ctx, env)
+	}
+
+	spec, ok := lookupType(env.Type)
+	if !ok {
+		return a.fail(ctx, env, "type_unsupported", fmt.Sprintf("xhs adapter does not handle %s", env.Type))
+	}
+
+	// Translate the channel request into the device command frame. The inward
+	// payload IS the device params (both are business-language JSON for these
+	// types), so the params pass through verbatim — the type→cmd mapping is the
+	// translation that matters.
+	params := env.Payload
+	if len(params) == 0 {
+		params = json.RawMessage("{}")
+	}
+
+	if err := a.dev.dispatch(ctx, env, spec, params); err != nil {
+		// dispatch only errors for the digestible offline case; the device
+		// being absent is a business failure, not a crash.
+		return a.fail(ctx, env, "device_offline", err.Error())
+	}
+	return nil
+}
+
+func (a *Actor) sender() message.Sender {
+	return message.Sender{Kind: actor.KindTool, ID: a.actorID}
+}
+
+func (a *Actor) fail(ctx context.Context, env *message.Envelope, errorCode, detail string) error {
+	_, err := behavior.Fail(ctx, a.writer, a.clock, env, a.sender(), errorCode, detail)
+	return err
+}
+
+func (a *Actor) handleDescribe(ctx context.Context, env *message.Envelope) error {
+	req, err := introspect.ParseDescribeRequest(env.Payload)
+	if err != nil {
+		return a.fail(ctx, env, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
+	}
+	answer, ok := introspect.AnswerDescribe(describeCatalog(string(a.actorID)), req)
+	if !ok {
+		return a.fail(ctx, env, "type_unsupported", fmt.Sprintf("xhs adapter does not handle %s", req.Type))
+	}
+	_, rerr := behavior.RespondJSON(ctx, a.writer, a.clock, env, a.sender(), answer)
+	return rerr
+}

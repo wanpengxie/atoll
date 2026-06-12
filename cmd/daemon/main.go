@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/ActOS/actors/device"
 	"github.com/wanpengxie/ActOS/actors/echo"
 	agentactor "github.com/wanpengxie/ActOS/actors/kimiagent"
+	"github.com/wanpengxie/ActOS/actors/xhs"
 	"github.com/wanpengxie/ActOS/cmd/internal/dotenv"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -67,6 +68,7 @@ func main() {
 	actorsFlag := flag.String("actors", "", "comma-separated actors to host (e.g. echo)")
 	name := flag.String("name", "", "device name; default: hostname")
 	workspace := flag.String("workspace", "", "workspace root dir; default: ~/.coagent/workspace")
+	xhsAddr := flag.String("xhs-device-addr", "127.0.0.1:8090", "local WS addr the xhs browser extension connects in to")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -154,6 +156,33 @@ func main() {
 					log.Fatalf("daemon: agent bridge: %v", err)
 				}
 				return b
+			},
+		})
+	}
+
+	// The xhs adapter is opt-in (--actors=xhs,...). It owns a PRIVATE local WS
+	// endpoint the browser extension connects in to (transport inlined in the
+	// adapter), so it is special-cased here to inject its listen addr + api key
+	// + channel id. Binding is runtime_inbound_via_relay (the device connects
+	// IN; the substrate only records the label, it does not route the transport).
+	if hasName(actorNames, "xhs") {
+		actorNames = removeName(actorNames, "xhs")
+		chID := channelFromServerURL(*ws)
+		if chID == "" {
+			log.Fatalf("daemon: --actors=xhs requires the --server URL to carry ?channel=<id>")
+		}
+		xhsCfg := xhs.Config{
+			ListenAddr: *xhsAddr,
+			APIKey:     os.Getenv("XHS_DEVICE_KEY"),
+			ChannelID:  channel.ID(chID),
+			Logger:     slog.Default(),
+		}
+		decls = append(decls, platform.ActorDecl{
+			ID:      xhs.DefaultActorID,
+			Kind:    actor.KindTool,
+			Binding: actor.BindingRuntimeInboundViaRelay,
+			Factory: func(w harness.Writer) actorrt.Actor {
+				return xhs.NewActor(w, xhsCfg)
 			},
 		})
 	}
