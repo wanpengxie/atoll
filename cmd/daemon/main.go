@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/url"
@@ -28,40 +29,102 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-var registry = map[string]func(harness.Writer) actorrt.Actor{
-	"echo": func(w harness.Writer) actorrt.Actor {
-		return echo.NewActor(w)
-	},
+// actorDeps bundles every input an actor might need to declare itself at the
+// composition root. Each builder takes what it needs and ignores the rest —
+// there is no "generic vs special" actor, just a list of self-describing decls.
+type actorDeps struct {
+	channelID    channel.ID // from the --server URL ?channel= (a cell is channel-scoped)
+	workspaceDir string     // workspace root for device + agent situation facts
+	deviceName   string     // device identity
+	logger       *slog.Logger
 }
 
-// hasName / removeName are tiny slice helpers for the --actors flag.
-func hasName(names []string, want string) bool {
-	for _, n := range names {
-		if n == want {
-			return true
-		}
-	}
-	return false
+// builders maps an --actors name to its decl builder. Every actor declares its
+// own (id, kind, binding, factory), pulling whatever config it needs from deps.
+// echo is not "the normal case" — it is just the zero-config one.
+var builders = map[string]func(actorDeps) (platform.ActorDecl, error){
+	"echo":  echoDecl,
+	"agent": agentDecl,
+	"xhs":   xhsDecl,
+	"kimi":  kimiDecl,
 }
 
-func removeName(names []string, drop string) []string {
-	out := names[:0]
-	for _, n := range names {
-		if n != drop {
-			out = append(out, n)
-		}
-	}
-	return out
+// echoDecl: the zero-config tool. Only needs a writer.
+func echoDecl(actorDeps) (platform.ActorDecl, error) {
+	return platform.ActorDecl{
+		ID:      actor.ActorID("echo"),
+		Kind:    actor.KindTool,
+		Binding: actor.BindingRuntimeOutbound,
+		Factory: func(w harness.Writer) actorrt.Actor { return echo.NewActor(w) },
+	}, nil
 }
 
-// isSpecialActor reports whether an actor name is handled by a dedicated
-// config-injecting block (below) rather than the generic registry loop.
-func isSpecialActor(name string) bool {
-	switch name {
-	case "agent", "xhs", "kimi":
-		return true
+// agentDecl: the agent brain (opt-in fat-daemon host of the same Bridge the
+// server spawns as the built-in fallback — one prototype, host decided by where
+// the binary runs). Needs the channel id, workspace situation, and KIMI_* creds.
+func agentDecl(d actorDeps) (platform.ActorDecl, error) {
+	if d.channelID == "" {
+		return platform.ActorDecl{}, fmt.Errorf("--actors=agent requires the --server URL to carry ?channel=<id>")
 	}
-	return false
+	cfg, err := agentactor.NewConfigFromEnv(agentactor.BuildSystemPrompt(
+		agentactor.Situation{Host: "daemon", HasWorkspace: true, WorkspaceDir: d.workspaceDir},
+		os.Getenv(agentactor.EnvKeyChannelType), os.Getenv(agentactor.EnvKeyDomainPrompt)))
+	if err != nil {
+		return platform.ActorDecl{}, fmt.Errorf("config: %w", err)
+	}
+	agentID := actor.ActorID("agent:main")
+	chID := d.channelID
+	return platform.ActorDecl{
+		ID:      agentID,
+		Kind:    actor.KindAgent,
+		Binding: actor.BindingRuntimeOutbound,
+		Factory: func(w harness.Writer) actorrt.Actor {
+			b, err := agentactor.NewBridge(cfg, agentID, chID, w)
+			if err != nil {
+				log.Fatalf("daemon: agent bridge: %v", err)
+			}
+			return b
+		},
+	}, nil
+}
+
+// adapterDecl is the shared shape of a browser-extension adapter: it owns a
+// PRIVATE loopback WS endpoint the extension connects in to (transport inlined),
+// keyless (the 127.0.0.1 bind is the trust boundary), binding
+// runtime_inbound_via_relay (the device connects IN; the substrate only records
+// the label, it does not route the transport). xhs/kimi differ only by id+addr.
+func xhsDecl(d actorDeps) (platform.ActorDecl, error) {
+	cfg := xhs.Config{ListenAddr: xhs.DefaultListenAddr, Logger: d.logger}
+	return platform.ActorDecl{
+		ID:      xhs.DefaultActorID,
+		Kind:    actor.KindTool,
+		Binding: actor.BindingRuntimeInboundViaRelay,
+		Factory: func(w harness.Writer) actorrt.Actor { return xhs.NewActor(w, cfg) },
+	}, nil
+}
+
+func kimiDecl(d actorDeps) (platform.ActorDecl, error) {
+	cfg := kimi.Config{ListenAddr: kimi.DefaultListenAddr, Logger: d.logger}
+	return platform.ActorDecl{
+		ID:      kimi.DefaultActorID,
+		Kind:    actor.KindTool,
+		Binding: actor.BindingRuntimeInboundViaRelay,
+		Factory: func(w harness.Writer) actorrt.Actor { return kimi.NewActor(w, cfg) },
+	}, nil
+}
+
+// deviceDecl: the generic device actor, always hosted — attaching a daemon means
+// attaching a device. Its id carries the device identity.
+func deviceDecl(d actorDeps) platform.ActorDecl {
+	deviceID := actor.ActorID("device:" + d.deviceName)
+	return platform.ActorDecl{
+		ID:      deviceID,
+		Kind:    actor.KindTool,
+		Binding: actor.BindingRuntimeOutbound,
+		Factory: func(w harness.Writer) actorrt.Actor {
+			return device.NewActor(w, deviceID, d.workspaceDir, d.logger)
+		},
+	}
 }
 
 // channelFromServerURL extracts the ?channel= query from the server WS URL.
@@ -76,11 +139,9 @@ func channelFromServerURL(raw string) string {
 func main() {
 	ws := flag.String("server", "ws://localhost:8080/compute", "server WS url")
 	key := flag.String("key", "", "api key")
-	actorsFlag := flag.String("actors", "", "comma-separated actors to host (e.g. echo)")
+	actorsFlag := flag.String("actors", "", "comma-separated actors to host (e.g. echo,xhs,kimi,agent)")
 	name := flag.String("name", "", "device name; default: hostname")
 	workspace := flag.String("workspace", "", "workspace root dir; default: ~/.coagent/workspace")
-	xhsAddr := flag.String("xhs-device-addr", "127.0.0.1:8090", "local WS addr the xhs browser extension connects in to")
-	kimiAddr := flag.String("kimi-device-addr", "127.0.0.1:8091", "local WS addr the Kimi WebBridge extension connects in to")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -98,37 +159,8 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	// Parse actor names.
-	var actorNames []string
-	for _, n := range strings.Split(*actorsFlag, ",") {
-		n = strings.TrimSpace(n)
-		if n != "" {
-			actorNames = append(actorNames, n)
-		}
-	}
-
-	// Build actor declarations with factories. The special-cased actors
-	// (agent / xhs / kimi) are handled in dedicated blocks below — they need
-	// per-actor config injection — so the generic registry loop skips them.
-	var decls []platform.ActorDecl
-	for _, n := range actorNames {
-		if isSpecialActor(n) {
-			continue
-		}
-		factory, ok := registry[n]
-		if !ok {
-			log.Fatalf("daemon: unknown actor %q", n)
-		}
-		decls = append(decls, platform.ActorDecl{
-			ID:      actor.ActorID(n),
-			Kind:    actor.KindTool,
-			Binding: actor.BindingRuntimeOutbound,
-			Factory: factory,
-		})
-	}
-
-	// Device identity + workspace root resolve first — both the device
-	// actor and the agent's situation facts derive from them.
+	// Device identity + workspace root resolve first — both the device actor and
+	// the agent's situation facts derive from them.
 	deviceName := *name
 	if deviceName == "" {
 		host, err := os.Hostname()
@@ -146,94 +178,32 @@ func main() {
 		wsRoot = filepath.Join(home, ".coagent", "workspace")
 	}
 
-	// The agent brain is opt-in (--actors=agent,...): the fat daemon hosts
-	// the same Bridge the server spawns as the built-in fallback — one
-	// prototype, host decided by where this binary runs. It needs the channel
-	// id (from the --server URL query) because a cell is channel-scoped.
-	if hasName(actorNames, "agent") {
-		actorNames = removeName(actorNames, "agent")
-		chID := channelFromServerURL(*ws)
-		if chID == "" {
-			log.Fatalf("daemon: --actors=agent requires the --server URL to carry ?channel=<id>")
+	deps := actorDeps{
+		channelID:    channel.ID(channelFromServerURL(*ws)),
+		workspaceDir: wsRoot,
+		deviceName:   deviceName,
+		logger:       slog.Default(),
+	}
+
+	// Build the selected actors' decls — one lookup, one builder, no special
+	// cases. Then the always-on device.
+	var decls []platform.ActorDecl
+	for _, n := range strings.Split(*actorsFlag, ",") {
+		n = strings.TrimSpace(n)
+		if n == "" {
+			continue
 		}
-		cfg, err := agentactor.NewConfigFromEnv(agentactor.BuildSystemPrompt(
-			agentactor.Situation{Host: "daemon", HasWorkspace: true, WorkspaceDir: wsRoot},
-			os.Getenv(agentactor.EnvKeyChannelType), os.Getenv(agentactor.EnvKeyDomainPrompt)))
+		build, ok := builders[n]
+		if !ok {
+			log.Fatalf("daemon: unknown actor %q", n)
+		}
+		decl, err := build(deps)
 		if err != nil {
-			log.Fatalf("daemon: agent config: %v", err)
+			log.Fatalf("daemon: actor %q: %v", n, err)
 		}
-		agentID := actor.ActorID("agent:main")
-		decls = append(decls, platform.ActorDecl{
-			ID:      agentID,
-			Kind:    actor.KindAgent,
-			Binding: actor.BindingRuntimeOutbound,
-			Factory: func(w harness.Writer) actorrt.Actor {
-				b, err := agentactor.NewBridge(cfg, agentID, channel.ID(chID), w)
-				if err != nil {
-					log.Fatalf("daemon: agent bridge: %v", err)
-				}
-				return b
-			},
-		})
+		decls = append(decls, decl)
 	}
-
-	// The xhs adapter is opt-in (--actors=xhs,...). It owns a PRIVATE loopback WS
-	// endpoint the browser extension connects in to (transport inlined in the
-	// adapter), so it is special-cased here to inject its listen addr. The
-	// endpoint is keyless — the 127.0.0.1 bind is the trust boundary (the device
-	// reaches it through the local daemon, same machine). Binding is
-	// runtime_inbound_via_relay (the device connects IN; the substrate only
-	// records the label, it does not route the transport).
-	if hasName(actorNames, "xhs") {
-		actorNames = removeName(actorNames, "xhs")
-		xhsCfg := xhs.Config{
-			ListenAddr: *xhsAddr,
-			Logger:     slog.Default(),
-		}
-		decls = append(decls, platform.ActorDecl{
-			ID:      xhs.DefaultActorID,
-			Kind:    actor.KindTool,
-			Binding: actor.BindingRuntimeInboundViaRelay,
-			Factory: func(w harness.Writer) actorrt.Actor {
-				return xhs.NewActor(w, xhsCfg)
-			},
-		})
-	}
-
-	// The kimi (Kimi WebBridge) adapter is opt-in (--actors=kimi,...). Same shape
-	// as xhs: a PRIVATE loopback WS endpoint the browser extension connects in to
-	// (transport inlined in the adapter), special-cased here to inject its listen
-	// addr. Keyless — the 127.0.0.1 bind is the trust boundary. Binding is
-	// runtime_inbound_via_relay (the device connects IN; the substrate only
-	// records the label, it does not route the transport). The addr defaults to
-	// :8091 so it never collides with xhs's :8090.
-	if hasName(actorNames, "kimi") {
-		actorNames = removeName(actorNames, "kimi")
-		kimiCfg := kimi.Config{
-			ListenAddr: *kimiAddr,
-			Logger:     slog.Default(),
-		}
-		decls = append(decls, platform.ActorDecl{
-			ID:      kimi.DefaultActorID,
-			Kind:    actor.KindTool,
-			Binding: actor.BindingRuntimeInboundViaRelay,
-			Factory: func(w harness.Writer) actorrt.Actor {
-				return kimi.NewActor(w, kimiCfg)
-			},
-		})
-	}
-
-	// The generic device actor is always hosted — attaching a daemon means
-	// attaching a device. Its id carries the device identity.
-	deviceID := actor.ActorID("device:" + deviceName)
-	decls = append(decls, platform.ActorDecl{
-		ID:      deviceID,
-		Kind:    actor.KindTool,
-		Binding: actor.BindingRuntimeOutbound,
-		Factory: func(w harness.Writer) actorrt.Actor {
-			return device.NewActor(w, deviceID, wsRoot, slog.Default())
-		},
-	})
+	decls = append(decls, deviceDecl(deps))
 
 	// The link layer is auth-agnostic: the api key rides the server WS url's
 	// query string (?key=), which the app layer resolves on WS upgrade. There is

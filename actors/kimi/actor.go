@@ -19,6 +19,11 @@ import (
 // DefaultActorID is the registry id this adapter owns.
 const DefaultActorID actor.ActorID = "tool:kimi"
 
+// DefaultListenAddr is the loopback addr this adapter's private device WS
+// endpoint binds by default. Owned here, not by the composition root — the
+// adapter knows its own port (8091, distinct from xhs's 8090).
+const DefaultListenAddr = "127.0.0.1:8091"
+
 // Config drives an Actor. ListenAddr is the LOOPBACK address the private device
 // WS endpoint binds (e.g. "127.0.0.1:8091", or "127.0.0.1:0" to let the OS pick
 // — tests read the resolved addr back via ListenAddr()). The loopback bind is
