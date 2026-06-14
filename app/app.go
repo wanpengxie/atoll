@@ -121,7 +121,10 @@ func (a *App) registerRoutes() {
 		identity.POST("/register", a.handleRegister)
 		identity.POST("/login", a.handleLogin)
 		identity.POST("/logout", a.handleLogout)
-		identity.GET("/me", a.handleMe)
+		// /me is the frontend's "am I logged in?" probe — it requires a valid
+		// session, so it carries the Auth guard directly (logout above stays
+		// public: it must clear the cookie even for an already-expired session).
+		identity.GET("/me", middleware.Auth(a.db), a.handleMe)
 		identity.POST("/verification/issue", a.handleVerificationIssue)
 	}
 

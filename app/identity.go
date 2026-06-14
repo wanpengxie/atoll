@@ -142,21 +142,14 @@ func (a *App) handleLogout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// handleMe returns the current user's profile. The route carries middleware.Auth,
+// so the session is already verified and the user id stamped by the time we get
+// here — session checking lives in exactly one place (the guard), never inline.
 func (a *App) handleMe(c *gin.Context) {
-	token, err := c.Cookie(middleware.SessionCookie)
-	if err != nil || token == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
-		return
-	}
-
-	userID, ok := middleware.VerifySession(c.Request.Context(), a.db, token)
-	if !ok {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid session"})
-		return
-	}
+	userID := middleware.UserID(c)
 
 	var email, displayName string
-	err = a.db.QueryRowContext(c.Request.Context(),
+	err := a.db.QueryRowContext(c.Request.Context(),
 		`SELECT email, display_name FROM users WHERE id = ?`, userID,
 	).Scan(&email, &displayName)
 	if err != nil {
