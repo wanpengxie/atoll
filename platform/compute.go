@@ -8,6 +8,7 @@ package platform
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -53,15 +54,15 @@ type ComputeConfig struct {
 	Logger    *slog.Logger
 }
 
-// ActorDecl declares one actor the daemon will host.
+// ActorDecl declares one actor the daemon will host. Factory constructs the
+// actorrt.Actor given the cell's writer (the link's out-of-process pen) — the
+// writer only exists after the actor's stream opens, so the actor cannot be
+// pre-built: every cell that can emit needs its pen at construction, and in the
+// actor model every actor can emit. There is no writer-less construction path.
 type ActorDecl struct {
 	ID      actor.ActorID
 	Kind    actor.Kind
 	Binding actor.Binding
-	// Impl is the actorrt.Actor implementation (mutually exclusive with Factory).
-	Impl actorrt.Actor
-	// Factory constructs an actorrt.Actor given the cell's writer (the link's
-	// out-of-process pen). Use when the actor needs the writer at construction.
 	Factory func(harness.Writer) actorrt.Actor
 }
 
@@ -119,10 +120,10 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		if err != nil {
 			return err
 		}
-		impl := a.Impl
-		if a.Factory != nil {
-			impl = a.Factory(writer)
+		if a.Factory == nil {
+			return fmt.Errorf("actor %q: nil Factory", a.ID)
 		}
+		impl := a.Factory(writer)
 		watcher.mu.Lock()
 		watcher.down[a.ID] = downHandler
 		watcher.mu.Unlock()
