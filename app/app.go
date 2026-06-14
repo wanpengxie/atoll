@@ -91,13 +91,6 @@ func New(cfg Config) (*App, error) {
 	return a, nil
 }
 
-// Handler returns the http.Handler (gin engine) for use with httptest or
-// direct ServeHTTP calls. The app layer keeps ownership of routes; callers
-// only get a read-only Handler reference.
-func (a *App) Handler() http.Handler {
-	return a.engine
-}
-
 // Run starts the HTTP server.
 func (a *App) Run(addr string) error {
 	return a.engine.Run(addr)
