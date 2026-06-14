@@ -26,7 +26,7 @@ import (
 // cell starts. A fixed high port on loopback is the simplest live path.
 const xhsDeviceAddr = "127.0.0.1:18090"
 
-// --- canned device behaviour (mirrors cmd/mock-xhs-device CannedReply) -------
+// --- canned device behaviour (mirrors cmd/devtools/mock-device xhsReply) -----
 //
 // Kept as a few self-contained lines rather than importing the cmd binary
 // (package main is not importable). The wire frames below are the adapter's
