@@ -6,6 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/wanpengxie/ActOS/app/internal/middleware"
 )
 
 // ---------------------------------------------------------------------------
@@ -13,7 +14,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func (a *App) handleListWorkspaces(c *gin.Context) {
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 	rows, err := a.db.QueryContext(c.Request.Context(),
 		`SELECT w.id, w.owner_id, w.name, w.created_at
 		 FROM workspaces w
@@ -44,7 +45,7 @@ func (a *App) handleListWorkspaces(c *gin.Context) {
 }
 
 func (a *App) handleCreateWorkspace(c *gin.Context) {
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 	var req struct {
 		Name string `json:"name"`
 	}

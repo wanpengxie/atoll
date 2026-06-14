@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/ActOS/app/internal/middleware"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 )
 
@@ -20,7 +21,7 @@ import (
 // ---------------------------------------------------------------------------
 
 func (a *App) handleListDaemons(c *gin.Context) {
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 	rows, err := a.db.QueryContext(c.Request.Context(),
 		`SELECT id, name, status, hostname, platform, last_heartbeat, created_at
 		 FROM daemons WHERE owner_id = ?`, userID,
@@ -83,7 +84,7 @@ func (a *App) daemonAttachedChannels(ctx context.Context, daemonID string) []str
 }
 
 func (a *App) handleCreateDaemon(c *gin.Context) {
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 	var req struct {
 		Name string `json:"name"`
 	}
@@ -115,7 +116,7 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 
 func (a *App) handleDeleteDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 
 	res, err := a.db.ExecContext(c.Request.Context(),
 		`DELETE FROM daemons WHERE id = ? AND owner_id = ?`, daemonID, userID,
@@ -179,7 +180,7 @@ func (a *App) handleAttachDaemons(c *gin.Context) {
 		return
 	}
 
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 	for _, did := range req.DaemonIDs {
 		var ownerID string
 		err := a.db.QueryRowContext(c.Request.Context(),
@@ -250,7 +251,7 @@ func (a *App) handleCreateAndAttachDaemon(c *gin.Context) {
 	if !ok {
 		return
 	}
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 	var req struct {
 		Name string `json:"name"`
 	}

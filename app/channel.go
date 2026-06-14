@@ -12,6 +12,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/ActOS/app/internal/middleware"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -24,7 +25,7 @@ import (
 
 func (a *App) handleListChannels(c *gin.Context) {
 	wsID := c.Param("wsID")
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 	if !a.isWorkspaceMember(c.Request.Context(), wsID, userID) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not a workspace member"})
 		return
@@ -58,7 +59,7 @@ func (a *App) handleListChannels(c *gin.Context) {
 
 func (a *App) handleCreateChannel(c *gin.Context) {
 	wsID := c.Param("wsID")
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 	if !a.isWorkspaceMember(c.Request.Context(), wsID, userID) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "not a workspace member"})
 		return
@@ -125,7 +126,7 @@ func (a *App) handleBindChannel(c *gin.Context) {
 		return
 	}
 
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 	var ownerID string
 	err := a.db.QueryRowContext(c.Request.Context(),
 		`SELECT owner_id FROM daemons WHERE id = ?`, req.DaemonID,
@@ -359,7 +360,7 @@ func (a *App) handleSendMessage(c *gin.Context) {
 		return
 	}
 
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 	senderID := actor.ActorID("user:" + userID)
 
 	audience := make([]actor.ActorID, 0, len(req.Audience))

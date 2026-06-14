@@ -8,6 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/wanpengxie/ActOS/app/internal/middleware"
 	"github.com/wanpengxie/ActOS/lib/introspect"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
@@ -58,7 +59,7 @@ func (a *App) handleActorStatus(c *gin.Context) {
 	}
 
 	channelID := channel.ID(chID)
-	senderID := actor.ActorID("user:" + getUserID(c))
+	senderID := actor.ActorID("user:" + middleware.UserID(c))
 
 	// Build the probe as the requesting user (same sending identity as
 	// handleSendMessage), addressed solely to the target actor.

@@ -3,11 +3,11 @@ package app
 import (
 	"context"
 	"net/http"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/ActOS/app/internal/middleware"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 )
 
@@ -21,17 +21,12 @@ var wsUpgrader = websocket.Upgrader{
 
 func (a *App) handleWS(c *gin.Context) {
 	// Auth via cookie.
-	token, err := c.Cookie(sessionCookieName)
+	token, err := c.Cookie(middleware.SessionCookie)
 	if err != nil || token == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
 		return
 	}
-	var userID string
-	var expiresAt int64
-	err = a.db.QueryRowContext(c.Request.Context(),
-		`SELECT user_id, expires_at FROM sessions WHERE token = ?`, token,
-	).Scan(&userID, &expiresAt)
-	if err != nil || time.Now().UnixMilli() > expiresAt {
+	if _, ok := middleware.VerifySession(c.Request.Context(), a.db, token); !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid session"})
 		return
 	}

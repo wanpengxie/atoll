@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/ActOS/actors/kimiagent"
+	"github.com/wanpengxie/ActOS/app/internal/middleware"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
@@ -77,19 +78,7 @@ func New(cfg Config) (*App, error) {
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
 	engine.Use(gin.Recovery())
-
-	// CORS (allow all for dev).
-	engine.Use(func(c *gin.Context) {
-		c.Header("Access-Control-Allow-Origin", "*")
-		c.Header("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
-		c.Header("Access-Control-Allow-Headers", "Content-Type,Authorization")
-		c.Header("Access-Control-Allow-Credentials", "true")
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(http.StatusNoContent)
-			return
-		}
-		c.Next()
-	})
+	engine.Use(middleware.CORS())
 
 	a.engine = engine
 	a.registerRoutes()
@@ -145,7 +134,7 @@ func (a *App) registerRoutes() {
 
 	// Authenticated API routes.
 	api := a.engine.Group("/api")
-	api.Use(a.authMiddleware())
+	api.Use(middleware.Auth(a.db))
 	{
 		api.GET("/workspaces", a.handleListWorkspaces)
 		api.POST("/workspaces", a.handleCreateWorkspace)

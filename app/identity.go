@@ -8,49 +8,14 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/wanpengxie/ActOS/app/internal/middleware"
 	"golang.org/x/crypto/bcrypt"
 )
 
-// ---------------------------------------------------------------------------
-// Auth middleware
-// ---------------------------------------------------------------------------
-
-const (
-	sessionCookieName = "coagent_session"
-	sessionDuration   = 30 * 24 * time.Hour
-	ctxKeyUserID      = "user_id"
-)
-
-func (a *App) authMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		token, err := c.Cookie(sessionCookieName)
-		if err != nil || token == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
-			return
-		}
-		var userID string
-		var expiresAt int64
-		err = a.db.QueryRowContext(c.Request.Context(),
-			`SELECT user_id, expires_at FROM sessions WHERE token = ?`, token,
-		).Scan(&userID, &expiresAt)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "invalid session"})
-			return
-		}
-		if time.Now().UnixMilli() > expiresAt {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "session expired"})
-			return
-		}
-		c.Set(ctxKeyUserID, userID)
-		c.Next()
-	}
-}
-
-func getUserID(c *gin.Context) string {
-	v, _ := c.Get(ctxKeyUserID)
-	s, _ := v.(string)
-	return s
-}
+// sessionDuration is how long a minted session stays valid. Session minting
+// lives here (the identity subsystem); session verification and the cookie name
+// live in the middleware package (the request guard).
+const sessionDuration = 30 * 24 * time.Hour
 
 func (a *App) isWorkspaceMember(ctx context.Context, wsID, userID string) bool {
 	var count int
@@ -71,7 +36,7 @@ func (a *App) channelWorkspaceID(ctx context.Context, chID string) (string, bool
 
 func (a *App) requireChannelAccess(c *gin.Context) (string, bool) {
 	chID := c.Param("chID")
-	userID := getUserID(c)
+	userID := middleware.UserID(c)
 	wsID, ok := a.channelWorkspaceID(c.Request.Context(), chID)
 	if !ok {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
@@ -167,29 +132,25 @@ func (a *App) handleLogin(c *gin.Context) {
 }
 
 func (a *App) handleLogout(c *gin.Context) {
-	token, err := c.Cookie(sessionCookieName)
+	token, err := c.Cookie(middleware.SessionCookie)
 	if err == nil && token != "" {
 		_, _ = a.db.ExecContext(c.Request.Context(),
 			`DELETE FROM sessions WHERE token = ?`, token,
 		)
 	}
-	c.SetCookie(sessionCookieName, "", -1, "/", "", false, true)
+	c.SetCookie(middleware.SessionCookie, "", -1, "/", "", false, true)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
 func (a *App) handleMe(c *gin.Context) {
-	token, err := c.Cookie(sessionCookieName)
+	token, err := c.Cookie(middleware.SessionCookie)
 	if err != nil || token == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
 		return
 	}
 
-	var userID string
-	var expiresAt int64
-	err = a.db.QueryRowContext(c.Request.Context(),
-		`SELECT user_id, expires_at FROM sessions WHERE token = ?`, token,
-	).Scan(&userID, &expiresAt)
-	if err != nil || time.Now().UnixMilli() > expiresAt {
+	userID, ok := middleware.VerifySession(c.Request.Context(), a.db, token)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid session"})
 		return
 	}
@@ -224,5 +185,5 @@ func (a *App) setSession(c *gin.Context, userID string) {
 		`INSERT INTO sessions (token, user_id, created_at, expires_at) VALUES (?,?,?,?)`,
 		token, userID, now, expiresAt,
 	)
-	c.SetCookie(sessionCookieName, token, int(sessionDuration.Seconds()), "/", "", false, true)
+	c.SetCookie(middleware.SessionCookie, token, int(sessionDuration.Seconds()), "/", "", false, true)
 }

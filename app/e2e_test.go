@@ -530,4 +530,3 @@ func TestE2E_SendMessageNoAudienceDefaultFill(t *testing.T) {
 		t.Fatalf("expected at least 2 messages, got %d", len(msgs))
 	}
 }
-
