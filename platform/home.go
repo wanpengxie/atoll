@@ -216,9 +216,12 @@ func Open(cfg HomeConfig) (*Home, error) {
 func (h *Home) Gate() harness.Writer { return h.writer }
 
 // View returns the read-only observation set (ReadAfterSeq / MaxSeq /
-// ListActors). It carries no写 capability — observation only.
+// ListActors / daemon link-presence). It carries no写 capability — observation
+// only. The host (app) reads presence through here OUT-OF-BAND (no message, no
+// truth-log write) — UI status polling must not pollute the log; in-universe
+// actors instead ask the system actor by message (that path is logged).
 func (h *Home) View() View {
-	return View{query: h.cs.Query, registry: h.cs.Registry}
+	return View{query: h.cs.Query, registry: h.cs.Registry, links: h.links}
 }
 
 // Spawn admits one actor into the channel as durable membership truth and, when
@@ -303,6 +306,24 @@ func (h *Home) Close() error {
 type View struct {
 	query    storespec.MessageQuery
 	registry storespec.Registry
+	links    *link.Acceptor
+}
+
+// IsAttached reports whether daemon (compute) id has a live attach right now
+// (L1 link presence) — read-time, derived from the link acceptor, never stored.
+func (v View) IsAttached(daemonID string) bool {
+	if v.links == nil {
+		return false
+	}
+	return v.links.IsAttached(daemonID)
+}
+
+// AttachedDaemons returns the currently-attached compute ids (L1 snapshot).
+func (v View) AttachedDaemons() []string {
+	if v.links == nil {
+		return nil
+	}
+	return v.links.AttachedDaemons()
 }
 
 // ReadAfterSeq returns committed envelopes with seq > afterSeq (client tail).

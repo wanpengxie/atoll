@@ -62,10 +62,6 @@ func migrate(db *sql.DB) error {
 			owner_id TEXT NOT NULL REFERENCES users(id),
 			name TEXT NOT NULL,
 			api_key_hash TEXT NOT NULL,
-			status TEXT NOT NULL DEFAULT 'offline',
-			hostname TEXT,
-			platform TEXT,
-			last_heartbeat INTEGER,
 			created_at INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS daemon_channels (
@@ -74,5 +70,16 @@ func migrate(db *sql.DB) error {
 			PRIMARY KEY(daemon_id, channel_id)
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	// Drop the dead daemon liveness columns (status/hostname/platform/
+	// last_heartbeat): presence is volatile L1 link state, read live from the
+	// platform View — never a persisted directory column (it only ever lied).
+	// Best-effort per column: a fresh DB created above never had them (no such
+	// column → ignore); an existing dev DB gets them dropped, rows preserved.
+	for _, col := range []string{"status", "hostname", "platform", "last_heartbeat"} {
+		_, _ = db.Exec(`ALTER TABLE daemons DROP COLUMN ` + col)
+	}
+	return nil
 }

@@ -1,16 +1,5 @@
 import React from 'react';
 
-function formatTime(ms) {
-  const n = Number(ms || 0);
-  if (!n) return '尚无 heartbeat';
-  return new Intl.DateTimeFormat('zh-CN', {
-    month: '2-digit',
-    day: '2-digit',
-    hour: '2-digit',
-    minute: '2-digit',
-  }).format(new Date(n));
-}
-
 function readiness(actor) {
   if (actor.ready) {
     return { className: 'ready', label: 'ready' };
@@ -28,7 +17,7 @@ function actorTypes(actor) {
 }
 
 export default function DeviceCard({ daemon, actors, onToggleAttach, onRevoke, revoking, attached = true }) {
-  const online = daemon.status === 'online';
+  const online = Boolean(daemon.online);
   const revoked = Boolean(daemon.revoked);
   const statusLabel = revoked ? '已撤销' : (online ? 'online' : 'offline');
 
@@ -38,7 +27,6 @@ export default function DeviceCard({ daemon, actors, onToggleAttach, onRevoke, r
         <div className={`device-status-dot ${online ? 'online' : 'offline'}`} />
         <div className="device-title-block">
           <h3>{daemon.name || '未命名设备'}</h3>
-          <span>{daemon.hostname || 'hostname pending'}</span>
         </div>
         <span className={`device-status-badge ${online ? 'online' : 'offline'}`}>{statusLabel}</span>
       </header>
@@ -47,10 +35,6 @@ export default function DeviceCard({ daemon, actors, onToggleAttach, onRevoke, r
         <div>
           <span>actors</span>
           <strong>{actors.length}</strong>
-        </div>
-        <div>
-          <span>last heartbeat</span>
-          <strong>{formatTime(daemon.last_heartbeat)}</strong>
         </div>
         <div>
           <span>api key</span>

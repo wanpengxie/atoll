@@ -16,7 +16,9 @@ function normalizeDaemon(row) {
   return {
     id: row.id || row.ID,
     name: row.name || row.Name || '',
-    status: row.status || row.Status || 'offline',
+    // online = L1 link presence, live from the platform View (replaces the dead
+    // status column).
+    online: Boolean(row.online ?? row.Online),
     hosted_actors: row.hosted_actors || row.hostedActors || [],
     attached_channels: row.attached_channels || row.attachedChannels || [],
   };
@@ -139,7 +141,7 @@ export default function ChannelDeviceBar({ channelID, inFlightActors }) {
         const actorID = actorIDOf(h);
         if (!actorID) continue;
         const key = `${d.id}:${actorID}`;
-        const online = d.status === 'online';
+        const online = Boolean(d.online);
         const live = statusLabel(h, online, channelID);
         out.push({
           key,
@@ -238,7 +240,7 @@ export default function ChannelDeviceBar({ channelID, inFlightActors }) {
               <ul className="bind-daemon-list">
                 {ownerDaemons.map((d) => {
                   const attachedNow = isAttached(d.id);
-                  const online = d.status === 'online';
+                  const online = Boolean(d.online);
                   return (
                     <li key={d.id} className={`bind-daemon-row ${attachedNow ? 'attached' : ''}`}>
                       <label className="bind-checkbox">

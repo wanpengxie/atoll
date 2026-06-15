@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"crypto/sha256"
-	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -23,8 +22,7 @@ import (
 func (a *App) handleListDaemons(c *gin.Context) {
 	userID := middleware.UserID(c)
 	rows, err := a.db.QueryContext(c.Request.Context(),
-		`SELECT id, name, status, hostname, platform, last_heartbeat, created_at
-		 FROM daemons WHERE owner_id = ?`, userID,
+		`SELECT id, name, created_at FROM daemons WHERE owner_id = ?`, userID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
@@ -34,32 +32,44 @@ func (a *App) handleListDaemons(c *gin.Context) {
 
 	var result []gin.H
 	for rows.Next() {
-		var id, name, status string
-		var hostname, plat sql.NullString
-		var lastHB sql.NullInt64
+		var id, name string
 		var createdAt int64
-		if err := rows.Scan(&id, &name, &status, &hostname, &plat, &lastHB, &createdAt); err != nil {
+		if err := rows.Scan(&id, &name, &createdAt); err != nil {
 			continue
 		}
-		d := gin.H{
-			"id": id, "name": name, "status": status, "created_at": createdAt,
-		}
-		if hostname.Valid {
-			d["hostname"] = hostname.String
-		}
-		if plat.Valid {
-			d["platform"] = plat.String
-		}
-		if lastHB.Valid {
-			d["last_heartbeat"] = lastHB.Int64
-		}
-		d["attached_channels"] = a.daemonAttachedChannels(c.Request.Context(), id)
-		result = append(result, d)
+		chans := a.daemonAttachedChannels(c.Request.Context(), id)
+		result = append(result, gin.H{
+			"id": id, "name": name, "created_at": createdAt,
+			"attached_channels": chans,
+			// online = L1 link presence: a live attach on ANY bound channel right
+			// now, read-time from the platform View (out-of-band, no truth-log
+			// write — UI polling must not pollute the log).
+			"online": a.daemonOnline(channel.ID(""), chans, id),
+		})
 	}
 	if result == nil {
 		result = []gin.H{}
 	}
 	c.JSON(http.StatusOK, gin.H{"daemons": result})
+}
+
+// daemonOnline reports whether daemon id has a live link attach right now. It is
+// online iff attached on any of its bound channels (or `only`, when non-empty).
+// Read-time from each channel-home's View — derived, never a stored column.
+func (a *App) daemonOnline(only channel.ID, boundChannels []string, daemonID string) bool {
+	check := func(chID channel.ID) bool {
+		h := a.getHome(chID)
+		return h != nil && h.View().IsAttached(daemonID)
+	}
+	if only != "" {
+		return check(only)
+	}
+	for _, ch := range boundChannels {
+		if check(channel.ID(ch)) {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) daemonAttachedChannels(ctx context.Context, daemonID string) []string {
@@ -139,7 +149,7 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 		return
 	}
 	rows, err := a.db.QueryContext(c.Request.Context(),
-		`SELECT d.id, d.name, d.status, d.created_at
+		`SELECT d.id, d.name, d.created_at
 		 FROM daemons d
 		 JOIN daemon_channels dc ON d.id = dc.daemon_id
 		 WHERE dc.channel_id = ?`, chID,
@@ -152,13 +162,15 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 
 	var result []gin.H
 	for rows.Next() {
-		var id, name, status string
+		var id, name string
 		var createdAt int64
-		if err := rows.Scan(&id, &name, &status, &createdAt); err != nil {
+		if err := rows.Scan(&id, &name, &createdAt); err != nil {
 			continue
 		}
 		result = append(result, gin.H{
-			"id": id, "name": name, "status": status, "created_at": createdAt,
+			"id": id, "name": name, "created_at": createdAt,
+			// online = L1 link presence on THIS channel, read-time from View.
+			"online": a.daemonOnline(channel.ID(chID), nil, id),
 		})
 	}
 	if result == nil {

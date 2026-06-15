@@ -18,10 +18,11 @@ function normalizeDaemon(row) {
     owner_id: row.owner_id || row.ownerID || row.OwnerID,
     name: row.name || row.Name || '',
     api_key_prefix: row.api_key_prefix || row.apiKeyPrefix || row.APIKeyPrefix || '',
-    status: row.status || row.Status || 'offline',
-    hostname: row.hostname || row.Hostname || '',
+    // online = L1 link presence (daemon attached on a bound channel right now),
+    // live from the platform View. Replaces the dead status/hostname/heartbeat
+    // columns that only ever lied.
+    online: Boolean(row.online ?? row.Online),
     proxy_version: row.proxy_version || row.proxyVersion || row.ProxyVersion || '',
-    last_heartbeat: row.last_heartbeat ?? row.lastHeartbeat ?? row.LastHeartbeat ?? 0,
     created_at: row.created_at ?? row.createdAt ?? row.CreatedAt ?? 0,
     attached_channels: row.attached_channels || row.attachedChannels || [],
     hosted_actors: row.hosted_actors || row.hostedActors || [],
@@ -99,7 +100,7 @@ function actorChipState(daemon, hostedActor) {
     hostedActor.display_callable_hint === true ||
     hostedActor.displayCallableHint === true ||
     hostedActor.DisplayCallableHint === true;
-  if (daemon.status !== 'online') {
+  if (!daemon.online) {
     return { actorID, state: 'offline', label: 'daemon 离线' };
   }
   if ((daemon.attached_channels || []).length === 0) {
@@ -384,20 +385,18 @@ export default function MyDevicesPage({ channelsByID = {} }) {
       ) : (
         <div className="device-grid">
           {daemons.map((daemon) => {
-            const online = daemon.status === 'online';
+            const online = Boolean(daemon.online);
             return (
               <article key={daemon.id} className={`device-card ${online ? 'online' : 'offline'}`}>
                 <header className="device-card-head">
                   <div className={`device-status-dot ${online ? 'online' : 'offline'}`} />
                   <div className="device-title-block">
                     <h3>{daemon.name || '未命名设备'}</h3>
-                    <span>{daemon.hostname || 'hostname pending'}</span>
                   </div>
                   <span className={`device-status-badge ${online ? 'online' : 'offline'}`}>{online ? 'online' : 'offline'}</span>
                 </header>
 
                 <div className="device-meta-grid">
-                  <div><span>last heartbeat</span><strong>{formatHeartbeat(daemon.last_heartbeat)}</strong></div>
                   <div><span>api key</span><strong>{daemon.api_key_prefix || '—'}</strong></div>
                   <div><span>proxy</span><strong>{daemon.proxy_version || 'unknown'}</strong></div>
                   <div><span>attached channels</span><strong>{daemon.attached_channels.length}</strong></div>

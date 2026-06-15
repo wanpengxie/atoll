@@ -50,6 +50,13 @@ type Acceptor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
+
+	// attached is the live attach refcount per compute id (daemon). A daemon is
+	// "online" (L1 link presence) iff its count > 0. Refcount, not bool, so an
+	// overlapping reconnect (old link tearing down after the new one attached)
+	// does not flap the daemon offline. Volatile runtime state — never persisted.
+	attachedMu sync.Mutex
+	attached   map[string]int
 }
 
 // Config configures an Acceptor. Auth is the app layer's concern — Serve
@@ -82,7 +89,52 @@ func NewAcceptor(cfg Config) *Acceptor {
 		leaseTTL:   cfg.LeaseTTL,
 		ctx:        ctx,
 		cancel:     cancel,
+		attached:   map[string]int{},
 	}
+}
+
+// markAttached / markDetached / IsAttached / AttachedDaemons are the L1 link-
+// presence read seam: the Acceptor authoritatively holds which computes have a
+// live attach right now (it owns the connections + lease). markAttached is
+// called once per accepted link (after attach success); markDetached once when
+// that link tears down (peer gone / lease expiry / Close). Empty id (dev self-
+// declared mode) is not tracked.
+func (a *Acceptor) markAttached(id string) {
+	if id == "" {
+		return
+	}
+	a.attachedMu.Lock()
+	a.attached[id]++
+	a.attachedMu.Unlock()
+}
+
+func (a *Acceptor) markDetached(id string) {
+	if id == "" {
+		return
+	}
+	a.attachedMu.Lock()
+	if a.attached[id]--; a.attached[id] <= 0 {
+		delete(a.attached, id)
+	}
+	a.attachedMu.Unlock()
+}
+
+// IsAttached reports whether compute id has a live attach right now (L1).
+func (a *Acceptor) IsAttached(id string) bool {
+	a.attachedMu.Lock()
+	defer a.attachedMu.Unlock()
+	return a.attached[id] > 0
+}
+
+// AttachedDaemons returns a snapshot of the currently-attached compute ids.
+func (a *Acceptor) AttachedDaemons() []string {
+	a.attachedMu.Lock()
+	defer a.attachedMu.Unlock()
+	out := make([]string, 0, len(a.attached))
+	for id := range a.attached {
+		out = append(out, id)
+	}
+	return out
 }
 
 // Serve upgrades an attaching daemon connection and runs its link for the
@@ -116,6 +168,15 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		mu      sync.Mutex
 		allowed = map[actor.ActorID]bool{}
 	)
+	// boundID is the compute id this link counts as online under, set once on the
+	// first accepted attach and torn down when runLink returns. Single-goroutine
+	// (onControl runs on this run loop), so a plain guard suffices.
+	var boundID string
+	defer func() {
+		if boundID != "" {
+			a.markDetached(boundID)
+		}
+	}()
 	resolve := func(leaseID string) (actor.ActorID, error) {
 		id := actor.ActorID(leaseID)
 		mu.Lock()
@@ -158,7 +219,14 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		if err != nil || cf.Kind != ctrlAttach || cf.Attach == nil {
 			return
 		}
-		a.handleAttach(reqCtx, lc, cf.Attach, daemonID, &mu, allowed)
+		id, accepted := a.handleAttach(reqCtx, lc, cf.Attach, daemonID, &mu, allowed)
+		// Count the daemon online only after a SUCCESSFUL attach (membership
+		// applied, Accepted reply sent) — a rejected/half attach must not show
+		// online. Once per link (first accepted frame).
+		if accepted && boundID == "" {
+			boundID = id
+			a.markAttached(id)
+		}
 	}
 
 	lc = newLinkConn(&wsConn{ws: ws}, onControl, onOpen)
@@ -188,7 +256,9 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 // membership (register/reactivate — detach never deregisters), record the
 // allowed set, and reply. Membership semantics照旧: a member row is durable; a
 // daemon detaching does NOT remove it (membership ≠ presence).
-func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed map[actor.ActorID]bool) {
+// handleAttach processes the stream-0 attach and reports (computeID, accepted)
+// so the caller can count L1 link presence only on success.
+func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed map[actor.ActorID]bool) (string, bool) {
 	computeID := att.ComputeID
 	if daemonID != "" {
 		computeID = daemonID
@@ -202,7 +272,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 		}
 		if err := a.membership.ApplyMemberTransitions(ctx, adds, nil); err != nil {
 			a.sendReply(lc, AttachReply{Accepted: false, Reason: "register: " + err.Error()})
-			return
+			return "", false
 		}
 	}
 
@@ -214,6 +284,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 
 	a.sendReply(lc, AttachReply{ChannelID: a.channelID, Accepted: true})
 	a.logger.Info("link.attached", "compute", computeID, "actors", len(att.Declarations))
+	return computeID, true
 }
 
 func (a *Acceptor) sendReply(lc *linkConn, reply AttachReply) {
