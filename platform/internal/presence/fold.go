@@ -2,6 +2,7 @@ package presence
 
 import (
 	"context"
+	"log/slog"
 	"sync"
 
 	"github.com/wanpengxie/ActOS/lib/introspect"
@@ -15,11 +16,16 @@ import (
 type Fold struct {
 	mu     sync.Mutex
 	latest map[actor.ActorID][]byte
+	logger *slog.Logger
 }
 
-// New builds an empty fold.
-func New() *Fold {
-	return &Fold{latest: map[actor.ActorID][]byte{}}
+// New builds an empty fold. logger surfaces presence-flow at DEBUG (folded /
+// decayed) so propagation is diagnosable without Info-noise; nil → discard.
+func New(logger *slog.Logger) *Fold {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	return &Fold{latest: map[actor.ActorID][]byte{}, logger: logger}
 }
 
 // OnObs implements actorrt.ObsWatcher: fold the latest ObsPresence snapshot
@@ -31,6 +37,7 @@ func (f *Fold) OnObs(_ context.Context, id actor.ActorID, kind actorrt.ObsKind, 
 	f.mu.Lock()
 	f.latest[id] = append([]byte(nil), val...)
 	f.mu.Unlock()
+	f.logger.Debug("presence.folded", "actor", string(id), "snapshot", string(val))
 }
 
 // OnDown implements actorrt.PresenceWatcher: the actor died — for a remote actor
@@ -38,8 +45,15 @@ func (f *Fold) OnObs(_ context.Context, id actor.ActorID, kind actorrt.ObsKind, 
 // decay to unknown (the L1-death-cascades-L3 backstop,搭 lease 便车,无独立 reaper).
 func (f *Fold) OnDown(_ context.Context, id actor.ActorID, _ error) {
 	f.mu.Lock()
+	_, had := f.latest[id]
 	delete(f.latest, id)
 	f.mu.Unlock()
+	// Only the actors that actually carried a folded presence "decay" — OnDown
+	// fires for every dying actor (global watcher), so guard to avoid logging a
+	// decay for actors that never had L3.
+	if had {
+		f.logger.Debug("presence.decayed", "actor", string(id), "cause", "link/cell down")
+	}
 }
 
 // Device returns the latest opaque presence snapshot for id. known=false means

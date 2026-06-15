@@ -381,3 +381,77 @@ func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want
 		time.Sleep(25 * time.Millisecond)
 	}
 }
+
+// xhsCascadeDeviceAddr is the loopback device endpoint for the cascade test
+// (distinct port from the status test so the two never collide).
+const xhsCascadeDeviceAddr = "127.0.0.1:18092"
+
+// TestXHSLiveDeviceUnknownOnDaemonDeath locks the L3 cascade: when the daemon
+// hosting a device adapter DIES (its /compute link drops), the actor's device
+// presence must decay to UNKNOWN (known:false) — NOT a stale online, and NOT
+// conflated with a clean device-offline edge. This is the link-death-cascades-L3
+// backstop (port.die → presence-down edge → home fold OnDown decays the entry),
+// distinct from TestXHSLiveActorStatus which only covers the device's own edges.
+func TestXHSLiveDeviceUnknownOnDaemonDeath(t *testing.T) {
+	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
+	s := fullSetup(t, env)
+
+	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID),
+		map[string]any{"name": "xhs-cascade-daemon"}, s.cookies)
+	assertStatus(t, w, http.StatusCreated)
+	apiKey := respJSON(t, w)["api_key"].(string)
+
+	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	ctx, cancel := context.WithCancel(context.Background())
+	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
+	runErr := make(chan error, 1)
+	go func() {
+		runErr <- platform.RunCompute(ctx,
+			platform.ComputeConfig{ServerWS: serverWS, Logger: logger},
+			[]platform.ActorDecl{{
+				ID:      xhs.DefaultActorID,
+				Kind:    actor.KindTool,
+				Binding: actor.BindingRuntimeInboundViaRelay,
+				Factory: func(wr harness.Writer) actorrt.Actor {
+					return xhs.NewActor(wr, xhs.Config{ListenAddr: xhsCascadeDeviceAddr, ReaperInterval: 20 * time.Millisecond, Logger: logger})
+				},
+			}},
+		)
+	}()
+	stopped := false
+	t.Cleanup(func() {
+		if !stopped {
+			cancel()
+			<-runErr
+		}
+	})
+
+	waitForActor(t, env, s, "tool:xhs", 5*time.Second)
+
+	// Device connects → online (a KNOWN presence exists to be decayed).
+	conn := dialDeviceWithRetry(t, fmt.Sprintf("ws://%s/device", xhsCascadeDeviceAddr), 3*time.Second)
+	waitDeviceOnline(t, env, s, "tool:xhs", true, 5*time.Second)
+
+	// Daemon DIES (link drops) — cascade must decay L3 to unknown.
+	_ = conn.Close()
+	cancel()
+	<-runErr
+	stopped = true
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, "tool:xhs"), nil, s.cookies)
+		assertStatus(t, w, http.StatusOK)
+		body := respJSON(t, w)
+		known, _ := body["known"].(bool)
+		if !known {
+			return // decayed to unknown — cascade proven
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("device presence never decayed to unknown after daemon death (last body=%v)", body)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+}

@@ -130,7 +130,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//     unknown on the actor's death edge (link-down cascade). Built BEFORE
 	//     channelkit so the system cell can read it (sysactor observes L1/L2/L3);
 	//     registered as a presence watcher + per-actor obs watcher below.
-	presence := presencefold.New()
+	presence := presencefold.New(logger)
 
 	// 6. channelkit: actorrt runtime + sysactor + death-edge wiring. The system
 	//    cell is built against the LIVE runtime (factory) — its presence Stat seam

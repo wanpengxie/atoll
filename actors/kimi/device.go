@@ -34,10 +34,11 @@ import (
 // substrate has no self-send (adapter-actor-spec §4).
 //
 // Device presence is tracked internally (conn==nil ⇒ offline ⇒ Receive fast-
-// fails device_offline), but NOT projected as a channel event: there is no
-// consumer yet and the audience semantics of a presence broadcast are undefined.
-// Emitting it additively (with a real consumer + named audience) is left for when
-// the pain is concrete — a rejected event is worse than no event.
+// fails device_offline) AND pushed on its up/down edges via the actor-source obs
+// PUSH axis (owner.publishPresence → ActorContext.PublishObs, D7). That is
+// OUT-OF-BAND obs (non-truth), NOT a channel event / truth-log entry — the home
+// folds it into a volatile L3 level (advisory; authoritative reachability stays
+// send→terminal). See actor.go publishPresence.
 //
 // Liveness limit (v1): this endpoint serves a LOCAL loopback extension, so a
 // dropped socket surfaces as a ReadJSON error and flips offline. Ping/pong
@@ -213,7 +214,7 @@ func (d *device) handleAccept(w http.ResponseWriter, r *http.Request) {
 	d.wg.Add(1)
 	d.mu.Unlock()
 
-	d.logger.Info("kimi.device.online")
+	d.logger.Info("kimi.device.online", "actor", string(d.owner.actorID))
 	d.owner.publishPresence(true)
 	go d.readLoop(conn)
 }
@@ -242,7 +243,7 @@ func (d *device) readLoop(conn *websocket.Conn) {
 	d.mu.Unlock()
 	if live {
 		_ = conn.Close()
-		d.logger.Info("kimi.device.offline")
+		d.logger.Info("kimi.device.offline", "actor", string(d.owner.actorID))
 		d.owner.publishPresence(false)
 	}
 }
@@ -343,7 +344,7 @@ func (d *device) dropConn(conn *websocket.Conn) {
 	d.conn = nil
 	d.mu.Unlock()
 	_ = conn.Close()
-	d.logger.Info("kimi.device.offline")
+	d.logger.Info("kimi.device.offline", "actor", string(d.owner.actorID))
 	d.owner.publishPresence(false)
 }
 
