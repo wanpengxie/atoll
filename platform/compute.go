@@ -45,16 +45,59 @@ func (w *cellDownWatcher) OnDown(_ context.Context, id actor.ActorID, cause erro
 	}
 }
 
+// obsForwardQueue bounds the daemon's async obs-forward buffer. obs is non-truth
+// and best-effort, so a full queue drops the edge (superseded by the next edge /
+// the home lease decay) rather than blocking the producer.
+const obsForwardQueue = 64
+
+type obsMsg struct {
+	id   actor.ActorID
+	kind string
+	val  []byte
+}
+
 // cellObsForwarder is the daemon's ObsWatcher: when a hosted cell PublishObs's an
 // opaque obs snapshot (e.g. an adapter's device-presence edge), forward it UP the
 // link as a KindObs frame so the home runtime's obs consumers see it. The daemon
 // holds no truth — obs is non-truth, best-effort; the home folds it into a
 // volatile level + lease-decays it.
-type cellObsForwarder struct{ d *link.Dialer }
+//
+// OnObs runs on the PUBLISHING CELL's goroutine (runtime.publishObs fanout) and
+// the ObsWatcher contract requires it be NON-BLOCKING — so OnObs only enqueues
+// (best-effort, drop-on-full); a separate pump goroutine does the blocking socket
+// write off the cell goroutine. This keeps the observation arm from ever back-
+// pressuring the actor's work path.
+type cellObsForwarder struct {
+	d  *link.Dialer
+	ch chan obsMsg
+}
 
-// OnObs implements actorrt.ObsWatcher.
+func newCellObsForwarder(d *link.Dialer) *cellObsForwarder {
+	return &cellObsForwarder{d: d, ch: make(chan obsMsg, obsForwardQueue)}
+}
+
+// OnObs implements actorrt.ObsWatcher — non-blocking enqueue (drop on full).
 func (f *cellObsForwarder) OnObs(_ context.Context, id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue) {
-	f.d.SendObs(id, string(kind), []byte(val))
+	m := obsMsg{id: id, kind: string(kind), val: append([]byte(nil), val...)}
+	select {
+	case f.ch <- m:
+	default: // queue full: drop (obs is best-effort; next edge / lease decay covers it)
+	}
+}
+
+// pump drains the queue onto the link OFF the cell goroutine. Exits when ctx is
+// cancelled or the link tears down.
+func (f *cellObsForwarder) pump(ctx context.Context, linkDone <-chan struct{}) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-linkDone:
+			return
+		case m := <-f.ch:
+			f.d.SendObs(m.id, m.kind, m.val)
+		}
+	}
 }
 
 // ComputeConfig configures the attached compute. ServerWS carries any auth
@@ -116,7 +159,8 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 	defer rt.StopAll()
 	watcher := &cellDownWatcher{down: map[actor.ActorID]func(cause string){}}
 	rt.WatchPresence(watcher)
-	obsFwd := &cellObsForwarder{d: d}
+	obsFwd := newCellObsForwarder(d)
+	go obsFwd.pump(ctx, d.Done())
 
 	for _, a := range actors {
 		// Open the actor's link stream first: the RemoteWriter (the cell's pen)
