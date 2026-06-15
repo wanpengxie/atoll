@@ -10,7 +10,7 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/lib/sysactor"
+	"github.com/wanpengxie/ActOS/platform/internal/sysactor"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
