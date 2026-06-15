@@ -15,9 +15,11 @@
 // lib/domain actor cannot import this package or its platform-internal handles;
 // privilege exclusivity is thus STRUCTURAL (the internal/ boundary = Go's
 // compile-time ring boundary), while addressing stays open (internal blocks
-// import, not message routing). Authorization is enforced AT the door by policy:
-// holding the public SystemActorID lets you knock, NOT pass — having the syscall
-// number is not having the capability.
+// import, not message routing). BY DESIGN the door is where authorization
+// belongs (gated by policy): holding the public SystemActorID lets you knock,
+// NOT pass — a syscall number is not a capability. That policy gate is a FUTURE
+// surface; TODAY this actor is advisory with no authz gate (see "What it does
+// today" below).
 //
 // Discipline: sysactor does ONLY door + authz/policy (thin). The heavy physical
 // logic (assembly, wiring, actuation) lives in the platform assembly root
