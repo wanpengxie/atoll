@@ -214,6 +214,7 @@ func (d *device) handleAccept(w http.ResponseWriter, r *http.Request) {
 	d.mu.Unlock()
 
 	d.logger.Info("xhs.device.online")
+	d.owner.publishPresence(true)
 	go d.readLoop(conn)
 }
 
@@ -242,6 +243,7 @@ func (d *device) readLoop(conn *websocket.Conn) {
 	if live {
 		_ = conn.Close()
 		d.logger.Info("xhs.device.offline")
+		d.owner.publishPresence(false)
 	}
 }
 
@@ -338,6 +340,7 @@ func (d *device) dropConn(conn *websocket.Conn) {
 	d.mu.Unlock()
 	_ = conn.Close()
 	d.logger.Info("xhs.device.offline")
+	d.owner.publishPresence(false)
 }
 
 // reaper sweeps the in-flight table for past-deadline requests and fails them

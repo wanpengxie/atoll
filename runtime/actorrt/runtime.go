@@ -295,7 +295,7 @@ func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
 // Attach returns. Pass a deadline ctx to guard the handshake; a nil/background
 // ctx degrades to an unbounded handshake read.
 func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc) (actor.ActorID, error) {
-	p, err := newPort(r.parent, hsCtx, conn, emit, resolve, r.publishDown, r.removeIf, r.clock(), r.logger)
+	p, err := newPort(r.parent, hsCtx, conn, emit, resolve, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
 	if err != nil {
 		return "", err
 	}

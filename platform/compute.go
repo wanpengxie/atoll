@@ -45,6 +45,18 @@ func (w *cellDownWatcher) OnDown(_ context.Context, id actor.ActorID, cause erro
 	}
 }
 
+// cellObsForwarder is the daemon's ObsWatcher: when a hosted cell PublishObs's an
+// opaque obs snapshot (e.g. an adapter's device-presence edge), forward it UP the
+// link as a KindObs frame so the home runtime's obs consumers see it. The daemon
+// holds no truth — obs is non-truth, best-effort; the home folds it into a
+// volatile level + lease-decays it.
+type cellObsForwarder struct{ d *link.Dialer }
+
+// OnObs implements actorrt.ObsWatcher.
+func (f *cellObsForwarder) OnObs(_ context.Context, id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue) {
+	f.d.SendObs(id, string(kind), []byte(val))
+}
+
 // ComputeConfig configures the attached compute. ServerWS carries any auth
 // credential in its query string (the ?key= the app layer resolves on WS
 // upgrade) — the link layer is auth-agnostic, so there is no separate key field.
@@ -104,6 +116,7 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 	defer rt.StopAll()
 	watcher := &cellDownWatcher{down: map[actor.ActorID]func(cause string){}}
 	rt.WatchPresence(watcher)
+	obsFwd := &cellObsForwarder{d: d}
 
 	for _, a := range actors {
 		// Open the actor's link stream first: the RemoteWriter (the cell's pen)
@@ -127,6 +140,9 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		watcher.mu.Lock()
 		watcher.down[a.ID] = downHandler
 		watcher.mu.Unlock()
+		// Register the obs forwarder BEFORE Spawn so no early presence edge is
+		// missed (same discipline as WatchPresence).
+		rt.WatchObs(a.ID, obsFwd)
 		rt.Spawn(a.ID, impl)
 	}
 

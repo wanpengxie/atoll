@@ -288,6 +288,26 @@ func (d *Dialer) pingLoop() {
 	}
 }
 
+// SendObs forwards one obs snapshot the named hosted actor pushed UP the link as
+// a KindObs frame (daemon-side arm of the actor-source obs PUSH axis: the home
+// port relays it into the home runtime's obs fanout). Fire-and-forget: a write
+// error on a dying stream is dropped (obs is non-truth — the next snapshot or the
+// home lease supersedes). No-op if the actor has no open stream. The codec write
+// mutex serialises this against the cell's KindEmit writes.
+func (d *Dialer) SendObs(id actor.ActorID, kind string, value []byte) {
+	d.mu.Lock()
+	as := d.streams[id]
+	d.mu.Unlock()
+	if as == nil {
+		return
+	}
+	payload, err := json.Marshal(ipc.ObsPayload{Kind: kind, Value: value})
+	if err != nil {
+		return
+	}
+	_ = as.codec.Write(ipc.Frame{Kind: ipc.KindObs, Payload: payload})
+}
+
 // Done returns a channel closed when the link tears down (peer gone, lease
 // expiry on the home side, or Close).
 func (d *Dialer) Done() <-chan struct{} { return d.done }

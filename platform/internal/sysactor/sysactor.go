@@ -23,6 +23,16 @@ type PresenceStat interface {
 	Stat(id actor.ActorID) (startedAt time.Time, present bool)
 }
 
+// DevicePresenceStat is the injected obs-read seam over the home presence fold:
+// the latest folded L3 device-presence snapshot for an actor (the actor-source
+// obs PUSH a device adapter published). known=false = UNKNOWN (not a device
+// adapter, no signal, or decayed) — NOT offline. Defined consumer-side (narrow);
+// a nil seam means no device column (everyone unknown). Advisory only —
+// authoritative reachability is send→terminal.
+type DevicePresenceStat interface {
+	Device(id actor.ActorID) (snapshot []byte, known bool)
+}
+
 // SystemActor answers channel-wide directory queries (actor.list) by composing
 // durable membership (Registry) with volatile presence (the injected seam). It
 // is channel-agnostic at the base — the composition root injects channel-scoped
@@ -34,6 +44,7 @@ type SystemActor struct {
 	lookup storespec.RequestLookup
 	clock    func() time.Time
 	stat     PresenceStat
+	device   DevicePresenceStat
 }
 
 // sysSender is the system actor's own identity — stamped on every serve write it
@@ -53,6 +64,9 @@ type Deps struct {
 	// Stat is the obs-read seam over the substrate's authoritative presence +
 	// bind-instant. Nil → actor.list reports everyone absent.
 	Stat PresenceStat
+	// Device is the obs-read seam over the home presence fold (L3 device presence).
+	// Nil → actor.list omits the device column (everyone unknown).
+	Device DevicePresenceStat
 }
 
 // New constructs the channel system actor cell.
@@ -67,6 +81,7 @@ func New(deps Deps) *SystemActor {
 		lookup:   deps.Lookup,
 		clock:    clock,
 		stat:     deps.Stat,
+		device:   deps.Device,
 	}
 }
 
@@ -108,6 +123,7 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 			Binding:  string(r.Binding),
 			Present:  present,
 			UptimeMs: uptimeMs,
+			Device:   s.deviceObs(r.ID),
 		})
 	}
 	return s.respondReserved(ctx, env, catalog)
@@ -183,4 +199,22 @@ func (s *SystemActor) obs(id actor.ActorID) (present bool, uptimeMs int64) {
 		uptimeMs = s.clock().Sub(startedAt).Milliseconds()
 	}
 	return true, uptimeMs
+}
+
+// deviceObs reads the actor's L3 device presence from the injected fold seam
+// (advisory; NOT a dispatch gate). nil = UNKNOWN (no seam, never reported, or
+// decayed) — the actor.list omits the device column rather than asserting offline.
+func (s *SystemActor) deviceObs(id actor.ActorID) *introspect.Presence {
+	if s.device == nil {
+		return nil
+	}
+	raw, known := s.device.Device(id)
+	if !known {
+		return nil
+	}
+	p, ok := introspect.ParsePresence(raw)
+	if !ok {
+		return nil
+	}
+	return &p
 }

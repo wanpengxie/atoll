@@ -30,6 +30,36 @@ type DescribeRequest struct {
 	Type string `json:"type,omitempty"`
 }
 
+// ObsPresence is the conventional actor-source obs KIND a device-bearing adapter
+// PUSHes (PublishObs) to surface its external device's liveness — a best-effort,
+// advisory hint, NEVER authoritative reachability (that stays send→terminal).
+// Opaque to substrate/platform (守结构不守词汇); shared by the publishing adapter
+// and the consuming app/view ONLY. **Absence of any value = unknown, NOT offline**
+// — many devices have no liveness signal, so an adapter that cannot observe simply
+// never publishes.
+const ObsPresence = "presence"
+
+// Presence is the conventional obs VALUE for ObsPresence: the adapter's best-
+// effort view of whether its external device is connected right now. The third
+// state — unknown — is the ABSENCE of any value (never published / decayed).
+type Presence struct {
+	Online bool `json:"online"`
+}
+
+// MarshalPresence encodes an online/offline edge for PublishObs.
+func MarshalPresence(online bool) []byte {
+	b, _ := json.Marshal(Presence{Online: online})
+	return b
+}
+
+// ParsePresence decodes a folded presence snapshot; ok=false on empty/malformed.
+func ParsePresence(raw []byte) (p Presence, ok bool) {
+	if len(raw) == 0 || json.Unmarshal(raw, &p) != nil {
+		return Presence{}, false
+	}
+	return p, true
+}
+
 // Describe is the full actor.describe answer: the actor's identity plus its
 // live capability surface. The actor is the sole authority on its own
 // capability; a caller discovers it by asking the actor, live.
@@ -101,6 +131,12 @@ type CatalogEntry struct {
 	// authoritative bind-instant. 0 when not present. Substrate-owned obs (the
 	// actor never self-reports it).
 	UptimeMs int64 `json:"uptime_ms,omitempty"`
+	// Device is the actor's L3 device-presence (for a device-bearing adapter),
+	// folded from its actor-source obs PUSH. nil = UNKNOWN (not a device adapter,
+	// no liveness signal, or decayed) — NOT offline. Advisory only (authoritative
+	// reachability is send→terminal). Distinct from Present (L2: is the cell/port
+	// bound here): an actor can be Present yet its external device offline.
+	Device *Presence `json:"device,omitempty"`
 }
 
 // Catalog is the actor.list response: the channel-wide directory.

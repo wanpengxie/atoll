@@ -57,6 +57,14 @@ type Acceptor struct {
 	// does not flap the daemon offline. Volatile runtime state — never persisted.
 	attachedMu sync.Mutex
 	attached   map[string]int
+
+	// obsWatcher folds each attached actor's obs PUSH (L3 device presence) into the
+	// home presence fold; registered per declared actor at attach (the home-side
+	// arm of the actor-source obs axis). nil → no folding. obsReg dedups so a
+	// daemon reconnect does not re-append the same watcher.
+	obsWatcher actorrt.ObsWatcher
+	obsMu      sync.Mutex
+	obsReg     map[actor.ActorID]bool
 }
 
 // Config configures an Acceptor. Auth is the app layer's concern — Serve
@@ -70,6 +78,9 @@ type Config struct {
 	Logger     *slog.Logger
 	LeasePing  time.Duration
 	LeaseTTL   time.Duration
+	// ObsWatcher (optional) receives each attached actor's obs PUSH via per-actor
+	// WatchObs registration at attach — the home-side arm of the L3 presence fold.
+	ObsWatcher actorrt.ObsWatcher
 }
 
 // NewAcceptor builds an Acceptor.
@@ -90,6 +101,8 @@ func NewAcceptor(cfg Config) *Acceptor {
 		ctx:        ctx,
 		cancel:     cancel,
 		attached:   map[string]int{},
+		obsWatcher: cfg.ObsWatcher,
+		obsReg:     map[actor.ActorID]bool{},
 	}
 }
 
@@ -281,6 +294,20 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 		allowed[d.ActorID] = true
 	}
 	mu.Unlock()
+
+	// Fold each declared actor's obs PUSH (L3 device presence) into the home fold.
+	// Registered here (before the actor's stream opens / port publishes) so no
+	// early edge is missed; deduped so a reconnect does not re-append the watcher.
+	if a.obsWatcher != nil {
+		a.obsMu.Lock()
+		for _, d := range att.Declarations {
+			if !a.obsReg[d.ActorID] {
+				a.runtime.WatchObs(d.ActorID, a.obsWatcher)
+				a.obsReg[d.ActorID] = true
+			}
+		}
+		a.obsMu.Unlock()
+	}
 
 	a.sendReply(lc, AttachReply{ChannelID: a.channelID, Accepted: true})
 	a.logger.Info("link.attached", "compute", computeID, "actors", len(att.Declarations))

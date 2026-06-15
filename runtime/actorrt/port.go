@@ -70,6 +70,10 @@ type port struct {
 	cancel context.CancelFunc
 
 	onDown func(actor.ActorID, error)
+	// onObs relays an inbound KindObs (the remote actor's obs PUSH) into the
+	// runtime's per-actor obs fanout — the cross-wire arm of the actor-source obs
+	// axis. nil → inbound obs is dropped (no consumer). Mirrors cell.onObs.
+	onObs  func(actor.ActorID, ObsKind, ObsValue)
 	onExit func(actor.ActorID, presence)
 	logger *slog.Logger
 
@@ -98,7 +102,7 @@ type port struct {
 // read runs off-goroutine and newPort selects it against hsCtx; on expiry it
 // closes the conn (unblocking the read) and returns. parent owns the port's
 // LIFETIME (unchanged); hsCtx owns only this one read.
-func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, onDown func(actor.ActorID, error), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) (p *port, err error) {
+func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, onDown func(actor.ActorID, error), onObs func(actor.ActorID, ObsKind, ObsValue), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) (p *port, err error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -154,6 +158,7 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 		ctx:      ctx,
 		cancel:   cancel,
 		onDown:   onDown,
+		onObs:    onObs,
 		onExit:   onExit,
 		logger:   logger,
 		sendq:    make(chan *message.Envelope, portSendQueue),
@@ -327,6 +332,21 @@ func (p *port) readLoop() {
 			if err := p.codec.Write(ipc.Frame{Kind: ipc.KindEmitAck, Payload: raw}); err != nil {
 				p.die(fmt.Errorf("actorrt: port %s emit ack write: %w", p.id, err))
 				return
+			}
+		case ipc.KindObs:
+			// Actor-source obs PUSH from the remote actor: relay into the runtime's
+			// per-actor obs fanout. Non-fatal (obs is non-truth, best-effort) — a
+			// decode error IS a protocol violation (closed-set discipline) and
+			// fail-closes the port, but a well-formed obs just fans out and the loop
+			// continues. p.id is the connection's authenticated identity (the wire
+			// never self-reports it).
+			var op ipc.ObsPayload
+			if err := json.Unmarshal(frame.Payload, &op); err != nil {
+				p.die(fmt.Errorf("actorrt: port %s obs decode: %w", p.id, err))
+				return
+			}
+			if p.onObs != nil {
+				p.onObs(p.id, ObsKind(op.Kind), ObsValue(op.Value))
 			}
 		case ipc.KindDown:
 			var dp ipc.DownPayload

@@ -64,6 +64,16 @@ const (
 	// collapses its reqCtx, and the caller's closure owns the terminal. This is
 	// why it carries no ack frame and cannot reuse the on-loop KindDeliver path.
 	KindCancel Kind = "cancel"
+	// KindObs (remote→host): the bound actor pushed an opaque obs snapshot about
+	// ITSELF (actor-source obs PUSH — operational/health state like device
+	// presence, NEVER business content, NEVER truth). The host relays it into the
+	// runtime's per-actor obs fanout (publishObs) so home-side WatchObs consumers
+	// see it. Fire-and-forget, unidirectional, NO ack: obs is non-truth and
+	// best-effort (a lost snapshot is superseded by the next one / decayed by the
+	// lease) — so it cannot reuse the ack'd KindEmit path. The actor is implicit
+	// (the connection IS that actor); the kind/value are OPAQUE (the substrate
+	// forwards, never interprets —守结构不守词汇).
+	KindObs Kind = "obs"
 )
 
 // MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.
@@ -127,6 +137,15 @@ type EmitAckPayload struct {
 // presence-down edge (the actor is implicit — the connection IS that actor).
 type DownPayload struct {
 	Reason string `json:"reason,omitempty"`
+}
+
+// ObsPayload carries one actor-source obs snapshot the bound actor pushed (the
+// actor is implicit — the connection IS that actor). Kind + Value are OPAQUE: the
+// wire forwards them, never interprets. Value is raw opaque bytes (the adapter's
+// vocabulary; the substrate stays type-agnostic).
+type ObsPayload struct {
+	Kind  string `json:"kind"`
+	Value []byte `json:"value,omitempty"`
 }
 
 // CancelPayload names the in-flight request to cancel on the bound actor (the

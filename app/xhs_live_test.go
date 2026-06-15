@@ -280,12 +280,14 @@ const xhsStatusDeviceAddr = "127.0.0.1:18091"
 // live conditions: a real server + real daemon hosting the tool:xhs cell + a real
 // mock device over the cell's private /device WS.
 //
-//  1. device connected → GET /actors/tool:xhs/status reports device_online:true
-//  2. device disconnects → the same probe reports device_online:false
+//  1. device connected → GET /actors/tool:xhs/status reports known:true, online:true
+//  2. device disconnects → the same read reports known:true, online:false
 //
-// This proves the end-to-end path the frontend uses to sense a daemon-hosted
-// adapter's device presence: app sends actor.status → adapter self-answers from
-// its live conn state → app returns it. No substrate obs frame is involved.
+// This proves the FULL L3 obs-PUSH chain end-to-end: the adapter publishes a
+// device-presence edge (PublishObs) → the daemon's WatchObs forwarder sends it UP
+// the link as a KindObs frame → the home port relays it into publishObs → the
+// home presence fold materialises the level → View.DevicePresence → /status reads
+// it OUT-OF-BAND (no probe, no truth-log write — the retired anti-pattern).
 func TestXHSLiveActorStatus(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
@@ -362,15 +364,19 @@ func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want
 		w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, id), nil, s.cookies)
 		assertStatus(t, w, http.StatusOK)
 		body := respJSON(t, w)
-		if live, _ := body["live"].(bool); live {
-			if st, ok := body["status"].(map[string]any); ok {
-				if online, ok := st["device_online"].(bool); ok && online == want {
-					return
-				}
+		// New shape: {known:bool, online:bool}. Only a KNOWN presence (the adapter
+		// actually published a device-presence edge that the obs chain folded at the
+		// home) proves the want — known:false (unknown) must never satisfy either
+		// assertion vacuously. This exercises the full L3 obs push chain end-to-end:
+		// adapter PublishObs → daemon WatchObs forward → KindObs wire → home port →
+		// publishObs → fold → View.DevicePresence → /status.
+		if known, _ := body["known"].(bool); known {
+			if online, ok := body["online"].(bool); ok && online == want {
+				return
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("status device_online never became %v (via a live answer) within %s (last body=%v)", want, timeout, body)
+			t.Fatalf("status online never became %v (via a known presence) within %s (last body=%v)", want, timeout, body)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

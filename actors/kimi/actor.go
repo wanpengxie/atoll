@@ -66,6 +66,9 @@ type Actor struct {
 	actorID actor.ActorID
 	clock   func() time.Time
 	dev     *device
+	// obs is the actor-source obs PUSH producer end, captured at Start. The device
+	// face uses it to publish device-presence edges (L3). nil until Start.
+	obs actorrt.ActorContext
 }
 
 // NewActor builds a kimi adapter bound to its writer + identity + config. The
@@ -100,7 +103,8 @@ var _ actorrt.Stopper = (*Actor)(nil)
 // Start binds the device WS endpoint and boots the accept + reaper goroutines.
 // A bind failure returns the error so the cell dies fast (positive death) — no
 // half-listening adapter ever registers as serviceable.
-func (a *Actor) Start(ctx context.Context, _ actorrt.ActorContext) error {
+func (a *Actor) Start(ctx context.Context, self actorrt.ActorContext) error {
+	a.obs = self
 	// The trust model assumes a loopback bind (only same-machine processes can
 	// reach the keyless endpoint). A non-loopback addr is a CONFIG ERROR (spec
 	// §6.1): it would expose the keyless device port to the network. Fail fast
@@ -108,7 +112,22 @@ func (a *Actor) Start(ctx context.Context, _ actorrt.ActorContext) error {
 	if !isLoopbackAddr(a.dev.addrCfg) {
 		return fmt.Errorf("kimi: device endpoint is keyless and trusts localhost; refusing non-loopback bind %q (use 127.0.0.1)", a.dev.addrCfg)
 	}
-	return a.dev.start(ctx)
+	if err := a.dev.start(ctx); err != nil {
+		return err
+	}
+	// Initial L3 edge: a connection-bearing adapter KNOWS it starts disconnected —
+	// publish offline so the home shows a definite state, not unknown.
+	a.publishPresence(false)
+	return nil
+}
+
+// publishPresence pushes a device-presence edge (L3) on the actor-source obs axis.
+// Best-effort, advisory (never authoritative — that is send→terminal); no-op
+// before Start captured the producer end.
+func (a *Actor) publishPresence(online bool) {
+	if a.obs != nil {
+		a.obs.PublishObs(introspect.ObsPresence, introspect.MarshalPresence(online))
+	}
 }
 
 // isLoopbackAddr reports whether host:port binds the loopback interface (the

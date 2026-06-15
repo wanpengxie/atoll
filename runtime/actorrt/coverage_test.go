@@ -542,7 +542,7 @@ func TestNewPortNilLoggerDefaulted(t *testing.T) {
 		_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		_, _ = c.Read() // consume ack
 	}()
-	p, err := newPort(context.Background(), context.Background(), hostConn, nopEmit, staticResolve("remote-1"), nil, nil, time.Now(), nil)
+	p, err := newPort(context.Background(), context.Background(), hostConn, nopEmit, staticResolve("remote-1"), nil, nil, nil, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("newPort: %v", err)
 	}

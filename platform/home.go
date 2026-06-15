@@ -9,6 +9,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/lib/channelkit"
 	"github.com/wanpengxie/ActOS/platform/internal/link"
+	presencefold "github.com/wanpengxie/ActOS/platform/internal/presence"
 	"github.com/wanpengxie/ActOS/platform/internal/sysactor"
 	"github.com/wanpengxie/ActOS/platform/internal/tap"
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -41,6 +42,7 @@ type Home struct {
 	signal    *tap.Signal
 	delivery  *tap.Pump
 	links     *link.Acceptor
+	presence  *presencefold.Fold
 	logger    *slog.Logger
 	nowMs     func() int64
 
@@ -123,6 +125,13 @@ func Open(cfg HomeConfig) (*Home, error) {
 		}
 	}
 
+	// 5.5 Presence fold (L3 device presence): folds actor-source obs PUSH edges
+	//     into a volatile per-actor level (in-memory; never persisted), decays to
+	//     unknown on the actor's death edge (link-down cascade). Built BEFORE
+	//     channelkit so the system cell can read it (sysactor observes L1/L2/L3);
+	//     registered as a presence watcher + per-actor obs watcher below.
+	presence := presencefold.New()
+
 	// 6. channelkit: actorrt runtime + sysactor + death-edge wiring. The system
 	//    cell is built against the LIVE runtime (factory) — its presence Stat seam
 	//    reads the real runtime at construction, no back-filled pointer.
@@ -136,6 +145,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 				Lookup:   cs.Requests,
 				Clock:    clock,
 				Stat:     &runtimePresenceAdapter{rt: rt},
+				Device:   presence,
 			})
 		},
 		Writer:       writer,
@@ -157,14 +167,21 @@ func Open(cfg HomeConfig) (*Home, error) {
 	delivery := tap.NewPump(signal, cs.Query, from, deliver, logger)
 	delivery.Start()
 
+	// 7.5 Register the presence fold as a global presence watcher (so an actor's
+	//     death edge decays its L3 to unknown — the link-down cascade). Per-actor
+	//     obs registration happens at attach (Acceptor below).
+	channel.Cells().WatchPresence(presence)
+
 	// 8. Build the link acceptor (physical layer: WS mux + per-actor ipc streams
-	//    + lease judgement for attached computes).
+	//    + lease judgement for attached computes). It folds each attached actor's
+	//    obs PUSH into the presence fold (per-actor WatchObs at attach).
 	links := link.NewAcceptor(link.Config{
 		Writer:     writer,
 		Runtime:    channel.Cells(),
 		Membership: cs.Membership,
 		ChannelID:  cfg.ChannelID,
 		Logger:     logger,
+		ObsWatcher: presence,
 	})
 
 	// 9. Closure reconciler (level backstop). Run one sweep at startup — this is
@@ -202,6 +219,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		signal:        signal,
 		delivery:      delivery,
 		links:         links,
+		presence:      presence,
 		logger:        logger,
 		nowMs:         nowMs,
 		reconcileStop: reconcileStop,
@@ -221,7 +239,7 @@ func (h *Home) Gate() harness.Writer { return h.writer }
 // truth-log write) — UI status polling must not pollute the log; in-universe
 // actors instead ask the system actor by message (that path is logged).
 func (h *Home) View() View {
-	return View{query: h.cs.Query, registry: h.cs.Registry, links: h.links}
+	return View{query: h.cs.Query, registry: h.cs.Registry, links: h.links, presence: h.presence}
 }
 
 // Spawn admits one actor into the channel as durable membership truth and, when
@@ -307,6 +325,19 @@ type View struct {
 	query    storespec.MessageQuery
 	registry storespec.Registry
 	links    *link.Acceptor
+	presence *presencefold.Fold
+}
+
+// DevicePresence returns the latest opaque L3 device-presence snapshot an actor
+// pushed (via the obs axis), folded read-time. known=false = UNKNOWN (the actor
+// never reported, or its link dropped and the fold decayed it) — NOT offline.
+// The caller decodes the bytes via introspect.ParsePresence. Advisory only;
+// authoritative reachability is send→terminal.
+func (v View) DevicePresence(id actor.ActorID) (snapshot []byte, known bool) {
+	if v.presence == nil {
+		return nil, false
+	}
+	return v.presence.Device(id)
 }
 
 // IsAttached reports whether daemon (compute) id has a live attach right now
