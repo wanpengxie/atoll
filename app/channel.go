@@ -99,7 +99,8 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 		// Roll back: delete the orphaned channel row.
 		_, _ = a.db.ExecContext(c.Request.Context(),
 			`DELETE FROM channels WHERE id = ?`, chID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "init channel home failed: " + err.Error()})
+		a.logger.Error("create channel: init home", "channel", chID, "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 
@@ -254,7 +255,8 @@ func (a *App) handleListActors(c *gin.Context) {
 
 	actors, err := home.View().ListActors(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		a.logger.Error("list actors", "channel", chID, "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 
@@ -287,7 +289,8 @@ func (a *App) handleCursor(c *gin.Context) {
 	}
 	seq, err := home.View().MaxSeq(c.Request.Context())
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		a.logger.Error("cursor: max seq", "channel", chID, "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"last_received_seq": seq})
@@ -314,7 +317,8 @@ func (a *App) handleListMessages(c *gin.Context) {
 
 	rows, err := home.View().ReadAfterSeq(c.Request.Context(), after, limit)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		a.logger.Error("list messages", "channel", chID, "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 
@@ -408,7 +412,8 @@ func (a *App) handleSendMessage(c *gin.Context) {
 	})
 	res, err := gw.SendMessage(ctx, env)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		a.logger.Error("send message", "channel", chID, "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 	if !res.Accepted() {

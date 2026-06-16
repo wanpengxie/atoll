@@ -128,10 +128,13 @@ func (a *App) handleCompute(c *gin.Context) {
 
 	chID := channel.ID(chIDStr)
 
-	// Single auth path: verify key + daemon-channel binding.
+	// Single auth path: verify key + daemon-channel binding. The specific
+	// reason (bad key / no binding / db error) stays server-side — a public
+	// auth endpoint must not be an oracle, so the client gets one flat 403.
 	daemonID, err := a.authAndResolve(apiKey, chID)
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": err.Error()})
+		a.logger.Warn("compute attach: auth failed", "channel", chID, "err", err)
+		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
 
