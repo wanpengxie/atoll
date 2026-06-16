@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -15,14 +16,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	_ "github.com/wanpengxie/ActOS/actors/kimiagent" // registers the "agent" catalog impl (init)
 	"github.com/wanpengxie/ActOS/actors/registry"
 	"github.com/wanpengxie/ActOS/app/internal/middleware"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
@@ -36,12 +35,6 @@ type App struct {
 	homes map[channel.ID]*platform.Home
 
 	channelDBDir string
-
-	// agentOverride, when set, builds the channel's bundled agent cell instead of
-	// the catalog. TEST-ONLY — set via export_test.go's SetAgentOverride; never on
-	// the production Config. Production builds the agent from the actor catalog
-	// (registry.Build("agent")), same source as the daemon.
-	agentOverride func(chID channel.ID, agentID actor.ActorID, w harness.Writer) (actorrt.Actor, error)
 }
 
 // Config configures the App.
@@ -210,63 +203,73 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 	a.homes[chID] = home
 	a.mu.Unlock()
 
-	// Built-in agent (the channel's bundled brain): spawned as a server cell
-	// when the server carries LLM credentials. Guarded — a server without
-	// KIMI_API_KEY simply has no built-in agent (dev/e2e unaffected).
-	a.spawnBuiltinAgent(chID, home)
+	// Spawn the channel's DESIRED composition (channel_actors) — the server-placed
+	// instances. Intent lives in channel_actors; what actually comes up lands in
+	// the substrate's actor_registry (actor-instance-model §3).
+	a.spawnComposition(chID, home)
 
 	return home, nil
 }
 
-// builtinAgentID is the bundled server-cell agent's channel-scoped id.
-const builtinAgentID = actor.ActorID("agent:main")
+// defaultAgentInstanceID is the canonical fallback/bootstrap agent instance —
+// the always-there server-embedded "boost" floor (default-agent-deployment §0:
+// every channel gets a server-cell agent for never-brainless + onboarding).
+// default_agent points here by default; it is a name-agnostic pointer, so a
+// channel may later repoint it at any other instance id (actor-instance-model §7).
+const (
+	defaultAgentInstanceID = actor.ActorID("agent:boost")
+	defaultAgentClass      = "agent"
+	// placementServer marks a composition instance the SERVER hosts (embedded
+	// cell). spawnComposition only spawns these; 'daemon'-placed rows are claimed
+	// by daemon hosts (delivery is additive). See actor-instance-model §6.
+	placementServer = "server"
+)
 
-// spawnBuiltinAgent best-effort spawns the bundled agent cell. Failure is
-// logged, never fatal: a channel without its brain still serves path-1
-// (explicit audience) traffic. The agent's pen is caller-stamped with its own
-// identity (embedded cells emit through the raw home gate, which the substrate
-// requires a CallerContext on — the app stamps here, as channelkit does for the
-// system cell).
-func (a *App) spawnBuiltinAgent(chID channel.ID, home *platform.Home) {
-	pen := &callerStampedWriter{inner: home.Gate(), caller: harness.CallerContext{
-		ActorID: builtinAgentID, ChannelID: chID,
-	}}
-
-	var impl actorrt.Actor
-	if a.agentOverride != nil {
-		// TEST-ONLY injection (export_test.go). Never set in production.
-		built, err := a.agentOverride(chID, builtinAgentID, pen)
-		if err != nil {
-			a.logger.Warn("app: agent override failed", "channel", string(chID), "err", err.Error())
-			return
-		}
-		impl = built
-	} else {
-		// Production: build the channel's agent from the actor catalog — same
-		// source as the daemon (registry.Build("agent")). A server carries no
-		// workspace, so Deps.WorkspaceDir is empty → the agent decl derives the
-		// server-embedded Situation. No creds / not applicable → no built-in agent
-		// (the channel runs the group-chat policy); never fatal.
-		decl, err := registry.Build("agent", registry.Deps{ChannelID: chID, Logger: a.logger})
-		if err != nil {
-			a.logger.Debug("app: no built-in agent", "channel", string(chID), "reason", err.Error())
-			return
-		}
-		impl = decl.Factory(pen)
-	}
-
-	if err := home.Spawn(context.Background(), builtinAgentID, actor.KindAgent, impl); err != nil {
-		a.logger.Warn("app: builtin agent spawn failed", "channel", string(chID), "err", err.Error())
+// spawnComposition reads the channel's DESIRED composition (channel_actors) and
+// spawns each instance from the actor catalog via the generic Build → Spawn
+// path — no special "the agent" case. The composition is INTENT; a build/spawn
+// failure (e.g. agent with no LLM creds) is logged and skipped: the row stays
+// (intent), the instance just isn't running (현상 = actor_registry has no row),
+// and default_agent still points at it. Each instance gets a caller-stamped pen
+// (an embedded cell emits through the raw home gate, which the substrate requires
+// a CallerContext on). Server placement: Deps carries NO WorkspaceDir, so the
+// agent class derives the server-embedded Situation.
+func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
+	type instanceSpec struct{ id, class, cfg string }
+	var specs []instanceSpec
+	rows, err := a.db.Query(
+		`SELECT instance_id, class, COALESCE(config_json, '') FROM channel_actors WHERE channel_id = ? AND placement = ?`,
+		string(chID), placementServer)
+	if err != nil {
+		a.logger.Error("app: read composition", "channel", string(chID), "err", err)
 		return
 	}
-	// An agent was actually assembled into this channel → set default_agent so the
-	// channel runs the agent-centric routing policy (no-audience → the agent).
-	// Channels with NO assembled agent keep default_agent empty and run the
-	// group-chat policy instead (handleSendMessage). IS NULL guard never clobbers
-	// an already-set / switched pointer on reload.
-	_, _ = a.db.ExecContext(context.Background(),
-		`UPDATE channels SET default_agent = ? WHERE id = ? AND default_agent IS NULL`,
-		string(builtinAgentID), string(chID))
+	for rows.Next() {
+		var s instanceSpec
+		if err := rows.Scan(&s.id, &s.class, &s.cfg); err != nil {
+			continue
+		}
+		specs = append(specs, s)
+	}
+	rows.Close()
+
+	for _, s := range specs {
+		decl, err := registry.Build(s.class, registry.InstanceSpec{
+			ID:     actor.ActorID(s.id),
+			Config: json.RawMessage(s.cfg),
+		}, registry.Deps{ChannelID: chID, Logger: a.logger})
+		if err != nil {
+			a.logger.Debug("app: composition instance not built", "channel", string(chID), "instance", s.id, "reason", err.Error())
+			continue
+		}
+		pen := &callerStampedWriter{inner: home.Gate(), caller: harness.CallerContext{
+			ActorID: decl.ID, ChannelID: chID,
+		}}
+		impl := decl.Factory(pen)
+		if err := home.Spawn(context.Background(), decl.ID, decl.Kind, impl); err != nil {
+			a.logger.Warn("app: spawn composition instance failed", "channel", string(chID), "instance", string(decl.ID), "err", err.Error())
+		}
+	}
 }
 
 // callerStampedWriter wraps the home write gate with a fixed CallerContext so an

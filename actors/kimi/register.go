@@ -8,15 +8,22 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-func init() { registry.Register("kimi", decl) }
+func init() { registry.Register("kimi", construct) }
 
-// decl: browser-extension adapter (mirrors xhs; differs only by id+addr).
-func decl(d registry.Deps) (platform.ActorDecl, bool, error) {
-	cfg := Config{ListenAddr: DefaultListenAddr, Logger: d.Logger}
+// construct: browser-extension adapter (mirrors xhs; differs only by id+addr).
+// id comes from the spec; blank → class default. The listen addr is config (a
+// transport detail, NOT an essence-singleton constraint — two kimi instances on
+// different addrs are legal); day-0 uses the default addr.
+func construct(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
+	id := spec.ID
+	if id == "" {
+		id = DefaultActorID
+	}
+	cfg := Config{ListenAddr: DefaultListenAddr, Logger: ctx.Logger}
 	return platform.ActorDecl{
-		ID:      DefaultActorID,
+		ID:      id,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeInboundViaRelay,
 		Factory: func(w harness.Writer) actorrt.Actor { return NewActor(w, cfg) },
-	}, true, nil
+	}, nil
 }

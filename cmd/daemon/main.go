@@ -1,10 +1,12 @@
 // Command daemon runs a v2 attached compute (hosts actor cells; no truth).
-// Cloud daemon and user/proxy daemon are the same binary. Which actors it hosts
-// comes from the SELF-REGISTERING actor registry (driver-registration pattern):
-// each in-tree actor package's init() registers its decl, and the daemon builds
-// ALL applicable actors by default (fat-daemon: one binary packages every impl)
-// — or a subset via --actors. Adding an in-tree actor = a new package with an
-// init() + one blank-import line in actors/all; this file is NEVER edited.
+// Cloud daemon and user/proxy daemon are the same binary. Which actor CLASSES it
+// can host comes from the SELF-REGISTERING catalog (driver-registration pattern):
+// each in-tree actor package's init() registers its class constructor. The daemon
+// hosts one default instance of every compiled TOOL/DEVICE class — but NOT the
+// "agent" class (the channel's orchestrator is server-placed; a daemon-hosted
+// agent is a server-delivered composition decision, not a CLI flag). Adding an
+// in-tree actor = a new package with an init() + one blank-import in actors/all;
+// this file is NEVER edited.
 package main
 
 import (
@@ -42,7 +44,6 @@ func channelFromServerURL(raw string) string {
 func main() {
 	ws := flag.String("server", "ws://localhost:8080/compute", "server WS url")
 	key := flag.String("key", "", "api key")
-	actorsFlag := flag.String("actors", "", "comma-separated subset to host (default: all registered+applicable)")
 	name := flag.String("name", "", "device name; default: hostname")
 	workspace := flag.String("workspace", "", "workspace root dir; default: ~/.coagent/workspace")
 	flag.Parse()
@@ -88,30 +89,23 @@ func main() {
 		Logger:       slog.Default(),
 	}
 
-	// Default = every registered+applicable actor (fat daemon). --actors narrows
-	// to an explicit subset. Either way the actor list comes from the registry —
-	// no hand-maintained manifest here.
-	var (
-		decls []platform.ActorDecl
-		err   error
-	)
-	if strings.TrimSpace(*actorsFlag) == "" {
-		decls, err = registry.BuildAll(deps)
-		if err != nil {
-			log.Fatalf("daemon: build actors: %v", err)
+	// Day-0 daemon composition (actor-instance-model §6/§7): the fat daemon hosts
+	// its compiled TOOL/DEVICE classes — one default instance each
+	// (InstanceSpec{} → class default id). It does NOT host the "agent" class:
+	// the channel's orchestrator is server-placed (agent:boost); a daemon-hosted
+	// agent is a per-channel composition decision delivered from the server
+	// (additive, not day-0) — never a CLI flag. This is what removes the old
+	// agent:main double-build.
+	var decls []platform.ActorDecl
+	for _, class := range registry.Classes() {
+		if class == "agent" {
+			continue // agent is server-placed; not in the daemon's default set
 		}
-	} else {
-		for _, n := range strings.Split(*actorsFlag, ",") {
-			n = strings.TrimSpace(n)
-			if n == "" {
-				continue
-			}
-			decl, berr := registry.Build(n, deps)
-			if berr != nil {
-				log.Fatalf("daemon: %v", berr)
-			}
-			decls = append(decls, decl)
+		decl, berr := registry.Build(class, registry.InstanceSpec{}, deps)
+		if berr != nil {
+			log.Fatalf("daemon: %v", berr)
 		}
+		decls = append(decls, decl)
 	}
 
 	// The link layer is auth-agnostic: the api key rides the server WS url's query

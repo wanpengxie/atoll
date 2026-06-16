@@ -1,99 +1,99 @@
 package registry
 
 import (
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
 
 	"github.com/wanpengxie/ActOS/platform"
+	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 )
 
-// Deps bundles every input an actor might need to declare itself at the daemon
-// composition root. Each Decl takes what it needs and ignores the rest — there is
-// no "generic vs special" actor, just self-describing decls.
+// Deps is the HOST CONTEXT a constructor builds against (which channel, the
+// workspace root, the device identity, a logger). It is NOT instance identity —
+// "which instance, with what config" comes from InstanceSpec. Splitting the two
+// is the whole point: a class is a template; the host context + an InstanceSpec
+// together produce one running instance.
 type Deps struct {
-	ChannelID    channel.ID // from the --server URL ?channel= (a cell is channel-scoped)
-	WorkspaceDir string     // workspace root for device + agent situation facts
-	DeviceName   string     // device identity
+	ChannelID    channel.ID // the channel this cell is scoped to
+	WorkspaceDir string     // workspace root (device / agent situation facts)
+	DeviceName   string     // device identity (for the device class's id)
 	Logger       *slog.Logger
 }
 
-// Decl builds one actor's hosting declaration from deps. ok=false means the actor
-// is NOT applicable in this daemon's context (e.g. an agent with no channel) — it
-// is silently skipped by BuildAll and reported as an error only when explicitly
-// requested by name. err is a hard build failure (bad config/creds).
-type Decl func(Deps) (decl platform.ActorDecl, ok bool, err error)
+// InstanceSpec is one actor instance's deployment params: its id and opaque
+// per-instance config. A class (actors/<x>) is a template; an instance =
+// class + InstanceSpec.
+//
+//   - ID == "" → "use the class's default id" (the fat-daemon one-of-each case).
+//   - ID != "" → instantiate this class under that id; the SAME class can be
+//     instantiated many times under different ids (multi-agent falls out here).
+//   - device ignores ID and derives it from the device identity (essence
+//     singleton: id IS the resource — see actor-instance-model §5.1).
+type InstanceSpec struct {
+	ID     actor.ActorID
+	Config json.RawMessage
+}
+
+// Constructor builds one instance of a class: given the deployment spec (id +
+// config) and the host context, it produces the ActorDecl the host spawns. The
+// id comes from the spec, NOT baked into the constructor — so one class yields
+// many instances. A bad config / missing creds is a hard error.
+type Constructor func(spec InstanceSpec, ctx Deps) (platform.ActorDecl, error)
 
 var (
 	mu  sync.RWMutex
-	reg = map[string]Decl{}
+	reg = map[string]Constructor{}
 )
 
-// Register records an actor's Decl under name. Called from an actor package's
-// init(); a duplicate name is a programmer error (panic, like sql.Register).
-func Register(name string, d Decl) {
+// Register records a class's Constructor under its class key. Called from an
+// actor package's init(); a duplicate class is a programmer error (panic, like
+// sql.Register).
+func Register(class string, c Constructor) {
 	mu.Lock()
 	defer mu.Unlock()
-	if _, dup := reg[name]; dup {
-		panic("actors/registry: duplicate actor registration: " + name)
+	if _, dup := reg[class]; dup {
+		panic("actors/registry: duplicate class registration: " + class)
 	}
-	reg[name] = d
+	reg[class] = c
 }
 
-// Names returns the registered actor names, sorted (stable BuildAll order).
-func Names() []string {
+// Classes returns the registered class keys, sorted (stable iteration order).
+func Classes() []string {
 	mu.RLock()
 	defer mu.RUnlock()
 	out := make([]string, 0, len(reg))
-	for n := range reg {
-		out = append(out, n)
+	for c := range reg {
+		out = append(out, c)
 	}
 	sort.Strings(out)
 	return out
 }
 
-// Build builds one named actor. An unknown name or a not-applicable actor (ok
-// =false) is an error here — the caller asked for it explicitly, so silence would
-// hide a misconfiguration.
-func Build(name string, deps Deps) (platform.ActorDecl, error) {
+// Has reports whether a class is registered.
+func Has(class string) bool {
 	mu.RLock()
-	d, found := reg[name]
-	mu.RUnlock()
-	if !found {
-		return platform.ActorDecl{}, fmt.Errorf("actors/registry: unknown actor %q (registered: %v)", name, Names())
-	}
-	decl, ok, err := d(deps)
-	if err != nil {
-		return platform.ActorDecl{}, fmt.Errorf("actors/registry: build %q: %w", name, err)
-	}
-	if !ok {
-		return platform.ActorDecl{}, fmt.Errorf("actors/registry: actor %q not applicable in this context (e.g. missing channel)", name)
-	}
-	return decl, nil
+	defer mu.RUnlock()
+	_, ok := reg[class]
+	return ok
 }
 
-// BuildAll builds every registered+applicable actor (the fat-daemon default: one
-// binary packages all impls, hosts all that apply here). A not-applicable actor
-// is skipped; a hard build error aborts.
-func BuildAll(deps Deps) ([]platform.ActorDecl, error) {
-	var out []platform.ActorDecl
-	for _, name := range Names() {
-		mu.RLock()
-		d := reg[name]
-		mu.RUnlock()
-		decl, ok, err := d(deps)
-		if err != nil {
-			return nil, fmt.Errorf("actors/registry: build %q: %w", name, err)
-		}
-		if !ok {
-			if deps.Logger != nil {
-				deps.Logger.Debug("registry.skip", "actor", name, "reason", "not applicable in this context")
-			}
-			continue
-		}
-		out = append(out, decl)
+// Build instantiates one instance of class with the given spec + host context.
+// Unknown class or a constructor error are returned to the caller (who asked for
+// it explicitly).
+func Build(class string, spec InstanceSpec, ctx Deps) (platform.ActorDecl, error) {
+	mu.RLock()
+	c, found := reg[class]
+	mu.RUnlock()
+	if !found {
+		return platform.ActorDecl{}, fmt.Errorf("actors/registry: unknown class %q (registered: %v)", class, Classes())
 	}
-	return out, nil
+	decl, err := c(spec, ctx)
+	if err != nil {
+		return platform.ActorDecl{}, fmt.Errorf("actors/registry: build %q: %w", class, err)
+	}
+	return decl, nil
 }

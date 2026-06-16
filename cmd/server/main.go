@@ -9,6 +9,13 @@ import (
 
 	"github.com/wanpengxie/ActOS/app"
 	"github.com/wanpengxie/ActOS/cmd/internal/dotenv"
+
+	// Composition root wires the catalog: the server-embedded agent (agent:boost)
+	// is built via registry.Build("agent"), so the BINARY pins which "agent" impl
+	// is compiled in — not the app library (which stays agent-impl-agnostic, so
+	// `go test ./app` can register its own stub). Same pattern as cmd/daemon
+	// importing actors/all.
+	_ "github.com/wanpengxie/ActOS/actors/kimiagent"
 )
 
 func main() {

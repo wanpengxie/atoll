@@ -1,7 +1,7 @@
 // Package all blank-imports every in-tree, self-registering actor so ONE daemon
 // binary packages them all (one process hosts all — not one process per actor).
 // Each imported package's init() calls actors/registry.Register; the daemon then
-// builds the catalog via registry.BuildAll / Build.
+// builds instances from the catalog via registry.Build(class, spec, ctx).
 //
 // This list is hand-maintained: adding an in-tree actor = add one blank import
 // line here. That is the earliest, simplest form and is correct at this scale.

@@ -85,12 +85,36 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	dbPath := filepath.Join(a.channelDBDir, chID+".db")
 	now := time.Now().UnixMilli()
 
-	_, err := a.db.ExecContext(c.Request.Context(),
-		`INSERT INTO channels (id, workspace_id, name, type, db_path, created_at) VALUES (?,?,?,?,?,?)`,
-		chID, wsID, req.Name, req.Type, dbPath, now,
-	)
+	// Create the channel row + seed its DESIRED composition (channel_actors) + the
+	// default_agent pointer in ONE tx. channel_actors is the canonical writer for
+	// "what this channel runs"; default_agent is a name-agnostic pointer into it,
+	// defaulting to the agent:boost fallback instance (actor-instance-model §7/§8).
+	// One tx → never a half-seeded channel (§8·C, no three-write drift).
+	tx, err := a.db.BeginTx(c.Request.Context(), nil)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "create channel failed"})
+		a.logger.Error("create channel: begin tx", "channel", chID, "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	_, err = tx.ExecContext(c.Request.Context(),
+		`INSERT INTO channels (id, workspace_id, name, type, db_path, default_agent, created_at) VALUES (?,?,?,?,?,?,?)`,
+		chID, wsID, req.Name, req.Type, dbPath, string(defaultAgentInstanceID), now,
+	)
+	if err == nil {
+		_, err = tx.ExecContext(c.Request.Context(),
+			`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
+			chID, string(defaultAgentInstanceID), defaultAgentClass, placementServer,
+		)
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		a.logger.Error("create channel: seed", "channel", chID, "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		a.logger.Error("create channel: commit", "channel", chID, "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 
@@ -341,22 +365,41 @@ func (a *App) handleSendMessage(c *gin.Context) {
 		audience = append(audience, actor.ActorID(a))
 	}
 
-	// No explicit audience → the channel's routing policy decides, selected by
-	// whether a default_agent is assembled:
-	//   • default_agent set  → agent-centric channel: route to the agent (request).
-	//   • default_agent empty → group-chat channel: broadcast to all human members
-	//     (event). The agent is NOT a default recipient here; it participates only
-	//     when explicitly @-addressed (path 1).
+	// No explicit audience → the channel's routing policy decides. default_agent
+	// is the INTENT pointer; routing resolves it against 现状 (actor_registry):
+	//   • default_agent points at a LIVE member → agent-centric: request to it.
+	//   • else (no pointer, or the pointed agent isn't running — e.g. agent:boost
+	//     with no LLM creds) → group-chat: broadcast to all human members (event).
+	//     The agent participates only when explicitly @-addressed (path 1).
+	// This keeps default_agent host/creds-agnostic (期望) while never routing to a
+	// dead target, and is the §7 failover seam (pointed brain down → fall back).
 	kind := message.Kind(req.Kind)
 	if len(audience) == 0 {
 		var da string
 		_ = a.db.QueryRowContext(c.Request.Context(),
 			`SELECT COALESCE(default_agent, '') FROM channels WHERE id = ?`, chID).Scan(&da)
+
+		actors, lerr := home.View().ListActors(c.Request.Context())
+		if lerr != nil {
+			// fail closed: don't silently downgrade agent routing to group-chat on
+			// a transient view failure.
+			a.logger.Error("send message: list actors", "channel", chID, "err", lerr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		agentLive := false
 		if da != "" {
+			for _, ac := range actors {
+				if string(ac.ID) == da && ac.Kind == actor.KindAgent {
+					agentLive = true
+					break
+				}
+			}
+		}
+		if agentLive {
 			audience = []actor.ActorID{actor.ActorID(da)}
 			kind = message.KindRequest
 		} else {
-			actors, _ := home.View().ListActors(c.Request.Context())
 			for _, ac := range actors {
 				if ac.Kind == actor.KindHuman {
 					audience = append(audience, ac.ID)

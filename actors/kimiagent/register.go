@@ -1,6 +1,7 @@
 package kimiagent
 
 import (
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -12,41 +13,48 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-func init() { registry.Register("agent", decl) }
+func init() { registry.Register("agent", construct) }
 
-// decl: the agent brain — the SINGLE source for both hosts. The daemon builds it
-// via BuildAll/RunCompute; the server-embedded built-in builds it via the same
-// registry.Build("agent"). Needs a channel + KIMI_* creds, so it is NOT applicable
-// (skipped by BuildAll) on a daemon whose --server URL carries no ?channel=.
+// construct: the agent brain — ONE class ("agent"), instantiated under whatever
+// id the spec gives (agent:boost, agent:research, …). The id is NOT baked here
+// (actor-instance-model §7): default_agent is a name-agnostic pointer, the
+// instance is just another actor. The same class yields N agents.
 //
-// Situation is derived from Deps: a daemon carries a workspace (exclusive device),
-// a server-embedded build does not — so WorkspaceDir presence is the discriminator
-// (default-agent-deployment §1.2: server = no exclusive device).
-func decl(d registry.Deps) (platform.ActorDecl, bool, error) {
-	if d.ChannelID == "" {
-		return platform.ActorDecl{}, false, nil // no channel → not applicable here
+// Situation is derived from the host context: a daemon carries a workspace
+// (exclusive device), a server-embedded build does not — WorkspaceDir presence
+// is the discriminator (default-agent-deployment §1.2).
+//
+// Config day-0 still comes from env (KIMI_*); per-instance persona/config from
+// spec.Config is the additive next step (D6). A missing channel / id / creds is
+// a hard error — the caller (app composition / daemon) decides whether to build.
+func construct(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
+	if ctx.ChannelID == "" {
+		return platform.ActorDecl{}, errors.New("agent: requires a channel")
+	}
+	id := spec.ID
+	if id == "" {
+		return platform.ActorDecl{}, errors.New("agent: requires an explicit instance id")
 	}
 	sit := Situation{Host: "server"}
-	if d.WorkspaceDir != "" {
-		sit = Situation{Host: "daemon", HasWorkspace: true, WorkspaceDir: d.WorkspaceDir}
+	if ctx.WorkspaceDir != "" {
+		sit = Situation{Host: "daemon", HasWorkspace: true, WorkspaceDir: ctx.WorkspaceDir}
 	}
 	cfg, err := NewConfigFromEnv(BuildSystemPrompt(
 		sit, os.Getenv(EnvKeyChannelType), os.Getenv(EnvKeyDomainPrompt)))
 	if err != nil {
-		return platform.ActorDecl{}, false, fmt.Errorf("config: %w", err)
+		return platform.ActorDecl{}, fmt.Errorf("config: %w", err)
 	}
-	agentID := actor.ActorID("agent:main")
-	chID := d.ChannelID
+	chID := ctx.ChannelID
 	return platform.ActorDecl{
-		ID:      agentID,
+		ID:      id,
 		Kind:    actor.KindAgent,
 		Binding: actor.BindingRuntimeOutbound,
 		Factory: func(w harness.Writer) actorrt.Actor {
-			b, err := NewBridge(cfg, agentID, chID, w)
+			b, err := NewBridge(cfg, id, chID, w)
 			if err != nil {
-				log.Fatalf("daemon: agent bridge: %v", err)
+				log.Fatalf("agent bridge: %v", err)
 			}
 			return b
 		},
-	}, true, nil
+	}, nil
 }

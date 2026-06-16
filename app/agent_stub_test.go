@@ -2,15 +2,47 @@ package app_test
 
 import (
 	"context"
+	"errors"
 	"time"
 
+	"github.com/wanpengxie/ActOS/actors/registry"
 	"github.com/wanpengxie/ActOS/lib/behavior"
+	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
+
+// testAgentBuilder is set by a test's setup (before any channel is created); the
+// "agent" catalog class registered below delegates to it. This keeps ALL agent
+// injection in test code: the production app builds the agent from the catalog
+// (registry.Build("agent")) and holds NO test seam — `go test ./app` does not
+// import kimiagent (the real "agent" impl is wired at cmd/server), so this is the
+// only "agent" registration and tests own it.
+var testAgentBuilder func(chID channel.ID, agentID actor.ActorID, w harness.Writer) (actorrt.Actor, error)
+
+func init() {
+	registry.Register("agent", func(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
+		if testAgentBuilder == nil {
+			return platform.ActorDecl{}, errors.New("test: no agent builder set")
+		}
+		id := spec.ID
+		return platform.ActorDecl{
+			ID:      id,
+			Kind:    actor.KindAgent,
+			Binding: actor.BindingRuntimeOutbound,
+			Factory: func(w harness.Writer) actorrt.Actor {
+				impl, err := testAgentBuilder(ctx.ChannelID, id, w)
+				if err != nil {
+					return nil
+				}
+				return impl
+			},
+		}, nil
+	})
+}
 
 // stubAgent is a minimal default-agent cell for e2e: the channel carries a real
 // kind=agent cell (so no-audience routing resolves to it) and, on a request, it
@@ -31,8 +63,8 @@ func (s *stubAgent) Receive(ctx context.Context, env *message.Envelope) error {
 	return nil
 }
 
-// stubAgentFactory is the app.AgentFactory the e2e tests inject so every channel
-// gets a working default-agent cell without LLM credentials.
+// stubAgentFactory builds the e2e stub agent. Tests assign it to testAgentBuilder
+// so every channel gets a working default-agent cell without LLM credentials.
 func stubAgentFactory(_ channel.ID, agentID actor.ActorID, w harness.Writer) (actorrt.Actor, error) {
 	return &stubAgent{w: w, self: agentID}, nil
 }

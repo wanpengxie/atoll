@@ -44,8 +44,9 @@ func setupTestApp(t *testing.T) *testEnv {
 		db.Close()
 		t.Fatalf("app.New: %v", err)
 	}
-	app.SetAgentOverride(a, stubAgentFactory)
+	testAgentBuilder = stubAgentFactory
 	t.Cleanup(func() {
+		testAgentBuilder = nil
 		a.Close()
 		db.Close()
 	})

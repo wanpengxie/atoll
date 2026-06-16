@@ -8,16 +8,23 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-func init() { registry.Register("xhs", decl) }
+func init() { registry.Register("xhs", construct) }
 
-// decl: browser-extension adapter — owns a PRIVATE loopback WS endpoint the
+// construct: browser-extension adapter — owns a PRIVATE loopback WS endpoint the
 // extension connects in to (keyless; the 127.0.0.1 bind is the trust boundary).
-func decl(d registry.Deps) (platform.ActorDecl, bool, error) {
-	cfg := Config{ListenAddr: DefaultListenAddr, Logger: d.Logger}
+// id comes from the spec; blank → class default. The loopback addr is config (a
+// transport detail like K8s hostPort — NOT essence-singleton; two xhs instances
+// on different addrs are legal); day-0 uses the default addr.
+func construct(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
+	id := spec.ID
+	if id == "" {
+		id = DefaultActorID
+	}
+	cfg := Config{ListenAddr: DefaultListenAddr, Logger: ctx.Logger}
 	return platform.ActorDecl{
-		ID:      DefaultActorID,
+		ID:      id,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeInboundViaRelay,
 		Factory: func(w harness.Writer) actorrt.Actor { return NewActor(w, cfg) },
-	}, true, nil
+	}, nil
 }

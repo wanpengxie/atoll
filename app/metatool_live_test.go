@@ -168,8 +168,9 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 		db.Close()
 		t.Fatalf("app.New: %v", err)
 	}
-	app.SetAgentOverride(a, factory)
+	testAgentBuilder = factory
 	t.Cleanup(func() {
+		testAgentBuilder = nil
 		a.Close()
 		db.Close()
 	})

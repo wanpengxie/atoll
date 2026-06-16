@@ -1,6 +1,8 @@
 package device
 
 import (
+	"errors"
+
 	"github.com/wanpengxie/ActOS/actors/registry"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -8,16 +10,22 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-func init() { registry.Register("device", decl) }
+func init() { registry.Register("device", construct) }
 
-// decl: the generic device actor — attaching a daemon means attaching a device,
-// so it applies whenever a daemon runs (id carries the device identity).
-func decl(d registry.Deps) (platform.ActorDecl, bool, error) {
-	id := actor.ActorID("device:" + d.DeviceName)
+// construct: the generic device actor. This is the one TRUE essence-singleton
+// (actor-instance-model §5.1): the instance's identity IS the external resource
+// (the machine), so the id is DERIVED from the device identity, not taken from
+// the spec — a second instance of the same device is incoherent. ctx.DeviceName
+// is the identity; spec.ID is ignored.
+func construct(_ registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
+	if ctx.DeviceName == "" {
+		return platform.ActorDecl{}, errors.New("device: empty device name")
+	}
+	id := actor.ActorID("device:" + ctx.DeviceName)
 	return platform.ActorDecl{
 		ID:      id,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeOutbound,
-		Factory: func(w harness.Writer) actorrt.Actor { return NewActor(w, id, d.WorkspaceDir, d.Logger) },
-	}, true, nil
+		Factory: func(w harness.Writer) actorrt.Actor { return NewActor(w, id, ctx.WorkspaceDir, ctx.Logger) },
+	}, nil
 }

@@ -8,14 +8,19 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-func init() { registry.Register("echo", decl) }
+func init() { registry.Register("echo", construct) }
 
-// decl: the zero-config tool — only needs a writer.
-func decl(registry.Deps) (platform.ActorDecl, bool, error) {
+// construct: the zero-config tool. id comes from the spec (multi-capable); a
+// blank spec id falls back to the class default "echo" (the one-of-each case).
+func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
+	id := spec.ID
+	if id == "" {
+		id = actor.ActorID("echo")
+	}
 	return platform.ActorDecl{
-		ID:      actor.ActorID("echo"),
+		ID:      id,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeOutbound,
 		Factory: func(w harness.Writer) actorrt.Actor { return NewActor(w) },
-	}, true, nil
+	}, nil
 }
