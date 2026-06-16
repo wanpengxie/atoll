@@ -15,7 +15,8 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/wanpengxie/ActOS/actors/kimiagent"
+	_ "github.com/wanpengxie/ActOS/actors/kimiagent" // registers the "agent" catalog impl (init)
+	"github.com/wanpengxie/ActOS/actors/registry"
 	"github.com/wanpengxie/ActOS/app/internal/middleware"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -35,25 +36,19 @@ type App struct {
 	homes map[channel.ID]*platform.Home
 
 	channelDBDir string
-	agentFactory AgentFactory
-}
 
-// AgentFactory builds a channel's bundled default-agent cell. The returned Actor
-// is spawned as an embedded server cell (kind=agent, binding=embedded); w is its
-// pen — a caller-stamped harness.Writer so the agent's emits authenticate as
-// itself (the app composition root stamps, exactly as channelkit does for the
-// system cell). A nil factory falls back to the env-based go-kimi built-in (no
-// KIMI creds → no built-in agent, dev/e2e unaffected). Tests inject a stub here.
-type AgentFactory func(chID channel.ID, agentID actor.ActorID, w harness.Writer) (actorrt.Actor, error)
+	// agentOverride, when set, builds the channel's bundled agent cell instead of
+	// the catalog. TEST-ONLY — set via export_test.go's SetAgentOverride; never on
+	// the production Config. Production builds the agent from the actor catalog
+	// (registry.Build("agent")), same source as the daemon.
+	agentOverride func(chID channel.ID, agentID actor.ActorID, w harness.Writer) (actorrt.Actor, error)
+}
 
 // Config configures the App.
 type Config struct {
 	DB           *sql.DB
 	Logger       *slog.Logger
 	ChannelDBDir string // e.g. "/tmp/coagent-dev/channels"
-	// AgentFactory overrides how the bundled default agent is built (tests inject
-	// a stub; production leaves it nil for the env-based go-kimi built-in).
-	AgentFactory AgentFactory
 }
 
 // New assembles the App: gin engine, routes, and loads existing channels.
@@ -72,7 +67,6 @@ func New(cfg Config) (*App, error) {
 		logger:       logger,
 		homes:        make(map[channel.ID]*platform.Home),
 		channelDBDir: cfg.ChannelDBDir,
-		agentFactory: cfg.AgentFactory,
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -239,26 +233,26 @@ func (a *App) spawnBuiltinAgent(chID channel.ID, home *platform.Home) {
 	}}
 
 	var impl actorrt.Actor
-	if a.agentFactory != nil {
-		built, err := a.agentFactory(chID, builtinAgentID, pen)
+	if a.agentOverride != nil {
+		// TEST-ONLY injection (export_test.go). Never set in production.
+		built, err := a.agentOverride(chID, builtinAgentID, pen)
 		if err != nil {
-			a.logger.Warn("app: agent factory failed", "channel", string(chID), "err", err.Error())
+			a.logger.Warn("app: agent override failed", "channel", string(chID), "err", err.Error())
 			return
 		}
 		impl = built
 	} else {
-		cfg, err := kimiagent.NewConfigFromEnv(kimiagent.BuildSystemPrompt(
-			kimiagent.Situation{Host: "server"},
-			os.Getenv(kimiagent.EnvKeyChannelType), os.Getenv(kimiagent.EnvKeyDomainPrompt)))
+		// Production: build the channel's agent from the actor catalog — same
+		// source as the daemon (registry.Build("agent")). A server carries no
+		// workspace, so Deps.WorkspaceDir is empty → the agent decl derives the
+		// server-embedded Situation. No creds / not applicable → no built-in agent
+		// (the channel runs the group-chat policy); never fatal.
+		decl, err := registry.Build("agent", registry.Deps{ChannelID: chID, Logger: a.logger})
 		if err != nil {
-			return // no LLM credentials on this server — no built-in agent
-		}
-		bridge, err := kimiagent.NewBridge(cfg, builtinAgentID, chID, pen)
-		if err != nil {
-			a.logger.Warn("app: builtin agent build failed", "channel", string(chID), "err", err.Error())
+			a.logger.Debug("app: no built-in agent", "channel", string(chID), "reason", err.Error())
 			return
 		}
-		impl = bridge
+		impl = decl.Factory(pen)
 	}
 
 	if err := home.Spawn(context.Background(), builtinAgentID, actor.KindAgent, impl); err != nil {
