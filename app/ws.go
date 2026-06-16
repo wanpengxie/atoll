@@ -8,6 +8,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/ActOS/app/internal/middleware"
+	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 )
 
@@ -63,10 +64,9 @@ func (a *App) handleWS(c *gin.Context) {
 	defer cancel()
 
 	cursor := sub.SinceSeq
-	gw := homeGateway(chID, home)
 
 	// Initial backfill.
-	a.wsSendMessages(ws, gw, chID, &cursor)
+	a.wsSendMessages(ws, home, chID, &cursor)
 
 	// Tail loop.
 	ctx := c.Request.Context()
@@ -78,14 +78,14 @@ func (a *App) handleWS(c *gin.Context) {
 			if !ok {
 				return
 			}
-			a.wsSendMessages(ws, gw, chID, &cursor)
+			a.wsSendMessages(ws, home, chID, &cursor)
 		}
 	}
 }
 
-func (a *App) wsSendMessages(ws *websocket.Conn, gw gateway, chID channel.ID, cursor *int64) {
+func (a *App) wsSendMessages(ws *websocket.Conn, home *platform.Home, chID channel.ID, cursor *int64) {
 	for {
-		rows, err := gw.ListMessages(context.Background(), *cursor, 100)
+		rows, err := home.View().ReadAfterSeq(context.Background(), *cursor, 100)
 		if err != nil || len(rows) == 0 {
 			return
 		}

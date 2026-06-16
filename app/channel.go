@@ -394,7 +394,6 @@ func (a *App) handleSendMessage(c *gin.Context) {
 		kind = message.KindRequest
 	}
 
-	gw := homeGateway(channel.ID(chID), home)
 	channelID := channel.ID(chID)
 
 	// App layer owns product decisions: sender kind, TTL, envelope shape.
@@ -410,7 +409,7 @@ func (a *App) handleSendMessage(c *gin.Context) {
 		ActorID:   senderID,
 		ChannelID: channelID,
 	})
-	res, err := gw.SendMessage(ctx, env)
+	res, err := home.Gate().Write(ctx, env)
 	if err != nil {
 		a.logger.Error("send message", "channel", chID, "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
