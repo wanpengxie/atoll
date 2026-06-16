@@ -137,7 +137,6 @@ func (a *App) registerRoutes() {
 
 		api.GET("/workspaces/:wsID/channels", a.handleListChannels)
 		api.POST("/workspaces/:wsID/channels", a.handleCreateChannel)
-		api.POST("/workspaces/:wsID/channels/:chID/bind", a.handleBindChannel)
 
 		api.GET("/channels/:chID", a.handleGetChannel)
 		api.DELETE("/channels/:chID", a.handleDeleteChannel)

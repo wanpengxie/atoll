@@ -117,37 +117,6 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	})
 }
 
-func (a *App) handleBindChannel(c *gin.Context) {
-	chID := c.Param("chID")
-	var req struct {
-		DaemonID string `json:"daemon_id"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.DaemonID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "daemon_id required"})
-		return
-	}
-
-	userID := middleware.UserID(c)
-	var ownerID string
-	err := a.db.QueryRowContext(c.Request.Context(),
-		`SELECT owner_id FROM daemons WHERE id = ?`, req.DaemonID,
-	).Scan(&ownerID)
-	if err != nil || ownerID != userID {
-		c.JSON(http.StatusForbidden, gin.H{"error": "daemon not found or not owned by you"})
-		return
-	}
-
-	_, err = a.db.ExecContext(c.Request.Context(),
-		`INSERT OR IGNORE INTO daemon_channels (daemon_id, channel_id) VALUES (?,?)`,
-		req.DaemonID, chID,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "bind failed"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
-}
-
 func (a *App) handleGetChannel(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {

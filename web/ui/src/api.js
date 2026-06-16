@@ -80,11 +80,6 @@ export const api = {
   createWorkspace:  (name)                      => request('POST', '/api/workspaces', { name }),
   listChannels:     (wsID)                      => request('GET',  `/api/workspaces/${wsID}/channels`),
   createChannel:    (wsID, name, type = 'group') => request('POST', `/api/workspaces/${wsID}/channels`, { name, type }),
-  // Bind a channel to a daemon — reserves placement and sends the
-  // control.create_channel frame; daemon ACKs and placement flips to
-  // active. Must be called after createChannel before any message can
-  // be written into the channel.
-  bindChannel:      (wsID, chID, daemonID) => request('POST', `/api/workspaces/${wsID}/channels/${chID}/bind`, { daemon_id: daemonID }),
   getChannel:       (chID)                      => request('GET',  `/api/channels/${chID}`),
   deleteChannel:    (chID)                      => request('DELETE', `/api/channels/${chID}`),
   listMembers:      (chID)                      => request('GET',  `/api/channels/${chID}/members`).then((r) => ({ members: r.members || [] })),
