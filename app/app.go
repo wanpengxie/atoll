@@ -263,7 +263,16 @@ func (a *App) spawnBuiltinAgent(chID channel.ID, home *platform.Home) {
 
 	if err := home.Spawn(context.Background(), builtinAgentID, actor.KindAgent, impl); err != nil {
 		a.logger.Warn("app: builtin agent spawn failed", "channel", string(chID), "err", err.Error())
+		return
 	}
+	// An agent was actually assembled into this channel → set default_agent so the
+	// channel runs the agent-centric routing policy (no-audience → the agent).
+	// Channels with NO assembled agent keep default_agent empty and run the
+	// group-chat policy instead (handleSendMessage). IS NULL guard never clobbers
+	// an already-set / switched pointer on reload.
+	_, _ = a.db.ExecContext(context.Background(),
+		`UPDATE channels SET default_agent = ? WHERE id = ? AND default_agent IS NULL`,
+		string(builtinAgentID), string(chID))
 }
 
 // callerStampedWriter wraps the home write gate with a fixed CallerContext so an

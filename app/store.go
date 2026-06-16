@@ -55,6 +55,7 @@ func migrate(db *sql.DB) error {
 			name TEXT NOT NULL,
 			type TEXT NOT NULL DEFAULT 'group',
 			db_path TEXT NOT NULL,
+			default_agent TEXT,
 			created_at INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS daemons (
@@ -81,5 +82,9 @@ func migrate(db *sql.DB) error {
 	for _, col := range []string{"status", "hostname", "platform", "last_heartbeat"} {
 		_, _ = db.Exec(`ALTER TABLE daemons DROP COLUMN ` + col)
 	}
+	// channels.default_agent: set only when an agent is assembled into the channel
+	// (see app.spawnBuiltinAgent). Empty = no designated brain = the channel runs
+	// the group-chat routing policy. Best-effort add for an existing dev DB.
+	_, _ = db.Exec(`ALTER TABLE channels ADD COLUMN default_agent TEXT`)
 	return nil
 }

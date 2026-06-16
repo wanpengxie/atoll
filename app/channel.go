@@ -122,18 +122,18 @@ func (a *App) handleGetChannel(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var id, workspaceID, name, chType string
+	var id, workspaceID, name, chType, defaultAgent string
 	var createdAt int64
 	err := a.db.QueryRowContext(c.Request.Context(),
-		`SELECT id, workspace_id, name, type, created_at FROM channels WHERE id = ?`, chID,
-	).Scan(&id, &workspaceID, &name, &chType, &createdAt)
+		`SELECT id, workspace_id, name, type, COALESCE(default_agent, ''), created_at FROM channels WHERE id = ?`, chID,
+	).Scan(&id, &workspaceID, &name, &chType, &defaultAgent, &createdAt)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{
 		"id": id, "workspace_id": workspaceID, "name": name,
-		"type": chType, "created_at": createdAt,
+		"type": chType, "default_agent": defaultAgent, "created_at": createdAt,
 	})
 }
 
@@ -341,26 +341,29 @@ func (a *App) handleSendMessage(c *gin.Context) {
 		audience = append(audience, actor.ActorID(a))
 	}
 
-	// Product decision: no explicit audience → send to channel's agent (kind=request).
+	// No explicit audience → the channel's routing policy decides, selected by
+	// whether a default_agent is assembled:
+	//   • default_agent set  → agent-centric channel: route to the agent (request).
+	//   • default_agent empty → group-chat channel: broadcast to all human members
+	//     (event). The agent is NOT a default recipient here; it participates only
+	//     when explicitly @-addressed (path 1).
 	kind := message.Kind(req.Kind)
 	if len(audience) == 0 {
-		actors, _ := home.View().ListActors(c.Request.Context())
-		var agents []actor.ActorID
-		for _, a := range actors {
-			if a.Kind == actor.KindAgent {
-				agents = append(agents, a.ID)
+		var da string
+		_ = a.db.QueryRowContext(c.Request.Context(),
+			`SELECT COALESCE(default_agent, '') FROM channels WHERE id = ?`, chID).Scan(&da)
+		if da != "" {
+			audience = []actor.ActorID{actor.ActorID(da)}
+			kind = message.KindRequest
+		} else {
+			actors, _ := home.View().ListActors(c.Request.Context())
+			for _, ac := range actors {
+				if ac.Kind == actor.KindHuman {
+					audience = append(audience, ac.ID)
+				}
 			}
+			kind = message.KindEvent
 		}
-		if len(agents) == 0 {
-			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "no agent in this channel"})
-			return
-		}
-		if len(agents) > 1 {
-			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": "multiple agents in channel, specify audience"})
-			return
-		}
-		audience = agents
-		kind = message.KindRequest
 	}
 
 	channelID := channel.ID(chID)
