@@ -1,4 +1,4 @@
-package kimiagent_test
+package kimi_test
 
 // hosting_test pins the spec's dual-host acceptance: the SAME Bridge package
 // passes the SAME behavior assertions when hosted as an in-process cell on a
@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/actors/kimiagent"
+	"github.com/wanpengxie/ActOS/agent/provider/kimi"
 	"github.com/wanpengxie/ActOS/lib/introspect"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -43,12 +43,12 @@ func newCellHost(t *testing.T) *cellHost {
 	t.Helper()
 	w := &recordingWriter{}
 	rt, del := actorrt.New(actorrt.Config{})
-	b, err := kimiagent.NewBridge(testConfig(), testActorID, testChannelID, w)
+	b, err := kimi.NewBridge(testConfig(), testActorID, testChannelID, w)
 	if err != nil {
 		t.Fatalf("cell host: NewBridge: %v", err)
 	}
-	var bb *kimiagent.Bridge = b
-	kimiagent.SetAgentFactory(b, func(kimiagent.AgentConfig) (kimiagent.Agent, error) {
+	var bb *kimi.Bridge = b
+	kimi.SetAgentFactory(b, func(kimi.AgentConfig) (kimi.Agent, error) {
 		return scriptTextTurn(&bb, "parity reply"), nil
 	})
 	rt.Spawn(testActorID, b)
@@ -100,13 +100,13 @@ func newDaemonHost(t *testing.T) *daemonHost {
 	rt, del := actorrt.New(actorrt.Config{})
 	dh.rt, dh.del = rt, del
 	pen := &daemonPen{dh: dh}
-	var b *kimiagent.Bridge
-	bb, err := kimiagent.NewBridge(testConfig(), testActorID, testChannelID, pen)
+	var b *kimi.Bridge
+	bb, err := kimi.NewBridge(testConfig(), testActorID, testChannelID, pen)
 	if err != nil {
 		t.Fatalf("daemon host: NewBridge: %v", err)
 	}
 	b = bb
-	kimiagent.SetAgentFactory(bb, func(kimiagent.AgentConfig) (kimiagent.Agent, error) {
+	kimi.SetAgentFactory(bb, func(kimi.AgentConfig) (kimi.Agent, error) {
 		return scriptTextTurn(&b, "parity reply"), nil
 	})
 	rt.Spawn(testActorID, bb)

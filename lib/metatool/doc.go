@@ -39,7 +39,7 @@
 //
 // This package is pure Go + protocol/message + introspect + behavior/harness
 // (the write door + author#2 it drives) — it never imports go-kimi or any
-// LLM-SDK types. The go-kimi binding layer lives in actors/kimiagent, which holds
+// LLM-SDK types. The go-kimi binding layer lives in agent/provider/kimi, which holds
 // one Shell, feeds responses into Shell.Deliver from its non-blocking Receive,
 // and materialises ResultValue into go-kimi types.ToolResult values.
 package metatool

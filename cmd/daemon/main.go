@@ -21,15 +21,20 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/wanpengxie/ActOS/actors/registry"
 	"github.com/wanpengxie/ActOS/cmd/internal/dotenv"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/channel"
+	"github.com/wanpengxie/ActOS/registry"
 
 	// actors/all blank-imports every in-tree self-registering actor package (its
 	// init() registers a decl). The import list is hand-maintained there; adding
 	// an in-tree actor = one line in actors/all, never here.
 	_ "github.com/wanpengxie/ActOS/actors/all"
+	// The agent subsystem (agent/all) is deliberately NOT imported here: the daemon
+	// hosts only TOOL/DEVICE classes; the channel orchestrator is server-placed, and
+	// no daemon-side path builds the "agent" class. Importing agent/all would link
+	// the LLM engine SDKs into the daemon binary for no consumer (substrate-purity
+	// 铁律 #4). Wire it in only if a daemon-delivered agent build path actually lands.
 )
 
 // channelFromServerURL extracts the ?channel= query from the server WS URL.
@@ -91,16 +96,14 @@ func main() {
 
 	// Day-0 daemon composition (actor-instance-model §6/§7): the fat daemon hosts
 	// its compiled TOOL/DEVICE classes — one default instance each
-	// (InstanceSpec{} → class default id). It does NOT host the "agent" class:
-	// the channel's orchestrator is server-placed (agent:boost); a daemon-hosted
-	// agent is a per-channel composition decision delivered from the server
-	// (additive, not day-0) — never a CLI flag. This is what removes the old
-	// agent:main double-build.
+	// (InstanceSpec{} → class default id). The agent subsystem is NOT compiled into
+	// the daemon (it imports actors/all only, never agent/all), so registry.Classes()
+	// yields only TOOL/DEVICE classes here: the channel's orchestrator is
+	// server-placed (agent:boost); a daemon-hosted agent would be a per-channel
+	// composition decision delivered from the server (additive, not day-0) — never a
+	// CLI flag. This is what removes the old agent:main double-build.
 	var decls []platform.ActorDecl
 	for _, class := range registry.Classes() {
-		if class == "agent" {
-			continue // agent is server-placed; not in the daemon's default set
-		}
 		decl, berr := registry.Build(class, registry.InstanceSpec{}, deps)
 		if berr != nil {
 			log.Fatalf("daemon: %v", berr)

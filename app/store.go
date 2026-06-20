@@ -93,7 +93,23 @@ func migrate(db *sql.DB) error {
 			class       TEXT NOT NULL,
 			config_json TEXT,
 			placement   TEXT NOT NULL DEFAULT 'server',
+			state       TEXT,
 			PRIMARY KEY(channel_id, instance_id)
+		);
+		-- agents: global agent declarations (agent-spec §二). One row per agent,
+		-- cross-channel (key = id). 'looper' picks the engine (go-kimi / claude);
+		-- the agent class selects the looper engine by it. config_json = the global
+		-- identity body + engine knobs, layered UNDER channel_actors' per-channel
+		-- config_json. Distinct from users (responsibility owner, never an agent).
+		CREATE TABLE IF NOT EXISTS agents (
+			id          TEXT PRIMARY KEY,
+			name        TEXT NOT NULL,
+			owner       TEXT NOT NULL REFERENCES users(id),
+			looper      TEXT NOT NULL,
+			config_json TEXT,
+			deleted_at  INTEGER,
+			created_at  INTEGER NOT NULL,
+			updated_at  INTEGER NOT NULL
 		);
 	`)
 	if err != nil {
@@ -115,6 +131,11 @@ func migrate(db *sql.DB) error {
 	// channel_actors.placement: best-effort add for a DB whose channel_actors was
 	// created before the column existed (a fresh CREATE above already has it).
 	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN placement TEXT NOT NULL DEFAULT 'server'`)
+
+	// channel_actors.state: per-instance looper-opaque checkpoint slot (durable
+	// resume; agent-spec §二/§三). The looper is its only author — external
+	// control never writes it directly. additive best-effort add for a dev DB.
+	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN state TEXT`)
 
 	// Backfill existing channels to the composition model (don't clear data):
 	//   1. seed an agent:boost row for any channel that lacks ONE (not just

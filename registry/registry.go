@@ -22,6 +22,21 @@ type Deps struct {
 	WorkspaceDir string     // workspace root (device / agent situation facts)
 	DeviceName   string     // device identity (for the device class's id)
 	Logger       *slog.Logger
+
+	// State is the durable per-instance state slot (agent-spec §二/§三): a
+	// platform-managed session dir + an opaque checkpoint blob
+	// (channel_actors.state) the looper alone authors. Zero value = no durable
+	// state (ephemeral working session). The agent is its first consumer.
+	State StateSlot
+}
+
+// StateSlot is one actor instance's durable state seam. coagent NEVER interprets
+// the blob — it only persists and replays it (agent-spec §三); the looper is the
+// blob's only author.
+type StateSlot struct {
+	Dir   string                      // platform-managed durable session dir ("" = ephemeral)
+	Seed  json.RawMessage             // last persisted opaque checkpoint, read at boot
+	Store func(json.RawMessage) error // persist a looper-authored checkpoint
 }
 
 // InstanceSpec is one actor instance's deployment params: its id and opaque
@@ -56,7 +71,7 @@ func Register(class string, c Constructor) {
 	mu.Lock()
 	defer mu.Unlock()
 	if _, dup := reg[class]; dup {
-		panic("actors/registry: duplicate class registration: " + class)
+		panic("registry: duplicate class registration: " + class)
 	}
 	reg[class] = c
 }
@@ -89,11 +104,11 @@ func Build(class string, spec InstanceSpec, ctx Deps) (platform.ActorDecl, error
 	c, found := reg[class]
 	mu.RUnlock()
 	if !found {
-		return platform.ActorDecl{}, fmt.Errorf("actors/registry: unknown class %q (registered: %v)", class, Classes())
+		return platform.ActorDecl{}, fmt.Errorf("registry: unknown class %q (registered: %v)", class, Classes())
 	}
 	decl, err := c(spec, ctx)
 	if err != nil {
-		return platform.ActorDecl{}, fmt.Errorf("actors/registry: build %q: %w", class, err)
+		return platform.ActorDecl{}, fmt.Errorf("registry: build %q: %w", class, err)
 	}
 	return decl, nil
 }

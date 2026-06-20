@@ -1,4 +1,4 @@
-package kimiagent
+package kimi
 
 import (
 	"fmt"

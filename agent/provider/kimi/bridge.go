@@ -21,10 +21,11 @@
 //     builds requests via behavior.BuildRequest, Arms author#2, emits, and
 //     waits a bounded fast-path window for the sync experience the model's
 //     training distribution expects).
-package kimiagent
+package kimi
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -105,12 +106,34 @@ type Config struct {
 
 	// NowFn returns unix-ms. Defaults to time.Now.UnixMilli.
 	NowFn func() int64
+
+	// ResumeSeed is the last persisted opaque checkpoint for this
+	// (agent, channel) — the durable state slot's blob (channel_actors.state).
+	// kimiagent treats it as a go-kimi session id to pin on boot; empty = fresh
+	// (fall back to the WorkDir's last-session inference).
+	ResumeSeed json.RawMessage
+
+	// Checkpoint persists a looper-authored blob back to the durable state slot.
+	// kimiagent writes its resolved session id; nil = no durable slot (the cell
+	// still resumes via a durable WorkDir, the slot is just not recorded).
+	Checkpoint func(json.RawMessage) error
 }
 
-// NewConfigFromEnv populates a Config from the documented env vars.
-// Returns an error when a required field (KIMI_API_KEY) is missing,
-// so the host can surface a clean fail-fast at assembly time.
+// NewConfigFromEnv populates a Config from the documented env vars (the
+// platform defaults / the server fallback agent's key). Equivalent to
+// NewConfigFromSpec with no per-instance overlay.
 func NewConfigFromEnv(systemPrompt string) (Config, error) {
+	return NewConfigFromSpec(nil, systemPrompt)
+}
+
+// NewConfigFromSpec builds a Config from the platform env DEFAULTS, then
+// overlays the per-instance spec.Config (channel_actors.config_json — an opaque
+// blob the looper SELF-PARSES; coagent imposes no config structure, agent-spec
+// §三). An agent's own config can fully supply creds (a user agent carrying its
+// own key) or just override a knob (model); env is the fallback the server's
+// boost agent rides. A required field (APIKey / Model) missing from BOTH is a
+// hard error, so the host fails fast at assembly time.
+func NewConfigFromSpec(raw json.RawMessage, systemPrompt string) (Config, error) {
 	cfg := Config{
 		APIKey:       strings.TrimSpace(os.Getenv(EnvKeyAPIKey)),
 		BaseURL:      strings.TrimSpace(os.Getenv(EnvKeyBaseURL)),
@@ -118,11 +141,34 @@ func NewConfigFromEnv(systemPrompt string) (Config, error) {
 		ProviderType: "anthropic",
 		SystemPrompt: systemPrompt,
 	}
+	if len(raw) > 0 {
+		var overlay struct {
+			Model        string `json:"model"`
+			BaseURL      string `json:"base_url"`
+			APIKey       string `json:"api_key"`
+			ProviderType string `json:"provider_type"`
+		}
+		if err := json.Unmarshal(raw, &overlay); err != nil {
+			return Config{}, fmt.Errorf("kimi: parse spec config: %w", err)
+		}
+		if overlay.Model != "" {
+			cfg.Model = overlay.Model
+		}
+		if overlay.BaseURL != "" {
+			cfg.BaseURL = overlay.BaseURL
+		}
+		if overlay.APIKey != "" {
+			cfg.APIKey = overlay.APIKey
+		}
+		if overlay.ProviderType != "" {
+			cfg.ProviderType = overlay.ProviderType
+		}
+	}
 	if cfg.APIKey == "" {
-		return Config{}, fmt.Errorf("kimi: %s env required for the kimi provider", EnvKeyAPIKey)
+		return Config{}, fmt.Errorf("kimi: %s env or config api_key required for the kimi provider", EnvKeyAPIKey)
 	}
 	if cfg.Model == "" {
-		return Config{}, fmt.Errorf("kimi: %s env required (pick a deepseek model id from your provider)", EnvKeyModel)
+		return Config{}, fmt.Errorf("kimi: %s env or config model required (pick a deepseek model id)", EnvKeyModel)
 	}
 	return cfg, nil
 }
@@ -251,6 +297,10 @@ func (b *Bridge) Start(ctx context.Context, _ actorrt.ActorContext) error {
 	if err != nil {
 		return err
 	}
+	// Record the resolved session id into the durable state slot (auditable,
+	// resettable pointer). Best-effort: the bytes already live in the durable
+	// WorkDir; this writes the platform-controlled mirror.
+	b.checkpointSession()
 
 	// The shell owns the outbound request lifecycle (build + Arm author#2 +
 	// emit + correlate). author#2 arms a caller-scoped timeout terminal per
@@ -373,9 +423,15 @@ func (b *Bridge) Receive(ctx context.Context, env *message.Envelope) error {
 // history Restore lands on the right session; otherwise go-kimi creates
 // one.
 func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (kimiAgent, error) {
-	sessionID := ""
-	if sess, err := kimisession.Continue(b.cfg.WorkDir); err == nil && sess != nil {
-		sessionID = sess.ID
+	// Resume order: the durable state slot (channel_actors.state) wins over fs
+	// inference — the slot is the auditable, platform-controlled pointer; the
+	// WorkDir's last-session file is its local mirror. Empty seed → infer from
+	// the (durable) WorkDir.
+	sessionID := strings.TrimSpace(string(b.cfg.ResumeSeed))
+	if sessionID == "" {
+		if sess, err := kimisession.Continue(b.cfg.WorkDir); err == nil && sess != nil {
+			sessionID = sess.ID
+		}
 	}
 	return b.agentNew(gokimi.AgentConfig{
 		WorkDir:         b.cfg.WorkDir,
@@ -397,6 +453,24 @@ func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (ki
 			Model:        b.cfg.Model,
 		},
 	})
+}
+
+// checkpointSession writes the current go-kimi session id into the durable
+// state slot (agent-spec §三). The looper is the slot's only author; coagent
+// stores the bytes opaquely. No-op when there is no slot (Checkpoint nil) or no
+// resolved session yet (a brand-new agent records on a later boot, once its
+// session exists in the durable WorkDir).
+func (b *Bridge) checkpointSession() {
+	if b.cfg.Checkpoint == nil {
+		return
+	}
+	sess, err := kimisession.Continue(b.cfg.WorkDir)
+	if err != nil || sess == nil || sess.ID == "" {
+		return
+	}
+	if err := b.cfg.Checkpoint(json.RawMessage(sess.ID)); err != nil {
+		slog.Default().Warn("agent.checkpoint_session", "id", string(b.self), "err", err)
+	}
 }
 
 // buildProvider hands a fully-configured llm.ChatProvider to

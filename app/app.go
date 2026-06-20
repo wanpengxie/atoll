@@ -11,17 +11,18 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/wanpengxie/ActOS/actors/registry"
 	"github.com/wanpengxie/ActOS/app/internal/middleware"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/ActOS/registry"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
@@ -135,6 +136,14 @@ func (a *App) registerRoutes() {
 		api.GET("/channels/:chID/messages", a.handleListMessages)
 		api.POST("/channels/:chID/messages", a.handleSendMessage)
 
+		// §五 创建与控制: a user's agents (global declaration) + introduce / restart.
+		api.GET("/agents", a.handleListAgents)
+		api.POST("/agents", a.handleCreateAgent)
+		api.PATCH("/agents/:agentID", a.handleUpdateAgent)
+		api.DELETE("/agents/:agentID", a.handleDeleteAgent)
+		api.POST("/agents/:agentID/restart", a.handleRestartAgent)
+		api.POST("/channels/:chID/agents", a.handleIntroduceAgent)
+
 		api.GET("/daemons", a.handleListDaemons)
 		api.POST("/daemons", a.handleCreateDaemon)
 		api.DELETE("/daemons/:id", a.handleDeleteDaemon)
@@ -235,10 +244,18 @@ const (
 // a CallerContext on). Server placement: Deps carries NO WorkspaceDir, so the
 // agent class derives the server-embedded Situation.
 func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
-	type instanceSpec struct{ id, class, cfg string }
+	type instanceSpec struct{ id, class, cfg, state, looper, gcfg string }
 	var specs []instanceSpec
+	// LEFT JOIN agents: for an agent instance (instance_id = 'agent:'||agents.id)
+	// pull the global looper + global config (agent-spec §二). A row without a
+	// matching agents declaration (e.g. the seeded fallback agent:boost) gets an
+	// empty looper → the go-kimi default; non-agent classes never match the join.
 	rows, err := a.db.Query(
-		`SELECT instance_id, class, COALESCE(config_json, '') FROM channel_actors WHERE channel_id = ? AND placement = ?`,
+		`SELECT ca.instance_id, ca.class, COALESCE(ca.config_json, ''), COALESCE(ca.state, ''),
+		        COALESCE(a.looper, ''), COALESCE(a.config_json, '')
+		   FROM channel_actors ca
+		   LEFT JOIN agents a ON ca.instance_id = 'agent:' || a.id
+		  WHERE ca.channel_id = ? AND ca.placement = ?`,
 		string(chID), placementServer)
 	if err != nil {
 		a.logger.Error("app: read composition", "channel", string(chID), "err", err)
@@ -246,20 +263,62 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 	}
 	for rows.Next() {
 		var s instanceSpec
-		if err := rows.Scan(&s.id, &s.class, &s.cfg); err != nil {
+		if err := rows.Scan(&s.id, &s.class, &s.cfg, &s.state, &s.looper, &s.gcfg); err != nil {
 			continue
 		}
 		specs = append(specs, s)
 	}
 	rows.Close()
 
+	// Durable per-instance session dirs live under the data root (sibling of the
+	// channel DBs), platform-managed so a looper's opaque session survives a
+	// restart — keystone: durable state in a platform-controlled area, not a tmp
+	// dir or the user's home (agent-spec §四).
+	sessionsRoot := filepath.Join(filepath.Dir(a.channelDBDir), "agent-sessions")
+
 	for _, s := range specs {
+		inst := s.id // bind for the checkpoint closure
+		dir := filepath.Join(sessionsRoot, pathSafe(string(chID)), pathSafe(inst))
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			a.logger.Warn("app: session dir", "channel", string(chID), "instance", inst, "err", err.Error())
+			dir = "" // fall back to the looper's ephemeral default
+		}
+		// store persists a looper-authored opaque checkpoint into the state slot.
+		// The looper is the slot's ONLY author (agent-spec §三).
+		store := func(blob json.RawMessage) error {
+			_, err := a.db.Exec(
+				`UPDATE channel_actors SET state = ? WHERE channel_id = ? AND instance_id = ?`,
+				string(blob), string(chID), inst)
+			return err
+		}
+		cfg := mergeConfig(s.gcfg, s.cfg)
+		if s.class == "agent" {
+			// DSN pattern: the generic registry stays kind-neutral (no looper
+			// field); the agent's engine selector rides in the opaque config and
+			// the "agent" class unpacks it (the engine sub-config ignores it). A
+			// non-object config is rejected — skip the instance, don't build a
+			// looper from a malformed config.
+			withL, werr := withLooper(cfg, s.looper)
+			if werr != nil {
+				a.logger.Warn("app: agent config rejected; not building looper", "channel", string(chID), "instance", inst, "err", werr.Error())
+				continue
+			}
+			cfg = withL
+		}
 		decl, err := registry.Build(s.class, registry.InstanceSpec{
-			ID:     actor.ActorID(s.id),
-			Config: json.RawMessage(s.cfg),
-		}, registry.Deps{ChannelID: chID, Logger: a.logger})
+			ID:     actor.ActorID(inst),
+			Config: cfg,
+		}, registry.Deps{
+			ChannelID: chID,
+			Logger:    a.logger,
+			State: registry.StateSlot{
+				Dir:   dir,
+				Seed:  json.RawMessage(s.state),
+				Store: store,
+			},
+		})
 		if err != nil {
-			a.logger.Debug("app: composition instance not built", "channel", string(chID), "instance", s.id, "reason", err.Error())
+			a.logger.Debug("app: composition instance not built", "channel", string(chID), "instance", inst, "reason", err.Error())
 			continue
 		}
 		pen := &callerStampedWriter{inner: home.Gate(), caller: harness.CallerContext{
@@ -270,6 +329,75 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 			a.logger.Warn("app: spawn composition instance failed", "channel", string(chID), "instance", string(decl.ID), "err", err.Error())
 		}
 	}
+}
+
+// pathSafe maps an actor/channel id to a filesystem-safe path segment (ids may
+// carry ':' like "agent:boost").
+func pathSafe(s string) string {
+	return strings.NewReplacer(":", "-", "/", "_", "\\", "_").Replace(s)
+}
+
+// withLooper packs the agent's engine selector (agents.looper) into the opaque
+// config the registry hands the "agent" class — the DSN pattern that keeps the
+// generic registry kind-neutral (no looper field). The agent class unpacks the
+// looper; the engine sub-config (kimi / claudecode) ignores the extra key.
+//
+// The config MUST be a JSON object (or empty) — that is the container the looper
+// key rides in. A non-object config (array / string / number) is a HARD error:
+// silently coercing it into a map would drop the caller's whole payload. The
+// caller refuses to build the looper on error (no instance from a malformed
+// config). JSON null is treated as empty.
+func withLooper(cfg json.RawMessage, looper string) (json.RawMessage, error) {
+	m := map[string]json.RawMessage{}
+	if len(cfg) > 0 {
+		if err := json.Unmarshal(cfg, &m); err != nil {
+			return nil, fmt.Errorf("agent config must be a JSON object: %w", err)
+		}
+	}
+	if m == nil {
+		// JSON null unmarshals a map to nil (not a no-op) — reset to an empty
+		// object so the looper key can be packed; null == "no config".
+		m = map[string]json.RawMessage{}
+	}
+	lv, _ := json.Marshal(looper)
+	m["looper"] = lv
+	out, err := json.Marshal(m)
+	if err != nil {
+		return nil, fmt.Errorf("agent config: re-marshal: %w", err)
+	}
+	return out, nil
+}
+
+// mergeConfig layers the per-channel config_json OVER the global agents config
+// (agent-spec §二: one config, two layers). Shallow object merge — channel keys
+// win. Empty / non-object inputs degrade gracefully (a raw per-channel blob is
+// preserved as-is so a non-agent class still gets its config_json).
+func mergeConfig(global, perChannel string) json.RawMessage {
+	gl := strings.TrimSpace(global)
+	pc := strings.TrimSpace(perChannel)
+	g := map[string]any{}
+	c := map[string]any{}
+	gObj := gl != "" && json.Unmarshal([]byte(gl), &g) == nil
+	cObj := pc != "" && json.Unmarshal([]byte(pc), &c) == nil
+	// Two-layer shallow merge ONLY when both are JSON objects (channel keys win).
+	if gObj && cObj {
+		for k, v := range c {
+			g[k] = v
+		}
+		if out, err := json.Marshal(g); err == nil {
+			return out
+		}
+	}
+	// Otherwise the per-channel blob is the more-specific layer — preserve it
+	// verbatim (never silently drop a non-object per-channel config); fall back
+	// to the global blob. [codex P2]
+	if pc != "" {
+		return json.RawMessage(pc)
+	}
+	if gl != "" {
+		return json.RawMessage(gl)
+	}
+	return nil
 }
 
 // callerStampedWriter wraps the home write gate with a fixed CallerContext so an

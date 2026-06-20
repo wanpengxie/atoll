@@ -1,11 +1,12 @@
 module github.com/wanpengxie/ActOS
 
-go 1.25.0
+go 1.25.7
 
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/wanpengxie/go-claude-agent-sdk v0.0.0-20260529113355-8ae69e5ccb9b
 	github.com/wanpengxie/go-kimi v1.0.1-0.20260526075941-a6d962d17cbe
 	golang.org/x/crypto v0.51.0
 	modernc.org/sqlite v1.50.1
@@ -21,6 +22,7 @@ require (
 	github.com/bytedance/sonic v1.15.0 // indirect
 	github.com/bytedance/sonic/loader v0.5.0 // indirect
 	github.com/cloudwego/base64x v0.1.6 // indirect
+	github.com/creack/pty v1.1.24 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
 	github.com/gabriel-vasile/mimetype v1.4.12 // indirect
 	github.com/gin-contrib/sse v1.1.0 // indirect

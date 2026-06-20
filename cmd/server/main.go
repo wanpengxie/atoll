@@ -13,9 +13,9 @@ import (
 	// Composition root wires the catalog: the server-embedded agent (agent:boost)
 	// is built via registry.Build("agent"), so the BINARY pins which "agent" impl
 	// is compiled in — not the app library (which stays agent-impl-agnostic, so
-	// `go test ./app` can register its own stub). Same pattern as cmd/daemon
-	// importing actors/all.
-	_ "github.com/wanpengxie/ActOS/actors/kimiagent"
+	// `go test ./app` can register its own stub). agent/all aggregates the "agent"
+	// class + its looper engines (go-kimi + claude); actors/ holds no agent.
+	_ "github.com/wanpengxie/ActOS/agent/all"
 )
 
 func main() {

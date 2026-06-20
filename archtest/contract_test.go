@@ -48,6 +48,11 @@ const allowedDir = "lib/introspect"
 // skipDirs are non-Go / vendored / data trees.
 var skipDirs = map[string]bool{
 	".git": true, "node_modules": true, "web": true, "bin": true, ".dalek": true,
+	// .claude holds agent infra (rules/skills) AND nested git worktrees — full
+	// repo copies that would otherwise be walked as if they were source, firing
+	// false layering violations against stale checkouts. No production Go lives
+	// under .claude.
+	".claude": true,
 }
 
 func TestContractShapesLiveOnlyInIntrospect(t *testing.T) {

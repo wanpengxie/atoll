@@ -6,7 +6,7 @@
 // It is built to the adapter-actor-spec.md (§6.3 kimi): two faces, complexity
 // pressed into one stateful actor. Disambiguation: this package (actors/kimi)
 // is the WebBridge that controls a browser extension — it is unrelated to
-// actors/kimiagent, which is a coding agent.
+// agent/provider/kimi, the go-kimi looper engine.
 //
 //   - Inward (channel face): a plain channel actor. Receive(env) serves a SINGLE
 //     request type, kimi.command, answers actor.describe, and emits channel

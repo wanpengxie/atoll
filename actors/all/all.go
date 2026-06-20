@@ -1,6 +1,6 @@
 // Package all blank-imports every in-tree, self-registering actor so ONE daemon
 // binary packages them all (one process hosts all — not one process per actor).
-// Each imported package's init() calls actors/registry.Register; the daemon then
+// Each imported package's init() calls registry.Register; the daemon then
 // builds instances from the catalog via registry.Build(class, spec, ctx).
 //
 // This list is hand-maintained: adding an in-tree actor = add one blank import
@@ -18,6 +18,5 @@ import (
 	_ "github.com/wanpengxie/ActOS/actors/device"
 	_ "github.com/wanpengxie/ActOS/actors/echo"
 	_ "github.com/wanpengxie/ActOS/actors/kimi"
-	_ "github.com/wanpengxie/ActOS/actors/kimiagent"
 	_ "github.com/wanpengxie/ActOS/actors/xhs"
 )

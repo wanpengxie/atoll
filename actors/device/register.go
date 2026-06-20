@@ -3,7 +3,7 @@ package device
 import (
 	"errors"
 
-	"github.com/wanpengxie/ActOS/actors/registry"
+	"github.com/wanpengxie/ActOS/registry"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"

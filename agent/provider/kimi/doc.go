@@ -1,4 +1,4 @@
-// kimiagent is a THIN ADAPTER: go-kimi drives the cognition, a held
+// Package kimi is a THIN ADAPTER: go-kimi drives the cognition, a held
 // metatool.Shell drives the channel calls, and this package only bridges
 // the two — go-kimi wire frames out to envelopes, channel envelopes in to
 // shell.Deliver. It owns no call mechanism of its own (correlation,
@@ -23,4 +23,4 @@
 // Failure path: a single failed-terminal envelope is emitted from the
 // LLM error classifier (see emitTerminalLLMError) carrying the full
 // error description in payload.text + payload.reason bucket.
-package kimiagent
+package kimi

@@ -5,7 +5,7 @@ import (
 	"errors"
 	"time"
 
-	"github.com/wanpengxie/ActOS/actors/registry"
+	"github.com/wanpengxie/ActOS/registry"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
