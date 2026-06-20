@@ -63,3 +63,49 @@ func TestAgentsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 		t.Fatalf("after delete, list = %d, want 0", got)
 	}
 }
+
+// TestSetDefaultAgentAPI exercises the §7.2 "repoint the default brain" endpoint:
+// re-point default_agent to an instance that IS in the channel composition (ok),
+// reject one that is NOT (the pointer may only target a composition member), and
+// clear it. Pairs with the routing failover (boost floor) that consumes it.
+func TestSetDefaultAgentAPI(t *testing.T) {
+	env := setupTestApp(t)
+	_, cookies := register(t, env, "setdef@example.com", "secret123", "Owner")
+	wsBody, cookies := createWorkspace(t, env, cookies, "WS")
+	wsID := wsBody["id"].(string)
+	chBody, cookies := createChannel(t, env, cookies, wsID, "CH")
+	chID := chBody["id"].(string)
+
+	// create + introduce an agent (server placement → live stub, lands in channel_actors)
+	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "Alice", "looper": "go-kimi"}, cookies)
+	assertStatus(t, w, http.StatusCreated)
+	agentID := respJSON(t, w)["id"].(string)
+	instID := "agent:" + agentID
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
+		map[string]any{"agent_id": agentID}, cookies) // not make_default
+	assertStatus(t, w, http.StatusCreated)
+
+	// 1) repoint default_agent to Alice (a composition member) → ok + persisted
+	w = env.do(t, "PUT", fmt.Sprintf("/api/channels/%s/default_agent", chID),
+		map[string]any{"instance_id": instID}, cookies)
+	assertStatus(t, w, http.StatusOK)
+	w = env.do(t, "GET", "/api/channels/"+chID, nil, cookies)
+	assertStatus(t, w, http.StatusOK)
+	if da := respJSON(t, w)["default_agent"]; da != instID {
+		t.Fatalf("default_agent not repointed/persisted: got %v want %s", da, instID)
+	}
+
+	// 2) point at a non-member instance → 400 (pointer must target the composition)
+	w = env.do(t, "PUT", fmt.Sprintf("/api/channels/%s/default_agent", chID),
+		map[string]any{"instance_id": "agent:ghost"}, cookies)
+	assertStatus(t, w, http.StatusBadRequest)
+
+	// 3) clear (empty instance_id) → ok + NULLed
+	w = env.do(t, "PUT", fmt.Sprintf("/api/channels/%s/default_agent", chID),
+		map[string]any{"instance_id": ""}, cookies)
+	assertStatus(t, w, http.StatusOK)
+	w = env.do(t, "GET", "/api/channels/"+chID, nil, cookies)
+	if da := respJSON(t, w)["default_agent"]; da != "" {
+		t.Fatalf("default_agent should be cleared, got %v", da)
+	}
+}

@@ -1,12 +1,14 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -365,14 +367,19 @@ func (a *App) handleSendMessage(c *gin.Context) {
 		audience = append(audience, actor.ActorID(a))
 	}
 
-	// No explicit audience → the channel's routing policy decides. default_agent
-	// is the INTENT pointer; routing resolves it against 现状 (actor_registry):
-	//   • default_agent points at a LIVE member → agent-centric: request to it.
-	//   • else (no pointer, or the pointed agent isn't running — e.g. agent:boost
-	//     with no LLM creds) → group-chat: broadcast to all human members (event).
-	//     The agent participates only when explicitly @-addressed (path 1).
-	// This keeps default_agent host/creds-agnostic (期望) while never routing to a
-	// dead target, and is the §7 failover seam (pointed brain down → fall back).
+	// No explicit audience → the channel's routing policy decides. default_agent is
+	// the INTENT pointer; routing resolves it against 现状 (actor_registry), with the
+	// agent:boost floor as the §7 failover target:
+	//   • da points at a LIVE agent           → agent-centric: request to it.
+	//   • else, channel HAS a boost floor:
+	//       boost live → failover to boost;  boost down → channel CANNOT serve.
+	//   • else (no boost AND no da set)        → group-chat: broadcast to humans.
+	//   • else (no boost, da was set but down) → no reachable brain, no floor.
+	// "cannot serve" / "no brain" surface as an API error to the SENDING user (a
+	// per-request condition) — NOT written as a channel envelope. An introduced
+	// boost floor means the channel is meant to always have a brain, so the dead
+	// branch NEVER silently degrades to group-chat (that is only the boost-less,
+	// default-less channel's intent).
 	kind := message.Kind(req.Kind)
 	if len(audience) == 0 {
 		var da string
@@ -381,31 +388,65 @@ func (a *App) handleSendMessage(c *gin.Context) {
 
 		actors, lerr := home.View().ListActors(c.Request.Context())
 		if lerr != nil {
-			// fail closed: don't silently downgrade agent routing to group-chat on
-			// a transient view failure.
+			// fail closed: don't silently downgrade routing on a transient view failure.
 			a.logger.Error("send message: list actors", "channel", chID, "err", lerr)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			return
 		}
-		agentLive := false
+		daLive := false
 		if da != "" {
 			for _, ac := range actors {
 				if string(ac.ID) == da && ac.Kind == actor.KindAgent {
-					agentLive = true
+					daLive = true
 					break
 				}
 			}
 		}
-		if agentLive {
+		if daLive {
 			audience = []actor.ActorID{actor.ActorID(da)}
 			kind = message.KindRequest
 		} else {
+			boostID := string(defaultAgentInstanceID)
+			boostLive := false
 			for _, ac := range actors {
-				if ac.Kind == actor.KindHuman {
-					audience = append(audience, ac.ID)
+				if string(ac.ID) == boostID && ac.Kind == actor.KindAgent {
+					boostLive = true
+					break
 				}
 			}
-			kind = message.KindEvent
+			hasBoost, berr := a.channelHasInstance(c.Request.Context(), chID, boostID)
+			if berr != nil {
+				a.logger.Error("send message: boost lookup", "channel", chID, "err", berr)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+				return
+			}
+			switch {
+			case hasBoost && boostLive:
+				audience = []actor.ActorID{defaultAgentInstanceID}
+				kind = message.KindRequest
+			case hasBoost:
+				// boost floor introduced but down → channel cannot serve.
+				c.JSON(http.StatusServiceUnavailable, gin.H{
+					"error":  "default agent unavailable",
+					"detail": "the channel's default/fallback agent is down",
+				})
+				return
+			case da == "":
+				// no floor + no default → pure group-chat: broadcast to humans.
+				for _, ac := range actors {
+					if ac.Kind == actor.KindHuman {
+						audience = append(audience, ac.ID)
+					}
+				}
+				kind = message.KindEvent
+			default:
+				// da was set but its brain is down, and no boost floor exists.
+				c.JSON(http.StatusServiceUnavailable, gin.H{
+					"error":  "default agent unavailable",
+					"detail": "the channel's default agent is down and no fallback is configured",
+				})
+				return
+			}
 		}
 	}
 
@@ -447,6 +488,63 @@ func (a *App) handleSendMessage(c *gin.Context) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+type setDefaultAgentReq struct {
+	InstanceID string `json:"instance_id"`
+}
+
+// handleSetDefaultAgent re-points (or clears) a channel's default_agent — the
+// §7.2 "user repoints the brain" entry point (install a daemon agent and make it
+// default, or fail back to agent:boost). The pointer may only target an instance
+// already in the channel's composition (channel_actors); an empty instance_id
+// clears it (→ group-chat when there is no boost floor). Takes effect on the next
+// routed message; it does not hot-reconfigure live cells.
+func (a *App) handleSetDefaultAgent(c *gin.Context) {
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
+	var req setDefaultAgentReq
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "bad request"})
+		return
+	}
+	inst := strings.TrimSpace(req.InstanceID)
+	if inst != "" {
+		has, err := a.channelHasInstance(c.Request.Context(), chID, inst)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		if !has {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "instance not in channel composition"})
+			return
+		}
+	}
+	var val any // empty instance_id → NULL (clear the pointer)
+	if inst != "" {
+		val = inst
+	}
+	if _, err := a.db.ExecContext(c.Request.Context(),
+		`UPDATE channels SET default_agent = ? WHERE id = ?`, val, chID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"channel_id": chID, "default_agent": inst})
+}
+
+// channelHasInstance reports whether instanceID is in the channel's composition
+// (channel_actors) — used to validate a default_agent pointer and to resolve the
+// agent:boost failover floor at routing time.
+func (a *App) channelHasInstance(ctx context.Context, chID, instanceID string) (bool, error) {
+	var n int
+	if err := a.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM channel_actors WHERE channel_id = ? AND instance_id = ?`,
+		chID, instanceID).Scan(&n); err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
 
 // clientRequestTTLMs is the default TTL for client-sent messages (product
 // decision, lives in app layer).

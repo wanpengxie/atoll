@@ -101,6 +101,17 @@ func migrate(db *sql.DB) error {
 		-- the agent class selects the looper engine by it. config_json = the global
 		-- identity body + engine knobs, layered UNDER channel_actors' per-channel
 		-- config_json. Distinct from users (responsibility owner, never an agent).
+		--
+		-- No "scope" column (cognitive-state scope) BY DESIGN — v1 is implicitly
+		-- channel-scoped: each agent's state is per-channel isolated
+		-- (channel_actors.state), NOT shared across channels. entity-scoped (one
+		-- shared memory/persona across an agent's channels = "unified") is v2, added
+		-- additively with the memory subsystem (then: ALTER TABLE ADD COLUMN scope).
+		-- Do NOT read per-channel as permanent truth: the agent IDENTITY is global
+		-- (one row here spans every channel) — only the cognitive STATE is isolated
+		-- in v1. A scope column now would be a single-valued placeholder pointing at
+		-- an unbuilt subsystem (零预留 #4). See actor-instance-model §8.4 (state-root
+		-- scope-key) + agent-spec §二.
 		CREATE TABLE IF NOT EXISTS agents (
 			id          TEXT PRIMARY KEY,
 			name        TEXT NOT NULL,

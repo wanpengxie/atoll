@@ -143,6 +143,7 @@ func (a *App) registerRoutes() {
 		api.DELETE("/agents/:agentID", a.handleDeleteAgent)
 		api.POST("/agents/:agentID/restart", a.handleRestartAgent)
 		api.POST("/channels/:chID/agents", a.handleIntroduceAgent)
+		api.PUT("/channels/:chID/default_agent", a.handleSetDefaultAgent)
 
 		api.GET("/daemons", a.handleListDaemons)
 		api.POST("/daemons", a.handleCreateDaemon)
