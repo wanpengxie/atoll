@@ -173,6 +173,10 @@ func (a *App) registerRoutes() {
 	// WebSocket endpoints.
 	a.engine.GET("/ws", a.handleWS)
 	a.engine.GET("/compute", a.handleCompute)
+	// Daemon composition pull (daemon-composition spec §3): the daemon GETs its
+	// channel's placement='daemon' assignment, then builds exactly that set
+	// (no blind-build). Same ?key=+?channel= auth as /compute.
+	a.engine.GET("/compute/plan", a.handleComputePlan)
 
 	// Static files.
 	a.engine.Static("/assets", "web/ui/dist/assets")
@@ -235,9 +239,12 @@ const (
 	// fixed fallback engine.
 	defaultBoostLooper = "go-kimi"
 	// placementServer marks a composition instance the SERVER hosts (embedded
-	// cell). spawnComposition only spawns these; 'daemon'-placed rows are claimed
-	// by daemon hosts (delivery is additive). See actor-instance-model §6.
+	// cell). spawnComposition only spawns these.
 	placementServer = "server"
+	// placementDaemon marks a composition instance a connected DAEMON hosts. The
+	// server never spawns these; the daemon pulls them (GET /compute/plan,
+	// daemon-composition spec §3) and builds them with its LOCAL creds.
+	placementDaemon = "daemon"
 )
 
 // spawnComposition reads the channel's DESIRED composition (channel_actors) and
