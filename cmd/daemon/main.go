@@ -21,7 +21,6 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/wanpengxie/ActOS/cmd/internal/dotenv"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/registry"
@@ -34,7 +33,7 @@ import (
 	// hosts only TOOL/DEVICE classes; the channel orchestrator is server-placed, and
 	// no daemon-side path builds the "agent" class. Importing agent/all would link
 	// the LLM engine SDKs into the daemon binary for no consumer (substrate-purity
-	// 铁律 #4). Wire it in only if a daemon-delivered agent build path actually lands.
+	// ). Wire it in only if a daemon-delivered agent build path actually lands.
 )
 
 // channelFromServerURL extracts the ?channel= query from the server WS URL.
@@ -55,15 +54,6 @@ func main() {
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	slog.SetDefault(logger)
-
-	// Seed config from .env (dev convenience) before reading the environment. An
-	// already-exported variable wins; a missing file is a no-op. The agent cell's
-	// KIMI_* creds enter the process here.
-	if n, err := dotenv.Load(".env"); err != nil {
-		logger.Warn("daemon: .env load failed", "err", err.Error())
-	} else if n > 0 {
-		logger.Info("daemon: loaded .env", "vars_set", n)
-	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
