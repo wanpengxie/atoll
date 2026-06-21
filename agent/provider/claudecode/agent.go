@@ -66,9 +66,9 @@ func NewConfigFromSpec(raw json.RawMessage, systemPrompt string) (Config, error)
 	return cfg, nil
 }
 
-// NewDecl is the LooperConstructor the agent core dispatches to when
-// agents.looper selects claude. Same shape as the go-kimi looper: one class
-// ("agent"), engine chosen by looper; id from the spec; Situation host-derived.
+// NewDecl is the claude engine's Constructor — its OWN flat actor class
+// ("claude", kind=agent) registered directly into the one registry (peer to
+// go-kimi; no umbrella "agent" class). id from the spec; Situation host-derived.
 func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
 	if ctx.ChannelID == "" {
 		return platform.ActorDecl{}, errors.New("claude agent: requires a channel")

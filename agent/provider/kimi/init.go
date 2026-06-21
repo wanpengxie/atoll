@@ -1,10 +1,10 @@
 package kimi
 
-import "github.com/wanpengxie/ActOS/agent"
+import "github.com/wanpengxie/ActOS/registry"
 
-// init self-registers the go-kimi engine under its canonical looper key into the
-// agent subsystem's looper-registry (agent-spec §10.2 driver-registration). cmd
-// blank-imports this package (via agent/all) to trigger it. The edge points
-// provider → agent only; the agent core never imports back, so the engine
-// (go-kimi) stays quarantined in this package.
-func init() { agent.RegisterLooper("go-kimi", NewDecl) }
+// init self-registers the go-kimi engine as its OWN actor class ("go-kimi") into
+// the one actor registry — flat, peer to claude and the tool classes. An agent's
+// engine IS its class (kind=agent); no umbrella "agent" class, no second
+// registry. cmd blank-imports this package (via agent/all). The go-kimi SDK stays
+// quarantined here; the registry never imports it.
+func init() { registry.Register("go-kimi", NewDecl) }

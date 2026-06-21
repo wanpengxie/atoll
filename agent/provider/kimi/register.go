@@ -13,13 +13,13 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// NewDecl: the go-kimi looper engine — the LooperConstructor the agent core
-// dispatches to for looper=go-kimi (and the unset default), wired in via this
-// package's init() → agent.RegisterLooper. ONE class ("agent"), instantiated
-// under whatever
-// id the spec gives (agent:boost, agent:research, …). The id is NOT baked here
-// (actor-instance-model §7): default_agent is a name-agnostic pointer, the
-// instance is just another actor. The same class yields N agents.
+// NewDecl: the go-kimi engine's Constructor — its OWN flat actor class
+// ("go-kimi", kind=agent), registered directly into the one registry via this
+// package's init() (peer to claude and the tool classes; there is no umbrella
+// "agent" class). Instantiated under whatever id the spec gives (agent:boost,
+// agent:research, …). The id is NOT baked here (actor-instance-model §7):
+// default_agent is a name-agnostic pointer, the instance is just another actor.
+// The same class yields N agents.
 //
 // Situation is derived from the host context: a daemon carries a workspace
 // (exclusive device), a server-embedded build does not — WorkspaceDir presence

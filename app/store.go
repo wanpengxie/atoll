@@ -96,11 +96,15 @@ func migrate(db *sql.DB) error {
 			state       TEXT,
 			PRIMARY KEY(channel_id, instance_id)
 		);
-		-- agents: global agent declarations (agent-spec §二). One row per agent,
-		-- cross-channel (key = id). 'looper' picks the engine (go-kimi / claude);
-		-- the agent class selects the looper engine by it. config_json = the global
-		-- identity body + engine knobs, layered UNDER channel_actors' per-channel
-		-- config_json. Distinct from users (responsibility owner, never an agent).
+		-- agents: global agent IDENTITY declarations (agent-spec §二). One row per
+		-- agent, cross-channel (key = id). 'default_looper' = the agent's DEFAULT
+		-- engine (a create-time preference, NOT runtime truth): the per-channel
+		-- concrete engine is channel_actors.class (= override ?? default_looper).
+		-- The engine IS the actor class (claude/go-kimi are flat registry classes,
+		-- kind=agent; there is NO umbrella "agent" class). config_json = the global
+		-- identity body (persona/skills + engine knobs), layered UNDER
+		-- channel_actors' per-channel config_json. Distinct from users
+		-- (responsibility owner, never an agent). See agent-kind-vs-class §7.
 		--
 		-- No "scope" column (cognitive-state scope) BY DESIGN — v1 is implicitly
 		-- channel-scoped: each agent's state is per-channel isolated
@@ -115,8 +119,8 @@ func migrate(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS agents (
 			id          TEXT PRIMARY KEY,
 			name        TEXT NOT NULL,
-			owner       TEXT NOT NULL REFERENCES users(id),
-			looper      TEXT NOT NULL,
+			owner          TEXT NOT NULL REFERENCES users(id),
+			default_looper TEXT NOT NULL,
 			config_json TEXT,
 			deleted_at  INTEGER,
 			created_at  INTEGER NOT NULL,
@@ -148,15 +152,31 @@ func migrate(db *sql.DB) error {
 	// control never writes it directly. additive best-effort add for a dev DB.
 	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN state TEXT`)
 
+	// agents.looper → default_looper (agent-kind-vs-class §7): the engine is now a
+	// per-channel concrete actor class (channel_actors.class); agents keeps only the
+	// create-time DEFAULT. Best-effort rename for an existing dev DB (a fresh CREATE
+	// above already has default_looper; the rename then no-ops on the missing column).
+	_, _ = db.Exec(`ALTER TABLE agents RENAME COLUMN looper TO default_looper`)
+
+	// Backfill channel_actors.class from the old placeholder shell value 'agent' to
+	// the REAL engine class (engine = class now; there is no "agent" class):
+	//   1. agent instances with a declaration → their agents.default_looper.
+	//   2. remaining 'agent' shells (e.g. agent:boost, no declaration) → boost engine.
+	_, _ = db.Exec(`UPDATE channel_actors
+		SET class = (SELECT default_looper FROM agents WHERE 'agent:' || agents.id = channel_actors.instance_id)
+		WHERE class = 'agent' AND instance_id IN (SELECT 'agent:' || id FROM agents)`)
+	_, _ = db.Exec(`UPDATE channel_actors SET class = 'go-kimi' WHERE class = 'agent'`)
+
 	// Backfill existing channels to the composition model (don't clear data):
 	//   1. seed an agent:boost row for any channel that lacks ONE (not just
 	//      channels with no rows at all — a channel with other composition but no
 	//      boost would otherwise get default_agent=agent:boost with no matching
 	//      instance to spawn). placement='server' = the server-embedded fallback.
+	//      class = 'go-kimi' = the boost engine (engine IS the class).
 	//   2. migrate the old hardcoded pointer agent:main → agent:boost (and fill a
 	//      NULL pointer) so default_agent points at the seeded instance.
 	_, _ = db.Exec(`INSERT OR IGNORE INTO channel_actors (channel_id, instance_id, class, placement)
-		SELECT id, 'agent:boost', 'agent', 'server' FROM channels
+		SELECT id, 'agent:boost', 'go-kimi', 'server' FROM channels
 		WHERE id NOT IN (SELECT channel_id FROM channel_actors WHERE instance_id = 'agent:boost')`)
 	_, _ = db.Exec(`UPDATE channels SET default_agent = 'agent:boost'
 		WHERE default_agent IS NULL OR default_agent = 'agent:main'`)

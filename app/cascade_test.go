@@ -29,7 +29,7 @@ func TestChannelActorsCascadeOnDelete(t *testing.T) {
 	mustExec(`INSERT INTO workspaces (id, owner_id, name, created_at) VALUES ('w1','u1','ws',0)`)
 	mustExec(`INSERT INTO channels (id, workspace_id, name, type, db_path, default_agent, created_at)
 		VALUES ('c1','w1','ch','group','/tmp/x.db','agent:boost',0)`)
-	mustExec(`INSERT INTO channel_actors (channel_id, instance_id, class) VALUES ('c1','agent:boost','agent')`)
+	mustExec(`INSERT INTO channel_actors (channel_id, instance_id, class) VALUES ('c1','agent:boost','go-kimi')`)
 
 	// Sanity: the composition row exists.
 	var n int

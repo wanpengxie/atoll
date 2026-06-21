@@ -105,7 +105,7 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	if err == nil {
 		_, err = tx.ExecContext(c.Request.Context(),
 			`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-			chID, string(defaultAgentInstanceID), defaultAgentClass, placementServer,
+			chID, string(defaultAgentInstanceID), defaultBoostLooper, placementServer,
 		)
 	}
 	if err != nil {

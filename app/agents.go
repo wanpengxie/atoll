@@ -32,7 +32,7 @@ import (
 // row and spawns it live. Spawn REPLACES an existing cell (one actor, one owner),
 // so this doubles as restart = rebuild (new config) + Spawn (the looper resumes
 // from its state slot). Mirrors spawnComposition's per-instance block.
-func (a *App) spawnAgentInstance(chID channel.ID, home *platform.Home, instanceID, class, channelCfg, state, looper, globalCfg string) error {
+func (a *App) spawnAgentInstance(chID channel.ID, home *platform.Home, instanceID, class, channelCfg, state, globalCfg string) error {
 	sessionsRoot := filepath.Join(filepath.Dir(a.channelDBDir), "agent-sessions")
 	dir := filepath.Join(sessionsRoot, pathSafe(string(chID)), pathSafe(instanceID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -46,17 +46,9 @@ func (a *App) spawnAgentInstance(chID channel.ID, home *platform.Home, instanceI
 			string(blob), string(chID), inst)
 		return err
 	}
+	// class IS the engine (claude/go-kimi); config = global identity overlaid by
+	// per-channel (mergeConfig). No looper-DSN packing.
 	cfg := mergeConfig(globalCfg, channelCfg)
-	if class == "agent" {
-		// DSN: pack agents.looper into the opaque config blob. A non-object config
-		// is a hard error — refuse to build the looper (agent-spec §三: config is a
-		// knobs container; a non-object payload would be silently dropped).
-		withL, werr := withLooper(cfg, looper)
-		if werr != nil {
-			return werr
-		}
-		cfg = withL
-	}
 	decl, err := registry.Build(class, registry.InstanceSpec{
 		ID:     actor.ActorID(inst),
 		Config: cfg,
@@ -80,15 +72,17 @@ func (a *App) spawnAgentInstance(chID channel.ID, home *platform.Home, instanceI
 }
 
 type createAgentReq struct {
-	Name   string          `json:"name"`
+	Name string `json:"name"`
+	// Looper = the agent's DEFAULT engine (stored as agents.default_looper); a
+	// per-channel engine may override it at introduce time (agent-kind-vs-class §7).
 	Looper string          `json:"looper"`
 	Config json.RawMessage `json:"config"`
 }
 
 // isJSONObject reports whether raw is a JSON object — the only shape an agent
-// config may take, since the looper key (DSN) rides INSIDE it. null / array /
-// scalar → false. Empty raw is the caller's responsibility (an absent config is
-// fine; only a present-but-non-object config is rejected).
+// config (persona/skills + engine knobs) may take. null / array / scalar →
+// false. Empty raw is the caller's responsibility (an absent config is fine;
+// only a present-but-non-object config is rejected).
 func isJSONObject(raw json.RawMessage) bool {
 	var m map[string]json.RawMessage
 	if err := json.Unmarshal(raw, &m); err != nil {
@@ -120,7 +114,7 @@ func (a *App) handleCreateAgent(c *gin.Context) {
 		cfg = string(req.Config)
 	}
 	if _, err := a.db.ExecContext(c.Request.Context(),
-		`INSERT INTO agents (id, name, owner, looper, config_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`,
+		`INSERT INTO agents (id, name, owner, default_looper, config_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`,
 		id, strings.TrimSpace(req.Name), userID, looper, cfg, now, now); err != nil {
 		a.logger.Error("create agent", "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -136,7 +130,7 @@ func (a *App) handleCreateAgent(c *gin.Context) {
 func (a *App) handleListAgents(c *gin.Context) {
 	userID := middleware.UserID(c)
 	rows, err := a.db.QueryContext(c.Request.Context(),
-		`SELECT id, name, looper, created_at, updated_at FROM agents WHERE owner = ? AND deleted_at IS NULL ORDER BY created_at`,
+		`SELECT id, name, default_looper, created_at, updated_at FROM agents WHERE owner = ? AND deleted_at IS NULL ORDER BY created_at`,
 		userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -229,6 +223,11 @@ type introduceAgentReq struct {
 	AgentID     string `json:"agent_id"`
 	Placement   string `json:"placement"`
 	MakeDefault bool   `json:"make_default"`
+	// Engine optionally OVERRIDES the agent's default_looper for THIS channel
+	// (per-channel runtime engine). Empty = use the agent's default_looper.
+	// Effective engine = Engine ?? agents.default_looper, resolved here (eager)
+	// into channel_actors.class. See agent-kind-vs-class §7.
+	Engine string `json:"engine"`
 }
 
 // handleIntroduceAgent adds an agent to a channel's composition (channel_actors)
@@ -245,10 +244,10 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "agent_id required"})
 		return
 	}
-	var looper, gcfg string
+	var defLooper, gcfg string
 	err := a.db.QueryRowContext(c.Request.Context(),
-		`SELECT looper, COALESCE(config_json, '') FROM agents WHERE id = ? AND owner = ? AND deleted_at IS NULL`,
-		req.AgentID, userID).Scan(&looper, &gcfg)
+		`SELECT default_looper, COALESCE(config_json, '') FROM agents WHERE id = ? AND owner = ? AND deleted_at IS NULL`,
+		req.AgentID, userID).Scan(&defLooper, &gcfg)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
 		return
@@ -257,6 +256,13 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
+	// Effective engine for THIS channel = explicit override ?? agent default
+	// (eager: resolved now into channel_actors.class = the per-channel concrete
+	// engine class). agent-kind-vs-class §7.
+	engine := strings.TrimSpace(req.Engine)
+	if engine == "" {
+		engine = defLooper
+	}
 	placement := strings.TrimSpace(req.Placement)
 	if placement == "" {
 		placement = placementServer
@@ -264,7 +270,7 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 	instanceID := "agent:" + req.AgentID
 	if _, err := a.db.ExecContext(c.Request.Context(),
 		`INSERT OR IGNORE INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-		chID, instanceID, "agent", placement); err != nil {
+		chID, instanceID, engine, placement); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
@@ -275,7 +281,7 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 	live := false
 	if placement == placementServer {
 		if home := a.getHome(channel.ID(chID)); home != nil {
-			if serr := a.spawnAgentInstance(channel.ID(chID), home, instanceID, "agent", "", "", looper, gcfg); serr != nil {
+			if serr := a.spawnAgentInstance(channel.ID(chID), home, instanceID, engine, "", "", gcfg); serr != nil {
 				a.logger.Warn("introduce agent: spawn", "channel", chID, "instance", instanceID, "err", serr.Error())
 			} else {
 				live = true
@@ -284,7 +290,7 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 	}
 	c.JSON(http.StatusCreated, gin.H{
 		"channel_id": chID, "instance_id": instanceID,
-		"placement": placement, "looper": looper, "live": live,
+		"placement": placement, "class": engine, "looper": engine, "live": live,
 	})
 }
 
@@ -295,10 +301,10 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 func (a *App) handleRestartAgent(c *gin.Context) {
 	userID := middleware.UserID(c)
 	agentID := c.Param("agentID")
-	var looper, gcfg string
+	var gcfg string
 	err := a.db.QueryRowContext(c.Request.Context(),
-		`SELECT looper, COALESCE(config_json, '') FROM agents WHERE id = ? AND owner = ? AND deleted_at IS NULL`,
-		agentID, userID).Scan(&looper, &gcfg)
+		`SELECT COALESCE(config_json, '') FROM agents WHERE id = ? AND owner = ? AND deleted_at IS NULL`,
+		agentID, userID).Scan(&gcfg)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
 		return
@@ -308,10 +314,12 @@ func (a *App) handleRestartAgent(c *gin.Context) {
 		return
 	}
 	instanceID := "agent:" + agentID
-	type loc struct{ chID, cfg, state string }
+	// Each channel's row carries its OWN engine (class) — restart preserves the
+	// per-channel engine; it does NOT re-resolve from the agent default.
+	type loc struct{ chID, class, cfg, state string }
 	var locs []loc
 	rows, qerr := a.db.QueryContext(c.Request.Context(),
-		`SELECT channel_id, COALESCE(config_json, ''), COALESCE(state, '') FROM channel_actors WHERE instance_id = ? AND placement = ?`,
+		`SELECT channel_id, class, COALESCE(config_json, ''), COALESCE(state, '') FROM channel_actors WHERE instance_id = ? AND placement = ?`,
 		instanceID, placementServer)
 	if qerr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -319,7 +327,7 @@ func (a *App) handleRestartAgent(c *gin.Context) {
 	}
 	for rows.Next() {
 		var l loc
-		if err := rows.Scan(&l.chID, &l.cfg, &l.state); err == nil {
+		if err := rows.Scan(&l.chID, &l.class, &l.cfg, &l.state); err == nil {
 			locs = append(locs, l)
 		}
 	}
@@ -331,7 +339,7 @@ func (a *App) handleRestartAgent(c *gin.Context) {
 		if home == nil {
 			continue
 		}
-		if serr := a.spawnAgentInstance(channel.ID(l.chID), home, instanceID, "agent", l.cfg, l.state, looper, gcfg); serr != nil {
+		if serr := a.spawnAgentInstance(channel.ID(l.chID), home, instanceID, l.class, l.cfg, l.state, gcfg); serr != nil {
 			a.logger.Warn("restart agent: spawn", "channel", l.chID, "instance", instanceID, "err", serr.Error())
 			continue
 		}

@@ -228,7 +228,12 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 // channel may later repoint it at any other instance id (actor-instance-model §7).
 const (
 	defaultAgentInstanceID = actor.ActorID("agent:boost")
-	defaultAgentClass      = "agent"
+	// defaultBoostLooper is the engine CLASS the always-there boost floor runs.
+	// An agent's engine IS its actor class — claude/go-kimi are flat registry
+	// classes (kind=agent), there is NO umbrella "agent" class. boost has no
+	// agents declaration row, so it can't carry a default_looper; it runs this
+	// fixed fallback engine.
+	defaultBoostLooper = "go-kimi"
 	// placementServer marks a composition instance the SERVER hosts (embedded
 	// cell). spawnComposition only spawns these; 'daemon'-placed rows are claimed
 	// by daemon hosts (delivery is additive). See actor-instance-model §6.
@@ -245,15 +250,16 @@ const (
 // a CallerContext on). Server placement: Deps carries NO WorkspaceDir, so the
 // agent class derives the server-embedded Situation.
 func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
-	type instanceSpec struct{ id, class, cfg, state, looper, gcfg string }
+	type instanceSpec struct{ id, class, cfg, state, gcfg string }
 	var specs []instanceSpec
 	// LEFT JOIN agents: for an agent instance (instance_id = 'agent:'||agents.id)
-	// pull the global looper + global config (agent-spec §二). A row without a
-	// matching agents declaration (e.g. the seeded fallback agent:boost) gets an
-	// empty looper → the go-kimi default; non-agent classes never match the join.
+	// overlay its GLOBAL identity config (persona/skills) UNDER the per-channel
+	// config (agent-spec §二). The engine is NOT read here — it IS ca.class (the
+	// per-channel concrete engine class: claude/go-kimi). A non-agent class never
+	// matches the join (no global overlay), which is correct.
 	rows, err := a.db.Query(
 		`SELECT ca.instance_id, ca.class, COALESCE(ca.config_json, ''), COALESCE(ca.state, ''),
-		        COALESCE(a.looper, ''), COALESCE(a.config_json, '')
+		        COALESCE(a.config_json, '')
 		   FROM channel_actors ca
 		   LEFT JOIN agents a ON ca.instance_id = 'agent:' || a.id
 		  WHERE ca.channel_id = ? AND ca.placement = ?`,
@@ -264,7 +270,7 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 	}
 	for rows.Next() {
 		var s instanceSpec
-		if err := rows.Scan(&s.id, &s.class, &s.cfg, &s.state, &s.looper, &s.gcfg); err != nil {
+		if err := rows.Scan(&s.id, &s.class, &s.cfg, &s.state, &s.gcfg); err != nil {
 			continue
 		}
 		specs = append(specs, s)
@@ -292,20 +298,9 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 				string(blob), string(chID), inst)
 			return err
 		}
+		// The engine = ca.class (per-channel concrete class). config = global
+		// identity overlaid by per-channel (mergeConfig); no looper-DSN packing.
 		cfg := mergeConfig(s.gcfg, s.cfg)
-		if s.class == "agent" {
-			// DSN pattern: the generic registry stays kind-neutral (no looper
-			// field); the agent's engine selector rides in the opaque config and
-			// the "agent" class unpacks it (the engine sub-config ignores it). A
-			// non-object config is rejected — skip the instance, don't build a
-			// looper from a malformed config.
-			withL, werr := withLooper(cfg, s.looper)
-			if werr != nil {
-				a.logger.Warn("app: agent config rejected; not building looper", "channel", string(chID), "instance", inst, "err", werr.Error())
-				continue
-			}
-			cfg = withL
-		}
 		decl, err := registry.Build(s.class, registry.InstanceSpec{
 			ID:     actor.ActorID(inst),
 			Config: cfg,
@@ -336,37 +331,6 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 // carry ':' like "agent:boost").
 func pathSafe(s string) string {
 	return strings.NewReplacer(":", "-", "/", "_", "\\", "_").Replace(s)
-}
-
-// withLooper packs the agent's engine selector (agents.looper) into the opaque
-// config the registry hands the "agent" class — the DSN pattern that keeps the
-// generic registry kind-neutral (no looper field). The agent class unpacks the
-// looper; the engine sub-config (kimi / claudecode) ignores the extra key.
-//
-// The config MUST be a JSON object (or empty) — that is the container the looper
-// key rides in. A non-object config (array / string / number) is a HARD error:
-// silently coercing it into a map would drop the caller's whole payload. The
-// caller refuses to build the looper on error (no instance from a malformed
-// config). JSON null is treated as empty.
-func withLooper(cfg json.RawMessage, looper string) (json.RawMessage, error) {
-	m := map[string]json.RawMessage{}
-	if len(cfg) > 0 {
-		if err := json.Unmarshal(cfg, &m); err != nil {
-			return nil, fmt.Errorf("agent config must be a JSON object: %w", err)
-		}
-	}
-	if m == nil {
-		// JSON null unmarshals a map to nil (not a no-op) — reset to an empty
-		// object so the looper key can be packed; null == "no config".
-		m = map[string]json.RawMessage{}
-	}
-	lv, _ := json.Marshal(looper)
-	m["looper"] = lv
-	out, err := json.Marshal(m)
-	if err != nil {
-		return nil, fmt.Errorf("agent config: re-marshal: %w", err)
-	}
-	return out, nil
 }
 
 // mergeConfig layers the per-channel config_json OVER the global agents config
