@@ -177,10 +177,10 @@ func NewConfigFromSpec(raw json.RawMessage, systemPrompt string) (Config, error)
 // actorrt.Actor (Receive) plus the Starter/Stopper lifecycle hooks; the
 // runtime guarantees all three run serially on the cell goroutine.
 type Bridge struct {
-	cfg    Config
-	self   actor.ActorID
-	chID   channel.ID
-	writer harness.Writer
+	cfg  Config
+	self actor.ActorID
+	chID channel.ID
+	pen  harness.Pen
 
 	mu              sync.Mutex
 	agentNew        func(gokimi.AgentConfig) (kimiAgent, error) // test hook
@@ -218,9 +218,10 @@ type kimiAgent interface {
 }
 
 // NewBridge builds a Bridge bound to its identity and writing seam. The
-// host closes over (self, chID, writer) at assembly time — the factory
-// shape is func(w harness.Writer) actorrt.Actor.
-func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Writer) (*Bridge, error) {
+// host closes over (self, chID, pen) at assembly time — the factory
+// shape is func(w harness.Pen) actorrt.Actor. The pen carries the welded
+// identity (sealed-pen); self/chID are kept for envelope id + admission guards.
+func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Pen) (*Bridge, error) {
 	if cfg.APIKey == "" {
 		return nil, errors.New("kimi: Config.APIKey empty")
 	}
@@ -234,7 +235,7 @@ func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Writer
 		return nil, errors.New("kimi: channel id empty")
 	}
 	if w == nil {
-		return nil, errors.New("kimi: writer nil")
+		return nil, errors.New("kimi: pen nil")
 	}
 	if cfg.ProviderType == "" {
 		cfg.ProviderType = "anthropic"
@@ -254,10 +255,10 @@ func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Writer
 	}
 
 	b := &Bridge{
-		cfg:    cfg,
-		self:   self,
-		chID:   chID,
-		writer: w,
+		cfg:  cfg,
+		self: self,
+		chID: chID,
+		pen:  w,
 	}
 	b.agentNew = b.defaultAgentFactory
 	return b, nil
@@ -270,10 +271,6 @@ var _ actorrt.Stopper = (*Bridge)(nil)
 // defaultAgentFactory wraps gokimi.NewAgent + the kimiAgent shim.
 func (b *Bridge) defaultAgentFactory(ac gokimi.AgentConfig) (kimiAgent, error) {
 	return gokimi.NewAgent(ac)
-}
-
-func (b *Bridge) sender() message.Sender {
-	return message.Sender{Kind: actor.KindAgent, ID: b.self}
 }
 
 func (b *Bridge) clock() time.Time { return time.UnixMilli(b.cfg.NowFn()) }
@@ -314,9 +311,7 @@ func (b *Bridge) Start(ctx context.Context, _ actorrt.ActorContext) error {
 	// b.shellRef closure), so assigning b.shell after buildAgent is safe — a
 	// tool can never capture a nil shell regardless of statement order.
 	b.shell = metatool.NewShell(metatool.ShellConfig{
-		Writer:         b.writer,
-		ChannelID:      b.chID,
-		Sender:         b.sender(),
+		Pen:            b.pen,
 		Clock:          b.clock,
 		EnvelopeID:     b.envelopeID,
 		FastPathWindow: b.cfg.FastPathWindow,

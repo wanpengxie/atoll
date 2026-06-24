@@ -28,9 +28,9 @@ func TestStepCallerAuth(t *testing.T) {
 		},
 		{
 			name: "caller bound to a different channel rejects acl_denied",
-			ctx: CtxWithCaller(context.Background(), CallerContext{
-				ActorID:   actor.ActorID("a"),
-				ChannelID: channel.ID("other-channel"),
+			ctx: ctxWithCaller(context.Background(), caller{
+				actorID: actor.ActorID("a"),
+				chID:    channel.ID("other-channel"),
 			}),
 			reason: HarnessEngineACLDenied,
 		},
@@ -41,8 +41,8 @@ func TestStepCallerAuth(t *testing.T) {
 		},
 		{
 			name: "caller with empty channel (channel-agnostic edge) accepts",
-			ctx: CtxWithCaller(context.Background(), CallerContext{
-				ActorID: actor.ActorID("a"),
+			ctx: ctxWithCaller(context.Background(), caller{
+				actorID: actor.ActorID("a"),
 			}),
 			reason: "",
 		},

@@ -7,12 +7,13 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// rejectWriter is a harness.Writer double that reports a reject reason.
+// rejectWriter is a harness.Pen double that reports a reject reason. (It is a
+// relay-only stub: it never injects identity, so envelopes it sees keep the
+// builder's zero Sender/ChannelID — the real boundPen does the welding.)
 type rejectWriter struct {
 	reason string
 	detail string
@@ -22,16 +23,11 @@ func (w *rejectWriter) Write(_ context.Context, env *message.Envelope) (harness.
 	return harness.WriteResult{MessageID: env.ID, RejectReason: harness.HarnessRejectReason(w.reason), RejectDetail: w.detail}, nil
 }
 
-// svcSender is the answering actor's own identity.
-func svcSender() message.Sender {
-	return message.Sender{Kind: actor.Kind("agent"), ID: actor.ActorID("svc")}
-}
-
 // Respond commits a final response and returns the written message id.
 func TestRespond_FinalSuccess(t *testing.T) {
 	w := &recordingWriter{}
 	req := newRequest("r1", nil)
-	id, err := Respond(context.Background(), w, fixedClock(1234), req, svcSender(), ResponseSpec{
+	id, err := Respond(context.Background(), w, fixedClock(1234), req, ResponseSpec{
 		Status: "completed",
 	})
 	if err != nil {
@@ -47,8 +43,10 @@ func TestRespond_FinalSuccess(t *testing.T) {
 	if term.ParentID != "r1" {
 		t.Fatalf("parent_id = %q, want r1", term.ParentID)
 	}
-	if term.Sender != svcSender() {
-		t.Fatalf("sender = %+v, want svc", term.Sender)
+	// Sender is welded by the pen, not the builder — the relay stub leaves it
+	// zero (sealed-pen).
+	if term.Sender != (message.Sender{}) {
+		t.Fatalf("sender = %+v, want zero (pen-injected)", term.Sender)
 	}
 	if term.TS != 1234 {
 		t.Fatalf("ts = %d, want 1234 from clock", term.TS)
@@ -67,7 +65,7 @@ func TestRespond_FinalSuccess(t *testing.T) {
 // An empty status defaults to "completed".
 func TestRespond_EmptyStatusDefaultsCompleted(t *testing.T) {
 	w := &recordingWriter{}
-	id, err := Respond(context.Background(), w, fixedClock(1), newRequest("r1", nil), svcSender(), ResponseSpec{})
+	id, err := Respond(context.Background(), w, fixedClock(1), newRequest("r1", nil), ResponseSpec{})
 	if err != nil {
 		t.Fatalf("Respond err: %v", err)
 	}
@@ -85,7 +83,7 @@ func TestRespond_EmptyStatusDefaultsCompleted(t *testing.T) {
 
 // A nil request is rejected.
 func TestRespond_NilRequest(t *testing.T) {
-	_, err := Respond(context.Background(), &recordingWriter{}, fixedClock(1), nil, svcSender(), ResponseSpec{})
+	_, err := Respond(context.Background(), &recordingWriter{}, fixedClock(1), nil, ResponseSpec{})
 	if err == nil {
 		t.Fatal("nil request must error")
 	}
@@ -93,7 +91,7 @@ func TestRespond_NilRequest(t *testing.T) {
 
 // A non-final status ("processing") is rejected — Respond is final-only.
 func TestRespond_NonFinalStatusRejected(t *testing.T) {
-	_, err := Respond(context.Background(), &recordingWriter{}, fixedClock(1), newRequest("r1", nil), svcSender(), ResponseSpec{
+	_, err := Respond(context.Background(), &recordingWriter{}, fixedClock(1), newRequest("r1", nil), ResponseSpec{
 		Status: "processing",
 	})
 	if err == nil {
@@ -104,7 +102,7 @@ func TestRespond_NonFinalStatusRejected(t *testing.T) {
 // A build failure (non-object payload) surfaces as an error before any write.
 func TestRespond_BuildFailurePropagates(t *testing.T) {
 	w := &recordingWriter{}
-	_, err := Respond(context.Background(), w, fixedClock(1), newRequest("r1", nil), svcSender(), ResponseSpec{
+	_, err := Respond(context.Background(), w, fixedClock(1), newRequest("r1", nil), ResponseSpec{
 		Status:  "completed",
 		Payload: json.RawMessage(`5`), // non-object payload -> MergeResponsePayload errors
 	})
@@ -119,7 +117,7 @@ func TestRespond_BuildFailurePropagates(t *testing.T) {
 // A writer error is wrapped and returned.
 func TestRespond_WriteErrorPropagates(t *testing.T) {
 	w := &recordingWriter{err: errors.New("boom")}
-	_, err := Respond(context.Background(), w, fixedClock(1), newRequest("r1", nil), svcSender(), ResponseSpec{
+	_, err := Respond(context.Background(), w, fixedClock(1), newRequest("r1", nil), ResponseSpec{
 		Status: "completed",
 	})
 	if err == nil {
@@ -131,7 +129,7 @@ func TestRespond_WriteErrorPropagates(t *testing.T) {
 // message id with no error — benign.
 func TestRespond_DuplicateBenign(t *testing.T) {
 	w := &recordingWriter{duplicate: true}
-	id, err := Respond(context.Background(), w, fixedClock(1), newRequest("r1", nil), svcSender(), ResponseSpec{
+	id, err := Respond(context.Background(), w, fixedClock(1), newRequest("r1", nil), ResponseSpec{
 		Status: "completed",
 	})
 	if err != nil {
@@ -145,7 +143,7 @@ func TestRespond_DuplicateBenign(t *testing.T) {
 // A RejectReason outcome surfaces as an error carrying the opaque diagnostic.
 func TestRespond_RejectReasonErrors(t *testing.T) {
 	w := &rejectWriter{reason: "harness_bad_audience", detail: "x"}
-	_, err := Respond(context.Background(), w, fixedClock(1), newRequest("r1", nil), svcSender(), ResponseSpec{
+	_, err := Respond(context.Background(), w, fixedClock(1), newRequest("r1", nil), ResponseSpec{
 		Status: "failed",
 	})
 	if err == nil {
@@ -157,7 +155,7 @@ func TestRespond_RejectReasonErrors(t *testing.T) {
 // carrying the detail in the payload.
 func TestCollapseInternalError_WithDetail(t *testing.T) {
 	w := &recordingWriter{}
-	id, err := CollapseInternalError(context.Background(), w, fixedClock(7), newRequest("r1", nil), svcSender(), "panic in handler")
+	id, err := CollapseInternalError(context.Background(), w, fixedClock(7), newRequest("r1", nil), "panic in handler")
 	if err != nil {
 		t.Fatalf("CollapseInternalError err: %v", err)
 	}
@@ -187,7 +185,7 @@ func TestCollapseInternalError_WithDetail(t *testing.T) {
 // closes with receiver_internal_error.
 func TestCollapseInternalError_EmptyDetail(t *testing.T) {
 	w := &recordingWriter{}
-	_, err := CollapseInternalError(context.Background(), w, fixedClock(7), newRequest("r1", nil), svcSender(), "")
+	_, err := CollapseInternalError(context.Background(), w, fixedClock(7), newRequest("r1", nil), "")
 	if err != nil {
 		t.Fatalf("CollapseInternalError err: %v", err)
 	}
@@ -206,16 +204,17 @@ func TestCollapseInternalError_EmptyDetail(t *testing.T) {
 
 // CollapseInternalError rejects a nil request.
 func TestCollapseInternalError_NilRequest(t *testing.T) {
-	_, err := CollapseInternalError(context.Background(), &recordingWriter{}, fixedClock(1), nil, svcSender(), "x")
+	_, err := CollapseInternalError(context.Background(), &recordingWriter{}, fixedClock(1), nil, "x")
 	if err == nil {
 		t.Fatal("nil request must error")
 	}
 }
 
-// EmitEvent emits a kind=event message under the supplied sender identity.
+// EmitEvent emits a kind=event message; the authoring identity is welded onto
+// the pen (the relay stub leaves Sender/ChannelID zero on the built envelope).
 func TestEmitEvent_Success(t *testing.T) {
 	w := &recordingWriter{}
-	id, err := EmitEvent(context.Background(), w, fixedClock(99), channel.ID("ch-1"), svcSender(),
+	id, err := EmitEvent(context.Background(), w, fixedClock(99),
 		"agent.text", json.RawMessage(`{"hi":1}`), message.Visibility("channel"), message.Audience{actor.ActorID("a")})
 	if err != nil {
 		t.Fatalf("EmitEvent err: %v", err)
@@ -230,20 +229,21 @@ func TestEmitEvent_Success(t *testing.T) {
 	if ev.Type != "agent.text" {
 		t.Fatalf("type = %q", ev.Type)
 	}
-	if ev.Sender != svcSender() {
-		t.Fatalf("sender = %+v", ev.Sender)
+	// Sender / ChannelID are pen-injected, not builder-filled (sealed-pen).
+	if ev.Sender != (message.Sender{}) {
+		t.Fatalf("sender = %+v, want zero (pen-injected)", ev.Sender)
+	}
+	if ev.ChannelID != "" {
+		t.Fatalf("channel_id = %q, want empty (pen-injected)", ev.ChannelID)
 	}
 	if ev.TS != 99 {
 		t.Fatalf("ts = %d, want 99", ev.TS)
-	}
-	if ev.ChannelID != channel.ID("ch-1") {
-		t.Fatalf("channel = %q", ev.ChannelID)
 	}
 }
 
 // EmitEvent rejects an empty event type.
 func TestEmitEvent_EmptyType(t *testing.T) {
-	_, err := EmitEvent(context.Background(), &recordingWriter{}, fixedClock(1), channel.ID("ch-1"), svcSender(),
+	_, err := EmitEvent(context.Background(), &recordingWriter{}, fixedClock(1),
 		"", nil, message.Visibility("channel"), nil)
 	if err == nil {
 		t.Fatal("empty type must error")
@@ -253,7 +253,7 @@ func TestEmitEvent_EmptyType(t *testing.T) {
 // EmitEvent surfaces a writer error.
 func TestEmitEvent_WriteError(t *testing.T) {
 	w := &recordingWriter{err: errors.New("boom")}
-	_, err := EmitEvent(context.Background(), w, fixedClock(1), channel.ID("ch-1"), svcSender(),
+	_, err := EmitEvent(context.Background(), w, fixedClock(1),
 		"agent.text", nil, message.Visibility("channel"), nil)
 	if err == nil {
 		t.Fatal("writer error must propagate")
@@ -263,7 +263,7 @@ func TestEmitEvent_WriteError(t *testing.T) {
 // EmitEvent surfaces a reject reason as an error.
 func TestEmitEvent_RejectReason(t *testing.T) {
 	w := &rejectWriter{reason: "harness_bad_visibility"}
-	_, err := EmitEvent(context.Background(), w, fixedClock(1), channel.ID("ch-1"), svcSender(),
+	_, err := EmitEvent(context.Background(), w, fixedClock(1),
 		"agent.text", nil, message.Visibility("channel"), nil)
 	if err == nil {
 		t.Fatal("reject reason must surface as an error")

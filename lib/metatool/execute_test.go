@@ -64,10 +64,8 @@ func (w *recWriter) lastRequest(t *testing.T, timeout time.Duration) message.Env
 func newExecShell(w *recWriter) *metatool.Shell {
 	var seq int64
 	return metatool.NewShell(metatool.ShellConfig{
-		Writer:    w,
-		ChannelID: "ch-test",
-		Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
-		Clock:     func() time.Time { return time.UnixMilli(0) },
+		Pen:   w,
+		Clock: func() time.Time { return time.UnixMilli(0) },
 		EnvelopeID: func(_ int64) message.ID {
 			seq++
 			return message.ID("req-" + itoa(seq))
@@ -314,9 +312,7 @@ func TestExecuteCallActor_TerminalFailureNormalized(t *testing.T) {
 func TestShell_TimeoutArmsAuthor2Terminal(t *testing.T) {
 	w := &recWriter{}
 	sh := metatool.NewShell(metatool.ShellConfig{
-		Writer:     w,
-		ChannelID:  "ch-test",
-		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
+		Pen:        w,
 		Clock:      time.Now, // real clock so ExpiresAt-now yields the budget
 		EnvelopeID: func(_ int64) message.ID { return message.ID("req-dead") },
 	})

@@ -28,7 +28,7 @@ func TestReconcile_ClosesOnlyAbsentReceivers(t *testing.T) {
 	present := presenceSet{"alive": true} // "dead" absent
 
 	err := ReconcileReceiverUnavailable(context.Background(), w, q, present,
-		fixedClock(1), sysSender(), nil)
+		fixedClock(1), nil)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -50,7 +50,7 @@ func TestReconcile_IdempotentOnDuplicateTerminal(t *testing.T) {
 
 	var faults int
 	err := ReconcileReceiverUnavailable(context.Background(), w, q, present,
-		fixedClock(1), sysSender(), func(message.ID, error) { faults++ })
+		fixedClock(1), func(message.ID, error) { faults++ })
 	if err != nil {
 		t.Fatalf("a duplicate-terminal collision must not surface a top-level error: %v", err)
 	}
@@ -66,7 +66,7 @@ func TestReconcile_ScanQueryFailureReturnsError(t *testing.T) {
 	q := &queryStub{recvErr: errors.New("store down")}
 
 	err := ReconcileReceiverUnavailable(context.Background(), w, q, presenceSet{},
-		fixedClock(1), sysSender(), nil)
+		fixedClock(1), nil)
 	if err == nil {
 		t.Fatal("a distinct-receivers scan failure must return an error")
 	}
@@ -86,7 +86,7 @@ func TestReconcile_PerReceiverDrainFaultContinues(t *testing.T) {
 
 	var faults int
 	err := ReconcileReceiverUnavailable(context.Background(), w, q, presenceSet{},
-		fixedClock(1), sysSender(), func(message.ID, error) { faults++ })
+		fixedClock(1), func(message.ID, error) { faults++ })
 	if err != nil {
 		t.Fatalf("per-receiver drain faults must not return a top-level error: %v", err)
 	}

@@ -13,7 +13,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// Chain is the write engine's concrete step pipeline (it has no separate
+// chain is the write engine's concrete step pipeline (it has no separate
 // contract interface — the former pure-contract harness package was deleted;
 // the engine's own seams live here in runtime/harness).
 // It assembles the 9 numbered steps declared in proto-layer1 §2.0
@@ -21,24 +21,31 @@ import (
 // ascending-ID order, short-circuiting on the first reject (or on the
 // first idempotent dedupe hit).
 //
-// Construct with New; Write is safe for concurrent use as long as Deps
-// implementations are concurrent-safe (the standard sqlite-backed store
-// / actor registry satisfy this).
-type Chain struct {
+// chain is the BARE writer (no identity). It is封死在包内 (unexported): the
+// substrate never hands out a bare writer. New藏 it inside a minter and returns
+// the minter; Mint welds an identity onto it via boundPen. write is safe for
+// concurrent use as long as Deps implementations are concurrent-safe (the
+// standard sqlite-backed store / actor registry satisfy this).
+type chain struct {
 	deps  Deps
 	steps []step
 }
 
-// New assembles a Chain from Deps. Returns an error when Deps is
-// incomplete or any step refuses to construct.
+// New assembles the write engine from Deps and returns a Minter — the铸笔机.
+// Returns an error when Deps is incomplete or any step refuses to construct.
 //
-// Construction-confined to platform: a Chain built outside the platform
+// New constructs the bare chain internally, hides it inside a minter, and
+// returns the minter — the platform receives a铸笔机 (Minter), never the bare
+// chain. The bare writer's visibility is compile-time封顶 inside the harness
+// package.
+//
+// Construction-confined to platform: a write engine built outside the platform
 // assembly has no commit signal (store OnCommit), closure reconciler, or
-// presence-watcher wiring — a half-wired write门. New/Deps/Chain may therefore
-// only be referenced by the platform tree (enforced by
+// presence-watcher wiring — a half-wired write门. New/Deps may therefore only
+// be referenced by the platform tree (enforced by
 // archtest.TestHarnessConstructionConfinedToPlatform); downstream speaks the
-// harness.Writer / WriteResult seam, never builds the chain itself.
-func New(deps Deps) (*Chain, error) {
+// harness.Pen / WriteResult seam, never builds the engine itself.
+func New(deps Deps) (Minter, error) {
 	if err := deps.Validate(); err != nil {
 		return nil, err
 	}
@@ -60,20 +67,20 @@ func New(deps Deps) (*Chain, error) {
 		newStepTypeRegistered(deps),
 		newStepKindAndAudience(deps),
 		newStepResponsePairing(deps),
-		// StepEngineAppend (step 9) is fused into Chain.Write so the Step
+		// StepEngineAppend (step 9) is fused into chain.write so the Step
 		// interface can stay pure (no side-effects beyond envelope
 		// mutation). Keeping engine append out of the Step slice also
 		// lets unit tests run steps 0..8 in isolation with a stub Log.
 	}
 	sort.SliceStable(steps, func(i, j int) bool { return steps[i].ID() < steps[j].ID() })
 
-	return &Chain{deps: deps, steps: steps}, nil
+	return &minter{chain: &chain{deps: deps, steps: steps}}, nil
 }
 
-// Write runs the chain against env per proto-layer1 §2.0. The envelope
+// write runs the chain against env per proto-layer1 §2.0. The envelope
 // is mutated in place during StepNormalize so the caller observes
 // default-filled fields when the call returns.
-func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res WriteResult, err error) {
+func (c *chain) write(ctx context.Context, env *message.Envelope) (res WriteResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			err = fmt.Errorf("harness: panic: %v\n%s", r, debug.Stack())
@@ -134,7 +141,7 @@ func (c *Chain) Write(ctx context.Context, env *message.Envelope) (res WriteResu
 	}, nil
 }
 
-func (c *Chain) observePass(ctx context.Context, env *message.Envelope, step stepID) {
+func (c *chain) observePass(ctx context.Context, env *message.Envelope, step stepID) {
 	c.deps.Logger.Debug("harness.write.step_ok",
 		"step", int(step),
 		"step_name", stepName(step),
@@ -147,7 +154,7 @@ func (c *Chain) observePass(ctx context.Context, env *message.Envelope, step ste
 	)
 }
 
-func (c *Chain) observeReject(ctx context.Context, env *message.Envelope, step stepID, reason HarnessRejectReason, detail string) {
+func (c *chain) observeReject(ctx context.Context, env *message.Envelope, step stepID, reason HarnessRejectReason, detail string) {
 	if reason == "" {
 		return
 	}
@@ -166,7 +173,7 @@ func (c *Chain) observeReject(ctx context.Context, env *message.Envelope, step s
 	)
 }
 
-func (c *Chain) observeError(ctx context.Context, env *message.Envelope, step stepID, err error) {
+func (c *chain) observeError(ctx context.Context, env *message.Envelope, step stepID, err error) {
 	c.deps.Metrics.IncCounter("harness.error", "step", stepName(step))
 	c.deps.Logger.Error("harness.write.error",
 		"step", int(step),
@@ -222,10 +229,10 @@ func rejectFromOutcome(out outcome, env *message.Envelope) WriteResult {
 type ctxKeyRequestID struct{}
 
 // WithRequestID attaches a request-id to ctx for harness log correlation.
-// Binding→harness INJECTION SEAM (like CtxWithCaller / CtxWithRawEnvelope):
-// wire-level bindings carry a request-id at the edge and plumb it in so the
-// harness's per-step diagnostics correlate to the originating request. The
-// getter (requestIDFromCtx) is harness-internal plumbing and stays unexported.
+// Binding→harness INJECTION SEAM (like CtxWithRawEnvelope): wire-level bindings
+// carry a request-id at the edge and plumb it in so the harness's per-step
+// diagnostics correlate to the originating request. The getter
+// (requestIDFromCtx) is harness-internal plumbing and stays unexported.
 func WithRequestID(ctx context.Context, id string) context.Context {
 	return context.WithValue(ctx, ctxKeyRequestID{}, id)
 }

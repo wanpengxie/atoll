@@ -7,7 +7,6 @@ import (
 
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
@@ -52,18 +51,14 @@ type pendingReq struct {
 
 // ShellConfig carries the deps the Shell needs to build, emit, and time
 // outbound requests. The holder (the client-edge program) supplies its
-// identity + write seam at construction.
+// write seam at construction; identity is welded onto the pen (sealed-pen),
+// never carried alongside.
 type ShellConfig struct {
-	// Writer is the harness write door: it emits requests and (via author#2)
-	// commits timeout terminals to truth. Required.
-	Writer harness.Writer
-
-	// ChannelID scopes every emitted request. Required.
-	ChannelID channel.ID
-
-	// Sender is the caller identity stamped on outbound requests and on the
-	// author#2 timeout terminals. Required.
-	Sender message.Sender
+	// Pen is the harness write door: it emits requests and (via author#2)
+	// commits timeout terminals to truth. The holder's identity (sender) and
+	// channel are welded onto the pen at mint time, so the Shell neither knows
+	// nor stamps them. Required.
+	Pen harness.Pen
 
 	// Clock returns wall time for build + author#2 timers. Required.
 	Clock func() time.Time
@@ -109,7 +104,7 @@ func NewShell(cfg ShellConfig) *Shell {
 		cfg:     cfg,
 		pending: make(map[message.ID]*pendingReq),
 	}
-	s.caller = behavior.NewCaller(cfg.Sender, cfg.Writer, cfg.Clock, cfg.OnFault)
+	s.caller = behavior.NewCaller(cfg.Pen, cfg.Clock, cfg.OnFault)
 	return s
 }
 
@@ -313,7 +308,7 @@ func (s *Shell) matchCaller(env *message.Envelope) {
 func (s *Shell) buildRequest(rc RuntimeContext, spec RequestSpec) (message.Envelope, error) {
 	now := s.cfg.Clock().UnixMilli()
 	expiresAt := now + int64(spec.Timeout/time.Millisecond)
-	env, err := behavior.BuildRequest(s.cfg.ChannelID, s.cfg.Sender,
+	env, err := behavior.BuildRequest(
 		func() time.Time { return time.UnixMilli(now) },
 		behavior.RequestSpec{
 			ID:         s.cfg.EnvelopeID(now),
@@ -352,7 +347,7 @@ func (s *Shell) submit(ctx context.Context, env message.Envelope, expectsAwait b
 // write commits one envelope through the harness chain; a reject is an error
 // (the caller must know its emit did not land).
 func (s *Shell) write(ctx context.Context, env message.Envelope) error {
-	res, err := s.cfg.Writer.Write(ctx, &env)
+	res, err := s.cfg.Pen.Write(ctx, &env)
 	if err != nil {
 		return err
 	}

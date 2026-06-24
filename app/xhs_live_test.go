@@ -105,7 +105,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 				ID:      xhs.DefaultActorID,
 				Kind:    actor.KindTool,
 				Binding: actor.BindingRuntimeInboundViaRelay,
-				Factory: func(wr harness.Writer) actorrt.Actor {
+				Factory: func(wr harness.Pen) actorrt.Actor {
 					return xhs.NewActor(wr, xhs.Config{
 						ListenAddr:     xhsDeviceAddr,
 						ReaperInterval: 20 * time.Millisecond,
@@ -315,7 +315,7 @@ func TestXHSLiveActorStatus(t *testing.T) {
 				ID:      xhs.DefaultActorID,
 				Kind:    actor.KindTool,
 				Binding: actor.BindingRuntimeInboundViaRelay,
-				Factory: func(wr harness.Writer) actorrt.Actor {
+				Factory: func(wr harness.Pen) actorrt.Actor {
 					return xhs.NewActor(wr, xhs.Config{
 						ListenAddr:     xhsStatusDeviceAddr,
 						ReaperInterval: 20 * time.Millisecond,
@@ -414,7 +414,7 @@ func TestXHSLiveDeviceUnknownOnDaemonDeath(t *testing.T) {
 				ID:      xhs.DefaultActorID,
 				Kind:    actor.KindTool,
 				Binding: actor.BindingRuntimeInboundViaRelay,
-				Factory: func(wr harness.Writer) actorrt.Actor {
+				Factory: func(wr harness.Pen) actorrt.Actor {
 					return xhs.NewActor(wr, xhs.Config{ListenAddr: xhsCascadeDeviceAddr, ReaperInterval: 20 * time.Millisecond, Logger: logger})
 				},
 			}},

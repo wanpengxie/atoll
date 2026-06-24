@@ -21,27 +21,58 @@ const testChannelID = channel.ID("test-channel")
 
 // --- stubs ---
 
-type stubWriter struct {
+// stubMinter is the test substrate铸笔机: Mint welds (id, chID) onto a stubPen
+// that mimics the real boundPen's fail-fast inject — so a remote cell's emit
+// (relayed up empty by the proxy pen) is welded with the connection's
+// authenticated bound id exactly as the production Minter would. A self-reported
+// identity on the relayed envelope is rejected fail-fast, proving the host welds
+// authorship and never trusts the wire's self-report.
+type stubMinter struct {
 	mu      sync.Mutex
 	writes  []*message.Envelope
 	nextSeq int64
 }
 
-func (s *stubWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
+func (s *stubMinter) Mint(id actor.ActorID, chID channel.ID) harness.Pen {
+	return &stubPen{minter: s, id: id, chID: chID}
+}
+
+func (s *stubMinter) record(env *message.Envelope) harness.WriteResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.nextSeq++
 	cp := *env
 	s.writes = append(s.writes, &cp)
-	return harness.WriteResult{MessageID: env.ID, Seq: s.nextSeq}, nil
+	return harness.WriteResult{MessageID: env.ID, Seq: s.nextSeq}
 }
 
-func (s *stubWriter) all() []*message.Envelope {
+func (s *stubMinter) all() []*message.Envelope {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	out := make([]*message.Envelope, len(s.writes))
 	copy(out, s.writes)
 	return out
+}
+
+// stubPen is the welded Pen a stubMinter hands out: it fail-fasts on a self-
+// reported identity (matching the real boundPen) and otherwise injects the
+// welded (id, chID) before recording the write.
+type stubPen struct {
+	minter *stubMinter
+	id     actor.ActorID
+	chID   channel.ID
+}
+
+func (p *stubPen) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
+	if env.Sender.ID != "" || env.ChannelID != "" {
+		return harness.WriteResult{
+			RejectReason: harness.HarnessIdentityNotCallerSettable,
+			RejectDetail: "sender.id/channel_id are substrate-injected, not caller-settable",
+		}, nil
+	}
+	env.Sender.ID = p.id
+	env.ChannelID = p.chID
+	return p.minter.record(env), nil
 }
 
 type stubMembership struct {
@@ -66,21 +97,22 @@ func (s *stubMembership) getAdds() []storespec.MemberActorAdd {
 	return cp
 }
 
-// echoCell responds to each request via its injected pen.
-type echoCell struct{ w harness.Writer }
+// echoCell responds to each request via its injected pen. It leaves
+// Sender.ID/ChannelID empty (substrate-injected): the welded pen stamps the
+// cell's own identity. A non-empty self-report would be rejected fail-fast — the
+// cell does not author its own identity.
+type echoCell struct{ w harness.Pen }
 
 func (e *echoCell) Receive(ctx context.Context, env *message.Envelope) error {
 	if env.Kind != message.KindRequest {
 		return nil
 	}
 	_, _ = e.w.Write(ctx, &message.Envelope{
-		ID:        message.ID("resp-" + string(env.ID)),
-		ChannelID: env.ChannelID,
-		Kind:      message.KindResponse,
-		Type:      env.Type,
-		ParentID:  env.ID,
-		Sender:    message.Sender{ID: env.Audience[0], Kind: actor.KindTool},
-		Audience:  message.Audience{env.Sender.ID},
+		ID:       message.ID("resp-" + string(env.ID)),
+		Kind:     message.KindResponse,
+		Type:     env.Type,
+		ParentID: env.ID,
+		Audience: message.Audience{env.Sender.ID},
 	})
 	return nil
 }
@@ -166,7 +198,7 @@ type homeRig struct {
 	acc        *link.Acceptor
 	rt         *actorrt.Runtime
 	deliver    actorrt.Deliverer
-	writer     *stubWriter
+	minter     *stubMinter
 	membership *stubMembership
 	srv        *httptest.Server
 
@@ -180,7 +212,7 @@ func newHomeRig(t *testing.T, leasePing, leaseTTL time.Duration) *homeRig {
 	r := &homeRig{
 		rt:         rt,
 		deliver:    del,
-		writer:     &stubWriter{},
+		minter:     &stubMinter{},
 		membership: &stubMembership{},
 	}
 	rt.WatchPresence(watcherFunc(func(_ context.Context, id actor.ActorID, _ error) {
@@ -189,7 +221,7 @@ func newHomeRig(t *testing.T, leasePing, leaseTTL time.Duration) *homeRig {
 		r.mu.Unlock()
 	}))
 	r.acc = link.NewAcceptor(link.Config{
-		Writer:     r.writer,
+		Minter:     r.minter,
 		Runtime:    rt,
 		Membership: r.membership,
 		ChannelID:  testChannelID,
@@ -271,7 +303,7 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	// The cell's response flows UP to the home write门.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		got := r.writer.all()
+		got := r.minter.all()
 		if len(got) >= 1 {
 			if got[0].ID != "resp-req-1" || got[0].ParentID != "req-1" {
 				t.Fatalf("emitted up = %+v, want resp-req-1/req-1", got[0])
@@ -338,7 +370,7 @@ func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
 	// The buffered in-window request must now be dispatched and answered.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
-		got := r.writer.all()
+		got := r.minter.all()
 		if len(got) >= 1 {
 			if got[0].ID != "resp-req-window" || got[0].ParentID != "req-window" {
 				t.Fatalf("emitted up = %+v, want resp-req-window/req-window", got[0])
@@ -508,7 +540,7 @@ func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 
 	// No truth terminal: cancel is a best-effort interrupt, not a write. The home
 	// write门 recorded nothing (the caller's closure owns the terminal).
-	if got := r.writer.all(); len(got) != 0 {
+	if got := r.minter.all(); len(got) != 0 {
 		t.Fatalf("cancel wrote truth terminal(s) %+v, want none", got)
 	}
 }

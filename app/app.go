@@ -21,9 +21,7 @@ import (
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
-	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/registry"
-	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // App is the product application server.
@@ -34,6 +32,12 @@ type App struct {
 
 	mu    sync.RWMutex
 	homes map[channel.ID]*platform.Home
+	// humans indexes each channel's live HUMAN write front-ends by user actor id.
+	// A front-end is the app's reference to a home-scoped human cell (admitted via
+	// Home.Spawn with a pen welded to "user:<id>") — the ONLY write path a person
+	// has now that the app holds no write gate (sealed-pen). Home-scoped: spawned
+	// on a user's first write and dropped when the channel home is torn down.
+	humans map[channel.ID]map[actor.ActorID]*humanFront
 
 	channelDBDir string
 }
@@ -60,6 +64,7 @@ func New(cfg Config) (*App, error) {
 		db:           cfg.DB,
 		logger:       logger,
 		homes:        make(map[channel.ID]*platform.Home),
+		humans:       make(map[channel.ID]map[actor.ActorID]*humanFront),
 		channelDBDir: cfg.ChannelDBDir,
 	}
 
@@ -94,6 +99,7 @@ func (a *App) Close() error {
 			firstErr = err
 		}
 		delete(a.homes, id)
+		a.forgetHumans(id)
 	}
 	return firstErr
 }
@@ -252,10 +258,11 @@ const (
 // path — no special "the agent" case. The composition is INTENT; a build/spawn
 // failure (e.g. agent with no LLM creds) is logged and skipped: the row stays
 // (intent), the instance just isn't running (현상 = actor_registry has no row),
-// and default_agent still points at it. Each instance gets a caller-stamped pen
-// (an embedded cell emits through the raw home gate, which the substrate requires
-// a CallerContext on). Server placement: Deps carries NO WorkspaceDir, so the
-// agent class derives the server-embedded Situation.
+// and default_agent still points at it. Each instance is admitted via Home.Spawn,
+// which Mints a pen welded to its (id, chID) inside the membrane and hands it to
+// the factory — the app never sees a bare writer (sealed-pen). Server placement:
+// Deps carries NO WorkspaceDir, so the agent class derives the server-embedded
+// Situation.
 func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 	type instanceSpec struct{ id, class, cfg, state, gcfg string }
 	var specs []instanceSpec
@@ -324,11 +331,10 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 			a.logger.Debug("app: composition instance not built", "channel", string(chID), "instance", inst, "reason", err.Error())
 			continue
 		}
-		pen := &callerStampedWriter{inner: home.Gate(), caller: harness.CallerContext{
-			ActorID: decl.ID, ChannelID: chID,
-		}}
-		impl := decl.Factory(pen)
-		if err := home.Spawn(context.Background(), decl.ID, decl.Kind, impl); err != nil {
+		// Home.Spawn Mints the pen welded to (decl.ID, chID) inside the admission
+		// membrane and hands it to the factory — the app supplies WHAT to place
+		// (id + factory), never a bare writer or a Minter (sealed-pen §3.1).
+		if err := home.Spawn(context.Background(), decl.ID, decl.Kind, decl.Factory); err != nil {
 			a.logger.Warn("app: spawn composition instance failed", "channel", string(chID), "instance", string(decl.ID), "err", err.Error())
 		}
 	}
@@ -370,19 +376,6 @@ func mergeConfig(global, perChannel string) json.RawMessage {
 		return json.RawMessage(gl)
 	}
 	return nil
-}
-
-// callerStampedWriter wraps the home write gate with a fixed CallerContext so an
-// embedded cell's emits authenticate as that cell. (A daemon cell gets this from
-// the link's emit-sink; an embedded cell's pen is stamped here at the app
-// composition root.)
-type callerStampedWriter struct {
-	inner  harness.Writer
-	caller harness.CallerContext
-}
-
-func (w *callerStampedWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	return w.inner.Write(harness.CtxWithCaller(ctx, w.caller), env)
 }
 
 func (a *App) loadChannels() error {

@@ -29,7 +29,10 @@ const (
 	testActorID   = actor.ActorID("agent:T")
 )
 
-// recordingWriter is a concurrency-safe harness.Writer double.
+// recordingWriter is a concurrency-safe harness.Pen double. It records the
+// envelope EXACTLY as the bridge emits it — it does NOT inject identity (a raw
+// recorder, not a boundPen). Under sealed-pen the bridge leaves Sender/ChannelID
+// zero; the real pen injects the welded identity at write time.
 type recordingWriter struct {
 	mu      sync.Mutex
 	written []message.Envelope
@@ -432,8 +435,10 @@ func TestReceive_RequestRunsTurnAndEmitsSingleTerminal(t *testing.T) {
 	if out.ParentID != "req-1" || out.CorrelationID != "corr-1" {
 		t.Fatalf("threading: parent=%s corr=%s", out.ParentID, out.CorrelationID)
 	}
-	if out.Sender.ID != testActorID || out.Sender.Kind != actor.KindAgent {
-		t.Fatalf("sender: %+v", out.Sender)
+	// Sealed-pen: the bridge leaves identity ZERO; the pen injects the welded
+	// (actorID, channelID) at write time. The recorder sees the pre-injection env.
+	if out.Sender.ID != "" || out.Sender.Kind != "" {
+		t.Fatalf("sender must be left empty for the pen to inject; got %+v", out.Sender)
 	}
 	if len(out.Audience) != 1 || out.Audience[0] != "user-A" {
 		t.Fatalf("reply audience: %+v", out.Audience)

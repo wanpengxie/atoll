@@ -22,7 +22,7 @@ const (
 	testActorID   = actor.ActorID("agent:T")
 )
 
-// recordingWriter is a concurrency-safe harness.Writer double.
+// recordingWriter is a concurrency-safe harness.Pen double.
 type recordingWriter struct {
 	mu      sync.Mutex
 	written []message.Envelope

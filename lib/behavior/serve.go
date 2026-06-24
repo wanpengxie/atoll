@@ -59,10 +59,13 @@ type ResponseSpec struct {
 // request is supplied in-hand by the caller: recovering it from truth (when the
 // caller does not already hold it) is the actor's job via the RequestLookup
 // seam, not this builder's.
+//
+// Sender / ChannelID are left ZERO: identity is substrate-injected by the pen
+// at write time (sealed-pen). The responder's own id is welded onto the pen, so
+// the builder neither knows nor fills it.
 func BuildResponseFromRequest(
 	request *message.Envelope,
 	clock func() time.Time,
-	sender message.Sender,
 	spec ResponseSpec,
 ) (*message.Envelope, error) {
 	if request == nil {
@@ -84,8 +87,6 @@ func BuildResponseFromRequest(
 	return &message.Envelope{
 		ID:            message.ID(uuid.NewString()),
 		TS:            clock().UnixMilli(),
-		ChannelID:     request.ChannelID,
-		Sender:        sender,
 		Kind:          message.KindResponse,
 		Type:          request.Type,
 		Payload:       merged,

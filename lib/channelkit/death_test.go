@@ -44,7 +44,12 @@ func TestOnDown_DoesNotDespawnSuccessor(t *testing.T) {
 	}
 }
 
-// fakeWriter records written terminals.
+// fakeWriter is the test stand-in for the SYSTEM Pen the composition root injects
+// (Mint(SystemActorID, chID)). channelkit no longer passes a sender — the system
+// identity is welded INTO the pen — so this fake welds sender==SystemActorID the
+// way the real system pen does, then records the terminal. (A real boundPen would
+// also fail-fast on a pre-filled sender, but author#3's behavior builders leave
+// it empty, so the weld is the only relevant半.)
 type fakeWriter struct {
 	mu      sync.Mutex
 	written []*message.Envelope
@@ -53,6 +58,7 @@ type fakeWriter struct {
 func (f *fakeWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	env.Sender = message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
 	f.written = append(f.written, env)
 	return harness.WriteResult{MessageID: env.ID}, nil
 }

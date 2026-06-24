@@ -36,7 +36,7 @@ type HomeConfig struct {
 // 只交钥匙). The app layer owns HTTP/transport; Home is pure Go.
 type Home struct {
 	channelID channelpkg.ID
-	writer    harness.Writer
+	minter    harness.Minter
 	channel   *channelkit.Channel
 	cs        *runtime.ChannelStores
 	signal    *tap.Signal
@@ -91,10 +91,13 @@ func Open(cfg HomeConfig) (*Home, error) {
 		return nil, fmt.Errorf("platform: open channel store: %w", err)
 	}
 
-	// 3. Build the harness chain (substrate). It is the request-path write门
-	//    directly — the post-commit Notify now lives at the store append
-	//    chokepoint, so there is no写门 wrapper layer.
-	writer, err := harness.New(harness.Deps{
+	// 3. Build the harness Minter (substrate铸笔机). New returns a Minter, never a
+	//    bare chain — the裸 writer's visibility is compile-time封顶 inside the
+	//    harness package. Every admission point (Spawn / attach / system closure)
+	//    Mints a Pen welded to (actorID, chID); the welded identity is unforgeable
+	//    by the holder. The post-commit Notify lives at the store append chokepoint,
+	//    so there is no写门 wrapper layer.
+	minter, err := harness.New(harness.Deps{
 		ChannelID:     cfg.ChannelID,
 		ActorRegistry: cs.Registry,
 		Log:           cs.Log,
@@ -104,6 +107,11 @@ func Open(cfg HomeConfig) (*Home, error) {
 		_ = cs.Close()
 		return nil, fmt.Errorf("platform: build harness: %w", err)
 	}
+	// The system Pen: every system-authored write (sysactor serve responses,
+	// channelkit's author#3 closure terminals) commits through this welded pen, so
+	// sender==SystemActorID rides each write by construction — no caller stamping
+	// at the call sites.
+	systemPen := minter.Mint(actor.SystemActorID, cfg.ChannelID)
 
 	// 5. Bootstrap: register the intrinsic system actor so its substrate-death
 	//    terminals pass harness sender validation. Idempotent SEED: on a home
@@ -141,14 +149,14 @@ func Open(cfg HomeConfig) (*Home, error) {
 		System: func(rt *actorrt.Runtime) actorrt.Actor {
 			return sysactor.New(sysactor.Deps{
 				Registry: cs.Registry,
-				Writer:   writer,
+				Writer:   systemPen,
 				Lookup:   cs.Requests,
 				Clock:    clock,
 				Stat:     &runtimePresenceAdapter{rt: rt},
 				Device:   presence,
 			})
 		},
-		Writer:       writer,
+		Writer:       systemPen,
 		OpenRequests: cs.Query,
 		Clock:        clock,
 		Logger:       logger,
@@ -176,7 +184,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    + lease judgement for attached computes). It folds each attached actor's
 	//    obs PUSH into the presence fold (per-actor WatchObs at attach).
 	links := link.NewAcceptor(link.Config{
-		Writer:     writer,
+		Minter:     minter,
 		Runtime:    channel.Cells(),
 		Membership: cs.Membership,
 		ChannelID:  cfg.ChannelID,
@@ -213,7 +221,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	logger.Info("platform.home.ready", "channel", string(cfg.ChannelID))
 	return &Home{
 		channelID:     cfg.ChannelID,
-		writer:        writer,
+		minter:        minter,
 		channel:       channel,
 		cs:            cs,
 		signal:        signal,
@@ -227,12 +235,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 	}, nil
 }
 
-// Gate returns the commit write门 (the harness chain) — the pen an in-process
-// cell, the client/SDK ingress, and the link emit-sink all write truth with.
-// The post-commit Notify lives at the store append chokepoint now, so the gate
-// is the bare harness chain, not a wrapper.
-func (h *Home) Gate() harness.Writer { return h.writer }
-
 // View returns the read-only observation set (ReadAfterSeq / MaxSeq /
 // ListActors / daemon link-presence). It carries no写 capability — observation
 // only. The host (app) reads presence through here OUT-OF-BAND (no message, no
@@ -243,22 +245,32 @@ func (h *Home) View() View {
 }
 
 // Spawn admits one actor into the channel as durable membership truth and, when
-// impl is non-nil, places it as a live in-process cell (binding=embedded).
+// factory is non-nil, places it as a live in-process cell (binding=embedded) with
+// a Pen welded to its own (id, channelID).
 //
-// Membership is the共同前缀 of both: a presence-bearing cell (impl != nil) and a
-// presence-less member (impl == nil — e.g. a human user, who is a member but has
-// no cell) take the SAME control-plane transition: absent -> insert, soft-
-// deregistered -> reactivate, active -> no-op, each with its system.actor.*
-// mirror event in the same tx. Membership ≠ presence is the substrate truth here;
-// the cell, if any, is the presence层 placed on top. A pre-existing row (server
-// restart) is reused — the live instance rebinds. The impl is opaque to platform
-// (the app layer decides WHAT to place; Home only knows HOW).
-func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, impl actorrt.Actor) error {
+// Identity weld at the admission膜: the app supplies the id (domain authority —
+// "this id may be admitted") and a factory; the substrate Mints the welded Pen
+// and hands it to the factory, so the cell is born with a pen焊死 to its own id
+// (the substrate's "actorID 与写能力焊死不分离" invariant). The app never sees a
+// bare writer or a Minter — it only chooses WHAT to place; Home decides HOW.
+//
+// Order铁律 (security-critical): membership apply -> Mint pen -> factory(pen) ->
+// spawn cell. Membership must be durable truth BEFORE the factory gets a pen,
+// else a cell that writes on construction hits step 4 (sender not yet registered).
+// "出生即焊死" must not become "先拿笔、后登记".
+//
+// nil-guard: factory == nil = membership-ONLY (a presence-less member, e.g. a
+// human user who is a member but has no cell). No Pen is Minted and no cell is
+// placed — Minting/placing a cell for a presence-less member would be wasted (and
+// passing nil to Mint→factory would NPE). Membership ≠ presence is the substrate
+// truth; the cell, if any, is the presence层 on top. A pre-existing row (server
+// restart) is reused — the live instance rebinds.
+func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, factory func(harness.Pen) actorrt.Actor) error {
 	if id == "" {
 		return fmt.Errorf("platform: Spawn id required")
 	}
 	binding := actor.Binding("")
-	if impl != nil {
+	if factory != nil {
 		binding = actor.BindingEmbedded
 	}
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{{
@@ -266,11 +278,12 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, imp
 	}}, nil); err != nil {
 		return fmt.Errorf("platform: Spawn membership: %w", err)
 	}
-	if impl != nil {
-		h.channel.Cells().Spawn(id, impl)
+	if factory != nil {
+		pen := h.minter.Mint(id, h.channelID)
+		h.channel.Cells().Spawn(id, factory(pen))
 	}
 	h.logger.Info("platform.member.spawned", "channel", string(h.channelID),
-		"actor", string(id), "kind", string(kind), "cell", impl != nil)
+		"actor", string(id), "kind", string(kind), "cell", factory != nil)
 	return nil
 }
 

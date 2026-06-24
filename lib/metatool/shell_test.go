@@ -12,11 +12,11 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// shellNoopWriter is a harness.Writer double that accepts every write — the
+// shellNoopPen is a harness.Pen double that accepts every write — the
 // correlator-mechanism tests never exercise the write door.
-type shellNoopWriter struct{}
+type shellNoopPen struct{}
 
-func (shellNoopWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
+func (shellNoopPen) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	return harness.WriteResult{MessageID: env.ID}, nil
 }
 
@@ -25,9 +25,7 @@ func (shellNoopWriter) Write(_ context.Context, env *message.Envelope) (harness.
 // emit path is exercised by execute_test.go through the meta-tools).
 func newTestShell() *Shell {
 	return NewShell(ShellConfig{
-		Writer:     shellNoopWriter{},
-		ChannelID:  "ch-test",
-		Sender:     message.Sender{Kind: "agent", ID: "agent:test"},
+		Pen:        shellNoopPen{},
 		Clock:      func() time.Time { return time.UnixMilli(0) },
 		EnvelopeID: func(nowMs int64) message.ID { return message.ID(fmt.Sprintf("req-%d", nowMs)) },
 	})

@@ -72,13 +72,11 @@ type shellAgent struct {
 	mu    sync.Mutex
 }
 
-func newShellAgent(self actor.ActorID, chID channel.ID, w harness.Writer) *shellAgent {
+func newShellAgent(self actor.ActorID, chID channel.ID, pen harness.Pen) *shellAgent {
 	a := &shellAgent{self: self, chID: chID}
 	a.shell = metatool.NewShell(metatool.ShellConfig{
-		Writer:    w,
-		ChannelID: chID,
-		Sender:    message.Sender{Kind: actor.KindAgent, ID: self},
-		Clock:     time.Now,
+		Pen:   pen,
+		Clock: time.Now,
 		EnvelopeID: func(nowMs int64) message.ID {
 			a.mu.Lock()
 			a.seq++
@@ -154,8 +152,8 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 		t.Fatalf("OpenDB: %v", err)
 	}
 
-	factory := func(chID channel.ID, agentID actor.ActorID, w harness.Writer) (actorrt.Actor, error) {
-		sa := newShellAgent(agentID, chID, w)
+	factory := func(chID channel.ID, agentID actor.ActorID, pen harness.Pen) (actorrt.Actor, error) {
+		sa := newShellAgent(agentID, chID, pen)
 		agentSink(sa)
 		return sa, nil
 	}
@@ -203,7 +201,7 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 					ID:      xhs.DefaultActorID,
 					Kind:    actor.KindTool,
 					Binding: actor.BindingRuntimeInboundViaRelay,
-					Factory: func(wr harness.Writer) actorrt.Actor {
+					Factory: func(wr harness.Pen) actorrt.Actor {
 						return xhs.NewActor(wr, xhs.Config{
 							ListenAddr:     metatoolXHSDeviceAddr,
 							ReaperInterval: 20 * time.Millisecond,
@@ -215,7 +213,7 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 					ID:      kimi.DefaultActorID,
 					Kind:    actor.KindTool,
 					Binding: actor.BindingRuntimeInboundViaRelay,
-					Factory: func(wr harness.Writer) actorrt.Actor {
+					Factory: func(wr harness.Pen) actorrt.Actor {
 						return kimi.NewActor(wr, kimi.Config{
 							ListenAddr:     metatoolKimiDeviceAddr,
 							ReaperInterval: 20 * time.Millisecond,

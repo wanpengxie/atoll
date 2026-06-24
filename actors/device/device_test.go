@@ -13,7 +13,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// recordingWriter is a harness.Writer test double.
+// recordingWriter is a harness.Pen test double.
 type recordingWriter struct {
 	mu     sync.Mutex
 	writes []*message.Envelope

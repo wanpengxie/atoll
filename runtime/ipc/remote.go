@@ -10,17 +10,25 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// RemoteWriter is the OUT-OF-PROCESS end of the writer contract: a
-// harness.Writer that a remote actor uses to emit upward over the port wire and
-// observe the host's authoritative write verdict. It is the wire-contract
+// RemoteWriter is the OUT-OF-PROCESS end of the write contract: a relay-only
+// PROXY PEN (harness.Pen) a remote actor uses to emit upward over the port wire
+// and observe the host's authoritative write verdict. It is the wire-contract
 // counterpart of the host-side port — both ends are parties to the same
 // contract, so the substrate ships both.
 //
-// A remote cell has no local truth: its Respond/EmitEvent drive this writer,
+// INVARIANT: the proxy pen NEVER injects identity and NEVER fail-fasts. It only
+// relays the envelope up the wire; the identity weld + fail-fast live on the
+// HOST side, where the link's emitSink Mints a Pen for the connection's
+// authenticated bound id. A daemon cell's behavior leaves Sender.ID/ChannelID
+// empty (it has no Minter), the proxy pen relays that empty envelope, and the
+// host pen welds the bound identity. So this proxy must stay a pure relay — see
+// the platform emit-identity test.
+//
+// A remote cell has no local truth: its Respond/EmitEvent drive this pen,
 // which sends a KindEmit and BLOCKS until the matching KindEmitAck returns. The
 // returned harness.WriteResult is reconstructed from that ack, so a remote
 // cell's Respond observes the EXACT outcome a local cell's Respond would — the
-// writer contract is not downgraded across the wire.
+// write contract is not downgraded across the wire.
 //
 // Correlation is FIFO with no id (the wire contract, pinned in frame.go): the
 // host acks emits in receipt order, so a pending queue resolved head-first is
@@ -62,10 +70,11 @@ func NewRemoteWriter(codec *Codec) *RemoteWriter {
 }
 
 // Write sends env upward as a KindEmit and blocks until the host returns the
-// matching KindEmitAck (FIFO) or ctx is cancelled. It satisfies harness.Writer:
-// a remote cell's writer seam is this method, so its behavior.Respond /
-// behavior.EmitEvent flow to the host harness (truth owner) and observe the
-// authoritative verdict.
+// matching KindEmitAck (FIFO) or ctx is cancelled. It satisfies harness.Pen
+// (relay-only): a remote cell's pen seam is this method, so its behavior.Respond
+// / behavior.EmitEvent flow to the host harness (truth owner) and observe the
+// authoritative verdict. It does NOT inject identity here — the host emitSink's
+// Mint welds the bound id (see the type doc invariant).
 //
 // On ctx cancellation the waiter is abandoned in place: the host still acks in
 // receipt order, and DeliverAck resolving an abandoned (already-closed-context)
@@ -173,7 +182,8 @@ func (w *RemoteWriter) Close() {
 	}
 }
 
-// Verify the remote writer satisfies the harness writer contract at compile
-// time — the whole point is that a remote cell's writer is indistinguishable
-// from a local one.
-var _ harness.Writer = (*RemoteWriter)(nil)
+// Verify the remote writer satisfies the harness Pen contract at compile time —
+// the whole point is that a remote cell's pen is indistinguishable from a local
+// one. It is a relay-only proxy pen (never injects identity / never fail-fasts);
+// the host emitSink's Mint welds the bound identity.
+var _ harness.Pen = (*RemoteWriter)(nil)

@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"os"
@@ -17,8 +18,6 @@ import (
 	"github.com/wanpengxie/ActOS/app/internal/middleware"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // ---------------------------------------------------------------------------
@@ -185,6 +184,7 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 		_ = home.Close()
 		delete(a.homes, cID)
 	}
+	a.forgetHumans(cID)
 	a.mu.Unlock()
 
 	// Remove daemon bindings, then the channel row.
@@ -328,13 +328,18 @@ func (a *App) handleListMessages(c *gin.Context) {
 	c.JSON(http.StatusOK, result)
 }
 
+// handleSendMessage commits a user-authored message to the channel. The user does
+// NOT write truth directly — sealed-pen forbids an app-held write gate. Instead it
+// hands the raw intent to the user's HUMAN write front-end (a home-scoped actor
+// admitted with a pen welded to "user:<id>"), whose SubmitIntent resolves routing,
+// builds the envelope, and commits through its welded pen — returning the
+// WriteResult synchronously so this POST keeps its 201 message_id/seq.
 func (a *App) handleSendMessage(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {
 		return
 	}
-	home := a.getHome(channel.ID(chID))
-	if home == nil {
+	if home := a.getHome(channel.ID(chID)); home == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
 		return
 	}
@@ -360,113 +365,35 @@ func (a *App) handleSendMessage(c *gin.Context) {
 	}
 
 	userID := middleware.UserID(c)
-	senderID := actor.ActorID("user:" + userID)
-
-	audience := make([]actor.ActorID, 0, len(req.Audience))
-	for _, a := range req.Audience {
-		audience = append(audience, actor.ActorID(a))
-	}
-
-	// No explicit audience → the channel's routing policy decides. default_agent is
-	// the INTENT pointer; routing resolves it against 现状 (actor_registry), with the
-	// agent:boost floor as the §7 failover target:
-	//   • da points at a LIVE agent           → agent-centric: request to it.
-	//   • else, channel HAS a boost floor:
-	//       boost live → failover to boost;  boost down → channel CANNOT serve.
-	//   • else (no boost AND no da set)        → group-chat: broadcast to humans.
-	//   • else (no boost, da was set but down) → no reachable brain, no floor.
-	// "cannot serve" / "no brain" surface as an API error to the SENDING user (a
-	// per-request condition) — NOT written as a channel envelope. An introduced
-	// boost floor means the channel is meant to always have a brain, so the dead
-	// branch NEVER silently degrades to group-chat (that is only the boost-less,
-	// default-less channel's intent).
-	kind := message.Kind(req.Kind)
-	if len(audience) == 0 {
-		var da string
-		_ = a.db.QueryRowContext(c.Request.Context(),
-			`SELECT COALESCE(default_agent, '') FROM channels WHERE id = ?`, chID).Scan(&da)
-
-		actors, lerr := home.View().ListActors(c.Request.Context())
-		if lerr != nil {
-			// fail closed: don't silently downgrade routing on a transient view failure.
-			a.logger.Error("send message: list actors", "channel", chID, "err", lerr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+	front, err := a.humanFor(c.Request.Context(), channel.ID(chID), userID)
+	if err != nil {
+		if errors.Is(err, errChannelNotLoaded) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
 			return
 		}
-		daLive := false
-		if da != "" {
-			for _, ac := range actors {
-				if string(ac.ID) == da && ac.Kind == actor.KindAgent {
-					daLive = true
-					break
-				}
-			}
-		}
-		if daLive {
-			audience = []actor.ActorID{actor.ActorID(da)}
-			kind = message.KindRequest
-		} else {
-			boostID := string(defaultAgentInstanceID)
-			boostLive := false
-			for _, ac := range actors {
-				if string(ac.ID) == boostID && ac.Kind == actor.KindAgent {
-					boostLive = true
-					break
-				}
-			}
-			hasBoost, berr := a.channelHasInstance(c.Request.Context(), chID, boostID)
-			if berr != nil {
-				a.logger.Error("send message: boost lookup", "channel", chID, "err", berr)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-				return
-			}
-			switch {
-			case hasBoost && boostLive:
-				audience = []actor.ActorID{defaultAgentInstanceID}
-				kind = message.KindRequest
-			case hasBoost:
-				// boost floor introduced but down → channel cannot serve.
-				c.JSON(http.StatusServiceUnavailable, gin.H{
-					"error":  "default agent unavailable",
-					"detail": "the channel's default/fallback agent is down",
-				})
-				return
-			case da == "":
-				// no floor + no default → pure group-chat: broadcast to humans.
-				for _, ac := range actors {
-					if ac.Kind == actor.KindHuman {
-						audience = append(audience, ac.ID)
-					}
-				}
-				kind = message.KindEvent
-			default:
-				// da was set but its brain is down, and no boost floor exists.
-				c.JSON(http.StatusServiceUnavailable, gin.H{
-					"error":  "default agent unavailable",
-					"detail": "the channel's default agent is down and no fallback is configured",
-				})
-				return
-			}
-		}
+		a.logger.Error("send message: admit human front", "channel", chID, "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
 	}
 
-	channelID := channel.ID(chID)
-
-	// App layer owns product decisions: sender kind, TTL, envelope shape.
-	env := a.newClientEnvelope(channelID, senderID, req.ID, req.Type, kind, req.Payload, audience)
-	if req.Visibility != "" {
-		env.Visibility = message.Visibility(req.Visibility)
-	}
-	if req.ParentID != "" {
-		env.ParentID = message.ID(req.ParentID)
-	}
-
-	ctx := harness.CtxWithCaller(c.Request.Context(), harness.CallerContext{
-		ActorID:   senderID,
-		ChannelID: channelID,
+	res, err := front.SubmitIntent(c.Request.Context(), submitInput{
+		ID:         req.ID,
+		Type:       req.Type,
+		Kind:       req.Kind,
+		Payload:    req.Payload,
+		Audience:   req.Audience,
+		Visibility: req.Visibility,
+		ParentID:   req.ParentID,
 	})
-	res, err := home.Gate().Write(ctx, env)
 	if err != nil {
+		var rErr *routingError
+		if errors.As(err, &rErr) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{
+				"error":  "default agent unavailable",
+				"detail": rErr.detail,
+			})
+			return
+		}
 		a.logger.Error("send message", "channel", chID, "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
@@ -544,47 +471,4 @@ func (a *App) channelHasInstance(ctx context.Context, chID, instanceID string) (
 		return false, err
 	}
 	return n > 0, nil
-}
-
-// clientRequestTTLMs is the default TTL for client-sent messages (product
-// decision, lives in app layer).
-const clientRequestTTLMs int64 = 30_000
-
-// newClientEnvelope builds a message.Envelope from client-provided fields,
-// filling in defaults (ID, Kind, TTL, Sender with KindHuman). All product
-// decisions (sender kind, TTL) live here in the app layer, not in platform.
-func (a *App) newClientEnvelope(
-	chID channel.ID,
-	senderID actor.ActorID,
-	msgID string,
-	msgType string,
-	kind message.Kind,
-	payload []byte,
-	audience []actor.ActorID,
-) *message.Envelope {
-	now := time.Now().UnixMilli()
-	exp := now + clientRequestTTLMs
-
-	envID := message.ID(msgID)
-	if envID == "" {
-		envID = message.ID(uuid.NewString())
-	}
-	if kind == "" {
-		kind = message.KindRequest
-	}
-
-	aud := make(message.Audience, 0, len(audience))
-	aud = append(aud, audience...)
-
-	return &message.Envelope{
-		ID:        envID,
-		TS:        now,
-		ChannelID: chID,
-		Kind:      kind,
-		Type:      msgType,
-		Sender:    message.Sender{Kind: actor.KindHuman, ID: senderID},
-		Audience:  aud,
-		Payload:   payload,
-		ExpiresAt: &exp,
-	}
 }

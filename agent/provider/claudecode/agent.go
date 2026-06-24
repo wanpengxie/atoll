@@ -96,7 +96,7 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 		ID:      id,
 		Kind:    actor.KindAgent,
 		Binding: actor.BindingRuntimeOutbound,
-		Factory: func(w harness.Writer) actorrt.Actor {
+		Factory: func(w harness.Pen) actorrt.Actor {
 			b, err := NewBridge(cfg, id, chID, w)
 			if err != nil {
 				log.Fatalf("claude agent bridge: %v", err)

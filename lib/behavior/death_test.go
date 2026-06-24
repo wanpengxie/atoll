@@ -41,10 +41,6 @@ func envsToRows(envs []*message.Envelope) []storespec.StoredRow {
 	return rows
 }
 
-func sysSender() message.Sender {
-	return message.Sender{Kind: actor.Kind("system"), ID: actor.ActorID("channel-sys")}
-}
-
 // MaterialiseReceiverUnavailable writes one receiver_unavailable terminal for
 // each in-flight request to the dead actor, and skips nil entries.
 func TestMaterialise_WritesPerRequest(t *testing.T) {
@@ -53,7 +49,7 @@ func TestMaterialise_WritesPerRequest(t *testing.T) {
 		newRequest("a", nil),
 		newRequest("b", nil),
 	})}
-	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), sysSender(), actor.ActorID("dead"), nil)
+	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), actor.ActorID("dead"), nil)
 	if err != nil {
 		t.Fatalf("unexpected err: %v", err)
 	}
@@ -64,8 +60,11 @@ func TestMaterialise_WritesPerRequest(t *testing.T) {
 		if term.Kind != message.KindResponse {
 			t.Fatalf("terminal kind = %q, want response", term.Kind)
 		}
-		if term.Sender != sysSender() {
-			t.Fatalf("terminal sender = %+v, want system", term.Sender)
+		// The system identity is welded onto the (system) pen, not set by the
+		// builder. The relay stub does not inject it, so the built terminal keeps
+		// a zero Sender (sealed-pen).
+		if term.Sender != (message.Sender{}) {
+			t.Fatalf("terminal sender = %+v, want zero (pen-injected)", term.Sender)
 		}
 		var p struct {
 			Status string `json:"status"`
@@ -82,7 +81,7 @@ func TestMaterialise_WritesPerRequest(t *testing.T) {
 func TestMaterialise_DrainQueryFailureReturnsError(t *testing.T) {
 	w := &recordingWriter{}
 	q := &queryStub{err: errors.New("store down")}
-	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), sysSender(), actor.ActorID("dead"), nil)
+	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), actor.ActorID("dead"), nil)
 	if err == nil {
 		t.Fatal("a drain-query failure must return an error")
 	}
@@ -98,7 +97,7 @@ func TestMaterialise_PerRequestWriteFaultContinues(t *testing.T) {
 	q := &queryStub{rows: envsToRows([]*message.Envelope{newRequest("a", nil), newRequest("b", nil)})}
 
 	var faults []message.ID
-	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), sysSender(), actor.ActorID("dead"),
+	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), actor.ActorID("dead"),
 		func(reqID message.ID, ferr error) { faults = append(faults, reqID) })
 	if err != nil {
 		t.Fatalf("per-request faults must not return a top-level error: %v", err)
@@ -113,7 +112,7 @@ func TestMaterialise_PerRequestWriteFaultContinues(t *testing.T) {
 func TestMaterialise_NilOnFaultIgnored(t *testing.T) {
 	w := &recordingWriter{err: errors.New("write boom")}
 	q := &queryStub{rows: envsToRows([]*message.Envelope{newRequest("a", nil), newRequest("b", nil)})}
-	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), sysSender(), actor.ActorID("dead"), nil)
+	err := MaterialiseReceiverUnavailable(context.Background(), w, q, fixedClock(1), actor.ActorID("dead"), nil)
 	if err != nil {
 		t.Fatalf("nil onFault must not surface an error: %v", err)
 	}

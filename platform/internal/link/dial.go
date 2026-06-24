@@ -143,7 +143,7 @@ func (d *Dialer) ChannelID() string { return d.channelID }
 // — the host fires the named request's reqCtx OFF the cell goroutine (the work
 // it interrupts is the goroutine's occupant). Call after Dial, before Start
 // consumes the home's first dispatch.
-func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelope) error, cancel func(requestID message.ID)) (harness.Writer, func(cause string), error) {
+func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelope) error, cancel func(requestID message.ID)) (harness.Pen, func(cause string), error) {
 	d.mu.Lock()
 	sid := d.nextID
 	d.nextID++

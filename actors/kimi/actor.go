@@ -62,7 +62,7 @@ const defaultReaperInterval = time.Second
 // device params are the payload's `args`. The closed set is the action allowlist
 // (types.go), not a multi-type table.
 type Actor struct {
-	writer  harness.Writer
+	pen     harness.Pen
 	actorID actor.ActorID
 	clock   func() time.Time
 	dev     *device
@@ -71,10 +71,10 @@ type Actor struct {
 	obs actorrt.ActorContext
 }
 
-// NewActor builds a kimi adapter bound to its writer + identity + config. The
+// NewActor builds a kimi adapter bound to its pen + identity + config. The
 // device endpoint is constructed here but only LISTENS at Start (cell
 // lifecycle): a half-built actor must never bind a port.
-func NewActor(w harness.Writer, cfg Config) *Actor {
+func NewActor(w harness.Pen, cfg Config) *Actor {
 	clock := cfg.NowFn
 	if clock == nil {
 		clock = time.Now
@@ -88,7 +88,7 @@ func NewActor(w harness.Writer, cfg Config) *Actor {
 		reaperInterval = defaultReaperInterval
 	}
 	a := &Actor{
-		writer:  w,
+		pen:     w,
 		actorID: DefaultActorID,
 		clock:   clock,
 	}
@@ -208,12 +208,8 @@ func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
 	return nil
 }
 
-func (a *Actor) sender() message.Sender {
-	return message.Sender{Kind: actor.KindTool, ID: a.actorID}
-}
-
 func (a *Actor) fail(ctx context.Context, env *message.Envelope, errorCode, detail string) error {
-	_, err := behavior.Fail(ctx, a.writer, a.clock, env, a.sender(), errorCode, detail)
+	_, err := behavior.Fail(ctx, a.pen, a.clock, env, errorCode, detail)
 	return err
 }
 
@@ -226,7 +222,7 @@ func (a *Actor) handleDescribe(ctx context.Context, env *message.Envelope) error
 	if !ok {
 		return a.fail(ctx, env, "type_unsupported", fmt.Sprintf("kimi adapter does not handle %s", req.Type))
 	}
-	_, rerr := behavior.RespondJSON(ctx, a.writer, a.clock, env, a.sender(), answer)
+	_, rerr := behavior.RespondJSON(ctx, a.pen, a.clock, env, answer)
 	return rerr
 }
 
@@ -241,6 +237,6 @@ func (a *Actor) handleStatus(ctx context.Context, env *message.Envelope) error {
 	answer := introspect.AnswerStatus(string(a.actorID), map[string]any{
 		"device_online": a.dev.online(),
 	})
-	_, rerr := behavior.RespondJSON(ctx, a.writer, a.clock, env, a.sender(), answer)
+	_, rerr := behavior.RespondJSON(ctx, a.pen, a.clock, env, answer)
 	return rerr
 }

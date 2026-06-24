@@ -14,8 +14,6 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-var sysSender = message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
-
 // Channel is one assembled channel: actorrt runtime + system cell + the
 // presence-down closure wiring (writer + open-request source).
 type Channel struct {
@@ -32,7 +30,7 @@ type Channel struct {
 	// actor. nil writer/openReqs → OnDown writes no terminals locally (the dead
 	// cell already self-evicted); the caller is responsible for closing the
 	// in-flight requests elsewhere.
-	writer   harness.Writer
+	writer   harness.Pen
 	openReqs storespec.MessageQuery
 	clock    func() time.Time
 
@@ -53,9 +51,10 @@ type Config struct {
 	// cells and does not know domain actor types. nil → no system cell.
 	System func(rt *actorrt.Runtime) actorrt.Actor
 	// Writer + OpenRequests wire the presence-down closure (author #3). Writer is
-	// a harness.Writer the composition root injects already stamped with the
-	// system caller context.
-	Writer       harness.Writer
+	// the system Pen the composition root injects (Mint(SystemActorID, chID)): the
+	// system identity is welded into the pen, so author #3's terminals are system-
+	// authored by construction — channelkit never stamps a caller itself.
+	Writer       harness.Pen
 	OpenRequests storespec.MessageQuery
 	Clock        func() time.Time
 	// Logger surfaces closure-drain faults. nil → discard (silent).
@@ -122,17 +121,13 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 	if c.writer == nil || c.openReqs == nil {
 		return
 	}
-	// Inject CallerContext for the system-authored write: the harness requires
-	// a CallerContext on every write (step 0 rejects without one). The death
-	// closure is system-authored (sender == SystemActorID), so the caller
-	// principal is the system actor.
-	ctx = harness.CtxWithCaller(ctx, harness.CallerContext{
-		ActorID:   actor.SystemActorID,
-		ChannelID: c.channelID,
-	})
+	// The death closure is system-authored: the injected writer is the system Pen
+	// (Mint(SystemActorID)), which welds sender==SystemActorID + the channel id
+	// into every write. No caller injection here — identity rides the pen.
+	//
 	// Delegate the closure materialisation to the behaviour base (author#3, ONE
 	// implementation, co-located with the other two authors — P13). channelkit
-	// only injects the seams (runtime writer + store drain) and an onFault log
+	// only injects the seams (system pen + store drain) and an onFault log
 	// callback; the base holds no logger.
 	onFault := func(reqID message.ID, err error) {
 		c.logger.Error("channelkit.closure.write_failed",
@@ -140,7 +135,7 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 	}
 	if err := behavior.MaterialiseReceiverUnavailable(ctx,
 		c.writer, c.openReqs,
-		c.clock, sysSender, id, onFault); err != nil {
+		c.clock, id, onFault); err != nil {
 		// The drain query failed → no caller of the dead actor can be closed →
 		// every one is a black hole. The loudest fault the watcher can hit.
 		c.logger.Error("channelkit.closure.drain_query_failed",
@@ -174,17 +169,16 @@ func (c *Channel) Reconcile(ctx context.Context) {
 	if c.writer == nil || c.openReqs == nil {
 		return
 	}
-	ctx = harness.CtxWithCaller(ctx, harness.CallerContext{
-		ActorID:   actor.SystemActorID,
-		ChannelID: c.channelID,
-	})
+	// System-authored (same as OnDown): the injected writer is the system Pen, so
+	// the reconciler's terminals carry sender==SystemActorID by construction. No
+	// caller injection — identity rides the pen.
 	onFault := func(reqID message.ID, err error) {
 		c.logger.Error("channelkit.closure.reconcile_fault",
 			"channel", c.channelID, "request", reqID, "err", err)
 	}
 	if err := behavior.ReconcileReceiverUnavailable(ctx,
 		c.writer, c.openReqs, presenceProbe{rt: c.cells},
-		c.clock, sysSender, onFault); err != nil {
+		c.clock, onFault); err != nil {
 		// The distinct-receivers scan failed → no orphan can be enumerated →
 		// every absent receiver's callers stay black holes until the next scan.
 		c.logger.Error("channelkit.closure.reconcile_scan_failed",

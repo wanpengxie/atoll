@@ -11,7 +11,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// stubWriter is an in-package harness.Writer double.
+// stubWriter is an in-package harness.Pen double.
 type stubWriter struct {
 	mu      sync.Mutex
 	written []message.Envelope

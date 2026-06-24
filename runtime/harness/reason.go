@@ -21,6 +21,12 @@ package harness
 type HarnessRejectReason string
 
 const (
+	// Pen identity injection (pre-chain, boundPen.Write) — a write者 hand-filled
+	// env.sender.id / env.channel_id, which are substrate-injected (welded by the
+	// pen), not caller-settable. Fail-fast rather than silently overwriting the
+	// misuse (feedback_agent_consumer_structural_boundary).
+	HarnessIdentityNotCallerSettable HarnessRejectReason = "harness_identity_not_caller_settable"
+
 	// Step 0 — Caller Principal Validation
 	HarnessEngineACLDenied HarnessRejectReason = "harness_engine_acl_denied"
 

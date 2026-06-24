@@ -17,7 +17,7 @@ import (
 
 const testChannelID = channel.ID("ch-test")
 
-// recordingWriter is a concurrency-safe harness.Writer double (mirrors the
+// recordingWriter is a concurrency-safe harness.Pen double (mirrors the
 // kimiagent test double — the adapter emits from the read loop + reaper
 // goroutines as well as the cell goroutine, so the writer must be safe).
 type recordingWriter struct {

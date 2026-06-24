@@ -67,11 +67,13 @@ func deregisterActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID) {
 	}
 }
 
-// ctxCaller returns a context carrying a CallerContext bound to the test channel.
+// ctxCaller returns a context carrying a caller bound to the test channel.
+// Tests drive the internal chain directly (step-isolation), so they set the
+// caller via the package-internal ctxWithCaller rather than minting a pen.
 func ctxCaller(id actor.ActorID) context.Context {
-	return CtxWithCaller(context.Background(), CallerContext{
-		ActorID:   id,
-		ChannelID: testChannelID,
+	return ctxWithCaller(context.Background(), caller{
+		actorID: id,
+		chID:    testChannelID,
 	})
 }
 

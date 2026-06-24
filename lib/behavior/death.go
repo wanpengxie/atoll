@@ -18,8 +18,9 @@ import (
 
 // MaterialiseReceiverUnavailable is the DEATH author (author#3). For every
 // in-flight request addressed to a dead actor it writes one
-// receiver_unavailable terminal. sender = the channel system actor (the harness
-// Step 8 authorises system + receiver_unavailable as the substrate author).
+// receiver_unavailable terminal. The pen is the system pen (the harness Step 8
+// authorises system + receiver_unavailable as the substrate author); the system
+// identity is welded onto the pen (sealed-pen), never a parameter.
 //
 // onFault(reqID, err) lets the caller (channelkit) record each per-request
 // closure fault — the base holds no logger. nil onFault = faults ignored.
@@ -29,10 +30,9 @@ import (
 // bad request does not strand the rest.
 func MaterialiseReceiverUnavailable(
 	ctx context.Context,
-	writer harness.Writer,
+	pen harness.Pen,
 	query storespec.MessageQuery,
 	clock func() time.Time,
-	sender message.Sender,
 	dead actor.ActorID,
 	onFault func(reqID message.ID, err error),
 ) error {
@@ -42,7 +42,7 @@ func MaterialiseReceiverUnavailable(
 	}
 	for i := range rows {
 		req := &rows[i].Envelope
-		if _, werr := Respond(ctx, writer, clock, req, sender, ResponseSpec{
+		if _, werr := Respond(ctx, pen, clock, req, ResponseSpec{
 			Status: "failed",
 			Reason: string(message.TerminalReceiverUnavailable),
 		}); werr != nil {
@@ -83,11 +83,10 @@ type PresenceProbe interface {
 // callers are all black holes) and any per-request write fault.
 func ReconcileReceiverUnavailable(
 	ctx context.Context,
-	writer harness.Writer,
+	pen harness.Pen,
 	query storespec.MessageQuery,
 	present PresenceProbe,
 	clock func() time.Time,
-	sender message.Sender,
 	onFault func(reqID message.ID, err error),
 ) error {
 	receivers, err := query.DistinctOpenRequestReceivers(ctx)
@@ -98,7 +97,7 @@ func ReconcileReceiverUnavailable(
 		if present.Present(id) {
 			continue // receiver is live — no closure owed, it can still answer.
 		}
-		if derr := MaterialiseReceiverUnavailable(ctx, writer, query, clock, sender, id, onFault); derr != nil {
+		if derr := MaterialiseReceiverUnavailable(ctx, pen, query, clock, id, onFault); derr != nil {
 			// Per-receiver drain-query failure: surface it (every one of this
 			// receiver's callers is a black hole) and continue — one bad receiver
 			// must not strand the rest of the scan. This fault is per-RECEIVER, not

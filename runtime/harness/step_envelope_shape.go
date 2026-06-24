@@ -53,7 +53,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 	// This harness IS the single writer of deps.ChannelID's log, so a row
 	// whose channel_id names a different channel is truth corruption (a
 	// channel-A log holding a row that claims channel B). The guard is
-	// structural and must NOT depend on the caller plumbing a CallerContext —
+	// structural and must NOT depend on the caller-context being plumbed —
 	// substrate truth integrity cannot be left to downstream behaviour.
 	// (StepCallerAuth separately checks the caller was authenticated for this
 	// channel — an ACL concern, distinct from this content-vs-binding guard.)

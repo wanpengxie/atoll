@@ -18,7 +18,7 @@ import (
 
 const testChannelID = channel.ID("ch-test")
 
-// recordingWriter is a concurrency-safe harness.Writer double: the adapter emits
+// recordingWriter is a concurrency-safe harness.Pen double: the adapter emits
 // from the read loop + reaper goroutines as well as the cell goroutine, so the
 // writer must be safe.
 type recordingWriter struct {

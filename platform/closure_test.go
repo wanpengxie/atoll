@@ -14,6 +14,7 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
@@ -42,6 +43,30 @@ func (a *silentActor) Receive(_ context.Context, env *message.Envelope) error {
 		a.caller.Arm(env)
 	}
 	return nil
+}
+
+// penCell is a no-op cell whose only purpose is to capture the welded Pen the
+// substrate Mints for it at admission. In the sealed-pen world a write门 is
+// reachable ONLY as an actor's own welded pen (no Home.Gate / no Minter outside
+// platform), so a test that needs to write truth AS some actor spawns that actor
+// and uses the pen the factory received — exactly the production admission path.
+type penCell struct{ pen harness.Pen }
+
+func (penCell) Receive(context.Context, *message.Envelope) error { return nil }
+
+// spawnWithPen admits id as a presence-bearing cell and returns the Pen welded to
+// (id, channelID). This is the only legitimate way a platform_test obtains a pen:
+// through the same Spawn(factory) admission an agent/tool/human goes through.
+func spawnWithPen(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor.Kind) harness.Pen {
+	t.Helper()
+	var pen harness.Pen
+	if err := ch.Spawn(context.Background(), id, kind, func(p harness.Pen) actorrt.Actor {
+		pen = p
+		return penCell{pen: p}
+	}); err != nil {
+		t.Fatalf("spawn pen actor %s: %v", id, err)
+	}
+	return pen
 }
 
 // ---------------------------------------------------------------------------
@@ -73,14 +98,14 @@ func registerActor(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor
 	}
 }
 
-// writeRequest writes a kind=request envelope through the gateway (= full
-// commit pipeline: harness -> append -> notify; the delivery tap then delivers
-// the committed row to its audience cells asynchronously).
+// writeRequest writes a kind=request envelope through the caller's welded pen (=
+// full commit pipeline: harness -> append -> notify; the delivery tap then
+// delivers the committed row to its audience cells asynchronously). Sender.ID /
+// ChannelID are left EMPTY — the pen injects the welded (caller, channel); a non-
+// empty self-report would be rejected fail-fast.
 func writeRequest(
 	t *testing.T,
-	ch *platform.Home,
-	senderID actor.ActorID,
-	senderKind actor.Kind,
+	pen harness.Pen,
 	targetID actor.ActorID,
 	reqType string,
 	expiresAt *int64,
@@ -90,8 +115,6 @@ func writeRequest(
 	env := &message.Envelope{
 		ID:         id,
 		TS:         time.Now().UnixMilli(),
-		ChannelID:  closureTestChannelID,
-		Sender:     message.Sender{Kind: senderKind, ID: senderID},
 		Kind:       message.KindRequest,
 		Type:       reqType,
 		Payload:    json.RawMessage(`{}`),
@@ -100,13 +123,9 @@ func writeRequest(
 		ExpiresAt:  expiresAt,
 	}
 
-	ctx := harness.CtxWithCaller(context.Background(), harness.CallerContext{
-		ActorID:   senderID,
-		ChannelID: closureTestChannelID,
-	})
-	res, err := ch.Gate().Write(ctx, env)
+	res, err := pen.Write(context.Background(), env)
 	if err != nil {
-		t.Fatalf("Gate().Write: %v", err)
+		t.Fatalf("pen.Write: %v", err)
 	}
 	if !res.Accepted() {
 		t.Fatalf("SendMessage rejected: %s (%s)", res.RejectReason, res.RejectDetail)
@@ -154,19 +173,22 @@ func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T
 	callerID := actor.ActorID("user:caller")
 	workerID := actor.ActorID("agent:worker")
 
-	// 1. Register both actors in membership.
-	registerActor(t, ch, callerID, actor.KindHuman)
+	// 1. Admit the caller as a pen-bearing cell (its welded pen writes the request)
+	//    and register the worker in membership.
+	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
 	registerActor(t, ch, workerID, actor.KindAgent)
 
 	// 2. Spawn the panic actor cell (membership already seeded above; Spawn
 	//    reactivates + places the cell).
-	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, panicOnReceive{}); err != nil {
+	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, func(harness.Pen) actorrt.Actor {
+		return panicOnReceive{}
+	}); err != nil {
 		t.Fatalf("spawn worker cell: %v", err)
 	}
 
 	// 3. Write a request addressed to the worker through the full pipeline.
 	//    The delivery tap delivers it to the worker cell, which panics.
-	reqID := writeRequest(t, ch, callerID, actor.KindHuman, workerID, "test.do", nil)
+	reqID := writeRequest(t, callerPen, workerID, "test.do", nil)
 
 	// 4. Wait for the receiver_unavailable terminal to appear in truth.
 	//    The chain: panic -> cell death -> publishDown -> OnDown ->
@@ -227,32 +249,31 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 	callerID := actor.ActorID("user:caller")
 	workerID := actor.ActorID("agent:silent")
 
-	// 1. Register both actors in membership.
-	registerActor(t, ch, callerID, actor.KindHuman)
+	// 1. Admit the caller as a pen-bearing cell. Its welded pen is BOTH the request
+	//    writer AND the Caller's terminal author — author #2 is caller self-close,
+	//    so the timeout terminal is committed under the caller's own welded
+	//    identity (no sender passed; the pen welds it). This is exactly how a real
+	//    caller actor holds its Caller primitive.
+	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
 	registerActor(t, ch, workerID, actor.KindAgent)
 
-	// 2. Build a silentActor with a Caller wired to the gateway writer. The
-	//    Caller's fireTimeout will write the unanswered_timeout terminal
-	//    through the harness. The sender for the terminal is the CALLER (the
-	//    one who issued the request and owns the timer), matching the author#2
-	//    contract: caller self-close.
+	// 2. Build a silentActor with a Caller wired to the CALLER's welded pen. The
+	//    Caller's fireTimeout writes the unanswered_timeout terminal through that
+	//    pen, so sender == callerID by construction (caller self-close).
 	sa := &silentActor{
-		caller: behavior.NewCaller(
-			message.Sender{Kind: actor.KindHuman, ID: callerID},
-			ch.Gate(),
-			time.Now,
-			nil,
-		),
+		caller: behavior.NewCaller(callerPen, time.Now, nil),
 	}
 
 	// 3. Spawn the silent actor cell (membership already seeded; Spawn places it).
-	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, sa); err != nil {
+	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, func(harness.Pen) actorrt.Actor {
+		return sa
+	}); err != nil {
 		t.Fatalf("spawn silent cell: %v", err)
 	}
 
 	// 4. Write a request with a short ExpiresAt (now + 300ms).
 	deadline := time.Now().Add(300 * time.Millisecond).UnixMilli()
-	reqID := writeRequest(t, ch, callerID, actor.KindHuman, workerID, "test.ask", &deadline)
+	reqID := writeRequest(t, callerPen, workerID, "test.ask", &deadline)
 
 	// 5. Wait for the unanswered_timeout terminal. The Caller timer fires
 	//    ~300ms after the request was armed, then writes through the harness.

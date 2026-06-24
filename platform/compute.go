@@ -110,15 +110,17 @@ type ComputeConfig struct {
 }
 
 // ActorDecl declares one actor the daemon will host. Factory constructs the
-// actorrt.Actor given the cell's writer (the link's out-of-process pen) — the
-// writer only exists after the actor's stream opens, so the actor cannot be
-// pre-built: every cell that can emit needs its pen at construction, and in the
-// actor model every actor can emit. There is no writer-less construction path.
+// actorrt.Actor given the cell's Pen (the link's out-of-process relay-only proxy
+// pen) — the pen only exists after the actor's stream opens, so the actor cannot
+// be pre-built: every cell that can emit needs its pen at construction, and in
+// the actor model every actor can emit. There is no pen-less construction path.
+// The proxy pen relays upward without injecting identity; the host emitSink's
+// Mint welds the actor's authenticated bound id.
 type ActorDecl struct {
 	ID      actor.ActorID
 	Kind    actor.Kind
 	Binding actor.Binding
-	Factory func(harness.Writer) actorrt.Actor
+	Factory func(harness.Pen) actorrt.Actor
 }
 
 // RunCompute connects to the channel home and hosts the supplied actors as
@@ -168,7 +170,7 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		// dispatch handler routes every envelope on this stream into THIS actor's
 		// mailbox (the stream IS the target — no audience demux on the daemon).
 		target := a.ID
-		writer, downHandler, err := d.OpenStream(target, func(env *message.Envelope) error {
+		pen, downHandler, err := d.OpenStream(target, func(env *message.Envelope) error {
 			_, err := del.Deliver([]actor.ActorID{target}, env)
 			return err
 		}, func(requestID message.ID) {
@@ -180,7 +182,7 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		if a.Factory == nil {
 			return fmt.Errorf("actor %q: nil Factory", a.ID)
 		}
-		impl := a.Factory(writer)
+		impl := a.Factory(pen)
 		watcher.mu.Lock()
 		watcher.down[a.ID] = downHandler
 		watcher.mu.Unlock()

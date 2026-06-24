@@ -23,7 +23,7 @@ import (
 // exec operations are confined to <root>/<channel-id>/ — one workspace
 // subdirectory per channel, created on first use.
 type Actor struct {
-	writer  harness.Writer
+	pen     harness.Pen
 	actorID actor.ActorID
 	root    string
 	clock   func() time.Time
@@ -32,12 +32,12 @@ type Actor struct {
 
 // NewActor constructs a device Actor. id is the full actor id
 // (device:<name>); root is the workspace root directory.
-func NewActor(writer harness.Writer, id actor.ActorID, root string, logger *slog.Logger) *Actor {
+func NewActor(pen harness.Pen, id actor.ActorID, root string, logger *slog.Logger) *Actor {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &Actor{
-		writer:  writer,
+		pen:     pen,
 		actorID: id,
 		root:    root,
 		clock:   time.Now,
@@ -95,13 +95,9 @@ func resolvePath(workspace, p string) (string, error) {
 	return full, nil
 }
 
-func (a *Actor) sender() message.Sender {
-	return message.Sender{Kind: actor.KindTool, ID: a.actorID}
-}
-
 // respond commits a status=completed final with the given result payload.
 func (a *Actor) respond(ctx context.Context, env *message.Envelope, result any) error {
-	_, err := behavior.RespondJSON(ctx, a.writer, a.clock, env, a.sender(), result)
+	_, err := behavior.RespondJSON(ctx, a.pen, a.clock, env, result)
 	if err != nil {
 		a.logger.Warn("device.respond.error",
 			"request_id", string(env.ID), "type", env.Type, "err", err.Error())
@@ -111,7 +107,7 @@ func (a *Actor) respond(ctx context.Context, env *message.Envelope, result any) 
 
 // fail closes the request with the conventional {error_code, detail} failure.
 func (a *Actor) fail(ctx context.Context, env *message.Envelope, errorCode, detail string) error {
-	_, err := behavior.Fail(ctx, a.writer, a.clock, env, a.sender(), errorCode, detail)
+	_, err := behavior.Fail(ctx, a.pen, a.clock, env, errorCode, detail)
 	if err != nil {
 		a.logger.Error("device.fail.respond.error",
 			"request_id", string(env.ID), "error_code", errorCode, "err", err)

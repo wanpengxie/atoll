@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
@@ -46,9 +45,11 @@ type RequestSpec struct {
 // construction defaults, mirroring serve's BuildResponseFromRequest. Bindings
 // stamp transport-edge fields (TSReceived) after build; this builder never
 // writes.
+//
+// Sender / ChannelID are left ZERO: identity is substrate-injected by the pen
+// at write time (sealed-pen). The calling actor's id is welded onto the pen, so
+// the builder neither knows nor fills it.
 func BuildRequest(
-	chID channel.ID,
-	sender message.Sender,
 	clock func() time.Time,
 	spec RequestSpec,
 ) (*message.Envelope, error) {
@@ -65,10 +66,8 @@ func BuildRequest(
 	return &message.Envelope{
 		ID:            id,
 		TS:            clock().UnixMilli(),
-		ChannelID:     chID,
 		Kind:          message.KindRequest,
 		Type:          strings.TrimSpace(spec.Type),
-		Sender:        sender,
 		Audience:      spec.Audience,
 		Payload:       spec.Payload,
 		Visibility:    spec.Visibility,
@@ -85,30 +84,30 @@ func BuildRequest(
 // Match, and Stop are all invoked from the actor's Receive/Stop, which the host
 // runs serially on the single cell goroutine. So `pending` needs no lock. A
 // timer's fireTimeout runs OFF the cell goroutine (the timer's own goroutine)
-// but NEVER touches `pending`: it holds only an immutable request snapshot, the
-// caller's sender, and the writer (concurrency-safe per harness.Writer contract).
-// The race between a timer fire and a late real terminal from the receiver is
-// resolved by the harness one-terminal-per-request UNIQUE INDEX — the loser gets
-// RejectReason=HarnessTerminalDuplicate, which is benign.
+// but NEVER touches `pending`: it holds only an immutable request snapshot and
+// the pen (concurrency-safe per harness.Pen contract; identity is welded onto
+// the pen, not carried alongside). The race between a timer fire and a late real
+// terminal from the receiver is resolved by the harness one-terminal-per-request
+// UNIQUE INDEX — the loser gets RejectReason=HarnessTerminalDuplicate, which is
+// benign.
 type Caller struct {
-	sender  message.Sender
-	writer  harness.Writer
+	pen     harness.Pen
 	clock   func() time.Time
 	pending map[message.ID]*time.Timer
 	onFault func(reqID message.ID, err error)
 }
 
-// NewCaller builds a caller-scoped closure manager. onFault is the per-request
-// fault face — symmetric with death.go's author#3 onFault. fireTimeout is
-// author#2's terminal-write executor; when its write FAILS (a real store/reject
-// error, NOT a benign duplicate) the liveness guarantee has a hole that must be
-// observable, so the base reports it through onFault. A duplicate (the
-// receiver's real terminal already landed) is the happy race and is never a
+// NewCaller builds a caller-scoped closure manager. The calling actor's identity
+// is welded onto the pen (sealed-pen), never a separate parameter. onFault is the
+// per-request fault face — symmetric with death.go's author#3 onFault.
+// fireTimeout is author#2's terminal-write executor; when its write FAILS (a real
+// store/reject error, NOT a benign duplicate) the liveness guarantee has a hole
+// that must be observable, so the base reports it through onFault. A duplicate
+// (the receiver's real terminal already landed) is the happy race and is never a
 // fault. nil onFault = faults ignored (the base holds no logger).
-func NewCaller(sender message.Sender, writer harness.Writer, clock func() time.Time, onFault func(reqID message.ID, err error)) *Caller {
+func NewCaller(pen harness.Pen, clock func() time.Time, onFault func(reqID message.ID, err error)) *Caller {
 	return &Caller{
-		sender:  sender,
-		writer:  writer,
+		pen:     pen,
 		clock:   clock,
 		pending: map[message.ID]*time.Timer{},
 		onFault: onFault,
@@ -143,11 +142,15 @@ func (c *Caller) Arm(req *message.Envelope) {
 }
 
 // fireTimeout runs OFF the cell goroutine (the timer's goroutine). It holds
-// ONLY the immutable snapshot, the caller's sender, the writer, and onFault — it
-// NEVER touches `pending`. It commits an unanswered_timeout terminal to truth
-// (audience = caller). The caller does NOT learn of the timeout here: that
-// terminal fans back to the caller's mailbox and Match clears `pending` on the
-// cell goroutine (mailbox is the sole ingress).
+// ONLY the immutable snapshot, the pen, and onFault — it NEVER touches
+// `pending`. It commits an unanswered_timeout terminal to truth (audience =
+// caller). The caller does NOT learn of the timeout here: that terminal fans
+// back to the caller's mailbox and Match clears `pending` on the cell goroutine
+// (mailbox is the sole ingress).
+//
+// Identity is welded onto the pen (sealed-pen): the terminal's sender/channel_id
+// are left zero by the builder and the pen injects the caller's own welded id at
+// write time. There is no caller-context plumbing here.
 //
 // The write result is no longer swallowed: a duplicate (the receiver's real
 // terminal already landed — the happy race) is benign and silent; ANY other
@@ -156,7 +159,7 @@ func (c *Caller) Arm(req *message.Envelope) {
 // SAME fault face author#3 (death.go) already has. A liveness-guarantee author
 // that fails silently is the asymmetry §3.2 closes.
 func (c *Caller) fireTimeout(req *message.Envelope) {
-	term, err := BuildResponseFromRequest(req, c.clock, c.sender, ResponseSpec{
+	term, err := BuildResponseFromRequest(req, c.clock, ResponseSpec{
 		Status: "failed",
 		Reason: string(message.TerminalUnansweredTimeout),
 	})
@@ -164,11 +167,7 @@ func (c *Caller) fireTimeout(req *message.Envelope) {
 		c.fault(req.ID, fmt.Errorf("behavior: caller timeout build: %w", err))
 		return
 	}
-	ctx := harness.CtxWithCaller(context.Background(), harness.CallerContext{
-		ActorID:   c.sender.ID,
-		ChannelID: req.ChannelID,
-	})
-	out, werr := c.writer.Write(ctx, term)
+	out, werr := c.pen.Write(context.Background(), term)
 	if werr != nil {
 		c.fault(req.ID, fmt.Errorf("behavior: caller timeout write: %w", werr))
 		return

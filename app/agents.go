@@ -18,7 +18,6 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/registry"
-	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // agents.go is the §五 创建与控制 face (agent-spec §五): a direct API over the
@@ -64,11 +63,9 @@ func (a *App) spawnAgentInstance(chID channel.ID, home *platform.Home, instanceI
 	if err != nil {
 		return err
 	}
-	pen := &callerStampedWriter{inner: home.Gate(), caller: harness.CallerContext{
-		ActorID: decl.ID, ChannelID: chID,
-	}}
-	impl := decl.Factory(pen)
-	return home.Spawn(context.Background(), decl.ID, decl.Kind, impl)
+	// Home.Spawn Mints the welded pen inside the admission membrane and hands it to
+	// the factory (sealed-pen §3.1) — the app supplies id + factory, never a pen.
+	return home.Spawn(context.Background(), decl.ID, decl.Kind, decl.Factory)
 }
 
 type createAgentReq struct {

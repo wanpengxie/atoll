@@ -3,6 +3,8 @@ package harness
 import (
 	"context"
 
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
@@ -67,8 +69,21 @@ type WriteResult struct {
 // Accepted reports whether the write produced a durable row.
 func (r WriteResult) Accepted() bool { return r.RejectReason == "" }
 
-// Writer is the harness write entry point as an interface — the injectable
-// write seam for any binding edge that drives the chain. *Chain satisfies it.
-type Writer interface {
+// Pen is the substrate's opaque write capability — the ONLY thing an actor (or
+// any write者) ever holds. A Pen is welded to one identity at mint time: every
+// Write it commits carries that (actorID, chID), and the holder cannot change
+// it. This is the substrate's first syscall (write truth); identity rides each
+// write the way a UID rides each Linux syscall. boundPen satisfies it (and, on
+// the daemon side, the relay-only RemoteWriter proxy pen).
+type Pen interface {
 	Write(ctx context.Context, env *message.Envelope) (WriteResult, error)
+}
+
+// Minter is the铸笔机 — the runtime's ONE outward face for producing pens. The
+// platform holds the Minter (never the bare chain) and Mints a welded Pen at
+// each admission point (Spawn / attach / system closure). Minting any identity
+// is the highest capability in the system, so archtest confines harness.Minter
+// type references to the platform tree.
+type Minter interface {
+	Mint(actorID actor.ActorID, chID channel.ID) Pen
 }

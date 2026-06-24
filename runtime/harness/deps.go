@@ -32,23 +32,25 @@ type NoopMetrics struct{}
 
 func (NoopMetrics) IncCounter(string, ...string) {}
 
-// CallerContext carries the principal + transport metadata the harness
-// needs to verify a write. It is plumbed through context.Context (see
-// CtxWithCaller / CallerFromCtx) so step implementations do not need a
-// per-step parameter and concrete bindings can populate it once at the
-// edge.
-type CallerContext struct {
-	// ActorID is the authenticated principal that issued the write.
+// caller carries the principal + transport metadata the harness needs to
+// verify a write. It is plumbed through context.Context (see ctxWithCaller /
+// callerFromCtx) so step implementations do not need a per-step parameter; the
+// boundPen populates it once from the welded (actorID, chID) before driving the
+// chain. It is harness-internal (unexported): the substrate's造笔面 is Mint,
+// which takes the raw (actorID, chID) — there is no caller-constructible
+// identity context outside the package.
+type caller struct {
+	// actorID is the authenticated principal that issued the write.
 	// step 1 / step 3 compare it against envelope.sender.id.
-	ActorID actor.ActorID
+	actorID actor.ActorID
 
-	// ChannelID is the channel binding the caller is authenticated for.
+	// chID is the channel binding the caller is authenticated for.
 	// Step 0/1 rejects (harness_engine_acl_denied) when it differs from the
 	// harness-bound channel.
-	ChannelID channel.ID
+	chID channel.ID
 }
 
-// Deps bundles every collaborator a runtime harness Chain needs. One
+// Deps bundles every collaborator the runtime write engine needs. One
 // Deps instance is shared across all step implementations.
 type Deps struct {
 	// ChannelID identifies which channel this harness is bound to. The
@@ -79,7 +81,7 @@ type Deps struct {
 	Metrics Metrics
 }
 
-// Validate returns nil when Deps is wired enough to assemble a Chain.
+// Validate returns nil when Deps is wired enough to assemble the engine.
 func (d Deps) Validate() error {
 	if d.ChannelID == "" {
 		return errors.New("harness: Deps.ChannelID required")
@@ -94,25 +96,25 @@ func (d Deps) Validate() error {
 }
 
 // ---------------------------------------------------------------------
-// CallerContext plumbing via context.Context
+// caller plumbing via context.Context (harness-internal)
 // ---------------------------------------------------------------------
 
 type ctxKeyCaller struct{}
 
-// CtxWithCaller returns a child ctx carrying the caller identity. Must be set
-// by the binding edge before invoking Chain.Write; absence is rejected as
-// harness_engine_acl_denied.
-func CtxWithCaller(ctx context.Context, c CallerContext) context.Context {
+// ctxWithCaller returns a child ctx carrying the caller identity. The boundPen
+// sets it from the welded principal before driving the chain; there is no
+// exported setter — identity is never caller-plumbed, it is Mint-welded.
+func ctxWithCaller(ctx context.Context, c caller) context.Context {
 	return context.WithValue(ctx, ctxKeyCaller{}, c)
 }
 
-// CallerFromCtx pulls the CallerContext set by CtxWithCaller. Returns
-// the zero value when absent.
-func callerFromCtx(ctx context.Context) CallerContext {
-	if v, ok := ctx.Value(ctxKeyCaller{}).(CallerContext); ok {
+// callerFromCtx pulls the caller set by ctxWithCaller. Returns the zero value
+// when absent.
+func callerFromCtx(ctx context.Context) caller {
+	if v, ok := ctx.Value(ctxKeyCaller{}).(caller); ok {
 		return v
 	}
-	return CallerContext{}
+	return caller{}
 }
 
 // ---------------------------------------------------------------------
@@ -124,7 +126,7 @@ type ctxKeyRawEnvelope struct{}
 
 // CtxWithRawEnvelope returns a child ctx carrying the original envelope
 // JSON bytes the caller decoded into *message.Envelope. This is a
-// binding→harness INJECTION SEAM (like CtxWithCaller): wire-level bindings
+// binding→harness INJECTION SEAM: wire-level bindings
 // (a connect-in port, the HTTP API) MUST plumb the raw wire bytes through it so Step 2's
 // unknown-top-level-field fail-closed check (proto-layer0 §7.3) has the
 // original JSON — without this setter exported, that check is

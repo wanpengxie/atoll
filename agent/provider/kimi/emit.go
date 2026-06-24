@@ -121,7 +121,7 @@ func (b *Bridge) emitEnvelope(
 // write commits one envelope through the harness chain; a reject is an
 // error (the agent must know its emit did not land).
 func (b *Bridge) write(ctx context.Context, env message.Envelope) error {
-	res, err := b.writer.Write(ctx, &env)
+	res, err := b.pen.Write(ctx, &env)
 	if err != nil {
 		return err
 	}
@@ -235,7 +235,7 @@ func (b *Bridge) buildAgentEvent(
 	correlationID message.ID,
 ) (message.Envelope, error) {
 	now := b.cfg.NowFn()
-	env, err := behavior.BuildEvent(b.chID, b.sender(),
+	env, err := behavior.BuildEvent(
 		func() time.Time { return time.UnixMilli(now) },
 		behavior.EventSpec{
 			ID:            b.envelopeID(now),
@@ -270,7 +270,7 @@ const agentSkillDoc = "# agent\n\n" +
 func (b *Bridge) handleDescribe(ctx context.Context, env *message.Envelope) error {
 	req, err := introspect.ParseDescribeRequest(env.Payload)
 	if err != nil {
-		_, ferr := behavior.Fail(ctx, b.writer, b.clock, env, b.sender(),
+		_, ferr := behavior.Fail(ctx, b.pen, b.clock, env,
 			"payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
 		return ferr
 	}
@@ -280,11 +280,11 @@ func (b *Bridge) handleDescribe(ctx context.Context, env *message.Envelope) erro
 		SkillDoc:    agentSkillDoc,
 	}, req)
 	if !ok {
-		_, ferr := behavior.Fail(ctx, b.writer, b.clock, env, b.sender(),
+		_, ferr := behavior.Fail(ctx, b.pen, b.clock, env,
 			"type_unsupported", fmt.Sprintf("agent has no type %s", req.Type))
 		return ferr
 	}
-	_, rerr := behavior.RespondJSON(ctx, b.writer, b.clock, env, b.sender(), answer)
+	_, rerr := behavior.RespondJSON(ctx, b.pen, b.clock, env, answer)
 	return rerr
 }
 
@@ -295,11 +295,11 @@ func (b *Bridge) handleDescribe(ctx context.Context, env *message.Envelope) erro
 // turn and burn an LLM call on a fact the bridge already holds.
 func (b *Bridge) handleStatus(ctx context.Context, env *message.Envelope) error {
 	if _, err := introspect.ParseStatusRequest(env.Payload); err != nil {
-		_, ferr := behavior.Fail(ctx, b.writer, b.clock, env, b.sender(),
+		_, ferr := behavior.Fail(ctx, b.pen, b.clock, env,
 			"payload_invalid", fmt.Sprintf("decode status payload: %v", err))
 		return ferr
 	}
 	answer := introspect.AnswerStatus(string(b.self), map[string]any{"role": "agent"})
-	_, rerr := behavior.RespondJSON(ctx, b.writer, b.clock, env, b.sender(), answer)
+	_, rerr := behavior.RespondJSON(ctx, b.pen, b.clock, env, answer)
 	return rerr
 }

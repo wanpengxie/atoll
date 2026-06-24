@@ -10,13 +10,18 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/internal/store"
 )
 
-func newTestChain(t *testing.T, cs *store.ChannelStores) *Chain {
+// newTestChain returns the package-internal bare chain. Tests drive the chain
+// directly (steps 0..8 + append) for step-isolation: they set the caller via
+// ctxWithCaller and pre-fill envelope.sender.id / channel_id, which the welded
+// boundPen would otherwise own. The pen's fail-fast injection is exercised
+// separately (platform emit-identity tests).
+func newTestChain(t *testing.T, cs *store.ChannelStores) *chain {
 	t.Helper()
-	c, err := New(testDeps(t, cs))
+	m, err := New(testDeps(t, cs))
 	if err != nil {
 		t.Fatalf("New chain: %v", err)
 	}
-	return c
+	return m.(*minter).chain
 }
 
 // New rejects incomplete Deps (substrate refuses to assemble half-wired).
@@ -37,7 +42,7 @@ func TestChain_WriteAcceptsEventDurably(t *testing.T) {
 		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindEvent, Type: "agent.text",
 		Audience: message.Audience{"x"},
 	}
-	res, err := c.Write(ctxCaller("agent:p"), e)
+	res, err := c.write(ctxCaller("agent:p"), e)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -99,7 +104,7 @@ func TestChain_WriteShortCircuitsOnFirstReject(t *testing.T) {
 				Audience: message.Audience{"x"},
 			}
 			tc.mutate(e)
-			res, err := c.Write(tc.ctx, e)
+			res, err := c.write(tc.ctx, e)
 			if err != nil {
 				t.Fatalf("Write: %v", err)
 			}
@@ -121,7 +126,7 @@ func TestChain_WriteShortCircuitsOnFirstReject(t *testing.T) {
 func TestChain_WriteNilEnvelope(t *testing.T) {
 	cs := newTestStore(t)
 	c := newTestChain(t, cs)
-	if _, err := c.Write(context.Background(), nil); err == nil {
+	if _, err := c.write(context.Background(), nil); err == nil {
 		t.Fatalf("nil envelope should error")
 	}
 }
@@ -140,7 +145,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 		Sender: message.Sender{ID: "agent:caller"}, Kind: message.KindRequest, Type: "xhs.publish",
 		Audience: message.Audience{"tool:xhs"}, Payload: json.RawMessage(`{}`),
 	}
-	if res, err := c.Write(ctxCaller("agent:caller"), req); err != nil || !res.Accepted() {
+	if res, err := c.write(ctxCaller("agent:caller"), req); err != nil || !res.Accepted() {
 		t.Fatalf("request write: err=%v reason=%q", err, res.RejectReason)
 	}
 
@@ -151,7 +156,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 		ParentID: "req1", Audience: message.Audience{"agent:caller"},
 		Payload: json.RawMessage(`{"status":"completed"}`),
 	}
-	res, err := c.Write(ctxCaller("tool:xhs"), resp)
+	res, err := c.write(ctxCaller("tool:xhs"), resp)
 	if err != nil || !res.Accepted() {
 		t.Fatalf("response write: err=%v reason=%q", err, res.RejectReason)
 	}
@@ -171,7 +176,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 		ParentID: "req1", Audience: message.Audience{"agent:caller"},
 		Payload: json.RawMessage(`{"status":"failed","reason":"receiver_internal_error"}`),
 	}
-	res2, err := c.Write(ctxCaller("tool:xhs"), resp2)
+	res2, err := c.write(ctxCaller("tool:xhs"), resp2)
 	if err != nil {
 		t.Fatalf("second response write err: %v", err)
 	}
@@ -193,10 +198,10 @@ func TestChain_DuplicateEnvelopeIDRejectsAtAppend(t *testing.T) {
 			Audience: message.Audience{"x"},
 		}
 	}
-	if res, err := c.Write(ctxCaller("agent:p"), mk()); err != nil || !res.Accepted() {
+	if res, err := c.write(ctxCaller("agent:p"), mk()); err != nil || !res.Accepted() {
 		t.Fatalf("first write: err=%v reason=%q", err, res.RejectReason)
 	}
-	res, err := c.Write(ctxCaller("agent:p"), mk())
+	res, err := c.write(ctxCaller("agent:p"), mk())
 	if err != nil {
 		t.Fatalf("second write err: %v", err)
 	}

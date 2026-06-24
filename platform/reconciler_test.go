@@ -82,10 +82,10 @@ func TestReconciler_LevelSweep_ClosesOrphanWithAbsentReceiver(t *testing.T) {
 
 	callerID := actor.ActorID("user:caller")
 	workerID := actor.ActorID("agent:worker")
-	registerActor(t, ch, callerID, actor.KindHuman)
+	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
 	registerActor(t, ch, workerID, actor.KindAgent)
 
-	reqID := writeRequest(t, ch, callerID, actor.KindHuman, workerID, "test.do", nil)
+	reqID := writeRequest(t, callerPen, workerID, "test.do", nil)
 
 	// No manual sweep, no edge: wait for the automatic ticker sweep to close it.
 	deadline := time.Now().Add(5 * time.Second)
@@ -111,11 +111,11 @@ func TestReconciler_Idempotent_NoDuplicateTerminal(t *testing.T) {
 
 	callerID := actor.ActorID("user:caller")
 	workerID := actor.ActorID("agent:worker")
-	registerActor(t, ch, callerID, actor.KindHuman)
+	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
 	registerActor(t, ch, workerID, actor.KindAgent)
 
 	// Open request to an absent receiver (registered, never placed as a cell).
-	reqID := writeRequest(t, ch, callerID, actor.KindHuman, workerID, "test.do", nil)
+	reqID := writeRequest(t, callerPen, workerID, "test.do", nil)
 
 	// Wait for the first sweep to close it.
 	deadline := time.Now().Add(5 * time.Second)

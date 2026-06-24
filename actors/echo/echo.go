@@ -34,13 +34,13 @@ const actorSkillDoc = "" +
 	"- `actor.describe` — returns the actor id, skill doc, and one type entry for `echo.ping`.\n"
 
 type Actor struct {
-	writer  harness.Writer
+	pen     harness.Pen
 	actorID actor.ActorID
 	clock   func() time.Time
 }
 
-func NewActor(w harness.Writer) *Actor {
-	return &Actor{writer: w, actorID: DefaultActorID, clock: time.Now}
+func NewActor(w harness.Pen) *Actor {
+	return &Actor{pen: w, actorID: DefaultActorID, clock: time.Now}
 }
 
 func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
@@ -60,17 +60,13 @@ func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
 
 var _ actorrt.Actor = (*Actor)(nil)
 
-func (a *Actor) sender() message.Sender {
-	return message.Sender{ID: a.actorID, Kind: actor.KindTool}
-}
-
 func (a *Actor) respond(ctx context.Context, env *message.Envelope, result any) error {
-	_, err := behavior.RespondJSON(ctx, a.writer, a.clock, env, a.sender(), result)
+	_, err := behavior.RespondJSON(ctx, a.pen, a.clock, env, result)
 	return err
 }
 
 func (a *Actor) fail(ctx context.Context, env *message.Envelope, errorCode, detail string) error {
-	_, err := behavior.Fail(ctx, a.writer, a.clock, env, a.sender(), errorCode, detail)
+	_, err := behavior.Fail(ctx, a.pen, a.clock, env, errorCode, detail)
 	return err
 }
 

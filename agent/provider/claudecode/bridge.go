@@ -44,10 +44,10 @@ type claudeClient interface {
 // on the cell goroutine. Async is the STRUCTURE (responses always re-enter via
 // Receive → shell.Deliver); the fast-path window gives the sync EXPERIENCE.
 type Bridge struct {
-	cfg    Config
-	self   actor.ActorID
-	chID   channel.ID
-	writer harness.Writer
+	cfg  Config
+	self actor.ActorID
+	chID channel.ID
+	pen  harness.Pen
 
 	clientNew   func() (claudeClient, error) // test hook (defaultClientFactory)
 	envelopeSeq atomic.Uint64
@@ -73,8 +73,10 @@ type Bridge struct {
 	fatal   error
 }
 
-// NewBridge builds a Bridge bound to its identity and writing seam.
-func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Writer) (*Bridge, error) {
+// NewBridge builds a Bridge bound to its identity and writing seam. The factory
+// shape is func(w harness.Pen) actorrt.Actor; the pen carries the welded identity
+// (sealed-pen), self/chID are kept for envelope id + admission guards.
+func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Pen) (*Bridge, error) {
 	if self == "" {
 		return nil, errors.New("claude: actor id empty")
 	}
@@ -82,7 +84,7 @@ func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Writer
 		return nil, errors.New("claude: channel id empty")
 	}
 	if w == nil {
-		return nil, errors.New("claude: writer nil")
+		return nil, errors.New("claude: pen nil")
 	}
 	if cfg.Model == "" {
 		cfg.Model = defaultModel
@@ -97,7 +99,7 @@ func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Writer
 		}
 		cfg.WorkDir = tmp
 	}
-	b := &Bridge{cfg: cfg, self: self, chID: chID, writer: w}
+	b := &Bridge{cfg: cfg, self: self, chID: chID, pen: w}
 	b.clientNew = b.defaultClientFactory
 	return b, nil
 }
@@ -126,8 +128,7 @@ func (b *Bridge) defaultClientFactory() (claudeClient, error) {
 	return claude.NewClient(opts...), nil
 }
 
-func (b *Bridge) sender() message.Sender { return message.Sender{Kind: actor.KindAgent, ID: b.self} }
-func (b *Bridge) clock() time.Time       { return time.UnixMilli(b.cfg.NowFn()) }
+func (b *Bridge) clock() time.Time { return time.UnixMilli(b.cfg.NowFn()) }
 
 // Start connects the claude client and starts the private loop. A connect
 // failure returns the error so the cell dies fast (positive death) — no
@@ -146,9 +147,7 @@ func (b *Bridge) Start(ctx context.Context, _ actorrt.ActorContext) error {
 	// buildMCPServer (in clientNew above) captured b and resolves b.shell LAZILY
 	// at tool-execute time, so assigning b.shell after the client build is safe.
 	b.shell = metatool.NewShell(metatool.ShellConfig{
-		Writer:         b.writer,
-		ChannelID:      b.chID,
-		Sender:         b.sender(),
+		Pen:            b.pen,
 		Clock:          b.clock,
 		EnvelopeID:     b.envelopeID,
 		FastPathWindow: defaultFastPathWindow,

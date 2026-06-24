@@ -102,14 +102,15 @@ func TestNew_FillsDefaults(t *testing.T) {
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
 	// NowMs / Logger / Metrics all nil → defaults filled.
-	c, err := New(Deps{ChannelID: testChannelID, ActorRegistry: reg, Log: lg})
+	m, err := New(Deps{ChannelID: testChannelID, ActorRegistry: reg, Log: lg})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
+	c := m.(*minter).chain
 	// Drive a successful write so the default NowMs is actually invoked and a
 	// real (non-test) clock value lands in ts_received.
 	e := validEvent("m-default", "agent:p")
-	res, err := c.Write(ctxCaller("agent:p"), e)
+	res, err := c.write(ctxCaller("agent:p"), e)
 	if err != nil || !res.Accepted() {
 		t.Fatalf("write with defaulted deps: err=%v reason=%q", err, res.RejectReason)
 	}
@@ -150,12 +151,12 @@ func TestStepName_DefaultUnknownID(t *testing.T) {
 	}
 }
 
-// chainWith builds a Chain with stub deps + a spy Metrics, exercising the
-// observe* metric paths.
-func chainWith(t *testing.T, reg storespec.Registry, lg storespec.MessageLog) (*Chain, *spyMetrics) {
+// chainWith builds the internal chain with stub deps + a spy Metrics,
+// exercising the observe* metric paths directly (step-isolation).
+func chainWith(t *testing.T, reg storespec.Registry, lg storespec.MessageLog) (*chain, *spyMetrics) {
 	t.Helper()
 	spy := &spyMetrics{}
-	c, err := New(Deps{
+	m, err := New(Deps{
 		ChannelID:     testChannelID,
 		ActorRegistry: reg,
 		Log:           lg,
@@ -165,7 +166,7 @@ func chainWith(t *testing.T, reg storespec.Registry, lg storespec.MessageLog) (*
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return c, spy
+	return m.(*minter).chain, spy
 }
 
 // A step that returns a hard error (not a reject) → Write maps it through
@@ -181,7 +182,9 @@ func TestWrite_StepError_ObservedAndReturned(t *testing.T) {
 		return storespec.Record{}, false, lookupErr // audience lookup fails
 	}}
 	lg := stubLog{
-		appendFn:   func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) { return storespec.AppendResult{}, nil },
+		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
+			return storespec.AppendResult{}, nil
+		},
 		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
@@ -192,7 +195,7 @@ func TestWrite_StepError_ObservedAndReturned(t *testing.T) {
 		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
 		Audience: message.Audience{"tool:dead"},
 	}
-	res, err := c.Write(ctxCaller("agent:p"), req)
+	res, err := c.write(ctxCaller("agent:p"), req)
 	if err == nil {
 		t.Fatalf("expected wrapped step error, got nil (res=%+v)", res)
 	}
@@ -224,7 +227,7 @@ func TestWrite_AppendTypedError_MapsToReject(t *testing.T) {
 	}
 	c, spy := chainWith(t, reg, lg)
 
-	res, err := c.Write(ctxCaller("agent:p"), validEvent("m-app", "agent:p"))
+	res, err := c.write(ctxCaller("agent:p"), validEvent("m-app", "agent:p"))
 	if err != nil {
 		t.Fatalf("typed AppendError should be a reject, not error: %v", err)
 	}
@@ -255,7 +258,7 @@ func TestWrite_AppendPlainError_WrappedAsError(t *testing.T) {
 	}
 	c, spy := chainWith(t, reg, lg)
 
-	_, err := c.Write(ctxCaller("agent:p"), validEvent("m-plain", "agent:p"))
+	_, err := c.write(ctxCaller("agent:p"), validEvent("m-plain", "agent:p"))
 	if err == nil || !errors.Is(err, appendErr) {
 		t.Fatalf("plain append error = %v, want wrapping %v", err, appendErr)
 	}
@@ -274,7 +277,9 @@ func TestWrite_PanicRecovered(t *testing.T) {
 		panic("step blew up")
 	}}
 	lg := stubLog{
-		appendFn:   func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) { return storespec.AppendResult{}, nil },
+		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
+			return storespec.AppendResult{}, nil
+		},
 		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
@@ -285,7 +290,7 @@ func TestWrite_PanicRecovered(t *testing.T) {
 		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
 		Audience: message.Audience{"tool:boom"},
 	}
-	_, err := c.Write(ctxCaller("agent:p"), req)
+	_, err := c.write(ctxCaller("agent:p"), req)
 	if err == nil {
 		t.Fatalf("panic should be recovered into an error")
 	}
@@ -308,7 +313,7 @@ func TestWrite_AppendEmptyReason_ObserveRejectNoOp(t *testing.T) {
 	}
 	c, spy := chainWith(t, reg, lg)
 
-	res, err := c.Write(ctxCaller("agent:p"), validEvent("m-empty", "agent:p"))
+	res, err := c.write(ctxCaller("agent:p"), validEvent("m-empty", "agent:p"))
 	if err != nil {
 		t.Fatalf("empty-reason AppendError should map to a WriteResult, got err=%v", err)
 	}

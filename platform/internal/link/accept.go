@@ -39,7 +39,7 @@ const attachHandshakeTimeout = 10 * time.Second
 // via the per-link lease. It owns NO business logic — Writer/Runtime/Membership
 // are injected capabilities of the home.
 type Acceptor struct {
-	writer     harness.Writer
+	minter     harness.Minter
 	runtime    *actorrt.Runtime
 	membership storespec.MembershipControlPlane
 	channelID  channel.ID
@@ -71,7 +71,7 @@ type Acceptor struct {
 // receives a pre-authenticated daemonID. LeasePing/LeaseTTL default to the
 // centralised constants (10s / 30s); zero means default (tests may shorten).
 type Config struct {
-	Writer     harness.Writer
+	Minter     harness.Minter
 	Runtime    *actorrt.Runtime
 	Membership storespec.MembershipControlPlane
 	ChannelID  channel.ID
@@ -91,7 +91,7 @@ func NewAcceptor(cfg Config) *Acceptor {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Acceptor{
-		writer:     cfg.Writer,
+		minter:     cfg.Minter,
 		runtime:    cfg.Runtime,
 		membership: cfg.Membership,
 		channelID:  cfg.ChannelID,
@@ -277,6 +277,20 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 		computeID = daemonID
 	}
 
+	// Reserved-id guard: no daemon may declare the system actor id. `system` is
+	// the substrate's OWN authority (it authors actor.* mirror events + substrate-
+	// death terminals), not a tenant actor — a half-trusted daemon (it runs on a
+	// user host) must never get a pen welded to it, or it could forge mirror events
+	// and force-close any open request as fake substrate-death. This closes only the
+	// system-impersonation sub-case (the largest blast radius); full per-daemon
+	// actor-ownership validation (A6) stays deferred under single-tenancy.
+	for _, d := range att.Declarations {
+		if d.ActorID == actor.SystemActorID {
+			a.sendReply(lc, AttachReply{Accepted: false, Reason: "declared actor id is reserved: " + string(d.ActorID)})
+			return "", false
+		}
+	}
+
 	if a.membership != nil {
 		nowMs := time.Now().UnixMilli()
 		adds := make([]storespec.MemberActorAdd, len(att.Declarations))
@@ -323,19 +337,18 @@ func (a *Acceptor) sendReply(lc *linkConn, reply AttachReply) {
 }
 
 // emitSink builds the per-link EmitSink: a remote cell's emit is written through
-// the home write门 with the source actor stamped as caller, and the
-// authoritative WriteResult returns as the ipc EmitAck. The caller identity is
-// the connection's authenticated bound id (the basis stamps the author), NOT the
-// envelope's self-reported sender — the identity axiom does not downgrade across
-// the wire, so a stream authenticated as one actor emitting on behalf of another
-// falls on sender_mismatch exactly as a local cell would.
+// the home write门, and the authoritative WriteResult returns as the ipc
+// EmitAck. The author identity is welded HERE by Minting a Pen for the
+// connection's authenticated bound id — never read from the envelope's self-
+// reported sender (the daemon's relay-only proxy pen leaves Sender.ID/ChannelID
+// empty; identity does not downgrade across the wire). A stream authenticated as
+// one actor whose envelope self-reports a foreign sender is rejected fail-fast
+// (HarnessIdentityNotCallerSettable) by the host pen — the substrate-injected
+// identity fields are not caller-settable, so a forged self-report never reaches
+// step 4.
 func (a *Acceptor) emitSink() actorrt.EmitSink {
 	return func(ctx context.Context, id actor.ActorID, env *message.Envelope) (ipc.EmitResult, error) {
-		cctx := harness.CtxWithCaller(ctx, harness.CallerContext{
-			ActorID:   id,
-			ChannelID: a.channelID,
-		})
-		res, err := a.writer.Write(cctx, env)
+		res, err := a.minter.Mint(id, a.channelID).Write(ctx, env)
 		// Mirror EVERY verdict field of the harness WriteResult onto the wire — the
 		// writer contract must not downgrade across the link (a remote cell's
 		// Respond observes the same verdict a local cell's would).

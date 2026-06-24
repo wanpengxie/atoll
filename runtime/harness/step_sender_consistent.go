@@ -31,19 +31,23 @@ func newStepSenderConsistent(d Deps) step {
 func (s *stepSenderConsistent) ID() stepID { return StepSenderConsistent }
 
 func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
-	caller := callerFromCtx(ctx)
-	if caller.ActorID == "" {
+	c := callerFromCtx(ctx)
+	if c.actorID == "" {
 		// stepCallerAuth should already have rejected; defensive.
 		return outcome{
 			RejectReason: HarnessEngineACLDenied,
 			Detail:       "harness: caller missing at sender-consistent step",
 		}, nil
 	}
-	if env.Sender.ID != caller.ActorID {
+	// With the boundPen welding the caller's actorID into env.Sender.ID before
+	// the chain runs, this comparison is effectively恒真 — but it is retained as
+	// the chain's own self-consistency assertion (the chain does not depend on
+	// the pen always welding; it self-validates completely).
+	if env.Sender.ID != c.actorID {
 		return outcome{
 			RejectReason: HarnessSenderMismatch,
 			Detail: fmt.Sprintf("envelope.sender.id=%q does not match caller=%q",
-				env.Sender.ID, caller.ActorID),
+				env.Sender.ID, c.actorID),
 		}, nil
 	}
 

@@ -5,10 +5,10 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/lib/introspect"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
@@ -40,25 +40,21 @@ type DevicePresenceStat interface {
 // own.
 type SystemActor struct {
 	registry storespec.Registry
-	writer harness.Writer
-	lookup storespec.RequestLookup
+	writer   harness.Pen
+	lookup   storespec.RequestLookup
 	clock    func() time.Time
 	stat     PresenceStat
 	device   DevicePresenceStat
 }
 
-// sysSender is the system actor's own identity — stamped on every serve write it
-// authors (P12: kind by identity, not hard-coded). behavior.Respond carries it
-// so the answer is kind-neutral at the base.
-var sysSender = message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID}
-
 // Deps bundles the channel services the system actor needs.
 type Deps struct {
 	Registry storespec.Registry
 	// Writer commits the serve response into truth. The composition root injects a
-	// harness.Writer already stamped with the system caller context (so the harness
-	// ACL authenticates the write).
-	Writer harness.Writer
+	// system Pen (Mint(SystemActorID, chID)): the identity is welded into the pen,
+	// so the system actor never passes a sender — every write it authors is system-
+	// authored by construction.
+	Writer harness.Pen
 	Lookup storespec.RequestLookup
 	Clock  func() time.Time
 	// Stat is the obs-read seam over the substrate's authoritative presence +
@@ -169,9 +165,9 @@ func (s *SystemActor) respondDescribe(ctx context.Context, env *message.Envelope
 // with a system-authored completed response carrying result. It recovers the
 // original request via the injected RequestLookup (the serve-side truth read)
 // and delegates marshal+build+stamp+write to behavior.RespondJSON (the ONE
-// marshal+respond home — no hand-rolled json.Marshal at the serve site). sender =
-// the system actor's own identity; the injected writer stamps the system caller
-// context so the harness ACL authenticates the write.
+// marshal+respond home — no hand-rolled json.Marshal at the serve site). The
+// injected pen is welded to the system identity (Mint(SystemActorID)), so the
+// response is system-authored by construction — no sender passed.
 func (s *SystemActor) respondReserved(ctx context.Context, env *message.Envelope, result any) error {
 	request, ok, err := s.lookup.FindByID(ctx, env.ID)
 	if err != nil {
@@ -180,7 +176,7 @@ func (s *SystemActor) respondReserved(ctx context.Context, env *message.Envelope
 	if !ok || request == nil {
 		return fmt.Errorf("sysactor: reserved request %s not found", env.ID)
 	}
-	_, err = behavior.RespondJSON(ctx, s.writer, s.clock, request, sysSender, result)
+	_, err = behavior.RespondJSON(ctx, s.writer, s.clock, request, result)
 	return err
 }
 

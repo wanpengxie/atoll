@@ -62,17 +62,17 @@ go test ./...
 ```go
 // actors/hermes/hermes.go
 func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
-    // 处理请求，写回复
-    _, err := a.writer.Write(ctx, responseEnvelope)
+    // 处理请求，写回复（pen 焊死本 actor 身份，无需填 Sender/ChannelID）
+    _, err := a.pen.Write(ctx, responseEnvelope)
     return err
 }
 ```
 
 ```go
 // cmd/daemon/main.go
-var registry = map[string]func(harness.Writer) actorrt.Actor{
-    "echo":   func(w harness.Writer) actorrt.Actor { return echo.NewActor(w) },
-    "hermes": func(w harness.Writer) actorrt.Actor { return hermes.NewActor(w) },
+var registry = map[string]func(harness.Pen) actorrt.Actor{
+    "echo":   func(p harness.Pen) actorrt.Actor { return echo.NewActor(p) },
+    "hermes": func(p harness.Pen) actorrt.Actor { return hermes.NewActor(p) },
 }
 ```
 

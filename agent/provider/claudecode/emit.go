@@ -56,7 +56,7 @@ func (b *Bridge) emitEnvelope(ctx context.Context, item turnItem, envType string
 }
 
 func (b *Bridge) write(ctx context.Context, env message.Envelope) error {
-	res, err := b.writer.Write(ctx, &env)
+	res, err := b.pen.Write(ctx, &env)
 	if err != nil {
 		return err
 	}
@@ -83,7 +83,7 @@ func (b *Bridge) envelopeID(nowMs int64) message.ID {
 
 func (b *Bridge) buildAgentEvent(envType string, visibility message.Visibility, audience message.Audience, payload []byte, parentID, correlationID message.ID) (message.Envelope, error) {
 	now := b.cfg.NowFn()
-	env, err := behavior.BuildEvent(b.chID, b.sender(),
+	env, err := behavior.BuildEvent(
 		func() time.Time { return time.UnixMilli(now) },
 		behavior.EventSpec{
 			ID:            b.envelopeID(now),
@@ -164,7 +164,7 @@ const agentSkillDoc = "# agent (claude looper)\n\n" +
 func (b *Bridge) handleDescribe(ctx context.Context, env *message.Envelope) error {
 	req, err := introspect.ParseDescribeRequest(env.Payload)
 	if err != nil {
-		_, ferr := behavior.Fail(ctx, b.writer, b.clock, env, b.sender(),
+		_, ferr := behavior.Fail(ctx, b.pen, b.clock, env,
 			"payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
 		return ferr
 	}
@@ -174,21 +174,21 @@ func (b *Bridge) handleDescribe(ctx context.Context, env *message.Envelope) erro
 		SkillDoc:    agentSkillDoc,
 	}, req)
 	if !ok {
-		_, ferr := behavior.Fail(ctx, b.writer, b.clock, env, b.sender(),
+		_, ferr := behavior.Fail(ctx, b.pen, b.clock, env,
 			"type_unsupported", fmt.Sprintf("agent has no type %s", req.Type))
 		return ferr
 	}
-	_, rerr := behavior.RespondJSON(ctx, b.writer, b.clock, env, b.sender(), answer)
+	_, rerr := behavior.RespondJSON(ctx, b.pen, b.clock, env, answer)
 	return rerr
 }
 
 func (b *Bridge) handleStatus(ctx context.Context, env *message.Envelope) error {
 	if _, err := introspect.ParseStatusRequest(env.Payload); err != nil {
-		_, ferr := behavior.Fail(ctx, b.writer, b.clock, env, b.sender(),
+		_, ferr := behavior.Fail(ctx, b.pen, b.clock, env,
 			"payload_invalid", fmt.Sprintf("decode status payload: %v", err))
 		return ferr
 	}
 	answer := introspect.AnswerStatus(string(b.self), map[string]any{"role": "agent", "looper": "claude"})
-	_, rerr := behavior.RespondJSON(ctx, b.writer, b.clock, env, b.sender(), answer)
+	_, rerr := behavior.RespondJSON(ctx, b.pen, b.clock, env, answer)
 	return rerr
 }

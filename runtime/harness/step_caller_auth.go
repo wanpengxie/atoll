@@ -7,10 +7,10 @@ import (
 )
 
 // stepCallerAuth implements proto-layer1 §2.0 step 0+1 — caller principal
-// validation. The harness consumes the CallerContext attached via
-// CtxWithCaller (set by the binding edge before the call). When no caller is
-// attached we reject harness_engine_acl_denied
-// (defensive — every legitimate edge wires it).
+// validation. The harness consumes the caller attached via ctxWithCaller (set
+// by the boundPen from the welded principal before driving the chain). When no
+// caller is attached we reject harness_engine_acl_denied (defensive — the
+// boundPen always wires it).
 //
 // Channel mismatch detection is split:
 //
@@ -30,14 +30,14 @@ func newStepCallerAuth(d Deps) step { return &stepCallerAuth{deps: d} }
 func (s *stepCallerAuth) ID() stepID { return StepCallerAuth }
 
 func (s *stepCallerAuth) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
-	caller := callerFromCtx(ctx)
-	if caller.ActorID == "" {
+	c := callerFromCtx(ctx)
+	if c.actorID == "" {
 		return outcome{
 			RejectReason: HarnessEngineACLDenied,
 			Detail:       "harness: missing caller context",
 		}, nil
 	}
-	if caller.ChannelID != "" && caller.ChannelID != s.deps.ChannelID {
+	if c.chID != "" && c.chID != s.deps.ChannelID {
 		return outcome{
 			RejectReason: HarnessEngineACLDenied,
 			Detail:       "harness: caller bound to a different channel",

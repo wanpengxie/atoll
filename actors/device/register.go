@@ -26,6 +26,6 @@ func construct(_ registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, 
 		ID:      id,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeOutbound,
-		Factory: func(w harness.Writer) actorrt.Actor { return NewActor(w, id, ctx.WorkspaceDir, ctx.Logger) },
+		Factory: func(w harness.Pen) actorrt.Actor { return NewActor(w, id, ctx.WorkspaceDir, ctx.Logger) },
 	}, nil
 }

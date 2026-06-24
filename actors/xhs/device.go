@@ -79,7 +79,7 @@ type pending struct {
 
 // device owns the adapter's outward transport.
 type device struct {
-	owner          *Actor // back-reference for sender()/writer
+	owner          *Actor // back-reference for pen + clock
 	addrCfg        string
 	clock          func() time.Time
 	reaperInterval time.Duration
@@ -269,7 +269,7 @@ func (d *device) handleUp(up upFrame) {
 		if len(up.Result) > 0 {
 			result = up.Result
 		}
-		if _, err := behavior.RespondJSON(ctx, d.owner.writer, d.clock, p.request, d.owner.sender(), result); err != nil {
+		if _, err := behavior.RespondJSON(ctx, d.owner.pen, d.clock, p.request, result); err != nil {
 			d.logger.Warn("xhs.device.respond_failed", "correlation_id", up.CorrelationID, "err", err.Error())
 		}
 		return
@@ -282,7 +282,7 @@ func (d *device) handleUp(up upFrame) {
 		}
 		detail = up.Error.Message
 	}
-	if _, err := behavior.Fail(ctx, d.owner.writer, d.clock, p.request, d.owner.sender(), code, detail); err != nil {
+	if _, err := behavior.Fail(ctx, d.owner.pen, d.clock, p.request, code, detail); err != nil {
 		d.logger.Warn("xhs.device.fail_failed", "correlation_id", up.CorrelationID, "err", err.Error())
 	}
 }
@@ -376,7 +376,7 @@ func (d *device) sweep() {
 	d.mu.Unlock()
 
 	for _, p := range expired {
-		if _, err := behavior.Fail(context.Background(), d.owner.writer, d.clock, p.request, d.owner.sender(), "timeout", "device did not reply within deadline"); err != nil {
+		if _, err := behavior.Fail(context.Background(), d.owner.pen, d.clock, p.request, "timeout", "device did not reply within deadline"); err != nil {
 			d.logger.Warn("xhs.device.timeout_fail_failed", "request_id", string(p.request.ID), "err", err.Error())
 		}
 	}

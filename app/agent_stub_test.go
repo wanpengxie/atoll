@@ -23,7 +23,7 @@ import (
 // injection in test code: the production app builds from the catalog
 // (registry.Build(<engine class>)) with NO test seam — `go test ./app` does not
 // import the real engine providers (wired at cmd/server), so tests own these.
-var testAgentBuilder func(chID channel.ID, agentID actor.ActorID, w harness.Writer) (actorrt.Actor, error)
+var testAgentBuilder func(chID channel.ID, agentID actor.ActorID, pen harness.Pen) (actorrt.Actor, error)
 
 func init() {
 	stub := func(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
@@ -35,8 +35,8 @@ func init() {
 			ID:      id,
 			Kind:    actor.KindAgent,
 			Binding: actor.BindingRuntimeOutbound,
-			Factory: func(w harness.Writer) actorrt.Actor {
-				impl, err := testAgentBuilder(ctx.ChannelID, id, w)
+			Factory: func(pen harness.Pen) actorrt.Actor {
+				impl, err := testAgentBuilder(ctx.ChannelID, id, pen)
 				if err != nil {
 					return nil
 				}
@@ -55,14 +55,13 @@ func init() {
 // a live LLM. The production built-in is a real go-kimi Bridge; the topology
 // (channel → route → agent cell → reply in truth) is identical.
 type stubAgent struct {
-	w    harness.Writer
+	pen  harness.Pen
 	self actor.ActorID
 }
 
 func (s *stubAgent) Receive(ctx context.Context, env *message.Envelope) error {
 	if env.Kind == message.KindRequest {
-		_, _ = behavior.RespondJSON(ctx, s.w, time.Now, env,
-			message.Sender{Kind: actor.KindAgent, ID: s.self},
+		_, _ = behavior.RespondJSON(ctx, s.pen, time.Now, env,
 			map[string]any{"text": "stub-ok"})
 	}
 	return nil
@@ -70,6 +69,6 @@ func (s *stubAgent) Receive(ctx context.Context, env *message.Envelope) error {
 
 // stubAgentFactory builds the e2e stub agent. Tests assign it to testAgentBuilder
 // so every channel gets a working default-agent cell without LLM credentials.
-func stubAgentFactory(_ channel.ID, agentID actor.ActorID, w harness.Writer) (actorrt.Actor, error) {
-	return &stubAgent{w: w, self: agentID}, nil
+func stubAgentFactory(_ channel.ID, agentID actor.ActorID, pen harness.Pen) (actorrt.Actor, error) {
+	return &stubAgent{pen: pen, self: agentID}, nil
 }
