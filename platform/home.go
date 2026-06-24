@@ -91,12 +91,12 @@ func Open(cfg HomeConfig) (*Home, error) {
 		return nil, fmt.Errorf("platform: open channel store: %w", err)
 	}
 
-	// 3. Build the harness Minter (substrate铸笔机). New returns a Minter, never a
-	//    bare chain — the裸 writer's visibility is compile-time封顶 inside the
+	// 3. Build the harness Minter (the substrate mint machine). New returns a Minter, never a
+	//    bare chain — the bare writer's visibility is compile-time capped inside the
 	//    harness package. Every admission point (Spawn / attach / system closure)
 	//    Mints a Pen welded to (actorID, chID); the welded identity is unforgeable
 	//    by the holder. The post-commit Notify lives at the store append chokepoint,
-	//    so there is no写门 wrapper layer.
+	//    so there is no write-gate wrapper layer.
 	minter, err := harness.New(harness.Deps{
 		ChannelID:     cfg.ChannelID,
 		ActorRegistry: cs.Registry,
@@ -156,7 +156,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 				Device:   presence,
 			})
 		},
-		Writer:       systemPen,
+		SystemPen:    systemPen,
 		OpenRequests: cs.Query,
 		Clock:        clock,
 		Logger:       logger,
@@ -248,22 +248,22 @@ func (h *Home) View() View {
 // factory is non-nil, places it as a live in-process cell (binding=embedded) with
 // a Pen welded to its own (id, channelID).
 //
-// Identity weld at the admission膜: the app supplies the id (domain authority —
+// Identity weld at the admission membrane: the app supplies the id (domain authority —
 // "this id may be admitted") and a factory; the substrate Mints the welded Pen
-// and hands it to the factory, so the cell is born with a pen焊死 to its own id
-// (the substrate's "actorID 与写能力焊死不分离" invariant). The app never sees a
+// and hands it to the factory, so the cell is born with a pen welded to its own id
+// (the substrate's "actorID and write capability are welded inseparably" invariant). The app never sees a
 // bare writer or a Minter — it only chooses WHAT to place; Home decides HOW.
 //
-// Order铁律 (security-critical): membership apply -> Mint pen -> factory(pen) ->
+// Order invariant (security-critical): membership apply -> Mint pen -> factory(pen) ->
 // spawn cell. Membership must be durable truth BEFORE the factory gets a pen,
 // else a cell that writes on construction hits step 4 (sender not yet registered).
-// "出生即焊死" must not become "先拿笔、后登记".
+// "welded at birth" must not become "pen first, then register".
 //
 // nil-guard: factory == nil = membership-ONLY (a presence-less member, e.g. a
 // human user who is a member but has no cell). No Pen is Minted and no cell is
 // placed — Minting/placing a cell for a presence-less member would be wasted (and
 // passing nil to Mint→factory would NPE). Membership ≠ presence is the substrate
-// truth; the cell, if any, is the presence层 on top. A pre-existing row (server
+// truth; the cell, if any, is the presence layer on top. A pre-existing row (server
 // restart) is reused — the live instance rebinds.
 func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, factory func(harness.Pen) actorrt.Actor) error {
 	if id == "" {

@@ -49,7 +49,7 @@ func TestOnDown_DoesNotDespawnSuccessor(t *testing.T) {
 // identity is welded INTO the pen — so this fake welds sender==SystemActorID the
 // way the real system pen does, then records the terminal. (A real boundPen would
 // also fail-fast on a pre-filled sender, but author#3's behavior builders leave
-// it empty, so the weld is the only relevant半.)
+// it empty, so the weld is the only relevant half.)
 type fakeWriter struct {
 	mu      sync.Mutex
 	written []*message.Envelope
@@ -94,7 +94,7 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 	fc := &fakeWriter{}
 	ch := channelkit.New(channelkit.Config{
 		ChannelID:    "ch",
-		Writer:       fc,
+		SystemPen:    fc,
 		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
 		Clock:        time.Now,
 	})
@@ -149,7 +149,7 @@ func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
 	fc := &fakeWriter{}
 	ch := channelkit.New(channelkit.Config{
 		ChannelID: "ch",
-		Writer:    fc,
+		SystemPen: fc,
 		OpenRequests: fakeQuery{
 			reqs:      []storespec.StoredRow{{Envelope: req}},
 			receivers: []actor.ActorID{"worker"}, // the open request's receiver
@@ -220,7 +220,7 @@ func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 	h := &capHandler{}
 	ch := channelkit.New(channelkit.Config{
 		ChannelID:    "ch",
-		Writer:       &fakeWriter{},
+		SystemPen:    &fakeWriter{},
 		OpenRequests: errQuery{},
 		Clock:        time.Now,
 		Logger:       slog.New(h),
@@ -261,7 +261,7 @@ func TestOnDown_PerRequestWriteFault_IsLogged(t *testing.T) {
 	h := &capHandler{}
 	ch := channelkit.New(channelkit.Config{
 		ChannelID:    "ch",
-		Writer:       errWriter{},
+		SystemPen:    errWriter{},
 		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
 		Clock:        time.Now,
 		Logger:       slog.New(h),

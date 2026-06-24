@@ -6,7 +6,7 @@
 // Concrete steps each implement the Step contract; the internal chain composes
 // them in stable StepID order with a short-circuit on the first reject.
 // Implementations live in step_*.go siblings of chain.go. The package exports
-// only an opaque Pen (welded-identity write capability) + a Minter (铸笔机,
+// only an opaque Pen (welded-identity write capability) + a Minter (mint machine,
 // platform-only) — the bare chain never leaves the package.
 //
 // Authoritative spec:

@@ -43,7 +43,7 @@ func newCellHost(t *testing.T) *cellHost {
 	t.Helper()
 	w := &recordingWriter{}
 	rt, del := actorrt.New(actorrt.Config{})
-	b, err := kimi.NewBridge(testConfig(), testActorID, testChannelID, w)
+	b, err := kimi.NewBridge(testConfig(), testActorID, w)
 	if err != nil {
 		t.Fatalf("cell host: NewBridge: %v", err)
 	}
@@ -101,7 +101,7 @@ func newDaemonHost(t *testing.T) *daemonHost {
 	dh.rt, dh.del = rt, del
 	pen := &daemonPen{dh: dh}
 	var b *kimi.Bridge
-	bb, err := kimi.NewBridge(testConfig(), testActorID, testChannelID, pen)
+	bb, err := kimi.NewBridge(testConfig(), testActorID, pen)
 	if err != nil {
 		t.Fatalf("daemon host: NewBridge: %v", err)
 	}

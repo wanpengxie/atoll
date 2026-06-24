@@ -91,13 +91,12 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 	}
 	cfg.ResumeSeed = ctx.State.Seed
 	cfg.Checkpoint = ctx.State.Store
-	chID := ctx.ChannelID
 	return platform.ActorDecl{
 		ID:      id,
 		Kind:    actor.KindAgent,
 		Binding: actor.BindingRuntimeOutbound,
 		Factory: func(w harness.Pen) actorrt.Actor {
-			b, err := NewBridge(cfg, id, chID, w)
+			b, err := NewBridge(cfg, id, w)
 			if err != nil {
 				log.Fatalf("claude agent bridge: %v", err)
 			}

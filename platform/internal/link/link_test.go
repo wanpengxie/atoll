@@ -21,7 +21,7 @@ const testChannelID = channel.ID("test-channel")
 
 // --- stubs ---
 
-// stubMinter is the test substrate铸笔机: Mint welds (id, chID) onto a stubPen
+// stubMinter is the test substrate mint machine: Mint welds (id, chID) onto a stubPen
 // that mimics the real boundPen's fail-fast inject — so a remote cell's emit
 // (relayed up empty by the proxy pen) is welded with the connection's
 // authenticated bound id exactly as the production Minter would. A self-reported

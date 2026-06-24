@@ -40,7 +40,7 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 		}, nil
 	}
 	// With the boundPen welding the caller's actorID into env.Sender.ID before
-	// the chain runs, this comparison is effectively恒真 — but it is retained as
+	// the chain runs, this comparison is effectively tautological — but it is retained as
 	// the chain's own self-consistency assertion (the chain does not depend on
 	// the pen always welding; it self-validates completely).
 	if env.Sender.ID != c.actorID {

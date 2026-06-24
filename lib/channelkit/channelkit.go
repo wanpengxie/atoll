@@ -27,10 +27,10 @@ type Channel struct {
 
 	// Presence-down closure (author #3): on a death edge the watcher writes
 	// receiver_unavailable for every in-flight request addressed to the dead
-	// actor. nil writer/openReqs → OnDown writes no terminals locally (the dead
+	// actor. nil systemPen/openReqs → OnDown writes no terminals locally (the dead
 	// cell already self-evicted); the caller is responsible for closing the
 	// in-flight requests elsewhere.
-	writer   harness.Pen
+	systemPen harness.Pen
 	openReqs storespec.MessageQuery
 	clock    func() time.Time
 
@@ -50,11 +50,11 @@ type Config struct {
 	// construction (no back-fill, no construction cycle). channelkit assembles
 	// cells and does not know domain actor types. nil → no system cell.
 	System func(rt *actorrt.Runtime) actorrt.Actor
-	// Writer + OpenRequests wire the presence-down closure (author #3). Writer is
+	// SystemPen + OpenRequests wire the presence-down closure (author #3). SystemPen is
 	// the system Pen the composition root injects (Mint(SystemActorID, chID)): the
 	// system identity is welded into the pen, so author #3's terminals are system-
 	// authored by construction — channelkit never stamps a caller itself.
-	Writer       harness.Pen
+	SystemPen    harness.Pen
 	OpenRequests storespec.MessageQuery
 	Clock        func() time.Time
 	// Logger surfaces closure-drain faults. nil → discard (silent).
@@ -76,7 +76,7 @@ func New(cfg Config) *Channel {
 	}
 	c := &Channel{
 		channelID: cfg.ChannelID,
-		writer:    cfg.Writer,
+		systemPen: cfg.SystemPen,
 		openReqs:  cfg.OpenRequests,
 		clock:     clock,
 		logger:    logger,
@@ -118,7 +118,7 @@ func (c *Channel) Deliverer() actorrt.Deliverer { return c.deliverer }
 // watcher Despawn(id) is not pointer-checked, so under same-id replacement it
 // would delete/stop the SUCCESSOR — the exact contract PresenceWatcher forbids.
 func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
-	if c.writer == nil || c.openReqs == nil {
+	if c.systemPen == nil || c.openReqs == nil {
 		return
 	}
 	// The death closure is system-authored: the injected writer is the system Pen
@@ -134,7 +134,7 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 			"channel", c.channelID, "dead_actor", id, "request", reqID, "err", err)
 	}
 	if err := behavior.MaterialiseReceiverUnavailable(ctx,
-		c.writer, c.openReqs,
+		c.systemPen, c.openReqs,
 		c.clock, id, onFault); err != nil {
 		// The drain query failed → no caller of the dead actor can be closed →
 		// every one is a black hole. The loudest fault the watcher can hit.
@@ -166,7 +166,7 @@ func (p presenceProbe) Present(id actor.ActorID) bool {
 //
 // nil writer/openReqs → no closure capability injected → no-op (mirrors OnDown).
 func (c *Channel) Reconcile(ctx context.Context) {
-	if c.writer == nil || c.openReqs == nil {
+	if c.systemPen == nil || c.openReqs == nil {
 		return
 	}
 	// System-authored (same as OnDown): the injected writer is the system Pen, so
@@ -177,7 +177,7 @@ func (c *Channel) Reconcile(ctx context.Context) {
 			"channel", c.channelID, "request", reqID, "err", err)
 	}
 	if err := behavior.ReconcileReceiverUnavailable(ctx,
-		c.writer, c.openReqs, presenceProbe{rt: c.cells},
+		c.systemPen, c.openReqs, presenceProbe{rt: c.cells},
 		c.clock, onFault); err != nil {
 		// The distinct-receivers scan failed → no orphan can be enumerated →
 		// every absent receiver's callers stay black holes until the next scan.

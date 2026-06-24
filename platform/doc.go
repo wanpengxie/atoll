@@ -5,7 +5,7 @@
 //
 //	Open(cfg) → *Home
 //	View()  View              — read-only observation set (ReadAfterSeq/MaxSeq/ListActors)
-//	Spawn(ctx,id,kind,factory) — in-process cell安置 (membership + Mint welded Pen + spawn); factory==nil = presence-less member
+//	Spawn(ctx,id,kind,factory) — in-process cell placement (membership + Mint welded Pen + spawn); factory==nil = presence-less member
 //	ServeAttach(w,r,daemonID) — attach受理面 (app hands an upgraded WS here)
 //	Subscribe() (<-chan struct{}, func()) — subscription注册面 (client push)
 //	Close() error

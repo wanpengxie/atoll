@@ -34,7 +34,7 @@ func (w *stubWriter) Write(_ context.Context, env *message.Envelope) (harness.Wr
 
 func newToolTestBridge(t *testing.T, w *stubWriter) *Bridge {
 	t.Helper()
-	b, err := NewBridge(Config{APIKey: "k", Model: "m"}, "agent:tt", "ch-tt", w)
+	b, err := NewBridge(Config{APIKey: "k", Model: "m"}, "agent:tt", w)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}

@@ -10,12 +10,12 @@ import (
 
 // TestHomePublicSurface pins *platform.Home's exported method set to EXACTLY the
 // five capabilities the design fixes: View / Spawn / ServeAttach / Subscribe /
-// Close. Gate is GONE under sealed-pen — Home no longer hands out a bare write门;
+// Close. Gate is GONE under sealed-pen — Home no longer hands out a bare write gate;
 // it Mints a welded Pen internally at each admission point (the Minter never
-// escapes). This is the机械守卫 against the organ-bag regression — any added
-// accessor (re-exposing裸 Runtime / Deliverer / Membership / Registry / Minter,
+// escapes). This is the mechanical guard against the organ-bag regression — any added
+// accessor (re-exposing bare Runtime / Deliverer / Membership / Registry / Minter,
 // or handing out an internal object instead of a capability method) turns this
-// test red (装配只交钥匙红线).
+// test red (assembly hands out keys only — compile-time red line).
 func TestHomePublicSurface(t *testing.T) {
 	want := []string{"Close", "ServeAttach", "Spawn", "Subscribe", "View"}
 

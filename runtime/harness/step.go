@@ -70,7 +70,7 @@ type WriteResult struct {
 func (r WriteResult) Accepted() bool { return r.RejectReason == "" }
 
 // Pen is the substrate's opaque write capability — the ONLY thing an actor (or
-// any write者) ever holds. A Pen is welded to one identity at mint time: every
+// any writer) ever holds. A Pen is welded to one identity at mint time: every
 // Write it commits carries that (actorID, chID), and the holder cannot change
 // it. This is the substrate's first syscall (write truth); identity rides each
 // write the way a UID rides each Linux syscall. boundPen satisfies it (and, on
@@ -79,7 +79,7 @@ type Pen interface {
 	Write(ctx context.Context, env *message.Envelope) (WriteResult, error)
 }
 
-// Minter is the铸笔机 — the runtime's ONE outward face for producing pens. The
+// Minter is the mint machine — the runtime's ONE outward face for producing pens. The
 // platform holds the Minter (never the bare chain) and Mints a welded Pen at
 // each admission point (Spawn / attach / system closure). Minting any identity
 // is the highest capability in the system, so archtest confines harness.Minter

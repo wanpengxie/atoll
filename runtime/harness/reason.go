@@ -21,7 +21,7 @@ package harness
 type HarnessRejectReason string
 
 const (
-	// Pen identity injection (pre-chain, boundPen.Write) — a write者 hand-filled
+	// Pen identity injection (pre-chain, boundPen.Write) — a writer hand-filled
 	// env.sender.id / env.channel_id, which are substrate-injected (welded by the
 	// pen), not caller-settable. Fail-fast rather than silently overwriting the
 	// misuse (feedback_agent_consumer_structural_boundary).

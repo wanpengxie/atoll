@@ -111,7 +111,7 @@ func TestClaudeTurn_EmitsFinalAndCheckpoints(t *testing.T) {
 		Model:      "m",
 		Checkpoint: func(b json.RawMessage) error { ckCh <- string(b); return nil },
 	}
-	b, err := claudecode.NewBridge(cfg, testActorID, testChannelID, w)
+	b, err := claudecode.NewBridge(cfg, testActorID, w)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
@@ -168,7 +168,7 @@ func TestClaudeTurn_EmitsFinalAndCheckpoints(t *testing.T) {
 // server — the same 7 tools the go-kimi looper installs as AdditionalTools.
 func TestClaudeMCP_BridgesAllMetaTools(t *testing.T) {
 	w := &recordingWriter{}
-	b, err := claudecode.NewBridge(claudecode.Config{Model: "m"}, testActorID, testChannelID, w)
+	b, err := claudecode.NewBridge(claudecode.Config{Model: "m"}, testActorID, w)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}

@@ -8,16 +8,16 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
-// minter is the铸笔机: it holds the bare chain and welds an identity onto it on
+// minter is the mint machine: it holds the bare chain and welds an identity onto it on
 // every Mint. The platform receives a Minter from New (never the bare chain),
-// so the bare writer's visibility is compile-time封顶 inside this package.
+// so the bare writer's visibility is compile-time capped inside this package.
 type minter struct {
 	chain *chain
 }
 
 // Mint produces a Pen welded to (actorID, chID). The returned pen commits every
 // write under that identity and the holder cannot change it — the substrate's
-// "actorID 与写能力焊死不分离" invariant. Mint is deterministic and cheap (no
+// "actorID and write capability are welded inseparably" invariant. Mint is deterministic and cheap (no
 // per-pen state beyond the welded principal), so admission points may Mint
 // per-emit freely.
 func (m *minter) Mint(actorID actor.ActorID, chID channel.ID) Pen {
@@ -38,7 +38,7 @@ type boundPen struct {
 // Write injects the welded identity into the envelope and drives the chain.
 //
 // Identity injection is FAIL-FAST, not silent-overwrite. env.Sender.ID /
-// env.ChannelID are substrate-injected fields, NOT write者 input: the write者
+// env.ChannelID are substrate-injected fields, NOT the writer's input: the writer
 // (via behavior builders) leaves them empty and the pen welds the principal. A
 // non-empty value means someone hand-stuffed identity (a bug / a bypass of the
 // behavior builders) and is rejected loudly (HarnessIdentityNotCallerSettable)

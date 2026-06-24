@@ -46,7 +46,7 @@ func (a *silentActor) Receive(_ context.Context, env *message.Envelope) error {
 }
 
 // penCell is a no-op cell whose only purpose is to capture the welded Pen the
-// substrate Mints for it at admission. In the sealed-pen world a write门 is
+// substrate Mints for it at admission. In the sealed-pen world a write gate is
 // reachable ONLY as an actor's own welded pen (no Home.Gate / no Minter outside
 // platform), so a test that needs to write truth AS some actor spawns that actor
 // and uses the pen the factory received — exactly the production admission path.

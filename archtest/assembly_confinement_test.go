@@ -79,7 +79,7 @@ func TestRuntimeAssemblyConfinedToPlatform(t *testing.T) {
 	}
 }
 
-// harnessConstructionSymbols are the write-门 construction + mint surface:
+// harnessConstructionSymbols are the write-gate construction + mint surface:
 //
 //   - New builds the bare write chain from Deps. Referencing it (or Deps)
 //     assembles a write gate WITHOUT the platform wiring (commit signal at the
@@ -88,7 +88,7 @@ func TestRuntimeAssemblyConfinedToPlatform(t *testing.T) {
 //   - Chain is the un-welded bare writer. It is now unexported inside harness
 //     (the seam exports opaque Pen / Minter only), so this entry is a DEAD lock
 //     kept as a tripwire: should Chain ever be re-exported, the wall re-arms.
-//   - Minter is the铸笔机 (Mint(actorID, chID) Pen) — the single most dangerous
+//   - Minter is the Minter (Mint(actorID, chID) Pen) — the single most dangerous
 //     capability in the system: holding it = minting a pen for ANY identity
 //     (impersonate anyone), strictly worse than a factory stashing its own
 //     welded pen (which can only impersonate itself). The seam must therefore
@@ -177,7 +177,7 @@ func TestHarnessConstructionConfinedToPlatform(t *testing.T) {
 			if harnessConstructionSymbols[sel.Sel.Name] {
 				pos := fset.Position(sel.Pos())
 				violations = append(violations, fmt.Sprintf(
-					"%s:%d references %s.%s — the write-门 construction + Minter may only be assembled by platform; downstream speaks the opaque harness.Pen/WriteResult seam, never builds the chain itself (no commit signal / reconciler / presence closure) nor holds a Minter (= minting a pen for any identity)",
+					"%s:%d references %s.%s — the write-gate construction + Minter may only be assembled by platform; downstream speaks the opaque harness.Pen/WriteResult seam, never builds the chain itself (no commit signal / reconciler / presence closure) nor holds a Minter (= minting a pen for any identity)",
 					slash, pos.Line, local, sel.Sel.Name))
 			}
 			return true

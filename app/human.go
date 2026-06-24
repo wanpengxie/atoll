@@ -28,11 +28,12 @@ var errChannelNotLoaded = errors.New("app: channel not loaded")
 // routing policy — default_agent / boost-floor failover / group-chat broadcast —
 // reading the app DB (default_agent) and Home.View (live roster). That is domain
 // policy; actors/ must not import app DB / platform.View (it would invert the
-// layering). It is an adapter all the same: inward it is a cell (Receive), but a
-// human does not RECEIVE channel requests, so Receive no-ops; outward it holds a
-// pen and writes through it from the HTTP goroutine (the same shape as the
-// xhs/kimi device face — a non-cell goroutine writing truth through the actor's
-// pen, guarding its outward state with a mutex).
+// layering). It is an adapter all the same: inward a cell whose Receive SHOULD
+// translate an inbound collaboration message (an agent's call) and push it to the
+// person — currently no-op, borrowing the obs axis (ws.go tail) as a stopgap (see
+// Receive); outward it holds a pen and writes through it from the HTTP goroutine
+// (the same shape as the xhs/kimi device face — a non-cell goroutine writing truth
+// through the actor's pen, guarding its outward state with a mutex).
 //
 // Lifecycle is HOME-SCOPED, not WS-scoped: a write arrives over HTTP POST and may
 // happen with NO WebSocket open (curl / API client / the very first message), so
@@ -43,15 +44,15 @@ var errChannelNotLoaded = errors.New("app: channel not loaded")
 
 // humanFront is one user's write front-end in one channel. It IS an actorrt.Actor
 // (so it is admitted through the same Home.Spawn path as agents/tools and is born
-// with a pen welded to its own user id — no PenFor side door), but its inward
-// mailbox is inert: a human does not receive channel requests, so Receive no-ops.
+// with a pen welded to its own user id — no PenFor side door). A human IS callable
+// on the message axis (an agent's request lands in this mailbox); Receive is no-op
+// FOR NOW, with the inbound push half borrowed from the obs axis (see Receive).
 // SubmitIntent is its outward face, called directly by the HTTP goroutine (off the
 // cell goroutine, bypassing the mailbox), returning the WriteResult synchronously
 // so the POST keeps its 201 message_id/seq.
 type humanFront struct {
 	app  *App
 	chID channel.ID
-	self actor.ActorID // "user:<id>"
 	pen  harness.Pen
 
 	// mu guards the outward face's state crossing the HTTP↔cell goroutine
@@ -64,10 +65,25 @@ type humanFront struct {
 	closed bool
 }
 
-// Receive is the inward mailbox. A human does not receive channel requests, so
-// the cell goroutine spins inertly here. (The substrate still delivers events to
-// the user as an audience member; those reach the browser via the ws.go push arm,
-// not through this cell.)
+// Receive is the inward mailbox — the COLLABORATION ingress arm. A human IS a
+// first-class actor on the message axis: an agent can call it (kind=request,
+// audience=[user:X]) and the request lands in THIS mailbox. (That is exactly why
+// the human MUST hold a cell — without one it is a message-axis ghost and an
+// agent's call resolves receiver_unavailable even while the person is watching.)
+//
+// TODO(human-collaboration-arm): Receive should TRANSLATE an inbound collaboration
+// message (an agent's request, a directed message) and PUSH it to the person
+// (live WS push / offline notification) — the outbound-to-human half of this
+// adapter, symmetric with SubmitIntent's inbound half. It is no-op for now:
+// delivery to this mailbox reports Delivered but is dropped here, and the person
+// instead sees the message via the OBS axis (ws.go tail-subscribe reads the
+// committed log and pushes it to the browser), then replies via SubmitIntent
+// (parent_id). That obs-axis substitution is good enough pre-launch (person sees
+// it + can reply), but it is NOT the message axis: obs is passive observation of
+// the log, not actor-directed collaboration delivery. The proper fix is to make
+// this arm a real outbound translator. The no-op does NOT mean the cell is
+// removable — the cell's existence is what keeps the human callable; only the
+// push half is borrowed from obs for now.
 func (h *humanFront) Receive(_ context.Context, _ *message.Envelope) error {
 	return nil
 }
@@ -143,7 +159,7 @@ func (h *humanFront) SubmitIntent(ctx context.Context, in submitInput) (harness.
 // resolveRouting reproduces the channel's no-audience routing policy (the product
 // decision moved here verbatim from handleSendMessage): an explicit audience is
 // honoured as-is; otherwise default_agent is the INTENT pointer, resolved against
-// 现状 (the live roster) with the agent:boost floor as the §7 failover target:
+// the live roster with the agent:boost floor as the §7 failover target:
 //   - default_agent points at a LIVE agent      → agent-centric: request to it.
 //   - else the channel HAS a boost floor:
 //       boost live → failover to boost;  boost down → channel CANNOT serve (503).
@@ -316,7 +332,7 @@ func (a *App) humanFor(ctx context.Context, chID channel.ID, userID string) (*hu
 	// door). The factory captures the ref the substrate does not hand back.
 	var built *humanFront
 	factory := func(pen harness.Pen) actorrt.Actor {
-		built = &humanFront{app: a, chID: chID, self: self, pen: pen}
+		built = &humanFront{app: a, chID: chID, pen: pen}
 		return built
 	}
 	if err := home.Spawn(ctx, self, actor.KindHuman, factory); err != nil {

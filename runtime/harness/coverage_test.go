@@ -130,20 +130,9 @@ func TestHarnessRejectReason_String(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// chain.go — WithRequestID, stepName default, observe paths, panic recover,
+// chain.go — stepName default, observe paths, panic recover,
 // step-error path, append-error paths
 // ---------------------------------------------------------------------
-
-func TestWithRequestID_RoundTrips(t *testing.T) {
-	ctx := WithRequestID(context.Background(), "req-42")
-	if got := requestIDFromCtx(ctx); got != "req-42" {
-		t.Fatalf("requestID = %q, want req-42", got)
-	}
-	// Absent → empty.
-	if got := requestIDFromCtx(context.Background()); got != "" {
-		t.Fatalf("absent requestID = %q, want empty", got)
-	}
-}
 
 func TestStepName_DefaultUnknownID(t *testing.T) {
 	if got := stepName(stepID(99)); got != "step_99" {

@@ -36,7 +36,7 @@ func (NoopMetrics) IncCounter(string, ...string) {}
 // verify a write. It is plumbed through context.Context (see ctxWithCaller /
 // callerFromCtx) so step implementations do not need a per-step parameter; the
 // boundPen populates it once from the welded (actorID, chID) before driving the
-// chain. It is harness-internal (unexported): the substrate's造笔面 is Mint,
+// chain. It is harness-internal (unexported): the substrate's pen-minting surface is Mint,
 // which takes the raw (actorID, chID) — there is no caller-constructible
 // identity context outside the package.
 type caller struct {

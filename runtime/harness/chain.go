@@ -21,8 +21,8 @@ import (
 // ascending-ID order, short-circuiting on the first reject (or on the
 // first idempotent dedupe hit).
 //
-// chain is the BARE writer (no identity). It is封死在包内 (unexported): the
-// substrate never hands out a bare writer. New藏 it inside a minter and returns
+// chain is the BARE writer (no identity). It is sealed inside the package (unexported): the
+// substrate never hands out a bare writer. New hides it inside a minter and returns
 // the minter; Mint welds an identity onto it via boundPen. write is safe for
 // concurrent use as long as Deps implementations are concurrent-safe (the
 // standard sqlite-backed store / actor registry satisfy this).
@@ -31,17 +31,17 @@ type chain struct {
 	steps []step
 }
 
-// New assembles the write engine from Deps and returns a Minter — the铸笔机.
+// New assembles the write engine from Deps and returns a Minter — the mint machine.
 // Returns an error when Deps is incomplete or any step refuses to construct.
 //
 // New constructs the bare chain internally, hides it inside a minter, and
-// returns the minter — the platform receives a铸笔机 (Minter), never the bare
-// chain. The bare writer's visibility is compile-time封顶 inside the harness
+// returns the minter — the platform receives a Minter (mint machine), never the bare
+// chain. The bare writer's visibility is compile-time capped inside the harness
 // package.
 //
 // Construction-confined to platform: a write engine built outside the platform
 // assembly has no commit signal (store OnCommit), closure reconciler, or
-// presence-watcher wiring — a half-wired write门. New/Deps may therefore only
+// presence-watcher wiring — a half-wired write gate. New/Deps may therefore only
 // be referenced by the platform tree (enforced by
 // archtest.TestHarnessConstructionConfinedToPlatform); downstream speaks the
 // harness.Pen / WriteResult seam, never builds the engine itself.
@@ -148,7 +148,6 @@ func (c *chain) observePass(ctx context.Context, env *message.Envelope, step ste
 		"channel_id", string(env.ChannelID),
 		"message_id", string(env.ID),
 		"correlation_id", string(env.CorrelationID),
-		"request_id", requestIDFromCtx(ctx),
 		"type", env.Type,
 		"kind", string(env.Kind),
 	)
@@ -167,7 +166,6 @@ func (c *chain) observeReject(ctx context.Context, env *message.Envelope, step s
 		"channel_id", string(env.ChannelID),
 		"message_id", string(env.ID),
 		"correlation_id", string(env.CorrelationID),
-		"request_id", requestIDFromCtx(ctx),
 		"type", env.Type,
 		"kind", string(env.Kind),
 	)
@@ -182,7 +180,6 @@ func (c *chain) observeError(ctx context.Context, env *message.Envelope, step st
 		"channel_id", string(env.ChannelID),
 		"message_id", string(env.ID),
 		"correlation_id", string(env.CorrelationID),
-		"request_id", requestIDFromCtx(ctx),
 		"type", env.Type,
 		"kind", string(env.Kind),
 	)
@@ -223,21 +220,3 @@ func rejectFromOutcome(out outcome, env *message.Envelope) WriteResult {
 	return r
 }
 
-// ctxKeyRequestID carries an optional request-id for per-step log correlation.
-// Replaces the deleted pkg/requestctx — the engine owns its own minimal ctx key
-// rather than importing an observability util (topology §1 法则).
-type ctxKeyRequestID struct{}
-
-// WithRequestID attaches a request-id to ctx for harness log correlation.
-// Binding→harness INJECTION SEAM (like CtxWithRawEnvelope): wire-level bindings
-// carry a request-id at the edge and plumb it in so the harness's per-step
-// diagnostics correlate to the originating request. The getter
-// (requestIDFromCtx) is harness-internal plumbing and stays unexported.
-func WithRequestID(ctx context.Context, id string) context.Context {
-	return context.WithValue(ctx, ctxKeyRequestID{}, id)
-}
-
-func requestIDFromCtx(ctx context.Context) string {
-	v, _ := ctx.Value(ctxKeyRequestID{}).(string)
-	return v
-}

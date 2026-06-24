@@ -17,7 +17,6 @@ import (
 	"github.com/wanpengxie/ActOS/lib/introspect"
 	"github.com/wanpengxie/ActOS/lib/metatool"
 	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
@@ -46,7 +45,6 @@ type claudeClient interface {
 type Bridge struct {
 	cfg  Config
 	self actor.ActorID
-	chID channel.ID
 	pen  harness.Pen
 
 	clientNew   func() (claudeClient, error) // test hook (defaultClientFactory)
@@ -75,13 +73,10 @@ type Bridge struct {
 
 // NewBridge builds a Bridge bound to its identity and writing seam. The factory
 // shape is func(w harness.Pen) actorrt.Actor; the pen carries the welded identity
-// (sealed-pen), self/chID are kept for envelope id + admission guards.
-func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Pen) (*Bridge, error) {
+// (sealed-pen), self is kept for envelope id + self-loop guard.
+func NewBridge(cfg Config, self actor.ActorID, w harness.Pen) (*Bridge, error) {
 	if self == "" {
 		return nil, errors.New("claude: actor id empty")
-	}
-	if chID == "" {
-		return nil, errors.New("claude: channel id empty")
 	}
 	if w == nil {
 		return nil, errors.New("claude: pen nil")
@@ -99,7 +94,7 @@ func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Pen) (
 		}
 		cfg.WorkDir = tmp
 	}
-	b := &Bridge{cfg: cfg, self: self, chID: chID, pen: w}
+	b := &Bridge{cfg: cfg, self: self, pen: w}
 	b.clientNew = b.defaultClientFactory
 	return b, nil
 }

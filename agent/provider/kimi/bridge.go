@@ -51,7 +51,6 @@ import (
 	"github.com/wanpengxie/ActOS/lib/introspect"
 	"github.com/wanpengxie/ActOS/lib/metatool"
 	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
@@ -179,7 +178,6 @@ func NewConfigFromSpec(raw json.RawMessage, systemPrompt string) (Config, error)
 type Bridge struct {
 	cfg  Config
 	self actor.ActorID
-	chID channel.ID
 	pen  harness.Pen
 
 	mu              sync.Mutex
@@ -218,10 +216,10 @@ type kimiAgent interface {
 }
 
 // NewBridge builds a Bridge bound to its identity and writing seam. The
-// host closes over (self, chID, pen) at assembly time — the factory
+// host closes over (self, pen) at assembly time — the factory
 // shape is func(w harness.Pen) actorrt.Actor. The pen carries the welded
-// identity (sealed-pen); self/chID are kept for envelope id + admission guards.
-func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Pen) (*Bridge, error) {
+// identity (sealed-pen); self is kept for envelope id + self-loop guard.
+func NewBridge(cfg Config, self actor.ActorID, w harness.Pen) (*Bridge, error) {
 	if cfg.APIKey == "" {
 		return nil, errors.New("kimi: Config.APIKey empty")
 	}
@@ -230,9 +228,6 @@ func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Pen) (
 	}
 	if self == "" {
 		return nil, errors.New("kimi: actor id empty")
-	}
-	if chID == "" {
-		return nil, errors.New("kimi: channel id empty")
 	}
 	if w == nil {
 		return nil, errors.New("kimi: pen nil")
@@ -257,7 +252,6 @@ func NewBridge(cfg Config, self actor.ActorID, chID channel.ID, w harness.Pen) (
 	b := &Bridge{
 		cfg:  cfg,
 		self: self,
-		chID: chID,
 		pen:  w,
 	}
 	b.agentNew = b.defaultAgentFactory

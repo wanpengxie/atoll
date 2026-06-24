@@ -48,11 +48,23 @@ func (b *Bridge) emitEnvelope(ctx context.Context, item turnItem, envType string
 	if err != nil {
 		return fmt.Errorf("claude: marshal payload: %w", err)
 	}
-	env, err := b.buildAgentEvent(envType, visibility, replyAudience(item.env.Sender.ID), body, item.env.ID, item.correlationID())
+	now := b.cfg.NowFn()
+	env, err := behavior.BuildEvent(
+		func() time.Time { return time.UnixMilli(now) },
+		behavior.EventSpec{
+			ID:            b.envelopeID(now),
+			Type:          envType,
+			Payload:       body,
+			Visibility:    visibility,
+			Audience:      replyAudience(item.env.Sender.ID),
+			ParentID:      item.env.ID,
+			CorrelationID: item.correlationID(),
+		})
 	if err != nil {
 		return err
 	}
-	return b.write(ctx, env)
+	env.TSReceived = now
+	return b.write(ctx, *env)
 }
 
 func (b *Bridge) write(ctx context.Context, env message.Envelope) error {
@@ -79,26 +91,6 @@ func (b *Bridge) envelopeID(nowMs int64) message.ID {
 		short = "anon"
 	}
 	return message.ID(fmt.Sprintf("claude-%s-%d-%d", short, nowMs, b.envelopeSeq.Add(1)))
-}
-
-func (b *Bridge) buildAgentEvent(envType string, visibility message.Visibility, audience message.Audience, payload []byte, parentID, correlationID message.ID) (message.Envelope, error) {
-	now := b.cfg.NowFn()
-	env, err := behavior.BuildEvent(
-		func() time.Time { return time.UnixMilli(now) },
-		behavior.EventSpec{
-			ID:            b.envelopeID(now),
-			Type:          envType,
-			Payload:       payload,
-			Visibility:    visibility,
-			Audience:      audience,
-			ParentID:      parentID,
-			CorrelationID: correlationID,
-		})
-	if err != nil {
-		return message.Envelope{}, err
-	}
-	env.TSReceived = now
-	return *env, nil
 }
 
 // setCurrentTurn / currentRC thread the in-flight turn's trigger to the MCP tool

@@ -337,7 +337,7 @@ func (a *Acceptor) sendReply(lc *linkConn, reply AttachReply) {
 }
 
 // emitSink builds the per-link EmitSink: a remote cell's emit is written through
-// the home write门, and the authoritative WriteResult returns as the ipc
+// the home write gate, and the authoritative WriteResult returns as the ipc
 // EmitAck. The author identity is welded HERE by Minting a Pen for the
 // connection's authenticated bound id — never read from the envelope's self-
 // reported sender (the daemon's relay-only proxy pen leaves Sender.ID/ChannelID

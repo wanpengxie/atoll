@@ -103,7 +103,7 @@ func testConfig() kimi.Config {
 // Cleanup stops it.
 func newStartedBridge(t *testing.T, w *recordingWriter, sa kimi.Agent) *kimi.Bridge {
 	t.Helper()
-	b, err := kimi.NewBridge(testConfig(), testActorID, testChannelID, w)
+	b, err := kimi.NewBridge(testConfig(), testActorID, w)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
@@ -141,7 +141,7 @@ func triggerEnv(id string) message.Envelope {
 // asserting the lazy b.shellRef resolver reached the real shell.
 func TestChannelTools_ShellResolvesWhenBuiltBeforeStart(t *testing.T) {
 	w := &recordingWriter{}
-	b, err := kimi.NewBridge(testConfig(), testActorID, testChannelID, w)
+	b, err := kimi.NewBridge(testConfig(), testActorID, w)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
@@ -383,19 +383,16 @@ func TestBuildSystemPrompt_NoFrozenActorSnapshot(t *testing.T) {
 
 func TestNewBridge_Validations(t *testing.T) {
 	w := &recordingWriter{}
-	if _, err := kimi.NewBridge(kimi.Config{Model: "m"}, testActorID, testChannelID, w); err == nil {
+	if _, err := kimi.NewBridge(kimi.Config{Model: "m"}, testActorID, w); err == nil {
 		t.Fatal("missing api key: want error")
 	}
-	if _, err := kimi.NewBridge(kimi.Config{APIKey: "k"}, testActorID, testChannelID, w); err == nil {
+	if _, err := kimi.NewBridge(kimi.Config{APIKey: "k"}, testActorID, w); err == nil {
 		t.Fatal("missing model: want error")
 	}
-	if _, err := kimi.NewBridge(testConfig(), "", testChannelID, w); err == nil {
+	if _, err := kimi.NewBridge(testConfig(), "", w); err == nil {
 		t.Fatal("missing self: want error")
 	}
-	if _, err := kimi.NewBridge(testConfig(), testActorID, "", w); err == nil {
-		t.Fatal("missing channel: want error")
-	}
-	if _, err := kimi.NewBridge(testConfig(), testActorID, testChannelID, nil); err == nil {
+	if _, err := kimi.NewBridge(testConfig(), testActorID, nil); err == nil {
 		t.Fatal("nil writer: want error")
 	}
 }
@@ -588,7 +585,7 @@ func TestCallActor_OverWindowReturnsAck(t *testing.T) {
 	var b *kimi.Bridge
 	cfg := testConfig()
 	cfg.FastPathWindow = 30 * time.Millisecond
-	bb, err := kimi.NewBridge(cfg, testActorID, testChannelID, w)
+	bb, err := kimi.NewBridge(cfg, testActorID, w)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
@@ -743,7 +740,7 @@ func TestReceive_UnawaitedFinalBecomesNewTurn(t *testing.T) {
 
 func TestEnvelopeIDUniqueWithinSameMillisecond(t *testing.T) {
 	w := &recordingWriter{}
-	b, err := kimi.NewBridge(testConfig(), testActorID, testChannelID, w)
+	b, err := kimi.NewBridge(testConfig(), testActorID, w)
 	if err != nil {
 		t.Fatalf("NewBridge: %v", err)
 	}
