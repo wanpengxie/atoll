@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"net/http"
+	"net/url"
 
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -16,8 +17,20 @@ import (
 // WebSocket: client message tail (/ws)
 // ---------------------------------------------------------------------------
 
+// wsUpgrader gates the WS handshake. CheckOrigin defends against cross-site
+// WebSocket hijacking: /ws authenticates by cookie, so without an Origin check a
+// malicious page in the user's browser could open a cross-origin WS riding the
+// user's session. Same-origin only; an absent Origin (non-browser client, e.g.
+// curl/API) is allowed — it still needs a valid session cookie + channel ACL.
 var wsUpgrader = websocket.Upgrader{
-	CheckOrigin: func(*http.Request) bool { return true },
+	CheckOrigin: func(r *http.Request) bool {
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		return err == nil && u.Host == r.Host
+	},
 }
 
 func (a *App) handleWS(c *gin.Context) {
@@ -27,7 +40,8 @@ func (a *App) handleWS(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "not authenticated"})
 		return
 	}
-	if _, ok := middleware.VerifySession(c.Request.Context(), a.db, token); !ok {
+	userID, ok := middleware.VerifySession(c.Request.Context(), a.db, token)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid session"})
 		return
 	}
@@ -53,6 +67,17 @@ func (a *App) handleWS(c *gin.Context) {
 	}
 
 	chID := channel.ID(sub.ChannelID)
+
+	// Channel-access ACL: a valid session is NOT enough — the user must be a
+	// member of the channel's workspace, the same gate REST goes through
+	// (requireChannelAccess). Without this any logged-in user could subscribe to
+	// any channel and tail its whole log from seq 0.
+	wsID, okWs := a.channelWorkspaceID(c.Request.Context(), string(chID))
+	if !okWs || !a.isWorkspaceMember(c.Request.Context(), wsID, userID) {
+		_ = ws.WriteJSON(gin.H{"error": "forbidden"})
+		return
+	}
+
 	home := a.getHome(chID)
 	if home == nil {
 		_ = ws.WriteJSON(gin.H{"error": "channel not loaded"})

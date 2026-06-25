@@ -20,6 +20,12 @@ import (
 // handler's nil-check and admission (a teardown race). The handler maps it to 404.
 var errChannelNotLoaded = errors.New("app: channel not loaded")
 
+// NOTE: this file is the sealed-pen HALF-BUILT state. The target shape (gateway
+// relay, Receive→gateway, type A/B response, cell≡online-signal) lives in
+// .dalek/pm/human-actor-completion.md (v7). The obs-tail stopgap mentioned below
+// is SUPERSEDED there: members read messages via the actor path (Receive→gateway),
+// not by tailing the log over the obs axis.
+//
 // human.go is the app-layer HUMAN write front-end — a human adapter whose
 // outward face is SubmitIntent. It is the substrate's "people are actors too":
 // a person writes truth ONLY through their own human actor's welded pen, never
