@@ -20,7 +20,7 @@ import (
 // Dialer is the daemon end of the link: it dials the home, attaches the party
 // (stream 0), and opens one stream per attached actor — each running the NATIVE
 // port-wire protocol with a real handshake (LeaseID = actor id). A hosted cell's
-// pen is the stream's ipc.RemoteWriter (emits flow UP, block on the home's
+// pen is the stream's RemoteWriter (emits flow UP, block on the home's
 // EmitAck). Dial/Start are two phases (inherited from step 0): Dial does WS +
 // attach with NO inbound consumption; Start installs the per-stream demux after
 // the host is fully built, so no dispatch races a half-built host.
@@ -47,7 +47,7 @@ type actorStream struct {
 	id       actor.ActorID
 	stream   *stream
 	codec    *ipc.Codec
-	writer   *ipc.RemoteWriter
+	writer   *RemoteWriter
 	dispatch func(env *message.Envelope) error
 	cancel   func(requestID message.ID)
 }
@@ -136,7 +136,7 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 func (d *Dialer) ChannelID() string { return d.channelID }
 
 // OpenStream opens one actor's link stream, performs the native ipc handshake
-// (LeaseID = actor id), and returns the cell's PEN (ipc.RemoteWriter) plus a
+// (LeaseID = actor id), and returns the cell's PEN (RemoteWriter) plus a
 // downHandler the host installs (close the stream UP on cell death). dispatch is
 // invoked for each KindDeliver frame the home sends down this stream — the host
 // routes it into the cell's mailbox. cancel is invoked for each KindCancel frame
@@ -176,7 +176,7 @@ func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelop
 		return nil, nil, fmt.Errorf("link: expected handshake_ack for %s, got %s", id, ack.Kind)
 	}
 
-	rw := ipc.NewRemoteWriter(codec)
+	rw := NewRemoteWriter(codec)
 	as := &actorStream{id: id, stream: s, codec: codec, writer: rw, dispatch: dispatch, cancel: cancel}
 	d.mu.Lock()
 	d.streams[id] = as

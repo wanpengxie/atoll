@@ -1,4 +1,4 @@
-package ipc
+package link
 
 import (
 	"context"
@@ -10,6 +10,7 @@ import (
 
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
 // hostEnd is a minimal stand-in for the substrate-side port in remote-writer
@@ -18,8 +19,8 @@ import (
 // EmitSink, then ack in receipt order). It lets the remote writer be tested
 // against a faithful host without pulling in actorrt.
 type hostEnd struct {
-	codec *Codec
-	sink  func(env message.Envelope) EmitAckPayload
+	codec *ipc.Codec
+	sink  func(env message.Envelope) ipc.EmitAckPayload
 }
 
 func (h *hostEnd) serve(t *testing.T) {
@@ -29,10 +30,10 @@ func (h *hostEnd) serve(t *testing.T) {
 		if err != nil {
 			return // EOF / closed: stop serving
 		}
-		if f.Kind != KindEmit {
+		if f.Kind != ipc.KindEmit {
 			continue
 		}
-		var ep EmitPayload
+		var ep ipc.EmitPayload
 		if err := json.Unmarshal(f.Payload, &ep); err != nil {
 			return
 		}
@@ -41,7 +42,7 @@ func (h *hostEnd) serve(t *testing.T) {
 		if err != nil {
 			return
 		}
-		if err := h.codec.Write(Frame{Kind: KindEmitAck, Payload: raw}); err != nil {
+		if err := h.codec.Write(ipc.Frame{Kind: ipc.KindEmitAck, Payload: raw}); err != nil {
 			return
 		}
 	}
@@ -50,13 +51,13 @@ func (h *hostEnd) serve(t *testing.T) {
 // remotePair wires a RemoteWriter to a hostEnd over an in-memory net.Pipe and
 // starts the host serve loop + the remote ack-reader (which feeds KindEmitAck
 // frames into the writer's FIFO queue, as the real remote read loop does).
-func remotePair(t *testing.T, sink func(env message.Envelope) EmitAckPayload) (*RemoteWriter, func()) {
+func remotePair(t *testing.T, sink func(env message.Envelope) ipc.EmitAckPayload) (*RemoteWriter, func()) {
 	t.Helper()
 	hostConn, remoteConn := net.Pipe()
-	host := &hostEnd{codec: NewCodec(hostConn, hostConn), sink: sink}
+	host := &hostEnd{codec: ipc.NewCodec(hostConn, hostConn), sink: sink}
 	go host.serve(t)
 
-	rcodec := NewCodec(remoteConn, remoteConn)
+	rcodec := ipc.NewCodec(remoteConn, remoteConn)
 	rw := NewRemoteWriter(rcodec)
 	readerDone := make(chan struct{})
 	go func() {
@@ -66,10 +67,10 @@ func remotePair(t *testing.T, sink func(env message.Envelope) EmitAckPayload) (*
 			if err != nil {
 				return
 			}
-			if f.Kind != KindEmitAck {
+			if f.Kind != ipc.KindEmitAck {
 				continue
 			}
-			var ap EmitAckPayload
+			var ap ipc.EmitAckPayload
 			if err := json.Unmarshal(f.Payload, &ap); err != nil {
 				return
 			}
@@ -89,8 +90,8 @@ func remotePair(t *testing.T, sink func(env message.Envelope) EmitAckPayload) (*
 // downgraded across the wire (an accepted write).
 func TestRemoteWriterSeesVerdict(t *testing.T) {
 	t.Parallel()
-	rw, cleanup := remotePair(t, func(env message.Envelope) EmitAckPayload {
-		return EmitAckPayload{EmitResult: EmitResult{MessageID: env.ID + "-durable", Seq: 42}}
+	rw, cleanup := remotePair(t, func(env message.Envelope) ipc.EmitAckPayload {
+		return ipc.EmitAckPayload{EmitResult: ipc.EmitResult{MessageID: env.ID + "-durable", Seq: 42}}
 	})
 	defer cleanup()
 
@@ -115,8 +116,8 @@ func TestRemoteWriterSeesVerdict(t *testing.T) {
 // local cell would see (verdict, not transport error).
 func TestRemoteWriterSeesReject(t *testing.T) {
 	t.Parallel()
-	rw, cleanup := remotePair(t, func(env message.Envelope) EmitAckPayload {
-		return EmitAckPayload{EmitResult: EmitResult{
+	rw, cleanup := remotePair(t, func(env message.Envelope) ipc.EmitAckPayload {
+		return ipc.EmitAckPayload{EmitResult: ipc.EmitResult{
 			MessageID:    env.ID,
 			RejectReason: string(harness.HarnessKindInvalid),
 			RejectDetail: "kind \"\" not in closed set",
@@ -145,8 +146,8 @@ func TestRemoteWriterSeesReject(t *testing.T) {
 // a Go error on the remote side.
 func TestRemoteWriterSeesErr(t *testing.T) {
 	t.Parallel()
-	rw, cleanup := remotePair(t, func(env message.Envelope) EmitAckPayload {
-		return EmitAckPayload{Err: "boom"}
+	rw, cleanup := remotePair(t, func(env message.Envelope) ipc.EmitAckPayload {
+		return ipc.EmitAckPayload{Err: "boom"}
 	})
 	defer cleanup()
 
@@ -163,9 +164,9 @@ func TestRemoteWriterSeesErr(t *testing.T) {
 // would cross the verdicts.
 func TestRemoteWriterFIFOOrder(t *testing.T) {
 	t.Parallel()
-	rw, cleanup := remotePair(t, func(env message.Envelope) EmitAckPayload {
+	rw, cleanup := remotePair(t, func(env message.Envelope) ipc.EmitAckPayload {
 		// Verdict echoes the envelope id, so a crossed pairing is detectable.
-		return EmitAckPayload{EmitResult: EmitResult{MessageID: env.ID + "-ack"}}
+		return ipc.EmitAckPayload{EmitResult: ipc.EmitResult{MessageID: env.ID + "-ack"}}
 	})
 	defer cleanup()
 
@@ -201,7 +202,7 @@ func TestRemoteWriterCloseFailsPending(t *testing.T) {
 	// A host that never acks: the emit stays pending until Close.
 	hostConn, remoteConn := net.Pipe()
 	go func() {
-		c := NewCodec(hostConn, hostConn)
+		c := ipc.NewCodec(hostConn, hostConn)
 		for {
 			if _, err := c.Read(); err != nil {
 				return
@@ -209,7 +210,7 @@ func TestRemoteWriterCloseFailsPending(t *testing.T) {
 			// deliberately never ack
 		}
 	}()
-	rcodec := NewCodec(remoteConn, remoteConn)
+	rcodec := ipc.NewCodec(remoteConn, remoteConn)
 	rw := NewRemoteWriter(rcodec)
 	defer func() { _ = hostConn.Close(); _ = remoteConn.Close() }()
 
@@ -242,14 +243,14 @@ func TestRemoteWriterCtxCancel(t *testing.T) {
 	t.Parallel()
 	hostConn, remoteConn := net.Pipe()
 	go func() {
-		c := NewCodec(hostConn, hostConn)
+		c := ipc.NewCodec(hostConn, hostConn)
 		for {
 			if _, err := c.Read(); err != nil {
 				return
 			}
 		}
 	}()
-	rcodec := NewCodec(remoteConn, remoteConn)
+	rcodec := ipc.NewCodec(remoteConn, remoteConn)
 	rw := NewRemoteWriter(rcodec)
 	defer func() { _ = hostConn.Close(); _ = remoteConn.Close() }()
 

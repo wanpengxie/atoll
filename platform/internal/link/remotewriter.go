@@ -1,4 +1,4 @@
-package ipc
+package link
 
 import (
 	"context"
@@ -8,13 +8,25 @@ import (
 
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
 
 // RemoteWriter is the OUT-OF-PROCESS end of the write contract: a relay-only
-// PROXY PEN (harness.Pen) a remote actor uses to emit upward over the port wire
-// and observe the host's authoritative write verdict. It is the wire-contract
-// counterpart of the host-side port — both ends are parties to the same
-// contract, so the substrate ships both.
+// PROXY PEN (harness.Pen) a daemon-hosted remote cell uses to emit upward over
+// the port wire and observe the host's authoritative write verdict.
+//
+// It lives in the platform ASSEMBLY layer, NOT in the substrate. A remote pen is
+// the COMPOSITION of two substrate mechanisms — the harness.Pen contract and the
+// ipc wire protocol — and composing them into an end-to-end pen is an assembly
+// concern, not a kernel-native one (unlike harness.boundPen, whose dependencies
+// close entirely inside the truth engine, this one straddles harness + ipc). Its
+// SYMMETRIC counterpart is the host-side emitSink (accept.go), which composes the
+// same two mechanisms the other way — Mint a pen, write truth, mirror the verdict
+// back onto the wire. Both halves of the emit/ack protocol therefore live
+// together here in link, beside their consumers (dial.go opens the remote end,
+// accept.go serves the host end). This is why moving it out of runtime/ipc lets
+// ipc fall back to a protocol-only wire leaf and frees actorrt's compile closure
+// of harness.
 //
 // INVARIANT: the proxy pen NEVER injects identity and NEVER fail-fasts. It only
 // relays the envelope up the wire; the identity weld + fail-fast live on the
@@ -30,13 +42,13 @@ import (
 // cell's Respond observes the EXACT outcome a local cell's Respond would — the
 // write contract is not downgraded across the wire.
 //
-// Correlation is FIFO with no id (the wire contract, pinned in frame.go): the
+// Correlation is FIFO with no id (the wire contract, pinned in ipc/frame.go): the
 // host acks emits in receipt order, so a pending queue resolved head-first is
 // the complete and only mechanism needed. Concurrent Write calls pipeline:
 // their emits are written in mutex order and their waiters enqueued in the same
 // order, matching the order the host receives and therefore acks them.
 type RemoteWriter struct {
-	codec *Codec
+	codec *ipc.Codec
 
 	// writeMu serializes "enqueue waiter + write emit to the wire" as one atomic
 	// step, so on-wire emit order == FIFO waiter order. It is HELD ACROSS the
@@ -60,12 +72,12 @@ type ackResult struct {
 
 // errRemoteWriterClosed is returned to a blocked or new Write once the writer is
 // torn down (the connection died with emits still in flight).
-var errRemoteWriterClosed = errors.New("ipc: remote writer closed")
+var errRemoteWriterClosed = errors.New("link: remote writer closed")
 
 // NewRemoteWriter binds a remote writer to codec (the actor's port connection).
 // The codec's write side is mutex-guarded, so emits may share it with the
 // actor's other outbound frames.
-func NewRemoteWriter(codec *Codec) *RemoteWriter {
+func NewRemoteWriter(codec *ipc.Codec) *RemoteWriter {
 	return &RemoteWriter{codec: codec}
 }
 
@@ -82,9 +94,9 @@ func NewRemoteWriter(codec *Codec) *RemoteWriter {
 // aligned with the host's ack order.
 func (w *RemoteWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	if env == nil {
-		return harness.WriteResult{}, errors.New("ipc: remote writer nil envelope")
+		return harness.WriteResult{}, errors.New("link: remote writer nil envelope")
 	}
-	payload, err := json.Marshal(EmitPayload{Envelope: *env})
+	payload, err := json.Marshal(ipc.EmitPayload{Envelope: *env})
 	if err != nil {
 		return harness.WriteResult{}, err
 	}
@@ -105,7 +117,7 @@ func (w *RemoteWriter) Write(ctx context.Context, env *message.Envelope) (harnes
 	w.pending = append(w.pending, waiter)
 	w.mu.Unlock()
 
-	if err := w.codec.Write(Frame{Kind: KindEmit, Payload: payload}); err != nil {
+	if err := w.codec.Write(ipc.Frame{Kind: ipc.KindEmit, Payload: payload}); err != nil {
 		// Nothing reached the host: drop this waiter. writeMu guarantees no other
 		// Write appended after it, so it is the tail (head pops by DeliverAck only
 		// shrink from the front).
@@ -141,7 +153,7 @@ func (w *RemoteWriter) removeTailWaiter(waiter chan ackResult) {
 // (the wire contract pins acks to receipt order, so the head waiter is always
 // the correct target). It reconstructs the harness.WriteResult verdict and the
 // transport error from the ack payload.
-func (w *RemoteWriter) DeliverAck(ack EmitAckPayload) {
+func (w *RemoteWriter) DeliverAck(ack ipc.EmitAckPayload) {
 	w.mu.Lock()
 	if len(w.pending) == 0 {
 		w.mu.Unlock()

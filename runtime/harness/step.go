@@ -73,8 +73,10 @@ func (r WriteResult) Accepted() bool { return r.RejectReason == "" }
 // any writer) ever holds. A Pen is welded to one identity at mint time: every
 // Write it commits carries that (actorID, chID), and the holder cannot change
 // it. This is the substrate's first syscall (write truth); identity rides each
-// write the way a UID rides each Linux syscall. boundPen satisfies it (and, on
-// the daemon side, the relay-only RemoteWriter proxy pen).
+// write the way a UID rides each Linux syscall. boundPen satisfies it; so does
+// the relay-only proxy pen a remote (out-of-process) cell uses to emit over the
+// wire — the proxy carries no local truth and observes the same verdict, so a
+// remote cell's pen is indistinguishable from a local one.
 type Pen interface {
 	Write(ctx context.Context, env *message.Envelope) (WriteResult, error)
 }
