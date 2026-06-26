@@ -10,6 +10,19 @@ package store
 //
 // The DDL string is split into multiple CREATE statements; the
 // modernc.org/sqlite driver accepts multi-statement input via Exec.
+//
+// Vocabulary closed sets (sender_kind / kind / visibility / actor_kind /
+// actor_binding) carry NO value-set `CHECK (... IN (...))` clause. Those sets
+// are authoritatively enforced in Go — write path: harness stepEnvelopeShape
+// (kind, visibility) + stepSenderConsistent (sender.kind overwritten from the
+// registry's parsed truth); read path: store scan via ParseKind /
+// ParseVisibility / ParseBinding (out-of-set values fail loud). A DB CHECK
+// would be a redundant SECOND enforcer that also welds an append-only DB to a
+// frozen vocabulary: extending a pre-launch closed set (e.g. a new sender_kind)
+// would make every existing channel sqlite reject inserts AND forbid recreation
+// against the old file. The set is closed by the Go ADT; the DDL must not
+// foreclose its evolution. is_terminal KEEPS its CHECK (0,1) — that is a
+// structural boolean integrity constraint, not an evolving vocabulary.
 const ChannelLocalDDL = `
 -- =============================================================
 -- 1) messages  (L2 §1.4.1)
@@ -20,14 +33,14 @@ CREATE TABLE IF NOT EXISTS messages (
   ts                   INTEGER NOT NULL,
   ts_received          INTEGER NOT NULL,
   channel_id           TEXT NOT NULL,
-  sender_kind          TEXT NOT NULL CHECK (sender_kind IN ('human','agent','system','tool')),
+  sender_kind          TEXT NOT NULL,
   sender_id            TEXT NOT NULL,
-  kind                 TEXT NOT NULL CHECK (kind IN ('event','request','response')),
+  kind                 TEXT NOT NULL,
   type                 TEXT NOT NULL,
   payload              TEXT NOT NULL,
   parent_id            TEXT,
   correlation_id       TEXT,
-  visibility           TEXT NOT NULL CHECK (visibility IN ('public','private','system')),
+  visibility           TEXT NOT NULL,
   audience             TEXT NOT NULL,
   expires_at           INTEGER,
   is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1))
@@ -55,11 +68,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
 -- =============================================================
 CREATE TABLE IF NOT EXISTS actor_registry (
   actor_id           TEXT PRIMARY KEY,
-  actor_kind         TEXT NOT NULL
-                     CHECK (actor_kind IN ('human','agent','system','tool')),
-  actor_binding      TEXT
-                     CHECK (actor_binding IS NULL
-                            OR actor_binding IN ('embedded','runtime_outbound','runtime_inbound_via_relay')),
+  actor_kind         TEXT NOT NULL,
+  actor_binding      TEXT,
   created_at         INTEGER NOT NULL,
   deregistered_at    INTEGER
 );

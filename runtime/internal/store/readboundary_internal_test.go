@@ -2,13 +2,18 @@ package store
 
 // In-package (white-box) tests for the closed-set READ BOUNDARY.
 //
-// The channel DDL's CHECK constraints block out-of-set values on the WRITE
-// path, so to exercise the read-side ParseKind/ParseVisibility guards we must
-// build a relaxed sqlite (no CHECKs) and inject poison rows directly. This is
-// only reachable from inside the package — exactly the structural confinement
-// the store relies on. The contract under test: a corrupted / forward-version
-// DB value MUST surface as an error on read, never be silently cast into the
-// closed-set ADT (kernel closed-set invariant).
+// Closed-set vocabularies are enforced in Go, not by a DB CHECK (schema.go
+// carries no value-set CHECK on sender_kind / kind / visibility / actor_kind /
+// actor_binding). The write path is guarded by the harness; the read path is
+// guarded by the store scan (ParseKind / ParseVisibility / ParseBinding). To
+// exercise those read-side guards we inject poison rows that a real writer
+// could never produce — a corrupted file or a forward-incompatible writer that
+// committed an out-of-set value. The relaxedDDL below is a plain mirror of the
+// channel tables used purely as the injection vehicle. This is only reachable
+// from inside the package — exactly the structural confinement the store relies
+// on. The contract under test: a corrupted / forward-version DB value MUST
+// surface as an error on read, never be silently cast into the closed-set ADT
+// (kernel closed-set invariant).
 
 import (
 	"context"
@@ -17,9 +22,11 @@ import (
 	"testing"
 )
 
-// relaxedDDL mirrors the channel tables but drops the CHECK constraints so we
-// can inject out-of-closed-set poison values that a real DB could only acquire
-// via corruption or a forward-incompatible writer.
+// relaxedDDL is a stripped mirror of the channel tables (no indexes, no
+// is_terminal bool CHECK) used only to inject out-of-closed-set poison values
+// that a real DB could acquire only via corruption or a forward-incompatible
+// writer. The closed-set vocabularies were never DB-enforced, so no value-set
+// CHECK is dropped here — the poison would insert against schema.go too.
 const relaxedDDL = `
 CREATE TABLE messages (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
