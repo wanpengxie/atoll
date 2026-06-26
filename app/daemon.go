@@ -41,7 +41,7 @@ func (a *App) handleListDaemons(c *gin.Context) {
 		result = append(result, gin.H{
 			"id": id, "name": name, "created_at": createdAt,
 			"attached_channels": chans,
-			// online = L1 link presence: a live attach on ANY bound channel right
+			// online = L1 link attachment: a live attach on ANY bound channel right
 			// now, read-time from the platform View (out-of-band, no truth-log
 			// write — UI polling must not pollute the log).
 			"online": a.daemonOnline(channel.ID(""), chans, id),
@@ -169,7 +169,7 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 		}
 		result = append(result, gin.H{
 			"id": id, "name": name, "created_at": createdAt,
-			// online = L1 link presence on THIS channel, read-time from View.
+			// online = L1 link attachment on THIS channel, read-time from View.
 			"online": a.daemonOnline(channel.ID(chID), nil, id),
 		})
 	}

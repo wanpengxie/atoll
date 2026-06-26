@@ -16,7 +16,7 @@ function normalizeDaemon(row) {
   return {
     id: row.id || row.ID,
     name: row.name || row.Name || '',
-    // online = L1 link presence, live from the platform View (replaces the dead
+    // online = L1 link attachment, live from the platform View (replaces the dead
     // status column).
     online: Boolean(row.online ?? row.Online),
     hosted_actors: row.hosted_actors || row.hostedActors || [],

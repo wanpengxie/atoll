@@ -52,7 +52,7 @@ type Acceptor struct {
 	wg     sync.WaitGroup
 
 	// attached is the live attach refcount per compute id (daemon). A daemon is
-	// "online" (L1 link presence) iff its count > 0. Refcount, not bool, so an
+	// "online" (attached) iff its count > 0. Refcount, not bool, so an
 	// overlapping reconnect (old link tearing down after the new one attached)
 	// does not flap the daemon offline. Volatile runtime state — never persisted.
 	attachedMu sync.Mutex
@@ -107,7 +107,7 @@ func NewAcceptor(cfg Config) *Acceptor {
 }
 
 // markAttached / markDetached / IsAttached / AttachedDaemons are the L1 link-
-// presence read seam: the Acceptor authoritatively holds which computes have a
+// attachment read seam: the Acceptor authoritatively holds which computes have a
 // live attach right now (it owns the connections + lease). markAttached is
 // called once per accepted link (after attach success); markDetached once when
 // that link tears down (peer gone / lease expiry / Close). Empty id (dev self-
@@ -268,9 +268,9 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 // handleAttach processes the stream-0 attach: register declared actors into
 // membership (register/reactivate — detach never deregisters), record the
 // allowed set, and reply. Membership semantics照旧: a member row is durable; a
-// daemon detaching does NOT remove it (membership ≠ presence).
+// daemon detaching does NOT remove it (membership ≠ attachment).
 // handleAttach processes the stream-0 attach and reports (computeID, accepted)
-// so the caller can count L1 link presence only on success.
+// so the caller can count L1 link attachment only on success.
 func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed map[actor.ActorID]bool) (string, bool) {
 	computeID := att.ComputeID
 	if daemonID != "" {

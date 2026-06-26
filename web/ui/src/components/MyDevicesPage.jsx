@@ -18,7 +18,7 @@ function normalizeDaemon(row) {
     owner_id: row.owner_id || row.ownerID || row.OwnerID,
     name: row.name || row.Name || '',
     api_key_prefix: row.api_key_prefix || row.apiKeyPrefix || row.APIKeyPrefix || '',
-    // online = L1 link presence (daemon attached on a bound channel right now),
+    // online = L1 link attachment (daemon attached on a bound channel right now),
     // live from the platform View. Replaces the dead status/hostname/heartbeat
     // columns that only ever lied.
     online: Boolean(row.online ?? row.Online),
