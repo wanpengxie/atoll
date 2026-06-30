@@ -7,7 +7,7 @@
 // (no HTTP status). All concrete backends, engines and bindings live
 // outside protocol and depend on protocol — never the other way round.
 //
-// Subpackages (3):
+// Subpackages (5):
 //
 //   - protocol/actor    — actor identity (ActorID), the actor Kind closed set,
 //     Binding closed set, and the reserved-type closed sets.
@@ -16,6 +16,13 @@
 //     sender flattened into sender.kind/sender.id), kind /
 //     visibility closed sets, core-type table, and the terminal-failure reason
 //     closed set (INVARIANT-10).
+//   - protocol/resource — the opaque ResourceID, the passive object of the
+//     access plane (second plane, subject/object closure); single-level
+//     (no incarnation), bytes opaque.
+//   - protocol/access   — the access invocation (Invocation), the Operation
+//     closed set {create,read,write,set,delete}, the FailureReason closed set,
+//     and the Grant operand for op=set. The second plane's subject to object
+//     relation, off-log.
 //
 // What is NOT in protocol (and why):
 //
