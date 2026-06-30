@@ -16,7 +16,7 @@ func TestDeliverNilEnvelopeIsError(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", newRecordActor())
+	rt.Spawn("a", static(newRecordActor()))
 
 	res, err := rt.deliver([]actor.ActorID{"a"}, nil)
 	if err == nil {
@@ -37,12 +37,12 @@ func TestDeliverPerAudienceTruth(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background(), Mailbox: 16})
 
 	live := newRecordActor()
-	rt.Spawn("live", live)
+	rt.Spawn("live", static(live))
 
 	// "gone" is spawned then despawned: hosted history but no live presence now,
 	// so it must read NotHosted, NOT some stale Delivered.
-	rt.Spawn("gone", newRecordActor())
-	rt.Despawn("gone")
+	gone := rt.Spawn("gone", static(newRecordActor()))
+	rt.Despawn(gone)
 
 	audience := []actor.ActorID{"live", "ghost", "gone"}
 	res, err := rt.deliver(audience, env("m"))
@@ -73,7 +73,7 @@ func TestDeliverDuplicateAudienceMember(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background(), Mailbox: 16})
 	defer rt.StopAll()
-	rt.Spawn("a", newRecordActor())
+	rt.Spawn("a", static(newRecordActor()))
 
 	res, err := rt.deliver([]actor.ActorID{"a", "a"}, env("m"))
 	if err != nil {
@@ -96,7 +96,7 @@ func TestSpawnReplaceStopsOld(t *testing.T) {
 	defer rt.StopAll()
 
 	first := newRecordActor()
-	rt.Spawn("a", first)
+	rt.Spawn("a", static(first))
 	select {
 	case <-first.startedCh:
 	case <-time.After(time.Second):
@@ -104,7 +104,7 @@ func TestSpawnReplaceStopsOld(t *testing.T) {
 	}
 
 	second := newRecordActor()
-	rt.Spawn("a", second)
+	rt.Spawn("a", static(second))
 
 	select {
 	case <-first.stoppedCh:
@@ -140,7 +140,7 @@ func TestActorContextSelf(t *testing.T) {
 	a := &selfIDActor{id: make(chan actor.ActorID, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", a)
+	rt.Spawn("a", static(a))
 	select {
 	case got := <-a.id:
 		if got != actor.ActorID("a") {
@@ -161,7 +161,7 @@ func TestStopAllClearsPresences(t *testing.T) {
 	for _, id := range []actor.ActorID{"a", "b", "c"} {
 		ra := newRecordActor()
 		actors[id] = ra
-		rt.Spawn(id, ra)
+		rt.Spawn(id, static(ra))
 		select {
 		case <-ra.startedCh:
 		case <-time.After(time.Second):
@@ -183,13 +183,14 @@ func TestStopAllClearsPresences(t *testing.T) {
 	}
 }
 
-// TestDespawnAbsentIsNoop: despawning an id the runtime never hosted is a no-op
-// (no panic, stays unaddressable).
+// TestDespawnAbsentIsNoop: despawning an incarnation handle the runtime never
+// hosted is a no-op (no panic, stays unaddressable). The guarded Despawn's
+// pointer check never matches, so it never touches the (nil) presence.
 func TestDespawnAbsentIsNoop(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Despawn("never-existed")
+	rt.Despawn(Incarnation{id: "never-existed"})
 	if _, ok := rt.Stat("never-existed"); ok {
 		t.Fatal("absent id became addressable after Despawn")
 	}
@@ -208,7 +209,7 @@ func TestStatReportsClockStampedStartedAt(t *testing.T) {
 	if _, ok := rt.Stat("a"); ok {
 		t.Fatal("Stat reported present for an unhosted id")
 	}
-	rt.Spawn("a", newRecordActor())
+	rt.Spawn("a", static(newRecordActor()))
 
 	st, ok := rt.Stat("a")
 	if !ok {

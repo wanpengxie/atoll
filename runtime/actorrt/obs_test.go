@@ -37,7 +37,7 @@ func TestObserveRoutesToObserver(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", &observerActor{})
+	rt.Spawn("a", static(&observerActor{}))
 
 	val, err := rt.Observe(context.Background(), "a", "quota.limit")
 	if err != nil {
@@ -58,7 +58,7 @@ func TestObserveUnsupportedAndNotHosted(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("plain", newRecordActor()) // no Observer
+	rt.Spawn("plain", static(newRecordActor())) // no Observer
 
 	if _, err := rt.Observe(context.Background(), "plain", "anything"); err != ErrObsUnsupported {
 		t.Fatalf("Observe(non-observer) err = %v, want ErrObsUnsupported", err)
@@ -93,7 +93,7 @@ func TestPublishObsFanout(t *testing.T) {
 	rt, del := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.WatchObs("a", col)
-	rt.Spawn("a", &observerActor{})
+	rt.Spawn("a", static(&observerActor{}))
 
 	if _, err := del.Deliver([]actor.ActorID{"a"}, env("trigger")); err != nil {
 		t.Fatalf("deliver: %v", err)

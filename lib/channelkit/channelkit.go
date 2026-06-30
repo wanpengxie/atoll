@@ -88,9 +88,15 @@ func New(cfg Config) *Channel {
 	// Register the death watcher BEFORE spawning any cell — no presence-down edge
 	// may be missed (closure-critical path).
 	c.cells.WatchPresence(c)
-	// Spawn the intrinsic system cell, built against the live runtime.
+	// Spawn the intrinsic system cell, built against the live runtime. It uses the
+	// RAW system pen (anchor not wrapped in a livePen, §3.5): the system actor
+	// writes singleton SystemActorID terminals, has no successor principal to
+	// impersonate, and the closure reconciler must write even when no cell is live
+	// — gating it would defeat it. So no incarnation is welded here.
 	if cfg.System != nil {
-		c.cells.Spawn(actor.SystemActorID, cfg.System(c.cells))
+		c.cells.Spawn(actor.SystemActorID, func(actorrt.Incarnation) actorrt.Actor {
+			return cfg.System(c.cells)
+		})
 	}
 	return c
 }

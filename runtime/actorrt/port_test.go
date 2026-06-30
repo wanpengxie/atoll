@@ -429,7 +429,10 @@ func TestPortStopIsNotDeath(t *testing.T) {
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
 
-	rt.Despawn(id)
+	rt.mu.Lock()
+	p := rt.presences[id]
+	rt.mu.Unlock()
+	rt.Despawn(Incarnation{id: id, p: p})
 	if _, ok := rt.Stat(id); ok {
 		t.Fatal("port still addressable after Despawn")
 	}

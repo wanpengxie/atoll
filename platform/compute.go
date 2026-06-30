@@ -189,7 +189,10 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		// Register the obs forwarder BEFORE Spawn so no early presence edge is
 		// missed (same discipline as WatchPresence).
 		rt.WatchObs(a.ID, obsFwd)
-		rt.Spawn(a.ID, impl)
+		// The daemon cell's pen is the link's relay-only RemoteWriter; it is NOT
+		// wrapped in a livePen — the home-side cross-wire death gate is deferred
+		// (§4 daemon door). The build closure just returns the prebuilt impl.
+		rt.Spawn(a.ID, func(actorrt.Incarnation) actorrt.Actor { return impl })
 	}
 
 	d.Start()

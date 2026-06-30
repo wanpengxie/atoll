@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -72,10 +73,19 @@ type port struct {
 	onDown func(actor.ActorID, error)
 	// onObs relays an inbound KindObs (the remote actor's obs PUSH) into the
 	// runtime's per-actor obs fanout — the cross-wire arm of the actor-source obs
-	// axis. nil → inbound obs is dropped (no consumer). Mirrors cell.onObs.
-	onObs  func(actor.ActorID, ObsKind, ObsValue)
+	// axis. It passes THIS port as the self pointer so the runtime can
+	// pointer-identity-gate the fanout (a replaced predecessor cannot publish obs
+	// attributed to a same-id successor). nil → inbound obs is dropped (no
+	// consumer). Mirrors cell.onObs.
+	onObs  func(actor.ActorID, presence, ObsKind, ObsValue)
 	onExit func(actor.ActorID, presence)
 	logger *slog.Logger
+
+	// live is the per-incarnation WHEN-validity atomic (presence contract), set
+	// true at Attach go-live and false on teardown. The home-side port death-write
+	// gate that would consult it is §3.6 (deferred); the field exists so port
+	// satisfies the presence interface and reports honestly if probed.
+	live atomic.Bool
 
 	sendq chan *message.Envelope
 	wg    sync.WaitGroup
@@ -102,7 +112,7 @@ type port struct {
 // read runs off-goroutine and newPort selects it against hsCtx; on expiry it
 // closes the conn (unblocking the read) and returns. parent owns the port's
 // LIFETIME (unchanged); hsCtx owns only this one read.
-func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, onDown func(actor.ActorID, error), onObs func(actor.ActorID, ObsKind, ObsValue), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) (p *port, err error) {
+func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, onDown func(actor.ActorID, error), onObs func(actor.ActorID, presence, ObsKind, ObsValue), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) (p *port, err error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -199,6 +209,13 @@ func readHandshakeBounded(hsCtx context.Context, codec *ipc.Codec) (ipc.Frame, e
 // startedAt implements presence: the substrate-stamped bind instant (obs uptime
 // source), set at Attach.
 func (p *port) startedAt() time.Time { return p.started }
+
+// isLive implements presence: the lock-free WHEN-validity probe (per-incarnation
+// atomic). True only between Attach go-live and teardown.
+func (p *port) isLive() bool { return p.live.Load() }
+
+// markDead implements presence: flip the liveness atomic to false (idempotent).
+func (p *port) markDead() { p.live.Store(false) }
 
 // observe implements presence for an out-of-process actor: obs PULL over the
 // wire is not yet wired (additive — a KindObs round-trip frame), so the port
@@ -346,7 +363,7 @@ func (p *port) readLoop() {
 				return
 			}
 			if p.onObs != nil {
-				p.onObs(p.id, ObsKind(op.Kind), ObsValue(op.Value))
+				p.onObs(p.id, p, ObsKind(op.Kind), ObsValue(op.Value))
 			}
 		case ipc.KindDown:
 			var dp ipc.DownPayload
@@ -370,6 +387,7 @@ func (p *port) readLoop() {
 // conn to unblock both loops; it NEVER joins them (stop() does that).
 func (p *port) die(cause error) {
 	p.dieOnce.Do(func() {
+		p.live.Store(false)
 		p.mu.Lock()
 		stopping := p.stopping
 		p.closed = true
@@ -389,6 +407,7 @@ func (p *port) die(cause error) {
 // presence-down edge), cancel + close to unblock the loops, then join on done.
 func (p *port) stop() {
 	p.stopOnce.Do(func() {
+		p.live.Store(false)
 		p.mu.Lock()
 		p.stopping = true
 		p.closed = true

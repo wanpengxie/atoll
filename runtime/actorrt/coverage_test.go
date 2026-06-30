@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net"
 	"sync"
 	"testing"
@@ -14,6 +15,17 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/ipc"
 )
+
+// newCell is a test shim over the two-phase allocShell: it allocates the cell
+// shell and fills impl in one step, so the direct-construction edge tests below
+// keep their single-call shape (production fills c.impl from the Spawn build
+// closure instead). It does NOT go-live (live stays false) — these tests drive
+// start()/stop() directly and do not assert IsLive.
+func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, presence, ObsKind, ObsValue), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) *cell {
+	c := allocShell(parent, id, mailbox, onDown, onObs, onExit, started, logger)
+	c.impl = impl
+	return c
+}
 
 // --- cell.go direct-construction edge tests -------------------------------
 
@@ -79,7 +91,7 @@ func TestCellStartErrorPublishesDown(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
-	rt.Spawn("a", startErrActor{})
+	rt.Spawn("a", static(startErrActor{}))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
@@ -114,7 +126,7 @@ func TestSafeReceiveSwallowsError(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 	defer rt.StopAll()
-	rt.Spawn("a", a)
+	rt.Spawn("a", static(a))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-a.got:
@@ -143,7 +155,7 @@ func TestNewDefaultsParent(t *testing.T) {
 	if rt.parent == nil {
 		t.Fatal("New did not default a nil Parent")
 	}
-	rt.Spawn("a", newRecordActor())
+	rt.Spawn("a", static(newRecordActor()))
 	if _, ok := rt.Stat("a"); !ok {
 		t.Fatal("runtime built from a zero Config cannot host a cell")
 	}
@@ -188,7 +200,7 @@ func TestPublishDownWatcherPanicGuarded(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(bad)
 	rt.WatchPresence(good)
-	rt.Spawn("a", panicActor{})
+	rt.Spawn("a", static(panicActor{}))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-bad.notify:
@@ -223,7 +235,7 @@ func TestPublishObsWatcherPanicGuarded(t *testing.T) {
 	defer rt.StopAll()
 	rt.WatchObs("a", bad)
 	rt.WatchObs("a", good)
-	rt.Spawn("a", &observerActor{})
+	rt.Spawn("a", static(&observerActor{}))
 	if _, err := del.Deliver([]actor.ActorID{"a"}, env("trigger")); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
@@ -282,6 +294,8 @@ func (fakeErrPresence) observe(context.Context, ObsKind) (ObsValue, error) {
 func (p fakeErrPresence) startedAt() time.Time { return p.started }
 func (fakeErrPresence) cancelRequest(message.ID) {}
 func (fakeErrPresence) stop()                    {}
+func (fakeErrPresence) isLive() bool             { return false }
+func (fakeErrPresence) markDead()                {}
 
 // TestDeliverDefaultArmMapsToStopped: an enqueue error that is neither
 // ErrMailboxFull nor ErrCellStopped maps to Stopped (deliver's default switch

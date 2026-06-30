@@ -178,7 +178,7 @@ func (h *daemonHost) Install(id actor.ActorID, impl actorrt.Actor, downHandler f
 	h.mu.Lock()
 	h.down[id] = downHandler
 	h.mu.Unlock()
-	h.rt.Spawn(id, impl)
+	h.rt.Spawn(id, func(actorrt.Incarnation) actorrt.Actor { return impl })
 }
 
 func (h *daemonHost) Dispatch(target actor.ActorID, env *message.Envelope) error {

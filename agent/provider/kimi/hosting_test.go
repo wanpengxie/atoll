@@ -51,7 +51,7 @@ func newCellHost(t *testing.T) *cellHost {
 	kimi.SetAgentFactory(b, func(kimi.AgentConfig) (kimi.Agent, error) {
 		return scriptTextTurn(&bb, "parity reply"), nil
 	})
-	rt.Spawn(testActorID, b)
+	rt.Spawn(testActorID, func(actorrt.Incarnation) actorrt.Actor { return b })
 	return &cellHost{w: w, rt: rt, del: del}
 }
 
@@ -109,7 +109,7 @@ func newDaemonHost(t *testing.T) *daemonHost {
 	kimi.SetAgentFactory(bb, func(kimi.AgentConfig) (kimi.Agent, error) {
 		return scriptTextTurn(&b, "parity reply"), nil
 	})
-	rt.Spawn(testActorID, bb)
+	rt.Spawn(testActorID, func(actorrt.Incarnation) actorrt.Actor { return bb })
 	return dh
 }
 

@@ -64,6 +64,12 @@ func env(id string) *message.Envelope {
 	return &message.Envelope{ID: message.ID(id)}
 }
 
+// static adapts a prebuilt Actor to the two-phase Spawn build closure (the
+// incarnation is ignored — these tests do not weld a livePen).
+func static(impl Actor) func(Incarnation) Actor {
+	return func(Incarnation) Actor { return impl }
+}
+
 // mustDeliver delivers to a single actor and fails on a non-Delivered outcome.
 func mustDeliver(t *testing.T, rt *Runtime, id actor.ActorID, e *message.Envelope) {
 	t.Helper()
@@ -85,7 +91,7 @@ func TestCellSerialDelivery(t *testing.T) {
 		done <- struct{}{}
 	}
 	rt, _ := New(Config{Parent: context.Background(), Mailbox: 200})
-	rt.Spawn("a", a)
+	rt.Spawn("a", static(a))
 
 	const n = 50
 	for i := 0; i < n; i++ {
@@ -107,13 +113,13 @@ func TestCellStartStop(t *testing.T) {
 	t.Parallel()
 	a := newRecordActor()
 	rt, _ := New(Config{Parent: context.Background()})
-	rt.Spawn("a", a)
+	inc := rt.Spawn("a", static(a))
 	select {
 	case <-a.startedCh:
 	case <-time.After(time.Second):
 		t.Fatal("Start never ran")
 	}
-	rt.Despawn("a")
+	rt.Despawn(inc)
 	select {
 	case <-a.stoppedCh:
 	case <-time.After(time.Second):
@@ -131,7 +137,7 @@ func TestCellMailboxFull(t *testing.T) {
 	a.receive = func() { <-block }
 	rt, _ := New(Config{Parent: context.Background(), Mailbox: 1})
 	defer func() { close(block); rt.StopAll() }()
-	rt.Spawn("a", a)
+	rt.Spawn("a", static(a))
 
 	var gotFull atomic.Bool
 	for i := 0; i < 50; i++ {
@@ -196,7 +202,7 @@ func TestCellPanicPublishesPresenceDown(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w) // register BEFORE spawn — no edge missed
-	rt.Spawn("a", panicActor{})
+	rt.Spawn("a", static(panicActor{}))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-w.notify:
@@ -217,14 +223,17 @@ func TestCellPanicPublishesPresenceDown(t *testing.T) {
 
 // despawningWatcher reproduces the DANGEROUS legacy pattern (despawn in the death
 // reaction). It must NOT deadlock: the cell self-evicts before OnDown, so the
-// Despawn no-ops instead of self-joining the dying goroutine. (B1 regression)
+// guarded Despawn(inc) finds a pointer mismatch and no-ops instead of self-joining
+// the dying goroutine. It holds the incarnation handle (the guarded Despawn API
+// requires it — a watcher can no longer despawn by bare id). (B1 regression)
 type despawningWatcher struct {
 	rt     *Runtime
+	inc    Incarnation
 	notify chan struct{}
 }
 
 func (w *despawningWatcher) OnDown(ctx context.Context, id actor.ActorID, cause error) {
-	w.rt.Despawn(id)
+	w.rt.Despawn(w.inc)
 	select {
 	case w.notify <- struct{}{}:
 	default:
@@ -237,7 +246,10 @@ func TestPanicDeathWithDespawningWatcherDoesNotDeadlock(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	w.rt = rt
 	rt.WatchPresence(w)
-	rt.Spawn("a", startPanicActor{})
+	// Receive-panic (not Start-panic) so the incarnation handle is recorded BEFORE
+	// death is triggered by the deliver below — no race on w.inc.
+	w.inc = rt.Spawn("a", static(panicActor{}))
+	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
@@ -258,14 +270,14 @@ func TestRespawnSameIDEachDeathIsIndependent(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchPresence(w)
 
-	rt.Spawn("a", startPanicActor{})
+	rt.Spawn("a", static(startPanicActor{}))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
 		t.Fatal("no presence-down edge for first instance")
 	}
 
-	rt.Spawn("a", startPanicActor{})
+	rt.Spawn("a", static(startPanicActor{}))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
@@ -319,7 +331,7 @@ func TestRequestCtxExpiresAtCancels(t *testing.T) {
 	a := &ctxActor{gotCtx: make(chan context.Context, 1), block: true}
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", a)
+	rt.Spawn("a", static(a))
 
 	expires := time.Now().Add(80 * time.Millisecond).UnixMilli()
 	e := env("req-1")
@@ -353,7 +365,7 @@ func TestRequestTableCollapses(t *testing.T) {
 	a := newRecordActor()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", a)
+	rt.Spawn("a", static(a))
 	mustDeliver(t, rt, "a", env("req-1"))
 
 	rt.mu.RLock()
@@ -385,7 +397,7 @@ func TestCellDeathCancelsInFlightReqCtx(t *testing.T) {
 	a := &ctxActor{panicN: "boom-req", downCh: make(chan struct{})}
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", a)
+	rt.Spawn("a", static(a))
 	mustDeliver(t, rt, "a", env("boom-req"))
 
 	select {
@@ -405,14 +417,14 @@ func TestCellTeardownWaitsInFlight(t *testing.T) {
 		finished.Store(true)
 	}
 	rt, _ := New(Config{Parent: context.Background()})
-	rt.Spawn("a", a)
+	inc := rt.Spawn("a", static(a))
 	mustDeliver(t, rt, "a", env("x"))
 	time.Sleep(10 * time.Millisecond) // ensure Receive is in-flight
 	go func() {
 		time.Sleep(20 * time.Millisecond)
 		close(release)
 	}()
-	rt.Despawn("a") // must block until in-flight Receive returns
+	rt.Despawn(inc) // must block until in-flight Receive returns
 	if !finished.Load() {
 		t.Fatal("Despawn returned before in-flight Receive completed")
 	}

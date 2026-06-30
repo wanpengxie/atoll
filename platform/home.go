@@ -279,8 +279,16 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, fac
 		return fmt.Errorf("platform: Spawn membership: %w", err)
 	}
 	if factory != nil {
-		pen := h.minter.Mint(id, h.channelID)
-		h.channel.Cells().Spawn(id, factory(pen))
+		// Two-phase Spawn: the build closure runs inside Spawn (after membership is
+		// durable, before go-live). It Mints the welded raw pen, wraps it in a
+		// livePen bound to THIS incarnation (death-after-write fence), and hands the
+		// gated pen to the factory. A participant is a gated cap holder; substrate
+		// anchors are not (see channelkit/compute).
+		rt := h.channel.Cells()
+		rt.Spawn(id, func(inc actorrt.Incarnation) actorrt.Actor {
+			pen := link.NewLivePen(h.minter.Mint(id, h.channelID), inc, rt)
+			return factory(pen)
+		})
 	}
 	h.logger.Info("platform.member.spawned", "channel", string(h.channelID),
 		"actor", string(id), "kind", string(kind), "cell", factory != nil)

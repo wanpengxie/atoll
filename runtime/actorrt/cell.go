@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -47,8 +48,11 @@ type cell struct {
 	onDown func(actor.ActorID, error)
 	// onObs publishes an actor-produced obs snapshot (obs push/actor) to the
 	// runtime's per-actor obs watchers. Invoked from the actor via
-	// ActorContext.PublishObs. No watcher → no-op.
-	onObs func(actor.ActorID, ObsKind, ObsValue)
+	// ActorContext.PublishObs. It passes THIS cell as the self pointer so the
+	// runtime can pointer-identity-gate the fanout (a stale predecessor that
+	// outlived its incarnation cannot publish obs attributed to a same-id
+	// successor — the ABA guard, mirroring onExit). No watcher → no-op.
+	onObs func(actor.ActorID, presence, ObsKind, ObsValue)
 	// logger surfaces cell-lifecycle edge observability.
 	logger *slog.Logger
 	// onExit is the pointer-identity-checked self-eviction hook the Runtime injects:
@@ -57,6 +61,12 @@ type cell struct {
 	// makes an instance unaddressable WITHOUT the cell trying to stop/join
 	// itself (a goroutine cannot join itself — that was the death deadlock).
 	onExit func(actor.ActorID, presence)
+
+	// live is the per-incarnation WHEN-validity atomic: false at allocShell, true
+	// at go-live (register), false again on any teardown (death / stop / eviction).
+	// IsLive reads it LOCK-FREE so a livePen can fence a dangling capability per
+	// write without serialising on the runtime's addressing lock.
+	live atomic.Bool
 
 	// done is closed when the cell goroutine has fully exited (after Stop).
 	done chan struct{}
@@ -77,10 +87,13 @@ type cell struct {
 	inflight map[message.ID]context.CancelFunc
 }
 
-// newCell constructs a cell. mailbox is the bounded inbox depth; onExit is the
-// self-eviction hook; onDown publishes the death (presence DELETED) edge;
-// started is the substrate-stamped bind instant (obs uptime).
-func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, ObsKind, ObsValue), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) *cell {
+// allocShell allocates a cell SHELL (impl=nil, live=false) — phase 1 of the
+// two-phase Spawn (§3.2). The returned pointer is the incarnation's stable p;
+// Spawn fills c.impl from the build closure (OUTSIDE the lock, while IsLive is
+// still false), then flips live true at go-live. mailbox is the bounded inbox
+// depth; onExit is the self-eviction hook; onDown publishes the death (presence
+// DELETED) edge; started is the substrate-stamped bind instant (obs uptime).
+func allocShell(parent context.Context, id actor.ActorID, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, presence, ObsKind, ObsValue), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) *cell {
 	if mailbox <= 0 {
 		mailbox = 64
 	}
@@ -90,7 +103,6 @@ func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, 
 	ctx, cancel := context.WithCancel(parent)
 	return &cell{
 		id:       id,
-		impl:     impl,
 		inbox:    make(chan *message.Envelope, mailbox),
 		started:  started,
 		ctx:      ctx,
@@ -110,6 +122,13 @@ func (c *cell) Self() actor.ActorID { return c.id }
 // startedAt implements presence: the substrate-stamped bind instant (obs uptime
 // source). The substrate is the authority for it — the cell never self-reports.
 func (c *cell) startedAt() time.Time { return c.started }
+
+// isLive implements presence: the lock-free WHEN-validity probe (per-incarnation
+// atomic). True only between go-live and teardown.
+func (c *cell) isLive() bool { return c.live.Load() }
+
+// markDead implements presence: flip the liveness atomic to false (idempotent).
+func (c *cell) markDead() { c.live.Store(false) }
 
 // observe implements presence: the obs PULL/actor route. It forwards the opaque
 // kind to the actor IFF the actor opts in via the Observer hook, answered
@@ -138,7 +157,7 @@ func (c *cell) observe(ctx context.Context, kind ObsKind) (ObsValue, error) {
 // the substrate forwards it without interpreting.
 func (c *cell) PublishObs(kind ObsKind, val ObsValue) {
 	if c.onObs != nil {
-		c.onObs(c.id, kind, val)
+		c.onObs(c.id, c, kind, val)
 	}
 }
 
@@ -175,6 +194,10 @@ func (c *cell) start() {
 			if r := recover(); r != nil {
 				deathCause = fmt.Errorf("actorrt: cell %s panicked: %v", c.id, r)
 			}
+			// (a-1) Flip liveness off FIRST so a livePen fences this incarnation the
+			// instant the goroutine begins to unwind (before self-eviction / death
+			// edge). markDead is idempotent; onExit/Despawn may flip it again.
+			c.live.Store(false)
 			// (a0) Cancel the cell ctx so EVERY in-flight reqCtx cascades cancelled
 			// — the dead instance's downstream goroutines (tools / LLM / sub-awaits
 			// holding a reqCtx) unwind instead of leaking. cancel() is idempotent;
@@ -296,6 +319,7 @@ func (c *cell) cancelRequest(id message.ID) {
 // calls stop(); it self-evicts via onExit instead.
 func (c *cell) stop() {
 	c.stopOnce.Do(func() {
+		c.live.Store(false) // fence any welded cap at once; the goroutine's defer also flips it.
 		c.mu.Lock()
 		c.closed = true
 		c.mu.Unlock()

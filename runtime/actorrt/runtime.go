@@ -30,10 +30,38 @@ type presence interface {
 	cancelRequest(id message.ID)
 	startedAt() time.Time
 	stop()
+	// isLive reports whether this presence is still the live incarnation — read
+	// LOCK-FREE off a per-incarnation atomic (set true at go-live, false on
+	// death/stop/eviction). It is the WHEN-validity probe a liveCap (livePen)
+	// consults per write to fence a dangling capability held by a goroutine that
+	// outlived its incarnation. It must NOT take r.mu (churn would serialise every
+	// emit behind the hot addressing lock).
+	isLive() bool
+	// markDead flips the per-incarnation live atomic to false. Called from the
+	// death path / stop / pointer-identity eviction. Idempotent.
+	markDead()
 }
 
 // ErrNotHosted is returned when no presence is hosted for the addressed id.
 var ErrNotHosted = errors.New("actorrt: actor not hosted")
+
+// Incarnation is the opaque handle to ONE live embodiment of an ActorID — a
+// (id, presence-pointer) pair. Identity is single-level (one stable ActorID),
+// but a capability welded to a specific incarnation can outlive it (a goroutine
+// captured a pen, the cell died, a same-id successor took over): the handle
+// names WHICH embodiment, so the WHEN-validity gate (IsLive) is by POINTER, not
+// by id — defeating ABA. It is comparable (id + pointer) and is NEVER serialised
+// into an envelope/truth; it lives only in the volatile liveness plane.
+type Incarnation struct {
+	id actor.ActorID
+	p  presence
+}
+
+// ID is the read-only accessor for the incarnation's ActorID. The presence
+// pointer stays opaque (no accessor) — only the host compares it. The platform
+// link layer needs ID() to Mint a pen welded to (id, chID) when wrapping a
+// livePen for an out-of-process incarnation.
+func (i Incarnation) ID() actor.ActorID { return i.id }
 
 // PresenceWatcher is the consumer end of the obs presence-PUSH channel. The
 // runtime invokes OnDown exactly once for each hosted unit that dies abnormally
@@ -188,10 +216,23 @@ func (r *Runtime) WatchObs(id actor.ActorID, w ObsWatcher) {
 }
 
 // publishObs fans an actor-published obs snapshot to that actor's watchers
-// (obs push/actor). Invoked on the publishing cell's goroutine; guarded so a
-// watcher panic cannot escape. No watcher → no-op.
-func (r *Runtime) publishObs(id actor.ActorID, kind ObsKind, val ObsValue) {
+// (obs push/actor). Invoked on the publishing presence's goroutine; guarded so
+// a watcher panic cannot escape. No watcher → no-op.
+//
+// POINTER-IDENTITY gated (the ABA guard, same discipline as removeIf/Despawn):
+// the fanout fires IFF the addressing map still points to this very `self`
+// incarnation. A stale predecessor goroutine that outlived its incarnation (it
+// was replaced, or is mid-teardown) cannot publish obs that watchers would
+// mis-attribute to the live same-id successor — the snapshot is dropped. The
+// check shares the one RLock that snapshots the watcher slice, so it is
+// consistent with the fanout it gates.
+func (r *Runtime) publishObs(id actor.ActorID, self presence, kind ObsKind, val ObsValue) {
 	r.mu.RLock()
+	cur, ok := r.presences[id]
+	if !ok || cur != self {
+		r.mu.RUnlock()
+		return
+	}
 	ws := append([]ObsWatcher(nil), r.obsWatch[id]...)
 	r.mu.RUnlock()
 	for _, w := range ws {
@@ -264,20 +305,51 @@ type DeliverResult struct {
 	Per map[actor.ActorID]Outcome
 }
 
-// Spawn creates and starts an IN-PROCESS cell for id. If a presence already
-// exists for id it is stopped and replaced (one actor, one owner).
-func (r *Runtime) Spawn(id actor.ActorID, impl Actor) {
+// Spawn creates and starts an IN-PROCESS cell for id, returning its Incarnation
+// handle. If a presence already exists for id it is stopped and replaced (one
+// actor, one owner).
+//
+// Two-phase construction (resolves the cap/cell chicken-and-egg):
+//
+//  1. allocShell — allocate the cell shell (impl=nil, live=false). Its pointer
+//     IS inc.p (stable for the incarnation's life).
+//  2. build(inc) — run the platform build closure OUTSIDE the lock to make the
+//     impl. The closure may weld a livePen{pen, inc, host}; because the shell is
+//     not yet in the addressing map, IsLive(inc)==false, so any write attempted
+//     DURING construction is structurally rejected (the "factory must not write"
+//     rule is enforced, not a soft convention).
+//  3. go-live — atomically register the shell and flip its live atomic true.
+//     Concurrent Spawn of the same id is LAST-GO-LIVE-WINS: the prior map entry
+//     is stopped (pointer-identity discipline), and the loser's shell — though it
+//     briefly set live=true — is stopped and marked dead, so the slack is bounded
+//     by the already-accepted in-flight window.
+func (r *Runtime) Spawn(id actor.ActorID, build func(Incarnation) Actor) Incarnation {
+	c := allocShell(r.parent, id, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
+	inc := Incarnation{id: id, p: c}
+	c.impl = build(inc) // OUTSIDE the lock; IsLive(inc)==false during build.
+
 	r.mu.Lock()
-	c := newCell(r.parent, id, impl, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
-	old, existed := r.presences[id]
+	old := r.presences[id]
 	r.presences[id] = c
+	c.live.Store(true) // go-live: register + liveness atomic flip are one critical section.
 	r.mu.Unlock()
 	// stop()/start() run OUTSIDE the lock: stop() joins the old goroutine,
 	// which may itself call back into the runtime.
-	if existed {
+	if old != nil {
 		old.stop()
 	}
 	c.start()
+	return inc
+}
+
+// IsLive reports whether inc is still the live incarnation, by POINTER (ABA-safe)
+// and LOCK-FREE (a per-incarnation atomic, never r.mu). It is the WHEN-validity
+// authority a liveCap consults per write; a nil handle is never live.
+func (r *Runtime) IsLive(inc Incarnation) bool {
+	if inc.p == nil {
+		return false
+	}
+	return inc.p.isLive()
 }
 
 // Attach binds an out-of-process actor that CONNECTED IN over conn, registering
@@ -302,6 +374,7 @@ func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, emit Em
 	r.mu.Lock()
 	old, existed := r.presences[p.id]
 	r.presences[p.id] = p
+	p.live.Store(true) // go-live (port path; the home-side incarnation gate is §3.6, deferred)
 	r.mu.Unlock()
 	if existed {
 		old.stop()
@@ -319,24 +392,33 @@ func (r *Runtime) removeIf(id actor.ActorID, self presence) {
 		delete(r.presences, id)
 	}
 	r.mu.Unlock()
+	// This presence is dying — flip its liveness atomic so any capability welded
+	// to it (livePen) fails the WHEN gate from here on. Idempotent.
+	self.markDead()
 }
 
-// Despawn stops and removes the current presence for id (no-op if absent). This
-// is the external deregister path. It carries NO caller obligation to collapse
+// Despawn stops and removes the incarnation inc (no-op unless the map still
+// points to this very incarnation). This is the external deregister path. It
+// carries NO caller obligation to collapse
 // in-flight requests first: after despawn the id is absent from presence, and
 // the closure reconciler (a level scan over open-request × receiver-absent)
 // closes every orphan in-flight request with receiver_unavailable. The death
 // edge would only fire on abnormal exit; closure is geometry (the level scan),
 // not a despawn-caller convention.
-func (r *Runtime) Despawn(id actor.ActorID) {
+func (r *Runtime) Despawn(inc Incarnation) {
 	r.mu.Lock()
-	p, ok := r.presences[id]
-	if ok {
-		delete(r.presences, id)
+	cur, ok := r.presences[inc.id]
+	matched := ok && cur == inc.p
+	if matched {
+		delete(r.presences, inc.id)
 	}
 	r.mu.Unlock()
-	if ok {
-		p.stop()
+	// Guarded by POINTER IDENTITY: only despawn IFF the map still points to this
+	// very incarnation, so despawning a stale handle (a replaced predecessor, or
+	// an id never hosted) is a safe no-op and can never evict a same-id successor.
+	if matched {
+		inc.p.markDead()
+		inc.p.stop()
 	}
 }
 
