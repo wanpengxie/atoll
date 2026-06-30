@@ -32,14 +32,15 @@ func TestKindClosedSet(t *testing.T) {
 		KindEmitAck:      "emit_ack",
 		KindDown:         "down",
 		KindCancel:       "cancel",
+		KindObs:          "obs",
 	}
 	for k, wire := range want {
 		if string(k) != wire {
 			t.Errorf("Kind %q wire form = %q, want %q", k, string(k), wire)
 		}
 	}
-	if len(want) != 7 {
-		t.Fatalf("expected exactly 7 kinds, guard lists %d", len(want))
+	if len(want) != 8 {
+		t.Fatalf("expected exactly 8 kinds, guard lists %d", len(want))
 	}
 }
 
