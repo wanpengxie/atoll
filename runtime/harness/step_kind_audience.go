@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
@@ -21,8 +20,14 @@ const defaultRequestTTLMs int64 = 24 * 60 * 60 * 1000
 //
 //   - core / reserved-namespace types: kind must match their kernel-defined rule
 //   - kind=request / kind=response: audience cardinality exactly-one
-//   - audience target must be a registered ACTIVE actor (pure actor addressing)
 //   - a request without expires_at gets the global fallback closure deadline
+//
+// Receiver reachability/liveness is deliberately NOT checked here: it is not a
+// property of the writer (a write harness validates truth about the SENDER), it
+// is racy at write time (TOCTOU), and its only authority is actorrt's live
+// presences — which this engine is structurally decoupled from (轴0). It is
+// resolved at the delivery seam (Deliver→NotHosted→closure materialises
+// receiver_unavailable) instead of at write time (根4).
 //
 // Business types carry NO substrate kind / handler constraint: their kind is a
 // kernel closed-set value (validated at envelope-shape), and which kind is
@@ -82,18 +87,13 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 		return outcome{}, nil
 	}
 
-	// (4) request — exactly-one concrete, ACTIVE receiver. Pure actor addressing:
-	//     the caller addressed the actor it resolved (no type→handler routing).
+	// (4) request — exactly-one concrete receiver (STRUCTURE only). The caller
+	//     addressed the actor it resolved (no type→handler routing). Whether that
+	//     receiver is reachable/live is NOT asserted here — that is the delivery
+	//     seam's job (Deliver→NotHosted→closure materialises receiver_unavailable),
+	//     not the writer's (根4). Do not re-add a registry liveness lookup.
 	if len(env.Audience) != 1 || env.Audience[0] == "" {
 		return outcome{RejectReason: HarnessRequestAudienceInvalid, Detail: "kind=request requires audience=[<concrete-actor>]"}, nil
-	}
-	target := actor.ActorID(env.Audience[0])
-	rec, ok, err := s.deps.ActorRegistry.Lookup(ctx, target)
-	if err != nil {
-		return outcome{}, err
-	}
-	if !ok || !rec.IsActive() {
-		return outcome{RejectReason: HarnessAudienceMemberNotActive, Detail: fmt.Sprintf("audience actor %q not active in registry", target)}, nil
 	}
 
 	// (5) request closure deadline — caller-supplied; uniform fallback when absent.

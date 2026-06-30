@@ -50,18 +50,18 @@ func TestStepKindAndAudience_AudienceCardinality(t *testing.T) {
 			reason:   HarnessRequestAudienceInvalid,
 		},
 		{
-			name:     "request to active actor accepts",
+			name:     "request with cardinality-1 audience accepts (no liveness check)",
 			kind:     message.KindRequest,
 			typ:      "xhs.publish",
 			audience: message.Audience{"tool:xhs"},
 			reason:   "",
 		},
 		{
-			name:     "request to unregistered actor rejected member_not_active",
+			name:     "request to unregistered actor still accepts (reachability is a delivery-seam concern, 根4)",
 			kind:     message.KindRequest,
 			typ:      "xhs.publish",
 			audience: message.Audience{"tool:ghost"},
-			reason:   HarnessAudienceMemberNotActive,
+			reason:   "",
 		},
 	}
 	for _, tc := range tests {
@@ -82,27 +82,6 @@ func TestStepKindAndAudience_AudienceCardinality(t *testing.T) {
 				t.Fatalf("reason = %q, want %q (detail=%q)", out.RejectReason, tc.reason, out.Detail)
 			}
 		})
-	}
-}
-
-// Deregistered audience target is not active → member_not_active.
-func TestStepKindAndAudience_DeregisteredTargetNotActive(t *testing.T) {
-	cs := newTestStore(t)
-	deps := testDeps(t, cs)
-	registerActor(t, cs, actor.ActorID("tool:gone"), actor.KindTool)
-	deregisterActor(t, cs, actor.ActorID("tool:gone"))
-
-	e := &message.Envelope{
-		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
-		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{"tool:gone"},
-	}
-	out, err := runStep(t, newStepKindAndAudience, deps, context.Background(), e)
-	if err != nil {
-		t.Fatalf("err: %v", err)
-	}
-	if out.RejectReason != HarnessAudienceMemberNotActive {
-		t.Fatalf("reason = %q, want member_not_active", out.RejectReason)
 	}
 }
 

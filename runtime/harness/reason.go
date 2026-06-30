@@ -54,7 +54,6 @@ const (
 	// Step 7 — Kind + Audience Validate
 	HarnessKindNotAllowedForType   HarnessRejectReason = "harness_kind_not_allowed_for_type"
 	HarnessAudienceEmpty           HarnessRejectReason = "harness_audience_empty"
-	HarnessAudienceMemberNotActive HarnessRejectReason = "harness_audience_member_not_active"
 	HarnessRequestAudienceInvalid  HarnessRejectReason = "harness_request_audience_invalid"
 	HarnessResponseAudienceInvalid HarnessRejectReason = "harness_response_audience_invalid"
 

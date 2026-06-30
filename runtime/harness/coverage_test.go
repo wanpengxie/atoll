@@ -159,16 +159,13 @@ func chainWith(t *testing.T, reg storespec.Registry, lg storespec.MessageLog) (*
 }
 
 // A step that returns a hard error (not a reject) → Write maps it through
-// observeError (chain.go:85-88 + 160-173) and returns the wrapped error. We
-// trigger this at StepKindAndAudience by making the registry Lookup fail for a
-// request audience target.
+// observeError (chain.go step-error path) and returns the wrapped error. We
+// trigger this at StepSenderConsistent by making the registry Lookup fail for
+// the sender (the kind+audience step no longer touches the registry — 根4).
 func TestWrite_StepError_ObservedAndReturned(t *testing.T) {
 	lookupErr := errors.New("boom-registry")
-	reg := stubRegistry{lookup: func(_ context.Context, id actor.ActorID) (storespec.Record, bool, error) {
-		if id == "agent:p" {
-			return activeRecord("agent:p"), true, nil // sender resolves
-		}
-		return storespec.Record{}, false, lookupErr // audience lookup fails
+	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
+		return storespec.Record{}, false, lookupErr // sender lookup fails
 	}}
 	lg := stubLog{
 		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
@@ -179,12 +176,7 @@ func TestWrite_StepError_ObservedAndReturned(t *testing.T) {
 	}
 	c, spy := chainWith(t, reg, lg)
 
-	req := &message.Envelope{
-		ID: "rq", TS: fixedNowMs - 1000, ChannelID: testChannelID,
-		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{"tool:dead"},
-	}
-	res, err := c.write(ctxCaller("agent:p"), req)
+	res, err := c.write(ctxCaller("agent:p"), validEvent("rq", "agent:p"))
 	if err == nil {
 		t.Fatalf("expected wrapped step error, got nil (res=%+v)", res)
 	}
@@ -256,13 +248,11 @@ func TestWrite_AppendPlainError_WrappedAsError(t *testing.T) {
 	}
 }
 
-// A step that panics → Write's deferred recover (chain.go:68-72) converts it to
-// an error. We make the audience Lookup panic at StepKindAndAudience.
+// A step that panics → Write's deferred recover converts it to an error. We make
+// the sender Lookup panic at StepSenderConsistent (the kind+audience step no
+// longer touches the registry — 根4).
 func TestWrite_PanicRecovered(t *testing.T) {
-	reg := stubRegistry{lookup: func(_ context.Context, id actor.ActorID) (storespec.Record, bool, error) {
-		if id == "agent:p" {
-			return activeRecord("agent:p"), true, nil
-		}
+	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
 		panic("step blew up")
 	}}
 	lg := stubLog{
@@ -274,12 +264,7 @@ func TestWrite_PanicRecovered(t *testing.T) {
 	}
 	c, _ := chainWith(t, reg, lg)
 
-	req := &message.Envelope{
-		ID: "rq", TS: fixedNowMs - 1000, ChannelID: testChannelID,
-		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{"tool:boom"},
-	}
-	_, err := c.write(ctxCaller("agent:p"), req)
+	_, err := c.write(ctxCaller("agent:p"), validEvent("rq", "agent:p"))
 	if err == nil {
 		t.Fatalf("panic should be recovered into an error")
 	}
@@ -380,27 +365,6 @@ func TestStepSenderConsistent_CtxCanceled(t *testing.T) {
 	_, err := runStep(t, newStepSenderConsistent, deps, ctx, env)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("err = %v, want context.Canceled", err)
-	}
-}
-
-// ---------------------------------------------------------------------
-// step_kind_audience.go:87-89 — request audience Lookup error
-// ---------------------------------------------------------------------
-
-func TestStepKindAudience_LookupError(t *testing.T) {
-	wantErr := errors.New("audience lookup down")
-	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-		return storespec.Record{}, false, wantErr
-	}}
-	deps := Deps{ChannelID: testChannelID, ActorRegistry: reg}
-	req := &message.Envelope{
-		ID: "rq", TS: fixedNowMs - 1000, ChannelID: testChannelID,
-		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{"tool:x"},
-	}
-	_, err := runStep(t, newStepKindAndAudience, deps, ctxCaller("agent:p"), req)
-	if err == nil || !errors.Is(err, wantErr) {
-		t.Fatalf("kind+audience lookup error = %v, want wrapping %v", err, wantErr)
 	}
 }
 
