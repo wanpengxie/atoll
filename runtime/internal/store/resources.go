@@ -20,10 +20,13 @@ import (
 // and mutates. Bound to one channel database (access is channel-封).
 type resourceRegistry struct {
 	db *sql.DB
+	// nowMs stamps created_at. Injectable (tests pin it) — the rest of the
+	// registry is clock-free.
+	nowMs func() int64
 }
 
 func newResourceRegistry(db *sql.DB) *resourceRegistry {
-	return &resourceRegistry{db: db}
+	return &resourceRegistry{db: db, nowMs: func() int64 { return time.Now().UnixMilli() }}
 }
 
 // Resolve reads back existence + meta. kind is returned as the raw persisted
@@ -76,14 +79,19 @@ func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, k
 		`INSERT INTO resources (resource_id, kind, bytes, created_at)
 		   VALUES (?, ?, ?, ?)
 		 ON CONFLICT(resource_id) DO NOTHING`,
-		string(id), string(kind), initial, time.Now().UnixMilli(),
+		string(id), string(kind), initial, r.nowMs(),
 	)
 	if err != nil {
 		return fmt.Errorf("store: resource create insert %q: %w", id, err)
 	}
 	// RowsAffected==0 means the id already existed (ON CONFLICT DO NOTHING) — the
-	// collision verdict, decided inside the transaction.
-	if n, _ := res.RowsAffected(); n == 0 {
+	// collision verdict, decided inside the transaction. A RowsAffected FAILURE is
+	// surfaced as its own error — never fabricated into an already_exists verdict.
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: resource create rows-affected %q: %w", id, err)
+	}
+	if n == 0 {
 		return resourcespec.ErrAlreadyExists
 	}
 
@@ -254,7 +262,11 @@ func (d *kvDriver) Write(ctx context.Context, id resource.ResourceID, value []by
 	if err != nil {
 		return fmt.Errorf("store: kv write %q: %w", id, err)
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
+	n, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("store: kv write rows-affected %q: %w", id, err)
+	}
+	if n == 0 {
 		return fmt.Errorf("store: kv write %q: resource vanished mid-invocation", id)
 	}
 	return nil
