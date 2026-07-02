@@ -24,8 +24,7 @@ import (
 //
 // On TurnEnd the bridge emits the single terminal agent.text
 // (visibility=public) envelope. Stream-level TextDelta keeps buffering
-// into the final text — never as envelope spam (chunk-spam was
-// explicitly excluded by owner).
+// into the final text — it is never emitted as envelope spam.
 type turnState struct {
 	textBuf      strings.Builder
 	pendingTools []wireToolCall
@@ -43,11 +42,10 @@ type turnState struct {
 //
 // LLM streaming chunks are a transport-layer artifact and MUST NOT leak
 // into the protocol envelope layer (the One Law: business change = new
-// message; a chunk is not a business change). Per proto-layer0
-// single-response semantics a request gets one final response envelope;
-// intermediate progress is the same `agent.text` type carrying
-// `visibility=system` per impl-vocabulary §2.3. Owner decision (M1.6):
-// per-step progress + one terminal agent.text per turn.
+// message; a chunk is not a business change). A request gets one final
+// response envelope; intermediate progress is the same `agent.text`
+// type carrying `visibility=system`. Design: per-step progress + one
+// terminal agent.text per turn.
 func (b *Bridge) consumeWire(
 	ctx context.Context,
 	agentDone <-chan struct{},

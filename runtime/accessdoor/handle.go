@@ -48,7 +48,7 @@ func (h boundHandle) Invoke(ctx context.Context, op access.Operation, id resourc
 //     to its channel/Registry via Deps, and R authorization needs no kind, so one
 //     parameter suffices;
 //   - MintState welds an owner for the actor-scoped (collapsed) branch. It is the
-//     injection-point contract 期4 hands to the downstream: platform draws an
+//     injection-point contract handed to the downstream: platform draws an
 //     owner-welded handle from here when it wires caps — runtime defines the
 //     contract, WHEN/HOW the downstream wraps it (liveAccess) is the downstream's
 //     concern. Both return the SAME AccessHandle contract (same door, same handle

@@ -63,9 +63,9 @@ func TestTerminalFailureReasonSetSize(t *testing.T) {
 }
 
 // TestIsFinalStatus pins the Layer-1 final closed set strictly at
-// {completed,failed} (proto-layer0 §2.5.1). Every provisional Layer-2
-// status and any Layer-3 business extension must NOT count as final —
-// is_terminal derivation depends on this boundary.
+// {completed,failed}. Every provisional Layer-2 status and any Layer-3
+// business extension must NOT count as final — is_terminal derivation
+// depends on this boundary.
 func TestIsFinalStatus(t *testing.T) {
 	t.Parallel()
 	final := []string{"completed", "failed"}

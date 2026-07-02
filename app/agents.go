@@ -20,12 +20,12 @@ import (
 	"github.com/wanpengxie/atoll/registry"
 )
 
-// agents.go is the §五 创建与控制 face (agent-spec §五): a direct API over the
+// agents.go is the create-and-control face: a direct API over the
 // `agents` declaration table + `channel_actors` composition — the front-end UI's
 // CRUD for a user's agents (create / introduce-to-channel / edit config / restart
 // / soft-delete). It writes the tables directly (declaration data, NOT actor
 // messages); changes take effect when the cell is (re)built, never via live hot
-// update (Spawn replaces — agent-spec §五).
+// update (Spawn replaces).
 
 // spawnAgentInstance builds ONE agent instance from its declaration + per-channel
 // row and spawns it live. Spawn REPLACES an existing cell (one actor, one owner),
@@ -63,15 +63,15 @@ func (a *App) spawnAgentInstance(chID channel.ID, home *platform.Home, instanceI
 	if err != nil {
 		return err
 	}
-	// Home.Spawn Mints the welded pen inside the admission membrane and hands it to
-	// the factory (sealed-pen §3.1) — the app supplies id + factory, never a pen.
+	// Home.Spawn mints the welded pen inside the admission membrane and hands it to
+	// the factory — the app supplies id + factory, never a pen.
 	return home.Spawn(context.Background(), decl.ID, decl.Kind, decl.Factory)
 }
 
 type createAgentReq struct {
 	Name string `json:"name"`
 	// Looper = the agent's DEFAULT engine (stored as agents.default_looper); a
-	// per-channel engine may override it at introduce time (agent-kind-vs-class §7).
+	// per-channel engine may override it at introduce time.
 	Looper string          `json:"looper"`
 	Config json.RawMessage `json:"config"`
 }
@@ -188,7 +188,7 @@ func (a *App) handleUpdateAgent(c *gin.Context) {
 
 // handleDeleteAgent soft-deletes an agent and removes it from every channel's
 // composition (it disappears from channels). Live cells are NOT force-killed —
-// membership gone = no re-route / no rebuild, the cell stops lazily (agent-spec §五).
+// membership gone = no re-route / no rebuild, the cell stops lazily.
 func (a *App) handleDeleteAgent(c *gin.Context) {
 	userID := middleware.UserID(c)
 	agentID := c.Param("agentID")
@@ -209,8 +209,7 @@ func (a *App) handleDeleteAgent(c *gin.Context) {
 		`DELETE FROM channel_actors WHERE instance_id = ?`, instanceID)
 	// Clear any channel whose default_agent pointed at the deleted instance — a
 	// removed agent must not keep receiving a channel's default traffic (default
-	// routing keys off channels.default_agent; the live cell still stops lazily,
-	// agent-spec §五). [codex P1]
+	// routing keys off channels.default_agent; the live cell still stops lazily).
 	_, _ = a.db.ExecContext(c.Request.Context(),
 		`UPDATE channels SET default_agent = NULL WHERE default_agent = ?`, instanceID)
 	c.JSON(http.StatusOK, gin.H{"deleted": agentID})
@@ -223,7 +222,7 @@ type introduceAgentReq struct {
 	// Engine optionally OVERRIDES the agent's default_looper for THIS channel
 	// (per-channel runtime engine). Empty = use the agent's default_looper.
 	// Effective engine = Engine ?? agents.default_looper, resolved here (eager)
-	// into channel_actors.class. See agent-kind-vs-class §7.
+	// into channel_actors.class.
 	Engine string `json:"engine"`
 }
 
@@ -255,7 +254,7 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 	}
 	// Effective engine for THIS channel = explicit override ?? agent default
 	// (eager: resolved now into channel_actors.class = the per-channel concrete
-	// engine class). agent-kind-vs-class §7.
+	// engine class).
 	engine := strings.TrimSpace(req.Engine)
 	if engine == "" {
 		engine = defLooper
@@ -294,7 +293,8 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 // handleRestartAgent rebuilds + respawns the agent's server-placed cells in every
 // channel it is in. Spawn replaces the old cell; the rebuilt cell reads the
 // latest config (declaration + per-channel) and the looper resumes from the state
-// slot (agent-spec §五: 改表后不活体热更新；生效 = 重建).
+// slot (editing the table does not hot-update a live cell; taking effect requires
+// a rebuild).
 func (a *App) handleRestartAgent(c *gin.Context) {
 	userID := middleware.UserID(c)
 	agentID := c.Param("agentID")

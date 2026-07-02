@@ -9,7 +9,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// StepEnvelopeShape contract — wire-level structural guards (proto-layer1 §2.2).
+// StepEnvelopeShape contract — wire-level structural guards.
 func TestStepEnvelopeShape_FieldMissing(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)
@@ -128,8 +128,8 @@ func TestStepEnvelopeShape_KindVisibilityAudienceResponse(t *testing.T) {
 	}
 }
 
-// (The unknown-top-level-field tests moved to protocol/message — the §7.3
-// fail-closed check rides Envelope.UnmarshalJSON now, not a harness step.)
+// (Unknown-top-level-field tests live in protocol/message — that fail-closed
+// check rides Envelope.UnmarshalJSON, not a harness step.)
 
 // Payload wellformedness (guard 2): non-empty payload must be valid JSON and
 // not the null literal — truth is append-only, so a malformed payload

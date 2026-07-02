@@ -25,38 +25,37 @@ import (
 // the engine with fakeStore/fakeFireSink/fakeReviver injected directly; this
 // file drives the WHOLE time axis assembled by OpenChannel + OpenScheduler
 // over a real per-channel sqlite (runtime/internal/store), a real harness
-// write chain (runtime/harness, self-assembled here exactly the way
-// platform's OpenScheduler wiring will — §3.4/§7.5, "FireSink 的 platform
-// 实现" — since a runtime-tree TEST file is not subject to the
-// harness-construction-confined-to-platform archtest wall, which excludes
-// _test.go files by construction), and a real *actorrt.Runtime as both the
-// LivenessProbe and the Reviver's SpawnIfAbsent backend. Only the Clock is
-// fake (discipline② 确定性可测 — schedule.Engine.New requires an injected
-// Clock precisely so a test never falls back to the wall clock).
+// write chain (runtime/harness, self-assembled here exactly the way the
+// platform FireSink wiring will — since a runtime-tree TEST file is not
+// subject to the harness-construction-confined-to-platform archtest wall,
+// which excludes _test.go files by construction), and a real
+// *actorrt.Runtime as both the LivenessProbe and the Reviver's
+// SpawnIfAbsent backend. Only the Clock is fake — schedule.Engine.New
+// requires an injected Clock precisely so a test never falls back to the
+// wall clock, keeping firing correctness deterministic and testable.
 //
-// Each TestTimerSlice<N>_* traces to timer-build-spec.md §7's vertical-slice
-// list (13 numbered slices over the §4 decision table). Two deliberate
-// scope boundaries, both spec-mandated:
+// Each TestTimerSlice<N>_* traces to a numbered vertical-slice list over a
+// decision table. Two deliberate scope boundaries, both spec-mandated:
 //
 //   - Slice 1 (and every other slice) asserts truth via cs.Query.ReadAfterSeq
 //     — NEVER mailbox delivery. pump/fanout live in platform/internal and are
-//     unreachable from the runtime tree (§1.1a: "引擎不持 Deliverer" — the
-//     engine's whole job stops at append); mailbox-reaches-actor is the
-//     接线期 platform integration test's job, not this one's.
-//   - The FireSink tri-state contract (§3.2 钉2) is proven against the REAL
-//     harness chain wherever the reject/dup path is a genuine harness
-//     verdict (duplicate messages.id, reserved-type rejection); synthetic Go
-//     errors (flakyFireSink) are used ONLY to drive the transient/backoff
-//     PACING paths, which the contract explicitly allows to be "any real Go
-//     error" — not a harness-specific shape.
+//     unreachable from the runtime tree (the engine does not hold a
+//     Deliverer — its whole job stops at append); mailbox-reaches-actor is
+//     the platform integration test's job, not this one's.
+//   - The FireSink tri-state contract is proven against the REAL harness
+//     chain wherever the reject/dup path is a genuine harness verdict
+//     (duplicate messages.id, reserved-type rejection); synthetic Go errors
+//     (flakyFireSink) are used ONLY to drive the transient/backoff PACING
+//     paths, which the contract explicitly allows to be "any real Go error"
+//     — not a harness-specific shape.
 //
-// 切片10 (确定性可测) has no dedicated test: it is the cross-cutting
-// discipline every slice below already satisfies by construction — FIRING
-// correctness never depends on wall-clock time, only on fakeClock.Advance;
-// the handful of time.Sleep/waitFor calls are test-synchronization polling
-// for the run-loop goroutine's asynchronous effects to become observable
-// (mirrors schedule/fakes_test.go's own waitFor doc), never something a
-// timing assertion depends on.
+// The determinism discipline has no dedicated test slice: it is the
+// cross-cutting discipline every slice below already satisfies by
+// construction — FIRING correctness never depends on wall-clock time, only
+// on fakeClock.Advance; the handful of time.Sleep/waitFor calls are
+// test-synchronization polling for the run-loop goroutine's asynchronous
+// effects to become observable (mirrors schedule/fakes_test.go's own
+// waitFor doc), never something a timing assertion depends on.
 
 // scheduleTestChannelID is this file's fixed channel scope — every test opens
 // its own tempdir/db (openScheduleChannel), so a shared constant id across
@@ -76,8 +75,8 @@ func openScheduleChannel(t *testing.T) *ChannelStores {
 }
 
 // newScheduleRuntime builds a real *actorrt.Runtime — the engine's
-// LivenessProbe (CurrentIncarnation/IsLive) AND the backend testReviver drives
-// via SpawnIfAbsent (拍点 8.2's real activation seam, not a fake).
+// LivenessProbe (CurrentIncarnation/IsLive) AND the backend testReviver
+// drives via SpawnIfAbsent, the real activation seam, not a fake.
 func newScheduleRuntime(t *testing.T) *actorrt.Runtime {
 	t.Helper()
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
@@ -86,12 +85,12 @@ func newScheduleRuntime(t *testing.T) *actorrt.Runtime {
 }
 
 // ---------------------------------------------------------------------
-// realFireSink — the runtime-tree self-assembled realization of §3.4's
-// platform FireSink design ("mint-a-pen-per-fire" + the §3.2 tri-state
+// realFireSink — the runtime-tree self-assembled realization of the
+// platform FireSink design ("mint-a-pen-per-fire" + the tri-state
 // WriteResult translation). This IS the reference implementation the
-// platform wiring (deferred, §7.5) will copy; building it here is this
-// suite's whole reason to exist as an INTEGRATION test rather than another
-// layer of engine_test.go's fakes.
+// (deferred) platform wiring will copy; building it here is this suite's
+// whole reason to exist as an INTEGRATION test rather than another layer of
+// engine_test.go's fakes.
 // ---------------------------------------------------------------------
 
 // The id-duplicate reject is now a closed-set member
@@ -117,11 +116,11 @@ func newRealFireSink(t *testing.T, cs *ChannelStores) *realFireSink {
 	return &realFireSink{minter: minter, chID: scheduleTestChannelID}
 }
 
-// Append mints a fresh Pen per call (Mint is cheap, pen.go 注释明言) and
-// translates harness.WriteResult into the FireSink tri-state contract
-// (§3.2 钉2): a naive `_, err := pen.Write(...); return err` would swallow a
-// deterministic reject into a false nil and let the engine silently drop the
-// fire — that failure mode is the entire reason this translation exists.
+// Append mints a fresh Pen per call (Mint is cheap) and translates
+// harness.WriteResult into the FireSink tri-state contract: a naive
+// `_, err := pen.Write(...); return err` would swallow a deterministic
+// reject into a false nil and let the engine silently drop the fire — that
+// failure mode is the entire reason this translation exists.
 func (s *realFireSink) Append(ctx context.Context, author actor.ActorID, env *message.Envelope) error {
 	s.mu.Lock()
 	s.calls++
@@ -154,7 +153,7 @@ var _ schedule.FireSink = (*realFireSink)(nil)
 // before delegating — the deterministic way to drive the engine's
 // leave-the-row-and-retry / backoff-pacing paths without corrupting a real
 // store. The tri-state contract explicitly allows "a genuine Go error" here
-// (§3.2: "真 error → 原样透传"); it does not have to originate from the real
+// — passed through as-is; it does not have to originate from the real
 // harness the way the dup/reject paths must.
 type flakyFireSink struct {
 	inner schedule.FireSink
@@ -209,8 +208,8 @@ var _ schedule.FireSink = (*flakyFireSink)(nil)
 
 // ---------------------------------------------------------------------
 // testReviver — schedule.Reviver wired to a REAL *actorrt.Runtime via
-// SpawnIfAbsent (拍点 8.2's real activation seam), with a tiny test factory
-// standing in for §7.5's deferred platform builder registry.
+// SpawnIfAbsent, the real activation seam, with a tiny test factory
+// standing in for the deferred platform builder registry.
 // ---------------------------------------------------------------------
 
 type stubTimerActor struct{}
@@ -266,8 +265,8 @@ func (r *testReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	}
 	r.mu.Unlock()
 	// SpawnIfAbsent semantics: idempotent no-op for an already-live author
-	// (§7.7's "EnsureLive MUST be idempotent" contract) — the real CAS mint,
-	// not a fake standing in for it.
+	// (EnsureLive MUST be idempotent) — the real CAS mint, not a fake
+	// standing in for it.
 	r.rt.SpawnIfAbsent(id, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	return nil
 }
@@ -373,8 +372,8 @@ func (c *fakeClock) Advance(d time.Duration) {
 var _ schedule.Clock = (*fakeClock)(nil)
 
 // ---------------------------------------------------------------------
-// logCapture — a minimal in-memory slog.Handler for asserting 拍点 8.8's
-// "loud disposal log" actually fired (obs/log plane, not truth).
+// logCapture — a minimal in-memory slog.Handler for asserting the "loud
+// disposal log" actually fired (obs/log plane, not truth).
 // ---------------------------------------------------------------------
 
 type logCapture struct {
@@ -462,8 +461,8 @@ func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
 
 // advanceUntil nudges the fake clock forward repeatedly (rather than one big
 // jump) so a stale alarm left over from an already-superseded schedule
-// (Cancel-then-reschedule to the same instant, 切片12) cannot race a single
-// Advance into missing the fresh alarm the engine re-arms afterwards.
+// (Cancel-then-reschedule to the same instant) cannot race a single Advance
+// into missing the fresh alarm the engine re-arms afterwards.
 func advanceUntil(t *testing.T, clock *fakeClock, step time.Duration, cond func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(5 * time.Second)
@@ -504,8 +503,8 @@ func waitStable(t *testing.T, val func() int, quiet time.Duration) int {
 }
 
 // ---------------------------------------------------------------------
-// Slice 1 — basic fire: truth lands in log, every §3.2 field-table entry
-// checked against the STORED (post-harness-normalized) row.
+// Slice 1 — basic fire: truth lands in log, every envelope field checked
+// against the STORED (post-harness-normalized) row.
 // ---------------------------------------------------------------------
 
 func TestTimerSlice1_BasicFireTruthFields(t *testing.T) {
@@ -583,15 +582,15 @@ func TestTimerSlice1_BasicFireTruthFields(t *testing.T) {
 		t.Fatalf("expires_at = %v, want nil (event carries no request-expiry semantics)", env.ExpiresAt)
 	}
 
-	// Deliberately NOT asserted: mailbox delivery (§1.1a — pump/fanout live in
+	// Deliberately NOT asserted: mailbox delivery — pump/fanout live in
 	// platform/internal, unreachable from the runtime tree; this slice's job
-	// stops at "真相入 log").
+	// stops at truth landing in the log.
 }
 
 // ---------------------------------------------------------------------
-// Slice 2 — self-targeted: ScheduleReq has no target field at compile time
-// (red线❶); the runtime correlate is that TWO independent authors' fires are
-// each unconditionally self-addressed, never cross-wired.
+// Slice 2 — self-targeted: ScheduleReq has no target field at compile time;
+// the runtime correlate is that TWO independent authors' fires are each
+// unconditionally self-addressed, never cross-wired.
 // ---------------------------------------------------------------------
 
 func TestTimerSlice2_SelfTargetedStructural(t *testing.T) {
@@ -672,15 +671,15 @@ func TestTimerSlice3_IncarnationDropsOnDeathEvenWithLiveSuccessor(t *testing.T) 
 		t.Fatalf("Schedule: %v", err)
 	}
 
-	// Structural assertion (v1.1 历史校准): an incarnation-bind timer is NEVER
-	// a row, at any point in its life — not merely absent after the drop.
+	// Structural assertion: an incarnation-bind timer is NEVER a row, at any
+	// point in its life — not merely absent after the drop.
 	if n := storeRowCount(t, cs); n != 0 {
 		t.Fatalf("bind=incarnation created %d durable rows, want 0 (never persisted, structure IS the bind)", n)
 	}
 
 	// Predecessor dies, a SAME-ID successor takes over (respawn) — the
 	// successor being live must NOT rescue the predecessor's timer (pointer
-	// identity, not id identity, is the drop check, §5.3).
+	// identity, not id identity, is the drop check).
 	rt.DespawnID("author-1")
 	rt.Spawn("author-1", func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 
@@ -722,7 +721,8 @@ func TestTimerSlice3b_AttachNoLiveEmbodiment(t *testing.T) {
 // ---------------------------------------------------------------------
 // Slice 4 — restart: incarnation-bind vanishes physically (a FRESH Engine +
 // a FRESH *actorrt.Runtime over the SAME durable store), identity-bind
-// survives and fires late (迟到照 fire, no fast-forward).
+// survives and fires late (a late timer still fires as scheduled, no
+// fast-forward).
 // ---------------------------------------------------------------------
 
 func TestTimerSlice4_RestartBatchDropVsIdentitySurvive(t *testing.T) {
@@ -792,9 +792,9 @@ func TestTimerSlice4_RestartBatchDropVsIdentitySurvive(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Slice 5 — crash-window idempotency + the FireSink tri-state contract
-// (§3.2 钉2, A 档验收): dup / deterministic-reject / transient, each proven
-// against the REAL harness chain except the pure-pacing transient case.
+// Slice 5 — crash-window idempotency + the FireSink tri-state contract:
+// dup / deterministic-reject / transient, each proven against the REAL
+// harness chain except the pure-pacing transient case.
 // ---------------------------------------------------------------------
 
 func TestTimerSlice5_CrashIdempotencyAndFireSinkTriState(t *testing.T) {
@@ -860,12 +860,13 @@ func TestTimerSlice5_CrashIdempotencyAndFireSinkTriState(t *testing.T) {
 			t.Fatalf("OpenScheduler: %v", err)
 		}
 
-		// Simulate 8.8's "rule evolved during a durable timer's sleep": insert a
+		// Simulate a rule that evolved during a durable timer's sleep: insert a
 		// row DIRECTLY (bypassing Schedule's own ingress guard, which would
 		// refuse a reserved-prefixed Type at the door) — a row that was legal
 		// to accept once, now deterministically rejected by the harness's
-		// reserved-namespace authority (ingress 已堵主入口 for a NEW Schedule;
-		// this is the "漏网的兜底" case the disposal path exists for).
+		// reserved-namespace authority (ingress already blocks the main
+		// entrypoint for a NEW Schedule; this is the leaked-through fallback
+		// case the disposal path exists for).
 		const author = actor.ActorID("author-poison")
 		const poisonID = timerspec.TimerID("poison-1")
 		if err := cs.timers.Insert(ctx, timerspec.TimerRow{
@@ -933,8 +934,9 @@ func TestTimerSlice5_CrashIdempotencyAndFireSinkTriState(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Slice 6 — Cancel tri-state (两家一个口): pending cancels, already-fired is
-// a silent no-op, a non-owner's Cancel never leaks existence.
+// Slice 6 — Cancel tri-state (a single Cancel entrypoint shared by both
+// binds): pending cancels, already-fired is a silent no-op, a non-owner's
+// Cancel never leaks existence.
 // ---------------------------------------------------------------------
 
 func TestTimerSlice6_CancelTriState(t *testing.T) {
@@ -1014,8 +1016,8 @@ func TestTimerSlice6_CancelTriState(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Slice 7 — dereg cascading clear (§10.12 row 6): identity rows clear in the
-// SAME tx as the registry flip, both dereg entry points asserted.
+// Slice 7 — dereg cascading clear: identity rows clear in the SAME tx as
+// the registry flip, both dereg entry points asserted.
 // ---------------------------------------------------------------------
 
 func TestTimerSlice7_DeregCascadeClear(t *testing.T) {
@@ -1082,7 +1084,7 @@ func TestTimerSlice7_DeregCascadeClear(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Slice 8 — the Revive seam (拍点 8.2): wake-first ordering against a REAL
+// Slice 8 — the Revive seam: wake-first ordering against a REAL
 // SpawnIfAbsent-backed activation, retry-on-failure, exactly-once truth.
 // ---------------------------------------------------------------------
 
@@ -1119,8 +1121,8 @@ func TestTimerSlice8_ReviveSeamWakeFirstOrdering(t *testing.T) {
 		t.Fatalf("Schedule: %v", err)
 	}
 
-	// While Revive keeps failing, append must NEVER be attempted (§7.7
-	// wake-first ordering, 拍点 8.2) and the row stays.
+	// While Revive keeps failing, append must NEVER be attempted (wake-first
+	// ordering) and the row stays.
 	waitFor(t, 2*time.Second, func() bool { return revive.callCount() >= 1 })
 	time.Sleep(30 * time.Millisecond)
 	if sink.callCount() != 0 {
@@ -1158,7 +1160,7 @@ func TestTimerSlice8_ReviveSeamWakeFirstOrdering(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Slice 9 — ErrBadSchedule matrix (§3.2 钉5) + past FireAt legal/immediate.
+// Slice 9 — ErrBadSchedule matrix + past FireAt legal/immediate.
 // ---------------------------------------------------------------------
 
 func TestTimerSlice9_ErrBadScheduleMatrix(t *testing.T) {
@@ -1202,9 +1204,9 @@ func TestTimerSlice9_ErrBadScheduleMatrix(t *testing.T) {
 		})
 	}
 
-	// past FireAt is legal and fires immediately — no threshold (§3.2 钉5:
-	// refusing it would make "a millisecond before vs after the deadline" two
-	// different behaviours).
+	// past FireAt is legal and fires immediately — no threshold (refusing it
+	// would make "a millisecond before vs after the deadline" two different
+	// behaviours).
 	id, err := handle.Schedule(ctx, schedule.ScheduleReq{Bind: schedule.BindIdentity, FireAt: 1, Type: "t"})
 	if err != nil {
 		t.Fatalf("Schedule(past FireAt): %v", err)
@@ -1237,10 +1239,9 @@ func TestTimerSlice11_ConcurrentScheduleCancelRace(t *testing.T) {
 	handle := minter.Mint("author-1")
 
 	// A keeper timer EARLIER than every churn timer, never cancelled: the
-	// semantic half of this slice (codex code-review minor 收口) — under
-	// concurrent Schedule/Cancel churn constantly re-arming the alarm, the
-	// earliest deadline must still fire (no wake/alarm-rearm window may
-	// swallow it), not merely "no data race".
+	// semantic half of this slice — under concurrent Schedule/Cancel churn
+	// constantly re-arming the alarm, the earliest deadline must still fire
+	// (no wake/alarm-rearm window may swallow it), not merely "no data race".
 	keeperID, err := handle.Schedule(ctx, schedule.ScheduleReq{
 		Bind: schedule.BindIdentity, FireAt: clock.Now().Add(10 * time.Second).UnixMilli(), Type: "keeper.tick",
 	})
@@ -1282,9 +1283,9 @@ func TestTimerSlice11_ConcurrentScheduleCancelRace(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Slice 12 — TimerID never reused (v1.2 blocker): a re-Schedule after Cancel
-// gets a NEW id, and only the new id's fire lands (the cancelled id's
-// messages.id UNIQUE row must never be resurrected).
+// Slice 12 — TimerID never reused: a re-Schedule after Cancel gets a NEW id,
+// and only the new id's fire lands (the cancelled id's messages.id UNIQUE
+// row must never be resurrected).
 // ---------------------------------------------------------------------
 
 func TestTimerSlice12_TimerIDNeverReused(t *testing.T) {
@@ -1329,7 +1330,7 @@ func TestTimerSlice12_TimerIDNeverReused(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Slice 13 — backoff is bounded, never a busy loop (v1.2 opus-major).
+// Slice 13 — backoff is bounded, never a busy loop.
 // ---------------------------------------------------------------------
 
 func TestTimerSlice13_BackoffBounded(t *testing.T) {

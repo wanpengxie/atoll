@@ -17,8 +17,7 @@ const (
 )
 
 // deadlines: publish is a long site action (image upload + post); the rest are
-// quick reads. Layered per §3.3 / §6.2 of the adapter spec — a request past its
-// deadline is reaped into a timeout failure.
+// quick reads. A request past its deadline is reaped into a timeout failure.
 const (
 	publishDeadline = 600 * time.Second
 	shortDeadline   = 30 * time.Second

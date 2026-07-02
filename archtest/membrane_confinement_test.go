@@ -22,8 +22,10 @@ import (
 // NewLivePen / NewLiveAccess / NewLiveSchedule can produce one), so the struct
 // literal is compiler-confined to package link. This wall locks the CONSTRUCTOR
 // symbols one layer earlier: the membrane must be woven where the raw handle is
-// minted (发 handle 与 live 膜 wrap 同一步, §4 红线❶) — the single caps assembler
-// (platform/home.go buildCaps) and the port emitSink path (platform/internal/link)
+// minted (minting the handle and wrapping it in the live membrane happen in the
+// same step) — the single caps assembler
+// (platform/home.go buildCaps) and the port emitSink path
+// (platform/internal/link)
 // — and nowhere else. A downstream cell holds only the woven membrane it was born
 // with; it never re-constructs one (that would let a raw handle escape unwrapped,
 // or re-weld a membrane to the wrong incarnation).
@@ -52,8 +54,8 @@ var membraneConstructors = map[string]bool{
 //     link, so a same-package reference carries no `link.` qualifier and the
 //     import-resolution below already exempts it (local=="" → skip). It therefore
 //     needs no entry here (accept.go's port-path weave is such a same-package use).
-//   - platform/home.go is the SINGLE caps assembler (buildCaps) — the one外部
-//     legitimate weave site.
+//   - platform/home.go is the SINGLE caps assembler (buildCaps) — the one
+//     external legitimate weave site.
 //
 // Everything else — spawnhandle.go (delegates to the assembler, weaves nothing),
 // compute.go (weaves nothing), and any future platform file — is OUT: adding a

@@ -1,6 +1,6 @@
-// Package claudecode is the SECOND looper engine (agent-spec §三): the Claude
+// Package claudecode is the SECOND looper engine: the Claude
 // Code agent, bound to the one actor face (lib/behavior + metatool.Shell) exactly
-// like the go-kimi looper. It proves the looper 接入规范 is a real contract — the
+// like the go-kimi looper. It proves the looper integration contract is real — the
 // shared mechanical skeleton (Receive / turn-queue / shell / harness.Pen /
 // author#2) is engine-agnostic; only three things differ from the go-kimi bridge:
 //

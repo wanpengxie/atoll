@@ -75,8 +75,8 @@ func migrate(db *sql.DB) error {
 			PRIMARY KEY(daemon_id, channel_id)
 		);
 		-- channel_actors: a channel's DESIRED actor-instance set (composition /
-		-- "spec"), the canonical writer for what a channel should run
-		-- (actor-instance-model §3/§8). One row = one instance = (class) + spec.
+		-- "spec"), the canonical writer for what a channel should run.
+		-- One row = one instance = (class) + spec.
 		-- This is INTENT, never live truth: "who is actually running" is the
 		-- substrate's actor_registry (read via Home.View().ListActors), never this
 		-- table. default_agent is a name-agnostic pointer INTO this set.
@@ -96,7 +96,7 @@ func migrate(db *sql.DB) error {
 			state       TEXT,
 			PRIMARY KEY(channel_id, instance_id)
 		);
-		-- agents: global agent IDENTITY declarations (agent-spec §二). One row per
+		-- agents: global agent IDENTITY declarations. One row per
 		-- agent, cross-channel (key = id). 'default_looper' = the agent's DEFAULT
 		-- engine (a create-time preference, NOT runtime truth): the per-channel
 		-- concrete engine is channel_actors.class (= override ?? default_looper).
@@ -104,7 +104,7 @@ func migrate(db *sql.DB) error {
 		-- kind=agent; there is NO umbrella "agent" class). config_json = the global
 		-- identity body (persona/skills + engine knobs), layered UNDER
 		-- channel_actors' per-channel config_json. Distinct from users
-		-- (responsibility owner, never an agent). See agent-kind-vs-class §7.
+		-- (responsibility owner, never an agent).
 		--
 		-- No "scope" column (cognitive-state scope) BY DESIGN — v1 is implicitly
 		-- channel-scoped: each agent's state is per-channel isolated
@@ -114,8 +114,7 @@ func migrate(db *sql.DB) error {
 		-- Do NOT read per-channel as permanent truth: the agent IDENTITY is global
 		-- (one row here spans every channel) — only the cognitive STATE is isolated
 		-- in v1. A scope column now would be a single-valued placeholder pointing at
-		-- an unbuilt subsystem (零预留 #4). See actor-instance-model §8.4 (state-root
-		-- scope-key) + agent-spec §二.
+		-- an unbuilt subsystem, so it is deliberately omitted until needed.
 		CREATE TABLE IF NOT EXISTS agents (
 			id          TEXT PRIMARY KEY,
 			name        TEXT NOT NULL,
@@ -131,7 +130,7 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	// Drop the dead daemon liveness columns (status/hostname/platform/
-	// last_heartbeat): attachment is volatile L0 link state, read live from the
+	// last_heartbeat): attachment is volatile link state, read live from the
 	// platform View — never a persisted directory column (it only ever lied).
 	// Best-effort per column: a fresh DB created above never had them (no such
 	// column → ignore); an existing dev DB gets them dropped, rows preserved.
@@ -148,11 +147,11 @@ func migrate(db *sql.DB) error {
 	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN placement TEXT NOT NULL DEFAULT 'server'`)
 
 	// channel_actors.state: per-instance looper-opaque checkpoint slot (durable
-	// resume; agent-spec §二/§三). The looper is its only author — external
+	// resume). The looper is its only author — external
 	// control never writes it directly. additive best-effort add for a dev DB.
 	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN state TEXT`)
 
-	// agents.looper → default_looper (agent-kind-vs-class §7): the engine is now a
+	// agents.looper → default_looper: the engine is now a
 	// per-channel concrete actor class (channel_actors.class); agents keeps only the
 	// create-time DEFAULT. Best-effort rename for an existing dev DB (a fresh CREATE
 	// above already has default_looper; the rename then no-ops on the missing column).

@@ -3,9 +3,9 @@ package store
 // White-box tests for the actor-scoped state locus: stateStore (byte realizer
 // over actor_state) and the deregister cascade (clearActorScopedTx hung on both
 // Deregister and applyMemberRemoveTx). Both stateStore and the registry are
-// unexported and reachable only from inside the package — the same §4.5
-// confinement the rest of the store relies on. They run over a real channel
-// sqlite (ChannelLocalDDL), no fakes.
+// unexported and reachable only from inside the package — the same
+// package-private confinement the rest of the store relies on. They run over
+// a real channel sqlite (ChannelLocalDDL), no fakes.
 
 import (
 	"context"

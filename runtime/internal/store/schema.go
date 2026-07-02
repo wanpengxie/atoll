@@ -3,11 +3,6 @@ package store
 // ChannelLocalDDL creates all channel-local tables inside one
 // channel sqlite (`messages.sqlite`).
 //
-// Authoritative spec references:
-//
-//   - L2 §1.4.1  messages
-//   - L2 §1.4.6  actor_registry
-//
 // The DDL string is split into multiple CREATE statements; the
 // modernc.org/sqlite driver accepts multi-statement input via Exec.
 //
@@ -28,7 +23,7 @@ package store
 // structural boolean integrity constraint, not an evolving vocabulary.
 const ChannelLocalDDL = `
 -- =============================================================
--- 1) messages  (L2 §1.4.1)
+-- 1) messages
 -- =============================================================
 CREATE TABLE IF NOT EXISTS messages (
   seq                  INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -67,7 +62,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
 -- pulls-and-resumes. Additive re-add when a real durable-pull actor demands it.)
 
 -- =============================================================
--- 3) actor_registry  (L2 §1.4.6)
+-- 3) actor_registry
 -- =============================================================
 CREATE TABLE IF NOT EXISTS actor_registry (
   actor_id           TEXT PRIMARY KEY,
@@ -82,26 +77,26 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
   WHERE deregistered_at IS NULL;
 
 -- (v2: worker_locks table removed. channel-sqlite is append-only truth;
--- write-path exclusivity is a structural invariant of the single write path
--- (proto-v2-physical §4), not a per-row lease.)
+-- write-path exclusivity is a structural invariant of the single write path,
+-- not a per-row lease.)
 
--- (v2: action_ledger table removed. Turn-replay idempotency (L2 §1.4.10.1) had
--- no triggering scenario left — P-A1 retired at-least-once redelivery and the
--- no-transparent-respawn收口 means substrate never replays a turn — and its key
--- is derived from a domain-supplied semantic_action_key, so idempotency is an
--- application/stdlib concern, not substrate truth. Additive re-add when a real
+-- (v2: action_ledger table removed. Turn-replay idempotency had no triggering
+-- scenario left — at-least-once redelivery was retired and substrate never
+-- transparently respawns and replays a turn — and its key is derived from a
+-- domain-supplied semantic_action_key, so idempotency is an application/stdlib
+-- concern, not substrate truth. Additive re-add when a real
 -- exactly-once-external-effect use case demands it.)
 
 -- =============================================================
--- 4) resources + resource_grants  (access plane / forward §12)
+-- 4) resources + resource_grants  (access plane)
 -- =============================================================
 -- The plane-2 object-lifecycle truth: existence + inline bytes (resources) and
 -- the authorization relation R (resource_grants). Same channel sqlite as the
--- message log — access is channel-封 (forward §12.5), so R and resource bytes
+-- message log — access is channel-scoped, so R and resource bytes
 -- share the one DB as sibling tables, never a separate library.
 --
--- No scope column on resources, ever (§8.1, owner-pinned): actor-scoped objects
--- live in a SEPARATE storage locus (the actor_state table below, 期4), so
+-- No scope column on resources, ever (owner-pinned): actor-scoped objects
+-- live in a SEPARATE storage locus (the actor_state table below), so
 -- scope is expressed by the STRUCTURE an object lives in, not a column (Unix:
 -- an anonymous mapping is not a file tagged "anonymous"). This table holds only
 -- channel-scoped objects.
@@ -119,7 +114,7 @@ CREATE TABLE IF NOT EXISTS resources (
 
 CREATE TABLE IF NOT EXISTS resource_grants (
   resource_id  TEXT NOT NULL,
-  grantee_kind TEXT NOT NULL,             -- access.GranteeKind closed set (A8)
+  grantee_kind TEXT NOT NULL,             -- access.GranteeKind closed set
   grantee      TEXT NOT NULL DEFAULT '',  -- actor id when kind=actor; '' when kind=members (sum form persisted in full)
   ops          TEXT NOT NULL,             -- JSON array of access.Operation
   PRIMARY KEY (resource_id, grantee_kind, grantee),
@@ -127,56 +122,56 @@ CREATE TABLE IF NOT EXISTS resource_grants (
 );
 
 -- =============================================================
--- 5) actor_state  (access plane / forward §6 · §12.9 拍点 8.1)
+-- 5) actor_state  (access plane)
 -- =============================================================
 -- The ACTOR-SCOPED storage locus: the second, structurally separate home of
 -- objects, dual to the channel-scoped resources table. Same channel sqlite as
--- everything else — access is channel-封 — but a SEPARATE table because scope is
+-- everything else — access is channel-scoped — but a SEPARATE table because scope is
 -- expressed by WHICH structure an object lives in, never by a column (Unix: an
 -- anonymous mapping is not a file tagged "anonymous", it simply is not in the fs
 -- namespace). The collapsed authorization (reachable set ≡ {owner}) means there
 -- is no R here — no resource_grants sibling: the byte row IS the whole object.
 -- Keyed (owner_id, resource_id) — the door welds owner at handle mint, so owner
 -- is a coordinate, not a per-call arg. Cascade-cleared with actor_registry on
--- deregister (§10.12 row 3 = the scope law: owner 亡 ⟹ its state 亡, Erlang ETS
+-- deregister (the scope law: owner dies ⟹ its state dies, Erlang ETS
 -- private).
 CREATE TABLE IF NOT EXISTS actor_state (
-  owner_id    TEXT NOT NULL,             -- identity level (ActorID); incarnation NEVER persisted (§5.3)
+  owner_id    TEXT NOT NULL,             -- identity level (ActorID); incarnation NEVER persisted
   resource_id TEXT NOT NULL,
-  bytes       BLOB,                      -- inline small bytes, plaintext (at-rest encryption deferred, 拍点 8.6); NULL = resolved-but-empty
+  bytes       BLOB,                      -- inline small bytes, plaintext (at-rest encryption deferred); NULL = resolved-but-empty
   created_at  INTEGER NOT NULL,
   PRIMARY KEY (owner_id, resource_id)
   -- No kind column (day-1 single mechanical shape; a second actor-scoped variant
-  -- adds one additively, 拍点 8.4 — day-1 it would be a dead tag).
+  -- adds one additively — day-1 it would be a dead tag).
   -- No scope column, ever (this whole table IS the actor-scoped locus, so the
   -- STRUCTURE is the scope — a column would be redundant and never read).
-  -- No version column (per-key fence / CAS deferred, §1.5; day-1 natural single
+  -- No version column (per-key fence / CAS deferred; day-1 natural single
   -- writer — reachable set ≡ {owner} + serial gift — so nothing to fence yet).
 );
 
 -- =============================================================
--- 6) timers  (time axis / forward §7)
+-- 6) timers  (time axis)
 -- =============================================================
 -- The IDENTITY-level pending-timer CONTROL PLANE: future intent keyed by a
--- durable name, mutable (cancellable), NEVER truth (§7.5 — pending in the
--- append-only log would be unretractable). Same channel sqlite (by-channel,
--- 同 messages/registry/state 库, forward §7.6).
+-- durable name, mutable (cancellable), NEVER truth (pending in the
+-- append-only log would be unretractable). Same channel sqlite as the
+-- messages/registry/state tables.
 --
 -- This table holds ONLY identity-bind timers — the bind is expressed by WHICH
--- home the intent lives in, never by a column (同 §12.9 scope-由结构表达):
--- incarnation-bind timers are engine MEMORY, welded to the live embodiment,
--- and vanish with the process (v1.1 历史校准: BEAM in-VM / Orleans
--- in-activation / POSIX on-task_struct — ephemeral intent never gets a
--- durable account). So: no bind column, ever; incarnation NEVER persisted
--- (§5.2/§5.3). No target column, ever (self-targeted 红线❶). No recurrence
+-- home the intent lives in, never by a column (same discipline as actor_state:
+-- scope is expressed by structure): incarnation-bind timers are engine MEMORY,
+-- welded to the live embodiment, and vanish with the process (BEAM in-VM /
+-- Orleans in-activation / POSIX on-task_struct — ephemeral intent never gets a
+-- durable account). So: no bind column, ever; incarnation NEVER persisted.
+-- No target column, ever (timers are always self-targeted). No recurrence
 -- column (one-shot is the complete primitive; recurrence is domain re-arm).
 CREATE TABLE IF NOT EXISTS timers (
   timer_id       TEXT PRIMARY KEY,
-  author_id      TEXT NOT NULL,     -- identity;排它的 actor = fire 作者(焊死,永不自由)
+  author_id      TEXT NOT NULL,     -- identity; the actor that scheduled the timer = the fire author (welded, never freely reassignable)
   fire_at        INTEGER NOT NULL,  -- UnixMilli
   type           TEXT NOT NULL,
   payload        BLOB,
-  correlation_id TEXT,              -- schedule 时捕获;fire envelope 继承(红线❺)
+  correlation_id TEXT,              -- captured at schedule time; inherited by the fire envelope
   created_at     INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_timers_fire_at ON timers(fire_at);

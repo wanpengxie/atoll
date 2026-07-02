@@ -164,8 +164,8 @@ func TestClaudeTurn_EmitsFinalAndCheckpoints(t *testing.T) {
 }
 
 // TestClaudeMCP_BridgesAllMetaTools pins that the claude engine gets the FULL
-// atoll meta-tool surface (agent-spec §三 必须项 #1) via the in-process MCP
-// server — the same 7 tools the go-kimi looper installs as AdditionalTools.
+// atoll meta-tool surface via the in-process MCP server — the same 7 tools
+// the go-kimi looper installs as AdditionalTools.
 func TestClaudeMCP_BridgesAllMetaTools(t *testing.T) {
 	w := &recordingWriter{}
 	b, err := claudecode.NewBridge(claudecode.Config{Model: "m"}, testActorID, w)
@@ -187,7 +187,7 @@ func TestClaudeMCP_BridgesAllMetaTools(t *testing.T) {
 	}
 }
 
-// TestClaudeConfigOverlay pins env-default + per-instance overlay (agent-spec §三).
+// TestClaudeConfigOverlay pins env-default + per-instance overlay behavior.
 func TestClaudeConfigOverlay(t *testing.T) {
 	t.Setenv(claudecode.EnvKeyModel, "env-model")
 	cfg, err := claudecode.NewConfigFromSpec(nil, "sys")

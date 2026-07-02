@@ -43,7 +43,7 @@ type Config struct {
 }
 
 // NewConfigFromSpec layers env defaults under the per-instance spec.Config
-// overlay (the looper self-parses its own schema; agent-spec §三).
+// overlay (the looper self-parses its own schema).
 func NewConfigFromSpec(raw json.RawMessage, systemPrompt string) (Config, error) {
 	cfg := Config{
 		Model:        strings.TrimSpace(os.Getenv(EnvKeyModel)),

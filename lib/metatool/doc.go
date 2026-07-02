@@ -23,14 +23,14 @@
 //     door, and Match author#2 on Deliver. The Shell HOLDS and DRIVES the
 //     behavior.Caller primitive; it does not re-implement it.
 //
-// Boundary axiom (lib-reshape spec §2.7): anything that can block-await is by
-// definition NOT an actor — the Shell's Await therefore never merges into
-// lib/behavior (the actor-side call face stays behavior.BuildRequest +
-// behavior.Caller, closure author#2). The Shell's Call blocks the CLIENT-EDGE
-// goroutine (the LLM loop), never a mailbox; Receive stays non-blocking. §2.7
-// only barred the correlator from behavior — its correct home is this shell, a
-// lib, not the agent. sync is an EXPERIENCE for the model's trained
-// distribution, async is the STRUCTURE.
+// Boundary axiom: anything that can block-await is by definition NOT an
+// actor — the Shell's Await therefore never merges into lib/behavior (the
+// actor-side call face stays behavior.BuildRequest + behavior.Caller, closure
+// author#2). The Shell's Call blocks the CLIENT-EDGE goroutine (the LLM
+// loop), never a mailbox; Receive stays non-blocking. The correlator is
+// barred from behavior — its correct home is this shell, a lib, not the
+// agent. sync is an EXPERIENCE for the model's trained distribution, async is
+// the STRUCTURE.
 //
 // The actor.* self-answer contract — Describe / DescribeType / TypeMeta /
 // Catalog response shapes — lives in lib/introspect, the ONE home of those

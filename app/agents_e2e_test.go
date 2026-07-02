@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// TestAgentsAPI_CreateIntroduceRestartDelete exercises the §五 创建与控制 face:
-// create a claude-looper agent (declaration), introduce it to a channel (which
+// TestAgentsAPI_CreateIntroduceRestartDelete exercises the agent creation and
+// control surface: create a claude-looper agent (declaration), introduce it to a channel (which
 // inserts the composition row + spawns it live via the stub "agent" class),
 // restart it (rebuild + Spawn), then soft-delete it (gone from the list +
 // composition). Proves the agents table + two-layer/looper composition + the
@@ -64,7 +64,7 @@ func TestAgentsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 	}
 }
 
-// TestSetDefaultAgentAPI exercises the §7.2 "repoint the default brain" endpoint:
+// TestSetDefaultAgentAPI exercises the "repoint the default brain" endpoint:
 // re-point default_agent to an instance that IS in the channel composition (ok),
 // reject one that is NOT (the pointer may only target a composition member), and
 // clear it. Pairs with the routing failover (boost floor) that consumes it.

@@ -8,18 +8,17 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// stepID is the ordinal index inside the harness chain (proto-layer1 §2.0).
-// Lower ids run first. The chain runner executes steps strictly ascending.
+// stepID is the ordinal index inside the harness chain. Lower ids run
+// first. The chain runner executes steps strictly ascending.
 //
-// (The former pure-contract harness package was deleted; these are the write
-// ENGINE's own contracts, living with their consumer in runtime/harness —
-// runtime-construction-spec §1.4. Step numbers are impl-shaped execution order,
-// not protocol ADT.)
+// These are the write engine's own contracts, living with their consumer
+// in runtime/harness. Step numbers are impl-shaped execution order, not
+// protocol ADT.
 type stepID int
 
-// Step 2 (StepDedupe) was retired with the v1 message-dedupe machinery;
-// the ordinals are intentionally left non-contiguous (2 is a gap) so the
-// remaining step numbers keep matching proto-layer1 §2.0 prose.
+// Step 2 (StepDedupe) was retired along with the message-dedupe machinery;
+// the ordinal is intentionally left as a gap so the remaining step numbers
+// stay stable.
 const (
 	StepCallerAuth       stepID = 0
 	StepEnvelopeShape    stepID = 1
@@ -54,7 +53,7 @@ type step interface {
 	Run(ctx context.Context, env *message.Envelope) (outcome, error)
 }
 
-// WriteResult is the outcome of a full Chain.Write invocation (L1 §2).
+// WriteResult is the outcome of a full Chain.Write invocation.
 // MessageID carries the envelope id on every path — durable on success,
 // the attempted id on reject (Accepted()/RejectReason says which). There is
 // no separate "partial" id field: the id is one value, the outcome flag tells

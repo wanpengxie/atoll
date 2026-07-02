@@ -72,7 +72,7 @@ const (
 	// best-effort (a lost snapshot is superseded by the next one / decayed by the
 	// lease) — so it cannot reuse the ack'd KindEmit path. The actor is implicit
 	// (the connection IS that actor); the kind/value are OPAQUE (the substrate
-	// forwards, never interprets —守结构不守词汇).
+	// forwards, never interprets — it governs structure, not vocabulary).
 	KindObs Kind = "obs"
 )
 

@@ -6,8 +6,8 @@
 //	Open(cfg) → *Home
 //	View()  View              — read-only observation set (ReadAfterSeq/MaxSeq/ListActors)
 //	Spawn(ctx,id,kind,factory) — in-process cell placement (membership + Mint welded Pen + spawn); factory==nil = cell-less member
-//	ServeAttach(w,r,daemonID) — attach受理面 (app hands an upgraded WS here)
-//	Subscribe() (<-chan struct{}, func()) — subscription注册面 (client push)
+//	ServeAttach(w,r,daemonID) — attach acceptance surface (app hands an upgraded WS here)
+//	Subscribe() (<-chan struct{}, func()) — subscription registration surface (client push)
 //	Close() error
 //
 // Everything else (runtime, deliverer, membership, registry, the harness Minter)
@@ -15,7 +15,7 @@
 // admission point (Spawn / attach / system closure); a bare writer and the Minter
 // itself never escape Home. Post-commit effects are tap subscribers, not inline
 // writer steps: cell delivery
-// is a Pump over the commit Signal (持 Deliverer, DeliverResult observed here),
-// client push is the Signal directly. Centralised multi-tenant = Open的工厂化, not a
+// is a Pump over the commit Signal (backed by the Deliverer, DeliverResult observed here),
+// client push is the Signal directly. Centralised multi-tenant is a factory over Open, not a
 // second Home shape.
 package platform

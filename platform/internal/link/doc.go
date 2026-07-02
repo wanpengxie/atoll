@@ -1,4 +1,4 @@
-// Package link is the platform's cross-machine embodiment layer (redesign §3.2):
+// Package link is the platform's cross-machine embodiment layer:
 // ONE authenticated WS link carries N logical streams, each stream a
 // (channel, actor) embodiment running the NATIVE port-wire protocol (runtime/ipc)
 // with a real handshake — stream-on-link is the SAME contract as a local pipe

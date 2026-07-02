@@ -17,7 +17,7 @@ const TypeCommand = "kimi.command"
 // commandDeadline bounds one browser primitive. Browser actions are sub-second
 // to a few seconds; navigate + page load can be slow. A single 60s budget covers
 // them all — there is no xhs.publish-style minutes-long operation here. A request
-// past this deadline is reaped into a timeout failure (adapter-actor-spec §3.3).
+// past this deadline is reaped into a timeout failure.
 const commandDeadline = 60 * time.Second
 
 // actions is the closed set of browser primitives the extension understands.

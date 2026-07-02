@@ -15,32 +15,28 @@ import (
 
 // messages implements runtime/storespec.MessageLog over the messages table.
 //
-// Per L2 §1.4.5 engine-append ACL, messages is a PURE PERSISTENCE SINK:
-// every caller MUST run the L1 §10.2 9-step Message-Write Harness chain
-// FIRST (runtime/harness.Chain). The chain is the only legitimate
-// principal that may call Append; every write path flows through
-// harness → store. Direct Append calls are a debug-only escape hatch that
-// bypasses normalize, sender_kind overwrite, type / schema validation, and
-// The One Law uniqueness contract.
+// messages is a PURE PERSISTENCE SINK: every caller MUST run the
+// Message-Write Harness chain FIRST (runtime/harness.Chain). The chain is
+// the only legitimate principal that may call Append; every write path
+// flows through harness → store. Direct Append calls are a debug-only
+// escape hatch that bypasses normalize, sender_kind overwrite, type /
+// schema validation, and the uniqueness contract.
 //
 // Append INSERTs the messages row in one transaction (raises *AppendError
 // on the messages.id UNIQUE violation or the terminal-duplicate UNIQUE
-// INDEX violation per L2 §1.4.1). envelope.id is a caller-generated random
-// uuid correlation anchor — uniqueness is a pure integrity guarantee, NOT
-// a dedup/idempotency seam (the v1 at-least-once dedupe machinery was
-// retired under v2 caller-scoped closure). There are no same-transaction
-// side-row observers (the v1 outbox projection is removed — see newMessages).
+// INDEX violation). envelope.id is a caller-generated random uuid
+// correlation anchor — uniqueness is a pure integrity guarantee, NOT a
+// dedup/idempotency seam. There are no same-transaction side-row observers
+// (see newMessages).
 //
 // IsTerminal is NOT computed here: the harness step 8 derives it from the
-// response's Layer-1 final status (proto-layer0 §2.5.1) and hands it to
-// Append.
+// response's final status and hands it to Append.
 //
-// **Protocol contract (FIX-T10):** `env.IsTerminal` is NOT a caller-
-// settable knob. It must be resolved by the harness chain (step 8) BEFORE
-// Append is reached. Store treats the field as a pre-computed harness
-// output and persists it verbatim; it neither validates nor recomputes the
-// value, keeping the harness the single source of truth for terminal
-// classification.
+// Protocol contract: env.IsTerminal is NOT a caller-settable knob. It must
+// be resolved by the harness chain (step 8) BEFORE Append is reached.
+// Store treats the field as a pre-computed harness output and persists it
+// verbatim; it neither validates nor recomputes the value, keeping the
+// harness the single source of truth for terminal classification.
 type messages struct {
 	db *sql.DB
 	// onCommit is the substrate's post-commit signal source: the append
@@ -54,10 +50,10 @@ type messages struct {
 
 // NewMessages returns a *messages bound to the channel sqlite.
 //
-// v2: no fencing — the channel has a SINGLE write path by construction
-// (proto-v2-physical §4), so the channel-write fence is obsolete. No outbox
-// observer — the store is a pure persistence sink; any fan-out to compute is a
-// concern above this layer, not a same-tx side-table projection here.
+// No fencing — the channel has a single write path by construction, so a
+// channel-write fence is unnecessary. No outbox observer — the store is a
+// pure persistence sink; any fan-out to compute is a concern above this
+// layer, not a same-tx side-table projection here.
 func newMessages(db *sql.DB, onCommit func()) *messages {
 	return &messages{db: db, onCommit: onCommit}
 }
@@ -72,9 +68,9 @@ func (m *messages) Append(ctx context.Context, env *message.Envelope, isTerminal
 	if env.ID == "" {
 		return storespec.AppendResult{}, errors.New("store: append empty envelope.id")
 	}
-	// FIX-T10 protocol defense: Payload is a REQUIRED field per L0 §2.1
-	// (every envelope carries a payload object, even if the body is the
-	// empty JSON object `{}`). Silently coercing nil to `{}` masks
+	// Protocol defense: Payload is a required field (every envelope carries
+	// a payload object, even if the body is the empty JSON object `{}`).
+	// Silently coercing nil to `{}` masks
 	// caller bugs that bypass harness Step 4 normalize
 	// and lets non-canonical rows enter the store. Reject loudly so the
 	// caller (harness chain) is forced to materialize the payload before
@@ -126,8 +122,8 @@ func appendTx(ctx context.Context, tx *sql.Tx, env *message.Envelope, isTerminal
 		return storespec.AppendResult{}, errors.New("store: append nil payload (harness step 4 must materialize payload before reaching store)")
 	}
 
-	// terminal-uniqueness, provisional facet (proto-layer1 §2.8). The final
-	// facet is geometry — the ux_terminal_response_per_request UNIQUE INDEX
+	// terminal-uniqueness, provisional facet. The final facet is geometry
+	// — the ux_terminal_response_per_request UNIQUE INDEX
 	// rejects a second final at INSERT. The provisional facet (no provisional
 	// after a final) had only a harness pre-check (HasFinalResponse) running in
 	// a DIFFERENT tx than this INSERT, so a final committing in the TOCTOU window
@@ -233,7 +229,7 @@ func (m *messages) ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) 
 // expires_at. It is unbounded by construction: closing a dead actor's
 // in-flight requests must drain EVERY one of them (a limit would leave the
 // overflow callers hanging — broken closure). The store reports only the open
-// set it positively holds; it never guesses "slow" (construction-spec §3.3).
+// set it positively holds; it never guesses "slow".
 func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.ActorID) ([]storespec.StoredRow, error) {
 	const q = `SELECT id, ts, ts_received, channel_id,
 	                  sender_kind, sender_id,
@@ -313,10 +309,9 @@ func (m *messages) DistinctOpenRequestReceivers(ctx context.Context) ([]actor.Ac
 // least one kind=response row exists for parent_id=parentID with the
 // row's is_terminal column set — store layer has already materialised
 // the (kind==response && payload.status ∈ {completed, failed})
-// derivation per proto-layer0 §2.5.1 + L2 §1.4.1, so the bit is the
-// canonical "final exists" answer.
+// derivation, so the bit is the canonical "final exists" answer.
 //
-// Used by harness Step 8 (proto-layer1 §2.8) to distinguish
+// Used by harness Step 8 to distinguish
 // final-after-final from provisional-after-final. The
 // `ux_terminal_response_per_request` UNIQUE INDEX guards final-after-
 // final at INSERT time; this query is the pre-check that lets the

@@ -8,7 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// StepKindAndAudience contract — structure-only addressing checks (proto-layer1 §2.6).
+// StepKindAndAudience contract — structure-only addressing checks.
 func TestStepKindAndAudience_AudienceCardinality(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)
@@ -134,12 +134,11 @@ func TestStepKindAndAudience_CallerExpiresPreserved(t *testing.T) {
 }
 
 // NB: the core-type AllowOverride=false constraint branch (step_kind_audience:
-// "!rule.AllowOverride && env.Kind != rule.DefaultKind") no longer has any
-// subject — after the 2026-06-11 cleanup both remaining core types (human.text,
-// agent.text) are AllowOverride=true. The former test exercised it via
-// core.system_event, now removed. That branch's fate (keep as additive-ready
-// constraint machinery vs rip) is the open C7 decision; the reserved-bootstrap
-// kind rule below covers the sibling enforcement path.
+// "!rule.AllowOverride && env.Kind != rule.DefaultKind") currently has no
+// test subject, since both remaining core types (human.text, agent.text) are
+// AllowOverride=true. Whether to keep that branch as additive-ready constraint
+// machinery or remove it is an open decision; the reserved-bootstrap kind rule
+// below covers the sibling enforcement path.
 
 // Reserved bootstrap system.* type allows only kind=event.
 func TestStepKindAndAudience_ReservedBootstrapKindRule(t *testing.T) {

@@ -72,7 +72,7 @@ func ctxCaller(id actor.ActorID) context.Context {
 // with an explicit WELDED kind — the pen-weld counterpart of registerActor's
 // registry row, for tests that need to inject a specific kind without a
 // registry lookup (stepSenderConsistent reads kind from the weld, not the
-// registry — incarnation-dynamics-build-spec §3.2).
+// registry).
 func ctxCallerKind(id actor.ActorID, kind actor.Kind) context.Context {
 	return ctxWithCaller(context.Background(), caller{
 		actorID: id,

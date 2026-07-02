@@ -2,10 +2,10 @@ package access
 
 import "github.com/wanpengxie/atoll/protocol/actor"
 
-// GranteeKind is the CLOSED SET of grantee principal classes a Grant can name
-// (§2.4). Day-1 two kinds; growing it is a protocol revision (like adding an
+// GranteeKind is the CLOSED SET of grantee principal classes a Grant can name.
+// Day-1 two kinds; growing it is a protocol revision (like adding an
 // Operation verb). `group` (arbitrary named sets, a group registry) is the one
-// KNOWN additive extension — deferred, zero pre-reservation (§9): it lands as a
+// KNOWN additive extension — deferred, zero pre-reservation: it lands as a
 // third kind value + a second set source at the door, with this wire shape and
 // the by-identity path unchanged.
 type GranteeKind string
@@ -18,7 +18,7 @@ const (
 	// authenticate — dangling grants are unexercisable dead weight, tolerated
 	// like POSIX orphan uids / Windows dangling SIDs). Whether a later
 	// re-INSERT of the same ActorID is "the same subject" is admission NAMING
-	// governance (§11 A6 cluster), not R's concern: same name = same subject
+	// governance, not R's concern: same name = same subject
 	// by definition; guard the name assignment, not the grants.
 	GranteeActor GranteeKind = "actor"
 
@@ -52,14 +52,14 @@ func ParseGranteeKind(raw string) (GranteeKind, bool) {
 }
 
 // Grant is the operand of OpSet — the grantee's NEW grant the substrate AUTHZ MANAGER
-// writes into the object's authorization relation R (§2.4), chmod/setfacl SET semantics:
+// writes into the object's authorization relation R, chmod/setfacl SET semantics:
 // it REPLACES the grantee's grant, and Ops=∅ revokes. It is PROTO (a typed Invocation.Grant
 // field, not opaque Args) because the substrate authoritatively manages it AND it crosses
-// the wire as a contract both ends must agree on (§0.1 认证判准 + envelope/payload rule:
+// the wire as a contract both ends must agree on (envelope/payload rule:
 // substrate-managed → typed, driver-interpreted → opaque payload).
 //
 // Shape rule (enforced at the door's ingress step, runtime — not a proto method,
-// same discipline as Invocation's op×field rules §3.4):
+// same discipline as Invocation's op×field rules):
 // GranteeKind ∈ closed set; GranteeKind=actor ⟺ Grantee non-empty;
 // GranteeKind=members ⟺ Grantee empty.
 type Grant struct {
@@ -68,19 +68,19 @@ type Grant struct {
 
 	// Grantee — the subject whose grant is being set when GranteeKind=actor: an
 	// actor IDENTITY, not incarnation. Grants survive the grantee's restarts
-	// (like a Unix uid) — this is where the object's single level (§1.2) meets
+	// (like a Unix uid) — this is where the object's single level of identity meets
 	// the subject's two levels: authorization binds at IDENTITY. Empty (and
 	// omitted on the wire) when GranteeKind=members.
 	Grantee actor.ActorID `json:"grantee,omitempty"`
 
 	// Ops — the grantee's new granted operations (∅ = revoke). STRUCTURALLY ⊆ OBJECT-OPS
-	// {read,write,set,delete} — NEVER create (create is container-locus, never an R grant, §2.4).
+	// {read,write,set,delete} — NEVER create (create is container-locus, never an R grant).
 	// DAY-1 further narrowed to {read,write} — enforced in the door's authz
 	// verdict (accessdoor day1OpsOverreach; its ValidateGrant is the structural
 	// sum-form/closed-set gate and deliberately ADMITS set/delete, so the day-1
 	// narrowing lifts without touching ingress). Granting set/delete =
-	// delegating control = §11; that §11 widening goes toward
-	// {read,write,set,delete}, still NOT create. This is also why transfer is a §11 Ops-policy widening, not a new op:
+	// delegating control; that widening goes toward
+	// {read,write,set,delete}, still NOT create. This is also why transfer is an Ops-policy widening, not a new op:
 	// set(Y,full) + set(self,∅). Rights across multiple matching entries UNION
 	// (R is allow-only, no deny entries — so actor-entry vs members-entry needs
 	// no precedence rule).

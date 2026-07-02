@@ -11,8 +11,8 @@ import (
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
-// TestIngressStateRules exercises the four-step actor-scoped ingress序, pinning
-// the divergence from the channel-scoped ingress: set is a CATEGORY error
+// TestIngressStateRules exercises the four-step actor-scoped ingress sequence,
+// pinning the divergence from the channel-scoped ingress: set is a CATEGORY error
 // (ErrOpNotInScope), never ErrMalformed, and never a verdict.
 func TestIngressStateRules(t *testing.T) {
 	grant := func(ops ...access.Operation) *access.Grant {
@@ -181,7 +181,7 @@ func TestInvokeActorScopedTree(t *testing.T) {
 	})
 }
 
-// TestInvokeActorScopedDriverError is the driver_error物证: an executor failure on
+// TestInvokeActorScopedDriverError demonstrates that an executor failure on
 // each mutating/reading op maps to a driver_error VERDICT (nil Go error), never a
 // Go error — folding it into a Go error would leave driver_error unproducible.
 func TestInvokeActorScopedDriverError(t *testing.T) {
@@ -209,8 +209,8 @@ func TestInvokeActorScopedDriverError(t *testing.T) {
 	}
 }
 
-// TestExecuteFailureCallerCancellation pins the executeFailure split (owner 拍,
-// review #3): when the request ctx is already cancelled, an EXECUTE-stage store
+// TestExecuteFailureCallerCancellation pins the executeFailure split: when the
+// request ctx is already cancelled, an EXECUTE-stage store
 // failure is the CALLER'S OWN hand, not a resource-plane fact — it surfaces as a
 // Go error, never a driver_error verdict (which would tell the caller "your
 // driver broke" about a cancellation it issued itself). Uniform across both

@@ -176,12 +176,12 @@ func (a *Acceptor) Serve(w http.ResponseWriter, r *http.Request, daemonID string
 func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID string) {
 	defer func() { _ = ws.Close() }()
 
-	// allowed is the attach declaration set: the resolve seam校验 an opening
-	// actor stream is one the daemon actually declared (membership-backed).
+	// allowed is the attach declaration set: the resolve seam checks that an
+	// opening actor stream is one the daemon actually declared (membership-backed).
 	// kinds caches each declared actor's Kind alongside allowed (populated in the
 	// SAME critical section at attach): emitSink needs it to Mint a pen welded to
 	// the actor's kind — without it a daemon-attached actor's Sender.Kind would be
-	// a silent empty value and blunt the harness sender门. Volatile, per-link.
+	// a silent empty value and blunt the harness sender gate. Volatile, per-link.
 	var (
 		mu      sync.Mutex
 		allowed = map[actor.ActorID]bool{}
@@ -218,9 +218,9 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 
 	// onOpen: each peer-opened actor stream runs native ipc — hand it straight to
 	// runtime.Attach. The substrate does the ipc handshake on the stream, resolves
-	// the actor (校验 it is in the declared set), and registers it as a port
+	// the actor (checks it is in the declared set), and registers it as a port
 	// embodiment. EOF on the stream (OpClose or link teardown) = the port reads EOF
-	// = down edge. The emitSink is the home write门 (the same notify pen
+	// = down edge. The emitSink is the home write gate (the same notify pen
 	// a local cell writes with); the authoritative WriteResult flows back as the
 	// ipc EmitAck (writer contract not downgraded across the wire).
 	onOpen := func(s *stream) {
@@ -282,10 +282,10 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 
 // handleAttach processes the stream-0 attach: register declared actors into
 // membership (register/reactivate — detach never deregisters), record the
-// allowed set, and reply. Membership semantics照旧: a member row is durable; a
-// daemon detaching does NOT remove it (membership ≠ attachment).
-// handleAttach processes the stream-0 attach and reports (computeID, accepted)
-// so the caller can count L0 link attachment only on success.
+// allowed set, and reply. Membership semantics are unchanged by this: a
+// member row is durable; a daemon detaching does NOT remove it (membership ≠
+// attachment). It reports (computeID, accepted) so the caller can count link
+// attachment only on success.
 func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed map[actor.ActorID]bool, kinds map[actor.ActorID]actor.Kind) (string, bool) {
 	computeID := att.ComputeID
 	if daemonID != "" {
@@ -364,8 +364,8 @@ func (a *Acceptor) sendReply(lc *linkConn, reply AttachReply) {
 // forged self-report never reaches step 4.
 //
 // The minted pen is wrapped in a livePen welded to the emitting port's
-// Incarnation and freshly minted per emit (§3.C1 port death-write门): every emit
-// first checks the port is STILL the live embodiment (by pointer, ABA-safe) —
+// Incarnation and freshly minted per emit (the port death-write gate): every
+// emit first checks the port is STILL the live embodiment (by pointer, ABA-safe) —
 // message-plane parity with the cell path, so a replaced/torn-down port's
 // in-flight emit is fenced with ErrWriterNotLive instead of authoring truth on a
 // dead incarnation's behalf.
@@ -378,7 +378,7 @@ func (a *Acceptor) emitSink(kindOf func(actor.ActorID) (actor.Kind, bool)) actor
 			// gates the stream on the same declaration set), so a live port's emit
 			// whose bound id has no cached kind is a protocol violation. Fail-fast
 			// rather than Mint with an empty kind (a silent empty kind would blunt
-			// the harness sender门); the error relays back as the emit ack's Err.
+			// the harness sender gate); the error relays back as the emit ack's Err.
 			return ipc.EmitResult{}, fmt.Errorf("link: emit from %q has no cached declaration kind (attach missing)", id)
 		}
 		res, err := NewLivePen(a.minter.Mint(id, kind, a.channelID), inc, a.runtime).Write(ctx, env)

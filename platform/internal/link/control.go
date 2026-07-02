@@ -24,8 +24,8 @@ type Declaration struct {
 // channel home: the party identity + the actor streams it will open. It carries
 // NO credential — authentication is an app-layer concern resolved on the WS
 // upgrade (the URL's ?key= query) before the connection ever reaches the
-// Acceptor; the link layer is auth-agnostic (concept doc §3.2: "Link 不关心对端
-// 是什么，差异只在 ResolveFunc"). A credential field here would be a dead leak of
+// Acceptor; the link layer is auth-agnostic (it does not care who the peer is,
+// only its ResolveFunc differs). A credential field here would be a dead leak of
 // an app concern into the wire vocabulary.
 type AttachRequest struct {
 	ComputeID    string        `json:"compute_id"`

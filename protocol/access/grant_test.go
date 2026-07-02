@@ -62,8 +62,8 @@ func TestGranteeKindClosedSet(t *testing.T) {
 // shape the substrate authz manager needs: ∅ = revoke (both nil and empty
 // non-nil are valid revoke spellings and round-trip preserving nil-ness), and a
 // multi-op grant preserves order and duplicates (the proto type carries the wire
-// form faithfully; day-1 narrowing Ops ⊆ {read,write} is the runtime门's
-// ValidateGrant policy, NOT proto — §3.2.1/§9).
+// form faithfully; day-1 narrowing Ops ⊆ {read,write} is the runtime gate's
+// ValidateGrant policy, NOT proto).
 func TestGrantOpsExpressible(t *testing.T) {
 	t.Parallel()
 	cases := map[string][]Operation{

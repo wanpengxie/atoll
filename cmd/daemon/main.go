@@ -3,7 +3,7 @@
 //
 // What the daemon RUNS is NOT "one of every compiled class" — it is exactly the
 // set the SERVER assigns this channel (channel_actors placement='daemon'),
-// PULLED at startup from GET /compute/plan (daemon-composition spec §3). Two
+// PULLED at startup from GET /compute/plan. Two
 // orthogonal axes: compiled-in (availability — actors/all + agent/all are linked
 // so the daemon CAN build any tool/looper/device) vs run (the pulled assignment
 // decides). NOTHING auto-runs. tool / looper / device are uniform — all just
@@ -53,9 +53,9 @@ func channelFromServerURL(raw string) string {
 	return u.Query().Get("channel")
 }
 
-// daemonAssignment mirrors the server's GET /compute/plan JSON (daemon-
-// composition spec §3). Decoded into the daemon's OWN struct — a loose HTTP
-// contract; the daemon must not import the server app package.
+// daemonAssignment mirrors the server's GET /compute/plan JSON. Decoded into
+// the daemon's OWN struct — a loose HTTP contract; the daemon must not import
+// the server app package.
 type daemonAssignment struct {
 	InstanceID string          `json:"instance_id"`
 	Class      string          `json:"class"`
@@ -84,7 +84,7 @@ func planURLFromWS(serverWS, key, chID string) (string, error) {
 }
 
 // planHTTPClient bounds the plan pull — a long-running daemon must not hang
-// forever on a wedged server (codex review).
+// forever on a wedged server.
 var planHTTPClient = &http.Client{Timeout: 10 * time.Second}
 
 // fetchPlan pulls this daemon's assignment for the channel from the server (the
@@ -121,15 +121,15 @@ func pathSafe(s string) string {
 	return strings.NewReplacer(":", "-", "/", "_", "\\", "_").Replace(s)
 }
 
-// localStateSlot gives a daemon-placed instance a DAEMON-LOCAL durable state slot
-// (daemon-composition spec §2·5: state follows execution locus — a daemon-placed
-// looper resumes from local state, the server holds none). dir is platform-
-// managed under the workspace; the looper is the slot's only author.
+// localStateSlot gives a daemon-placed instance a DAEMON-LOCAL durable state
+// slot: state follows execution locus — a daemon-placed looper resumes from
+// local state, the server holds none. dir is platform-managed under the
+// workspace; the looper is the slot's only author.
 //
 // A mkdir failure is RETURNED (not silently downgraded to ephemeral): the caller
 // skips that instance observably, because claude's resume contract depends on a
-// real durable Dir/Seed/Store (codex review). Store writes atomically (temp +
-// rename) so a crash mid-write never leaves a torn checkpoint.
+// real durable Dir/Seed/Store. Store writes atomically (temp + rename) so a
+// crash mid-write never leaves a torn checkpoint.
 func localStateSlot(wsRoot, chID, instanceID string) (registry.StateSlot, error) {
 	dir := filepath.Join(wsRoot, "agent-state", pathSafe(chID), pathSafe(instanceID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -189,12 +189,11 @@ func main() {
 	chID := channelFromServerURL(*ws)
 
 	// Pull this channel's daemon-placed assignment from the server, then build
-	// EXACTLY that set (daemon-composition spec §3). No blind-build of
-	// registry.Classes(). A build failure for one instance is logged + skipped
-	// (mirrors the server's spawnComposition tolerance) — it must not down the
-	// whole daemon.
-	// Bounded retry: a transient server hiccup should not permanently kill daemon
-	// startup (codex review). After 3 tries we fatal (a supervisor restarts us).
+	// EXACTLY that set. No blind-build of registry.Classes(). A build failure
+	// for one instance is logged + skipped (mirrors the server's
+	// spawnComposition tolerance) — it must not down the whole daemon.
+	// Bounded retry: a transient server hiccup should not permanently kill
+	// daemon startup. After 3 tries we fatal (a supervisor restarts us).
 	var (
 		plan []daemonAssignment
 		err  error

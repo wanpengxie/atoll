@@ -16,10 +16,9 @@ import (
 // chain is the write engine's concrete step pipeline (it has no separate
 // contract interface — the former pure-contract harness package was deleted;
 // the engine's own seams live here in runtime/harness).
-// It assembles the 9 numbered steps declared in proto-layer1 §2.0
-// (Step 0 entry gate + Step 1-9 main pipeline) and runs them in stable
-// ascending-ID order, short-circuiting on the first reject (or on the
-// first idempotent dedupe hit).
+// It assembles the 9 numbered steps (Step 0 entry gate + Step 1-9 main
+// pipeline) and runs them in stable ascending-ID order, short-circuiting on
+// the first reject (or on the first idempotent dedupe hit).
 //
 // chain is the BARE writer (no identity). It is sealed inside the package (unexported): the
 // substrate never hands out a bare writer. New hides it inside a minter and returns
@@ -77,7 +76,7 @@ func New(deps Deps) (Minter, error) {
 	return &minter{chain: &chain{deps: deps, steps: steps}}, nil
 }
 
-// write runs the chain against env per proto-layer1 §2.0. The envelope
+// write runs the chain against env. The envelope
 // is mutated in place during StepNormalize so the caller observes
 // default-filled fields when the call returns.
 func (c *chain) write(ctx context.Context, env *message.Envelope) (res WriteResult, err error) {
@@ -113,7 +112,7 @@ func (c *chain) write(ctx context.Context, env *message.Envelope) (res WriteResu
 	}
 
 	// StepEngineAppend — canonical sink. is_terminal (StepResponsePairing)
-	// was captured above; the store allocates seq per L2 §1.4.1.
+	// was captured above; the store allocates seq.
 	env.TSReceived = c.deps.NowMs()
 	appendRes, err := c.deps.Log.Append(ctx, env, isTerminal)
 	if err != nil {

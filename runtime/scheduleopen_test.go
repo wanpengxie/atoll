@@ -12,7 +12,7 @@ import (
 
 // ---------------------------------------------------------------------
 // Minimal collaborator fakes for OpenScheduler's assembly test — this file
-// only exercises the ASSEMBLY seam (§3.4: Store injected from cs, Clock
+// only exercises the ASSEMBLY seam (Store injected from cs, Clock
 // defaulted, Fire/Host/Revive forwarded + fail-fast). The engine's own
 // run-loop behaviour (fire path, incarnation due-set, poison-row disposal,
 // …) is schedule package's own unit-test responsibility (fakes_test.go);
@@ -52,7 +52,7 @@ func validAssemblyDeps() schedule.AssemblyDeps {
 // engine — proven by Schedule(identity) landing a durable row reachable
 // through the SAME cs.timers.Due — and (2) hands back a Minter that can Mint
 // a working ScheduleHandle, all without the caller ever touching a raw
-// TimerStore (红线❻: AssemblyDeps has no Store field at all).
+// TimerStore (AssemblyDeps has no Store field at all).
 func TestOpenScheduler_AssembledMintWorks(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
@@ -127,7 +127,7 @@ func TestOpenScheduler_NilRequiredDepFailsFast(t *testing.T) {
 // TestOpenScheduler_NilClockDefaultsToRealClock: AssemblyDeps.Clock left nil
 // does not fail assembly (unlike schedule.Deps.Clock passed directly to
 // New, which fail-fasts) — OpenScheduler is the one seam that fills in the
-// real wall clock (v1.2 codex-minor "两层各守各的默认").
+// real wall clock; each layer defaults independently.
 func TestOpenScheduler_NilClockDefaultsToRealClock(t *testing.T) {
 	cs := openAccessChannel(t)
 	deps := validAssemblyDeps()

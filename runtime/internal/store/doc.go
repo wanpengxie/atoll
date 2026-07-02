@@ -12,8 +12,7 @@
 // channel-home actor owns the db handle outright — then there is no second
 // handle to confine.)
 //
-// Authoritative spec: runtime-construction-spec §1.3 (storespec ports) +
-// L2 §1.4 schema.
+// This package implements the storespec ports and the underlying schema.
 //
 // Files:
 //

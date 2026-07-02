@@ -8,7 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// StepCallerAuth contract (A1 寻址 / ACL entry gate):
+// StepCallerAuth contract (addressing / ACL entry gate):
 //   - missing caller context     → harness_engine_acl_denied
 //   - caller bound to a different channel → harness_engine_acl_denied
 //   - caller authenticated for this channel (or channel-agnostic) → accept

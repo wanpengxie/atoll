@@ -210,8 +210,8 @@ func importsOf(t *testing.T, fset *token.FileSet, path string) []string {
 const platformModulePrefix = "github.com/wanpengxie/atoll/"
 
 // TestPlatformDependencyDirection enforces the platform reshape's dependency
-// figure (platform-redesign-construction §1): platform is the assembly layer
-// BELOW app/cmd and ABOVE the substrate. It must never import downstream
+// figure: platform is the assembly layer BELOW app/cmd and ABOVE the
+// substrate. It must never import downstream
 // (actors/, app/) — that would let a domain actor or the HTTP layer back-flow
 // into the physical layer. The wire VOCABULARY (runtime/ipc + the mux) lives
 // ONLY in platform/internal/link: no other platform package may carry it (the computebus
@@ -277,6 +277,6 @@ func TestPlatformDependencyDirection(t *testing.T) {
 	}
 
 	if len(violations) > 0 {
-		t.Fatalf("platform dependency direction (construction §1):\n  %s", strings.Join(violations, "\n  "))
+		t.Fatalf("platform dependency direction violated:\n  %s", strings.Join(violations, "\n  "))
 	}
 }

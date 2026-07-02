@@ -3,7 +3,7 @@ package access
 import "testing"
 
 // TestIsValidFailureReason pins the frozen 5-value access-failure closed set
-// (the resolve→authorize→execute→return pipeline, §2.2/§3.3): the five blessed
+// (the resolve→authorize→execute→return pipeline): the five blessed
 // reasons validate and round-trip their string; everything else — empty string,
 // casing variants, partials, not-in-set words, a word from a different
 // vocabulary (a message terminal reason), and trailing whitespace — is rejected.
@@ -33,7 +33,7 @@ func TestIsValidFailureReason(t *testing.T) {
 		"denied",               // partial
 		"driver",               // partial
 		"unknown",              // partial
-		"malformed",            // door-level reject, deliberately NOT a FailureReason (§3.3)
+		"malformed",            // door-level reject, deliberately NOT a FailureReason
 		"receiver_unavailable", // a message terminal reason, different vocabulary
 		"ResourceNotFound",     // wrong case
 		"Access_Denied",        // wrong case

@@ -7,7 +7,7 @@ import (
 )
 
 // Record is the channel-local actor membership row exposed via the registry
-// query API (L1 §12.2). The projection STORAGE (actor_registry table) lives
+// query API. The projection STORAGE (actor_registry table) lives
 // in runtime/store.
 //
 // substrate scope: Record carries ONLY membership — who is registered, and
@@ -24,14 +24,14 @@ type Record struct {
 	DeregisteredAt int64 // 0 = active
 }
 
-// IsActive reports whether the actor is still active (L1 §12.2).
+// IsActive reports whether the actor is still active.
 func (r Record) IsActive() bool { return r.DeregisteredAt == 0 }
 
-// Registry is the channel-local actor membership READ contract (L1 §12.1) —
+// Registry is the channel-local actor membership READ contract —
 // deliberately SEGREGATED from the membership-write surface so a read-only
 // consumer never receives Insert/Deregister.
 // Membership mutation lives on MembershipWriter / MembershipControlPlane (a
-// control-plane write that is NOT a query). Forward-derived from the reader's
+// control-plane write that is NOT a query). Derived from the reader's
 // role, not from any one consumer. Concrete sqlite backend lives in
 // runtime/store (actorRegistry, which satisfies all three interfaces).
 type Registry interface {
@@ -42,7 +42,7 @@ type Registry interface {
 
 // MembershipWriter is the single-actor membership-write surface (Insert /
 // Deregister). It is SEGREGATED from the read-only Registry: Insert seeds a
-// new membership row (L2 §1.4.6) and Deregister soft-removes one. These are
+// new membership row and Deregister soft-removes one. These are
 // control-plane writes, not queries, so a read-only caller cannot reach them.
 // The log-emitting batch transition lives on MembershipControlPlane; this is
 // the imperative single-actor seed/teardown path. Concrete impl in

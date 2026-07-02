@@ -16,10 +16,9 @@ package resourcespec
 // the channel-scoped locus (this table): actor-scoped state has NO kind — it
 // lives in a structurally separate locus (StateStore / the actor_state table,
 // keyed by owner), where scope is expressed by structure and day-1 has a
-// single mechanical shape, so no kind column exists there to route (§12.9
-// 拍点 8.1, 拍点 8.4). Day-1 pins exactly KindKV; file / secret land
-// additively on THIS axis — a value + a driver — when their mechanical
-// difference is real.
+// single mechanical shape, so no kind column exists there to route. Day-1
+// pins exactly KindKV; file / secret land additively on THIS axis — a value
+// + a driver — when their mechanical difference is real.
 type ResourceKind string
 
 // KindKV is day-1's only driver: channel-scoped, small inline bytes, plaintext.

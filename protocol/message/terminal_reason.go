@@ -2,13 +2,12 @@ package message
 
 // TerminalFailureReason is the closed set of reasons stamped into a
 // kind=response payload's `reason` field when status=failed. It is the
-// closure ADT's failure vocabulary — proto-layer0 §2.6 / INVARIANT-10,
-// frozen at exactly 3 values.
+// closure ADT's failure vocabulary (INVARIANT-10), frozen at exactly 3
+// values.
 //
 // Prior-art anchor (Erlang BEAM monitor/call): these are the substrate +
 // caller produced DOWN-reasons of the request/response lifecycle, and they
-// map 1:1 onto the closure three-author model (actor-runtime-redesign §0.5,
-// proto-v2-closure-revision):
+// map 1:1 onto the closure three-author model:
 //
 //   - unanswered_timeout      — author #2: the request SENDER's own
 //     blessed-call timer fired. Producer is the caller, NOT a global/system

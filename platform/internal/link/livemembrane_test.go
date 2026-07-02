@@ -35,7 +35,7 @@ func (a *recordAccess) count() int {
 	return a.n
 }
 
-// TestLiveAccessFencesPostDeathInvoke is the WHEN-validity收口 on the access
+// TestLiveAccessFencesPostDeathInvoke closes the WHEN-validity gap on the access
 // plane: a liveAccess welded to an incarnation is fenced pre-go-live, passes
 // while live, and fences with ErrAccessNotLive after despawn — the plane-2 twin
 // of the livePen death-after-write test.
@@ -106,7 +106,7 @@ func (s *recordSchedule) counts() (int, int) {
 	return s.schedule, s.cancel
 }
 
-// TestLiveScheduleFencesPostDeath is the WHEN-validity收口 on the time plane: a
+// TestLiveScheduleFencesPostDeath closes the WHEN-validity gap on the time plane: a
 // liveSchedule welded to an incarnation is fenced pre-go-live, passes while
 // live, and fences BOTH Schedule and Cancel with ErrScheduleNotLive after
 // despawn — the time-axis twin of the livePen death-after-write test.

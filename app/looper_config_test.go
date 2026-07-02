@@ -7,8 +7,8 @@ import (
 
 // TestIsJSONObject pins the API-entry guard: only a real JSON object passes;
 // null / array / scalar are rejected (a present-but-non-object agent config is
-// 400). Config is the opaque persona/knobs container (agent-spec §二); the engine
-// is NOT in it (engine = the actor class, agent-kind-vs-class §7).
+// 400). Config is the opaque persona/knobs container; the engine is NOT in it
+// (engine = the actor class).
 func TestIsJSONObject(t *testing.T) {
 	cases := map[string]bool{
 		`{}`:      true,

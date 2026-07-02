@@ -2,14 +2,12 @@
 // visibility enums, the core-type table, and the terminal-failure reason
 // closed set.
 //
-// Authoritative spec:
+// Key invariants:
 //
-//   - Envelope fields           — L0 §2.1 (.dalek/pm/proto-layer0.md)
-//   - Kind closed set           — L0 §3.1 invariant I7 + proto-layer0 §3
-//   - Visibility enum           — L0 §2.4
-//   - Terminal-failure reason   — proto-layer0 §2.6 (INVARIANT-10)
+//   - Kind is a closed set.
+//   - Terminal-failure reason is a closed set.
 //
-// The package depends on protocol/actor for L0 sender identity primitives.
+// The package depends on protocol/actor for sender identity primitives.
 // Pure proto: no context, no storage, no engine interfaces. Harness reject
 // reasons + install reasons are the write/install ENGINES' errno vocabulary
 // and live with those engines outside this package; reason→HTTP mapping is

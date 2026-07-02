@@ -8,9 +8,9 @@ import (
 	"github.com/wanpengxie/atoll/registry"
 )
 
-// TestNewDecl_ResumeContract pins claude's daemon-side build/resume contract
-// (daemon-composition spec §2·5; codex's "don't ASSUME the SDK auto-resumes from
-// workdir" concern). The parts we OWN and therefore test:
+// TestNewDecl_ResumeContract pins claude's daemon-side build/resume contract:
+// don't assume the SDK auto-resumes from workdir. The parts we OWN and
+// therefore test:
 //
 //   - build is SEED-OPTIONAL: NewDecl succeeds with NO state (fresh start) AND
 //     with a state seed (resume). Resume is driven by the EXPLICIT State.Seed the
@@ -49,8 +49,8 @@ func TestNewDecl_ResumeContract(t *testing.T) {
 
 // TestNewDecl_RequiresChannelAndID pins WHY the daemon must build from an
 // EXPLICIT assignment (not a blind-build of registry.Classes() with empty specs):
-// claude refuses an empty id — exactly the fatal the old "one of each" loop would
-// hit once agents were compiled into the daemon (daemon-composition spec §1).
+// claude refuses an empty id — exactly the fatal a blind "one of each" loop
+// would hit once agents were compiled into the daemon.
 func TestNewDecl_RequiresChannelAndID(t *testing.T) {
 	if _, err := NewDecl(registry.InstanceSpec{ID: "agent:x"}, registry.Deps{}); err == nil {
 		t.Fatal("NewDecl with empty ChannelID should error")

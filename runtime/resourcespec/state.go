@@ -10,21 +10,22 @@ import (
 // StateStore is the byte realizer for the ACTOR-SCOPED storage locus — the
 // second, structurally separate home of objects (an actor_state-shaped table
 // keyed (owner, id)), dual to the channel-scoped resources table. Scope is
-// expressed by WHICH structure an object lives in, never by a column (§12.9
-// 拍点 8.1). It is a driver in RESPONSIBILITY (giftless byte realizer,
-// substrate-owned, closed) but NOT a DriverTable entry: DriverTable routes
-// channel-scoped kind→driver; the actor-scoped locus has no kind routing
-// (day-1 one mechanical shape: inline small bytes, plaintext).
+// expressed by WHICH structure an object lives in, never by a column. It is
+// a driver in RESPONSIBILITY (giftless byte realizer, substrate-owned,
+// closed) but NOT a DriverTable entry: DriverTable routes channel-scoped
+// kind→driver; the actor-scoped locus has no kind routing (day-1 one
+// mechanical shape: inline small bytes, plaintext).
 //
 // The collapsed authorization (owner-only) is NOT re-checked here: the door
 // welds owner at handle mint and the reachable set is structurally ≡ {owner}.
 // Registry(R)/membership are not consulted — that absence IS the scope law.
 // No Resolve (each op's own row-hit IS the existence check — the channel-
 // scoped door needs Resolve only to route meta.Kind before the R query; the
-// collapsed branch has neither), no List (enumeration is not access; "不进
-// 可枚举 registry" is scope-law content, 零预留).
+// collapsed branch has neither), no List (enumeration is not access; not
+// being enumerable via a registry is itself scope-law content, and this is
+// intentionally not left as a placeholder for future extension).
 //
-// Load-bearing (§3.1 注):
+// Load-bearing:
 //  1. owner is a COORDINATE, not a check — StateStore trusts the door (mirrors
 //     storespec's store-not-validate), and owner is always the door-welded
 //     caller.
@@ -41,8 +42,8 @@ type StateStore interface {
 	// Read returns the current bytes; exists=false = no row (the door maps
 	// it to resource_not_found, uniform with the channel-scoped tree even at
 	// the degenerate point). An existing row with NULL bytes is resolved-but-
-	// empty: the door maps it to Found=false (opus-B2, same bit meaning as
-	// the channel-scoped driver), value=nil; empty non-nil bytes are a value.
+	// empty: the door maps it to Found=false (same bit meaning as the
+	// channel-scoped driver), value=nil; empty non-nil bytes are a value.
 	Read(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (value []byte, exists bool, err error)
 
 	// Write overwrites an EXISTING row (PUT semantics, idempotent);

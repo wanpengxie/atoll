@@ -11,7 +11,7 @@ import (
 )
 
 // TestPlanURLFromWS pins the ws→http(s) + /compute/plan derivation the daemon
-// uses to pull its assignment (daemon-composition spec §3).
+// uses to pull its assignment.
 func TestPlanURLFromWS(t *testing.T) {
 	got, err := planURLFromWS("ws://localhost:8080/compute", "k1", "c1")
 	if err != nil {
@@ -74,8 +74,8 @@ func TestFetchPlan_Non200(t *testing.T) {
 }
 
 // TestLocalStateSlot: a daemon-placed looper's state slot is DAEMON-LOCAL and
-// durable — a checkpoint stored by one build is read back as the seed on the next
-// (daemon-composition spec §2·5: state follows execution locus, no server seed).
+// durable — a checkpoint stored by one build is read back as the seed on the next.
+// State follows the execution locus; the server does not seed it.
 func TestLocalStateSlot(t *testing.T) {
 	root := t.TempDir()
 	slot, err := localStateSlot(root, "c1", "agent:rev")

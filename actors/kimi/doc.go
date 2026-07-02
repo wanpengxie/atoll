@@ -3,8 +3,8 @@
 // browser, driven through the Kimi WebBridge Chrome extension that speaks no
 // actor primitives.
 //
-// It is built to the adapter-actor-spec.md (§6.3 kimi): two faces, complexity
-// pressed into one stateful actor. Disambiguation: this package (actors/kimi)
+// It follows the adapter-actor shape: two faces, complexity pressed into one
+// stateful actor. Disambiguation: this package (actors/kimi)
 // is the WebBridge that controls a browser extension — it is unrelated to
 // agent/provider/kimi, the go-kimi looper engine.
 //

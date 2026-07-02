@@ -1,7 +1,7 @@
 package actor
 
 // Binding is the actor transport descriptor — how an actor is reached. Its
-// string values are the canonical wire forms from proto-foundation §2.5.1.
+// string values are the canonical wire forms.
 //
 // Closed set semantics:
 //

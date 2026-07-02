@@ -2,7 +2,7 @@ package store
 
 // White-box tests for the access-plane store: resourceRegistry (R + existence)
 // and kvDriver (inline bytes). Both are unexported and reachable only from
-// inside the package — the same §4.5 confinement the message-log store relies
+// inside the package — the same confinement the message-log store relies
 // on. They run over a real channel sqlite (ChannelLocalDDL), no fakes.
 
 import (

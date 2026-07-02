@@ -15,7 +15,8 @@ import (
 // (closed-set, drives closure policy / routing). Mutable / presentation
 // attributes (display name, user mapping, role) are domain — they live in the
 // domain layer keyed by ID, NOT in the substrate envelope (cf. Unix inode vs
-// filename; Slack user-id vs display-name; proto-v2-physical §6.1 二轴).
+// filename; Slack user-id vs display-name — identity and presentation are two
+// separate axes).
 type Sender struct {
 	Kind actor.Kind    `json:"kind"`
 	ID   actor.ActorID `json:"id"`
@@ -23,12 +24,12 @@ type Sender struct {
 
 // Envelope is the v4 message envelope (pure proto).
 //
-// It carries the content fields from L0 §2.1 (with `sender.kind/id`
+// It carries the content fields (with `sender.kind/id`
 // bundled into the nested Sender object).
 //
 // Store-derived columns (`seq`, `is_terminal`) are NOT
 // part of the envelope — they are persistence-layer derived columns, not
-// wire proto fields (target-state §3.7). The substrate carries no delivery/scheduling
+// wire proto fields. The substrate carries no delivery/scheduling
 // metadata on the message: delivery outcome is the closure terminal
 // response (three reasons), delivery observability is the recipient
 // cursor, and scheduling is an upstream actor concern — none of which
@@ -40,10 +41,10 @@ type Sender struct {
 //   - ExpiresAt: `*int64` — nil pointer means NULL; otherwise the
 //     timestamp value.
 //   - Payload (`json.RawMessage`): empty / null means absent; protocol
-//     baseline requires non-null (L0 §2.2 — `payload={}` legal,
+//     baseline requires non-null (`payload={}` legal,
 //     `payload=null` not).
 type Envelope struct {
-	// --- content fields (L0 §2.1) -------------------------------------
+	// --- content fields -------------------------------------
 
 	ID            ID              `json:"id"`
 	TS            int64           `json:"ts"`
@@ -60,8 +61,8 @@ type Envelope struct {
 	ExpiresAt     *int64          `json:"expires_at,omitempty"`
 }
 
-// ReservedTypePrefix is the substrate-authoritative message-type namespace
-// (proto-layer1 §2.5): a Type under this prefix may only be authored by the
+// ReservedTypePrefix is the substrate-authoritative message-type namespace:
+// a Type under this prefix may only be authored by the
 // substrate itself (concrete reserved names live in protocol/actor; the
 // PREFIX concept is protocol vocabulary and lives here, its one home). Both
 // enforcement halves reference this symbol — the harness reserved-type step
@@ -72,10 +73,10 @@ type Envelope struct {
 const ReservedTypePrefix = "system."
 
 // ---------------------------------------------------------------------
-// Wire field-set closure (L0 §7.3) — enforced by the TYPE, not by callers.
+// Wire field-set closure — enforced by the TYPE, not by callers.
 // ---------------------------------------------------------------------
 
-// UnknownFieldError is the L0 §7.3 fail-closed verdict: the wire JSON carried
+// UnknownFieldError is the fail-closed verdict: the wire JSON carried
 // one or more top-level keys outside the envelope's closed field set. Typed
 // so a binding can map it onto its own error surface (HTTP 400, an ipc frame
 // error) with errors.As.
@@ -112,15 +113,13 @@ var envelopeTopLevelKeys = func() map[string]bool {
 
 // UnmarshalJSON decodes an envelope fail-closed: a top-level key outside the
 // struct's field set rejects with UnknownFieldError BEFORE any field is
-// decoded. This is L0 §7.3 riding the type itself — every wire entrance that
+// decoded. This enforcement rides the type itself — every wire entrance that
 // decodes an envelope (the HTTP API, the ipc frame codec, any future binding)
 // enforces it by construction, with no per-binding plumbing to forget.
-// (It replaced the harness's CtxWithRawEnvelope injection seam, whose
-// "callers MUST plumb the raw JSON" obligation lived only in a comment and
-// was wired by no binding.) In-process Go construction is untouched — a
+// In-process Go construction is untouched — a
 // struct literal cannot carry an unknown field in the first place.
 //
-// Scope is deliberately top-level only, faithful to §7.3: unknown keys inside
+// Scope is deliberately top-level only: unknown keys inside
 // nested objects (sender, payload) are the nested vocabulary's concern —
 // payload is opaque by axiom and never inspected here.
 func (e *Envelope) UnmarshalJSON(data []byte) error {
@@ -150,10 +149,10 @@ func (e *Envelope) UnmarshalJSON(data []byte) error {
 }
 
 // IsFinalStatus reports whether the given payload.status value belongs
-// to the Layer 1 final closed set per proto-layer0 §2.5.1. The Layer 1
+// to the Layer 1 final closed set. The Layer 1
 // set is strictly closed at {"completed","failed"}; expanding it
-// requires a protocol-level revision (proto-foundation §F.closure_policy
-// guards uniqueness of the final response).
+// requires a protocol-level revision (uniqueness of the final response
+// must be preserved).
 //
 // Provisional response statuses — both the Layer 2 core closed set
 // (received / queued / processing / deferred / unavailable) and Layer 3
@@ -161,14 +160,11 @@ func (e *Envelope) UnmarshalJSON(data []byte) error {
 // and return false here. is_terminal derivation uses this helper:
 //
 //	is_terminal = (kind == "response" && IsFinalStatus(payload.status))
-//
-// per proto-layer0 §2.5.1 and proto-foundation §1.6.3.
 func IsFinalStatus(status string) bool {
 	return status == StatusCompleted || status == StatusFailed
 }
 
-// Layer 1 final status closed set — the two wire words per proto-layer0
-// §2.5.1. IsFinalStatus above is the membership predicate (the judgment
+// Layer 1 final status closed set — the two wire words. IsFinalStatus above is the membership predicate (the judgment
 // face); these consts are the ONE literal home (the vocabulary face).
 // Production code MUST reference them instead of bare "completed"/"failed"
 // strings; wire/JSON fixtures keep the literal form.
@@ -177,7 +173,7 @@ const (
 	StatusFailed    = "failed"
 )
 
-// contentFields lists the envelope field names from L0 §2.1 (with sender
+// contentFields lists the envelope field names (with sender
 // flattened into the 2 dotted keys sender.{kind,id} — sender carries
 // structural identity only).
 //

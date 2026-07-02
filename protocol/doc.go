@@ -1,7 +1,7 @@
 // Package protocol is the protocol contract layer for atoll (launch+).
 //
 // It is PURE proto: pure types, closed-set vocabularies and pure functions
-// that mirror the protocol specs (.dalek/pm/proto-*.md). It owns no state,
+// that mirror the protocol specs. It owns no state,
 // performs no IO, takes no context.Context, declares no engine interfaces,
 // and knows nothing about storage (no Scan/Value) or transport bindings
 // (no HTTP status). All concrete backends, engines and bindings live
@@ -12,7 +12,7 @@
 //   - protocol/actor    — actor identity (ActorID), the actor Kind closed set,
 //     Binding closed set, and the reserved-type closed sets.
 //   - protocol/channel  — channel ID type (opaque stable string).
-//   - protocol/message  — envelope schema (14 wire content fields, L0 §2.1;
+//   - protocol/message  — envelope schema (14 wire content fields;
 //     sender flattened into sender.kind/sender.id), kind /
 //     visibility closed sets, core-type table, and the terminal-failure reason
 //     closed set (INVARIANT-10).

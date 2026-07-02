@@ -9,23 +9,22 @@ import (
 	"testing"
 )
 
-// The time-axis (timer) purity wall (period 5, build spec §2/§7 line F). Only
-// one lock is load-bearing here — mirroring the resourcespec precedent, not
-// the accessdoor one:
+// The time-axis (timer) purity wall. Only one lock is load-bearing here —
+// mirroring the resourcespec precedent, not the accessdoor one:
 //
 //   - timerspec is the kernel-only durable-pending-timer CONTRACT leaf (dual
 //     to resourcespec on the object plane, storespec on the message plane). If
 //     domain code could import it, it could implement its own TimerStore /
 //     construct a raw pending-timer table reachable outside the engine — a
-//     delayed forged-author write path around the pen (build spec 红线❹❻).
-//     The confinement is enforced at the compile layer, not by convention.
+//     delayed forged-author write path around the pen. The confinement is
+//     enforced at the compile layer, not by convention.
 //
 //   - runtime/schedule is deliberately NOT walled the same way: it is the
 //     downstream-facing surface (ScheduleHandle / Minter), the schedule-package
-//     analogue of accessdoor — platform is meant to import it (build spec §2
-//     archtest row, v1.2 修正: "只封 timerspec...schedule 开放"). It only gets a
-//     narrower containment check below (no reach into the concrete store or
-//     the platform assembly it must stay below).
+//     analogue of accessdoor — platform is meant to import it. Only timerspec
+//     is sealed; schedule stays open to downstream. It only gets a narrower
+//     containment check below (no reach into the concrete store or the
+//     platform assembly it must stay below).
 //
 // Like the rest of this package these are structural boundaries, not drift
 // tripwires: an import path is a mandatory string literal, so the AST sees
@@ -43,7 +42,7 @@ const (
 // pending-timer contract leaf) may be imported ONLY from inside the runtime
 // tree. A downstream importer could implement TimerStore / construct a raw
 // pending table directly, opening a delayed forged-author write path around
-// the pen (红线❹❻). The closed store-implementor set is thereby closed by the
+// the pen. The closed store-implementor set is thereby closed by the
 // compile layer: downstream sees only schedule.ScheduleHandle / the welded
 // Minter, never the raw TimerStore.
 func TestTimerspecImportedOnlyWithinRuntime(t *testing.T) {

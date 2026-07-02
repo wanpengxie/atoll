@@ -36,7 +36,7 @@ func TestInvocationRoundTripMinimal(t *testing.T) {
 }
 
 // TestInvocationRoundTripSetShape exercises the LEGAL op=set invocation: the
-// operand is the typed Grant and Args is nil (§3.4 — set/delete carry no Args;
+// operand is the typed Grant and Args is nil (set/delete carry no Args;
 // a set with non-nil Args is malformed and rejected at the runtime door, so it
 // is deliberately NOT modeled here as a benign round-trip). Asserts struct
 // fidelity for Caller/Resource/Operation/Grant after a JSON round trip; Args

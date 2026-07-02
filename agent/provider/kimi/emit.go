@@ -20,9 +20,8 @@ import (
 )
 
 // emitTurnProgress writes one progress envelope summarising a completed
-// step. Per impl-vocabulary §2.3 progress is `agent.text` carrying
-// `visibility=system` (intermediate output / not delivered to view by
-// default). Payload shape:
+// step. Progress is emitted as `agent.text` carrying `visibility=system`
+// (intermediate output / not delivered to view by default). Payload shape:
 //
 //	{
 //	  "turn_index":  <1-based bridge turn>,

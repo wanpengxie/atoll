@@ -157,7 +157,7 @@ func (c *Caller) Arm(req *message.Envelope) {
 // reject or a non-nil error is a liveness break (this request may now be closed
 // by no path) and MUST be observable, so it is reported through onFault — the
 // SAME fault face author#3 (death.go) already has. A liveness-guarantee author
-// that fails silently is the asymmetry §3.2 closes.
+// must never fail silently.
 func (c *Caller) fireTimeout(req *message.Envelope) {
 	term, err := BuildResponseFromRequest(req, c.clock, ResponseSpec{
 		Status: message.StatusFailed,

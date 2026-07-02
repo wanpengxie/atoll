@@ -11,9 +11,8 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// stepResponsePairing implements proto-layer1 §2.8 Step 8 — Final
-// Response Uniqueness + Response Parent Validation. Applies only to
-// kind=response.
+// stepResponsePairing enforces Final Response Uniqueness + Response
+// Parent Validation. Applies only to kind=response.
 //
 // Concretely:
 //
@@ -23,8 +22,7 @@ import (
 //   - parent.kind must equal "request"; otherwise →
 //     harness_response_parent_not_request.
 //
-//   - payload.status MUST belong to the proto-layer0 §2.5 half-closed
-//     set:
+//   - payload.status MUST belong to the half-closed set:
 //
 //     – Layer 1 final (strict closed): {"completed","failed"} → is_terminal=true.
 //     – Layer 2 provisional core (strict closed):
@@ -32,19 +30,18 @@ import (
 //     – Layer 3 provisional business extension (regex
 //     `^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$`): namespace part must not
 //     collide with any Layer 1 / Layer 2 status name AND must equal
-//     the sender.id local-name (everything after the last `:`). Anti-
-//     spoofing per proto-layer0 §2.5.3. Otherwise →
+//     the sender.id local-name (everything after the last `:`), to
+//     prevent namespace spoofing. Otherwise →
 //     harness_response_status_invalid or
 //     harness_response_status_namespace_mismatch.
 //
 //   - When status=failed (Layer 1 final), payload.reason MUST be PRESENT and
 //     in the terminal_failure_reason closed set; missing or out-of-set →
-//     harness_response_reason_invalid (§2.6: a reason-less failed terminal
-//     would break three-author attribution).
+//     harness_response_reason_invalid (a reason-less failed terminal would
+//     break three-author attribution).
 //
-//   - response.sender authorization has THREE authors (actor-runtime-
-//     redesign.md §0.5 Δ2), each welded 1:1 to its ONE failure word (§2.6
-//     total matrix — the word IS the authorization), and response.audience
+//   - response.sender authorization has THREE authors, each welded 1:1 to
+//     its ONE failure word (the word IS the authorization), and response.audience
 //     must target the parent request sender exactly:
 //     1. receiver voluntary — sender ∈ parent.audience: completed /
 //     provisional / failed+receiver_internal_error ONLY;
@@ -69,8 +66,8 @@ import (
 //     authoritative defence for concurrent racers.
 //
 //   - is_terminal is computed from the payload.status classification:
-//     Layer 1 → true; Layer 2 / Layer 3 → false. proto-layer0 §2.5.1
-//     defines is_terminal as a uniform payload.status derivation.
+//     Layer 1 → true; Layer 2 / Layer 3 → false. This is a uniform
+//     payload.status derivation.
 type stepResponsePairing struct {
 	deps Deps
 }
@@ -102,7 +99,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 		}, nil
 	}
 
-	// payload.status half-closed-set classification — proto-layer0 §2.5.
+	// payload.status half-closed-set classification.
 	statusCls := classifyResponseStatus(env.Payload, env.Sender.ID)
 	if statusCls.reject != "" {
 		return outcome{
@@ -118,7 +115,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 			Detail:       reasonCheck.detail,
 		}, nil
 	}
-	// §2.6 normative, second half: status=failed MUST carry payload.reason.
+	// status=failed MUST carry payload.reason.
 	// A reason-less failed terminal in truth breaks three-author attribution
 	// (no reason ⇒ no author derivable) and every reason-dispatching
 	// consumer; previously only present-but-out-of-set was rejected, so
@@ -130,13 +127,12 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 		}, nil
 	}
 
-	// ── Step 8 authorization model (§0.5 Δ2 + proto-layer0 §2.6 1:1 矩阵) ──
+	// ── authorization model ──
 	//
 	// closure has exactly THREE authors, by "who holds the fact" — and the
 	// terminal_failure_reason closed set has exactly three words, welded
 	// 1:1: each author may write ITS one failure word and nothing else (the
-	// word IS the authorization; the matrix is total, owner-pinned 2026-07-02
-	// 选项A):
+	// word IS the authorization; the matrix is total):
 	//
 	//   1. receiver voluntary — sender ∈ parent.audience answers:
 	//      completed, any provisional, or failed+receiver_internal_error —
@@ -222,7 +218,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 	}
 
 	// is_terminal derives purely from the Layer 1 final closed set —
-	// the proto-layer0 §2.5.1 derivation is uniform across all types.
+	// this derivation is uniform across all types.
 	return outcome{IsTerminal: statusCls.isFinal}, nil
 }
 
@@ -286,8 +282,8 @@ func terminalFailureReasonAllowed(reason string) bool {
 	return message.IsValidTerminalFailureReason(message.TerminalFailureReason(reason))
 }
 
-// layer2ProvisionalStatuses is the Layer 2 provisional core closed set
-// per proto-layer0 §2.5.2. Expansion is a protocol-level revision.
+// layer2ProvisionalStatuses is the Layer 2 provisional core closed set.
+// Expansion is a protocol-level revision.
 var layer2ProvisionalStatuses = map[string]struct{}{
 	"received":    {},
 	"queued":      {},
@@ -297,7 +293,7 @@ var layer2ProvisionalStatuses = map[string]struct{}{
 }
 
 // layer3StatusRegex enforces the Layer 3 provisional business extension
-// grammar per proto-layer0 §2.5.3:
+// grammar:
 //
 //	^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$
 //
@@ -320,8 +316,8 @@ type statusClassification struct {
 	detail string
 }
 
-// classifyResponseStatus runs the proto-layer0 §2.5 half-closed-set
-// classification on env.Payload's `status` field. senderID is used for
+// classifyResponseStatus runs the half-closed-set classification on
+// env.Payload's `status` field. senderID is used for
 // the Layer 3 namespace ownership check.
 func classifyResponseStatus(payload []byte, senderID actor.ActorID) statusClassification {
 	status, ok := extractPayloadStatus(payload)
@@ -388,9 +384,9 @@ func extractPayloadStatus(payload []byte) (string, bool) {
 	return status, true
 }
 
-// senderLocalName derives the local-name portion of a sender.id per
-// proto-layer0 §2.5.3 namespace ownership rule: everything after the
-// last `:`, falling back to the full id when no `:` is present.
+// senderLocalName derives the local-name portion of a sender.id per the
+// namespace ownership rule: everything after the last `:`, falling back
+// to the full id when no `:` is present.
 //
 //	"tool:xhs"       → "xhs"
 //	"agent:planner"  → "planner"

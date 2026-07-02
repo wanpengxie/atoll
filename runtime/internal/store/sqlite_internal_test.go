@@ -1,9 +1,9 @@
 package store
 
 // In-package tests for the unexported sqlite open / schema-verify primitives.
-// openSqlite, verifySchema and tableColumns are §4.5-confined (the raw *sql.DB
-// must never cross the store boundary), so their defensive arms can only be
-// driven from inside the package.
+// openSqlite, verifySchema and tableColumns are confined to this package (the
+// raw *sql.DB must never cross the store boundary), so their defensive arms
+// can only be driven from inside the package.
 
 import (
 	"context"

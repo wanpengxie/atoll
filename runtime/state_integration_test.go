@@ -17,7 +17,7 @@ import (
 // with injected fakes; these drive the ACTOR-SCOPED branch of the whole plane-2
 // door assembled by OpenChannel over a real per-channel sqlite — MintState welds
 // the owner, the real stateStore realizes bytes, and the real actor_registry
-// dereg path cascades the clear. Each test name traces to a §7 vertical slice.
+// dereg path cascades the clear.
 //
 // State handles are actor-scoped: the reachable set is structurally ≡ {owner}, so
 // owners are NOT seeded as channel members here (membership is never consulted on
@@ -66,7 +66,7 @@ func TestStateSlice1_PrivacyByStructure(t *testing.T) {
 	expectStateNotFoundNotDenied(t, "B delete A's id", out, err)
 }
 
-// ---- slice 2: four-step ingress序 + op distinctions -------------------------
+// ---- slice 2: four-step ingress order + op distinctions --------------------
 
 // TestStateSlice2_FourStepOrderAndOpDistinctions pins the four-step actor-scoped
 // ingress order and the collapsed op verdicts through the assembled handle. The
@@ -123,14 +123,14 @@ func TestStateSlice2_FourStepOrderAndOpDistinctions(t *testing.T) {
 // ---- slice 2b: empty bytes vs resolved-but-empty ---------------------------
 
 // TestStateSlice2b_EmptyBytes: the NULL-vs-empty distinction survives the round
-// trip through the real sqlite BLOB column (opus-B2). create(nil) stores a row
+// trip through the real sqlite BLOB column. create(nil) stores a row
 // with a NULL bytes column = resolved-but-empty → read returns an accepted
 // Outcome{Found:false, Value:nil}; create([]byte{}) stores an empty non-nil blob
 // = a value → read returns Found:true with a non-nil zero-length Value.
 //
 // The store-level unit test (internal/store/state_test.go) already proved the
 // sqlite driver distinguishes NULL from an empty blob; this asserts the door maps
-// each to the correct Found bit end-to-end. No偏差 from spec observed: the mattn
+// each to the correct Found bit end-to-end. No deviation from spec observed: the mattn
 // sqlite driver stores a nil []byte arg as NULL and an []byte{} arg as an empty
 // blob, and `bytes IS NULL` reads them back apart.
 func TestStateSlice2b_EmptyBytes(t *testing.T) {
@@ -182,12 +182,12 @@ func TestStateSlice2b_EmptyBytes(t *testing.T) {
 // the SAME owner return handles that read the SAME bytes — the handle carries no
 // incarnation state.
 //
-// NOTE (防误读): this asserts ONLY the WHICH-data axis. The orthogonal WHEN-valid
-// axis (a handle held by a dead incarnation must be refused) is the liveAccess
-// membrane's job, wired in the接线期 (§3.5b / §7.5) — it does NOT exist in the
-// 期4 contract layer. A second MintState reading the same bytes here must NOT be
-// read as "the WHEN half is built": there simply is no validity dimension on the
-// 期4 handle at all.
+// NOTE (to avoid misreading): this asserts ONLY the WHICH-data axis. The
+// orthogonal WHEN-valid axis (a handle held by a dead incarnation must be
+// refused) is the liveAccess membrane's job, wired in a later integration
+// phase — it does NOT exist in the current contract layer. A second MintState
+// reading the same bytes here must NOT be read as "the WHEN half is built":
+// there simply is no validity dimension on the current handle at all.
 func TestStateSlice3_WhichDataIsIdentity(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
@@ -210,7 +210,7 @@ func TestStateSlice3_WhichDataIsIdentity(t *testing.T) {
 // ---- slice 4: cascade clear vs non-lossy -----------------------------------
 
 // TestStateSlice4_CascadeClearVsNonLossy: owner deregister cascades the
-// actor-scoped locus (state随 owner 亡, §10.12 row 3) in the SAME tx that flips
+// actor-scoped locus (state dies with its owner) in the SAME tx that flips
 // the registry, while the channel-scoped plane is NON-LOSSY — a resource the actor
 // created (its row AND its R grant) survives the dereg. Both dereg entry points —
 // the single-actor Deregister and the batch ApplyMemberTransitions(removes) — run
@@ -239,7 +239,7 @@ func TestStateSlice4_CascadeClearVsNonLossy(t *testing.T) {
 
 		// Cascade: the actor_state row is gone (same tx as the registry flip).
 		out, err := hState.Invoke(ctx, access.OpRead, stateID, nil, nil)
-		expectReason(t, "state read after dereg (cascaded清)", out, err, access.ResourceNotFound)
+		expectReason(t, "state read after dereg (cascaded)", out, err, access.ResourceNotFound)
 
 		// Non-lossy: the channel-scoped resource + its creator R grant survive, so A
 		// (whose direct full-rights entry is untouched — object ops consult R, not
@@ -271,7 +271,7 @@ func TestStateSlice4_CascadeClearVsNonLossy(t *testing.T) {
 
 // TestStateSlice5_TwoLociMutuallyInvisible: the actor-scoped locus (actor_state)
 // and the channel-scoped locus (resources) are structurally separate homes — the
-// scope律 lives in WHICH table, not a column. A channel-scoped handle reading an
+// scope law lives in WHICH table, not a column. A channel-scoped handle reading an
 // id that only exists in state gets resource_not_found, and vice versa; the same id
 // string may live independently in both loci as two distinct rows.
 func TestStateSlice5_TwoLociMutuallyInvisible(t *testing.T) {
@@ -312,8 +312,8 @@ func TestStateSlice5_TwoLociMutuallyInvisible(t *testing.T) {
 	expectBytes(t, "channel dup value", out, []byte("chan-value"))
 }
 
-// (slice 6 — driver_error 物证 — lives in accessdoor/state_test.go
-// (TestInvokeActorScopedDriverError), where the fake家族 already exists: verdict
+// (slice 6 — driver_error evidence — lives in accessdoor/state_test.go
+// (TestInvokeActorScopedDriverError), where the fake family already exists: verdict
 // mapping is a door branch behaviour, a unit concern, not an integration path.
 // Keeping a fake-injected copy here would grow a third parallel fake family.)
 

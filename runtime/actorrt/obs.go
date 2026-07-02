@@ -16,8 +16,8 @@ import (
 //	substrate   Stat(id) → present+StartedAt  WatchDown → OnDown (down edge = death)
 //	actor       Observe(id,kind) → Observer   PublishObs(kind,val) → WatchObs → OnObs
 //
-// The full 2×2 surface is laid down structurally (owner-directed up-front
-// skeleton, NOT痛感-driven) so the shape cannot be re-collapsed; cells with no
+// The full 2×2 surface is laid down structurally (up-front skeleton, not
+// usage-driven) so the shape cannot be re-collapsed; cells with no
 // consumer are no-ops (no Observer → ErrObsUnsupported; no ObsWatcher → empty
 // fanout). obs is READ-ONLY (you cannot drive work through it) and NON-TRUTH —
 // that is the structural guarantee it never becomes a business read bus.
@@ -28,17 +28,13 @@ import (
 // (embodiment/uptime) are the only obs the substrate authoritatively produces, and
 // they ride the typed Stat bundle, not an opaque kind.
 //
-// RETENTION (reviewed 2026-06-12): a kernel audit flagged the ACTOR-source axis
-// (ObsKind/ObsValue/Observer/Observe/PublishObs/ObsWatcher/WatchObs/OnObs) as a
-// cast-but-not-yet-wired vertical slice — zero production producer/consumer.
-// (The ipc KindObs frame has since landed, so the cross-wire arm has its wire
-// vocabulary; see port.observe for the pull side's current state.) Owner
-// decision: RETAIN, do NOT rip. A business consumer is imminent (the moment an
-// agent/monitor integrates it will need actor-source obs), and completing it is
-// a pure-additive wire arm. So this is a DELIBERATELY-PENDING skeleton on an
-// explicit keep decision, NOT an oversight — future audits should treat it as
-// settled. The substrate-source axis (Stat/WatchDown/OnDown) IS wired
-// end-to-end and unaffected.
+// RETENTION: the ACTOR-source axis (ObsKind/ObsValue/Observer/Observe/
+// PublishObs/ObsWatcher/WatchObs/OnObs) is a deliberately-pending vertical
+// slice with no production producer/consumer yet; the ipc KindObs frame gives
+// the cross-wire arm its wire vocabulary already (see port.observe for the
+// pull side's current state), and completing this axis is a pure-additive
+// wire arm once a consumer needs it. The substrate-source axis (Stat/
+// WatchDown/OnDown) IS wired end-to-end and unaffected.
 
 // ObsKind is an opaque observation selector for ACTOR-source obs. The substrate
 // never interprets it — it routes the kind to the actor, which owns its own

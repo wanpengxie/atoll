@@ -10,12 +10,11 @@ import (
 )
 
 // daemonAssignment is one actor instance the server assigns a daemon to host for
-// a channel (daemon-composition spec §3). It carries only what the daemon needs
-// to BUILD the instance: id + class (the engine/tool class — engine=class per
-// agent-kind-vs-class) + the resolved config (global identity overlaid by
-// per-channel). Deliberately NO state/seed: a daemon-placed looper resumes from
-// its OWN local state slot (claude self-manages locally); the server holds no
-// state for daemon instances (server-side audit copy = v2).
+// a channel. It carries only what the daemon needs to BUILD the instance: id +
+// class (the engine/tool class) + the resolved config (global identity overlaid
+// by per-channel). Deliberately NO state/seed: a daemon-placed looper resumes
+// from its OWN local state slot (claude self-manages locally); the server holds
+// no state for daemon instances (a server-side audit copy is a future addition).
 type daemonAssignment struct {
 	InstanceID string          `json:"instance_id"`
 	Class      string          `json:"class"`
@@ -54,8 +53,8 @@ func (a *App) daemonComposition(chID channel.ID) ([]daemonAssignment, error) {
 	return out, rows.Err()
 }
 
-// handleComputePlan is the daemon's pull endpoint (daemon-composition spec §3):
-// authenticated by the same ?key=+?channel= as /compute, it returns the
+// handleComputePlan is the daemon's pull endpoint: authenticated by the same
+// ?key=+?channel= as /compute, it returns the
 // channel's placement='daemon' assignment so the daemon builds EXACTLY that set
 // (no blind-build of registry.Classes()). The link/attach protocol is untouched
 // — the daemon declares what it builds, as today. This pull avoids a server→

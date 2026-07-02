@@ -10,7 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
-// ErrOpNotInScope is the CATEGORY-ERROR class (拍点 8.2): a well-formed op that
+// ErrOpNotInScope is the CATEGORY-ERROR class: a well-formed op that
 // does not exist in this handle's locus (op=set on an actor-scoped handle — there
 // is no R to write, and that absence IS the scope law). It is a PROTOCOL error,
 // NOT a verdict: there is no possible world in which it is authorized — even the
@@ -46,8 +46,8 @@ func (h boundStateHandle) Invoke(ctx context.Context, op access.Operation, id re
 	return h.door.invokeActorScoped(ctx, h.owner, op, id, args)
 }
 
-// ingressState is the actor-scoped ingress — the four-step decision序, order
-// pinned (§3.2 tree). It mirrors the channel-scoped ingress's structural cluster
+// ingressState is the actor-scoped ingress — the four-step decision order,
+// order pinned. It mirrors the channel-scoped ingress's structural cluster
 // but diverges on set, which is a category error here rather than a grant-bearing
 // op:
 //
@@ -78,14 +78,13 @@ func ingressState(op access.Operation, id resource.ResourceID, args []byte, gran
 }
 
 // executeFailure maps an EXECUTE-stage failure to the right error channel —
-// shared by BOTH trees (owner 拍,2026-07-02 review #3): the caller's OWN
-// cancellation (the request ctx expired or was cancelled) is not a
-// resource-plane verdict — a driver_error there would blame the driver for the
-// caller's hand — so it surfaces as the Go error it is. Everything else stays a
-// driver_error verdict (executor-authored, reason.go), keeping the verdict
-// producible (opus-F4 discipline intact). Day-1 draws NO finer infra-vs-driver
-// line inside EXECUTE (on sqlite they are physically one failure); a finer
-// split waits for real pain.
+// shared by BOTH trees: the caller's OWN cancellation (the request ctx
+// expired or was cancelled) is not a resource-plane verdict — a driver_error
+// there would blame the driver for the caller's hand — so it surfaces as the
+// Go error it is. Everything else stays a driver_error verdict
+// (executor-authored, reason.go), keeping the verdict producible. Day-1 draws
+// NO finer infra-vs-driver line inside EXECUTE (on sqlite they are physically
+// one failure); a finer split waits for real pain.
 func executeFailure(ctx context.Context, err error) (Outcome, error) {
 	if ctx.Err() != nil {
 		return Outcome{}, err
@@ -105,14 +104,14 @@ func createVerdict(ctx context.Context, err error) (Outcome, error) {
 }
 
 // invokeActorScoped runs the collapsed decision tree for one welded owner — the
-// degenerate evaluation of the same tree invoke runs (proto-second-plane-spec
-// §2.4): the authorization judgment退化 to owner-only (guaranteed structurally by
-// the welded handle), so NO membership check, NO R union, NO DriverTable routing.
+// degenerate evaluation of the same tree invoke runs: the authorization
+// judgment degenerates to owner-only (guaranteed structurally by the welded
+// handle), so NO membership check, NO R union, NO DriverTable routing.
 // Each op's own row-hit IS its existence check — there is no Resolve step because
 // there is no meta.Kind to route.
 //
-// Two error channels stay distinct, exactly as invoke's (opus-F4 / codex): a Go
-// error is returned only for something reason.go has no verdict for; every failure
+// Two error channels stay distinct, exactly as invoke's: a Go error is
+// returned only for something reason.go has no verdict for; every failure
 // inside the EXECUTE pipeline is a verdict (driver_error). Folding an executor
 // failure into a Go error would leave driver_error unproducible.
 func (d *door) invokeActorScoped(ctx context.Context, owner actor.ActorID, op access.Operation, id resource.ResourceID, args []byte) (Outcome, error) {
@@ -132,7 +131,7 @@ func (d *door) invokeActorScoped(ctx context.Context, owner actor.ActorID, op ac
 			return Outcome{RejectReason: access.ResourceNotFound}, nil
 		}
 		// Found is the resolved-but-empty signal, uniform with the channel-scoped
-		// tree (opus-B2): an existing row with NULL bytes (val == nil) = Found:false;
+		// tree: an existing row with NULL bytes (val == nil) = Found:false;
 		// empty non-nil bytes are a value.
 		return Outcome{Value: val, Found: val != nil}, nil
 

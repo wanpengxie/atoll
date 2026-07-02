@@ -7,13 +7,13 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
-// Shape-pinning for the 期2 contract-first activation/placement symbols
+// Shape-pinning for the contract-first activation/placement symbols
 // (DesiredSource / DesiredMember / Lifecycle / Placement / HostRef). Their
-// consumers arrive with the eager reconcile ring (线B) and multi-home
-// placement; until then these COMPILE-TIME assertions are the only thing
-// preventing a refactor from silently deforming the pinned contract shapes
-// (timer-build-spec 引为 lazy 入口锚点; forward §15 账). A signature change
-// here must be a conscious contract revision, not a drive-by.
+// consumers arrive with the eager reconcile ring and multi-home placement;
+// until then these COMPILE-TIME assertions are the only thing preventing a
+// refactor from silently deforming the pinned contract shapes (Lifecycle
+// is also the anchor referenced by the lazy timer entry point). A signature
+// change here must be a conscious contract revision, not a drive-by.
 func TestActivationPlacementContractShapes(t *testing.T) {
 	// DesiredSource: Members(ctx) ([]DesiredMember, error).
 	var _ func(DesiredSource, context.Context) ([]DesiredMember, error) = DesiredSource.Members

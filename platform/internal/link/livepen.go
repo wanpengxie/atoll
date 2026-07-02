@@ -19,7 +19,7 @@ var ErrWriterNotLive = errors.New("link: writer no longer the live incarnation")
 // harness.Pen: a thin wrapper that, per write, first checks the host that the
 // welded incarnation is STILL live (by POINTER, ABA-safe; lock-free) and only
 // then forwards to the raw pen. It is the platform-assembly half of the
-// death-after-write收口 — the substrate (actorrt) owns liveness, the harness owns
+// death-after-write fence — the substrate (actorrt) owns liveness, the harness owns
 // the WHO weld + append, and this wrapper composes the two with no change to
 // either (bi-layer: actorrt never imports harness; livePen lives here in link,
 // beside emitSink/RemoteWriter, so the port path can construct it too).
@@ -39,7 +39,7 @@ type livePen struct {
 // NewLivePen wraps raw in the WHEN-validity membrane welded to inc, gated on host.
 // Participant cells (agent/tool/human) are born with this; substrate anchors
 // (the system/sysactor pen, the daemon relay pen) deliberately use the raw pen
-// (no incarnation gate) — see §3.5 anchor-not-wrapped.
+// with no incarnation gate.
 func NewLivePen(raw harness.Pen, inc actorrt.Incarnation, host *actorrt.Runtime) harness.Pen {
 	return livePen{raw: raw, inc: inc, host: host}
 }

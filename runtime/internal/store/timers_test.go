@@ -4,10 +4,10 @@ package store
 // timers table realizer, timerspec.TimerStore) and the deregister cascade
 // (clearTimersTx hung on both Deregister and applyMemberRemoveTx, parallel to
 // clearActorScopedTx). timerStore is unexported and reachable only from
-// inside the package — the same §4.5 / 红线❻ confinement the rest of the
-// store relies on (a raw TimerStore reachable downstream is a delayed
-// forged-author write path around the pen). They run over a real channel
-// sqlite (ChannelLocalDDL), no fakes.
+// inside the package — the same confinement the rest of the store relies on
+// (a raw TimerStore reachable downstream is a delayed forged-author write
+// path around the pen). They run over a real channel sqlite
+// (ChannelLocalDDL), no fakes.
 
 import (
 	"context"

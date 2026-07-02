@@ -2,10 +2,10 @@ package message
 
 // Kind is the v4 message ADT classifier (event / request / response).
 //
-// Once a message is written, kind is immutable (L0 §2.2 — "kind 写入定死").
+// Once a message is written, kind is immutable.
 type Kind string
 
-// Kind enum — closed set per L0 §3.1 invariant I7.
+// Kind enum — closed set.
 const (
 	KindEvent    Kind = "event"
 	KindRequest  Kind = "request"
@@ -37,8 +37,6 @@ func ParseKind(raw string) (Kind, bool) {
 // rule-managed ACL property of truth — the substrate's to enforce — not opaque
 // data an actor interprets. Once written, visibility is immutable.
 //
-// Authoritative spec: proto-layer0 §2.4 (round-3 cluster F).
-//
 // Declared intent (what each value MEANS):
 //   - public  — intended for every channel member.
 //   - private — intended only for the sender + actors in audience.
@@ -46,19 +44,18 @@ func ParseKind(raw string) (Kind, bool) {
 //     progress bubbles, placement notices, bootstrap events), intended to be
 //     suppressed from the default UI view (still persisted as audit trail).
 //
-// NB (C5, 2026-06-11): enforcement is NOT yet wired. The read seam (storespec
-// queries / view fanout) does NOT filter on visibility today — every committed
-// message is currently readable by any reader regardless of this field. So
-// visibility is presently ADVISORY: the value is recorded faithfully, but
-// "private = only sender+audience may see" / "system = suppressed from view" are
-// the INTENDED semantics, not current behaviour. Read-side enforcement (a
-// query-see chokepoint filtering by visibility ∧ audience) is痛感-driven
-// additive — the field is the correct, already-placed data half; the filter is
-// the收口 half, added when a real privacy / multi-tenant driver lands. Do NOT
-// claim enforcement in code or UX until that seam exists.
+// NB: enforcement is NOT yet wired. The read seam (storespec queries / view
+// fanout) does NOT filter on visibility today — every committed message is
+// currently readable by any reader regardless of this field. So visibility is
+// presently ADVISORY: the value is recorded faithfully, but "private = only
+// sender+audience may see" / "system = suppressed from view" are the INTENDED
+// semantics, not current behaviour. Read-side enforcement (a query-see
+// chokepoint filtering by visibility ∧ audience) is deferred and will be added
+// additively when a real privacy / multi-tenant driver lands. Do NOT claim
+// enforcement in code or UX until that seam exists.
 type Visibility string
 
-// Visibility enum — closed set per proto-layer0 §2.4.
+// Visibility enum — closed set.
 const (
 	VisibilityPublic  Visibility = "public"
 	VisibilityPrivate Visibility = "private"

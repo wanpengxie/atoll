@@ -256,7 +256,7 @@ func (f watcherFunc) OnDown(ctx context.Context, id actor.ActorID, cause error) 
 // TestEndToEnd_AttachDispatchEmit drives a full home↔daemon link: a daemon
 // attaches one actor, the home dispatches a request down the actor's stream into
 // the daemon cell, and the cell's emit flows UP that same stream to the home
-// write门. Native ipc over a mux stream, zero translation.
+// write gate. Native ipc over a mux stream, zero translation.
 func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
@@ -302,7 +302,7 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 		t.Fatalf("home deliver: %v", err)
 	}
 
-	// The cell's response flows UP to the home write门.
+	// The cell's response flows UP to the home write gate.
 	deadline := time.Now().Add(10 * time.Second)
 	for {
 		got := r.minter.all()
@@ -433,7 +433,8 @@ func TestEndToEnd_CellDeath_ClosesStreamToOnDown(t *testing.T) {
 // TestLease_NoTraffic_ExpiresToDown proves the home's lease judges
 // liveness: with the daemon NOT pinging (Start never called) and a short TTL,
 // the home tears the link down on TTL — the actor stream EOFs and the home
-// publishes down (the正面观察 a frozen daemon's TCP never produces).
+// publishes down (the lease timeout stands in for the positive signal a
+// frozen daemon's TCP connection never produces).
 func TestLease_NoTraffic_ExpiresToDown(t *testing.T) {
 	r := newHomeRig(t, 20*time.Millisecond, 60*time.Millisecond)
 
@@ -541,7 +542,7 @@ func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 	}
 
 	// No truth terminal: cancel is a best-effort interrupt, not a write. The home
-	// write门 recorded nothing (the caller's closure owns the terminal).
+	// write gate recorded nothing (the caller's closure owns the terminal).
 	if got := r.minter.all(); len(got) != 0 {
 		t.Fatalf("cancel wrote truth terminal(s) %+v, want none", got)
 	}

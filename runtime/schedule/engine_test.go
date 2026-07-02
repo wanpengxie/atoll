@@ -71,7 +71,7 @@ func TestNewSucceedsWithNilLogger(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Schedule validation matrix (§3.2 钉5 / 切片9).
+// Schedule validation matrix.
 // ---------------------------------------------------------------------
 
 func TestScheduleValidationMatrix(t *testing.T) {
@@ -117,7 +117,7 @@ func TestScheduleValidationMatrix(t *testing.T) {
 
 // TestScheduleIncarnationNoLiveEmbodiment: the attach seam's structural
 // bottom — an author with no live embodiment has nothing to weld an
-// incarnation-bind entry to (拍点 8.4).
+// incarnation-bind entry to.
 func TestScheduleIncarnationNoLiveEmbodiment(t *testing.T) {
 	rt := newTestRuntime(t)
 	minter, engine, err := New(Deps{
@@ -138,7 +138,8 @@ func TestScheduleIncarnationNoLiveEmbodiment(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Two-family routing (§1.3 两个家) + basic fire field-table assertions.
+// Two-family routing (identity vs. incarnation) + basic fire field-table
+// assertions.
 // ---------------------------------------------------------------------
 
 func TestBindIdentityRoutesToStoreAndFires(t *testing.T) {
@@ -182,7 +183,7 @@ func TestBindIdentityRoutesToStoreAndFires(t *testing.T) {
 		t.Fatalf("fire env.ID = %q, want %q", call.env.ID, wantID)
 	}
 	if call.env.Kind != message.KindEvent {
-		t.Fatalf("fire env.Kind = %q, want event (拍点 8.3)", call.env.Kind)
+		t.Fatalf("fire env.Kind = %q, want event", call.env.Kind)
 	}
 	if len(call.env.Audience) != 1 || call.env.Audience[0] != "author-1" {
 		t.Fatalf("fire env.Audience = %v, want [author-1] (self-targeted)", call.env.Audience)
@@ -194,7 +195,7 @@ func TestBindIdentityRoutesToStoreAndFires(t *testing.T) {
 		t.Fatalf("fire env.Sender/ChannelID pre-filled by the engine: %+v / %q, want empty (pen welds them)", call.env.Sender, call.env.ChannelID)
 	}
 	if string(call.env.CorrelationID) != "corr-1" {
-		t.Fatalf("fire env.CorrelationID = %q, want corr-1 (§1.4 继承)", call.env.CorrelationID)
+		t.Fatalf("fire env.CorrelationID = %q, want corr-1 (inherited from the schedule request)", call.env.CorrelationID)
 	}
 	if call.env.Type != "demo.tick" {
 		t.Fatalf("fire env.Type = %q, want demo.tick", call.env.Type)
@@ -230,8 +231,8 @@ func TestBindIncarnationRoutesToMemoryOnly(t *testing.T) {
 		t.Fatalf("Schedule: %v", err)
 	}
 
-	// Never a durable row — the whole point of v1.1's 历史校准 (structure IS
-	// the bind: incarnation-bind timers are engine memory, full stop).
+	// Never a durable row — structure IS the bind: incarnation-bind timers
+	// are engine memory, full stop.
 	if store.rowCount() != 0 {
 		t.Fatalf("bind=incarnation created %d durable rows, want 0 (never persisted)", store.rowCount())
 	}
@@ -246,7 +247,7 @@ func TestBindIncarnationRoutesToMemoryOnly(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Incarnation death drop — pointer-level ABA guard (§5.3, 切片3).
+// Incarnation death drop — pointer-level ABA guard.
 // ---------------------------------------------------------------------
 
 func TestIncarnationBindDropsOnDeathEvenWithLiveSuccessor(t *testing.T) {
@@ -290,7 +291,7 @@ func TestIncarnationBindDropsOnDeathEvenWithLiveSuccessor(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// FireSink tri-state contract (§3.2 钉2, 切片5).
+// FireSink tri-state contract.
 // ---------------------------------------------------------------------
 
 func TestFireTriStateOutcomes(t *testing.T) {
@@ -364,8 +365,8 @@ func mustNewEngine(t *testing.T, store timerspec.TimerStore, sink FireSink, revi
 }
 
 // scheduleIdentityDue schedules an identity-bind timer already due (past
-// FireAt is legal, §3.2 钉5) directly through the engine (bypassing a Minter
-// — these tri-state tests only care about the fire path).
+// FireAt is legal) directly through the engine (bypassing a Minter — these
+// tri-state tests only care about the fire path).
 func scheduleIdentityDue(t *testing.T, engine *Engine, author actor.ActorID, clock *fakeClock) TimerID {
 	t.Helper()
 	id, err := engine.schedule(context.Background(), author, ScheduleReq{
@@ -378,7 +379,7 @@ func scheduleIdentityDue(t *testing.T, engine *Engine, author actor.ActorID, clo
 }
 
 // ---------------------------------------------------------------------
-// Revive seam (拍点 8.2, 切片8).
+// Revive seam.
 // ---------------------------------------------------------------------
 
 func TestReviveGatesIdentityFire(t *testing.T) {
@@ -401,7 +402,8 @@ func TestReviveGatesIdentityFire(t *testing.T) {
 		t.Fatalf("Schedule: %v", err)
 	}
 
-	// EnsureLive fails: fire never attempted, row stays (顺序焊死 EnsureLive→append).
+	// EnsureLive fails: fire never attempted, row stays (EnsureLive must run
+	// before append, in that fixed order).
 	waitFor(t, 2*time.Second, func() bool { return revive.callCount() >= 1 })
 	time.Sleep(20 * time.Millisecond)
 	if sink.callCount() != 0 {
@@ -422,7 +424,7 @@ func TestReviveGatesIdentityFire(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Cancel (§3.2 钉6, 切片6).
+// Cancel.
 // ---------------------------------------------------------------------
 
 func TestCancelTriState(t *testing.T) {
@@ -499,7 +501,7 @@ func TestCancelTriState(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// TimerID never reused (v1.2 blocker, 切片12).
+// TimerID never reused.
 // ---------------------------------------------------------------------
 
 func TestTimerIDNeverReused(t *testing.T) {
@@ -545,7 +547,7 @@ func TestTimerIDNeverReused(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Backoff, not a busy loop (v1.2 opus-major, 切片13).
+// Backoff, not a busy loop.
 // ---------------------------------------------------------------------
 
 func TestBackoffNotBusyLoop(t *testing.T) {
@@ -564,7 +566,7 @@ func TestBackoffNotBusyLoop(t *testing.T) {
 	}
 
 	// A freshly-Scheduled already-due item races its OWN wake token against
-	// the run loop's discovery of it: the coalesced wake channel (§3.2 钉块)
+	// the run loop's discovery of it: the coalesced wake channel
 	// may still hold that one token by the time the first failed attempt
 	// arms its backoff alarm, letting it slip through once more before the
 	// backoff genuinely holds — a bounded, single-token artifact, never an
@@ -595,7 +597,7 @@ func TestBackoffNotBusyLoop(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// -race: concurrent Schedule/Cancel against a ticking run loop (切片11).
+// -race: concurrent Schedule/Cancel against a ticking run loop.
 // ---------------------------------------------------------------------
 
 func TestConcurrentScheduleCancelRace(t *testing.T) {
@@ -637,8 +639,8 @@ func TestConcurrentScheduleCancelRace(t *testing.T) {
 	<-done
 }
 
-// TestNextFireAtStoreFaultDegradesToBackoffRetry (code review 收口, engine.go
-// nextFireAt): a transient NextFireAt store fault must degrade to a
+// TestNextFireAtStoreFaultDegradesToBackoffRetry (engine.go nextFireAt): a
+// transient NextFireAt store fault must degrade to a
 // backoff-PACED retry, never a bare wake-only wait — with an empty mem family
 // the old fold-into-"nothing due" behaviour would park every durable fire on
 // a quiet channel until somebody happened to Schedule again.
@@ -683,11 +685,11 @@ func TestNextFireAtStoreFaultDegradesToBackoffRetry(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// Reviver two-class error contract (FireSink tri-state 的镜像).
+// Reviver two-class error contract (mirrors the FireSink tri-state).
 // ---------------------------------------------------------------------
 
 // ReviveRejected = permanently unrevivable author → the row is a poison row,
-// disposed per 拍点 8.8 (deleted, never fired, loud log) — left in place it
+// disposed (deleted, never fired, loud log) — left in place it
 // would retry hot forever and starve later-due rows once such rows fill a
 // due page. A plain error stays transient: the row survives for the next tick.
 func TestReviveTwoClassOutcomes(t *testing.T) {

@@ -12,11 +12,11 @@ import (
 
 func init() { registry.Register("device", construct) }
 
-// construct: the generic device actor. This is the one TRUE essence-singleton
-// (actor-instance-model §5.1): the instance's identity IS the external resource
-// (the machine), so the id is DERIVED from the device identity, not taken from
-// the spec — a second instance of the same device is incoherent. ctx.DeviceName
-// is the identity; spec.ID is ignored.
+// construct: the generic device actor. This is a true essence-singleton:
+// the instance's identity IS the external resource (the machine), so the id
+// is DERIVED from the device identity, not taken from the spec — a second
+// instance of the same device is incoherent. ctx.DeviceName is the identity;
+// spec.ID is ignored.
 func construct(_ registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
 	if ctx.DeviceName == "" {
 		return platform.ActorDecl{}, errors.New("device: empty device name")

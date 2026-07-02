@@ -220,7 +220,7 @@ func TestStatReportsClockStampedStartedAt(t *testing.T) {
 	}
 }
 
-// TestCurrentIncarnationLiveHandle: the schedule engine's attach seam (8.4) —
+// TestCurrentIncarnationLiveHandle: the schedule engine's attach seam —
 // a live embodiment's CurrentIncarnation returns a handle whose IsLive reads
 // true, the same addressing authority Deliver/Stat consult.
 func TestCurrentIncarnationLiveHandle(t *testing.T) {
@@ -243,7 +243,7 @@ func TestCurrentIncarnationLiveHandle(t *testing.T) {
 
 // TestCurrentIncarnationAbsent: no embodiment hosted for id → ok=false, no
 // handle fabricated — mirrors Stat's present=false discipline (the schedule
-// engine's ErrBadSchedule attach-failure path, 8.4/§4).
+// engine's ErrBadSchedule attach-failure path).
 func TestCurrentIncarnationAbsent(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
@@ -259,7 +259,8 @@ func TestCurrentIncarnationAbsent(t *testing.T) {
 // captured BEFORE the replace reads IsLive=false afterward — the ABA guard
 // (pointer-identity discipline) extended to the schedule engine's attach
 // seam: a same-id successor taking over never revives a predecessor's welded
-// incarnation-bind timer (timer-build-spec.md §4 "同 id 后继在场也不救前任").
+// incarnation-bind timer — a same-id successor being present never rescues
+// its predecessor.
 func TestCurrentIncarnationReplaceIsPointerLevel(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})

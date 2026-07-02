@@ -8,7 +8,7 @@ import (
 )
 
 // Actor is the minimal contract the substrate requires of an actor
-// implementation (actor-runtime-redesign.md §1.2). The runtime guarantees
+// implementation. The runtime guarantees
 // Receive (and the optional Start/Stop lifecycle hooks) are invoked serially by
 // the cell's single goroutine, so WORK state needs no locks/atomics — the
 // mailbox IS the serialization. The actor entry surface is work (Receive) +

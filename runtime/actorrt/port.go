@@ -27,7 +27,7 @@ import (
 // local cell's author is stamped by the basis; the wire's self-reported sender
 // carries no authority. The incarnation (not just the bare id) is passed so the
 // home-side sink can gate the emit on this port still being the live embodiment
-// (the port death-write门, §3.C1): a livePen welded to inc fences an in-flight
+// (the port death-write gate): a livePen welded to inc fences an in-flight
 // emit from a port already replaced/torn down, exactly as the cell path fences a
 // leaked pen — the same WHEN-validity membrane on both transports.
 //
@@ -88,7 +88,7 @@ type port struct {
 
 	// live is the per-incarnation WHEN-validity atomic (embodiment contract), set
 	// true at Attach go-live and false on teardown. The home-side port death-write
-	// gate consults it via §3.C1: a livePen minted for a remote actor fences its
+	// gate consults it: a livePen minted for a remote actor fences its
 	// welded capability through runtime IsLive, which reads this field lock-free
 	// (isLive) so a dangling emit from a torn-down port is rejected.
 	live atomic.Bool
@@ -190,7 +190,7 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 // goroutine then drains into the buffered channel, leaking nothing. So the
 // substrate still self-guards the bound (the close is the substrate's, just at
 // newPort), with one coherent owner instead of two. A nil hsCtx degrades to an
-// unbounded read (parity with the pre-F8 contract for callers that opt out).
+// unbounded read (parity with the previous contract for callers that opt out).
 func readHandshakeBounded(hsCtx context.Context, codec *ipc.Codec) (ipc.Frame, error) {
 	if hsCtx == nil {
 		return codec.Read()
@@ -297,7 +297,7 @@ func (p *port) writeLoop() {
 			// materialise receiver_unavailable terminals mid-teardown for
 			// every port-hosted actor while cell-hosted actors (whose ctx arm
 			// returns with deathCause=nil) stay silent — the same event
-			// splitting into two truth outcomes by transport, the F5-class
+			// splitting into two truth outcomes by transport, the classic
 			// "two paths" disease. Teardown owes truth nothing: closure
 			// correctness belongs to the level-scan reconciler on the next
 			// open, which reads these ports as absent either way. An
@@ -420,7 +420,7 @@ func (p *port) die(cause error) {
 }
 
 // initiateStop implements embodiment: the non-blocking, idempotent SIGNAL half of
-// teardown (§3.1a) — port already has exactly this shape in die(): it never
+// teardown — port already has exactly this shape in die(): it never
 // joins, it self-evicts via onExit, and cause==nil already skips the onDown
 // death edge (the same "clean stop, no closure obligation" semantics stop()
 // wants). A dying parent's cascade (removeIf) calls this to signal a forked

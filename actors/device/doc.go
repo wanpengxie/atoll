@@ -4,8 +4,7 @@
 // and device.file.read/write/edit (file manipulation) — all confined to a
 // per-channel workspace directory. Everything else (grep, ls, find, git, …)
 // goes through device.exec: a dedicated type exists only where the shell
-// round-trip is unreliable for a model (write/edit) — see
-// .dalek/pm/device-tool.md §1.
+// round-trip is unreliable for a model (write/edit).
 //
 // The actor id is device:<name> — one per physical device, so device identity
 // rides in the id. Credentials live in the daemon process (env/keychain),

@@ -9,12 +9,11 @@
 // only an opaque Pen (welded-identity write capability) + a Minter (mint machine,
 // platform-only) — the bare chain never leaves the package.
 //
-// Authoritative spec:
+// Contracts:
 //
-//   - L1 §10.2  Harness 校验链
-//   - L1 §10.2.1 Authoritative pseudocode
-//   - L1 §10.3.1 Closed harness_reject_reason set
-//   - L2 §1.4.5  Engine append ACL (harness is the only principal)
+//   - The harness validation chain, with authoritative pseudocode.
+//   - A closed set of harness_reject_reason values.
+//   - Engine append ACL: the harness is the only principal allowed to append.
 //
 // **Not in scope of this package**:
 //

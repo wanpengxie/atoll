@@ -15,8 +15,8 @@ import (
 	"github.com/wanpengxie/atoll/registry"
 )
 
-// TestDaemonComposition_E2E is the daemon-composition acceptance (spec §3, goal
-// D5 / C1): it runs the FULL daemon flow against a real server —
+// TestDaemonComposition_E2E is the daemon-composition acceptance test: it runs
+// the FULL daemon flow against a real server —
 //
 //	introduce claude (placement='daemon')
 //	  → PULL the assignment from GET /compute/plan         (what daemon does 1st)

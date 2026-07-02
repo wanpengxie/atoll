@@ -1,6 +1,6 @@
 package actor
 
-// Kind is the actor physical-position classifier (L0 §2.3 normative):
+// Kind is the actor physical-position classifier:
 // the 4-value closed set human / agent / system / tool.
 type Kind string
 

@@ -30,7 +30,7 @@ type ResourceMeta struct {
 
 // Registry is the R (authorization relation) + resource-existence contract —
 // the object-lifecycle truth the door consults and mutates. One per channel
-// (access is channel-封). Implemented by runtime/internal/store.
+// (access is channel-scoped). Implemented by runtime/internal/store.
 type Registry interface {
 	// Resolve reports whether id exists and its meta. This is the door's
 	// authoritative RESOLVE stage; it never asks the driver.

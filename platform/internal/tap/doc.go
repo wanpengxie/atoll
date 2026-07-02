@@ -5,7 +5,7 @@
 // the cursor read, never in the signal — the signal is lossy-by-design, so a
 // coalesced or dropped wake costs nothing (the next read still sees every new
 // seq). This is the one CDC-style seam that serves all downstreams: cell
-// delivery, client push, and (future,痛感驱动) projection/bridge/mobile taps.
+// delivery, client push, and (future, need-driven) projection/bridge/mobile taps.
 //
 // tap is pure mechanism with zero business semantics: it moves rows by seq, it
 // does not read envelope/type/kind. Its vocabulary is seq / cursor / signal.

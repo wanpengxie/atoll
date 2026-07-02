@@ -4,17 +4,15 @@ import "github.com/wanpengxie/atoll/runtime/storespec"
 
 // HarnessRejectReason is the closed set of reasons the 9-step Message-Write
 // Harness can synchronously reject a write with. This is the WRITE ENGINE's
-// errno vocabulary (Erlang/Unix prior-art, kernel-construction-spec §0.1):
-// it co-evolves with the harness steps, so it lives with the engine, not in
-// the kernel ADT layer.
+// errno vocabulary (Erlang/Unix prior-art): it co-evolves with the harness
+// steps, so it lives with the engine, not in the kernel ADT layer.
 //
-// v2 drops several v1 reasons because an errno vocabulary is exactly the set
-// of reasons a producer can stamp, so a word with zero producers is not in it:
-// the channel-write fence is obsolete under a single harness writer
-// (runtime-construction-spec §4.1); the visibility-scoped audience wildcard
-// was removed; substrate went type-agnostic (no type→handler routing left to
-// mismatch); and the sender door's registry retirement later dropped
-// harness_sender_deregistered the same way — leaving 27.
+// An errno vocabulary is exactly the set of reasons a producer can stamp,
+// so a word with zero producers is not in it: the channel-write fence is
+// obsolete under a single harness writer; the visibility-scoped audience
+// wildcard was removed; substrate went type-agnostic (no type→handler
+// routing left to mismatch); and the sender door's registry retirement
+// later dropped harness_sender_deregistered the same way — leaving 27.
 //
 // The two store-produced members (id-duplicate / terminal-duplicate) are
 // lifted from storespec's AppendReject* consts — the contract leaf is their
@@ -34,7 +32,7 @@ const (
 	// Pen identity injection (pre-chain, boundPen.Write) — a writer hand-filled
 	// env.sender.id / env.channel_id, which are substrate-injected (welded by the
 	// pen), not caller-settable. Fail-fast rather than silently overwriting the
-	// misuse (feedback_agent_consumer_structural_boundary).
+	// misuse.
 	HarnessIdentityNotCallerSettable HarnessRejectReason = "harness_identity_not_caller_settable"
 
 	// Step 0 — Caller Principal Validation
@@ -49,8 +47,8 @@ const (
 	HarnessAudienceWildcardForbidden HarnessRejectReason = "harness_audience_wildcard_forbidden"
 	HarnessResponseMissingParent     HarnessRejectReason = "harness_response_missing_parent"
 
-	// (harness_envelope_unknown_field is gone from this vocabulary: the L0
-	// §7.3 unknown-top-level-field fail-closed reject now rides the Envelope
+	// (harness_envelope_unknown_field is gone from this vocabulary: the
+	// unknown-top-level-field fail-closed reject now rides the Envelope
 	// type — message.Envelope.UnmarshalJSON returns message.UnknownFieldError
 	// at decode, before a pen is ever involved.)
 

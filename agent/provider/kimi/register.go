@@ -17,13 +17,13 @@ import (
 // ("go-kimi", kind=agent), registered directly into the one registry via this
 // package's init() (peer to claude and the tool classes; there is no umbrella
 // "agent" class). Instantiated under whatever id the spec gives (agent:boost,
-// agent:research, …). The id is NOT baked here (actor-instance-model §7):
-// default_agent is a name-agnostic pointer, the instance is just another actor.
-// The same class yields N agents.
+// agent:research, …). The id is NOT baked here: default_agent is a
+// name-agnostic pointer, the instance is just another actor. The same class
+// yields N agents.
 //
 // Situation is derived from the host context: a daemon carries a workspace
 // (exclusive device), a server-embedded build does not — WorkspaceDir presence
-// is the discriminator (default-agent-deployment §1.2).
+// is the discriminator.
 //
 // Config layers env (platform defaults / the server fallback's key) under the
 // per-instance spec.Config overlay (channel_actors.config_json — the looper
@@ -47,9 +47,9 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("config: %w", err)
 	}
-	// Durable resume seam (agent-spec §三): a platform-managed session dir keeps
-	// the looper's opaque session across restarts; the state slot carries the
-	// auditable resume pointer (seed read at boot, store written by the looper).
+	// Durable resume seam: a platform-managed session dir keeps the looper's
+	// opaque session across restarts; the state slot carries the auditable
+	// resume pointer (seed read at boot, store written by the looper).
 	if ctx.State.Dir != "" {
 		cfg.WorkDir = ctx.State.Dir
 	}

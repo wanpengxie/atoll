@@ -10,13 +10,13 @@ import (
 )
 
 // timerStore implements timerspec.TimerStore over the channel-local `timers`
-// table — the durable IDENTITY-level half of the time axis (schema.go §6):
-// control-plane pending intent, keyed by a durable name (author identity),
-// NEVER truth. Bound to one channel database, the same locus discipline every
-// other channel-local store follows. It trusts its caller (the schedule
-// engine welds author before Insert; store-not-validate, mirrors
-// resourceRegistry/stateStore) and is itself CONFINED to package store — the
-// runtime tree assembles it behind ChannelStores' unexported field (红线❻).
+// table — the durable identity-level half of the time axis: control-plane
+// pending intent, keyed by a durable name (author identity), NEVER truth.
+// Bound to one channel database, the same locus discipline every other
+// channel-local store follows. It trusts its caller (the schedule engine
+// welds author before Insert; store-not-validate, mirrors
+// resourceRegistry/stateStore) and is itself confined to package store — the
+// runtime tree assembles it behind ChannelStores' unexported field.
 type timerStore struct {
 	db *sql.DB
 }
@@ -126,18 +126,18 @@ func (s *timerStore) CancelOwned(ctx context.Context, id timerspec.TimerID, auth
 }
 
 // clearTimersTx cascades the identity-level pending-timer locus: it deletes
-// every timers row owned by author, inside the SAME transaction that
-// deregisters the actor (both dereg entry points in actors.go hang it there,
-// §10.12 row 6). It is a PARALLEL sibling of clearActorScopedTx (state.go),
-// never merged into it — one locus, one function (v1.2 opus-nit) — so a
-// future third scoped locus finds its own cascade in its own file.
-// Idempotent: a re-run over an already-cleared author deletes zero rows.
+// every timers row owned by author, inside the same transaction that
+// deregisters the actor (both dereg entry points in actors.go hang it
+// there). It is a parallel sibling of clearActorScopedTx (state.go), never
+// merged into it — one locus, one function — so a future third scoped locus
+// finds its own cascade in its own file. Idempotent: a re-run over an
+// already-cleared author deletes zero rows.
 //
-// Incarnation-bind timers need NO hook here — they are not rows (they live in
-// the schedule engine's in-memory due-set, welded to the live embodiment,
-// v1.1 历史校准). Deregister implies the embodiment already died, so those
-// entries are reaped lazily at fire time via IsLive (§1.3) — zero coupling to
-// this cascade.
+// Incarnation-bind timers need NO hook here — they are not rows (they live
+// in the schedule engine's in-memory due-set, welded to the live
+// embodiment). Deregister implies the embodiment already died, so those
+// entries are reaped lazily at fire time via IsLive — zero coupling to this
+// cascade.
 func clearTimersTx(ctx context.Context, tx *sql.Tx, author actor.ActorID) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM timers WHERE author_id=?`, string(author)); err != nil {
 		return fmt.Errorf("store: timers cascade clear %q: %w", author, err)

@@ -29,14 +29,14 @@ type ChannelStores struct {
 	// this and speaks only Invoke, exactly as it speaks harness.Pen for plane-1.
 	Access accessdoor.AccessMinter
 
-	// timers is the identity-level durable pending-timer store (timer-build-
-	// spec.md §3.3). Unexported for the same reason Access is public but its
-	// R/byte collaborators are not: a raw TimerStore reachable downstream is
-	// a delayed forged-author write path around the pen (红线❻). Its ONE
-	// intended reader is OpenScheduler (scheduleopen.go, §3.4), which lives
-	// in this same package — no minter-shaped collaborator sits between it
-	// and this field yet because the schedule engine (unlike accessdoor) is
-	// the reader, not a caller-facing decision tree.
+	// timers is the identity-level durable pending-timer store. Unexported
+	// for the same reason Access is public but its R/byte collaborators are
+	// not: a raw TimerStore reachable downstream is a delayed forged-author
+	// write path around the pen. Its ONE intended reader is OpenScheduler
+	// (scheduleopen.go), which lives in this same package — no minter-shaped
+	// collaborator sits between it and this field yet because the schedule
+	// engine (unlike accessdoor) is the reader, not a caller-facing decision
+	// tree.
 	timers timerspec.TimerStore
 
 	closer func() error

@@ -6,7 +6,8 @@ import "encoding/json"
 // volatile self-snapshot), as opposed to actor.describe's static capability
 // surface. The request payload is a StatusRequest (currently empty: the full
 // self-snapshot is the only form). An actor answers with a Status whose snapshot
-// map it fills itself; introspect守结构不守词汇 — it never interprets the keys.
+// map it fills itself; introspect owns structure, not vocabulary — it never
+// interprets the keys.
 //
 // This is the additive status self-answer foreshadowed in introspect.go: it
 // exists because a concrete actor (the device adapters) has non-trivial live
@@ -23,10 +24,10 @@ type StatusRequest struct{}
 // Status is the actor.status answer: the actor's identity plus an OPAQUE live
 // snapshot. The snapshot map is the actor's own vocabulary (e.g.
 // {"device_online": true}) — introspect owns the envelope (actor_id + the
-// snapshot slot) but never the keys inside it, exactly as the substrate守结构
-// 不守词汇. The JSON key is "status_snapshot" (not "status") so it never
-// collides with the behavior-layer terminal `status` field that the response
-// wrapper merges in alongside it.
+// snapshot slot) but never the keys inside it, exactly as the substrate owns
+// structure, not vocabulary. The JSON key is "status_snapshot" (not "status")
+// so it never collides with the behavior-layer terminal `status` field that
+// the response wrapper merges in alongside it.
 type Status struct {
 	// ActorID is the actor's registry id (e.g. "tool:xhs").
 	ActorID string `json:"actor_id"`

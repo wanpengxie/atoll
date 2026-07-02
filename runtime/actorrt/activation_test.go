@@ -7,7 +7,7 @@ import (
 )
 
 // TestLiveIDs_MatchesCurrentlySpawnedSet: LiveIDs is the map-key snapshot of
-// r.embodiments (§3.4) — spawning two and despawning one must leave exactly the
+// r.embodiments — spawning two and despawning one must leave exactly the
 // one still-live id in the result.
 func TestLiveIDs_MatchesCurrentlySpawnedSet(t *testing.T) {
 	t.Parallel()
@@ -54,7 +54,7 @@ func TestSpawnIfAbsent_EmptyIDSucceeds(t *testing.T) {
 }
 
 // TestSpawnIfAbsent_OccupiedIDNeverReplaces: SpawnIfAbsent is a CAS mint, NOT
-// Spawn's replace semantics (§3.4) — on an already-occupied id it must return
+// Spawn's replace semantics — on an already-occupied id it must return
 // ok=false, discard the freshly-built shell WITHOUT ever calling c.start() on
 // it (the discarded actor's startedCh never fires), and leave the
 // pre-existing embodiment completely untouched (still the SAME incarnation,

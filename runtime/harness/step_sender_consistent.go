@@ -9,19 +9,18 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// stepSenderConsistent implements the Sender Validate step (StepSenderConsistent
-// in the impl ordering; proto-layer1 §2.6 Sender Validate):
+// stepSenderConsistent implements the Sender Validate step:
 //
 //   - envelope.sender.id == caller.actor_id (sender_mismatch otherwise)
 //   - envelope.sender.kind matches the pen-welded caller.kind; caller-provided
 //     kind that conflicts → sender_kind_mismatch. Always OVERWRITE the envelope
 //     with the welded truth so downstream callers see the canonical value
-//     (forced-overwrite per L1 §10.2.1).
+//     (forced overwrite).
 //
-// There is deliberately NO actor_registry lookup here (incarnation-dynamics
-// build-spec §3.2 / §1.4): identity is pen-welded (sender.id above) and
-// liveness is gated one layer up by livePen.IsLive() (platform/internal/
-// link/livepen.go) on every write, before this chain even runs. A registry
+// There is deliberately NO actor_registry lookup here: identity is pen-welded
+// (sender.id above) and liveness is gated one layer up by livePen.IsLive()
+// (platform/internal/link/livepen.go) on every write, before this chain even
+// runs. A registry
 // name-list check here would be a second, redundant authority over the same
 // "is this a real, live writer" question — this step trusts the pen.
 type stepSenderConsistent struct {
@@ -44,9 +43,9 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 		}, nil
 	}
 	// With the boundPen welding the caller's actorID into env.Sender.ID before
-	// the chain runs, this comparison is effectively tautological — but it is retained as
-	// the chain's own self-consistency assertion (the chain does not depend on
-	// the pen always welding; it self-validates completely).
+	// the chain runs, this comparison is effectively tautological — but it is
+	// retained as the chain's own self-consistency assertion (the chain does
+	// not depend on the pen always welding; it self-validates completely).
 	if env.Sender.ID != c.actorID {
 		return outcome{
 			RejectReason: HarnessSenderMismatch,
@@ -55,9 +54,8 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 		}, nil
 	}
 
-	// Welded-kind closed-set gate (incarnation-dynamics-build-spec §3.2 point 5,
-	// the "mint 前统一收口点"): with the registry lookup gone, this is the ONE
-	// chokepoint every pen flows through before its kind is stamped into a
+	// Welded-kind closed-set gate: with the registry lookup gone, this is the
+	// ONE chokepoint every pen flows through before its kind is stamped into a
 	// durable row — the wire path is already guarded at attach (accept.go's
 	// ParseKind over declarations), but in-process pens (Home.Spawn's kind
 	// param, a registry Constructor's decl.Kind) reach here unvalidated, and
@@ -73,8 +71,8 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 	providedKind := env.Sender.Kind
 	if providedKind != "" && providedKind != c.kind {
 		// A caller-provided kind that contradicts the pen-welded truth is a
-		// misreport of identity (A3 真实). The weld is the single identity
-		// truth; reject hard. There is no "trusted transport may self-assert
+		// misreport of identity. The weld is the single identity truth;
+		// reject hard. There is no "trusted transport may self-assert
 		// its kind" mode — that axis is a downstream transport distinction
 		// the weld-as-truth axiom collapses.
 		return outcome{

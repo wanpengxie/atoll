@@ -54,7 +54,7 @@ func TestDeps_ValidateMissingFields(t *testing.T) {
 		t.Fatalf("missing Log should fail")
 	}
 	// Fully wired → nil. (No ActorRegistry dep — the sender door trusts the
-	// pen weld, incarnation-dynamics-build-spec §3.2.)
+	// pen weld.)
 	lg := stubLog{}
 	if err := (Deps{ChannelID: testChannelID, Log: lg}).Validate(); err != nil {
 		t.Fatalf("fully-wired Deps Validate = %v, want nil", err)
@@ -135,8 +135,8 @@ func chainWith(t *testing.T, lg storespec.MessageLog) (*chain, *spyMetrics) {
 // observeError (chain.go step-error path) and returns the wrapped error. We
 // trigger this at StepResponsePairing by making Log.FindByID fail for the
 // parent lookup — StepSenderConsistent no longer has an error-producing seam
-// of its own (no registry lookup left: incarnation-dynamics-build-spec
-// §3.2/§1.4, identity is pen-welded + livePen-gated, not registry-checked).
+// of its own (no registry lookup left: identity is pen-welded + livePen-gated,
+// not registry-checked).
 func TestWrite_StepError_ObservedAndReturned(t *testing.T) {
 	findErr := errors.New("boom-find")
 	lg := stubLog{
@@ -218,7 +218,7 @@ func TestWrite_AppendPlainError_WrappedAsError(t *testing.T) {
 
 // A step that panics → Write's deferred recover converts it to an error. We
 // make Log.FindByID panic at StepResponsePairing (StepSenderConsistent no
-// longer has a seam to panic through — no registry lookup left, §3.2/§1.4).
+// longer has a seam to panic through — no registry lookup left).
 func TestWrite_PanicRecovered(t *testing.T) {
 	lg := stubLog{
 		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
@@ -306,10 +306,9 @@ func TestStepNormalize_NilEnvelope(t *testing.T) {
 // ---------------------------------------------------------------------
 // step_sender_consistent.go — ctx canceled (final guard). The Lookup-error
 // seam this section used to cover is gone: the step no longer calls
-// ActorRegistry.Lookup at all (incarnation-dynamics-build-spec §3.2/§1.4 —
-// identity is pen-welded + livePen-gated one layer up, not registry-checked
-// here). That correctness now lives in platform/internal/link/livepen_test.go
-// (ErrWriterNotLive).
+// ActorRegistry.Lookup at all — identity is pen-welded + livePen-gated one
+// layer up, not registry-checked here. That correctness now lives in
+// platform/internal/link/livepen_test.go (ErrWriterNotLive).
 // ---------------------------------------------------------------------
 
 func TestStepSenderConsistent_CtxCanceled(t *testing.T) {

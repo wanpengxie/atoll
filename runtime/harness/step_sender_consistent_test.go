@@ -8,14 +8,12 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// StepSenderConsistent contract (A3 真实 — the pen weld is the single identity
-// truth; there is no registry lookup left in this step —
-// incarnation-dynamics-build-spec §3.2/§1.4). The two registry-backed
-// rejection cases this file used to exercise ("sender not in registry",
-// "deregistered sender rejects deregistered") are gone: that correctness now
-// lives one layer up, in livePen.IsLive() (platform/internal/link/livepen.go,
-// ErrWriterNotLive), which runs before the chain and cannot be exercised from
-// this package's step-isolation harness. See livepen_test.go for its coverage.
+// StepSenderConsistent contract: the pen weld is the single identity
+// truth; there is no registry lookup in this step. Registry-backed rejection
+// (e.g. deregistered sender) is enforced one layer up, in livePen.IsLive()
+// (platform/internal/link/livepen.go, ErrWriterNotLive), which runs before
+// the chain and cannot be exercised from this package's step-isolation
+// harness. See livepen_test.go for its coverage.
 func TestStepSenderConsistent(t *testing.T) {
 	deps := Deps{}
 

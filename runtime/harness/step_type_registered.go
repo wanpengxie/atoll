@@ -8,11 +8,11 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// reservedBootstrapTypeSet is the proto-layer1 §6.2.0 Reserved Bootstrap
-// Type Set. Only the channel system actor may emit these envelope.type
-// values; any other sender is rejected per §2.5.
+// reservedBootstrapTypeSet is the reserved bootstrap type set. Only the
+// channel system actor may emit these envelope.type values; any other
+// sender is rejected.
 //
-// Keys reference protocol/actor constants (the frozen closed set, §1.4) rather
+// Keys reference protocol/actor constants (the frozen closed set) rather
 // than bare literals so a kernel rename can never silently diverge here.
 var reservedBootstrapTypeSet = map[string]struct{}{
 	actor.ReservedSystemChannelCreated:    {},
@@ -35,9 +35,9 @@ func newStepTypeRegistered(Deps) step { return &stepTypeRegistered{} }
 func (s *stepTypeRegistered) ID() stepID { return StepTypeRegistered }
 
 func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
-	// Reserved namespace authority — proto-layer1 §2.5 + §6.2.0. Even
-	// before checking registry membership, reject any non-system sender
-	// trying to forge a reserved system event.
+	// Reserved namespace authority. Even before checking registry
+	// membership, reject any non-system sender trying to forge a reserved
+	// system event.
 	if strings.HasPrefix(env.Type, message.ReservedTypePrefix) {
 		if _, reserved := reservedBootstrapTypeSet[env.Type]; reserved {
 			if env.Sender.Kind != actor.KindSystem || env.Sender.ID != actor.SystemActorID {

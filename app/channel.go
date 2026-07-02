@@ -89,8 +89,8 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	// Create the channel row + seed its DESIRED composition (channel_actors) + the
 	// default_agent pointer in ONE tx. channel_actors is the canonical writer for
 	// "what this channel runs"; default_agent is a name-agnostic pointer into it,
-	// defaulting to the agent:boost fallback instance (actor-instance-model §7/§8).
-	// One tx → never a half-seeded channel (§8·C, no three-write drift).
+	// defaulting to the agent:boost fallback instance.
+	// One tx → never a half-seeded channel (no three-write drift).
 	tx, err := a.db.BeginTx(c.Request.Context(), nil)
 	if err != nil {
 		a.logger.Error("create channel: begin tx", "channel", chID, "err", err)
@@ -421,7 +421,7 @@ type setDefaultAgentReq struct {
 }
 
 // handleSetDefaultAgent re-points (or clears) a channel's default_agent — the
-// §7.2 "user repoints the brain" entry point (install a daemon agent and make it
+// entry point for "user repoints the brain" (install a daemon agent and make it
 // default, or fail back to agent:boost). The pointer may only target an instance
 // already in the channel's composition (channel_actors); an empty instance_id
 // clears it (→ group-chat when there is no boost floor). Takes effect on the next

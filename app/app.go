@@ -149,7 +149,7 @@ func (a *App) registerRoutes() {
 		api.GET("/channels/:chID/messages", a.handleListMessages)
 		api.POST("/channels/:chID/messages", a.handleSendMessage)
 
-		// §五 创建与控制: a user's agents (global declaration) + introduce / restart.
+		// A user's agents (global declaration) + introduce / restart.
 		api.GET("/agents", a.handleListAgents)
 		api.POST("/agents", a.handleCreateAgent)
 		api.PATCH("/agents/:agentID", a.handleUpdateAgent)
@@ -186,9 +186,9 @@ func (a *App) registerRoutes() {
 	// WebSocket endpoints.
 	a.engine.GET("/ws", a.handleWS)
 	a.engine.GET("/compute", a.handleCompute)
-	// Daemon composition pull (daemon-composition spec §3): the daemon GETs its
-	// channel's placement='daemon' assignment, then builds exactly that set
-	// (no blind-build). Same ?key=+?channel= auth as /compute.
+	// Daemon composition pull: the daemon GETs its channel's placement='daemon'
+	// assignment, then builds exactly that set (no blind-build). Same
+	// ?key=+?channel= auth as /compute.
 	a.engine.GET("/compute/plan", a.handleComputePlan)
 
 	// Static files — only when a built UI is supplied (the UI lives in its
@@ -236,17 +236,17 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 
 	// Spawn the channel's DESIRED composition (channel_actors) — the server-placed
 	// instances. Intent lives in channel_actors; what actually comes up lands in
-	// the substrate's actor_registry (actor-instance-model §3).
+	// the substrate's actor_registry.
 	a.spawnComposition(chID, home)
 
 	return home, nil
 }
 
 // defaultAgentInstanceID is the canonical fallback/bootstrap agent instance —
-// the always-there server-embedded "boost" floor (default-agent-deployment §0:
-// every channel gets a server-cell agent for never-brainless + onboarding).
+// the always-there server-embedded "boost" floor: every channel gets a
+// server-cell agent for never-brainless behavior plus onboarding.
 // default_agent points here by default; it is a name-agnostic pointer, so a
-// channel may later repoint it at any other instance id (actor-instance-model §7).
+// channel may later repoint it at any other instance id.
 const (
 	defaultAgentInstanceID = actor.ActorID("agent:boost")
 	// defaultBoostLooper is the engine CLASS the always-there boost floor runs.
@@ -259,8 +259,8 @@ const (
 	// cell). spawnComposition only spawns these.
 	placementServer = "server"
 	// placementDaemon marks a composition instance a connected DAEMON hosts. The
-	// server never spawns these; the daemon pulls them (GET /compute/plan,
-	// daemon-composition spec §3) and builds them with its LOCAL creds.
+	// server never spawns these; the daemon pulls them (GET /compute/plan) and
+	// builds them with its LOCAL creds.
 	placementDaemon = "daemon"
 )
 
@@ -268,7 +268,7 @@ const (
 // spawns each instance from the actor catalog via the generic Build → Spawn
 // path — no special "the agent" case. The composition is INTENT; a build/spawn
 // failure (e.g. agent with no LLM creds) is logged and skipped: the row stays
-// (intent), the instance just isn't running (현상 = actor_registry has no row),
+// (intent), the instance just isn't running (actor_registry has no row),
 // and default_agent still points at it. Each instance is admitted via Home.Spawn,
 // which Mints a pen welded to its (id, chID) inside the membrane and hands it to
 // the factory — the app never sees a bare writer (sealed-pen). Server placement:
@@ -279,7 +279,7 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 	var specs []instanceSpec
 	// LEFT JOIN agents: for an agent instance (instance_id = 'agent:'||agents.id)
 	// overlay its GLOBAL identity config (persona/skills) UNDER the per-channel
-	// config (agent-spec §二). The engine is NOT read here — it IS ca.class (the
+	// config. The engine is NOT read here — it IS ca.class (the
 	// per-channel concrete engine class: claude/go-kimi). A non-agent class never
 	// matches the join (no global overlay), which is correct.
 	rows, err := a.db.Query(
@@ -305,7 +305,7 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 	// Durable per-instance session dirs live under the data root (sibling of the
 	// channel DBs), platform-managed so a looper's opaque session survives a
 	// restart — keystone: durable state in a platform-controlled area, not a tmp
-	// dir or the user's home (agent-spec §四).
+	// dir or the user's home.
 	sessionsRoot := filepath.Join(filepath.Dir(a.channelDBDir), "agent-sessions")
 
 	for _, s := range specs {
@@ -316,7 +316,7 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 			dir = "" // fall back to the looper's ephemeral default
 		}
 		// store persists a looper-authored opaque checkpoint into the state slot.
-		// The looper is the slot's ONLY author (agent-spec §三).
+		// The looper is the slot's ONLY author.
 		store := func(blob json.RawMessage) error {
 			_, err := a.db.Exec(
 				`UPDATE channel_actors SET state = ? WHERE channel_id = ? AND instance_id = ?`,
@@ -344,7 +344,7 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 		}
 		// Home.Spawn Mints the pen welded to (decl.ID, chID) inside the admission
 		// membrane and hands it to the factory — the app supplies WHAT to place
-		// (id + factory), never a bare writer or a Minter (sealed-pen §3.1).
+		// (id + factory), never a bare writer or a Minter (sealed-pen).
 		if err := home.Spawn(context.Background(), decl.ID, decl.Kind, decl.Factory); err != nil {
 			a.logger.Warn("app: spawn composition instance failed", "channel", string(chID), "instance", string(decl.ID), "err", err.Error())
 		}
@@ -358,7 +358,7 @@ func pathSafe(s string) string {
 }
 
 // mergeConfig layers the per-channel config_json OVER the global agents config
-// (agent-spec §二: one config, two layers). Shallow object merge — channel keys
+// (one config, two layers). Shallow object merge — channel keys
 // win. Empty / non-object inputs degrade gracefully (a raw per-channel blob is
 // preserved as-is so a non-agent class still gets its config_json).
 func mergeConfig(global, perChannel string) json.RawMessage {
@@ -379,7 +379,7 @@ func mergeConfig(global, perChannel string) json.RawMessage {
 	}
 	// Otherwise the per-channel blob is the more-specific layer — preserve it
 	// verbatim (never silently drop a non-object per-channel config); fall back
-	// to the global blob. [codex P2]
+	// to the global blob.
 	if pc != "" {
 		return json.RawMessage(pc)
 	}

@@ -20,8 +20,8 @@ type MemberActorAdd struct {
 // doc) is NOT a substrate membership field — substrate identity is {ID, Kind,
 // Binding}. The declaration is application-level self-description, carried as
 // an ordinary event (skill-as-document), outside the scope of membership. The
-// who-can-call-whom AUTHORISATION (capability ②, kernel-roadmap §4.2) is a
-// separate, not-yet-built substrate concern, unrelated to this blob.
+// who-can-call-whom AUTHORISATION is a separate, not-yet-built substrate
+// concern, unrelated to this blob.
 
 // MemberActorRemove is one actor deregistration transition.
 type MemberActorRemove struct {

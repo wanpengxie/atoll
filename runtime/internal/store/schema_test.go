@@ -61,7 +61,7 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 // ChannelLocalTables enumerates exactly the surviving channel-local tables:
 // the message log, the actor registry, the access plane's channel-scoped
 // resources + resource_grants, the actor-scoped state locus actor_state, and
-// the identity-level pending-timer control plane timers (forward §7)
+// the identity-level pending-timer control plane timers
 // (type_registry's two tables + actor_cursors are deleted).
 func TestChannelLocalTables_Set(t *testing.T) {
 	want := map[string]bool{

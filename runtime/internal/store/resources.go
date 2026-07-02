@@ -17,7 +17,7 @@ import (
 // resourceRegistry implements resourcespec.Registry over the channel-local
 // sqlite (resources + resource_grants), the plane-2 dual of actorRegistry: it
 // is the object-existence + authorization-relation (R) truth the door consults
-// and mutates. Bound to one channel database (access is channel-封).
+// and mutates. Bound to one channel database (access is channel-scoped).
 type resourceRegistry struct {
 	db *sql.DB
 	// nowMs stamps created_at. Injectable (tests pin it) — the rest of the

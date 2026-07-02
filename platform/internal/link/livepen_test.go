@@ -45,8 +45,8 @@ type noopLiveActor struct{}
 
 func (noopLiveActor) Receive(context.Context, *message.Envelope) error { return nil }
 
-// TestLivePenFencesPostDeathWrite is the death-after-write收口 (B1, cell path): a
-// pen welded to an incarnation writes while the incarnation is live, is
+// TestLivePenFencesPostDeathWrite covers the death-after-write fence on the cell
+// path: a pen welded to an incarnation writes while the incarnation is live, is
 // structurally rejected during construction (before go-live), and is rejected
 // with ErrWriterNotLive after the incarnation is despawned — proving a capability
 // that outlives its incarnation cannot author truth on its behalf.
@@ -137,8 +137,8 @@ func attachTestPort(t *testing.T, rt *actorrt.Runtime, id actor.ActorID) (actorr
 	return inc, remoteConn
 }
 
-// TestLivePenFencesPostDeathWrite_PortPath is the death-after-write收口 on the
-// PORT path (§3.C1): a livePen welded to an out-of-process port's Incarnation
+// TestLivePenFencesPostDeathWrite_PortPath covers the death-after-write fence on
+// the PORT path: a livePen welded to an out-of-process port's Incarnation
 // writes while the port is the live embodiment, then — once a same-id reattach
 // REPLACES that port (the predecessor incarnation is stopped) — fences every
 // write with ErrWriterNotLive. It is the message-plane parity of the cell test:
@@ -236,7 +236,7 @@ func attachGatedPort(t *testing.T, rt *actorrt.Runtime, id actor.ActorID, emit a
 }
 
 // TestLivePenFencesInFlightEmit_PortWireChain is the FULL-wire-chain behaviour
-// proof of the replacement-live-flip invariant (F1) on the port death-write门: an
+// proof of the replacement-live-flip invariant on the port death-write fence: an
 // emit that is ALREADY IN FLIGHT inside the host emitSink when a same-id reattach
 // REPLACES the port must be fenced with ErrWriterNotLive and never reach the raw
 // pen — because Attach flips the predecessor dead in the SAME critical section as
@@ -314,7 +314,7 @@ func TestLivePenFencesInFlightEmit_PortWireChain(t *testing.T) {
 	//
 	// Why the daemon-side error is asserted as "non-nil" and NOT as an ack
 	// carrying ErrWriterNotLive: on the port path the incarnation IS the wire
-	// (§5.2) — the replacement that killed the old incarnation closed its conn
+	// — the replacement that killed the old incarnation closed its conn
 	// in the same event, so the old readLoop's ack write hits a dead conn and
 	// the daemon observes transport death, never the verdict payload. An ack
 	// carrying ErrWriterNotLive would require "port alive but incarnation dead",

@@ -11,7 +11,7 @@ import (
 	"testing"
 )
 
-// Agent subsystem layering locks (agent-spec §10.2 / agent-corpus-review G3).
+// Agent subsystem layering locks.
 //
 // The agent is its OWN top-level subsystem (agent/), NOT an actor under actors/.
 // These tests pin the dependency direction so it can't silently rot back:

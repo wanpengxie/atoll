@@ -46,7 +46,7 @@ type embodiment interface {
 	// initiateStop is the non-blocking, idempotent SIGNAL half of teardown — it
 	// triggers death (cancel + immediate onExit self-eviction) and returns at
 	// once, WITHOUT joining the embodiment's own goroutine. It exists so a dying
-	// parent's cascade (removeIf, §3.1a) can tear down owned children from
+	// parent's cascade (removeIf) can tear down owned children from
 	// within its own death path without deadlocking: a child's initiateStop
 	// synchronously re-enters onExit (which takes r.mu), so calling the
 	// join-and-signal stop() here — from the dying goroutine — would block the
@@ -108,8 +108,8 @@ type Runtime struct {
 	obsWatch    map[actor.ActorID][]ObsWatcher
 	mailbox     int
 	// owned tracks the fork ownership edge: parent-embodiment -> its forked
-	// children's embodiments (§3.1/§3.1a). It lives ONLY in memory (an incarnation
-	// is volatile, §1.3) and is pruned of already-not-live entries on every Fork
+	// children's embodiments. It lives ONLY in memory (an incarnation
+	// is volatile) and is pruned of already-not-live entries on every Fork
 	// (amortised cleanup — no separate sweep/GC) and cleared wholesale for a key
 	// when that parent embodiment itself dies (removeIf cascades initiateStop() to
 	// every child still on the list at that instant).
@@ -377,7 +377,7 @@ func (r *Runtime) Spawn(id actor.ActorID, build func(Incarnation) Actor) Incarna
 }
 
 // LiveIDs returns a snapshot of every ActorID currently occupying an embodiment
-// slot (§3.4, reconcile's bulk enumeration for the desired−actual diff) — the
+// slot (reconcile's bulk enumeration for the desired−actual diff) — the
 // KEY SET of r.embodiments, taken under r.mu. It is deliberately NOT filtered by
 // isLive(): Spawn's map-insert and its live-atomic flip are the SAME critical
 // section (see the go-live step above), so embodiment-map membership already IS
@@ -394,7 +394,7 @@ func (r *Runtime) LiveIDs() []actor.ActorID {
 }
 
 // SpawnIfAbsent mints id ONLY IF no embodiment currently occupies it — activation's
-// atomic CAS mint (§3.4), mirroring Fork's two-phase-with-recheck discipline.
+// atomic CAS mint, mirroring Fork's two-phase-with-recheck discipline.
 // Unlike Spawn (last-go-live-wins replace), SpawnIfAbsent NEVER replaces an
 // existing embodiment: build runs OUTSIDE the lock (same discipline as
 // Spawn/Fork), then absence is RE-CHECKED inside the SAME critical section as
@@ -403,7 +403,7 @@ func (r *Runtime) LiveIDs() []actor.ActorID {
 // via SpawnIfAbsent itself) — the freshly-built shell is discarded: never
 // inserted into embodiments, never started (ok=false). This is a real CAS, not
 // best-effort, because rebuild cost for agent-class actors (re-establishing
-// LLM context) is a real cost, not a theoretical nicety (§3.4).
+// LLM context) is a real cost, not a theoretical nicety.
 func (r *Runtime) SpawnIfAbsent(id actor.ActorID, build func(Incarnation) Actor) (Incarnation, bool) {
 	r.mu.RLock()
 	_, occupied := r.embodiments[id]
@@ -482,7 +482,7 @@ func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, emit Em
 	}
 	p.start()
 	// Return the Incarnation (id + this embodiment pointer): the home-side port
-	// death-write门 (§3.C1) welds a livePen to it and gates each cross-wire emit
+	// death-write gate welds a livePen to it and gates each cross-wire emit
 	// on IsLive, so a replaced/torn-down port's in-flight emit is fenced by
 	// pointer identity — the message-plane parity of the cell path's livePen.
 	return Incarnation{id: p.id, p: p}, nil
@@ -496,7 +496,7 @@ func (r *Runtime) removeIf(id actor.ActorID, self embodiment) {
 	if cur, ok := r.embodiments[id]; ok && cur == self {
 		delete(r.embodiments, id)
 	}
-	// Ownership-edge cascade (§3.1a): this embodiment may itself be a fork parent.
+	// Ownership-edge cascade: this embodiment may itself be a fork parent.
 	// Take its children list and drop the r.owned entry in the SAME critical
 	// section as the eviction above (so a concurrent Fork sees either the full
 	// list-to-be-cascaded or nothing — never a half-updated slice).
@@ -506,7 +506,7 @@ func (r *Runtime) removeIf(id actor.ActorID, self embodiment) {
 	// This embodiment is dying — flip its liveness atomic so any capability welded
 	// to it (livePen) fails the WHEN gate from here on. Idempotent.
 	self.markDead()
-	// Cascade OUTSIDE the lock, signal-only (§3.1a): initiateStop() must never be
+	// Cascade OUTSIDE the lock, signal-only: initiateStop() must never be
 	// called while holding r.mu — a child's initiateStop synchronously re-enters
 	// onExit/removeIf, which takes r.mu again (deadlock if still locked here).
 	// Each child's own death path recurses this same removeIf on ITS children —
@@ -546,7 +546,7 @@ func (r *Runtime) Despawn(inc Incarnation) {
 }
 
 // DespawnID stops and removes whatever embodiment CURRENTLY occupies id, if any
-// (§3.4 activation's scoped deactivation — the caller only ever holds an id
+// (activation's scoped deactivation — the caller only ever holds an id
 // there, never an Incarnation handle: the eager-managed set is tracked
 // across MULTIPLE Reconcile ticks as a plain id set, and retaining stale
 // Incarnation pointers across ticks would reintroduce exactly the ABA risk
@@ -666,23 +666,22 @@ func (r *Runtime) Stat(id actor.ActorID) (UnitStat, bool) {
 }
 
 // CurrentIncarnation is the authoritative self-read of an actor's live
-// embodiment handle — the schedule engine's ATTACH seam (timer-build-spec.md
-// §1.3/§3.2, 拍点 8.4): welding an incarnation-bind timer to "whichever
-// embodiment is live for id right now" requires reading that fact FROM the
-// runtime itself (an incarnation is never caller-reported and never
-// serialised, §5.2/§5.3) — the same addressing-map authority Stat/deliver
-// consult. It is the pidfd analogue: a HELD pointer to one specific live
-// instance, not a re-resolvable name.
+// embodiment handle — the schedule engine's ATTACH seam: welding an
+// incarnation-bind timer to "whichever embodiment is live for id right now"
+// requires reading that fact FROM the runtime itself (an incarnation is never
+// caller-reported and never serialised) — the same addressing-map authority
+// Stat/deliver consult. It is the pidfd analogue: a HELD pointer to one
+// specific live instance, not a re-resolvable name.
 //
-// Scope (deliberately narrow, per the 8.4 diligence note — DO NOT widen this
-// without re-reading it): this only guards "no embodiment at all" (ok=false).
-// It structurally CANNOT guard "the caller's mental model of WHICH embodiment
-// is live is stale" — a goroutine that raced ahead of a same-id successor
-// taking over (Despawn+respawn between the caller's last observation and this
-// call) gets the SUCCESSOR's handle, not an error; this method reports
-// "whoever is live right now", exactly like Stat/deliver's map lookup. That
-// leaked-goroutine misuse class is fenced by the downstream liveSchedule
-// membrane at the platform link layer (§3.5b), not here. The drop check at
+// Scope (deliberately narrow — DO NOT widen without re-reading this note):
+// this only guards "no embodiment at all" (ok=false). It structurally CANNOT
+// guard "the caller's mental model of WHICH embodiment is live is stale" — a
+// goroutine that raced ahead of a same-id successor taking over
+// (Despawn+respawn between the caller's last observation and this call) gets
+// the SUCCESSOR's handle, not an error; this method reports "whoever is live
+// right now", exactly like Stat/deliver's map lookup. That leaked-goroutine
+// misuse class is fenced by the downstream liveSchedule membrane at the
+// platform link layer, not here. The drop check at
 // fire time still works correctly regardless: it compares the handle captured
 // HERE at Schedule time by POINTER identity (IsLive), so a since-replaced
 // incarnation is still caught even though this call itself does not detect

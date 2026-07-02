@@ -33,8 +33,9 @@ type HomeConfig struct {
 }
 
 // Home is the assembled channel-home. Its public surface is the capability set in
-// the package doc —裸 Runtime/Deliverer/Membership/Registry never escape it (装配
-// 只交钥匙). The app layer owns HTTP/transport; Home is pure Go.
+// the package doc — the bare Runtime/Deliverer/Membership/Registry never escape
+// it; assembly only hands out capabilities. The app layer owns HTTP/transport;
+// Home is pure Go.
 type Home struct {
 	channelID  channelpkg.ID
 	minter     harness.Minter
@@ -51,13 +52,13 @@ type Home struct {
 	// Single fixed-home identity this period (SinglePlacement); shaped now so
 	// fork/activation route through Place() and multi-home swaps additively.
 	placement actorrt.Placement
-	// builder is the platform-layer class → caps-factory table (fork注入点契约,
-	// CapsFactoryBuilder). nil until the domain's factory table is injected
-	// (factory-migration棒) — a nil builder makes SpawnHandle.Fork fail-fast with
-	// ErrNoBuilder rather than fabricate a child. The table hands back the RAW
-	// factory (func(Caps) Actor); the caps缝 is woven at the platform assembler
+	// builder is the platform-layer class → caps-factory table (the fork
+	// injection-point contract, CapsFactoryBuilder). nil until the domain's
+	// factory table is injected — a nil builder makes SpawnHandle.Fork fail-fast
+	// with ErrNoBuilder rather than fabricate a child. The table hands back the RAW
+	// factory (func(Caps) Actor); the caps weld happens at the platform assembler
 	// (buildCaps) when a fork child is born, so a child gets the identical membrane
-	// set as a top-level admission (纯度: the domain fills WHAT to build, the
+	// set as a top-level admission (purity: the domain fills WHAT to build, the
 	// platform seam owns HOW caps are welded — actorrt never touches harness/link).
 	builder CapsFactoryBuilder
 
@@ -134,7 +135,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    before the restart-recovery reconciler below can even run. Insert itself
 	//    stays strict (a duplicate is an error, locked by the store's
 	//    coverage test); the idempotent seed lives here at the genesis call site
-	//    (audit ④-a: guard at the platform bootstrap, do not relax substrate).
+	//    (guard the idempotency at the platform bootstrap call site — do not relax substrate).
 	if exists, err := cs.Registry.Exists(ctx, actor.SystemActorID); err != nil {
 		_ = cs.Close()
 		return nil, fmt.Errorf("platform: check system actor: %w", err)
@@ -176,7 +177,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Logger:       logger,
 	})
 
-	// 7. Build the delivery tap: a Pump over the Signal持 Deliverer. cursor start
+	// 7. Build the delivery tap: a Pump over the Signal-fed Deliverer. cursor start
 	//    = current MaxSeq (mailbox semantics: only new commits). DeliverResult
 	//    lands here as structured per-audience logs.
 	from, err := cs.Query.MaxSeq(ctx)
@@ -245,14 +246,14 @@ func Open(cfg HomeConfig) (*Home, error) {
 		logger:        logger,
 		nowMs:         nowMs,
 		placement:     SinglePlacement{},
-		builder:       nil, // injected by the factory-migration棒; nil → Fork fail-fasts (ErrNoBuilder).
+		builder:       nil, // injected by the domain's factory-migration path; nil → Fork fail-fasts (ErrNoBuilder).
 		reconcileStop: reconcileStop,
 		reconcileDone: reconcileDone,
 	}, nil
 }
 
 // View returns the read-only observation set (ReadAfterSeq / MaxSeq /
-// ListActors / daemon attachment). It carries no写 capability — observation
+// ListActors / daemon attachment). It carries no write capability — observation
 // only. The host (app) reads these projections OUT-OF-BAND (no message, no
 // truth-log write) — UI status polling must not pollute the log; in-universe
 // actors instead ask the system actor by message (that path is logged).
@@ -273,9 +274,9 @@ func (h *Home) View() View {
 // Order invariant (security-critical): membership apply -> build caps (Mint pen +
 // access/state/spawn) -> factory(caps) -> spawn cell. Membership must be durable
 // truth BEFORE the embodiment goes live — this is the birth mirror of the
-// death-side "despawn before deregister" (期2 §3.4 point 5, creation/destruction
+// death-side "despawn before deregister" (creation/destruction
 // symmetry): the sender gate no longer queries the registry (kind is welded into
-// the pen at Mint, §3.2), so the old "else a cell that writes on construction
+// the pen at Mint), so the old "else a cell that writes on construction
 // hits sender_deregistered" reason no longer holds; the invariant remains because
 // membership ≠ embodiment (membership is the durable identity-level truth the
 // live cell layers on top), and a construction-time plane-2 access invoke needing
@@ -304,7 +305,7 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, fac
 	}
 	if factory != nil {
 		// Two-phase Spawn: the build closure runs inside Spawn (after membership is
-		// durable, before go-live). It welds the whole caps缝 bound to THIS
+		// durable, before go-live). It welds the whole caps bundle bound to THIS
 		// incarnation (livePen + liveAccess membranes, spawn handle) and hands the
 		// gated bundle to the factory in ONE step — no bare handle escapes. A
 		// participant is a gated cap holder; substrate anchors are not (see
@@ -319,12 +320,13 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, fac
 	return nil
 }
 
-// buildCaps assembles the caps缝 — the five-capability bundle welded to (id,
-// inc) —发 handle 与 live 膜 wrap 同一步 (红线, no bare handle). It is the SINGLE
+// buildCaps assembles the caps bundle — the five-capability bundle welded to (id,
+// inc). Handing out the handle and wrapping the live membrane happen in the same
+// step (invariant: no bare handle escapes). It is the SINGLE
 // caps assembler, shared by admission (Home.Spawn) and by fork (spawnHandle.Fork
 // holds this method value as its capsAssembler and re-runs it against each child's
 // incarnation) — so a fork child is born with the IDENTICAL membrane set as a
-// top-level admission (recursive assembly, §3.A), never a raw un-membraned closure.
+// top-level admission (recursive assembly), never a raw un-membraned closure.
 //
 // Wired this period: Pen (livePen over the harness pen), Access + State
 // (liveAccess over the channel-scoped Mint and actor-scoped MintState handles —
@@ -332,30 +334,30 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, fac
 // by-incarnation fork/despawn handle; builder may be nil → Fork fail-fasts).
 //
 // Schedule is DELIBERATELY nil this period: the ScheduleHandle requires the
-// schedule engine, which OpenScheduler assembles only once FireSink (铸笔镜像
-// emitSink) + Reviver (SpawnIfAbsent+Builder) exist — that is 线B (装配根,
-// gated on 期5 收货 + review, wiring-build-spec §3.B/P5). Focing a placeholder
-// here would be a半成品 (a minted handle over an engine that never Start()s),
-// so the field is left nil until 线B wires it — no actor consumes it yet.
+// schedule engine, which OpenScheduler assembles only once FireSink (mirroring
+// the pen mint) and Reviver (SpawnIfAbsent+Builder) exist — that assembly path
+// is not wired yet. Forcing a placeholder here would be a half-built piece (a
+// minted handle over an engine that never Start()s), so the field is left nil
+// until that assembly wires it — no actor consumes it yet.
 func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnation) actorcaps.Caps {
 	rt := h.channel.Cells()
 	return actorcaps.Caps{
 		Pen:      link.NewLivePen(h.minter.Mint(id, kind, h.channelID), inc, rt),
 		Access:   link.NewLiveAccess(h.cs.Access.Mint(id), inc, rt),
 		State:    link.NewLiveAccess(h.cs.Access.MintState(id), inc, rt),
-		Schedule: nil, // 线B (OpenScheduler 真装配) — see doc above.
+		Schedule: nil, // not wired yet (OpenScheduler assembly) — see doc above.
 		Spawn:    newSpawnHandle(inc, rt, h.builder, h.buildCaps, h.placement),
 	}
 }
 
-// ServeAttach is the attach受理面: the app hands an upgraded WS request here so a
+// ServeAttach is the attach admission surface: the app hands an upgraded WS request here so a
 // daemon can attach its actor streams. Home keeps the internal link acceptor and
 // only exposes this capability — the acceptor object never escapes.
 func (h *Home) ServeAttach(w http.ResponseWriter, r *http.Request, daemonID string) {
 	h.links.Serve(w, r, daemonID)
 }
 
-// Subscribe is the subscription注册面 (client push): a client stream subscribes to
+// Subscribe is the subscription registration surface (client push): a client stream subscribes to
 // the commit Signal and reads forward from its own seq cursor. It returns the
 // wake channel and the unsubscribe func — the internal Signal never escapes.
 func (h *Home) Subscribe() (<-chan struct{}, func()) {

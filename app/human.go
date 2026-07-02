@@ -21,12 +21,6 @@ import (
 // handler's nil-check and admission (a teardown race). The handler maps it to 404.
 var errChannelNotLoaded = errors.New("app: channel not loaded")
 
-// NOTE: this file is the sealed-pen HALF-BUILT state. The target shape (gateway
-// relay, Receive→gateway, type A/B response, cell≡online-signal) lives in
-// .dalek/pm/human-actor-completion.md (v7). The obs-tail stopgap mentioned below
-// is SUPERSEDED there: members read messages via the actor path (Receive→gateway),
-// not by tailing the log over the obs axis.
-//
 // human.go is the app-layer HUMAN write front-end — a human adapter whose
 // outward face is SubmitIntent. It is the substrate's "people are actors too":
 // a person writes truth ONLY through their own human actor's welded pen, never
@@ -166,7 +160,7 @@ func (h *humanFront) SubmitIntent(ctx context.Context, in submitInput) (harness.
 // resolveRouting reproduces the channel's no-audience routing policy (the product
 // decision moved here verbatim from handleSendMessage): an explicit audience is
 // honoured as-is; otherwise default_agent is the INTENT pointer, resolved against
-// the live roster with the agent:boost floor as the §7 failover target:
+// the live roster with the agent:boost floor as the failover target:
 //   - default_agent points at a LIVE agent      → agent-centric: request to it.
 //   - else the channel HAS a boost floor:
 //     boost live → failover to boost;  boost down → channel CANNOT serve (503).

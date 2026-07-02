@@ -14,8 +14,8 @@ import (
 // TestEnvelopeRoundTripMinimal exercises the minimal valid envelope: only
 // the always-present (non-omitempty) fields are populated. It pins the wire
 // contract that a bare envelope survives marshal/unmarshal without the
-// substrate inventing or dropping fields (A3: substrate does not lie about
-// the message it carries).
+// substrate inventing or dropping fields (substrate must not lie about the
+// message it carries).
 func TestEnvelopeRoundTripMinimal(t *testing.T) {
 	t.Parallel()
 	src := Envelope{
@@ -65,7 +65,6 @@ func TestEnvelopeRoundTripFullyPopulated(t *testing.T) {
 
 // TestExpiresAtTriState pins the documented tri-state of ExpiresAt
 // (*int64): nil means NULL on the wire, a set pointer means the timestamp.
-// (proto §"Tri-state semantics").
 func TestExpiresAtTriState(t *testing.T) {
 	t.Parallel()
 	mk := func(p *int64) Envelope {
@@ -241,20 +240,21 @@ func diff(a, b []string) []string {
 }
 
 // ---------------------------------------------------------------------
-// Wire field-set closure (L0 §7.3) — UnmarshalJSON fail-closed tests.
+// Wire field-set closure — UnmarshalJSON fail-closed tests.
 // ---------------------------------------------------------------------
 
 const validEnvelopeJSON = `{"id":"m1","ts":1,"channel_id":"ch","sender":{"kind":"agent","id":"a"},"kind":"event","type":"agent.text","payload":{},"visibility":"public","audience":["x"]}`
 
-// TestEnvelopeUnmarshalRejectsUnknownTopLevelField pins §7.3 riding the type:
-// any decode of an envelope carrying a top-level key outside the closed field
-// set fails with a typed UnknownFieldError — no binding-side plumbing involved.
+// TestEnvelopeUnmarshalRejectsUnknownTopLevelField pins the closed-set
+// invariant: any decode of an envelope carrying a top-level key outside the
+// closed field set fails with a typed UnknownFieldError — no binding-side
+// plumbing involved.
 func TestEnvelopeUnmarshalRejectsUnknownTopLevelField(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
 		"typo/smuggle key": `{"id":"m1","ts":1,"channel_id":"ch","sender":{"id":"a"},"kind":"event","type":"t","bogus":1}`,
-		// Store-derived columns are NOT wire proto fields (envelope doc):
-		// submitting them is exactly the drift §7.3 fail-closes on.
+		// Store-derived columns are NOT wire proto fields:
+		// submitting them is exactly the drift this check fail-closes on.
 		"store-derived seq":         `{"id":"m1","ts":1,"channel_id":"ch","sender":{"id":"a"},"kind":"event","type":"t","seq":9}`,
 		"store-derived is_terminal": `{"id":"m1","ts":1,"channel_id":"ch","sender":{"id":"a"},"kind":"event","type":"t","is_terminal":1}`,
 	}
@@ -289,8 +289,9 @@ func TestEnvelopeUnmarshalAllKnownKeys(t *testing.T) {
 }
 
 // TestEnvelopeUnmarshalNestedUnknownAllowed documents the deliberate scope:
-// §7.3 is TOP-LEVEL only. An unknown key inside the nested sender object is
-// the nested vocabulary's concern, and payload is opaque by axiom.
+// the unknown-field check is TOP-LEVEL only. An unknown key inside the nested
+// sender object is the nested vocabulary's concern, and payload is opaque by
+// axiom.
 func TestEnvelopeUnmarshalNestedUnknownAllowed(t *testing.T) {
 	t.Parallel()
 	raw := `{"id":"m1","ts":1,"channel_id":"ch","sender":{"kind":"agent","id":"a","x":1},"kind":"event","type":"t","payload":{"anything":"goes"}}`

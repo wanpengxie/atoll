@@ -26,13 +26,12 @@ const (
 	// backoffDuration is the sleep-until-retry the run loop arms after a
 	// tick makes zero progress across BOTH families (every due row/entry
 	// left in place — a pure transient-failure tick). Real, non-zero pacing
-	// so the loop never busy-spins re-querying an unchanged due set (v1.2
-	// opus-major 修复, §3.2 钉3).
+	// so the loop never busy-spins re-querying an unchanged due set.
 	backoffDuration = 1 * time.Second
 )
 
 // memTimer is one incarnation-bind entry in the engine's in-memory due-set —
-// NEVER a store row, NEVER serialised (v1.1 历史校准, §1.3). inc is the
+// NEVER a store row, NEVER serialised. inc is the
 // attach reference captured at Schedule time; the drop check at fire time
 // compares it by POINTER identity via LivenessProbe.IsLive (ABA-safe: a
 // same-id successor being live does not rescue a predecessor's timer).
@@ -51,7 +50,7 @@ type memTimer struct {
 // incarnation entries via mem) through one run goroutine (tap.Pump
 // structural twin). Schedule/Cancel run on the CALLER's goroutine (a
 // ScheduleHandle may be held by any actor cell); mem is the only state they
-// share with run, guarded by mu in short critical sections (§3.2 并发模型).
+// share with run, guarded by mu in short critical sections.
 type Engine struct {
 	deps Deps
 
@@ -71,10 +70,10 @@ type Engine struct {
 
 // New assembles the engine from deps and returns its two outward faces — a
 // Minter (the caps surface) and the bare *Engine (for the assembly root to
-// Start/Close) — never a way to reach mem or the raw TimerStore (red line
-// ❻). Fail-fasts at assembly, not at first Schedule: every Dep is required,
-// Revive included (拍点 8.2 — reviving on a wake with no live actor is not an
-// increment, it is the reason a timer exists at all).
+// Start/Close) — never a way to reach mem or the raw TimerStore. Fail-fasts
+// at assembly, not at first Schedule: every Dep is required, Revive
+// included — reviving on a wake with no live actor is not an increment, it
+// is the reason a timer exists at all.
 func New(deps Deps) (Minter, *Engine, error) {
 	switch {
 	case deps.Store == nil:
@@ -129,24 +128,24 @@ func (e *Engine) Close() {
 	<-e.done
 }
 
-// mintTimerID mints a fresh, never-reused TimerID (v1.2 blocker: reusing a
-// TimerID would let an old fire's messages.id UNIQUE swallow a legitimate new
-// fire, §3.1 doc). The engine is the ONLY minter — ScheduleReq has no ID
-// field, so caller-supply is unrepresentable at compile time.
+// mintTimerID mints a fresh, never-reused TimerID: reusing a TimerID would
+// let an old fire's messages.id UNIQUE swallow a legitimate new fire. The
+// engine is the ONLY minter — ScheduleReq has no ID field, so caller-supply
+// is unrepresentable at compile time.
 func mintTimerID() TimerID { return TimerID(uuid.NewString()) }
 
 // schedule validates req, mints a TimerID, and routes the intent to its
-// bind's home (§3.2 钉块 pseudocode). Runs on the caller's goroutine — a
-// short critical section for the incarnation path, no I/O under the lock.
+// bind's home. Runs on the caller's goroutine — a short critical section
+// for the incarnation path, no I/O under the lock.
 //
 // Unexported: author is a free parameter here, so this is the UN-WELDED face
 // — the schedule-package twin of harness's bare chain, and it stays inside
 // the package for the same reason the chain does. Every consumption path
 // (caps-injected cell handle, host-side per-call mint at the port arm, the
 // platform's own system timers) closes over Minter.Mint(author), and Mint is
-// the one seam future per-author enforcement (liveSchedule membrane, §13
-// storm quotas, §11 principal checks) attaches to — an exported free-author
-// method would be a standing structural bypass of that seam.
+// the one seam future per-author enforcement (liveSchedule membrane, storm
+// quotas, principal checks) attaches to — an exported free-author method
+// would be a standing structural bypass of that seam.
 func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req ScheduleReq) (TimerID, error) {
 	if err := validateScheduleReq(req); err != nil {
 		return "", err
@@ -170,7 +169,7 @@ func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req Schedul
 			return "", err
 		}
 	case BindIncarnation:
-		// Attach (拍点 8.4): self-read whichever embodiment is live for
+		// Attach: self-read whichever embodiment is live for
 		// author RIGHT NOW. No live embodiment → nothing to weld to, and an
 		// incarnation-bind timer with no incarnation is a contradiction —
 		// ErrBadSchedule (this only guards "no embodiment at all"; a racing
@@ -199,7 +198,7 @@ func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req Schedul
 }
 
 // cancel deletes a pending timer/entry IFF author owns it — a single logical
-// entry point over both homes (§3.2 钉5: "两家一个口"). It checks mem first
+// entry point over both homes. It checks mem first
 // (the fast, lock-only path), then always also asks the durable store
 // (CancelOwned's WHERE clause is the non-ambient author check) — a given id
 // lives in exactly one home, so the other check is a harmless existed=false
@@ -207,15 +206,15 @@ func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req Schedul
 // Already-fired / never-existed / not-owned are all the same silent no-op
 // (fired truth is not retractable; a foreign id never leaks existence).
 //
-// Deadline race, DECLARED (spec §3.2 钉6, code review 收口): a Cancel landing
+// Deadline race, DECLARED: a Cancel landing
 // after fireDue has already snapshotted this id returns just as silently while
 // the in-flight fire lands as truth — "cancelled, but it still rang". This is
 // inherent to any timer at the deadline boundary (time.Timer.Stop's false
 // return names the same window) and sits in the accepted in-flight-window
-// class (§5.6 point 3). No claim machinery: the handle contract is
+// class. No claim machinery: the handle contract is
 // deliberately ack-less (error-only; existed is never surfaced), so no caller
 // promise is broken — and closing the window would need cancelled-while-
-// claimed tracking (mem) or a persisted claim (durable, the claim-lease 8.1
+// claimed tracking (mem) or a persisted claim (durable, the claim-lease
 // explicitly deferred), a state machine for a promise the API never made.
 //
 // Unexported for the same reason as schedule: the welded face is
@@ -243,11 +242,11 @@ func (e *Engine) wakeUp() {
 }
 
 // validateScheduleReq is the Go-error ingress gate (protocol layer, not a
-// verdict — timer 不是 plane-2, §1.2 正名): Bind outside the closed set,
+// verdict — a timer is not a plane-2 concept): Bind outside the closed set,
 // FireAt<=0, or an empty/reserved-prefixed Type all reject before anything
-// is minted or stored. A PAST FireAt is legal (§3.2 钉5 — it fires
+// is minted or stored. A PAST FireAt is legal — it fires
 // immediately; refusing it would make "a millisecond before vs after the
-// deadline" two different behaviours).
+// deadline" two different behaviours.
 func validateScheduleReq(req ScheduleReq) error {
 	switch req.Bind {
 	case BindIdentity, BindIncarnation:
@@ -264,8 +263,8 @@ func validateScheduleReq(req ScheduleReq) error {
 }
 
 // run is the single engine goroutine driving both families through one
-// poll/wake/fire cycle (tap.Pump structural twin; §3.2 钉块 pseudocode
-// verbatim). It blocks on whichever comes first: stop, a coalesced wake, or
+// poll/wake/fire cycle (tap.Pump structural twin). It blocks on whichever
+// comes first: stop, a coalesced wake, or
 // the alarm for the nearest known due instant — never a busy for{sleep}.
 func (e *Engine) run() {
 	defer close(e.done)
@@ -277,8 +276,8 @@ func (e *Engine) run() {
 		}
 		if !alarm.Stop() {
 			// Already fired: drain the pending value so a subsequent arm
-			// does not race a stale fire (Go time.Timer discipline, §3.2
-			// 钉7 — the compute-then-sleep window this guards against).
+			// does not race a stale fire (Go time.Timer discipline —
+			// guards against the compute-then-sleep window).
 			select {
 			case <-alarm.C():
 			default:
@@ -321,7 +320,7 @@ func (e *Engine) run() {
 			if !progress {
 				// Every due row/entry left in place (transient failures
 				// only) — a real retry pace, never a hot loop re-querying
-				// the same unchanged due set (v1.2 opus-major 修复).
+				// the same unchanged due set.
 				alarm = e.deps.Clock.NewAlarm(nowTime.Add(backoffDuration))
 				select {
 				case <-e.stop:
@@ -356,8 +355,8 @@ func (e *Engine) nextFireAt(ctx context.Context) (int64, bool) {
 		// fault into "durable family has nothing due" would — on a tick where
 		// the mem family is also empty — park the run loop on wake alone, so a
 		// quiet channel (nobody schedules again) would never fire its durable
-		// rows. Same 钉3 posture the Due-fault path already has via
-		// progress=false; this is its NextFireAt twin (code review 收口).
+		// rows. Same posture the Due-fault path already has via
+		// progress=false; this is its NextFireAt twin.
 		storeNext, storeOK = e.deps.Clock.Now().Add(backoffDuration).UnixMilli(), true
 	}
 
@@ -378,7 +377,7 @@ func (e *Engine) nextFireAt(ctx context.Context) (int64, bool) {
 
 // fireDue runs one tick's fire path over both families and reports whether
 // EITHER family made progress (deleted at least one row/entry) — the run
-// loop's real-retry-vs-busy-loop gate (§3.2 钉块). mem access is snapshotted
+// loop's real-retry-vs-busy-loop gate. mem access is snapshotted
 // under mu and released BEFORE any I/O (fire.Append), per the concurrency
 // model's snapshot-then-release discipline: Schedule/Cancel must never block
 // on a fire in flight.
@@ -398,7 +397,7 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 		if !e.deps.Host.IsLive(t.inc) {
 			// Dead (die'd or replaced) — drop, never fire. A same-id
 			// successor being live does not rescue this entry (pointer-level
-			// ABA guard, §5.3).
+			// ABA guard).
 			e.mu.Lock()
 			delete(e.mem, t.id)
 			e.mu.Unlock()
@@ -430,14 +429,14 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 		return progress
 	}
 	for _, row := range rows {
-		// Wake-first ordering, welded (拍点 8.2): the identity family's
+		// Wake-first ordering, welded: the identity family's
 		// "no live actor" case is the NORMAL restart path, not an edge case
 		// — reviving before appending is what keeps the wake from being
 		// lost into a mailbox nobody is hosting yet.
 		if err := e.deps.Revive.EnsureLive(ctx, row.AuthorID); err != nil {
 			if isReviveRejected(err) {
 				// Deterministic — this row can NEVER fire (its author is
-				// permanently unrevivable). Dispose per 拍点 8.8, same arm
+				// permanently unrevivable). Dispose it, same arm
 				// as a FireRejected poison row: left in place it would
 				// retry hot forever and, at ≥dueBatchLimit oldest rows,
 				// starve every later-due legitimate row behind it.
@@ -475,20 +474,20 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 }
 
 // isFireRejected reports whether err is (or wraps) a FireRejected — the
-// deterministic-reject class disposed per 拍点 8.8.
+// deterministic-reject class disposed as a poison row/entry.
 func isFireRejected(err error) bool {
 	var rejected FireRejected
 	return errors.As(err, &rejected)
 }
 
 // isReviveRejected reports whether err is (or wraps) a ReviveRejected — the
-// permanently-unrevivable class, disposed per the same 8.8 poison-row arm.
+// permanently-unrevivable class, disposed via the same poison-row arm.
 func isReviveRejected(err error) bool {
 	var rejected ReviveRejected
 	return errors.As(err, &rejected)
 }
 
-// loudLog is 拍点 8.8's disposal signal for a poison row/entry: the fire
+// loudLog is the disposal signal for a poison row/entry: the fire
 // never became truth (it never passed the harness), so writing a system
 // message to announce the disposal would be substrate ghost-writing
 // protocol truth on the author's behalf — layer error. The information
@@ -508,18 +507,18 @@ func (e *Engine) loudLog(id TimerID, author actor.ActorID, err error) {
 	)
 }
 
-// buildFireEnvelope constructs the fire envelope per the field table (§3.2):
+// buildFireEnvelope constructs the fire envelope per the field table:
 // TS is the engine's injected clock (never the pen — the pen leaves TS to
 // its caller, and here the engine IS the caller); Kind is welded event
-// (拍点 8.3, fire is a notification, never a request); Audience is
-// self-targeted — [author], the only legal audience for a timer's own fire
-// (§0 命题4); Sender/ChannelID stay zero (the FireSink's pen welds them —
+// (fire is a notification, never a request); Audience is
+// self-targeted — [author], the only legal audience for a timer's own fire;
+// Sender/ChannelID stay zero (the FireSink's pen welds them —
 // pen.Write fail-fasts on a non-empty value, so the engine must never fill
 // them); Visibility stays zero (StepNormalize defaults to public);
 // ParentID/ExpiresAt are never set (fire is not a reply, and event kind
-// carries no request-expiry semantics, §1.4). fireMessageID's `timer:`
+// carries no request-expiry semantics). fireMessageID's `timer:`
 // namespace + the never-reused TimerID make this id permanently unique
-// (命题8) — crash-window replay is caught by messages.id UNIQUE, not by any
+// — crash-window replay is caught by messages.id UNIQUE, not by any
 // state this engine keeps.
 func buildFireEnvelope(id TimerID, author actor.ActorID, typ string, payload []byte, correlationID message.ID, now time.Time) *message.Envelope {
 	if len(payload) == 0 {
@@ -538,7 +537,7 @@ func buildFireEnvelope(id TimerID, author actor.ActorID, typ string, payload []b
 
 // fireMessageID derives the deterministic, permanently-unique fire message
 // id from TimerID — the `timer:` namespace keeps it apart from the uuid
-// space ordinary writers mint into (v1.2 blocker fix: without the
+// space ordinary writers mint into. Without the
 // namespace, or with a reused TimerID, a stale fire's UNIQUE row could
-// swallow a legitimate new one).
+// swallow a legitimate new one.
 func fireMessageID(id TimerID) message.ID { return message.ID("timer:" + string(id)) }

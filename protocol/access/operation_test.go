@@ -47,7 +47,7 @@ func TestParseOperation(t *testing.T) {
 }
 
 // TestOperationSetSize pins the closed set at exactly 5 members. The set falls
-// out of the resource lifecycle (§1.3) and is frozen: adding a verb is a
+// out of the resource lifecycle and is frozen: adding a verb is a
 // protocol revision, so this count is a deliberate drift tripwire. It asserts on
 // the unexported backing slice allOperations directly (not a re-listed literal),
 // so a 6th constant wired into the const block + allOperations trips this test —
@@ -55,7 +55,7 @@ func TestParseOperation(t *testing.T) {
 func TestOperationSetSize(t *testing.T) {
 	t.Parallel()
 	if len(allOperations) != 5 {
-		t.Fatalf("Operation closed set drifted: allOperations has %d members, want 5 — adding/removing a verb is a protocol revision (§1.3/§2.3); update this sentinel deliberately", len(allOperations))
+		t.Fatalf("Operation closed set drifted: allOperations has %d members, want 5 — adding/removing a verb is a protocol revision; update this sentinel deliberately", len(allOperations))
 	}
 	for _, o := range allOperations {
 		if _, ok := ParseOperation(string(o)); !ok {

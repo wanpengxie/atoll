@@ -8,26 +8,25 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// stepEnvelopeShape implements proto-layer1 §2.2 — envelope shape
-// validation. It covers seven kinds of wire-level guards (round 3
-// cluster F insertion):
+// stepEnvelopeShape validates the envelope shape invariants. It covers
+// seven kinds of wire-level guards:
 //
-//  1. content fields present (proto-layer0 §1.1)
+//  1. content fields present
 //  2. payload wellformedness — non-empty payload must be valid JSON and not
-//     the null literal (L0 §2.2: payload={} legal, payload=null not; empty
+//     the null literal (payload={} legal, payload=null not; empty
 //     stays legal here — Step Normalize fills the {} default)
 //  3. envelope.channel_id == the harness-bound channel (unconditional)
 //  4. kind ∈ {event, request, response}
 //  5. visibility (when non-empty) ∈ {public, private, system} — Step
 //     Normalize fills the default when caller leaves it empty.
-//  6. audience cardinality + wildcard ban (proto-layer0 §2.3)
+//  6. audience cardinality + wildcard ban
 //  7. response.parent_id non-null
 //
-// (The proto-layer0 §7.3 unknown-top-level-field fail-closed reject is NOT a
-// harness step: it rides the Envelope type — message.Envelope.UnmarshalJSON
-// rejects out-of-set keys at every wire decode, so by the time a decoded
-// envelope reaches this chain the field set is already closed; in-process Go
-// struct callers cannot drift on field set at all.)
+// (The unknown-top-level-field fail-closed reject is NOT a harness step: it
+// rides the Envelope type — message.Envelope.UnmarshalJSON rejects
+// out-of-set keys at every wire decode, so by the time a decoded envelope
+// reaches this chain the field set is already closed; in-process Go struct
+// callers cannot drift on field set at all.)
 //
 // The step runs after CallerAuth and before SenderConsistent/Normalize, so
 // downstream stages never see a malformed envelope.
@@ -38,7 +37,7 @@ func newStepEnvelopeShape(d Deps) step { return &stepEnvelopeShape{deps: d} }
 func (s *stepEnvelopeShape) ID() stepID { return StepEnvelopeShape }
 
 func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
-	// (1) content fields present — proto-layer0 §1.1.
+	// (1) content fields present.
 	switch {
 	case env.ID == "":
 		return rejectFieldMissing("envelope.id required"), nil
@@ -54,7 +53,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		return rejectFieldMissing("envelope.ts required"), nil
 	}
 
-	// (2) payload wellformedness — L0 §2.2: payload={} legal, payload=null
+	// (2) payload wellformedness — payload={} is legal, payload=null is
 	// not. Truth is append-only, so a malformed payload admitted here is a
 	// protocol-illegal row FOREVER (and an in-process json.RawMessage("{bad")
 	// would additionally break every later delivery marshal of the committed
@@ -90,7 +89,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		}, nil
 	}
 
-	// (4) kind closed set — proto-layer0 §2.1.
+	// (4) kind closed set.
 	switch env.Kind {
 	case message.KindEvent, message.KindRequest, message.KindResponse:
 	default:
@@ -100,7 +99,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		}, nil
 	}
 
-	// (5) visibility closed set — proto-layer0 §2.4.
+	// (5) visibility closed set.
 	// Empty visibility is legal here (Step Normalize defaults to public).
 	if env.Visibility != "" {
 		if _, ok := message.ParseVisibility(string(env.Visibility)); !ok {
@@ -111,10 +110,9 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		}
 	}
 
-	// (6) audience wildcard ban — proto-layer0 §2.3 (pure format, no
-	// channel truth). Wildcard "*" was removed from the audience closed
-	// set (owner reframed addressing as Erlang-style explicit `pid !
-	// msg`); every audience entry MUST be a literal actor_id.
+	// (6) audience wildcard ban (pure format, no channel truth).
+	// Addressing is Erlang-style explicit `pid ! msg`; every audience
+	// entry MUST be a literal actor_id.
 	//
 	// Audience EMPTINESS and request/response cardinality are NOT
 	// validated here: empty/cardinality checks all live in
@@ -141,12 +139,10 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 	return outcome{}, nil
 }
 
-// rejectFieldMissing returns the proto-layer1 §2.2 reject for missing
-// content fields.
+// rejectFieldMissing returns the reject outcome for missing content fields.
 func rejectFieldMissing(detail string) outcome {
 	return outcome{
 		RejectReason: HarnessEnvelopeFieldMissing,
 		Detail:       detail,
 	}
 }
-

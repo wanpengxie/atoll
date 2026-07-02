@@ -32,11 +32,11 @@ type OpenOptions struct {
 }
 
 // openChannelDB opens (creating if absent) the per-channel messages.sqlite at
-// dbPath, runs ChannelLocalDDL, and returns the raw *sql.DB. UNEXPORTED by
-// design (§4.5): the raw handle must never cross the store boundary — only the
+// dbPath, runs ChannelLocalDDL, and returns the raw *sql.DB. Unexported by
+// design: the raw handle must never cross the store boundary — only the
 // OpenChannel assembly (channel.go) may hold it, exposing storespec interfaces.
 //
-// Pragmas applied (per L2 §1.4 sqlite tuning):
+// Pragmas applied:
 //
 //	PRAGMA journal_mode=WAL
 //	PRAGMA synchronous=NORMAL

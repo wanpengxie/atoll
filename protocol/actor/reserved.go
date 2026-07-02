@@ -30,7 +30,7 @@ package actor
 // there is no deserialization gate to own. kernel only OWNS these canonical
 // names (only the substrate can authoritatively define its own mirror-event
 // vocabulary); deciding whether a given type is reserved AND whether its sender
-// is authorized to emit it is the write engine's job (harness §6.2.0), never a
+// is authorized to emit it is the write engine's job (in the harness), never a
 // kernel concern. These are plain string consts by design, not a set type.
 const (
 	ReservedSystemChannelCreated    = "system.channel.created"

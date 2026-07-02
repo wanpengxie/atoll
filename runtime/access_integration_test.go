@@ -16,12 +16,13 @@ import (
 )
 
 // TestAccessDoorVerticalSlice drives the whole plane-2 door assembled by
-// OpenChannel over a real sqlite file — every §4 branch (two loci, the A8
-// union, day-1 Ops narrowing, non-lossy delete, fresh re-birth, and dynamic
-// membership) against the actual resourceRegistry + kvDriver + membership
-// adapter, not fakes. It is the integration counterpart to accessdoor's
-// in-package unit tests: those exercise the tree with injected fakes; this
-// proves the runtime wiring hands the door its real collaborators.
+// OpenChannel over a real sqlite file — every branch (two loci, the
+// grantee-kind union, day-1 Ops narrowing, non-lossy delete, fresh re-birth,
+// and dynamic membership) against the actual resourceRegistry + kvDriver +
+// membership adapter, not fakes. It is the integration counterpart to
+// accessdoor's in-package unit tests: those exercise the tree with injected
+// fakes; this proves the runtime wiring hands the door its real
+// collaborators.
 func TestAccessDoorVerticalSlice(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)

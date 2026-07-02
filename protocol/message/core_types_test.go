@@ -3,9 +3,8 @@ package message
 import "testing"
 
 // TestLookupCoreType pins the core-type closed set and each entry's rule
-// (DefaultKind + AllowOverride) per impl-vocabulary §2.1. These are
-// engine-built-in types; their default kind and override policy are part
-// of the substrate contract.
+// (DefaultKind + AllowOverride). These are engine-built-in types; their
+// default kind and override policy are part of the substrate contract.
 func TestLookupCoreType(t *testing.T) {
 	t.Parallel()
 
@@ -75,9 +74,9 @@ func TestLookupCoreTypeRejectsNonCore(t *testing.T) {
 
 // TestCoreTypeTableCardinality pins the core-type closed set at exactly the 2
 // live-producer entries. New core types are a protocol change; this count is a
-// deliberate drift tripwire (and confirms the zero-producer entries removed in
-// the 2026-06-11 cleanup — core.system_event / file.* — plus heartbeat /
-// agent.progress, are all absent).
+// deliberate drift tripwire (and confirms the zero-producer entries —
+// core.system_event / file.* — plus heartbeat / agent.progress, are all
+// absent).
 func TestCoreTypeTableCardinality(t *testing.T) {
 	t.Parallel()
 	known := []string{"human.text", "agent.text"}

@@ -21,8 +21,8 @@ const (
 // materialises receiver_unavailable when the actor is gone). actor.status
 // (QueryStatus, status.go) is the additive, pain-driven self-answer for an actor
 // whose non-trivial LIVE state (e.g. a device adapter's attach online/offline
-// flag) is knowable independent of any in-flight request — a真存量 the actor
-// alone can report, not a trivial constant.
+// flag) is knowable independent of any in-flight request — a real live quantity
+// the actor alone can report, not a trivial constant.
 
 // DescribeRequest is the actor.describe request payload. Empty = the full
 // self-answer (Describe); Type set = the single-type answer (DescribeType).
@@ -33,7 +33,7 @@ type DescribeRequest struct {
 // ObsDevicePresence is the conventional actor-source obs KIND a device-bearing adapter
 // PUSHes (PublishObs) to surface its external device's liveness — a best-effort,
 // advisory hint, NEVER authoritative reachability (that stays send→terminal).
-// Opaque to substrate/platform (守结构不守词汇); shared by the publishing adapter
+// Opaque to substrate/platform (they enforce structure, not vocabulary); shared by the publishing adapter
 // and the consuming app/view ONLY. **Absence of any value = unknown, NOT offline**
 // — many devices have no liveness signal, so an adapter that cannot observe simply
 // never publishes.

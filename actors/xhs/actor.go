@@ -53,8 +53,7 @@ const defaultReaperInterval = time.Second
 // The substrate runs Start/Stop/Receive serially on the cell goroutine, so the
 // inward face needs no locks. The device read loop + reaper run on their own
 // goroutines and emit channel responses directly through the writer; their
-// shared state is guarded inside *device (the one cross-goroutine boundary,
-// adapter-actor-spec §4).
+// shared state is guarded inside *device (the one cross-goroutine boundary).
 type Actor struct {
 	pen     harness.Pen
 	actorID actor.ActorID
@@ -100,9 +99,9 @@ var _ actorrt.Stopper = (*Actor)(nil)
 func (a *Actor) Start(ctx context.Context, self actorrt.ActorContext) error {
 	a.obs = self
 	// The trust model assumes a loopback bind (only same-machine processes can
-	// reach the keyless endpoint). A non-loopback addr is a CONFIG ERROR (spec
-	// §6.1): it would expose the keyless device port to the network. Fail fast
-	// (positive death) rather than start a serviceable-but-exposed endpoint.
+	// reach the keyless endpoint). A non-loopback addr is a CONFIG ERROR: it
+	// would expose the keyless device port to the network. Fail fast (positive
+	// death) rather than start a serviceable-but-exposed endpoint.
 	if !isLoopbackAddr(a.dev.addrCfg) {
 		return fmt.Errorf("xhs: device endpoint is keyless and trusts localhost; refusing non-loopback bind %q (use 127.0.0.1)", a.dev.addrCfg)
 	}

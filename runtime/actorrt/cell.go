@@ -79,7 +79,7 @@ type cell struct {
 	// inflight maps a live request's id to its per-request cancel. Each Receive
 	// runs under a reqCtx derived from c.ctx (deadline from ExpiresAt, else plain
 	// cancel); the entry is recorded before the call and removed when it closes.
-	// This is the request-scope of cancel(scope): an off-loop fire (P4 cross-wire
+	// This is the request-scope of cancel(scope): an off-loop fire (a cross-wire
 	// KindCancel) cancels exactly the one Receive holding the goroutine without
 	// queuing behind it. Built WITH its collapse — the entry is deleted the
 	// instant the request closes, so the table never outlives its requests.
@@ -88,7 +88,7 @@ type cell struct {
 }
 
 // allocShell allocates a cell SHELL (impl=nil, live=false) — phase 1 of the
-// two-phase Spawn (§3.2). The returned pointer is the incarnation's stable p;
+// two-phase Spawn. The returned pointer is the incarnation's stable p;
 // Spawn fills c.impl from the build closure (OUTSIDE the lock, while IsLive is
 // still false), then flips live true at go-live. mailbox is the bounded inbox
 // depth; onExit is the self-eviction hook; onDown publishes the death (embodiment
@@ -244,7 +244,7 @@ func (c *cell) start() {
 // safeReceive invokes impl.Receive under a per-request ctx derived from c.ctx.
 // The reqCtx is the request-scope of cancel(scope): it carries the ExpiresAt
 // deadline (so an expired request's downstream work unwinds at its instant) and
-// is the handle an off-loop cancel (caller abandon / P4 cross-wire) fires to
+// is the handle an off-loop cancel (caller abandon / cross-wire) fires to
 // interrupt exactly this Receive. The serial model is unchanged — one reqCtx is
 // live at a time; it is a per-call scope, not concurrency.
 //
@@ -314,7 +314,7 @@ func (c *cell) cancelRequest(id message.ID) {
 }
 
 // initiateStop implements embodiment: the non-blocking, idempotent SIGNAL half of
-// teardown (§3.1a) — trigger death and return at once, WITHOUT joining c.done.
+// teardown — trigger death and return at once, WITHOUT joining c.done.
 // It is stop()'s signal half; stop() = initiateStop() + join. Both share
 // stopOnce, so calling either (or both, in either order) is safe — the body
 // runs exactly once, and c.done is safe to read from multiple goroutines.

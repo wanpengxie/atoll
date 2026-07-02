@@ -16,8 +16,8 @@
 //     responses go to shell.Deliver, which Matches author#2 (disarms the
 //     timeout) and wakes a bounded-window waiter — a final nobody consumed
 //     falls through as a new turn.
-//   - A private LLM loop goroutine (the CLIENT EDGE — blocking is legal here,
-//     §2.7) runs go-kimi turns serially; tool calls drive shell ops (the shell
+//   - A private LLM loop goroutine (the CLIENT EDGE — blocking is legal here)
+//     runs go-kimi turns serially; tool calls drive shell ops (the shell
 //     builds requests via behavior.BuildRequest, Arms author#2, emits, and
 //     waits a bounded fast-path window for the sync experience the model's
 //     training distribution expects).
@@ -64,7 +64,7 @@ const (
 	EnvKeyModel   = "KIMI_MODEL"
 
 	// EnvKeyChannelType / EnvKeyDomainPrompt feed the prompt-cache
-	// friendly base prompt (L4 §2.4 + L0-L2 platform teaching).
+	// friendly base prompt (platform teaching plus per-channel-type prompt).
 	EnvKeyChannelType  = "ATOLL_CHANNEL_TYPE"
 	EnvKeyDomainPrompt = "ATOLL_DOMAIN_PROMPT"
 )
@@ -127,8 +127,8 @@ func NewConfigFromEnv(systemPrompt string) (Config, error) {
 
 // NewConfigFromSpec builds a Config from the platform env DEFAULTS, then
 // overlays the per-instance spec.Config (channel_actors.config_json — an opaque
-// blob the looper SELF-PARSES; atoll imposes no config structure, agent-spec
-// §三). An agent's own config can fully supply creds (a user agent carrying its
+// blob the looper SELF-PARSES; atoll imposes no config structure). An
+// agent's own config can fully supply creds (a user agent carrying its
 // own key) or just override a knob (model); env is the fallback the server's
 // boost agent rides. A required field (APIKey / Model) missing from BOTH is a
 // hard error, so the host fails fast at assembly time.
@@ -445,7 +445,7 @@ func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (ki
 }
 
 // checkpointSession writes the current go-kimi session id into the durable
-// state slot (agent-spec §三). The looper is the slot's only author; atoll
+// state slot. The looper is the slot's only author; atoll
 // stores the bytes opaquely. No-op when there is no slot (Checkpoint nil) or no
 // resolved session yet (a brand-new agent records on a later boot, once its
 // session exists in the durable WorkDir).

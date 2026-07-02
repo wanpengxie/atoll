@@ -10,10 +10,11 @@ import (
 )
 
 // buildMCPServer wraps the 7 atoll meta-tools as an in-process SDK MCP server
-// — the claude looper's path to the shared actor-invocation machinery (agent-spec
-// §三 必须项 #1: "能把标准 meta-tool 注入自己的工具面并调通"; the go-kimi looper
-// does the same via AdditionalTools). Each handler bridges to the held shell with
-// the in-flight turn's RuntimeContext. The handler reads b.shell LAZILY (the
+// — the claude looper's path to the shared actor-invocation machinery (every
+// looper must be able to inject the standard meta-tools into its own tool
+// surface and invoke them; the go-kimi looper does the same via
+// AdditionalTools). Each handler bridges to the held shell with the
+// in-flight turn's RuntimeContext. The handler reads b.shell LAZILY (the
 // server is built before Start assigns it; handlers only fire mid-turn, well
 // after) so the binding is order-independent.
 func (b *Bridge) buildMCPServer() *claude.McpSdkServerConfig {

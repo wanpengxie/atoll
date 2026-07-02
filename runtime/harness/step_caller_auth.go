@@ -6,21 +6,19 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// stepCallerAuth implements proto-layer1 §2.0 step 0+1 — caller principal
-// validation. The harness consumes the caller attached via ctxWithCaller (set
-// by the boundPen from the welded principal before driving the chain). When no
-// caller is attached we reject harness_engine_acl_denied (defensive — the
-// boundPen always wires it).
+// stepCallerAuth validates the caller principal. The harness consumes the
+// caller attached via ctxWithCaller (set by the boundPen from the welded
+// principal before driving the chain). When no caller is attached we reject
+// harness_engine_acl_denied (defensive — the boundPen always wires it).
 //
 // Channel mismatch detection is split:
 //
 //   - caller.ChannelID vs the harness-bound channel is a *caller* identity
 //     mismatch (caller bound to the wrong channel) → harness_engine_acl_denied.
 //   - envelope.channel_id vs the harness-bound channel is an *envelope*
-//     shape error per proto-layer1 §2.2 #2 → harness_channel_mismatch,
-//     emitted by step_envelope_shape (Step 2). step 0+1 leaves the
-//     envelope.channel_id alone so Step 2 can surface the dedicated
-//     reason.
+//     shape error → harness_channel_mismatch, emitted by step_envelope_shape
+//     (Step 2). step 0+1 leaves the envelope.channel_id alone so Step 2 can
+//     surface the dedicated reason.
 type stepCallerAuth struct {
 	deps Deps
 }

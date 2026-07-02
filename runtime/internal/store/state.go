@@ -13,12 +13,12 @@ import (
 )
 
 // stateStore implements resourcespec.StateStore over the actor_state table — the
-// byte realizer for the ACTOR-SCOPED storage locus (forward §6 · §12.9 拍点 8.1).
-// It is the collapsed-branch dual of resourceRegistry+kvDriver: no R, no grants,
-// no kind routing (day-1 one mechanical shape). owner is a COORDINATE welded by
-// the door at handle mint (reachable set ≡ {owner}); this store only persists
-// (mirrors storespec's store-not-validate discipline), it never re-checks
-// authorization. Bound to one channel database (access is channel-封).
+// byte realizer for the ACTOR-SCOPED storage locus. It is the collapsed-branch
+// dual of resourceRegistry+kvDriver: no R, no grants, no kind routing (day-1
+// one mechanical shape). owner is a COORDINATE welded by the door at handle
+// mint (reachable set ≡ {owner}); this store only persists (mirrors
+// storespec's store-not-validate discipline), it never re-checks
+// authorization. Bound to one channel database (access is channel-scoped).
 type stateStore struct {
 	db *sql.DB
 	// nowMs stamps created_at. Injectable (tests pin it) — the rest of the
@@ -136,8 +136,8 @@ func (s *stateStore) Delete(ctx context.Context, owner actor.ActorID, id resourc
 // clearActorScopedTx cascades the actor-scoped state locus: it deletes every
 // actor_state row owned by owner, inside the SAME transaction that deregisters
 // the actor (both dereg entry points in actors.go hang it there). This is the
-// scope law (§10.12 row 3 / forward §6.5③): an actor's private persistent state
-// 亡 with the actor (Erlang ETS private — owner 亡表随亡). Idempotent: a re-run
+// scope law: an actor's private persistent state dies with the actor (like
+// Erlang ETS private tables dying with their owner). Idempotent: a re-run
 // over an already-cleared owner deletes zero rows. The channel-scoped resources
 // table is deliberately NOT touched — those objects are non-lossy, outliving
 // their creator and dying only on explicit delete / channel destroy.

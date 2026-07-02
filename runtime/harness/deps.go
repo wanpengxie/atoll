@@ -47,7 +47,7 @@ type caller struct {
 	// kind is the WELDED kind — set once at Mint time, the pen-authoritative
 	// counterpart of actorID. stepSenderConsistent reads it (via
 	// callerFromCtx) instead of querying the registry: kind is welded truth,
-	// not a name-list lookup (§3.2 incarnation-dynamics-build-spec.md).
+	// not a name-list lookup.
 	kind actor.Kind
 
 	// chID is the channel binding the caller is authenticated for.
@@ -69,10 +69,9 @@ type Deps struct {
 	// (There is NO ActorRegistry dep: the sender door trusts the pen weld —
 	// identity + kind are welded at Mint, liveness is gated one layer up by
 	// livePen.IsLive() — so no step reads the membership registry at write
-	// time (incarnation-dynamics-build-spec §3.2; the receiver/audience half
-	// was evicted earlier by root4). The substrate is likewise type-agnostic —
-	// no TypeRegistry dep either: business-type vocabulary is a domain
-	// concern, not a substrate write-time check.)
+	// time (the receiver/audience half was evicted earlier). The substrate is
+	// likewise type-agnostic — no TypeRegistry dep either: business-type
+	// vocabulary is a domain concern, not a substrate write-time check.)
 
 	// Log is the channel-local messages-table sink. Required — step 9
 	// engine append calls Log.Append. (v2: no fencing — single writer.)
@@ -122,8 +121,8 @@ func callerFromCtx(ctx context.Context) caller {
 	return caller{}
 }
 
-// (The former CtxWithRawEnvelope raw-JSON injection seam is gone: the L0
-// §7.3 unknown-top-level-field fail-closed check now rides the Envelope TYPE
+// (The former CtxWithRawEnvelope raw-JSON injection seam is gone: the
+// unknown-top-level-field fail-closed check now rides the Envelope TYPE
 // itself — message.Envelope.UnmarshalJSON rejects out-of-set keys at every
 // wire decode, so there is no per-binding plumbing obligation left to
 // enforce, and no binding can forget it.)

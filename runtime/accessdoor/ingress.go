@@ -18,9 +18,9 @@ var ErrMalformed = errors.New("accessdoor: malformed invocation")
 // ingress runs the shape-check cluster in order; any failure short-circuits to
 // ErrMalformed (wrapping a detail). It is the structural layer only — the day-1
 // {read,write} Ops narrowing is a SEPARATE authorization step (day1OpsOverreach),
-// not folded in here (opus-F2: structure→error and overreach→verdict stay two
-// distinct layers). The cluster's members are named pure functions so each rule
-// is independently unit-testable, mirroring a harness step's testability without
+// not folded in here: structure→error and overreach→verdict stay two distinct
+// layers. The cluster's members are named pure functions so each rule is
+// independently unit-testable, mirroring a harness step's testability without
 // borrowing its machinery.
 func ingress(op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) error {
 	if err := checkOperation(op); err != nil {
@@ -137,9 +137,9 @@ func ValidateGrant(g access.Grant) error {
 // day1OpsOverreach is the post-ingress authorization step (NOT a structural
 // check): on op=set, day-1 narrows the granted Ops to {read,write}. Granting
 // set/delete is structurally legal (ValidateGrant lets it through) but delegates
-// control (= §11), so day-1 it is OVERREACH → access_denied verdict — a REJECT,
-// not a silent clamp (v1's clamp is dead). ok reports whether the step applies
-// (op=set with a grant); over reports the overreach.
+// control, so day-1 it is OVERREACH → access_denied verdict — a REJECT, not a
+// silent clamp. ok reports whether the step applies (op=set with a grant); over
+// reports the overreach.
 func day1OpsOverreach(op access.Operation, grant *access.Grant) (over bool, ok bool) {
 	if op != access.OpSet || grant == nil {
 		return false, false

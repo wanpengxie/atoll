@@ -21,8 +21,8 @@ import (
 
 // device.go is the outward (device) face: a PRIVATE WS endpoint the extension
 // connect-ins to, the single accepted connection, the in-flight correlation
-// table, the read loop, and the deadline reaper. This is the adapter's封闭
-// transport — inlined here, NOT a shared framework piece (adapter-actor-spec §7).
+// table, the read loop, and the deadline reaper. This is the adapter's own
+// closed transport — inlined here, NOT a shared framework piece.
 //
 // Concurrency: the cell goroutine (Receive) calls dispatch; the read loop +
 // reaper run on their own goroutines. The mutex guards ONLY the in-flight table
@@ -31,11 +31,11 @@ import (
 // a write deadline, so a stuck peer can never freeze the mutex (which the reaper,
 // Stop, and accept all share). Channel emits (RespondJSON/Fail) go straight
 // through the writer from whichever goroutine closes the request, because the
-// substrate has no self-send (adapter-actor-spec §4).
+// substrate has no self-send.
 //
 // Device presence is tracked internally (conn==nil ⇒ offline ⇒ Receive fast-
 // fails device_offline) AND pushed on its up/down edges via the actor-source obs
-// PUSH axis (owner.publishDevicePresence → ActorContext.PublishObs, D7). That is
+// PUSH axis (owner.publishDevicePresence → ActorContext.PublishObs). That is
 // OUT-OF-BAND obs (non-truth), NOT a channel event / truth-log entry — the home
 // folds it into a volatile L3 level (advisory; authoritative reachability stays
 // send→terminal). See actor.go publishDevicePresence.
@@ -222,8 +222,7 @@ func (d *device) handleAccept(w http.ResponseWriter, r *http.Request) {
 // readLoop drains one connection's up-frames until it errors/closes. On exit it
 // flips offline IFF it is still the live connection (pointer identity — a newer
 // accept may have displaced it). In-flight requests are NOT failed here — the
-// reaper collects them at their deadline (adapter-actor-spec §6.2: don't brute-
-// fail on drop).
+// reaper collects them at their deadline (don't brute-fail on drop).
 func (d *device) readLoop(conn *websocket.Conn) {
 	defer d.wg.Done()
 	conn.SetReadLimit(maxDeviceFrameBytes)
@@ -345,8 +344,8 @@ func (d *device) dropConn(conn *websocket.Conn) {
 }
 
 // reaper sweeps the in-flight table for past-deadline requests and fails them
-// with timeout. It is the one timeout authority (adapter-actor-spec §3.3) — the
-// read loop never times out, the reaper never matches replies.
+// with timeout. It is the one timeout authority — the read loop never times
+// out, the reaper never matches replies.
 func (d *device) reaper(ctx context.Context) {
 	defer d.wg.Done()
 	ticker := time.NewTicker(d.reaperInterval)

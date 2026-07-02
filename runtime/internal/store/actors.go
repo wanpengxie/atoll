@@ -181,8 +181,8 @@ func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error 
 }
 
 // Deregister implements storespec.Registry. It runs in a transaction so the
-// deregistration transition and the actor-scoped state cascade (§10.12 row 3 /
-// forward §6.5③: owner 亡 ⟹ its private state 亡) commit atomically. The no-op
+// deregistration transition and the actor-scoped state cascade (an owner's
+// death implies its private state dies too) commit atomically. The no-op
 // semantics are preserved: a missing or already-deregistered actor changes zero
 // rows, so nothing is cascaded and no error is returned.
 func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int64) error {
@@ -215,9 +215,9 @@ func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int
 	if err := clearActorScopedTx(ctx, tx, id); err != nil {
 		return err
 	}
-	// Same tx: cascade-clear its identity-level pending timers (§10.12 row 6).
-	// A parallel call, not folded into the state cascade above — one locus, one
-	// function (v1.2 opus-nit; see clearTimersTx doc in timers.go).
+	// Same tx: cascade-clear its identity-level pending timers. A parallel call,
+	// not folded into the state cascade above — one locus, one function (see
+	// clearTimersTx doc in timers.go).
 	if err := clearTimersTx(ctx, tx, id); err != nil {
 		return err
 	}
@@ -234,7 +234,7 @@ func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int
 
 // Membership transition DTOs (storespec.MemberActorAdd / storespec.MemberActorRemove)
 // + the MembershipControlPlane contract live in runtime/storespec (contract
-// types, §4.5). This file is their sqlite implementation.
+// types). This file is their sqlite implementation.
 
 // ApplyMemberTransitions mutates actor_registry and appends the matching
 // system.actor.* mirror events in one sqlite transaction. Duplicate retries
@@ -399,12 +399,12 @@ func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, rem
 		return false, nil
 	}
 	// Deregistration took effect this tx — cascade-clear the actor's state in the
-	// same tx (scope law, §10.12 row 3), atomic with the deregistered_at write.
+	// same tx (scope law), atomic with the deregistered_at write.
 	if err := clearActorScopedTx(ctx, tx, remove.ID); err != nil {
 		return false, err
 	}
-	// Same tx: cascade-clear its identity-level pending timers (§10.12 row 6),
-	// parallel to the state cascade above.
+	// Same tx: cascade-clear its identity-level pending timers, parallel to the
+	// state cascade above.
 	if err := clearTimersTx(ctx, tx, remove.ID); err != nil {
 		return false, err
 	}

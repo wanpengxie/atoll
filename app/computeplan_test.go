@@ -6,11 +6,11 @@ import (
 	"testing"
 )
 
-// TestComputePlan_DaemonAssignmentOnly verifies the daemon pull endpoint
-// (daemon-composition spec §3 / acceptance D4 + B1/B2/B3): introduce a claude
-// agent with placement='daemon' and GET /compute/plan returns EXACTLY that
-// instance (engine=class → class "claude"); the server-placed boost is NOT in
-// it (placement filtering). This is the data the daemon builds — no blind-build.
+// TestComputePlan_DaemonAssignmentOnly verifies the daemon pull endpoint:
+// introduce a claude agent with placement='daemon' and GET /compute/plan
+// returns EXACTLY that instance (engine=class → class "claude"); the
+// server-placed boost is NOT in it (placement filtering). This is the data
+// the daemon builds — no blind-build.
 func TestComputePlan_DaemonAssignmentOnly(t *testing.T) {
 	env := setupTestApp(t)
 	_, cookies := register(t, env, "plan@example.com", "secret123", "Owner")

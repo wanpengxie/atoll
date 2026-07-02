@@ -15,8 +15,8 @@
 //   - It cannot live in runtime/actorrt (actorrt must never import
 //     runtime/harness — fork.go) nor in harness/accessdoor/schedule (none of
 //     those may reach across to the others). Caps sits ABOVE all four, which is
-//     a downstream (lib) concern, not a runtime one — the wiring期 places it
-//     here rather than inventing a new runtime package.
+//     a downstream (lib) concern, not a runtime one — placed here rather than
+//     inventing a new runtime package.
 //   - As a lib leaf it is importable by BOTH the platform assembly root and by
 //     channelkit (which cannot import platform — platform imports channelkit,
 //     so a Caps in platform root would be a cycle the moment channelkit needs

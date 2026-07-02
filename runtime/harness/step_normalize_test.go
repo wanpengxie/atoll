@@ -7,7 +7,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// StepNormalize contract — default-fill + time-relation guard (proto-layer1 §2.4).
+// StepNormalize contract — default-fill + time-relation guard.
 func TestStepNormalize_Defaults(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)
@@ -39,12 +39,12 @@ func TestStepNormalize_Defaults(t *testing.T) {
 	// not by normalize — the full-Write contract is pinned in chain_test.go.
 }
 
-// TestStepNormalize_DoesNotFillKind pins the C7 (2026-06-11) invariant: normalize
+// TestStepNormalize_DoesNotFillKind pins the invariant: normalize
 // NEVER fills kind — not for core types, not for business types. kind is
 // sender-required and enforced upstream by stepEnvelopeShape (empty kind →
-// field_missing, short-circuit), so a kind-fill in normalize is dead code. The
-// former "core type fills default kind" behaviour was removed; the core-type
-// table's kind field is now a constraint in stepKindAndAudience, not a fill.
+// field_missing, short-circuit), so a kind-fill in normalize is dead code.
+// The core-type table's kind field is a constraint in stepKindAndAudience,
+// not a fill.
 func TestStepNormalize_DoesNotFillKind(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)

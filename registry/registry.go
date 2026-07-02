@@ -23,16 +23,16 @@ type Deps struct {
 	DeviceName   string     // device identity (for the device class's id)
 	Logger       *slog.Logger
 
-	// State is the durable per-instance state slot (agent-spec §二/§三): a
-	// platform-managed session dir + an opaque checkpoint blob
-	// (channel_actors.state) the looper alone authors. Zero value = no durable
-	// state (ephemeral working session). The agent is its first consumer.
+	// State is the durable per-instance state slot: a platform-managed session
+	// dir + an opaque checkpoint blob (channel_actors.state) the looper alone
+	// authors. Zero value = no durable state (ephemeral working session). The
+	// agent is its first consumer.
 	State StateSlot
 }
 
 // StateSlot is one actor instance's durable state seam. atoll NEVER interprets
-// the blob — it only persists and replays it (agent-spec §三); the looper is the
-// blob's only author.
+// the blob — it only persists and replays it; the looper is the blob's only
+// author.
 type StateSlot struct {
 	Dir   string                      // platform-managed durable session dir ("" = ephemeral)
 	Seed  json.RawMessage             // last persisted opaque checkpoint, read at boot
@@ -47,7 +47,7 @@ type StateSlot struct {
 //   - ID != "" → instantiate this class under that id; the SAME class can be
 //     instantiated many times under different ids (multi-agent falls out here).
 //   - device ignores ID and derives it from the device identity (essence
-//     singleton: id IS the resource — see actor-instance-model §5.1).
+//     singleton: id IS the resource).
 type InstanceSpec struct {
 	ID     actor.ActorID
 	Config json.RawMessage

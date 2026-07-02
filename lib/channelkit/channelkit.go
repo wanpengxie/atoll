@@ -25,7 +25,7 @@ type Channel struct {
 	// the harness.
 	deliverer actorrt.Deliverer
 
-	// Death-edge closure (author #3): on a death edge the watcher writes
+	// Death-edge closure: on a death edge the watcher writes
 	// receiver_unavailable for every in-flight request addressed to the dead
 	// actor. nil systemPen/openReqs → OnDown writes no terminals locally (the dead
 	// cell already self-evicted); the caller is responsible for closing the
@@ -50,9 +50,9 @@ type Config struct {
 	// construction (no back-fill, no construction cycle). channelkit assembles
 	// cells and does not know domain actor types. nil → no system cell.
 	System func(rt *actorrt.Runtime) actorrt.Actor
-	// SystemPen + OpenRequests wire the death-edge closure (author #3). SystemPen is
+	// SystemPen + OpenRequests wire the death-edge closure. SystemPen is
 	// the system Pen the composition root injects (Mint(SystemActorID, chID)): the
-	// system identity is welded into the pen, so author #3's terminals are system-
+	// system identity is welded into the pen, so the closure's terminals are system-
 	// authored by construction — channelkit never stamps a caller itself.
 	SystemPen    harness.Pen
 	OpenRequests storespec.MessageQuery
@@ -89,7 +89,7 @@ func New(cfg Config) *Channel {
 	// may be missed (closure-critical path).
 	c.cells.WatchDown(c)
 	// Spawn the intrinsic system cell, built against the live runtime. It uses the
-	// RAW system pen (anchor not wrapped in a livePen, §3.5): the system actor
+	// RAW system pen (anchor not wrapped in a livePen): the system actor
 	// writes singleton SystemActorID terminals, has no successor principal to
 	// impersonate, and the closure reconciler must write even when no cell is live
 	// — gating it would defeat it. So no incarnation is welded here.
@@ -114,10 +114,10 @@ func (c *Channel) Deliverer() actorrt.Deliverer { return c.deliverer }
 // the embodiment (obs push), and the Channel is just a subscriber. On the edge it
 // materialises receiver_unavailable (the closure REACTION — work that lands in
 // truth) for every in-flight request addressed to the dead actor. The terminal
-// is SYSTEM-authored — harness Step 8 authorises sender==system +
+// is SYSTEM-authored — the harness authorises sender==system +
 // reason==receiver_unavailable. This is the substrate's ONLY closure obligation;
-// without it a dead cell is a black hole that hangs every waiting caller
-// (construction-spec §3.3). Death itself is NOT truth; this reaction is.
+// without it a dead cell is a black hole that hangs every waiting caller.
+// Death itself is NOT truth; this reaction is.
 //
 // It MUST NOT despawn the id: the dead embodiment has ALREADY self-evicted (the
 // runtime's pointer-identity removeIf ran before publishing this edge). A
@@ -131,8 +131,8 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 	// (Mint(SystemActorID)), which welds sender==SystemActorID + the channel id
 	// into every write. No caller injection here — identity rides the pen.
 	//
-	// Delegate the closure materialisation to the behaviour base (author#3, ONE
-	// implementation, co-located with the other two authors — P13). channelkit
+	// Delegate the closure materialisation to the behaviour base (the single
+	// implementation, co-located with its counterparts). channelkit
 	// only injects the seams (system pen + store drain) and an onFault log
 	// callback; the base holds no logger.
 	onFault := func(reqID message.ID, err error) {
@@ -159,7 +159,7 @@ func (p livenessProbe) Present(id actor.ActorID) bool {
 	return ok
 }
 
-// Reconcile runs the closure level scan (author #3 reconciler): for every
+// Reconcile runs the closure level scan (the reconciler): for every
 // receiver that still holds an open request and is currently ABSENT from the
 // substrate liveness view, materialise receiver_unavailable. This is the
 // level-triggered correctness backstop the death edge alone cannot give — a lost

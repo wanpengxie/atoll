@@ -5,8 +5,7 @@
 // compute nodes / link / liveness / resources) into the message universe so the
 // logical universe closes over its own physical body. Other actors do NOT import
 // it — they reach it by sending a message to the well-known actor.SystemActorID,
-// exactly as userspace traps into the kernel by syscall number. Full design:
-// .dalek/pm/sysactor-design.md.
+// exactly as userspace traps into the kernel by syscall number.
 //
 // WHY platform/internal (ring 0): the door needs platform-internal capability
 // that ordinary actors must NOT hold. Living in lib would give it the same
@@ -30,7 +29,7 @@
 // What it does today: the channel's LIVENESS projection. It answers the
 // channel-wide directory query (actor.list) as a composed, on-read view
 // (membership ∧ liveness, the formula owned by introspect.QueryList). It is
-// ADVISORY — never a dispatch gate (P15/P16): reachability authority is
+// ADVISORY — never a dispatch gate: reachability authority is
 // send→terminal, and the dispatch path never reads this actor's view. It runs as
 // a channel-intrinsic cell, spawned once per channel at creation. Operating the
 // physical body (scale/budget) is the same door's future additive surface, not

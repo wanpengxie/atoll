@@ -188,7 +188,7 @@ func (r *fakeReviver) callCount() int {
 var _ Reviver = (*fakeReviver)(nil)
 
 // stubActor is a minimal actorrt.Actor — never actually receives anything in
-// these tests (the engine never talks to the mailbox, §1.1a), it exists only
+// these tests (the engine never talks to the mailbox), it exists only
 // so a real *actorrt.Runtime has something live to weld an Incarnation to.
 type stubActor struct{}
 
@@ -211,8 +211,7 @@ func newTestRuntime(t *testing.T) *actorrt.Runtime {
 // NewAlarm registers a due-tracked entry (keyed by an ABSOLUTE deadline, per
 // clock.go's doc — no relative-duration conversion for Advance() to race)
 // fired only by Advance. armedCount / lastArmedDuration observe the run
-// loop's own alarm-arming behaviour (busy-loop / backoff-pacing assertions,
-// 切片13).
+// loop's own alarm-arming behaviour (busy-loop / backoff-pacing assertions).
 // ---------------------------------------------------------------------
 
 type fakeClock struct {
@@ -337,7 +336,7 @@ var _ Clock = (*fakeClock)(nil)
 // to become observable. This is test-synchronization glue only — the actual
 // fire-timing decisions under test are 100% governed by the injected
 // fakeClock (zero wall-clock dependence for correctness), never by how long
-// this polling takes to notice (cell_test.go 同款 goroutine-sync pattern).
+// this polling takes to notice (same goroutine-sync pattern as cell_test.go).
 // ---------------------------------------------------------------------
 
 func waitFor(t *testing.T, timeout time.Duration, cond func() bool) {
@@ -386,7 +385,7 @@ func advanceUntil(t *testing.T, clock *fakeClock, step time.Duration, cond func(
 // waitStable polls val until it stops changing for a quiet window, returning
 // the settled value — used where a coalesced wake token can legitimately
 // cause one extra bounded transition before a loop's steady state holds
-// (§3.2 钉块's "丢一次 wake 无害,下轮重算兜住" cuts both ways: an extra
+// (dropping a wake is harmless since the next round recomputes; an extra
 // stale wake is equally harmless, just an extra recompute).
 func waitStable(t *testing.T, val func() int, quiet time.Duration) int {
 	t.Helper()

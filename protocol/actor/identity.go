@@ -1,9 +1,9 @@
 package actor
 
 // ActorID is the channel-local sender identifier. It is identical to
-// envelope `sender.id` (L0 §2.1 — same namespace, see L1 §3.2).
+// envelope `sender.id` — same namespace.
 //
-// Naming convention reference (informative — non-normative; L1 §3.2):
+// Naming convention reference (informative — non-normative):
 //
 //	user:<short-id>      - human members
 //	system               - the channel-local system actor (fixed id)
@@ -11,11 +11,10 @@ package actor
 //	tool:<tool-name>     - tool actors
 //
 // Cross-channel uniqueness is NOT guaranteed; mapping a real-world user
-// to multiple channels is out of scope for the channel-local registry
-// (L1 §12.5).
+// to multiple channels is out of scope for the channel-local registry.
 type ActorID string
 
-// Well-known fixed actor ids per L1 §3.2.
+// Well-known fixed actor ids.
 const (
 	// SystemActorID is the channel-local system actor — every channel
 	// has exactly one, seeded at channel genesis.

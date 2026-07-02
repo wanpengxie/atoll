@@ -25,7 +25,8 @@ import (
 //   - schedule.Minter — Mint(author) hands back an author-welded
 //     ScheduleHandle: a fire ultimately appends truth AS that author through
 //     the FireSink-minted pen, so holding the minter = a delayed forged-author
-//     write path (the legalised twin of 红线❹❻'s raw TimerStore).
+//     write path (the legalised twin of the raw TimerStore's forged-author
+//     write path).
 //   - schedule.Engine rides along: its free-author faces are unexported
 //     (engine.schedule/cancel — the un-welded twin of harness's bare chain),
 //     so what remains outward is Start/Close, the run-loop lifecycle. That is
@@ -40,15 +41,15 @@ import (
 // platform hand-off later the mint-for-anyone capability has escaped. With
 // it, the hand-off target cannot even be declared.
 //
-// Lock granularity follows leak granularity (assembly_confinement 同款): both
+// Lock granularity follows leak granularity (same pattern as assembly_confinement): both
 // packages export legitimate downstream contracts (AccessHandle / Outcome /
 // ScheduleHandle / ScheduleReq / FireSink …), so the ban is per-symbol, not
 // per-import. Construction faces (accessdoor.New / schedule.New and their
 // Deps) are deliberately NOT locked: they are inert downstream — a useful
 // Deps needs resourcespec / timerspec values whose contract leaves are
 // import-confined to the runtime tree, and a nil-dep Deps is rejected by
-// New's fail-fast — so locking them would ban nothing dangerous (拒绝集 =
-// 真危险集, 一个不多).
+// New's fail-fast — so locking them would ban nothing dangerous (the deny
+// set equals the true-danger set, not one symbol more).
 //
 // Allowlist: the runtime ROOT package only (OpenChannel / OpenScheduler
 // produce these values, so their signatures name the types — no runtime

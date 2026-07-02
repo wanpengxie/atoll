@@ -10,18 +10,18 @@ import (
 // is no longer) live — either the lock-free fast-path check at entry, or the
 // re-check inside the same critical section as the child's go-live (a parent
 // that died during the build window). No child embodiment is ever inserted or
-// started on this path (§3.1).
+// started on this path.
 var ErrParentNotLive = errors.New("actorrt: parent not live")
 
 // ErrChildIDCollision is returned by Fork when childID already names a live
 // embodiment. Unlike Spawn (last-go-live-wins replace), a fork collision is a
-// HARD failure — fork always mints a fresh identity (§10.2); a colliding
+// HARD failure — fork always mints a fresh identity; a colliding
 // childID is a caller bug, not a legitimate replace scenario.
 var ErrChildIDCollision = errors.New("actorrt: child id collision")
 
-// Fork mints a child cell owned by parent's incarnation (§3.1/§10.2/§10.3).
+// Fork mints a child cell owned by parent's incarnation.
 // Ownership binds the PARENT'S INCARNATION (not identity): when parent dies,
-// every still-live child is signal-cascaded to death too (removeIf, §3.1a) —
+// every still-live child is signal-cascaded to death too (removeIf) —
 // ownership lives only in memory (r.owned), never persisted.
 //
 // Two-phase construction (mirrors Spawn) with TWO liveness checks bracketing
@@ -62,7 +62,7 @@ func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, build func(Inc
 	}
 	r.embodiments[childID] = c
 	// Prune already-not-live entries out of r.owned[parent.p] BEFORE appending
-	// the new child (§3.1a v2.1 fix): a long-lived parent that forks many
+	// the new child: a long-lived parent that forks many
 	// short-lived children would otherwise grow this slice without bound —
 	// each already-dead child's OWN initiateStop/death path already unhooked it
 	// from r.embodiments, but the stale pointer would linger here until the
@@ -81,14 +81,14 @@ func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, build func(Inc
 	return Incarnation{id: childID, p: c}, nil
 }
 
-// Builder is the activation/fork注入点契约(§3.4/§9.1): a queryable table from
+// Builder is the injection point contract for activation/fork: a queryable table from
 // (id) or (class) to a build closure, shared by BOTH triggers underneath the
-// same domain-owned table (fork/activation are one mechanism, per §10.1) —
+// same domain-owned table (fork/activation are one mechanism) —
 // runtime defines the shape, domain fills the table (fat daemon registry.Build).
 // Neither entry returns a Kind: Kind is caller-held (ForkSpec.Kind /
 // DesiredMember.Kind), never re-answered by Builder — Kind (protocol
 // classification) and "which implementation" are orthogonal fields, not one
-// selecting the other (§9.1 v2.1 correction).
+// selecting the other.
 type Builder interface {
 	// Lookup resolves an already-durable member's id to its build closure —
 	// activation's entry (the triggering party knows only the id; the original
@@ -96,18 +96,18 @@ type Builder interface {
 	Lookup(id actor.ActorID) (build func(Incarnation) Actor, ok bool)
 	// LookupByClass resolves a caller-declared, opaque implementation-selection
 	// key to its build closure — fork's entry (ForkSpec.Class; there is no
-	// durable-membership row to look an id up in, §10.4).
+	// durable-membership row to look an id up in).
 	LookupByClass(class string) (build func(Incarnation) Actor, ok bool)
 }
 
 // ForkSpec is the caller-declared, wire-serialisable description of a child to
-// fork (§3.1, v2.1 final). It carries no Go closure — fork and activation share
-// one Builder-backed mint path (§9.1 owner-picked plan A) so an out-of-process
+// fork. It carries no Go closure — fork and activation share
+// one Builder-backed mint path so an out-of-process
 // parent (a daemon-hosted actor) can fork too, over a wire that can only carry
 // serialisable fields.
 type ForkSpec struct {
 	// Kind is the substrate's own protocol classification (the closed set
-	// welded into Mint(id, kind, chID), §3.2) — it does NOT select which
+	// welded into Mint(id, kind, chID)) — it does NOT select which
 	// implementation runs (kimi/xhs/echo are all Kind=KindTool; Kind cannot
 	// distinguish them). Orthogonal to Class.
 	Kind actor.Kind
@@ -116,14 +116,14 @@ type ForkSpec struct {
 	// through verbatim to the domain's registry.Build(class, ...) table.
 	Class string
 	// NameHint derives childID as parentID + "/" + NameHint (namespace
-	// derivation, §10.2) — no substrate id allocator needed.
+	// derivation) — no substrate id allocator needed.
 	NameHint string
 }
 
 // SpawnHandle is the capability a parent incarnation holds to fork/despawn ITS
-// OWN children (§3.1/§3.3/§10.5). Fork returns only the child's NAME
+// OWN children. Fork returns only the child's NAME
 // (childID), never its incarnation truth-handle — the handle never leaves
-// substrate (§10.5 "句柄不出"); a holder that could pass around a live
+// substrate (the handle is never exposed outside it); a holder that could pass around a live
 // incarnation handle could bypass the by-id authority-check Despawn performs.
 // The concrete implementation (welding a parent Incarnation + Minter for
 // pen-welding) lives in platform, not here — this is pure actorrt vocabulary
@@ -144,16 +144,17 @@ type SpawnHandle interface {
 // embodiment owned by the given parent incarnation — either no such embodiment
 // exists, or it exists but is owned by a different parent (or not fork-owned
 // at all). Both cases collapse to the same rejection: a by-id caller gets no
-// information about WHY an id it does not own is refused (§10.5 "句柄不出" —
-// a name-only request only ever resolves through this authority gate, it
-// never gets to distinguish "doesn't exist" from "not yours").
+// information about WHY an id it does not own is refused — since the handle
+// is never exposed outside substrate, a name-only request only ever resolves
+// through this authority gate, it never gets to distinguish "doesn't exist"
+// from "not yours".
 var ErrNotOwner = errors.New("actorrt: child not owned by this incarnation")
 
 // DespawnChild is the by-id, authority-checked termination entry backing
-// SpawnHandle.Despawn (§3.3): it confirms childID names an embodiment currently
+// SpawnHandle.Despawn: it confirms childID names an embodiment currently
 // listed in r.owned[parent.p] BEFORE despawning it — so a SpawnHandle can
 // request termination of its own fork children BY NAME ONLY, without ever
-// holding the child's Incarnation truth-handle (§10.5). A childID that is
+// holding the child's Incarnation truth-handle. A childID that is
 // absent, or present but not owned by parent, is ErrNotOwner.
 func (r *Runtime) DespawnChild(parent Incarnation, childID actor.ActorID) error {
 	r.mu.Lock()
@@ -181,7 +182,7 @@ func (r *Runtime) DespawnChild(parent Incarnation, childID actor.ActorID) error 
 	// Mirrors Despawn's own guarded teardown: the live flip already happened
 	// in-lock; here only the join (WAIT half). The stale r.owned[parent.p] entry
 	// for this child is left in place — it is !isLive() from here on and gets
-	// pruned on the parent's next Fork (§3.1a's amortised cleanup), same as any
+	// pruned on the parent's next Fork (the amortised cleanup above), same as any
 	// other child that died on its own between two Forks.
 	child.stop()
 	return nil

@@ -15,7 +15,7 @@ import (
 // policy (deadline-by-actor.kind was a per-type-policy leak, now removed).
 const defaultRequestTTLMs int64 = 24 * 60 * 60 * 1000
 
-// stepKindAndAudience implements proto-layer1 §2.6 Kind+Audience Validate — the
+// stepKindAndAudience performs Kind+Audience validation — the
 // substrate-essential STRUCTURE checks, with NO business-type vocabulary:
 //
 //   - core / reserved-namespace types: kind must match their kernel-defined rule
@@ -25,9 +25,9 @@ const defaultRequestTTLMs int64 = 24 * 60 * 60 * 1000
 // Receiver reachability/liveness is deliberately NOT checked here: it is not a
 // property of the writer (a write harness validates truth about the SENDER), it
 // is racy at write time (TOCTOU), and its only authority is actorrt's live
-// embodiments — which this engine is structurally decoupled from (轴0). It is
+// embodiments — which this engine is structurally decoupled from. It is
 // resolved at the delivery seam (Deliver→NotHosted→closure materialises
-// receiver_unavailable) instead of at write time (根4).
+// receiver_unavailable) instead of at write time.
 //
 // Business types carry NO substrate kind / handler constraint: their kind is a
 // kernel closed-set value (validated at envelope-shape), and which kind is
@@ -44,10 +44,10 @@ func (s *stepKindAndAudience) ID() stepID { return StepKindAndAudience }
 
 func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
 	// (1) core / reserved-namespace type→kind rules — kernel's OWN vocabulary.
-	// NB (C7, 2026-06-11): this AllowOverride=false branch is the LIVE enforcer of
+	// This AllowOverride=false branch is the LIVE enforcer of
 	// CoreTypeRule.DefaultKind as a constraint (not a fill). It currently has NO
 	// subject — both live core types are AllowOverride=true — but is kept as
-	// additive-ready machinery (C7 decision = 甲): a future non-overridable core
+	// additive-ready machinery: a future non-overridable core
 	// type reactivates it. The reserved-bootstrap branch below is its live sibling.
 	if rule, ok := message.LookupCoreType(env.Type); ok {
 		if !rule.AllowOverride && env.Kind != rule.DefaultKind {
@@ -91,7 +91,7 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 	//     addressed the actor it resolved (no type→handler routing). Whether that
 	//     receiver is reachable/live is NOT asserted here — that is the delivery
 	//     seam's job (Deliver→NotHosted→closure materialises receiver_unavailable),
-	//     not the writer's (根4). Do not re-add a registry liveness lookup.
+	//     not the writer's. Do not re-add a registry liveness lookup.
 	if len(env.Audience) != 1 || env.Audience[0] == "" {
 		return outcome{RejectReason: HarnessRequestAudienceInvalid, Detail: "kind=request requires audience=[<concrete-actor>]"}, nil
 	}

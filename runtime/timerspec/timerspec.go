@@ -12,9 +12,9 @@ import (
 // closed — a timer that fires becomes an ordinary message; one that is
 // cancelled never existed as truth.
 //
-// MINTED BY THE ENGINE, never caller-supplied, never reused (v1.2 双线审
-// blocker): the fire message ID derives deterministically from TimerID, so a
-// reused TimerID would let an old fire's messages.id UNIQUE swallow a NEW
+// MINTED BY THE ENGINE, never caller-supplied, never reused: the fire
+// message ID derives deterministically from TimerID, so a reused TimerID
+// would let an old fire's messages.id UNIQUE swallow a NEW
 // timer's legitimate fire. ScheduleReq has no ID field (caller-supply is
 // unrepresentable at compile time); the engine mints a fresh uuid per
 // Schedule, so ID uniqueness is by construction, not by table constraint
@@ -26,23 +26,23 @@ type TimerID string
 // by a durable name (author identity), surviving restarts until deregister.
 // Incarnation-bind timers are NOT rows and never will be — they live in the
 // schedule engine's memory, welded to the live embodiment, and vanish with the
-// process (v1.1 历史校准: BEAM in-VM timers / Orleans in-activation Timers /
-// POSIX timers on task_struct — ephemeral intent lives in ephemeral memory;
-// a durable account for a must-die thing is half a token, 已拔).
+// process (compare BEAM in-VM timers / Orleans in-activation Timers / POSIX
+// timers on task_struct — ephemeral intent lives in ephemeral memory; a
+// durable account for a must-die thing is half a token).
 //
 // author_id is the identity that scheduled it AND the welded author of the
 // fired message (self-targeted: there is no target field, structurally — a
 // timer can only ever produce a message authored by the actor that scheduled
-// it). Incarnation is NOT here (§5.2: not serialisable) — and with v1.1 there
-// is no bind column either: everything in this table is identity-bind by
-// construction (structure IS the bind, 同 §12.9 scope-由结构表达 的手法).
+// it). Incarnation is NOT here (it is not serialisable) — and there is no
+// bind column either: everything in this table is identity-bind by
+// construction (structure IS the bind).
 type TimerRow struct {
 	ID            TimerID
 	AuthorID      actor.ActorID
-	FireAt        int64  // UnixMilli(仓库时戳纪律)
-	Type          string // fire envelope 的 type(domain 词汇,opaque)
-	Payload       []byte // fire envelope 的 payload(opaque)
-	CorrelationID string // schedule 时捕获的因果坐标;fire envelope 继承(红线❺)
+	FireAt        int64  // UnixMilli, per repo-wide timestamp convention
+	Type          string // fire envelope's type (domain vocabulary, opaque)
+	Payload       []byte // fire envelope's payload (opaque)
+	CorrelationID string // causal coordinate captured at schedule time; inherited by the fire envelope
 	CreatedAt     int64
 }
 
@@ -50,7 +50,7 @@ type TimerRow struct {
 // engine welds author; mirrors storespec's store-not-validate discipline) and
 // is CONFINED to the runtime tree: a raw TimerStore reachable downstream would
 // let anyone insert a row with a forged author_id — a delayed forged-sender
-// write path around the pen (红线❻).
+// write path around the pen.
 type TimerStore interface {
 	Insert(ctx context.Context, row TimerRow) error
 	// Delete removes one pending row (fire completion / cancel / drop);

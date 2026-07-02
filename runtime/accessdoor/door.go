@@ -32,7 +32,7 @@ func (d *door) driver(kind resourcespec.ResourceKind) (resourcespec.Driver, erro
 // (boundHandle.Invoke → ingress → day1OpsOverreach → invoke), so op/args/grant
 // are structurally valid here.
 //
-// Two error channels, deliberately distinct (opus-F4 / codex):
+// Two error channels, deliberately distinct:
 //   - a Go error is returned ONLY for an assembly defect (no driver for a kind),
 //     infrastructure failure (store broken at resolve/authorize), or the
 //     caller's OWN cancellation surfacing mid-EXECUTE (executeFailure — a
@@ -59,9 +59,9 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 			return Outcome{RejectReason: access.AccessDenied}, nil
 		}
 		// kind is hardcoded to KindKV day-1 (single driver). With multiple drivers
-		// the kind is set by the handle the caller holds (forward §12.1.5), welded
-		// by the caps facade — never derived from the ResourceID (that would be the
-		// kernel interpreting an opaque name).
+		// the kind is set by the handle the caller holds, welded by the caps facade
+		// — never derived from the ResourceID (that would be the kernel
+		// interpreting an opaque name).
 		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, args); err != nil {
 			return createVerdict(ctx, err) // one collision vocabulary, two loci — shared mapping
 		}

@@ -9,9 +9,9 @@ import (
 
 // StoredRow wraps a protocol Envelope with the store-derived columns kernel
 // deliberately keeps OUT of the pure Envelope (they are store-derived, not
-// protocol fields — kernel-construction-spec §1.2). Read paths return
-// StoredRow; write paths (Append) take the pure envelope + the
-// harness-computed is_terminal and the store allocates seq.
+// protocol fields). Read paths return StoredRow; write paths (Append) take
+// the pure envelope + the harness-computed is_terminal and the store
+// allocates seq.
 type StoredRow struct {
 	Envelope message.Envelope
 
@@ -72,9 +72,9 @@ const (
 	AppendRejectTerminalDuplicate = "harness_terminal_duplicate"
 )
 
-// MessageLog is the channel-local messages-table append contract (L2
-// §1.4.1). Append is the only mutation entry point; reads are not declared
-// here because readers query messages through the MessageQuery role below.
+// MessageLog is the channel-local messages-table append contract. Append is
+// the only mutation entry point; reads are not declared here because readers
+// query messages through the MessageQuery role below.
 //
 // Concrete sqlite impl lives in runtime/internal/store/messages.go. v2 changes:
 //   - no fencing parameter — the store is scoped to one channel at construction
@@ -83,7 +83,7 @@ const (
 //   - is_terminal is passed EXPLICITLY: kernel purified it off the Envelope
 //     (it is store-derived, not a protocol field). It is computed by the caller
 //     because it depends on message-kind semantics the store does not interpret;
-//     the store persists it verbatim (it stays the dumb persister, FIX-T10).
+//     the store persists it verbatim (it stays the dumb persister).
 type MessageLog interface {
 	Append(ctx context.Context, env *message.Envelope, isTerminal bool) (AppendResult, error)
 
@@ -130,7 +130,7 @@ type MessageQuery interface {
 	DistinctOpenRequestReceivers(ctx context.Context) ([]actor.ActorID, error)
 }
 
-// RequestLookup recovers an original request envelope by id (L2 §8 F5).
+// RequestLookup recovers an original request envelope by id.
 // Channel-scoped: implementations refuse cross-channel reads.
 type RequestLookup interface {
 	FindByID(ctx context.Context, id message.ID) (*message.Envelope, bool, error)

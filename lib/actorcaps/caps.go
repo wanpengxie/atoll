@@ -11,8 +11,9 @@ import (
 // Every field is a substrate-minted, caller-welded capability: the actor never
 // self-reports which id/author it is — that coordinate is welded into each
 // handle at construction (non-ambient), exactly as harness.Pen welds the writer
-// identity. The platform assembly root builds all five in ONE step (发 handle 与
-// live 膜 wrap 同一步, 红线) so an actor never receives a bare, ungated handle.
+// identity. The platform assembly root builds all five in ONE step — issuing a
+// handle and wrapping it in its liveness membrane happen together — so an actor
+// never receives a bare, ungated handle.
 type Caps struct {
 	// Pen is the plane-1 truth-write capability (append messages AS this actor).
 	// Wrapped in the death-after-write membrane (livePen) at assembly.
@@ -27,7 +28,7 @@ type Caps struct {
 	// Schedule is the time-axis capability (self-targeted timers). Wrapped in
 	// the liveSchedule membrane.
 	Schedule schedule.ScheduleHandle
-	// Spawn is the fork/despawn capability over THIS incarnation's own children
-	// (§10.5 句柄不出 — Fork returns only a child's name, never a handle).
+	// Spawn is the fork/despawn capability over THIS incarnation's own children.
+	// Fork returns only a child's name, never a handle.
 	Spawn actorrt.SpawnHandle
 }
