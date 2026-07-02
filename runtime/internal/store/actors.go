@@ -191,6 +191,12 @@ func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int
 	if err := clearActorScopedTx(ctx, tx, id); err != nil {
 		return err
 	}
+	// Same tx: cascade-clear its identity-level pending timers (§10.12 row 6).
+	// A parallel call, not folded into the state cascade above — one locus, one
+	// function (v1.2 opus-nit; see clearTimersTx doc in timers.go).
+	if err := clearTimersTx(ctx, tx, id); err != nil {
+		return err
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("store: actor deregister commit: %w", err)
 	}
@@ -199,7 +205,8 @@ func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int
 
 // (clearActorScopedTx — the actor-scoped cascade both dereg entry points call —
 // lives in state.go beside the locus's other SQL, so actor_state has exactly one
-// author file.)
+// author file. clearTimersTx is its parallel sibling for the timers locus,
+// living in timers.go.)
 
 // Membership transition DTOs (storespec.MemberActorAdd / storespec.MemberActorRemove)
 // + the MembershipControlPlane contract live in runtime/storespec (contract
@@ -359,6 +366,11 @@ func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, rem
 	// Deregistration took effect this tx — cascade-clear the actor's state in the
 	// same tx (scope law, §10.12 row 3), atomic with the deregistered_at write.
 	if err := clearActorScopedTx(ctx, tx, remove.ID); err != nil {
+		return false, err
+	}
+	// Same tx: cascade-clear its identity-level pending timers (§10.12 row 6),
+	// parallel to the state cascade above.
+	if err := clearTimersTx(ctx, tx, remove.ID); err != nil {
 		return false, err
 	}
 	return true, nil

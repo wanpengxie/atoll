@@ -141,6 +141,7 @@ var channelLocalSchemaShape = map[string][]string{
 	"resources":       {"resource_id", "kind", "bytes", "created_at"},
 	"resource_grants": {"resource_id", "grantee_kind", "grantee", "ops"},
 	"actor_state":     {"owner_id", "resource_id", "bytes", "created_at"},
+	"timers":          {"timer_id", "author_id", "fire_at", "type", "payload", "correlation_id", "created_at"},
 }
 
 func verifyChannelLocalSchema(ctx context.Context, db *sql.DB) error {

@@ -150,6 +150,34 @@ CREATE TABLE IF NOT EXISTS actor_state (
   -- No version column (per-key fence / CAS deferred, §1.5; day-1 natural single
   -- writer — reachable set ≡ {owner} + serial gift — so nothing to fence yet).
 );
+
+-- =============================================================
+-- 6) timers  (time axis / forward §7)
+-- =============================================================
+-- The IDENTITY-level pending-timer CONTROL PLANE: future intent keyed by a
+-- durable name, mutable (cancellable), NEVER truth (§7.5 — pending in the
+-- append-only log would be unretractable). Same channel sqlite (by-channel,
+-- 同 messages/registry/state 库, forward §7.6).
+--
+-- This table holds ONLY identity-bind timers — the bind is expressed by WHICH
+-- home the intent lives in, never by a column (同 §12.9 scope-由结构表达):
+-- incarnation-bind timers are engine MEMORY, welded to the live embodiment,
+-- and vanish with the process (v1.1 历史校准: BEAM in-VM / Orleans
+-- in-activation / POSIX on-task_struct — ephemeral intent never gets a
+-- durable account). So: no bind column, ever; incarnation NEVER persisted
+-- (§5.2/§5.3). No target column, ever (self-targeted 红线❶). No recurrence
+-- column (one-shot is the complete primitive; recurrence is domain re-arm).
+CREATE TABLE IF NOT EXISTS timers (
+  timer_id       TEXT PRIMARY KEY,
+  author_id      TEXT NOT NULL,     -- identity;排它的 actor = fire 作者(焊死,永不自由)
+  fire_at        INTEGER NOT NULL,  -- UnixMilli
+  type           TEXT NOT NULL,
+  payload        BLOB,
+  correlation_id TEXT,              -- schedule 时捕获;fire envelope 继承(红线❺)
+  created_at     INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_timers_fire_at ON timers(fire_at);
+CREATE INDEX IF NOT EXISTS ix_timers_author  ON timers(author_id);
 `
 
 // ChannelLocalTables enumerates the channel-local table names in
@@ -164,4 +192,5 @@ var ChannelLocalTables = []string{
 	"resources",
 	"resource_grants",
 	"actor_state",
+	"timers",
 }

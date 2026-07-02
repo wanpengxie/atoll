@@ -618,3 +618,35 @@ func (r *Runtime) Stat(id actor.ActorID) (UnitStat, bool) {
 	}
 	return UnitStat{StartedAt: p.startedAt()}, true
 }
+
+// CurrentIncarnation is the authoritative self-read of an actor's live
+// embodiment handle — the schedule engine's ATTACH seam (timer-build-spec.md
+// §1.3/§3.2, 拍点 8.4): welding an incarnation-bind timer to "whichever
+// embodiment is live for id right now" requires reading that fact FROM the
+// runtime itself (an incarnation is never caller-reported and never
+// serialised, §5.2/§5.3) — the same addressing-map authority Stat/deliver
+// consult. It is the pidfd analogue: a HELD pointer to one specific live
+// instance, not a re-resolvable name.
+//
+// Scope (deliberately narrow, per the 8.4 diligence note — DO NOT widen this
+// without re-reading it): this only guards "no embodiment at all" (ok=false).
+// It structurally CANNOT guard "the caller's mental model of WHICH embodiment
+// is live is stale" — a goroutine that raced ahead of a same-id successor
+// taking over (Despawn+respawn between the caller's last observation and this
+// call) gets the SUCCESSOR's handle, not an error; this method reports
+// "whoever is live right now", exactly like Stat/deliver's map lookup. That
+// leaked-goroutine misuse class is fenced by the downstream liveSchedule
+// membrane at the platform link layer (§3.5b), not here. The drop check at
+// fire time still works correctly regardless: it compares the handle captured
+// HERE at Schedule time by POINTER identity (IsLive), so a since-replaced
+// incarnation is still caught even though this call itself does not detect
+// staleness up front.
+func (r *Runtime) CurrentIncarnation(id actor.ActorID) (Incarnation, bool) {
+	r.mu.RLock()
+	p, ok := r.embodiments[id]
+	r.mu.RUnlock()
+	if !ok {
+		return Incarnation{}, false
+	}
+	return Incarnation{id: id, p: p}, true
+}

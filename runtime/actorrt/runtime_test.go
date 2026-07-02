@@ -219,3 +219,71 @@ func TestStatReportsClockStampedStartedAt(t *testing.T) {
 		t.Fatalf("StartedAt = %v, want clock-stamped %v", st.StartedAt, pinned)
 	}
 }
+
+// TestCurrentIncarnationLiveHandle: the schedule engine's attach seam (8.4) —
+// a live embodiment's CurrentIncarnation returns a handle whose IsLive reads
+// true, the same addressing authority Deliver/Stat consult.
+func TestCurrentIncarnationLiveHandle(t *testing.T) {
+	t.Parallel()
+	rt, _ := New(Config{Parent: context.Background()})
+	defer rt.StopAll()
+	rt.Spawn("a", static(newRecordActor()))
+
+	inc, ok := rt.CurrentIncarnation("a")
+	if !ok {
+		t.Fatal("CurrentIncarnation reported absent for a hosted cell")
+	}
+	if inc.ID() != actor.ActorID("a") {
+		t.Fatalf("ID() = %q, want a", inc.ID())
+	}
+	if !rt.IsLive(inc) {
+		t.Fatal("IsLive(handle) = false for a freshly spawned live embodiment")
+	}
+}
+
+// TestCurrentIncarnationAbsent: no embodiment hosted for id → ok=false, no
+// handle fabricated — mirrors Stat's present=false discipline (the schedule
+// engine's ErrBadSchedule attach-failure path, 8.4/§4).
+func TestCurrentIncarnationAbsent(t *testing.T) {
+	t.Parallel()
+	rt, _ := New(Config{Parent: context.Background()})
+	defer rt.StopAll()
+
+	if _, ok := rt.CurrentIncarnation("never-existed"); ok {
+		t.Fatal("CurrentIncarnation reported present for an unhosted id")
+	}
+}
+
+// TestCurrentIncarnationReplaceIsPointerLevel: after a same-id replace,
+// CurrentIncarnation returns the NEW embodiment's handle, and a handle
+// captured BEFORE the replace reads IsLive=false afterward — the ABA guard
+// (pointer-identity discipline) extended to the schedule engine's attach
+// seam: a same-id successor taking over never revives a predecessor's welded
+// incarnation-bind timer (timer-build-spec.md §4 "同 id 后继在场也不救前任").
+func TestCurrentIncarnationReplaceIsPointerLevel(t *testing.T) {
+	t.Parallel()
+	rt, _ := New(Config{Parent: context.Background()})
+	defer rt.StopAll()
+	rt.Spawn("a", static(newRecordActor()))
+
+	old, ok := rt.CurrentIncarnation("a")
+	if !ok {
+		t.Fatal("CurrentIncarnation reported absent before replace")
+	}
+
+	rt.Spawn("a", static(newRecordActor())) // same-id replace (successor go-live)
+
+	next, ok := rt.CurrentIncarnation("a")
+	if !ok {
+		t.Fatal("CurrentIncarnation reported absent after replace")
+	}
+	if next.p == old.p {
+		t.Fatal("CurrentIncarnation returned the predecessor's embodiment pointer after a replace")
+	}
+	if rt.IsLive(old) {
+		t.Fatal("stale predecessor handle still reads IsLive=true after replace")
+	}
+	if !rt.IsLive(next) {
+		t.Fatal("successor handle reads IsLive=false right after go-live")
+	}
+}

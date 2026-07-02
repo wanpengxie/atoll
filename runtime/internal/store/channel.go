@@ -7,6 +7,7 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/runtime/resourcespec"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
+	"github.com/wanpengxie/ActOS/runtime/timerspec"
 )
 
 // ChannelStores is the channel-local store assembly and the SINGLE public
@@ -46,6 +47,19 @@ type ChannelStores struct {
 	// the SAME door one layer up, reached downstream only through the welded
 	// AccessMinter.MintState, never as a raw store.
 	State resourcespec.StateStore
+
+	// timers is the identity-level durable pending-timer store (the timers
+	// table, forward §7 / timer-build-spec §3.3) — the ONE raw TimerStore
+	// instance for this channel. Unlike Resources/State it is deliberately NOT
+	// exported: a raw TimerStore reachable outside package store is a delayed
+	// forged-author write path around the pen (红线❻), so unlike the door's
+	// collapsed-branch stores (whose confinement is enforced by "only the welded
+	// minter is exposed downstream"), the timer store has no minter-shaped
+	// collaborator sitting between it and a caller yet — the schedule engine's
+	// assembly (OpenScheduler, runtime 根装配缝, 期5 后续切片) is the only
+	// intended reader, and it reaches this field from within the runtime tree,
+	// never as a public ChannelStores member.
+	timers timerspec.TimerStore
 }
 
 // OpenChannel opens the per-channel sqlite and assembles the channel stores.
@@ -81,9 +95,22 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Resources:  newResourceRegistry(db),
 		KVDriver:   newKVDriver(db),
 		State:      newStateStore(db),
+		timers:     newTimerStore(db),
 	}
 	return cs, nil
 }
 
 // Close releases the owned *sql.DB. After Close the assembly is unusable.
 func (c *ChannelStores) Close() error { return c.db.Close() }
+
+// Timers exposes the raw timerspec.TimerStore for the one intended reader
+// within the runtime tree — runtime.OpenScheduler (the schedule engine's
+// assembly seam, timer-build-spec.md §3.4). It is a METHOD, not a promoted
+// exported field: the accessor itself is the confinement marker (an
+// unexported field plus one narrow reader), the same discipline the raw
+// *sql.DB follows via Close/Open rather than a public field. The runtime
+// package (a different Go package, even though it is the sole importer of
+// this internal one) cannot reach an unexported struct field directly — this
+// is the seam that lets it without promoting timers to a public
+// ChannelStores member (红线❻: no raw TimerStore public surface).
+func (c *ChannelStores) Timers() timerspec.TimerStore { return c.timers }
