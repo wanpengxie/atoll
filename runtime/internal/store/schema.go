@@ -14,8 +14,11 @@ package store
 // Vocabulary closed sets (sender_kind / kind / visibility / actor_kind /
 // actor_binding) carry NO value-set `CHECK (... IN (...))` clause. Those sets
 // are authoritatively enforced in Go — write path: harness stepEnvelopeShape
-// (kind, visibility) + stepSenderConsistent (sender.kind overwritten from the
-// registry's parsed truth); read path: store scan via ParseKind /
+// (kind, visibility) + stepSenderConsistent (sender.kind force-overwritten
+// from the pen-WELDED caller kind — the registry lookup was retired by the
+// incarnation rework, Mint is the single truth source) + the membership
+// control plane's validateMemberIdentity (actor_kind / actor_binding gated by
+// ParseKind / ParseBinding before insert); read path: store scan via ParseKind /
 // ParseVisibility / ParseBinding (out-of-set values fail loud). A DB CHECK
 // would be a redundant SECOND enforcer that also welds an append-only DB to a
 // frozen vocabulary: extending a pre-launch closed set (e.g. a new sender_kind)

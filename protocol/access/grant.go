@@ -75,9 +75,12 @@ type Grant struct {
 
 	// Ops — the grantee's new granted operations (∅ = revoke). STRUCTURALLY ⊆ OBJECT-OPS
 	// {read,write,set,delete} — NEVER create (create is container-locus, never an R grant, §2.4).
-	// DAY-1 further narrowed to {read,write} by runtime ValidateGrant (granting set/delete =
-	// delegating control = §11; that §11 widening goes toward {read,write,set,delete}, still NOT
-	// create). This is also why transfer is a §11 Ops-policy widening, not a new op:
+	// DAY-1 further narrowed to {read,write} — enforced in the door's authz
+	// verdict (accessdoor day1OpsOverreach; its ValidateGrant is the structural
+	// sum-form/closed-set gate and deliberately ADMITS set/delete, so the day-1
+	// narrowing lifts without touching ingress). Granting set/delete =
+	// delegating control = §11; that §11 widening goes toward
+	// {read,write,set,delete}, still NOT create. This is also why transfer is a §11 Ops-policy widening, not a new op:
 	// set(Y,full) + set(self,∅). Rights across multiple matching entries UNION
 	// (R is allow-only, no deny entries — so actor-entry vs members-entry needs
 	// no precedence rule).
