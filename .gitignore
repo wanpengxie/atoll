@@ -25,3 +25,4 @@ bin/
 # UI build artifacts: chrome extension zip is staged here by `make extension-zip`
 ui/public/downloads/
 /.cache/
+*.err.log
