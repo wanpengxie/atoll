@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // liveSet is a LivenessProbe backed by a fixed present-set.

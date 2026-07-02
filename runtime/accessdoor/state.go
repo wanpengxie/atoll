@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/ActOS/protocol/access"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/resource"
-	"github.com/wanpengxie/ActOS/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
 // ErrOpNotInScope is the CATEGORY-ERROR class (拍点 8.2): a well-formed op that

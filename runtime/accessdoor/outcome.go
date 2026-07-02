@@ -1,6 +1,6 @@
 package accessdoor
 
-import "github.com/wanpengxie/ActOS/protocol/access"
+import "github.com/wanpengxie/atoll/protocol/access"
 
 // Outcome is the per-invocation verdict — the access-plane dual of
 // harness.WriteResult. RejectReason draws directly on the proto FailureReason

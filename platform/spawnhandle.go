@@ -3,9 +3,9 @@ package platform
 import (
 	"errors"
 
-	"github.com/wanpengxie/ActOS/lib/actorcaps"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 // ErrNoBuilder is returned by spawnHandle.Fork when no builder is wired into the

@@ -5,15 +5,15 @@ import (
 	"errors"
 	"time"
 
-	"github.com/wanpengxie/ActOS/lib/actorcaps"
-	"github.com/wanpengxie/ActOS/lib/behavior"
-	"github.com/wanpengxie/ActOS/platform"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/registry"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // testAgentBuilder is set by a test's setup (before any channel is created); the

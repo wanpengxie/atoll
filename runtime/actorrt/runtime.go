@@ -8,8 +8,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // embodiment is one live actor's substrate-side embodiment, regardless of where

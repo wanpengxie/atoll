@@ -4,8 +4,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/wanpengxie/ActOS/protocol/access"
-	"github.com/wanpengxie/ActOS/protocol/resource"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
 // ErrMalformed is the ingress protocol-error class: a structurally bad request

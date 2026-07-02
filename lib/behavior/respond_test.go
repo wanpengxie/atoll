@@ -6,9 +6,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // rejectWriter is a harness.Pen double that reports a reject reason. (It is a

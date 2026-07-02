@@ -3,7 +3,7 @@ package metatool
 import (
 	"sort"
 
-	"github.com/wanpengxie/ActOS/lib/introspect"
+	"github.com/wanpengxie/atoll/lib/introspect"
 )
 
 // FormatCatalog projects an introspect.Catalog (the substrate's actor.list

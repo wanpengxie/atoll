@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // shellNoopPen is a harness.Pen double that accepts every write — the

@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-# coagent-proxy one-line installer.
+# atoll-proxy one-line installer.
 #
 # Served by `<server>/install/proxy.sh`; the server templates SERVER_ORIGIN
 # in at request time. Typical usage:
@@ -9,8 +9,8 @@
 # Honors optional overrides:
 #   --server-ws <ws-url>          override derived server-ws
 #   --install-dir <path>          override $HOME/.local/bin
-#   COAGENT_PROXY_INSTALL_DIR     same, env-form
-#   COAGENT_PROXY_NO_START=1      install + write config, do not auto-start
+#   ATOLL_PROXY_INSTALL_DIR     same, env-form
+#   ATOLL_PROXY_NO_START=1      install + write config, do not auto-start
 #
 set -eu
 
@@ -22,9 +22,9 @@ SERVER_ORIGIN=""
 
 api_key=""
 server_ws=""
-install_dir="${COAGENT_PROXY_INSTALL_DIR:-$HOME/.local/bin}"
+install_dir="${ATOLL_PROXY_INSTALL_DIR:-$HOME/.local/bin}"
 auto_start="1"
-[ "${COAGENT_PROXY_NO_START:-0}" = "1" ] && auto_start="0"
+[ "${ATOLL_PROXY_NO_START:-0}" = "1" ] && auto_start="0"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -37,7 +37,7 @@ while [ $# -gt 0 ]; do
     --no-start)       auto_start="0"; shift ;;
     -h|--help)
       cat <<EOF
-coagent-proxy installer
+atoll-proxy installer
 
 Usage: $0 --api-key <KEY> [--server-ws <ws-url>] [--install-dir <path>] [--no-start]
 
@@ -71,7 +71,7 @@ fi
 
 # When SERVER_ORIGIN is empty (raw-file fetch), the caller must have placed
 # the binary themselves. The download branch below is skipped and we just
-# write config + start using whatever coagent-proxy is already on $PATH /
+# write config + start using whatever atoll-proxy is already on $PATH /
 # install_dir.
 binary_origin="$SERVER_ORIGIN"
 
@@ -88,10 +88,10 @@ case "$os" in
 esac
 
 mkdir -p "$install_dir"
-binary_path="$install_dir/coagent-proxy"
+binary_path="$install_dir/atoll-proxy"
 
 if [ -n "$binary_origin" ]; then
-  binary_url="$binary_origin/install/coagent-proxy_${os}_${arch}"
+  binary_url="$binary_origin/install/atoll-proxy_${os}_${arch}"
   echo "downloading $binary_url"
   tmp="$(mktemp)"
   trap 'rm -f "$tmp"' EXIT
@@ -110,7 +110,7 @@ else
   echo "✓ reusing existing $binary_path"
 fi
 
-# Write ~/.coagent/proxy/config.json
+# Write ~/.atoll/proxy/config.json
 "$binary_path" install --api-key "$api_key" --server-ws "$server_ws"
 
 if ! command -v "$binary_path" >/dev/null 2>&1; then
@@ -126,7 +126,7 @@ fi
 
 if [ "$auto_start" = "1" ]; then
   echo ""
-  echo "starting coagent-proxy (Ctrl+C to stop; run 'coagent-proxy start' to resume later)"
+  echo "starting atoll-proxy (Ctrl+C to stop; run 'atoll-proxy start' to resume later)"
   echo ""
   exec "$binary_path" start
 else

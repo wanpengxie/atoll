@@ -31,17 +31,17 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wanpengxie/ActOS/platform"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
-	"github.com/wanpengxie/ActOS/registry"
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/registry"
 
 	// Availability (NOT auto-run): blank-import every in-tree actor + engine so the
 	// daemon CAN build any class the server assigns. actors/all = tools/devices;
 	// agent/all = the LLM engine classes (claude / go-kimi). What actually runs is
 	// the pulled assignment, never "one of each".
-	_ "github.com/wanpengxie/ActOS/actors/all"
-	_ "github.com/wanpengxie/ActOS/agent/all"
+	_ "github.com/wanpengxie/atoll/actors/all"
+	_ "github.com/wanpengxie/atoll/agent/all"
 )
 
 // channelFromServerURL extracts the ?channel= query from the server WS URL.
@@ -157,7 +157,7 @@ func main() {
 	ws := flag.String("server", "ws://localhost:8080/compute", "server WS url")
 	key := flag.String("key", "", "api key")
 	name := flag.String("name", "", "device name; default: hostname")
-	workspace := flag.String("workspace", "", "workspace root dir; default: ~/.coagent/workspace")
+	workspace := flag.String("workspace", "", "workspace root dir; default: ~/.atoll/workspace")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -183,7 +183,7 @@ func main() {
 		if err != nil {
 			log.Fatalf("daemon: home dir: %v", err)
 		}
-		wsRoot = filepath.Join(home, ".coagent", "workspace")
+		wsRoot = filepath.Join(home, ".atoll", "workspace")
 	}
 
 	chID := channelFromServerURL(*ws)

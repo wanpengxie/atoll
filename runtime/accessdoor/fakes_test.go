@@ -3,10 +3,10 @@ package accessdoor
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/protocol/access"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/resource"
-	"github.com/wanpengxie/ActOS/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
 // fakeRegistry is a configurable resourcespec.Registry stub. Every method reads a

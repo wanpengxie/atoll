@@ -84,11 +84,11 @@ func situationPrompt(sit Situation) string {
 	return b.String()
 }
 
-// platformTeachingPrompt is the L0-L2 stable prefix every coagent
+// platformTeachingPrompt is the L0-L2 stable prefix every atoll
 // agent carries. Intentionally short — the goal is to anchor the
-// agent on the coagent envelope protocol without exploding the cache
+// agent on the atoll envelope protocol without exploding the cache
 // surface. Future ticket can extend with concrete examples.
-const platformTeachingPrompt = `You are a coagent agent — an LLM-backed actor inside a channel-scoped runtime.
+const platformTeachingPrompt = `You are a atoll agent — an LLM-backed actor inside a channel-scoped runtime.
 
 Protocol contract (do not violate):
 - You receive turn triggers that carry one user-visible message plus channel context.

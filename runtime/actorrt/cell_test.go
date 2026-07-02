@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // recordActor records the order and concurrency of Receive invocations WITHOUT

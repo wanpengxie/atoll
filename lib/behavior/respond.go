@@ -8,8 +8,8 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // respond.go is the SERVE WRITE primitive — closure author#1, ONE

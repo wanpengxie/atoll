@@ -47,13 +47,13 @@ import (
 	// surfaces as "provider not found" at NewAgent time.
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
-	"github.com/wanpengxie/ActOS/lib/behavior"
-	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/lib/metatool"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/lib/metatool"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // Env keys read at NewConfigFromEnv time. Kept exported so tests and the
@@ -65,8 +65,8 @@ const (
 
 	// EnvKeyChannelType / EnvKeyDomainPrompt feed the prompt-cache
 	// friendly base prompt (L4 §2.4 + L0-L2 platform teaching).
-	EnvKeyChannelType  = "COAGENT_CHANNEL_TYPE"
-	EnvKeyDomainPrompt = "COAGENT_DOMAIN_PROMPT"
+	EnvKeyChannelType  = "ATOLL_CHANNEL_TYPE"
+	EnvKeyDomainPrompt = "ATOLL_DOMAIN_PROMPT"
 )
 
 // Config drives a Bridge. All fields optional unless documented; sane
@@ -127,7 +127,7 @@ func NewConfigFromEnv(systemPrompt string) (Config, error) {
 
 // NewConfigFromSpec builds a Config from the platform env DEFAULTS, then
 // overlays the per-instance spec.Config (channel_actors.config_json — an opaque
-// blob the looper SELF-PARSES; coagent imposes no config structure, agent-spec
+// blob the looper SELF-PARSES; atoll imposes no config structure, agent-spec
 // §三). An agent's own config can fully supply creds (a user agent carrying its
 // own key) or just override a knob (model); env is the fallback the server's
 // boost agent rides. A required field (APIKey / Model) missing from BOTH is a
@@ -242,7 +242,7 @@ func NewBridge(cfg Config, self actor.ActorID, w harness.Pen) (*Bridge, error) {
 		cfg.FastPathWindow = 15 * time.Second
 	}
 	if cfg.WorkDir == "" {
-		tmp, err := os.MkdirTemp("", "coagent-kimi-")
+		tmp, err := os.MkdirTemp("", "atoll-kimi-")
 		if err != nil {
 			return nil, fmt.Errorf("kimi: workdir: %w", err)
 		}
@@ -430,7 +430,7 @@ func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (ki
 		WireEmitter:     emitter,
 		AdditionalTools: b.channelTools(),
 		// SkillRoots: empty non-nil slice = hermetic skill discovery.
-		// coagent's agent MUST NOT pick up arbitrary SKILL.md files from
+		// atoll's agent MUST NOT pick up arbitrary SKILL.md files from
 		// the user's $HOME/.kimi/skills (those belong to other tools like
 		// Claude Code's skill catalog). go-kimi's DefaultSkillRoots would
 		// otherwise scan there and either inject unrelated skills into
@@ -445,7 +445,7 @@ func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (ki
 }
 
 // checkpointSession writes the current go-kimi session id into the durable
-// state slot (agent-spec §三). The looper is the slot's only author; coagent
+// state slot (agent-spec §三). The looper is the slot's only author; atoll
 // stores the bytes opaquely. No-op when there is no slot (Checkpoint nil) or no
 // resolved session yet (a brand-new agent records on a later boot, once its
 // session exists in the durable WorkDir).

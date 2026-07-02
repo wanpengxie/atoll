@@ -10,12 +10,12 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/platform/internal/link"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/runtime/ipc"
+	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/ipc"
 )
 
 // recordPen is a minimal raw harness.Pen: it counts the writes that reach it and

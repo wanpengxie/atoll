@@ -4,7 +4,7 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/wanpengxie/ActOS/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // readBatch caps one ReadAfterSeq page. A drained read (< readBatch rows) ends

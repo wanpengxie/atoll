@@ -11,6 +11,6 @@
 package all
 
 import (
-	_ "github.com/wanpengxie/ActOS/agent/provider/claudecode" // engine class: claude
-	_ "github.com/wanpengxie/ActOS/agent/provider/kimi"       // engine class: go-kimi
+	_ "github.com/wanpengxie/atoll/agent/provider/claudecode" // engine class: claude
+	_ "github.com/wanpengxie/atoll/agent/provider/kimi"       // engine class: go-kimi
 )

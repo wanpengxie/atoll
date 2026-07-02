@@ -13,10 +13,10 @@ import (
 	kimierrors "github.com/wanpengxie/go-kimi/pkg/kimi/errors"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
-	"github.com/wanpengxie/ActOS/lib/behavior"
-	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // emitTurnProgress writes one progress envelope summarising a completed

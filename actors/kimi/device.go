@@ -15,8 +15,8 @@ import (
 
 	"log/slog"
 
-	"github.com/wanpengxie/ActOS/lib/behavior"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // device.go is the outward (device) face: a PRIVATE WS endpoint the extension

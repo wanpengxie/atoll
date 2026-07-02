@@ -1,4 +1,4 @@
-// Command server runs the coagent application server.
+// Command server runs the atoll application server.
 package main
 
 import (
@@ -7,21 +7,21 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/wanpengxie/ActOS/app"
-	"github.com/wanpengxie/ActOS/cmd/internal/dotenv"
+	"github.com/wanpengxie/atoll/app"
+	"github.com/wanpengxie/atoll/cmd/internal/dotenv"
 
 	// Composition root wires the catalog: the server-embedded agent (agent:boost)
 	// is built via registry.Build("agent"), so the BINARY pins which "agent" impl
 	// is compiled in — not the app library (which stays agent-impl-agnostic, so
 	// `go test ./app` can register its own stub). agent/all aggregates the "agent"
 	// class + its looper engines (go-kimi + claude); actors/ holds no agent.
-	_ "github.com/wanpengxie/ActOS/agent/all"
+	_ "github.com/wanpengxie/atoll/agent/all"
 )
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
-	dbPath := flag.String("db", "coagent.db", "app database path")
-	channelDBDir := flag.String("channel-db-dir", "/tmp/coagent-dev/channels", "directory for channel databases")
+	dbPath := flag.String("db", "atoll.db", "app database path")
+	channelDBDir := flag.String("channel-db-dir", "/tmp/atoll-dev/channels", "directory for channel databases")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))

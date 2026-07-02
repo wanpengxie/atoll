@@ -24,7 +24,7 @@ var forbiddenProtoStdlib = []string{"context", "database/sql", "net/http"}
 // declares but, until this guard, only a manual `git grep` and review upheld:
 //
 //   - DIRECTION: protocol/ may import ONLY stdlib and other protocol/ packages.
-//     It may NOT import any other ActOS package (runtime/lib/platform/app) —
+//     It may NOT import any other atoll package (runtime/lib/platform/app) —
 //     everything depends on protocol, never the reverse. A reversed arrow
 //     (protocol importing runtime) inverts the whole layering and still
 //     compiles; this is the single most corrosive base-layer defect, so it is
@@ -40,8 +40,8 @@ var forbiddenProtoStdlib = []string{"context", "database/sql", "net/http"}
 // stop. (The agent-PR consumer model needs exactly this: a comment + manual grep
 // is zero enforcement when review is also an agent.)
 func TestProtocolPurityAndDirection(t *testing.T) {
-	const protoPkg = platformModulePrefix + "protocol" // ".../ActOS/protocol"
-	protoPrefix := protoPkg + "/"                       // ".../ActOS/protocol/"
+	const protoPkg = platformModulePrefix + "protocol" // ".../atoll/protocol"
+	protoPrefix := protoPkg + "/"                       // ".../atoll/protocol/"
 
 	fset := token.NewFileSet()
 	var violations []string
@@ -72,14 +72,14 @@ func TestProtocolPurityAndDirection(t *testing.T) {
 				continue
 			}
 
-			// Intra-protocol import — always allowed (the only permitted ActOS edge).
+			// Intra-protocol import — always allowed (the only permitted atoll edge).
 			if p == protoPkg || strings.HasPrefix(p, protoPrefix) {
 				continue
 			}
-			// Any other ActOS package = a reversed dependency arrow.
+			// Any other atoll package = a reversed dependency arrow.
 			if strings.HasPrefix(p, platformModulePrefix) {
 				violations = append(violations, fmt.Sprintf(
-					"%s imports %q — protocol must not import any non-protocol ActOS package (dependency direction: all layers depend on protocol, never the reverse)", rel, p))
+					"%s imports %q — protocol must not import any non-protocol atoll package (dependency direction: all layers depend on protocol, never the reverse)", rel, p))
 				continue
 			}
 			// External (non-stdlib) module: a dot in the first path segment.

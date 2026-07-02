@@ -3,8 +3,8 @@ package accessdoor
 import (
 	"testing"
 
-	"github.com/wanpengxie/ActOS/protocol/access"
-	"github.com/wanpengxie/ActOS/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
 // TestNewFailFast: assembly-time validation rejects an incomplete Deps and a

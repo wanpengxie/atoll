@@ -9,7 +9,7 @@ import (
 
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // turnState tracks the in-flight signals the bridge observes inside a

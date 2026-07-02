@@ -7,7 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // AwaitResultSpec is the protocol-layer definition of await_result.

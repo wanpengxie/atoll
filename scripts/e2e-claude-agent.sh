@@ -2,8 +2,8 @@
 # e2e-claude-agent.sh — REAL end-to-end run of the second looper (claude).
 #
 # Flow (mirrors dev-deploy.sh's start-server-then-drive style, but self-contained
-# and against an ISOLATED data dir — never touches /tmp/coagent-dev owner data):
-#   1. build server, start it on :8899 against /tmp/coagent-e2e (fresh)
+# and against an ISOLATED data dir — never touches /tmp/atoll-dev owner data):
+#   1. build server, start it on :8899 against /tmp/atoll-e2e (fresh)
 #   2. register user → workspace → channel
 #   3. POST /api/agents {looper:"claude"}            → a claude-looper agent
 #   4. POST /api/channels/:ch/agents {make_default}  → introduce + LIVE spawn
@@ -19,7 +19,7 @@ set -uo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-DATA_DIR="/tmp/coagent-e2e"        # e2e scratch — NOT /tmp/coagent-dev
+DATA_DIR="/tmp/atoll-e2e"        # e2e scratch — NOT /tmp/atoll-dev
 PORT=8899
 BASE="http://127.0.0.1:$PORT"
 JAR="$DATA_DIR/cookies.txt"
@@ -38,13 +38,13 @@ trap cleanup EXIT
 # ---- 0. fresh scratch + build + start server -------------------------------
 rm -rf "$DATA_DIR"; mkdir -p "$DATA_DIR/channels"
 say "build server"
-go build -o bin/coagent-server ./cmd/server || die "build"
+go build -o bin/atoll-server ./cmd/server || die "build"
 
 # free the port if a previous e2e left something
-pkill -f "coagent-server.*:$PORT" 2>/dev/null; sleep 1
+pkill -f "atoll-server.*:$PORT" 2>/dev/null; sleep 1
 
 say "start server :$PORT (data=$DATA_DIR)"
-./bin/coagent-server -db "$DATA_DIR/app.db" -channel-db-dir "$DATA_DIR/channels" -addr ":$PORT" \
+./bin/atoll-server -db "$DATA_DIR/app.db" -channel-db-dir "$DATA_DIR/channels" -addr ":$PORT" \
   > "$SLOG" 2>&1 &
 SERVER_PID=$!
 for i in $(seq 1 15); do

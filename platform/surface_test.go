@@ -5,7 +5,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/platform"
+	"github.com/wanpengxie/atoll/platform"
 )
 
 // TestHomePublicSurface pins *platform.Home's exported method set to EXACTLY the

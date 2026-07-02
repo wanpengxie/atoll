@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // ListActorsSpec is the protocol-layer definition of list_actors.

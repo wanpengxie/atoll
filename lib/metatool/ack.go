@@ -3,7 +3,7 @@ package metatool
 import (
 	"time"
 
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // AckDescriptor is the immediate-ack shape handed back to the LLM when a

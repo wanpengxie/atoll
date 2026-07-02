@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/platform"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // newSweepingHome assembles a platform.Home whose closure reconciler sweeps on a

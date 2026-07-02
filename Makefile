@@ -21,15 +21,15 @@ LDFLAGS_RELEASE := -s -w
 build-go:
 	@mkdir -p bin
 	@for b in $(GO_BINARIES); do \
-	  echo "[build] cmd/$$b -> bin/coagent-$$b"; \
-	  go build -o bin/coagent-$$b ./cmd/$$b || exit 1; \
+	  echo "[build] cmd/$$b -> bin/atoll-$$b"; \
+	  go build -o bin/atoll-$$b ./cmd/$$b || exit 1; \
 	done
 
 build-release:
 	@mkdir -p bin
 	@for b in $(GO_BINARIES); do \
-	  echo "[build-release] cmd/$$b -> bin/coagent-$$b (stripped)"; \
-	  go build -ldflags="$(LDFLAGS_RELEASE)" -o bin/coagent-$$b ./cmd/$$b || exit 1; \
+	  echo "[build-release] cmd/$$b -> bin/atoll-$$b (stripped)"; \
+	  go build -ldflags="$(LDFLAGS_RELEASE)" -o bin/atoll-$$b ./cmd/$$b || exit 1; \
 	done
 
 build-ui:
@@ -55,11 +55,11 @@ lint:
 dev: build-go dev-server dev-ui
 
 dev-server:
-	@mkdir -p /tmp/coagent-dev/channels
+	@mkdir -p /tmp/atoll-dev/channels
 	@echo "[dev] starting server on :8832"
-	@bin/coagent-server \
-	  --db /tmp/coagent-dev/app.db \
-	  --channel-db-dir /tmp/coagent-dev/channels \
+	@bin/atoll-server \
+	  --db /tmp/atoll-dev/app.db \
+	  --channel-db-dir /tmp/atoll-dev/channels \
 	  --addr :8832 &
 
 dev-ui:

@@ -207,7 +207,7 @@ func importsOf(t *testing.T, fset *token.FileSet, path string) []string {
 
 // platformModulePrefix is this module's import path prefix; the dependency
 // guards reason about same-module package paths.
-const platformModulePrefix = "github.com/wanpengxie/ActOS/"
+const platformModulePrefix = "github.com/wanpengxie/atoll/"
 
 // TestPlatformDependencyDirection enforces the platform reshape's dependency
 // figure (platform-redesign-construction §1): platform is the assembly layer

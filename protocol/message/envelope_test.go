@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // TestEnvelopeRoundTripMinimal exercises the minimal valid envelope: only

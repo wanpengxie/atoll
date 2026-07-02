@@ -1,6 +1,6 @@
 package actorrt
 
-import "github.com/wanpengxie/ActOS/protocol/actor"
+import "github.com/wanpengxie/atoll/protocol/actor"
 
 // HostRef names the physical host a new incarnation is placed on. It is
 // incarnation-level, substrate-lock①(§10.7 forward, §3.5 build-spec): opaque

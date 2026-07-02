@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // stepEnvelopeShape implements proto-layer1 §2.2 — envelope shape

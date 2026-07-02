@@ -7,8 +7,8 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // stepResponsePairing implements proto-layer1 §2.8 Step 8 — Final

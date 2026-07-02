@@ -22,7 +22,7 @@ import (
 // SessionCookie is the canonical session cookie name. It is the contract between
 // the session-minting path (login/logout, in the app package) and the
 // session-verifying path (here), so it is exported for the minter to reference.
-const SessionCookie = "coagent_session"
+const SessionCookie = "atoll_session"
 
 // ctxKeyUserID is where Auth stamps the authenticated user id. It is private so
 // only this package can write it (via Auth) and read it (via UserID) — business

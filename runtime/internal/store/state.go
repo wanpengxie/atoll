@@ -7,9 +7,9 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/resource"
-	"github.com/wanpengxie/ActOS/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
 // stateStore implements resourcespec.StateStore over the actor_state table — the

@@ -3,8 +3,8 @@ package actorrt
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // Actor is the minimal contract the substrate requires of an actor

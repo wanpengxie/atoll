@@ -1,6 +1,6 @@
 package runtime
 
-import "github.com/wanpengxie/ActOS/runtime/schedule"
+import "github.com/wanpengxie/atoll/runtime/schedule"
 
 // OpenScheduler assembles the time-axis engine over an already-open channel
 // store (timer-build-spec.md §3.4). It is a SECOND assembly step, deliberately

@@ -20,13 +20,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-DATA_DIR="${COAGENT_DATA_DIR:-/tmp/coagent-dev}"
+DATA_DIR="${ATOLL_DATA_DIR:-/tmp/atoll-dev}"
 LOG_DIR="$DATA_DIR"
 DB_PATH="$DATA_DIR/server.db"
 DAEMON_DATA="$DATA_DIR/daemon"
 SERVER_LOG="$LOG_DIR/server.log"
 DAEMON_LOG="$LOG_DIR/daemon.log"
-DAEMONBUS_URL="${COAGENT_DAEMONBUS_URL:-ws://127.0.0.1:8832/daemonbus}"
+DAEMONBUS_URL="${ATOLL_DAEMONBUS_URL:-ws://127.0.0.1:8832/daemonbus}"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*" >&2; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }
@@ -40,9 +40,9 @@ blue "[deploy] step 1: source .env"
 [ -f .env ] || fail ".env missing in $REPO_ROOT"
 set -a; source .env; set +a
 
-for var in COAGENT_DAEMON_SECRET COAGENT_HUMAN_SECRET COAGENT_SESSION_SECRET \
-           COAGENT_DEVICEBUS_ALLOWED_ORIGINS \
-           COAGENT_PUSHHUB_ALLOWED_ORIGINS COAGENT_DAEMONBUS_ALLOWED_ORIGINS \
+for var in ATOLL_DAEMON_SECRET ATOLL_HUMAN_SECRET ATOLL_SESSION_SECRET \
+           ATOLL_DEVICEBUS_ALLOWED_ORIGINS \
+           ATOLL_PUSHHUB_ALLOWED_ORIGINS ATOLL_DAEMONBUS_ALLOWED_ORIGINS \
            KIMI_API_KEY KIMI_BASE_URL KIMI_MODEL; do
   [ -n "${!var:-}" ] || fail "env var $var empty in .env"
 done
@@ -56,21 +56,21 @@ else
   blue "[deploy] step 2: go build server / daemon / worker / cli / proxy"
   mkdir -p bin
   for b in server daemon worker cli; do
-    go build -o "bin/coagent-$b" "./cmd/$b" || fail "go build cmd/$b"
+    go build -o "bin/atoll-$b" "./cmd/$b" || fail "go build cmd/$b"
   done
   # Native proxy binary for direct local use + cross-compiled installer
-  # binaries served by /install/coagent-proxy_<os>_<arch>. The installer
+  # binaries served by /install/atoll-proxy_<os>_<arch>. The installer
   # set is what one-line `curl … | sh` fetches when a remote user installs
   # the daemon on their own machine. We keep coverage to the platforms
   # spec §13 #2 lists as MVP: linux/darwin × amd64/arm64.
-  go build -o "bin/coagent-proxy" "./cmd/coagent-proxy" || fail "go build cmd/coagent-proxy"
+  go build -o "bin/atoll-proxy" "./cmd/atoll-proxy" || fail "go build cmd/atoll-proxy"
   mkdir -p bin/installers
   for os_arch in linux_amd64 linux_arm64 darwin_amd64 darwin_arm64; do
     goos="${os_arch%_*}"
     goarch="${os_arch##*_}"
-    out="bin/installers/coagent-proxy_${os_arch}"
-    GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$out" "./cmd/coagent-proxy" \
-      || fail "cross-build coagent-proxy ${os_arch}"
+    out="bin/installers/atoll-proxy_${os_arch}"
+    GOOS="$goos" GOARCH="$goarch" go build -trimpath -ldflags="-s -w" -o "$out" "./cmd/atoll-proxy" \
+      || fail "cross-build atoll-proxy ${os_arch}"
   done
 fi
 
@@ -111,9 +111,9 @@ stop_proc() {
   sleep 1
 }
 
-stop_proc "bin/coagent-worker" "worker" 5
-stop_proc "bin/coagent-daemon" "daemon" 8
-stop_proc "bin/coagent-server" "server" 5
+stop_proc "bin/atoll-worker" "worker" 5
+stop_proc "bin/atoll-daemon" "daemon" 8
+stop_proc "bin/atoll-server" "server" 5
 
 # port 8832 must be free
 if ss -tlnp 2>/dev/null | grep -q ":8832 "; then
@@ -127,7 +127,7 @@ blue "[deploy] step 5: start server :8832"
 mkdir -p "$DATA_DIR"
 # Start services in a new session so non-interactive runners that clean up
 # their own process group do not tear down the deployed stack on exit.
-setsid ./bin/coagent-server \
+setsid ./bin/atoll-server \
   -db "$DB_PATH" \
   -addr :8832 \
   -ui-dist ./ui/dist \
@@ -156,10 +156,10 @@ done
 # Step 6: start daemon, wait daemonbus.ws.connected
 # -----------------------------------------------------------------------------
 blue "[deploy] step 6: start daemon → $DAEMONBUS_URL"
-setsid ./bin/coagent-daemon \
+setsid ./bin/atoll-daemon \
   -server-url "$DAEMONBUS_URL" \
-  -key "$COAGENT_DAEMON_SECRET" \
-  -human-caller-secret "$COAGENT_HUMAN_SECRET" \
+  -key "$ATOLL_DAEMON_SECRET" \
+  -human-caller-secret "$ATOLL_HUMAN_SECRET" \
   -data-dir "$DAEMON_DATA" \
   -daemon-id daemon-dev \
   > "$DAEMON_LOG" 2>&1 &
@@ -189,17 +189,17 @@ done
 # -----------------------------------------------------------------------------
 blue "[deploy] step 7: status"
 COMMIT=$(git -C "$REPO_ROOT" rev-parse --short HEAD)
-WORKER_MTIME=$(stat -c %y bin/coagent-worker | cut -d. -f1)
+WORKER_MTIME=$(stat -c %y bin/atoll-worker | cut -d. -f1)
 
 cat <<EOF
 
 [deploy] ✅ stack up
   commit:        $COMMIT
-  server pid:    $SERVER_PID   (binary: $(stat -c %y bin/coagent-server | cut -d. -f1))
+  server pid:    $SERVER_PID   (binary: $(stat -c %y bin/atoll-server | cut -d. -f1))
   daemon pid:    $DAEMON_PID   (epoch:  $EPOCH)
   worker bin:    $WORKER_MTIME (next spawn auto-picks)
   data dir:      $DATA_DIR
   logs:          $SERVER_LOG / $DAEMON_LOG
-  origins:       $COAGENT_DEVICEBUS_ALLOWED_ORIGINS
+  origins:       $ATOLL_DEVICEBUS_ALLOWED_ORIGINS
 
 EOF

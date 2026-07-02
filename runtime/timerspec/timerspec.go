@@ -3,7 +3,7 @@ package timerspec
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // TimerID names one pending timer. It is a RUNTIME-level name (control-plane),

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // TestGrantRoundTrip pins structural fidelity of the set operand: GranteeKind +

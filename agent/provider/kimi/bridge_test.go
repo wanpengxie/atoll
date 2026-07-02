@@ -17,11 +17,11 @@ import (
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
-	"github.com/wanpengxie/ActOS/agent/provider/kimi"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/atoll/agent/provider/kimi"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 const (
@@ -322,7 +322,7 @@ func TestNewConfigFromSpec_OverlayAndFallback(t *testing.T) {
 
 func TestBuildSystemPrompt_EmptyDomain(t *testing.T) {
 	p := kimi.BuildSystemPrompt(kimi.Situation{Host: "server"}, "", "")
-	if !strings.Contains(p, "coagent agent") {
+	if !strings.Contains(p, "atoll agent") {
 		t.Fatalf("platform teaching missing: %q", p[:80])
 	}
 	if strings.Contains(p, "Channel template") {
@@ -370,7 +370,7 @@ func TestBuildSystemPrompt_SituationDrivesBehaviour(t *testing.T) {
 
 func TestBuildSystemPrompt_NoFrozenActorSnapshot(t *testing.T) {
 	p := kimi.BuildSystemPrompt(kimi.Situation{}, "group", "d")
-	for _, banned := range []string{"actor_id\":", "frozen", "COAGENT_CHANNEL_CONTEXT_JSON"} {
+	for _, banned := range []string{"actor_id\":", "frozen", "ATOLL_CHANNEL_CONTEXT_JSON"} {
 		if strings.Contains(p, banned) {
 			t.Fatalf("prompt carries frozen snapshot marker %q", banned)
 		}

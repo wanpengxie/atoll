@@ -39,17 +39,17 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/wanpengxie/ActOS/actors/kimi"
-	"github.com/wanpengxie/ActOS/actors/xhs"
-	"github.com/wanpengxie/ActOS/app"
-	"github.com/wanpengxie/ActOS/lib/actorcaps"
-	"github.com/wanpengxie/ActOS/lib/metatool"
-	"github.com/wanpengxie/ActOS/platform"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/atoll/actors/kimi"
+	"github.com/wanpengxie/atoll/actors/xhs"
+	"github.com/wanpengxie/atoll/app"
+	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/lib/metatool"
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // Fixed loopback device ports for this test's two adapters. Distinct from the

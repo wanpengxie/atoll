@@ -6,9 +6,9 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/runtime/ipc"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/ipc"
 )
 
 // RemoteWriter is the OUT-OF-PROCESS end of the write contract: a relay-only

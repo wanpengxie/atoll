@@ -3,7 +3,7 @@ package actorrt
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // Lifecycle is a desired member's activation intent — the closed set of ways a

@@ -6,12 +6,12 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/platform/internal/link"
-	"github.com/wanpengxie/ActOS/protocol/access"
-	"github.com/wanpengxie/ActOS/protocol/resource"
-	"github.com/wanpengxie/ActOS/runtime/accessdoor"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/schedule"
+	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 // recordAccess is a minimal raw accessdoor.AccessHandle: it counts the invokes

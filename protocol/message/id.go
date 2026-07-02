@@ -1,7 +1,7 @@
 package message
 
 import (
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // ID is the envelope.message identifier wire form.

@@ -3,8 +3,8 @@ package storespec
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // StoredRow wraps a protocol Envelope with the store-derived columns kernel

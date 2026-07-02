@@ -1,8 +1,8 @@
 package access
 
 import (
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/resource"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
 // Invocation is one access — a subject invokes one lifecycle/access operation on one

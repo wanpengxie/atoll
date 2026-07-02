@@ -1,5 +1,5 @@
 // Package sdk will provide the Go client library for actors (daemon-hosted
-// or standalone) to interact with the coagent server: send messages, read
+// or standalone) to interact with the atoll server: send messages, read
 // channel logs, and manage actor lifecycle — the programmatic equivalent of
 // the HTTP/WS gateway, shaped for actor authors rather than HTTP callers.
 //

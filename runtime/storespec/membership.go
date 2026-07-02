@@ -3,7 +3,7 @@ package storespec
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // MemberActorAdd is one actor registration transition (membership control

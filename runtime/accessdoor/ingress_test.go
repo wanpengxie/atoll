@@ -4,9 +4,9 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/protocol/access"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/resource"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
 // TestIngressRules exercises every ingress structural rule; each malformed shape

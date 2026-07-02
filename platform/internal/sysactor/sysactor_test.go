@@ -6,11 +6,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/platform/internal/sysactor"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/runtime/storespec"
+	"github.com/wanpengxie/atoll/platform/internal/sysactor"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // fakeRegistry serves a fixed membership set (the durable axis).

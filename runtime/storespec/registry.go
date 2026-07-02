@@ -3,7 +3,7 @@ package storespec
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // Record is the channel-local actor membership row exposed via the registry

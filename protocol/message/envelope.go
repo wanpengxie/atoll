@@ -6,8 +6,8 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // Sender is the nested `sender` object inside an envelope. It is the stable

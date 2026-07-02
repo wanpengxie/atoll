@@ -6,10 +6,10 @@ import (
 
 	claude "github.com/wanpengxie/go-claude-agent-sdk"
 
-	"github.com/wanpengxie/ActOS/lib/metatool"
+	"github.com/wanpengxie/atoll/lib/metatool"
 )
 
-// buildMCPServer wraps the 7 coagent meta-tools as an in-process SDK MCP server
+// buildMCPServer wraps the 7 atoll meta-tools as an in-process SDK MCP server
 // — the claude looper's path to the shared actor-invocation machinery (agent-spec
 // §三 必须项 #1: "能把标准 meta-tool 注入自己的工具面并调通"; the go-kimi looper
 // does the same via AdditionalTools). Each handler bridges to the held shell with
@@ -35,7 +35,7 @@ func (b *Bridge) buildMCPServer() *claude.McpSdkServerConfig {
 		}
 		tools = append(tools, claude.NewMCPTool(mt.Spec.Name, mt.Spec.Description, schema, handler))
 	}
-	return claude.CreateSdkMcpServer("coagent", "1.0.0", tools...)
+	return claude.CreateSdkMcpServer("atoll", "1.0.0", tools...)
 }
 
 // toMCPResult materialises a metatool.ResultValue as an MCP tool result. The

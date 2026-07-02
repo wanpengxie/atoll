@@ -15,8 +15,8 @@
 package all
 
 import (
-	_ "github.com/wanpengxie/ActOS/actors/device"
-	_ "github.com/wanpengxie/ActOS/actors/echo"
-	_ "github.com/wanpengxie/ActOS/actors/kimi"
-	_ "github.com/wanpengxie/ActOS/actors/xhs"
+	_ "github.com/wanpengxie/atoll/actors/device"
+	_ "github.com/wanpengxie/atoll/actors/echo"
+	_ "github.com/wanpengxie/atoll/actors/kimi"
+	_ "github.com/wanpengxie/atoll/actors/xhs"
 )

@@ -3,8 +3,8 @@ package accessdoor
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
 // MembershipCheck is the door's narrow channel-membership seam. Two loci consult

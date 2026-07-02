@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/lib/metatool"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/atoll/lib/metatool"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // ---------------------------------------------------------------------------

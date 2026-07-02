@@ -8,10 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/platform/internal/link"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // TestEmitIdentity_HostWeldsAuthorFromBoundID pins the substrate identity axiom

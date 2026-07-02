@@ -9,12 +9,12 @@ import (
 
 	claude "github.com/wanpengxie/go-claude-agent-sdk"
 
-	"github.com/wanpengxie/ActOS/agent/provider/claudecode"
-	"github.com/wanpengxie/ActOS/lib/metatool"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/atoll/agent/provider/claudecode"
+	"github.com/wanpengxie/atoll/lib/metatool"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 const (
@@ -164,7 +164,7 @@ func TestClaudeTurn_EmitsFinalAndCheckpoints(t *testing.T) {
 }
 
 // TestClaudeMCP_BridgesAllMetaTools pins that the claude engine gets the FULL
-// coagent meta-tool surface (agent-spec §三 必须项 #1) via the in-process MCP
+// atoll meta-tool surface (agent-spec §三 必须项 #1) via the in-process MCP
 // server — the same 7 tools the go-kimi looper installs as AdditionalTools.
 func TestClaudeMCP_BridgesAllMetaTools(t *testing.T) {
 	w := &recordingWriter{}

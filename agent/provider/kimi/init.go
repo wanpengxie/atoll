@@ -1,6 +1,6 @@
 package kimi
 
-import "github.com/wanpengxie/ActOS/registry"
+import "github.com/wanpengxie/atoll/registry"
 
 // init self-registers the go-kimi engine as its OWN actor class ("go-kimi") into
 // the one actor registry — flat, peer to claude and the tool classes. An agent's

@@ -9,7 +9,7 @@ import (
 
 	_ "modernc.org/sqlite"
 
-	"github.com/wanpengxie/ActOS/runtime/internal/store"
+	"github.com/wanpengxie/atoll/runtime/internal/store"
 )
 
 // OpenChannel installs exactly the channel-local tables — messages,

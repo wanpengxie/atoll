@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/runtime/ipc"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/ipc"
 )
 
 // hostEnd is a minimal stand-in for the substrate-side port in remote-writer

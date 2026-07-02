@@ -1,6 +1,6 @@
 package behavior
 
-import "github.com/wanpengxie/ActOS/protocol/message"
+import "github.com/wanpengxie/atoll/protocol/message"
 
 // There is no separate CorrelationEntry/State: the original request envelope
 // (keyed by its id) is the single source of truth (id / expires_at /

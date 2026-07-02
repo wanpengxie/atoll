@@ -20,7 +20,7 @@ const platformPathPrefix = "../platform/"
 
 // TestRuntimeAssemblyConfinedToPlatform — PACKAGE-level lock.
 //
-// The runtime ROOT package (github.com/wanpengxie/ActOS/runtime) is PURE
+// The runtime ROOT package (github.com/wanpengxie/atoll/runtime) is PURE
 // assembly: its entire export surface is ChannelStores / OpenChannelOptions /
 // OpenChannel / OpenScheduler. OpenChannel hands back a ChannelStores whose .Log is the raw
 // MessageLog (Append writes the messages table directly) and whose .Membership

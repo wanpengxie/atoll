@@ -4,8 +4,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // reservedBootstrapTypeSet is the proto-layer1 §6.2.0 Reserved Bootstrap

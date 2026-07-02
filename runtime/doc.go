@@ -1,4 +1,4 @@
-// Package runtime is the reusable execution substrate for coagent — the v2
+// Package runtime is the reusable execution substrate for atoll — the v2
 // BEAM-style engine layer. It imports only protocol.
 //
 // runtime/ owns:

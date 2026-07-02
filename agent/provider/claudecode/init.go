@@ -1,6 +1,6 @@
 package claudecode
 
-import "github.com/wanpengxie/ActOS/registry"
+import "github.com/wanpengxie/atoll/registry"
 
 // init self-registers the claude-code engine as its OWN actor class ("claude")
 // into the one actor registry — flat, peer to go-kimi and the tool classes

@@ -13,13 +13,13 @@ import (
 
 	claude "github.com/wanpengxie/go-claude-agent-sdk"
 
-	"github.com/wanpengxie/ActOS/lib/behavior"
-	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/lib/metatool"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
+	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/lib/metatool"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 const (
@@ -88,7 +88,7 @@ func NewBridge(cfg Config, self actor.ActorID, w harness.Pen) (*Bridge, error) {
 		cfg.NowFn = func() int64 { return time.Now().UnixMilli() }
 	}
 	if cfg.WorkDir == "" {
-		tmp, err := os.MkdirTemp("", "coagent-claude-")
+		tmp, err := os.MkdirTemp("", "atoll-claude-")
 		if err != nil {
 			return nil, fmt.Errorf("claude: workdir: %w", err)
 		}
@@ -105,13 +105,13 @@ var (
 	_ actorrt.Stopper = (*Bridge)(nil)
 )
 
-// defaultClientFactory builds a claude.NewClient wired with the coagent
+// defaultClientFactory builds a claude.NewClient wired with the atoll
 // meta-tool MCP server, the durable Cwd, the system prompt, and a resume seed.
 func (b *Bridge) defaultClientFactory() (claudeClient, error) {
 	opts := []claude.Option{
 		claude.WithModel(b.cfg.Model),
 		claude.WithPermissionMode(claude.PermissionBypassPermissions),
-		claude.WithMcpServers(map[string]claude.McpServerConfig{"coagent": b.buildMCPServer()}),
+		claude.WithMcpServers(map[string]claude.McpServerConfig{"atoll": b.buildMCPServer()}),
 		claude.WithCwd(b.cfg.WorkDir),
 	}
 	if strings.TrimSpace(b.cfg.SystemPrompt) != "" {

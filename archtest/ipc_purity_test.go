@@ -29,8 +29,8 @@ import (
 // runtime sibling) turns this test red, full stop. A doc comment is zero
 // enforcement when review is also an agent.
 func TestIPCWireLeafPurity(t *testing.T) {
-	const protoPkg = platformModulePrefix + "protocol" // ".../ActOS/protocol"
-	protoPrefix := protoPkg + "/"                       // ".../ActOS/protocol/"
+	const protoPkg = platformModulePrefix + "protocol" // ".../atoll/protocol"
+	protoPrefix := protoPkg + "/"                       // ".../atoll/protocol/"
 	const ipcPkg = platformModulePrefix + "runtime/ipc"
 
 	fset := token.NewFileSet()
@@ -60,7 +60,7 @@ func TestIPCWireLeafPurity(t *testing.T) {
 				violations = append(violations, fmt.Sprintf("%s: unparseable import %s", rel, imp.Path.Value))
 				continue
 			}
-			// protocol/* — the only ActOS edge a wire leaf may take (it speaks
+			// protocol/* — the only atoll edge a wire leaf may take (it speaks
 			// pure envelope / actor types on the wire).
 			if p == protoPkg || strings.HasPrefix(p, protoPrefix) {
 				continue
@@ -69,7 +69,7 @@ func TestIPCWireLeafPurity(t *testing.T) {
 			if p == ipcPkg {
 				continue
 			}
-			// Any other ActOS package = a sibling/up dependency a wire leaf must
+			// Any other atoll package = a sibling/up dependency a wire leaf must
 			// not carry (harness is the one this wall exists to forbid).
 			if strings.HasPrefix(p, platformModulePrefix) {
 				violations = append(violations, fmt.Sprintf(

@@ -38,8 +38,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/wanpengxie/ActOS/actors/kimi"
-	"github.com/wanpengxie/ActOS/actors/xhs"
+	"github.com/wanpengxie/atoll/actors/kimi"
+	"github.com/wanpengxie/atoll/actors/xhs"
 )
 
 // downFrame is the command the adapter pushes down to the device.

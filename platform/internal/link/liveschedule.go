@@ -4,8 +4,8 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/schedule"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 // ErrScheduleNotLive is the WHEN-validity rejection on the time plane: a

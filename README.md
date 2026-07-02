@@ -20,16 +20,16 @@ web/         前端（React Vite UI + xhs Chrome 扩展）
 
 ```bash
 # 1. 构建
-go build -o bin/coagent-server ./cmd/server
-go build -o bin/coagent-daemon ./cmd/daemon
-go build -o bin/coagent-cli    ./cmd/cli
+go build -o bin/atoll-server ./cmd/server
+go build -o bin/atoll-daemon ./cmd/daemon
+go build -o bin/atoll-cli    ./cmd/cli
 
 # 2. 起 server
-bin/coagent-server --db /tmp/coagent-dev/app.db --channel-db-dir /tmp/coagent-dev/channels
+bin/atoll-server --db /tmp/atoll-dev/app.db --channel-db-dir /tmp/atoll-dev/channels
 
 # 3. 起 daemon（echo actor，不需要外部凭证）
 #    先在 UI 或 CLI 创建 daemon 拿到 api-key，绑定到 channel
-bin/coagent-daemon --server ws://localhost:8080/compute?key=<api-key>&channel=<chID> \
+bin/atoll-daemon --server ws://localhost:8080/compute?key=<api-key>&channel=<chID> \
                    --key <api-key> --actors echo
 
 # 4. UI（开发模式）
@@ -43,9 +43,9 @@ go test ./...
 
 | Binary | 作用 |
 |--------|------|
-| `coagent-server` | HTTP API + WS 推送 + 所有 channel 的 truth 持有者 |
-| `coagent-daemon` | WS 连 server，host actor cell（echo/feishu/...） |
-| `coagent-cli`    | 管理 CLI（channel/daemon/message 操作） |
+| `atoll-server` | HTTP API + WS 推送 + 所有 channel 的 truth 持有者 |
+| `atoll-daemon` | WS 连 server，host actor cell（echo/feishu/...） |
+| `atoll-cli`    | 管理 CLI（channel/daemon/message 操作） |
 
 ## 核心设计
 
@@ -78,5 +78,5 @@ var registry = map[string]func(harness.Pen) actorrt.Actor{
 
 ## 项目名 vs module path
 
-- **项目名：coagent**（小写）
-- **Go module：`github.com/wanpengxie/ActOS`** — import path 用 ActOS，项目文档用 coagent
+- **项目名：atoll**（小写）
+- **Go module：`github.com/wanpengxie/atoll`** — import path 与项目名统一为 atoll（曾用名 atoll/coagent，2026-07 系统性更名）

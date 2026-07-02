@@ -4,7 +4,7 @@ import (
 	"context"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // Shape-pinning for the 期2 contract-first activation/placement symbols

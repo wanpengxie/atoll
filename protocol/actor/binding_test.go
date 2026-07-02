@@ -3,7 +3,7 @@ package actor_test
 import (
 	"testing"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // Kind closed set {human, agent, system, tool}.

@@ -1,10 +1,10 @@
 package actorcaps
 
 import (
-	"github.com/wanpengxie/ActOS/runtime/accessdoor"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
-	"github.com/wanpengxie/ActOS/runtime/schedule"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 // Caps is the five-capability bundle welded to one actor incarnation at birth.

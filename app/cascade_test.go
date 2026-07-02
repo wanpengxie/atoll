@@ -4,7 +4,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/app"
+	"github.com/wanpengxie/atoll/app"
 )
 
 // TestChannelActorsCascadeOnDelete pins that deleting a channel also removes its

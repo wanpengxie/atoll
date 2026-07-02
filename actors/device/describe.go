@@ -4,8 +4,8 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // actorDescription is the one-line actor positioning returned by

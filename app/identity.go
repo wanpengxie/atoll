@@ -8,7 +8,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/wanpengxie/ActOS/app/internal/middleware"
+	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"golang.org/x/crypto/bcrypt"
 )
 

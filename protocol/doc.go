@@ -1,4 +1,4 @@
-// Package protocol is the protocol contract layer for coagent (launch+).
+// Package protocol is the protocol contract layer for atoll (launch+).
 //
 // It is PURE proto: pure types, closed-set vocabularies and pure functions
 // that mirror the protocol specs (.dalek/pm/proto-*.md). It owns no state,
@@ -44,13 +44,13 @@
 //     not even the stdlib seams that imply state/IO/transport: context,
 //     database/sql, net/http, or any SQL/driver/transport package. Concretely
 //     no module outside protocol may be imported (other protocol/ packages are
-//     the only permitted ActOS edge — all layers depend on protocol, never the
+//     the only permitted atoll edge — all layers depend on protocol, never the
 //     reverse).
 //
 // Enforcement: archtest/protocol_purity_test.go (TestProtocolPurityAndDirection)
 // mechanically enforces BOTH purity and dependency direction under
 // `go test ./...` / `make lint`, so a PR adding a forbidden import — an external
-// module, a reversed ActOS import (protocol importing runtime/lib/platform), or
+// module, a reversed atoll import (protocol importing runtime/lib/platform), or
 // a state/IO/transport stdlib seam — turns the build red. A Go import path is a
 // mandatory string literal, so the AST check has no computed-import escape
 // hatch: this is a structural boundary, not a review convention.

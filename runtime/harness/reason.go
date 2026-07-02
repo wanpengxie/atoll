@@ -1,6 +1,6 @@
 package harness
 
-import "github.com/wanpengxie/ActOS/runtime/storespec"
+import "github.com/wanpengxie/atoll/runtime/storespec"
 
 // HarnessRejectReason is the closed set of reasons the 9-step Message-Write
 // Harness can synchronously reject a write with. This is the WRITE ENGINE's

@@ -7,9 +7,9 @@ import (
 	"sort"
 	"sync"
 
-	"github.com/wanpengxie/ActOS/platform"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // Deps is the HOST CONTEXT a constructor builds against (which channel, the
@@ -30,7 +30,7 @@ type Deps struct {
 	State StateSlot
 }
 
-// StateSlot is one actor instance's durable state seam. coagent NEVER interprets
+// StateSlot is one actor instance's durable state seam. atoll NEVER interprets
 // the blob — it only persists and replays it (agent-spec §三); the looper is the
 // blob's only author.
 type StateSlot struct {

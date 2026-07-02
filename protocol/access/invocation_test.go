@@ -7,8 +7,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/resource"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
 // mkInvocation builds a baseline object-op Invocation with the always-present

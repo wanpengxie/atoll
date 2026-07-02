@@ -3,8 +3,8 @@ package metatool_test
 import (
 	"testing"
 
-	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/lib/metatool"
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/lib/metatool"
 )
 
 func TestFormatCatalogEmpty(t *testing.T) {

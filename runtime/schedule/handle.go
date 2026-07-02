@@ -3,7 +3,7 @@ package schedule
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // boundScheduleHandle is a ScheduleHandle welded to one author (the caps-

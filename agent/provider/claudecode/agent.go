@@ -8,25 +8,25 @@ import (
 	"os"
 	"strings"
 
-	"github.com/wanpengxie/ActOS/lib/actorcaps"
-	"github.com/wanpengxie/ActOS/platform"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/registry"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 // Env keys (the claude CLI carries its OWN auth — ANTHROPIC_API_KEY / `claude
-// login` — so coagent passes no key; only a model + the prompt situation).
+// login` — so atoll passes no key; only a model + the prompt situation).
 const (
-	EnvKeyModel        = "COAGENT_CLAUDE_MODEL"
-	EnvKeyChannelType  = "COAGENT_CHANNEL_TYPE"
-	EnvKeyDomainPrompt = "COAGENT_DOMAIN_PROMPT"
+	EnvKeyModel        = "ATOLL_CLAUDE_MODEL"
+	EnvKeyChannelType  = "ATOLL_CHANNEL_TYPE"
+	EnvKeyDomainPrompt = "ATOLL_DOMAIN_PROMPT"
 
 	defaultModel = "claude-sonnet-4-5"
 )
 
 // Config drives a claude Bridge. Lean by design: the engine is the `claude` CLI
-// (auth + workspace are its own), so coagent supplies a model, the platform
+// (auth + workspace are its own), so atoll supplies a model, the platform
 // system prompt, and the durable resume seam.
 type Config struct {
 	Model        string
@@ -114,14 +114,14 @@ type Situation struct {
 }
 
 // buildSystemPrompt assembles the platform teaching + situation + domain
-// template. Claude Code brings its own coding skills; coagent teaches it the
-// channel facts: it is ONE actor among others, reached through the coagent
+// template. Claude Code brings its own coding skills; atoll teaches it the
+// channel facts: it is ONE actor among others, reached through the atoll
 // meta-tools (call_actor …), not acting alone.
 func buildSystemPrompt(sit Situation, channelType, domainPrompt string) string {
 	var b strings.Builder
-	b.WriteString("You are a coagent agent — one actor in a shared channel. ")
+	b.WriteString("You are a atoll agent — one actor in a shared channel. ")
 	b.WriteString("Other participants (humans and actors) share this channel. ")
-	b.WriteString("Reach other actors through the coagent meta-tools (call_actor, ")
+	b.WriteString("Reach other actors through the atoll meta-tools (call_actor, ")
 	b.WriteString("list_actors, describe_actor, …) — do not assume you act alone.\n")
 	if sit.HasWorkspace {
 		fmt.Fprintf(&b, "\nYou have a working directory at %s for file work; ", sit.WorkspaceDir)

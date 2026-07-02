@@ -17,11 +17,11 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/wanpengxie/ActOS/app/internal/middleware"
-	"github.com/wanpengxie/ActOS/platform"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/channel"
-	"github.com/wanpengxie/ActOS/registry"
+	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/registry"
 )
 
 // App is the product application server.
@@ -46,7 +46,7 @@ type App struct {
 type Config struct {
 	DB           *sql.DB
 	Logger       *slog.Logger
-	ChannelDBDir string // e.g. "/tmp/coagent-dev/channels"
+	ChannelDBDir string // e.g. "/tmp/atoll-dev/channels"
 }
 
 // New assembles the App: gin engine, routes, and loads existing channels.

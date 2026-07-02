@@ -7,7 +7,7 @@ import (
 	gokimitools "github.com/wanpengxie/go-kimi/pkg/kimi/tools"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
-	"github.com/wanpengxie/ActOS/lib/metatool"
+	"github.com/wanpengxie/atoll/lib/metatool"
 )
 
 // channelToolRuntimeKey carries the current turn's trigger item through the

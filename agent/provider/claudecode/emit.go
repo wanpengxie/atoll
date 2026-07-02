@@ -10,11 +10,11 @@ import (
 
 	claude "github.com/wanpengxie/go-claude-agent-sdk"
 
-	"github.com/wanpengxie/ActOS/lib/behavior"
-	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/lib/metatool"
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/lib/metatool"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // emitFinal writes the single terminal agent.text (visibility=public) reply for
@@ -114,7 +114,7 @@ func (b *Bridge) currentRC() metatool.RuntimeContext {
 }
 
 // checkpoint persists the claude session id into the durable state slot (the
-// looper is the slot's only author; coagent stores it opaquely).
+// looper is the slot's only author; atoll stores it opaquely).
 func (b *Bridge) checkpoint(sessionID string) {
 	if b.cfg.Checkpoint == nil || sessionID == "" {
 		return

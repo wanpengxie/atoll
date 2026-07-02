@@ -1,8 +1,8 @@
 package xhs
 
 import (
-	"github.com/wanpengxie/ActOS/lib/introspect"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // describe.go is the actor.describe self-answer catalog — discovery is the

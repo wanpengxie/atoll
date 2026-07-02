@@ -5,8 +5,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/wanpengxie/ActOS/protocol/access"
-	"github.com/wanpengxie/ActOS/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
 // --- create branch ---

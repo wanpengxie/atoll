@@ -4,10 +4,10 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/ActOS/protocol/access"
-	"github.com/wanpengxie/ActOS/protocol/resource"
-	"github.com/wanpengxie/ActOS/runtime/accessdoor"
-	"github.com/wanpengxie/ActOS/runtime/actorrt"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 // ErrAccessNotLive is the WHEN-validity rejection on the access plane: a

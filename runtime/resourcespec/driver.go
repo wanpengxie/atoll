@@ -3,7 +3,7 @@ package resourcespec
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/protocol/resource"
+	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
 // Driver is the giftless byte realizer for ONE ResourceKind. It has NO Create

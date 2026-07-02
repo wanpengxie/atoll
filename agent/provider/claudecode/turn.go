@@ -9,8 +9,8 @@ import (
 
 	claude "github.com/wanpengxie/go-claude-agent-sdk"
 
-	"github.com/wanpengxie/ActOS/lib/behavior"
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // turnItem is one mailbox envelope awaiting serial execution by the private loop.
@@ -79,7 +79,7 @@ func (b *Bridge) runLoop(ctx context.Context) {
 // runTurn drives one claude exchange: Query the input, drain ReceiveResponse
 // (which ends at the ResultMessage), emit the terminal reply, and checkpoint the
 // session id into the durable state slot. Tool calls the model makes resolve
-// through the coagent MCP server (→ the held shell) mid-drain.
+// through the atoll MCP server (→ the held shell) mid-drain.
 func (b *Bridge) runTurn(ctx context.Context, item turnItem, turnIndex int) error {
 	b.setCurrentTurn(&item)
 	defer b.setCurrentTurn(nil)

@@ -3,8 +3,8 @@ package resourcespec
 import (
 	"context"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/resource"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
 // StateStore is the byte realizer for the ACTOR-SCOPED storage locus — the

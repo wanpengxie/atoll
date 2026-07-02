@@ -3,7 +3,7 @@ package actorrt
 import (
 	"errors"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // ErrParentNotLive is returned by Fork when the parent incarnation is not (or

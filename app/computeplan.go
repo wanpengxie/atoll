@@ -6,7 +6,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/wanpengxie/ActOS/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // daemonAssignment is one actor instance the server assigns a daemon to host for

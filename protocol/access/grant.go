@@ -1,6 +1,6 @@
 package access
 
-import "github.com/wanpengxie/ActOS/protocol/actor"
+import "github.com/wanpengxie/atoll/protocol/actor"
 
 // GranteeKind is the CLOSED SET of grantee principal classes a Grant can name
 // (§2.4). Day-1 two kinds; growing it is a protocol revision (like adding an

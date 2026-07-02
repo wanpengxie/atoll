@@ -3,7 +3,7 @@ package resource_test
 import (
 	"testing"
 
-	"github.com/wanpengxie/ActOS/protocol/resource"
+	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
 // resource.ResourceID is an opaque stable-string newtype — the passive object

@@ -6,7 +6,7 @@ import (
 	gokimi "github.com/wanpengxie/go-kimi/pkg/kimi"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
-	"github.com/wanpengxie/ActOS/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // This file is in package `agent` (not `agent_test`) so the test helpers
