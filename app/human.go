@@ -45,7 +45,7 @@ var errChannelNotLoaded = errors.New("app: channel not loaded")
 // happen with NO WebSocket open (curl / API client / the very first message), so
 // the cell must exist whenever the home is up and the user is a member — it
 // cannot be gated on a WS connection. The push arm (browser tail) stays the
-// existing ws.go tail-subscribe, untouched. presence (cell up) does NOT mean the
+// existing ws.go tail-subscribe, untouched. liveness (cell up) does NOT mean the
 // user is online; online-ness is the WS push arm's concern, never membership.
 
 // humanFront is one user's write front-end in one channel. It IS an actorrt.Actor
@@ -168,9 +168,10 @@ func (h *humanFront) SubmitIntent(ctx context.Context, in submitInput) (harness.
 // the live roster with the agent:boost floor as the §7 failover target:
 //   - default_agent points at a LIVE agent      → agent-centric: request to it.
 //   - else the channel HAS a boost floor:
-//       boost live → failover to boost;  boost down → channel CANNOT serve (503).
+//     boost live → failover to boost;  boost down → channel CANNOT serve (503).
 //   - else (no boost AND no default set)         → group-chat: broadcast to humans.
 //   - else (no boost, default set but down)      → no reachable brain (503).
+//
 // "cannot serve" / "no brain" are per-request conditions for the SENDING user —
 // returned as a routingError, NEVER written as a channel envelope. An introduced
 // boost floor means the channel is meant to always have a brain, so a dead default
@@ -271,10 +272,10 @@ func (h *humanFront) newClientEnvelope(in submitInput, kind message.Kind, audien
 	aud = append(aud, audience...)
 
 	return &message.Envelope{
-		ID:        envID,
-		TS:        now,
-		Kind:      kind,
-		Type:      in.Type,
+		ID:   envID,
+		TS:   now,
+		Kind: kind,
+		Type: in.Type,
 		// Sender left zero: identity is substrate-injected (pen welds id, step 4
 		// welds kind from registry) — not caller-settable. Filling it here is
 		// harmless (fail-fast only guards id/channel) but off-spec, so leave empty.

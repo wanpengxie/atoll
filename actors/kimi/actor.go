@@ -117,16 +117,16 @@ func (a *Actor) Start(ctx context.Context, self actorrt.ActorContext) error {
 	}
 	// Initial L3 edge: a connection-bearing adapter KNOWS it starts disconnected —
 	// publish offline so the home shows a definite state, not unknown.
-	a.publishPresence(false)
+	a.publishDevicePresence(false)
 	return nil
 }
 
-// publishPresence pushes a device-presence edge (L3) on the actor-source obs axis.
+// publishDevicePresence pushes a device-presence edge (L3) on the actor-source obs axis.
 // Best-effort, advisory (never authoritative — that is send→terminal); no-op
 // before Start captured the producer end.
-func (a *Actor) publishPresence(online bool) {
+func (a *Actor) publishDevicePresence(online bool) {
 	if a.obs != nil {
-		a.obs.PublishObs(introspect.ObsPresence, introspect.MarshalPresence(online))
+		a.obs.PublishObs(introspect.ObsDevicePresence, introspect.MarshalDevicePresence(online))
 	}
 }
 

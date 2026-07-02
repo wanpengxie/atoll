@@ -286,7 +286,7 @@ const xhsStatusDeviceAddr = "127.0.0.1:18091"
 // This proves the FULL L3 obs-PUSH chain end-to-end: the adapter publishes a
 // device-presence edge (PublishObs) → the daemon's WatchObs forwarder sends it UP
 // the link as a KindObs frame → the home port relays it into publishObs → the
-// home presence fold materialises the level → View.DevicePresence → /status reads
+// home device-presence fold materialises the level → View.DevicePresence → /status reads
 // it OUT-OF-BAND (no probe, no truth-log write — the retired anti-pattern).
 func TestXHSLiveActorStatus(t *testing.T) {
 	env := setupTestApp(t)
@@ -364,7 +364,7 @@ func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want
 		w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, id), nil, s.cookies)
 		assertStatus(t, w, http.StatusOK)
 		body := respJSON(t, w)
-		// New shape: {known:bool, online:bool}. Only a KNOWN presence (the adapter
+		// New shape: {known:bool, online:bool}. Only a KNOWN device presence (the adapter
 		// actually published a device-presence edge that the obs chain folded at the
 		// home) proves the want — known:false (unknown) must never satisfy either
 		// assertion vacuously. This exercises the full L3 obs push chain end-to-end:
@@ -376,7 +376,7 @@ func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("status online never became %v (via a known presence) within %s (last body=%v)", want, timeout, body)
+			t.Fatalf("status online never became %v (via a known device presence) within %s (last body=%v)", want, timeout, body)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}
@@ -387,10 +387,10 @@ func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want
 const xhsCascadeDeviceAddr = "127.0.0.1:18092"
 
 // TestXHSLiveDeviceUnknownOnDaemonDeath locks the L3 cascade: when the daemon
-// hosting a device adapter DIES (its /compute link drops), the actor's device
-// presence must decay to UNKNOWN (known:false) — NOT a stale online, and NOT
+// hosting a device adapter DIES (its /compute link drops), the actor's
+// device presence must decay to UNKNOWN (known:false) — NOT a stale online, and NOT
 // conflated with a clean device-offline edge. This is the link-death-cascades-L3
-// backstop (port.die → presence-down edge → home fold OnDown decays the entry),
+// backstop (port.die → down edge → home fold OnDown decays the entry),
 // distinct from TestXHSLiveActorStatus which only covers the device's own edges.
 func TestXHSLiveDeviceUnknownOnDaemonDeath(t *testing.T) {
 	env := setupTestApp(t)
@@ -430,7 +430,7 @@ func TestXHSLiveDeviceUnknownOnDaemonDeath(t *testing.T) {
 
 	waitForActor(t, env, s, "tool:xhs", 5*time.Second)
 
-	// Device connects → online (a KNOWN presence exists to be decayed).
+	// Device connects → online (a KNOWN device presence exists to be decayed).
 	conn := dialDeviceWithRetry(t, fmt.Sprintf("ws://%s/device", xhsCascadeDeviceAddr), 3*time.Second)
 	waitDeviceOnline(t, env, s, "tool:xhs", true, 5*time.Second)
 

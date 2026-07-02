@@ -65,16 +65,16 @@ func (s *stateStore) Create(ctx context.Context, owner actor.ActorID, id resourc
 	return nil
 }
 
-// Read returns the current bytes and whether the ROW exists (present). present
-// tracks EXISTENCE, not byte-nullness: a present row whose bytes column is NULL
-// is resolved-but-empty and reads back present=true with value=nil (the door
+// Read returns the current bytes and whether the ROW exists. exists
+// tracks EXISTENCE, not byte-nullness: an existing row whose bytes column is NULL
+// is resolved-but-empty and reads back exists=true with value=nil (the door
 // maps that to Found=false, uniform with the channel-scoped driver); an empty
-// non-nil blob is a value (present=true, value=[]byte{}). A missing row is
-// present=false (door → resource_not_found).
-func (s *stateStore) Read(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (value []byte, present bool, err error) {
+// non-nil blob is a value (exists=true, value=[]byte{}). A missing row is
+// exists=false (door → resource_not_found).
+func (s *stateStore) Read(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (value []byte, exists bool, err error) {
 	// bytes IS NULL is selected explicitly: a zero-length blob scans back as a
 	// nil []byte just like NULL does, so the Go value alone cannot distinguish
-	// resolved-but-empty (NULL → value=nil) from a present empty value ([]byte{}).
+	// resolved-but-empty (NULL → value=nil) from an existing empty value ([]byte{}).
 	const q = `SELECT bytes, bytes IS NULL FROM actor_state WHERE owner_id=? AND resource_id=?`
 	var raw []byte
 	var isNull bool
@@ -86,7 +86,7 @@ func (s *stateStore) Read(ctx context.Context, owner actor.ActorID, id resource.
 		return nil, false, fmt.Errorf("store: actor_state read %q/%q: %w", owner, id, err)
 	}
 	if isNull {
-		// Row present, bytes NULL = resolved-but-empty.
+		// Row exists, bytes NULL = resolved-but-empty.
 		return nil, true, nil
 	}
 	if raw == nil {
@@ -96,10 +96,10 @@ func (s *stateStore) Read(ctx context.Context, owner actor.ActorID, id resource.
 }
 
 // Write overwrites an EXISTING row (PUT semantics, naturally idempotent). It
-// never creates: birth is Create. present=false when no row was hit (door →
+// never creates: birth is Create. exists=false when no row was hit (door →
 // resource_not_found — honest about writing to something that is not there),
 // mirroring kvDriver's zero-row surfacing.
-func (s *stateStore) Write(ctx context.Context, owner actor.ActorID, id resource.ResourceID, value []byte) (present bool, err error) {
+func (s *stateStore) Write(ctx context.Context, owner actor.ActorID, id resource.ResourceID, value []byte) (exists bool, err error) {
 	res, err := s.db.ExecContext(ctx,
 		`UPDATE actor_state SET bytes=? WHERE owner_id=? AND resource_id=?`,
 		value, string(owner), string(id),
@@ -114,11 +114,11 @@ func (s *stateStore) Write(ctx context.Context, owner actor.ActorID, id resource
 	return n > 0, nil
 }
 
-// Delete removes the row; present=false when no row was hit (door →
+// Delete removes the row; exists=false when no row was hit (door →
 // resource_not_found; repeated delete is honestly not-found). This is the
 // non-lossy "explicit delete" half; the OTHER death is scope-expiry (owner
 // deregister → clearActorScopedTx, store-internal, not an op).
-func (s *stateStore) Delete(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (present bool, err error) {
+func (s *stateStore) Delete(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (exists bool, err error) {
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM actor_state WHERE owner_id=? AND resource_id=?`,
 		string(owner), string(id),

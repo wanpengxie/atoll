@@ -16,7 +16,7 @@ var ListActorsSpec = ToolSpec{
 	Description: strings.TrimSpace(`
 Discover what actors (tool adapters, agents, system actors) exist in this
 channel RIGHT NOW. Returns a thin directory: per actor its actor_id, kind,
-binding, present (online now), and uptime_ms. Types and payload docs are NOT
+binding, present (live cell/port bound now), and uptime_ms. Types and payload docs are NOT
 listed here — drill into one actor with describe_actor / describe_type.
 
 This is a LIVE query — the catalog reflects the channel's current membership at

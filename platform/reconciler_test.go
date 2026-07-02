@@ -63,12 +63,12 @@ func countTerminals(t *testing.T, ch *platform.Home, parentID message.ID) int {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: restart — an open request whose receiver is absent (its presence
+// Test 1: restart — an open request whose receiver is absent (its embodiment
 // predates this process) is closed by the startup reconciler sweep.
 // ---------------------------------------------------------------------------
 func TestReconciler_LevelSweep_ClosesOrphanWithAbsentReceiver(t *testing.T) {
 	// The death edge NEVER fires for this request — its receiver is a member that
-	// was never placed as a cell, so it has no presence and no death to publish.
+	// was never placed as a cell, so it has no embodiment and no death to publish.
 	// This is exactly the #5 home-restart-leftover shape (an open request whose
 	// receiver is absent because no live instance backs it). Only the LEVEL sweep
 	// can close it. The sweep is automatic (fast ticker) — the test drives NOTHING

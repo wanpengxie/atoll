@@ -20,7 +20,7 @@ package message
 //     late answers for monitoring is a domain observability concern).
 //   - receiver_unavailable    — author #3: the SUBSTRATE positively observed
 //     the receiver's death (cell goroutine panic or relay/wire disconnect),
-//     published it as the obs presence-down edge, and a watcher materialised a
+//     published it as the obs down edge, and a watcher materialised a
 //     terminal. The substrate never guesses "slow"; it only materialises death
 //     it observed. = Erlang monitor DOWN `noproc` / `noconnection`.
 //   - receiver_internal_error — author #1 tail: an in-handler failure the

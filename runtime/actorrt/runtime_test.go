@@ -30,7 +30,7 @@ func TestDeliverNilEnvelopeIsError(t *testing.T) {
 // TestDeliverPerAudienceTruth is the core A3 contract: a multi-member audience
 // gets a per-member Outcome that truthfully reflects what the runtime did to
 // EACH — a hosted live actor is Delivered, an unhosted id is NotHosted (never
-// silently skipped), and a hosted-but-stopped presence is Stopped. The map has
+// silently skipped), and a hosted-but-stopped embodiment is Stopped. The map has
 // exactly one entry per audience id.
 func TestDeliverPerAudienceTruth(t *testing.T) {
 	t.Parallel()
@@ -39,7 +39,7 @@ func TestDeliverPerAudienceTruth(t *testing.T) {
 	live := newRecordActor()
 	rt.Spawn("live", static(live))
 
-	// "gone" is spawned then despawned: hosted history but no live presence now,
+	// "gone" is spawned then despawned: hosted history but no live embodiment now,
 	// so it must read NotHosted, NOT some stale Delivered.
 	gone := rt.Spawn("gone", static(newRecordActor()))
 	rt.Despawn(gone)
@@ -119,7 +119,7 @@ func TestSpawnReplaceStopsOld(t *testing.T) {
 	if _, ok := rt.Stat("a"); !ok {
 		t.Fatal("id not addressable after replace")
 	}
-	// The replacement actually receives — proving the live presence is the new one.
+	// The replacement actually receives — proving the live embodiment is the new one.
 	mustDeliver(t, rt, "a", env("x"))
 }
 
@@ -151,9 +151,9 @@ func TestActorContextSelf(t *testing.T) {
 	}
 }
 
-// TestStopAllClearsPresences: channel teardown stops every presence and empties
+// TestStopAllClearsEmbodiments: channel teardown stops every embodiment and empties
 // the addressing map (no id remains addressable, Stop hooks run).
-func TestStopAllClearsPresences(t *testing.T) {
+func TestStopAllClearsEmbodiments(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 
@@ -185,7 +185,7 @@ func TestStopAllClearsPresences(t *testing.T) {
 
 // TestDespawnAbsentIsNoop: despawning an incarnation handle the runtime never
 // hosted is a no-op (no panic, stays unaddressable). The guarded Despawn's
-// pointer check never matches, so it never touches the (nil) presence.
+// pointer check never matches, so it never touches the (nil) embodiment.
 func TestDespawnAbsentIsNoop(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})

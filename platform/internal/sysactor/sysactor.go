@@ -13,17 +13,17 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
-// PresenceStat is the injected obs-read seam: the consumer-side narrow read of
-// the substrate's AUTHORITATIVE presence + bind-instant for an actor (present =
+// LivenessStat is the injected obs-read seam: the consumer-side narrow read of
+// the substrate's AUTHORITATIVE liveness + bind-instant for an actor (present =
 // the bool, uptime = now - startedAt). Defined consumer-side (Go idiom) as the
 // NARROW shape this actor needs, so the composition root supplies a thin reader
 // over the substrate's pull-stat obs seam. A nil seam (not yet wired) reports
 // everyone absent — advisory, never a dispatch gate.
-type PresenceStat interface {
+type LivenessStat interface {
 	Stat(id actor.ActorID) (startedAt time.Time, present bool)
 }
 
-// DevicePresenceStat is the injected obs-read seam over the home presence fold:
+// DevicePresenceStat is the injected obs-read seam over the home device-presence fold:
 // the latest folded L3 device-presence snapshot for an actor (the actor-source
 // obs PUSH a device adapter published). known=false = UNKNOWN (not a device
 // adapter, no signal, or decayed) — NOT offline. Defined consumer-side (narrow);
@@ -34,7 +34,7 @@ type DevicePresenceStat interface {
 }
 
 // SystemActor answers channel-wide directory queries (actor.list) by composing
-// durable membership (Registry) with volatile presence (the injected seam). It
+// durable membership (Registry) with volatile liveness (the injected seam). It
 // is channel-agnostic at the base — the composition root injects channel-scoped
 // services (registry, writer, lookup), so this actor holds no channel id of its
 // own.
@@ -43,7 +43,7 @@ type SystemActor struct {
 	writer   harness.Pen
 	lookup   storespec.RequestLookup
 	clock    func() time.Time
-	stat     PresenceStat
+	stat     LivenessStat
 	device   DevicePresenceStat
 }
 
@@ -57,10 +57,10 @@ type Deps struct {
 	Writer harness.Pen
 	Lookup storespec.RequestLookup
 	Clock  func() time.Time
-	// Stat is the obs-read seam over the substrate's authoritative presence +
+	// Stat is the obs-read seam over the substrate's authoritative liveness +
 	// bind-instant. Nil → actor.list reports everyone absent.
-	Stat PresenceStat
-	// Device is the obs-read seam over the home presence fold (L3 device presence).
+	Stat LivenessStat
+	// Device is the obs-read seam over the home device-presence fold (L3 device presence).
 	// Nil → actor.list omits the device column (everyone unknown).
 	Device DevicePresenceStat
 }
@@ -101,7 +101,7 @@ func (s *SystemActor) Receive(ctx context.Context, env *message.Envelope) error 
 }
 
 // respondList answers actor.list with a composed channel-wide directory
-// (the membership ∧ presence formula owned by introspect.QueryList), composed
+// (the membership ∧ liveness formula owned by introspect.QueryList), composed
 // INSIDE the actor so the channel only sees the result, never the raw rows.
 // Readiness is deliberately absent: it is not a substrate axis — whether an actor can service a request
 // is the OUTCOME of send→terminal, never a stored field here.
@@ -132,12 +132,12 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 func systemDescribe() introspect.Describe {
 	return introspect.Describe{
 		ActorID:     string(actor.SystemActorID),
-		Description: "Channel system actor: answers the reserved directory query actor.list (membership ∧ presence).",
+		Description: "Channel system actor: answers the reserved directory query actor.list (membership ∧ liveness).",
 		SkillDoc: "# system\n\nReserved channel directory.\n\n## Tool surface\n\n" +
-			"- `actor.list` — channel-wide actor directory: durable membership composed with live presence.\n",
+			"- `actor.list` — channel-wide actor directory: durable membership composed with liveness.\n",
 		Types: map[string]introspect.TypeMeta{
 			introspect.QueryList: {
-				Description:  "channel-wide actor directory: membership ∧ presence",
+				Description:  "channel-wide actor directory: membership ∧ liveness",
 				AllowedKinds: []string{string(message.KindRequest)},
 			},
 		},
@@ -200,7 +200,7 @@ func (s *SystemActor) obs(id actor.ActorID) (present bool, uptimeMs int64) {
 // deviceObs reads the actor's L3 device presence from the injected fold seam
 // (advisory; NOT a dispatch gate). nil = UNKNOWN (no seam, never reported, or
 // decayed) — the actor.list omits the device column rather than asserting offline.
-func (s *SystemActor) deviceObs(id actor.ActorID) *introspect.Presence {
+func (s *SystemActor) deviceObs(id actor.ActorID) *introspect.DevicePresence {
 	if s.device == nil {
 		return nil
 	}
@@ -208,7 +208,7 @@ func (s *SystemActor) deviceObs(id actor.ActorID) *introspect.Presence {
 	if !known {
 		return nil
 	}
-	p, ok := introspect.ParsePresence(raw)
+	p, ok := introspect.ParseDevicePresence(raw)
 	if !ok {
 		return nil
 	}

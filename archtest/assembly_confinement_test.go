@@ -83,7 +83,7 @@ func TestRuntimeAssemblyConfinedToPlatform(t *testing.T) {
 //
 //   - New builds the bare write chain from Deps. Referencing it (or Deps)
 //     assembles a write gate WITHOUT the platform wiring (commit signal at the
-//     store append chokepoint, closure reconciler, PresenceWatcher) — a
+//     store append chokepoint, closure reconciler, DownWatcher) — a
 //     half-wired home.
 //   - Chain is the un-welded bare writer. It is now unexported inside harness
 //     (the seam exports opaque Pen / Minter only), so this entry is a DEAD lock
@@ -177,7 +177,7 @@ func TestHarnessConstructionConfinedToPlatform(t *testing.T) {
 			if harnessConstructionSymbols[sel.Sel.Name] {
 				pos := fset.Position(sel.Pos())
 				violations = append(violations, fmt.Sprintf(
-					"%s:%d references %s.%s — the write-gate construction + Minter may only be assembled by platform; downstream speaks the opaque harness.Pen/WriteResult seam, never builds the chain itself (no commit signal / reconciler / presence closure) nor holds a Minter (= minting a pen for any identity)",
+					"%s:%d references %s.%s — the write-gate construction + Minter may only be assembled by platform; downstream speaks the opaque harness.Pen/WriteResult seam, never builds the chain itself (no commit signal / reconciler / death-edge closure) nor holds a Minter (= minting a pen for any identity)",
 					slash, pos.Line, local, sel.Sel.Name))
 			}
 			return true

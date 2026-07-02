@@ -11,9 +11,9 @@ import (
 // in runtime/store.
 //
 // substrate scope: Record carries ONLY membership — who is registered, and
-// when they deregistered (durable truth). Presence (whether a compute node is
+// when they deregistered (durable truth). Liveness (whether a compute node is
 // currently online) and readiness (whether an actor can currently serve) are
-// not membership projections and are not modelled here: presence is volatile
+// not membership projections and are not modelled here: liveness is volatile
 // compute state, readiness is application business state. Neither is substrate
 // membership.
 type Record struct {

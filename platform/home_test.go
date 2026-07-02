@@ -55,9 +55,9 @@ func TestView_ListActors_IncludesSystem(t *testing.T) {
 	}
 }
 
-// TestSpawn_PresencelessMember registers a human member with nil impl (membership
+// TestSpawn_CellLessMember registers a human member with nil impl (membership
 // only) and confirms it surfaces in the actor roster with no cell binding.
-func TestSpawn_PresencelessMember(t *testing.T) {
+func TestSpawn_CellLessMember(t *testing.T) {
 	h := openTestHome(t)
 	ctx := context.Background()
 	id := actor.ActorID("user:alice")
@@ -76,10 +76,10 @@ func TestSpawn_PresencelessMember(t *testing.T) {
 		}
 	}
 	if got == nil {
-		t.Fatalf("presence-less member %s not in roster", id)
+		t.Fatalf("cell-less member %s not in roster", id)
 	}
 	if *got != "" {
-		t.Errorf("presence-less member binding = %q, want empty (no cell)", *got)
+		t.Errorf("cell-less member binding = %q, want empty (no cell)", *got)
 	}
 }
 

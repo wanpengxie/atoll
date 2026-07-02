@@ -12,25 +12,25 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
-// presence is one live actor's substrate-side presence, regardless of where
+// embodiment is one live actor's substrate-side embodiment, regardless of where
 // the actor's code runs. Deliver enqueues an envelope into the actor's mailbox
 // (never blocking: ErrMailboxFull / ErrCellStopped); stop tears it down. Two
 // backends implement it, by transport distance:
 //   - cell  — in-process actor   (mailbox = Go channel)
 //   - port  — out-of-process actor (mailbox = byte-stream connection)
 //
-// Both report the same Outcome on Deliver and the same presence-down edge on death.
+// Both report the same Outcome on Deliver and the same down edge on death.
 //
 // startedAt is the obs `uptime` source: the substrate-stamped bind instant. It is
 // substrate-authoritative (only the host knows when it bound the instance — the
 // actor never self-reports it), read out-of-band via Runtime.Stat.
-type presence interface {
+type embodiment interface {
 	Deliver(env *message.Envelope) error
 	observe(ctx context.Context, kind ObsKind) (ObsValue, error)
 	cancelRequest(id message.ID)
 	startedAt() time.Time
 	stop()
-	// isLive reports whether this presence is still the live incarnation — read
+	// isLive reports whether this embodiment is still the live incarnation — read
 	// LOCK-FREE off a per-incarnation atomic (set true at go-live, false on
 	// death/stop/eviction). It is the WHEN-validity probe a liveCap (livePen)
 	// consults per write to fence a dangling capability held by a goroutine that
@@ -42,7 +42,7 @@ type presence interface {
 	markDead()
 	// initiateStop is the non-blocking, idempotent SIGNAL half of teardown — it
 	// triggers death (cancel + immediate onExit self-eviction) and returns at
-	// once, WITHOUT joining the presence's own goroutine. It exists so a dying
+	// once, WITHOUT joining the embodiment's own goroutine. It exists so a dying
 	// parent's cascade (removeIf, §3.1a) can tear down owned children from
 	// within its own death path without deadlocking: a child's initiateStop
 	// synchronously re-enters onExit (which takes r.mu), so calling the
@@ -53,11 +53,11 @@ type presence interface {
 	initiateStop()
 }
 
-// ErrNotHosted is returned when no presence is hosted for the addressed id.
+// ErrNotHosted is returned when no embodiment is hosted for the addressed id.
 var ErrNotHosted = errors.New("actorrt: actor not hosted")
 
 // Incarnation is the opaque handle to ONE live embodiment of an ActorID — a
-// (id, presence-pointer) pair. Identity is single-level (one stable ActorID),
+// (id, embodiment-pointer) pair. Identity is single-level (one stable ActorID),
 // but a capability welded to a specific incarnation can outlive it (a goroutine
 // captured a pen, the cell died, a same-id successor took over): the handle
 // names WHICH embodiment, so the WHEN-validity gate (IsLive) is by POINTER, not
@@ -65,18 +65,18 @@ var ErrNotHosted = errors.New("actorrt: actor not hosted")
 // into an envelope/truth; it lives only in the volatile liveness plane.
 type Incarnation struct {
 	id actor.ActorID
-	p  presence
+	p  embodiment
 }
 
-// ID is the read-only accessor for the incarnation's ActorID. The presence
+// ID is the read-only accessor for the incarnation's ActorID. The embodiment
 // pointer stays opaque (no accessor) — only the host compares it. The platform
 // link layer needs ID() to Mint a pen welded to (id, chID) when wrapping a
 // livePen for an out-of-process incarnation.
 func (i Incarnation) ID() actor.ActorID { return i.id }
 
-// PresenceWatcher is the consumer end of the obs presence-PUSH channel. The
+// DownWatcher is the consumer end of the obs down-edge PUSH channel. The
 // runtime invokes OnDown exactly once for each hosted unit that dies abnormally
-// — death is the DELETED edge of presence (obs), NOT a control signal and NOT
+// — death is the DELETED edge of embodiment (obs), NOT a control signal and NOT
 // truth. The watcher's reaction (e.g. materialise receiver_unavailable) is work
 // and lands in truth on its own. The dead unit has ALREADY self-evicted from the
 // addressing map before OnDown runs, so a watcher MUST NOT despawn it.
@@ -84,46 +84,46 @@ func (i Incarnation) ID() actor.ActorID { return i.id }
 // Reliability (closure-critical path): register watchers BEFORE Spawn/Attach so
 // no death edge is missed; OnDown is invoked synchronously in the reap path and
 // is not droppable.
-type PresenceWatcher interface {
+type DownWatcher interface {
 	OnDown(ctx context.Context, id actor.ActorID, cause error)
 }
 
-// Runtime owns the live presences for one channel and is the addressing seam.
-// Identity is single-level: a stable ActorID names at most one live presence at
+// Runtime owns the live embodiments for one channel and is the addressing seam.
+// Identity is single-level: a stable ActorID names at most one live embodiment at
 // a time. Spawn/Attach replaces; death is terminal (no transparent same-id
 // respawn). Death and replacement are checked by POINTER IDENTITY (the map
-// entry still points to this very presence), so a dying predecessor can never
+// entry still points to this very embodiment), so a dying predecessor can never
 // evict its successor — no per-instance generation is needed.
 type Runtime struct {
 	parent context.Context
 	clock  func() time.Time
 	logger *slog.Logger
 
-	mu        sync.RWMutex
-	presences map[actor.ActorID]presence
-	watchers  []PresenceWatcher
-	obsWatch  map[actor.ActorID][]ObsWatcher
-	mailbox   int
-	// owned tracks the fork ownership edge: parent-presence -> its forked
-	// children's presences (§3.1/§3.1a). It lives ONLY in memory (an incarnation
+	mu          sync.RWMutex
+	embodiments map[actor.ActorID]embodiment
+	watchers    []DownWatcher
+	obsWatch    map[actor.ActorID][]ObsWatcher
+	mailbox     int
+	// owned tracks the fork ownership edge: parent-embodiment -> its forked
+	// children's embodiments (§3.1/§3.1a). It lives ONLY in memory (an incarnation
 	// is volatile, §1.3) and is pruned of already-not-live entries on every Fork
 	// (amortised cleanup — no separate sweep/GC) and cleared wholesale for a key
-	// when that parent presence itself dies (removeIf cascades initiateStop() to
+	// when that parent embodiment itself dies (removeIf cascades initiateStop() to
 	// every child still on the list at that instant).
-	owned map[presence][]presence
+	owned map[embodiment][]embodiment
 }
 
 // Config configures a Runtime.
 type Config struct {
-	// Parent is the context all presences derive from; cancelling it tears the
+	// Parent is the context all embodiments derive from; cancelling it tears the
 	// whole channel down.
 	Parent context.Context
 	// Mailbox is the default bounded mailbox depth (<=0 → 64).
 	Mailbox int
-	// Clock stamps each presence's bind instant (obs uptime source). nil →
+	// Clock stamps each embodiment's bind instant (obs uptime source). nil →
 	// time.Now. Injectable so tests can pin uptime deterministically.
 	Clock func() time.Time
-	// Logger surfaces presence-watch faults (a watcher panic on the
+	// Logger surfaces down-watcher faults (a watcher panic on the
 	// closure-critical death path) and other cell-lifecycle edge observability.
 	// nil → discard (no-op).
 	Logger *slog.Logger
@@ -144,7 +144,7 @@ type Deliverer interface {
 
 // New constructs a Runtime and its confined work-egress capability. The
 // *Runtime is the broadly-shareable management/addressing handle (Spawn/Attach/
-// Despawn/Stat/StopAll/WatchPresence); the Deliverer is the confined WORK enqueue
+// Despawn/Stat/StopAll/WatchDown); the Deliverer is the confined WORK enqueue
 // (give it ONLY to the post-harness fanout). A *Runtime holder can address and
 // observe but cannot inject work — the mailbox is the harness/substrate's
 // private egress, structurally.
@@ -166,13 +166,13 @@ func New(cfg Config) (*Runtime, Deliverer) {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	r := &Runtime{
-		parent:    parent,
-		clock:     clock,
-		logger:    logger,
-		presences: make(map[actor.ActorID]presence),
-		obsWatch:  make(map[actor.ActorID][]ObsWatcher),
-		owned:     make(map[presence][]presence),
-		mailbox:   mb,
+		parent:      parent,
+		clock:       clock,
+		logger:      logger,
+		embodiments: make(map[actor.ActorID]embodiment),
+		obsWatch:    make(map[actor.ActorID][]ObsWatcher),
+		owned:       make(map[embodiment][]embodiment),
+		mailbox:     mb,
 	}
 	return r, deliverer{r}
 }
@@ -186,9 +186,9 @@ func (d deliverer) Deliver(audience []actor.ActorID, env *message.Envelope) (Del
 	return d.r.deliver(audience, env)
 }
 
-// WatchPresence registers a watcher for the obs presence-PUSH channel (currently:
+// WatchDown registers a watcher for the obs down-edge PUSH channel (currently:
 // death = the DELETED edge). Register BEFORE Spawn/Attach so no edge is missed.
-func (r *Runtime) WatchPresence(w PresenceWatcher) {
+func (r *Runtime) WatchDown(w DownWatcher) {
 	if w == nil {
 		return
 	}
@@ -197,7 +197,7 @@ func (r *Runtime) WatchPresence(w PresenceWatcher) {
 	r.mu.Unlock()
 }
 
-// publishDown fans the presence DELETED edge out to every watcher. Invoked once
+// publishDown fans the down edge out to every watcher. Invoked once
 // per abnormal death, synchronously in the dying goroutine's reap path (the
 // edge is not droppable — closure depends on it). Each watcher is guarded: a
 // watcher panic must not escape and crash the process through the death path —
@@ -206,14 +206,14 @@ func (r *Runtime) WatchPresence(w PresenceWatcher) {
 // a blocking watcher stalls the dying goroutine's reap.
 func (r *Runtime) publishDown(id actor.ActorID, cause error) {
 	r.mu.RLock()
-	ws := make([]PresenceWatcher, len(r.watchers))
+	ws := make([]DownWatcher, len(r.watchers))
 	copy(ws, r.watchers)
 	r.mu.RUnlock()
 	for _, w := range ws {
 		func() {
 			defer func() {
 				if rec := recover(); rec != nil {
-					r.logger.Error("actorrt.presence.watcher_panic",
+					r.logger.Error("actorrt.down.watcher_panic",
 						"actor", id, "cause", cause, "panic", rec)
 				}
 			}()
@@ -235,7 +235,7 @@ func (r *Runtime) WatchObs(id actor.ActorID, w ObsWatcher) {
 }
 
 // publishObs fans an actor-published obs snapshot to that actor's watchers
-// (obs push/actor). Invoked on the publishing presence's goroutine; guarded so
+// (obs push/actor). Invoked on the publishing embodiment's goroutine; guarded so
 // a watcher panic cannot escape. No watcher → no-op.
 //
 // POINTER-IDENTITY gated (the ABA guard, same discipline as removeIf/Despawn):
@@ -245,9 +245,9 @@ func (r *Runtime) WatchObs(id actor.ActorID, w ObsWatcher) {
 // mis-attribute to the live same-id successor — the snapshot is dropped. The
 // check shares the one RLock that snapshots the watcher slice, so it is
 // consistent with the fanout it gates.
-func (r *Runtime) publishObs(id actor.ActorID, self presence, kind ObsKind, val ObsValue) {
+func (r *Runtime) publishObs(id actor.ActorID, self embodiment, kind ObsKind, val ObsValue) {
 	r.mu.RLock()
-	cur, ok := r.presences[id]
+	cur, ok := r.embodiments[id]
 	if !ok || cur != self {
 		r.mu.RUnlock()
 		return
@@ -268,13 +268,13 @@ func (r *Runtime) publishObs(id actor.ActorID, self presence, kind ObsKind, val 
 
 // Observe is the obs PULL resolver for ACTOR-source obs: it routes the opaque
 // kind to the hosted unit, which self-answers from its own operational state or
-// reports ErrObsUnsupported. Substrate-source facts (presence/uptime) do NOT
+// reports ErrObsUnsupported. Substrate-source facts (embodiment/uptime) do NOT
 // come here — they ride the typed Stat bundle. Read-only, non-truth, out-of-band
 // (never enqueued into the mailbox); the actor's Observer impl answers
 // concurrently and must be non-perturbing.
 func (r *Runtime) Observe(ctx context.Context, id actor.ActorID, kind ObsKind) (ObsValue, error) {
 	r.mu.RLock()
-	p, ok := r.presences[id]
+	p, ok := r.embodiments[id]
 	r.mu.RUnlock()
 	if !ok {
 		return nil, ErrNotHosted
@@ -283,17 +283,17 @@ func (r *Runtime) Observe(ctx context.Context, id actor.ActorID, kind ObsKind) (
 }
 
 // CancelRequest fires the request-scope of cancel(scope) for one in-flight
-// request on a hosted presence: the reqCtx the addressed actor is currently
+// request on a hosted embodiment: the reqCtx the addressed actor is currently
 // running that request under is cancelled, off the work goroutine. A cell fires
 // its in-flight CancelFunc directly; a port writes a KindCancel frame so the
 // remote host cancels its own cell's reqCtx (in-proc and cross-wire are the same
-// primitive, one scope down from Despawn). No-op if no presence is hosted for id
+// primitive, one scope down from Despawn). No-op if no embodiment is hosted for id
 // or the request already closed — cancel is a best-effort hint; the caller's
 // closure owns the terminal, so a lost cancel only costs the receiver a little
 // wasted work (the ExpiresAt deadline still collapses it).
 func (r *Runtime) CancelRequest(id actor.ActorID, requestID message.ID) {
 	r.mu.RLock()
-	p, ok := r.presences[id]
+	p, ok := r.embodiments[id]
 	r.mu.RUnlock()
 	if !ok {
 		return
@@ -308,13 +308,13 @@ type Outcome int
 const (
 	// Delivered: the envelope was enqueued into the actor's mailbox.
 	Delivered Outcome = iota
-	// NotHosted: this runtime hosts no presence for the actor (legitimately —
+	// NotHosted: this runtime hosts no embodiment for the actor (legitimately —
 	// the audience may include system/user/remote-elsewhere actors). The seam
 	// can fast-fail receiver_unavailable instead of waiting for a timeout.
 	NotHosted
-	// MailboxFull: a presence is hosted but its bounded mailbox is full.
+	// MailboxFull: an embodiment is hosted but its bounded mailbox is full.
 	MailboxFull
-	// Stopped: a presence is hosted but tearing down.
+	// Stopped: an embodiment is hosted but tearing down.
 	Stopped
 )
 
@@ -325,7 +325,7 @@ type DeliverResult struct {
 }
 
 // Spawn creates and starts an IN-PROCESS cell for id, returning its Incarnation
-// handle. If a presence already exists for id it is stopped and replaced (one
+// handle. If an embodiment already exists for id it is stopped and replaced (one
 // actor, one owner).
 //
 // Two-phase construction (resolves the cap/cell chicken-and-egg):
@@ -348,8 +348,8 @@ func (r *Runtime) Spawn(id actor.ActorID, build func(Incarnation) Actor) Incarna
 	c.impl = build(inc) // OUTSIDE the lock; IsLive(inc)==false during build.
 
 	r.mu.Lock()
-	old := r.presences[id]
-	r.presences[id] = c
+	old := r.embodiments[id]
+	r.embodiments[id] = c
 	c.live.Store(true) // go-live: register + liveness atomic flip are one critical section.
 	r.mu.Unlock()
 	// stop()/start() run OUTSIDE the lock: stop() joins the old goroutine,
@@ -361,37 +361,37 @@ func (r *Runtime) Spawn(id actor.ActorID, build func(Incarnation) Actor) Incarna
 	return inc
 }
 
-// LiveIDs returns a snapshot of every ActorID currently occupying a presence
+// LiveIDs returns a snapshot of every ActorID currently occupying an embodiment
 // slot (§3.4, reconcile's bulk enumeration for the desired−actual diff) — the
-// KEY SET of r.presences, taken under r.mu. It is deliberately NOT filtered by
+// KEY SET of r.embodiments, taken under r.mu. It is deliberately NOT filtered by
 // isLive(): Spawn's map-insert and its live-atomic flip are the SAME critical
-// section (see the go-live step above), so presence-map membership already IS
+// section (see the go-live step above), so embodiment-map membership already IS
 // "currently live" — re-filtering would be redundant work over an invariant
 // that already holds. Order is unspecified.
 func (r *Runtime) LiveIDs() []actor.ActorID {
 	r.mu.RLock()
-	ids := make([]actor.ActorID, 0, len(r.presences))
-	for id := range r.presences {
+	ids := make([]actor.ActorID, 0, len(r.embodiments))
+	for id := range r.embodiments {
 		ids = append(ids, id)
 	}
 	r.mu.RUnlock()
 	return ids
 }
 
-// SpawnIfAbsent mints id ONLY IF no presence currently occupies it — activation's
+// SpawnIfAbsent mints id ONLY IF no embodiment currently occupies it — activation's
 // atomic CAS mint (§3.4), mirroring Fork's two-phase-with-recheck discipline.
 // Unlike Spawn (last-go-live-wins replace), SpawnIfAbsent NEVER replaces an
-// existing presence: build runs OUTSIDE the lock (same discipline as
+// existing embodiment: build runs OUTSIDE the lock (same discipline as
 // Spawn/Fork), then absence is RE-CHECKED inside the SAME critical section as
 // the insert. If id is already occupied by the time the lock is taken —
 // someone else won the race (admission via Spawn, or another reconcile tick
 // via SpawnIfAbsent itself) — the freshly-built shell is discarded: never
-// inserted into presences, never started (ok=false). This is a real CAS, not
+// inserted into embodiments, never started (ok=false). This is a real CAS, not
 // best-effort, because rebuild cost for agent-class actors (re-establishing
 // LLM context) is a real cost, not a theoretical nicety (§3.4).
 func (r *Runtime) SpawnIfAbsent(id actor.ActorID, build func(Incarnation) Actor) (Incarnation, bool) {
 	r.mu.RLock()
-	_, occupied := r.presences[id]
+	_, occupied := r.embodiments[id]
 	r.mu.RUnlock()
 	if occupied { // fast-path: skip the build entirely if already obviously taken.
 		return Incarnation{}, false
@@ -402,11 +402,11 @@ func (r *Runtime) SpawnIfAbsent(id actor.ActorID, build func(Incarnation) Actor)
 	c.impl = build(inc) // OUTSIDE the lock; IsLive(inc)==false during build.
 
 	r.mu.Lock()
-	if _, occupied := r.presences[id]; occupied { // same critical section re-check
+	if _, occupied := r.embodiments[id]; occupied { // same critical section re-check
 		r.mu.Unlock() // lost the race: discard the shell, never c.start() it.
 		return Incarnation{}, false
 	}
-	r.presences[id] = c
+	r.embodiments[id] = c
 	c.live.Store(true) // go-live: register + liveness atomic flip are one critical section.
 	r.mu.Unlock()
 	c.start()
@@ -424,10 +424,10 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 }
 
 // Attach binds an out-of-process actor that CONNECTED IN over conn, registering
-// it as a `port` presence. The substrate does not spawn the remote (it connects
+// it as a `port` embodiment. The substrate does not spawn the remote (it connects
 // in); Attach performs the handshake, resolves
 // the connection's credential to an ActorID via resolve, relays the remote's
-// emits through emit, and returns the bound id. If a presence already exists for
+// emits through emit, and returns the bound id. If an embodiment already exists for
 // the resolved id it is stopped and replaced.
 //
 // hsCtx bounds ONLY the connect-in handshake (a substrate-owned protocol step
@@ -443,8 +443,8 @@ func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, emit Em
 		return "", err
 	}
 	r.mu.Lock()
-	old, existed := r.presences[p.id]
-	r.presences[p.id] = p
+	old, existed := r.embodiments[p.id]
+	r.embodiments[p.id] = p
 	p.live.Store(true) // go-live (port path; the home-side incarnation gate is §3.6, deferred)
 	r.mu.Unlock()
 	if existed {
@@ -455,21 +455,21 @@ func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, emit Em
 }
 
 // removeIf is the pointer-identity-checked self-eviction hook handed to each
-// presence. It deletes the map entry IFF it still points to this very instance —
+// embodiment. It deletes the map entry IFF it still points to this very instance —
 // so a late-dying predecessor (already replaced) cannot evict its successor.
-func (r *Runtime) removeIf(id actor.ActorID, self presence) {
+func (r *Runtime) removeIf(id actor.ActorID, self embodiment) {
 	r.mu.Lock()
-	if cur, ok := r.presences[id]; ok && cur == self {
-		delete(r.presences, id)
+	if cur, ok := r.embodiments[id]; ok && cur == self {
+		delete(r.embodiments, id)
 	}
-	// Ownership-edge cascade (§3.1a): this presence may itself be a fork parent.
+	// Ownership-edge cascade (§3.1a): this embodiment may itself be a fork parent.
 	// Take its children list and drop the r.owned entry in the SAME critical
 	// section as the eviction above (so a concurrent Fork sees either the full
 	// list-to-be-cascaded or nothing — never a half-updated slice).
 	children := r.owned[self]
 	delete(r.owned, self)
 	r.mu.Unlock()
-	// This presence is dying — flip its liveness atomic so any capability welded
+	// This embodiment is dying — flip its liveness atomic so any capability welded
 	// to it (livePen) fails the WHEN gate from here on. Idempotent.
 	self.markDead()
 	// Cascade OUTSIDE the lock, signal-only (§3.1a): initiateStop() must never be
@@ -485,17 +485,17 @@ func (r *Runtime) removeIf(id actor.ActorID, self presence) {
 // Despawn stops and removes the incarnation inc (no-op unless the map still
 // points to this very incarnation). This is the external deregister path. It
 // carries NO caller obligation to collapse
-// in-flight requests first: after despawn the id is absent from presence, and
+// in-flight requests first: after despawn the id is absent from embodiment, and
 // the closure reconciler (a level scan over open-request × receiver-absent)
 // closes every orphan in-flight request with receiver_unavailable. The death
 // edge would only fire on abnormal exit; closure is geometry (the level scan),
 // not a despawn-caller convention.
 func (r *Runtime) Despawn(inc Incarnation) {
 	r.mu.Lock()
-	cur, ok := r.presences[inc.id]
+	cur, ok := r.embodiments[inc.id]
 	matched := ok && cur == inc.p
 	if matched {
-		delete(r.presences, inc.id)
+		delete(r.embodiments, inc.id)
 	}
 	r.mu.Unlock()
 	// Guarded by POINTER IDENTITY: only despawn IFF the map still points to this
@@ -507,24 +507,24 @@ func (r *Runtime) Despawn(inc Incarnation) {
 	}
 }
 
-// DespawnID stops and removes whatever presence CURRENTLY occupies id, if any
+// DespawnID stops and removes whatever embodiment CURRENTLY occupies id, if any
 // (§3.4 activation's scoped deactivation — the caller only ever holds an id
 // there, never an Incarnation handle: the eager-managed set is tracked
 // across MULTIPLE Reconcile ticks as a plain id set, and retaining stale
 // Incarnation pointers across ticks would reintroduce exactly the ABA risk
-// pointer-identity discipline exists to avoid). It looks the presence up
+// pointer-identity discipline exists to avoid). It looks the embodiment up
 // fresh and evicts it under the SAME critical section — not weaker than
 // Despawn(inc), just keyed differently: Despawn requires a caller-held
 // pointer proving WHICH embodiment to kill, DespawnID kills "whoever is live
 // for id right now" (mirrors Linux kill(pid, sig) — by-name, not by-handle).
-// Returns false if id has no live presence (a no-op, not an error — the
+// Returns false if id has no live embodiment (a no-op, not an error — the
 // scoped deactivation diff can legitimately name an id that already died on
 // its own between two ticks).
 func (r *Runtime) DespawnID(id actor.ActorID) bool {
 	r.mu.Lock()
-	p, ok := r.presences[id]
+	p, ok := r.embodiments[id]
 	if ok {
-		delete(r.presences, id)
+		delete(r.embodiments, id)
 	}
 	r.mu.Unlock()
 	if ok {
@@ -534,9 +534,9 @@ func (r *Runtime) DespawnID(id actor.ActorID) bool {
 	return ok
 }
 
-// deliver routes env to every audience presence hosted by this Runtime by
+// deliver routes env to every audience embodiment hosted by this Runtime by
 // enqueueing into each mailbox, returning the per-audience Outcome. An audience
-// member with no local presence is reported NotHosted (not silently skipped) —
+// member with no local embodiment is reported NotHosted (not silently skipped) —
 // the substrate reports truthfully what it did so the seam can fast-fail. error
 // is reserved for a true exception (nil envelope), not for delivery conditions.
 //
@@ -553,9 +553,9 @@ func (r *Runtime) deliver(audience []actor.ActorID, env *message.Envelope) (Deli
 	}
 	res := DeliverResult{Per: make(map[actor.ActorID]Outcome, len(audience))}
 	r.mu.RLock()
-	matched := make(map[actor.ActorID]presence, len(audience))
+	matched := make(map[actor.ActorID]embodiment, len(audience))
 	for _, id := range audience {
-		if p, ok := r.presences[id]; ok {
+		if p, ok := r.embodiments[id]; ok {
 			matched[id] = p
 		} else {
 			res.Per[id] = NotHosted
@@ -578,14 +578,14 @@ func (r *Runtime) deliver(audience []actor.ActorID, env *message.Envelope) (Deli
 	return res, nil
 }
 
-// StopAll stops every presence. Used at channel teardown.
+// StopAll stops every embodiment. Used at channel teardown.
 func (r *Runtime) StopAll() {
 	r.mu.Lock()
-	ps := make([]presence, 0, len(r.presences))
-	for _, p := range r.presences {
+	ps := make([]embodiment, 0, len(r.embodiments))
+	for _, p := range r.embodiments {
 		ps = append(ps, p)
 	}
-	r.presences = make(map[actor.ActorID]presence)
+	r.embodiments = make(map[actor.ActorID]embodiment)
 	r.mu.Unlock()
 	for _, p := range ps {
 		p.stop()
@@ -604,14 +604,14 @@ type UnitStat struct {
 	StartedAt time.Time
 }
 
-// Stat reads the substrate-owned obs facts for id. The bool reports presence
+// Stat reads the substrate-owned obs facts for id. The bool reports embodiment
 // (is a live instance hosted here right now) — the `kill -0` / is_process_alive
 // authority: only the substrate can answer it, so it never asks the actor and
 // never blocks. It replaces the old boolean Has: present = the second return,
 // uptime = now - StartedAt.
 func (r *Runtime) Stat(id actor.ActorID) (UnitStat, bool) {
 	r.mu.RLock()
-	p, ok := r.presences[id]
+	p, ok := r.embodiments[id]
 	r.mu.RUnlock()
 	if !ok {
 		return UnitStat{}, false

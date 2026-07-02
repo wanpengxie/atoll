@@ -67,7 +67,7 @@ func TestRegistry_Exists(t *testing.T) {
 	if ex, err := cs.Registry.Exists(ctx, "tool:xhs"); err != nil || !ex {
 		t.Fatalf("post-insert Exists=%v err=%v", ex, err)
 	}
-	// Exists is true even after soft-deregister (it is presence-of-row, not active).
+	// Exists is true even after soft-deregister (it is existence-of-row, not active).
 	if err := cs.Membership.Deregister(ctx, "tool:xhs", 2000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}

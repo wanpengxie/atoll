@@ -104,7 +104,7 @@ type MessageQuery interface {
 	// authoritative "who has an open request" question is answered by the message
 	// log, not by membership (a member with no open request needs no closure; an
 	// open request is the only thing that demands one). The reconciler intersects
-	// this set with substrate presence to find absent receivers, then drains each
+	// this set with substrate liveness to find absent receivers, then drains each
 	// via OpenRequestsForActor. Unbounded by construction (same closure law).
 	DistinctOpenRequestReceivers(ctx context.Context) ([]actor.ActorID, error)
 }

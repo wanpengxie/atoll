@@ -140,7 +140,7 @@ func TestStateSlice2b_EmptyBytes(t *testing.T) {
 	const A = actor.ActorID("A")
 	hA := cs.Access.MintState(A)
 
-	// create(nil) → present row, NULL bytes → read: accepted, Found:false, Value:nil.
+	// create(nil) → existing row, NULL bytes → read: accepted, Found:false, Value:nil.
 	const nullID = resource.ResourceID("null-bytes")
 	acc(t, "create(nil)")(hA.Invoke(ctx, access.OpCreate, nullID, nil, nil))
 	out, err := hA.Invoke(ctx, access.OpRead, nullID, nil, nil)
@@ -151,13 +151,13 @@ func TestStateSlice2b_EmptyBytes(t *testing.T) {
 		t.Fatalf("read(null): rejected with %q, want accepted", out.RejectReason)
 	}
 	if out.Found {
-		t.Fatalf("read(null): Found = true, want false (present row + NULL bytes = resolved-but-empty)")
+		t.Fatalf("read(null): Found = true, want false (existing row + NULL bytes = resolved-but-empty)")
 	}
 	if out.Value != nil {
 		t.Fatalf("read(null): Value = %#v, want nil", out.Value)
 	}
 
-	// create([]byte{}) → present row, empty non-nil blob → read: Found:true, Value len 0.
+	// create([]byte{}) → existing row, empty non-nil blob → read: Found:true, Value len 0.
 	const emptyID = resource.ResourceID("empty-value")
 	acc(t, "create([]byte{})")(hA.Invoke(ctx, access.OpCreate, emptyID, []byte{}, nil))
 	out, err = hA.Invoke(ctx, access.OpRead, emptyID, nil, nil)

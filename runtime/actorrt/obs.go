@@ -13,7 +13,7 @@ import (
 // all four cells:
 //
 //	            pull (consumer-timed)         push (producer-timed)
-//	substrate   Stat(id) → present+StartedAt  WatchPresence → OnDown (presence DELETED edge = death)
+//	substrate   Stat(id) → present+StartedAt  WatchDown → OnDown (down edge = death)
 //	actor       Observe(id,kind) → Observer   PublishObs(kind,val) → WatchObs → OnObs
 //
 // The full 2×2 surface is laid down structurally (owner-directed up-front
@@ -25,7 +25,7 @@ import (
 // Vocabulary stays out of the substrate: ObsKind/ObsValue are OPAQUE for the
 // actor-source cells (the substrate routes/forwards, the actor owns its
 // operational-only obs vocabulary and self-answers). Substrate-source facts
-// (presence/uptime) are the only obs the substrate authoritatively produces, and
+// (embodiment/uptime) are the only obs the substrate authoritatively produces, and
 // they ride the typed Stat bundle, not an opaque kind.
 //
 // RETENTION (reviewed 2026-06-12): a kernel audit flagged the ACTOR-source axis
@@ -36,7 +36,7 @@ import (
 // agent/monitor integrates it will need actor-source obs), and completing it is
 // a pure-additive wire arm. So this is a DELIBERATELY-PENDING skeleton on an
 // explicit keep decision, NOT an oversight — future audits should treat it as
-// settled. The substrate-source axis (Stat/WatchPresence/OnDown) IS wired
+// settled. The substrate-source axis (Stat/WatchDown/OnDown) IS wired
 // end-to-end and unaffected.
 
 // ObsKind is an opaque observation selector for ACTOR-source obs. The substrate

@@ -30,7 +30,7 @@ const (
 	// non-blocking enqueue).
 	KindDeliver Kind = "deliver"
 	// KindEmit (remote→host): the bound actor emitted an envelope upward. The
-	// host (port presence) relays it to the harness — the single channel-log
+	// host (port embodiment) relays it to the harness — the single channel-log
 	// writer.
 	KindEmit Kind = "emit"
 	// KindEmitAck (host→remote): the host's authoritative verdict for one
@@ -49,7 +49,7 @@ const (
 	// reordering that cannot occur — forbidden (zero reservation).
 	KindEmitAck Kind = "emit_ack"
 	// KindDown (remote→host): the bound actor died. The host publishes the
-	// presence DELETED edge (obs push); a subscriber materialises
+	// down edge (obs push); a subscriber materialises
 	// receiver_unavailable for in-flight requests. Connection EOF is the
 	// equivalent terminal signal.
 	KindDown Kind = "down"
@@ -134,7 +134,7 @@ type EmitAckPayload struct {
 }
 
 // DownPayload is the bound actor's death notification — the host turns it into a
-// presence-down edge (the actor is implicit — the connection IS that actor).
+// down edge (the actor is implicit — the connection IS that actor).
 type DownPayload struct {
 	Reason string `json:"reason,omitempty"`
 }

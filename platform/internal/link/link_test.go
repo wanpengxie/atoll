@@ -157,7 +157,7 @@ type daemonHost struct {
 func newDaemonHost() *daemonHost {
 	rt, del := actorrt.New(actorrt.Config{})
 	h := &daemonHost{rt: rt, del: del, down: map[actor.ActorID]func(cause string){}}
-	rt.WatchPresence(h)
+	rt.WatchDown(h)
 	return h
 }
 
@@ -215,7 +215,7 @@ func newHomeRig(t *testing.T, leasePing, leaseTTL time.Duration) *homeRig {
 		minter:     &stubMinter{},
 		membership: &stubMembership{},
 	}
-	rt.WatchPresence(watcherFunc(func(_ context.Context, id actor.ActorID, _ error) {
+	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ error) {
 		r.mu.Lock()
 		r.downActors = append(r.downActors, id)
 		r.mu.Unlock()
@@ -386,7 +386,7 @@ func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
 
 // TestEndToEnd_CellDeath_ClosesStreamToOnDown proves a daemon cell's abnormal
 // death closes its link stream, the home port reads EOF, and the home publishes
-// the presence-down edge (the closure trigger). Death is the stream EOF — no
+// the down edge (the closure trigger). Death is the stream EOF — no
 // translated death frame.
 func TestEndToEnd_CellDeath_ClosesStreamToOnDown(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
@@ -422,17 +422,17 @@ func TestEndToEnd_CellDeath_ClosesStreamToOnDown(t *testing.T) {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("home never observed the cell's presence-down edge over the link")
+			t.Fatal("home never observed the cell's down edge over the link")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
 }
 
-// TestLease_NoTraffic_ExpiresToPresenceDown proves the home's lease judges
+// TestLease_NoTraffic_ExpiresToDown proves the home's lease judges
 // liveness: with the daemon NOT pinging (Start never called) and a short TTL,
 // the home tears the link down on TTL — the actor stream EOFs and the home
-// publishes presence-down (the正面观察 a frozen daemon's TCP never produces).
-func TestLease_NoTraffic_ExpiresToPresenceDown(t *testing.T) {
+// publishes down (the正面观察 a frozen daemon's TCP never produces).
+func TestLease_NoTraffic_ExpiresToDown(t *testing.T) {
 	r := newHomeRig(t, 20*time.Millisecond, 60*time.Millisecond)
 
 	const toolID = actor.ActorID("tool:frozen")
@@ -463,7 +463,7 @@ func TestLease_NoTraffic_ExpiresToPresenceDown(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("lease never expired the frozen link to presence-down")
+			t.Fatal("lease never expired the frozen link to down")
 		}
 		time.Sleep(5 * time.Millisecond)
 	}

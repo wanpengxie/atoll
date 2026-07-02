@@ -47,7 +47,7 @@ import (
 //     1. receiver voluntary — sender ∈ parent.audience;
 //     2. caller self-close — sender == parent.sender writing its own
 //     caller-scoped status=failed + reason=unanswered_timeout;
-//     3. substrate death — on the obs presence-down edge a watcher
+//     3. substrate death — on the obs down edge a watcher
 //     materialises the dead receiver's receiver_unavailable, SYSTEM-authored
 //     (sender == SystemActorID; see substrateDeath gate below). This is a
 //     distinct author, NOT a forged dead-receiver sender. The old generic

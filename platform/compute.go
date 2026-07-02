@@ -21,7 +21,7 @@ import (
 	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
-// cellDownWatcher is the daemon's PresenceWatcher: when a hosted cell dies
+// cellDownWatcher is the daemon's DownWatcher: when a hosted cell dies
 // abnormally, OnDown fires that actor's downHandler (close its stream UP the
 // link). The daemon holds no truth, so it cannot write receiver_unavailable
 // itself — the home port reads EOF and the home's closure author#3 closes
@@ -31,7 +31,7 @@ type cellDownWatcher struct {
 	down map[actor.ActorID]func(cause string)
 }
 
-// OnDown implements actorrt.PresenceWatcher.
+// OnDown implements actorrt.DownWatcher.
 func (w *cellDownWatcher) OnDown(_ context.Context, id actor.ActorID, cause error) {
 	w.mu.Lock()
 	handler := w.down[id]
@@ -160,7 +160,7 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 	rt, del := actorrt.New(actorrt.Config{})
 	defer rt.StopAll()
 	watcher := &cellDownWatcher{down: map[actor.ActorID]func(cause string){}}
-	rt.WatchPresence(watcher)
+	rt.WatchDown(watcher)
 	obsFwd := newCellObsForwarder(d)
 	go obsFwd.pump(ctx, d.Done())
 
@@ -186,8 +186,8 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		watcher.mu.Lock()
 		watcher.down[a.ID] = downHandler
 		watcher.mu.Unlock()
-		// Register the obs forwarder BEFORE Spawn so no early presence edge is
-		// missed (same discipline as WatchPresence).
+		// Register the obs forwarder BEFORE Spawn so no early obs edge is
+		// missed (same discipline as WatchDown).
 		rt.WatchObs(a.ID, obsFwd)
 		// The daemon cell's pen is the link's relay-only RemoteWriter; it is NOT
 		// wrapped in a livePen — the home-side cross-wire death gate is deferred

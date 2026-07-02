@@ -21,7 +21,7 @@ import (
 // keep their single-call shape (production fills c.impl from the Spawn build
 // closure instead). It does NOT go-live (live stays false) — these tests drive
 // start()/stop() directly and do not assert IsLive.
-func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, presence, ObsKind, ObsValue), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) *cell {
+func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) *cell {
 	c := allocShell(parent, id, mailbox, onDown, onObs, onExit, started, logger)
 	c.impl = impl
 	return c
@@ -75,7 +75,7 @@ func TestCellDeliverAfterStopGuarded(t *testing.T) {
 }
 
 // startErrActor returns a (non-panic) error from Start — an abnormal death that
-// publishes the presence-down edge WITHOUT a panic (the deathCause branch of
+// publishes the down edge WITHOUT a panic (the deathCause branch of
 // start()'s Starter arm).
 type startErrActor struct{}
 
@@ -85,17 +85,17 @@ func (startErrActor) Start(context.Context, ActorContext) error {
 }
 
 // TestCellStartErrorPublishesDown: Start returning an error (not a panic) is a
-// death — it self-evicts and publishes the presence-down edge.
+// death — it self-evicts and publishes the down edge.
 func TestCellStartErrorPublishesDown(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
-	rt.WatchPresence(w)
+	rt.WatchDown(w)
 	rt.Spawn("a", static(startErrActor{}))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no presence-down edge after Start returned an error")
+		t.Fatal("no down edge after Start returned an error")
 	}
 	if _, ok := rt.Stat("a"); ok {
 		t.Fatal("cell still addressable after Start error")
@@ -124,7 +124,7 @@ func TestSafeReceiveSwallowsError(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	a := errReceiveActor{got: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
-	rt.WatchPresence(w)
+	rt.WatchDown(w)
 	defer rt.StopAll()
 	rt.Spawn("a", static(a))
 	mustDeliver(t, rt, "a", env("x"))
@@ -136,7 +136,7 @@ func TestSafeReceiveSwallowsError(t *testing.T) {
 	// A handler error is NOT a death.
 	select {
 	case <-w.notify:
-		t.Fatal("Receive error wrongly published a presence-down edge")
+		t.Fatal("Receive error wrongly published an down edge")
 	case <-time.After(150 * time.Millisecond):
 	}
 	if _, ok := rt.Stat("a"); !ok {
@@ -161,29 +161,29 @@ func TestNewDefaultsParent(t *testing.T) {
 	}
 }
 
-// TestWatchersIgnoreNil: WatchPresence(nil) and WatchObs(nil) are no-ops — a nil
+// TestWatchersIgnoreNil: WatchDown(nil) and WatchObs(nil) are no-ops — a nil
 // watcher must never be enrolled (it would panic on the closure-critical path).
 func TestWatchersIgnoreNil(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.WatchPresence(nil)
+	rt.WatchDown(nil)
 	rt.WatchObs("a", nil)
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	if len(rt.watchers) != 0 {
-		t.Fatalf("nil PresenceWatcher was enrolled: %d watchers", len(rt.watchers))
+		t.Fatalf("nil DownWatcher was enrolled: %d watchers", len(rt.watchers))
 	}
 	if len(rt.obsWatch["a"]) != 0 {
 		t.Fatalf("nil ObsWatcher was enrolled: %d", len(rt.obsWatch["a"]))
 	}
 }
 
-// panickyPresenceWatcher panics in OnDown — the runtime must guard it (the
+// panickyDownWatcher panics in OnDown — the runtime must guard it (the
 // closure-critical death path cannot crash the process) and log it.
-type panickyPresenceWatcher struct{ notify chan struct{} }
+type panickyDownWatcher struct{ notify chan struct{} }
 
-func (w panickyPresenceWatcher) OnDown(context.Context, actor.ActorID, error) {
+func (w panickyDownWatcher) OnDown(context.Context, actor.ActorID, error) {
 	if w.notify != nil {
 		w.notify <- struct{}{}
 	}
@@ -195,11 +195,11 @@ func (w panickyPresenceWatcher) OnDown(context.Context, actor.ActorID, error) {
 // watcher still runs (guard is per-watcher).
 func TestPublishDownWatcherPanicGuarded(t *testing.T) {
 	t.Parallel()
-	bad := panickyPresenceWatcher{notify: make(chan struct{}, 1)}
+	bad := panickyDownWatcher{notify: make(chan struct{}, 1)}
 	good := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
-	rt.WatchPresence(bad)
-	rt.WatchPresence(good)
+	rt.WatchDown(bad)
+	rt.WatchDown(good)
 	rt.Spawn("a", static(panicActor{}))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
@@ -252,7 +252,7 @@ func TestPublishObsWatcherPanicGuarded(t *testing.T) {
 }
 
 // TestDeliverStoppedAndDefaultOutcome: deliver maps a hosted-but-stopped
-// presence to Stopped (ErrCellStopped arm). Exercised by stopping a cell out of
+// embodiment to Stopped (ErrCellStopped arm). Exercised by stopping a cell out of
 // band while it remains in the addressing map, then delivering to it directly
 // through the runtime's deliver path.
 func TestDeliverStoppedOutcome(t *testing.T) {
@@ -264,13 +264,13 @@ func TestDeliverStoppedOutcome(t *testing.T) {
 	c := newCell(rt.parent, "a", newRecordActor(), 4, rt.publishDown, rt.publishObs, rt.removeIf, rt.clock(), rt.logger)
 	c.start()
 	rt.mu.Lock()
-	rt.presences["a"] = c
+	rt.embodiments["a"] = c
 	rt.mu.Unlock()
 	c.stop()
 	// removeIf deleted the map entry on exit; re-insert the stopped cell so the
 	// deliver path reaches its ErrCellStopped guard.
 	rt.mu.Lock()
-	rt.presences["a"] = c
+	rt.embodiments["a"] = c
 	rt.mu.Unlock()
 
 	res, err := rt.deliver([]actor.ActorID{"a"}, env("x"))
@@ -282,21 +282,21 @@ func TestDeliverStoppedOutcome(t *testing.T) {
 	}
 }
 
-// fakeStoppedPresence is a presence whose Deliver returns an arbitrary
+// fakeStoppedEmbodiment is an embodiment whose Deliver returns an arbitrary
 // (non-sentinel) error, exercising deliver()'s default arm (mapped to Stopped —
 // the substrate refuses to report Delivered for any non-nil enqueue error).
-type fakeErrPresence struct{ started time.Time }
+type fakeErrEmbodiment struct{ started time.Time }
 
-func (fakeErrPresence) Deliver(*message.Envelope) error { return errors.New("weird enqueue error") }
-func (fakeErrPresence) observe(context.Context, ObsKind) (ObsValue, error) {
+func (fakeErrEmbodiment) Deliver(*message.Envelope) error { return errors.New("weird enqueue error") }
+func (fakeErrEmbodiment) observe(context.Context, ObsKind) (ObsValue, error) {
 	return nil, ErrObsUnsupported
 }
-func (p fakeErrPresence) startedAt() time.Time { return p.started }
-func (fakeErrPresence) cancelRequest(message.ID) {}
-func (fakeErrPresence) stop()                    {}
-func (fakeErrPresence) initiateStop()            {}
-func (fakeErrPresence) isLive() bool             { return false }
-func (fakeErrPresence) markDead()                {}
+func (p fakeErrEmbodiment) startedAt() time.Time   { return p.started }
+func (fakeErrEmbodiment) cancelRequest(message.ID) {}
+func (fakeErrEmbodiment) stop()                    {}
+func (fakeErrEmbodiment) initiateStop()            {}
+func (fakeErrEmbodiment) isLive() bool             { return false }
+func (fakeErrEmbodiment) markDead()                {}
 
 // TestDeliverDefaultArmMapsToStopped: an enqueue error that is neither
 // ErrMailboxFull nor ErrCellStopped maps to Stopped (deliver's default switch
@@ -305,7 +305,7 @@ func TestDeliverDefaultArmMapsToStopped(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.mu.Lock()
-	rt.presences["a"] = fakeErrPresence{started: time.Now()}
+	rt.embodiments["a"] = fakeErrEmbodiment{started: time.Now()}
 	rt.mu.Unlock()
 	res, err := rt.deliver([]actor.ActorID{"a"}, env("x"))
 	if err != nil {
@@ -334,12 +334,12 @@ func TestPortObserveUnsupported(t *testing.T) {
 
 // TestPortEmitDecodeErrorIsDeath: a KindEmit frame whose payload fails to decode
 // is a protocol violation that kills the port (emit decode error arm of
-// readLoop), publishing a presence-down edge.
+// readLoop), publishing an down edge.
 func TestPortEmitDecodeErrorIsDeath(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
-	rt.WatchPresence(w)
+	rt.WatchDown(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
 
@@ -371,7 +371,7 @@ func TestPortDownEmptyReasonDefaults(t *testing.T) {
 		got <- struct{}{}
 	}}
 	rt, _ := New(Config{Parent: context.Background()})
-	rt.WatchPresence(w)
+	rt.WatchDown(w)
 	_, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
 
@@ -383,7 +383,7 @@ func TestPortDownEmptyReasonDefaults(t *testing.T) {
 	select {
 	case <-got:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no presence-down edge for empty-reason DOWN")
+		t.Fatal("no down edge for empty-reason DOWN")
 	}
 	mu.Lock()
 	defer mu.Unlock()
@@ -410,12 +410,12 @@ func contains(s, sub string) bool {
 
 // TestPortDeliverWriteFailsIsDeath: when the wire write of a delivered envelope
 // fails (the conn is closed under the writeLoop), the port dies (the deliver
-// write-error arm of writeLoop), publishing a presence-down edge.
+// write-error arm of writeLoop), publishing an down edge.
 func TestPortDeliverWriteFailsIsDeath(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
-	rt.WatchPresence(w)
+	rt.WatchDown(w)
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 
 	// Close the remote end so the host-side write fails. net.Pipe writes block
@@ -447,7 +447,7 @@ func TestPortDeliverMalformedEnvelopeDropped(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
-	rt.WatchPresence(w)
+	rt.WatchDown(w)
 	defer rt.StopAll()
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()

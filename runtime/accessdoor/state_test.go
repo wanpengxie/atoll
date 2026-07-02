@@ -109,7 +109,7 @@ func TestInvokeActorScopedTree(t *testing.T) {
 		mustVerdict(t, out, err, access.AlreadyExists)
 	})
 
-	t.Run("read present with bytes → Found:true", func(t *testing.T) {
+	t.Run("read existing row with bytes → Found:true", func(t *testing.T) {
 		st := &fakeStateStore{readPresent: true, readValue: []byte("v")}
 		d := newStateDoor(st, &fakeRegistry{}, &fakeMembership{})
 		out, err := d.invokeActorScoped(t.Context(), owner, access.OpRead, id, nil)
@@ -119,17 +119,17 @@ func TestInvokeActorScopedTree(t *testing.T) {
 		}
 	})
 
-	t.Run("read present NULL bytes → resolved-but-empty (Found:false)", func(t *testing.T) {
+	t.Run("read existing row, NULL bytes → resolved-but-empty (Found:false)", func(t *testing.T) {
 		st := &fakeStateStore{readPresent: true, readValue: nil}
 		d := newStateDoor(st, &fakeRegistry{}, &fakeMembership{})
 		out, err := d.invokeActorScoped(t.Context(), owner, access.OpRead, id, nil)
 		mustAccept(t, out, err)
 		if out.Found {
-			t.Fatalf("out.Found = true, want false (present row + NULL bytes = resolved-but-empty)")
+			t.Fatalf("out.Found = true, want false (existing row + NULL bytes = resolved-but-empty)")
 		}
 	})
 
-	t.Run("read present empty non-nil bytes → Found:true", func(t *testing.T) {
+	t.Run("read existing row, empty non-nil bytes → Found:true", func(t *testing.T) {
 		st := &fakeStateStore{readPresent: true, readValue: []byte{}}
 		d := newStateDoor(st, &fakeRegistry{}, &fakeMembership{})
 		out, err := d.invokeActorScoped(t.Context(), owner, access.OpRead, id, nil)
@@ -146,7 +146,7 @@ func TestInvokeActorScopedTree(t *testing.T) {
 		mustVerdict(t, out, err, access.ResourceNotFound)
 	})
 
-	t.Run("write present → ok", func(t *testing.T) {
+	t.Run("write existing → ok", func(t *testing.T) {
 		st := &fakeStateStore{writePresent: true}
 		d := newStateDoor(st, &fakeRegistry{}, &fakeMembership{})
 		out, err := d.invokeActorScoped(t.Context(), owner, access.OpWrite, id, []byte("v"))
@@ -163,7 +163,7 @@ func TestInvokeActorScopedTree(t *testing.T) {
 		mustVerdict(t, out, err, access.ResourceNotFound)
 	})
 
-	t.Run("delete present → ok", func(t *testing.T) {
+	t.Run("delete existing → ok", func(t *testing.T) {
 		st := &fakeStateStore{deletePresent: true}
 		d := newStateDoor(st, &fakeRegistry{}, &fakeMembership{})
 		out, err := d.invokeActorScoped(t.Context(), owner, access.OpDelete, id, nil)

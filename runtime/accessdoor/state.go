@@ -124,34 +124,34 @@ func (d *door) invokeActorScoped(ctx context.Context, owner actor.ActorID, op ac
 		return Outcome{}, nil
 
 	case access.OpRead:
-		val, present, err := d.deps.State.Read(ctx, owner, id)
+		val, exists, err := d.deps.State.Read(ctx, owner, id)
 		if err != nil {
 			return executeFailure(ctx, err)
 		}
-		if !present {
+		if !exists {
 			return Outcome{RejectReason: access.ResourceNotFound}, nil
 		}
 		// Found is the resolved-but-empty signal, uniform with the channel-scoped
-		// tree (opus-B2): a present row with NULL bytes (val == nil) = Found:false;
+		// tree (opus-B2): an existing row with NULL bytes (val == nil) = Found:false;
 		// empty non-nil bytes are a value.
 		return Outcome{Value: val, Found: val != nil}, nil
 
 	case access.OpWrite:
-		present, err := d.deps.State.Write(ctx, owner, id, args)
+		exists, err := d.deps.State.Write(ctx, owner, id, args)
 		if err != nil {
 			return executeFailure(ctx, err)
 		}
-		if !present {
+		if !exists {
 			return Outcome{RejectReason: access.ResourceNotFound}, nil // birth is Create, not Write
 		}
 		return Outcome{}, nil
 
 	case access.OpDelete:
-		present, err := d.deps.State.Delete(ctx, owner, id)
+		exists, err := d.deps.State.Delete(ctx, owner, id)
 		if err != nil {
 			return executeFailure(ctx, err)
 		}
-		if !present {
+		if !exists {
 			return Outcome{RejectReason: access.ResourceNotFound}, nil // repeated delete is honestly not-found
 		}
 		return Outcome{}, nil

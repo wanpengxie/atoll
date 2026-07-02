@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/platform/internal/sysactor"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/platform/internal/sysactor"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
@@ -41,7 +41,7 @@ func (f fakeLookup) FindByID(_ context.Context, _ message.ID) (*message.Envelope
 
 // fakeStat is the injected obs-read seam (substrate pull-stat stand-in); it reports the
 // ids in its set as present with a fixed bind-instant. Stands in for the
-// substrate's authoritative presence/uptime view.
+// substrate's authoritative liveness/uptime view.
 type fakeStat struct {
 	present map[actor.ActorID]bool
 	started time.Time
@@ -55,7 +55,7 @@ func (p fakeStat) Stat(id actor.ActorID) (time.Time, bool) {
 }
 
 // TestActorList_TwoAxisNoReadiness proves the composed actor.list directory is
-// membership (registry) ∧ presence (lease) and carries NO readiness column —
+// membership (registry) ∧ liveness (lease) and carries NO readiness column —
 // readiness is not a substrate axis; whether an actor can service a request is
 // the OUTCOME of send→terminal, never projected into this channel-wide view.
 func TestActorList_TwoAxisNoReadiness(t *testing.T) {
@@ -68,7 +68,7 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 		ID: "q1", ChannelID: "ch", Kind: message.KindRequest, Type: "actor.list",
 		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{actor.SystemActorID},
 	}
-	// Presence authority reports actor:a present, actor:b absent — read via the
+	// Liveness authority reports actor:a present, actor:b absent — read via the
 	// injected seam when composing actor.list (never a message, never truth).
 	s := sysactor.New(sysactor.Deps{
 		Registry: reg, Writer: fc, Lookup: fakeLookup{req: listReq},
@@ -97,7 +97,7 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 			t.Fatalf("actor.list row carries a readiness field — readiness is not a substrate axis: %+v", a)
 		}
 	}
-	// actor:a has a fresh presence lease → present; actor:b never reported → absent.
+	// actor:a has a fresh liveness lease → present; actor:b never reported → absent.
 	if byID["actor:a"]["present"] != true {
 		t.Fatalf("actor:a present=%v, want true (fresh lease)", byID["actor:a"]["present"])
 	}

@@ -54,11 +54,11 @@ func MaterialiseReceiverUnavailable(
 	return nil
 }
 
-// PresenceProbe answers the substrate's authoritative "is a live instance for id
+// LivenessProbe answers the substrate's authoritative "is a live instance for id
 // hosted right now" question — the `kill -0` / is_process_alive authority only
 // the substrate can answer. The reconciler uses it to decide which open-request
 // receivers are absent. present=false means closure is owed.
-type PresenceProbe interface {
+type LivenessProbe interface {
 	Present(id actor.ActorID) bool
 }
 
@@ -78,14 +78,14 @@ type PresenceProbe interface {
 // number of times — startup, a low-frequency ticker, or a lossy-edge wakeup.
 //
 // receivers() is the truth-derived set of distinct open-request receivers (a
-// derived view over the log, not membership). present probes substrate presence.
+// derived view over the log, not membership). present probes substrate liveness.
 // onFault receives both a drain-query failure (the loudest — that receiver's
 // callers are all black holes) and any per-request write fault.
 func ReconcileReceiverUnavailable(
 	ctx context.Context,
 	pen harness.Pen,
 	query storespec.MessageQuery,
-	present PresenceProbe,
+	present LivenessProbe,
 	clock func() time.Time,
 	onFault func(reqID message.ID, err error),
 ) error {

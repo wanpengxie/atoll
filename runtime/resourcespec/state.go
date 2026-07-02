@@ -38,21 +38,21 @@ type StateStore interface {
 	// mapping). No grant row — R does not apply to this locus.
 	Create(ctx context.Context, owner actor.ActorID, id resource.ResourceID, initial []byte) error
 
-	// Read returns the current bytes; present=false = no row (the door maps
+	// Read returns the current bytes; exists=false = no row (the door maps
 	// it to resource_not_found, uniform with the channel-scoped tree even at
-	// the degenerate point). A present row with NULL bytes is resolved-but-
+	// the degenerate point). An existing row with NULL bytes is resolved-but-
 	// empty: the door maps it to Found=false (opus-B2, same bit meaning as
 	// the channel-scoped driver), value=nil; empty non-nil bytes are a value.
-	Read(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (value []byte, present bool, err error)
+	Read(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (value []byte, exists bool, err error)
 
 	// Write overwrites an EXISTING row (PUT semantics, idempotent);
-	// present=false when no row was hit (door → resource_not_found — birth
+	// exists=false when no row was hit (door → resource_not_found — birth
 	// is Create, not Write).
-	Write(ctx context.Context, owner actor.ActorID, id resource.ResourceID, value []byte) (present bool, err error)
+	Write(ctx context.Context, owner actor.ActorID, id resource.ResourceID, value []byte) (exists bool, err error)
 
-	// Delete removes the row; present=false when no row was hit (door →
+	// Delete removes the row; exists=false when no row was hit (door →
 	// resource_not_found; repeated delete is honestly not-found). The OTHER
 	// death is scope-expiry (owner deregister → clearActorScopedTx,
 	// store-internal, not an op).
-	Delete(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (present bool, err error)
+	Delete(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (exists bool, err error)
 }

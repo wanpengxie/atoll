@@ -25,7 +25,7 @@ func TestFork_ChildLiveAndOwned(t *testing.T) {
 	}
 
 	rt.mu.RLock()
-	children := append([]presence(nil), rt.owned[parentInc.p]...)
+	children := append([]embodiment(nil), rt.owned[parentInc.p]...)
 	rt.mu.RUnlock()
 	found := false
 	for _, ch := range children {
@@ -40,7 +40,7 @@ func TestFork_ChildLiveAndOwned(t *testing.T) {
 
 // TestFork_ParentNotLive_FastPath: Fork on an already-dead parent fails fast
 // with ErrParentNotLive (the lock-free entry check, §3.1 ①) — no child
-// presence is ever inserted.
+// embodiment is ever inserted.
 func TestFork_ParentNotLive_FastPath(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
@@ -53,14 +53,14 @@ func TestFork_ParentNotLive_FastPath(t *testing.T) {
 	if !errors.Is(err, ErrParentNotLive) {
 		t.Fatalf("Fork(dead parent) = %v, want ErrParentNotLive", err)
 	}
-	if _, ok := rt.presences["parent/child"]; ok {
-		t.Fatal("Fork on a dead parent inserted a presence anyway")
+	if _, ok := rt.embodiments["parent/child"]; ok {
+		t.Fatal("Fork on a dead parent inserted an embodiment anyway")
 	}
 }
 
 // TestFork_ChildIDCollision_HardFail: a childID that already names a live
-// presence is a HARD failure (§10.2) — NOT Spawn's last-go-live-wins replace
-// semantics. The pre-existing presence must be untouched.
+// embodiment is a HARD failure (§10.2) — NOT Spawn's last-go-live-wins replace
+// semantics. The pre-existing embodiment must be untouched.
 func TestFork_ChildIDCollision_HardFail(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
@@ -74,13 +74,13 @@ func TestFork_ChildIDCollision_HardFail(t *testing.T) {
 		t.Fatalf("Fork(colliding id) = %v, want ErrChildIDCollision", err)
 	}
 	if !rt.IsLive(existing) {
-		t.Fatal("colliding Fork killed/replaced the pre-existing presence")
+		t.Fatal("colliding Fork killed/replaced the pre-existing embodiment")
 	}
 	rt.mu.RLock()
-	cur := rt.presences["parent/child"]
+	cur := rt.embodiments["parent/child"]
 	rt.mu.RUnlock()
 	if cur != existing.p {
-		t.Fatal("presences[childID] pointer changed after a colliding Fork — must not replace")
+		t.Fatal("embodiments[childID] pointer changed after a colliding Fork — must not replace")
 	}
 }
 
@@ -107,7 +107,7 @@ func TestFork_PrunesDeadChildrenOnNextFork(t *testing.T) {
 	}
 
 	rt.mu.RLock()
-	children := append([]presence(nil), rt.owned[parentInc.p]...)
+	children := append([]embodiment(nil), rt.owned[parentInc.p]...)
 	rt.mu.RUnlock()
 	if len(children) != 1 || children[0] != c2.p {
 		t.Fatalf("r.owned[parent] = %v (len %d), want exactly [c2] — dead c1 must be pruned on the next Fork", children, len(children))
@@ -148,10 +148,10 @@ func TestFork_CascadeOnParentDeath(t *testing.T) {
 		t.Fatal("child still live after parent death — cascade did not fire")
 	}
 	rt.mu.RLock()
-	_, hosted := rt.presences["parent/child"]
+	_, hosted := rt.embodiments["parent/child"]
 	rt.mu.RUnlock()
 	if hosted {
-		t.Fatal("child still addressable in r.presences after cascade — initiateStop must evict it immediately")
+		t.Fatal("child still addressable in r.embodiments after cascade — initiateStop must evict it immediately")
 	}
 }
 

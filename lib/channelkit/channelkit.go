@@ -15,7 +15,7 @@ import (
 )
 
 // Channel is one assembled channel: actorrt runtime + system cell + the
-// presence-down closure wiring (writer + open-request source).
+// death-edge closure wiring (writer + open-request source).
 type Channel struct {
 	channelID channel.ID
 	cells     *actorrt.Runtime
@@ -25,14 +25,14 @@ type Channel struct {
 	// the harness.
 	deliverer actorrt.Deliverer
 
-	// Presence-down closure (author #3): on a death edge the watcher writes
+	// Death-edge closure (author #3): on a death edge the watcher writes
 	// receiver_unavailable for every in-flight request addressed to the dead
 	// actor. nil systemPen/openReqs → OnDown writes no terminals locally (the dead
 	// cell already self-evicted); the caller is responsible for closing the
 	// in-flight requests elsewhere.
 	systemPen harness.Pen
-	openReqs storespec.MessageQuery
-	clock    func() time.Time
+	openReqs  storespec.MessageQuery
+	clock     func() time.Time
 
 	// logger surfaces closure-drain FAULTS (a swallowed drain failure is a
 	// black hole — the loudest thing the watcher can hit). nil → discard.
@@ -44,13 +44,13 @@ type Config struct {
 	ChannelID channel.ID
 	// System builds the channel's intrinsic system cell GIVEN the live runtime.
 	// It is a factory, not a ready cell, because the system actor legitimately
-	// reads the runtime (presence Stat) — born before the runtime, it would need
+	// reads the runtime (liveness Stat) — born before the runtime, it would need
 	// a back-filled pointer. channelkit builds the runtime first, then calls this
 	// with the real *actorrt.Runtime, so the cell holds a live reference at
 	// construction (no back-fill, no construction cycle). channelkit assembles
 	// cells and does not know domain actor types. nil → no system cell.
 	System func(rt *actorrt.Runtime) actorrt.Actor
-	// SystemPen + OpenRequests wire the presence-down closure (author #3). SystemPen is
+	// SystemPen + OpenRequests wire the death-edge closure (author #3). SystemPen is
 	// the system Pen the composition root injects (Mint(SystemActorID, chID)): the
 	// system identity is welded into the pen, so author #3's terminals are system-
 	// authored by construction — channelkit never stamps a caller itself.
@@ -61,10 +61,10 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// New builds the channel, subscribes to the substrate's presence-edge (the
-// Channel is the actorrt.PresenceWatcher — see OnDown) and spawns the intrinsic
+// New builds the channel, subscribes to the substrate's down edge (the
+// Channel is the actorrt.DownWatcher — see OnDown) and spawns the intrinsic
 // system cell. Assembly order: runtime → watcher → system cell, so the System
-// factory receives the live runtime (no back-filled presence pointer).
+// factory receives the live runtime (no back-filled runtime pointer).
 func New(cfg Config) *Channel {
 	clock := cfg.Clock
 	if clock == nil {
@@ -85,9 +85,9 @@ func New(cfg Config) *Channel {
 	// each cell's StartedAt with this clock, so the system actor's uptime
 	// (now - StartedAt) stays consistent under a test/non-realtime clock.
 	c.cells, c.deliverer = actorrt.New(actorrt.Config{Clock: clock, Logger: logger})
-	// Register the death watcher BEFORE spawning any cell — no presence-down edge
+	// Register the death watcher BEFORE spawning any cell — no down edge
 	// may be missed (closure-critical path).
-	c.cells.WatchPresence(c)
+	c.cells.WatchDown(c)
 	// Spawn the intrinsic system cell, built against the live runtime. It uses the
 	// RAW system pen (anchor not wrapped in a livePen, §3.5): the system actor
 	// writes singleton SystemActorID terminals, has no successor principal to
@@ -110,8 +110,8 @@ func (c *Channel) Cells() *actorrt.Runtime { return c.cells }
 // routes it to the post-harness fanout (the sole legitimate mailbox feeder).
 func (c *Channel) Deliverer() actorrt.Deliverer { return c.deliverer }
 
-// OnDown implements actorrt.PresenceWatcher: death is the DELETED edge of
-// presence (obs push), and the Channel is just a subscriber. On the edge it
+// OnDown implements actorrt.DownWatcher: death is the DELETED edge of
+// the embodiment (obs push), and the Channel is just a subscriber. On the edge it
 // materialises receiver_unavailable (the closure REACTION — work that lands in
 // truth) for every in-flight request addressed to the dead actor. The terminal
 // is SYSTEM-authored — harness Step 8 authorises sender==system +
@@ -119,10 +119,10 @@ func (c *Channel) Deliverer() actorrt.Deliverer { return c.deliverer }
 // without it a dead cell is a black hole that hangs every waiting caller
 // (construction-spec §3.3). Death itself is NOT truth; this reaction is.
 //
-// It MUST NOT despawn the id: the dead presence has ALREADY self-evicted (the
+// It MUST NOT despawn the id: the dead embodiment has ALREADY self-evicted (the
 // runtime's pointer-identity removeIf ran before publishing this edge). A
 // watcher Despawn(id) is not pointer-checked, so under same-id replacement it
-// would delete/stop the SUCCESSOR — the exact contract PresenceWatcher forbids.
+// would delete/stop the SUCCESSOR — the exact contract DownWatcher forbids.
 func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 	if c.systemPen == nil || c.openReqs == nil {
 		return
@@ -149,19 +149,19 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 	}
 }
 
-// presenceProbe adapts the channel's runtime presence map to the behaviour
-// reconciler's PresenceProbe seam: present = a live instance hosted right now
+// livenessProbe adapts the channel's runtime liveness view (Stat) to the behaviour
+// reconciler's LivenessProbe seam: present = a live instance hosted right now
 // (Stat's is_process_alive authority). Absent = closure owed.
-type presenceProbe struct{ rt *actorrt.Runtime }
+type livenessProbe struct{ rt *actorrt.Runtime }
 
-func (p presenceProbe) Present(id actor.ActorID) bool {
+func (p livenessProbe) Present(id actor.ActorID) bool {
 	_, ok := p.rt.Stat(id)
 	return ok
 }
 
 // Reconcile runs the closure level scan (author #3 reconciler): for every
 // receiver that still holds an open request and is currently ABSENT from the
-// substrate presence map, materialise receiver_unavailable. This is the
+// substrate liveness view, materialise receiver_unavailable. This is the
 // level-triggered correctness backstop the death edge alone cannot give — a lost
 // edge (clean despawn, ctx-cancel, an open request predating a home restart)
 // leaves an orphan that only a scan can close. Idempotent: re-writing a terminal
@@ -183,7 +183,7 @@ func (c *Channel) Reconcile(ctx context.Context) {
 			"channel", c.channelID, "request", reqID, "err", err)
 	}
 	if err := behavior.ReconcileReceiverUnavailable(ctx,
-		c.systemPen, c.openReqs, presenceProbe{rt: c.cells},
+		c.systemPen, c.openReqs, livenessProbe{rt: c.cells},
 		c.clock, onFault); err != nil {
 		// The distinct-receivers scan failed → no orphan can be enumerated →
 		// every absent receiver's callers stay black holes until the next scan.

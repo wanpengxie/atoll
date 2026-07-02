@@ -130,7 +130,7 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	}
 
 	actorID := actor.ActorID("user:" + userID)
-	// Register the creating user as a presence-less channel member (a human is a
+	// Register the creating user as a cell-less channel member (a human is a
 	// member but has no cell — Spawn with nil impl is membership-only).
 	if mErr := home.Spawn(c.Request.Context(), actorID, actor.KindHuman, nil); mErr != nil {
 		a.logger.Warn("app: channel membership insert failed", "channel", chID, "err", mErr.Error())

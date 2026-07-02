@@ -64,7 +64,7 @@ func (l *Lease) expired() bool {
 
 // Watch is the liveness judge: every ping it checks last-seen; if the gap
 // exceeds TTL it fires expire (the owner tears the whole link down — all actor
-// streams EOF = every presence on this party falls on the same presence-down
+// streams EOF = every embodiment on this party falls on the same down
 // edge). It returns when expire fires or done closes.
 func (l *Lease) Watch(done <-chan struct{}, expire func()) {
 	t := time.NewTicker(l.ping)

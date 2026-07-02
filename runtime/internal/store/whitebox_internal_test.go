@@ -198,7 +198,7 @@ func TestLookup_PoisonBinding(t *testing.T) {
 	}
 }
 
-// Empty binding is a legitimate state (a presence-less member — e.g. a human —
+// Empty binding is a legitimate state (a cell-less member — e.g. a human —
 // carries no binding), so a NULL/empty actor_binding must read back cleanly as
 // "" — the validation rejects only NON-empty out-of-set values.
 func TestLookup_EmptyBindingAccepted(t *testing.T) {

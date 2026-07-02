@@ -15,7 +15,7 @@ Returns the actor's live self-answer: its one-line description, a markdown
 skill_doc (typical workflows and error handling), and a types map documenting
 every request type it serves (payload docs, error codes, allowed kinds, wait
 budget). Call this after list_actors when you have identified which actor
-matches your need. Kind/binding/presence are directory facts — read them from
+matches your need. Kind/binding/liveness are directory facts — read them from
 list_actors, not from here.
 `),
 	Schema: json.RawMessage(`{

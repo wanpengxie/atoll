@@ -41,7 +41,7 @@ type chain struct {
 //
 // Construction-confined to platform: a write engine built outside the platform
 // assembly has no commit signal (store OnCommit), closure reconciler, or
-// presence-watcher wiring — a half-wired write gate. New/Deps may therefore only
+// down-watcher wiring — a half-wired write gate. New/Deps may therefore only
 // be referenced by the platform tree (enforced by
 // archtest.TestHarnessConstructionConfinedToPlatform); downstream speaks the
 // harness.Pen / WriteResult seam, never builds the engine itself.
@@ -219,4 +219,3 @@ func rejectFromOutcome(out outcome, env *message.Envelope) WriteResult {
 	}
 	return r
 }
-

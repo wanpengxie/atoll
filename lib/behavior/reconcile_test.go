@@ -9,10 +9,10 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
-// presenceSet is a PresenceProbe backed by a fixed present-set.
-type presenceSet map[actor.ActorID]bool
+// liveSet is a LivenessProbe backed by a fixed present-set.
+type liveSet map[actor.ActorID]bool
 
-func (p presenceSet) Present(id actor.ActorID) bool { return p[id] }
+func (p liveSet) Present(id actor.ActorID) bool { return p[id] }
 
 // The reconciler closes ONLY the receivers the substrate reports absent; a live
 // receiver (still present) is skipped — it can still answer, no closure owed.
@@ -25,7 +25,7 @@ func TestReconcile_ClosesOnlyAbsentReceivers(t *testing.T) {
 		// drained, so exactly one request is closed.
 		rows: envsToRows([]*message.Envelope{newRequest("r1", nil)}),
 	}
-	present := presenceSet{"alive": true} // "dead" absent
+	present := liveSet{"alive": true} // "dead" absent
 
 	err := ReconcileReceiverUnavailable(context.Background(), w, q, present,
 		fixedClock(1), nil)
@@ -46,7 +46,7 @@ func TestReconcile_IdempotentOnDuplicateTerminal(t *testing.T) {
 		receivers: []actor.ActorID{"dead"},
 		rows:      envsToRows([]*message.Envelope{newRequest("r1", nil)}),
 	}
-	present := presenceSet{} // dead absent
+	present := liveSet{} // dead absent
 
 	var faults int
 	err := ReconcileReceiverUnavailable(context.Background(), w, q, present,
@@ -65,7 +65,7 @@ func TestReconcile_ScanQueryFailureReturnsError(t *testing.T) {
 	w := &recordingWriter{}
 	q := &queryStub{recvErr: errors.New("store down")}
 
-	err := ReconcileReceiverUnavailable(context.Background(), w, q, presenceSet{},
+	err := ReconcileReceiverUnavailable(context.Background(), w, q, liveSet{},
 		fixedClock(1), nil)
 	if err == nil {
 		t.Fatal("a distinct-receivers scan failure must return an error")
@@ -85,7 +85,7 @@ func TestReconcile_PerReceiverDrainFaultContinues(t *testing.T) {
 	}
 
 	var faults int
-	err := ReconcileReceiverUnavailable(context.Background(), w, q, presenceSet{},
+	err := ReconcileReceiverUnavailable(context.Background(), w, q, liveSet{},
 		fixedClock(1), func(message.ID, error) { faults++ })
 	if err != nil {
 		t.Fatalf("per-receiver drain faults must not return a top-level error: %v", err)

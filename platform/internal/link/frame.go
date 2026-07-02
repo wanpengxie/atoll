@@ -23,7 +23,7 @@ const (
 	// untouched (zero-translation invariant).
 	OpData Op = 2
 	// OpClose (either side): a stream ends. The peer's stream Read returns EOF —
-	// for an actor stream that EOF is the presence-down edge.
+	// for an actor stream that EOF is the down edge.
 	OpClose Op = 3
 )
 
@@ -105,7 +105,7 @@ func (s *stream) push(payload []byte) {
 
 // Read drains buffered bytes, blocking until some arrive or the stream closes.
 // Returns io.EOF once the stream is closed and the buffer is drained — that EOF
-// is what an actor port reads as the presence-down edge.
+// is what an actor port reads as the down edge.
 func (s *stream) Read(p []byte) (int, error) {
 	s.mu.Lock()
 	for len(s.buf) == 0 && !s.closed {
@@ -272,7 +272,7 @@ func (lc *linkConn) dropStream(id uint32) {
 // run is the demux loop: read mux frames, route OpOpen/OpData/OpClose to the
 // stream table or the control hooks. Exits when the link reads an error (peer
 // gone / link torn down), tearing every stream down (all actor streams EOF =
-// all that party's presence falls on the same edge). onFrame, if non-nil, is
+// all that party's embodiments fall on the same edge). onFrame, if non-nil, is
 // invoked for every inbound frame BEFORE routing — the lease's last-seen
 // refresh hooks here (any inbound traffic is liveness).
 func (lc *linkConn) run(onFrame func()) {
@@ -337,7 +337,7 @@ func (lc *linkConn) run(onFrame func()) {
 
 // teardown closes every live stream (each Read sees EOF) and the underlying
 // transport. Idempotent. This is the single death funnel: link gone → every
-// presence on it falls on the same edge.
+// every embodiment on it falls on the same edge.
 func (lc *linkConn) teardown() {
 	lc.closeOnce.Do(func() {
 		lc.mu.Lock()

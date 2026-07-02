@@ -30,7 +30,7 @@ type Actor interface {
 	// Receive processes exactly one envelope addressed to this actor.
 	// Returning an error does NOT itself synthesise a terminal — closure
 	// is the sender's responsibility (caller-scoped timer) and the
-	// substrate's only obligation is to publish the presence DELETED edge
+	// substrate's only obligation is to publish the down edge
 	// (death) for watchers. A returned error is recorded for observability;
 	// a panic is caught by the cell and published as that death edge.
 	Receive(ctx context.Context, env *message.Envelope) error

@@ -8,9 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/ActOS/lib/channelkit"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
-	"github.com/wanpengxie/ActOS/lib/channelkit"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
 	"github.com/wanpengxie/ActOS/runtime/harness"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
@@ -26,7 +26,7 @@ type liveActor struct{}
 
 func (liveActor) Receive(context.Context, *message.Envelope) error { return nil }
 
-// TestOnDown_DoesNotDespawnSuccessor locks the PresenceWatcher contract: a late
+// TestOnDown_DoesNotDespawnSuccessor locks the DownWatcher contract: a late
 // death edge for an id must NOT despawn whatever currently occupies that id. A
 // dead predecessor self-evicts via the runtime's pointer-identity removeIf; if
 // OnDown also despawned, a same-id successor would be wrongly killed (Despawn is
@@ -37,10 +37,10 @@ func TestOnDown_DoesNotDespawnSuccessor(t *testing.T) {
 	if _, ok := ch.Cells().Stat("worker"); !ok {
 		t.Fatal("successor not hosted after Spawn")
 	}
-	// A late presence-down edge for "worker" (e.g. from a replaced predecessor).
+	// A late down edge for "worker" (e.g. from a replaced predecessor).
 	ch.OnDown(context.Background(), "worker", errors.New("late predecessor death"))
 	if _, ok := ch.Cells().Stat("worker"); !ok {
-		t.Fatal("OnDown despawned the live successor — PresenceWatcher contract violated")
+		t.Fatal("OnDown despawned the live successor — DownWatcher contract violated")
 	}
 }
 
@@ -70,8 +70,10 @@ type fakeQuery struct {
 	receivers []actor.ActorID
 }
 
-func (f fakeQuery) MaxSeq(context.Context) (int64, error)                              { return 0, nil }
-func (f fakeQuery) ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error) { return nil, nil }
+func (f fakeQuery) MaxSeq(context.Context) (int64, error) { return 0, nil }
+func (f fakeQuery) ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error) {
+	return nil, nil
+}
 func (f fakeQuery) OpenRequestsForActor(context.Context, actor.ActorID) ([]storespec.StoredRow, error) {
 	return f.reqs, nil
 }
@@ -113,7 +115,7 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if fc.count() == 0 {
-		t.Fatal("presence-down closure NOT materialised — OnDown wrote no terminal (black hole regression)")
+		t.Fatal("death-edge closure NOT materialised — OnDown wrote no terminal (black hole regression)")
 	}
 	term := fc.written[0]
 	if term.Kind != message.KindResponse {
@@ -135,7 +137,7 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 // level scan) closes a CLEAN-despawned actor's inbound open request WITHOUT the
 // caller doing anything (F5: Despawn carries no "callers MUST collapse before"
 // obligation). A clean despawn fires NO death edge — only the level scan, which
-// finds the open request's receiver absent from presence and materialises
+// finds the open request's receiver absent from liveness and materialises
 // receiver_unavailable.
 func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
 	req := message.Envelope{
@@ -189,8 +191,10 @@ func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
 // closed → every caller is a black hole). The watcher MUST NOT swallow it.
 type errQuery struct{}
 
-func (errQuery) MaxSeq(context.Context) (int64, error)                              { return 0, nil }
-func (errQuery) ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error) { return nil, nil }
+func (errQuery) MaxSeq(context.Context) (int64, error) { return 0, nil }
+func (errQuery) ReadAfterSeq(context.Context, int64, int) ([]storespec.StoredRow, error) {
+	return nil, nil
+}
 func (errQuery) OpenRequestsForActor(context.Context, actor.ActorID) ([]storespec.StoredRow, error) {
 	return nil, errors.New("store down")
 }

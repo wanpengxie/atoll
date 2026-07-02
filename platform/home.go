@@ -8,8 +8,8 @@ import (
 	"time"
 
 	"github.com/wanpengxie/ActOS/lib/channelkit"
+	"github.com/wanpengxie/ActOS/platform/internal/devicepresence"
 	"github.com/wanpengxie/ActOS/platform/internal/link"
-	presencefold "github.com/wanpengxie/ActOS/platform/internal/presence"
 	"github.com/wanpengxie/ActOS/platform/internal/sysactor"
 	"github.com/wanpengxie/ActOS/platform/internal/tap"
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -35,16 +35,16 @@ type HomeConfig struct {
 // the package doc —裸 Runtime/Deliverer/Membership/Registry never escape it (装配
 // 只交钥匙). The app layer owns HTTP/transport; Home is pure Go.
 type Home struct {
-	channelID channelpkg.ID
-	minter    harness.Minter
-	channel   *channelkit.Channel
-	cs        *runtime.ChannelStores
-	signal    *tap.Signal
-	delivery  *tap.Pump
-	links     *link.Acceptor
-	presence  *presencefold.Fold
-	logger    *slog.Logger
-	nowMs     func() int64
+	channelID  channelpkg.ID
+	minter     harness.Minter
+	channel    *channelkit.Channel
+	cs         *runtime.ChannelStores
+	signal     *tap.Signal
+	delivery   *tap.Pump
+	links      *link.Acceptor
+	deviceFold *devicepresence.Fold
+	logger     *slog.Logger
+	nowMs      func() int64
 
 	// reconcileStop tears down the closure reconciler ticker (level backstop).
 	reconcileStop context.CancelFunc
@@ -133,15 +133,15 @@ func Open(cfg HomeConfig) (*Home, error) {
 		}
 	}
 
-	// 5.5 Presence fold (L3 device presence): folds actor-source obs PUSH edges
+	// 5.5 Device-presence fold (L3): folds actor-source obs PUSH edges
 	//     into a volatile per-actor level (in-memory; never persisted), decays to
 	//     unknown on the actor's death edge (link-down cascade). Built BEFORE
 	//     channelkit so the system cell can read it (sysactor observes L1/L2/L3);
-	//     registered as a presence watcher + per-actor obs watcher below.
-	presence := presencefold.New(logger)
+	//     registered as a down watcher + per-actor obs watcher below.
+	deviceFold := devicepresence.New(logger)
 
 	// 6. channelkit: actorrt runtime + sysactor + death-edge wiring. The system
-	//    cell is built against the LIVE runtime (factory) — its presence Stat seam
+	//    cell is built against the LIVE runtime (factory) — its liveness Stat seam
 	//    reads the real runtime at construction, no back-filled pointer.
 	clock := func() time.Time { return time.UnixMilli(nowMs()) }
 	channel := channelkit.New(channelkit.Config{
@@ -152,8 +152,8 @@ func Open(cfg HomeConfig) (*Home, error) {
 				Writer:   systemPen,
 				Lookup:   cs.Requests,
 				Clock:    clock,
-				Stat:     &runtimePresenceAdapter{rt: rt},
-				Device:   presence,
+				Stat:     &runtimeLivenessAdapter{rt: rt},
+				Device:   deviceFold,
 			})
 		},
 		SystemPen:    systemPen,
@@ -175,26 +175,26 @@ func Open(cfg HomeConfig) (*Home, error) {
 	delivery := tap.NewPump(signal, cs.Query, from, deliver, logger)
 	delivery.Start()
 
-	// 7.5 Register the presence fold as a global presence watcher (so an actor's
+	// 7.5 Register the device-presence fold as a global down watcher (so an actor's
 	//     death edge decays its L3 to unknown — the link-down cascade). Per-actor
 	//     obs registration happens at attach (Acceptor below).
-	channel.Cells().WatchPresence(presence)
+	channel.Cells().WatchDown(deviceFold)
 
 	// 8. Build the link acceptor (physical layer: WS mux + per-actor ipc streams
 	//    + lease judgement for attached computes). It folds each attached actor's
-	//    obs PUSH into the presence fold (per-actor WatchObs at attach).
+	//    obs PUSH into the device-presence fold (per-actor WatchObs at attach).
 	links := link.NewAcceptor(link.Config{
 		Minter:     minter,
 		Runtime:    channel.Cells(),
 		Membership: cs.Membership,
 		ChannelID:  cfg.ChannelID,
 		Logger:     logger,
-		ObsWatcher: presence,
+		ObsWatcher: deviceFold,
 	})
 
 	// 9. Closure reconciler (level backstop). Run one sweep at startup — this is
 	//    the home-restart recovery path (#5): an open request whose receiver is
-	//    absent because its presence predates this process gets closed now, not
+	//    absent because its embodiment predates this process gets closed now, not
 	//    held forever. Then a low-frequency ticker keeps it as a safety net for
 	//    any lost death edge. The death edge (OnDown) remains the lossy fast-path.
 	channel.Reconcile(ctx)
@@ -227,7 +227,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		signal:        signal,
 		delivery:      delivery,
 		links:         links,
-		presence:      presence,
+		deviceFold:    deviceFold,
 		logger:        logger,
 		nowMs:         nowMs,
 		reconcileStop: reconcileStop,
@@ -236,12 +236,12 @@ func Open(cfg HomeConfig) (*Home, error) {
 }
 
 // View returns the read-only observation set (ReadAfterSeq / MaxSeq /
-// ListActors / daemon link-presence). It carries no写 capability — observation
-// only. The host (app) reads presence through here OUT-OF-BAND (no message, no
+// ListActors / daemon attachment). It carries no写 capability — observation
+// only. The host (app) reads these projections OUT-OF-BAND (no message, no
 // truth-log write) — UI status polling must not pollute the log; in-universe
 // actors instead ask the system actor by message (that path is logged).
 func (h *Home) View() View {
-	return View{query: h.cs.Query, registry: h.cs.Registry, links: h.links, presence: h.presence}
+	return View{query: h.cs.Query, registry: h.cs.Registry, links: h.links, deviceFold: h.deviceFold}
 }
 
 // Spawn admits one actor into the channel as durable membership truth and, when
@@ -259,11 +259,11 @@ func (h *Home) View() View {
 // else a cell that writes on construction hits step 4 (sender not yet registered).
 // "welded at birth" must not become "pen first, then register".
 //
-// nil-guard: factory == nil = membership-ONLY (a presence-less member, e.g. a
+// nil-guard: factory == nil = membership-ONLY (a cell-less member, e.g. a
 // human user who is a member but has no cell). No Pen is Minted and no cell is
-// placed — Minting/placing a cell for a presence-less member would be wasted (and
-// passing nil to Mint→factory would NPE). Membership ≠ presence is the substrate
-// truth; the cell, if any, is the presence layer on top. A pre-existing row (server
+// placed — Minting/placing a cell for a cell-less member would be wasted (and
+// passing nil to Mint→factory would NPE). Membership ≠ embodiment is the substrate
+// truth; the cell, if any, is the embodiment layer on top. A pre-existing row (server
 // restart) is reused — the live instance rebinds.
 func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, factory func(harness.Pen) actorrt.Actor) error {
 	if id == "" {
@@ -343,26 +343,26 @@ func (h *Home) Close() error {
 // (ReadAfterSeq), head cursor (MaxSeq), and active actor roster (ListActors). It
 // holds only read interfaces — there is no write path through a View.
 type View struct {
-	query    storespec.MessageQuery
-	registry storespec.Registry
-	links    *link.Acceptor
-	presence *presencefold.Fold
+	query      storespec.MessageQuery
+	registry   storespec.Registry
+	links      *link.Acceptor
+	deviceFold *devicepresence.Fold
 }
 
 // DevicePresence returns the latest opaque L3 device-presence snapshot an actor
 // pushed (via the obs axis), folded read-time. known=false = UNKNOWN (the actor
 // never reported, or its link dropped and the fold decayed it) — NOT offline.
-// The caller decodes the bytes via introspect.ParsePresence. Advisory only;
+// The caller decodes the bytes via introspect.ParseDevicePresence. Advisory only;
 // authoritative reachability is send→terminal.
 func (v View) DevicePresence(id actor.ActorID) (snapshot []byte, known bool) {
-	if v.presence == nil {
+	if v.deviceFold == nil {
 		return nil, false
 	}
-	return v.presence.Device(id)
+	return v.deviceFold.Device(id)
 }
 
 // IsAttached reports whether daemon (compute) id has a live attach right now
-// (L1 link presence) — read-time, derived from the link acceptor, never stored.
+// (L0 attachment) — read-time, derived from the link acceptor, never stored.
 func (v View) IsAttached(daemonID string) bool {
 	if v.links == nil {
 		return false
@@ -394,14 +394,14 @@ func (v View) ListActors(ctx context.Context) ([]storespec.Record, error) {
 }
 
 // ---------------------------------------------------------------------------
-// runtimePresenceAdapter -- bridges actorrt.Runtime.Stat -> sysactor.PresenceStat
+// runtimeLivenessAdapter -- bridges actorrt.Runtime.Stat -> sysactor.LivenessStat
 // ---------------------------------------------------------------------------
 
-type runtimePresenceAdapter struct {
+type runtimeLivenessAdapter struct {
 	rt *actorrt.Runtime
 }
 
-func (a *runtimePresenceAdapter) Stat(id actor.ActorID) (startedAt time.Time, present bool) {
+func (a *runtimeLivenessAdapter) Stat(id actor.ActorID) (startedAt time.Time, present bool) {
 	if a.rt == nil {
 		return time.Time{}, false
 	}

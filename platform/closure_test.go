@@ -25,7 +25,7 @@ const closureTestChannelID = channel.ID("test-closure")
 // ---------------------------------------------------------------------------
 
 // panicOnReceive is a cell that panics on any envelope — simulates abnormal
-// death so the runtime publishes the presence-down edge and the channelkit
+// death so the runtime publishes the down edge and the channelkit
 // OnDown materialises receiver_unavailable (closure author #3).
 type panicOnReceive struct{}
 
@@ -54,7 +54,7 @@ type penCell struct{ pen harness.Pen }
 
 func (penCell) Receive(context.Context, *message.Envelope) error { return nil }
 
-// spawnWithPen admits id as a presence-bearing cell and returns the Pen welded to
+// spawnWithPen admits id as an embodiment-bearing cell and returns the Pen welded to
 // (id, channelID). This is the only legitimate way a platform_test obtains a pen:
 // through the same Spawn(factory) admission an agent/tool/human goes through.
 func spawnWithPen(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor.Kind) harness.Pen {
@@ -88,7 +88,7 @@ func newClosureHome(t *testing.T) *platform.Home {
 	return ch
 }
 
-// registerActor seeds a presence-less membership row so the harness accepts
+// registerActor seeds a cell-less membership row so the harness accepts
 // envelopes from / addressed to this actor (Spawn with nil impl = membership
 // only).
 func registerActor(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor.Kind) {
@@ -162,7 +162,7 @@ func pollForTerminal(t *testing.T, ch *platform.Home, parentID message.ID, timeo
 
 // TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable is the
 // platform-level integration test for closure author #3: a cell panics ->
-// presence-down edge -> channelkit OnDown -> MaterialiseReceiverUnavailable
+// down edge -> channelkit OnDown -> MaterialiseReceiverUnavailable
 // writes a system-authored receiver_unavailable terminal into truth.
 //
 // The full commit pipeline is exercised: write -> harness -> sqlite append ->
@@ -305,5 +305,3 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 		t.Fatalf("terminal payload.reason=%q, want unanswered_timeout", payload.Reason)
 	}
 }
-
-

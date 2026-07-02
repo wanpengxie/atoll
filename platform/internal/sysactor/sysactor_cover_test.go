@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/ActOS/protocol/actor"
-	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/lib/introspect"
 	"github.com/wanpengxie/ActOS/platform/internal/sysactor"
+	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
@@ -191,7 +191,7 @@ func TestRespondReserved_NotFound(t *testing.T) {
 	}
 }
 
-// TestObs_NilStat proves the nil-seam contract: with no presence seam wired,
+// TestObs_NilStat proves the nil-seam contract: with no liveness seam wired,
 // actor.list composes everyone absent with zero uptime (advisory, never a gate).
 func TestObs_NilStat(t *testing.T) {
 	reg := fakeRegistry{rows: []storespec.Record{

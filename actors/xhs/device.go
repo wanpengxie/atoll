@@ -35,10 +35,10 @@ import (
 //
 // Device presence is tracked internally (conn==nil ⇒ offline ⇒ Receive fast-
 // fails device_offline) AND pushed on its up/down edges via the actor-source obs
-// PUSH axis (owner.publishPresence → ActorContext.PublishObs, D7). That is
+// PUSH axis (owner.publishDevicePresence → ActorContext.PublishObs, D7). That is
 // OUT-OF-BAND obs (non-truth), NOT a channel event / truth-log entry — the home
 // folds it into a volatile L3 level (advisory; authoritative reachability stays
-// send→terminal). See actor.go publishPresence.
+// send→terminal). See actor.go publishDevicePresence.
 //
 // Liveness limit (v1): this endpoint serves a LOCAL loopback extension, so a
 // dropped socket surfaces as a ReadJSON error and flips offline. Ping/pong
@@ -111,7 +111,7 @@ func newDevice(owner *Actor, addr string, clock func() time.Time, reaperInterval
 }
 
 // online reports whether a device connection is currently live (conn != nil).
-// This is the read side of the same presence the dispatch path fast-fails on;
+// This is the read side of the same device presence the dispatch path fast-fails on;
 // it is the actor.status snapshot's one fact. Locked read — the conn pointer is
 // mutated by handleAccept/readLoop/dropConn/stop on other goroutines.
 func (d *device) online() bool {
@@ -215,7 +215,7 @@ func (d *device) handleAccept(w http.ResponseWriter, r *http.Request) {
 	d.mu.Unlock()
 
 	d.logger.Info("xhs.device.online", "actor", string(d.owner.actorID))
-	d.owner.publishPresence(true)
+	d.owner.publishDevicePresence(true)
 	go d.readLoop(conn)
 }
 
@@ -244,7 +244,7 @@ func (d *device) readLoop(conn *websocket.Conn) {
 	if live {
 		_ = conn.Close()
 		d.logger.Info("xhs.device.offline", "actor", string(d.owner.actorID))
-		d.owner.publishPresence(false)
+		d.owner.publishDevicePresence(false)
 	}
 }
 
@@ -341,7 +341,7 @@ func (d *device) dropConn(conn *websocket.Conn) {
 	d.mu.Unlock()
 	_ = conn.Close()
 	d.logger.Info("xhs.device.offline", "actor", string(d.owner.actorID))
-	d.owner.publishPresence(false)
+	d.owner.publishDevicePresence(false)
 }
 
 // reaper sweeps the in-flight table for past-deadline requests and fails them

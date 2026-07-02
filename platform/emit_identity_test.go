@@ -41,7 +41,7 @@ func TestEmitIdentity_HostWeldsAuthorFromBoundID(t *testing.T) {
 	registerActor(t, ch, victimID, actor.KindHuman)
 
 	// Real home↔daemon link over httptest: the daemon attaches tool:x and gets a
-	// real port presence bound to that authenticated id at the handshake.
+	// real port embodiment bound to that authenticated id at the handshake.
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ch.ServeAttach(w, r, "daemon-1")
 	}))

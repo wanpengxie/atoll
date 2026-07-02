@@ -131,7 +131,7 @@ func migrate(db *sql.DB) error {
 		return err
 	}
 	// Drop the dead daemon liveness columns (status/hostname/platform/
-	// last_heartbeat): presence is volatile L1 link state, read live from the
+	// last_heartbeat): attachment is volatile L0 link state, read live from the
 	// platform View — never a persisted directory column (it only ever lied).
 	// Best-effort per column: a fresh DB created above never had them (no such
 	// column → ignore); an existing dev DB gets them dropped, rows preserved.

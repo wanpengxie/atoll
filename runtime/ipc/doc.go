@@ -1,6 +1,6 @@
 // Package ipc defines the port wire protocol — the length-prefixed JSON
 // byte-stream contract between the substrate host side (runtime/actorrt port
-// presence) and one out-of-process actor. It is the smallest shared surface so
+// embodiment) and one out-of-process actor. It is the smallest shared surface so
 // both ends agree on frame kinds and payload schemas:
 // handshake / handshake_ack / deliver / control / emit / emit_ack / down.
 //

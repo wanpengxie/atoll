@@ -1,11 +1,11 @@
 // Package platform is the channel-home and attached-compute assembly: it puts the
 // position-blind logical world (substrate) into the positioned physical world.
-// home.go is the channel-home assembly root — it owns truth and presence wiring
+// home.go is the channel-home assembly root — it owns truth and embodiment wiring
 // for one channel and delivers a narrow capability set (not an organ bag):
 //
 //	Open(cfg) → *Home
 //	View()  View              — read-only observation set (ReadAfterSeq/MaxSeq/ListActors)
-//	Spawn(ctx,id,kind,factory) — in-process cell placement (membership + Mint welded Pen + spawn); factory==nil = presence-less member
+//	Spawn(ctx,id,kind,factory) — in-process cell placement (membership + Mint welded Pen + spawn); factory==nil = cell-less member
 //	ServeAttach(w,r,daemonID) — attach受理面 (app hands an upgraded WS here)
 //	Subscribe() (<-chan struct{}, func()) — subscription注册面 (client push)
 //	Close() error

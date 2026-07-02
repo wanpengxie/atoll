@@ -9,15 +9,15 @@ const (
 	// request payload is a DescribeRequest: empty for the full self-answer,
 	// or with Type set for a single-type answer.
 	QueryDescribe = "actor.describe"
-	// QueryList — who is in this channel: the membership ∧ presence directory.
+	// QueryList — who is in this channel: the membership ∧ liveness directory.
 	// This is the AUTHORITATIVE definition of the formula (durable registry
-	// membership composed with volatile presence); other sites reference it
+	// membership composed with volatile liveness); other sites reference it
 	// rather than restating it.
 	QueryList = "actor.list"
 )
 
 // NOTE: "Is this actor serviceable for one request right now" is NOT actor.status
-// — that remains the OUTCOME of send→terminal (the substrate presence-down edge
+// — that remains the OUTCOME of send→terminal (the substrate down edge
 // materialises receiver_unavailable when the actor is gone). actor.status
 // (QueryStatus, status.go) is the additive, pain-driven self-answer for an actor
 // whose non-trivial LIVE state (e.g. a device adapter's attach online/offline
@@ -30,32 +30,32 @@ type DescribeRequest struct {
 	Type string `json:"type,omitempty"`
 }
 
-// ObsPresence is the conventional actor-source obs KIND a device-bearing adapter
+// ObsDevicePresence is the conventional actor-source obs KIND a device-bearing adapter
 // PUSHes (PublishObs) to surface its external device's liveness — a best-effort,
 // advisory hint, NEVER authoritative reachability (that stays send→terminal).
 // Opaque to substrate/platform (守结构不守词汇); shared by the publishing adapter
 // and the consuming app/view ONLY. **Absence of any value = unknown, NOT offline**
 // — many devices have no liveness signal, so an adapter that cannot observe simply
 // never publishes.
-const ObsPresence = "presence"
+const ObsDevicePresence = "device_presence"
 
-// Presence is the conventional obs VALUE for ObsPresence: the adapter's best-
+// DevicePresence is the conventional obs VALUE for ObsDevicePresence: the adapter's best-
 // effort view of whether its external device is connected right now. The third
 // state — unknown — is the ABSENCE of any value (never published / decayed).
-type Presence struct {
+type DevicePresence struct {
 	Online bool `json:"online"`
 }
 
-// MarshalPresence encodes an online/offline edge for PublishObs.
-func MarshalPresence(online bool) []byte {
-	b, _ := json.Marshal(Presence{Online: online})
+// MarshalDevicePresence encodes an online/offline edge for PublishObs.
+func MarshalDevicePresence(online bool) []byte {
+	b, _ := json.Marshal(DevicePresence{Online: online})
 	return b
 }
 
-// ParsePresence decodes a folded presence snapshot; ok=false on empty/malformed.
-func ParsePresence(raw []byte) (p Presence, ok bool) {
+// ParseDevicePresence decodes a folded device-presence snapshot; ok=false on empty/malformed.
+func ParseDevicePresence(raw []byte) (p DevicePresence, ok bool) {
 	if len(raw) == 0 || json.Unmarshal(raw, &p) != nil {
-		return Presence{}, false
+		return DevicePresence{}, false
 	}
 	return p, true
 }
@@ -116,7 +116,7 @@ func ParseDescribeRequest(payload []byte) (DescribeRequest, error) {
 }
 
 // CatalogEntry is one row of the actor.list channel directory: membership
-// (registry truth) ∧ presence (volatile, read from the substrate's authoritative
+// (registry truth) ∧ liveness (volatile, read from the substrate's authoritative
 // obs). No readiness axis — whether an actor can service a request is the OUTCOME
 // of send→terminal, not a field here. No capability axis either — types and
 // payload docs are the actor's own self-answer (actor.describe), not directory
@@ -136,7 +136,7 @@ type CatalogEntry struct {
 	// no liveness signal, or decayed) — NOT offline. Advisory only (authoritative
 	// reachability is send→terminal). Distinct from Present (L2: is the cell/port
 	// bound here): an actor can be Present yet its external device offline.
-	Device *Presence `json:"device,omitempty"`
+	Device *DevicePresence `json:"device,omitempty"`
 }
 
 // Catalog is the actor.list response: the channel-wide directory.

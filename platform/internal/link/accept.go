@@ -21,7 +21,7 @@ import (
 
 // errUndeclaredActor is the resolve verdict for an actor stream whose lease id
 // is not in the link's attach declaration set (an actor the daemon never
-// declared may not bind a presence).
+// declared may not bind an embodiment).
 var errUndeclaredActor = errors.New("link: actor not in attach declarations")
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -59,7 +59,7 @@ type Acceptor struct {
 	attached   map[string]int
 
 	// obsWatcher folds each attached actor's obs PUSH (L3 device presence) into the
-	// home presence fold; registered per declared actor at attach (the home-side
+	// home device-presence fold; registered per declared actor at attach (the home-side
 	// arm of the actor-source obs axis). nil → no folding. obsReg dedups so a
 	// daemon reconnect does not re-append the same watcher.
 	obsWatcher actorrt.ObsWatcher
@@ -79,7 +79,7 @@ type Config struct {
 	LeasePing  time.Duration
 	LeaseTTL   time.Duration
 	// ObsWatcher (optional) receives each attached actor's obs PUSH via per-actor
-	// WatchObs registration at attach — the home-side arm of the L3 presence fold.
+	// WatchObs registration at attach — the home-side arm of the L3 device-presence fold.
 	ObsWatcher actorrt.ObsWatcher
 }
 
@@ -106,7 +106,7 @@ func NewAcceptor(cfg Config) *Acceptor {
 	}
 }
 
-// markAttached / markDetached / IsAttached / AttachedDaemons are the L1 link-
+// markAttached / markDetached / IsAttached / AttachedDaemons are the L0 link-
 // attachment read seam: the Acceptor authoritatively holds which computes have a
 // live attach right now (it owns the connections + lease). markAttached is
 // called once per accepted link (after attach success); markDetached once when
@@ -132,7 +132,7 @@ func (a *Acceptor) markDetached(id string) {
 	a.attachedMu.Unlock()
 }
 
-// IsAttached reports whether compute id has a live attach right now (L1).
+// IsAttached reports whether compute id has a live attach right now (L0).
 func (a *Acceptor) IsAttached(id string) bool {
 	a.attachedMu.Lock()
 	defer a.attachedMu.Unlock()
@@ -204,8 +204,8 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// onOpen: each peer-opened actor stream runs native ipc — hand it straight to
 	// runtime.Attach. The substrate does the ipc handshake on the stream, resolves
 	// the actor (校验 it is in the declared set), and registers it as a port
-	// presence. EOF on the stream (OpClose or link teardown) = the port reads EOF
-	// = presence-down edge. The emitSink is the home write门 (the same notify pen
+	// embodiment. EOF on the stream (OpClose or link teardown) = the port reads EOF
+	// = down edge. The emitSink is the home write门 (the same notify pen
 	// a local cell writes with); the authoritative WriteResult flows back as the
 	// ipc EmitAck (writer contract not downgraded across the wire).
 	onOpen := func(s *stream) {
@@ -270,7 +270,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 // allowed set, and reply. Membership semantics照旧: a member row is durable; a
 // daemon detaching does NOT remove it (membership ≠ attachment).
 // handleAttach processes the stream-0 attach and reports (computeID, accepted)
-// so the caller can count L1 link attachment only on success.
+// so the caller can count L0 link attachment only on success.
 func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed map[actor.ActorID]bool) (string, bool) {
 	computeID := att.ComputeID
 	if daemonID != "" {
@@ -364,7 +364,7 @@ func (a *Acceptor) emitSink() actorrt.EmitSink {
 // CancelRequest reaches the request-scope of cancel(scope) across the wire: the
 // home (where a request's caller lives) tells the daemon hosting `actor` to
 // cancel the reqCtx its cell is running `requestID` under. The bound port
-// presence writes a KindCancel frame down that actor's stream; the daemon fires
+// embodiment writes a KindCancel frame down that actor's stream; the daemon fires
 // the matching reqCtx off its cell goroutine. No-op if the actor is not a hosted
 // port here or the request already closed — cancel is a best-effort hint, the
 // caller's closure owns the terminal. The real producer (a caller actively

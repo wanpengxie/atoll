@@ -57,29 +57,29 @@ func TestState_CRUDLifecycle(t *testing.T) {
 	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	val, present, err := f.state.Read(ctx, "actor:a", "cursor")
-	if err != nil || !present {
-		t.Fatalf("Read after create: present=%v err=%v", present, err)
+	val, exists, err := f.state.Read(ctx, "actor:a", "cursor")
+	if err != nil || !exists {
+		t.Fatalf("Read after create: exists=%v err=%v", exists, err)
 	}
 	if string(val) != "v1" {
 		t.Errorf("value=%q want v1", val)
 	}
 
-	// Write overwrites an existing row (present=true).
-	present, err = f.state.Write(ctx, "actor:a", "cursor", []byte("v2"))
-	if err != nil || !present {
-		t.Fatalf("Write existing: present=%v err=%v", present, err)
+	// Write overwrites an existing row (exists=true).
+	exists, err = f.state.Write(ctx, "actor:a", "cursor", []byte("v2"))
+	if err != nil || !exists {
+		t.Fatalf("Write existing: exists=%v err=%v", exists, err)
 	}
 	if val, _, _ := f.state.Read(ctx, "actor:a", "cursor"); string(val) != "v2" {
 		t.Errorf("value after write=%q want v2", val)
 	}
 
-	// Delete removes the row (present=true), then it is gone.
-	present, err = f.state.Delete(ctx, "actor:a", "cursor")
-	if err != nil || !present {
-		t.Fatalf("Delete existing: present=%v err=%v", present, err)
+	// Delete removes the row (exists=true), then it is gone.
+	exists, err = f.state.Delete(ctx, "actor:a", "cursor")
+	if err != nil || !exists {
+		t.Fatalf("Delete existing: exists=%v err=%v", exists, err)
 	}
-	if _, present, _ := f.state.Read(ctx, "actor:a", "cursor"); present {
+	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
 		t.Error("row must be gone after delete")
 	}
 }
@@ -108,26 +108,26 @@ func TestState_CreateCollisionSentinel(t *testing.T) {
 // coordinate the door welds at mint, and empty ids are rejected at the door's
 // ingress. store-not-validate.)
 
-// --- present semantics on absent rows ----------------------------------------
+// --- exists semantics on absent rows ----------------------------------------
 
 func TestState_PresentFalseOnAbsent(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
 
-	if _, present, err := f.state.Read(ctx, "actor:ghost", "k"); err != nil || present {
-		t.Errorf("Read absent: present=%v err=%v want false/nil", present, err)
+	if _, exists, err := f.state.Read(ctx, "actor:ghost", "k"); err != nil || exists {
+		t.Errorf("Read absent: exists=%v err=%v want false/nil", exists, err)
 	}
-	// Write never creates: a missing row is present=false (door → not_found).
-	if present, err := f.state.Write(ctx, "actor:ghost", "k", []byte("x")); err != nil || present {
-		t.Errorf("Write absent: present=%v err=%v want false/nil", present, err)
+	// Write never creates: a missing row is exists=false (door → not_found).
+	if exists, err := f.state.Write(ctx, "actor:ghost", "k", []byte("x")); err != nil || exists {
+		t.Errorf("Write absent: exists=%v err=%v want false/nil", exists, err)
 	}
 	// The failed write must NOT have created a row.
-	if _, present, _ := f.state.Read(ctx, "actor:ghost", "k"); present {
+	if _, exists, _ := f.state.Read(ctx, "actor:ghost", "k"); exists {
 		t.Error("Write on absent row must not create it")
 	}
-	// Delete on a missing row is honestly not-found (present=false), idempotent.
-	if present, err := f.state.Delete(ctx, "actor:ghost", "k"); err != nil || present {
-		t.Errorf("Delete absent: present=%v err=%v want false/nil", present, err)
+	// Delete on a missing row is honestly not-found (exists=false), idempotent.
+	if exists, err := f.state.Delete(ctx, "actor:ghost", "k"); err != nil || exists {
+		t.Errorf("Delete absent: exists=%v err=%v want false/nil", exists, err)
 	}
 }
 
@@ -137,33 +137,33 @@ func TestState_NullBytesResolvedButEmpty(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
 
-	// create(nil initial) → a present row whose bytes are NULL = resolved-but-
-	// empty: present=true, value=nil (door maps to Found=false).
+	// create(nil initial) → an existing row whose bytes are NULL = resolved-but-
+	// empty: exists=true, value=nil (door maps to Found=false).
 	if err := f.state.Create(ctx, "actor:a", "empty", nil); err != nil {
 		t.Fatalf("Create nil: %v", err)
 	}
-	val, present, err := f.state.Read(ctx, "actor:a", "empty")
+	val, exists, err := f.state.Read(ctx, "actor:a", "empty")
 	if err != nil {
 		t.Fatalf("Read: %v", err)
 	}
-	if !present {
-		t.Error("NULL-bytes row must still be present (the row exists)")
+	if !exists {
+		t.Error("NULL-bytes row must still exist")
 	}
 	if val != nil {
 		t.Errorf("NULL-bytes value=%q want nil", val)
 	}
 
-	// An empty non-nil blob is a VALUE, not resolved-but-empty: present=true,
+	// An empty non-nil blob is a VALUE, not resolved-but-empty: exists=true,
 	// value=[]byte{} (non-nil, len 0) — must not collapse into the NULL case.
 	if err := f.state.Create(ctx, "actor:a", "blank", []byte{}); err != nil {
 		t.Fatalf("Create blank: %v", err)
 	}
-	val, present, err = f.state.Read(ctx, "actor:a", "blank")
+	val, exists, err = f.state.Read(ctx, "actor:a", "blank")
 	if err != nil {
 		t.Fatalf("Read blank: %v", err)
 	}
-	if !present || val == nil || len(val) != 0 {
-		t.Errorf("empty-blob row: present=%v val=%#v want present, non-nil empty value", present, val)
+	if !exists || val == nil || len(val) != 0 {
+		t.Errorf("empty-blob row: exists=%v val=%#v want existing row, non-nil empty value", exists, val)
 	}
 }
 
@@ -213,14 +213,14 @@ func TestState_CascadeClearedOnDeregister(t *testing.T) {
 	}
 
 	// owner:a state is gone (both keys).
-	if _, present, _ := f.state.Read(ctx, "actor:a", "cursor"); present {
+	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
 		t.Error("owner:a cursor must be cascade-cleared on deregister")
 	}
-	if _, present, _ := f.state.Read(ctx, "actor:a", "checkpoint"); present {
+	if _, exists, _ := f.state.Read(ctx, "actor:a", "checkpoint"); exists {
 		t.Error("owner:a checkpoint must be cascade-cleared on deregister")
 	}
 	// owner:b untouched.
-	if _, present, _ := f.state.Read(ctx, "actor:b", "cursor"); !present {
+	if _, exists, _ := f.state.Read(ctx, "actor:b", "cursor"); !exists {
 		t.Error("owner:b state must NOT be cleared by owner:a deregister")
 	}
 }
@@ -240,7 +240,7 @@ func TestState_NoCascadeOnNoOpDeregister(t *testing.T) {
 	if err := f.reg.Deregister(ctx, "actor:ghost", 1); err != nil {
 		t.Fatalf("Deregister ghost must be no-op: %v", err)
 	}
-	if _, present, _ := f.state.Read(ctx, "actor:a", "cursor"); !present {
+	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); !exists {
 		t.Error("no-op deregister must not clear another actor's state")
 	}
 
@@ -249,7 +249,7 @@ func TestState_NoCascadeOnNoOpDeregister(t *testing.T) {
 	if err := f.reg.Deregister(ctx, "actor:a", 2); err != nil {
 		t.Fatalf("Deregister a: %v", err)
 	}
-	if _, present, _ := f.state.Read(ctx, "actor:a", "cursor"); present {
+	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
 		t.Error("owner:a state must be cleared by real deregister")
 	}
 	if err := f.reg.Deregister(ctx, "actor:a", 3); err != nil {
@@ -276,7 +276,7 @@ func TestState_CascadeClearedOnMemberRemove(t *testing.T) {
 		[]storespec.MemberActorRemove{{ID: "actor:a", At: 200}}); err != nil {
 		t.Fatalf("remove member: %v", err)
 	}
-	if _, present, _ := f.state.Read(ctx, "actor:a", "cursor"); present {
+	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
 		t.Error("member state must be cascade-cleared on member remove")
 	}
 
@@ -311,7 +311,7 @@ func TestState_ChannelScopedResourcesSurviveDeregister(t *testing.T) {
 	}
 
 	// actor-scoped state gone...
-	if _, present, _ := f.state.Read(ctx, "actor:a", "cursor"); present {
+	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
 		t.Error("actor-scoped state must be cleared on deregister")
 	}
 	// ...but the channel-scoped resource survives (non-lossy).

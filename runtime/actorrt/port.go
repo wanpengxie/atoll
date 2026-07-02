@@ -45,14 +45,14 @@ type ResolveFunc func(leaseID string) (actor.ActorID, error)
 // like a cell's bounded inbox.
 const portSendQueue = 64
 
-// port is one OUT-OF-PROCESS actor presence: the substrate-side endpoint of a
+// port is one OUT-OF-PROCESS actor embodiment: the substrate-side endpoint of a
 // byte-stream connection to a remote actor (Erlang-port model — the connection
 // IS the actor). It mirrors cell:
 //   - Deliver enqueues into a bounded send queue drained to the wire; a full
 //     queue returns ErrMailboxFull (non-blocking, like cell.Deliver).
 //   - the read loop relays the remote's EMIT frames to the injected emit
 //     callback and turns DOWN / EOF / unknown-kind into the SAME self-eviction +
-//     presence-down edge a cell publishes.
+//     down edge a cell publishes.
 //
 // Death never self-joins (a goroutine cannot wait on its own exit): die()
 // cancels + closes the conn to unblock the loops and self-evicts via onExit;
@@ -77,14 +77,14 @@ type port struct {
 	// pointer-identity-gate the fanout (a replaced predecessor cannot publish obs
 	// attributed to a same-id successor). nil → inbound obs is dropped (no
 	// consumer). Mirrors cell.onObs.
-	onObs  func(actor.ActorID, presence, ObsKind, ObsValue)
-	onExit func(actor.ActorID, presence)
+	onObs  func(actor.ActorID, embodiment, ObsKind, ObsValue)
+	onExit func(actor.ActorID, embodiment)
 	logger *slog.Logger
 
-	// live is the per-incarnation WHEN-validity atomic (presence contract), set
+	// live is the per-incarnation WHEN-validity atomic (embodiment contract), set
 	// true at Attach go-live and false on teardown. The home-side port death-write
 	// gate that would consult it is §3.6 (deferred); the field exists so port
-	// satisfies the presence interface and reports honestly if probed.
+	// satisfies the embodiment interface and reports honestly if probed.
 	live atomic.Bool
 
 	sendq chan *message.Envelope
@@ -112,7 +112,7 @@ type port struct {
 // read runs off-goroutine and newPort selects it against hsCtx; on expiry it
 // closes the conn (unblocking the read) and returns. parent owns the port's
 // LIFETIME (unchanged); hsCtx owns only this one read.
-func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, onDown func(actor.ActorID, error), onObs func(actor.ActorID, presence, ObsKind, ObsValue), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) (p *port, err error) {
+func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -160,19 +160,19 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 	}
 	ctx, cancel := context.WithCancel(parent)
 	return &port{
-		id:       id,
-		codec:    codec,
-		conn:     conn,
-		emit:     emit,
-		started:  started,
-		ctx:      ctx,
-		cancel:   cancel,
-		onDown:   onDown,
-		onObs:    onObs,
-		onExit:   onExit,
-		logger:   logger,
-		sendq:    make(chan *message.Envelope, portSendQueue),
-		done:     make(chan struct{}),
+		id:      id,
+		codec:   codec,
+		conn:    conn,
+		emit:    emit,
+		started: started,
+		ctx:     ctx,
+		cancel:  cancel,
+		onDown:  onDown,
+		onObs:   onObs,
+		onExit:  onExit,
+		logger:  logger,
+		sendq:   make(chan *message.Envelope, portSendQueue),
+		done:    make(chan struct{}),
 	}, nil
 }
 
@@ -206,18 +206,18 @@ func readHandshakeBounded(hsCtx context.Context, codec *ipc.Codec) (ipc.Frame, e
 	}
 }
 
-// startedAt implements presence: the substrate-stamped bind instant (obs uptime
+// startedAt implements embodiment: the substrate-stamped bind instant (obs uptime
 // source), set at Attach.
 func (p *port) startedAt() time.Time { return p.started }
 
-// isLive implements presence: the lock-free WHEN-validity probe (per-incarnation
+// isLive implements embodiment: the lock-free WHEN-validity probe (per-incarnation
 // atomic). True only between Attach go-live and teardown.
 func (p *port) isLive() bool { return p.live.Load() }
 
-// markDead implements presence: flip the liveness atomic to false (idempotent).
+// markDead implements embodiment: flip the liveness atomic to false (idempotent).
 func (p *port) markDead() { p.live.Store(false) }
 
-// observe implements presence for an out-of-process actor: obs PULL over the
+// observe implements embodiment for an out-of-process actor: obs PULL over the
 // wire is not yet wired (additive — a KindObs round-trip frame), so the port
 // reports ErrObsUnsupported. The 2×2 cell exists; the wire arm is a no-op until
 // a real consumer drives it.
@@ -246,7 +246,7 @@ func (p *port) Deliver(env *message.Envelope) error {
 	}
 }
 
-// cancelRequest implements presence for an out-of-process actor: the
+// cancelRequest implements embodiment for an out-of-process actor: the
 // request-scope of cancel(scope) crossing the wire. It writes a KindCancel frame
 // naming the request directly onto the codec — NOT through the sendq/writeLoop —
 // because cancel is off-loop: it must not queue behind the very deliver work it
@@ -284,10 +284,10 @@ func (p *port) writeLoop() {
 		select {
 		case <-p.ctx.Done():
 			// A cancelled ctx is the actor-scope of cancel(scope): a cancellable
-			// parent (runtime teardown / kill) collapsed this presence. Route it
+			// parent (runtime teardown / kill) collapsed this embodiment. Route it
 			// through die(), not a bare return — die() closeConn (unblocks readLoop,
 			// releases the conn, retracts addressing so a level scan reads "absent")
-			// AND publishes the presence-down edge (lossy wakeup). die()'s stopping
+			// AND publishes the down edge (lossy wakeup). die()'s stopping
 			// guard suppresses the redundant edge when this is an external stop().
 			p.die(p.ctx.Err())
 			return
@@ -382,7 +382,7 @@ func (p *port) readLoop() {
 }
 
 // die makes the port unaddressable (pointer-identity self-eviction) and
-// publishes the presence-down edge exactly once — UNLESS this teardown is an
+// publishes the down edge exactly once — UNLESS this teardown is an
 // external stop() (clean despawn, no closure obligation). It cancels + closes the
 // conn to unblock both loops; it NEVER joins them (stop() does that).
 func (p *port) die(cause error) {
@@ -403,7 +403,7 @@ func (p *port) die(cause error) {
 	})
 }
 
-// initiateStop implements presence: the non-blocking, idempotent SIGNAL half of
+// initiateStop implements embodiment: the non-blocking, idempotent SIGNAL half of
 // teardown (§3.1a) — port already has exactly this shape in die(): it never
 // joins, it self-evicts via onExit, and cause==nil already skips the onDown
 // death edge (the same "clean stop, no closure obligation" semantics stop()
@@ -412,7 +412,7 @@ func (p *port) die(cause error) {
 func (p *port) initiateStop() { p.die(nil) }
 
 // stop is the external teardown: mark stopping (so the loops' die() publishes NO
-// presence-down edge), cancel + close to unblock the loops, then join on done.
+// down edge), cancel + close to unblock the loops, then join on done.
 func (p *port) stop() {
 	p.stopOnce.Do(func() {
 		p.live.Store(false)

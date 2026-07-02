@@ -1,6 +1,6 @@
-// Package link is the platform's cross-machine presence layer (redesign §3.2):
+// Package link is the platform's cross-machine embodiment layer (redesign §3.2):
 // ONE authenticated WS link carries N logical streams, each stream a
-// (channel, actor) presence running the NATIVE port-wire protocol (runtime/ipc)
+// (channel, actor) embodiment running the NATIVE port-wire protocol (runtime/ipc)
 // with a real handshake — stream-on-link is the SAME contract as a local pipe
 // (Erlang-distribution zero-translation discipline). Stream 0 is the link
 // control plane (attach). The home side (accept.go) judges liveness via a

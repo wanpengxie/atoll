@@ -44,7 +44,7 @@
 //
 //   - Device presence is tracked INTERNALLY (an offline device fast-fails
 //     device_offline) but NOT projected as a channel event — there is no
-//     consumer yet and the audience of a presence broadcast is undefined. Emit
+//     consumer yet and the audience of a device-presence broadcast is undefined. Emit
 //     it additively once a consumer + named audience exist.
 //   - The endpoint serves a LOCAL loopback extension, so a dropped socket
 //     surfaces as a read error and flips offline. Ping/pong keepalive + read

@@ -9,12 +9,12 @@ import (
 // ErrParentNotLive is returned by Fork when the parent incarnation is not (or
 // is no longer) live — either the lock-free fast-path check at entry, or the
 // re-check inside the same critical section as the child's go-live (a parent
-// that died during the build window). No child presence is ever inserted or
+// that died during the build window). No child embodiment is ever inserted or
 // started on this path (§3.1).
 var ErrParentNotLive = errors.New("actorrt: parent not live")
 
 // ErrChildIDCollision is returned by Fork when childID already names a live
-// presence. Unlike Spawn (last-go-live-wins replace), a fork collision is a
+// embodiment. Unlike Spawn (last-go-live-wins replace), a fork collision is a
 // HARD failure — fork always mints a fresh identity (§10.2); a colliding
 // childID is a caller bug, not a legitimate replace scenario.
 var ErrChildIDCollision = errors.New("actorrt: child id collision")
@@ -28,15 +28,15 @@ var ErrChildIDCollision = errors.New("actorrt: child id collision")
 // the build window:
 //  1. entry, lock-free (IsLive): parent already dead → fail fast, no wasted
 //     build.
-//  2. go-live, inside r.mu, in the SAME critical section as the presence
-//     insert + ownership-edge append: re-check r.presences[parent.id]==parent.p.
+//  2. go-live, inside r.mu, in the SAME critical section as the embodiment
+//     insert + ownership-edge append: re-check r.embodiments[parent.id]==parent.p.
 //     A parent dying during the (lock-free) build window is caught HERE — its
 //     own death path (removeIf) also takes r.mu, so the two are totally
 //     ordered by r.mu and this check can never miss it. If it fails, the
-//     child's shell is discarded — never inserted into presences, never
+//     child's shell is discarded — never inserted into embodiments, never
 //     started — so Fork never produces an orphan needing a "revert" step.
 //
-// childID colliding with an existing presence is a HARD failure
+// childID colliding with an existing embodiment is a HARD failure
 // (ErrChildIDCollision) — NOT Spawn's replace semantics.
 func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, build func(Incarnation) Actor) (Incarnation, error) {
 	if !r.IsLive(parent) { // ① fast-path, lock-free
@@ -46,20 +46,20 @@ func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, build func(Inc
 	c.impl = build(Incarnation{id: childID, p: c}) // outside the lock, same discipline as Spawn.
 
 	r.mu.Lock()
-	if _, exists := r.presences[childID]; exists { // collision = hard fail
+	if _, exists := r.embodiments[childID]; exists { // collision = hard fail
 		r.mu.Unlock()
 		return Incarnation{}, ErrChildIDCollision
 	}
-	if r.presences[parent.id] != parent.p { // ② same critical section re-check
+	if r.embodiments[parent.id] != parent.p { // ② same critical section re-check
 		r.mu.Unlock() // not passed: do not insert, do not go-live.
 		return Incarnation{}, ErrParentNotLive
 	}
-	r.presences[childID] = c
+	r.embodiments[childID] = c
 	// Prune already-not-live entries out of r.owned[parent.p] BEFORE appending
 	// the new child (§3.1a v2.1 fix): a long-lived parent that forks many
 	// short-lived children would otherwise grow this slice without bound —
 	// each already-dead child's OWN initiateStop/death path already unhooked it
-	// from r.presences, but the stale pointer would linger here until the
+	// from r.embodiments, but the stale pointer would linger here until the
 	// parent itself dies. Amortised into the regular Fork path; no separate
 	// sweep/GC.
 	live := r.owned[parent.p][:0]
@@ -135,7 +135,7 @@ type SpawnHandle interface {
 }
 
 // ErrNotOwner is returned by DespawnChild when childID does not name a
-// presence owned by the given parent incarnation — either no such presence
+// embodiment owned by the given parent incarnation — either no such embodiment
 // exists, or it exists but is owned by a different parent (or not fork-owned
 // at all). Both cases collapse to the same rejection: a by-id caller gets no
 // information about WHY an id it does not own is refused (§10.5 "句柄不出" —
@@ -144,14 +144,14 @@ type SpawnHandle interface {
 var ErrNotOwner = errors.New("actorrt: child not owned by this incarnation")
 
 // DespawnChild is the by-id, authority-checked termination entry backing
-// SpawnHandle.Despawn (§3.3): it confirms childID names a presence currently
+// SpawnHandle.Despawn (§3.3): it confirms childID names an embodiment currently
 // listed in r.owned[parent.p] BEFORE despawning it — so a SpawnHandle can
 // request termination of its own fork children BY NAME ONLY, without ever
 // holding the child's Incarnation truth-handle (§10.5). A childID that is
 // absent, or present but not owned by parent, is ErrNotOwner.
 func (r *Runtime) DespawnChild(parent Incarnation, childID actor.ActorID) error {
 	r.mu.Lock()
-	child, ok := r.presences[childID]
+	child, ok := r.embodiments[childID]
 	if ok {
 		ok = false
 		for _, ch := range r.owned[parent.p] {
@@ -165,7 +165,7 @@ func (r *Runtime) DespawnChild(parent Incarnation, childID actor.ActorID) error 
 		r.mu.Unlock()
 		return ErrNotOwner
 	}
-	delete(r.presences, childID)
+	delete(r.embodiments, childID)
 	r.mu.Unlock()
 	// Mirrors Despawn's own guarded teardown: mark dead + join. The stale
 	// r.owned[parent.p] entry for this child is left in place — it is

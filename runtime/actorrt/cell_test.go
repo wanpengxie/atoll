@@ -180,7 +180,7 @@ type startPanicActor struct{}
 func (startPanicActor) Receive(ctx context.Context, env *message.Envelope) error { return nil }
 func (startPanicActor) Start(ctx context.Context, self ActorContext) error       { panic("start boom") }
 
-// recordingWatcher is the consumer end of the obs presence-push channel: it
+// recordingWatcher is the consumer end of the obs embodiment-push channel: it
 // records each death (DELETED edge) the runtime publishes.
 type recordingWatcher struct {
 	mu     sync.Mutex
@@ -197,17 +197,17 @@ func (w *recordingWatcher) OnDown(ctx context.Context, id actor.ActorID, cause e
 	}
 }
 
-func TestCellPanicPublishesPresenceDown(t *testing.T) {
+func TestCellPanicPublishesDown(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
-	rt.WatchPresence(w) // register BEFORE spawn — no edge missed
+	rt.WatchDown(w) // register BEFORE spawn — no edge missed
 	rt.Spawn("a", static(panicActor{}))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no presence-down edge after actor panic")
+		t.Fatal("no down edge after actor panic")
 	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
@@ -245,7 +245,7 @@ func TestPanicDeathWithDespawningWatcherDoesNotDeadlock(t *testing.T) {
 	w := &despawningWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	w.rt = rt
-	rt.WatchPresence(w)
+	rt.WatchDown(w)
 	// Receive-panic (not Start-panic) so the incarnation handle is recorded BEFORE
 	// death is triggered by the deliver below — no race on w.inc.
 	w.inc = rt.Spawn("a", static(panicActor{}))
@@ -261,27 +261,27 @@ func TestPanicDeathWithDespawningWatcherDoesNotDeadlock(t *testing.T) {
 }
 
 // TestRespawnSameIDEachDeathIsIndependent: re-Spawning the same ActorID after a
-// death is a fresh instance that, when it too dies, publishes its own presence
+// death is a fresh instance that, when it too dies, publishes its own embodiment
 // down edge addressed by ActorID. Death is terminal per instance (no transparent
 // respawn, no generation) — the substrate just produces one down per dying cell.
 func TestRespawnSameIDEachDeathIsIndependent(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
-	rt.WatchPresence(w)
+	rt.WatchDown(w)
 
 	rt.Spawn("a", static(startPanicActor{}))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no presence-down edge for first instance")
+		t.Fatal("no down edge for first instance")
 	}
 
 	rt.Spawn("a", static(startPanicActor{}))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
-		t.Fatal("no presence-down edge for second instance")
+		t.Fatal("no down edge for second instance")
 	}
 
 	w.mu.Lock()
@@ -369,7 +369,7 @@ func TestRequestTableCollapses(t *testing.T) {
 	mustDeliver(t, rt, "a", env("req-1"))
 
 	rt.mu.RLock()
-	c := rt.presences["a"].(*cell)
+	c := rt.embodiments["a"].(*cell)
 	rt.mu.RUnlock()
 
 	deadline := time.After(time.Second)

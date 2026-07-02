@@ -15,7 +15,7 @@ import (
 
 // ErrMailboxFull is returned by Deliver when the actor's bounded mailbox is
 // full. The caller MUST NOT block: a full request mailbox is rejected at the
-// seam and the sender's caller-scoped closure (or the substrate presence-down edge)
+// seam and the sender's caller-scoped closure (or the substrate down edge)
 // collapses it. An event whose mailbox is full may be dropped (the log is truth).
 var ErrMailboxFull = errors.New("actorrt: mailbox full")
 
@@ -41,8 +41,8 @@ type cell struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	// onDown publishes the obs presence DELETED edge (death) for this id. The
-	// runtime wires it to its presence-watch fanout. Death is an obs push, not a
+	// onDown publishes the obs down edge (death) for this id. The
+	// runtime wires it to its down-watch fanout. Death is an obs push, not a
 	// control signal and not truth — the watcher's reaction (receiver_unavailable)
 	// is the part that becomes work/truth.
 	onDown func(actor.ActorID, error)
@@ -52,7 +52,7 @@ type cell struct {
 	// runtime can pointer-identity-gate the fanout (a stale predecessor that
 	// outlived its incarnation cannot publish obs attributed to a same-id
 	// successor — the ABA guard, mirroring onExit). No watcher → no-op.
-	onObs func(actor.ActorID, presence, ObsKind, ObsValue)
+	onObs func(actor.ActorID, embodiment, ObsKind, ObsValue)
 	// logger surfaces cell-lifecycle edge observability.
 	logger *slog.Logger
 	// onExit is the pointer-identity-checked self-eviction hook the Runtime injects:
@@ -60,7 +60,7 @@ type cell struct {
 	// map IFF the map still points to this very instance. This is how death
 	// makes an instance unaddressable WITHOUT the cell trying to stop/join
 	// itself (a goroutine cannot join itself — that was the death deadlock).
-	onExit func(actor.ActorID, presence)
+	onExit func(actor.ActorID, embodiment)
 
 	// live is the per-incarnation WHEN-validity atomic: false at allocShell, true
 	// at go-live (register), false again on any teardown (death / stop / eviction).
@@ -91,9 +91,9 @@ type cell struct {
 // two-phase Spawn (§3.2). The returned pointer is the incarnation's stable p;
 // Spawn fills c.impl from the build closure (OUTSIDE the lock, while IsLive is
 // still false), then flips live true at go-live. mailbox is the bounded inbox
-// depth; onExit is the self-eviction hook; onDown publishes the death (presence
+// depth; onExit is the self-eviction hook; onDown publishes the death (embodiment
 // DELETED) edge; started is the substrate-stamped bind instant (obs uptime).
-func allocShell(parent context.Context, id actor.ActorID, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, presence, ObsKind, ObsValue), onExit func(actor.ActorID, presence), started time.Time, logger *slog.Logger) *cell {
+func allocShell(parent context.Context, id actor.ActorID, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) *cell {
 	if mailbox <= 0 {
 		mailbox = 64
 	}
@@ -119,18 +119,18 @@ func allocShell(parent context.Context, id actor.ActorID, mailbox int, onDown fu
 // Self implements ActorContext.
 func (c *cell) Self() actor.ActorID { return c.id }
 
-// startedAt implements presence: the substrate-stamped bind instant (obs uptime
+// startedAt implements embodiment: the substrate-stamped bind instant (obs uptime
 // source). The substrate is the authority for it — the cell never self-reports.
 func (c *cell) startedAt() time.Time { return c.started }
 
-// isLive implements presence: the lock-free WHEN-validity probe (per-incarnation
+// isLive implements embodiment: the lock-free WHEN-validity probe (per-incarnation
 // atomic). True only between go-live and teardown.
 func (c *cell) isLive() bool { return c.live.Load() }
 
-// markDead implements presence: flip the liveness atomic to false (idempotent).
+// markDead implements embodiment: flip the liveness atomic to false (idempotent).
 func (c *cell) markDead() { c.live.Store(false) }
 
-// observe implements presence: the obs PULL/actor route. It forwards the opaque
+// observe implements embodiment: the obs PULL/actor route. It forwards the opaque
 // kind to the actor IFF the actor opts in via the Observer hook, answered
 // concurrently (out-of-band, not on the work goroutine) — so the impl must be
 // non-perturbing. An actor that does not implement Observer is a no-op:
@@ -183,7 +183,7 @@ func (c *cell) Deliver(env *message.Envelope) error {
 
 // start spawns the cell goroutine. It calls Start (if implemented), then loops
 // over the mailbox invoking Receive serially, then on teardown self-evicts,
-// publishes the presence DELETED edge (on abnormal death), and calls Stop. A
+// publishes the down edge (on abnormal death), and calls Stop. A
 // panic anywhere is recovered and surfaced as that death edge.
 func (c *cell) start() {
 	go func() {
@@ -209,8 +209,8 @@ func (c *cell) start() {
 			if c.onExit != nil {
 				c.onExit(c.id, c)
 			}
-			// (b) On abnormal death, PUBLISH the presence DELETED edge (obs push).
-			// The runtime fans it out to presence watchers (e.g. the closure-doer
+			// (b) On abnormal death, PUBLISH the down edge (obs push).
+			// The runtime fans it out to embodiment watchers (e.g. the closure-doer
 			// that materialises receiver_unavailable). onDown guards each watcher
 			// against panic; death is positively-observed, the substrate never
 			// guesses "slow".
@@ -297,7 +297,7 @@ func (c *cell) disarmRequest(id message.ID) {
 	c.flightMu.Unlock()
 }
 
-// cancelRequest implements presence: fire the in-flight reqCtx for id, off the
+// cancelRequest implements embodiment: fire the in-flight reqCtx for id, off the
 // cell goroutine. This is the request-scope of cancel(scope) — it interrupts
 // exactly the one Receive holding the goroutine without queuing behind it (the
 // thing to interrupt IS the goroutine's occupant). Idempotent and unknown-id
@@ -313,14 +313,14 @@ func (c *cell) cancelRequest(id message.ID) {
 	}
 }
 
-// initiateStop implements presence: the non-blocking, idempotent SIGNAL half of
+// initiateStop implements embodiment: the non-blocking, idempotent SIGNAL half of
 // teardown (§3.1a) — trigger death and return at once, WITHOUT joining c.done.
 // It is stop()'s signal half; stop() = initiateStop() + join. Both share
 // stopOnce, so calling either (or both, in either order) is safe — the body
 // runs exactly once, and c.done is safe to read from multiple goroutines.
 //
 // It calls onExit IMMEDIATELY (mirroring port.die()'s existing onExit call) so
-// a cascaded child is removed from r.presences/LiveIDs() the instant this is
+// a cascaded child is removed from r.embodiments/LiveIDs() the instant this is
 // called, not lazily whenever its own goroutine notices ctx cancellation — a
 // dying parent's cascade (removeIf) calls ONLY this, never stop(), because
 // stop() joins the child's goroutine and a child's initiateStop synchronously
@@ -329,7 +329,7 @@ func (c *cell) cancelRequest(id message.ID) {
 // AFTER releasing r.mu).
 //
 // onExit/removeIf is already pointer-identity-idempotent (deletes IFF
-// r.presences[id]==self), so the cell's own goroutine later reaching its death
+// r.embodiments[id]==self), so the cell's own goroutine later reaching its death
 // defer (cell.go start()'s onExit call) and calling onExit a SECOND time is a
 // safe no-op — the entry is already gone. impl.Stop()'s resource release still
 // runs on that natural exit path, unaffected by the early table removal here.

@@ -7,7 +7,7 @@ import (
 )
 
 // TestLiveIDs_MatchesCurrentlySpawnedSet: LiveIDs is the map-key snapshot of
-// r.presences (§3.4) — spawning two and despawning one must leave exactly the
+// r.embodiments (§3.4) — spawning two and despawning one must leave exactly the
 // one still-live id in the result.
 func TestLiveIDs_MatchesCurrentlySpawnedSet(t *testing.T) {
 	t.Parallel()
@@ -57,7 +57,7 @@ func TestSpawnIfAbsent_EmptyIDSucceeds(t *testing.T) {
 // Spawn's replace semantics (§3.4) — on an already-occupied id it must return
 // ok=false, discard the freshly-built shell WITHOUT ever calling c.start() on
 // it (the discarded actor's startedCh never fires), and leave the
-// pre-existing presence completely untouched (still the SAME incarnation,
+// pre-existing embodiment completely untouched (still the SAME incarnation,
 // still live).
 func TestSpawnIfAbsent_OccupiedIDNeverReplaces(t *testing.T) {
 	t.Parallel()
@@ -87,20 +87,20 @@ func TestSpawnIfAbsent_OccupiedIDNeverReplaces(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 	}
 
-	// The pre-existing presence is untouched: same incarnation pointer, still
+	// The pre-existing embodiment is untouched: same incarnation pointer, still
 	// live, never stopped.
 	if !rt.IsLive(originalInc) {
-		t.Fatal("SpawnIfAbsent(occupied id) disturbed the pre-existing presence's liveness")
+		t.Fatal("SpawnIfAbsent(occupied id) disturbed the pre-existing embodiment's liveness")
 	}
 	select {
 	case <-original.stoppedCh:
-		t.Fatal("SpawnIfAbsent(occupied id) stopped the pre-existing presence")
+		t.Fatal("SpawnIfAbsent(occupied id) stopped the pre-existing embodiment")
 	case <-time.After(100 * time.Millisecond):
 	}
 	rt.mu.RLock()
-	cur := rt.presences["taken"]
+	cur := rt.embodiments["taken"]
 	rt.mu.RUnlock()
 	if cur != originalInc.p {
-		t.Fatal("SpawnIfAbsent(occupied id) replaced the pre-existing presence pointer")
+		t.Fatal("SpawnIfAbsent(occupied id) replaced the pre-existing embodiment pointer")
 	}
 }
