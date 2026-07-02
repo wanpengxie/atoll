@@ -75,30 +75,49 @@ func TestInsert_WithBindingCommits(t *testing.T) {
 	}
 }
 
-// --- ApplyMemberTransitions inner skip / default arms ------------------------
+// --- ApplyMemberTransitions inner skip / closed-set gate arms -----------------
 
-// An add/remove with an empty ID is skipped (continue) — no row, no mirror.
-// An add with empty Kind defaults to KindHuman.
-func TestApplyMemberTransitions_EmptyIDSkippedAndKindDefaulted(t *testing.T) {
+// The membership WRITE path gates the actor.Kind / actor.Binding closed sets
+// (the control-plane twin of stepSenderConsistent's write-side gate): a poison
+// kind must fail LOUD at write time — the read path (ListActive) fails on the
+// first bad row, so one admitted poison row would brick the whole channel's
+// member enumeration. Empty kind is a caller bug, not a human default (the
+// former ""→KindHuman fallback silently registered kind-less adds as humans).
+func TestApplyMemberTransitions_ClosedSetGate(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	adds := []storespec.MemberActorAdd{
-		{ID: "", Kind: actor.KindAgent, At: 1}, // skipped: empty ID
-		{ID: "defaulted", Kind: "", At: 2000},  // Kind defaults to human
+	// Empty ID entries are skipped, not errors (idempotent batch hygiene).
+	if err := cs.Membership.ApplyMemberTransitions(ctx,
+		[]storespec.MemberActorAdd{{ID: "", Kind: actor.KindAgent, At: 1}},
+		[]storespec.MemberActorRemove{{ID: "", At: 1}},
+	); err != nil {
+		t.Fatalf("empty-ID entries must be skipped: %v", err)
 	}
-	removes := []storespec.MemberActorRemove{
-		{ID: "", At: 1}, // skipped: empty ID
+
+	for name, add := range map[string]storespec.MemberActorAdd{
+		"empty kind":  {ID: "a1", Kind: "", At: 2000},
+		"poison kind": {ID: "a2", Kind: "wizard", At: 2000},
+		"poison bind": {ID: "a3", Kind: actor.KindAgent, Binding: "teleport", At: 2000},
+	} {
+		if err := cs.Membership.ApplyMemberTransitions(ctx,
+			[]storespec.MemberActorAdd{add}, nil,
+		); err == nil {
+			t.Errorf("%s must be rejected at the write gate", name)
+		}
+		if _, ok, _ := cs.Registry.Lookup(ctx, add.ID); ok {
+			t.Errorf("%s: poison row must not land", name)
+		}
 	}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, adds, removes); err != nil {
-		t.Fatalf("ApplyMemberTransitions: %v", err)
+
+	// ListActive still enumerates cleanly — no poison row was admitted.
+	if _, err := cs.Registry.ListActive(ctx); err != nil {
+		t.Fatalf("ListActive after rejected poisons: %v", err)
 	}
-	rec, ok, err := cs.Registry.Lookup(ctx, "defaulted")
-	if err != nil || !ok {
-		t.Fatalf("defaulted actor ok=%v err=%v", ok, err)
-	}
-	if rec.Kind != actor.KindHuman {
-		t.Errorf("empty kind must default to human, got %q", rec.Kind)
+
+	// Insert takes the same gate.
+	if err := cs.Membership.Insert(ctx, storespec.Record{ID: "b1", Kind: "wizard", CreatedAt: 1}); err == nil {
+		t.Error("Insert must gate the kind closed set")
 	}
 }
 

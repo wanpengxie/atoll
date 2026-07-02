@@ -1,5 +1,7 @@
 package harness
 
+import "github.com/wanpengxie/ActOS/runtime/storespec"
+
 // HarnessRejectReason is the closed set of reasons the 9-step Message-Write
 // Harness can synchronously reject a write with. This is the WRITE ENGINE's
 // errno vocabulary (Erlang/Unix prior-art, kernel-construction-spec §0.1):
@@ -9,13 +11,19 @@ package harness
 // v2 drops several v1 reasons because an errno vocabulary is exactly the set
 // of reasons a producer can stamp, so a word with zero producers is not in it:
 // the channel-write fence is obsolete under a single harness writer
-// (runtime-construction-spec §4.1); the v1 id-dedupe step was retired
-// (message.id is now a random uuid; an id UNIQUE collision is a pure integrity
-// error surfaced via classifyAppendErr's wire string); the visibility-scoped
-// audience wildcard was removed; and substrate went type-agnostic (no
-// type→handler routing left to mismatch); the sender door's registry
-// retirement later dropped harness_sender_deregistered the same way —
-// leaving 27.
+// (runtime-construction-spec §4.1); the visibility-scoped audience wildcard
+// was removed; substrate went type-agnostic (no type→handler routing left to
+// mismatch); and the sender door's registry retirement later dropped
+// harness_sender_deregistered the same way — leaving 27.
+//
+// The two store-produced members (id-duplicate / terminal-duplicate) are
+// lifted from storespec's AppendReject* consts — the contract leaf is their
+// canonical home because the store driver stamps them and must not import
+// this package. (Earlier the id-duplicate word had a live producer but no
+// const anywhere — the "surfaced via classifyAppendErr's wire string"
+// rationale — which left the timer FireSink's dup/poison split and every
+// other consumer comparing against string coincidence. An errno word with a
+// producer belongs in the closed set.)
 //
 // No HTTPStatus() method: mapping a reason to an HTTP status code (strerror)
 // is a transport binding concern, not a substrate engine concern. This type
@@ -34,6 +42,7 @@ const (
 
 	// Step 1 — Envelope Shape Validate
 	HarnessEnvelopeFieldMissing      HarnessRejectReason = "harness_envelope_field_missing"
+	HarnessPayloadInvalid            HarnessRejectReason = "harness_payload_invalid"
 	HarnessChannelMismatch           HarnessRejectReason = "harness_channel_mismatch"
 	HarnessKindInvalid               HarnessRejectReason = "harness_kind_invalid"
 	HarnessVisibilityInvalid         HarnessRejectReason = "harness_visibility_invalid"
@@ -73,8 +82,21 @@ const (
 	HarnessResponseReasonInvalid           HarnessRejectReason = "harness_response_reason_invalid"
 	HarnessResponseUnauthorizedSender      HarnessRejectReason = "harness_response_unauthorized_sender"
 	HarnessResponseAudienceMismatch        HarnessRejectReason = "harness_response_audience_mismatch"
-	HarnessTerminalDuplicate               HarnessRejectReason = "harness_terminal_duplicate"
 	HarnessProvisionalAfterFinal           HarnessRejectReason = "harness_provisional_after_final"
+
+	// Step 9 — Engine Append (store-produced, lifted from the storespec
+	// contract leaf so driver and vocabulary share ONE symbol; see the type
+	// doc above).
+	//
+	// HarnessIDDuplicateConflict — messages.id UNIQUE hit. For a
+	// deterministic producer (the timer fire id) this is the crash-replay
+	// idempotency signal a FireSink translates to ErrDuplicateFire; for a
+	// random uuid it is a pure integrity error.
+	HarnessIDDuplicateConflict HarnessRejectReason = storespec.AppendRejectIDDuplicate
+	// HarnessTerminalDuplicate — second terminal response for one request
+	// (ux_terminal_response_per_request UNIQUE); lib/behavior's three
+	// authors treat it as the benign lost-race signal.
+	HarnessTerminalDuplicate HarnessRejectReason = storespec.AppendRejectTerminalDuplicate
 )
 
 // (No exported AllHarnessRejectReasons enumeration: the const block above IS

@@ -130,3 +130,40 @@ func TestStepEnvelopeShape_KindVisibilityAudienceResponse(t *testing.T) {
 
 // (The unknown-top-level-field tests moved to protocol/message — the §7.3
 // fail-closed check rides Envelope.UnmarshalJSON now, not a harness step.)
+
+// Payload wellformedness (guard 2): non-empty payload must be valid JSON and
+// not the null literal — truth is append-only, so a malformed payload
+// admitted once is a protocol-illegal row forever. Empty payload stays legal
+// (Step Normalize fills the {} default).
+func TestStepEnvelopeShape_PayloadWellformedness(t *testing.T) {
+	cs := newTestStore(t)
+	deps := testDeps(t, cs)
+
+	cases := map[string]struct {
+		payload string
+		reject  bool
+	}{
+		"invalid JSON":       {payload: `{bad`, reject: true},
+		"null literal":       {payload: `null`, reject: true},
+		"padded null":        {payload: ` null `, reject: true},
+		"empty object":       {payload: `{}`, reject: false},
+		"empty (normalized)": {payload: ``, reject: false},
+		"non-object JSON":    {payload: `"opaque"`, reject: false}, // opaque by axiom; only wellformedness + non-null are shape law
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			e := validEvent(message.ID("m-"+name), "a")
+			e.Payload = []byte(tc.payload)
+			out, err := runStep(t, newStepEnvelopeShape, deps, context.Background(), e)
+			if err != nil {
+				t.Fatalf("err: %v", err)
+			}
+			if tc.reject && out.RejectReason != HarnessPayloadInvalid {
+				t.Fatalf("reason = %q, want harness_payload_invalid", out.RejectReason)
+			}
+			if !tc.reject && !out.Continue() {
+				t.Fatalf("reason = %q, want accept", out.RejectReason)
+			}
+		})
+	}
+}

@@ -94,14 +94,11 @@ func newScheduleRuntime(t *testing.T) *actorrt.Runtime {
 // layer of engine_test.go's fakes.
 // ---------------------------------------------------------------------
 
-// harnessIDDuplicateConflict is classifyAppendErr's raw wire-string reason
-// (runtime/internal/store/messages.go) for a messages.id UNIQUE hit.
-// Deliberately not an exported harness constant (v2 dropped the id-dedupe
-// step from the closed reject vocabulary — reason.go's own doc: "an id
-// UNIQUE collision is a pure integrity error surfaced via classifyAppendErr's
-// wire string") — so, exactly like the real platform FireSink will have to,
-// this sink hardcodes the wire literal.
-const harnessIDDuplicateConflict harness.HarnessRejectReason = "harness_id_duplicate_conflict"
+// The id-duplicate reject is now a closed-set member
+// (harness.HarnessIDDuplicateConflict, canonical string in storespec) — this
+// sink compares against the shared symbol, exactly like the real platform
+// FireSink will.
+const harnessIDDuplicateConflict = harness.HarnessIDDuplicateConflict
 
 type realFireSink struct {
 	minter harness.Minter

@@ -1,22 +1,27 @@
 package harness
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // stepEnvelopeShape implements proto-layer1 §2.2 — envelope shape
-// validation. It covers six kinds of wire-level guards (round 3
+// validation. It covers seven kinds of wire-level guards (round 3
 // cluster F insertion):
 //
 //  1. content fields present (proto-layer0 §1.1)
-//  2. envelope.channel_id == the harness-bound channel (unconditional)
-//  3. kind ∈ {event, request, response}
-//  4. visibility (when non-empty) ∈ {public, private} — Step Normalize
-//     fills the default when caller leaves it empty.
-//  5. audience cardinality + wildcard ban (proto-layer0 §2.3)
-//  6. response.parent_id non-null
+//  2. payload wellformedness — non-empty payload must be valid JSON and not
+//     the null literal (L0 §2.2: payload={} legal, payload=null not; empty
+//     stays legal here — Step Normalize fills the {} default)
+//  3. envelope.channel_id == the harness-bound channel (unconditional)
+//  4. kind ∈ {event, request, response}
+//  5. visibility (when non-empty) ∈ {public, private, system} — Step
+//     Normalize fills the default when caller leaves it empty.
+//  6. audience cardinality + wildcard ban (proto-layer0 §2.3)
+//  7. response.parent_id non-null
 //
 // (The proto-layer0 §7.3 unknown-top-level-field fail-closed reject is NOT a
 // harness step: it rides the Envelope type — message.Envelope.UnmarshalJSON
@@ -49,7 +54,28 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		return rejectFieldMissing("envelope.ts required"), nil
 	}
 
-	// (2) channel_id pinned to the harness-bound channel — UNCONDITIONAL.
+	// (2) payload wellformedness — L0 §2.2: payload={} legal, payload=null
+	// not. Truth is append-only, so a malformed payload admitted here is a
+	// protocol-illegal row FOREVER (and an in-process json.RawMessage("{bad")
+	// would additionally break every later delivery marshal of the committed
+	// row). Empty payload is legal at this step — Step Normalize fills the {}
+	// default; the guard covers only what a caller actually supplied.
+	if len(env.Payload) > 0 {
+		if !json.Valid(env.Payload) {
+			return outcome{
+				RejectReason: HarnessPayloadInvalid,
+				Detail:       "envelope.payload is not valid JSON",
+			}, nil
+		}
+		if string(bytes.TrimSpace(env.Payload)) == "null" {
+			return outcome{
+				RejectReason: HarnessPayloadInvalid,
+				Detail:       "envelope.payload=null is not legal (L0 §2.2); omit payload or send {}",
+			}, nil
+		}
+	}
+
+	// (3) channel_id pinned to the harness-bound channel — UNCONDITIONAL.
 	// This harness IS the single writer of deps.ChannelID's log, so a row
 	// whose channel_id names a different channel is truth corruption (a
 	// channel-A log holding a row that claims channel B). The guard is
@@ -64,7 +90,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		}, nil
 	}
 
-	// (3) kind closed set — proto-layer0 §2.1.
+	// (4) kind closed set — proto-layer0 §2.1.
 	switch env.Kind {
 	case message.KindEvent, message.KindRequest, message.KindResponse:
 	default:
@@ -74,7 +100,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		}, nil
 	}
 
-	// (4) visibility closed set — proto-layer0 §2.4.
+	// (5) visibility closed set — proto-layer0 §2.4.
 	// Empty visibility is legal here (Step Normalize defaults to public).
 	if env.Visibility != "" &&
 		env.Visibility != message.VisibilityPublic &&
@@ -86,7 +112,7 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		}, nil
 	}
 
-	// (5) audience wildcard ban — proto-layer0 §2.3 (pure format, no
+	// (6) audience wildcard ban — proto-layer0 §2.3 (pure format, no
 	// channel truth). Wildcard "*" was removed from the audience closed
 	// set (owner reframed addressing as Erlang-style explicit `pid !
 	// msg`); every audience entry MUST be a literal actor_id.

@@ -473,7 +473,7 @@ func classifyAppendErr(err error, envID string) error {
 	switch {
 	case strings.Contains(msg, "UNIQUE constraint failed: messages.id"):
 		return &storespec.AppendError{
-			Reason:           "harness_id_duplicate_conflict",
+			Reason:           storespec.AppendRejectIDDuplicate,
 			Detail:           msg,
 			PartialMessageID: message.ID(envID),
 		}
@@ -481,7 +481,7 @@ func classifyAppendErr(err error, envID string) error {
 		strings.Contains(msg, "UNIQUE constraint failed: messages.parent_id") ||
 		strings.Contains(msg, "parent_id, kind, is_terminal"):
 		return &storespec.AppendError{
-			Reason:           "harness_terminal_duplicate",
+			Reason:           storespec.AppendRejectTerminalDuplicate,
 			Detail:           msg,
 			PartialMessageID: message.ID(envID),
 		}

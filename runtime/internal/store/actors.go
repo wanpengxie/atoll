@@ -124,10 +124,33 @@ func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, err
 	return out, nil
 }
 
+// validateMemberIdentity gates the membership WRITE path on the protocol
+// closed sets — the control-plane twin of the envelope write path's
+// stepSenderConsistent ParseKind gate, and for the same reason: the read path
+// (Lookup / ListActive) parses these columns fail-loud, so an unvalidated
+// write is a poisoned row that only explodes on a later read — and because
+// ListActive fails on the FIRST bad row, one poison row bricks the whole
+// channel's member enumeration (reconcile, door membership checks). Binding
+// is nullable: empty means NULL, any non-empty value must parse.
+func validateMemberIdentity(id actor.ActorID, kind actor.Kind, binding actor.Binding) error {
+	if _, ok := actor.ParseKind(string(kind)); !ok {
+		return fmt.Errorf("store: actor %q kind %q not in the actor.Kind closed set", id, kind)
+	}
+	if binding != "" {
+		if _, ok := actor.ParseBinding(string(binding)); !ok {
+			return fmt.Errorf("store: actor %q binding %q not in the actor.Binding closed set", id, binding)
+		}
+	}
+	return nil
+}
+
 // Insert implements storespec.Registry: it adds one membership row.
 func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error {
 	if rec.ID == "" {
 		return errors.New("store: actor insert: empty ID")
+	}
+	if err := validateMemberIdentity(rec.ID, rec.Kind, rec.Binding); err != nil {
+		return err
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -257,8 +280,12 @@ func (r *actorRegistry) ApplyMemberTransitions(
 		if add.ID == "" {
 			continue
 		}
-		if add.Kind == "" {
-			add.Kind = actor.KindHuman
+		// No silent kind default (the former ""→KindHuman fallback let a
+		// kind-less daemon/tool add enter the registry AND the mirror truth
+		// as a human, with zero signal): a missing kind is a caller bug and
+		// fails loud, same posture as the missing-timestamp check below.
+		if err := validateMemberIdentity(add.ID, add.Kind, add.Binding); err != nil {
+			return err
 		}
 		if add.At == 0 {
 			return fmt.Errorf("store: actor member add %q missing timestamp", add.ID)
@@ -357,7 +384,14 @@ func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, rem
 	if err != nil {
 		return false, fmt.Errorf("store: actor member deregister %q: %w", remove.ID, err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		// Do NOT swallow (same law as Deregister above): with n unknowable,
+		// falling into the no-op branch would let the enclosing tx COMMIT a
+		// deregistered_at that took effect while skipping the state/timer
+		// cascade and the mirror event — a silently half-applied removal.
+		return false, fmt.Errorf("store: actor member deregister rows-affected %q: %w", remove.ID, err)
+	}
 	if n != 1 {
 		// Already-deregistered / missing member: idempotent no-op, no cascade (a
 		// re-run must not re-clear).

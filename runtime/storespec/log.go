@@ -34,9 +34,15 @@ type AppendResult struct {
 // request → terminal_duplicate).
 //
 // Reason is a plain-string diagnostic code for a protocol-level violation the
-// store detected at write time (e.g. terminal_duplicate). The concrete values
-// are defined by the store implementation per violation type; the consumer is
-// responsible for interpreting them / mapping into its own error domain.
+// store detected at write time. Its value set is CLOSED and lives right here
+// (the two consts below): this contract leaf is the one package both the
+// producer (the store driver's classifyAppendErr) and the vocabulary owner
+// (harness's HarnessRejectReason const block) can import, so it is the single
+// home of the store-produced reject words. Before this, the driver minted the
+// strings as bare literals and harness cast them through — one word
+// (harness_id_duplicate_conflict) had a live producer but no const anywhere,
+// and every consumer (the timer FireSink dup/poison split, lib/behavior's
+// benign-duplicate checks) rode on string coincidence.
 type AppendError struct {
 	Reason           string
 	Detail           string
@@ -50,6 +56,21 @@ func (e *AppendError) Error() string {
 	}
 	return e.Reason
 }
+
+// The two AppendError.Reason values the store can stamp — the complete set
+// (classifyAppendErr produces exactly these; anything else surfaces as a
+// plain error, not an AppendError). Untyped so harness can lift them into
+// its HarnessRejectReason const block as constant expressions.
+const (
+	// AppendRejectIDDuplicate — messages.id UNIQUE hit: this envelope id is
+	// already in truth. For a deterministic producer (the timer fire id) this
+	// is the crash-replay idempotency signal; for a random uuid it is a pure
+	// integrity error.
+	AppendRejectIDDuplicate = "harness_id_duplicate_conflict"
+	// AppendRejectTerminalDuplicate — ux_terminal_response_per_request UNIQUE
+	// hit: a second terminal response for the same parent request.
+	AppendRejectTerminalDuplicate = "harness_terminal_duplicate"
+)
 
 // MessageLog is the channel-local messages-table append contract (L2
 // §1.4.1). Append is the only mutation entry point; reads are not declared
