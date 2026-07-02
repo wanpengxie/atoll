@@ -2,13 +2,12 @@ package harness
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
 // stepEnvelopeShape implements proto-layer1 §2.2 — envelope shape
-// validation. It covers seven kinds of wire-level guards (round 3
+// validation. It covers six kinds of wire-level guards (round 3
 // cluster F insertion):
 //
 //  1. content fields present (proto-layer0 §1.1)
@@ -18,11 +17,12 @@ import (
 //     fills the default when caller leaves it empty.
 //  5. audience cardinality + wildcard ban (proto-layer0 §2.3)
 //  6. response.parent_id non-null
-//  7. unknown top-level field fail-closed reject (proto-layer0 §7.3) —
-//     only enforced when the caller supplies the original raw JSON via
-//     CtxWithRawEnvelope; in-process Go struct callers naturally
-//     cannot drift on field set because the struct fixes the schema at
-//     compile time.
+//
+// (The proto-layer0 §7.3 unknown-top-level-field fail-closed reject is NOT a
+// harness step: it rides the Envelope type — message.Envelope.UnmarshalJSON
+// rejects out-of-set keys at every wire decode, so by the time a decoded
+// envelope reaches this chain the field set is already closed; in-process Go
+// struct callers cannot drift on field set at all.)
 //
 // The step runs after CallerAuth and before SenderConsistent/Normalize, so
 // downstream stages never see a malformed envelope.
@@ -113,19 +113,6 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 		}, nil
 	}
 
-	// (8) unknown top-level field fail-closed — proto-layer0 §7.3.
-	// Enforced only when the caller plumbed the raw envelope JSON via
-	// CtxWithRawEnvelope. Struct-based Go callers cannot drift on field
-	// set (the envelope struct fixes the schema at compile time) so the
-	// raw-JSON plumb is opt-in and skipped when absent.
-	if raw := rawEnvelopeFromCtx(ctx); len(raw) > 0 {
-		if out, err := checkUnknownTopLevelFields(raw); err != nil {
-			return outcome{}, err
-		} else if !out.Continue() {
-			return out, nil
-		}
-	}
-
 	return outcome{}, nil
 }
 
@@ -138,41 +125,3 @@ func rejectFieldMissing(detail string) outcome {
 	}
 }
 
-// allowedTopLevelEnvelopeKey reports whether key is a proto-layer0 §1.1
-// content field — the ONLY fields a caller can legitimately put on a write
-// envelope. Store-derived columns (seq, is_terminal) are minted by the store
-// AFTER append and can never exist on a submitted envelope; they are NOT
-// whitelisted, so a caller that submits them is fail-closed rejected. The
-// write entry only admits fields a caller can produce; store-derived columns
-// belong to the read/StoredRow shape, not the write protocol.
-func allowedTopLevelEnvelopeKey(key string) bool {
-	switch key {
-	// L0 §1.1 content fields. sender is nested; sender.{kind,id}
-	// flatten into the same top-level "sender" key.
-	case "id", "ts", "channel_id", "sender", "kind", "type",
-		"payload", "parent_id", "correlation_id",
-		"visibility", "audience", "expires_at":
-		return true
-	}
-	return false
-}
-
-// checkUnknownTopLevelFields decodes raw JSON enough to enumerate
-// top-level keys and rejects when any unknown key is present.
-func checkUnknownTopLevelFields(raw []byte) (outcome, error) {
-	var top map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &top); err != nil {
-		// Caller plumbed malformed JSON; this is a programming error
-		// rather than a protocol reject — surface as error.
-		return outcome{}, err
-	}
-	for k := range top {
-		if !allowedTopLevelEnvelopeKey(k) {
-			return outcome{
-				RejectReason: HarnessEnvelopeUnknownField,
-				Detail:       "envelope top-level field not in spec: " + k,
-			}, nil
-		}
-	}
-	return outcome{}, nil
-}

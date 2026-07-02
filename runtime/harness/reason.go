@@ -37,9 +37,13 @@ const (
 	HarnessChannelMismatch           HarnessRejectReason = "harness_channel_mismatch"
 	HarnessKindInvalid               HarnessRejectReason = "harness_kind_invalid"
 	HarnessVisibilityInvalid         HarnessRejectReason = "harness_visibility_invalid"
-	HarnessEnvelopeUnknownField      HarnessRejectReason = "harness_envelope_unknown_field"
 	HarnessAudienceWildcardForbidden HarnessRejectReason = "harness_audience_wildcard_forbidden"
 	HarnessResponseMissingParent     HarnessRejectReason = "harness_response_missing_parent"
+
+	// (harness_envelope_unknown_field is gone from this vocabulary: the L0
+	// §7.3 unknown-top-level-field fail-closed reject now rides the Envelope
+	// type — message.Envelope.UnmarshalJSON returns message.UnknownFieldError
+	// at decode, before a pen is ever involved.)
 
 	// Step 3 — Normalize (time-relation guard)
 	HarnessTimeInvalid HarnessRejectReason = "harness_time_invalid"

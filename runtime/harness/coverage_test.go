@@ -324,30 +324,6 @@ func TestStepSenderConsistent_CtxCanceled(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// step_envelope_shape.go:122-124 + 164-168 — malformed raw JSON plumbed via
-// CtxWithRawEnvelope makes checkUnknownTopLevelFields' json.Unmarshal fail,
-// surfaced as a hard error (not a reject).
-// ---------------------------------------------------------------------
-
-func TestStepEnvelopeShape_MalformedRawJSONError(t *testing.T) {
-	deps := Deps{ChannelID: testChannelID}
-	env := validEvent("m1", "agent:p")
-	ctx := CtxWithRawEnvelope(ctxCaller("agent:p"), []byte("{not-json"))
-	_, err := runStep(t, newStepEnvelopeShape, deps, ctx, env)
-	if err == nil {
-		t.Fatalf("malformed raw JSON should surface as error")
-	}
-}
-
-// checkUnknownTopLevelFields directly: valid JSON, valid error path covered
-// above; here assert the function itself on malformed input returns the error.
-func TestCheckUnknownTopLevelFields_Malformed(t *testing.T) {
-	if _, err := checkUnknownTopLevelFields([]byte("nope")); err == nil {
-		t.Fatalf("malformed JSON should error")
-	}
-}
-
-// ---------------------------------------------------------------------
 // step_response_pairing.go — FindByID error (86-88), HasFinalResponse error
 // (176-178), and the checkFailedResponseReason / extractPayloadStatus /
 // senderLocalName uncovered arms.

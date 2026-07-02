@@ -2,6 +2,9 @@ package message
 
 import (
 	"encoding/json"
+	"reflect"
+	"sort"
+	"strings"
 
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
@@ -55,6 +58,84 @@ type Envelope struct {
 	Visibility    Visibility      `json:"visibility"`
 	Audience      Audience        `json:"audience"`
 	ExpiresAt     *int64          `json:"expires_at,omitempty"`
+}
+
+// ---------------------------------------------------------------------
+// Wire field-set closure (L0 §7.3) — enforced by the TYPE, not by callers.
+// ---------------------------------------------------------------------
+
+// UnknownFieldError is the L0 §7.3 fail-closed verdict: the wire JSON carried
+// one or more top-level keys outside the envelope's closed field set. Typed
+// so a binding can map it onto its own error surface (HTTP 400, an ipc frame
+// error) with errors.As.
+type UnknownFieldError struct {
+	// Keys are the offending top-level keys, sorted (deterministic across the
+	// randomized map iteration).
+	Keys []string
+}
+
+func (e UnknownFieldError) Error() string {
+	return "message: envelope top-level field not in spec: " + strings.Join(e.Keys, ", ")
+}
+
+// envelopeTopLevelKeys is the closed set of wire keys, derived from the
+// Envelope struct's json tags at init — the struct IS the schema, so the set
+// can never drift from it (no second hand-maintained list). Store-derived
+// columns (seq, is_terminal) are not struct fields, hence rejected; welded /
+// substrate-injected fields (sender.id, channel_id, ts_received) ARE legal
+// keys here — lying in them is separately made impossible by the write gate
+// (the pen fail-fasts pre-stuffed identity; the engine unconditionally
+// overwrites ts_received), while the read/deliver path legitimately carries
+// them populated.
+var envelopeTopLevelKeys = func() map[string]bool {
+	keys := map[string]bool{}
+	t := reflect.TypeOf(Envelope{})
+	for i := 0; i < t.NumField(); i++ {
+		name, _, _ := strings.Cut(t.Field(i).Tag.Get("json"), ",")
+		if name != "" && name != "-" {
+			keys[name] = true
+		}
+	}
+	return keys
+}()
+
+// UnmarshalJSON decodes an envelope fail-closed: a top-level key outside the
+// struct's field set rejects with UnknownFieldError BEFORE any field is
+// decoded. This is L0 §7.3 riding the type itself — every wire entrance that
+// decodes an envelope (the HTTP API, the ipc frame codec, any future binding)
+// enforces it by construction, with no per-binding plumbing to forget.
+// (It replaced the harness's CtxWithRawEnvelope injection seam, whose
+// "callers MUST plumb the raw JSON" obligation lived only in a comment and
+// was wired by no binding.) In-process Go construction is untouched — a
+// struct literal cannot carry an unknown field in the first place.
+//
+// Scope is deliberately top-level only, faithful to §7.3: unknown keys inside
+// nested objects (sender, payload) are the nested vocabulary's concern —
+// payload is opaque by axiom and never inspected here.
+func (e *Envelope) UnmarshalJSON(data []byte) error {
+	var top map[string]json.RawMessage
+	if err := json.Unmarshal(data, &top); err != nil {
+		return err
+	}
+	var unknown []string
+	for k := range top {
+		if !envelopeTopLevelKeys[k] {
+			unknown = append(unknown, k)
+		}
+	}
+	if len(unknown) > 0 {
+		sort.Strings(unknown)
+		return UnknownFieldError{Keys: unknown}
+	}
+	// plain drops the method set, so the inner decode cannot recurse into
+	// this UnmarshalJSON.
+	type plain Envelope
+	var p plain
+	if err := json.Unmarshal(data, &p); err != nil {
+		return err
+	}
+	*e = Envelope(p)
+	return nil
 }
 
 // IsFinalStatus reports whether the given payload.status value belongs

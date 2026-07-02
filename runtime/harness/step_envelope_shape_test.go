@@ -128,44 +128,5 @@ func TestStepEnvelopeShape_KindVisibilityAudienceResponse(t *testing.T) {
 	}
 }
 
-// Unknown top-level field fail-closed — only when raw JSON is plumbed via
-// CtxWithRawEnvelope. Struct callers (no raw) skip the check.
-func TestStepEnvelopeShape_UnknownTopLevelField(t *testing.T) {
-	cs := newTestStore(t)
-	deps := testDeps(t, cs)
-	e := validEvent("m1", "a")
-
-	t.Run("unknown raw field rejected", func(t *testing.T) {
-		raw := []byte(`{"id":"m1","ts":1,"channel_id":"ch-test","sender":{"id":"a"},"kind":"event","type":"agent.text","bogus":1}`)
-		ctx := CtxWithRawEnvelope(context.Background(), raw)
-		out, err := runStep(t, newStepEnvelopeShape, deps, ctx, e)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if out.RejectReason != HarnessEnvelopeUnknownField {
-			t.Fatalf("reason = %q, want unknown_field", out.RejectReason)
-		}
-	})
-
-	t.Run("all-known raw fields accepted", func(t *testing.T) {
-		raw := []byte(`{"id":"m1","ts":1,"channel_id":"ch-test","sender":{"id":"a"},"kind":"event","type":"agent.text","audience":["x"]}`)
-		ctx := CtxWithRawEnvelope(context.Background(), raw)
-		out, err := runStep(t, newStepEnvelopeShape, deps, ctx, e)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if !out.Continue() {
-			t.Fatalf("reason = %q, want accept", out.RejectReason)
-		}
-	})
-
-	t.Run("no raw plumbed skips the check", func(t *testing.T) {
-		out, err := runStep(t, newStepEnvelopeShape, deps, context.Background(), e)
-		if err != nil {
-			t.Fatalf("err: %v", err)
-		}
-		if !out.Continue() {
-			t.Fatalf("reason = %q, want accept (struct caller, no raw)", out.RejectReason)
-		}
-	})
-}
+// (The unknown-top-level-field tests moved to protocol/message — the §7.3
+// fail-closed check rides Envelope.UnmarshalJSON now, not a harness step.)

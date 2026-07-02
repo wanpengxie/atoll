@@ -1,6 +1,7 @@
 package message
 
 import (
+	"errors"
 	"encoding/json"
 	"reflect"
 	"sort"
@@ -238,3 +239,112 @@ func diff(a, b []string) []string {
 	}
 	return out
 }
+
+// ---------------------------------------------------------------------
+// Wire field-set closure (L0 §7.3) — UnmarshalJSON fail-closed tests.
+// ---------------------------------------------------------------------
+
+const validEnvelopeJSON = `{"id":"m1","ts":1,"channel_id":"ch","sender":{"kind":"agent","id":"a"},"kind":"event","type":"agent.text","payload":{},"visibility":"public","audience":["x"]}`
+
+// TestEnvelopeUnmarshalRejectsUnknownTopLevelField pins §7.3 riding the type:
+// any decode of an envelope carrying a top-level key outside the closed field
+// set fails with a typed UnknownFieldError — no binding-side plumbing involved.
+func TestEnvelopeUnmarshalRejectsUnknownTopLevelField(t *testing.T) {
+	t.Parallel()
+	cases := map[string]string{
+		"typo/smuggle key": `{"id":"m1","ts":1,"channel_id":"ch","sender":{"id":"a"},"kind":"event","type":"t","bogus":1}`,
+		// Store-derived columns are NOT wire proto fields (envelope doc):
+		// submitting them is exactly the drift §7.3 fail-closes on.
+		"store-derived seq":         `{"id":"m1","ts":1,"channel_id":"ch","sender":{"id":"a"},"kind":"event","type":"t","seq":9}`,
+		"store-derived is_terminal": `{"id":"m1","ts":1,"channel_id":"ch","sender":{"id":"a"},"kind":"event","type":"t","is_terminal":1}`,
+	}
+	for name, raw := range cases {
+		t.Run(name, func(t *testing.T) {
+			var e Envelope
+			err := json.Unmarshal([]byte(raw), &e)
+			var uf UnknownFieldError
+			if !errorsAs(err, &uf) {
+				t.Fatalf("err = %v, want UnknownFieldError", err)
+			}
+			if len(uf.Keys) != 1 {
+				t.Fatalf("keys = %v, want exactly one offending key", uf.Keys)
+			}
+		})
+	}
+}
+
+// TestEnvelopeUnmarshalAllKnownKeys decodes an envelope using every legal
+// top-level key and asserts acceptance — the closed set derived from the
+// struct tags admits precisely the struct's own fields.
+func TestEnvelopeUnmarshalAllKnownKeys(t *testing.T) {
+	t.Parallel()
+	full := `{"id":"m1","ts":1,"ts_received":2,"channel_id":"ch","sender":{"kind":"agent","id":"a"},"kind":"event","type":"t","payload":{},"parent_id":"p","correlation_id":"c","visibility":"public","audience":["x"],"expires_at":5}`
+	var e Envelope
+	if err := json.Unmarshal([]byte(full), &e); err != nil {
+		t.Fatalf("full-key envelope should decode: %v", err)
+	}
+	if e.ID != "m1" || e.TSReceived != 2 || e.ExpiresAt == nil || *e.ExpiresAt != 5 {
+		t.Fatalf("decoded fields lost: %+v", e)
+	}
+}
+
+// TestEnvelopeUnmarshalNestedUnknownAllowed documents the deliberate scope:
+// §7.3 is TOP-LEVEL only. An unknown key inside the nested sender object is
+// the nested vocabulary's concern, and payload is opaque by axiom.
+func TestEnvelopeUnmarshalNestedUnknownAllowed(t *testing.T) {
+	t.Parallel()
+	raw := `{"id":"m1","ts":1,"channel_id":"ch","sender":{"kind":"agent","id":"a","x":1},"kind":"event","type":"t","payload":{"anything":"goes"}}`
+	var e Envelope
+	if err := json.Unmarshal([]byte(raw), &e); err != nil {
+		t.Fatalf("nested unknown keys must not trip the top-level check: %v", err)
+	}
+}
+
+// TestEnvelopeUnmarshalMultipleUnknownSorted pins deterministic reporting:
+// all offending keys, sorted, independent of map iteration order.
+func TestEnvelopeUnmarshalMultipleUnknownSorted(t *testing.T) {
+	t.Parallel()
+	raw := `{"id":"m1","zzz":1,"aaa":2,"kind":"event"}`
+	var e Envelope
+	err := json.Unmarshal([]byte(raw), &e)
+	var uf UnknownFieldError
+	if !errorsAs(err, &uf) {
+		t.Fatalf("err = %v, want UnknownFieldError", err)
+	}
+	if !reflect.DeepEqual(uf.Keys, []string{"aaa", "zzz"}) {
+		t.Fatalf("keys = %v, want [aaa zzz] (all offenders, sorted)", uf.Keys)
+	}
+}
+
+// TestEnvelopeUnmarshalMalformed pins that malformed JSON still surfaces as a
+// plain decode error, not an UnknownFieldError.
+func TestEnvelopeUnmarshalMalformed(t *testing.T) {
+	t.Parallel()
+	var e Envelope
+	err := json.Unmarshal([]byte("{not-json"), &e)
+	if err == nil {
+		t.Fatalf("malformed JSON should error")
+	}
+	var uf UnknownFieldError
+	if errorsAs(err, &uf) {
+		t.Fatalf("malformed JSON must not classify as UnknownFieldError")
+	}
+}
+
+// TestEnvelopeUnmarshalValidRoundTrip re-asserts the fidelity contract still
+// holds through the custom UnmarshalJSON (the shadow-type decode must not
+// change any field semantics).
+func TestEnvelopeUnmarshalValidRoundTrip(t *testing.T) {
+	t.Parallel()
+	var e Envelope
+	if err := json.Unmarshal([]byte(validEnvelopeJSON), &e); err != nil {
+		t.Fatalf("valid envelope: %v", err)
+	}
+	if e.Sender.ID != "a" || e.Kind != KindEvent || len(e.Audience) != 1 {
+		t.Fatalf("decode lost fields: %+v", e)
+	}
+}
+
+// errorsAs is a local alias so this file keeps its stdlib-only import set
+// tight (errors is imported here on first use).
+func errorsAs(err error, target any) bool { return errors.As(err, target) }
