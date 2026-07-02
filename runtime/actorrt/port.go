@@ -88,8 +88,9 @@ type port struct {
 
 	// live is the per-incarnation WHEN-validity atomic (embodiment contract), set
 	// true at Attach go-live and false on teardown. The home-side port death-write
-	// gate that would consult it is §3.6 (deferred); the field exists so port
-	// satisfies the embodiment interface and reports honestly if probed.
+	// gate consults it via §3.C1: a livePen minted for a remote actor fences its
+	// welded capability through runtime IsLive, which reads this field lock-free
+	// (isLive) so a dangling emit from a torn-down port is rejected.
 	live atomic.Bool
 
 	sendq chan *message.Envelope
