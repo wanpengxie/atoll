@@ -311,6 +311,15 @@ func TestLivePenFencesInFlightEmit_PortWireChain(t *testing.T) {
 	// The in-flight emit is fenced end-to-end: the daemon write returns an error
 	// (its port was torn down), the sink verdict is ErrWriterNotLive, and the raw
 	// pen never saw the write.
+	//
+	// Why the daemon-side error is asserted as "non-nil" and NOT as an ack
+	// carrying ErrWriterNotLive: on the port path the incarnation IS the wire
+	// (§5.2) — the replacement that killed the old incarnation closed its conn
+	// in the same event, so the old readLoop's ack write hits a dead conn and
+	// the daemon observes transport death, never the verdict payload. An ack
+	// carrying ErrWriterNotLive would require "port alive but incarnation dead",
+	// which cannot exist here. The authoritative fence assertions are therefore
+	// host-side: the sink verdict below and the untouched raw pen.
 	if werr := <-emitDone; werr == nil {
 		t.Fatalf("daemon emit err = nil, want non-nil (port torn down under it)")
 	}

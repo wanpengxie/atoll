@@ -198,8 +198,12 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		// missed (same discipline as WatchDown).
 		rt.WatchObs(a.ID, obsFwd)
 		// The daemon cell's pen is the link's relay-only RemoteWriter; it is NOT
-		// wrapped in a livePen — the home-side cross-wire death gate is deferred
-		// (§4 daemon door). The build closure just returns the prebuilt impl.
+		// wrapped in a livePen HERE — the death gate for this actor's writes is
+		// enforced HOME-SIDE (the Acceptor's emitSink wraps a livePen per emit,
+		// welded to the home's port incarnation). What stays deferred is only the
+		// DAEMON-side gate on this local relay (federation trigger): a daemon is
+		// its owner's own host, so a local stale-relay write still crosses the
+		// home gate before reaching truth. The build closure returns the prebuilt impl.
 		rt.Spawn(a.ID, func(actorrt.Incarnation) actorrt.Actor { return impl })
 	}
 
