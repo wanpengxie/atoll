@@ -13,13 +13,8 @@ dist/
 /daemon
 /worker
 /bin/
-.dalek/*
-!.dalek/pm/
-!.dalek/pm/**
-.dalek/pm/**/*.local.*
 *.local.*
 .logs/
-.dalek/runtime/
 .env
 .coagent-local/
 bin/
