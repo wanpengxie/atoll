@@ -13,13 +13,17 @@ import (
 // in the impl ordering; proto-layer1 §2.6 Sender Validate):
 //
 //   - envelope.sender.id == caller.actor_id (sender_mismatch otherwise)
-//   - actor_registry resolves sender.id (sender_deregistered when absent)
-//   - actor_registry.deregistered_at IS NULL (sender_deregistered when
-//     the actor was soft-deleted; system is exempt per spec)
-//   - envelope.sender.kind matches actor_kind; caller-provided kind that
-//     conflicts → sender_kind_mismatch. Always OVERWRITE the envelope
-//     with the registry's truth so downstream callers see the canonical
-//     value (forced-overwrite per L1 §10.2.1).
+//   - envelope.sender.kind matches the pen-welded caller.kind; caller-provided
+//     kind that conflicts → sender_kind_mismatch. Always OVERWRITE the envelope
+//     with the welded truth so downstream callers see the canonical value
+//     (forced-overwrite per L1 §10.2.1).
+//
+// There is deliberately NO actor_registry lookup here (incarnation-dynamics
+// build-spec §3.2 / §1.4): identity is pen-welded (sender.id above) and
+// liveness is gated one layer up by livePen.IsLive() (platform/internal/
+// link/livepen.go) on every write, before this chain even runs. A registry
+// name-list check here would be a second, redundant authority over the same
+// "is this a real, live writer" question — this step trusts the pen.
 type stepSenderConsistent struct {
 	deps Deps
 }
@@ -51,38 +55,36 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 		}, nil
 	}
 
-	rec, ok, err := s.deps.ActorRegistry.Lookup(ctx, env.Sender.ID)
-	if err != nil {
-		return outcome{}, fmt.Errorf("harness: actor lookup: %w", err)
-	}
-	if !ok {
-		return outcome{
-			RejectReason: HarnessSenderDeregistered,
-			Detail:       fmt.Sprintf("sender %q not in actor_registry", env.Sender.ID),
-		}, nil
-	}
-	if rec.DeregisteredAt != 0 && env.Sender.ID != actor.SystemActorID {
-		return outcome{
-			RejectReason: HarnessSenderDeregistered,
-			Detail:       fmt.Sprintf("sender %q deregistered_at=%d", env.Sender.ID, rec.DeregisteredAt),
-		}, nil
+	// Welded-kind closed-set gate (incarnation-dynamics-build-spec §3.2 point 5,
+	// the "mint 前统一收口点"): with the registry lookup gone, this is the ONE
+	// chokepoint every pen flows through before its kind is stamped into a
+	// durable row — the wire path is already guarded at attach (accept.go's
+	// ParseKind over declarations), but in-process pens (Home.Spawn's kind
+	// param, a registry Constructor's decl.Kind) reach here unvalidated, and
+	// the store's Append does not re-check kind (only the READ scan does), so
+	// without this gate an out-of-set kind would land as a poisoned row that
+	// only explodes on a later read. An out-of-set WELDED kind is an assembly/
+	// programmer error (Mint welded garbage), not a caller envelope fault — so
+	// it is a hard engine error, not a closed-set reject.
+	if _, ok := actor.ParseKind(string(c.kind)); !ok {
+		return outcome{}, fmt.Errorf("harness: welded sender kind %q out of closed set (assembly bug: Mint welded an invalid kind)", c.kind)
 	}
 
 	providedKind := env.Sender.Kind
-	if providedKind != "" && providedKind != rec.Kind {
-		// A caller-provided kind that contradicts the registry is a
-		// misreport of identity (A3 真实). The registry is the single
-		// identity truth; reject hard. There is no "trusted transport may
-		// self-assert its kind" mode — that axis is a downstream transport
-		// distinction the registry-as-truth axiom collapses.
+	if providedKind != "" && providedKind != c.kind {
+		// A caller-provided kind that contradicts the pen-welded truth is a
+		// misreport of identity (A3 真实). The weld is the single identity
+		// truth; reject hard. There is no "trusted transport may self-assert
+		// its kind" mode — that axis is a downstream transport distinction
+		// the weld-as-truth axiom collapses.
 		return outcome{
 			RejectReason: HarnessSenderKindMismatch,
-			Detail: fmt.Sprintf("envelope.sender.kind=%s does not match actor_registry=%s",
-				providedKind, rec.Kind),
+			Detail: fmt.Sprintf("envelope.sender.kind=%s does not match welded kind=%s",
+				providedKind, c.kind),
 		}, nil
 	}
-	// Forced overwrite — the registry is the truth.
-	env.Sender.Kind = rec.Kind
+	// Forced overwrite — the pen-welded kind is the truth.
+	env.Sender.Kind = c.kind
 
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return outcome{}, ctx.Err()

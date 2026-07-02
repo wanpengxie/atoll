@@ -13,7 +13,9 @@ package harness
 // (message.id is now a random uuid; an id UNIQUE collision is a pure integrity
 // error surfaced via classifyAppendErr's wire string); the visibility-scoped
 // audience wildcard was removed; and substrate went type-agnostic (no
-// type→handler routing left to mismatch) — leaving 28.
+// type→handler routing left to mismatch); the sender door's registry
+// retirement later dropped harness_sender_deregistered the same way —
+// leaving 27.
 //
 // No HTTPStatus() method: mapping a reason to an HTTP status code (strerror)
 // is a transport binding concern, not a substrate engine concern. This type
@@ -42,10 +44,12 @@ const (
 	// Step 3 — Normalize (time-relation guard)
 	HarnessTimeInvalid HarnessRejectReason = "harness_time_invalid"
 
-	// Step 4 — Sender Validate
+	// Step 4 — Sender Validate. (harness_sender_deregistered was retired with
+	// the sender door's registry lookup — the step trusts the pen weld, and a
+	// reason with zero producers is not in the errno vocabulary, same rule as
+	// the v2 drops above.)
 	HarnessSenderMismatch     HarnessRejectReason = "harness_sender_mismatch"
 	HarnessSenderKindMismatch HarnessRejectReason = "harness_sender_kind_mismatch"
-	HarnessSenderDeregistered HarnessRejectReason = "harness_sender_deregistered"
 
 	// Step 5 — Type / Kind Validate
 	HarnessTypeUnknown                    HarnessRejectReason = "harness_type_unknown"

@@ -44,6 +44,12 @@ type caller struct {
 	// step 1 / step 3 compare it against envelope.sender.id.
 	actorID actor.ActorID
 
+	// kind is the WELDED kind — set once at Mint time, the pen-authoritative
+	// counterpart of actorID. stepSenderConsistent reads it (via
+	// callerFromCtx) instead of querying the registry: kind is welded truth,
+	// not a name-list lookup (§3.2 incarnation-dynamics-build-spec.md).
+	kind actor.Kind
+
 	// chID is the channel binding the caller is authenticated for.
 	// Step 0/1 rejects (harness_engine_acl_denied) when it differs from the
 	// harness-bound channel.
@@ -60,11 +66,13 @@ type Deps struct {
 	// the envelope-shape step.
 	ChannelID channel.ID
 
-	// ActorRegistry resolves sender.id / audience entries to storespec.Record
-	// (kind / binding / deregistration timestamp). Required. (The substrate is
-	// type-agnostic — there is no TypeRegistry dep: business-type vocabulary is
-	// a domain concern, not a substrate write-time check.)
-	ActorRegistry storespec.Registry
+	// (There is NO ActorRegistry dep: the sender door trusts the pen weld —
+	// identity + kind are welded at Mint, liveness is gated one layer up by
+	// livePen.IsLive() — so no step reads the membership registry at write
+	// time (incarnation-dynamics-build-spec §3.2; the receiver/audience half
+	// was evicted earlier by root4). The substrate is likewise type-agnostic —
+	// no TypeRegistry dep either: business-type vocabulary is a domain
+	// concern, not a substrate write-time check.)
 
 	// Log is the channel-local messages-table sink. Required — step 9
 	// engine append calls Log.Append. (v2: no fencing — single writer.)
@@ -85,9 +93,6 @@ type Deps struct {
 func (d Deps) Validate() error {
 	if d.ChannelID == "" {
 		return errors.New("harness: Deps.ChannelID required")
-	}
-	if d.ActorRegistry == nil {
-		return errors.New("harness: Deps.ActorRegistry required")
 	}
 	if d.Log == nil {
 		return errors.New("harness: Deps.Log required")

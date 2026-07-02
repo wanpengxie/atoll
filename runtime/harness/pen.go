@@ -15,15 +15,17 @@ type minter struct {
 	chain *chain
 }
 
-// Mint produces a Pen welded to (actorID, chID). The returned pen commits every
-// write under that identity and the holder cannot change it — the substrate's
-// "actorID and write capability are welded inseparably" invariant. Mint is deterministic and cheap (no
-// per-pen state beyond the welded principal), so admission points may Mint
-// per-emit freely.
-func (m *minter) Mint(actorID actor.ActorID, chID channel.ID) Pen {
+// Mint produces a Pen welded to (actorID, kind, chID). The returned pen commits
+// every write under that identity and the holder cannot change it — the
+// substrate's "actorID and write capability are welded inseparably" invariant.
+// kind is welded here too (not backfilled from a registry lookup mid-chain):
+// stepSenderConsistent reads the welded kind, so Mint is the single source of
+// truth for both id and kind. Mint is deterministic and cheap (no per-pen state
+// beyond the welded principal), so admission points may Mint per-emit freely.
+func (m *minter) Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID) Pen {
 	return &boundPen{
 		chain:     m.chain,
-		principal: caller{actorID: actorID, chID: chID},
+		principal: caller{actorID: actorID, kind: kind, chID: chID},
 	}
 }
 
@@ -45,9 +47,10 @@ type boundPen struct {
 // rather than quietly corrected — a static overwrite would hide the misuse
 // (feedback_agent_consumer_structural_boundary).
 //
-// Sender.Kind is NOT filled here: step 4 (sender_consistent) force-overwrites it
-// from the registry truth. The welded caller is set on the outermost ctx layer
-// (shadow-proof against any pre-stuffed value) before the chain runs.
+// Sender.Kind is NOT filled here either: step 4 (sender_consistent) force-
+// overwrites it from the pen-welded caller.kind (read via callerFromCtx), same
+// truth source as env.Sender.ID. The welded caller is set on the outermost ctx
+// layer (shadow-proof against any pre-stuffed value) before the chain runs.
 func (p *boundPen) Write(ctx context.Context, env *message.Envelope) (WriteResult, error) {
 	if env == nil {
 		// Defer the nil check to the chain so the error vocabulary stays in one

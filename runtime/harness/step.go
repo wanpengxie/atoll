@@ -87,5 +87,5 @@ type Pen interface {
 // is the highest capability in the system, so archtest confines harness.Minter
 // type references to the platform tree.
 type Minter interface {
-	Mint(actorID actor.ActorID, chID channel.ID) Pen
+	Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID) Pen
 }

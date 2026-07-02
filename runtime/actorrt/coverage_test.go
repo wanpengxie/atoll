@@ -294,6 +294,7 @@ func (fakeErrPresence) observe(context.Context, ObsKind) (ObsValue, error) {
 func (p fakeErrPresence) startedAt() time.Time { return p.started }
 func (fakeErrPresence) cancelRequest(message.ID) {}
 func (fakeErrPresence) stop()                    {}
+func (fakeErrPresence) initiateStop()            {}
 func (fakeErrPresence) isLive() bool             { return false }
 func (fakeErrPresence) markDead()                {}
 

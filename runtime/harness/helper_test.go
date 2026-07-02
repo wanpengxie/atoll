@@ -39,10 +39,9 @@ func newTestStore(t *testing.T) *store.ChannelStores {
 func testDeps(t *testing.T, cs *store.ChannelStores) Deps {
 	t.Helper()
 	return Deps{
-		ChannelID:     testChannelID,
-		ActorRegistry: cs.Registry,
-		Log:           cs.Log,
-		NowMs:         func() int64 { return fixedNowMs },
+		ChannelID: testChannelID,
+		Log:       cs.Log,
+		NowMs:     func() int64 { return fixedNowMs },
 	}
 }
 
@@ -59,20 +58,25 @@ func registerActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID, kind
 	}
 }
 
-// deregisterActor soft-deletes an actor (deregistered_at != 0).
-func deregisterActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID) {
-	t.Helper()
-	if err := cs.Membership.Deregister(context.Background(), id, fixedNowMs+1); err != nil {
-		t.Fatalf("deregister actor %q: %v", id, err)
-	}
-}
-
 // ctxCaller returns a context carrying a caller bound to the test channel.
 // Tests drive the internal chain directly (step-isolation), so they set the
 // caller via the package-internal ctxWithCaller rather than minting a pen.
 func ctxCaller(id actor.ActorID) context.Context {
 	return ctxWithCaller(context.Background(), caller{
 		actorID: id,
+		chID:    testChannelID,
+	})
+}
+
+// ctxCallerKind returns a context carrying a caller bound to the test channel
+// with an explicit WELDED kind — the pen-weld counterpart of registerActor's
+// registry row, for tests that need to inject a specific kind without a
+// registry lookup (stepSenderConsistent reads kind from the weld, not the
+// registry — incarnation-dynamics-build-spec §3.2).
+func ctxCallerKind(id actor.ActorID, kind actor.Kind) context.Context {
+	return ctxWithCaller(context.Background(), caller{
+		actorID: id,
+		kind:    kind,
 		chID:    testChannelID,
 	})
 }

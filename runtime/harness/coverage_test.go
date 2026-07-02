@@ -16,18 +16,6 @@ import (
 // behaviour is supplied per-test. We never touch production .go.
 // ---------------------------------------------------------------------
 
-type stubRegistry struct {
-	lookup func(ctx context.Context, id actor.ActorID) (storespec.Record, bool, error)
-}
-
-func (s stubRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec.Record, bool, error) {
-	return s.lookup(ctx, id)
-}
-func (s stubRegistry) Exists(context.Context, actor.ActorID) (bool, error) { return false, nil }
-func (s stubRegistry) ListActive(context.Context) ([]storespec.Record, error) {
-	return nil, nil
-}
-
 type stubLog struct {
 	appendFn   func(ctx context.Context, env *message.Envelope, isTerminal bool) (storespec.AppendResult, error)
 	findByID   func(ctx context.Context, id message.ID) (*storespec.StoredRow, bool, error)
@@ -53,11 +41,6 @@ func (m *spyMetrics) IncCounter(name string, tags ...string) {
 	m.calls = append(m.calls, append([]string{name}, tags...))
 }
 
-// activeRecord returns an active agent record for sender/audience resolution.
-func activeRecord(id actor.ActorID) storespec.Record {
-	return storespec.Record{ID: id, Kind: actor.KindAgent, CreatedAt: fixedNowMs}
-}
-
 // ---------------------------------------------------------------------
 // deps.go — Validate + NoopMetrics.IncCounter + New defaults
 // ---------------------------------------------------------------------
@@ -66,20 +49,14 @@ func TestDeps_ValidateMissingFields(t *testing.T) {
 	if err := (Deps{}).Validate(); err == nil {
 		t.Fatalf("empty Deps should fail Validate")
 	}
-	// ChannelID set, ActorRegistry nil → line 87-89.
+	// ChannelID set, Log nil → missing-Log branch.
 	if err := (Deps{ChannelID: testChannelID}).Validate(); err == nil {
-		t.Fatalf("missing ActorRegistry should fail")
-	}
-	// ChannelID + Registry set, Log nil → line 90-92.
-	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-		return storespec.Record{}, false, nil
-	}}
-	if err := (Deps{ChannelID: testChannelID, ActorRegistry: reg}).Validate(); err == nil {
 		t.Fatalf("missing Log should fail")
 	}
-	// Fully wired → nil.
+	// Fully wired → nil. (No ActorRegistry dep — the sender door trusts the
+	// pen weld, incarnation-dynamics-build-spec §3.2.)
 	lg := stubLog{}
-	if err := (Deps{ChannelID: testChannelID, ActorRegistry: reg, Log: lg}).Validate(); err != nil {
+	if err := (Deps{ChannelID: testChannelID, Log: lg}).Validate(); err != nil {
 		t.Fatalf("fully-wired Deps Validate = %v, want nil", err)
 	}
 }
@@ -91,9 +68,6 @@ func TestNoopMetrics_IncCounter(t *testing.T) {
 
 // New must fill NowMs / Logger / Metrics defaults when nil (chain.go:36-44).
 func TestNew_FillsDefaults(t *testing.T) {
-	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-		return activeRecord("agent:p"), true, nil
-	}}
 	lg := stubLog{
 		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
 			return storespec.AppendResult{Seq: 1}, nil
@@ -102,7 +76,7 @@ func TestNew_FillsDefaults(t *testing.T) {
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
 	// NowMs / Logger / Metrics all nil → defaults filled.
-	m, err := New(Deps{ChannelID: testChannelID, ActorRegistry: reg, Log: lg})
+	m, err := New(Deps{ChannelID: testChannelID, Log: lg})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -110,7 +84,7 @@ func TestNew_FillsDefaults(t *testing.T) {
 	// Drive a successful write so the default NowMs is actually invoked and a
 	// real (non-test) clock value lands in ts_received.
 	e := validEvent("m-default", "agent:p")
-	res, err := c.write(ctxCaller("agent:p"), e)
+	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), e)
 	if err != nil || !res.Accepted() {
 		t.Fatalf("write with defaulted deps: err=%v reason=%q", err, res.RejectReason)
 	}
@@ -142,15 +116,14 @@ func TestStepName_DefaultUnknownID(t *testing.T) {
 
 // chainWith builds the internal chain with stub deps + a spy Metrics,
 // exercising the observe* metric paths directly (step-isolation).
-func chainWith(t *testing.T, reg storespec.Registry, lg storespec.MessageLog) (*chain, *spyMetrics) {
+func chainWith(t *testing.T, lg storespec.MessageLog) (*chain, *spyMetrics) {
 	t.Helper()
 	spy := &spyMetrics{}
 	m, err := New(Deps{
-		ChannelID:     testChannelID,
-		ActorRegistry: reg,
-		Log:           lg,
-		NowMs:         func() int64 { return fixedNowMs },
-		Metrics:       spy,
+		ChannelID: testChannelID,
+		Log:       lg,
+		NowMs:     func() int64 { return fixedNowMs },
+		Metrics:   spy,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -160,28 +133,29 @@ func chainWith(t *testing.T, reg storespec.Registry, lg storespec.MessageLog) (*
 
 // A step that returns a hard error (not a reject) → Write maps it through
 // observeError (chain.go step-error path) and returns the wrapped error. We
-// trigger this at StepSenderConsistent by making the registry Lookup fail for
-// the sender (the kind+audience step no longer touches the registry — 根4).
+// trigger this at StepResponsePairing by making Log.FindByID fail for the
+// parent lookup — StepSenderConsistent no longer has an error-producing seam
+// of its own (no registry lookup left: incarnation-dynamics-build-spec
+// §3.2/§1.4, identity is pen-welded + livePen-gated, not registry-checked).
 func TestWrite_StepError_ObservedAndReturned(t *testing.T) {
-	lookupErr := errors.New("boom-registry")
-	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-		return storespec.Record{}, false, lookupErr // sender lookup fails
-	}}
+	findErr := errors.New("boom-find")
 	lg := stubLog{
 		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
 			return storespec.AppendResult{}, nil
 		},
-		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
+		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, findErr },
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
-	c, spy := chainWith(t, reg, lg)
+	c, spy := chainWith(t, lg)
 
-	res, err := c.write(ctxCaller("agent:p"), validEvent("rq", "agent:p"))
+	resp := makeResponse("")
+	resp.Payload = []byte(`{"status":"completed"}`)
+	res, err := c.write(ctxCallerKind("tool:xhs", actor.KindTool), resp)
 	if err == nil {
 		t.Fatalf("expected wrapped step error, got nil (res=%+v)", res)
 	}
-	if !errors.Is(err, lookupErr) {
-		t.Fatalf("error = %v, want wrapping %v", err, lookupErr)
+	if !errors.Is(err, findErr) {
+		t.Fatalf("error = %v, want wrapping %v", err, findErr)
 	}
 	// observeError must have incremented harness.error.
 	if !hasMetric(spy, "harness.error") {
@@ -192,9 +166,6 @@ func TestWrite_StepError_ObservedAndReturned(t *testing.T) {
 // Append returns a typed *storespec.AppendError → mapped to a closed-set
 // reject via observeReject (chain.go:108-116 + 141-157).
 func TestWrite_AppendTypedError_MapsToReject(t *testing.T) {
-	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-		return activeRecord("agent:p"), true, nil
-	}}
 	lg := stubLog{
 		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
 			return storespec.AppendResult{}, &storespec.AppendError{
@@ -206,9 +177,9 @@ func TestWrite_AppendTypedError_MapsToReject(t *testing.T) {
 		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
-	c, spy := chainWith(t, reg, lg)
+	c, spy := chainWith(t, lg)
 
-	res, err := c.write(ctxCaller("agent:p"), validEvent("m-app", "agent:p"))
+	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), validEvent("m-app", "agent:p"))
 	if err != nil {
 		t.Fatalf("typed AppendError should be a reject, not error: %v", err)
 	}
@@ -227,9 +198,6 @@ func TestWrite_AppendTypedError_MapsToReject(t *testing.T) {
 // and observeError records harness.error.
 func TestWrite_AppendPlainError_WrappedAsError(t *testing.T) {
 	appendErr := errors.New("disk on fire")
-	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-		return activeRecord("agent:p"), true, nil
-	}}
 	lg := stubLog{
 		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
 			return storespec.AppendResult{}, appendErr
@@ -237,9 +205,9 @@ func TestWrite_AppendPlainError_WrappedAsError(t *testing.T) {
 		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
-	c, spy := chainWith(t, reg, lg)
+	c, spy := chainWith(t, lg)
 
-	_, err := c.write(ctxCaller("agent:p"), validEvent("m-plain", "agent:p"))
+	_, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), validEvent("m-plain", "agent:p"))
 	if err == nil || !errors.Is(err, appendErr) {
 		t.Fatalf("plain append error = %v, want wrapping %v", err, appendErr)
 	}
@@ -248,23 +216,24 @@ func TestWrite_AppendPlainError_WrappedAsError(t *testing.T) {
 	}
 }
 
-// A step that panics → Write's deferred recover converts it to an error. We make
-// the sender Lookup panic at StepSenderConsistent (the kind+audience step no
-// longer touches the registry — 根4).
+// A step that panics → Write's deferred recover converts it to an error. We
+// make Log.FindByID panic at StepResponsePairing (StepSenderConsistent no
+// longer has a seam to panic through — no registry lookup left, §3.2/§1.4).
 func TestWrite_PanicRecovered(t *testing.T) {
-	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-		panic("step blew up")
-	}}
 	lg := stubLog{
 		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
 			return storespec.AppendResult{}, nil
 		},
-		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
+		findByID: func(context.Context, message.ID) (*storespec.StoredRow, bool, error) {
+			panic("step blew up")
+		},
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
-	c, _ := chainWith(t, reg, lg)
+	c, _ := chainWith(t, lg)
 
-	_, err := c.write(ctxCaller("agent:p"), validEvent("rq", "agent:p"))
+	resp := makeResponse("")
+	resp.Payload = []byte(`{"status":"completed"}`)
+	_, err := c.write(ctxCallerKind("tool:xhs", actor.KindTool), resp)
 	if err == nil {
 		t.Fatalf("panic should be recovered into an error")
 	}
@@ -275,9 +244,6 @@ func TestWrite_PanicRecovered(t *testing.T) {
 // makes Chain.Write call observeReject with reason "". We assert no
 // harness.reject counter is recorded (the metric branch is skipped).
 func TestWrite_AppendEmptyReason_ObserveRejectNoOp(t *testing.T) {
-	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-		return activeRecord("agent:p"), true, nil
-	}}
 	lg := stubLog{
 		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
 			return storespec.AppendResult{}, &storespec.AppendError{Reason: "", Detail: "no reason"}
@@ -285,9 +251,9 @@ func TestWrite_AppendEmptyReason_ObserveRejectNoOp(t *testing.T) {
 		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
-	c, spy := chainWith(t, reg, lg)
+	c, spy := chainWith(t, lg)
 
-	res, err := c.write(ctxCaller("agent:p"), validEvent("m-empty", "agent:p"))
+	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), validEvent("m-empty", "agent:p"))
 	if err != nil {
 		t.Fatalf("empty-reason AppendError should map to a WriteResult, got err=%v", err)
 	}
@@ -338,28 +304,17 @@ func TestStepNormalize_NilEnvelope(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
-// step_sender_consistent.go — Lookup error (51-53) + ctx canceled (83-85)
+// step_sender_consistent.go — ctx canceled (final guard). The Lookup-error
+// seam this section used to cover is gone: the step no longer calls
+// ActorRegistry.Lookup at all (incarnation-dynamics-build-spec §3.2/§1.4 —
+// identity is pen-welded + livePen-gated one layer up, not registry-checked
+// here). That correctness now lives in platform/internal/link/livepen_test.go
+// (ErrWriterNotLive).
 // ---------------------------------------------------------------------
 
-func TestStepSenderConsistent_LookupError(t *testing.T) {
-	wantErr := errors.New("registry down")
-	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-		return storespec.Record{}, false, wantErr
-	}}
-	deps := Deps{ChannelID: testChannelID, ActorRegistry: reg}
-	env := validEvent("m1", "agent:p")
-	_, err := runStep(t, newStepSenderConsistent, deps, ctxCaller("agent:p"), env)
-	if err == nil || !errors.Is(err, wantErr) {
-		t.Fatalf("lookup error = %v, want wrapping %v", err, wantErr)
-	}
-}
-
 func TestStepSenderConsistent_CtxCanceled(t *testing.T) {
-	reg := stubRegistry{lookup: func(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-		return activeRecord("agent:p"), true, nil
-	}}
-	deps := Deps{ChannelID: testChannelID, ActorRegistry: reg}
-	ctx, cancel := context.WithCancel(ctxCaller("agent:p"))
+	deps := Deps{ChannelID: testChannelID}
+	ctx, cancel := context.WithCancel(ctxCallerKind("agent:p", actor.KindAgent))
 	cancel() // canceled before run → final guard returns ctx.Err()
 	env := validEvent("m1", "agent:p")
 	_, err := runStep(t, newStepSenderConsistent, deps, ctx, env)

@@ -8,59 +8,50 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/message"
 )
 
-// StepSenderConsistent contract (A3 真实 — registry is the single identity truth).
+// StepSenderConsistent contract (A3 真实 — the pen weld is the single identity
+// truth; there is no registry lookup left in this step —
+// incarnation-dynamics-build-spec §3.2/§1.4). The two registry-backed
+// rejection cases this file used to exercise ("sender not in registry",
+// "deregistered sender rejects deregistered") are gone: that correctness now
+// lives one layer up, in livePen.IsLive() (platform/internal/link/livepen.go,
+// ErrWriterNotLive), which runs before the chain and cannot be exercised from
+// this package's step-isolation harness. See livepen_test.go for its coverage.
 func TestStepSenderConsistent(t *testing.T) {
-	cs := newTestStore(t)
-	deps := testDeps(t, cs)
-	registerActor(t, cs, actor.ActorID("agent:p"), actor.KindAgent)
-	deregisterActor(t, cs, actor.ActorID("agent:p")) // for the deregistered case below
-	registerActor(t, cs, actor.ActorID("agent:live"), actor.KindAgent)
+	deps := Deps{}
 
 	tests := []struct {
 		name   string
-		caller actor.ActorID
+		ctx    context.Context
 		sender message.Sender
 		reason HarnessRejectReason
 	}{
 		{
 			name:   "no caller context defensively acl_denied",
-			caller: "",
+			ctx:    context.Background(),
 			sender: message.Sender{ID: "agent:live"},
 			reason: HarnessEngineACLDenied,
 		},
 		{
 			name:   "sender.id != caller rejects sender_mismatch",
-			caller: "agent:live",
+			ctx:    ctxCallerKind("agent:live", actor.KindAgent),
 			sender: message.Sender{ID: "agent:other"},
 			reason: HarnessSenderMismatch,
 		},
 		{
-			name:   "sender not in registry rejects deregistered",
-			caller: "agent:ghost",
-			sender: message.Sender{ID: "agent:ghost"},
-			reason: HarnessSenderDeregistered,
-		},
-		{
-			name:   "deregistered sender rejects deregistered",
-			caller: "agent:p",
-			sender: message.Sender{ID: "agent:p"},
-			reason: HarnessSenderDeregistered,
-		},
-		{
-			name:   "caller-provided kind conflicting with registry rejects kind_mismatch",
-			caller: "agent:live",
+			name:   "caller-provided kind conflicting with welded kind rejects kind_mismatch",
+			ctx:    ctxCallerKind("agent:live", actor.KindAgent),
 			sender: message.Sender{ID: "agent:live", Kind: actor.KindTool},
 			reason: HarnessSenderKindMismatch,
 		},
 		{
 			name:   "live sender, no provided kind accepts",
-			caller: "agent:live",
+			ctx:    ctxCallerKind("agent:live", actor.KindAgent),
 			sender: message.Sender{ID: "agent:live"},
 			reason: "",
 		},
 		{
 			name:   "live sender, matching provided kind accepts",
-			caller: "agent:live",
+			ctx:    ctxCallerKind("agent:live", actor.KindAgent),
 			sender: message.Sender{ID: "agent:live", Kind: actor.KindAgent},
 			reason: "",
 		},
@@ -69,11 +60,7 @@ func TestStepSenderConsistent(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			e := validEvent("m1", tc.sender.ID)
 			e.Sender = tc.sender
-			ctx := context.Background()
-			if tc.caller != "" {
-				ctx = ctxCaller(tc.caller)
-			}
-			out, err := runStep(t, newStepSenderConsistent, deps, ctx, e)
+			out, err := runStep(t, newStepSenderConsistent, deps, tc.ctx, e)
 			if err != nil {
 				t.Fatalf("err: %v", err)
 			}
@@ -84,15 +71,13 @@ func TestStepSenderConsistent(t *testing.T) {
 	}
 }
 
-// On accept the registry kind is force-overwritten onto the envelope (truth wins).
+// On accept the welded kind is force-overwritten onto the envelope (truth wins).
 func TestStepSenderConsistent_ForcedKindOverwrite(t *testing.T) {
-	cs := newTestStore(t)
-	deps := testDeps(t, cs)
-	registerActor(t, cs, actor.ActorID("tool:xhs"), actor.KindTool)
+	deps := Deps{}
 
 	e := validEvent("m1", "tool:xhs")
 	e.Sender = message.Sender{ID: "tool:xhs"} // no kind provided
-	out, err := runStep(t, newStepSenderConsistent, deps, ctxCaller("tool:xhs"), e)
+	out, err := runStep(t, newStepSenderConsistent, deps, ctxCallerKind("tool:xhs", actor.KindTool), e)
 	if err != nil {
 		t.Fatalf("err: %v", err)
 	}
@@ -100,6 +85,6 @@ func TestStepSenderConsistent_ForcedKindOverwrite(t *testing.T) {
 		t.Fatalf("unexpected reject %q", out.RejectReason)
 	}
 	if e.Sender.Kind != actor.KindTool {
-		t.Fatalf("sender.kind = %q, want registry truth tool", e.Sender.Kind)
+		t.Fatalf("sender.kind = %q, want welded truth tool", e.Sender.Kind)
 	}
 }

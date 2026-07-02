@@ -403,6 +403,14 @@ func (p *port) die(cause error) {
 	})
 }
 
+// initiateStop implements presence: the non-blocking, idempotent SIGNAL half of
+// teardown (§3.1a) — port already has exactly this shape in die(): it never
+// joins, it self-evicts via onExit, and cause==nil already skips the onDown
+// death edge (the same "clean stop, no closure obligation" semantics stop()
+// wants). A dying parent's cascade (removeIf) calls this to signal a forked
+// child without joining it.
+func (p *port) initiateStop() { p.die(nil) }
+
 // stop is the external teardown: mark stopping (so the loops' die() publishes NO
 // presence-down edge), cancel + close to unblock the loops, then join on done.
 func (p *port) stop() {

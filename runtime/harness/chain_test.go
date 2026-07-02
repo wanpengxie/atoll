@@ -42,7 +42,7 @@ func TestChain_WriteAcceptsEventDurably(t *testing.T) {
 		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindEvent, Type: "agent.text",
 		Audience: message.Audience{"x"},
 	}
-	res, err := c.write(ctxCaller("agent:p"), e)
+	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), e)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -145,7 +145,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 		Sender: message.Sender{ID: "agent:caller"}, Kind: message.KindRequest, Type: "xhs.publish",
 		Audience: message.Audience{"tool:xhs"}, Payload: json.RawMessage(`{}`),
 	}
-	if res, err := c.write(ctxCaller("agent:caller"), req); err != nil || !res.Accepted() {
+	if res, err := c.write(ctxCallerKind("agent:caller", actor.KindAgent), req); err != nil || !res.Accepted() {
 		t.Fatalf("request write: err=%v reason=%q", err, res.RejectReason)
 	}
 
@@ -156,7 +156,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 		ParentID: "req1", Audience: message.Audience{"agent:caller"},
 		Payload: json.RawMessage(`{"status":"completed"}`),
 	}
-	res, err := c.write(ctxCaller("tool:xhs"), resp)
+	res, err := c.write(ctxCallerKind("tool:xhs", actor.KindTool), resp)
 	if err != nil || !res.Accepted() {
 		t.Fatalf("response write: err=%v reason=%q", err, res.RejectReason)
 	}
@@ -176,7 +176,7 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 		ParentID: "req1", Audience: message.Audience{"agent:caller"},
 		Payload: json.RawMessage(`{"status":"failed","reason":"receiver_internal_error"}`),
 	}
-	res2, err := c.write(ctxCaller("tool:xhs"), resp2)
+	res2, err := c.write(ctxCallerKind("tool:xhs", actor.KindTool), resp2)
 	if err != nil {
 		t.Fatalf("second response write err: %v", err)
 	}
@@ -198,10 +198,10 @@ func TestChain_DuplicateEnvelopeIDRejectsAtAppend(t *testing.T) {
 			Audience: message.Audience{"x"},
 		}
 	}
-	if res, err := c.write(ctxCaller("agent:p"), mk()); err != nil || !res.Accepted() {
+	if res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), mk()); err != nil || !res.Accepted() {
 		t.Fatalf("first write: err=%v reason=%q", err, res.RejectReason)
 	}
-	res, err := c.write(ctxCaller("agent:p"), mk())
+	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), mk())
 	if err != nil {
 		t.Fatalf("second write err: %v", err)
 	}

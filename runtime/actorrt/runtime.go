@@ -40,6 +40,17 @@ type presence interface {
 	// markDead flips the per-incarnation live atomic to false. Called from the
 	// death path / stop / pointer-identity eviction. Idempotent.
 	markDead()
+	// initiateStop is the non-blocking, idempotent SIGNAL half of teardown — it
+	// triggers death (cancel + immediate onExit self-eviction) and returns at
+	// once, WITHOUT joining the presence's own goroutine. It exists so a dying
+	// parent's cascade (removeIf, §3.1a) can tear down owned children from
+	// within its own death path without deadlocking: a child's initiateStop
+	// synchronously re-enters onExit (which takes r.mu), so calling the
+	// join-and-signal stop() here — from the dying goroutine — would block the
+	// parent's own teardown on the child's goroutine actually exiting, which is
+	// not guaranteed to be prompt. stop() is initiateStop() plus a join, for
+	// callers on a DIFFERENT goroutine (Despawn/StopAll).
+	initiateStop()
 }
 
 // ErrNotHosted is returned when no presence is hosted for the addressed id.
@@ -93,6 +104,13 @@ type Runtime struct {
 	watchers  []PresenceWatcher
 	obsWatch  map[actor.ActorID][]ObsWatcher
 	mailbox   int
+	// owned tracks the fork ownership edge: parent-presence -> its forked
+	// children's presences (§3.1/§3.1a). It lives ONLY in memory (an incarnation
+	// is volatile, §1.3) and is pruned of already-not-live entries on every Fork
+	// (amortised cleanup — no separate sweep/GC) and cleared wholesale for a key
+	// when that parent presence itself dies (removeIf cascades initiateStop() to
+	// every child still on the list at that instant).
+	owned map[presence][]presence
 }
 
 // Config configures a Runtime.
@@ -153,6 +171,7 @@ func New(cfg Config) (*Runtime, Deliverer) {
 		logger:    logger,
 		presences: make(map[actor.ActorID]presence),
 		obsWatch:  make(map[actor.ActorID][]ObsWatcher),
+		owned:     make(map[presence][]presence),
 		mailbox:   mb,
 	}
 	return r, deliverer{r}
@@ -342,6 +361,58 @@ func (r *Runtime) Spawn(id actor.ActorID, build func(Incarnation) Actor) Incarna
 	return inc
 }
 
+// LiveIDs returns a snapshot of every ActorID currently occupying a presence
+// slot (§3.4, reconcile's bulk enumeration for the desired−actual diff) — the
+// KEY SET of r.presences, taken under r.mu. It is deliberately NOT filtered by
+// isLive(): Spawn's map-insert and its live-atomic flip are the SAME critical
+// section (see the go-live step above), so presence-map membership already IS
+// "currently live" — re-filtering would be redundant work over an invariant
+// that already holds. Order is unspecified.
+func (r *Runtime) LiveIDs() []actor.ActorID {
+	r.mu.RLock()
+	ids := make([]actor.ActorID, 0, len(r.presences))
+	for id := range r.presences {
+		ids = append(ids, id)
+	}
+	r.mu.RUnlock()
+	return ids
+}
+
+// SpawnIfAbsent mints id ONLY IF no presence currently occupies it — activation's
+// atomic CAS mint (§3.4), mirroring Fork's two-phase-with-recheck discipline.
+// Unlike Spawn (last-go-live-wins replace), SpawnIfAbsent NEVER replaces an
+// existing presence: build runs OUTSIDE the lock (same discipline as
+// Spawn/Fork), then absence is RE-CHECKED inside the SAME critical section as
+// the insert. If id is already occupied by the time the lock is taken —
+// someone else won the race (admission via Spawn, or another reconcile tick
+// via SpawnIfAbsent itself) — the freshly-built shell is discarded: never
+// inserted into presences, never started (ok=false). This is a real CAS, not
+// best-effort, because rebuild cost for agent-class actors (re-establishing
+// LLM context) is a real cost, not a theoretical nicety (§3.4).
+func (r *Runtime) SpawnIfAbsent(id actor.ActorID, build func(Incarnation) Actor) (Incarnation, bool) {
+	r.mu.RLock()
+	_, occupied := r.presences[id]
+	r.mu.RUnlock()
+	if occupied { // fast-path: skip the build entirely if already obviously taken.
+		return Incarnation{}, false
+	}
+
+	c := allocShell(r.parent, id, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
+	inc := Incarnation{id: id, p: c}
+	c.impl = build(inc) // OUTSIDE the lock; IsLive(inc)==false during build.
+
+	r.mu.Lock()
+	if _, occupied := r.presences[id]; occupied { // same critical section re-check
+		r.mu.Unlock() // lost the race: discard the shell, never c.start() it.
+		return Incarnation{}, false
+	}
+	r.presences[id] = c
+	c.live.Store(true) // go-live: register + liveness atomic flip are one critical section.
+	r.mu.Unlock()
+	c.start()
+	return inc, true
+}
+
 // IsLive reports whether inc is still the live incarnation, by POINTER (ABA-safe)
 // and LOCK-FREE (a per-incarnation atomic, never r.mu). It is the WHEN-validity
 // authority a liveCap consults per write; a nil handle is never live.
@@ -391,10 +462,24 @@ func (r *Runtime) removeIf(id actor.ActorID, self presence) {
 	if cur, ok := r.presences[id]; ok && cur == self {
 		delete(r.presences, id)
 	}
+	// Ownership-edge cascade (§3.1a): this presence may itself be a fork parent.
+	// Take its children list and drop the r.owned entry in the SAME critical
+	// section as the eviction above (so a concurrent Fork sees either the full
+	// list-to-be-cascaded or nothing — never a half-updated slice).
+	children := r.owned[self]
+	delete(r.owned, self)
 	r.mu.Unlock()
 	// This presence is dying — flip its liveness atomic so any capability welded
 	// to it (livePen) fails the WHEN gate from here on. Idempotent.
 	self.markDead()
+	// Cascade OUTSIDE the lock, signal-only (§3.1a): initiateStop() must never be
+	// called while holding r.mu — a child's initiateStop synchronously re-enters
+	// onExit/removeIf, which takes r.mu again (deadlock if still locked here).
+	// Each child's own death path recurses this same removeIf on ITS children —
+	// depth-first, no level of the cascade waits on the next.
+	for _, child := range children {
+		child.initiateStop()
+	}
 }
 
 // Despawn stops and removes the incarnation inc (no-op unless the map still
@@ -420,6 +505,33 @@ func (r *Runtime) Despawn(inc Incarnation) {
 		inc.p.markDead()
 		inc.p.stop()
 	}
+}
+
+// DespawnID stops and removes whatever presence CURRENTLY occupies id, if any
+// (§3.4 activation's scoped deactivation — the caller only ever holds an id
+// there, never an Incarnation handle: the eager-managed set is tracked
+// across MULTIPLE Reconcile ticks as a plain id set, and retaining stale
+// Incarnation pointers across ticks would reintroduce exactly the ABA risk
+// pointer-identity discipline exists to avoid). It looks the presence up
+// fresh and evicts it under the SAME critical section — not weaker than
+// Despawn(inc), just keyed differently: Despawn requires a caller-held
+// pointer proving WHICH embodiment to kill, DespawnID kills "whoever is live
+// for id right now" (mirrors Linux kill(pid, sig) — by-name, not by-handle).
+// Returns false if id has no live presence (a no-op, not an error — the
+// scoped deactivation diff can legitimately name an id that already died on
+// its own between two ticks).
+func (r *Runtime) DespawnID(id actor.ActorID) bool {
+	r.mu.Lock()
+	p, ok := r.presences[id]
+	if ok {
+		delete(r.presences, id)
+	}
+	r.mu.Unlock()
+	if ok {
+		p.markDead()
+		p.stop()
+	}
+	return ok
 }
 
 // deliver routes env to every audience presence hosted by this Runtime by

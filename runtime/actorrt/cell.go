@@ -313,17 +313,44 @@ func (c *cell) cancelRequest(id message.ID) {
 	}
 }
 
-// stop closes the mailbox, cancels the cell ctx, and waits for the goroutine to
-// exit. Safe to call multiple times. It MUST be called only from a DIFFERENT
-// goroutine than the cell's own (it joins on c.done) — the death path never
-// calls stop(); it self-evicts via onExit instead.
-func (c *cell) stop() {
+// initiateStop implements presence: the non-blocking, idempotent SIGNAL half of
+// teardown (§3.1a) — trigger death and return at once, WITHOUT joining c.done.
+// It is stop()'s signal half; stop() = initiateStop() + join. Both share
+// stopOnce, so calling either (or both, in either order) is safe — the body
+// runs exactly once, and c.done is safe to read from multiple goroutines.
+//
+// It calls onExit IMMEDIATELY (mirroring port.die()'s existing onExit call) so
+// a cascaded child is removed from r.presences/LiveIDs() the instant this is
+// called, not lazily whenever its own goroutine notices ctx cancellation — a
+// dying parent's cascade (removeIf) calls ONLY this, never stop(), because
+// stop() joins the child's goroutine and a child's initiateStop synchronously
+// re-enters onExit/removeIf (which takes r.mu) — calling it while the parent's
+// own removeIf still held r.mu would deadlock (it doesn't: removeIf calls this
+// AFTER releasing r.mu).
+//
+// onExit/removeIf is already pointer-identity-idempotent (deletes IFF
+// r.presences[id]==self), so the cell's own goroutine later reaching its death
+// defer (cell.go start()'s onExit call) and calling onExit a SECOND time is a
+// safe no-op — the entry is already gone. impl.Stop()'s resource release still
+// runs on that natural exit path, unaffected by the early table removal here.
+func (c *cell) initiateStop() {
 	c.stopOnce.Do(func() {
 		c.live.Store(false) // fence any welded cap at once; the goroutine's defer also flips it.
 		c.mu.Lock()
 		c.closed = true
 		c.mu.Unlock()
 		c.cancel()
+		if c.onExit != nil {
+			c.onExit(c.id, c) // immediate table removal — do not wait for the goroutine to exit.
+		}
 	})
+}
+
+// stop closes the mailbox, cancels the cell ctx, and waits for the goroutine to
+// exit. Safe to call multiple times. It MUST be called only from a DIFFERENT
+// goroutine than the cell's own (it joins on c.done) — the death path never
+// calls stop(); it calls initiateStop() (the signal-only half) instead.
+func (c *cell) stop() {
+	c.initiateStop()
 	<-c.done
 }
