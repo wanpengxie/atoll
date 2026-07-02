@@ -329,9 +329,13 @@ func Open(cfg HomeConfig) (*Home, error) {
 //
 // 削 (deactivate, 反误杀): the diff is prevEagerDesired − currentDesired, NEVER
 // actual − desired. LiveIDs() mixes in system/human/fork-child/daemon-attach
-// embodiments this ring must never evict; only ids THIS ring minted in a prior
-// tick and no longer wants are DespawnID'd. Lazy members are not eager-managed and
-// never enter the tracked set.
+// embodiments this ring must never evict; the 削 set is every id that was
+// desired-always-on in the prior tick and is no longer desired (this includes an
+// always-on member first embodied by admission Home.Spawn, not only ids this ring
+// SpawnIfAbsent-minted — the ring is the authority for the always-on lifecycle
+// regardless of who first embodied it). 反误杀 holds because the protected
+// categories never enter the desired-always-on set, so they never enter
+// prevEagerDesired. Lazy members are not eager-managed and never enter it either.
 func (h *Home) reconcileActivation(ctx context.Context) {
 	if h.desired == nil {
 		return
