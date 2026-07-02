@@ -78,9 +78,21 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 		}
 	}
 
-	dsn := dbPath
+	// Per-CONNECTION pragmas ride the DSN, never a one-shot ExecContext:
+	// database/sql may retire and reopen the underlying connection (bad-conn
+	// recycle), and a pragma applied imperatively to the first connection
+	// silently vanishes on its replacement — foreign-key enforcement and
+	// busy_timeout would be OFF exactly on the recovery path. The modernc
+	// driver applies each _pragma= to EVERY connection it opens, so the DSN
+	// is the per-connection geometry. (journal_mode is persisted in the file
+	// itself; synchronous / foreign_keys / busy_timeout are per-connection.)
+	dsn := fmt.Sprintf(
+		"file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)",
+		dbPath)
 	if opts.ReadOnly {
-		dsn = fmt.Sprintf("file:%s?mode=ro&_pragma=busy_timeout(5000)", dbPath)
+		// WAL/synchronous not applicable to a read-only open; FK still guards
+		// any PRAGMA-sensitive read semantics, busy_timeout still applies.
+		dsn = fmt.Sprintf("file:%s?mode=ro&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", dbPath)
 	}
 
 	db, err := sql.Open("sqlite", dsn)
@@ -89,14 +101,12 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 	}
 
 	// modernc.org/sqlite is single-connection-safe; cap pool to 1 for the
-	// channel sqlite so WAL writers/readers don't fight pragma state.
+	// channel sqlite so WAL writers/readers don't fight pragma state. This
+	// pin is also LOAD-BEARING for messages.go's in-tx provisional-after-
+	// final re-check (single serialized connection = the re-check and the
+	// INSERT are atomic); TestChannelDBPoolPinnedToOneConnection anchors it.
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
-
-	if err := applyPragmas(ctx, db, opts); err != nil {
-		_ = db.Close()
-		return nil, err
-	}
 
 	if !opts.SkipDDL && !opts.ReadOnly {
 		if _, err := db.ExecContext(ctx, ddl); err != nil {
@@ -106,28 +116,6 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 	}
 
 	return db, nil
-}
-
-func applyPragmas(ctx context.Context, db *sql.DB, opts OpenOptions) error {
-	base := []string{
-		"PRAGMA journal_mode=WAL",
-		"PRAGMA synchronous=NORMAL",
-		"PRAGMA foreign_keys=ON",
-		"PRAGMA busy_timeout=5000",
-	}
-	if opts.ReadOnly {
-		// WAL pragma not applicable to read-only; foreign_keys still useful.
-		base = []string{
-			"PRAGMA foreign_keys=ON",
-			"PRAGMA busy_timeout=5000",
-		}
-	}
-	for _, p := range base {
-		if _, err := db.ExecContext(ctx, p); err != nil {
-			return fmt.Errorf("store: %s: %w", p, err)
-		}
-	}
-	return nil
 }
 
 // channelLocalSchemaShape is the authoritative set of (table -> required

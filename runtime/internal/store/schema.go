@@ -98,7 +98,7 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 -- share the one DB as sibling tables, never a separate library.
 --
 -- No scope column on resources, ever (§8.1, owner-pinned): actor-scoped objects
--- live in a SEPARATE storage locus (an actor_state-shaped table, deferred), so
+-- live in a SEPARATE storage locus (the actor_state table below, 期4), so
 -- scope is expressed by the STRUCTURE an object lives in, not a column (Unix:
 -- an anonymous mapping is not a file tagged "anonymous"). This table holds only
 -- channel-scoped objects.

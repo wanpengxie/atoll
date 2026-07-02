@@ -30,8 +30,9 @@ import (
 //
 // RETENTION (reviewed 2026-06-12): a kernel audit flagged the ACTOR-source axis
 // (ObsKind/ObsValue/Observer/Observe/PublishObs/ObsWatcher/WatchObs/OnObs) as a
-// cast-but-not-yet-wired vertical slice — zero production producer/consumer, and
-// the cross-wire arm is a no-op (no ipc KindObs frame; see port.observe). Owner
+// cast-but-not-yet-wired vertical slice — zero production producer/consumer.
+// (The ipc KindObs frame has since landed, so the cross-wire arm has its wire
+// vocabulary; see port.observe for the pull side's current state.) Owner
 // decision: RETAIN, do NOT rip. A business consumer is imminent (the moment an
 // agent/monitor integrates it will need actor-source obs), and completing it is
 // a pure-additive wire arm. So this is a DELIBERATELY-PENDING skeleton on an

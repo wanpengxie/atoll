@@ -46,7 +46,9 @@ const (
 // Schedule refuses to accept one at all — the structural half of "handle the
 // main entrance so the poison-row disposal path only has to catch what
 // slips past it" (rule evolution during a durable timer's sleep, 8.8 二).
-const reservedTypePrefix = "system."
+// References the protocol's one home so this ingress half can never drift
+// from the harness's authoritative gate on what "reserved" means.
+const reservedTypePrefix = message.ReservedTypePrefix
 
 // ScheduleReq is what an actor asks: "at FireAt, wake ME with this message."
 // No target (self-targeted, red line ❶ — a timer can only ever produce a

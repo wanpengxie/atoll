@@ -50,11 +50,14 @@ import (
 // New's fail-fast — so locking them would ban nothing dangerous (拒绝集 =
 // 真危险集, 一个不多).
 //
-// Allowlist: the runtime tree (OpenChannel / OpenScheduler produce these
-// values, so their signatures name the types) and the platform tree (the
-// assembler that receives and holds them). Same shadowing / dot-import
-// caveat as the harness lock: a review-layer offence, not worth a
-// go/types-grade pass pre-launch.
+// Allowlist: the runtime ROOT package only (OpenChannel / OpenScheduler
+// produce these values, so their signatures name the types — no runtime
+// SIBLING package has any business holding a minter: harness/actorrt/
+// accessdoor/schedule reference their own symbols unqualified, which this
+// selector walk never matches) and the platform tree (the assembler that
+// receives and holds them). Same shadowing / dot-import caveat as the
+// harness lock: a review-layer offence, not worth a go/types-grade pass
+// pre-launch.
 var minterConfinements = []struct {
 	pkg          string // import path of the guarded package
 	defaultLocal string // qualifier when the import carries no alias
@@ -96,8 +99,8 @@ func TestMinterTypeConfinement(t *testing.T) {
 			return nil
 		}
 		slash := filepath.ToSlash(path)
-		if strings.HasPrefix(slash, runtimeTreePrefix) || strings.HasPrefix(slash, platformPathPrefix) {
-			return nil // the legitimate producer / assembler trees
+		if isRuntimeRootFile(slash) || strings.HasPrefix(slash, platformPathPrefix) {
+			return nil // the legitimate producer (runtime root) / assembler (platform)
 		}
 		file, perr := parser.ParseFile(fset, path, nil, 0)
 		if perr != nil {

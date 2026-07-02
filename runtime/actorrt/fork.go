@@ -48,10 +48,16 @@ func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, build func(Inc
 	r.mu.Lock()
 	if _, exists := r.embodiments[childID]; exists { // collision = hard fail
 		r.mu.Unlock()
+		// Release the discarded shell's ctx node: allocShell derived it from
+		// r.parent, so an uncancelled discard would pin a child-context entry
+		// in the parent's tree for the whole channel lifetime (the shell never
+		// started; cancel is idempotent and unobserved).
+		c.cancel()
 		return Incarnation{}, ErrChildIDCollision
 	}
 	if r.embodiments[parent.id] != parent.p { // ② same critical section re-check
 		r.mu.Unlock() // not passed: do not insert, do not go-live.
+		c.cancel()    // same discard-release as the collision arm above
 		return Incarnation{}, ErrParentNotLive
 	}
 	r.embodiments[childID] = c

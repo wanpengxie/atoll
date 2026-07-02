@@ -38,7 +38,7 @@ func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (ou
 	// Reserved namespace authority — proto-layer1 §2.5 + §6.2.0. Even
 	// before checking registry membership, reject any non-system sender
 	// trying to forge a reserved system event.
-	if strings.HasPrefix(env.Type, "system.") {
+	if strings.HasPrefix(env.Type, message.ReservedTypePrefix) {
 		if _, reserved := reservedBootstrapTypeSet[env.Type]; reserved {
 			if env.Sender.Kind != actor.KindSystem || env.Sender.ID != actor.SystemActorID {
 				return outcome{

@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -60,6 +61,12 @@ type Engine struct {
 	wake chan struct{} // capacity 1, coalesced — a lost wake is harmless (the next tick recomputes due from scratch)
 	stop chan struct{}
 	done chan struct{}
+
+	// started guards the Start/Close lifecycle pair: double Start panics
+	// loud, Close before Start returns without joining (done is only ever
+	// closed by a run loop that ran). Lifecycle misuse is an assembly bug —
+	// it must fail at the misuse site, not deadlock or double-fire later.
+	started atomic.Bool
 }
 
 // New assembles the engine from deps and returns its two outward faces — a
@@ -96,14 +103,29 @@ func New(deps Deps) (Minter, *Engine, error) {
 
 // Start launches the run-loop goroutine. It does not block; Close joins it.
 func (e *Engine) Start() {
+	if !e.started.CompareAndSwap(false, true) {
+		// Loud, not silent: a second run loop would race fires against the
+		// first and re-close done on exit. Misassembly fails at the call
+		// site, not as a heisen-double-fire later.
+		panic("schedule: Engine.Start called twice")
+	}
 	go e.run()
 }
 
 // Close stops the run loop and joins its goroutine, then never touches the
 // store again (mirrors tap.Pump.Close). Safe to call once; a second call
 // would panic on the closed stop channel, same discipline as Pump.
+//
+// Close BEFORE Start (an assembly error-path `defer Close()` that fires when
+// a later wiring step failed) is legal and returns immediately: there is no
+// run loop to join, and waiting on done would deadlock the teardown forever.
+// The stop channel is still closed, so a Start that races/follows sees an
+// already-stopped engine and its run loop exits at once.
 func (e *Engine) Close() {
 	close(e.stop)
+	if !e.started.Load() {
+		return
+	}
 	<-e.done
 }
 

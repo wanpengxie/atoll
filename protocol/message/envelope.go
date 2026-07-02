@@ -60,6 +60,17 @@ type Envelope struct {
 	ExpiresAt     *int64          `json:"expires_at,omitempty"`
 }
 
+// ReservedTypePrefix is the substrate-authoritative message-type namespace
+// (proto-layer1 §2.5): a Type under this prefix may only be authored by the
+// substrate itself (concrete reserved names live in protocol/actor; the
+// PREFIX concept is protocol vocabulary and lives here, its one home). Both
+// enforcement halves reference this symbol — the harness reserved-type step
+// (the authoritative gate) and the schedule ingress guard (which refuses to
+// even accept a reserved-type timer, so a rule change can never strand a
+// durable row that fires into a permanent reject) — so the two halves cannot
+// drift apart on what "reserved" means.
+const ReservedTypePrefix = "system."
+
 // ---------------------------------------------------------------------
 // Wire field-set closure (L0 §7.3) — enforced by the TYPE, not by callers.
 // ---------------------------------------------------------------------

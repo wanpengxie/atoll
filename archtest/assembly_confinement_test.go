@@ -22,7 +22,7 @@ const platformPathPrefix = "../platform/"
 //
 // The runtime ROOT package (github.com/wanpengxie/ActOS/runtime) is PURE
 // assembly: its entire export surface is ChannelStores / OpenChannelOptions /
-// OpenChannel. OpenChannel hands back a ChannelStores whose .Log is the raw
+// OpenChannel / OpenScheduler. OpenChannel hands back a ChannelStores whose .Log is the raw
 // MessageLog (Append writes the messages table directly) and whose .Membership
 // mutates the actor_registry projection — both BYPASS the harness 9-step write
 // gate and Home.Spawn. Because the package is wholly assembly, the lock is at
