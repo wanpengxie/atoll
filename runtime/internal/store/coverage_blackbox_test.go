@@ -121,51 +121,63 @@ func TestApplyMemberTransitions_ClosedSetGate(t *testing.T) {
 	}
 }
 
-// The add-mirror appendTx fails when a message row already occupies the mirror
-// event's deterministic id (system.actor.registered:<id>:<at>). The whole tx
-// must roll back: neither the registry row nor any partial state survives.
-func TestApplyMemberTransitions_AddMirrorAppendConflict(t *testing.T) {
+// Mirror ids are random uuids, so a same-millisecond membership bounce
+// (add → remove → re-add, identical At) MUST succeed — under the former
+// deterministic <type>:<actor>:<at> id the re-add's mirror collided with the
+// first registration's on messages.id UNIQUE and rolled the whole re-add
+// back, which made any deterministic-At replayer (reconcile re-laying a
+// member plan, a seeded boot) fail permanently. Idempotency does not need
+// the deterministic id: it lives in the registry-state guard (changed=false
+// appends nothing) + the tx atomicity.
+func TestApplyMemberTransitions_SameMillisecondBounce(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	mirrorID := "system.actor.registered:collide:5000"
-	// Pre-occupy the mirror event id with an unrelated message row.
-	squat := newEnv(mirrorID, message.KindEvent, message.Audience{"system"})
-	if _, err := cs.Log.Append(ctx, squat, false); err != nil {
-		t.Fatalf("seed squat row: %v", err)
-	}
-	add := storespec.MemberActorAdd{ID: "collide", Kind: actor.KindAgent, At: 5000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err == nil {
-		t.Fatal("add mirror append must fail on the id collision")
-	}
-	// Rolled back: the registry row must NOT exist.
-	if _, ok, _ := cs.Registry.Lookup(ctx, "collide"); ok {
-		t.Error("failed transition must roll back the actor_registry row")
-	}
-}
-
-// The remove-mirror appendTx fails the same way: pre-occupy the deregistered
-// mirror id, then a real remove must fail and roll back (the actor stays active).
-func TestApplyMemberTransitions_RemoveMirrorAppendConflict(t *testing.T) {
-	ctx := context.Background()
-	cs := openTestChannel(t)
-
-	add := storespec.MemberActorAdd{ID: "rc", Kind: actor.KindAgent, At: 1000}
+	const at = int64(5000)
+	add := storespec.MemberActorAdd{ID: "bounce", Kind: actor.KindAgent, At: at}
 	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
 		t.Fatalf("add: %v", err)
 	}
-	mirrorID := "system.actor.deregistered:rc:6000"
-	squat := newEnv(mirrorID, message.KindEvent, message.Audience{"system"})
-	if _, err := cs.Log.Append(ctx, squat, false); err != nil {
-		t.Fatalf("seed squat row: %v", err)
+	if err := cs.Membership.ApplyMemberTransitions(ctx, nil,
+		[]storespec.MemberActorRemove{{ID: "bounce", At: at}}); err != nil {
+		t.Fatalf("remove: %v", err)
 	}
-	rm := storespec.MemberActorRemove{ID: "rc", At: 6000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{rm}); err == nil {
-		t.Fatal("remove mirror append must fail on the id collision")
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
+		t.Fatalf("same-ms re-add must succeed (uuid mirror ids cannot collide): %v", err)
 	}
-	// Rolled back: the actor must still be active.
-	rec, ok, _ := cs.Registry.Lookup(ctx, "rc")
+
+	rec, ok, _ := cs.Registry.Lookup(ctx, "bounce")
 	if !ok || !rec.IsActive() {
-		t.Error("failed remove transition must roll back; actor must stay active")
+		t.Fatalf("bounced actor must be active, ok=%v", ok)
+	}
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", "bounce")); n != 2 {
+		t.Errorf("registered mirrors = %d, want 2", n)
+	}
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", "bounce")); n != 1 {
+		t.Errorf("deregistered mirrors = %d, want 1", n)
+	}
+}
+
+// A mid-batch failure rolls the WHOLE transition tx back — no partial state,
+// no partial mirrors. (The former trigger, squatting a deterministic mirror
+// id, no longer exists — mirror ids are uuids — so the failure is injected
+// via the closed-set write gate: a poison entry after a good one.)
+func TestApplyMemberTransitions_MidBatchFailureRollsBackAll(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+
+	adds := []storespec.MemberActorAdd{
+		{ID: "good", Kind: actor.KindAgent, At: 1000},
+		{ID: "poison", Kind: "wizard", At: 1000}, // rejected by validateMemberIdentity
+	}
+	if err := cs.Membership.ApplyMemberTransitions(ctx, adds, nil); err == nil {
+		t.Fatal("poison entry must fail the batch")
+	}
+	// Rolled back: the good entry's registry row AND its mirror must not exist.
+	if _, ok, _ := cs.Registry.Lookup(ctx, "good"); ok {
+		t.Error("mid-batch failure must roll back the earlier registry row")
+	}
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", "good")); n != 0 {
+		t.Errorf("mid-batch failure must roll back the earlier mirror, got %d", n)
 	}
 }

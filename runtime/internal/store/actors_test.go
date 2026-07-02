@@ -2,6 +2,7 @@ package store_test
 
 import (
 	"context"
+	"encoding/json"
 	"sync/atomic"
 	"testing"
 
@@ -9,6 +10,31 @@ import (
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
+
+// mirrorEventsOf scans the log for mirror events of typ whose payload names
+// actorID. Mirror ids are random uuids (no deterministic id to FindByID), so
+// tests locate them by content, the same way a real consumer would.
+func mirrorEventsOf(t *testing.T, q storespec.MessageQuery, typ string, actorID string) []storespec.StoredRow {
+	t.Helper()
+	rows, err := q.ReadAfterSeq(context.Background(), 0, 1000)
+	if err != nil {
+		t.Fatalf("ReadAfterSeq: %v", err)
+	}
+	var out []storespec.StoredRow
+	for _, r := range rows {
+		if r.Envelope.Type != typ {
+			continue
+		}
+		var p struct {
+			ActorID string `json:"actor_id"`
+		}
+		if err := json.Unmarshal(r.Envelope.Payload, &p); err != nil || p.ActorID != actorID {
+			continue
+		}
+		out = append(out, r)
+	}
+	return out
+}
 
 // --- Insert / Lookup / Exists / Deregister -----------------------------------
 
@@ -171,11 +197,11 @@ func TestApplyMemberTransitions_AddEmitsMirror(t *testing.T) {
 	}
 
 	// Mirror event present in the log, system-addressed, event, non-terminal.
-	mirrorID := message.ID("system.actor.registered:tool:xhs:7000")
-	row, ok, err := cs.Log.FindByID(ctx, mirrorID)
-	if err != nil || !ok {
-		t.Fatalf("mirror event ok=%v err=%v", ok, err)
+	mirrors := mirrorEventsOf(t, cs.Query, "system.actor.registered", "tool:xhs")
+	if len(mirrors) != 1 {
+		t.Fatalf("registered mirrors = %d, want 1", len(mirrors))
 	}
+	row := mirrors[0]
 	e := row.Envelope
 	// The mirror event's channel scope is the BINDING (testChannelID, fixed at
 	// OpenChannel), never a per-call arg — F3.
@@ -253,8 +279,8 @@ func TestApplyMemberTransitions_DuplicateAddIdempotent(t *testing.T) {
 	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add2}, nil); err != nil {
 		t.Fatalf("duplicate add: %v", err)
 	}
-	if _, ok, _ := cs.Log.FindByID(ctx, "system.actor.registered:tool:xhs:8000"); ok {
-		t.Errorf("duplicate add emitted a second mirror event")
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", "tool:xhs")); n != 1 {
+		t.Errorf("registered mirrors = %d after duplicate add, want 1 (idempotent no-op emits nothing)", n)
 	}
 }
 
@@ -275,8 +301,8 @@ func TestApplyMemberTransitions_RemoveEmitsMirror(t *testing.T) {
 	if !ok || rec.IsActive() {
 		t.Fatalf("after remove: ok=%v active=%v want inactive", ok, rec.IsActive())
 	}
-	if _, ok, err := cs.Log.FindByID(ctx, "system.actor.deregistered:tool:xhs:9000"); err != nil || !ok {
-		t.Errorf("deregistered mirror ok=%v err=%v", ok, err)
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", "tool:xhs")); n != 1 {
+		t.Errorf("deregistered mirrors = %d, want 1", n)
 	}
 }
 
@@ -297,8 +323,8 @@ func TestApplyMemberTransitions_DuplicateRemoveIdempotent(t *testing.T) {
 	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{rm2}); err != nil {
 		t.Fatalf("duplicate remove: %v", err)
 	}
-	if _, ok, _ := cs.Log.FindByID(ctx, "system.actor.deregistered:a:3000"); ok {
-		t.Error("duplicate remove emitted a second mirror event")
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", "a")); n != 1 {
+		t.Errorf("deregistered mirrors = %d after duplicate remove, want 1 (idempotent no-op emits nothing)", n)
 	}
 }
 
@@ -338,7 +364,7 @@ func TestApplyMemberTransitions_Reactivation(t *testing.T) {
 	if !ok || !rec.IsActive() {
 		t.Fatalf("reactivated actor active=%v", rec.IsActive())
 	}
-	if _, ok, err := cs.Log.FindByID(ctx, "system.actor.registered:a:3000"); err != nil || !ok {
-		t.Errorf("reactivation mirror ok=%v err=%v", ok, err)
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", "a")); n != 2 {
+		t.Errorf("registered mirrors = %d after reactivation, want 2 (initial + reactivate)", n)
 	}
 }

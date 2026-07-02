@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -410,6 +411,19 @@ func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, rem
 	return true, nil
 }
 
+// Mirror event IDs are random uuids, the same as every ordinary envelope —
+// deliberately NOT deterministic. Determinism would be load-bearing only if
+// mirror appends had a cross-tx replay window to dedup (the timer fire id's
+// situation: append and row-delete are two operations, a crash between them
+// replays the append). A mirror append has no such window: it commits in the
+// SAME tx as the registry transition, and a replayed batch takes the
+// changed=false arm and appends nothing — idempotency lives in the registry
+// state guard, not in an id collision. The former deterministic
+// <type>:<actor>:<at> id carried no idempotency and had one runtime effect:
+// a same-millisecond remove→re-add collided with the FIRST registration's
+// mirror on messages.id UNIQUE and rolled back the whole re-add (a
+// deterministic-At replayer — reconcile re-laying a member plan, a seeded
+// boot — would fail permanently).
 func actorRegisteredEnvelope(channelID channel.ID, add storespec.MemberActorAdd) *message.Envelope {
 	payload, _ := json.Marshal(map[string]any{
 		"actor_id":      add.ID,
@@ -418,7 +432,7 @@ func actorRegisteredEnvelope(channelID channel.ID, add storespec.MemberActorAdd)
 		"registered_at": add.At,
 	})
 	return &message.Envelope{
-		ID:         message.ID(fmt.Sprintf("%s:%s:%d", actor.ReservedSystemActorRegistered, add.ID, add.At)),
+		ID:         message.ID(uuid.NewString()),
 		TS:         add.At,
 		TSReceived: add.At,
 		ChannelID:  channelID,
@@ -437,7 +451,7 @@ func actorDeregisteredEnvelope(channelID channel.ID, remove storespec.MemberActo
 		"deregistered_at": remove.At,
 	})
 	return &message.Envelope{
-		ID:         message.ID(fmt.Sprintf("%s:%s:%d", actor.ReservedSystemActorDeregistered, remove.ID, remove.At)),
+		ID:         message.ID(uuid.NewString()), // random, same law as registered (see above)
 		TS:         remove.At,
 		TSReceived: remove.At,
 		ChannelID:  channelID,
