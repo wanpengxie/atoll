@@ -19,7 +19,10 @@ import (
 //   - cell  — in-process actor   (mailbox = Go channel)
 //   - port  — out-of-process actor (mailbox = byte-stream connection)
 //
-// Both report the same Outcome on Deliver and the same down edge on death.
+// Both report the same Outcome on Deliver and the same down edge on death —
+// and the same QUIET teardown on parent-ctx collapse (self-evict, cancel,
+// release, NO down edge: teardown is not an observed death; closure belongs
+// to the level-scan reconciler on the next open).
 //
 // startedAt is the obs `uptime` source: the substrate-stamped bind instant. It is
 // substrate-authoritative (only the host knows when it bound the instance — the
@@ -416,6 +419,12 @@ func (r *Runtime) SpawnIfAbsent(id actor.ActorID, build func(Incarnation) Actor)
 	r.mu.Lock()
 	if _, occupied := r.embodiments[id]; occupied { // same critical section re-check
 		r.mu.Unlock() // lost the race: discard the shell, never c.start() it.
+		// Release the discarded shell's ctx node (same discard-release as
+		// Fork's collision/parent-dead arms): allocShell derived it from
+		// r.parent, so an uncancelled discard pins a child-context entry in
+		// the parent's tree for the whole channel lifetime — and the eager
+		// reconcile ring races admission Spawn here every tick.
+		c.cancel()
 		return Incarnation{}, false
 	}
 	r.embodiments[id] = c

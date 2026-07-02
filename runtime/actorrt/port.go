@@ -289,13 +289,21 @@ func (p *port) writeLoop() {
 	for {
 		select {
 		case <-p.ctx.Done():
-			// A cancelled ctx is the actor-scope of cancel(scope): a cancellable
-			// parent (runtime teardown / kill) collapsed this embodiment. Route it
-			// through die(), not a bare return — die() closeConn (unblocks readLoop,
-			// releases the conn, retracts addressing so a level scan reads "absent")
-			// AND publishes the down edge (lossy wakeup). die()'s stopping
-			// guard suppresses the redundant edge when this is an external stop().
-			p.die(p.ctx.Err())
+			// A cancelled ctx is CHANNEL TEARDOWN (Config.Parent collapsed) —
+			// not an observed death. Route through die(nil), the QUIET arm
+			// (initiateStop's exact semantics): closeConn (unblocks readLoop,
+			// releases the conn), retract addressing (a level scan reads
+			// "absent"), but publish NO down edge. Publishing here would
+			// materialise receiver_unavailable terminals mid-teardown for
+			// every port-hosted actor while cell-hosted actors (whose ctx arm
+			// returns with deathCause=nil) stay silent — the same event
+			// splitting into two truth outcomes by transport, the F5-class
+			// "two paths" disease. Teardown owes truth nothing: closure
+			// correctness belongs to the level-scan reconciler on the next
+			// open, which reads these ports as absent either way. An
+			// INDIVIDUALLY dying port still publishes — its path is
+			// die(cause) from a loop error, never this arm.
+			p.die(nil)
 			return
 		case env := <-p.sendq:
 			payload, err := json.Marshal(ipc.DeliverPayload{Envelope: *env})

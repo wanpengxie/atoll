@@ -13,8 +13,9 @@ import (
 type Lifecycle string
 
 const (
-	// LifecycleAlwaysOn: the eager reconcile loop keeps a live incarnation up
-	// whenever this member appears in desired (期2's activation half).
+	// LifecycleAlwaysOn: the eager reconcile ring (线B, wiring-build-spec —
+	// not yet built; 期2 shipped this contract's SHAPE only) will keep a
+	// live incarnation up whenever this member appears in desired.
 	LifecycleAlwaysOn Lifecycle = "always_on"
 	// LifecycleLazy: no eager revival; activation on demand at the delivery
 	// seam (member-but-no-live → activate) — deferred this period, kept in the

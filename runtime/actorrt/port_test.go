@@ -379,12 +379,16 @@ func TestPortUnknownFrameKindFailsClosed(t *testing.T) {
 	}
 }
 
-// TestPortParentCancelDies: cancelling the cancellable parent ctx is the
-// actor-scope of cancel(scope) on a port — writeLoop routes the ctx-done through
-// die() (not a bare return), so the down edge fires, the conn closes
-// (the remote sees EOF), and the port retracts from addressing (Stat reports
-// absent — a level scan reads it "not in embodiment"). (F1)
-func TestPortParentCancelDies(t *testing.T) {
+// TestPortParentCancelQuietTeardown: cancelling the cancellable parent ctx is
+// CHANNEL TEARDOWN, not an observed death — the port must release its
+// resources (conn closes, the remote sees EOF) and retract from addressing
+// (Stat reports absent), but publish NO down edge: an edge here would
+// materialise receiver_unavailable terminals mid-teardown for port-hosted
+// actors while cell-hosted actors stay silent (same event, two truth
+// outcomes by transport). Closure correctness belongs to the level-scan
+// reconciler on the next open. Cell symmetry: the cell's ctx arm returns
+// with deathCause=nil and publishes nothing either.
+func TestPortParentCancelQuietTeardown(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -393,7 +397,7 @@ func TestPortParentCancelDies(t *testing.T) {
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
 
-	// The remote observes EOF once the port closes its conn on death.
+	// The remote observes EOF once the port closes its conn on teardown.
 	eof := make(chan struct{})
 	go func() {
 		remote.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
@@ -401,20 +405,22 @@ func TestPortParentCancelDies(t *testing.T) {
 		close(eof)
 	}()
 
-	cancel() // collapse the actor scope
+	cancel() // collapse the channel scope
 
-	select {
-	case <-w.notify:
-	case <-time.After(2 * time.Second):
-		t.Fatal("no down edge after parent cancel — writeLoop returned bare instead of die()")
-	}
 	select {
 	case <-eof:
 	case <-time.After(2 * time.Second):
-		t.Fatal("conn not closed after parent cancel — die() did not closeConn")
+		t.Fatal("conn not closed after parent cancel — quiet teardown must still closeConn")
 	}
 	if _, ok := rt.Stat(id); ok {
 		t.Fatal("port still addressable after parent cancel — did not retract from embodiment")
+	}
+	// NO down edge: teardown is not death. (Checked AFTER eof+Stat confirm the
+	// teardown completed, so a would-be edge has had every chance to fire.)
+	select {
+	case <-w.notify:
+		t.Fatal("parent-ctx teardown must NOT publish a down edge (teardown ≠ observed death)")
+	default:
 	}
 }
 

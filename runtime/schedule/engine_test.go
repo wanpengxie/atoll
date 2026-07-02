@@ -681,3 +681,48 @@ func TestNextFireAtStoreFaultDegradesToBackoffRetry(t *testing.T) {
 	waitFor(t, 2*time.Second, func() bool { return sink.callCount() >= 1 })
 	waitFor(t, 2*time.Second, func() bool { return !store.hasRow("t-fault") })
 }
+
+// ---------------------------------------------------------------------
+// Reviver two-class error contract (FireSink tri-state 的镜像).
+// ---------------------------------------------------------------------
+
+// ReviveRejected = permanently unrevivable author → the row is a poison row,
+// disposed per 拍点 8.8 (deleted, never fired, loud log) — left in place it
+// would retry hot forever and starve later-due rows once such rows fill a
+// due page. A plain error stays transient: the row survives for the next tick.
+func TestReviveTwoClassOutcomes(t *testing.T) {
+	t.Run("ReviveRejected disposes the row without firing", func(t *testing.T) {
+		store := newFakeStore()
+		sink := &fakeFireSink{}
+		clock := newFakeClock(time.UnixMilli(1_000_000))
+		reviver := &fakeReviver{err: ReviveRejected{Reason: "builder_gone", Detail: "class removed during sleep"}}
+		engine := mustNewEngine(t, store, sink, reviver, clock)
+		engine.Start()
+		defer engine.Close()
+
+		id := scheduleIdentityDue(t, engine, "author-1", clock)
+		waitFor(t, 2*time.Second, func() bool { return !store.hasRow(id) })
+		if n := sink.callCount(); n != 0 {
+			t.Fatalf("fire sink called %d times, want 0 (unrevivable row must never fire)", n)
+		}
+	})
+
+	t.Run("plain error is transient: the row survives", func(t *testing.T) {
+		store := newFakeStore()
+		sink := &fakeFireSink{}
+		clock := newFakeClock(time.UnixMilli(1_000_000))
+		reviver := &fakeReviver{err: errors.New("host busy")}
+		engine := mustNewEngine(t, store, sink, reviver, clock)
+		engine.Start()
+		defer engine.Close()
+
+		id := scheduleIdentityDue(t, engine, "author-1", clock)
+		waitFor(t, 2*time.Second, func() bool { return reviver.callCount() >= 2 }) // retried across ticks
+		if !store.hasRow(id) {
+			t.Fatal("transient revive failure must leave the row for retry")
+		}
+		if n := sink.callCount(); n != 0 {
+			t.Fatalf("fire sink called %d times, want 0 (never revived)", n)
+		}
+	})
+}

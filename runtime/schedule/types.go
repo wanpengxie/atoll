@@ -176,8 +176,34 @@ type LivenessProbe interface {
 // for an already-live author (SpawnIfAbsent semantics — the platform
 // implementation wraps actorrt.Runtime.SpawnIfAbsent + a builder factory,
 // §7.5, not this package's concern).
+//
+// TWO-CLASS error contract (mirrors FireSink's tri-state, same rationale —
+// "a deterministic failure retried forever is a hot loop, not
+// at-least-once"). An implementation MUST distinguish:
+//   - permanently unrevivable (the author's class is gone from the Builder
+//     table, the id can never resolve to a build closure, …) →
+//     ReviveRejected{Reason, Detail} — the engine disposes the row per 拍点
+//     8.8 (delete + loud log), because a row that can never revive is a
+//     poison row: left in place it retries hot forever AND, once such rows
+//     fill a due page (≥ dueBatchLimit with the oldest fire_at), they starve
+//     every later-due legitimate row behind them.
+//   - transient (host busy, momentary spawn failure, …) → any other error —
+//     the row stays, retried next tick (at-least-once, current semantics).
 type Reviver interface {
 	EnsureLive(ctx context.Context, id actor.ActorID) error
+}
+
+// ReviveRejected is the deterministic-failure class a Reviver surfaces from
+// EnsureLive: retrying can NEVER succeed (rule evolution during a durable
+// timer's sleep — the 8.8 scenario's identity-family twin). Typed error:
+// test with errors.As. FireRejected 同款母板.
+type ReviveRejected struct {
+	Reason string
+	Detail string
+}
+
+func (e ReviveRejected) Error() string {
+	return "schedule: revive rejected: " + e.Reason + " (" + e.Detail + ")"
 }
 
 // Deps bundles every collaborator the engine needs. New fail-fasts on any

@@ -435,6 +435,20 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 		// — reviving before appending is what keeps the wake from being
 		// lost into a mailbox nobody is hosting yet.
 		if err := e.deps.Revive.EnsureLive(ctx, row.AuthorID); err != nil {
+			if isReviveRejected(err) {
+				// Deterministic — this row can NEVER fire (its author is
+				// permanently unrevivable). Dispose per 拍点 8.8, same arm
+				// as a FireRejected poison row: left in place it would
+				// retry hot forever and, at ≥dueBatchLimit oldest rows,
+				// starve every later-due legitimate row behind it.
+				if _, derr := e.deps.Store.Delete(ctx, row.ID); derr != nil {
+					e.deps.Logger.Error("schedule.poison_row_delete_failed", "timer_id", string(row.ID), "err", derr)
+					continue
+				}
+				progress = true
+				e.loudLog(row.ID, row.AuthorID, err)
+				continue
+			}
 			continue // transient — leave the row, retry next tick.
 		}
 		env := buildFireEnvelope(row.ID, row.AuthorID, row.Type, row.Payload, message.ID(row.CorrelationID), nowTime)
@@ -464,6 +478,13 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 // deterministic-reject class disposed per 拍点 8.8.
 func isFireRejected(err error) bool {
 	var rejected FireRejected
+	return errors.As(err, &rejected)
+}
+
+// isReviveRejected reports whether err is (or wraps) a ReviveRejected — the
+// permanently-unrevivable class, disposed per the same 8.8 poison-row arm.
+func isReviveRejected(err error) bool {
+	var rejected ReviveRejected
 	return errors.As(err, &rejected)
 }
 
