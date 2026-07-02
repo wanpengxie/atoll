@@ -48,8 +48,9 @@ func TestInvocationRoundTripSetShape(t *testing.T) {
 		Resource:  resource.ResourceID("file:report"),
 		Operation: OpSet,
 		Grant: &Grant{
-			Grantee: actor.ActorID("agent:bob"),
-			Ops:     []Operation{OpRead, OpWrite},
+			GranteeKind: GranteeActor,
+			Grantee:     actor.ActorID("agent:bob"),
+			Ops:         []Operation{OpRead, OpWrite},
 		},
 	}
 	got := roundTrip(t, src)
@@ -170,7 +171,7 @@ func TestGrantPresenceTriState(t *testing.T) {
 	// non-nil Grant → round-trips.
 	withGrant := mkInvocation()
 	withGrant.Operation = OpSet
-	withGrant.Grant = &Grant{Grantee: actor.ActorID("agent:bob"), Ops: []Operation{OpRead}}
+	withGrant.Grant = &Grant{GranteeKind: GranteeActor, Grantee: actor.ActorID("agent:bob"), Ops: []Operation{OpRead}}
 	got := roundTrip(t, withGrant)
 	if got.Grant == nil {
 		t.Fatalf("non-nil Grant dropped on round trip")
@@ -243,7 +244,7 @@ func TestInvocationWireKeys(t *testing.T) {
 		Caller:    actor.ActorID("agent:alice"),
 		Resource:  resource.ResourceID("file:report"),
 		Operation: OpSet,
-		Grant:     &Grant{Grantee: actor.ActorID("agent:bob"), Ops: []Operation{OpRead}},
+		Grant:     &Grant{GranteeKind: GranteeActor, Grantee: actor.ActorID("agent:bob"), Ops: []Operation{OpRead}},
 	}
 	got := wireKeys(full)
 	if len(got) != len(contentFields) {
