@@ -104,9 +104,13 @@ type relayClient struct {
 
 // relayAck carries one resolved ack back to the blocked round-trip: the opaque
 // response bytes and the host-side error (reconstructed from RelayAckPayload.Err).
+// transport marks the arm-closed sentinel — a teardown with the request in flight,
+// NOT a host verdict — so roundTrip surfaces it as transportErr (unconfirmed →
+// outcome_unknown on access) rather than as a definite ackErr.
 type relayAck struct {
-	payload json.RawMessage
-	err     error
+	payload   json.RawMessage
+	err       error
+	transport bool
 }
 
 func newRelayClient(codec *ipc.Codec, requestKind ipc.Kind) *relayClient {
@@ -148,6 +152,11 @@ func (c *relayClient) roundTrip(ctx context.Context, payload []byte) (ackPayload
 		// reader) — the FIFO head is still consumed, keeping the queue aligned.
 		return nil, nil, ctx.Err()
 	case r := <-waiter:
+		if r.transport {
+			// The arm was torn down with this request in flight (connection died):
+			// nothing was confirmed — surface it as transportErr, not a host verdict.
+			return nil, nil, r.err
+		}
 		return r.payload, r.err, nil
 	}
 }
@@ -197,7 +206,7 @@ func (c *relayClient) close() {
 	c.pending = nil
 	c.mu.Unlock()
 	for _, waiter := range pending {
-		waiter <- relayAck{err: errRelayClosed}
+		waiter <- relayAck{err: errRelayClosed, transport: true}
 	}
 }
 

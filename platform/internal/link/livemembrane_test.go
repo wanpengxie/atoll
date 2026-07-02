@@ -8,6 +8,7 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -148,5 +149,81 @@ func TestLiveScheduleFencesPostDeath(t *testing.T) {
 	}
 	if n, c := raw.counts(); n != 1 || c != 0 {
 		t.Fatalf("raw handle saw (schedule=%d cancel=%d) total, want (1, 0) (post-death fenced before raw)", n, c)
+	}
+}
+
+// TestLiveAccessFencesPostDeath_PortPath is the plane-2 twin of the livePen
+// port-path fence: a liveAccess welded to an out-of-process port's Incarnation
+// invokes while that port is the live embodiment, then — once a same-id reattach
+// REPLACES the port (predecessor stopped) — fences with ErrAccessNotLive. The gate
+// is the shared pointer-identity IsLive check, here exercised over a real port
+// incarnation rather than a local cell.
+func TestLiveAccessFencesPostDeath_PortPath(t *testing.T) {
+	t.Parallel()
+	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
+	defer rt.StopAll()
+
+	const id = actor.ActorID("remote-access")
+	inc1, remote1 := attachTestPort(t, rt, id)
+	defer remote1.Close()
+
+	raw := &recordAccess{}
+	h := link.NewLiveAccess(raw, inc1, rt)
+
+	if _, err := h.Invoke(context.Background(), access.Operation(""), resource.ResourceID(""), nil, nil); err != nil {
+		t.Fatalf("live invoke err = %v, want nil", err)
+	}
+	if raw.count() != 1 {
+		t.Fatalf("raw handle saw %d invokes while live, want 1", raw.count())
+	}
+
+	// A second attach for the SAME id replaces the port: Attach stops inc1 before
+	// returning, so the welded liveAccess is no longer the live incarnation.
+	_, remote2 := attachTestPort(t, rt, id)
+	defer remote2.Close()
+
+	_, err := h.Invoke(context.Background(), access.Operation(""), resource.ResourceID(""), nil, nil)
+	if !errors.Is(err, link.ErrAccessNotLive) {
+		t.Fatalf("post-replace invoke err = %v, want ErrAccessNotLive", err)
+	}
+	if raw.count() != 1 {
+		t.Fatalf("raw handle saw %d invokes total, want 1 (post-replace invoke fenced before raw)", raw.count())
+	}
+}
+
+// TestLiveScheduleFencesPostDeath_PortPath is the time-axis twin of the livePen
+// port-path fence: a liveSchedule welded to a port's Incarnation passes while the
+// port is live, then fences BOTH Schedule and Cancel with ErrScheduleNotLive once
+// a same-id reattach replaces the port.
+func TestLiveScheduleFencesPostDeath_PortPath(t *testing.T) {
+	t.Parallel()
+	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
+	defer rt.StopAll()
+
+	const id = actor.ActorID("remote-schedule")
+	inc1, remote1 := attachTestPort(t, rt, id)
+	defer remote1.Close()
+
+	raw := &recordSchedule{}
+	h := link.NewLiveSchedule(raw, inc1, rt)
+
+	if _, err := h.Schedule(context.Background(), schedule.ScheduleReq{}); err != nil {
+		t.Fatalf("live schedule err = %v, want nil", err)
+	}
+	if n, _ := raw.counts(); n != 1 {
+		t.Fatalf("raw handle saw %d schedules while live, want 1", n)
+	}
+
+	_, remote2 := attachTestPort(t, rt, id)
+	defer remote2.Close()
+
+	if _, err := h.Schedule(context.Background(), schedule.ScheduleReq{}); !errors.Is(err, link.ErrScheduleNotLive) {
+		t.Fatalf("post-replace schedule err = %v, want ErrScheduleNotLive", err)
+	}
+	if err := h.Cancel(context.Background(), schedule.TimerID("t")); !errors.Is(err, link.ErrScheduleNotLive) {
+		t.Fatalf("post-replace cancel err = %v, want ErrScheduleNotLive", err)
+	}
+	if n, c := raw.counts(); n != 1 || c != 0 {
+		t.Fatalf("raw handle saw (schedule=%d cancel=%d) total, want (1, 0) (post-replace fenced before raw)", n, c)
 	}
 }

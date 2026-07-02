@@ -254,25 +254,36 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 			if err := dispatch(&env); err != nil {
 				d.logger.Error("link.dispatch", "actor", string(as.id), "err", err)
 			}
+		// The three ack arms (emit / access / schedule) correlate FIFO-no-id: each
+		// ack pops the queue head. A malformed ack cannot be matched to its op, so
+		// SKIPPING the pop would permanently shift the arm by one and hand every
+		// subsequent caller the previous op's verdict. Fail-closed instead: tear the
+		// stream down so the deferred arm-close surfaces the honest unconfirmed
+		// outcome (outcome_unknown / error) to every in-flight caller, mirroring the
+		// port read loop's decode discipline. (KindDeliver / KindCancel below are not
+		// FIFO-correlated, so a decode drop there is not a desync and stays non-fatal.)
 		case ipc.KindEmitAck:
 			var ap ipc.EmitAckPayload
 			if err := json.Unmarshal(frame.Payload, &ap); err != nil {
 				d.logger.Error("link.emit_ack_decode", "actor", string(as.id), "err", err)
-				continue
+				_ = as.stream.Close()
+				return
 			}
 			as.writer.DeliverAck(ap)
 		case ipc.KindAccessAck:
 			var ap ipc.RelayAckPayload
 			if err := json.Unmarshal(frame.Payload, &ap); err != nil {
 				d.logger.Error("link.access_ack_decode", "actor", string(as.id), "err", err)
-				continue
+				_ = as.stream.Close()
+				return
 			}
 			as.access.deliverAck(ap)
 		case ipc.KindScheduleAck:
 			var ap ipc.RelayAckPayload
 			if err := json.Unmarshal(frame.Payload, &ap); err != nil {
 				d.logger.Error("link.schedule_ack_decode", "actor", string(as.id), "err", err)
-				continue
+				_ = as.stream.Close()
+				return
 			}
 			as.sched.deliverAck(ap)
 		case ipc.KindCancel:

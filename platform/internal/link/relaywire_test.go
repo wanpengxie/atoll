@@ -302,3 +302,149 @@ func TestScheduleArmCellPortParity(t *testing.T) {
 		t.Fatalf("cancel call = %+v, want author=%q canceled=%q", got, toolID, portTID)
 	}
 }
+
+// --- transport-death rig: minters whose handle parks in flight ---
+
+// dialArmsWithMinters stands up a home wired with the given plane-2 / time-axis
+// minters and returns one daemon-hosted actor's port arms. It is newCapsRig +
+// dialArms fused so a test can inject a blocking minter (the cell-parity rig's
+// fake minters answer synchronously and can never leave an op in flight).
+func dialArmsWithMinters(t *testing.T, access accessdoor.AccessMinter, sched schedule.Minter, id actor.ActorID) (link.CellArms, *link.Dialer) {
+	t.Helper()
+	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
+	acc := link.NewAcceptor(link.Config{
+		Minter:     &stubMinter{},
+		Access:     access,
+		Schedule:   sched,
+		Runtime:    rt,
+		Membership: &stubMembership{},
+		ChannelID:  testChannelID,
+		LeasePing:  5 * time.Second,
+		LeaseTTL:   30 * time.Second,
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		acc.Serve(w, req, "daemon-1")
+	}))
+	t.Cleanup(func() { _ = acc.Close(); srv.Close(); rt.StopAll() })
+
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1",
+		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	arms, err := d.OpenStream(id, func(*message.Envelope) error { return nil }, nil)
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	d.Start()
+	return arms, d
+}
+
+// blockingAccessMinter's handle signals entry (the invoke has crossed the wire and
+// reached the home) then parks until released — so a test can drop the transport
+// while an access invoke is genuinely in flight on the arm.
+type blockingAccessMinter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (m *blockingAccessMinter) Mint(actor.ActorID) accessdoor.AccessHandle {
+	return &blockingAccessHandle{m: m}
+}
+func (m *blockingAccessMinter) MintState(actor.ActorID) accessdoor.AccessHandle {
+	return &blockingAccessHandle{m: m}
+}
+
+type blockingAccessHandle struct{ m *blockingAccessMinter }
+
+func (h *blockingAccessHandle) Invoke(ctx context.Context, _ access.Operation, _ resource.ResourceID, _ []byte, _ *access.Grant) (accessdoor.Outcome, error) {
+	h.m.once.Do(func() { close(h.m.entered) })
+	select {
+	case <-h.m.release:
+	case <-ctx.Done():
+	}
+	return accessdoor.Outcome{}, nil
+}
+
+type blockingScheduleMinter struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (m *blockingScheduleMinter) Mint(actor.ActorID) schedule.ScheduleHandle {
+	return &blockingScheduleHandle{m: m}
+}
+
+type blockingScheduleHandle struct{ m *blockingScheduleMinter }
+
+func (h *blockingScheduleHandle) Schedule(ctx context.Context, _ schedule.ScheduleReq) (schedule.TimerID, error) {
+	h.m.once.Do(func() { close(h.m.entered) })
+	select {
+	case <-h.m.release:
+	case <-ctx.Done():
+	}
+	return schedule.TimerID("t"), nil
+}
+
+func (h *blockingScheduleHandle) Cancel(context.Context, schedule.TimerID) error { return nil }
+
+// TestAccessArmOutcomeUnknownOnTransportDeath exercises outcome_unknown through the
+// PRIMARY real-world producer: the transport dying with an access invoke in flight
+// (streamReadLoop teardown → relayClient.close → errRelayClosed → OutcomeUnknown),
+// not the cancelled-ctx path. It is the wire-only verdict, so a torn-down
+// connection must still surface it as a VERDICT (nil error), never as a transport
+// error handed to the caller.
+func TestAccessArmOutcomeUnknownOnTransportDeath(t *testing.T) {
+	const toolID = actor.ActorID("tool:txdeath-access")
+	m := &blockingAccessMinter{entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(m.release)
+	arms, d := dialArmsWithMinters(t, m, &fakeScheduleMinter{}, toolID)
+
+	type result struct {
+		out accessdoor.Outcome
+		err error
+	}
+	res := make(chan result, 1)
+	go func() {
+		o, e := arms.Access.Invoke(context.Background(), access.OpRead, "r", []byte("x"), nil)
+		res <- result{o, e}
+	}()
+	<-m.entered // the home received the invoke → it is genuinely in flight on the arm
+
+	_ = d.Close() // drop the transport with the verdict unconfirmed
+
+	r := <-res
+	if r.err != nil {
+		t.Fatalf("transport-death outcome must be a verdict, not an error: %v", r.err)
+	}
+	if r.out.RejectReason != access.OutcomeUnknown {
+		t.Fatalf("unconfirmed outcome = %q, want outcome_unknown", r.out.RejectReason)
+	}
+}
+
+// TestScheduleArmErrorsOnTransportDeath is the time-axis counterpart: the schedule
+// arm has no unknown-verdict slot, so an in-flight schedule interrupted by
+// transport death surfaces as a plain error (the timer may or may not exist —
+// current at-least-once semantics), never a fabricated verdict.
+func TestScheduleArmErrorsOnTransportDeath(t *testing.T) {
+	const toolID = actor.ActorID("tool:txdeath-sched")
+	m := &blockingScheduleMinter{entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(m.release)
+	arms, d := dialArmsWithMinters(t, &fakeAccessMinter{}, m, toolID)
+
+	res := make(chan error, 1)
+	go func() {
+		_, e := arms.Schedule.Schedule(context.Background(),
+			schedule.ScheduleReq{Bind: schedule.BindIdentity, FireAt: 1, Type: "wake"})
+		res <- e
+	}()
+	<-m.entered
+
+	_ = d.Close()
+
+	if err := <-res; err == nil {
+		t.Fatalf("transport-death schedule err = nil, want non-nil (unconfirmed, no unknown verdict)")
+	}
+}
