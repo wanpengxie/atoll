@@ -16,11 +16,11 @@ type boundScheduleHandle struct {
 }
 
 func (h boundScheduleHandle) Schedule(ctx context.Context, req ScheduleReq) (TimerID, error) {
-	return h.engine.Schedule(ctx, h.author, req)
+	return h.engine.schedule(ctx, h.author, req)
 }
 
 func (h boundScheduleHandle) Cancel(ctx context.Context, id TimerID) error {
-	return h.engine.Cancel(ctx, h.author, id)
+	return h.engine.cancel(ctx, h.author, id)
 }
 
 // minter is Minter's sole implementation, sealed inside the package — New

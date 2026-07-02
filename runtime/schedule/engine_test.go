@@ -368,7 +368,7 @@ func mustNewEngine(t *testing.T, store timerspec.TimerStore, sink FireSink, revi
 // — these tri-state tests only care about the fire path).
 func scheduleIdentityDue(t *testing.T, engine *Engine, author actor.ActorID, clock *fakeClock) TimerID {
 	t.Helper()
-	id, err := engine.Schedule(context.Background(), author, ScheduleReq{
+	id, err := engine.schedule(context.Background(), author, ScheduleReq{
 		Bind: BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.due",
 	})
 	if err != nil {
@@ -556,7 +556,7 @@ func TestBackoffNotBusyLoop(t *testing.T) {
 	engine.Start()
 	defer engine.Close()
 
-	_, err := engine.Schedule(context.Background(), "author-1", ScheduleReq{
+	_, err := engine.schedule(context.Background(), "author-1", ScheduleReq{
 		Bind: BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.due",
 	})
 	if err != nil {

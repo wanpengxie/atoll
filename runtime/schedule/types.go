@@ -80,7 +80,7 @@ type ScheduleHandle interface {
 	// leaks whether some OTHER author's timer exists. It is deliberately
 	// ack-less (error-only): a Cancel racing an already-due, in-flight fire
 	// may still see that fire land as truth (deadline race, accepted — see
-	// Engine.Cancel doc), so "Cancel returned nil" is never a promise that
+	// engine.cancel doc), so "Cancel returned nil" is never a promise that
 	// the timer will not ring.
 	Cancel(ctx context.Context, id TimerID) error
 }

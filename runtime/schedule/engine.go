@@ -113,10 +113,19 @@ func (e *Engine) Close() {
 // field, so caller-supply is unrepresentable at compile time.
 func mintTimerID() TimerID { return TimerID(uuid.NewString()) }
 
-// Schedule validates req, mints a TimerID, and routes the intent to its
+// schedule validates req, mints a TimerID, and routes the intent to its
 // bind's home (§3.2 钉块 pseudocode). Runs on the caller's goroutine — a
 // short critical section for the incarnation path, no I/O under the lock.
-func (e *Engine) Schedule(ctx context.Context, author actor.ActorID, req ScheduleReq) (TimerID, error) {
+//
+// Unexported: author is a free parameter here, so this is the UN-WELDED face
+// — the schedule-package twin of harness's bare chain, and it stays inside
+// the package for the same reason the chain does. Every consumption path
+// (caps-injected cell handle, host-side per-call mint at the port arm, the
+// platform's own system timers) closes over Minter.Mint(author), and Mint is
+// the one seam future per-author enforcement (liveSchedule membrane, §13
+// storm quotas, §11 principal checks) attaches to — an exported free-author
+// method would be a standing structural bypass of that seam.
+func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req ScheduleReq) (TimerID, error) {
 	if err := validateScheduleReq(req); err != nil {
 		return "", err
 	}
@@ -167,7 +176,7 @@ func (e *Engine) Schedule(ctx context.Context, author actor.ActorID, req Schedul
 	return id, nil
 }
 
-// Cancel deletes a pending timer/entry IFF author owns it — a single logical
+// cancel deletes a pending timer/entry IFF author owns it — a single logical
 // entry point over both homes (§3.2 钉5: "两家一个口"). It checks mem first
 // (the fast, lock-only path), then always also asks the durable store
 // (CancelOwned's WHERE clause is the non-ambient author check) — a given id
@@ -186,7 +195,10 @@ func (e *Engine) Schedule(ctx context.Context, author actor.ActorID, req Schedul
 // promise is broken — and closing the window would need cancelled-while-
 // claimed tracking (mem) or a persisted claim (durable, the claim-lease 8.1
 // explicitly deferred), a state machine for a promise the API never made.
-func (e *Engine) Cancel(ctx context.Context, author actor.ActorID, id TimerID) error {
+//
+// Unexported for the same reason as schedule: the welded face is
+// ScheduleHandle.Cancel, minted per author.
+func (e *Engine) cancel(ctx context.Context, author actor.ActorID, id TimerID) error {
 	e.mu.Lock()
 	if t, ok := e.mem[id]; ok && t.author == author {
 		delete(e.mem, id)
