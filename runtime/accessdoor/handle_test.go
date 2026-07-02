@@ -14,6 +14,7 @@ func TestNewFailFast(t *testing.T) {
 		Registry:   &fakeRegistry{},
 		Drivers:    DriverTable{resourcespec.KindKV: &fakeDriver{}},
 		Membership: &fakeMembership{},
+		State:      &fakeStateStore{},
 	}
 
 	t.Run("complete Deps assembles", func(t *testing.T) {
@@ -35,6 +36,14 @@ func TestNewFailFast(t *testing.T) {
 		d.Membership = nil
 		if _, err := New(d); err == nil {
 			t.Fatalf("expected error for nil Membership")
+		}
+	})
+
+	t.Run("missing State", func(t *testing.T) {
+		d := full
+		d.State = nil
+		if _, err := New(d); err == nil {
+			t.Fatalf("expected error for nil State")
 		}
 	})
 
@@ -61,7 +70,7 @@ func TestMintedHandleRunsFullPath(t *testing.T) {
 	reg := &fakeRegistry{}
 	drv := &fakeDriver{}
 	mem := &fakeMembership{isMember: true}
-	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: drv}, Membership: mem})
+	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: drv}, Membership: mem, State: &fakeStateStore{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

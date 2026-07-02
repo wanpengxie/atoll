@@ -22,11 +22,15 @@ type MembershipCheck interface {
 // tree with no entry is an assembly defect (a Go error), never a verdict.
 type DriverTable map[resourcespec.ResourceKind]resourcespec.Driver
 
-// Deps bundles the collaborators the door needs: the Registry (R + existence),
-// the Drivers (bytes per kind), and the Membership seam (create locus + members
-// late-binding). All three are required — New fail-fasts on any missing.
+// Deps bundles the collaborators the door needs. The channel-scoped tree uses the
+// Registry (R + existence), the Drivers (bytes per kind), and the Membership seam
+// (create locus + members late-binding). The actor-scoped (collapsed) branch uses
+// only State — the owner-keyed byte realizer for the second, structurally separate
+// storage locus (no R, no membership, no kind routing: that absence is the scope
+// law). All four are required — New fail-fasts on any missing.
 type Deps struct {
 	Registry   resourcespec.Registry
 	Drivers    DriverTable
 	Membership MembershipCheck
+	State      resourcespec.StateStore
 }

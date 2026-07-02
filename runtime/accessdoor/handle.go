@@ -42,11 +42,20 @@ func (h boundHandle) Invoke(ctx context.Context, op access.Operation, id resourc
 }
 
 // AccessMinter is the door's ONE outward face (mirroring harness.Minter's
-// discipline: New hands out only a Minter, the bare door stays sealed). Mint
-// takes just the caller — the door is already bound to its channel/Registry via
-// Deps, and R authorization needs no kind, so one parameter suffices.
+// discipline: New hands out only a Minter, the bare door stays sealed). It has two
+// mint faces, one per scope:
+//   - Mint welds a caller for the channel-scoped tree — the door is already bound
+//     to its channel/Registry via Deps, and R authorization needs no kind, so one
+//     parameter suffices;
+//   - MintState welds an owner for the actor-scoped (collapsed) branch. It is the
+//     injection-point contract 期4 hands to the downstream: platform draws an
+//     owner-welded handle from here when it wires caps — runtime defines the
+//     contract, WHEN/HOW the downstream wraps it (liveAccess) is the downstream's
+//     concern. Both return the SAME AccessHandle contract (same door, same handle
+//     interface), so every consumer downstream treats the two alike.
 type AccessMinter interface {
 	Mint(caller actor.ActorID) AccessHandle
+	MintState(owner actor.ActorID) AccessHandle
 }
 
 type minter struct{ door *door }
@@ -57,12 +66,19 @@ func (m *minter) Mint(caller actor.ActorID) AccessHandle {
 	return boundHandle{door: m.door, caller: caller}
 }
 
+// MintState welds owner onto the door and returns an actor-scoped handle. Same
+// door, same AccessHandle contract as Mint — the owner is the namespace coordinate
+// (non-ambient: welded here, never read off the wire).
+func (m *minter) MintState(owner actor.ActorID) AccessHandle {
+	return boundStateHandle{door: m.door, owner: owner}
+}
+
 // New assembles the door from Deps and returns a Minter — never the bare door.
 // It fail-fasts at assembly, not at first op: every Dep is required, and the
 // day-1 KindKV driver must be present (op=create hardcodes KindKV, so a missing
 // one would otherwise surface only when someone first creates).
 func New(deps Deps) (AccessMinter, error) {
-	if deps.Registry == nil || deps.Drivers == nil || deps.Membership == nil {
+	if deps.Registry == nil || deps.Drivers == nil || deps.Membership == nil || deps.State == nil {
 		return nil, errors.New("accessdoor: Deps incomplete")
 	}
 	if deps.Drivers[resourcespec.KindKV] == nil {

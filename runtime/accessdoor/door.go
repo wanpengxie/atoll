@@ -33,11 +33,12 @@ func (d *door) driver(kind resourcespec.ResourceKind) (resourcespec.Driver, erro
 // are structurally valid here.
 //
 // Two error channels, deliberately distinct (opus-F4 / codex):
-//   - a Go error is returned ONLY for an assembly defect (no driver for a kind)
-//     or infrastructure failure (store broken) — the kind reason.go has no
-//     verdict for;
-//   - every failure inside the resolve→authorize→EXECUTE pipeline is a verdict
-//     (Outcome.RejectReason, nil error), including an executor failure
+//   - a Go error is returned ONLY for an assembly defect (no driver for a kind),
+//     infrastructure failure (store broken at resolve/authorize), or the
+//     caller's OWN cancellation surfacing mid-EXECUTE (executeFailure — a
+//     driver_error there would blame the driver for the caller's hand);
+//   - every other failure inside the resolve→authorize→EXECUTE pipeline is a
+//     verdict (Outcome.RejectReason, nil error), including an executor failure
 //     (driver_error). Folding EXECUTE failures into Go errors would leave
 //     driver_error unproducible — the bug v1 shipped.
 func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
@@ -62,10 +63,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		// by the caps facade — never derived from the ResourceID (that would be the
 		// kernel interpreting an opaque name).
 		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, args); err != nil {
-			if errors.Is(err, resourcespec.ErrAlreadyExists) {
-				return Outcome{RejectReason: access.AlreadyExists}, nil // race collision decided atomically
-			}
-			return Outcome{RejectReason: access.DriverError}, nil // EXECUTE failure = verdict
+			return createVerdict(ctx, err) // one collision vocabulary, two loci — shared mapping
 		}
 		return Outcome{}, nil
 	}
@@ -104,7 +102,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		}
 		val, found, rerr := drv.Read(ctx, id)
 		if rerr != nil {
-			return Outcome{RejectReason: access.DriverError}, nil
+			return executeFailure(ctx, rerr)
 		}
 		return Outcome{Value: val, Found: found}, nil
 
@@ -114,7 +112,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 			return Outcome{}, err
 		}
 		if werr := drv.Write(ctx, id, args); werr != nil {
-			return Outcome{RejectReason: access.DriverError}, nil
+			return executeFailure(ctx, werr)
 		}
 		return Outcome{}, nil
 
@@ -122,7 +120,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		// set's executor is the substrate authz manager (Registry), not a driver.
 		// grant is non-nil and structurally valid (ingress), so the deref is safe.
 		if serr := d.deps.Registry.SetGrant(ctx, id, *grant); serr != nil {
-			return Outcome{RejectReason: access.DriverError}, nil // executor-authored (reason.go)
+			return executeFailure(ctx, serr) // executor-authored (reason.go)
 		}
 		return Outcome{}, nil
 
@@ -135,10 +133,10 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		// resolvable (retryable) or resolved-but-empty (legal) — never a row gone
 		// with bytes stranded under someone's name.
 		if derr := drv.Delete(ctx, id); derr != nil {
-			return Outcome{RejectReason: access.DriverError}, nil
+			return executeFailure(ctx, derr)
 		}
 		if derr := d.deps.Registry.Delete(ctx, id); derr != nil {
-			return Outcome{RejectReason: access.DriverError}, nil
+			return executeFailure(ctx, derr)
 		}
 		return Outcome{}, nil
 

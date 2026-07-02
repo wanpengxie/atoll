@@ -12,9 +12,14 @@ package resourcespec
 // size / at-rest encryption / storage locus), NOT the use case. kind is a
 // durable persisted value (the resources.kind column), so the implementation
 // name never lies about the bytes behind it; use case lives in an id naming
-// convention instead (the Unix /etc pattern). Day-1 pins exactly KindKV;
-// state (actor-scoped) / file / secret land additively — a value + a driver —
-// when their mechanical difference is real.
+// convention instead (the Unix /etc pattern). The kind axis belongs ONLY to
+// the channel-scoped locus (this table): actor-scoped state has NO kind — it
+// lives in a structurally separate locus (StateStore / the actor_state table,
+// keyed by owner), where scope is expressed by structure and day-1 has a
+// single mechanical shape, so no kind column exists there to route (§12.9
+// 拍点 8.1, 拍点 8.4). Day-1 pins exactly KindKV; file / secret land
+// additively on THIS axis — a value + a driver — when their mechanical
+// difference is real.
 type ResourceKind string
 
 // KindKV is day-1's only driver: channel-scoped, small inline bytes, plaintext.

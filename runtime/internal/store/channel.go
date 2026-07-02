@@ -38,6 +38,14 @@ type ChannelStores struct {
 	// past that assembly (no bypass-the-door write path escapes).
 	Resources resourcespec.Registry // R (authorization relation) + resource existence
 	KVDriver  resourcespec.Driver   // KindKV byte realizer (inline bytes)
+
+	// State is the owner-keyed byte realizer for the ACTOR-SCOPED locus (the
+	// actor_state table), dual to Resources+KVDriver on the channel-scoped side.
+	// It has no R and no kind routing — that absence IS the scope law (§12.9). It
+	// too stays within the runtime tree: the collapsed branch is assembled into
+	// the SAME door one layer up, reached downstream only through the welded
+	// AccessMinter.MintState, never as a raw store.
+	State resourcespec.StateStore
 }
 
 // OpenChannel opens the per-channel sqlite and assembles the channel stores.
@@ -72,6 +80,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Membership: reg,
 		Resources:  newResourceRegistry(db),
 		KVDriver:   newKVDriver(db),
+		State:      newStateStore(db),
 	}
 	return cs, nil
 }

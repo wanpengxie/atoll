@@ -122,6 +122,34 @@ CREATE TABLE IF NOT EXISTS resource_grants (
   PRIMARY KEY (resource_id, grantee_kind, grantee),
   FOREIGN KEY (resource_id) REFERENCES resources(resource_id)
 );
+
+-- =============================================================
+-- 5) actor_state  (access plane / forward §6 · §12.9 拍点 8.1)
+-- =============================================================
+-- The ACTOR-SCOPED storage locus: the second, structurally separate home of
+-- objects, dual to the channel-scoped resources table. Same channel sqlite as
+-- everything else — access is channel-封 — but a SEPARATE table because scope is
+-- expressed by WHICH structure an object lives in, never by a column (Unix: an
+-- anonymous mapping is not a file tagged "anonymous", it simply is not in the fs
+-- namespace). The collapsed authorization (reachable set ≡ {owner}) means there
+-- is no R here — no resource_grants sibling: the byte row IS the whole object.
+-- Keyed (owner_id, resource_id) — the door welds owner at handle mint, so owner
+-- is a coordinate, not a per-call arg. Cascade-cleared with actor_registry on
+-- deregister (§10.12 row 3 = the scope law: owner 亡 ⟹ its state 亡, Erlang ETS
+-- private).
+CREATE TABLE IF NOT EXISTS actor_state (
+  owner_id    TEXT NOT NULL,             -- identity level (ActorID); incarnation NEVER persisted (§5.3)
+  resource_id TEXT NOT NULL,
+  bytes       BLOB,                      -- inline small bytes, plaintext (at-rest encryption deferred, 拍点 8.6); NULL = resolved-but-empty
+  created_at  INTEGER NOT NULL,
+  PRIMARY KEY (owner_id, resource_id)
+  -- No kind column (day-1 single mechanical shape; a second actor-scoped variant
+  -- adds one additively, 拍点 8.4 — day-1 it would be a dead tag).
+  -- No scope column, ever (this whole table IS the actor-scoped locus, so the
+  -- STRUCTURE is the scope — a column would be redundant and never read).
+  -- No version column (per-key fence / CAS deferred, §1.5; day-1 natural single
+  -- writer — reachable set ≡ {owner} + serial gift — so nothing to fence yet).
+);
 `
 
 // ChannelLocalTables enumerates the channel-local table names in
@@ -135,4 +163,5 @@ var ChannelLocalTables = []string{
 	"actor_registry",
 	"resources",
 	"resource_grants",
+	"actor_state",
 }

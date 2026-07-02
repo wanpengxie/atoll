@@ -48,10 +48,12 @@ const (
 	OpSet Operation = "set"
 
 	// OpDelete — the object's explicit death. NON-LOSSY (§1.2 后果③): an access-plane
-	// object dies ONLY by an explicit op=delete (a full-rights holder) or by channel
-	// destroy — the substrate NEVER auto-destroys on creator-deregister (it would lose
-	// an artifact; isomorphic to the message plane being append-only). Deletes by id —
-	// it has NO operand. Side-effecting.
+	// object dies ONLY by an explicit op=delete (a full-rights holder) or when its
+	// owning scope dies — channel-scoped objects with the channel destroy, actor-scoped
+	// objects with their owner's deregister (the scope law, forward §12.1.5). Scope death
+	// is not a lossy auto-destroy: the object outlives everything short of its scope, and
+	// no living scope ever silently drops it. Deletes by id — it has NO operand.
+	// Side-effecting.
 	OpDelete Operation = "delete"
 )
 

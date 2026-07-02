@@ -156,20 +156,50 @@ func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error 
 	return nil
 }
 
-// Deregister implements storespec.Registry.
+// Deregister implements storespec.Registry. It runs in a transaction so the
+// deregistration transition and the actor-scoped state cascade (§10.12 row 3 /
+// forward §6.5③: owner 亡 ⟹ its private state 亡) commit atomically. The no-op
+// semantics are preserved: a missing or already-deregistered actor changes zero
+// rows, so nothing is cascaded and no error is returned.
 func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int64) error {
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: actor deregister begin: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	const q = `UPDATE actor_registry SET deregistered_at=? WHERE actor_id=? AND deregistered_at IS NULL`
-	res, err := r.db.ExecContext(ctx, q, at, string(id))
+	res, err := tx.ExecContext(ctx, q, at, string(id))
 	if err != nil {
 		return fmt.Errorf("store: actor deregister %q: %w", id, err)
 	}
-	n, _ := res.RowsAffected()
+	n, err := res.RowsAffected()
+	if err != nil {
+		// Do NOT swallow: with n unknowable, falling into the no-op branch would
+		// roll back an UPDATE that may have succeeded — "return nil = nothing
+		// happened" must describe reality, never manufacture it.
+		return fmt.Errorf("store: actor deregister rows-affected %q: %w", id, err)
+	}
 	if n == 0 {
-		// Either missing or already deregistered — caller treats as no-op.
+		// Either missing or already deregistered — caller treats as no-op. Nothing
+		// transitioned, so no cascade (idempotent; the rollback discards the empty
+		// UPDATE).
 		return nil
+	}
+	// The row transitioned to deregistered in THIS tx — cascade-clear its
+	// actor-scoped state in the same tx (scope law, atomic with the transition).
+	if err := clearActorScopedTx(ctx, tx, id); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: actor deregister commit: %w", err)
 	}
 	return nil
 }
+
+// (clearActorScopedTx — the actor-scoped cascade both dereg entry points call —
+// lives in state.go beside the locus's other SQL, so actor_state has exactly one
+// author file.)
 
 // Membership transition DTOs (storespec.MemberActorAdd / storespec.MemberActorRemove)
 // + the MembershipControlPlane contract live in runtime/storespec (contract
@@ -321,7 +351,17 @@ func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, rem
 		return false, fmt.Errorf("store: actor member deregister %q: %w", remove.ID, err)
 	}
 	n, _ := res.RowsAffected()
-	return n == 1, nil
+	if n != 1 {
+		// Already-deregistered / missing member: idempotent no-op, no cascade (a
+		// re-run must not re-clear).
+		return false, nil
+	}
+	// Deregistration took effect this tx — cascade-clear the actor's state in the
+	// same tx (scope law, §10.12 row 3), atomic with the deregistered_at write.
+	if err := clearActorScopedTx(ctx, tx, remove.ID); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 func actorRegisteredEnvelope(channelID channel.ID, add storespec.MemberActorAdd) *message.Envelope {

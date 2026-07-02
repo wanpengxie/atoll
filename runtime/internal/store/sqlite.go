@@ -12,6 +12,15 @@ import (
 )
 
 // OpenOptions tunes DSN-level pragmas. Zero value is fine for production.
+//
+// NOTE (schema baseline): ReadOnly and SkipDDL both skip the idempotent
+// CREATE TABLE IF NOT EXISTS bootstrap — this package's only migration
+// mechanism — while the schema verifier still runs on every open. They
+// therefore REQUIRE the file to already carry the current baseline: a file
+// last touched by an older binary fails fast with "stale channel DB" until
+// one ordinary read-write open self-heals it. Deliberate — admitting a
+// table-short DB read-only would only defer the crash to the first query
+// against the missing table.
 type OpenOptions struct {
 	// ReadOnly opens the database in read-only mode (mode=ro); no filesystem
 	// write side-effects.
@@ -131,6 +140,7 @@ var channelLocalSchemaShape = map[string][]string{
 	"actor_registry":  {"actor_id", "actor_kind", "deregistered_at"},
 	"resources":       {"resource_id", "kind", "bytes", "created_at"},
 	"resource_grants": {"resource_id", "grantee_kind", "grantee", "ops"},
+	"actor_state":     {"owner_id", "resource_id", "bytes", "created_at"},
 }
 
 func verifyChannelLocalSchema(ctx context.Context, db *sql.DB) error {

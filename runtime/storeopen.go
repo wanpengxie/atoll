@@ -59,6 +59,12 @@ func (c *ChannelStores) Close() error {
 
 // OpenChannelOptions tunes the store open.
 type OpenChannelOptions struct {
+	// ReadOnly / SkipDDL skip the idempotent DDL bootstrap (the only migration
+	// mechanism) while the schema verifier still runs — they REQUIRE the file to
+	// already carry the current schema baseline. A file last touched by an older
+	// binary fails fast ("stale channel DB") until one ordinary read-write open
+	// self-heals it. Deliberate: admitting a table-short DB would only defer the
+	// crash to the first query against the missing table.
 	ReadOnly bool
 	SkipDDL  bool
 
@@ -96,6 +102,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Registry:   cs.Resources,
 		Drivers:    accessdoor.DriverTable{resourcespec.KindKV: cs.KVDriver},
 		Membership: channelMembershipCheck{registry: cs.Registry},
+		State:      cs.State,
 	})
 	if err != nil {
 		_ = cs.Close()
