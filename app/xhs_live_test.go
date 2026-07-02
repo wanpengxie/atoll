@@ -14,10 +14,10 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/ActOS/actors/xhs"
+	"github.com/wanpengxie/ActOS/lib/actorcaps"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // xhsDeviceAddr is a fixed loopback port for the adapter's private device
@@ -105,8 +105,8 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 				ID:      xhs.DefaultActorID,
 				Kind:    actor.KindTool,
 				Binding: actor.BindingRuntimeInboundViaRelay,
-				Factory: func(wr harness.Pen) actorrt.Actor {
-					return xhs.NewActor(wr, xhs.Config{
+				Factory: func(caps actorcaps.Caps) actorrt.Actor {
+					return xhs.NewActor(caps.Pen, xhs.Config{
 						ListenAddr:     xhsDeviceAddr,
 						ReaperInterval: 20 * time.Millisecond,
 						Logger:         logger,
@@ -315,8 +315,8 @@ func TestXHSLiveActorStatus(t *testing.T) {
 				ID:      xhs.DefaultActorID,
 				Kind:    actor.KindTool,
 				Binding: actor.BindingRuntimeInboundViaRelay,
-				Factory: func(wr harness.Pen) actorrt.Actor {
-					return xhs.NewActor(wr, xhs.Config{
+				Factory: func(caps actorcaps.Caps) actorrt.Actor {
+					return xhs.NewActor(caps.Pen, xhs.Config{
 						ListenAddr:     xhsStatusDeviceAddr,
 						ReaperInterval: 20 * time.Millisecond,
 						Logger:         logger,
@@ -414,8 +414,8 @@ func TestXHSLiveDeviceUnknownOnDaemonDeath(t *testing.T) {
 				ID:      xhs.DefaultActorID,
 				Kind:    actor.KindTool,
 				Binding: actor.BindingRuntimeInboundViaRelay,
-				Factory: func(wr harness.Pen) actorrt.Actor {
-					return xhs.NewActor(wr, xhs.Config{ListenAddr: xhsCascadeDeviceAddr, ReaperInterval: 20 * time.Millisecond, Logger: logger})
+				Factory: func(caps actorcaps.Caps) actorrt.Actor {
+					return xhs.NewActor(caps.Pen, xhs.Config{ListenAddr: xhsCascadeDeviceAddr, ReaperInterval: 20 * time.Millisecond, Logger: logger})
 				},
 			}},
 		)

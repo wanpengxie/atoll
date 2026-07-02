@@ -3,11 +3,11 @@ package device
 import (
 	"errors"
 
-	"github.com/wanpengxie/ActOS/registry"
+	"github.com/wanpengxie/ActOS/lib/actorcaps"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/registry"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 func init() { registry.Register("device", construct) }
@@ -26,6 +26,6 @@ func construct(_ registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, 
 		ID:      id,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeOutbound,
-		Factory: func(w harness.Pen) actorrt.Actor { return NewActor(w, id, ctx.WorkspaceDir, ctx.Logger) },
+		Factory: func(caps actorcaps.Caps) actorrt.Actor { return NewActor(caps.Pen, id, ctx.WorkspaceDir, ctx.Logger) },
 	}, nil
 }

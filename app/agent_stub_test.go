@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/wanpengxie/ActOS/lib/actorcaps"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -35,8 +36,8 @@ func init() {
 			ID:      id,
 			Kind:    actor.KindAgent,
 			Binding: actor.BindingRuntimeOutbound,
-			Factory: func(pen harness.Pen) actorrt.Actor {
-				impl, err := testAgentBuilder(ctx.ChannelID, id, pen)
+			Factory: func(caps actorcaps.Caps) actorrt.Actor {
+				impl, err := testAgentBuilder(ctx.ChannelID, id, caps.Pen)
 				if err != nil {
 					return nil
 				}

@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/ActOS/lib/actorcaps"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
 	"github.com/wanpengxie/ActOS/protocol/message"
@@ -338,8 +339,8 @@ func (a *App) humanFor(ctx context.Context, chID channel.ID, userID string) (*hu
 	// to its own user id (same admission path as agents/tools — no PenFor side
 	// door). The factory captures the ref the substrate does not hand back.
 	var built *humanFront
-	factory := func(pen harness.Pen) actorrt.Actor {
-		built = &humanFront{app: a, chID: chID, pen: pen}
+	factory := func(caps actorcaps.Caps) actorrt.Actor {
+		built = &humanFront{app: a, chID: chID, pen: caps.Pen}
 		return built
 	}
 	if err := home.Spawn(ctx, self, actor.KindHuman, factory); err != nil {

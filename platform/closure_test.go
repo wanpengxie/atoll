@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/ActOS/lib/actorcaps"
 	"github.com/wanpengxie/ActOS/lib/behavior"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -60,9 +61,9 @@ func (penCell) Receive(context.Context, *message.Envelope) error { return nil }
 func spawnWithPen(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor.Kind) harness.Pen {
 	t.Helper()
 	var pen harness.Pen
-	if err := ch.Spawn(context.Background(), id, kind, func(p harness.Pen) actorrt.Actor {
-		pen = p
-		return penCell{pen: p}
+	if err := ch.Spawn(context.Background(), id, kind, func(caps actorcaps.Caps) actorrt.Actor {
+		pen = caps.Pen
+		return penCell{pen: caps.Pen}
 	}); err != nil {
 		t.Fatalf("spawn pen actor %s: %v", id, err)
 	}
@@ -180,7 +181,7 @@ func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T
 
 	// 2. Spawn the panic actor cell (membership already seeded above; Spawn
 	//    reactivates + places the cell).
-	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, func(harness.Pen) actorrt.Actor {
+	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
 		return panicOnReceive{}
 	}); err != nil {
 		t.Fatalf("spawn worker cell: %v", err)
@@ -265,7 +266,7 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 	}
 
 	// 3. Spawn the silent actor cell (membership already seeded; Spawn places it).
-	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, func(harness.Pen) actorrt.Actor {
+	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
 		return sa
 	}); err != nil {
 		t.Fatalf("spawn silent cell: %v", err)

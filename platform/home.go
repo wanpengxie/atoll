@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/wanpengxie/ActOS/lib/actorcaps"
 	"github.com/wanpengxie/ActOS/lib/channelkit"
 	"github.com/wanpengxie/ActOS/platform/internal/devicepresence"
 	"github.com/wanpengxie/ActOS/platform/internal/link"
@@ -45,6 +46,17 @@ type Home struct {
 	deviceFold *devicepresence.Fold
 	logger     *slog.Logger
 	nowMs      func() int64
+
+	// placement decides which host a new activity (fork/activation) starts on.
+	// Single fixed-home identity this period (SinglePlacement); shaped now so
+	// fork/activation route through Place() and multi-home swaps additively.
+	placement actorrt.Placement
+	// builder is the活过死亡的 class/id → build-closure table (fork/activation注入点
+	// 契约, actorrt.Builder). nil until the domain's factory table is injected
+	// (factory-migration棒) — a nil builder makes SpawnHandle.Fork fail-fast with
+	// ErrNoBuilder rather than fabricate a child. runtime defines the contract,
+	// the downstream fills the table (纯度: substrate 不做实现、不 gate 在它身上).
+	builder actorrt.Builder
 
 	// reconcileStop tears down the closure reconciler ticker (level backstop).
 	reconcileStop context.CancelFunc
@@ -98,10 +110,9 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    by the holder. The post-commit Notify lives at the store append chokepoint,
 	//    so there is no write-gate wrapper layer.
 	minter, err := harness.New(harness.Deps{
-		ChannelID:     cfg.ChannelID,
-		ActorRegistry: cs.Registry,
-		Log:           cs.Log,
-		Logger:        logger,
+		ChannelID: cfg.ChannelID,
+		Log:       cs.Log,
+		Logger:    logger,
 	})
 	if err != nil {
 		_ = cs.Close()
@@ -111,7 +122,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	// channelkit's author#3 closure terminals) commits through this welded pen, so
 	// sender==SystemActorID rides each write by construction — no caller stamping
 	// at the call sites.
-	systemPen := minter.Mint(actor.SystemActorID, cfg.ChannelID)
+	systemPen := minter.Mint(actor.SystemActorID, actor.KindSystem, cfg.ChannelID)
 
 	// 5. Bootstrap: register the intrinsic system actor so its substrate-death
 	//    terminals pass harness sender validation. Idempotent SEED: on a home
@@ -230,6 +241,8 @@ func Open(cfg HomeConfig) (*Home, error) {
 		deviceFold:    deviceFold,
 		logger:        logger,
 		nowMs:         nowMs,
+		placement:     SinglePlacement{},
+		builder:       nil, // injected by the factory-migration棒; nil → Fork fail-fasts (ErrNoBuilder).
 		reconcileStop: reconcileStop,
 		reconcileDone: reconcileDone,
 	}, nil
@@ -254,10 +267,18 @@ func (h *Home) View() View {
 // (the substrate's "actorID and write capability are welded inseparably" invariant). The app never sees a
 // bare writer or a Minter — it only chooses WHAT to place; Home decides HOW.
 //
-// Order invariant (security-critical): membership apply -> Mint pen -> factory(pen) ->
-// spawn cell. Membership must be durable truth BEFORE the factory gets a pen,
-// else a cell that writes on construction hits step 4 (sender not yet registered).
-// "welded at birth" must not become "pen first, then register".
+// Order invariant (security-critical): membership apply -> build caps (Mint pen +
+// access/state/spawn) -> factory(caps) -> spawn cell. Membership must be durable
+// truth BEFORE the embodiment goes live — this is the birth mirror of the
+// death-side "despawn before deregister" (期2 §3.4 point 5, creation/destruction
+// symmetry): the sender gate no longer queries the registry (kind is welded into
+// the pen at Mint, §3.2), so the old "else a cell that writes on construction
+// hits sender_deregistered" reason no longer holds; the invariant remains because
+// membership ≠ embodiment (membership is the durable identity-level truth the
+// live cell layers on top), and a construction-time plane-2 access invoke needing
+// a member-grant resolves against durable membership. A live cell must never
+// precede its own committed membership row — "welded at birth" must not become
+// "pen first, then register".
 //
 // nil-guard: factory == nil = membership-ONLY (a cell-less member, e.g. a
 // human user who is a member but has no cell). No Pen is Minted and no cell is
@@ -265,7 +286,7 @@ func (h *Home) View() View {
 // passing nil to Mint→factory would NPE). Membership ≠ embodiment is the substrate
 // truth; the cell, if any, is the embodiment layer on top. A pre-existing row (server
 // restart) is reused — the live instance rebinds.
-func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, factory func(harness.Pen) actorrt.Actor) error {
+func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, factory func(actorcaps.Caps) actorrt.Actor) error {
 	if id == "" {
 		return fmt.Errorf("platform: Spawn id required")
 	}
@@ -280,19 +301,46 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, fac
 	}
 	if factory != nil {
 		// Two-phase Spawn: the build closure runs inside Spawn (after membership is
-		// durable, before go-live). It Mints the welded raw pen, wraps it in a
-		// livePen bound to THIS incarnation (death-after-write fence), and hands the
-		// gated pen to the factory. A participant is a gated cap holder; substrate
-		// anchors are not (see channelkit/compute).
+		// durable, before go-live). It welds the whole caps缝 bound to THIS
+		// incarnation (livePen + liveAccess membranes, spawn handle) and hands the
+		// gated bundle to the factory in ONE step — no bare handle escapes. A
+		// participant is a gated cap holder; substrate anchors are not (see
+		// channelkit/compute).
 		rt := h.channel.Cells()
 		rt.Spawn(id, func(inc actorrt.Incarnation) actorrt.Actor {
-			pen := link.NewLivePen(h.minter.Mint(id, h.channelID), inc, rt)
-			return factory(pen)
+			return factory(h.buildCaps(id, kind, inc))
 		})
 	}
 	h.logger.Info("platform.member.spawned", "channel", string(h.channelID),
 		"actor", string(id), "kind", string(kind), "cell", factory != nil)
 	return nil
+}
+
+// buildCaps assembles the caps缝 — the five-capability bundle welded to (id,
+// inc) —发 handle 与 live 膜 wrap 同一步 (红线, no bare handle). It is the SINGLE
+// assembler shared by admission (Home.Spawn) and, later, by the Builder-table
+// populator (so a fork/activation child is born with the identical membrane set).
+//
+// Wired this period: Pen (livePen over the harness pen), Access + State
+// (liveAccess over the channel-scoped Mint and actor-scoped MintState handles —
+// cs.Access is already assembled by storeopen, drawn directly), Spawn (the
+// by-incarnation fork/despawn handle; builder may be nil → Fork fail-fasts).
+//
+// Schedule is DELIBERATELY nil this period: the ScheduleHandle requires the
+// schedule engine, which OpenScheduler assembles only once FireSink (铸笔镜像
+// emitSink) + Reviver (SpawnIfAbsent+Builder) exist — that is 线B (装配根,
+// gated on 期5 收货 + review, wiring-build-spec §3.B/P5). Focing a placeholder
+// here would be a半成品 (a minted handle over an engine that never Start()s),
+// so the field is left nil until 线B wires it — no actor consumes it yet.
+func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnation) actorcaps.Caps {
+	rt := h.channel.Cells()
+	return actorcaps.Caps{
+		Pen:      link.NewLivePen(h.minter.Mint(id, kind, h.channelID), inc, rt),
+		Access:   link.NewLiveAccess(h.cs.Access.Mint(id), inc, rt),
+		State:    link.NewLiveAccess(h.cs.Access.MintState(id), inc, rt),
+		Schedule: nil, // 线B (OpenScheduler 真装配) — see doc above.
+		Spawn:    newSpawnHandle(inc, rt, h.builder, h.placement),
+	}
 }
 
 // ServeAttach is the attach受理面: the app hands an upgraded WS request here so a

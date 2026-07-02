@@ -14,11 +14,11 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/ActOS/lib/actorcaps"
 	"github.com/wanpengxie/ActOS/platform/internal/link"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/message"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // cellDownWatcher is the daemon's DownWatcher: when a hosted cell dies
@@ -110,17 +110,21 @@ type ComputeConfig struct {
 }
 
 // ActorDecl declares one actor the daemon will host. Factory constructs the
-// actorrt.Actor given the cell's Pen (the link's out-of-process relay-only proxy
-// pen) — the pen only exists after the actor's stream opens, so the actor cannot
-// be pre-built: every cell that can emit needs its pen at construction, and in
-// the actor model every actor can emit. There is no pen-less construction path.
-// The proxy pen relays upward without injecting identity; the host emitSink's
-// Mint welds the actor's authenticated bound id.
+// actorrt.Actor given its Caps bundle — the same unified factory signature both
+// admission paths share (Home.Spawn cell-side and RunCompute daemon-side). On the
+// daemon only Caps.Pen is wired (the link's out-of-process relay-only proxy pen);
+// the other caps (Access/State/Schedule/Spawn) ride wire arms that are deferred
+// this period, so they are nil here until those arms land. The pen only exists
+// after the actor's stream opens, so the actor cannot be pre-built: every cell
+// that can emit needs its pen at construction, and in the actor model every actor
+// can emit. There is no pen-less construction path. The proxy pen relays upward
+// without injecting identity; the host emitSink's Mint welds the actor's
+// authenticated bound id.
 type ActorDecl struct {
 	ID      actor.ActorID
 	Kind    actor.Kind
 	Binding actor.Binding
-	Factory func(harness.Pen) actorrt.Actor
+	Factory func(actorcaps.Caps) actorrt.Actor
 }
 
 // RunCompute connects to the channel home and hosts the supplied actors as
@@ -182,7 +186,11 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		if a.Factory == nil {
 			return fmt.Errorf("actor %q: nil Factory", a.ID)
 		}
-		impl := a.Factory(pen)
+		// Daemon-side caps: only Pen is wired (the relay-only RemoteWriter). The
+		// off-log/time/spawn arms cross the wire and are deferred this period, so
+		// they stay nil — an actor that reaches for them daemon-side gets a nil
+		// handle, honestly reflecting the unbuilt wire arm rather than a fake one.
+		impl := a.Factory(actorcaps.Caps{Pen: pen})
 		watcher.mu.Lock()
 		watcher.down[a.ID] = downHandler
 		watcher.mu.Unlock()

@@ -8,11 +8,11 @@ import (
 	"os"
 	"strings"
 
+	"github.com/wanpengxie/ActOS/lib/actorcaps"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/registry"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 // Env keys (the claude CLI carries its OWN auth — ANTHROPIC_API_KEY / `claude
@@ -95,8 +95,8 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 		ID:      id,
 		Kind:    actor.KindAgent,
 		Binding: actor.BindingRuntimeOutbound,
-		Factory: func(w harness.Pen) actorrt.Actor {
-			b, err := NewBridge(cfg, id, w)
+		Factory: func(caps actorcaps.Caps) actorrt.Actor {
+			b, err := NewBridge(cfg, id, caps.Pen)
 			if err != nil {
 				log.Fatalf("claude agent bridge: %v", err)
 			}

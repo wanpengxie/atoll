@@ -42,6 +42,7 @@ import (
 	"github.com/wanpengxie/ActOS/actors/kimi"
 	"github.com/wanpengxie/ActOS/actors/xhs"
 	"github.com/wanpengxie/ActOS/app"
+	"github.com/wanpengxie/ActOS/lib/actorcaps"
 	"github.com/wanpengxie/ActOS/lib/metatool"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -201,8 +202,8 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 					ID:      xhs.DefaultActorID,
 					Kind:    actor.KindTool,
 					Binding: actor.BindingRuntimeInboundViaRelay,
-					Factory: func(wr harness.Pen) actorrt.Actor {
-						return xhs.NewActor(wr, xhs.Config{
+					Factory: func(caps actorcaps.Caps) actorrt.Actor {
+						return xhs.NewActor(caps.Pen, xhs.Config{
 							ListenAddr:     metatoolXHSDeviceAddr,
 							ReaperInterval: 20 * time.Millisecond,
 							Logger:         logger,
@@ -213,8 +214,8 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 					ID:      kimi.DefaultActorID,
 					Kind:    actor.KindTool,
 					Binding: actor.BindingRuntimeInboundViaRelay,
-					Factory: func(wr harness.Pen) actorrt.Actor {
-						return kimi.NewActor(wr, kimi.Config{
+					Factory: func(caps actorcaps.Caps) actorrt.Actor {
+						return kimi.NewActor(caps.Pen, kimi.Config{
 							ListenAddr:     metatoolKimiDeviceAddr,
 							ReaperInterval: 20 * time.Millisecond,
 							Logger:         logger,

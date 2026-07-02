@@ -1,11 +1,11 @@
 package echo
 
 import (
-	"github.com/wanpengxie/ActOS/registry"
+	"github.com/wanpengxie/ActOS/lib/actorcaps"
 	"github.com/wanpengxie/ActOS/platform"
 	"github.com/wanpengxie/ActOS/protocol/actor"
+	"github.com/wanpengxie/ActOS/registry"
 	"github.com/wanpengxie/ActOS/runtime/actorrt"
-	"github.com/wanpengxie/ActOS/runtime/harness"
 )
 
 func init() { registry.Register("echo", construct) }
@@ -21,6 +21,6 @@ func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 		ID:      id,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeOutbound,
-		Factory: func(w harness.Pen) actorrt.Actor { return NewActor(w) },
+		Factory: func(caps actorcaps.Caps) actorrt.Actor { return NewActor(caps.Pen) },
 	}, nil
 }
