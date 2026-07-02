@@ -1,81 +1,161 @@
-# Coagent
+# Atoll
 
-多 actor 协作平台：actor 通过 envelope 协议在 channel 内互相发消息，server 持有 truth（per-channel sqlite），daemon 提供算力（host actor cell）。
+**A kernel for agent collaboration.**
 
-## 架构
+Atoll is a substrate where AI agents, humans, and tools work together as **actors** in
+shared **channels** — on top of an enforced, append-only **truth log** for everything
+they say, and capability-gated **access** for everything they touch.
+
+It is built kernel-first: the guarantees are structural, not conventions. An actor
+cannot forge another actor's messages, cannot write around the log, and cannot reach
+data it was not granted — not because a prompt asked it nicely, but because the
+geometry does not compile.
+
+## Why a kernel
+
+Every serious multi-agent system ends up hand-building the same checklist: durable
+state that survives restarts, stable identity across crashes and respawns, an audit
+trail of who did what, authorization for tools and credentials, idempotent recovery,
+lifecycle cleanup. Actor frameworks keep agents *alive*; nothing in that stack keeps
+them *truthful*.
+
+Atoll's position is that this checklist is not application work — it is an operating
+system's work. Agents are the new processes; they need a kernel.
+
+## The minimal kernel: five elements, two planes
 
 ```
-protocol/    协议类型（envelope, actor, channel）
-runtime/     基座运行时（harness 9步管线, actorrt cell/port, sqlite store）
-lib/         stdlib（behavior, callkit, metatool, channelkit, sysactor, introspect）
-platform/    channel 运行平台（server 侧 ChannelHome + daemon 侧 RunCompute）
-app/         产品 HTTP API（gin, identity, workspace, channel, daemon, WS）
-actors/      actor 实现（echo, feishu, agent/kimi, xhs）
-cmd/         二进制入口（server, daemon, cli）
+                 channel (the boundary)
+   ┌──────────────────────────────────────────────┐
+   │   actor  ──── message ────▶  actor            │   horizontal plane:
+   │  (subject)   (into the truth log)  (subject)  │   collaboration = truth
+   │     │                                         │
+   │     └────── access ────▶  resource            │   vertical plane:
+   │        (capability-gated,  (object)           │   reaching data = authority
+   │         off-log)                              │
+   └──────────────────────────────────────────────┘
+```
+
+| Element | What it is |
+|---|---|
+| **channel** | The boundary atom: one execution domain, one trust boundary, one data boundary. |
+| **actor** | A subject: agent, human, or tool. Addressed by identity; alive as an incarnation. |
+| **resource** | An object: passive owned data (state, files, secrets), opaque to the kernel. |
+| **message** | Subject ↔ subject. Appended to the channel's truth log, delivered from its tail. |
+| **access** | Subject ↔ object. Off-log, checked at a gate: caller + resource + operation + capability. |
+
+Remove any element and the system stops working; anything more is domain. Messages
+are the IPC of this world; access is its syscall. A runtime with only the horizontal
+plane lets agents talk but not act — credentials, state, files, and timers all live
+on the vertical plane.
+
+## What the kernel enforces
+
+- **The server is truth.** Every message is appended to a per-channel log (SQLite
+  today) before delivery; delivery *is* the log tail. There is no side channel.
+- **Writes are welded to identity.** An actor writes through a *pen* minted at birth;
+  sender identity is not a field it fills in, so it is not a field it can forge.
+- **Admission is a pipeline.** Every write passes a fixed chain of checks — caller
+  authorization, envelope shape, sender consistency, kind/audience rules, response
+  pairing, dedupe — before it becomes truth.
+- **Identity and liveness are two different things.** An actor's *identity* is stable
+  (addressing, membership, the log); each activation is a distinct *incarnation*
+  (lifecycle, capability validity). Dead incarnations cannot haunt the log.
+- **Requests always close.** A request's terminal state has three authors: the actor's
+  reply, the caller's timeout, or the actor's death. No dangling futures.
+- **Transport is neutral.** An in-process actor (cell) and a remote one (port over
+  WebSocket) are indistinguishable to the runtime — same contract, same gates.
+- **The layering is machine-checked.** Architecture tests fail the build when domain
+  code reaches into kernel internals. The rules hold for agent-written code too —
+  that is the point.
+
+## How it relates to MCP and A2A
+
+They are complements, not competitors. **MCP** connects one agent to its tools.
+**A2A** connects two agents pairwise. Message-bus approaches add a shared space for
+many agents. Atoll's concern is the layer none of them claim: a **shared truth** of
+what was said, **enforced identity** for who said it, and an **authority plane** for
+what each participant may touch. Adapters for existing ecosystems (MCP servers,
+CLIs, coding-agent harnesses) attach as ordinary actors at the boundary.
+
+## Repository layout
+
+```
+protocol/    protocol types (envelope, actor, channel, access, resource)
+runtime/     the kernel runtime (harness admission pipeline, actorrt cells/ports,
+             sqlite store, schedule/timers, access door)
+lib/         stdlib for actor authors (behavior, channelkit, metatool, introspect)
+platform/    channel assembly (server-side ChannelHome + daemon-side RunCompute)
+app/         HTTP API surface (identity, workspace, channel, daemon, WS)
+actors/      built-in actors (echo, device, kimi, xhs)
+agent/       agent looper providers (claudecode, kimi)
+registry/    actor class registry (config → running actor)
+cmd/         binaries (server, daemon, cli)
 sdk/         Go SDK
+archtest/    architecture enforcement tests
 ```
 
 ## Quickstart
 
 ```bash
-# 1. 构建
-go build -o bin/atoll-server ./cmd/server
-go build -o bin/atoll-daemon ./cmd/daemon
-go build -o bin/atoll-cli    ./cmd/cli
+# 1. build
+make build          # -> bin/atoll-server, bin/atoll-daemon
 
-# 2. 起 server
+# 2. run the server (holds truth for all channels)
 bin/atoll-server --db /tmp/atoll-dev/app.db --channel-db-dir /tmp/atoll-dev/channels
 
-# 3. 起 daemon（echo actor，不需要外部凭证）
-#    先在 UI 或 CLI 创建 daemon 拿到 api-key，绑定到 channel
-bin/atoll-daemon --server ws://localhost:8080/compute?key=<api-key>&channel=<chID> \
-                   --key <api-key> --actors echo
+# 3. run a daemon (compute host; echo actor needs no external credentials)
+#    create a daemon in the UI/CLI to get an api-key, bind it to a channel
+bin/atoll-daemon --server "ws://localhost:8080/compute?key=<api-key>&channel=<chID>" \
+                 --key <api-key> --actors echo
 
-# 4. UI（开发模式）
-# web UI 在独立仓库 atoll-web (github.com/wanpengxie/atoll-web); server 用 --ui-dist 指向其 dist/
-
-# 5. 测试
-go test ./...
+# 4. tests
+make test
 ```
 
-## 二进制
+The web UI lives in a separate repository and is served via `--ui-dist`.
 
-| Binary | 作用 |
-|--------|------|
-| `atoll-server` | HTTP API + WS 推送 + 所有 channel 的 truth 持有者 |
-| `atoll-daemon` | WS 连 server，host actor cell（echo/feishu/...） |
-| `atoll-cli`    | 管理 CLI（channel/daemon/message 操作） |
+## Writing an actor
 
-## 核心设计
-
-- **Server IS truth**：所有消息写入只在 server 侧的 per-channel sqlite，daemon 不持有 truth
-- **Envelope 协议统一**：所有 actor 交互通过同一种 envelope 格式（kind=request/response/event）
-- **Cell/Port 对称**：in-process actor（cell）和 remote actor（port over WS）对 actorrt 来说一样
-- **Closure 三作者**：request 的终态由三条路径保证——actor 回复（author#1）、caller 超时（author#2）、actor 死亡（author#3）
-- **Harness 9 步管线**：每条消息写入 truth 前经过 9 步校验（caller auth → envelope shape → channel match → sender consistent → kind+audience → response pairing → dedupe → commit）
-
-## 接入新 actor
-
-实现一个 `Receive(ctx context.Context, env *message.Envelope) error`，注册到 daemon registry：
+An actor implements `Receive` and registers a constructor. The capabilities it gets
+(`Caps`) are handed to it at birth — including the pen that welds its identity:
 
 ```go
-// actors/hermes/hermes.go
+// actors/hello/hello.go
 func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
-    // 处理请求，写回复（pen 焊死本 actor 身份，无需填 Sender/ChannelID）
+    // handle the request, write the reply — the pen fills in identity;
+    // Sender/ChannelID are not yours to set.
     _, err := a.pen.Write(ctx, responseEnvelope)
     return err
 }
 ```
 
 ```go
-// cmd/daemon/main.go
-var registry = map[string]func(harness.Pen) actorrt.Actor{
-    "echo":   func(p harness.Pen) actorrt.Actor { return echo.NewActor(p) },
-    "hermes": func(p harness.Pen) actorrt.Actor { return hermes.NewActor(p) },
+// actors/hello/register.go
+func init() { registry.Register("hello", construct) }
+
+func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
+    return platform.ActorDecl{
+        ID:      spec.ID,
+        Kind:    actor.KindTool,
+        Binding: actor.BindingRuntimeOutbound,
+        Factory: func(caps actorcaps.Caps) actorrt.Actor { return NewActor(caps.Pen) },
+    }, nil
 }
 ```
 
-## 项目名 vs module path
+## Status
 
-- **项目名：atoll**（小写）
-- **Go module：`github.com/wanpengxie/atoll`** — import path 与项目名统一为 atoll（曾用名 atoll/coagent，2026-07 系统性更名）
+Atoll is **v0.01 — a working minimal kernel, pre-release**. The five elements and
+both planes are in place and enforced; the developer shell around them (one-command
+setup, coding-agent connectors, scaffolding) is being built next. Known, deliberate
+boundaries at this stage: single trust domain per deployment, no read-path ACL yet,
+APIs still move without deprecation cycles. Kernel first, polish second — watch the
+repo if you want to see the rest arrive.
+
+## Name
+
+The project is **atoll** (lowercase); the Go module is
+`github.com/wanpengxie/atoll`. An atoll is a reef ring built by countless small
+organisms depositing layer upon layer — no one owns the reef, and it grows by
+sedimentation. That is the design.
