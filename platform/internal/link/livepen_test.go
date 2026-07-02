@@ -8,6 +8,7 @@ import (
 	"net"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/ActOS/platform/internal/link"
 	"github.com/wanpengxie/ActOS/protocol/actor"
@@ -175,5 +176,148 @@ func TestLivePenFencesPostDeathWrite_PortPath(t *testing.T) {
 	}
 	if raw.count() != 1 {
 		t.Fatalf("raw pen saw %d writes total, want 1 (post-replace write fenced before raw)", raw.count())
+	}
+}
+
+// attachGatedPort attaches a port whose emitSink is the caller-supplied one, and
+// stands up a REAL RemoteWriter on the daemon end over net.Pipe (handshake +
+// EmitAck read loop). Unlike attachTestPort's no-op sink, this drives the FULL
+// wire chain: remote RemoteWriter.Write → KindEmit → port.readLoop → emitSink →
+// KindEmitAck → RemoteWriter.DeliverAck. Returns the bound Incarnation, the
+// daemon-side writer, and the raw remote conn (for cleanup).
+func attachGatedPort(t *testing.T, rt *actorrt.Runtime, id actor.ActorID, emit actorrt.EmitSink) (actorrt.Incarnation, *link.RemoteWriter, net.Conn) {
+	t.Helper()
+	hostConn, remoteConn := net.Pipe()
+	codec := ipc.NewCodec(remoteConn, remoteConn)
+	rwCh := make(chan *link.RemoteWriter, 1)
+	hsErr := make(chan error, 1)
+	go func() {
+		payload, _ := json.Marshal(ipc.HandshakePayload{LeaseID: string(id)})
+		if err := codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: payload}); err != nil {
+			hsErr <- err
+			return
+		}
+		ack, err := codec.Read()
+		if err != nil {
+			hsErr <- err
+			return
+		}
+		if ack.Kind != ipc.KindHandshakeAck {
+			hsErr <- io.ErrUnexpectedEOF
+			return
+		}
+		rw := link.NewRemoteWriter(codec)
+		rwCh <- rw
+		hsErr <- nil
+		// EmitAck read loop: route each ack into the FIFO waiter; any conn error
+		// (the host closed the port on replace) fails all pending writers.
+		for {
+			f, rerr := codec.Read()
+			if rerr != nil {
+				rw.Close()
+				return
+			}
+			if f.Kind == ipc.KindEmitAck {
+				var ap ipc.EmitAckPayload
+				if json.Unmarshal(f.Payload, &ap) == nil {
+					rw.DeliverAck(ap)
+				}
+			}
+		}
+	}()
+	inc, err := rt.Attach(context.Background(), hostConn, emit, func(string) (actor.ActorID, error) { return id, nil })
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if e := <-hsErr; e != nil {
+		t.Fatalf("remote handshake: %v", e)
+	}
+	return inc, <-rwCh, remoteConn
+}
+
+// TestLivePenFencesInFlightEmit_PortWireChain is the FULL-wire-chain behaviour
+// proof of the replacement-live-flip invariant (F1) on the port death-write门: an
+// emit that is ALREADY IN FLIGHT inside the host emitSink when a same-id reattach
+// REPLACES the port must be fenced with ErrWriterNotLive and never reach the raw
+// pen — because Attach flips the predecessor dead in the SAME critical section as
+// the map swap, so by the time the parked emit resumes and consults IsLive, the
+// replaced incarnation already reads not-live.
+//
+// Determinism: the gate releases ONLY after CurrentIncarnation reports a different
+// pointer for id, which can only happen once the successor is installed — and the
+// predecessor's markDead precedes that install in the one critical section. So the
+// IsLive verdict the parked emit sees is deterministically false. (Without the F1
+// fix the flip would trail the map swap by the lock-release window, making the
+// verdict a race — this test would then be flaky-red rather than stably green, so
+// it is written to assert the FIXED, deterministic outcome.)
+func TestLivePenFencesInFlightEmit_PortWireChain(t *testing.T) {
+	t.Parallel()
+	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
+	defer rt.StopAll()
+
+	const id = actor.ActorID("remote-wire")
+	raw := &recordPen{}
+
+	emitEntered := make(chan struct{})
+	release := make(chan struct{})
+	sinkVerdict := make(chan error, 1)
+
+	// The host emitSink mirrors Acceptor.emitSink's core (mint → NewLivePen → Write)
+	// but parks BEFORE the livePen.Write so the test can interleave the replace. The
+	// raw pen here stands in for the freshly-minted harness pen.
+	emit := func(ctx context.Context, inc actorrt.Incarnation, env *message.Envelope) (ipc.EmitResult, error) {
+		close(emitEntered)
+		<-release
+		res, werr := link.NewLivePen(raw, inc, rt).Write(ctx, env)
+		sinkVerdict <- werr
+		return ipc.EmitResult{
+			MessageID:    res.MessageID,
+			Seq:          res.Seq,
+			RejectReason: string(res.RejectReason),
+			RejectDetail: res.RejectDetail,
+		}, werr
+	}
+
+	inc1, rw1, remote1 := attachGatedPort(t, rt, id, emit)
+	defer remote1.Close()
+
+	// The daemon emits over the real wire; the write blocks on the host's EmitAck.
+	emitDone := make(chan error, 1)
+	go func() {
+		_, werr := rw1.Write(context.Background(), &message.Envelope{ID: "in-flight"})
+		emitDone <- werr
+	}()
+
+	// Wait until the emit has traversed the wire and parked in the host sink.
+	<-emitEntered
+
+	// Releaser: once the successor is installed (pointer differs), the predecessor's
+	// in-lock markDead has already run — release the parked emit then.
+	go func() {
+		for {
+			if cur, ok := rt.CurrentIncarnation(id); ok && cur != inc1 {
+				break
+			}
+			time.Sleep(200 * time.Microsecond) // gentle poll (not a hot spin) — avoids CPU contention under parallel test load
+		}
+		close(release)
+	}()
+
+	// Replace: a second attach for the SAME id stops the predecessor (Attach's
+	// old.stop() joins inc1's readLoop, which the releaser unparks above).
+	_, remote2 := attachTestPort(t, rt, id)
+	defer remote2.Close()
+
+	// The in-flight emit is fenced end-to-end: the daemon write returns an error
+	// (its port was torn down), the sink verdict is ErrWriterNotLive, and the raw
+	// pen never saw the write.
+	if werr := <-emitDone; werr == nil {
+		t.Fatalf("daemon emit err = nil, want non-nil (port torn down under it)")
+	}
+	if verr := <-sinkVerdict; !errors.Is(verr, link.ErrWriterNotLive) {
+		t.Fatalf("host sink verdict = %v, want ErrWriterNotLive", verr)
+	}
+	if raw.count() != 0 {
+		t.Fatalf("raw pen saw %d writes, want 0 (in-flight emit fenced post-replace)", raw.count())
 	}
 }

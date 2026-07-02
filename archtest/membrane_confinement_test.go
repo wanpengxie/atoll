@@ -28,18 +28,38 @@ import (
 // with; it never re-constructs one (that would let a raw handle escape unwrapped,
 // or re-weld a membrane to the wrong incarnation).
 //
-// Allowlist granularity = the platform tree (platformPathPrefix), the same
-// allowlist as minter_confinement's platform half. link IS internal to platform,
-// so Go's internal-import rule already caps who can reach NewLive* to the platform
-// subtree; this symbol lock is the documented tripwire that (a) records the
-// weave-at-assembly invariant at the type-reference layer and (b) re-arms should
-// link ever be de-internalised (same "kept as a tripwire" stance as harness.Chain).
-// The residual shadowing / dot-import evasion is a review-layer offence, not worth
-// a go/types-grade pass pre-launch — same as the sibling confinement walls.
+// Allowlist granularity = a PRECISE per-file set (membraneWeaveAllowlist below),
+// NOT the whole platform tree. A blanket platform-prefix skip makes the wall
+// vacuous — any platform file could re-construct a membrane and re-weld it to the
+// wrong incarnation (or let a raw handle escape unwrapped). The membrane types are
+// unexported so only NewLive* can produce one, and link IS internal to platform;
+// this symbol lock is the tripwire that (a) records the weave-at-assembly invariant
+// at the type-reference layer and (b) re-arms should link ever be de-internalised
+// (same "kept as a tripwire" stance as harness.Chain). The residual shadowing /
+// dot-import evasion is a review-layer offence, not worth a go/types-grade pass
+// pre-launch — same as the sibling confinement walls.
 var membraneConstructors = map[string]bool{
 	"NewLivePen":      true,
 	"NewLiveAccess":   true,
 	"NewLiveSchedule": true,
+}
+
+// membraneWeaveAllowlist is the EXACT set of files permitted to reference the
+// live-membrane constructors via the `link.` qualifier. Cored out by ACTUAL
+// reference (not by tree prefix):
+//
+//   - The link package itself DEFINES the constructors; a link file never imports
+//     link, so a same-package reference carries no `link.` qualifier and the
+//     import-resolution below already exempts it (local=="" → skip). It therefore
+//     needs no entry here (accept.go's port-path weave is such a same-package use).
+//   - platform/home.go is the SINGLE caps assembler (buildCaps) — the one外部
+//     legitimate weave site.
+//
+// Everything else — spawnhandle.go (delegates to the assembler, weaves nothing),
+// compute.go (weaves nothing), and any future platform file — is OUT: adding a
+// NewLive* reference anywhere else must turn this test red.
+var membraneWeaveAllowlist = map[string]bool{
+	"../platform/home.go": true,
 }
 
 // TestLiveMembraneConstructionConfinedToPlatform — SYMBOL-level lock: only the
@@ -65,8 +85,8 @@ func TestLiveMembraneConstructionConfinedToPlatform(t *testing.T) {
 			return nil
 		}
 		slash := filepath.ToSlash(path)
-		if strings.HasPrefix(slash, platformPathPrefix) {
-			return nil // platform = the legitimate assembler (buildCaps) + port path (link)
+		if membraneWeaveAllowlist[slash] {
+			return nil // the SINGLE sanctioned assembler (buildCaps); link is exempted below by import-resolution
 		}
 		file, perr := parser.ParseFile(fset, path, nil, 0)
 		if perr != nil {

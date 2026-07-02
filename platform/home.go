@@ -51,12 +51,15 @@ type Home struct {
 	// Single fixed-home identity this period (SinglePlacement); shaped now so
 	// fork/activation route through Place() and multi-home swaps additively.
 	placement actorrt.Placement
-	// builder is the活过死亡的 class/id → build-closure table (fork/activation注入点
-	// 契约, actorrt.Builder). nil until the domain's factory table is injected
+	// builder is the platform-layer class → caps-factory table (fork注入点契约,
+	// CapsFactoryBuilder). nil until the domain's factory table is injected
 	// (factory-migration棒) — a nil builder makes SpawnHandle.Fork fail-fast with
-	// ErrNoBuilder rather than fabricate a child. runtime defines the contract,
-	// the downstream fills the table (纯度: substrate 不做实现、不 gate 在它身上).
-	builder actorrt.Builder
+	// ErrNoBuilder rather than fabricate a child. The table hands back the RAW
+	// factory (func(Caps) Actor); the caps缝 is woven at the platform assembler
+	// (buildCaps) when a fork child is born, so a child gets the identical membrane
+	// set as a top-level admission (纯度: the domain fills WHAT to build, the
+	// platform seam owns HOW caps are welded — actorrt never touches harness/link).
+	builder CapsFactoryBuilder
 
 	// reconcileStop tears down the closure reconciler ticker (level backstop).
 	reconcileStop context.CancelFunc
@@ -318,8 +321,10 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, fac
 
 // buildCaps assembles the caps缝 — the five-capability bundle welded to (id,
 // inc) —发 handle 与 live 膜 wrap 同一步 (红线, no bare handle). It is the SINGLE
-// assembler shared by admission (Home.Spawn) and, later, by the Builder-table
-// populator (so a fork/activation child is born with the identical membrane set).
+// caps assembler, shared by admission (Home.Spawn) and by fork (spawnHandle.Fork
+// holds this method value as its capsAssembler and re-runs it against each child's
+// incarnation) — so a fork child is born with the IDENTICAL membrane set as a
+// top-level admission (recursive assembly, §3.A), never a raw un-membraned closure.
 //
 // Wired this period: Pen (livePen over the harness pen), Access + State
 // (liveAccess over the channel-scoped Mint and actor-scoped MintState handles —
@@ -339,7 +344,7 @@ func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnat
 		Access:   link.NewLiveAccess(h.cs.Access.Mint(id), inc, rt),
 		State:    link.NewLiveAccess(h.cs.Access.MintState(id), inc, rt),
 		Schedule: nil, // 线B (OpenScheduler 真装配) — see doc above.
-		Spawn:    newSpawnHandle(inc, rt, h.builder, h.placement),
+		Spawn:    newSpawnHandle(inc, rt, h.builder, h.buildCaps, h.placement),
 	}
 }
 

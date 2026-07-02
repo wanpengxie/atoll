@@ -172,13 +172,17 @@ func (r *Runtime) DespawnChild(parent Incarnation, childID actor.ActorID) error 
 		return ErrNotOwner
 	}
 	delete(r.embodiments, childID)
-	r.mu.Unlock()
-	// Mirrors Despawn's own guarded teardown: mark dead + join. The stale
-	// r.owned[parent.p] entry for this child is left in place — it is
-	// !isLive() from here on and gets pruned on the parent's next Fork
-	// (§3.1a's amortised cleanup), same as any other child that died on its
-	// own between two Forks.
+	// REPLACEMENT-LIVE-FLIP INVARIANT (same as Despawn/DespawnID): flip dead in the
+	// SAME critical section as the map delete — no live-but-unmapped window for a
+	// stale welded cap to pass IsLive. markDead is an idempotent atomic and never
+	// re-enters r.mu, so it is deadlock-safe in-lock.
 	child.markDead()
+	r.mu.Unlock()
+	// Mirrors Despawn's own guarded teardown: the live flip already happened
+	// in-lock; here only the join (WAIT half). The stale r.owned[parent.p] entry
+	// for this child is left in place — it is !isLive() from here on and gets
+	// pruned on the parent's next Fork (§3.1a's amortised cleanup), same as any
+	// other child that died on its own between two Forks.
 	child.stop()
 	return nil
 }

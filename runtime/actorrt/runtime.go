@@ -349,11 +349,23 @@ func (r *Runtime) Spawn(id actor.ActorID, build func(Incarnation) Actor) Incarna
 
 	r.mu.Lock()
 	old := r.embodiments[id]
+	if old != nil {
+		// REPLACEMENT-LIVE-FLIP INVARIANT: the predecessor's live→dead flip MUST
+		// happen in the SAME critical section that stops pointing the map at it.
+		// markDead is an idempotent atomic write (it never re-enters r.mu / removeIf),
+		// so it is deadlock-safe here. If it were left to old.stop() (below, outside
+		// the lock), a window would open where the map no longer points to `old` yet
+		// old.isLive() still reads true — and a stale livePen captured by a goroutine
+		// that outlived `old` would PASS the WHEN gate (IsLive reads old's own atomic,
+		// not the map) and author truth on a replaced incarnation's behalf.
+		old.markDead()
+	}
 	r.embodiments[id] = c
 	c.live.Store(true) // go-live: register + liveness atomic flip are one critical section.
 	r.mu.Unlock()
 	// stop()/start() run OUTSIDE the lock: stop() joins the old goroutine,
-	// which may itself call back into the runtime.
+	// which may itself call back into the runtime. The live flip already happened
+	// in-lock above; stop() here only cancels + joins (the WAIT half of teardown).
 	if old != nil {
 		old.stop()
 	}
@@ -444,11 +456,20 @@ func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, emit Em
 	}
 	r.mu.Lock()
 	old, existed := r.embodiments[p.id]
+	if existed {
+		// REPLACEMENT-LIVE-FLIP INVARIANT (same as Spawn): flip the predecessor
+		// dead in the SAME critical section as the map swap. Otherwise a replaced
+		// port's in-flight cross-wire emit — welded to `old`'s Incarnation — would
+		// still pass IsLive during the lock-release-to-old.stop() window and author
+		// truth on the successor's id. markDead is an idempotent atomic (no r.mu
+		// re-entry), deadlock-safe in-lock.
+		old.markDead()
+	}
 	r.embodiments[p.id] = p
 	p.live.Store(true) // go-live (port path); register + liveness flip are one critical section, exactly as Spawn.
 	r.mu.Unlock()
 	if existed {
-		old.stop()
+		old.stop() // WAIT half only (cancel + join); the live flip already happened in-lock.
 	}
 	p.start()
 	// Return the Incarnation (id + this embodiment pointer): the home-side port
@@ -500,14 +521,18 @@ func (r *Runtime) Despawn(inc Incarnation) {
 	matched := ok && cur == inc.p
 	if matched {
 		delete(r.embodiments, inc.id)
+		// REPLACEMENT-LIVE-FLIP INVARIANT: flip dead in the SAME critical section as
+		// the map delete, so no window opens where the entry is gone but IsLive still
+		// reads true for a stale welded capability. markDead is idempotent + never
+		// re-enters r.mu, so it is deadlock-safe in-lock.
+		inc.p.markDead()
 	}
 	r.mu.Unlock()
 	// Guarded by POINTER IDENTITY: only despawn IFF the map still points to this
 	// very incarnation, so despawning a stale handle (a replaced predecessor, or
 	// an id never hosted) is a safe no-op and can never evict a same-id successor.
 	if matched {
-		inc.p.markDead()
-		inc.p.stop()
+		inc.p.stop() // WAIT half only; the live flip already happened in-lock.
 	}
 }
 
@@ -529,11 +554,14 @@ func (r *Runtime) DespawnID(id actor.ActorID) bool {
 	p, ok := r.embodiments[id]
 	if ok {
 		delete(r.embodiments, id)
+		// REPLACEMENT-LIVE-FLIP INVARIANT: dead-flip in the same critical section as
+		// the map delete (idempotent atomic, no r.mu re-entry) — no live-but-unmapped
+		// window for a stale welded cap to slip through IsLive.
+		p.markDead()
 	}
 	r.mu.Unlock()
 	if ok {
-		p.markDead()
-		p.stop()
+		p.stop() // WAIT half only; the live flip already happened in-lock.
 	}
 	return ok
 }
@@ -587,12 +615,17 @@ func (r *Runtime) StopAll() {
 	r.mu.Lock()
 	ps := make([]embodiment, 0, len(r.embodiments))
 	for _, p := range r.embodiments {
+		// REPLACEMENT-LIVE-FLIP INVARIANT: dead-flip every embodiment in the SAME
+		// critical section that clears the map, so no live-but-unmapped window opens
+		// for a stale welded cap between here and the joins below. markDead is an
+		// idempotent atomic and never re-enters r.mu — deadlock-safe in-lock.
+		p.markDead()
 		ps = append(ps, p)
 	}
 	r.embodiments = make(map[actor.ActorID]embodiment)
 	r.mu.Unlock()
 	for _, p := range ps {
-		p.stop()
+		p.stop() // WAIT half only; the live flips already happened in-lock.
 	}
 }
 
