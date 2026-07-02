@@ -102,14 +102,13 @@ func (s *stepEnvelopeShape) Run(ctx context.Context, env *message.Envelope) (out
 
 	// (5) visibility closed set — proto-layer0 §2.4.
 	// Empty visibility is legal here (Step Normalize defaults to public).
-	if env.Visibility != "" &&
-		env.Visibility != message.VisibilityPublic &&
-		env.Visibility != message.VisibilityPrivate &&
-		env.Visibility != message.VisibilitySystem {
-		return outcome{
-			RejectReason: HarnessVisibilityInvalid,
-			Detail:       "envelope.visibility not in {public, private, system}",
-		}, nil
+	if env.Visibility != "" {
+		if _, ok := message.ParseVisibility(string(env.Visibility)); !ok {
+			return outcome{
+				RejectReason: HarnessVisibilityInvalid,
+				Detail:       "envelope.visibility not in {public, private, system}",
+			}, nil
+		}
 	}
 
 	// (6) audience wildcard ban — proto-layer0 §2.3 (pure format, no

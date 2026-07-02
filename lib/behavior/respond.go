@@ -23,8 +23,8 @@ import (
 // the caller timeout (author#2) or a concurrent author, which is benign.
 
 // Respond commits a FINAL response/terminal for a request held in-hand, through
-// the pen. status MUST be final ("completed"/"failed"); empty defaults to
-// "completed". A Duplicate outcome returns the message id with no error. The
+// the pen. status MUST be final (message.StatusCompleted/StatusFailed); empty
+// defaults to completed. A Duplicate outcome returns the message id with no error. The
 // answering actor's own identity is welded onto the pen (sealed-pen), never a
 // parameter. author#1.
 func Respond(
@@ -38,7 +38,7 @@ func Respond(
 		return "", fmt.Errorf("behavior: Respond request required")
 	}
 	if spec.Status == "" {
-		spec.Status = "completed"
+		spec.Status = message.StatusCompleted
 	}
 	if !message.IsFinalStatus(spec.Status) {
 		return "", fmt.Errorf("behavior: Respond status must be final; got %q", spec.Status)
@@ -79,7 +79,7 @@ func CollapseInternalError(
 		payload = b
 	}
 	return Respond(ctx, pen, clock, request, ResponseSpec{
-		Status:  "failed",
+		Status:  message.StatusFailed,
 		Reason:  string(message.TerminalReceiverInternalError),
 		Payload: payload,
 	})
@@ -101,7 +101,7 @@ func RespondJSON(
 			fmt.Sprintf("marshal result: %v", err))
 	}
 	return Respond(ctx, pen, clock, request,
-		ResponseSpec{Status: "completed", Payload: raw})
+		ResponseSpec{Status: message.StatusCompleted, Payload: raw})
 }
 
 // Fail commits a status=failed final carrying the conventional failure
@@ -117,7 +117,7 @@ func Fail(
 ) (message.ID, error) {
 	payload, _ := json.Marshal(map[string]string{"error_code": errorCode, "detail": detail})
 	return Respond(ctx, pen, clock, request, ResponseSpec{
-		Status:  "failed",
+		Status:  message.StatusFailed,
 		Reason:  string(message.TerminalReceiverInternalError),
 		Payload: payload,
 	})

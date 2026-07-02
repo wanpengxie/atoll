@@ -164,8 +164,18 @@ func (e *Envelope) UnmarshalJSON(data []byte) error {
 //
 // per proto-layer0 §2.5.1 and proto-foundation §1.6.3.
 func IsFinalStatus(status string) bool {
-	return status == "completed" || status == "failed"
+	return status == StatusCompleted || status == StatusFailed
 }
+
+// Layer 1 final status closed set — the two wire words per proto-layer0
+// §2.5.1. IsFinalStatus above is the membership predicate (the judgment
+// face); these consts are the ONE literal home (the vocabulary face).
+// Production code MUST reference them instead of bare "completed"/"failed"
+// strings; wire/JSON fixtures keep the literal form.
+const (
+	StatusCompleted = "completed"
+	StatusFailed    = "failed"
+)
 
 // contentFields lists the envelope field names from L0 §2.1 (with sender
 // flattened into the 2 dotted keys sender.{kind,id} — sender carries

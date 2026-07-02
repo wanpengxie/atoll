@@ -43,7 +43,7 @@ func MaterialiseReceiverUnavailable(
 	for i := range rows {
 		req := &rows[i].Envelope
 		if _, werr := Respond(ctx, pen, clock, req, ResponseSpec{
-			Status: "failed",
+			Status: message.StatusFailed,
 			Reason: string(message.TerminalReceiverUnavailable),
 		}); werr != nil {
 			if onFault != nil {

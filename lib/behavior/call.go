@@ -160,7 +160,7 @@ func (c *Caller) Arm(req *message.Envelope) {
 // that fails silently is the asymmetry §3.2 closes.
 func (c *Caller) fireTimeout(req *message.Envelope) {
 	term, err := BuildResponseFromRequest(req, c.clock, ResponseSpec{
-		Status: "failed",
+		Status: message.StatusFailed,
 		Reason: string(message.TerminalUnansweredTimeout),
 	})
 	if err != nil {

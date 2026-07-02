@@ -261,7 +261,7 @@ func checkFailedResponseReason(payload []byte) failedResponseReasonCheck {
 		return check
 	}
 	var status string
-	if err := json.Unmarshal(rawStatus, &status); err != nil || status != "failed" {
+	if err := json.Unmarshal(rawStatus, &status); err != nil || status != message.StatusFailed {
 		return check
 	}
 	check.failed = true
