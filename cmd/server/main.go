@@ -22,6 +22,7 @@ func main() {
 	addr := flag.String("addr", ":8080", "listen address")
 	dbPath := flag.String("db", "atoll.db", "app database path")
 	channelDBDir := flag.String("channel-db-dir", "/tmp/atoll-dev/channels", "directory for channel databases")
+	uiDist := flag.String("ui-dist", "", "path to the built web UI (atoll-web repo's dist/); empty = API-only")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -45,6 +46,7 @@ func main() {
 		DB:           appDB,
 		Logger:       logger,
 		ChannelDBDir: *channelDBDir,
+		UIDist:       *uiDist,
 	})
 	if err != nil {
 		log.Fatalf("server: %v", err)

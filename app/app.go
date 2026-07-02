@@ -40,6 +40,7 @@ type App struct {
 	humans map[channel.ID]map[actor.ActorID]*humanFront
 
 	channelDBDir string
+	uiDist       string
 }
 
 // Config configures the App.
@@ -47,6 +48,11 @@ type Config struct {
 	DB           *sql.DB
 	Logger       *slog.Logger
 	ChannelDBDir string // e.g. "/tmp/atoll-dev/channels"
+
+	// UIDist is the on-disk path of the built web UI (the atoll-web repo's
+	// dist/ — the UI lives in its own repository since the open-source split).
+	// Empty = UI routes are not registered and the server is API-only.
+	UIDist string
 }
 
 // New assembles the App: gin engine, routes, and loads existing channels.
@@ -66,6 +72,7 @@ func New(cfg Config) (*App, error) {
 		homes:        make(map[channel.ID]*platform.Home),
 		humans:       make(map[channel.ID]map[actor.ActorID]*humanFront),
 		channelDBDir: cfg.ChannelDBDir,
+		uiDist:       cfg.UIDist,
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -184,15 +191,19 @@ func (a *App) registerRoutes() {
 	// (no blind-build). Same ?key=+?channel= auth as /compute.
 	a.engine.GET("/compute/plan", a.handleComputePlan)
 
-	// Static files.
-	a.engine.Static("/assets", "web/ui/dist/assets")
-	a.engine.StaticFile("/favicon.svg", "web/ui/dist/favicon.svg")
+	// Static files — only when a built UI is supplied (the UI lives in its
+	// own repository, atoll-web; empty UIDist = API-only server).
+	if a.uiDist != "" {
+		a.engine.Static("/assets", filepath.Join(a.uiDist, "assets"))
+		a.engine.StaticFile("/favicon.svg", filepath.Join(a.uiDist, "favicon.svg"))
+	}
 	a.engine.NoRoute(func(c *gin.Context) {
 		// For non-API, non-asset paths, serve index.html (SPA fallback).
-		if !strings.HasPrefix(c.Request.URL.Path, "/api/") &&
+		if a.uiDist != "" &&
+			!strings.HasPrefix(c.Request.URL.Path, "/api/") &&
 			!strings.HasPrefix(c.Request.URL.Path, "/ws") &&
 			!strings.HasPrefix(c.Request.URL.Path, "/compute") {
-			c.File("web/ui/dist/index.html")
+			c.File(filepath.Join(a.uiDist, "index.html"))
 			return
 		}
 		c.JSON(http.StatusNotFound, gin.H{"error": "not found"})

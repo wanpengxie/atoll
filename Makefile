@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: install build build-go build-release build-ui test lint dev dev-ui dev-server clean
+.PHONY: install build build-go build-release test lint dev dev-server clean
 
 GO_BINARIES := server daemon
 
@@ -9,12 +9,11 @@ GO_BINARIES := server daemon
 # ----------------------------------------------------------------------------
 install:
 	go mod download
-	cd web/ui && pnpm install
 
 # ----------------------------------------------------------------------------
 # build
 # ----------------------------------------------------------------------------
-build: build-go build-ui
+build: build-go
 
 LDFLAGS_RELEASE := -s -w
 
@@ -32,9 +31,6 @@ build-release:
 	  go build -ldflags="$(LDFLAGS_RELEASE)" -o bin/atoll-$$b ./cmd/$$b || exit 1; \
 	done
 
-build-ui:
-	cd web/ui && pnpm build
-
 # ----------------------------------------------------------------------------
 # test / lint
 # ----------------------------------------------------------------------------
@@ -47,12 +43,11 @@ lint:
 	go test ./archtest/
 
 # ----------------------------------------------------------------------------
-# dev — 一键起全栈: server + UI dev server
-#   make dev        起 server + UI
-#   make dev-server 只起 server
-#   make dev-ui     只起 UI dev server
+# dev — 起 server(API-only)。web UI 在独立仓库 atoll-web:
+#   make dev UI_DIST=../atoll-web/dist  连本地构建好的 UI
+#   UI dev server 在 atoll-web 仓里 pnpm dev
 # ----------------------------------------------------------------------------
-dev: build-go dev-server dev-ui
+dev: build-go dev-server
 
 dev-server:
 	@mkdir -p /tmp/atoll-dev/channels
@@ -60,11 +55,8 @@ dev-server:
 	@bin/atoll-server \
 	  --db /tmp/atoll-dev/app.db \
 	  --channel-db-dir /tmp/atoll-dev/channels \
-	  --addr :8832 &
-
-dev-ui:
-	@echo "[dev] starting UI on :5173 (proxy -> :8832)"
-	cd web/ui && pnpm dev
+	  --addr :8832 \
+	  --ui-dist "$(UI_DIST)" &
 
 # ----------------------------------------------------------------------------
 # clean — 删 build 产物（不动用户数据）

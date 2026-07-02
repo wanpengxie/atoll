@@ -13,7 +13,6 @@ app/         产品 HTTP API（gin, identity, workspace, channel, daemon, WS）
 actors/      actor 实现（echo, feishu, agent/kimi, xhs）
 cmd/         二进制入口（server, daemon, cli）
 sdk/         Go SDK
-web/         前端（React Vite UI + xhs Chrome 扩展）
 ```
 
 ## Quickstart
@@ -33,7 +32,7 @@ bin/atoll-daemon --server ws://localhost:8080/compute?key=<api-key>&channel=<chI
                    --key <api-key> --actors echo
 
 # 4. UI（开发模式）
-cd web/ui && pnpm dev   # http://localhost:5173
+# web UI 在独立仓库 atoll-web (github.com/wanpengxie/atoll-web); server 用 --ui-dist 指向其 dist/
 
 # 5. 测试
 go test ./...
