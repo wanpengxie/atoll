@@ -275,13 +275,13 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	pen, _, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
-	h.Install(toolID, &echoCell{w: pen}, nil)
+	h.Install(toolID, &echoCell{w: arms.Pen}, nil)
 	d.Start()
 
 	// Membership registered the declared actor (register/reactivate semantics).
@@ -340,7 +340,7 @@ func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	pen, _, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -366,7 +366,7 @@ func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
 	// deterministically rather than racily.
 	time.Sleep(50 * time.Millisecond)
 
-	h.Install(toolID, &echoCell{w: pen}, nil)
+	h.Install(toolID, &echoCell{w: arms.Pen}, nil)
 	d.Start()
 
 	// The buffered in-window request must now be dispatched and answered.
@@ -404,14 +404,14 @@ func TestEndToEnd_CellDeath_ClosesStreamToOnDown(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	pen, downHandler, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
-	_ = pen
-	h.Install(toolID, panicCell{}, downHandler)
+	_ = arms
+	h.Install(toolID, panicCell{}, arms.Down)
 	d.Start()
 
 	// Dispatch triggers the panic → cell death → downHandler closes the stream →
@@ -449,14 +449,14 @@ func TestLease_NoTraffic_ExpiresToDown(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	pen, downHandler, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
-	_ = pen
-	h.Install(toolID, &echoCell{w: pen}, downHandler)
+	_ = arms
+	h.Install(toolID, &echoCell{w: arms.Pen}, arms.Down)
 	// Deliberately do NOT call d.Start(): no idle ping, so no inbound traffic
 	// refreshes the home lease. The daemon is "frozen" from the home's view.
 
@@ -502,13 +502,13 @@ func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 	defer h.Stop()
 
 	cell := &blockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
-	pen, _, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
-	_ = pen
+	_ = arms
 	h.Install(toolID, cell, nil)
 	d.Start()
 

@@ -112,14 +112,14 @@ type ComputeConfig struct {
 // ActorDecl declares one actor the daemon will host. Factory constructs the
 // actorrt.Actor given its Caps bundle — the same unified factory signature both
 // admission paths share (Home.Spawn cell-side and RunCompute daemon-side). On the
-// daemon only Caps.Pen is wired (the link's out-of-process relay-only proxy pen);
-// the other caps (Access/State/Schedule/Spawn) ride wire arms that are deferred
-// this period, so they are nil here until those arms land. The pen only exists
-// after the actor's stream opens, so the actor cannot be pre-built: every cell
-// that can emit needs its pen at construction, and in the actor model every actor
-// can emit. There is no pen-less construction path. The proxy pen relays upward
-// without injecting identity; the host emitSink's Mint welds the actor's
-// authenticated bound id.
+// daemon the Pen + plane-2 (Access/State) + time-axis (Schedule) caps are all
+// wired as relay-only proxies over the actor's port stream; only Spawn stays nil
+// (the fork/despawn arm does not cross the wire this period). The proxies only
+// exist after the actor's stream opens, so the actor cannot be pre-built: every
+// cell that can emit needs its pen at construction, and in the actor model every
+// actor can emit. There is no pen-less construction path. The proxies relay upward
+// without injecting identity; the home side welds the actor's authenticated bound
+// id (Mint on the pen, the access door minter, the schedule engine minter).
 type ActorDecl struct {
 	ID      actor.ActorID
 	Kind    actor.Kind
@@ -174,7 +174,7 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		// dispatch handler routes every envelope on this stream into THIS actor's
 		// mailbox (the stream IS the target — no audience demux on the daemon).
 		target := a.ID
-		pen, downHandler, err := d.OpenStream(target, func(env *message.Envelope) error {
+		arms, err := d.OpenStream(target, func(env *message.Envelope) error {
 			_, err := del.Deliver([]actor.ActorID{target}, env)
 			return err
 		}, func(requestID message.ID) {
@@ -186,13 +186,19 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		if a.Factory == nil {
 			return fmt.Errorf("actor %q: nil Factory", a.ID)
 		}
-		// Daemon-side caps: only Pen is wired (the relay-only RemoteWriter). The
-		// off-log/time/spawn arms cross the wire and are deferred this period, so
-		// they stay nil — an actor that reaches for them daemon-side gets a nil
-		// handle, honestly reflecting the unbuilt wire arm rather than a fake one.
-		impl := a.Factory(actorcaps.Caps{Pen: pen})
+		// Daemon-side caps: Pen + Access/State + Schedule are all wired as relay
+		// proxies over the actor's port stream, so a daemon-hosted cell reaches for
+		// them exactly as a local cell does (transport neutrality — the home welds
+		// identity and runs the death gate over the home's port incarnation). Only
+		// Spawn stays nil: the fork/despawn arm does not cross the wire this period.
+		impl := a.Factory(actorcaps.Caps{
+			Pen:      arms.Pen,
+			Access:   arms.Access,
+			State:    arms.State,
+			Schedule: arms.Schedule,
+		})
 		watcher.mu.Lock()
-		watcher.down[a.ID] = downHandler
+		watcher.down[a.ID] = arms.Down
 		watcher.mu.Unlock()
 		// Register the obs forwarder BEFORE Spawn so no early obs edge is
 		// missed (same discipline as WatchDown).

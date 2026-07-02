@@ -55,10 +55,11 @@ func TestEmitIdentity_HostWeldsAuthorFromBoundID(t *testing.T) {
 	}
 	defer func() { _ = d.Close() }()
 
-	pen, _, err := d.OpenStream(toolID, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(toolID, func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
+	pen := arms.Pen
 	d.Start()
 
 	// 1. Production path: the daemon relays an envelope with EMPTY identity. The

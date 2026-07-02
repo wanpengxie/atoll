@@ -448,8 +448,9 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 // it as a `port` embodiment. The substrate does not spawn the remote (it connects
 // in); Attach performs the handshake, resolves
 // the connection's credential to an ActorID via resolve, relays the remote's
-// emits through emit, and returns the bound Incarnation. If an embodiment already
-// exists for the resolved id it is stopped and replaced.
+// upward invocations through sinks (Emit for the message plane, Access/Schedule
+// for the opaque plane-2 / time-axis arms), and returns the bound Incarnation. If
+// an embodiment already exists for the resolved id it is stopped and replaced.
 //
 // hsCtx bounds ONLY the connect-in handshake (a substrate-owned protocol step
 // whose time bound is a substrate invariant — a peer that connects but never
@@ -458,8 +459,8 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 // this call — a per-call lifetime ctx would wrongly tear the port down when
 // Attach returns. Pass a deadline ctx to guard the handshake; a nil/background
 // ctx degrades to an unbounded handshake read.
-func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc) (Incarnation, error) {
-	p, err := newPort(r.parent, hsCtx, conn, emit, resolve, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
+func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc) (Incarnation, error) {
+	p, err := newPort(r.parent, hsCtx, conn, sinks, resolve, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
 	if err != nil {
 		return Incarnation{}, err
 	}

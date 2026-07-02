@@ -222,21 +222,12 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//     obs registration happens at attach (Acceptor below).
 	channel.Cells().WatchDown(deviceFold)
 
-	// 8. Build the link acceptor (physical layer: WS mux + per-actor ipc streams
-	//    + lease judgement for attached computes). It folds each attached actor's
-	//    obs PUSH into the device-presence fold (per-actor WatchObs at attach).
-	links := link.NewAcceptor(link.Config{
-		Minter:     minter,
-		Runtime:    channel.Cells(),
-		Membership: cs.Membership,
-		ChannelID:  cfg.ChannelID,
-		Logger:     logger,
-		ObsWatcher: deviceFold,
-	})
-
 	// 9. Assemble the Home shell now: the scheduler's Reviver and the eager
 	//    reconcile arm both close over it (buildCaps, builder, cells), so it must
-	//    exist before those are wired. schedMinter/engine are filled in step 10.
+	//    exist before those are wired. schedMinter/engine/links are filled below —
+	//    the link acceptor is built AFTER the scheduler because it welds a remote
+	//    port's incarnation onto the schedule Minter (the time-axis wire arm), which
+	//    only exists once OpenScheduler has run.
 	h := &Home{
 		channelID:        cfg.ChannelID,
 		minter:           minter,
@@ -244,7 +235,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 		cs:               cs,
 		signal:           signal,
 		delivery:         delivery,
-		links:            links,
 		deviceFold:       deviceFold,
 		logger:           logger,
 		nowMs:            nowMs,
@@ -270,7 +260,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Logger: logger,
 	})
 	if err != nil {
-		links.Close()
 		delivery.Close()
 		channel.Cells().StopAll()
 		_ = cs.Close()
@@ -279,6 +268,26 @@ func Open(cfg HomeConfig) (*Home, error) {
 	h.schedMinter = schedMinter
 	h.engine = engine
 	engine.Start()
+
+	// 10.5 Build the link acceptor (physical layer: WS mux + per-actor ipc streams
+	//      + lease judgement for attached computes). It welds an attaching remote
+	//      port's incarnation onto the same three minters a local cell's Caps draw
+	//      from — the harness pen Minter, the access door (cs.Access), and the
+	//      schedule engine Minter — so a daemon-hosted cell's message / off-log /
+	//      time-axis capability is behaviourally identical to a local one (transport
+	//      neutrality). It also folds each attached actor's obs PUSH into the
+	//      device-presence fold (per-actor WatchObs at attach).
+	links := link.NewAcceptor(link.Config{
+		Minter:     minter,
+		Access:     cs.Access,
+		Schedule:   schedMinter,
+		Runtime:    rt,
+		Membership: cs.Membership,
+		ChannelID:  cfg.ChannelID,
+		Logger:     logger,
+		ObsWatcher: deviceFold,
+	})
+	h.links = links
 
 	// 11. Reconcilers (level backstops). Run one sweep of EACH at startup — closure
 	//     is the home-restart recovery path (#5, close orphan open requests whose

@@ -74,6 +74,28 @@ const (
 	// (the connection IS that actor); the kind/value are OPAQUE (the substrate
 	// forwards, never interprets — it governs structure, not vocabulary).
 	KindObs Kind = "obs"
+	// KindAccess (remote→host): the bound actor invoked its plane-2 off-log
+	// capability (an access/state Invocation). The host relays the OPAQUE payload
+	// to its injected access RelaySink — the substrate port does NOT decode it
+	// (plane-agnostic transport: the wire payload's shape is owned by the platform
+	// link layer, not by ipc/actorrt). One connection == one actor: the same
+	// FIFO-no-id correlation as KindEmit (the host acks in receipt order on its
+	// single read loop).
+	KindAccess Kind = "access"
+	// KindAccessAck (host→remote): the host's authoritative verdict for one
+	// KindAccess (the opaque access response bytes + any host-side error). Same
+	// receipt-order FIFO discipline and same reason as KindEmitAck — the off-log
+	// capability's outcome must not downgrade across the wire, so it needs an
+	// upward ack, not fire-and-forget.
+	KindAccessAck Kind = "access_ack"
+	// KindSchedule (remote→host): the bound actor invoked its time-axis capability
+	// (schedule/cancel a self-targeted timer). Opaque payload, relayed to the host's
+	// injected schedule RelaySink; the port does not decode it. FIFO-no-id, same as
+	// KindEmit/KindAccess.
+	KindSchedule Kind = "schedule"
+	// KindScheduleAck (host→remote): the host's authoritative verdict for one
+	// KindSchedule (the opaque schedule response bytes + any host-side error).
+	KindScheduleAck Kind = "schedule_ack"
 )
 
 // MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.
@@ -131,6 +153,19 @@ type EmitResult struct {
 type EmitAckPayload struct {
 	EmitResult
 	Err string `json:"err,omitempty"`
+}
+
+// RelayAckPayload is the host's reply to one KindAccess / KindSchedule: the
+// OPAQUE verdict bytes the injected RelaySink produced (the platform link layer
+// owns their shape — ipc stays plane-agnostic), plus Err, the string form of any
+// host-side error the sink returned (empty on the ok path). It is the plane-
+// agnostic twin of EmitAckPayload: the remote reconstructs both the opaque
+// verdict and the error from this single frame, so a remote cell's plane-2 /
+// time-axis call observes the exact outcome a local cell would. The wire
+// contract is not downgraded across the port.
+type RelayAckPayload struct {
+	Payload json.RawMessage `json:"payload,omitempty"`
+	Err     string          `json:"err,omitempty"`
 }
 
 // DownPayload is the bound actor's death notification — the host turns it into a

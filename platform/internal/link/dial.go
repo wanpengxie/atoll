@@ -13,8 +13,10 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/ipc"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 // Dialer is the daemon end of the link: it dials the home, attaches the party
@@ -48,8 +50,23 @@ type actorStream struct {
 	stream   *stream
 	codec    *ipc.Codec
 	writer   *RemoteWriter
+	access   *relayClient // KindAccess FIFO round-trip (backs Access + State faces)
+	sched    *relayClient // KindSchedule FIFO round-trip
 	dispatch func(env *message.Envelope) error
 	cancel   func(requestID message.ID)
+}
+
+// CellArms is the full capability bundle the daemon wires into a hosted cell's
+// Caps for one attached actor: every plane a local cell's Caps carry, over the
+// port wire. Access and State are two faces of the SAME access arm (channel- vs
+// actor-scoped), so a cell's off-log capability is behaviourally identical to a
+// local one (transport neutrality — a residual-capability arm would break parity).
+type CellArms struct {
+	Pen      harness.Pen
+	Access   accessdoor.AccessHandle
+	State    accessdoor.AccessHandle
+	Schedule schedule.ScheduleHandle
+	Down     func(cause string)
 }
 
 // Dial dials the home, sends the stream-0 attach, and waits for attach_reply. It
@@ -136,14 +153,15 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 func (d *Dialer) ChannelID() string { return d.channelID }
 
 // OpenStream opens one actor's link stream, performs the native ipc handshake
-// (LeaseID = actor id), and returns the cell's PEN (RemoteWriter) plus a
+// (LeaseID = actor id), and returns the cell's full capability arms (CellArms:
+// Pen + Access/State + Schedule, all relaying over this one stream) plus a
 // downHandler the host installs (close the stream UP on cell death). dispatch is
 // invoked for each KindDeliver frame the home sends down this stream — the host
 // routes it into the cell's mailbox. cancel is invoked for each KindCancel frame
 // — the host fires the named request's reqCtx OFF the cell goroutine (the work
 // it interrupts is the goroutine's occupant). Call after Dial, before Start
 // consumes the home's first dispatch.
-func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelope) error, cancel func(requestID message.ID)) (harness.Pen, func(cause string), error) {
+func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelope) error, cancel func(requestID message.ID)) (CellArms, error) {
 	d.mu.Lock()
 	sid := d.nextID
 	d.nextID++
@@ -151,7 +169,7 @@ func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelop
 
 	s, err := d.lc.openStream(sid)
 	if err != nil {
-		return nil, nil, err
+		return CellArms{}, err
 	}
 	codec := ipc.NewCodec(s, s)
 
@@ -160,24 +178,26 @@ func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelop
 	hsPayload, err := json.Marshal(ipc.HandshakePayload{LeaseID: string(id)})
 	if err != nil {
 		_ = s.Close()
-		return nil, nil, err
+		return CellArms{}, err
 	}
 	if err := codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: hsPayload}); err != nil {
 		_ = s.Close()
-		return nil, nil, fmt.Errorf("link: handshake write %s: %w", id, err)
+		return CellArms{}, fmt.Errorf("link: handshake write %s: %w", id, err)
 	}
 	ack, err := codec.Read()
 	if err != nil {
 		_ = s.Close()
-		return nil, nil, fmt.Errorf("link: handshake ack read %s: %w", id, err)
+		return CellArms{}, fmt.Errorf("link: handshake ack read %s: %w", id, err)
 	}
 	if ack.Kind != ipc.KindHandshakeAck {
 		_ = s.Close()
-		return nil, nil, fmt.Errorf("link: expected handshake_ack for %s, got %s", id, ack.Kind)
+		return CellArms{}, fmt.Errorf("link: expected handshake_ack for %s, got %s", id, ack.Kind)
 	}
 
 	rw := NewRemoteWriter(codec)
-	as := &actorStream{id: id, stream: s, codec: codec, writer: rw, dispatch: dispatch, cancel: cancel}
+	accessRelay := newRelayClient(codec, ipc.KindAccess)
+	schedRelay := newRelayClient(codec, ipc.KindSchedule)
+	as := &actorStream{id: id, stream: s, codec: codec, writer: rw, access: accessRelay, sched: schedRelay, dispatch: dispatch, cancel: cancel}
 	d.mu.Lock()
 	d.streams[id] = as
 	d.mu.Unlock()
@@ -193,7 +213,13 @@ func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelop
 		_ = codec.Write(ipc.Frame{Kind: ipc.KindDown, Payload: downPayload})
 		_ = s.Close()
 	}
-	return rw, downHandler, nil
+	return CellArms{
+		Pen:      rw,
+		Access:   &remoteAccessHandle{relay: accessRelay, scope: accessScopeChannel},
+		State:    &remoteAccessHandle{relay: accessRelay, scope: accessScopeState},
+		Schedule: &remoteScheduleHandle{relay: schedRelay},
+		Down:     downHandler,
+	}, nil
 }
 
 // streamReadLoop drives one actor stream's inbound ipc frames after the
@@ -201,7 +227,13 @@ func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelop
 // RemoteWriter, and on EOF fail any pending emits and drop the stream.
 func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Envelope) error) {
 	defer func() {
+		// The stream is gone: fail every in-flight round-trip on all arms (message
+		// plane + access + schedule) so no cell blocks forever on a verdict that
+		// will never return — the transport-death signal each arm surfaces to its
+		// caller (outcome_unknown on access, error on emit/schedule).
 		as.writer.Close()
+		as.access.close()
+		as.sched.close()
 		d.mu.Lock()
 		delete(d.streams, as.id)
 		d.mu.Unlock()
@@ -229,6 +261,20 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 				continue
 			}
 			as.writer.DeliverAck(ap)
+		case ipc.KindAccessAck:
+			var ap ipc.RelayAckPayload
+			if err := json.Unmarshal(frame.Payload, &ap); err != nil {
+				d.logger.Error("link.access_ack_decode", "actor", string(as.id), "err", err)
+				continue
+			}
+			as.access.deliverAck(ap)
+		case ipc.KindScheduleAck:
+			var ap ipc.RelayAckPayload
+			if err := json.Unmarshal(frame.Payload, &ap); err != nil {
+				d.logger.Error("link.schedule_ack_decode", "actor", string(as.id), "err", err)
+				continue
+			}
+			as.sched.deliverAck(ap)
 		case ipc.KindCancel:
 			var cp ipc.CancelPayload
 			if err := json.Unmarshal(frame.Payload, &cp); err != nil {

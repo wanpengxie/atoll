@@ -54,7 +54,7 @@ func dialPort(t *testing.T, r *Runtime, leaseID string, emit EmitSink, resolve R
 		hsErr <- nil
 	}()
 
-	inc, err := r.Attach(context.Background(), hostConn, emit, resolve)
+	inc, err := r.Attach(context.Background(), hostConn, Sinks{Emit: emit}, resolve)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -115,7 +115,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			// An EMIT frame where a handshake is required — protocol violation.
 			_ = c.Write(ipc.Frame{Kind: ipc.KindEmit})
 		}()
-		if _, err := rt.Attach(context.Background(), hostConn, nopEmit, staticResolve("x")); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x")); err == nil {
 			t.Fatal("Attach accepted a non-handshake first frame")
 		}
 	})
@@ -130,7 +130,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		}()
 		resolve := func(string) (actor.ActorID, error) { return "", io.ErrUnexpectedEOF }
-		if _, err := rt.Attach(context.Background(), hostConn, nopEmit, resolve); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, resolve); err == nil {
 			t.Fatal("Attach accepted a connection whose lease failed to resolve")
 		}
 	})
@@ -144,7 +144,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			p, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "anon"})
 			_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		}()
-		if _, err := rt.Attach(context.Background(), hostConn, nopEmit, staticResolve("")); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("")); err == nil {
 			t.Fatal("Attach accepted an empty resolved actor id")
 		}
 	})
@@ -166,7 +166,7 @@ func TestAttachHandshakeBounded(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := rt.Attach(hsCtx, hostConn, nopEmit, staticResolve("x"))
+		_, err := rt.Attach(hsCtx, hostConn, Sinks{Emit: nopEmit}, staticResolve("x"))
 		done <- err
 	}()
 
@@ -186,11 +186,11 @@ func TestPortRequiresSinks(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, _ := net.Pipe()
-	if _, err := rt.Attach(context.Background(), hostConn, nil, staticResolve("x")); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn, Sinks{}, staticResolve("x")); err == nil {
 		t.Fatal("Attach accepted a nil EmitSink")
 	}
 	hostConn2, _ := net.Pipe()
-	if _, err := rt.Attach(context.Background(), hostConn2, nopEmit, nil); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn2, Sinks{Emit: nopEmit}, nil); err == nil {
 		t.Fatal("Attach accepted a nil ResolveFunc")
 	}
 }

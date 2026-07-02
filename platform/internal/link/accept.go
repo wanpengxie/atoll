@@ -2,6 +2,7 @@ package link
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -14,9 +15,11 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/ipc"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -41,6 +44,8 @@ const attachHandshakeTimeout = 10 * time.Second
 // are injected capabilities of the home.
 type Acceptor struct {
 	minter     harness.Minter
+	access     accessdoor.AccessMinter
+	sched      schedule.Minter
 	runtime    *actorrt.Runtime
 	membership storespec.MembershipControlPlane
 	channelID  channel.ID
@@ -72,7 +77,14 @@ type Acceptor struct {
 // receives a pre-authenticated daemonID. LeasePing/LeaseTTL default to the
 // centralised constants (10s / 30s); zero means default (tests may shorten).
 type Config struct {
-	Minter     harness.Minter
+	Minter harness.Minter
+	// Access / Schedule are the plane-2 and time-axis minters the home welds a
+	// remote port's incarnation onto (the wire arms of Caps.Access/State/Schedule).
+	// Same source the cell path draws from (cs.Access, the schedule engine Minter),
+	// so a daemon-hosted cell's off-log / timer capability is behaviourally
+	// identical to a local one (transport neutrality).
+	Access     accessdoor.AccessMinter
+	Schedule   schedule.Minter
 	Runtime    *actorrt.Runtime
 	Membership storespec.MembershipControlPlane
 	ChannelID  channel.ID
@@ -93,6 +105,8 @@ func NewAcceptor(cfg Config) *Acceptor {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Acceptor{
 		minter:     cfg.Minter,
+		access:     cfg.Access,
+		sched:      cfg.Schedule,
 		runtime:    cfg.Runtime,
 		membership: cfg.Membership,
 		channelID:  cfg.ChannelID,
@@ -232,7 +246,12 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			defer cancel()
 			// Attach (substrate) owns the conn from here: on failure it closes the
 			// stream itself (single owner), so we never double-close here.
-			if _, err := a.runtime.Attach(hsCtx, s, a.emitSink(kindOf), resolve); err != nil {
+			sinks := actorrt.Sinks{
+				Emit:     a.emitSink(kindOf),
+				Access:   a.accessSink(),
+				Schedule: a.scheduleSink(),
+			}
+			if _, err := a.runtime.Attach(hsCtx, s, sinks, resolve); err != nil {
 				a.logger.Info("link.attach_stream_failed", "err", err)
 			}
 		}()
@@ -391,6 +410,79 @@ func (a *Acceptor) emitSink(kindOf func(actor.ActorID) (actor.Kind, bool)) actor
 			RejectReason: string(res.RejectReason),
 			RejectDetail: res.RejectDetail,
 		}, err
+	}
+}
+
+// accessSink builds the per-link access RelaySink: a remote cell's plane-2
+// invocation is resolved through the home's access door under the connection's
+// authenticated bound id, and the authoritative Outcome returns as the KindAccess
+// ack. The caller identity is welded HERE (the door minter binds inc.ID()) — the
+// wire's self-reported Invocation.Caller is rejected fail-fast, never trusted.
+// The minted handle is wrapped in a liveAccess over the emitting port's OWN
+// Incarnation (same source as emitSink — never a cross-stream lookup) and freshly
+// per invocation (the port death gate on the access plane): a replaced/torn-down
+// port's in-flight invoke is fenced with ErrAccessNotLive instead of acting on a
+// dead incarnation's behalf. State rides this same arm — the scope field selects
+// MintState (actor-scoped) over Mint (channel-scoped).
+func (a *Acceptor) accessSink() actorrt.RelaySink {
+	return func(ctx context.Context, inc actorrt.Incarnation, payload []byte) ([]byte, error) {
+		if a.access == nil {
+			return nil, errors.New("link: access plane not wired on this home")
+		}
+		var req accessRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, fmt.Errorf("link: access payload decode: %w", err)
+		}
+		if req.Inv.Caller != "" {
+			// Identity is not caller-settable across the wire (mirrors the pen
+			// rejecting a pre-filled Sender): fail-fast, never silently overwrite.
+			return nil, fmt.Errorf("link: access invocation self-reported caller %q — identity is home-welded, not wire-settable", req.Inv.Caller)
+		}
+		id := inc.ID()
+		var raw accessdoor.AccessHandle
+		switch req.Scope {
+		case accessScopeChannel:
+			raw = a.access.Mint(id)
+		case accessScopeState:
+			raw = a.access.MintState(id)
+		default:
+			return nil, fmt.Errorf("link: access unknown scope %q", req.Scope)
+		}
+		outcome, err := NewLiveAccess(raw, inc, a.runtime).Invoke(ctx, req.Inv.Operation, req.Inv.Resource, req.Inv.Args, req.Inv.Grant)
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(accessResponse{Value: outcome.Value, Found: outcome.Found, RejectReason: outcome.RejectReason})
+	}
+}
+
+// scheduleSink builds the per-link schedule RelaySink: a remote cell's time-axis
+// call is welded to the connection's authenticated bound id (the engine Minter
+// binds inc.ID() as author — the wire never self-reports it) and wrapped in a
+// liveSchedule over the port's OWN Incarnation (the time-plane port death gate).
+// The CorrelationID inside ScheduleReq crosses the wire intact.
+func (a *Acceptor) scheduleSink() actorrt.RelaySink {
+	return func(ctx context.Context, inc actorrt.Incarnation, payload []byte) ([]byte, error) {
+		if a.sched == nil {
+			return nil, errors.New("link: schedule plane not wired on this home")
+		}
+		var req scheduleRequest
+		if err := json.Unmarshal(payload, &req); err != nil {
+			return nil, fmt.Errorf("link: schedule payload decode: %w", err)
+		}
+		h := NewLiveSchedule(a.sched.Mint(inc.ID()), inc, a.runtime)
+		switch req.Method {
+		case scheduleMethodSchedule:
+			tid, err := h.Schedule(ctx, req.Req)
+			if err != nil {
+				return nil, err
+			}
+			return json.Marshal(scheduleResponse{ID: tid})
+		case scheduleMethodCancel:
+			return nil, h.Cancel(ctx, req.ID)
+		default:
+			return nil, fmt.Errorf("link: schedule unknown method %q", req.Method)
+		}
 	}
 }
 

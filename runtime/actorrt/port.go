@@ -38,6 +38,35 @@ import (
 // processed emit returns a non-zero RejectReason with a nil error.
 type EmitSink func(ctx context.Context, inc Incarnation, env *message.Envelope) (ipc.EmitResult, error)
 
+// RelaySink is the plane-AGNOSTIC upward relay callback for a port's non-message
+// capability arms (plane-2 access/state, time-axis schedule). The substrate port
+// carries the author identity in inc (exactly as EmitSink does) and forwards the
+// OPAQUE request payload verbatim: it does NOT decode it. The wire payload's shape
+// is owned by the injecting caller (the platform link layer), so actorrt never
+// imports the access/schedule vocabulary — the port is a pure transport, the same
+// way it never interprets a KindObs value. It returns the opaque response bytes
+// the caller acks back to the remote (verdict, not downgraded across the wire) and
+// an error for a host-side fault (relayed as the ack's Err string).
+//
+// inc is passed (not just the bare id) for the same reason as EmitSink: the home-
+// side sink gates the invocation on this port still being the live embodiment
+// (the plane-2 / time-axis twin of the port death-write gate).
+type RelaySink func(ctx context.Context, inc Incarnation, payload []byte) ([]byte, error)
+
+// Sinks is the full set of upward relay callbacks a port's incarnation carries —
+// one per plane an in-process cell's Caps expose. Emit is the message plane (its
+// type is welded to the envelope, as before); Access and Schedule are the plane-2
+// off-log and time-axis arms, opaque to the substrate (RelaySink). A remote actor
+// is an out-of-process embodiment, so its incarnation must carry every plane a
+// local one does (transport neutrality) — else "write data verified live, write
+// truth verified live, but off-log/timers unguarded" would be a new two-plane
+// misalignment on the same wire.
+type Sinks struct {
+	Emit     EmitSink
+	Access   RelaySink
+	Schedule RelaySink
+}
+
 // ResolveFunc is the connect-in auth seam: it maps a connecting actor's lease
 // credential to the ActorID the substrate binds the connection to. This is the
 // connection's ONE-TIME
@@ -66,7 +95,7 @@ type port struct {
 	id    actor.ActorID
 	codec *ipc.Codec
 	conn  io.Closer
-	emit  EmitSink
+	sinks Sinks
 
 	// started is the substrate-stamped bind instant (obs uptime source), set at
 	// Attach. Same authority model as cell.started.
@@ -118,7 +147,7 @@ type port struct {
 // read runs off-goroutine and newPort selects it against hsCtx; on expiry it
 // closes the conn (unblocking the read) and returns. parent owns the port's
 // LIFETIME (unchanged); hsCtx owns only this one read.
-func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
+func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -132,7 +161,7 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 			_ = conn.Close()
 		}
 	}()
-	if emit == nil {
+	if sinks.Emit == nil {
 		return nil, errors.New("actorrt: port requires EmitSink")
 	}
 	if resolve == nil {
@@ -169,7 +198,7 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 		id:      id,
 		codec:   codec,
 		conn:    conn,
-		emit:    emit,
+		sinks:   sinks,
 		started: started,
 		ctx:     ctx,
 		cancel:  cancel,
@@ -352,7 +381,7 @@ func (p *port) readLoop() {
 			// stamps the author from it, never from the wire's self-reported sender.
 			// The Incarnation (id + this very embodiment pointer) rides the sink so
 			// the home can fence the emit if this port is no longer the live one.
-			res, emitErr := p.emit(p.ctx, Incarnation{id: p.id, p: p}, &env)
+			res, emitErr := p.sinks.Emit(p.ctx, Incarnation{id: p.id, p: p}, &env)
 			ackPayload := ipc.EmitAckPayload{EmitResult: res}
 			if emitErr != nil {
 				ackPayload.Err = emitErr.Error()
@@ -364,6 +393,21 @@ func (p *port) readLoop() {
 			}
 			if err := p.codec.Write(ipc.Frame{Kind: ipc.KindEmitAck, Payload: raw}); err != nil {
 				p.die(fmt.Errorf("actorrt: port %s emit ack write: %w", p.id, err))
+				return
+			}
+		case ipc.KindAccess:
+			// Plane-2 off-log capability invocation —逐字同构 with KindEmit: relay
+			// the OPAQUE payload to the injected access sink (the port never decodes
+			// it), then write the verdict back as a KindAccessAck. Single goroutine ⇒
+			// receipt-order processing ⇒ receipt-order acks = the FIFO correlation
+			// (no per-op id). The Incarnation rides the sink so the home can fence the
+			// invocation if this port is no longer the live embodiment.
+			if !p.relayAck(ipc.KindAccessAck, p.sinks.Access, frame.Payload, "access") {
+				return
+			}
+		case ipc.KindSchedule:
+			// Time-axis capability invocation — same shape as KindAccess.
+			if !p.relayAck(ipc.KindScheduleAck, p.sinks.Schedule, frame.Payload, "schedule") {
 				return
 			}
 		case ipc.KindObs:
@@ -395,6 +439,36 @@ func (p *port) readLoop() {
 			return
 		}
 	}
+}
+
+// relayAck processes one opaque capability frame (KindAccess / KindSchedule):
+// invoke the injected sink with the raw payload + this port's Incarnation, then
+// write the verdict back as ackKind. It returns false (and has already die()'d)
+// on a fatal fault — a nil sink is a protocol violation (a frame arrived for a
+// plane this port never wired: fail-closed, same closed-set discipline as an
+// unknown kind), and an ack-write failure is a transport death. A non-nil sink
+// ERROR is NOT fatal: it is the invocation's own verdict, relayed as the ack's
+// Err (a rejected-but-processed op, exactly like KindEmit's emitErr path).
+func (p *port) relayAck(ackKind ipc.Kind, sink RelaySink, payload []byte, plane string) bool {
+	if sink == nil {
+		p.die(fmt.Errorf("actorrt: port %s received %s frame but no %s sink is wired", p.id, plane, plane))
+		return false
+	}
+	res, relayErr := sink(p.ctx, Incarnation{id: p.id, p: p}, payload)
+	ackPayload := ipc.RelayAckPayload{Payload: res}
+	if relayErr != nil {
+		ackPayload.Err = relayErr.Error()
+	}
+	raw, err := json.Marshal(ackPayload)
+	if err != nil {
+		p.die(fmt.Errorf("actorrt: port %s %s ack marshal: %w", p.id, plane, err))
+		return false
+	}
+	if err := p.codec.Write(ipc.Frame{Kind: ackKind, Payload: raw}); err != nil {
+		p.die(fmt.Errorf("actorrt: port %s %s ack write: %w", p.id, plane, err))
+		return false
+	}
+	return true
 }
 
 // die makes the port unaddressable (pointer-identity self-eviction) and

@@ -501,7 +501,7 @@ func TestNewPortHandshakeReadError(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, remoteConn := net.Pipe()
 	remoteConn.Close() // no handshake — read fails immediately
-	if _, err := rt.Attach(context.Background(), hostConn, nopEmit, staticResolve("x")); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x")); err == nil {
 		t.Fatal("Attach accepted a connection that never sent a handshake")
 	}
 }
@@ -518,7 +518,7 @@ func TestNewPortHandshakeDecodeError(t *testing.T) {
 		// HandshakePayload.
 		_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: json.RawMessage(`12345`)})
 	}()
-	if _, err := rt.Attach(context.Background(), hostConn, nopEmit, staticResolve("x")); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x")); err == nil {
 		t.Fatal("Attach accepted a handshake with an undecodable payload")
 	}
 }
@@ -539,7 +539,7 @@ func TestNewPortHandshakeAckWriteError(t *testing.T) {
 		_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		remoteConn.Close()
 	}()
-	if _, err := rt.Attach(context.Background(), hostConn, nopEmit, staticResolve("remote-1")); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1")); err == nil {
 		t.Fatal("Attach succeeded despite a failed ack write")
 	}
 }
@@ -557,7 +557,7 @@ func TestNewPortNilLoggerDefaulted(t *testing.T) {
 		_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		_, _ = c.Read() // consume ack
 	}()
-	p, err := newPort(context.Background(), context.Background(), hostConn, nopEmit, staticResolve("remote-1"), nil, nil, nil, time.Now(), nil)
+	p, err := newPort(context.Background(), context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil, nil, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("newPort: %v", err)
 	}

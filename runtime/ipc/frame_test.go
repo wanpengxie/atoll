@@ -17,12 +17,14 @@ import (
 
 // --- closed Kind set ------------------------------------------------------
 
-// The port-wire Kind set is closed at exactly 7 members with fixed wire
+// The port-wire Kind set is closed at exactly 12 members with fixed wire
 // spellings. Every kind has a real producer + state transition; the dead
 // frames (fence / shutdown / heartbeat / control) are gone. KindCancel is the
-// request-scope of cancel(scope) crossing the wire (host→remote). If a wire
-// spelling drifts or a kind is added/removed, this trips — the two endpoints
-// must agree on the exact bytes.
+// request-scope of cancel(scope) crossing the wire (host→remote); KindAccess/
+// KindSchedule + their acks are the plane-2 and time-axis capability arms (an
+// out-of-process actor's incarnation carries every plane a local cell's Caps do).
+// If a wire spelling drifts or a kind is added/removed, this trips — the two
+// endpoints must agree on the exact bytes.
 func TestKindClosedSet(t *testing.T) {
 	want := map[Kind]string{
 		KindHandshake:    "handshake",
@@ -33,14 +35,18 @@ func TestKindClosedSet(t *testing.T) {
 		KindDown:         "down",
 		KindCancel:       "cancel",
 		KindObs:          "obs",
+		KindAccess:       "access",
+		KindAccessAck:    "access_ack",
+		KindSchedule:     "schedule",
+		KindScheduleAck:  "schedule_ack",
 	}
 	for k, wire := range want {
 		if string(k) != wire {
 			t.Errorf("Kind %q wire form = %q, want %q", k, string(k), wire)
 		}
 	}
-	if len(want) != 8 {
-		t.Fatalf("expected exactly 8 kinds, guard lists %d", len(want))
+	if len(want) != 12 {
+		t.Fatalf("expected exactly 12 kinds, guard lists %d", len(want))
 	}
 }
 
