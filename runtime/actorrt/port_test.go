@@ -54,14 +54,14 @@ func dialPort(t *testing.T, r *Runtime, leaseID string, emit EmitSink, resolve R
 		hsErr <- nil
 	}()
 
-	id, err := r.Attach(context.Background(), hostConn, emit, resolve)
+	inc, err := r.Attach(context.Background(), hostConn, emit, resolve)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
 	if e := <-hsErr; e != nil {
 		t.Fatalf("remote handshake: %v", e)
 	}
-	return id, remote
+	return inc.ID(), remote
 }
 
 // staticResolve binds every lease to the same id.
@@ -69,7 +69,7 @@ func staticResolve(id actor.ActorID) ResolveFunc {
 	return func(string) (actor.ActorID, error) { return id, nil }
 }
 
-func nopEmit(context.Context, actor.ActorID, *message.Envelope) (ipc.EmitResult, error) {
+func nopEmit(context.Context, Incarnation, *message.Envelope) (ipc.EmitResult, error) {
 	return ipc.EmitResult{}, nil
 }
 
@@ -263,8 +263,8 @@ func TestPortEmitRelayed(t *testing.T) {
 		env *message.Envelope
 	}
 	got := make(chan relayed, 1)
-	emit := func(_ context.Context, id actor.ActorID, e *message.Envelope) (ipc.EmitResult, error) {
-		got <- relayed{id: id, env: e}
+	emit := func(_ context.Context, inc Incarnation, e *message.Envelope) (ipc.EmitResult, error) {
+		got <- relayed{id: inc.ID(), env: e}
 		return ipc.EmitResult{MessageID: "m-up-1", RejectReason: "harness_kind_invalid"}, nil
 	}
 	_, remote := dialPort(t, rt, "l", emit, staticResolve("remote-1"))

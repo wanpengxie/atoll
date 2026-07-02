@@ -20,18 +20,23 @@ import (
 // remote actor emits an envelope. Injected so the port owns only the wire
 // boundary: the caller owns where emits land.
 //
-// id is the connection's authenticated bound ActorID (resolved at the handshake)
-// — the substrate carries the author identity, the remote actor never self-reports
-// it. The author of a port (out-of-process cell) emit is stamped by the basis from
-// this bound id, exactly as a local cell's author is stamped by the basis; the
-// wire's self-reported sender carries no authority.
+// inc is THIS port's Incarnation — the (authenticated bound id, embodiment-
+// pointer) pair resolved at the handshake. The substrate carries the author
+// identity, the remote actor never self-reports it: the author of a port (out-
+// of-process cell) emit is stamped by the basis from inc.ID(), exactly as a
+// local cell's author is stamped by the basis; the wire's self-reported sender
+// carries no authority. The incarnation (not just the bare id) is passed so the
+// home-side sink can gate the emit on this port still being the live embodiment
+// (the port death-write门, §3.C1): a livePen welded to inc fences an in-flight
+// emit from a port already replaced/torn down, exactly as the cell path fences a
+// leaked pen — the same WHEN-validity membrane on both transports.
 //
 // It returns the authoritative write verdict (ipc.EmitResult: MessageID +
 // RejectReason) so the port can ack it back to the remote actor — the writer
 // contract is not downgraded across the wire. The error is the transport/write
 // failure (relayed to the remote as the ack's Err string); a rejected-but-
 // processed emit returns a non-zero RejectReason with a nil error.
-type EmitSink func(ctx context.Context, id actor.ActorID, env *message.Envelope) (ipc.EmitResult, error)
+type EmitSink func(ctx context.Context, inc Incarnation, env *message.Envelope) (ipc.EmitResult, error)
 
 // ResolveFunc is the connect-in auth seam: it maps a connecting actor's lease
 // credential to the ActorID the substrate binds the connection to. This is the
@@ -336,7 +341,9 @@ func (p *port) readLoop() {
 			//
 			// p.id is the connection's authenticated bound identity — the basis
 			// stamps the author from it, never from the wire's self-reported sender.
-			res, emitErr := p.emit(p.ctx, p.id, &env)
+			// The Incarnation (id + this very embodiment pointer) rides the sink so
+			// the home can fence the emit if this port is no longer the live one.
+			res, emitErr := p.emit(p.ctx, Incarnation{id: p.id, p: p}, &env)
 			ackPayload := ipc.EmitAckPayload{EmitResult: res}
 			if emitErr != nil {
 				ackPayload.Err = emitErr.Error()

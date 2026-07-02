@@ -33,8 +33,8 @@ type stubMinter struct {
 	nextSeq int64
 }
 
-func (s *stubMinter) Mint(id actor.ActorID, chID channel.ID) harness.Pen {
-	return &stubPen{minter: s, id: id, chID: chID}
+func (s *stubMinter) Mint(id actor.ActorID, kind actor.Kind, chID channel.ID) harness.Pen {
+	return &stubPen{minter: s, id: id, kind: kind, chID: chID}
 }
 
 func (s *stubMinter) record(env *message.Envelope) harness.WriteResult {
@@ -60,6 +60,7 @@ func (s *stubMinter) all() []*message.Envelope {
 type stubPen struct {
 	minter *stubMinter
 	id     actor.ActorID
+	kind   actor.Kind
 	chID   channel.ID
 }
 
@@ -71,6 +72,7 @@ func (p *stubPen) Write(_ context.Context, env *message.Envelope) (harness.Write
 		}, nil
 	}
 	env.Sender.ID = p.id
+	env.Sender.Kind = p.kind
 	env.ChannelID = p.chID
 	return p.minter.record(env), nil
 }

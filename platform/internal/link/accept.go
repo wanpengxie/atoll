@@ -3,6 +3,7 @@ package link
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -177,9 +178,14 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 
 	// allowed is the attach declaration set: the resolve seam校验 an opening
 	// actor stream is one the daemon actually declared (membership-backed).
+	// kinds caches each declared actor's Kind alongside allowed (populated in the
+	// SAME critical section at attach): emitSink needs it to Mint a pen welded to
+	// the actor's kind — without it a daemon-attached actor's Sender.Kind would be
+	// a silent empty value and blunt the harness sender门. Volatile, per-link.
 	var (
 		mu      sync.Mutex
 		allowed = map[actor.ActorID]bool{}
+		kinds   = map[actor.ActorID]actor.Kind{}
 	)
 	// boundID is the compute id this link counts as online under, set once on the
 	// first accepted attach and torn down when runLink returns. Single-goroutine
@@ -200,6 +206,15 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		}
 		return id, nil
 	}
+	// kindOf reads the cached declaration Kind for an attached actor (under the
+	// same mu as allowed). ok=false only when no attach ever declared the id —
+	// which resolve already excludes, so a live port's emit is never a miss.
+	kindOf := func(id actor.ActorID) (actor.Kind, bool) {
+		mu.Lock()
+		k, ok := kinds[id]
+		mu.Unlock()
+		return k, ok
+	}
 
 	// onOpen: each peer-opened actor stream runs native ipc — hand it straight to
 	// runtime.Attach. The substrate does the ipc handshake on the stream, resolves
@@ -217,7 +232,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			defer cancel()
 			// Attach (substrate) owns the conn from here: on failure it closes the
 			// stream itself (single owner), so we never double-close here.
-			if _, err := a.runtime.Attach(hsCtx, s, a.emitSink(), resolve); err != nil {
+			if _, err := a.runtime.Attach(hsCtx, s, a.emitSink(kindOf), resolve); err != nil {
 				a.logger.Info("link.attach_stream_failed", "err", err)
 			}
 		}()
@@ -232,7 +247,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		if err != nil || cf.Kind != ctrlAttach || cf.Attach == nil {
 			return
 		}
-		id, accepted := a.handleAttach(reqCtx, lc, cf.Attach, daemonID, &mu, allowed)
+		id, accepted := a.handleAttach(reqCtx, lc, cf.Attach, daemonID, &mu, allowed, kinds)
 		// Count the daemon online only after a SUCCESSFUL attach (membership
 		// applied, Accepted reply sent) — a rejected/half attach must not show
 		// online. Once per link (first accepted frame).
@@ -271,7 +286,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 // daemon detaching does NOT remove it (membership ≠ attachment).
 // handleAttach processes the stream-0 attach and reports (computeID, accepted)
 // so the caller can count L0 link attachment only on success.
-func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed map[actor.ActorID]bool) (string, bool) {
+func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed map[actor.ActorID]bool, kinds map[actor.ActorID]actor.Kind) (string, bool) {
 	computeID := att.ComputeID
 	if daemonID != "" {
 		computeID = daemonID
@@ -306,6 +321,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 	mu.Lock()
 	for _, d := range att.Declarations {
 		allowed[d.ActorID] = true
+		kinds[d.ActorID] = d.Kind
 	}
 	mu.Unlock()
 
@@ -339,16 +355,33 @@ func (a *Acceptor) sendReply(lc *linkConn, reply AttachReply) {
 // emitSink builds the per-link EmitSink: a remote cell's emit is written through
 // the home write gate, and the authoritative WriteResult returns as the ipc
 // EmitAck. The author identity is welded HERE by Minting a Pen for the
-// connection's authenticated bound id — never read from the envelope's self-
-// reported sender (the daemon's relay-only proxy pen leaves Sender.ID/ChannelID
-// empty; identity does not downgrade across the wire). A stream authenticated as
-// one actor whose envelope self-reports a foreign sender is rejected fail-fast
-// (HarnessIdentityNotCallerSettable) by the host pen — the substrate-injected
-// identity fields are not caller-settable, so a forged self-report never reaches
-// step 4.
-func (a *Acceptor) emitSink() actorrt.EmitSink {
-	return func(ctx context.Context, id actor.ActorID, env *message.Envelope) (ipc.EmitResult, error) {
-		res, err := a.minter.Mint(id, a.channelID).Write(ctx, env)
+// connection's authenticated bound id (with its cached declaration kind) — never
+// read from the envelope's self-reported sender (the daemon's relay-only proxy
+// pen leaves Sender.ID/ChannelID empty; identity does not downgrade across the
+// wire). A stream authenticated as one actor whose envelope self-reports a
+// foreign sender is rejected fail-fast (HarnessIdentityNotCallerSettable) by the
+// host pen — the substrate-injected identity fields are not caller-settable, so a
+// forged self-report never reaches step 4.
+//
+// The minted pen is wrapped in a livePen welded to the emitting port's
+// Incarnation and freshly minted per emit (§3.C1 port death-write门): every emit
+// first checks the port is STILL the live embodiment (by pointer, ABA-safe) —
+// message-plane parity with the cell path, so a replaced/torn-down port's
+// in-flight emit is fenced with ErrWriterNotLive instead of authoring truth on a
+// dead incarnation's behalf.
+func (a *Acceptor) emitSink(kindOf func(actor.ActorID) (actor.Kind, bool)) actorrt.EmitSink {
+	return func(ctx context.Context, inc actorrt.Incarnation, env *message.Envelope) (ipc.EmitResult, error) {
+		id := inc.ID()
+		kind, ok := kindOf(id)
+		if !ok {
+			// The stream-0 attach always precedes any actor stream opening (resolve
+			// gates the stream on the same declaration set), so a live port's emit
+			// whose bound id has no cached kind is a protocol violation. Fail-fast
+			// rather than Mint with an empty kind (a silent empty kind would blunt
+			// the harness sender门); the error relays back as the emit ack's Err.
+			return ipc.EmitResult{}, fmt.Errorf("link: emit from %q has no cached declaration kind (attach missing)", id)
+		}
+		res, err := NewLivePen(a.minter.Mint(id, kind, a.channelID), inc, a.runtime).Write(ctx, env)
 		// Mirror EVERY verdict field of the harness WriteResult onto the wire — the
 		// writer contract must not downgrade across the link (a remote cell's
 		// Respond observes the same verdict a local cell's would).

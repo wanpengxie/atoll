@@ -427,8 +427,8 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 // it as a `port` embodiment. The substrate does not spawn the remote (it connects
 // in); Attach performs the handshake, resolves
 // the connection's credential to an ActorID via resolve, relays the remote's
-// emits through emit, and returns the bound id. If an embodiment already exists for
-// the resolved id it is stopped and replaced.
+// emits through emit, and returns the bound Incarnation. If an embodiment already
+// exists for the resolved id it is stopped and replaced.
 //
 // hsCtx bounds ONLY the connect-in handshake (a substrate-owned protocol step
 // whose time bound is a substrate invariant — a peer that connects but never
@@ -437,21 +437,25 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 // this call — a per-call lifetime ctx would wrongly tear the port down when
 // Attach returns. Pass a deadline ctx to guard the handshake; a nil/background
 // ctx degrades to an unbounded handshake read.
-func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc) (actor.ActorID, error) {
+func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, emit EmitSink, resolve ResolveFunc) (Incarnation, error) {
 	p, err := newPort(r.parent, hsCtx, conn, emit, resolve, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
 	if err != nil {
-		return "", err
+		return Incarnation{}, err
 	}
 	r.mu.Lock()
 	old, existed := r.embodiments[p.id]
 	r.embodiments[p.id] = p
-	p.live.Store(true) // go-live (port path; the home-side incarnation gate is §3.6, deferred)
+	p.live.Store(true) // go-live (port path); register + liveness flip are one critical section, exactly as Spawn.
 	r.mu.Unlock()
 	if existed {
 		old.stop()
 	}
 	p.start()
-	return p.id, nil
+	// Return the Incarnation (id + this embodiment pointer): the home-side port
+	// death-write门 (§3.C1) welds a livePen to it and gates each cross-wire emit
+	// on IsLive, so a replaced/torn-down port's in-flight emit is fenced by
+	// pointer identity — the message-plane parity of the cell path's livePen.
+	return Incarnation{id: p.id, p: p}, nil
 }
 
 // removeIf is the pointer-identity-checked self-eviction hook handed to each
