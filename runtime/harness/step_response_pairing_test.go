@@ -190,6 +190,30 @@ func TestStepResponsePairing_ClosureAuthors(t *testing.T) {
 			payload: `{"status":"failed","reason":"unanswered_timeout"}`,
 			reason:  HarnessResponseUnauthorizedSender,
 		},
+		{
+			name:    "receiver failed with its own word receiver_internal_error authorized",
+			sender:  "tool:xhs",
+			payload: `{"status":"failed","reason":"receiver_internal_error"}`,
+			reason:  "",
+		},
+		{
+			name:    "receiver forging receiver_unavailable (substrate's word) not authorized",
+			sender:  "tool:xhs",
+			payload: `{"status":"failed","reason":"receiver_unavailable"}`,
+			reason:  HarnessResponseUnauthorizedSender,
+		},
+		{
+			name:    "receiver forging unanswered_timeout (caller's word) not authorized",
+			sender:  "tool:xhs",
+			payload: `{"status":"failed","reason":"unanswered_timeout"}`,
+			reason:  HarnessResponseUnauthorizedSender,
+		},
+		{
+			name:    "failed without reason rejected (§2.6: failed MUST carry reason)",
+			sender:  "tool:xhs",
+			payload: `{"status":"failed"}`,
+			reason:  HarnessResponseReasonInvalid,
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

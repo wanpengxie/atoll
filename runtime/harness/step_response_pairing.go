@@ -37,16 +37,19 @@ import (
 //     harness_response_status_invalid or
 //     harness_response_status_namespace_mismatch.
 //
-//   - When status=failed (Layer 1 final), payload.reason MUST be in the
-//     terminal_failure_reason closed set; otherwise →
-//     harness_response_reason_invalid.
+//   - When status=failed (Layer 1 final), payload.reason MUST be PRESENT and
+//     in the terminal_failure_reason closed set; missing or out-of-set →
+//     harness_response_reason_invalid (§2.6: a reason-less failed terminal
+//     would break three-author attribution).
 //
 //   - response.sender authorization has THREE authors (actor-runtime-
-//     redesign.md §0.5 Δ2), and response.audience must target the parent
-//     request sender exactly:
-//     1. receiver voluntary — sender ∈ parent.audience;
+//     redesign.md §0.5 Δ2), each welded 1:1 to its ONE failure word (§2.6
+//     total matrix — the word IS the authorization), and response.audience
+//     must target the parent request sender exactly:
+//     1. receiver voluntary — sender ∈ parent.audience: completed /
+//     provisional / failed+receiver_internal_error ONLY;
 //     2. caller self-close — sender == parent.sender writing its own
-//     caller-scoped status=failed + reason=unanswered_timeout;
+//     caller-scoped status=failed + reason=unanswered_timeout ONLY;
 //     3. substrate death — on the obs down edge a watcher
 //     materialises the dead receiver's receiver_unavailable, SYSTEM-authored
 //     (sender == SystemActorID; see substrateDeath gate below). This is a
@@ -115,46 +118,66 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 			Detail:       reasonCheck.detail,
 		}, nil
 	}
+	// §2.6 normative, second half: status=failed MUST carry payload.reason.
+	// A reason-less failed terminal in truth breaks three-author attribution
+	// (no reason ⇒ no author derivable) and every reason-dispatching
+	// consumer; previously only present-but-out-of-set was rejected, so
+	// {"status":"failed"} slipped through as a legal terminal.
+	if reasonCheck.failed && !reasonCheck.hasReason {
+		return outcome{
+			RejectReason: HarnessResponseReasonInvalid,
+			Detail:       "status=failed requires payload.reason in the terminal_failure_reason closed set",
+		}, nil
+	}
 
-	// ── Step 8 authorization model (actor-runtime-redesign.md §0.5 Δ2) ──
+	// ── Step 8 authorization model (§0.5 Δ2 + proto-layer0 §2.6 1:1 矩阵) ──
 	//
-	// closure has exactly THREE authors, by "who holds the fact":
+	// closure has exactly THREE authors, by "who holds the fact" — and the
+	// terminal_failure_reason closed set has exactly three words, welded
+	// 1:1: each author may write ITS one failure word and nothing else (the
+	// word IS the authorization; the matrix is total, owner-pinned 2026-07-02
+	// 选项A):
 	//
-	//   1. receiver voluntary — sender ∈ parent.audience answers
-	//      (completed / failed). audience must equal [parent.sender].
-	//   2. caller self-close   — parent.sender writes its OWN
-	//      caller-scoped unanswered_timeout (status=failed + reason=
-	//      unanswered_timeout). It is not in its own audience, so this is
-	//      a distinct authorization. audience==[parent.sender] (itself) is
-	//      naturally satisfied (#7 unchanged).
+	//   1. receiver voluntary — sender ∈ parent.audience answers:
+	//      completed, any provisional, or failed+receiver_internal_error —
+	//      the callee's own exit reason, the ONE failure word a receiver
+	//      holds. receiver_unavailable would assert substrate-observed death
+	//      and unanswered_timeout would assert the caller's own giving-up:
+	//      facts the receiver does not hold, so writing them here is forgery
+	//      and rejects.
+	//   2. caller self-close   — parent.sender writes its OWN caller-scoped
+	//      status=failed + reason=unanswered_timeout ONLY. It is not in its
+	//      own audience, so this is a distinct authorization.
+	//      audience==[parent.sender] (itself) is naturally satisfied (#7
+	//      unchanged).
 	//   3. substrate death     — the substrate materialises a dead/gone
-	//      receiver's terminal with reason=receiver_unavailable. A dead or
-	//      deregistered receiver cannot sign for itself (StepSenderConsistent
-	//      would reject a deregistered/unknown sender BEFORE this step), so
-	//      the substrate signs as the channel system actor (exempt from the
-	//      deregistration check) under a NARROW gate: status=failed +
-	//      reason=receiver_unavailable ONLY.
+	//      receiver's terminal, SYSTEM-signed (a dead receiver cannot sign
+	//      for itself), under the narrow gate status=failed +
+	//      reason=receiver_unavailable ONLY. The old generic "system actor
+	//      terminal fallback" (any reason, any parent — the global-guess
+	//      author) stays DELETED: the substrate never guesses "slow", it
+	//      only materialises death it positively observed.
 	//
-	// This narrow substrate author is NOT the old generic "system actor
-	// terminal fallback" (which authorized ANY terminal reason — including
-	// unanswered_timeout — for any parent, the global-guess author). That
-	// generic author is DELETED. The substrate never guesses "slow"; it
-	// only materialises death it positively observed, hence the reason is
-	// pinned to receiver_unavailable.
+	// The arms are OR'd: a self-request's sender is simultaneously caller
+	// and receiver and may write either of its two words. A sender that is
+	// none of the three authors rejects as unauthorized; an authorized
+	// author writing ANOTHER author's word rejects the same way.
+	isReceiver := audienceContains(parent.Envelope.Audience, env.Sender.ID)
+	receiverAuthored := isReceiver &&
+		(!reasonCheck.failed || reasonCheck.reason == string(message.TerminalReceiverInternalError))
+
 	callerSelfClose := env.Sender.ID == parent.Envelope.Sender.ID &&
 		reasonCheck.failed &&
-		reasonCheck.hasReason &&
 		reasonCheck.reason == string(message.TerminalUnansweredTimeout)
 
 	substrateDeath := env.Sender.ID == actor.SystemActorID &&
 		reasonCheck.failed &&
-		reasonCheck.hasReason &&
 		reasonCheck.reason == string(message.TerminalReceiverUnavailable)
 
-	if !audienceContains(parent.Envelope.Audience, env.Sender.ID) && !callerSelfClose && !substrateDeath {
+	if !receiverAuthored && !callerSelfClose && !substrateDeath {
 		return outcome{
 			RejectReason: HarnessResponseUnauthorizedSender,
-			Detail:       "response sender is not an authorized closure author (receiver / caller-timeout / substrate-death): " + string(env.Sender.ID),
+			Detail:       "response sender is not an authorized closure author for this status/reason (receiver→receiver_internal_error, caller→unanswered_timeout, substrate→receiver_unavailable): " + string(env.Sender.ID),
 		}, nil
 	}
 	if !audienceExactlySender(env.Audience, parent.Envelope.Sender.ID) {
