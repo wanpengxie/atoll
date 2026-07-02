@@ -19,25 +19,37 @@ var ErrNoBuilder = errors.New("platform: no builder wired — fork unavailable")
 // factory registered under spec.Class — a structural reject, not silent.
 var ErrClassNotFound = errors.New("platform: fork class not found in builder")
 
-// CapsFactoryBuilder is the PLATFORM-layer class→factory table for fork (and,
-// later, activation). It resolves an opaque implementation-selection Class to the
-// actor's caps-taking factory `func(actorcaps.Caps) actorrt.Actor` — the SAME
-// factory shape a top-level admission (Home.Spawn) consumes.
+// CapsFactoryBuilder is the PLATFORM-layer factory table for the two mint
+// triggers that resolve a factory AFTER the original admission closure is gone —
+// fork (by Class) and activation (by id). It resolves either key to the actor's
+// caps-taking factory `func(actorcaps.Caps) actorrt.Actor` — the SAME factory
+// shape a top-level admission (Home.Spawn) consumes.
 //
-// It is deliberately NOT actorrt.Builder (whose LookupByClass hands back
-// `func(Incarnation) Actor`): the caps seam — the livePen/liveAccess/liveState
-// membranes — must be woven at the platform assembly seam (buildCaps), where the
-// live-membrane constructors live, and NEVER inside actorrt (which must not import
-// runtime/harness · runtime/link). So the table hands back the RAW factory and
-// spawnHandle wraps it in the shared caps assembler per fork; a child is therefore
-// born with the identical membrane set as a top-level admission. Welding caps at
-// the domain-populated table instead would require the domain to reach the
-// platform membrane constructors — exactly the leak the archtest wall forbids.
+// It is deliberately NOT actorrt.Builder (whose Lookup/LookupByClass hand back
+// `func(Incarnation) Actor`): the caps seam — the livePen/liveAccess/liveState/
+// liveSchedule membranes — must be woven at the platform assembly seam
+// (buildCaps), where the live-membrane constructors live, and NEVER inside actorrt
+// (which must not import runtime/harness · runtime/link). So the table hands back
+// the RAW factory and the platform wraps it in the shared caps assembler per mint;
+// the child/revived actor is therefore born with the identical membrane set as a
+// top-level admission. Welding caps at the domain-populated table instead would
+// require the domain to reach the platform membrane constructors — exactly the
+// leak the archtest wall forbids. This is the "platform承接 the raw factory"
+// posture the wiring spec pins for BOTH actorrt.Builder entries: the runtime
+// contract is not bent to carry caps; the platform seam owns the weld.
 type CapsFactoryBuilder interface {
 	// LookupByClass resolves a caller-declared, opaque implementation-selection key
 	// to its caps-taking factory — fork's entry (ForkSpec.Class). Kind is NOT
 	// re-answered here (it is caller-held on ForkSpec.Kind).
 	LookupByClass(class string) (factory func(actorcaps.Caps) actorrt.Actor, ok bool)
+	// Lookup resolves a durable member id to its caps-taking factory — activation's
+	// entry (the reconcile ring's eager revival + the schedule engine's identity-
+	// timer Reviver both hold only an id, since the original admission factory died
+	// with the previous incarnation). Kind is NOT re-answered here either (it is
+	// caller-held: DesiredMember.Kind for reconcile, the registry row for the
+	// Reviver). The domain implementation maps id→class→factory over the same
+	// underlying table LookupByClass reads.
+	Lookup(id actor.ActorID) (factory func(actorcaps.Caps) actorrt.Actor, ok bool)
 }
 
 // capsAssembler is the platform's single caps seam assembler (Home.buildCaps):

@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -30,6 +31,15 @@ type HomeConfig struct {
 	// period (the backstop for lost death edges). <=0 → the default. The death
 	// edge closes the common case immediately; this sweep is a rare backstop.
 	ReconcileInterval time.Duration
+	// Desired is the eager-activation reconcile ring's read of intent (the
+	// desired−actual diff's desired half). Injected by the app assembly root — the
+	// substrate never knows the table behind it and must yield only confirmed
+	// durable members. nil → no eager activation (the closure backstop still runs).
+	Desired actorrt.DesiredSource
+	// Builder is the platform class/id→factory table fork and activation resolve
+	// against once the original admission closure is gone. nil → Fork and identity-
+	// timer revival fail-fast (structural refusal, never a phantom actor).
+	Builder CapsFactoryBuilder
 }
 
 // Home is the assembled channel-home. Its public surface is the capability set in
@@ -61,6 +71,23 @@ type Home struct {
 	// set as a top-level admission (purity: the domain fills WHAT to build, the
 	// platform seam owns HOW caps are welded — actorrt never touches harness/link).
 	builder CapsFactoryBuilder
+
+	// schedMinter mints a per-actor ScheduleHandle for the caps seam; engine is
+	// the time-axis run loop assembled by OpenScheduler. The engine's Start/Close
+	// is bound to Home's own open/close lifecycle (only minting a handle without
+	// Start would be a cast-but-unwired half-piece).
+	schedMinter schedule.Minter
+	engine      *schedule.Engine
+
+	// desired is the eager-activation reconcile ring's intent source (nil → no
+	// eager activation). prevEagerDesired is the AlwaysOn set the LAST reconcile
+	// tick managed — the deactivation diff is prevEagerDesired − currentDesired,
+	// NEVER actual − desired (actual mixes in system/human/fork-child/daemon-attach
+	// embodiments this ring must never evict). Touched only by the reconcile ticker
+	// goroutine (and the one synchronous startup sweep before that goroutine
+	// launches), so it needs no lock.
+	desired          actorrt.DesiredSource
+	prevEagerDesired map[actor.ActorID]bool
 
 	// reconcileStop tears down the closure reconciler ticker (level backstop).
 	reconcileStop context.CancelFunc
@@ -207,12 +234,60 @@ func Open(cfg HomeConfig) (*Home, error) {
 		ObsWatcher: deviceFold,
 	})
 
-	// 9. Closure reconciler (level backstop). Run one sweep at startup — this is
-	//    the home-restart recovery path (#5): an open request whose receiver is
-	//    absent because its embodiment predates this process gets closed now, not
-	//    held forever. Then a low-frequency ticker keeps it as a safety net for
-	//    any lost death edge. The death edge (OnDown) remains the lossy fast-path.
+	// 9. Assemble the Home shell now: the scheduler's Reviver and the eager
+	//    reconcile arm both close over it (buildCaps, builder, cells), so it must
+	//    exist before those are wired. schedMinter/engine are filled in step 10.
+	h := &Home{
+		channelID:        cfg.ChannelID,
+		minter:           minter,
+		channel:          channel,
+		cs:               cs,
+		signal:           signal,
+		delivery:         delivery,
+		links:            links,
+		deviceFold:       deviceFold,
+		logger:           logger,
+		nowMs:            nowMs,
+		placement:        SinglePlacement{},
+		builder:          cfg.Builder,
+		desired:          cfg.Desired,
+		prevEagerDesired: map[actor.ActorID]bool{},
+	}
+
+	// 10. Time axis (OpenScheduler). FireSink mints a pen per fire (author-welded);
+	//     Reviver activates an absent identity-timer author via SpawnIfAbsent. The
+	//     engine is Started here and Closed in Home.Close (minting a handle without
+	//     Start would be a cast-but-unwired half-piece). BOOT-ORDER红线: the Reviver
+	//     is wired and the engine is Started BEFORE the first reconcile sweep below,
+	//     because an overdue fire on Start can precede the eager ring re-minting the
+	//     always-on set — and append has no backfill, so the wake must be revivable
+	//     from the first instant.
+	rt := channel.Cells()
+	schedMinter, engine, err := runtime.OpenScheduler(cs, schedule.AssemblyDeps{
+		Fire:   fireSink{minter: minter, registry: cs.Registry, chID: cfg.ChannelID},
+		Host:   rt,
+		Revive: homeReviver{h: h},
+		Logger: logger,
+	})
+	if err != nil {
+		links.Close()
+		delivery.Close()
+		channel.Cells().StopAll()
+		_ = cs.Close()
+		return nil, fmt.Errorf("platform: open scheduler: %w", err)
+	}
+	h.schedMinter = schedMinter
+	h.engine = engine
+	engine.Start()
+
+	// 11. Reconcilers (level backstops). Run one sweep of EACH at startup — closure
+	//     is the home-restart recovery path (#5, close orphan open requests whose
+	//     receiver's embodiment predates this process); activation re-mints the
+	//     always-on desired set. Then a low-frequency ticker keeps both as the
+	//     safety net for any lost death edge / intent change. The death edge (OnDown)
+	//     remains the lossy fast-path for closure.
 	channel.Reconcile(ctx)
+	h.reconcileActivation(ctx)
 	sweepEvery := cfg.ReconcileInterval
 	if sweepEvery <= 0 {
 		sweepEvery = reconcileInterval
@@ -229,27 +304,78 @@ func Open(cfg HomeConfig) (*Home, error) {
 				return
 			case <-t.C:
 				channel.Reconcile(reconcileCtx)
+				h.reconcileActivation(reconcileCtx)
 			}
 		}
 	}()
+	h.reconcileStop = reconcileStop
+	h.reconcileDone = reconcileDone
 
 	logger.Info("platform.home.ready", "channel", string(cfg.ChannelID))
-	return &Home{
-		channelID:     cfg.ChannelID,
-		minter:        minter,
-		channel:       channel,
-		cs:            cs,
-		signal:        signal,
-		delivery:      delivery,
-		links:         links,
-		deviceFold:    deviceFold,
-		logger:        logger,
-		nowMs:         nowMs,
-		placement:     SinglePlacement{},
-		builder:       nil, // injected by the domain's factory-migration path; nil → Fork fail-fasts (ErrNoBuilder).
-		reconcileStop: reconcileStop,
-		reconcileDone: reconcileDone,
-	}, nil
+	return h, nil
+}
+
+// reconcileActivation is the eager-activation half of the reconcile ring: it
+// mints the desired−actual difference and deactivates the members it previously
+// managed that are no longer desired. It is a substrate assembly-layer mechanism
+// (the reconcile ring骨架 lives here in platform, not the actorrt kernel), driven
+// by the same ticker as the closure backstop.
+//
+// 补 (revive): for every AlwaysOn desired member absent from the live set, resolve
+// its factory through the builder (id-keyed activation entry), weld caps at the
+// platform seam, and SpawnIfAbsent it (the CAS discards the shell if some other
+// path won the race — admission or a concurrent Reviver fire). Kind comes from the
+// DesiredMember, never re-answered by the builder.
+//
+// 削 (deactivate, 反误杀): the diff is prevEagerDesired − currentDesired, NEVER
+// actual − desired. LiveIDs() mixes in system/human/fork-child/daemon-attach
+// embodiments this ring must never evict; only ids THIS ring minted in a prior
+// tick and no longer wants are DespawnID'd. Lazy members are not eager-managed and
+// never enter the tracked set.
+func (h *Home) reconcileActivation(ctx context.Context) {
+	if h.desired == nil {
+		return
+	}
+	desired, err := h.desired.Members(ctx)
+	if err != nil {
+		h.logger.Error("platform.reconcile.desired_failed", "channel", string(h.channelID), "err", err)
+		return
+	}
+	rt := h.channel.Cells()
+	actual := make(map[actor.ActorID]bool)
+	for _, id := range rt.LiveIDs() {
+		actual[id] = true
+	}
+	current := make(map[actor.ActorID]bool)
+	for _, m := range desired {
+		if m.Lifecycle != actorrt.LifecycleAlwaysOn {
+			continue // lazy members are activated at the delivery seam, not eagerly.
+		}
+		current[m.ID] = true
+		if actual[m.ID] {
+			continue
+		}
+		if h.builder == nil {
+			h.logger.Warn("platform.reconcile.no_builder", "channel", string(h.channelID), "actor", string(m.ID))
+			continue
+		}
+		factory, ok := h.builder.Lookup(m.ID)
+		if !ok {
+			h.logger.Warn("platform.reconcile.class_not_found", "channel", string(h.channelID), "actor", string(m.ID))
+			continue
+		}
+		kind := m.Kind
+		id := m.ID
+		rt.SpawnIfAbsent(id, func(inc actorrt.Incarnation) actorrt.Actor {
+			return factory(h.buildCaps(id, kind, inc))
+		})
+	}
+	for id := range h.prevEagerDesired {
+		if !current[id] {
+			rt.DespawnID(id)
+		}
+	}
+	h.prevEagerDesired = current
 }
 
 // View returns the read-only observation set (ReadAfterSeq / MaxSeq /
@@ -333,19 +459,18 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, fac
 // cs.Access is already assembled by storeopen, drawn directly), Spawn (the
 // by-incarnation fork/despawn handle; builder may be nil → Fork fail-fasts).
 //
-// Schedule is DELIBERATELY nil this period: the ScheduleHandle requires the
-// schedule engine, which OpenScheduler assembles only once FireSink (mirroring
-// the pen mint) and Reviver (SpawnIfAbsent+Builder) exist — that assembly path
-// is not wired yet. Forcing a placeholder here would be a half-built piece (a
-// minted handle over an engine that never Start()s), so the field is left nil
-// until that assembly wires it — no actor consumes it yet.
+// Schedule is welded over the schedule engine's per-author ScheduleHandle
+// (h.schedMinter, assembled by OpenScheduler at Open step 10) inside the same
+// liveSchedule membrane the other caps wear — self-targeted timers gated on this
+// incarnation still being live. schedMinter is always set before any participant
+// admission (the system cell does not pass through buildCaps).
 func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnation) actorcaps.Caps {
 	rt := h.channel.Cells()
 	return actorcaps.Caps{
 		Pen:      link.NewLivePen(h.minter.Mint(id, kind, h.channelID), inc, rt),
 		Access:   link.NewLiveAccess(h.cs.Access.Mint(id), inc, rt),
 		State:    link.NewLiveAccess(h.cs.Access.MintState(id), inc, rt),
-		Schedule: nil, // not wired yet (OpenScheduler assembly) — see doc above.
+		Schedule: link.NewLiveSchedule(h.schedMinter.Mint(id), inc, rt),
 		Spawn:    newSpawnHandle(inc, rt, h.builder, h.buildCaps, h.placement),
 	}
 }
@@ -372,6 +497,12 @@ func (h *Home) Close() error {
 	if h.reconcileStop != nil {
 		h.reconcileStop()
 		<-h.reconcileDone
+	}
+	// 0.5 Schedule engine: stop the run loop and join it before the runtime/stores
+	//     it fires into (FireSink→pen→log) and revives against (SpawnIfAbsent) go
+	//     away — mirrors the reconciler-first ordering.
+	if h.engine != nil {
+		h.engine.Close()
 	}
 	// 1. Link acceptor first: close all WS links, tear down every actor stream,
 	//    wait for Serve goroutines. Stops external compute traffic before the
