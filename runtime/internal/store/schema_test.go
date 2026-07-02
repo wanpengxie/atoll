@@ -58,10 +58,16 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 	}
 }
 
-// ChannelLocalTables enumerates exactly the surviving channel-local tables
-// (the brief's contract: type_registry's two tables + actor_cursors are deleted).
+// ChannelLocalTables enumerates exactly the surviving channel-local tables:
+// the message log, the actor registry, and the access plane's resources +
+// resource_grants (type_registry's two tables + actor_cursors are deleted).
 func TestChannelLocalTables_Set(t *testing.T) {
-	want := map[string]bool{"messages": true, "actor_registry": true}
+	want := map[string]bool{
+		"messages":        true,
+		"actor_registry":  true,
+		"resources":       true,
+		"resource_grants": true,
+	}
 	if len(store.ChannelLocalTables) != len(want) {
 		t.Fatalf("ChannelLocalTables=%v want exactly %v", store.ChannelLocalTables, want)
 	}

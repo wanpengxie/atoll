@@ -88,6 +88,40 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 -- is derived from a domain-supplied semantic_action_key, so idempotency is an
 -- application/stdlib concern, not substrate truth. Additive re-add when a real
 -- exactly-once-external-effect use case demands it.)
+
+-- =============================================================
+-- 4) resources + resource_grants  (access plane / forward §12)
+-- =============================================================
+-- The plane-2 object-lifecycle truth: existence + inline bytes (resources) and
+-- the authorization relation R (resource_grants). Same channel sqlite as the
+-- message log — access is channel-封 (forward §12.5), so R and resource bytes
+-- share the one DB as sibling tables, never a separate library.
+--
+-- No scope column on resources, ever (§8.1, owner-pinned): actor-scoped objects
+-- live in a SEPARATE storage locus (an actor_state-shaped table, deferred), so
+-- scope is expressed by the STRUCTURE an object lives in, not a column (Unix:
+-- an anonymous mapping is not a file tagged "anonymous"). This table holds only
+-- channel-scoped objects.
+--
+-- No CHECK on grantee_kind: it is a Go-enforced closed set (access.GranteeKind,
+-- validated by the door's ValidateGrant on the write path), same discipline as
+-- sender_kind / actor_kind above — a DB CHECK would weld an evolving vocabulary
+-- to every existing channel file.
+CREATE TABLE IF NOT EXISTS resources (
+  resource_id TEXT PRIMARY KEY,
+  kind        TEXT NOT NULL,
+  bytes       BLOB,               -- KindKV driver's inline bytes (day-1's only driver); NULL = resolved-but-empty
+  created_at  INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS resource_grants (
+  resource_id  TEXT NOT NULL,
+  grantee_kind TEXT NOT NULL,             -- access.GranteeKind closed set (A8)
+  grantee      TEXT NOT NULL DEFAULT '',  -- actor id when kind=actor; '' when kind=members (sum form persisted in full)
+  ops          TEXT NOT NULL,             -- JSON array of access.Operation
+  PRIMARY KEY (resource_id, grantee_kind, grantee),
+  FOREIGN KEY (resource_id) REFERENCES resources(resource_id)
+);
 `
 
 // ChannelLocalTables enumerates the channel-local table names in
@@ -99,4 +133,6 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 var ChannelLocalTables = []string{
 	"messages",
 	"actor_registry",
+	"resources",
+	"resource_grants",
 }

@@ -3,8 +3,11 @@ package runtime
 import (
 	"context"
 
+	"github.com/wanpengxie/ActOS/protocol/actor"
 	"github.com/wanpengxie/ActOS/protocol/channel"
+	"github.com/wanpengxie/ActOS/runtime/accessdoor"
 	"github.com/wanpengxie/ActOS/runtime/internal/store"
+	"github.com/wanpengxie/ActOS/runtime/resourcespec"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
@@ -17,7 +20,33 @@ type ChannelStores struct {
 	Requests   storespec.RequestLookup
 	Registry   storespec.Registry
 	Membership storespec.MembershipControlPlane
-	closer     func() error
+
+	// Access is the plane-2 door's single outward face — the welded AccessMinter.
+	// The resourcespec.Registry / Driver behind it are deliberately NOT re-exported:
+	// handing out the raw R + byte surfaces would be a bypass-the-door write path
+	// (the anti-bypass wall). Downstream mints a caller-welded AccessHandle from
+	// this and speaks only Invoke, exactly as it speaks harness.Pen for plane-1.
+	Access accessdoor.AccessMinter
+
+	closer func() error
+}
+
+// channelMembershipCheck adapts the channel's actor-membership registry to the
+// door's MembershipCheck seam (create's container locus + members-grant late
+// binding). It wraps Lookup + Record.IsActive rather than Exists: a deregistered
+// actor still has a row (Exists=true) but is NOT a current member, so member
+// grants must stop resolving for it the moment it deregisters (late binding, R
+// left untouched).
+type channelMembershipCheck struct {
+	registry storespec.Registry
+}
+
+func (c channelMembershipCheck) IsMember(ctx context.Context, id actor.ActorID) (bool, error) {
+	rec, ok, err := c.registry.Lookup(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return ok && rec.IsActive(), nil
 }
 
 // Close releases the underlying store resources.
@@ -57,12 +86,29 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	if err != nil {
 		return nil, err
 	}
+
+	// Assemble the whole plane-2 door here: this is the dependency confluence
+	// point — the R + byte implementations come up from the store, the membership
+	// seam wraps the same channel's actor registry. New fail-fasts on an
+	// incomplete assembly (missing KindKV driver), so a mis-wired open fails at
+	// open, not at first Invoke.
+	access, err := accessdoor.New(accessdoor.Deps{
+		Registry:   cs.Resources,
+		Drivers:    accessdoor.DriverTable{resourcespec.KindKV: cs.KVDriver},
+		Membership: channelMembershipCheck{registry: cs.Registry},
+	})
+	if err != nil {
+		_ = cs.Close()
+		return nil, err
+	}
+
 	return &ChannelStores{
 		Log:        cs.Log,
 		Query:      cs.Query,
 		Requests:   cs.Requests,
 		Registry:   cs.Registry,
 		Membership: cs.Membership,
+		Access:     access,
 		closer:     cs.Close,
 	}, nil
 }

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 
 	"github.com/wanpengxie/ActOS/protocol/channel"
+	"github.com/wanpengxie/ActOS/runtime/resourcespec"
 	"github.com/wanpengxie/ActOS/runtime/storespec"
 )
 
@@ -28,6 +29,15 @@ type ChannelStores struct {
 	// from role — a reader never receives any membership write):
 	Registry   storespec.Registry               // membership READS only (Lookup/Exists/ListActive)
 	Membership storespec.MembershipControlPlane // membership WRITES: Insert/Deregister + ApplyMemberTransitions (log-emitting)
+
+	// Plane-2 (access/resource) implementations over the SAME channel db. These
+	// are the door's collaborators, handed up as resourcespec CONTRACTS (never
+	// the concrete rows / raw db). They stay WITHIN the runtime tree — the door
+	// is assembled one layer up (runtime.OpenChannel) and only the welded
+	// AccessMinter is exposed downstream; the raw R + byte surfaces never leak
+	// past that assembly (no bypass-the-door write path escapes).
+	Resources resourcespec.Registry // R (authorization relation) + resource existence
+	KVDriver  resourcespec.Driver   // KindKV byte realizer (inline bytes)
 }
 
 // OpenChannel opens the per-channel sqlite and assembles the channel stores.
@@ -60,6 +70,8 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Requests:   newRequestLookup(msgs),
 		Registry:   reg,
 		Membership: reg,
+		Resources:  newResourceRegistry(db),
+		KVDriver:   newKVDriver(db),
 	}
 	return cs, nil
 }
