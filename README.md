@@ -153,6 +153,11 @@ boundaries at this stage: single trust domain per deployment, no read-path ACL y
 APIs still move without deprecation cycles. Kernel first, polish second — watch the
 repo if you want to see the rest arrive.
 
+## License
+
+[Apache-2.0](LICENSE). The Atoll name and any hosted offering are separate from the
+code license.
+
 ## Name
 
 The project is **atoll** (lowercase); the Go module is
