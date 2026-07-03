@@ -194,6 +194,20 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 // ChannelID returns the channel the home assigned on attach.
 func (d *Dialer) ChannelID() string { return d.channelID }
 
+// HasStream reports whether id currently has an open stream on THIS link — the
+// stream-existence half of the reconcile ring's 补 diff (§10.13 推导6/F6): a
+// hosted actor can be live in the runtime while its stream is gone, either
+// because this is a fresh post-reconnect Dialer that has opened nothing yet, or
+// because a single stream died while the link itself stayed up. Either way the
+// ring's answer is the same — reopen that one stream — so the ring diffs
+// live ∪ stream-existence, never live alone.
+func (d *Dialer) HasStream(id actor.ActorID) bool {
+	d.mu.Lock()
+	_, ok := d.streams[id]
+	d.mu.Unlock()
+	return ok
+}
+
 // reattachTimeout bounds one Reattach round-trip — a wedged home must not hang
 // the daemon's reconcile ring forever.
 const reattachTimeout = 10 * time.Second

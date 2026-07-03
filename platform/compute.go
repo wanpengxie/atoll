@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -70,14 +71,25 @@ type obsMsg struct {
 // (best-effort, drop-on-full); a separate pump goroutine does the blocking socket
 // write off the cell goroutine. This keeps the observation arm from ever back-
 // pressuring the actor's work path.
+//
+// The obs arm is the fifth rebindable face (alongside RebindableArms' four
+// capability arms, §10.13 推导3): d is swapped atomically on every (re)connect
+// via Rebind, so pump — which runs for the WHOLE daemon lifetime, not one
+// link's — always forwards through whichever Dialer is currently connected. A
+// nil/disconnected d (no link right now) just drops the queued edge, the same
+// best-effort posture a dead stream already has.
 type cellObsForwarder struct {
-	d  *link.Dialer
+	d  atomic.Pointer[link.Dialer]
 	ch chan obsMsg
 }
 
-func newCellObsForwarder(d *link.Dialer) *cellObsForwarder {
-	return &cellObsForwarder{d: d, ch: make(chan obsMsg, obsForwardQueue)}
+func newCellObsForwarder() *cellObsForwarder {
+	return &cellObsForwarder{ch: make(chan obsMsg, obsForwardQueue)}
 }
+
+// Rebind swaps in the currently-connected Dialer — call once per (re)connect,
+// mirroring RebindableArms.Rebind for the four capability arms.
+func (f *cellObsForwarder) Rebind(d *link.Dialer) { f.d.Store(d) }
 
 // OnObs implements actorrt.ObsWatcher — non-blocking enqueue (drop on full).
 func (f *cellObsForwarder) OnObs(_ context.Context, id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue) {
@@ -88,17 +100,18 @@ func (f *cellObsForwarder) OnObs(_ context.Context, id actor.ActorID, kind actor
 	}
 }
 
-// pump drains the queue onto the link OFF the cell goroutine. Exits when ctx is
-// cancelled or the link tears down.
-func (f *cellObsForwarder) pump(ctx context.Context, linkDone <-chan struct{}) {
+// pump drains the queue onto the CURRENT link OFF the cell goroutine, for the
+// life of the daemon (ctx) — it survives any number of individual link deaths
+// and reconnects, reading whatever Dialer Rebind last stored.
+func (f *cellObsForwarder) pump(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-linkDone:
-			return
 		case m := <-f.ch:
-			f.d.SendObs(m.id, m.kind, m.val)
+			if d := f.d.Load(); d != nil {
+				d.SendObs(m.id, m.kind, m.val)
+			}
 		}
 	}
 }
@@ -166,6 +179,25 @@ type ComputeConfig struct {
 	Poll time.Duration
 }
 
+// redialInitialBackoff / redialMaxBackoff bound the daemon's reconnect retry
+// (§10.13 推导3: link death degrades the wire, never the hosted work — so the
+// daemon just keeps trying to get the wire back, at no accelerating cost to
+// the home). Exponential from the floor, capped at the ceiling; reset to the
+// floor the moment a connection succeeds.
+const (
+	redialInitialBackoff = 1 * time.Second
+	redialMaxBackoff     = 30 * time.Second
+)
+
+// nextRedialBackoff doubles cur, capped at redialMaxBackoff.
+func nextRedialBackoff(cur time.Duration) time.Duration {
+	next := cur * 2
+	if next > redialMaxBackoff {
+		return redialMaxBackoff
+	}
+	return next
+}
+
 // RunCompute connects to the channel home and runs the daemon's own reconcile
 // ring against cfg.Desired: it hosts every AlwaysOn desired member as a cell,
 // declaring it to the home (Reattach) before opening its stream. The home
@@ -173,7 +205,15 @@ type ComputeConfig struct {
 // the cell's emits flow UP that same stream as native ipc (blocking on the
 // home's authoritative EmitAck). No local truth.
 //
-// RunCompute blocks until ctx is cancelled or the link disconnects.
+// The link is NOT the unit of life here — rt is (§10.13 推导3: wire-session
+// death ≠ hosted-work death). RunCompute dials in a redial loop with an
+// exponential backoff (1s→30s cap, reset on success); every hosted cell
+// survives any number of link deaths, resuming under the SAME identity once
+// the wire returns (reopen, never respawn — F6). The ONLY path that ever
+// StopAll's rt is ctx cancellation (graceful shutdown, each stream KindDetach
+// first) — a link death alone only re-enters the redial loop.
+//
+// RunCompute blocks until ctx is cancelled.
 func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 	logger := cfg.Logger
 	if logger == nil {
@@ -195,58 +235,71 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 	}
 
 	// Cell running is the kernel: the daemon owns an actorrt.Runtime directly. It
-	// is built HERE, once — never inside a reconnect attempt (F14) — because a
+	// is built HERE, once — OUTSIDE the redial loop below (F14) — because a
 	// hosted cell's identity and in-memory state must outlive a single wire
-	// session (§10.13 推导3: wire-session death ≠ hosted-work death). The
-	// reconnect loop itself is a later slice; this shape is the structural
-	// precondition it needs.
+	// session.
 	rt, del := actorrt.New(actorrt.Config{})
 	defer rt.StopAll()
 	watcher := &cellDownWatcher{down: map[actor.ActorID]func(cause string){}}
 	rt.WatchDown(watcher)
-
-	// Dial declares NOTHING yet: every actor this compute hosts is declared by the
-	// ring's own Reattach below (the full-set declaration idiom, §S-P8), including
-	// the very first batch — the initial reconcile pass runs before the poll
-	// ticker starts, so there is no dead startup window.
-	d, err := link.Dial(ctx, cfg.ServerWS, computeID, nil, logger)
-	if err != nil {
-		return err
-	}
-	defer func() { _ = d.Close() }()
-	// Host→remote despawn hook: a KindDespawn frame from the home ends that actor's
-	// arm here (§10.5) — despawn the local cell and the stream loop replies KindDetach.
-	d.SetDespawnLocal(func(id actor.ActorID) { rt.DespawnID(id) })
-	obsFwd := newCellObsForwarder(d)
-	go obsFwd.pump(ctx, d.Done())
+	// The obs arm outlives every individual link the same way rt does — built
+	// once, Rebind'd per connection, pumped for the daemon's whole life.
+	obsFwd := newCellObsForwarder()
+	go obsFwd.pump(ctx)
 
 	ring := &computeRing{
 		rt:          rt,
 		del:         del,
-		d:           d,
 		watcher:     watcher,
 		obsFwd:      obsFwd,
 		builder:     cfg.Builder,
 		logger:      logger,
 		prevCurrent: map[actor.ActorID]actor.Kind{},
 		infeasible:  map[actor.ActorID]error{},
+		arms:        map[actor.ActorID]*link.RebindableArms{},
 	}
-	ring.reconcile(ctx, cfg.Desired)
 
-	t := time.NewTicker(poll)
-	defer t.Stop()
+	backoff := redialInitialBackoff
 	for {
+		// Dial declares NOTHING yet: every actor this compute hosts is declared by
+		// the ring's own Reattach (the full-set declaration idiom, §S-P8) inside
+		// the first reconcile pass below.
+		d, err := link.Dial(ctx, cfg.ServerWS, computeID, nil, logger)
+		if err != nil {
+			if ctx.Err() != nil {
+				return nil
+			}
+			logger.Warn("platform.compute.dial_failed", "err", err, "retry_in", backoff)
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(backoff):
+			}
+			backoff = nextRedialBackoff(backoff)
+			continue
+		}
+		backoff = redialInitialBackoff
+
+		// Host→remote despawn hook: a KindDespawn frame from the home ends that
+		// actor's arm here (§10.5) — despawn the local cell, the stream loop
+		// replies KindDetach. Re-installed on every connection (it closes over
+		// THIS d's stream read loops).
+		d.SetDespawnLocal(func(id actor.ActorID) { rt.DespawnID(id) })
+		obsFwd.Rebind(d)
+
+		graceful := ring.runLink(ctx, d, cfg.Desired, poll)
+		_ = d.Close() // idempotent: a no-op if the link already tore itself down.
+		if graceful {
+			return nil
+		}
+
+		logger.Warn("platform.compute.link_down", "retry_in", backoff)
 		select {
 		case <-ctx.Done():
-			// Graceful shutdown: detach each actor stream (KindDetach) so the home ports
-			// die QUIET (no receiver_unavailable) instead of on a raw EOF down edge.
-			d.DetachAll()
 			return nil
-		case <-d.Done():
-			return nil
-		case <-t.C:
-			ring.reconcile(ctx, cfg.Desired)
+		case <-time.After(backoff):
 		}
+		backoff = nextRedialBackoff(backoff)
 	}
 }
 
@@ -257,7 +310,6 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 type computeRing struct {
 	rt      *actorrt.Runtime
 	del     actorrt.Deliverer
-	d       *link.Dialer
 	watcher *cellDownWatcher
 	obsFwd  *cellObsForwarder
 	builder ComputeBuilder
@@ -274,13 +326,50 @@ type computeRing struct {
 	// structured logging each pass; the diff itself retries every tick (a failed id
 	// stays "not live", so it is always back in next tick's missing set).
 	infeasible map[actor.ActorID]error
+	// arms is the per-id wire-flap membrane (§10.13 推导3): populated once at
+	// buildOne, Rebind'd (never re-created) on every later reopen — the cell's
+	// Caps were built from these facades, so a reconnect never touches the cell.
+	arms map[actor.ActorID]*link.RebindableArms
 }
 
-// reconcile runs one pass of the ring: read desired, 削 what fell out of it
-// (despawn + detach), then 补 what is desired-and-not-live (Reattach the full
-// declared set, then per-id OpenStream → Spawn → StartStream). A desired-read
-// failure leaves the prior state untouched and retries next tick.
-func (r *computeRing) reconcile(ctx context.Context, desired actorrt.DesiredSource) {
+// runLink drives ONE connected session on d: an initial reconcile pass (which
+// reopens every already-live actor's stream on this new link, F6, before it
+// resolves anything freshly missing) followed by a poll loop. It returns true
+// (graceful) only on ctx cancellation — having first detached every stream so
+// the home's ports die QUIET — and false if the link itself goes down, so the
+// caller redials. It never touches rt's cells: a link death degrades the wire,
+// the hosted work is untouched (§10.13 推导3).
+func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, desired actorrt.DesiredSource, poll time.Duration) (graceful bool) {
+	r.reconcile(ctx, d, desired)
+
+	t := time.NewTicker(poll)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			// Graceful shutdown: detach each actor stream (KindDetach) so the home
+			// ports die QUIET (no receiver_unavailable) instead of on a raw EOF down
+			// edge. rt itself is untouched here — RunCompute's defer StopAll's it.
+			d.DetachAll()
+			return true
+		case <-d.Done():
+			return false
+		case <-t.C:
+			r.reconcile(ctx, d, desired)
+		}
+	}
+}
+
+// reconcile runs one pass of the ring against link d: read desired, 削 what
+// fell out of it (despawn + detach), then 补 what is desired-and-not-fully-
+// hosted on THIS link — either never built, or live but missing a stream here
+// (F6: a fresh reconnect where nothing has a stream yet, or a single stream
+// that died while the link stayed up). Reattach the full declared set, then
+// per missing id either buildOne (never live: resolve factory, OpenStream,
+// Spawn, StartStream) or reopenOne (already live: OpenStream, Rebind, Start-
+// Stream — never re-Spawn). A desired-read failure leaves the prior state
+// untouched and retries next tick.
+func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired actorrt.DesiredSource) {
 	members, err := desired.Members(ctx)
 	if err != nil {
 		r.logger.Error("platform.compute.desired_failed", "err", err)
@@ -302,19 +391,21 @@ func (r *computeRing) reconcile(ctx context.Context, desired actorrt.DesiredSour
 			continue
 		}
 		r.rt.DespawnID(id)
-		r.d.DetachStream(id)
+		d.DetachStream(id)
 		delete(r.infeasible, id)
+		delete(r.arms, id)
 		r.logger.Info("platform.compute.deactivated", "actor", string(id))
 	}
 
-	// 补: desired-and-not-live.
+	// 补: desired-and-not-fully-hosted on THIS link — live ∪ stream-existence
+	// (F6), never live alone: a cell can be live while its stream on d is gone.
 	live := make(map[actor.ActorID]bool)
 	for _, id := range r.rt.LiveIDs() {
 		live[id] = true
 	}
 	var missing []actor.ActorID
 	for id := range current {
-		if !live[id] {
+		if !live[id] || !d.HasStream(id) {
 			missing = append(missing, id)
 		}
 	}
@@ -322,21 +413,25 @@ func (r *computeRing) reconcile(ctx context.Context, desired actorrt.DesiredSour
 	if len(missing) > 0 {
 		// Reattach the FULL current declared set (kubelet node-status idiom, never
 		// an increment — §S-P8) so the home's allowed set covers every id about to
-		// OpenStream, then build each missing actor.
+		// OpenStream, then build/reopen each missing actor.
 		decls := make([]link.Declaration, 0, len(current))
 		for id, kind := range current {
 			decls = append(decls, link.Declaration{ActorID: id, Kind: kind, Binding: actor.BindingRuntimeInboundViaRelay})
 		}
-		if err := r.d.Reattach(ctx, decls); err != nil {
+		if err := d.Reattach(ctx, decls); err != nil {
 			r.logger.Warn("platform.compute.reattach_failed", "err", err, "actors", len(decls))
-			// Every missing id stays not-live, so next tick's diff retries them
-			// (the ids remain in `current`, untouched below); record the reason.
+			// Every missing id stays not-fully-hosted, so next tick's diff retries
+			// them (the ids remain in `current`, untouched below); record the reason.
 			for _, id := range missing {
 				r.infeasible[id] = err
 			}
 		} else {
 			for _, id := range missing {
-				r.buildOne(id)
+				if live[id] {
+					r.reopenOne(id, d)
+				} else {
+					r.buildOne(id, d)
+				}
 			}
 		}
 	}
@@ -345,9 +440,10 @@ func (r *computeRing) reconcile(ctx context.Context, desired actorrt.DesiredSour
 }
 
 // buildOne opens the actor's link stream, resolves its factory via the builder,
-// and spawns + starts it. A failure at any step is recorded in r.infeasible and
-// logged; the id stays out of the live set, so next tick's diff retries it.
-func (r *computeRing) buildOne(id actor.ActorID) {
+// and spawns + starts it — the FIRST time this id is ever hosted. A failure at
+// any step is recorded in r.infeasible and logged; the id stays out of the live
+// set, so next tick's diff retries it.
+func (r *computeRing) buildOne(id actor.ActorID, d *link.Dialer) {
 	factory, ok := r.builder.Lookup(id)
 	if !ok {
 		err := fmt.Errorf("no factory for %q", id)
@@ -359,22 +455,23 @@ func (r *computeRing) buildOne(id actor.ActorID) {
 	// exist before the cell is spawned. One stream == one actor, so the dispatch
 	// handler routes every envelope on this stream into THIS actor's mailbox (the
 	// stream IS the target — no audience demux on the daemon).
-	arms, err := r.d.OpenStream(id, r.dispatchFor(id), r.cancelFor(id))
+	arms, err := d.OpenStream(id, r.dispatchFor(id, d), r.cancelFor(id))
 	if err != nil {
 		r.infeasible[id] = err
 		r.logger.Warn("platform.compute.open_stream_failed", "actor", string(id), "err", err)
 		return
 	}
-	// Daemon-side caps: Pen + Access/State + Schedule are all wired as relay
-	// proxies over the actor's port stream, so a daemon-hosted cell reaches for
-	// them exactly as a local cell does (transport neutrality — the home welds
-	// identity and runs the death gate over the home's port incarnation). Only
-	// Spawn stays nil: the fork/despawn arm does not cross the wire this period.
+	// The cell's Caps are built from the REBINDABLE facades, never the raw
+	// per-stream proxies directly — this is the one-time construction the wire-
+	// flap membrane needs: a later reconnect Rebinds this SAME *RebindableArms,
+	// the cell (built once, right below) never rebuilds (§10.13 推导3).
+	rb := link.NewRebindableArms(arms)
+	r.arms[id] = rb
 	impl := factory(actorcaps.Caps{
-		Pen:      arms.Pen,
-		Access:   arms.Access,
-		State:    arms.State,
-		Schedule: arms.Schedule,
+		Pen:      rb.Pen(),
+		Access:   rb.Access(),
+		State:    rb.State(),
+		Schedule: rb.Schedule(),
 	})
 	r.watcher.mu.Lock()
 	r.watcher.down[id] = arms.Down
@@ -390,30 +487,64 @@ func (r *computeRing) buildOne(id actor.ActorID) {
 	// owner's own host, so a local stale-relay write still crosses the home gate
 	// before reaching truth. The build closure returns the prebuilt impl.
 	r.rt.Spawn(id, func(actorrt.Incarnation) actorrt.Actor { return impl })
-	r.d.StartStream(id)
+	d.StartStream(id)
 	delete(r.infeasible, id)
 }
 
-// dispatchFor builds one actor's inbound dispatch closure: deliver into its
-// mailbox and, for any non-Delivered outcome, report it UP the wire as a pure
+// reopenOne re-establishes an ALREADY-LIVE actor's link stream on d — a fresh
+// reconnect (every stream on the new Dialer starts nonexistent) or a single
+// stream that died while the link stayed up (F6). It OpenStreams again and
+// Rebinds the actor's membrane to the fresh arms, but never re-Spawns: the
+// cell (identity + in-memory state) outlives the wire session, only the wire
+// arm is replaced. A failure here is recorded/retried exactly like buildOne's
+// — the cell keeps running throughout, its wire arm just stays in the
+// disconnect-window (fail-closed) state a moment longer.
+func (r *computeRing) reopenOne(id actor.ActorID, d *link.Dialer) {
+	rb := r.arms[id]
+	if rb == nil {
+		// Cannot happen in practice (live ⟹ buildOne already ran and populated
+		// r.arms), but fail closed rather than lose the membrane silently.
+		err := fmt.Errorf("no rebindable arms for live actor %q", id)
+		r.infeasible[id] = err
+		r.logger.Error("platform.compute.reopen_missing_arms", "actor", string(id))
+		return
+	}
+	arms, err := d.OpenStream(id, r.dispatchFor(id, d), r.cancelFor(id))
+	if err != nil {
+		r.infeasible[id] = err
+		r.logger.Warn("platform.compute.reopen_stream_failed", "actor", string(id), "err", err)
+		return
+	}
+	rb.Rebind(arms)
+	r.watcher.mu.Lock()
+	r.watcher.down[id] = arms.Down
+	r.watcher.mu.Unlock()
+	d.StartStream(id)
+	delete(r.infeasible, id)
+}
+
+// dispatchFor builds one actor's inbound dispatch closure over link d: deliver
+// into its mailbox and, for any non-Delivered outcome, report it UP d as a pure
 // observation (KindDeliverResult) — the home logs it exactly as its own delivery
 // tap does. Delivered = silence. The daemon holds no truth, so this is
-// observation only; closure is materialised home-side from the log.
-func (r *computeRing) dispatchFor(id actor.ActorID) func(env *message.Envelope) error {
+// observation only; closure is materialised home-side from the log. d is bound
+// at OpenStream time (never read off a mutable ring field), so a dispatch fired
+// from a since-superseded connection's read loop can never race a reconnect.
+func (r *computeRing) dispatchFor(id actor.ActorID, d *link.Dialer) func(env *message.Envelope) error {
 	return func(env *message.Envelope) error {
 		res, derr := r.del.Deliver([]actor.ActorID{id}, env)
 		if derr != nil {
 			return derr
 		}
 		if outcome, ok := res.Per[id]; ok && outcome != actorrt.Delivered {
-			r.d.SendDeliverResult(id, env.ID, outcomeString(outcome), "")
+			d.SendDeliverResult(id, env.ID, outcomeString(outcome), "")
 		}
 		return nil
 	}
 }
 
 // cancelFor builds one actor's cancel hook: fire the named request's reqCtx on
-// this daemon's runtime.
+// this daemon's runtime. rt-scoped only, so it needs no per-connection binding.
 func (r *computeRing) cancelFor(id actor.ActorID) func(requestID message.ID) {
 	return func(requestID message.ID) { r.rt.CancelRequest(id, requestID) }
 }
