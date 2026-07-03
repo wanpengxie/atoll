@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/schedule"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 const activationTestChannelID = channel.ID("test-activation")
@@ -399,5 +400,173 @@ func TestClose_ProducersBeforeEngineNoDeadlock(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Close did not complete within 10s — teardown deadlock")
+	}
+}
+
+// Test 7 — S6 补 filter (§10.13 推导2/7): a desired AlwaysOn member the
+// registry already shows attached to a daemon (Host != "") is NOT spawned
+// locally by the eager ring — home is not the placement authority for an
+// already-attached identity, and double-embodying it would race the daemon's
+// own copy.
+func TestReconcileActivation_DoesNotSpawnAttachedDesiredMember(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	const id = actor.ActorID("agent:attached-desired")
+	builder.byID[id] = builder.recordFactory(id)
+
+	h := openActivationHome(t, desired, builder)
+
+	if err := h.Spawn(ctx, id, actor.KindAgent, nil); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
+		{ID: id, Kind: actor.KindAgent, Host: "daemon-y", At: h.nowMs()},
+	}, nil); err != nil {
+		t.Fatalf("attach host: %v", err)
+	}
+
+	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
+	h.reconcileActivation(ctx)
+
+	if live(h, id) {
+		t.Fatal("attached desired member was spawned locally by home (补 filter not applied — double-embodiment)")
+	}
+	if _, ok := builder.capsFor(id); ok {
+		t.Fatal("builder factory ran for an attached desired member (补 filter not applied)")
+	}
+}
+
+// Test 8 — S6 削 filter (DoD 6, 反误杀 extended to placement): a member this
+// ring previously eager-managed, no longer desired, is NOT evicted if the
+// registry now shows it attached to a daemon — a migrated placement fact, not
+// identity absence.
+func TestReconcileActivation_DoesNotEvictAttachedNoLongerDesiredMember(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	const id = actor.ActorID("agent:migrated")
+	builder.byID[id] = builder.recordFactory(id)
+
+	h := openActivationHome(t, desired, builder)
+
+	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
+	h.reconcileActivation(ctx)
+	if !live(h, id) {
+		t.Fatal("member not revived on first tick")
+	}
+
+	// Simulate a migration mid-flight: the registry now shows Host attached to
+	// a daemon, and the id falls out of desired in the SAME tick.
+	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
+		{ID: id, Kind: actor.KindAgent, Host: "daemon-z", At: h.nowMs()},
+	}, nil); err != nil {
+		t.Fatalf("attach host: %v", err)
+	}
+	desired.set() // no longer desired
+
+	h.reconcileActivation(ctx)
+	if !live(h, id) {
+		t.Fatal("attached member was evicted by reconcile's 削 arm (placement filter not applied — 反误杀 broken)")
+	}
+}
+
+// Test 9 — S6 Reviver placement gate + DoD 5 (fake-clock driven): an identity
+// timer whose author's registry row shows Host attached to a daemon fires
+// NEITHER by home (the row must be RETAINED as transient, never poison-
+// deleted, never doubly-embodied) NOR silently lost — once the author is no
+// longer attached (Host reverts to home), the SAME row revives-then-appends
+// on a later tick.
+func TestReviver_AttachedHostRetainsThenFiresOnceDetached(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{} // deliberately empty: only the identity timer drives this author
+	builder := newTestBuilder()
+	const author = actor.ActorID("agent:wire-flap")
+	builder.byID[author] = builder.recordFactory(author)
+
+	clock := newFakeClock(time.UnixMilli(1_000_000))
+	dbPath := filepath.Join(t.TempDir(), "revive-attached.sqlite")
+	h, err := Open(HomeConfig{
+		ChannelID:         activationTestChannelID,
+		DBPath:            dbPath,
+		ReconcileInterval: time.Hour,
+		Desired:           desired,
+		Builder:           builder,
+		Clock:             clock,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	// Seed durable membership, unembodied, then mark it Host-attached — the
+	// wire-flap window this test exercises (the author's own daemon holds the
+	// live embodiment, home only has the durable row).
+	if err := h.Spawn(ctx, author, actor.KindAgent, nil); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
+		{ID: author, Kind: actor.KindAgent, Host: "daemon-flap", At: h.nowMs()},
+	}, nil); err != nil {
+		t.Fatalf("attach host: %v", err)
+	}
+
+	handle := h.schedMinter.Mint(author)
+	id, err := handle.Schedule(ctx, schedule.ScheduleReq{
+		Bind: schedule.BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.tick",
+	})
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+	wantID := message.ID("timer:" + string(id))
+
+	hasFired := func() bool {
+		rows, rerr := h.View().ReadAfterSeq(ctx, 0, 1000)
+		if rerr != nil {
+			t.Fatalf("ReadAfterSeq: %v", rerr)
+		}
+		for _, r := range rows {
+			if r.Envelope.ID == wantID {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Drive several backoff ticks (schedule.backoffDuration pace) while still
+	// attached: the row must be RETAINED — never fired, never poison-deleted,
+	// and home must never double-embody the attached author locally.
+	for i := 0; i < 5; i++ {
+		clock.Advance(2 * time.Second)
+		time.Sleep(20 * time.Millisecond) // let the run loop observe the advance
+		if hasFired() {
+			t.Fatal("attached author's identity timer fired while Host != \"\" (placement gate not applied)")
+		}
+		if live(h, author) {
+			t.Fatal("attached author was revived locally by home (double-embodiment — placement gate not applied)")
+		}
+	}
+
+	// 重连: the author is no longer attached (Host reverts to home) — the SAME
+	// row must revive-then-append on a later tick, never lost.
+	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
+		{ID: author, Kind: actor.KindAgent, Host: "", At: h.nowMs()},
+	}, nil); err != nil {
+		t.Fatalf("detach host: %v", err)
+	}
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		clock.Advance(2 * time.Second)
+		if hasFired() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("identity timer never fired after Host reverted to home")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !live(h, author) {
+		t.Fatal("author not live after fire — the Reviver did not activate an embodiment before append")
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
@@ -40,6 +41,14 @@ type HomeConfig struct {
 	// against once the original admission closure is gone. nil → Fork and identity-
 	// timer revival fail-fast (structural refusal, never a phantom actor).
 	Builder CapsFactoryBuilder
+	// Clock is the schedule engine's time source, forwarded to
+	// schedule.AssemblyDeps unchanged. nil → OpenScheduler's own default (the
+	// real wall clock). Pulled forward from period 8 (G16) because a fake
+	// clock is the only way to drive the engine's poll/backoff loop
+	// deterministically in a test (host-attached revive retries pace at
+	// schedule.backoffDuration, real wall-clock waits would make the test
+	// slow and flaky).
+	Clock schedule.Clock
 }
 
 // Home is the assembled channel-home. Its public surface is the capability set in
@@ -92,7 +101,20 @@ type Home struct {
 	// reconcileStop tears down the closure reconciler ticker (level backstop).
 	reconcileStop context.CancelFunc
 	reconcileDone chan struct{}
+
+	// reviveLogMu/reviveLogAt throttle the attached-host revive-skip log (see
+	// reviveLogThrottle) to once per author per window — the schedule engine
+	// backs off a transient EnsureLive failure at schedule.backoffDuration (1s)
+	// pace, so an attached author's due identity timer would otherwise log
+	// once a second for as long as it stays attached. Pure log hygiene, not a
+	// correctness mechanism.
+	reviveLogMu sync.Mutex
+	reviveLogAt map[actor.ActorID]time.Time
 }
+
+// reviveLogThrottle bounds the attached-host revive-skip log (see
+// Home.reviveLogAt).
+const reviveLogThrottle = 30 * time.Second
 
 // reconcileInterval is the closure reconciler's low-frequency safety-net sweep
 // period. The death edge closes the common case immediately; this level sweep
@@ -242,6 +264,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		builder:          cfg.Builder,
 		desired:          cfg.Desired,
 		prevEagerDesired: map[actor.ActorID]bool{},
+		reviveLogAt:      map[actor.ActorID]time.Time{},
 	}
 
 	// 10. Time axis (OpenScheduler). FireSink mints a pen per fire (author-welded);
@@ -257,6 +280,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Fire:   fireSink{minter: minter, registry: cs.Registry, chID: cfg.ChannelID},
 		Host:   rt,
 		Revive: homeReviver{h: h},
+		Clock:  cfg.Clock,
 		Logger: logger,
 	})
 	if err != nil {
@@ -325,6 +349,21 @@ func Open(cfg HomeConfig) (*Home, error) {
 	return h, nil
 }
 
+// logReviveAttached logs, throttled per author (reviveLogThrottle), that an
+// identity-timer wake was skipped because its author is currently placed on a
+// daemon (§10.13 推导2/3) rather than home.
+func (h *Home) logReviveAttached(id actor.ActorID, host string) {
+	now := time.Now()
+	h.reviveLogMu.Lock()
+	if last, ok := h.reviveLogAt[id]; ok && now.Sub(last) < reviveLogThrottle {
+		h.reviveLogMu.Unlock()
+		return
+	}
+	h.reviveLogAt[id] = now
+	h.reviveLogMu.Unlock()
+	h.logger.Warn("platform.revive.attached", "channel", string(h.channelID), "actor", string(id), "host", host)
+}
+
 // reconcileActivation is the eager-activation half of the reconcile ring: it
 // mints the desired−actual difference and deactivates the members it previously
 // managed that are no longer desired. It is a substrate assembly-layer mechanism
@@ -346,6 +385,15 @@ func Open(cfg HomeConfig) (*Home, error) {
 // regardless of who first embodied it). 反误杀 holds because the protected
 // categories never enter the desired-always-on set, so they never enter
 // prevEagerDesired. Lazy members are not eager-managed and never enter it either.
+//
+// placement filter (§10.13 推导2/7, S6): both arms consult the registry's Host
+// column BEFORE their own gate (补: before the builder lookup; 削: before
+// DespawnID) — an id currently placed on a daemon (Host != "") is this ring's
+// business in neither direction: 补 must not double-embody an already-attached
+// identity locally, and 削 must not evict an embodiment that is legitimately
+// live elsewhere (attached is a placement fact, not desired absence). A
+// registry fault skips the id for this tick only (F8: not a verdict, retried
+// next sweep), never a poison judgement.
 func (h *Home) reconcileActivation(ctx context.Context) {
 	if h.desired == nil {
 		return
@@ -369,6 +417,12 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		if actual[m.ID] {
 			continue
 		}
+		if rec, ok, err := h.cs.Registry.Lookup(ctx, m.ID); err != nil {
+			h.logger.Warn("platform.reconcile.host_lookup_failed", "channel", string(h.channelID), "actor", string(m.ID), "err", err)
+			continue
+		} else if ok && rec.Host != "" {
+			continue // attached elsewhere — not this ring's authority to embody (反误杀)
+		}
 		if h.builder == nil {
 			h.logger.Warn("platform.reconcile.no_builder", "channel", string(h.channelID), "actor", string(m.ID))
 			continue
@@ -385,9 +439,16 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		})
 	}
 	for id := range h.prevEagerDesired {
-		if !current[id] {
-			rt.DespawnID(id)
+		if current[id] {
+			continue
 		}
+		if rec, ok, err := h.cs.Registry.Lookup(ctx, id); err != nil {
+			h.logger.Warn("platform.reconcile.host_lookup_failed", "channel", string(h.channelID), "actor", string(id), "err", err)
+			continue
+		} else if ok && rec.Host != "" {
+			continue // attached elsewhere — not gone, not this ring's to evict (反误杀)
+		}
+		rt.DespawnID(id)
 	}
 	h.prevEagerDesired = current
 }

@@ -90,16 +90,27 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	if h.builder == nil {
 		return schedule.ReviveRejected{Reason: "no_builder", Detail: string(id)}
 	}
-	factory, ok := h.builder.Lookup(id)
-	if !ok {
-		return schedule.ReviveRejected{Reason: "class_not_found", Detail: string(id)}
-	}
+	// S6 (§10.13 推导2/3): consult the placement fact BEFORE the class table —
+	// an attached author's activation authority is its daemon's own feasible
+	// check, not home's. A registry fault or an attached Host are BOTH plain
+	// (transient) errors, never ReviveRejected: the row is retained and retried
+	// next tick, so the SAME wake fires normally once the fault clears or the
+	// author is no longer attached (poisoning here would turn a placement fact
+	// into a false identity-death verdict).
 	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
 	if err != nil {
 		return fmt.Errorf("platform: revive lookup %s: %w", id, err) // transient
 	}
 	if !ok {
 		return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
+	}
+	if rec.Host != "" {
+		h.logReviveAttached(id, rec.Host)
+		return fmt.Errorf("platform: revive %s: attached to host %q", id, rec.Host) // transient
+	}
+	factory, ok := h.builder.Lookup(id)
+	if !ok {
+		return schedule.ReviveRejected{Reason: "class_not_found", Detail: string(id)}
 	}
 	kind := rec.Kind
 	// SpawnIfAbsent is the idempotent CAS: an already-live author is a no-op
