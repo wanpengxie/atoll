@@ -48,6 +48,7 @@ type Acceptor struct {
 	sched      schedule.Minter
 	runtime    *actorrt.Runtime
 	membership storespec.MembershipControlPlane
+	registry   storespec.Registry
 	channelID  channel.ID
 	logger     *slog.Logger
 	leasePing  time.Duration
@@ -87,10 +88,16 @@ type Config struct {
 	Schedule   schedule.Minter
 	Runtime    *actorrt.Runtime
 	Membership storespec.MembershipControlPlane
-	ChannelID  channel.ID
-	Logger     *slog.Logger
-	LeasePing  time.Duration
-	LeaseTTL   time.Duration
+	// Registry is the membership READ face (storespec.Registry, segregated from
+	// the write-only MembershipControlPlane) a Reattach reconciles against: it
+	// lists which actors this compute currently owns (Host==computeID) so a
+	// shrunk declaration set can detect what fell out. Optional — nil skips
+	// attach reconciliation (existing single-declare callers unaffected).
+	Registry  storespec.Registry
+	ChannelID channel.ID
+	Logger    *slog.Logger
+	LeasePing time.Duration
+	LeaseTTL  time.Duration
 	// ObsWatcher (optional) receives each attached actor's obs PUSH via per-actor
 	// WatchObs registration at attach — the home-side arm of the L3 device-presence fold.
 	ObsWatcher actorrt.ObsWatcher
@@ -109,6 +116,7 @@ func NewAcceptor(cfg Config) *Acceptor {
 		sched:      cfg.Schedule,
 		runtime:    cfg.Runtime,
 		membership: cfg.Membership,
+		registry:   cfg.Registry,
 		channelID:  cfg.ChannelID,
 		logger:     logger,
 		leasePing:  cfg.LeasePing,
@@ -285,7 +293,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		if err != nil || cf.Kind != ctrlAttach || cf.Attach == nil {
 			return
 		}
-		id, accepted := a.handleAttach(reqCtx, lc, cf.Attach, daemonID, &mu, &allowed, &kinds)
+		id, accepted := a.handleAttach(reqCtx, lc, cf.Attach, daemonID, &mu, &allowed, &kinds, &portMu, ports)
 		// Count the daemon online only after a SUCCESSFUL attach (membership
 		// applied, Accepted reply sent) — a rejected/half attach must not show
 		// online. Once per link (first accepted frame).
@@ -342,13 +350,15 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 // reactivate — detach never deregisters), WHOLESALE-REPLACE the link's allowed/
 // kinds sets to exactly att.Declarations (idempotent — an unchanged re-declare
 // swaps in an identical set; self-correcting — a dropped declaration falls out),
-// and reply. The replace is a single atomic swap under mu (never a partial
-// merge), so a concurrent resolve()/kindOf() sees either the old full set or the
-// new one, never a mix. Membership semantics are unchanged by this: a member row
-// is durable; a daemon detaching does NOT remove it (membership ≠ attachment).
-// It reports (computeID, accepted) so the caller can count link attachment only
-// on success.
-func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed *map[actor.ActorID]bool, kinds *map[actor.ActorID]actor.Kind) (string, bool) {
+// reconcile the compute's Host-owned membership rows against the fresh
+// declaration set (see reconcileHost), and reply. The replace is a single
+// atomic swap under mu (never a partial merge), so a concurrent
+// resolve()/kindOf() sees either the old full set or the new one, never a mix.
+// Membership semantics are unchanged by this: a member row is durable; a daemon
+// detaching does NOT remove it (membership ≠ attachment) — reconcileHost only
+// removes rows the compute itself no longer declares. It reports (computeID,
+// accepted) so the caller can count link attachment only on success.
+func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed *map[actor.ActorID]bool, kinds *map[actor.ActorID]actor.Kind, portMu *sync.Mutex, ports map[actor.ActorID]actorrt.Incarnation) (string, bool) {
 	computeID := att.ComputeID
 	if daemonID != "" {
 		computeID = daemonID
@@ -395,6 +405,8 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 	*kinds = newKinds
 	mu.Unlock()
 
+	a.reconcileHost(ctx, computeID, newAllowed, portMu, ports)
+
 	// Fold each declared actor's obs PUSH (L3 device presence) into the home fold.
 	// Registered here (before the actor's stream opens / port publishes) so no
 	// early edge is missed; deduped so a reconnect does not re-append the watcher.
@@ -412,6 +424,61 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 	a.sendReply(lc, AttachReply{ChannelID: a.channelID, Accepted: true})
 	a.logger.Info("link.attached", "compute", computeID, "actors", len(att.Declarations))
 	return computeID, true
+}
+
+// reconcileHost is the attach-time membership reconciliation (§10.13 推导7 /
+// spec S5): a Reattach's declaration set is the compute's FULL current
+// placement (kubelet node-status idiom, never an increment), so any actor row
+// still marked Host==computeID but absent from newAllowed has fallen out — the
+// compute stopped hosting it and must be deregistered. nil Registry (not every
+// caller wires one — e.g. dev/test single-declare rigs) skips reconciliation
+// entirely; a Lookup/ListActive error is logged and skipped for this round
+// (best-effort — the attach itself already succeeded, the next Reattach
+// retries the diff).
+//
+// Despawn-first order (§10.12 mechanical coupling): each falling-out id is
+// despawned BEFORE the membership row is removed, so the removal transaction
+// never reports the row gone while the embodiment is still live. The despawn
+// is GUARDED by the per-link Incarnation pointer retained in ports (stored at
+// onOpen) — Despawn only acts if the runtime's live embodiment for that id is
+// STILL this very pointer. This defeats the TOCTOU where the id already
+// migrated to a successor compute B between this reconcile snapshot and the
+// despawn call: a mismatched pointer makes Despawn a no-op (the successor's
+// embodiment survives), and — doubly safe — that row's Host has already
+// flipped to B, so it would not have surfaced in ListActive(Host==computeID)
+// on B's own next reconcile either. An id with no retained pointer on THIS
+// link (e.g. it was declared on a since-dead prior connection and its
+// embodiment already reaped with that connection) has nothing local to
+// despawn — the row removal alone is safe.
+func (a *Acceptor) reconcileHost(ctx context.Context, computeID string, newAllowed map[actor.ActorID]bool, portMu *sync.Mutex, ports map[actor.ActorID]actorrt.Incarnation) {
+	if a.registry == nil || a.membership == nil || computeID == "" {
+		return
+	}
+	active, err := a.registry.ListActive(ctx)
+	if err != nil {
+		a.logger.Warn("link.reconcile_host_list_failed", "compute", computeID, "err", err)
+		return
+	}
+	nowMs := time.Now().UnixMilli()
+	var removes []storespec.MemberActorRemove
+	for _, rec := range active {
+		if rec.Host != computeID || newAllowed[rec.ID] {
+			continue
+		}
+		portMu.Lock()
+		inc, ok := ports[rec.ID]
+		portMu.Unlock()
+		if ok {
+			a.runtime.Despawn(inc)
+		}
+		removes = append(removes, storespec.MemberActorRemove{ID: rec.ID, At: nowMs})
+	}
+	if len(removes) == 0 {
+		return
+	}
+	if err := a.membership.ApplyMemberTransitions(ctx, nil, removes); err != nil {
+		a.logger.Warn("link.reconcile_host_dereg_failed", "compute", computeID, "err", err)
+	}
 }
 
 func (a *Acceptor) sendReply(lc *linkConn, reply AttachReply) {

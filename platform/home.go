@@ -283,6 +283,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Schedule:   schedMinter,
 		Runtime:    rt,
 		Membership: cs.Membership,
+		Registry:   cs.Registry,
 		ChannelID:  cfg.ChannelID,
 		Logger:     logger,
 		ObsWatcher: deviceFold,

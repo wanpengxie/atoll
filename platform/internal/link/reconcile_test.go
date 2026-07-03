@@ -1,0 +1,202 @@
+package link_test
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+)
+
+// storeHomeRig is the S5b counterpart to homeRig: it wires the Acceptor over a
+// REAL per-channel sqlite (runtime.OpenChannel) instead of the stub membership,
+// so it exercises the actual Host-column Registry read face and the actual
+// applyMemberRemoveTx cascade (state/timers) — not a fake that could drift from
+// substrate truth.
+type storeHomeRig struct {
+	acc     *link.Acceptor
+	rt      *actorrt.Runtime
+	deliver actorrt.Deliverer
+	cs      *runtime.ChannelStores
+	srv     *httptest.Server
+}
+
+func newStoreHomeRig(t *testing.T) *storeHomeRig {
+	t.Helper()
+	ctx := context.Background()
+	cs, err := runtime.OpenChannel(ctx, testChannelID, filepath.Join(t.TempDir(), "ch.sqlite"), runtime.OpenChannelOptions{})
+	if err != nil {
+		t.Fatalf("OpenChannel: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+
+	rt, del := actorrt.New(actorrt.Config{Parent: context.Background()})
+	r := &storeHomeRig{rt: rt, deliver: del, cs: cs}
+	r.acc = link.NewAcceptor(link.Config{
+		Minter:     &stubMinter{},
+		Runtime:    rt,
+		Membership: cs.Membership,
+		Registry:   cs.Registry,
+		ChannelID:  testChannelID,
+		LeasePing:  5 * time.Second,
+		LeaseTTL:   30 * time.Second,
+	})
+	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r.acc.Serve(w, req, "daemon-1")
+	}))
+	t.Cleanup(func() { _ = r.acc.Close(); r.srv.Close() })
+	return r
+}
+
+func (r *storeHomeRig) wsURL() string { return "ws" + r.srv.URL[4:] }
+
+// deliverProbe drives one request at id straight off the rig's Runtime and
+// returns the per-audience Outcome — the despawn-first probe: a despawned
+// actor's port is gone from the Runtime's addressing map entirely, so this
+// reports NotHosted rather than dispatching anywhere.
+func (r *storeHomeRig) deliverProbe(id actor.ActorID) (actorrt.Outcome, error) {
+	res, err := r.deliver.Deliver([]actor.ActorID{id}, &message.Envelope{
+		ID:        "probe-1",
+		ChannelID: testChannelID,
+		Kind:      message.KindRequest,
+		Type:      "probe.do",
+		Sender:    message.Sender{ID: "user:a", Kind: actor.KindHuman},
+		Audience:  message.Audience{id},
+	})
+	if err != nil {
+		return 0, err
+	}
+	return res.Per[id], nil
+}
+
+// TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut proves the S5
+// attach-time reconciliation (spec §3-S5, forward §10.13 推导7): a Reattach
+// declaring a SMALLER set than the compute currently hosts (Host==computeID in
+// the real Registry) despawns the fallen-out actor's port FIRST (guarded by the
+// per-link Incarnation pointer retained at onOpen) and THEN deregisters its
+// membership row — in that order, so the removal transaction never runs while
+// the embodiment is still live.
+//
+// Despawn-first is observed via NotHosted (the home Runtime no longer routes to
+// the actor at all — the guarded Despawn matched and evicted the embodiment);
+// dereg is observed via the real Registry row's DeregisteredAt; the same-tx
+// state cascade (§10.12 row 6) is observed via a pre-seeded actor-scoped value
+// disappearing (cascade-cleared, not merely orphaned) — proving this reconcile
+// path drives the SAME applyMemberRemoveTx used everywhere else, not a
+// parallel dereg mechanism that would skip the cascade.
+func TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut(t *testing.T) {
+	ctx := context.Background()
+	r := newStoreHomeRig(t)
+
+	const (
+		toolA = actor.ActorID("tool:a")
+		toolB = actor.ActorID("tool:b")
+	)
+
+	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
+		{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+		{ActorID: toolB, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	noopDispatch := func(*message.Envelope) error { return nil }
+	if _, err := d.OpenStream(toolA, noopDispatch, nil); err != nil {
+		t.Fatalf("OpenStream(a): %v", err)
+	}
+	if _, err := d.OpenStream(toolB, noopDispatch, nil); err != nil {
+		t.Fatalf("OpenStream(b): %v", err)
+	}
+	d.Start()
+
+	// Wait for both ports to attach (home-side onOpen retains the Incarnation
+	// asynchronously) — poll via the real Registry until both rows show up
+	// Host-owned by this compute.
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		recA, okA, _ := r.cs.Registry.Lookup(ctx, toolA)
+		recB, okB, _ := r.cs.Registry.Lookup(ctx, toolB)
+		if okA && okB && recA.Host == "daemon-1" && recB.Host == "daemon-1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("actors never registered Host=daemon-1")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Seed actor-scoped state for toolA — the cascade probe.
+	hState := r.cs.Access.MintState(toolA)
+	const stateID = resource.ResourceID("cursor")
+	if out, err := hState.Invoke(ctx, access.OpCreate, stateID, []byte("v1"), nil); err != nil || !out.Accepted() {
+		t.Fatalf("seed actor state: out=%+v err=%v", out, err)
+	}
+
+	// Shrink the declared set to {b} only — toolA falls out.
+	if err := d.Reattach(ctx, []link.Declaration{
+		{ActorID: toolB, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+	}); err != nil {
+		t.Fatalf("Reattach (shrink): %v", err)
+	}
+
+	// Despawn-first: the home Runtime no longer hosts toolA at all (the guarded
+	// Despawn matched this link's own retained pointer and evicted it) — a
+	// deliver reports NotHosted, not a silent drop.
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		outcome, err := r.deliverProbe(toolA)
+		if err != nil {
+			t.Fatalf("deliverProbe(toolA): %v", err)
+		}
+		if outcome == actorrt.NotHosted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("toolA still hosted after shrink Reattach (outcome=%v), want NotHosted", outcome)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Dereg: the real Registry row is now deregistered.
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		rec, ok, err := r.cs.Registry.Lookup(ctx, toolA)
+		if err != nil {
+			t.Fatalf("Lookup(toolA): %v", err)
+		}
+		if ok && !rec.IsActive() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("toolA never deregistered after shrink Reattach")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// toolB (still declared) stays active and untouched.
+	recB, okB, err := r.cs.Registry.Lookup(ctx, toolB)
+	if err != nil || !okB || !recB.IsActive() {
+		t.Fatalf("toolB Lookup = %+v ok=%v err=%v, want active", recB, okB, err)
+	}
+
+	// Same-tx cascade: toolA's actor-scoped state is cascade-cleared, not merely
+	// orphaned — a fresh read for the SAME id resolves resource_not_found.
+	out, err := hState.Invoke(ctx, access.OpRead, stateID, nil, nil)
+	if err != nil {
+		t.Fatalf("state read after dereg: %v", err)
+	}
+	if out.Accepted() {
+		t.Fatalf("state read after dereg = accepted %+v, want cascade-cleared (resource_not_found)", out)
+	}
+}
