@@ -664,3 +664,65 @@ func TestReviver_AttachedAuthorNilBuilderIsTransientNotPoisoned(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 }
+
+// Test 11 — G10 fire × 并发 dereg 竞态: a durable author deregistered AFTER a fire
+// was snapshotted as due but BEFORE it lands must be REJECTED at both timer seams.
+// Registry.Lookup deliberately returns soft-deregistered rows (Exists/grant
+// resolution consumers need them), so BOTH fireSink.Append and homeReviver.EnsureLive
+// must screen rec.IsActive() themselves — else the in-flight fire would append truth
+// authored by a gone member (Append) or resurrect a zombie cell (EnsureLive) for an
+// identity the dereg cascade already tore down.
+func TestFireAndRevive_RejectDeregisteredAuthor(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	const author = actor.ActorID("agent:dereged")
+	builder.byID[author] = builder.recordFactory(author)
+
+	h := openActivationHome(t, desired, builder)
+
+	// Seed durable membership (unembodied), then soft-deregister it — the registry
+	// row survives with DeregisteredAt != 0, exactly the in-flight-race snapshot.
+	if err := h.Spawn(ctx, author, actor.KindAgent, nil); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	if err := h.cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{
+		{ID: author, At: h.nowMs()},
+	}); err != nil {
+		t.Fatalf("deregister author: %v", err)
+	}
+	// Precondition: Lookup still resolves the row (soft-dereg), but as inactive.
+	rec, ok, err := h.cs.Registry.Lookup(ctx, author)
+	if err != nil {
+		t.Fatalf("Lookup: %v", err)
+	}
+	if !ok || rec.IsActive() {
+		t.Fatalf("precondition broken: want a resolvable-but-inactive row, got ok=%v active=%v", ok, rec.IsActive())
+	}
+
+	// Reviver seam: a dereg'd author is the deterministic unrevivable class, NOT a
+	// transient error and NOT a silent revive.
+	var revRejected schedule.ReviveRejected
+	if rerr := (homeReviver{h: h}).EnsureLive(ctx, author); !errors.As(rerr, &revRejected) {
+		t.Fatalf("EnsureLive(deregistered author) = %v, want ReviveRejected (zombie-cell resurrection guard)", rerr)
+	}
+	if live(h, author) {
+		t.Fatal("deregistered author was revived into a live cell (G10 zombie-cell resurrection)")
+	}
+
+	// FireSink seam: appending a fire for a dereg'd author must be a deterministic
+	// FireRejected (disposed), never a false nil that lets zombie truth land.
+	sink := fireSink{minter: h.minter, registry: h.cs.Registry, chID: activationTestChannelID}
+	// The IsActive guard rejects before pen.Write, so a minimal envelope suffices.
+	env := &message.Envelope{
+		ID:       message.ID("timer:test-dereg"),
+		Kind:     message.KindEvent,
+		Type:     "demo.tick",
+		Payload:  []byte("{}"),
+		Audience: message.Audience{author},
+	}
+	var fireRejected schedule.FireRejected
+	if ferr := sink.Append(ctx, author, env); !errors.As(ferr, &fireRejected) {
+		t.Fatalf("Append(deregistered author) = %v, want FireRejected (zombie-truth guard)", ferr)
+	}
+}

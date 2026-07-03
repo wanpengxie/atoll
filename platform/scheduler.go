@@ -37,11 +37,17 @@ func (s fireSink) Append(ctx context.Context, author actor.ActorID, env *message
 	if err != nil {
 		return err // transient: the engine leaves the row for the next tick.
 	}
-	if !ok {
-		// The author is not a durable member — its kind cannot be welded. For an
-		// identity-bind fire this cannot happen (a member's timers cascade-clear on
-		// dereg); reaching here means a poison row whose author vanished, so treat it
-		// as a deterministic reject (disposed of), never a hot retry loop.
+	if !ok || !rec.IsActive() {
+		// The author is not a LIVE durable member — its kind must not be welded.
+		//   !ok: a poison row whose author never existed.
+		//   !IsActive: the author was deregistered AFTER the engine snapshotted this
+		//   fire as due but BEFORE Append ran. Deregister soft-removes the registry
+		//   row and cascade-clears its timer rows in ONE tx, but a fire already
+		//   snapshotted into the due set is in flight against the pre-dereg view —
+		//   the deadline-boundary race (cf. Engine.cancel's declared window). Welding
+		//   a pen here would append truth authored by a member who is already gone.
+		// Both are deterministic rejects (the engine disposes the row), never a hot
+		// retry loop — a soft-dereg is monotonic, it never reverts to active.
 		return schedule.FireRejected{Reason: "author_not_member", Detail: string(author)}
 	}
 	pen := s.minter.Mint(author, rec.Kind, s.chID)
@@ -103,7 +109,13 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	if err != nil {
 		return fmt.Errorf("platform: revive lookup %s: %w", id, err) // transient
 	}
-	if !ok {
+	if !ok || !rec.IsActive() {
+		// !ok: never a member. !IsActive: deregistered after this wake was
+		// snapshotted as due but before revive ran (the same deadline-boundary race
+		// FireSink.Append closes) — reviving would resurrect a zombie cell for an
+		// identity the dereg cascade already tore down (state + timers cleared).
+		// Both are the deterministic unrevivable class: dispose the row, never
+		// hot-retry (soft-dereg is monotonic, it never reverts to active).
 		return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
 	}
 	if rec.Host != "" {
