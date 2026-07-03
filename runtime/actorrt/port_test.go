@@ -424,9 +424,11 @@ func TestPortParentCancelQuietTeardown(t *testing.T) {
 	}
 }
 
-// TestPortStopIsNotDeath: an external stop() (clean despawn) tears the port down
-// WITHOUT publishing an down edge — death is for positively-observed remote
-// failure, not for an orderly host-initiated teardown.
+// TestPortStopIsNotDeath: a by-name Despawn tears the port down WITHOUT publishing
+// a down edge — death is for positively-observed remote failure, not for an orderly
+// host-initiated teardown. Despawn does send the remote a best-effort KindDespawn
+// frame (host→remote "end your arm"), so the remote drains the wire here; the frame
+// is observation, not a local death edge.
 func TestPortStopIsNotDeath(t *testing.T) {
 	t.Parallel()
 	w := &recordingWatcher{notify: make(chan struct{}, 4)}
@@ -435,10 +437,25 @@ func TestPortStopIsNotDeath(t *testing.T) {
 	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
 	defer remote.conn.Close()
 
+	// Drain the remote end: Despawn writes a KindDespawn frame down the wire before
+	// closing, and the codec write is synchronous over the net.Pipe — without a
+	// reader it would block. The remote reads the KindDespawn, then sees EOF on the
+	// close.
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		for {
+			if _, err := remote.codec.Read(); err != nil {
+				return
+			}
+		}
+	}()
+
 	rt.mu.Lock()
 	p := rt.embodiments[id]
 	rt.mu.Unlock()
 	rt.Despawn(Incarnation{id: id, p: p})
+	<-drained
 	if _, ok := rt.Stat(id); ok {
 		t.Fatal("port still addressable after Despawn")
 	}

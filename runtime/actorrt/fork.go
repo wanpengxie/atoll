@@ -180,10 +180,12 @@ func (r *Runtime) DespawnChild(parent Incarnation, childID actor.ActorID) error 
 	child.markDead()
 	r.mu.Unlock()
 	// Mirrors Despawn's own guarded teardown: the live flip already happened
-	// in-lock; here only the join (WAIT half). The stale r.owned[parent.p] entry
-	// for this child is left in place — it is !isLive() from here on and gets
-	// pruned on the parent's next Fork (the amortised cleanup above), same as any
-	// other child that died on its own between two Forks.
-	child.stop()
+	// in-lock; here only the join (WAIT half). stopDespawn (not stop) — a by-name
+	// termination signals a port's remote (KindDespawn) before closing; a cell child
+	// (the only kind Fork mints today) collapses it to stop(). The stale
+	// r.owned[parent.p] entry for this child is left in place — it is !isLive() from
+	// here on and gets pruned on the parent's next Fork (the amortised cleanup
+	// above), same as any other child that died on its own between two Forks.
+	child.stopDespawn()
 	return nil
 }

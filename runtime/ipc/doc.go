@@ -2,7 +2,8 @@
 // byte-stream contract between the substrate host side (runtime/actorrt port
 // embodiment) and one out-of-process actor. It is the smallest shared surface so
 // both ends agree on frame kinds and payload schemas:
-// handshake / handshake_ack / deliver / emit / emit_ack / down / cancel / obs.
+// handshake / handshake_ack / deliver / emit / emit_ack / down / cancel / obs /
+// access(+ack) / schedule(+ack) / detach / despawn / deliver_result.
 //
 // Model: one connection == one actor (the Erlang open_port model). The
 // connection IS the actor's identity, so there is no per-frame actor id or

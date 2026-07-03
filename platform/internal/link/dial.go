@@ -36,6 +36,12 @@ type Dialer struct {
 	streams  map[actor.ActorID]*actorStream
 	attached chan struct{} // closed when attach_reply arrives
 	reply    AttachReply
+	// despawnLocal is the host→remote despawn hook: on a KindDespawn frame the
+	// stream read loop despawns the named local cell (ending its execution arm) and
+	// replies KindDetach. Injected by RunCompute (→ rt.DespawnID) after Dial, before
+	// Start (so it is set before any read loop runs). nil → a KindDespawn only
+	// closes the stream (no local cell to end, e.g. a test dialer).
+	despawnLocal func(actor.ActorID)
 
 	done chan struct{}
 }
@@ -286,6 +292,23 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 				return
 			}
 			as.sched.deliverAck(ap)
+		case ipc.KindDespawn:
+			// Host→remote: end this actor's execution arm (§10.5). Despawn the local
+			// cell (the injected hook → rt.DespawnID) and reply KindDetach before
+			// dropping the stream, so the home port dies QUIET. Best-effort, no ack;
+			// not FIFO-correlated, so a decode miss is non-fatal (reason is advisory).
+			var dp ipc.DownPayload
+			_ = json.Unmarshal(frame.Payload, &dp)
+			d.mu.Lock()
+			despawn := d.despawnLocal
+			d.mu.Unlock()
+			if despawn != nil {
+				despawn(as.id)
+			}
+			detachPayload, _ := json.Marshal(ipc.DownPayload{Reason: "despawned"})
+			_ = as.codec.Write(ipc.Frame{Kind: ipc.KindDetach, Payload: detachPayload})
+			_ = as.stream.Close()
+			return
 		case ipc.KindCancel:
 			var cp ipc.CancelPayload
 			if err := json.Unmarshal(frame.Payload, &cp); err != nil {
@@ -363,6 +386,53 @@ func (d *Dialer) SendObs(id actor.ActorID, kind string, value []byte) {
 		return
 	}
 	_ = as.codec.Write(ipc.Frame{Kind: ipc.KindObs, Payload: payload})
+}
+
+// SetDespawnLocal installs the host→remote despawn hook (see Dialer.despawnLocal).
+// Call after Dial, before Start — it is read by the per-stream read loops.
+func (d *Dialer) SetDespawnLocal(fn func(actor.ActorID)) {
+	d.mu.Lock()
+	d.despawnLocal = fn
+	d.mu.Unlock()
+}
+
+// SendDeliverResult reports one non-Delivered local-deliver outcome UP the named
+// actor's stream as a KindDeliverResult frame (pure observation — the home logs it
+// as a structured Warn). Fire-and-forget: a write error on a dying stream is
+// dropped, and it is NOT correlated to any FIFO waiter. No-op if the actor has no
+// open stream. The codec write mutex serialises this against the cell's writes.
+func (d *Dialer) SendDeliverResult(id actor.ActorID, envID message.ID, outcome, detail string) {
+	d.mu.Lock()
+	as := d.streams[id]
+	d.mu.Unlock()
+	if as == nil {
+		return
+	}
+	payload, err := json.Marshal(ipc.DeliverResultPayload{EnvelopeID: envID, Outcome: outcome, Detail: detail})
+	if err != nil {
+		return
+	}
+	_ = as.codec.Write(ipc.Frame{Kind: ipc.KindDeliverResult, Payload: payload})
+}
+
+// DetachAll sends a graceful KindDetach on every open actor stream (remote→host
+// "I am removing this arm" — the home port reads it and dies QUIET, no down edge)
+// then closes each stream. Called on daemon ctx-cancel (graceful shutdown) so the
+// home's port-hosted actors fall silent instead of materialising
+// receiver_unavailable; a hard link drop (kill -9) skips this and the home reads
+// EOF as the loud, positively-observed down edge instead.
+func (d *Dialer) DetachAll() {
+	d.mu.Lock()
+	streams := make([]*actorStream, 0, len(d.streams))
+	for _, as := range d.streams {
+		streams = append(streams, as)
+	}
+	d.mu.Unlock()
+	for _, as := range streams {
+		payload, _ := json.Marshal(ipc.DownPayload{Reason: "detach"})
+		_ = as.codec.Write(ipc.Frame{Kind: ipc.KindDetach, Payload: payload})
+		_ = as.stream.Close()
+	}
 }
 
 // Done returns a channel closed when the link tears down (peer gone, lease

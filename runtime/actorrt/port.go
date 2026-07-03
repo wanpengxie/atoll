@@ -426,6 +426,29 @@ func (p *port) readLoop() {
 			}
 			p.die(fmt.Errorf("actorrt: port %s down: %s", p.id, reason))
 			return
+		case ipc.KindDetach:
+			// The remote gracefully removed its execution arm (a daemon ctx-cancel
+			// shutdown, or the ack of a KindDespawn). Die QUIET — die(nil) skips the
+			// down edge (cause==nil), so a graceful detach never materialises
+			// receiver_unavailable, unlike KindDown / EOF (the loud, positively-
+			// observed death edges). The remote closes the stream right after.
+			p.die(nil)
+			return
+		case ipc.KindDeliverResult:
+			// A pure delivery OBSERVATION from the remote host: its local Deliver
+			// produced a non-Delivered outcome. Log it as a structured Warn (the same
+			// shape the home's own delivery tap emits) and continue — it is NEVER
+			// enqueued into any FIFO ack waiter (independent of KindEmit correlation;
+			// a lost one only loses an observation). A malformed frame is still a
+			// closed-set protocol violation that fail-closes the port (obs discipline).
+			var drp ipc.DeliverResultPayload
+			if err := json.Unmarshal(frame.Payload, &drp); err != nil {
+				p.die(fmt.Errorf("actorrt: port %s deliver_result decode: %w", p.id, err))
+				return
+			}
+			p.logger.Warn("actorrt.port.deliver_result",
+				"actor", string(p.id), "envelope", string(drp.EnvelopeID),
+				"outcome", drp.Outcome, "detail", drp.Detail)
 		default:
 			p.die(fmt.Errorf("actorrt: port %s unknown frame kind %q", p.id, frame.Kind))
 			return
@@ -502,6 +525,31 @@ func (p *port) stop() {
 		p.stopping = true
 		p.closed = true
 		p.mu.Unlock()
+		p.cancel()
+		p.closeConn()
+	})
+	<-p.done
+}
+
+// stopDespawn is the DESPAWN-flavoured external teardown: unlike stop() (a QUIET
+// close for replace / channel-teardown), it first writes a KindDespawn frame down
+// the wire — the host→remote "end your execution arm" signal (§10.5) — so the
+// remote despawns its local cell and replies KindDetach before the stream closes.
+// It then tears down exactly like stop() (mark stopping so the loops publish NO
+// down edge, cancel + close, join). The frame is best-effort and un-acked: a live
+// remote flushes it before the buffered conn closes, a dead one degrades to an EOF
+// death. The write is on the SAME serialised codec as writeLoop — consistent with
+// the port's existing synchronous wire writes (deliver / cancel / emit-ack).
+func (p *port) stopDespawn() {
+	p.stopOnce.Do(func() {
+		p.live.Store(false)
+		p.mu.Lock()
+		p.stopping = true
+		p.closed = true
+		p.mu.Unlock()
+		if payload, err := json.Marshal(ipc.DownPayload{Reason: "despawn"}); err == nil {
+			_ = p.codec.Write(ipc.Frame{Kind: ipc.KindDespawn, Payload: payload})
+		}
 		p.cancel()
 		p.closeConn()
 	})

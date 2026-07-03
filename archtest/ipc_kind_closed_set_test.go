@@ -14,17 +14,17 @@ import (
 // TestIPCKindClosedSetExhaustive is the AST-level guard the hand-maintained
 // in-package runtime/ipc TestKindClosedSet map structurally CANNOT be: it scans
 // EVERY `Kind`-typed const declared in package ipc and asserts the set is EXACTLY
-// the 12 known port-wire kinds.
+// the 15 known port-wire kinds.
 //
 // Why the in-package map cannot catch a regression: TestKindClosedSet checks a
-// hand-written `want` map against its own len — a 13th Kind added to frame.go that
+// hand-written `want` map against its own len — a 16th Kind added to frame.go that
 // the author forgot to add to the map is simply ABSENT from the map, so the map
-// still has 12 entries and the test stays green. This test closes that hole by
+// still has 15 entries and the test stays green. This test closes that hole by
 // enforcing the closed set against the SOURCE OF TRUTH (the const declarations),
 // not against a parallel hand-list: a new Kind const not acknowledged in `known`
 // below turns THIS red.
 func TestIPCKindClosedSetExhaustive(t *testing.T) {
-	// The canonical closed set — 12 members. Adding a Kind const to runtime/ipc
+	// The canonical closed set — 15 members. Adding a Kind const to runtime/ipc
 	// without adding it here is the intended tripwire (keep this in lockstep with
 	// the in-package TestKindClosedSet wire-spelling map).
 	known := map[string]bool{
@@ -36,6 +36,8 @@ func TestIPCKindClosedSetExhaustive(t *testing.T) {
 		"KindObs":    true,
 		"KindAccess": true, "KindAccessAck": true,
 		"KindSchedule": true, "KindScheduleAck": true,
+		"KindDetach": true, "KindDespawn": true,
+		"KindDeliverResult": true,
 	}
 
 	fset := token.NewFileSet()

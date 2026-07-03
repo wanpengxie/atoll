@@ -319,6 +319,59 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	}
 }
 
+// TestHomeCloseQuietTeardown_NoDownEdge: a home-side Acceptor.Close tears the link
+// down GRACEFULLY — its port-hosted actors are quiet-stopped (pointer-guarded, no
+// down edge), so an in-flight request never materialises receiver_unavailable.
+// Without the quiet handle the port would EOF loud on Close and publish a death
+// edge. The request round-trip first proves the port is fully attached (its
+// Incarnation retained) before Close, so the handle deterministically covers it.
+func TestHomeCloseQuietTeardown_NoDownEdge(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+
+	const toolID = actor.ActorID("tool:echo")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	h := newDaemonHost()
+	defer h.Stop()
+
+	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+		return h.Dispatch(toolID, env)
+	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	h.Install(toolID, &echoCell{w: arms.Pen}, nil)
+	d.Start()
+
+	req := &message.Envelope{
+		ID: "req-1", ChannelID: testChannelID, Kind: message.KindRequest, Type: "echo.do",
+		Sender: message.Sender{ID: "user:a", Kind: actor.KindHuman}, Audience: message.Audience{toolID},
+	}
+	if _, err := r.deliver.Deliver([]actor.ActorID{toolID}, req); err != nil {
+		t.Fatalf("home deliver: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(r.minter.all()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("cell emit never reached the home writer (port not fully attached)")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Graceful home Close: the port must fall silent — no down edge.
+	if err := r.acc.Close(); err != nil {
+		t.Fatalf("acc.Close: %v", err)
+	}
+	if down := r.getDown(); len(down) != 0 {
+		t.Fatalf("home Close published down edge(s) %+v — graceful port teardown must be quiet", down)
+	}
+}
+
 // TestDispatchInOpenStreamWindow_NotDropped pins the step-0 race fix in its
 // per-stream form: a deliver the home sends AFTER the daemon opens the stream
 // (so the home-side port is live) but BEFORE the daemon installs the cell and

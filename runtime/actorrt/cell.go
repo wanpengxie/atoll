@@ -333,3 +333,9 @@ func (c *cell) stop() {
 	c.initiateStop()
 	<-c.done
 }
+
+// stopDespawn implements embodiment: a cell has NO wire, so the despawn-flavoured
+// teardown is identical to stop() (there is no remote to send a KindDespawn frame
+// to — the KindDespawn arm is the port's alone). The distinction exists only so the
+// by-name termination entries reach a port's wire signal; a cell collapses it.
+func (c *cell) stopDespawn() { c.stop() }

@@ -165,6 +165,9 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 	defer rt.StopAll()
 	watcher := &cellDownWatcher{down: map[actor.ActorID]func(cause string){}}
 	rt.WatchDown(watcher)
+	// Host→remote despawn hook: a KindDespawn frame from the home ends that actor's
+	// arm here (§10.5) — despawn the local cell and the stream loop replies KindDetach.
+	d.SetDespawnLocal(func(id actor.ActorID) { rt.DespawnID(id) })
 	obsFwd := newCellObsForwarder(d)
 	go obsFwd.pump(ctx, d.Done())
 
@@ -175,8 +178,18 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 		// mailbox (the stream IS the target — no audience demux on the daemon).
 		target := a.ID
 		arms, err := d.OpenStream(target, func(env *message.Envelope) error {
-			_, err := del.Deliver([]actor.ActorID{target}, env)
-			return err
+			res, derr := del.Deliver([]actor.ActorID{target}, env)
+			if derr != nil {
+				return derr
+			}
+			// Report a non-Delivered local-deliver outcome UP the wire as a pure
+			// observation (KindDeliverResult) — the home logs it exactly as its own
+			// delivery tap does. Delivered = silence. The daemon holds no truth, so
+			// this is observation only; closure is materialised home-side from the log.
+			if outcome, ok := res.Per[target]; ok && outcome != actorrt.Delivered {
+				d.SendDeliverResult(target, env.ID, outcomeString(outcome), "")
+			}
+			return nil
 		}, func(requestID message.ID) {
 			rt.CancelRequest(target, requestID)
 		})
@@ -217,6 +230,9 @@ func RunCompute(ctx context.Context, cfg ComputeConfig, actors []ActorDecl) erro
 
 	select {
 	case <-ctx.Done():
+		// Graceful shutdown: detach each actor stream (KindDetach) so the home ports
+		// die QUIET (no receiver_unavailable) instead of on a raw EOF down edge.
+		d.DetachAll()
 		return nil
 	case <-d.Done():
 		return nil

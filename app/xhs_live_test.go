@@ -5,9 +5,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -394,7 +396,23 @@ const xhsCascadeDeviceAddr = "127.0.0.1:18092"
 // distinct from TestXHSLiveActorStatus which only covers the device's own edges.
 func TestXHSLiveDeviceUnknownOnDaemonDeath(t *testing.T) {
 	env := setupTestApp(t)
-	srv := httptest.NewServer(env.app.Handler())
+	// Capture the daemon's hijacked /compute WS connection so the test can drop it
+	// at the transport (a genuine abnormal death). A graceful ctx-cancel now
+	// KindDetaches quiet — per the device-fold's "abnormal death only" contract that
+	// is the WRONG trigger for the L3-decay backstop; only a raw link drop surfaces
+	// the loud port down edge. httptest's CloseClientConnections/Close do NOT touch
+	// hijacked WS conns, so we grab the conn via ConnState instead.
+	var hijackMu sync.Mutex
+	var hijackedConn net.Conn
+	srv := httptest.NewUnstartedServer(env.app.Handler())
+	srv.Config.ConnState = func(c net.Conn, state http.ConnState) {
+		if state == http.StateHijacked {
+			hijackMu.Lock()
+			hijackedConn = c
+			hijackMu.Unlock()
+		}
+	}
+	srv.Start()
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
@@ -434,11 +452,21 @@ func TestXHSLiveDeviceUnknownOnDaemonDeath(t *testing.T) {
 	conn := dialDeviceWithRetry(t, fmt.Sprintf("ws://%s/device", xhsCascadeDeviceAddr), 3*time.Second)
 	waitDeviceOnline(t, env, s, "tool:xhs", true, 5*time.Second)
 
-	// Daemon DIES (link drops) — cascade must decay L3 to unknown.
+	// Daemon DIES via a HARD link drop (kill -9 style) — close the daemon's hijacked
+	// /compute WS at the transport so the home reads a raw EOF (the loud, positively-
+	// observed port down edge the device-presence fold decays on), NOT a graceful
+	// ctx-cancel KindDetach (now quiet — and per the fold's "abnormal death only"
+	// contract a clean detach would correctly NOT decay). The device close races
+	// harmlessly: the port down edge (fold OnDown) is terminal. Cleanup still
+	// cancel()s the ctx + drains runErr.
 	_ = conn.Close()
-	cancel()
-	<-runErr
-	stopped = true
+	hijackMu.Lock()
+	hc := hijackedConn
+	hijackMu.Unlock()
+	if hc == nil {
+		t.Fatal("daemon /compute WS connection was never hijacked (cannot simulate abnormal death)")
+	}
+	_ = hc.Close()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {

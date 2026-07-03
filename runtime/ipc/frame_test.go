@@ -17,36 +17,111 @@ import (
 
 // --- closed Kind set ------------------------------------------------------
 
-// The port-wire Kind set is closed at exactly 12 members with fixed wire
+// The port-wire Kind set is closed at exactly 15 members with fixed wire
 // spellings. Every kind has a real producer + state transition; the dead
 // frames (fence / shutdown / heartbeat / control) are gone. KindCancel is the
 // request-scope of cancel(scope) crossing the wire (host→remote); KindAccess/
 // KindSchedule + their acks are the plane-2 and time-axis capability arms (an
-// out-of-process actor's incarnation carries every plane a local cell's Caps do).
-// If a wire spelling drifts or a kind is added/removed, this trips — the two
-// endpoints must agree on the exact bytes.
+// out-of-process actor's incarnation carries every plane a local cell's Caps do);
+// KindDetach/KindDespawn are the two lifecycle-termination arms (remote→host
+// graceful detach vs host→remote by-name despawn) and KindDeliverResult is the
+// remote host's delivery observation relayed home. If a wire spelling drifts or a
+// kind is added/removed, this trips — the two endpoints must agree on the exact
+// bytes.
 func TestKindClosedSet(t *testing.T) {
 	want := map[Kind]string{
-		KindHandshake:    "handshake",
-		KindHandshakeAck: "handshake_ack",
-		KindDeliver:      "deliver",
-		KindEmit:         "emit",
-		KindEmitAck:      "emit_ack",
-		KindDown:         "down",
-		KindCancel:       "cancel",
-		KindObs:          "obs",
-		KindAccess:       "access",
-		KindAccessAck:    "access_ack",
-		KindSchedule:     "schedule",
-		KindScheduleAck:  "schedule_ack",
+		KindHandshake:     "handshake",
+		KindHandshakeAck:  "handshake_ack",
+		KindDeliver:       "deliver",
+		KindEmit:          "emit",
+		KindEmitAck:       "emit_ack",
+		KindDown:          "down",
+		KindCancel:        "cancel",
+		KindObs:           "obs",
+		KindAccess:        "access",
+		KindAccessAck:     "access_ack",
+		KindSchedule:      "schedule",
+		KindScheduleAck:   "schedule_ack",
+		KindDetach:        "detach",
+		KindDespawn:       "despawn",
+		KindDeliverResult: "deliver_result",
 	}
 	for k, wire := range want {
 		if string(k) != wire {
 			t.Errorf("Kind %q wire form = %q, want %q", k, string(k), wire)
 		}
 	}
-	if len(want) != 12 {
-		t.Fatalf("expected exactly 12 kinds, guard lists %d", len(want))
+	if len(want) != 15 {
+		t.Fatalf("expected exactly 15 kinds, guard lists %d", len(want))
+	}
+}
+
+// The three lifecycle frames (detach / despawn / deliver_result) survive
+// Write→Read across a real net.Pipe (two independent endpoints, not one buffer):
+// what one end writes, the peer reads identically. detach/despawn reuse
+// DownPayload{Reason}; deliver_result carries its own DeliverResultPayload. This
+// pins the on-wire contract for the frames S1 added.
+func TestNewLifecycleFramesRoundTripOverPipe(t *testing.T) {
+	server, client := net.Pipe()
+	defer server.Close()
+	defer client.Close()
+
+	frames := []Frame{
+		{Kind: KindDetach, Payload: mustMarshal(t, DownPayload{Reason: "ctx cancelled"})},
+		{Kind: KindDespawn, Payload: mustMarshal(t, DownPayload{Reason: "despawn"})},
+		{Kind: KindDeliverResult, Payload: mustMarshal(t, DeliverResultPayload{
+			EnvelopeID: message.ID("m-9"), Outcome: "not_hosted", Detail: "no cell",
+		})},
+	}
+
+	wc := NewCodec(nil, client)
+	go func() {
+		for _, f := range frames {
+			if err := wc.Write(f); err != nil {
+				return
+			}
+		}
+	}()
+
+	rc := NewCodec(server, nil)
+
+	d0, err := rc.Read()
+	if err != nil {
+		t.Fatalf("read detach: %v", err)
+	}
+	if d0.Kind != KindDetach {
+		t.Fatalf("frame 0 kind = %q, want detach", d0.Kind)
+	}
+	var dp0 DownPayload
+	mustUnmarshal(t, d0.Payload, &dp0)
+	if dp0.Reason != "ctx cancelled" {
+		t.Fatalf("detach reason = %q, want ctx cancelled", dp0.Reason)
+	}
+
+	d1, err := rc.Read()
+	if err != nil {
+		t.Fatalf("read despawn: %v", err)
+	}
+	if d1.Kind != KindDespawn {
+		t.Fatalf("frame 1 kind = %q, want despawn", d1.Kind)
+	}
+	var dp1 DownPayload
+	mustUnmarshal(t, d1.Payload, &dp1)
+	if dp1.Reason != "despawn" {
+		t.Fatalf("despawn reason = %q, want despawn", dp1.Reason)
+	}
+
+	d2, err := rc.Read()
+	if err != nil {
+		t.Fatalf("read deliver_result: %v", err)
+	}
+	if d2.Kind != KindDeliverResult {
+		t.Fatalf("frame 2 kind = %q, want deliver_result", d2.Kind)
+	}
+	var drp DeliverResultPayload
+	mustUnmarshal(t, d2.Payload, &drp)
+	if drp.EnvelopeID != message.ID("m-9") || drp.Outcome != "not_hosted" || drp.Detail != "no cell" {
+		t.Fatalf("deliver_result payload = %+v, want {m-9, not_hosted, no cell}", drp)
 	}
 }
 

@@ -278,6 +278,7 @@ func (fakeErrEmbodiment) Deliver(*message.Envelope) error { return errors.New("w
 func (p fakeErrEmbodiment) startedAt() time.Time   { return p.started }
 func (fakeErrEmbodiment) cancelRequest(message.ID) {}
 func (fakeErrEmbodiment) stop()                    {}
+func (fakeErrEmbodiment) stopDespawn()             {}
 func (fakeErrEmbodiment) initiateStop()            {}
 func (fakeErrEmbodiment) isLive() bool             { return false }
 func (fakeErrEmbodiment) markDead()                {}

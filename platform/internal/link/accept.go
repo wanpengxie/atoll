@@ -201,6 +201,16 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		allowed = map[actor.ActorID]bool{}
 		kinds   = map[actor.ActorID]actor.Kind{}
 	)
+	// ports holds the live port Incarnation per attached actor on THIS link (stored
+	// at onOpen). It is the graceful-teardown handle: on a home-side Close the link
+	// quiet-stops each port (pointer-guarded, no down edge) so in-flight requests do
+	// not materialise receiver_unavailable. A stale entry (the port already died /
+	// was replaced) is a safe no-op — DespawnQuiet guards by pointer identity — so no
+	// explicit stream-death eviction is needed (the map lives only for this link).
+	var (
+		portMu sync.Mutex
+		ports  = map[actor.ActorID]actorrt.Incarnation{}
+	)
 	// boundID is the compute id this link counts as online under, set once on the
 	// first accepted attach and torn down when runLink returns. Single-goroutine
 	// (onControl runs on this run loop), so a plain guard suffices.
@@ -251,9 +261,16 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				Access:   a.accessSink(),
 				Schedule: a.scheduleSink(),
 			}
-			if _, err := a.runtime.Attach(hsCtx, s, sinks, resolve); err != nil {
+			inc, err := a.runtime.Attach(hsCtx, s, sinks, resolve)
+			if err != nil {
 				a.logger.Info("link.attach_stream_failed", "err", err)
+				return
 			}
+			// Retain the Incarnation so a home-side Close can quiet-stop this port
+			// (see the ports map above). A same-id reattach overwrites the entry.
+			portMu.Lock()
+			ports[inc.ID()] = inc
+			portMu.Unlock()
 		}()
 	}
 
@@ -284,10 +301,29 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		a.logger.Info("link.lease_expired", "channel", string(a.channelID))
 		_ = lc.Close()
 	})
-	// Acceptor Close / request cancellation also tears the link down.
+	// quietStopPorts tears down every port on this link WITHOUT a down edge — the
+	// home is going away gracefully, so its port-hosted actors must fall silent (no
+	// receiver_unavailable for in-flight requests) rather than surfacing a spurious
+	// death. Pointer-guarded per incarnation (a since-replaced/dead port is a no-op).
+	quietStopPorts := func() {
+		portMu.Lock()
+		incs := make([]actorrt.Incarnation, 0, len(ports))
+		for _, inc := range ports {
+			incs = append(incs, inc)
+		}
+		portMu.Unlock()
+		for _, inc := range incs {
+			a.runtime.DespawnQuiet(inc)
+		}
+	}
+
+	// Acceptor Close tears the link down; quiet-stop this link's ports FIRST so the
+	// ensuing stream EOFs are silent. A request-context cancel or peer-gone (the run
+	// loop ending) stays LOUD — those are the positively-observed death edges.
 	go func() {
 		select {
 		case <-a.ctx.Done():
+			quietStopPorts()
 			_ = lc.Close()
 		case <-reqCtx.Done():
 			_ = lc.Close()

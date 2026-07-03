@@ -53,6 +53,15 @@ type embodiment interface {
 	// not guaranteed to be prompt. stop() is initiateStop() plus a join, for
 	// callers on a DIFFERENT goroutine (Despawn/StopAll).
 	initiateStop()
+	// stopDespawn is the DESPAWN-flavoured external teardown (join half): the
+	// by-name termination entries (Despawn / DespawnID / DespawnChild) call it so a
+	// port first signals its remote (a KindDespawn frame ending the execution arm,
+	// §10.5) BEFORE closing the wire. A cell has no wire, so stopDespawn is identical
+	// to stop() for it. This is the sole difference from stop()'s quiet teardown
+	// (replace / channel-teardown, which sends no frame — the remote learns via EOF):
+	// a despawn owes the remote an explicit host→remote signal, a quiet close does
+	// not.
+	stopDespawn()
 }
 
 // ErrNotHosted is returned when no embodiment is hosted for the addressed id.
@@ -525,7 +534,31 @@ func (r *Runtime) Despawn(inc Incarnation) {
 	// very incarnation, so despawning a stale handle (a replaced predecessor, or
 	// an id never hosted) is a safe no-op and can never evict a same-id successor.
 	if matched {
-		inc.p.stop() // WAIT half only; the live flip already happened in-lock.
+		// stopDespawn (not stop): this is a by-name termination, so a port signals
+		// its remote (KindDespawn) before closing the wire; a cell's stopDespawn is
+		// just stop(). WAIT half only — the live flip already happened in-lock.
+		inc.p.stopDespawn()
+	}
+}
+
+// DespawnQuiet is Despawn's QUIET twin: same pointer-identity guard, same map
+// eviction, but the teardown sends NO wire frame (stop(), not stopDespawn()). It
+// is the home's graceful-teardown entry for a specific port — the host is going
+// away, so its ports must fall silent (no down edge → no receiver_unavailable for
+// in-flight requests) WITHOUT telling the remote to despawn its cell (a quiet close
+// is a link drop the remote can redial, not a by-name arm termination). A cell's
+// stop() is already quiet, so DespawnQuiet and Despawn coincide for cells.
+func (r *Runtime) DespawnQuiet(inc Incarnation) {
+	r.mu.Lock()
+	cur, ok := r.embodiments[inc.id]
+	matched := ok && cur == inc.p
+	if matched {
+		delete(r.embodiments, inc.id)
+		inc.p.markDead()
+	}
+	r.mu.Unlock()
+	if matched {
+		inc.p.stop() // quiet WAIT half; the live flip already happened in-lock.
 	}
 }
 
@@ -554,7 +587,9 @@ func (r *Runtime) DespawnID(id actor.ActorID) bool {
 	}
 	r.mu.Unlock()
 	if ok {
-		p.stop() // WAIT half only; the live flip already happened in-lock.
+		// stopDespawn (not stop): DespawnID is a by-name termination, so a port
+		// signals its remote (KindDespawn) before closing. WAIT half only.
+		p.stopDespawn()
 	}
 	return ok
 }

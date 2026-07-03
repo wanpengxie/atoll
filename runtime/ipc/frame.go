@@ -96,6 +96,31 @@ const (
 	// KindScheduleAck (host→remote): the host's authoritative verdict for one
 	// KindSchedule (the opaque schedule response bytes + any host-side error).
 	KindScheduleAck Kind = "schedule_ack"
+	// KindDetach (remote→host): the remote actively removes ITS execution arm from
+	// this host. Sent on the actor's stream, after which the remote closes the
+	// stream; the host-side port dies QUIET (no down edge — a graceful detach is not
+	// an observed death, so it must not materialise receiver_unavailable). The
+	// canonical producer is a daemon's graceful ctx-cancel shutdown (one KindDetach
+	// per stream before close); it is also the remote's ack of a KindDespawn. Payload
+	// reuses DownPayload{Reason}. No ack — a lost KindDetach degrades to an EOF
+	// death (the conservative loud edge), never a silent leak.
+	KindDetach Kind = "detach"
+	// KindDespawn (host→remote): the host ends the remote's execution arm (§10.5 —
+	// the by-name despawn crossing the wire). Sent on the target actor's stream; the
+	// remote despawns its local cell and replies KindDetach before closing the
+	// stream. Payload reuses DownPayload{Reason}. No ack — best-effort (a lost frame
+	// degrades to an EOF death). This is DISTINCT from a quiet close/replace teardown
+	// (which sends no frame): only the by-name despawn entries (Despawn / DespawnID /
+	// DespawnChild) end an arm with an explicit host→remote signal.
+	KindDespawn Kind = "despawn"
+	// KindDeliverResult (remote→host): a pure delivery-OBSERVATION frame. After the
+	// remote host's local Deliver produces a non-Delivered outcome (the addressed
+	// cell is not_hosted / mailbox_full / stopped), it reports that verdict UP the
+	// wire so the home logs it exactly as its own delivery tap does. Fire-and-forget,
+	// unidirectional, NO ack: it is INDEPENDENT of the KindEmit FIFO waiter queue
+	// (never enqueued, never correlated) — a lost one only loses an observation
+	// (truth-side closure is materialised from the log, not from this frame).
+	KindDeliverResult Kind = "deliver_result"
 )
 
 // MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.
@@ -181,6 +206,16 @@ type DownPayload struct {
 type ObsPayload struct {
 	Kind  string `json:"kind"`
 	Value []byte `json:"value,omitempty"`
+}
+
+// DeliverResultPayload carries one remote-host delivery observation up the wire
+// (KindDeliverResult). The actor is implicit (the connection IS that actor), so
+// only the envelope + outcome ride along — never an actor id. It is non-truth,
+// best-effort: the home turns it into a structured Warn, never a closure terminal.
+type DeliverResultPayload struct {
+	EnvelopeID message.ID `json:"envelope_id"`
+	Outcome    string     `json:"outcome"` // not_hosted / mailbox_full / stopped
+	Detail     string     `json:"detail,omitempty"`
 }
 
 // CancelPayload names the in-flight request to cancel on the bound actor (the
