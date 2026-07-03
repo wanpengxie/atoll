@@ -467,26 +467,21 @@ func (r *computeRing) buildOne(id actor.ActorID, d *link.Dialer) {
 	// the cell (built once, right below) never rebuilds (§10.13 推导3).
 	rb := link.NewRebindableArms(arms)
 	r.arms[id] = rb
-	impl := factory(actorcaps.Caps{
-		Pen:      rb.Pen(),
-		Access:   rb.Access(),
-		State:    rb.State(),
-		Schedule: rb.Schedule(),
-	})
 	r.watcher.mu.Lock()
 	r.watcher.down[id] = arms.Down
 	r.watcher.mu.Unlock()
 	// Register the obs forwarder BEFORE Spawn so no early obs edge is missed
 	// (same discipline as WatchDown).
 	r.rt.WatchObs(id, r.obsFwd)
-	// The daemon cell's pen is the link's relay-only RemoteWriter; it is NOT
-	// wrapped in a livePen HERE — the death gate for this actor's writes is
-	// enforced HOME-SIDE (the Acceptor's emitSink wraps a livePen per emit,
-	// welded to the home's port incarnation). What stays deferred is only the
-	// DAEMON-side gate on this local relay (federation trigger): a daemon is its
-	// owner's own host, so a local stale-relay write still crosses the home gate
-	// before reaching truth. The build closure returns the prebuilt impl.
-	r.rt.Spawn(id, func(actorrt.Incarnation) actorrt.Actor { return impl })
+	// Two-phase Spawn, port-path mirror of Home.Spawn (§10.13 推导7①/G12): the
+	// build closure runs inside Spawn, BEFORE go-live, so link.NewLiveArms welds
+	// the cell's caps to THIS incarnation and fences every call until it goes
+	// live — a factory that writes during construction is refused here exactly
+	// like a cell born at home, closing the daemon-side parity gap the raw
+	// (ungated) facades used to leave open.
+	r.rt.Spawn(id, func(inc actorrt.Incarnation) actorrt.Actor {
+		return factory(link.NewLiveArms(rb, inc, r.rt))
+	})
 	d.StartStream(id)
 	delete(r.infeasible, id)
 }

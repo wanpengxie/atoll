@@ -53,13 +53,17 @@ var membraneConstructors = map[string]bool{
 //   - The link package itself DEFINES the constructors; a link file never imports
 //     link, so a same-package reference carries no `link.` qualifier and the
 //     import-resolution below already exempts it (local=="" → skip). It therefore
-//     needs no entry here (accept.go's port-path weave is such a same-package use).
+//     needs no entry here (accept.go's port-path weave is such a same-package use
+//     — and, since S7, so is livearms.go's NewLiveArms, the daemon-side counterpart
+//     of buildCaps: it weaves NewLivePen/NewLiveAccess/NewLiveSchedule over the
+//     RebindableArms facades, gated on the DAEMON's own incarnation).
 //   - platform/home.go is the SINGLE caps assembler (buildCaps) — the one
 //     external legitimate weave site.
 //
 // Everything else — spawnhandle.go (delegates to the assembler, weaves nothing),
-// compute.go (weaves nothing), and any future platform file — is OUT: adding a
-// NewLive* reference anywhere else must turn this test red.
+// compute.go (delegates to link.NewLiveArms, weaves nothing directly), and any
+// future platform file — is OUT: adding a NewLive* reference anywhere else must
+// turn this test red.
 var membraneWeaveAllowlist = map[string]bool{
 	"../platform/home.go": true,
 }
