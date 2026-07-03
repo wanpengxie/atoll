@@ -439,6 +439,84 @@ func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
 	}
 }
 
+// TestPostStartOpenStream_StartStreamDrives pins the S2 three-step arm order for a
+// stream opened AFTER Start: OpenStream + Spawn install the cell but its read loop
+// stays deferred until the ring calls StartStream. A deliver sent in the window
+// between Spawn and StartStream must buffer (not race a stream with no loop), then
+// be drained once StartStream runs. This is the per-stream, mid-life form of the
+// initial-batch deferral Start gives — the mechanism the S3 reconcile ring rides.
+func TestPostStartOpenStream_StartStreamDrives(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+
+	const initID = actor.ActorID("tool:init")
+	const lateID = actor.ActorID("tool:late")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{
+			{ActorID: initID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+			{ActorID: lateID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+		}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	h := newDaemonHost()
+	defer h.Stop()
+
+	// Initial batch: open + spawn the first actor, then Start launches its loop.
+	armsInit, err := d.OpenStream(initID, func(env *message.Envelope) error {
+		return h.Dispatch(initID, env)
+	}, func(requestID message.ID) { h.CancelRequest(initID, requestID) })
+	if err != nil {
+		t.Fatalf("OpenStream init: %v", err)
+	}
+	h.Install(initID, &echoCell{w: armsInit.Pen}, nil)
+	d.Start()
+
+	// Post-Start open: the second actor's stream comes up AFTER Start, so Start's
+	// batch snapshot never covered it — its loop is the ring's to launch.
+	armsLate, err := d.OpenStream(lateID, func(env *message.Envelope) error {
+		return h.Dispatch(lateID, env)
+	}, func(requestID message.ID) { h.CancelRequest(lateID, requestID) })
+	if err != nil {
+		t.Fatalf("OpenStream late: %v", err)
+	}
+	h.Install(lateID, &echoCell{w: armsLate.Pen}, nil)
+
+	req := &message.Envelope{
+		ID: "req-late", ChannelID: testChannelID, Kind: message.KindRequest, Type: "echo.do",
+		Sender: message.Sender{ID: "user:a", Kind: actor.KindHuman}, Audience: message.Audience{lateID},
+	}
+	if _, err := r.deliver.Deliver([]actor.ActorID{lateID}, req); err != nil {
+		t.Fatalf("home deliver: %v", err)
+	}
+	// No read loop yet: the frame must sit in the stream buffer, unanswered.
+	time.Sleep(50 * time.Millisecond)
+	if got := r.minter.all(); len(got) != 0 {
+		t.Fatalf("late stream answered before StartStream %+v — post-Start read loop must be deferred", got)
+	}
+
+	// Step three drives the buffered deliver. A second StartStream is a no-op
+	// (per-stream loopStarted guard), so Start's batch and a ring launch compose.
+	d.StartStream(lateID)
+	d.StartStream(lateID)
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		got := r.minter.all()
+		if len(got) >= 1 {
+			if got[0].ID != "resp-req-late" || got[0].ParentID != "req-late" {
+				t.Fatalf("emitted up = %+v, want resp-req-late/req-late", got[0])
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("StartStream never drove the buffered post-Start deliver")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 // TestEndToEnd_CellDeath_ClosesStreamToOnDown proves a daemon cell's abnormal
 // death closes its link stream, the home port reads EOF, and the home publishes
 // the down edge (the closure trigger). Death is the stream EOF — no

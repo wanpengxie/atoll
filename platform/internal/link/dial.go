@@ -23,9 +23,11 @@ import (
 // (stream 0), and opens one stream per attached actor — each running the NATIVE
 // port-wire protocol with a real handshake (LeaseID = actor id). A hosted cell's
 // pen is the stream's RemoteWriter (emits flow UP, block on the home's
-// EmitAck). Dial/Start are two phases (inherited from step 0): Dial does WS +
-// attach with NO inbound consumption; Start installs the per-stream demux after
-// the host is fully built, so no dispatch races a half-built host.
+// EmitAck). Dial does WS + attach with NO inbound consumption; each actor arm is
+// then built in three steps — OpenStream (handshake) → caller Spawn (install the
+// cell) → StartStream (start the read loop) — so no dispatch races a half-built
+// host. Start drives StartStream across the initial batch; the ring drives it
+// per stream for a mid-life open.
 type Dialer struct {
 	lc        *linkConn
 	channelID string
@@ -36,6 +38,12 @@ type Dialer struct {
 	streams  map[actor.ActorID]*actorStream
 	attached chan struct{} // closed when attach_reply arrives
 	reply    AttachReply
+	// started flips true inside the SAME mu critical section that snapshots the
+	// streams for the initial batch (Start). It makes Start idempotent and is the
+	// boundary a post-Start OpenStream races against: a stream inserted before the
+	// critical section is launched by Start; one inserted after is the ring's to
+	// launch via StartStream (the fixed OpenStream→Spawn→StartStream arm order).
+	started bool
 	// despawnLocal is the host→remote despawn hook: on a KindDespawn frame the
 	// stream read loop despawns the named local cell (ending its execution arm) and
 	// replies KindDetach. Injected by RunCompute (→ rt.DespawnID) after Dial, before
@@ -48,18 +56,21 @@ type Dialer struct {
 
 // actorStream is one hosted actor's link stream + its native ipc plumbing. The
 // dispatch handler is captured at OpenStream but the read loop that invokes it
-// only starts at Start() — after the host has installed every cell — so an
+// only starts at StartStream — after the host has installed the cell — so an
 // inbound deliver can never race a half-built host (the frame waits in the
-// stream buffer until Start).
+// stream buffer until StartStream). loopStarted guards the read loop to exactly
+// once, so Start's initial-batch launch and a later explicit StartStream compose
+// without double-starting a stream.
 type actorStream struct {
-	id       actor.ActorID
-	stream   *stream
-	codec    *ipc.Codec
-	writer   *RemoteWriter
-	access   *relayClient // KindAccess FIFO round-trip (backs Access + State faces)
-	sched    *relayClient // KindSchedule FIFO round-trip
-	dispatch func(env *message.Envelope) error
-	cancel   func(requestID message.ID)
+	id          actor.ActorID
+	stream      *stream
+	codec       *ipc.Codec
+	writer      *RemoteWriter
+	access      *relayClient // KindAccess FIFO round-trip (backs Access + State faces)
+	sched       *relayClient // KindSchedule FIFO round-trip
+	dispatch    func(env *message.Envelope) error
+	cancel      func(requestID message.ID)
+	loopStarted bool
 }
 
 // CellArms is the full capability bundle the daemon wires into a hosted cell's
@@ -165,8 +176,11 @@ func (d *Dialer) ChannelID() string { return d.channelID }
 // invoked for each KindDeliver frame the home sends down this stream — the host
 // routes it into the cell's mailbox. cancel is invoked for each KindCancel frame
 // — the host fires the named request's reqCtx OFF the cell goroutine (the work
-// it interrupts is the goroutine's occupant). Call after Dial, before Start
-// consumes the home's first dispatch.
+// it interrupts is the goroutine's occupant). OpenStream is step one of three:
+// OpenStream (handshake + build the arm) → caller Spawn (install the cell) →
+// StartStream (start the read loop). It never starts the read loop itself, so a
+// deliver can never race a not-yet-spawned cell — true for the initial batch and
+// for a post-Start open the ring adds mid-life.
 func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelope) error, cancel func(requestID message.ID)) (CellArms, error) {
 	d.mu.Lock()
 	sid := d.nextID
@@ -208,11 +222,12 @@ func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelop
 	d.streams[id] = as
 	d.mu.Unlock()
 
-	// NB: the per-stream read loop is NOT started here — Start() launches it once
-	// the host has installed every cell. Deliver frames that arrive in the window
-	// between handshake and Start wait in the stream buffer; starting dispatch
-	// before install would let an envelope hit a not-yet-hosted actor and be
-	// silently dropped (the bug step 0 fixed, in per-stream form).
+	// NB: the per-stream read loop is NOT started here — StartStream launches it
+	// once the host has installed the cell (Start drives it for the initial batch).
+	// Deliver frames that arrive in the window between handshake and StartStream
+	// wait in the stream buffer; starting dispatch before install would let an
+	// envelope hit a not-yet-hosted actor and be silently dropped (the bug step 0
+	// fixed, in per-stream form).
 
 	downHandler := func(cause string) {
 		downPayload, _ := json.Marshal(ipc.DownPayload{Reason: cause})
@@ -330,21 +345,46 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 	}
 }
 
-// Start launches every actor stream's read loop, then the idle-ping keepalive.
-// Call once, after Dial + all OpenStream + host install. Deferring the read
-// loops to here (rather than starting them in OpenStream) is the dispatch-race
-// fix: by the time any deliver is consumed, every cell is installed, so an
-// envelope can never hit a half-built host. Frames buffered during the window
-// are drained in receipt order when the loop starts.
+// StartStream launches one actor stream's read loop — step three of the
+// OpenStream→Spawn→StartStream arm order. Idempotent per stream (loopStarted): a
+// second call, or a call for a stream Start already launched, is a no-op, so the
+// initial-batch launch and a mid-life ring launch compose without racing.
+// Deferring the loop to here (rather than starting it in OpenStream) is the
+// dispatch-race fix: by the time any deliver is consumed the cell is installed,
+// so an envelope can never hit a half-built host. No-op for an unknown id.
+func (d *Dialer) StartStream(id actor.ActorID) {
+	d.mu.Lock()
+	as := d.streams[id]
+	if as == nil || as.loopStarted {
+		d.mu.Unlock()
+		return
+	}
+	as.loopStarted = true
+	d.mu.Unlock()
+	go d.streamReadLoop(as, as.dispatch)
+}
+
+// Start launches every OPEN actor stream's read loop, then the idle-ping
+// keepalive. Call once, after Dial + the initial batch of OpenStream + host
+// install. Setting started and snapshotting the streams happen in the SAME mu
+// critical section (F12): a stream inserted before it is in the batch snapshot;
+// one inserted after is the ring's to launch via StartStream. Idempotent —
+// started gates a second Start to a no-op. Frames buffered during the window are
+// drained in receipt order when each loop starts.
 func (d *Dialer) Start() {
 	d.mu.Lock()
-	streams := make([]*actorStream, 0, len(d.streams))
-	for _, as := range d.streams {
-		streams = append(streams, as)
+	if d.started {
+		d.mu.Unlock()
+		return
+	}
+	d.started = true
+	ids := make([]actor.ActorID, 0, len(d.streams))
+	for id := range d.streams {
+		ids = append(ids, id)
 	}
 	d.mu.Unlock()
-	for _, as := range streams {
-		go d.streamReadLoop(as, as.dispatch)
+	for _, id := range ids {
+		d.StartStream(id)
 	}
 	go d.pingLoop()
 }
