@@ -235,7 +235,7 @@ func TestListActive_RawScanError(t *testing.T) {
 	// the int64 scan in ListActive.
 	if _, err := db.ExecContext(ctx, `CREATE TABLE actor_registry (
 	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, actor_binding TEXT,
-	   created_at TEXT, deregistered_at INTEGER)`); err != nil {
+	   created_at TEXT, deregistered_at INTEGER, host TEXT)`); err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
 	if _, err := db.ExecContext(ctx,
@@ -316,12 +316,12 @@ func TestApplyMemberAddTx_LookupScanError(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	if _, err := db.ExecContext(ctx, `CREATE TABLE actor_registry (
 	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, actor_binding TEXT,
-	   created_at INTEGER, deregistered_at TEXT)`); err != nil {
+	   created_at INTEGER, deregistered_at TEXT, host TEXT)`); err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
 	// deregistered_at = a string that cannot scan into sql.NullInt64.
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry VALUES ('a','agent',NULL,1,'not-an-int')`); err != nil {
+		`INSERT INTO actor_registry VALUES ('a','agent',NULL,1,'not-an-int','')`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	reg := newActorRegistry(db, "C", nil)
@@ -371,7 +371,7 @@ func TestApplyMemberAddTx_InsertError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	if _, err := db.ExecContext(ctx, `CREATE TABLE actor_registry (
-	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER, deregistered_at INTEGER)`); err != nil {
+	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER, deregistered_at INTEGER, host TEXT)`); err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
 	reg := newActorRegistry(db, "C", nil)
@@ -441,7 +441,7 @@ func TestApplyMemberAddTx_ReactivateError(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = db.Close() })
 	if _, err := db.ExecContext(ctx, `CREATE TABLE actor_registry (
-	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER, deregistered_at INTEGER)`); err != nil {
+	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER, deregistered_at INTEGER, host TEXT)`); err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
 	// Seed a deregistered row so the lookup finds it and takes the reactivate arm.

@@ -37,7 +37,7 @@ CREATE TABLE messages (
   audience TEXT NOT NULL, expires_at INTEGER, is_terminal INTEGER NOT NULL DEFAULT 0
 );
 CREATE TABLE actor_registry (
-  actor_id TEXT PRIMARY KEY, actor_kind TEXT NOT NULL, actor_binding TEXT,
+  actor_id TEXT PRIMARY KEY, actor_kind TEXT NOT NULL, actor_binding TEXT, host TEXT,
   created_at INTEGER NOT NULL, deregistered_at INTEGER
 );
 `

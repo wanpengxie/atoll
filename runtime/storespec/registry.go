@@ -17,9 +17,15 @@ import (
 // compute state, readiness is application business state. Neither is substrate
 // membership.
 type Record struct {
-	ID             actor.ActorID
-	Kind           actor.Kind
-	Binding        actor.Binding // empty for human / system
+	ID      actor.ActorID
+	Kind    actor.Kind
+	Binding actor.Binding // empty for human / system
+	// Host is the placement locus of the actor's embodiment — "" = the server's
+	// own home process, a compute id = the daemon that hosts the cell. It is a
+	// durable membership fact (which node is responsible for this actor) so the
+	// server can reconcile the attached set of a specific compute against its
+	// declarations. Empty is the home default and the zero value.
+	Host           string
 	CreatedAt      int64
 	DeregisteredAt int64 // 0 = active
 }

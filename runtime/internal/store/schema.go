@@ -68,6 +68,7 @@ CREATE TABLE IF NOT EXISTS actor_registry (
   actor_id           TEXT PRIMARY KEY,
   actor_kind         TEXT NOT NULL,
   actor_binding      TEXT,
+  host               TEXT NOT NULL DEFAULT '',  -- placement locus: '' = home process, compute id = hosting daemon
   created_at         INTEGER NOT NULL,
   deregistered_at    INTEGER
 );

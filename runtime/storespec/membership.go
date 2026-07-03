@@ -13,7 +13,12 @@ type MemberActorAdd struct {
 	ID      actor.ActorID
 	Kind    actor.Kind
 	Binding actor.Binding
-	At      int64
+	// Host is the placement locus (see storespec.Record.Host): "" = home,
+	// a compute id = the daemon hosting the cell. A host-only change on an
+	// already-active member is a placement fact update, not a re-registration,
+	// so it mutates the row WITHOUT emitting a system.actor.registered mirror.
+	Host string
+	At   int64
 }
 
 // NOTE: an actor's capability/service DECLARATION (name, handled types, skill

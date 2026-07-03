@@ -438,7 +438,7 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, fac
 		binding = actor.BindingEmbedded
 	}
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{{
-		ID: id, Kind: kind, Binding: binding, At: h.nowMs(),
+		ID: id, Kind: kind, Binding: binding, Host: "", At: h.nowMs(),
 	}}, nil); err != nil {
 		return fmt.Errorf("platform: Spawn membership: %w", err)
 	}

@@ -37,13 +37,13 @@ func newActorRegistry(db *sql.DB, channelID channel.ID, onCommit func()) *actorR
 
 // Lookup implements storespec.Registry.
 func (r *actorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec.Record, bool, error) {
-	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''),
+	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''), COALESCE(host,''),
 	                 created_at, COALESCE(deregistered_at,0)
 	            FROM actor_registry WHERE actor_id=?`
 	var rec storespec.Record
 	var kind, binding string
 	err := r.db.QueryRowContext(ctx, q, string(id)).Scan(
-		&rec.ID, &kind, &binding, &rec.CreatedAt, &rec.DeregisteredAt,
+		&rec.ID, &kind, &binding, &rec.Host, &rec.CreatedAt, &rec.DeregisteredAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storespec.Record{}, false, nil
@@ -87,7 +87,7 @@ func (r *actorRegistry) Exists(ctx context.Context, id actor.ActorID) (bool, err
 
 // ListActive implements storespec.Registry.
 func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, error) {
-	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''),
+	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''), COALESCE(host,''),
 	                 created_at
 	            FROM actor_registry
 	            WHERE deregistered_at IS NULL
@@ -102,7 +102,7 @@ func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, err
 	for rows.Next() {
 		var rec storespec.Record
 		var kind, binding string
-		if err := rows.Scan(&rec.ID, &kind, &binding, &rec.CreatedAt); err != nil {
+		if err := rows.Scan(&rec.ID, &kind, &binding, &rec.Host, &rec.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store: list active actors scan: %w", err)
 		}
 		k, ok := actor.ParseKind(kind)
@@ -160,8 +160,8 @@ func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error 
 	defer func() { _ = tx.Rollback() }()
 
 	const insActor = `INSERT INTO actor_registry
-	   (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-	   VALUES (?, ?, ?, ?, NULL)`
+	   (actor_id, actor_kind, actor_binding, host, created_at, deregistered_at)
+	   VALUES (?, ?, ?, ?, ?, NULL)`
 	var binding any
 	if rec.Binding == "" {
 		binding = nil
@@ -169,7 +169,7 @@ func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error 
 		binding = string(rec.Binding)
 	}
 	if _, err := tx.ExecContext(ctx, insActor,
-		string(rec.ID), string(rec.Kind), binding, rec.CreatedAt,
+		string(rec.ID), string(rec.Kind), binding, rec.Host, rec.CreatedAt,
 	); err != nil {
 		return fmt.Errorf("store: actor insert %q: %w", rec.ID, err)
 	}
@@ -339,23 +339,40 @@ func (r *actorRegistry) ApplyMemberTransitions(
 
 func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add storespec.MemberActorAdd) (bool, error) {
 	var deregistered sql.NullInt64
-	err := tx.QueryRowContext(ctx, `SELECT deregistered_at FROM actor_registry WHERE actor_id=?`, string(add.ID)).Scan(&deregistered)
+	var curHost string
+	err := tx.QueryRowContext(ctx,
+		`SELECT deregistered_at, COALESCE(host,'') FROM actor_registry WHERE actor_id=?`,
+		string(add.ID)).Scan(&deregistered, &curHost)
 	switch {
 	case err == nil:
 		if !deregistered.Valid {
 			// Row is already active (reconnect / retried update_members /
-			// re-run of a boot-time seed). A duplicate add is an idempotent
-			// no-op: substrate identity is {ID, Kind, Binding} and carries no
-			// per-actor declaration to diff. An actor's capability/service
-			// declaration is an application-level event (skill-as-document,
-			// runtime), not a substrate membership field.
+			// re-run of a boot-time seed). Substrate identity is {ID, Kind,
+			// Binding} and carries no per-actor declaration to diff — that is an
+			// application-level event (skill-as-document, runtime), not membership.
+			// So a duplicate add is an idempotent no-op EXCEPT for a placement
+			// move: host is a durable membership fact, and a compute re-homing an
+			// actor (or the home reclaiming it) must be recorded. This is a
+			// deliberate narrowing of the former unconditional no-op: a host-only
+			// change UPDATEs the row but returns changed=false, so it emits NO
+			// system.actor.registered mirror — the mirror never carries host, and
+			// re-homing is not a re-registration.
+			if curHost == add.Host {
+				return false, nil
+			}
+			if _, err := tx.ExecContext(ctx,
+				`UPDATE actor_registry SET host=? WHERE actor_id=?`,
+				add.Host, string(add.ID),
+			); err != nil {
+				return false, fmt.Errorf("store: actor rehost %q: %w", add.ID, err)
+			}
 			return false, nil
 		}
 		_, err := tx.ExecContext(ctx,
 			`UPDATE actor_registry
-			    SET actor_kind=?, actor_binding=?, created_at=?, deregistered_at=NULL
+			    SET actor_kind=?, actor_binding=?, host=?, created_at=?, deregistered_at=NULL
 			  WHERE actor_id=?`,
-			string(add.Kind), nullableString(string(add.Binding)), add.At, string(add.ID),
+			string(add.Kind), nullableString(string(add.Binding)), add.Host, add.At, string(add.ID),
 		)
 		if err != nil {
 			return false, fmt.Errorf("store: actor reactivate %q: %w", add.ID, err)
@@ -364,9 +381,9 @@ func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add st
 	case errors.Is(err, sql.ErrNoRows):
 		_, err := tx.ExecContext(ctx,
 			`INSERT INTO actor_registry
-			   (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-			 VALUES (?, ?, ?, ?, NULL)`,
-			string(add.ID), string(add.Kind), nullableString(string(add.Binding)), add.At,
+			   (actor_id, actor_kind, actor_binding, host, created_at, deregistered_at)
+			 VALUES (?, ?, ?, ?, ?, NULL)`,
+			string(add.ID), string(add.Kind), nullableString(string(add.Binding)), add.Host, add.At,
 		)
 		if err != nil {
 			return false, fmt.Errorf("store: actor member insert %q: %w", add.ID, err)
