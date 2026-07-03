@@ -119,14 +119,29 @@ func newRelayClient(codec *ipc.Codec, requestKind ipc.Kind) *relayClient {
 
 // roundTrip sends payload as a request frame and blocks for the ack. It reports
 // three distinct outcomes:
-//   - transportErr != nil: nothing was confirmed (wire write failed, ctx
-//     cancelled, or the arm closed with the request in flight) — the caller
-//     decides how to surface an UNCONFIRMED outcome (access → outcome_unknown,
-//     schedule → error);
-//   - transportErr == nil, ackErr != nil: the host returned a definite error
-//     verdict (structural / not-live) — relayed as-is for cell/port parity;
+//   - transportErr != nil: the op GENUINELY crossed the wire and its result is now
+//     UNCONFIRMED (the ctx was cancelled AFTER the frame was sent, or the arm died
+//     with the request in flight) — the caller surfaces this as an in-flight
+//     unknown (access → outcome_unknown, schedule → error). A pre-send wire-write
+//     failure also lands here (nothing to confirm either way);
+//   - transportErr == nil, ackErr != nil: a DEFINITE, op-did-not-produce-an-unknown
+//     failure — either the host returned a definite error verdict (structural /
+//     not-live), OR the ctx was ALREADY cancelled before the frame left (a pre-send
+//     abort: the op provably never reached the home). Both are relayed as a plain
+//     error on both arms — NEVER outcome_unknown, because the op verifiably did not
+//     execute-with-unknown-result;
 //   - both nil: ackPayload is the host's opaque verdict bytes.
 func (c *relayClient) roundTrip(ctx context.Context, payload []byte) (ackPayload json.RawMessage, ackErr error, transportErr error) {
+	// Pre-send ctx check: an already-cancelled ctx means the frame never leaves the
+	// wire, so the op provably did not reach the home — a DEFINITE non-execution,
+	// surfaced through the ackErr slot (a plain error), never transportErr. This is
+	// the pre/post-send split: outcome_unknown is reserved for an op that actually
+	// crossed the wire (post-send cancel / in-flight arm death below), never one
+	// that never sent.
+	if err := ctx.Err(); err != nil {
+		return nil, err, nil
+	}
+
 	waiter := make(chan relayAck, 1)
 
 	c.writeMu.Lock()
@@ -147,6 +162,9 @@ func (c *relayClient) roundTrip(ctx context.Context, payload []byte) (ackPayload
 
 	select {
 	case <-ctx.Done():
+		// POST-SEND cancel: the frame is already on the wire, so the op is
+		// GENUINELY in flight and its result unconfirmed → transportErr (→
+		// outcome_unknown on access), NOT the pre-send definite-error path above.
 		// Waiter abandoned in place: the host still acks in receipt order and
 		// deliverAck consuming an abandoned waiter is harmless (buffered chan, no
 		// reader) — the FIFO head is still consumed, keeping the queue aligned.

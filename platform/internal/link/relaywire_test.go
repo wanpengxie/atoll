@@ -232,13 +232,15 @@ func TestStateArmRoutesToActorScope(t *testing.T) {
 	}
 }
 
-// TestAccessArmOutcomeUnknownOnlyOnWire: an unconfirmed transport (here a cancelled
-// ctx while the verdict is in flight) yields the outcome_unknown VERDICT on the
-// port path — the one Outcome state only the wire can produce. The cell path with
-// the same cancelled ctx never yields it (it is synchronous — it returns the
-// door's real outcome).
-func TestAccessArmOutcomeUnknownOnlyOnWire(t *testing.T) {
-	const toolID = actor.ActorID("tool:unknown")
+// TestAccessArmPreSendCancelIsDefiniteError pins the PRE-send half of the pre/post-
+// send split: a ctx ALREADY cancelled before the invoke means the frame never
+// leaves the wire, so the op provably did not reach the home — the port arm returns
+// a DEFINITE error, NOT outcome_unknown (which is reserved for an op that genuinely
+// crossed the wire and whose ack never came, see the transport-death test below).
+// The cell path, being synchronous, likewise never manufactures an unknown from a
+// cancelled ctx.
+func TestAccessArmPreSendCancelIsDefiniteError(t *testing.T) {
+	const toolID = actor.ActorID("tool:presend-cancel")
 	r := newCapsRig(t)
 	arms, d := dialArms(t, r, toolID)
 	defer func() { _ = d.Close() }()
@@ -252,14 +254,49 @@ func TestAccessArmOutcomeUnknownOnlyOnWire(t *testing.T) {
 		t.Fatalf("cell path produced outcome_unknown (err=%v out=%+v) — only the wire may", cellErr, cellOut)
 	}
 
-	// Port path: the round-trip's outcome is unconfirmed → outcome_unknown verdict,
-	// nil error (a verdict, not a transport error surfaced to the caller).
+	// Port path: pre-send cancel is a definite non-execution → a real error, and
+	// specifically NOT the outcome_unknown verdict (the op never reached the home).
 	portOut, portErr := arms.Access.Invoke(cancelled, access.OpRead, "r", []byte("x"), nil)
-	if portErr != nil {
-		t.Fatalf("port outcome_unknown must be a verdict, not an error: %v", portErr)
+	if portErr == nil {
+		t.Fatalf("pre-send cancel port invoke err = nil, want a definite error (op never left the wire)")
 	}
-	if portOut.RejectReason != access.OutcomeUnknown {
-		t.Fatalf("port unconfirmed outcome = %q, want outcome_unknown", portOut.RejectReason)
+	if portOut.RejectReason == access.OutcomeUnknown {
+		t.Fatalf("pre-send cancel produced outcome_unknown — reserved for a genuinely in-flight op, not one that never sent")
+	}
+}
+
+// TestAccessArmPostSendCancelIsUnknown pins the POST-send half: once the frame IS
+// on the wire and the home is processing it, a ctx cancellation leaves the op
+// GENUINELY in flight — its outcome is unconfirmed, so the port arm yields the
+// outcome_unknown VERDICT (nil error), the same class as a transport death. This is
+// the legitimate outcome_unknown per §3.5c ("the request may already have executed
+// in the home"), and the contrast partner to the pre-send definite-error case.
+func TestAccessArmPostSendCancelIsUnknown(t *testing.T) {
+	const toolID = actor.ActorID("tool:postsend-cancel")
+	m := &blockingAccessMinter{entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(m.release)
+	arms, d := dialArmsWithMinters(t, m, &fakeScheduleMinter{}, toolID)
+	defer func() { _ = d.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	type result struct {
+		out accessdoor.Outcome
+		err error
+	}
+	res := make(chan result, 1)
+	go func() {
+		o, e := arms.Access.Invoke(ctx, access.OpRead, "r", []byte("x"), nil)
+		res <- result{o, e}
+	}()
+	<-m.entered // the frame crossed the wire and the home is parked on it → in flight
+	cancel()    // cancel AFTER the frame was sent
+
+	r := <-res
+	if r.err != nil {
+		t.Fatalf("post-send cancel must be a verdict, not an error: %v", r.err)
+	}
+	if r.out.RejectReason != access.OutcomeUnknown {
+		t.Fatalf("post-send cancel outcome = %q, want outcome_unknown (genuinely in flight)", r.out.RejectReason)
 	}
 }
 

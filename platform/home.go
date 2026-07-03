@@ -502,30 +502,49 @@ func (h *Home) Subscribe() (<-chan struct{}, func()) {
 	return h.signal.Subscribe()
 }
 
-// Close tears down the channel home in order: link acceptor (WS connections +
-// per-actor streams) -> delivery tap -> cells -> channel stores (DB).
+// Close tears down the channel home by quiescing PRODUCERS before the CONSUMERS
+// they feed, so no still-live producer can enqueue work into an already-dead sink:
+//
+//	1. reconcile ticker — stops the SpawnIfAbsent/activation producer.
+//	2. link acceptor    — stops port producers (their schedule/access wire arms)
+//	   and all external compute traffic.
+//	3. delivery tap      — stops delivering messages that would drive a cell to
+//	   schedule/emit anew.
+//	4. cells             — stops every in-proc cell (the Schedule/emit producers);
+//	   their goroutines are joined.
+//	5. schedule engine   — only NOW, with every schedule PRODUCER gone, is the time
+//	   engine's run loop stopped. Stopping it earlier (the old "engine first" order)
+//	   left a window where a still-live cell/port could Schedule() an in-memory
+//	   (incarnation-bind) timer into a dead run loop, silently losing it.
+//	6. channel stores    — the DB the engine fired into (FireSink→pen→log) and cells
+//	   persisted to, torn down last.
+//
+// No deadlock: cell shutdown never blocks on the engine (Schedule/Cancel only
+// insert into mem + post a wake, never join the run loop), and engine.Close only
+// joins its own run goroutine (fireDue's Append/Revive never block on the
+// already-stopped cells).
 func (h *Home) Close() error {
-	// 0. Reconciler ticker first: stop the level sweep and join it, so no
-	//    Reconcile runs against the writer/runtime/stores being torn down below.
+	// 1. Reconciler ticker: stop the level sweep and join it, so no Reconcile runs
+	//    against the writer/runtime/stores being torn down below.
 	if h.reconcileStop != nil {
 		h.reconcileStop()
 		<-h.reconcileDone
 	}
-	// 0.5 Schedule engine: stop the run loop and join it before the runtime/stores
-	//     it fires into (FireSink→pen→log) and revives against (SpawnIfAbsent) go
-	//     away — mirrors the reconciler-first ordering.
+	// 2. Link acceptor: close all WS links, tear down every actor stream, wait for
+	//    Serve goroutines. Stops external compute traffic (and its port-side
+	//    schedule/access producers) before the runtime/stores underneath shut down.
+	linkErr := h.links.Close()
+	// 3. Delivery tap: stop the pump so no fresh delivery drives a cell to produce.
+	h.delivery.Close()
+	// 4. Cells: stop actor cells (system actors included) — the last schedule/emit
+	//    producers. Their goroutines are joined here.
+	h.channel.Cells().StopAll()
+	// 5. Schedule engine: every producer is gone, so stopping the run loop now can
+	//    no longer strand a Schedule() into a dead engine.
 	if h.engine != nil {
 		h.engine.Close()
 	}
-	// 1. Link acceptor first: close all WS links, tear down every actor stream,
-	//    wait for Serve goroutines. Stops external compute traffic before the
-	//    runtime/stores underneath shut down.
-	linkErr := h.links.Close()
-	// 2. Delivery tap: stop the pump before tearing the runtime down.
-	h.delivery.Close()
-	// 3. Cells: stop actor cells (system actors included).
-	h.channel.Cells().StopAll()
-	// 4. Channel stores (DB) last.
+	// 6. Channel stores (DB) last.
 	csErr := h.cs.Close()
 
 	if linkErr != nil {

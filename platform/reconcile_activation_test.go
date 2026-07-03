@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -305,5 +306,98 @@ func TestReconcileActivation_IdentityTimerFireRevivesThenAppends(t *testing.T) {
 	}
 	if !live(h, author) {
 		t.Fatal("author not live after fire — the Reviver did not activate an embodiment before append")
+	}
+}
+
+// Test 5 — F1 regression: an identity-timer fire for an ALREADY-LIVE author must
+// succeed even when NO Builder is wired. EnsureLive checks liveness BEFORE the
+// builder gate — the builder is only needed to activate an ABSENT author. Before
+// the fix a live author + nil builder returned ReviveRejected{no_builder}, poison-
+// deleting a legitimate live author's timer row.
+func TestReviver_LiveAuthorWithNilBuilderIsNotPoisoned(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "revive-nobuilder.sqlite")
+	// Desired + Builder deliberately nil: a legal nil-builder home.
+	h, err := Open(HomeConfig{
+		ChannelID:         activationTestChannelID,
+		DBPath:            dbPath,
+		ReconcileInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	const author = actor.ActorID("agent:live-nobuilder")
+	if err := h.Spawn(ctx, author, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
+		return recordActor{}
+	}); err != nil {
+		t.Fatalf("Spawn live author: %v", err)
+	}
+	if !live(h, author) {
+		t.Fatal("author not live after Spawn — precondition broken")
+	}
+
+	// Live author, nil builder → idempotent no-op, NOT a ReviveRejected poison.
+	if err := (homeReviver{h: h}).EnsureLive(ctx, author); err != nil {
+		t.Fatalf("EnsureLive(live author, nil builder) = %v, want nil (must not poison a live author's timer)", err)
+	}
+
+	// Contrast: an ABSENT author with nil builder is still a ReviveRejected — the
+	// builder gate correctly guards the activation (absent) path.
+	var rejected schedule.ReviveRejected
+	if err := (homeReviver{h: h}).EnsureLive(ctx, actor.ActorID("agent:absent")); !errors.As(err, &rejected) {
+		t.Fatalf("EnsureLive(absent author, nil builder) = %v, want ReviveRejected", err)
+	}
+}
+
+// Test 6 — F2 teardown ordering: Close quiesces schedule PRODUCERS (cells) before
+// the schedule engine, and completes without deadlock even with an in-memory
+// (incarnation-bind) timer parked in the engine. Regression guard for the reorder
+// (producers-before-consumer): the old "engine first" order left a window where a
+// still-live cell could Schedule() an in-memory timer into a dead run loop.
+func TestClose_ProducersBeforeEngineNoDeadlock(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	const id = actor.ActorID("agent:sched")
+	builder.byID[id] = builder.recordFactory(id)
+
+	dbPath := filepath.Join(t.TempDir(), "close-order.sqlite")
+	h, err := Open(HomeConfig{
+		ChannelID:         activationTestChannelID,
+		DBPath:            dbPath,
+		ReconcileInterval: time.Hour,
+		Desired:           desired,
+		Builder:           builder,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// NB: Close is called explicitly below (not via t.Cleanup) — a second Close
+	// would double-close the engine's stop channel and panic.
+
+	// Bring a cell live and park a far-future incarnation-bind timer in the engine's
+	// in-memory family (so the engine holds live schedule state at Close time).
+	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
+	h.reconcileActivation(ctx)
+	if !live(h, id) {
+		t.Fatal("author not revived")
+	}
+	if _, err := h.schedMinter.Mint(id).Schedule(ctx, schedule.ScheduleReq{
+		Bind: schedule.BindIncarnation, FireAt: h.nowMs() + 1_000_000, Type: "demo.tick",
+	}); err != nil {
+		t.Fatalf("Schedule incarnation timer: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() { done <- h.Close() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Close: %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Close did not complete within 10s — teardown deadlock")
 	}
 }

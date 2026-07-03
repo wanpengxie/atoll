@@ -77,6 +77,16 @@ type homeReviver struct{ h *Home }
 // disposes of; a transient registry fault is a plain error the engine retries.
 func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	h := r.h
+	// Already live: an idempotent no-op — return BEFORE the builder gate. Liveness
+	// is checked first because the builder is only needed to activate an ABSENT
+	// author; an identity-timer fire for an already-embodied author must succeed
+	// even when no builder is wired (a nil-builder home is legal — it simply has no
+	// eager/fork activation). Gating a live author on the builder would turn a
+	// legitimate wake into a ReviveRejected{no_builder} poison verdict, and the
+	// engine would delete the timer row (silently losing a live author's timer).
+	if _, ok := h.channel.Cells().CurrentIncarnation(id); ok {
+		return nil
+	}
 	if h.builder == nil {
 		return schedule.ReviveRejected{Reason: "no_builder", Detail: string(id)}
 	}
