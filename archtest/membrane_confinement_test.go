@@ -44,28 +44,43 @@ var membraneConstructors = map[string]bool{
 	"NewLivePen":      true,
 	"NewLiveAccess":   true,
 	"NewLiveSchedule": true,
+	// NewLiveArms is the daemon-side caps assembler (S7): it bundles the
+	// RebindableArms facades through the three membranes above, gated on the
+	// daemon cell's own incarnation. Same exported-constructor exposure, same
+	// lock: it must be woven exactly once, at the compute build closure.
+	"NewLiveArms": true,
 }
 
-// membraneWeaveAllowlist is the EXACT set of files permitted to reference the
-// live-membrane constructors via the `link.` qualifier. Cored out by ACTUAL
-// reference (not by tree prefix):
+// membraneWeaveAllowlist is the EXACT per-file, PER-SYMBOL set permitted to
+// reference the live-membrane constructors via the `link.` qualifier. Cored out
+// by ACTUAL reference (not by tree prefix):
 //
 //   - The link package itself DEFINES the constructors; a link file never imports
 //     link, so a same-package reference carries no `link.` qualifier and the
 //     import-resolution below already exempts it (local=="" → skip). It therefore
 //     needs no entry here (accept.go's port-path weave is such a same-package use
-//     — and, since S7, so is livearms.go's NewLiveArms, the daemon-side counterpart
-//     of buildCaps: it weaves NewLivePen/NewLiveAccess/NewLiveSchedule over the
-//     RebindableArms facades, gated on the DAEMON's own incarnation).
-//   - platform/home.go is the SINGLE caps assembler (buildCaps) — the one
-//     external legitimate weave site.
+//     — and, since S7, so is livearms.go's NewLiveArms body: it weaves
+//     NewLivePen/NewLiveAccess/NewLiveSchedule over the RebindableArms facades,
+//     gated on the DAEMON's own incarnation).
+//   - platform/home.go is the SINGLE home-side caps assembler (buildCaps) — it
+//     may weave the three raw membranes, never the daemon bundle.
+//   - platform/compute.go is the SINGLE daemon-side assembly site (the build
+//     closure inside Spawn) — it may call link.NewLiveArms, and ONLY that: it
+//     never touches the raw per-plane constructors directly.
 //
-// Everything else — spawnhandle.go (delegates to the assembler, weaves nothing),
-// compute.go (delegates to link.NewLiveArms, weaves nothing directly), and any
-// future platform file — is OUT: adding a NewLive* reference anywhere else must
-// turn this test red.
-var membraneWeaveAllowlist = map[string]bool{
-	"../platform/home.go": true,
+// Everything else — spawnhandle.go (delegates to the assembler, weaves nothing)
+// and any future platform file — is OUT: adding a NewLive* reference anywhere
+// else, or a raw-membrane reference in compute.go / a NewLiveArms reference in
+// home.go, must turn this test red.
+var membraneWeaveAllowlist = map[string]map[string]bool{
+	"../platform/home.go": {
+		"NewLivePen":      true,
+		"NewLiveAccess":   true,
+		"NewLiveSchedule": true,
+	},
+	"../platform/compute.go": {
+		"NewLiveArms": true,
+	},
 }
 
 // TestLiveMembraneConstructionConfinedToPlatform — SYMBOL-level lock: only the
@@ -91,9 +106,7 @@ func TestLiveMembraneConstructionConfinedToPlatform(t *testing.T) {
 			return nil
 		}
 		slash := filepath.ToSlash(path)
-		if membraneWeaveAllowlist[slash] {
-			return nil // the SINGLE sanctioned assembler (buildCaps); link is exempted below by import-resolution
-		}
+		allowedSymbols := membraneWeaveAllowlist[slash] // per-symbol; nil for every non-assembler file
 		file, perr := parser.ParseFile(fset, path, nil, 0)
 		if perr != nil {
 			return fmt.Errorf("parse %s: %w", path, perr)
@@ -126,7 +139,7 @@ func TestLiveMembraneConstructionConfinedToPlatform(t *testing.T) {
 			if !ok || x.Name != local {
 				return true
 			}
-			if membraneConstructors[sel.Sel.Name] {
+			if membraneConstructors[sel.Sel.Name] && !allowedSymbols[sel.Sel.Name] {
 				pos := fset.Position(sel.Pos())
 				violations = append(violations, fmt.Sprintf(
 					"%s:%d references %s.%s — the live-membrane must be woven at the caps assembler / port path (发 handle 与 live 膜 wrap 同一步); a downstream never re-constructs one",
@@ -140,7 +153,7 @@ func TestLiveMembraneConstructionConfinedToPlatform(t *testing.T) {
 		t.Fatalf("walk: %v", err)
 	}
 	if len(violations) > 0 {
-		t.Fatalf("live-membrane construction confinement (only platform may reference link.NewLivePen/NewLiveAccess/NewLiveSchedule):\n  %s",
+		t.Fatalf("live-membrane construction confinement (link.NewLivePen/NewLiveAccess/NewLiveSchedule only in home.go's buildCaps; link.NewLiveArms only in compute.go's build closure):\n  %s",
 			strings.Join(violations, "\n  "))
 	}
 }

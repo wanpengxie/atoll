@@ -31,7 +31,15 @@ type MemberActorAdd struct {
 // MemberActorRemove is one actor deregistration transition.
 type MemberActorRemove struct {
 	ID actor.ActorID
-	At int64
+	// ExpectedHost, when non-empty, guards the deregistration on the row STILL
+	// being placed on that host: the remove only takes effect if the row's host
+	// column equals it, and a mismatch is a silent no-op (no cascade, no mirror).
+	// This is the attach-reconcile arm's migration-window guard — a stale
+	// compute A reconciling against a snapshot taken before the actor re-homed
+	// to compute B must not deregister B's active row. Empty = unguarded, the
+	// product-level deregistration semantics (identity removal is host-agnostic).
+	ExpectedHost string
+	At           int64
 }
 
 // MembershipControlPlane is the full membership-management contract —

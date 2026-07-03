@@ -2,12 +2,15 @@ package link_test
 
 import (
 	"context"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/internal/devicepresence"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -753,6 +756,131 @@ func TestReattach_RejectedLeavesPriorSetIntact(t *testing.T) {
 	// replaced it.
 	if _, err := d.OpenStream(toolA, func(*message.Envelope) error { return nil }, nil); err != nil {
 		t.Fatalf("OpenStream(toolA) after a rejected Reattach: %v", err)
+	}
+}
+
+// TestHardLinkDrop_DownEdgeDecaysDevicePresence pins the ABNORMAL half of the
+// link-death lifecycle (the counterpart of TestHomeCloseQuietTeardown): a raw
+// transport-level drop of the daemon's /compute connection (kill -9 / network
+// partition — NOT a graceful KindDetach) makes the home port read a hard error,
+// publish the LOUD down edge, and that edge decays the actor's folded device
+// presence to unknown (the L3 link-death cascade backstop). This coverage lives
+// HERE, at the mechanism layer, because since S1 a graceful ctx-cancel detaches
+// quiet — the only trigger for the decay is the raw drop, which app-level tests
+// cannot produce without reaching under the transport.
+func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
+	rt, del := actorrt.New(actorrt.Config{Parent: context.Background()})
+	r := &homeRig{
+		rt:         rt,
+		deliver:    del,
+		minter:     &stubMinter{},
+		membership: &stubMembership{},
+	}
+	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ error) {
+		r.mu.Lock()
+		r.downActors = append(r.downActors, id)
+		r.mu.Unlock()
+	}))
+	// The device-presence fold rides the SAME down edge (registered exactly as
+	// platform/home.go wires it): the drop must decay its folded level.
+	fold := devicepresence.New(nil)
+	rt.WatchDown(fold)
+	r.acc = link.NewAcceptor(link.Config{
+		Minter:     r.minter,
+		Runtime:    rt,
+		Membership: r.membership,
+		ChannelID:  testChannelID,
+		LeasePing:  5 * time.Second,
+		LeaseTTL:   30 * time.Second,
+	})
+	// httptest's Close/CloseClientConnections never touch a hijacked WS conn, so
+	// the raw transport handle is captured via ConnState — closing IT is the hard
+	// drop (no frame, no close handshake; the home just stops hearing the daemon).
+	var connMu sync.Mutex
+	var hijacked net.Conn
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		r.acc.Serve(w, req, "daemon-1")
+	}))
+	srv.Config.ConnState = func(c net.Conn, state http.ConnState) {
+		if state == http.StateHijacked {
+			connMu.Lock()
+			hijacked = c
+			connMu.Unlock()
+		}
+	}
+	srv.Start()
+	r.srv = srv
+	t.Cleanup(func() { _ = r.acc.Close(); srv.Close() })
+
+	const toolID = actor.ActorID("tool:device")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	h := newDaemonHost()
+	defer h.Stop()
+
+	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+		return h.Dispatch(toolID, env)
+	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	h.Install(toolID, &echoCell{w: arms.Pen}, nil)
+	d.Start()
+
+	// Round-trip a request first: proves the port is fully attached, so the drop
+	// below is observed by a LIVE port (not a half-built one).
+	if _, err := r.deliver.Deliver([]actor.ActorID{toolID}, &message.Envelope{
+		ID: "req-1", ChannelID: testChannelID, Kind: message.KindRequest, Type: "echo.do",
+		Sender: message.Sender{ID: "user:a", Kind: actor.KindHuman}, Audience: message.Audience{toolID},
+	}); err != nil {
+		t.Fatalf("home deliver: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(r.minter.all()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("cell emit never reached the home writer (port not fully attached)")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Seed a KNOWN device-presence level for the actor — the thing the drop decays.
+	fold.OnObs(context.Background(), toolID,
+		actorrt.ObsKind(introspect.ObsDevicePresence), actorrt.ObsValue(`{"online":true}`))
+	if _, known := fold.Device(toolID); !known {
+		t.Fatal("device presence not folded — precondition broken")
+	}
+
+	// HARD drop: close the daemon's hijacked /compute conn at the transport.
+	connMu.Lock()
+	hc := hijacked
+	connMu.Unlock()
+	if hc == nil {
+		t.Fatal("the /compute WS connection was never hijacked (cannot simulate abnormal death)")
+	}
+	_ = hc.Close()
+
+	// The home must observe the LOUD down edge AND the fold must decay to unknown.
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		downSeen := false
+		for _, id := range r.getDown() {
+			if id == toolID {
+				downSeen = true
+			}
+		}
+		_, known := fold.Device(toolID)
+		if downSeen && !known {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("hard link drop never cascaded (down edge seen=%v, presence known=%v — want true/false)", downSeen, known)
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

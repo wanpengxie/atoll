@@ -395,10 +395,19 @@ func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add st
 }
 
 func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, remove storespec.MemberActorRemove) (bool, error) {
-	res, err := tx.ExecContext(ctx,
-		`UPDATE actor_registry SET deregistered_at=? WHERE actor_id=? AND deregistered_at IS NULL`,
-		remove.At, string(remove.ID),
-	)
+	// The unguarded form is the product-level deregistration (identity removal
+	// is host-agnostic). A non-empty ExpectedHost narrows the arm to the
+	// attach-reconcile entry point: the row must STILL be placed on that host,
+	// or the actor has re-homed since the caller's snapshot and this remove is
+	// a migration-window no-op (0 rows affected → the n!=1 branch below: no
+	// cascade, no mirror, no error) — the successor host's row survives intact.
+	query := `UPDATE actor_registry SET deregistered_at=? WHERE actor_id=? AND deregistered_at IS NULL`
+	args := []any{remove.At, string(remove.ID)}
+	if remove.ExpectedHost != "" {
+		query += ` AND host=?`
+		args = append(args, remove.ExpectedHost)
+	}
+	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
 		return false, fmt.Errorf("store: actor member deregister %q: %w", remove.ID, err)
 	}

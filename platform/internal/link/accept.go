@@ -471,7 +471,13 @@ func (a *Acceptor) reconcileHost(ctx context.Context, computeID string, newAllow
 		if ok {
 			a.runtime.Despawn(inc)
 		}
-		removes = append(removes, storespec.MemberActorRemove{ID: rec.ID, At: nowMs})
+		// ExpectedHost closes the remaining write-side TOCTOU: between this
+		// ListActive snapshot and the transition tx, the row's Host may flip to a
+		// successor compute B (B attaches while A's stale reconcile is in flight).
+		// The guard makes the deregistration conditional on host==computeID inside
+		// the tx itself — a flipped row is a 0-rows-affected no-op (no cascade of
+		// state/timers, no dereg mirror), so B's active row survives untouched.
+		removes = append(removes, storespec.MemberActorRemove{ID: rec.ID, ExpectedHost: computeID, At: nowMs})
 	}
 	if len(removes) == 0 {
 		return

@@ -87,16 +87,18 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	if _, ok := h.channel.Cells().CurrentIncarnation(id); ok {
 		return nil
 	}
-	if h.builder == nil {
-		return schedule.ReviveRejected{Reason: "no_builder", Detail: string(id)}
-	}
 	// S6 (§10.13 推导2/3): consult the placement fact BEFORE the class table —
-	// an attached author's activation authority is its daemon's own feasible
-	// check, not home's. A registry fault or an attached Host are BOTH plain
-	// (transient) errors, never ReviveRejected: the row is retained and retried
-	// next tick, so the SAME wake fires normally once the fault clears or the
-	// author is no longer attached (poisoning here would turn a placement fact
-	// into a false identity-death verdict).
+	// AND before the nil-builder gate. An attached author's activation authority
+	// is its daemon's own feasible check, not home's: a nil-builder home hosting
+	// an attached author's identity timer must classify the wake as transient
+	// (S6), never as ReviveRejected{no_builder} — the builder is only ever needed
+	// to activate a HOME-placed absent author, so gating on it before placement
+	// classification would poison-delete a live daemon actor's timer row. A
+	// registry fault or an attached Host are BOTH plain (transient) errors, never
+	// ReviveRejected: the row is retained and retried next tick, so the SAME wake
+	// fires normally once the fault clears or the author is no longer attached
+	// (poisoning here would turn a placement fact into a false identity-death
+	// verdict).
 	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
 	if err != nil {
 		return fmt.Errorf("platform: revive lookup %s: %w", id, err) // transient
@@ -107,6 +109,10 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	if rec.Host != "" {
 		h.logReviveAttached(id, rec.Host)
 		return fmt.Errorf("platform: revive %s: attached to host %q", id, rec.Host) // transient
+	}
+	// Home-placed, absent: only NOW is the builder load-bearing.
+	if h.builder == nil {
+		return schedule.ReviveRejected{Reason: "no_builder", Detail: string(id)}
 	}
 	factory, ok := h.builder.Lookup(id)
 	if !ok {

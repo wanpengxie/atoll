@@ -293,3 +293,81 @@ func TestTimer_CascadeClearedOnMemberRemove(t *testing.T) {
 		t.Fatalf("repeat remove must be no-op: %v", err)
 	}
 }
+
+// --- attach-reconcile host guard (期7 review P1a) -----------------------------
+
+// TestMemberRemove_ExpectedHostGuard_MigrationWindowNoOp pins the host-flip
+// TOCTOU closure on the attach-reconcile remove arm: daemon A snapshots its
+// owned rows, the actor re-homes to daemon B (host-only UPDATE), and A's stale
+// remove lands AFTER the flip. With ExpectedHost set the UPDATE carries
+// `AND host=?`, so the flipped row is a 0-rows-affected no-op — B's active row
+// AND its cascaded loci (state, identity timers) survive intact. The unguarded
+// (product-level) remove semantics are untouched: a remove guarded on the
+// CURRENT host — or carrying no guard at all — still deregisters and cascades.
+func TestMemberRemove_ExpectedHostGuard_MigrationWindowNoOp(t *testing.T) {
+	ctx := context.Background()
+	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "hostguard.sqlite"), OpenOptions{}, ChannelLocalDDL)
+	if err != nil {
+		t.Fatalf("openSqlite: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	reg := newActorRegistry(db, timersTestChannelID, nil)
+	timers := newTimerStore(db)
+	state := newStateStore(db)
+
+	const id = actor.ActorID("tool:migrant")
+	// Registered on daemon A, with actor-scoped state and an identity timer.
+	if err := reg.ApplyMemberTransitions(ctx,
+		[]storespec.MemberActorAdd{{ID: id, Kind: actor.KindTool, Host: "daemon-a", At: 100}}, nil); err != nil {
+		t.Fatalf("add on daemon-a: %v", err)
+	}
+	if err := state.Create(ctx, id, "cursor", []byte("v1")); err != nil {
+		t.Fatalf("Create state: %v", err)
+	}
+	mustInsertTimer(t, timers, timerspec.TimerRow{ID: "t1", AuthorID: id, FireAt: 1000, Type: "wake", CreatedAt: 1})
+
+	// Migration: the row re-homes to daemon B before A's reconcile applies.
+	if err := reg.ApplyMemberTransitions(ctx,
+		[]storespec.MemberActorAdd{{ID: id, Kind: actor.KindTool, Host: "daemon-b", At: 200}}, nil); err != nil {
+		t.Fatalf("re-home to daemon-b: %v", err)
+	}
+
+	// Daemon A's stale reconcile remove, guarded on its own host: MUST no-op.
+	if err := reg.ApplyMemberTransitions(ctx, nil,
+		[]storespec.MemberActorRemove{{ID: id, ExpectedHost: "daemon-a", At: 300}}); err != nil {
+		t.Fatalf("stale guarded remove must not error: %v", err)
+	}
+	rec, ok, err := reg.Lookup(ctx, id)
+	if err != nil || !ok {
+		t.Fatalf("Lookup after stale remove ok=%v err=%v", ok, err)
+	}
+	if !rec.IsActive() || rec.Host != "daemon-b" {
+		t.Fatalf("B's row damaged by A's stale remove: active=%v host=%q, want active on daemon-b", rec.IsActive(), rec.Host)
+	}
+	if _, exists, _ := state.Read(ctx, id, "cursor"); !exists {
+		t.Error("actor state was cascade-cleared by a no-op guarded remove")
+	}
+	if due, _ := timers.Due(ctx, 999999, 10); len(due) != 1 || due[0].ID != "t1" {
+		t.Errorf("identity timers were cascade-cleared by a no-op guarded remove: %+v", due)
+	}
+
+	// A remove guarded on the row's CURRENT host still deregisters + cascades
+	// (B's own later reconcile) — the guard narrows, it never disables.
+	if err := reg.ApplyMemberTransitions(ctx, nil,
+		[]storespec.MemberActorRemove{{ID: id, ExpectedHost: "daemon-b", At: 400}}); err != nil {
+		t.Fatalf("matching guarded remove: %v", err)
+	}
+	rec, ok, err = reg.Lookup(ctx, id)
+	if err != nil || !ok {
+		t.Fatalf("Lookup after matching remove ok=%v err=%v", ok, err)
+	}
+	if rec.IsActive() {
+		t.Fatal("matching guarded remove did not deregister the row")
+	}
+	if _, exists, _ := state.Read(ctx, id, "cursor"); exists {
+		t.Error("matching guarded remove did not cascade-clear state")
+	}
+	if due, _ := timers.Due(ctx, 999999, 10); len(due) != 0 {
+		t.Errorf("matching guarded remove did not cascade-clear timers: %+v", due)
+	}
+}

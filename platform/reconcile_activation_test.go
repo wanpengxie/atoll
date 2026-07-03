@@ -570,3 +570,97 @@ func TestReviver_AttachedHostRetainsThenFiresOnceDetached(t *testing.T) {
 		t.Fatal("author not live after fire — the Reviver did not activate an embodiment before append")
 	}
 }
+
+// Test 10 — 期7 review P1b regression: an ATTACHED author's identity timer on a
+// NIL-BUILDER home must classify as transient, never ReviveRejected{no_builder}.
+// EnsureLive consults the placement fact BEFORE the builder gate — the builder
+// is only load-bearing for activating a HOME-placed absent author, so an
+// attached author's wake on a builderless home is S6 transient (row retained,
+// retried) rather than a poison verdict that deletes the row.
+func TestReviver_AttachedAuthorNilBuilderIsTransientNotPoisoned(t *testing.T) {
+	ctx := context.Background()
+	clock := newFakeClock(time.UnixMilli(1_000_000))
+	dbPath := filepath.Join(t.TempDir(), "revive-attached-nobuilder.sqlite")
+	// Desired + Builder deliberately nil: a legal nil-builder home.
+	h, err := Open(HomeConfig{
+		ChannelID:         activationTestChannelID,
+		DBPath:            dbPath,
+		ReconcileInterval: time.Hour,
+		Clock:             clock,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	const author = actor.ActorID("agent:attached-nobuilder")
+	if err := h.Spawn(ctx, author, actor.KindAgent, nil); err != nil {
+		t.Fatalf("seed membership: %v", err)
+	}
+	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
+		{ID: author, Kind: actor.KindAgent, Host: "daemon-x", At: h.nowMs()},
+	}, nil); err != nil {
+		t.Fatalf("attach host: %v", err)
+	}
+
+	// Direct contract check: transient (plain error), NOT ReviveRejected.
+	err = (homeReviver{h: h}).EnsureLive(ctx, author)
+	if err == nil {
+		t.Fatal("EnsureLive(attached author) = nil, want a transient error (home never activates an attached author)")
+	}
+	var rejected schedule.ReviveRejected
+	if errors.As(err, &rejected) {
+		t.Fatalf("EnsureLive(attached author, nil builder) = ReviveRejected{%s} — placement must classify BEFORE the builder gate", rejected.Reason)
+	}
+
+	// End-to-end: a past-due identity timer fire must RETAIN the row (transient
+	// backoff), never fire it and never poison-delete it.
+	id, err := h.schedMinter.Mint(author).Schedule(ctx, schedule.ScheduleReq{
+		Bind: schedule.BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.tick",
+	})
+	if err != nil {
+		t.Fatalf("Schedule: %v", err)
+	}
+	wantID := message.ID("timer:" + string(id))
+	hasFired := func() bool {
+		rows, rerr := h.View().ReadAfterSeq(ctx, 0, 1000)
+		if rerr != nil {
+			t.Fatalf("ReadAfterSeq: %v", rerr)
+		}
+		for _, r := range rows {
+			if r.Envelope.ID == wantID {
+				return true
+			}
+		}
+		return false
+	}
+	for i := 0; i < 5; i++ {
+		clock.Advance(2 * time.Second)
+		time.Sleep(20 * time.Millisecond) // let the run loop observe the advance
+		if hasFired() {
+			t.Fatal("attached author's identity timer fired on a nil-builder home while Host != \"\"")
+		}
+		if live(h, author) {
+			t.Fatal("attached author was revived locally by a nil-builder home (double-embodiment)")
+		}
+	}
+
+	// Retention proof (the raw TimerStore is deliberately unreachable here): bring
+	// the author home and LIVE — Spawn re-adds the row with Host "" and mints a
+	// cell, so EnsureLive's already-live fast path clears the gate. The SAME
+	// timer must now fire: a no_builder poison during the attached window would
+	// have deleted the row and this fire could never land.
+	if err := h.Spawn(ctx, author, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
+		return recordActor{}
+	}); err != nil {
+		t.Fatalf("Spawn author home: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !hasFired() {
+		clock.Advance(2 * time.Second)
+		if time.Now().After(deadline) {
+			t.Fatal("retained timer never fired once the author came home live — the attached window poison-deleted it")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}

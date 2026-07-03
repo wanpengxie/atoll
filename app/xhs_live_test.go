@@ -5,11 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"sync"
 	"testing"
 	"time"
 
@@ -384,102 +382,13 @@ func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want
 	}
 }
 
-// xhsCascadeDeviceAddr is the loopback device endpoint for the cascade test
-// (distinct port from the status test so the two never collide).
-const xhsCascadeDeviceAddr = "127.0.0.1:18092"
-
-// TestXHSLiveDeviceUnknownOnDaemonDeath locks the L3 cascade: when the daemon
-// hosting a device adapter DIES (its /compute link drops), the actor's
-// device presence must decay to UNKNOWN (known:false) — NOT a stale online, and NOT
-// conflated with a clean device-offline edge. This is the link-death-cascades-L3
-// backstop (port.die → down edge → home fold OnDown decays the entry),
-// distinct from TestXHSLiveActorStatus which only covers the device's own edges.
-func TestXHSLiveDeviceUnknownOnDaemonDeath(t *testing.T) {
-	env := setupTestApp(t)
-	// Capture the daemon's hijacked /compute WS connection so the test can drop it
-	// at the transport (a genuine abnormal death). A graceful ctx-cancel now
-	// KindDetaches quiet — per the device-fold's "abnormal death only" contract that
-	// is the WRONG trigger for the L3-decay backstop; only a raw link drop surfaces
-	// the loud port down edge. httptest's CloseClientConnections/Close do NOT touch
-	// hijacked WS conns, so we grab the conn via ConnState instead.
-	var hijackMu sync.Mutex
-	var hijackedConn net.Conn
-	srv := httptest.NewUnstartedServer(env.app.Handler())
-	srv.Config.ConnState = func(c net.Conn, state http.ConnState) {
-		if state == http.StateHijacked {
-			hijackMu.Lock()
-			hijackedConn = c
-			hijackMu.Unlock()
-		}
-	}
-	srv.Start()
-	t.Cleanup(srv.Close)
-	s := fullSetup(t, env)
-
-	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID),
-		map[string]any{"name": "xhs-cascade-daemon"}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	apiKey := respJSON(t, w)["api_key"].(string)
-
-	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
-	ctx, cancel := context.WithCancel(context.Background())
-	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
-	runErr := make(chan error, 1)
-	desired, builder := staticActorCompute([]platform.ActorDecl{{
-		ID:      xhs.DefaultActorID,
-		Kind:    actor.KindTool,
-		Binding: actor.BindingRuntimeInboundViaRelay,
-		Factory: func(caps actorcaps.Caps) actorrt.Actor {
-			return xhs.NewActor(caps.Pen, xhs.Config{ListenAddr: xhsCascadeDeviceAddr, ReaperInterval: 20 * time.Millisecond, Logger: logger})
-		},
-	}})
-	go func() {
-		runErr <- platform.RunCompute(ctx,
-			platform.ComputeConfig{ServerWS: serverWS, Logger: logger, Desired: desired, Builder: builder},
-		)
-	}()
-	stopped := false
-	t.Cleanup(func() {
-		if !stopped {
-			cancel()
-			<-runErr
-		}
-	})
-
-	waitForActor(t, env, s, "tool:xhs", 5*time.Second)
-
-	// Device connects → online (a KNOWN device presence exists to be decayed).
-	conn := dialDeviceWithRetry(t, fmt.Sprintf("ws://%s/device", xhsCascadeDeviceAddr), 3*time.Second)
-	waitDeviceOnline(t, env, s, "tool:xhs", true, 5*time.Second)
-
-	// Daemon DIES via a HARD link drop (kill -9 style) — close the daemon's hijacked
-	// /compute WS at the transport so the home reads a raw EOF (the loud, positively-
-	// observed port down edge the device-presence fold decays on), NOT a graceful
-	// ctx-cancel KindDetach (now quiet — and per the fold's "abnormal death only"
-	// contract a clean detach would correctly NOT decay). The device close races
-	// harmlessly: the port down edge (fold OnDown) is terminal. Cleanup still
-	// cancel()s the ctx + drains runErr.
-	_ = conn.Close()
-	hijackMu.Lock()
-	hc := hijackedConn
-	hijackMu.Unlock()
-	if hc == nil {
-		t.Fatal("daemon /compute WS connection was never hijacked (cannot simulate abnormal death)")
-	}
-	_ = hc.Close()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, "tool:xhs"), nil, s.cookies)
-		assertStatus(t, w, http.StatusOK)
-		body := respJSON(t, w)
-		known, _ := body["known"].(bool)
-		if !known {
-			return // decayed to unknown — cascade proven
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("device presence never decayed to unknown after daemon death (last body=%v)", body)
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-}
+// NOTE (期7 review 修复 P2b): the former TestXHSLiveDeviceUnknownOnDaemonDeath
+// (L3 decays to unknown when the hosting daemon's /compute link drops) lived
+// here. Its trigger was a graceful ctx-cancel, which since 期7 S1 tears down as
+// a QUIET KindDetach — per the device-fold's "abnormal death only" contract
+// that no longer decays, so the scenario is only expressible as a raw
+// transport-level link drop. That abnormal-path lifecycle coverage now lives
+// at its mechanism layer: platform/internal/link
+// TestHardLinkDrop_DownEdgeDecaysDevicePresence. This file keeps only the
+// device's own-edge coverage (TestXHSLiveActorStatus) per the "app tests are
+// mechanical call-shape migrations only" red line.
