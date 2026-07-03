@@ -12,15 +12,13 @@ import (
 // Receive (and the optional Start/Stop lifecycle hooks) are invoked serially by
 // the cell's single goroutine, so WORK state needs no locks/atomics — the
 // mailbox IS the serialization. The actor entry surface is work (Receive) +
-// lifecycle (Start/Stop) + obs (Observer); there is no control lane.
+// lifecycle (Start/Stop); there is no control lane.
 //
-// EXCEPTION: the optional obs Observer hook (PublishObs/Observe) is the only
-// surface invoked OUT-OF-BAND (concurrently with Receive, off the cell
-// goroutine). An actor that exposes obs MUST keep the OBSERVED state
-// concurrency-safe — a separate atomic/locked snapshot, copy-on-write, or
-// immutable value it publishes — NOT its raw mailbox-confined work state. Work
-// state stays lock-free; obs state is the one thing that crosses the goroutine
-// boundary and must be guarded.
+// The one obs surface an actor may drive is the optional PUSH producer
+// (ActorContext.PublishObs). The substrate forwards the published ObsValue by
+// reference to watchers on other goroutines, so an actor MUST publish an immutable
+// snapshot (ObsValue is immutable by contract) — NOT its raw mailbox-confined work
+// state. Work state stays lock-free.
 //
 // There is deliberately no required call/cast/info/Tick and no self-send:
 // an actor receives ONLY collaboration envelopes (through the harness→fanout

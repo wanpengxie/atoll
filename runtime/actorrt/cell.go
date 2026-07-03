@@ -130,27 +130,6 @@ func (c *cell) isLive() bool { return c.live.Load() }
 // markDead implements embodiment: flip the liveness atomic to false (idempotent).
 func (c *cell) markDead() { c.live.Store(false) }
 
-// observe implements embodiment: the obs PULL/actor route. It forwards the opaque
-// kind to the actor IFF the actor opts in via the Observer hook, answered
-// concurrently (out-of-band, not on the work goroutine) — so the impl must be
-// non-perturbing. An actor that does not implement Observer is a no-op:
-// ErrObsUnsupported.
-func (c *cell) observe(ctx context.Context, kind ObsKind) (ObsValue, error) {
-	// Lifecycle guard (same as Deliver): do not run an obs hook on a cell
-	// that has begun teardown — its Stop may be releasing the very state Observe
-	// would read.
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, ErrCellStopped
-	}
-	c.mu.Unlock()
-	if obs, ok := c.impl.(Observer); ok {
-		return obs.Observe(ctx, kind)
-	}
-	return nil, ErrObsUnsupported
-}
-
 // PublishObs implements ActorContext: the actor's obs PUSH/producer end. It
 // hands an opaque snapshot to the runtime's per-actor obs fanout (no watcher →
 // no-op). This is NOT a self-send and NOT truth — it publishes observable state,

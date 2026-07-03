@@ -2,7 +2,6 @@ package actorrt
 
 import (
 	"context"
-	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
@@ -10,31 +9,35 @@ import (
 // obs is the substrate's OBSERVATION channel: side-effect-free, non-truth,
 // out-of-band reads of a unit's state. It is orthogonal on two axes — timing
 // {pull, push} × source {substrate, actor} — and the substrate is the broker for
-// all four cells:
+// the three LIVE cells:
 //
 //	            pull (consumer-timed)         push (producer-timed)
 //	substrate   Stat(id) → present+StartedAt  WatchDown → OnDown (down edge = death)
-//	actor       Observe(id,kind) → Observer   PublishObs(kind,val) → WatchObs → OnObs
+//	actor       —                             PublishObs(kind,val) → WatchObs → OnObs
 //
-// The full 2×2 surface is laid down structurally (up-front skeleton, not
-// usage-driven) so the shape cannot be re-collapsed; cells with no
-// consumer are no-ops (no Observer → ErrObsUnsupported; no ObsWatcher → empty
-// fanout). obs is READ-ONLY (you cannot drive work through it) and NON-TRUTH —
-// that is the structural guarantee it never becomes a business read bus.
+// obs is READ-ONLY (you cannot drive work through it) and NON-TRUTH — that is the
+// structural guarantee it never becomes a business read bus.
 //
 // Vocabulary stays out of the substrate: ObsKind/ObsValue are OPAQUE for the
-// actor-source cells (the substrate routes/forwards, the actor owns its
-// operational-only obs vocabulary and self-answers). Substrate-source facts
-// (embodiment/uptime) are the only obs the substrate authoritatively produces, and
-// they ride the typed Stat bundle, not an opaque kind.
+// actor-source cell (the substrate forwards, the actor owns its operational-only
+// obs vocabulary). Substrate-source facts (embodiment/uptime) are the only obs the
+// substrate authoritatively produces, and they ride the typed Stat bundle, not an
+// opaque kind.
 //
-// RETENTION: the ACTOR-source axis (ObsKind/ObsValue/Observer/Observe/
-// PublishObs/ObsWatcher/WatchObs/OnObs) is a deliberately-pending vertical
-// slice with no production producer/consumer yet; the ipc KindObs frame gives
-// the cross-wire arm its wire vocabulary already (see port.observe for the
-// pull side's current state), and completing this axis is a pure-additive
-// wire arm once a consumer needs it. The substrate-source axis (Stat/
-// WatchDown/OnDown) IS wired end-to-end and unaffected.
+// DELETED CELL — actor-source PULL (Observer/Observe), ripped 期7·S8: the fourth
+// cell was a zero-consumer half-built vertical slice — an Observe pull hook welded
+// into cell/port/embodiment with no producer and no consumer. That is exactly the
+// substrate-purity violation a "cast the shape up front" skeleton must NOT decay
+// into (a bolted-but-unwired slice misleads more than an empty cell). Its stated
+// motive (keep the 2×2 from re-collapsing) is already served by the three live
+// cells, and its function — a consumer pulling actor state on demand — is the
+// message axis (a request-response read is work), so the cell was redundant as well
+// as inert.
+//
+// REBUILD OBLIGATION: this rips an empty cell, not the concept. When a REAL
+// consumer needs actor-source pull, refill this cell — driven by that need, wired
+// across BOTH hosts (cell + port) in one batch, landed with a real consumer in the
+// same batch. Rebuild = fill the cell (pure-additive), never a structural refactor.
 
 // ObsKind is an opaque observation selector for ACTOR-source obs. The substrate
 // never interprets it — it routes the kind to the actor, which owns its own
@@ -47,22 +50,6 @@ type ObsKind string
 // the substrate forwards it by reference (no clone), so a publisher must not
 // mutate a value after publishing and a watcher/reader must not write it.
 type ObsValue []byte
-
-// ErrObsUnsupported is returned by Observe when the addressed unit does not expose
-// the requested obs kind (no Observer hook / kind not declared by the actor /
-// out-of-process port whose wire-obs is not yet wired).
-var ErrObsUnsupported = errors.New("actorrt: obs kind unsupported")
-
-// Observer is the OPTIONAL actor-source PULL hook: an actor implements it to
-// answer obs reads about its own operational state (resource/health/queue/
-// rate-limit — NEVER business content; business reads are work). Observe is
-// invoked OUT-OF-BAND (not on the cell's work goroutine, not through the
-// mailbox), so the implementation MUST be concurrency-safe and non-perturbing —
-// it reads a snapshot of its own state, like a /metrics scrape handler. An actor
-// that does not implement Observer reports ErrObsUnsupported (no-op).
-type Observer interface {
-	Observe(ctx context.Context, kind ObsKind) (ObsValue, error)
-}
 
 // ObsWatcher is the consumer end of the actor-source PUSH channel: it receives
 // obs snapshots an actor publishes (PublishObs). The substrate is the broker —

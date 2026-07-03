@@ -49,19 +49,6 @@ func TestNewCellDefaults(t *testing.T) {
 	}
 }
 
-// TestCellObserveAfterStopGuarded: a cell that has begun teardown refuses an
-// obs PULL with ErrCellStopped (the lifecycle guard mirrors Deliver/signal — an
-// obs hook must not run on state Stop may be releasing).
-func TestCellObserveAfterStopGuarded(t *testing.T) {
-	t.Parallel()
-	c := newCell(context.Background(), "a", newRecordActor(), 4, nil, nil, nil, time.Now(), nil)
-	c.start()
-	c.stop()
-	if _, err := c.observe(context.Background(), "anything"); err != ErrCellStopped {
-		t.Fatalf("observe after stop = %v, want ErrCellStopped", err)
-	}
-}
-
 // TestCellDeliverAfterStopGuarded: work enqueue (Deliver) refuses a torn-down
 // cell with ErrCellStopped.
 func TestCellDeliverAfterStopGuarded(t *testing.T) {
@@ -288,9 +275,6 @@ func TestDeliverStoppedOutcome(t *testing.T) {
 type fakeErrEmbodiment struct{ started time.Time }
 
 func (fakeErrEmbodiment) Deliver(*message.Envelope) error { return errors.New("weird enqueue error") }
-func (fakeErrEmbodiment) observe(context.Context, ObsKind) (ObsValue, error) {
-	return nil, ErrObsUnsupported
-}
 func (p fakeErrEmbodiment) startedAt() time.Time   { return p.started }
 func (fakeErrEmbodiment) cancelRequest(message.ID) {}
 func (fakeErrEmbodiment) stop()                    {}
@@ -317,20 +301,6 @@ func TestDeliverDefaultArmMapsToStopped(t *testing.T) {
 }
 
 // --- port.go edge tests ---------------------------------------------------
-
-// TestPortObserveUnsupported: a port's obs PULL is not yet wired over the wire —
-// it reports ErrObsUnsupported (the wire arm is a no-op until a real consumer
-// drives it).
-func TestPortObserveUnsupported(t *testing.T) {
-	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
-	defer rt.StopAll()
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
-	defer remote.conn.Close()
-	if _, err := rt.Observe(context.Background(), id, "anything"); err != ErrObsUnsupported {
-		t.Fatalf("port Observe = %v, want ErrObsUnsupported", err)
-	}
-}
 
 // TestPortEmitDecodeErrorIsDeath: a KindEmit frame whose payload fails to decode
 // is a protocol violation that kills the port (emit decode error arm of

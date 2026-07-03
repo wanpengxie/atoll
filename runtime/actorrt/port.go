@@ -252,14 +252,6 @@ func (p *port) isLive() bool { return p.live.Load() }
 // markDead implements embodiment: flip the liveness atomic to false (idempotent).
 func (p *port) markDead() { p.live.Store(false) }
 
-// observe implements embodiment for an out-of-process actor: obs PULL over the
-// wire is not yet wired (additive — a KindObs round-trip frame), so the port
-// reports ErrObsUnsupported. The 2×2 cell exists; the wire arm is a no-op until
-// a real consumer drives it.
-func (p *port) observe(ctx context.Context, kind ObsKind) (ObsValue, error) {
-	return nil, ErrObsUnsupported
-}
-
 // Deliver enqueues env into the port's bounded send queue. Never blocks: a full
 // queue returns ErrMailboxFull, a torn-down port ErrCellStopped. nil is not a
 // message and is rejected (a mailbox carries only envelopes).

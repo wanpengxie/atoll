@@ -29,7 +29,6 @@ import (
 // actor never self-reports it), read out-of-band via Runtime.Stat.
 type embodiment interface {
 	Deliver(env *message.Envelope) error
-	observe(ctx context.Context, kind ObsKind) (ObsValue, error)
 	cancelRequest(id message.ID)
 	startedAt() time.Time
 	stop()
@@ -267,22 +266,6 @@ func (r *Runtime) publishObs(id actor.ActorID, self embodiment, kind ObsKind, va
 			w.OnObs(context.Background(), id, kind, val)
 		}()
 	}
-}
-
-// Observe is the obs PULL resolver for ACTOR-source obs: it routes the opaque
-// kind to the hosted unit, which self-answers from its own operational state or
-// reports ErrObsUnsupported. Substrate-source facts (embodiment/uptime) do NOT
-// come here — they ride the typed Stat bundle. Read-only, non-truth, out-of-band
-// (never enqueued into the mailbox); the actor's Observer impl answers
-// concurrently and must be non-perturbing.
-func (r *Runtime) Observe(ctx context.Context, id actor.ActorID, kind ObsKind) (ObsValue, error) {
-	r.mu.RLock()
-	p, ok := r.embodiments[id]
-	r.mu.RUnlock()
-	if !ok {
-		return nil, ErrNotHosted
-	}
-	return p.observe(ctx, kind)
 }
 
 // CancelRequest fires the request-scope of cancel(scope) for one in-flight
