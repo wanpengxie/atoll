@@ -88,7 +88,10 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), chID, apiKey)
-	go func() { runErr <- platform.RunCompute(ctx, platform.ComputeConfig{ServerWS: serverWS}, decls) }()
+	desired, builder := staticActorCompute(decls)
+	go func() {
+		runErr <- platform.RunCompute(ctx, platform.ComputeConfig{ServerWS: serverWS, Desired: desired, Builder: builder})
+	}()
 	t.Cleanup(func() {
 		cancel()
 		select {

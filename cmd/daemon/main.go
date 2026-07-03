@@ -31,10 +31,12 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 
 	// Availability (NOT auto-run): blank-import every in-tree actor + engine so the
 	// daemon CAN build any class the server assigns. actors/all = tools/devices;
@@ -114,6 +116,24 @@ func fetchPlan(ctx context.Context, serverWS, key, chID string) ([]daemonAssignm
 		return nil, fmt.Errorf("decode: %w", err)
 	}
 	return out.Assignments, nil
+}
+
+// staticSource wraps a one-time-fetched compute plan (registry.Build's decls) as
+// an actorrt.DesiredSource: the daemon pulls its assignment ONCE at startup (no
+// blind-build, no polling against the server) and the reconcile ring reads that
+// same fixed set every tick. Every wrapped instance is AlwaysOn — a daemon has no
+// delivery-seam analogue for lazy activation.
+type staticSource []actorrt.DesiredMember
+
+func (s staticSource) Members(context.Context) ([]actorrt.DesiredMember, error) { return s, nil }
+
+// staticBuilder resolves each fetched instance's id to the factory registry.Build
+// already produced for it — the daemon's ComputeBuilder over a fixed plan.
+type staticBuilder map[actor.ActorID]func(actorcaps.Caps) actorrt.Actor
+
+func (b staticBuilder) Lookup(id actor.ActorID) (func(actorcaps.Caps) actorrt.Actor, bool) {
+	f, ok := b[id]
+	return f, ok
 }
 
 // pathSafe maps an actor/channel id to a filesystem-safe path segment.
@@ -213,7 +233,10 @@ func main() {
 		case <-time.After(time.Duration(attempt) * time.Second):
 		}
 	}
-	var decls []platform.ActorDecl
+	var (
+		desired  staticSource
+		builders = staticBuilder{}
+	)
 	for _, asg := range plan {
 		// A daemon-placed instance needs a real durable local state slot; a mkdir
 		// failure is observable (skip this instance, logged), never silent ephemeral.
@@ -238,9 +261,10 @@ func main() {
 				"instance", asg.InstanceID, "class", asg.Class, "err", berr.Error())
 			continue
 		}
-		decls = append(decls, decl)
+		desired = append(desired, actorrt.DesiredMember{ID: decl.ID, Kind: decl.Kind, Lifecycle: actorrt.LifecycleAlwaysOn})
+		builders[decl.ID] = decl.Factory
 	}
-	logger.Info("daemon: composition", "channel", chID, "assigned", len(plan), "built", len(decls))
+	logger.Info("daemon: composition", "channel", chID, "assigned", len(plan), "built", len(desired))
 
 	// The link layer is auth-agnostic: the api key rides the server WS url's query
 	// string (?key=), which the app layer resolves on WS upgrade. There is no
@@ -253,7 +277,12 @@ func main() {
 		}
 		serverWS += sep + "key=" + url.QueryEscape(*key)
 	}
-	if err := platform.RunCompute(ctx, platform.ComputeConfig{ServerWS: serverWS}, decls); err != nil {
+	if err := platform.RunCompute(ctx, platform.ComputeConfig{
+		ServerWS: serverWS,
+		Logger:   logger,
+		Desired:  desired,
+		Builder:  builders,
+	}); err != nil {
 		log.Fatalf("daemon: %v", err)
 	}
 }

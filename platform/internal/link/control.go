@@ -20,13 +20,17 @@ type Declaration struct {
 	Binding actor.Binding `json:"binding"`
 }
 
-// AttachRequest is the stream-0 control message a daemon sends ONCE to join a
-// channel home: the party identity + the actor streams it will open. It carries
-// NO credential — authentication is an app-layer concern resolved on the WS
-// upgrade (the URL's ?key= query) before the connection ever reaches the
-// Acceptor; the link layer is auth-agnostic (it does not care who the peer is,
-// only its ResolveFunc differs). A credential field here would be a dead leak of
-// an app concern into the wire vocabulary.
+// AttachRequest is the stream-0 control message a daemon sends to join a
+// channel home: the party identity + the actor streams it will open. The FIRST
+// send joins the link; a daemon whose desired set changes may send it again
+// (Reattach, §S-P8) — each send carries the FULL current declared set, never an
+// increment, so the home's re-diff is idempotent and self-correcting (a dropped
+// declaration simply is not in the next send). It carries NO credential —
+// authentication is an app-layer concern resolved on the WS upgrade (the URL's
+// ?key= query) before the connection ever reaches the Acceptor; the link layer
+// is auth-agnostic (it does not care who the peer is, only its ResolveFunc
+// differs). A credential field here would be a dead leak of an app concern into
+// the wire vocabulary.
 type AttachRequest struct {
 	ComputeID    string        `json:"compute_id"`
 	Declarations []Declaration `json:"declarations"`

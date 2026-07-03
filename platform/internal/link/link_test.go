@@ -679,6 +679,83 @@ func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 	}
 }
 
+// TestReattach_FullSetReplace proves the §S-P8 full-set idiom: Reattach
+// wholesale-REPLACES the home's declared set, it never merges. A larger
+// declared set lets a newly-declared actor's stream open; a smaller one makes a
+// previously-declared actor's NEXT stream open fail — the id simply fell out.
+func TestReattach_FullSetReplace(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+
+	const (
+		toolA = actor.ActorID("tool:a")
+		toolB = actor.ActorID("tool:b")
+	)
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolA, Kind: actor.KindTool}}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	noopDispatch := func(*message.Envelope) error { return nil }
+
+	// toolB was never declared: its stream must not open.
+	if _, err := d.OpenStream(toolB, noopDispatch, nil); err == nil {
+		t.Fatal("OpenStream(toolB) succeeded before any declaration — want rejected")
+	}
+
+	// Reattach the FULL set {a, b} (never an increment) — b becomes openable.
+	if err := d.Reattach(context.Background(), []link.Declaration{
+		{ActorID: toolA, Kind: actor.KindTool},
+		{ActorID: toolB, Kind: actor.KindTool},
+	}); err != nil {
+		t.Fatalf("Reattach (add): %v", err)
+	}
+	if _, err := d.OpenStream(toolB, noopDispatch, nil); err != nil {
+		t.Fatalf("OpenStream(toolB) after Reattach: %v", err)
+	}
+
+	// Reattach the REDUCED set {b} only: a's declaration falls out of the
+	// wholesale replacement, so a NEW stream open for toolA must now fail.
+	if err := d.Reattach(context.Background(), []link.Declaration{
+		{ActorID: toolB, Kind: actor.KindTool},
+	}); err != nil {
+		t.Fatalf("Reattach (shrink): %v", err)
+	}
+	if _, err := d.OpenStream(toolA, noopDispatch, nil); err == nil {
+		t.Fatal("OpenStream(toolA) succeeded after it fell out of the Reattach set — want rejected")
+	}
+}
+
+// TestReattach_RejectedLeavesPriorSetIntact proves a REJECTED Reattach (the
+// reserved system-actor-id guard) surfaces its reason in the returned error and
+// does not clobber the link's existing declared set — a previously-declared
+// actor's stream still opens normally afterwards.
+func TestReattach_RejectedLeavesPriorSetIntact(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+
+	const toolA = actor.ActorID("tool:a")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolA, Kind: actor.KindTool}}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	err = d.Reattach(context.Background(), []link.Declaration{
+		{ActorID: actor.SystemActorID, Kind: actor.KindSystem},
+	})
+	if err == nil {
+		t.Fatal("Reattach declaring the reserved system actor id unexpectedly succeeded")
+	}
+
+	// The prior set (toolA) must still be intact — the rejected Reattach never
+	// replaced it.
+	if _, err := d.OpenStream(toolA, func(*message.Envelope) error { return nil }, nil); err != nil {
+		t.Fatalf("OpenStream(toolA) after a rejected Reattach: %v", err)
+	}
+}
+
 func mustDeliver(t *testing.T, r *homeRig, target actor.ActorID) error {
 	t.Helper()
 	_, err := r.deliver.Deliver([]actor.ActorID{target}, &message.Envelope{

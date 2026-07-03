@@ -2,6 +2,7 @@ package app_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -10,11 +11,45 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/app"
+	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+// staticActorCompute adapts a fixed []platform.ActorDecl list — the shape every
+// RunCompute test call site held before period 7 S3 collapsed RunCompute's
+// signature to (ctx, cfg) — into the ComputeConfig.Desired/Builder pair the new
+// signature reads. Purely mechanical test-call-form migration (§4 red line 8'):
+// it changes no test semantics, only how a fixed actor list is handed to
+// RunCompute. Every decl is AlwaysOn (a live test daemon has no lazy-activation
+// analogue to exercise).
+func staticActorCompute(decls []platform.ActorDecl) (actorrt.DesiredSource, platform.ComputeBuilder) {
+	members := make(staticDesiredMembers, 0, len(decls))
+	factories := make(staticFactoryTable, len(decls))
+	for _, d := range decls {
+		members = append(members, actorrt.DesiredMember{ID: d.ID, Kind: d.Kind, Lifecycle: actorrt.LifecycleAlwaysOn})
+		factories[d.ID] = d.Factory
+	}
+	return members, factories
+}
+
+type staticDesiredMembers []actorrt.DesiredMember
+
+func (m staticDesiredMembers) Members(context.Context) ([]actorrt.DesiredMember, error) {
+	return m, nil
+}
+
+type staticFactoryTable map[actor.ActorID]func(actorcaps.Caps) actorrt.Actor
+
+func (t staticFactoryTable) Lookup(id actor.ActorID) (func(actorcaps.Caps) actorrt.Actor, bool) {
+	f, ok := t[id]
+	return f, ok
+}
 
 // testEnv holds a fresh App + handler for one test. Each test gets an isolated
 // SQLite (temp dir) so tests never share state.

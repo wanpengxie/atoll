@@ -194,35 +194,35 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 	ctx, cancel := context.WithCancel(context.Background())
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
 	runErr := make(chan error, 1)
+	desired, builder := staticActorCompute([]platform.ActorDecl{
+		{
+			ID:      xhs.DefaultActorID,
+			Kind:    actor.KindTool,
+			Binding: actor.BindingRuntimeInboundViaRelay,
+			Factory: func(caps actorcaps.Caps) actorrt.Actor {
+				return xhs.NewActor(caps.Pen, xhs.Config{
+					ListenAddr:     metatoolXHSDeviceAddr,
+					ReaperInterval: 20 * time.Millisecond,
+					Logger:         logger,
+				})
+			},
+		},
+		{
+			ID:      kimi.DefaultActorID,
+			Kind:    actor.KindTool,
+			Binding: actor.BindingRuntimeInboundViaRelay,
+			Factory: func(caps actorcaps.Caps) actorrt.Actor {
+				return kimi.NewActor(caps.Pen, kimi.Config{
+					ListenAddr:     metatoolKimiDeviceAddr,
+					ReaperInterval: 20 * time.Millisecond,
+					Logger:         logger,
+				})
+			},
+		},
+	})
 	go func() {
 		runErr <- platform.RunCompute(ctx,
-			platform.ComputeConfig{ServerWS: serverWS, Logger: logger},
-			[]platform.ActorDecl{
-				{
-					ID:      xhs.DefaultActorID,
-					Kind:    actor.KindTool,
-					Binding: actor.BindingRuntimeInboundViaRelay,
-					Factory: func(caps actorcaps.Caps) actorrt.Actor {
-						return xhs.NewActor(caps.Pen, xhs.Config{
-							ListenAddr:     metatoolXHSDeviceAddr,
-							ReaperInterval: 20 * time.Millisecond,
-							Logger:         logger,
-						})
-					},
-				},
-				{
-					ID:      kimi.DefaultActorID,
-					Kind:    actor.KindTool,
-					Binding: actor.BindingRuntimeInboundViaRelay,
-					Factory: func(caps actorcaps.Caps) actorrt.Actor {
-						return kimi.NewActor(caps.Pen, kimi.Config{
-							ListenAddr:     metatoolKimiDeviceAddr,
-							ReaperInterval: 20 * time.Millisecond,
-							Logger:         logger,
-						})
-					},
-				},
-			},
+			platform.ComputeConfig{ServerWS: serverWS, Logger: logger, Desired: desired, Builder: builder},
 		)
 	}()
 	t.Cleanup(func() {

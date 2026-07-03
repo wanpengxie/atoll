@@ -201,6 +201,8 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		allowed = map[actor.ActorID]bool{}
 		kinds   = map[actor.ActorID]actor.Kind{}
 	)
+	// Both maps are wholesale-replaced (never merged) by each successful
+	// handleAttach — see the &allowed/&kinds pointer pass below.
 	// ports holds the live port Incarnation per attached actor on THIS link (stored
 	// at onOpen). It is the graceful-teardown handle: on a home-side Close the link
 	// quiet-stops each port (pointer-guarded, no down edge) so in-flight requests do
@@ -283,7 +285,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		if err != nil || cf.Kind != ctrlAttach || cf.Attach == nil {
 			return
 		}
-		id, accepted := a.handleAttach(reqCtx, lc, cf.Attach, daemonID, &mu, allowed, kinds)
+		id, accepted := a.handleAttach(reqCtx, lc, cf.Attach, daemonID, &mu, &allowed, &kinds)
 		// Count the daemon online only after a SUCCESSFUL attach (membership
 		// applied, Accepted reply sent) — a rejected/half attach must not show
 		// online. Once per link (first accepted frame).
@@ -335,13 +337,18 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	close(done)
 }
 
-// handleAttach processes the stream-0 attach: register declared actors into
-// membership (register/reactivate — detach never deregisters), record the
-// allowed set, and reply. Membership semantics are unchanged by this: a
-// member row is durable; a daemon detaching does NOT remove it (membership ≠
-// attachment). It reports (computeID, accepted) so the caller can count link
-// attachment only on success.
-func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed map[actor.ActorID]bool, kinds map[actor.ActorID]actor.Kind) (string, bool) {
+// handleAttach processes a stream-0 attach — the first on a link, or a later
+// Reattach (§S-P8): register declared actors into membership (register/
+// reactivate — detach never deregisters), WHOLESALE-REPLACE the link's allowed/
+// kinds sets to exactly att.Declarations (idempotent — an unchanged re-declare
+// swaps in an identical set; self-correcting — a dropped declaration falls out),
+// and reply. The replace is a single atomic swap under mu (never a partial
+// merge), so a concurrent resolve()/kindOf() sees either the old full set or the
+// new one, never a mix. Membership semantics are unchanged by this: a member row
+// is durable; a daemon detaching does NOT remove it (membership ≠ attachment).
+// It reports (computeID, accepted) so the caller can count link attachment only
+// on success.
+func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed *map[actor.ActorID]bool, kinds *map[actor.ActorID]actor.Kind) (string, bool) {
 	computeID := att.ComputeID
 	if daemonID != "" {
 		computeID = daemonID
@@ -373,11 +380,19 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 		}
 	}
 
-	mu.Lock()
+	// Build the FULL declared set fresh, then swap it in under mu in one step — a
+	// Reattach carries every actor this compute currently hosts (never an
+	// increment), so this IS the re-diff: an id absent from att.Declarations that
+	// was allowed before is simply not in newAllowed after.
+	newAllowed := make(map[actor.ActorID]bool, len(att.Declarations))
+	newKinds := make(map[actor.ActorID]actor.Kind, len(att.Declarations))
 	for _, d := range att.Declarations {
-		allowed[d.ActorID] = true
-		kinds[d.ActorID] = d.Kind
+		newAllowed[d.ActorID] = true
+		newKinds[d.ActorID] = d.Kind
 	}
+	mu.Lock()
+	*allowed = newAllowed
+	*kinds = newKinds
 	mu.Unlock()
 
 	// Fold each declared actor's obs PUSH (L3 device presence) into the home fold.

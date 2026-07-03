@@ -31,6 +31,7 @@ import (
 type Dialer struct {
 	lc        *linkConn
 	channelID string
+	computeID string
 	logger    *slog.Logger
 
 	mu       sync.Mutex
@@ -38,6 +39,13 @@ type Dialer struct {
 	streams  map[actor.ActorID]*actorStream
 	attached chan struct{} // closed when attach_reply arrives
 	reply    AttachReply
+	// reattachWait, when non-nil, is the pending Reattach's reply channel — set
+	// right before sending a post-initial ctrlAttach, cleared by onControl when
+	// the matching attach_reply arrives (or by the waiter itself on timeout/
+	// cancellation). nil means no Reattach is in flight, so any attach_reply
+	// received then is either the initial one (still open, closes d.attached) or
+	// a protocol anomaly (logged, dropped).
+	reattachWait chan AttachReply
 	// started flips true inside the SAME mu critical section that snapshots the
 	// streams for the initial batch (Start). It makes Start idempotent and is the
 	// boundary a post-Start OpenStream races against: a stream inserted before the
@@ -99,6 +107,7 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 	}
 	d := &Dialer{
 		channelID: "",
+		computeID: computeID,
 		logger:    logger,
 		nextID:    1,
 		streams:   map[actor.ActorID]*actorStream{},
@@ -112,8 +121,24 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 			return
 		}
 		d.mu.Lock()
+		// A pending Reattach owns the NEXT attach_reply — deliver it there and
+		// return; this is not the initial attach's reply (that already closed
+		// d.attached long before any Reattach could be sent).
+		if pending := d.reattachWait; pending != nil {
+			d.reattachWait = nil
+			d.mu.Unlock()
+			select {
+			case pending <- *cf.AttachReply:
+			default: // waiter already gave up (ctx/timeout) — reply is moot.
+			}
+			return
+		}
 		select {
 		case <-d.attached:
+			// No Reattach in flight and the initial attach already resolved: an
+			// extra attach_reply is a protocol/ordering anomaly (F11 — reject
+			// reasons, and anomalies generally, are never silently dropped).
+			d.logger.Warn("link.unexpected_attach_reply")
 		default:
 			d.reply = *cf.AttachReply
 			d.channelID = string(cf.AttachReply.ChannelID)
@@ -168,6 +193,75 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 
 // ChannelID returns the channel the home assigned on attach.
 func (d *Dialer) ChannelID() string { return d.channelID }
+
+// reattachTimeout bounds one Reattach round-trip — a wedged home must not hang
+// the daemon's reconcile ring forever.
+const reattachTimeout = 10 * time.Second
+
+// Reattach re-declares this compute's FULL current actor set on stream 0 (the
+// kubelet node-status idiom — always the whole set, never an increment, §S-P8)
+// and waits for the home's verdict, so the caller can OpenStream a newly-desired
+// actor only once the home's allowed set actually covers it. Only one Reattach
+// may be in flight at a time (the reconcile ring drives it from a single
+// goroutine; the guard keeps the contract honest regardless). A rejected reply's
+// reason comes back in the error (F11 — reject reasons are never silently
+// dropped).
+func (d *Dialer) Reattach(ctx context.Context, decls []Declaration) error {
+	d.mu.Lock()
+	if d.reattachWait != nil {
+		d.mu.Unlock()
+		return errors.New("link: reattach already in flight")
+	}
+	ch := make(chan AttachReply, 1)
+	d.reattachWait = ch
+	d.mu.Unlock()
+
+	raw, err := encodeControl(controlFrame{Kind: ctrlAttach, Attach: &AttachRequest{
+		ComputeID: d.computeID, Declarations: decls,
+	}})
+	if err != nil {
+		d.clearReattachWait(ch)
+		return err
+	}
+	if err := d.lc.sendControl(raw); err != nil {
+		d.clearReattachWait(ch)
+		return err
+	}
+
+	timeout := time.NewTimer(reattachTimeout)
+	defer timeout.Stop()
+	select {
+	case reply := <-ch:
+		if !reply.Accepted {
+			reason := reply.Reason
+			if reason == "" {
+				reason = "rejected"
+			}
+			return fmt.Errorf("link: reattach rejected: %s", reason)
+		}
+		return nil
+	case <-ctx.Done():
+		d.clearReattachWait(ch)
+		return ctx.Err()
+	case <-d.done:
+		d.clearReattachWait(ch)
+		return errors.New("link: reattach: link closed")
+	case <-timeout.C:
+		d.clearReattachWait(ch)
+		return errors.New("link: reattach: timed out waiting for attach_reply")
+	}
+}
+
+// clearReattachWait drops the pending-Reattach marker IF it still points at ch
+// (a concurrent onControl delivery may have already cleared and consumed it —
+// pointer-compare avoids clobbering a later, unrelated Reattach's wait).
+func (d *Dialer) clearReattachWait(ch chan AttachReply) {
+	d.mu.Lock()
+	if d.reattachWait == ch {
+		d.reattachWait = nil
+	}
+	d.mu.Unlock()
+}
 
 // OpenStream opens one actor's link stream, performs the native ipc handshake
 // (LeaseID = actor id), and returns the cell's full capability arms (CellArms:
@@ -455,23 +549,37 @@ func (d *Dialer) SendDeliverResult(id actor.ActorID, envID message.ID, outcome, 
 	_ = as.codec.Write(ipc.Frame{Kind: ipc.KindDeliverResult, Payload: payload})
 }
 
-// DetachAll sends a graceful KindDetach on every open actor stream (remote→host
-// "I am removing this arm" — the home port reads it and dies QUIET, no down edge)
-// then closes each stream. Called on daemon ctx-cancel (graceful shutdown) so the
-// home's port-hosted actors fall silent instead of materialising
-// receiver_unavailable; a hard link drop (kill -9) skips this and the home reads
-// EOF as the loud, positively-observed down edge instead.
+// DetachStream sends a graceful KindDetach on ONE actor's stream (remote→host
+// "I am removing this arm" — the home port reads it and dies QUIET, no down
+// edge) then closes it. Used both by DetachAll (daemon shutdown) and the
+// reconcile ring's 削 path (a locally-dropped desired member, §10.13). No-op if
+// the actor has no open stream (already gone).
+func (d *Dialer) DetachStream(id actor.ActorID) {
+	d.mu.Lock()
+	as := d.streams[id]
+	d.mu.Unlock()
+	if as == nil {
+		return
+	}
+	payload, _ := json.Marshal(ipc.DownPayload{Reason: "detach"})
+	_ = as.codec.Write(ipc.Frame{Kind: ipc.KindDetach, Payload: payload})
+	_ = as.stream.Close()
+}
+
+// DetachAll sends a graceful KindDetach on every open actor stream then closes
+// each. Called on daemon ctx-cancel (graceful shutdown) so the home's port-
+// hosted actors fall silent instead of materialising receiver_unavailable; a
+// hard link drop (kill -9) skips this and the home reads EOF as the loud,
+// positively-observed down edge instead.
 func (d *Dialer) DetachAll() {
 	d.mu.Lock()
-	streams := make([]*actorStream, 0, len(d.streams))
-	for _, as := range d.streams {
-		streams = append(streams, as)
+	ids := make([]actor.ActorID, 0, len(d.streams))
+	for id := range d.streams {
+		ids = append(ids, id)
 	}
 	d.mu.Unlock()
-	for _, as := range streams {
-		payload, _ := json.Marshal(ipc.DownPayload{Reason: "detach"})
-		_ = as.codec.Write(ipc.Frame{Kind: ipc.KindDetach, Payload: payload})
-		_ = as.stream.Close()
+	for _, id := range ids {
+		d.DetachStream(id)
 	}
 }
 
