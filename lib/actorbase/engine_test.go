@@ -112,6 +112,19 @@ func (f *fakeActorContext) obsCount() int {
 	return len(f.pubs)
 }
 
+// obsKindCounts tallies published obs by kind — the precise assertion F5/F8
+// tests need (a bare non-zero count cannot tell reject_lane_overflow from
+// closure_fault from a stale-delivery drop).
+func (f *fakeActorContext) obsKindCounts() map[actorrt.ObsKind]int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	counts := map[actorrt.ObsKind]int{}
+	for _, p := range f.pubs {
+		counts[p.kind]++
+	}
+	return counts
+}
+
 // newTestEngine builds an *engine directly (bypassing New) so tests can
 // shrink the ledger/queue capacities and inject a deterministic clock —
 // same-package whitebox construction, zero platform import.
@@ -128,7 +141,7 @@ func newTestEngine(t *testing.T, pen *fakePen, hooks Hooks, serveCap, queueCap i
 		queueCap: queueCap,
 	}
 	e.serve = newServeLedger(e.life, serveCap)
-	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks)
+	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks, e.closureFault)
 	e.workQ = make(chan *message.Envelope, queueCap)
 	e.rejectQ = make(chan *message.Envelope, queueCap)
 	e.rejectStop = make(chan struct{})
@@ -371,22 +384,29 @@ func TestEngine_ServeLedgerFullRoutesToRejectLane(t *testing.T) {
 	}
 }
 
+// TestEngine_RejectLaneFullDropsAndObsRecords (F8) genuinely exercises the
+// reject-lane-overflow path with REAL small capacities (serveCap=1, queueCap=2)
+// — the old form passed serveCap=0, which newServeLedger silently remapped to
+// 256, so all requests Admitted and the overflow it "verified" was the work
+// queue's, never the reject lane's. Here: req-1 fills the one serve slot;
+// req-2/req-3 fill the reject queue (cap=2); req-4 has nowhere left and must
+// record EXACTLY the reject_lane_overflow obs (nothing else publishes obs on
+// this path, so the assertion is precise).
 func TestEngine_RejectLaneFullDropsAndObsRecords(t *testing.T) {
 	pen := &fakePen{self: "actor:test"}
 	actx := &fakeActorContext{self: "actor:test"}
-	e := newTestEngine(t, pen, Hooks{}, 0 /*serveCap: nothing ever Admits*/, 8)
+	e := newTestEngine(t, pen, Hooks{}, 1 /*serveCap*/, 2 /*queueCap → rejectQ cap*/)
 	e.lifeCtx = context.Background()
 	e.actorCtx = actx
 	e.occupant.Store(int32(occupantRunning))
-	// Reject lane goroutine deliberately NOT started: rejectQ (cap=8) plus one
-	// more overflows without anyone ever draining it.
-	for i := 0; i < 9; i++ {
-		if err := e.Receive(context.Background(), newRequestEnv(message.ID(time.Now().Format(time.RFC3339Nano)+string(rune(i))), -1)); err != nil {
-			t.Fatalf("unexpected Receive error: %v", err)
+	// Reject lane goroutine deliberately NOT started so rejectQ never drains.
+	for i, id := range []message.ID{"req-1", "req-2", "req-3", "req-4"} {
+		if err := e.Receive(context.Background(), newRequestEnv(id, -1)); err != nil {
+			t.Fatalf("unexpected Receive error on %s (i=%d): %v", id, i, err)
 		}
 	}
-	if actx.obsCount() == 0 {
-		t.Fatal("expected an obs record for the reject-lane overflow")
+	if got := actx.obsKindCounts(); got[actorrt.ObsKind("actorbase.reject_lane_overflow")] != 1 {
+		t.Fatalf("expected exactly one reject_lane_overflow obs, got kinds=%v", got)
 	}
 }
 

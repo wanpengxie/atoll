@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"sync/atomic"
 	"time"
 
@@ -116,7 +117,7 @@ func New(caps actorcaps.Caps, hooks Hooks, def Def) actorrt.Actor {
 		queueCap: 256,
 	}
 	e.serve = newServeLedger(e.life, 256)
-	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks)
+	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks, e.closureFault)
 	e.workQ = make(chan *message.Envelope, e.queueCap)
 	e.rejectQ = make(chan *message.Envelope, e.queueCap)
 	e.rejectStop = make(chan struct{})
@@ -134,12 +135,17 @@ func (e *engine) life() context.Context { return e.lifeCtx }
 func (e *engine) Start(ctx context.Context, self actorrt.ActorContext) error {
 	e.lifeCtx = ctx
 	e.actorCtx = self
+	// Initialise the lifecycle channels BEFORE def.New (F2): every return path
+	// must leave the engine Stop-able. The cell's teardown defer calls Stop
+	// even after a FAILED Start; a nil workerDone would then hang Stop's join
+	// forever. def.New failing still leaves occupant at Starting, which Stop's
+	// fast path collapses without ever waiting on a worker that never ran.
+	e.dying = make(chan error, 1)
+	e.workerDone = make(chan struct{})
 	proc, err := e.def.New()
 	if err != nil {
 		return fmt.Errorf("actorbase: def.New: %w", err)
 	}
-	e.dying = make(chan error, 1)
-	e.workerDone = make(chan struct{})
 	e.occupant.Store(int32(occupantRunning))
 	go e.runWorker(proc)
 	go e.runRejectLane()
@@ -148,8 +154,28 @@ func (e *engine) Start(ctx context.Context, self actorrt.ActorContext) error {
 
 func (e *engine) runWorker(proc Proc) {
 	defer close(e.workerDone)
-	err := proc(e)
+	err := e.runProc(proc)
+	// F6: flip to Draining BEFORE announcing death, so any request that races
+	// into the pump during the teardown window (worker already gone) is
+	// rejected with an overloaded terminal rather than admitted into a work
+	// queue no one will ever drain (a suspended request only author#2 could
+	// close). Ordering matters: the Draining store happens-before the dying
+	// send, so a reader of Dying() observes the pump already refusing Admit.
+	e.occupant.Store(int32(occupantDraining))
 	e.dying <- err
+}
+
+// runProc runs the Proc body under a recover (F1): a panic becomes a loud
+// (non-nil) death code carried back through Dying(), instead of unwinding past
+// the worker goroutine and crashing the whole process (spec §1.4/§1.6:
+// err|panic = loud 横死). The panic value and its stack ride in the error.
+func (e *engine) runProc(proc Proc) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("actorbase: proc panicked: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return proc(e)
 }
 
 func (e *engine) runRejectLane() {
@@ -158,7 +184,18 @@ func (e *engine) runRejectLane() {
 		case env := <-e.rejectQ:
 			e.writeOverloaded(env)
 		case <-e.rejectStop:
-			return
+			// F7: drain any still-queued rejects before exiting so each one
+			// still gets its overloaded terminal (the queue is bounded, so the
+			// drain is bounded). A bare `return` here would strand whatever the
+			// pump had already handed us when Stop fired.
+			for {
+				select {
+				case env := <-e.rejectQ:
+					e.writeOverloaded(env)
+				default:
+					return
+				}
+			}
 		}
 	}
 }
@@ -175,6 +212,14 @@ func (e *engine) writeOverloaded(env *message.Envelope) {
 // the mailbox is closed and the last in-flight Receive has returned, on the
 // cell's own goroutine — blocking here IS "worker 排空至 return".
 func (e *engine) Stop(ctx context.Context) error {
+	// F2 fast path: an engine whose worker never started (def.New failed, or
+	// Start was never reached) still has occupant == Starting. There is no
+	// worker to drain and workerDone may be nil — flip Dead and return at once,
+	// never block on a join that could never complete.
+	if occupantState(e.occupant.Load()) == occupantStarting {
+		e.occupant.Store(int32(occupantDead))
+		return nil
+	}
 	e.occupant.Store(int32(occupantDraining))
 	<-e.workerDone
 	close(e.rejectStop)
@@ -260,6 +305,21 @@ func (e *engine) recordDrop(env *message.Envelope, kind actorrt.ObsKind) {
 	}
 	val, _ := json.Marshal(map[string]any{"id": env.ID, "type": env.Type})
 	e.actorCtx.PublishObs(kind, val)
+}
+
+// closureFault is the call ledger's fault sink (F5): an author#2 obligation
+// write (fireTimeout / cancel) that FAILS or is rejected — a real store error
+// or a non-duplicate reject, never a benign terminal-duplicate — is a
+// liveness-guarantee hole that MUST be observable, so it is surfaced on the
+// same actor-obs PUSH recordDrop uses (kind actorbase.closure_fault). Wired by
+// New; reads actorCtx at call time (it is nil until Start), so a fault raised
+// before wiring is a silent no-op exactly like recordDrop's.
+func (e *engine) closureFault(id message.ID, err error) {
+	if e.actorCtx == nil {
+		return
+	}
+	val, _ := json.Marshal(map[string]any{"id": id, "error": err.Error()})
+	e.actorCtx.PublishObs(actorrt.ObsKind("actorbase.closure_fault"), val)
 }
 
 // --- Sys: response / terminal writes ------------------------------------
@@ -376,6 +436,15 @@ func (e *engine) submit(spec behavior.RequestSpec) (message.ID, error) {
 		return "", fmt.Errorf("actorbase: submit audience required")
 	}
 	target := spec.Audience[0]
+	// F3: a Call/Submit addressed to this incarnation's OWN id would deadlock
+	// the single worker (the reply can only be authored by the same goroutine
+	// then blocked in Wait). Fail fast BEFORE any build/register/write, so it
+	// leaves zero residue in the out-station ledger. Guard on a non-empty self
+	// only: Self() is "" before actorCtx is wired, and an empty target must not
+	// be mistaken for a self-call (it falls through to audience validation).
+	if self := e.Self(); self != "" && target == self {
+		return "", ErrSelfCall
+	}
 	if spec.ExpiresAt == nil {
 		if d := e.resolveTimeout(target, spec.Type); d > 0 {
 			t := e.clockFn().Add(d).UnixMilli()

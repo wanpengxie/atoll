@@ -5,6 +5,11 @@ package actorbase
 // local variables = the process's own memory (its stack). This one function
 // signature is the entire generation contract — no second lifecycle hook
 // exists beside it (mirrors Unix main / an Erlang spawn fun).
+//
+// A Proc MUST respond to its termination signals — sys.Recv() returning an
+// error (ErrRecvDone) and sys.Life() being Done — by returning. This is a
+// cooperative model with NO pre-emption: a Proc that ignores them makes Stop
+// wait for it without bound (Stop joins the worker goroutine).
 type Proc func(sys Sys) error
 
 // Def is the registry entry one Proc constructor is registered under. New

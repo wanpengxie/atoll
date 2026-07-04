@@ -110,6 +110,15 @@ type Sys interface {
 // tested with errors.Is.
 var ErrUnsupported = errors.New("actorbase: verb unsupported on this host")
 
+// ErrSelfCall is submit's fail-fast verdict for a Call/Submit addressed to the
+// caller's OWN id (spec §1.3: "自 Call 自 = 在写请求/登记之前 fail-fast 返错,
+// 零残留"): a single worker goroutine runs the Proc, so Call(Self()) followed
+// by Wait would block that goroutine on a reply only the same, now-blocked
+// goroutine could ever author — a structural deadlock. Rejected before any
+// build/register/write, so it leaves zero out-station residue. Tested with
+// errors.Is.
+var ErrSelfCall = errors.New("actorbase: cannot Call self — single-worker deadlock")
+
 // ErrRequestClosed is Reply/Fail/Progress's verdict for a request Msg whose
 // in-station account entry already closed (deadline passed, cancel delivered,
 // or a concurrent write already landed the terminal) BEFORE this write ran —

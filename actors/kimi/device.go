@@ -243,6 +243,13 @@ func (d *device) readLoop(conn *websocket.Conn) {
 // (already reaped, or a stray) is dropped. Taking the pending out of the table
 // under the lock makes the close atomic: a correlation can be claimed by the
 // read loop OR the reaper, never both.
+//
+// LATE-REPLY NOTE (actorbase migration): a reply landing after its request
+// already closed no longer writes the pen blindly and lets the terminal-
+// uniqueness index arbitrate — sys.Reply/sys.Fail now judge locally first,
+// returning ErrRequestClosed without a write (spec §1.5's local判定先行). A
+// behaviour change from the old direct-write form, closer to spec, recorded
+// here.
 func (d *device) handleUp(up upFrame) {
 	d.mu.Lock()
 	p, ok := d.inflight[up.CorrelationID]

@@ -40,8 +40,14 @@ type serveLedger struct {
 }
 
 func newServeLedger(life func() context.Context, capacity int) *serveLedger {
+	// A non-positive cap is a construction-time wiring bug, never an author's
+	// intent (F8): the old silent <=0 → 256 remap is exactly what let a test
+	// pass serveCap=0 and unknowingly exercise the work queue instead of the
+	// reject lane. Fail loud at assembly time — this is called only from New
+	// (always 256) and whitebox tests, so a panic surfaces the mistake at wiring,
+	// never at request time.
 	if capacity <= 0 {
-		capacity = 256
+		panic("actorbase: serve ledger capacity must be positive")
 	}
 	return &serveLedger{life: life, entries: make(map[message.ID]*serveEntry), cap: capacity}
 }

@@ -31,6 +31,14 @@ type callEntry struct {
 	req    *message.Envelope
 	ch     chan *message.Envelope
 	timer  *time.Timer
+	// final marks the entry buffered-final (F4): set under the ledger lock the
+	// instant match hands a FINAL response to ch. Once set, the entry's ONLY
+	// exit is wait consuming it — fireTimeout and cancel become no-ops (they
+	// must never delete the entry nor write a self-close over a real terminal
+	// already in hand) and list hides it (it is no longer in-flight). This is
+	// the "缓冲 final 永远赢" invariant made structural rather than a scatter of
+	// if-guards.
+	final bool
 }
 
 // callLedger is the out-station account (spec §1.5): "InFlight →(回信对号|
@@ -46,13 +54,25 @@ type callLedger struct {
 	pen   harness.Pen
 	clock func() time.Time
 	hooks Hooks
+	// onFault is the fault sink (F5): a failed/rejected obligation write
+	// (fireTimeout/cancel) — a liveness-guarantee hole — is reported here. Wired
+	// by engine.New to engine.closureFault; nil = faults ignored (the ledger
+	// holds no obs face of its own).
+	onFault func(id message.ID, err error)
 
 	mu      sync.Mutex
 	entries map[message.ID]*callEntry
 }
 
-func newCallLedger(life func() context.Context, pen harness.Pen, clock func() time.Time, hooks Hooks) *callLedger {
-	return &callLedger{life: life, pen: pen, clock: clock, hooks: hooks, entries: make(map[message.ID]*callEntry)}
+func newCallLedger(life func() context.Context, pen harness.Pen, clock func() time.Time, hooks Hooks, onFault func(message.ID, error)) *callLedger {
+	return &callLedger{life: life, pen: pen, clock: clock, hooks: hooks, onFault: onFault, entries: make(map[message.ID]*callEntry)}
+}
+
+// fault reports a closure-write fault if a sink is wired.
+func (l *callLedger) fault(id message.ID, err error) {
+	if l.onFault != nil {
+		l.onFault(id, err)
+	}
 }
 
 // register reserves env.ID as InFlight BEFORE the write runs (subscribe-
@@ -118,6 +138,11 @@ func (l *callLedger) match(env *message.Envelope) bool {
 		e.timer.Stop()
 		e.timer = nil
 	}
+	// Mark buffered-final UNDER the lock (F4) before releasing it: a
+	// fireTimeout/cancel that grabs the lock next sees final=true and is a
+	// no-op, so it can never delete this entry (whose real final is now owed to
+	// wait) nor write a self-close over the terminal already in hand.
+	e.final = true
 	l.mu.Unlock()
 	select {
 	case e.ch <- env:
@@ -129,28 +154,45 @@ func (l *callLedger) match(env *message.Envelope) bool {
 // fireTimeout is author#2's durable-deadline executor (spec §1.5, the
 // behavior.Caller precedent collapsed into this ledger): it commits an
 // unanswered_timeout terminal to truth AS the caller, closing the entry
-// itself. A benign race against a real terminal that landed microseconds
-// earlier (Match already deleted the entry) is a silent no-op — the
-// happy-race outcome, not a fault.
+// itself. A buffered-final entry (final=true) is a no-op — a real terminal
+// already landed and is owed to wait, so this must neither delete it nor write
+// over it (F4). An id already gone (a real terminal claimed and consumed it) is
+// likewise a silent no-op — the happy-race outcome, not a fault.
+//
+// KNOWN GAP (spec §1.5 orphan申报, defer): if this caller横死 before its
+// out-station entry closes, this timer dies with it and the entry becomes an
+// orphan — the receiver-side account self-cleans on its own deadline and the
+// truth row reads as a lazy-open request an ExpiresAt reader can level-judge.
+// The eventual fix is generalising the substrate closure reconcile
+// (death.go's ReconcileReceiverUnavailable geometry) to the "caller absent"
+// cell; owner deferred it, pain-driven.
 func (l *callLedger) fireTimeout(id message.ID) {
 	l.mu.Lock()
 	e, ok := l.entries[id]
-	if ok {
-		delete(l.entries, id)
-	}
-	l.mu.Unlock()
-	if !ok {
+	if !ok || e.final {
+		l.mu.Unlock()
 		return
 	}
+	delete(l.entries, id)
+	l.mu.Unlock()
 	payload, _ := json.Marshal(map[string]string{
 		"error_code": string(message.TerminalUnansweredTimeout),
 		"detail":     "no response before deadline",
 	})
-	_, _ = behavior.Respond(l.life(), l.pen, l.clock, e.req, behavior.ResponseSpec{
+	// The WHEN authority for this obligation write is the pen's live membrane,
+	// not the ctx (F5): WithoutCancel keeps the provenance value chain but strips
+	// the teardown cancel, so a legitimate Draining-window timeout still lands.
+	// The membrane fail-closes a genuinely-dead write; ctx is only the transport
+	// pipe. A failed/rejected write (Respond maps a benign terminal-duplicate to
+	// a nil error, so that stays silent) is a liveness hole and is reported.
+	_, werr := behavior.Respond(context.WithoutCancel(l.life()), l.pen, l.clock, e.req, behavior.ResponseSpec{
 		Status:  message.StatusFailed,
 		Reason:  string(message.TerminalUnansweredTimeout),
 		Payload: payload,
 	})
+	if werr != nil {
+		l.fault(id, werr)
+	}
 }
 
 // cancel is pending.Cancel's disposition (spec §1.5): close id's entry NOW
@@ -162,13 +204,15 @@ func (l *callLedger) fireTimeout(id message.ID) {
 func (l *callLedger) cancel(id message.ID) error {
 	l.mu.Lock()
 	e, ok := l.entries[id]
-	if ok {
-		delete(l.entries, id)
-	}
-	l.mu.Unlock()
-	if !ok {
+	if !ok || e.final {
+		// Not in-flight, or a real final already landed and is buffered for wait
+		// (F4): cancel is a no-op — never discard the real final nor write a
+		// self-close over it.
+		l.mu.Unlock()
 		return nil
 	}
+	delete(l.entries, id)
+	l.mu.Unlock()
 	if e.timer != nil {
 		e.timer.Stop()
 	}
@@ -177,11 +221,17 @@ func (l *callLedger) cancel(id message.ID) error {
 		"detail":     "cancelled by caller",
 		"cancelled":  true,
 	})
-	_, _ = behavior.Respond(l.life(), l.pen, l.clock, e.req, behavior.ResponseSpec{
+	// WithoutCancel (F5): same rationale as fireTimeout — the obligation write's
+	// WHEN authority is the pen membrane, not the ctx; a failed/rejected write
+	// (duplicate excepted) is reported as a liveness fault.
+	_, werr := behavior.Respond(context.WithoutCancel(l.life()), l.pen, l.clock, e.req, behavior.ResponseSpec{
 		Status:  message.StatusFailed,
 		Reason:  string(message.TerminalUnansweredTimeout),
 		Payload: payload,
 	})
+	if werr != nil {
+		l.fault(id, werr)
+	}
 	if l.hooks.Canceller != nil {
 		l.hooks.Canceller(e.target, id)
 	}
@@ -193,7 +243,10 @@ func (l *callLedger) list() []message.ID {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	ids := make([]message.ID, 0, len(l.entries))
-	for id := range l.entries {
+	for id, e := range l.entries {
+		if e.final {
+			continue // buffered-final entries are no longer in-flight (F4)
+		}
 		ids = append(ids, id)
 	}
 	return ids
