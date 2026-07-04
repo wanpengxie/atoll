@@ -19,7 +19,13 @@ type Pending interface {
 	// exception). d bounds this particular wait window; it is independent of
 	// (and typically much shorter than) the request's own durable deadline,
 	// which the ledger enforces regardless of whether anyone is still
-	// waiting.
+	// waiting. d<=0 means NO time bound — wait on ctx alone (pass msg.Ctx()
+	// or a WithTimeout-derived ctx to bound it). NOTE the deliberate
+	// asymmetry with JobTable.Await, where window<=0 means "do not wait at
+	// all": a Proc holding a Pending is mid-flow and wants to park; a
+	// mind-binding tool call is one dispatch and wants an immediate ack.
+	// A wait parked when the account closes under it (deadline fired /
+	// cancelled elsewhere) returns ErrCallClosed immediately.
 	Wait(ctx context.Context, d time.Duration) (Msg, error)
 	// Cancel closes this call's out-station entry early: it commits the
 	// caller's OWN unanswered_timeout terminal now instead of waiting for the

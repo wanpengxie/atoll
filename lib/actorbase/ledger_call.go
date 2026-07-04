@@ -207,6 +207,13 @@ func (l *callLedger) fireTimeout(id message.ID) {
 		return
 	}
 	delete(l.entries, id)
+	// Close ch to wake any parked waiter NOW (round-3/fable review): the
+	// account is closed, so a goroutine blocked in wait() must learn it here
+	// rather than sit out its whole window (or, on an unbounded wait, hang
+	// forever past a terminal that is already in truth). Safe under the lock:
+	// match sends only within its own lock scope after finding the entry, and
+	// the entry is deleted above — no send can follow this close.
+	close(e.ch)
 	l.mu.Unlock()
 	payload, _ := json.Marshal(map[string]string{
 		"error_code": string(message.TerminalUnansweredTimeout),
@@ -245,6 +252,9 @@ func (l *callLedger) cancel(id message.ID) error {
 		return nil
 	}
 	delete(l.entries, id)
+	// Wake parked waiters, same as fireTimeout: account closed, no send can
+	// follow (match's lookup+send share one lock scope; entry is gone).
+	close(e.ch)
 	l.mu.Unlock()
 	if e.timer != nil {
 		e.timer.Stop()
@@ -300,7 +310,16 @@ func (l *callLedger) wait(ctx context.Context, id message.ID, d time.Duration) (
 	if !ok {
 		return nil, false, ErrCallClosed
 	}
-	consume := func(env *message.Envelope) (*message.Envelope, bool, error) {
+	// consume distinguishes the two things a ch receive can yield: a real
+	// final (chOk=true) is claimed and the entry deleted; a zero value from a
+	// CLOSED ch (chOk=false) is the close-side waking us — the account was
+	// closed by fireTimeout/cancel (round-3 review: a parked waiter must not
+	// sit out its window, let alone hang an unbounded wait, past a terminal
+	// already committed to truth) — surface ErrCallClosed.
+	consume := func(env *message.Envelope, chOk bool) (*message.Envelope, bool, error) {
+		if !chOk {
+			return nil, false, ErrCallClosed
+		}
 		l.mu.Lock()
 		delete(l.entries, id)
 		l.mu.Unlock()
@@ -308,8 +327,8 @@ func (l *callLedger) wait(ctx context.Context, id message.ID, d time.Duration) (
 	}
 	if d <= 0 {
 		select {
-		case env := <-e.ch:
-			return consume(env)
+		case env, chOk := <-e.ch:
+			return consume(env, chOk)
 		case <-ctx.Done():
 			if env, ok := l.claimBuffered(id); ok {
 				return env, true, nil
@@ -320,8 +339,8 @@ func (l *callLedger) wait(ctx context.Context, id message.ID, d time.Duration) (
 	timer := time.NewTimer(d)
 	defer timer.Stop()
 	select {
-	case env := <-e.ch:
-		return consume(env)
+	case env, chOk := <-e.ch:
+		return consume(env, chOk)
 	case <-timer.C:
 		if env, ok := l.claimBuffered(id); ok {
 			return env, true, nil
@@ -349,7 +368,10 @@ type JobTable interface {
 	// sys.Call does.
 	Submit(spec behavior.RequestSpec) (message.ID, error)
 	// Await blocks for id's final response up to window (<=0 = do not wait
-	// at all — the immediate-ack shape), ctx, or arrival, whichever first.
+	// at all — the immediate-ack shape; the DELIBERATE inverse of
+	// Pending.Wait's d<=0="unbounded", see Pending's godoc), ctx, or
+	// arrival, whichever first. An await parked when the account closes
+	// under it returns ErrCallClosed immediately.
 	Await(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error)
 	// List returns the in-flight request ids (list_pending).
 	List() []message.ID

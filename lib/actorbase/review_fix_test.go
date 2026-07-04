@@ -320,6 +320,45 @@ func TestCallLedger_ClaimBufferedWinsOverConcededWait(t *testing.T) {
 	}
 }
 
+// Round-3 (fable review): a waiter ALREADY parked in wait() must be woken the
+// moment the account closes under it — fireTimeout/cancel close the entry's
+// ch, and the waiter surfaces ErrCallClosed instead of sitting out its window
+// (bounded wait) or hanging forever (unbounded wait) past a terminal that is
+// already in truth. (Pre-fix: close paths never signalled ch; an unbounded
+// Wait(sys.Life(), 0) hung until process death.)
+func TestCallLedger_ParkedWaiterWokenByClose(t *testing.T) {
+	pen := &fakePen{self: "actor:caller"}
+	e := newTestEngine(t, pen, Hooks{}, 8, 8)
+	e.lifeCtx = context.Background()
+
+	for _, tc := range []struct {
+		id    message.ID
+		close func()
+	}{
+		{"req-wake-timeout", func() { e.call.fireTimeout("req-wake-timeout") }},
+		{"req-wake-cancel", func() { _ = e.call.cancel("req-wake-cancel") }},
+	} {
+		registerEntry(e, tc.id)
+		got := make(chan error, 1)
+		parked := make(chan struct{})
+		go func() {
+			close(parked)
+			_, _, err := e.call.wait(context.Background(), tc.id, 0) // unbounded
+			got <- err
+		}()
+		<-parked
+		tc.close()
+		select {
+		case err := <-got:
+			if !errors.Is(err, ErrCallClosed) {
+				t.Fatalf("%s: woken waiter error = %v, want ErrCallClosed", tc.id, err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatalf("%s: parked waiter not woken by account close", tc.id)
+		}
+	}
+}
+
 // F8: a non-positive serve-ledger cap is a wiring bug and must panic at
 // construction, not silently remap to 256. (Pre-fix: newServeLedger(_, 0)
 // returns a cap-256 ledger.)
