@@ -3,6 +3,7 @@ package platform
 import (
 	"errors"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -22,34 +23,35 @@ var ErrClassNotFound = errors.New("platform: fork class not found in builder")
 // CapsFactoryBuilder is the PLATFORM-layer factory table for the two mint
 // triggers that resolve a factory AFTER the original admission closure is gone —
 // fork (by Class) and activation (by id). It resolves either key to the actor's
-// caps-taking factory `func(actorcaps.Caps) actorrt.Actor` — the SAME factory
-// shape a top-level admission (Home.Spawn) consumes.
+// ActorFactory (spec §4 S3's "def") — the SAME shape a top-level admission
+// (Home.Spawn) consumes.
 //
 // It is deliberately NOT actorrt.Builder (whose Lookup/LookupByClass hand back
 // `func(Incarnation) Actor`): the caps seam — the livePen/liveAccess/liveState/
 // liveSchedule membranes — must be woven at the platform assembly seam
 // (buildCaps), where the live-membrane constructors live, and NEVER inside actorrt
 // (which must not import runtime/harness · runtime/link). So the table hands back
-// the RAW factory and the platform wraps it in the shared caps assembler per mint;
-// the child/revived actor is therefore born with the identical membrane set as a
-// top-level admission. Welding caps at the domain-populated table instead would
-// require the domain to reach the platform membrane constructors — exactly the
-// leak the archtest wall forbids. This is the "platform承接 the raw factory"
-// posture the wiring spec pins for BOTH actorrt.Builder entries: the runtime
-// contract is not bent to carry caps; the platform seam owns the weld.
+// the ActorFactory and the platform wraps it in the shared caps assembler +
+// build() per mint; the child/revived actor is therefore born with the identical
+// membrane set as a top-level admission. Welding caps at the domain-populated
+// table instead would require the domain to reach the platform membrane
+// constructors — exactly the leak the archtest wall forbids. This is the
+// "platform承接 the construction" posture the wiring spec pins for BOTH
+// actorrt.Builder entries: the runtime contract is not bent to carry caps; the
+// platform seam owns the weld.
 type CapsFactoryBuilder interface {
 	// LookupByClass resolves a caller-declared, opaque implementation-selection key
-	// to its caps-taking factory — fork's entry (ForkSpec.Class). Kind is NOT
+	// to its ActorFactory — fork's entry (ForkSpec.Class). Kind is NOT
 	// re-answered here (it is caller-held on ForkSpec.Kind).
-	LookupByClass(class string) (factory func(actorcaps.Caps) actorrt.Actor, ok bool)
-	// Lookup resolves a durable member id to its caps-taking factory — activation's
+	LookupByClass(class string) (def ActorFactory, ok bool)
+	// Lookup resolves a durable member id to its ActorFactory — activation's
 	// entry (the reconcile ring's eager revival + the schedule engine's identity-
 	// timer Reviver both hold only an id, since the original admission factory died
 	// with the previous incarnation). Kind is NOT re-answered here either (it is
 	// caller-held: DesiredMember.Kind for reconcile, the registry row for the
 	// Reviver). The domain implementation maps id→class→factory over the same
 	// underlying table LookupByClass reads.
-	Lookup(id actor.ActorID) (factory func(actorcaps.Caps) actorrt.Actor, ok bool)
+	Lookup(id actor.ActorID) (def ActorFactory, ok bool)
 }
 
 // capsAssembler is the platform's single caps seam assembler (Home.buildCaps):
@@ -75,12 +77,13 @@ type spawnHandle struct {
 	builder   CapsFactoryBuilder // nil until the class→factory table is injected.
 	assemble  capsAssembler      // the shared caps seam assembler (Home.buildCaps); never nil.
 	placement actorrt.Placement  // single-home identity this period (SinglePlacement).
+	hooks     actorbase.Hooks    // the actorbase engine's per-host wiring (spec §3); a fork child inherits its parent home's hooks.
 }
 
 // newSpawnHandle welds a SpawnHandle to parent incarnation inc. rt/assemble/
 // placement are always present; builder may be nil (see ErrNoBuilder).
-func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, builder CapsFactoryBuilder, assemble capsAssembler, placement actorrt.Placement) actorrt.SpawnHandle {
-	return spawnHandle{inc: inc, rt: rt, builder: builder, assemble: assemble, placement: placement}
+func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, builder CapsFactoryBuilder, assemble capsAssembler, placement actorrt.Placement, hooks actorbase.Hooks) actorrt.SpawnHandle {
+	return spawnHandle{inc: inc, rt: rt, builder: builder, assemble: assemble, placement: placement, hooks: hooks}
 }
 
 // Fork mints a child owned by this handle's parent incarnation.
@@ -113,10 +116,10 @@ func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 	// admission): the build closure runs INSIDE rt.Fork (pre-go-live,
 	// IsLive(childInc)==false), so a construction-time write is fenced exactly as
 	// for a top-level Spawn.
-	build := func(childInc actorrt.Incarnation) actorrt.Actor {
-		return factory(h.assemble(childID, spec.Kind, childInc))
+	buildChild := func(childInc actorrt.Incarnation) actorrt.Actor {
+		return build(h.assemble(childID, spec.Kind, childInc), h.hooks, factory)
 	}
-	if _, err := h.rt.Fork(h.inc, childID, spec.Kind, build); err != nil {
+	if _, err := h.rt.Fork(h.inc, childID, spec.Kind, buildChild); err != nil {
 		return "", err
 	}
 	return childID, nil

@@ -42,7 +42,6 @@ import (
 	"github.com/wanpengxie/atoll/actors/kimi"
 	"github.com/wanpengxie/atoll/actors/xhs"
 	"github.com/wanpengxie/atoll/app"
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/metatool"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -199,25 +198,25 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 			ID:      xhs.DefaultActorID,
 			Kind:    actor.KindTool,
 			Binding: actor.BindingRuntimeInboundViaRelay,
-			Factory: func(caps actorcaps.Caps) actorrt.Actor {
-				return xhs.NewActor(caps.Pen, xhs.Config{
+			Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
+				return xhs.NewActor(pen, xhs.Config{
 					ListenAddr:     metatoolXHSDeviceAddr,
 					ReaperInterval: 20 * time.Millisecond,
 					Logger:         logger,
 				})
-			},
+			}},
 		},
 		{
 			ID:      kimi.DefaultActorID,
 			Kind:    actor.KindTool,
 			Binding: actor.BindingRuntimeInboundViaRelay,
-			Factory: func(caps actorcaps.Caps) actorrt.Actor {
-				return kimi.NewActor(caps.Pen, kimi.Config{
+			Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
+				return kimi.NewActor(pen, kimi.Config{
 					ListenAddr:     metatoolKimiDeviceAddr,
 					ReaperInterval: 20 * time.Millisecond,
 					Logger:         logger,
 				})
-			},
+			}},
 		},
 	})
 	go func() {

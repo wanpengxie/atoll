@@ -11,7 +11,6 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/app"
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -44,9 +43,9 @@ func (m staticDesiredMembers) Members(context.Context) ([]actorrt.DesiredMember,
 	return m, nil
 }
 
-type staticFactoryTable map[actor.ActorID]func(actorcaps.Caps) actorrt.Actor
+type staticFactoryTable map[actor.ActorID]platform.ActorFactory
 
-func (t staticFactoryTable) Lookup(id actor.ActorID) (func(actorcaps.Caps) actorrt.Actor, bool) {
+func (t staticFactoryTable) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
 	f, ok := t[id]
 	return f, ok
 }

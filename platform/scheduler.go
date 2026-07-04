@@ -169,7 +169,7 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	// (ok=false, shell discarded), so EnsureLive satisfies its idempotency contract
 	// without a separate liveness pre-check.
 	inc, built := h.channel.Cells().SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-		return factory(h.buildCaps(id, kind, inc))
+		return build(h.buildCaps(id, kind, inc), h.hooks(), factory)
 	})
 	if !built {
 		return nil

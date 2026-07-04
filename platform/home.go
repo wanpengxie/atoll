@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/channelkit"
 	"github.com/wanpengxie/atoll/platform/internal/devicepresence"
@@ -476,7 +477,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		kind := m.Kind
 		id := m.ID
 		rt.SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-			return factory(h.buildCaps(id, kind, inc))
+			return build(h.buildCaps(id, kind, inc), h.hooks(), factory)
 		})
 	}
 	for id := range h.prevEagerDesired {
@@ -510,18 +511,20 @@ func (h *Home) View() View {
 }
 
 // Spawn admits one actor into the channel as durable membership truth and, when
-// factory is non-nil, places it as a live in-process cell (binding=embedded) with
+// def is non-empty, places it as a live in-process cell (binding=embedded) with
 // a Pen welded to its own (id, channelID).
 //
 // Identity weld at the admission membrane: the app supplies the id (domain authority —
-// "this id may be admitted") and a factory; the substrate Mints the welded Pen
-// and hands it to the factory, so the cell is born with a pen welded to its own id
-// (the substrate's "actorID and write capability are welded inseparably" invariant). The app never sees a
-// bare writer or a Minter — it only chooses WHAT to place; Home decides HOW.
+// "this id may be admitted") and a def (spec §4 S3's ActorFactory); the substrate
+// Mints the welded Pen and hands the caps to def's build in ONE step, so the cell
+// is born with a pen welded to its own id (the substrate's "actorID and write
+// capability are welded inseparably" invariant). The app never sees a bare writer,
+// a Minter, or actorcaps.Caps itself — it only chooses WHAT to place (an
+// ActorFactory over harness.Pen or an actorbase.Def); Home decides HOW.
 //
 // Order invariant (security-critical): membership apply -> build caps (Mint pen +
-// access/state/spawn) -> factory(caps) -> spawn cell. Membership must be durable
-// truth BEFORE the embodiment goes live — this is the birth mirror of the
+// access/state/spawn) -> build(caps, hooks, def) -> spawn cell. Membership must be
+// durable truth BEFORE the embodiment goes live — this is the birth mirror of the
 // death-side "despawn before deregister" (creation/destruction
 // symmetry): the sender gate no longer queries the registry (kind is welded into
 // the pen at Mint), so the old "else a cell that writes on construction
@@ -532,18 +535,18 @@ func (h *Home) View() View {
 // precede its own committed membership row — "welded at birth" must not become
 // "pen first, then register".
 //
-// nil-guard: factory == nil = membership-ONLY (a cell-less member, e.g. a
+// nil-guard: def.Empty() == true = membership-ONLY (a cell-less member, e.g. a
 // human user who is a member but has no cell). No Pen is Minted and no cell is
-// placed — Minting/placing a cell for a cell-less member would be wasted (and
-// passing nil to Mint→factory would NPE). Membership ≠ embodiment is the substrate
-// truth; the cell, if any, is the embodiment layer on top. A pre-existing row (server
-// restart) is reused — the live instance rebinds.
-func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, factory func(actorcaps.Caps) actorrt.Actor) error {
+// placed — Minting/placing a cell for a cell-less member would be wasted. Membership
+// ≠ embodiment is the substrate truth; the cell, if any, is the embodiment layer on
+// top. A pre-existing row (server restart) is reused — the live instance rebinds.
+func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, def ActorFactory) error {
 	if id == "" {
 		return fmt.Errorf("platform: Spawn id required")
 	}
+	hasCell := !def.Empty()
 	binding := actor.Binding("")
-	if factory != nil {
+	if hasCell {
 		binding = actor.BindingEmbedded
 	}
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{{
@@ -551,21 +554,30 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, fac
 	}}, nil); err != nil {
 		return fmt.Errorf("platform: Spawn membership: %w", err)
 	}
-	if factory != nil {
+	if hasCell {
 		// Two-phase Spawn: the build closure runs inside Spawn (after membership is
 		// durable, before go-live). It welds the whole caps bundle bound to THIS
 		// incarnation (livePen + liveAccess membranes, spawn handle) and hands the
-		// gated bundle to the factory in ONE step — no bare handle escapes. A
+		// gated bundle to def's build in ONE step — no bare handle escapes. A
 		// participant is a gated cap holder; substrate anchors are not (see
 		// channelkit/compute).
 		rt := h.channel.Cells()
 		rt.Spawn(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-			return factory(h.buildCaps(id, kind, inc))
+			return build(h.buildCaps(id, kind, inc), h.hooks(), def)
 		})
 	}
 	h.logger.Info("platform.member.spawned", "channel", string(h.channelID),
-		"actor", string(id), "kind", string(kind), "cell", factory != nil)
+		"actor", string(id), "kind", string(kind), "cell", hasCell)
 	return nil
+}
+
+// hooks is the actorbase engine's per-host wiring for every Proc-shaped def
+// this Home builds (spec §3's out-generation matrix, row 1): a cell host always
+// has a live CancelRequest reach, so Hooks.Canceller is never nil here (the
+// daemon-side gap — no caller-side cancel upstream frame — is a DIFFERENT
+// host, wired in compute.go instead).
+func (h *Home) hooks() actorbase.Hooks {
+	return actorbase.Hooks{Canceller: h.CancelRequest}
 }
 
 // CancelRequest reaches the request-scope of cancel(scope) for one in-flight
@@ -623,7 +635,7 @@ func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnat
 		Access:   link.NewLiveAccess(h.cs.Access.Mint(id), inc, rt),
 		State:    link.NewLiveAccess(h.cs.Access.MintState(id), inc, rt),
 		Schedule: link.NewLiveSchedule(h.schedMinter.Mint(id), inc, rt),
-		Spawn:    newSpawnHandle(inc, rt, h.builder, h.buildCaps, h.placement),
+		Spawn:    newSpawnHandle(inc, rt, h.builder, h.buildCaps, h.placement, h.hooks()),
 	}
 }
 

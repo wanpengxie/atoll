@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -131,8 +132,8 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 
 	actorID := actor.ActorID("user:" + userID)
 	// Register the creating user as a cell-less channel member (a human is a
-	// member but has no cell — Spawn with nil impl is membership-only).
-	if mErr := home.Spawn(c.Request.Context(), actorID, actor.KindHuman, nil); mErr != nil {
+	// member but has no cell — an empty ActorFactory is membership-only).
+	if mErr := home.Spawn(c.Request.Context(), actorID, actor.KindHuman, platform.ActorFactory{}); mErr != nil {
 		a.logger.Warn("app: channel membership insert failed", "channel", chID, "err", mErr.Error())
 	}
 

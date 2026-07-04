@@ -1,11 +1,11 @@
 package echo
 
 import (
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func init() { registry.Register("echo", construct) }
@@ -21,6 +21,6 @@ func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 		ID:      id,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeOutbound,
-		Factory: func(caps actorcaps.Caps) actorrt.Actor { return NewActor(caps.Pen) },
+		Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor { return NewActor(pen) }},
 	}, nil
 }

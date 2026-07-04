@@ -14,10 +14,10 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/atoll/actors/xhs"
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // xhsDeviceAddr is a fixed loopback port for the adapter's private device
@@ -102,13 +102,13 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 		ID:      xhs.DefaultActorID,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeInboundViaRelay,
-		Factory: func(caps actorcaps.Caps) actorrt.Actor {
-			return xhs.NewActor(caps.Pen, xhs.Config{
+		Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
+			return xhs.NewActor(pen, xhs.Config{
 				ListenAddr:     xhsDeviceAddr,
 				ReaperInterval: 20 * time.Millisecond,
 				Logger:         logger,
 			})
-		},
+		}},
 	}})
 	go func() {
 		runErr <- platform.RunCompute(ctx,
@@ -312,13 +312,13 @@ func TestXHSLiveActorStatus(t *testing.T) {
 		ID:      xhs.DefaultActorID,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeInboundViaRelay,
-		Factory: func(caps actorcaps.Caps) actorrt.Actor {
-			return xhs.NewActor(caps.Pen, xhs.Config{
+		Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
+			return xhs.NewActor(pen, xhs.Config{
 				ListenAddr:     xhsStatusDeviceAddr,
 				ReaperInterval: 20 * time.Millisecond,
 				Logger:         logger,
 			})
-		},
+		}},
 	}})
 	go func() {
 		runErr <- platform.RunCompute(ctx,

@@ -6,11 +6,11 @@ import (
 	"log"
 	"os"
 
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // NewDecl: the go-kimi engine's Constructor — its OWN flat actor class
@@ -59,12 +59,12 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 		ID:      id,
 		Kind:    actor.KindAgent,
 		Binding: actor.BindingRuntimeOutbound,
-		Factory: func(caps actorcaps.Caps) actorrt.Actor {
-			b, err := NewBridge(cfg, id, caps.Pen)
+		Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
+			b, err := NewBridge(cfg, id, pen)
 			if err != nil {
 				log.Fatalf("agent bridge: %v", err)
 			}
 			return b
-		},
+		}},
 	}, nil
 }

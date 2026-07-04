@@ -31,7 +31,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -127,11 +126,12 @@ type staticSource []actorrt.DesiredMember
 
 func (s staticSource) Members(context.Context) ([]actorrt.DesiredMember, error) { return s, nil }
 
-// staticBuilder resolves each fetched instance's id to the factory registry.Build
-// already produced for it — the daemon's ComputeBuilder over a fixed plan.
-type staticBuilder map[actor.ActorID]func(actorcaps.Caps) actorrt.Actor
+// staticBuilder resolves each fetched instance's id to the ActorFactory
+// registry.Build already produced for it — the daemon's ComputeBuilder over a
+// fixed plan.
+type staticBuilder map[actor.ActorID]platform.ActorFactory
 
-func (b staticBuilder) Lookup(id actor.ActorID) (func(actorcaps.Caps) actorrt.Actor, bool) {
+func (b staticBuilder) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
 	f, ok := b[id]
 	return f, ok
 }

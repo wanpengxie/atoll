@@ -47,7 +47,7 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 	ctx := context.Background()
 	id := actor.ActorID("obs-publisher")
 	pub := &obsPublisherActor{}
-	if err := h.Spawn(ctx, id, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor { return pub }); err != nil {
+	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor { return pub })); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
 
@@ -206,9 +206,9 @@ func TestObsFanout_HomeSpawn_OncePerPublish(t *testing.T) {
 
 	ctx := context.Background()
 	const id = actor.ActorID("obs-fanout-spawn")
-	if err := h.Spawn(ctx, id, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
+	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return &obsPublisherActor{}
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
 
@@ -227,7 +227,7 @@ func TestObsFanout_ReconcileActivationRevive_OncePerPublish(t *testing.T) {
 	desired := &testDesired{}
 	builder := newTestBuilder()
 	const id = actor.ActorID("agent:obs-fanout-reconcile")
-	builder.byID[id] = func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} }
+	builder.byID[id] = CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
 
 	h := openActivationHome(t, desired, builder)
 
@@ -256,13 +256,13 @@ func TestObsFanout_HomeReviver_OncePerPublish(t *testing.T) {
 	desired := &testDesired{} // empty: no eager reconcile competing for this id
 	builder := newTestBuilder()
 	const id = actor.ActorID("agent:obs-fanout-reviver")
-	builder.byID[id] = func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} }
+	builder.byID[id] = CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
 
 	h := openActivationHome(t, desired, builder)
 
 	// Seed durable membership WITHOUT a live cell (factory=nil — Home.Spawn's
 	// two-phase contract: membership row lands, no rt.Spawn runs).
-	if err := h.Spawn(ctx, id, actor.KindAgent, nil); err != nil {
+	if err := h.Spawn(ctx, id, actor.KindAgent, ActorFactory{}); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 	if live(h, id) {
@@ -292,7 +292,7 @@ func TestObsFanout_Fork_OncePerPublish(t *testing.T) {
 	builder := newTestBuilder()
 	const parent = actor.ActorID("agent:obs-fanout-fork-parent")
 	builder.byID[parent] = builder.recordFactory(parent)
-	builder.byClass["obs-worker"] = func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} }
+	builder.byClass["obs-worker"] = CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
 
 	h := openActivationHome(t, desired, builder)
 

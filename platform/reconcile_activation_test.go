@@ -52,28 +52,30 @@ func (d *testDesired) Members(context.Context) ([]actorrt.DesiredMember, error) 
 // class-keyed for fork. Each factory records the caps it received.
 type testBuilder struct {
 	mu      sync.Mutex
-	byID    map[actor.ActorID]func(actorcaps.Caps) actorrt.Actor
-	byClass map[string]func(actorcaps.Caps) actorrt.Actor
+	byID    map[actor.ActorID]ActorFactory
+	byClass map[string]ActorFactory
 	seen    map[actor.ActorID]actorcaps.Caps
 }
 
 func newTestBuilder() *testBuilder {
 	return &testBuilder{
-		byID:    map[actor.ActorID]func(actorcaps.Caps) actorrt.Actor{},
-		byClass: map[string]func(actorcaps.Caps) actorrt.Actor{},
+		byID:    map[actor.ActorID]ActorFactory{},
+		byClass: map[string]ActorFactory{},
 		seen:    map[actor.ActorID]actorcaps.Caps{},
 	}
 }
 
-// recordFactory returns a factory that records the caps under id and returns a
-// recordActor. Registered on byID (activation) and/or byClass (fork).
-func (b *testBuilder) recordFactory(id actor.ActorID) func(actorcaps.Caps) actorrt.Actor {
-	return func(c actorcaps.Caps) actorrt.Actor {
+// recordFactory returns an ActorFactory that records the caps it received and
+// returns a recordActor. Registered on byID (activation) and/or byClass
+// (fork). Built over CapsFactory — platform's own test seam over the whole
+// caps bundle (ActorFactory's doc).
+func (b *testBuilder) recordFactory(id actor.ActorID) ActorFactory {
+	return CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		b.mu.Lock()
 		b.seen[id] = c
 		b.mu.Unlock()
 		return recordActor{caps: c}
-	}
+	})
 }
 
 func (b *testBuilder) capsFor(id actor.ActorID) (actorcaps.Caps, bool) {
@@ -83,14 +85,14 @@ func (b *testBuilder) capsFor(id actor.ActorID) (actorcaps.Caps, bool) {
 	return c, ok
 }
 
-func (b *testBuilder) Lookup(id actor.ActorID) (func(actorcaps.Caps) actorrt.Actor, bool) {
+func (b *testBuilder) Lookup(id actor.ActorID) (ActorFactory, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	f, ok := b.byID[id]
 	return f, ok
 }
 
-func (b *testBuilder) LookupByClass(class string) (func(actorcaps.Caps) actorrt.Actor, bool) {
+func (b *testBuilder) LookupByClass(class string) (ActorFactory, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	f, ok := b.byClass[class]
@@ -203,9 +205,9 @@ func TestReconcileActivation_DoesNotKillUnmanagedLiveActors(t *testing.T) {
 
 	// A human, admitted as a real cell (durable member) — never in desired.
 	const human = actor.ActorID("user:alice")
-	if err := h.Spawn(ctx, human, actor.KindHuman, func(actorcaps.Caps) actorrt.Actor {
+	if err := h.Spawn(ctx, human, actor.KindHuman, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("Spawn human: %v", err)
 	}
 
@@ -263,7 +265,7 @@ func TestReconcileActivation_IdentityTimerFireRevivesThenAppends(t *testing.T) {
 
 	// Seed durable membership (no cell) so the FireSink can resolve the author's
 	// kind and the harness accepts the fired envelope — but leave it UN-embodied.
-	if err := h.Spawn(ctx, author, actor.KindAgent, nil); err != nil {
+	if err := h.Spawn(ctx, author, actor.KindAgent, ActorFactory{}); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 	if live(h, author) {
@@ -330,9 +332,9 @@ func TestReviver_LiveAuthorWithNilBuilderIsNotPoisoned(t *testing.T) {
 	t.Cleanup(func() { _ = h.Close() })
 
 	const author = actor.ActorID("agent:live-nobuilder")
-	if err := h.Spawn(ctx, author, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
+	if err := h.Spawn(ctx, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("Spawn live author: %v", err)
 	}
 	if !live(h, author) {
@@ -417,7 +419,7 @@ func TestReconcileActivation_DoesNotSpawnAttachedDesiredMember(t *testing.T) {
 
 	h := openActivationHome(t, desired, builder)
 
-	if err := h.Spawn(ctx, id, actor.KindAgent, nil); err != nil {
+	if err := h.Spawn(ctx, id, actor.KindAgent, ActorFactory{}); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
@@ -502,7 +504,7 @@ func TestReviver_AttachedHostRetainsThenFiresOnceDetached(t *testing.T) {
 	// Seed durable membership, unembodied, then mark it Host-attached — the
 	// wire-flap window this test exercises (the author's own daemon holds the
 	// live embodiment, home only has the durable row).
-	if err := h.Spawn(ctx, author, actor.KindAgent, nil); err != nil {
+	if err := h.Spawn(ctx, author, actor.KindAgent, ActorFactory{}); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
@@ -594,7 +596,7 @@ func TestReviver_AttachedAuthorNilBuilderIsTransientNotPoisoned(t *testing.T) {
 	t.Cleanup(func() { _ = h.Close() })
 
 	const author = actor.ActorID("agent:attached-nobuilder")
-	if err := h.Spawn(ctx, author, actor.KindAgent, nil); err != nil {
+	if err := h.Spawn(ctx, author, actor.KindAgent, ActorFactory{}); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
@@ -650,9 +652,9 @@ func TestReviver_AttachedAuthorNilBuilderIsTransientNotPoisoned(t *testing.T) {
 	// cell, so EnsureLive's already-live fast path clears the gate. The SAME
 	// timer must now fire: a no_builder poison during the attached window would
 	// have deleted the row and this fire could never land.
-	if err := h.Spawn(ctx, author, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
+	if err := h.Spawn(ctx, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("Spawn author home: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -683,7 +685,7 @@ func TestFireAndRevive_RejectDeregisteredAuthor(t *testing.T) {
 
 	// Seed durable membership (unembodied), then soft-deregister it — the registry
 	// row survives with DeregisteredAt != 0, exactly the in-flight-race snapshot.
-	if err := h.Spawn(ctx, author, actor.KindAgent, nil); err != nil {
+	if err := h.Spawn(ctx, author, actor.KindAgent, ActorFactory{}); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{

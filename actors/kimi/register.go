@@ -1,11 +1,11 @@
 package kimi
 
 import (
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 func init() { registry.Register("kimi", construct) }
@@ -24,6 +24,6 @@ func construct(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDec
 		ID:      id,
 		Kind:    actor.KindTool,
 		Binding: actor.BindingRuntimeInboundViaRelay,
-		Factory: func(caps actorcaps.Caps) actorrt.Actor { return NewActor(caps.Pen, cfg) },
+		Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor { return NewActor(pen, cfg) }},
 	}, nil
 }

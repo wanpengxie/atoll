@@ -36,9 +36,9 @@ func TestView_Stat_TriState(t *testing.T) {
 		t.Fatalf("Stat before spawn: live = true, want false")
 	}
 
-	if err := h.Spawn(ctx, id, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
+	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return statTestActor{}
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
 

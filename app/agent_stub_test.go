@@ -5,7 +5,6 @@ import (
 	"errors"
 	"time"
 
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -36,13 +35,13 @@ func init() {
 			ID:      id,
 			Kind:    actor.KindAgent,
 			Binding: actor.BindingRuntimeOutbound,
-			Factory: func(caps actorcaps.Caps) actorrt.Actor {
-				impl, err := testAgentBuilder(ctx.ChannelID, id, caps.Pen)
+			Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
+				impl, err := testAgentBuilder(ctx.ChannelID, id, pen)
 				if err != nil {
 					return nil
 				}
 				return impl
-			},
+			}},
 		}, nil
 	}
 	for _, engine := range []string{"go-kimi", "claude"} {

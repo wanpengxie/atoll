@@ -61,7 +61,7 @@ func TestSpawn_CellLessMember(t *testing.T) {
 	h := openTestHome(t)
 	ctx := context.Background()
 	id := actor.ActorID("user:alice")
-	if err := h.Spawn(ctx, id, actor.KindHuman, nil); err != nil {
+	if err := h.Spawn(ctx, id, actor.KindHuman, platform.ActorFactory{}); err != nil {
 		t.Fatalf("Spawn(nil impl): %v", err)
 	}
 	actors, err := h.View().ListActors(ctx)

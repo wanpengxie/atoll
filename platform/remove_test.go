@@ -61,9 +61,9 @@ func TestRemove_OrderSpy_DespawnBeforeDereg(t *testing.T) {
 	ctx := context.Background()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
 	const id = actor.ActorID("agent:order-spy")
-	if err := h.Spawn(ctx, id, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
+	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
 	if !live(h, id) {
@@ -94,9 +94,9 @@ func TestRemove_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
 	const id = actor.ActorID("agent:idempotent")
-	if err := h.Spawn(ctx, id, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
+	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
 
@@ -128,10 +128,10 @@ func TestRemove_CascadeClearsState(t *testing.T) {
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
 	const id = actor.ActorID("agent:cascade")
 	var caps1 actorcaps.Caps
-	if err := h.Spawn(ctx, id, actor.KindAgent, func(c actorcaps.Caps) actorrt.Actor {
+	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		caps1 = c
 		return recordActor{caps: c}
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
 	const key = resource.ResourceID("cursor")
@@ -144,10 +144,10 @@ func TestRemove_CascadeClearsState(t *testing.T) {
 	}
 
 	var caps2 actorcaps.Caps
-	if err := h.Spawn(ctx, id, actor.KindAgent, func(c actorcaps.Caps) actorrt.Actor {
+	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		caps2 = c
 		return recordActor{caps: c}
-	}); err != nil {
+	})); err != nil {
 		t.Fatalf("re-Spawn: %v", err)
 	}
 	out, err := caps2.State.Invoke(ctx, access.OpRead, key, nil, nil)
@@ -166,7 +166,7 @@ func TestRemove_DueFireRace(t *testing.T) {
 	builder.byID[id] = builder.recordFactory(id)
 	h := openActivationHome(t, &testDesired{}, builder)
 
-	if err := h.Spawn(ctx, id, actor.KindAgent, nil); err != nil {
+	if err := h.Spawn(ctx, id, actor.KindAgent, ActorFactory{}); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 	if _, err := h.schedMinter.Mint(id).Schedule(ctx, schedule.ScheduleReq{
@@ -214,7 +214,7 @@ func TestRemove_ReviverStraddle_SelfUndo(t *testing.T) {
 	builder.byID[id] = builder.recordFactory(id)
 	h := openActivationHome(t, &testDesired{}, builder)
 
-	if err := h.Spawn(ctx, id, actor.KindAgent, nil); err != nil {
+	if err := h.Spawn(ctx, id, actor.KindAgent, ActorFactory{}); err != nil {
 		t.Fatalf("seed membership: %v", err)
 	}
 

@@ -9,7 +9,6 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -61,10 +60,10 @@ func (penCell) Receive(context.Context, *message.Envelope) error { return nil }
 func spawnWithPen(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor.Kind) harness.Pen {
 	t.Helper()
 	var pen harness.Pen
-	if err := ch.Spawn(context.Background(), id, kind, func(caps actorcaps.Caps) actorrt.Actor {
-		pen = caps.Pen
-		return penCell{pen: caps.Pen}
-	}); err != nil {
+	if err := ch.Spawn(context.Background(), id, kind, platform.ActorFactory{Legacy: func(p harness.Pen) actorrt.Actor {
+		pen = p
+		return penCell{pen: p}
+	}}); err != nil {
 		t.Fatalf("spawn pen actor %s: %v", id, err)
 	}
 	return pen
@@ -94,7 +93,7 @@ func newClosureHome(t *testing.T) *platform.Home {
 // only).
 func registerActor(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor.Kind) {
 	t.Helper()
-	if err := ch.Spawn(context.Background(), id, kind, nil); err != nil {
+	if err := ch.Spawn(context.Background(), id, kind, platform.ActorFactory{}); err != nil {
 		t.Fatalf("register actor %s: %v", id, err)
 	}
 }
@@ -181,9 +180,9 @@ func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T
 
 	// 2. Spawn the panic actor cell (membership already seeded above; Spawn
 	//    reactivates + places the cell).
-	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
+	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
 		return panicOnReceive{}
-	}); err != nil {
+	}}); err != nil {
 		t.Fatalf("spawn worker cell: %v", err)
 	}
 
@@ -266,9 +265,9 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 	}
 
 	// 3. Spawn the silent actor cell (membership already seeded; Spawn places it).
-	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, func(actorcaps.Caps) actorrt.Actor {
+	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
 		return sa
-	}); err != nil {
+	}}); err != nil {
 		t.Fatalf("spawn silent cell: %v", err)
 	}
 

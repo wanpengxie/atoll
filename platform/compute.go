@@ -18,7 +18,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -116,17 +116,17 @@ func (f *cellObsForwarder) pump(ctx context.Context) {
 	}
 }
 
-// ActorDecl declares one actor the daemon will host. Factory constructs the
-// actorrt.Actor given its Caps bundle — the same unified factory signature both
-// admission paths share (Home.Spawn cell-side and RunCompute daemon-side). On the
-// daemon the Pen + plane-2 (Access/State) + time-axis (Schedule) caps are all
-// wired as relay-only proxies over the actor's port stream; only Spawn stays nil
-// (the fork/despawn arm does not cross the wire this period). The proxies only
-// exist after the actor's stream opens, so the actor cannot be pre-built: every
-// cell that can emit needs its pen at construction, and in the actor model every
-// actor can emit. There is no pen-less construction path. The proxies relay upward
-// without injecting identity; the home side welds the actor's authenticated bound
-// id (Mint on the pen, the access door minter, the schedule engine minter).
+// ActorDecl declares one actor the daemon will host. Factory is the ActorFactory
+// (def) both admission paths share (Home.Spawn cell-side and RunCompute
+// daemon-side). On the daemon the Pen + plane-2 (Access/State) + time-axis
+// (Schedule) caps are all wired as relay-only proxies over the actor's port
+// stream; only Spawn stays nil (the fork/despawn arm does not cross the wire
+// this period). The proxies only exist after the actor's stream opens, so the
+// actor cannot be pre-built: every cell that can emit needs its pen at
+// construction, and in the actor model every actor can emit. There is no
+// pen-less construction path. The proxies relay upward without injecting
+// identity; the home side welds the actor's authenticated bound id (Mint on the
+// pen, the access door minter, the schedule engine minter).
 //
 // The type is retained as the registry.Constructor return shape (registry/actors
 // still hand back a caller-held id+kind+factory triple); RunCompute itself no
@@ -135,16 +135,16 @@ type ActorDecl struct {
 	ID      actor.ActorID
 	Kind    actor.Kind
 	Binding actor.Binding
-	Factory func(actorcaps.Caps) actorrt.Actor
+	Factory ActorFactory
 }
 
-// ComputeBuilder resolves a desired member's id to its caps-taking factory — the
+// ComputeBuilder resolves a desired member's id to its ActorFactory — the
 // daemon-side counterpart of the reconcile ring's activation resolve (mirrors
 // CapsFactoryBuilder.Lookup, but scoped to compute: a daemon never forks, so it
 // carries no LookupByClass entry). Kind is never re-answered here — it is
 // caller-held on the DesiredMember the reconcile loop already read.
 type ComputeBuilder interface {
-	Lookup(id actor.ActorID) (factory func(actorcaps.Caps) actorrt.Actor, ok bool)
+	Lookup(id actor.ActorID) (def ActorFactory, ok bool)
 }
 
 // defaultComputePoll is the reconcile ring's desired-source poll period when
@@ -477,7 +477,12 @@ func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer
 	// like a cell born at home, closing the daemon-side parity gap the raw
 	// (ungated) facades used to leave open.
 	r.rt.Spawn(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-		return factory(link.NewLiveArms(rb, inc, r.rt))
+		// daemon Hooks{}: Canceller stays nil — the out-generation matrix's known
+		// gap (§3): a daemon-hosted caller's cancel-upstream frame does not exist
+		// yet (KindCancel is host→remote only), so Cancel still commits the
+		// caller's own unanswered_timeout terminal, just without the receiver
+		// signal.
+		return build(link.NewLiveArms(rb, inc, r.rt), actorbase.Hooks{}, factory)
 	})
 	d.StartStream(id)
 	delete(r.infeasible, id)
