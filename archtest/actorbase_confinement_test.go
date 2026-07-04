@@ -150,10 +150,10 @@ func TestNoOldCapsFactoryShapeResidual(t *testing.T) {
 // queue named explicitly in the spec (echo → actors/kimi(+xhs/device, same
 // adapter shape) → sysactor → agent providers) — each entry SHRINKS this set
 // as it migrates to actorbase.Proc, it never grows. _test.go stubs are exempt
-// everywhere (a test double is not a production implementer).
+// everywhere (a test double is not a production implementer). echo has
+// migrated (spec §4 S5a) and is gone from this list.
 var directActorImplementAllowlist = []string{
 	"../lib/actorbase/engine.go",                // the sanctioned engine (spec §3)
-	"../actors/echo/echo.go",                    // S5 migration queue
 	"../actors/xhs/actor.go",                    // S5/S5b migration queue
 	"../actors/device/actor.go",                 // S5/S5b migration queue
 	"../actors/kimi/actor.go",                   // S5/S5b migration queue
