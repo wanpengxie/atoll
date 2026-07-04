@@ -217,6 +217,50 @@ func TestEngine_ReplyClosesEntry(t *testing.T) {
 	}
 }
 
+// TestEngine_CancelRequestClosesEntryAndCancelsMsgCtx is spec §5 DoD④'s
+// "投递穿透 msg.Ctx Done" — the cell-hosted proof: cell.cancelRequest's
+// one-hop handoff to a RequestCanceller-implementing occupant (§1.4) IS
+// engine.CancelRequest, which must both close the serve ledger entry AND
+// cancel the ctx a delivered Msg's Ctx() already carries (ledger_serve.go's
+// close() firing the entry's own cancel — a Proc parked on msg.Ctx().Done()
+// must actually unblock, not just have its ledger row vanish).
+func TestEngine_CancelRequestClosesEntryAndCancelsMsgCtx(t *testing.T) {
+	pen := &fakePen{self: "actor:test"}
+	e := newTestEngine(t, pen, Hooks{}, 8, 8)
+	e.lifeCtx = context.Background()
+	env := newRequestEnv("req-cancel", -1) // no ExpiresAt: only a delivered cancel can close it
+	if !e.serve.admit(env) {
+		t.Fatal("expected admit to succeed")
+	}
+	ctx, ok := e.serve.ctxFor(env.ID)
+	if !ok {
+		t.Fatal("expected ctxFor to resolve the admitted entry")
+	}
+	msg := NewMsg(ctx, *env)
+
+	select {
+	case <-msg.Ctx().Done():
+		t.Fatal("msg.Ctx() done before any cancel was delivered")
+	default:
+	}
+
+	var _ actorrt.RequestCanceller = e // engine.CancelRequest IS the RequestCanceller hook cell.cancelRequest one-hop-delivers to.
+	e.CancelRequest(env.ID)
+
+	select {
+	case <-msg.Ctx().Done():
+	case <-time.After(time.Second):
+		t.Fatal("msg.Ctx() never cancelled after engine.CancelRequest")
+	}
+	if e.serve.len() != 0 {
+		t.Fatalf("expected serve ledger entry closed after CancelRequest, got len=%d", e.serve.len())
+	}
+	// Idempotent: a redundant cancel/late-write on an already-closed entry.
+	if _, err := e.Reply(msg, "late"); !errors.Is(err, ErrRequestClosed) {
+		t.Fatalf("expected ErrRequestClosed on Reply after cancel, got %v", err)
+	}
+}
+
 // --- call ledger / Sys.Call / JobTable: await_result and Wait share one
 // account -------------------------------------------------------------------
 
@@ -368,8 +412,16 @@ func TestEngine_CallTimeoutWritesUnansweredTimeoutAndClosesEntry(t *testing.T) {
 		t.Fatalf("unexpected Submit error: %v", err)
 	}
 
+	// fireTimeout claims the entry (deletes it under lock — the at-most-once
+	// guard against a racing Match) BEFORE it writes the terminal through the
+	// pen, so polling on list()==0 alone is not proof the write has landed
+	// yet (a benign race, not a production defect: the delete is the claim,
+	// the write is the effect, and nothing here promises they're atomic).
+	// Poll on the actual write count instead (Submit already wrote the
+	// request itself, so wait for a SECOND write — the terminal).
+	writeCountBefore := pen.count()
 	deadline := time.Now().Add(time.Second)
-	for len(e.call.list()) != 0 && time.Now().Before(deadline) {
+	for pen.count() == writeCountBefore && time.Now().Before(deadline) {
 		time.Sleep(5 * time.Millisecond)
 	}
 	if len(e.call.list()) != 0 {
@@ -575,5 +627,23 @@ func TestEngine_StopDrainsWorkerBeforeReturning(t *testing.T) {
 	case <-done:
 	case <-time.After(time.Second):
 		t.Fatal("Stop did not return after the worker drained")
+	}
+}
+
+// TestEngine_ForkAndDespawnChildReturnErrUnsupportedWhenSpawnNil is spec §3's
+// out-generation matrix known gap made mechanical (§1.2 doc: "daemon 宿主返
+// ErrUnsupported"): link.NewLiveArms leaves Caps.Spawn zero for a daemon-
+// hosted incarnation, so the engine must answer ErrUnsupported — not
+// nil-pointer-panic on the nil actorrt.SpawnHandle.
+func TestEngine_ForkAndDespawnChildReturnErrUnsupportedWhenSpawnNil(t *testing.T) {
+	pen := &fakePen{self: "actor:daemon-hosted"}
+	e := newTestEngine(t, pen, Hooks{}, 8, 8)
+	e.spawn = nil // the daemon out-generation path's known gap (spec §3)
+
+	if _, err := e.Fork("worker", "hint"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("Fork with nil Spawn arm err = %v, want ErrUnsupported", err)
+	}
+	if err := e.DespawnChild("actor:child"); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("DespawnChild with nil Spawn arm err = %v, want ErrUnsupported", err)
 	}
 }
