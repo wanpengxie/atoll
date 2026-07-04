@@ -138,17 +138,46 @@ func (l *callLedger) match(env *message.Envelope) bool {
 		e.timer.Stop()
 		e.timer = nil
 	}
-	// Mark buffered-final UNDER the lock (F4) before releasing it: a
-	// fireTimeout/cancel that grabs the lock next sees final=true and is a
-	// no-op, so it can never delete this entry (whose real final is now owed to
-	// wait) nor write a self-close over the terminal already in hand.
+	// Mark buffered-final AND hand the envelope to ch in ONE lock scope (F4;
+	// tightened in the round-2 review): ch is buffered(1) and at most one
+	// final ever lands, so the send can never block while the lock is held.
+	// Setting the flag and filling the buffer atomically w.r.t. lock holders
+	// removes the "final=true but ch still empty" intermediate — any lock
+	// holder that observes the flag can also claim the envelope (see
+	// claimBuffered), so a wait conceding its deadline can never strand a
+	// final that had already been marked buffered.
 	e.final = true
-	l.mu.Unlock()
 	select {
 	case e.ch <- env:
 	default: // unreachable for a well-formed ledger (at most one final ever lands)
 	}
+	l.mu.Unlock()
 	return true
+}
+
+// claimBuffered atomically claims a final that match has already buffered:
+// whenever a lock holder observes final=true the envelope is already in ch
+// (match sets both in one lock scope), so the receive here never blocks. A
+// concurrent waiter may have consumed it first — then the entry is theirs
+// and this returns false. wait's deadline/ctx branches call this instead of
+// a bare non-blocking channel peek, so "the final landed just as I gave up"
+// resolves to claiming it, and a genuine timeout leaves the entry a normal
+// InFlight row (visible to list, cancellable, awaitable later) — the
+// stranded "marked buffered yet unreachable" state cannot exist.
+func (l *callLedger) claimBuffered(id message.ID) (*message.Envelope, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	e, ok := l.entries[id]
+	if !ok || !e.final {
+		return nil, false
+	}
+	select {
+	case env := <-e.ch:
+		delete(l.entries, id)
+		return env, true
+	default:
+		return nil, false
+	}
 }
 
 // fireTimeout is author#2's durable-deadline executor (spec §1.5, the
@@ -165,7 +194,11 @@ func (l *callLedger) match(env *message.Envelope) bool {
 // truth row reads as a lazy-open request an ExpiresAt reader can level-judge.
 // The eventual fix is generalising the substrate closure reconcile
 // (death.go's ReconcileReceiverUnavailable geometry) to the "caller absent"
-// cell; owner deferred it, pain-driven.
+// cell; owner deferred it, pain-driven. A sibling of the same orphan family
+// (round-2 review, M1): a buffered-final entry whose caller never comes back
+// for it (async Submit → its own wait gave up → final landed late → no
+// further Await/Cancel) lingers in the map until teardown — truth is already
+// closed by the real final, only this local row idles; same defer.
 func (l *callLedger) fireTimeout(id message.ID) {
 	l.mu.Lock()
 	e, ok := l.entries[id]
@@ -278,6 +311,9 @@ func (l *callLedger) wait(ctx context.Context, id message.ID, d time.Duration) (
 		case env := <-e.ch:
 			return consume(env)
 		case <-ctx.Done():
+			if env, ok := l.claimBuffered(id); ok {
+				return env, true, nil
+			}
 			return nil, false, ctx.Err()
 		}
 	}
@@ -287,19 +323,15 @@ func (l *callLedger) wait(ctx context.Context, id message.ID, d time.Duration) (
 	case env := <-e.ch:
 		return consume(env)
 	case <-timer.C:
-		select {
-		case env := <-e.ch:
-			return consume(env)
-		default:
-			return nil, false, nil
+		if env, ok := l.claimBuffered(id); ok {
+			return env, true, nil
 		}
+		return nil, false, nil
 	case <-ctx.Done():
-		select {
-		case env := <-e.ch:
-			return consume(env)
-		default:
-			return nil, false, ctx.Err()
+		if env, ok := l.claimBuffered(id); ok {
+			return env, true, nil
 		}
+		return nil, false, ctx.Err()
 	}
 }
 

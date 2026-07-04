@@ -155,12 +155,15 @@ func (e *engine) Start(ctx context.Context, self actorrt.ActorContext) error {
 func (e *engine) runWorker(proc Proc) {
 	defer close(e.workerDone)
 	err := e.runProc(proc)
-	// F6: flip to Draining BEFORE announcing death, so any request that races
-	// into the pump during the teardown window (worker already gone) is
-	// rejected with an overloaded terminal rather than admitted into a work
-	// queue no one will ever drain (a suspended request only author#2 could
-	// close). Ordering matters: the Draining store happens-before the dying
-	// send, so a reader of Dying() observes the pump already refusing Admit.
+	// F6: flip to Draining BEFORE announcing death, so a request arriving
+	// after the death announcement is rejected with an overloaded terminal
+	// rather than admitted into a work queue no one will ever drain. The
+	// store→send ordering is a deterministic barrier ONLY for Dying()
+	// readers (channel edge); the cell's own inbox arm racing this store may
+	// still admit one last request in the sub-microsecond window between the
+	// Proc returning and the store landing — that residue is closed by its
+	// caller's author#2 timer, the same backstop geometry as ever (spec
+	// §1.5). The store shrinks the window; author#2 owns whatever is left.
 	e.occupant.Store(int32(occupantDraining))
 	e.dying <- err
 }
@@ -184,18 +187,14 @@ func (e *engine) runRejectLane() {
 		case env := <-e.rejectQ:
 			e.writeOverloaded(env)
 		case <-e.rejectStop:
-			// F7: drain any still-queued rejects before exiting so each one
-			// still gets its overloaded terminal (the queue is bounded, so the
-			// drain is bounded). A bare `return` here would strand whatever the
-			// pump had already handed us when Stop fired.
-			for {
-				select {
-				case env := <-e.rejectQ:
-					e.writeOverloaded(env)
-				default:
-					return
-				}
-			}
+			// No drain on stop (round-2 review overturned F7's drain): rejectStop
+			// only closes AFTER the cell has already flipped the incarnation's
+			// live bit and cancelled lifeCtx, so every drained write would be
+			// fail-closed by the pen's live membrane — a drain here is theater
+			// that leaves truth untouched. Whatever is still queued is closed by
+			// the ORIGINAL callers' own author#2 durable timers — the same
+			// backstop as a full reject lane (spec §1.5: teardown 残留同兜底).
+			return
 		}
 	}
 }
