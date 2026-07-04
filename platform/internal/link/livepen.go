@@ -15,7 +15,7 @@ import (
 // a goroutine that outlived its incarnation cannot author truth on its behalf.
 var ErrWriterNotLive = errors.New("link: writer no longer the live incarnation")
 
-// livePen is the liveCap (ActorEnvFactory's WHEN-validity membrane) over a raw
+// livePen is the liveCap (WHEN-validity membrane) over a raw
 // harness.Pen: a thin wrapper that, per write, first checks the host that the
 // welded incarnation is STILL live (by POINTER, ABA-safe; lock-free) and only
 // then forwards to the raw pen. It is the platform-assembly half of the

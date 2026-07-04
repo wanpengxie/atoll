@@ -314,8 +314,10 @@ func (p *port) Deliver(env *message.Envelope) error {
 // naming the request directly onto the codec — NOT through the sendq/writeLoop —
 // because cancel is off-loop: it must not queue behind the very deliver work it
 // means to interrupt, and the codec's write mutex already serialises it against
-// concurrent deliver writes. The remote host fires the matching reqCtx off its
-// own cell goroutine. Best-effort: a write error on a dying conn is dropped (the
+// concurrent deliver writes. The remote host's disposition depends on the
+// occupant: an actorbase engine closes the request's in-station ledger entry
+// (msg.Ctx cancel + account close); a legacy stack-form occupant fires the
+// matching reqCtx. Best-effort: a write error on a dying conn is dropped (the
 // request's deadline + the caller's closure still own the terminal); a torn-down
 // port is a no-op.
 func (p *port) cancelRequest(id message.ID) {

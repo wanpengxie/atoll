@@ -360,8 +360,16 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 		as.writer.Close()
 		as.access.close()
 		as.sched.close()
+		// Pointer-guarded removal: delete the table entry only if it is still
+		// THIS stream. A reconnect/rebuild may have already registered a NEW
+		// stream under the same actor id (OpenStream overwrites d.streams[id]);
+		// a bare delete-by-id here would tear the successor's entry out from
+		// under it — the same alias bug pointer-identity discipline kills
+		// everywhere else in the runtime.
 		d.mu.Lock()
-		delete(d.streams, as.id)
+		if d.streams[as.id] == as {
+			delete(d.streams, as.id)
+		}
 		d.mu.Unlock()
 	}()
 	for {
@@ -445,7 +453,19 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 				go as.cancel(cp.RequestID)
 			}
 		default:
-			d.logger.Warn("link.unknown_kind", "actor", string(as.id), "kind", string(frame.Kind))
+			// Fail-closed on an out-of-closed-set kind, mirroring the home port's
+			// read-loop discipline (ipc kinds are a closed set): an unknown frame
+			// may be an unmatchable ack occupying a FIFO slot, and skipping it
+			// would silently shift an ack arm by one — every later caller would
+			// get the previous op's verdict. Tearing the stream down lets the
+			// deferred arm-close surface honest unconfirmed outcomes to all
+			// in-flight callers, and the daemon's redial loop re-establishes.
+			// NOTE (version skew): today both ends ship in one binary; when the
+			// frame set grows (期10 wire extensions), mixed-version links will
+			// close on first new frame — bump both ends together.
+			d.logger.Error("link.unknown_kind", "actor", string(as.id), "kind", string(frame.Kind))
+			_ = as.stream.Close()
+			return
 		}
 	}
 }
