@@ -346,6 +346,121 @@ func TestEngine_RejectLaneFullDropsAndObsRecords(t *testing.T) {
 	}
 }
 
+// --- call ledger: author#2 durable timeout + pending.Cancel disposition ----
+
+func TestEngine_CallTimeoutWritesUnansweredTimeoutAndClosesEntry(t *testing.T) {
+	pen := &fakePen{self: "actor:caller"}
+	e := newTestEngine(t, pen, Hooks{}, 8, 8)
+	e.lifeCtx = context.Background()
+
+	spec := behavior.RequestSpec{
+		Type:      "greet",
+		Audience:  message.Audience{"actor:callee"},
+		ExpiresAt: nil,
+	}
+	// Force a short deadline directly through submit's ExpiresAt resolution
+	// path (Hooks.TimeoutResolver) rather than sleeping out DefaultTimeout.
+	e.hooks.TimeoutResolver = func(actor.ActorID, string) (time.Duration, bool) {
+		return 20 * time.Millisecond, true
+	}
+	id, err := e.Submit(spec)
+	if err != nil {
+		t.Fatalf("unexpected Submit error: %v", err)
+	}
+
+	deadline := time.Now().Add(time.Second)
+	for len(e.call.list()) != 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	if len(e.call.list()) != 0 {
+		t.Fatal("expected call ledger entry closed after author#2 timeout fired")
+	}
+	last := pen.last()
+	if last == nil {
+		t.Fatal("expected author#2 to write the caller's own unanswered_timeout terminal")
+	}
+	var payload struct {
+		ErrorCode string `json:"error_code"`
+	}
+	_ = json.Unmarshal(last.Payload, &payload)
+	if payload.ErrorCode != string(message.TerminalUnansweredTimeout) {
+		t.Fatalf("expected error_code=%s, got %+v", message.TerminalUnansweredTimeout, payload)
+	}
+
+	// A response that races in after the self-close is a benign no-op — the
+	// entry is already gone, Match must not resurrect or double-write it.
+	writesBefore := pen.count()
+	e.call.match(responseEnv(id, message.StatusCompleted))
+	if pen.count() != writesBefore {
+		t.Fatalf("expected no further write from a post-timeout race match, got %d writes (was %d)", pen.count(), writesBefore)
+	}
+}
+
+func TestEngine_PendingCancelSelfClosesAndSkipsCancellerWhenNil(t *testing.T) {
+	pen := &fakePen{self: "actor:caller"}
+	e := newTestEngine(t, pen, Hooks{}, 8, 8) // Hooks{} — Canceller nil, honest degrade
+	e.lifeCtx = context.Background()
+
+	pending, err := e.Call("actor:callee", "greet", map[string]string{"hi": "1"})
+	if err != nil {
+		t.Fatalf("unexpected Call error: %v", err)
+	}
+
+	if err := pending.Cancel(); err != nil {
+		t.Fatalf("unexpected Cancel error: %v", err)
+	}
+	if len(e.call.list()) != 0 {
+		t.Fatal("expected the call ledger entry closed by Cancel")
+	}
+	last := pen.last()
+	if last == nil {
+		t.Fatal("expected Cancel to write the caller's own self-closed terminal")
+	}
+	var payload struct {
+		ErrorCode string `json:"error_code"`
+		Cancelled bool   `json:"cancelled"`
+	}
+	_ = json.Unmarshal(last.Payload, &payload)
+	if payload.ErrorCode != string(message.TerminalUnansweredTimeout) || !payload.Cancelled {
+		t.Fatalf("expected a cancelled unanswered_timeout terminal, got %+v", payload)
+	}
+
+	// A second Cancel against an already-closed entry is an idempotent no-op.
+	if err := pending.Cancel(); err != nil {
+		t.Fatalf("expected idempotent no-op on double Cancel, got %v", err)
+	}
+}
+
+func TestEngine_PendingCancelInvokesCancellerHookWhenWired(t *testing.T) {
+	pen := &fakePen{self: "actor:caller"}
+	var gotTarget actor.ActorID
+	var gotID message.ID
+	calls := 0
+	hooks := Hooks{Canceller: func(target actor.ActorID, id message.ID) {
+		calls++
+		gotTarget = target
+		gotID = id
+	}}
+	e := newTestEngine(t, pen, hooks, 8, 8)
+	e.lifeCtx = context.Background()
+
+	pending, err := e.Call("actor:callee", "greet", map[string]string{"hi": "1"})
+	if err != nil {
+		t.Fatalf("unexpected Call error: %v", err)
+	}
+	sent := pen.last()
+
+	if err := pending.Cancel(); err != nil {
+		t.Fatalf("unexpected Cancel error: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("expected Hooks.Canceller invoked exactly once, got %d", calls)
+	}
+	if gotTarget != actor.ActorID("actor:callee") || gotID != sent.ID {
+		t.Fatalf("expected Canceller(target=actor:callee, id=%s), got target=%s id=%s", sent.ID, gotTarget, gotID)
+	}
+}
+
 // --- occupant arc: death broadcast timing + quiet/loud raw exit code -------
 
 func TestEngine_DyingReportsQuietOnNilReturn(t *testing.T) {

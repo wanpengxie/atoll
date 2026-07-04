@@ -98,6 +98,15 @@ type ShellConfig struct {
 // Shell is the channel's actor-invocation shell. It holds the in-flight
 // correlator + closure author#2 and exposes the sync/async call ops the
 // meta-tools drive. One Shell is owned by one client-edge holder.
+//
+// KNOWN S3+ SHOVEL TERRITORY (actorbase-spec-v1.md §1.5/§4): Shell.pending +
+// behavior.Caller is one of the "two historical fragments" the spec collapses
+// into lib/actorbase's callLedger/JobTable — engine.go's ledger_call.go is
+// that same machine, moved house, not a second one built alongside this. This
+// Shell has not been rewired onto JobTable yet (that lands with the metatool
+// mind-binding's JobTable consumption, S3+ per spec's slice order); until
+// then this remains the ONLY live out-station account a channel's
+// tool-invocation path runs against — not a dual form, a not-yet-migrated one.
 type Shell struct {
 	cfg ShellConfig
 
