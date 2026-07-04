@@ -552,8 +552,22 @@ type stateAdapter struct {
 func (s stateAdapter) Get(id resource.ResourceID) (accessdoor.Outcome, error) {
 	return s.h.Invoke(s.ctx(), access.OpRead, id, nil, nil)
 }
+
+// Put upserts key — the absorbed StateKV.Put semantics the verb table
+// promises (spec §1.2 "期8 StateKV 吸收"): the door's Write only PUTs an
+// EXISTING row (birth is Create, not Write), so a first Write coming back
+// resource_not_found falls through to Create. The two-step is a benign race,
+// not a TOCTOU: the state locus has exactly one writer (self, non-ambient
+// welding).
 func (s stateAdapter) Put(id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
-	return s.h.Invoke(s.ctx(), access.OpWrite, id, args, nil)
+	out, err := s.h.Invoke(s.ctx(), access.OpWrite, id, args, nil)
+	if err != nil {
+		return out, err
+	}
+	if out.RejectReason == access.ResourceNotFound {
+		return s.h.Invoke(s.ctx(), access.OpCreate, id, args, nil)
+	}
+	return out, nil
 }
 func (s stateAdapter) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
 	return s.h.Invoke(s.ctx(), access.OpDelete, id, nil, nil)

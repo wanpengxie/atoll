@@ -9,7 +9,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
@@ -356,6 +359,65 @@ func TestCallLedger_ParkedWaiterWokenByClose(t *testing.T) {
 		case <-time.After(2 * time.Second):
 			t.Fatalf("%s: parked waiter not woken by account close", tc.id)
 		}
+	}
+}
+
+// upsertAccess is an accessdoor double for the State-arm upsert contract: it
+// rejects OpWrite on keys it has never seen (the door's real Write-is-PUT
+// semantics) and records every op, so the test can assert Put's
+// Write→not_found→Create fallthrough.
+type upsertAccess struct {
+	rows map[resource.ResourceID][]byte
+	ops  []access.Operation
+}
+
+func (u *upsertAccess) Invoke(_ context.Context, op access.Operation, id resource.ResourceID, args []byte, _ *access.Grant) (accessdoor.Outcome, error) {
+	u.ops = append(u.ops, op)
+	switch op {
+	case access.OpWrite:
+		if _, ok := u.rows[id]; !ok {
+			return accessdoor.Outcome{RejectReason: access.ResourceNotFound}, nil
+		}
+		u.rows[id] = args
+		return accessdoor.Outcome{}, nil
+	case access.OpCreate:
+		u.rows[id] = args
+		return accessdoor.Outcome{}, nil
+	default:
+		return accessdoor.Outcome{}, nil
+	}
+}
+
+// S6-STRAND ①(三期×actorbase 汇总裁决): sys.State().Put must be the upsert the
+// verb table promises("期8 StateKV 吸收")——a first Put on a new key falls
+// through Write→resource_not_found→Create instead of surfacing the reject;
+// a second Put on the same key is a plain Write. (Pre-fix: stateAdapter.Put
+// was a bare OpWrite — first write to any new key rejected, the OPPOSITE of
+// the absorbed facade's semantics.)
+func TestEngine_StatePutUpsertsNewKey(t *testing.T) {
+	pen := &fakePen{self: "actor:test"}
+	e := newTestEngine(t, pen, Hooks{}, 8, 8)
+	e.lifeCtx = context.Background()
+	ua := &upsertAccess{rows: map[resource.ResourceID][]byte{}}
+	e.state = ua
+
+	out, err := e.State().Put("k1", []byte("v1"))
+	if err != nil || !out.Accepted() {
+		t.Fatalf("first Put on a new key must upsert-accept, got out=%+v err=%v", out, err)
+	}
+	wantOps := []access.Operation{access.OpWrite, access.OpCreate}
+	if len(ua.ops) != 2 || ua.ops[0] != wantOps[0] || ua.ops[1] != wantOps[1] {
+		t.Fatalf("expected Write→Create fallthrough, got ops=%v", ua.ops)
+	}
+	out, err = e.State().Put("k1", []byte("v2"))
+	if err != nil || !out.Accepted() {
+		t.Fatalf("second Put must be a plain accepted Write, got out=%+v err=%v", out, err)
+	}
+	if len(ua.ops) != 3 || ua.ops[2] != access.OpWrite {
+		t.Fatalf("second Put must not re-Create, got ops=%v", ua.ops)
+	}
+	if string(ua.rows["k1"]) != "v2" {
+		t.Fatalf("rows[k1] = %q, want v2", ua.rows["k1"])
 	}
 }
 

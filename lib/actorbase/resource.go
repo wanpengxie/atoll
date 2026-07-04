@@ -33,9 +33,10 @@ type ResourceHandle interface {
 // this actor's own owner coordinate instead of the channel-scoped tree; its
 // own KV vocabulary (Get/Put/Del) is deliberately spelled differently from
 // ResourceHandle's (Create/Read/Write/Delete) because the two loci read
-// differently to a Proc author even though one engine implements both (期8
-// StateKV absorbs Put's create-or-write branch behind one verb — not this
-// slice's concern, the SIGNATURE is final now).
+// differently to a Proc author even though one engine implements both. Put
+// is an UPSERT — the create-or-write branch the retired 期8 StateKV facade
+// carried is absorbed into the engine's stateAdapter.Put (a first write to a
+// new key must not surprise the author with resource_not_found).
 type StateHandle interface {
 	Get(id resource.ResourceID) (accessdoor.Outcome, error)
 	Put(id resource.ResourceID, args []byte) (accessdoor.Outcome, error)
