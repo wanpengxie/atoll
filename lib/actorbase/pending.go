@@ -1,0 +1,30 @@
+package actorbase
+
+import (
+	"context"
+	"time"
+)
+
+// Pending is the single-use ticket sys.Call hands back — the caller's own
+// out-station account entry (spec §1.5, the two-ledger account: this is the
+// caller-facing read/write handle on ONE call ledger row, not a third table).
+// It is a SEALED ticket, not a chaining builder: exactly two dispositions,
+// nothing else grafts onto it later.
+type Pending interface {
+	// Wait blocks until the matching response lands, ctx is done, or d
+	// elapses (selective receive on the out-station account) — whichever
+	// first. ctx is caller-supplied by design (spec's ctx-provenance rule:
+	// "只修 Wait 修不了生态" — a bare Proc's other calls (http/sql/SDK) all
+	// take an explicit ctx too, so Wait does not get to be the one magic
+	// exception). d bounds this particular wait window; it is independent of
+	// (and typically much shorter than) the request's own durable deadline,
+	// which the ledger enforces regardless of whether anyone is still
+	// waiting.
+	Wait(ctx context.Context, d time.Duration) (Msg, error)
+	// Cancel closes this call's out-station entry early: it commits the
+	// caller's OWN unanswered_timeout terminal now instead of waiting for the
+	// deadline (a legal self-close, never a forged verdict — see spec
+	// §1.5's pending.Cancel semantics), and lets a Canceller signal reach the
+	// receiver's in-station account. Idempotent to a closed entry.
+	Cancel() error
+}
