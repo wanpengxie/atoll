@@ -48,6 +48,31 @@ type Stopper interface {
 	Stop(ctx context.Context) error
 }
 
+// RequestCanceller is the optional occupant hook for the request-cancel signal
+// (the "down" half of §1.4's three signal lines, cell-hosted twin of port's
+// wire-crossing cancelRequest). cell.cancelRequest hands the id off to it in
+// ONE HOP — dispatch is the runtime's job, disposition is the occupant's
+// (mirrors port writing a KindCancel frame and leaving the remote to act on
+// it). An occupant that does not implement RequestCanceller keeps the
+// built-in per-request reqCtx cancellation (the fallback path test doubles
+// rely on) — this interface is purely additive, it does not replace that
+// path for non-implementers.
+type RequestCanceller interface {
+	CancelRequest(id message.ID)
+}
+
+// DownReporter is the optional occupant hook for the exit signal (the "up"
+// half of §1.4's three signal lines): the cell's main loop adds a select arm
+// on Dying(). A value read from it is the occupant's own exit code — nil
+// (return nil) is quiet (dies without a down edge, no receiver_unavailable
+// fanout), a non-nil error (return err or panic) is loud (down edge,
+// author#3). An occupant that does not implement DownReporter leaves the
+// arm disabled (a nil channel never fires in a select) and the cell's
+// existing ctx.Done()/panic-recover death path is unchanged.
+type DownReporter interface {
+	Dying() <-chan error
+}
+
 // ActorContext is the handle the substrate hands an actor at Start. It exposes
 // the actor's own identity (Erlang self()) and the obs PUSH/producer end
 // (PublishObs) — and nothing else: there is no self-send. A message reaches an

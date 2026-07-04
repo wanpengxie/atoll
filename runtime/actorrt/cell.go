@@ -216,15 +216,72 @@ func (c *cell) start() {
 			}
 		}
 
+		// dying is the optional occupant exit-signal arm (DownReporter). A
+		// non-implementing occupant leaves it nil — a nil channel never becomes
+		// ready in a select, so the arm below is simply disabled and the loop's
+		// behaviour is unchanged from before this hook existed.
+		var dying <-chan error
+		if dr, ok := c.impl.(DownReporter); ok {
+			dying = dr.Dying()
+		}
+
 		for {
 			select {
 			case <-c.ctx.Done():
+				// Non-stopping arbitration (§1.4) prefers a dying signal that raced
+				// ctx.Done() to plain readiness: re-check dying NON-BLOCKINGLY before
+				// returning, so a simultaneously-ready exit code is not lost to
+				// select's random choice between two ready cases.
+				if err, ok := drainDying(dying); ok {
+					deathCause = c.arbitrateDeath(err)
+				}
+				return
+			case err := <-dying:
+				deathCause = c.arbitrateDeath(err)
 				return
 			case env := <-c.inbox:
 				c.safeReceive(env)
 			}
 		}
 	}()
+}
+
+// drainDying is a non-blocking read of the optional dying arm — nil-channel
+// safe (a nil channel's receive in a select-with-default never fires, so a
+// non-DownReporter occupant reports ok=false here).
+func drainDying(dying <-chan error) (err error, ok bool) {
+	if dying == nil {
+		return nil, false
+	}
+	select {
+	case err = <-dying:
+		return err, true
+	default:
+		return nil, false
+	}
+}
+
+// arbitrateDeath applies the ②>① priority (opus review, §1.4): regulation ②
+// (stopping position pre-empts everything) wins over the occupant's own exit
+// code — a worker's ANY return during Draining (external Stop/Despawn/replace
+// in flight) is forced quiet, because the natural graceful-shutdown write is
+// `return ctx.Err()`, which regulation ① alone would misjudge loud. Outside
+// stopping, the occupant's code stands: nil is quiet, non-nil is loud.
+func (c *cell) arbitrateDeath(err error) error {
+	if c.isStopping() {
+		return nil
+	}
+	return err
+}
+
+// isStopping reports whether external teardown (initiateStop) has already
+// begun — the Draining entry condition (§1.4) the death-arbitration priority
+// consults. Shares c.closed, the same flag Deliver gates on (both ask "has
+// teardown started", the one existing signal for that position).
+func (c *cell) isStopping() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.closed
 }
 
 // safeReceive invokes impl.Receive under a per-request ctx derived from c.ctx.
@@ -283,14 +340,22 @@ func (c *cell) disarmRequest(id message.ID) {
 	c.flightMu.Unlock()
 }
 
-// cancelRequest implements embodiment: fire the in-flight reqCtx for id, off the
-// cell goroutine. This is the request-scope of cancel(scope) — it interrupts
-// exactly the one Receive holding the goroutine without queuing behind it (the
-// thing to interrupt IS the goroutine's occupant). Idempotent and unknown-id
-// safe: a request that already closed (or never existed) is a no-op, because the
-// caller's closure owns the terminal — the cancel is a best-effort hint. It does
-// NOT remove the entry; safeReceive's own defer disarms on the way out.
+// cancelRequest implements embodiment: deliver the request-cancel signal for id,
+// off the cell goroutine. If the occupant implements RequestCanceller the
+// delivery is a ONE-HOP handoff to it (dispatch/disposition split — the occupant
+// decides what cancelling id means to its own in-flight work); otherwise this
+// falls back to firing the in-flight reqCtx directly, the request-scope of
+// cancel(scope) that interrupts exactly the one Receive holding the goroutine
+// without queuing behind it. Idempotent and unknown-id safe in the fallback: a
+// request that already closed (or never existed) is a no-op, because the
+// caller's closure owns the terminal — the cancel is a best-effort hint. The
+// fallback does NOT remove the entry; safeReceive's own defer disarms on the
+// way out.
 func (c *cell) cancelRequest(id message.ID) {
+	if rc, ok := c.impl.(RequestCanceller); ok {
+		rc.CancelRequest(id)
+		return
+	}
 	c.flightMu.Lock()
 	cancel := c.inflight[id]
 	c.flightMu.Unlock()

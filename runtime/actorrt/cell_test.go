@@ -2,6 +2,7 @@ package actorrt
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -404,6 +405,155 @@ func TestCellDeathCancelsInFlightReqCtx(t *testing.T) {
 	case <-a.downCh:
 	case <-time.After(2 * time.Second):
 		t.Fatal("dead cell's in-flight reqCtx was not cancelled — downstream goroutine leaked")
+	}
+}
+
+// cancelHookActor implements RequestCanceller: cell.cancelRequest must hand
+// the id off to it in one hop instead of firing the built-in reqCtx.
+type cancelHookActor struct {
+	calls chan message.ID
+}
+
+func (a *cancelHookActor) Receive(ctx context.Context, env *message.Envelope) error { return nil }
+func (a *cancelHookActor) CancelRequest(id message.ID)                              { a.calls <- id }
+
+// TestCancelRequestOccupantHook: an occupant implementing RequestCanceller
+// receives the one-hop handoff — dispatch (runtime) and disposition
+// (occupant) are separate.
+func TestCancelRequestOccupantHook(t *testing.T) {
+	t.Parallel()
+	a := &cancelHookActor{calls: make(chan message.ID, 1)}
+	rt, _ := New(Config{Parent: context.Background()})
+	defer rt.StopAll()
+	rt.Spawn("a", actor.KindAgent, static(a))
+
+	rt.CancelRequest("a", message.ID("req-1"))
+	select {
+	case got := <-a.calls:
+		if got != message.ID("req-1") {
+			t.Fatalf("CancelRequest id = %q, want req-1", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("occupant CancelRequest hook never invoked")
+	}
+}
+
+// TestCancelRequestFallbackFiresReqCtx: an occupant that does NOT implement
+// RequestCanceller keeps the built-in per-request reqCtx cancellation —
+// RequestCanceller is purely additive, it must not regress the fallback path
+// existing (test-stub) occupants rely on.
+func TestCancelRequestFallbackFiresReqCtx(t *testing.T) {
+	t.Parallel()
+	a := &ctxActor{gotCtx: make(chan context.Context, 1), block: true}
+	rt, _ := New(Config{Parent: context.Background()})
+	defer rt.StopAll()
+	rt.Spawn("a", actor.KindAgent, static(a))
+	mustDeliver(t, rt, "a", env("req-1"))
+
+	var reqCtx context.Context
+	select {
+	case reqCtx = <-a.gotCtx:
+	case <-time.After(time.Second):
+		t.Fatal("Receive never ran")
+	}
+
+	rt.CancelRequest("a", "req-1")
+	select {
+	case <-reqCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("fallback path never fired the in-flight reqCtx")
+	}
+	if _, ok := rt.Stat("a"); !ok {
+		t.Fatal("cell died — only the request scope should have been cancelled")
+	}
+}
+
+// dyingActor implements DownReporter on top of recordActor's Receive/Start/
+// Stop — the occupant's own exit-code signal for the cell's Dying() select
+// arm.
+type dyingActor struct {
+	*recordActor
+	dying chan error
+}
+
+func newDyingActor() *dyingActor {
+	return &dyingActor{recordActor: newRecordActor(), dying: make(chan error, 1)}
+}
+
+func (a *dyingActor) Dying() <-chan error { return a.dying }
+
+// TestDownReporterQuietNoDownEdge: a nil value on Dying() (occupant "return
+// nil") is quiet — the cell dies WITHOUT publishing the down edge.
+func TestDownReporterQuietNoDownEdge(t *testing.T) {
+	t.Parallel()
+	a := newDyingActor()
+	w := &recordingWatcher{notify: make(chan struct{}, 1)}
+	rt, _ := New(Config{Parent: context.Background()})
+	rt.WatchDown(w)
+	rt.Spawn("a", actor.KindAgent, static(a))
+
+	a.dying <- nil
+	deadline := time.After(2 * time.Second)
+	for {
+		if _, ok := rt.Stat("a"); !ok {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("cell never died on a quiet Dying() signal")
+		case <-time.After(2 * time.Millisecond):
+		}
+	}
+	select {
+	case <-w.notify:
+		t.Fatal("quiet death (nil) must not publish a down edge")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// TestDownReporterLoudPublishesDownEdge: a non-nil error on Dying() (occupant
+// "return err") is loud — the cell publishes the down edge (author#3).
+func TestDownReporterLoudPublishesDownEdge(t *testing.T) {
+	t.Parallel()
+	a := newDyingActor()
+	w := &recordingWatcher{notify: make(chan struct{}, 1)}
+	rt, _ := New(Config{Parent: context.Background()})
+	rt.WatchDown(w)
+	rt.Spawn("a", actor.KindAgent, static(a))
+
+	a.dying <- errors.New("boom")
+	select {
+	case <-w.notify:
+	case <-time.After(2 * time.Second):
+		t.Fatal("no down edge after a loud Dying() signal")
+	}
+	if _, ok := rt.Stat("a"); ok {
+		t.Fatal("cell still addressable after loud death")
+	}
+}
+
+// TestDownReporterStoppingOverridesLoud: arbitration ②>① — a stopping
+// position (external Despawn in flight) forces quiet even when a loud
+// Dying() error is queued, so a graceful shutdown never misfires
+// receiver_unavailable.
+func TestDownReporterStoppingOverridesLoud(t *testing.T) {
+	t.Parallel()
+	a := newDyingActor()
+	w := &recordingWatcher{notify: make(chan struct{}, 1)}
+	rt, _ := New(Config{Parent: context.Background()})
+	rt.WatchDown(w)
+	inc := rt.Spawn("a", actor.KindAgent, static(a))
+
+	a.dying <- errors.New("boom") // queued before the stopping position — races ctx.Done()
+	rt.Despawn(inc)               // marks stopping (c.closed) before cancelling ctx
+
+	select {
+	case <-w.notify:
+		t.Fatal("stopping position must force quiet, even with a loud Dying() error queued")
+	case <-time.After(200 * time.Millisecond):
+	}
+	if _, ok := rt.Stat("a"); ok {
+		t.Fatal("cell still addressable after Despawn")
 	}
 }
 
