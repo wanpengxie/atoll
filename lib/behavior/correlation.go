@@ -10,14 +10,13 @@ import "github.com/wanpengxie/atoll/protocol/message"
 // request id GEOMETRICALLY (BuildResponseFromRequest reads request.ID), not a
 // caller-supplied key that could disagree.
 
-// CorrelationID derives the correlation id for a meta-tool request from
-// a trigger payload's fields.
-func CorrelationID(triggerCorrelationID, envelopeCorrelationID, envelopeID message.ID) message.ID {
-	if triggerCorrelationID != "" {
-		return triggerCorrelationID
+// CorrelationID derives the correlation id: chain wins when the caller has one
+// pinned (e.g. a task chain that must survive a request envelope that carries
+// none), otherwise rootID (the envelope's own correlation id, or its own id
+// when that is empty).
+func CorrelationID(chain, rootID message.ID) message.ID {
+	if chain != "" {
+		return chain
 	}
-	if envelopeCorrelationID != "" {
-		return envelopeCorrelationID
-	}
-	return envelopeID
+	return rootID
 }

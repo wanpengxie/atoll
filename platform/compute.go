@@ -378,9 +378,6 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 
 	current := make(map[actor.ActorID]actor.Kind, len(members))
 	for _, m := range members {
-		if m.Lifecycle != actorrt.LifecycleAlwaysOn {
-			continue // lazy has no delivery-seam analogue on a daemon this period.
-		}
 		current[m.ID] = m.Kind
 	}
 
@@ -430,7 +427,7 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 				if live[id] {
 					r.reopenOne(id, d)
 				} else {
-					r.buildOne(id, d)
+					r.buildOne(id, current[id], d)
 				}
 			}
 		}
@@ -443,7 +440,7 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 // and spawns + starts it — the FIRST time this id is ever hosted. A failure at
 // any step is recorded in r.infeasible and logged; the id stays out of the live
 // set, so next tick's diff retries it.
-func (r *computeRing) buildOne(id actor.ActorID, d *link.Dialer) {
+func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer) {
 	factory, ok := r.builder.Lookup(id)
 	if !ok {
 		err := fmt.Errorf("no factory for %q", id)
@@ -479,7 +476,7 @@ func (r *computeRing) buildOne(id actor.ActorID, d *link.Dialer) {
 	// live — a factory that writes during construction is refused here exactly
 	// like a cell born at home, closing the daemon-side parity gap the raw
 	// (ungated) facades used to leave open.
-	r.rt.Spawn(id, func(inc actorrt.Incarnation) actorrt.Actor {
+	r.rt.Spawn(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
 		return factory(link.NewLiveArms(rb, inc, r.rt))
 	})
 	d.StartStream(id)

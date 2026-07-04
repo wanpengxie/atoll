@@ -45,6 +45,7 @@ const (
 
 type pendingReq struct {
 	ch           chan *message.Envelope
+	target       actor.ActorID
 	expectsAwait bool
 	state        awaitState
 }
@@ -75,6 +76,23 @@ type ShellConfig struct {
 	// OnFault is the per-request closure-fault face for author#2 (symmetric
 	// with author#3). nil = faults ignored.
 	OnFault func(reqID message.ID, err error)
+
+	// Canceller reaches the protocol-level cancel for one in-flight request
+	// (the assembly root wires it to Home.CancelRequest). nil = Abandon only
+	// drops the local waiter — the injection-point contract vs implementation-
+	// fill split (the assembly root fills this once it holds a Home; lib knows
+	// nothing of platform/link).
+	Canceller func(target actor.ActorID, requestID message.ID)
+
+	// TimeoutResolver supplies the per-(target, request-type) closure deadline
+	// (author#2's ExpiresAt) when a RequestSpec leaves Timeout unset. nil, or a
+	// false ok, falls back to DefaultTimeout — the injection-point contract vs
+	// implementation-fill split: lib carries no describe cache to answer this
+	// itself, so the consumer holding one (a describe cache / catalog layer)
+	// fills it once it exists. The fast-path Await window is a UX cap derived
+	// FROM the resolved deadline (min(FastPathWindow, deadline)), never a
+	// separate per-type knob.
+	TimeoutResolver func(target actor.ActorID, reqType string) (time.Duration, bool)
 }
 
 // Shell is the channel's actor-invocation shell. It holds the in-flight
@@ -120,9 +138,11 @@ func (s *Shell) Stop() {
 
 // --- correlator core (in-flight futures) ---
 
-// register records an in-flight request. If expectsAwait is true, a final
-// that arrives before Await parks is buffered for it.
-func (s *Shell) register(id message.ID, expectsAwait bool) {
+// register records an in-flight request against its target actor (Abandon's
+// protocol-level cancel needs it — the Shell has no other way back to WHO is
+// running the request). If expectsAwait is true, a final that arrives before
+// Await parks is buffered for it.
+func (s *Shell) register(id message.ID, target actor.ActorID, expectsAwait bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if _, ok := s.pending[id]; ok {
@@ -130,6 +150,7 @@ func (s *Shell) register(id message.ID, expectsAwait bool) {
 	}
 	s.pending[id] = &pendingReq{
 		ch:           make(chan *message.Envelope, 1),
+		target:       target,
 		expectsAwait: expectsAwait,
 		state:        awaitNotStarted,
 	}
@@ -161,9 +182,20 @@ func (s *Shell) Pending() []message.ID {
 	return ids
 }
 
-// Abandon drops the local waiter for id (abandon semantics — no downstream
-// cancel; the result still returns as a new message).
-func (s *Shell) Abandon(id message.ID) { s.cancel(id) }
+// Abandon drops the local waiter for id, then (if the assembly root wired a
+// Canceller) reaches the protocol-level cancel for it — the result may still
+// land as a new message (best-effort interrupt, not a guaranteed suppression).
+// Local drop runs first: the waiter is gone even if the protocol-level cancel
+// never fires.
+func (s *Shell) Abandon(id message.ID) {
+	s.mu.Lock()
+	p, ok := s.pending[id]
+	delete(s.pending, id)
+	s.mu.Unlock()
+	if ok && s.cfg.Canceller != nil {
+		s.cfg.Canceller(p.target, id)
+	}
+}
 
 // Deliver routes an inbound response envelope to its registered waiter and
 // Matches author#2 (disarms the timeout) on a final. CALL SITE: the holder's
@@ -225,6 +257,13 @@ func (s *Shell) Deliver(env *message.Envelope) (consumed bool) {
 
 // Await blocks until the final for id arrives, the window elapses, or ctx is
 // done. window <= 0 means "do not wait at all".
+//
+// This window is the VOLATILE half of the two timer layers (P15): a per-call
+// UX bound the tool-calling convention degrades to an ack on, unrelated to
+// whether the request is still running. The DURABLE half is author#2's
+// closure timer (behavior/call.go, held as s.caller) — it owns the terminal
+// write guarantee and keeps running after this window elapses; Await timing
+// out never disarms it.
 func (s *Shell) Await(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error) {
 	if window <= 0 {
 		return nil, false, nil
@@ -321,7 +360,7 @@ func (s *Shell) buildRequest(rc RuntimeContext, spec RequestSpec) (message.Envel
 			// trigger carries no correlation_id (a non-normalised trigger) —
 			// the same defensive derivation behavior.CorrelationID gives the
 			// closure, so a request never roots correlation at itself by accident.
-			CorrelationID: behavior.CorrelationID("", rc.Trigger.CorrelationID, rc.Trigger.Envelope.ID),
+			CorrelationID: behavior.CorrelationID(rc.Trigger.CorrelationID, rc.Trigger.Envelope.ID),
 			ExpiresAt:     &expiresAt,
 		})
 	if err != nil {
@@ -334,8 +373,8 @@ func (s *Shell) buildRequest(rc RuntimeContext, spec RequestSpec) (message.Envel
 // submit is the three-step call: register the future (subscribe-before-send),
 // commit the request through the harness, and Arm closure author#2. Any
 // failure unwinds the future registration.
-func (s *Shell) submit(ctx context.Context, env message.Envelope, expectsAwait bool) error {
-	s.register(env.ID, expectsAwait)
+func (s *Shell) submit(ctx context.Context, env message.Envelope, target actor.ActorID, expectsAwait bool) error {
+	s.register(env.ID, target, expectsAwait)
 	if err := s.write(ctx, env); err != nil {
 		s.cancel(env.ID)
 		return err
@@ -374,7 +413,7 @@ func (e *emitRejectedError) Error() string {
 // meta-tools drive.
 func (s *Shell) ExecuteRequest(ctx context.Context, rc RuntimeContext, spec RequestSpec) ResultValue {
 	if spec.Timeout <= 0 {
-		spec.Timeout = DefaultTimeout
+		spec.Timeout = s.resolveTimeout(actor.ActorID(spec.HandlerActorID), spec.EnvelopeType)
 	}
 	env, buildErr := s.buildRequest(rc, spec)
 	if buildErr != nil {
@@ -384,7 +423,7 @@ func (s *Shell) ExecuteRequest(ctx context.Context, rc RuntimeContext, spec Requ
 	}
 
 	expectsAwait := spec.WaitMode != WaitNone
-	if err := s.submit(ctx, env, expectsAwait); err != nil {
+	if err := s.submit(ctx, env, actor.ActorID(spec.HandlerActorID), expectsAwait); err != nil {
 		return NewError(spec.ToolName, InternalError,
 			"emit channel request "+spec.EnvelopeType+": "+err.Error(),
 			"Inspect adapter/link status and retry", nil)
@@ -425,7 +464,7 @@ func (s *Shell) ExecuteReservedRaw(ctx context.Context, rc RuntimeContext, spec 
 	if buildErr != nil {
 		return nil, false
 	}
-	if err := s.submit(ctx, env, true); err != nil {
+	if err := s.submit(ctx, env, actor.ActorID(spec.HandlerActorID), true); err != nil {
 		return nil, false
 	}
 	window := ResolveFastPathWindow(spec.Timeout, DefaultTimeout, true)
@@ -441,6 +480,18 @@ func (s *Shell) ExecuteReservedRaw(ctx context.Context, rc RuntimeContext, spec 
 		return nil, false
 	}
 	return finalEnv.Payload, true
+}
+
+// resolveTimeout answers the closure deadline for a request whose spec left
+// Timeout unset: the configured TimeoutResolver's per-(target, type) value, or
+// DefaultTimeout when unconfigured / it declines.
+func (s *Shell) resolveTimeout(target actor.ActorID, reqType string) time.Duration {
+	if s.cfg.TimeoutResolver != nil {
+		if d, ok := s.cfg.TimeoutResolver(target, reqType); ok && d > 0 {
+			return d
+		}
+	}
+	return DefaultTimeout
 }
 
 // resolveWindow computes the inline wait window from the spec's wait mode,

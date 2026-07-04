@@ -80,10 +80,7 @@ func BuildResponseFromRequest(
 		vis = request.Visibility
 	}
 	audience := message.Audience{request.Sender.ID}
-	correlationID := request.CorrelationID
-	if correlationID == "" {
-		correlationID = request.ID
-	}
+	correlationID := CorrelationID(request.CorrelationID, request.ID)
 	return &message.Envelope{
 		ID:            message.ID(uuid.NewString()),
 		TS:            clock().UnixMilli(),

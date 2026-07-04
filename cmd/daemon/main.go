@@ -209,9 +209,9 @@ func main() {
 	chID := channelFromServerURL(*ws)
 
 	// Pull this channel's daemon-placed assignment from the server, then build
-	// EXACTLY that set. No blind-build of registry.Classes(). A build failure
-	// for one instance is logged + skipped (mirrors the server's
-	// spawnComposition tolerance) — it must not down the whole daemon.
+	// EXACTLY that set. A build failure for one instance is logged + skipped
+	// (mirrors the server's spawnComposition tolerance) — it must not down the
+	// whole daemon.
 	// Bounded retry: a transient server hiccup should not permanently kill
 	// daemon startup. After 3 tries we fatal (a supervisor restarts us).
 	var (

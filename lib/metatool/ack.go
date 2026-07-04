@@ -12,7 +12,7 @@ type AckDescriptor struct {
 	RequestID  message.ID
 	Accepted   bool
 	Status     string // substrate-level, always "accepted" on the immediate ack
-	EstWaitMs  int64  // source: type.max_pending_ms (R5)
+	EstWaitMs  int64  // source: the resolved closure deadline (spec.Timeout, ms)
 	Guidance   string // framework template
 	ToWait     ToWaitHint
 	NotWaiting string

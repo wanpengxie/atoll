@@ -267,7 +267,7 @@ func (r *testReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	// SpawnIfAbsent semantics: idempotent no-op for an already-live author
 	// (EnsureLive MUST be idempotent) — the real CAS mint, not a fake
 	// standing in for it.
-	r.rt.SpawnIfAbsent(id, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	r.rt.SpawnIfAbsent(id, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	return nil
 }
 
@@ -653,7 +653,7 @@ func TestTimerSlice3_IncarnationDropsOnDeathEvenWithLiveSuccessor(t *testing.T) 
 	cs := openScheduleChannel(t)
 	sink := newRealFireSink(t, cs)
 	rt := newScheduleRuntime(t)
-	rt.Spawn("author-1", func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	revive := newTestReviver(rt)
 
@@ -681,7 +681,7 @@ func TestTimerSlice3_IncarnationDropsOnDeathEvenWithLiveSuccessor(t *testing.T) 
 	// successor being live must NOT rescue the predecessor's timer (pointer
 	// identity, not id identity, is the drop check).
 	rt.DespawnID("author-1")
-	rt.Spawn("author-1", func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 
 	clock.Advance(time.Hour)
 	// Bounded real-time window for the (non-)fire to settle, then assert it
@@ -733,7 +733,7 @@ func TestTimerSlice4_RestartBatchDropVsIdentitySurvive(t *testing.T) {
 
 	// --- pre-restart process ---
 	rt1 := newScheduleRuntime(t)
-	rt1.Spawn("author-inc", func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	rt1.Spawn("author-inc", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	sink1 := newRealFireSink(t, cs)
 	revive1 := newTestReviver(rt1)
 
@@ -944,7 +944,7 @@ func TestTimerSlice6_CancelTriState(t *testing.T) {
 	cs := openScheduleChannel(t)
 	sink := newRealFireSink(t, cs)
 	rt := newScheduleRuntime(t)
-	rt.Spawn("author-1", func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	revive := newTestReviver(rt)
 
@@ -1168,7 +1168,7 @@ func TestTimerSlice9_ErrBadScheduleMatrix(t *testing.T) {
 	cs := openScheduleChannel(t)
 	sink := newRealFireSink(t, cs)
 	rt := newScheduleRuntime(t)
-	rt.Spawn("author-1", func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	revive := newTestReviver(rt)
 

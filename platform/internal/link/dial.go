@@ -191,9 +191,6 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 	return d, nil
 }
 
-// ChannelID returns the channel the home assigned on attach.
-func (d *Dialer) ChannelID() string { return d.channelID }
-
 // HasStream reports whether id currently has an open stream on THIS link — the
 // stream-existence half of the reconcile ring's 补 diff (§10.13 推导6/F6): a
 // hosted actor can be live in the runtime while its stream is gone, either

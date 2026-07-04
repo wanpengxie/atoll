@@ -31,6 +31,15 @@ type embodiment interface {
 	Deliver(env *message.Envelope) error
 	cancelRequest(id message.ID)
 	startedAt() time.Time
+	// kind is the substrate-stamped protocol classification the embodiment was
+	// minted with (Spawn/SpawnIfAbsent/Fork's kind param, or a port's Attach-time
+	// KindOf resolution) — the incarnation-level household's own copy of the same
+	// fact membership stores identity-level (registry.Row.Kind), read out-of-band
+	// via Runtime.Stat (UnitStat.Kind). Every embodiment form now welds a real
+	// kind at birth (G11: the embodiments table is the incarnation-level birth
+	// registry, and every out-generation attribute belongs in it) — a live-
+	// embodiment kind read is authoritative for cell/fork/port alike.
+	kind() actor.Kind
 	stop()
 	// isLive reports whether this embodiment is still the live incarnation — read
 	// LOCK-FREE off a per-incarnation atomic (set true at go-live, false on
@@ -245,6 +254,31 @@ func (r *Runtime) WatchObs(id actor.ActorID, w ObsWatcher) {
 	r.mu.Unlock()
 }
 
+// UnwatchObs is the symmetric un-registration to WatchObs (the append-only
+// register is otherwise a name that only grows: it must never leak across
+// dereg/reincarnation). Removes the first occurrence of w for id by identity
+// (interface value equality); no-op if not found. Deletes the map entry once
+// empty so a churned identity does not accumulate empty slices.
+func (r *Runtime) UnwatchObs(id actor.ActorID, w ObsWatcher) {
+	if w == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ws := r.obsWatch[id]
+	for i, cur := range ws {
+		if cur == w {
+			ws = append(ws[:i], ws[i+1:]...)
+			break
+		}
+	}
+	if len(ws) == 0 {
+		delete(r.obsWatch, id)
+	} else {
+		r.obsWatch[id] = ws
+	}
+}
+
 // publishObs fans an actor-published obs snapshot to that actor's watchers
 // (obs push/actor). Invoked on the publishing embodiment's goroutine; guarded so
 // a watcher panic cannot escape. No watcher → no-op.
@@ -337,8 +371,8 @@ type DeliverResult struct {
 //     is stopped (pointer-identity discipline), and the loser's shell — though it
 //     briefly set live=true — is stopped and marked dead, so the slack is bounded
 //     by the already-accepted in-flight window.
-func (r *Runtime) Spawn(id actor.ActorID, build func(Incarnation) Actor) Incarnation {
-	c := allocShell(r.parent, id, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
+func (r *Runtime) Spawn(id actor.ActorID, kind actor.Kind, build func(Incarnation) Actor) Incarnation {
+	c := allocShell(r.parent, id, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
 	inc := Incarnation{id: id, p: c}
 	c.impl = build(inc) // OUTSIDE the lock; IsLive(inc)==false during build.
 
@@ -396,7 +430,7 @@ func (r *Runtime) LiveIDs() []actor.ActorID {
 // inserted into embodiments, never started (ok=false). This is a real CAS, not
 // best-effort, because rebuild cost for agent-class actors (re-establishing
 // LLM context) is a real cost, not a theoretical nicety.
-func (r *Runtime) SpawnIfAbsent(id actor.ActorID, build func(Incarnation) Actor) (Incarnation, bool) {
+func (r *Runtime) SpawnIfAbsent(id actor.ActorID, kind actor.Kind, build func(Incarnation) Actor) (Incarnation, bool) {
 	r.mu.RLock()
 	_, occupied := r.embodiments[id]
 	r.mu.RUnlock()
@@ -404,7 +438,7 @@ func (r *Runtime) SpawnIfAbsent(id actor.ActorID, build func(Incarnation) Actor)
 		return Incarnation{}, false
 	}
 
-	c := allocShell(r.parent, id, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
+	c := allocShell(r.parent, id, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
 	inc := Incarnation{id: id, p: c}
 	c.impl = build(inc) // OUTSIDE the lock; IsLive(inc)==false during build.
 
@@ -444,6 +478,15 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 // for the opaque plane-2 / time-axis arms), and returns the bound Incarnation. If
 // an embodiment already exists for the resolved id it is stopped and replaced.
 //
+// kindOf resolves the just-resolved id's declared Kind (G11: Attach is a birth
+// position in the incarnation household exactly like Spawn/SpawnIfAbsent/Fork,
+// so it must weld the SAME out-generation attribute — no embodiment form may
+// answer a silent zero-value Kind from Runtime.Stat). It runs AFTER resolve
+// yields the id — Attach itself never learns which actor is connecting before
+// the handshake decodes the lease — so kindOf is a lookup keyed by the
+// resolved id, not a static value; a nil kindOf (or a false ok) welds the zero
+// value, same as before this parameter existed.
+//
 // hsCtx bounds ONLY the connect-in handshake (a substrate-owned protocol step
 // whose time bound is a substrate invariant — a peer that connects but never
 // sends a handshake must not pin this goroutine forever). It does NOT scope the
@@ -451,8 +494,8 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 // this call — a per-call lifetime ctx would wrongly tear the port down when
 // Attach returns. Pass a deadline ctx to guard the handshake; a nil/background
 // ctx degrades to an unbounded handshake read.
-func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc) (Incarnation, error) {
-	p, err := newPort(r.parent, hsCtx, conn, sinks, resolve, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
+func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf) (Incarnation, error) {
+	p, err := newPort(r.parent, hsCtx, conn, sinks, resolve, kindOf, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
 	if err != nil {
 		return Incarnation{}, err
 	}
@@ -667,6 +710,13 @@ type UnitStat struct {
 	// consumer (the substrate stores the instant, not the elapsed duration —
 	// registry-stores-membership / readiness-is-outcome model).
 	StartedAt time.Time
+	// Kind is the embodiment's own copy of the out-generation-attribute the
+	// incarnation household must carry (G11: the embodiments table is the
+	// incarnation-level birth registry — every out-generation attribute welded
+	// at mint time belongs in it). Set by Spawn/SpawnIfAbsent/Fork's kind param,
+	// or by Attach's kindOf resolution for a port — every birth position welds
+	// it, none answers a silent zero value.
+	Kind actor.Kind
 }
 
 // Stat reads the substrate-owned obs facts for id. The bool reports embodiment
@@ -681,7 +731,7 @@ func (r *Runtime) Stat(id actor.ActorID) (UnitStat, bool) {
 	if !ok {
 		return UnitStat{}, false
 	}
-	return UnitStat{StartedAt: p.startedAt()}, true
+	return UnitStat{StartedAt: p.startedAt(), Kind: p.kind()}, true
 }
 
 // CurrentIncarnation is the authoritative self-read of an actor's live

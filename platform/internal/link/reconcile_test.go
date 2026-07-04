@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,10 @@ type storeHomeRig struct {
 }
 
 func newStoreHomeRig(t *testing.T) *storeHomeRig {
+	return newStoreHomeRigWithObs(t, nil)
+}
+
+func newStoreHomeRigWithObs(t *testing.T, obsWatcher actorrt.ObsWatcher) *storeHomeRig {
 	t.Helper()
 	ctx := context.Background()
 	cs, err := runtime.OpenChannel(ctx, testChannelID, filepath.Join(t.TempDir(), "ch.sqlite"), runtime.OpenChannelOptions{})
@@ -49,6 +54,7 @@ func newStoreHomeRig(t *testing.T) *storeHomeRig {
 		ChannelID:  testChannelID,
 		LeasePing:  5 * time.Second,
 		LeaseTTL:   30 * time.Second,
+		ObsWatcher: obsWatcher,
 	})
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.acc.Serve(w, req, "daemon-1")
@@ -198,5 +204,133 @@ func TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut(t *testing.T) {
 	}
 	if out.Accepted() {
 		t.Fatalf("state read after dereg = accepted %+v, want cascade-cleared (resource_not_found)", out)
+	}
+}
+
+// countingObsWatcher counts OnObs invocations per actor — the fanout-doubling
+// probe: a leaked WatchObs registration (obsReg cleared without the matching
+// UnwatchObs, or vice versa) makes a SINGLE upstream publish land twice.
+type countingObsWatcher struct {
+	mu    sync.Mutex
+	calls map[actor.ActorID]int
+}
+
+func newCountingObsWatcher() *countingObsWatcher {
+	return &countingObsWatcher{calls: map[actor.ActorID]int{}}
+}
+
+func (w *countingObsWatcher) OnObs(_ context.Context, id actor.ActorID, _ actorrt.ObsKind, _ actorrt.ObsValue) {
+	w.mu.Lock()
+	w.calls[id]++
+	w.mu.Unlock()
+}
+
+func (w *countingObsWatcher) count(id actor.ActorID) int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.calls[id]
+}
+
+// TestReattach_HostReconcile_UnwatchesObsOnDereg (H5): the fallen-out dereg
+// cascade must clear BOTH the obsReg dedup entry AND the runtime registration
+// (UnwatchObs) together — clearing only one half leaves the actor-source obs
+// PUSH axis wrong on the next attach for the same id: obsReg cleared without
+// UnwatchObs would double-register (the old registration still fires) on
+// re-attach, and a publish after that would be observed TWICE by the SAME
+// watcher instance.
+func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
+	ctx := context.Background()
+	obs := newCountingObsWatcher()
+	r := newStoreHomeRigWithObs(t, obs)
+
+	const toolA = actor.ActorID("tool:obs-a")
+	d, err := link.Dial(ctx, r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	noopDispatch := func(*message.Envelope) error { return nil }
+	if _, err := d.OpenStream(toolA, noopDispatch, nil); err != nil {
+		t.Fatalf("OpenStream(a): %v", err)
+	}
+	d.Start()
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		rec, ok, _ := r.cs.Registry.Lookup(ctx, toolA)
+		if ok && rec.Host == "daemon-1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("toolA never registered Host=daemon-1")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	d.SendObs(toolA, "probe.kind", []byte("v1"))
+	deadline = time.Now().Add(5 * time.Second)
+	for obs.count(toolA) < 1 {
+		if time.Now().After(deadline) {
+			t.Fatal("obs watcher never observed the first publish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Shrink the declared set to {} — toolA falls out: despawn-first, then
+	// dereg (which must clear obsReg[toolA] AND UnwatchObs it).
+	if err := d.Reattach(ctx, nil); err != nil {
+		t.Fatalf("Reattach (drop toolA): %v", err)
+	}
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		rec, ok, _ := r.cs.Registry.Lookup(ctx, toolA)
+		if ok && !rec.IsActive() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("toolA never deregistered after shrink Reattach")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// Re-declare toolA on the SAME link (a fresh embodiment, same id) — attach
+	// re-registers obs (obsReg[toolA] was cleared).
+	if err := d.Reattach(ctx, []link.Declaration{
+		{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+	}); err != nil {
+		t.Fatalf("Reattach (re-add toolA): %v", err)
+	}
+	if _, err := d.OpenStream(toolA, noopDispatch, nil); err != nil {
+		t.Fatalf("OpenStream(a) after re-attach: %v", err)
+	}
+
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		rec, ok, _ := r.cs.Registry.Lookup(ctx, toolA)
+		if ok && rec.Host == "daemon-1" && rec.IsActive() {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("toolA never re-registered Host=daemon-1")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	before := obs.count(toolA)
+	d.SendObs(toolA, "probe.kind", []byte("v2"))
+	deadline = time.Now().Add(5 * time.Second)
+	for obs.count(toolA) == before {
+		if time.Now().After(deadline) {
+			t.Fatal("obs watcher never observed the post-reattach publish")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Settle: give a leaked double-registration a chance to double-fire before
+	// asserting the count stayed at exactly one new call.
+	time.Sleep(50 * time.Millisecond)
+	if got := obs.count(toolA) - before; got != 1 {
+		t.Fatalf("post-reattach publish observed %d times, want exactly 1 (obsReg/UnwatchObs must clear together)", got)
 	}
 }

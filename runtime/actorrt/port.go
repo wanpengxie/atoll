@@ -74,6 +74,19 @@ type Sinks struct {
 // the handshake binds it).
 type ResolveFunc func(leaseID string) (actor.ActorID, error)
 
+// KindOf resolves an already-resolved actor's declared Kind — the port-birth
+// counterpart of Spawn/SpawnIfAbsent/Fork's caller-held kind param (G11: every
+// incarnation-household birth position welds the out-generation Kind
+// attribute, none may leave it a silent zero value). It is a LOOKUP keyed by
+// the id resolve() just produced, not a static value handed to Attach ahead of
+// time: Attach itself never learns which actor is connecting until the ipc
+// handshake decodes the lease and resolve() maps it to an id — the kind is
+// looked up immediately after, from the same declaration cache the id came
+// from (the injecting caller's per-link kind cache, e.g. the link layer's
+// attach-declaration kinds map). A nil KindOf, or ok=false, welds the zero
+// value (dev/test callers that do not care about kind).
+type KindOf func(id actor.ActorID) (actor.Kind, bool)
+
 // portSendQueue bounds a port's outbound mailbox — the buffer Deliver enqueues
 // into and writeLoop drains to the wire. A full queue is MailboxFull, exactly
 // like a cell's bounded inbox.
@@ -96,6 +109,12 @@ type port struct {
 	codec *ipc.Codec
 	conn  io.Closer
 	sinks Sinks
+
+	// mintKind is the port's out-generation Kind attribute (G11), resolved via
+	// KindOf immediately after resolve() yields id — the port-birth counterpart
+	// of cell.mintKind. Zero value if Attach's caller wired no KindOf (or it
+	// answered ok=false).
+	mintKind actor.Kind
 
 	// started is the substrate-stamped bind instant (obs uptime source), set at
 	// Attach. Same authority model as cell.started.
@@ -147,7 +166,7 @@ type port struct {
 // read runs off-goroutine and newPort selects it against hsCtx; on expiry it
 // closes the conn (unblocking the read) and returns. parent owns the port's
 // LIFETIME (unchanged); hsCtx owns only this one read.
-func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
+func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -186,6 +205,16 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 	if id == "" {
 		return nil, errors.New("actorrt: port resolve returned empty actor id")
 	}
+	// G11: weld the out-generation Kind attribute NOW — immediately after id is
+	// known, the earliest point it CAN be known (kindOf is a lookup by id, not a
+	// value Attach could have been handed ahead of the handshake). A nil kindOf
+	// or ok=false leaves the zero value (unchanged prior behaviour).
+	var mintKind actor.Kind
+	if kindOf != nil {
+		if k, ok := kindOf(id); ok {
+			mintKind = k
+		}
+	}
 	ackPayload, err := json.Marshal(ipc.HandshakeAckPayload{Actor: id})
 	if err != nil {
 		return nil, err
@@ -195,19 +224,20 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 	}
 	ctx, cancel := context.WithCancel(parent)
 	return &port{
-		id:      id,
-		codec:   codec,
-		conn:    conn,
-		sinks:   sinks,
-		started: started,
-		ctx:     ctx,
-		cancel:  cancel,
-		onDown:  onDown,
-		onObs:   onObs,
-		onExit:  onExit,
-		logger:  logger,
-		sendq:   make(chan *message.Envelope, portSendQueue),
-		done:    make(chan struct{}),
+		id:       id,
+		codec:    codec,
+		conn:     conn,
+		sinks:    sinks,
+		mintKind: mintKind,
+		started:  started,
+		ctx:      ctx,
+		cancel:   cancel,
+		onDown:   onDown,
+		onObs:    onObs,
+		onExit:   onExit,
+		logger:   logger,
+		sendq:    make(chan *message.Envelope, portSendQueue),
+		done:     make(chan struct{}),
 	}, nil
 }
 
@@ -244,6 +274,12 @@ func readHandshakeBounded(hsCtx context.Context, codec *ipc.Codec) (ipc.Frame, e
 // startedAt implements embodiment: the substrate-stamped bind instant (obs uptime
 // source), set at Attach.
 func (p *port) startedAt() time.Time { return p.started }
+
+// kind implements embodiment: the out-generation Kind attribute resolved via
+// KindOf at Attach time (G11 review fix — the port birth position now welds
+// the SAME incarnation-household attribute Spawn/SpawnIfAbsent/Fork do; a
+// caller that wires no KindOf still gets the zero value, exactly as before).
+func (p *port) kind() actor.Kind { return p.mintKind }
 
 // isLive implements embodiment: the lock-free WHEN-validity probe (per-incarnation
 // atomic). True only between Attach go-live and teardown.

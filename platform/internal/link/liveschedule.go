@@ -39,9 +39,9 @@ type liveSchedule struct {
 }
 
 // NewLiveSchedule wraps raw in the WHEN-validity membrane welded to inc, gated
-// on host. Participant cells are born with this; substrate anchors
-// (system/sysactor) deliberately use the raw handle — no incarnation gate — for
-// the same reason livePen skips anchors (see NewLivePen).
+// on host. Participant cells are born with this; substrate anchors (sysactor)
+// have no Schedule capability at all (sysactor.Deps carries none) — there is
+// no raw-handle path to gate for them, unlike the pen axis (see NewLivePen).
 func NewLiveSchedule(raw schedule.ScheduleHandle, inc actorrt.Incarnation, host *actorrt.Runtime) schedule.ScheduleHandle {
 	return liveSchedule{raw: raw, inc: inc, host: host}
 }

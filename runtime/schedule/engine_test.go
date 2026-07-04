@@ -76,7 +76,7 @@ func TestNewSucceedsWithNilLogger(t *testing.T) {
 
 func TestScheduleValidationMatrix(t *testing.T) {
 	rt := newTestRuntime(t)
-	rt.Spawn("author-1", func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
 	minter, engine, err := New(Deps{
 		Store: newFakeStore(), Fire: &fakeFireSink{}, Host: rt,
@@ -215,7 +215,7 @@ func TestBindIncarnationRoutesToMemoryOnly(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	rt := newTestRuntime(t)
-	rt.Spawn("author-1", func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
 	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
 	if err != nil {
@@ -255,7 +255,7 @@ func TestIncarnationBindDropsOnDeathEvenWithLiveSuccessor(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	rt := newTestRuntime(t)
-	rt.Spawn("author-1", func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
 	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
 	if err != nil {
@@ -274,7 +274,7 @@ func TestIncarnationBindDropsOnDeathEvenWithLiveSuccessor(t *testing.T) {
 	// successor being live must NOT rescue the predecessor's timer (pointer
 	// identity, not id identity, is the drop check).
 	rt.DespawnID("author-1")
-	rt.Spawn("author-1", func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
 	waitForArmedAtLeast(t, clock, 1)
 	clock.Advance(time.Hour)
@@ -432,8 +432,8 @@ func TestCancelTriState(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	rt := newTestRuntime(t)
-	rt.Spawn("author-1", func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
-	rt.Spawn("author-2", func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	rt.Spawn("author-2", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
 	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
 	if err != nil {

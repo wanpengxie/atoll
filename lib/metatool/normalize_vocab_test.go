@@ -94,14 +94,6 @@ func TestCloneRawJSONEmpty(t *testing.T) {
 	}
 }
 
-func TestResponseFailureReasonTerminalFailure(t *testing.T) {
-	raw := json.RawMessage(`{"terminal_failure_reason":"receiver_unavailable"}`)
-	reason := ResponseFailureReason(raw)
-	if reason != "receiver_unavailable" {
-		t.Fatalf("expected receiver_unavailable, got %q", reason)
-	}
-}
-
 func TestResponseFailureReasonStatusFailed(t *testing.T) {
 	raw := json.RawMessage(`{"status":"failed","reason":"something_broke"}`)
 	reason := ResponseFailureReason(raw)

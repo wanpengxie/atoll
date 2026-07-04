@@ -236,6 +236,50 @@ func TestExecuteCallActor_FanOutEmitsRequest(t *testing.T) {
 	}
 }
 
+// TestExecuteCallActor_TimeoutResolverOverridesDefault pins P13: a
+// ShellConfig.TimeoutResolver answer is the closure deadline actually used —
+// it is NOT capped to DefaultTimeout (30s). A resolver answering 300s must
+// surface as est_wait_ms=300000 on the immediate ack, not 30000.
+func TestExecuteCallActor_TimeoutResolverOverridesDefault(t *testing.T) {
+	w := &recWriter{}
+	var seq int64
+	sh := metatool.NewShell(metatool.ShellConfig{
+		Pen:   w,
+		Clock: func() time.Time { return time.UnixMilli(0) },
+		EnvelopeID: func(_ int64) message.ID {
+			seq++
+			return message.ID("req-resolver-" + itoa(seq))
+		},
+		TimeoutResolver: func(target actor.ActorID, reqType string) (time.Duration, bool) {
+			if target == "tool:slow" && reqType == "slow.op" {
+				return 300 * time.Second, true
+			}
+			return 0, false
+		},
+	})
+
+	params, _ := json.Marshal(map[string]any{
+		"actor_id": "tool:slow", "type": "slow.op", "wait": false,
+	})
+	rv := metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
+	assertNotError(t, rv)
+	if rv.Value["status"] != "accepted" {
+		t.Fatalf("wait=false want immediate ack, got %v", rv.Value)
+	}
+	wantMs := int64(300 * time.Second / time.Millisecond)
+	if got := rv.Value["est_wait_ms"]; got != wantMs {
+		t.Fatalf("est_wait_ms = %v, want %d (resolver's 300s, not the 30s default)", got, wantMs)
+	}
+
+	req := w.lastRequest(t, time.Second)
+	if req.ExpiresAt == nil {
+		t.Fatal("emitted request carries no ExpiresAt")
+	}
+	if got := *req.ExpiresAt; got != int64(300*time.Second/time.Millisecond) {
+		t.Fatalf("ExpiresAt = %d, want the resolver's 300s deadline", got)
+	}
+}
+
 func TestExecuteCallActor_NilPayloadNormalizes(t *testing.T) {
 	w := &recWriter{}
 	sh := newExecShell(w)
@@ -349,6 +393,74 @@ func TestShell_TimeoutArmsAuthor2Terminal(t *testing.T) {
 			t.Fatal("author#2 timeout terminal never written")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestShell_AbandonCallsCanceller pins M2: Abandon drops the local waiter AND
+// (when the assembly root wires a Canceller) reaches the protocol-level
+// cancel for the request's target — the ExecuteRequest/register plumbing that
+// carries RequestSpec.HandlerActorID through to the pendingReq the Shell
+// hands Abandon.
+func TestShell_AbandonCallsCanceller(t *testing.T) {
+	w := &recWriter{}
+	var gotTarget actor.ActorID
+	var gotReqID message.ID
+	var calls int
+	sh := metatool.NewShell(metatool.ShellConfig{
+		Pen:        w,
+		Clock:      func() time.Time { return time.UnixMilli(0) },
+		EnvelopeID: func(_ int64) message.ID { return message.ID("req-abandon-1") },
+		Canceller: func(target actor.ActorID, requestID message.ID) {
+			calls++
+			gotTarget = target
+			gotReqID = requestID
+		},
+	})
+
+	rv := sh.ExecuteRequest(context.Background(), defaultRC(), metatool.RequestSpec{
+		ToolName: "call_actor", EnvelopeType: "cancel.probe", HandlerActorID: "tool:cancel-target",
+		WaitMode: metatool.WaitNone, Timeout: time.Second,
+	})
+	if rv.Value["status"] != "accepted" {
+		t.Fatalf("want ack, got %v", rv.Value)
+	}
+
+	sh.Abandon(message.ID("req-abandon-1"))
+
+	if calls != 1 {
+		t.Fatalf("canceller calls = %d, want 1", calls)
+	}
+	if gotTarget != actor.ActorID("tool:cancel-target") {
+		t.Fatalf("canceller target = %q, want %q", gotTarget, "tool:cancel-target")
+	}
+	if gotReqID != message.ID("req-abandon-1") {
+		t.Fatalf("canceller requestID = %q, want %q", gotReqID, "req-abandon-1")
+	}
+	if sh.InFlight(message.ID("req-abandon-1")) {
+		t.Fatalf("Abandon must drop the local waiter (InFlight still true)")
+	}
+
+	// A second Abandon on the same (now-gone) id must not re-invoke the
+	// canceller — Abandon only reaches a request it still holds locally.
+	sh.Abandon(message.ID("req-abandon-1"))
+	if calls != 1 {
+		t.Fatalf("canceller calls after second Abandon = %d, want 1 (no-op on unknown id)", calls)
+	}
+}
+
+// TestShell_AbandonWithoutCancellerIsLocalOnly pins nil-Canceller as the
+// current-behavior default (ShellConfig.Canceller unset): Abandon still
+// drops the local waiter, no protocol-level cancel is attempted.
+func TestShell_AbandonWithoutCancellerIsLocalOnly(t *testing.T) {
+	sh := newExecShell(&recWriter{})
+	rv := sh.ExecuteRequest(context.Background(), defaultRC(), metatool.RequestSpec{
+		ToolName: "call_actor", EnvelopeType: "no.canceller", HandlerActorID: "tool:x",
+		WaitMode: metatool.WaitNone, Timeout: time.Second,
+	})
+	reqID := message.ID(rv.Value["request_id"].(string))
+	sh.Abandon(reqID) // must not panic with nil Canceller
+	if sh.InFlight(reqID) {
+		t.Fatalf("Abandon must drop the local waiter even with nil Canceller")
 	}
 }
 

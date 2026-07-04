@@ -51,8 +51,9 @@ func (f *Fold) OnDown(_ context.Context, id actor.ActorID, _ error) {
 	delete(f.latest, id)
 	f.mu.Unlock()
 	// Only the actors that actually carried a folded device presence "decay" — OnDown
-	// fires for every dying actor (global watcher), so guard to avoid logging a
-	// decay for actors that never had L3.
+	// is a global watcher over every abnormal death (quiet teardown publishes no
+	// down edge, see the method doc above), so guard to avoid logging a decay for
+	// actors that never had L3.
 	if had {
 		f.logger.Debug("devicepresence.decayed", "actor", string(id), "cause", "link/cell down")
 	}

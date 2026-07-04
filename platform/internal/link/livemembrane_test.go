@@ -49,7 +49,7 @@ func TestLiveAccessFencesPostDeathInvoke(t *testing.T) {
 	var h accessdoor.AccessHandle
 	var ctorErr error
 
-	inc := rt.Spawn("w", func(i actorrt.Incarnation) actorrt.Actor {
+	inc := rt.Spawn("w", actor.KindTool, func(i actorrt.Incarnation) actorrt.Actor {
 		h = link.NewLiveAccess(raw, i, rt)
 		_, ctorErr = h.Invoke(context.Background(), access.Operation(""), resource.ResourceID(""), nil, nil)
 		return noopLiveActor{}
@@ -120,7 +120,7 @@ func TestLiveScheduleFencesPostDeath(t *testing.T) {
 	var h schedule.ScheduleHandle
 	var ctorErr error
 
-	inc := rt.Spawn("w", func(i actorrt.Incarnation) actorrt.Actor {
+	inc := rt.Spawn("w", actor.KindTool, func(i actorrt.Incarnation) actorrt.Actor {
 		h = link.NewLiveSchedule(raw, i, rt)
 		_, ctorErr = h.Schedule(context.Background(), schedule.ScheduleReq{})
 		return noopLiveActor{}

@@ -35,10 +35,13 @@
 // physical body (scale/budget) is the same door's future additive surface, not
 // yet built.
 //
-// Two-axis model (runtime/storespec.Record): membership is durable registry
+// Three-axis model (runtime/storespec.Record): membership is durable registry
 // truth; LIVENESS is volatile and AUTHORITY-OWNED (the component holding the
-// compute leases/connections). Liveness is never a message and never truth — a
-// volatile state read. readiness is NOT a third axis — whether an actor can
-// service a request is the OUTCOME of send→terminal, not a stored state the
-// system actor projects or composes.
+// compute leases/connections) — never a message, never truth, a volatile state
+// read. DEVICE PRESENCE is a third, separate axis: an ADVISORY three-state
+// signal (device_presence events → DevicePresence fold) about an external
+// device's own reachability, orthogonal to whether the actor itself has an
+// embodiment — it never gates liveness and liveness never answers it. readiness
+// is NOT a fourth axis — whether an actor can service a request is the OUTCOME
+// of send→terminal, not a stored state the system actor projects or composes.
 package sysactor

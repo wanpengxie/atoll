@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform/internal/devicepresence"
 	"github.com/wanpengxie/atoll/platform/internal/link"
@@ -183,7 +185,7 @@ func (h *daemonHost) Install(id actor.ActorID, impl actorrt.Actor, downHandler f
 	h.mu.Lock()
 	h.down[id] = downHandler
 	h.mu.Unlock()
-	h.rt.Spawn(id, func(actorrt.Incarnation) actorrt.Actor { return impl })
+	h.rt.Spawn(id, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return impl })
 }
 
 func (h *daemonHost) Dispatch(target actor.ActorID, env *message.Envelope) error {
@@ -270,10 +272,6 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer func() { _ = d.Close() }()
-
-	if d.ChannelID() != string(testChannelID) {
-		t.Fatalf("ChannelID = %q, want %q", d.ChannelID(), testChannelID)
-	}
 
 	h := newDaemonHost()
 	defer h.Stop()
@@ -615,12 +613,13 @@ func TestLease_NoTraffic_ExpiresToDown(t *testing.T) {
 
 // TestEndToEnd_CancelRequest_CrossWire proves the request-scope of cancel(scope)
 // crosses the wire: a daemon cell is parked in Receive on an in-flight request;
-// the home calls Acceptor.CancelRequest(actor, requestID) (the substrate
-// mechanism the app's caller-abandon trigger drives), which writes a KindCancel
-// frame down that actor's stream; the daemon fires the matching reqCtx OFF the
-// cell goroutine, so the parked Receive's ctx goes Done. No truth terminal is
-// written — cancel is a best-effort interrupt of in-flight work, the caller's
-// closure owns the terminal (the home stubWriter records nothing).
+// the home calls rt.CancelRequest(actor, requestID) (the same runtime call
+// Home.CancelRequest forwards — the substrate mechanism the app's
+// caller-abandon trigger drives), which writes a KindCancel frame down that
+// actor's stream; the daemon fires the matching reqCtx OFF the cell goroutine,
+// so the parked Receive's ctx goes Done. No truth terminal is written — cancel
+// is a best-effort interrupt of in-flight work, the caller's closure owns the
+// terminal (the home stubWriter records nothing).
 func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
@@ -667,7 +666,7 @@ func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 	}
 
 	// The home reaches the request-scope of cancel(scope) across the wire.
-	r.acc.CancelRequest(toolID, reqID)
+	r.rt.CancelRequest(toolID, reqID)
 
 	select {
 	case <-cell.cancelled:
@@ -881,6 +880,182 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 			t.Fatalf("hard link drop never cascaded (down edge seen=%v, presence known=%v — want true/false)", downSeen, known)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestEndToEnd_DespawnID_CrossWireKill proves DespawnID's remote-kill semantics
+// across a real wire — the mechanism period8 S1's Home.Remove step ① composes
+// over (rt.DespawnID(id) reaching a daemon-attached identity, not merely
+// deleting a local map entry). SetDespawnLocal (the daemon's own
+// RunCompute-style wiring, platform/compute.go:287) is installed so a
+// KindDespawn frame really ends the remote cell's execution arm; the daemon
+// replies KindDetach and the port dies STOPPING (stopDespawn sets `stopping`
+// before the wire write, port.go), so the home publishes NO down edge for a
+// by-name kill — a despawn is never a death.
+func TestEndToEnd_DespawnID_CrossWireKill(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+
+	const toolID = actor.ActorID("tool:despawn-target")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+	// The daemon's own kill wiring: a host KindDespawn frame despawns the local
+	// cell in the daemon's runtime (exactly platform/compute.go's RunCompute).
+	h := newDaemonHost()
+	defer h.Stop()
+	d.SetDespawnLocal(func(id actor.ActorID) { h.rt.DespawnID(id) })
+
+	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+		return h.Dispatch(toolID, env)
+	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	h.Install(toolID, &echoCell{w: arms.Pen}, arms.Down)
+	d.Start()
+
+	// Precondition: the daemon-side cell is actually live before the kill.
+	if _, ok := h.rt.Stat(toolID); !ok {
+		t.Fatal("daemon cell not live before DespawnID — precondition broken")
+	}
+
+	// The home-side kill: exactly Home.Remove step ①.
+	if ok := r.rt.DespawnID(toolID); !ok {
+		t.Fatal("DespawnID(toolID) = false, want true (a live port embodiment)")
+	}
+
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, ok := h.rt.Stat(toolID); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("daemon cell never died — KindDespawn frame never reached the remote")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// The kill is a by-name despawn, not a death: the home must NOT publish a
+	// down edge for it (port.stopDespawn marks `stopping` before the wire
+	// write, so its own die() path takes the "no down edge" branch).
+	for _, id := range r.getDown() {
+		if id == toolID {
+			t.Fatal("DespawnID materialised a down edge — a by-name kill must be quiet, not a death")
+		}
+	}
+}
+
+// TestKickDaemon_ClosesAllLinksIncludingHalfAttached is S3's DoD (§8.3/§7.4):
+// KickDaemon(computeID) tears down EVERY link registered under that id — the
+// one fully attached (port live, round-tripped a request) AND one still stuck
+// in the half-attach window (TCP/WS connected, daemonID pre-authenticated by
+// Serve, but no attach frame sent yet). It proves:
+//  1. the quiet edge — no receiver_unavailable / down edge for the killed port;
+//  2. fail-closed — the home-side port embodiment is gone from the runtime
+//     (any pen still welded to that Incarnation is IsLive()==false, so a
+//     leaked writer is rejected rather than authoring on a dead incarnation);
+//  3. the half-attach sliver — a link that never got as far as a declared
+//     actor is closed by the SAME Kick call (registration precedes the attach
+//     frame, closing the T2→T3 window per §S-P21).
+func TestKickDaemon_ClosesAllLinksIncludingHalfAttached(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+
+	const toolID = actor.ActorID("tool:echo")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	h := newDaemonHost()
+	defer h.Stop()
+
+	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+		return h.Dispatch(toolID, env)
+	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	h.Install(toolID, &echoCell{w: arms.Pen}, nil)
+	d.Start()
+
+	// Round-trip first: proves the port is FULLY attached before the kick.
+	req := &message.Envelope{
+		ID: "req-1", ChannelID: testChannelID, Kind: message.KindRequest, Type: "echo.do",
+		Sender: message.Sender{ID: "user:a", Kind: actor.KindHuman}, Audience: message.Audience{toolID},
+	}
+	if _, err := r.deliver.Deliver([]actor.ActorID{toolID}, req); err != nil {
+		t.Fatalf("home deliver: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(r.minter.all()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("cell emit never reached the home writer (port not fully attached)")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	if _, ok := r.rt.Stat(toolID); !ok {
+		t.Fatal("home runtime has no live port embodiment before kick — precondition broken")
+	}
+
+	// A SECOND connection to the same daemonID, stuck in the half-attach window
+	// (Serve has authenticated it as "daemon-1" — runLink has registered it —
+	// but it never sends the stream-0 attach frame). Raw gorilla dial, NOT
+	// link.Dial (which always completes the attach handshake).
+	half, _, err := websocket.DefaultDialer.Dial(r.wsURL(), nil)
+	if err != nil {
+		t.Fatalf("raw dial (half-attach probe): %v", err)
+	}
+	defer func() { _ = half.Close() }()
+	// Give runLink a moment to actually register the link (registration races
+	// the TCP accept — this only needs to win before KickDaemon below, not
+	// before some fixed deadline).
+	time.Sleep(50 * time.Millisecond)
+
+	n := r.acc.KickDaemon("daemon-1")
+	if n != 2 {
+		t.Fatalf("KickDaemon = %d, want 2 (one fully attached + one half-attached)", n)
+	}
+
+	// IsAttached flips false once the fully-attached link's runLink unwinds.
+	deadline = time.Now().Add(10 * time.Second)
+	for r.acc.IsAttached("daemon-1") {
+		if time.Now().After(deadline) {
+			t.Fatal("IsAttached(daemon-1) still true after KickDaemon")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// No down edge for the killed port — kick is a voluntary revocation, not an
+	// observed death.
+	for _, id := range r.getDown() {
+		if id == toolID {
+			t.Fatal("KickDaemon materialised a down edge — a kick must be quiet, not a death")
+		}
+	}
+
+	// Fail-closed: the home-side port embodiment is gone (any writer still
+	// welded to that Incarnation is rejected as not-live, ErrWriterNotLive).
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		if _, ok := r.rt.Stat(toolID); !ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("home runtime still reports a live port embodiment after KickDaemon")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	// The half-attached raw connection is closed by the SAME Kick call — a read
+	// on it must observe the close, not hang.
+	_ = half.SetReadDeadline(time.Now().Add(5 * time.Second))
+	if _, _, err := half.ReadMessage(); err == nil {
+		t.Fatal("half-attached connection still open after KickDaemon — half-attach window not closed")
 	}
 }
 

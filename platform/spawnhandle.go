@@ -116,7 +116,7 @@ func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 	build := func(childInc actorrt.Incarnation) actorrt.Actor {
 		return factory(h.assemble(childID, spec.Kind, childInc))
 	}
-	if _, err := h.rt.Fork(h.inc, childID, build); err != nil {
+	if _, err := h.rt.Fork(h.inc, childID, spec.Kind, build); err != nil {
 		return "", err
 	}
 	return childID, nil

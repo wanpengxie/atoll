@@ -76,8 +76,10 @@ func Register(class string, c Constructor) {
 	reg[class] = c
 }
 
-// Classes returns the registered class keys, sorted (stable iteration order).
-func Classes() []string {
+// classes returns the registered class keys, sorted (stable iteration order).
+// Unexported: the only legitimate reader is Build's own error path below —
+// there is no discovery/catalog surface over the registry (see package doc).
+func classes() []string {
 	mu.RLock()
 	defer mu.RUnlock()
 	out := make([]string, 0, len(reg))
@@ -88,14 +90,6 @@ func Classes() []string {
 	return out
 }
 
-// Has reports whether a class is registered.
-func Has(class string) bool {
-	mu.RLock()
-	defer mu.RUnlock()
-	_, ok := reg[class]
-	return ok
-}
-
 // Build instantiates one instance of class with the given spec + host context.
 // Unknown class or a constructor error are returned to the caller (who asked for
 // it explicitly).
@@ -104,7 +98,7 @@ func Build(class string, spec InstanceSpec, ctx Deps) (platform.ActorDecl, error
 	c, found := reg[class]
 	mu.RUnlock()
 	if !found {
-		return platform.ActorDecl{}, fmt.Errorf("registry: unknown class %q (registered: %v)", class, Classes())
+		return platform.ActorDecl{}, fmt.Errorf("registry: unknown class %q (registered: %v)", class, classes())
 	}
 	decl, err := c(spec, ctx)
 	if err != nil {

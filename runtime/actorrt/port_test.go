@@ -26,8 +26,9 @@ type remoteEnd struct {
 // reads the handshake and replies with the ack), then returns the bound id,
 // the runtime-side conn (closed by the port), and the remote end the test
 // drives. emit/resolve are injected so each test can observe relays / control
-// identity binding.
-func dialPort(t *testing.T, r *Runtime, leaseID string, emit EmitSink, resolve ResolveFunc) (actor.ActorID, *remoteEnd) {
+// identity binding; kindOf is injected so a test can assert the port's welded
+// Kind attribute (nil in tests that do not care, weld the zero value).
+func dialPort(t *testing.T, r *Runtime, leaseID string, emit EmitSink, resolve ResolveFunc, kindOf KindOf) (actor.ActorID, *remoteEnd) {
 	t.Helper()
 	hostConn, remoteConn := net.Pipe()
 	remote := &remoteEnd{conn: remoteConn, codec: ipc.NewCodec(remoteConn, remoteConn)}
@@ -54,7 +55,7 @@ func dialPort(t *testing.T, r *Runtime, leaseID string, emit EmitSink, resolve R
 		hsErr <- nil
 	}()
 
-	inc, err := r.Attach(context.Background(), hostConn, Sinks{Emit: emit}, resolve)
+	inc, err := r.Attach(context.Background(), hostConn, Sinks{Emit: emit}, resolve, kindOf)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -86,7 +87,7 @@ func TestPortHandshakeBindsResolvedID(t *testing.T) {
 		gotLease <- lease
 		return "remote-1", nil
 	}
-	id, remote := dialPort(t, rt, "lease-xyz", nopEmit, resolve)
+	id, remote := dialPort(t, rt, "lease-xyz", nopEmit, resolve, nil)
 	defer remote.conn.Close()
 
 	if id != "remote-1" {
@@ -115,7 +116,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			// An EMIT frame where a handshake is required — protocol violation.
 			_ = c.Write(ipc.Frame{Kind: ipc.KindEmit})
 		}()
-		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x")); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil); err == nil {
 			t.Fatal("Attach accepted a non-handshake first frame")
 		}
 	})
@@ -130,7 +131,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		}()
 		resolve := func(string) (actor.ActorID, error) { return "", io.ErrUnexpectedEOF }
-		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, resolve); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, resolve, nil); err == nil {
 			t.Fatal("Attach accepted a connection whose lease failed to resolve")
 		}
 	})
@@ -144,7 +145,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			p, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "anon"})
 			_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		}()
-		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("")); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve(""), nil); err == nil {
 			t.Fatal("Attach accepted an empty resolved actor id")
 		}
 	})
@@ -166,7 +167,7 @@ func TestAttachHandshakeBounded(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := rt.Attach(hsCtx, hostConn, Sinks{Emit: nopEmit}, staticResolve("x"))
+		_, err := rt.Attach(hsCtx, hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil)
 		done <- err
 	}()
 
@@ -186,11 +187,11 @@ func TestPortRequiresSinks(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, _ := net.Pipe()
-	if _, err := rt.Attach(context.Background(), hostConn, Sinks{}, staticResolve("x")); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn, Sinks{}, staticResolve("x"), nil); err == nil {
 		t.Fatal("Attach accepted a nil EmitSink")
 	}
 	hostConn2, _ := net.Pipe()
-	if _, err := rt.Attach(context.Background(), hostConn2, Sinks{Emit: nopEmit}, nil); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn2, Sinks{Emit: nopEmit}, nil, nil); err == nil {
 		t.Fatal("Attach accepted a nil ResolveFunc")
 	}
 }
@@ -202,7 +203,7 @@ func TestPortDeliverReachesWire(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 	defer remote.conn.Close()
 
 	res, err := rt.deliver([]actor.ActorID{id}, env("hello"))
@@ -236,7 +237,7 @@ func TestPortDeliverRejectsNilEnvelope(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 	defer remote.conn.Close()
 
 	// Reach the port embodiment directly to exercise its nil guard (Runtime.Deliver
@@ -267,7 +268,7 @@ func TestPortEmitRelayed(t *testing.T) {
 		got <- relayed{id: inc.ID(), env: e}
 		return ipc.EmitResult{MessageID: "m-up-1", RejectReason: "harness_kind_invalid"}, nil
 	}
-	_, remote := dialPort(t, rt, "l", emit, staticResolve("remote-1"))
+	_, remote := dialPort(t, rt, "l", emit, staticResolve("remote-1"), nil)
 	defer remote.conn.Close()
 
 	// The remote self-reports a DIFFERENT sender on the wire; the substrate must
@@ -314,7 +315,7 @@ func TestPortDownPublishesDown(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 
 	dp, _ := json.Marshal(ipc.DownPayload{Reason: "actor exited"})
 	if err := remote.codec.Write(ipc.Frame{Kind: ipc.KindDown, Payload: dp}); err != nil {
@@ -342,7 +343,7 @@ func TestPortEOFPublishesDown(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 
 	remote.conn.Close()
 	select {
@@ -363,7 +364,7 @@ func TestPortUnknownFrameKindFailsClosed(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 	defer remote.conn.Close()
 
 	if err := remote.codec.Write(ipc.Frame{Kind: ipc.Kind("garbage")}); err != nil {
@@ -394,7 +395,7 @@ func TestPortParentCancelQuietTeardown(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	rt, _ := New(Config{Parent: ctx})
 	rt.WatchDown(w)
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 	defer remote.conn.Close()
 
 	// The remote observes EOF once the port closes its conn on teardown.
@@ -434,7 +435,7 @@ func TestPortStopIsNotDeath(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 4)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 	defer remote.conn.Close()
 
 	// Drain the remote end: Despawn writes a KindDespawn frame down the wire before
@@ -477,7 +478,7 @@ func TestPortStopIsNotDeath(t *testing.T) {
 func TestPortDeliverAfterStop(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 	defer remote.conn.Close()
 
 	rt.mu.RLock()
@@ -499,7 +500,7 @@ func TestPortMailboxFull(t *testing.T) {
 	defer rt.StopAll()
 	// The remote NEVER reads, so the wire buffer + writeLoop's one in-flight
 	// frame + the bounded sendq all back up; past saturation Deliver is full.
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 	defer remote.conn.Close()
 
 	var sawFull bool
@@ -533,7 +534,7 @@ func TestPortAttachReplaceStopsOld(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	id1, remote1 := dialPort(t, rt, "l", nopEmit, staticResolve("dup"))
+	id1, remote1 := dialPort(t, rt, "l", nopEmit, staticResolve("dup"), nil)
 	// Reading on the old conn should observe EOF once it is stopped+closed by the
 	// replace, proving the old port was torn down.
 	closed := make(chan struct{})
@@ -543,7 +544,7 @@ func TestPortAttachReplaceStopsOld(t *testing.T) {
 		close(closed)
 	}()
 
-	id2, remote2 := dialPort(t, rt, "l", nopEmit, staticResolve("dup"))
+	id2, remote2 := dialPort(t, rt, "l", nopEmit, staticResolve("dup"), nil)
 	defer remote2.conn.Close()
 	if id1 != id2 {
 		t.Fatalf("ids differ: %q vs %q", id1, id2)

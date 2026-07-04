@@ -173,14 +173,3 @@ func (b *Bridge) handleDescribe(ctx context.Context, env *message.Envelope) erro
 	_, rerr := behavior.RespondJSON(ctx, b.pen, b.clock, env, answer)
 	return rerr
 }
-
-func (b *Bridge) handleStatus(ctx context.Context, env *message.Envelope) error {
-	if _, err := introspect.ParseStatusRequest(env.Payload); err != nil {
-		_, ferr := behavior.Fail(ctx, b.pen, b.clock, env,
-			"payload_invalid", fmt.Sprintf("decode status payload: %v", err))
-		return ferr
-	}
-	answer := introspect.AnswerStatus(string(b.self), map[string]any{"role": "agent", "looper": "claude"})
-	_, rerr := behavior.RespondJSON(ctx, b.pen, b.clock, env, answer)
-	return rerr
-}

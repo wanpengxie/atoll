@@ -48,7 +48,7 @@ func TestNewDecl_ResumeContract(t *testing.T) {
 }
 
 // TestNewDecl_RequiresChannelAndID pins WHY the daemon must build from an
-// EXPLICIT assignment (not a blind-build of registry.Classes() with empty specs):
+// EXPLICIT assignment (not a blind "one of each" build with empty specs):
 // claude refuses an empty id — exactly the fatal a blind "one of each" loop
 // would hit once agents were compiled into the daemon.
 func TestNewDecl_RequiresChannelAndID(t *testing.T) {

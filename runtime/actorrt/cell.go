@@ -28,8 +28,9 @@ var ErrCellStopped = errors.New("actorrt: cell stopped")
 // send it a message; there is no path to run caller-supplied code on the cell
 // goroutine.
 type cell struct {
-	id    actor.ActorID
-	impl  Actor
+	id       actor.ActorID
+	mintKind actor.Kind
+	impl     Actor
 	inbox chan *message.Envelope
 
 	// started is the substrate-stamped bind instant — the obs `uptime` fact's
@@ -92,8 +93,10 @@ type cell struct {
 // Spawn fills c.impl from the build closure (OUTSIDE the lock, while IsLive is
 // still false), then flips live true at go-live. mailbox is the bounded inbox
 // depth; onExit is the self-eviction hook; onDown publishes the death (embodiment
-// DELETED) edge; started is the substrate-stamped bind instant (obs uptime).
-func allocShell(parent context.Context, id actor.ActorID, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) *cell {
+// DELETED) edge; started is the substrate-stamped bind instant (obs uptime);
+// kind is the out-generation attribute welded at mint (Spawn/SpawnIfAbsent/
+// Fork's caller-held kind), read back via Runtime.Stat (UnitStat.Kind).
+func allocShell(parent context.Context, id actor.ActorID, kind actor.Kind, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) *cell {
 	if mailbox <= 0 {
 		mailbox = 64
 	}
@@ -103,6 +106,7 @@ func allocShell(parent context.Context, id actor.ActorID, mailbox int, onDown fu
 	ctx, cancel := context.WithCancel(parent)
 	return &cell{
 		id:       id,
+		mintKind: kind,
 		inbox:    make(chan *message.Envelope, mailbox),
 		started:  started,
 		ctx:      ctx,
@@ -122,6 +126,9 @@ func (c *cell) Self() actor.ActorID { return c.id }
 // startedAt implements embodiment: the substrate-stamped bind instant (obs uptime
 // source). The substrate is the authority for it — the cell never self-reports.
 func (c *cell) startedAt() time.Time { return c.started }
+
+// kind implements embodiment: the out-generation attribute welded at mint time.
+func (c *cell) kind() actor.Kind { return c.mintKind }
 
 // isLive implements embodiment: the lock-free WHEN-validity probe (per-incarnation
 // atomic). True only between go-live and teardown.

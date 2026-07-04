@@ -91,7 +91,7 @@ func TestCellSerialDelivery(t *testing.T) {
 		done <- struct{}{}
 	}
 	rt, _ := New(Config{Parent: context.Background(), Mailbox: 200})
-	rt.Spawn("a", static(a))
+	rt.Spawn("a", actor.KindAgent, static(a))
 
 	const n = 50
 	for i := 0; i < n; i++ {
@@ -113,7 +113,7 @@ func TestCellStartStop(t *testing.T) {
 	t.Parallel()
 	a := newRecordActor()
 	rt, _ := New(Config{Parent: context.Background()})
-	inc := rt.Spawn("a", static(a))
+	inc := rt.Spawn("a", actor.KindAgent, static(a))
 	select {
 	case <-a.startedCh:
 	case <-time.After(time.Second):
@@ -137,7 +137,7 @@ func TestCellMailboxFull(t *testing.T) {
 	a.receive = func() { <-block }
 	rt, _ := New(Config{Parent: context.Background(), Mailbox: 1})
 	defer func() { close(block); rt.StopAll() }()
-	rt.Spawn("a", static(a))
+	rt.Spawn("a", actor.KindAgent, static(a))
 
 	var gotFull atomic.Bool
 	for i := 0; i < 50; i++ {
@@ -202,7 +202,7 @@ func TestCellPanicPublishesDown(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w) // register BEFORE spawn — no edge missed
-	rt.Spawn("a", static(panicActor{}))
+	rt.Spawn("a", actor.KindAgent, static(panicActor{}))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-w.notify:
@@ -248,7 +248,7 @@ func TestPanicDeathWithDespawningWatcherDoesNotDeadlock(t *testing.T) {
 	rt.WatchDown(w)
 	// Receive-panic (not Start-panic) so the incarnation handle is recorded BEFORE
 	// death is triggered by the deliver below — no race on w.inc.
-	w.inc = rt.Spawn("a", static(panicActor{}))
+	w.inc = rt.Spawn("a", actor.KindAgent, static(panicActor{}))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-w.notify:
@@ -270,14 +270,14 @@ func TestRespawnSameIDEachDeathIsIndependent(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
 
-	rt.Spawn("a", static(startPanicActor{}))
+	rt.Spawn("a", actor.KindAgent, static(startPanicActor{}))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
 		t.Fatal("no down edge for first instance")
 	}
 
-	rt.Spawn("a", static(startPanicActor{}))
+	rt.Spawn("a", actor.KindAgent, static(startPanicActor{}))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
@@ -331,7 +331,7 @@ func TestRequestCtxExpiresAtCancels(t *testing.T) {
 	a := &ctxActor{gotCtx: make(chan context.Context, 1), block: true}
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", static(a))
+	rt.Spawn("a", actor.KindAgent, static(a))
 
 	expires := time.Now().Add(80 * time.Millisecond).UnixMilli()
 	e := env("req-1")
@@ -365,7 +365,7 @@ func TestRequestTableCollapses(t *testing.T) {
 	a := newRecordActor()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", static(a))
+	rt.Spawn("a", actor.KindAgent, static(a))
 	mustDeliver(t, rt, "a", env("req-1"))
 
 	rt.mu.RLock()
@@ -397,7 +397,7 @@ func TestCellDeathCancelsInFlightReqCtx(t *testing.T) {
 	a := &ctxActor{panicN: "boom-req", downCh: make(chan struct{})}
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", static(a))
+	rt.Spawn("a", actor.KindAgent, static(a))
 	mustDeliver(t, rt, "a", env("boom-req"))
 
 	select {
@@ -417,7 +417,7 @@ func TestCellTeardownWaitsInFlight(t *testing.T) {
 		finished.Store(true)
 	}
 	rt, _ := New(Config{Parent: context.Background()})
-	inc := rt.Spawn("a", static(a))
+	inc := rt.Spawn("a", actor.KindAgent, static(a))
 	mustDeliver(t, rt, "a", env("x"))
 	time.Sleep(10 * time.Millisecond) // ensure Receive is in-flight
 	go func() {

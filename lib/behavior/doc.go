@@ -20,7 +20,7 @@
 // construction); correlation.go holds the derivation rule for correlation ids.
 //
 // Position in the stack: behavior sits in lib/ (the stdlib layer). It imports
-// only protocol types (message, channel, actor) and runtime seams (harness,
-// storespec). It has no knowledge of specific actor kinds — kind-neutrality is
-// the whole point.
+// only protocol types (message, actor), runtime seams (harness, storespec),
+// and uuid (envelope id generation). It has no knowledge of specific actor
+// kinds — kind-neutrality is the whole point.
 package behavior

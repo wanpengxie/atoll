@@ -24,6 +24,16 @@ import (
 // to truth (audience = caller) and flows BACK to the caller's mailbox; the
 // caller learns of its own timeout by RECEIVING that terminal, never by an
 // out-of-band callback. No runtime self-timer / Tick is needed.
+//
+// TWO TIMER LAYERS, not one (P15): this file's time.AfterFunc is the DURABLE
+// terminal deadline — closure author#2's guarantee that every request it Arms
+// gets a terminal written to truth, fired once, surviving no matter whether
+// anyone is still watching. It is NOT the caller-experience wait bound: that is
+// metatool's Shell.Await window (lib/metatool/shell.go), a VOLATILE per-call
+// UX timer that can elapse (degrading to an ack) while author#2's timer keeps
+// running underneath, still owing its terminal write. Neither is the batch
+// table-scan form forward's write-door audit criticised (each is a single
+// per-request AfterFunc, not a poll loop over a live table).
 
 // RequestSpec is the caller-supplied shape of a kind=request envelope —
 // the call-face mirror of serve's ResponseSpec.

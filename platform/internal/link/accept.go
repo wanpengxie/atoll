@@ -72,6 +72,26 @@ type Acceptor struct {
 	obsWatcher actorrt.ObsWatcher
 	obsMu      sync.Mutex
 	obsReg     map[actor.ActorID]bool
+
+	// links is the per-compute revocation handle table (§8.3 KickDaemon): every
+	// link whose daemonID is known is registered here at runLink ENTRY — before
+	// the attach frame is even read, not only after a successful attach — so a
+	// Kick reaches a connection still mid-handshake (the T2→T3 half-attach
+	// window) too. Multiple entries under the same id are normal during an
+	// overlapping reconnect (old link tearing down as the new one comes up);
+	// Kick tears down every one of them. Empty id (dev self-declared mode) is
+	// never registered — Kick cannot target what auth never named.
+	linksMu sync.Mutex
+	links   map[string][]linkHandle
+}
+
+// linkHandle is what Kick needs to voluntarily tear one link down: quietStop
+// silences this link's ports FIRST (kick is a revocation, not a death — the
+// same silent edge as a graceful detach), then lc.Close() drives it through the
+// existing teardown funnel (frame.go).
+type linkHandle struct {
+	lc        *linkConn
+	quietStop func()
 }
 
 // Config configures an Acceptor. Auth is the app layer's concern — Serve
@@ -126,15 +146,69 @@ func NewAcceptor(cfg Config) *Acceptor {
 		attached:   map[string]int{},
 		obsWatcher: cfg.ObsWatcher,
 		obsReg:     map[actor.ActorID]bool{},
+		links:      map[string][]linkHandle{},
 	}
 }
 
-// markAttached / markDetached / IsAttached / AttachedDaemons are the L0 link-
-// attachment read seam: the Acceptor authoritatively holds which computes have a
-// live attach right now (it owns the connections + lease). markAttached is
-// called once per accepted link (after attach success); markDetached once when
-// that link tears down (peer gone / lease expiry / Close). Empty id (dev self-
-// declared mode) is not tracked.
+// registerLink adds this link's handle under id — called at runLink entry
+// (daemonID known, attach not yet processed), not at markAttached time.
+func (a *Acceptor) registerLink(id string, h linkHandle) {
+	if id == "" {
+		return
+	}
+	a.linksMu.Lock()
+	a.links[id] = append(a.links[id], h)
+	a.linksMu.Unlock()
+}
+
+// deregisterLink removes exactly this link's handle (identity match on lc, not
+// a wholesale clear) — an overlapping reconnect leaves the other entry intact.
+func (a *Acceptor) deregisterLink(id string, lc *linkConn) {
+	if id == "" {
+		return
+	}
+	a.linksMu.Lock()
+	hs := a.links[id]
+	for i, h := range hs {
+		if h.lc == lc {
+			hs = append(hs[:i], hs[i+1:]...)
+			break
+		}
+	}
+	if len(hs) == 0 {
+		delete(a.links, id)
+	} else {
+		a.links[id] = hs
+	}
+	a.linksMu.Unlock()
+}
+
+// KickDaemon closes every link currently registered under computeID — the
+// substrate half of a revocation (S3 §8.3). It is a snapshot-then-act: the
+// handle slice is copied under the lock, then each handle is torn down OUTSIDE
+// it (quietStop first — kick is a voluntary teardown, not a death edge — then
+// Close through the existing funnel), so a concurrent runLink deregistration
+// never deadlocks against it. Returns the number of links closed. No
+// generation/tombstone bookkeeping (S-P21 拍定 A): a residual pre-auth
+// connection that has not registered yet is closed by the app-side convergence
+// loop (`while IsAttached { Kick }`, §6), not by a shadow revoked-set here.
+func (a *Acceptor) KickDaemon(computeID string) int {
+	a.linksMu.Lock()
+	hs := append([]linkHandle(nil), a.links[computeID]...)
+	a.linksMu.Unlock()
+	for _, h := range hs {
+		h.quietStop()
+		_ = h.lc.Close()
+	}
+	return len(hs)
+}
+
+// markAttached / markDetached / IsAttached are the L0 link-attachment read
+// seam: the Acceptor authoritatively holds which computes have a live attach
+// right now (it owns the connections + lease). markAttached is called once
+// per accepted link (after attach success); markDetached once when that link
+// tears down (peer gone / lease expiry / Close). Empty id (dev self-declared
+// mode) is not tracked.
 func (a *Acceptor) markAttached(id string) {
 	if id == "" {
 		return
@@ -160,17 +234,6 @@ func (a *Acceptor) IsAttached(id string) bool {
 	a.attachedMu.Lock()
 	defer a.attachedMu.Unlock()
 	return a.attached[id] > 0
-}
-
-// AttachedDaemons returns a snapshot of the currently-attached compute ids.
-func (a *Acceptor) AttachedDaemons() []string {
-	a.attachedMu.Lock()
-	defer a.attachedMu.Unlock()
-	out := make([]string, 0, len(a.attached))
-	for id := range a.attached {
-		out = append(out, id)
-	}
-	return out
 }
 
 // Serve upgrades an attaching daemon connection and runs its link for the
@@ -271,7 +334,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				Access:   a.accessSink(),
 				Schedule: a.scheduleSink(),
 			}
-			inc, err := a.runtime.Attach(hsCtx, s, sinks, resolve)
+			inc, err := a.runtime.Attach(hsCtx, s, sinks, resolve, actorrt.KindOf(kindOf))
 			if err != nil {
 				a.logger.Info("link.attach_stream_failed", "err", err)
 				return
@@ -305,12 +368,6 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 
 	lc = newLinkConn(&wsConn{ws: ws}, onControl, onOpen)
 
-	// Lease watchdog: tears the link down when last-seen falls behind TTL.
-	done := make(chan struct{})
-	go lease.Watch(done, func() {
-		a.logger.Info("link.lease_expired", "channel", string(a.channelID))
-		_ = lc.Close()
-	})
 	// quietStopPorts tears down every port on this link WITHOUT a down edge — the
 	// home is going away gracefully, so its port-hosted actors must fall silent (no
 	// receiver_unavailable for in-flight requests) rather than surfacing a spurious
@@ -326,6 +383,21 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			a.runtime.DespawnQuiet(inc)
 		}
 	}
+
+	// Register this link's Kick handle BEFORE the attach frame is even read (not
+	// only after a successful attach, unlike markAttached/boundID above) — this
+	// closes the half-attach window (§S-P21): a daemon that is pre-authenticated
+	// but has not yet completed its attach handshake is still reachable by
+	// KickDaemon. Deregistered on runLink exit regardless of how it ends.
+	a.registerLink(daemonID, linkHandle{lc: lc, quietStop: quietStopPorts})
+	defer a.deregisterLink(daemonID, lc)
+
+	// Lease watchdog: tears the link down when last-seen falls behind TTL.
+	done := make(chan struct{})
+	go lease.Watch(done, func() {
+		a.logger.Info("link.lease_expired", "channel", string(a.channelID))
+		_ = lc.Close()
+	})
 
 	// Acceptor Close tears the link down; quiet-stop this link's ports FIRST so the
 	// ensuing stream EOFs are silent. A request-context cancel or peer-gone (the run
@@ -484,6 +556,41 @@ func (a *Acceptor) reconcileHost(ctx context.Context, computeID string, newAllow
 	}
 	if err := a.membership.ApplyMemberTransitions(ctx, nil, removes); err != nil {
 		a.logger.Warn("link.reconcile_host_dereg_failed", "compute", computeID, "err", err)
+		return
+	}
+	// H5 obs cleanup runs AFTER the remove tx commits, and confirms EACH row is
+	// actually gone before touching obsReg — never eagerly on the pre-tx
+	// candidate list (the bug this closes). Race: a successor compute B can take
+	// over rec.ID (attach, re-register under Host==B) between the ListActive
+	// snapshot above and this tx running; ApplyMemberTransitions' ExpectedHost
+	// guard already makes THAT row's removal a 0-rows-affected no-op, but obs
+	// cleanup has no guard of its own — clearing it unconditionally on the
+	// candidate list (as this method used to, inline in the loop above, BEFORE
+	// the tx even ran) would rip out B's now-live obs registration on the
+	// strength of a stale snapshot, even though B's own handleAttach correctly
+	// skipped re-registering it (obsReg dedup saw it already true). There is no
+	// per-row changed signal from ApplyMemberTransitions, so re-Lookup NOW, per
+	// id, and clean obs ONLY for a row confirmed gone/inactive; a row that moved
+	// to a successor (still active, whatever its Host now is) keeps its
+	// registration untouched — it is owned by whoever hosts it now.
+	if a.obsWatcher == nil {
+		return
+	}
+	for _, rm := range removes {
+		rec2, ok2, err2 := a.registry.Lookup(ctx, rm.ID)
+		if err2 != nil {
+			a.logger.Warn("link.reconcile_host_obs_lookup_failed", "compute", computeID, "actor", string(rm.ID), "err", err2)
+			continue
+		}
+		if ok2 && rec2.IsActive() {
+			continue // confirmed NOT gone — leave its obs registration alone
+		}
+		a.obsMu.Lock()
+		if a.obsReg[rm.ID] {
+			a.runtime.UnwatchObs(rm.ID, a.obsWatcher)
+			delete(a.obsReg, rm.ID)
+		}
+		a.obsMu.Unlock()
 	}
 }
 
@@ -608,19 +715,6 @@ func (a *Acceptor) scheduleSink() actorrt.RelaySink {
 			return nil, fmt.Errorf("link: schedule unknown method %q", req.Method)
 		}
 	}
-}
-
-// CancelRequest reaches the request-scope of cancel(scope) across the wire: the
-// home (where a request's caller lives) tells the daemon hosting `actor` to
-// cancel the reqCtx its cell is running `requestID` under. The bound port
-// embodiment writes a KindCancel frame down that actor's stream; the daemon fires
-// the matching reqCtx off its cell goroutine. No-op if the actor is not a hosted
-// port here or the request already closed — cancel is a best-effort hint, the
-// caller's closure owns the terminal. The real producer (a caller actively
-// abandoning a request) is the app/domain trigger above the substrate; this is
-// the substrate mechanism it drives.
-func (a *Acceptor) CancelRequest(target actor.ActorID, requestID message.ID) {
-	a.runtime.CancelRequest(target, requestID)
 }
 
 // Close stops accepting new links and tears down active ones, waiting for all

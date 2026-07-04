@@ -51,7 +51,7 @@ func newCellHost(t *testing.T) *cellHost {
 	kimi.SetAgentFactory(b, func(kimi.AgentConfig) (kimi.Agent, error) {
 		return scriptTextTurn(&bb, "parity reply"), nil
 	})
-	rt.Spawn(testActorID, func(actorrt.Incarnation) actorrt.Actor { return b })
+	rt.Spawn(testActorID, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return b })
 	return &cellHost{w: w, rt: rt, del: del}
 }
 
@@ -109,7 +109,7 @@ func newDaemonHost(t *testing.T) *daemonHost {
 	kimi.SetAgentFactory(bb, func(kimi.AgentConfig) (kimi.Agent, error) {
 		return scriptTextTurn(&b, "parity reply"), nil
 	})
-	rt.Spawn(testActorID, func(actorrt.Incarnation) actorrt.Actor { return bb })
+	rt.Spawn(testActorID, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return bb })
 	return dh
 }
 
@@ -190,31 +190,6 @@ func assertAgentBehavior(t *testing.T, h agentHost) {
 		t.Fatalf("describe payload missing skill_doc: %s", descReply.Payload)
 	}
 
-	// 2b. actor.status self-answers mechanically too (never an LLM turn): it
-	//     emits a kind=response immediately and does NOT enqueue a turn that
-	//     would burn an LLM call. The scripted turn would emit an agent.text
-	//     event; asserting the immediate emit is the response (not a 3rd
-	//     agent.text) pins that status never reaches the loop.
-	status := message.Envelope{
-		ID: "parity-status", ChannelID: testChannelID, Kind: message.KindRequest,
-		Type:   introspect.QueryStatus,
-		Sender: message.Sender{Kind: actor.KindHuman, ID: "user-A"},
-	}
-	h.deliver(t, &status)
-	got = waitEmitted(t, h, 3, 2*time.Second)
-	if len(got) < 3 {
-		t.Fatal("status self-answer missing")
-	}
-	statusReply := got[2]
-	if statusReply.Kind != message.KindResponse || statusReply.ParentID != "parity-status" {
-		t.Fatalf("status reply shape (expected mechanical response, not an LLM turn): %+v", statusReply)
-	}
-	var sp map[string]json.RawMessage
-	_ = json.Unmarshal(statusReply.Payload, &sp)
-	if _, ok := sp["status_snapshot"]; !ok {
-		t.Fatalf("status payload missing status_snapshot: %s", statusReply.Payload)
-	}
-
 	// 3. An unawaited FINAL response becomes a continuation turn (the
 	//    async-result-feeds-next-reasoning path — pure mailbox routing,
 	//    therefore host-coupled and parity-critical).
@@ -226,11 +201,11 @@ func assertAgentBehavior(t *testing.T, h agentHost) {
 		Payload: finalPayload,
 	}
 	h.deliver(t, &asyncFinal)
-	got = waitEmitted(t, h, 4, 2*time.Second)
-	if len(got) < 4 {
+	got = waitEmitted(t, h, 3, 2*time.Second)
+	if len(got) < 3 {
 		t.Fatal("unawaited final did not produce a continuation turn")
 	}
-	cont := got[3]
+	cont := got[2]
 	if cont.Type != "agent.text" || cont.ParentID != "parity-async-final" {
 		t.Fatalf("continuation shape: %+v", cont)
 	}

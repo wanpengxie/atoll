@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // TestLiveIDs_MatchesCurrentlySpawnedSet: LiveIDs is the map-key snapshot of
@@ -14,8 +16,8 @@ func TestLiveIDs_MatchesCurrentlySpawnedSet(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	a := rt.Spawn("a", static(newRecordActor()))
-	rt.Spawn("b", static(newRecordActor()))
+	a := rt.Spawn("a", actor.KindAgent, static(newRecordActor()))
+	rt.Spawn("b", actor.KindAgent, static(newRecordActor()))
 	rt.Despawn(a)
 
 	ids := rt.LiveIDs()
@@ -35,7 +37,7 @@ func TestSpawnIfAbsent_EmptyIDSucceeds(t *testing.T) {
 	defer rt.StopAll()
 
 	ra := newRecordActor()
-	inc, ok := rt.SpawnIfAbsent("fresh", static(ra))
+	inc, ok := rt.SpawnIfAbsent("fresh", actor.KindAgent, static(ra))
 	if !ok {
 		t.Fatal("SpawnIfAbsent(absent id) returned ok=false")
 	}
@@ -65,7 +67,7 @@ func TestSpawnIfAbsent_OccupiedIDNeverReplaces(t *testing.T) {
 	defer rt.StopAll()
 
 	original := newRecordActor()
-	originalInc := rt.Spawn("taken", static(original))
+	originalInc := rt.Spawn("taken", actor.KindAgent, static(original))
 	select {
 	case <-original.startedCh:
 	case <-time.After(time.Second):
@@ -73,7 +75,7 @@ func TestSpawnIfAbsent_OccupiedIDNeverReplaces(t *testing.T) {
 	}
 
 	discarded := newRecordActor()
-	_, ok := rt.SpawnIfAbsent("taken", static(discarded))
+	_, ok := rt.SpawnIfAbsent("taken", actor.KindAgent, static(discarded))
 	if ok {
 		t.Fatal("SpawnIfAbsent(occupied id) returned ok=true, want false")
 	}

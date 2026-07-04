@@ -17,7 +17,7 @@ import (
 type turnItem struct{ env message.Envelope }
 
 func (t turnItem) correlationID() message.ID {
-	return behavior.CorrelationID("", t.env.CorrelationID, t.env.ID)
+	return behavior.CorrelationID(t.env.CorrelationID, t.env.ID)
 }
 
 // enqueueTurn pushes a turn without ever blocking: on overflow the oldest queued

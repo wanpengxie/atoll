@@ -5,6 +5,8 @@ import (
 	"errors"
 	"testing"
 	"time"
+
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // TestFork_ChildLiveAndOwned is the base fork happy path: a live parent
@@ -15,8 +17,8 @@ func TestFork_ChildLiveAndOwned(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", static(newRecordActor()))
-	childInc, err := rt.Fork(parentInc, "parent/child", static(newRecordActor()))
+	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
+	childInc, err := rt.Fork(parentInc, "parent/child", actor.KindAgent, static(newRecordActor()))
 	if err != nil {
 		t.Fatalf("Fork: %v", err)
 	}
@@ -46,10 +48,10 @@ func TestFork_ParentNotLive_FastPath(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", static(newRecordActor()))
+	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
 	rt.Despawn(parentInc)
 
-	_, err := rt.Fork(parentInc, "parent/child", static(newRecordActor()))
+	_, err := rt.Fork(parentInc, "parent/child", actor.KindAgent, static(newRecordActor()))
 	if !errors.Is(err, ErrParentNotLive) {
 		t.Fatalf("Fork(dead parent) = %v, want ErrParentNotLive", err)
 	}
@@ -66,10 +68,10 @@ func TestFork_ChildIDCollision_HardFail(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", static(newRecordActor()))
-	existing := rt.Spawn("parent/child", static(newRecordActor()))
+	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
+	existing := rt.Spawn("parent/child", actor.KindAgent, static(newRecordActor()))
 
-	_, err := rt.Fork(parentInc, "parent/child", static(newRecordActor()))
+	_, err := rt.Fork(parentInc, "parent/child", actor.KindAgent, static(newRecordActor()))
 	if !errors.Is(err, ErrChildIDCollision) {
 		t.Fatalf("Fork(colliding id) = %v, want ErrChildIDCollision", err)
 	}
@@ -93,15 +95,15 @@ func TestFork_PrunesDeadChildrenOnNextFork(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", static(newRecordActor()))
+	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
 
-	c1, err := rt.Fork(parentInc, "parent/c1", static(newRecordActor()))
+	c1, err := rt.Fork(parentInc, "parent/c1", actor.KindAgent, static(newRecordActor()))
 	if err != nil {
 		t.Fatalf("Fork c1: %v", err)
 	}
 	rt.Despawn(c1) // c1 dies independently of parent — a stale r.owned entry.
 
-	c2, err := rt.Fork(parentInc, "parent/c2", static(newRecordActor()))
+	c2, err := rt.Fork(parentInc, "parent/c2", actor.KindAgent, static(newRecordActor()))
 	if err != nil {
 		t.Fatalf("Fork c2: %v", err)
 	}
@@ -123,8 +125,8 @@ func TestFork_CascadeOnParentDeath(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", static(newRecordActor()))
-	childInc, err := rt.Fork(parentInc, "parent/child", static(newRecordActor()))
+	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
+	childInc, err := rt.Fork(parentInc, "parent/child", actor.KindAgent, static(newRecordActor()))
 	if err != nil {
 		t.Fatalf("Fork: %v", err)
 	}
@@ -163,9 +165,9 @@ func TestDespawnChild_AuthorityCheck(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", static(newRecordActor()))
-	otherInc := rt.Spawn("other", static(newRecordActor()))
-	childInc, err := rt.Fork(parentInc, "parent/child", static(newRecordActor()))
+	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
+	otherInc := rt.Spawn("other", actor.KindAgent, static(newRecordActor()))
+	childInc, err := rt.Fork(parentInc, "parent/child", actor.KindAgent, static(newRecordActor()))
 	if err != nil {
 		t.Fatalf("Fork: %v", err)
 	}

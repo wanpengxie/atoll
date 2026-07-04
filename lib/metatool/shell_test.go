@@ -57,7 +57,7 @@ func provisionalEnvelope(parentID message.ID) *message.Envelope {
 func TestShell_RegisterAndDeliverFinal(t *testing.T) {
 	s := newTestShell()
 	id := message.ID("req-1")
-	s.register(id, false)
+	s.register(id, "actor:test", false)
 
 	// expectsAwait=false and state=awaitNotStarted → default branch → not
 	// consumed (nobody is actually awaiting).
@@ -69,7 +69,7 @@ func TestShell_RegisterAndDeliverFinal(t *testing.T) {
 func TestShell_RegisterWithExpectsAwaitAndDeliverFinal(t *testing.T) {
 	s := newTestShell()
 	id := message.ID("req-2")
-	s.register(id, true) // expectsAwait=true → buffer for future Await
+	s.register(id, "actor:test", true) // expectsAwait=true → buffer for future Await
 
 	if consumed := s.Deliver(finalEnvelope(id)); !consumed {
 		t.Fatalf("expected consumed, got not consumed")
@@ -79,7 +79,7 @@ func TestShell_RegisterWithExpectsAwaitAndDeliverFinal(t *testing.T) {
 func TestShell_DeliverProvisionalToActiveAwaiter(t *testing.T) {
 	s := newTestShell()
 	id := message.ID("req-3")
-	s.register(id, true)
+	s.register(id, "actor:test", true)
 
 	done := make(chan struct{})
 	go func() {
@@ -116,7 +116,7 @@ func TestShell_DeliverNilEnvelope(t *testing.T) {
 func TestShell_RegisterAwaitDeliverFinal(t *testing.T) {
 	s := newTestShell()
 	id := message.ID("req-4")
-	s.register(id, true)
+	s.register(id, "actor:test", true)
 
 	env := finalEnvelope(id)
 	var (
@@ -147,7 +147,7 @@ func TestShell_RegisterAwaitDeliverFinal(t *testing.T) {
 func TestShell_AwaitTimeout(t *testing.T) {
 	s := newTestShell()
 	id := message.ID("req-5")
-	s.register(id, true)
+	s.register(id, "actor:test", true)
 
 	env, ok, err := s.Await(context.Background(), id, 50*time.Millisecond)
 	if err != nil {
@@ -161,7 +161,7 @@ func TestShell_AwaitTimeout(t *testing.T) {
 func TestShell_AwaitContextCancelled(t *testing.T) {
 	s := newTestShell()
 	id := message.ID("req-ctx")
-	s.register(id, true)
+	s.register(id, "actor:test", true)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
@@ -181,7 +181,7 @@ func TestShell_AwaitContextCancelled(t *testing.T) {
 func TestShell_AwaitZeroWindow(t *testing.T) {
 	s := newTestShell()
 	id := message.ID("req-zero")
-	s.register(id, true)
+	s.register(id, "actor:test", true)
 
 	env, ok, err := s.Await(context.Background(), id, 0)
 	if err != nil {
@@ -206,7 +206,7 @@ func TestShell_AwaitUnregistered(t *testing.T) {
 func TestShell_AbandonRemovesFuture(t *testing.T) {
 	s := newTestShell()
 	id := message.ID("req-6")
-	s.register(id, true)
+	s.register(id, "actor:test", true)
 	if !s.InFlight(id) {
 		t.Fatal("expected InFlight=true after register")
 	}
@@ -220,7 +220,7 @@ func TestShell_PendingReturnsRegisteredIDs(t *testing.T) {
 	s := newTestShell()
 	ids := []message.ID{"a", "b", "c"}
 	for _, id := range ids {
-		s.register(id, false)
+		s.register(id, "actor:test", false)
 	}
 	pending := s.Pending()
 	if len(pending) != 3 {
@@ -244,8 +244,8 @@ func TestShell_PendingEmptyByDefault(t *testing.T) {
 func TestShell_RegisterDuplicateIsNoop(t *testing.T) {
 	s := newTestShell()
 	id := message.ID("dup")
-	s.register(id, true)
-	s.register(id, false) // should not overwrite
+	s.register(id, "actor:test", true)
+	s.register(id, "actor:test", false) // should not overwrite
 	if len(s.Pending()) != 1 {
 		t.Fatal("expected exactly 1 pending after duplicate register")
 	}
@@ -254,7 +254,7 @@ func TestShell_RegisterDuplicateIsNoop(t *testing.T) {
 func TestShell_DeliverFinalBufferedBeforeAwait(t *testing.T) {
 	s := newTestShell()
 	id := message.ID("req-buf")
-	s.register(id, true)
+	s.register(id, "actor:test", true)
 
 	if consumed := s.Deliver(finalEnvelope(id)); !consumed {
 		t.Fatalf("expected consumed, got not consumed")
@@ -276,7 +276,7 @@ func TestShell_BufferedFinalNotStrandedByTimeout(t *testing.T) {
 	for i := 0; i < 100; i++ {
 		s := newTestShell()
 		id := message.ID(fmt.Sprintf("req-race-%d", i))
-		s.register(id, true)
+		s.register(id, "actor:test", true)
 		s.Deliver(finalEnvelope(id)) // buffered before Await parks
 
 		env, ok, err := s.Await(context.Background(), id, time.Nanosecond)

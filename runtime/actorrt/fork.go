@@ -38,11 +38,15 @@ var ErrChildIDCollision = errors.New("actorrt: child id collision")
 //
 // childID colliding with an existing embodiment is a HARD failure
 // (ErrChildIDCollision) — NOT Spawn's replace semantics.
-func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, build func(Incarnation) Actor) (Incarnation, error) {
+//
+// kind is welded onto the child's embodiment (G11: the caller — ForkSpec.Kind —
+// always holds it; the child's incarnation household must carry it, same as an
+// admission Spawn's), read back later via Runtime.Stat.
+func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, kind actor.Kind, build func(Incarnation) Actor) (Incarnation, error) {
 	if !r.IsLive(parent) { // ① fast-path, lock-free
 		return Incarnation{}, ErrParentNotLive
 	}
-	c := allocShell(r.parent, childID, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
+	c := allocShell(r.parent, childID, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
 	c.impl = build(Incarnation{id: childID, p: c}) // outside the lock, same discipline as Spawn.
 
 	r.mu.Lock()

@@ -151,65 +151,6 @@ func TestRespond_RejectReasonErrors(t *testing.T) {
 	}
 }
 
-// CollapseInternalError closes a request with a receiver_internal_error final,
-// carrying the detail in the payload.
-func TestCollapseInternalError_WithDetail(t *testing.T) {
-	w := &recordingWriter{}
-	id, err := CollapseInternalError(context.Background(), w, fixedClock(7), newRequest("r1", nil), "panic in handler")
-	if err != nil {
-		t.Fatalf("CollapseInternalError err: %v", err)
-	}
-	if id == "" {
-		t.Fatal("want a message id")
-	}
-	var p struct {
-		Status string `json:"status"`
-		Reason string `json:"reason"`
-		Detail string `json:"detail"`
-	}
-	if e := json.Unmarshal(w.last().Payload, &p); e != nil {
-		t.Fatalf("payload unmarshal: %v", e)
-	}
-	if p.Status != "failed" {
-		t.Fatalf("status = %q, want failed", p.Status)
-	}
-	if p.Reason != string(message.TerminalReceiverInternalError) {
-		t.Fatalf("reason = %q, want receiver_internal_error", p.Reason)
-	}
-	if p.Detail != "panic in handler" {
-		t.Fatalf("detail = %q, want carried", p.Detail)
-	}
-}
-
-// CollapseInternalError with empty detail writes no detail field but still
-// closes with receiver_internal_error.
-func TestCollapseInternalError_EmptyDetail(t *testing.T) {
-	w := &recordingWriter{}
-	_, err := CollapseInternalError(context.Background(), w, fixedClock(7), newRequest("r1", nil), "")
-	if err != nil {
-		t.Fatalf("CollapseInternalError err: %v", err)
-	}
-	var p struct {
-		Reason string `json:"reason"`
-		Detail string `json:"detail"`
-	}
-	_ = json.Unmarshal(w.last().Payload, &p)
-	if p.Reason != string(message.TerminalReceiverInternalError) {
-		t.Fatalf("reason = %q", p.Reason)
-	}
-	if p.Detail != "" {
-		t.Fatalf("empty detail must not appear, got %q", p.Detail)
-	}
-}
-
-// CollapseInternalError rejects a nil request.
-func TestCollapseInternalError_NilRequest(t *testing.T) {
-	_, err := CollapseInternalError(context.Background(), &recordingWriter{}, fixedClock(1), nil, "x")
-	if err == nil {
-		t.Fatal("nil request must error")
-	}
-}
-
 // EmitEvent emits a kind=event message; the authoring identity is welded onto
 // the pen (the relay stub leaves Sender/ChannelID zero on the built envelope).
 func TestEmitEvent_Success(t *testing.T) {

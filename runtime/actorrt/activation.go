@@ -8,20 +8,18 @@ import (
 
 // Lifecycle is a desired member's activation intent — the closed set of ways a
 // durable member wants its liveness managed. It is content the control plane
-// declares per member, not a new mint type: both values flow through the same
-// mint.
+// declares per member, not a new mint type: the single value flows through the
+// same mint as everything else (H4: the LifecycleLazy ghost value — a public
+// promise to DesiredSource implementers with no corresponding machine
+// semantics, a half-built-result — was ripped from the set; additive to bring
+// back when a real second lifecycle semantics exists).
 type Lifecycle string
 
 const (
-	// LifecycleAlwaysOn: the eager reconcile ring (not yet built; this
-	// contract's shape has already shipped) will keep a live incarnation up
-	// whenever this member appears in desired.
+	// LifecycleAlwaysOn: the eager reconcile ring keeps a live incarnation up
+	// whenever this member appears in desired (platform.Home.reconcileActivation /
+	// computeRing.reconcile).
 	LifecycleAlwaysOn Lifecycle = "always_on"
-	// LifecycleLazy: no eager revival; activation on demand at the delivery
-	// seam (member-but-no-live → activate) — deferred for now, kept in the
-	// closed set so desired declarations don't need a schema change when the
-	// lazy entry lands.
-	LifecycleLazy Lifecycle = "lazy"
 )
 
 // DesiredMember is one row of the desired truth: a durable member the control

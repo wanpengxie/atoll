@@ -41,7 +41,7 @@ type turnItem struct {
 // correlationID resolves the correlation anchor for a turn: the trigger
 // envelope's correlation id, falling back to its own id.
 func (t turnItem) correlationID() message.ID {
-	return behavior.CorrelationID("", t.env.CorrelationID, t.env.ID)
+	return behavior.CorrelationID(t.env.CorrelationID, t.env.ID)
 }
 
 // enqueueTurn pushes a turn without ever blocking: on overflow the oldest

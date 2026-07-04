@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/tap"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
@@ -110,6 +111,48 @@ type Home struct {
 	// correctness mechanism.
 	reviveLogMu sync.Mutex
 	reviveLogAt map[actor.ActorID]time.Time
+
+	// obsReg dedups this home's own per-actor WatchObs registration (the local-cell
+	// arm of the actor-source obs axis, mirroring Acceptor.obsReg's dedup for the
+	// daemon-attach arm) — WatchObs itself is append-only with no built-in dedup
+	// (runtime.go), so a losing SpawnIfAbsent/Fork build (CAS discarded) must not
+	// leave a duplicate registration behind. Registered once, at buildCaps (the
+	// single convergence point for every local birth path).
+	obsMu  sync.Mutex
+	obsReg map[actor.ActorID]bool
+
+	// reviverStraddleHook is a test-only seam (nil in production): see its call
+	// site in homeReviver.EnsureLive.
+	reviverStraddleHook func()
+}
+
+// watchObs registers the device-presence fold for id's obs PUSH, deduped so a
+// discarded build (SpawnIfAbsent/Fork CAS loser) never leaves the runtime's
+// append-only obsWatch registry double-appended for the same id.
+func (h *Home) watchObs(id actor.ActorID) {
+	h.obsMu.Lock()
+	defer h.obsMu.Unlock()
+	if h.obsReg[id] {
+		return
+	}
+	h.channel.Cells().WatchObs(id, h.deviceFold)
+	h.obsReg[id] = true
+}
+
+// unwatchObs is watchObs's symmetric un-registration (H5): obsReg is a name
+// registry that must not outlive the membership it tracks (WatchObs is
+// append-only, runtime.go), so a dereg without the matching UnwatchObs would
+// leak the fold's registration across a future re-admission of the same id
+// (mirrors Acceptor.obsReg's own dereg-site cleanup for the daemon-attach arm).
+// A no-op if id was never registered here (e.g. it only ever lived attached).
+func (h *Home) unwatchObs(id actor.ActorID) {
+	h.obsMu.Lock()
+	defer h.obsMu.Unlock()
+	if !h.obsReg[id] {
+		return
+	}
+	h.channel.Cells().UnwatchObs(id, h.deviceFold)
+	delete(h.obsReg, id)
 }
 
 // reviveLogThrottle bounds the attached-host revive-skip log (see
@@ -177,7 +220,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	// at the call sites.
 	systemPen := minter.Mint(actor.SystemActorID, actor.KindSystem, cfg.ChannelID)
 
-	// 5. Bootstrap: register the intrinsic system actor so its substrate-death
+	// 4. Bootstrap: register the intrinsic system actor so its substrate-death
 	//    terminals pass harness sender validation. Idempotent SEED: on a home
 	//    restart over a persistent channel DB the row already exists, and a raw
 	//    re-Insert would PK-conflict (actor_id is the table key) — failing Open
@@ -197,7 +240,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		}
 	}
 
-	// 5.5 Device-presence fold (L3): folds actor-source obs PUSH edges
+	// 5. Device-presence fold (L3): folds actor-source obs PUSH edges
 	//     into a volatile per-actor level (in-memory; never persisted), decays to
 	//     unknown on the actor's death edge (link-down cascade). Built BEFORE
 	//     channelkit so the system cell can read it (sysactor observes L1/L2/L3);
@@ -239,7 +282,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	delivery := tap.NewPump(signal, cs.Query, from, deliver, logger)
 	delivery.Start()
 
-	// 7.5 Register the device-presence fold as a global down watcher (so an actor's
+	// 8. Register the device-presence fold as a global down watcher (so an actor's
 	//     death edge decays its L3 to unknown — the link-down cascade). Per-actor
 	//     obs registration happens at attach (Acceptor below).
 	channel.Cells().WatchDown(deviceFold)
@@ -265,6 +308,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		desired:          cfg.Desired,
 		prevEagerDesired: map[actor.ActorID]bool{},
 		reviveLogAt:      map[actor.ActorID]time.Time{},
+		obsReg:           map[actor.ActorID]bool{},
 	}
 
 	// 10. Time axis (OpenScheduler). FireSink mints a pen per fire (author-welded);
@@ -277,7 +321,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//     from the first instant.
 	rt := channel.Cells()
 	schedMinter, engine, err := runtime.OpenScheduler(cs, schedule.AssemblyDeps{
-		Fire:   fireSink{minter: minter, registry: cs.Registry, chID: cfg.ChannelID},
+		Fire:   fireSink{minter: minter, registry: cs.Registry, rt: rt, chID: cfg.ChannelID},
 		Host:   rt,
 		Revive: homeReviver{h: h},
 		Clock:  cfg.Clock,
@@ -293,7 +337,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	h.engine = engine
 	engine.Start()
 
-	// 10.5 Build the link acceptor (physical layer: WS mux + per-actor ipc streams
+	// 11. Build the link acceptor (physical layer: WS mux + per-actor ipc streams
 	//      + lease judgement for attached computes). It welds an attaching remote
 	//      port's incarnation onto the same three minters a local cell's Caps draw
 	//      from — the harness pen Minter, the access door (cs.Access), and the
@@ -314,8 +358,8 @@ func Open(cfg HomeConfig) (*Home, error) {
 	})
 	h.links = links
 
-	// 11. Reconcilers (level backstops). Run one sweep of EACH at startup — closure
-	//     is the home-restart recovery path (#5, close orphan open requests whose
+	// 12. Reconcilers (level backstops). Run one sweep of EACH at startup — closure
+	//     is the home-restart recovery path (#4, close orphan open requests whose
 	//     receiver's embodiment predates this process); activation re-mints the
 	//     always-on desired set. Then a low-frequency ticker keeps both as the
 	//     safety net for any lost death edge / intent change. The death edge (OnDown)
@@ -384,7 +428,7 @@ func (h *Home) logReviveAttached(id actor.ActorID, host string) {
 // SpawnIfAbsent-minted — the ring is the authority for the always-on lifecycle
 // regardless of who first embodied it). 反误杀 holds because the protected
 // categories never enter the desired-always-on set, so they never enter
-// prevEagerDesired. Lazy members are not eager-managed and never enter it either.
+// prevEagerDesired.
 //
 // placement filter (§10.13 推导2/7, S6): both arms consult the registry's Host
 // column BEFORE their own gate (补: before the builder lookup; 削: before
@@ -410,9 +454,6 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 	}
 	current := make(map[actor.ActorID]bool)
 	for _, m := range desired {
-		if m.Lifecycle != actorrt.LifecycleAlwaysOn {
-			continue // lazy members are activated at the delivery seam, not eagerly.
-		}
 		current[m.ID] = true
 		if actual[m.ID] {
 			continue
@@ -434,7 +475,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		}
 		kind := m.Kind
 		id := m.ID
-		rt.SpawnIfAbsent(id, func(inc actorrt.Incarnation) actorrt.Actor {
+		rt.SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
 			return factory(h.buildCaps(id, kind, inc))
 		})
 	}
@@ -459,7 +500,13 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 // truth-log write) — UI status polling must not pollute the log; in-universe
 // actors instead ask the system actor by message (that path is logged).
 func (h *Home) View() View {
-	return View{query: h.cs.Query, registry: h.cs.Registry, links: h.links, deviceFold: h.deviceFold}
+	return View{
+		query:      h.cs.Query,
+		registry:   h.cs.Registry,
+		links:      h.links,
+		deviceFold: h.deviceFold,
+		stat:       &runtimeLivenessAdapter{rt: h.channel.Cells()},
+	}
 }
 
 // Spawn admits one actor into the channel as durable membership truth and, when
@@ -512,13 +559,35 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, fac
 		// participant is a gated cap holder; substrate anchors are not (see
 		// channelkit/compute).
 		rt := h.channel.Cells()
-		rt.Spawn(id, func(inc actorrt.Incarnation) actorrt.Actor {
+		rt.Spawn(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
 			return factory(h.buildCaps(id, kind, inc))
 		})
 	}
 	h.logger.Info("platform.member.spawned", "channel", string(h.channelID),
 		"actor", string(id), "kind", string(kind), "cell", factory != nil)
 	return nil
+}
+
+// CancelRequest reaches the request-scope of cancel(scope) for one in-flight
+// request `target` is running under `requestID`. Home holds the runtime
+// directly (cell/port hosting is transport-neutral inside it — CancelRequest
+// reaches a daemon-hosted port the same way it reaches a local cell) so this
+// is a direct call, no Acceptor indirection needed. No-op if the request
+// already closed or `target` has no live embodiment — cancel is a
+// best-effort hint, the caller's closure owns the terminal.
+func (h *Home) CancelRequest(target actor.ActorID, requestID message.ID) {
+	h.channel.Cells().CancelRequest(target, requestID)
+}
+
+// KickDaemon closes every link this compute currently holds (the substrate
+// half of a revocation, §8.3) and returns the count closed. It is a write
+// handle (unlike View, a read-only face) — revoking access is a write. The
+// authority to decide WHEN to kick (a daemon's credential was just revoked)
+// lives entirely in the app layer; this method only executes the mechanical
+// teardown. Kicked ports fall silent (quiet-stop, no receiver_unavailable) —
+// a kick is a voluntary revocation, not an observed death.
+func (h *Home) KickDaemon(computeID string) int {
+	return h.links.KickDaemon(computeID)
 }
 
 // buildCaps assembles the caps bundle — the five-capability bundle welded to (id,
@@ -539,8 +608,16 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, fac
 // liveSchedule membrane the other caps wear — self-targeted timers gated on this
 // incarnation still being live. schedMinter is always set before any participant
 // admission (the system cell does not pass through buildCaps).
+//
+// buildCaps is also the obs-registration convergence point (G8): every local
+// birth path — Home.Spawn, the reconcile ring's eager 补臂, homeReviver, and
+// spawnHandle.Fork — calls this method to weld a child's caps, so registering
+// h.watchObs(id) here once covers all four without a separate call at each
+// birth site (and its dedup makes a build a losing SpawnIfAbsent/Fork CAS
+// discards a no-op double-registration, not a double fanout).
 func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnation) actorcaps.Caps {
 	rt := h.channel.Cells()
+	h.watchObs(id)
 	return actorcaps.Caps{
 		Pen:      link.NewLivePen(h.minter.Mint(id, kind, h.channelID), inc, rt),
 		Access:   link.NewLiveAccess(h.cs.Access.Mint(id), inc, rt),
@@ -627,6 +704,7 @@ type View struct {
 	registry   storespec.Registry
 	links      *link.Acceptor
 	deviceFold *devicepresence.Fold
+	stat       *runtimeLivenessAdapter
 }
 
 // DevicePresence returns the latest opaque L3 device-presence snapshot an actor
@@ -641,6 +719,21 @@ func (v View) DevicePresence(id actor.ActorID) (snapshot []byte, known bool) {
 	return v.deviceFold.Device(id)
 }
 
+// Stat reads the authoritative embodiment presence for id: live=true means id
+// has a live embodiment on THIS home right now (cell or attached port — the
+// `kill -0` read, actorrt.Runtime.Stat, transport-neutral). This is NOT the
+// device/L3 advisory axis (DevicePresence above): that is a self-reported,
+// three-state, decays-to-unknown push signal from the actor's own client;
+// this is the substrate's own authoritative self-read of embodiment, never
+// asked of the actor, never advisory. The two axes answer different
+// questions and must not be conflated.
+func (v View) Stat(id actor.ActorID) (startedAt time.Time, live bool) {
+	if v.stat == nil {
+		return time.Time{}, false
+	}
+	return v.stat.Stat(id)
+}
+
 // IsAttached reports whether daemon (compute) id has a live attach right now
 // (L0 attachment) — read-time, derived from the link acceptor, never stored.
 func (v View) IsAttached(daemonID string) bool {
@@ -648,14 +741,6 @@ func (v View) IsAttached(daemonID string) bool {
 		return false
 	}
 	return v.links.IsAttached(daemonID)
-}
-
-// AttachedDaemons returns the currently-attached compute ids (L1 snapshot).
-func (v View) AttachedDaemons() []string {
-	if v.links == nil {
-		return nil
-	}
-	return v.links.AttachedDaemons()
 }
 
 // ReadAfterSeq returns committed envelopes with seq > afterSeq (client tail).

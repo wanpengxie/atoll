@@ -98,7 +98,16 @@ func (p *Pump) drain() {
 		}
 		for _, row := range rows {
 			if err := p.handle(row); err != nil {
-				// Cursor gated at this row: stop here, retry on next wake.
+				// Cursor gated at this row: stop here, retry on next wake. This IS
+				// the at-least-once delivery contract's physical implementation
+				// (the same skeleton as a Kafka consumer offset / WAL apply
+				// cursor / replication cursor) — not dead code. Today's only
+				// handle (cell delivery) is best-effort and never returns an
+				// error, so this branch is currently unexercised; that is the
+				// CONSUMER's choice to forgo retry, not evidence the gate itself
+				// is unneeded. Any future reliable consumer (audit log, external
+				// export, indexer) needs exactly this gate the moment it exists —
+				// do NOT remove it as an apparently-dead branch.
 				return
 			}
 			p.cursor = row.Seq

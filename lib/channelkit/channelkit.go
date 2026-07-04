@@ -94,7 +94,7 @@ func New(cfg Config) *Channel {
 	// impersonate, and the closure reconciler must write even when no cell is live
 	// — gating it would defeat it. So no incarnation is welded here.
 	if cfg.System != nil {
-		c.cells.Spawn(actor.SystemActorID, func(actorrt.Incarnation) actorrt.Actor {
+		c.cells.Spawn(actor.SystemActorID, actor.KindSystem, func(actorrt.Incarnation) actorrt.Actor {
 			return cfg.System(c.cells)
 		})
 	}

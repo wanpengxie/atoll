@@ -4,7 +4,7 @@
 // for one channel and delivers a narrow capability set (not an organ bag):
 //
 //	Open(cfg) → *Home
-//	View()  View              — read-only observation set (ReadAfterSeq/MaxSeq/ListActors)
+//	View()  View              — read-only observation set (ReadAfterSeq/MaxSeq/ListActors/Stat/DevicePresence/IsAttached)
 //	Spawn(ctx,id,kind,factory) — in-process cell placement (membership + Mint welded Pen + spawn); factory==nil = cell-less member
 //	ServeAttach(w,r,daemonID) — attach acceptance surface (app hands an upgraded WS here)
 //	Subscribe() (<-chan struct{}, func()) — subscription registration surface (client push)

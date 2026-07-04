@@ -37,9 +37,6 @@ func ResponseFailureReason(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return ""
 	}
-	if reason := StringValue(obj["terminal_failure_reason"]); reason != "" {
-		return reason
-	}
 	if status := StringValue(obj["status"]); strings.EqualFold(status, "failed") {
 		if reason := StringValue(obj["reason"]); reason != "" {
 			return reason

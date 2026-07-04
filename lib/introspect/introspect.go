@@ -16,13 +16,12 @@ const (
 	QueryList = "actor.list"
 )
 
-// NOTE: "Is this actor serviceable for one request right now" is NOT actor.status
-// — that remains the OUTCOME of send→terminal (the substrate down edge
-// materialises receiver_unavailable when the actor is gone). actor.status
-// (QueryStatus, status.go) is the additive, pain-driven self-answer for an actor
-// whose non-trivial LIVE state (e.g. a device adapter's attach online/offline
-// flag) is knowable independent of any in-flight request — a real live quantity
-// the actor alone can report, not a trivial constant.
+// NOTE: "Is this actor serviceable for one request right now" is NOT a pull-side
+// query — it remains the OUTCOME of send→terminal (the substrate down edge
+// materialises receiver_unavailable when the actor is gone). Device liveness is
+// answered by the push-side obs axis below (ObsDevicePresence), the ONE
+// authoritative channel for that fact — a prior pull-side self-answer for the
+// same fact was retired (P14) rather than left standing as a second channel.
 
 // DescribeRequest is the actor.describe request payload. Empty = the full
 // self-answer (Describe); Type set = the single-type answer (DescribeType).

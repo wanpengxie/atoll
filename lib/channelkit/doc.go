@@ -5,4 +5,10 @@
 // not a Supervisor and not an actor — there is no supervision tree; death is
 // obs, and the closure reaction is the only domain duty here. Domain
 // coordination is the system actor's job.
+//
+// Reconcile is the level-triggered backstop for the same closure: the death
+// edge is a lossy fast path (a missed or predating edge leaves an orphan open
+// request), so Reconcile scans for receivers absent from substrate liveness
+// and closes them directly — idempotent against the terminal-uniqueness index,
+// driven by the composition root on a ticker, not by any edge.
 package channelkit

@@ -104,8 +104,11 @@ func ExecuteCallActor(ctx context.Context, params json.RawMessage, sh *Shell, rc
 		EnvelopeType:   p.Type,
 		HandlerActorID: p.ActorID,
 		Payload:        payload,
-		Timeout:        DefaultTimeout,
-		WaitMode:       mode,
+		// Timeout left unset: the call is the one path whose per-type deadline
+		// can vary (a real business round-trip, unlike the fixed introspection
+		// queries), so ExecuteRequest resolves it through the configured
+		// TimeoutResolver (nil = DefaultTimeout).
+		WaitMode: mode,
 	})
 	return NormalizeCallActorResult(result, p.ActorID, p.Type)
 }

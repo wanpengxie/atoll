@@ -30,7 +30,7 @@ restart), the result is an error explaining so.
   "type": "object",
   "properties": {
     "request_id": {"type": "string", "description": "The request_id returned in a prior call_actor ack."},
-    "timeout_ms": {"type": "integer", "description": "Optional max wait in milliseconds. Defaults to the R5 default. On timeout you get a still-pending ack."}
+    "timeout_ms": {"type": "integer", "description": "Optional max wait in milliseconds. Defaults to 30s. On timeout you get a still-pending ack."}
   },
   "required": ["request_id"]
 }`),
@@ -104,11 +104,13 @@ Stop waiting locally on a previously-submitted call_actor request. Use this in a
 fan-out when one sibling already gave you what you need, or when you no longer care
 about a result.
 
-This does NOT cancel the downstream work (there is no protocol-level cancel) — the
-call keeps running in the daemon. If it later produces a result, that result will
-still come back to you as a new message (parent_id = request_id). Abandon only
-releases your local wait so list_pending() no longer shows it and await_result()
-will report it as not in flight.
+Releases your local wait so list_pending() no longer shows it and await_result()
+will report it as not in flight, then best-effort interrupts the downstream work
+(a protocol-level cancel — whether this is wired depends on the assembly root; if
+it is not, the call keeps running). Either way, if the call already produced or
+still produces a result, that result comes back to you as a new message
+(parent_id = request_id) — abandon never suppresses the eventual response, it only
+stops YOU from waiting on it.
 `),
 	Schema: json.RawMessage(`{
   "type": "object",
@@ -143,7 +145,7 @@ func ExecuteAbandon(_ context.Context, params json.RawMessage, sh *Shell, _ Runt
 		Name: "abandon",
 		Value: map[string]any{
 			"abandoned":  reqID.String(),
-			"note":       "local wait released; downstream work is not cancelled (no protocol-level cancel). A later result returns as a new message.",
+			"note":       "local wait released; a best-effort protocol-level cancel was also sent (if wired). A later result, if produced anyway, returns as a new message.",
 			"request_id": reqID.String(),
 		},
 	}

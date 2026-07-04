@@ -62,7 +62,7 @@ func TestLivePenFencesPostDeathWrite(t *testing.T) {
 	// The build closure runs inside Spawn, BEFORE go-live: IsLive(inc)==false, so a
 	// write attempted during construction is fenced (the "factory must not write"
 	// rule is structural, not a soft convention).
-	inc := rt.Spawn("w", func(i actorrt.Incarnation) actorrt.Actor {
+	inc := rt.Spawn("w", actor.KindTool, func(i actorrt.Incarnation) actorrt.Actor {
 		pen = link.NewLivePen(raw, i, rt)
 		_, ctorErr = pen.Write(context.Background(), &message.Envelope{ID: "during-ctor"})
 		return noopLiveActor{}
@@ -127,6 +127,7 @@ func attachTestPort(t *testing.T, rt *actorrt.Runtime, id actor.ActorID) (actorr
 			return ipc.EmitResult{}, nil
 		}},
 		func(string) (actor.ActorID, error) { return id, nil },
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
@@ -225,7 +226,7 @@ func attachGatedPort(t *testing.T, rt *actorrt.Runtime, id actor.ActorID, emit a
 			}
 		}
 	}()
-	inc, err := rt.Attach(context.Background(), hostConn, actorrt.Sinks{Emit: emit}, func(string) (actor.ActorID, error) { return id, nil })
+	inc, err := rt.Attach(context.Background(), hostConn, actorrt.Sinks{Emit: emit}, func(string) (actor.ActorID, error) { return id, nil }, nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}

@@ -33,7 +33,7 @@ func (liveActor) Receive(context.Context, *message.Envelope) error { return nil 
 // not pointer-checked).
 func TestOnDown_DoesNotDespawnSuccessor(t *testing.T) {
 	ch := channelkit.New(channelkit.Config{ChannelID: "ch", Clock: time.Now})
-	ch.Cells().Spawn("worker", func(actorrt.Incarnation) actorrt.Actor { return liveActor{} }) // the live successor
+	ch.Cells().Spawn("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} }) // the live successor
 	if _, ok := ch.Cells().Stat("worker"); !ok {
 		t.Fatal("successor not hosted after Spawn")
 	}
@@ -100,7 +100,7 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
 		Clock:        time.Now,
 	})
-	ch.Cells().Spawn("worker", func(actorrt.Incarnation) actorrt.Actor { return panicActor{} })
+	ch.Cells().Spawn("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return panicActor{} })
 
 	// Deliver a request → Receive panics → cell death → OnDown. Delivery goes
 	// through the confined Deliverer (the post-harness fanout's capability), not
@@ -159,7 +159,7 @@ func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
 		Clock: time.Now,
 	})
 	// Place the worker, then CLEAN despawn it (no panic → no death edge fires).
-	workerInc := ch.Cells().Spawn("worker", func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
+	workerInc := ch.Cells().Spawn("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
 
 	// While present, a sweep must NOT close it (the live receiver can answer).
 	ch.Reconcile(context.Background())

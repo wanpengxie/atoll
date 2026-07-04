@@ -25,6 +25,7 @@ import (
 type fireSink struct {
 	minter   harness.Minter
 	registry storespec.Registry
+	rt       *actorrt.Runtime
 	chID     channelpkg.ID
 }
 
@@ -32,25 +33,51 @@ type fireSink struct {
 // naive `_, err := pen.Write(...); return err` would swallow a deterministic
 // reject into a false nil and let the engine drop the fire silently — that
 // failure mode is the entire reason this translation exists.
+//
+// G11 双神谕: kind is resolved by trying the incarnation-level oracle FIRST
+// (rt.Stat — the live embodiments table), falling back to the identity-level
+// oracle (the durable registry, G10-guarded by IsActive) only if no live
+// embodiment answers. This order is not arbitrary: an incarnation-bind fire's
+// author is IsLive-checked by the caller immediately before Append runs (a
+// fork child is NEVER a durable member — it has no registry row at all), while
+// an identity-bind fire's author was just revived-or-already-live by the
+// engine's wake-first Reviver step, so it too is normally live by the time
+// Append runs. Either way, a live embodiment's own kind is the freshest,
+// authoritative answer and needs no registry hop; the registry fallback is
+// what keeps a genuinely COLD identity fire (revived, then died again before
+// Append — or a G10 dereg race) working, and what turns a fork child that died
+// between its IsLive check and this call into a quiet, deterministic
+// author_not_member drop (never a false live-embodiment read of a departed
+// author's kind) rather than a resurrection.
 func (s fireSink) Append(ctx context.Context, author actor.ActorID, env *message.Envelope) error {
-	rec, ok, err := s.registry.Lookup(ctx, author)
-	if err != nil {
-		return err // transient: the engine leaves the row for the next tick.
+	var kind actor.Kind
+	if stat, ok := s.rt.Stat(author); ok {
+		kind = stat.Kind
+	} else {
+		rec, ok, err := s.registry.Lookup(ctx, author)
+		if err != nil {
+			return err // transient: the engine leaves the row for the next tick.
+		}
+		if !ok || !rec.IsActive() {
+			// The author is not a LIVE durable member — its kind must not be welded.
+			//   !ok: a poison row whose author never existed (includes a fork child:
+			//   it is never a durable member, so a dead fork child falls straight
+			//   through to here — the quiet, deterministic drop G11's death-race
+			//   guard relies on).
+			//   !IsActive: the author was deregistered AFTER the engine snapshotted
+			//   this fire as due but BEFORE Append ran. Deregister soft-removes the
+			//   registry row and cascade-clears its timer rows in ONE tx, but a fire
+			//   already snapshotted into the due set is in flight against the
+			//   pre-dereg view — the deadline-boundary race (cf. Engine.cancel's
+			//   declared window). Welding a pen here would append truth authored by
+			//   a member who is already gone.
+			// Both are deterministic rejects (the engine disposes the row), never a
+			// hot retry loop — a soft-dereg is monotonic, it never reverts to active.
+			return schedule.FireRejected{Reason: "author_not_member", Detail: string(author)}
+		}
+		kind = rec.Kind
 	}
-	if !ok || !rec.IsActive() {
-		// The author is not a LIVE durable member — its kind must not be welded.
-		//   !ok: a poison row whose author never existed.
-		//   !IsActive: the author was deregistered AFTER the engine snapshotted this
-		//   fire as due but BEFORE Append ran. Deregister soft-removes the registry
-		//   row and cascade-clears its timer rows in ONE tx, but a fire already
-		//   snapshotted into the due set is in flight against the pre-dereg view —
-		//   the deadline-boundary race (cf. Engine.cancel's declared window). Welding
-		//   a pen here would append truth authored by a member who is already gone.
-		// Both are deterministic rejects (the engine disposes the row), never a hot
-		// retry loop — a soft-dereg is monotonic, it never reverts to active.
-		return schedule.FireRejected{Reason: "author_not_member", Detail: string(author)}
-	}
-	pen := s.minter.Mint(author, rec.Kind, s.chID)
+	pen := s.minter.Mint(author, kind, s.chID)
 	res, err := pen.Write(ctx, env)
 	if err != nil {
 		return err // transient Go error (store/transport fault): retain and retry.
@@ -131,12 +158,48 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		return schedule.ReviveRejected{Reason: "class_not_found", Detail: string(id)}
 	}
 	kind := rec.Kind
+	// straddleHook (test-only, nil in production): fires AFTER the Lookup above
+	// passed but BEFORE SpawnIfAbsent below — the exact window Home.Remove's
+	// double-tap closure argument (S-P20) requires a test able to park a build
+	// in. Zero cost when nil.
+	if h.reviverStraddleHook != nil {
+		h.reviverStraddleHook()
+	}
 	// SpawnIfAbsent is the idempotent CAS: an already-live author is a no-op
 	// (ok=false, shell discarded), so EnsureLive satisfies its idempotency contract
 	// without a separate liveness pre-check.
-	h.channel.Cells().SpawnIfAbsent(id, func(inc actorrt.Incarnation) actorrt.Actor {
+	inc, built := h.channel.Cells().SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
 		return factory(h.buildCaps(id, kind, inc))
 	})
+	if !built {
+		return nil
+	}
+	// Post-build recheck (S-P20 拍定 A′, Remove's straddle-window closure other
+	// half): the id could have been Remove'd BETWEEN the Lookup above and this
+	// build landing (Remove's own double-tap only guards its own before/after,
+	// not a build that starts after Remove's ① and finishes after its ③). Re-read
+	// the registry NOW, under the freshly-minted incarnation — if it is no longer
+	// an active member, immediately undo the build (Despawn is pointer-guarded:
+	// it only evicts IFF the map still points to THIS incarnation, so it can
+	// never evict a legitimate successor that has already re-admitted the id).
+	rec2, ok2, err2 := h.cs.Registry.Lookup(ctx, id)
+	if err2 != nil {
+		// The recheck itself FAILED — an unverified freshly-built embodiment is not
+		// a validated live one (same posture as the !IsActive branch immediately
+		// below: this recheck existing to CONFIRM the build landed as a legitimate
+		// member is the whole point of it, so a Lookup fault that leaves it
+		// unconfirmed must not be treated as an implicit confirmation). Despawn
+		// (pointer-guarded: only evicts IFF the map still points to THIS
+		// incarnation, so it never evicts a legitimate successor that has already
+		// re-admitted the id) and return a transient error so the engine retries
+		// the wake next tick against a clean slate.
+		h.channel.Cells().Despawn(inc)
+		return fmt.Errorf("platform: revive post-build recheck %s: %w", id, err2)
+	}
+	if !ok2 || !rec2.IsActive() {
+		h.channel.Cells().Despawn(inc)
+		return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
+	}
 	return nil
 }
 

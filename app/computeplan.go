@@ -54,10 +54,9 @@ func (a *App) daemonComposition(chID channel.ID) ([]daemonAssignment, error) {
 }
 
 // handleComputePlan is the daemon's pull endpoint: authenticated by the same
-// ?key=+?channel= as /compute, it returns the
-// channel's placement='daemon' assignment so the daemon builds EXACTLY that set
-// (no blind-build of registry.Classes()). The link/attach protocol is untouched
-// — the daemon declares what it builds, as today. This pull avoids a server→
+// ?key=+?channel= as /compute, it returns the channel's placement='daemon'
+// assignment so the daemon builds EXACTLY that set. The link/attach protocol
+// is untouched — the daemon declares what it builds, as today. This pull avoids a server→
 // daemon wire change AND the membership-needs-Kind/Binding problem of a push
 // model (cmd/server does not import actors/all, so it could not synthesise tool
 // Kind/Binding; the daemon, which builds the decls, has them for free).

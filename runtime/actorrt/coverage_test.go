@@ -22,7 +22,7 @@ import (
 // closure instead). It does NOT go-live (live stays false) — these tests drive
 // start()/stop() directly and do not assert IsLive.
 func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) *cell {
-	c := allocShell(parent, id, mailbox, onDown, onObs, onExit, started, logger)
+	c := allocShell(parent, id, actor.KindAgent, mailbox, onDown, onObs, onExit, started, logger)
 	c.impl = impl
 	return c
 }
@@ -78,7 +78,7 @@ func TestCellStartErrorPublishesDown(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
-	rt.Spawn("a", static(startErrActor{}))
+	rt.Spawn("a", actor.KindAgent, static(startErrActor{}))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
@@ -113,7 +113,7 @@ func TestSafeReceiveSwallowsError(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
 	defer rt.StopAll()
-	rt.Spawn("a", static(a))
+	rt.Spawn("a", actor.KindAgent, static(a))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-a.got:
@@ -142,7 +142,7 @@ func TestNewDefaultsParent(t *testing.T) {
 	if rt.parent == nil {
 		t.Fatal("New did not default a nil Parent")
 	}
-	rt.Spawn("a", static(newRecordActor()))
+	rt.Spawn("a", actor.KindAgent, static(newRecordActor()))
 	if _, ok := rt.Stat("a"); !ok {
 		t.Fatal("runtime built from a zero Config cannot host a cell")
 	}
@@ -187,7 +187,7 @@ func TestPublishDownWatcherPanicGuarded(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(bad)
 	rt.WatchDown(good)
-	rt.Spawn("a", static(panicActor{}))
+	rt.Spawn("a", actor.KindAgent, static(panicActor{}))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-bad.notify:
@@ -222,7 +222,7 @@ func TestPublishObsWatcherPanicGuarded(t *testing.T) {
 	defer rt.StopAll()
 	rt.WatchObs("a", bad)
 	rt.WatchObs("a", good)
-	rt.Spawn("a", static(&observerActor{}))
+	rt.Spawn("a", actor.KindAgent, static(&observerActor{}))
 	if _, err := del.Deliver([]actor.ActorID{"a"}, env("trigger")); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
@@ -275,13 +275,14 @@ func TestDeliverStoppedOutcome(t *testing.T) {
 type fakeErrEmbodiment struct{ started time.Time }
 
 func (fakeErrEmbodiment) Deliver(*message.Envelope) error { return errors.New("weird enqueue error") }
-func (p fakeErrEmbodiment) startedAt() time.Time   { return p.started }
-func (fakeErrEmbodiment) cancelRequest(message.ID) {}
-func (fakeErrEmbodiment) stop()                    {}
-func (fakeErrEmbodiment) stopDespawn()             {}
-func (fakeErrEmbodiment) initiateStop()            {}
-func (fakeErrEmbodiment) isLive() bool             { return false }
-func (fakeErrEmbodiment) markDead()                {}
+func (p fakeErrEmbodiment) startedAt() time.Time          { return p.started }
+func (fakeErrEmbodiment) cancelRequest(message.ID)        {}
+func (fakeErrEmbodiment) stop()                           {}
+func (fakeErrEmbodiment) stopDespawn()                    {}
+func (fakeErrEmbodiment) initiateStop()                   {}
+func (fakeErrEmbodiment) isLive() bool                    { return false }
+func (fakeErrEmbodiment) markDead()                       {}
+func (fakeErrEmbodiment) kind() actor.Kind                { return "" }
 
 // TestDeliverDefaultArmMapsToStopped: an enqueue error that is neither
 // ErrMailboxFull nor ErrCellStopped maps to Stopped (deliver's default switch
@@ -311,7 +312,7 @@ func TestPortEmitDecodeErrorIsDeath(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 	defer remote.conn.Close()
 
 	// A KindEmit frame carrying a payload that is not a valid EmitPayload object.
@@ -343,7 +344,7 @@ func TestPortDownEmptyReasonDefaults(t *testing.T) {
 	}}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
-	_, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	_, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 	defer remote.conn.Close()
 
 	// DOWN with empty reason payload.
@@ -387,7 +388,7 @@ func TestPortDeliverWriteFailsIsDeath(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 
 	// Close the remote end so the host-side write fails. net.Pipe writes block
 	// until read; closing the remote makes the write return an error.
@@ -420,7 +421,7 @@ func TestPortDeliverMalformedEnvelopeDropped(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
 	defer rt.StopAll()
-	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"))
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-1"), nil)
 	defer remote.conn.Close()
 
 	// A drainer so the wire never backs up.
@@ -472,7 +473,7 @@ func TestNewPortHandshakeReadError(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, remoteConn := net.Pipe()
 	remoteConn.Close() // no handshake — read fails immediately
-	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x")); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil); err == nil {
 		t.Fatal("Attach accepted a connection that never sent a handshake")
 	}
 }
@@ -489,7 +490,7 @@ func TestNewPortHandshakeDecodeError(t *testing.T) {
 		// HandshakePayload.
 		_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: json.RawMessage(`12345`)})
 	}()
-	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x")); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil); err == nil {
 		t.Fatal("Attach accepted a handshake with an undecodable payload")
 	}
 }
@@ -510,7 +511,7 @@ func TestNewPortHandshakeAckWriteError(t *testing.T) {
 		_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		remoteConn.Close()
 	}()
-	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1")); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil); err == nil {
 		t.Fatal("Attach succeeded despite a failed ack write")
 	}
 }
@@ -528,7 +529,7 @@ func TestNewPortNilLoggerDefaulted(t *testing.T) {
 		_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		_, _ = c.Read() // consume ack
 	}()
-	p, err := newPort(context.Background(), context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil, nil, time.Now(), nil)
+	p, err := newPort(context.Background(), context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil, nil, nil, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("newPort: %v", err)
 	}

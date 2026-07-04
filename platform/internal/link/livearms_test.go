@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -37,7 +38,7 @@ func TestLiveArmsFencesConstructionTimeWrite(t *testing.T) {
 	// so every arm a factory could reach during construction is fenced — the
 	// "factory must not write" rule is structural on the port path too, not a
 	// soft convention left for the daemon alone.
-	inc := rt.Spawn("compute-w", func(i actorrt.Incarnation) actorrt.Actor {
+	inc := rt.Spawn("compute-w", actor.KindTool, func(i actorrt.Incarnation) actorrt.Actor {
 		caps := link.NewLiveArms(rb, i, rt)
 		_, errs.pen = caps.Pen.Write(context.Background(), &message.Envelope{ID: "during-ctor"})
 		_, errs.access = caps.Access.Invoke(context.Background(), access.Operation(""), resource.ResourceID(""), nil, nil)

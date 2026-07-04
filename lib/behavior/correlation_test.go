@@ -84,16 +84,13 @@ func TestParseFinalStatus(t *testing.T) {
 	}
 }
 
-// CorrelationID picks the first non-empty id in priority order.
+// CorrelationID picks chain when pinned, else falls back to rootID.
 func TestCorrelationID(t *testing.T) {
-	if got := CorrelationID("a", "b", "c"); got != "a" {
-		t.Fatalf("want trigger corr id, got %q", got)
+	if got := CorrelationID("chain", "root"); got != "chain" {
+		t.Fatalf("want pinned chain, got %q", got)
 	}
-	if got := CorrelationID("", "b", "c"); got != "b" {
-		t.Fatalf("want envelope corr id, got %q", got)
-	}
-	if got := CorrelationID("", "", "c"); got != "c" {
-		t.Fatalf("want envelope id, got %q", got)
+	if got := CorrelationID("", "root"); got != "root" {
+		t.Fatalf("want rootID fallback, got %q", got)
 	}
 }
 

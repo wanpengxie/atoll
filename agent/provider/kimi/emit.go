@@ -286,19 +286,3 @@ func (b *Bridge) handleDescribe(ctx context.Context, env *message.Envelope) erro
 	_, rerr := behavior.RespondJSON(ctx, b.pen, b.clock, env, answer)
 	return rerr
 }
-
-// handleStatus serves the actor.status self-answer mechanically (the LLM never
-// sees reserved queries). The agent has no non-trivial live device state to
-// report — unlike the device adapters it answers a constant role snapshot — so
-// the point is purely citizenship: respond immediately rather than enqueue a
-// turn and burn an LLM call on a fact the bridge already holds.
-func (b *Bridge) handleStatus(ctx context.Context, env *message.Envelope) error {
-	if _, err := introspect.ParseStatusRequest(env.Payload); err != nil {
-		_, ferr := behavior.Fail(ctx, b.pen, b.clock, env,
-			"payload_invalid", fmt.Sprintf("decode status payload: %v", err))
-		return ferr
-	}
-	answer := introspect.AnswerStatus(string(b.self), map[string]any{"role": "agent"})
-	_, rerr := behavior.RespondJSON(ctx, b.pen, b.clock, env, answer)
-	return rerr
-}

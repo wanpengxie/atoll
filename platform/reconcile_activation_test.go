@@ -712,7 +712,7 @@ func TestFireAndRevive_RejectDeregisteredAuthor(t *testing.T) {
 
 	// FireSink seam: appending a fire for a dereg'd author must be a deterministic
 	// FireRejected (disposed), never a false nil that lets zombie truth land.
-	sink := fireSink{minter: h.minter, registry: h.cs.Registry, chID: activationTestChannelID}
+	sink := fireSink{minter: h.minter, registry: h.cs.Registry, rt: h.channel.Cells(), chID: activationTestChannelID}
 	// The IsActive guard rejects before pen.Write, so a minimal envelope suffices.
 	env := &message.Envelope{
 		ID:       message.ID("timer:test-dereg"),
@@ -724,5 +724,145 @@ func TestFireAndRevive_RejectDeregisteredAuthor(t *testing.T) {
 	var fireRejected schedule.FireRejected
 	if ferr := sink.Append(ctx, author, env); !errors.As(ferr, &fireRejected) {
 		t.Fatalf("Append(deregistered author) = %v, want FireRejected (zombie-truth guard)", ferr)
+	}
+}
+
+// Test 12 — G11: an incarnation-bind timer on a FORK CHILD fires successfully,
+// with its kind resolved from the LIVE embodiments table (the incarnation-level
+// oracle) rather than the durable registry — a fork child is never a durable
+// member, so a registry-only fireSink would reject every fork-child fire as
+// author_not_member. The fired envelope's Sender.Kind must be the child's
+// ForkSpec.Kind (the pen is minted with it, exactly as an admission Spawn's
+// author would carry).
+func TestFireSink_ForkChildIncarnationFire_KindFromLiveEmbodiment(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	const parent = actor.ActorID("agent:fork-parent")
+	builder.byID[parent] = builder.recordFactory(parent)
+	const childNameHint = "w1"
+	builder.byClass["worker"] = builder.recordFactory(parent + "/" + actor.ActorID(childNameHint))
+
+	h := openActivationHome(t, desired, builder)
+
+	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
+	h.reconcileActivation(ctx)
+	if !live(h, parent) {
+		t.Fatal("parent not revived")
+	}
+	parentCaps, ok := builder.capsFor(parent)
+	if !ok {
+		t.Fatal("parent caps not captured")
+	}
+	childID, err := parentCaps.Spawn.Fork(actorrt.ForkSpec{Kind: actor.KindTool, Class: "worker", NameHint: childNameHint})
+	if err != nil {
+		t.Fatalf("Fork child: %v", err)
+	}
+	childCaps, ok := builder.capsFor(childID)
+	if !ok {
+		t.Fatal("fork child caps not captured")
+	}
+
+	id, err := childCaps.Schedule.Schedule(ctx, schedule.ScheduleReq{
+		Bind: schedule.BindIncarnation, FireAt: h.nowMs() - 1, Type: "demo.tick",
+	})
+	if err != nil {
+		t.Fatalf("Schedule (incarnation-bind, fork child): %v", err)
+	}
+	wantID := message.ID("timer:" + string(id))
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rows, rerr := h.View().ReadAfterSeq(ctx, 0, 1000)
+		if rerr != nil {
+			t.Fatalf("ReadAfterSeq: %v", rerr)
+		}
+		found := false
+		for _, r := range rows {
+			if r.Envelope.ID == wantID {
+				found = true
+				if r.Envelope.Sender.ID != childID {
+					t.Fatalf("fire sender = %q, want fork child %q", r.Envelope.Sender.ID, childID)
+				}
+				if r.Envelope.Sender.Kind != actor.KindTool {
+					t.Fatalf("fire sender kind = %q, want %q (resolved from the LIVE embodiments table, not the durable registry — a fork child has no registry row)", r.Envelope.Sender.Kind, actor.KindTool)
+				}
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("fork-child incarnation-bind fire never landed in truth (G11 fireSink double-oracle broken)")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// Test 13 — G11 death race: an incarnation-bind fire whose author (a fork
+// child) dies BETWEEN the engine's IsLive gate (schedule/engine.go's fireDue,
+// outside fireSink) and fireSink's own kind resolution must be a quiet,
+// deterministic drop — never a dead-write (truth authored by a departed fork
+// child) and never a resurrection. fireSink.Append is exercised DIRECTLY
+// (the injection hook: killing the child then calling Append simulates
+// "IsLive passed a moment ago, died before the sink's own lookup ran" without
+// racing the real engine goroutine) — a fork child is never a durable member,
+// so the registry fallback also returns !ok, and the drop is
+// author_not_member, symmetric with G10's identity-family race.
+func TestFireSink_ForkChildDeathRace_QuietDrop(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	const parent = actor.ActorID("agent:fork-death-parent")
+	builder.byID[parent] = builder.recordFactory(parent)
+	const childNameHint = "w1"
+	builder.byClass["worker"] = builder.recordFactory(parent + "/" + actor.ActorID(childNameHint))
+
+	h := openActivationHome(t, desired, builder)
+
+	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
+	h.reconcileActivation(ctx)
+	parentCaps, ok := builder.capsFor(parent)
+	if !ok {
+		t.Fatal("parent caps not captured")
+	}
+	childID, err := parentCaps.Spawn.Fork(actorrt.ForkSpec{Kind: actor.KindTool, Class: "worker", NameHint: childNameHint})
+	if err != nil {
+		t.Fatalf("Fork child: %v", err)
+	}
+	if !live(h, childID) {
+		t.Fatal("fork child not live after Fork")
+	}
+
+	// The race: the child dies (rt.DespawnID) — the SAME live-embodiment slot
+	// fireSink.Append is about to consult is now empty, AND the child was never
+	// a durable member (fork children carry no registry row), so both oracles
+	// come up empty.
+	h.channel.Cells().DespawnID(childID)
+	if live(h, childID) {
+		t.Fatal("fork child still live after DespawnID — precondition broken")
+	}
+
+	sink := fireSink{minter: h.minter, registry: h.cs.Registry, rt: h.channel.Cells(), chID: activationTestChannelID}
+	env := &message.Envelope{
+		ID:       message.ID("timer:test-fork-death-race"),
+		Kind:     message.KindEvent,
+		Type:     "demo.tick",
+		Payload:  []byte("{}"),
+		Audience: message.Audience{childID},
+	}
+	var fireRejected schedule.FireRejected
+	if ferr := sink.Append(ctx, childID, env); !errors.As(ferr, &fireRejected) {
+		t.Fatalf("Append(dead fork child) = %v, want FireRejected (death-race quiet drop)", ferr)
+	}
+
+	rows, rerr := h.View().ReadAfterSeq(ctx, 0, 1000)
+	if rerr != nil {
+		t.Fatalf("ReadAfterSeq: %v", rerr)
+	}
+	for _, r := range rows {
+		if r.Envelope.ID == env.ID {
+			t.Fatal("a dead-race fire landed in truth — G11 death-race guard broken (dead-write)")
+		}
 	}
 }

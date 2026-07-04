@@ -110,16 +110,6 @@ func newDevice(owner *Actor, addr string, clock func() time.Time, reaperInterval
 	}
 }
 
-// online reports whether a device connection is currently live (conn != nil).
-// This is the read side of the same device presence the dispatch path fast-fails on;
-// it is the actor.status snapshot's one fact. Locked read — the conn pointer is
-// mutated by handleAccept/readLoop/dropConn/stop on other goroutines.
-func (d *device) online() bool {
-	d.mu.Lock()
-	defer d.mu.Unlock()
-	return d.conn != nil
-}
-
 // addr returns the resolved listen address (post-bind), or "" before Start.
 func (d *device) addr() string {
 	d.mu.Lock()

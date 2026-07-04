@@ -60,31 +60,6 @@ func Respond(
 	return out.MessageID, nil
 }
 
-// CollapseInternalError closes a request with a receiver_internal_error final
-// — the author#1 tail for a Handle that failed hard. detail is carried as the
-// payload reason context; it is opaque to the base.
-func CollapseInternalError(
-	ctx context.Context,
-	pen harness.Pen,
-	clock func() time.Time,
-	request *message.Envelope,
-	detail string,
-) (message.ID, error) {
-	if request == nil {
-		return "", fmt.Errorf("behavior: CollapseInternalError request required")
-	}
-	var payload json.RawMessage
-	if detail != "" {
-		b, _ := json.Marshal(map[string]string{"detail": detail})
-		payload = b
-	}
-	return Respond(ctx, pen, clock, request, ResponseSpec{
-		Status:  message.StatusFailed,
-		Reason:  string(message.TerminalReceiverInternalError),
-		Payload: payload,
-	})
-}
-
 // RespondJSON marshals result and commits a status=completed final for the
 // request held in hand. The serve-side happy-path one-liner: every actor's
 // "respond with this value" goes through here instead of hand-marshalling.
