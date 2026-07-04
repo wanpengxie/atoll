@@ -1,15 +1,12 @@
 package sysactor
 
 import (
-	"context"
-	"fmt"
 	"time"
 
-	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -33,15 +30,19 @@ type DevicePresenceStat interface {
 	Device(id actor.ActorID) (snapshot []byte, known bool)
 }
 
-// SystemActor answers channel-wide directory queries (actor.list) by composing
-// durable membership (Registry) with volatile liveness (the injected seam). It
-// is channel-agnostic at the base — the composition root injects channel-scoped
-// services (registry, writer, lookup), so this actor holds no channel id of its
-// own.
+// SystemActor holds one incarnation's process state: it answers channel-wide
+// directory queries (actor.list) by composing durable membership (Registry)
+// with volatile liveness (the injected seam). It is channel-agnostic at the
+// base — the composition root injects channel-scoped services (registry,
+// liveness/device seams), so this actor holds no channel id of its own.
+//
+// It is an actorbase Proc (lib/actorbase, actorbase-spec-v1 §3's out-generation
+// matrix: sysactor is a ring0 special Proc — Caps hand-built raw by platform,
+// not welded through the live membrane — but it enters through the SAME
+// actorbase.New seam every other actor does). Def mints a fresh SystemActor per
+// incarnation; run(sys) is the process body.
 type SystemActor struct {
 	registry storespec.Registry
-	writer   harness.Pen
-	lookup   storespec.RequestLookup
 	clock    func() time.Time
 	stat     LivenessStat
 	device   DevicePresenceStat
@@ -50,13 +51,7 @@ type SystemActor struct {
 // Deps bundles the channel services the system actor needs.
 type Deps struct {
 	Registry storespec.Registry
-	// Writer commits the serve response into truth. The composition root injects a
-	// system Pen (Mint(SystemActorID, chID)): the identity is welded into the pen,
-	// so the system actor never passes a sender — every write it authors is system-
-	// authored by construction.
-	Writer harness.Pen
-	Lookup storespec.RequestLookup
-	Clock  func() time.Time
+	Clock    func() time.Time
 	// Stat is the obs-read seam over the substrate's authoritative liveness +
 	// bind-instant. Nil → actor.list reports everyone absent.
 	Stat LivenessStat
@@ -65,7 +60,9 @@ type Deps struct {
 	Device DevicePresenceStat
 }
 
-// New constructs the channel system actor cell.
+// New constructs the channel system actor's process state (exported so a
+// composition root's own tests can drive it directly against a fake Sys; Def
+// wraps this in the actorbase registration entry for production spawn).
 func New(deps Deps) *SystemActor {
 	clock := deps.Clock
 	if clock == nil {
@@ -73,42 +70,68 @@ func New(deps Deps) *SystemActor {
 	}
 	return &SystemActor{
 		registry: deps.Registry,
-		writer:   deps.Writer,
-		lookup:   deps.Lookup,
 		clock:    clock,
 		stat:     deps.Stat,
 		device:   deps.Device,
 	}
 }
 
-// Receive handles one envelope serially (implements runtime/actorrt.Actor).
-func (s *SystemActor) Receive(ctx context.Context, env *message.Envelope) error {
-	if env.Kind == message.KindRequest {
-		switch env.Type {
+// Def is sysactor's actorbase registration entry (spec §1.6): New mints a
+// fresh SystemActor + run per incarnation, closing over deps.
+func Def(deps Deps) actorbase.Def {
+	return actorbase.Def{
+		Doc: systemDescribe().Description,
+		New: func() (actorbase.Proc, error) {
+			return New(deps).run, nil
+		},
+	}
+}
+
+// run is the Proc body (spec §1.6): loop sys.Recv() until the cell dies or
+// Stop is requested.
+func (s *SystemActor) run(sys actorbase.Sys) error {
+	for {
+		msg, err := sys.Recv()
+		if err != nil {
+			return err
+		}
+		s.handle(sys, msg)
+	}
+}
+
+// handle dispatches one delivered Msg (mirrors the former Receive).
+func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
+	if msg.Kind == message.KindRequest {
+		switch msg.Type {
 		case introspect.QueryList:
-			return s.respondList(ctx, env)
+			s.respondList(sys, msg)
+			return
 		case introspect.QueryDescribe:
 			// The system actor is itself an actor: it self-answers the reserved
 			// actor.describe so the reserved surface is complete (no actor times
 			// out on a self-query).
-			return s.respondDescribe(ctx, env)
+			s.respondDescribe(sys, msg)
+			return
 		}
 	}
 	// Anything else (other reserved requests, stray events): the system actor
 	// does not synthesize — a request is left for the caller's caller-scoped
 	// closure to time out.
-	return nil
 }
 
 // respondList answers actor.list with a composed channel-wide directory
 // (the membership ∧ liveness formula owned by introspect.QueryList), composed
-// INSIDE the actor so the channel only sees the result, never the raw rows.
+// INSIDE the actor so the channel only sees the result, never the raw rows. A
+// registry read failure writes nothing (the same "does not synthesize"
+// posture as an unrouted type — the caller's closure reaps it) rather than
+// answering with a bogus empty directory.
+//
 // Readiness is deliberately absent: it is not a substrate axis — whether an actor can service a request
 // is the OUTCOME of send→terminal, never a stored field here.
-func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) error {
-	rows, err := s.registry.ListActive(ctx)
+func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
+	rows, err := s.registry.ListActive(msg.Ctx())
 	if err != nil {
-		return err
+		return
 	}
 	catalog := introspect.Catalog{Actors: make([]introspect.CatalogEntry, 0, len(rows))}
 	for _, r := range rows {
@@ -122,7 +145,7 @@ func (s *SystemActor) respondList(ctx context.Context, env *message.Envelope) er
 			Device:   s.deviceObs(r.ID),
 		})
 	}
-	return s.respondReserved(ctx, env, catalog)
+	_, _ = sys.Reply(msg, catalog)
 }
 
 // systemDescribe is the system actor's self-answer in the introspect contract
@@ -149,35 +172,16 @@ func systemDescribe() introspect.Describe {
 // selector). Like every actor, it must answer the reserved self-query rather
 // than let the caller hang. A malformed or unknown selector is NOT synthesized
 // (this actor's stated philosophy): the caller's closure reaps it.
-func (s *SystemActor) respondDescribe(ctx context.Context, env *message.Envelope) error {
-	req, err := introspect.ParseDescribeRequest(env.Payload)
+func (s *SystemActor) respondDescribe(sys actorbase.Sys, msg actorbase.Msg) {
+	req, err := introspect.ParseDescribeRequest(msg.Payload)
 	if err != nil {
-		return nil
+		return
 	}
 	answer, ok := introspect.AnswerDescribe(systemDescribe(), req)
 	if !ok {
-		return nil
+		return
 	}
-	return s.respondReserved(ctx, env, answer)
-}
-
-// respondReserved answers a reserved self-query (actor.list / actor.describe)
-// with a system-authored completed response carrying result. It recovers the
-// original request via the injected RequestLookup (the serve-side truth read)
-// and delegates marshal+build+stamp+write to behavior.RespondJSON (the ONE
-// marshal+respond home — no hand-rolled json.Marshal at the serve site). The
-// injected pen is welded to the system identity (Mint(SystemActorID)), so the
-// response is system-authored by construction — no sender passed.
-func (s *SystemActor) respondReserved(ctx context.Context, env *message.Envelope, result any) error {
-	request, ok, err := s.lookup.FindByID(ctx, env.ID)
-	if err != nil {
-		return err
-	}
-	if !ok || request == nil {
-		return fmt.Errorf("sysactor: reserved request %s not found", env.ID)
-	}
-	_, err = behavior.RespondJSON(ctx, s.writer, s.clock, request, result)
-	return err
+	_, _ = sys.Reply(msg, answer)
 }
 
 // obs reads the substrate's authoritative obs for id (advisory; NOT a dispatch

@@ -26,6 +26,14 @@
 // It keeps NO copy of physical state: it READS liveness via an injected seam and
 // composes on-read, exactly as it reads membership from the Registry.
 //
+// Shape (actorbase-spec-v1 §3's out-generation matrix): sysactor is a ring0
+// SPECIAL Proc — a lib/actorbase Proc whose Caps are hand-built raw by the
+// platform assembly root (the system Pen only; no live membrane, no
+// Access/State/Schedule/Spawn arm) rather than welded through buildCaps — but
+// it still enters through the SAME actorbase.New seam every other actor does.
+// Its privilege is entirely in WHERE its Caps come from (platform itself is the
+// authority, not a minted membrane), never in a different hosting shape.
+//
 // What it does today: the channel's LIVENESS projection. It answers the
 // channel-wide directory query (actor.list) as a composed, on-read view
 // (membership ∧ liveness, the formula owned by introspect.QueryList). It is

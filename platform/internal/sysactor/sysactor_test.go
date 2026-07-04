@@ -1,4 +1,4 @@
-package sysactor_test
+package sysactor
 
 import (
 	"context"
@@ -6,10 +6,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform/internal/sysactor"
+	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -22,21 +22,6 @@ func (f fakeRegistry) Lookup(context.Context, actor.ActorID) (storespec.Record, 
 func (f fakeRegistry) Exists(context.Context, actor.ActorID) (bool, error) { return false, nil }
 func (f fakeRegistry) ListActive(context.Context) ([]storespec.Record, error) {
 	return f.rows, nil
-}
-
-// fakeWriter records the system actor's written response.
-type fakeWriter struct{ written []*message.Envelope }
-
-func (w *fakeWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	w.written = append(w.written, env)
-	return harness.WriteResult{MessageID: env.ID}, nil
-}
-
-// fakeLookup returns the original request so Respond can anchor the response to it.
-type fakeLookup struct{ req *message.Envelope }
-
-func (f fakeLookup) FindByID(_ context.Context, _ message.ID) (*message.Envelope, bool, error) {
-	return f.req, true, nil
 }
 
 // fakeStat is the injected obs-read seam (substrate pull-stat stand-in); it reports the
@@ -54,6 +39,37 @@ func (p fakeStat) Stat(id actor.ActorID) (time.Time, bool) {
 	return p.started, true
 }
 
+// fakeSys is a minimal actorbase.Sys double: it embeds the (nil) interface so
+// every verb this actor never touches stays unimplemented (a call would nil-
+// panic, failing the test loudly), and overrides only Reply — the sole verb
+// the system actor ever calls.
+type fakeSys struct {
+	actorbase.Sys
+
+	replies []replyRec
+}
+
+type replyRec struct {
+	msg actorbase.Msg
+	v   any
+}
+
+func (f *fakeSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
+	f.replies = append(f.replies, replyRec{msg: msg, v: v})
+	return msg.ID, nil
+}
+
+var _ actorbase.Sys = (*fakeSys)(nil)
+
+func requestMsg(id message.ID, typ string, payload []byte) actorbase.Msg {
+	return actorbase.NewMsg(context.Background(), message.Envelope{
+		ID: id, ChannelID: "ch", Kind: message.KindRequest, Type: typ,
+		Sender:   message.Sender{Kind: actor.KindAgent, ID: "caller"},
+		Audience: message.Audience{actor.SystemActorID},
+		Payload:  payload,
+	})
+}
+
 // TestActorList_TwoAxisNoReadiness proves the composed actor.list directory is
 // membership (registry) ∧ liveness (lease) and carries NO readiness column —
 // readiness is not a substrate axis; whether an actor can service a request is
@@ -63,29 +79,29 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 		{ID: "actor:a", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
 		{ID: "actor:b", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
 	}}
-	fc := &fakeWriter{}
-	listReq := &message.Envelope{
-		ID: "q1", ChannelID: "ch", Kind: message.KindRequest, Type: "actor.list",
-		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{actor.SystemActorID},
-	}
+	sys := &fakeSys{}
+	listReq := requestMsg("q1", introspect.QueryList, nil)
+
 	// Liveness authority reports actor:a present, actor:b absent — read via the
 	// injected seam when composing actor.list (never a message, never truth).
-	s := sysactor.New(sysactor.Deps{
-		Registry: reg, Writer: fc, Lookup: fakeLookup{req: listReq},
-		Stat: fakeStat{present: map[actor.ActorID]bool{"actor:a": true}, started: time.Now()},
+	s := New(Deps{
+		Registry: reg,
+		Stat:     fakeStat{present: map[actor.ActorID]bool{"actor:a": true}, started: time.Now()},
 	})
 
-	if err := s.Receive(context.Background(), listReq); err != nil {
-		t.Fatalf("actor.list: %v", err)
+	s.handle(sys, listReq)
+	if len(sys.replies) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(sys.replies))
 	}
-	if len(fc.written) != 1 {
-		t.Fatalf("expected 1 response written, got %d", len(fc.written))
+	raw, err := json.Marshal(sys.replies[0].v)
+	if err != nil {
+		t.Fatalf("marshal reply: %v", err)
 	}
 	var body struct {
 		Actors []map[string]any `json:"actors"`
 	}
-	if err := json.Unmarshal(fc.written[0].Payload, &body); err != nil {
-		t.Fatalf("unmarshal response: %v", err)
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("unmarshal reply: %v", err)
 	}
 	if len(body.Actors) != 2 {
 		t.Fatalf("catalog has %d actors, want 2 (membership)", len(body.Actors))

@@ -8,12 +8,10 @@ import (
 	"net"
 	"time"
 
-	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // DefaultActorID is the registry id this adapter owns.
@@ -46,34 +44,32 @@ type Config struct {
 // tiny, so a 1s scan is cheap; tests inject a shorter one.
 const defaultReaperInterval = time.Second
 
-// Actor is the kimi (Kimi WebBridge) adapter cell. The inward (channel) face is
-// this struct's Receive/describe; the outward (device) face is the embedded
-// *device, which owns the WS endpoint, the connection, the in-flight table, and
-// the reaper.
+// Actor is the kimi (Kimi WebBridge) adapter's process state. The inward
+// (channel) face is run()'s dispatch off sys.Recv(); the outward (device) face
+// is the embedded *device, which owns the WS endpoint, the connection, the
+// in-flight table, and the reaper.
 //
-// The substrate runs Start/Stop/Receive serially on the cell goroutine, so the
-// inward face needs no locks. The device read loop + reaper run on their own
-// goroutines and emit channel responses directly through the writer; their
-// shared state is guarded inside *device (the one cross-goroutine boundary).
+// sys is bound once, at run()'s first line (birth) — before that this Actor is
+// a half-built value NewActor produced, never handed a Proc's identity. The
+// worker goroutine calls Recv/dispatch serially; the device's read-loop +
+// reaper goroutines close requests by calling sys.Reply/Fail directly (legal
+// fan-out — spec §1.2: Sys is concurrency-safe, Msg is immutable), guarded by
+// *device's own mutex for the in-flight table they share.
 //
 // Domain face (vs xhs): kimi serves a SINGLE request type, kimi.command, whose
 // device verb is the payload's `action` (one of 13 browser primitives) and whose
 // device params are the payload's `args`. The closed set is the action allowlist
 // (types.go), not a multi-type table.
 type Actor struct {
-	pen     harness.Pen
-	actorID actor.ActorID
-	clock   func() time.Time
-	dev     *device
-	// obs is the actor-source obs PUSH producer end, captured at Start. The device
-	// face uses it to publish device-presence edges (L3). nil until Start.
-	obs actorrt.ActorContext
+	sys   actorbase.Sys
+	clock func() time.Time
+	dev   *device
 }
 
-// NewActor builds a kimi adapter bound to its pen + identity + config. The
-// device endpoint is constructed here but only LISTENS at Start (cell
-// lifecycle): a half-built actor must never bind a port.
-func NewActor(w harness.Pen, cfg Config) *Actor {
+// NewActor builds a kimi adapter bound to its config. The device endpoint is
+// constructed here but only LISTENS at run() (Proc entry = birth): a
+// half-built actor must never bind a port.
+func NewActor(cfg Config) *Actor {
 	clock := cfg.NowFn
 	if clock == nil {
 		clock = time.Now
@@ -86,24 +82,29 @@ func NewActor(w harness.Pen, cfg Config) *Actor {
 	if reaperInterval <= 0 {
 		reaperInterval = defaultReaperInterval
 	}
-	a := &Actor{
-		pen:     w,
-		actorID: DefaultActorID,
-		clock:   clock,
-	}
+	a := &Actor{clock: clock}
 	a.dev = newDevice(a, cfg.ListenAddr, clock, reaperInterval, logger)
 	return a
 }
 
-var _ actorrt.Actor = (*Actor)(nil)
-var _ actorrt.Starter = (*Actor)(nil)
-var _ actorrt.Stopper = (*Actor)(nil)
+// Def is this actor's actorbase registration entry (spec §1.6): New mints a
+// fresh Actor + Proc per incarnation, closing over cfg (New itself takes zero
+// parameters — cfg is captured by this closure, not carried by Def).
+func Def(cfg Config) actorbase.Def {
+	return actorbase.Def{
+		Doc: actorDescription,
+		New: func() (actorbase.Proc, error) {
+			return NewActor(cfg).run, nil
+		},
+	}
+}
 
-// Start binds the device WS endpoint and boots the accept + reaper goroutines.
-// A bind failure returns the error so the cell dies fast (positive death) — no
-// half-listening adapter ever registers as serviceable.
-func (a *Actor) Start(ctx context.Context, self actorrt.ActorContext) error {
-	a.obs = self
+// run is the Proc body (spec §1.6): entry = birth, return = death. It binds
+// the device endpoint, then loops sys.Recv() until the cell dies or Stop is
+// requested — the loop's exit IS this incarnation's death, and the deferred
+// device teardown is its resource release.
+func (a *Actor) run(sys actorbase.Sys) error {
+	a.sys = sys
 	// The trust model assumes a loopback bind (only same-machine processes can
 	// reach the keyless endpoint). A non-loopback addr is a CONFIG ERROR: it
 	// would expose the keyless device port to the network. Fail fast
@@ -111,22 +112,27 @@ func (a *Actor) Start(ctx context.Context, self actorrt.ActorContext) error {
 	if !isLoopbackAddr(a.dev.addrCfg) {
 		return fmt.Errorf("kimi: device endpoint is keyless and trusts localhost; refusing non-loopback bind %q (use 127.0.0.1)", a.dev.addrCfg)
 	}
-	if err := a.dev.start(ctx); err != nil {
+	if err := a.dev.start(sys.Life()); err != nil {
 		return err
 	}
+	defer func() { _ = a.dev.stop(context.Background()) }()
 	// Initial L3 edge: a connection-bearing adapter KNOWS it starts disconnected —
 	// publish offline so the home shows a definite state, not unknown.
 	a.publishDevicePresence(false)
-	return nil
+
+	for {
+		msg, err := sys.Recv()
+		if err != nil {
+			return err
+		}
+		a.handle(msg)
+	}
 }
 
 // publishDevicePresence pushes a device-presence edge (L3) on the actor-source obs axis.
-// Best-effort, advisory (never authoritative — that is send→terminal); no-op
-// before Start captured the producer end.
+// Best-effort, advisory (never authoritative — that is send→terminal).
 func (a *Actor) publishDevicePresence(online bool) {
-	if a.obs != nil {
-		a.obs.PublishObs(introspect.ObsDevicePresence, introspect.MarshalDevicePresence(online))
-	}
+	_ = a.sys.PublishObs(introspect.ObsDevicePresence, introspect.MarshalDevicePresence(online))
 }
 
 // isLoopbackAddr reports whether host:port binds the loopback interface (the
@@ -144,49 +150,44 @@ func isLoopbackAddr(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// Stop tears the device endpoint down: stop accepting, close the conn, join the
-// read loop + reaper. The runtime guarantees no Receive is in flight.
-func (a *Actor) Stop(ctx context.Context) error {
-	return a.dev.stop(ctx)
-}
-
 // ListenAddr returns the resolved device-endpoint address (useful when the
-// config asked for port 0). Empty until Start has bound.
+// config asked for port 0). Empty until run() has bound.
 func (a *Actor) ListenAddr() string { return a.dev.addr() }
 
-// Receive is the inward mailbox entry. It NEVER blocks on the device: a
+// handle dispatches one delivered Msg. It NEVER blocks on the device: a
 // supported request is encoded, registered in the in-flight table, and pushed
 // down the conn — the reply comes back asynchronously through the read loop. An
 // offline device fails the request immediately (digested, not crashed).
-func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
-	if env == nil {
-		return nil
-	}
+func (a *Actor) handle(msg actorbase.Msg) {
 	// The adapter only ACTS on requests — it serves request/response types and
 	// answers describe. A non-request (event/response addressed here) has no
 	// terminal to author, so it is dropped rather than mis-handled.
-	if env.Kind != message.KindRequest {
-		return nil
+	if msg.Kind != message.KindRequest {
+		return
 	}
-	if env.Type == introspect.QueryDescribe {
-		return a.handleDescribe(ctx, env)
+	if msg.Type == introspect.QueryDescribe {
+		a.handleDescribe(msg)
+		return
 	}
 
-	if env.Type != TypeCommand {
-		return a.fail(ctx, env, "type_unsupported", fmt.Sprintf("kimi adapter does not handle %s", env.Type))
+	if msg.Type != TypeCommand {
+		_, _ = a.sys.Fail(msg, "type_unsupported", fmt.Sprintf("kimi adapter does not handle %s", msg.Type))
+		return
 	}
 
 	// kimi.command carries the device verb in its payload: {action, args}. The
 	// verb is resolved here (not a static type→cmd table) and validated against
 	// the closed action set before anything reaches the device.
 	var cmd commandPayload
-	if len(env.Payload) > 0 {
-		if err := json.Unmarshal(env.Payload, &cmd); err != nil {
-			return a.fail(ctx, env, "payload_invalid", fmt.Sprintf("decode kimi.command payload: %v", err))
+	if len(msg.Payload) > 0 {
+		if err := json.Unmarshal(msg.Payload, &cmd); err != nil {
+			_, _ = a.sys.Fail(msg, "payload_invalid", fmt.Sprintf("decode kimi.command payload: %v", err))
+			return
 		}
 	}
 	if !isAction(cmd.Action) {
-		return a.fail(ctx, env, "invalid_action", fmt.Sprintf("unknown action %q", cmd.Action))
+		_, _ = a.sys.Fail(msg, "invalid_action", fmt.Sprintf("unknown action %q", cmd.Action))
+		return
 	}
 
 	// args passes through verbatim as the device frame params (the adapter does
@@ -196,28 +197,23 @@ func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
 		params = json.RawMessage("{}")
 	}
 
-	if err := a.dev.dispatch(ctx, env, cmd.Action, commandDeadline, params); err != nil {
+	if err := a.dev.dispatch(msg, cmd.Action, commandDeadline, params); err != nil {
 		// dispatch only errors for the digestible offline case; the device
 		// being absent is a business failure, not a crash.
-		return a.fail(ctx, env, "device_offline", err.Error())
+		_, _ = a.sys.Fail(msg, "device_offline", err.Error())
 	}
-	return nil
 }
 
-func (a *Actor) fail(ctx context.Context, env *message.Envelope, errorCode, detail string) error {
-	_, err := behavior.Fail(ctx, a.pen, a.clock, env, errorCode, detail)
-	return err
-}
-
-func (a *Actor) handleDescribe(ctx context.Context, env *message.Envelope) error {
-	req, err := introspect.ParseDescribeRequest(env.Payload)
+func (a *Actor) handleDescribe(msg actorbase.Msg) {
+	req, err := introspect.ParseDescribeRequest(msg.Payload)
 	if err != nil {
-		return a.fail(ctx, env, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
+		_, _ = a.sys.Fail(msg, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
+		return
 	}
-	answer, ok := introspect.AnswerDescribe(describeCatalog(string(a.actorID)), req)
+	answer, ok := introspect.AnswerDescribe(describeCatalog(string(a.sys.Self())), req)
 	if !ok {
-		return a.fail(ctx, env, "type_unsupported", fmt.Sprintf("kimi adapter does not handle %s", req.Type))
+		_, _ = a.sys.Fail(msg, "type_unsupported", fmt.Sprintf("kimi adapter does not handle %s", req.Type))
+		return
 	}
-	_, rerr := behavior.RespondJSON(ctx, a.pen, a.clock, env, answer)
-	return rerr
+	_, _ = a.sys.Reply(msg, answer)
 }

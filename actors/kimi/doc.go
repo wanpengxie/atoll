@@ -1,21 +1,24 @@
 // Package kimi is a concrete device-backed adapter actor — the boundary
 // translator between the channel (actor/message world) and the user's real
 // browser, driven through the Kimi WebBridge Chrome extension that speaks no
-// actor primitives.
+// actor primitives. It is an actorbase Proc (lib/actorbase, actorbase-spec-v1):
+// Def(cfg) mints a fresh Actor + run per incarnation, run(sys) is the process
+// body (entry=birth, sys.Recv() loop, return=death).
 //
 // It follows the adapter-actor shape: two faces, complexity pressed into one
 // stateful actor. Disambiguation: this package (actors/kimi)
 // is the WebBridge that controls a browser extension — it is unrelated to
 // agent/provider/kimi, the go-kimi looper engine.
 //
-//   - Inward (channel face): a plain channel actor. Receive(env) serves a SINGLE
-//     request type, kimi.command, answers actor.describe, and emits channel
-//     primitives through lib/behavior. The device verb is the payload's `action`
-//     (one of 13 browser primitives: navigate / find_tab / snapshot / click /
-//     fill / evaluate / screenshot / network / upload / save_as_pdf / list_tabs /
-//     close_tab / close_session); `args` is forwarded to the device verbatim. An
-//     action outside the closed set fails invalid_action before anything reaches
-//     the device. No other actor ever learns what a browser extension is.
+//   - Inward (channel face): run()'s sys.Recv() loop, dispatched in
+//     Actor.handle. It serves a SINGLE request type, kimi.command, answers
+//     actor.describe, and writes terminals through sys.Reply/sys.Fail. The
+//     device verb is the payload's `action` (one of 13 browser primitives:
+//     navigate / find_tab / snapshot / click / fill / evaluate / screenshot /
+//     network / upload / save_as_pdf / list_tabs / close_tab / close_session);
+//     `args` is forwarded to the device verbatim. An action outside the closed
+//     set fails invalid_action before anything reaches the device. No other
+//     actor ever learns what a browser extension is.
 //
 //   - Outward (device face): a PRIVATE WS endpoint owned by this package (the
 //     extension connect-ins to it). The wire is the minimal request/response
@@ -23,11 +26,13 @@
 //     result|error} up — NOT a channel envelope, NOT any device_transit frame
 //     family. correlation_id pairs a reply to its request.
 //
-// Statefulness (substrate cell hosts one long-lived instance): the adapter
-// holds the current device conn + an in-flight table keyed by correlation_id.
-// Because the substrate has no self-send, device replies are emitted to the
-// channel directly from the read-loop goroutine via the writer; an internal
-// mutex guards the conn + in-flight table (the one cross-goroutine state).
+// Statefulness (one incarnation per Proc, per spec §1.6): the adapter holds
+// the current device conn + an in-flight table keyed by correlation_id (as its
+// own Msg, not a re-fetched envelope — sys.Reply/sys.Fail take the Msg
+// in-hand). Because Sys is concurrency-safe and Msg is immutable (spec §1.2
+// fan-out), the device's read-loop + reaper goroutines call sys.Reply/sys.Fail
+// directly to close a request; an internal mutex guards the conn + in-flight
+// table (the one cross-goroutine state device.go itself owns).
 //
 // Fault posture (let-it-crash): a single request that times out or hits an
 // offline device fails as a business response (the actor digests it). A reaper
@@ -35,7 +40,7 @@
 // budget — browser actions are sub-second to a few seconds, no minutes-long
 // operation). A dropped conn flips the adapter offline and waits for a fresh
 // connection — it does NOT panic; only an untrustworthy internal state would
-// (positive death).
+// (positive death, i.e. run() returning a non-nil error).
 //
 // Domain note: screenshot and save_as_pdf return a LOCAL file path — the device
 // writes the bytes to disk and the wire carries only the path, not the payload.
@@ -54,7 +59,8 @@
 //
 // File layout (one concern per file):
 //
-//   - actor.go    Actor struct + NewActor + Start/Stop/Receive + describe dispatch.
+//   - actor.go    Actor struct + NewActor + Def + run (Proc body) + handle
+//     dispatch + describe dispatch.
 //   - device.go   WS listener + accept + read loop + in-flight table + reaper +
 //     downstream send (write-deadline bounded).
 //   - wire.go     the minimal device frame structs.

@@ -1,4 +1,4 @@
-package sysactor_test
+package sysactor
 
 import (
 	"context"
@@ -7,15 +7,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // errRegistry fails ListActive, exercising the registry-error early return in
-// respondList (substrate read failure is propagated, never swallowed).
+// respondList (a substrate read failure writes nothing — the same "does not
+// synthesize" posture as an unrouted type, never a bogus empty directory).
 type errRegistry struct{ err error }
 
 func (e errRegistry) Lookup(context.Context, actor.ActorID) (storespec.Record, bool, error) {
@@ -26,27 +27,8 @@ func (e errRegistry) ListActive(context.Context) ([]storespec.Record, error) {
 	return nil, e.err
 }
 
-// errLookup fails FindByID, exercising the lookup-error return in respondReserved.
-type errLookup struct{ err error }
-
-func (e errLookup) FindByID(context.Context, message.ID) (*message.Envelope, bool, error) {
-	return nil, false, e.err
-}
-
-// missLookup reports the request not found (ok=false), exercising the
-// not-found defensive branch in respondReserved.
-type missLookup struct{}
-
-func (missLookup) FindByID(context.Context, message.ID) (*message.Envelope, bool, error) {
-	return nil, false, nil
-}
-
-func newDescribeReq() *message.Envelope {
-	return &message.Envelope{
-		ID: "q-desc", ChannelID: "ch", Kind: message.KindRequest, Type: introspect.QueryDescribe,
-		Sender:   message.Sender{Kind: actor.KindAgent, ID: "caller"},
-		Audience: message.Audience{actor.SystemActorID},
-	}
+func newDescribeReq() actorbase.Msg {
+	return requestMsg("q-desc", introspect.QueryDescribe, nil)
 }
 
 // TestRespondDescribe proves the system actor self-answers the reserved
@@ -54,19 +36,19 @@ func newDescribeReq() *message.Envelope {
 // reserved query it serves (actor.list) documented in Types.
 func TestRespondDescribe(t *testing.T) {
 	req := newDescribeReq()
-	fc := &fakeWriter{}
-	s := sysactor.New(sysactor.Deps{
-		Registry: fakeRegistry{}, Writer: fc, Lookup: fakeLookup{req: req},
-	})
+	sys := &fakeSys{}
+	s := New(Deps{Registry: fakeRegistry{}})
 
-	if err := s.Receive(context.Background(), req); err != nil {
-		t.Fatalf("actor.describe: %v", err)
+	s.handle(sys, req)
+	if len(sys.replies) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(sys.replies))
 	}
-	if len(fc.written) != 1 {
-		t.Fatalf("expected 1 response written, got %d", len(fc.written))
+	raw, err := json.Marshal(sys.replies[0].v)
+	if err != nil {
+		t.Fatalf("marshal reply: %v", err)
 	}
 	var d introspect.Describe
-	if err := json.Unmarshal(fc.written[0].Payload, &d); err != nil {
+	if err := json.Unmarshal(raw, &d); err != nil {
 		t.Fatalf("unmarshal describe: %v", err)
 	}
 	if d.ActorID != string(actor.SystemActorID) {
@@ -81,21 +63,20 @@ func TestRespondDescribe(t *testing.T) {
 // TestRespondDescribe_TypeSelector proves the single-type selector form
 // answers with the introspect DescribeType shape.
 func TestRespondDescribe_TypeSelector(t *testing.T) {
-	req := newDescribeReq()
-	req.Payload = []byte(`{"type":"actor.list"}`)
-	fc := &fakeWriter{}
-	s := sysactor.New(sysactor.Deps{
-		Registry: fakeRegistry{}, Writer: fc, Lookup: fakeLookup{req: req},
-	})
+	req := requestMsg("q-desc", introspect.QueryDescribe, []byte(`{"type":"actor.list"}`))
+	sys := &fakeSys{}
+	s := New(Deps{Registry: fakeRegistry{}})
 
-	if err := s.Receive(context.Background(), req); err != nil {
-		t.Fatalf("actor.describe selector: %v", err)
+	s.handle(sys, req)
+	if len(sys.replies) != 1 {
+		t.Fatalf("expected 1 reply, got %d", len(sys.replies))
 	}
-	if len(fc.written) != 1 {
-		t.Fatalf("expected 1 response written, got %d", len(fc.written))
+	raw, err := json.Marshal(sys.replies[0].v)
+	if err != nil {
+		t.Fatalf("marshal reply: %v", err)
 	}
 	var dt introspect.DescribeType
-	if err := json.Unmarshal(fc.written[0].Payload, &dt); err != nil {
+	if err := json.Unmarshal(raw, &dt); err != nil {
 		t.Fatalf("unmarshal describe type: %v", err)
 	}
 	if dt.Type != introspect.QueryList || dt.Description == "" {
@@ -104,90 +85,51 @@ func TestRespondDescribe_TypeSelector(t *testing.T) {
 }
 
 // TestRespondDescribe_UnknownSelector proves an unknown type selector is not
-// synthesized (no write): the caller closure reaps it.
+// synthesized (no reply): the caller closure reaps it.
 func TestRespondDescribe_UnknownSelector(t *testing.T) {
-	req := newDescribeReq()
-	req.Payload = []byte(`{"type":"nope"}`)
-	fc := &fakeWriter{}
-	s := sysactor.New(sysactor.Deps{
-		Registry: fakeRegistry{}, Writer: fc, Lookup: fakeLookup{req: req},
-	})
+	req := requestMsg("q-desc", introspect.QueryDescribe, []byte(`{"type":"nope"}`))
+	sys := &fakeSys{}
+	s := New(Deps{Registry: fakeRegistry{}})
 
-	if err := s.Receive(context.Background(), req); err != nil {
-		t.Fatalf("actor.describe unknown selector: %v", err)
-	}
-	if len(fc.written) != 0 {
-		t.Fatalf("expected no response written, got %d", len(fc.written))
+	s.handle(sys, req)
+	if len(sys.replies) != 0 {
+		t.Fatalf("expected no reply, got %d", len(sys.replies))
 	}
 }
 
 // TestReceive_NonRequestIgnored proves the system actor does not synthesize for
 // anything but the two reserved requests: events and other reserved requests
-// are silently left (no write), so the caller's closure times out instead.
+// are silently left (no reply), so the caller's closure times out instead.
 func TestReceive_NonRequestIgnored(t *testing.T) {
-	cases := []*message.Envelope{
-		{ID: "e1", Kind: message.KindEvent, Type: "some.event"},
-		{ID: "r1", Kind: message.KindRequest, Type: "actor.other"},
-		{ID: "p1", Kind: message.KindResponse, Type: introspect.QueryList},
+	cases := []struct {
+		kind message.Kind
+		typ  string
+	}{
+		{message.KindEvent, "some.event"},
+		{message.KindRequest, "actor.other"},
+		{message.KindResponse, introspect.QueryList},
 	}
-	for _, env := range cases {
-		fc := &fakeWriter{}
-		s := sysactor.New(sysactor.Deps{Registry: fakeRegistry{}, Writer: fc, Lookup: fakeLookup{}})
-		if err := s.Receive(context.Background(), env); err != nil {
-			t.Fatalf("Receive(%s/%s): %v", env.Kind, env.Type, err)
-		}
-		if len(fc.written) != 0 {
-			t.Fatalf("Receive(%s/%s) wrote %d responses, want 0 (not synthesized)", env.Kind, env.Type, len(fc.written))
+	for _, c := range cases {
+		sys := &fakeSys{}
+		s := New(Deps{Registry: fakeRegistry{}})
+		msg := actorbase.NewMsg(context.Background(), message.Envelope{ID: "e1", Kind: c.kind, Type: c.typ})
+		s.handle(sys, msg)
+		if len(sys.replies) != 0 {
+			t.Fatalf("Receive(%s/%s) wrote %d replies, want 0 (not synthesized)", c.kind, c.typ, len(sys.replies))
 		}
 	}
 }
 
-// TestRespondList_RegistryError proves a substrate read failure (ListActive) is
-// propagated out of respondList, never swallowed into an empty directory.
+// TestRespondList_RegistryError proves a substrate read failure (ListActive)
+// writes no reply — never swallowed into a bogus empty directory.
 func TestRespondList_RegistryError(t *testing.T) {
-	want := errors.New("registry down")
-	listReq := &message.Envelope{
-		ID: "q1", Kind: message.KindRequest, Type: introspect.QueryList,
-		Audience: message.Audience{actor.SystemActorID},
-	}
-	s := sysactor.New(sysactor.Deps{
-		Registry: errRegistry{err: want}, Writer: &fakeWriter{}, Lookup: fakeLookup{req: listReq},
-	})
-	err := s.Receive(context.Background(), listReq)
-	if !errors.Is(err, want) {
-		t.Fatalf("respondList err=%v, want %v", err, want)
-	}
-}
+	listReq := requestMsg("q1", introspect.QueryList, nil)
+	sys := &fakeSys{}
+	s := New(Deps{Registry: errRegistry{err: errors.New("registry down")}})
 
-// TestRespondReserved_LookupError proves a lookup read failure is propagated
-// out of respondReserved (the serve-side truth read is authoritative).
-func TestRespondReserved_LookupError(t *testing.T) {
-	want := errors.New("lookup down")
-	req := newDescribeReq()
-	s := sysactor.New(sysactor.Deps{
-		Registry: fakeRegistry{}, Writer: &fakeWriter{}, Lookup: errLookup{err: want},
-	})
-	err := s.Receive(context.Background(), req)
-	if !errors.Is(err, want) {
-		t.Fatalf("respondReserved err=%v, want %v", err, want)
-	}
-}
-
-// TestRespondReserved_NotFound proves the defensive branch: when the original
-// request cannot be recovered (ok=false), respondReserved errors rather than
-// authoring a response anchored to nothing.
-func TestRespondReserved_NotFound(t *testing.T) {
-	req := newDescribeReq()
-	fc := &fakeWriter{}
-	s := sysactor.New(sysactor.Deps{
-		Registry: fakeRegistry{}, Writer: fc, Lookup: missLookup{},
-	})
-	err := s.Receive(context.Background(), req)
-	if err == nil {
-		t.Fatalf("respondReserved with missing request returned nil, want error")
-	}
-	if len(fc.written) != 0 {
-		t.Fatalf("wrote %d responses despite missing request, want 0", len(fc.written))
+	s.handle(sys, listReq)
+	if len(sys.replies) != 0 {
+		t.Fatalf("expected no reply on registry error, got %d", len(sys.replies))
 	}
 }
 
@@ -197,20 +139,18 @@ func TestObs_NilStat(t *testing.T) {
 	reg := fakeRegistry{rows: []storespec.Record{
 		{ID: "actor:a", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
 	}}
-	fc := &fakeWriter{}
-	listReq := &message.Envelope{
-		ID: "q1", Kind: message.KindRequest, Type: introspect.QueryList,
-		Audience: message.Audience{actor.SystemActorID},
-	}
+	listReq := requestMsg("q1", introspect.QueryList, nil)
+	sys := &fakeSys{}
 	// Stat left nil → everyone absent.
-	s := sysactor.New(sysactor.Deps{
-		Registry: reg, Writer: fc, Lookup: fakeLookup{req: listReq},
-	})
-	if err := s.Receive(context.Background(), listReq); err != nil {
-		t.Fatalf("actor.list: %v", err)
+	s := New(Deps{Registry: reg})
+
+	s.handle(sys, listReq)
+	raw, err := json.Marshal(sys.replies[0].v)
+	if err != nil {
+		t.Fatalf("marshal reply: %v", err)
 	}
 	var cat introspect.Catalog
-	if err := json.Unmarshal(fc.written[0].Payload, &cat); err != nil {
+	if err := json.Unmarshal(raw, &cat); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if len(cat.Actors) != 1 {
@@ -228,22 +168,22 @@ func TestObs_PresentZeroStartedAt(t *testing.T) {
 	reg := fakeRegistry{rows: []storespec.Record{
 		{ID: "actor:a", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
 	}}
-	fc := &fakeWriter{}
-	listReq := &message.Envelope{
-		ID: "q1", Kind: message.KindRequest, Type: introspect.QueryList,
-		Audience: message.Audience{actor.SystemActorID},
-	}
+	listReq := requestMsg("q1", introspect.QueryList, nil)
+	sys := &fakeSys{}
 	// present=true but started=zero time → uptime guarded to 0.
-	s := sysactor.New(sysactor.Deps{
-		Registry: reg, Writer: fc, Lookup: fakeLookup{req: listReq},
-		Stat:  fakeStat{present: map[actor.ActorID]bool{"actor:a": true}, started: time.Time{}},
-		Clock: func() time.Time { return time.Unix(1000, 0) },
+	s := New(Deps{
+		Registry: reg,
+		Stat:     fakeStat{present: map[actor.ActorID]bool{"actor:a": true}},
+		Clock:    func() time.Time { return time.Unix(1000, 0) },
 	})
-	if err := s.Receive(context.Background(), listReq); err != nil {
-		t.Fatalf("actor.list: %v", err)
+
+	s.handle(sys, listReq)
+	raw, err := json.Marshal(sys.replies[0].v)
+	if err != nil {
+		t.Fatalf("marshal reply: %v", err)
 	}
 	var cat introspect.Catalog
-	if err := json.Unmarshal(fc.written[0].Payload, &cat); err != nil {
+	if err := json.Unmarshal(raw, &cat); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
 	if !cat.Actors[0].Present {

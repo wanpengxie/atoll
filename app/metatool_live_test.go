@@ -210,13 +210,11 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 			ID:      kimi.DefaultActorID,
 			Kind:    actor.KindTool,
 			Binding: actor.BindingRuntimeInboundViaRelay,
-			Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
-				return kimi.NewActor(pen, kimi.Config{
-					ListenAddr:     metatoolKimiDeviceAddr,
-					ReaperInterval: 20 * time.Millisecond,
-					Logger:         logger,
-				})
-			}},
+			Factory: platform.ActorFactory{Proc: kimi.Def(kimi.Config{
+				ListenAddr:     metatoolKimiDeviceAddr,
+				ReaperInterval: 20 * time.Millisecond,
+				Logger:         logger,
+			})},
 		},
 	})
 	go func() {

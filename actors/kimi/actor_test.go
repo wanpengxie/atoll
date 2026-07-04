@@ -3,6 +3,7 @@ package kimi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -10,57 +11,147 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 const testChannelID = channel.ID("ch-test")
 
-// recordingWriter is a concurrency-safe harness.Pen double: the adapter emits
-// from the read loop + reaper goroutines as well as the cell goroutine, so the
-// writer must be safe.
-type recordingWriter struct {
+// errFakeSysStopped is fakeSys.Recv's loop-termination signal once the test
+// closes the delivery channel (the fakeSys.stop() cleanup path) — mirrors the
+// engine's ErrRecvDone contract (spec §1.2).
+var errFakeSysStopped = errors.New("fakeSys: stopped")
+
+// replyRec / failRec record one recorded sys.Reply/sys.Fail call — the
+// concurrency-safe double for asserting what run()/device.go wrote, since
+// several goroutines (worker, read loop, reaper) may call these concurrently
+// (spec §1.2 fan-out).
+type replyRec struct {
+	id message.ID
+	v  any
+}
+
+type failRec struct {
+	id           message.ID
+	code, detail string
+}
+
+// fakeSys is a minimal actorbase.Sys double: it embeds the (nil) interface so
+// every verb this actor never touches stays unimplemented (a call would nil-
+// panic, failing the test loudly), and overrides only the verbs the kimi actor
+// actually calls: Recv, Reply, Fail, PublishObs, Self, Life. Recv blocks on a
+// channel (not a pre-built queue) because the actor's device goroutines close
+// requests asynchronously while the worker goroutine is parked in Recv.
+type fakeSys struct {
+	actorbase.Sys
+
+	selfID actor.ActorID
+	recvCh chan actorbase.Msg
+
 	mu      sync.Mutex
-	written []message.Envelope
+	replies []replyRec
+	fails   []failRec
 }
 
-func (w *recordingWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.written = append(w.written, *env)
-	return harness.WriteResult{MessageID: env.ID}, nil
+func newFakeSys(selfID actor.ActorID) *fakeSys {
+	return &fakeSys{selfID: selfID, recvCh: make(chan actorbase.Msg, 16)}
 }
 
-func (w *recordingWriter) Written() []message.Envelope {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	out := make([]message.Envelope, len(w.written))
-	copy(out, w.written)
+// push enqueues one delivery for the worker's Recv loop to pick up.
+func (f *fakeSys) push(msg actorbase.Msg) { f.recvCh <- msg }
+
+// stop closes the delivery channel — Recv returns errFakeSysStopped, ending
+// run()'s loop (its death) so the deferred device teardown runs.
+func (f *fakeSys) stop() { close(f.recvCh) }
+
+func (f *fakeSys) Recv() (actorbase.Msg, error) {
+	msg, ok := <-f.recvCh
+	if !ok {
+		return actorbase.Msg{}, errFakeSysStopped
+	}
+	return msg, nil
+}
+
+func (f *fakeSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replies = append(f.replies, replyRec{id: msg.ID, v: v})
+	return msg.ID, nil
+}
+
+func (f *fakeSys) Fail(msg actorbase.Msg, code, detail string) (message.ID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fails = append(f.fails, failRec{id: msg.ID, code: code, detail: detail})
+	return msg.ID, nil
+}
+
+func (f *fakeSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error { return nil }
+
+func (f *fakeSys) Self() actor.ActorID { return f.selfID }
+
+func (f *fakeSys) Life() context.Context { return context.Background() }
+
+var _ actorbase.Sys = (*fakeSys)(nil)
+
+func (f *fakeSys) repliesSnapshot() []replyRec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]replyRec, len(f.replies))
+	copy(out, f.replies)
 	return out
 }
 
-// waitResponse polls for a kind=response envelope with the given parent_id.
-func (w *recordingWriter) waitResponse(t *testing.T, parentID message.ID, timeout time.Duration) (message.Envelope, bool) {
+func (f *fakeSys) failsSnapshot() []failRec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]failRec, len(f.fails))
+	copy(out, f.fails)
+	return out
+}
+
+// waitReply polls for a recorded Reply call for id.
+func (f *fakeSys) waitReply(t *testing.T, id message.ID, timeout time.Duration) (replyRec, bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		for _, env := range w.Written() {
-			if env.Kind == message.KindResponse && env.ParentID == parentID {
-				return env, true
+		for _, r := range f.repliesSnapshot() {
+			if r.id == id {
+				return r, true
 			}
 		}
 		if time.Now().After(deadline) {
-			return message.Envelope{}, false
+			return replyRec{}, false
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 }
 
-// startActor builds + starts a kimi adapter on a free port. Cleanup stops it. A
-// short reaper interval keeps the timeout test prompt without a prod constant.
-func startActor(t *testing.T, w *recordingWriter, cfg Config) *Actor {
+// waitFail polls for a recorded Fail call for id.
+func (f *fakeSys) waitFail(t *testing.T, id message.ID, timeout time.Duration) (failRec, bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, r := range f.failsSnapshot() {
+			if r.id == id {
+				return r, true
+			}
+		}
+		if time.Now().After(deadline) {
+			return failRec{}, false
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// startActor builds a kimi actor on a free port and runs its Proc body against
+// a fakeSys, in a goroutine (run() blocks in sys.Recv()). Cleanup stops the
+// fakeSys (which ends run()'s loop) and waits for it to return. A short reaper
+// interval keeps the timeout test prompt without a prod constant.
+func startActor(t *testing.T, cfg Config) (*Actor, *fakeSys) {
 	t.Helper()
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = "127.0.0.1:0"
@@ -68,12 +159,32 @@ func startActor(t *testing.T, w *recordingWriter, cfg Config) *Actor {
 	if cfg.ReaperInterval == 0 {
 		cfg.ReaperInterval = 20 * time.Millisecond
 	}
-	a := NewActor(w, cfg)
-	if err := a.Start(context.Background(), nil); err != nil {
-		t.Fatalf("Start: %v", err)
+	a := NewActor(cfg)
+	sys := newFakeSys(DefaultActorID)
+	done := make(chan error, 1)
+	go func() { done <- a.run(sys) }()
+	t.Cleanup(func() {
+		sys.stop()
+		<-done
+	})
+	waitListening(t, a)
+	return a, sys
+}
+
+// waitListening blocks until run() has bound the device's WS endpoint (run()
+// binds before entering its Recv loop, off the goroutine startActor spawned).
+func waitListening(t *testing.T, a *Actor) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if a.ListenAddr() != "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("device never bound its listen address")
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
-	t.Cleanup(func() { _ = a.Stop(context.Background()) })
-	return a
 }
 
 // waitOnline blocks until the adapter has registered a live device connection.
@@ -129,14 +240,14 @@ func (f *fakeExtension) reply(t *testing.T, up upFrame) {
 	}
 }
 
-// command builds a kimi.command request with the given action + args.
-func command(id, action string, args map[string]any) *message.Envelope {
+// command builds a kimi.command request Msg with the given action + args.
+func command(id, action string, args map[string]any) actorbase.Msg {
 	payload := map[string]any{"action": action}
 	if args != nil {
 		payload["args"] = args
 	}
 	body, _ := json.Marshal(payload)
-	return &message.Envelope{
+	return actorbase.NewMsg(context.Background(), message.Envelope{
 		ID:         message.ID(id),
 		ChannelID:  testChannelID,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:main"},
@@ -144,36 +255,20 @@ func command(id, action string, args map[string]any) *message.Envelope {
 		Type:       TypeCommand,
 		Payload:    body,
 		Visibility: message.VisibilityPublic,
-	}
-}
-
-func responseStatus(t *testing.T, env message.Envelope) (status, errorCode string, result map[string]any) {
-	t.Helper()
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(env.Payload, &m); err != nil {
-		t.Fatalf("decode response payload: %v", err)
-	}
-	_ = json.Unmarshal(m["status"], &status)
-	_ = json.Unmarshal(m["error_code"], &errorCode)
-	result = map[string]any{}
-	_ = json.Unmarshal(env.Payload, &result)
-	return status, errorCode, result
+	})
 }
 
 //  1. Round-trip: a navigate command flows down to the extension as
-//     {cmd:navigate, params:{url}} and the reply comes back as a completed
-//     response. The device verb is drawn from the payload action; args becomes
-//     the frame params.
+//     {cmd:navigate, params:{url}} and the reply comes back as a Reply call
+//     carrying the device result. The device verb is drawn from the payload
+//     action; args becomes the frame params.
 func TestRoundTrip(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{})
+	a, sys := startActor(t, Config{})
 	ext := dialExtension(t, a)
 	waitOnline(t, a)
 
 	req := command("req-1", "navigate", map[string]any{"url": "x"})
-	if err := a.Receive(context.Background(), req); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
+	sys.push(req)
 
 	down := ext.read(t)
 	if down.CorrelationID != "req-1" {
@@ -191,46 +286,45 @@ func TestRoundTrip(t *testing.T) {
 	result, _ := json.Marshal(map[string]any{"tabId": 7})
 	ext.reply(t, upFrame{CorrelationID: "req-1", OK: true, Result: result})
 
-	resp, ok := w.waitResponse(t, "req-1", 2*time.Second)
+	rep, ok := sys.waitReply(t, "req-1", 2*time.Second)
 	if !ok {
-		t.Fatal("no response for req-1")
+		t.Fatal("no Reply call for req-1")
 	}
-	status, _, body := responseStatus(t, resp)
-	if status != "completed" {
-		t.Errorf("status=%q want completed", status)
+	// rep.v is device.go's raw device result (json.RawMessage or {} — see
+	// handleUp); re-marshal + decode rather than asserting its static Go type.
+	raw, err := json.Marshal(rep.v)
+	if err != nil {
+		t.Fatalf("marshal reply value: %v", err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode reply value: %v", err)
 	}
 	if _, has := body["tabId"]; !has {
-		t.Errorf("response payload missing tabId: %v", body)
+		t.Errorf("reply value missing tabId: %v", rep.v)
 	}
 }
 
 //  2. Offline: with no extension connected, a command fails immediately with
 //     device_offline.
 func TestOffline(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{})
+	_, sys := startActor(t, Config{})
 
 	req := command("req-off", "snapshot", nil)
-	if err := a.Receive(context.Background(), req); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
-	resp, ok := w.waitResponse(t, "req-off", time.Second)
+	sys.push(req)
+
+	fail, ok := sys.waitFail(t, "req-off", time.Second)
 	if !ok {
-		t.Fatal("no response for req-off")
+		t.Fatal("no Fail call for req-off")
 	}
-	status, code, _ := responseStatus(t, resp)
-	if status != "failed" {
-		t.Errorf("status=%q want failed", status)
-	}
-	if code != "device_offline" {
-		t.Errorf("error_code=%q want device_offline", code)
+	if fail.code != "device_offline" {
+		t.Errorf("code=%q want device_offline", fail.code)
 	}
 }
 
 //  3. Timeout: a connected extension that never replies; the reaper produces a
-//     failed/timeout terminal. NowFn is advanced past the deadline.
+//     Fail call with code=timeout. NowFn is advanced past the deadline.
 func TestTimeout(t *testing.T) {
-	w := &recordingWriter{}
 	var mu sync.Mutex
 	base := time.Now()
 	now := func() time.Time {
@@ -238,14 +332,12 @@ func TestTimeout(t *testing.T) {
 		defer mu.Unlock()
 		return base
 	}
-	a := startActor(t, w, Config{NowFn: now})
+	a, sys := startActor(t, Config{NowFn: now})
 	ext := dialExtension(t, a)
 	waitOnline(t, a)
 
 	req := command("req-to", "snapshot", nil)
-	if err := a.Receive(context.Background(), req); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
+	sys.push(req)
 	_ = ext.read(t) // extension receives but never replies
 
 	// Advance the clock past the deadline so the reaper collects it.
@@ -253,26 +345,21 @@ func TestTimeout(t *testing.T) {
 	base = base.Add(commandDeadline + time.Second)
 	mu.Unlock()
 
-	resp, ok := w.waitResponse(t, "req-to", 2*time.Second)
+	fail, ok := sys.waitFail(t, "req-to", 2*time.Second)
 	if !ok {
-		t.Fatal("no timeout response for req-to")
+		t.Fatal("no timeout Fail call for req-to")
 	}
-	status, code, _ := responseStatus(t, resp)
-	if status != "failed" {
-		t.Errorf("status=%q want failed", status)
-	}
-	if code != "timeout" {
-		t.Errorf("error_code=%q want timeout", code)
+	if fail.code != "timeout" {
+		t.Errorf("code=%q want timeout", fail.code)
 	}
 }
 
 //  4. Describe: actor.describe returns the single kimi.command type with all 13
 //     actions visible.
 func TestDescribe(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{})
+	_, sys := startActor(t, Config{})
 
-	req := &message.Envelope{
+	req := actorbase.NewMsg(context.Background(), message.Envelope{
 		ID:         message.ID("req-desc"),
 		ChannelID:  testChannelID,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:main"},
@@ -280,13 +367,19 @@ func TestDescribe(t *testing.T) {
 		Type:       "actor.describe",
 		Payload:    json.RawMessage(`{}`),
 		Visibility: message.VisibilityPublic,
-	}
-	if err := a.Receive(context.Background(), req); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
-	resp, ok := w.waitResponse(t, "req-desc", time.Second)
+	})
+	sys.push(req)
+
+	rep, ok := sys.waitReply(t, "req-desc", time.Second)
 	if !ok {
-		t.Fatal("no describe response")
+		t.Fatal("no describe Reply call")
+	}
+	// rep.v is the introspect.Describe answer describeCatalog built; re-marshal
+	// + decode to inspect its shape without importing introspect's concrete
+	// type here a second time.
+	raw, err := json.Marshal(rep.v)
+	if err != nil {
+		t.Fatalf("marshal describe reply: %v", err)
 	}
 	var payload struct {
 		ActorID string `json:"actor_id"`
@@ -294,7 +387,7 @@ func TestDescribe(t *testing.T) {
 			Notes string `json:"notes"`
 		} `json:"types"`
 	}
-	if err := json.Unmarshal(resp.Payload, &payload); err != nil {
+	if err := json.Unmarshal(raw, &payload); err != nil {
 		t.Fatalf("decode describe: %v", err)
 	}
 	if payload.ActorID != string(DefaultActorID) {
@@ -317,25 +410,19 @@ func TestDescribe(t *testing.T) {
 //  5. InvalidAction: an action outside the 13-primitive set fails invalid_action
 //     and nothing is dispatched to the device.
 func TestInvalidAction(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{})
+	a, sys := startActor(t, Config{})
 	ext := dialExtension(t, a)
 	waitOnline(t, a)
 
 	req := command("req-bogus", "bogus", map[string]any{"x": 1})
-	if err := a.Receive(context.Background(), req); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
-	resp, ok := w.waitResponse(t, "req-bogus", time.Second)
+	sys.push(req)
+
+	fail, ok := sys.waitFail(t, "req-bogus", time.Second)
 	if !ok {
-		t.Fatal("no response for req-bogus")
+		t.Fatal("no Fail call for req-bogus")
 	}
-	status, code, _ := responseStatus(t, resp)
-	if status != "failed" {
-		t.Errorf("status=%q want failed", status)
-	}
-	if code != "invalid_action" {
-		t.Errorf("error_code=%q want invalid_action", code)
+	if fail.code != "invalid_action" {
+		t.Errorf("code=%q want invalid_action", fail.code)
 	}
 
 	// Nothing must have been dispatched: the extension sees no down-frame.
@@ -347,20 +434,21 @@ func TestInvalidAction(t *testing.T) {
 }
 
 //  6. KindGuard: a non-request (event-kind) addressed to kimi.command is dropped
-//     — the adapter has no terminal to author, so it emits nothing and dispatches
-//     nothing.
+//     — the adapter has no terminal to author, so it neither replies nor fails
+//     nor dispatches.
 func TestKindGuardDropsNonRequest(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{})
+	_, sys := startActor(t, Config{})
 
 	ev := command("ev-1", "snapshot", nil)
-	ev.Kind = message.KindEvent
-	if err := a.Receive(context.Background(), ev); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
-	// Give any erroneous async path a moment, then assert nothing was emitted.
+	evEnv := message.Envelope{ID: ev.ID, Kind: message.KindEvent, Type: ev.Type, Payload: ev.Payload}
+	sys.push(actorbase.NewMsg(context.Background(), evEnv))
+
+	// Give any erroneous async path a moment, then assert nothing was recorded.
 	time.Sleep(30 * time.Millisecond)
-	if got := w.Written(); len(got) != 0 {
-		t.Fatalf("expected no emit for non-request, got %d", len(got))
+	if got := sys.repliesSnapshot(); len(got) != 0 {
+		t.Fatalf("expected no replies for non-request, got %d", len(got))
+	}
+	if got := sys.failsSnapshot(); len(got) != 0 {
+		t.Fatalf("expected no fails for non-request, got %d", len(got))
 	}
 }

@@ -251,18 +251,33 @@ func Open(cfg HomeConfig) (*Home, error) {
 	// 6. channelkit: actorrt runtime + sysactor + death-edge wiring. The system
 	//    cell is built against the LIVE runtime (factory) — its liveness Stat seam
 	//    reads the real runtime at construction, no back-filled pointer.
+	//
+	//    h is predeclared (nil) here and assigned below (step 9): sysactor is a
+	//    ring0 special Proc (spec §3's out-generation matrix) that still enters
+	//    through actorbase.New like every other actor, so its Hooks.Canceller
+	//    wants Home.CancelRequest — but the system cell is spawned INSIDE
+	//    channelkit.New, before Home exists. The closure captures the h
+	//    VARIABLE (not its zero value); by the time a cancel actually fires
+	//    (long after Open returns), h has been assigned.
+	var h *Home
 	clock := func() time.Time { return time.UnixMilli(nowMs()) }
 	channel := channelkit.New(channelkit.Config{
 		ChannelID: cfg.ChannelID,
 		System: func(rt *actorrt.Runtime) actorrt.Actor {
-			return sysactor.New(sysactor.Deps{
+			caps := actorcaps.Caps{Pen: systemPen}
+			hooks := actorbase.Hooks{
+				Canceller: func(target actor.ActorID, requestID message.ID) {
+					if h != nil {
+						h.CancelRequest(target, requestID)
+					}
+				},
+			}
+			return actorbase.New(caps, hooks, sysactor.Def(sysactor.Deps{
 				Registry: cs.Registry,
-				Writer:   systemPen,
-				Lookup:   cs.Requests,
 				Clock:    clock,
 				Stat:     &runtimeLivenessAdapter{rt: rt},
 				Device:   deviceFold,
-			})
+			}))
 		},
 		SystemPen:    systemPen,
 		OpenRequests: cs.Query,
@@ -294,7 +309,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    the link acceptor is built AFTER the scheduler because it welds a remote
 	//    port's incarnation onto the schedule Minter (the time-axis wire arm), which
 	//    only exists once OpenScheduler has run.
-	h := &Home{
+	h = &Home{
 		channelID:        cfg.ChannelID,
 		minter:           minter,
 		channel:          channel,
@@ -656,19 +671,19 @@ func (h *Home) Subscribe() (<-chan struct{}, func()) {
 // Close tears down the channel home by quiescing PRODUCERS before the CONSUMERS
 // they feed, so no still-live producer can enqueue work into an already-dead sink:
 //
-//	1. reconcile ticker — stops the SpawnIfAbsent/activation producer.
-//	2. link acceptor    — stops port producers (their schedule/access wire arms)
-//	   and all external compute traffic.
-//	3. delivery tap      — stops delivering messages that would drive a cell to
-//	   schedule/emit anew.
-//	4. cells             — stops every in-proc cell (the Schedule/emit producers);
-//	   their goroutines are joined.
-//	5. schedule engine   — only NOW, with every schedule PRODUCER gone, is the time
-//	   engine's run loop stopped. Stopping it earlier (the old "engine first" order)
-//	   left a window where a still-live cell/port could Schedule() an in-memory
-//	   (incarnation-bind) timer into a dead run loop, silently losing it.
-//	6. channel stores    — the DB the engine fired into (FireSink→pen→log) and cells
-//	   persisted to, torn down last.
+//  1. reconcile ticker — stops the SpawnIfAbsent/activation producer.
+//  2. link acceptor    — stops port producers (their schedule/access wire arms)
+//     and all external compute traffic.
+//  3. delivery tap      — stops delivering messages that would drive a cell to
+//     schedule/emit anew.
+//  4. cells             — stops every in-proc cell (the Schedule/emit producers);
+//     their goroutines are joined.
+//  5. schedule engine   — only NOW, with every schedule PRODUCER gone, is the time
+//     engine's run loop stopped. Stopping it earlier (the old "engine first" order)
+//     left a window where a still-live cell/port could Schedule() an in-memory
+//     (incarnation-bind) timer into a dead run loop, silently losing it.
+//  6. channel stores    — the DB the engine fired into (FireSink→pen→log) and cells
+//     persisted to, torn down last.
 //
 // No deadlock: cell shutdown never blocks on the engine (Schedule/Cancel only
 // insert into mem + post a wake, never join the run loop), and engine.Close only

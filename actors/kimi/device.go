@@ -15,8 +15,7 @@ import (
 
 	"log/slog"
 
-	"github.com/wanpengxie/atoll/lib/behavior"
-	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 )
 
 // device.go is the outward (device) face: a PRIVATE WS endpoint the extension
@@ -24,18 +23,19 @@ import (
 // table, the read loop, and the deadline reaper. This is the adapter's own
 // closed transport — inlined here, NOT a shared framework piece.
 //
-// Concurrency: the cell goroutine (Receive) calls dispatch; the read loop +
-// reaper run on their own goroutines. The mutex guards ONLY the in-flight table
-// + the current conn pointer + the stopped flag — never a blocking wire write.
-// dispatch registers under the lock, then writes the frame OUTSIDE the lock with
-// a write deadline, so a stuck peer can never freeze the mutex (which the reaper,
-// Stop, and accept all share). Channel emits (RespondJSON/Fail) go straight
-// through the writer from whichever goroutine closes the request, because the
-// substrate has no self-send.
+// Concurrency: the worker goroutine (Actor.handle) calls dispatch; the read
+// loop + reaper run on their own goroutines. The mutex guards ONLY the
+// in-flight table + the current conn pointer + the stopped flag — never a
+// blocking wire write. dispatch registers under the lock, then writes the
+// frame OUTSIDE the lock with a write deadline, so a stuck peer can never
+// freeze the mutex (which the reaper, stop, and accept all share). Terminal
+// writes (sys.Reply/sys.Fail) run straight off whichever goroutine closes the
+// request — legal fan-out (spec §1.2: Sys is concurrency-safe, Msg is
+// immutable) — because the substrate has no self-send.
 //
-// Device presence is tracked internally (conn==nil ⇒ offline ⇒ Receive fast-
+// Device presence is tracked internally (conn==nil ⇒ offline ⇒ handle fast-
 // fails device_offline) AND pushed on its up/down edges via the actor-source obs
-// PUSH axis (owner.publishDevicePresence → ActorContext.PublishObs, D7). That is
+// PUSH axis (owner.publishDevicePresence → Sys.PublishObs, D7). That is
 // OUT-OF-BAND obs (non-truth), NOT a channel event / truth-log entry — the home
 // folds it into a volatile L3 level (advisory; authoritative reachability stays
 // send→terminal). See actor.go publishDevicePresence.
@@ -70,16 +70,16 @@ const maxDeviceFrameBytes = 4 << 20 // 4 MiB
 const deviceWriteTimeout = 5 * time.Second
 
 // pending is one in-flight request awaiting its device reply. The original
-// request envelope is held in-hand so the closing path (read loop or reaper)
-// can author the channel response/terminal without recovering it from truth.
+// delivery is held in-hand (as its Msg, not a re-fetched envelope) so the
+// closing path (read loop or reaper) can call sys.Reply/sys.Fail directly.
 type pending struct {
-	request  *message.Envelope
+	request  actorbase.Msg
 	deadline time.Time
 }
 
 // device owns the adapter's outward transport.
 type device struct {
-	owner          *Actor // back-reference for pen + clock
+	owner          *Actor // back-reference for sys + clock
 	addrCfg        string
 	clock          func() time.Time
 	reaperInterval time.Duration
@@ -110,7 +110,7 @@ func newDevice(owner *Actor, addr string, clock func() time.Time, reaperInterval
 	}
 }
 
-// addr returns the resolved listen address (post-bind), or "" before Start.
+// addr returns the resolved listen address (post-bind), or "" before run() binds.
 func (d *device) addr() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -121,7 +121,8 @@ func (d *device) addr() string {
 }
 
 // start binds the WS endpoint and boots the serve + reaper goroutines. A bind
-// failure is returned so the cell dies fast.
+// failure is returned so the incarnation dies fast. ctx is the process-life ctx
+// (sys.Life()) — the reaper's own long-lived scope.
 func (d *device) start(ctx context.Context) error {
 	ln, err := net.Listen("tcp", d.addrCfg)
 	if err != nil {
@@ -204,7 +205,7 @@ func (d *device) handleAccept(w http.ResponseWriter, r *http.Request) {
 	d.wg.Add(1)
 	d.mu.Unlock()
 
-	d.logger.Info("kimi.device.online", "actor", string(d.owner.actorID))
+	d.logger.Info("kimi.device.online", "actor", string(d.owner.sys.Self()))
 	d.owner.publishDevicePresence(true)
 	go d.readLoop(conn)
 }
@@ -232,15 +233,16 @@ func (d *device) readLoop(conn *websocket.Conn) {
 	d.mu.Unlock()
 	if live {
 		_ = conn.Close()
-		d.logger.Info("kimi.device.offline", "actor", string(d.owner.actorID))
+		d.logger.Info("kimi.device.offline", "actor", string(d.owner.sys.Self()))
 		d.owner.publishDevicePresence(false)
 	}
 }
 
 // handleUp matches one reply to its in-flight request and authors the channel
-// terminal. An unknown correlation_id (already reaped, or a stray) is dropped.
-// Taking the pending out of the table under the lock makes the close atomic: a
-// correlation can be claimed by the read loop OR the reaper, never both.
+// terminal directly through sys.Reply/sys.Fail. An unknown correlation_id
+// (already reaped, or a stray) is dropped. Taking the pending out of the table
+// under the lock makes the close atomic: a correlation can be claimed by the
+// read loop OR the reaper, never both.
 func (d *device) handleUp(up upFrame) {
 	d.mu.Lock()
 	p, ok := d.inflight[up.CorrelationID]
@@ -252,13 +254,12 @@ func (d *device) handleUp(up upFrame) {
 		return
 	}
 
-	ctx := context.Background()
 	if up.OK {
 		var result any = map[string]any{}
 		if len(up.Result) > 0 {
 			result = up.Result
 		}
-		if _, err := behavior.RespondJSON(ctx, d.owner.pen, d.clock, p.request, result); err != nil {
+		if _, err := d.owner.sys.Reply(p.request, result); err != nil {
 			d.logger.Warn("kimi.device.respond_failed", "correlation_id", up.CorrelationID, "err", err.Error())
 		}
 		return
@@ -271,23 +272,23 @@ func (d *device) handleUp(up upFrame) {
 		}
 		detail = up.Error.Message
 	}
-	if _, err := behavior.Fail(ctx, d.owner.pen, d.clock, p.request, code, detail); err != nil {
+	if _, err := d.owner.sys.Fail(p.request, code, detail); err != nil {
 		d.logger.Warn("kimi.device.fail_failed", "correlation_id", up.CorrelationID, "err", err.Error())
 	}
 }
 
 // dispatch encodes + registers + sends one request down to the device. It
 // returns an error ONLY for the digestible offline case (no live conn); the
-// caller (Receive) turns that into a device_offline business failure. A write
-// error after registration is left to the reaper (the request stays in-flight
-// and times out) rather than racing a second terminal.
+// caller (Actor.handle) turns that into a device_offline business failure. A
+// write error after registration is left to the reaper (the request stays
+// in-flight and times out) rather than racing a second terminal.
 //
 // Unlike xhs, the device verb (cmd) is not a static per-type constant — it is
-// the request's `action`, resolved by Receive — so dispatch takes cmd + deadline
-// as explicit arguments.
-func (d *device) dispatch(_ context.Context, env *message.Envelope, cmd string, deadline time.Duration, params json.RawMessage) error {
+// the request's `action`, resolved by Actor.handle — so dispatch takes cmd +
+// deadline as explicit arguments.
+func (d *device) dispatch(msg actorbase.Msg, cmd string, deadline time.Duration, params json.RawMessage) error {
 	frame := downFrame{
-		CorrelationID: string(env.ID),
+		CorrelationID: string(msg.ID),
 		Cmd:           cmd,
 		Params:        params,
 	}
@@ -299,15 +300,14 @@ func (d *device) dispatch(_ context.Context, env *message.Envelope, cmd string, 
 		return errors.New("no kimi device connected")
 	}
 	// Register before sending so a fast reply can never find an empty table.
-	reqCopy := *env
-	d.inflight[string(env.ID)] = &pending{
-		request:  &reqCopy,
+	d.inflight[string(msg.ID)] = &pending{
+		request:  msg,
 		deadline: d.clock().Add(deadline),
 	}
 	d.mu.Unlock()
 
 	// Write OUTSIDE the lock, with a deadline: a stuck peer must never freeze the
-	// mutex. Only the cell goroutine dispatches, so conn writes stay single-
+	// mutex. Only the worker goroutine dispatches, so conn writes stay single-
 	// writer (gorilla's rule). The socket deadline is REAL wall-clock, not the
 	// injectable logical clock.
 	_ = conn.SetWriteDeadline(time.Now().Add(deviceWriteTimeout))
@@ -315,7 +315,7 @@ func (d *device) dispatch(_ context.Context, env *message.Envelope, cmd string, 
 		// The frame did not reach the device. Leave the entry in-flight (the
 		// reaper times it out); treat the conn as dead so the next dispatch sees
 		// offline.
-		d.logger.Warn("kimi.device.write_failed", "correlation_id", string(env.ID), "err", err.Error())
+		d.logger.Warn("kimi.device.write_failed", "correlation_id", string(msg.ID), "err", err.Error())
 		d.dropConn(conn)
 	}
 	return nil
@@ -333,7 +333,7 @@ func (d *device) dropConn(conn *websocket.Conn) {
 	d.conn = nil
 	d.mu.Unlock()
 	_ = conn.Close()
-	d.logger.Info("kimi.device.offline", "actor", string(d.owner.actorID))
+	d.logger.Info("kimi.device.offline", "actor", string(d.owner.sys.Self()))
 	d.owner.publishDevicePresence(false)
 }
 
@@ -369,7 +369,7 @@ func (d *device) sweep() {
 	d.mu.Unlock()
 
 	for _, p := range expired {
-		if _, err := behavior.Fail(context.Background(), d.owner.pen, d.clock, p.request, "timeout", "device did not reply within deadline"); err != nil {
+		if _, err := d.owner.sys.Fail(p.request, "timeout", "device did not reply within deadline"); err != nil {
 			d.logger.Warn("kimi.device.timeout_fail_failed", "request_id", string(p.request.ID), "err", err.Error())
 		}
 	}
