@@ -28,6 +28,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -117,22 +118,80 @@ func fetchPlan(ctx context.Context, serverWS, key, chID string) ([]daemonAssignm
 	return out.Assignments, nil
 }
 
-// staticSource wraps a one-time-fetched compute plan (registry.Build's decls) as
-// an actorrt.DesiredSource: the daemon pulls its assignment ONCE at startup (no
-// blind-build, no polling against the server) and the reconcile ring reads that
-// same fixed set every tick. Every wrapped instance is AlwaysOn — a daemon has no
-// delivery-seam analogue for lazy activation.
-type staticSource []actorrt.DesiredMember
+// planSource is the daemon's LIVE compute-plan source: it is BOTH the reconcile
+// ring's actorrt.DesiredSource (Members) and its platform.ComputeBuilder (Lookup),
+// sharing one fetched-plan snapshot. The reconcile ring calls Members every poll
+// tick (compute.runLink), so Members RE-FETCHES /compute/plan each tick and
+// rebuilds the desired set + the id→factory table together — a plan changed on the
+// server converges WITHOUT a daemon restart (SW-6). A fetch failure is NON-FATAL:
+// Members logs and returns the last-known-good set (empty until the first success),
+// so the daemon stays connected and keeps trying ("connect first, pull later" —
+// no 3-try-fatal startup gate). Members updates the builder table BEFORE returning,
+// so the ring's subsequent per-id Lookup sees a consistent snapshot.
+type planSource struct {
+	ws, key, chID, wsRoot, deviceName string
+	logger                            *slog.Logger
 
-func (s staticSource) Members(context.Context) ([]actorrt.DesiredMember, error) { return s, nil }
+	mu          sync.Mutex
+	lastDesired []actorrt.DesiredMember
+	builders    map[actor.ActorID]platform.ActorFactory
+	lastBuilt   int // -1 until the first successful fetch (to Info-log only on change)
+}
 
-// staticBuilder resolves each fetched instance's id to the ActorFactory
-// registry.Build already produced for it — the daemon's ComputeBuilder over a
-// fixed plan.
-type staticBuilder map[actor.ActorID]platform.ActorFactory
+func newPlanSource(ws, key, chID, wsRoot, deviceName string, logger *slog.Logger) *planSource {
+	return &planSource{
+		ws: ws, key: key, chID: chID, wsRoot: wsRoot, deviceName: deviceName,
+		logger:    logger,
+		builders:  map[actor.ActorID]platform.ActorFactory{},
+		lastBuilt: -1,
+	}
+}
 
-func (b staticBuilder) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
-	f, ok := b[id]
+func (p *planSource) Members(ctx context.Context) ([]actorrt.DesiredMember, error) {
+	plan, err := fetchPlan(ctx, p.ws, p.key, p.chID)
+	if err != nil {
+		p.logger.Warn("daemon: refetch plan failed, using last-known-good", "err", err.Error())
+		p.mu.Lock()
+		d := p.lastDesired
+		p.mu.Unlock()
+		return d, nil // never error the ring; last-known-good keeps hosted work alive
+	}
+	var desired []actorrt.DesiredMember
+	builders := map[actor.ActorID]platform.ActorFactory{}
+	for _, asg := range plan {
+		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
+			ID:     actor.ActorID(asg.InstanceID),
+			Config: asg.Config,
+		}, registry.Deps{
+			ChannelID:    channel.ID(p.chID),
+			WorkspaceDir: p.wsRoot,
+			DeviceName:   p.deviceName,
+			Logger:       p.logger,
+		})
+		if berr != nil {
+			p.logger.Error("daemon: build assigned instance",
+				"instance", asg.InstanceID, "class", asg.Class, "err", berr.Error())
+			continue
+		}
+		desired = append(desired, actorrt.DesiredMember{ID: decl.ID, Kind: decl.Kind, Lifecycle: actorrt.LifecycleAlwaysOn})
+		builders[decl.ID] = decl.Factory
+	}
+	p.mu.Lock()
+	p.lastDesired = desired
+	p.builders = builders
+	changed := p.lastBuilt != len(desired)
+	p.lastBuilt = len(desired)
+	p.mu.Unlock()
+	if changed {
+		p.logger.Info("daemon: composition", "channel", p.chID, "assigned", len(plan), "built", len(desired))
+	}
+	return desired, nil
+}
+
+func (p *planSource) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	f, ok := p.builders[id]
 	return f, ok
 }
 
@@ -178,55 +237,13 @@ func main() {
 		log.Fatalf("daemon: -server %q has no ?channel= query; pass e.g. -server ws://host:8080/compute?channel=<channel-id>", *ws)
 	}
 
-	// Pull this channel's daemon-placed assignment from the server, then build
-	// EXACTLY that set. A build failure for one instance is logged + skipped
-	// (mirrors the server's spawnComposition tolerance) — it must not down the
-	// whole daemon.
-	// Bounded retry: a transient server hiccup should not permanently kill
-	// daemon startup. After 3 tries we fatal (a supervisor restarts us).
-	var (
-		plan []daemonAssignment
-		err  error
-	)
-	for attempt := 1; ; attempt++ {
-		plan, err = fetchPlan(ctx, *ws, *key, chID)
-		if err == nil {
-			break
-		}
-		if attempt >= 3 {
-			log.Fatalf("daemon: fetch composition plan (after %d tries): %v", attempt, err)
-		}
-		logger.Warn("daemon: fetch plan failed, retrying", "attempt", attempt, "err", err.Error())
-		select {
-		case <-ctx.Done():
-			log.Fatalf("daemon: cancelled during plan fetch")
-		case <-time.After(time.Duration(attempt) * time.Second):
-		}
-	}
-	var (
-		desired  staticSource
-		builders = staticBuilder{}
-	)
-	for _, asg := range plan {
-		deps := registry.Deps{
-			ChannelID:    channel.ID(chID),
-			WorkspaceDir: wsRoot,
-			DeviceName:   deviceName,
-			Logger:       slog.Default(),
-		}
-		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
-			ID:     actor.ActorID(asg.InstanceID),
-			Config: asg.Config,
-		}, deps)
-		if berr != nil {
-			logger.Error("daemon: build assigned instance",
-				"instance", asg.InstanceID, "class", asg.Class, "err", berr.Error())
-			continue
-		}
-		desired = append(desired, actorrt.DesiredMember{ID: decl.ID, Kind: decl.Kind, Lifecycle: actorrt.LifecycleAlwaysOn})
-		builders[decl.ID] = decl.Factory
-	}
-	logger.Info("daemon: composition", "channel", chID, "assigned", len(plan), "built", len(desired))
+	// The daemon's compute plan is pulled LIVE, not snapshotted: planSource re-fetches
+	// /compute/plan every reconcile tick and rebuilds the desired set + factory table
+	// together (a plan change on the server converges with no daemon restart — SW-6).
+	// Startup does NOT gate on a first fetch: RunCompute connects the link, then the
+	// ring calls Members, which tolerates a fetch failure (last-known-good, initially
+	// empty) — connect first, pull later, keep retrying.
+	source := newPlanSource(*ws, *key, chID, wsRoot, deviceName, logger)
 
 	// The link layer is auth-agnostic: the api key rides the server WS url's query
 	// string (?key=), which the app layer resolves on WS upgrade. There is no
@@ -242,8 +259,8 @@ func main() {
 	if err := platform.RunCompute(ctx, platform.ComputeConfig{
 		ServerWS: serverWS,
 		Logger:   logger,
-		Desired:  desired,
-		Builder:  builders,
+		Desired:  source,
+		Builder:  source,
 	}); err != nil {
 		log.Fatalf("daemon: %v", err)
 	}
