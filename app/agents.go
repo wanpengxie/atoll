@@ -162,14 +162,21 @@ func (a *App) handleUpdateAgent(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"updated": agentID, "note": "takes effect on restart"})
 }
 
-// handleDeleteAgent soft-deletes an agent and removes it from every channel's
-// composition (it disappears from channels). Live cells are NOT force-killed —
-// membership gone = no re-route / no rebuild, the cell stops lazily.
+// handleDeleteAgent is the WORLD-LAYER half of an agent's death (C6): a
+// cross-channel identity de-registration, HTTP-legitimate. It (1) soft-deletes the
+// agents declaration (the world-layer fact), then (2) projects that fact into every
+// channel the agent was in — the world→channel cascade. The per-channel removal is
+// NOT an orphan table DELETE that leaves the live cell a zombie (病灶 #6): it goes
+// through the Home control-plane machine seam (Home.Remove = despawn → dereg cascade
+// → system-authored mirror), so the live cell dies + membership clears + a
+// system-authored removal lands in the channel log. Order (红线 3): intent row first
+// (the ring won't re-mint), then Home.Remove.
 func (a *App) handleDeleteAgent(c *gin.Context) {
 	userID := middleware.UserID(c)
 	agentID := c.Param("agentID")
+	ctx := c.Request.Context()
 	now := time.Now().UnixMilli()
-	res, err := a.db.ExecContext(c.Request.Context(),
+	res, err := a.db.ExecContext(ctx,
 		`UPDATE agents SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner = ? AND deleted_at IS NULL`,
 		now, now, agentID, userID)
 	if err != nil {
@@ -181,13 +188,33 @@ func (a *App) handleDeleteAgent(c *gin.Context) {
 		return
 	}
 	instanceID := "agent:" + agentID
-	_, _ = a.db.ExecContext(c.Request.Context(),
-		`DELETE FROM channel_actors WHERE instance_id = ?`, instanceID)
-	// Clear any channel whose default_agent pointed at the deleted instance — a
-	// removed agent must not keep receiving a channel's default traffic (default
-	// routing keys off channels.default_agent; the live cell still stops lazily).
-	_, _ = a.db.ExecContext(c.Request.Context(),
+
+	// Gather the channels this instance is in BEFORE deleting the rows.
+	var chans []string
+	if rows, qerr := a.db.QueryContext(ctx,
+		`SELECT channel_id FROM channel_actors WHERE instance_id = ?`, instanceID); qerr == nil {
+		for rows.Next() {
+			var ch string
+			if rows.Scan(&ch) == nil {
+				chans = append(chans, ch)
+			}
+		}
+		rows.Close()
+	}
+	// Clear any channel whose default_agent pointed at the deleted instance (default
+	// routing keys off channels.default_agent).
+	_, _ = a.db.ExecContext(ctx,
 		`UPDATE channels SET default_agent = NULL WHERE default_agent = ?`, instanceID)
+	// Per-channel projection: intent first, then Home control-plane removal.
+	for _, ch := range chans {
+		_, _ = a.db.ExecContext(ctx,
+			`DELETE FROM channel_actors WHERE channel_id = ? AND instance_id = ?`, ch, instanceID)
+		if home := a.getHome(channel.ID(ch)); home != nil {
+			if rerr := home.Remove(ctx, actor.ActorID(instanceID)); rerr != nil {
+				a.logger.Warn("delete agent: channel removal", "channel", ch, "instance", instanceID, "err", rerr.Error())
+			}
+		}
+	}
 	c.JSON(http.StatusOK, gin.H{"deleted": agentID})
 }
 
