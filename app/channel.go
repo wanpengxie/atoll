@@ -16,7 +16,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -77,7 +76,7 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	if req.Type == "" {
 		req.Type = "group"
 	}
-	validTypes := map[string]bool{"group": true, "xhs-creator": true}
+	validTypes := map[string]bool{"group": true}
 	if !validTypes[req.Type] {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel type"})
 		return
@@ -131,10 +130,19 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	}
 
 	actorID := actor.ActorID("user:" + userID)
-	// Register the creating user as a cell-less channel member (a human is a
-	// member but has no cell — an empty ActorFactory is membership-only).
-	if mErr := home.Spawn(c.Request.Context(), actorID, actor.KindHuman, platform.ActorFactory{}); mErr != nil {
-		a.logger.Warn("app: channel membership insert failed", "channel", chID, "err", mErr.Error())
+	// Membrane law: the creator is a member. Admit is the pure-membership动词 —
+	// the creating user's not→member edge (§4.6). No cell here (the human is
+	// embodied by the ring / subjectgate, never welded at this call site).
+	if mErr := home.Admit(c.Request.Context(), actorID, actor.KindHuman); mErr != nil {
+		a.logger.Warn("app: channel creator admit failed", "channel", chID, "err", mErr.Error())
+	}
+	// Template seeding is a PAIR: the seeded boost composition intent row (written
+	// in the tx above) + its durable membership admission. Intent without
+	// membership is filtered to a never-embodied dead row under desired=intent∩
+	// membership; the Admit closes the pair. Idempotent — the coexisting
+	// spawnComposition may have already membership'd boost via Home.Spawn.
+	if mErr := home.Admit(c.Request.Context(), defaultAgentInstanceID, actor.KindAgent); mErr != nil {
+		a.logger.Warn("app: channel boost admit failed", "channel", chID, "err", mErr.Error())
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
