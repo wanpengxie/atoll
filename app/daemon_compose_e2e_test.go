@@ -39,20 +39,24 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	chBody, cookies := createChannel(t, env, cookies, wsID, "CH")
 	chID := chBody["id"].(string)
 
-	// claude agent, introduced as a DAEMON-placed default.
+	// claude agent.
 	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "Rev", "looper": "claude"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
 	instID := "agent:" + agentID
-	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
-		map[string]any{"agent_id": agentID, "placement": "daemon", "make_default": true}, cookies)
-	assertStatus(t, w, http.StatusCreated)
 
-	// create + bind a daemon (one call) → api_key.
+	// create + bind a daemon (one call) → id + api_key.
 	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", chID),
 		map[string]any{"name": "mybox"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
-	apiKey := respJSON(t, w)["api_key"].(string)
+	dResp := respJSON(t, w)
+	daemonID := dResp["id"].(string)
+	apiKey := dResp["api_key"].(string)
+
+	// introduce the claude as a DAEMON-placed default assigned to THIS daemon.
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
+		map[string]any{"agent_id": agentID, "placement": "daemon", "desired_host": daemonID, "make_default": true}, cookies)
+	assertStatus(t, w, http.StatusCreated)
 
 	// 1) PULL the assignment.
 	w = env.do(t, "GET", fmt.Sprintf("/compute/plan?key=%s&channel=%s", apiKey, chID), nil, nil)

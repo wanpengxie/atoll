@@ -64,6 +64,71 @@ func TestAgentsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 	}
 }
 
+// TestIntroduceAgent_HonestReintroduce (SW-8): re-introducing an existing
+// composition row reports it as-is ("exists, unchanged") — it does NOT swallow
+// a placement/class change while echoing the caller's new values. Rehoming is
+// remove_actor + re-introduce, never a silent in-place mutation.
+func TestIntroduceAgent_HonestReintroduce(t *testing.T) {
+	env := setupTestApp(t)
+	_, cookies := register(t, env, "sw8@example.com", "secret123", "Owner")
+	wsBody, cookies := createWorkspace(t, env, cookies, "WS")
+	wsID := wsBody["id"].(string)
+	chBody, cookies := createChannel(t, env, cookies, wsID, "CH")
+	chID := chBody["id"].(string)
+
+	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "Alice", "looper": "go-kimi"}, cookies)
+	assertStatus(t, w, http.StatusCreated)
+	agentID := respJSON(t, w)["id"].(string)
+	instID := "agent:" + agentID
+
+	// first introduce: server placement, engine=go-kimi → new row, created=true.
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
+		map[string]any{"agent_id": agentID}, cookies)
+	assertStatus(t, w, http.StatusCreated)
+	first := respJSON(t, w)
+	if first["created"] != true || first["placement"] != "server" || first["class"] != "go-kimi" {
+		t.Fatalf("first introduce = %+v", first)
+	}
+
+	// re-introduce with a DIFFERENT placement + engine → honest no-change: 200,
+	// created=false, persisted (server/go-kimi) values, NOT the caller's new ones.
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
+		map[string]any{"agent_id": agentID, "placement": "daemon", "engine": "claude"}, cookies)
+	assertStatus(t, w, http.StatusOK)
+	again := respJSON(t, w)
+	if again["created"] != false {
+		t.Fatalf("re-introduce should report created=false: %+v", again)
+	}
+	if again["placement"] != "server" {
+		t.Fatalf("re-introduce must not mutate placement (want server): %+v", again)
+	}
+	if again["class"] != "go-kimi" {
+		t.Fatalf("re-introduce must not mutate class (want go-kimi): %+v", again)
+	}
+	if again["instance_id"] != instID {
+		t.Fatalf("re-introduce instance_id = %v, want %s", again["instance_id"], instID)
+	}
+}
+
+// TestIntroduceAgent_ServerPlacementRejectsDesiredHost enforces the two-level
+// invariant at the write face: a 'server' row carries no daemon assignment.
+func TestIntroduceAgent_ServerPlacementRejectsDesiredHost(t *testing.T) {
+	env := setupTestApp(t)
+	_, cookies := register(t, env, "inv@example.com", "secret123", "Owner")
+	wsBody, cookies := createWorkspace(t, env, cookies, "WS")
+	wsID := wsBody["id"].(string)
+	chBody, cookies := createChannel(t, env, cookies, wsID, "CH")
+	chID := chBody["id"].(string)
+
+	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "Bob", "looper": "go-kimi"}, cookies)
+	assertStatus(t, w, http.StatusCreated)
+	agentID := respJSON(t, w)["id"].(string)
+
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
+		map[string]any{"agent_id": agentID, "placement": "server", "desired_host": "somebox"}, cookies)
+	assertStatus(t, w, http.StatusBadRequest)
+}
+
 // TestSetDefaultAgentAPI exercises the "repoint the default brain" endpoint:
 // re-point default_agent to an instance that IS in the channel composition (ok),
 // reject one that is NOT (the pointer may only target a composition member), and

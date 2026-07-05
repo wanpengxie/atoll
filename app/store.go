@@ -81,18 +81,23 @@ func migrate(db *sql.DB) error {
 		-- substrate's actor_registry (read via Home.View().ListActors), never this
 		-- table. default_agent is a name-agnostic pointer INTO this set.
 		--
-		-- placement = which host runs the instance ('server' = server-embedded
-		-- cell, 'daemon' = a connected daemon). The server spawns ONLY its
-		-- 'server' rows (spawnComposition filters on it); 'daemon' rows are for
-		-- daemon hosts to claim via server→daemon composition delivery (that
-		-- delivery is the additive next step — the column completes the data shape
-		-- now so adding it needs no migration).
+		-- placement = which host CLASS runs the instance ('server' = server-embedded
+		-- cell, 'daemon' = a connected daemon). desired_host = which specific
+		-- daemon INSTANCE claims a 'daemon' row (''=unassigned pool). Two-level
+		-- invariant (enforced at the write face): placement='server' ⟹
+		-- desired_host=''; placement='daemon' AND desired_host='' = a legal
+		-- unassigned pool row (delivered to NO daemon). /compute/plan filters a
+		-- daemon's assignment on desired_host = its own id (G4: two daemons on one
+		-- channel each pull only their own rows). desired_host (intent) is a
+		-- separate plane from the embodiment fact (membership Host); never join
+		-- them to judge liveness.
 		CREATE TABLE IF NOT EXISTS channel_actors (
 			channel_id  TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
 			instance_id TEXT NOT NULL,
 			class       TEXT NOT NULL,
 			config_json TEXT,
 			placement   TEXT NOT NULL DEFAULT 'server',
+			desired_host TEXT NOT NULL DEFAULT '',
 			state       TEXT,
 			PRIMARY KEY(channel_id, instance_id)
 		);
@@ -123,7 +128,8 @@ func migrate(db *sql.DB) error {
 			config_json TEXT,
 			deleted_at  INTEGER,
 			created_at  INTEGER NOT NULL,
-			updated_at  INTEGER NOT NULL
+			updated_at  INTEGER NOT NULL,
+			visibility  TEXT NOT NULL DEFAULT 'private'
 		);
 	`)
 	if err != nil {
@@ -146,6 +152,11 @@ func migrate(db *sql.DB) error {
 	// created before the column existed (a fresh CREATE above already has it).
 	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN placement TEXT NOT NULL DEFAULT 'server'`)
 
+	// channel_actors.desired_host: which specific daemon instance claims a
+	// 'daemon' row (''=unassigned pool). Two-level invariant with placement,
+	// enforced at the write face. additive best-effort add for a dev DB.
+	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN desired_host TEXT NOT NULL DEFAULT ''`)
+
 	// channel_actors.state: per-instance looper-opaque checkpoint slot (durable
 	// resume). The looper is its only author — external
 	// control never writes it directly. additive best-effort add for a dev DB.
@@ -156,6 +167,11 @@ func migrate(db *sql.DB) error {
 	// create-time DEFAULT. Best-effort rename for an existing dev DB (a fresh CREATE
 	// above already has default_looper; the rename then no-ops on the missing column).
 	_, _ = db.Exec(`ALTER TABLE agents RENAME COLUMN looper TO default_looper`)
+
+	// agents.visibility: reference-eligibility axis, orthogonal to owner
+	// (management authority). private = only owner may introduce; public = any
+	// member. additive best-effort add for a dev DB.
+	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`)
 
 	// Backfill channel_actors.class from the old placeholder shell value 'agent' to
 	// the REAL engine class (engine = class now; there is no "agent" class):

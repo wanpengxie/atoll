@@ -22,18 +22,23 @@ type daemonAssignment struct {
 }
 
 // daemonComposition reads the channel's DESIRED daemon-placed composition
-// (channel_actors placement='daemon') and resolves each instance's config — the
-// SAME read + global/per-channel overlay spawnComposition does for server-placed
-// rows, but it RETURNS the data instead of spawning (the daemon builds + runs
-// them with its local creds). The engine is ca.class directly. tool / looper /
-// device are all just rows here — uniform, no special-casing.
-func (a *App) daemonComposition(chID channel.ID) ([]daemonAssignment, error) {
+// assigned to THIS daemon (channel_actors placement='daemon' AND
+// desired_host=daemonID) and resolves each instance's config — the SAME read +
+// global/per-channel overlay spawnComposition does for server-placed rows, but
+// it RETURNS the data instead of spawning (the daemon builds + runs them with
+// its local creds). The engine is ca.class directly. tool / looper / device are
+// all just rows here — uniform, no special-casing.
+//
+// desired_host filtering resolves G4: two daemons bound to one channel each pull
+// ONLY their own rows; an unassigned pool row (desired_host='') is delivered to
+// no daemon (a legal transient — no daemon claims it yet).
+func (a *App) daemonComposition(chID channel.ID, daemonID string) ([]daemonAssignment, error) {
 	rows, err := a.db.Query(
 		`SELECT ca.instance_id, ca.class, COALESCE(ca.config_json, ''), COALESCE(a.config_json, '')
 		   FROM channel_actors ca
 		   LEFT JOIN agents a ON ca.instance_id = 'agent:' || a.id
-		  WHERE ca.channel_id = ? AND ca.placement = ?`,
-		string(chID), placementDaemon)
+		  WHERE ca.channel_id = ? AND ca.placement = ? AND ca.desired_host = ?`,
+		string(chID), placementDaemon, daemonID)
 	if err != nil {
 		return nil, err
 	}
@@ -73,13 +78,15 @@ func (a *App) handleComputePlan(c *gin.Context) {
 	}
 	chID := channel.ID(chIDStr)
 	// Same single auth path as /compute: verify key + daemon-channel binding. A
-	// flat 403 (no oracle) on any failure.
-	if _, err := a.authAndResolve(apiKey, chID); err != nil {
+	// flat 403 (no oracle) on any failure. The resolved daemonID filters the
+	// plan to this daemon's own assignment (G4).
+	daemonID, err := a.authAndResolve(apiKey, chID)
+	if err != nil {
 		a.logger.Warn("compute plan: auth failed", "channel", string(chID), "err", err.Error())
 		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
-	plan, err := a.daemonComposition(chID)
+	plan, err := a.daemonComposition(chID, daemonID)
 	if err != nil {
 		a.logger.Error("compute plan: read composition", "channel", string(chID), "err", err.Error())
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})

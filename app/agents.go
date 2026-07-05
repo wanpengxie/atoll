@@ -218,6 +218,7 @@ func (a *App) handleDeleteAgent(c *gin.Context) {
 type introduceAgentReq struct {
 	AgentID     string `json:"agent_id"`
 	Placement   string `json:"placement"`
+	DesiredHost string `json:"desired_host"`
 	MakeDefault bool   `json:"make_default"`
 	// Engine optionally OVERRIDES the agent's default_looper for THIS channel
 	// (per-channel runtime engine). Empty = use the agent's default_looper.
@@ -263,10 +264,41 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 	if placement == "" {
 		placement = placementServer
 	}
+	desiredHost := strings.TrimSpace(req.DesiredHost)
+	// Two-level placement×desired_host invariant enforced at the write face: a
+	// 'server' row pins the server host and carries no daemon assignment. Reject
+	// a dirty combination rather than let it slip past the plan filter.
+	if placement == placementServer && desiredHost != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "server placement cannot carry desired_host"})
+		return
+	}
 	instanceID := "agent:" + req.AgentID
+
+	// SW-8: introduce is honest about a pre-existing row. Re-introduce never
+	// mutates class/placement/desired_host (rehoming = remove_actor +
+	// re-introduce); it reports the persisted row as-is ("exists, unchanged")
+	// instead of INSERT OR IGNORE silently swallowing the change while echoing
+	// the caller's new values. Only a brand-new row is inserted + spawned.
+	var exClass, exPlacement, exDesiredHost string
+	qerr := a.db.QueryRowContext(c.Request.Context(),
+		`SELECT class, placement, desired_host FROM channel_actors WHERE channel_id = ? AND instance_id = ?`,
+		chID, instanceID).Scan(&exClass, &exPlacement, &exDesiredHost)
+	if qerr == nil {
+		c.JSON(http.StatusOK, gin.H{
+			"channel_id": chID, "instance_id": instanceID,
+			"placement": exPlacement, "class": exClass, "looper": exClass,
+			"desired_host": exDesiredHost, "created": false, "live": false,
+		})
+		return
+	}
+	if qerr != sql.ErrNoRows {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+
 	if _, err := a.db.ExecContext(c.Request.Context(),
-		`INSERT OR IGNORE INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-		chID, instanceID, engine, placement); err != nil {
+		`INSERT INTO channel_actors (channel_id, instance_id, class, placement, desired_host) VALUES (?,?,?,?,?)`,
+		chID, instanceID, engine, placement, desiredHost); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
@@ -286,7 +318,8 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 	}
 	c.JSON(http.StatusCreated, gin.H{
 		"channel_id": chID, "instance_id": instanceID,
-		"placement": placement, "class": engine, "looper": engine, "live": live,
+		"placement": placement, "class": engine, "looper": engine,
+		"desired_host": desiredHost, "created": true, "live": live,
 	})
 }
 
