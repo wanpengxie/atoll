@@ -10,11 +10,14 @@ import (
 	"github.com/wanpengxie/atoll/app"
 	"github.com/wanpengxie/atoll/cmd/internal/dotenv"
 
-	// Composition root wires the catalog: the server-embedded agent (agent:boost)
-	// is built via registry.Build("agent"), so the BINARY pins which "agent" impl
-	// is compiled in — not the app library (which stays agent-impl-agnostic, so
-	// `go test ./app` can register its own stub). agent/all aggregates the "agent"
-	// class + its looper engines (go-kimi + claude); actors/ holds no agent.
+	// Composition root wires the catalog: the BINARY pins which classes are
+	// compiled in — not the app library (which stays impl-agnostic, so
+	// `go test ./app` can register its own stub). Both assembly roots (server +
+	// daemon) import the SAME catalog so placement can name any class the server
+	// might host (G21): whether it actually runs is answered honestly by
+	// Build/creds, not gated by binary contents. agent/all = the LLM engine
+	// classes (go-kimi + claude); actors/all = tools + devices.
+	_ "github.com/wanpengxie/atoll/actors/all"
 	_ "github.com/wanpengxie/atoll/agent/all"
 )
 
