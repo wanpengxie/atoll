@@ -34,7 +34,19 @@ type Deps struct {
 //   - device ignores ID and derives it from the device identity (essence
 //     singleton: id IS the resource).
 type InstanceSpec struct {
-	ID     actor.ActorID
+	ID actor.ActorID
+	// Config is THE per-instance config injection point — the app-rewire spec's
+	// "ctx.Config" (K2=a/S8). It is NOT a new runtime surface; the constructor
+	// closure captures it and hands it to the actor in BOTH forms: a Legacy
+	// actor's constructor parses it and closes over the result in the
+	// func(pen) closure; a Proc actor's constructor closes it into its Def
+	// (Constructor(spec,deps) → Def → New() per incarnation; see
+	// actorbase.Def's doc). Either way config rides the constructor, NOT the
+	// capability bundle: it is an independent PARAMETER, never welded into
+	// actorcaps.Caps (S-P16 红线; enforced by archtest.TestConfigNotInCaps).
+	// A config change is an intent write on the composition row (改配置门) that
+	// takes effect via Spawn-replace — a fresh incarnation over a fresh snapshot;
+	// there is no live hot-read of Config.
 	Config json.RawMessage
 }
 

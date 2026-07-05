@@ -19,11 +19,14 @@ import (
 //
 // 防 ioctl 法条 (owner 2026-07-05 过堂): this verb table MUST NOT grow linearly.
 // The four types are noun-CRUD on the channel composition (remove_actor=delete a
-// composition row / set_default_agent=update a config field / introduce_actor=
-// the add half / restart_actor=祈使残渣 foldable into an update-generation field).
-// A new controllable state is a new field/row on the noun, NEVER a new hand-rolled
-// verb (Slack's 400+ RPC = the reverse anti-pattern; Linux's closed verb set +
-// open file-name noun = the pattern; ioctl = the escape hatch this law forbids).
+// composition row / set_default_agent=update the channel's default-agent field /
+// introduce_actor=the add-OR-update UPSERT of a composition row, incl. its config
+// field (改配置门, K2=a/S8: config is an existing FIELD on the noun, so 改配置 is
+// CRUD-Update — NOT a new verb) / restart_actor=祈使残渣 foldable into an
+// update-generation field). A new controllable state is a new field/row on the
+// noun, NEVER a new hand-rolled verb (Slack's 400+ RPC = the reverse anti-pattern;
+// Linux's closed verb set + open file-name noun = the pattern; ioctl = the escape
+// hatch this law forbids).
 const (
 	TypeIntroduceActor  = "channel.introduce_actor"
 	TypeRemoveActor     = "channel.remove_actor"

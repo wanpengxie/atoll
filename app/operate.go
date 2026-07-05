@@ -49,6 +49,18 @@ type introducePayload struct {
 	DesiredHost string `json:"desired_host"`
 	MakeDefault bool   `json:"make_default"`
 	Engine      string `json:"engine"`
+	// Config is the per-channel config overlay (channel_actors.config_json) — the
+	// tunable field of the composition-row noun. Introduce is the composition
+	// row's UPSERT verb (add-or-update, 防 ioctl 名词-CRUD): absent Config leaves
+	// the field untouched (pure add / ensure); present Config writes it. This is
+	// K2=(a)'s 改配置门 (S8): config is an INSTANCE PARAMETER carried by
+	// registry.InstanceSpec.Config into the constructor closure, NEVER a
+	// capability — it does not ride actorcaps.Caps (see buildInstance /
+	// archtest.TestConfigNotInCaps). A config change on a live server-placed row
+	// takes effect via Spawn-replace (下方; A-P14 原语), the same 生效 path restart
+	// uses — placement/class stay frozen (rehoming/reclassing = remove + re-add,
+	// SW-8), only the tunable field moves.
+	Config json.RawMessage `json:"config,omitempty"`
 }
 
 type instancePayload struct {
@@ -63,15 +75,19 @@ func channelUnavailable() error {
 	return &platform.OperateError{Code: "channel_unavailable", Detail: "channel home not open"}
 }
 
-// Introduce is the add half of composition CRUD. Two forms (kind-blind同一动词):
+// Introduce is the UPSERT half of composition CRUD (add-or-update the composition
+// row; remove is its delete counterpart). Two forms (kind-blind同一动词):
 //   - user form: introduce_actor(user:X) = pure membership (膜律 唯一动词) — no
 //     class, no intent row, just Admit + poke.
 //   - agent form: world-layer ref-eligibility (二型律: visibility=='public' ∨
 //     principal==owner) → ClassKind precheck (unknown class当场拒) → ensure intent
-//     (SW-8: pre-existing row如实 unchanged) → ensure Admit → poke. intent and Admit
-//     are BOTH ensured even on a pre-existing row (幂等: a crash between the two
-//     writes is self-healed on retry — else the half-written row is滤成 a never-
-//     embodied dead row under desired=intent∩membership).
+//     (SW-8: pre-existing row's placement/class如实 unchanged) → optional config
+//     UPDATE (改配置门, S8: config is the row's tunable field) → ensure Admit → poke,
+//     and Spawn-replace when a config change must take on an already-live
+//     server-placed row (生效). intent and Admit are BOTH ensured even on a
+//     pre-existing row (幂等: a crash between the two writes is self-healed on
+//     retry — else the half-written row is滤成 a never-embodied dead row under
+//     desired=intent∩membership).
 func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateRequest) (any, error) {
 	var p introducePayload
 	if err := json.Unmarshal(req.Payload, &p); err != nil {
@@ -127,22 +143,46 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 	}
 	instanceID := "agent:" + agentID
 
+	// A present config must be a JSON object (persona/knobs) — same guard the
+	// agent-config API applies. Absent (missing / null) leaves the field untouched;
+	// json.RawMessage round-trips a JSON null as the literal "null", so treat it as
+	// absent rather than a malformed object.
+	rawCfg := strings.TrimSpace(string(p.Config))
+	hasConfig := rawCfg != "" && rawCfg != "null"
+	if hasConfig && !isJSONObject(p.Config) {
+		return nil, &platform.OperateError{Code: "bad_payload", Detail: "config must be a JSON object"}
+	}
+
 	var exClass, exPlacement, exDesiredHost string
 	qerr := x.a.db.QueryRowContext(ctx,
 		`SELECT class, placement, desired_host FROM channel_actors WHERE channel_id = ? AND instance_id = ?`,
 		string(req.ChannelID), instanceID).Scan(&exClass, &exPlacement, &exDesiredHost)
 	created := false
+	configChanged := false
 	switch qerr {
 	case nil:
-		// SW-8: pre-existing row如实 unchanged (rehoming = remove + re-introduce —
-		// placement/class恒不变更). Report the persisted values, ensure Admit below.
+		// SW-8: placement/class of a pre-existing row恒不变更 (rehoming/reclassing =
+		// remove + re-introduce). Only config — the tunable field — is mutable here
+		// (改配置门, S8): a present config UPDATEs channel_actors.config_json.
 		placement = exPlacement
 		engine = exClass
 		_ = exDesiredHost
+		if hasConfig {
+			if _, err := x.a.db.ExecContext(ctx,
+				`UPDATE channel_actors SET config_json = ? WHERE channel_id = ? AND instance_id = ?`,
+				string(p.Config), string(req.ChannelID), instanceID); err != nil {
+				return nil, err
+			}
+			configChanged = true
+		}
 	case sql.ErrNoRows:
+		var cfg any
+		if hasConfig {
+			cfg = string(p.Config)
+		}
 		if _, err := x.a.db.ExecContext(ctx,
-			`INSERT INTO channel_actors (channel_id, instance_id, class, placement, desired_host) VALUES (?,?,?,?,?)`,
-			string(req.ChannelID), instanceID, engine, placement, desiredHost); err != nil {
+			`INSERT INTO channel_actors (channel_id, instance_id, class, placement, desired_host, config_json) VALUES (?,?,?,?,?,?)`,
+			string(req.ChannelID), instanceID, engine, placement, desiredHost, cfg); err != nil {
 			return nil, err
 		}
 		created = true
@@ -157,8 +197,23 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 	if err := home.Admit(ctx, actor.ActorID(instanceID), kind); err != nil {
 		return nil, err
 	}
+	// 生效: a config change on an already-embodied server-placed row won't take on a
+	// mere poke (the live cell's SpawnIfAbsent CAS loses). Spawn-replace rebuilds it
+	// with the fresh merged snapshot — the same 原地换脑 path restart uses (A-P14).
+	// A brand-new row (created) rides the ring's build, which already reads the new
+	// config_json; a daemon-placed row converges on its next plan poll.
+	if configChanged && placement == placementServer {
+		var gcfg string
+		_ = x.a.db.QueryRowContext(ctx,
+			`SELECT COALESCE(config_json,'') FROM agents WHERE id = ? AND deleted_at IS NULL`,
+			agentID).Scan(&gcfg)
+		if serr := x.a.spawnAgentInstance(req.ChannelID, home, instanceID, engine, string(p.Config), gcfg); serr != nil {
+			return nil, &platform.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
+		}
+	}
 	return map[string]any{
-		"instance_id": instanceID, "class": engine, "placement": placement, "created": created,
+		"instance_id": instanceID, "class": engine, "placement": placement,
+		"created": created, "config_updated": configChanged,
 	}, nil
 }
 

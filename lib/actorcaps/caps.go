@@ -14,6 +14,12 @@ import (
 // identity. The platform assembly root builds all five in ONE step — issuing a
 // handle and wrapping it in its liveness membrane happen together — so an actor
 // never receives a bare, ungated handle.
+//
+// Caps is CAPABILITIES ONLY. Per-instance CONFIG (registry.InstanceSpec.Config,
+// the app-rewire spec's "ctx.Config") is deliberately NOT a member here: config
+// is an independent parameter the constructor closure captures, not a
+// substrate-minted authority (S-P16 红线). Adding a Config field to this struct
+// would collapse that distinction — archtest.TestConfigNotInCaps trips on it.
 type Caps struct {
 	// Pen is the plane-1 truth-write capability (append messages AS this actor).
 	// Wrapped in the death-after-write membrane (livePen) at assembly.

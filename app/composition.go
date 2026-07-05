@@ -99,6 +99,13 @@ func (a *App) instanceCompositionRow(chID channel.ID, instanceID actor.ActorID) 
 // host spawns (mergeConfig + registry.Build). The engine IS ca.class (per-channel
 // concrete class); server placement carries no WorkspaceDir so the agent class
 // derives the server-embedded Situation.
+//
+// This is THE config injection point (S8): the merged snapshot (global agents
+// config under the per-channel channel_actors.config_json) rides
+// registry.InstanceSpec.Config into the constructor closure — an instance
+// PARAMETER, never a capability (it does not touch the actorcaps.Caps bundle the
+// platform welds separately). "改配置" is a new snapshot here + Spawn-replace, not
+// a live mutation of any handle.
 func (a *App) buildInstance(chID channel.ID, r compositionRow) (platform.ActorDecl, error) {
 	return registry.Build(r.class, registry.InstanceSpec{
 		ID:     actor.ActorID(r.instanceID),
