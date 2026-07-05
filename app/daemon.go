@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"fmt"
 	"net/http"
@@ -14,6 +15,25 @@ import (
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
+
+// kickDaemonConverge drives the substrate half of a daemon revocation to
+// convergence on ONE channel home: KickDaemon (close every link the home holds
+// for computeID) is a hint, so it is retried a bounded number of times until
+// View.IsAttached reports the daemon gone, and a still-attached daemon after the
+// budget is logged (not an error — the link teardown is best-effort). No-op if the
+// home is not open in this process.
+func (a *App) kickDaemonConverge(chID channel.ID, daemonID string) {
+	home := a.getHome(chID)
+	if home == nil {
+		return
+	}
+	for i := 0; i < 3 && home.View().IsAttached(daemonID); i++ {
+		home.KickDaemon(daemonID)
+	}
+	if home.View().IsAttached(daemonID) {
+		a.logger.Warn("app: daemon kick did not converge", "channel", string(chID), "daemon", daemonID)
+	}
+}
 
 // ---------------------------------------------------------------------------
 // Daemon handlers
@@ -124,21 +144,44 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 	})
 }
 
+// handleDeleteDaemon revokes a daemon (world-layer scope: the daemon key + its
+// cross-channel identity, HTTP-legitimate). Full teardown, in order: capture the
+// bound channels → delete the daemon_channels bindings (intent) → clear
+// desired_host on every composition row placed on this daemon, keeping the pool row
+// with placement UNCHANGED (a rehome is a separate指派, never a migration) → delete
+// the daemons row (revocation persisted) → run the KickDaemon convergence loop on
+// each formerly-bound home so live links fall silent.
 func (a *App) handleDeleteDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
 	userID := middleware.UserID(c)
+	ctx := c.Request.Context()
 
-	res, err := a.db.ExecContext(c.Request.Context(),
-		`DELETE FROM daemons WHERE id = ? AND owner_id = ?`, daemonID, userID,
-	)
+	var owner string
+	err := a.db.QueryRowContext(ctx, `SELECT owner_id FROM daemons WHERE id = ?`, daemonID).Scan(&owner)
+	if err == sql.ErrNoRows || (err == nil && owner != userID) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "daemon not found"})
+		return
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "daemon not found"})
+	bound := a.daemonAttachedChannels(ctx, daemonID)
+
+	if _, err := a.db.ExecContext(ctx,
+		`DELETE FROM daemon_channels WHERE daemon_id = ?`, daemonID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
+	}
+	// Clear desired_host on this daemon's rows (placement恒不变; the pool row stays,
+	// no daemon claims it, the live cell is simply absent until a re-指派).
+	_, _ = a.db.ExecContext(ctx,
+		`UPDATE channel_actors SET desired_host = '' WHERE desired_host = ?`, daemonID)
+	_, _ = a.db.ExecContext(ctx,
+		`DELETE FROM daemons WHERE id = ? AND owner_id = ?`, daemonID, userID)
+
+	for _, ch := range bound {
+		a.kickDaemonConverge(channel.ID(ch), daemonID)
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -210,21 +253,29 @@ func (a *App) handleAttachDaemons(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
+// handleDetachDaemon unbinds ONE daemon from ONE channel.收口 order: delete the
+// binding (intent) → run the KickDaemon convergence loop on this channel's home so
+// the live link drops (not left to natural link death) → clear desired_host on this
+// channel's rows placed on the daemon, keeping the pool row with placement
+// UNCHANGED (rehome = a later指派, never a migration here).
 func (a *App) handleDetachDaemon(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {
 		return
 	}
 	daemonID := c.Param("id")
+	ctx := c.Request.Context()
 
-	_, err := a.db.ExecContext(c.Request.Context(),
+	if _, err := a.db.ExecContext(ctx,
 		`DELETE FROM daemon_channels WHERE daemon_id = ? AND channel_id = ?`,
-		daemonID, chID,
-	)
-	if err != nil {
+		daemonID, chID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "detach failed"})
 		return
 	}
+	a.kickDaemonConverge(channel.ID(chID), daemonID)
+	_, _ = a.db.ExecContext(ctx,
+		`UPDATE channel_actors SET desired_host = '' WHERE channel_id = ? AND desired_host = ?`,
+		chID, daemonID)
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
