@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/lib/pathsafe"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -33,7 +34,7 @@ import (
 // from its state slot). Mirrors spawnComposition's per-instance block.
 func (a *App) spawnAgentInstance(chID channel.ID, home *platform.Home, instanceID, class, channelCfg, state, globalCfg string) error {
 	sessionsRoot := filepath.Join(filepath.Dir(a.channelDBDir), "agent-sessions")
-	dir := filepath.Join(sessionsRoot, pathSafe(string(chID)), pathSafe(instanceID))
+	dir := filepath.Join(sessionsRoot, pathsafe.Segment(string(chID)), pathsafe.Segment(instanceID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		a.logger.Warn("app: session dir", "channel", string(chID), "instance", instanceID, "err", err.Error())
 		dir = ""

@@ -2,10 +2,16 @@
 package main
 
 import (
+	"context"
+	"errors"
 	"flag"
+	"io"
 	"log"
 	"log/slog"
 	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
 	"github.com/wanpengxie/atoll/app"
 	"github.com/wanpengxie/atoll/cmd/internal/dotenv"
@@ -20,6 +26,32 @@ import (
 	_ "github.com/wanpengxie/atoll/actors/all"
 	_ "github.com/wanpengxie/atoll/agent/all"
 )
+
+// shutdownTimeout bounds the in-flight drain so a wedged request cannot hold the
+// process open forever.
+const shutdownTimeout = 30 * time.Second
+
+// appShutdowner is the graceful-teardown surface gracefulShutdown drives (App
+// satisfies it).
+type appShutdowner interface {
+	Shutdown(context.Context) error
+	Close() error
+}
+
+// gracefulShutdown runs the ordered teardown — the order IS the semantics: ①
+// drain the HTTP entry (stop accepting, finish in-flight), ② close channel homes
+// (the substrate behind the entry), ③ close the app db. Each step logs before it
+// runs so the order is assertable. All three run even if an earlier one errors;
+// errors are joined.
+func gracefulShutdown(ctx context.Context, logger *slog.Logger, a appShutdowner, db io.Closer) error {
+	logger.Info("server: shutdown step 1/3: draining http")
+	e1 := a.Shutdown(ctx)
+	logger.Info("server: shutdown step 2/3: closing channel homes")
+	e2 := a.Close()
+	logger.Info("server: shutdown step 3/3: closing app db")
+	e3 := db.Close()
+	return errors.Join(e1, e2, e3)
+}
 
 func main() {
 	addr := flag.String("addr", ":8080", "listen address")
@@ -43,7 +75,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("server: %v", err)
 	}
-	defer appDB.Close()
+	defer appDB.Close() // early-exit safety; graceful path closes it as step 3/3 (double close is a no-op)
 
 	a, err := app.New(app.Config{
 		DB:           appDB,
@@ -55,7 +87,25 @@ func main() {
 		log.Fatalf("server: %v", err)
 	}
 
-	if err := a.Run(*addr); err != nil {
-		log.Fatalf("server: %v", err)
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- a.Run(*addr) }()
+
+	select {
+	case err := <-serveErr:
+		// Run returned before any signal — a listen/startup failure.
+		if err != nil {
+			log.Fatalf("server: %v", err)
+		}
+	case <-ctx.Done():
+		stop() // restore default handling: a second signal hard-kills a stuck drain
+		logger.Info("server: signal received, shutting down")
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer cancel()
+		if err := gracefulShutdown(shutdownCtx, logger, a, appDB); err != nil {
+			logger.Error("server: shutdown", "err", err.Error())
+		}
 	}
 }

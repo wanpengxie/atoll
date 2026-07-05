@@ -31,6 +31,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/pathsafe"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -136,11 +137,6 @@ func (b staticBuilder) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
 	return f, ok
 }
 
-// pathSafe maps an actor/channel id to a filesystem-safe path segment.
-func pathSafe(s string) string {
-	return strings.NewReplacer(":", "-", "/", "_", "\\", "_").Replace(s)
-}
-
 // localStateSlot gives a daemon-placed instance a DAEMON-LOCAL durable state
 // slot: state follows execution locus — a daemon-placed looper resumes from
 // local state, the server holds none. dir is platform-managed under the
@@ -151,7 +147,7 @@ func pathSafe(s string) string {
 // real durable Dir/Seed/Store. Store writes atomically (temp + rename) so a
 // crash mid-write never leaves a torn checkpoint.
 func localStateSlot(wsRoot, chID, instanceID string) (registry.StateSlot, error) {
-	dir := filepath.Join(wsRoot, "agent-state", pathSafe(chID), pathSafe(instanceID))
+	dir := filepath.Join(wsRoot, "agent-state", pathsafe.Segment(chID), pathsafe.Segment(instanceID))
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return registry.StateSlot{}, fmt.Errorf("state dir %s: %w", dir, err)
 	}
@@ -207,6 +203,13 @@ func main() {
 	}
 
 	chID := channelFromServerURL(*ws)
+	// Assembly-root check: a daemon hosts exactly ONE channel's assignment, named
+	// by the server WS url's ?channel=. Missing it means we cannot know what to
+	// build — fatal at the earliest point with a fix-it diagnostic (fetchPlan
+	// would otherwise surface a murky 400/403 far downstream).
+	if chID == "" {
+		log.Fatalf("daemon: -server %q has no ?channel= query; pass e.g. -server ws://host:8080/compute?channel=<channel-id>", *ws)
+	}
 
 	// Pull this channel's daemon-placed assignment from the server, then build
 	// EXACTLY that set. A build failure for one instance is logged + skipped

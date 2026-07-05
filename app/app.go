@@ -18,6 +18,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/lib/pathsafe"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -29,6 +30,7 @@ type App struct {
 	db     *sql.DB
 	logger *slog.Logger
 	engine *gin.Engine
+	srv    *http.Server // set by Run; drained by Shutdown
 
 	mu    sync.RWMutex
 	homes map[channel.ID]*platform.Home
@@ -91,9 +93,31 @@ func New(cfg Config) (*App, error) {
 	return a, nil
 }
 
-// Run starts the HTTP server.
+// Run starts the HTTP server and blocks until it is Shutdown (or errors). It
+// holds an explicit http.Server so cmd can drain in-flight requests on signal;
+// a clean Shutdown returns nil (ErrServerClosed is not an error).
 func (a *App) Run(addr string) error {
-	return a.engine.Run(addr)
+	a.mu.Lock()
+	a.srv = &http.Server{Addr: addr, Handler: a.engine}
+	srv := a.srv
+	a.mu.Unlock()
+	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// Shutdown stops accepting new connections and drains in-flight requests within
+// ctx's deadline. It is step ① of the graceful teardown (before Close): stop the
+// entry before dismantling the homes behind it.
+func (a *App) Shutdown(ctx context.Context) error {
+	a.mu.RLock()
+	srv := a.srv
+	a.mu.RUnlock()
+	if srv == nil {
+		return nil
+	}
+	return srv.Shutdown(ctx)
 }
 
 // Close tears down all channel homes.
@@ -310,7 +334,7 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 
 	for _, s := range specs {
 		inst := s.id // bind for the checkpoint closure
-		dir := filepath.Join(sessionsRoot, pathSafe(string(chID)), pathSafe(inst))
+		dir := filepath.Join(sessionsRoot, pathsafe.Segment(string(chID)), pathsafe.Segment(inst))
 		if err := os.MkdirAll(dir, 0o755); err != nil {
 			a.logger.Warn("app: session dir", "channel", string(chID), "instance", inst, "err", err.Error())
 			dir = "" // fall back to the looper's ephemeral default
@@ -349,12 +373,6 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 			a.logger.Warn("app: spawn composition instance failed", "channel", string(chID), "instance", string(decl.ID), "err", err.Error())
 		}
 	}
-}
-
-// pathSafe maps an actor/channel id to a filesystem-safe path segment (ids may
-// carry ':' like "agent:boost").
-func pathSafe(s string) string {
-	return strings.NewReplacer(":", "-", "/", "_", "\\", "_").Replace(s)
 }
 
 // mergeConfig layers the per-channel config_json OVER the global agents config
