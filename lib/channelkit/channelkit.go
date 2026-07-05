@@ -94,9 +94,16 @@ func New(cfg Config) *Channel {
 	// impersonate, and the closure reconciler must write even when no cell is live
 	// — gating it would defeat it. So no incarnation is welded here.
 	if cfg.System != nil {
-		c.cells.Spawn(actor.SystemActorID, actor.KindSystem, func(actorrt.Incarnation) actorrt.Actor {
+		// Singleton invariant made explicit (was prose only): the system anchor is
+		// the SOLE occupant of SystemActorID and is minted exactly once, here, at
+		// channel assembly. SpawnIfAbsent + created-assert fails fast if the reserved
+		// id is ever already occupied (a second anchor spawn / a member admission
+		// leaking the reserved id) instead of Spawn's silent last-go-live replace.
+		if _, created := c.cells.SpawnIfAbsent(actor.SystemActorID, actor.KindSystem, func(actorrt.Incarnation) actorrt.Actor {
 			return cfg.System(c.cells)
-		})
+		}); !created {
+			panic("channelkit: system anchor invariant violated — SystemActorID already occupied at assembly")
+		}
 	}
 	return c
 }
