@@ -2,12 +2,16 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net/http"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
+
+// errTestChannelNotLoaded stands in for a torn-down home in the test seams below.
+var errTestChannelNotLoaded = errors.New("app: channel not loaded")
 
 // OperateFaceForTest exposes the app's channel-operate executor so black-box
 // tests can drive the four control verbs directly (as the sysactor gate would
@@ -45,7 +49,7 @@ func (a *App) DropHomeForTest(chID channel.ID) {
 func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) error {
 	home := a.getHome(channel.ID(chID))
 	if home == nil {
-		return errChannelNotLoaded
+		return errTestChannelNotLoaded
 	}
 	return home.Admit(context.Background(), id, kind)
 }
@@ -56,7 +60,7 @@ func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) error
 func (a *App) KillCellForTest(chID channel.ID, id actor.ActorID) error {
 	home := a.getHome(chID)
 	if home == nil {
-		return errChannelNotLoaded
+		return errTestChannelNotLoaded
 	}
 	return home.Remove(context.Background(), id)
 }

@@ -32,12 +32,6 @@ type App struct {
 
 	mu    sync.RWMutex
 	homes map[channel.ID]*platform.Home
-	// humans indexes each channel's live HUMAN write front-ends by user actor id.
-	// A front-end is the app's reference to a home-scoped human cell (admitted via
-	// Home.Spawn with a pen welded to "user:<id>") — the ONLY write path a person
-	// has now that the app holds no write gate (sealed-pen). Home-scoped: spawned
-	// on a user's first write and dropped when the channel home is torn down.
-	humans map[channel.ID]map[actor.ActorID]*humanFront
 
 	channelDBDir string
 	uiDist       string
@@ -70,7 +64,6 @@ func New(cfg Config) (*App, error) {
 		db:           cfg.DB,
 		logger:       logger,
 		homes:        make(map[channel.ID]*platform.Home),
-		humans:       make(map[channel.ID]map[actor.ActorID]*humanFront),
 		channelDBDir: cfg.ChannelDBDir,
 		uiDist:       cfg.UIDist,
 	}
@@ -128,7 +121,6 @@ func (a *App) Close() error {
 			firstErr = err
 		}
 		delete(a.homes, id)
-		a.forgetHumans(id)
 	}
 	return firstErr
 }

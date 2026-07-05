@@ -16,8 +16,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // ---------------------------------------------------------------------------
@@ -193,7 +195,6 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 		_ = home.Close()
 		delete(a.homes, cID)
 	}
-	a.forgetHumans(cID)
 	a.mu.Unlock()
 
 	// Remove daemon bindings, then the channel row.
@@ -342,17 +343,25 @@ func (a *App) handleListMessages(c *gin.Context) {
 }
 
 // handleSendMessage commits a user-authored message to the channel. The user does
-// NOT write truth directly — sealed-pen forbids an app-held write gate. Instead it
-// hands the raw intent to the user's HUMAN write front-end (a home-scoped actor
-// admitted with a pen welded to "user:<id>"), whose SubmitIntent resolves routing,
-// builds the envelope, and commits through its welded pen — returning the
-// WriteResult synchronously so this POST keeps its 201 message_id/seq.
+// NOT write truth directly — sealed-pen forbids an app-held write gate. The app
+// resolves routing policy (product domain), then hands the result to the
+// subjectgate door (Home.Human → HumanHandle.Submit): the door welds the
+// "user:<id>" identity onto its own pen and commits, returning the receipt
+// synchronously so this POST keeps its 201 message_id/seq.
+//
+// 膜律: a non-member (workspace access ≠ channel membership) is REJECTED by the
+// door's户籍校验 (403) — the POST must NOT admit the user as a side effect
+// (严禁 Admit 兜底; UI joins a user via introduce before they can speak).
+//
+// This HTTP write path is第二链路 (H3 已拍死): it is replaced by the ws message
+// frame; kept as a shim only until the ws write-frame lands.
 func (a *App) handleSendMessage(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {
 		return
 	}
-	if home := a.homeOrError(c, channel.ID(chID)); home == nil {
+	home := a.homeOrError(c, channel.ID(chID))
+	if home == nil {
 		return
 	}
 
@@ -376,53 +385,60 @@ func (a *App) handleSendMessage(c *gin.Context) {
 		return
 	}
 
-	userID := middleware.UserID(c)
-	front, err := a.humanFor(c.Request.Context(), channel.ID(chID), userID)
-	if err != nil {
-		if errors.Is(err, errChannelNotLoaded) {
-			// Home vanished between homeOrError above and admission (teardown race):
-			// present-in-directory but not open → 503 unavailable (A-P8).
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
+	in := submitInput{
+		ID: req.ID, Type: req.Type, Kind: req.Kind, Payload: req.Payload,
+		Audience: req.Audience, Visibility: req.Visibility, ParentID: req.ParentID,
+	}
+
+	// Routing policy (app domain) resolves audience + kind BEFORE the door write.
+	audience, kind, rErr := a.resolveRouting(c.Request.Context(), channel.ID(chID), in)
+	if rErr != nil {
+		var re *routingError
+		if errors.As(rErr, &re) {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "default agent unavailable", "detail": re.detail})
 			return
 		}
-		a.logger.Error("send message: admit human front", "channel", chID, "err", err)
+		a.logger.Error("send message: routing", "channel", chID, "err", rErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 
-	res, err := front.SubmitIntent(c.Request.Context(), submitInput{
-		ID:         req.ID,
-		Type:       req.Type,
-		Kind:       req.Kind,
-		Payload:    req.Payload,
-		Audience:   req.Audience,
-		Visibility: req.Visibility,
-		ParentID:   req.ParentID,
-	})
+	handle, err := home.Human(c.Request.Context(), actor.ActorID("user:"+middleware.UserID(c)))
 	if err != nil {
-		var rErr *routingError
-		if errors.As(err, &rErr) {
-			c.JSON(http.StatusServiceUnavailable, gin.H{
-				"error":  "default agent unavailable",
-				"detail": rErr.detail,
-			})
+		if errors.Is(err, platform.ErrNotMember) {
+			c.JSON(http.StatusForbidden, gin.H{"error": "not a channel member"})
 			return
 		}
-		a.logger.Error("send message", "channel", chID, "err", err)
+		a.logger.Error("send message: door", "channel", chID, "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	if !res.Accepted() {
-		c.JSON(http.StatusUnprocessableEntity, gin.H{
-			"error":  string(res.RejectReason),
-			"detail": res.RejectDetail,
-		})
+
+	exp := time.Now().UnixMilli() + clientRequestTTLMs
+	msgID, seq, err := handle.Submit(c.Request.Context(), platform.SubmitSpec{
+		ID:         message.ID(req.ID),
+		Type:       req.Type,
+		Kind:       kind,
+		Payload:    req.Payload,
+		Audience:   audience,
+		Visibility: message.Visibility(req.Visibility),
+		ParentID:   message.ID(req.ParentID),
+		ExpiresAt:  &exp,
+	})
+	if err != nil {
+		var wr *platform.WriteRejectedError
+		if errors.As(err, &wr) {
+			c.JSON(http.StatusUnprocessableEntity, gin.H{"error": wr.Reason, "detail": wr.Detail})
+			return
+		}
+		a.logger.Error("send message: submit", "channel", chID, "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
-		"message_id": string(res.MessageID),
-		"seq":        res.Seq,
+		"message_id": string(msgID),
+		"seq":        seq,
 	})
 }
 
