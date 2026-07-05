@@ -101,7 +101,6 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	desired, builder := staticActorCompute([]platform.ActorDecl{{
 		ID:      xhs.DefaultActorID,
 		Kind:    actor.KindTool,
-		Binding: actor.BindingRuntimeInboundViaRelay,
 		Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
 			return xhs.NewActor(pen, xhs.Config{
 				ListenAddr:     xhsDeviceAddr,
@@ -311,7 +310,6 @@ func TestXHSLiveActorStatus(t *testing.T) {
 	desired, builder := staticActorCompute([]platform.ActorDecl{{
 		ID:      xhs.DefaultActorID,
 		Kind:    actor.KindTool,
-		Binding: actor.BindingRuntimeInboundViaRelay,
 		Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
 			return xhs.NewActor(pen, xhs.Config{
 				ListenAddr:     xhsStatusDeviceAddr,

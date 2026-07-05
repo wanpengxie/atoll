@@ -134,7 +134,6 @@ func (f *cellObsForwarder) pump(ctx context.Context) {
 type ActorDecl struct {
 	ID      actor.ActorID
 	Kind    actor.Kind
-	Binding actor.Binding
 	Factory ActorFactory
 }
 

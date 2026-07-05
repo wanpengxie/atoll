@@ -24,7 +24,6 @@ func construct(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDec
 	return platform.ActorDecl{
 		ID:      id,
 		Kind:    actor.KindTool,
-		Binding: actor.BindingRuntimeInboundViaRelay,
 		Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor { return NewActor(pen, cfg) }},
 	}, nil
 }

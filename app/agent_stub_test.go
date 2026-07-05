@@ -34,7 +34,6 @@ func init() {
 		return platform.ActorDecl{
 			ID:      id,
 			Kind:    actor.KindAgent,
-			Binding: actor.BindingRuntimeOutbound,
 			Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
 				impl, err := testAgentBuilder(ctx.ChannelID, id, pen)
 				if err != nil {

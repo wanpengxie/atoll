@@ -94,7 +94,6 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 	return platform.ActorDecl{
 		ID:      id,
 		Kind:    actor.KindAgent,
-		Binding: actor.BindingRuntimeOutbound,
 		Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
 			b, err := NewBridge(cfg, id, pen)
 			if err != nil {

@@ -197,7 +197,6 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 		{
 			ID:      xhs.DefaultActorID,
 			Kind:    actor.KindTool,
-			Binding: actor.BindingRuntimeInboundViaRelay,
 			Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
 				return xhs.NewActor(pen, xhs.Config{
 					ListenAddr:     metatoolXHSDeviceAddr,
@@ -209,7 +208,6 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 		{
 			ID:      kimi.DefaultActorID,
 			Kind:    actor.KindTool,
-			Binding: actor.BindingRuntimeInboundViaRelay,
 			Factory: platform.ActorFactory{Proc: kimi.Def(kimi.Config{
 				ListenAddr:     metatoolKimiDeviceAddr,
 				ReaperInterval: 20 * time.Millisecond,

@@ -18,7 +18,6 @@ func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 	return platform.ActorDecl{
 		ID:      id,
 		Kind:    actor.KindTool,
-		Binding: actor.BindingRuntimeOutbound,
 		Factory: platform.ActorFactory{Proc: Def()},
 	}, nil
 }
