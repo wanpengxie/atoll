@@ -32,13 +32,13 @@ Result shapes (fast-path, default):
     The call keeps running. To collect it, call await_result(request_id) to block,
     or do other work — the result will return on its own as a NEW message
     (parent_id = request_id) you can react to in a later turn. Use list_pending()
-    to see what is still in flight, and abandon(request_id) to stop waiting on one.
+    to see what is still in flight, and cancel(request_id) to stop one.
 
 wait parameter:
   - omit / true (default behaviour above is bounded; pass wait=true for sync):
     wait=true waits up to the type's full timeout before degrading to an ack.
   - wait=false: returns the ack IMMEDIATELY without waiting at all. Use this to
-    FAN OUT several calls in parallel, then await_result / abandon each as needed.
+    FAN OUT several calls in parallel, then await_result / cancel each as needed.
 `),
 	Schema: json.RawMessage(`{
   "type": "object",

@@ -396,12 +396,13 @@ func TestShell_TimeoutArmsAuthor2Terminal(t *testing.T) {
 	}
 }
 
-// TestShell_AbandonCallsCanceller pins M2: Abandon drops the local waiter AND
-// (when the assembly root wires a Canceller) reaches the protocol-level
-// cancel for the request's target — the ExecuteRequest/register plumbing that
-// carries RequestSpec.HandlerActorID through to the pendingReq the Shell
-// hands Abandon.
-func TestShell_AbandonCallsCanceller(t *testing.T) {
+// TestShell_CancelWritesTerminalAndCallsCanceller pins M2 (ⓐ+ⓓ+ⓖ): Cancel
+// writes the caller's OWN cancel terminal (failed + unanswered_timeout +
+// cancelled:true, parent = request), drops the local waiter, AND (when the
+// assembly root wires a Canceller) reaches the protocol-level cancel for the
+// request's target — the register plumbing that carries RequestSpec.HandlerActorID
+// through to the pendingReq the Shell hands Cancel.
+func TestShell_CancelWritesTerminalAndCallsCanceller(t *testing.T) {
 	w := &recWriter{}
 	var gotTarget actor.ActorID
 	var gotReqID message.ID
@@ -409,7 +410,7 @@ func TestShell_AbandonCallsCanceller(t *testing.T) {
 	sh := metatool.NewShell(metatool.ShellConfig{
 		Pen:        w,
 		Clock:      func() time.Time { return time.UnixMilli(0) },
-		EnvelopeID: func(_ int64) message.ID { return message.ID("req-abandon-1") },
+		EnvelopeID: func(_ int64) message.ID { return message.ID("req-cancel-1") },
 		Canceller: func(target actor.ActorID, requestID message.ID) {
 			calls++
 			gotTarget = target
@@ -425,7 +426,30 @@ func TestShell_AbandonCallsCanceller(t *testing.T) {
 		t.Fatalf("want ack, got %v", rv.Value)
 	}
 
-	sh.Abandon(message.ID("req-abandon-1"))
+	sh.Cancel(message.ID("req-cancel-1"))
+
+	// ⓐ: a cancel terminal was written to truth — the request envelope (index 0)
+	// then the failed+unanswered_timeout+cancelled terminal parented to it.
+	var term *message.Envelope
+	for i := range w.written {
+		if w.written[i].Kind == message.KindResponse && w.written[i].ParentID == message.ID("req-cancel-1") {
+			term = &w.written[i]
+		}
+	}
+	if term == nil {
+		t.Fatalf("Cancel must write a terminal parented to the request; writes=%d", len(w.written))
+	}
+	var tp struct {
+		Status    string `json:"status"`
+		ErrorCode string `json:"error_code"`
+		Cancelled bool   `json:"cancelled"`
+	}
+	if err := json.Unmarshal(term.Payload, &tp); err != nil {
+		t.Fatalf("terminal payload: %v", err)
+	}
+	if tp.Status != string(message.StatusFailed) || tp.ErrorCode != string(message.TerminalUnansweredTimeout) || !tp.Cancelled {
+		t.Fatalf("cancel terminal payload = %+v, want failed/unanswered_timeout/cancelled", tp)
+	}
 
 	if calls != 1 {
 		t.Fatalf("canceller calls = %d, want 1", calls)
@@ -433,34 +457,39 @@ func TestShell_AbandonCallsCanceller(t *testing.T) {
 	if gotTarget != actor.ActorID("tool:cancel-target") {
 		t.Fatalf("canceller target = %q, want %q", gotTarget, "tool:cancel-target")
 	}
-	if gotReqID != message.ID("req-abandon-1") {
-		t.Fatalf("canceller requestID = %q, want %q", gotReqID, "req-abandon-1")
+	if gotReqID != message.ID("req-cancel-1") {
+		t.Fatalf("canceller requestID = %q, want %q", gotReqID, "req-cancel-1")
 	}
-	if sh.InFlight(message.ID("req-abandon-1")) {
-		t.Fatalf("Abandon must drop the local waiter (InFlight still true)")
+	if sh.InFlight(message.ID("req-cancel-1")) {
+		t.Fatalf("Cancel must drop the local waiter (InFlight still true)")
 	}
 
-	// A second Abandon on the same (now-gone) id must not re-invoke the
-	// canceller — Abandon only reaches a request it still holds locally.
-	sh.Abandon(message.ID("req-abandon-1"))
+	// A second Cancel on the same (now-gone) id is a no-op: no second terminal,
+	// no second canceller call — Cancel only reaches a request it still holds.
+	writesBefore := len(w.written)
+	sh.Cancel(message.ID("req-cancel-1"))
 	if calls != 1 {
-		t.Fatalf("canceller calls after second Abandon = %d, want 1 (no-op on unknown id)", calls)
+		t.Fatalf("canceller calls after second Cancel = %d, want 1 (no-op on unknown id)", calls)
+	}
+	if len(w.written) != writesBefore {
+		t.Fatalf("second Cancel must not write a second terminal")
 	}
 }
 
-// TestShell_AbandonWithoutCancellerIsLocalOnly pins nil-Canceller as the
-// current-behavior default (ShellConfig.Canceller unset): Abandon still
-// drops the local waiter, no protocol-level cancel is attempted.
-func TestShell_AbandonWithoutCancellerIsLocalOnly(t *testing.T) {
-	sh := newExecShell(&recWriter{})
+// TestShell_CancelWithoutCancellerSelfCloses pins nil-Canceller (ⓓ): Cancel
+// still self-closes (writes the terminal) and drops the local waiter, no
+// protocol-level cancel is attempted, no panic.
+func TestShell_CancelWithoutCancellerSelfCloses(t *testing.T) {
+	w := &recWriter{}
+	sh := newExecShell(w)
 	rv := sh.ExecuteRequest(context.Background(), defaultRC(), metatool.RequestSpec{
 		ToolName: "call_actor", EnvelopeType: "no.canceller", HandlerActorID: "tool:x",
 		WaitMode: metatool.WaitNone, Timeout: time.Second,
 	})
 	reqID := message.ID(rv.Value["request_id"].(string))
-	sh.Abandon(reqID) // must not panic with nil Canceller
+	sh.Cancel(reqID) // must not panic with nil Canceller
 	if sh.InFlight(reqID) {
-		t.Fatalf("Abandon must drop the local waiter even with nil Canceller")
+		t.Fatalf("Cancel must drop the local waiter even with nil Canceller")
 	}
 }
 
@@ -775,54 +804,54 @@ func TestExecuteAwaitResult_FailedResponse(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// ExecuteAbandon
+// ExecuteCancel
 // ---------------------------------------------------------------------------
 
-func TestExecuteAbandon_NilShell(t *testing.T) {
-	rv := metatool.ExecuteAbandon(context.Background(), nil, nil, metatool.RuntimeContext{})
+func TestExecuteCancel_NilShell(t *testing.T) {
+	rv := metatool.ExecuteCancel(context.Background(), nil, nil, metatool.RuntimeContext{})
 	assertIsError(t, rv, "internal_error")
 }
 
-func TestExecuteAbandon_MissingRequestID(t *testing.T) {
+func TestExecuteCancel_MissingRequestID(t *testing.T) {
 	sh := newExecShell(&recWriter{})
 	params, _ := json.Marshal(map[string]any{})
-	rv := metatool.ExecuteAbandon(context.Background(), params, sh, metatool.RuntimeContext{})
+	rv := metatool.ExecuteCancel(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "payload_invalid")
 }
 
-func TestExecuteAbandon_InvalidJSON(t *testing.T) {
+func TestExecuteCancel_InvalidJSON(t *testing.T) {
 	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteAbandon(context.Background(), json.RawMessage(`{bad`), sh, metatool.RuntimeContext{})
+	rv := metatool.ExecuteCancel(context.Background(), json.RawMessage(`{bad`), sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "payload_invalid")
 }
 
-func TestExecuteAbandon_Success(t *testing.T) {
+func TestExecuteCancel_Success(t *testing.T) {
 	w := &recWriter{}
 	sh := newExecShell(w)
 	reqID := submitInFlight(t, w, sh)
 
 	params, _ := json.Marshal(map[string]any{"request_id": reqID.String()})
-	rv := metatool.ExecuteAbandon(context.Background(), params, sh, metatool.RuntimeContext{})
+	rv := metatool.ExecuteCancel(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertNotError(t, rv)
-	if rv.Value["abandoned"] != reqID.String() {
-		t.Fatalf("expected abandoned=%s, got %v", reqID, rv.Value["abandoned"])
+	if rv.Value["cancelled"] != reqID.String() {
+		t.Fatalf("expected cancelled=%s, got %v", reqID, rv.Value["cancelled"])
 	}
 	if sh.InFlight(reqID) {
-		t.Fatal("expected future cancelled after abandon")
+		t.Fatal("expected future cancelled after cancel")
 	}
 }
 
-func TestExecuteAbandon_WhitespaceRequestID(t *testing.T) {
+func TestExecuteCancel_WhitespaceRequestID(t *testing.T) {
 	sh := newExecShell(&recWriter{})
 	params, _ := json.Marshal(map[string]any{"request_id": "  "})
-	rv := metatool.ExecuteAbandon(context.Background(), params, sh, metatool.RuntimeContext{})
+	rv := metatool.ExecuteCancel(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertIsError(t, rv, "payload_invalid")
 }
 
-func TestExecuteAbandon_UnknownRequestID(t *testing.T) {
+func TestExecuteCancel_UnknownRequestID(t *testing.T) {
 	sh := newExecShell(&recWriter{})
 	params, _ := json.Marshal(map[string]any{"request_id": "req-nonexistent"})
-	rv := metatool.ExecuteAbandon(context.Background(), params, sh, metatool.RuntimeContext{})
+	rv := metatool.ExecuteCancel(context.Background(), params, sh, metatool.RuntimeContext{})
 	assertNotError(t, rv)
 }
 
@@ -869,15 +898,15 @@ func TestExecuteListPending_WithPending(t *testing.T) {
 	}
 }
 
-func TestExecuteListPending_AfterAbandon(t *testing.T) {
+func TestExecuteListPending_AfterCancel(t *testing.T) {
 	w := &recWriter{}
 	sh := newExecShell(w)
 	reqID := submitInFlight(t, w, sh)
-	sh.Abandon(reqID)
+	sh.Cancel(reqID)
 
 	rv := metatool.ExecuteListPending(context.Background(), nil, sh, metatool.RuntimeContext{})
 	assertNotError(t, rv)
 	if count, _ := rv.Value["count"].(int); count != 0 {
-		t.Fatalf("expected count=0 after abandon, got %d", count)
+		t.Fatalf("expected count=0 after cancel, got %d", count)
 	}
 }

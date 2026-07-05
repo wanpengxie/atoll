@@ -1,7 +1,7 @@
 // Package metatool is the channel's actor-invocation SHELL (bash positioning).
 // A channel is a set of actors; a client edge (an LLM brain, a UI, a gateway)
 // uses them through three primitives — invoke (call_actor), collect
-// (sync/async: await_result/list_pending/abandon), and discover (list_actors/
+// (sync/async: await_result/list_pending/cancel), and discover (list_actors/
 // describe_actor/describe_type). This is "how you call an actor in this
 // channel", the universal entry — NOT any single caller's private wiring. job
 // control (& / wait / jobs / kill %) is bash's, implemented once and shared by
@@ -11,7 +11,7 @@
 // One package, one purpose:
 //
 //   - the 7 client-edge meta tool specs (call_actor, list_actors,
-//     describe_actor, describe_type, await_result, abandon, list_pending)
+//     describe_actor, describe_type, await_result, cancel, list_pending)
 //     and their Execute functions (the binding onto Shell)
 //   - the tool-result VOCABULARY: ResultValue, the ErrorCode closed set, ack
 //     shapes (AckDescriptor/AckResult), the tool-call spec

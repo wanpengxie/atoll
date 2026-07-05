@@ -37,7 +37,7 @@ func MetaTools() []MetaTool {
 		{Spec: DescribeActorSpec, Execute: ExecuteDescribeActor},
 		{Spec: DescribeTypeSpec, Execute: ExecuteDescribeType},
 		{Spec: AwaitResultSpec, Execute: ExecuteAwaitResult},
-		{Spec: AbandonSpec, Execute: ExecuteAbandon},
+		{Spec: CancelSpec, Execute: ExecuteCancel},
 		{Spec: ListPendingSpec, Execute: ExecuteListPending},
 	}
 }

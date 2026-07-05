@@ -2,6 +2,7 @@ package metatool
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
 	"time"
 
@@ -44,8 +45,13 @@ const (
 )
 
 type pendingReq struct {
-	ch           chan *message.Envelope
-	target       actor.ActorID
+	ch     chan *message.Envelope
+	target actor.ActorID
+	// req is a value copy of the request envelope (no aliasing of caller-mutable
+	// state, Arm 同款纪律). Cancel builds the self-close terminal from it
+	// (BuildResponseFromRequest needs the request in-hand); the pen-welded sender
+	// is stashed in after the write so the terminal's audience is the caller.
+	req          message.Envelope
 	expectsAwait bool
 	state        awaitState
 }
@@ -78,8 +84,8 @@ type ShellConfig struct {
 	OnFault func(reqID message.ID, err error)
 
 	// Canceller reaches the protocol-level cancel for one in-flight request
-	// (the assembly root wires it to Home.CancelRequest). nil = Abandon only
-	// drops the local waiter — the injection-point contract vs implementation-
+	// (the assembly root wires it to Home.CancelRequest). nil = Cancel only
+	// self-closes + drops the local waiter — the injection-point contract vs implementation-
 	// fill split (the assembly root fills this once it holds a Home; lib knows
 	// nothing of platform/link).
 	Canceller func(target actor.ActorID, requestID message.ID)
@@ -142,10 +148,12 @@ func (s *Shell) Stop() {
 
 // --- correlator core (in-flight futures) ---
 
-// register records an in-flight request against its target actor (Abandon's
-// protocol-level cancel needs it — the Shell has no other way back to WHO is
-// running the request). If expectsAwait is true, a final that arrives before
-// Await parks is buffered for it.
+// register records an in-flight request against its target actor (Cancel's
+// protocol-level cancel needs the target — the Shell has no other way back to
+// WHO is running the request). If expectsAwait is true, a final that arrives
+// before Await parks is buffered for it. The request snapshot Cancel's self-close
+// terminal is built from is stashed separately by stashRequest after the pen
+// welds identity (subscribe-before-send: the future is registered before write).
 func (s *Shell) register(id message.ID, target actor.ActorID, expectsAwait bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -158,6 +166,18 @@ func (s *Shell) register(id message.ID, target actor.ActorID, expectsAwait bool)
 		expectsAwait: expectsAwait,
 		state:        awaitNotStarted,
 	}
+}
+
+// stashRequest records the pen-welded request snapshot into id's future so
+// Cancel's self-close terminal is addressed back to the caller (audience =
+// request.Sender.ID, which the pen welded at write time). No-op if the future
+// is already gone (a fast final consumed it before the arm).
+func (s *Shell) stashRequest(env message.Envelope) {
+	s.mu.Lock()
+	if p, ok := s.pending[env.ID]; ok {
+		p.req = env
+	}
+	s.mu.Unlock()
 }
 
 // InFlight reports whether a future exists for id (await_result's guard).
@@ -186,17 +206,50 @@ func (s *Shell) Pending() []message.ID {
 	return ids
 }
 
-// Abandon drops the local waiter for id, then (if the assembly root wired a
-// Canceller) reaches the protocol-level cancel for it — the result may still
-// land as a new message (best-effort interrupt, not a guaranteed suppression).
-// Local drop runs first: the waiter is gone even if the protocol-level cancel
-// never fires.
-func (s *Shell) Abandon(id message.ID) {
+// Cancel closes id's request with the caller's OWN cancel terminal — a legal
+// self-close (§2.6), never a forged verdict — then (if the assembly root wired a
+// Canceller) reaches the protocol-level cancel so the receiver's in-station
+// account is torn down too. It is逐字对齐 lib/actorbase callLedger.cancel: drop
+// the local waiter FIRST (gone even if the pen write / Canceller never fires),
+// then write a failed + unanswered_timeout terminal marked cancelled:true. A
+// write that fails for anything but a benign duplicate (the receiver's real
+// terminal already won the race) is a liveness break → OnFault. A late real
+// answer that arrives after this is rejected by the harness one-terminal-per-
+// request UNIQUE index (never lands as a second terminal).
+//
+// 红线 7 期限申报: this is the过渡第二宿主 mirror of callLedger.cancel — the SAME
+// machine (取消轴 self-close + Canceller signal + local reclaim), moved house,
+// not a second semantics. It disappears when the metatool mind-binding migrates
+// the Shell onto lib/actorbase's JobTable (期10); until then the Shell is the
+// only live out-station account a channel's tool-invocation path runs against.
+func (s *Shell) Cancel(id message.ID) {
 	s.mu.Lock()
 	p, ok := s.pending[id]
 	delete(s.pending, id)
 	s.mu.Unlock()
-	if ok && s.cfg.Canceller != nil {
+	if !ok {
+		return
+	}
+	// self-close: write the caller's own cancel terminal (audience = caller, from
+	// the pen-welded request snapshot). author#2's per-request timer is disarmed
+	// when this terminal fans back through Deliver→Match; a race where the timer
+	// fires first is benign (duplicate).
+	payload, _ := json.Marshal(map[string]any{
+		"error_code": string(message.TerminalUnansweredTimeout),
+		"detail":     "cancelled by caller",
+		"cancelled":  true,
+	})
+	req := p.req
+	if _, err := behavior.Respond(context.Background(), s.cfg.Pen, s.cfg.Clock, &req, behavior.ResponseSpec{
+		Status:  message.StatusFailed,
+		Reason:  string(message.TerminalUnansweredTimeout),
+		Payload: payload,
+	}); err != nil && s.cfg.OnFault != nil {
+		// behavior.Respond treats a HarnessTerminalDuplicate as success (nil err),
+		// so any error here is a real liveness break, not the happy race.
+		s.cfg.OnFault(id, err)
+	}
+	if s.cfg.Canceller != nil {
 		s.cfg.Canceller(p.target, id)
 	}
 }
@@ -376,18 +429,23 @@ func (s *Shell) buildRequest(rc RuntimeContext, spec RequestSpec) (message.Envel
 // failure unwinds the future registration.
 func (s *Shell) submit(ctx context.Context, env message.Envelope, target actor.ActorID, expectsAwait bool) error {
 	s.register(env.ID, target, expectsAwait)
-	if err := s.write(ctx, env); err != nil {
+	// write welds the caller's identity onto env IN PLACE (sealed-pen), so after
+	// it returns env carries the sender the author#2 closure and Cancel need for a
+	// correctly-addressed terminal (audience = caller).
+	if err := s.write(ctx, &env); err != nil {
 		s.cancel(env.ID)
 		return err
 	}
+	s.stashRequest(env)
 	s.armCaller(&env)
 	return nil
 }
 
-// write commits one envelope through the harness chain; a reject is an error
-// (the caller must know its emit did not land).
-func (s *Shell) write(ctx context.Context, env message.Envelope) error {
-	res, err := s.cfg.Pen.Write(ctx, &env)
+// write commits one envelope through the harness chain, welding the caller's
+// identity onto env in place; a reject is an error (the caller must know its
+// emit did not land).
+func (s *Shell) write(ctx context.Context, env *message.Envelope) error {
+	res, err := s.cfg.Pen.Write(ctx, env)
 	if err != nil {
 		return err
 	}
@@ -446,7 +504,7 @@ func (s *Shell) ExecuteRequest(ctx context.Context, rc RuntimeContext, spec Requ
 		s.cancel(env.ID)
 		return NewError(spec.ToolName, InternalError,
 			"channel request "+spec.EnvelopeType+" wait failed: "+awaitErr.Error(),
-			"Inspect adapter logs; the request may have been abandoned", nil)
+			"Inspect adapter logs; the wait was released but the call keeps running", nil)
 	}
 	if ok {
 		rv, _ := ResultFromResponse(spec.ToolName, *finalEnv)

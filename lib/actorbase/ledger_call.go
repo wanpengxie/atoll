@@ -357,7 +357,7 @@ func (l *callLedger) wait(ctx context.Context, id message.ID, d time.Duration) (
 // JobTable is the engine's exported, cross-goroutine narrow face onto the
 // SAME out-station account sys.Call()/Pending touch (spec §1.5). Unlike a
 // Proc's own sys.Call().Wait — one call frame, one wait — a mind-binding
-// tool call (await_result/list_pending/abandon) resumes from OUTSIDE the
+// tool call (await_result/list_pending/cancel) resumes from OUTSIDE the
 // turn that submitted the request, in a LATER, separate dispatch, so it
 // needs a durable handle reachable across turns instead of a one-shot
 // Pending ticket. Both caller classes touch the identical ledger row.
@@ -375,7 +375,7 @@ type JobTable interface {
 	Await(ctx context.Context, id message.ID, window time.Duration) (*message.Envelope, bool, error)
 	// List returns the in-flight request ids (list_pending).
 	List() []message.ID
-	// Cancel is pending.Cancel by id (abandon) — idempotent to an id
+	// Cancel is pending.Cancel by id (the cancel tool) — idempotent to an id
 	// already closed.
 	Cancel(id message.ID) error
 }

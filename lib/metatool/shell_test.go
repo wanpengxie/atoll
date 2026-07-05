@@ -203,16 +203,16 @@ func TestShell_AwaitUnregistered(t *testing.T) {
 	}
 }
 
-func TestShell_AbandonRemovesFuture(t *testing.T) {
+func TestShell_CancelRemovesFuture(t *testing.T) {
 	s := newTestShell()
 	id := message.ID("req-6")
 	s.register(id, "actor:test", true)
 	if !s.InFlight(id) {
 		t.Fatal("expected InFlight=true after register")
 	}
-	s.Abandon(id)
+	s.Cancel(id)
 	if s.InFlight(id) {
-		t.Fatal("expected InFlight=false after abandon")
+		t.Fatal("expected InFlight=false after cancel")
 	}
 }
 

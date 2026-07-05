@@ -23,7 +23,7 @@ return that result. Use this to collect a long call that returned an ack
     still-pending ack back (the call keeps running; try again later or let the
     result return as a new message).
 
-If the request is unknown (already collected, abandoned, or lost to a cell
+If the request is unknown (already collected, cancelled, or lost to a cell
 restart), the result is an error explaining so.
 `),
 	Schema: json.RawMessage(`{
@@ -61,7 +61,7 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, sh *Shell, 
 		return NewError(
 			"await_result",
 			InternalError,
-			fmt.Sprintf("request_id %q is not in flight (already collected, abandoned, or lost to a cell restart)", reqID),
+			fmt.Sprintf("request_id %q is not in flight (already collected, cancelled, or lost to a cell restart)", reqID),
 			"Call list_pending() to see in-flight request ids; resubmit the call if needed",
 			nil,
 		)
@@ -74,10 +74,13 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, sh *Shell, 
 
 	finalEnv, ok, err := sh.Await(ctx, reqID, timeout)
 	if err != nil {
-		sh.Abandon(reqID)
+		// PURE local drop: an await failure releases YOUR wait, it does NOT
+		// implicitly cancel the request (cancel writes a terminal + signals the
+		// receiver — an await error is not the caller deciding to abandon the work).
+		sh.cancel(reqID)
 		return NewError("await_result", InternalError,
 			fmt.Sprintf("await_result %q failed: %v", reqID, err),
-			"Inspect adapter logs; the request may have been abandoned", nil)
+			"Inspect adapter logs; the wait was released but the call keeps running", nil)
 	}
 	if !ok {
 		// Still pending after the window — hand control back with an ack.
@@ -96,21 +99,19 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, sh *Shell, 
 	return rv
 }
 
-// AbandonSpec is the protocol-layer definition of abandon.
-var AbandonSpec = ToolSpec{
-	Name: "abandon",
+// CancelSpec is the protocol-layer definition of cancel.
+var CancelSpec = ToolSpec{
+	Name: "cancel",
 	Description: strings.TrimSpace(`
-Stop waiting locally on a previously-submitted call_actor request. Use this in a
-fan-out when one sibling already gave you what you need, or when you no longer care
-about a result.
+Cancel a previously-submitted call_actor request. Use this in a fan-out when one
+sibling already gave you what you need, or when you no longer want the work done.
 
-Releases your local wait so list_pending() no longer shows it and await_result()
-will report it as not in flight, then best-effort interrupts the downstream work
-(a protocol-level cancel — whether this is wired depends on the assembly root; if
-it is not, the call keeps running). Either way, if the call already produced or
-still produces a result, that result comes back to you as a new message
-(parent_id = request_id) — abandon never suppresses the eventual response, it only
-stops YOU from waiting on it.
+Closes the request NOW with a cancel terminal (a legal self-close): list_pending()
+no longer shows it, await_result() reports it as not in flight, and the receiver is
+signalled to stop the work (if the assembly root wired the protocol-level cancel).
+The request is DONE — a late answer the receiver may still produce is rejected as a
+duplicate terminal and never lands. This is the definitive stop, not merely
+"stop waiting": use it only when you actually want the request cancelled.
 `),
 	Schema: json.RawMessage(`{
   "type": "object",
@@ -121,31 +122,31 @@ stops YOU from waiting on it.
 }`),
 }
 
-type abandonParams struct {
+type cancelParams struct {
 	RequestID string `json:"request_id"`
 }
 
-// ExecuteAbandon is the protocol-layer execute function for abandon.
-func ExecuteAbandon(_ context.Context, params json.RawMessage, sh *Shell, _ RuntimeContext) ResultValue {
+// ExecuteCancel is the protocol-layer execute function for cancel.
+func ExecuteCancel(_ context.Context, params json.RawMessage, sh *Shell, _ RuntimeContext) ResultValue {
 	if sh == nil {
-		return NewError("abandon", InternalError, "abandon tool not configured", "Retry after the bridge is configured", nil)
+		return NewError("cancel", InternalError, "cancel tool not configured", "Retry after the bridge is configured", nil)
 	}
-	var p abandonParams
+	var p cancelParams
 	if len(params) > 0 {
 		if err := json.Unmarshal(params, &p); err != nil {
-			return PayloadInvalidError("abandon", fmt.Sprintf("invalid params: %v", err), "")
+			return PayloadInvalidError("cancel", fmt.Sprintf("invalid params: %v", err), "")
 		}
 	}
 	reqID := message.ID(strings.TrimSpace(p.RequestID))
 	if reqID == "" {
-		return PayloadInvalidError("abandon", "request_id is required", "")
+		return PayloadInvalidError("cancel", "request_id is required", "")
 	}
-	sh.Abandon(reqID)
+	sh.Cancel(reqID)
 	return ResultValue{
-		Name: "abandon",
+		Name: "cancel",
 		Value: map[string]any{
-			"abandoned":  reqID.String(),
-			"note":       "local wait released; a best-effort protocol-level cancel was also sent (if wired). A later result, if produced anyway, returns as a new message.",
+			"cancelled":  reqID.String(),
+			"note":       "request closed with a cancel terminal; the receiver was signalled to stop (if wired). A late answer is rejected as a duplicate and never lands.",
 			"request_id": reqID.String(),
 		},
 	}
@@ -157,7 +158,7 @@ var ListPendingSpec = ToolSpec{
 	Description: strings.TrimSpace(`
 List the request_ids of call_actor requests you have submitted that have not yet
 reached their final result. Returns only the id list — no status — as a decision aid
-for which await_result / abandon to issue next.
+for which await_result / cancel to issue next.
 
 Note: this view is per-process. If the cell restarted, the list is empty even
 though earlier calls may still be running in the daemon; their results will return
