@@ -100,6 +100,50 @@ func (r *storeHomeRig) deliverProbe(id actor.ActorID) (actorrt.Outcome, error) {
 	return res.Per[id], nil
 }
 
+// TestAttach_DeclarationWithoutMembership_NotMinted proves the membrane law
+// (v1.8 问①): a daemon declaring an id with NO active户籍 does NOT mint a
+// membership row — "a daemon may attach" is not "a daemon may任命 members". The
+// admitted id in the same declaration IS stamped (只盖 Host); the un-admitted one
+// is refused/skipped, leaving zero new rows.
+func TestAttach_DeclarationWithoutMembership_NotMinted(t *testing.T) {
+	ctx := context.Background()
+	r := newStoreHomeRig(t)
+
+	const (
+		member = actor.ActorID("tool:member")
+		orphan = actor.ActorID("tool:orphan")
+	)
+	r.admit(t, member) // orphan is deliberately NOT admitted
+
+	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
+		{ActorID: member, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+		{ActorID: orphan, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	// The admitted member's Host is stamped by attach.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rec, ok, _ := r.cs.Registry.Lookup(ctx, member)
+		if ok && rec.Host == "daemon-1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("admitted member never got Host=daemon-1 (只盖 Host arm broken)")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// The un-admitted orphan has NO membership row — attach never minted one.
+	if _, ok, err := r.cs.Registry.Lookup(ctx, orphan); err != nil {
+		t.Fatalf("Lookup(orphan): %v", err)
+	} else if ok {
+		t.Fatal("attach minted membership for an un-admitted declaration (膜律 问① broken — 绝不铸行)")
+	}
+}
+
 // TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut proves the S5
 // attach-time reconciliation (spec §3-S5, forward §10.13 推导7): a Reattach
 // declaring a SMALLER set than the compute currently hosts (Host==computeID in

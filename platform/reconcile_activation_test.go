@@ -32,6 +32,7 @@ func (recordActor) Receive(context.Context, *message.Envelope) error { return ni
 type testDesired struct {
 	mu      sync.Mutex
 	members []actorrt.DesiredMember
+	err     error
 }
 
 func (d *testDesired) set(ms ...actorrt.DesiredMember) {
@@ -40,9 +41,19 @@ func (d *testDesired) set(ms ...actorrt.DesiredMember) {
 	d.mu.Unlock()
 }
 
+// fail makes Members return err (union-atomicity fault injection); nil restores.
+func (d *testDesired) fail(err error) {
+	d.mu.Lock()
+	d.err = err
+	d.mu.Unlock()
+}
+
 func (d *testDesired) Members(context.Context) ([]actorrt.DesiredMember, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if d.err != nil {
+		return nil, d.err
+	}
 	out := make([]actorrt.DesiredMember, len(d.members))
 	copy(out, d.members)
 	return out, nil
@@ -266,6 +277,113 @@ func TestReconcileActivation_DoesNotKillUnmanagedLiveActors(t *testing.T) {
 	}
 	if !live(h, parent) {
 		t.Fatal("eager-managed parent was killed while still desired")
+	}
+}
+
+// DoD ⑧ (user域): an admitted human is embodied by the ring from the user域
+// derivation ALONE (empty组合域, no connection/request) — a常驻 cell; removing the
+// membership shrinks the projection and the 削臂 evicts it (human is a MANAGED
+// member now, not a protected category — removal = true death).
+func TestReconcileActivation_UserDomainHumanEmbodiedAndEvicted(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{} // empty组合域: the human comes entirely from user域
+	builder := newTestBuilder()
+	h := openActivationHome(t, desired, builder)
+
+	const human = actor.ActorID("user:carol")
+	admit(t, h, human, actor.KindHuman)
+	h.reconcileActivation(ctx)
+	if !live(h, human) {
+		t.Fatal("admitted human not embodied by the ring (user域 derivation must build a常驻 cell with no connection)")
+	}
+
+	if err := h.cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{{ID: human, At: h.nowMs()}}); err != nil {
+		t.Fatalf("remove membership: %v", err)
+	}
+	h.reconcileActivation(ctx)
+	if live(h, human) {
+		t.Fatal("removed human still live — 削臂 did not evict a no-longer-desired managed member")
+	}
+}
+
+// DoD ⑧ (union 原子性): a desired-source read fault aborts the WHOLE tick — zero
+// 削 zero 铸, and prevEagerDesired is NOT updated (so a later good tick still
+// manages the member). The组合域 source faulting exercises the same early-return
+// abort the user域 (ListActive) fault takes.
+func TestReconcileActivation_UnionAtomicity_FaultAbortsTick(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	const id = actor.ActorID("agent:atomic")
+	builder.byID[id] = builder.recordFactory(id)
+	h := openActivationHome(t, desired, builder)
+	admit(t, h, id, actor.KindAgent)
+
+	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
+	h.reconcileActivation(ctx)
+	if !live(h, id) {
+		t.Fatal("precondition: member not embodied on the good tick")
+	}
+	if !h.prevEagerDesired[id] {
+		t.Fatal("precondition: member not in prevEagerDesired after the good tick")
+	}
+
+	desired.fail(errors.New("injected desired-source fault"))
+	h.reconcileActivation(ctx)
+	if !live(h, id) {
+		t.Fatal("member evicted on a faulted tick — 削臂 ran against a truncated desired (atomicity broken)")
+	}
+	if !h.prevEagerDesired[id] {
+		t.Fatal("prevEagerDesired mutated on a faulted tick — must stay untouched until a complete read")
+	}
+}
+
+// DoD ⑧ (交集红线): a组合域 intent row whose Admit never landed (crash between the
+// two non-atomic writes) is NOT embodied and does NOT enter the 削臂 management set
+// (skip precedes current) — no panic. Once the户籍 lands, the next tick embodies it.
+func TestReconcileActivation_IntersectionRedline_NoMembershipNoEmbody(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	const id = actor.ActorID("agent:orphan-intent")
+	builder.byID[id] = builder.recordFactory(id)
+	h := openActivationHome(t, desired, builder)
+
+	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
+	h.reconcileActivation(ctx) // must NOT panic, must NOT embody (no户籍)
+	if live(h, id) {
+		t.Fatal("orphan intent (no户籍) was embodied — 交集红线 broken")
+	}
+	if h.prevEagerDesired[id] {
+		t.Fatal("orphan intent entered the 削臂 management set — the membership skip must precede current[id]=true")
+	}
+
+	admit(t, h, id, actor.KindAgent)
+	h.reconcileActivation(ctx)
+	if !live(h, id) {
+		t.Fatal("member not embodied after its户籍 landed on a later tick")
+	}
+}
+
+// DoD ⑧ (poke 即时具身): Admit pokes the reconcile ring, so a freshly-admitted
+// member embodies OFF-TICK — no synchronous reconcile, no 30s tick wait (the home
+// runs a time.Hour interval here). Only the Admit poke drives the background sweep.
+func TestAdmit_PokeEmbodiesWithoutWaitingTick(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	h := openActivationHome(t, desired, builder)
+
+	const human = actor.ActorID("user:poke")
+	if err := h.Admit(ctx, human, actor.KindHuman); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for !live(h, human) {
+		if time.Now().After(deadline) {
+			t.Fatal("admitted human never embodied — the Admit poke did not wake the reconcile ring off-tick")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 
