@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -90,19 +91,22 @@ func BuildRequest(
 // Caller is an actor-private, caller-scoped closure manager (the timeout half
 // of gen_server:call). It is owned by one actor.
 //
-// CONCURRENCY PROOF: `pending` is touched ONLY on the cell goroutine — Arm,
-// Match, and Stop are all invoked from the actor's Receive/Stop, which the host
-// runs serially on the single cell goroutine. So `pending` needs no lock. A
-// timer's fireTimeout runs OFF the cell goroutine (the timer's own goroutine)
-// but NEVER touches `pending`: it holds only an immutable request snapshot and
-// the pen (concurrency-safe per harness.Pen contract; identity is welded onto
-// the pen, not carried alongside). The race between a timer fire and a late real
-// terminal from the receiver is resolved by the harness one-terminal-per-request
-// UNIQUE INDEX — the loser gets RejectReason=HarnessTerminalDuplicate, which is
-// benign.
+// CONCURRENCY: `pending` is guarded by mu because a Caller has two-goroutine
+// holders — the subjectgate door Arms a request on the gateway goroutine and
+// Matches the reply on the door's cell goroutine; metatool.Shell likewise Arms
+// on a client-edge tool-call and Matches on the mailbox goroutine. Arm, Match
+// and Stop take mu; a single-goroutine actor pays only an uncontended lock. A
+// timer's fireTimeout runs OFF any of these goroutines (the timer's own) but
+// NEVER touches `pending`: it holds only an immutable request snapshot and the
+// pen (concurrency-safe per harness.Pen contract; identity is welded onto the
+// pen, not carried alongside), so it takes no lock. The race between a timer
+// fire and a late real terminal from the receiver is resolved by the harness
+// one-terminal-per-request UNIQUE INDEX — the loser gets
+// RejectReason=HarnessTerminalDuplicate, which is benign.
 type Caller struct {
 	pen     harness.Pen
 	clock   func() time.Time
+	mu      sync.Mutex
 	pending map[message.ID]*time.Timer
 	onFault func(reqID message.ID, err error)
 }
@@ -126,12 +130,14 @@ func NewCaller(pen harness.Pen, clock func() time.Time, onFault func(reqID messa
 
 // Arm registers a just-sent request as in-flight and, if req.ExpiresAt != nil,
 // starts a caller-scoped timer. Idempotent: a re-Arm of an already-pending
-// request is a no-op. CALL SITE: the cell goroutine (the actor armed it right
-// after sending the request from Receive).
+// request is a no-op. CALL SITE: whichever goroutine just sent the request (a
+// single-goroutine actor's Receive, or a two-goroutine holder's send edge).
 func (c *Caller) Arm(req *message.Envelope) {
 	if req == nil || req.ID == "" {
 		return
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	if _, exists := c.pending[req.ID]; exists {
 		return // idempotent
 	}
@@ -208,6 +214,8 @@ func (c *Caller) Match(env *message.Envelope) bool {
 	if env == nil || env.Kind != message.KindResponse {
 		return false
 	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	t, ok := c.pending[env.ParentID]
 	if !ok {
 		return false
@@ -221,9 +229,10 @@ func (c *Caller) Match(env *message.Envelope) bool {
 	return true
 }
 
-// Stop stops all timers and clears pending. CALL SITE: the cell goroutine
-// (actor teardown).
+// Stop stops all timers and clears pending. CALL SITE: the holder's teardown.
 func (c *Caller) Stop() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	for id, t := range c.pending {
 		if t != nil {
 			t.Stop()

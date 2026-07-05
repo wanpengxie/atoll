@@ -31,9 +31,9 @@ import (
 // behavior.Caller (author#2) stays a BEHAVIOR primitive (the actor-side
 // call-face). The Shell HOLDS and DRIVES it — it does not re-implement the
 // timeout terminal. Arm fires on the client-edge goroutine (a tool call) and
-// Match on the holder's mailbox goroutine (Deliver); the Shell guards every
-// caller touch with callerMu so the lock-free single-goroutine base contract
-// is honoured by a two-goroutine holder.
+// Match on the holder's mailbox goroutine (Deliver); the base is now internally
+// cross-goroutine safe (behavior.Caller guards its own pending), so the Shell
+// no longer wraps caller touches in a lock of its own.
 
 type awaitState int
 
@@ -113,12 +113,9 @@ type Shell struct {
 	mu      sync.Mutex
 	pending map[message.ID]*pendingReq
 
-	// callerMu serializes author#2 touches across the holder's two
-	// goroutines: Arm on the client-edge (a tool call), Match on the
-	// mailbox (Deliver). The behavior.Caller base stays lock-free for
-	// single-goroutine actors; this two-goroutine holder adapts.
-	callerMu sync.Mutex
-	caller   *behavior.Caller
+	// caller is author#2's closure manager, internally cross-goroutine safe:
+	// Arm on the client-edge (a tool call), Match on the mailbox (Deliver).
+	caller *behavior.Caller
 }
 
 // NewShell builds a Shell bound to its holder's identity + write seam. The
@@ -138,11 +135,9 @@ func NewShell(cfg ShellConfig) *Shell {
 // Stop disarms all author#2 timers and clears in-flight state. CALL SITE:
 // the holder's teardown (cell goroutine).
 func (s *Shell) Stop() {
-	s.callerMu.Lock()
 	if s.caller != nil {
 		s.caller.Stop()
 	}
-	s.callerMu.Unlock()
 }
 
 // --- correlator core (in-flight futures) ---
@@ -214,8 +209,8 @@ func (s *Shell) Deliver(env *message.Envelope) (consumed bool) {
 	if env == nil {
 		return false
 	}
-	// author#2: a final disarms the per-request timeout. callerMu guards the
-	// lock-free base against the concurrent Arm on the client-edge goroutine.
+	// author#2: a final disarms the per-request timeout. The base guards its own
+	// pending against the concurrent Arm on the client-edge goroutine.
 	s.matchCaller(env)
 
 	final := behavior.IsEnvFinal(env)
@@ -329,19 +324,16 @@ func (s *Shell) reconcileAfterWait(id message.ID) (*message.Envelope, bool) {
 
 // --- author#2 lifecycle (held + driven, not re-implemented) ---
 
-// armCaller / matchCaller serialize author#2 touches across the holder's two
-// goroutines (Arm on the client edge, Match on the mailbox).
+// armCaller / matchCaller drive author#2 across the holder's two goroutines
+// (Arm on the client edge, Match on the mailbox); the base is internally
+// cross-goroutine safe, so these are thin nil-guarded pass-throughs.
 func (s *Shell) armCaller(env *message.Envelope) {
-	s.callerMu.Lock()
-	defer s.callerMu.Unlock()
 	if s.caller != nil {
 		s.caller.Arm(env)
 	}
 }
 
 func (s *Shell) matchCaller(env *message.Envelope) {
-	s.callerMu.Lock()
-	defer s.callerMu.Unlock()
 	if s.caller != nil {
 		s.caller.Match(env)
 	}
