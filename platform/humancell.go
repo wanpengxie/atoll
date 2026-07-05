@@ -1,11 +1,7 @@
 package platform
 
 import (
-	"context"
-
-	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 )
 
 // humanCellFactory is the platform's built-in home-side human embodiment (CORE1
@@ -14,24 +10,29 @@ import (
 // it), so the reconcile ring keeps a live human cell up whenever the member is
 // admitted, without any app-injected factory.
 //
-// Minimal three-选 (三层律 §3): a call to a human whose device is absent is
-// answered by leaving the request OPEN — the DEFERRED honest option. The cell
-// keeps the actor callable (agent→human delivery lands in its mailbox) but never
-// fabricates a Delivered/completed it did not earn (the old humanFront.Receive
-// no-op reported Delivered = the dishonest fourth state). The full three-选
-// (immediate human.message / deferred human.approve) + the Resolve/Cancel/After
-// door land in CORE2 (subjectgate).
-//
-// Legacy shape (the pen is unused): a human request is answered by the person via
-// the door, not by the cell writing truth. The pen is welded by the caps seam like
-// any cell's; this occupant simply never reaches for it this period.
+// Proc shape (through the actorbase engine, NOT a raw actorrt.Actor implementer —
+// archtest wall): the full三选 (immediate human.message / deferred human.approve)
+// + the Resolve/Cancel/After door land in CORE2 (subjectgate). This minimal form
+// answers a call to an absent-device human by leaving the request OPEN — the
+// DEFERRED honest option (三层律 §3), never the old humanFront.Receive no-op that
+// reported Delivered (the dishonest fourth state).
 func humanCellFactory() ActorFactory {
-	return ActorFactory{Legacy: func(harness.Pen) actorrt.Actor { return humanCell{} }}
+	return ActorFactory{Proc: actorbase.Def{
+		Doc: "home-side human embodiment (CORE1 minimal): callable; leaves every request OPEN (deferred三选) — the person answers via the door (CORE2 subjectgate)",
+		New: func() (actorbase.Proc, error) { return humanProc, nil },
+	}}
 }
 
-type humanCell struct{}
-
-// Receive leaves every request OPEN (deferred): returning nil records nothing and
-// synthesises no terminal — closure is the sender's caller-scoped timer, and the
-// person's own Resolve (CORE2) is the real answer.
-func (humanCell) Receive(context.Context, *message.Envelope) error { return nil }
+// humanProc drains its mailbox but never responds: a call to a human whose device
+// is absent is answered by leaving the request OPEN (deferred). It never
+// fabricates a Reply/Fail it did not earn — closure is the sender's caller-scoped
+// timer, and the person's own Resolve (CORE2) is the real answer. Returning on a
+// Recv error is the cooperative termination contract (spec §1.6).
+func humanProc(sys actorbase.Sys) error {
+	for {
+		if _, err := sys.Recv(); err != nil {
+			return nil
+		}
+		// deferred: leave the request open (no Reply/Fail).
+	}
+}

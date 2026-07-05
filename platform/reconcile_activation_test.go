@@ -125,10 +125,14 @@ func live(h *Home, id actor.ActorID) bool {
 
 // admit seeds durable membership for id (desired = intent ∩ membership: the ring
 // only embodies an intent row whose户籍 landed). Tests that inject a组合域
-// DesiredMember must first Admit the id, exactly as the real introduce path does.
+// DesiredMember must first admit the id, as the real introduce path does. It writes
+// the membership row DIRECTLY (not via Home.Admit) precisely so it does NOT poke
+// the reconcile ring — these tests drive reconcileActivation synchronously, and a
+// poke would race the background ticker goroutine against the test's own calls.
 func admit(t *testing.T, h *Home, id actor.ActorID, kind actor.Kind) {
 	t.Helper()
-	if err := h.Admit(context.Background(), id, kind); err != nil {
+	if err := h.cs.Membership.ApplyMemberTransitions(context.Background(),
+		[]storespec.MemberActorAdd{{ID: id, Kind: kind, At: h.nowMs()}}, nil); err != nil {
 		t.Fatalf("admit %s: %v", id, err)
 	}
 }
