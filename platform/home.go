@@ -25,6 +25,18 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
+// OperateExecutor / OperateRequest / OperateError re-export the sysactor operate
+// face's injection-point contract at the platform boundary, so the app assembly
+// implements it WITHOUT importing platform/internal/sysactor (the internal door
+// stays sealed; the contract is the only thing that crosses). The gate does
+// permission + routing; the app-supplied executor does the intent write + Home
+// call (§2.7-后半 scope 判据: channel-internal control归门内政).
+type (
+	OperateExecutor = sysactor.OperateExecutor
+	OperateRequest  = sysactor.OperateRequest
+	OperateError    = sysactor.OperateError
+)
+
 // HomeConfig configures the channel-home assembly.
 type HomeConfig struct {
 	ChannelID channelpkg.ID
@@ -43,6 +55,11 @@ type HomeConfig struct {
 	// against once the original admission closure is gone. nil → Fork and identity-
 	// timer revival fail-fast (structural refusal, never a phantom actor).
 	Builder CapsFactoryBuilder
+	// Operate is the channel-operate executor injected into the system actor's
+	// in-gate control plane (NP-1=c). nil → the four control types are inert (the
+	// injection point is unfilled) — the app assembly fills it (executor = intent
+	// write + Home-face call; the gate does permission + routing). White-list ⑤.
+	Operate OperateExecutor
 	// Clock is the schedule engine's time source, forwarded to
 	// schedule.AssemblyDeps unchanged. nil → OpenScheduler's own default (the
 	// real wall clock). Pulled forward from period 8 (G16) because a fake
@@ -286,6 +303,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 				Clock:    clock,
 				Stat:     &runtimeLivenessAdapter{rt: rt},
 				Device:   deviceFold,
+				Operate:  cfg.Operate,
 			}))
 		},
 		SystemPen:    systemPen,

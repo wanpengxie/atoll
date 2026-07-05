@@ -46,6 +46,7 @@ type SystemActor struct {
 	clock    func() time.Time
 	stat     LivenessStat
 	device   DevicePresenceStat
+	operate  OperateExecutor
 }
 
 // Deps bundles the channel services the system actor needs.
@@ -58,6 +59,10 @@ type Deps struct {
 	// Device is the obs-read seam over the home device-presence fold (L3 device presence).
 	// Nil → actor.list omits the device column (everyone unknown).
 	Device DevicePresenceStat
+	// Operate is the injected channel-operate executor (the in-gate control plane's
+	// implementation half; the gate here does permission + routing). Nil → the four
+	// control types are inert (no synthesis) — the injection point is unfilled.
+	Operate OperateExecutor
 }
 
 // New constructs the channel system actor's process state (exported so a
@@ -73,6 +78,7 @@ func New(deps Deps) *SystemActor {
 		clock:    clock,
 		stat:     deps.Stat,
 		device:   deps.Device,
+		operate:  deps.Operate,
 	}
 }
 
@@ -111,6 +117,11 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 			// actor.describe so the reserved surface is complete (no actor times
 			// out on a self-query).
 			s.respondDescribe(sys, msg)
+			return
+		case TypeIntroduceActor, TypeRemoveActor, TypeRestartActor, TypeSetDefaultAgent:
+			// Channel operate face (NP-1=c): in-gate control plane. Permission +
+			// routing here; the injected executor does the intent write + Home call.
+			s.handleOperate(sys, msg)
 			return
 		}
 	}
