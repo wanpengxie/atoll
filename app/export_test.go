@@ -4,9 +4,18 @@ import (
 	"context"
 	"net/http"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
+
+// OperateFaceForTest exposes the app's channel-operate executor so black-box
+// tests can drive the four control verbs directly (as the sysactor gate would
+// after authorising the sender), without the not-yet-built message senders
+// (S5b/shims). Test-only.
+func (a *App) OperateFaceForTest() platform.OperateExecutor {
+	return a.operateFace()
+}
 
 // Handler exposes the assembled gin engine as an http.Handler so black-box
 // (package app_test) tests can drive the whole server through httptest without

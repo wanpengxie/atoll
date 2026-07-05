@@ -261,6 +261,9 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 		ChannelID: chID,
 		DBPath:    dbPath,
 		Logger:    a.logger,
+		// Fill the operate-face injection point: the in-gate control plane's
+		// executor half (intent write + Home call). One instance, channel-resolved.
+		Operate: a.operateFace(),
 	})
 	if err != nil {
 		return nil, err
