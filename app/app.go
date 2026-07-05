@@ -21,7 +21,6 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/registry"
 )
 
 // App is the product application server.
@@ -261,6 +260,14 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 		ChannelID: chID,
 		DBPath:    dbPath,
 		Logger:    a.logger,
+		// Fill the two eager-activation injection points with the组合域 supply:
+		// Desired = server-placed intent (the reconcile ring's desired half),
+		// Builder = the id→ActorFactory table (activation/reviver resolve). The
+		// user域 (per-channel human members) is derived by the platform ring itself
+		// (see Home.reconcileActivation) — the app cannot enumerate it. Both non-nil
+		// (double-nil灭: a nil pair leaves the ring inert).
+		Desired: compositionDesired{app: a, chID: chID},
+		Builder: compositionBuilder{app: a, chID: chID},
 		// Fill the operate-face injection point: the in-gate control plane's
 		// executor half (intent write + Home call). One instance, channel-resolved.
 		Operate: a.operateFace(),
@@ -314,47 +321,15 @@ const (
 // Deps carries NO WorkspaceDir, so the agent class derives the server-embedded
 // Situation.
 func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
-	type instanceSpec struct{ id, class, cfg, gcfg string }
-	var specs []instanceSpec
-	// LEFT JOIN agents: for an agent instance (instance_id = 'agent:'||agents.id)
-	// overlay its GLOBAL identity config (persona/skills) UNDER the per-channel
-	// config. The engine is NOT read here — it IS ca.class (the
-	// per-channel concrete engine class: claude/go-kimi). A non-agent class never
-	// matches the join (no global overlay), which is correct.
-	rows, err := a.db.Query(
-		`SELECT ca.instance_id, ca.class, COALESCE(ca.config_json, ''),
-		        COALESCE(a.config_json, '')
-		   FROM channel_actors ca
-		   LEFT JOIN agents a ON ca.instance_id = 'agent:' || a.id
-		  WHERE ca.channel_id = ? AND ca.placement = ?`,
-		string(chID), placementServer)
+	rows, err := a.serverCompositionRows(chID)
 	if err != nil {
 		a.logger.Error("app: read composition", "channel", string(chID), "err", err)
 		return
 	}
-	for rows.Next() {
-		var s instanceSpec
-		if err := rows.Scan(&s.id, &s.class, &s.cfg, &s.gcfg); err != nil {
-			continue
-		}
-		specs = append(specs, s)
-	}
-	rows.Close()
-
-	for _, s := range specs {
-		inst := s.id
-		// The engine = ca.class (per-channel concrete class). config = global
-		// identity overlaid by per-channel (mergeConfig); no looper-DSN packing.
-		cfg := mergeConfig(s.gcfg, s.cfg)
-		decl, err := registry.Build(s.class, registry.InstanceSpec{
-			ID:     actor.ActorID(inst),
-			Config: cfg,
-		}, registry.Deps{
-			ChannelID: chID,
-			Logger:    a.logger,
-		})
+	for _, r := range rows {
+		decl, err := a.buildInstance(chID, r)
 		if err != nil {
-			a.logger.Debug("app: composition instance not built", "channel", string(chID), "instance", inst, "reason", err.Error())
+			a.logger.Debug("app: composition instance not built", "channel", string(chID), "instance", r.instanceID, "reason", err.Error())
 			continue
 		}
 		// Home.Spawn Mints the pen welded to (decl.ID, chID) inside the admission

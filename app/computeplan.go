@@ -33,29 +33,19 @@ type daemonAssignment struct {
 // ONLY their own rows; an unassigned pool row (desired_host='') is delivered to
 // no daemon (a legal transient — no daemon claims it yet).
 func (a *App) daemonComposition(chID channel.ID, daemonID string) ([]daemonAssignment, error) {
-	rows, err := a.db.Query(
-		`SELECT ca.instance_id, ca.class, COALESCE(ca.config_json, ''), COALESCE(a.config_json, '')
-		   FROM channel_actors ca
-		   LEFT JOIN agents a ON ca.instance_id = 'agent:' || a.id
-		  WHERE ca.channel_id = ? AND ca.placement = ? AND ca.desired_host = ?`,
-		string(chID), placementDaemon, daemonID)
+	rows, err := a.daemonCompositionRows(chID, daemonID)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []daemonAssignment{}
-	for rows.Next() {
-		var id, class, cfg, gcfg string
-		if err := rows.Scan(&id, &class, &cfg, &gcfg); err != nil {
-			continue
-		}
+	out := make([]daemonAssignment, 0, len(rows))
+	for _, r := range rows {
 		out = append(out, daemonAssignment{
-			InstanceID: id,
-			Class:      class,
-			Config:     mergeConfig(gcfg, cfg),
+			InstanceID: r.instanceID,
+			Class:      r.class,
+			Config:     mergeConfig(r.globalCfg, r.channelCfg),
 		})
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 // handleComputePlan is the daemon's pull endpoint: authenticated by the same

@@ -13,9 +13,7 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/registry"
 )
 
 // agents.go is the create-and-control face: a direct API over the
@@ -31,14 +29,10 @@ import (
 // from its state slot). Mirrors spawnComposition's per-instance block.
 func (a *App) spawnAgentInstance(chID channel.ID, home *platform.Home, instanceID, class, channelCfg, globalCfg string) error {
 	// class IS the engine (claude/go-kimi); config = global identity overlaid by
-	// per-channel (mergeConfig). No looper-DSN packing.
-	cfg := mergeConfig(globalCfg, channelCfg)
-	decl, err := registry.Build(class, registry.InstanceSpec{
-		ID:     actor.ActorID(instanceID),
-		Config: cfg,
-	}, registry.Deps{
-		ChannelID: chID,
-		Logger:    a.logger,
+	// per-channel (mergeConfig). Shared build装配 (A12: same buildInstance the
+	// reconcile builder / spawnComposition use).
+	decl, err := a.buildInstance(chID, compositionRow{
+		instanceID: instanceID, class: class, channelCfg: channelCfg, globalCfg: globalCfg,
 	})
 	if err != nil {
 		return err
