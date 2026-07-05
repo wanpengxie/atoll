@@ -248,9 +248,9 @@ const clientRequestTTLMs int64 = 30_000
 // newClientEnvelope builds a message.Envelope from the user's raw intent, filling
 // product defaults (ID, Kind, TTL). Identity is NOT filled: ChannelID and Sender
 // are left zero for the pen to weld at write time (sealed-pen: identity is
-// substrate-injected, not caller-settable). Kind defaults to request; the sender's
-// human KIND rides as the envelope's declared kind but step 4 force-overwrites it
-// from the registry, so it is advisory here.
+// substrate-injected, not caller-settable). The message Kind here is the routing
+// policy's decision (KindRequest to a brain / KindEvent for a group broadcast),
+// defaulting to request when unset — it stands as written, not advisory.
 func (h *humanFront) newClientEnvelope(in submitInput, kind message.Kind, audience []actor.ActorID) *message.Envelope {
 	now := time.Now().UnixMilli()
 	exp := now + clientRequestTTLMs
@@ -271,9 +271,11 @@ func (h *humanFront) newClientEnvelope(in submitInput, kind message.Kind, audien
 		TS:   now,
 		Kind: kind,
 		Type: in.Type,
-		// Sender left zero: identity is substrate-injected (pen welds id, step 4
-		// welds kind from registry) — not caller-settable. Filling it here is
-		// harmless (fail-fast only guards id/channel) but off-spec, so leave empty.
+		// Sender left zero: identity is substrate-injected — the pen welds Sender.ID
+		// at write time and the sender_consistent step welds Sender.Kind from the
+		// pen-welded caller.kind (not from any registry lookup) — not caller-settable.
+		// Filling it here is harmless (fail-fast only guards id/channel) but off-spec,
+		// so leave empty.
 		Audience:  aud,
 		Payload:   in.Payload,
 		ExpiresAt: &exp,
