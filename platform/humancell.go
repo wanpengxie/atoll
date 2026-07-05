@@ -2,37 +2,108 @@ package platform
 
 import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// humanCellFactory is the platform's built-in home-side human embodiment (CORE1
-// minimal). user域 supply is platform internal政 — a per-channel human member's
-// authority lives only in the channel's own registry (the app cannot enumerate
-// it), so the reconcile ring keeps a live human cell up whenever the member is
-// admitted, without any app-injected factory.
+// Day-1 two of the three honest closure options (三层律 §3) a human cell
+// declares per request type. fail-fast (device_unreachable) is not a human's
+// option: the log IS the inbox, so a human is never structurally unreachable —
+// an unrecognised type degrades to the deferred (收件箱) default rather than a
+// fabricated failure.
+const (
+	// TypeHumanMessage is IMMEDIATE: a message to the human's inbox, answered
+	// completed on receipt (durable delivery to the log IS the answer).
+	TypeHumanMessage = "human.message"
+	// TypeHumanApprove is DEFERRED: left OPEN until the person answers via the
+	// door (HumanHandle.Resolve). Closure is the sender's caller-scoped timer.
+	TypeHumanApprove = "human.approve"
+)
+
+// humanCellFactory is the platform's built-in home-side human embodiment. user域
+// supply is platform internal政 — a per-channel human member's authority lives
+// only in this channel's registry (the app cannot enumerate it), so the reconcile
+// ring keeps a live human cell up whenever the member is admitted, without any
+// app-injected factory. The cell captures the SHARED per-user Caller (author#2)
+// so it Matches replies to requests the same subject Armed via HumanHandle.Submit.
 //
 // Proc shape (through the actorbase engine, NOT a raw actorrt.Actor implementer —
-// archtest wall): the full三选 (immediate human.message / deferred human.approve)
-// + the Resolve/Cancel/After door land in CORE2 (subjectgate). This minimal form
-// answers a call to an absent-device human by leaving the request OPEN — the
-// DEFERRED honest option (三层律 §3), never the old humanFront.Receive no-op that
-// reported Delivered (the dishonest fourth state).
-func humanCellFactory() ActorFactory {
+// archtest wall): a serve loop that answers each request per the three-choice type
+// table (immediate human.message / deferred human.approve / describe self-answer)
+// and Matches responses onto the author#2 Caller.
+func humanCellFactory(h *Home, id actor.ActorID) ActorFactory {
+	caller := h.humanCaller(id)
 	return ActorFactory{Proc: actorbase.Def{
-		Doc: "home-side human embodiment (CORE1 minimal): callable; leaves every request OPEN (deferred三选) — the person answers via the door (CORE2 subjectgate)",
-		New: func() (actorbase.Proc, error) { return humanProc, nil },
+		Doc: "home-side human embodiment (subjectgate): callable; three-choice per-type closure (immediate human.message / deferred human.approve) + describe; the person answers deferred requests via the door",
+		New: func() (actorbase.Proc, error) {
+			return func(sys actorbase.Sys) error { return humanServe(sys, caller) }, nil
+		},
 	}}
 }
 
-// humanProc drains its mailbox but never responds: a call to a human whose device
-// is absent is answered by leaving the request OPEN (deferred). It never
-// fabricates a Reply/Fail it did not earn — closure is the sender's caller-scoped
-// timer, and the person's own Resolve (CORE2) is the real answer. Returning on a
-// Recv error is the cooperative termination contract (spec §1.6).
-func humanProc(sys actorbase.Sys) error {
+// humanServe is the human cell's serve loop. Responses match the author#2 Caller
+// (closing the subject's own outstanding requests); requests route through the
+// three-choice type table. Returning on a Recv error is the cooperative
+// termination contract (spec §1.6).
+func humanServe(sys actorbase.Sys, caller *behavior.Caller) error {
 	for {
-		if _, err := sys.Recv(); err != nil {
+		msg, err := sys.Recv()
+		if err != nil {
 			return nil
 		}
-		// deferred: leave the request open (no Reply/Fail).
+		switch msg.Kind {
+		case message.KindResponse:
+			// author#2: a reply to one of THIS subject's outstanding requests
+			// (armed on the gateway goroutine) — close it on the cell goroutine.
+			// Match reads only Kind/ParentID/Payload, so a minimal projection back
+			// to an envelope is faithful.
+			caller.Match(&message.Envelope{
+				Kind:     msg.Kind,
+				ParentID: msg.ParentID,
+				Payload:  msg.Payload,
+			})
+		case message.KindRequest:
+			humanServeRequest(sys, msg)
+		}
+	}
+}
+
+// humanServeRequest answers one delivered request per the three-choice type
+// table. It NEVER fabricates a Reply it did not earn: human.approve and any
+// unrecognised type are left OPEN (deferred) — the person's Resolve via the door
+// is the real answer, and closure is the sender's caller-scoped timer.
+func humanServeRequest(sys actorbase.Sys, msg actorbase.Msg) {
+	switch msg.Type {
+	case introspect.QueryDescribe:
+		req, err := introspect.ParseDescribeRequest(msg.Payload)
+		if err != nil {
+			_, _ = sys.Fail(msg, "payload_invalid", err.Error())
+			return
+		}
+		answer, ok := introspect.AnswerDescribe(humanDescribe(string(sys.Self())), req)
+		if !ok {
+			_, _ = sys.Fail(msg, "type_unsupported", "human cell does not serve "+req.Type)
+			return
+		}
+		_, _ = sys.Reply(msg, answer)
+	case TypeHumanMessage:
+		// immediate: 收件即 completed 回执 (log 即收件箱).
+		_, _ = sys.Reply(msg, map[string]any{"delivered": true})
+	default:
+		// deferred (human.approve and any other type): leave OPEN — no Reply/Fail.
+	}
+}
+
+// humanDescribe is the human cell's actor.describe self-answer catalog.
+func humanDescribe(id string) introspect.Describe {
+	return introspect.Describe{
+		ActorID:     id,
+		Description: "human subject — occupant off-process; the log is the inbox",
+		Types: map[string]introspect.TypeMeta{
+			TypeHumanMessage: {Description: "immediate: delivered to the human's inbox, answered completed on receipt"},
+			TypeHumanApprove: {Description: "deferred: left open until the person answers via the door (Resolve)"},
+		},
 	}
 }

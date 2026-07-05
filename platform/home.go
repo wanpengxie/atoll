@@ -10,6 +10,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/channelkit"
 	"github.com/wanpengxie/atoll/platform/internal/devicepresence"
 	"github.com/wanpengxie/atoll/platform/internal/link"
@@ -85,6 +86,16 @@ type Home struct {
 	deviceFold *devicepresence.Fold
 	logger     *slog.Logger
 	nowMs      func() int64
+
+	// humanCallers is the home-scoped, per-user author#2 closure index. One
+	// behavior.Caller per (channel, user), welded to that user's pen — SHARED by
+	// HumanHandle.Submit (Arm on the gateway goroutine) and the human cell's Recv
+	// loop (Match on the cell goroutine). behavior.Caller is cross-goroutine safe
+	// (CORE2①), and the instance is stable across cell crash/revive (keyed by id,
+	// not by incarnation), so a request armed before a crash still gets its
+	// unanswered_timeout terminal after the cell is reborn.
+	humanCallersMu sync.Mutex
+	humanCallers   map[actor.ActorID]*behavior.Caller
 
 	// placement decides which host a new activity (fork/activation) starts on.
 	// Single fixed-home identity this period (SinglePlacement); shaped now so
@@ -588,7 +599,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 // not-found). Kind is caller-held (rec.Kind), never re-answered.
 func (h *Home) factoryFor(rec storespec.Record) (ActorFactory, bool) {
 	if rec.Kind == actor.KindHuman {
-		return humanCellFactory(), true
+		return humanCellFactory(h, rec.ID), true
 	}
 	if h.builder == nil {
 		return ActorFactory{}, false

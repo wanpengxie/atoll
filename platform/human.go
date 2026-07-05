@@ -125,6 +125,28 @@ func (h HumanHandle) clock() func() time.Time {
 	return func() time.Time { return time.UnixMilli(h.home.nowMs()) }
 }
 
+// humanCaller returns the home-scoped author#2 closure manager for a human
+// subject, welded to that user's own pen (minter.Mint id-scoped — the same
+// identity Human()'s handle writes under). Get-or-create under lock: one Caller
+// per (channel, user), SHARED by Submit's Arm (gateway goroutine) and the human
+// cell's Match (cell goroutine), and stable across cell crash/revive so a request
+// armed before the crash still gets its unanswered_timeout after rebirth.
+func (h *Home) humanCaller(id actor.ActorID) *behavior.Caller {
+	h.humanCallersMu.Lock()
+	defer h.humanCallersMu.Unlock()
+	if h.humanCallers == nil {
+		h.humanCallers = map[actor.ActorID]*behavior.Caller{}
+	}
+	if c, ok := h.humanCallers[id]; ok {
+		return c
+	}
+	pen := h.minter.Mint(id, actor.KindHuman, h.channelID)
+	clock := func() time.Time { return time.UnixMilli(h.nowMs()) }
+	c := behavior.NewCaller(pen, clock, nil)
+	h.humanCallers[id] = c
+	return c
+}
+
 // Submit commits one subject write through the welded pen and returns the receipt
 // (message id + seq) synchronously (POST 201 / ws ack same shape). Per-call户籍
 // 校验 first: a removed member's stale handle is rejected. audience/kind are the
@@ -164,6 +186,13 @@ func (h HumanHandle) Submit(ctx context.Context, spec SubmitSpec) (message.ID, i
 	}
 	if !res.Accepted() {
 		return "", 0, &WriteRejectedError{Reason: string(res.RejectReason), Detail: res.RejectDetail}
+	}
+	// author#2: a subject-authored request arms the shared per-user Caller so an
+	// unanswered request gets its unanswered_timeout terminal (fired off the
+	// gateway goroutine, closed by the cell goroutine's Match). A no-deadline
+	// request registers in-flight without a timer (no closure guarantee owed).
+	if kind == message.KindRequest {
+		h.home.humanCaller(h.userID).Arm(env)
 	}
 	return res.MessageID, res.Seq, nil
 }
