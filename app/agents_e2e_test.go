@@ -7,11 +7,11 @@ import (
 )
 
 // TestAgentsAPI_CreateIntroduceRestartDelete exercises the agent creation and
-// control surface: create a claude-looper agent (declaration), introduce it to a channel (which
-// inserts the composition row + spawns it live via the stub "agent" class),
-// restart it (rebuild + Spawn), then soft-delete it (gone from the list +
-// composition). Proves the agents table + two-layer/looper composition + the
-// control API end to end.
+// control surface: create a claude-looper agent (declaration), introduce it to a
+// channel server-placed (which writes the composition row + Admits — embodiment is
+// the reconcile ring's async job now, not a synchronous spawn), restart it
+// (rebuild + Spawn), then soft-delete it (gone from the list + composition). Proves
+// the agents table + two-layer/looper composition + the control API end to end.
 func TestAgentsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 	env := setupTestApp(t)
 	_, cookies := register(t, env, "agents@example.com", "secret123", "AgentOwner")
@@ -36,16 +36,16 @@ func TestAgentsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 		t.Fatalf("list agents = %d, want 1", got)
 	}
 
-	// introduce to channel → composition row + live stub spawn
+	// introduce to channel server-placed → composition row + Admit (created=true)
 	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
-		map[string]any{"agent_id": agentID, "make_default": true}, cookies)
+		map[string]any{"agent_id": agentID, "placement": "server", "make_default": true}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	intro := respJSON(t, w)
 	if intro["instance_id"] != "agent:"+agentID || intro["looper"] != "claude" {
 		t.Fatalf("introduce = %+v", intro)
 	}
-	if intro["live"] != true {
-		t.Fatalf("introduce should spawn live via the stub agent class: %+v", intro)
+	if intro["placement"] != "server" || intro["created"] != true {
+		t.Fatalf("introduce should be server-placed + created: %+v", intro)
 	}
 
 	// restart rebuilds the server-placed cell(s)
@@ -81,26 +81,27 @@ func TestIntroduceAgent_HonestReintroduce(t *testing.T) {
 	agentID := respJSON(t, w)["id"].(string)
 	instID := "agent:" + agentID
 
-	// first introduce: server placement, engine=go-kimi → new row, created=true.
+	// first introduce: default placement (daemon policy), engine=go-kimi → new row,
+	// created=true.
 	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
 		map[string]any{"agent_id": agentID}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	first := respJSON(t, w)
-	if first["created"] != true || first["placement"] != "server" || first["class"] != "go-kimi" {
+	if first["created"] != true || first["placement"] != "daemon" || first["class"] != "go-kimi" {
 		t.Fatalf("first introduce = %+v", first)
 	}
 
 	// re-introduce with a DIFFERENT placement + engine → honest no-change: 200,
-	// created=false, persisted (server/go-kimi) values, NOT the caller's new ones.
+	// created=false, persisted (daemon/go-kimi) values, NOT the caller's new ones.
 	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
-		map[string]any{"agent_id": agentID, "placement": "daemon", "engine": "claude"}, cookies)
+		map[string]any{"agent_id": agentID, "placement": "server", "engine": "claude"}, cookies)
 	assertStatus(t, w, http.StatusOK)
 	again := respJSON(t, w)
 	if again["created"] != false {
 		t.Fatalf("re-introduce should report created=false: %+v", again)
 	}
-	if again["placement"] != "server" {
-		t.Fatalf("re-introduce must not mutate placement (want server): %+v", again)
+	if again["placement"] != "daemon" {
+		t.Fatalf("re-introduce must not mutate placement (want daemon): %+v", again)
 	}
 	if again["class"] != "go-kimi" {
 		t.Fatalf("re-introduce must not mutate class (want go-kimi): %+v", again)

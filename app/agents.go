@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -201,9 +203,13 @@ type introduceAgentReq struct {
 	Engine string `json:"engine"`
 }
 
-// handleIntroduceAgent adds an agent to a channel's composition (channel_actors)
-// and spawns it live when server-placed. Intent persists even if the live spawn
-// fails (e.g. the claude CLI is absent) — mirrors spawnComposition's tolerance.
+// handleIntroduceAgent is the HTTP front for the add half of composition CRUD. It
+// is a THIN adapter over the canonical control path: it forwards the caller as the
+// operating principal (user:<id>) into operateExecutor.Introduce — the SAME chain
+// the in-gate channel.introduce_actor type drives (red line 11: no control ability
+// reachable only via HTTP). Ref-eligibility (二型律), ClassKind precheck, intent
+// write + Admit + poke all live in the executor; embodiment is the ring's async job
+// (no synchronous live-spawn here — live is decided by the next reconcile sweep).
 func (a *App) handleIntroduceAgent(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {
@@ -215,86 +221,55 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "agent_id required"})
 		return
 	}
-	var defLooper, gcfg string
-	err := a.db.QueryRowContext(c.Request.Context(),
-		`SELECT default_looper, COALESCE(config_json, '') FROM agents WHERE id = ? AND owner = ? AND deleted_at IS NULL`,
-		req.AgentID, userID).Scan(&defLooper, &gcfg)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
-		return
-	}
+	payload, _ := json.Marshal(introducePayload{
+		AgentID: req.AgentID, Placement: req.Placement, DesiredHost: req.DesiredHost,
+		MakeDefault: req.MakeDefault, Engine: req.Engine,
+	})
+	res, err := a.operateFace().Introduce(c.Request.Context(), platform.OperateRequest{
+		ChannelID: channel.ID(chID),
+		Sender:    actor.ActorID("user:" + userID),
+		Payload:   payload,
+	})
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		code, detail := operateHTTPError(err)
+		c.JSON(code, gin.H{"error": detail})
 		return
 	}
-	// Effective engine for THIS channel = explicit override ?? agent default
-	// (eager: resolved now into channel_actors.class = the per-channel concrete
-	// engine class).
-	engine := strings.TrimSpace(req.Engine)
-	if engine == "" {
-		engine = defLooper
+	m, _ := res.(map[string]any)
+	if m == nil {
+		m = gin.H{}
 	}
-	placement := strings.TrimSpace(req.Placement)
-	if placement == "" {
-		placement = placementServer
+	m["channel_id"] = chID
+	if cl, ok := m["class"].(string); ok {
+		m["looper"] = cl
 	}
-	desiredHost := strings.TrimSpace(req.DesiredHost)
-	// Two-level placement×desired_host invariant enforced at the write face: a
-	// 'server' row pins the server host and carries no daemon assignment. Reject
-	// a dirty combination rather than let it slip past the plan filter.
-	if placement == placementServer && desiredHost != "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "server placement cannot carry desired_host"})
-		return
+	status := http.StatusOK
+	if created, _ := m["created"].(bool); created {
+		status = http.StatusCreated
 	}
-	instanceID := "agent:" + req.AgentID
+	c.JSON(status, m)
+}
 
-	// SW-8: introduce is honest about a pre-existing row. Re-introduce never
-	// mutates class/placement/desired_host (rehoming = remove_actor +
-	// re-introduce); it reports the persisted row as-is ("exists, unchanged")
-	// instead of INSERT OR IGNORE silently swallowing the change while echoing
-	// the caller's new values. Only a brand-new row is inserted + spawned.
-	var exClass, exPlacement, exDesiredHost string
-	qerr := a.db.QueryRowContext(c.Request.Context(),
-		`SELECT class, placement, desired_host FROM channel_actors WHERE channel_id = ? AND instance_id = ?`,
-		chID, instanceID).Scan(&exClass, &exPlacement, &exDesiredHost)
-	if qerr == nil {
-		c.JSON(http.StatusOK, gin.H{
-			"channel_id": chID, "instance_id": instanceID,
-			"placement": exPlacement, "class": exClass, "looper": exClass,
-			"desired_host": exDesiredHost, "created": false, "live": false,
-		})
-		return
-	}
-	if qerr != sql.ErrNoRows {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
-	}
-
-	if _, err := a.db.ExecContext(c.Request.Context(),
-		`INSERT INTO channel_actors (channel_id, instance_id, class, placement, desired_host) VALUES (?,?,?,?,?)`,
-		chID, instanceID, engine, placement, desiredHost); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
-	}
-	if req.MakeDefault {
-		_, _ = a.db.ExecContext(c.Request.Context(),
-			`UPDATE channels SET default_agent = ? WHERE id = ?`, instanceID, chID)
-	}
-	live := false
-	if placement == placementServer {
-		if home := a.getHome(channel.ID(chID)); home != nil {
-			if serr := a.spawnAgentInstance(channel.ID(chID), home, instanceID, engine, "", gcfg); serr != nil {
-				a.logger.Warn("introduce agent: spawn", "channel", chID, "instance", instanceID, "err", serr.Error())
-			} else {
-				live = true
-			}
+// operateHTTPError maps an operateExecutor error to an HTTP (status, detail): an
+// *platform.OperateError carries its own code (translated to a status), anything
+// else is an internal error.
+func operateHTTPError(err error) (int, string) {
+	var oe *platform.OperateError
+	if errors.As(err, &oe) {
+		switch oe.Code {
+		case "agent_not_found":
+			return http.StatusNotFound, "agent not found"
+		case "forbidden":
+			return http.StatusForbidden, oe.Detail
+		case "channel_unavailable":
+			return http.StatusServiceUnavailable, oe.Detail
+		case "bad_payload", "unknown_class", "invalid_placement", "not_in_composition":
+			return http.StatusBadRequest, oe.Detail
+		default:
+			return http.StatusBadRequest, oe.Detail
 		}
 	}
-	c.JSON(http.StatusCreated, gin.H{
-		"channel_id": chID, "instance_id": instanceID,
-		"placement": placement, "class": engine, "looper": engine,
-		"desired_host": desiredHost, "created": true, "live": live,
-	})
+	return http.StatusInternalServerError, "internal error"
 }
 
 // handleRestartAgent rebuilds + respawns the agent's server-placed cells in every

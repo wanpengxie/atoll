@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/app"
 	"github.com/wanpengxie/atoll/platform"
@@ -217,7 +218,14 @@ func createChannel(t *testing.T, env *testEnv, cookies []*http.Cookie, wsID, nam
 		"name": name,
 	}, cookies)
 	assertStatus(t, w, http.StatusCreated)
-	return respJSON(t, w), mergeCookies(cookies, extractCookies(w))
+	body := respJSON(t, w)
+	// Composition embodiment is async now (reconcile ring, not a synchronous spawn):
+	// wait for the boost default floor to come up so tests that immediately send a
+	// message find a live default agent (matches the old synchronous readiness).
+	if chID, ok := body["id"].(string); ok {
+		env.app.WaitLiveForTest(chID, actor.ActorID("agent:boost"), 2*time.Second)
+	}
+	return body, mergeCookies(cookies, extractCookies(w))
 }
 
 // fullSetup does register + login + create workspace + create channel, returns

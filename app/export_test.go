@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -52,6 +53,28 @@ func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) error
 		return errTestChannelNotLoaded
 	}
 	return home.Admit(context.Background(), id, kind)
+}
+
+// WaitLiveForTest polls chID's home until id has a live embodiment (View.Stat) or
+// the timeout elapses — the async-embodiment counterpart of the old synchronous
+// spawn: since composition is embodied by the reconcile ring (Admit + poke → sweep),
+// a test that needs a live default floor before sending must wait for the sweep.
+// Test-only.
+func (a *App) WaitLiveForTest(chID string, id actor.ActorID, timeout time.Duration) bool {
+	home := a.getHome(channel.ID(chID))
+	if home == nil {
+		return false
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if _, live := home.View().Stat(id); live {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // KillCellForTest kills id's live embodiment on chID's home (despawn + dereg) —

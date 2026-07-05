@@ -272,11 +272,9 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 	a.homes[chID] = home
 	a.mu.Unlock()
 
-	// Spawn the channel's DESIRED composition (channel_actors) — the server-placed
-	// instances. Intent lives in channel_actors; what actually comes up lands in
-	// the substrate's actor_registry.
-	a.spawnComposition(chID, home)
-
+	// Composition embodiment is the reconcile ring's job now (compositionDesired ∩
+	// membership → SpawnIfAbsent), run by Open's synchronous startup sweep — the app
+	// no longer hand-spawns at open time (spawnComposition retired, A-P1=A′).
 	return home, nil
 }
 
@@ -294,44 +292,14 @@ const (
 	// fixed fallback engine.
 	defaultBoostLooper = "go-kimi"
 	// placementServer marks a composition instance the SERVER hosts (embedded
-	// cell). spawnComposition only spawns these.
+	// cell). The reconcile ring only embodies these; daemon-placed rows are pulled
+	// by the daemon's own plan.
 	placementServer = "server"
 	// placementDaemon marks a composition instance a connected DAEMON hosts. The
 	// server never spawns these; the daemon pulls them (GET /compute/plan) and
 	// builds them with its LOCAL creds.
 	placementDaemon = "daemon"
 )
-
-// spawnComposition reads the channel's DESIRED composition (channel_actors) and
-// spawns each instance from the actor catalog via the generic Build → Spawn
-// path — no special "the agent" case. The composition is INTENT; a build/spawn
-// failure (e.g. agent with no LLM creds) is logged and skipped: the row stays
-// (intent), the instance just isn't running (actor_registry has no row),
-// and default_agent still points at it. Each instance is admitted via Home.Spawn,
-// which Mints a pen welded to its (id, chID) inside the membrane and hands it to
-// the factory — the app never sees a bare writer (sealed-pen). Server placement:
-// Deps carries NO WorkspaceDir, so the agent class derives the server-embedded
-// Situation.
-func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
-	rows, err := a.serverCompositionRows(chID)
-	if err != nil {
-		a.logger.Error("app: read composition", "channel", string(chID), "err", err)
-		return
-	}
-	for _, r := range rows {
-		decl, err := a.buildInstance(chID, r)
-		if err != nil {
-			a.logger.Debug("app: composition instance not built", "channel", string(chID), "instance", r.instanceID, "reason", err.Error())
-			continue
-		}
-		// Home.Spawn Mints the pen welded to (decl.ID, chID) inside the admission
-		// membrane and hands it to the factory — the app supplies WHAT to place
-		// (id + factory), never a bare writer or a Minter (sealed-pen).
-		if err := home.Spawn(context.Background(), decl.ID, decl.Kind, decl.Factory); err != nil {
-			a.logger.Warn("app: spawn composition instance failed", "channel", string(chID), "instance", string(decl.ID), "err", err.Error())
-		}
-	}
-}
 
 // mergeConfig layers the per-channel config_json OVER the global agents config
 // (one config, two layers). Shallow object merge — channel keys

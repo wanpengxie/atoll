@@ -141,8 +141,8 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	// Template seeding is a PAIR: the seeded boost composition intent row (written
 	// in the tx above) + its durable membership admission. Intent without
 	// membership is filtered to a never-embodied dead row under desired=intent∩
-	// membership; the Admit closes the pair. Idempotent — the coexisting
-	// spawnComposition may have already membership'd boost via Home.Spawn.
+	// membership; the Admit closes the pair. Idempotent (re-Admit is a no-op-shaped
+	// upsert), and it pokes the ring so boost embodies without waiting a tick.
 	if mErr := home.Admit(c.Request.Context(), defaultAgentInstanceID, actor.KindAgent); mErr != nil {
 		a.logger.Warn("app: channel boost admit failed", "channel", chID, "err", mErr.Error())
 	}
