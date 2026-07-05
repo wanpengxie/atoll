@@ -374,14 +374,21 @@ func Open(cfg HomeConfig) (*Home, error) {
 	})
 	h.links = links
 
-	// 12. Reconcilers (level backstops). Run one sweep of EACH at startup — closure
-	//     is the home-restart recovery path (#4, close orphan open requests whose
-	//     receiver's embodiment predates this process); activation re-mints the
-	//     always-on desired set. Then a low-frequency ticker keeps both as the
+	// 12. Reconcilers (level backstops). Run one sweep of EACH at startup —
+	//     activation re-mints the always-on desired set; closure is the home-restart
+	//     recovery path (#4, close orphan open requests whose receiver's embodiment
+	//     predates this process). Then a low-frequency ticker keeps both as the
 	//     safety net for any lost death edge / intent change. The death edge (OnDown)
 	//     remains the lossy fast-path for closure.
-	channel.Reconcile(ctx)
+	//
+	//     BOOT-ORDER红线 (红线12): activation MUST precede closure, at the first sweep
+	//     AND every tick. closure's verdict is "absent right now" (livenessProbe),
+	//     not "predates this process" — so a receiver whose desired cell the ring has
+	//     not yet (re)minted this sweep would be scanned as receiver_unavailable and
+	//     its deferred open requests wrongly closed. Minting first, then scanning,
+	//     keeps a restart / mid-life-crash cell's open requests alive across the sweep.
 	h.reconcileActivation(ctx)
+	channel.Reconcile(ctx)
 	sweepEvery := cfg.ReconcileInterval
 	if sweepEvery <= 0 {
 		sweepEvery = reconcileInterval
@@ -397,8 +404,8 @@ func Open(cfg HomeConfig) (*Home, error) {
 			case <-reconcileCtx.Done():
 				return
 			case <-t.C:
-				channel.Reconcile(reconcileCtx)
 				h.reconcileActivation(reconcileCtx)
+				channel.Reconcile(reconcileCtx)
 			}
 		}
 	}()
