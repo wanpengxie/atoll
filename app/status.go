@@ -34,9 +34,8 @@ func (a *App) handleActorStatus(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "actor id required"})
 		return
 	}
-	home := a.getHome(channel.ID(chID))
+	home := a.homeOrError(c, channel.ID(chID))
 	if home == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
 		return
 	}
 

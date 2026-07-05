@@ -164,7 +164,7 @@ func (a *App) registerRoutes() {
 
 		api.GET("/channels/:chID", a.handleGetChannel)
 		api.DELETE("/channels/:chID", a.handleDeleteChannel)
-		api.GET("/channels/:chID/members", a.handleListChannelMembers)
+		api.GET("/channels/:chID/workspace-members", a.handleListWorkspaceMembers)
 		api.GET("/channels/:chID/actors", a.handleListActors)
 		api.GET("/channels/:chID/actors/:actorID/status", a.handleActorStatus)
 
@@ -231,6 +231,29 @@ func (a *App) getHome(chID channel.ID) *platform.Home {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.homes[chID]
+}
+
+// homeOrError resolves the open Home for chID, or writes the honest two-state
+// error to c and returns nil (A-P8):
+//   - the directory (channels table) has NO such channel → 404 (permanent).
+//   - the directory HAS it but its universe is not open (getHome==nil) → 503
+//     "channel unavailable" (retryable, logged) — never the misleading 404 that
+//     conflated "gone" with "not up yet".
+//
+// The two states must not collapse: a caller retrying a 503 is right to; a caller
+// retrying a 404 is not. Every handler that needs a live Home routes through here.
+func (a *App) homeOrError(c *gin.Context, chID channel.ID) *platform.Home {
+	if home := a.getHome(chID); home != nil {
+		return home
+	}
+	if _, ok := a.channelWorkspaceID(c.Request.Context(), string(chID)); !ok {
+		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+		return nil
+	}
+	a.logger.Warn("channel unavailable: directory has channel but its home is not open",
+		"channel", string(chID))
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
+	return nil
 }
 
 func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error) {

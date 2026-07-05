@@ -80,7 +80,13 @@ func (a *App) handleWS(c *gin.Context) {
 
 	home := a.getHome(chID)
 	if home == nil {
-		_ = ws.WriteJSON(gin.H{"error": "channel not loaded"})
+		// Access already passed (workspace member of an existing channel), so a nil
+		// home is the present-but-not-open state (A-P8): honestly "unavailable"
+		// (retryable), not "not found". A ws handshake has no HTTP status to carry;
+		// the frame + log mirror the 503 semantics the REST handlers return.
+		a.logger.Warn("channel unavailable: directory has channel but its home is not open",
+			"channel", string(chID))
+		_ = ws.WriteJSON(gin.H{"error": "channel unavailable"})
 		return
 	}
 
@@ -163,9 +169,8 @@ func (a *App) handleCompute(c *gin.Context) {
 		return
 	}
 
-	home := a.getHome(chID)
+	home := a.homeOrError(c, chID)
 	if home == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
 		return
 	}
 

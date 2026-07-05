@@ -160,12 +160,19 @@ func (h *humanFront) SubmitIntent(ctx context.Context, in submitInput) (harness.
 // resolveRouting reproduces the channel's no-audience routing policy (the product
 // decision moved here verbatim from handleSendMessage): an explicit audience is
 // honoured as-is; otherwise default_agent is the INTENT pointer, resolved against
-// the live roster with the agent:boost floor as the failover target:
-//   - default_agent points at a LIVE agent      → agent-centric: request to it.
+// live PRESENCE (View.Stat, the substrate's authoritative embodiment self-read)
+// with the agent:boost floor as the failover target:
+//   - default_agent points at a PRESENT agent   → agent-centric: request to it.
 //   - else the channel HAS a boost floor:
-//     boost live → failover to boost;  boost down → channel CANNOT serve (503).
+//     boost present → failover to boost;  boost absent → channel CANNOT serve (503).
 //   - else (no boost AND no default set)         → group-chat: broadcast to humans.
-//   - else (no boost, default set but down)      → no reachable brain (503).
+//   - else (no boost, default set but absent)    → no reachable brain (503).
+//
+// Liveness is PRESENCE not membership (§4.5 axes must not cross-train): a
+// brain-dead default (member registry still lists it, but its cell has no live
+// embodiment) is 503, never a silent 201 into a black hole. The human group-chat
+// broadcast below is deliberately the OTHER axis — an immediate/log-inbox event
+// addressed to all human MEMBERS regardless of device presence.
 //
 // "cannot serve" / "no brain" are per-request conditions for the SENDING user —
 // returned as a routingError, NEVER written as a channel envelope. An introduced
@@ -184,39 +191,24 @@ func (h *humanFront) resolveRouting(ctx context.Context, in submitInput) ([]acto
 
 	home := h.app.getHome(h.chID)
 	if home == nil {
-		return nil, kind, &routingError{detail: "channel not loaded"}
+		return nil, kind, &routingError{detail: "channel unavailable"}
 	}
+	view := home.View()
 
 	var da string
 	_ = h.app.db.QueryRowContext(ctx,
 		`SELECT COALESCE(default_agent, '') FROM channels WHERE id = ?`, string(h.chID)).Scan(&da)
 
-	actors, lerr := home.View().ListActors(ctx)
-	if lerr != nil {
-		// fail closed: do not silently downgrade routing on a transient view failure.
-		return nil, kind, lerr
-	}
 	daLive := false
 	if da != "" {
-		for _, ac := range actors {
-			if string(ac.ID) == da && ac.Kind == actor.KindAgent {
-				daLive = true
-				break
-			}
-		}
+		_, daLive = view.Stat(actor.ActorID(da))
 	}
 	if daLive {
 		return []actor.ActorID{actor.ActorID(da)}, message.KindRequest, nil
 	}
 
 	boostID := string(defaultAgentInstanceID)
-	boostLive := false
-	for _, ac := range actors {
-		if string(ac.ID) == boostID && ac.Kind == actor.KindAgent {
-			boostLive = true
-			break
-		}
-	}
+	_, boostLive := view.Stat(defaultAgentInstanceID)
 	hasBoost, berr := h.app.channelHasInstance(ctx, string(h.chID), boostID)
 	if berr != nil {
 		return nil, kind, berr
@@ -225,10 +217,16 @@ func (h *humanFront) resolveRouting(ctx context.Context, in submitInput) ([]acto
 	case hasBoost && boostLive:
 		return []actor.ActorID{defaultAgentInstanceID}, message.KindRequest, nil
 	case hasBoost:
-		// boost floor introduced but down → channel cannot serve.
+		// boost floor introduced but its cell is not present → channel cannot serve.
 		return nil, kind, &routingError{detail: "the channel's default/fallback agent is down"}
 	case da == "":
-		// no floor + no default → pure group-chat: broadcast to humans.
+		// no floor + no default → pure group-chat: broadcast to human MEMBERS
+		// (membership axis, not presence — an event lands in each human's log inbox).
+		actors, lerr := view.ListActors(ctx)
+		if lerr != nil {
+			// fail closed: do not silently downgrade routing on a transient view failure.
+			return nil, kind, lerr
+		}
 		for _, ac := range actors {
 			if ac.Kind == actor.KindHuman {
 				audience = append(audience, ac.ID)
@@ -236,7 +234,7 @@ func (h *humanFront) resolveRouting(ctx context.Context, in submitInput) ([]acto
 		}
 		return audience, message.KindEvent, nil
 	default:
-		// da was set but its brain is down, and no boost floor exists.
+		// da was set but its brain is absent, and no boost floor exists.
 		return nil, kind, &routingError{detail: "the channel's default agent is down and no fallback is configured"}
 	}
 }

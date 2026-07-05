@@ -200,7 +200,14 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
-func (a *App) handleListChannelMembers(c *gin.Context) {
+// handleListWorkspaceMembers lists the WORKSPACE roster reachable through this
+// channel (workspace_members JOIN users) — a world-layer / subject-domain
+// projection (HTTP legitimate), NOT the channel's actor census. Named honestly:
+// "who is in the workspace", not "who is in the channel". The channel's real
+// roster (its admitted actors) is served by handleListActors (/actors), backed by
+// the in-gate sysactor actor.list; the two are different questions and must not be
+// conflated (A11).
+func (a *App) handleListWorkspaceMembers(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {
 		return
@@ -243,9 +250,8 @@ func (a *App) handleListActors(c *gin.Context) {
 	if !ok {
 		return
 	}
-	home := a.getHome(channel.ID(chID))
+	home := a.homeOrError(c, channel.ID(chID))
 	if home == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
 		return
 	}
 
@@ -278,9 +284,8 @@ func (a *App) handleCursor(c *gin.Context) {
 	if !ok {
 		return
 	}
-	home := a.getHome(channel.ID(chID))
+	home := a.homeOrError(c, channel.ID(chID))
 	if home == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
 		return
 	}
 	seq, err := home.View().MaxSeq(c.Request.Context())
@@ -297,9 +302,8 @@ func (a *App) handleListMessages(c *gin.Context) {
 	if !ok {
 		return
 	}
-	home := a.getHome(channel.ID(chID))
+	home := a.homeOrError(c, channel.ID(chID))
 	if home == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
 		return
 	}
 
@@ -340,8 +344,7 @@ func (a *App) handleSendMessage(c *gin.Context) {
 	if !ok {
 		return
 	}
-	if home := a.getHome(channel.ID(chID)); home == nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
+	if home := a.homeOrError(c, channel.ID(chID)); home == nil {
 		return
 	}
 
@@ -369,7 +372,9 @@ func (a *App) handleSendMessage(c *gin.Context) {
 	front, err := a.humanFor(c.Request.Context(), channel.ID(chID), userID)
 	if err != nil {
 		if errors.Is(err, errChannelNotLoaded) {
-			c.JSON(http.StatusNotFound, gin.H{"error": "channel not loaded"})
+			// Home vanished between homeOrError above and admission (teardown race):
+			// present-in-directory but not open → 503 unavailable (A-P8).
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 			return
 		}
 		a.logger.Error("send message: admit human front", "channel", chID, "err", err)
