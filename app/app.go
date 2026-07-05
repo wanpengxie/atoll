@@ -197,16 +197,6 @@ func (a *App) registerRoutes() {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	})
 
-	// Placements stub (no auth -- CLI diagnostic tool).
-	a.engine.GET("/api/placements", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"placements": []any{}})
-	})
-
-	// Daemon version stub.
-	a.engine.GET("/api/daemon/version", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{"latest": "dev", "force": false})
-	})
-
 	// WebSocket endpoints.
 	a.engine.GET("/ws", a.handleWS)
 	a.engine.GET("/compute", a.handleCompute)
