@@ -156,12 +156,14 @@ func (a *App) registerRoutes() {
 		api.GET("/channels/:chID", a.handleGetChannel)
 		api.DELETE("/channels/:chID", a.handleDeleteChannel)
 		api.GET("/channels/:chID/workspace-members", a.handleListWorkspaceMembers)
+		// DEPRECATED (第二链路, H2 defer): channel-internal reads move onto the
+		// gateway ws (roster/tail/cursor frames). Kept as read shims until帧化; no
+		// new consumers. The channel-internal WRITE path is already gone — the ws
+		// message frame replaced POST /messages (H1=a, zero backward-compat).
 		api.GET("/channels/:chID/actors", a.handleListActors)
 		api.GET("/channels/:chID/actors/:actorID/status", a.handleActorStatus)
-
 		api.GET("/channels/:chID/cursor", a.handleCursor)
 		api.GET("/channels/:chID/messages", a.handleListMessages)
-		api.POST("/channels/:chID/messages", a.handleSendMessage)
 
 		// A user's agents (global declaration) + introduce / restart.
 		api.GET("/agents", a.handleListAgents)
