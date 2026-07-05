@@ -104,6 +104,15 @@ type Home struct {
 	reconcileStop context.CancelFunc
 	reconcileDone chan struct{}
 
+	// pokeCh is the coalesced activation wake: Admit (a fresh membership write)
+	// posts a non-blocking edge here so the reconcile ring runs its next sweep
+	// immediately instead of waiting up to one tick (30s) to embody the new
+	// member. Buffered size 1 = coalesced (many Admits between ticks fold into one
+	// extra sweep). Same shape as tap.Signal's wake. nil-safe: a poke before the
+	// ticker goroutine launches is dropped (the synchronous startup sweep already
+	// covers genesis).
+	pokeCh chan struct{}
+
 	// reviveLogMu/reviveLogAt throttle the attached-host revive-skip log (see
 	// reviveLogThrottle) to once per author per window — the schedule engine
 	// backs off a transient EnsureLive failure at schedule.backoffDuration (1s)
@@ -325,6 +334,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		prevEagerDesired: map[actor.ActorID]bool{},
 		reviveLogAt:      map[actor.ActorID]time.Time{},
 		obsReg:           map[actor.ActorID]bool{},
+		pokeCh:           make(chan struct{}, 1),
 	}
 
 	// 10. Time axis (OpenScheduler). FireSink mints a pen per fire (author-welded);
@@ -404,6 +414,12 @@ func Open(cfg HomeConfig) (*Home, error) {
 			case <-reconcileCtx.Done():
 				return
 			case <-t.C:
+				h.reconcileActivation(reconcileCtx)
+				channel.Reconcile(reconcileCtx)
+			case <-h.pokeCh:
+				// Admit poke: run the same activation-then-closure sweep off-tick so
+				// a freshly-admitted member embodies without the ≤30s wait. Boot-order
+				// 红线 holds (activation precedes closure) on this path too.
 				h.reconcileActivation(reconcileCtx)
 				channel.Reconcile(reconcileCtx)
 			}
@@ -591,6 +607,44 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, def
 	h.logger.Info("platform.member.spawned", "channel", string(h.channelID),
 		"actor", string(id), "kind", string(kind), "cell", hasCell)
 	return nil
+}
+
+// Admit registers one actor as durable channel membership truth and nothing more
+// — the pure-membership primitive (the not→member edge of §4.6). It writes a
+// NEUTRAL row (Binding="" / Host=""): membership precedes embodiment, and the
+// host path (daemon attach / activation ring) owns Binding/Host stamping — Admit
+// never guesses placement. It does not Mint a pen or place a cell; the desired
+// member is embodied by the reconcile ring's SpawnIfAbsent (activation) or a
+// daemon attach, never by Admit itself. After the write it pokes the ring so the
+// embodiment lands on the next immediate sweep rather than waiting a full tick.
+// Idempotent: ApplyMemberTransitions upserts a live row (a re-Admit of an existing
+// member is a no-op-shaped write + a harmless extra poke).
+func (h *Home) Admit(ctx context.Context, id actor.ActorID, kind actor.Kind) error {
+	if id == "" {
+		return fmt.Errorf("platform: Admit id required")
+	}
+	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{{
+		ID: id, Kind: kind, Binding: actor.Binding(""), Host: "", At: h.nowMs(),
+	}}, nil); err != nil {
+		return fmt.Errorf("platform: Admit membership: %w", err)
+	}
+	h.pokeReconcile()
+	h.logger.Info("platform.member.admitted", "channel", string(h.channelID),
+		"actor", string(id), "kind", string(kind))
+	return nil
+}
+
+// pokeReconcile posts a coalesced wake to the reconcile ring (non-blocking: a
+// full buffer already carries the pending edge). No-op if the ticker goroutine
+// has not launched yet (genesis is covered by the synchronous startup sweep).
+func (h *Home) pokeReconcile() {
+	if h.pokeCh == nil {
+		return
+	}
+	select {
+	case h.pokeCh <- struct{}{}:
+	default:
+	}
 }
 
 // hooks is the actorbase engine's per-host wiring for every Proc-shaped def
