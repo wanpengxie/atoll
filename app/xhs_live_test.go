@@ -152,15 +152,18 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	}()
 
 	// --- STAGE 3+4: send xhs.search → completed response with results -------
-	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/messages", s.chID), map[string]any{
-		"type":     "xhs.search",
+	wsc := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer wsc.close()
+	ack := wsc.sendMessage(map[string]any{
+		"msg_type": "xhs.search",
 		"kind":     "request",
 		"payload":  map[string]any{"keyword": "go"},
 		"audience": []string{"tool:xhs"},
-	}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	sendBody := respJSON(t, w)
-	reqMsgID := sendBody["message_id"].(string)
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("send xhs.search: want ack, got %v", ack)
+	}
+	reqMsgID := ack["message_id"].(string)
 	if reqMsgID == "" {
 		t.Fatal("send returned empty message_id")
 	}

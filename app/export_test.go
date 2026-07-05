@@ -87,3 +87,24 @@ func (a *App) KillCellForTest(chID channel.ID, id actor.ActorID) error {
 	}
 	return home.Remove(context.Background(), id)
 }
+
+// AddWorkspaceMemberForTest inserts userID into wsID's workspace roster so a
+// second registered user can pass the ws/REST channel-access ACL (which gates on
+// workspace membership). Test-only — the production join path is the invite flow.
+func (a *App) AddWorkspaceMemberForTest(wsID, userID string) error {
+	_, err := a.db.ExecContext(context.Background(),
+		`INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?,?,?)`,
+		wsID, userID, "member")
+	return err
+}
+
+// StatForTest reads id's L1 embodiment (View.Stat) on chID's home — the axis
+// presence must stay orthogonal to (层2 link来去不碰层1: startedAt stable across a
+// ws reconnect, live throughout). Test-only.
+func (a *App) StatForTest(chID channel.ID, id actor.ActorID) (startedAt time.Time, live bool) {
+	home := a.getHome(chID)
+	if home == nil {
+		return time.Time{}, false
+	}
+	return home.View().Stat(id)
+}

@@ -344,27 +344,32 @@ func TestE2E_RegisterLoginWorkspaceChannel(t *testing.T) {
 
 func TestE2E_SendMessageAndReadBack(t *testing.T) {
 	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
-	// Send a message.
-	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/messages", s.chID), map[string]any{
-		"type":    "chat.text",
-		"kind":    "event",
-		"payload": map[string]any{"text": "hello world"},
-	}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	sendBody := respJSON(t, w)
-	seq := sendBody["seq"]
+	// Send a message through the gateway ws frame (the write path; POST is废).
+	c := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer c.close()
+	ack := c.sendMessage(map[string]any{
+		"msg_type": "chat.text",
+		"kind":     "event",
+		"payload":  map[string]any{"text": "hello world"},
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("send message: want ack, got %v", ack)
+	}
+	seq := ack["seq"]
 	if seq == nil || seq.(float64) <= 0 {
 		t.Fatalf("send message returned invalid seq: %v", seq)
 	}
-	msgID := sendBody["message_id"].(string)
+	msgID := ack["message_id"].(string)
 	if msgID == "" {
 		t.Fatal("send message returned empty message_id")
 	}
 
 	// Read back messages.
-	w = env.do(t, "GET", fmt.Sprintf("/api/channels/%s/messages?after=0", s.chID), nil, s.cookies)
+	w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/messages?after=0", s.chID), nil, s.cookies)
 	assertStatus(t, w, http.StatusOK)
 	msgs := respJSONArray(t, w)
 	if len(msgs) == 0 {
@@ -468,6 +473,8 @@ func TestE2E_DaemonCreateAttachDetach(t *testing.T) {
 
 func TestE2E_DaemonAttachAndMessageFlow(t *testing.T) {
 	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
 	// Create and attach a daemon.
@@ -483,15 +490,18 @@ func TestE2E_DaemonAttachAndMessageFlow(t *testing.T) {
 	// Without RunCompute there is no daemon actor cell to receive request-kind
 	// messages (the harness enforces exactly-one active target for requests), so
 	// we use kind=event which has no cardinality constraint.
-	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/messages", s.chID), map[string]any{
-		"type":    "echo.ping",
-		"kind":    "event",
-		"payload": map[string]any{"text": "ping"},
-	}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	sendBody := respJSON(t, w)
-	reqSeq := sendBody["seq"].(float64)
-	reqMsgID := sendBody["message_id"].(string)
+	c := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer c.close()
+	ack := c.sendMessage(map[string]any{
+		"msg_type": "echo.ping",
+		"kind":     "event",
+		"payload":  map[string]any{"text": "ping"},
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("send message: want ack, got %v", ack)
+	}
+	reqSeq := ack["seq"].(float64)
+	reqMsgID := ack["message_id"].(string)
 
 	// Read back -- should contain the request message.
 	w = env.do(t, "GET", fmt.Sprintf("/api/channels/%s/messages?after=0", s.chID), nil, s.cookies)
@@ -532,41 +542,48 @@ func TestE2E_DaemonAttachAndMessageFlow(t *testing.T) {
 
 func TestE2E_SendMessageNoAudienceDefaultFill(t *testing.T) {
 	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
+	c := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer c.close()
+
 	// Send a message with NO audience field at all.
-	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/messages", s.chID), map[string]any{
-		"type":    "chat.text",
-		"kind":    "event",
-		"payload": map[string]any{"text": "broadcast"},
-	}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	body := respJSON(t, w)
-	seq := body["seq"].(float64)
+	ack := c.sendMessage(map[string]any{
+		"msg_type": "chat.text",
+		"kind":     "event",
+		"payload":  map[string]any{"text": "broadcast"},
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("send message: want ack, got %v", ack)
+	}
+	seq := ack["seq"].(float64)
 	if seq <= 0 {
 		t.Fatalf("expected positive seq, got %v", seq)
 	}
-	msgID := body["message_id"].(string)
+	msgID := ack["message_id"].(string)
 	if msgID == "" {
 		t.Fatal("expected non-empty message_id")
 	}
 
 	// Also send with an explicit empty audience array -- should still succeed.
-	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/messages", s.chID), map[string]any{
-		"type":     "chat.text",
+	ack2 := c.sendMessage(map[string]any{
+		"msg_type": "chat.text",
 		"kind":     "event",
 		"payload":  map[string]any{"text": "broadcast2"},
 		"audience": []string{},
-	}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	body2 := respJSON(t, w)
-	seq2 := body2["seq"].(float64)
+	})
+	if ack2["type"] != "ack" {
+		t.Fatalf("second send: want ack, got %v", ack2)
+	}
+	seq2 := ack2["seq"].(float64)
 	if seq2 <= seq {
 		t.Fatalf("second message seq %v should be > first seq %v", seq2, seq)
 	}
 
 	// Verify both messages exist in truth.
-	w = env.do(t, "GET", fmt.Sprintf("/api/channels/%s/messages?after=0", s.chID), nil, s.cookies)
+	w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/messages?after=0", s.chID), nil, s.cookies)
 	assertStatus(t, w, http.StatusOK)
 	msgs := respJSONArray(t, w)
 	if len(msgs) < 2 {
