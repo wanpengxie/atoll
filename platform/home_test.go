@@ -83,6 +83,28 @@ func TestAdmit_CellLessMember(t *testing.T) {
 	}
 }
 
+// TestSpawn_NonMemberRejected is the restart-verify DoD (v1.8, S2): Spawn-replace
+// VERIFIES membership, it never mints it. Spawning an id with no active membership
+// row (a restart of an orphan) must error and leave the roster untouched — the
+// membrane law推论 that registration only ever happens through Admit.
+func TestSpawn_NonMemberRejected(t *testing.T) {
+	h := openTestHome(t)
+	ctx := context.Background()
+	id := actor.ActorID("agent:orphan")
+	if err := h.Spawn(ctx, id, actor.KindAgent, platform.ActorFactory{}); err == nil {
+		t.Fatal("Spawn of a non-member must error (膜律: Spawn-replace verifies, never mints)")
+	}
+	actors, err := h.View().ListActors(ctx)
+	if err != nil {
+		t.Fatalf("ListActors: %v", err)
+	}
+	for _, a := range actors {
+		if a.ID == id {
+			t.Fatal("Spawn wrote a membership row for a non-member — verify must not apply")
+		}
+	}
+}
+
 // TestOpen_RestartOverPersistentDB verifies the genesis seed is idempotent: a
 // second Open over the SAME db file (a home restart) must succeed, not PK-conflict
 // on re-seeding the intrinsic system actor. Before the Exists-guard this failed
