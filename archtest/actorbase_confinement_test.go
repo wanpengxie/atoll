@@ -159,7 +159,10 @@ var directActorImplementAllowlist = []string{
 	"../actors/device/actor.go",              // S5/S5b migration queue
 	"../agent/provider/kimi/bridge.go",       // S5b migration queue
 	"../agent/provider/claudecode/bridge.go", // S5b migration queue
-	"../app/human.go",                        // S3's app-human call-site adaptation only (Legacy shape); Sys verb table cannot express its arbitrary-audience/TTL/parent_id envelope needs without a behaviour rewrite — see actorbase-spec-v1.md S3 slice report
+	// ../app/human.go is GONE: the old humanFront (a direct actorrt.Actor
+	// implementer holding a Pen) was整删 with the subjectgate door (S4) — the
+	// human is now embodied by the platform-internal Proc cell (humancell.go), and
+	// app/human.go carries only routing policy (no Receive, no Pen).
 }
 
 // receiveSig is the actorrt.Actor.Receive method signature text this AST scan
