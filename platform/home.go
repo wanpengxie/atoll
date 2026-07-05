@@ -471,84 +471,129 @@ func (h *Home) logReviveAttached(id actor.ActorID, host string) {
 // (the reconcile ring骨架 lives here in platform, not the actorrt kernel), driven
 // by the same ticker as the closure backstop.
 //
-// 补 (revive): for every AlwaysOn desired member absent from the live set, resolve
-// its factory through the builder (id-keyed activation entry), weld caps at the
-// platform seam, and SpawnIfAbsent it (the CAS discards the shell if some other
-// path won the race — admission or a concurrent Reviver fire). Kind comes from the
-// DesiredMember, never re-answered by the builder.
+// desired = 两源之并 (union of two intent sources), read to completion BEFORE any
+// mint/despawn: 组合域 — the app-injected DesiredSource (channel_actors intent
+// rows); user域 — platform-internal, derived from THIS channel's own registry (the
+// per-channel human members, Kind==human && Host==""). The user域 authority lives
+// only inside the channel truth born within Open, so the app cannot enumerate it
+// (chicken-egg) — the ring derives it itself. Union 原子性: either source read
+// failing aborts the WHOLE tick — no arm runs and prevEagerDesired is NOT updated,
+// so 削臂 can never diff against a truncated current and evict live cells wholesale.
+//
+// 补 (revive): for every desired member absent from the live set, resolve its
+// factory through factoryFor (human → the platform's own built-in cell factory;
+// others → the app-injected组合域 builder), weld caps at the platform seam, and
+// SpawnIfAbsent it (the CAS discards the shell if some other path won the race —
+// admission or a concurrent Reviver fire). Kind comes from the MEMBERSHIP record
+// (rec.Kind, the authority), never re-answered by the builder.
+//
+// 交集红线: desired = intent ∩ durable membership. A组合域 intent row whose Admit
+// never landed (crash between the two non-atomic writes) is not in the membership
+// snapshot, so it is skipped BEFORE current[id]=true — a非成员 must never enter the
+// 削臂 management set.
 //
 // 削 (deactivate, 反误杀): the diff is prevEagerDesired − currentDesired, NEVER
-// actual − desired. LiveIDs() mixes in system/human/fork-child/daemon-attach
-// embodiments this ring must never evict; the 削 set is every id that was
-// desired-always-on in the prior tick and is no longer desired (this includes an
-// always-on member first embodied by admission Home.Spawn, not only ids this ring
-// SpawnIfAbsent-minted — the ring is the authority for the always-on lifecycle
-// regardless of who first embodied it). 反误杀 holds because the protected
-// categories never enter the desired-always-on set, so they never enter
-// prevEagerDesired.
+// actual − desired. LiveIDs() mixes in system / fork-child / daemon-attach
+// embodiments this ring must never evict — the protected categories that never
+// enter the desired set (human is NO LONGER protected: it is a managed member now
+// — its Admit puts it in desired, its removal takes it out and the 削臂 evicts it,
+// membership-gone = true death). The 削 set is every id that was desired in the
+// prior tick and is no longer desired.
 //
-// placement filter (§10.13 推导2/7, S6): both arms consult the registry's Host
-// column BEFORE their own gate (补: before the builder lookup; 削: before
-// DespawnID) — an id currently placed on a daemon (Host != "") is this ring's
-// business in neither direction: 补 must not double-embody an already-attached
-// identity locally, and 削 must not evict an embodiment that is legitimately
-// live elsewhere (attached is a placement fact, not desired absence). A
-// registry fault skips the id for this tick only (F8: not a verdict, retried
-// next sweep), never a poison judgement.
+// placement filter (§10.13 推导2/7, S6): both arms consult the membership Host
+// column BEFORE embodying/evicting — an id currently placed on a daemon (Host != "")
+// is this ring's business in neither direction: 补 must not double-embody an
+// already-attached identity locally, and 削 must not evict an embodiment that is
+// legitimately live elsewhere.
 func (h *Home) reconcileActivation(ctx context.Context) {
-	if h.desired == nil {
-		return
+	var composed []actorrt.DesiredMember
+	if h.desired != nil {
+		m, err := h.desired.Members(ctx)
+		if err != nil {
+			h.logger.Error("platform.reconcile.desired_failed", "channel", string(h.channelID), "err", err)
+			return
+		}
+		composed = m
 	}
-	desired, err := h.desired.Members(ctx)
+	actives, err := h.cs.Registry.ListActive(ctx)
 	if err != nil {
-		h.logger.Error("platform.reconcile.desired_failed", "channel", string(h.channelID), "err", err)
+		h.logger.Error("platform.reconcile.registry_failed", "channel", string(h.channelID), "err", err)
 		return
 	}
+	// The active-membership snapshot serves BOTH roles, read once for atomicity: it
+	// is the user域 source AND the 交集红线 membership filter (+ the placement Host
+	// read the two arms consult).
+	member := make(map[actor.ActorID]storespec.Record, len(actives))
+	for _, rec := range actives {
+		member[rec.ID] = rec
+	}
+	desiredIDs := make(map[actor.ActorID]bool, len(composed)+len(actives))
+	for _, m := range composed {
+		desiredIDs[m.ID] = true
+	}
+	for _, rec := range actives {
+		if rec.Kind == actor.KindHuman && rec.Host == "" {
+			desiredIDs[rec.ID] = true
+		}
+	}
+
 	rt := h.channel.Cells()
 	actual := make(map[actor.ActorID]bool)
 	for _, id := range rt.LiveIDs() {
 		actual[id] = true
 	}
 	current := make(map[actor.ActorID]bool)
-	for _, m := range desired {
-		current[m.ID] = true
-		if actual[m.ID] {
+	for id := range desiredIDs {
+		rec, ok := member[id]
+		if !ok || !rec.IsActive() {
+			continue // 交集红线: desired-but-not-a-durable-member — skip BEFORE current
+		}
+		current[id] = true
+		if actual[id] {
 			continue
 		}
-		if rec, ok, err := h.cs.Registry.Lookup(ctx, m.ID); err != nil {
-			h.logger.Warn("platform.reconcile.host_lookup_failed", "channel", string(h.channelID), "actor", string(m.ID), "err", err)
-			continue
-		} else if ok && rec.Host != "" {
+		if rec.Host != "" {
 			continue // attached elsewhere — not this ring's authority to embody (反误杀)
 		}
-		if h.builder == nil {
-			h.logger.Warn("platform.reconcile.no_builder", "channel", string(h.channelID), "actor", string(m.ID))
-			continue
-		}
-		factory, ok := h.builder.Lookup(m.ID)
+		factory, ok := h.factoryFor(rec)
 		if !ok {
-			h.logger.Warn("platform.reconcile.class_not_found", "channel", string(h.channelID), "actor", string(m.ID))
+			h.logger.Warn("platform.reconcile.no_factory", "channel", string(h.channelID), "actor", string(id))
 			continue
 		}
-		kind := m.Kind
-		id := m.ID
-		rt.SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-			return build(h.buildCaps(id, kind, inc), h.hooks(), factory)
+		kind := rec.Kind
+		mid := id
+		rt.SpawnIfAbsent(mid, kind, func(inc actorrt.Incarnation) actorrt.Actor {
+			return build(h.buildCaps(mid, kind, inc), h.hooks(), factory)
 		})
 	}
 	for id := range h.prevEagerDesired {
 		if current[id] {
 			continue
 		}
-		if rec, ok, err := h.cs.Registry.Lookup(ctx, id); err != nil {
-			h.logger.Warn("platform.reconcile.host_lookup_failed", "channel", string(h.channelID), "actor", string(id), "err", err)
-			continue
-		} else if ok && rec.Host != "" {
+		if rec, ok := member[id]; ok && rec.Host != "" {
 			continue // attached elsewhere — not gone, not this ring's to evict (反误杀)
 		}
 		rt.DespawnID(id)
 	}
 	h.prevEagerDesired = current
+}
+
+// factoryFor is the single activation-dispatch point shared by the reconcile
+// ring's 补臂 and homeReviver.EnsureLive: it maps a durable member record to the
+// ActorFactory that embodies it. A human member (Kind==KindHuman) resolves to the
+// platform's OWN built-in human cell factory — user域 supply is platform internal
+// 政 (the per-channel human member's authority lives only in this channel's
+// registry, unreachable by the app), so the app-injected builder is never asked
+// for it. Every other kind resolves through the组合域 builder table (nil builder →
+// not-found). Kind is caller-held (rec.Kind), never re-answered.
+func (h *Home) factoryFor(rec storespec.Record) (ActorFactory, bool) {
+	if rec.Kind == actor.KindHuman {
+		return humanCellFactory(), true
+	}
+	if h.builder == nil {
+		return ActorFactory{}, false
+	}
+	return h.builder.Lookup(rec.ID)
 }
 
 // View returns the read-only observation set (ReadAfterSeq / MaxSeq /

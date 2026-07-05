@@ -230,6 +230,7 @@ func TestObsFanout_ReconcileActivationRevive_OncePerPublish(t *testing.T) {
 	builder.byID[id] = CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
 
 	h := openActivationHome(t, desired, builder)
+	admit(t, h, id, actor.KindAgent)
 
 	if live(h, id) {
 		t.Fatal("member live before it was ever desired")
@@ -295,6 +296,7 @@ func TestObsFanout_Fork_OncePerPublish(t *testing.T) {
 	builder.byClass["obs-worker"] = CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
 
 	h := openActivationHome(t, desired, builder)
+	admit(t, h, parent, actor.KindAgent)
 
 	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)

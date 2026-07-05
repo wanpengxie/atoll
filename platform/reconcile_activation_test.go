@@ -123,6 +123,16 @@ func live(h *Home, id actor.ActorID) bool {
 	return ok
 }
 
+// admit seeds durable membership for id (desired = intent ∩ membership: the ring
+// only embodies an intent row whose户籍 landed). Tests that inject a组合域
+// DesiredMember must first Admit the id, exactly as the real introduce path does.
+func admit(t *testing.T, h *Home, id actor.ActorID, kind actor.Kind) {
+	t.Helper()
+	if err := h.Admit(context.Background(), id, kind); err != nil {
+		t.Fatalf("admit %s: %v", id, err)
+	}
+}
+
 // Test 1 — desired absent member → Builder revives it (eager activation) and the
 // revived incarnation carries a usable State cap (create+read round-trips).
 func TestReconcileActivation_RevivesAbsentDesiredMemberWithState(t *testing.T) {
@@ -133,6 +143,7 @@ func TestReconcileActivation_RevivesAbsentDesiredMemberWithState(t *testing.T) {
 	builder.byID[id] = builder.recordFactory(id)
 
 	h := openActivationHome(t, desired, builder)
+	admit(t, h, id, actor.KindAgent)
 
 	if live(h, id) {
 		t.Fatal("member live before it was ever desired")
@@ -175,6 +186,7 @@ func TestReconcileActivation_DespawnsNoLongerDesired(t *testing.T) {
 	builder.byID[id] = builder.recordFactory(id)
 
 	h := openActivationHome(t, desired, builder)
+	admit(t, h, id, actor.KindAgent)
 
 	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
@@ -202,8 +214,11 @@ func TestReconcileActivation_DoesNotKillUnmanagedLiveActors(t *testing.T) {
 	builder.byClass["worker"] = builder.recordFactory("agent:always/w1")
 
 	h := openActivationHome(t, desired, builder)
+	admit(t, h, parent, actor.KindAgent)
 
-	// A human, admitted as a real cell (durable member) — never in desired.
+	// A human, admitted as a real cell (durable member) — now a MANAGED member (its
+	// Admit puts it in the user域 desired set; it survives here because it is
+	// desired+live, no longer because it is a "protected category").
 	const human = actor.ActorID("user:alice")
 	if err := h.Spawn(ctx, human, actor.KindHuman, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
@@ -379,6 +394,7 @@ func TestClose_ProducersBeforeEngineNoDeadlock(t *testing.T) {
 	}
 	// NB: Close is called explicitly below (not via t.Cleanup) — a second Close
 	// would double-close the engine's stop channel and panic.
+	admit(t, h, id, actor.KindAgent)
 
 	// Bring a cell live and park a far-future incarnation-bind timer in the engine's
 	// in-memory family (so the engine holds live schedule state at Close time).
@@ -451,6 +467,7 @@ func TestReconcileActivation_DoesNotEvictAttachedNoLongerDesiredMember(t *testin
 	builder.byID[id] = builder.recordFactory(id)
 
 	h := openActivationHome(t, desired, builder)
+	admit(t, h, id, actor.KindAgent)
 
 	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
@@ -746,6 +763,7 @@ func TestFireSink_ForkChildIncarnationFire_KindFromLiveEmbodiment(t *testing.T) 
 	builder.byClass["worker"] = builder.recordFactory(parent + "/" + actor.ActorID(childNameHint))
 
 	h := openActivationHome(t, desired, builder)
+	admit(t, h, parent, actor.KindAgent)
 
 	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
@@ -821,6 +839,7 @@ func TestFireSink_ForkChildDeathRace_QuietDrop(t *testing.T) {
 	builder.byClass["worker"] = builder.recordFactory(parent + "/" + actor.ActorID(childNameHint))
 
 	h := openActivationHome(t, desired, builder)
+	admit(t, h, parent, actor.KindAgent)
 
 	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)

@@ -149,15 +149,19 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		h.logReviveAttached(id, rec.Host)
 		return fmt.Errorf("platform: revive %s: attached to host %q", id, rec.Host) // transient
 	}
-	// Home-placed, absent: only NOW is the builder load-bearing.
-	if h.builder == nil {
-		return schedule.ReviveRejected{Reason: "no_builder", Detail: string(id)}
-	}
-	factory, ok := h.builder.Lookup(id)
+	// Home-placed, absent: resolve through factoryFor (human → the platform's own
+	// built-in cell factory, needing no builder; others → the组合域 builder, now
+	// load-bearing). A human revive therefore never depends on a wired builder (a
+	// nil-builder home still revives its identity-timer-bearing humans); a non-human
+	// miss splits into the two structurally-unrevivable classes the engine disposes.
+	kind := rec.Kind
+	factory, ok := h.factoryFor(rec)
 	if !ok {
+		if h.builder == nil {
+			return schedule.ReviveRejected{Reason: "no_builder", Detail: string(id)}
+		}
 		return schedule.ReviveRejected{Reason: "class_not_found", Detail: string(id)}
 	}
-	kind := rec.Kind
 	// straddleHook (test-only, nil in production): fires AFTER the Lookup above
 	// passed but BEFORE SpawnIfAbsent below — the exact window Home.Remove's
 	// double-tap closure argument (S-P20) requires a test able to park a build
