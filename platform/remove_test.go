@@ -61,6 +61,7 @@ func TestRemove_OrderSpy_DespawnBeforeDereg(t *testing.T) {
 	ctx := context.Background()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
 	const id = actor.ActorID("agent:order-spy")
+	admit(t, h, id, actor.KindAgent)
 	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	})); err != nil {
@@ -94,6 +95,7 @@ func TestRemove_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
 	const id = actor.ActorID("agent:idempotent")
+	admit(t, h, id, actor.KindAgent)
 	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	})); err != nil {
@@ -127,6 +129,7 @@ func TestRemove_CascadeClearsState(t *testing.T) {
 	ctx := context.Background()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
 	const id = actor.ActorID("agent:cascade")
+	admit(t, h, id, actor.KindAgent)
 	var caps1 actorcaps.Caps
 	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		caps1 = c
@@ -143,6 +146,9 @@ func TestRemove_CascadeClearsState(t *testing.T) {
 		t.Fatalf("Remove: %v", err)
 	}
 
+	// Re-admit: Remove deregistered the row, so a fresh incarnation must be
+	// re-admitted (the introduce door) before Spawn-replace verifies membership.
+	admit(t, h, id, actor.KindAgent)
 	var caps2 actorcaps.Caps
 	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		caps2 = c
@@ -166,9 +172,7 @@ func TestRemove_DueFireRace(t *testing.T) {
 	builder.byID[id] = builder.recordFactory(id)
 	h := openActivationHome(t, &testDesired{}, builder)
 
-	if err := h.Spawn(ctx, id, actor.KindAgent, ActorFactory{}); err != nil {
-		t.Fatalf("seed membership: %v", err)
-	}
+	admit(t, h, id, actor.KindAgent)
 	if _, err := h.schedMinter.Mint(id).Schedule(ctx, schedule.ScheduleReq{
 		Bind: schedule.BindIdentity, FireAt: h.nowMs() - 1, Type: "demo.tick",
 	}); err != nil {
@@ -214,9 +218,7 @@ func TestRemove_ReviverStraddle_SelfUndo(t *testing.T) {
 	builder.byID[id] = builder.recordFactory(id)
 	h := openActivationHome(t, &testDesired{}, builder)
 
-	if err := h.Spawn(ctx, id, actor.KindAgent, ActorFactory{}); err != nil {
-		t.Fatalf("seed membership: %v", err)
-	}
+	admit(t, h, id, actor.KindAgent)
 
 	paused := make(chan struct{})
 	resume := make(chan struct{})

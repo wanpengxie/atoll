@@ -47,14 +47,6 @@ func CapsFactory(f func(actorcaps.Caps) actorrt.Actor) ActorFactory {
 	return ActorFactory{fullCaps: f}
 }
 
-// Empty reports the zero factory — Home.Spawn's membership-only nil guard
-// (a cell-less member, e.g. a human user with no cell) carries forward
-// unchanged: the caller passes ActorFactory{} exactly where it used to pass a
-// nil func.
-func (f ActorFactory) Empty() bool {
-	return f.Proc.New == nil && f.Legacy == nil && f.fullCaps == nil
-}
-
 // build constructs the actorrt.Actor one ActorFactory declares, over one
 // incarnation's already-welded caps bundle. hooks configures the actorbase
 // engine when Proc is set (spec §3's out-generation matrix: Home wires its

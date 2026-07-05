@@ -28,11 +28,11 @@ import (
 // spawnAgentInstance builds ONE agent instance from its declaration + per-channel
 // row and spawns it live. Spawn REPLACES an existing cell (one actor, one owner),
 // so this doubles as restart = rebuild (new config) + Spawn (the looper resumes
-// from its state slot). Mirrors spawnComposition's per-instance block.
+// from its state slot). The restart executors are its only callers now (A-P14).
 func (a *App) spawnAgentInstance(chID channel.ID, home *platform.Home, instanceID, class, channelCfg, globalCfg string) error {
 	// class IS the engine (claude/go-kimi); config = global identity overlaid by
 	// per-channel (mergeConfig). Shared build装配 (A12: same buildInstance the
-	// reconcile builder / spawnComposition use).
+	// reconcile builder uses).
 	decl, err := a.buildInstance(chID, compositionRow{
 		instanceID: instanceID, class: class, channelCfg: channelCfg, globalCfg: globalCfg,
 	})

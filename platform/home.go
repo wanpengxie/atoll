@@ -634,52 +634,38 @@ func (h *Home) View() View {
 // a Minter, or actorcaps.Caps itself — it only chooses WHAT to place (an
 // ActorFactory over harness.Pen or an actorbase.Def); Home decides HOW.
 //
-// Order invariant (security-critical): membership apply -> build caps (Mint pen +
-// access/state/spawn) -> build(caps, hooks, def) -> spawn cell. Membership must be
-// durable truth BEFORE the embodiment goes live — this is the birth mirror of the
-// death-side "despawn before deregister" (creation/destruction
-// symmetry): the sender gate no longer queries the registry (kind is welded into
-// the pen at Mint), so the old "else a cell that writes on construction
-// hits sender_deregistered" reason no longer holds; the invariant remains because
-// membership ≠ embodiment (membership is the durable identity-level truth the
-// live cell layers on top), and a construction-time plane-2 access invoke needing
-// a member-grant resolves against durable membership. A live cell must never
-// precede its own committed membership row — "welded at birth" must not become
-// "pen first, then register".
+// Membership is VERIFIED, not applied (膜律 — the not→member edge belongs to Admit
+// alone; Spawn never mints membership as a side effect). Spawn-replace embodies an
+// EXISTING member (A-P14: restart's single real-factory caller); a Spawn of a
+// non-member id is an error — restarting an orphan row would be a membrane bypass.
+// The verify precedes the cell so the order invariant still holds: durable
+// membership BEFORE the live embodiment (the birth mirror of the death-side
+// "despawn before deregister"). The sender gate does not query the registry (kind
+// is welded into the pen at Mint); membership ≠ embodiment (the live cell layers on
+// top of the durable identity-level truth), and a construction-time plane-2 access
+// invoke needing a member-grant resolves against that durable membership.
 //
-// nil-guard: def.Empty() == true = membership-ONLY (a cell-less member, e.g. a
-// human user who is a member but has no cell). No Pen is Minted and no cell is
-// placed — Minting/placing a cell for a cell-less member would be wasted. Membership
-// ≠ embodiment is the substrate truth; the cell, if any, is the embodiment layer on
-// top. A pre-existing row (server restart) is reused — the live instance rebinds.
+// Two-phase Spawn: the build closure runs inside rt.Spawn. It welds the whole caps
+// bundle bound to THIS incarnation (livePen + liveAccess membranes, spawn handle)
+// and hands the gated bundle to def's build in ONE step — no bare handle escapes. A
+// participant is a gated cap holder; substrate anchors are not (see channelkit/compute).
 func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, def ActorFactory) error {
 	if id == "" {
 		return fmt.Errorf("platform: Spawn id required")
 	}
-	hasCell := !def.Empty()
-	binding := actor.Binding("")
-	if hasCell {
-		binding = actor.BindingEmbedded
+	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
+	if err != nil {
+		return fmt.Errorf("platform: Spawn membership lookup: %w", err)
 	}
-	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{{
-		ID: id, Kind: kind, Binding: binding, Host: "", At: h.nowMs(),
-	}}, nil); err != nil {
-		return fmt.Errorf("platform: Spawn membership: %w", err)
+	if !ok || !rec.IsActive() {
+		return fmt.Errorf("platform: Spawn requires an active member: %s", id)
 	}
-	if hasCell {
-		// Two-phase Spawn: the build closure runs inside Spawn (after membership is
-		// durable, before go-live). It welds the whole caps bundle bound to THIS
-		// incarnation (livePen + liveAccess membranes, spawn handle) and hands the
-		// gated bundle to def's build in ONE step — no bare handle escapes. A
-		// participant is a gated cap holder; substrate anchors are not (see
-		// channelkit/compute).
-		rt := h.channel.Cells()
-		rt.Spawn(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-			return build(h.buildCaps(id, kind, inc), h.hooks(), def)
-		})
-	}
+	rt := h.channel.Cells()
+	rt.Spawn(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
+		return build(h.buildCaps(id, kind, inc), h.hooks(), def)
+	})
 	h.logger.Info("platform.member.spawned", "channel", string(h.channelID),
-		"actor", string(id), "kind", string(kind), "cell", hasCell)
+		"actor", string(id), "kind", string(kind))
 	return nil
 }
 

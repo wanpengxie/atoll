@@ -55,14 +55,14 @@ func TestView_ListActors_IncludesSystem(t *testing.T) {
 	}
 }
 
-// TestSpawn_CellLessMember registers a human member with nil impl (membership
-// only) and confirms it surfaces in the actor roster with no cell binding.
-func TestSpawn_CellLessMember(t *testing.T) {
+// TestAdmit_CellLessMember admits a human member (the pure-membership primitive,
+// no cell) and confirms it surfaces in the actor roster with no cell binding.
+func TestAdmit_CellLessMember(t *testing.T) {
 	h := openTestHome(t)
 	ctx := context.Background()
 	id := actor.ActorID("user:alice")
-	if err := h.Spawn(ctx, id, actor.KindHuman, platform.ActorFactory{}); err != nil {
-		t.Fatalf("Spawn(nil impl): %v", err)
+	if err := h.Admit(ctx, id, actor.KindHuman); err != nil {
+		t.Fatalf("Admit: %v", err)
 	}
 	actors, err := h.View().ListActors(ctx)
 	if err != nil {

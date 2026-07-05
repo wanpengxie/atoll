@@ -47,6 +47,7 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 	ctx := context.Background()
 	id := actor.ActorID("obs-publisher")
 	pub := &obsPublisherActor{}
+	admit(t, h, id, actor.KindAgent)
 	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor { return pub })); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -206,6 +207,7 @@ func TestObsFanout_HomeSpawn_OncePerPublish(t *testing.T) {
 
 	ctx := context.Background()
 	const id = actor.ActorID("obs-fanout-spawn")
+	admit(t, h, id, actor.KindAgent)
 	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return &obsPublisherActor{}
 	})); err != nil {
@@ -261,11 +263,9 @@ func TestObsFanout_HomeReviver_OncePerPublish(t *testing.T) {
 
 	h := openActivationHome(t, desired, builder)
 
-	// Seed durable membership WITHOUT a live cell (factory=nil — Home.Spawn's
-	// two-phase contract: membership row lands, no rt.Spawn runs).
-	if err := h.Spawn(ctx, id, actor.KindAgent, ActorFactory{}); err != nil {
-		t.Fatalf("seed membership: %v", err)
-	}
+	// Seed durable membership WITHOUT a live cell (Admit — the pure-membership
+	// primitive; embodiment is the reviver's job below).
+	admit(t, h, id, actor.KindAgent)
 	if live(h, id) {
 		t.Fatal("member live before EnsureLive ran — precondition broken")
 	}

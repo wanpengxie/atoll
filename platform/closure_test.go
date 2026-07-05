@@ -59,6 +59,9 @@ func (penCell) Receive(context.Context, *message.Envelope) error { return nil }
 // through the same Spawn(factory) admission an agent/tool/human goes through.
 func spawnWithPen(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor.Kind) harness.Pen {
 	t.Helper()
+	if err := ch.Admit(context.Background(), id, kind); err != nil {
+		t.Fatalf("admit %s: %v", id, err)
+	}
 	var pen harness.Pen
 	if err := ch.Spawn(context.Background(), id, kind, platform.ActorFactory{Legacy: func(p harness.Pen) actorrt.Actor {
 		pen = p
@@ -88,12 +91,12 @@ func newClosureHome(t *testing.T) *platform.Home {
 	return ch
 }
 
-// registerActor seeds a cell-less membership row so the harness accepts
-// envelopes from / addressed to this actor (Spawn with nil impl = membership
-// only).
+// registerActor seeds a membership row (Admit — the pure-membership primitive) so
+// the harness accepts envelopes from / addressed to this actor without embodying a
+// cell.
 func registerActor(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor.Kind) {
 	t.Helper()
-	if err := ch.Spawn(context.Background(), id, kind, platform.ActorFactory{}); err != nil {
+	if err := ch.Admit(context.Background(), id, kind); err != nil {
 		t.Fatalf("register actor %s: %v", id, err)
 	}
 }

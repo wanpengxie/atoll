@@ -235,6 +235,7 @@ func TestReconcileActivation_DoesNotKillUnmanagedLiveActors(t *testing.T) {
 	// Admit puts it in the user域 desired set; it survives here because it is
 	// desired+live, no longer because it is a "protected category").
 	const human = actor.ActorID("user:alice")
+	admit(t, h, human, actor.KindHuman)
 	if err := h.Spawn(ctx, human, actor.KindHuman, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	})); err != nil {
@@ -402,9 +403,7 @@ func TestReconcileActivation_IdentityTimerFireRevivesThenAppends(t *testing.T) {
 
 	// Seed durable membership (no cell) so the FireSink can resolve the author's
 	// kind and the harness accepts the fired envelope — but leave it UN-embodied.
-	if err := h.Spawn(ctx, author, actor.KindAgent, ActorFactory{}); err != nil {
-		t.Fatalf("seed membership: %v", err)
-	}
+	admit(t, h, author, actor.KindAgent)
 	if live(h, author) {
 		t.Fatal("author already live before the timer fired — precondition broken")
 	}
@@ -469,6 +468,7 @@ func TestReviver_LiveAuthorWithNilBuilderIsNotPoisoned(t *testing.T) {
 	t.Cleanup(func() { _ = h.Close() })
 
 	const author = actor.ActorID("agent:live-nobuilder")
+	admit(t, h, author, actor.KindAgent)
 	if err := h.Spawn(ctx, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	})); err != nil {
@@ -557,9 +557,7 @@ func TestReconcileActivation_DoesNotSpawnAttachedDesiredMember(t *testing.T) {
 
 	h := openActivationHome(t, desired, builder)
 
-	if err := h.Spawn(ctx, id, actor.KindAgent, ActorFactory{}); err != nil {
-		t.Fatalf("seed membership: %v", err)
-	}
+	admit(t, h, id, actor.KindAgent)
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
 		{ID: id, Kind: actor.KindAgent, Host: "daemon-y", At: h.nowMs()},
 	}, nil); err != nil {
@@ -643,9 +641,7 @@ func TestReviver_AttachedHostRetainsThenFiresOnceDetached(t *testing.T) {
 	// Seed durable membership, unembodied, then mark it Host-attached — the
 	// wire-flap window this test exercises (the author's own daemon holds the
 	// live embodiment, home only has the durable row).
-	if err := h.Spawn(ctx, author, actor.KindAgent, ActorFactory{}); err != nil {
-		t.Fatalf("seed membership: %v", err)
-	}
+	admit(t, h, author, actor.KindAgent)
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
 		{ID: author, Kind: actor.KindAgent, Host: "daemon-flap", At: h.nowMs()},
 	}, nil); err != nil {
@@ -735,9 +731,7 @@ func TestReviver_AttachedAuthorNilBuilderIsTransientNotPoisoned(t *testing.T) {
 	t.Cleanup(func() { _ = h.Close() })
 
 	const author = actor.ActorID("agent:attached-nobuilder")
-	if err := h.Spawn(ctx, author, actor.KindAgent, ActorFactory{}); err != nil {
-		t.Fatalf("seed membership: %v", err)
-	}
+	admit(t, h, author, actor.KindAgent)
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
 		{ID: author, Kind: actor.KindAgent, Host: "daemon-x", At: h.nowMs()},
 	}, nil); err != nil {
@@ -824,9 +818,7 @@ func TestFireAndRevive_RejectDeregisteredAuthor(t *testing.T) {
 
 	// Seed durable membership (unembodied), then soft-deregister it — the registry
 	// row survives with DeregisteredAt != 0, exactly the in-flight-race snapshot.
-	if err := h.Spawn(ctx, author, actor.KindAgent, ActorFactory{}); err != nil {
-		t.Fatalf("seed membership: %v", err)
-	}
+	admit(t, h, author, actor.KindAgent)
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{
 		{ID: author, At: h.nowMs()},
 	}); err != nil {

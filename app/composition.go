@@ -21,7 +21,7 @@ import (
 
 // compositionRow is one channel_actors instance with its resolved config layers
 // (per-channel over the global agents declaration). The SINGLE row shape
-// spawnComposition / daemonComposition / compositionBuilder all read (A12: one
+// serverCompositionRows / daemonCompositionRows / compositionBuilder all read (A12: one
 // query, one scan, one build — no手搓 duplication).
 type compositionRow struct {
 	instanceID, class, channelCfg, globalCfg string
@@ -142,8 +142,8 @@ func (d compositionDesired) Members(context.Context) ([]actorrt.DesiredMember, e
 
 // compositionBuilder is the组合域 CapsFactoryBuilder injected into a home: it
 // resolves a durable member id to its ActorFactory by reading the channel_actors
-// row and building it (the same read+build spawnComposition does, RETURNED instead
-// of spawned). A build failure (missing creds, unknown class) is (zero,false) — the
+// row and building it (the same read+build the reconcile ring's activation does,
+// resolved for the builder instead of eagerly spawned). A build failure (missing creds, unknown class) is (zero,false) — the
 // ring records it infeasible and retries next tick. LookupByClass is always
 // not-found: fork is deferred (A-P2=A), so the home never forks a domain child.
 type compositionBuilder struct {
