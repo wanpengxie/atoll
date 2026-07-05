@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // storeHomeRig is the S5b counterpart to homeRig: it wires the Acceptor over a
@@ -65,6 +66,21 @@ func newStoreHomeRigWithObs(t *testing.T, obsWatcher actorrt.ObsWatcher) *storeH
 
 func (r *storeHomeRig) wsURL() string { return "ws" + r.srv.URL[4:] }
 
+// admit seeds durable membership for ids (Host="" neutral rows). Since the
+// membrane law (v1.8 问①) stopped attach from minting membership, a declared id
+// must be an existing active member for the attach to stamp its Host — this stands
+// in for the introduce door the raw link rig bypasses.
+func (r *storeHomeRig) admit(t *testing.T, ids ...actor.ActorID) {
+	t.Helper()
+	adds := make([]storespec.MemberActorAdd, len(ids))
+	for i, id := range ids {
+		adds[i] = storespec.MemberActorAdd{ID: id, Kind: actor.KindTool, At: time.Now().UnixMilli()}
+	}
+	if err := r.cs.Membership.ApplyMemberTransitions(context.Background(), adds, nil); err != nil {
+		t.Fatalf("admit: %v", err)
+	}
+}
+
 // deliverProbe drives one request at id straight off the rig's Runtime and
 // returns the per-audience Outcome — the despawn-first probe: a despawned
 // actor's port is gone from the Runtime's addressing map entirely, so this
@@ -107,6 +123,7 @@ func TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut(t *testing.T) {
 		toolA = actor.ActorID("tool:a")
 		toolB = actor.ActorID("tool:b")
 	)
+	r.admit(t, toolA, toolB)
 
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
@@ -244,6 +261,7 @@ func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
 	r := newStoreHomeRigWithObs(t, obs)
 
 	const toolA = actor.ActorID("tool:obs-a")
+	r.admit(t, toolA)
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1",
 		[]link.Declaration{{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
 	if err != nil {
@@ -295,8 +313,11 @@ func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Re-declare toolA on the SAME link (a fresh embodiment, same id) — attach
-	// re-registers obs (obsReg[toolA] was cleared).
+	// Re-admit toolA (the introduce door re-runs: a deregistered id needs its户籍
+	// back before attach may stamp Host — membrane law, v1.8 问①), then re-declare
+	// it on the SAME link (a fresh embodiment, same id) — attach re-registers obs
+	// (obsReg[toolA] was cleared).
+	r.admit(t, toolA)
 	if err := d.Reattach(ctx, []link.Declaration{
 		{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
 	}); err != nil {

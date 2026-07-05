@@ -96,6 +96,9 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	// --- run the daemon: real /compute attach + hosted tool:xhs cell --------
 	ctx, cancel := context.WithCancel(context.Background())
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
+	if err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool); err != nil {
+		t.Fatalf("pre-admit tool:xhs: %v", err)
+	}
 
 	runErr := make(chan error, 1)
 	desired, builder := staticActorCompute([]platform.ActorDecl{{
@@ -306,6 +309,9 @@ func TestXHSLiveActorStatus(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
+	if err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool); err != nil {
+		t.Fatalf("pre-admit tool:xhs: %v", err)
+	}
 	runErr := make(chan error, 1)
 	desired, builder := staticActorCompute([]platform.ActorDecl{{
 		ID:      xhs.DefaultActorID,

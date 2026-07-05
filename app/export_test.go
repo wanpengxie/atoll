@@ -37,6 +37,19 @@ func (a *App) DropHomeForTest(chID channel.ID) {
 	delete(a.homes, chID)
 }
 
+// AdmitForTest admits id as a durable member of chID's home (the pure-membership
+// primitive an introduce door writes). Since the membrane law (v1.8 问①) stopped
+// daemon attach from minting membership, a daemon-hosted actor must be admitted
+// BEFORE its daemon declares it — this test seam stands in for the introduce door
+// the daemon-attach live tests bypass. Test-only.
+func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) error {
+	home := a.getHome(channel.ID(chID))
+	if home == nil {
+		return errChannelNotLoaded
+	}
+	return home.Admit(context.Background(), id, kind)
+}
+
 // KillCellForTest kills id's live embodiment on chID's home (despawn + dereg) —
 // the "brain went dead" event resolveRouting must answer with 503 when id is the
 // channel's default agent. Test-only.

@@ -192,6 +192,12 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
+	if err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool); err != nil {
+		t.Fatalf("pre-admit tool:xhs: %v", err)
+	}
+	if err := env.app.AdmitForTest(s.chID, kimi.DefaultActorID, actor.KindTool); err != nil {
+		t.Fatalf("pre-admit tool:kimi: %v", err)
+	}
 	runErr := make(chan error, 1)
 	desired, builder := staticActorCompute([]platform.ActorDecl{
 		{

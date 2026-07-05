@@ -452,13 +452,35 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 
 	if a.membership != nil {
 		nowMs := time.Now().UnixMilli()
-		adds := make([]storespec.MemberActorAdd, len(att.Declarations))
-		for i, d := range att.Declarations {
-			adds[i] = storespec.MemberActorAdd{ID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Host: computeID, At: nowMs}
+		adds := make([]storespec.MemberActorAdd, 0, len(att.Declarations))
+		for _, d := range att.Declarations {
+			// 膜律 (问①, v1.8): a declaration only STAMPS Host onto an EXISTING
+			// active member — it never mints membership. An id with no active户籍
+			// (never Admitted, or already deregistered) is refused: "a daemon may
+			// attach" must not silently升级 to "a daemon may任命 members" (it runs on
+			// a half-trusted user host). 有户籍 → applyMemberAddTx only UPDATEs host
+			// for an active row (只盖 Host). registry-less rigs (nil) keep the old
+			// unconditional write (no truth store to consult). 问②③ (placement /
+			// desired_host authority) is enforced at plan generation (app), not here.
+			if a.registry != nil {
+				rec, ok, err := a.registry.Lookup(ctx, d.ActorID)
+				if err != nil {
+					a.sendReply(lc, AttachReply{Accepted: false, Reason: "membership lookup: " + err.Error()})
+					return "", false
+				}
+				if !ok || !rec.IsActive() {
+					a.logger.Warn("link.attach.declaration_no_membership",
+						"compute", computeID, "actor", string(d.ActorID))
+					continue
+				}
+			}
+			adds = append(adds, storespec.MemberActorAdd{ID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Host: computeID, At: nowMs})
 		}
-		if err := a.membership.ApplyMemberTransitions(ctx, adds, nil); err != nil {
-			a.sendReply(lc, AttachReply{Accepted: false, Reason: "register: " + err.Error()})
-			return "", false
+		if len(adds) > 0 {
+			if err := a.membership.ApplyMemberTransitions(ctx, adds, nil); err != nil {
+				a.sendReply(lc, AttachReply{Accepted: false, Reason: "register: " + err.Error()})
+				return "", false
+			}
 		}
 	}
 
