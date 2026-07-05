@@ -38,6 +38,19 @@ type (
 	OperateError    = sysactor.OperateError
 )
 
+// The four channel-operate message types re-exported at the platform boundary so
+// the app's HTTP shims can Submit them through the door (Home.Human(u).Submit,
+// audience=[system]) WITHOUT importing platform/internal/sysactor. They are the
+// door's wire vocabulary — the shim must speak the exact strings the gate
+// dispatches on, so a single home avoids drift (same posture as the contract
+// type re-exports above; white-list ⑤).
+const (
+	TypeIntroduceActor  = sysactor.TypeIntroduceActor
+	TypeRemoveActor     = sysactor.TypeRemoveActor
+	TypeRestartActor    = sysactor.TypeRestartActor
+	TypeSetDefaultAgent = sysactor.TypeSetDefaultAgent
+)
+
 // HomeConfig configures the channel-home assembly.
 type HomeConfig struct {
 	ChannelID channelpkg.ID

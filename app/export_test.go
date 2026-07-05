@@ -14,6 +14,13 @@ import (
 // errTestChannelNotLoaded stands in for a torn-down home in the test seams below.
 var errTestChannelNotLoaded = errors.New("app: channel not loaded")
 
+// SetControlShimTimeoutForTest overrides the channel-control HTTP shim's bounded
+// wait so a test can exercise the timeout branch (202+request_id) deterministically
+// (a near-zero timeout times out before the async door reply can commit). Test-only.
+func (a *App) SetControlShimTimeoutForTest(d time.Duration) {
+	a.controlShimTimeout = d
+}
+
 // OperateFaceForTest exposes the app's channel-operate executor so black-box
 // tests can drive the four control verbs directly (as the sysactor gate would
 // after authorising the sender), without the not-yet-built message senders

@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -35,6 +36,11 @@ type App struct {
 
 	channelDBDir string
 	uiDist       string
+
+	// controlShimTimeout bounds how long a channel-control HTTP shim waits for the
+	// door's terminal reply before returning 202 + request_id (前端语义不变). A test
+	// seam sets it tiny to exercise the timeout branch deterministically.
+	controlShimTimeout time.Duration
 }
 
 // Config configures the App.
@@ -61,11 +67,12 @@ func New(cfg Config) (*App, error) {
 	}
 
 	a := &App{
-		db:           cfg.DB,
-		logger:       logger,
-		homes:        make(map[channel.ID]*platform.Home),
-		channelDBDir: cfg.ChannelDBDir,
-		uiDist:       cfg.UIDist,
+		db:                 cfg.DB,
+		logger:             logger,
+		homes:              make(map[channel.ID]*platform.Home),
+		channelDBDir:       cfg.ChannelDBDir,
+		uiDist:             cfg.UIDist,
+		controlShimTimeout: defaultControlShimTimeout,
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -172,6 +179,7 @@ func (a *App) registerRoutes() {
 		api.DELETE("/agents/:agentID", a.handleDeleteAgent)
 		api.POST("/agents/:agentID/restart", a.handleRestartAgent)
 		api.POST("/channels/:chID/agents", a.handleIntroduceAgent)
+		api.DELETE("/channels/:chID/actors/:instanceID", a.handleRemoveActor)
 		api.PUT("/channels/:chID/default_agent", a.handleSetDefaultAgent)
 
 		api.GET("/daemons", a.handleListDaemons)

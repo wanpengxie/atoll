@@ -19,11 +19,12 @@ import (
 // picking the fail code). One instance serves every channel — it resolves the
 // home per req.ChannelID.
 //
-// This is the CANONICAL control path. The legacy HTTP handlers (handleIntroduceAgent
-// / handleSetDefaultAgent / handleRestartAgent / handleDeleteAgent) still coexist
-// on their direct-write paths this slice; their retirement into gateway shims is
-// CORE2. No message sender drives these verbs yet (S5b/shims deferred), so the
-// live face is exercised by DoD tests until then.
+// This is the CANONICAL control path, and now the ONLY one: the channel-control
+// HTTP endpoints are shims (operate_shim.go) that replay the session user through
+// the door (Home.Human(u).Submit, audience=[system]) into this executor — no
+// handler writes the composition tables directly (红线11). handleDeleteAgent stays
+// a world-layer soft-delete (its per-channel cascade is a system-authored mirror,
+// not a member action), outside this face.
 type operateExecutor struct {
 	a *App
 }

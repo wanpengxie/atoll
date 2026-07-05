@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -347,10 +349,11 @@ type setDefaultAgentReq struct {
 
 // handleSetDefaultAgent re-points (or clears) a channel's default_agent — the
 // entry point for "user repoints the brain" (install a daemon agent and make it
-// default, or fail back to agent:boost). The pointer may only target an instance
-// already in the channel's composition (channel_actors); an empty instance_id
-// clears it (→ group-chat when there is no boost floor). Takes effect on the next
-// routed message; it does not hot-reconfigure live cells.
+// default, or fail back to agent:boost). It is an HTTP垫片 (NP-1=c): it replays the
+// session user through the door (channel.set_default_agent, audience=[system]), so
+// the pointer-validation + write live in the executor and the action lands 笔为
+// user:X in the log. The pointer may only target an instance already in the
+// channel's composition; an empty instance_id clears it.
 func (a *App) handleSetDefaultAgent(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {
@@ -361,28 +364,38 @@ func (a *App) handleSetDefaultAgent(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "bad request"})
 		return
 	}
-	inst := strings.TrimSpace(req.InstanceID)
-	if inst != "" {
-		has, err := a.channelHasInstance(c.Request.Context(), chID, inst)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-			return
-		}
-		if !has {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "instance not in channel composition"})
-			return
-		}
-	}
-	var val any // empty instance_id → NULL (clear the pointer)
-	if inst != "" {
-		val = inst
-	}
-	if _, err := a.db.ExecContext(c.Request.Context(),
-		`UPDATE channels SET default_agent = ? WHERE id = ?`, val, chID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+	payload, _ := json.Marshal(instancePayload{InstanceID: strings.TrimSpace(req.InstanceID)})
+	r, err := a.submitControlThroughDoor(c.Request.Context(), chID, middleware.UserID(c),
+		platform.TypeSetDefaultAgent, payload)
+	a.finishControlShim(c, r, err, func(body map[string]any) (int, any) {
+		da, _ := body["default_agent"].(string)
+		return http.StatusOK, gin.H{"channel_id": chID, "default_agent": da}
+	})
+}
+
+// handleRemoveActor is the HTTP垫片 for the channel-internal removal半 (红线11): a
+// member removes an actor from THIS channel by replaying through the door
+// (channel.remove_actor, audience=[system]). It is distinct from the world-layer
+// agent soft-delete (handleDeleteAgent, DELETE /agents/:agentID): that de-registers
+// a cross-channel identity and cascades via a system-authored mirror; this is one
+// member removing one composition member from one channel, 笔为 user:X.
+func (a *App) handleRemoveActor(c *gin.Context) {
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"channel_id": chID, "default_agent": inst})
+	inst := strings.TrimSpace(c.Param("instanceID"))
+	if inst == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "instance_id required"})
+		return
+	}
+	payload, _ := json.Marshal(instancePayload{InstanceID: inst})
+	r, err := a.submitControlThroughDoor(c.Request.Context(), chID, middleware.UserID(c),
+		platform.TypeRemoveActor, payload)
+	a.finishControlShim(c, r, err, func(body map[string]any) (int, any) {
+		removed, _ := body["removed"].(string)
+		return http.StatusOK, gin.H{"channel_id": chID, "removed": removed}
+	})
 }
 
 // channelHasInstance reports whether instanceID is in the channel's composition

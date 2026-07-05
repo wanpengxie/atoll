@@ -2,9 +2,7 @@ package app
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -230,19 +228,18 @@ type introduceAgentReq struct {
 	Engine string `json:"engine"`
 }
 
-// handleIntroduceAgent is the HTTP front for the add half of composition CRUD. It
-// is a THIN adapter over the canonical control path: it forwards the caller as the
-// operating principal (user:<id>) into operateExecutor.Introduce — the SAME chain
-// the in-gate channel.introduce_actor type drives (red line 11: no control ability
+// handleIntroduceAgent is the HTTP垫片 for the add half of composition CRUD. It
+// replays the session user through the door (channel.introduce_actor, audience=
+// [system]) — the SAME chain a frame drives (red line 11: no control ability
 // reachable only via HTTP). Ref-eligibility (二型律), ClassKind precheck, intent
-// write + Admit + poke all live in the executor; embodiment is the ring's async job
-// (no synchronous live-spawn here — live is decided by the next reconcile sweep).
+// write + Admit + poke all live in the executor behind the gate; the request +
+// terminal land 笔为 user:X in the log. A non-member session user is refused by the
+// door's户籍校验 (膜律: 严禁 Admit 兜底 — the UI引导 "先加入频道").
 func (a *App) handleIntroduceAgent(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {
 		return
 	}
-	userID := middleware.UserID(c)
 	var req introduceAgentReq
 	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.AgentID) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "agent_id required"})
@@ -252,104 +249,76 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 		AgentID: req.AgentID, Placement: req.Placement, DesiredHost: req.DesiredHost,
 		MakeDefault: req.MakeDefault, Engine: req.Engine,
 	})
-	res, err := a.operateFace().Introduce(c.Request.Context(), platform.OperateRequest{
-		ChannelID: channel.ID(chID),
-		Sender:    actor.ActorID("user:" + userID),
-		Payload:   payload,
-	})
-	if err != nil {
-		code, detail := operateHTTPError(err)
-		c.JSON(code, gin.H{"error": detail})
-		return
-	}
-	m, _ := res.(map[string]any)
-	if m == nil {
-		m = gin.H{}
-	}
-	m["channel_id"] = chID
-	if cl, ok := m["class"].(string); ok {
-		m["looper"] = cl
-	}
-	status := http.StatusOK
-	if created, _ := m["created"].(bool); created {
-		status = http.StatusCreated
-	}
-	c.JSON(status, m)
-}
-
-// operateHTTPError maps an operateExecutor error to an HTTP (status, detail): an
-// *platform.OperateError carries its own code (translated to a status), anything
-// else is an internal error.
-func operateHTTPError(err error) (int, string) {
-	var oe *platform.OperateError
-	if errors.As(err, &oe) {
-		switch oe.Code {
-		case "agent_not_found":
-			return http.StatusNotFound, "agent not found"
-		case "forbidden":
-			return http.StatusForbidden, oe.Detail
-		case "channel_unavailable":
-			return http.StatusServiceUnavailable, oe.Detail
-		case "bad_payload", "unknown_class", "invalid_placement", "not_in_composition":
-			return http.StatusBadRequest, oe.Detail
-		default:
-			return http.StatusBadRequest, oe.Detail
+	r, err := a.submitControlThroughDoor(c.Request.Context(), chID, middleware.UserID(c),
+		platform.TypeIntroduceActor, payload)
+	a.finishControlShim(c, r, err, func(body map[string]any) (int, any) {
+		body["channel_id"] = chID
+		if cl, ok := body["class"].(string); ok {
+			body["looper"] = cl
 		}
-	}
-	return http.StatusInternalServerError, "internal error"
+		status := http.StatusOK
+		if created, _ := body["created"].(bool); created {
+			status = http.StatusCreated
+		}
+		return status, body
+	})
 }
 
-// handleRestartAgent rebuilds + respawns the agent's server-placed cells in every
-// channel it is in. Spawn replaces the old cell; the rebuilt cell reads the
-// latest config (declaration + per-channel) and the looper resumes from the state
-// slot (editing the table does not hot-update a live cell; taking effect requires
-// a rebuild).
+// handleRestartAgent restarts the agent's server-placed cells in every channel the
+// CALLER is a member of. It is an HTTP垫片 (NP-1=c): world-layer ownership scopes
+// WHICH channels (the caller's own agent), but each per-channel restart is replayed
+// through the door (channel.restart_actor, audience=[system]) — no direct Home.Spawn
+// from HTTP (红线11). The per-channel authority is the door's member check; a channel
+// the caller is not a member of is skipped (膜律). Restart is原地换脑 (Spawn-replace,
+// A-P14): editing config does not hot-update a live cell; taking effect needs a
+// rebuild.
 func (a *App) handleRestartAgent(c *gin.Context) {
 	userID := middleware.UserID(c)
 	agentID := c.Param("agentID")
-	var gcfg string
-	err := a.db.QueryRowContext(c.Request.Context(),
-		`SELECT COALESCE(config_json, '') FROM agents WHERE id = ? AND owner = ? AND deleted_at IS NULL`,
-		agentID, userID).Scan(&gcfg)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
-		return
-	}
-	if err != nil {
+	ctx := c.Request.Context()
+	// World-layer scope: the caller owns this agent (enumerate ITS channels). The
+	// per-channel restart authority is the door's member check, not ownership.
+	var owned int
+	if err := a.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM agents WHERE id = ? AND owner = ? AND deleted_at IS NULL`,
+		agentID, userID).Scan(&owned); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
+	if owned == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "agent not found"})
+		return
+	}
 	instanceID := "agent:" + agentID
-	// Each channel's row carries its OWN engine (class) — restart preserves the
-	// per-channel engine; it does NOT re-resolve from the agent default.
-	type loc struct{ chID, class, cfg string }
-	var locs []loc
-	rows, qerr := a.db.QueryContext(c.Request.Context(),
-		`SELECT channel_id, class, COALESCE(config_json, '') FROM channel_actors WHERE instance_id = ? AND placement = ?`,
+	var chans []string
+	rows, qerr := a.db.QueryContext(ctx,
+		`SELECT channel_id FROM channel_actors WHERE instance_id = ? AND placement = ?`,
 		instanceID, placementServer)
 	if qerr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 	for rows.Next() {
-		var l loc
-		if err := rows.Scan(&l.chID, &l.class, &l.cfg); err == nil {
-			locs = append(locs, l)
+		var ch string
+		if rows.Scan(&ch) == nil {
+			chans = append(chans, ch)
 		}
 	}
 	rows.Close()
 
+	payload, _ := json.Marshal(instancePayload{InstanceID: instanceID})
 	restarted := 0
-	for _, l := range locs {
-		home := a.getHome(channel.ID(l.chID))
-		if home == nil {
+	for _, ch := range chans {
+		r, derr := a.submitControlThroughDoor(ctx, ch, userID, platform.TypeRestartActor, payload)
+		if derr != nil {
+			// Non-member of that channel (膜律) or unavailable — the caller may only
+			// restart in channels they are a member of.
+			a.logger.Warn("restart agent: door", "channel", ch, "instance", instanceID, "err", derr.Error())
 			continue
 		}
-		if serr := a.spawnAgentInstance(channel.ID(l.chID), home, instanceID, l.class, l.cfg, gcfg); serr != nil {
-			a.logger.Warn("restart agent: spawn", "channel", l.chID, "instance", instanceID, "err", serr.Error())
-			continue
+		if r.settled && r.completed {
+			restarted++
 		}
-		restarted++
 	}
 	c.JSON(http.StatusOK, gin.H{"agent": agentID, "restarted": restarted})
 }
