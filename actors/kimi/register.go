@@ -6,7 +6,7 @@ import (
 	"github.com/wanpengxie/atoll/registry"
 )
 
-func init() { registry.Register("kimi", construct) }
+func init() { registry.Register("kimi", registry.ClassDecl{Kind: actor.KindTool, New: construct}) }
 
 // construct: browser-extension adapter (mirrors xhs; differs only by id+addr).
 // id comes from the spec; blank → class default. The listen addr is config (a

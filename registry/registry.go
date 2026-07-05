@@ -59,21 +59,45 @@ type InstanceSpec struct {
 // many instances. A bad config / missing creds is a hard error.
 type Constructor func(spec InstanceSpec, ctx Deps) (platform.ActorDecl, error)
 
+// ClassDecl is a class's directory-level declaration: the class-level facts
+// knowable WITHOUT running the constructor (pre-Build), plus the constructor
+// itself. Kind is the one such fact today — Admit needs it before any cell is
+// built, and it was previously locked inside the Constructor's return value
+// (unreachable pre-Build). Future class-level facts are additive fields here;
+// the Register signature no longer changes when they arrive.
+type ClassDecl struct {
+	Kind actor.Kind
+	New  Constructor
+}
+
 var (
 	mu  sync.RWMutex
-	reg = map[string]Constructor{}
+	reg = map[string]ClassDecl{}
 )
 
-// Register records a class's Constructor under its class key. Called from an
+// Register records a class's ClassDecl under its class key. Called from an
 // actor package's init(); a duplicate class is a programmer error (panic, like
 // sql.Register).
-func Register(class string, c Constructor) {
+func Register(class string, d ClassDecl) {
 	mu.Lock()
 	defer mu.Unlock()
 	if _, dup := reg[class]; dup {
 		panic("registry: duplicate class registration: " + class)
 	}
-	reg[class] = c
+	reg[class] = d
+}
+
+// ClassKind returns a class's declared Kind (pure table lookup, no construction)
+// and whether the class is registered. It is the pre-Build kind source Admit
+// resolves against.
+func ClassKind(class string) (actor.Kind, bool) {
+	mu.RLock()
+	defer mu.RUnlock()
+	d, ok := reg[class]
+	if !ok {
+		return "", false
+	}
+	return d.Kind, true
 }
 
 // classes returns the registered class keys, sorted (stable iteration order).
@@ -95,14 +119,20 @@ func classes() []string {
 // it explicitly).
 func Build(class string, spec InstanceSpec, ctx Deps) (platform.ActorDecl, error) {
 	mu.RLock()
-	c, found := reg[class]
+	d, found := reg[class]
 	mu.RUnlock()
 	if !found {
 		return platform.ActorDecl{}, fmt.Errorf("registry: unknown class %q (registered: %v)", class, classes())
 	}
-	decl, err := c(spec, ctx)
+	decl, err := d.New(spec, ctx)
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("registry: build %q: %w", class, err)
+	}
+	// Consistency guard: the constructed decl's Kind must match the class's
+	// declared Kind — a drift means the directory declaration lies about what
+	// the constructor produces. Fail loud rather than admit a mislabelled cell.
+	if decl.Kind != d.Kind {
+		return platform.ActorDecl{}, fmt.Errorf("registry: build %q: constructed kind %q ≠ declared kind %q", class, decl.Kind, d.Kind)
 	}
 	return decl, nil
 }

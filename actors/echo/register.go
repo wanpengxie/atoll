@@ -6,7 +6,7 @@ import (
 	"github.com/wanpengxie/atoll/registry"
 )
 
-func init() { registry.Register("echo", construct) }
+func init() { registry.Register("echo", registry.ClassDecl{Kind: actor.KindTool, New: construct}) }
 
 // construct: the zero-config tool. id comes from the spec (multi-capable); a
 // blank spec id falls back to the class default "echo" (the one-of-each case).

@@ -8,7 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
-func init() { registry.Register("xhs", construct) }
+func init() { registry.Register("xhs", registry.ClassDecl{Kind: actor.KindTool, New: construct}) }
 
 // construct: browser-extension adapter — owns a PRIVATE loopback WS endpoint the
 // extension connects in to (keyless; the 127.0.0.1 bind is the trust boundary).

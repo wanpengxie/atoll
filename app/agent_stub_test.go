@@ -44,7 +44,7 @@ func init() {
 		}, nil
 	}
 	for _, engine := range []string{"go-kimi", "claude"} {
-		registry.Register(engine, stub)
+		registry.Register(engine, registry.ClassDecl{Kind: actor.KindAgent, New: stub})
 	}
 }
 

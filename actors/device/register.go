@@ -10,7 +10,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
-func init() { registry.Register("device", construct) }
+func init() { registry.Register("device", registry.ClassDecl{Kind: actor.KindTool, New: construct}) }
 
 // construct: the generic device actor. This is a true essence-singleton:
 // the instance's identity IS the external resource (the machine), so the id
