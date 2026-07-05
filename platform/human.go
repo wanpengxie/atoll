@@ -10,8 +10,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
@@ -343,6 +345,65 @@ func (h HumanHandle) CancelTimer(ctx context.Context, id schedule.TimerID) error
 		return err
 	}
 	return h.sched.Cancel(ctx, id)
+}
+
+// PresenceConnect feeds this subject's L3 device presence online for one gateway
+// ws session (层3 obs 轴, advisory — 正交 actor 活性, 绝不互训). Refcounted per
+// (channel, user): the online edge is fed only on the FIRST session; a later tab
+// just increments. No户籍 re-check — presence is advisory and the handle was
+// already gated by Home.Human's membership check; a removed member's stale feed is
+// harmless (its cell is gone).
+func (h HumanHandle) PresenceConnect() {
+	h.home.presenceConnect(h.userID)
+}
+
+// PresenceDisconnect feeds this subject's L3 device presence offline when the LAST
+// session drops (显式 offline snapshot, 不靠 decay — 常驻 cell 不死). A non-final
+// disconnect only decrements; a stale disconnect past zero is a no-op.
+func (h HumanHandle) PresenceDisconnect() {
+	h.home.presenceDisconnect(h.userID)
+}
+
+// presenceConnect increments the subject's session refcount and feeds the online
+// device-presence edge on the 0→1 edge, under presenceMu (edges totally ordered).
+func (h *Home) presenceConnect(id actor.ActorID) {
+	h.presenceMu.Lock()
+	defer h.presenceMu.Unlock()
+	if h.presenceSessions == nil {
+		h.presenceSessions = map[actor.ActorID]int{}
+	}
+	was := h.presenceSessions[id]
+	h.presenceSessions[id] = was + 1
+	if was == 0 {
+		h.feedDevicePresence(id, true)
+	}
+}
+
+// presenceDisconnect decrements the subject's session refcount and feeds the
+// offline edge only on the 1→0 edge (last session), under presenceMu.
+func (h *Home) presenceDisconnect(id actor.ActorID) {
+	h.presenceMu.Lock()
+	defer h.presenceMu.Unlock()
+	n := h.presenceSessions[id]
+	if n <= 0 {
+		return
+	}
+	n--
+	if n == 0 {
+		delete(h.presenceSessions, id)
+		h.feedDevicePresence(id, false)
+		return
+	}
+	h.presenceSessions[id] = n
+}
+
+// feedDevicePresence pushes an online/offline edge into the home device-presence
+// fold through its existing ObsWatcher entry (the same fold a daemon adapter feeds
+// via the obs axis) — the door is this subject's L3 producer.
+func (h *Home) feedDevicePresence(id actor.ActorID, online bool) {
+	h.deviceFold.OnObs(context.Background(), id,
+		actorrt.ObsKind(introspect.ObsDevicePresence),
+		actorrt.ObsValue(introspect.MarshalDevicePresence(online)))
 }
 
 // audienceContains reports whether id is in the audience list.

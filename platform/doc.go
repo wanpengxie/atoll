@@ -6,7 +6,7 @@
 //	Open(cfg) → *Home
 //	View()  View              — read-only observation set (ReadAfterSeq/MaxSeq/ListActors/Stat/DevicePresence/IsAttached)
 //	Admit(ctx,id,kind)        — pure-membership admission (neutral row; embodiment left to the ring/attach)
-//	Human(ctx,id) → HumanHandle — subjectgate door面 (a subject's Submit/Resolve/Cancel/After verbs; welded pen stays in the wall)
+//	Human(ctx,id) → HumanHandle — subjectgate door面 (a subject's Submit/Resolve/Cancel/After verbs + PresenceConnect/Disconnect L3 device-presence feed; welded pen stays in the wall)
 //	Spawn(ctx,id,kind,factory) — in-process cell placement (membership + Mint welded Pen + spawn)
 //	ServeAttach(w,r,daemonID) — attach acceptance surface (app hands an upgraded WS here)
 //	Subscribe() (<-chan struct{}, func()) — subscription registration surface (client push)

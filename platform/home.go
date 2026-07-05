@@ -97,6 +97,18 @@ type Home struct {
 	humanCallersMu sync.Mutex
 	humanCallers   map[actor.ActorID]*behavior.Caller
 
+	// presenceSessions is the subjectgate door's L3 device-presence session
+	// refcount per subject (channel, user): the gateway ws connect/disconnect are
+	// the ONLY producer of a human's device presence (常驻 cell 不死, decay 挂
+	// down-edge 对它失效, so the door must explicitly feed — 根基档 §4.6/§6). A
+	// (channel,user) may hold several ws (multi-tab/multi-device); online is fed on
+	// the FIRST session, offline only when the LAST drops. The count is mutated and
+	// the fold fed under presenceMu together, so edges are totally ordered — a late
+	// disconnect from an old session can only decrement (never overwrite a still-live
+	// sibling's online), which is the generation guard the refcount subsumes.
+	presenceMu       sync.Mutex
+	presenceSessions map[actor.ActorID]int
+
 	// placement decides which host a new activity (fork/activation) starts on.
 	// Single fixed-home identity this period (SinglePlacement); shaped now so
 	// fork/activation route through Place() and multi-home swaps additively.
