@@ -37,9 +37,11 @@ type livePen struct {
 }
 
 // NewLivePen wraps raw in the WHEN-validity membrane welded to inc, gated on host.
-// Participant cells (agent/tool/human) are born with this; substrate anchors
-// (the system/sysactor pen, the daemon relay pen) deliberately use the raw pen
-// with no incarnation gate.
+// Participant cells (agent/tool/human) are born with this; the sole substrate
+// anchor exempt from the incarnation gate is the system/sysactor pen, which
+// deliberately uses the raw pen (no successor principal to impersonate; the
+// closure reconciler must write even when no cell is live). Every relay sink on
+// the daemon path is membrane-wrapped — there is no exempt "daemon relay pen".
 func NewLivePen(raw harness.Pen, inc actorrt.Incarnation, host *actorrt.Runtime) harness.Pen {
 	return livePen{raw: raw, inc: inc, host: host}
 }
