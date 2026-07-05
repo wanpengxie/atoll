@@ -47,14 +47,6 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("config: %w", err)
 	}
-	// Durable resume seam: a platform-managed session dir keeps the looper's
-	// opaque session across restarts; the state slot carries the auditable
-	// resume pointer (seed read at boot, store written by the looper).
-	if ctx.State.Dir != "" {
-		cfg.WorkDir = ctx.State.Dir
-	}
-	cfg.ResumeSeed = ctx.State.Seed
-	cfg.Checkpoint = ctx.State.Store
 	return platform.ActorDecl{
 		ID:      id,
 		Kind:    actor.KindAgent,

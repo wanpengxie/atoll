@@ -31,7 +31,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wanpengxie/atoll/lib/pathsafe"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -137,38 +136,6 @@ func (b staticBuilder) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
 	return f, ok
 }
 
-// localStateSlot gives a daemon-placed instance a DAEMON-LOCAL durable state
-// slot: state follows execution locus — a daemon-placed looper resumes from
-// local state, the server holds none. dir is platform-managed under the
-// workspace; the looper is the slot's only author.
-//
-// A mkdir failure is RETURNED (not silently downgraded to ephemeral): the caller
-// skips that instance observably, because claude's resume contract depends on a
-// real durable Dir/Seed/Store. Store writes atomically (temp + rename) so a
-// crash mid-write never leaves a torn checkpoint.
-func localStateSlot(wsRoot, chID, instanceID string) (registry.StateSlot, error) {
-	dir := filepath.Join(wsRoot, "agent-state", pathsafe.Segment(chID), pathsafe.Segment(instanceID))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return registry.StateSlot{}, fmt.Errorf("state dir %s: %w", dir, err)
-	}
-	seedPath := filepath.Join(dir, "checkpoint.json")
-	var seed json.RawMessage
-	if b, err := os.ReadFile(seedPath); err == nil && len(b) > 0 {
-		seed = b
-	}
-	return registry.StateSlot{
-		Dir:  dir,
-		Seed: seed,
-		Store: func(blob json.RawMessage) error {
-			tmp := seedPath + ".tmp"
-			if err := os.WriteFile(tmp, blob, 0o644); err != nil {
-				return err
-			}
-			return os.Rename(tmp, seedPath) // atomic replace
-		},
-	}, nil
-}
-
 func main() {
 	ws := flag.String("server", "ws://localhost:8080/compute", "server WS url")
 	key := flag.String("key", "", "api key")
@@ -241,19 +208,11 @@ func main() {
 		builders = staticBuilder{}
 	)
 	for _, asg := range plan {
-		// A daemon-placed instance needs a real durable local state slot; a mkdir
-		// failure is observable (skip this instance, logged), never silent ephemeral.
-		slot, serr := localStateSlot(wsRoot, chID, asg.InstanceID)
-		if serr != nil {
-			logger.Error("daemon: state slot", "instance", asg.InstanceID, "err", serr.Error())
-			continue
-		}
 		deps := registry.Deps{
 			ChannelID:    channel.ID(chID),
 			WorkspaceDir: wsRoot,
 			DeviceName:   deviceName,
 			Logger:       slog.Default(),
-			State:        slot,
 		}
 		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
 			ID:     actor.ActorID(asg.InstanceID),

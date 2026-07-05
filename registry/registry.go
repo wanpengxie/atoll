@@ -22,21 +22,6 @@ type Deps struct {
 	WorkspaceDir string     // workspace root (device / agent situation facts)
 	DeviceName   string     // device identity (for the device class's id)
 	Logger       *slog.Logger
-
-	// State is the durable per-instance state slot: a platform-managed session
-	// dir + an opaque checkpoint blob (channel_actors.state) the looper alone
-	// authors. Zero value = no durable state (ephemeral working session). The
-	// agent is its first consumer.
-	State StateSlot
-}
-
-// StateSlot is one actor instance's durable state seam. atoll NEVER interprets
-// the blob — it only persists and replays it; the looper is the blob's only
-// author.
-type StateSlot struct {
-	Dir   string                      // platform-managed durable session dir ("" = ephemeral)
-	Seed  json.RawMessage             // last persisted opaque checkpoint, read at boot
-	Store func(json.RawMessage) error // persist a looper-authored checkpoint
 }
 
 // InstanceSpec is one actor instance's deployment params: its id and opaque

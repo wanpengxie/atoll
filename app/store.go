@@ -98,7 +98,6 @@ func migrate(db *sql.DB) error {
 			config_json TEXT,
 			placement   TEXT NOT NULL DEFAULT 'server',
 			desired_host TEXT NOT NULL DEFAULT '',
-			state       TEXT,
 			PRIMARY KEY(channel_id, instance_id)
 		);
 		-- agents: global agent IDENTITY declarations. One row per
@@ -112,8 +111,8 @@ func migrate(db *sql.DB) error {
 		-- (responsibility owner, never an agent).
 		--
 		-- No "scope" column (cognitive-state scope) BY DESIGN — v1 is implicitly
-		-- channel-scoped: each agent's state is per-channel isolated
-		-- (channel_actors.state), NOT shared across channels. entity-scoped (one
+		-- channel-scoped: each agent's cognitive state is per-channel isolated,
+		-- NOT shared across channels. entity-scoped (one
 		-- shared memory/persona across an agent's channels = "unified") is v2, added
 		-- additively with the memory subsystem (then: ALTER TABLE ADD COLUMN scope).
 		-- Do NOT read per-channel as permanent truth: the agent IDENTITY is global
@@ -156,11 +155,6 @@ func migrate(db *sql.DB) error {
 	// 'daemon' row (''=unassigned pool). Two-level invariant with placement,
 	// enforced at the write face. additive best-effort add for a dev DB.
 	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN desired_host TEXT NOT NULL DEFAULT ''`)
-
-	// channel_actors.state: per-instance looper-opaque checkpoint slot (durable
-	// resume). The looper is its only author — external
-	// control never writes it directly. additive best-effort add for a dev DB.
-	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN state TEXT`)
 
 	// agents.looper → default_looper: the engine is now a
 	// per-channel concrete actor class (channel_actors.class); agents keeps only the

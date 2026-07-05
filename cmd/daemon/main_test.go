@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -70,29 +69,5 @@ func TestFetchPlan_Non200(t *testing.T) {
 	serverWS := "ws://" + strings.TrimPrefix(srv.URL, "http://") + "/compute"
 	if _, err := fetchPlan(context.Background(), serverWS, "bad", "c1"); err == nil {
 		t.Fatal("non-200 plan fetch should error")
-	}
-}
-
-// TestLocalStateSlot: a daemon-placed looper's state slot is DAEMON-LOCAL and
-// durable — a checkpoint stored by one build is read back as the seed on the next.
-// State follows the execution locus; the server does not seed it.
-func TestLocalStateSlot(t *testing.T) {
-	root := t.TempDir()
-	slot, err := localStateSlot(root, "c1", "agent:rev")
-	if err != nil {
-		t.Fatalf("localStateSlot: %v", err)
-	}
-	if slot.Seed != nil {
-		t.Fatalf("fresh slot should have no seed, got %s", slot.Seed)
-	}
-	if err := slot.Store(json.RawMessage(`"sess-1"`)); err != nil {
-		t.Fatalf("store: %v", err)
-	}
-	reopened, err := localStateSlot(root, "c1", "agent:rev")
-	if err != nil {
-		t.Fatalf("localStateSlot reopen: %v", err)
-	}
-	if string(reopened.Seed) != `"sess-1"` {
-		t.Fatalf("seed not persisted locally: %s", reopened.Seed)
 	}
 }

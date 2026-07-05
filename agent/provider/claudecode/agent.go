@@ -86,11 +86,6 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("config: %w", err)
 	}
-	if ctx.State.Dir != "" {
-		cfg.WorkDir = ctx.State.Dir
-	}
-	cfg.ResumeSeed = ctx.State.Seed
-	cfg.Checkpoint = ctx.State.Store
 	return platform.ActorDecl{
 		ID:      id,
 		Kind:    actor.KindAgent,

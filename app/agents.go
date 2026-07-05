@@ -5,8 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"net/http"
-	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -14,7 +12,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/lib/pathsafe"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -32,34 +29,16 @@ import (
 // row and spawns it live. Spawn REPLACES an existing cell (one actor, one owner),
 // so this doubles as restart = rebuild (new config) + Spawn (the looper resumes
 // from its state slot). Mirrors spawnComposition's per-instance block.
-func (a *App) spawnAgentInstance(chID channel.ID, home *platform.Home, instanceID, class, channelCfg, state, globalCfg string) error {
-	sessionsRoot := filepath.Join(filepath.Dir(a.channelDBDir), "agent-sessions")
-	dir := filepath.Join(sessionsRoot, pathsafe.Segment(string(chID)), pathsafe.Segment(instanceID))
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		a.logger.Warn("app: session dir", "channel", string(chID), "instance", instanceID, "err", err.Error())
-		dir = ""
-	}
-	inst := instanceID
-	store := func(blob json.RawMessage) error {
-		_, err := a.db.Exec(
-			`UPDATE channel_actors SET state = ? WHERE channel_id = ? AND instance_id = ?`,
-			string(blob), string(chID), inst)
-		return err
-	}
+func (a *App) spawnAgentInstance(chID channel.ID, home *platform.Home, instanceID, class, channelCfg, globalCfg string) error {
 	// class IS the engine (claude/go-kimi); config = global identity overlaid by
 	// per-channel (mergeConfig). No looper-DSN packing.
 	cfg := mergeConfig(globalCfg, channelCfg)
 	decl, err := registry.Build(class, registry.InstanceSpec{
-		ID:     actor.ActorID(inst),
+		ID:     actor.ActorID(instanceID),
 		Config: cfg,
 	}, registry.Deps{
 		ChannelID: chID,
 		Logger:    a.logger,
-		State: registry.StateSlot{
-			Dir:   dir,
-			Seed:  json.RawMessage(state),
-			Store: store,
-		},
 	})
 	if err != nil {
 		return err
@@ -310,7 +289,7 @@ func (a *App) handleIntroduceAgent(c *gin.Context) {
 	live := false
 	if placement == placementServer {
 		if home := a.getHome(channel.ID(chID)); home != nil {
-			if serr := a.spawnAgentInstance(channel.ID(chID), home, instanceID, engine, "", "", gcfg); serr != nil {
+			if serr := a.spawnAgentInstance(channel.ID(chID), home, instanceID, engine, "", gcfg); serr != nil {
 				a.logger.Warn("introduce agent: spawn", "channel", chID, "instance", instanceID, "err", serr.Error())
 			} else {
 				live = true
@@ -347,10 +326,10 @@ func (a *App) handleRestartAgent(c *gin.Context) {
 	instanceID := "agent:" + agentID
 	// Each channel's row carries its OWN engine (class) — restart preserves the
 	// per-channel engine; it does NOT re-resolve from the agent default.
-	type loc struct{ chID, class, cfg, state string }
+	type loc struct{ chID, class, cfg string }
 	var locs []loc
 	rows, qerr := a.db.QueryContext(c.Request.Context(),
-		`SELECT channel_id, class, COALESCE(config_json, ''), COALESCE(state, '') FROM channel_actors WHERE instance_id = ? AND placement = ?`,
+		`SELECT channel_id, class, COALESCE(config_json, '') FROM channel_actors WHERE instance_id = ? AND placement = ?`,
 		instanceID, placementServer)
 	if qerr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -358,7 +337,7 @@ func (a *App) handleRestartAgent(c *gin.Context) {
 	}
 	for rows.Next() {
 		var l loc
-		if err := rows.Scan(&l.chID, &l.class, &l.cfg, &l.state); err == nil {
+		if err := rows.Scan(&l.chID, &l.class, &l.cfg); err == nil {
 			locs = append(locs, l)
 		}
 	}
@@ -370,7 +349,7 @@ func (a *App) handleRestartAgent(c *gin.Context) {
 		if home == nil {
 			continue
 		}
-		if serr := a.spawnAgentInstance(channel.ID(l.chID), home, instanceID, l.class, l.cfg, l.state, gcfg); serr != nil {
+		if serr := a.spawnAgentInstance(channel.ID(l.chID), home, instanceID, l.class, l.cfg, gcfg); serr != nil {
 			a.logger.Warn("restart agent: spawn", "channel", l.chID, "instance", instanceID, "err", serr.Error())
 			continue
 		}

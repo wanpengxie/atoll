@@ -18,7 +18,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/lib/pathsafe"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -289,7 +288,7 @@ const (
 // Deps carries NO WorkspaceDir, so the agent class derives the server-embedded
 // Situation.
 func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
-	type instanceSpec struct{ id, class, cfg, state, gcfg string }
+	type instanceSpec struct{ id, class, cfg, gcfg string }
 	var specs []instanceSpec
 	// LEFT JOIN agents: for an agent instance (instance_id = 'agent:'||agents.id)
 	// overlay its GLOBAL identity config (persona/skills) UNDER the per-channel
@@ -297,7 +296,7 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 	// per-channel concrete engine class: claude/go-kimi). A non-agent class never
 	// matches the join (no global overlay), which is correct.
 	rows, err := a.db.Query(
-		`SELECT ca.instance_id, ca.class, COALESCE(ca.config_json, ''), COALESCE(ca.state, ''),
+		`SELECT ca.instance_id, ca.class, COALESCE(ca.config_json, ''),
 		        COALESCE(a.config_json, '')
 		   FROM channel_actors ca
 		   LEFT JOIN agents a ON ca.instance_id = 'agent:' || a.id
@@ -309,34 +308,15 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 	}
 	for rows.Next() {
 		var s instanceSpec
-		if err := rows.Scan(&s.id, &s.class, &s.cfg, &s.state, &s.gcfg); err != nil {
+		if err := rows.Scan(&s.id, &s.class, &s.cfg, &s.gcfg); err != nil {
 			continue
 		}
 		specs = append(specs, s)
 	}
 	rows.Close()
 
-	// Durable per-instance session dirs live under the data root (sibling of the
-	// channel DBs), platform-managed so a looper's opaque session survives a
-	// restart — keystone: durable state in a platform-controlled area, not a tmp
-	// dir or the user's home.
-	sessionsRoot := filepath.Join(filepath.Dir(a.channelDBDir), "agent-sessions")
-
 	for _, s := range specs {
-		inst := s.id // bind for the checkpoint closure
-		dir := filepath.Join(sessionsRoot, pathsafe.Segment(string(chID)), pathsafe.Segment(inst))
-		if err := os.MkdirAll(dir, 0o755); err != nil {
-			a.logger.Warn("app: session dir", "channel", string(chID), "instance", inst, "err", err.Error())
-			dir = "" // fall back to the looper's ephemeral default
-		}
-		// store persists a looper-authored opaque checkpoint into the state slot.
-		// The looper is the slot's ONLY author.
-		store := func(blob json.RawMessage) error {
-			_, err := a.db.Exec(
-				`UPDATE channel_actors SET state = ? WHERE channel_id = ? AND instance_id = ?`,
-				string(blob), string(chID), inst)
-			return err
-		}
+		inst := s.id
 		// The engine = ca.class (per-channel concrete class). config = global
 		// identity overlaid by per-channel (mergeConfig); no looper-DSN packing.
 		cfg := mergeConfig(s.gcfg, s.cfg)
@@ -346,11 +326,6 @@ func (a *App) spawnComposition(chID channel.ID, home *platform.Home) {
 		}, registry.Deps{
 			ChannelID: chID,
 			Logger:    a.logger,
-			State: registry.StateSlot{
-				Dir:   dir,
-				Seed:  json.RawMessage(s.state),
-				Store: store,
-			},
 		})
 		if err != nil {
 			a.logger.Debug("app: composition instance not built", "channel", string(chID), "instance", inst, "reason", err.Error())

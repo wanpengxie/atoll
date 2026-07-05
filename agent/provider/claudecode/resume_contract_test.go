@@ -1,49 +1,33 @@
 package claudecode
 
 import (
-	"encoding/json"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
 )
 
-// TestNewDecl_ResumeContract pins claude's daemon-side build/resume contract:
-// don't assume the SDK auto-resumes from workdir. The parts we OWN and
-// therefore test:
+// TestNewDecl_BuildContract pins claude's daemon-side build contract:
 //
-//   - build is SEED-OPTIONAL: NewDecl succeeds with NO state (fresh start) AND
-//     with a state seed (resume). Resume is driven by the EXPLICIT State.Seed the
-//     daemon persists locally (cmd/daemon localStateSlot) → State.Seed wired to
-//     cfg.ResumeSeed, State.Store to cfg.Checkpoint — NOT implicit-workdir magic.
+//   - build is SEED-OPTIONAL cold start: NewDecl succeeds with NO durable state
+//     (fresh start every boot — the platform state slot was removed, resume is
+//     down until period-10 rebuilds it on sys.State).
 //   - build is CREDS-INDEPENDENT: no ANTHROPIC_API_KEY / login is read at BUILD
 //     (the claude CLI carries its own auth at RUN time, see agent.go EnvKeys), so
 //     a daemon builds the assigned claude with only the user's LOCAL login.
-func TestNewDecl_ResumeContract(t *testing.T) {
+func TestNewDecl_BuildContract(t *testing.T) {
 	base := registry.Deps{ChannelID: "c1", WorkspaceDir: t.TempDir()}
 	spec := registry.InstanceSpec{ID: actor.ActorID("agent:rev")}
 
-	// (a) no state / no seed → fresh start, builds fine (no creds in env).
 	decl, err := NewDecl(spec, base)
 	if err != nil {
-		t.Fatalf("NewDecl with no state should build (fresh start): %v", err)
+		t.Fatalf("NewDecl should build (cold start): %v", err)
 	}
 	if decl.Kind != actor.KindAgent {
 		t.Fatalf("claude decl Kind = %v, want agent", decl.Kind)
 	}
 	if decl.ID != spec.ID {
 		t.Fatalf("claude decl ID = %v, want %v", decl.ID, spec.ID)
-	}
-
-	// (b) with a local state seed → resume path also builds fine.
-	seeded := base
-	seeded.State = registry.StateSlot{
-		Dir:   t.TempDir(),
-		Seed:  json.RawMessage(`"claude-session-xyz"`),
-		Store: func(json.RawMessage) error { return nil },
-	}
-	if _, err := NewDecl(spec, seeded); err != nil {
-		t.Fatalf("NewDecl with a resume seed should build: %v", err)
 	}
 }
 
