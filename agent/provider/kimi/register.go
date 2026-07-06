@@ -3,35 +3,24 @@ package kimi
 import (
 	"errors"
 	"fmt"
-	"log"
-	"os"
 
+	"github.com/wanpengxie/atoll/agent/base"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // NewDecl: the go-kimi engine's Constructor — its OWN flat actor class
-// ("go-kimi", kind=agent), registered directly into the one registry via this
-// package's init() (peer to claude and the tool classes; there is no umbrella
-// "agent" class). Instantiated under whatever id the spec gives (agent:boost,
-// agent:research, …). The id is NOT baked here: default_agent is a
-// name-agnostic pointer, the instance is just another actor. The same class
-// yields N agents.
+// ("go-kimi", kind=agent). Instantiated under whatever id the spec gives
+// (agent:boost, agent:research, …); the id is NOT baked (default_agent is a
+// name-agnostic pointer). Situation is host-derived (a daemon carries a
+// workspace, a server-embedded build does not).
 //
-// Situation is derived from the host context: a daemon carries a workspace
-// (exclusive device), a server-embedded build does not — WorkspaceDir presence
-// is the discriminator.
-//
-// Config layers env (platform defaults / the server fallback's key) under the
-// per-instance spec.Config overlay (channel_actors.config_json — the looper
-// self-parses it). Cold start every boot: the platform state slot that once
-// carried durable resume was removed (A-P7), so the bridge mints a fresh
-// per-process WorkDir and starts a new session (resume returns in period 10 on
-// sys.State). A missing channel / id / creds is a hard error — the caller (app
-// composition / daemon) decides whether to build.
+// Config layers env DEFAULTS under the per-instance spec.Config overlay
+// (channel_actors.config_json). It builds the agent as a base.Def (a Proc over
+// agent/base's skeleton), NOT a raw actorrt.Actor (期10 S5: the mailbox loop /
+// turn queue / response分拣 live in the base). A missing channel / id / creds is
+// a hard error.
 func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
 	if ctx.ChannelID == "" {
 		return platform.ActorDecl{}, errors.New("agent: requires a channel")
@@ -44,20 +33,19 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 	if ctx.WorkspaceDir != "" {
 		sit = Situation{Host: "daemon", HasWorkspace: true, WorkspaceDir: ctx.WorkspaceDir}
 	}
-	cfg, err := NewConfigFromSpec(spec.Config, BuildSystemPrompt(
-		sit, os.Getenv(EnvKeyChannelType), os.Getenv(EnvKeyDomainPrompt)))
+	cfg, err := NewConfigFromSpec(spec.Config, sit)
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("config: %w", err)
+	}
+	def, err := base.Def(agentSkillDoc, base.Config{
+		NewEngine: newEngineFn(cfg, defaultAgentFactory),
+	})
+	if err != nil {
+		return platform.ActorDecl{}, fmt.Errorf("kimi agent def: %w", err)
 	}
 	return platform.ActorDecl{
 		ID:      id,
 		Kind:    actor.KindAgent,
-		Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
-			b, err := NewBridge(cfg, id, pen)
-			if err != nil {
-				log.Fatalf("agent bridge: %v", err)
-			}
-			return b
-		}},
+		Factory: platform.ActorFactory{Proc: def},
 	}, nil
 }

@@ -6,51 +6,42 @@ import (
 
 	claude "github.com/wanpengxie/go-claude-agent-sdk"
 
+	"github.com/wanpengxie/atoll/agent/base"
 	"github.com/wanpengxie/atoll/lib/metatool"
 )
 
-// buildMCPServer wraps the 7 atoll meta-tools as an in-process SDK MCP server
-// — the claude looper's path to the shared actor-invocation machinery (every
-// looper must be able to inject the standard meta-tools into its own tool
-// surface and invoke them; the go-kimi looper does the same via
-// AdditionalTools). Each handler bridges to the held shell with the
-// in-flight turn's RuntimeContext. The handler reads b.shell LAZILY (the
-// server is built before Start assigns it; handlers only fire mid-turn, well
-// after) so the binding is order-independent.
-func (b *Bridge) buildMCPServer() *claude.McpSdkServerConfig {
-	catalog := metatool.MetaTools()
+// buildMCPServer wraps the 7 atoll meta-tools as an in-process SDK MCP server —
+// the claude looper's path to the shared actor-invocation machinery. It projects
+// the neutral base.BuildMCPCatalog (§2 S2: agentbase出一个 MCP 目录) into claude
+// SdkMcpTools; each handler bridges to the engine's held Exec face with the
+// in-flight turn's RuntimeContext. Handlers read e.currentRC() lazily (they only
+// fire mid-turn), so the binding is order-independent.
+func (e *engine) buildMCPServer() *claude.McpSdkServerConfig {
+	exec := func(ctx context.Context, mt metatool.MetaTool, params json.RawMessage) metatool.ResultValue {
+		return mt.Execute(ctx, params, e.x, e.currentRC())
+	}
+	catalog := base.BuildMCPCatalog(exec)
 	tools := make([]*claude.SdkMcpTool, 0, len(catalog))
-	for _, mt := range catalog {
-		mt := mt
+	for _, row := range catalog {
+		row := row
 		var schema map[string]any
-		if len(mt.Spec.Schema) > 0 {
-			_ = json.Unmarshal(mt.Spec.Schema, &schema)
+		if len(row.Schema) > 0 {
+			_ = json.Unmarshal(row.Schema, &schema)
 		}
 		handler := func(ctx context.Context, args map[string]any) (claude.MCPToolResult, error) {
 			params, err := json.Marshal(args)
 			if err != nil {
 				return errResult(err.Error()), nil
 			}
-			rv := mt.Execute(ctx, params, b.shell, b.currentRC())
-			return toMCPResult(rv), nil
+			res := row.Handler(ctx, params)
+			return claude.MCPToolResult{
+				Content: []claude.MCPContent{{Type: "text", Text: res.Text}},
+				IsError: res.IsError,
+			}, nil
 		}
-		tools = append(tools, claude.NewMCPTool(mt.Spec.Name, mt.Spec.Description, schema, handler))
+		tools = append(tools, claude.NewMCPTool(row.Name, row.Description, schema, handler))
 	}
 	return claude.CreateSdkMcpServer("atoll", "1.0.0", tools...)
-}
-
-// toMCPResult materialises a metatool.ResultValue as an MCP tool result. The
-// value (the metatool's structured result map) is rendered to JSON text since
-// the model consumes it as a tool message.
-func toMCPResult(rv metatool.ResultValue) claude.MCPToolResult {
-	var text string
-	if bts, err := json.Marshal(rv.Value); err == nil {
-		text = string(bts)
-	}
-	return claude.MCPToolResult{
-		Content: []claude.MCPContent{{Type: "text", Text: text}},
-		IsError: rv.IsError,
-	}
 }
 
 func errResult(msg string) claude.MCPToolResult {

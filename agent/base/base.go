@@ -26,12 +26,14 @@ const resumeSeedKey resource.ResourceID = "agent.resume-seed"
 // its emitted narration, not a request reply).
 const eventType = "agent.text"
 
-// NewEngine builds this incarnation's Engine, seeded with the durable resume
-// value the base read from sys.State (nil = cold start). It runs INSIDE the
-// Proc (after Sys is welded), so the provider's engine construction may depend
-// on the resume seed. The provider builds + installs its own tool面 here (via
-// BuildMCPCatalog) — how the catalog reaches the engine is适配件内政 (§1 三件套②).
-type NewEngine func(resumeSeed []byte) (Engine, error)
+// NewEngine builds this incarnation's Engine, given the welded Sys and the
+// durable resume value the base read from sys.State (nil = cold start). It runs
+// INSIDE the Proc (after Sys is welded), so the provider's engine construction
+// may depend on both. Sys is passed so the provider can build its meta-tool
+// execution face — ExecFace(sys, …) — and thread it into the engine's tool
+// surface (§1 三件套②: how the catalog reaches the engine is适配件内政; the
+// base only supplies the substrate JobTable + sys.Call face via ExecFace).
+type NewEngine func(sys actorbase.Sys, resumeSeed []byte) (Engine, error)
 
 // Config assembles the base Proc. The provider supplies NewEngine (its only
 // obligation beside the Engine impl); the rest is skeleton.
@@ -63,7 +65,7 @@ func Def(doc string, cfg Config) (actorbase.Def, error) {
 func newProc(cfg Config) actorbase.Proc {
 	return func(sys actorbase.Sys) error {
 		seed := readSeed(sys)
-		eng, err := cfg.NewEngine(seed)
+		eng, err := cfg.NewEngine(sys, seed)
 		if err != nil {
 			return fmt.Errorf("agent/base: engine boot: %w", err) // loud死: no half-alive agent
 		}

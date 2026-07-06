@@ -1,20 +1,21 @@
-// Package claudecode is the SECOND looper engine: the Claude
-// Code agent, bound to the one actor face (lib/behavior + metatool.Shell) exactly
-// like the go-kimi looper. It proves the looper integration contract is real — the
-// shared mechanical skeleton (Receive / turn-queue / shell / harness.Pen /
-// author#2) is engine-agnostic; only three things differ from the go-kimi bridge:
+// Package claudecode is the SECOND agent engine: the Claude Code agent, built
+// on agent/base's skeleton (期10 S5) exactly like the go-kimi provider. It
+// implements base.Engine (the model-adaptation三件套 — Turn / Describe /
+// Checkpoint / Close); the mailbox loop, turn queue, response分拣, describe
+// dispatch, per-turn checkpoint挂账, and emit all live in agent/base. Only two
+// things differ from the go-kimi engine:
 //
 //   - engine: go-claude-agent-sdk's ClaudeClient (which shells out to the
 //     `claude` CLI), vs go-kimi's in-process Agent.
-//   - metatool injection: an in-process MCP server bridging the 7 meta-tools
-//     (call_actor …) into the claude tool surface, vs go-kimi's AdditionalTools.
+//   - metatool injection: an in-process MCP server bridging the neutral
+//     base.BuildMCPCatalog (call_actor …) into the claude tool surface, vs
+//     go-kimi's AdditionalTools.
 //
-// Resume is currently cold-start on BOTH engines: the platform durable state slot
-// that once carried the session pointer was removed (A-P7), so every boot starts a
-// fresh session (durable resume returns in period 10 on sys.State).
+// Durable resume (10.0) is on: the claude session id from each ResultMessage is
+// checkpointed on sys.State (agent/base) and replayed via WithResume on the next
+// incarnation.
 //
-// Like the go-kimi bridge: Receive (cell goroutine) never blocks; a private loop
-// (the client edge — blocking legal) runs claude turns serially; responses flow
-// through metatool.Shell.Deliver. The agent core (top-level agent/) dispatches to
-// THIS engine when agents.looper = claude; this package self-registers via init().
+// The claude SDK stays quarantined here; the registry never imports it. The
+// agent core dispatches to THIS engine when the channel_actors.class is
+// "claude"; this package self-registers via init().
 package claudecode

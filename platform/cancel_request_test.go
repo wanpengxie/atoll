@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -16,22 +17,38 @@ import (
 	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
-// cancelBlockingCell parks in Receive on a request until its reqCtx is
-// cancelled — the only way out proves the cancel actually reached this
-// daemon-hosted cell's request scope.
+// cancelBlockingCell parks in Receive on a request until its own per-request
+// cancel fires via the RequestCanceller hook — proving the cancel reached this
+// daemon-hosted occupant (期10 S5: the cell's built-in reqCtx machine was
+// retired; the occupant owns the request-cancel disposition, one-hop-delivered).
 type cancelBlockingCell struct {
 	started   chan struct{}
 	cancelled chan struct{}
+	mu        sync.Mutex
+	cancel    context.CancelFunc
 }
 
 func (b *cancelBlockingCell) Receive(ctx context.Context, env *message.Envelope) error {
 	if env.Kind != message.KindRequest {
 		return nil
 	}
+	reqCtx, cancel := context.WithCancel(ctx)
+	b.mu.Lock()
+	b.cancel = cancel
+	b.mu.Unlock()
 	close(b.started)
-	<-ctx.Done()
+	<-reqCtx.Done()
 	close(b.cancelled)
 	return nil
+}
+
+func (b *cancelBlockingCell) CancelRequest(_ message.ID) {
+	b.mu.Lock()
+	c := b.cancel
+	b.mu.Unlock()
+	if c != nil {
+		c()
+	}
 }
 
 // cancelDaemonHost is the minimal test-local daemon side: an actorrt.Runtime

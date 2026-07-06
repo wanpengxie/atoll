@@ -9,6 +9,7 @@ import (
 
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
+	"github.com/wanpengxie/atoll/agent/base"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
@@ -46,11 +47,11 @@ type turnState struct {
 // response envelope; intermediate progress is the same `agent.text`
 // type carrying `visibility=system`. Design: per-step progress + one
 // terminal agent.text per turn.
-func (b *Bridge) consumeWire(
+func (e *engine) consumeWire(
 	ctx context.Context,
 	agentDone <-chan struct{},
-	item turnItem,
-	turnIndex int,
+	trigger base.Trigger,
+	sink base.Sink,
 ) error {
 	state := &turnState{}
 
@@ -65,12 +66,12 @@ func (b *Bridge) consumeWire(
 			// anything the agent emitted is already in the buffer.
 			for drained := true; drained; {
 				select {
-				case msg, ok := <-b.wireCh:
+				case msg, ok := <-e.wireCh:
 					if !ok {
 						drained = false
 						break
 					}
-					done, err := b.handleWireMsg(ctx, msg, state, item, turnIndex)
+					done, err := e.handleWireMsg(state, msg, sink)
 					if err != nil {
 						return err
 					}
@@ -81,14 +82,14 @@ func (b *Bridge) consumeWire(
 					drained = false
 				}
 			}
-			// No TurnEnd means no terminal agent.text was emitted. Treat it
+			// No TurnEnd means no terminal Output was emitted. Treat it
 			// as turn failure so the trigger is not silently swallowed.
 			return errors.New("kimi: agent completed without TurnEnd")
-		case msg, ok := <-b.wireCh:
+		case msg, ok := <-e.wireCh:
 			if !ok {
 				return errors.New("kimi: wire channel closed before TurnEnd")
 			}
-			done, err := b.handleWireMsg(ctx, msg, state, item, turnIndex)
+			done, err := e.handleWireMsg(state, msg, sink)
 			if err != nil {
 				return err
 			}
@@ -104,12 +105,10 @@ func (b *Bridge) consumeWire(
 // stop reading the wire stream). Tool call request/result events are
 // folded into the per-step progress envelope as described in the
 // consumeWire godoc.
-func (b *Bridge) handleWireMsg(
-	ctx context.Context,
-	msg wire.WireMessage,
+func (e *engine) handleWireMsg(
 	state *turnState,
-	item turnItem,
-	turnIndex int,
+	msg wire.WireMessage,
+	sink base.Sink,
 ) (bool, error) {
 	switch m := msg.(type) {
 	case wire.TextDelta:
@@ -124,30 +123,29 @@ func (b *Bridge) handleWireMsg(
 		return false, nil
 	case wire.ToolCallResult:
 		// First result after a batch of requests marks the step boundary.
-		// Flush one progress envelope summarising the step's tool calls,
-		// then clear the pending list so the next step starts fresh.
+		// Flush one progress Output summarising the step's tool calls, then
+		// clear the pending list so the next step starts fresh.
 		if len(state.pendingTools) == 0 {
 			return false, nil
 		}
 		state.stepIndex++
-		if err := b.emitTurnProgress(ctx, item, turnIndex, state.stepIndex, state.pendingTools); err != nil {
+		if err := e.emitTurnProgress(sink, state.stepIndex, state.pendingTools); err != nil {
 			return false, err
 		}
 		state.pendingTools = state.pendingTools[:0]
 		return false, nil
 	case wire.TurnEnd:
 		// If the LLM yielded with tool_use but the tools never resolved
-		// (e.g. provider error mid-step) we still flush any pending
-		// requests as a progress envelope so the UI shows what the agent
-		// attempted before the final text.
+		// (e.g. provider error mid-step) we still flush any pending requests
+		// as a progress Output so the UI shows what the agent attempted.
 		if len(state.pendingTools) > 0 {
 			state.stepIndex++
-			if err := b.emitTurnProgress(ctx, item, turnIndex, state.stepIndex, state.pendingTools); err != nil {
+			if err := e.emitTurnProgress(sink, state.stepIndex, state.pendingTools); err != nil {
 				return false, err
 			}
 			state.pendingTools = state.pendingTools[:0]
 		}
-		return true, b.emitTurnEnd(ctx, item, m, state.textBuf.String(), turnIndex)
+		return true, e.emitTurnEnd(sink, m, state.textBuf.String())
 	default:
 		return false, nil
 	}

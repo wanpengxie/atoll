@@ -156,17 +156,14 @@ func TestNoOldCapsFactoryShapeResidual(t *testing.T) {
 
 // directActorImplementAllowlist is ④'s exact allowlist (spec: "直接实现
 // actorrt.Actor 者仅引擎+测试 stub"): lib/actorbase's engine is the ONE
-// production implementer this period; the rest are the remaining migration
-// queue — each entry SHRINKS this set as it migrates to actorbase.Proc, it
-// never grows. _test.go stubs are exempt everywhere (a test double is not a
-// production implementer). echo, kimi (actors/kimi), sysactor, and now the
-// plugin adapters xhs + actors/device (期10 S3) have migrated to
-// actorbase.Proc and are gone from this list; only the two agent-provider
-// bridges remain (期10 S5).
+// production implementer — the migration queue is now EMPTY. _test.go stubs are
+// exempt everywhere (a test double is not a production implementer). echo, kimi
+// (actors/kimi), sysactor, the plugin adapters xhs + actors/device (期10 S3),
+// and now the two agent-provider engines claude + go-kimi (期10 S5) have all
+// migrated to actorbase.Proc — the Legacy queue is zeroed and the cell's
+// per-request machine铲除 (spec §3 / 红线6).
 var directActorImplementAllowlist = []string{
-	"../lib/actorbase/engine.go",             // the sanctioned engine (spec §3)
-	"../agent/provider/kimi/bridge.go",       // 期10 S5 migration queue
-	"../agent/provider/claudecode/bridge.go", // 期10 S5 migration queue
+	"../lib/actorbase/engine.go", // the sanctioned engine (spec §3) — the ONLY entry
 	// ../app/human.go is GONE: the old humanFront (a direct actorrt.Actor
 	// implementer holding a Pen) was整删 with the subjectgate door (S4) — the
 	// human is now embodied by the platform-internal Proc cell (humancell.go), and

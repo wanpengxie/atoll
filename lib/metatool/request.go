@@ -6,7 +6,7 @@ import (
 )
 
 // DefaultTimeout is the closure deadline (RequestSpec.Timeout) used when a
-// spec leaves Timeout unset and no ShellConfig.TimeoutResolver overrides it
+// spec leaves Timeout unset and no Exec.TimeoutResolver overrides it
 // (P13). The fast-path Await window is DERIVED from whatever deadline is in
 // force (min(FastPathWindow, deadline)), never a separate knob.
 const DefaultTimeout = 30 * time.Second
@@ -31,7 +31,7 @@ type RequestSpec struct {
 	HandlerActorID string
 	Payload        json.RawMessage
 	// Timeout is the closure deadline (author#2's ExpiresAt), per request type.
-	// Zero = let the Shell resolve it (ShellConfig.TimeoutResolver, else
+	// Zero = let the Exec resolve it (Exec.TimeoutResolver, else
 	// DefaultTimeout). It is NOT a wait-window knob — the fast-path Await
 	// window is always min(FastPathWindow, Timeout), derived, never per-type.
 	Timeout  time.Duration

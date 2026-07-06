@@ -4,64 +4,75 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
+	"time"
 
+	"github.com/wanpengxie/atoll/agent/base"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
-// Env keys (the claude CLI carries its OWN auth — ANTHROPIC_API_KEY / `claude
-// login` — so atoll passes no key; only a model + the prompt situation).
+// Env keys. The claude CLI carries its OWN auth (ANTHROPIC_API_KEY / `claude
+// login`), so atoll passes no key — only a model default. ATOLL_CHANNEL_TYPE /
+// ATOLL_DOMAIN_PROMPT are GONE (A3 / Q7): the per-channel domain prompt now
+// rides InstanceSpec.Config (channel_actors.config_json), the ONE config
+//承载, never a process-wide env.
 const (
-	EnvKeyModel        = "ATOLL_CLAUDE_MODEL"
-	EnvKeyChannelType  = "ATOLL_CHANNEL_TYPE"
-	EnvKeyDomainPrompt = "ATOLL_DOMAIN_PROMPT"
+	EnvKeyModel = "ATOLL_CLAUDE_MODEL"
 
 	defaultModel = "claude-sonnet-4-5"
+
+	defaultFastPathWindow = 15 * time.Second
 )
 
-// Config drives a claude Bridge. Lean by design: the engine is the `claude` CLI
-// (auth + workspace are its own), so atoll supplies a model, the platform
-// system prompt, and the durable resume seam.
+// Config drives a claude engine. Lean by design: the engine is the `claude` CLI
+// (auth + workspace are its own), so atoll supplies a model, the assembled
+// system prompt, and the inline-wait window.
 type Config struct {
-	Model        string
-	SystemPrompt string
-	// NowFn returns unix-ms. Defaults to time.Now.UnixMilli.
-	NowFn func() int64
+	Model          string
+	SystemPrompt   string
+	FastPathWindow time.Duration
+}
+
+// specOverlay is the per-instance config (channel_actors.config_json) the looper
+// self-parses: a model override plus the channel's domain prompt facts (A3/Q7 —
+// what ATOLL_CHANNEL_TYPE / ATOLL_DOMAIN_PROMPT once carried, now per-instance).
+type specOverlay struct {
+	Model        string `json:"model"`
+	ChannelType  string `json:"channel_type"`
+	DomainPrompt string `json:"domain_prompt"`
 }
 
 // NewConfigFromSpec layers env defaults under the per-instance spec.Config
-// overlay (the looper self-parses its own schema).
-func NewConfigFromSpec(raw json.RawMessage, systemPrompt string) (Config, error) {
-	cfg := Config{
-		Model:        strings.TrimSpace(os.Getenv(EnvKeyModel)),
-		SystemPrompt: systemPrompt,
-	}
+// overlay, assembling the system prompt from the host situation + the config's
+// domain facts.
+func NewConfigFromSpec(raw json.RawMessage, sit Situation) (Config, error) {
+	var overlay specOverlay
 	if len(raw) > 0 {
-		var overlay struct {
-			Model string `json:"model"`
-		}
 		if err := json.Unmarshal(raw, &overlay); err != nil {
 			return Config{}, fmt.Errorf("claude: parse spec config: %w", err)
 		}
-		if overlay.Model != "" {
-			cfg.Model = overlay.Model
-		}
 	}
-	if cfg.Model == "" {
-		cfg.Model = defaultModel
+	model := strings.TrimSpace(os.Getenv(EnvKeyModel))
+	if overlay.Model != "" {
+		model = overlay.Model
 	}
-	return cfg, nil
+	if model == "" {
+		model = defaultModel
+	}
+	return Config{
+		Model:          model,
+		SystemPrompt:   buildSystemPrompt(sit, overlay.ChannelType, overlay.DomainPrompt),
+		FastPathWindow: defaultFastPathWindow,
+	}, nil
 }
 
 // NewDecl is the claude engine's Constructor — its OWN flat actor class
-// ("claude", kind=agent) registered directly into the one registry (peer to
-// go-kimi; no umbrella "agent" class). id from the spec; Situation host-derived.
+// ("claude", kind=agent). id from the spec; Situation host-derived. It builds
+// the agent as a base.Def (a Proc over agent/base's skeleton), NOT a raw
+// actorrt.Actor (期10 S5: the mailbox loop / turn queue live in the base).
 func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
 	if ctx.ChannelID == "" {
 		return platform.ActorDecl{}, errors.New("claude agent: requires a channel")
@@ -74,21 +85,20 @@ func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl,
 	if ctx.WorkspaceDir != "" {
 		sit = Situation{Host: "daemon", HasWorkspace: true, WorkspaceDir: ctx.WorkspaceDir}
 	}
-	cfg, err := NewConfigFromSpec(spec.Config, buildSystemPrompt(
-		sit, os.Getenv(EnvKeyChannelType), os.Getenv(EnvKeyDomainPrompt)))
+	cfg, err := NewConfigFromSpec(spec.Config, sit)
 	if err != nil {
 		return platform.ActorDecl{}, fmt.Errorf("config: %w", err)
+	}
+	def, err := base.Def(agentSkillDoc, base.Config{
+		NewEngine: newEngineFn(cfg, defaultClientFactory),
+	})
+	if err != nil {
+		return platform.ActorDecl{}, fmt.Errorf("claude agent def: %w", err)
 	}
 	return platform.ActorDecl{
 		ID:      id,
 		Kind:    actor.KindAgent,
-		Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
-			b, err := NewBridge(cfg, id, pen)
-			if err != nil {
-				log.Fatalf("claude agent bridge: %v", err)
-			}
-			return b
-		}},
+		Factory: platform.ActorFactory{Proc: def},
 	}, nil
 }
 

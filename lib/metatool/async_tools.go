@@ -3,10 +3,12 @@ package metatool
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
@@ -42,8 +44,8 @@ type awaitResultParams struct {
 }
 
 // ExecuteAwaitResult is the protocol-layer execute function for await_result.
-func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, sh *Shell, _ RuntimeContext) ResultValue {
-	if sh == nil {
+func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ RuntimeContext) ResultValue {
+	if x == nil || x.Jobs == nil {
 		return NewError("await_result", InternalError, "await_result tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p awaitResultParams
@@ -57,27 +59,28 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, sh *Shell, 
 		return PayloadInvalidError("await_result", "request_id is required (from a prior call_actor ack)", "")
 	}
 
-	if !sh.InFlight(reqID) {
-		return NewError(
-			"await_result",
-			InternalError,
-			fmt.Sprintf("request_id %q is not in flight (already collected, cancelled, or lost to a cell restart)", reqID),
-			"Call list_pending() to see in-flight request ids; resubmit the call if needed",
-			nil,
-		)
-	}
-
 	timeout := DefaultTimeout
 	if p.TimeoutMs > 0 {
 		timeout = time.Duration(p.TimeoutMs) * time.Millisecond
 	}
 
-	finalEnv, ok, err := sh.Await(ctx, reqID, timeout)
+	finalEnv, ok, err := x.Jobs.Await(ctx, reqID, timeout)
 	if err != nil {
-		// PURE local drop: an await failure releases YOUR wait, it does NOT
-		// implicitly cancel the request (cancel writes a terminal + signals the
-		// receiver — an await error is not the caller deciding to abandon the work).
-		sh.cancel(reqID)
+		if errors.Is(err, actorbase.ErrCallClosed) {
+			// The ledger row is gone (already collected, cancelled, or lost to a
+			// cell restart) — the JobTable equivalent of the old InFlight guard.
+			return NewError(
+				"await_result",
+				InternalError,
+				fmt.Sprintf("request_id %q is not in flight (already collected, cancelled, or lost to a cell restart)", reqID),
+				"Call list_pending() to see in-flight request ids; resubmit the call if needed",
+				nil,
+			)
+		}
+		// A ctx / wait error releases YOUR wait; it does NOT drop the ledger
+		// entry (author#2 still owns the request's terminal) — the request keeps
+		// running and stays awaitable. No implicit cancel (an await error is not
+		// the caller deciding to abandon the work).
 		return NewError("await_result", InternalError,
 			fmt.Sprintf("await_result %q failed: %v", reqID, err),
 			"Inspect adapter logs; the wait was released but the call keeps running", nil)
@@ -127,8 +130,8 @@ type cancelParams struct {
 }
 
 // ExecuteCancel is the protocol-layer execute function for cancel.
-func ExecuteCancel(_ context.Context, params json.RawMessage, sh *Shell, _ RuntimeContext) ResultValue {
-	if sh == nil {
+func ExecuteCancel(_ context.Context, params json.RawMessage, x *Exec, _ RuntimeContext) ResultValue {
+	if x == nil || x.Jobs == nil {
 		return NewError("cancel", InternalError, "cancel tool not configured", "Retry after the bridge is configured", nil)
 	}
 	var p cancelParams
@@ -141,7 +144,7 @@ func ExecuteCancel(_ context.Context, params json.RawMessage, sh *Shell, _ Runti
 	if reqID == "" {
 		return PayloadInvalidError("cancel", "request_id is required", "")
 	}
-	sh.Cancel(reqID)
+	_ = x.Jobs.Cancel(reqID)
 	return ResultValue{
 		Name: "cancel",
 		Value: map[string]any{
@@ -168,11 +171,11 @@ as new messages.
 }
 
 // ExecuteListPending is the protocol-layer execute function for list_pending.
-func ExecuteListPending(_ context.Context, _ json.RawMessage, sh *Shell, _ RuntimeContext) ResultValue {
-	if sh == nil {
+func ExecuteListPending(_ context.Context, _ json.RawMessage, x *Exec, _ RuntimeContext) ResultValue {
+	if x == nil || x.Jobs == nil {
 		return NewError("list_pending", InternalError, "list_pending tool not configured", "Retry after the bridge is configured", nil)
 	}
-	ids := sh.Pending()
+	ids := x.Jobs.List()
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, id.String())

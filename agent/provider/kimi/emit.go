@@ -2,68 +2,44 @@ package kimi
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
 	"net/url"
 	"strings"
-	"time"
 
 	kimierrors "github.com/wanpengxie/go-kimi/pkg/kimi/errors"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
-	"github.com/wanpengxie/atoll/lib/behavior"
-	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/agent/base"
 )
 
-// emitTurnProgress writes one progress envelope summarising a completed
-// step. Progress is emitted as `agent.text` carrying `visibility=system`
-// (intermediate output / not delivered to view by default). Payload shape:
-//
-//	{
-//	  "turn_index":  <1-based bridge turn>,
-//	  "step_index":  <1-based within-turn step>,
-//	  "tool_calls":  [{"name": "...", "preview": "..."}, ...],
-//	}
-//
-// The progress envelope sits next to the eventual terminal agent.text
-// (visibility=public) envelope under the same parent_id /
-// correlation_id, so harness ordering keeps them grouped.
-func (b *Bridge) emitTurnProgress(
-	ctx context.Context,
-	item turnItem,
-	turnIndex int,
-	stepIndex int,
-	tools []wireToolCall,
-) error {
-	payload := map[string]any{
-		"turn_index": turnIndex,
-		"step_index": stepIndex,
-	}
+// errSinkWrite wraps a base.Sink emit failure so Turn can tell a plumbing break
+// (loud死 — the write door rejected / errored) apart from an ordinary
+// missing-TurnEnd (surface as a failed terminal, stay alive).
+var errSinkWrite = errors.New("kimi: sink emit failed")
+
+// emitTurnProgress writes one intermediate progress Output summarising a
+// completed step (Final=false — the base's intermediate output PORT). The old
+// bridge rode this on visibility=system; the base surfaces no per-output
+// visibility, so it emits public (base.go procSink申报: the visibility nuance
+// is the migration's accepted cost, F7 minimal union). Payload: step_index +
+// tool_calls (the base stamps turn_index).
+func (e *engine) emitTurnProgress(sink base.Sink, stepIndex int, tools []wireToolCall) error {
+	extra := map[string]any{"step_index": stepIndex}
 	if summary := summariseToolCalls(tools, 240); len(summary) > 0 {
-		payload["tool_calls"] = summary
+		extra["tool_calls"] = summary
 	}
-	return b.emitEnvelope(ctx, item, "agent.text", message.VisibilitySystem, payload)
+	if err := sink.Emit(base.Output{Final: false, Extra: extra}); err != nil {
+		return fmt.Errorf("%w: %v", errSinkWrite, err)
+	}
+	return nil
 }
 
-// emitTurnEnd writes the single terminal agent.text envelope for one
-// completed Agent.Run. Per-step progress envelopes have already been
-// emitted by handleWireMsg at each ToolCallResult boundary — this
-// function only produces the final reply.
-//
-// `accumulated` is the full TextDelta-buffered string; the TurnEnd's
-// own Output text parts are preferred, falling back to the buffered
-// stream when Output is empty (providers vary).
-func (b *Bridge) emitTurnEnd(
-	ctx context.Context,
-	item turnItem,
-	end wire.TurnEnd,
-	accumulated string,
-	turnIndex int,
-) error {
+// emitTurnEnd writes the single terminal Output for one completed Agent.Run
+// (Final=true). accumulated is the full TextDelta-buffered string; the
+// TurnEnd's own Output text is preferred, falling back to the buffered stream.
+func (e *engine) emitTurnEnd(sink base.Sink, end wire.TurnEnd, accumulated string) error {
 	stop := strings.ToLower(strings.TrimSpace(end.StopReason))
 	text := extractTurnEndText(end.Output)
 
@@ -74,110 +50,45 @@ func (b *Bridge) emitTurnEnd(
 	case "max_tokens":
 		nextAction = "max_tokens"
 	case "tool_use":
-		// go-kimi's soul aggregates tool steps internally and only
-		// emits TurnEnd at Agent.Run completion. Seeing stop_reason=
-		// tool_use at the bridge boundary means the run ended while
-		// the LLM was still yielding — surface as `done` so the trigger
-		// turn closes cleanly; per-step progress bubbles already gave
-		// the UI visibility into what was attempted.
+		// go-kimi aggregates tool steps internally and only emits TurnEnd at
+		// completion; a tool_use stop at this boundary means the run ended while
+		// the LLM was still yielding — close cleanly as done.
 		nextAction = "done"
 	}
 	if text == "" {
 		text = accumulated
 	}
-	payload := map[string]any{
-		"text":        text,
-		"next_action": nextAction,
-		"stop_reason": end.StopReason,
-		"turn_index":  turnIndex,
-	}
-	return b.emitEnvelope(ctx, item, "agent.text", message.VisibilityPublic, payload)
-}
-
-// emitEnvelope assembles + writes one event envelope. Audience is derived
-// from the trigger sender — Erlang-style `From` routing: the agent always
-// replies to whoever triggered it.
-func (b *Bridge) emitEnvelope(
-	ctx context.Context,
-	item turnItem,
-	envType string,
-	visibility message.Visibility,
-	payload map[string]any,
-) error {
-	body, err := json.Marshal(payload)
-	if err != nil {
-		return fmt.Errorf("kimi: marshal payload: %w", err)
-	}
-	env, err := b.buildAgentEvent(envType, visibility,
-		replyAudience(item.env.Sender.ID), body,
-		item.env.ID, item.correlationID())
-	if err != nil {
-		return err
-	}
-	return b.write(ctx, env)
-}
-
-// write commits one envelope through the harness chain; a reject is an
-// error (the agent must know its emit did not land).
-func (b *Bridge) write(ctx context.Context, env message.Envelope) error {
-	res, err := b.pen.Write(ctx, &env)
-	if err != nil {
-		return err
-	}
-	if !res.Accepted() {
-		return fmt.Errorf("kimi: emit rejected: %s (%s)", res.RejectReason, res.RejectDetail)
+	if err := sink.Emit(base.Output{
+		Final:      true,
+		Text:       text,
+		NextAction: nextAction,
+		Extra:      map[string]any{"stop_reason": end.StopReason},
+	}); err != nil {
+		return fmt.Errorf("%w: %v", errSinkWrite, err)
 	}
 	return nil
 }
 
-// replyAudience returns the audience for an agent reply. Falls back to
-// the system actor when the trigger sender id is empty (boot path /
-// boot-failed terminal error).
-func replyAudience(triggerSender actor.ActorID) message.Audience {
-	if triggerSender == "" {
-		return message.Audience{actor.SystemActorID}
-	}
-	return message.Audience{triggerSender}
-}
-
-// emitTerminalLLMError classifies the error, emits a failed terminal
-// envelope, then wraps the underlying error as terminalEmittedError so
-// the loop knows the failure already surfaced in the channel log.
-// err == nil short-circuits to a no-op for convenience.
-func (b *Bridge) emitTerminalLLMError(
-	ctx context.Context,
-	err error,
-	parentEnvID message.ID,
-	correlationID message.ID,
-) error {
+// emitTerminalLLMError surfaces an LLM/plumbing error as a failed terminal
+// Output and returns nil on success (actor stays alive); a Sink write failure
+// is propagated as errSinkWrite (loud死). err == nil short-circuits to no-op.
+func (e *engine) emitTerminalLLMError(sink base.Sink, err error) error {
 	if err == nil {
 		return nil
 	}
-	reason := classifyLLMError(err)
-	payload := map[string]any{
-		"text":        fmt.Sprintf("llm bridge failed: %v", err),
-		"next_action": "failed",
-		"reason":      reason,
+	if emitErr := sink.Emit(base.Output{
+		Final:      true,
+		Text:       fmt.Sprintf("llm bridge failed: %v", err),
+		NextAction: "failed",
+		Reason:     classifyLLMError(err),
+	}); emitErr != nil {
+		return fmt.Errorf("%w: %v", errSinkWrite, emitErr)
 	}
-	body, _ := json.Marshal(payload)
-	// LLM-error terminal: emit as observation-only addressed to
-	// system (no business actor fan-out). The originating trigger
-	// sender is not available on this path.
-	env, buildErr := b.buildAgentEvent("agent.text", message.VisibilityPublic,
-		message.Audience{actor.SystemActorID}, body, parentEnvID, correlationID)
-	if buildErr != nil {
-		return errors.Join(err, buildErr)
-	}
-	if writeErr := b.write(ctx, env); writeErr != nil {
-		return errors.Join(err, writeErr)
-	}
-	return terminalEmittedError{cause: err}
+	return nil
 }
 
-// classifyLLMError maps a go-kimi error into one of 5 reason buckets
-// the agent emits as payload.reason on the failed terminal envelope.
-// The mapping is deliberately coarse — UI handlers + operators care
-// about retryable vs fatal, not provider-specific quirks.
+// classifyLLMError maps a go-kimi error into one of a few coarse reason buckets
+// (retryable vs fatal — UI/operators do not care about provider quirks).
 func classifyLLMError(err error) string {
 	if err == nil {
 		return ""
@@ -195,8 +106,6 @@ func classifyLLMError(err error) string {
 			return "llm_unknown"
 		}
 	}
-	// network-shape errors — DNS / refused / timeout / tls — surface
-	// as net.* types through the stdlib http stack.
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		return "llm_network"
@@ -209,80 +118,4 @@ func classifyLLMError(err error) string {
 		return "llm_network"
 	}
 	return "llm_unknown"
-}
-
-// envelopeID generates a deterministic-shape id for emitted envelopes.
-// The per-bridge sequence keeps multiple emits in the same millisecond
-// unique while preserving the actor/time prefix for debugging.
-func (b *Bridge) envelopeID(nowMs int64) message.ID {
-	short := strings.TrimPrefix(string(b.self), "agent:")
-	if short == "" {
-		short = "anon"
-	}
-	return message.ID(fmt.Sprintf("kimi-%s-%d-%d", short, nowMs, b.envelopeSeq.Add(1)))
-}
-
-// buildAgentEvent assembles a kind=event envelope through the behavior
-// builder (ONE home for event defaults), then stamps the binding-edge
-// fields this path owns (deterministic per-actor id, TSReceived).
-func (b *Bridge) buildAgentEvent(
-	envType string,
-	visibility message.Visibility,
-	audience message.Audience,
-	payload []byte,
-	parentID message.ID,
-	correlationID message.ID,
-) (message.Envelope, error) {
-	now := b.cfg.NowFn()
-	env, err := behavior.BuildEvent(
-		func() time.Time { return time.UnixMilli(now) },
-		behavior.EventSpec{
-			ID:            b.envelopeID(now),
-			Type:          envType,
-			Payload:       payload,
-			Visibility:    visibility,
-			Audience:      audience,
-			ParentID:      parentID,
-			CorrelationID: correlationID,
-		})
-	if err != nil {
-		return message.Envelope{}, err
-	}
-	env.TSReceived = now
-	return *env, nil
-}
-
-// agentDescription / agentSkillDoc are the agent's actor.describe
-// self-answer. The agent serves no request-type closed set — its surface is
-// conversational (any request becomes an LLM turn), so Types stays empty and
-// discovery guidance lives in the skill doc.
-const agentDescription = "LLM agent: the channel's conversational brain. Send it any request — it reasons over the channel context and orchestrates the channel's tool actors via call_actor."
-
-const agentSkillDoc = "# agent\n\n" +
-	"Conversational actor backed by an LLM. It accepts any kind=request as a " +
-	"turn trigger (no closed type set), replies with agent.text events " +
-	"(public terminal + system progress), and calls other actors through the " +
-	"channel's meta tools.\n"
-
-// handleDescribe serves the actor.describe self-answer through the standard
-// introspect dispatch (mechanical — the LLM never sees reserved queries).
-func (b *Bridge) handleDescribe(ctx context.Context, env *message.Envelope) error {
-	req, err := introspect.ParseDescribeRequest(env.Payload)
-	if err != nil {
-		_, ferr := behavior.Fail(ctx, b.pen, b.clock, env,
-			"payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
-		return ferr
-	}
-	answer, ok := introspect.AnswerDescribe(introspect.Describe{
-		ActorID:     string(b.self),
-		Description: agentDescription,
-		SkillDoc:    agentSkillDoc,
-	}, req)
-	if !ok {
-		_, ferr := behavior.Fail(ctx, b.pen, b.clock, env,
-			"type_unsupported", fmt.Sprintf("agent has no type %s", req.Type))
-		return ferr
-	}
-	_, rerr := behavior.RespondJSON(ctx, b.pen, b.clock, env, answer)
-	return rerr
 }

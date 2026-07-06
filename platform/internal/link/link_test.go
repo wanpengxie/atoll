@@ -128,24 +128,41 @@ type panicCell struct{}
 
 func (panicCell) Receive(context.Context, *message.Envelope) error { panic("boom") }
 
-// blockingCell blocks in Receive until its (per-request) ctx is cancelled,
-// signalling entry on started and the ctx-cancel outcome on cancelled. It is the
+// blockingCell blocks in Receive until its own per-request cancel fires,
+// signalling entry on started and the cancel outcome on cancelled. It is the
 // cross-wire cancel probe: the request occupies the cell goroutine, and the only
-// way out is the reqCtx going Done — proving the home's KindCancel reached the
-// daemon and fired exactly this request's reqCtx OFF the goroutine.
+// way out is the occupant's RequestCanceller hook being invoked OFF the goroutine
+// — proving the home's KindCancel reached the daemon and one-hop-delivered to this
+// occupant (期10 S5: the cell's built-in reqCtx machine was retired; the occupant
+// owns the request-cancel disposition, mirroring the actorbase engine).
 type blockingCell struct {
 	started   chan struct{}
 	cancelled chan struct{}
+	mu        sync.Mutex
+	cancel    context.CancelFunc
 }
 
 func (b *blockingCell) Receive(ctx context.Context, env *message.Envelope) error {
 	if env.Kind != message.KindRequest {
 		return nil
 	}
+	reqCtx, cancel := context.WithCancel(ctx)
+	b.mu.Lock()
+	b.cancel = cancel
+	b.mu.Unlock()
 	close(b.started)
-	<-ctx.Done()
+	<-reqCtx.Done()
 	close(b.cancelled)
 	return nil
+}
+
+func (b *blockingCell) CancelRequest(_ message.ID) {
+	b.mu.Lock()
+	c := b.cancel
+	b.mu.Unlock()
+	if c != nil {
+		c()
+	}
 }
 
 // --- daemon rig ---

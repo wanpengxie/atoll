@@ -324,75 +324,12 @@ func (a *ctxActor) Receive(ctx context.Context, env *message.Envelope) error {
 	return nil
 }
 
-// TestRequestCtxExpiresAtCancels: a request carrying ExpiresAt runs under a
-// reqCtx whose deadline is that instant — a long Receive observes its ctx fire
-// at expiry WITHOUT the cell dying (the request-scope deadline of cancel(scope)).
-func TestRequestCtxExpiresAtCancels(t *testing.T) {
-	t.Parallel()
-	a := &ctxActor{gotCtx: make(chan context.Context, 1), block: true}
-	rt, _ := New(Config{Parent: context.Background()})
-	defer rt.StopAll()
-	rt.Spawn("a", actor.KindAgent, static(a))
-
-	expires := time.Now().Add(80 * time.Millisecond).UnixMilli()
-	e := env("req-1")
-	e.ExpiresAt = &expires
-	mustDeliver(t, rt, "a", e)
-
-	var reqCtx context.Context
-	select {
-	case reqCtx = <-a.gotCtx:
-	case <-time.After(time.Second):
-		t.Fatal("Receive never ran")
-	}
-	if dl, ok := reqCtx.Deadline(); !ok || dl.UnixMilli() != expires {
-		t.Fatalf("reqCtx deadline = %v (ok=%v), want %d", dl, ok, expires)
-	}
-	select {
-	case <-reqCtx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("reqCtx never cancelled at ExpiresAt")
-	}
-	// The cell itself is still alive (only the request scope expired).
-	if _, ok := rt.Stat("a"); !ok {
-		t.Fatal("cell died — only the per-request scope should have expired")
-	}
-}
-
-// TestRequestTableCollapses: the in-flight table is built WITH its collapse — a
-// closed request leaves no entry behind (no down-map-never-deleted leak).
-func TestRequestTableCollapses(t *testing.T) {
-	t.Parallel()
-	a := newRecordActor()
-	rt, _ := New(Config{Parent: context.Background()})
-	defer rt.StopAll()
-	rt.Spawn("a", actor.KindAgent, static(a))
-	mustDeliver(t, rt, "a", env("req-1"))
-
-	rt.mu.RLock()
-	c := rt.embodiments["a"].(*cell)
-	rt.mu.RUnlock()
-
-	deadline := time.After(time.Second)
-	for {
-		c.flightMu.Lock()
-		n := len(c.inflight)
-		c.flightMu.Unlock()
-		if n == 0 {
-			return
-		}
-		select {
-		case <-deadline:
-			t.Fatalf("in-flight table did not collapse: %d entries linger", n)
-		case <-time.After(2 * time.Millisecond):
-		}
-	}
-}
-
 // TestCellDeathCancelsInFlightReqCtx: when a cell dies (panic), the death path
-// cancels the cell ctx, cascading into the in-flight reqCtx so the dead
-// instance's downstream goroutines unwind (the actor-scope of cancel(scope) —
-// no leaked work behind a corpse).
+// cancels the cell ctx (c.ctx), cascading into any downstream goroutine a Receive
+// spawned holding that ctx so it unwinds (the actor-scope of cancel(scope) — no
+// leaked work behind a corpse). 期10 S5 retired the per-request reqCtx; Receive
+// now runs under c.ctx directly, and cell death cancelling c.ctx is what makes
+// this cascade hold.
 func TestCellDeathCancelsInFlightReqCtx(t *testing.T) {
 	t.Parallel()
 	a := &ctxActor{panicN: "boom-req", downCh: make(chan struct{})}
@@ -435,36 +372,6 @@ func TestCancelRequestOccupantHook(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("occupant CancelRequest hook never invoked")
-	}
-}
-
-// TestCancelRequestFallbackFiresReqCtx: an occupant that does NOT implement
-// RequestCanceller keeps the built-in per-request reqCtx cancellation —
-// RequestCanceller is purely additive, it must not regress the fallback path
-// existing (test-stub) occupants rely on.
-func TestCancelRequestFallbackFiresReqCtx(t *testing.T) {
-	t.Parallel()
-	a := &ctxActor{gotCtx: make(chan context.Context, 1), block: true}
-	rt, _ := New(Config{Parent: context.Background()})
-	defer rt.StopAll()
-	rt.Spawn("a", actor.KindAgent, static(a))
-	mustDeliver(t, rt, "a", env("req-1"))
-
-	var reqCtx context.Context
-	select {
-	case reqCtx = <-a.gotCtx:
-	case <-time.After(time.Second):
-		t.Fatal("Receive never ran")
-	}
-
-	rt.CancelRequest("a", "req-1")
-	select {
-	case <-reqCtx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("fallback path never fired the in-flight reqCtx")
-	}
-	if _, ok := rt.Stat("a"); !ok {
-		t.Fatal("cell died — only the request scope should have been cancelled")
 	}
 }
 

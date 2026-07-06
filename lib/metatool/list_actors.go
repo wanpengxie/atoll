@@ -27,14 +27,14 @@ appear here. Call it whenever you need the current actor set.
 }
 
 // ExecuteListActors is the protocol-layer execute function for list_actors.
-func ExecuteListActors(ctx context.Context, _ json.RawMessage, sh *Shell, rc RuntimeContext) ResultValue {
-	if sh == nil {
+func ExecuteListActors(ctx context.Context, _ json.RawMessage, x *Exec, rc RuntimeContext) ResultValue {
+	if x == nil || x.Call == nil {
 		return errorResultValue("list_actors", "list_actors tool not configured")
 	}
 	if !rc.InTurn() {
 		return errorResultValue("list_actors", "list_actors invoked outside a bridge turn")
 	}
-	raw, ok := sh.ExecuteReservedRaw(ctx, rc, RequestSpec{
+	raw, ok := x.CallSyncRaw(ctx, rc, RequestSpec{
 		ToolName:       "list_actors",
 		EnvelopeType:   "actor.list",
 		HandlerActorID: string(actor.SystemActorID),

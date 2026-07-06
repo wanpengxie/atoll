@@ -1,45 +1,43 @@
 package app_test
 
 import (
-	"context"
 	"errors"
-	"time"
 
-	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // testAgentBuilder is set by a test's setup (before any channel is created); the
 // engine catalog classes registered below (go-kimi / claude) delegate to it.
-// Engines are FLAT actor classes now (agent-kind-vs-class): boost runs "go-kimi"
-// and tests create agents with looper "claude"/"go-kimi", so the per-channel
-// engine (channel_actors.class) resolves to one of these. This keeps ALL agent
-// injection in test code: the production app builds from the catalog
-// (registry.Build(<engine class>)) with NO test seam — `go test ./app` does not
-// import the real engine providers (wired at cmd/server), so tests own these.
-var testAgentBuilder func(chID channel.ID, agentID actor.ActorID, pen harness.Pen) (actorrt.Actor, error)
+// Engines are FLAT actor classes now, and — since 期10 S5 — agents are
+// actorbase.Proc actors (the mailbox loop / turn queue live in agent/base), so
+// the builder returns a Proc, not a raw actorrt.Actor. This keeps ALL agent
+// injection in test code: the production app builds from the catalog with NO
+// test seam (`go test ./app` does not import the real engine providers).
+var testAgentBuilder func(chID channel.ID, agentID actor.ActorID) (actorbase.Proc, error)
 
 func init() {
 	stub := func(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
-		if testAgentBuilder == nil {
+		// Capture the builder HERE (the Constructor runs on the reconcile/build
+		// path, which Close joins) — not lazily inside New (which runs on the
+		// async cell goroutine and would race the cleanup nil-ing the global).
+		builder := testAgentBuilder
+		if builder == nil {
 			return platform.ActorDecl{}, errors.New("test: no agent builder set")
 		}
 		id := spec.ID
 		return platform.ActorDecl{
-			ID:      id,
-			Kind:    actor.KindAgent,
-			Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
-				impl, err := testAgentBuilder(ctx.ChannelID, id, pen)
-				if err != nil {
-					return nil
-				}
-				return impl
+			ID:   id,
+			Kind: actor.KindAgent,
+			Factory: platform.ActorFactory{Proc: actorbase.Def{
+				Doc: "test agent",
+				New: func() (actorbase.Proc, error) {
+					return builder(ctx.ChannelID, id)
+				},
 			}},
 		}, nil
 	}
@@ -48,26 +46,21 @@ func init() {
 	}
 }
 
-// stubAgent is a minimal default-agent cell for e2e: the channel carries a real
-// kind=agent cell (so no-audience routing resolves to it) and, on a request, it
-// replies "stub-ok" — exercising the embedded-cell write path end to end without
-// a live LLM. The production built-in is a real go-kimi Bridge; the topology
-// (channel → route → agent cell → reply in truth) is identical.
-type stubAgent struct {
-	pen  harness.Pen
-	self actor.ActorID
-}
-
-func (s *stubAgent) Receive(ctx context.Context, env *message.Envelope) error {
-	if env.Kind == message.KindRequest {
-		_, _ = behavior.RespondJSON(ctx, s.pen, time.Now, env,
-			map[string]any{"text": "stub-ok"})
-	}
-	return nil
-}
-
-// stubAgentFactory builds the e2e stub agent. Tests assign it to testAgentBuilder
-// so every channel gets a working default-agent cell without LLM credentials.
-func stubAgentFactory(_ channel.ID, agentID actor.ActorID, pen harness.Pen) (actorrt.Actor, error) {
-	return &stubAgent{pen: pen, self: agentID}, nil
+// stubAgentFactory builds the e2e stub agent: a Proc that replies "stub-ok" to
+// any request — the channel carries a real kind=agent cell (so no-audience
+// routing resolves to it) exercising the embedded-cell write path end to end
+// without a live LLM. The production built-in is a real go-kimi Proc; the
+// topology (channel → route → agent cell → reply in truth) is identical.
+func stubAgentFactory(_ channel.ID, _ actor.ActorID) (actorbase.Proc, error) {
+	return func(sys actorbase.Sys) error {
+		for {
+			msg, err := sys.Recv()
+			if err != nil {
+				return err
+			}
+			if msg.Kind == message.KindRequest {
+				_, _ = sys.Reply(msg, map[string]any{"text": "stub-ok"})
+			}
+		}
+	}, nil
 }

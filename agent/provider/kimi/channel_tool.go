@@ -7,66 +7,55 @@ import (
 	gokimitools "github.com/wanpengxie/go-kimi/pkg/kimi/tools"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/types"
 
+	"github.com/wanpengxie/atoll/agent/base"
 	"github.com/wanpengxie/atoll/lib/metatool"
 )
 
-// channelToolRuntimeKey carries the current turn's trigger item through the
+// channelToolRuntimeKey carries the current turn's RuntimeContext through the
 // tool-execution context so meta tools can thread parent/correlation.
 type channelToolRuntimeKey struct{}
 
-// channelTools returns the meta-tool surface the LLM sees. It iterates the
-// data-driven metatool.MetaTools() catalog and wraps each entry in one
-// generic go-kimi adapter bound to the agent's held shell — the shared
-// actor-invocation machinery, not agent-private state.
-func (b *Bridge) channelTools() []gokimitools.Tool {
-	if b == nil {
-		return nil
-	}
-	catalog := metatool.MetaTools()
-	tools := make([]gokimitools.Tool, 0, len(catalog))
-	for _, mt := range catalog {
-		tools = append(tools, &kimiTool{mt: mt, shell: b.shellRef})
-	}
-	return tools
-}
-
-// extractRuntimeContext pulls the trigger item from ctx for metatool
-// Execute functions. A missing item yields a zero RuntimeContext, which
-// the Execute functions reject as "outside a turn".
-func extractRuntimeContext(ctx context.Context) metatool.RuntimeContext {
-	item, ok := ctx.Value(channelToolRuntimeKey{}).(turnItem)
-	if !ok {
-		return metatool.RuntimeContext{}
-	}
+// rcFromTrigger builds the metatool RuntimeContext threaded to the tools for one
+// turn (the curTurn/RC 合一 — one value per turn, carried on the tool ctx).
+func rcFromTrigger(trigger base.Trigger) metatool.RuntimeContext {
 	return metatool.RuntimeContext{
 		Trigger: metatool.Trigger{
-			Envelope:      item.env,
-			CorrelationID: item.env.CorrelationID,
+			Envelope:      trigger.Envelope,
+			CorrelationID: trigger.CorrelationID,
 		},
 	}
 }
 
-// shellRef returns the bridge's held metatool.Shell, or nil before Start. The
-// Execute functions treat a nil shell as "tool not configured".
-func (b *Bridge) shellRef() *metatool.Shell {
-	if b == nil {
-		return nil
+// channelTools returns the meta-tool surface the LLM sees. It iterates the
+// data-driven metatool.MetaTools() catalog and wraps each entry in one generic
+// go-kimi adapter bound to the engine's Exec face — the shared actor-invocation
+// machinery (the substrate JobTable + sys.Call), not agent-private state.
+func (e *engine) channelTools() []gokimitools.Tool {
+	catalog := metatool.MetaTools()
+	tools := make([]gokimitools.Tool, 0, len(catalog))
+	for _, mt := range catalog {
+		tools = append(tools, &kimiTool{mt: mt, x: e.x})
 	}
-	return b.shell
+	return tools
+}
+
+// extractRuntimeContext pulls the turn's RuntimeContext from ctx. A missing
+// value yields a zero RuntimeContext, which the Execute functions reject as
+// "outside a turn".
+func extractRuntimeContext(ctx context.Context) metatool.RuntimeContext {
+	rc, ok := ctx.Value(channelToolRuntimeKey{}).(metatool.RuntimeContext)
+	if !ok {
+		return metatool.RuntimeContext{}
+	}
+	return rc
 }
 
 // kimiTool is the one generic go-kimi adapter over a metatool.MetaTool. Name /
 // description / schema come straight from the spec; Execute threads the turn's
 // RuntimeContext and materialises the ResultValue into a go-kimi ToolResult.
-//
-// shell is a LAZY resolver (b.shellRef), not a captured *Shell: the tool
-// surface is installed into the LLM loop during Start BEFORE b.shell is
-// assigned, so capturing the value would freeze a nil shell. Resolving at
-// Execute time — which only runs once the loop is live — always sees the real
-// shell, making the binding order-independent by construction.
 type kimiTool struct {
-	mt    metatool.MetaTool
-	shell func() *metatool.Shell
+	mt metatool.MetaTool
+	x  *metatool.Exec
 }
 
 var _ gokimitools.Tool = (*kimiTool)(nil)
@@ -80,7 +69,7 @@ func (t *kimiTool) ParameterSchema() json.RawMessage {
 
 func (t *kimiTool) Execute(ctx context.Context, params json.RawMessage) (types.ToolResult, error) {
 	rc := extractRuntimeContext(ctx)
-	rv := t.mt.Execute(ctx, params, t.shell(), rc)
+	rv := t.mt.Execute(ctx, params, t.x, rc)
 	return toKimiToolResult(rv), nil
 }
 

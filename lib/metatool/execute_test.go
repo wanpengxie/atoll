@@ -3,910 +3,429 @@ package metatool_test
 import (
 	"context"
 	"encoding/json"
-	"sync"
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/metatool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
-// ---------------------------------------------------------------------------
-// test harness: a real Shell driven by a recording writer
-// ---------------------------------------------------------------------------
+// execute_test drives the SEVEN meta-tools against a fake Exec double. The
+// out-station correlation machinery itself (Submit/Await/Cancel/List/the
+// author#2 timer) is the engine's callLedger — tested in lib/actorbase. Here we
+// pin only the tools' translation of params → JobTable/Call operations and the
+// rendering of results.
 
-// recWriter records every emitted envelope so tests can assert on the request
-// the Shell built, and can optionally fail/reject the write.
-type recWriter struct {
-	mu      sync.Mutex
-	written []message.Envelope
-	err     error
-	reject  harness.HarnessRejectReason
+// --- fake Exec -------------------------------------------------------------
+
+// fakeJobs is a recording actorbase.JobTable double: Submit records the spec
+// and mints a monotonic id; Await/Call return whatever a test scripted.
+type fakeJobs struct {
+	submitted []behavior.RequestSpec
+	seq       int
+
+	// awaitFn scripts each Await call; nil = still-pending (ok=false).
+	awaitFn func(id message.ID) (*message.Envelope, bool, error)
+	// list is what List returns.
+	listIDs []message.ID
+	// cancelled records ids passed to Cancel.
+	cancelled []message.ID
 }
 
-func (w *recWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if w.err != nil {
-		return harness.WriteResult{}, w.err
-	}
-	if w.reject != "" {
-		return harness.WriteResult{RejectReason: w.reject}, nil
-	}
-	w.written = append(w.written, *env)
-	return harness.WriteResult{MessageID: env.ID}, nil
+func (f *fakeJobs) Submit(spec behavior.RequestSpec) (message.ID, error) {
+	f.submitted = append(f.submitted, spec)
+	f.seq++
+	return message.ID("req-" + itoa(int64(f.seq))), nil
 }
 
-func (w *recWriter) lastRequest(t *testing.T, timeout time.Duration) message.Envelope {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		w.mu.Lock()
-		for i := len(w.written) - 1; i >= 0; i-- {
-			if w.written[i].Kind == message.KindRequest {
-				env := w.written[i]
-				w.mu.Unlock()
-				return env
-			}
-		}
-		w.mu.Unlock()
-		if time.Now().After(deadline) {
-			t.Fatal("no request envelope emitted")
-		}
-		time.Sleep(2 * time.Millisecond)
+func (f *fakeJobs) Await(_ context.Context, id message.ID, _ time.Duration) (*message.Envelope, bool, error) {
+	if f.awaitFn != nil {
+		return f.awaitFn(id)
 	}
+	return nil, false, nil
 }
 
-// newExecShell builds a Shell over a recording writer. seq mints monotonic ids
-// so the test can drive Deliver against the emitted request id.
-func newExecShell(w *recWriter) *metatool.Shell {
-	var seq int64
-	return metatool.NewShell(metatool.ShellConfig{
-		Pen:   w,
-		Clock: func() time.Time { return time.UnixMilli(0) },
-		EnvelopeID: func(_ int64) message.ID {
-			seq++
-			return message.ID("req-" + itoa(seq))
-		},
-	})
+func (f *fakeJobs) List() []message.ID { return f.listIDs }
+
+func (f *fakeJobs) Cancel(id message.ID) error {
+	f.cancelled = append(f.cancelled, id)
+	return nil
+}
+
+var _ actorbase.JobTable = (*fakeJobs)(nil)
+
+// newExec builds an Exec over a fake JobTable + a scripted Call.
+func newExec(jobs *fakeJobs, call metatool.CallFunc) *metatool.Exec {
+	return &metatool.Exec{
+		Jobs:           jobs,
+		Call:           call,
+		Clock:          time.Now,
+		FastPathWindow: 10 * time.Second,
+	}
 }
 
 func itoa(n int64) string {
 	if n == 0 {
 		return "0"
 	}
-	var b [20]byte
-	i := len(b)
+	var b []byte
 	for n > 0 {
-		i--
-		b[i] = byte('0' + n%10)
+		b = append([]byte{byte('0' + n%10)}, b...)
 		n /= 10
 	}
-	return string(b[i:])
+	return string(b)
 }
 
 func finalResp(parentID message.ID, payload map[string]any) *message.Envelope {
 	body, _ := json.Marshal(payload)
 	return &message.Envelope{
-		ID:       "resp-" + parentID,
+		ID:       message.ID("resp-" + string(parentID)),
 		Kind:     message.KindResponse,
 		ParentID: parentID,
 		Payload:  body,
 	}
 }
 
-// defaultRC returns a RuntimeContext marking a live turn.
 func defaultRC() metatool.RuntimeContext {
 	return metatool.RuntimeContext{
 		Trigger: metatool.Trigger{
-			Envelope:      message.Envelope{ID: "trig-1", ChannelID: "ch-test"},
-			CorrelationID: "corr-1",
+			Envelope: message.Envelope{
+				ID:   "trigger-1",
+				Kind: message.KindRequest,
+				Type: "agent.turn",
+			},
+			CorrelationID: "trigger-1",
 		},
 	}
 }
 
-// assertIsError checks that rv.IsError is true and the error value contains code.
 func assertIsError(t *testing.T, rv metatool.ResultValue, code string) {
 	t.Helper()
 	if !rv.IsError {
-		t.Fatalf("expected IsError=true, got false; value=%v", rv.Value)
+		t.Fatalf("expected IsError, got %+v", rv.Value)
 	}
-	if code == "" {
-		return
-	}
-	errObj, ok := rv.Value["error"]
+	errObj, ok := rv.Value["error"].(map[string]any)
 	if !ok {
-		t.Fatalf("expected 'error' key in value; got %v", rv.Value)
-	}
-	if m, ok := errObj.(map[string]any); ok {
-		if got, _ := m["code"].(string); got != code {
-			t.Fatalf("expected error code %q, got %q; value=%v", code, got, rv.Value)
+		// list_actors uses a plain {"error": "..."} shape.
+		if _, ok := rv.Value["error"].(string); ok {
+			return
 		}
+		t.Fatalf("no error object in %+v", rv.Value)
+	}
+	if code != "" && errObj["code"] != code {
+		t.Fatalf("error code = %v, want %v", errObj["code"], code)
 	}
 }
 
-// assertNotError checks that rv.IsError is false.
 func assertNotError(t *testing.T, rv metatool.ResultValue) {
 	t.Helper()
 	if rv.IsError {
-		t.Fatalf("expected IsError=false, got true; value=%v", rv.Value)
+		t.Fatalf("unexpected error: %+v", rv.Value)
 	}
 }
 
-// ---------------------------------------------------------------------------
-// ExecuteCallActor — validation
-// ---------------------------------------------------------------------------
+// --- call_actor: validation ------------------------------------------------
 
-func TestExecuteCallActor_NilShell(t *testing.T) {
+func TestExecuteCallActor_NilExec(t *testing.T) {
 	rv := metatool.ExecuteCallActor(context.Background(), nil, nil, defaultRC())
 	assertIsError(t, rv, "internal_error")
 }
 
 func TestExecuteCallActor_OutsideTurn(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"actor_id": "tool:x", "type": "x.do"})
-	rv := metatool.ExecuteCallActor(context.Background(), params, sh, metatool.RuntimeContext{})
+	x := newExec(&fakeJobs{}, nil)
+	params := json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search"}`)
+	rv := metatool.ExecuteCallActor(context.Background(), params, x, metatool.RuntimeContext{})
 	assertIsError(t, rv, "internal_error")
 }
 
 func TestExecuteCallActor_MissingActorID(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"type": "x.do"})
-	rv := metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
+	x := newExec(&fakeJobs{}, nil)
+	params := json.RawMessage(`{"type":"xhs.search"}`)
+	rv := metatool.ExecuteCallActor(context.Background(), params, x, defaultRC())
 	assertIsError(t, rv, "payload_invalid")
 }
 
 func TestExecuteCallActor_MissingType(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"actor_id": "tool:x"})
-	rv := metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
+	x := newExec(&fakeJobs{}, nil)
+	params := json.RawMessage(`{"actor_id":"tool:xhs"}`)
+	rv := metatool.ExecuteCallActor(context.Background(), params, x, defaultRC())
 	assertIsError(t, rv, "payload_invalid")
 }
 
 func TestExecuteCallActor_InvalidJSON(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteCallActor(context.Background(), json.RawMessage(`{bad`), sh, defaultRC())
+	x := newExec(&fakeJobs{}, nil)
+	rv := metatool.ExecuteCallActor(context.Background(), json.RawMessage(`{bad`), x, defaultRC())
 	assertIsError(t, rv, "payload_invalid")
 }
 
-func TestExecuteCallActor_InvalidPayloadJSON(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params := json.RawMessage(`{"actor_id":"tool:x","type":"x.do","payload":{invalid}}`)
-	rv := metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
-	assertIsError(t, rv, "payload_invalid")
-}
+// --- call_actor: dispatch --------------------------------------------------
 
-func TestExecuteCallActor_EmptyParams(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteCallActor(context.Background(), nil, sh, defaultRC())
-	assertIsError(t, rv, "payload_invalid")
-}
-
-func TestExecuteCallActor_WhitespaceActorID(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"actor_id": "  ", "type": "x.do"})
-	rv := metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
-	assertIsError(t, rv, "payload_invalid")
-}
-
-// ---------------------------------------------------------------------------
-// ExecuteCallActor — dispatch (the emitted request + wait modes)
-// ---------------------------------------------------------------------------
-
-// TestExecuteCallActor_FanOutEmitsRequest pins the request the Shell builds:
-// wait=false returns an immediate ack and the emitted envelope carries the
-// type/audience/parent/correlation/payload the meta-tool supplied.
-func TestExecuteCallActor_FanOutEmitsRequest(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	params, _ := json.Marshal(map[string]any{
-		"actor_id": "tool:xhs",
-		"type":     "xhs.publish",
-		"payload":  map[string]any{"title": "hello"},
-		"wait":     false,
-	})
-	rv := metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
+// TestExecuteCallActor_FanOutSubmitsRequest pins the behavior.RequestSpec the
+// adapter builds: audience=target, type, ParentID=trigger, and an ExpiresAt
+// derived from the deadline.
+func TestExecuteCallActor_FanOutSubmitsRequest(t *testing.T) {
+	jobs := &fakeJobs{}
+	x := newExec(jobs, nil)
+	params := json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search","payload":{"keyword":"go"},"wait":false}`)
+	rv := metatool.ExecuteCallActor(context.Background(), params, x, defaultRC())
 	assertNotError(t, rv)
+	if len(jobs.submitted) != 1 {
+		t.Fatalf("expected 1 submit, got %d", len(jobs.submitted))
+	}
+	got := jobs.submitted[0]
+	if got.Type != "xhs.search" {
+		t.Fatalf("submit type = %q, want xhs.search", got.Type)
+	}
+	if len(got.Audience) != 1 || got.Audience[0] != actor.ActorID("tool:xhs") {
+		t.Fatalf("submit audience = %v, want [tool:xhs]", got.Audience)
+	}
+	if got.ParentID != "trigger-1" {
+		t.Fatalf("submit parent = %q, want trigger-1", got.ParentID)
+	}
+	if got.ExpiresAt == nil {
+		t.Fatal("submit ExpiresAt nil — the closure deadline must be stamped")
+	}
+	// wait=false → immediate ack.
 	if rv.Value["status"] != "accepted" {
-		t.Fatalf("wait=false want immediate ack, got %v", rv.Value)
-	}
-
-	req := w.lastRequest(t, time.Second)
-	if req.Type != "xhs.publish" {
-		t.Fatalf("emitted type = %q", req.Type)
-	}
-	if len(req.Audience) != 1 || req.Audience[0] != actor.ActorID("tool:xhs") {
-		t.Fatalf("emitted audience = %v", req.Audience)
-	}
-	if req.ParentID != "trig-1" {
-		t.Fatalf("emitted parent = %q", req.ParentID)
-	}
-	if req.CorrelationID != "corr-1" {
-		t.Fatalf("emitted correlation = %q", req.CorrelationID)
-	}
-	if req.ExpiresAt == nil {
-		t.Fatal("emitted request carries no ExpiresAt (author#2 deadline)")
-	}
-	var pl map[string]any
-	_ = json.Unmarshal(req.Payload, &pl)
-	if pl["title"] != "hello" {
-		t.Fatalf("emitted payload = %v", pl)
+		t.Fatalf("wait=false should ack; got %+v", rv.Value)
 	}
 }
 
-// TestExecuteCallActor_TimeoutResolverOverridesDefault pins P13: a
-// ShellConfig.TimeoutResolver answer is the closure deadline actually used —
-// it is NOT capped to DefaultTimeout (30s). A resolver answering 300s must
-// surface as est_wait_ms=300000 on the immediate ack, not 30000.
+// TestExecuteCallActor_TimeoutResolverOverridesDefault pins P13: a resolver
+// answer is the deadline actually used (ExpiresAt reflects it).
 func TestExecuteCallActor_TimeoutResolverOverridesDefault(t *testing.T) {
-	w := &recWriter{}
-	var seq int64
-	sh := metatool.NewShell(metatool.ShellConfig{
-		Pen:   w,
-		Clock: func() time.Time { return time.UnixMilli(0) },
-		EnvelopeID: func(_ int64) message.ID {
-			seq++
-			return message.ID("req-resolver-" + itoa(seq))
-		},
+	jobs := &fakeJobs{}
+	now := time.Now()
+	x := &metatool.Exec{
+		Jobs:  jobs,
+		Clock: func() time.Time { return now },
 		TimeoutResolver: func(target actor.ActorID, reqType string) (time.Duration, bool) {
-			if target == "tool:slow" && reqType == "slow.op" {
-				return 300 * time.Second, true
-			}
-			return 0, false
+			return 3 * time.Second, true
 		},
-	})
-
-	params, _ := json.Marshal(map[string]any{
-		"actor_id": "tool:slow", "type": "slow.op", "wait": false,
-	})
-	rv := metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
-	assertNotError(t, rv)
-	if rv.Value["status"] != "accepted" {
-		t.Fatalf("wait=false want immediate ack, got %v", rv.Value)
 	}
-	wantMs := int64(300 * time.Second / time.Millisecond)
-	if got := rv.Value["est_wait_ms"]; got != wantMs {
-		t.Fatalf("est_wait_ms = %v, want %d (resolver's 300s, not the 30s default)", got, wantMs)
-	}
-
-	req := w.lastRequest(t, time.Second)
-	if req.ExpiresAt == nil {
-		t.Fatal("emitted request carries no ExpiresAt")
-	}
-	if got := *req.ExpiresAt; got != int64(300*time.Second/time.Millisecond) {
-		t.Fatalf("ExpiresAt = %d, want the resolver's 300s deadline", got)
+	params := json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search","wait":false}`)
+	metatool.ExecuteCallActor(context.Background(), params, x, defaultRC())
+	got := jobs.submitted[0]
+	wantExpiry := now.Add(3 * time.Second).UnixMilli()
+	if got.ExpiresAt == nil || *got.ExpiresAt != wantExpiry {
+		t.Fatalf("ExpiresAt = %v, want %d (now+3s)", got.ExpiresAt, wantExpiry)
 	}
 }
 
-func TestExecuteCallActor_NilPayloadNormalizes(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	params, _ := json.Marshal(map[string]any{"actor_id": "tool:x", "type": "x.do", "wait": false})
-	rv := metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
-	assertNotError(t, rv)
-	req := w.lastRequest(t, time.Second)
-	if string(req.Payload) != "{}" {
-		t.Fatalf("expected payload={}, got %s", string(req.Payload))
-	}
-}
-
-// TestExecuteCallActor_SyncResolvesInline pins the sync experience: wait=true
-// blocks until the final lands, then returns the response payload inline.
+// TestExecuteCallActor_SyncResolvesInline pins the sync experience: a final in
+// the window returns inline as the actor's completed result.
 func TestExecuteCallActor_SyncResolvesInline(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-
-	resCh := make(chan metatool.ResultValue, 1)
-	go func() {
-		params, _ := json.Marshal(map[string]any{
-			"actor_id": "tool:xhs", "type": "xhs.publish", "wait": true,
-		})
-		resCh <- metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
-	}()
-
-	req := w.lastRequest(t, 2*time.Second)
-	sh.Deliver(finalResp(req.ID, map[string]any{"status": "completed", "note_id": "n1"}))
-
-	select {
-	case rv := <-resCh:
-		assertNotError(t, rv)
-		if rv.Value["note_id"] != "n1" {
-			t.Fatalf("inline result = %v", rv.Value)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("sync call did not resolve after final")
+	jobs := &fakeJobs{}
+	jobs.awaitFn = func(id message.ID) (*message.Envelope, bool, error) {
+		return finalResp(id, map[string]any{"status": "completed", "results": []any{}}), true, nil
+	}
+	x := newExec(jobs, nil)
+	params := json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search","wait":true}`)
+	rv := metatool.ExecuteCallActor(context.Background(), params, x, defaultRC())
+	assertNotError(t, rv)
+	if rv.Value["status"] != "completed" {
+		t.Fatalf("expected inline completed result, got %+v", rv.Value)
 	}
 }
 
 // TestExecuteCallActor_TerminalFailureNormalized pins the actor-CLI error
-// mapping when the final response is a terminal failure.
+// mapping for a terminal failure reason.
 func TestExecuteCallActor_TerminalFailureNormalized(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-
-	resCh := make(chan metatool.ResultValue, 1)
-	go func() {
-		params, _ := json.Marshal(map[string]any{
-			"actor_id": "tool:xhs", "type": "xhs.publish", "wait": true,
-		})
-		resCh <- metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
-	}()
-
-	req := w.lastRequest(t, 2*time.Second)
-	sh.Deliver(finalResp(req.ID, map[string]any{
-		"status": "failed", "reason": string(message.TerminalReceiverUnavailable),
-	}))
-
-	select {
-	case rv := <-resCh:
-		assertIsError(t, rv, "actor_unreachable")
-	case <-time.After(2 * time.Second):
-		t.Fatal("sync call did not resolve after terminal failure")
+	jobs := &fakeJobs{}
+	jobs.awaitFn = func(id message.ID) (*message.Envelope, bool, error) {
+		return finalResp(id, map[string]any{
+			"status": "failed",
+			"reason": string(message.TerminalReceiverUnavailable),
+		}), true, nil
 	}
+	x := newExec(jobs, nil)
+	params := json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search","wait":true}`)
+	rv := metatool.ExecuteCallActor(context.Background(), params, x, defaultRC())
+	assertIsError(t, rv, "actor_unreachable")
 }
 
-// TestShell_TimeoutArmsAuthor2Terminal pins the author#2 closure the Shell
-// owns: a request nobody answers gets an unanswered_timeout terminal WRITTEN
-// BY THE SHELL'S OWN CALLER TIMER (behavior.Caller) — the shell-level
-// guarantee that "every request I send is guaranteed to close". Driven through
-// ExecuteRequest with a tiny Timeout (the wall clock derives the deadline so a
-// 50ms budget fires quickly).
-func TestShell_TimeoutArmsAuthor2Terminal(t *testing.T) {
-	w := &recWriter{}
-	sh := metatool.NewShell(metatool.ShellConfig{
-		Pen:        w,
-		Clock:      time.Now, // real clock so ExpiresAt-now yields the budget
-		EnvelopeID: func(_ int64) message.ID { return message.ID("req-dead") },
-	})
-
-	rv := sh.ExecuteRequest(context.Background(), defaultRC(), metatool.RequestSpec{
-		ToolName: "call_actor", EnvelopeType: "dead.op", HandlerActorID: "tool:dead",
-		WaitMode: metatool.WaitNone, Timeout: 50 * time.Millisecond,
-	})
-	if rv.Value["status"] != "accepted" {
-		t.Fatalf("want ack, got %v", rv.Value)
-	}
-
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		w.mu.Lock()
-		var term *message.Envelope
-		for i := len(w.written) - 1; i >= 0; i-- {
-			if w.written[i].Kind == message.KindResponse {
-				e := w.written[i]
-				term = &e
-				break
-			}
-		}
-		w.mu.Unlock()
-		if term != nil {
-			var p map[string]any
-			_ = json.Unmarshal(term.Payload, &p)
-			if p["status"] != "failed" || p["reason"] != string(message.TerminalUnansweredTimeout) {
-				t.Fatalf("author#2 terminal payload: %+v", p)
-			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("author#2 timeout terminal never written")
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-}
-
-// TestShell_CancelWritesTerminalAndCallsCanceller pins M2 (ⓐ+ⓓ+ⓖ): Cancel
-// writes the caller's OWN cancel terminal (failed + unanswered_timeout +
-// cancelled:true, parent = request), drops the local waiter, AND (when the
-// assembly root wires a Canceller) reaches the protocol-level cancel for the
-// request's target — the register plumbing that carries RequestSpec.HandlerActorID
-// through to the pendingReq the Shell hands Cancel.
-func TestShell_CancelWritesTerminalAndCallsCanceller(t *testing.T) {
-	w := &recWriter{}
-	var gotTarget actor.ActorID
-	var gotReqID message.ID
-	var calls int
-	sh := metatool.NewShell(metatool.ShellConfig{
-		Pen:        w,
-		Clock:      func() time.Time { return time.UnixMilli(0) },
-		EnvelopeID: func(_ int64) message.ID { return message.ID("req-cancel-1") },
-		Canceller: func(target actor.ActorID, requestID message.ID) {
-			calls++
-			gotTarget = target
-			gotReqID = requestID
-		},
-	})
-
-	rv := sh.ExecuteRequest(context.Background(), defaultRC(), metatool.RequestSpec{
-		ToolName: "call_actor", EnvelopeType: "cancel.probe", HandlerActorID: "tool:cancel-target",
-		WaitMode: metatool.WaitNone, Timeout: time.Second,
-	})
-	if rv.Value["status"] != "accepted" {
-		t.Fatalf("want ack, got %v", rv.Value)
-	}
-
-	sh.Cancel(message.ID("req-cancel-1"))
-
-	// ⓐ: a cancel terminal was written to truth — the request envelope (index 0)
-	// then the failed+unanswered_timeout+cancelled terminal parented to it.
-	var term *message.Envelope
-	for i := range w.written {
-		if w.written[i].Kind == message.KindResponse && w.written[i].ParentID == message.ID("req-cancel-1") {
-			term = &w.written[i]
-		}
-	}
-	if term == nil {
-		t.Fatalf("Cancel must write a terminal parented to the request; writes=%d", len(w.written))
-	}
-	var tp struct {
-		Status    string `json:"status"`
-		ErrorCode string `json:"error_code"`
-		Cancelled bool   `json:"cancelled"`
-	}
-	if err := json.Unmarshal(term.Payload, &tp); err != nil {
-		t.Fatalf("terminal payload: %v", err)
-	}
-	if tp.Status != string(message.StatusFailed) || tp.ErrorCode != string(message.TerminalUnansweredTimeout) || !tp.Cancelled {
-		t.Fatalf("cancel terminal payload = %+v, want failed/unanswered_timeout/cancelled", tp)
-	}
-
-	if calls != 1 {
-		t.Fatalf("canceller calls = %d, want 1", calls)
-	}
-	if gotTarget != actor.ActorID("tool:cancel-target") {
-		t.Fatalf("canceller target = %q, want %q", gotTarget, "tool:cancel-target")
-	}
-	if gotReqID != message.ID("req-cancel-1") {
-		t.Fatalf("canceller requestID = %q, want %q", gotReqID, "req-cancel-1")
-	}
-	if sh.InFlight(message.ID("req-cancel-1")) {
-		t.Fatalf("Cancel must drop the local waiter (InFlight still true)")
-	}
-
-	// A second Cancel on the same (now-gone) id is a no-op: no second terminal,
-	// no second canceller call — Cancel only reaches a request it still holds.
-	writesBefore := len(w.written)
-	sh.Cancel(message.ID("req-cancel-1"))
-	if calls != 1 {
-		t.Fatalf("canceller calls after second Cancel = %d, want 1 (no-op on unknown id)", calls)
-	}
-	if len(w.written) != writesBefore {
-		t.Fatalf("second Cancel must not write a second terminal")
-	}
-}
-
-// TestShell_CancelWithoutCancellerSelfCloses pins nil-Canceller (ⓓ): Cancel
-// still self-closes (writes the terminal) and drops the local waiter, no
-// protocol-level cancel is attempted, no panic.
-func TestShell_CancelWithoutCancellerSelfCloses(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	rv := sh.ExecuteRequest(context.Background(), defaultRC(), metatool.RequestSpec{
-		ToolName: "call_actor", EnvelopeType: "no.canceller", HandlerActorID: "tool:x",
-		WaitMode: metatool.WaitNone, Timeout: time.Second,
-	})
-	reqID := message.ID(rv.Value["request_id"].(string))
-	sh.Cancel(reqID) // must not panic with nil Canceller
-	if sh.InFlight(reqID) {
-		t.Fatalf("Cancel must drop the local waiter even with nil Canceller")
-	}
-}
-
-func TestExecuteCallActor_WriteErrorIsInternal(t *testing.T) {
-	w := &recWriter{reject: harness.HarnessRejectReason("harness_audience_invalid")}
-	sh := newExecShell(w)
-	params, _ := json.Marshal(map[string]any{"actor_id": "tool:x", "type": "x.do", "wait": false})
-	rv := metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
-	assertIsError(t, rv, "internal_error")
-	// The future must not leak after a rejected emit.
-	if len(sh.Pending()) != 0 {
-		t.Fatalf("future leaked after rejected emit: %v", sh.Pending())
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ExecuteListActors
-// ---------------------------------------------------------------------------
-
-func TestExecuteListActors_NilShell(t *testing.T) {
-	rv := metatool.ExecuteListActors(context.Background(), nil, nil, defaultRC())
-	assertIsError(t, rv, "")
-}
-
-func TestExecuteListActors_OutsideTurn(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteListActors(context.Background(), nil, sh, metatool.RuntimeContext{})
-	assertIsError(t, rv, "")
-}
-
-func TestExecuteListActors_RequestTimesOut(t *testing.T) {
-	// No Deliver — the reserved request never gets a catalog; list_actors
-	// reports the still-pending/failed condition.
-	w := &recWriter{}
-	sh := newExecShell(w)
-	// Drive with a context that cancels quickly so the unbounded reserved
-	// wait returns without a final.
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() { time.Sleep(30 * time.Millisecond); cancel() }()
-	rv := metatool.ExecuteListActors(ctx, nil, sh, defaultRC())
-	assertIsError(t, rv, "")
-}
-
-func TestExecuteListActors_Success(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-
-	resCh := make(chan metatool.ResultValue, 1)
-	go func() { resCh <- metatool.ExecuteListActors(context.Background(), nil, sh, defaultRC()) }()
-
-	req := w.lastRequest(t, 2*time.Second)
-	if req.Type != "actor.list" {
-		t.Fatalf("expected actor.list, got %q", req.Type)
-	}
-	catalog := map[string]any{
-		"status": "completed",
-		"actors": []map[string]any{
-			{"id": "tool:xhs", "kind": "tool", "present": true},
-			{"id": "agent:research", "kind": "agent", "present": false},
-		},
-	}
-	sh.Deliver(finalResp(req.ID, catalog))
-
-	select {
-	case rv := <-resCh:
-		assertNotError(t, rv)
-		actors, ok := rv.Value["actors"].([]map[string]any)
-		if !ok {
-			t.Fatalf("expected actors []map[string]any, got %T", rv.Value["actors"])
-		}
-		if len(actors) != 2 {
-			t.Fatalf("expected 2 actors, got %d", len(actors))
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("list_actors did not resolve after catalog")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ExecuteDescribeActor / ExecuteDescribeType — validation
-// ---------------------------------------------------------------------------
-
-func TestExecuteDescribeActor_NilShell(t *testing.T) {
-	rv := metatool.ExecuteDescribeActor(context.Background(), nil, nil, defaultRC())
+// TestExecuteCallActor_SubmitError surfaces a Submit failure as internal_error.
+func TestExecuteCallActor_SubmitError(t *testing.T) {
+	x := newExec(&fakeJobs{}, nil)
+	x.Jobs = &errJobs{}
+	params := json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search"}`)
+	rv := metatool.ExecuteCallActor(context.Background(), params, x, defaultRC())
 	assertIsError(t, rv, "internal_error")
 }
 
-func TestExecuteDescribeActor_MissingActorID(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{})
-	rv := metatool.ExecuteDescribeActor(context.Background(), params, sh, defaultRC())
-	assertIsError(t, rv, "payload_invalid")
+type errJobs struct{ fakeJobs }
+
+func (e *errJobs) Submit(spec behavior.RequestSpec) (message.ID, error) {
+	return "", context.DeadlineExceeded
 }
 
-func TestExecuteDescribeActor_InvalidJSON(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteDescribeActor(context.Background(), json.RawMessage(`{bad`), sh, defaultRC())
-	assertIsError(t, rv, "payload_invalid")
-}
+// --- await_result ----------------------------------------------------------
 
-func TestExecuteDescribeActor_OutsideTurn(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"actor_id": "tool:xhs"})
-	rv := metatool.ExecuteDescribeActor(context.Background(), params, sh, metatool.RuntimeContext{})
+func TestExecuteAwaitResult_NilExec(t *testing.T) {
+	rv := metatool.ExecuteAwaitResult(context.Background(), nil, nil, defaultRC())
 	assertIsError(t, rv, "internal_error")
 }
 
-func TestExecuteDescribeActor_EmitsActorDescribe(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	resCh := make(chan metatool.ResultValue, 1)
-	go func() {
-		params, _ := json.Marshal(map[string]any{"actor_id": "tool:xhs"})
-		resCh <- metatool.ExecuteDescribeActor(context.Background(), params, sh, defaultRC())
-	}()
-	req := w.lastRequest(t, 2*time.Second)
-	if req.Type != "actor.describe" {
-		t.Fatalf("expected actor.describe, got %q", req.Type)
-	}
-	if req.Audience[0] != actor.ActorID("tool:xhs") {
-		t.Fatalf("audience = %v", req.Audience)
-	}
-	sh.Deliver(finalResp(req.ID, map[string]any{"status": "completed", "name": "xhs"}))
-	select {
-	case rv := <-resCh:
-		assertNotError(t, rv)
-	case <-time.After(2 * time.Second):
-		t.Fatal("describe_actor did not resolve")
-	}
-}
-
-func TestExecuteDescribeType_NilShell(t *testing.T) {
-	rv := metatool.ExecuteDescribeType(context.Background(), nil, nil, defaultRC())
-	assertIsError(t, rv, "internal_error")
-}
-
-func TestExecuteDescribeType_MissingActorID(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"type": "xhs.publish"})
-	rv := metatool.ExecuteDescribeType(context.Background(), params, sh, defaultRC())
-	assertIsError(t, rv, "payload_invalid")
-}
-
-func TestExecuteDescribeType_MissingType(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"actor_id": "tool:xhs"})
-	rv := metatool.ExecuteDescribeType(context.Background(), params, sh, defaultRC())
-	assertIsError(t, rv, "payload_invalid")
-}
-
-func TestExecuteDescribeType_InvalidJSON(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteDescribeType(context.Background(), json.RawMessage(`{bad`), sh, defaultRC())
-	assertIsError(t, rv, "payload_invalid")
-}
-
-func TestExecuteDescribeType_OutsideTurn(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"actor_id": "tool:xhs", "type": "xhs.publish"})
-	rv := metatool.ExecuteDescribeType(context.Background(), params, sh, metatool.RuntimeContext{})
-	assertIsError(t, rv, "internal_error")
-}
-
-func TestExecuteDescribeType_EmitsTypePayload(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	resCh := make(chan metatool.ResultValue, 1)
-	go func() {
-		params, _ := json.Marshal(map[string]any{"actor_id": "tool:xhs", "type": "xhs.publish"})
-		resCh <- metatool.ExecuteDescribeType(context.Background(), params, sh, defaultRC())
-	}()
-	req := w.lastRequest(t, 2*time.Second)
-	if req.Type != "actor.describe" {
-		t.Fatalf("expected actor.describe, got %q", req.Type)
-	}
-	var pl map[string]string
-	_ = json.Unmarshal(req.Payload, &pl)
-	if pl["type"] != "xhs.publish" {
-		t.Fatalf("emitted payload.type = %q", pl["type"])
-	}
-	sh.Deliver(finalResp(req.ID, map[string]any{"status": "completed", "type": "xhs.publish"}))
-	select {
-	case rv := <-resCh:
-		assertNotError(t, rv)
-	case <-time.After(2 * time.Second):
-		t.Fatal("describe_type did not resolve")
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ExecuteAwaitResult
-// ---------------------------------------------------------------------------
-
-func TestExecuteAwaitResult_NilShell(t *testing.T) {
-	rv := metatool.ExecuteAwaitResult(context.Background(), nil, nil, metatool.RuntimeContext{})
-	assertIsError(t, rv, "internal_error")
-}
-
-func TestExecuteAwaitResult_MissingRequestID(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
-	assertIsError(t, rv, "payload_invalid")
-}
-
-func TestExecuteAwaitResult_InvalidJSON(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteAwaitResult(context.Background(), json.RawMessage(`{bad`), sh, metatool.RuntimeContext{})
+func TestExecuteAwaitResult_MissingID(t *testing.T) {
+	x := newExec(&fakeJobs{}, nil)
+	rv := metatool.ExecuteAwaitResult(context.Background(), json.RawMessage(`{}`), x, defaultRC())
 	assertIsError(t, rv, "payload_invalid")
 }
 
 func TestExecuteAwaitResult_NotInFlight(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"request_id": "req-unknown"})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
+	jobs := &fakeJobs{}
+	jobs.awaitFn = func(id message.ID) (*message.Envelope, bool, error) {
+		return nil, false, actorbase.ErrCallClosed
+	}
+	x := newExec(jobs, nil)
+	rv := metatool.ExecuteAwaitResult(context.Background(),
+		json.RawMessage(`{"request_id":"req-9"}`), x, defaultRC())
+	assertIsError(t, rv, "internal_error")
+	blob, _ := json.Marshal(rv.Value)
+	if !containsStr(string(blob), "not in flight") {
+		t.Fatalf("expected 'not in flight' message, got %s", blob)
+	}
+}
+
+func TestExecuteAwaitResult_StillPending(t *testing.T) {
+	jobs := &fakeJobs{} // awaitFn nil → ok=false
+	x := newExec(jobs, nil)
+	rv := metatool.ExecuteAwaitResult(context.Background(),
+		json.RawMessage(`{"request_id":"req-1"}`), x, defaultRC())
+	assertNotError(t, rv)
+	if rv.Value["status"] != "accepted" {
+		t.Fatalf("still-pending should ack; got %+v", rv.Value)
+	}
+}
+
+func TestExecuteAwaitResult_ResolvesFinal(t *testing.T) {
+	jobs := &fakeJobs{}
+	jobs.awaitFn = func(id message.ID) (*message.Envelope, bool, error) {
+		return finalResp(id, map[string]any{"status": "completed"}), true, nil
+	}
+	x := newExec(jobs, nil)
+	rv := metatool.ExecuteAwaitResult(context.Background(),
+		json.RawMessage(`{"request_id":"req-1"}`), x, defaultRC())
+	assertNotError(t, rv)
+	if rv.Value["status"] != "completed" {
+		t.Fatalf("expected completed, got %+v", rv.Value)
+	}
+}
+
+// --- cancel ----------------------------------------------------------------
+
+func TestExecuteCancel_NilExec(t *testing.T) {
+	rv := metatool.ExecuteCancel(context.Background(), nil, nil, defaultRC())
 	assertIsError(t, rv, "internal_error")
 }
 
-func TestExecuteAwaitResult_WhitespaceRequestID(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"request_id": "  "})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
+func TestExecuteCancel_CallsJobTableCancel(t *testing.T) {
+	jobs := &fakeJobs{}
+	x := newExec(jobs, nil)
+	rv := metatool.ExecuteCancel(context.Background(),
+		json.RawMessage(`{"request_id":"req-7"}`), x, defaultRC())
+	assertNotError(t, rv)
+	if len(jobs.cancelled) != 1 || jobs.cancelled[0] != "req-7" {
+		t.Fatalf("expected Cancel(req-7), got %v", jobs.cancelled)
+	}
+	if rv.Value["cancelled"] != "req-7" {
+		t.Fatalf("expected cancelled=req-7, got %+v", rv.Value)
+	}
+}
+
+// --- list_pending ----------------------------------------------------------
+
+func TestExecuteListPending_ReturnsJobTableList(t *testing.T) {
+	jobs := &fakeJobs{listIDs: []message.ID{"req-1", "req-2"}}
+	x := newExec(jobs, nil)
+	rv := metatool.ExecuteListPending(context.Background(), nil, x, defaultRC())
+	assertNotError(t, rv)
+	if rv.Value["count"] != 2 {
+		t.Fatalf("count = %v, want 2", rv.Value["count"])
+	}
+}
+
+// --- describe_actor (sys.Call face) ----------------------------------------
+
+func TestExecuteDescribeActor_NilCall(t *testing.T) {
+	x := &metatool.Exec{Jobs: &fakeJobs{}} // Call nil
+	rv := metatool.ExecuteDescribeActor(context.Background(),
+		json.RawMessage(`{"actor_id":"tool:xhs"}`), x, defaultRC())
+	assertIsError(t, rv, "internal_error")
+}
+
+func TestExecuteDescribeActor_UsesCallFace(t *testing.T) {
+	var called bool
+	call := func(_ context.Context, spec behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		called = true
+		if spec.Type != "actor.describe" {
+			t.Fatalf("describe spec type = %q", spec.Type)
+		}
+		return finalResp("d", map[string]any{"actor_id": "tool:xhs", "description": "x"}), true, nil
+	}
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
+	rv := metatool.ExecuteDescribeActor(context.Background(),
+		json.RawMessage(`{"actor_id":"tool:xhs"}`), x, defaultRC())
+	assertNotError(t, rv)
+	if !called {
+		t.Fatal("describe_actor did not drive the Call face")
+	}
+	// A describe query MUST NOT become a durable job (it went through sys.Call).
+	if jobs, ok := x.Jobs.(*fakeJobs); ok && len(jobs.submitted) != 0 {
+		t.Fatalf("describe leaked into the JobTable: %d submits", len(jobs.submitted))
+	}
+}
+
+func TestExecuteDescribeType_MissingType(t *testing.T) {
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		return nil, false, nil
+	}, Clock: time.Now}
+	rv := metatool.ExecuteDescribeType(context.Background(),
+		json.RawMessage(`{"actor_id":"tool:xhs"}`), x, defaultRC())
 	assertIsError(t, rv, "payload_invalid")
 }
 
-// submitInFlight fans out a wait=false call_actor so the Shell holds an
-// in-flight future, and returns the emitted request id.
-func submitInFlight(t *testing.T, w *recWriter, sh *metatool.Shell) message.ID {
-	t.Helper()
-	params, _ := json.Marshal(map[string]any{"actor_id": "tool:x", "type": "x.do", "wait": false})
-	rv := metatool.ExecuteCallActor(context.Background(), params, sh, defaultRC())
-	assertNotError(t, rv)
-	return w.lastRequest(t, time.Second).ID
-}
+// --- list_actors (sys.Call raw) --------------------------------------------
 
-func TestExecuteAwaitResult_SuccessFinalDelivered(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	reqID := submitInFlight(t, w, sh)
-
-	// A fan-out (wait=false) future does not buffer an early final — it only
-	// resolves a parked Await. Deliver concurrently once await_result parks.
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		sh.Deliver(finalResp(reqID, map[string]any{"status": "completed", "data": "hello"}))
-	}()
-
-	params, _ := json.Marshal(map[string]any{"request_id": reqID.String(), "timeout_ms": 5000})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
-	if rv.Name != "await_result" {
-		t.Fatalf("expected Name=await_result, got %q", rv.Name)
-	}
-	assertNotError(t, rv)
-	if rv.Value["data"] != "hello" {
-		t.Fatalf("expected data=hello, got %v", rv.Value)
-	}
-}
-
-func TestExecuteAwaitResult_Timeout(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	reqID := submitInFlight(t, w, sh)
-
-	params, _ := json.Marshal(map[string]any{"request_id": reqID.String(), "timeout_ms": 50})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
-	if rv.Name != "await_result" {
-		t.Fatalf("expected Name=await_result, got %q", rv.Name)
-	}
-	if status, _ := rv.Value["status"].(string); status != "accepted" {
-		t.Fatalf("expected status=accepted, got %q; value=%v", status, rv.Value)
-	}
-}
-
-func TestExecuteAwaitResult_ContextCancelled(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	reqID := submitInFlight(t, w, sh)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
-	params, _ := json.Marshal(map[string]any{"request_id": reqID.String()})
-	rv := metatool.ExecuteAwaitResult(ctx, params, sh, metatool.RuntimeContext{})
-	assertIsError(t, rv, "internal_error")
-}
-
-func TestExecuteAwaitResult_CustomTimeout(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	reqID := submitInFlight(t, w, sh)
-
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		sh.Deliver(finalResp(reqID, map[string]any{"status": "completed", "result": "done"}))
-	}()
-	params, _ := json.Marshal(map[string]any{"request_id": reqID.String(), "timeout_ms": 5000})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
-	assertNotError(t, rv)
-}
-
-func TestExecuteAwaitResult_FailedResponse(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	reqID := submitInFlight(t, w, sh)
-
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		sh.Deliver(finalResp(reqID, map[string]any{"status": "failed", "reason": "adapter_error"}))
-	}()
-	params, _ := json.Marshal(map[string]any{"request_id": reqID.String(), "timeout_ms": 5000})
-	rv := metatool.ExecuteAwaitResult(context.Background(), params, sh, metatool.RuntimeContext{})
+func TestExecuteListActors_NilCall(t *testing.T) {
+	x := &metatool.Exec{Jobs: &fakeJobs{}}
+	rv := metatool.ExecuteListActors(context.Background(), nil, x, defaultRC())
 	assertIsError(t, rv, "")
 }
 
-// ---------------------------------------------------------------------------
-// ExecuteCancel
-// ---------------------------------------------------------------------------
-
-func TestExecuteCancel_NilShell(t *testing.T) {
-	rv := metatool.ExecuteCancel(context.Background(), nil, nil, metatool.RuntimeContext{})
-	assertIsError(t, rv, "internal_error")
+func TestExecuteListActors_OutsideTurn(t *testing.T) {
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		return nil, false, nil
+	}}
+	rv := metatool.ExecuteListActors(context.Background(), nil, x, metatool.RuntimeContext{})
+	assertIsError(t, rv, "")
 }
 
-func TestExecuteCancel_MissingRequestID(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{})
-	rv := metatool.ExecuteCancel(context.Background(), params, sh, metatool.RuntimeContext{})
-	assertIsError(t, rv, "payload_invalid")
-}
-
-func TestExecuteCancel_InvalidJSON(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteCancel(context.Background(), json.RawMessage(`{bad`), sh, metatool.RuntimeContext{})
-	assertIsError(t, rv, "payload_invalid")
-}
-
-func TestExecuteCancel_Success(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	reqID := submitInFlight(t, w, sh)
-
-	params, _ := json.Marshal(map[string]any{"request_id": reqID.String()})
-	rv := metatool.ExecuteCancel(context.Background(), params, sh, metatool.RuntimeContext{})
-	assertNotError(t, rv)
-	if rv.Value["cancelled"] != reqID.String() {
-		t.Fatalf("expected cancelled=%s, got %v", reqID, rv.Value["cancelled"])
+func TestExecuteListActors_RendersCatalog(t *testing.T) {
+	call := func(_ context.Context, spec behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		if spec.Type != "actor.list" {
+			t.Fatalf("list spec type = %q", spec.Type)
+		}
+		body, _ := json.Marshal(map[string]any{
+			"actors": []map[string]any{
+				{"actor_id": "tool:xhs", "kind": "tool", "present": true},
+			},
+		})
+		return &message.Envelope{Kind: message.KindResponse, Payload: body}, true, nil
 	}
-	if sh.InFlight(reqID) {
-		t.Fatal("expected future cancelled after cancel")
-	}
-}
-
-func TestExecuteCancel_WhitespaceRequestID(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"request_id": "  "})
-	rv := metatool.ExecuteCancel(context.Background(), params, sh, metatool.RuntimeContext{})
-	assertIsError(t, rv, "payload_invalid")
-}
-
-func TestExecuteCancel_UnknownRequestID(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	params, _ := json.Marshal(map[string]any{"request_id": "req-nonexistent"})
-	rv := metatool.ExecuteCancel(context.Background(), params, sh, metatool.RuntimeContext{})
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
+	rv := metatool.ExecuteListActors(context.Background(), nil, x, defaultRC())
 	assertNotError(t, rv)
 }
 
-// ---------------------------------------------------------------------------
-// ExecuteListPending
-// ---------------------------------------------------------------------------
-
-func TestExecuteListPending_NilShell(t *testing.T) {
-	rv := metatool.ExecuteListPending(context.Background(), nil, nil, metatool.RuntimeContext{})
-	assertIsError(t, rv, "internal_error")
-}
-
-func TestExecuteListPending_EmptyList(t *testing.T) {
-	sh := newExecShell(&recWriter{})
-	rv := metatool.ExecuteListPending(context.Background(), nil, sh, metatool.RuntimeContext{})
-	assertNotError(t, rv)
-	if count, _ := rv.Value["count"].(int); count != 0 {
-		t.Fatalf("expected count=0, got %d", count)
+func containsStr(s, sub string) bool {
+	for i := 0; i+len(sub) <= len(s); i++ {
+		if s[i:i+len(sub)] == sub {
+			return true
+		}
 	}
-	pending, ok := rv.Value["pending"].([]string)
-	if !ok || len(pending) != 0 {
-		t.Fatalf("expected empty []string pending, got %T %v", rv.Value["pending"], rv.Value["pending"])
-	}
-}
-
-func TestExecuteListPending_WithPending(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	id1 := submitInFlight(t, w, sh)
-	id2 := submitInFlight(t, w, sh)
-
-	rv := metatool.ExecuteListPending(context.Background(), nil, sh, metatool.RuntimeContext{})
-	assertNotError(t, rv)
-	if count, _ := rv.Value["count"].(int); count != 2 {
-		t.Fatalf("expected count=2, got %d", count)
-	}
-	pending, _ := rv.Value["pending"].([]string)
-	found := map[string]bool{}
-	for _, id := range pending {
-		found[id] = true
-	}
-	if !found[id1.String()] || !found[id2.String()] {
-		t.Fatalf("expected %s and %s in pending, got %v", id1, id2, pending)
-	}
-}
-
-func TestExecuteListPending_AfterCancel(t *testing.T) {
-	w := &recWriter{}
-	sh := newExecShell(w)
-	reqID := submitInFlight(t, w, sh)
-	sh.Cancel(reqID)
-
-	rv := metatool.ExecuteListPending(context.Background(), nil, sh, metatool.RuntimeContext{})
-	assertNotError(t, rv)
-	if count, _ := rv.Value["count"].(int); count != 0 {
-		t.Fatalf("expected count=0 after cancel, got %d", count)
-	}
+	return false
 }

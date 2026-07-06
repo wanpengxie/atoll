@@ -163,7 +163,7 @@ func runProc(t *testing.T, self actor.ActorID, eng *stubEngine, seedState map[re
 			sys.state.m[k] = v
 		}
 	}
-	cfg := Config{NewEngine: func(seed []byte) (Engine, error) {
+	cfg := Config{NewEngine: func(_ actorbase.Sys, seed []byte) (Engine, error) {
 		eng.seed = seed
 		return eng, nil
 	}}
@@ -323,7 +323,7 @@ func TestResumeSeedReadAtBoot(t *testing.T) {
 func TestBootFailureIsLoudDeath(t *testing.T) {
 	sys := newFakeSys("agent:me", eventMsg("user:c", "one"))
 	bootErr := errors.New("no api key")
-	proc := newProc(Config{NewEngine: func([]byte) (Engine, error) { return nil, bootErr }})
+	proc := newProc(Config{NewEngine: func(actorbase.Sys, []byte) (Engine, error) { return nil, bootErr }})
 	err := proc(sys)
 	if err == nil || !errors.Is(err, bootErr) {
 		t.Fatalf("boot failure must be loud death, got %v", err)
@@ -351,7 +351,7 @@ func TestDefRequiresNewEngine(t *testing.T) {
 	if _, err := Def("doc", Config{}); err == nil {
 		t.Fatalf("Def must reject a nil NewEngine")
 	}
-	if _, err := Def("doc", Config{NewEngine: func([]byte) (Engine, error) { return &stubEngine{}, nil }}); err != nil {
+	if _, err := Def("doc", Config{NewEngine: func(actorbase.Sys, []byte) (Engine, error) { return &stubEngine{}, nil }}); err != nil {
 		t.Fatalf("Def with NewEngine: %v", err)
 	}
 }

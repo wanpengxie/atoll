@@ -41,14 +41,14 @@ import (
 
 	"github.com/wanpengxie/atoll/actors/kimi"
 	"github.com/wanpengxie/atoll/actors/xhs"
+	"github.com/wanpengxie/atoll/agent/base"
 	"github.com/wanpengxie/atoll/app"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/metatool"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // Fixed loopback device ports for this test's two adapters. Distinct from the
@@ -58,60 +58,50 @@ const (
 	metatoolKimiDeviceAddr = "127.0.0.1:18093"
 )
 
-// --- the agent cell: a metatool.Shell holder, kimiagent-shaped, no LLM --------
+// --- the agent cell: a JobTable-driven Proc, no LLM ---------------------------
 
-// shellAgent is a minimal channel agent cell that holds a metatool.Shell (the
-// SAME shared invocation machinery the production go-kimi Bridge holds) and
-// feeds inbound responses to shell.Deliver — the kimiagent Receive path with the
-// LLM removed. The test drives the shell's call_actor directly.
+// shellAgent is a minimal channel agent cell (期10 S5): an actorbase.Proc whose
+// engine IS the substrate JobTable (the SAME out-station account the production
+// agents drive through metatool.Exec). Its run loop idles on sys.Recv() to keep
+// the cell live — the engine's own pump matches inbound responses to the ledger,
+// no manual Deliver needed. The test drives the meta-tool call_actor directly
+// against the engine's Exec face from a separate goroutine (the mind-binding
+// caller class — JobTable is cross-goroutine safe by design).
 type shellAgent struct {
 	self  actor.ActorID
 	chID  channel.ID
-	shell *metatool.Shell
-	seq   uint64
 	mu    sync.Mutex
+	exec  *metatool.Exec
+	ready chan struct{}
 }
 
-func newShellAgent(self actor.ActorID, chID channel.ID, pen harness.Pen) *shellAgent {
-	a := &shellAgent{self: self, chID: chID}
-	a.shell = metatool.NewShell(metatool.ShellConfig{
-		Pen:   pen,
-		Clock: time.Now,
-		EnvelopeID: func(nowMs int64) message.ID {
-			a.mu.Lock()
-			a.seq++
-			n := a.seq
-			a.mu.Unlock()
-			return message.ID(fmt.Sprintf("shellagent-%d-%d", nowMs, n))
-		},
-		// Give the inline fast-path plenty of room: the canned device replies in
-		// milliseconds, so a generous window keeps every call synchronous.
-		FastPathWindow: 10 * time.Second,
-		OnFault: func(reqID message.ID, err error) {
-			// Surfaced via t.Log in the test if it ever fires; a fault here would
-			// mean a request the shell could not close (the real liveness break).
-		},
-	})
-	return a
+func newShellAgent(self actor.ActorID, chID channel.ID) *shellAgent {
+	return &shellAgent{self: self, chID: chID, ready: make(chan struct{})}
 }
 
-// Receive is the cell mailbox. Responses go to shell.Deliver (waking the
-// call_actor waiter); everything else is ignored (this agent has no LLM turn).
-func (a *shellAgent) Receive(_ context.Context, env *message.Envelope) error {
-	if env == nil {
-		return nil
+// run is the cell Proc: build the Exec face from Sys (the JobTable + sys.Call),
+// publish it, then idle so the cell (and its response-matching pump) stays live.
+func (a *shellAgent) run(sys actorbase.Sys) error {
+	a.mu.Lock()
+	a.exec = base.ExecFace(sys, 10*time.Second, nil)
+	a.mu.Unlock()
+	close(a.ready)
+	for {
+		if _, err := sys.Recv(); err != nil {
+			return err
+		}
 	}
-	if env.Kind == message.KindResponse && env.ParentID != "" {
-		a.shell.Deliver(env)
-	}
-	return nil
 }
 
-// callActor drives the agent's REAL call_actor entry with a synthesised turn
-// trigger (a request to this agent threads parent/correlation — exactly what a
-// live trigger envelope carries). The shell blocks on the inline window until the
-// cell's Receive delivers the response, so this runs on its own goroutine.
+// callActor drives the REAL call_actor entry with a synthesised turn trigger.
+// call_actor Submits through the JobTable and blocks the fast-path window until
+// the engine's pump matches the device response, so this runs on its own
+// goroutine.
 func (a *shellAgent) callActor(ctx context.Context, actorID, envType string, params map[string]any) metatool.ResultValue {
+	<-a.ready
+	a.mu.Lock()
+	x := a.exec
+	a.mu.Unlock()
 	paramRaw, _ := json.Marshal(params)
 	callRaw, _ := json.Marshal(map[string]any{
 		"actor_id": actorID,
@@ -130,10 +120,10 @@ func (a *shellAgent) callActor(ctx context.Context, actorID, envType string, par
 			},
 		},
 	}
-	return metatool.ExecuteCallActor(ctx, callRaw, a.shell, rc)
+	return metatool.ExecuteCallActor(ctx, callRaw, x, rc)
 }
 
-func (a *shellAgent) stop() { a.shell.Stop() }
+func (a *shellAgent) stop() {}
 
 // --- test-local App setup with the shellAgent injected as the channel agent ---
 
@@ -152,10 +142,10 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 		t.Fatalf("OpenDB: %v", err)
 	}
 
-	factory := func(chID channel.ID, agentID actor.ActorID, pen harness.Pen) (actorrt.Actor, error) {
-		sa := newShellAgent(agentID, chID, pen)
+	factory := func(chID channel.ID, agentID actor.ActorID) (actorbase.Proc, error) {
+		sa := newShellAgent(agentID, chID)
 		agentSink(sa)
-		return sa, nil
+		return sa.run, nil
 	}
 
 	a, err := app.New(app.Config{

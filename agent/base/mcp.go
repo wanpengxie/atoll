@@ -41,12 +41,12 @@ type MCPTool struct {
 	Handler func(ctx context.Context, params json.RawMessage) MCPResult
 }
 
-// ToolExecutor abstracts the call-machinery one meta-tool Execute runs against
-// — metatool.Shell today, lib/actorbase JobTable after the S5 migration — behind
-// a single closure, so this neutral catalog names neither. The provider supplies
-// it, threading its own held caller + the current turn's RuntimeContext (derived
-// from base.Trigger — the curTurn/RuntimeContext 合一). This keeps agent/base out
-// of the S5 Shell→JobTable换形 entirely (红线7: 改动以切片账为限).
+// ToolExecutor is the closure one meta-tool Execute runs through — the provider
+// supplies it, binding the incarnation's metatool.Exec face (ExecFace(sys, …):
+// the substrate JobTable + sys.Call) and the current turn's RuntimeContext
+// (derived from base.Trigger — the curTurn/RuntimeContext 合一). This neutral
+// catalog names neither the engine nor the tool params, keeping BuildMCPCatalog
+// engine-SDK-free (§2 S2).
 type ToolExecutor func(ctx context.Context, mt metatool.MetaTool, params json.RawMessage) metatool.ResultValue
 
 // BuildMCPCatalog projects the substrate's 7-tool meta catalog

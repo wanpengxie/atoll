@@ -18,12 +18,14 @@ type ToolSpec struct {
 	Schema      json.RawMessage
 }
 
-// MetaTool pairs a tool's spec with its Execute binding onto the Shell.
+// MetaTool pairs a tool's spec with its Execute binding onto the Exec face.
 // Every meta tool shares the one Execute shape so a runtime can wrap them
-// uniformly by iterating MetaTools() — no per-tool wiring.
+// uniformly by iterating MetaTools() — no per-tool wiring. The Exec face is the
+// substrate's out-station JobTable + a synchronous sys.Call face (期10 S5: the
+// historical private Shell collapsed into the engine's ledger).
 type MetaTool struct {
 	Spec    ToolSpec
-	Execute func(ctx context.Context, params json.RawMessage, sh *Shell, rc RuntimeContext) ResultValue
+	Execute func(ctx context.Context, params json.RawMessage, x *Exec, rc RuntimeContext) ResultValue
 }
 
 // MetaTools returns the channel's meta-tool catalog: the 7 client-edge
