@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"sync"
@@ -66,6 +67,15 @@ type testBuilder struct {
 	byID    map[actor.ActorID]ActorFactory
 	byClass map[string]ActorFactory
 	seen    map[actor.ActorID]actorcaps.Caps
+	// forkCalls records the (childID, class, config) each LookupByClass received —
+	// the M2 config-passthrough / childID-derivation assertions read it.
+	forkCalls []forkCall
+}
+
+type forkCall struct {
+	childID actor.ActorID
+	class   string
+	config  json.RawMessage
 }
 
 func newTestBuilder() *testBuilder {
@@ -103,9 +113,10 @@ func (b *testBuilder) Lookup(id actor.ActorID) (ActorFactory, bool) {
 	return f, ok
 }
 
-func (b *testBuilder) LookupByClass(class string) (ActorFactory, bool) {
+func (b *testBuilder) LookupByClass(childID actor.ActorID, class string, config json.RawMessage) (ActorFactory, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	b.forkCalls = append(b.forkCalls, forkCall{childID: childID, class: class, config: config})
 	f, ok := b.byClass[class]
 	return f, ok
 }

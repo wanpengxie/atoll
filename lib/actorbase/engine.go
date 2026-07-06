@@ -587,7 +587,7 @@ func (e *engine) CancelTimer(id schedule.TimerID) error {
 
 // --- Sys: Spawn arm --------------------------------------------------------
 
-func (e *engine) Fork(class, nameHint string) (actor.ActorID, error) {
+func (e *engine) Fork(class, nameHint string, config json.RawMessage) (actor.ActorID, error) {
 	// A daemon-hosted incarnation is minted via link.NewLiveArms, which
 	// leaves Spawn zero (spec §3's known gap: fork does not cross the wire
 	// this period) — a nil e.spawn means "this host has no Spawn arm", which
@@ -595,7 +595,7 @@ func (e *engine) Fork(class, nameHint string) (actor.ActorID, error) {
 	if e.spawn == nil {
 		return "", ErrUnsupported
 	}
-	return e.spawn.Fork(actorrt.ForkSpec{Kind: forkKind, Class: class, NameHint: nameHint})
+	return e.spawn.Fork(actorrt.ForkSpec{Kind: forkKind, Class: class, NameHint: nameHint, Config: config})
 }
 
 func (e *engine) DespawnChild(id actor.ActorID) error {

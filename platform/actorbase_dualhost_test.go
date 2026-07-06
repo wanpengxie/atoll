@@ -139,7 +139,7 @@ func forkProbeDef() actorbase.Def {
 					if msg.Type != typeForkProbe {
 						continue
 					}
-					_, forkErr := sys.Fork("probe", "child")
+					_, forkErr := sys.Fork("probe", "child", nil)
 					_, _ = sys.Reply(msg, map[string]string{"fork_err": fmt.Sprint(forkErr)})
 				}
 			}, nil

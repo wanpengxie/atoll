@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -165,8 +166,10 @@ func (d compositionDesired) Members(context.Context) ([]actorrt.DesiredMember, e
 // resolves a durable member id to its ActorFactory by reading the channel_actors
 // row and building it (the same read+build the reconcile ring's activation does,
 // resolved for the builder instead of eagerly spawned). A build failure (missing creds, unknown class) is (zero,false) — the
-// ring records it infeasible and retries next tick. LookupByClass is always
-// not-found: fork is deferred (A-P2=A), so the home never forks a domain child.
+// ring records it infeasible and retries next tick. LookupByClass is fork's entry
+// (M2): a parent's委托 (childID + class + config) → the child's ActorFactory via
+// the SAME registry.Build the id-based Lookup runs, config carried on
+// InstanceSpec.Config (fork is its second灌入口 after S8's composition rows).
 type compositionBuilder struct {
 	app  *App
 	chID channel.ID
@@ -189,6 +192,25 @@ func (b compositionBuilder) Lookup(id actor.ActorID) (platform.ActorFactory, boo
 	return decl.Factory, true
 }
 
-func (b compositionBuilder) LookupByClass(string) (platform.ActorFactory, bool) {
-	return platform.ActorFactory{}, false
+// LookupByClass builds a fork child's ActorFactory from the parent's委托: the
+// domain's class→instance table is registry.Build, fed InstanceSpec{ID: childID,
+// Config: config} (the fork path is InstanceSpec.Config's second injection point
+// after the composition-row path S8 wired). Kind is NOT re-answered — it is
+// caller-held on ForkSpec.Kind. A build failure (unknown class, bad config,
+// missing creds) is (zero, false): the parent's Fork surfaces ErrClassNotFound,
+// never a phantom child. Server-scoped Deps (no WorkspaceDir): a forked child
+// derives the server-embedded Situation like any server-placed cell.
+func (b compositionBuilder) LookupByClass(childID actor.ActorID, class string, config json.RawMessage) (platform.ActorFactory, bool) {
+	decl, err := registry.Build(class, registry.InstanceSpec{
+		ID:     childID,
+		Config: config,
+	}, registry.Deps{
+		ChannelID: b.chID,
+		Logger:    b.app.logger,
+	})
+	if err != nil {
+		b.app.logger.Debug("app: composition builder fork build", "channel", string(b.chID), "child", string(childID), "class", class, "reason", err.Error())
+		return platform.ActorFactory{}, false
+	}
+	return decl.Factory, true
 }

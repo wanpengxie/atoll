@@ -88,7 +88,9 @@ func (s *fakeSys) After(time.Duration, string, any) (schedule.TimerID, error) {
 	return "", nil
 }
 func (s *fakeSys) CancelTimer(schedule.TimerID) error               { return nil }
-func (s *fakeSys) Fork(string, string) (actor.ActorID, error)       { return "", nil }
+func (s *fakeSys) Fork(string, string, json.RawMessage) (actor.ActorID, error) {
+	return "", nil
+}
 func (s *fakeSys) DespawnChild(actor.ActorID) error                 { return nil }
 func (s *fakeSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error { return nil }
 func (s *fakeSys) Self() actor.ActorID                              { return s.self }

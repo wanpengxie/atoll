@@ -2,6 +2,7 @@ package actorbase
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"time"
 
@@ -74,9 +75,12 @@ type Sys interface {
 	// --- Spawn arm --------------------------------------------------
 	// Fork mints a child owned by this incarnation, returning the child's
 	// name only (never a live handle — the handle never leaves substrate).
-	// A daemon-hosted incarnation returns ErrUnsupported (spec §3's known
-	// gap: fork is a cell-only capability in v1).
-	Fork(class, nameHint string) (actor.ActorID, error)
+	// config is the parent's opaque per-instance委托 for the child (the fork
+	// counterpart of admission's InstanceSpec.Config — the argv/Args a parent
+	// hands its child); substrate passes it through verbatim to the domain's
+	// build table, never interpreting it. A daemon-hosted incarnation returns
+	// ErrUnsupported (spec §3's known gap: fork is a cell-only capability in v1).
+	Fork(class, nameHint string, config json.RawMessage) (actor.ActorID, error)
 	DespawnChild(id actor.ActorID) error
 
 	// --- ActorContext -----------------------------------------------

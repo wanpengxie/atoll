@@ -660,7 +660,7 @@ func TestEngine_ForkAndDespawnChildReturnErrUnsupportedWhenSpawnNil(t *testing.T
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.spawn = nil // the daemon out-generation path's known gap (spec §3)
 
-	if _, err := e.Fork("worker", "hint"); !errors.Is(err, ErrUnsupported) {
+	if _, err := e.Fork("worker", "hint", nil); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("Fork with nil Spawn arm err = %v, want ErrUnsupported", err)
 	}
 	if err := e.DespawnChild("actor:child"); !errors.Is(err, ErrUnsupported) {

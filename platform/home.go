@@ -21,6 +21,7 @@ import (
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -894,8 +895,27 @@ func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnat
 		Access:   link.NewLiveAccess(h.cs.Access.Mint(id), inc, rt),
 		State:    link.NewLiveAccess(h.cs.Access.MintState(id), inc, rt),
 		Schedule: link.NewLiveSchedule(h.schedMinter.Mint(id), inc, rt),
-		Spawn:    newSpawnHandle(inc, rt, h.builder, h.buildCaps, h.placement, h.hooks()),
+		// The child assembler is buildChildCaps, NOT buildCaps: every fork
+		// descendant is an incarnation-level citizen (spec §4.1), so its private
+		// state must be per-incarnation memory, not this durable MintState arm. Any
+		// actor's fork children — top-level or itself a child — take that path.
+		Spawn: newSpawnHandle(inc, rt, h.builder, h.buildChildCaps, h.placement, h.hooks()),
 	}
+}
+
+// buildChildCaps is the FORK-CHILD caps assembler (spec §4.1 户籍轴): identical to
+// buildCaps except the State arm is a per-incarnation in-memory backend instead of
+// the durable actor_state MintState. substrate-本质: a fork child holds no durable
+// name分, so it holds no durable state — a fresh empty memStateStore is minted per
+// Fork and welded to THIS incarnation, so it evaporates with the incarnation and a
+// same-named reincarnation inherits nothing (EH2 root-cure, spec P1-2). The other
+// four arms (Pen / Access / Schedule / Spawn) are byte-for-byte buildCaps's — a
+// child writes truth, reads/writes父授 workspace resources, arms incarnation timers,
+// and forks its own (memory-state) children exactly like any actor.
+func (h *Home) buildChildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnation) actorcaps.Caps {
+	caps := h.buildCaps(id, kind, inc)
+	caps.State = link.NewLiveAccess(accessdoor.NewMemoryStateHandle(id), inc, h.channel.Cells())
+	return caps
 }
 
 // ServeAttach is the attach admission surface: the app hands an upgraded WS request here so a

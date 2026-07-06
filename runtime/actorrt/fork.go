@@ -1,6 +1,7 @@
 package actorrt
 
 import (
+	"encoding/json"
 	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -122,6 +123,14 @@ type ForkSpec struct {
 	// NameHint derives childID as parentID + "/" + NameHint (namespace
 	// derivation) — no substrate id allocator needed.
 	NameHint string
+	// Config is the parent's opaque per-instance委托 for the child — the fork
+	// counterpart of admission's InstanceSpec.Config (the Unix fork+exec argv /
+	// Erlang spawn(M,F,Args) Args). Substrate does not interpret it: it is passed
+	// through verbatim to the domain's Build(class, InstanceSpec{Config}, ...)
+	// table, so an out-of-process parent could carry it too (it rides the
+	// wire-serialisable ForkSpec, never a Go closure). It is the child's incarnation
+	// intent —随 incarnation, never persisted.
+	Config json.RawMessage
 }
 
 // SpawnHandle is the capability a parent incarnation holds to fork/despawn ITS

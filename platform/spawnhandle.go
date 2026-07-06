@@ -1,6 +1,7 @@
 package platform
 
 import (
+	"encoding/json"
 	"errors"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -42,8 +43,12 @@ var ErrClassNotFound = errors.New("platform: fork class not found in builder")
 type CapsFactoryBuilder interface {
 	// LookupByClass resolves a caller-declared, opaque implementation-selection key
 	// to its ActorFactory — fork's entry (ForkSpec.Class). Kind is NOT
-	// re-answered here (it is caller-held on ForkSpec.Kind).
-	LookupByClass(class string) (def ActorFactory, ok bool)
+	// re-answered here (it is caller-held on ForkSpec.Kind). It takes the
+	// already-derived childID and the parent's opaque config because the domain's
+	// Build(class, InstanceSpec{ID, Config}, ...) table needs both to construct the
+	// instance (a provider constructor rejects an empty ID) — the platform only
+	// passes them through, it never touches the registry.
+	LookupByClass(childID actor.ActorID, class string, config json.RawMessage) (def ActorFactory, ok bool)
 	// Lookup resolves a durable member id to its ActorFactory — activation's
 	// entry (the reconcile ring's eager revival + the schedule engine's identity-
 	// timer Reviver both hold only an id, since the original admission factory died
@@ -99,13 +104,15 @@ func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 	if h.builder == nil {
 		return "", ErrNoBuilder
 	}
-	factory, ok := h.builder.LookupByClass(spec.Class)
+	// childID = parentID + "/" + NameHint (namespace derivation — no substrate id
+	// allocator). Derived BEFORE the builder lookup: the domain's Build needs the
+	// child's id to construct the instance (InstanceSpec{ID} — a provider
+	// constructor rejects an empty ID), so the class→factory resolve is id-aware.
+	childID := h.inc.ID() + "/" + actor.ActorID(spec.NameHint)
+	factory, ok := h.builder.LookupByClass(childID, spec.Class, spec.Config)
 	if !ok {
 		return "", ErrClassNotFound
 	}
-	// childID = parentID + "/" + NameHint (namespace derivation — no substrate id
-	// allocator).
-	childID := h.inc.ID() + "/" + actor.ActorID(spec.NameHint)
 	// Placement answers the physical host (single-home identity this period);
 	// call it so multi-home can additively swap the implementation later without
 	// touching this call site.
