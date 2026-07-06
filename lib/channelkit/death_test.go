@@ -322,7 +322,7 @@ func TestNew_DefaultClockAndSpawnsSystem(t *testing.T) {
 	ch := channelkit.New(channelkit.Config{
 		ChannelID: "ch",
 		// intrinsic system cell — built against the live runtime, spawned by New.
-		System: func(*actorrt.Runtime) actorrt.Actor { return liveActor{} },
+		System: func(*actorrt.Runtime, actorrt.Incarnation) actorrt.Actor { return liveActor{} },
 		// Clock left nil → New must default it (time.Now) without panicking.
 	})
 	defer ch.Stop()

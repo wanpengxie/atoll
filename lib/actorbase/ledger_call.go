@@ -109,6 +109,25 @@ func (l *callLedger) arm(id message.ID, d time.Duration) {
 	l.mu.Unlock()
 }
 
+// stopTimers halts every armed author#2 deadline timer — engine.Stop calls it
+// on teardown (D 族小账) so no AfterFunc outlives the dead incarnation. A timer
+// that survived would only fire l.fireTimeout into a fail-closed pen (the live
+// membrane rejects the write once lifeCtx is cancelled), so reclaiming it drops
+// a dangling timer without losing any closure: the entries themselves stay, and
+// their terminal obligation is owned by the ORIGINAL callers' durable backstop,
+// exactly as the reject lane leaves its residue (spec §1.5 teardown 残留同兜底).
+// Lock-held, so it is safe against a concurrent match/arm.
+func (l *callLedger) stopTimers() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.entries {
+		if e.timer != nil {
+			e.timer.Stop()
+			e.timer = nil
+		}
+	}
+}
+
 // match is the pump's (Receive's) O(1) response-side dispatch: env is a
 // response addressed to one of this ledger's InFlight requests iff its
 // ParentID resolves. A PROVISIONAL response is swallowed (the entry stays

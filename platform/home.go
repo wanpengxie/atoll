@@ -345,8 +345,22 @@ func Open(cfg HomeConfig) (*Home, error) {
 	clock := func() time.Time { return time.UnixMilli(nowMs()) }
 	channel := channelkit.New(channelkit.Config{
 		ChannelID: cfg.ChannelID,
-		System: func(rt *actorrt.Runtime) actorrt.Actor {
-			caps := actorcaps.Caps{Pen: systemPen}
+		System: func(rt *actorrt.Runtime, inc actorrt.Incarnation) actorrt.Actor {
+			// S6 Q5: the ring0 anchor's four caps arms装真 — all RAW (no
+			// incarnation membrane), the anchor姿势 the system pen already wears
+			// (权威自身不设 incarnation 门). Access/State are eager (the access
+			// door is assembled by storeopen, before channelkit); Schedule/Spawn
+			// are late-bound (their engines are assembled after this cell is born
+			// — see sysanchorcaps.go), captured through the same h variable
+			// Hooks.Canceller uses.
+			homeOf := func() *Home { return h }
+			caps := actorcaps.Caps{
+				Pen:      systemPen,
+				Access:   cs.Access.Mint(actor.SystemActorID),
+				State:    cs.Access.MintState(actor.SystemActorID),
+				Schedule: systemScheduleHandle{home: homeOf},
+				Spawn:    systemSpawnHandle{inc: inc, home: homeOf},
+			}
 			hooks := actorbase.Hooks{
 				Canceller: func(target actor.ActorID, requestID message.ID) {
 					if h != nil {

@@ -63,8 +63,11 @@ type Config struct {
 	// a back-filled pointer. channelkit builds the runtime first, then calls this
 	// with the real *actorrt.Runtime, so the cell holds a live reference at
 	// construction (no back-fill, no construction cycle). channelkit assembles
-	// cells and does not know domain actor types. nil → no system cell.
-	System func(rt *actorrt.Runtime) actorrt.Actor
+	// cells and does not know domain actor types. nil → no system cell. The
+	// factory also receives the cell's own incarnation (from the SpawnIfAbsent
+	// build closure) so the composition root can weld an incarnation-owned Spawn
+	// arm onto the anchor.
+	System func(rt *actorrt.Runtime, inc actorrt.Incarnation) actorrt.Actor
 	// SystemPen + OpenRequests wire the death-edge closure. SystemPen is
 	// the system Pen the composition root injects (Mint(SystemActorID, chID)): the
 	// system identity is welded into the pen, so the closure's terminals are system-
@@ -117,8 +120,8 @@ func New(cfg Config) *Channel {
 		// channel assembly. SpawnIfAbsent + created-assert fails fast if the reserved
 		// id is ever already occupied (a second anchor spawn / a member admission
 		// leaking the reserved id) instead of Spawn's silent last-go-live replace.
-		if _, created := c.cells.SpawnIfAbsent(actor.SystemActorID, actor.KindSystem, func(actorrt.Incarnation) actorrt.Actor {
-			return cfg.System(c.cells)
+		if _, created := c.cells.SpawnIfAbsent(actor.SystemActorID, actor.KindSystem, func(inc actorrt.Incarnation) actorrt.Actor {
+			return cfg.System(c.cells, inc)
 		}); !created {
 			panic("channelkit: system anchor invariant violated — SystemActorID already occupied at assembly")
 		}

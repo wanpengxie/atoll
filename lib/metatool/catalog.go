@@ -22,6 +22,9 @@ func FormatCatalog(catalog introspect.Catalog) map[string]any {
 		if a.UptimeMs > 0 {
 			entry["uptime_ms"] = a.UptimeMs
 		}
+		if a.Device != nil {
+			entry["device"] = map[string]any{"online": a.Device.Online}
+		}
 		out = append(out, entry)
 	}
 	sort.Slice(out, func(i, j int) bool {

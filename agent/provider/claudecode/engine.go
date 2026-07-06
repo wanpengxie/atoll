@@ -50,7 +50,6 @@ type claudeClient interface {
 	Connect(ctx context.Context) error
 	Query(ctx context.Context, prompt string) error
 	ReceiveResponse(ctx context.Context) <-chan claude.Message
-	Interrupt(ctx context.Context) error
 	Close() error
 }
 

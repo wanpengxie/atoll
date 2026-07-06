@@ -47,8 +47,7 @@ func (c *scriptedClient) ReceiveResponse(context.Context) <-chan claude.Message 
 	close(ch)
 	return ch
 }
-func (c *scriptedClient) Interrupt(context.Context) error { return nil }
-func (c *scriptedClient) Close() error                    { return nil }
+func (c *scriptedClient) Close() error { return nil }
 
 func triggerEnv(id string) message.Envelope {
 	body, _ := json.Marshal(map[string]string{"text": "hi"})

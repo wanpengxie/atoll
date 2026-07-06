@@ -217,11 +217,16 @@ func (e *engine) Stop(ctx context.Context) error {
 	// never block on a join that could never complete.
 	if occupantState(e.occupant.Load()) == occupantStarting {
 		e.occupant.Store(int32(occupantDead))
+		e.call.stopTimers()
 		return nil
 	}
 	e.occupant.Store(int32(occupantDraining))
 	<-e.workerDone
 	close(e.rejectStop)
+	// D 族小账: reclaim the call ledger's dangling author#2 AfterFunc timers on
+	// teardown — they would otherwise outlive the incarnation and fire into a
+	// fail-closed pen (see callLedger.stopTimers).
+	e.call.stopTimers()
 	e.occupant.Store(int32(occupantDead))
 	return nil
 }
@@ -521,16 +526,32 @@ type resourceAdapter struct {
 	ctx func() context.Context
 }
 
+// nil-arm底线 (S6): a host with no Access/State arm answers ErrUnsupported
+// rather than nil-pointer-panicking through the door — the same kernel defense
+// the Spawn arm carries. No host currently produces a nil arm here (only Spawn
+// crosses the wire zero), so this is a defensive floor, not a live path.
 func (r resourceAdapter) Create(id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
+	if r.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
 	return r.h.Invoke(r.ctx(), access.OpCreate, id, args, nil)
 }
 func (r resourceAdapter) Read(id resource.ResourceID) (accessdoor.Outcome, error) {
+	if r.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
 	return r.h.Invoke(r.ctx(), access.OpRead, id, nil, nil)
 }
 func (r resourceAdapter) Write(id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
+	if r.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
 	return r.h.Invoke(r.ctx(), access.OpWrite, id, args, nil)
 }
 func (r resourceAdapter) Delete(id resource.ResourceID) (accessdoor.Outcome, error) {
+	if r.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
 	return r.h.Invoke(r.ctx(), access.OpDelete, id, nil, nil)
 }
 
@@ -540,6 +561,9 @@ type stateAdapter struct {
 }
 
 func (s stateAdapter) Get(id resource.ResourceID) (accessdoor.Outcome, error) {
+	if s.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
 	return s.h.Invoke(s.ctx(), access.OpRead, id, nil, nil)
 }
 
@@ -550,6 +574,9 @@ func (s stateAdapter) Get(id resource.ResourceID) (accessdoor.Outcome, error) {
 // not a TOCTOU: the state locus has exactly one writer (self, non-ambient
 // welding).
 func (s stateAdapter) Put(id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
+	if s.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
 	out, err := s.h.Invoke(s.ctx(), access.OpWrite, id, args, nil)
 	if err != nil {
 		return out, err
@@ -560,6 +587,9 @@ func (s stateAdapter) Put(id resource.ResourceID, args []byte) (accessdoor.Outco
 	return out, nil
 }
 func (s stateAdapter) Del(id resource.ResourceID) (accessdoor.Outcome, error) {
+	if s.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
 	return s.h.Invoke(s.ctx(), access.OpDelete, id, nil, nil)
 }
 
@@ -569,6 +599,11 @@ func (e *engine) Resource() ResourceHandle { return resourceAdapter{h: e.access,
 // --- Sys: Schedule arm -----------------------------------------------------
 
 func (e *engine) After(d time.Duration, msgType string, payload any) (schedule.TimerID, error) {
+	// nil-arm底线 (S6): a host with no Schedule arm answers ErrUnsupported, never
+	// nil-pointer-panics — the same kernel defense the Spawn arm carries.
+	if e.sched == nil {
+		return "", ErrUnsupported
+	}
 	raw, err := json.Marshal(payload)
 	if err != nil {
 		return "", err
@@ -582,6 +617,9 @@ func (e *engine) After(d time.Duration, msgType string, payload any) (schedule.T
 }
 
 func (e *engine) CancelTimer(id schedule.TimerID) error {
+	if e.sched == nil {
+		return ErrUnsupported
+	}
 	return e.sched.Cancel(e.lifeCtx, id)
 }
 
