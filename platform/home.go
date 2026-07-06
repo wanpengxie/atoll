@@ -708,6 +708,21 @@ func (h *Home) Admit(ctx context.Context, id actor.ActorID, kind actor.Kind) err
 	if id == "" {
 		return fmt.Errorf("platform: Admit id required")
 	}
+	// An Admit of an ALREADY-active member is a pure no-op (poke only): it must NOT
+	// re-apply the neutral Host="" row, because applyMemberAddTx UPDATEs host on any
+	// host-diff — a re-Admit of a daemon-hosted member (an idempotent introduce
+	// retry) would else clobber its live Host back to "" (placement authority is the
+	// attach/plan path's, never Admit's). Only an inactive/absent id takes the apply
+	// (reactivate/insert), where Host="" is the correct genesis-neutral state the
+	// host path stamps later.
+	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
+	if err != nil {
+		return fmt.Errorf("platform: Admit membership lookup: %w", err)
+	}
+	if ok && rec.IsActive() {
+		h.pokeReconcile()
+		return nil
+	}
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{{
 		ID: id, Kind: kind, Binding: actor.Binding(""), Host: "", At: h.nowMs(),
 	}}, nil); err != nil {
@@ -851,6 +866,11 @@ func (h *Home) Close() error {
 	// 4. Cells: stop actor cells (system actors included) — the last schedule/emit
 	//    producers. Their goroutines are joined here.
 	h.channel.Cells().StopAll()
+	// 4.5. Human callers: stop every shared per-user Caller's pending timer NOW —
+	//    after cells (no goroutine can Arm a fresh request) and before the stores
+	//    close (a still-armed fireTimeout would write a terminal through the pen into
+	//    an already-closing store, a死后写 into a dead sink).
+	h.stopAllHumanCallers()
 	// 5. Schedule engine: every producer is gone, so stopping the run loop now can
 	//    no longer strand a Schedule() into a dead engine.
 	if h.engine != nil {

@@ -144,6 +144,52 @@ func TestAttach_DeclarationWithoutMembership_NotMinted(t *testing.T) {
 	}
 }
 
+// TestAttach_OrphanDeclaration_NotInAllowSet proves the 问① allow-set gate: an
+// orphan declaration (no active户籍) is dropped not only from the membership write
+// but from the allowed/kinds allow-set too, so the daemon CANNOT OpenStream a
+// welded pen for it (resolve rejects → the home closes the stream → the handshake
+// ack read fails). The admitted member's stream opens fine, proving the gate is
+// per-declaration and not a wholesale reject.
+func TestAttach_OrphanDeclaration_NotInAllowSet(t *testing.T) {
+	ctx := context.Background()
+	r := newStoreHomeRig(t)
+
+	const (
+		member = actor.ActorID("tool:member")
+		orphan = actor.ActorID("tool:orphan")
+	)
+	r.admit(t, member) // orphan deliberately NOT admitted
+
+	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
+		{ActorID: member, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+		{ActorID: orphan, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	// The admitted member's stream opens (it is in the allow-set).
+	if _, err := d.OpenStream(member, func(*message.Envelope) error { return nil }, func(message.ID) {}); err != nil {
+		t.Fatalf("OpenStream(member) must succeed (admitted): %v", err)
+	}
+	// The orphan's stream is refused: resolve rejects the undeclared id, the home
+	// closes the stream, and OpenStream's handshake-ack read fails. Before the fix
+	// the orphan sat in the allow-set and this would succeed → a welded pen for a
+	// non-member (truth forgery surface).
+	if _, err := d.OpenStream(orphan, func(*message.Envelope) error { return nil }, func(message.ID) {}); err == nil {
+		t.Fatal("OpenStream(orphan) must fail — an un-admitted declaration is NOT in the allow-set (问① gate broken)")
+	}
+
+	// Doubly: the orphan minted no membership row (allow-set and membership share the
+	// one Lookup verdict).
+	if _, ok, err := r.cs.Registry.Lookup(ctx, orphan); err != nil {
+		t.Fatalf("Lookup(orphan): %v", err)
+	} else if ok {
+		t.Fatal("orphan declaration minted a membership row (膜律 问① broken)")
+	}
+}
+
 // TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut proves the S5
 // attach-time reconciliation (spec §3-S5, forward §10.13 推导7): a Reattach
 // declaring a SMALLER set than the compute currently hosts (Host==computeID in

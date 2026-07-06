@@ -168,27 +168,46 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 	}
 	bound := a.daemonAttachedChannels(ctx, daemonID)
 
-	if _, err := a.db.ExecContext(ctx,
+	// The three revocation writes (delete bindings, clear desired_host, delete the
+	// daemons row) are ONE atomic tx: a failure on any of them must leave NONE
+	// applied — a half-revoked state (e.g. bindings gone but the key row surviving,
+	// or desired_host cleared but the daemon still resolvable) is precisely the
+	// inconsistency the old sequential-write path could commit. Only after the tx
+	// COMMITS is the revocation durable and the live links safe to Kick (a link
+	// kicked but not revoked reconnects). Any write error → rollback (deferred) +
+	// 5xx, no Kick.
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
+	// Injected test seam (nil in production): force the revocation persist to fail
+	// so the rollback + 5xx path is exercised deterministically.
+	if a.revokeFailHook != nil {
+		if herr := a.revokeFailHook(); herr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+			return
+		}
+	}
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM daemon_channels WHERE daemon_id = ?`, daemonID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
 	// Clear desired_host on this daemon's rows (placement恒不变; the pool row stays,
-	// no daemon claims it, the live cell is simply absent until a re-指派). This and
-	// the daemons-row delete are REVOCATION persistence, not best-effort: a swallowed
-	// error would return ok while the key/host binding still lived. Check both; on
-	// failure return 5xx and do NOT Kick (a link kicked but not revoked reconnects).
-	if a.revokeFailForTest {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
-	if _, err := a.db.ExecContext(ctx,
+	// no daemon claims it, the live cell is simply absent until a re-指派).
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE channel_actors SET desired_host = '' WHERE desired_host = ?`, daemonID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
-	if _, err := a.db.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM daemons WHERE id = ? AND owner_id = ?`, daemonID, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}

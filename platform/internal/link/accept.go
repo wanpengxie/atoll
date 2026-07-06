@@ -450,47 +450,55 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 		}
 	}
 
-	if a.membership != nil {
-		nowMs := time.Now().UnixMilli()
-		adds := make([]storespec.MemberActorAdd, 0, len(att.Declarations))
-		for _, d := range att.Declarations {
-			// 膜律 (问①, v1.8): a declaration only STAMPS Host onto an EXISTING
-			// active member — it never mints membership. An id with no active户籍
-			// (never Admitted, or already deregistered) is refused: "a daemon may
-			// attach" must not silently升级 to "a daemon may任命 members" (it runs on
-			// a half-trusted user host). 有户籍 → applyMemberAddTx only UPDATEs host
-			// for an active row (只盖 Host). registry-less rigs (nil) keep the old
-			// unconditional write (no truth store to consult). 问②③ (placement /
-			// desired_host authority) is enforced at plan generation (app), not here.
-			if a.registry != nil {
-				rec, ok, err := a.registry.Lookup(ctx, d.ActorID)
-				if err != nil {
-					a.sendReply(lc, AttachReply{Accepted: false, Reason: "membership lookup: " + err.Error()})
-					return "", false
-				}
-				if !ok || !rec.IsActive() {
-					a.logger.Warn("link.attach.declaration_no_membership",
-						"compute", computeID, "actor", string(d.ActorID))
-					continue
-				}
-			}
-			adds = append(adds, storespec.MemberActorAdd{ID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Host: computeID, At: nowMs})
-		}
-		if len(adds) > 0 {
-			if err := a.membership.ApplyMemberTransitions(ctx, adds, nil); err != nil {
-				a.sendReply(lc, AttachReply{Accepted: false, Reason: "register: " + err.Error()})
+	// 膜律 (问①, v1.8): a declaration is admitted ONLY if it names an id with an
+	// active户籍 — one active-census Lookup per declaration, and that ONE verdict
+	// gates EVERY downstream use of the declaration: the membership host-stamp,
+	// the allowed/kinds allow-set (so OpenStream can bind a welded pen), and the
+	// obs fold. An orphan (never Admitted, or already deregistered) is dropped
+	// from ALL of them — not merely skipped from the membership write — so a
+	// half-trusted daemon cannot OpenStream a welded pen for an id it never had
+	// 户籍 for and forge truth ("a daemon may attach" is not "a daemon may任命
+	// members"). registry-less rigs (nil) admit every declaration (no truth store
+	// to consult). 问②③ (placement / desired_host authority) is enforced at plan
+	// generation (app), not here.
+	admitted := make([]Declaration, 0, len(att.Declarations))
+	for _, d := range att.Declarations {
+		if a.registry != nil {
+			rec, ok, err := a.registry.Lookup(ctx, d.ActorID)
+			if err != nil {
+				a.sendReply(lc, AttachReply{Accepted: false, Reason: "membership lookup: " + err.Error()})
 				return "", false
 			}
+			if !ok || !rec.IsActive() {
+				a.logger.Warn("link.attach.declaration_no_membership",
+					"compute", computeID, "actor", string(d.ActorID))
+				continue
+			}
+		}
+		admitted = append(admitted, d)
+	}
+
+	if a.membership != nil && len(admitted) > 0 {
+		nowMs := time.Now().UnixMilli()
+		adds := make([]storespec.MemberActorAdd, 0, len(admitted))
+		for _, d := range admitted {
+			// 有户籍 → applyMemberAddTx only UPDATEs host for an active row (只盖 Host).
+			adds = append(adds, storespec.MemberActorAdd{ID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Host: computeID, At: nowMs})
+		}
+		if err := a.membership.ApplyMemberTransitions(ctx, adds, nil); err != nil {
+			a.sendReply(lc, AttachReply{Accepted: false, Reason: "register: " + err.Error()})
+			return "", false
 		}
 	}
 
-	// Build the FULL declared set fresh, then swap it in under mu in one step — a
+	// Build the FULL admitted set fresh, then swap it in under mu in one step — a
 	// Reattach carries every actor this compute currently hosts (never an
-	// increment), so this IS the re-diff: an id absent from att.Declarations that
-	// was allowed before is simply not in newAllowed after.
-	newAllowed := make(map[actor.ActorID]bool, len(att.Declarations))
-	newKinds := make(map[actor.ActorID]actor.Kind, len(att.Declarations))
-	for _, d := range att.Declarations {
+	// increment), so this IS the re-diff: an id absent from the admitted set that
+	// was allowed before is simply not in newAllowed after. Orphans were already
+	// dropped above, so they never enter the allow-set (the 问① OpenStream gate).
+	newAllowed := make(map[actor.ActorID]bool, len(admitted))
+	newKinds := make(map[actor.ActorID]actor.Kind, len(admitted))
+	for _, d := range admitted {
 		newAllowed[d.ActorID] = true
 		newKinds[d.ActorID] = d.Kind
 	}
@@ -501,12 +509,12 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 
 	a.reconcileHost(ctx, computeID, newAllowed, portMu, ports)
 
-	// Fold each declared actor's obs PUSH (L3 device presence) into the home fold.
+	// Fold each ADMITTED actor's obs PUSH (L3 device presence) into the home fold.
 	// Registered here (before the actor's stream opens / port publishes) so no
 	// early edge is missed; deduped so a reconnect does not re-append the watcher.
 	if a.obsWatcher != nil {
 		a.obsMu.Lock()
-		for _, d := range att.Declarations {
+		for _, d := range admitted {
 			if !a.obsReg[d.ActorID] {
 				a.runtime.WatchObs(d.ActorID, a.obsWatcher)
 				a.obsReg[d.ActorID] = true

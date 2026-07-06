@@ -3,7 +3,6 @@ package app
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -19,10 +18,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
-
-// errTestSeedAdmitFail is the forced failure the seedAdmitFailForTest seam raises
-// in place of a real seeding Admit, to drive the create-channel rollback path.
-var errTestSeedAdmitFail = errors.New("app: forced seed admit failure (test)")
 
 // ---------------------------------------------------------------------------
 // Channel handlers
@@ -141,8 +136,10 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	// and return 5xx, so the caller sees a clean failure it can retry, never a
 	// silent 201 over a broken channel.
 	admit := func(id actor.ActorID, kind actor.Kind) error {
-		if a.seedAdmitFailForTest {
-			return errTestSeedAdmitFail
+		if a.seedAdmitFailHook != nil {
+			if err := a.seedAdmitFailHook(); err != nil {
+				return err
+			}
 		}
 		return home.Admit(c.Request.Context(), id, kind)
 	}

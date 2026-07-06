@@ -149,6 +149,44 @@ func (h *Home) humanCaller(id actor.ActorID) *behavior.Caller {
 	return c
 }
 
+// stopHumanCaller stops and drops the shared per-user Caller for id: its pending
+// timers are stopped (no fireTimeout fires after the subject is gone) and the
+// by-id index entry is deleted. Called from Home.Remove — once id is no longer a
+// member, an armed request must NOT still write a死后 unanswered_timeout through
+// the裸 pen, and the index must not grow monotonically. A no-op if id never had a
+// caller (e.g. a non-human removal). A cell crash/revive does NOT call this: the
+// Caller is keyed by id (stable across incarnations), so a request armed before a
+// crash still gets its terminal after rebirth (既有 by-id 稳定语义).
+func (h *Home) stopHumanCaller(id actor.ActorID) {
+	h.humanCallersMu.Lock()
+	c := h.humanCallers[id]
+	delete(h.humanCallers, id)
+	h.humanCallersMu.Unlock()
+	if c != nil {
+		c.Stop()
+	}
+}
+
+// stopAllHumanCallers stops every live per-user Caller at teardown and clears the
+// index. CALL SITE (Home.Close): AFTER cells are stopped (no cell goroutine can
+// Arm a fresh request into a caller we are about to drop) and BEFORE the stores
+// close (a still-armed timer firing would write a terminal through the pen into an
+// already-closing store).
+func (h *Home) stopAllHumanCallers() {
+	h.humanCallersMu.Lock()
+	callers := make([]*behavior.Caller, 0, len(h.humanCallers))
+	for _, c := range h.humanCallers {
+		if c != nil {
+			callers = append(callers, c)
+		}
+	}
+	h.humanCallers = map[actor.ActorID]*behavior.Caller{}
+	h.humanCallersMu.Unlock()
+	for _, c := range callers {
+		c.Stop()
+	}
+}
+
 // Submit commits one subject write through the welded pen and returns the receipt
 // (message id + seq) synchronously (POST 201 / ws ack same shape). Per-call户籍
 // 校验 first: a removed member's stale handle is rejected. audience/kind are the

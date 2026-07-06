@@ -128,10 +128,6 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 	if engine == "" {
 		engine = defLooper
 	}
-	kind, ok := registry.ClassKind(engine)
-	if !ok {
-		return nil, &platform.OperateError{Code: "unknown_class", Detail: engine}
-	}
 	// Default placement policy (product policy, v1.7): agents default to daemon
 	// (除 human/sysactor/boost 外). Explicit placement参数 kept for API/agent paths.
 	placement := strings.TrimSpace(p.Placement)
@@ -139,10 +135,12 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		placement = placementDaemon
 	}
 	desiredHost := strings.TrimSpace(p.DesiredHost)
-	if placement == placementServer && desiredHost != "" {
-		return nil, &platform.OperateError{Code: "invalid_placement", Detail: "server placement cannot carry desired_host"}
-	}
 	instanceID := "agent:" + agentID
+	// NB: the request engine's ClassKind + placement are validated ONLY on the create
+	// branch below (after the row query), NOT here. An existing row's class is frozen
+	// (SW-8) — a config/retry introduce against it must走 the frozen effective class,
+	// so validating the (possibly stale/garbage) request engine up-front would wrongly
+	// reject a legitimate update of an already-composed row.
 
 	// A present config must be a JSON object (persona/knobs) — same guard the
 	// agent-config API applies. Absent (missing / null) leaves the field untouched;
@@ -177,6 +175,14 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 			configChanged = true
 		}
 	case sql.ErrNoRows:
+		// Create branch only: NOW validate the request engine's ClassKind (unknown
+		// class当场拒 — before we persist an unbuildable row) and the placement shape.
+		if _, ok := registry.ClassKind(engine); !ok {
+			return nil, &platform.OperateError{Code: "unknown_class", Detail: engine}
+		}
+		if placement == placementServer && desiredHost != "" {
+			return nil, &platform.OperateError{Code: "invalid_placement", Detail: "server placement cannot carry desired_host"}
+		}
 		var cfg any
 		if hasConfig {
 			cfg = string(p.Config)
@@ -199,7 +205,7 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 	// retry (intent landed, Admit didn't) whose request carries a different class
 	// must Admit under the row's ACTUAL class-kind, never the request's stale one
 	// (the kind precheck above only guards the create path's unknown-class reject).
-	kind, ok = registry.ClassKind(engine)
+	kind, ok := registry.ClassKind(engine)
 	if !ok {
 		return nil, &platform.OperateError{Code: "unknown_class", Detail: engine}
 	}

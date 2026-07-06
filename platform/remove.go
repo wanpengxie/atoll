@@ -53,5 +53,9 @@ func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
 	// dereg (WatchObs is append-only; leaving the entry would leak across a
 	// future re-admission of the same id).
 	h.unwatchObs(id)
+	// A removed subject's shared Caller must not outlive its membership: stop its
+	// pending timers (no死后 unanswered_timeout write through the裸 pen) and drop
+	// the by-id index entry. A no-op for a non-human id (no caller was minted).
+	h.stopHumanCaller(id)
 	return nil
 }

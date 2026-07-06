@@ -88,6 +88,75 @@ func TestOperate_IntroduceHalfFailedRetry_UsesFrozenClassKind(t *testing.T) {
 	}
 }
 
+// TestOperate_IntroduceExistingRow_GarbageEngineSucceeds pins the operate-face
+// reorder fix (#6): the request engine's ClassKind is validated ONLY on the create
+// branch. An introduce against an EXISTING row (class frozen, SW-8) carrying a
+// garbage/unknown request engine must NOT be rejected by the up-front unknown-class
+// check — it走 the frozen effective class. Before the fix the precheck ran before
+// the row query and rejected the retry outright.
+func TestOperate_IntroduceExistingRow_GarbageEngineSucceeds(t *testing.T) {
+	env := setupTestApp(t)
+	s := fullSetup(t, env)
+
+	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "rev2", "looper": "claude"}, s.cookies)
+	assertStatus(t, w, http.StatusCreated)
+	agentID := respJSON(t, w)["id"].(string)
+	instID := "agent:" + agentID
+
+	// Existing composition row frozen to class test-tool (kind=tool), placement server.
+	if err := env.app.SeedIntentRowForTest(s.chID, instID, "test-tool", "server"); err != nil {
+		t.Fatalf("seed intent row: %v", err)
+	}
+
+	// Retry with a garbage engine — must succeed on the frozen class, not be rejected
+	// as unknown_class.
+	face := env.app.OperateFaceForTest()
+	payload, _ := json.Marshal(map[string]any{"agent_id": agentID, "engine": "totally-unknown-engine-xyz"})
+	res, err := face.Introduce(context.Background(), platform.OperateRequest{
+		ChannelID: channel.ID(s.chID),
+		Sender:    actor.ActorID("user:" + s.userID),
+		Payload:   payload,
+	})
+	if err != nil {
+		t.Fatalf("Introduce against existing row with garbage engine must succeed: %v", err)
+	}
+	m, _ := res.(map[string]any)
+	if m["class"] != "test-tool" {
+		t.Fatalf("effective class = %v, want frozen test-tool", m["class"])
+	}
+	// And the member landed under the frozen class's kind (tool).
+	if got := actorKind(t, env, s.cookies, s.chID, instID); got != string(actor.KindTool) {
+		t.Fatalf("member kind = %q, want %q (frozen class-kind)", got, actor.KindTool)
+	}
+}
+
+// TestOperate_IntroduceNewRow_UnknownEngineRejected pins the other side of #6: the
+// CREATE branch still rejects an unknown class (the validation moved, it did not
+// disappear) — no unbuildable row is ever persisted.
+func TestOperate_IntroduceNewRow_UnknownEngineRejected(t *testing.T) {
+	env := setupTestApp(t)
+	s := fullSetup(t, env)
+
+	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "rev3", "looper": "claude"}, s.cookies)
+	assertStatus(t, w, http.StatusCreated)
+	agentID := respJSON(t, w)["id"].(string)
+
+	face := env.app.OperateFaceForTest()
+	payload, _ := json.Marshal(map[string]any{"agent_id": agentID, "engine": "totally-unknown-engine-xyz"})
+	_, err := face.Introduce(context.Background(), platform.OperateRequest{
+		ChannelID: channel.ID(s.chID),
+		Sender:    actor.ActorID("user:" + s.userID),
+		Payload:   payload,
+	})
+	if err == nil {
+		t.Fatal("Introduce of a NEW row with an unknown engine must be rejected (create-branch class check)")
+	}
+	oe, ok := err.(*platform.OperateError)
+	if !ok || oe.Code != "unknown_class" {
+		t.Fatalf("want unknown_class OperateError, got %v", err)
+	}
+}
+
 // TestCreateChannel_SeedAdmitFails_RollsBack pins the create-channel transaction
 // fix: a failed seeding Admit (creator or boost) must tear the channel down (close
 // home + delete the row) and return 5xx — never a silent 201 over a channel whose
@@ -125,13 +194,24 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 	assertStatus(t, w, http.StatusCreated)
 	daemonID := respJSON(t, w)["id"].(string)
 
+	// Create a channel and bind the daemon so there is a daemon_channels row the tx
+	// deletes FIRST — proving the whole tx rolls back, not just the later writes.
+	wsBody, cookies2 := createWorkspace(t, env, cookies, "WS-rev")
+	wsID := wsBody["id"].(string)
+	chBody := env.do(t, "POST", "/api/workspaces/"+wsID+"/channels", map[string]any{"name": "c"}, cookies2)
+	assertStatus(t, chBody, http.StatusCreated)
+	chID := respJSON(t, chBody)["id"].(string)
+	w = env.do(t, "POST", "/api/channels/"+chID+"/daemons/attach",
+		map[string]any{"daemon_ids": []string{daemonID}}, cookies2)
+	assertStatus(t, w, http.StatusOK)
+
 	env.app.SetRevokeFailForTest(true)
-	w = env.do(t, "DELETE", "/api/daemons/"+daemonID, nil, cookies)
+	w = env.do(t, "DELETE", "/api/daemons/"+daemonID, nil, cookies2)
 	assertStatus(t, w, http.StatusInternalServerError)
 	env.app.SetRevokeFailForTest(false)
 
 	// The daemon must still exist — revocation was not persisted, so not reported ok.
-	w = env.do(t, "GET", "/api/daemons", nil, cookies)
+	w = env.do(t, "GET", "/api/daemons", nil, cookies2)
 	assertStatus(t, w, http.StatusOK)
 	ds, _ := respJSON(t, w)["daemons"].([]any)
 	found := false
@@ -142,5 +222,19 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("daemon deleted despite revocation-persist failure (false ok)")
+	}
+	// And the daemon-channel binding must survive: the tx rolled back its FIRST
+	// write, not left it half-applied (the whole point of the transaction fix).
+	w = env.do(t, "GET", "/api/channels/"+chID+"/daemons", nil, cookies2)
+	assertStatus(t, w, http.StatusOK)
+	cds, _ := respJSON(t, w)["daemons"].([]any)
+	bindingSurvived := false
+	for _, d := range cds {
+		if d.(map[string]any)["id"] == daemonID {
+			bindingSurvived = true
+		}
+	}
+	if !bindingSurvived {
+		t.Fatal("daemon_channels binding was deleted despite the revocation tx rolling back (half-applied)")
 	}
 }

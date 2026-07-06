@@ -29,15 +29,35 @@ func (a *App) OperateFaceForTest() platform.OperateExecutor {
 	return a.operateFace()
 }
 
-// SetSeedAdmitFailForTest forces the create-channel seeding Admits to fail so a
-// test can drive the transactional rollback (close home + delete channel row +
-// 5xx). Test-only.
-func (a *App) SetSeedAdmitFailForTest(v bool) { a.seedAdmitFailForTest = v }
+// errTestSeedAdmitFail / errTestRevokeFail are the forced failures the injected
+// seams raise in place of a real persist, to drive the rollback paths.
+var (
+	errTestSeedAdmitFail = errors.New("app: forced seed admit failure (test)")
+	errTestRevokeFail    = errors.New("app: forced revoke persist failure (test)")
+)
 
-// SetRevokeFailForTest forces the daemon-delete revocation persist to fail so a
-// test can prove the handler returns 5xx (not a false ok) when revocation does
-// not reach durable storage. Test-only.
-func (a *App) SetRevokeFailForTest(v bool) { a.revokeFailForTest = v }
+// SetSeedAdmitFailForTest installs (v=true) or clears (v=false) the injected
+// seeding-Admit failure hook so a test can drive the create-channel transactional
+// rollback (close home + delete channel row + 5xx). Test-only.
+func (a *App) SetSeedAdmitFailForTest(v bool) {
+	if v {
+		a.seedAdmitFailHook = func() error { return errTestSeedAdmitFail }
+		return
+	}
+	a.seedAdmitFailHook = nil
+}
+
+// SetRevokeFailForTest installs (v=true) or clears (v=false) the injected
+// revocation-persist failure hook so a test can prove the daemon-delete handler
+// rolls back and returns 5xx (not a false ok) when revocation does not reach
+// durable storage. Test-only.
+func (a *App) SetRevokeFailForTest(v bool) {
+	if v {
+		a.revokeFailHook = func() error { return errTestRevokeFail }
+		return
+	}
+	a.revokeFailHook = nil
+}
 
 // SeedIntentRowForTest inserts a raw channel_actors intent row WITHOUT admitting
 // its membership — reproducing the半失败 state (intent landed, Admit did not) an

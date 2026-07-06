@@ -42,16 +42,15 @@ type App struct {
 	// seam sets it tiny to exercise the timeout branch deterministically.
 	controlShimTimeout time.Duration
 
-	// seedAdmitFailForTest forces the create-channel seeding Admits (creator +
-	// boost) to fail, so a test can exercise the transactional rollback path
-	// (close home + delete the channel row + 5xx). Nil/false in production.
-	seedAdmitFailForTest bool
-
-	// revokeFailForTest forces the daemon-delete revocation persist (desired_host
-	// clear) to fail, so a test can prove the handler returns 5xx and does NOT
-	// report ok / Kick when the revocation did not reach durable storage.
-	// Nil/false in production.
-	revokeFailForTest bool
+	// seedAdmitFailHook / revokeFailHook are test-only injected failure seams (nil
+	// in production — no if-bool branch survives in the production handlers, mirroring
+	// platform's reviverStraddleHook). When set (via export_test.go) they return a
+	// non-nil error to force a specific persist failure so a test can exercise the
+	// transactional rollback path: seedAdmitFailHook fails a create-channel seeding
+	// Admit (→ close home + delete channel row + 5xx); revokeFailHook aborts the
+	// daemon-delete revocation tx (→ rollback + 5xx, no Kick, no false ok).
+	seedAdmitFailHook func() error
+	revokeFailHook    func() error
 }
 
 // Config configures the App.

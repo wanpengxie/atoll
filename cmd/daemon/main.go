@@ -189,7 +189,20 @@ func (p *planSource) Members(ctx context.Context) ([]actorrt.DesiredMember, erro
 				"instance", asg.InstanceID, "class", asg.Class, "err", berr.Error())
 			continue
 		}
-		builders[decl.ID] = decl.Factory
+		// The builder table is keyed on the PLAN's InstanceID (what desired carries
+		// and what the ring Lookups), NOT decl.ID. A constructor that rewrites the id
+		// (device derives its own id from the device identity, "ignores ID and derives
+		// it") would otherwise file the factory under the derived id — permanently
+		// unreachable by the ring's Lookup(InstanceID) → no_builder forever, yet Build
+		// reported success. Treat an id drift as a build failure: skip the row loud
+		// (desired keeps it, ring records no_builder, retries) rather than file a
+		// silently-dead entry. (痛感前哨 for a future ClassDecl.IDPolicy; 止血 here.)
+		if decl.ID != id {
+			p.logger.Warn("daemon: built instance id differs from plan instance id, skipping",
+				"instance", asg.InstanceID, "class", asg.Class, "built_id", string(decl.ID))
+			continue
+		}
+		builders[id] = decl.Factory
 	}
 	p.mu.Lock()
 	p.lastDesired = desired

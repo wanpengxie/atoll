@@ -166,9 +166,10 @@ func (a *App) finishControlShim(c *gin.Context, r *doorReceipt, err error, onSuc
 }
 
 // controlErrorHTTP maps a door terminal's error_code to an HTTP status + detail.
-// It mirrors operateHTTPError (the direct-executor mapping) and adds the gate's own
-// codes (unauthorized_sender) and internal_error — the codes only the door路径 can
-// surface.
+// It is the SOLE operate-error→HTTP mapping now (the former direct-executor
+// operateHTTPError retired into this function when the shim door path became the
+// only control path), covering both the executor's own codes and the gate's
+// (unauthorized_sender, internal_error) — the codes only the door路径 can surface.
 func controlErrorHTTP(code, detail string) (int, string) {
 	switch code {
 	case "agent_not_found":
