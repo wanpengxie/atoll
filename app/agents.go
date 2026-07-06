@@ -212,6 +212,14 @@ func (a *App) handleDeleteAgent(c *gin.Context) {
 				a.logger.Warn("delete agent: channel removal", "channel", ch, "instance", instanceID, "err", rerr.Error())
 			}
 		}
+		// 户籍欠账 (owner 拍定, reverse-entropy account): when a channel's home is NOT
+		// open here, the intent row above is deleted but Home.Remove never runs, so the
+		// agent's per-channel membership 户籍 (a row in the closed channel's own db)
+		// survives — a display-layer stale row. It is HARMLESS to composition: the
+		// deleted_at filter in compositionSelect keeps the ring from ever rebuilding
+		// the agent on that channel's next open, and no other path revives an agent
+		// member without an intent row. Cleaning the orphan census row is deferred to a
+		// reverse-entropy sweep, not force-opened here.
 	}
 	c.JSON(http.StatusOK, gin.H{"deleted": agentID})
 }

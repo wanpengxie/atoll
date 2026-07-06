@@ -27,6 +27,13 @@ import (
 // whether the id behind a session is a person, a local agent (coral), or both —
 // 法只认 id+凭据+门.
 
+// ErrClosed is every subjectgate verb's refusal once Home.Close has begun (the
+// home.closed flag is set). A ws/垫片 goroutine holding a HumanHandle is NOT joined
+// by Close, so without this a post-Close Submit could mint a caller + Arm a死后
+// timer against a closing store. The app maps it to 503 (retryable elsewhere / gone
+// here). Zero side effect: a closed home admits and arms nothing.
+var ErrClosed = errors.New("platform: channel home is closed")
+
 // ErrNotMember is Home.Human's真实拒绝 for a subject that is not an active
 // channel member (看得见≠在里面 — the membrane law). The app maps it to 403.
 // Zero construction, zero入籍: Human() never admits, it only checks.
@@ -109,9 +116,15 @@ func (h *Home) Human(ctx context.Context, id actor.ActorID) (*HumanHandle, error
 	}, nil
 }
 
-// requireActiveMember is the per-verb membrane check: the id must be an active
-// registry member. Not found / deregistered → ErrNotMember.
+// requireActiveMember is the per-verb membrane + liveness gate every subjectgate
+// entry runs first: the home must be OPEN (else ErrClosed — a post-Close verb on an
+// un-joined ws goroutine must not act) AND id must be an active registry member (else
+// ErrNotMember). Order matters: closed is checked BEFORE the store lookup, so a verb
+// racing teardown never touches a closing store.
 func (h *Home) requireActiveMember(ctx context.Context, id actor.ActorID) error {
+	if h.closed.Load() {
+		return ErrClosed
+	}
 	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
 	if err != nil {
 		return fmt.Errorf("platform: Human membership lookup: %w", err)
@@ -145,6 +158,15 @@ func (h *Home) humanCaller(id actor.ActorID) *behavior.Caller {
 	pen := h.minter.Mint(id, actor.KindHuman, h.channelID)
 	clock := func() time.Time { return time.UnixMilli(h.nowMs()) }
 	c := behavior.NewCaller(pen, clock, nil)
+	// Home closing: never (re)mint a caller INTO the index after teardown began.
+	// stopAllHumanCallers has cleared it, and re-storing would resurrect a caller
+	// whose Arm could fire a死后 terminal through the pen into a closing store. The
+	// verb entries are already ErrClosed-gated (requireActiveMember), so this is the
+	// belt-and-suspenders half — a caller is still returned for any non-verb holder,
+	// just left unindexed so the cleared index stays cleared.
+	if h.closed.Load() {
+		return c
+	}
 	h.humanCallers[id] = c
 	return c
 }

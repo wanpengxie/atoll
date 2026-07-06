@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -187,6 +188,17 @@ type Home struct {
 	// reviverStraddleHook is a test-only seam (nil in production): see its call
 	// site in homeReviver.EnsureLive.
 	reviverStraddleHook func()
+
+	// closed is set true at the very START of Close (before any teardown step), the
+	// authoritative "this home is shutting down" flag every subjectgate verb entry
+	// checks. Close cannot JOIN the ws/垫片 goroutines that hold a HumanHandle (they
+	// live in the app layer, outside Home's teardown), so "cells stopped ⇒ no one can
+	// Arm" does NOT hold: a gateway goroutine could Submit → mint a fresh caller →
+	// Arm AFTER stopAllHumanCallers cleared the index, stranding a死后 timer against
+	// a closing store. The flag closes that window structurally — every verb (and
+	// humanCaller's index write) refuses once it is set. atomic (lock-free read on
+	// the hot Submit path).
+	closed atomic.Bool
 }
 
 // watchObs registers the device-presence fold for id's obs PUSH, deduped so a
@@ -851,6 +863,12 @@ func (h *Home) Subscribe() (<-chan struct{}, func()) {
 // joins its own run goroutine (fireDue's Append/Revive never block on the
 // already-stopped cells).
 func (h *Home) Close() error {
+	// 0. Mark closed FIRST: the subjectgate verbs run on ws/垫片 goroutines Close
+	//    never joins (they are the app's, not Home's), so quiescing cells below is
+	//    NOT enough to stop a fresh Submit→Arm. The flag makes every verb entry (and
+	//    humanCaller's index write) refuse from this instant on, so stopAllHumanCallers
+	//    at step 4.5 clears the index for good — no goroutine can re-mint into it.
+	h.closed.Store(true)
 	// 1. Reconciler ticker: stop the level sweep and join it, so no Reconcile runs
 	//    against the writer/runtime/stores being torn down below.
 	if h.reconcileStop != nil {
@@ -866,10 +884,12 @@ func (h *Home) Close() error {
 	// 4. Cells: stop actor cells (system actors included) — the last schedule/emit
 	//    producers. Their goroutines are joined here.
 	h.channel.Cells().StopAll()
-	// 4.5. Human callers: stop every shared per-user Caller's pending timer NOW —
-	//    after cells (no goroutine can Arm a fresh request) and before the stores
-	//    close (a still-armed fireTimeout would write a terminal through the pen into
-	//    an already-closing store, a死后写 into a dead sink).
+	// 4.5. Human callers: stop every shared per-user Caller's pending timer NOW and
+	//    clear the index. Ordering: after cells, before the stores close (a still-
+	//    armed fireTimeout would write a terminal through the pen into an already-
+	//    closing store, a死后写 into a dead sink). The clear is FINAL because step 0
+	//    set h.closed — a gateway goroutine's post-Close Submit is now ErrClosed-
+	//    gated and can never re-mint a caller into the index behind this call.
 	h.stopAllHumanCallers()
 	// 5. Schedule engine: every producer is gone, so stopping the run loop now can
 	//    no longer strand a Schedule() into a dead engine.

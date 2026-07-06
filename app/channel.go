@@ -199,6 +199,14 @@ func (a *App) handleGetChannel(c *gin.Context) {
 	})
 }
 
+// handleDeleteChannel tears a channel down. The authority is WORLD-LAYER: a
+// workspace member (requireChannelAccess) may delete it, judged entirely from the
+// app-db directory — it NEVER consults channel-internal membership or requires a
+// live/complete home. This is deliberate: a半成品 channel (a crash between
+// createChannel's app-db commit and the creator's Admit left the app row + an empty
+// channel-db membership, so the channel has NO members at all) must stay deletable.
+// The home Close below is a no-op when the home is absent from the map, and the row/
+// file deletes proceed regardless of whether membership was ever admitted.
 func (a *App) handleDeleteChannel(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {

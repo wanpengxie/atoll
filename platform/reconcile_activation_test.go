@@ -388,41 +388,77 @@ func TestAdmit_PokeEmbodiesWithoutWaitingTick(t *testing.T) {
 	}
 }
 
-// Test 4 — boot-order: an identity timer whose author has NO live incarnation
-// fires by reviving the author first (the Reviver seam), THEN appending — with no
-// reconcile tick involved at all (the wake path is self-sufficient from the first
-// instant, before any eager reconcile).
+// Test 4 — EH1真重启 (period 9 review #5): a DURABLE (BindIdentity) self-timer armed
+// in one home lifetime, then overdue on the NEXT open of the SAME db, must revive its
+// author THROUGH the restart builder (the original admission closure is long gone) and
+// append the fire — and must NOT poison-delete the timer row. Two Opens on one db path,
+// a fake clock advanced past FireAt on the second, is the only faithful真重启 shape;
+// the old single-open past-due write never exercised the closure-gone reviver-via-
+// builder path at all.
 func TestReconcileActivation_IdentityTimerFireRevivesThenAppends(t *testing.T) {
 	ctx := context.Background()
-	desired := &testDesired{} // deliberately empty: no eager reconcile for this author
-	builder := newTestBuilder()
+	dbPath := filepath.Join(t.TempDir(), "identity-timer-restart.sqlite")
 	const author = actor.ActorID("agent:sleeper")
-	builder.byID[author] = builder.recordFactory(author)
 
-	h := openActivationHome(t, desired, builder)
-
-	// Seed durable membership (no cell) so the FireSink can resolve the author's
-	// kind and the harness accepts the fired envelope — but leave it UN-embodied.
-	admit(t, h, author, actor.KindAgent)
-	if live(h, author) {
-		t.Fatal("author already live before the timer fired — precondition broken")
+	// --- Open #1: admit the author, arm a durable BindIdentity self-timer whose
+	// FireAt is in the FUTURE for this open's clock (so it cannot fire during the
+	// brief Open #1 window), then Close. The timer persists in the channel db across
+	// the close (BindIdentity survives restart). ---
+	clock1 := newFakeClock(time.UnixMilli(1_000_000))
+	builder1 := newTestBuilder()
+	builder1.byID[author] = builder1.recordFactory(author)
+	h1, err := Open(HomeConfig{
+		ChannelID:         activationTestChannelID,
+		DBPath:            dbPath,
+		ReconcileInterval: time.Hour,
+		Desired:           &testDesired{},
+		Builder:           builder1,
+		Clock:             clock1,
+	})
+	if err != nil {
+		t.Fatalf("Open #1: %v", err)
 	}
-
-	// Schedule a past-due identity timer directly through the schedule minter (the
-	// same handle a caps-injected cell would hold). The engine — already Started in
-	// Open, Reviver wired — must revive the author and append the fire.
-	handle := h.schedMinter.Mint(author)
-	id, err := handle.Schedule(ctx, schedule.ScheduleReq{
-		Bind: schedule.BindIdentity, FireAt: h.nowMs() - 1, Type: "demo.tick",
+	admit(t, h1, author, actor.KindAgent)
+	if live(h1, author) {
+		t.Fatal("author live before the timer fired — precondition broken")
+	}
+	fireAt := clock1.Now().UnixMilli() + 60_000 // future for clock1
+	tid, err := h1.schedMinter.Mint(author).Schedule(ctx, schedule.ScheduleReq{
+		Bind: schedule.BindIdentity, FireAt: fireAt, Type: "demo.tick",
 	})
 	if err != nil {
 		t.Fatalf("Schedule: %v", err)
 	}
+	if err := h1.Close(); err != nil {
+		t.Fatalf("Close #1: %v", err)
+	}
 
-	wantID := message.ID("timer:" + string(id))
+	// --- Open #2: SAME db, a FRESH builder (the original closure is gone), and a
+	// clock reading well PAST FireAt so the persisted timer is overdue on boot. The
+	// engine must revive the author through builder2, then append the fire. ---
+	clock2 := newFakeClock(time.UnixMilli(2_000_000)) // > fireAt (1_060_000)
+	builder2 := newTestBuilder()
+	builder2.byID[author] = builder2.recordFactory(author)
+	h2, err := Open(HomeConfig{
+		ChannelID:         activationTestChannelID,
+		DBPath:            dbPath,
+		ReconcileInterval: time.Hour,
+		Desired:           &testDesired{},
+		Builder:           builder2,
+		Clock:             clock2,
+	})
+	if err != nil {
+		t.Fatalf("Open #2: %v", err)
+	}
+	t.Cleanup(func() { _ = h2.Close() })
+	if live(h2, author) {
+		t.Fatal("author live immediately on reopen before the overdue fire — precondition broken")
+	}
+
+	wantID := message.ID("timer:" + string(tid))
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		rows, rerr := h.View().ReadAfterSeq(ctx, 0, 1000)
+		rows, rerr := h2.View().ReadAfterSeq(ctx, 0, 1000)
 		if rerr != nil {
 			t.Fatalf("ReadAfterSeq: %v", rerr)
 		}
@@ -439,12 +475,19 @@ func TestReconcileActivation_IdentityTimerFireRevivesThenAppends(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("identity timer fire never landed in truth (Reviver-then-append boot path broken)")
+			t.Fatal("overdue identity timer never fired after restart (真重启 revive-then-append broken, or the row was poison-deleted)")
 		}
+		clock2.Advance(time.Second) // nudge the engine's poll/backoff loop
 		time.Sleep(10 * time.Millisecond)
 	}
-	if !live(h, author) {
-		t.Fatal("author not live after fire — the Reviver did not activate an embodiment before append")
+	// The fire landed as truth AFTER a restart whose original admission closure was
+	// gone — so the reviver rebuilt the author through builder2 and the timer row was
+	// consumed by a successful append, never poison-deleted.
+	if !live(h2, author) {
+		t.Fatal("author not live after the fire — the Reviver did not activate an embodiment before append")
+	}
+	if _, ok := builder2.capsFor(author); !ok {
+		t.Fatal("restart builder factory never ran — author was not rebuilt through the reopen builder")
 	}
 }
 
@@ -999,5 +1042,45 @@ func TestFireSink_ForkChildDeathRace_QuietDrop(t *testing.T) {
 		if r.Envelope.ID == env.ID {
 			t.Fatal("a dead-race fire landed in truth — G11 death-race guard broken (dead-write)")
 		}
+	}
+}
+
+// Test 14 — attach-straddle (period 9 review #4): a daemon attach stamps Host in the
+// registry BETWEEN the reviver's initial Lookup (which saw Host=="", home-placed) and
+// its SpawnIfAbsent build landing — the exact window accept.go's handleAttach opens
+// (Host stamped on the control frame; the port incarnation installed later on the
+// separate stream-open). The post-build recheck must catch the now-non-empty Host,
+// UNDO the local build (Despawn), and classify TRANSIENT — never leave a local cell
+// double-embodying the daemon's incoming port, and never a poison ReviveRejected.
+func TestReviver_AttachStraddle_HostStampedMidBuild_NoLocalRevive(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	const author = actor.ActorID("agent:straddle")
+	builder.byID[author] = builder.recordFactory(author)
+
+	h := openActivationHome(t, desired, builder)
+	admit(t, h, author, actor.KindAgent) // Host=="" initially → passes the first Lookup
+
+	// The straddle: after factoryFor resolves (Host==""), before SpawnIfAbsent, a
+	// daemon attach stamps Host on the SAME id (what accept.go handleAttach does).
+	h.reviverStraddleHook = func() {
+		if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
+			{ID: author, Kind: actor.KindAgent, Host: "daemon-straddle", At: h.nowMs()},
+		}, nil); err != nil {
+			t.Errorf("straddle host stamp: %v", err)
+		}
+	}
+
+	err := (homeReviver{h: h}).EnsureLive(ctx, author)
+	if err == nil {
+		t.Fatal("EnsureLive returned nil after a mid-build Host stamp — the local cell was kept (double-embodiment window)")
+	}
+	var rejected schedule.ReviveRejected
+	if errors.As(err, &rejected) {
+		t.Fatalf("EnsureLive = ReviveRejected{%s}; want a TRANSIENT error (attached-after-build is retryable, never a poison verdict)", rejected.Reason)
+	}
+	if live(h, author) {
+		t.Fatal("a local cell survived the attach-straddle — the post-build Host recheck did not undo the build")
 	}
 }

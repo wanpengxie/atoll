@@ -204,6 +204,21 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		h.channel.Cells().Despawn(inc)
 		return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
 	}
+	// Placement recheck (attach-straddle window): the initial Lookup saw Host==""
+	// (home-placed), but a daemon attach stamps Host in the registry (accept.go
+	// handleAttach) on the control frame BEFORE it installs the port incarnation on
+	// the separate stream-open — a real window in which SpawnIfAbsent above found no
+	// live embodiment and built a LOCAL cell for an id that is now daemon-placed.
+	// Home is not the placement authority for an attached identity, so undo the local
+	// build (Despawn is pointer-guarded — only this incarnation) and classify
+	// transient: the row is retained and the SAME wake fires normally once the port is
+	// installed (already-live fast path) or the author detaches back home. Keeping the
+	// cell would double-embody it against the daemon's incoming port.
+	if rec2.Host != "" {
+		h.channel.Cells().Despawn(inc)
+		h.logReviveAttached(id, rec2.Host)
+		return fmt.Errorf("platform: revive %s: attached to host %q after build", id, rec2.Host) // transient
+	}
 	return nil
 }
 

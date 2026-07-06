@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"path/filepath"
 	"time"
+
+	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -134,6 +137,33 @@ func (a *App) KillCellForTest(chID channel.ID, id actor.ActorID) error {
 		return errTestChannelNotLoaded
 	}
 	return home.Remove(context.Background(), id)
+}
+
+// CreateHalfBuiltChannelForTest reproduces the createChannel CRASH window: the
+// app-db channels row + its seeded channel_actors intent are committed and the home
+// is opened, but NO Admit ran — the creator + boost never became channel members
+// (the process died between tx.Commit and the seeding Admits). The result is a valid
+// directory entry over an EMPTY channel-db membership (only the intrinsic system
+// actor Open seeds). Returns the new channel id. Test-only — proves half-built
+// channels stay deletable and open with clear errors, never a panic. Test-only.
+func (a *App) CreateHalfBuiltChannelForTest(wsID, name string) (string, error) {
+	chID := uuid.NewString()
+	dbPath := filepath.Join(a.channelDBDir, chID+".db")
+	now := time.Now().UnixMilli()
+	if _, err := a.db.ExecContext(context.Background(),
+		`INSERT INTO channels (id, workspace_id, name, type, db_path, default_agent, created_at) VALUES (?,?,?,?,?,?,?)`,
+		chID, wsID, name, "group", dbPath, string(defaultAgentInstanceID), now); err != nil {
+		return "", err
+	}
+	if _, err := a.db.ExecContext(context.Background(),
+		`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
+		chID, string(defaultAgentInstanceID), defaultBoostLooper, placementServer); err != nil {
+		return "", err
+	}
+	if _, err := a.createHome(channel.ID(chID), dbPath); err != nil {
+		return "", err
+	}
+	return chID, nil
 }
 
 // AddWorkspaceMemberForTest inserts userID into wsID's workspace roster so a

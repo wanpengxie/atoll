@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
@@ -117,5 +118,58 @@ func TestRemove_StopsHumanCallerTimeout(t *testing.T) {
 		if r.Envelope.Kind == message.KindResponse && r.Envelope.ParentID == req.ID {
 			t.Fatalf("timeout fired a 死后写 terminal after removal: %+v", r.Envelope)
 		}
+	}
+}
+
+// TestClose_RejectsSubmitAndMintsNoCaller pins the humanCaller shutdown-window fix
+// (#6): Close cannot JOIN the ws/垫片 goroutines that hold a HumanHandle, so "cells
+// stopped ⇒ no one can Arm" is false — a post-Close Submit could otherwise mint a
+// caller and Arm a死后 timer against a closing store. With the home-closed flag set at
+// the top of Close, a stale handle's Submit is refused with ErrClosed and mints NO
+// caller into the (already-cleared) index.
+func TestClose_RejectsSubmitAndMintsNoCaller(t *testing.T) {
+	ctx := context.Background()
+	h, err := Open(HomeConfig{
+		ChannelID: channelpkg.ID("test-close-reject"),
+		DBPath:    filepath.Join(t.TempDir(), "home.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	// NB: Close is called explicitly below (not via t.Cleanup) — a second Close would
+	// double-close the engine's stop channel and panic.
+	id := actor.ActorID("user:alice")
+	if err := h.Admit(ctx, id, actor.KindHuman); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	// A live ws/垫片 goroutine would hold a door handle grabbed BEFORE teardown.
+	handle, err := h.Human(ctx, id)
+	if err != nil {
+		t.Fatalf("Human: %v", err)
+	}
+
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Post-Close Submit on the stale handle → ErrClosed, checked BEFORE any store hop.
+	_, _, serr := handle.Submit(ctx, SubmitSpec{
+		Type:     "ask.do",
+		Kind:     message.KindRequest,
+		Audience: []actor.ActorID{actor.ActorID("agent:x")},
+	})
+	if !errors.Is(serr, ErrClosed) {
+		t.Fatalf("post-Close Submit = %v, want ErrClosed", serr)
+	}
+	// No caller re-minted into the cleared index (无新 caller 铸入).
+	h.humanCallersMu.Lock()
+	n := len(h.humanCallers)
+	h.humanCallersMu.Unlock()
+	if n != 0 {
+		t.Fatalf("post-Close Submit minted %d caller(s) into the index — the closed gate leaked", n)
+	}
+	// Home.Human itself must also refuse after close (no new handle minted either).
+	if _, herr := h.Human(ctx, id); !errors.Is(herr, ErrClosed) {
+		t.Fatalf("post-Close Human = %v, want ErrClosed", herr)
 	}
 }

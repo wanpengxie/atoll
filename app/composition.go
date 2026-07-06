@@ -31,10 +31,20 @@ type compositionRow struct {
 // composition read uses; each caller appends its own predicate (placement / host /
 // instance). The overlay is UNDER the per-channel config (mergeConfig); a non-agent
 // class never matches the join (no overlay), which is correct.
+//
+// deleted_at filter: a soft-deleted agent (agents.deleted_at set) is NEVER composed
+// — the reconcile ring, the daemon plan, and the per-id factory resolve all read
+// through here, so a stale channel_actors intent row that outlived its agent (the
+// delete-time 户籍 debt: handleDeleteAgent could not reach a home that was closed)
+// can never be rebuilt/revived on a restart. `a.id IS NULL` keeps every non-agent
+// class (boost, human — no join match), and only a row whose MATCHED agent is
+// soft-deleted is dropped. The composition read is the substrate-truth guard; the
+// orphan intent row itself is left to the reverse-entropy sweep (owner 拍定).
 const compositionSelect = `SELECT ca.instance_id, ca.class, COALESCE(ca.config_json, ''), COALESCE(a.config_json, '')
 	   FROM channel_actors ca
 	   LEFT JOIN agents a ON ca.instance_id = 'agent:' || a.id
-	  WHERE ca.channel_id = ?`
+	  WHERE ca.channel_id = ?
+	    AND (a.id IS NULL OR a.deleted_at IS NULL)`
 
 // scanCompositionRows drains rows into compositionRow (shared scan). A scan error
 // ABORTS with an error rather than skipping the row: this set feeds the reconcile

@@ -36,6 +36,27 @@ import (
 // error, all funnel through one outbound queue — the upstream-reader goroutine and
 // the tail goroutine never write the ws concurrently (gorilla forbids it).
 
+const (
+	// wsMaxFrameBytes caps a single inbound ws frame. The write frames (message /
+	// resolve / cancel) carry only pointers + content fields — bulk bytes never enter
+	// the log (file/blob is the resource axis), so a few hundred KB is ample. An
+	// oversized frame is a malformed / hostile client: SetReadLimit fails the read
+	// (CloseMessageTooBig) instead of letting one frame allocate unboundedly.
+	wsMaxFrameBytes = 512 * 1024
+	// wsWriteWait bounds one ws write so a stuck / slow-reading peer cannot pin the
+	// single writer pump goroutine forever; a write past this deadline tears the
+	// conn down.
+	wsWriteWait = 10 * time.Second
+	// wsPongWait is how long the server waits for a pong before treating the peer as
+	// dead (the read deadline). Each pong renews it, so a half-open TCP conn (peer
+	// vanished with no FIN) is reclaimed within one window instead of leaking a
+	// goroutine + subscription forever.
+	wsPongWait = 60 * time.Second
+	// wsPingPeriod is how often the writer pump pings; strictly less than wsPongWait
+	// so a healthy peer always answers before its read deadline lapses.
+	wsPingPeriod = (wsPongWait * 9) / 10
+)
+
 // wsUpgrader gates the WS handshake. CheckOrigin defends against cross-site
 // WebSocket hijacking: /ws authenticates by cookie, so without an Origin check a
 // malicious page in the user's browser could open a cross-origin WS riding the
@@ -91,6 +112,16 @@ func (a *App) handleWS(c *gin.Context) {
 	}
 	defer ws.Close()
 
+	// Harden the link BEFORE the first read: cap inbound frame size, arm the read
+	// deadline, and renew it on every pong. The ping/pong keepalive is driven by the
+	// single writer pump below; a peer that stops answering pongs trips this deadline
+	// and its reader loop unblocks with an error (half-open reclaim).
+	ws.SetReadLimit(wsMaxFrameBytes)
+	_ = ws.SetReadDeadline(time.Now().Add(wsPongWait))
+	ws.SetPongHandler(func(string) error {
+		return ws.SetReadDeadline(time.Now().Add(wsPongWait))
+	})
+
 	// The opening frame MUST be a subscribe (starts the tail; carries channel + cursor).
 	var sub inFrame
 	if err := ws.ReadJSON(&sub); err != nil {
@@ -143,12 +174,24 @@ func (a *App) handleWS(c *gin.Context) {
 	// serialized through outbound so no two goroutines write the ws concurrently.
 	outbound := make(chan any, 64)
 	go func() {
+		ping := time.NewTicker(wsPingPeriod)
+		defer ping.Stop()
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case m := <-outbound:
+				_ = ws.SetWriteDeadline(time.Now().Add(wsWriteWait))
 				if err := ws.WriteJSON(m); err != nil {
+					cancel()
+					return
+				}
+			case <-ping.C:
+				// Keepalive rides the SAME single writer (gorilla forbids concurrent
+				// writes), never a side goroutine. A failed ping tears the conn down;
+				// a peer that stops ponging trips the reader's read deadline.
+				_ = ws.SetWriteDeadline(time.Now().Add(wsWriteWait))
+				if err := ws.WriteControl(websocket.PingMessage, nil, time.Now().Add(wsWriteWait)); err != nil {
 					cancel()
 					return
 				}
