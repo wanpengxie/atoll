@@ -421,6 +421,67 @@ func TestEngine_StatePutUpsertsNewKey(t *testing.T) {
 	}
 }
 
+// P1-1 (期10 review): a request ADMITTED into the serve ledger but then REFUSED
+// by a work deque already saturated with other admitted requests must be closed
+// and rejected NOW (overloaded terminal), never left as an open account the caller
+// white-waits to its own deadline. The serve ledger must end holding only the
+// seated requests — the refused newcomer leaves zero residue.
+// (Pre-fix: the request path called enqueueWork, whose refused-newcomer branch
+// only obs-recorded a drop; the serve account stayed open with no terminal.)
+func TestEngine_AdmittedRequestRefusedByFullDequeRejectsNow(t *testing.T) {
+	pen := &fakePen{self: "actor:test"}
+	// serveCap 8 admits freely; queueCap 2 saturates the deque first. No worker
+	// drains it, so the two seated requests stay put and every later push refuses.
+	e := newTestEngine(t, pen, Hooks{}, 8 /*serveCap*/, 2 /*queueCap*/)
+	e.lifeCtx = context.Background()
+	e.occupant.Store(int32(occupantRunning))
+	go e.runRejectLane() // the lane commits the overloaded terminal
+	defer close(e.rejectStop)
+
+	// Seat two admitted, in-flight-forever requests (no ExpiresAt).
+	for _, id := range []message.ID{"seated-1", "seated-2"} {
+		if err := e.Receive(context.Background(), newRequestEnv(id, -1)); err != nil {
+			t.Fatalf("unexpected Receive error seating %s: %v", id, err)
+		}
+	}
+	if e.serve.len() != 2 {
+		t.Fatalf("expected 2 seated admitted requests, got serve len=%d", e.serve.len())
+	}
+
+	// The newcomer is admitted then refused by the full all-request deque → it must
+	// be closed and handed an overloaded terminal at once.
+	if err := e.Receive(context.Background(), newRequestEnv("newcomer", -1)); err != nil {
+		t.Fatalf("unexpected Receive error for newcomer: %v", err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for pen.count() == 0 && time.Now().Before(deadline) {
+		time.Sleep(5 * time.Millisecond)
+	}
+	last := pen.last()
+	if last == nil {
+		t.Fatal("expected an immediate overloaded terminal for the refused newcomer, got none (caller would white-wait)")
+	}
+	if last.ParentID != "newcomer" {
+		t.Fatalf("expected the terminal to answer the refused newcomer, got ParentID=%q", last.ParentID)
+	}
+	var payload struct {
+		ErrorCode string `json:"error_code"`
+	}
+	_ = json.Unmarshal(last.Payload, &payload)
+	if payload.ErrorCode != "overloaded" {
+		t.Fatalf("expected error_code=overloaded for the refused newcomer, got %+v", payload)
+	}
+	// The seated requests are untouched (only the newcomer was rejected) and the
+	// ledger holds no orphan: exactly the two seated accounts remain open.
+	if pen.count() != 1 {
+		t.Fatalf("expected exactly one reject write (the newcomer); the seated requests must not be rejected, got %d writes", pen.count())
+	}
+	if e.serve.len() != 2 {
+		t.Fatalf("expected the refused newcomer's account closed (no orphan), serve len=%d, want 2", e.serve.len())
+	}
+}
+
 // F8: a non-positive serve-ledger cap is a wiring bug and must panic at
 // construction, not silently remap to 256. (Pre-fix: newServeLedger(_, 0)
 // returns a cap-256 ledger.)

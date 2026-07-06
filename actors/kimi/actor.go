@@ -147,7 +147,9 @@ func (a *Actor) run(sys actorbase.Sys) error {
 	// Initial L3 edge: a connection-bearing adapter KNOWS it starts disconnected —
 	// publish offline so the home shows a definite state, not unknown.
 	a.publishDevicePresence(false)
-	a.tryBind()
+	if err := a.tryBind(); err != nil {
+		return err
+	}
 
 	for {
 		msg, err := sys.Recv()
@@ -156,10 +158,17 @@ func (a *Actor) run(sys actorbase.Sys) error {
 		}
 		switch msg.Type {
 		case bindRetryType:
-			a.tryBind()
+			if err := a.tryBind(); err != nil {
+				return err
+			}
 		case reaperTickType:
 			a.dev.sweep()
-			_, _ = a.sys.After(a.reaperInterval, reaperTickType, nil)
+			// A dropped reaper self-wake silently ossifies this incarnation (sweeps
+			// stop, stale sessions never reaped) — a static half-alive actor is worse
+			// than death. Die loud so the ring re-forges a healthy incarnation.
+			if _, err := a.sys.After(a.reaperInterval, reaperTickType, nil); err != nil {
+				return fmt.Errorf("kimi: reaper re-arm failed, dying to re-forge: %w", err)
+			}
 		default:
 			a.handle(msg)
 		}
@@ -170,17 +179,25 @@ func (a *Actor) run(sys actorbase.Sys) error {
 // the reaper self-wake; on failure (the port is still held by a predecessor
 // incarnation — Q8=B) it schedules a retry and returns without dying. The
 // listener is a bound-once resource, so an already-bound device short-circuits.
-func (a *Actor) tryBind() {
+// An arm FAILURE (bind-retry or reaper) breaks the self-wake chain — silent
+// ossification is worse than横死, so it returns a loud error and lets the ring
+// re-forge a healthy incarnation.
+func (a *Actor) tryBind() error {
 	if a.dev.bound() {
-		return
+		return nil
 	}
 	if err := a.dev.start(); err != nil {
 		a.logger.Warn("kimi.device.bind_retry", "addr", a.dev.addrCfg, "err", err.Error())
-		_, _ = a.sys.After(a.bindRetryInterval, bindRetryType, nil)
-		return
+		if _, aerr := a.sys.After(a.bindRetryInterval, bindRetryType, nil); aerr != nil {
+			return fmt.Errorf("kimi: bind-retry re-arm failed, dying to re-forge: %w", aerr)
+		}
+		return nil
 	}
 	// Bound: arm the first reaper tick; each tick re-arms the next in run().
-	_, _ = a.sys.After(a.reaperInterval, reaperTickType, nil)
+	if _, err := a.sys.After(a.reaperInterval, reaperTickType, nil); err != nil {
+		return fmt.Errorf("kimi: reaper arm failed, dying to re-forge: %w", err)
+	}
+	return nil
 }
 
 // publishDevicePresence pushes a device-presence edge (L3) on the actor-source obs axis.

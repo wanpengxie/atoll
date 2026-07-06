@@ -259,7 +259,22 @@ func (e *engine) Receive(_ context.Context, env *message.Envelope) error {
 			e.offerReject(env)
 			return nil
 		}
-		e.enqueueWork(env)
+		// Admitted: seat the delivery. The work deque never evicts a seated
+		// request, so a saturated deque can only REFUSE this newcomer (push
+		// returns env itself). The account is already open, so an honest overload
+		// reject MUST close it now and hand env to the reject lane's overloaded
+		// terminal — otherwise the caller white-waits to its own deadline (P1-1).
+		// A non-nil drop that is NOT env means an older event was evicted to seat
+		// env (env is enqueued, account stays open) — that is the ordinary event
+		// overflow, obs-recorded, not a request refusal.
+		if dropped := e.workQ.push(env); dropped != nil {
+			if dropped == env {
+				e.serve.close(env.ID)
+				e.offerReject(env)
+			} else {
+				e.recordDrop(dropped, actorrt.ObsKind("actorbase.queue_overflow"))
+			}
+		}
 		return nil
 	default: // message.KindEvent, including self-authored timer fires
 		e.enqueueWork(env)

@@ -14,12 +14,12 @@ import (
 // TestIPCKindClosedSetExhaustive is the AST-level guard the hand-maintained
 // in-package runtime/ipc TestKindClosedSet map structurally CANNOT be: it scans
 // EVERY `Kind`-typed const declared in package ipc and asserts the set is EXACTLY
-// the 15 known port-wire kinds.
+// the 16 known port-wire kinds.
 //
 // Why the in-package map cannot catch a regression: TestKindClosedSet checks a
-// hand-written `want` map against its own len — a 16th Kind added to frame.go that
+// hand-written `want` map against its own len — a 17th Kind added to frame.go that
 // the author forgot to add to the map is simply ABSENT from the map, so the map
-// still has 15 entries and the test stays green. This test closes that hole by
+// still has 16 entries and the test stays green. This test closes that hole by
 // enforcing the closed set against the SOURCE OF TRUTH (the const declarations),
 // not against a parallel hand-list: a new Kind const not acknowledged in `known`
 // below turns THIS red.

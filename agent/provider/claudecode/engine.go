@@ -38,8 +38,7 @@ type engine struct {
 	// the durable resume checkpoint (WithResume on the next incarnation). Guarded
 	// by curMu (written on the Turn goroutine, read by Checkpoint on the same
 	// base loop goroutine — the mutex is belt-and-braces).
-	session      string
-	sessionDirty bool
+	session string
 }
 
 var _ base.Engine = (*engine)(nil)
@@ -153,7 +152,6 @@ func (e *engine) Turn(ctx context.Context, trigger base.Trigger, sink base.Sink)
 		case *claude.ResultMessage:
 			if m.SessionID != "" && m.SessionID != e.session {
 				e.session = m.SessionID
-				e.sessionDirty = true
 			}
 			text := strings.TrimSpace(m.Result)
 			if text == "" {
@@ -193,15 +191,17 @@ func (e *engine) Describe() introspect.Describe {
 	}
 }
 
-// Checkpoint returns the durable resume seed (the claude session id) when it
-// changed this turn; nil otherwise. The base persists it on sys.State per turn.
+// Checkpoint returns the durable resume seed (the claude session id) whenever a
+// session exists, nil otherwise. No dirty micro-opt: re-returning the unchanged
+// value every turn is an idempotent zero-cost upsert (spec F8), and it is what
+// makes the base's persist self-healing — a turn whose Put failed re-writes the
+// same seed next turn. The base persists it on sys.State per turn.
 func (e *engine) Checkpoint() []byte {
 	e.curMu.Lock()
 	defer e.curMu.Unlock()
-	if !e.sessionDirty || e.session == "" {
+	if e.session == "" {
 		return nil
 	}
-	e.sessionDirty = false
 	return []byte(e.session)
 }
 

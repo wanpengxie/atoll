@@ -9,6 +9,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -19,7 +20,15 @@ import (
 
 // --- fakes -------------------------------------------------------------------
 
-type fakeState struct{ m map[resource.ResourceID][]byte }
+type fakeState struct {
+	m map[resource.ResourceID][]byte
+	// putRej/putErr inject a rejected/failed Put (checkpoint-persist fault path).
+	putRej access.FailureReason
+	putErr error
+	// puts records every ATTEMPTED Put value (even failed ones), so a test can
+	// assert the seed is re-written each turn.
+	puts [][]byte
+}
 
 func newFakeState() *fakeState { return &fakeState{m: map[resource.ResourceID][]byte{}} }
 
@@ -28,6 +37,10 @@ func (s *fakeState) Get(id resource.ResourceID) (accessdoor.Outcome, error) {
 	return accessdoor.Outcome{Value: v, Found: ok}, nil
 }
 func (s *fakeState) Put(id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
+	s.puts = append(s.puts, append([]byte(nil), args...))
+	if s.putRej != "" || s.putErr != nil {
+		return accessdoor.Outcome{RejectReason: s.putRej}, s.putErr
+	}
 	s.m[id] = append([]byte(nil), args...)
 	return accessdoor.Outcome{}, nil
 }
@@ -56,6 +69,7 @@ type fakeSys struct {
 	emits   []emitRecord
 	replies []any
 	fails   []failRecord
+	obs     []actorrt.ObsKind
 }
 
 func newFakeSys(self actor.ActorID, msgs ...actorbase.Msg) *fakeSys {
@@ -92,7 +106,10 @@ func (s *fakeSys) Fork(string, string, json.RawMessage) (actor.ActorID, error) {
 	return "", nil
 }
 func (s *fakeSys) DespawnChild(actor.ActorID) error                 { return nil }
-func (s *fakeSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error { return nil }
+func (s *fakeSys) PublishObs(kind actorrt.ObsKind, _ actorrt.ObsValue) error {
+	s.obs = append(s.obs, kind)
+	return nil
+}
 func (s *fakeSys) Self() actor.ActorID                              { return s.self }
 func (s *fakeSys) Life() context.Context                           { return s.life }
 func (s *fakeSys) Recv() (actorbase.Msg, error) {
@@ -305,6 +322,44 @@ func TestNoCheckpointWhenNil(t *testing.T) {
 	}
 	if _, ok := sys.state.m[resumeSeedKey]; ok {
 		t.Fatalf("nil checkpoint must not write state")
+	}
+}
+
+// P1-2 (期10 review): a failed/rejected checkpoint persist must NOT be swallowed —
+// it surfaces on the actor obs push (agentbase.checkpoint_drop) — and because the
+// engine's Checkpoint returns the same seed EVERY turn (no dirty micro-opt), the
+// NEXT turn re-writes the same value, self-healing. The actor stays alive across
+// both failed persists. (Pre-fix: `_, _ = Put(...)` swallowed the fault silently.)
+func TestCheckpointPersistFailureSurfacedAndRetried(t *testing.T) {
+	eng := &stubEngine{checkpoint: []byte(`{"session":"s1"}`), outputs: []Output{{Final: true, Text: "x"}}}
+	sys := newFakeSys("agent:me", eventMsg("user:c", "one"), eventMsg("user:c", "two"))
+	sys.state.putRej = access.ResourceNotFound // every persist rejected
+	cfg := Config{NewEngine: func(_ actorbase.Sys, seed []byte) (Engine, error) {
+		eng.seed = seed
+		return eng, nil
+	}}
+	if err := newProc(cfg)(sys); err != nil && !errors.Is(err, actorbase.ErrRecvDone) {
+		t.Fatalf("a failed persist must not kill the actor, got %v", err)
+	}
+	if len(eng.turns) != 2 {
+		t.Fatalf("both turns must run despite failed persists, got %d turns", len(eng.turns))
+	}
+	drops := 0
+	for _, k := range sys.obs {
+		if k == actorrt.ObsKind("agentbase.checkpoint_drop") {
+			drops++
+		}
+	}
+	if drops != 2 {
+		t.Fatalf("expected 2 checkpoint_drop obs (fault not swallowed, one per failed turn), got %d (obs=%v)", drops, sys.obs)
+	}
+	if len(sys.state.puts) != 2 {
+		t.Fatalf("expected the seed re-attempted each turn (self-healing), got %d Put attempts", len(sys.state.puts))
+	}
+	for i, p := range sys.state.puts {
+		if string(p) != `{"session":"s1"}` {
+			t.Fatalf("Put #%d attempted %q, want the unchanged seed re-written", i, string(p))
+		}
 	}
 }
 

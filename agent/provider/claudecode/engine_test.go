@@ -85,12 +85,14 @@ func TestClaudeTurn_EmitsFinal(t *testing.T) {
 	if !o.Final || o.Text != "hello world" || o.NextAction != "done" {
 		t.Fatalf("output = %+v", o)
 	}
-	// Session id captured → Checkpoint returns it once, then nil (not dirty).
+	// Session id captured → Checkpoint returns it EVERY turn the session is set
+	// (no dirty micro-opt: re-returning the unchanged seed is an idempotent
+	// zero-cost upsert that makes the base's persist self-healing — P1-2).
 	if cp := e.Checkpoint(); string(cp) != "sess-123" {
 		t.Fatalf("checkpoint = %q, want sess-123", cp)
 	}
-	if cp := e.Checkpoint(); cp != nil {
-		t.Fatalf("second checkpoint should be nil (unchanged), got %q", cp)
+	if cp := e.Checkpoint(); string(cp) != "sess-123" {
+		t.Fatalf("second checkpoint should still return the seed (self-healing, no dirty gate), got %q", cp)
 	}
 }
 

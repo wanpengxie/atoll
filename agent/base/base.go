@@ -2,6 +2,7 @@ package base
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -12,6 +13,8 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 // resumeSeedKey is the actor-scoped state locus the会话记忆 seed lives under
@@ -108,10 +111,31 @@ func newProc(cfg Config) actorbase.Proc {
 			if cp := eng.Checkpoint(); cp != nil {
 				// per-turn挂账 (双线审 F8: resume正确性优先; a value-unchanged rewrite
 				// is idempotent). Put是 upsert (first write to a fresh key ≠ error).
-				_, _ = sys.State().Put(resumeSeedKey, cp)
+				// A failed/rejected persist is NOT swallowed: it is surfaced on the
+				// actor-obs push, and — because Checkpoint returns the seed every turn
+				// the session is non-empty (no dirty micro-opt) — the NEXT turn re-writes
+				// the same value, self-healing without killing the actor (P1-2).
+				out, err := sys.State().Put(resumeSeedKey, cp)
+				if err != nil || !out.Accepted() {
+					publishCheckpointDrop(sys, out, err)
+				}
 			}
 		}
 	}
+}
+
+// publishCheckpointDrop surfaces a failed/rejected resume-seed persist on the
+// actor-source obs push (kind agentbase.checkpoint_drop) — the same honest-degrade
+// face the engine's recordDrop uses. The turn is NOT failed and the actor does NOT
+// die: the next turn re-writes the seed (Checkpoint is stateless-idempotent), so
+// the drop self-heals. No watcher → PublishObs is a no-op (its own contract).
+func publishCheckpointDrop(sys actorbase.Sys, out accessdoor.Outcome, err error) {
+	detail := map[string]any{"reject_reason": string(out.RejectReason)}
+	if err != nil {
+		detail["error"] = err.Error()
+	}
+	val, _ := json.Marshal(detail)
+	_ = sys.PublishObs(actorrt.ObsKind("agentbase.checkpoint_drop"), val)
 }
 
 // readSeed reads the durable resume seed at boot. A missing/empty locus (cold
