@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"net"
 	"strings"
 	"sync"
 	"testing"
@@ -16,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 const testChannelID = channel.ID("ch-test")
@@ -42,14 +44,18 @@ type failRec struct {
 // fakeSys is a minimal actorbase.Sys double: it embeds the (nil) interface so
 // every verb this actor never touches stays unimplemented (a call would nil-
 // panic, failing the test loudly), and overrides only the verbs the kimi actor
-// actually calls: Recv, Reply, Fail, PublishObs, Self, Life. Recv blocks on a
-// channel (not a pre-built queue) because the actor's device goroutines close
-// requests asynchronously while the worker goroutine is parked in Recv.
+// actually calls: Recv, Reply, Fail, PublishObs, Self, Life, After. Recv blocks
+// on a channel (not a pre-built queue) because the actor's device goroutines
+// close requests asynchronously while the worker goroutine is parked in Recv.
+// After is real — the reaper + bind-retry are now sys.After self-wakes
+// (spec §3), so the double must actually schedule delivery of the timer event.
 type fakeSys struct {
 	actorbase.Sys
 
 	selfID actor.ActorID
 	recvCh chan actorbase.Msg
+	quit   chan struct{}
+	once   sync.Once
 
 	mu      sync.Mutex
 	replies []replyRec
@@ -57,22 +63,48 @@ type fakeSys struct {
 }
 
 func newFakeSys(selfID actor.ActorID) *fakeSys {
-	return &fakeSys{selfID: selfID, recvCh: make(chan actorbase.Msg, 16)}
+	return &fakeSys{selfID: selfID, recvCh: make(chan actorbase.Msg, 16), quit: make(chan struct{})}
 }
 
-// push enqueues one delivery for the worker's Recv loop to pick up.
-func (f *fakeSys) push(msg actorbase.Msg) { f.recvCh <- msg }
+// push enqueues one delivery for the worker's Recv loop to pick up (dropping it
+// if the double has already stopped, so timer goroutines never send on a dead
+// path).
+func (f *fakeSys) push(msg actorbase.Msg) {
+	select {
+	case f.recvCh <- msg:
+	case <-f.quit:
+	}
+}
 
-// stop closes the delivery channel — Recv returns errFakeSysStopped, ending
-// run()'s loop (its death) so the deferred device teardown runs.
-func (f *fakeSys) stop() { close(f.recvCh) }
+// stop closes the quit channel — Recv returns errFakeSysStopped, ending run()'s
+// loop (its death) so the deferred device teardown runs.
+func (f *fakeSys) stop() { f.once.Do(func() { close(f.quit) }) }
 
 func (f *fakeSys) Recv() (actorbase.Msg, error) {
-	msg, ok := <-f.recvCh
-	if !ok {
+	select {
+	case msg := <-f.recvCh:
+		return msg, nil
+	case <-f.quit:
 		return actorbase.Msg{}, errFakeSysStopped
 	}
-	return msg, nil
+}
+
+// After schedules a self-authored KindEvent delivery after d — the substrate's
+// self-wake, modelled with a real timer. It quits cleanly if the test stops.
+func (f *fakeSys) After(d time.Duration, msgType string, payload any) (schedule.TimerID, error) {
+	raw, _ := json.Marshal(payload)
+	go func() {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			f.push(actorbase.NewMsg(context.Background(), message.Envelope{
+				Kind: message.KindEvent, Type: msgType, Payload: raw,
+			}))
+		case <-f.quit:
+		}
+	}()
+	return schedule.TimerID("fake-timer"), nil
 }
 
 func (f *fakeSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
@@ -158,6 +190,9 @@ func startActor(t *testing.T, cfg Config) (*Actor, *fakeSys) {
 	}
 	if cfg.ReaperInterval == 0 {
 		cfg.ReaperInterval = 20 * time.Millisecond
+	}
+	if cfg.BindRetryInterval == 0 {
+		cfg.BindRetryInterval = 20 * time.Millisecond
 	}
 	a := NewActor(cfg)
 	sys := newFakeSys(DefaultActorID)
@@ -450,5 +485,49 @@ func TestKindGuardDropsNonRequest(t *testing.T) {
 	}
 	if got := sys.failsSnapshot(); len(got) != 0 {
 		t.Fatalf("expected no fails for non-request, got %d", len(got))
+	}
+}
+
+//  7. FixedPortReplacement (Q8=B): a successor incarnation on the SAME fixed
+//     loopback port cannot bind while the predecessor holds it; its retry loop
+//     keeps trying and it binds once the predecessor releases the port — the
+//     exclusive-resource contention is resolved by the domain, not the kernel.
+func TestFixedPortReplacementRetriesUntilBound(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	predecessor, predSys := startActor(t, Config{ListenAddr: addr})
+	if predecessor.ListenAddr() == "" {
+		t.Fatal("predecessor never bound")
+	}
+
+	successor := NewActor(Config{ListenAddr: addr, BindRetryInterval: 20 * time.Millisecond, ReaperInterval: 20 * time.Millisecond})
+	succSys := newFakeSys(DefaultActorID)
+	done := make(chan error, 1)
+	go func() { done <- successor.run(succSys) }()
+	t.Cleanup(func() {
+		succSys.stop()
+		<-done
+	})
+
+	// It must NOT be bound while the predecessor holds the port.
+	time.Sleep(60 * time.Millisecond)
+	if successor.ListenAddr() != "" {
+		t.Fatal("successor bound while predecessor still held the port")
+	}
+
+	// Release the port (predecessor dies); the successor's retry loop must bind.
+	predSys.stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for successor.ListenAddr() == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("successor never bound after predecessor released the port")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

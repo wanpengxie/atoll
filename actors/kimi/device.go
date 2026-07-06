@@ -23,15 +23,15 @@ import (
 // table, the read loop, and the deadline reaper. This is the adapter's own
 // closed transport — inlined here, NOT a shared framework piece.
 //
-// Concurrency: the worker goroutine (Actor.handle) calls dispatch; the read
-// loop + reaper run on their own goroutines. The mutex guards ONLY the
-// in-flight table + the current conn pointer + the stopped flag — never a
-// blocking wire write. dispatch registers under the lock, then writes the
-// frame OUTSIDE the lock with a write deadline, so a stuck peer can never
-// freeze the mutex (which the reaper, stop, and accept all share). Terminal
-// writes (sys.Reply/sys.Fail) run straight off whichever goroutine closes the
-// request — legal fan-out (spec §1.2: Sys is concurrency-safe, Msg is
-// immutable) — because the substrate has no self-send.
+// Concurrency: the worker goroutine (Actor.handle) calls dispatch and runs the
+// reaper sweep (driven by sys.After self-wake, spec §3); the read loop runs on
+// its own goroutine. The mutex guards ONLY the in-flight table + the current
+// conn pointer + the stopped flag — never a blocking wire write. dispatch
+// registers under the lock, then writes the frame OUTSIDE the lock with a write
+// deadline, so a stuck peer can never freeze the mutex (which sweep, stop, and
+// accept all share). Terminal writes (sys.Reply/sys.Fail) run straight off
+// whichever goroutine closes the request — legal fan-out (spec §1.2: Sys is
+// concurrency-safe, Msg is immutable) — because the substrate has no self-send.
 //
 // Device presence is tracked internally (conn==nil ⇒ offline ⇒ handle fast-
 // fails device_offline) AND pushed on its up/down edges via the actor-source obs
@@ -79,11 +79,10 @@ type pending struct {
 
 // device owns the adapter's outward transport.
 type device struct {
-	owner          *Actor // back-reference for sys + clock
-	addrCfg        string
-	clock          func() time.Time
-	reaperInterval time.Duration
-	logger         *slog.Logger
+	owner   *Actor // back-reference for sys + clock
+	addrCfg string
+	clock   func() time.Time
+	logger  *slog.Logger
 
 	srv      *http.Server
 	listener net.Listener
@@ -94,19 +93,16 @@ type device struct {
 	stopped  bool
 
 	stopOnce sync.Once
-	stopCh   chan struct{}
 	wg       sync.WaitGroup
 }
 
-func newDevice(owner *Actor, addr string, clock func() time.Time, reaperInterval time.Duration, logger *slog.Logger) *device {
+func newDevice(owner *Actor, addr string, clock func() time.Time, logger *slog.Logger) *device {
 	return &device{
-		owner:          owner,
-		addrCfg:        addr,
-		clock:          clock,
-		reaperInterval: reaperInterval,
-		logger:         logger,
-		inflight:       make(map[string]*pending),
-		stopCh:         make(chan struct{}),
+		owner:    owner,
+		addrCfg:  addr,
+		clock:    clock,
+		logger:   logger,
+		inflight: make(map[string]*pending),
 	}
 }
 
@@ -120,10 +116,19 @@ func (d *device) addr() string {
 	return d.listener.Addr().String()
 }
 
-// start binds the WS endpoint and boots the serve + reaper goroutines. A bind
-// failure is returned so the incarnation dies fast. ctx is the process-life ctx
-// (sys.Life()) — the reaper's own long-lived scope.
-func (d *device) start(ctx context.Context) error {
+// bound reports whether the endpoint has already bound its listener — the retry
+// loop's idempotency guard (a listener is a bound-once resource).
+func (d *device) bound() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.listener != nil
+}
+
+// start binds the WS endpoint and boots the serve goroutine. A bind failure is
+// returned so the caller (tryBind) can retry — the exclusive loopback port may
+// still be held by a predecessor incarnation (Q8=B). The reaper is NOT a
+// goroutine here: it is swept on the worker via sys.After self-wake (spec §3).
+func (d *device) start() error {
 	ln, err := net.Listen("tcp", d.addrCfg)
 	if err != nil {
 		return fmt.Errorf("kimi: device listen %q: %w", d.addrCfg, err)
@@ -135,9 +140,8 @@ func (d *device) start(ctx context.Context) error {
 	d.srv = &http.Server{Handler: mux}
 	d.mu.Unlock()
 
-	d.wg.Add(2)
+	d.wg.Add(1)
 	go d.serve(ln)
-	go d.reaper(ctx)
 	return nil
 }
 
@@ -152,10 +156,10 @@ func (d *device) serve(ln net.Listener) {
 // stop shuts the endpoint, closes the conn, and joins the goroutines. The
 // stopped flag is set under the lock BEFORE wg.Wait so a concurrent handleAccept
 // either observes it (and bails without wg.Add) or already counted itself — Add
-// can never race Wait.
+// can never race Wait. Idempotent + safe to call when the endpoint never bound
+// (srv/listener stay nil, wg has zero counts).
 func (d *device) stop(ctx context.Context) error {
 	d.stopOnce.Do(func() {
-		close(d.stopCh)
 		d.mu.Lock()
 		d.stopped = true
 		conn := d.conn
@@ -344,25 +348,9 @@ func (d *device) dropConn(conn *websocket.Conn) {
 	d.owner.publishDevicePresence(false)
 }
 
-// reaper sweeps the in-flight table for past-deadline requests and fails them
-// with timeout. It is the one timeout authority — the read loop never times
-// out, the reaper never matches replies.
-func (d *device) reaper(ctx context.Context) {
-	defer d.wg.Done()
-	ticker := time.NewTicker(d.reaperInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-d.stopCh:
-			return
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			d.sweep()
-		}
-	}
-}
-
+// sweep fails every past-deadline in-flight request with timeout. It is the one
+// timeout authority — the read loop never times out, sweep never matches
+// replies. Called on the worker goroutine off the reaper self-wake (spec §3).
 func (d *device) sweep() {
 	now := d.clock()
 	var expired []*pending

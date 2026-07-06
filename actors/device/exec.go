@@ -9,7 +9,7 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 )
 
 // boundedBuffer keeps at most max bytes; further writes are counted but
@@ -37,24 +37,28 @@ func (b *boundedBuffer) Write(p []byte) (int, error) {
 // handleExec implements device.exec: run a bash command line inside the
 // channel workspace. A non-zero exit code is a completed result; only a
 // timeout or a spawn failure fails the request.
-func (a *Actor) handleExec(ctx context.Context, env *message.Envelope) error {
+func (a *Actor) handleExec(msg actorbase.Msg) {
 	var p ExecPayload
-	if err := json.Unmarshal(env.Payload, &p); err != nil {
-		return a.fail(ctx, env, "payload_invalid", fmt.Sprintf("decode payload: %v", err))
+	if err := json.Unmarshal(msg.Payload, &p); err != nil {
+		a.fail(msg, "payload_invalid", fmt.Sprintf("decode payload: %v", err))
+		return
 	}
 	if p.Command == "" {
-		return a.fail(ctx, env, "payload_invalid", "device.exec: command required")
+		a.fail(msg, "payload_invalid", "device.exec: command required")
+		return
 	}
 
-	ws, err := a.channelWorkspace(env.ChannelID)
+	ws, err := a.channelWorkspace(msg.ChannelID)
 	if err != nil {
-		return a.fail(ctx, env, "workspace_unavailable", err.Error())
+		a.fail(msg, "workspace_unavailable", err.Error())
+		return
 	}
 	cwd := ws
 	if p.Cwd != "" {
 		cwd, err = resolvePath(ws, p.Cwd)
 		if err != nil {
-			return a.fail(ctx, env, "path_invalid", fmt.Sprintf("cwd: %v", err))
+			a.fail(msg, "path_invalid", fmt.Sprintf("cwd: %v", err))
+			return
 		}
 	}
 
@@ -65,7 +69,10 @@ func (a *Actor) handleExec(ctx context.Context, env *message.Envelope) error {
 	if timeout > MaxExecTimeoutMs {
 		timeout = MaxExecTimeoutMs
 	}
-	runCtx, cancel := context.WithTimeout(ctx, time.Duration(timeout)*time.Millisecond)
+	// msg.Ctx() is the request-scoped ctx (deadline + cancel, spec §1.5); the
+	// exec bound composes with it so a cancelled/expired request also stops the
+	// command.
+	runCtx, cancel := context.WithTimeout(msg.Ctx(), time.Duration(timeout)*time.Millisecond)
 	defer cancel()
 
 	cmd := exec.CommandContext(runCtx, "bash", "-c", p.Command)
@@ -80,8 +87,9 @@ func (a *Actor) handleExec(ctx context.Context, env *message.Envelope) error {
 	durationMs := a.clock().Sub(start).Milliseconds()
 
 	if runCtx.Err() == context.DeadlineExceeded {
-		return a.fail(ctx, env, "exec_timeout",
+		a.fail(msg, "exec_timeout",
 			fmt.Sprintf("command timed out after %dms", timeout))
+		return
 	}
 	exitCode := 0
 	if runErr != nil {
@@ -89,11 +97,12 @@ func (a *Actor) handleExec(ctx context.Context, env *message.Envelope) error {
 		if errors.As(runErr, &exitErr) {
 			exitCode = exitErr.ExitCode()
 		} else {
-			return a.fail(ctx, env, "exec_spawn_failed", runErr.Error())
+			a.fail(msg, "exec_spawn_failed", runErr.Error())
+			return
 		}
 	}
 
-	return a.respond(ctx, env, ExecResult{
+	a.respond(msg, ExecResult{
 		ExitCode:   exitCode,
 		Stdout:     stdout.buf.String(),
 		Stderr:     stderr.buf.String(),

@@ -8,12 +8,10 @@ import (
 	"net"
 	"time"
 
-	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // DefaultActorID is the registry id this adapter owns.
@@ -37,7 +35,12 @@ type Config struct {
 	// defaults to defaultReaperInterval. Injectable so tests catch shortened
 	// deadlines promptly without a production-tuned constant.
 	ReaperInterval time.Duration
-	// Logger surfaces device-face edges (accept/drop/reaper). Defaults to a
+	// BindRetryInterval is how long the retry loop waits between listen
+	// attempts when the loopback port is still held (Q8=B: exclusive-resource
+	// contention is domain policy — the actor re-tries until it can bind or is
+	// killed). Defaults to defaultBindRetryInterval; tests inject a shorter one.
+	BindRetryInterval time.Duration
+	// Logger surfaces device-face edges (accept/drop/reaper/bind). Defaults to a
 	// discard logger.
 	Logger *slog.Logger
 }
@@ -46,28 +49,43 @@ type Config struct {
 // tiny, so a 1s scan is cheap; tests inject a shorter one.
 const defaultReaperInterval = time.Second
 
-// Actor is the xhs adapter cell. The inward (channel) face is this struct's
-// Receive/describe; the outward (device) face is the embedded *device, which
-// owns the WS endpoint, the connection, the in-flight table, and the reaper.
+// defaultBindRetryInterval is the production listen-retry cadence for the
+// exclusive loopback port (Q8=B). A predecessor incarnation releases the port
+// within its death grace, so a sub-second retry lands the successor promptly.
+const defaultBindRetryInterval = 500 * time.Millisecond
+
+// Internal self-authored wake types (spec §3: reaper migrated from a private
+// ticker goroutine to sys.After self-wake, swept on the worker goroutine). They
+// are KindEvent messages the incarnation sends to itself; run()'s loop
+// intercepts them before dispatch, so they never reach the business handler.
+const (
+	reaperTickType = "xhs.internal.reaper_tick"
+	bindRetryType  = "xhs.internal.bind_retry"
+)
+
+// Actor is the xhs adapter as an actorbase Proc (spec §1.6). The inward
+// (channel) face is run()'s dispatch off sys.Recv(); the outward (device) face
+// is the embedded *device, which owns the WS endpoint, the connection, and the
+// in-flight table.
 //
-// The substrate runs Start/Stop/Receive serially on the cell goroutine, so the
-// inward face needs no locks. The device read loop + reaper run on their own
-// goroutines and emit channel responses directly through the writer; their
-// shared state is guarded inside *device (the one cross-goroutine boundary).
+// sys is bound once, at run()'s first line (birth). The worker goroutine calls
+// Recv/dispatch and runs the reaper sweep serially; the device's read-loop
+// goroutines close requests by calling sys.Reply/sys.Fail directly (legal
+// fan-out — spec §1.2: Sys is concurrency-safe, Msg is immutable), guarded by
+// *device's own mutex for the in-flight table they share.
 type Actor struct {
-	pen     harness.Pen
-	actorID actor.ActorID
-	clock   func() time.Time
-	dev     *device
-	// obs is the actor-source obs PUSH producer end, captured at Start. The device
-	// face uses it to publish device-presence edges (L3). nil until Start.
-	obs actorrt.ActorContext
+	sys               actorbase.Sys
+	clock             func() time.Time
+	dev               *device
+	reaperInterval    time.Duration
+	bindRetryInterval time.Duration
+	logger            *slog.Logger
 }
 
-// NewActor builds an xhs adapter bound to its pen + identity + config. The
-// device endpoint is constructed here but only LISTENS at Start (cell
-// lifecycle): a half-built actor must never bind a port.
-func NewActor(w harness.Pen, cfg Config) *Actor {
+// NewActor builds an xhs adapter bound to its config. The device endpoint is
+// constructed here but only LISTENS at run() (Proc entry = birth): a
+// half-built actor must never bind a port.
+func NewActor(cfg Config) *Actor {
 	clock := cfg.NowFn
 	if clock == nil {
 		clock = time.Now
@@ -80,48 +98,88 @@ func NewActor(w harness.Pen, cfg Config) *Actor {
 	if reaperInterval <= 0 {
 		reaperInterval = defaultReaperInterval
 	}
-	a := &Actor{
-		pen:     w,
-		actorID: DefaultActorID,
-		clock:   clock,
+	bindRetryInterval := cfg.BindRetryInterval
+	if bindRetryInterval <= 0 {
+		bindRetryInterval = defaultBindRetryInterval
 	}
-	a.dev = newDevice(a, cfg.ListenAddr, clock, reaperInterval, logger)
+	a := &Actor{
+		clock:             clock,
+		reaperInterval:    reaperInterval,
+		bindRetryInterval: bindRetryInterval,
+		logger:            logger,
+	}
+	a.dev = newDevice(a, cfg.ListenAddr, clock, logger)
 	return a
 }
 
-var _ actorrt.Actor = (*Actor)(nil)
-var _ actorrt.Starter = (*Actor)(nil)
-var _ actorrt.Stopper = (*Actor)(nil)
+// Def is this actor's actorbase registration entry (spec §1.6): New mints a
+// fresh Actor + Proc per incarnation, closing over cfg.
+func Def(cfg Config) actorbase.Def {
+	return actorbase.Def{
+		Doc: actorDescription,
+		New: func() (actorbase.Proc, error) {
+			return NewActor(cfg).run, nil
+		},
+	}
+}
 
-// Start binds the device WS endpoint and boots the accept + reaper goroutines.
-// A bind failure returns the error so the cell dies fast (positive death) — no
-// half-listening adapter ever registers as serviceable.
-func (a *Actor) Start(ctx context.Context, self actorrt.ActorContext) error {
-	a.obs = self
+// run is the Proc body (spec §1.6): entry = birth, return = death. It attempts
+// to bind the device endpoint, then loops sys.Recv() until the cell dies or
+// Stop is requested — the loop's exit IS this incarnation's death, and the
+// deferred device teardown is its resource release.
+func (a *Actor) run(sys actorbase.Sys) error {
+	a.sys = sys
 	// The trust model assumes a loopback bind (only same-machine processes can
-	// reach the keyless endpoint). A non-loopback addr is a CONFIG ERROR: it
-	// would expose the keyless device port to the network. Fail fast (positive
-	// death) rather than start a serviceable-but-exposed endpoint.
+	// reach the keyless endpoint). A non-loopback addr is a CONFIG ERROR (not a
+	// resource-contention error): fail fast (positive death) rather than retry
+	// forever or start a serviceable-but-exposed endpoint.
 	if !isLoopbackAddr(a.dev.addrCfg) {
 		return fmt.Errorf("xhs: device endpoint is keyless and trusts localhost; refusing non-loopback bind %q (use 127.0.0.1)", a.dev.addrCfg)
 	}
-	if err := a.dev.start(ctx); err != nil {
-		return err
-	}
-	// Initial L3 edge: a connection-bearing adapter KNOWS it starts disconnected
-	// (no extension attached yet) — publish offline so the home shows a definite
-	// state, not unknown. A later connect/disconnect edge supersedes it.
+	defer func() { _ = a.dev.stop(context.Background()) }()
+	// Initial L3 edge: a connection-bearing adapter KNOWS it starts disconnected —
+	// publish offline so the home shows a definite state, not unknown.
 	a.publishDevicePresence(false)
-	return nil
+	a.tryBind()
+
+	for {
+		msg, err := sys.Recv()
+		if err != nil {
+			return err
+		}
+		switch msg.Type {
+		case bindRetryType:
+			a.tryBind()
+		case reaperTickType:
+			a.dev.sweep()
+			_, _ = a.sys.After(a.reaperInterval, reaperTickType, nil)
+		default:
+			a.handle(msg)
+		}
+	}
 }
 
-// publishDevicePresence pushes a device-presence edge (L3) on the actor-source obs axis.
-// Best-effort, advisory (never authoritative — that is send→terminal); no-op
-// before Start captured the producer end.
-func (a *Actor) publishDevicePresence(online bool) {
-	if a.obs != nil {
-		a.obs.PublishObs(introspect.ObsDevicePresence, introspect.MarshalDevicePresence(online))
+// tryBind attempts to listen on the exclusive loopback port. On success it arms
+// the reaper self-wake; on failure (the port is still held by a predecessor
+// incarnation — Q8=B) it schedules a retry and returns without dying. The
+// listener is a bound-once resource, so an already-bound device short-circuits.
+func (a *Actor) tryBind() {
+	if a.dev.bound() {
+		return
 	}
+	if err := a.dev.start(); err != nil {
+		a.logger.Warn("xhs.device.bind_retry", "addr", a.dev.addrCfg, "err", err.Error())
+		_, _ = a.sys.After(a.bindRetryInterval, bindRetryType, nil)
+		return
+	}
+	// Bound: arm the first reaper tick; each tick re-arms the next in run().
+	_, _ = a.sys.After(a.reaperInterval, reaperTickType, nil)
+}
+
+// publishDevicePresence pushes a device-presence edge (L3) on the actor-source
+// obs axis. Best-effort, advisory (never authoritative — that is send→terminal).
+func (a *Actor) publishDevicePresence(online bool) {
+	_ = a.sys.PublishObs(introspect.ObsDevicePresence, introspect.MarshalDevicePresence(online))
 }
 
 // isLoopbackAddr reports whether host:port binds the loopback interface (the
@@ -139,70 +197,58 @@ func isLoopbackAddr(addr string) bool {
 	return ip != nil && ip.IsLoopback()
 }
 
-// Stop tears the device endpoint down: stop accepting, close the conn, join the
-// read loop + reaper. The runtime guarantees no Receive is in flight.
-func (a *Actor) Stop(ctx context.Context) error {
-	return a.dev.stop(ctx)
-}
-
 // ListenAddr returns the resolved device-endpoint address (useful when the
-// config asked for port 0). Empty until Start has bound.
+// config asked for port 0). Empty until run() has bound.
 func (a *Actor) ListenAddr() string { return a.dev.addr() }
 
-// Receive is the inward mailbox entry. It NEVER blocks on the device: a
+// handle dispatches one delivered request Msg. It NEVER blocks on the device: a
 // supported request is encoded, registered in the in-flight table, and pushed
 // down the conn — the reply comes back asynchronously through the read loop. An
 // offline device fails the request immediately (digested, not crashed).
-func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
-	if env == nil {
-		return nil
-	}
+func (a *Actor) handle(msg actorbase.Msg) {
 	// The adapter only ACTS on requests — it serves request/response types and
 	// answers describe. A non-request (event/response addressed here) has no
 	// terminal to author, so it is dropped rather than mis-handled.
-	if env.Kind != message.KindRequest {
-		return nil
+	if msg.Kind != message.KindRequest {
+		return
 	}
-	if env.Type == introspect.QueryDescribe {
-		return a.handleDescribe(ctx, env)
+	if msg.Type == introspect.QueryDescribe {
+		a.handleDescribe(msg)
+		return
 	}
 
-	spec, ok := lookupType(env.Type)
+	spec, ok := lookupType(msg.Type)
 	if !ok {
-		return a.fail(ctx, env, "type_unsupported", fmt.Sprintf("xhs adapter does not handle %s", env.Type))
+		_, _ = a.sys.Fail(msg, "type_unsupported", fmt.Sprintf("xhs adapter does not handle %s", msg.Type))
+		return
 	}
 
 	// Translate the channel request into the device command frame. The inward
 	// payload IS the device params (both are business-language JSON for these
 	// types), so the params pass through verbatim — the type→cmd mapping is the
 	// translation that matters.
-	params := env.Payload
+	params := msg.Payload
 	if len(params) == 0 {
 		params = json.RawMessage("{}")
 	}
 
-	if err := a.dev.dispatch(ctx, env, spec, params); err != nil {
+	if err := a.dev.dispatch(msg, spec, params); err != nil {
 		// dispatch only errors for the digestible offline case; the device
 		// being absent is a business failure, not a crash.
-		return a.fail(ctx, env, "device_offline", err.Error())
+		_, _ = a.sys.Fail(msg, "device_offline", err.Error())
 	}
-	return nil
 }
 
-func (a *Actor) fail(ctx context.Context, env *message.Envelope, errorCode, detail string) error {
-	_, err := behavior.Fail(ctx, a.pen, a.clock, env, errorCode, detail)
-	return err
-}
-
-func (a *Actor) handleDescribe(ctx context.Context, env *message.Envelope) error {
-	req, err := introspect.ParseDescribeRequest(env.Payload)
+func (a *Actor) handleDescribe(msg actorbase.Msg) {
+	req, err := introspect.ParseDescribeRequest(msg.Payload)
 	if err != nil {
-		return a.fail(ctx, env, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
+		_, _ = a.sys.Fail(msg, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
+		return
 	}
-	answer, ok := introspect.AnswerDescribe(describeCatalog(string(a.actorID)), req)
+	answer, ok := introspect.AnswerDescribe(describeCatalog(string(a.sys.Self())), req)
 	if !ok {
-		return a.fail(ctx, env, "type_unsupported", fmt.Sprintf("xhs adapter does not handle %s", req.Type))
+		_, _ = a.sys.Fail(msg, "type_unsupported", fmt.Sprintf("xhs adapter does not handle %s", req.Type))
+		return
 	}
-	_, rerr := behavior.RespondJSON(ctx, a.pen, a.clock, env, answer)
-	return rerr
+	_, _ = a.sys.Reply(msg, answer)
 }

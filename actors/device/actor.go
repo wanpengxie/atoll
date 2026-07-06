@@ -1,7 +1,6 @@
 package device
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -10,64 +9,92 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
-// Actor implements actorrt.Actor for the generic device tool. All file and
-// exec operations are confined to <root>/<channel-id>/ — one workspace
-// subdirectory per channel, created on first use.
+// Actor is the generic device tool as an actorbase Proc (spec §1.6): entry =
+// birth, return = death. All file and exec operations are confined to
+// <root>/<channel-id>/ — one workspace subdirectory per channel, created on
+// first use. It holds no connection and arms no timer, so run() is a bare loop
+// over sys.Recv() (echo's shape), with each delivery answered synchronously on
+// the worker goroutine through sys.Reply/sys.Fail.
 type Actor struct {
-	pen     harness.Pen
-	actorID actor.ActorID
-	root    string
-	clock   func() time.Time
-	logger  *slog.Logger
+	sys    actorbase.Sys
+	root   string
+	clock  func() time.Time
+	logger *slog.Logger
 }
 
-// NewActor constructs a device Actor. id is the full actor id
-// (device:<name>); root is the workspace root directory.
-func NewActor(pen harness.Pen, id actor.ActorID, root string, logger *slog.Logger) *Actor {
+// NewActor constructs a device Actor bound to its workspace root. The identity
+// is welded into sys at birth (read via sys.Self() where needed), not carried
+// as a field — a half-built value has no identity.
+func NewActor(root string, logger *slog.Logger) *Actor {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &Actor{
-		pen:     pen,
-		actorID: id,
-		root:    root,
-		clock:   time.Now,
-		logger:  logger,
+		root:   root,
+		clock:  time.Now,
+		logger: logger,
 	}
 }
 
-// Receive dispatches by env.Type. Unknown types are rejected with a failed
-// terminal so the caller observes a definite outcome instead of waiting for
-// the framework timer.
-func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
-	switch env.Type {
+// Def is this actor's actorbase registration entry (spec §1.6): New mints a
+// fresh Actor + Proc per incarnation, closing over root/logger (New itself
+// takes zero parameters — the config is captured by this closure, not carried
+// by Def).
+func Def(root string, logger *slog.Logger) actorbase.Def {
+	return actorbase.Def{
+		Doc: actorDescription,
+		New: func() (actorbase.Proc, error) {
+			return NewActor(root, logger).run, nil
+		},
+	}
+}
+
+// run is the Proc body (spec §1.6): loop sys.Recv() until the cell dies or Stop
+// is requested — the loop's exit IS this incarnation's death. There is no
+// resource to release (no listener, no timer), so no defer teardown.
+func (a *Actor) run(sys actorbase.Sys) error {
+	a.sys = sys
+	for {
+		msg, err := sys.Recv()
+		if err != nil {
+			return err
+		}
+		a.handle(msg)
+	}
+}
+
+// handle dispatches one delivered Msg by type. A non-request has no terminal to
+// author, so it is dropped rather than mis-handled. Unknown types are rejected
+// with a failed terminal so the caller observes a definite outcome instead of
+// waiting for the framework timer.
+func (a *Actor) handle(msg actorbase.Msg) {
+	if msg.Kind != message.KindRequest {
+		return
+	}
+	switch msg.Type {
 	case TypeExec:
-		return a.handleExec(ctx, env)
+		a.handleExec(msg)
 	case TypeFileRead:
-		return a.handleFileRead(ctx, env)
+		a.handleFileRead(msg)
 	case TypeFileWrite:
-		return a.handleFileWrite(ctx, env)
+		a.handleFileWrite(msg)
 	case TypeFileEdit:
-		return a.handleFileEdit(ctx, env)
+		a.handleFileEdit(msg)
 	case introspect.QueryDescribe:
-		return a.handleDescribe(ctx, env)
+		a.handleDescribe(msg)
+	default:
+		a.fail(msg, "type_unsupported", fmt.Sprintf("device actor does not handle %s", msg.Type))
 	}
-	return a.fail(ctx, env, "type_unsupported", fmt.Sprintf("device actor does not handle %s", env.Type))
 }
-
-var _ actorrt.Actor = (*Actor)(nil)
 
 // channelWorkspace resolves (and lazily creates) the per-channel workspace
-// directory for the envelope's channel.
+// directory for the delivery's channel.
 func (a *Actor) channelWorkspace(chID channel.ID) (string, error) {
 	if chID == "" {
 		return "", errors.New("envelope has no channel id")
@@ -96,21 +123,17 @@ func resolvePath(workspace, p string) (string, error) {
 }
 
 // respond commits a status=completed final with the given result payload.
-func (a *Actor) respond(ctx context.Context, env *message.Envelope, result any) error {
-	_, err := behavior.RespondJSON(ctx, a.pen, a.clock, env, result)
-	if err != nil {
+func (a *Actor) respond(msg actorbase.Msg, result any) {
+	if _, err := a.sys.Reply(msg, result); err != nil {
 		a.logger.Warn("device.respond.error",
-			"request_id", string(env.ID), "type", env.Type, "err", err.Error())
+			"request_id", string(msg.ID), "type", msg.Type, "err", err.Error())
 	}
-	return err
 }
 
 // fail closes the request with the conventional {error_code, detail} failure.
-func (a *Actor) fail(ctx context.Context, env *message.Envelope, errorCode, detail string) error {
-	_, err := behavior.Fail(ctx, a.pen, a.clock, env, errorCode, detail)
-	if err != nil {
+func (a *Actor) fail(msg actorbase.Msg, errorCode, detail string) {
+	if _, err := a.sys.Fail(msg, errorCode, detail); err != nil {
 		a.logger.Error("device.fail.respond.error",
-			"request_id", string(env.ID), "error_code", errorCode, "err", err)
+			"request_id", string(msg.ID), "error_code", errorCode, "err", err.Error())
 	}
-	return err
 }

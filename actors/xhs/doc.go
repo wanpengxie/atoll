@@ -24,10 +24,11 @@
 // mutex guards the conn + in-flight table (the one cross-goroutine state).
 //
 // Fault posture (let-it-crash): a single request that times out or hits an
-// offline device fails as a business response (the actor digests it). A reaper
-// goroutine sweeps the in-flight table for past-deadline requests. A dropped
-// conn flips the adapter offline and waits for a fresh connection — it does NOT
-// panic; only an untrustworthy internal state would (positive death).
+// offline device fails as a business response (the actor digests it). The
+// reaper sweep (armed by sys.After self-wake, run on the worker — 期10 S3)
+// collects past-deadline requests. A dropped conn flips the adapter offline and
+// waits for a fresh connection — it does NOT panic; only an untrustworthy
+// internal state would (positive death).
 //
 // v1 scope (additive hardening deferred until the pain is concrete):
 //
@@ -43,8 +44,9 @@
 //
 // File layout (one concern per file):
 //
-//   - actor.go    Actor struct + NewActor + Start/Stop/Receive + describe dispatch.
-//   - device.go   WS listener + accept + read loop + in-flight table + reaper +
+//   - actor.go    Actor struct + NewActor/Def + run Proc loop (bind retry +
+//     reaper self-wake + dispatch) + describe dispatch.
+//   - device.go   WS listener + accept + read loop + in-flight table + sweep +
 //     downstream send (write-deadline bounded).
 //   - wire.go     the minimal device frame structs.
 //   - types.go    inward type constants + per-type cmd mapping + per-type deadline.

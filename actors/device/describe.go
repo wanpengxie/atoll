@@ -1,9 +1,9 @@
 package device
 
 import (
-	"context"
 	"fmt"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
@@ -94,20 +94,24 @@ var typeMetas = map[string]introspect.TypeMeta{
 
 // handleDescribe serves the actor.describe self-answer through the standard
 // introspect dispatch: empty payload = full answer, {"type": ...} = single
-// type, unknown type = failed terminal.
-func (a *Actor) handleDescribe(ctx context.Context, env *message.Envelope) error {
-	req, err := introspect.ParseDescribeRequest(env.Payload)
+// type, unknown type = failed terminal. The actor id is taken live from
+// sys.Self() (spec §3 A2: no hard-coded id), so the self-answer always names
+// this incarnation's welded identity.
+func (a *Actor) handleDescribe(msg actorbase.Msg) {
+	req, err := introspect.ParseDescribeRequest(msg.Payload)
 	if err != nil {
-		return a.fail(ctx, env, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
+		a.fail(msg, "payload_invalid", fmt.Sprintf("decode describe payload: %v", err))
+		return
 	}
 	answer, ok := introspect.AnswerDescribe(introspect.Describe{
-		ActorID:     string(a.actorID),
+		ActorID:     string(a.sys.Self()),
 		Description: actorDescription,
 		SkillDoc:    actorSkillDoc,
 		Types:       typeMetas,
 	}, req)
 	if !ok {
-		return a.fail(ctx, env, "type_unsupported", fmt.Sprintf("device actor does not handle %s", req.Type))
+		a.fail(msg, "type_unsupported", fmt.Sprintf("device actor does not handle %s", req.Type))
+		return
 	}
-	return a.respond(ctx, env, answer)
+	a.respond(msg, answer)
 }

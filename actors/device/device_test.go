@@ -3,95 +3,183 @@ package device
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
-// recordingWriter is a harness.Pen test double.
-type recordingWriter struct {
-	mu     sync.Mutex
-	writes []*message.Envelope
+const testActorID = actor.ActorID("device:test")
+
+// errFakeSysStopped is fakeSys.Recv's loop-termination signal (mirrors the
+// engine's ErrRecvDone contract, spec §1.2).
+var errFakeSysStopped = errors.New("fakeSys: stopped")
+
+// replyRec / failRec record one recorded sys.Reply/sys.Fail call.
+type replyRec struct {
+	id message.ID
+	v  any
 }
 
-func (w *recordingWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.writes = append(w.writes, env)
-	return harness.WriteResult{MessageID: env.ID}, nil
+type failRec struct {
+	id           message.ID
+	code, detail string
 }
 
-func (w *recordingWriter) last(t *testing.T) *message.Envelope {
-	t.Helper()
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	if len(w.writes) == 0 {
-		t.Fatal("no response written")
+// fakeSys is a minimal actorbase.Sys double for the device Proc: it embeds the
+// (nil) interface so any verb this actor never touches nil-panics loudly, and
+// overrides only Recv/Reply/Fail/Self/Life. The device actor answers
+// synchronously on the worker goroutine, so a single recorded reply/fail is
+// available right after the worker drains the pushed request.
+type fakeSys struct {
+	actorbase.Sys
+
+	selfID actor.ActorID
+	recvCh chan actorbase.Msg
+	quit   chan struct{}
+	once   sync.Once
+
+	mu      sync.Mutex
+	replies []replyRec
+	fails   []failRec
+}
+
+func newFakeSys(selfID actor.ActorID) *fakeSys {
+	return &fakeSys{selfID: selfID, recvCh: make(chan actorbase.Msg, 16), quit: make(chan struct{})}
+}
+
+func (f *fakeSys) push(msg actorbase.Msg) {
+	select {
+	case f.recvCh <- msg:
+	case <-f.quit:
 	}
-	return w.writes[len(w.writes)-1]
+}
+
+func (f *fakeSys) stop() { f.once.Do(func() { close(f.quit) }) }
+
+func (f *fakeSys) Recv() (actorbase.Msg, error) {
+	select {
+	case msg := <-f.recvCh:
+		return msg, nil
+	case <-f.quit:
+		return actorbase.Msg{}, errFakeSysStopped
+	}
+}
+
+func (f *fakeSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replies = append(f.replies, replyRec{id: msg.ID, v: v})
+	return msg.ID, nil
+}
+
+func (f *fakeSys) Fail(msg actorbase.Msg, code, detail string) (message.ID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fails = append(f.fails, failRec{id: msg.ID, code: code, detail: detail})
+	return msg.ID, nil
+}
+
+func (f *fakeSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error { return nil }
+
+func (f *fakeSys) Self() actor.ActorID { return f.selfID }
+
+func (f *fakeSys) Life() context.Context { return context.Background() }
+
+var _ actorbase.Sys = (*fakeSys)(nil)
+
+func (f *fakeSys) repliesSnapshot() []replyRec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]replyRec, len(f.replies))
+	copy(out, f.replies)
+	return out
+}
+
+func (f *fakeSys) failsSnapshot() []failRec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]failRec, len(f.fails))
+	copy(out, f.fails)
+	return out
+}
+
+// waitTerminal polls for the recorded terminal (reply or fail) for id, then
+// returns its result value / failure code as JSON-decodable data. status is
+// "completed" for a Reply, "failed" for a Fail.
+func waitTerminal(t *testing.T, f *fakeSys, id message.ID) (status, code string, result map[string]json.RawMessage) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		for _, r := range f.repliesSnapshot() {
+			if r.id == id {
+				raw, _ := json.Marshal(r.v)
+				_ = json.Unmarshal(raw, &result)
+				return "completed", "", result
+			}
+		}
+		for _, r := range f.failsSnapshot() {
+			if r.id == id {
+				return "failed", r.code, nil
+			}
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("no terminal recorded for %s", id)
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 const testChannel = channel.ID("ch-test")
 
-func newTestActor(t *testing.T) (*Actor, *recordingWriter) {
+// startActor runs a device Proc against a fakeSys in a goroutine; cleanup stops
+// it and joins run()'s return.
+func startActor(t *testing.T) (*fakeSys, string) {
 	t.Helper()
-	w := &recordingWriter{}
-	a := NewActor(w, actor.ActorID("device:test"), t.TempDir(), nil)
-	return a, w
+	root := t.TempDir()
+	a := NewActor(root, nil)
+	sys := newFakeSys(testActorID)
+	done := make(chan error, 1)
+	go func() { done <- a.run(sys) }()
+	t.Cleanup(func() {
+		sys.stop()
+		<-done
+	})
+	return sys, root
 }
 
-func request(typ string, payload any) *message.Envelope {
+func request(typ string, payload any) actorbase.Msg {
 	raw, _ := json.Marshal(payload)
-	return &message.Envelope{
+	return actorbase.NewMsg(context.Background(), message.Envelope{
 		ID:        message.ID("req-" + typ),
 		ChannelID: testChannel,
 		Kind:      message.KindRequest,
 		Type:      typ,
 		Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
 		Payload:   raw,
-	}
-}
-
-// decodeResponse unmarshals the merged response payload and returns the
-// status field plus the raw payload for further decoding.
-func decodeResponse(t *testing.T, env *message.Envelope) (status string, raw map[string]json.RawMessage) {
-	t.Helper()
-	if env.Kind != message.KindResponse {
-		t.Fatalf("response kind = %s; want response", env.Kind)
-	}
-	if err := json.Unmarshal(env.Payload, &raw); err != nil {
-		t.Fatalf("decode response payload: %v", err)
-	}
-	_ = json.Unmarshal(raw["status"], &status)
-	return status, raw
-}
-
-func errorCode(t *testing.T, raw map[string]json.RawMessage) string {
-	t.Helper()
-	var code string
-	_ = json.Unmarshal(raw["error_code"], &code)
-	return code
+	})
 }
 
 func TestWriteReadRoundtrip(t *testing.T) {
-	a, w := newTestActor(t)
-	ctx := context.Background()
+	sys, _ := startActor(t)
 
-	_ = a.Receive(ctx, request(TypeFileWrite, FileWritePayload{
+	sys.push(request(TypeFileWrite, FileWritePayload{
 		Path: "notes/plan.md", Content: "line1\nline2\nline3",
 	}))
-	status, _ := decodeResponse(t, w.last(t))
+	status, _, _ := waitTerminal(t, sys, "req-"+TypeFileWrite)
 	if status != "completed" {
 		t.Fatalf("write status = %s", status)
 	}
 
-	_ = a.Receive(ctx, request(TypeFileRead, FileReadPayload{Path: "notes/plan.md"}))
-	status, raw := decodeResponse(t, w.last(t))
+	sys.push(request(TypeFileRead, FileReadPayload{Path: "notes/plan.md"}))
+	status, _, raw := waitTerminal(t, sys, "req-"+TypeFileRead)
 	if status != "completed" {
 		t.Fatalf("read status = %s", status)
 	}
@@ -103,14 +191,15 @@ func TestWriteReadRoundtrip(t *testing.T) {
 }
 
 func TestReadLineSlice(t *testing.T) {
-	a, w := newTestActor(t)
-	ctx := context.Background()
+	sys, _ := startActor(t)
 
-	_ = a.Receive(ctx, request(TypeFileWrite, FileWritePayload{
-		Path: "f.txt", Content: "a\nb\nc\nd",
-	}))
-	_ = a.Receive(ctx, request(TypeFileRead, FileReadPayload{Path: "f.txt", Offset: 1, Limit: 2}))
-	_, raw := decodeResponse(t, w.last(t))
+	sys.push(request(TypeFileWrite, FileWritePayload{Path: "f.txt", Content: "a\nb\nc\nd"}))
+	_, _, _ = waitTerminal(t, sys, "req-"+TypeFileWrite)
+
+	// Same request id would collide in the recorder; use a distinct read msg.
+	readMsg := request(TypeFileRead, FileReadPayload{Path: "f.txt", Offset: 1, Limit: 2})
+	sys.push(readMsg)
+	_, _, raw := waitTerminal(t, sys, readMsg.ID)
 	var content string
 	_ = json.Unmarshal(raw["content"], &content)
 	if content != "b\nc" {
@@ -119,49 +208,42 @@ func TestReadLineSlice(t *testing.T) {
 }
 
 func TestPathConfinement(t *testing.T) {
-	a, w := newTestActor(t)
-	ctx := context.Background()
+	sys, _ := startActor(t)
 
-	for _, p := range []string{"../escape.txt", "/etc/passwd", "a/../../escape.txt"} {
-		_ = a.Receive(ctx, request(TypeFileRead, FileReadPayload{Path: p}))
-		status, raw := decodeResponse(t, w.last(t))
-		if status != "failed" || errorCode(t, raw) != "path_invalid" {
-			t.Fatalf("path %q: status=%s code=%s; want failed/path_invalid", p, status, errorCode(t, raw))
+	for i, p := range []string{"../escape.txt", "/etc/passwd", "a/../../escape.txt"} {
+		msg := request(TypeFileRead, FileReadPayload{Path: p})
+		msg.ID = message.ID("req-confine-" + string(rune('a'+i)))
+		sys.push(msg)
+		status, code, _ := waitTerminal(t, sys, msg.ID)
+		if status != "failed" || code != "path_invalid" {
+			t.Fatalf("path %q: status=%s code=%s; want failed/path_invalid", p, status, code)
 		}
 	}
 }
 
 func TestEditUniqueness(t *testing.T) {
-	a, w := newTestActor(t)
-	ctx := context.Background()
+	sys, _ := startActor(t)
 
-	_ = a.Receive(ctx, request(TypeFileWrite, FileWritePayload{
-		Path: "e.txt", Content: "foo bar foo",
-	}))
-
-	// Multiple occurrences without replace_all -> old_string_not_unique.
-	_ = a.Receive(ctx, request(TypeFileEdit, FileEditPayload{
-		Path: "e.txt", OldString: "foo", NewString: "baz",
-	}))
-	status, raw := decodeResponse(t, w.last(t))
-	if status != "failed" || errorCode(t, raw) != "old_string_not_unique" {
-		t.Fatalf("dup edit: status=%s code=%s", status, errorCode(t, raw))
+	push := func(id string, typ string, payload any) (string, string, map[string]json.RawMessage) {
+		msg := request(typ, payload)
+		msg.ID = message.ID(id)
+		sys.push(msg)
+		return waitTerminal(t, sys, msg.ID)
 	}
 
-	// Zero occurrences -> old_string_not_found.
-	_ = a.Receive(ctx, request(TypeFileEdit, FileEditPayload{
-		Path: "e.txt", OldString: "missing", NewString: "x",
-	}))
-	status, raw = decodeResponse(t, w.last(t))
-	if status != "failed" || errorCode(t, raw) != "old_string_not_found" {
-		t.Fatalf("missing edit: status=%s code=%s", status, errorCode(t, raw))
+	_, _, _ = push("w", TypeFileWrite, FileWritePayload{Path: "e.txt", Content: "foo bar foo"})
+
+	status, code, _ := push("e1", TypeFileEdit, FileEditPayload{Path: "e.txt", OldString: "foo", NewString: "baz"})
+	if status != "failed" || code != "old_string_not_unique" {
+		t.Fatalf("dup edit: status=%s code=%s", status, code)
 	}
 
-	// replace_all succeeds with 2 replacements.
-	_ = a.Receive(ctx, request(TypeFileEdit, FileEditPayload{
-		Path: "e.txt", OldString: "foo", NewString: "baz", ReplaceAll: true,
-	}))
-	status, raw = decodeResponse(t, w.last(t))
+	status, code, _ = push("e2", TypeFileEdit, FileEditPayload{Path: "e.txt", OldString: "missing", NewString: "x"})
+	if status != "failed" || code != "old_string_not_found" {
+		t.Fatalf("missing edit: status=%s code=%s", status, code)
+	}
+
+	status, _, raw := push("e3", TypeFileEdit, FileEditPayload{Path: "e.txt", OldString: "foo", NewString: "baz", ReplaceAll: true})
 	if status != "completed" {
 		t.Fatalf("replace_all status = %s", status)
 	}
@@ -171,16 +253,11 @@ func TestEditUniqueness(t *testing.T) {
 		t.Fatalf("replacements = %d; want 2", n)
 	}
 
-	// Unique occurrence edits in place.
-	_ = a.Receive(ctx, request(TypeFileEdit, FileEditPayload{
-		Path: "e.txt", OldString: "bar", NewString: "qux",
-	}))
-	status, _ = decodeResponse(t, w.last(t))
+	status, _, _ = push("e4", TypeFileEdit, FileEditPayload{Path: "e.txt", OldString: "bar", NewString: "qux"})
 	if status != "completed" {
 		t.Fatalf("unique edit status = %s", status)
 	}
-	_ = a.Receive(ctx, request(TypeFileRead, FileReadPayload{Path: "e.txt"}))
-	_, raw = decodeResponse(t, w.last(t))
+	_, _, raw = push("r", TypeFileRead, FileReadPayload{Path: "e.txt"})
 	var content string
 	_ = json.Unmarshal(raw["content"], &content)
 	if content != "baz qux baz" {
@@ -189,12 +266,16 @@ func TestEditUniqueness(t *testing.T) {
 }
 
 func TestExec(t *testing.T) {
-	a, w := newTestActor(t)
-	ctx := context.Background()
+	sys, _ := startActor(t)
 
-	// Basic stdout capture inside the workspace cwd.
-	_ = a.Receive(ctx, request(TypeExec, ExecPayload{Command: "echo hello && pwd"}))
-	status, raw := decodeResponse(t, w.last(t))
+	push := func(id string, payload ExecPayload) (string, string, map[string]json.RawMessage) {
+		msg := request(TypeExec, payload)
+		msg.ID = message.ID(id)
+		sys.push(msg)
+		return waitTerminal(t, sys, msg.ID)
+	}
+
+	status, _, raw := push("x1", ExecPayload{Command: "echo hello && pwd"})
 	if status != "completed" {
 		t.Fatalf("exec status = %s", status)
 	}
@@ -204,9 +285,7 @@ func TestExec(t *testing.T) {
 		t.Fatalf("stdout = %q; want hello + workspace cwd", stdout)
 	}
 
-	// Non-zero exit code is a completed result.
-	_ = a.Receive(ctx, request(TypeExec, ExecPayload{Command: "exit 3"}))
-	status, raw = decodeResponse(t, w.last(t))
+	status, _, raw = push("x2", ExecPayload{Command: "exit 3"})
 	if status != "completed" {
 		t.Fatalf("nonzero-exit status = %s", status)
 	}
@@ -216,41 +295,48 @@ func TestExec(t *testing.T) {
 		t.Fatalf("exit_code = %d; want 3", code)
 	}
 
-	// Timeout fails with exec_timeout.
-	_ = a.Receive(ctx, request(TypeExec, ExecPayload{Command: "sleep 2", TimeoutMs: 100}))
-	status, raw = decodeResponse(t, w.last(t))
-	if status != "failed" || errorCode(t, raw) != "exec_timeout" {
-		t.Fatalf("timeout: status=%s code=%s", status, errorCode(t, raw))
+	status, ecode, _ := push("x3", ExecPayload{Command: "sleep 2", TimeoutMs: 100})
+	if status != "failed" || ecode != "exec_timeout" {
+		t.Fatalf("timeout: status=%s code=%s", status, ecode)
 	}
 
-	// cwd escape rejected.
-	_ = a.Receive(ctx, request(TypeExec, ExecPayload{Command: "ls", Cwd: "../"}))
-	status, raw = decodeResponse(t, w.last(t))
-	if status != "failed" || errorCode(t, raw) != "path_invalid" {
-		t.Fatalf("cwd escape: status=%s code=%s", status, errorCode(t, raw))
+	status, ecode, _ = push("x4", ExecPayload{Command: "ls", Cwd: "../"})
+	if status != "failed" || ecode != "path_invalid" {
+		t.Fatalf("cwd escape: status=%s code=%s", status, ecode)
 	}
 }
 
 func TestDescribeAndUnknownType(t *testing.T) {
-	a, w := newTestActor(t)
-	ctx := context.Background()
+	sys, _ := startActor(t)
 
-	_ = a.Receive(ctx, request("actor.describe", map[string]any{}))
-	status, raw := decodeResponse(t, w.last(t))
+	pushRaw := func(id string, typ string, payload any) (string, string, map[string]json.RawMessage) {
+		raw, _ := json.Marshal(payload)
+		msg := actorbase.NewMsg(context.Background(), message.Envelope{
+			ID:        message.ID(id),
+			ChannelID: testChannel,
+			Kind:      message.KindRequest,
+			Type:      typ,
+			Sender:    message.Sender{Kind: actor.KindAgent, ID: "agent:test"},
+			Payload:   raw,
+		})
+		sys.push(msg)
+		return waitTerminal(t, sys, msg.ID)
+	}
+
+	status, _, raw := pushRaw("d1", "actor.describe", map[string]any{})
 	if status != "completed" {
 		t.Fatalf("describe status = %s", status)
 	}
 	var actorID string
 	_ = json.Unmarshal(raw["actor_id"], &actorID)
-	if actorID != string(a.actorID) {
-		t.Fatalf("describe actor_id = %q; want %q", actorID, a.actorID)
+	if actorID != string(testActorID) {
+		t.Fatalf("describe actor_id = %q; want %q", actorID, testActorID)
 	}
 	var skillDoc string
 	_ = json.Unmarshal(raw["skill_doc"], &skillDoc)
 	if skillDoc == "" {
 		t.Fatal("describe skill_doc empty")
 	}
-	// Kind/binding are registry truth (actor.list), deliberately absent here.
 	if _, ok := raw["kind"]; ok {
 		t.Fatal("describe must not restate registry kind")
 	}
@@ -262,8 +348,7 @@ func TestDescribeAndUnknownType(t *testing.T) {
 		}
 	}
 
-	_ = a.Receive(ctx, request("actor.describe", map[string]any{"type": TypeExec}))
-	status, raw = decodeResponse(t, w.last(t))
+	status, _, raw = pushRaw("d2", "actor.describe", map[string]any{"type": TypeExec})
 	if status != "completed" {
 		t.Fatalf("describe_type status = %s", status)
 	}
@@ -283,9 +368,8 @@ func TestDescribeAndUnknownType(t *testing.T) {
 		t.Fatalf("describe_type max_pending_ms = %d; want %d", maxPendingMs, MaxExecTimeoutMs)
 	}
 
-	_ = a.Receive(ctx, request("device.nope", map[string]any{}))
-	status, raw = decodeResponse(t, w.last(t))
-	if status != "failed" || errorCode(t, raw) != "type_unsupported" {
-		t.Fatalf("unknown type: status=%s code=%s", status, errorCode(t, raw))
+	status, code, _ := pushRaw("d3", "device.nope", map[string]any{})
+	if status != "failed" || code != "type_unsupported" {
+		t.Fatalf("unknown type: status=%s code=%s", status, code)
 	}
 }

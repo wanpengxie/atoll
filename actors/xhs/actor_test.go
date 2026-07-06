@@ -3,63 +3,171 @@ package xhs
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"net"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 const testChannelID = channel.ID("ch-test")
 
-// recordingWriter is a concurrency-safe harness.Pen double (mirrors the
-// kimiagent test double — the adapter emits from the read loop + reaper
-// goroutines as well as the cell goroutine, so the writer must be safe).
-type recordingWriter struct {
+// errFakeSysStopped is fakeSys.Recv's loop-termination signal once the test
+// stops it — mirrors the engine's ErrRecvDone contract (spec §1.2).
+var errFakeSysStopped = errors.New("fakeSys: stopped")
+
+type replyRec struct {
+	id message.ID
+	v  any
+}
+
+type failRec struct {
+	id           message.ID
+	code, detail string
+}
+
+// fakeSys is a minimal actorbase.Sys double. It embeds the (nil) interface so
+// any verb the actor never touches nil-panics loudly, and overrides the ones it
+// uses: Recv, Reply, Fail, PublishObs, Self, Life, and After. After is real —
+// the reaper + bind-retry are now sys.After self-wakes (spec §3), so the double
+// must actually schedule delivery of the timer event back into the Recv loop.
+type fakeSys struct {
+	actorbase.Sys
+
+	selfID actor.ActorID
+	recvCh chan actorbase.Msg
+	quit   chan struct{}
+	once   sync.Once
+
 	mu      sync.Mutex
-	written []message.Envelope
+	replies []replyRec
+	fails   []failRec
 }
 
-func (w *recordingWriter) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	w.written = append(w.written, *env)
-	return harness.WriteResult{MessageID: env.ID}, nil
+func newFakeSys(selfID actor.ActorID) *fakeSys {
+	return &fakeSys{selfID: selfID, recvCh: make(chan actorbase.Msg, 16), quit: make(chan struct{})}
 }
 
-func (w *recordingWriter) Written() []message.Envelope {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	out := make([]message.Envelope, len(w.written))
-	copy(out, w.written)
+func (f *fakeSys) push(msg actorbase.Msg) {
+	select {
+	case f.recvCh <- msg:
+	case <-f.quit:
+	}
+}
+
+func (f *fakeSys) stop() { f.once.Do(func() { close(f.quit) }) }
+
+func (f *fakeSys) Recv() (actorbase.Msg, error) {
+	select {
+	case msg := <-f.recvCh:
+		return msg, nil
+	case <-f.quit:
+		return actorbase.Msg{}, errFakeSysStopped
+	}
+}
+
+func (f *fakeSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.replies = append(f.replies, replyRec{id: msg.ID, v: v})
+	return msg.ID, nil
+}
+
+func (f *fakeSys) Fail(msg actorbase.Msg, code, detail string) (message.ID, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.fails = append(f.fails, failRec{id: msg.ID, code: code, detail: detail})
+	return msg.ID, nil
+}
+
+func (f *fakeSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error { return nil }
+
+func (f *fakeSys) Self() actor.ActorID { return f.selfID }
+
+func (f *fakeSys) Life() context.Context { return context.Background() }
+
+// After schedules a self-authored KindEvent delivery after d — the substrate's
+// self-wake, modelled with a real timer. It quits cleanly if the test stops.
+func (f *fakeSys) After(d time.Duration, msgType string, payload any) (schedule.TimerID, error) {
+	raw, _ := json.Marshal(payload)
+	go func() {
+		timer := time.NewTimer(d)
+		defer timer.Stop()
+		select {
+		case <-timer.C:
+			f.push(actorbase.NewMsg(context.Background(), message.Envelope{
+				Kind: message.KindEvent, Type: msgType, Payload: raw,
+			}))
+		case <-f.quit:
+		}
+	}()
+	return schedule.TimerID("fake-timer"), nil
+}
+
+var _ actorbase.Sys = (*fakeSys)(nil)
+
+func (f *fakeSys) repliesSnapshot() []replyRec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]replyRec, len(f.replies))
+	copy(out, f.replies)
 	return out
 }
 
-// waitResponse polls for a kind=response envelope with the given parent_id.
-func (w *recordingWriter) waitResponse(t *testing.T, parentID message.ID, timeout time.Duration) (message.Envelope, bool) {
+func (f *fakeSys) failsSnapshot() []failRec {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]failRec, len(f.fails))
+	copy(out, f.fails)
+	return out
+}
+
+func (f *fakeSys) waitReply(t *testing.T, id message.ID, timeout time.Duration) (replyRec, bool) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		for _, env := range w.Written() {
-			if env.Kind == message.KindResponse && env.ParentID == parentID {
-				return env, true
+		for _, r := range f.repliesSnapshot() {
+			if r.id == id {
+				return r, true
 			}
 		}
 		if time.Now().After(deadline) {
-			return message.Envelope{}, false
+			return replyRec{}, false
 		}
 		time.Sleep(2 * time.Millisecond)
 	}
 }
 
-// startActor builds + starts an xhs adapter on a free port. Cleanup stops it. A
-// short reaper interval keeps the timeout test prompt without a prod constant.
-func startActor(t *testing.T, w *recordingWriter, cfg Config) *Actor {
+func (f *fakeSys) waitFail(t *testing.T, id message.ID, timeout time.Duration) (failRec, bool) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for {
+		for _, r := range f.failsSnapshot() {
+			if r.id == id {
+				return r, true
+			}
+		}
+		if time.Now().After(deadline) {
+			return failRec{}, false
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+}
+
+// startActor builds an xhs actor and runs its Proc body against a fakeSys, in a
+// goroutine (run() blocks in sys.Recv()). Cleanup stops the fakeSys (ending
+// run()'s loop) and joins it. A short reaper interval keeps the timeout test
+// prompt without a prod constant.
+func startActor(t *testing.T, cfg Config) (*Actor, *fakeSys) {
 	t.Helper()
 	if cfg.ListenAddr == "" {
 		cfg.ListenAddr = "127.0.0.1:0"
@@ -67,18 +175,37 @@ func startActor(t *testing.T, w *recordingWriter, cfg Config) *Actor {
 	if cfg.ReaperInterval == 0 {
 		cfg.ReaperInterval = 20 * time.Millisecond
 	}
-	a := NewActor(w, cfg)
-	if err := a.Start(context.Background(), nil); err != nil {
-		t.Fatalf("Start: %v", err)
+	if cfg.BindRetryInterval == 0 {
+		cfg.BindRetryInterval = 20 * time.Millisecond
 	}
-	t.Cleanup(func() { _ = a.Stop(context.Background()) })
-	return a
+	a := NewActor(cfg)
+	sys := newFakeSys(DefaultActorID)
+	done := make(chan error, 1)
+	go func() { done <- a.run(sys) }()
+	t.Cleanup(func() {
+		sys.stop()
+		<-done
+	})
+	waitListening(t, a)
+	return a, sys
+}
+
+// waitListening blocks until run() has bound the device's WS endpoint.
+func waitListening(t *testing.T, a *Actor) {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if a.ListenAddr() != "" {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("device never bound its listen address")
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
 }
 
 // waitOnline blocks until the adapter has registered a live device connection.
-// (Dial returns after the HTTP upgrade handshake, slightly before handleAccept
-// finishes registering the conn — this is the white-box synchronisation that the
-// dropped online event used to provide.)
 func waitOnline(t *testing.T, a *Actor) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)
@@ -129,9 +256,10 @@ func (f *fakeExtension) reply(t *testing.T, up upFrame) {
 	}
 }
 
-func request(id, typ string, payload map[string]any) *message.Envelope {
+// request builds an xhs request Msg of the given type + payload.
+func request(id, typ string, payload map[string]any) actorbase.Msg {
 	body, _ := json.Marshal(payload)
-	return &message.Envelope{
+	return actorbase.NewMsg(context.Background(), message.Envelope{
 		ID:         message.ID(id),
 		ChannelID:  testChannelID,
 		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:main"},
@@ -139,34 +267,17 @@ func request(id, typ string, payload map[string]any) *message.Envelope {
 		Type:       typ,
 		Payload:    body,
 		Visibility: message.VisibilityPublic,
-	}
-}
-
-func responseStatus(t *testing.T, env message.Envelope) (status, errorCode string, result map[string]any) {
-	t.Helper()
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(env.Payload, &m); err != nil {
-		t.Fatalf("decode response payload: %v", err)
-	}
-	_ = json.Unmarshal(m["status"], &status)
-	_ = json.Unmarshal(m["error_code"], &errorCode)
-	result = map[string]any{}
-	_ = json.Unmarshal(env.Payload, &result)
-	return status, errorCode, result
+	})
 }
 
 //  1. Round-trip: a search request flows down to the extension and the reply
-//     comes back as a completed response carrying the result.
+//     comes back as a Reply call carrying the device result.
 func TestRoundTrip(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{})
+	a, sys := startActor(t, Config{})
 	ext := dialExtension(t, a)
 	waitOnline(t, a)
 
-	req := request("req-1", TypeSearch, map[string]any{"keyword": "go", "limit": 5})
-	if err := a.Receive(context.Background(), req); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
+	sys.push(request("req-1", TypeSearch, map[string]any{"keyword": "go", "limit": 5}))
 
 	down := ext.read(t)
 	if down.CorrelationID != "req-1" {
@@ -184,46 +295,39 @@ func TestRoundTrip(t *testing.T) {
 	result, _ := json.Marshal(map[string]any{"results": []map[string]any{{"id": "n1"}}})
 	ext.reply(t, upFrame{CorrelationID: "req-1", OK: true, Result: result})
 
-	resp, ok := w.waitResponse(t, "req-1", 2*time.Second)
+	rep, ok := sys.waitReply(t, "req-1", 2*time.Second)
 	if !ok {
-		t.Fatal("no response for req-1")
+		t.Fatal("no Reply call for req-1")
 	}
-	status, _, body := responseStatus(t, resp)
-	if status != "completed" {
-		t.Errorf("status=%q want completed", status)
+	raw, _ := json.Marshal(rep.v)
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		t.Fatalf("decode reply value: %v", err)
 	}
 	if _, has := body["results"]; !has {
-		t.Errorf("response payload missing results: %v", body)
+		t.Errorf("reply value missing results: %v", rep.v)
 	}
 }
 
 //  2. Offline: with no extension connected, a request fails immediately with
 //     device_offline.
 func TestOffline(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{})
+	_, sys := startActor(t, Config{})
 
-	req := request("req-off", TypeSearch, map[string]any{"keyword": "x"})
-	if err := a.Receive(context.Background(), req); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
-	resp, ok := w.waitResponse(t, "req-off", time.Second)
+	sys.push(request("req-off", TypeSearch, map[string]any{"keyword": "x"}))
+
+	fail, ok := sys.waitFail(t, "req-off", time.Second)
 	if !ok {
-		t.Fatal("no response for req-off")
+		t.Fatal("no Fail call for req-off")
 	}
-	status, code, _ := responseStatus(t, resp)
-	if status != "failed" {
-		t.Errorf("status=%q want failed", status)
-	}
-	if code != "device_offline" {
-		t.Errorf("error_code=%q want device_offline", code)
+	if fail.code != "device_offline" {
+		t.Errorf("code=%q want device_offline", fail.code)
 	}
 }
 
-//  3. Timeout: a connected extension that never replies; the reaper produces a
-//     failed/timeout terminal. NowFn is advanced past the deadline.
+//  3. Timeout: a connected extension that never replies; the reaper self-wake
+//     produces a Fail call with code=timeout. NowFn is advanced past the deadline.
 func TestTimeout(t *testing.T) {
-	w := &recordingWriter{}
 	var mu sync.Mutex
 	base := time.Now()
 	now := func() time.Time {
@@ -231,52 +335,51 @@ func TestTimeout(t *testing.T) {
 		defer mu.Unlock()
 		return base
 	}
-	a := startActor(t, w, Config{NowFn: now})
+	a, sys := startActor(t, Config{NowFn: now})
 	ext := dialExtension(t, a)
 	waitOnline(t, a)
 
-	req := request("req-to", TypeSearch, map[string]any{"keyword": "x"})
-	if err := a.Receive(context.Background(), req); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
+	sys.push(request("req-to", TypeSearch, map[string]any{"keyword": "x"}))
 	_ = ext.read(t) // extension receives but never replies
 
-	// Advance the clock past the short deadline so the reaper collects it.
+	// Advance the clock past the short deadline so the next reaper sweep collects it.
 	mu.Lock()
 	base = base.Add(shortDeadline + time.Second)
 	mu.Unlock()
 
-	resp, ok := w.waitResponse(t, "req-to", 2*time.Second)
+	fail, ok := sys.waitFail(t, "req-to", 2*time.Second)
 	if !ok {
-		t.Fatal("no timeout response for req-to")
+		t.Fatal("no timeout Fail call for req-to")
 	}
-	status, code, _ := responseStatus(t, resp)
-	if status != "failed" {
-		t.Errorf("status=%q want failed", status)
-	}
-	if code != "timeout" {
-		t.Errorf("error_code=%q want timeout", code)
+	if fail.code != "timeout" {
+		t.Errorf("code=%q want timeout", fail.code)
 	}
 }
 
-// 4. Describe: actor.describe returns the four-type catalog.
+//  4. Describe: actor.describe returns the four-type catalog under sys.Self().
 func TestDescribe(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{})
+	_, sys := startActor(t, Config{})
 
-	req := request("req-desc", "actor.describe", map[string]any{})
-	if err := a.Receive(context.Background(), req); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
-	resp, ok := w.waitResponse(t, "req-desc", time.Second)
+	sys.push(actorbase.NewMsg(context.Background(), message.Envelope{
+		ID:         message.ID("req-desc"),
+		ChannelID:  testChannelID,
+		Sender:     message.Sender{Kind: actor.KindAgent, ID: "agent:main"},
+		Kind:       message.KindRequest,
+		Type:       "actor.describe",
+		Payload:    json.RawMessage(`{}`),
+		Visibility: message.VisibilityPublic,
+	}))
+
+	rep, ok := sys.waitReply(t, "req-desc", time.Second)
 	if !ok {
-		t.Fatal("no describe response")
+		t.Fatal("no describe Reply call")
 	}
+	raw, _ := json.Marshal(rep.v)
 	var payload struct {
 		ActorID string                     `json:"actor_id"`
 		Types   map[string]json.RawMessage `json:"types"`
 	}
-	if err := json.Unmarshal(resp.Payload, &payload); err != nil {
+	if err := json.Unmarshal(raw, &payload); err != nil {
 		t.Fatalf("decode describe: %v", err)
 	}
 	if payload.ActorID != string(DefaultActorID) {
@@ -292,48 +395,89 @@ func TestDescribe(t *testing.T) {
 	}
 }
 
-//  5. ConnReplacement: a new device connection displaces the old one (one
-//     adapter, one device). The old socket is closed; the live one serves.
+//  5. ConnReplacement: a new device connection displaces the old one.
 func TestConnReplacement(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{})
+	a, sys := startActor(t, Config{})
 	ext1 := dialExtension(t, a)
 	waitOnline(t, a)
 
 	ext2 := dialExtension(t, a)
 	waitOnline(t, a)
 
-	// ext1 must be displaced: its read errors out once the adapter closes it.
 	_ = ext1.conn.SetReadDeadline(time.Now().Add(time.Second))
 	if _, _, err := ext1.conn.ReadMessage(); err == nil {
 		t.Fatal("expected ext1 to be displaced (read should error)")
 	}
 
-	// The live connection (ext2) serves the next request.
-	req := request("req-repl", TypeSearch, map[string]any{"keyword": "x"})
-	if err := a.Receive(context.Background(), req); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
+	sys.push(request("req-repl", TypeSearch, map[string]any{"keyword": "x"}))
 	down := ext2.read(t)
 	if down.CorrelationID != "req-repl" {
 		t.Errorf("ext2 got correlation_id=%q want req-repl", down.CorrelationID)
 	}
 }
 
-//  6. KindGuard: a non-request (event-kind) addressed to a served type is
-//     dropped — the adapter has no terminal to author, so it emits nothing.
+//  6. KindGuard: a non-request addressed to a served type is dropped.
 func TestKindGuardDropsNonRequest(t *testing.T) {
-	w := &recordingWriter{}
-	a := startActor(t, w, Config{})
+	_, sys := startActor(t, Config{})
 
 	ev := request("ev-1", TypeSearch, map[string]any{"keyword": "x"})
-	ev.Kind = message.KindEvent
-	if err := a.Receive(context.Background(), ev); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
-	// Give any erroneous async path a moment, then assert nothing was emitted.
+	evEnv := message.Envelope{ID: ev.ID, Kind: message.KindEvent, Type: ev.Type, Payload: ev.Payload}
+	sys.push(actorbase.NewMsg(context.Background(), evEnv))
+
 	time.Sleep(30 * time.Millisecond)
-	if got := w.Written(); len(got) != 0 {
-		t.Fatalf("expected no emit for non-request, got %d", len(got))
+	if got := sys.repliesSnapshot(); len(got) != 0 {
+		t.Fatalf("expected no replies for non-request, got %d", len(got))
+	}
+	if got := sys.failsSnapshot(); len(got) != 0 {
+		t.Fatalf("expected no fails for non-request, got %d", len(got))
+	}
+}
+
+//  7. FixedPortReplacement (Q8=B): a successor incarnation on the SAME fixed
+//     loopback port cannot bind while the predecessor holds it; its retry loop
+//     keeps trying and it binds once the predecessor releases the port — the
+//     exclusive-resource contention is resolved by the domain, not the kernel.
+func TestFixedPortReplacementRetriesUntilBound(t *testing.T) {
+	// Reserve a concrete loopback port, then free it so two incarnations can
+	// contend for the exact same addr.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve port: %v", err)
+	}
+	addr := ln.Addr().String()
+	_ = ln.Close()
+
+	// Predecessor binds the port.
+	predecessor, predSys := startActor(t, Config{ListenAddr: addr})
+	if predecessor.ListenAddr() == "" {
+		t.Fatal("predecessor never bound")
+	}
+
+	// Successor on the same addr: its initial bind fails (port held), so it
+	// enters the retry loop rather than dying.
+	successor := NewActor(Config{ListenAddr: addr, BindRetryInterval: 20 * time.Millisecond, ReaperInterval: 20 * time.Millisecond})
+	succSys := newFakeSys(DefaultActorID)
+	done := make(chan error, 1)
+	go func() { done <- successor.run(succSys) }()
+	t.Cleanup(func() {
+		succSys.stop()
+		<-done
+	})
+
+	// It must NOT be bound while the predecessor holds the port.
+	time.Sleep(60 * time.Millisecond)
+	if successor.ListenAddr() != "" {
+		t.Fatal("successor bound while predecessor still held the port")
+	}
+
+	// Release the port (predecessor dies); the successor's retry loop must bind.
+	predSys.stop()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for successor.ListenAddr() == "" {
+		if time.Now().After(deadline) {
+			t.Fatal("successor never bound after predecessor released the port")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }

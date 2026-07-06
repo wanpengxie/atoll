@@ -203,13 +203,11 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 		{
 			ID:      xhs.DefaultActorID,
 			Kind:    actor.KindTool,
-			Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
-				return xhs.NewActor(pen, xhs.Config{
-					ListenAddr:     metatoolXHSDeviceAddr,
-					ReaperInterval: 20 * time.Millisecond,
-					Logger:         logger,
-				})
-			}},
+			Factory: platform.ActorFactory{Proc: xhs.Def(xhs.Config{
+				ListenAddr:     metatoolXHSDeviceAddr,
+				ReaperInterval: 20 * time.Millisecond,
+				Logger:         logger,
+			})},
 		},
 		{
 			ID:      kimi.DefaultActorID,

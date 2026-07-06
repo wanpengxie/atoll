@@ -15,29 +15,29 @@ import (
 
 	"log/slog"
 
-	"github.com/wanpengxie/atoll/lib/behavior"
-	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 )
 
 // device.go is the outward (device) face: a PRIVATE WS endpoint the extension
 // connect-ins to, the single accepted connection, the in-flight correlation
-// table, the read loop, and the deadline reaper. This is the adapter's own
-// closed transport — inlined here, NOT a shared framework piece.
+// table, and the read loop. This is the adapter's own closed transport —
+// inlined here, NOT a shared framework piece.
 //
-// Concurrency: the cell goroutine (Receive) calls dispatch; the read loop +
-// reaper run on their own goroutines. The mutex guards ONLY the in-flight table
-// + the current conn pointer + the stopped flag — never a blocking wire write.
-// dispatch registers under the lock, then writes the frame OUTSIDE the lock with
-// a write deadline, so a stuck peer can never freeze the mutex (which the reaper,
-// Stop, and accept all share). Channel emits (RespondJSON/Fail) go straight
-// through the writer from whichever goroutine closes the request, because the
-// substrate has no self-send.
+// Concurrency: the worker goroutine (Actor.handle) calls dispatch and runs the
+// reaper sweep (driven by sys.After self-wake, spec §3); the read loop runs on
+// its own goroutine. The mutex guards ONLY the in-flight table + the current
+// conn pointer + the stopped flag — never a blocking wire write. dispatch
+// registers under the lock, then writes the frame OUTSIDE the lock with a write
+// deadline, so a stuck peer can never freeze the mutex (which sweep, stop, and
+// accept all share). Terminal writes (sys.Reply/sys.Fail) run straight off
+// whichever goroutine closes the request — legal fan-out (spec §1.2: Sys is
+// concurrency-safe, Msg is immutable) — because the substrate has no self-send.
 //
-// Device presence is tracked internally (conn==nil ⇒ offline ⇒ Receive fast-
+// Device presence is tracked internally (conn==nil ⇒ offline ⇒ handle fast-
 // fails device_offline) AND pushed on its up/down edges via the actor-source obs
-// PUSH axis (owner.publishDevicePresence → ActorContext.PublishObs). That is
-// OUT-OF-BAND obs (non-truth), NOT a channel event / truth-log entry — the home
-// folds it into a volatile L3 level (advisory; authoritative reachability stays
+// PUSH axis (owner.publishDevicePresence → Sys.PublishObs). That is OUT-OF-BAND
+// obs (non-truth), NOT a channel event / truth-log entry — the home folds it
+// into a volatile L3 level (advisory; authoritative reachability stays
 // send→terminal). See actor.go publishDevicePresence.
 //
 // Liveness limit (v1): this endpoint serves a LOCAL loopback extension, so a
@@ -70,20 +70,19 @@ const maxDeviceFrameBytes = 4 << 20 // 4 MiB
 const deviceWriteTimeout = 5 * time.Second
 
 // pending is one in-flight request awaiting its device reply. The original
-// request envelope is held in-hand so the closing path (read loop or reaper)
-// can author the channel response/terminal without recovering it from truth.
+// delivery is held in-hand (as its Msg, not a re-fetched envelope) so the
+// closing path (read loop or reaper sweep) can call sys.Reply/sys.Fail directly.
 type pending struct {
-	request  *message.Envelope
+	request  actorbase.Msg
 	deadline time.Time
 }
 
 // device owns the adapter's outward transport.
 type device struct {
-	owner          *Actor // back-reference for pen + clock
-	addrCfg        string
-	clock          func() time.Time
-	reaperInterval time.Duration
-	logger         *slog.Logger
+	owner   *Actor // back-reference for sys + clock
+	addrCfg string
+	clock   func() time.Time
+	logger  *slog.Logger
 
 	srv      *http.Server
 	listener net.Listener
@@ -94,23 +93,20 @@ type device struct {
 	stopped  bool
 
 	stopOnce sync.Once
-	stopCh   chan struct{}
 	wg       sync.WaitGroup
 }
 
-func newDevice(owner *Actor, addr string, clock func() time.Time, reaperInterval time.Duration, logger *slog.Logger) *device {
+func newDevice(owner *Actor, addr string, clock func() time.Time, logger *slog.Logger) *device {
 	return &device{
-		owner:          owner,
-		addrCfg:        addr,
-		clock:          clock,
-		reaperInterval: reaperInterval,
-		logger:         logger,
-		inflight:       make(map[string]*pending),
-		stopCh:         make(chan struct{}),
+		owner:    owner,
+		addrCfg:  addr,
+		clock:    clock,
+		logger:   logger,
+		inflight: make(map[string]*pending),
 	}
 }
 
-// addr returns the resolved listen address (post-bind), or "" before Start.
+// addr returns the resolved listen address (post-bind), or "" before run() binds.
 func (d *device) addr() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -120,9 +116,19 @@ func (d *device) addr() string {
 	return d.listener.Addr().String()
 }
 
-// start binds the WS endpoint and boots the serve + reaper goroutines. A bind
-// failure is returned so the cell dies fast.
-func (d *device) start(ctx context.Context) error {
+// bound reports whether the endpoint has already bound its listener — the retry
+// loop's idempotency guard (a listener is a bound-once resource).
+func (d *device) bound() bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.listener != nil
+}
+
+// start binds the WS endpoint and boots the serve goroutine. A bind failure is
+// returned so the caller (tryBind) can retry — the exclusive loopback port may
+// still be held by a predecessor incarnation (Q8=B). The reaper is NOT a
+// goroutine here: it is swept on the worker via sys.After self-wake (spec §3).
+func (d *device) start() error {
 	ln, err := net.Listen("tcp", d.addrCfg)
 	if err != nil {
 		return fmt.Errorf("xhs: device listen %q: %w", d.addrCfg, err)
@@ -134,9 +140,8 @@ func (d *device) start(ctx context.Context) error {
 	d.srv = &http.Server{Handler: mux}
 	d.mu.Unlock()
 
-	d.wg.Add(2)
+	d.wg.Add(1)
 	go d.serve(ln)
-	go d.reaper(ctx)
 	return nil
 }
 
@@ -151,10 +156,10 @@ func (d *device) serve(ln net.Listener) {
 // stop shuts the endpoint, closes the conn, and joins the goroutines. The
 // stopped flag is set under the lock BEFORE wg.Wait so a concurrent handleAccept
 // either observes it (and bails without wg.Add) or already counted itself — Add
-// can never race Wait.
+// can never race Wait. Idempotent + safe to call when the endpoint never bound
+// (srv/listener stay nil, wg has zero counts).
 func (d *device) stop(ctx context.Context) error {
 	d.stopOnce.Do(func() {
-		close(d.stopCh)
 		d.mu.Lock()
 		d.stopped = true
 		conn := d.conn
@@ -204,7 +209,7 @@ func (d *device) handleAccept(w http.ResponseWriter, r *http.Request) {
 	d.wg.Add(1)
 	d.mu.Unlock()
 
-	d.logger.Info("xhs.device.online", "actor", string(d.owner.actorID))
+	d.logger.Info("xhs.device.online", "actor", string(d.owner.sys.Self()))
 	d.owner.publishDevicePresence(true)
 	go d.readLoop(conn)
 }
@@ -232,15 +237,16 @@ func (d *device) readLoop(conn *websocket.Conn) {
 	d.mu.Unlock()
 	if live {
 		_ = conn.Close()
-		d.logger.Info("xhs.device.offline", "actor", string(d.owner.actorID))
+		d.logger.Info("xhs.device.offline", "actor", string(d.owner.sys.Self()))
 		d.owner.publishDevicePresence(false)
 	}
 }
 
 // handleUp matches one reply to its in-flight request and authors the channel
-// terminal. An unknown correlation_id (already reaped, or a stray) is dropped.
-// Taking the pending out of the table under the lock makes the close atomic: a
-// correlation can be claimed by the read loop OR the reaper, never both.
+// terminal directly through sys.Reply/sys.Fail. An unknown correlation_id
+// (already reaped, or a stray) is dropped. Taking the pending out of the table
+// under the lock makes the close atomic: a correlation can be claimed by the
+// read loop OR the reaper, never both.
 func (d *device) handleUp(up upFrame) {
 	d.mu.Lock()
 	p, ok := d.inflight[up.CorrelationID]
@@ -252,13 +258,12 @@ func (d *device) handleUp(up upFrame) {
 		return
 	}
 
-	ctx := context.Background()
 	if up.OK {
 		var result any = map[string]any{}
 		if len(up.Result) > 0 {
 			result = up.Result
 		}
-		if _, err := behavior.RespondJSON(ctx, d.owner.pen, d.clock, p.request, result); err != nil {
+		if _, err := d.owner.sys.Reply(p.request, result); err != nil {
 			d.logger.Warn("xhs.device.respond_failed", "correlation_id", up.CorrelationID, "err", err.Error())
 		}
 		return
@@ -271,19 +276,19 @@ func (d *device) handleUp(up upFrame) {
 		}
 		detail = up.Error.Message
 	}
-	if _, err := behavior.Fail(ctx, d.owner.pen, d.clock, p.request, code, detail); err != nil {
+	if _, err := d.owner.sys.Fail(p.request, code, detail); err != nil {
 		d.logger.Warn("xhs.device.fail_failed", "correlation_id", up.CorrelationID, "err", err.Error())
 	}
 }
 
 // dispatch encodes + registers + sends one request down to the device. It
 // returns an error ONLY for the digestible offline case (no live conn); the
-// caller (Receive) turns that into a device_offline business failure. A write
-// error after registration is left to the reaper (the request stays in-flight
-// and times out) rather than racing a second terminal.
-func (d *device) dispatch(_ context.Context, env *message.Envelope, spec typeSpec, params json.RawMessage) error {
+// caller (Actor.handle) turns that into a device_offline business failure. A
+// write error after registration is left to the reaper (the request stays
+// in-flight and times out) rather than racing a second terminal.
+func (d *device) dispatch(msg actorbase.Msg, spec typeSpec, params json.RawMessage) error {
 	frame := downFrame{
-		CorrelationID: string(env.ID),
+		CorrelationID: string(msg.ID),
 		Cmd:           spec.cmd,
 		Params:        params,
 	}
@@ -295,15 +300,14 @@ func (d *device) dispatch(_ context.Context, env *message.Envelope, spec typeSpe
 		return errors.New("no xhs device connected")
 	}
 	// Register before sending so a fast reply can never find an empty table.
-	reqCopy := *env
-	d.inflight[string(env.ID)] = &pending{
-		request:  &reqCopy,
+	d.inflight[string(msg.ID)] = &pending{
+		request:  msg,
 		deadline: d.clock().Add(spec.deadline),
 	}
 	d.mu.Unlock()
 
 	// Write OUTSIDE the lock, with a deadline: a stuck peer must never freeze the
-	// mutex. Only the cell goroutine dispatches, so conn writes stay single-
+	// mutex. Only the worker goroutine dispatches, so conn writes stay single-
 	// writer (gorilla's rule). The socket deadline is REAL wall-clock, not the
 	// injectable logical clock.
 	_ = conn.SetWriteDeadline(time.Now().Add(deviceWriteTimeout))
@@ -311,7 +315,7 @@ func (d *device) dispatch(_ context.Context, env *message.Envelope, spec typeSpe
 		// The frame did not reach the device. Leave the entry in-flight (the
 		// reaper times it out); treat the conn as dead so the next dispatch sees
 		// offline.
-		d.logger.Warn("xhs.device.write_failed", "correlation_id", string(env.ID), "err", err.Error())
+		d.logger.Warn("xhs.device.write_failed", "correlation_id", string(msg.ID), "err", err.Error())
 		d.dropConn(conn)
 	}
 	return nil
@@ -329,29 +333,13 @@ func (d *device) dropConn(conn *websocket.Conn) {
 	d.conn = nil
 	d.mu.Unlock()
 	_ = conn.Close()
-	d.logger.Info("xhs.device.offline", "actor", string(d.owner.actorID))
+	d.logger.Info("xhs.device.offline", "actor", string(d.owner.sys.Self()))
 	d.owner.publishDevicePresence(false)
 }
 
-// reaper sweeps the in-flight table for past-deadline requests and fails them
-// with timeout. It is the one timeout authority — the read loop never times
-// out, the reaper never matches replies.
-func (d *device) reaper(ctx context.Context) {
-	defer d.wg.Done()
-	ticker := time.NewTicker(d.reaperInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-d.stopCh:
-			return
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			d.sweep()
-		}
-	}
-}
-
+// sweep fails every past-deadline in-flight request with timeout. It is the one
+// timeout authority — the read loop never times out, sweep never matches
+// replies. Called on the worker goroutine off the reaper self-wake (spec §3).
 func (d *device) sweep() {
 	now := d.clock()
 	var expired []*pending
@@ -365,7 +353,7 @@ func (d *device) sweep() {
 	d.mu.Unlock()
 
 	for _, p := range expired {
-		if _, err := behavior.Fail(context.Background(), d.owner.pen, d.clock, p.request, "timeout", "device did not reply within deadline"); err != nil {
+		if _, err := d.owner.sys.Fail(p.request, "timeout", "device did not reply within deadline"); err != nil {
 			d.logger.Warn("xhs.device.timeout_fail_failed", "request_id", string(p.request.ID), "err", err.Error())
 		}
 	}

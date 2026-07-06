@@ -86,6 +86,16 @@ func TestPluginDirsForbidCapsAndDoorImports(t *testing.T) {
 		if !inPlugin {
 			return
 		}
+		// A plugin _test.go implementing an actorbase.Sys double must name
+		// schedule.TimerID (Sys.After's return type) once the adapter migrated
+		// to Proc (期10 S3) — a test double is not a production adapter reaching
+		// for a minting surface, the same "_test.go doubles are exempt"
+		// principle rule ④ already uses. The whole caps bundle stays banned even
+		// in tests here (and repo-wide via rule ①); only the raw
+		// accessdoor/schedule minting surfaces are relaxed for test doubles.
+		if strings.HasSuffix(slash, "_test.go") && imp != actorcapsPkg {
+			return
+		}
 		if why, banned := forbidden[imp]; banned {
 			v = append(v, fmt.Sprintf(
 				"%s imports %q (%s) — plugin dirs are adapters over harness.Pen only (逃生门纪律: reaching for more means changing身份/目录, not importing the enforcement package from here)",
@@ -146,19 +156,17 @@ func TestNoOldCapsFactoryShapeResidual(t *testing.T) {
 
 // directActorImplementAllowlist is ④'s exact allowlist (spec: "直接实现
 // actorrt.Actor 者仅引擎+测试 stub"): lib/actorbase's engine is the ONE
-// production implementer this period; the rest are the S5/S5b migration
-// queue named explicitly in the spec (echo → actors/kimi(+xhs/device, same
-// adapter shape) → sysactor → agent providers) — each entry SHRINKS this set
-// as it migrates to actorbase.Proc, it never grows. _test.go stubs are exempt
-// everywhere (a test double is not a production implementer). echo, kimi
-// (actors/kimi) and sysactor have migrated (spec §4 S5/S5b) and are gone from
-// this list.
+// production implementer this period; the rest are the remaining migration
+// queue — each entry SHRINKS this set as it migrates to actorbase.Proc, it
+// never grows. _test.go stubs are exempt everywhere (a test double is not a
+// production implementer). echo, kimi (actors/kimi), sysactor, and now the
+// plugin adapters xhs + actors/device (期10 S3) have migrated to
+// actorbase.Proc and are gone from this list; only the two agent-provider
+// bridges remain (期10 S5).
 var directActorImplementAllowlist = []string{
 	"../lib/actorbase/engine.go",             // the sanctioned engine (spec §3)
-	"../actors/xhs/actor.go",                 // S5/S5b migration queue
-	"../actors/device/actor.go",              // S5/S5b migration queue
-	"../agent/provider/kimi/bridge.go",       // S5b migration queue
-	"../agent/provider/claudecode/bridge.go", // S5b migration queue
+	"../agent/provider/kimi/bridge.go",       // 期10 S5 migration queue
+	"../agent/provider/claudecode/bridge.go", // 期10 S5 migration queue
 	// ../app/human.go is GONE: the old humanFront (a direct actorrt.Actor
 	// implementer holding a Pen) was整删 with the subjectgate door (S4) — the
 	// human is now embodied by the platform-internal Proc cell (humancell.go), and

@@ -35,7 +35,12 @@ type Config struct {
 	// defaults to defaultReaperInterval. Injectable so tests catch shortened
 	// deadlines promptly without a production-tuned constant.
 	ReaperInterval time.Duration
-	// Logger surfaces device-face edges (accept/drop/reaper). Defaults to a
+	// BindRetryInterval is how long the retry loop waits between listen attempts
+	// when the loopback port is still held (Q8=B: exclusive-resource contention
+	// is domain policy — the actor re-tries until it can bind or is killed).
+	// Defaults to defaultBindRetryInterval; tests inject a shorter one.
+	BindRetryInterval time.Duration
+	// Logger surfaces device-face edges (accept/drop/reaper/bind). Defaults to a
 	// discard logger.
 	Logger *slog.Logger
 }
@@ -43,6 +48,20 @@ type Config struct {
 // defaultReaperInterval is the production in-flight sweep cadence. The table is
 // tiny, so a 1s scan is cheap; tests inject a shorter one.
 const defaultReaperInterval = time.Second
+
+// defaultBindRetryInterval is the production listen-retry cadence for the
+// exclusive loopback port (Q8=B). A predecessor incarnation releases the port
+// within its death grace, so a sub-second retry lands the successor promptly.
+const defaultBindRetryInterval = 500 * time.Millisecond
+
+// Internal self-authored wake types (spec §3: reaper migrated from a private
+// ticker goroutine to sys.After self-wake, swept on the worker goroutine). They
+// are KindEvent messages the incarnation sends to itself; run()'s loop
+// intercepts them before dispatch, so they never reach the business handler.
+const (
+	reaperTickType = "kimi.internal.reaper_tick"
+	bindRetryType  = "kimi.internal.bind_retry"
+)
 
 // Actor is the kimi (Kimi WebBridge) adapter's process state. The inward
 // (channel) face is run()'s dispatch off sys.Recv(); the outward (device) face
@@ -61,9 +80,12 @@ const defaultReaperInterval = time.Second
 // device params are the payload's `args`. The closed set is the action allowlist
 // (types.go), not a multi-type table.
 type Actor struct {
-	sys   actorbase.Sys
-	clock func() time.Time
-	dev   *device
+	sys               actorbase.Sys
+	clock             func() time.Time
+	dev               *device
+	reaperInterval    time.Duration
+	bindRetryInterval time.Duration
+	logger            *slog.Logger
 }
 
 // NewActor builds a kimi adapter bound to its config. The device endpoint is
@@ -82,8 +104,17 @@ func NewActor(cfg Config) *Actor {
 	if reaperInterval <= 0 {
 		reaperInterval = defaultReaperInterval
 	}
-	a := &Actor{clock: clock}
-	a.dev = newDevice(a, cfg.ListenAddr, clock, reaperInterval, logger)
+	bindRetryInterval := cfg.BindRetryInterval
+	if bindRetryInterval <= 0 {
+		bindRetryInterval = defaultBindRetryInterval
+	}
+	a := &Actor{
+		clock:             clock,
+		reaperInterval:    reaperInterval,
+		bindRetryInterval: bindRetryInterval,
+		logger:            logger,
+	}
+	a.dev = newDevice(a, cfg.ListenAddr, clock, logger)
 	return a
 }
 
@@ -106,27 +137,50 @@ func Def(cfg Config) actorbase.Def {
 func (a *Actor) run(sys actorbase.Sys) error {
 	a.sys = sys
 	// The trust model assumes a loopback bind (only same-machine processes can
-	// reach the keyless endpoint). A non-loopback addr is a CONFIG ERROR: it
-	// would expose the keyless device port to the network. Fail fast
-	// (positive death) rather than start a serviceable-but-exposed endpoint.
+	// reach the keyless endpoint). A non-loopback addr is a CONFIG ERROR (not a
+	// resource-contention error): fail fast (positive death) rather than retry
+	// forever or start a serviceable-but-exposed endpoint.
 	if !isLoopbackAddr(a.dev.addrCfg) {
 		return fmt.Errorf("kimi: device endpoint is keyless and trusts localhost; refusing non-loopback bind %q (use 127.0.0.1)", a.dev.addrCfg)
-	}
-	if err := a.dev.start(sys.Life()); err != nil {
-		return err
 	}
 	defer func() { _ = a.dev.stop(context.Background()) }()
 	// Initial L3 edge: a connection-bearing adapter KNOWS it starts disconnected —
 	// publish offline so the home shows a definite state, not unknown.
 	a.publishDevicePresence(false)
+	a.tryBind()
 
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
 			return err
 		}
-		a.handle(msg)
+		switch msg.Type {
+		case bindRetryType:
+			a.tryBind()
+		case reaperTickType:
+			a.dev.sweep()
+			_, _ = a.sys.After(a.reaperInterval, reaperTickType, nil)
+		default:
+			a.handle(msg)
+		}
 	}
+}
+
+// tryBind attempts to listen on the exclusive loopback port. On success it arms
+// the reaper self-wake; on failure (the port is still held by a predecessor
+// incarnation — Q8=B) it schedules a retry and returns without dying. The
+// listener is a bound-once resource, so an already-bound device short-circuits.
+func (a *Actor) tryBind() {
+	if a.dev.bound() {
+		return
+	}
+	if err := a.dev.start(); err != nil {
+		a.logger.Warn("kimi.device.bind_retry", "addr", a.dev.addrCfg, "err", err.Error())
+		_, _ = a.sys.After(a.bindRetryInterval, bindRetryType, nil)
+		return
+	}
+	// Bound: arm the first reaper tick; each tick re-arms the next in run().
+	_, _ = a.sys.After(a.reaperInterval, reaperTickType, nil)
 }
 
 // publishDevicePresence pushes a device-presence edge (L3) on the actor-source obs axis.

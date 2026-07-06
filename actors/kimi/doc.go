@@ -30,15 +30,16 @@
 // the current device conn + an in-flight table keyed by correlation_id (as its
 // own Msg, not a re-fetched envelope — sys.Reply/sys.Fail take the Msg
 // in-hand). Because Sys is concurrency-safe and Msg is immutable (spec §1.2
-// fan-out), the device's read-loop + reaper goroutines call sys.Reply/sys.Fail
-// directly to close a request; an internal mutex guards the conn + in-flight
-// table (the one cross-goroutine state device.go itself owns).
+// fan-out), the device's read-loop goroutine calls sys.Reply/sys.Fail directly
+// to close a request; an internal mutex guards the conn + in-flight table (the
+// one cross-goroutine state device.go itself owns). The reaper is not a
+// goroutine: it sweeps on the worker off a sys.After self-wake (期10 S3).
 //
 // Fault posture (let-it-crash): a single request that times out or hits an
-// offline device fails as a business response (the actor digests it). A reaper
-// goroutine sweeps the in-flight table for past-deadline requests (single 60s
-// budget — browser actions are sub-second to a few seconds, no minutes-long
-// operation). A dropped conn flips the adapter offline and waits for a fresh
+// offline device fails as a business response (the actor digests it). The
+// reaper sweep (armed by sys.After self-wake, run on the worker) collects
+// past-deadline requests (single 60s budget — browser actions are sub-second to
+// a few seconds, no minutes-long operation). A dropped conn flips the adapter offline and waits for a fresh
 // connection — it does NOT panic; only an untrustworthy internal state would
 // (positive death, i.e. run() returning a non-nil error).
 //
@@ -61,7 +62,7 @@
 //
 //   - actor.go    Actor struct + NewActor + Def + run (Proc body) + handle
 //     dispatch + describe dispatch.
-//   - device.go   WS listener + accept + read loop + in-flight table + reaper +
+//   - device.go   WS listener + accept + read loop + in-flight table + sweep +
 //     downstream send (write-deadline bounded).
 //   - wire.go     the minimal device frame structs.
 //   - types.go    the single inward type + action allowlist + payload shape + deadline.
