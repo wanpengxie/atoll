@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,6 +19,10 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
+
+// errTestSeedAdmitFail is the forced failure the seedAdmitFailForTest seam raises
+// in place of a real seeding Admit, to drive the create-channel rollback path.
+var errTestSeedAdmitFail = errors.New("app: forced seed admit failure (test)")
 
 // ---------------------------------------------------------------------------
 // Channel handlers
@@ -128,20 +133,47 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 		return
 	}
 
+	// The two seeding Admits are REQUIRED stages of the create transaction, not
+	// best-effort: a channel whose creator is not a member, or whose seeded boost
+	// intent row has no matching membership (filtered to a never-embodied dead row
+	// under desired=intent∩membership), is a half-built channel. On either failure,
+	// tear the whole thing down — close the home and roll back the channel row —
+	// and return 5xx, so the caller sees a clean failure it can retry, never a
+	// silent 201 over a broken channel.
+	admit := func(id actor.ActorID, kind actor.Kind) error {
+		if a.seedAdmitFailForTest {
+			return errTestSeedAdmitFail
+		}
+		return home.Admit(c.Request.Context(), id, kind)
+	}
+	rollback := func(stage string, err error) {
+		cID := channel.ID(chID)
+		a.mu.Lock()
+		if h, ok := a.homes[cID]; ok {
+			_ = h.Close()
+			delete(a.homes, cID)
+		}
+		a.mu.Unlock()
+		_, _ = a.db.ExecContext(c.Request.Context(), `DELETE FROM channels WHERE id = ?`, chID)
+		a.logger.Error("create channel: "+stage, "channel", chID, "err", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+	}
+
 	actorID := actor.ActorID("user:" + userID)
 	// Membrane law: the creator is a member. Admit is the pure-membership动词 —
 	// the creating user's not→member edge (§4.6). No cell here (the human is
 	// embodied by the ring / subjectgate, never welded at this call site).
-	if mErr := home.Admit(c.Request.Context(), actorID, actor.KindHuman); mErr != nil {
-		a.logger.Warn("app: channel creator admit failed", "channel", chID, "err", mErr.Error())
+	if mErr := admit(actorID, actor.KindHuman); mErr != nil {
+		rollback("creator admit", mErr)
+		return
 	}
 	// Template seeding is a PAIR: the seeded boost composition intent row (written
-	// in the tx above) + its durable membership admission. Intent without
-	// membership is filtered to a never-embodied dead row under desired=intent∩
-	// membership; the Admit closes the pair. Idempotent (re-Admit is a no-op-shaped
-	// upsert), and it pokes the ring so boost embodies without waiting a tick.
-	if mErr := home.Admit(c.Request.Context(), defaultAgentInstanceID, actor.KindAgent); mErr != nil {
-		a.logger.Warn("app: channel boost admit failed", "channel", chID, "err", mErr.Error())
+	// in the tx above) + its durable membership admission. Idempotent (re-Admit is
+	// a no-op-shaped upsert), and it pokes the ring so boost embodies without
+	// waiting a tick.
+	if mErr := admit(defaultAgentInstanceID, actor.KindAgent); mErr != nil {
+		rollback("boost admit", mErr)
+		return
 	}
 
 	c.JSON(http.StatusCreated, gin.H{

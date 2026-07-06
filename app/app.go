@@ -41,6 +41,17 @@ type App struct {
 	// door's terminal reply before returning 202 + request_id (前端语义不变). A test
 	// seam sets it tiny to exercise the timeout branch deterministically.
 	controlShimTimeout time.Duration
+
+	// seedAdmitFailForTest forces the create-channel seeding Admits (creator +
+	// boost) to fail, so a test can exercise the transactional rollback path
+	// (close home + delete the channel row + 5xx). Nil/false in production.
+	seedAdmitFailForTest bool
+
+	// revokeFailForTest forces the daemon-delete revocation persist (desired_host
+	// clear) to fail, so a test can prove the handler returns 5xx and does NOT
+	// report ok / Kick when the revocation did not reach durable storage.
+	// Nil/false in production.
+	revokeFailForTest bool
 }
 
 // Config configures the App.

@@ -174,12 +174,26 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 		return
 	}
 	// Clear desired_host on this daemon's rows (placement恒不变; the pool row stays,
-	// no daemon claims it, the live cell is simply absent until a re-指派).
-	_, _ = a.db.ExecContext(ctx,
-		`UPDATE channel_actors SET desired_host = '' WHERE desired_host = ?`, daemonID)
-	_, _ = a.db.ExecContext(ctx,
-		`DELETE FROM daemons WHERE id = ? AND owner_id = ?`, daemonID, userID)
+	// no daemon claims it, the live cell is simply absent until a re-指派). This and
+	// the daemons-row delete are REVOCATION persistence, not best-effort: a swallowed
+	// error would return ok while the key/host binding still lived. Check both; on
+	// failure return 5xx and do NOT Kick (a link kicked but not revoked reconnects).
+	if a.revokeFailForTest {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	if _, err := a.db.ExecContext(ctx,
+		`UPDATE channel_actors SET desired_host = '' WHERE desired_host = ?`, daemonID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	if _, err := a.db.ExecContext(ctx,
+		`DELETE FROM daemons WHERE id = ? AND owner_id = ?`, daemonID, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
 
+	// Only now that the revocation is durable do we Kick the live links to silence.
 	for _, ch := range bound {
 		a.kickDaemonConverge(channel.ID(ch), daemonID)
 	}

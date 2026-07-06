@@ -194,6 +194,15 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		_, _ = x.a.db.ExecContext(ctx,
 			`UPDATE channels SET default_agent = ? WHERE id = ?`, instanceID, string(req.ChannelID))
 	}
+	// The effective class is now final: a pre-existing row froze engine to exClass
+	// (SW-8). Re-derive kind from THAT class, not the request's engine — a半失败
+	// retry (intent landed, Admit didn't) whose request carries a different class
+	// must Admit under the row's ACTUAL class-kind, never the request's stale one
+	// (the kind precheck above only guards the create path's unknown-class reject).
+	kind, ok = registry.ClassKind(engine)
+	if !ok {
+		return nil, &platform.OperateError{Code: "unknown_class", Detail: engine}
+	}
 	// ensure Admit (idempotent) — pokes the ring; embodiment lands on the next sweep.
 	if err := home.Admit(ctx, actor.ActorID(instanceID), kind); err != nil {
 		return nil, err

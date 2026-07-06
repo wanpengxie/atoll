@@ -29,6 +29,27 @@ func (a *App) OperateFaceForTest() platform.OperateExecutor {
 	return a.operateFace()
 }
 
+// SetSeedAdmitFailForTest forces the create-channel seeding Admits to fail so a
+// test can drive the transactional rollback (close home + delete channel row +
+// 5xx). Test-only.
+func (a *App) SetSeedAdmitFailForTest(v bool) { a.seedAdmitFailForTest = v }
+
+// SetRevokeFailForTest forces the daemon-delete revocation persist to fail so a
+// test can prove the handler returns 5xx (not a false ok) when revocation does
+// not reach durable storage. Test-only.
+func (a *App) SetRevokeFailForTest(v bool) { a.revokeFailForTest = v }
+
+// SeedIntentRowForTest inserts a raw channel_actors intent row WITHOUT admitting
+// its membership — reproducing the半失败 state (intent landed, Admit did not) an
+// Introduce retry must heal, so a test can assert the retry Admits under the
+// FROZEN row's class-kind, not the request's. Test-only.
+func (a *App) SeedIntentRowForTest(chID, instanceID, class, placement string) error {
+	_, err := a.db.ExecContext(context.Background(),
+		`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
+		chID, instanceID, class, placement)
+	return err
+}
+
 // Handler exposes the assembled gin engine as an http.Handler so black-box
 // (package app_test) tests can drive the whole server through httptest without
 // binding a port. It lives in export_test.go on purpose: compiled only under

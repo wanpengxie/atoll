@@ -159,8 +159,24 @@ func (p *planSource) Members(ctx context.Context) ([]actorrt.DesiredMember, erro
 	var desired []actorrt.DesiredMember
 	builders := map[actor.ActorID]platform.ActorFactory{}
 	for _, asg := range plan {
+		id := actor.ActorID(asg.InstanceID)
+		// Desired is generated from the plan row ALONE (ClassKind, a pure pre-Build
+		// table lookup), decoupled from Build. So a per-row Build failure (missing
+		// creds, transient) keeps the id IN desired — the ring finds no builder,
+		// records it infeasible, and retries next tick, while computeRing's削臂
+		// (prevCurrent−current) never culls a live cell that is still in the plan.
+		// Only a plan that genuinely drops the row removes it from desired. An
+		// unknown class has no derivable kind (unactivatable) — skipped, as the
+		// server-side compositionDesired does.
+		kind, ok := registry.ClassKind(asg.Class)
+		if !ok {
+			p.logger.Error("daemon: unknown class in plan, skipping",
+				"instance", asg.InstanceID, "class", asg.Class)
+			continue
+		}
+		desired = append(desired, actorrt.DesiredMember{ID: id, Kind: kind, Lifecycle: actorrt.LifecycleAlwaysOn})
 		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
-			ID:     actor.ActorID(asg.InstanceID),
+			ID:     id,
 			Config: asg.Config,
 		}, registry.Deps{
 			ChannelID:    channel.ID(p.chID),
@@ -173,7 +189,6 @@ func (p *planSource) Members(ctx context.Context) ([]actorrt.DesiredMember, erro
 				"instance", asg.InstanceID, "class", asg.Class, "err", berr.Error())
 			continue
 		}
-		desired = append(desired, actorrt.DesiredMember{ID: decl.ID, Kind: decl.Kind, Lifecycle: actorrt.LifecycleAlwaysOn})
 		builders[decl.ID] = decl.Factory
 	}
 	p.mu.Lock()
@@ -183,7 +198,8 @@ func (p *planSource) Members(ctx context.Context) ([]actorrt.DesiredMember, erro
 	p.lastBuilt = len(desired)
 	p.mu.Unlock()
 	if changed {
-		p.logger.Info("daemon: composition", "channel", p.chID, "assigned", len(plan), "built", len(desired))
+		p.logger.Info("daemon: composition", "channel", p.chID,
+			"assigned", len(plan), "desired", len(desired), "built", len(builders))
 	}
 	return desired, nil
 }

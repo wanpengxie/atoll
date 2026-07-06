@@ -36,14 +36,18 @@ const compositionSelect = `SELECT ca.instance_id, ca.class, COALESCE(ca.config_j
 	   LEFT JOIN agents a ON ca.instance_id = 'agent:' || a.id
 	  WHERE ca.channel_id = ?`
 
-// scanCompositionRows drains rows into compositionRow (shared scan; a per-row scan
-// error skips that row, never aborts the set).
+// scanCompositionRows drains rows into compositionRow (shared scan). A scan error
+// ABORTS with an error rather than skipping the row: this set feeds the reconcile
+// ring's desired source, where a silently-missing row reads as "no longer desired"
+// and gets its live cell culled. Fail-closed — the platform ring's union atomicity
+// turns the error into a whole-tick abort (nothing culled), so a transient scan
+// glitch never sheds a still-desired actor.
 func scanCompositionRows(rows *sql.Rows) ([]compositionRow, error) {
 	var out []compositionRow
 	for rows.Next() {
 		var r compositionRow
 		if err := rows.Scan(&r.instanceID, &r.class, &r.channelCfg, &r.globalCfg); err != nil {
-			continue
+			return nil, err
 		}
 		out = append(out, r)
 	}

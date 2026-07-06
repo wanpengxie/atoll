@@ -2,12 +2,36 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/registry"
 )
+
+// Test-only classes: one that builds, one whose constructor always errors. They
+// let TestPlanSource_BuildFailureDoesNotCullDesired drive a per-row Build failure
+// deterministically (real classes need creds/config to fail).
+func init() {
+	registry.Register("test-ok-daemon", registry.ClassDecl{
+		Kind: actor.KindAgent,
+		New: func(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
+			return platform.ActorDecl{ID: spec.ID, Kind: actor.KindAgent}, nil
+		},
+	})
+	registry.Register("test-fail-daemon", registry.ClassDecl{
+		Kind: actor.KindAgent,
+		New: func(registry.InstanceSpec, registry.Deps) (platform.ActorDecl, error) {
+			return platform.ActorDecl{}, fmt.Errorf("forced build failure")
+		},
+	})
+}
 
 // TestPlanURLFromWS pins the ws→http(s) + /compute/plan derivation the daemon
 // uses to pull its assignment.
@@ -69,5 +93,41 @@ func TestFetchPlan_Non200(t *testing.T) {
 	serverWS := "ws://" + strings.TrimPrefix(srv.URL, "http://") + "/compute"
 	if _, err := fetchPlan(context.Background(), serverWS, "bad", "c1"); err == nil {
 		t.Fatal("non-200 plan fetch should error")
+	}
+}
+
+// TestPlanSource_BuildFailureDoesNotCullDesired pins the削臂 fix: a per-row Build
+// failure must NOT drop the row from the desired set (which would let computeRing
+// cull a still-assigned live cell). Desired is generated from the plan row itself;
+// only the BUILDER is absent for the failing row → the ring records it infeasible
+// and retries, while the buildable row and every other plan member stay desired.
+func TestPlanSource_BuildFailureDoesNotCullDesired(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"assignments":[
+			{"instance_id":"agent:ok","class":"test-ok-daemon"},
+			{"instance_id":"agent:bad","class":"test-fail-daemon"}]}`)
+	}))
+	defer srv.Close()
+
+	serverWS := "ws://" + strings.TrimPrefix(srv.URL, "http://") + "/compute"
+	p := newPlanSource(serverWS, "k", "c", "", "dev", slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	desired, err := p.Members(context.Background())
+	if err != nil {
+		t.Fatalf("Members: %v", err)
+	}
+	got := map[actor.ActorID]bool{}
+	for _, d := range desired {
+		got[d.ID] = true
+	}
+	if !got["agent:ok"] || !got["agent:bad"] {
+		t.Fatalf("desired must contain BOTH the buildable and the build-failing row (no cull), got %v", got)
+	}
+	if _, ok := p.Lookup("agent:ok"); !ok {
+		t.Fatal("buildable row must have a builder")
+	}
+	if _, ok := p.Lookup("agent:bad"); ok {
+		t.Fatal("build-failing row must have NO builder (infeasible → retried), yet stay in desired")
 	}
 }
