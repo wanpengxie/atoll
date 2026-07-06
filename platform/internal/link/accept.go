@@ -73,6 +73,12 @@ type Acceptor struct {
 	obsMu      sync.Mutex
 	obsReg     map[actor.ActorID]bool
 
+	// cancelReq is the home's injected KindCancelRequest handler (the caller-side
+	// upstream cancel: a daemon-hosted caller abandoning its own outbound request).
+	// Passed straight to runtime.Attach as the port's onCancelRequest — the link
+	// layer holds no request-lookup logic (the closure is Home's).
+	cancelReq func(actor.ActorID, message.ID)
+
 	// links is the per-compute revocation handle table (§8.3 KickDaemon): every
 	// link whose daemonID is known is registered here at runLink ENTRY — before
 	// the attach frame is even read, not only after a successful attach — so a
@@ -121,6 +127,15 @@ type Config struct {
 	// ObsWatcher (optional) receives each attached actor's obs PUSH via per-actor
 	// WatchObs registration at attach — the home-side arm of the L3 device-presence fold.
 	ObsWatcher actorrt.ObsWatcher
+	// CancelRequest (optional) is the home's injected handler for a KindCancelRequest
+	// frame (a daemon-hosted caller abandoning one of its OWN outbound requests). It
+	// is passed the connection's authenticated bound id + the request id; the home
+	// closure reverse-resolves the request's target from the log and validates the
+	// sender before firing Home.CancelRequest (non-self-report; the four failure
+	// branches — not found / non-request / empty audience / sender mismatch — all
+	// silently drop + log, best-effort no-ack semantics). nil → inbound
+	// cancel_request is dropped (no consumer).
+	CancelRequest func(actor.ActorID, message.ID)
 }
 
 // NewAcceptor builds an Acceptor.
@@ -146,6 +161,7 @@ func NewAcceptor(cfg Config) *Acceptor {
 		attached:   map[string]int{},
 		obsWatcher: cfg.ObsWatcher,
 		obsReg:     map[actor.ActorID]bool{},
+		cancelReq:  cfg.CancelRequest,
 		links:      map[string][]linkHandle{},
 	}
 }
@@ -334,7 +350,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				Access:   a.accessSink(),
 				Schedule: a.scheduleSink(),
 			}
-			inc, err := a.runtime.Attach(hsCtx, s, sinks, resolve, actorrt.KindOf(kindOf))
+			inc, err := a.runtime.Attach(hsCtx, s, sinks, resolve, actorrt.KindOf(kindOf), a.cancelReq)
 			if err != nil {
 				a.logger.Info("link.attach_stream_failed", "err", err)
 				return

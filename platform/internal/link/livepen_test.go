@@ -128,6 +128,7 @@ func attachTestPort(t *testing.T, rt *actorrt.Runtime, id actor.ActorID) (actorr
 		}},
 		func(string) (actor.ActorID, error) { return id, nil },
 		nil,
+		nil,
 	)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
@@ -226,7 +227,7 @@ func attachGatedPort(t *testing.T, rt *actorrt.Runtime, id actor.ActorID, emit a
 			}
 		}
 	}()
-	inc, err := rt.Attach(context.Background(), hostConn, actorrt.Sinks{Emit: emit}, func(string) (actor.ActorID, error) { return id, nil }, nil)
+	inc, err := rt.Attach(context.Background(), hostConn, actorrt.Sinks{Emit: emit}, func(string) (actor.ActorID, error) { return id, nil }, nil, nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}

@@ -541,6 +541,15 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 // resolved id, not a static value; a nil kindOf (or a false ok) welds the zero
 // value, same as before this parameter existed.
 //
+// onCancelRequest is the injected upstream relay for a KindCancelRequest frame:
+// a bound actor abandoning one of ITS OWN outbound requests (the caller-side
+// upstream twin of the host→remote cancel). It is NOT a Sink (the three Sinks
+// arms are all ack'd; this signal is fire-and-forget, no ack — the same reason
+// obs/down are not Sinks), so it rides its own parameter. The port passes the
+// connection's authenticated bound id + the request id; the injecting caller
+// reverse-resolves the request's target and validates the sender from the log
+// (non-self-report). nil → inbound cancel_request is dropped.
+//
 // hsCtx bounds ONLY the connect-in handshake (a substrate-owned protocol step
 // whose time bound is a substrate invariant — a peer that connects but never
 // sends a handshake must not pin this goroutine forever). It does NOT scope the
@@ -548,8 +557,8 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 // this call — a per-call lifetime ctx would wrongly tear the port down when
 // Attach returns. Pass a deadline ctx to guard the handshake; a nil/background
 // ctx degrades to an unbounded handshake read.
-func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf) (Incarnation, error) {
-	p, err := newPort(r.parent, hsCtx, conn, sinks, resolve, kindOf, r.publishDown, r.publishObs, r.removeIf, r.reapZombie, r.clock(), r.logger)
+func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onCancelRequest func(actor.ActorID, message.ID)) (Incarnation, error) {
+	p, err := newPort(r.parent, hsCtx, conn, sinks, resolve, kindOf, r.publishDown, r.publishObs, onCancelRequest, r.removeIf, r.reapZombie, r.clock(), r.logger)
 	if err != nil {
 		return Incarnation{}, err
 	}

@@ -121,6 +121,23 @@ const (
 	// (never enqueued, never correlated) — a lost one only loses an observation
 	// (truth-side closure is materialised from the log, not from this frame).
 	KindDeliverResult Kind = "deliver_result"
+	// KindCancelRequest (remote→host): a bound actor abandons one of ITS OWN
+	// in-flight OUTBOUND requests — the caller-side UPSTREAM twin of the host→remote
+	// KindCancel. The direction is the substrate reason it is a distinct kind (the
+	// pairing precedent = KindDetach/KindDespawn, KindEmit/KindDeliver): a
+	// daemon-hosted caller cannot mint the host→remote cancel signal, so the
+	// substrate carries its "close my outstanding request" intent up its own stream.
+	// It carries ONLY the request id (reuses CancelPayload): the actor is implicit
+	// (the connection IS that actor), and the host reverse-resolves the target from
+	// the request's own audience in the log — the caller self-reports neither target
+	// nor its own identity (non-self-report: the host authenticates the sender ==
+	// the connection's bound id against the stored request before acting). Fire-and-
+	// forget, unidirectional, NO ack (same posture as the downstream KindCancel /
+	// KindObs): a lost one only costs the receiver a little wasted work — the
+	// request's ExpiresAt deadline still collapses its reqCtx and the caller's
+	// closure already owns its own terminal. So it never rides the ack'd on-loop
+	// path.
+	KindCancelRequest Kind = "cancel_request"
 )
 
 // MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.

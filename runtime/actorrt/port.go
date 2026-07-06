@@ -130,8 +130,19 @@ type port struct {
 	// pointer-identity-gate the fanout (a replaced predecessor cannot publish obs
 	// attributed to a same-id successor). nil → inbound obs is dropped (no
 	// consumer). Mirrors cell.onObs.
-	onObs  func(actor.ActorID, embodiment, ObsKind, ObsValue)
-	onExit func(actor.ActorID, embodiment)
+	onObs func(actor.ActorID, embodiment, ObsKind, ObsValue)
+	// onCancelRequest relays an inbound KindCancelRequest (the bound actor
+	// abandoning one of ITS OWN outbound requests) UPWARD to the injecting caller
+	// — the caller-side upstream twin of the host→remote cancel. It passes THIS
+	// port's authenticated bound id (the connection IS that actor: the caller
+	// self-reports neither its identity nor the request's target — both are
+	// reverse-resolved by the injecting caller from the request in the log) plus
+	// the named request id. NO ack (best-effort, same posture as onObs): a lost
+	// one degrades to the request's own deadline + the caller's own terminal. nil →
+	// inbound cancel_request is dropped (no consumer). Distinct from Sinks — the
+	// three Sinks arms are all ack'd, this signal is not.
+	onCancelRequest func(actor.ActorID, message.ID)
+	onExit          func(actor.ActorID, embodiment)
 	// onReap strikes this port off the runtime's zombie ledger — invoked the
 	// instant both loops have fully exited (account⇔residue), before done closes.
 	onReap func(embodiment)
@@ -169,7 +180,7 @@ type port struct {
 // read runs off-goroutine and newPort selects it against hsCtx; on expiry it
 // closes the conn (unblocking the read) and returns. parent owns the port's
 // LIFETIME (unchanged); hsCtx owns only this one read.
-func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), onReap func(embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
+func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onCancelRequest func(actor.ActorID, message.ID), onExit func(actor.ActorID, embodiment), onReap func(embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -227,21 +238,22 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 	}
 	ctx, cancel := context.WithCancel(parent)
 	return &port{
-		id:       id,
-		codec:    codec,
-		conn:     conn,
-		sinks:    sinks,
-		mintKind: mintKind,
-		started:  started,
-		ctx:      ctx,
-		cancel:   cancel,
-		onDown:   onDown,
-		onObs:    onObs,
-		onExit:   onExit,
-		onReap:   onReap,
-		logger:   logger,
-		sendq:    make(chan *message.Envelope, portSendQueue),
-		done:     make(chan struct{}),
+		id:              id,
+		codec:           codec,
+		conn:            conn,
+		sinks:           sinks,
+		mintKind:        mintKind,
+		started:         started,
+		ctx:             ctx,
+		cancel:          cancel,
+		onDown:          onDown,
+		onObs:           onObs,
+		onCancelRequest: onCancelRequest,
+		onExit:          onExit,
+		onReap:          onReap,
+		logger:          logger,
+		sendq:           make(chan *message.Envelope, portSendQueue),
+		done:            make(chan struct{}),
 	}, nil
 }
 
@@ -471,6 +483,22 @@ func (p *port) readLoop() {
 			}
 			if p.onObs != nil {
 				p.onObs(p.id, p, ObsKind(op.Kind), ObsValue(op.Value))
+			}
+		case ipc.KindCancelRequest:
+			// The bound actor abandons one of ITS OWN outbound requests (caller-side
+			// upstream twin of the host→remote KindCancel). Relay UPWARD via the
+			// injected callback with this port's authenticated bound id (the wire never
+			// self-reports it) + the named request id. Non-fatal (best-effort, no ack,
+			// same as KindObs): a decode error IS a protocol violation (closed-set
+			// discipline) and fail-closes the port, but a well-formed frame just relays
+			// and the loop continues. nil callback → dropped (no consumer wired).
+			var cp ipc.CancelPayload
+			if err := json.Unmarshal(frame.Payload, &cp); err != nil {
+				p.die(fmt.Errorf("actorrt: port %s cancel_request decode: %w", p.id, err))
+				return
+			}
+			if p.onCancelRequest != nil {
+				p.onCancelRequest(p.id, cp.RequestID)
 			}
 		case ipc.KindDown:
 			var dp ipc.DownPayload

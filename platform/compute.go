@@ -116,6 +116,43 @@ func (f *cellObsForwarder) pump(ctx context.Context) {
 	}
 }
 
+// cellCancelForwarder is the daemon's caller-side cancel arm: when a hosted cell's
+// call ledger fires its Hooks.Canceller (a caller abandoning one of its OWN
+// outbound requests), forward the request id UP that caller's link stream as a
+// KindCancelRequest frame so the home reverse-resolves the target and reaches the
+// receiver's in-station account — the daemon-hosted parity of Home.CancelRequest.
+//
+// Like cellObsForwarder it is the rebindable face of a WHOLE-DAEMON-LIFETIME arm:
+// d is swapped atomically on every (re)connect via Rebind (mirroring
+// RebindableArms + obsForwarder), so a Canceller built once at buildOne always
+// sends through whichever Dialer is currently connected — a closure that captured
+// the FIRST connection's Dialer would send toward a dead stream after any reconnect
+// (双线审 F5). A nil/disconnected d (no link right now) drops the frame, the same
+// best-effort no-ack posture the downstream KindCancel already has.
+type cellCancelForwarder struct {
+	d atomic.Pointer[link.Dialer]
+}
+
+func newCellCancelForwarder() *cellCancelForwarder { return &cellCancelForwarder{} }
+
+// Rebind swaps in the currently-connected Dialer — call once per (re)connect,
+// mirroring cellObsForwarder.Rebind and RebindableArms.Rebind.
+func (f *cellCancelForwarder) Rebind(d *link.Dialer) { f.d.Store(d) }
+
+// cancellerFor builds the Hooks.Canceller closure for one hosted caller id. The
+// target parameter is IGNORED on the wire (the home reverse-resolves it from the
+// request in the log — the caller self-reports nothing); the frame goes up THIS
+// caller's own stream, so the id is welded here. Synchronous (the ledger invokes
+// Canceller off its own lock — ledger_call.go — not on a fanout goroutine, so a
+// direct codec write is safe, exactly like the cell-path Home.CancelRequest).
+func (f *cellCancelForwarder) cancellerFor(id actor.ActorID) func(target actor.ActorID, requestID message.ID) {
+	return func(_ actor.ActorID, requestID message.ID) {
+		if d := f.d.Load(); d != nil {
+			d.SendCancelRequest(id, requestID)
+		}
+	}
+}
+
 // ActorDecl declares one actor the daemon will host. Factory is the ActorFactory
 // (def) both admission paths share (Home.Spawn cell-side and RunCompute
 // daemon-side). On the daemon the Pen + plane-2 (Access/State) + time-axis
@@ -253,12 +290,17 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 	// once, Rebind'd per connection, pumped for the daemon's whole life.
 	obsFwd := newCellObsForwarder()
 	go obsFwd.pump(ctx)
+	// The caller-side cancel arm, like the obs arm, outlives every individual link:
+	// built once, Rebind'd per connection, so a hosted caller's Canceller always
+	// sends up whichever Dialer is currently connected.
+	cancelFwd := newCellCancelForwarder()
 
 	ring := &computeRing{
 		rt:          rt,
 		del:         del,
 		watcher:     watcher,
 		obsFwd:      obsFwd,
+		cancelFwd:   cancelFwd,
 		builder:     cfg.Builder,
 		logger:      logger,
 		prevCurrent: map[actor.ActorID]actor.Kind{},
@@ -293,6 +335,7 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 		// THIS d's stream read loops).
 		d.SetDespawnLocal(func(id actor.ActorID) { rt.DespawnID(id) })
 		obsFwd.Rebind(d)
+		cancelFwd.Rebind(d)
 
 		graceful := ring.runLink(ctx, d, cfg.Desired, poll)
 		_ = d.Close() // idempotent: a no-op if the link already tore itself down.
@@ -315,12 +358,13 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 // detach) to close the gap. It is the daemon-hosted counterpart of Home's
 // reconcileActivation — same paradigm (§10.13 推导2), different host.
 type computeRing struct {
-	rt      *actorrt.Runtime
-	del     actorrt.Deliverer
-	watcher *cellDownWatcher
-	obsFwd  *cellObsForwarder
-	builder ComputeBuilder
-	logger  *slog.Logger
+	rt        *actorrt.Runtime
+	del       actorrt.Deliverer
+	watcher   *cellDownWatcher
+	obsFwd    *cellObsForwarder
+	cancelFwd *cellCancelForwarder
+	builder   ComputeBuilder
+	logger    *slog.Logger
 
 	// prevCurrent is the AlwaysOn desired set the LAST reconcile pass declared —
 	// mirrors Home's prevEagerDesired: the 削 diff is prevCurrent − current, never
@@ -484,12 +528,13 @@ func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer
 	// like a cell born at home, closing the daemon-side parity gap the raw
 	// (ungated) facades used to leave open.
 	r.rt.Spawn(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-		// daemon Hooks{}: Canceller stays nil — the out-generation matrix's known
-		// gap (§3): a daemon-hosted caller's cancel-upstream frame does not exist
-		// yet (KindCancel is host→remote only), so Cancel still commits the
-		// caller's own unanswered_timeout terminal, just without the receiver
-		// signal.
-		return build(link.NewLiveArms(rb, inc, r.rt), actorbase.Hooks{}, factory)
+		// daemon Hooks.Canceller = the caller-side cancel-upstream forwarder (the
+		// out-generation matrix's former known gap, now filled): a daemon-hosted
+		// caller's Cancel commits its own unanswered_timeout terminal AND forwards a
+		// KindCancelRequest frame up this caller's stream, so the home reverse-
+		// resolves the target and reaches the receiver's in-station account — the
+		// daemon-hosted parity of the cell-path Home.CancelRequest.
+		return build(link.NewLiveArms(rb, inc, r.rt), actorbase.Hooks{Canceller: r.cancelFwd.cancellerFor(id)}, factory)
 	})
 	d.StartStream(id)
 	delete(r.infeasible, id)

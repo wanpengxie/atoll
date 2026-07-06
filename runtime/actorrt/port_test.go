@@ -55,7 +55,7 @@ func dialPort(t *testing.T, r *Runtime, leaseID string, emit EmitSink, resolve R
 		hsErr <- nil
 	}()
 
-	inc, err := r.Attach(context.Background(), hostConn, Sinks{Emit: emit}, resolve, kindOf)
+	inc, err := r.Attach(context.Background(), hostConn, Sinks{Emit: emit}, resolve, kindOf, nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -116,7 +116,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			// An EMIT frame where a handshake is required — protocol violation.
 			_ = c.Write(ipc.Frame{Kind: ipc.KindEmit})
 		}()
-		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil, nil); err == nil {
 			t.Fatal("Attach accepted a non-handshake first frame")
 		}
 	})
@@ -131,7 +131,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		}()
 		resolve := func(string) (actor.ActorID, error) { return "", io.ErrUnexpectedEOF }
-		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, resolve, nil); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, resolve, nil, nil); err == nil {
 			t.Fatal("Attach accepted a connection whose lease failed to resolve")
 		}
 	})
@@ -145,7 +145,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			p, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "anon"})
 			_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		}()
-		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve(""), nil); err == nil {
+		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve(""), nil, nil); err == nil {
 			t.Fatal("Attach accepted an empty resolved actor id")
 		}
 	})
@@ -167,7 +167,7 @@ func TestAttachHandshakeBounded(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := rt.Attach(hsCtx, hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil)
+		_, err := rt.Attach(hsCtx, hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil, nil)
 		done <- err
 	}()
 
@@ -187,11 +187,11 @@ func TestPortRequiresSinks(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, _ := net.Pipe()
-	if _, err := rt.Attach(context.Background(), hostConn, Sinks{}, staticResolve("x"), nil); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn, Sinks{}, staticResolve("x"), nil, nil); err == nil {
 		t.Fatal("Attach accepted a nil EmitSink")
 	}
 	hostConn2, _ := net.Pipe()
-	if _, err := rt.Attach(context.Background(), hostConn2, Sinks{Emit: nopEmit}, nil, nil); err == nil {
+	if _, err := rt.Attach(context.Background(), hostConn2, Sinks{Emit: nopEmit}, nil, nil, nil); err == nil {
 		t.Fatal("Attach accepted a nil ResolveFunc")
 	}
 }
@@ -566,5 +566,98 @@ func TestPortAttachReplaceStopsOld(t *testing.T) {
 	}
 	if _, ok := rt.Stat("dup"); !ok {
 		t.Fatal("no live embodiment after replace")
+	}
+}
+
+// dialPortCancel is dialPort's twin that also threads an onCancelRequest handler
+// into Attach — the injection seam the platform link layer uses to relay a
+// caller-side KindCancelRequest upstream. Same handshake choreography.
+func dialPortCancel(t *testing.T, r *Runtime, leaseID string, resolve ResolveFunc, onCancel func(actor.ActorID, message.ID)) (actor.ActorID, *remoteEnd) {
+	t.Helper()
+	hostConn, remoteConn := net.Pipe()
+	remote := &remoteEnd{conn: remoteConn, codec: ipc.NewCodec(remoteConn, remoteConn)}
+	hsErr := make(chan error, 1)
+	go func() {
+		payload, _ := json.Marshal(ipc.HandshakePayload{LeaseID: leaseID})
+		if err := remote.codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: payload}); err != nil {
+			hsErr <- err
+			return
+		}
+		if _, err := remote.codec.Read(); err != nil {
+			hsErr <- err
+			return
+		}
+		hsErr <- nil
+	}()
+	inc, err := r.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, resolve, nil, onCancel)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	if e := <-hsErr; e != nil {
+		t.Fatalf("remote handshake: %v", e)
+	}
+	return inc.ID(), remote
+}
+
+// TestPortCancelRequestRelayed: the remote actor writes a KindCancelRequest frame
+// (the caller-side upstream cancel) and the port's readLoop relays it to the
+// injected onCancelRequest with THIS port's authenticated bound id (the wire never
+// self-reports it) + the named request id. The port stays alive (best-effort,
+// no ack — same posture as obs), so a well-formed frame just relays and the loop
+// continues.
+func TestPortCancelRequestRelayed(t *testing.T) {
+	t.Parallel()
+	rt, _ := New(Config{Parent: context.Background()})
+	defer rt.StopAll()
+
+	type got struct {
+		id  actor.ActorID
+		req message.ID
+	}
+	relayed := make(chan got, 1)
+	id, remote := dialPortCancel(t, rt, "l", staticResolve("caller-1"), func(boundID actor.ActorID, reqID message.ID) {
+		relayed <- got{id: boundID, req: reqID}
+	})
+	defer remote.conn.Close()
+
+	payload, _ := json.Marshal(ipc.CancelPayload{RequestID: message.ID("req-9")})
+	if err := remote.codec.Write(ipc.Frame{Kind: ipc.KindCancelRequest, Payload: payload}); err != nil {
+		t.Fatalf("remote write cancel_request: %v", err)
+	}
+	select {
+	case g := <-relayed:
+		if g.id != id {
+			t.Fatalf("relayed bound id = %q, want %q", g.id, id)
+		}
+		if g.req != message.ID("req-9") {
+			t.Fatalf("relayed request id = %q, want req-9", g.req)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("cancel_request was not relayed to onCancelRequest")
+	}
+	// The port survives a well-formed upstream cancel (non-fatal, no ack).
+	if _, ok := rt.Stat(id); !ok {
+		t.Fatal("port died after a well-formed cancel_request (should be non-fatal)")
+	}
+}
+
+// TestPortCancelRequestNilHandlerDropped: with no onCancelRequest wired, a
+// KindCancelRequest frame is silently dropped (no consumer) and the port stays
+// alive — the nil-handler degrade, same as a nil obs consumer.
+func TestPortCancelRequestNilHandlerDropped(t *testing.T) {
+	t.Parallel()
+	rt, _ := New(Config{Parent: context.Background()})
+	defer rt.StopAll()
+	id, remote := dialPortCancel(t, rt, "l", staticResolve("caller-2"), nil)
+	defer remote.conn.Close()
+
+	payload, _ := json.Marshal(ipc.CancelPayload{RequestID: message.ID("req-x")})
+	if err := remote.codec.Write(ipc.Frame{Kind: ipc.KindCancelRequest, Payload: payload}); err != nil {
+		t.Fatalf("remote write cancel_request: %v", err)
+	}
+	// Give the read loop a moment to process; the port must remain addressable.
+	time.Sleep(50 * time.Millisecond)
+	if _, ok := rt.Stat(id); !ok {
+		t.Fatal("port died after a dropped cancel_request (should be non-fatal)")
 	}
 }

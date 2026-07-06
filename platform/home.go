@@ -450,15 +450,16 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//      neutrality). It also folds each attached actor's obs PUSH into the
 	//      device-presence fold (per-actor WatchObs at attach).
 	links := link.NewAcceptor(link.Config{
-		Minter:     minter,
-		Access:     cs.Access,
-		Schedule:   schedMinter,
-		Runtime:    rt,
-		Membership: cs.Membership,
-		Registry:   cs.Registry,
-		ChannelID:  cfg.ChannelID,
-		Logger:     logger,
-		ObsWatcher: deviceFold,
+		Minter:        minter,
+		Access:        cs.Access,
+		Schedule:      schedMinter,
+		Runtime:       rt,
+		Membership:    cs.Membership,
+		Registry:      cs.Registry,
+		ChannelID:     cfg.ChannelID,
+		Logger:        logger,
+		ObsWatcher:    deviceFold,
+		CancelRequest: h.handleCancelUpstream,
 	})
 	h.links = links
 
@@ -849,6 +850,41 @@ func (h *Home) hooks() actorbase.Hooks {
 // best-effort hint, the caller's closure owns the terminal.
 func (h *Home) CancelRequest(target actor.ActorID, requestID message.ID) {
 	h.channel.Cells().CancelRequest(target, requestID)
+}
+
+// handleCancelUpstream is the home's disposition for one KindCancelRequest frame
+// (the caller-side upstream twin of CancelRequest): a daemon-hosted caller,
+// identified by the connection's authenticated bound id, abandons one of ITS OWN
+// outbound requests named by requestID. The caller self-reports NEITHER the
+// request's target NOR its own identity — the home takes both from truth: it
+// reverse-resolves the request envelope from the log by id, reads the target from
+// its audience, and validates that the request's sender == the connection's bound
+// id (a half-trusted daemon may only revoke a request it actually authored). Four
+// failure branches — not found / non-request kind / empty audience / sender
+// mismatch — all silently drop + log (best-effort no-ack semantics: an upstream
+// cancel is a hint, never a verdict; the caller's own closure already owns the
+// terminal and the request's deadline still collapses its reqCtx). On the happy
+// path it fires Home.CancelRequest(target, requestID) — the exact same reach a
+// local cell's Hooks.Canceller takes.
+func (h *Home) handleCancelUpstream(boundID actor.ActorID, requestID message.ID) {
+	req, ok, err := h.cs.Requests.FindByID(context.Background(), requestID)
+	if err != nil || !ok {
+		h.logger.Info("platform.home.cancel_upstream.not_found", "request", string(requestID), "sender", string(boundID), "err", err)
+		return
+	}
+	if req.Kind != message.KindRequest {
+		h.logger.Info("platform.home.cancel_upstream.not_a_request", "request", string(requestID), "kind", string(req.Kind), "sender", string(boundID))
+		return
+	}
+	if len(req.Audience) == 0 {
+		h.logger.Info("platform.home.cancel_upstream.empty_audience", "request", string(requestID), "sender", string(boundID))
+		return
+	}
+	if req.Sender.ID != boundID {
+		h.logger.Info("platform.home.cancel_upstream.sender_mismatch", "request", string(requestID), "sender", string(boundID), "authored_by", string(req.Sender.ID))
+		return
+	}
+	h.CancelRequest(req.Audience[0], requestID)
 }
 
 // KickDaemon closes every link this compute currently holds (the substrate

@@ -17,10 +17,12 @@ import (
 
 // --- closed Kind set ------------------------------------------------------
 
-// The port-wire Kind set is closed at exactly 15 members with fixed wire
+// The port-wire Kind set is closed at exactly 16 members with fixed wire
 // spellings. Every kind has a real producer + state transition; the dead
 // frames (fence / shutdown / heartbeat / control) are gone. KindCancel is the
-// request-scope of cancel(scope) crossing the wire (host→remote); KindAccess/
+// request-scope of cancel(scope) crossing the wire (host→remote); KindCancelRequest
+// is its caller-side upstream twin (remote→host: a bound actor abandons one of its
+// own outbound requests); KindAccess/
 // KindSchedule + their acks are the plane-2 and time-axis capability arms (an
 // out-of-process actor's incarnation carries every plane a local cell's Caps do);
 // KindDetach/KindDespawn are the two lifecycle-termination arms (remote→host
@@ -45,14 +47,15 @@ func TestKindClosedSet(t *testing.T) {
 		KindDetach:        "detach",
 		KindDespawn:       "despawn",
 		KindDeliverResult: "deliver_result",
+		KindCancelRequest: "cancel_request",
 	}
 	for k, wire := range want {
 		if string(k) != wire {
 			t.Errorf("Kind %q wire form = %q, want %q", k, string(k), wire)
 		}
 	}
-	if len(want) != 15 {
-		t.Fatalf("expected exactly 15 kinds, guard lists %d", len(want))
+	if len(want) != 16 {
+		t.Fatalf("expected exactly 16 kinds, guard lists %d", len(want))
 	}
 }
 
@@ -262,6 +265,17 @@ func TestRoundTripPerKind(t *testing.T) {
 				mustUnmarshal(t, got.Payload, &p)
 				if p.RequestID != message.ID("req-7") {
 					t.Errorf("request_id = %q, want req-7", p.RequestID)
+				}
+			},
+		},
+		{
+			name:  "cancel_request",
+			frame: Frame{Kind: KindCancelRequest, Payload: mustMarshal(t, CancelPayload{RequestID: message.ID("req-up-9")})},
+			check: func(t *testing.T, got Frame) {
+				var p CancelPayload
+				mustUnmarshal(t, got.Payload, &p)
+				if p.RequestID != message.ID("req-up-9") {
+					t.Errorf("request_id = %q, want req-up-9", p.RequestID)
 				}
 			},
 		},

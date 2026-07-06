@@ -24,7 +24,7 @@ import (
 // not against a parallel hand-list: a new Kind const not acknowledged in `known`
 // below turns THIS red.
 func TestIPCKindClosedSetExhaustive(t *testing.T) {
-	// The canonical closed set — 15 members. Adding a Kind const to runtime/ipc
+	// The canonical closed set — 16 members. Adding a Kind const to runtime/ipc
 	// without adding it here is the intended tripwire (keep this in lockstep with
 	// the in-package TestKindClosedSet wire-spelling map).
 	known := map[string]bool{
@@ -38,6 +38,7 @@ func TestIPCKindClosedSetExhaustive(t *testing.T) {
 		"KindSchedule": true, "KindScheduleAck": true,
 		"KindDetach": true, "KindDespawn": true,
 		"KindDeliverResult": true,
+		"KindCancelRequest": true,
 	}
 
 	fset := token.NewFileSet()

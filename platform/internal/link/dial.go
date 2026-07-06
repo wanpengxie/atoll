@@ -553,6 +553,29 @@ func (d *Dialer) SendObs(id actor.ActorID, kind string, value []byte) {
 	_ = as.codec.Write(ipc.Frame{Kind: ipc.KindObs, Payload: payload})
 }
 
+// SendCancelRequest forwards one caller-side cancel UP the named actor's stream as
+// a KindCancelRequest frame (the daemon-hosted caller abandoning its OWN outbound
+// request — the upstream twin of the home's host→remote KindCancel). It carries
+// ONLY the request id: the home reverse-resolves the target from the request in the
+// log and authenticates the sender == this stream's bound id, so the caller
+// self-reports neither. Fire-and-forget, unidirectional, NO ack (same posture as
+// SendObs): a write error on a dying stream is dropped — the request's own deadline
+// and the caller's own terminal already close it. No-op if the actor has no open
+// stream. The codec write mutex serialises this against the cell's KindEmit writes.
+func (d *Dialer) SendCancelRequest(id actor.ActorID, requestID message.ID) {
+	d.mu.Lock()
+	as := d.streams[id]
+	d.mu.Unlock()
+	if as == nil {
+		return
+	}
+	payload, err := json.Marshal(ipc.CancelPayload{RequestID: requestID})
+	if err != nil {
+		return
+	}
+	_ = as.codec.Write(ipc.Frame{Kind: ipc.KindCancelRequest, Payload: payload})
+}
+
 // SetDespawnLocal installs the host→remote despawn hook (see Dialer.despawnLocal).
 // Call after Dial, before Start — it is read by the per-stream read loops.
 func (d *Dialer) SetDespawnLocal(fn func(actor.ActorID)) {
