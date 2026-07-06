@@ -145,12 +145,15 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 }
 
 // handleDeleteDaemon revokes a daemon (world-layer scope: the daemon key + its
-// cross-channel identity, HTTP-legitimate). Full teardown, in order: capture the
-// bound channels → delete the daemon_channels bindings (intent) → clear
-// desired_host on every composition row placed on this daemon, keeping the pool row
-// with placement UNCHANGED (a rehome is a separate指派, never a migration) → delete
-// the daemons row (revocation persisted) → run the KickDaemon convergence loop on
-// each formerly-bound home so live links fall silent.
+// cross-channel identity, HTTP-legitimate). Full teardown, in order: delete the
+// daemon_channels bindings (intent) INSIDE the tx with RETURNING channel_id — the
+// kick set is the rows actually deleted, not a separate pre-tx read (a concurrent
+// attach landing between a pre-read and the delete would else leave a residual port
+// this delete never sees) → clear desired_host on every composition row placed on
+// this daemon, keeping the pool row with placement UNCHANGED (a rehome is a separate
+// 指派, never a migration) → delete the daemons row (revocation persisted) → run the
+// KickDaemon convergence loop on each channel whose binding was just deleted so live
+// links fall silent.
 func (a *App) handleDeleteDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
 	userID := middleware.UserID(c)
@@ -166,7 +169,6 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
-	bound := a.daemonAttachedChannels(ctx, daemonID)
 
 	// The three revocation writes (delete bindings, clear desired_host, delete the
 	// daemons row) are ONE atomic tx: a failure on any of them must leave NONE
@@ -190,11 +192,34 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 			return
 		}
 	}
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM daemon_channels WHERE daemon_id = ?`, daemonID); err != nil {
+	// Delete the bindings and capture the kick set IN THE SAME tx (RETURNING): the
+	// channels to Kick are exactly the rows this DELETE removed, closing the window
+	// where a concurrent attach binds a channel between a separate pre-read and the
+	// delete (a residual port on a channel the kick loop would never visit).
+	var bound []string
+	kickRows, err := tx.QueryContext(ctx,
+		`DELETE FROM daemon_channels WHERE daemon_id = ? RETURNING channel_id`, daemonID)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
+	for kickRows.Next() {
+		var ch string
+		if err := kickRows.Scan(&ch); err != nil {
+			_ = kickRows.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+			return
+		}
+		bound = append(bound, ch)
+	}
+	if err := kickRows.Err(); err != nil {
+		_ = kickRows.Close()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	// Close the rows cursor before the next statement on this tx (sqlite runs the tx
+	// on a single connection — an open cursor would block the following Exec).
+	_ = kickRows.Close()
 	// Clear desired_host on this daemon's rows (placement恒不变; the pool row stays,
 	// no daemon claims it, the live cell is simply absent until a re-指派).
 	if _, err := tx.ExecContext(ctx,
@@ -299,6 +324,12 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
 	ctx := c.Request.Context()
 
+	// 登记 (non-atomic, dirty-column self-heal level): these three writes (delete
+	// binding, kick, clear desired_host) are NOT one tx — a crash between them leaves
+	// a stale desired_host on this channel's rows. Benign: the pool row's placement is
+	// unchanged and the next re-指派 overwrites the dirty column; unlike deleteDaemon
+	// (world-layer revocation) a single-channel detach has no half-revoked key state
+	// to protect, so the atomicity is not现在 owed.
 	if _, err := a.db.ExecContext(ctx,
 		`DELETE FROM daemon_channels WHERE daemon_id = ? AND channel_id = ?`,
 		daemonID, chID); err != nil {

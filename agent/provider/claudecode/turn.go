@@ -77,9 +77,10 @@ func (b *Bridge) runLoop(ctx context.Context) {
 }
 
 // runTurn drives one claude exchange: Query the input, drain ReceiveResponse
-// (which ends at the ResultMessage), emit the terminal reply, and checkpoint the
-// session id into the durable state slot. Tool calls the model makes resolve
-// through the atoll MCP server (→ the held shell) mid-drain.
+// (which ends at the ResultMessage), and emit the terminal reply. Tool calls the
+// model makes resolve through the atoll MCP server (→ the held shell) mid-drain.
+// No session checkpoint: the durable state slot that once recorded the session id
+// was removed (A-P7); every boot is a cold start (resume returns in period 10).
 func (b *Bridge) runTurn(ctx context.Context, item turnItem, turnIndex int) error {
 	b.setCurrentTurn(&item)
 	defer b.setCurrentTurn(nil)
@@ -93,7 +94,6 @@ func (b *Bridge) runTurn(ctx context.Context, item turnItem, turnIndex int) erro
 	}
 
 	var acc strings.Builder
-	var sessionID string
 	for msg := range b.client.ReceiveResponse(ctx) {
 		switch m := msg.(type) {
 		case *claude.AssistantMessage:
@@ -106,7 +106,6 @@ func (b *Bridge) runTurn(ctx context.Context, item turnItem, turnIndex int) erro
 				}
 			}
 		case *claude.ResultMessage:
-			sessionID = m.SessionID
 			text := strings.TrimSpace(m.Result)
 			if text == "" {
 				text = acc.String()
@@ -118,9 +117,6 @@ func (b *Bridge) runTurn(ctx context.Context, item turnItem, turnIndex int) erro
 				return err // plumbing failure: propagate → positive death
 			}
 		}
-	}
-	if sessionID != "" {
-		b.checkpoint(sessionID)
 	}
 	return nil
 }

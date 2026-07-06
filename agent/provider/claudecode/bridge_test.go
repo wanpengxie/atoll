@@ -99,17 +99,15 @@ func triggerEnv(id string) message.Envelope {
 	}
 }
 
-// TestClaudeTurn_EmitsFinalAndCheckpoints drives one turn through the stubbed
-// engine and asserts the bridge emits a public agent.text terminal addressed to
-// the trigger sender, AND checkpoints the claude session id into the state slot
-// — the second looper on the same lib contract as go-kimi.
-func TestClaudeTurn_EmitsFinalAndCheckpoints(t *testing.T) {
+// TestClaudeTurn_EmitsFinal drives one turn through the stubbed engine and asserts
+// the bridge emits a public agent.text terminal addressed to the trigger sender —
+// the second looper on the same lib contract as go-kimi. (Session checkpointing was
+// removed with the durable state slot, A-P7 — every boot is a cold start.)
+func TestClaudeTurn_EmitsFinal(t *testing.T) {
 	ctx := context.Background()
 	w := &recordingWriter{}
-	ckCh := make(chan string, 1)
 	cfg := claudecode.Config{
-		Model:      "m",
-		Checkpoint: func(b json.RawMessage) error { ckCh <- string(b); return nil },
+		Model: "m",
 	}
 	b, err := claudecode.NewBridge(cfg, testActorID, w)
 	if err != nil {
@@ -151,15 +149,6 @@ func TestClaudeTurn_EmitsFinalAndCheckpoints(t *testing.T) {
 	}
 	if len(final.Audience) != 1 || final.Audience[0] != actor.ActorID("user-A") {
 		t.Fatalf("audience = %v (want [user-A])", final.Audience)
-	}
-
-	select {
-	case ck := <-ckCh:
-		if ck != "sess-123" {
-			t.Fatalf("checkpoint = %q (want sess-123)", ck)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("session never checkpointed into the state slot")
 	}
 }
 

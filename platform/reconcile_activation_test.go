@@ -1084,3 +1084,44 @@ func TestReviver_AttachStraddle_HostStampedMidBuild_NoLocalRevive(t *testing.T) 
 		t.Fatal("a local cell survived the attach-straddle — the post-build Host recheck did not undo the build")
 	}
 }
+
+// Test 15 — reconcile 补臂 post-build straddle (period 9 review #2): a concurrent
+// Home.Remove landing BETWEEN the ring's SpawnIfAbsent build and its post-build
+// recheck must be self-undone by the shared verifyPostBuild — the just-built cell is
+// Despawn'd (pointer-guarded) and dropped from the managed set (current /
+// prevEagerDesired), never resurrected into an unhoused, dereg'd cell (the死后写
+// window). Mirror of the reviver arm's TestRemove_ReviverStraddle_SelfUndo.
+func TestReconcileActivation_BuildStraddle_RemoveSelfUndo(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	const id = actor.ActorID("agent:recon-straddle")
+	builder.byID[id] = builder.recordFactory(id)
+
+	h := openActivationHome(t, desired, builder)
+	admit(t, h, id, actor.KindAgent)
+	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
+
+	// The straddle: Home.Remove runs AFTER the ring's build lands but BEFORE its
+	// verifyPostBuild — exactly the window a dereg can slip into.
+	var once sync.Once
+	h.reconcileBuildHook = func(built actor.ActorID) {
+		if built != id {
+			return
+		}
+		once.Do(func() {
+			if err := h.Remove(ctx, id); err != nil {
+				t.Errorf("Remove during straddle: %v", err)
+			}
+		})
+	}
+
+	h.reconcileActivation(ctx)
+
+	if live(h, id) {
+		t.Fatal("a cell survived the reconcile build straddle — post-build recheck did not self-undo")
+	}
+	if h.prevEagerDesired[id] {
+		t.Fatal("straddled id was carried into the managed set (prevEagerDesired) despite being Removed")
+	}
+}

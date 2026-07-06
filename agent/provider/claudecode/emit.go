@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 	"time"
 
@@ -110,18 +109,6 @@ func (b *Bridge) currentRC() metatool.RuntimeContext {
 	}
 	return metatool.RuntimeContext{
 		Trigger: metatool.Trigger{Envelope: t.env, CorrelationID: t.env.CorrelationID},
-	}
-}
-
-// checkpoint persists the claude session id into the durable state slot (the
-// looper is the slot's only author; atoll stores it opaquely).
-func (b *Bridge) checkpoint(sessionID string) {
-	if b.cfg.Checkpoint == nil || sessionID == "" {
-		return
-	}
-	if err := b.cfg.Checkpoint(json.RawMessage(sessionID)); err != nil {
-		// best-effort: a failed checkpoint just means a cold start next boot.
-		slog.Default().Warn("claude.checkpoint_session", "id", string(b.self), "err", err)
 	}
 }
 

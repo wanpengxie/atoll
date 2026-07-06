@@ -31,13 +31,6 @@ const (
 type Config struct {
 	Model        string
 	SystemPrompt string
-	// WorkDir is the Cwd for the claude session (the durable resume dir when the
-	// state slot provides one; else a per-process tmp).
-	WorkDir string
-	// ResumeSeed is a claude session id (the state slot blob) to resume on boot.
-	ResumeSeed json.RawMessage
-	// Checkpoint persists a looper-authored blob (the session id) to the slot.
-	Checkpoint func(json.RawMessage) error
 	// NowFn returns unix-ms. Defaults to time.Now.UnixMilli.
 	NowFn func() int64
 }

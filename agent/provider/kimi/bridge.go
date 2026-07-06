@@ -38,7 +38,6 @@ import (
 	gokimi "github.com/wanpengxie/go-kimi/pkg/kimi"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/config"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/llm"
-	kimisession "github.com/wanpengxie/go-kimi/pkg/kimi/session"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
 	// Force-register the anthropic provider factory. go-kimi's factory
@@ -94,10 +93,6 @@ type Config struct {
 	// provider so long as it stays byte-stable across turns.
 	SystemPrompt string
 
-	// WorkDir is the directory go-kimi uses for sessions / wire log /
-	// approvals. Defaults to a per-process tmp dir.
-	WorkDir string
-
 	// FastPathWindow bounds the inline wait of one tool call before it
 	// degrades to an ack (the sync EXPERIENCE for the model). Defaults
 	// to metatool's 15s fast-path.
@@ -105,17 +100,6 @@ type Config struct {
 
 	// NowFn returns unix-ms. Defaults to time.Now.UnixMilli.
 	NowFn func() int64
-
-	// ResumeSeed is the last persisted opaque checkpoint for this
-	// (agent, channel) — the durable state slot's blob (channel_actors.state).
-	// kimiagent treats it as a go-kimi session id to pin on boot; empty = fresh
-	// (fall back to the WorkDir's last-session inference).
-	ResumeSeed json.RawMessage
-
-	// Checkpoint persists a looper-authored blob back to the durable state slot.
-	// kimiagent writes its resolved session id; nil = no durable slot (the cell
-	// still resumes via a durable WorkDir, the slot is just not recorded).
-	Checkpoint func(json.RawMessage) error
 }
 
 // NewConfigFromEnv populates a Config from the documented env vars (the
@@ -180,6 +164,12 @@ type Bridge struct {
 	self actor.ActorID
 	pen  harness.Pen
 
+	// workDir is go-kimi's per-process scratch dir (sessions / wire log /
+	// approvals), minted fresh in NewBridge. It is NOT a durable resume dir: the
+	// platform state slot that once seeded it was removed (A-P7), so every boot
+	// starts cold — see buildAgent.
+	workDir string
+
 	mu              sync.Mutex
 	agentNew        func(gokimi.AgentConfig) (kimiAgent, error) // test hook
 	testWireEmitter wire.Emitter                                // populated by Start; tests reach in via export_test.go
@@ -241,18 +231,16 @@ func NewBridge(cfg Config, self actor.ActorID, w harness.Pen) (*Bridge, error) {
 	if cfg.FastPathWindow <= 0 {
 		cfg.FastPathWindow = 15 * time.Second
 	}
-	if cfg.WorkDir == "" {
-		tmp, err := os.MkdirTemp("", "atoll-kimi-")
-		if err != nil {
-			return nil, fmt.Errorf("kimi: workdir: %w", err)
-		}
-		cfg.WorkDir = tmp
+	workDir, err := os.MkdirTemp("", "atoll-kimi-")
+	if err != nil {
+		return nil, fmt.Errorf("kimi: workdir: %w", err)
 	}
 
 	b := &Bridge{
-		cfg:  cfg,
-		self: self,
-		pen:  w,
+		cfg:     cfg,
+		self:    self,
+		pen:     w,
+		workDir: workDir,
 	}
 	b.agentNew = b.defaultAgentFactory
 	return b, nil
@@ -288,10 +276,6 @@ func (b *Bridge) Start(ctx context.Context, _ actorrt.ActorContext) error {
 	if err != nil {
 		return err
 	}
-	// Record the resolved session id into the durable state slot (auditable,
-	// resettable pointer). Best-effort: the bytes already live in the durable
-	// WorkDir; this writes the platform-controlled mirror.
-	b.checkpointSession()
 
 	// The shell owns the outbound request lifecycle (build + Arm author#2 +
 	// emit + correlate). author#2 arms a caller-scoped timeout terminal per
@@ -403,25 +387,14 @@ func (b *Bridge) Receive(ctx context.Context, env *message.Envelope) error {
 	return nil
 }
 
-// buildAgent builds a fresh kimiAgent bound to (workDir, emitter,
-// provider). When a prior session exists under <workDir>/.kimi/sessions
-// (i.e. last_session_id resolves), the build pins that session id so
-// history Restore lands on the right session; otherwise go-kimi creates
-// one.
+// buildAgent builds a fresh kimiAgent bound to (workDir, emitter, provider).
+// Cold start every boot: the durable state slot that once seeded a resume session
+// id was removed (A-P7), and workDir is a fresh per-process tmp, so there is no
+// prior session to pin — go-kimi creates a new one. (Durable resume returns in
+// period 10 on sys.State.)
 func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (kimiAgent, error) {
-	// Resume order: the durable state slot (channel_actors.state) wins over fs
-	// inference — the slot is the auditable, platform-controlled pointer; the
-	// WorkDir's last-session file is its local mirror. Empty seed → infer from
-	// the (durable) WorkDir.
-	sessionID := strings.TrimSpace(string(b.cfg.ResumeSeed))
-	if sessionID == "" {
-		if sess, err := kimisession.Continue(b.cfg.WorkDir); err == nil && sess != nil {
-			sessionID = sess.ID
-		}
-	}
 	return b.agentNew(gokimi.AgentConfig{
-		WorkDir:         b.cfg.WorkDir,
-		SessionID:       sessionID,
+		WorkDir:         b.workDir,
 		Config:          config.NewDefaultConfig(),
 		Provider:        provider,
 		WireEmitter:     emitter,
@@ -439,24 +412,6 @@ func (b *Bridge) buildAgent(provider llm.ChatProvider, emitter wire.Emitter) (ki
 			Model:        b.cfg.Model,
 		},
 	})
-}
-
-// checkpointSession writes the current go-kimi session id into the durable
-// state slot. The looper is the slot's only author; atoll
-// stores the bytes opaquely. No-op when there is no slot (Checkpoint nil) or no
-// resolved session yet (a brand-new agent records on a later boot, once its
-// session exists in the durable WorkDir).
-func (b *Bridge) checkpointSession() {
-	if b.cfg.Checkpoint == nil {
-		return
-	}
-	sess, err := kimisession.Continue(b.cfg.WorkDir)
-	if err != nil || sess == nil || sess.ID == "" {
-		return
-	}
-	if err := b.cfg.Checkpoint(json.RawMessage(sess.ID)); err != nil {
-		slog.Default().Warn("agent.checkpoint_session", "id", string(b.self), "err", err)
-	}
 }
 
 // buildProvider hands a fully-configured llm.ChatProvider to

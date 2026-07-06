@@ -180,6 +180,14 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		if _, ok := registry.ClassKind(engine); !ok {
 			return nil, &platform.OperateError{Code: "unknown_class", Detail: engine}
 		}
+		// placement闭集 {server, daemon}: an explicit garbage value is fail-closed
+		// (same posture as unknown_class) — a row with an unknown placement builds on
+		// neither host (the ring only embodies server, the plan only pulls daemon), so
+		// it would persist as a silently-dead row. Empty already defaulted to daemon
+		// above, so by here placement is non-empty.
+		if placement != placementServer && placement != placementDaemon {
+			return nil, &platform.OperateError{Code: "invalid_placement", Detail: placement}
+		}
 		if placement == placementServer && desiredHost != "" {
 			return nil, &platform.OperateError{Code: "invalid_placement", Detail: "server placement cannot carry desired_host"}
 		}

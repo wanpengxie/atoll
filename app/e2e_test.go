@@ -81,8 +81,11 @@ func setupTestApp(t *testing.T) *testEnv {
 	}
 	testAgentBuilder = stubAgentFactory
 	t.Cleanup(func() {
-		testAgentBuilder = nil
+		// Close the app FIRST (joins every home's reconcile ticker goroutine, which
+		// reads testAgentBuilder in its build path) BEFORE nil-ing the global — else a
+		// still-running ticker races the write under -race.
 		a.Close()
+		testAgentBuilder = nil
 		db.Close()
 	})
 

@@ -189,6 +189,13 @@ type Home struct {
 	// site in homeReviver.EnsureLive.
 	reviverStraddleHook func()
 
+	// reconcileBuildHook is a test-only seam (nil in production): fired in
+	// reconcileActivation's 补臂 AFTER a real SpawnIfAbsent build lands but BEFORE
+	// verifyPostBuild runs — the window a concurrent Home.Remove must be parked in
+	// to prove the ring's own post-build straddle recheck self-undoes (mirror of
+	// reviverStraddleHook for the reviver arm).
+	reconcileBuildHook func(actor.ActorID)
+
 	// closed is set true at the very START of Close (before any teardown step), the
 	// authoritative "this home is shutting down" flag every subjectgate verb entry
 	// checks. Close cannot JOIN the ws/垫片 goroutines that hold a HumanHandle (they
@@ -610,9 +617,26 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		}
 		kind := rec.Kind
 		mid := id
-		rt.SpawnIfAbsent(mid, kind, func(inc actorrt.Incarnation) actorrt.Actor {
+		inc, built := rt.SpawnIfAbsent(mid, kind, func(inc actorrt.Incarnation) actorrt.Actor {
 			return build(h.buildCaps(mid, kind, inc), h.hooks(), factory)
 		})
+		// Post-build straddle recheck (shared verifyPostBuild, mirror of the reviver
+		// arm's S-P20 recheck): a concurrent Home.Remove (dereg) or daemon attach (Host
+		// stamp) can land BETWEEN the Lookup that admitted mid into current above and
+		// this build. On a real build (CAS winner), re-read under inc — on any non-OK
+		// outcome verifyPostBuild undoes it (pointer-guarded Despawn) and we drop mid
+		// from current so it is neither counted managed nor carried into
+		// prevEagerDesired: resurrecting a dead-write cell past its dereg (into an
+		// unhoused cell, death-后写 window) is the笔 this closes. A lost CAS (!built) is
+		// a no-op — some other path already owns the embodiment.
+		if built {
+			if h.reconcileBuildHook != nil {
+				h.reconcileBuildHook(mid)
+			}
+			if _, res, _ := h.verifyPostBuild(ctx, mid, inc); res != recheckOK {
+				delete(current, mid)
+			}
+		}
 	}
 	for id := range h.prevEagerDesired {
 		if current[id] {
@@ -621,6 +645,11 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		if rec, ok := member[id]; ok && rec.Host != "" {
 			continue // attached elsewhere — not gone, not this ring's to evict (反误杀)
 		}
+		// 登记 (latent, H5-对称): DespawnID here does NOT unwatchObs — a no-longer-desired
+		// member may be re-desired later, so its obs registration legitimately survives
+		// a mere deactivation. The only leak is a member whose户籍 row is deleted by RAW
+		// SQL (bypassing Home.Remove, which DOES unwatchObs); that path is not reachable
+		// through any supported verb, so the symmetric un-registration stays with Remove.
 		rt.DespawnID(id)
 	}
 	h.prevEagerDesired = current
@@ -642,6 +671,44 @@ func (h *Home) factoryFor(rec storespec.Record) (ActorFactory, bool) {
 		return ActorFactory{}, false
 	}
 	return h.builder.Lookup(rec.ID)
+}
+
+// recheckResult classifies a post-build straddle recheck (verifyPostBuild).
+type recheckResult int
+
+const (
+	recheckOK       recheckResult = iota // still an active home-placed member — keep the build
+	recheckGone                          // Remove'd / not a durable member — build undone
+	recheckAttached                      // daemon-attached mid-build — build undone
+	recheckFault                         // registry lookup fault — build undone
+)
+
+// verifyPostBuild is the shared straddle-window closure for every eager LOCAL birth
+// (the reconcile ring's 补臂 and homeReviver.EnsureLive): after SpawnIfAbsent mints
+// inc, re-read the registry NOW and confirm id is still an active, HOME-placed
+// member. The window it closes: a concurrent Home.Remove (dereg) or a daemon attach
+// (Host stamp) landing BETWEEN the pre-build Lookup and this build's landing. On any
+// non-OK outcome it UNDOES the build — Despawn is pointer-guarded (evicts IFF the
+// runtime map still points to THIS inc, so a legitimate successor that already
+// re-admitted the id is never evicted) — and returns the classification so each
+// caller maps it to its own contract (EnsureLive → transient err / poison verdict;
+// the ring → drop from current/managed). rec carries the fresh Host for the
+// attached case's log; err is set only for recheckFault (the caller wraps it).
+func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, inc actorrt.Incarnation) (rec storespec.Record, res recheckResult, err error) {
+	rec2, ok2, lerr := h.cs.Registry.Lookup(ctx, id)
+	if lerr != nil {
+		h.channel.Cells().Despawn(inc)
+		return storespec.Record{}, recheckFault, lerr
+	}
+	if !ok2 || !rec2.IsActive() {
+		h.channel.Cells().Despawn(inc)
+		return storespec.Record{}, recheckGone, nil
+	}
+	if rec2.Host != "" {
+		h.channel.Cells().Despawn(inc)
+		return rec2, recheckAttached, nil
+	}
+	return rec2, recheckOK, nil
 }
 
 // View returns the read-only observation set (ReadAfterSeq / MaxSeq /

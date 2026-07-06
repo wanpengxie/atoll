@@ -179,43 +179,26 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		return nil
 	}
 	// Post-build recheck (S-P20 拍定 A′, Remove's straddle-window closure other
-	// half): the id could have been Remove'd BETWEEN the Lookup above and this
-	// build landing (Remove's own double-tap only guards its own before/after,
-	// not a build that starts after Remove's ① and finishes after its ③). Re-read
-	// the registry NOW, under the freshly-minted incarnation — if it is no longer
-	// an active member, immediately undo the build (Despawn is pointer-guarded:
-	// it only evicts IFF the map still points to THIS incarnation, so it can
-	// never evict a legitimate successor that has already re-admitted the id).
-	rec2, ok2, err2 := h.cs.Registry.Lookup(ctx, id)
-	if err2 != nil {
-		// The recheck itself FAILED — an unverified freshly-built embodiment is not
-		// a validated live one (same posture as the !IsActive branch immediately
-		// below: this recheck existing to CONFIRM the build landed as a legitimate
-		// member is the whole point of it, so a Lookup fault that leaves it
-		// unconfirmed must not be treated as an implicit confirmation). Despawn
-		// (pointer-guarded: only evicts IFF the map still points to THIS
-		// incarnation, so it never evicts a legitimate successor that has already
-		// re-admitted the id) and return a transient error so the engine retries
-		// the wake next tick against a clean slate.
-		h.channel.Cells().Despawn(inc)
-		return fmt.Errorf("platform: revive post-build recheck %s: %w", id, err2)
-	}
-	if !ok2 || !rec2.IsActive() {
-		h.channel.Cells().Despawn(inc)
+	// half): the id could have been Remove'd (dereg) or daemon-attached (Host stamp)
+	// BETWEEN the Lookup above and this build landing (Remove's own double-tap only
+	// guards its own before/after, not a build that starts after Remove's ① and
+	// finishes after its ③). verifyPostBuild re-reads under the fresh inc and undoes
+	// the build (pointer-guarded Despawn) on any non-OK outcome; here we only map its
+	// verdict onto the engine's two-class contract:
+	//   - fault: transient — the recheck itself failed, so the freshly-built cell is
+	//     unconfirmed (an unverified build is not a validated live one); retry next tick.
+	//   - gone: ReviveRejected{not_a_member} — the dereg cascade already tore down its
+	//     state + timers; reviving would resurrect a zombie.
+	//   - attached: transient — home is not the placement authority for an attached
+	//     identity; the SAME wake fires normally once the port installs (already-live
+	//     fast path) or the author detaches back home.
+	rec2, res, lerr := h.verifyPostBuild(ctx, id, inc)
+	switch res {
+	case recheckFault:
+		return fmt.Errorf("platform: revive post-build recheck %s: %w", id, lerr)
+	case recheckGone:
 		return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
-	}
-	// Placement recheck (attach-straddle window): the initial Lookup saw Host==""
-	// (home-placed), but a daemon attach stamps Host in the registry (accept.go
-	// handleAttach) on the control frame BEFORE it installs the port incarnation on
-	// the separate stream-open — a real window in which SpawnIfAbsent above found no
-	// live embodiment and built a LOCAL cell for an id that is now daemon-placed.
-	// Home is not the placement authority for an attached identity, so undo the local
-	// build (Despawn is pointer-guarded — only this incarnation) and classify
-	// transient: the row is retained and the SAME wake fires normally once the port is
-	// installed (already-live fast path) or the author detaches back home. Keeping the
-	// cell would double-embody it against the daemon's incoming port.
-	if rec2.Host != "" {
-		h.channel.Cells().Despawn(inc)
+	case recheckAttached:
 		h.logReviveAttached(id, rec2.Host)
 		return fmt.Errorf("platform: revive %s: attached to host %q after build", id, rec2.Host) // transient
 	}

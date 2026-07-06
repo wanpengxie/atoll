@@ -27,9 +27,11 @@ import (
 //
 // Config layers env (platform defaults / the server fallback's key) under the
 // per-instance spec.Config overlay (channel_actors.config_json — the looper
-// self-parses it). Durable resume rides ctx.State (a platform-managed session
-// dir + the opaque state slot). A missing channel / id / creds is a hard error —
-// the caller (app composition / daemon) decides whether to build.
+// self-parses it). Cold start every boot: the platform state slot that once
+// carried durable resume was removed (A-P7), so the bridge mints a fresh
+// per-process WorkDir and starts a new session (resume returns in period 10 on
+// sys.State). A missing channel / id / creds is a hard error — the caller (app
+// composition / daemon) decides whether to build.
 func NewDecl(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
 	if ctx.ChannelID == "" {
 		return platform.ActorDecl{}, errors.New("agent: requires a channel")

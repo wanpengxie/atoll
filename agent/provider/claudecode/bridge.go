@@ -47,6 +47,11 @@ type Bridge struct {
 	self actor.ActorID
 	pen  harness.Pen
 
+	// workDir is the claude session's Cwd, minted fresh per process in NewBridge.
+	// NOT a durable resume dir: the platform state slot that once seeded resume was
+	// removed (A-P7), so every boot is a cold start (see defaultClientFactory).
+	workDir string
+
 	clientNew   func() (claudeClient, error) // test hook (defaultClientFactory)
 	envelopeSeq atomic.Uint64
 
@@ -87,14 +92,11 @@ func NewBridge(cfg Config, self actor.ActorID, w harness.Pen) (*Bridge, error) {
 	if cfg.NowFn == nil {
 		cfg.NowFn = func() int64 { return time.Now().UnixMilli() }
 	}
-	if cfg.WorkDir == "" {
-		tmp, err := os.MkdirTemp("", "atoll-claude-")
-		if err != nil {
-			return nil, fmt.Errorf("claude: workdir: %w", err)
-		}
-		cfg.WorkDir = tmp
+	workDir, err := os.MkdirTemp("", "atoll-claude-")
+	if err != nil {
+		return nil, fmt.Errorf("claude: workdir: %w", err)
 	}
-	b := &Bridge{cfg: cfg, self: self, pen: w}
+	b := &Bridge{cfg: cfg, self: self, pen: w, workDir: workDir}
 	b.clientNew = b.defaultClientFactory
 	return b, nil
 }
@@ -105,20 +107,20 @@ var (
 	_ actorrt.Stopper = (*Bridge)(nil)
 )
 
-// defaultClientFactory builds a claude.NewClient wired with the atoll
-// meta-tool MCP server, the durable Cwd, the system prompt, and a resume seed.
+// defaultClientFactory builds a claude.NewClient wired with the atoll meta-tool
+// MCP server, the per-process Cwd, and the system prompt. Cold start every boot:
+// the platform state slot that once carried a resume session id was removed
+// (A-P7), so no WithResume seed is passed (durable resume returns in period 10 on
+// sys.State).
 func (b *Bridge) defaultClientFactory() (claudeClient, error) {
 	opts := []claude.Option{
 		claude.WithModel(b.cfg.Model),
 		claude.WithPermissionMode(claude.PermissionBypassPermissions),
 		claude.WithMcpServers(map[string]claude.McpServerConfig{"atoll": b.buildMCPServer()}),
-		claude.WithCwd(b.cfg.WorkDir),
+		claude.WithCwd(b.workDir),
 	}
 	if strings.TrimSpace(b.cfg.SystemPrompt) != "" {
 		opts = append(opts, claude.WithSystemPrompt(b.cfg.SystemPrompt))
-	}
-	if resume := strings.TrimSpace(string(b.cfg.ResumeSeed)); resume != "" {
-		opts = append(opts, claude.WithResume(resume))
 	}
 	return claude.NewClient(opts...), nil
 }

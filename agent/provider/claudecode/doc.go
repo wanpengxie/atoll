@@ -8,8 +8,10 @@
 //     `claude` CLI), vs go-kimi's in-process Agent.
 //   - metatool injection: an in-process MCP server bridging the 7 meta-tools
 //     (call_actor …) into the claude tool surface, vs go-kimi's AdditionalTools.
-//   - resume: a claude session id (WithResume seed in / ResultMessage.SessionID
-//     out → the durable state slot), vs go-kimi's WorkDir last-session.
+//
+// Resume is currently cold-start on BOTH engines: the platform durable state slot
+// that once carried the session pointer was removed (A-P7), so every boot starts a
+// fresh session (durable resume returns in period 10 on sys.State).
 //
 // Like the go-kimi bridge: Receive (cell goroutine) never blocks; a private loop
 // (the client edge — blocking legal) runs claude turns serially; responses flow

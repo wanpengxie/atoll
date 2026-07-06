@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -171,5 +172,52 @@ func TestClose_RejectsSubmitAndMintsNoCaller(t *testing.T) {
 	// Home.Human itself must also refuse after close (no new handle minted either).
 	if _, herr := h.Human(ctx, id); !errors.Is(herr, ErrClosed) {
 		t.Fatalf("post-Close Human = %v, want ErrClosed", herr)
+	}
+}
+
+// TestResolve_InvalidDecisionRejected pins the decision闭集 guard (#4): only
+// approved/rejected may become the log's permanent payload.decision. An empty or
+// unknown verb is refused at the door入口 — BEFORE any request lookup — so a垃圾串
+// can never be written into channel truth.
+func TestResolve_InvalidDecisionRejected(t *testing.T) {
+	ctx := context.Background()
+	h := openWhiteboxHome(t)
+	id := actor.ActorID("user:carol")
+	if err := h.Admit(ctx, id, actor.KindHuman); err != nil {
+		t.Fatalf("Admit: %v", err)
+	}
+	handle, err := h.Human(ctx, id)
+	if err != nil {
+		t.Fatalf("Human: %v", err)
+	}
+	for _, dec := range []string{"", "maybe", "APPROVED"} {
+		if rerr := handle.Resolve(ctx, message.ID("no-such-req"), dec, nil); !errors.Is(rerr, ErrInvalidDecision) {
+			t.Fatalf("Resolve(decision=%q) = %v, want ErrInvalidDecision", dec, rerr)
+		}
+	}
+}
+
+// TestBoundedJSONDepth pins the JSON-depth guard (#1): a blob nested past
+// maxJSONDepth is refused up front so json.Unmarshal never recurses into it and
+// overflows the goroutine stack. The scan itself is ITERATIVE (json.Decoder.Token is
+// slice-backed), so even a pathologically deep blob is rejected safely rather than
+// crashing the scanner.
+func TestBoundedJSONDepth(t *testing.T) {
+	// A 10000-level blob would overflow json.Unmarshal's recursion; the linear scan
+	// rejects it without recursing.
+	if err := boundedJSONDepth([]byte(strings.Repeat("[", 10000) + strings.Repeat("]", 10000))); err == nil {
+		t.Fatal("boundedJSONDepth accepted a 10000-level blob (stack-overflow risk)")
+	}
+	if err := boundedJSONDepth([]byte(`{"a":{"b":{"c":[1,2,3]}}}`)); err != nil {
+		t.Fatalf("boundedJSONDepth rejected a shallow blob: %v", err)
+	}
+	// Exactly at the limit passes; one level past it is refused.
+	atLimit := strings.Repeat("[", maxJSONDepth) + strings.Repeat("]", maxJSONDepth)
+	if err := boundedJSONDepth([]byte(atLimit)); err != nil {
+		t.Fatalf("boundedJSONDepth rejected a %d-level blob at the limit: %v", maxJSONDepth, err)
+	}
+	over := strings.Repeat("[", maxJSONDepth+1) + strings.Repeat("]", maxJSONDepth+1)
+	if err := boundedJSONDepth([]byte(over)); err == nil {
+		t.Fatalf("boundedJSONDepth accepted a %d-level blob past the limit", maxJSONDepth+1)
 	}
 }

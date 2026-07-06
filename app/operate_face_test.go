@@ -118,3 +118,36 @@ func TestOperate_IntroduceUnknownClass_Rejected(t *testing.T) {
 		t.Fatalf("want error_code=unknown_class, got %v", err)
 	}
 }
+
+// TestOperate_IntroduceInvalidPlacement_Rejected proves the placement闭集 guard (#5):
+// an explicit garbage placement is fail-closed (error_code=invalid_placement) — the
+// same posture as unknown_class — and NO channel_actors row lands (rejected before the
+// INSERT). Empty placement still defaults to daemon (unaffected).
+func TestOperate_IntroduceInvalidPlacement_Rejected(t *testing.T) {
+	env := setupTestApp(t)
+	s := fullSetup(t, env)
+
+	// Owner creates a real-class agent (owner may introduce its own regardless of
+	// visibility), so the only reason to reject is the bad placement value.
+	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "ok", "looper": "go-kimi"}, s.cookies)
+	assertStatus(t, w, http.StatusCreated)
+	var ag map[string]any
+	_ = json.Unmarshal(w.Body.Bytes(), &ag)
+	agentID := ag["id"].(string)
+
+	face := env.app.OperateFaceForTest()
+	payload, _ := json.Marshal(map[string]any{"agent_id": agentID, "placement": "foo"})
+	_, err := face.Introduce(context.Background(), platform.OperateRequest{
+		ChannelID: channel.ID(s.chID),
+		Sender:    actor.ActorID("user:" + s.userID),
+		Payload:   payload,
+	})
+	var oe *platform.OperateError
+	if err == nil || !errors.As(err, &oe) || oe.Code != "invalid_placement" {
+		t.Fatalf("want error_code=invalid_placement, got %v", err)
+	}
+	// Not persisted: fail-closed BEFORE the INSERT, so the agent never became a member.
+	if actorPresent(t, env, s.cookies, s.chID, "agent:"+agentID) {
+		t.Fatalf("agent embodied despite invalid placement (row landed)")
+	}
+}

@@ -238,3 +238,48 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 		t.Fatal("daemon_channels binding was deleted despite the revocation tx rolling back (half-applied)")
 	}
 }
+
+// TestDeleteDaemon_HappyPath_RemovesBindings pins the kick-set fix (#3): the channels
+// to kick are collected IN-TX via DELETE ... RETURNING channel_id (the rows this
+// delete actually removed), not a separate pre-tx read a concurrent attach could
+// race. A successful delete removes the binding, drops the daemon, and reports ok.
+func TestDeleteDaemon_HappyPath_RemovesBindings(t *testing.T) {
+	env := setupTestApp(t)
+	_, cookies := register(t, env, "kick@example.com", "secret123", "Owner")
+
+	w := env.do(t, "POST", "/api/daemons", map[string]any{"name": "box"}, cookies)
+	assertStatus(t, w, http.StatusCreated)
+	daemonID := respJSON(t, w)["id"].(string)
+
+	wsBody, cookies2 := createWorkspace(t, env, cookies, "WS-kick")
+	wsID := wsBody["id"].(string)
+	chBody := env.do(t, "POST", "/api/workspaces/"+wsID+"/channels", map[string]any{"name": "c"}, cookies2)
+	assertStatus(t, chBody, http.StatusCreated)
+	chID := respJSON(t, chBody)["id"].(string)
+	w = env.do(t, "POST", "/api/channels/"+chID+"/daemons/attach",
+		map[string]any{"daemon_ids": []string{daemonID}}, cookies2)
+	assertStatus(t, w, http.StatusOK)
+
+	// Delete: the in-tx RETURNING collects [chID] as the kick set, commits, then kicks.
+	w = env.do(t, "DELETE", "/api/daemons/"+daemonID, nil, cookies2)
+	assertStatus(t, w, http.StatusOK)
+
+	// Daemon gone.
+	w = env.do(t, "GET", "/api/daemons", nil, cookies2)
+	assertStatus(t, w, http.StatusOK)
+	ds, _ := respJSON(t, w)["daemons"].([]any)
+	for _, d := range ds {
+		if d.(map[string]any)["id"] == daemonID {
+			t.Fatalf("daemon still present after delete")
+		}
+	}
+	// Binding gone (the RETURNING delete committed, not rolled back).
+	w = env.do(t, "GET", "/api/channels/"+chID+"/daemons", nil, cookies2)
+	assertStatus(t, w, http.StatusOK)
+	cds, _ := respJSON(t, w)["daemons"].([]any)
+	for _, d := range cds {
+		if d.(map[string]any)["id"] == daemonID {
+			t.Fatalf("daemon_channels binding survived delete")
+		}
+	}
+}

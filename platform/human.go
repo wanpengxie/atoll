@@ -1,10 +1,12 @@
 package platform
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"time"
 
 	"github.com/google/uuid"
@@ -54,6 +56,51 @@ var ErrRequestClosed = errors.New("platform: request already closed")
 // ErrNotInAudience is Resolve's guard: a subject may only resolve a request that
 // is addressed to it (audience 含我). The app maps it to 403.
 var ErrNotInAudience = errors.New("platform: not in the request's audience")
+
+// ErrInvalidDecision is Resolve's入口 guard on the decision verb: only approved /
+// rejected are valid human decisions (both close the request — approve/reject BOTH
+// map to completed+payload.decision below). An empty or unknown string must never
+// reach the log as a permanent truth's payload.decision — 垃圾串写进频道永久真相 is
+// exactly what this refuses. The app maps it to 400.
+var ErrInvalidDecision = errors.New("platform: resolve decision must be approved or rejected")
+
+// maxJSONDepth bounds the container nesting a client-supplied JSON blob may carry
+// before it is decoded into an UNSTRUCTURED map[string]any/any. encoding/json's
+// Unmarshal decodes nested containers by RECURSION, so a deeply-nested blob
+// overflows the goroutine stack — a fatal, unrecoverable crash that takes the whole
+// process down, not a catchable error. 64 levels is far past any legitimate
+// payload/config; the guard runs before every such decode (a poison config
+// additionally persists and is re-hit every startup).
+const maxJSONDepth = 64
+
+// boundedJSONDepth scans raw's structural tokens WITHOUT materialising any value
+// (json.Decoder.Token is iterative — a slice-backed scanner stack, never call-stack
+// recursion, so it cannot overflow) and errors if container nesting exceeds
+// maxJSONDepth. It is the cheap pre-decode gate for an unstructured json.Unmarshal:
+// a malformed blob is left to the real decode to report (returns nil here), only
+// over-deep nesting is refused up front.
+func boundedJSONDepth(raw []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	depth := 0
+	for {
+		tok, err := dec.Token()
+		if err == io.EOF {
+			return nil
+		}
+		if err != nil {
+			return nil // malformed: the caller's own Unmarshal surfaces the parse error
+		}
+		switch tok {
+		case json.Delim('{'), json.Delim('['):
+			depth++
+			if depth > maxJSONDepth {
+				return fmt.Errorf("platform: json nesting exceeds %d levels", maxJSONDepth)
+			}
+		case json.Delim('}'), json.Delim(']'):
+			depth--
+		}
+	}
+}
 
 // WriteRejectedError wraps a substrate write reject (a non-Accepted WriteResult)
 // so the app can surface it as 422 without ever touching harness types itself.
@@ -158,12 +205,20 @@ func (h *Home) humanCaller(id actor.ActorID) *behavior.Caller {
 	pen := h.minter.Mint(id, actor.KindHuman, h.channelID)
 	clock := func() time.Time { return time.UnixMilli(h.nowMs()) }
 	c := behavior.NewCaller(pen, clock, nil)
-	// Home closing: never (re)mint a caller INTO the index after teardown began.
+	// Home closing: never (re)mint a caller INTO the index after teardown began —
 	// stopAllHumanCallers has cleared it, and re-storing would resurrect a caller
-	// whose Arm could fire a死后 terminal through the pen into a closing store. The
-	// verb entries are already ErrClosed-gated (requireActiveMember), so this is the
-	// belt-and-suspenders half — a caller is still returned for any non-verb holder,
-	// just left unindexed so the cleared index stays cleared.
+	// whose Arm could fire a死后 terminal through the pen into a closing store. Keep
+	// the caller UNINDEXED (returned for this one call, never stored) so the cleared
+	// index stays cleared.
+	//
+	// Honest scope: this does NOT fully close the post-Close window. A Submit that
+	// already passed requireActiveMember BEFORE h.closed was set is in flight and
+	// still reaches this Arm — the ErrClosed gate stops the NEXT verb entry, not an
+	// in-flight one past it. That residual Arm fires at most one timer against a
+	// closing store through an UNINDEXED caller (untracked by stopAllHumanCallers);
+	// the write is either accepted just before the store closes or rejected by it,
+	// and the unindexed caller is GC'd — no leak, no monotonic index growth. Owner
+	// 拍定 benign, not fixed.
 	if h.closed.Load() {
 		return c
 	}
@@ -269,6 +324,12 @@ func (h HumanHandle) Resolve(ctx context.Context, reqID message.ID, decision str
 	if err := h.home.requireActiveMember(ctx, h.userID); err != nil {
 		return err
 	}
+	// decision闭集 (approved/rejected): reject an empty/unknown string BEFORE any
+	// log work — payload.decision becomes permanent channel truth, and a garbage
+	// verb must never land there.
+	if decision != "approved" && decision != "rejected" {
+		return ErrInvalidDecision
+	}
 	req, ok, err := h.home.cs.Requests.FindByID(ctx, reqID)
 	if err != nil {
 		return fmt.Errorf("platform: Resolve lookup: %w", err)
@@ -288,6 +349,11 @@ func (h HumanHandle) Resolve(ctx context.Context, reqID message.ID, decision str
 	}
 	merged := map[string]any{}
 	if len(payload) > 0 {
+		// Bounded-depth pre-check: refuse a stack-overflow blob before Unmarshal can
+		// recurse into map[string]any (fatal, unrecoverable — see boundedJSONDepth).
+		if derr := boundedJSONDepth(payload); derr != nil {
+			return &WriteRejectedError{Reason: "bad_payload", Detail: derr.Error()}
+		}
 		if uerr := json.Unmarshal(payload, &merged); uerr != nil {
 			return &WriteRejectedError{Reason: "bad_payload", Detail: uerr.Error()}
 		}
