@@ -142,9 +142,12 @@ func (f *cellCancelForwarder) Rebind(d *link.Dialer) { f.d.Store(d) }
 // cancellerFor builds the Hooks.Canceller closure for one hosted caller id. The
 // target parameter is IGNORED on the wire (the home reverse-resolves it from the
 // request in the log — the caller self-reports nothing); the frame goes up THIS
-// caller's own stream, so the id is welded here. Synchronous (the ledger invokes
-// Canceller off its own lock — ledger_call.go — not on a fanout goroutine, so a
-// direct codec write is safe, exactly like the cell-path Home.CancelRequest).
+// caller's own stream, so the id is welded here. The call into SendCancelRequest
+// itself is synchronous (the ledger invokes Canceller off its own lock —
+// ledger_call.go — not on a fanout goroutine) but SendCancelRequest's actual
+// wire write is NOT: it runs off this goroutine and is grace-bounded, so a
+// stuck/dead link can never pin the ledger's own goroutine (or the actor
+// worker occupying it) waiting on a write that will never drain.
 func (f *cellCancelForwarder) cancellerFor(id actor.ActorID) func(target actor.ActorID, requestID message.ID) {
 	return func(_ actor.ActorID, requestID message.ID) {
 		if d := f.d.Load(); d != nil {

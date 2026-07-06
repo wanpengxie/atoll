@@ -553,6 +553,20 @@ func (d *Dialer) SendObs(id actor.ActorID, kind string, value []byte) {
 	_ = as.codec.Write(ipc.Frame{Kind: ipc.KindObs, Payload: payload})
 }
 
+// cancelForwardWriteGrace bounds how long ONE cancel-forward frame write may
+// occupy the link before it is abandoned as stuck. A write deadline that only
+// failed this one call would leave the shared mux conn holding a partial
+// length-prefixed frame — unsafe to keep writing to (see closeConn's own
+// contract) — so on grace expiry the whole link is torn down instead, exactly
+// mirroring the port escort's signalDespawn idiom (runtime/actorrt/port.go: a
+// grace timer racing the write, and on timeout closeConn — not a bespoke
+// per-write deadline — unblocks the stuck write from underneath it). A link
+// death here is the SAME best-effort outcome this arm already tolerates
+// (Rebind survives it — cellCancelForwarder/cellObsForwarder resend on
+// whichever Dialer reconnect installs next), just reached via a stuck
+// write instead of a read error.
+var cancelForwardWriteGrace = 5 * time.Second
+
 // SendCancelRequest forwards one caller-side cancel UP the named actor's stream as
 // a KindCancelRequest frame (the daemon-hosted caller abandoning its OWN outbound
 // request — the upstream twin of the home's host→remote KindCancel). It carries
@@ -561,7 +575,16 @@ func (d *Dialer) SendObs(id actor.ActorID, kind string, value []byte) {
 // self-reports neither. Fire-and-forget, unidirectional, NO ack (same posture as
 // SendObs): a write error on a dying stream is dropped — the request's own deadline
 // and the caller's own terminal already close it. No-op if the actor has no open
-// stream. The codec write mutex serialises this against the cell's KindEmit writes.
+// stream.
+//
+// The actual write runs OFF the caller's goroutine (often the cell/ledger
+// goroutine abandoning its own outbound request — never something this signal
+// may pin on a stuck peer) and is bounded by cancelForwardWriteGrace: a second
+// goroutine races the write against a grace timer and force-closes the link if
+// the timer wins, guaranteeing the write goroutine can never leak past grace
+// (it unblocks either on write completion or on the closed conn erroring the
+// write out). The codec write mutex still serialises this against the cell's
+// other KindEmit/Access/Schedule writes on the same stream.
 func (d *Dialer) SendCancelRequest(id actor.ActorID, requestID message.ID) {
 	d.mu.Lock()
 	as := d.streams[id]
@@ -573,7 +596,18 @@ func (d *Dialer) SendCancelRequest(id actor.ActorID, requestID message.ID) {
 	if err != nil {
 		return
 	}
-	_ = as.codec.Write(ipc.Frame{Kind: ipc.KindCancelRequest, Payload: payload})
+	frameDone := make(chan struct{})
+	go func() {
+		defer close(frameDone)
+		_ = as.codec.Write(ipc.Frame{Kind: ipc.KindCancelRequest, Payload: payload})
+	}()
+	go func() {
+		select {
+		case <-frameDone:
+		case <-time.After(cancelForwardWriteGrace):
+			_ = d.lc.Close() // stuck write: unblock it by killing the (evidently dead) link
+		}
+	}()
 }
 
 // SetDespawnLocal installs the host→remote despawn hook (see Dialer.despawnLocal).
