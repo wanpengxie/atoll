@@ -22,7 +22,7 @@ import (
 // closure instead). It does NOT go-live (live stays false) — these tests drive
 // start()/stop() directly and do not assert IsLive.
 func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) *cell {
-	c := allocShell(parent, id, actor.KindAgent, mailbox, onDown, onObs, onExit, started, logger)
+	c := allocShell(parent, id, actor.KindAgent, mailbox, onDown, onObs, onExit, nil, started, logger)
 	c.impl = impl
 	return c
 }
@@ -55,7 +55,8 @@ func TestCellDeliverAfterStopGuarded(t *testing.T) {
 	t.Parallel()
 	c := newCell(context.Background(), "a", newRecordActor(), 4, nil, nil, nil, time.Now(), nil)
 	c.start()
-	c.stop()
+	c.initiateStop()
+	<-c.done
 	if err := c.Deliver(env("x")); err != ErrCellStopped {
 		t.Fatalf("Deliver after stop = %v, want ErrCellStopped", err)
 	}
@@ -253,7 +254,8 @@ func TestDeliverStoppedOutcome(t *testing.T) {
 	rt.mu.Lock()
 	rt.embodiments["a"] = c
 	rt.mu.Unlock()
-	c.stop()
+	c.initiateStop()
+	<-c.done
 	// removeIf deleted the map entry on exit; re-insert the stopped cell so the
 	// deliver path reaches its ErrCellStopped guard.
 	rt.mu.Lock()
@@ -277,9 +279,10 @@ type fakeErrEmbodiment struct{ started time.Time }
 func (fakeErrEmbodiment) Deliver(*message.Envelope) error { return errors.New("weird enqueue error") }
 func (p fakeErrEmbodiment) startedAt() time.Time          { return p.started }
 func (fakeErrEmbodiment) cancelRequest(message.ID)        {}
-func (fakeErrEmbodiment) stop()                           {}
-func (fakeErrEmbodiment) stopDespawn()                    {}
 func (fakeErrEmbodiment) initiateStop()                   {}
+func (fakeErrEmbodiment) beginTeardown()                  {}
+func (fakeErrEmbodiment) signalDespawn(context.Context)   {}
+func (fakeErrEmbodiment) doneCh() <-chan struct{}         { return nil }
 func (fakeErrEmbodiment) isLive() bool                    { return false }
 func (fakeErrEmbodiment) markDead()                       {}
 func (fakeErrEmbodiment) kind() actor.Kind                { return "" }
@@ -529,7 +532,7 @@ func TestNewPortNilLoggerDefaulted(t *testing.T) {
 		_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		_, _ = c.Read() // consume ack
 	}()
-	p, err := newPort(context.Background(), context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil, nil, nil, time.Now(), nil)
+	p, err := newPort(context.Background(), context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil, nil, nil, nil, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("newPort: %v", err)
 	}

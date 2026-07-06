@@ -238,7 +238,15 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 	// hosted cell's identity and in-memory state must outlive a single wire
 	// session.
 	rt, del := actorrt.New(actorrt.Config{})
-	defer rt.StopAll()
+	defer func() {
+		// StopAll no longer joins (G0): it enrols every hosted cell as a zombie and
+		// returns. DrainZombies is the aggregate join — a卡死 cell is reported leaked
+		// into the shutdown log instead of hanging RunCompute's teardown forever.
+		rt.StopAll()
+		if leaked := rt.DrainZombies(0); len(leaked) > 0 {
+			logger.Warn("compute.close.zombies_leaked", "compute", computeID, "count", len(leaked), "actors", leaked)
+		}
+	}()
 	watcher := &cellDownWatcher{down: map[actor.ActorID]func(cause string){}}
 	rt.WatchDown(watcher)
 	// The obs arm outlives every individual link the same way rt does — built

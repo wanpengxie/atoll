@@ -52,7 +52,7 @@ type engine struct {
 	serve *serveLedger
 	call  *callLedger
 
-	workQ   chan *message.Envelope
+	workQ   *workDeque
 	rejectQ chan *message.Envelope
 
 	lifeCtx  context.Context
@@ -118,7 +118,7 @@ func New(caps actorcaps.Caps, hooks Hooks, def Def) actorrt.Actor {
 	}
 	e.serve = newServeLedger(e.life, 256)
 	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks, e.closureFault)
-	e.workQ = make(chan *message.Envelope, e.queueCap)
+	e.workQ = newWorkDeque(e.queueCap)
 	e.rejectQ = make(chan *message.Envelope, e.queueCap)
 	e.rejectStop = make(chan struct{})
 	return e
@@ -274,25 +274,15 @@ func (e *engine) offerReject(env *message.Envelope) {
 	}
 }
 
-// enqueueWork hands env to the bounded work queue the worker's Recv drains.
-// Overflow evicts the oldest queued item (obs recorded) before inserting env
-// — event/timer deliveries carry no closure obligation, so dropping one is
-// a legitimate degrade, never a liveness break (spec §1.3).
+// enqueueWork hands env to the bounded work deque the worker's Recv drains.
+// Overflow evicts the oldest NON-request queued item (skipping admitted requests
+// — an event flood must never evict an open account, P0-4=A) before inserting env;
+// if every queued item is a request the newcomer is refused instead. Either drop
+// is obs-recorded — event/timer deliveries carry no closure obligation, so it is a
+// legitimate degrade, never a liveness break (spec §1.3 + G0-4).
 func (e *engine) enqueueWork(env *message.Envelope) {
-	select {
-	case e.workQ <- env:
-		return
-	default:
-	}
-	select {
-	case dropped := <-e.workQ:
+	if dropped := e.workQ.push(env); dropped != nil {
 		e.recordDrop(dropped, actorrt.ObsKind("actorbase.queue_overflow"))
-	default:
-	}
-	select {
-	case e.workQ <- env:
-	default:
-		e.recordDrop(env, actorrt.ObsKind("actorbase.queue_overflow"))
 	}
 }
 
@@ -641,21 +631,28 @@ func (e *engine) Self() actor.ActorID {
 // everything already handed to it (spec's "worker 排空至 return").
 func (e *engine) Recv() (Msg, error) {
 	for {
-		select {
-		case env := <-e.workQ:
+		// Drain the deque with priority over ErrRecvDone: a Draining occupant still
+		// finishes everything already handed to it (spec's "worker 排空至 return").
+		if env, ok := e.workQ.pop(); ok {
 			if msg, ok := e.projectWork(env); ok {
 				return msg, nil
 			}
 			continue
-		default:
 		}
 		select {
-		case env := <-e.workQ:
-			if msg, ok := e.projectWork(env); ok {
-				return msg, nil
-			}
+		case <-e.workQ.sig:
+			// A push woke us — loop back to pop. (Coalesced: one wake may cover
+			// several pushes; the pop loop drains them all.)
 			continue
 		case <-e.lifeCtx.Done():
+			// Teardown: one last drain attempt (a push may have raced Done) before
+			// signalling the loop to end.
+			if env, ok := e.workQ.pop(); ok {
+				if msg, ok := e.projectWork(env); ok {
+					return msg, nil
+				}
+				continue
+			}
 			return Msg{}, ErrRecvDone
 		}
 	}

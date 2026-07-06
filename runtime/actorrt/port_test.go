@@ -413,8 +413,17 @@ func TestPortParentCancelQuietTeardown(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("conn not closed after parent cancel — quiet teardown must still closeConn")
 	}
-	if _, ok := rt.Stat(id); ok {
-		t.Fatal("port still addressable after parent cancel — did not retract from embodiment")
+	// Eviction (die→onExit) runs on the port goroutine just after closeConn, so it
+	// is async relative to the remote's EOF observation above — poll for it.
+	evicted := time.Now().Add(2 * time.Second)
+	for {
+		if _, ok := rt.Stat(id); !ok {
+			break
+		}
+		if time.Now().After(evicted) {
+			t.Fatal("port still addressable after parent cancel — did not retract from embodiment")
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 	// NO down edge: teardown is not death. (Checked AFTER eof+Stat confirm the
 	// teardown completed, so a would-be edge has had every chance to fire.)
@@ -484,7 +493,8 @@ func TestPortDeliverAfterStop(t *testing.T) {
 	rt.mu.RLock()
 	p := rt.embodiments[id]
 	rt.mu.RUnlock()
-	p.stop()
+	p.initiateStop()
+	<-p.doneCh()
 
 	if err := p.Deliver(env("x")); err != ErrCellStopped {
 		t.Fatalf("Deliver after stop = %v, want ErrCellStopped", err)

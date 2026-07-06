@@ -46,7 +46,7 @@ func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, kind actor.Kin
 	if !r.IsLive(parent) { // ① fast-path, lock-free
 		return Incarnation{}, ErrParentNotLive
 	}
-	c := allocShell(r.parent, childID, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
+	c := allocShell(r.parent, childID, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.reapZombie, r.clock(), r.logger)
 	c.impl = build(Incarnation{id: childID, p: c}) // outside the lock, same discipline as Spawn.
 
 	r.mu.Lock()
@@ -180,16 +180,17 @@ func (r *Runtime) DespawnChild(parent Incarnation, childID actor.ActorID) error 
 	// REPLACEMENT-LIVE-FLIP INVARIANT (same as Despawn/DespawnID): flip dead in the
 	// SAME critical section as the map delete — no live-but-unmapped window for a
 	// stale welded cap to pass IsLive. markDead is an idempotent atomic and never
-	// re-enters r.mu, so it is deadlock-safe in-lock.
+	// re-enters r.mu, so it is deadlock-safe in-lock. Enrol as a zombie in the SAME
+	// critical section (P0-1).
 	child.markDead()
+	launch := r.retireLocked(child, childID, flavorDespawn)
 	r.mu.Unlock()
-	// Mirrors Despawn's own guarded teardown: the live flip already happened
-	// in-lock; here only the join (WAIT half). stopDespawn (not stop) — a by-name
-	// termination signals a port's remote (KindDespawn) before closing; a cell child
-	// (the only kind Fork mints today) collapses it to stop(). The stale
-	// r.owned[parent.p] entry for this child is left in place — it is !isLive() from
-	// here on and gets pruned on the parent's next Fork (the amortised cleanup
-	// above), same as any other child that died on its own between two Forks.
-	child.stopDespawn()
+	// Mirrors Despawn's own guarded teardown: the escort drives signalDespawn (a
+	// by-name termination — a port emits KindDespawn before closing; a cell child,
+	// the only kind Fork mints today, collapses it to the quiet teardown) then joins
+	// bounded by grace. DespawnChild returns in O(judge-dead), never waiting on the
+	// child goroutine. The stale r.owned[parent.p] entry is left in place — it is
+	// !isLive() from here on and gets pruned on the parent's next Fork.
+	launch()
 	return nil
 }

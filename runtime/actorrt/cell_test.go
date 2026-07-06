@@ -557,7 +557,13 @@ func TestDownReporterStoppingOverridesLoud(t *testing.T) {
 	}
 }
 
-func TestCellTeardownWaitsInFlight(t *testing.T) {
+// TestCellTeardownDoesNotWaitInFlight is the G0 inversion of the old
+// "teardown waits" contract (DoD①: 卡死不陪葬). Despawn must return in
+// O(judge-dead) WITHOUT joining a stuck in-flight Receive — the corpse is enrolled
+// on the zombie ledger and its escort does the bounded join off-path. Once the
+// Receive is released the goroutine exits and self-reaps (account⇔residue: the
+// ledger clears).
+func TestCellTeardownDoesNotWaitInFlight(t *testing.T) {
 	t.Parallel()
 	release := make(chan struct{})
 	finished := atomic.Bool{}
@@ -566,16 +572,36 @@ func TestCellTeardownWaitsInFlight(t *testing.T) {
 		<-release
 		finished.Store(true)
 	}
-	rt, _ := New(Config{Parent: context.Background()})
+	rt, _ := New(Config{Parent: context.Background(), ZombieGrace: 2 * time.Second})
 	inc := rt.Spawn("a", actor.KindAgent, static(a))
 	mustDeliver(t, rt, "a", env("x"))
 	time.Sleep(10 * time.Millisecond) // ensure Receive is in-flight
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		close(release)
-	}()
-	rt.Despawn(inc) // must block until in-flight Receive returns
+
+	start := time.Now()
+	rt.Despawn(inc) // must NOT block on the in-flight Receive
+	if elapsed := time.Since(start); elapsed > 200*time.Millisecond {
+		t.Fatalf("Despawn blocked %v on an in-flight Receive — teardown must be O(judge-dead)", elapsed)
+	}
+	if finished.Load() {
+		t.Fatal("in-flight Receive completed before release — test did not exercise the blocked path")
+	}
+	// The corpse is enrolled while its goroutine is still stuck in Receive.
+	if got := len(rt.Zombies()); got != 1 {
+		t.Fatalf("zombie ledger = %d entries, want 1 (the stuck corpse)", got)
+	}
+	// Release it: the goroutine exits and self-reaps, clearing the ledger.
+	close(release)
+	deadline := time.Now().Add(2 * time.Second)
+	for len(rt.Zombies()) != 0 && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
+	if got := len(rt.Zombies()); got != 0 {
+		t.Fatalf("zombie ledger = %d after release, want 0 (self-reap)", got)
+	}
 	if !finished.Load() {
-		t.Fatal("Despawn returned before in-flight Receive completed")
+		t.Fatal("released Receive never completed")
+	}
+	if rt.LeakedTotal() != 0 {
+		t.Fatalf("LeakedTotal = %d, want 0 (the corpse exited within grace)", rt.LeakedTotal())
 	}
 }

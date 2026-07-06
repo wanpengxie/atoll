@@ -37,7 +37,22 @@ type Channel struct {
 	// logger surfaces closure-drain FAULTS (a swallowed drain failure is a
 	// black hole — the loudest thing the watcher can hit). nil → discard.
 	logger *slog.Logger
+
+	// downCh is the O(1) hand-off the down edge (OnDown) posts a dead id onto —
+	// the publishDown contract is "watcher MUST be non-blocking", and the closure
+	// materialisation (a store scan + terminal writes) is decidedly NOT: it must
+	// not run on the dying goroutine's reap path (G0-3). A bounded buffer (a
+	// full one drops + logs — the level scan is the load-bearing backstop, the
+	// edge is a lossy fast-path, P0-3); consumeDown drains it serially.
+	downCh   chan actor.ActorID
+	downStop chan struct{}
+	downDone chan struct{}
 }
+
+// downChBuffer bounds the death-edge hand-off queue. A full buffer drops the
+// edge (logged) — the 30s level scan + startup first-scan close whatever the
+// edge lost, idempotently (the per-request UNIQUE index makes a re-scan a no-op).
+const downChBuffer = 64
 
 // Config assembles a channel.
 type Config struct {
@@ -80,6 +95,9 @@ func New(cfg Config) *Channel {
 		openReqs:  cfg.OpenRequests,
 		clock:     clock,
 		logger:    logger,
+		downCh:    make(chan actor.ActorID, downChBuffer),
+		downStop:  make(chan struct{}),
+		downDone:  make(chan struct{}),
 	}
 	// Share the channel's clock + logger with the runtime: the runtime stamps
 	// each cell's StartedAt with this clock, so the system actor's uptime
@@ -105,6 +123,12 @@ func New(cfg Config) *Channel {
 			panic("channelkit: system anchor invariant violated — SystemActorID already occupied at assembly")
 		}
 	}
+	// Start the resident closure consumer: OnDown only O(1)-posts a dead id; this
+	// goroutine drains the buffer serially and does the blocking closure work off
+	// the dying goroutine's reap path (G0-3). Started after the runtime exists
+	// (it reads liveness for the recheck) and joined by Stop in Home.Close's
+	// teardown序 (after cells stop, before stores close).
+	go c.consumeDown()
 	return c
 }
 
@@ -134,14 +158,47 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 	if c.systemPen == nil || c.openReqs == nil {
 		return
 	}
-	// The death closure is system-authored: the injected writer is the system Pen
-	// (Mint(SystemActorID)), which welds sender==SystemActorID + the channel id
-	// into every write. No caller injection here — identity rides the pen.
-	//
-	// Delegate the closure materialisation to the behaviour base (the single
-	// implementation, co-located with its counterparts). channelkit
-	// only injects the seams (system pen + store drain) and an onFault log
-	// callback; the base holds no logger.
+	// O(1) hand-off ONLY (G0-3): the closure materialisation (a store scan +
+	// terminal writes) violates publishDown's "watcher MUST be non-blocking"
+	// contract and must not run on the dying goroutine's reap path. Post the dead
+	// id to the resident consumer; a full buffer is dropped + logged (the level
+	// scan is the load-bearing backstop — the edge is a lossy fast-path, P0-3).
+	select {
+	case c.downCh <- id:
+	default:
+		c.logger.Warn("channelkit.closure.edge_dropped",
+			"channel", c.channelID, "dead_actor", id,
+			"note", "down buffer full; level scan will close orphans")
+	}
+}
+
+// consumeDown is the resident closure goroutine: it drains dead ids serially and
+// does the blocking closure work off the death-edge reap path. Started by New,
+// joined by Stop. Before materialising, it RE-CHECKS liveness (Present) — the
+// async hand-off widens the window in which a same-id successor may have taken
+// over, so the edge path must guard against mis-closing the successor's callers
+// exactly as the level scan does.
+func (c *Channel) consumeDown() {
+	defer close(c.downDone)
+	probe := livenessProbe{rt: c.cells}
+	for {
+		select {
+		case id := <-c.downCh:
+			c.closeFor(context.Background(), id, probe)
+		case <-c.downStop:
+			return
+		}
+	}
+}
+
+// closeFor materialises receiver_unavailable for every in-flight request
+// addressed to id — UNLESS a same-id successor is already live (Present), in
+// which case the edge is stale and skipped (its callers are the successor's, not
+// black holes). System-authored: identity rides the system pen.
+func (c *Channel) closeFor(ctx context.Context, id actor.ActorID, probe livenessProbe) {
+	if probe.Present(id) {
+		return // a successor took over between the edge and this consume — not a corpse.
+	}
 	onFault := func(reqID message.ID, err error) {
 		c.logger.Error("channelkit.closure.write_failed",
 			"channel", c.channelID, "dead_actor", id, "request", reqID, "err", err)
@@ -154,6 +211,17 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 		c.logger.Error("channelkit.closure.drain_query_failed",
 			"channel", c.channelID, "dead_actor", id, "err", err)
 	}
+}
+
+// Stop joins the resident closure consumer — the down-edge goroutine's teardown
+// seam Home.Close drives AFTER cells stop (no more edges will be produced) and
+// BEFORE the stores close (a late materialise must not write into a closing
+// store). Idempotent-safe: Home.Close calls it exactly once. Any id still
+// buffered at Stop is abandoned to the level scan (the same lossy-edge / level-
+// backstop split as a full-buffer drop).
+func (c *Channel) Stop() {
+	close(c.downStop)
+	<-c.downDone
 }
 
 // livenessProbe adapts the channel's runtime liveness view (Stat) to the behaviour

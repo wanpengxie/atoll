@@ -33,6 +33,7 @@ func (liveActor) Receive(context.Context, *message.Envelope) error { return nil 
 // not pointer-checked).
 func TestOnDown_DoesNotDespawnSuccessor(t *testing.T) {
 	ch := channelkit.New(channelkit.Config{ChannelID: "ch", Clock: time.Now})
+	defer ch.Stop()
 	ch.Cells().Spawn("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} }) // the live successor
 	if _, ok := ch.Cells().Stat("worker"); !ok {
 		t.Fatal("successor not hosted after Spawn")
@@ -100,6 +101,7 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
 		Clock:        time.Now,
 	})
+	defer ch.Stop()
 	ch.Cells().Spawn("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return panicActor{} })
 
 	// Deliver a request → Receive panics → cell death → OnDown. Delivery goes
@@ -158,6 +160,7 @@ func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
 		},
 		Clock: time.Now,
 	})
+	defer ch.Stop()
 	// Place the worker, then CLEAN despawn it (no panic → no death edge fires).
 	workerInc := ch.Cells().Spawn("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
 
@@ -203,16 +206,44 @@ func (errQuery) DistinctOpenRequestReceivers(context.Context) ([]actor.ActorID, 
 }
 
 // capHandler is a minimal slog.Handler capturing emitted record messages so a
-// test can assert a fault was surfaced through the std slog facade.
-type capHandler struct{ msgs []string }
+// test can assert a fault was surfaced through the std slog facade. It is mutex-
+// guarded because the closure work now runs on channelkit's resident consumer
+// goroutine (G0-3), not synchronously in the test's goroutine.
+type capHandler struct {
+	mu   sync.Mutex
+	msgs []string
+}
 
 func (*capHandler) Enabled(context.Context, slog.Level) bool { return true }
 func (h *capHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
 	h.msgs = append(h.msgs, r.Message)
+	h.mu.Unlock()
 	return nil
 }
 func (h *capHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *capHandler) WithGroup(string) slog.Handler      { return h }
+
+// waitFirstMsg polls until at least one message is captured, returning the first
+// (or "" on timeout). The down edge is now async: OnDown only O(1)-posts, the
+// resident consumer does the closure work + logging on its own goroutine.
+func (h *capHandler) waitFirstMsg(timeout time.Duration) string {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		h.mu.Lock()
+		n := len(h.msgs)
+		var first string
+		if n > 0 {
+			first = h.msgs[0]
+		}
+		h.mu.Unlock()
+		if n > 0 {
+			return first
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	return ""
+}
 
 // TestClosureDrainFailure_IsSurfaced proves a swallowed-drain regression cannot
 // return: when the drain query fails (cannot close anyone → black hole), the
@@ -229,12 +260,14 @@ func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 		Clock:        time.Now,
 		Logger:       slog.New(h),
 	})
+	defer ch.Stop()
 	ch.OnDown(context.Background(), "worker", nil)
-	if len(h.msgs) == 0 {
+	got := h.waitFirstMsg(2 * time.Second)
+	if got == "" {
 		t.Fatal("drain query failed but NO fault logged — silent black hole regression")
 	}
-	if h.msgs[0] != "channelkit.closure.drain_query_failed" {
-		t.Fatalf("fault msg=%q, want channelkit.closure.drain_query_failed", h.msgs[0])
+	if got != "channelkit.closure.drain_query_failed" {
+		t.Fatalf("fault msg=%q, want channelkit.closure.drain_query_failed", got)
 	}
 }
 
@@ -270,12 +303,14 @@ func TestOnDown_PerRequestWriteFault_IsLogged(t *testing.T) {
 		Clock:        time.Now,
 		Logger:       slog.New(h),
 	})
+	defer ch.Stop()
 	ch.OnDown(context.Background(), "worker", nil)
-	if len(h.msgs) == 0 {
+	got := h.waitFirstMsg(2 * time.Second)
+	if got == "" {
 		t.Fatal("per-request write failed but NO fault logged — silent black hole regression")
 	}
-	if h.msgs[0] != "channelkit.closure.write_failed" {
-		t.Fatalf("fault msg=%q, want channelkit.closure.write_failed", h.msgs[0])
+	if got != "channelkit.closure.write_failed" {
+		t.Fatalf("fault msg=%q, want channelkit.closure.write_failed", got)
 	}
 }
 
@@ -290,8 +325,44 @@ func TestNew_DefaultClockAndSpawnsSystem(t *testing.T) {
 		System: func(*actorrt.Runtime) actorrt.Actor { return liveActor{} },
 		// Clock left nil → New must default it (time.Now) without panicking.
 	})
+	defer ch.Stop()
 	if _, ok := ch.Cells().Stat(actor.SystemActorID); !ok {
 		t.Fatal("New did not spawn the intrinsic System cell at SystemActorID")
+	}
+}
+
+// TestOnDown_AsyncConsumer_SkipsLivePresentSuccessor (DoD⑤ + G0-3): the down
+// edge is now O(1)-posted and materialised by a resident consumer, which RE-CHECKS
+// liveness before writing — so a stale edge for an id whose same-id successor is
+// already live is skipped (no terminal), exactly as the level scan guards. A
+// live "worker" is present, an edge arrives for it, and NO closure terminal is
+// written.
+func TestOnDown_AsyncConsumer_SkipsLivePresentSuccessor(t *testing.T) {
+	req := message.Envelope{
+		ID: "req-1", ChannelID: "ch", Kind: message.KindRequest, Type: "x.do",
+		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"worker"},
+	}
+	fc := &fakeWriter{}
+	ch := channelkit.New(channelkit.Config{
+		ChannelID:    "ch",
+		SystemPen:    fc,
+		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
+		Clock:        time.Now,
+	})
+	defer ch.Stop()
+	// A live successor occupies "worker".
+	ch.Cells().Spawn("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
+
+	// A stale edge for "worker" — the async consumer must recheck Present and skip.
+	ch.OnDown(context.Background(), "worker", errors.New("stale predecessor edge"))
+
+	// Give the consumer time to (not) write. No terminal must appear.
+	deadline := time.Now().Add(300 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if fc.count() != 0 {
+			t.Fatalf("consumer wrote a terminal for a live-present successor — recheck did not skip")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 }
 

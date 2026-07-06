@@ -132,6 +132,9 @@ type port struct {
 	// consumer). Mirrors cell.onObs.
 	onObs  func(actor.ActorID, embodiment, ObsKind, ObsValue)
 	onExit func(actor.ActorID, embodiment)
+	// onReap strikes this port off the runtime's zombie ledger — invoked the
+	// instant both loops have fully exited (account⇔residue), before done closes.
+	onReap func(embodiment)
 	logger *slog.Logger
 
 	// live is the per-incarnation WHEN-validity atomic (embodiment contract), set
@@ -166,7 +169,7 @@ type port struct {
 // read runs off-goroutine and newPort selects it against hsCtx; on expiry it
 // closes the conn (unblocking the read) and returns. parent owns the port's
 // LIFETIME (unchanged); hsCtx owns only this one read.
-func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
+func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), onReap func(embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -235,6 +238,7 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 		onDown:   onDown,
 		onObs:    onObs,
 		onExit:   onExit,
+		onReap:   onReap,
 		logger:   logger,
 		sendq:    make(chan *message.Envelope, portSendQueue),
 		done:     make(chan struct{}),
@@ -288,6 +292,10 @@ func (p *port) isLive() bool { return p.live.Load() }
 // markDead implements embodiment: flip the liveness atomic to false (idempotent).
 func (p *port) markDead() { p.live.Store(false) }
 
+// doneCh implements embodiment: the channel closed once both loops have fully
+// exited (the zombie escort / DrainZombies join handle).
+func (p *port) doneCh() <-chan struct{} { return p.done }
+
 // Deliver enqueues env into the port's bounded send queue. Never blocks: a full
 // queue returns ErrMailboxFull, a torn-down port ErrCellStopped. nil is not a
 // message and is rejected (a mailbox carries only envelopes).
@@ -339,7 +347,16 @@ func (p *port) start() {
 	p.wg.Add(2)
 	go p.writeLoop()
 	go p.readLoop()
-	go func() { p.wg.Wait(); close(p.done) }()
+	go func() {
+		p.wg.Wait()
+		// Reap BEFORE closing done: the escort / DrainZombies wake on done and must
+		// see an already-reaped ledger (account⇔residue — the residue is gone the
+		// instant both loops exit).
+		if p.onReap != nil {
+			p.onReap(p)
+		}
+		close(p.done)
+	}()
 }
 
 // writeLoop drains the send queue onto the wire.
@@ -547,51 +564,66 @@ func (p *port) die(cause error) {
 }
 
 // initiateStop implements embodiment: the non-blocking, idempotent SIGNAL half of
-// teardown — port already has exactly this shape in die(): it never
-// joins, it self-evicts via onExit, and cause==nil already skips the onDown
-// death edge (the same "clean stop, no closure obligation" semantics stop()
-// wants). A dying parent's cascade (removeIf) calls this to signal a forked
-// child without joining it.
-func (p *port) initiateStop() { p.die(nil) }
-
-// stop is the external teardown: mark stopping (so the loops' die() publishes NO
-// down edge), cancel + close to unblock the loops, then join on done.
-func (p *port) stop() {
-	p.stopOnce.Do(func() {
-		p.live.Store(false)
-		p.mu.Lock()
-		p.stopping = true
-		p.closed = true
-		p.mu.Unlock()
-		p.cancel()
-		p.closeConn()
-	})
-	<-p.done
+// the QUIET teardown. It marks stopping FIRST (so a loop's die() from the ensuing
+// closeConn publishes NO down edge — a quiet replace / channel-teardown owes truth
+// nothing) then routes through die(nil): self-evict via onExit, cancel + closeConn
+// to unblock the loops, no join. A dying parent's cascade (removeIf) and the quiet
+// escort both call this.
+func (p *port) initiateStop() {
+	p.mu.Lock()
+	p.stopping = true
+	p.mu.Unlock()
+	p.die(nil)
 }
 
-// stopDespawn is the DESPAWN-flavoured external teardown: unlike stop() (a QUIET
-// close for replace / channel-teardown), it first writes a KindDespawn frame down
-// the wire — the host→remote "end your execution arm" signal (§10.5) — so the
-// remote despawns its local cell and replies KindDetach before the stream closes.
-// It then tears down exactly like stop() (mark stopping so the loops publish NO
-// down edge, cancel + close, join). The frame is best-effort and un-acked: a live
+// beginTeardown implements embodiment: synchronously mark the quiet-teardown
+// intent (p.stopping+p.closed) so a loop's die() from a racing error publishes NO
+// down edge. Non-blocking — no cancel/closeConn (the escort's signalDespawn does
+// those, after writing the frame).
+func (p *port) beginTeardown() {
+	p.live.Store(false)
+	p.mu.Lock()
+	p.stopping = true
+	p.closed = true
+	p.mu.Unlock()
+}
+
+// signalDespawn implements embodiment: the DESPAWN-flavoured SIGNAL half (non-
+// joining). Unlike the quiet teardown, it first emits a KindDespawn frame — the
+// host→remote "end your execution arm" signal (§10.5) — so the remote despawns its
+// local cell and replies KindDetach before the stream closes. stopping is set
+// FIRST (so the loops publish NO down edge), then the frame is written in a SUB-
+// goroutine bounded by dl (P1-5: ipc.Codec.Write holds wmu and has no ctx — an
+// inline write would pin the escort past grace with no way out); on dl expiry the
+// closeConn below breaks a stuck write (it returns an error, the remote degrades to
+// EOF), so the write goroutine can never leak. Best-effort + un-acked: a live
 // remote flushes it before the buffered conn closes, a dead one degrades to an EOF
-// death. The write is on the SAME serialised codec as writeLoop — consistent with
-// the port's existing synchronous wire writes (deliver / cancel / emit-ack).
-func (p *port) stopDespawn() {
+// death. No join — the escort watches doneCh bounded by the same grace.
+func (p *port) signalDespawn(dl context.Context) {
 	p.stopOnce.Do(func() {
 		p.live.Store(false)
 		p.mu.Lock()
 		p.stopping = true
 		p.closed = true
 		p.mu.Unlock()
-		if payload, err := json.Marshal(ipc.DownPayload{Reason: "despawn"}); err == nil {
-			_ = p.codec.Write(ipc.Frame{Kind: ipc.KindDespawn, Payload: payload})
+		frameDone := make(chan struct{})
+		go func() {
+			defer close(frameDone)
+			if payload, err := json.Marshal(ipc.DownPayload{Reason: "despawn"}); err == nil {
+				_ = p.codec.Write(ipc.Frame{Kind: ipc.KindDespawn, Payload: payload})
+			}
+		}()
+		if dl == nil {
+			<-frameDone
+		} else {
+			select {
+			case <-frameDone:
+			case <-dl.Done():
+			}
 		}
 		p.cancel()
-		p.closeConn()
+		p.closeConn() // unblocks a stuck frame write (returns err) + both loops
 	})
-	<-p.done
 }
 
 func (p *port) closeConn() {

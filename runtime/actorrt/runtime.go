@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -40,7 +41,11 @@ type embodiment interface {
 	// registry, and every out-generation attribute belongs in it) — a live-
 	// embodiment kind read is authoritative for cell/fork/port alike.
 	kind() actor.Kind
-	stop()
+	// doneCh returns the channel closed when this embodiment's goroutine(s) have
+	// FULLY exited — the join handle the zombie escort (and DrainZombies) waits on
+	// bounded by grace. It is the sole exit-observation seam; nobody joins it
+	// directly anymore (that unbounded join was the disease the zombie ledger cures).
+	doneCh() <-chan struct{}
 	// isLive reports whether this embodiment is still the live incarnation — read
 	// LOCK-FREE off a per-incarnation atomic (set true at go-live, false on
 	// death/stop/eviction). It is the WHEN-validity probe a liveCap (livePen)
@@ -59,18 +64,29 @@ type embodiment interface {
 	// synchronously re-enters onExit (which takes r.mu), so calling the
 	// join-and-signal stop() here — from the dying goroutine — would block the
 	// parent's own teardown on the child's goroutine actually exiting, which is
-	// not guaranteed to be prompt. stop() is initiateStop() plus a join, for
-	// callers on a DIFFERENT goroutine (Despawn/StopAll).
+	// not guaranteed to be prompt. It is now also the escort's QUIET-teardown
+	// signal (flavorQuiet): the escort — never the entry — is the one goroutine
+	// that fires it and then watches doneCh bounded by grace.
 	initiateStop()
-	// stopDespawn is the DESPAWN-flavoured external teardown (join half): the
-	// by-name termination entries (Despawn / DespawnID / DespawnChild) call it so a
-	// port first signals its remote (a KindDespawn frame ending the execution arm,
-	// §10.5) BEFORE closing the wire. A cell has no wire, so stopDespawn is identical
-	// to stop() for it. This is the sole difference from stop()'s quiet teardown
-	// (replace / channel-teardown, which sends no frame — the remote learns via EOF):
-	// a despawn owes the remote an explicit host→remote signal, a quiet close does
-	// not.
-	stopDespawn()
+	// beginTeardown SYNCHRONOUSLY marks the quiet-teardown intent (cell: c.closed;
+	// port: p.stopping+p.closed) so a body's own racing self-death is arbitrated
+	// QUIET (no down edge) — non-blocking, no cancel/closeConn/evict. Used by the
+	// despawn flavour, where the actual teardown (frame write + closeConn) must run
+	// async in the escort but the quiet flag must be set at judge-dead time.
+	// Idempotent. (Quiet-flavour teardown fires the full initiateStop synchronously
+	// instead, so it needs no separate begin.)
+	beginTeardown()
+	// signalDespawn is the DESPAWN-flavoured SIGNAL half (non-joining), driven by
+	// the escort for a by-name termination (Despawn / DespawnID / DespawnChild): a
+	// port first emits a best-effort KindDespawn frame ending the remote's
+	// execution arm (§10.5) BEFORE closing the wire. Its frame write is bounded by
+	// dl (the escort's shared grace budget) and MUST NOT block the caller inline
+	// (ipc.Codec.Write holds wmu and has no ctx — P1-5): the write runs in a sub-
+	// goroutine and closeConn breaks a stuck one. A cell has no wire, so
+	// signalDespawn collapses to initiateStop for it. This is the sole difference
+	// from the quiet teardown (replace / channel-teardown, which sends no frame —
+	// the remote learns via EOF).
+	signalDespawn(dl context.Context)
 }
 
 // ErrNotHosted is returned when no embodiment is hosted for the addressed id.
@@ -101,9 +117,13 @@ func (i Incarnation) ID() actor.ActorID { return i.id }
 // and lands in truth on its own. The dead unit has ALREADY self-evicted from the
 // addressing map before OnDown runs, so a watcher MUST NOT despawn it.
 //
-// Reliability (closure-critical path): register watchers BEFORE Spawn/Attach so
-// no death edge is missed; OnDown is invoked synchronously in the reap path and
-// is not droppable.
+// Reliability: register watchers BEFORE Spawn/Attach so no death edge is missed.
+// OnDown is invoked synchronously in the reap path, so a watcher MUST be non-
+// blocking (it stalls the dying goroutine's reap otherwise) — the down edge is a
+// LOSSY fast-path, not the closure authority: correctness rests on the level scan
+// (the reconciler), which closes any orphan a dropped/blocked edge missed. A
+// watcher that must do blocking closure work hands the id to its own resident
+// consumer (see channelkit) rather than doing it here.
 type DownWatcher interface {
 	OnDown(ctx context.Context, id actor.ActorID, cause error)
 }
@@ -131,7 +151,25 @@ type Runtime struct {
 	// when that parent embodiment itself dies (removeIf cascades initiateStop() to
 	// every child still on the list at that instant).
 	owned map[embodiment][]embodiment
+
+	// zombies is the already-judged-dead-but-not-yet-reaped ledger (zombie.go) —
+	// every terminated body from the instant judged dead (enrollLocked, in the
+	// same critical section as the death judgement, P0-1) to the instant its
+	// goroutine truly exits (reapZombie). Keyed by embodiment POINTER so a replaced
+	// predecessor and its live same-id successor never collide. Guarded by r.mu.
+	zombies map[embodiment]*zombie
+	// grace bounds every escort's wait (and the default DrainZombies deadline). 5s
+	// by default (Config.ZombieGrace injects a short value in tests — DoD never
+	// really waits 5s).
+	grace time.Duration
+	// leakedTotal counts corpses ever declared leaked (red line ⑤: leaks counted,
+	// never silent). Cumulative — survives the reap that clears the entry.
+	leakedTotal atomic.Int64
 }
+
+// defaultZombieGrace is the aggregate teardown grace (P0-1 = 5s, not a config
+// knob — only test injection overrides it).
+const defaultZombieGrace = 5 * time.Second
 
 // Config configures a Runtime.
 type Config struct {
@@ -147,6 +185,10 @@ type Config struct {
 	// closure-critical death path) and other cell-lifecycle edge observability.
 	// nil → discard (no-op).
 	Logger *slog.Logger
+	// ZombieGrace overrides the per-corpse escort grace (and default DrainZombies
+	// deadline). <=0 → defaultZombieGrace (5s). Injected short in tests so a
+	// leak/late-reap assertion never really waits 5s.
+	ZombieGrace time.Duration
 }
 
 // Deliverer is the privileged capability to enqueue an envelope into a hosted
@@ -185,6 +227,10 @@ func New(cfg Config) (*Runtime, Deliverer) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	grace := cfg.ZombieGrace
+	if grace <= 0 {
+		grace = defaultZombieGrace
+	}
 	r := &Runtime{
 		parent:      parent,
 		clock:       clock,
@@ -192,6 +238,8 @@ func New(cfg Config) (*Runtime, Deliverer) {
 		embodiments: make(map[actor.ActorID]embodiment),
 		obsWatch:    make(map[actor.ActorID][]ObsWatcher),
 		owned:       make(map[embodiment][]embodiment),
+		zombies:     make(map[embodiment]*zombie),
+		grace:       grace,
 		mailbox:     mb,
 	}
 	return r, deliverer{r}
@@ -217,12 +265,12 @@ func (r *Runtime) WatchDown(w DownWatcher) {
 	r.mu.Unlock()
 }
 
-// publishDown fans the down edge out to every watcher. Invoked once
-// per abnormal death, synchronously in the dying goroutine's reap path (the
-// edge is not droppable — closure depends on it). Each watcher is guarded: a
-// watcher panic must not escape and crash the process through the death path —
-// AND it is logged, because a swallowed fault on the closure-critical path is a
-// silent black hole (the caller stays unclosed). Watchers MUST be non-blocking;
+// publishDown fans the down edge out to every watcher. Invoked once per abnormal
+// death, synchronously in the dying goroutine's reap path — a LOSSY fast-path, not
+// the closure authority (the level scan is; a watcher that drops or defers an edge
+// is closed for by the next scan). Each watcher is guarded: a watcher panic must
+// not escape and crash the process through the death path — AND it is logged,
+// because a swallowed fault is a silent black hole. Watchers MUST be non-blocking;
 // a blocking watcher stalls the dying goroutine's reap.
 func (r *Runtime) publishDown(id actor.ActorID, cause error) {
 	r.mu.RLock()
@@ -372,31 +420,37 @@ type DeliverResult struct {
 //     briefly set live=true — is stopped and marked dead, so the slack is bounded
 //     by the already-accepted in-flight window.
 func (r *Runtime) Spawn(id actor.ActorID, kind actor.Kind, build func(Incarnation) Actor) Incarnation {
-	c := allocShell(r.parent, id, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
+	c := allocShell(r.parent, id, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.reapZombie, r.clock(), r.logger)
 	inc := Incarnation{id: id, p: c}
 	c.impl = build(inc) // OUTSIDE the lock; IsLive(inc)==false during build.
 
 	r.mu.Lock()
 	old := r.embodiments[id]
+	var launch func()
 	if old != nil {
 		// REPLACEMENT-LIVE-FLIP INVARIANT: the predecessor's live→dead flip MUST
 		// happen in the SAME critical section that stops pointing the map at it.
 		// markDead is an idempotent atomic write (it never re-enters r.mu / removeIf),
-		// so it is deadlock-safe here. If it were left to old.stop() (below, outside
+		// so it is deadlock-safe here. If it were left to the escort (below, outside
 		// the lock), a window would open where the map no longer points to `old` yet
 		// old.isLive() still reads true — and a stale livePen captured by a goroutine
 		// that outlived `old` would PASS the WHEN gate (IsLive reads old's own atomic,
 		// not the map) and author truth on a replaced incarnation's behalf.
 		old.markDead()
+		// Enrol `old` as a zombie IN THE SAME critical section as the judgement
+		// (P0-1). The escort — launched below, outside the lock — drives the quiet
+		// teardown and the (bounded) join, so the幽灵-live window closes and the new
+		// incarnation starts WITHOUT waiting for the old goroutine to exit.
+		launch = r.retireLocked(old, id, flavorQuiet)
 	}
 	r.embodiments[id] = c
 	c.live.Store(true) // go-live: register + liveness atomic flip are one critical section.
 	r.mu.Unlock()
-	// stop()/start() run OUTSIDE the lock: stop() joins the old goroutine,
-	// which may itself call back into the runtime. The live flip already happened
-	// in-lock above; stop() here only cancels + joins (the WAIT half of teardown).
-	if old != nil {
-		old.stop()
+	// The escort's teardown signal runs OUTSIDE the lock (red line ⑥). start()
+	// begins the new incarnation immediately — no join on the old (Q8/P0-2:
+	// replace-immediately, do not wait for the predecessor to exit).
+	if launch != nil {
+		launch()
 	}
 	c.start()
 	return inc
@@ -438,7 +492,7 @@ func (r *Runtime) SpawnIfAbsent(id actor.ActorID, kind actor.Kind, build func(In
 		return Incarnation{}, false
 	}
 
-	c := allocShell(r.parent, id, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
+	c := allocShell(r.parent, id, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.reapZombie, r.clock(), r.logger)
 	inc := Incarnation{id: id, p: c}
 	c.impl = build(inc) // OUTSIDE the lock; IsLive(inc)==false during build.
 
@@ -495,26 +549,30 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 // Attach returns. Pass a deadline ctx to guard the handshake; a nil/background
 // ctx degrades to an unbounded handshake read.
 func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf) (Incarnation, error) {
-	p, err := newPort(r.parent, hsCtx, conn, sinks, resolve, kindOf, r.publishDown, r.publishObs, r.removeIf, r.clock(), r.logger)
+	p, err := newPort(r.parent, hsCtx, conn, sinks, resolve, kindOf, r.publishDown, r.publishObs, r.removeIf, r.reapZombie, r.clock(), r.logger)
 	if err != nil {
 		return Incarnation{}, err
 	}
 	r.mu.Lock()
 	old, existed := r.embodiments[p.id]
+	var launch func()
 	if existed {
 		// REPLACEMENT-LIVE-FLIP INVARIANT (same as Spawn): flip the predecessor
 		// dead in the SAME critical section as the map swap. Otherwise a replaced
 		// port's in-flight cross-wire emit — welded to `old`'s Incarnation — would
-		// still pass IsLive during the lock-release-to-old.stop() window and author
+		// still pass IsLive during the lock-release-to-escort window and author
 		// truth on the successor's id. markDead is an idempotent atomic (no r.mu
-		// re-entry), deadlock-safe in-lock.
+		// re-entry), deadlock-safe in-lock. Enrol `old` as a zombie in the SAME
+		// critical section (P0-1); the escort drives the quiet teardown + bounded
+		// join, so the new port goes live without waiting for the old to exit.
 		old.markDead()
+		launch = r.retireLocked(old, p.id, flavorQuiet)
 	}
 	r.embodiments[p.id] = p
 	p.live.Store(true) // go-live (port path); register + liveness flip are one critical section, exactly as Spawn.
 	r.mu.Unlock()
-	if existed {
-		old.stop() // WAIT half only (cancel + join); the live flip already happened in-lock.
+	if launch != nil {
+		launch() // escort (outside the lock) fires the quiet teardown + bounded join.
 	}
 	p.start()
 	// Return the Incarnation (id + this embodiment pointer): the home-side port
@@ -538,10 +596,20 @@ func (r *Runtime) removeIf(id actor.ActorID, self embodiment) {
 	// list-to-be-cascaded or nothing — never a half-updated slice).
 	children := r.owned[self]
 	delete(r.owned, self)
+	// P0-1 (natural-death half): enrol this self-terminating body BEFORE it
+	// proceeds to close its done channel, so account⇔residue holds even for a
+	// body no external entry ever named. Idempotent — if an external entry already
+	// enrolled it (flavorQuiet/flavorDespawn), this neither re-enrols nor launches
+	// a second escort (its flavor is not downgraded to natural).
+	launch := r.retireLocked(self, id, flavorNatural)
 	r.mu.Unlock()
 	// This embodiment is dying — flip its liveness atomic so any capability welded
 	// to it (livePen) fails the WHEN gate from here on. Idempotent.
 	self.markDead()
+	// Launch the (natural-flavour, watch-only) escort OUTSIDE the lock. It fires
+	// no teardown signal — the body is already unwinding — it only guards against
+	// a stuck exit defer (a worker-joining Stop that never returns → leaked).
+	launch()
 	// Cascade OUTSIDE the lock, signal-only: initiateStop() must never be
 	// called while holding r.mu — a child's initiateStop synchronously re-enters
 	// onExit/removeIf, which takes r.mu again (deadlock if still locked here).
@@ -564,23 +632,26 @@ func (r *Runtime) Despawn(inc Incarnation) {
 	r.mu.Lock()
 	cur, ok := r.embodiments[inc.id]
 	matched := ok && cur == inc.p
+	var launch func()
 	if matched {
 		delete(r.embodiments, inc.id)
 		// REPLACEMENT-LIVE-FLIP INVARIANT: flip dead in the SAME critical section as
 		// the map delete, so no window opens where the entry is gone but IsLive still
 		// reads true for a stale welded capability. markDead is idempotent + never
-		// re-enters r.mu, so it is deadlock-safe in-lock.
+		// re-enters r.mu, so it is deadlock-safe in-lock. Enrol as a zombie in the
+		// SAME critical section (P0-1); the escort drives the despawn teardown +
+		// bounded join, so Despawn returns in O(judge-dead) not O(goroutine-exit).
 		inc.p.markDead()
+		launch = r.retireLocked(inc.p, inc.id, flavorDespawn)
 	}
 	r.mu.Unlock()
 	// Guarded by POINTER IDENTITY: only despawn IFF the map still points to this
 	// very incarnation, so despawning a stale handle (a replaced predecessor, or
 	// an id never hosted) is a safe no-op and can never evict a same-id successor.
-	if matched {
-		// stopDespawn (not stop): this is a by-name termination, so a port signals
-		// its remote (KindDespawn) before closing the wire; a cell's stopDespawn is
-		// just stop(). WAIT half only — the live flip already happened in-lock.
-		inc.p.stopDespawn()
+	if launch != nil {
+		// The escort runs signalDespawn (a port emits KindDespawn before closing;
+		// a cell collapses it to the quiet teardown) then joins bounded by grace.
+		launch()
 	}
 }
 
@@ -595,13 +666,18 @@ func (r *Runtime) DespawnQuiet(inc Incarnation) {
 	r.mu.Lock()
 	cur, ok := r.embodiments[inc.id]
 	matched := ok && cur == inc.p
+	var launch func()
 	if matched {
 		delete(r.embodiments, inc.id)
 		inc.p.markDead()
+		// Quiet flavour: no KindDespawn frame (a graceful host teardown is a link
+		// drop the remote can redial, not a by-name arm termination). Enrol in-lock
+		// (P0-1); the escort fires the quiet teardown + bounded join.
+		launch = r.retireLocked(inc.p, inc.id, flavorQuiet)
 	}
 	r.mu.Unlock()
-	if matched {
-		inc.p.stop() // quiet WAIT half; the live flip already happened in-lock.
+	if launch != nil {
+		launch()
 	}
 }
 
@@ -621,18 +697,21 @@ func (r *Runtime) DespawnQuiet(inc Incarnation) {
 func (r *Runtime) DespawnID(id actor.ActorID) bool {
 	r.mu.Lock()
 	p, ok := r.embodiments[id]
+	var launch func()
 	if ok {
 		delete(r.embodiments, id)
 		// REPLACEMENT-LIVE-FLIP INVARIANT: dead-flip in the same critical section as
 		// the map delete (idempotent atomic, no r.mu re-entry) — no live-but-unmapped
-		// window for a stale welded cap to slip through IsLive.
+		// window for a stale welded cap to slip through IsLive. Enrol in-lock (P0-1);
+		// the escort drives the despawn teardown + bounded join.
 		p.markDead()
+		launch = r.retireLocked(p, id, flavorDespawn)
 	}
 	r.mu.Unlock()
-	if ok {
-		// stopDespawn (not stop): DespawnID is a by-name termination, so a port
-		// signals its remote (KindDespawn) before closing. WAIT half only.
-		p.stopDespawn()
+	if launch != nil {
+		// DespawnID is a by-name termination, so the escort's signalDespawn has a
+		// port emit KindDespawn before closing (a cell collapses it to quiet).
+		launch()
 	}
 	return ok
 }
@@ -681,22 +760,27 @@ func (r *Runtime) deliver(audience []actor.ActorID, env *message.Envelope) (Deli
 	return res, nil
 }
 
-// StopAll stops every embodiment. Used at channel teardown.
+// StopAll judges every embodiment dead and enrols each as a zombie — it does NOT
+// wait for any goroutine to exit. Used at channel teardown: it returns in
+// O(judge-dead), and the all-kill wait is DrainZombies's job (the sole legitimate
+// aggregate join). Each body's escort drives its own quiet teardown + bounded join
+// in the background; a caller that wants the leaked list calls DrainZombies next.
 func (r *Runtime) StopAll() {
 	r.mu.Lock()
-	ps := make([]embodiment, 0, len(r.embodiments))
-	for _, p := range r.embodiments {
+	launches := make([]func(), 0, len(r.embodiments))
+	for id, p := range r.embodiments {
 		// REPLACEMENT-LIVE-FLIP INVARIANT: dead-flip every embodiment in the SAME
 		// critical section that clears the map, so no live-but-unmapped window opens
-		// for a stale welded cap between here and the joins below. markDead is an
-		// idempotent atomic and never re-enters r.mu — deadlock-safe in-lock.
+		// for a stale welded cap. markDead is an idempotent atomic and never re-enters
+		// r.mu — deadlock-safe in-lock. Enrol each in-lock (P0-1) with the quiet
+		// flavour (channel teardown sends no KindDespawn — the remote learns via EOF).
 		p.markDead()
-		ps = append(ps, p)
+		launches = append(launches, r.retireLocked(p, id, flavorQuiet))
 	}
 	r.embodiments = make(map[actor.ActorID]embodiment)
 	r.mu.Unlock()
-	for _, p := range ps {
-		p.stop() // WAIT half only; the live flips already happened in-lock.
+	for _, launch := range launches {
+		launch() // fire each escort OUTSIDE the lock (red line ⑥); none joins here.
 	}
 }
 

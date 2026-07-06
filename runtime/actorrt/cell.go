@@ -62,6 +62,12 @@ type cell struct {
 	// makes an instance unaddressable WITHOUT the cell trying to stop/join
 	// itself (a goroutine cannot join itself — that was the death deadlock).
 	onExit func(actor.ActorID, embodiment)
+	// onReap strikes this body off the runtime's zombie ledger — invoked from the
+	// cell goroutine's临终 defer the instant it truly exits (account⇔residue:
+	// an entry exists IFF a physical corpse remains). Runs AFTER onExit (which
+	// enrols the natural-death zombie) and impl.Stop (whose block would keep this
+	// body a leaked zombie until it finally returns).
+	onReap func(embodiment)
 
 	// live is the per-incarnation WHEN-validity atomic: false at allocShell, true
 	// at go-live (register), false again on any teardown (death / stop / eviction).
@@ -96,7 +102,7 @@ type cell struct {
 // DELETED) edge; started is the substrate-stamped bind instant (obs uptime);
 // kind is the out-generation attribute welded at mint (Spawn/SpawnIfAbsent/
 // Fork's caller-held kind), read back via Runtime.Stat (UnitStat.Kind).
-func allocShell(parent context.Context, id actor.ActorID, kind actor.Kind, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) *cell {
+func allocShell(parent context.Context, id actor.ActorID, kind actor.Kind, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), onReap func(embodiment), started time.Time, logger *slog.Logger) *cell {
 	if mailbox <= 0 {
 		mailbox = 64
 	}
@@ -115,6 +121,7 @@ func allocShell(parent context.Context, id actor.ActorID, kind actor.Kind, mailb
 		onObs:    onObs,
 		logger:   logger,
 		onExit:   onExit,
+		onReap:   onReap,
 		done:     make(chan struct{}),
 		inflight: make(map[message.ID]context.CancelFunc),
 	}
@@ -136,6 +143,10 @@ func (c *cell) isLive() bool { return c.live.Load() }
 
 // markDead implements embodiment: flip the liveness atomic to false (idempotent).
 func (c *cell) markDead() { c.live.Store(false) }
+
+// doneCh implements embodiment: the channel closed once the cell goroutine has
+// fully exited (the zombie escort / DrainZombies join handle).
+func (c *cell) doneCh() <-chan struct{} { return c.done }
 
 // PublishObs implements ActorContext: the actor's obs PUSH/producer end. It
 // hands an opaque snapshot to the runtime's per-actor obs fanout (no watcher →
@@ -174,6 +185,16 @@ func (c *cell) Deliver(env *message.Envelope) error {
 func (c *cell) start() {
 	go func() {
 		defer close(c.done)
+		// Reap AFTER the death defer below (LIFO: it runs first) — so the natural-
+		// death zombie onExit enrols is struck only once the body has truly finished
+		// (past impl.Stop, whose block keeps this corpse a leaked zombie until it
+		// returns). Runs before close(c.done), so any escort/DrainZombies waiter that
+		// wakes on done sees a consistent already-reaped ledger.
+		defer func() {
+			if c.onReap != nil {
+				c.onReap(c)
+			}
+		}()
 
 		var deathCause error
 		defer func() {
@@ -365,19 +386,17 @@ func (c *cell) cancelRequest(id message.ID) {
 }
 
 // initiateStop implements embodiment: the non-blocking, idempotent SIGNAL half of
-// teardown — trigger death and return at once, WITHOUT joining c.done.
-// It is stop()'s signal half; stop() = initiateStop() + join. Both share
-// stopOnce, so calling either (or both, in either order) is safe — the body
-// runs exactly once, and c.done is safe to read from multiple goroutines.
+// teardown — trigger death and return at once, WITHOUT joining c.done. It is the
+// only teardown signal now (the join is the escort's job, bounded by grace) —
+// stopOnce makes it safe to call any number of times, and c.done is safe to read
+// from multiple goroutines (the escort / DrainZombies).
 //
 // It calls onExit IMMEDIATELY (mirroring port.die()'s existing onExit call) so
 // a cascaded child is removed from r.embodiments/LiveIDs() the instant this is
 // called, not lazily whenever its own goroutine notices ctx cancellation — a
-// dying parent's cascade (removeIf) calls ONLY this, never stop(), because
-// stop() joins the child's goroutine and a child's initiateStop synchronously
-// re-enters onExit/removeIf (which takes r.mu) — calling it while the parent's
-// own removeIf still held r.mu would deadlock (it doesn't: removeIf calls this
-// AFTER releasing r.mu).
+// dying parent's cascade (removeIf) calls this, and a child's initiateStop
+// synchronously re-enters onExit/removeIf (which takes r.mu) — safe because
+// removeIf calls this AFTER releasing r.mu.
 //
 // onExit/removeIf is already pointer-identity-idempotent (deletes IFF
 // r.embodiments[id]==self), so the cell's own goroutine later reaching its death
@@ -397,17 +416,20 @@ func (c *cell) initiateStop() {
 	})
 }
 
-// stop closes the mailbox, cancels the cell ctx, and waits for the goroutine to
-// exit. Safe to call multiple times. It MUST be called only from a DIFFERENT
-// goroutine than the cell's own (it joins on c.done) — the death path never
-// calls stop(); it calls initiateStop() (the signal-only half) instead.
-func (c *cell) stop() {
-	c.initiateStop()
-	<-c.done
+// beginTeardown implements embodiment: synchronously mark the quiet-teardown
+// intent (c.closed) so a racing self-death arbitrates quiet (isStopping→true).
+// Non-blocking — no cancel/closeConn/evict (the escort's signalDespawn does those).
+func (c *cell) beginTeardown() {
+	c.live.Store(false)
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
 }
 
-// stopDespawn implements embodiment: a cell has NO wire, so the despawn-flavoured
-// teardown is identical to stop() (there is no remote to send a KindDespawn frame
-// to — the KindDespawn arm is the port's alone). The distinction exists only so the
-// by-name termination entries reach a port's wire signal; a cell collapses it.
-func (c *cell) stopDespawn() { c.stop() }
+// signalDespawn implements embodiment: a cell has NO wire, so the despawn-flavoured
+// SIGNAL half is identical to initiateStop (there is no remote to send a
+// KindDespawn frame to — the KindDespawn arm is the port's alone). dl is unused
+// (no frame write to bound). The distinction exists only so the by-name
+// termination entries reach a port's wire signal; a cell collapses it. Non-joining
+// — the escort watches doneCh bounded by grace, no goroutine ever self-joins.
+func (c *cell) signalDespawn(_ context.Context) { c.initiateStop() }

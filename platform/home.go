@@ -373,6 +373,8 @@ func Open(cfg HomeConfig) (*Home, error) {
 	from, err := cs.Query.MaxSeq(ctx)
 	if err != nil {
 		channel.Cells().StopAll()
+		channel.Cells().DrainZombies(0)
+		channel.Stop()
 		_ = cs.Close()
 		return nil, fmt.Errorf("platform: read max seq: %w", err)
 	}
@@ -429,6 +431,8 @@ func Open(cfg HomeConfig) (*Home, error) {
 	if err != nil {
 		delivery.Close()
 		channel.Cells().StopAll()
+		channel.Cells().DrainZombies(0)
+		channel.Stop()
 		_ = cs.Close()
 		return nil, fmt.Errorf("platform: open scheduler: %w", err)
 	}
@@ -948,9 +952,20 @@ func (h *Home) Close() error {
 	linkErr := h.links.Close()
 	// 3. Delivery tap: stop the pump so no fresh delivery drives a cell to produce.
 	h.delivery.Close()
-	// 4. Cells: stop actor cells (system actors included) — the last schedule/emit
-	//    producers. Their goroutines are joined here.
+	// 4. Cells: judge every actor cell dead (system actors included) — the last
+	//    schedule/emit producers. StopAll no longer joins (G0): it enrols each as a
+	//    zombie and returns; DrainZombies is the sole aggregate join.
 	h.channel.Cells().StopAll()
+	// 4.1. Drain the zombie cohort under one aggregate grace; a卡死 cell that never
+	//    exits is reported as leaked (into the shutdown log) instead of hanging Close
+	//    forever — the whole point of the zombie ledger.
+	if leaked := h.channel.Cells().DrainZombies(0); len(leaked) > 0 {
+		h.logger.Warn("home.close.zombies_leaked", "channel", h.channelID, "count", len(leaked), "actors", leaked)
+	}
+	// 4.2. Closure consumer: join channelkit's resident down-edge goroutine now —
+	//    after cells stop (no more edges produced), before the stores close (a late
+	//    materialise must not write into a closing store). G0-3 teardown序.
+	h.channel.Stop()
 	// 4.5. Human callers: stop every shared per-user Caller's pending timer NOW and
 	//    clear the index. Ordering: after cells, before the stores close (a still-
 	//    armed fireTimeout would write a terminal through the pen into an already-

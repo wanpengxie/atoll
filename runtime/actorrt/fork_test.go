@@ -135,6 +135,7 @@ func TestFork_CascadeOnParentDeath(t *testing.T) {
 	}
 
 	done := make(chan struct{})
+	start := time.Now()
 	go func() {
 		rt.Despawn(parentInc)
 		close(done)
@@ -142,17 +143,33 @@ func TestFork_CascadeOnParentDeath(t *testing.T) {
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
-		t.Fatal("Despawn(parent) hung — cascade must be signal-only (initiateStop), never join a child")
+		t.Fatal("Despawn(parent) hung — teardown must be O(judge-dead), never join a child")
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Fatalf("Despawn(parent) took %v — teardown must not block on the cascade", elapsed)
 	}
 
+	// The cascade now runs on the parent's escort goroutine (the teardown signal
+	// is fired there, off the entry path), so the child dies WITHIN grace rather
+	// than synchronously with Despawn's return. Poll for it.
+	deadline := time.Now().Add(2 * time.Second)
+	for rt.IsLive(childInc) && time.Now().Before(deadline) {
+		time.Sleep(2 * time.Millisecond)
+	}
 	if rt.IsLive(childInc) {
 		t.Fatal("child still live after parent death — cascade did not fire")
 	}
-	rt.mu.RLock()
-	_, hosted := rt.embodiments["parent/child"]
-	rt.mu.RUnlock()
-	if hosted {
-		t.Fatal("child still addressable in r.embodiments after cascade — initiateStop must evict it immediately")
+	for {
+		rt.mu.RLock()
+		_, hosted := rt.embodiments["parent/child"]
+		rt.mu.RUnlock()
+		if !hosted {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("child still addressable in r.embodiments after cascade — must be evicted within grace")
+		}
+		time.Sleep(2 * time.Millisecond)
 	}
 }
 
