@@ -25,11 +25,15 @@ type Caps struct {
 	// Wrapped in the death-after-write membrane (livePen) at assembly.
 	Pen harness.Pen
 	// Access is the plane-2 off-log capability over the channel-scoped resource
-	// tree (the access-plane dual of Pen). Wrapped in the liveAccess membrane.
-	Access accessdoor.AccessHandle
+	// tree (the access-plane dual of Pen) — the WIDE resource face
+	// (Invoke+Create+Stat+List, 期11 spec §3.1's "Caps.Access 声明类型加宽").
+	// Wrapped in the resource-face liveness membrane (link.liveResourceAccess).
+	Access accessdoor.ResourceAccessHandle
 	// State is the actor-scoped (collapsed) branch of the same plane-2 door —
 	// this actor's own private durable state, minted via MintState(owner) and
-	// wrapped in the same liveAccess membrane.
+	// wrapped in the (narrow, Invoke-only) liveAccess membrane. The scope law
+	// itself keeps this field's type NARROW: there is no kind/R/membership at
+	// this locus for Create/Stat/List to mean anything.
 	State accessdoor.AccessHandle
 	// Schedule is the time-axis capability (self-targeted timers). Wrapped in
 	// the liveSchedule membrane.

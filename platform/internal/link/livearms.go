@@ -7,11 +7,12 @@ import (
 
 // NewLiveArms bundles a RebindableArms' four wire-flap facades into a gated
 // Caps set, welded to inc and gated on host — the daemon (attached-compute)
-// counterpart of platform/home.go's buildCaps. It weaves the SAME three
-// membranes buildCaps weaves (livePen / liveAccess / liveSchedule), just over
-// the daemon's own relay-backed arms instead of home's directly-minted ones,
-// and gated by the DAEMON's own actorrt.Runtime (the local host of the cell
-// being born) rather than home's.
+// counterpart of platform/home.go's buildCaps. It weaves the SAME four
+// membranes buildCaps weaves (livePen / liveResourceAccess (Access) /
+// liveAccess (State) / liveSchedule), just over the daemon's own
+// relay-backed arms instead of home's directly-minted ones, and gated by the
+// DAEMON's own actorrt.Runtime (the local host of the cell being born)
+// rather than home's.
 //
 // This closes G12 (§10.13 推导7①, sealed-pen prior art extended to the port
 // path): "a factory must not write" is a structural rule on the cell path —
@@ -31,7 +32,7 @@ import (
 func NewLiveArms(rb *RebindableArms, inc actorrt.Incarnation, host *actorrt.Runtime) actorcaps.Caps {
 	return actorcaps.Caps{
 		Pen:      NewLivePen(rb.Pen(), inc, host),
-		Access:   NewLiveAccess(rb.Access(), inc, host),
+		Access:   NewLiveResourceAccess(rb.Access(), inc, host),
 		State:    NewLiveAccess(rb.State(), inc, host),
 		Schedule: NewLiveSchedule(rb.Schedule(), inc, host),
 	}

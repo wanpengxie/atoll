@@ -28,11 +28,17 @@
 //
 // Shape (actorbase-spec-v1 §3's out-generation matrix): sysactor is a ring0
 // SPECIAL Proc — a lib/actorbase Proc whose Caps are hand-built raw by the
-// platform assembly root (the system Pen only; no live membrane, no
-// Access/State/Schedule/Spawn arm) rather than welded through buildCaps — but
-// it still enters through the SAME actorbase.New seam every other actor does.
-// Its privilege is entirely in WHERE its Caps come from (platform itself is the
-// authority, not a minted membrane), never in a different hosting shape.
+// platform assembly root (no live/incarnation membrane on any arm — the
+// anchor posture the system pen already wears, authority itself sets no gate
+// on itself) rather than welded through buildCaps. All four arms are real
+// (期10 S6): Access/State are wired EAGER (the access door is assembled by
+// storeopen, before channelkit); Schedule/Spawn are LATE-BOUND (their engines
+// assemble after this cell is born — see platform/sysanchorcaps.go),
+// captured through the same closure Hooks.Canceller uses. It still enters
+// through the SAME actorbase.New seam every other actor does. Its privilege
+// is entirely in WHERE its Caps come from (platform itself is the authority,
+// not a minted membrane) and in wearing no incarnation gate, never in a
+// missing arm.
 //
 // What it does today: the channel's LIVENESS projection. It answers the
 // channel-wide directory query (actor.list) as a composed, on-read view

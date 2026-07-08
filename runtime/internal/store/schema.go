@@ -105,12 +105,21 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 -- No CHECK on grantee_kind: it is a Go-enforced closed set (access.GranteeKind,
 -- validated by the door's ValidateGrant on the write path), same discipline as
 -- sender_kind / actor_kind above — a DB CHECK would weld an evolving vocabulary
--- to every existing channel file.
+-- to every existing channel file. Same discipline extends to the five columns
+-- 期11 (resource 轴完备化) adds below: placement_kind / provenance are
+-- Go-enforced closed sets (resourcespec.ValidPlacementKind / ValidProvenance,
+-- read-path fail-fast, resourcespec/create.go), no DB CHECK.
 CREATE TABLE IF NOT EXISTS resources (
-  resource_id TEXT PRIMARY KEY,
-  kind        TEXT NOT NULL,
-  bytes       BLOB,               -- KindKV driver's inline bytes (day-1's only driver); NULL = resolved-but-empty
-  created_at  INTEGER NOT NULL
+  resource_id           TEXT PRIMARY KEY,
+  kind                  TEXT NOT NULL,
+  bytes                 BLOB,                     -- KindKV driver's inline bytes; NULL for kv = resolved-but-empty, ALWAYS NULL for file (its bytes live at placement_coord, never inline)
+  placement_kind        TEXT NOT NULL DEFAULT '', -- resourcespec.PlacementKind closed set; '' for kv (no placement axis — non-NULL, structurally distinct from "unknown")
+  placement_daemon_id   TEXT NOT NULL DEFAULT '', -- explicit routing column: which daemon's Streamer holds the bytes; '' for kv
+  placement_coord       TEXT NOT NULL DEFAULT '', -- opaque storage handle, server-registry-generated (§1.6); '' for kv; NEVER crosses Stat/List to a caller (§3.6 red line, enforced one layer up)
+  provenance            TEXT NOT NULL DEFAULT '', -- resourcespec.Provenance closed set; day-1 always 'axis-allocated' for every kind (door-stamped at create)
+  created_by            TEXT NOT NULL DEFAULT '', -- durable creator actor id; PURE AUDIT column, not the authorization predicate (the creator's full-rights grant in resource_grants is)
+  created_at            INTEGER NOT NULL,
+  is_dir                INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)) -- file BYTE-SHAPE bit (the inode's S_IFDIR analogue): 1 = directory-shaped file resource (workspace, bytes = a whole tree委托真fs, Open→os.Root lease句柄), 0 = regular blob (Open→single-file staging句柄) / kv (always 0). Structural boolean integrity, KEEPS its CHECK (same discipline as is_terminal); this is the door's Open ROUTING truth, read at resolve, never a leaf the daemon re-derives from disk
 );
 
 CREATE TABLE IF NOT EXISTS resource_grants (
@@ -121,6 +130,44 @@ CREATE TABLE IF NOT EXISTS resource_grants (
   PRIMARY KEY (resource_id, grantee_kind, grantee),
   FOREIGN KEY (resource_id) REFERENCES resources(resource_id)
 );
+
+-- =============================================================
+-- 4b) resource_reservations + resource_tombstones  (create/delete outbox)
+-- =============================================================
+-- The create-outbox's two durable halves, both server-side (期11 spec §1.3 —
+-- v1.1's corrected home: the daemon holds no truth, so BOTH the create
+-- write-ahead half and the delete collection-pending half live in THIS
+-- channel sqlite, never on the daemon). True mirrors of each other: create's
+-- authorization-first-mover is the door (server) writing resource_reservations
+-- before any byte moves; delete's is the door (server) writing
+-- resource_tombstones before the Reclaimer collects bytes. Neither table is
+-- message-log truth (append-only) — both are mutable control-plane outboxes,
+-- rows created and later DELETED as their event closes, same non-truth
+-- discipline as the timers table above.
+CREATE TABLE IF NOT EXISTS resource_reservations (
+  reservation_id       TEXT PRIMARY KEY,        -- fresh uuid per ReserveCreate call
+  resource_id          TEXT NOT NULL,
+  kind                 TEXT NOT NULL,
+  placement_daemon_id  TEXT NOT NULL DEFAULT '',
+  placement_coord      TEXT NOT NULL DEFAULT '',
+  created_by           TEXT NOT NULL,           -- door-authenticated creator (never daemon-reported)
+  reserved_at          INTEGER NOT NULL,
+  is_dir               INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)) -- carried write-ahead so CommitReservation lands the resources row with the correct byte-shape bit (a content-less dir create's shape must survive the ReserveCreate→AllocRequest→Committed round trip; daemon reports no truth, §1.3)
+);
+CREATE INDEX IF NOT EXISTS ix_resource_reservations_daemon ON resource_reservations(placement_daemon_id);
+CREATE INDEX IF NOT EXISTS ix_resource_reservations_reserved_at ON resource_reservations(reserved_at);
+
+CREATE TABLE IF NOT EXISTS resource_tombstones (
+  tombstone_id    TEXT PRIMARY KEY,       -- fresh uuid per Delete(file) call
+  resource_id     TEXT NOT NULL,          -- NON-unique index: same-name delete/recreate can leave multiple tombstones co-existing without colliding on the primary key
+  daemon_id       TEXT NOT NULL DEFAULT '',
+  placement_coord TEXT NOT NULL DEFAULT '',
+  provenance      TEXT NOT NULL,          -- the Reclaimer branches on this: axis-allocated bytes are rm -rf'd, registered bytes are left on disk
+  kind            TEXT NOT NULL,
+  deleted_at      INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_resource_tombstones_resource ON resource_tombstones(resource_id);
+CREATE INDEX IF NOT EXISTS ix_resource_tombstones_daemon ON resource_tombstones(daemon_id);
 
 -- =============================================================
 -- 5) actor_state  (access plane)
@@ -190,6 +237,8 @@ var ChannelLocalTables = []string{
 	"actor_registry",
 	"resources",
 	"resource_grants",
+	"resource_reservations",
+	"resource_tombstones",
 	"actor_state",
 	"timers",
 }

@@ -57,3 +57,108 @@ func (a liveAccess) Invoke(ctx context.Context, op access.Operation, id resource
 	}
 	return a.raw.Invoke(ctx, op, id, args, grant)
 }
+
+// liveResourceAccess is the RESOURCE-FACE twin of liveAccess (期11 spec
+// §3.2's "膜层...各拆两型" — the membrane layer's resource/state split):
+// same WHEN-validity fence, over accessdoor.ResourceAccessHandle's full
+// method set (Invoke+Create+Stat+List) instead of Invoke alone. A single Go
+// type wrapping BOTH scopes would either grow Create/Stat/List on a
+// state-scoped instance (violating "状态面不实现空方法") or need
+// ErrUnsupported branches per method (the explicit red-line-forbidden
+// intermediate state, §8.7) — so liveAccess and liveResourceAccess stay two
+// separate types sharing nothing but the IsLive check's shape.
+type liveResourceAccess struct {
+	raw  accessdoor.ResourceAccessHandle
+	inc  actorrt.Incarnation
+	host *actorrt.Runtime
+}
+
+// NewLiveResourceAccess wraps raw in the WHEN-validity membrane welded to
+// inc, gated on host — the resource-face counterpart of NewLiveAccess.
+// Participant cells are born with this over their channel-scoped (Mint)
+// handle; substrate anchors (system/sysactor) deliberately use the raw
+// handle — no incarnation gate — for the same reason NewLivePen/NewLiveAccess
+// skip anchors.
+//
+// FileOpener pass-through (found+fixed during 期11 S6's platform-level walk
+// verification — a REAL bug, not a spec-authored requirement): raw is a
+// boundHandle for a home-hosted caller (which does NOT implement
+// accessdoor.FileOpener — Open/CreateFile correctly answer ErrUnsupported
+// there, §5's own documented scope) but a remoteResourceHandle for a
+// daemon-hosted caller (which DOES implement it — this is the ONE avatar
+// §5 built Open/Redeem for in the first place, dial.go's own doc). This
+// wrapper used to ALWAYS return the plain liveResourceAccess value — which
+// has no Open/Redeem methods — so lib/actorbase's own type-assertion
+// (`r.h.(accessdoor.FileOpener)`) failed for EVERY caller, daemon-hosted
+// included, silently defeating §5's entire Open/CreateFile build (S5's own
+// handoff claimed "ready for a consumer"; the first actual actorbase-level
+// caller — this section's walk tests — is what surfaced it, since S4/S5's
+// own tests drove remoteResourceHandle directly, never through this
+// membrane). Fixed by returning a DIFFERENT concrete type when raw itself
+// implements FileOpener — never by making liveResourceAccess unconditionally
+// claim the interface (which would have to fabricate a NEW "unsupported"
+// error identity for the home-hosted case, changing existing behavior
+// instead of just completing it).
+func NewLiveResourceAccess(raw accessdoor.ResourceAccessHandle, inc actorrt.Incarnation, host *actorrt.Runtime) accessdoor.ResourceAccessHandle {
+	base := liveResourceAccess{raw: raw, inc: inc, host: host}
+	if fo, ok := raw.(accessdoor.FileOpener); ok {
+		return liveResourceAccessFileOpener{liveResourceAccess: base, fo: fo}
+	}
+	return base
+}
+
+func (a liveResourceAccess) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
+	if !a.host.IsLive(a.inc) {
+		return accessdoor.Outcome{}, ErrAccessNotLive
+	}
+	return a.raw.Invoke(ctx, op, id, args, grant)
+}
+
+func (a liveResourceAccess) Create(ctx context.Context, id resource.ResourceID, spec accessdoor.CreateSpec, initial []byte) (accessdoor.Outcome, error) {
+	if !a.host.IsLive(a.inc) {
+		return accessdoor.Outcome{}, ErrAccessNotLive
+	}
+	return a.raw.Create(ctx, id, spec, initial)
+}
+
+func (a liveResourceAccess) Stat(ctx context.Context, id resource.ResourceID) (accessdoor.StatResult, error) {
+	if !a.host.IsLive(a.inc) {
+		return accessdoor.StatResult{}, ErrAccessNotLive
+	}
+	return a.raw.Stat(ctx, id)
+}
+
+func (a liveResourceAccess) List(ctx context.Context, q accessdoor.ListQuery) (accessdoor.ListPage, error) {
+	if !a.host.IsLive(a.inc) {
+		return accessdoor.ListPage{}, ErrAccessNotLive
+	}
+	return a.raw.List(ctx, q)
+}
+
+// liveResourceAccessFileOpener is liveResourceAccess PLUS the
+// accessdoor.FileOpener forwarding pair (Open/Redeem) — minted by
+// NewLiveResourceAccess only when raw itself implements FileOpener (see its
+// doc). Embedding liveResourceAccess gives it the same Invoke/Create/Stat/
+// List + liveness-fence behavior for free; Open/Redeem apply the IDENTICAL
+// fence before forwarding to fo (never to a.raw directly — fo IS a.raw,
+// captured pre-asserted so this type never re-asserts per call).
+type liveResourceAccessFileOpener struct {
+	liveResourceAccess
+	fo accessdoor.FileOpener
+}
+
+func (a liveResourceAccessFileOpener) Open(ctx context.Context, id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+	if !a.host.IsLive(a.inc) {
+		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrAccessNotLive
+	}
+	return a.fo.Open(ctx, id, mode)
+}
+
+func (a liveResourceAccessFileOpener) Redeem(ctx context.Context, route accessdoor.FileRoute) (accessdoor.FileAccess, error) {
+	if !a.host.IsLive(a.inc) {
+		return accessdoor.FileAccess{}, ErrAccessNotLive
+	}
+	return a.fo.Redeem(ctx, route)
+}
+
+var _ accessdoor.FileOpener = liveResourceAccessFileOpener{}

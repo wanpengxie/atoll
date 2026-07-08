@@ -26,7 +26,7 @@ import (
 // handing out an internal object instead of a capability method) turns this
 // test red (assembly hands out keys only — compile-time red line).
 func TestHomePublicSurface(t *testing.T) {
-	want := []string{"Admit", "CancelRequest", "Close", "Human", "KickDaemon", "Remove", "ServeAttach", "Spawn", "Subscribe", "View"}
+	want := []string{"Admit", "CancelRequest", "Close", "KickDaemon", "Remove", "ServeAttach", "Spawn", "Subscribe", "View"}
 
 	typ := reflect.TypeOf((*platform.Home)(nil))
 	var got []string

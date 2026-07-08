@@ -6,79 +6,81 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hashicorp/yamux"
+
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/ipc"
 )
 
-// blockingWireConn is a wireConn whose WriteMessage never returns until Close
-// is called — the stand-in for a stuck/half-dead peer (TCP black hole, or a
-// peer that simply never drains its receive buffer). writeUnblocked receives
-// once each blocked WriteMessage call actually returns, so a test can prove a
-// write goroutine was released (not merely that some other path moved on).
-type blockingWireConn struct {
+// blockingRWC is an io.ReadWriteCloser whose Read/Write never return until Close
+// is called — the stand-in for a wedged carrier (peer not draining: TCP black
+// hole, or a peer that never reads its receive buffer). writeUnblocked receives
+// once each blocked Write actually returns, so a test can prove a write goroutine
+// was released (not merely that some other path moved on).
+type blockingRWC struct {
 	closeOnce      sync.Once
 	closed         chan struct{}
 	writeUnblocked chan struct{}
 }
 
-func newBlockingWireConn() *blockingWireConn {
-	return &blockingWireConn{
+func newBlockingRWC() *blockingRWC {
+	return &blockingRWC{
 		closed:         make(chan struct{}),
 		writeUnblocked: make(chan struct{}, 8),
 	}
 }
 
-func (c *blockingWireConn) ReadMessage() ([]byte, error) {
+func (c *blockingRWC) Read([]byte) (int, error) {
 	<-c.closed
-	return nil, errors.New("link: closed (test)")
+	return 0, errors.New("link: closed (test)")
 }
 
-func (c *blockingWireConn) WriteMessage([]byte) error {
+func (c *blockingRWC) Write([]byte) (int, error) {
 	<-c.closed
 	select {
 	case c.writeUnblocked <- struct{}{}:
 	default:
 	}
-	return errors.New("link: closed (test)")
+	return 0, errors.New("link: closed (test)")
 }
 
-func (c *blockingWireConn) Close() error {
+func (c *blockingRWC) Close() error {
 	c.closeOnce.Do(func() { close(c.closed) })
 	return nil
 }
 
-var _ wireConn = (*blockingWireConn)(nil)
-
 // TestSendCancelRequest_StuckWriteDoesNotBlockCaller is the review-finding
-// regression: a cancel-forward write onto a wedged link (peer not reading,
-// TCP black hole) must never leave the caller — the actor worker/ledger
-// goroutine abandoning its own request — hostage to a write that will not
-// drain (violates the fire-and-forget best-effort contract SendCancelRequest
-// itself documents). It must also not leak the goroutine carrying the write:
-// past cancelForwardWriteGrace the link is torn down, which force-unblocks
-// the stuck conn write from underneath it.
+// regression: a cancel-forward write onto a wedged link (peer not reading, TCP
+// black hole) must never leave the caller — the actor worker/ledger goroutine
+// abandoning its own request — hostage to a write that will not drain (violates
+// the fire-and-forget best-effort contract SendCancelRequest itself documents).
+// It must also not leak the goroutine carrying the write: past
+// cancelForwardWriteGrace the link is torn down, which — session Close → carrier
+// close → the blocked substream write errors out — force-unblocks it.
 func TestSendCancelRequest_StuckWriteDoesNotBlockCaller(t *testing.T) {
 	origGrace := cancelForwardWriteGrace
 	cancelForwardWriteGrace = 50 * time.Millisecond
 	defer func() { cancelForwardWriteGrace = origGrace }()
 
-	conn := newBlockingWireConn()
-	lc := newLinkConn(conn, nil, nil)
+	// A REAL yamux session over the wedged carrier: this is exactly how a link
+	// teardown unblocks a stuck write in production — ls.Close() → ys.Close() →
+	// carrier.Close(), which errors the blocked write out from underneath it. The
+	// cancel frame itself is issued directly onto the carrier via the codec (a
+	// substream would need a live peer to open; the carrier IS the stuck seam).
+	block := newBlockingRWC()
+	ys, err := yamux.Client(block, linkYamuxConfig())
+	if err != nil {
+		t.Fatalf("yamux client: %v", err)
+	}
+	ls := &linkSession{ys: ys}
 
-	// Wire one actor stream directly into the mux table (bypassing openStream,
-	// whose own OpOpen write would otherwise block forever on this fake conn
-	// before the test even reaches SendCancelRequest).
 	const id = actor.ActorID("actor:stuck")
-	s := newStream(1, lc.writeFrame, func() { lc.dropStream(1) })
-	lc.mu.Lock()
-	lc.streams[1] = s
-	lc.mu.Unlock()
-	codec := ipc.NewCodec(s, s)
-	as := &actorStream{id: id, stream: s, codec: codec}
+	codec := ipc.NewCodec(block, block)
+	as := &actorStream{id: id, stream: block, codec: codec}
 
 	d := testDialer()
-	d.lc = lc
+	d.lc = ls
 	d.streams[id] = as
 
 	start := time.Now()
@@ -98,18 +100,18 @@ func TestSendCancelRequest_StuckWriteDoesNotBlockCaller(t *testing.T) {
 	}
 
 	// Past grace the link must be torn down (the only safe way to unblock a
-	// conn write that will not drain — see cancelForwardWriteGrace docstring).
+	// carrier write that will not drain — see cancelForwardWriteGrace docstring).
 	select {
-	case <-conn.closed:
+	case <-block.closed:
 	case <-time.After(2 * time.Second):
 		t.Fatal("stuck cancel-forward write never forced the link closed — grace timer did not fire")
 	}
 
-	// And the blocked WriteMessage call itself must actually return (proving
-	// the goroutine carrying the write exits — no leak past grace).
+	// And the blocked write call itself must actually return (proving the
+	// goroutine carrying the write exits — no leak past grace).
 	select {
-	case <-conn.writeUnblocked:
+	case <-block.writeUnblocked:
 	case <-time.After(2 * time.Second):
-		t.Fatal("blocked conn write never returned after link teardown — write goroutine leaked")
+		t.Fatal("blocked write never returned after link teardown — write goroutine leaked")
 	}
 }

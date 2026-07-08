@@ -12,12 +12,17 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
-// recordAccess is a minimal raw accessdoor.AccessHandle: it counts the invokes
-// that reach it and always accepts. Wrapping it in a liveAccess lets a test
-// assert which invokes the incarnation gate let THROUGH versus fenced before it.
+// recordAccess is a minimal raw accessdoor.ResourceAccessHandle: it counts
+// the invokes that reach it and always accepts. Wrapping it in a liveAccess/
+// liveResourceAccess lets a test assert which invokes the incarnation gate
+// let THROUGH versus fenced before it. It satisfies the WIDE resource face so
+// the same double backs both the Access (resource-face) and State
+// (narrow-face) slots — a wider double is harmless where only Invoke is ever
+// called.
 type recordAccess struct {
 	mu sync.Mutex
 	n  int
@@ -28,6 +33,27 @@ func (a *recordAccess) Invoke(context.Context, access.Operation, resource.Resour
 	a.n++
 	a.mu.Unlock()
 	return accessdoor.Outcome{}, nil
+}
+
+func (a *recordAccess) Create(context.Context, resource.ResourceID, resourcespec.CreateSpec, []byte) (accessdoor.Outcome, error) {
+	a.mu.Lock()
+	a.n++
+	a.mu.Unlock()
+	return accessdoor.Outcome{}, nil
+}
+
+func (a *recordAccess) Stat(context.Context, resource.ResourceID) (accessdoor.StatResult, error) {
+	a.mu.Lock()
+	a.n++
+	a.mu.Unlock()
+	return accessdoor.StatResult{}, nil
+}
+
+func (a *recordAccess) List(context.Context, accessdoor.ListQuery) (accessdoor.ListPage, error) {
+	a.mu.Lock()
+	a.n++
+	a.mu.Unlock()
+	return accessdoor.ListPage{}, nil
 }
 
 func (a *recordAccess) count() int {

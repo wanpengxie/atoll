@@ -5,11 +5,17 @@ import (
 	"time"
 )
 
-// Default lease parameters: the home judges per-link liveness. last-seen is
-// refreshed by ANY inbound frame; the home pings stream 0 every leasePing; if no
-// frame arrives within leaseTTL the home declares the link dead (the positive
-// observation a frozen/half-open daemon never produces a TCP EOF for).
-// Centralised + tunable.
+// Default lease parameters: the home judges per-link liveness from
+// APPLICATION-layer frames only — never yamux's own keepalive ping/pong, which
+// yamux answers inside its own session loop and never surfaces above the
+// substream layer (linksession.go's dispatch is where last-seen actually gets
+// refreshed, via each peer-opened substream's onFrame hook). The daemon pings
+// the control substream every leasePing (dial.go's pingLoop) precisely so a
+// live-but-otherwise-idle link still refreshes; if no application frame
+// arrives within leaseTTL the home declares the link dead (the positive
+// observation a frozen-app-but-live-socket daemon never produces a TCP EOF
+// for — it keeps answering yamux keepalive right up to the kill). Centralised
+// + tunable.
 const (
 	leasePing = 10 * time.Second
 	leaseTTL  = 30 * time.Second
@@ -46,8 +52,10 @@ func NewLease(ping, ttl time.Duration) *Lease {
 	}
 }
 
-// Refresh stamps last-seen to now. Any inbound frame is liveness — the demux
-// loop calls this for every frame it reads.
+// Refresh stamps last-seen to now. Only an application frame is liveness —
+// linksession.go's dispatch calls this (via its per-substream onFrame hook)
+// for every application frame it reads, never for yamux's own keepalive
+// ping/pong, which never reaches that hook.
 func (l *Lease) Refresh() {
 	l.mu.Lock()
 	l.lastSeen = time.Now()

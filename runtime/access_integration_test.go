@@ -12,8 +12,13 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+// kvSpec is the day-1 CreateSpec every integration test in this file creates
+// through — inline kv value, no placement axis.
+var kvSpec = resourcespec.CreateSpec{Kind: resourcespec.KindKV}
 
 // TestAccessDoorVerticalSlice drives the whole plane-2 door assembled by
 // OpenChannel over a real sqlite file — every branch (two loci, the
@@ -50,13 +55,13 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	v2 := []byte("world")
 
 	// ---- Step 1: create locus (channel membership) ----
-	out, err := hA.Invoke(ctx, access.OpCreate, rid, v1, nil)
+	out, err := hA.Create(ctx, rid, kvSpec, v1)
 	expectAccepted(t, "A create", out, err)
 
-	out, err = hX.Invoke(ctx, access.OpCreate, ridX, nil, nil)
+	out, err = hX.Create(ctx, ridX, kvSpec, nil)
 	expectReason(t, "non-member X create", out, err, access.AccessDenied)
 
-	out, err = hA.Invoke(ctx, access.OpCreate, rid, v1, nil)
+	out, err = hA.Create(ctx, rid, kvSpec, v1)
 	expectReason(t, "A re-create same id", out, err, access.AlreadyExists)
 
 	// ---- Step 2: object op via R (creator has full rights; B has none) ----
@@ -123,7 +128,7 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	expectReason(t, "repeat delete (idempotent)", out, err, access.ResourceNotFound)
 
 	// Fresh birth: create has no memory of the deleted id.
-	out, err = hA.Invoke(ctx, access.OpCreate, rid, v1, nil)
+	out, err = hA.Create(ctx, rid, kvSpec, v1)
 	expectAccepted(t, "A re-create after delete (fresh birth)", out, err)
 
 	// ---- Step 7: dynamic membership (exit loses, join gains) ----

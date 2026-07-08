@@ -32,6 +32,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -285,11 +286,29 @@ func main() {
 		}
 		serverWS += sep + "key=" + url.QueryEscape(*key)
 	}
+
+	// Storage host (期11 §4): the file-kind resource axis's physical half —
+	// os.Root-confined, this channel's own resources/<channelID>/{live,
+	// staging} tree, a SIBLING of wsRoot/<channelID>'s device workspace tree
+	// (never nested under it, §4.2). Opened unconditionally: a daemon that
+	// never hosts a file-kind resource simply never receives an AllocRequest
+	// for it (RunCompute's bridge only calls into StorageHost when the home
+	// actually sends one), so there is no cost to always wiring it — and no
+	// silent gap the day a channel this daemon serves DOES need file
+	// placement.
+	sh, err := storagehost.Open(wsRoot, chID, logger)
+	if err != nil {
+		log.Fatalf("daemon: open storage host: %v", err)
+	}
+	defer func() { _ = sh.Close() }()
+
 	if err := platform.RunCompute(ctx, platform.ComputeConfig{
-		ServerWS: serverWS,
-		Logger:   logger,
-		Desired:  source,
-		Builder:  source,
+		ServerWS:        serverWS,
+		Logger:          logger,
+		Desired:         source,
+		Builder:         source,
+		StorageHost:     storageHostAdapter{host: sh},
+		LocalFileOpener: storageHostAdapter{host: sh},
 	}); err != nil {
 		log.Fatalf("daemon: %v", err)
 	}

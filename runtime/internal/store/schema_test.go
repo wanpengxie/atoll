@@ -60,17 +60,21 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 
 // ChannelLocalTables enumerates exactly the surviving channel-local tables:
 // the message log, the actor registry, the access plane's channel-scoped
-// resources + resource_grants, the actor-scoped state locus actor_state, and
-// the identity-level pending-timer control plane timers
-// (type_registry's two tables + actor_cursors are deleted).
+// resources + resource_grants + the create/delete outbox's two server-side
+// durable halves (resource_reservations + resource_tombstones, 期11 spec
+// §1.3), the actor-scoped state locus actor_state, and the identity-level
+// pending-timer control plane timers (type_registry's two tables +
+// actor_cursors are deleted).
 func TestChannelLocalTables_Set(t *testing.T) {
 	want := map[string]bool{
-		"messages":        true,
-		"actor_registry":  true,
-		"resources":       true,
-		"resource_grants": true,
-		"actor_state":     true,
-		"timers":          true,
+		"messages":              true,
+		"actor_registry":        true,
+		"resources":             true,
+		"resource_grants":       true,
+		"resource_reservations": true,
+		"resource_tombstones":   true,
+		"actor_state":           true,
+		"timers":                true,
 	}
 	if len(store.ChannelLocalTables) != len(want) {
 		t.Fatalf("ChannelLocalTables=%v want exactly %v", store.ChannelLocalTables, want)

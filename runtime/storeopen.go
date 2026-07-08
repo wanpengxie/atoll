@@ -29,6 +29,15 @@ type ChannelStores struct {
 	// this and speaks only Invoke, exactly as it speaks harness.Pen for plane-1.
 	Access accessdoor.AccessMinter
 
+	// Outbox is the SAME underlying resource registry re-exported under the
+	// narrow resourcespec.ResourceOutbox slice (期11 spec §4.7): reservation/
+	// tombstone completion for the daemon control-RPC handlers platform
+	// assembly wires (Committed/ReclaimAck/ReconcilePull). The general R
+	// surface (ActorAllows/MembersAllow/SetGrant/Create/Delete/Resolve) stays
+	// confined behind the door alone — the SAME anti-bypass wall Access's own
+	// doc above names, drawn one field narrower here rather than widened.
+	Outbox resourcespec.ResourceOutbox
+
 	// timers is the identity-level durable pending-timer store. Unexported
 	// for the same reason Access is public but its R/byte collaborators are
 	// not: a raw TimerStore reachable downstream is a delayed forged-author
@@ -60,6 +69,22 @@ func (c channelMembershipCheck) IsMember(ctx context.Context, id actor.ActorID) 
 	return ok && rec.IsActive(), nil
 }
 
+// Lookup adapts storespec.Registry.Lookup to accessdoor.MembershipCheck's
+// placement-routing seam (期11 spec §4.3's policy chain ①): kind + Host, "not
+// found" collapsed to found=false regardless of whether the row is merely
+// absent or present-but-deregistered (IsActive, mirroring IsMember above —
+// a deregistered actor is not a valid creator-affinity source either).
+func (c channelMembershipCheck) Lookup(ctx context.Context, id actor.ActorID) (actor.Kind, string, bool, error) {
+	rec, ok, err := c.registry.Lookup(ctx, id)
+	if err != nil {
+		return "", "", false, err
+	}
+	if !ok || !rec.IsActive() {
+		return "", "", false, nil
+	}
+	return rec.Kind, rec.Host, true, nil
+}
+
 // Close releases the underlying store resources.
 func (c *ChannelStores) Close() error {
 	if c.closer != nil {
@@ -84,6 +109,27 @@ type OpenChannelOptions struct {
 	// woken identically regardless of which write path advanced the log. nil =
 	// no subscriber. The callback must be non-blocking (a lossy fan-out wake).
 	OnCommit func()
+
+	// StorageMounts / StorageControl are file-kind placement's platform-filled
+	// injection points (期11 spec §4.3: "注入点契约 runtime 定,实现填充下游
+	// 做") — this package DEFINES the accessdoor.Deps shape they land in but
+	// never answers them itself (it has no notion of a link/wire or an
+	// attach-state table). nil is legal: a channel opened without them (e.g.
+	// a kv-only test rig, or before platform's link Acceptor exists —
+	// §4.3's own late-bound-injection escape hatch covers that ordering) can
+	// resolve authorization and complete kv/kv creates exactly as before;
+	// only a file-kind Create fails honestly (§4.3's own reject path).
+	StorageMounts accessdoor.StorageMounts
+	// StorageControl issues the door's own AllocRequest once placement is
+	// chosen (see accessdoor.StorageControl's doc for why this Dep exists
+	// beyond spec §4.3's literal placement-CHOICE list).
+	StorageControl accessdoor.StorageControl
+	// LaneControl mints §5's file byte-route Token — same late-bound,
+	// nil-safe injection-point discipline as StorageMounts/StorageControl
+	// above (platform fills it over the link Acceptor; nil leaves file
+	// OpRead/OpWrite/with_content-create honestly erroring rather than
+	// fabricating a route).
+	LaneControl accessdoor.LaneControl
 }
 
 // OpenChannel opens the per-channel sqlite at dbPath and returns the segregated
@@ -110,10 +156,14 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	// incomplete assembly (missing KindKV driver), so a mis-wired open fails at
 	// open, not at first Invoke.
 	access, err := accessdoor.New(accessdoor.Deps{
-		Registry:   cs.Resources,
-		Drivers:    accessdoor.DriverTable{resourcespec.KindKV: cs.KVDriver},
-		Membership: channelMembershipCheck{registry: cs.Registry},
-		State:      cs.State,
+		Registry:       cs.Resources,
+		Drivers:        accessdoor.DriverTable{resourcespec.KindKV: cs.KVDriver},
+		Membership:     channelMembershipCheck{registry: cs.Registry},
+		State:          cs.State,
+		ChannelID:      channelID,
+		StorageMounts:  opts.StorageMounts,
+		StorageControl: opts.StorageControl,
+		LaneControl:    opts.LaneControl,
 	})
 	if err != nil {
 		_ = cs.Close()
@@ -127,6 +177,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Registry:   cs.Registry,
 		Membership: cs.Membership,
 		Access:     access,
+		Outbox:     cs.Resources,
 		timers:     cs.Timers(),
 		closer:     cs.Close,
 	}, nil

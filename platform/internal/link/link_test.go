@@ -628,6 +628,101 @@ func TestLease_NoTraffic_ExpiresToDown(t *testing.T) {
 	}
 }
 
+// TestLease_KeepAliveAliveButAppFrozen_ExpiresToDown proves the actual
+// invariant the two-heartbeat design (linksession.go's linkYamuxConfig doc)
+// promises, not a proxy for it: with yamux's OWN keepalive genuinely running —
+// fast-forwarded via SetYamuxKeepAliveIntervalForTest so several real
+// keepalive round trips land inside the test's TTL window — but the daemon's
+// APPLICATION layer producing nothing (Start is never called: no pingLoop, no
+// actor traffic), the home's Lease still expires the link on TTL.
+//
+// This is deliberately NOT TestLease_NoTraffic_ExpiresToDown's shortcut of
+// setting TTL (60ms) far below yamux's 30s default keepalive so the keepalive
+// simply never gets a chance to fire during the test — that shortcut cannot
+// distinguish "the Lease correctly ignores keepalive" from "the test window
+// was too short for keepalive to matter either way", so it would NOT have
+// caught the 换底 regression this test guards: onRead used to fire on every
+// wsByteStream.Read — including yamux's own keepalive ping/pong bytes — so a
+// frozen-app-but-live-socket daemon was kept "alive" by keepalive alone, and
+// the home's Lease (whose entire job is catching exactly that daemon) never
+// expired it.
+func TestLease_KeepAliveAliveButAppFrozen_ExpiresToDown(t *testing.T) {
+	// yamux's real keepalive fires every 15ms for the life of this test — many
+	// round trips complete inside the 200ms TTL window below, so the wire
+	// genuinely carries traffic throughout, not merely by the window being too
+	// short to notice its absence.
+	reset := link.SetYamuxKeepAliveIntervalForTest(15 * time.Millisecond)
+	defer reset()
+
+	r := newHomeRig(t, 20*time.Millisecond, 200*time.Millisecond)
+
+	const toolID = actor.ActorID("tool:frozen-app-live-keepalive")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	h := newDaemonHost()
+	defer h.Stop()
+
+	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+		return h.Dispatch(toolID, env)
+	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	_ = arms
+	h.Install(toolID, &echoCell{w: arms.Pen}, arms.Down)
+	// Deliberately do NOT call d.Start(): the app-level pingLoop never runs and
+	// no actor traffic exists — the daemon's APPLICATION layer is frozen. Its
+	// yamux SESSION is nonetheless fully alive and answering keepalive entirely
+	// on its own (yamux's newSession launches the keepalive goroutine
+	// unconditionally, independent of any application code) — exactly the "app
+	// goroutine wedged, yamux read/write loops still scheduled" daemon the
+	// Lease exists to catch, reproduced here by simply never starting the app
+	// layer rather than by actually wedging a goroutine.
+	start := time.Now()
+
+	// Well inside the TTL window, several keepalive round trips have already
+	// landed (200ms TTL / 15ms keepalive ≈ 13 ticks by TTL) — confirm the lease
+	// has NOT been torn down yet, i.e. this is a real mid-flight observation of
+	// live keepalive traffic, not a window too short for it to occur.
+	time.Sleep(80 * time.Millisecond)
+	if down := r.getDown(); len(down) != 0 {
+		t.Fatalf("lease already expired at 80ms (TTL=200ms) despite ongoing keepalive traffic: down=%v", down)
+	}
+
+	// The lease still expires once the app-frame silence outlasts the TTL — the
+	// regression this test guards would instead have kept refreshing forever
+	// off keepalive alone, so this loop would never observe a down and the
+	// bounded deadline below is what actually catches it.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if down := r.getDown(); len(down) >= 1 && down[0] == toolID {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("lease never expired the frozen-app link to down, despite yamux keepalive genuinely running — keepalive traffic is refreshing the lease again")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// The expiry should land close to the configured TTL, not near the test's
+	// own generous outer deadline — a wide margin here would itself suggest the
+	// down edge came from something other than the TTL judgment.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("lease expiry took implausibly long (%v) for a 200ms TTL — suspect keepalive intermittently refreshed it", elapsed)
+	}
+
+	// The daemon side also observes the link tearing down.
+	select {
+	case <-d.Done():
+	case <-time.After(10 * time.Second):
+		t.Fatal("daemon never saw the link close after lease expiry")
+	}
+}
+
 // TestEndToEnd_CancelRequest_CrossWire proves the request-scope of cancel(scope)
 // crosses the wire: a daemon cell is parked in Receive on an in-flight request;
 // the home calls rt.CancelRequest(actor, requestID) (the same runtime call

@@ -2,6 +2,7 @@ package link
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -33,7 +34,7 @@ import (
 // arm that silently keeps answering as if still connected.
 type RebindableArms struct {
 	pen      atomic.Pointer[harness.Pen]
-	access   atomic.Pointer[accessdoor.AccessHandle]
+	access   atomic.Pointer[accessdoor.ResourceAccessHandle]
 	state    atomic.Pointer[accessdoor.AccessHandle]
 	schedule atomic.Pointer[schedule.ScheduleHandle]
 }
@@ -64,14 +65,16 @@ func (r *RebindableArms) Rebind(arms CellArms) {
 // time — it reads the CURRENT pen arm on every Write.
 func (r *RebindableArms) Pen() harness.Pen { return rebindPen{r} }
 
-// Access returns the stable channel-scoped facade (Caps.Access).
-func (r *RebindableArms) Access() accessdoor.AccessHandle {
-	return rebindAccess{ptr: &r.access}
+// Access returns the stable channel-scoped (resource-face) facade
+// (Caps.Access).
+func (r *RebindableArms) Access() accessdoor.ResourceAccessHandle {
+	return rebindResourceAccess{ptr: &r.access}
 }
 
 // State returns the stable actor-scoped facade (Caps.State) — Access and State
 // are two faces of the same arm (§10.13 prior art), so they get independent
-// atomic slots swapped together by one Rebind call.
+// atomic slots swapped together by one Rebind call. State stays the NARROW
+// (Invoke-only) facade — the scope law itself (§3.1/§3.2).
 func (r *RebindableArms) State() accessdoor.AccessHandle {
 	return rebindAccess{ptr: &r.state}
 }
@@ -88,15 +91,73 @@ func (p rebindPen) Write(ctx context.Context, env *message.Envelope) (harness.Wr
 	return (*p.r.pen.Load()).Write(ctx, env)
 }
 
-// rebindAccess is the Caps-injected AccessHandle facade (backs both the
-// channel-scoped Access face and the actor-scoped State face — ptr selects
-// which of the membrane's two slots this facade reads).
+// rebindAccess is the Caps-injected AccessHandle facade — the actor-scoped
+// State face's narrow (Invoke-only) facade.
 type rebindAccess struct {
 	ptr *atomic.Pointer[accessdoor.AccessHandle]
 }
 
 func (a rebindAccess) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
 	return (*a.ptr.Load()).Invoke(ctx, op, id, args, grant)
+}
+
+// rebindResourceAccess is the Caps-injected ResourceAccessHandle facade —
+// the channel-scoped Access face's WIDE facade (期11 spec §3.2's "wire 层
+// 各拆两型": this is rebindAccess's resource-face twin, reading an
+// independent atomic slot so a reconnect swaps both without touching cell
+// code).
+type rebindResourceAccess struct {
+	ptr *atomic.Pointer[accessdoor.ResourceAccessHandle]
+}
+
+func (a rebindResourceAccess) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
+	return (*a.ptr.Load()).Invoke(ctx, op, id, args, grant)
+}
+
+func (a rebindResourceAccess) Create(ctx context.Context, id resource.ResourceID, spec accessdoor.CreateSpec, initial []byte) (accessdoor.Outcome, error) {
+	return (*a.ptr.Load()).Create(ctx, id, spec, initial)
+}
+
+func (a rebindResourceAccess) Stat(ctx context.Context, id resource.ResourceID) (accessdoor.StatResult, error) {
+	return (*a.ptr.Load()).Stat(ctx, id)
+}
+
+func (a rebindResourceAccess) List(ctx context.Context, q accessdoor.ListQuery) (accessdoor.ListPage, error) {
+	return (*a.ptr.Load()).List(ctx, q)
+}
+
+// ErrResourceAccessNoFileOpener signals the CURRENTLY Rebind'd arm does not
+// implement accessdoor.FileOpener (found+fixed during 期11 S6's platform-
+// level walk verification, mirrors liveaccess.go's own fix note): day-1 this
+// never actually fires — every rebindResourceAccess arm is a daemon-hosted
+// remoteResourceHandle, which always implements FileOpener — but the facade
+// re-reads the CURRENT pointer PER CALL (a reconnect could in principle swap
+// in a different concrete arm), so Open/Redeem stay a real checked type
+// assertion rather than an unchecked one.
+var ErrResourceAccessNoFileOpener = errors.New("link: current resource access arm does not support file byte access")
+
+// Open/Redeem implement accessdoor.FileOpener over the CURRENT arm — the
+// missing half of this facade before this fix: rebindResourceAccess already
+// satisfied ResourceAccessHandle's four pinned methods, but with no Open/
+// Redeem, NewLiveResourceAccess's own FileOpener detection (liveaccess.go)
+// could never see through this wrapper to the underlying
+// *remoteResourceHandle, so a daemon-hosted actor's sys.Resource().Open/
+// CreateFile always answered actorbase.ErrUnsupported despite §5 building
+// the whole daemon-side mechanism these two calls need.
+func (a rebindResourceAccess) Open(ctx context.Context, id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+	fo, ok := (*a.ptr.Load()).(accessdoor.FileOpener)
+	if !ok {
+		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrResourceAccessNoFileOpener
+	}
+	return fo.Open(ctx, id, mode)
+}
+
+func (a rebindResourceAccess) Redeem(ctx context.Context, route accessdoor.FileRoute) (accessdoor.FileAccess, error) {
+	fo, ok := (*a.ptr.Load()).(accessdoor.FileOpener)
+	if !ok {
+		return accessdoor.FileAccess{}, ErrResourceAccessNoFileOpener
+	}
+	return fo.Redeem(ctx, route)
 }
 
 // rebindSchedule is the Caps-injected ScheduleHandle facade.
@@ -113,7 +174,9 @@ func (s rebindSchedule) Cancel(ctx context.Context, id schedule.TimerID) error {
 // Compile-time proof the facades satisfy the substrate capability contracts —
 // a reconnect-surviving cell's caps are indistinguishable from a fixed one.
 var (
-	_ harness.Pen             = rebindPen{}
-	_ accessdoor.AccessHandle = rebindAccess{}
-	_ schedule.ScheduleHandle = rebindSchedule{}
+	_ harness.Pen                     = rebindPen{}
+	_ accessdoor.AccessHandle         = rebindAccess{}
+	_ accessdoor.ResourceAccessHandle = rebindResourceAccess{}
+	_ accessdoor.FileOpener           = rebindResourceAccess{}
+	_ schedule.ScheduleHandle         = rebindSchedule{}
 )

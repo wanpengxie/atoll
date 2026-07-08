@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -59,13 +60,28 @@ func (p *fakePen) count() int {
 	return len(p.written)
 }
 
-// fakeAccess is an accessdoor.AccessHandle double never meaningfully
+// fakeAccess is an accessdoor.ResourceAccessHandle double never meaningfully
 // exercised by these tests (State()/Resource() are thin pass-throughs;
-// covering the pass-through shape is enough here).
+// covering the pass-through shape is enough here). It satisfies the WIDE
+// resource face so the same value can back both engine.access (Access field,
+// needs Create/Stat/List) and engine.state (State field, only ever needs
+// Invoke — a wider double is harmless there, Go interfaces are structural).
 type fakeAccess struct{}
 
 func (fakeAccess) Invoke(_ context.Context, op access.Operation, id resource.ResourceID, args []byte, _ *access.Grant) (accessdoor.Outcome, error) {
 	return accessdoor.Outcome{Value: args}, nil
+}
+
+func (fakeAccess) Create(_ context.Context, id resource.ResourceID, spec resourcespec.CreateSpec, initial []byte) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{Value: initial}, nil
+}
+
+func (fakeAccess) Stat(_ context.Context, id resource.ResourceID) (accessdoor.StatResult, error) {
+	return accessdoor.StatResult{}, nil
+}
+
+func (fakeAccess) List(_ context.Context, q accessdoor.ListQuery) (accessdoor.ListPage, error) {
+	return accessdoor.ListPage{}, nil
 }
 
 // fakeSchedule is a schedule.ScheduleHandle double: Schedule/Cancel are

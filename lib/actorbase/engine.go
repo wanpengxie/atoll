@@ -40,7 +40,7 @@ import (
 //     for requests the serve ledger had no room to Admit.
 type engine struct {
 	pen      harness.Pen
-	access   accessdoor.AccessHandle
+	access   accessdoor.ResourceAccessHandle
 	state    accessdoor.AccessHandle
 	sched    schedule.ScheduleHandle
 	spawn    actorrt.SpawnHandle
@@ -537,7 +537,7 @@ func (e *engine) Cancel(id message.ID) error {
 // --- Sys: State / Access arms --------------------------------------------
 
 type resourceAdapter struct {
-	h   accessdoor.AccessHandle
+	h   accessdoor.ResourceAccessHandle
 	ctx func() context.Context
 }
 
@@ -545,11 +545,18 @@ type resourceAdapter struct {
 // rather than nil-pointer-panicking through the door — the same kernel defense
 // the Spawn arm carries. No host currently produces a nil arm here (only Spawn
 // crosses the wire zero), so this is a defensive floor, not a live path.
+//
+// Create goes through the door's OWN Create method (期11 spec §3.1's "create
+// 单入口" — the resource face's Invoke no longer accepts a bare op=create at
+// all), day-1 kv-only: CreateSpec.Kind is hardcoded KindKV here, mirroring
+// this adapter's PRE-§3 behavior byte-for-byte (a domain Proc author still
+// sees the same Create(id, args) shape; file-kind creation has no domain
+// sugar yet — S4/S5 land the daemon/lane machinery it needs first).
 func (r resourceAdapter) Create(id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {
 	if r.h == nil {
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
-	return r.h.Invoke(r.ctx(), access.OpCreate, id, args, nil)
+	return r.h.Create(r.ctx(), id, accessdoor.CreateSpec{Kind: accessdoor.KindKV}, args)
 }
 func (r resourceAdapter) Read(id resource.ResourceID) (accessdoor.Outcome, error) {
 	if r.h == nil {
@@ -568,6 +575,71 @@ func (r resourceAdapter) Delete(id resource.ResourceID) (accessdoor.Outcome, err
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
 	return r.h.Invoke(r.ctx(), access.OpDelete, id, nil, nil)
+}
+
+// ShareActor/ShareMembers are OpSet sugar (期11 spec §3.9': "各拼 Grant 塞
+// Invocation{Op:OpSet} 调 Invoke — 与 Open/Write→Invoke 同构") — a Proc body
+// never hand-assembles an access.Grant.
+func (r resourceAdapter) ShareActor(id resource.ResourceID, actorID actor.ActorID, ops []access.Operation) (accessdoor.Outcome, error) {
+	if r.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
+	return r.h.Invoke(r.ctx(), access.OpSet, id, nil, &access.Grant{GranteeKind: access.GranteeActor, Grantee: actorID, Ops: ops})
+}
+func (r resourceAdapter) ShareMembers(id resource.ResourceID, ops []access.Operation) (accessdoor.Outcome, error) {
+	if r.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
+	return r.h.Invoke(r.ctx(), access.OpSet, id, nil, &access.Grant{GranteeKind: access.GranteeMembers, Ops: ops})
+}
+
+// Stat/List are the read face's zero-reinterpretation pass-through.
+func (r resourceAdapter) Stat(id resource.ResourceID) (accessdoor.StatResult, error) {
+	if r.h == nil {
+		return accessdoor.StatResult{}, ErrUnsupported
+	}
+	return r.h.Stat(r.ctx(), id)
+}
+func (r resourceAdapter) List(q accessdoor.ListQuery) (accessdoor.ListPage, error) {
+	if r.h == nil {
+		return accessdoor.ListPage{}, ErrUnsupported
+	}
+	return r.h.List(r.ctx(), q)
+}
+
+// Open/CreateFile are file kind's own byte-access verbs (期11 spec §5/
+// §3.9') — see ResourceHandle's doc. Both type-assert r.h against
+// accessdoor.FileOpener (a SEPARATE, optional capability from the pinned
+// four-method ResourceAccessHandle, §3.1) rather than calling it directly:
+// only a daemon-hosted avatar (platform/internal/link's remoteResourceHandle)
+// implements it day-1 — a home-hosted caller (boundHandle/liveResourceAccess)
+// does not, and answers ErrUnsupported here rather than a nil-pointer panic,
+// the SAME nil-arm discipline the r.h==nil check above already applies.
+func (r resourceAdapter) Open(id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+	if r.h == nil {
+		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrUnsupported
+	}
+	fo, ok := r.h.(accessdoor.FileOpener)
+	if !ok {
+		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrUnsupported
+	}
+	return fo.Open(r.ctx(), id, mode)
+}
+
+func (r resourceAdapter) CreateFile(id resource.ResourceID, dir bool, withContent bool) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+	if r.h == nil {
+		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrUnsupported
+	}
+	out, err := r.h.Create(r.ctx(), id, accessdoor.CreateSpec{Kind: accessdoor.KindFile, Dir: dir, WithContent: withContent}, nil)
+	if err != nil || !withContent || !out.Accepted() || out.Route == nil {
+		return accessdoor.FileAccess{}, out, err
+	}
+	fo, ok := r.h.(accessdoor.FileOpener)
+	if !ok {
+		return accessdoor.FileAccess{}, out, ErrUnsupported
+	}
+	fa, rerr := fo.Redeem(r.ctx(), *out.Route)
+	return fa, out, rerr
 }
 
 type stateAdapter struct {

@@ -2,9 +2,11 @@ package accessdoor
 
 import (
 	"context"
+	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
@@ -20,6 +22,15 @@ type fakeRegistry struct {
 	createErr   error
 	createCalls []createCall
 
+	reserveCreateID        string
+	reserveCreateErr       error
+	reserveCreateCalls     []createCall
+	commitReservationFound bool
+	commitReservationErr   error
+	commitReservationCalls []string
+	clearTombstoneFound    bool
+	clearTombstoneErr      error
+
 	actorAllows    bool
 	actorAllowsErr error
 
@@ -32,17 +43,34 @@ type fakeRegistry struct {
 	deleteErr   error
 	deleteCalls []resource.ResourceID
 
+	// listRows/listNextCursor/listErr back List — canned per §3.7's door
+	// tests (Stat/List projection), which need MULTIPLE rows with distinct
+	// grant shapes at once (a single-bool fake cannot express that, same
+	// reasoning decay_test.go's real-store rig documents for the set arm).
+	listRows       []resourcespec.ResourceRow
+	listNextCursor string
+	listErr        error
+	listCalls      []listCall
+
 	// calls is the total method-invocation count across every method — the
 	// actor-scoped negative assertion ("the collapsed branch consults no Registry")
 	// asserts this stays zero.
 	calls int
 }
 
+type listCall struct {
+	prefix string
+	limit  int
+	cursor string
+}
+
 type createCall struct {
-	id      resource.ResourceID
-	kind    resourcespec.ResourceKind
-	creator actor.ActorID
-	initial []byte
+	id                                resource.ResourceID
+	kind                              resourcespec.ResourceKind
+	creator                           actor.ActorID
+	placementDaemonID, placementCoord string
+	provenance                        resourcespec.Provenance
+	initial                           []byte
 }
 
 func (r *fakeRegistry) Resolve(ctx context.Context, id resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
@@ -50,10 +78,89 @@ func (r *fakeRegistry) Resolve(ctx context.Context, id resource.ResourceID) (res
 	return r.resolveMeta, r.resolveExists, r.resolveErr
 }
 
-func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, initial []byte) error {
+func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, provenance resourcespec.Provenance, initial []byte) error {
 	r.calls++
-	r.createCalls = append(r.createCalls, createCall{id: id, kind: kind, creator: creator, initial: initial})
+	r.createCalls = append(r.createCalls, createCall{
+		id: id, kind: kind, creator: creator,
+		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
+		provenance: provenance, initial: initial,
+	})
 	return r.createErr
+}
+
+// ReserveCreate / CommitReservation / ClearTombstone back §4's placement
+// routing (door.create's file-kind branch, query.go) — canned per-call so a
+// test can drive the reservation/commit sequence a content-less file create
+// runs through.
+func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool) (string, error) {
+	r.calls++
+	r.reserveCreateCalls = append(r.reserveCreateCalls, createCall{
+		id: id, kind: kind, creator: creator,
+		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
+	})
+	if r.reserveCreateErr != nil {
+		return "", r.reserveCreateErr
+	}
+	id2 := r.reserveCreateID
+	if id2 == "" {
+		id2 = "reservation-1"
+	}
+	return id2, nil
+}
+
+func (r *fakeRegistry) CommitReservation(ctx context.Context, reservationID string) (bool, error) {
+	r.calls++
+	r.commitReservationCalls = append(r.commitReservationCalls, reservationID)
+	return r.commitReservationFound, r.commitReservationErr
+}
+
+func (r *fakeRegistry) ClearTombstone(ctx context.Context, tombstoneID string) (bool, error) {
+	r.calls++
+	return r.clearTombstoneFound, r.clearTombstoneErr
+}
+
+// ReservationDaemon / TombstoneDaemon / ListReservationsByDaemon /
+// ListTombstonesByDaemon / ListByPlacementDaemon back §4.7's daemon
+// control-RPC handlers (platform, not this door) — no accessdoor caller
+// exercises them, stubbed purely for interface compliance.
+func (r *fakeRegistry) ReservationDaemon(ctx context.Context, reservationID string) (string, bool, error) {
+	r.calls++
+	return "", false, errors.New("fakeRegistry: ReservationDaemon not wired (no accessdoor caller)")
+}
+
+func (r *fakeRegistry) TombstoneDaemon(ctx context.Context, tombstoneID string) (string, bool, error) {
+	r.calls++
+	return "", false, errors.New("fakeRegistry: TombstoneDaemon not wired (no accessdoor caller)")
+}
+
+func (r *fakeRegistry) ListReservationsByDaemon(ctx context.Context, daemonID string) ([]resourcespec.ReservationRow, error) {
+	r.calls++
+	return nil, errors.New("fakeRegistry: ListReservationsByDaemon not wired (no accessdoor caller)")
+}
+
+func (r *fakeRegistry) ListTombstonesByDaemon(ctx context.Context, daemonID string) ([]resourcespec.TombstoneRow, error) {
+	r.calls++
+	return nil, errors.New("fakeRegistry: ListTombstonesByDaemon not wired (no accessdoor caller)")
+}
+
+func (r *fakeRegistry) ListByPlacementDaemon(ctx context.Context, daemonID string) ([]resourcespec.ResourceRow, error) {
+	r.calls++
+	return nil, errors.New("fakeRegistry: ListByPlacementDaemon not wired (no accessdoor caller)")
+}
+
+func (r *fakeRegistry) SweepExpiredReservations(ctx context.Context, daemonID string, cutoffMs int64) ([]resourcespec.ReservationRow, error) {
+	r.calls++
+	return nil, errors.New("fakeRegistry: SweepExpiredReservations not wired (no accessdoor caller)")
+}
+
+// List is §3.7's door-level consumer (door.list, query.go): canned rows +
+// nextCursor let a test drive the any-grant projection over MULTIPLE rows
+// with distinct grant shapes in one call — a single-bool fake cannot express
+// that.
+func (r *fakeRegistry) List(ctx context.Context, prefix string, limit int, cursor string) ([]resourcespec.ResourceRow, string, error) {
+	r.calls++
+	r.listCalls = append(r.listCalls, listCall{prefix: prefix, limit: limit, cursor: cursor})
+	return r.listRows, r.listNextCursor, r.listErr
 }
 
 func (r *fakeRegistry) ActorAllows(ctx context.Context, caller actor.ActorID, id resource.ResourceID, op access.Operation) (bool, error) {
@@ -112,11 +219,87 @@ type fakeMembership struct {
 	isMember bool
 	err      error
 	calls    int
+
+	// lookupKind/lookupHost/lookupFound/lookupErr back Lookup (§4.3 placement
+	// chain ①'s creator-affinity read). lookupCalls records every caller id
+	// Lookup was asked about.
+	lookupKind  actor.Kind
+	lookupHost  string
+	lookupFound bool
+	lookupErr   error
+	lookupCalls []actor.ActorID
 }
 
 func (m *fakeMembership) IsMember(ctx context.Context, id actor.ActorID) (bool, error) {
 	m.calls++
 	return m.isMember, m.err
+}
+
+func (m *fakeMembership) Lookup(ctx context.Context, id actor.ActorID) (actor.Kind, string, bool, error) {
+	m.calls++
+	m.lookupCalls = append(m.lookupCalls, id)
+	return m.lookupKind, m.lookupHost, m.lookupFound, m.lookupErr
+}
+
+// fakeStorageMounts is a configurable StorageMounts stub (§4.3 placement
+// chain ③④'s mount-table input).
+type fakeStorageMounts struct {
+	mounts []StorageMount
+	err    error
+	calls  int
+}
+
+func (f *fakeStorageMounts) ListStorageDaemons(ctx context.Context, chID channel.ID) ([]StorageMount, error) {
+	f.calls++
+	return f.mounts, f.err
+}
+
+// fakeStorageControl is a configurable StorageControl stub — records every
+// AllocRequest a test's door.create drives so the placement/coord/dir it was
+// asked to allocate can be asserted.
+type fakeStorageControl struct {
+	err   error
+	calls []allocCall
+}
+
+type allocCall struct {
+	daemonID string
+	spec     StorageAllocSpec
+}
+
+func (f *fakeStorageControl) AllocRequest(ctx context.Context, daemonID string, spec StorageAllocSpec) error {
+	f.calls = append(f.calls, allocCall{daemonID: daemonID, spec: spec})
+	return f.err
+}
+
+// fakeLaneControl is a configurable LaneControl stub (§5 item 0's file
+// byte-route Token mint) — records every OpenTransfer call so a test can
+// assert the exact (targetDaemonID, requesterDaemonID, coord, mode,
+// reservationID) the door routed.
+type fakeLaneControl struct {
+	token string
+	err   error
+	calls []openTransferCall
+}
+
+type openTransferCall struct {
+	targetDaemonID    string
+	requesterDaemonID string
+	coord             string
+	mode              access.Operation
+	reservationID     string
+}
+
+func (f *fakeLaneControl) OpenTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
+	f.calls = append(f.calls, openTransferCall{targetDaemonID: targetDaemonID, requesterDaemonID: requesterDaemonID, coord: coord, mode: mode, reservationID: reservationID})
+	if f.err != nil {
+		return "", f.err
+	}
+	tok := f.token
+	if tok == "" {
+		tok = "fake-lane-token"
+	}
+	return tok, nil
 }
 
 // fakeStateStore is a configurable resourcespec.StateStore stub. Every method
@@ -181,6 +364,18 @@ func newDoor(reg *fakeRegistry, drv *fakeDriver, mem *fakeMembership) *door {
 		Membership: mem,
 		State:      &fakeStateStore{},
 	}}
+}
+
+// newFileDoor builds a bare door with the file-kind placement Deps wired
+// (§4.3: StorageMounts + StorageControl + ChannelID), on top of newDoor's
+// baseline — the constructor query_test.go's placement-chain tests use.
+func newFileDoor(reg *fakeRegistry, drv *fakeDriver, mem *fakeMembership, mounts *fakeStorageMounts, ctl *fakeStorageControl, chID channel.ID) *door {
+	d := newDoor(reg, drv, mem)
+	d.deps.StorageMounts = mounts
+	d.deps.StorageControl = ctl
+	d.deps.ChannelID = chID
+	d.deps.LaneControl = &fakeLaneControl{}
+	return d
 }
 
 // newStateDoor builds a bare door wired for the actor-scoped branch. The Registry

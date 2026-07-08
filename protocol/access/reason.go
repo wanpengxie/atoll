@@ -13,6 +13,12 @@ const (
 	// ResourceNotFound — RESOLVE stage: the name does not resolve to a driver/object (for
 	// read/write/set/delete on an absent id). Door-authoritative. = ENOENT. (Distinct from a
 	// resolved-but-empty read, which is found=false in the outcome, not a failure.)
+	//
+	// Term pin (期11 S6 account item ⑧): the wire spelling is exactly
+	// "resource_not_found" — never renamed/abbreviated to "not_found" at any
+	// layer, including a future §5.3 UI HTTP endpoint's JSON error body (HTTP
+	// 404, same term verbatim) — one name end to end, door verdict through to
+	// the HTTP response, no per-layer relabeling.
 	ResourceNotFound FailureReason = "resource_not_found"
 
 	// AlreadyExists — RESOLVE stage, the DUAL of ResourceNotFound: op=create on a name that

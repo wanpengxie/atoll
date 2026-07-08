@@ -15,6 +15,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -46,7 +47,7 @@ type fakeAccessMinter struct {
 	calls []fakeAccessCall
 }
 
-func (m *fakeAccessMinter) Mint(caller actor.ActorID) accessdoor.AccessHandle {
+func (m *fakeAccessMinter) Mint(caller actor.ActorID) accessdoor.ResourceAccessHandle {
 	return &fakeAccessHandle{m: m, caller: caller, scope: "channel"}
 }
 
@@ -81,6 +82,24 @@ func (h *fakeAccessHandle) Invoke(_ context.Context, op access.Operation, id res
 		return accessdoor.Outcome{RejectReason: access.AccessDenied}, nil
 	}
 	return accessdoor.Outcome{Value: args, Found: len(args) > 0}, nil
+}
+
+// Create/Stat/List complete the ResourceAccessHandle contract for this fake
+// (only Invoke parity is exercised by the tests in this file today — these
+// exist purely so fakeAccessHandle keeps satisfying the wide interface).
+func (h *fakeAccessHandle) Create(_ context.Context, id resource.ResourceID, spec resourcespec.CreateSpec, initial []byte) (accessdoor.Outcome, error) {
+	h.m.record(fakeAccessCall{caller: h.caller, scope: h.scope, op: access.OpCreate, id: id, args: initial})
+	return accessdoor.Outcome{Value: initial, Found: len(initial) > 0}, nil
+}
+
+func (h *fakeAccessHandle) Stat(_ context.Context, id resource.ResourceID) (accessdoor.StatResult, error) {
+	h.m.record(fakeAccessCall{caller: h.caller, scope: h.scope, id: id})
+	return accessdoor.StatResult{}, nil
+}
+
+func (h *fakeAccessHandle) List(_ context.Context, q accessdoor.ListQuery) (accessdoor.ListPage, error) {
+	h.m.record(fakeAccessCall{caller: h.caller, scope: h.scope})
+	return accessdoor.ListPage{}, nil
 }
 
 // --- fake time axis ---
@@ -386,7 +405,7 @@ type blockingAccessMinter struct {
 	once    sync.Once
 }
 
-func (m *blockingAccessMinter) Mint(actor.ActorID) accessdoor.AccessHandle {
+func (m *blockingAccessMinter) Mint(actor.ActorID) accessdoor.ResourceAccessHandle {
 	return &blockingAccessHandle{m: m}
 }
 func (m *blockingAccessMinter) MintState(actor.ActorID) accessdoor.AccessHandle {
@@ -395,13 +414,36 @@ func (m *blockingAccessMinter) MintState(actor.ActorID) accessdoor.AccessHandle 
 
 type blockingAccessHandle struct{ m *blockingAccessMinter }
 
-func (h *blockingAccessHandle) Invoke(ctx context.Context, _ access.Operation, _ resource.ResourceID, _ []byte, _ *access.Grant) (accessdoor.Outcome, error) {
+// block signals entry once (the invoke has crossed the wire and reached the
+// home) then parks until released or ctx dies — the shared blocking shape
+// every method on this handle uses, so any arm (Invoke/Create/Stat/List) can
+// exercise the same in-flight-transport-death rig.
+func (h *blockingAccessHandle) block(ctx context.Context) {
 	h.m.once.Do(func() { close(h.m.entered) })
 	select {
 	case <-h.m.release:
 	case <-ctx.Done():
 	}
+}
+
+func (h *blockingAccessHandle) Invoke(ctx context.Context, _ access.Operation, _ resource.ResourceID, _ []byte, _ *access.Grant) (accessdoor.Outcome, error) {
+	h.block(ctx)
 	return accessdoor.Outcome{}, nil
+}
+
+func (h *blockingAccessHandle) Create(ctx context.Context, _ resource.ResourceID, _ resourcespec.CreateSpec, _ []byte) (accessdoor.Outcome, error) {
+	h.block(ctx)
+	return accessdoor.Outcome{}, nil
+}
+
+func (h *blockingAccessHandle) Stat(ctx context.Context, _ resource.ResourceID) (accessdoor.StatResult, error) {
+	h.block(ctx)
+	return accessdoor.StatResult{}, nil
+}
+
+func (h *blockingAccessHandle) List(ctx context.Context, _ accessdoor.ListQuery) (accessdoor.ListPage, error) {
+	h.block(ctx)
+	return accessdoor.ListPage{}, nil
 }
 
 type blockingScheduleMinter struct {

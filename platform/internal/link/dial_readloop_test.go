@@ -10,11 +10,21 @@ import (
 	"github.com/wanpengxie/atoll/runtime/ipc"
 )
 
+// nopRWC is a throwaway io.ReadWriteCloser for an actorStream.stream in read-loop
+// unit tests: the read loop drives inbound frames through as.codec (built over
+// the test's own pipes), and only ever calls as.stream.Close() directly — which
+// here is a harmless no-op.
+type nopRWC struct{}
+
+func (nopRWC) Read([]byte) (int, error)    { return 0, io.EOF }
+func (nopRWC) Write(p []byte) (int, error) { return len(p), nil }
+func (nopRWC) Close() error                { return nil }
+
 func testReadLoopStream(id actor.ActorID, r io.Reader, w io.Writer) *actorStream {
 	codec := ipc.NewCodec(r, w)
 	return &actorStream{
 		id:     id,
-		stream: newStream(1, func(uint32, Op, []byte) error { return nil }, nil),
+		stream: nopRWC{},
 		codec:  codec,
 		writer: NewRemoteWriter(codec),
 		access: newRelayClient(codec, ipc.KindAccess),

@@ -124,12 +124,23 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 // the DDL is the single source of truth; this map is just the fail-fast
 // guard that an opened file actually carries that shape.
 var channelLocalSchemaShape = map[string][]string{
-	"messages":        {"seq", "id", "type", "kind"},
-	"actor_registry":  {"actor_id", "actor_kind", "deregistered_at"},
-	"resources":       {"resource_id", "kind", "bytes", "created_at"},
+	"messages":       {"seq", "id", "type", "kind"},
+	"actor_registry": {"actor_id", "actor_kind", "deregistered_at"},
+	"resources": {
+		"resource_id", "kind", "bytes",
+		"placement_kind", "placement_daemon_id", "placement_coord", "provenance", "created_by",
+		"created_at", "is_dir",
+	},
 	"resource_grants": {"resource_id", "grantee_kind", "grantee", "ops"},
-	"actor_state":     {"owner_id", "resource_id", "bytes", "created_at"},
-	"timers":          {"timer_id", "author_id", "fire_at", "type", "payload", "correlation_id", "created_at"},
+	"resource_reservations": {
+		"reservation_id", "resource_id", "kind",
+		"placement_daemon_id", "placement_coord", "created_by", "reserved_at", "is_dir",
+	},
+	"resource_tombstones": {
+		"tombstone_id", "resource_id", "daemon_id", "placement_coord", "provenance", "kind", "deleted_at",
+	},
+	"actor_state": {"owner_id", "resource_id", "bytes", "created_at"},
+	"timers":      {"timer_id", "author_id", "fire_at", "type", "payload", "correlation_id", "created_at"},
 }
 
 func verifyChannelLocalSchema(ctx context.Context, db *sql.DB) error {

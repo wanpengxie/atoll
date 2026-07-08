@@ -1,6 +1,7 @@
 package accessdoor
 
 import (
+	"errors"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -84,8 +85,19 @@ func TestMintedHandleRunsFullPath(t *testing.T) {
 		t.Fatalf("no store call should occur on a malformed request")
 	}
 
-	// well-formed create → welded caller reaches Registry.Create.
-	out, err := h.Invoke(t.Context(), access.OpCreate, "r1", []byte("v"), nil)
+	// a bare op=create through Invoke is rejected outright (期11 §3.1 "create
+	// 单入口") — the resource face has exactly one create locus, the Create
+	// method below.
+	if _, err := h.Invoke(t.Context(), access.OpCreate, "r1", []byte("v"), nil); !errors.Is(err, ErrCreateViaInvoke) {
+		t.Fatalf("expected ErrCreateViaInvoke for a bare op=create through Invoke, got %v", err)
+	}
+	if len(reg.createCalls) != 0 {
+		t.Fatalf("no store call should occur for a bare Invoke(op=create)")
+	}
+
+	// well-formed create via the Create method → welded caller reaches
+	// Registry.Create.
+	out, err := h.Create(t.Context(), "r1", resourcespec.CreateSpec{Kind: resourcespec.KindKV}, []byte("v"))
 	mustAccept(t, out, err)
 	if len(reg.createCalls) != 1 || reg.createCalls[0].creator != "a" {
 		t.Fatalf("create call = %+v", reg.createCalls)

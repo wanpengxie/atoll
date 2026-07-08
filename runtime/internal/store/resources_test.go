@@ -1,23 +1,27 @@
 package store
 
-// White-box tests for the access-plane store: resourceRegistry (R + existence)
-// and kvDriver (inline bytes). Both are unexported and reachable only from
-// inside the package — the same confinement the message-log store relies
-// on. They run over a real channel sqlite (ChannelLocalDDL), no fakes.
+// White-box tests for the access-plane store: resourceRegistry (R + existence
+// + create/delete outbox) and kvDriver (inline bytes). Both are unexported and
+// reachable only from inside the package — the same confinement the
+// message-log store relies on. They run over a real channel sqlite
+// (ChannelLocalDDL), no fakes.
 
 import (
 	"context"
+	"database/sql"
 	"path/filepath"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
 // openResourceReg opens a fresh temp-dir channel sqlite with the full DDL
-// (resources + resource_grants present, foreign_keys=ON) and returns a registry
-// over it, registering cleanup.
+// (resources + resource_grants + resource_reservations + resource_tombstones
+// present, foreign_keys=ON) and returns a registry over it, registering
+// cleanup.
 func openResourceReg(t *testing.T) *resourceRegistry {
 	t.Helper()
 	ctx := context.Background()
@@ -31,13 +35,22 @@ func openResourceReg(t *testing.T) *resourceRegistry {
 
 func kvOf(r *resourceRegistry) *kvDriver { return newKVDriver(r.db) }
 
+// createKV is the day-1 kv shape: no placement axis (empty daemon/coord),
+// provenance always axis-allocated.
+func createKV(t *testing.T, reg *resourceRegistry, id resource.ResourceID, creator actor.ActorID, initial []byte) {
+	t.Helper()
+	if err := reg.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", resourcespec.ProvenanceAxisAllocated, initial); err != nil {
+		t.Fatalf("Create %q: %v", id, err)
+	}
+}
+
 // --- Create: atomicity (row + full grant + bytes) + collision sentinel -------
 
 func TestResource_CreateWritesRowGrantBytes(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	if err := reg.Create(ctx, "kv:doc", "kv", "actor:a", []byte("hello")); err != nil {
+	if err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:a", "", "", resourcespec.ProvenanceAxisAllocated, []byte("hello")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -69,14 +82,73 @@ func TestResource_CreateWritesRowGrantBytes(t *testing.T) {
 	}
 }
 
+// kv rows must persist the additive placement/provenance/audit columns:
+// placement axis empty (structurally distinct from "unknown" — non-NULL
+// empty string), provenance always axis-allocated, created_by = creator.
+func TestResource_CreateKVPlacementColumnsAllEmptyProvenanceAxisAllocated(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	createKV(t, reg, "kv:doc", "actor:a", []byte("v"))
+
+	meta, ok, err := reg.Resolve(ctx, "kv:doc")
+	if err != nil || !ok {
+		t.Fatalf("Resolve ok=%v err=%v", ok, err)
+	}
+	if meta.PlacementKind != "" {
+		t.Errorf("kv PlacementKind=%q want empty (no placement axis)", meta.PlacementKind)
+	}
+	if meta.PlacementDaemonID != "" {
+		t.Errorf("kv PlacementDaemonID=%q want empty", meta.PlacementDaemonID)
+	}
+	if meta.PlacementCoord != "" {
+		t.Errorf("kv PlacementCoord=%q want empty", meta.PlacementCoord)
+	}
+	if meta.Provenance != resourcespec.ProvenanceAxisAllocated {
+		t.Errorf("kv Provenance=%q want axis-allocated", meta.Provenance)
+	}
+	if meta.CreatedBy != "actor:a" {
+		t.Errorf("CreatedBy=%q want actor:a", meta.CreatedBy)
+	}
+}
+
+// A file-kind row (created via the direct immediate path — a content-less
+// file create, §1.5) must stamp PlacementKind=daemon-local and carry whatever
+// placement_daemon_id/coord the door supplied.
+func TestResource_CreateFileStampsPlacementDaemonLocal(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+		t.Fatalf("Create file: %v", err)
+	}
+
+	meta, ok, err := reg.Resolve(ctx, "file:doc")
+	if err != nil || !ok {
+		t.Fatalf("Resolve ok=%v err=%v", ok, err)
+	}
+	if meta.PlacementKind != resourcespec.PlacementDaemonLocal {
+		t.Errorf("file PlacementKind=%q want daemon-local", meta.PlacementKind)
+	}
+	if meta.PlacementDaemonID != "daemon-1" {
+		t.Errorf("PlacementDaemonID=%q want daemon-1", meta.PlacementDaemonID)
+	}
+	if meta.PlacementCoord != "coord-xyz" {
+		t.Errorf("PlacementCoord=%q want coord-xyz", meta.PlacementCoord)
+	}
+	// file bytes never ride the inline `bytes` column — resolved-but-empty via
+	// the kv driver's shape is NOT how file bytes are read (a file driver is a
+	// later addition, §4), but the row's own bytes column must stay NULL.
+	if val, found, err := kvOf(reg).Read(ctx, "file:doc"); err != nil || found || val != nil {
+		t.Errorf("file row bytes column: found=%v val=%q err=%v, want found=false nil (bytes live at placement_coord, never inline)", found, val, err)
+	}
+}
+
 func TestResource_CreateCollisionSentinel(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	if err := reg.Create(ctx, "kv:doc", "kv", "actor:a", []byte("v1")); err != nil {
-		t.Fatalf("first Create: %v", err)
-	}
-	err := reg.Create(ctx, "kv:doc", "kv", "actor:b", []byte("v2"))
+	createKV(t, reg, "kv:doc", "actor:a", []byte("v1"))
+	err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:b", "", "", resourcespec.ProvenanceAxisAllocated, []byte("v2"))
 	if err == nil {
 		t.Fatal("second Create on same id must collide")
 	}
@@ -96,11 +168,400 @@ func TestResource_CreateCollisionSentinel(t *testing.T) {
 func TestResource_CreateGuardsEmptyInputs(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
-	if err := reg.Create(ctx, "", "kv", "actor:a", nil); err == nil {
+	if err := reg.Create(ctx, "", resourcespec.KindKV, "actor:a", "", "", resourcespec.ProvenanceAxisAllocated, nil); err == nil {
 		t.Error("Create with empty id must error")
 	}
-	if err := reg.Create(ctx, "kv:x", "kv", "", nil); err == nil {
+	if err := reg.Create(ctx, "kv:x", resourcespec.KindKV, "", "", "", resourcespec.ProvenanceAxisAllocated, nil); err == nil {
 		t.Error("Create with empty creator must error")
+	}
+}
+
+// --- ReserveCreate / CommitReservation: create-outbox (§1.7) -----------------
+
+func TestResource_ReserveCreateAndCommitLandsRow(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	rid, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate: %v", err)
+	}
+	if rid == "" {
+		t.Fatal("ReserveCreate must return a non-empty reservation id")
+	}
+
+	// Not yet visible: the row lands only on Commit.
+	if _, ok, _ := reg.Resolve(ctx, "file:doc"); ok {
+		t.Fatal("resource must not be visible before CommitReservation")
+	}
+
+	found, err := reg.CommitReservation(ctx, rid)
+	if err != nil {
+		t.Fatalf("CommitReservation: %v", err)
+	}
+	if !found {
+		t.Fatal("CommitReservation must report found=true for a live reservation")
+	}
+
+	meta, ok, err := reg.Resolve(ctx, "file:doc")
+	if err != nil || !ok {
+		t.Fatalf("Resolve after commit ok=%v err=%v", ok, err)
+	}
+	if meta.CreatedBy != "actor:a" {
+		t.Errorf("CreatedBy=%q want actor:a (door-authenticated creator from the reservation, never daemon-reported)", meta.CreatedBy)
+	}
+	if meta.PlacementDaemonID != "daemon-1" || meta.PlacementCoord != "coord-1" {
+		t.Errorf("placement = (%q,%q) want (daemon-1,coord-1)", meta.PlacementDaemonID, meta.PlacementCoord)
+	}
+	if meta.Provenance != resourcespec.ProvenanceAxisAllocated {
+		t.Errorf("Provenance=%q want axis-allocated", meta.Provenance)
+	}
+	// Creator holds the full object-rights grant, same as the direct path.
+	if !allowActor(t, reg, "actor:a", "file:doc", access.OpDelete) {
+		t.Error("committed creator must hold the full-rights grant")
+	}
+}
+
+// TestResource_ReserveCreateDirSurvivesOutbox pins 期11 丁12's byte-shape bit
+// crossing the create-outbox: a content-less dir=true reservation must land a
+// resources row whose Resolve reports Dir=true (the door's later Open reads
+// this to route to an os.Root subtree lease, never a single-file staging
+// handle). Daemon reports no truth (§1.3), so the shape has to ride the
+// server-side reservation write-ahead, not be re-derived from disk.
+func TestResource_ReserveCreateDirSurvivesOutbox(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	// Regular file: Dir stays false end-to-end.
+	ridFile, err := reg.ReserveCreate(ctx, "file:blob", resourcespec.KindFile, "actor:a", "daemon-1", "coord-blob", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate(file): %v", err)
+	}
+	if _, err := reg.CommitReservation(ctx, ridFile); err != nil {
+		t.Fatalf("CommitReservation(file): %v", err)
+	}
+	if meta, ok, _ := reg.Resolve(ctx, "file:blob"); !ok || meta.Dir {
+		t.Fatalf("regular file Resolve.Dir=%v want false (ok=%v)", meta.Dir, ok)
+	}
+
+	// Directory-shaped workspace: Dir must survive to the landed row.
+	ridDir, err := reg.ReserveCreate(ctx, "file:ws", resourcespec.KindFile, "actor:a", "daemon-1", "coord-ws", true)
+	if err != nil {
+		t.Fatalf("ReserveCreate(dir): %v", err)
+	}
+	if _, err := reg.CommitReservation(ctx, ridDir); err != nil {
+		t.Fatalf("CommitReservation(dir): %v", err)
+	}
+	meta, ok, err := reg.Resolve(ctx, "file:ws")
+	if err != nil || !ok {
+		t.Fatalf("Resolve(dir) ok=%v err=%v", ok, err)
+	}
+	if !meta.Dir {
+		t.Fatal("dir workspace Resolve.Dir=false want true — byte-shape bit lost across the create-outbox")
+	}
+}
+
+// A repeat Committed (replay) after the reservation already landed must be a
+// clean no-op — level-triggered idempotency, §1.7.
+func TestResource_CommitReservation_ReplayAfterLandingIsNoop(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	rid, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate: %v", err)
+	}
+	if _, err := reg.CommitReservation(ctx, rid); err != nil {
+		t.Fatalf("first CommitReservation: %v", err)
+	}
+
+	found, err := reg.CommitReservation(ctx, rid)
+	if err != nil {
+		t.Fatalf("replay CommitReservation must not error: %v", err)
+	}
+	if found {
+		t.Error("replay CommitReservation must report found=false (already consumed)")
+	}
+}
+
+// A reservation_id that never existed is also a clean no-op.
+func TestResource_CommitReservation_UnknownIsNoop(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	found, err := reg.CommitReservation(ctx, "no-such-reservation")
+	if err != nil {
+		t.Fatalf("unknown reservation must not error: %v", err)
+	}
+	if found {
+		t.Error("unknown reservation must report found=false")
+	}
+}
+
+// Two reservations racing to land the SAME resource_id: the first Commit
+// wins, the second gets ErrReservationLost and its own reservation row is
+// still deleted (never left dangling), per §1.7's "并发败者".
+func TestResource_CommitReservation_LosingRaceDeletesLoserReservation(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	rid1, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate 1: %v", err)
+	}
+	rid2, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:b", "daemon-2", "coord-2", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate 2: %v", err)
+	}
+
+	if found, err := reg.CommitReservation(ctx, rid1); err != nil || !found {
+		t.Fatalf("winner CommitReservation found=%v err=%v", found, err)
+	}
+
+	found, err := reg.CommitReservation(ctx, rid2)
+	if !found {
+		t.Errorf("loser CommitReservation found=%v want true (the reservation DID exist)", found)
+	}
+	if err == nil {
+		t.Fatal("loser CommitReservation must return ErrReservationLost")
+	}
+	if err != resourcespec.ErrReservationLost {
+		t.Errorf("loser err=%v want ErrReservationLost", err)
+	}
+
+	// The winner's attributes must stand — the loser never overwrote them.
+	meta, ok, _ := reg.Resolve(ctx, "file:doc")
+	if !ok || meta.CreatedBy != "actor:a" || meta.PlacementDaemonID != "daemon-1" {
+		t.Errorf("landed row = %+v, want the WINNER (actor:a/daemon-1) unperturbed by the loser", meta)
+	}
+
+	// The loser's reservation is gone (a second commit attempt on rid2 is a
+	// clean no-op, not a repeat "lost" — proves it was actually deleted).
+	found2, err2 := reg.CommitReservation(ctx, rid2)
+	if err2 != nil {
+		t.Fatalf("repeat commit of the already-deleted loser reservation must not error: %v", err2)
+	}
+	if found2 {
+		t.Error("loser reservation must have been deleted on its first (losing) commit")
+	}
+}
+
+// --- ReservationDaemon / ListReservationsByDaemon (§4.7 daemon control-RPC) --
+
+func TestResource_ReservationDaemon(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	rid, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate: %v", err)
+	}
+
+	daemonID, found, err := reg.ReservationDaemon(ctx, rid)
+	if err != nil {
+		t.Fatalf("ReservationDaemon: %v", err)
+	}
+	if !found || daemonID != "daemon-1" {
+		t.Errorf("ReservationDaemon = (%q,%v), want (daemon-1,true)", daemonID, found)
+	}
+
+	// After commit the reservation is gone — ReservationDaemon reports a
+	// clean not-found, never an error (the same replay-safety contract
+	// CommitReservation itself draws).
+	if _, err := reg.CommitReservation(ctx, rid); err != nil {
+		t.Fatalf("CommitReservation: %v", err)
+	}
+	if _, found, err := reg.ReservationDaemon(ctx, rid); err != nil || found {
+		t.Errorf("ReservationDaemon after commit: found=%v err=%v, want (false,nil)", found, err)
+	}
+}
+
+func TestResource_ReservationDaemon_UnknownIsNotFound(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	if _, found, err := reg.ReservationDaemon(ctx, "no-such-reservation"); err != nil || found {
+		t.Errorf("unknown reservation: found=%v err=%v, want (false,nil)", found, err)
+	}
+}
+
+// ListReservationsByDaemon must return ONLY the calling daemon's own rows
+// (§4.7's read-side sender-auth discipline: "不泄他 daemon 的 coord 清单").
+func TestResource_ListReservationsByDaemonFiltersPerDaemon(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	if _, err := reg.ReserveCreate(ctx, "file:a", resourcespec.KindFile, "actor:a", "daemon-1", "coord-a", false); err != nil {
+		t.Fatalf("ReserveCreate a: %v", err)
+	}
+	if _, err := reg.ReserveCreate(ctx, "file:b", resourcespec.KindFile, "actor:a", "daemon-1", "coord-b", false); err != nil {
+		t.Fatalf("ReserveCreate b: %v", err)
+	}
+	if _, err := reg.ReserveCreate(ctx, "file:c", resourcespec.KindFile, "actor:a", "daemon-2", "coord-c", false); err != nil {
+		t.Fatalf("ReserveCreate c: %v", err)
+	}
+
+	rows, err := reg.ListReservationsByDaemon(ctx, "daemon-1")
+	if err != nil {
+		t.Fatalf("ListReservationsByDaemon: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("ListReservationsByDaemon(daemon-1) rows=%d want 2", len(rows))
+	}
+	for _, row := range rows {
+		if row.PlacementDaemonID != "daemon-1" {
+			t.Errorf("row %+v leaked into daemon-1's list", row)
+		}
+	}
+
+	rows2, err := reg.ListReservationsByDaemon(ctx, "daemon-3-with-nothing-pending")
+	if err != nil {
+		t.Fatalf("ListReservationsByDaemon (empty): %v", err)
+	}
+	if len(rows2) != 0 {
+		t.Errorf("ListReservationsByDaemon for an unrelated daemon = %d rows, want 0", len(rows2))
+	}
+}
+
+// TestResource_SweepExpiredReservations (§1.7's third reservation-deletion
+// trigger, S6's account): a reservation older than the cutoff is swept
+// (deleted + returned); one younger is left untouched; a same-daemon-but-
+// young row and an other-daemon row are both structurally confirmed
+// unaffected (per-daemon confinement + age gate compose correctly).
+func TestResource_SweepExpiredReservations(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	reg.nowMs = func() int64 { return 1000 }
+	oldID, err := reg.ReserveCreate(ctx, "file:old", resourcespec.KindFile, "actor:a", "daemon-1", "coord-old", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate old: %v", err)
+	}
+	oldOtherDaemonID, err := reg.ReserveCreate(ctx, "file:old-other", resourcespec.KindFile, "actor:a", "daemon-2", "coord-old-other", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate old-other-daemon: %v", err)
+	}
+
+	reg.nowMs = func() int64 { return 5000 }
+	freshID, err := reg.ReserveCreate(ctx, "file:fresh", resourcespec.KindFile, "actor:a", "daemon-1", "coord-fresh", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate fresh: %v", err)
+	}
+
+	swept, err := reg.SweepExpiredReservations(ctx, "daemon-1", 3000)
+	if err != nil {
+		t.Fatalf("SweepExpiredReservations: %v", err)
+	}
+	if len(swept) != 1 || swept[0].ReservationID != oldID {
+		t.Fatalf("swept = %+v, want exactly [%s]", swept, oldID)
+	}
+
+	// old (daemon-1, before cutoff) is gone.
+	if _, found, err := reg.ReservationDaemon(ctx, oldID); err != nil || found {
+		t.Fatalf("old reservation still present: found=%v err=%v", found, err)
+	}
+	// fresh (daemon-1, after cutoff) survives.
+	if _, found, err := reg.ReservationDaemon(ctx, freshID); err != nil || !found {
+		t.Fatalf("fresh reservation swept: found=%v err=%v", found, err)
+	}
+	// old-other-daemon (before cutoff, but a DIFFERENT daemon) survives — the
+	// sweep is per-daemon confined exactly like every other List*ByDaemon call.
+	if _, found, err := reg.ReservationDaemon(ctx, oldOtherDaemonID); err != nil || !found {
+		t.Fatalf("other-daemon reservation swept: found=%v err=%v", found, err)
+	}
+
+	// Re-sweeping is a clean no-op (idempotent, level-triggered like every
+	// other outbox-completion method).
+	swept2, err := reg.SweepExpiredReservations(ctx, "daemon-1", 3000)
+	if err != nil {
+		t.Fatalf("re-sweep: %v", err)
+	}
+	if len(swept2) != 0 {
+		t.Fatalf("re-sweep swept = %+v, want none", swept2)
+	}
+}
+
+// --- TombstoneDaemon / ListTombstonesByDaemon (§4.7 daemon control-RPC) ------
+
+func TestResource_TombstoneDaemon(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+		t.Fatalf("Create file: %v", err)
+	}
+	if err := reg.Delete(ctx, "file:doc"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	tombstoneID := onlyTombstoneID(t, reg.db, "file:doc")
+
+	daemonID, found, err := reg.TombstoneDaemon(ctx, tombstoneID)
+	if err != nil {
+		t.Fatalf("TombstoneDaemon: %v", err)
+	}
+	if !found || daemonID != "daemon-1" {
+		t.Errorf("TombstoneDaemon = (%q,%v), want (daemon-1,true)", daemonID, found)
+	}
+
+	if _, err := reg.ClearTombstone(ctx, tombstoneID); err != nil {
+		t.Fatalf("ClearTombstone: %v", err)
+	}
+	if _, found, err := reg.TombstoneDaemon(ctx, tombstoneID); err != nil || found {
+		t.Errorf("TombstoneDaemon after clear: found=%v err=%v, want (false,nil)", found, err)
+	}
+}
+
+func TestResource_ListTombstonesByDaemonFiltersPerDaemon(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	for _, tc := range []struct{ id, daemon, coord string }{
+		{"file:a", "daemon-1", "coord-a"},
+		{"file:b", "daemon-1", "coord-b"},
+		{"file:c", "daemon-2", "coord-c"},
+	} {
+		if err := reg.Create(ctx, resource.ResourceID(tc.id), resourcespec.KindFile, "actor:a", tc.daemon, tc.coord, resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+			t.Fatalf("Create %s: %v", tc.id, err)
+		}
+		if err := reg.Delete(ctx, resource.ResourceID(tc.id)); err != nil {
+			t.Fatalf("Delete %s: %v", tc.id, err)
+		}
+	}
+
+	rows, err := reg.ListTombstonesByDaemon(ctx, "daemon-1")
+	if err != nil {
+		t.Fatalf("ListTombstonesByDaemon: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("ListTombstonesByDaemon(daemon-1) rows=%d want 2", len(rows))
+	}
+	for _, row := range rows {
+		if row.DaemonID != "daemon-1" {
+			t.Errorf("row %+v leaked into daemon-1's list", row)
+		}
+	}
+}
+
+// --- ListByPlacementDaemon (§4.7 ReconcilePull "应有资源清单") ----------------
+
+func TestResource_ListByPlacementDaemonFiltersPerDaemonAndExcludesKV(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	if err := reg.Create(ctx, "file:a", resourcespec.KindFile, "actor:a", "daemon-1", "coord-a", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+		t.Fatalf("Create file a: %v", err)
+	}
+	if err := reg.Create(ctx, "file:b", resourcespec.KindFile, "actor:a", "daemon-2", "coord-b", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+		t.Fatalf("Create file b: %v", err)
+	}
+	createKV(t, reg, "kv:c", "actor:a", []byte("v"))
+
+	rows, err := reg.ListByPlacementDaemon(ctx, "daemon-1")
+	if err != nil {
+		t.Fatalf("ListByPlacementDaemon: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "file:a" {
+		t.Fatalf("ListByPlacementDaemon(daemon-1) = %+v, want exactly [file:a]", rows)
+	}
+	if len(rows[0].Grants) != 1 {
+		t.Errorf("ListByPlacementDaemon row grants = %d, want the creator's full-rights grant", len(rows[0].Grants))
 	}
 }
 
@@ -108,7 +569,7 @@ func TestResource_CreateGuardsEmptyInputs(t *testing.T) {
 
 func TestResource_SetGrantReplaceAndRevoke(t *testing.T) {
 	reg := openResourceReg(t)
-	mustCreate(t, reg, "kv:doc", "actor:a")
+	createKV(t, reg, "kv:doc", "actor:a", nil)
 
 	// Grant B read only.
 	set(t, reg, "kv:doc", grantActor("actor:b", access.OpRead))
@@ -134,7 +595,7 @@ func TestResource_SetGrantReplaceAndRevoke(t *testing.T) {
 
 func TestResource_MembersEntryQuerySplit(t *testing.T) {
 	reg := openResourceReg(t)
-	mustCreate(t, reg, "kv:doc", "actor:a")
+	createKV(t, reg, "kv:doc", "actor:a", nil)
 
 	// A members entry (grantee empty) grants read.
 	set(t, reg, "kv:doc", grantMembers(access.OpRead))
@@ -159,12 +620,12 @@ func TestResource_MembersEntryQuerySplit(t *testing.T) {
 	}
 }
 
-// --- Delete: cascades row + all grants ---------------------------------------
+// --- Delete: cascades row + all grants; file additionally tombstones --------
 
 func TestResource_DeleteCascadesRowAndGrants(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
-	mustCreate(t, reg, "kv:doc", "actor:a")
+	createKV(t, reg, "kv:doc", "actor:a", nil)
 	set(t, reg, "kv:doc", grantActor("actor:b", access.OpRead))
 	set(t, reg, "kv:doc", grantMembers(access.OpRead))
 
@@ -192,6 +653,247 @@ func TestResource_DeleteCascadesRowAndGrants(t *testing.T) {
 	}
 }
 
+// kv delete leaves no tombstone (bytes live inline, "no tombstone" per §1.8).
+func TestResource_DeleteKVWritesNoTombstone(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	createKV(t, reg, "kv:doc", "actor:a", []byte("v"))
+	if err := reg.Delete(ctx, "kv:doc"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+	n := countRows(t, reg.db, "resource_tombstones")
+	if n != 0 {
+		t.Errorf("resource_tombstones rows=%d want 0 after a kv delete", n)
+	}
+}
+
+// file delete is row-first-bytes-last + tombstone (§1.8): the row/grants are
+// gone but a tombstone row carries daemon_id/coord/provenance/kind for the
+// (later) Reclaimer, and ClearTombstone removes it once collection is
+// confirmed.
+func TestResource_DeleteFileWritesTombstoneThenClearTombstone(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+		t.Fatalf("Create file: %v", err)
+	}
+
+	if err := reg.Delete(ctx, "file:doc"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	// Row + grants gone (same non-lossy cascade as kv).
+	if _, ok, _ := reg.Resolve(ctx, "file:doc"); ok {
+		t.Error("file resource must not resolve after delete")
+	}
+
+	tombstoneID := onlyTombstoneID(t, reg.db, "file:doc")
+	daemonID, coord, provenance, kind := readTombstone(t, reg.db, tombstoneID)
+	if daemonID != "daemon-1" || coord != "coord-xyz" {
+		t.Errorf("tombstone placement = (%q,%q) want (daemon-1,coord-xyz)", daemonID, coord)
+	}
+	if provenance != string(resourcespec.ProvenanceAxisAllocated) {
+		t.Errorf("tombstone provenance=%q want axis-allocated", provenance)
+	}
+	if kind != string(resourcespec.KindFile) {
+		t.Errorf("tombstone kind=%q want file", kind)
+	}
+
+	found, err := reg.ClearTombstone(ctx, tombstoneID)
+	if err != nil {
+		t.Fatalf("ClearTombstone: %v", err)
+	}
+	if !found {
+		t.Error("ClearTombstone must report found=true for a live tombstone")
+	}
+	if n := countRows(t, reg.db, "resource_tombstones"); n != 0 {
+		t.Errorf("resource_tombstones rows=%d want 0 after ClearTombstone", n)
+	}
+}
+
+// ClearTombstone on an unknown id is a clean no-op (replay-safe).
+func TestResource_ClearTombstone_UnknownIsNoop(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	found, err := reg.ClearTombstone(ctx, "no-such-tombstone")
+	if err != nil {
+		t.Fatalf("unknown tombstone must not error: %v", err)
+	}
+	if found {
+		t.Error("unknown tombstone must report found=false")
+	}
+}
+
+// Same-name delete/recreate must not collide on the tombstone table's primary
+// key — resource_id carries a NON-unique index precisely so multiple
+// tombstones for the same id can co-exist (§1.3).
+func TestResource_DeleteRecreateDeleteLeavesTwoTombstones(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+		t.Fatalf("Create 1: %v", err)
+	}
+	if err := reg.Delete(ctx, "file:doc"); err != nil {
+		t.Fatalf("Delete 1: %v", err)
+	}
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-2", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+		t.Fatalf("Create 2 (recreate): %v", err)
+	}
+	if err := reg.Delete(ctx, "file:doc"); err != nil {
+		t.Fatalf("Delete 2: %v", err)
+	}
+
+	if n := countRows(t, reg.db, "resource_tombstones"); n != 2 {
+		t.Errorf("resource_tombstones rows=%d want 2 (delete/recreate/delete must not collide)", n)
+	}
+}
+
+// --- List: raw range scan, prefix filter, pagination, grant projection ------
+
+func TestResource_ListOrdersByCreatedAtThenID(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	// Pin the clock so all three land on the SAME created_at: order must fall
+	// back to resource_id (a wall-clock nowMs() would only collide by luck —
+	// and does NOT under -race's slower scheduling — so the fixed-tick clock
+	// is load-bearing for this assertion, not incidental).
+	reg.nowMs = func() int64 { return 1000 }
+	createKV(t, reg, "kv:b", "actor:a", nil)
+	createKV(t, reg, "kv:a", "actor:a", nil)
+	createKV(t, reg, "kv:c", "actor:a", nil)
+
+	rows, next, err := reg.List(ctx, "", 50, "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if next != "" {
+		t.Errorf("next cursor=%q want empty (fewer rows than limit)", next)
+	}
+	if len(rows) != 3 {
+		t.Fatalf("rows=%d want 3", len(rows))
+	}
+	for i, want := range []resource.ResourceID{"kv:a", "kv:b", "kv:c"} {
+		if rows[i].ID != want {
+			t.Errorf("rows[%d].ID=%q want %q", i, rows[i].ID, want)
+		}
+	}
+}
+
+func TestResource_ListPrefixFilters(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	createKV(t, reg, "kv:doc:1", "actor:a", nil)
+	createKV(t, reg, "kv:doc:2", "actor:a", nil)
+	createKV(t, reg, "kv:other", "actor:a", nil)
+
+	rows, _, err := reg.List(ctx, "kv:doc:", 50, "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows=%d want 2, got %+v", len(rows), rows)
+	}
+	for _, row := range rows {
+		if row.ID != "kv:doc:1" && row.ID != "kv:doc:2" {
+			t.Errorf("unexpected row id %q under prefix kv:doc:", row.ID)
+		}
+	}
+}
+
+// A raw '%' in an id must not act as a glob — likePrefix escapes it.
+func TestResource_ListPrefixEscapesWildcards(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	createKV(t, reg, "kv:100%off", "actor:a", nil)
+	createKV(t, reg, "kv:100Xoff", "actor:a", nil)
+
+	rows, _, err := reg.List(ctx, "kv:100%", 50, "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "kv:100%off" {
+		t.Fatalf("rows=%+v want exactly [kv:100%%off] (literal %% must not glob)", rows)
+	}
+}
+
+// limit bounds the SCAN; a full page yields a non-empty cursor that resumes
+// exactly where the previous page left off, covering the whole set exactly
+// once with '>' strict comparison (no repeats, no gaps).
+func TestResource_ListPaginatesByCursor(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	ids := []resource.ResourceID{"kv:a", "kv:b", "kv:c", "kv:d", "kv:e"}
+	for _, id := range ids {
+		createKV(t, reg, id, "actor:a", nil)
+	}
+
+	var seen []resource.ResourceID
+	cursor := ""
+	for i := 0; i < 10; i++ { // bounded loop guard against an infinite-pagination bug
+		rows, next, err := reg.List(ctx, "", 2, cursor)
+		if err != nil {
+			t.Fatalf("List page %d: %v", i, err)
+		}
+		for _, row := range rows {
+			seen = append(seen, row.ID)
+		}
+		if next == "" {
+			break
+		}
+		cursor = next
+	}
+
+	if len(seen) != len(ids) {
+		t.Fatalf("seen=%v want all of %v", seen, ids)
+	}
+	for i, want := range ids {
+		if seen[i] != want {
+			t.Errorf("seen[%d]=%q want %q (order/no-repeat/no-gap)", i, seen[i], want)
+		}
+	}
+}
+
+func TestResource_ListMalformedCursorIsGoError(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	if _, _, err := reg.List(ctx, "", 50, "not-a-valid-cursor!!"); err == nil {
+		t.Fatal("malformed cursor must be a Go error")
+	}
+}
+
+func TestResource_ListNonPositiveLimitErrors(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	if _, _, err := reg.List(ctx, "", 0, ""); err == nil {
+		t.Error("limit=0 must error")
+	}
+	if _, _, err := reg.List(ctx, "", -1, ""); err == nil {
+		t.Error("negative limit must error")
+	}
+}
+
+// List does NOT grant-filter — it returns the FULL grant projection per row,
+// including entries the door would later filter away for a given caller.
+func TestResource_ListReturnsFullGrantProjection(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	createKV(t, reg, "kv:doc", "actor:a", nil)
+	set(t, reg, "kv:doc", grantActor("actor:b", access.OpRead))
+	set(t, reg, "kv:doc", grantMembers(access.OpRead))
+
+	rows, _, err := reg.List(ctx, "", 50, "")
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows=%d want 1", len(rows))
+	}
+	if len(rows[0].Grants) != 3 { // creator full grant + actor:b read + members read
+		t.Fatalf("grants=%+v want 3 entries (creator, actor:b, members)", rows[0].Grants)
+	}
+}
+
 // --- kvDriver: found semantics (empty bytes vs no row), write, no-op delete ---
 
 func TestKVDriver_ReadFoundSemantics(t *testing.T) {
@@ -200,9 +902,7 @@ func TestKVDriver_ReadFoundSemantics(t *testing.T) {
 	kv := kvOf(reg)
 
 	// Row exists with NULL bytes (nil initial) → resolved-but-empty: found=false.
-	if err := reg.Create(ctx, "kv:empty", "kv", "actor:a", nil); err != nil {
-		t.Fatalf("Create empty: %v", err)
-	}
+	createKV(t, reg, "kv:empty", "actor:a", nil)
 	if _, ok, _ := reg.Resolve(ctx, "kv:empty"); !ok {
 		t.Fatal("empty-bytes resource must still RESOLVE (the row exists)")
 	}
@@ -224,9 +924,7 @@ func TestKVDriver_ReadFoundSemantics(t *testing.T) {
 	}
 
 	// Row with content → found=true.
-	if err := reg.Create(ctx, "kv:full", "kv", "actor:a", []byte("payload")); err != nil {
-		t.Fatalf("Create full: %v", err)
-	}
+	createKV(t, reg, "kv:full", "actor:a", []byte("payload"))
 	val, found, _ = kv.Read(ctx, "kv:full")
 	if !found || string(val) != "payload" {
 		t.Errorf("content row: found=%v val=%q want true/payload", found, val)
@@ -234,9 +932,7 @@ func TestKVDriver_ReadFoundSemantics(t *testing.T) {
 
 	// Present-but-empty ([]byte{}, proto: legal and distinct from nil) must read
 	// back found=true with empty value — NOT collapse into the NULL case.
-	if err := reg.Create(ctx, "kv:blank", "kv", "actor:a", []byte{}); err != nil {
-		t.Fatalf("Create blank: %v", err)
-	}
+	createKV(t, reg, "kv:blank", "actor:a", []byte{})
 	val, found, err = kv.Read(ctx, "kv:blank")
 	if err != nil {
 		t.Fatalf("Read blank: %v", err)
@@ -261,7 +957,7 @@ func TestKVDriver_WriteOverwrites(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 	kv := kvOf(reg)
-	mustCreate(t, reg, "kv:doc", "actor:a") // created with nil bytes
+	createKV(t, reg, "kv:doc", "actor:a", nil) // created with nil bytes
 
 	if err := kv.Write(ctx, "kv:doc", []byte("v1")); err != nil {
 		t.Fatalf("Write v1: %v", err)
@@ -284,7 +980,7 @@ func TestKVDriver_DeleteIsNoop(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 	kv := kvOf(reg)
-	if err := reg.Create(ctx, "kv:doc", "kv", "actor:a", []byte("keep")); err != nil {
+	if err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:a", "", "", resourcespec.ProvenanceAxisAllocated, []byte("keep")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if err := kv.Delete(ctx, "kv:doc"); err != nil {
@@ -303,9 +999,7 @@ func TestKVDriver_DeleteIsNoop(t *testing.T) {
 
 func mustCreate(t *testing.T, reg *resourceRegistry, id resource.ResourceID, creator actor.ActorID) {
 	t.Helper()
-	if err := reg.Create(context.Background(), id, "kv", creator, nil); err != nil {
-		t.Fatalf("Create %q: %v", id, err)
-	}
+	createKV(t, reg, id, creator, nil)
 }
 
 func set(t *testing.T, reg *resourceRegistry, id resource.ResourceID, g access.Grant) {
@@ -339,4 +1033,54 @@ func allowMembers(t *testing.T, reg *resourceRegistry, id resource.ResourceID, o
 		t.Fatalf("MembersAllow(%q,%s): %v", id, op, err)
 	}
 	return ok
+}
+
+// countRows is a raw row-count probe over the given table — used only to
+// assert outbox table population/depopulation (resource_reservations /
+// resource_tombstones), which resourcespec.Registry deliberately exposes no
+// enumeration method for (they are internal accounting, not caller-facing).
+func countRows(t *testing.T, db *sql.DB, table string) int {
+	t.Helper()
+	var n int
+	if err := db.QueryRowContext(context.Background(), "SELECT COUNT(*) FROM "+table).Scan(&n); err != nil {
+		t.Fatalf("count %s: %v", table, err)
+	}
+	return n
+}
+
+// onlyTombstoneID asserts exactly one tombstone row exists for resourceID and
+// returns its tombstone_id.
+func onlyTombstoneID(t *testing.T, db *sql.DB, resourceID resource.ResourceID) string {
+	t.Helper()
+	rows, err := db.QueryContext(context.Background(), `SELECT tombstone_id FROM resource_tombstones WHERE resource_id=?`, string(resourceID))
+	if err != nil {
+		t.Fatalf("query tombstones for %q: %v", resourceID, err)
+	}
+	defer func() { _ = rows.Close() }()
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			t.Fatalf("scan tombstone id: %v", err)
+		}
+		ids = append(ids, id)
+	}
+	if len(ids) != 1 {
+		t.Fatalf("tombstones for %q = %v, want exactly 1", resourceID, ids)
+	}
+	return ids[0]
+}
+
+// readTombstone reads back one tombstone row's daemon_id/placement_coord/
+// provenance/kind by tombstone_id.
+func readTombstone(t *testing.T, db *sql.DB, tombstoneID string) (daemonID, coord, provenance, kind string) {
+	t.Helper()
+	err := db.QueryRowContext(context.Background(),
+		`SELECT daemon_id, placement_coord, provenance, kind FROM resource_tombstones WHERE tombstone_id=?`,
+		tombstoneID,
+	).Scan(&daemonID, &coord, &provenance, &kind)
+	if err != nil {
+		t.Fatalf("read tombstone %q: %v", tombstoneID, err)
+	}
+	return daemonID, coord, provenance, kind
 }

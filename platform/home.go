@@ -11,7 +11,6 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
-	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/channelkit"
 	"github.com/wanpengxie/atoll/platform/internal/devicepresence"
 	"github.com/wanpengxie/atoll/platform/internal/link"
@@ -84,6 +83,15 @@ type HomeConfig struct {
 	// schedule.backoffDuration, real wall-clock waits would make the test
 	// slow and flaky).
 	Clock schedule.Clock
+	// ReservationTimeout overrides how long a create-outbox reservation may
+	// sit unCommitted before ReconcilePull ages it out (期11 spec §1.7's
+	// third reservation-deletion trigger, homeStorageHostControl's own nil-
+	// safe-defaulted field). <=0 → defaultReservationTimeout (5m, production
+	// default). Additive test-only knob (mirrors ComputeConfig.ScrubberInterval's
+	// own shape): a crash-recovery walk driving the "abandoned reservation"
+	// timeout path needs a fast, deterministic window rather than production's
+	// multi-minute backstop.
+	ReservationTimeout time.Duration
 }
 
 // Home is the assembled channel-home. Its public surface is the capability set in
@@ -102,15 +110,8 @@ type Home struct {
 	logger     *slog.Logger
 	nowMs      func() int64
 
-	// humanCallers is the home-scoped, per-user author#2 closure index. One
-	// behavior.Caller per (channel, user), welded to that user's pen — SHARED by
-	// HumanHandle.Submit (Arm on the gateway goroutine) and the human cell's Recv
-	// loop (Match on the cell goroutine). behavior.Caller is cross-goroutine safe
-	// (CORE2①), and the instance is stable across cell crash/revive (keyed by id,
-	// not by incarnation), so a request armed before a crash still gets its
-	// unanswered_timeout terminal after the cell is reborn.
-	humanCallersMu sync.Mutex
-	humanCallers   map[actor.ActorID]*behavior.Caller
+	// (humanCallers author#2 index detached — platform/human.go 旧形整删
+	// 2026-07-08，重建见 TODO(human-canonical)。)
 
 	// presenceSessions is the subjectgate door's L3 device-presence session
 	// refcount per subject (channel, user): the gateway ws connect/disconnect are
@@ -274,9 +275,18 @@ func Open(cfg HomeConfig) (*Home, error) {
 
 	// 2. Open channel stores (substrate), wiring the commit signal as the store's
 	//    OnCommit. Now any durable append — request or control-plane — wakes the
-	//    tap identically.
+	//    tap identically. StorageMounts/StorageControl (期11 §4.3) are LATE-BOUND
+	//    here (storagehost.go's lateAcceptor): the ONLY thing that can actually
+	//    answer them — the link Acceptor's attach state — is not built until
+	//    step 11 below. bindLateAcceptor closes that gap once it exists; any
+	//    file-kind Create landing before then sees an honest empty mount list
+	//    (§4.3's own "late-bound...延迟解析,调用时才读在线态" escape hatch).
+	lateAcc := &lateAcceptor{}
 	cs, err := runtime.OpenChannel(ctx, cfg.ChannelID, cfg.DBPath, runtime.OpenChannelOptions{
-		OnCommit: signal.Notify,
+		OnCommit:       signal.Notify,
+		StorageMounts:  lateStorageMounts{acc: lateAcc},
+		StorageControl: lateStorageControl{acc: lateAcc},
+		LaneControl:    lateLaneControl{acc: lateAcc},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: open channel store: %w", err)
@@ -464,18 +474,23 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//      neutrality). It also folds each attached actor's obs PUSH into the
 	//      device-presence fold (per-actor WatchObs at attach).
 	links := link.NewAcceptor(link.Config{
-		Minter:        minter,
-		Access:        cs.Access,
-		Schedule:      schedMinter,
-		Runtime:       rt,
-		Membership:    cs.Membership,
-		Registry:      cs.Registry,
-		ChannelID:     cfg.ChannelID,
-		Logger:        logger,
-		ObsWatcher:    deviceFold,
-		CancelRequest: h.handleCancelUpstream,
+		Minter:             minter,
+		Access:             cs.Access,
+		Schedule:           schedMinter,
+		Runtime:            rt,
+		Membership:         cs.Membership,
+		Registry:           cs.Registry,
+		ChannelID:          cfg.ChannelID,
+		Logger:             logger,
+		ObsWatcher:         deviceFold,
+		CancelRequest:      h.handleCancelUpstream,
+		StorageHostControl: homeStorageHostControl{outbox: cs.Outbox, timeout: cfg.ReservationTimeout},
 	})
 	h.links = links
+	// Close the late-binding window (see step 2's lateAcc note): every
+	// file-kind placement decision from this instant on can actually route an
+	// AllocRequest / see attached daemons as storage-mount candidates.
+	lateAcc.bind(links)
 
 	// 12. Reconcilers (level backstops). Run one sweep of EACH at startup —
 	//     activation re-mints the always-on desired set; closure is the home-restart
@@ -942,7 +957,7 @@ func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnat
 	h.watchObs(id)
 	return actorcaps.Caps{
 		Pen:      link.NewLivePen(h.minter.Mint(id, kind, h.channelID), inc, rt),
-		Access:   link.NewLiveAccess(h.cs.Access.Mint(id), inc, rt),
+		Access:   link.NewLiveResourceAccess(h.cs.Access.Mint(id), inc, rt),
 		State:    link.NewLiveAccess(h.cs.Access.MintState(id), inc, rt),
 		Schedule: link.NewLiveSchedule(h.schedMinter.Mint(id), inc, rt),
 		// The child assembler is buildChildCaps, NOT buildCaps: every fork
@@ -1036,13 +1051,8 @@ func (h *Home) Close() error {
 	//    after cells stop (no more edges produced), before the stores close (a late
 	//    materialise must not write into a closing store). G0-3 teardown序.
 	h.channel.Stop()
-	// 4.5. Human callers: stop every shared per-user Caller's pending timer NOW and
-	//    clear the index. Ordering: after cells, before the stores close (a still-
-	//    armed fireTimeout would write a terminal through the pen into an already-
-	//    closing store, a死后写 into a dead sink). The clear is FINAL because step 0
-	//    set h.closed — a gateway goroutine's post-Close Submit is now ErrClosed-
-	//    gated and can never re-mint a caller into the index behind this call.
-	h.stopAllHumanCallers()
+	// 4.5. (human caller teardown detached — platform/human.go 旧形整删
+	//    2026-07-08，重建见 TODO(human-canonical)。)
 	// 5. Schedule engine: every producer is gone, so stopping the run loop now can
 	//    no longer strand a Schedule() into a dead engine.
 	if h.engine != nil {

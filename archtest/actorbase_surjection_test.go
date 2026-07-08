@@ -57,9 +57,12 @@ func TestActorbaseSysIsSurjectiveOverCapabilityFace(t *testing.T) {
 		access.OpRead:   "Resource().Read / State().Get",
 		access.OpWrite:  "Resource().Write / State().Put",
 		access.OpDelete: "Resource().Delete / State().Del",
-		// access.OpSet is a DOCUMENTED gap (spec: "标有意缺格(share、access
-		// OpSet)") — SetGrant is a membership/authorization-plane operation, not
-		// a per-actor capability verb; no Sys method answers it, by design.
+		// access.OpSet — 期11 spec §3's "词表糖名" landed ShareActor/
+		// ShareMembers as its Sys verb (the PRE-期11 "no Sys method answers
+		// it, by design" gap is closed): both are Invoke(OpSet) sugar over an
+		// actor-kind / members-kind Grant respectively, so a Proc body never
+		// hand-assembles one.
+		access.OpSet: "Resource().ShareActor / Resource().ShareMembers",
 	}
 	if !hasMethod("Resource") || !hasMethod("State") {
 		t.Fatal("Sys is missing the Resource()/State() arms entirely")
@@ -71,7 +74,7 @@ func TestActorbaseSysIsSurjectiveOverCapabilityFace(t *testing.T) {
 		// a reviewer sees the atom ↔ verb pairing in one place.
 	}
 	resourceType := reflect.TypeOf((*actorbase.ResourceHandle)(nil)).Elem()
-	for _, m := range []string{"Create", "Read", "Write", "Delete"} {
+	for _, m := range []string{"Create", "Read", "Write", "Delete", "ShareActor", "ShareMembers"} {
 		if _, ok := resourceType.MethodByName(m); !ok {
 			t.Errorf("ResourceHandle has no %s method for access.Operation atom", m)
 		}
@@ -82,7 +85,17 @@ func TestActorbaseSysIsSurjectiveOverCapabilityFace(t *testing.T) {
 			t.Errorf("StateHandle has no %s method for access.Operation atom", m)
 		}
 	}
-	var _ accessdoor.AccessHandle // same "single Invoke method" tripwire as Pen above.
+	// 期11 spec §3.6/§3.7's Stat/List are Query methods, not Operation atoms
+	// (deliberately NOT in opAtoms above — §3.8's "Stat/List 绝不进 Operation
+	// 闭集"), but they are still part of the resource face's public surface
+	// this surjection sweep documents.
+	for _, m := range []string{"Stat", "List"} {
+		if _, ok := resourceType.MethodByName(m); !ok {
+			t.Errorf("ResourceHandle has no %s method (期11 §3 read face)", m)
+		}
+	}
+	var _ accessdoor.AccessHandle         // same "single Invoke method" tripwire as Pen above.
+	var _ accessdoor.ResourceAccessHandle // the resource face's own (Invoke+Create+Stat+List) tripwire.
 	// access.OpSet completes the 5-member Operation set (Create/Read/Write/Set/
 	// Delete) this manifest enumerates against; allOperations itself is
 	// unexported (protocol/access/operation.go: "the closed-set contract is the

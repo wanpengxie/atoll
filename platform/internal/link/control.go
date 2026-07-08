@@ -4,8 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 
-	"github.com/gorilla/websocket"
-
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -42,6 +40,20 @@ type AttachReply struct {
 	ChannelID channel.ID `json:"channel_id"`
 	Accepted  bool       `json:"accepted"`
 	Reason    string     `json:"reason,omitempty"`
+	// DaemonID is the AUTHORITATIVE compute id the home just counted this
+	// link online under (期11 spec §4.7's "AttachReply 增 daemonID 回传") —
+	// the pre-authenticated daemonID the Acceptor received from the app
+	// layer, or (dev/self-declared mode, daemonID=="") the ComputeID the
+	// daemon itself sent. Today a daemon that dials with no explicit
+	// ComputeID gets a random uuid from RunCompute and never learns whether
+	// the home overrode it (Acceptor.handleAttach's computeID var already
+	// does exactly that override when daemonID != ""). The daemon updates
+	// its OWN identity on receipt (Dialer.DaemonID) — replacing the random
+	// uuid — because per-channel resource root paths, AllocRequest routing,
+	// and reservation/tombstone ownership all need this SAME value to be the
+	// one unambiguous authority, not a value the daemon merely hoped the
+	// home would agree with.
+	DaemonID string `json:"daemon_id,omitempty"`
 }
 
 // controlKind tags one stream-0 control payload (the link control plane is
@@ -70,27 +82,3 @@ func decodeControl(b []byte) (controlFrame, error) {
 	}
 	return f, nil
 }
-
-// ---------------------------------------------------------------------------
-// wsConn — gorilla *websocket.Conn as a wireConn (binary-message transport)
-// ---------------------------------------------------------------------------
-
-// wsConn adapts a gorilla WebSocket to the link wireConn: every mux frame is one
-// binary message. WriteMessage callers are serialised by linkConn, so no extra
-// write mutex is needed here.
-type wsConn struct {
-	ws *websocket.Conn
-}
-
-func (c *wsConn) ReadMessage() ([]byte, error) {
-	_, b, err := c.ws.ReadMessage()
-	return b, err
-}
-
-func (c *wsConn) WriteMessage(b []byte) error {
-	return c.ws.WriteMessage(websocket.BinaryMessage, b)
-}
-
-func (c *wsConn) Close() error { return c.ws.Close() }
-
-var _ wireConn = (*wsConn)(nil)

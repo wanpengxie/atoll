@@ -6,6 +6,7 @@ require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/websocket v1.5.3
+	github.com/hashicorp/yamux v0.1.2
 	github.com/wanpengxie/go-claude-agent-sdk v0.0.0-20260529113355-8ae69e5ccb9b
 	github.com/wanpengxie/go-kimi v1.0.1-0.20260526075941-a6d962d17cbe
 	golang.org/x/crypto v0.51.0

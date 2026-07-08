@@ -16,6 +16,13 @@ type Outcome struct {
 	Found bool
 	// RejectReason is the failure verdict, or "" for an accepted outcome.
 	RejectReason access.FailureReason
+	// Route is OpRead/OpWrite(file)'s and Create(file, with_content=true)'s
+	// authorization product (期11 spec §5 item 0/§3.4) — set ONLY on an
+	// accepted outcome for a file-kind byte-access request, nil otherwise
+	// (kv ops never populate it; Value stays kv's carrier, unchanged). It is
+	// NEVER bytes and NEVER a coord (§8.1/§8.9 red lines) — see FileRoute's
+	// own doc for exactly what it carries and why.
+	Route *FileRoute
 }
 
 // Accepted reports whether the invocation succeeded (no reject verdict).

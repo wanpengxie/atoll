@@ -12,6 +12,9 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
+// kvSpec (the channel-scoped Create's CreateSpec) is declared once, in
+// access_integration_test.go — same package, reused here.
+
 // This file is the runtime-package-root INTEGRATION counterpart to accessdoor's
 // in-package state unit tests (state_test.go): those drive the collapsed tree
 // with injected fakes; these drive the ACTOR-SCOPED branch of the whole plane-2
@@ -233,7 +236,7 @@ func TestStateSlice4_CascadeClearVsNonLossy(t *testing.T) {
 		kvBytes := []byte("channel-scoped, survives dereg")
 
 		acc(t, "A create actor-scoped state")(hState.Invoke(ctx, access.OpCreate, stateID, []byte("cursor"), nil))
-		acc(t, "A create channel-scoped kv")(hChan.Invoke(ctx, access.OpCreate, kvID, kvBytes, nil))
+		acc(t, "A create channel-scoped kv")(hChan.Create(ctx, kvID, kvSpec, kvBytes))
 
 		dereg(t, cs, A)
 
@@ -288,7 +291,7 @@ func TestStateSlice5_TwoLociMutuallyInvisible(t *testing.T) {
 	const chanOnly = resource.ResourceID("chan-only")
 
 	acc(t, "create state-only in actor_state")(hState.Invoke(ctx, access.OpCreate, stateOnly, []byte("s"), nil))
-	acc(t, "create chan-only in resources")(hChan.Invoke(ctx, access.OpCreate, chanOnly, []byte("c"), nil))
+	acc(t, "create chan-only in resources")(hChan.Create(ctx, chanOnly, kvSpec, []byte("c")))
 
 	// channel-scoped handle cannot see the state-only id (not in resources).
 	out, err := hChan.Invoke(ctx, access.OpRead, stateOnly, nil, nil)
@@ -303,7 +306,7 @@ func TestStateSlice5_TwoLociMutuallyInvisible(t *testing.T) {
 	// each handle reads its own locus's value.
 	const dup = resource.ResourceID("dup")
 	acc(t, "state create dup")(hState.Invoke(ctx, access.OpCreate, dup, []byte("state-value"), nil))
-	acc(t, "channel create dup")(hChan.Invoke(ctx, access.OpCreate, dup, []byte("chan-value"), nil))
+	acc(t, "channel create dup")(hChan.Create(ctx, dup, kvSpec, []byte("chan-value")))
 	out, err = hState.Invoke(ctx, access.OpRead, dup, nil, nil)
 	expectAccepted(t, "state read dup", out, err)
 	expectBytes(t, "state dup value", out, []byte("state-value"))

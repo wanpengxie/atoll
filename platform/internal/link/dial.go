@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
+	"net"
 	"sync"
 	"time"
 
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
@@ -29,13 +32,20 @@ import (
 // host. Start drives StartStream across the initial batch; the ring drives it
 // per stream for a mid-life open.
 type Dialer struct {
-	lc        *linkConn
+	lc        *linkSession
 	channelID string
 	computeID string
 	logger    *slog.Logger
 
+	// daemonID is the home-confirmed compute id (期11 spec §4.7's AttachReply.
+	// DaemonID) — updated under mu on every attach_reply (initial AND every
+	// Reattach), replacing whatever self-declared/random value computeID
+	// started as. This is the one value per-channel resource root paths,
+	// AllocRequest routing, and reservation/tombstone ownership may rely on
+	// (see AttachReply.DaemonID's doc). Read via DaemonID().
+	daemonID string
+
 	mu       sync.Mutex
-	nextID   uint32
 	streams  map[actor.ActorID]*actorStream
 	attached chan struct{} // closed when attach_reply arrives
 	reply    AttachReply
@@ -59,6 +69,35 @@ type Dialer struct {
 	// closes the stream (no local cell to end, e.g. a test dialer).
 	despawnLocal func(actor.ActorID)
 
+	// allocHandler answers an inbound AllocRequest (home→daemon, §4.7's first
+	// frame): the daemon storage host's Allocator does the real mkdir/touch
+	// and returns the verdict this Dialer relays back as an AllocReply.
+	// Injected by RunCompute (mirrors despawnLocal's pattern) after Dial,
+	// before Start. nil → every AllocRequest is answered OK:false (no
+	// storage host wired on this compute — an honest reject, never a silent
+	// drop: this RPC plane is request/response).
+	allocHandler func(AllocRequest) AllocReply
+
+	// pendingCommitted / pendingReclaim / pendingReconcile correlate this
+	// Dialer's own OUTBOUND Committed/ReclaimAck/ReconcilePull sends with
+	// the home's replies — the daemon-initiated three legs of the §4.7
+	// control-RPC plane (AllocRequest is the one home-initiated leg,
+	// answered via allocHandler above, never through these).
+	pendingCommitted *pendingReplies[CommittedReply]
+	pendingReclaim   *pendingReplies[ReclaimAckReply]
+	pendingReconcile *pendingReplies[ReconcilePullReply]
+
+	// pendingResolveCoord correlates this Dialer's own ResolveCoord sends
+	// (§5's lane-control frame, lanecontrol.go) with home's replies.
+	pendingResolveCoord *pendingReplies[ResolveCoordReply]
+
+	// localFileOpener is the daemon-side same-machine byte-access capability
+	// (lane.go's LocalFileOpener) — injected via SetLocalFileOpener, mirrors
+	// SetAllocHandler/SetDespawnLocal's post-Dial, pre-Start injection
+	// pattern. nil → every file byte redemption on this compute answers an
+	// honest "no storage host wired" error (never a silent no-op).
+	localFileOpener LocalFileOpener
+
 	done chan struct{}
 }
 
@@ -71,7 +110,7 @@ type Dialer struct {
 // without double-starting a stream.
 type actorStream struct {
 	id          actor.ActorID
-	stream      *stream
+	stream      io.ReadWriteCloser
 	codec       *ipc.Codec
 	writer      *RemoteWriter
 	access      *relayClient // KindAccess FIFO round-trip (backs Access + State faces)
@@ -86,9 +125,11 @@ type actorStream struct {
 // port wire. Access and State are two faces of the SAME access arm (channel- vs
 // actor-scoped), so a cell's off-log capability is behaviourally identical to a
 // local one (transport neutrality — a residual-capability arm would break parity).
+// Access is the WIDE resource face (Invoke+Create+Stat+List, 期11 spec §3.1);
+// State stays the narrow (Invoke-only) face — the scope law itself.
 type CellArms struct {
 	Pen      harness.Pen
-	Access   accessdoor.AccessHandle
+	Access   accessdoor.ResourceAccessHandle
 	State    accessdoor.AccessHandle
 	Schedule schedule.ScheduleHandle
 	Down     func(cause string)
@@ -106,21 +147,70 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		return nil, err
 	}
 	d := &Dialer{
-		channelID: "",
-		computeID: computeID,
-		logger:    logger,
-		nextID:    1,
-		streams:   map[actor.ActorID]*actorStream{},
-		attached:  make(chan struct{}),
-		done:      make(chan struct{}),
+		channelID:           "",
+		computeID:           computeID,
+		logger:              logger,
+		streams:             map[actor.ActorID]*actorStream{},
+		attached:            make(chan struct{}),
+		pendingCommitted:    newPendingReplies[CommittedReply](),
+		pendingReclaim:      newPendingReplies[ReclaimAckReply](),
+		pendingReconcile:    newPendingReplies[ReconcilePullReply](),
+		pendingResolveCoord: newPendingReplies[ResolveCoordReply](),
+		done:                make(chan struct{}),
 	}
 
 	onControl := func(payload []byte) {
+		switch peekControlKind(payload) {
+		case ctrlAllocRequest:
+			sf, err := decodeStorageControl(payload)
+			if err != nil || sf.AllocRequest == nil {
+				return
+			}
+			d.handleAllocRequest(*sf.AllocRequest)
+			return
+		case ctrlCommittedReply:
+			sf, err := decodeStorageControl(payload)
+			if err != nil || sf.CommittedReply == nil {
+				return
+			}
+			d.pendingCommitted.deliver(sf.CommittedReply.RequestID, *sf.CommittedReply)
+			return
+		case ctrlReclaimAckReply:
+			sf, err := decodeStorageControl(payload)
+			if err != nil || sf.ReclaimAckReply == nil {
+				return
+			}
+			d.pendingReclaim.deliver(sf.ReclaimAckReply.RequestID, *sf.ReclaimAckReply)
+			return
+		case ctrlReconcilePullReply:
+			sf, err := decodeStorageControl(payload)
+			if err != nil || sf.ReconcilePullReply == nil {
+				return
+			}
+			d.pendingReconcile.deliver(sf.ReconcilePullReply.RequestID, *sf.ReconcilePullReply)
+			return
+		case ctrlResolveCoordReply:
+			lf, err := decodeLaneControl(payload)
+			if err != nil || lf.ResolveCoordReply == nil {
+				return
+			}
+			d.pendingResolveCoord.deliver(lf.ResolveCoordReply.RequestID, *lf.ResolveCoordReply)
+			return
+		}
 		cf, derr := decodeControl(payload)
 		if derr != nil || cf.Kind != ctrlAttachReply || cf.AttachReply == nil {
 			return
 		}
 		d.mu.Lock()
+		// Every attach_reply (initial AND every later Reattach) updates the
+		// home-confirmed daemon id — the authoritative value AttachReply.
+		// DaemonID's doc names (§4.7). An accepted reply always carries a
+		// non-empty DaemonID (Acceptor.handleAttach stamps computeID
+		// unconditionally); a rejected one may not, so only update on Accepted
+		// to avoid clobbering a previously-confirmed id with an empty string.
+		if cf.AttachReply.Accepted && cf.AttachReply.DaemonID != "" {
+			d.daemonID = cf.AttachReply.DaemonID
+		}
 		// A pending Reattach owns the NEXT attach_reply — deliver it there and
 		// return; this is not the initial attach's reply (that already closed
 		// d.attached long before any Reattach could be sent).
@@ -146,28 +236,44 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		}
 		d.mu.Unlock()
 	}
-	d.lc = newLinkConn(&wsConn{ws: ws}, onControl, nil)
+	// onLane handles a HOME-opened lane substream: the home is relaying a
+	// redeemed transfer whose TARGET is this daemon (§5). It runs on the per-
+	// substream dispatch goroutine (its own goroutine), so blocking on the byte
+	// copy never stalls the accept loop.
+	onLane := func(conn net.Conn) { d.handleLaneInbound(conn) }
 
-	// Send attach on stream 0.
-	raw, err := encodeControl(controlFrame{Kind: ctrlAttach, Attach: &AttachRequest{
-		ComputeID: computeID, Declarations: decls,
-	}})
+	// Build the top-level yamux session over the raw WS byte stream and open the
+	// control substream (dialLinkSession tags it and starts its read loop). The
+	// session's own accept + control read loops run for the link's whole life;
+	// the per-actor ipc READ loops (which invoke dispatch) start at Start(),
+	// after every cell is installed, so a buffered deliver just waits for Start.
+	ls, err := dialLinkSession(ws, onControl, onLane, logger)
 	if err != nil {
 		_ = ws.Close()
 		return nil, err
 	}
+	d.lc = ls
+	// start() launches the read/accept loops only now that d.lc is assigned, so
+	// onControl (which reaches back through d.lc) can never fire against a nil lc.
+	d.lc.start()
 
-	// The demux loop runs for the link's whole life. It only routes data frames
-	// into per-stream buffers; the per-stream READ loops (which invoke dispatch)
-	// start at Start(), after every cell is installed. So the demux running here
-	// cannot race a half-built host — a buffered deliver just waits for Start.
+	// Fold session death into d.done — the single link-death signal every waiter
+	// (pending RPCs, pingLoop, the attach wait below) selects on.
 	go func() {
-		defer close(d.done)
-		d.lc.run(nil)
+		<-d.lc.closed()
+		close(d.done)
 	}()
 
+	// Send attach on the control substream.
+	raw, err := encodeControl(controlFrame{Kind: ctrlAttach, Attach: &AttachRequest{
+		ComputeID: computeID, Declarations: decls,
+	}})
+	if err != nil {
+		_ = d.lc.Close()
+		return nil, err
+	}
 	if err := d.lc.sendControl(raw); err != nil {
-		_ = ws.Close()
+		_ = d.lc.Close()
 		return nil, err
 	}
 
@@ -189,6 +295,19 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		return nil, errors.New(reason)
 	}
 	return d, nil
+}
+
+// DaemonID returns the home-confirmed compute id (期11 spec §4.7's
+// AttachReply.DaemonID) — empty until the FIRST attach_reply lands (Dial
+// already blocks until then, so any caller reaching a live *Dialer sees a
+// non-empty value in every non-dev-self-declared deployment). This is the
+// identity the storage host's per-channel resource root, AllocRequest
+// routing, and reservation/tombstone ownership must all key on — never the
+// possibly-random ComputeID passed to Dial.
+func (d *Dialer) DaemonID() string {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.daemonID
 }
 
 // HasStream reports whether id currently has an open stream on THIS link — the
@@ -287,12 +406,10 @@ func (d *Dialer) clearReattachWait(ch chan AttachReply) {
 // deliver can never race a not-yet-spawned cell — true for the initial batch and
 // for a post-Start open the ring adds mid-life.
 func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelope) error, cancel func(requestID message.ID)) (CellArms, error) {
-	d.mu.Lock()
-	sid := d.nextID
-	d.nextID++
-	d.mu.Unlock()
-
-	s, err := d.lc.openStream(sid)
+	// yamux assigns the substream id itself (the retired mux's nextID
+	// hand-numbering is gone); openStream tags the substream tag=actor so the
+	// home's accept loop routes it to runtime.Attach.
+	s, err := d.lc.openStream()
 	if err != nil {
 		return CellArms{}, err
 	}
@@ -341,7 +458,7 @@ func (d *Dialer) OpenStream(id actor.ActorID, dispatch func(env *message.Envelop
 	}
 	return CellArms{
 		Pen:      rw,
-		Access:   &remoteAccessHandle{relay: accessRelay, scope: accessScopeChannel},
+		Access:   &remoteResourceHandle{relay: accessRelay, dialer: d},
 		State:    &remoteAccessHandle{relay: accessRelay, scope: accessScopeState},
 		Schedule: &remoteScheduleHandle{relay: schedRelay},
 		Down:     downHandler,
@@ -616,6 +733,293 @@ func (d *Dialer) SetDespawnLocal(fn func(actor.ActorID)) {
 	d.mu.Lock()
 	d.despawnLocal = fn
 	d.mu.Unlock()
+}
+
+// SetAllocHandler installs the storage host's AllocRequest handler (see
+// Dialer.allocHandler) — mirrors SetDespawnLocal's injection pattern. Call
+// after Dial, before Start.
+func (d *Dialer) SetAllocHandler(fn func(AllocRequest) AllocReply) {
+	d.mu.Lock()
+	d.allocHandler = fn
+	d.mu.Unlock()
+}
+
+// handleAllocRequest answers one inbound AllocRequest on the control plane's
+// read-loop goroutine (onControl runs synchronously per stream-0 frame, the
+// same posture handleAttach already has home-side) — a real Allocator mkdir/
+// touch is expected to be fast (a local filesystem op), so this is not
+// bounced to a separate goroutine; a slow/wedged Allocator would delay
+// further control-frame processing on this link, an accepted trade-off
+// matching the existing synchronous-onControl discipline throughout this
+// package.
+func (d *Dialer) handleAllocRequest(req AllocRequest) {
+	d.mu.Lock()
+	handler := d.allocHandler
+	d.mu.Unlock()
+	var reply AllocReply
+	if handler == nil {
+		reply = AllocReply{RequestID: req.RequestID, OK: false, Reason: "link: no storage host wired on this compute"}
+	} else {
+		reply = handler(req)
+		reply.RequestID = req.RequestID // the handler answers the ALLOC, not the envelope — id is ours to stamp
+	}
+	raw, err := encodeStorageControl(storageControlFrame{Kind: ctrlAllocReply, AllocReply: &reply})
+	if err != nil {
+		return
+	}
+	_ = d.lc.sendControl(raw)
+}
+
+// SendCommitted is the daemon's send-half of §4.7's second frame (create-
+// outbox landing, after staging→fsync→rename completes for a content-bearing
+// create): blocks for the correlated CommittedReply (or ctx/timeout/link-
+// close). Fire only after bytes are durably renamed — never before (§1.5's
+// "无半截可见").
+func (d *Dialer) SendCommitted(ctx context.Context, reservationID string) (CommittedReply, error) {
+	msg := Committed{RequestID: newRequestID(), ReservationID: reservationID}
+	ch := d.pendingCommitted.register(msg.RequestID)
+	raw, err := encodeStorageControl(storageControlFrame{Kind: ctrlCommitted, Committed: &msg})
+	if err != nil {
+		d.pendingCommitted.cancel(msg.RequestID)
+		return CommittedReply{}, err
+	}
+	if err := d.lc.sendControl(raw); err != nil {
+		d.pendingCommitted.cancel(msg.RequestID)
+		return CommittedReply{}, err
+	}
+	return d.pendingCommitted.wait(ctx, msg.RequestID, ch, d.done)
+}
+
+// SendReclaimAck is SendCommitted's delete-side mirror (§4.7's third frame),
+// fired after the Reclaimer confirms the tombstoned bytes are collected.
+func (d *Dialer) SendReclaimAck(ctx context.Context, tombstoneID string) (ReclaimAckReply, error) {
+	msg := ReclaimAck{RequestID: newRequestID(), TombstoneID: tombstoneID}
+	ch := d.pendingReclaim.register(msg.RequestID)
+	raw, err := encodeStorageControl(storageControlFrame{Kind: ctrlReclaimAck, ReclaimAck: &msg})
+	if err != nil {
+		d.pendingReclaim.cancel(msg.RequestID)
+		return ReclaimAckReply{}, err
+	}
+	if err := d.lc.sendControl(raw); err != nil {
+		d.pendingReclaim.cancel(msg.RequestID)
+		return ReclaimAckReply{}, err
+	}
+	return d.pendingReclaim.wait(ctx, msg.RequestID, ch, d.done)
+}
+
+// SendReconcilePull is the Scrubber's periodic pull (§4.7's fourth frame,
+// level-triggered — the daemon holds no local truth, so this is its ONLY
+// source of "what should exist / what is pending" after a restart or on the
+// Scrubber's normal ticker cadence).
+func (d *Dialer) SendReconcilePull(ctx context.Context) (ReconcilePullReply, error) {
+	msg := ReconcilePull{RequestID: newRequestID()}
+	ch := d.pendingReconcile.register(msg.RequestID)
+	raw, err := encodeStorageControl(storageControlFrame{Kind: ctrlReconcilePull, ReconcilePull: &msg})
+	if err != nil {
+		d.pendingReconcile.cancel(msg.RequestID)
+		return ReconcilePullReply{}, err
+	}
+	if err := d.lc.sendControl(raw); err != nil {
+		d.pendingReconcile.cancel(msg.RequestID)
+		return ReconcilePullReply{}, err
+	}
+	return d.pendingReconcile.wait(ctx, msg.RequestID, ch, d.done)
+}
+
+// SetLocalFileOpener installs the daemon-side same-machine byte-access
+// capability (mirrors SetAllocHandler's injection pattern). Call after Dial,
+// before Start.
+func (d *Dialer) SetLocalFileOpener(o LocalFileOpener) {
+	d.mu.Lock()
+	d.localFileOpener = o
+	d.mu.Unlock()
+}
+
+// handleLaneInbound answers one inbound lane data stream: read the Token,
+// resolve it via ResolveCoord (this daemon must BE the transfer's target —
+// home's handler enforces the sender==target assertion, §5 item 0), open
+// the local handle, then copy bytes — read: local→stream; write: stream→
+// local, Commit (firing Committed(ReservationID) when set) or Abort on a
+// short read.
+func (d *Dialer) handleLaneInbound(conn io.ReadWriteCloser) {
+	defer conn.Close()
+	var hdr laneRedeemHeader
+	if err := readLaneJSON(conn, &hdr); err != nil {
+		return
+	}
+	reply, err := d.SendResolveCoord(context.Background(), hdr.Token)
+	if err != nil || !reply.OK {
+		reason := "resolve failed"
+		if err != nil {
+			reason = err.Error()
+		} else {
+			reason = reply.Reason
+		}
+		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: reason})
+		return
+	}
+	d.mu.Lock()
+	opener := d.localFileOpener
+	d.mu.Unlock()
+	if opener == nil {
+		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "link: no storage host wired on this compute"})
+		return
+	}
+	switch reply.Mode {
+	case access.OpRead:
+		rh, oerr := opener.OpenRead(reply.Coord)
+		if oerr != nil {
+			_ = writeLaneJSON(conn, laneAck{OK: false, Reason: oerr.Error()})
+			return
+		}
+		defer rh.Close()
+		if err := writeLaneJSON(conn, laneAck{OK: true}); err != nil {
+			return
+		}
+		_, _ = io.Copy(conn, rh)
+	case access.OpWrite:
+		wh, oerr := opener.OpenWrite(reply.Coord)
+		if oerr != nil {
+			_ = writeLaneJSON(conn, laneAck{OK: false, Reason: oerr.Error()})
+			return
+		}
+		if err := writeLaneJSON(conn, laneAck{OK: true}); err != nil {
+			_ = wh.Abort()
+			return
+		}
+		if _, cerr := io.Copy(wh, conn); cerr != nil {
+			_ = wh.Abort()
+			return
+		}
+		if cerr := wh.Commit(); cerr != nil {
+			return
+		}
+		if reply.ReservationID != "" {
+			// Best-effort: a failed relay here is recovered by the Scrubber's
+			// ReconcilePull (§1.7's third trigger) — the write already
+			// landed locally regardless.
+			_, _ = d.SendCommitted(context.Background(), reply.ReservationID)
+		}
+	default:
+		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "link: unknown lane mode " + string(reply.Mode)})
+	}
+}
+
+// SendResolveCoord is the daemon's send-half of §5's ResolveCoord frame:
+// resolves a Token into its coord/mode/reservation, blocking for the
+// correlated reply (or ctx/timeout/link-close). Only the transfer's OWN
+// target daemon may successfully resolve a given Token (home's sender-auth
+// check, lanecontrol.go).
+func (d *Dialer) SendResolveCoord(ctx context.Context, token string) (ResolveCoordReply, error) {
+	msg := ResolveCoordRequest{RequestID: newRequestID(), Token: token}
+	ch := d.pendingResolveCoord.register(msg.RequestID)
+	raw, err := encodeLaneControl(laneControlFrame{Kind: ctrlResolveCoord, ResolveCoord: &msg})
+	if err != nil {
+		d.pendingResolveCoord.cancel(msg.RequestID)
+		return ResolveCoordReply{}, err
+	}
+	if err := d.lc.sendControl(raw); err != nil {
+		d.pendingResolveCoord.cancel(msg.RequestID)
+		return ResolveCoordReply{}, err
+	}
+	return d.pendingResolveCoord.wait(ctx, msg.RequestID, ch, d.done)
+}
+
+// redeemFileRoute is the shared implementation behind
+// remoteResourceHandle.Redeem — Local resolves coord directly (one small
+// control RPC, zero lane byte-hop, true zerocopy for the actual file
+// bytes) and opens the local handle; !Local opens a fresh stream on THIS
+// daemon's OWN lane session, sends the redeem header, and hands the caller
+// the raw stream as FileAccess.Stream.
+func (d *Dialer) redeemFileRoute(ctx context.Context, route accessdoor.FileRoute) (accessdoor.FileAccess, error) {
+	if route.Local {
+		reply, err := d.SendResolveCoord(ctx, route.Token)
+		if err != nil {
+			return accessdoor.FileAccess{}, err
+		}
+		if !reply.OK {
+			return accessdoor.FileAccess{}, laneErr("resolve coord: %s", reply.Reason)
+		}
+		d.mu.Lock()
+		opener := d.localFileOpener
+		d.mu.Unlock()
+		if opener == nil {
+			return accessdoor.FileAccess{}, errors.New("link: no local file opener wired on this compute")
+		}
+		if route.Dir {
+			// Directory-shaped resource (workspace): hand out the os.Root subtree
+			// lease (期11 丁12) regardless of read/write mode — a dir lease is
+			// inherently both, with no Commit boundary (each os.* call lands
+			// immediately in the real subtree). Cross-host dir leases are rejected
+			// at the door (resolveFileRoute), so route.Dir implies route.Local.
+			root, oerr := opener.OpenDir(reply.Coord)
+			if oerr != nil {
+				return accessdoor.FileAccess{}, oerr
+			}
+			return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Dir: root}}, nil
+		}
+		switch route.Mode {
+		case access.OpRead:
+			rh, oerr := opener.OpenRead(reply.Coord)
+			if oerr != nil {
+				return accessdoor.FileAccess{}, oerr
+			}
+			return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Read: rh}}, nil
+		case access.OpWrite:
+			wh, oerr := opener.OpenWrite(reply.Coord)
+			if oerr != nil {
+				return accessdoor.FileAccess{}, oerr
+			}
+			if reply.ReservationID != "" {
+				wh = &committingWriteHandle{LocalWriteHandle: wh, dialer: d, reservationID: reply.ReservationID}
+			}
+			return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Write: wh}}, nil
+		default:
+			return accessdoor.FileAccess{}, laneErr("unknown mode %q", route.Mode)
+		}
+	}
+
+	// Flattened lane: a redeem is a fresh TOP-LEVEL substream tagged lane on
+	// this link's own session (openLane writes the streamHeader{lane}); the
+	// home's accept loop dispatches it to handleLaneRedeem. No nested yamux
+	// session to guard — d.lc is live for any live Dialer.
+	conn, err := d.lc.openLane()
+	if err != nil {
+		return accessdoor.FileAccess{}, fmt.Errorf("link: open lane redeem stream: %w", err)
+	}
+	if err := writeLaneJSON(conn, laneRedeemHeader{Token: route.Token}); err != nil {
+		_ = conn.Close()
+		return accessdoor.FileAccess{}, err
+	}
+	var ack laneAck
+	if err := readLaneJSON(conn, &ack); err != nil {
+		_ = conn.Close()
+		return accessdoor.FileAccess{}, err
+	}
+	if !ack.OK {
+		_ = conn.Close()
+		return accessdoor.FileAccess{}, laneErr("redeem rejected: %s", ack.Reason)
+	}
+	return accessdoor.FileAccess{Stream: conn}, nil
+}
+
+// committingWriteHandle wraps a LocalWriteHandle so Commit ALSO fires
+// Committed(reservationID) once the local fsync+rename lands — the
+// create-with-content write route's own completion signal (§1.7); a plain
+// OpWrite's route never sets ReservationID, so its handle is never wrapped.
+type committingWriteHandle struct {
+	accessdoor.LocalWriteHandle
+	dialer        *Dialer
+	reservationID string
+}
+
+func (h *committingWriteHandle) Commit() error {
+	if err := h.LocalWriteHandle.Commit(); err != nil {
+		return err
+	}
+	// Best-effort — see handleLaneInbound's identical note.
+	_, _ = h.dialer.SendCommitted(context.Background(), h.reservationID)
+	return nil
 }
 
 // SendDeliverResult reports one non-Delivered local-deliver outcome UP the named

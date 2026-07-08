@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -79,6 +80,23 @@ type Acceptor struct {
 	// layer holds no request-lookup logic (the closure is Home's).
 	cancelReq func(actor.ActorID, message.ID)
 
+	// storageControl is the home-side handler for the daemon-INITIATED half of
+	// the §4.7 control-RPC plane (Committed/ReclaimAck/ReconcilePull) — nil
+	// means those three frames get an honest error reply (no storage host
+	// wired on this channel yet), never a silent drop (§4.7's own frames are
+	// request/response; a daemon retrying forever against a home that just
+	// swallows the frame would be a worse failure mode than an explicit nak).
+	storageControl StorageHostControl
+
+	// pendingAlloc correlates AllocRequest (home→daemon) with its AllocReply —
+	// the ONE home-initiated leg of the control-RPC plane (the other three
+	// frames are daemon-initiated, correlated on the Dialer side instead).
+	pendingAlloc *pendingReplies[AllocReply]
+
+	// lane is §5's resource lane bookkeeping (per-daemon yamux sessions +
+	// the Token-keyed transfer registry) — see lanecontrol.go.
+	lane *laneState
+
 	// links is the per-compute revocation handle table (§8.3 KickDaemon): every
 	// link whose daemonID is known is registered here at runLink ENTRY — before
 	// the attach frame is even read, not only after a successful attach — so a
@@ -96,7 +114,7 @@ type Acceptor struct {
 // same silent edge as a graceful detach), then lc.Close() drives it through the
 // existing teardown funnel (frame.go).
 type linkHandle struct {
-	lc        *linkConn
+	lc        *linkSession
 	quietStop func()
 }
 
@@ -136,6 +154,10 @@ type Config struct {
 	// silently drop + log, best-effort no-ack semantics). nil → inbound
 	// cancel_request is dropped (no consumer).
 	CancelRequest func(actor.ActorID, message.ID)
+	// StorageHostControl (optional) handles the daemon-initiated half of the
+	// §4.7 storage control-RPC plane (Committed/ReclaimAck/ReconcilePull).
+	// nil → those three frames get an honest error reply.
+	StorageHostControl StorageHostControl
 }
 
 // NewAcceptor builds an Acceptor.
@@ -146,23 +168,26 @@ func NewAcceptor(cfg Config) *Acceptor {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Acceptor{
-		minter:     cfg.Minter,
-		access:     cfg.Access,
-		sched:      cfg.Schedule,
-		runtime:    cfg.Runtime,
-		membership: cfg.Membership,
-		registry:   cfg.Registry,
-		channelID:  cfg.ChannelID,
-		logger:     logger,
-		leasePing:  cfg.LeasePing,
-		leaseTTL:   cfg.LeaseTTL,
-		ctx:        ctx,
-		cancel:     cancel,
-		attached:   map[string]int{},
-		obsWatcher: cfg.ObsWatcher,
-		obsReg:     map[actor.ActorID]bool{},
-		cancelReq:  cfg.CancelRequest,
-		links:      map[string][]linkHandle{},
+		minter:         cfg.Minter,
+		access:         cfg.Access,
+		sched:          cfg.Schedule,
+		runtime:        cfg.Runtime,
+		membership:     cfg.Membership,
+		registry:       cfg.Registry,
+		channelID:      cfg.ChannelID,
+		logger:         logger,
+		leasePing:      cfg.LeasePing,
+		leaseTTL:       cfg.LeaseTTL,
+		ctx:            ctx,
+		cancel:         cancel,
+		attached:       map[string]int{},
+		obsWatcher:     cfg.ObsWatcher,
+		obsReg:         map[actor.ActorID]bool{},
+		cancelReq:      cfg.CancelRequest,
+		storageControl: cfg.StorageHostControl,
+		pendingAlloc:   newPendingReplies[AllocReply](),
+		lane:           newLaneState(),
+		links:          map[string][]linkHandle{},
 	}
 }
 
@@ -179,7 +204,7 @@ func (a *Acceptor) registerLink(id string, h linkHandle) {
 
 // deregisterLink removes exactly this link's handle (identity match on lc, not
 // a wholesale clear) — an overlapping reconnect leaves the other entry intact.
-func (a *Acceptor) deregisterLink(id string, lc *linkConn) {
+func (a *Acceptor) deregisterLink(id string, lc *linkSession) {
 	if id == "" {
 		return
 	}
@@ -252,6 +277,23 @@ func (a *Acceptor) IsAttached(id string) bool {
 	return a.attached[id] > 0
 }
 
+// AttachedComputeIDs returns every compute id with a live attach right now
+// (L0, same authority as IsAttached) — the platform-layer StorageMounts
+// implementation's ONLY data source (期11 spec §4.3): a snapshot, not a
+// subscription, so a caller building a placement candidate list re-reads it
+// per call rather than caching (an attach/detach between two calls is not
+// this method's problem to paper over, matching Lookup's own read-time
+// discipline). Order is unspecified.
+func (a *Acceptor) AttachedComputeIDs() []string {
+	a.attachedMu.Lock()
+	defer a.attachedMu.Unlock()
+	out := make([]string, 0, len(a.attached))
+	for id := range a.attached {
+		out = append(out, id)
+	}
+	return out
+}
+
 // Serve upgrades an attaching daemon connection and runs its link for the
 // connection's lifetime. daemonID is the pre-authenticated identifier from the
 // app layer (empty → the daemon's self-declared id, dev mode). It blocks until
@@ -301,12 +343,22 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		ports  = map[actor.ActorID]actorrt.Incarnation{}
 	)
 	// boundID is the compute id this link counts as online under, set once on the
-	// first accepted attach and torn down when runLink returns. Single-goroutine
-	// (onControl runs on this run loop), so a plain guard suffices.
-	var boundID string
+	// first accepted attach and torn down when runLink returns. It is WRITTEN only
+	// by onControl (the single control-substream read goroutine), but READ across
+	// goroutines now — onLane runs on a per-substream accept-dispatch goroutine
+	// (the retired mux processed control + stream-open in ONE demux goroutine; the
+	// yamux accept loop and the control read loop are separate), and the deferred
+	// markDetached runs on the runLink goroutine — so boundMu guards it.
+	var (
+		boundMu sync.Mutex
+		boundID string
+	)
 	defer func() {
-		if boundID != "" {
-			a.markDetached(boundID)
+		boundMu.Lock()
+		b := boundID
+		boundMu.Unlock()
+		if b != "" {
+			a.markDetached(b)
 		}
 	}()
 	resolve := func(leaseID string) (actor.ActorID, error) {
@@ -329,14 +381,16 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		return k, ok
 	}
 
-	// onOpen: each peer-opened actor stream runs native ipc — hand it straight to
-	// runtime.Attach. The substrate does the ipc handshake on the stream, resolves
-	// the actor (checks it is in the declared set), and registers it as a port
-	// embodiment. EOF on the stream (OpClose or link teardown) = the port reads EOF
-	// = down edge. The emitSink is the home write gate (the same notify pen
-	// a local cell writes with); the authoritative WriteResult flows back as the
-	// ipc EmitAck (writer contract not downgraded across the wire).
-	onOpen := func(s *stream) {
+	// onActor: each peer-opened tag=actor substream runs native ipc — hand it
+	// straight to runtime.Attach. The substrate does the ipc handshake on the
+	// stream, resolves the actor (checks it is in the declared set), and registers
+	// it as a port embodiment. EOF on the substream (its own Close or session
+	// teardown) = the port reads EOF = down edge. The emitSink is the home write
+	// gate (the same notify pen a local cell writes with); the authoritative
+	// WriteResult flows back as the ipc EmitAck (writer contract not downgraded
+	// across the wire). Runs off the accept-dispatch goroutine (its own goroutine)
+	// so the bounded handshake never stalls the accept loop.
+	onActor := func(conn net.Conn) {
 		go func() {
 			// The handshake is bounded by attachHandshakeTimeout (substrate self-
 			// guards the time limit). The port LIFETIME stays the runtime's, not
@@ -350,7 +404,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				Access:   a.accessSink(),
 				Schedule: a.scheduleSink(),
 			}
-			inc, err := a.runtime.Attach(hsCtx, s, sinks, resolve, actorrt.KindOf(kindOf), a.cancelReq)
+			inc, err := a.runtime.Attach(hsCtx, conn, sinks, resolve, actorrt.KindOf(kindOf), a.cancelReq)
 			if err != nil {
 				a.logger.Info("link.attach_stream_failed", "err", err)
 				return
@@ -363,26 +417,100 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		}()
 	}
 
+	// onLane: §5's flattened resource lane (tag=lane). Every lane substream a
+	// daemon opens toward the home is a redeem attempt (§5 item 0) — dispatched
+	// straight to handleLaneRedeem, which relays it to the transfer's target
+	// daemon's own link. Runs on the per-substream accept-dispatch goroutine (its
+	// own goroutine), so blocking on the byte pump never stalls the accept loop.
+	// boundID (the requester's confirmed id) is read under boundMu — it is
+	// written by the onControl goroutine, and the daemon only opens a lane
+	// substream after its own attach succeeded, so it is set by the time any
+	// redeem arrives.
+	onLane := func(conn net.Conn) {
+		boundMu.Lock()
+		id := boundID
+		boundMu.Unlock()
+		a.handleLaneRedeem(id, conn)
+	}
+
 	// the per-link lease, refreshed by any inbound frame.
 	lease := NewLease(a.leasePing, a.leaseTTL)
 
-	var lc *linkConn
+	var lc *linkSession
 	onControl := func(payload []byte) {
-		cf, err := decodeControl(payload)
-		if err != nil || cf.Kind != ctrlAttach || cf.Attach == nil {
-			return
-		}
-		id, accepted := a.handleAttach(reqCtx, lc, cf.Attach, daemonID, &mu, &allowed, &kinds, &portMu, ports)
-		// Count the daemon online only after a SUCCESSFUL attach (membership
-		// applied, Accepted reply sent) — a rejected/half attach must not show
-		// online. Once per link (first accepted frame).
-		if accepted && boundID == "" {
-			boundID = id
-			a.markAttached(id)
+		switch peekControlKind(payload) {
+		case ctrlAttach:
+			cf, err := decodeControl(payload)
+			if err != nil || cf.Attach == nil {
+				return
+			}
+			isFirstAttachOnLink := boundID == ""
+			id, accepted := a.handleAttach(reqCtx, lc, cf.Attach, daemonID, isFirstAttachOnLink, &mu, &allowed, &kinds, &portMu, ports)
+			// Count the daemon online only after a SUCCESSFUL attach (membership
+			// applied, Accepted reply sent) — a rejected/half attach must not show
+			// online. Once per link (first accepted frame). boundID is read unlocked
+			// here (this is its only writer goroutine) but WRITTEN under boundMu so
+			// the cross-goroutine readers (onLane, the deferred markDetached) see it.
+			if accepted && boundID == "" {
+				boundMu.Lock()
+				boundID = id
+				boundMu.Unlock()
+				a.markAttached(id)
+				// Register this link for lane relay under its confirmed id, so a
+				// redeem on ANOTHER daemon's link whose transfer targets THIS one
+				// can open a lane substream toward it (handleLaneRedeem → laneLink).
+				a.registerLaneLink(id, lc)
+			}
+		case ctrlAllocReply:
+			sf, err := decodeStorageControl(payload)
+			if err != nil || sf.AllocReply == nil {
+				return
+			}
+			a.pendingAlloc.deliver(sf.AllocReply.RequestID, *sf.AllocReply)
+		case ctrlCommitted:
+			sf, err := decodeStorageControl(payload)
+			if err != nil || sf.Committed == nil {
+				return
+			}
+			a.handleCommitted(reqCtx, lc, boundID, sf.Committed)
+		case ctrlReclaimAck:
+			sf, err := decodeStorageControl(payload)
+			if err != nil || sf.ReclaimAck == nil {
+				return
+			}
+			a.handleReclaimAck(reqCtx, lc, boundID, sf.ReclaimAck)
+		case ctrlReconcilePull:
+			sf, err := decodeStorageControl(payload)
+			if err != nil || sf.ReconcilePull == nil {
+				return
+			}
+			a.handleReconcilePull(reqCtx, lc, boundID, sf.ReconcilePull)
+		case ctrlResolveCoord:
+			lf, err := decodeLaneControl(payload)
+			if err != nil || lf.ResolveCoord == nil {
+				return
+			}
+			reply := a.handleResolveCoord(boundID, lf.ResolveCoord)
+			raw, eerr := encodeLaneControl(laneControlFrame{Kind: ctrlResolveCoordReply, ResolveCoordReply: &reply})
+			if eerr != nil {
+				return
+			}
+			_ = lc.sendControl(raw)
 		}
 	}
 
-	lc = newLinkConn(&wsConn{ws: ws}, onControl, onOpen)
+	// Build the top-level yamux server session over the raw WS byte stream.
+	// lease.Refresh is passed as onFrame: linksession.go's dispatch fires it per
+	// application frame on whichever peer-opened substream carries it (the
+	// daemon's app-level idle ping on the control substream, or an actor's ipc
+	// frame) — deliberately NOT on the raw carrier, where yamux's own keepalive
+	// ping/pong also flows and would otherwise mask a frozen app.
+	var lerr error
+	lc, lerr = acceptLinkSession(ws, onControl, onActor, onLane, lease.Refresh, a.logger)
+	if lerr != nil {
+		a.logger.Info("link.accept_session_failed", "err", lerr)
+		return
+	}
 
 	// quietStopPorts tears down every port on this link WITHOUT a down edge — the
 	// home is going away gracefully, so its port-hosted actors must fall silent (no
@@ -407,6 +535,15 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// KickDaemon. Deregistered on runLink exit regardless of how it ends.
 	a.registerLink(daemonID, linkHandle{lc: lc, quietStop: quietStopPorts})
 	defer a.deregisterLink(daemonID, lc)
+	// Evict this link from the lane-relay table on teardown (keyed by boundID,
+	// read at defer-run time — pointer-guarded so an overlapping reconnect's
+	// newer registration survives this stale link's exit).
+	defer func() {
+		boundMu.Lock()
+		b := boundID
+		boundMu.Unlock()
+		a.deregisterLaneLink(b, lc)
+	}()
 
 	// Lease watchdog: tears the link down when last-seen falls behind TTL.
 	done := make(chan struct{})
@@ -416,8 +553,8 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	})
 
 	// Acceptor Close tears the link down; quiet-stop this link's ports FIRST so the
-	// ensuing stream EOFs are silent. A request-context cancel or peer-gone (the run
-	// loop ending) stays LOUD — those are the positively-observed death edges.
+	// ensuing stream EOFs are silent. A request-context cancel or peer-gone (the
+	// session dying) stays LOUD — those are the positively-observed death edges.
 	go func() {
 		select {
 		case <-a.ctx.Done():
@@ -429,7 +566,14 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		}
 	}()
 
-	lc.run(lease.Refresh)
+	// Launch the session's accept/read loops now that lc is assigned + registered,
+	// then block for the link's whole life — the session dying (peer gone, carrier
+	// error, lease-expiry Close) fires closed(), the direct replacement for the
+	// retired demux loop returning. Every open substream is errored by yamux on
+	// session death, so each port's ipc read loop fails and publishes its down edge
+	// (the same death funnel the old teardown() drove).
+	lc.start()
+	<-lc.closed()
 	close(done)
 }
 
@@ -446,7 +590,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 // detaching does NOT remove it (membership ≠ attachment) — reconcileHost only
 // removes rows the compute itself no longer declares. It reports (computeID,
 // accepted) so the caller can count link attachment only on success.
-func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRequest, daemonID string, mu *sync.Mutex, allowed *map[actor.ActorID]bool, kinds *map[actor.ActorID]actor.Kind, portMu *sync.Mutex, ports map[actor.ActorID]actorrt.Incarnation) (string, bool) {
+func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, att *AttachRequest, daemonID string, isFirstAttachOnLink bool, mu *sync.Mutex, allowed *map[actor.ActorID]bool, kinds *map[actor.ActorID]actor.Kind, portMu *sync.Mutex, ports map[actor.ActorID]actorrt.Incarnation) (string, bool) {
 	computeID := att.ComputeID
 	if daemonID != "" {
 		computeID = daemonID
@@ -523,7 +667,40 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 	*kinds = newKinds
 	mu.Unlock()
 
-	a.reconcileHost(ctx, computeID, newAllowed, portMu, ports)
+	// reconcileHost is a DESTRUCTIVE full-set diff (§S-P8's "kubelet
+	// node-status idiom, never an increment" — an id absent from THIS
+	// declaration is deregistered outright) — it must run ONLY against a
+	// caller's genuinely-authoritative declared set, never against
+	// RunCompute's own bootstrap attach. That FIRST attach on every (re)dial
+	// deliberately carries att.Declarations==nil (compute.go's own doc:
+	// "Dial declares NOTHING yet: every actor this compute hosts is declared
+	// by the ring's own Reattach... inside the first reconcile pass") — a
+	// PLACEHOLDER meaning "not yet known", not "authoritatively zero actors".
+	// Found+fixed during 期11 S6's platform-level crash-recovery walk
+	// verification: running reconcileHost against this nil/bootstrap
+	// declaration was DEREGISTERING every actor this compute had previously
+	// declared (Host==computeID) milliseconds before the ring's OWN Reattach
+	// (always a non-nil, even if zero-length, slice — computeRing.reconcile's
+	// `make([]link.Declaration, 0, len(current))`) arrived with the real set
+	// — so EVERY reconnect of an already-attached daemon raced its own
+	// membership out from under itself, permanently locking every one of its
+	// actors out (膜律's "问①" active-membership gate then refuses every
+	// later OpenStream for them, forever, since nothing ever re-registers a
+	// deregistered row).
+	//
+	// The skip condition is narrower than "declarations==nil" alone: a
+	// caller MAY legitimately Reattach(ctx, nil) on an ALREADY-established
+	// link to explicitly shrink its declared set to zero (this package's own
+	// TestReattach_HostReconcile_UnwatchesObsOnDereg does exactly that) — nil
+	// is ambiguous by itself; "is this the very FIRST attach frame this
+	// specific link has ever sent" is the real bootstrap signal (isFirstAttachOnLink,
+	// evaluated by the caller BEFORE boundID is set). Only nil-AND-first is
+	// the placeholder case; nil-on-a-later-Reattach keeps its full
+	// authoritative shrink-to-zero meaning unchanged, and a non-nil (even
+	// empty) declaration ALWAYS reconciles regardless of position.
+	if att.Declarations != nil || !isFirstAttachOnLink {
+		a.reconcileHost(ctx, computeID, newAllowed, portMu, ports)
+	}
 
 	// Fold each ADMITTED actor's obs PUSH (L3 device presence) into the home fold.
 	// Registered here (before the actor's stream opens / port publishes) so no
@@ -539,7 +716,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkConn, att *AttachRe
 		a.obsMu.Unlock()
 	}
 
-	a.sendReply(lc, AttachReply{ChannelID: a.channelID, Accepted: true})
+	a.sendReply(lc, AttachReply{ChannelID: a.channelID, Accepted: true, DaemonID: computeID})
 	a.logger.Info("link.attached", "compute", computeID, "actors", len(att.Declarations))
 	return computeID, true
 }
@@ -640,12 +817,181 @@ func (a *Acceptor) reconcileHost(ctx context.Context, computeID string, newAllow
 	}
 }
 
-func (a *Acceptor) sendReply(lc *linkConn, reply AttachReply) {
+func (a *Acceptor) sendReply(lc *linkSession, reply AttachReply) {
 	raw, err := encodeControl(controlFrame{Kind: ctrlAttachReply, AttachReply: &reply})
 	if err != nil {
 		return
 	}
 	_ = lc.sendControl(raw)
+}
+
+// peekControlKind reads ONLY the "kind" field of a stream-0 control payload —
+// the dispatch key onControl uses to decide which of the two control
+// vocabularies (attach's controlFrame vs the storage plane's
+// storageControlFrame, §4.7) to fully decode the payload as. Both share the
+// same wire discipline (one JSON object, a "kind" string field), so a bad/
+// truncated payload simply peeks as the zero controlKind (dispatches to no
+// case, silently dropped — the same discipline decodeControl's own error
+// path already had before this dispatch existed).
+func peekControlKind(payload []byte) controlKind {
+	var probe struct {
+		Kind controlKind `json:"kind"`
+	}
+	_ = json.Unmarshal(payload, &probe)
+	return probe.Kind
+}
+
+// sendStorageControl is the storage control-RPC plane's single guarded send
+// path (mirrors sendReply for attach) — a marshal failure is dropped (same
+// discipline sendReply already has: an encode failure here means a Go bug in
+// this package, not a wire condition worth propagating to the caller, who
+// has no slot to receive an error from an async control send anyway).
+func (a *Acceptor) sendStorageControl(lc *linkSession, f storageControlFrame) {
+	raw, err := encodeStorageControl(f)
+	if err != nil {
+		return
+	}
+	_ = lc.sendControl(raw)
+}
+
+// SendAllocRequest is the door's (accessdoor.StorageControl, via a platform
+// adapter) send-half of §4.7's first frame: routes to daemonID's most
+// recently registered live link (a.links, the same table KickDaemon reads),
+// waits for the correlated AllocReply. Returns a Go error on "no live
+// connection for daemonID" (the caller's placement chain chose a daemon that
+// is no longer attached — a StorageMounts snapshot can go stale between
+// ListStorageDaemons and this call, §4.3's own read-time-not-cached
+// discipline), a send failure, or a controlRPCTimeout/ctx-cancel/link-close
+// while waiting; ok=false on the daemon's own AllocReply{OK:false} (a
+// non-nil error with the reply's Reason, e.g. mkdir failed on the daemon's
+// side — a genuine Allocator failure, not a transport one).
+func (a *Acceptor) SendAllocRequest(ctx context.Context, daemonID string, req AllocRequest) error {
+	a.linksMu.Lock()
+	hs := a.links[daemonID]
+	var lc *linkSession
+	if len(hs) > 0 {
+		lc = hs[len(hs)-1].lc // most recently registered connection for this compute
+	}
+	a.linksMu.Unlock()
+	if lc == nil {
+		return fmt.Errorf("link: no live connection for daemon %q", daemonID)
+	}
+
+	if req.RequestID == "" {
+		req.RequestID = newRequestID()
+	}
+	ch := a.pendingAlloc.register(req.RequestID)
+	raw, err := encodeStorageControl(storageControlFrame{Kind: ctrlAllocRequest, AllocRequest: &req})
+	if err != nil {
+		a.pendingAlloc.cancel(req.RequestID)
+		return err
+	}
+	if err := lc.sendControl(raw); err != nil {
+		a.pendingAlloc.cancel(req.RequestID)
+		return err
+	}
+	reply, err := a.pendingAlloc.wait(ctx, req.RequestID, ch, a.ctx.Done())
+	if err != nil {
+		return err
+	}
+	if !reply.OK {
+		return fmt.Errorf("link: alloc request denied by daemon %q: %s", daemonID, reply.Reason)
+	}
+	return nil
+}
+
+// handleCommitted answers a daemon-initiated Committed(reservation_id) frame
+// (§4.7's second frame): sender-auth (senderDaemonID must equal the
+// reservation's OWN placement_daemon_id, read via ResourceOutbox before
+// acting — §4.7's mechanical "sender==placement_daemon_id" assertion),
+// then CommitReservation, then reply. senderDaemonID=="" (not yet attached —
+// should be unreachable in practice, since only an attached link is even
+// reading frames off this connection, but checked defensively) and a nil
+// storageControl both reply with an honest Reason, never a silent drop (this
+// RPC plane is request/response — a daemon retrying forever against silence
+// is a worse failure mode than an explicit nak).
+func (a *Acceptor) handleCommitted(ctx context.Context, lc *linkSession, senderDaemonID string, msg *Committed) {
+	reply := CommittedReply{RequestID: msg.RequestID}
+	switch {
+	case a.storageControl == nil:
+		reply.Reason = "link: no storage host control wired on this channel"
+	case senderDaemonID == "":
+		reply.Reason = "link: committed frame from an unattached sender"
+	default:
+		found, lost, err := a.storageControl.Committed(ctx, senderDaemonID, msg.ReservationID)
+		if err != nil {
+			reply.Reason = err.Error()
+		} else {
+			reply.Found, reply.Lost = found, lost
+		}
+	}
+	a.sendStorageControl(lc, storageControlFrame{Kind: ctrlCommittedReply, CommittedReply: &reply})
+}
+
+// handleReclaimAck is handleCommitted's delete-side mirror (§4.7's third
+// frame).
+func (a *Acceptor) handleReclaimAck(ctx context.Context, lc *linkSession, senderDaemonID string, msg *ReclaimAck) {
+	reply := ReclaimAckReply{RequestID: msg.RequestID}
+	switch {
+	case a.storageControl == nil:
+		reply.Reason = "link: no storage host control wired on this channel"
+	case senderDaemonID == "":
+		reply.Reason = "link: reclaim_ack frame from an unattached sender"
+	default:
+		found, err := a.storageControl.ReclaimAck(ctx, senderDaemonID, msg.TombstoneID)
+		if err != nil {
+			reply.Reason = err.Error()
+		} else {
+			reply.Found = found
+		}
+	}
+	a.sendStorageControl(lc, storageControlFrame{Kind: ctrlReclaimAckReply, ReclaimAckReply: &reply})
+}
+
+// handleReconcilePull answers the Scrubber's periodic pull (§4.7's fourth
+// frame): senderDaemonID is trusted DIRECTLY as the sole filter (unlike
+// Committed/ReclaimAck, there is no separate id to cross-check it against —
+// ReconcilePull carries no target id of its own, it simply asks "what is
+// mine"), so StorageHostControl.ReconcilePull's OWN implementation is
+// responsible for the "只返回该 sender 名下" confinement (§4.7) via the
+// ResourceOutbox's already-per-daemon-filtered List*ByDaemon methods.
+func (a *Acceptor) handleReconcilePull(ctx context.Context, lc *linkSession, senderDaemonID string, msg *ReconcilePull) {
+	reply := ReconcilePullReply{RequestID: msg.RequestID}
+	switch {
+	case a.storageControl == nil:
+		reply.Reason = "link: no storage host control wired on this channel"
+	case senderDaemonID == "":
+		reply.Reason = "link: reconcile_pull frame from an unattached sender"
+	default:
+		resources, pendingReservations, pendingTombstones, err := a.storageControl.ReconcilePull(ctx, senderDaemonID)
+		if err != nil {
+			reply.Reason = err.Error()
+		} else {
+			reply.Resources = resources
+			reply.PendingReservations = pendingReservations
+			reply.PendingTombstones = pendingTombstones
+		}
+	}
+	a.sendStorageControl(lc, storageControlFrame{Kind: ctrlReconcilePullReply, ReconcilePullReply: &reply})
+}
+
+// StorageHostControl is the home-side handler for the daemon-initiated half
+// of the §4.7 control-RPC plane — platform assembly implements it (over
+// runtime.ChannelStores.Outbox, the resourcespec.ResourceOutbox slice) and
+// injects it via Config.StorageHostControl; this package only defines the
+// contract and drives the sender-auth + reply-envelope mechanics around it.
+type StorageHostControl interface {
+	// Committed lands a content-bearing file create's reservation
+	// (resourcespec.Registry.CommitReservation) — see that method's doc for
+	// the found/err(ErrReservationLost) contract this must preserve.
+	Committed(ctx context.Context, senderDaemonID, reservationID string) (found, lost bool, err error)
+	// ReclaimAck clears a collected tombstone
+	// (resourcespec.Registry.ClearTombstone).
+	ReclaimAck(ctx context.Context, senderDaemonID, tombstoneID string) (found bool, err error)
+	// ReconcilePull answers senderDaemonID's own recovery picture — landed
+	// resources placed on it, its pending reservations, its pending
+	// tombstones (resourcespec.Registry's three List*ByDaemon methods).
+	ReconcilePull(ctx context.Context, senderDaemonID string) (resources []ReconcileResource, pendingReservations []ReconcileReservation, pendingTombstones []ReconcileTombstone, err error)
 }
 
 // emitSink builds the per-link EmitSink: a remote cell's emit is written through
@@ -692,15 +1038,22 @@ func (a *Acceptor) emitSink(kindOf func(actor.ActorID) (actor.Kind, bool)) actor
 
 // accessSink builds the per-link access RelaySink: a remote cell's plane-2
 // invocation is resolved through the home's access door under the connection's
-// authenticated bound id, and the authoritative Outcome returns as the KindAccess
-// ack. The caller identity is welded HERE (the door minter binds inc.ID()) — the
-// wire's self-reported Invocation.Caller is rejected fail-fast, never trusted.
-// The minted handle is wrapped in a liveAccess over the emitting port's OWN
-// Incarnation (same source as emitSink — never a cross-stream lookup) and freshly
-// per invocation (the port death gate on the access plane): a replaced/torn-down
-// port's in-flight invoke is fenced with ErrAccessNotLive instead of acting on a
-// dead incarnation's behalf. State rides this same arm — the scope field selects
-// MintState (actor-scoped) over Mint (channel-scoped).
+// authenticated bound id, and the authoritative verdict returns as the
+// KindAccess ack. The caller identity is welded HERE (the door minter binds
+// inc.ID()) — every arm door-welds caller structurally (the Invocation arm's
+// wire-level Invocation.Caller is rejected fail-fast if self-reported; the
+// Create/Query arms carry no caller field at ALL, a stronger structural
+// version of the same rule). Each handle is wrapped in the matching liveness
+// membrane over the emitting port's OWN Incarnation (same source as
+// emitSink — never a cross-stream lookup), freshly per invocation (the port
+// death gate on the access plane): a replaced/torn-down port's in-flight
+// invoke is fenced instead of acting on a dead incarnation's behalf.
+//
+// Three arms (期11 spec §3.3's sum): Invocation (state OR channel-scoped, by
+// Scope — pre-existing), Create (channel-scoped only), Query (channel-scoped
+// only, Stat or List by QueryKind). All three share this ONE ipc KindAccess
+// frame kind — the sum lives inside the payload, the frame closed set is
+// untouched.
 func (a *Acceptor) accessSink() actorrt.RelaySink {
 	return func(ctx context.Context, inc actorrt.Incarnation, payload []byte) ([]byte, error) {
 		if a.access == nil {
@@ -710,26 +1063,88 @@ func (a *Acceptor) accessSink() actorrt.RelaySink {
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return nil, fmt.Errorf("link: access payload decode: %w", err)
 		}
-		if req.Inv.Caller != "" {
-			// Identity is not caller-settable across the wire (mirrors the pen
-			// rejecting a pre-filled Sender): fail-fast, never silently overwrite.
-			return nil, fmt.Errorf("link: access invocation self-reported caller %q — identity is home-welded, not wire-settable", req.Inv.Caller)
-		}
 		id := inc.ID()
-		var raw accessdoor.AccessHandle
-		switch req.Scope {
-		case accessScopeChannel:
-			raw = a.access.Mint(id)
-		case accessScopeState:
-			raw = a.access.MintState(id)
+
+		switch req.Kind {
+		case accessKindInvocation:
+			return a.accessInvocation(ctx, inc, id, req)
+		case accessKindCreate:
+			return a.accessCreate(ctx, inc, id, req)
+		case accessKindQuery:
+			return a.accessQuery(ctx, inc, id, req)
 		default:
-			return nil, fmt.Errorf("link: access unknown scope %q", req.Scope)
+			return nil, fmt.Errorf("link: access unknown request kind %q", req.Kind)
 		}
-		outcome, err := NewLiveAccess(raw, inc, a.runtime).Invoke(ctx, req.Inv.Operation, req.Inv.Resource, req.Inv.Args, req.Inv.Grant)
+	}
+}
+
+// accessInvocation handles the pre-existing Invoke arm — state OR
+// channel-scoped, selected by Scope.
+func (a *Acceptor) accessInvocation(ctx context.Context, inc actorrt.Incarnation, id actor.ActorID, req accessRequest) ([]byte, error) {
+	if req.Inv == nil {
+		return nil, errors.New("link: access invocation request missing its inv payload")
+	}
+	if req.Inv.Caller != "" {
+		// Identity is not caller-settable across the wire (mirrors the pen
+		// rejecting a pre-filled Sender): fail-fast, never silently overwrite.
+		return nil, fmt.Errorf("link: access invocation self-reported caller %q — identity is home-welded, not wire-settable", req.Inv.Caller)
+	}
+	var raw accessdoor.AccessHandle
+	switch req.Scope {
+	case accessScopeChannel:
+		raw = a.access.Mint(id)
+	case accessScopeState:
+		raw = a.access.MintState(id)
+	default:
+		return nil, fmt.Errorf("link: access unknown scope %q", req.Scope)
+	}
+	outcome, err := NewLiveAccess(raw, inc, a.runtime).Invoke(ctx, req.Inv.Operation, req.Inv.Resource, req.Inv.Args, req.Inv.Grant)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(accessResponse{Kind: accessKindInvocation, Value: outcome.Value, Found: outcome.Found, RejectReason: outcome.RejectReason, Route: outcome.Route})
+}
+
+// accessCreate handles the Create arm — structurally channel-scoped only
+// (期11 spec §3.3: "Create/Query 天然只属资源面"), so it always Mints (never
+// MintState) and carries no self-reportable caller field at all.
+func (a *Acceptor) accessCreate(ctx context.Context, inc actorrt.Incarnation, id actor.ActorID, req accessRequest) ([]byte, error) {
+	if req.Create == nil {
+		return nil, errors.New("link: access create request missing its create payload")
+	}
+	rh := NewLiveResourceAccess(a.access.Mint(id), inc, a.runtime)
+	outcome, err := rh.Create(ctx, req.Create.Resource, req.Create.Spec, req.Create.Initial)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(accessResponse{Kind: accessKindCreate, Value: outcome.Value, Found: outcome.Found, RejectReason: outcome.RejectReason, Route: outcome.Route})
+}
+
+// accessQuery handles the Query arm (Stat or List, by QueryKind) — same
+// channel-scoped-only structural rule as Create.
+func (a *Acceptor) accessQuery(ctx context.Context, inc actorrt.Incarnation, id actor.ActorID, req accessRequest) ([]byte, error) {
+	if req.Query == nil {
+		return nil, errors.New("link: access query request missing its query payload")
+	}
+	rh := NewLiveResourceAccess(a.access.Mint(id), inc, a.runtime)
+	switch req.Query.QueryKind {
+	case accessQueryStat:
+		res, err := rh.Stat(ctx, req.Query.Resource)
 		if err != nil {
 			return nil, err
 		}
-		return json.Marshal(accessResponse{Value: outcome.Value, Found: outcome.Found, RejectReason: outcome.RejectReason})
+		return json.Marshal(accessResponse{Kind: accessKindQuery, Stat: &accessStatRespFields{Meta: res.Meta, Ops: res.Ops, Reject: res.Reject}})
+	case accessQueryList:
+		if req.Query.List == nil {
+			return nil, errors.New("link: access list query missing its list payload")
+		}
+		page, err := rh.List(ctx, accessdoor.ListQuery{Prefix: req.Query.List.Prefix, Limit: req.Query.List.Limit, Cursor: req.Query.List.Cursor})
+		if err != nil {
+			return nil, err
+		}
+		return json.Marshal(accessResponse{Kind: accessKindQuery, List: &accessListRespFields{Entries: page.Entries, Next: page.Next, Reject: page.Reject}})
+	default:
+		return nil, fmt.Errorf("link: access unknown query kind %q", req.Query.QueryKind)
 	}
 }
 

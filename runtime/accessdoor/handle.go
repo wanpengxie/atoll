@@ -3,6 +3,7 @@ package accessdoor
 import (
 	"context"
 	"errors"
+	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -10,30 +11,114 @@ import (
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
-// AccessHandle is the substrate's off-log capability — the access-plane dual of
-// harness.Pen. It is welded to ONE caller at construction and NEVER self-reports
-// identity. It is an INTERFACE: the cell implementation (boundHandle) and the
-// future port implementation (cross-wire) are twins of one contract, so a
-// liveness wrapper can wrap it the way livePen wraps Pen, zero friction.
+// CreateSpec is a type alias re-exporting resourcespec.CreateSpec at the
+// door's public face — the SAME type, not a copy (identical underlying type,
+// wire-compatible, directly assignable both ways). archtest's
+// TestResourcespecImportedOnlyWithinRuntime confines the resourcespec import
+// itself to the runtime tree (only the kernel may implement a Driver /
+// construct a raw Registry); downstream (lib/actorbase, platform/internal/
+// link) needs CreateSpec's SHAPE to call Create/ResourceAccessHandle without
+// ever importing resourcespec — this alias is that seam, the same pattern
+// Outcome/StatMeta/etc. already establish (accessdoor is the door's whole
+// public vocabulary; resourcespec's types ride out through it, never
+// directly).
+type CreateSpec = resourcespec.CreateSpec
+
+// KindKV re-exports resourcespec.KindKV for the same reason CreateSpec is
+// aliased above — the day-1 inline-value kind, the only one a domain Proc
+// author's Create sugar (lib/actorbase's ResourceHandle.Create) drives.
+const KindKV = resourcespec.KindKV
+
+// KindFile re-exports resourcespec.KindFile — §5's CreateFile sugar
+// (lib/actorbase's ResourceHandle.CreateFile) needs it to build a file-kind
+// CreateSpec without importing resourcespec directly (same purity-wall
+// reason as KindKV/CreateSpec above).
+const KindFile = resourcespec.KindFile
+
+// AccessHandle is the STATE-FACE capability — the access-plane dual of
+// harness.Pen, narrowed to the one verb the actor-scoped (collapsed) locus
+// has any use for. It is welded to ONE caller/owner at construction and NEVER
+// self-reports identity. It is an INTERFACE: the cell implementation
+// (boundStateHandle) and the port implementation (remoteAccessHandle) are
+// twins of one contract, so a liveness wrapper can wrap it the way livePen
+// wraps Pen, zero friction.
 type AccessHandle interface {
 	Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error)
 }
 
-// boundHandle is an AccessHandle welded to one caller (the cell implementation).
-// The caller is a struct field, not a wire field — structurally there is nowhere
-// to self-report it.
+// ResourceAccessHandle is the RESOURCE-FACE capability (channel-scoped,
+// Mint-minted) — 期11 spec §3.1's scope split: everything AccessHandle has,
+// plus the three additional resource-locus verbs (Create/Stat/List) the
+// actor-scoped locus structurally cannot answer (no kind routing, no R, no
+// membership — the scope law itself, §3.1's "决策树保持一条,劈的是词表不是
+// 执法"). Embedding AccessHandle rather than duplicating Invoke keeps the two
+// faces' Invoke contract byte-for-byte identical and lets a ResourceAccessHandle
+// value satisfy AccessHandle wherever only Invoke is needed (Caps.Access's
+// wire path and the Invocation-arm dispatch both do exactly this).
+//
+// Caps.Access's DECLARED TYPE widens to this interface (§3.1: "Caps.Access
+// 声明类型加宽为资源面接口，字段集合零变") — Caps.State stays AccessHandle,
+// narrow, unchanged: the two fields are already two Mint faces (Access via
+// Mint, State via MintState), only Access's Go type grows.
+//
+// THREE-AVATAR PARITY (红线, §3.2): boundHandle (here), the resource liveness
+// membrane (link.liveResourceAccess), and the resource wire proxy
+// (link.remoteResourceHandle) must all carry every method of this interface
+// in lockstep — landing one without the other two is a half-wired vertical
+// slice the red line forbids outright (no ErrUnsupported intermediate state).
+type ResourceAccessHandle interface {
+	AccessHandle
+
+	// Create is the SOLE create entry point (§3.1's "create 单入口"): the
+	// resource face's Invoke no longer accepts a bare OpCreate at all (see
+	// boundHandle.Invoke below) — CreateSpec never rides Invocation/Args
+	// (§1's carrier red line), so create needed its own typed method the
+	// moment CreateSpec existed.
+	Create(ctx context.Context, id resource.ResourceID, spec resourcespec.CreateSpec, initial []byte) (Outcome, error)
+
+	// Stat projects id's any-grant-visible metadata + caller's effective ops
+	// (§3.6). Never Operation-gated (Stat is a Query method, not a grantable
+	// verb) and never carries PlacementCoord (StatMeta is a separate,
+	// coord-less projection type — see query.go).
+	Stat(ctx context.Context, id resource.ResourceID) (StatResult, error)
+
+	// List enumerates channel-scoped resources this caller can see (any-grant
+	// projection), paginated (§3.7). The actor-scoped locus has NO List — that
+	// absence IS the scope law (no kind column, no cross-owner enumeration
+	// makes sense there), so List belongs on this interface alone.
+	List(ctx context.Context, q ListQuery) (ListPage, error)
+}
+
+// boundHandle is a ResourceAccessHandle welded to one caller (the cell
+// implementation, channel-scoped). The caller is a struct field, not a wire
+// field — structurally there is nowhere to self-report it.
 type boundHandle struct {
 	door   *door
 	caller actor.ActorID
 }
 
-// Invoke runs ingress (structure → ErrMalformed), then the day-1 Ops-overreach
-// judgment (→ access_denied verdict), then the decision tree under the welded
-// caller. The two rejection layers stay distinct: a structural fault is a Go
-// error before anything resolves; overreach is a verdict.
+// ErrCreateViaInvoke is the resource face's "create 单入口" enforcement
+// (§3.1): a bare op=create reaching Invoke is a caller-protocol misuse — the
+// SAME class of failure ErrMalformed already names (a structurally
+// unacceptable shape rejected before resolve, never a verdict) — so it wraps
+// ErrMalformed rather than minting a fourth error class. The actor-scoped
+// (state) face is UNCHANGED and continues to accept op=create through
+// Invoke (checkpoint's own birth verb, §3.2's "状态面 Invoke 路零改动") —
+// this gate lives ONLY on boundHandle.Invoke, never in the shared ingress()
+// cluster both faces run.
+var ErrCreateViaInvoke = fmt.Errorf("%w: op=create must use the Create method, not Invoke (资源面 create 单入口)", ErrMalformed)
+
+// Invoke runs ingress (structure → ErrMalformed), then the create单入口 gate,
+// then the day-1 Ops-overreach judgment (→ access_denied verdict), then the
+// decision tree under the welded caller. The rejection layers stay distinct:
+// a structural fault is a Go error before anything resolves; overreach is a
+// verdict.
 func (h boundHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
 	if err := ingress(op, id, args, grant); err != nil {
 		return Outcome{}, err
+	}
+	if op == access.OpCreate {
+		return Outcome{}, ErrCreateViaInvoke
 	}
 	if over, ok := day1OpsOverreach(op, grant); ok && over {
 		return Outcome{RejectReason: access.AccessDenied}, nil
@@ -41,28 +126,54 @@ func (h boundHandle) Invoke(ctx context.Context, op access.Operation, id resourc
 	return h.door.invoke(ctx, h.caller, op, id, args, grant)
 }
 
+// Create runs the create-specific ingress (structure → ErrMalformed), then
+// the create decision tree under the welded caller.
+func (h boundHandle) Create(ctx context.Context, id resource.ResourceID, spec resourcespec.CreateSpec, initial []byte) (Outcome, error) {
+	if err := ingressCreate(id, spec, initial); err != nil {
+		return Outcome{}, err
+	}
+	return h.door.create(ctx, h.caller, id, spec, initial)
+}
+
+// Stat runs the read-face projection under the welded caller.
+func (h boundHandle) Stat(ctx context.Context, id resource.ResourceID) (StatResult, error) {
+	if err := checkResourceID(id); err != nil {
+		return StatResult{}, err
+	}
+	return h.door.stat(ctx, h.caller, id)
+}
+
+// List runs the read-face pagination under the welded caller.
+func (h boundHandle) List(ctx context.Context, q ListQuery) (ListPage, error) {
+	return h.door.list(ctx, h.caller, q)
+}
+
 // AccessMinter is the door's ONE outward face (mirroring harness.Minter's
 // discipline: New hands out only a Minter, the bare door stays sealed). It has two
 // mint faces, one per scope:
 //   - Mint welds a caller for the channel-scoped tree — the door is already bound
 //     to its channel/Registry via Deps, and R authorization needs no kind, so one
-//     parameter suffices;
+//     parameter suffices. Its return type is the WIDE resource face
+//     (ResourceAccessHandle, §3.1) — the channel-scoped locus is where
+//     Create/Stat/List live;
 //   - MintState welds an owner for the actor-scoped (collapsed) branch. It is the
 //     injection-point contract handed to the downstream: platform draws an
 //     owner-welded handle from here when it wires caps — runtime defines the
 //     contract, WHEN/HOW the downstream wraps it (liveAccess) is the downstream's
-//     concern. Both return the SAME AccessHandle contract (same door, same handle
-//     interface), so every consumer downstream treats the two alike.
+//     concern. Its return type stays the NARROW AccessHandle (Invoke only) — the
+//     scope law itself: there is no kind/R/membership at this locus for
+//     Create/Stat/List to mean anything, so the interface does not offer them
+//     (§3.2's "不实现空方法" red line).
 type AccessMinter interface {
-	Mint(caller actor.ActorID) AccessHandle
+	Mint(caller actor.ActorID) ResourceAccessHandle
 	MintState(owner actor.ActorID) AccessHandle
 }
 
 type minter struct{ door *door }
 
-// Mint welds caller onto the door and returns a handle. Deterministic and cheap;
-// admission points may Mint per-caller freely.
-func (m *minter) Mint(caller actor.ActorID) AccessHandle {
+// Mint welds caller onto the door and returns a resource-face handle.
+// Deterministic and cheap; admission points may Mint per-caller freely.
+func (m *minter) Mint(caller actor.ActorID) ResourceAccessHandle {
 	return boundHandle{door: m.door, caller: caller}
 }
 

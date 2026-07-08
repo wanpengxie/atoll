@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
 // fork_census_test.go is S4's acceptance: the fork子代户籍轴 (spec §4.1/§4.4). A
@@ -198,9 +199,9 @@ func TestFork_ChildDurableCreateDenied(t *testing.T) {
 
 	// The child is NOT a member (fork is not an introduce门). A channel-scoped
 	// create must be denied at the door's IsMember check.
-	out, err := childCaps.Access.Invoke(ctx, access.OpCreate, resource.ResourceID("res:child-orphan"), []byte("{}"), nil)
+	out, err := childCaps.Access.Create(ctx, resource.ResourceID("res:child-orphan"), resourcespec.CreateSpec{Kind: resourcespec.KindKV}, []byte("{}"))
 	if err != nil {
-		t.Fatalf("child durable create Invoke: %v", err)
+		t.Fatalf("child durable create: %v", err)
 	}
 	if out.Accepted() {
 		t.Fatal("fork child created a channel-scoped resource — the门 must deny a non-member's create (orphan-resource source)")
@@ -211,9 +212,9 @@ func TestFork_ChildDurableCreateDenied(t *testing.T) {
 
 	// Contrast: the parent IS a member and CAN create — proves the denial is the
 	// child's non-membership, not a broken door.
-	pout, err := parentCaps.Access.Invoke(ctx, access.OpCreate, resource.ResourceID("res:parent-owned"), []byte("{}"), nil)
+	pout, err := parentCaps.Access.Create(ctx, resource.ResourceID("res:parent-owned"), resourcespec.CreateSpec{Kind: resourcespec.KindKV}, []byte("{}"))
 	if err != nil {
-		t.Fatalf("parent durable create Invoke: %v", err)
+		t.Fatalf("parent durable create: %v", err)
 	}
 	if !pout.Accepted() {
 		t.Fatalf("parent (a member) create was denied: %q — the door itself is broken", pout.RejectReason)

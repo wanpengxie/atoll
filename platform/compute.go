@@ -11,6 +11,7 @@ package platform
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -22,6 +23,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
@@ -216,6 +218,224 @@ type ComputeConfig struct {
 	Builder ComputeBuilder
 	// Poll is the ring's desired-source poll period. <=0 → defaultComputePoll.
 	Poll time.Duration
+	// StorageHost (optional, 期11 §4) is the daemon's file-kind storage host
+	// — cmd/daemon/internal/storagehost.Host, injected by cmd/daemon/main.go
+	// (this package cannot construct one itself: the concrete os.Root-touching
+	// implementation lives in a cmd/daemon-confined package, §8.2's
+	// server-zero-storage red line — RunCompute only ROUTES already-built
+	// control-plane frames to it). nil → every AllocRequest this daemon
+	// receives is answered honestly OK:false (no storage host wired), and no
+	// Scrubber pass ever runs (a daemon that never hosts file-kind resources
+	// needs neither).
+	StorageHost StorageHost
+	// ScrubberInterval overrides the storage-host reconcile bridge's periodic
+	// ReconcilePull cadence (storageHostForwarder.pump). <=0 →
+	// scrubberPumpInterval (60s, production default). A startup pass ALWAYS
+	// runs immediately regardless of this value — only the PERIODIC ticker
+	// after it is affected. Additive test-only knob (mirrors Poll's own
+	// nil-safe-default shape): a walk test driving delete→tombstone→
+	// ReclaimAck end-to-end needs a fast, deterministic cadence rather than
+	// production's 60s backstop interval.
+	ScrubberInterval time.Duration
+	// LocalFileOpener (optional, 期11 §5) is the daemon-side same-machine
+	// byte-access capability the resource lane's Local route and this
+	// daemon's own lane-inbound (target) handler both redeem through —
+	// SAME underlying storagehost.Host as StorageHost, a DIFFERENT facet of
+	// it (Streamer's OpenRead/OpenWrite rather than Alloc/Reconcile). No
+	// mirror type is needed here (unlike StorageHost's Reconcile shapes):
+	// its signature is expressed purely in io.ReadSeekCloser +
+	// accessdoor.LocalWriteHandle, both already reachable from cmd/daemon's
+	// adapter without importing platform/internal/link. nil → every file
+	// byte redemption on this compute answers an honest "no storage host
+	// wired" error.
+	LocalFileOpener LocalFileOpener
+}
+
+// LocalFileOpener mirrors platform/internal/link.LocalFileOpener's exact
+// method set (期11 spec §5/§3.4's "daemon 本地颁 os.Root 子句柄") — a
+// SEPARATE named interface (not an alias) purely so cmd/daemon/main.go's
+// wiring code reads against platform's own public vocabulary rather than
+// reaching into platform/internal/link (which it cannot import); Go's
+// structural interface typing makes the two directly interchangeable at
+// RunCompute's Dialer.SetLocalFileOpener call site with no adapter needed.
+type LocalFileOpener interface {
+	OpenRead(coord string) (io.ReadSeekCloser, error)
+	OpenWrite(coord string) (accessdoor.LocalWriteHandle, error)
+	// OpenDir opens coord as a directory-shaped resource's SUBTREE lease (期11
+	// 丁12) — an os.Root confined to live/<coord>, surfaced behind
+	// accessdoor.LocalDirHandle (the os.Root TYPE stays inside cmd/daemon per
+	// the server-zero-storage archtest; this interface names only its method
+	// set). Redeemed for Open(dir资源) on the same-daemon Local route only.
+	OpenDir(coord string) (accessdoor.LocalDirHandle, error)
+}
+
+// StorageResourceCoord / StorageReservationCoord / StorageTombstoneCoord are
+// StorageHost.Reconcile's injection-point shapes — plain data, deliberately
+// NOT aliases of platform/internal/link's own wire types: the implementor
+// (cmd/daemon/internal/storagehost.Host) lives OUTSIDE platform/internal's
+// Go-enforced visibility boundary and cannot reference those types even by
+// alias-name. This mirrors the CONCEPTUAL layering resourcespec/store and
+// accessdoor/resourcespec already draw — a fresh mirror type at a boundary a
+// downstream package cannot import across, translated by the ONE adapter
+// that can see both sides (storageHostForwarder below, for this boundary;
+// StorageHost.Alloc's own two arguments are plain string/bool, needing no
+// mirror struct at all).
+type (
+	StorageResourceCoord    struct{ Coord string }
+	StorageReservationCoord struct{ ReservationID, Coord string }
+	StorageTombstoneCoord   struct{ TombstoneID, Coord, Provenance string }
+)
+
+// StorageReclaimAckFunc is Reconcile's network callback — RunCompute's
+// bridge (storageHostForwarder) supplies a closure bound to whichever
+// *link.Dialer is CURRENTLY connected; the StorageHost implementor never
+// holds a live connection reference itself.
+type StorageReclaimAckFunc func(ctx context.Context, tombstoneID string) (found bool, err error)
+
+// StorageCommittedResendFunc is Reconcile's OTHER network callback (期11 S6,
+// found+built during platform-level crash-recovery walk verification — see
+// cmd/daemon/internal/storagehost.CommittedResendFunc's doc for why it did
+// not already exist): resumes a pending reservation whose bytes already
+// landed locally before this daemon (re)connected, by resending
+// Committed(reservationID) — §1.7's "daemon rename后Committed未达即daemon
+// crash" recovery path.
+type StorageCommittedResendFunc func(ctx context.Context, reservationID string) (found, lost bool, err error)
+
+// StorageHost is the daemon storage host's injection-point contract (期11
+// §4): implemented by cmd/daemon/internal/storagehost.Host (via a thin
+// cmd/daemon-side adapter — Host's own method shapes already match this
+// exactly, see its doc). Every method uses only the plain types above, never
+// platform/internal/link's wire types, because the implementor cannot
+// import that package (outside its Go-enforced internal/ visibility).
+type StorageHost interface {
+	// Alloc performs the mkdir/touch for one AllocRequest.
+	Alloc(coord string, dir bool) error
+	// Reconcile runs one Scrubber pass against the home's ReconcilePullReply
+	// (already translated to plain types by storageHostForwarder).
+	Reconcile(ctx context.Context, resources []StorageResourceCoord, pendingReservations []StorageReservationCoord, pendingTombstones []StorageTombstoneCoord, ack StorageReclaimAckFunc, resend StorageCommittedResendFunc)
+}
+
+// storageHostForwarder is StorageHost's daemon-lifetime bridge to the link
+// layer — mirrors cellObsForwarder/cellCancelForwarder's OWN shape exactly
+// (built once outside the redial loop, Rebind'd on every successful
+// (re)connect, its background pump reads whichever Dialer Rebind last
+// stored): the ONE place both the plain StorageHost vocabulary and
+// platform/internal/link's wire types are simultaneously in scope, so it is
+// also where every field-by-field translation between them happens.
+type storageHostForwarder struct {
+	host     StorageHost
+	logger   *slog.Logger
+	interval time.Duration
+	d        atomic.Pointer[link.Dialer]
+}
+
+func newStorageHostForwarder(host StorageHost, logger *slog.Logger, interval time.Duration) *storageHostForwarder {
+	if interval <= 0 {
+		interval = scrubberPumpInterval
+	}
+	return &storageHostForwarder{host: host, logger: logger, interval: interval}
+}
+
+// Rebind swaps in the currently-connected Dialer (obsFwd/cancelFwd's own
+// pattern) and installs handleAlloc as its inbound AllocRequest handler —
+// every (re)connect re-installs it, since SetAllocHandler is per-Dialer
+// state that does not survive a reconnect.
+func (f *storageHostForwarder) Rebind(d *link.Dialer) {
+	f.d.Store(d)
+	if f.host != nil {
+		d.SetAllocHandler(f.handleAlloc)
+	}
+}
+
+// handleAlloc answers one inbound AllocRequest by calling the injected
+// StorageHost — nil host (never wired) answers an honest OK:false rather
+// than silently dropping (this RPC plane is request/response).
+func (f *storageHostForwarder) handleAlloc(req link.AllocRequest) link.AllocReply {
+	if f.host == nil {
+		return link.AllocReply{OK: false, Reason: "platform: no storage host wired on this compute"}
+	}
+	if err := f.host.Alloc(req.Coord, req.Dir); err != nil {
+		return link.AllocReply{OK: false, Reason: err.Error()}
+	}
+	return link.AllocReply{OK: true}
+}
+
+// scrubberPumpInterval is the Scrubber pass cadence this bridge drives —
+// generous relative to the lease ping/TTL (10s/30s), a recovery backstop
+// rather than a liveness signal (mirrors storagehost.scrubberInterval's own
+// reasoning, duplicated here since that constant lives in a package this
+// one cannot import).
+const scrubberPumpInterval = 60 * time.Second
+
+// pump drives the startup pass then a periodic ticker for the daemon's
+// whole lifetime (ctx-bound) — the same shape cellObsForwarder.pump/
+// cellCancelForwarder already have for their own daemon-lifetime arms. A
+// nil host makes every pass a no-op (nothing to reconcile, no point paying
+// a ReconcilePull round trip).
+func (f *storageHostForwarder) pump(ctx context.Context) {
+	if f.host == nil {
+		return
+	}
+	f.pass(ctx)
+	t := time.NewTicker(f.interval)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			f.pass(ctx)
+		}
+	}
+}
+
+// pass runs ONE ReconcilePull round trip (against whichever Dialer is
+// currently connected) and, on success, translates the reply into
+// StorageHost.Reconcile's plain shapes. A nil Dialer (never connected yet /
+// mid-reconnect) or a failed ReconcilePull just skips this pass — the next
+// tick retries, the same level-triggered discipline every reconcile ring in
+// this codebase already has.
+func (f *storageHostForwarder) pass(ctx context.Context) {
+	d := f.d.Load()
+	if d == nil {
+		return
+	}
+	reply, err := d.SendReconcilePull(ctx)
+	if err != nil {
+		f.logger.Warn("platform.compute.storage_reconcile_pull_failed", "err", err)
+		return
+	}
+
+	resources := make([]StorageResourceCoord, 0, len(reply.Resources))
+	for _, r := range reply.Resources {
+		resources = append(resources, StorageResourceCoord{Coord: r.Coord})
+	}
+	pendingReservations := make([]StorageReservationCoord, 0, len(reply.PendingReservations))
+	for _, r := range reply.PendingReservations {
+		pendingReservations = append(pendingReservations, StorageReservationCoord{ReservationID: r.ReservationID, Coord: r.Coord})
+	}
+	pendingTombstones := make([]StorageTombstoneCoord, 0, len(reply.PendingTombstones))
+	for _, t := range reply.PendingTombstones {
+		pendingTombstones = append(pendingTombstones, StorageTombstoneCoord{TombstoneID: t.TombstoneID, Coord: t.Coord, Provenance: t.Provenance})
+	}
+
+	ack := func(ctx context.Context, tombstoneID string) (bool, error) {
+		d := f.d.Load() // re-load: a reconnect may have happened between pass start and ack
+		if d == nil {
+			return false, fmt.Errorf("platform: no live connection to ack tombstone %q", tombstoneID)
+		}
+		reply, err := d.SendReclaimAck(ctx, tombstoneID)
+		return reply.Found, err
+	}
+	resend := func(ctx context.Context, reservationID string) (bool, bool, error) {
+		d := f.d.Load() // re-load: a reconnect may have happened between pass start and resend
+		if d == nil {
+			return false, false, fmt.Errorf("platform: no live connection to resend committed %q", reservationID)
+		}
+		reply, err := d.SendCommitted(ctx, reservationID)
+		return reply.Found, reply.Lost, err
+	}
+	f.host.Reconcile(ctx, resources, pendingReservations, pendingTombstones, ack, resend)
 }
 
 // redialInitialBackoff / redialMaxBackoff bound the daemon's reconnect retry
@@ -297,6 +517,11 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 	// built once, Rebind'd per connection, so a hosted caller's Canceller always
 	// sends up whichever Dialer is currently connected.
 	cancelFwd := newCellCancelForwarder()
+	// The storage host bridge (期11 §4), same daemon-lifetime shape as
+	// obsFwd/cancelFwd — built once (nil-host-safe: cfg.StorageHost may be
+	// nil), Rebind'd per connection, pumped for the daemon's whole life.
+	storageFwd := newStorageHostForwarder(cfg.StorageHost, logger, cfg.ScrubberInterval)
+	go storageFwd.pump(ctx)
 
 	ring := &computeRing{
 		rt:          rt,
@@ -339,6 +564,13 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 		d.SetDespawnLocal(func(id actor.ActorID) { rt.DespawnID(id) })
 		obsFwd.Rebind(d)
 		cancelFwd.Rebind(d)
+		storageFwd.Rebind(d)
+		d.SetLocalFileOpener(cfg.LocalFileOpener)
+		// §5's resource lane needs no per-connection carrier setup any more (片③
+		// flattened it): the Dialer accepts home-relayed inbound lane substreams
+		// via its always-running accept loop, and opens its own redeem substreams
+		// on demand — both live for the connection's whole life without a
+		// dedicated open step here.
 
 		graceful := ring.runLink(ctx, d, cfg.Desired, poll)
 		_ = d.Close() // idempotent: a no-op if the link already tore itself down.

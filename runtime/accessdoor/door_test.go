@@ -9,13 +9,16 @@ import (
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
-// --- create branch ---
+// --- create branch (期11 §3.1: create is its own method, door.create — no
+//     longer reachable through invoke at all) ---
 
-func TestInvokeCreate(t *testing.T) {
+func TestDoorCreate(t *testing.T) {
+	kvSpec := resourcespec.CreateSpec{Kind: resourcespec.KindKV}
+
 	t.Run("existing id rejects already_exists", func(t *testing.T) {
 		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
-		out, err := d.invoke(t.Context(), "a", access.OpCreate, "r1", []byte("v"), nil)
+		out, err := d.create(t.Context(), "a", "r1", kvSpec, []byte("v"))
 		mustVerdict(t, out, err, access.AlreadyExists)
 		if len(reg.createCalls) != 0 {
 			t.Fatalf("Create must not run when id exists")
@@ -25,7 +28,7 @@ func TestInvokeCreate(t *testing.T) {
 	t.Run("non-member rejects access_denied", func(t *testing.T) {
 		reg := &fakeRegistry{}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: false})
-		out, err := d.invoke(t.Context(), "x", access.OpCreate, "r1", nil, nil)
+		out, err := d.create(t.Context(), "x", "r1", kvSpec, nil)
 		mustVerdict(t, out, err, access.AccessDenied)
 		if len(reg.createCalls) != 0 {
 			t.Fatalf("Create must not run for a non-member")
@@ -35,7 +38,7 @@ func TestInvokeCreate(t *testing.T) {
 	t.Run("member creates with KindKV and initial bytes", func(t *testing.T) {
 		reg := &fakeRegistry{}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
-		out, err := d.invoke(t.Context(), "a", access.OpCreate, "r1", []byte("hi"), nil)
+		out, err := d.create(t.Context(), "a", "r1", kvSpec, []byte("hi"))
 		mustAccept(t, out, err)
 		if len(reg.createCalls) != 1 {
 			t.Fatalf("expected one Create call, got %d", len(reg.createCalls))
@@ -49,23 +52,162 @@ func TestInvokeCreate(t *testing.T) {
 	t.Run("Create ErrAlreadyExists maps to already_exists verdict", func(t *testing.T) {
 		reg := &fakeRegistry{createErr: resourcespec.ErrAlreadyExists}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
-		out, err := d.invoke(t.Context(), "a", access.OpCreate, "r1", nil, nil)
+		out, err := d.create(t.Context(), "a", "r1", kvSpec, nil)
 		mustVerdict(t, out, err, access.AlreadyExists)
 	})
 
 	t.Run("Create other error maps to driver_error verdict", func(t *testing.T) {
 		reg := &fakeRegistry{createErr: errors.New("boom")}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
-		out, err := d.invoke(t.Context(), "a", access.OpCreate, "r1", nil, nil)
+		out, err := d.create(t.Context(), "a", "r1", kvSpec, nil)
 		mustVerdict(t, out, err, access.DriverError)
 	})
 
 	t.Run("membership error is a Go error", func(t *testing.T) {
 		reg := &fakeRegistry{}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{err: errors.New("mem down")})
-		_, err := d.invoke(t.Context(), "a", access.OpCreate, "r1", nil, nil)
+		_, err := d.create(t.Context(), "a", "r1", kvSpec, nil)
 		if err == nil {
 			t.Fatalf("expected Go error on membership failure")
+		}
+	})
+
+	t.Run("file kind fails honestly when placement Deps are unwired", func(t *testing.T) {
+		reg := &fakeRegistry{}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true})
+		_, err := d.create(t.Context(), "a", "r1", resourcespec.CreateSpec{Kind: resourcespec.KindFile}, nil)
+		if err == nil {
+			t.Fatalf("expected a Go error when Deps.StorageMounts is nil")
+		}
+		if len(reg.createCalls) != 0 {
+			t.Fatalf("Registry.Create must not run when placement routing is unavailable")
+		}
+	})
+}
+
+// --- file-kind create: placement chain wiring (期11 §4) ---
+
+func TestDoorCreateFileKindPlacement(t *testing.T) {
+	fileSpec := resourcespec.CreateSpec{Kind: resourcespec.KindFile}
+	fileSpecWithContent := resourcespec.CreateSpec{Kind: resourcespec.KindFile, WithContent: true}
+
+	t.Run("creator affinity (chain ①) picks the creator's own online host", func(t *testing.T) {
+		reg := &fakeRegistry{commitReservationFound: true}
+		mem := &fakeMembership{isMember: true, lookupHost: "daemon-1", lookupFound: true}
+		mounts := &fakeStorageMounts{mounts: []StorageMount{
+			{DaemonID: "daemon-1", Online: true},
+			{DaemonID: "daemon-2", Online: true},
+		}}
+		ctl := &fakeStorageControl{}
+		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
+
+		out, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		mustAccept(t, out, err)
+
+		if len(ctl.calls) != 1 || ctl.calls[0].daemonID != "daemon-1" {
+			t.Fatalf("AllocRequest calls = %+v, want exactly one to daemon-1", ctl.calls)
+		}
+		if ctl.calls[0].spec.ChannelID != "ch1" {
+			t.Errorf("AllocRequest ChannelID = %q, want ch1", ctl.calls[0].spec.ChannelID)
+		}
+		if len(reg.reserveCreateCalls) != 1 || reg.reserveCreateCalls[0].placementDaemonID != "daemon-1" {
+			t.Fatalf("ReserveCreate calls = %+v, want one to daemon-1", reg.reserveCreateCalls)
+		}
+		if len(reg.commitReservationCalls) != 1 {
+			t.Fatalf("CommitReservation calls = %d, want 1 (content-less create commits synchronously on AllocRequest ack)", len(reg.commitReservationCalls))
+		}
+	})
+
+	t.Run("unique online candidate (chain ③) when creator has no host", func(t *testing.T) {
+		reg := &fakeRegistry{commitReservationFound: true}
+		mem := &fakeMembership{isMember: true} // no host: home-placed / human creator
+		mounts := &fakeStorageMounts{mounts: []StorageMount{{DaemonID: "solo-daemon", Online: true}}}
+		ctl := &fakeStorageControl{}
+		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
+
+		out, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		mustAccept(t, out, err)
+		if len(ctl.calls) != 1 || ctl.calls[0].daemonID != "solo-daemon" {
+			t.Fatalf("AllocRequest calls = %+v, want exactly one to solo-daemon", ctl.calls)
+		}
+	})
+
+	t.Run("chain ④ zero online daemons is an honest ErrNoStoragePlacement", func(t *testing.T) {
+		reg := &fakeRegistry{}
+		mem := &fakeMembership{isMember: true}
+		mounts := &fakeStorageMounts{}
+		ctl := &fakeStorageControl{}
+		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
+
+		_, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		if !errors.Is(err, ErrNoStoragePlacement) {
+			t.Fatalf("err = %v, want ErrNoStoragePlacement", err)
+		}
+		if len(reg.reserveCreateCalls) != 0 || len(ctl.calls) != 0 {
+			t.Fatalf("no reservation/alloc must be attempted with no placement chosen")
+		}
+	})
+
+	t.Run("chain ④ multiple online daemons with no creator affinity is ambiguous", func(t *testing.T) {
+		reg := &fakeRegistry{}
+		mem := &fakeMembership{isMember: true}
+		mounts := &fakeStorageMounts{mounts: []StorageMount{
+			{DaemonID: "daemon-1", Online: true},
+			{DaemonID: "daemon-2", Online: true},
+		}}
+		ctl := &fakeStorageControl{}
+		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
+
+		_, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		if !errors.Is(err, ErrAmbiguousStoragePlacement) {
+			t.Fatalf("err = %v, want ErrAmbiguousStoragePlacement", err)
+		}
+	})
+
+	t.Run("AllocRequest failure surfaces as a Go error, reservation left standing", func(t *testing.T) {
+		reg := &fakeRegistry{}
+		mem := &fakeMembership{isMember: true}
+		mounts := &fakeStorageMounts{mounts: []StorageMount{{DaemonID: "d1", Online: true}}}
+		ctl := &fakeStorageControl{err: errors.New("daemon unreachable")}
+		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
+
+		_, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		if err == nil {
+			t.Fatal("expected a Go error when AllocRequest fails")
+		}
+		if len(reg.commitReservationCalls) != 0 {
+			t.Fatal("CommitReservation must not run when AllocRequest failed")
+		}
+	})
+
+	t.Run("with_content=true resolves placement + reservation and returns a write Route", func(t *testing.T) {
+		reg := &fakeRegistry{}
+		mem := &fakeMembership{isMember: true, lookupHost: "daemon-1", lookupFound: true}
+		mounts := &fakeStorageMounts{mounts: []StorageMount{{DaemonID: "daemon-1", Online: true}}}
+		ctl := &fakeStorageControl{}
+		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
+
+		out, err := d.create(t.Context(), "a", "r1", fileSpecWithContent, nil)
+		if err != nil {
+			t.Fatalf("unexpected error %v", err)
+		}
+		if !out.Accepted() {
+			t.Fatalf("want accepted, got reject %q", out.RejectReason)
+		}
+		if out.Route == nil || !out.Route.Local || out.Route.Mode != access.OpWrite {
+			t.Fatalf("want a Local write Route (creator is daemon-1, same as placement), got %+v", out.Route)
+		}
+		if len(reg.reserveCreateCalls) != 1 {
+			t.Fatalf("ReserveCreate calls = %d, want 1 (placement+reservation ARE resolved for with_content)", len(reg.reserveCreateCalls))
+		}
+		if out.Route.ReservationID != "reservation-1" {
+			t.Fatalf("Route.ReservationID = %q, want the reservation ReserveCreate minted (\"reservation-1\", the fake's default)", out.Route.ReservationID)
+		}
+		if len(ctl.calls) != 0 {
+			t.Fatalf("AllocRequest must not run for with_content=true (that is the write path's job, §5)")
+		}
+		if len(reg.commitReservationCalls) != 0 {
+			t.Fatalf("CommitReservation must not run synchronously for with_content=true — that lands via the daemon's Committed RPC (§1.7)")
 		}
 	})
 }
@@ -258,11 +400,15 @@ func TestInvokeResolveErrorIsGoError(t *testing.T) {
 }
 
 func TestInvokeMissingDriverIsGoError(t *testing.T) {
-	// Resolve returns a kind with no registered driver → assembly defect.
-	reg := &fakeRegistry{resolveExists: true, resolveMeta: resourcespec.ResourceMeta{Kind: resourcespec.ResourceKind("file")}, actorAllows: true}
+	// A kv-shaped kind resolved with no registered driver → assembly defect
+	// (this is the GENUINE "someone added a kind without wiring its driver"
+	// gap — distinct from file, which structurally never gets a DriverTable
+	// entry at all, see TestInvokeFileReadWriteRedirectsToByteRoute below).
+	const bogusKind = resourcespec.ResourceKind("bogus-inline-kind")
+	reg := &fakeRegistry{resolveExists: true, resolveMeta: resourcespec.ResourceMeta{Kind: bogusKind}, actorAllows: true}
 	d := &door{deps: Deps{
 		Registry:   reg,
-		Drivers:    DriverTable{resourcespec.KindKV: &fakeDriver{}}, // KindKV present, "file" absent
+		Drivers:    DriverTable{resourcespec.KindKV: &fakeDriver{}}, // KindKV present, bogusKind absent
 		Membership: &fakeMembership{},
 	}}
 	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpDelete} {
@@ -270,6 +416,111 @@ func TestInvokeMissingDriverIsGoError(t *testing.T) {
 		if err == nil {
 			t.Fatalf("op %q with no driver must be a Go error", op)
 		}
+	}
+}
+
+// TestInvokeFileReadWriteProducesRoute pins 期11 spec §3.4/§5's execute-arm
+// kind branch: file read/write through Invoke never touches a Driver (file
+// structurally has none — its bytes are realized by the daemon-side
+// Allocator/Streamer, §4) and never carries bytes on Outcome.Value (§8.1) —
+// an accepted outcome carries a FileRoute instead, Local when the caller's
+// Membership.Lookup Host matches the resource's placement daemon, a minted
+// lane Token otherwise.
+func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
+	meta := resourcespec.ResourceMeta{Kind: resourcespec.KindFile, PlacementDaemonID: "daemon-1", PlacementCoord: "coord-1"}
+
+	t.Run("same-daemon caller gets a Local route, no bytes on Value", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
+		mem := &fakeMembership{lookupHost: "daemon-1", lookupFound: true}
+		lane := &fakeLaneControl{}
+		d := newDoor(reg, &fakeDriver{}, mem)
+		d.deps.LaneControl = lane
+		for _, op := range []access.Operation{access.OpRead, access.OpWrite} {
+			out, err := d.invoke(context.Background(), "a", op, "r1", nil, nil)
+			if err != nil {
+				t.Fatalf("op %q: unexpected error %v", op, err)
+			}
+			if !out.Accepted() {
+				t.Fatalf("op %q: want accepted, got reject %q", op, out.RejectReason)
+			}
+			if out.Value != nil {
+				t.Fatalf("op %q: file bytes must never ride Outcome.Value, got %v", op, out.Value)
+			}
+			if out.Route == nil || !out.Route.Local {
+				t.Fatalf("op %q: want Local route, got %+v", op, out.Route)
+			}
+			if out.Route.Mode != op {
+				t.Fatalf("op %q: route Mode = %q, want %q", op, out.Route.Mode, op)
+			}
+		}
+		if len(lane.calls) != 2 {
+			t.Fatalf("OpenTransfer calls = %d, want 2 (one per op — a Token still mints for the Local branch's ResolveCoord step)", len(lane.calls))
+		}
+	})
+
+	t.Run("cross-host caller gets a Stream route (minted Token)", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
+		mem := &fakeMembership{lookupHost: "daemon-2", lookupFound: true}
+		lane := &fakeLaneControl{token: "tok-xyz"}
+		d := newDoor(reg, &fakeDriver{}, mem)
+		d.deps.LaneControl = lane
+
+		out, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil, nil)
+		if err != nil {
+			t.Fatalf("unexpected error %v", err)
+		}
+		if out.Route == nil || out.Route.Local {
+			t.Fatalf("want a non-Local route, got %+v", out.Route)
+		}
+		if out.Route.Token != "tok-xyz" {
+			t.Fatalf("Token = %q, want %q", out.Route.Token, "tok-xyz")
+		}
+		if len(lane.calls) != 1 || lane.calls[0].targetDaemonID != "daemon-1" || lane.calls[0].requesterDaemonID != "daemon-2" || lane.calls[0].coord != "coord-1" {
+			t.Fatalf("OpenTransfer call = %+v, want target=daemon-1 requester=daemon-2 coord=coord-1", lane.calls)
+		}
+	})
+
+	t.Run("no Membership.Lookup host (home-hosted caller) is honestly non-Local", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
+		mem := &fakeMembership{} // lookupFound: false
+		lane := &fakeLaneControl{}
+		d := newDoor(reg, &fakeDriver{}, mem)
+		d.deps.LaneControl = lane
+
+		out, err := d.invoke(context.Background(), "a", access.OpWrite, "r1", nil, nil)
+		if err != nil {
+			t.Fatalf("unexpected error %v", err)
+		}
+		if out.Route == nil || out.Route.Local {
+			t.Fatalf("want a non-Local route for an unfound/home-hosted caller, got %+v", out.Route)
+		}
+	})
+
+	t.Run("nil Deps.LaneControl is an honest Go error, never a fabricated route", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{lookupHost: "daemon-1", lookupFound: true})
+		_, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil, nil)
+		if err == nil {
+			t.Fatal("expected a Go error when Deps.LaneControl is nil")
+		}
+	})
+}
+
+// TestInvokeFileDeleteRowFirstBytesLast pins 期11 spec §1.8/§3's flip: file
+// delete calls ONLY Registry.Delete (row-first-bytes-last, already a single
+// transaction inside Registry.Delete since S1) — no Driver.Delete call at
+// all, since file has no Driver.
+func TestInvokeFileDeleteRowFirstBytesLast(t *testing.T) {
+	reg := &fakeRegistry{resolveExists: true, resolveMeta: resourcespec.ResourceMeta{Kind: resourcespec.KindFile}, actorAllows: true}
+	drv := &fakeDriver{}
+	d := newDoor(reg, drv, &fakeMembership{})
+	out, err := d.invoke(context.Background(), "a", access.OpDelete, "r1", nil, nil)
+	mustAccept(t, out, err)
+	if drv.deleteCalls != 0 {
+		t.Fatalf("file delete must not call the Driver (file has none), got %d driver deletes", drv.deleteCalls)
+	}
+	if len(reg.deleteCalls) != 1 {
+		t.Fatalf("expected one Registry.Delete call, got %d", len(reg.deleteCalls))
 	}
 }
 

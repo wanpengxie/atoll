@@ -2,7 +2,6 @@ package platform
 
 import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -33,37 +32,29 @@ const (
 // archtest wall): a serve loop that answers each request per the three-choice type
 // table (immediate human.message / deferred human.approve / describe self-answer)
 // and Matches responses onto the author#2 Caller.
+// TODO(human-canonical): author#2 caller 耦合已随 platform/human.go 旧形整删
+// （2026-07-08）——本 cell（层1 embodiment + 三选应答）是正典要保留的半；subject
+// 自发 request 的 caller 台账随债②（human 入站）按正典重建时接回。
 func humanCellFactory(h *Home, id actor.ActorID) ActorFactory {
-	caller := h.humanCaller(id)
 	return ActorFactory{Proc: actorbase.Def{
 		Doc: "home-side human embodiment (subjectgate): callable; three-choice per-type closure (immediate human.message / deferred human.approve) + describe; the person answers deferred requests via the door",
 		New: func() (actorbase.Proc, error) {
-			return func(sys actorbase.Sys) error { return humanServe(sys, caller) }, nil
+			return func(sys actorbase.Sys) error { return humanServe(sys) }, nil
 		},
 	}}
 }
 
-// humanServe is the human cell's serve loop. Responses match the author#2 Caller
-// (closing the subject's own outstanding requests); requests route through the
+// humanServe is the human cell's serve loop: requests route through the
 // three-choice type table. Returning on a Recv error is the cooperative
-// termination contract (spec §1.6).
-func humanServe(sys actorbase.Sys, caller *behavior.Caller) error {
+// termination contract (spec §1.6). (author#2 response Match detached — see
+// TODO(human-canonical) above.)
+func humanServe(sys actorbase.Sys) error {
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
 			return nil
 		}
 		switch msg.Kind {
-		case message.KindResponse:
-			// author#2: a reply to one of THIS subject's outstanding requests
-			// (armed on the gateway goroutine) — close it on the cell goroutine.
-			// Match reads only Kind/ParentID/Payload, so a minimal projection back
-			// to an envelope is faithful.
-			caller.Match(&message.Envelope{
-				Kind:     msg.Kind,
-				ParentID: msg.ParentID,
-				Payload:  msg.Payload,
-			})
 		case message.KindRequest:
 			humanServeRequest(sys, msg)
 		}
