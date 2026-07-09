@@ -168,6 +168,13 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 			}
 			d.handleAllocRequest(*sf.AllocRequest)
 			return
+		case ctrlReclaimRequest:
+			sf, err := decodeStorageControl(payload)
+			if err != nil || sf.ReclaimRequest == nil {
+				return
+			}
+			d.handleReclaimRequest(*sf.ReclaimRequest)
+			return
 		case ctrlCommittedReply:
 			sf, err := decodeStorageControl(payload)
 			if err != nil || sf.CommittedReply == nil {
@@ -770,6 +777,35 @@ func (d *Dialer) handleAllocRequest(req AllocRequest) {
 	_ = d.lc.sendControl(raw)
 }
 
+// handleReclaimRequest answers one inbound ReclaimRequest (期11 review §2.5
+// #B, the content-less create loser's synchronous coord reclaim) on the same
+// synchronous onControl goroutine handleAllocRequest uses — a local
+// RemoveAll, expected fast. Reclaims coord's live bytes via the wired
+// LocalFileOpener (idempotent: an already-empty coord is a clean OK). A nil
+// opener (no storage host on this compute) answers OK:false with an honest
+// Reason, never a silent drop, exactly like handleAllocRequest.
+func (d *Dialer) handleReclaimRequest(req ReclaimRequest) {
+	d.mu.Lock()
+	opener := d.localFileOpener
+	d.mu.Unlock()
+	reply := ReclaimReply{RequestID: req.RequestID}
+	switch {
+	case opener == nil:
+		reply.Reason = "link: no storage host wired on this compute"
+	default:
+		if err := opener.ReclaimCoord(req.Coord); err != nil {
+			reply.Reason = err.Error()
+		} else {
+			reply.OK = true
+		}
+	}
+	raw, err := encodeStorageControl(storageControlFrame{Kind: ctrlReclaimReply, ReclaimReply: &reply})
+	if err != nil {
+		return
+	}
+	_ = d.lc.sendControl(raw)
+}
+
 // SendCommitted is the daemon's send-half of §4.7's second frame (create-
 // outbox landing, after staging→fsync→rename completes for a content-bearing
 // create): blocks for the correlated CommittedReply (or ctx/timeout/link-
@@ -810,9 +846,16 @@ func (d *Dialer) SendReclaimAck(ctx context.Context, tombstoneID string) (Reclai
 // SendReconcilePull is the Scrubber's periodic pull (§4.7's fourth frame,
 // level-triggered — the daemon holds no local truth, so this is its ONLY
 // source of "what should exist / what is pending" after a restart or on the
-// Scrubber's normal ticker cadence).
-func (d *Dialer) SendReconcilePull(ctx context.Context) (ReconcilePullReply, error) {
-	msg := ReconcilePull{RequestID: newRequestID()}
+// Scrubber's normal ticker cadence). activeCoords is 期11 review's own
+// narrowing addition — the caller's (platform.storageHostForwarder's) fresh
+// snapshot of coords with a currently-open local WriteHandle, forwarded
+// as-is so the home's liveness touch can bump exactly these rows and no
+// others (ReconcilePull.ActiveCoords's own doc). landedCoords is 期11 review
+// §2.5 #A's addition — the caller's fresh live/ directory listing, forwarded
+// so the home can flip matching pending reservations to phase='landed' BEFORE
+// its age-sweep (ReconcilePull.LandedCoords's own doc).
+func (d *Dialer) SendReconcilePull(ctx context.Context, activeCoords, landedCoords []string) (ReconcilePullReply, error) {
+	msg := ReconcilePull{RequestID: newRequestID(), ActiveCoords: activeCoords, LandedCoords: landedCoords}
 	ch := d.pendingReconcile.register(msg.RequestID)
 	raw, err := encodeStorageControl(storageControlFrame{Kind: ctrlReconcilePull, ReconcilePull: &msg})
 	if err != nil {
@@ -971,7 +1014,7 @@ func (d *Dialer) redeemFileRoute(ctx context.Context, route accessdoor.FileRoute
 				return accessdoor.FileAccess{}, oerr
 			}
 			if reply.ReservationID != "" {
-				wh = &committingWriteHandle{LocalWriteHandle: wh, dialer: d, reservationID: reply.ReservationID}
+				wh = &committingWriteHandle{LocalWriteHandle: wh, dialer: d, reservationID: reply.ReservationID, coord: reply.Coord}
 			}
 			return accessdoor.FileAccess{Local: &accessdoor.LocalFile{Write: wh}}, nil
 		default:
@@ -1011,15 +1054,81 @@ type committingWriteHandle struct {
 	accessdoor.LocalWriteHandle
 	dialer        *Dialer
 	reservationID string
+	// coord is this write's OWN landed coord (期11 S2, transfer-lifecycle-
+	// spec.md §3's #2) — carried alongside reservationID purely so Commit
+	// can name WHICH local bytes to reclaim if the home reports this
+	// reservation Lost; never sent over the wire itself (Committed only
+	// ever carries the reservation id, §1.7 P0-2).
+	coord string
 }
 
 func (h *committingWriteHandle) Commit() error {
 	if err := h.LocalWriteHandle.Commit(); err != nil {
 		return err
 	}
-	// Best-effort — see handleLaneInbound's identical note.
-	_, _ = h.dialer.SendCommitted(context.Background(), h.reservationID)
+	// The bytes are now durably fsync+renamed at h.coord. What remains is the
+	// home landing the resource row from this reservation.
+	reply, err := h.dialer.SendCommitted(context.Background(), h.reservationID)
+	if err != nil {
+		// 期11 review #D: a send failure (timeout / link down) is NOT success.
+		// The bytes DID land locally and the reservation stays phase=landed, so
+		// the Scrubber's resumeLandedReservations resend is the durable backstop
+		// that eventually lands the row (§1.7's third trigger). But the row is
+		// not visible YET — the actor must not be told the create succeeded.
+		// Surface the error rather than the pre-review bug's silent `nil`.
+		return fmt.Errorf("link: committed relay for reservation %q failed (bytes landed at %q, row reconciled on a later scrubber pass): %w", h.reservationID, h.coord, err)
+	}
+	if reply.Reason != "" && !reply.Lost {
+		// 期11 review残余#2a: the transport round-trip succeeded but the home
+		// itself explicitly NAK'd the commit (sender/placement mismatch, a
+		// store error, or no storage control wired on this channel —
+		// handleCommitted's own Reason-setting branches). The pre-fix code
+		// only checked err/Lost, so this reply.Reason WAS silently dropped
+		// and the caller was told nil (success) even though the row was
+		// never landed home-side. The bytes DID land locally (fsync+rename
+		// already happened above) and the Scrubber's resend backstop
+		// (§1.7's third trigger) is what actually reconciles the row later
+		// — but that is not THIS call's success to report.
+		return fmt.Errorf("link: committed relay for reservation %q rejected by home (bytes landed at %q, row reconciled on a later scrubber pass): %s", h.reservationID, h.coord, reply.Reason)
+	}
+	if reply.Lost {
+		// 期11 S2's "非-land 终态回收": this reservation lost the
+		// same-resource_id race — the resource id already belongs to whichever
+		// OTHER reservation landed first (ErrReservationLost's own doc), so THIS
+		// write's already-renamed bytes at h.coord are orphaned and must be
+		// collected, never retried. Lost is a DEFINITIVE store verdict (never a
+		// transient), so reclaiming here is safe. Fail loud (期11 review #D:
+		// a permanent reject is reported, never dressed as success).
+		h.dialer.reclaimLostCoord(h.coord)
+		return fmt.Errorf("link: create lost the race for its resource id (reservation %q); another create landed it first", h.reservationID)
+	}
+	// reply.Found==true landed the row; reply.Found==false is a benign no-op
+	// (a concurrent scrubber resumeLandedReservations resend already landed it,
+	// or the reservation was superseded by a Delete). Deliberately NO reclaim on
+	// found=false: it cannot be distinguished from a legitimately-committed-by-
+	// resend row, so reclaiming here would risk deleting live committed bytes —
+	// data loss strictly worse than a rare leftover empty coord.
 	return nil
+}
+
+// reclaimLostCoord is committingWriteHandle.Commit's Lost-branch helper,
+// split out so it is unit-testable without a live wire (a Dialer with only
+// localFileOpener set, no real websocket underneath). Logs — never panics
+// or returns — on a nil opener (no LocalFileOpener wired: nothing to
+// reclaim from) or a Reclaim failure (the NEXT Scrubber pass's own orphan
+// sweep is the backstop, exactly as every other best-effort daemon-side
+// cleanup in this file already documents).
+func (d *Dialer) reclaimLostCoord(coord string) {
+	d.mu.Lock()
+	opener := d.localFileOpener
+	d.mu.Unlock()
+	if opener == nil {
+		d.logger.Warn("link.reclaim_lost_coord_no_opener", "coord", coord)
+		return
+	}
+	if err := opener.ReclaimCoord(coord); err != nil {
+		d.logger.Warn("link.reclaim_lost_coord_failed", "coord", coord, "err", err)
+	}
 }
 
 // SendDeliverResult reports one non-Delivered local-deliver outcome UP the named

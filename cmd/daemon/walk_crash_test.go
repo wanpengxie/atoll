@@ -74,6 +74,10 @@ func (o interceptOpener) OpenDir(coord string) (accessdoor.LocalDirHandle, error
 	return o.real.OpenDir(coord)
 }
 
+func (o interceptOpener) ReclaimCoord(coord string) error {
+	return o.real.ReclaimCoord(coord)
+}
+
 type interceptWriteHandle struct {
 	accessdoor.LocalWriteHandle
 	onCommit func()

@@ -102,3 +102,26 @@ func stagingPath(coord, suffix string) (string, error) {
 }
 
 func (c *channelRoot) Close() error { return c.root.Close() }
+
+// fsyncDir fsyncs the directory at c's root-relative relDir (liveDir or
+// stagingDir — this package's only two directory entries ever mutated, both
+// flat: every coord is a DIRECT child, never nested, root.go's own doc) —
+// 期11 S3's parent-directory durability (transfer-lifecycle-spec.md §3's #7):
+// a file's own fsync (streamer.go's Commit) durably persists its BYTES, but
+// the directory ENTRY that makes a rename/mkdir/touch visible again after a
+// crash is a SEPARATE piece of metadata the containing directory itself
+// owns — POSIX's classic "fsync the parent too" rule. Without this, a crash
+// between rename()/Mkdir()/Create() returning and the directory's own
+// eventual writeback can resurrect the OLD (pre-rename/nonexistent) state on
+// reboot even though the file's own bytes were already durable.
+func fsyncDir(c *channelRoot, relDir string) error {
+	f, err := c.root.Open(relDir)
+	if err != nil {
+		return fmt.Errorf("storagehost: fsync dir open %q: %w", relDir, err)
+	}
+	defer func() { _ = f.Close() }()
+	if err := f.Sync(); err != nil {
+		return fmt.Errorf("storagehost: fsync dir %q: %w", relDir, err)
+	}
+	return nil
+}

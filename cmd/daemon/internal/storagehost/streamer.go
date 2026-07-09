@@ -43,6 +43,17 @@ type WriteHandle struct {
 	liveRelPath    string
 	f              *os.File
 	done           bool
+
+	// onDone is Host.OpenWrite's in-flight-registration deregistration hook
+	// (期11 S1 #6 — see Host.activeWrites' doc): fires exactly once, at
+	// Commit or Abort, regardless of outcome (a failed Commit/rename still
+	// ends this handle's "active write" window — a later Scrubber pass
+	// falling back to reserved_at/last_progress_at staleness, or plain
+	// crash-orphan sweep, is what decides whether a leftover staging file is
+	// now safe to sweep, not this hook). nil for a handle minted directly
+	// off Streamer (tests, or any caller that bypasses Host) — never invoked
+	// in that case, matching Streamer's own stateless, self-contained doc.
+	onDone func()
 }
 
 func (h *WriteHandle) Write(p []byte) (int, error) { return h.f.Write(p) }
@@ -55,6 +66,9 @@ func (h *WriteHandle) Commit() error {
 		return fmt.Errorf("storagehost: write handle already closed")
 	}
 	h.done = true
+	if h.onDone != nil {
+		defer h.onDone()
+	}
 	if err := h.f.Sync(); err != nil {
 		_ = h.f.Close()
 		return fmt.Errorf("storagehost: commit fsync: %w", err)
@@ -64,6 +78,11 @@ func (h *WriteHandle) Commit() error {
 	}
 	if err := h.cr.root.Rename(h.stagingRelPath, h.liveRelPath); err != nil {
 		return fmt.Errorf("storagehost: commit rename: %w", err)
+	}
+	// 期11 S3 (transfer-lifecycle-spec.md §3's #7): the rename's directory
+	// ENTRY into live/ needs its own fsync — see fsyncDir's doc.
+	if err := fsyncDir(h.cr, liveDir); err != nil {
+		return err
 	}
 	return nil
 }
@@ -76,6 +95,9 @@ func (h *WriteHandle) Abort() error {
 		return nil
 	}
 	h.done = true
+	if h.onDone != nil {
+		defer h.onDone()
+	}
 	_ = h.f.Close()
 	if err := h.cr.root.Remove(h.stagingRelPath); err != nil {
 		return fmt.Errorf("storagehost: abort remove staging: %w", err)

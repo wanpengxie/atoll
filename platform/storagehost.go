@@ -83,6 +83,18 @@ func (c lateStorageControl) AllocRequest(ctx context.Context, daemonID string, s
 	})
 }
 
+// ReclaimRequest implements accessdoor.StorageControl's 期11 review §2.5 #B
+// arm: routes the content-less create loser's coord reclaim to the Acceptor's
+// per-daemon live connection (link.Acceptor.SendReclaimRequest), the delete
+// mirror of AllocRequest above.
+func (c lateStorageControl) ReclaimRequest(ctx context.Context, daemonID string, coord string) error {
+	a := c.acc.get()
+	if a == nil {
+		return errors.New("platform: storage control not wired yet (Acceptor not built)")
+	}
+	return a.SendReclaimRequest(ctx, daemonID, coord)
+}
+
 // lateLaneControl implements accessdoor.LaneControl over a lateAcceptor —
 // §5's Token-mint injection point, same late-bound discipline as
 // lateStorageMounts/lateStorageControl above (the Acceptor owns the lane
@@ -182,20 +194,53 @@ func (h homeStorageHostControl) ReclaimAck(ctx context.Context, senderDaemonID, 
 	return h.outbox.ClearTombstone(ctx, tombstoneID)
 }
 
-func (h homeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
+func (h homeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords, landedCoords []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
 	// No separate sender-auth check here: unlike Committed/ReclaimAck (which
 	// name a specific reservation/tombstone id that could belong to ANOTHER
 	// daemon), ReconcilePull carries no target id of its own — senderDaemonID
 	// IS the query, and every List*ByDaemon call below is already filtered to
 	// exactly that id server-side (§4.7: "只返回该 sender 名下的 rows").
 	//
+	// Mark landed FIRST, BEFORE the sweep (期11 review §2.5 #A): the daemon's
+	// landedCoords is its fresh live/ directory listing, so a pending
+	// reservation whose bytes are durably renamed into live/ flips to
+	// phase='landed' here — and SweepExpiredReservations (phase='reserved'
+	// only) can then never destroy it, however long its Committed has been
+	// delayed/lost. This closes the P0 where a landed-but-uncommitted create
+	// >timeout old is reclaimed as abandoned before the daemon's resend can
+	// land its row. Disk-derived and reported afresh every pull, so the very
+	// first pull after a long crash gap already protects its landed rows.
+	if err := h.outbox.MarkReservationsLanded(ctx, senderDaemonID, landedCoords); err != nil {
+		return nil, nil, nil, err
+	}
+
 	// Sweep BEFORE listing (§1.7's third trigger, level-triggered exactly
 	// here — "ReconcilePull 响应时删"): a reservation this daemon has aged
-	// past reservationTimeout() never appears in the pendingReservations
-	// this call returns, so the daemon never resumes/resends for one the
-	// server has already abandoned.
+	// past reservationTimeout() (AND still phase='reserved') never appears in
+	// the pendingReservations this call returns, so the daemon never
+	// resumes/resends for one the server has already abandoned. Sweep reads the
+	// PRE-touch last_progress_at (期11 S1) — a daemon that has gone silent long
+	// enough still ages out on schedule, even though every call that DOES
+	// arrive touches its own rows immediately below.
 	cutoff := h.nowFn()().Add(-h.reservationTimeout()).UnixMilli()
 	if _, err := h.outbox.SweepExpiredReservations(ctx, senderDaemonID, cutoff); err != nil {
+		return nil, nil, nil, err
+	}
+
+	// Touch AFTER sweep, BEFORE listing (期11 S1's "在途登记" liveness bump —
+	// resourcespec.Registry.TouchReservationsByCoords's own doc), NARROWED
+	// by 期11 review to the caller-supplied activeCoords: this daemon just
+	// proved ITS OWN currently-open WriteHandles (cmd/daemon/internal/
+	// storagehost.Host.ActiveWriteCoords, forwarded through the
+	// ReconcilePull frame) reachable, so ONLY the reservations whose coord
+	// is in that set are stamped alive as of now — not every reservation
+	// this daemon happens to still own. A reservation whose coord is
+	// missing from activeCoords (AllocRequest never reached the daemon, or
+	// the write was abandoned/never opened) gets NOTHING bumped for it,
+	// so it ages out on schedule even while the daemon keeps polling on its
+	// normal cadence — the bug this narrowing fixes: "daemon online" is not
+	// "this reservation is alive".
+	if err := h.outbox.TouchReservationsByCoords(ctx, senderDaemonID, activeCoords, h.nowFn()().UnixMilli()); err != nil {
 		return nil, nil, nil, err
 	}
 

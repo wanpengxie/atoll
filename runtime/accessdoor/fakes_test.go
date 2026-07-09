@@ -153,6 +153,16 @@ func (r *fakeRegistry) SweepExpiredReservations(ctx context.Context, daemonID st
 	return nil, errors.New("fakeRegistry: SweepExpiredReservations not wired (no accessdoor caller)")
 }
 
+func (r *fakeRegistry) TouchReservationsByCoords(ctx context.Context, daemonID string, coords []string, atMs int64) error {
+	r.calls++
+	return errors.New("fakeRegistry: TouchReservationsByCoords not wired (no accessdoor caller)")
+}
+
+func (r *fakeRegistry) MarkReservationsLanded(ctx context.Context, daemonID string, coords []string) error {
+	r.calls++
+	return errors.New("fakeRegistry: MarkReservationsLanded not wired (no accessdoor caller)")
+}
+
 // List is §3.7's door-level consumer (door.list, query.go): canned rows +
 // nextCursor let a test drive the any-grant projection over MULTIPLE rows
 // with distinct grant shapes in one call — a single-bool fake cannot express
@@ -258,8 +268,10 @@ func (f *fakeStorageMounts) ListStorageDaemons(ctx context.Context, chID channel
 // AllocRequest a test's door.create drives so the placement/coord/dir it was
 // asked to allocate can be asserted.
 type fakeStorageControl struct {
-	err   error
-	calls []allocCall
+	err          error
+	calls        []allocCall
+	reclaimErr   error
+	reclaimCalls []reclaimCall
 }
 
 type allocCall struct {
@@ -267,9 +279,19 @@ type allocCall struct {
 	spec     StorageAllocSpec
 }
 
+type reclaimCall struct {
+	daemonID string
+	coord    string
+}
+
 func (f *fakeStorageControl) AllocRequest(ctx context.Context, daemonID string, spec StorageAllocSpec) error {
 	f.calls = append(f.calls, allocCall{daemonID: daemonID, spec: spec})
 	return f.err
+}
+
+func (f *fakeStorageControl) ReclaimRequest(ctx context.Context, daemonID string, coord string) error {
+	f.reclaimCalls = append(f.reclaimCalls, reclaimCall{daemonID: daemonID, coord: coord})
+	return f.reclaimErr
 }
 
 // fakeLaneControl is a configurable LaneControl stub (§5 item 0's file

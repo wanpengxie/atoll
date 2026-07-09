@@ -116,6 +116,12 @@ func (r *parityRegistry) ListByPlacementDaemon(context.Context, string) ([]resou
 func (r *parityRegistry) SweepExpiredReservations(context.Context, string, int64) ([]resourcespec.ReservationRow, error) {
 	return nil, errors.New("parityRegistry: SweepExpiredReservations not exercised by this rig (kv-only)")
 }
+func (r *parityRegistry) TouchReservationsByCoords(context.Context, string, []string, int64) error {
+	return errors.New("parityRegistry: TouchReservationsByCoords not exercised by this rig (kv-only)")
+}
+func (r *parityRegistry) MarkReservationsLanded(context.Context, string, []string) error {
+	return errors.New("parityRegistry: MarkReservationsLanded not exercised by this rig (kv-only)")
+}
 
 func (r *parityRegistry) ActorAllows(_ context.Context, caller actor.ActorID, id resource.ResourceID, op access.Operation) (bool, error) {
 	r.mu.Lock()

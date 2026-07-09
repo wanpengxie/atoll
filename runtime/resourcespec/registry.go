@@ -106,6 +106,12 @@ type ReservationRow struct {
 	PlacementCoord    string
 	CreatedBy         actor.ActorID
 	ReservedAt        int64
+
+	// LastProgressAt is 期11 S1's "在途登记" liveness stamp (schema.go's
+	// resource_reservations.last_progress_at): seeded to ReservedAt at
+	// ReserveCreate, bumped by TouchReservationsByCoords. SweepExpiredReservations
+	// ages on this field, never ReservedAt.
+	LastProgressAt int64
 }
 
 // TombstoneRow is one delete-outbox tombstone (§1.8's resource_tombstones,
@@ -309,20 +315,55 @@ type Registry interface {
 	ListByPlacementDaemon(ctx context.Context, daemonID string) ([]ResourceRow, error)
 
 	// SweepExpiredReservations deletes — and returns — every reservation
-	// belonging to daemonID whose reserved_at is strictly older than
-	// cutoffMs (unix millis). This is §1.7's THIRD reservation-deletion
-	// trigger ("超时未Committed：server 侧按 reserved_at 判超时，
+	// belonging to daemonID whose last_progress_at is strictly older than
+	// cutoffMs (unix millis; 期11 S1 additive-narrowed this from reserved_at —
+	// see ReservationRow.LastProgressAt's doc — a slow-but-alive create must
+	// not be judged by its BIRTH time). This is §1.7's THIRD reservation-
+	// deletion trigger ("超时未Committed：server 侧按存活戳判超时，
 	// ReconcilePull 响应时 level-triggered 删，不依赖 daemon 主动上报") — the
-	// server ages out a reservation whose AllocRequest the daemon never even
-	// received (so the daemon has nothing to resend Committed for and would
+	// server ages out a reservation whose placement daemon has gone
+	// unreachable long enough that nothing is bumping its liveness stamp
+	// (so the daemon has nothing to resend Committed for and would
 	// otherwise see the SAME stale row forever). Called from
 	// ReconcilePull's handler, BEFORE ListReservationsByDaemon, so a swept
-	// row never appears in that same response. A reservation younger than
-	// cutoffMs is left untouched — still legitimately in flight. This is
-	// the server-side mirror of Delete's tombstone reclaim: reservations
-	// never grow unbounded from an abandoned/lost create, matching §1.7's
-	// "三触发全在 server 侧收口" account (①success ②loser ③this one).
+	// row never appears in that same response. A reservation whose
+	// last_progress_at is younger than cutoffMs is left untouched — still
+	// legitimately in flight (§1's "纯按龄扫降级为兜底": this age check now
+	// only ever catches a row with NO recent activity, never a merely-slow
+	// one). This is the server-side mirror of Delete's tombstone reclaim:
+	// reservations never grow unbounded from an abandoned/lost create,
+	// matching §1.7's "三触发全在 server 侧收口" account (①success ②loser
+	// ③this one).
 	SweepExpiredReservations(ctx context.Context, daemonID string, cutoffMs int64) ([]ReservationRow, error)
+
+	// TouchReservationsByCoords bumps last_progress_at = atMs for every
+	// currently-pending reservation whose placement_daemon_id == daemonID
+	// AND whose PlacementCoord is IN coords (期11 S1's "在途登记" liveness
+	// bump, transfer-lifecycle-spec.md §2 item 1 — "daemon 有字节活动就
+	// bump" — narrowed by 期11 review: 活性 is the RESERVATION's own coord
+	// having a live WriteHandle, not merely "this daemon is still polling").
+	// coords is the caller's (ReconcilePull handler's) per-request
+	// activeCoords list — the daemon's own snapshot of coords with a
+	// currently-open local WriteHandle (cmd/daemon/internal/storagehost.
+	// Host.ActiveWriteCoords). An EMPTY coords touches ZERO rows — this is
+	// the honest answer when the daemon has no active writes at all, not a
+	// no-filter fallback to "touch everything this daemon owns" (that
+	// blanket form is exactly the bug this narrowed method replaces: an
+	// abandoned reservation whose daemon merely stays online forever gets
+	// touched by every ReconcilePull and never ages out). A no-op, never an
+	// error, when coords is empty or daemonID owns no matching pending
+	// reservation.
+	TouchReservationsByCoords(ctx context.Context, daemonID string, coords []string, atMs int64) error
+
+	// MarkReservationsLanded flips phase reserved→landed for daemonID's pending
+	// reservations whose placement_coord is in coords (期11 review §2.5 #A —
+	// the daemon's live/ directory listing, reported each ReconcilePull). The
+	// home runs this BEFORE SweepExpiredReservations in the same pull, so a
+	// reservation whose bytes are durably in live/ becomes immune to the
+	// age-sweep (phase='reserved' only) — closing the P0 where a
+	// landed-but-uncommitted create is reclaimed as abandoned. Empty coords is
+	// a clean no-op (an idle daemon reports nothing landed).
+	MarkReservationsLanded(ctx context.Context, daemonID string, coords []string) error
 }
 
 // ResourceOutbox is the NARROW slice of Registry the home-side daemon
@@ -346,4 +387,12 @@ type ResourceOutbox interface {
 	ListTombstonesByDaemon(ctx context.Context, daemonID string) ([]TombstoneRow, error)
 	ListByPlacementDaemon(ctx context.Context, daemonID string) ([]ResourceRow, error)
 	SweepExpiredReservations(ctx context.Context, daemonID string, cutoffMs int64) ([]ReservationRow, error)
+	TouchReservationsByCoords(ctx context.Context, daemonID string, coords []string, atMs int64) error
+	// MarkReservationsLanded flips phase reserved→landed for daemonID's pending
+	// reservations whose coord is in coords (期11 review §2.5 #A — the daemon's
+	// live/ listing, reported each ReconcilePull). Run BEFORE SweepExpiredReservations
+	// in the same pull: a landed reservation is immune to the age-sweep, so its
+	// bytes survive an arbitrarily delayed Committed rather than being reclaimed
+	// as abandoned. Empty coords is a clean no-op.
+	MarkReservationsLanded(ctx context.Context, daemonID string, coords []string) error
 }

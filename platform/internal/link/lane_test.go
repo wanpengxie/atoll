@@ -78,6 +78,20 @@ func (f *laneLocalFile) OpenDir(coord string) (accessdoor.LocalDirHandle, error)
 	return nil, errors.New("laneLocalFile: OpenDir not supported (dir lease never crosses the lane)")
 }
 
+// ReclaimCoord is 期11 S2's daemon-side "非-land 终态回收" seam — deletes
+// coord's in-memory bytes, mirroring storagehost.Host.ReclaimCoord's real
+// removal of live/<coord>. Unexercised by this rig's own tests (parityRegistry
+// does not support reservation semantics, so no lane test here can DRIVE a
+// real Lost outcome); present only to satisfy link.LocalFileOpener — S2's own
+// dedicated coverage is dial_reclaim_test.go (package link) + door_test.go's
+// verdict-mapping test + scrubber_test.go's crash-resume reclaim test.
+func (f *laneLocalFile) ReclaimCoord(coord string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	delete(f.bytes, coord)
+	return nil
+}
+
 type laneReadHandle struct{ *bytes.Reader }
 
 func (laneReadHandle) Close() error { return nil }

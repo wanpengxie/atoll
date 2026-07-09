@@ -27,7 +27,9 @@ func (Allocator) Alloc(cr *channelRoot, coord string, dir bool) error {
 		if err := cr.root.MkdirAll(p, 0o700); err != nil {
 			return fmt.Errorf("storagehost: alloc mkdir %q: %w", coord, err)
 		}
-		return nil
+		// 期11 S3 (transfer-lifecycle-spec.md §3's #7): the mkdir's directory
+		// ENTRY into live/ needs its own fsync — see fsyncDir's doc.
+		return fsyncDir(cr, liveDir)
 	}
 	// Touch: idempotent — an already-existing entry (file OR directory) at
 	// this coord is left untouched (a replayed AllocRequest must not
@@ -42,5 +44,10 @@ func (Allocator) Alloc(cr *channelRoot, coord string, dir bool) error {
 	if err != nil {
 		return fmt.Errorf("storagehost: alloc create %q: %w", coord, err)
 	}
-	return f.Close()
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("storagehost: alloc create close %q: %w", coord, err)
+	}
+	// 期11 S3 (transfer-lifecycle-spec.md §3's #7): the touch's directory
+	// ENTRY into live/ needs its own fsync — see fsyncDir's doc.
+	return fsyncDir(cr, liveDir)
 }

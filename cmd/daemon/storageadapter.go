@@ -51,6 +51,29 @@ func (a storageHostAdapter) Reconcile(ctx context.Context, resources []platform.
 	a.host.Reconcile(ctx, rs, prs, pts, hostAck, hostResend)
 }
 
+// ActiveWriteCoords satisfies platform.StorageHost's own narrowing addition
+// (期11 review): a plain []string mirror of *storagehost.Host.
+// ActiveWriteCoords's []storagehost.ActiveStaging snapshot — this seam
+// exists for the exact same reason Reconcile's own translation does (plain
+// wrapping type this package alone can convert between).
+func (a storageHostAdapter) ActiveWriteCoords() []string {
+	staging := a.host.ActiveWriteCoords()
+	out := make([]string, 0, len(staging))
+	for _, s := range staging {
+		out = append(out, s.Coord)
+	}
+	return out
+}
+
+// LandedCoords satisfies platform.StorageHost's 期11 review §2.5 #A arm — a
+// plain ([]string, error) mirror of *storagehost.Host.LandedCoords's live/
+// directory listing (期11 review残余#1: the read error is now propagated,
+// never swallowed into a fabricated empty slice — see Host.LandedCoords's
+// own doc for why a read failure must reach the caller).
+func (a storageHostAdapter) LandedCoords() ([]string, error) {
+	return a.host.LandedCoords()
+}
+
 // OpenRead / OpenWrite satisfy platform.LocalFileOpener (期11 §5) — the SAME
 // *storagehost.Host, its Streamer facet rather than its Allocator/Scrubber
 // facet. *storagehost.ReadHandle already has Read/Seek/Close
@@ -72,6 +95,13 @@ func (a storageHostAdapter) OpenWrite(coord string) (accessdoor.LocalWriteHandle
 // TYPE stays inside cmd/daemon, only its method surface crosses to platform.
 func (a storageHostAdapter) OpenDir(coord string) (accessdoor.LocalDirHandle, error) {
 	return a.host.OpenDir(coord)
+}
+
+// ReclaimCoord satisfies platform.LocalFileOpener's ReclaimCoord (期11 S2) —
+// same Host, its Reclaimer facet (reused from the tombstone delete path,
+// storagehost.Host.ReclaimCoord's own doc).
+func (a storageHostAdapter) ReclaimCoord(coord string) error {
+	return a.host.ReclaimCoord(coord)
 }
 
 var (

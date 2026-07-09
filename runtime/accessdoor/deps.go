@@ -105,6 +105,17 @@ var ErrReservationLost = resourcespec.ErrReservationLost
 // AllocRequest rather than stopping at "here is a daemon id".
 type StorageControl interface {
 	AllocRequest(ctx context.Context, daemonID string, spec StorageAllocSpec) error
+	// ReclaimRequest collects an orphaned coord's already-allocated bytes on
+	// daemonID (期11 review §2.5 #B). It is the content-less create loser's
+	// synchronous reclaim: a content-less create AllocRequest's its coord up
+	// front (an empty live/<coord>) but moves no bytes, so a loser has no
+	// Committed round trip on which the with-content path's
+	// CommittedReply.Lost→ReclaimCoord signal could ride — this is that signal
+	// for the synchronous path. Best-effort from the door's view: a returned
+	// error is logged, never propagated into the caller-facing verdict (the
+	// create already resolved AlreadyExists; a missed reclaim leaves at worst an
+	// empty directory, never a correctness fault).
+	ReclaimRequest(ctx context.Context, daemonID string, coord string) error
 }
 
 // Deps bundles the collaborators the door needs. The channel-scoped tree uses the

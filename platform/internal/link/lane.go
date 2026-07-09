@@ -4,9 +4,22 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
+
+// laneHeaderReadTimeout bounds the ONE header/ack read at the head of every
+// lane substream (期11 review #F). Without it, a peer that opens a lane
+// substream and then never writes its header (a half-open connection, a peer
+// bug) wedges the dispatch goroutine reading it forever — the Lease pings only
+// watch the control stream, so a stuck lane substream leaks undetected.
+// Generous relative to leasePing/leaseTTL (10s/30s): a header is tens of bytes,
+// so any healthy peer sends it near-instantly; this only ever fires on a
+// genuinely stuck/half-open stream. The deadline is CLEARED the moment the
+// header is read (readLaneJSON's defer), so it never bounds the raw byte pump
+// that follows on the same stream — a long transfer is unaffected.
+const laneHeaderReadTimeout = 30 * time.Second
 
 // lane.go is 期11 spec §5's resource lane transport. 片③ FLATTENED it: a lane
 // redeem is now a PLAIN top-level substream of the link session (linksession.go),
@@ -67,6 +80,15 @@ func writeLaneJSON(w io.Writer, v any) error {
 // A byte-at-a-time scan is the simplest way to guarantee zero over-read;
 // headers here are tens of bytes, so the per-byte Read call cost is noise.
 func readLaneJSON(r io.Reader, v any) error {
+	// Bound the header read against a half-open / never-writing peer (#F). Set
+	// on entry, CLEARED on return (defer) so the subsequent raw byte pump on the
+	// SAME stream inherits no deadline. Only streams that carry a deadline API
+	// (net.Conn / yamux stream) are bounded; a plain io.Reader (test buffer)
+	// simply skips it.
+	if dl, ok := r.(interface{ SetReadDeadline(t time.Time) error }); ok {
+		_ = dl.SetReadDeadline(time.Now().Add(laneHeaderReadTimeout))
+		defer func() { _ = dl.SetReadDeadline(time.Time{}) }()
+	}
 	var buf []byte
 	one := make([]byte, 1)
 	for {
@@ -132,6 +154,17 @@ type LocalFileOpener interface {
 	// LocalDirHandle. Consulted only on the same-daemon Local route (a dir
 	// lease never crosses the lane — resolveFileRoute rejects dir && !Local).
 	OpenDir(coord string) (accessdoor.LocalDirHandle, error)
+	// ReclaimCoord removes coord's already-landed local bytes (期11 S2,
+	// transfer-lifecycle-spec.md §2/§3's #2's "非-land 终态回收"):
+	// committingWriteHandle's Commit calls this when the home's
+	// CommittedReply comes back Lost=true — this daemon's own fsync+rename
+	// won LOCALLY (§3.5) but lost the same-resource_id race at the home, so
+	// its bytes at coord are now orphaned and must be collected, never
+	// retried. Idempotent — a coord with nothing there is a clean no-op
+	// (cmd/daemon/internal/storagehost.Host.ReclaimCoord's own doc, which
+	// reuses the SAME Reclaimer a tombstone's delete already collects
+	// through).
+	ReclaimCoord(coord string) error
 }
 
 func laneErr(reason string, args ...any) error {

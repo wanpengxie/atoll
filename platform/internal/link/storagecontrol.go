@@ -94,8 +94,57 @@ type ReclaimAckReply struct {
 // level-triggered) pull for restart/crash recovery state (§4.1/§4.7's
 // fourth frame) — the daemon holds no local truth, so EVERYTHING it needs to
 // reconcile its directory against comes back in the reply.
+//
+// ActiveCoords is 期11 review's own narrowing addition: every coord this
+// daemon currently has an OPEN local WriteHandle for (cmd/daemon/internal/
+// storagehost.Host.ActiveWriteCoords), snapshotted fresh on every pull. The
+// home's TouchReservationsByCoords liveness bump reads ONLY this list —
+// "this daemon is still polling" is deliberately NOT treated as "every
+// reservation this daemon owns is alive" (that blanket form let an abandoned
+// reservation's daemon merely staying online forever suppress its age-sweep
+// forever). Additive field — omitempty keeps an old daemon build's empty
+// slice indistinguishable from "explicitly nothing active", which is exactly
+// what an idle daemon should send.
+//
+// LandedCoords is 期11 review §2.5 #A's addition: every coord this daemon
+// currently has in its live/ directory (cmd/daemon/internal/storagehost.Host.
+// LandedCoords — a plain directory listing, sourced from disk so it survives a
+// crash/restart with no daemon-side truth). The home's MarkReservationsLanded
+// flips any matching pending reservation to phase='landed' BEFORE the
+// age-sweep, so a landed-but-uncommitted create's durable bytes are never
+// destroyed by the sweep (the P0 #A closes). Reported afresh on every pull,
+// disk-derived, never cached — so the very first pull after a >timeout crash
+// gap already protects its landed reservations, before the sweep can fire.
+// Additive omitempty field, exactly like ActiveCoords.
 type ReconcilePull struct {
+	RequestID    string   `json:"request_id"`
+	ActiveCoords []string `json:"active_coords,omitempty"`
+	LandedCoords []string `json:"landed_coords,omitempty"`
+}
+
+// ReclaimRequest is home→daemon: "collect coord's already-landed local bytes"
+// (期11 review §2.5 #B) — the content-less create loser's synchronous reclaim,
+// riding the SAME home-initiated control channel AllocRequest uses. A
+// content-less create allocates live/<coord> up front (AllocRequest's own
+// mkdir/touch) but moves no bytes, so its loser has NO Committed round trip on
+// which to piggyback a CommittedReply.Lost→ReclaimCoord signal (the
+// with-content path's mechanism). This frame is that signal for the
+// synchronous path: the door, on ErrReservationLost, tells the placement
+// daemon to reclaim the orphaned empty coord directly. Idempotent on the
+// daemon side (ReclaimCoord no-ops an already-empty coord).
+type ReclaimRequest struct {
 	RequestID string `json:"request_id"`
+	Coord     string `json:"coord"`
+}
+
+// ReclaimReply is daemon→home: the reclaim verdict — OK once the coord's local
+// bytes are gone (or were already absent), else Reason names the failure (a
+// Go-error-shaped string, not an access verdict — same discipline as
+// AllocReply).
+type ReclaimReply struct {
+	RequestID string `json:"request_id"`
+	OK        bool   `json:"ok"`
+	Reason    string `json:"reason,omitempty"`
 }
 
 // ReconcileResource is one row of ReconcilePullReply's "应有资源清单" —
@@ -157,6 +206,8 @@ const (
 	ctrlReclaimAckReply    controlKind = "reclaim_ack_reply"
 	ctrlReconcilePull      controlKind = "reconcile_pull"
 	ctrlReconcilePullReply controlKind = "reconcile_pull_reply"
+	ctrlReclaimRequest     controlKind = "reclaim_request"
+	ctrlReclaimReply       controlKind = "reclaim_reply"
 )
 
 // newRequestID mints a fresh correlation id for one control-RPC round trip
@@ -274,6 +325,8 @@ type storageControlFrame struct {
 	ReclaimAckReply    *ReclaimAckReply    `json:"reclaim_ack_reply,omitempty"`
 	ReconcilePull      *ReconcilePull      `json:"reconcile_pull,omitempty"`
 	ReconcilePullReply *ReconcilePullReply `json:"reconcile_pull_reply,omitempty"`
+	ReclaimRequest     *ReclaimRequest     `json:"reclaim_request,omitempty"`
+	ReclaimReply       *ReclaimReply       `json:"reclaim_reply,omitempty"`
 }
 
 func encodeStorageControl(f storageControlFrame) ([]byte, error) { return json.Marshal(f) }

@@ -7,11 +7,22 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 )
+
+// laneTransferTTL bounds how long a minted-but-unconsumed lane transfer lingers
+// in the registry (期11 review #G): a Token that is opened but never
+// redeemed/resolved (a requester that gives up, a target that never attaches)
+// would otherwise sit in the transfers map until the Acceptor dies. A transfer
+// is meant to be redeemed promptly right after the door hands its route back to
+// the caller, so this is generous — it only reclaims genuinely-abandoned
+// tokens. GC is opportunistic (sweepExpiredTransfersLocked runs on each mint),
+// so no ticker/goroutine is added.
+const laneTransferTTL = 10 * time.Minute
 
 // lanecontrol.go is the HOME half of §5's resource lane: the per-daemon
 // live-link table (boundID → linkSession, for opening a lane substream toward a
@@ -77,18 +88,22 @@ func decodeLaneControl(b []byte) (laneControlFrame, error) {
 // --- transfer registry -----------------------------------------------------
 
 // laneTransfer is one pending §5 byte-access authorization the door minted
-// (accessdoor.LaneControl.OpenTransfer) — single-use: consumed the moment
-// its target daemon resolves it (ResolveCoord) or a requester redeems it
-// (the lane-redeem accept loop reads it read-only, never deletes — deletion
-// is ALWAYS the target's ResolveCoord call, whichever path reaches it
-// first: Local's direct caller IS the target; Stream's inbound handler on
-// the target daemon calls it after being redeemed-to).
+// (accessdoor.LaneControl.OpenTransfer). 期11 review #H/#G: a transfer is a
+// TIME-BOUNDED capability, not a consume-on-first-use ticket — both
+// handleResolveCoord and handleLaneRedeem READ it (never delete), so an
+// authorized target's retried resolve is idempotent, and abandoned tokens are
+// reclaimed by laneTransferTTL (sweepExpiredTransfersLocked) rather than by a
+// successful resolve. Re-resolution grants no authority the door had not
+// already minted for this exact caller/coord/mode.
 type laneTransfer struct {
 	targetDaemonID    string
 	requesterDaemonID string
 	coord             string
 	mode              access.Operation
 	reservationID     string
+	// mintedAt stamps OpenLaneTransfer time, read only by
+	// sweepExpiredTransfersLocked for the laneTransferTTL GC (期11 review #G).
+	mintedAt time.Time
 }
 
 // laneState is the Acceptor's lane bookkeeping, split into its own struct
@@ -168,6 +183,14 @@ func (a *Acceptor) handleLaneRedeem(daemonID string, conn net.Conn) {
 	}
 	a.lane.mu.Lock()
 	tr, ok := a.lane.transfers[hdr.Token]
+	if ok && laneTransferExpired(tr, time.Now()) {
+		// 期11 review残余#3: TTL is enforced AT USE, not only opportunistically
+		// at the NEXT mint (sweepExpiredTransfersLocked) — a token minted long
+		// ago but never redeemed until now must not still work just because no
+		// OTHER OpenLaneTransfer happened to run its GC in between.
+		delete(a.lane.transfers, hdr.Token)
+		ok = false
+	}
 	a.lane.mu.Unlock()
 	if !ok || tr.requesterDaemonID != daemonID {
 		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "unknown or mismatched transfer token"})
@@ -226,21 +249,65 @@ func (a *Acceptor) handleLaneRedeem(daemonID string, conn net.Conn) {
 func (a *Acceptor) OpenLaneTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (string, error) {
 	token := uuid.NewString()
 	a.lane.mu.Lock()
+	a.sweepExpiredTransfersLocked(time.Now()) // 期11 review #G: opportunistic GC of abandoned tokens
 	a.lane.transfers[token] = laneTransfer{
 		targetDaemonID: targetDaemonID, requesterDaemonID: requesterDaemonID,
 		coord: coord, mode: mode, reservationID: reservationID,
+		mintedAt: time.Now(),
 	}
 	a.lane.mu.Unlock()
 	return token, nil
 }
 
+// sweepExpiredTransfersLocked drops every transfer older than laneTransferTTL
+// (期11 review #G). Caller holds a.lane.mu. O(n) over a map that is bounded by
+// exactly this sweep to "transfers minted within one TTL window" — no ticker,
+// no goroutine, the simplest GC that keeps the map from growing without bound
+// under open-no-redeem.
+func (a *Acceptor) sweepExpiredTransfersLocked(now time.Time) {
+	for token, tr := range a.lane.transfers {
+		if laneTransferExpired(tr, now) {
+			delete(a.lane.transfers, token)
+		}
+	}
+}
+
+// laneTransferExpired reports whether tr has aged past laneTransferTTL as of
+// now — the single predicate both the opportunistic mint-time GC
+// (sweepExpiredTransfersLocked) above AND the at-USE enforcement
+// (handleResolveCoord / handleLaneRedeem, 期11 review残余#3) share, so the
+// two can never disagree about what "expired" means. Before this fix, TTL
+// was ONLY checked opportunistically at the next OpenLaneTransfer call — a
+// transfer nobody happened to mint again after was resolvable/redeemable
+// indefinitely, silently outliving the "10 minutes to abandon" contract
+// laneTransferTTL's own doc promises.
+func laneTransferExpired(tr laneTransfer, now time.Time) bool {
+	return now.Sub(tr.mintedAt) > laneTransferTTL
+}
+
 // handleResolveCoord answers ResolveCoord (§5 item 0's single mechanical
-// check): only the daemon the transfer's target IS may resolve it — this
-// ONE assertion covers both the Local route (the caller IS the target,
-// resolving directly) and the Stream route's target-side inbound handler
-// (redeemed-to by home, then resolving for itself) uniformly. Single-use:
-// deletes the transfer on a successful resolve so a Token can never be
-// redeemed/resolved twice.
+// check): only the daemon the transfer's target IS may resolve it — this ONE
+// assertion covers both the Local route (the caller IS the target, resolving
+// directly) and the Stream route's target-side inbound handler (redeemed-to by
+// home, then resolving for itself) uniformly.
+//
+// 期11 review #H reshapes two things the pre-review "delete-then-check" form
+// got wrong:
+//  1. AUTHORIZE BEFORE MUTATE — the sender (target) check runs BEFORE any
+//     deletion, so a frame from the WRONG sender can never burn a legitimate
+//     target's token (the old form deleted first, then rejected, destroying a
+//     valid transfer on an unauthorized probe).
+//  2. IDEMPOTENT / REPLAY-SAFE — resolution NO LONGER consumes the transfer.
+//     The Local route re-resolves the same route.Token on a retried open (a
+//     dropped reply, a re-dialed handle), and the old consume-on-resolve made
+//     that second attempt fail with "already-resolved". A resolve now just
+//     READS the transfer (like handleLaneRedeem already does), so a retry by
+//     the authorized target returns the same coord — the "幂等 no-op" the
+//     Committed/ReclaimAck handlers already have. The single-use property this
+//     relaxes granted no authority the door had not ALREADY minted for exactly
+//     this caller/coord/mode; the transfer is instead bounded in time by
+//     laneTransferTTL (#G's GC), which reclaims it whether or not it was ever
+//     resolved.
 func (a *Acceptor) handleResolveCoord(senderDaemonID string, msg *ResolveCoordRequest) ResolveCoordReply {
 	reply := ResolveCoordReply{RequestID: msg.RequestID}
 	if senderDaemonID == "" {
@@ -249,15 +316,22 @@ func (a *Acceptor) handleResolveCoord(senderDaemonID string, msg *ResolveCoordRe
 	}
 	a.lane.mu.Lock()
 	tr, ok := a.lane.transfers[msg.Token]
-	if ok {
+	if ok && laneTransferExpired(tr, time.Now()) {
+		// 期11 review残余#3: enforce TTL AT USE (see laneTransferExpired's
+		// own doc) — a stale-but-still-present transfer must not resolve
+		// just because the opportunistic mint-time GC has not happened to
+		// run since it aged out.
 		delete(a.lane.transfers, msg.Token)
+		ok = false
 	}
 	a.lane.mu.Unlock()
 	if !ok {
-		reply.Reason = "unknown or already-resolved transfer token"
+		reply.Reason = "unknown or expired transfer token"
 		return reply
 	}
 	if tr.targetDaemonID != senderDaemonID {
+		// Authorization failure — NON-destructive: the transfer stays, so the
+		// real target can still resolve it (the old form burned it here).
 		reply.Reason = fmt.Sprintf("token belongs to target %q, sender is %q", tr.targetDaemonID, senderDaemonID)
 		return reply
 	}

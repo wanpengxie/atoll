@@ -479,6 +479,124 @@ func TestResource_SweepExpiredReservations(t *testing.T) {
 	}
 }
 
+// TestResource_TouchReservationsByCoordsSurvivesShortSweepCutoff (期11 S1's
+// "本地慢写(注入短cutoff)不被sweep断" DoD, narrowed by 期11 review to coords
+// rather than "any row this daemon owns"): a reservation born long before an
+// injected short cutoff would normally be swept on reserved_at alone — but a
+// TouchReservationsByCoords call NAMING its own coord (the daemon's own
+// per-ReconcilePull activeCoords liveness bump, platform/storagehost.go's
+// ReconcilePull handler) refreshes last_progress_at, and
+// SweepExpiredReservations judges THAT column, not birth time. A same-daemon,
+// same-age row whose coord is NOT in the touched set still sweeps on
+// schedule — this is the exact regression this narrowing fixes: an abandoned
+// reservation must not be kept alive merely because ITS DAEMON also owns some
+// other, genuinely active, coord.
+func TestResource_TouchReservationsByCoordsSurvivesShortSweepCutoff(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	reg.nowMs = func() int64 { return 1000 }
+	activeID, err := reg.ReserveCreate(ctx, "file:active", resourcespec.KindFile, "actor:a", "daemon-1", "coord-active", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate active: %v", err)
+	}
+	abandonedID, err := reg.ReserveCreate(ctx, "file:abandoned", resourcespec.KindFile, "actor:a", "daemon-1", "coord-abandoned", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate abandoned: %v", err)
+	}
+
+	// The daemon polls (ReconcilePull) at t=9000 — long after birth (t=1000)
+	// but well within a short cutoff window measured from NOW — naming ONLY
+	// coord-active as its currently-open WriteHandle. coord-abandoned's
+	// AllocRequest never got a write opened for it (or it already closed and
+	// was never reopened), so it is deliberately absent from activeCoords.
+	if err := reg.TouchReservationsByCoords(ctx, "daemon-1", []string{"coord-active"}, 9000); err != nil {
+		t.Fatalf("TouchReservationsByCoords: %v", err)
+	}
+
+	// A short cutoff (10000-8000=2000) would sweep BOTH rows on reserved_at
+	// alone (born at 1000, well before 2000) — S1's whole point is that it no
+	// longer does for the touched one, and 期11 review's whole point is that
+	// it STILL does for the same-daemon row whose coord was never named.
+	swept, err := reg.SweepExpiredReservations(ctx, "daemon-1", 2000)
+	if err != nil {
+		t.Fatalf("SweepExpiredReservations daemon-1: %v", err)
+	}
+	if len(swept) != 1 || swept[0].ReservationID != abandonedID {
+		t.Fatalf("swept = %+v, want exactly [%s] (coord-active must survive, coord-abandoned must age out)", swept, abandonedID)
+	}
+	if _, found, err := reg.ReservationDaemon(ctx, activeID); err != nil || !found {
+		t.Fatalf("active reservation swept despite being touched: found=%v err=%v", found, err)
+	}
+	if _, found, err := reg.ReservationDaemon(ctx, abandonedID); err != nil || found {
+		t.Fatalf("abandoned reservation survived the sweep: found=%v err=%v, want gone", found, err)
+	}
+}
+
+// TestResource_TouchReservationsByCoordsIsNoopForUnrelatedDaemon confirms the
+// UPDATE is confined to daemonID's own rows even when another daemon's row
+// happens to share a coord string — the per-daemon confinement every other
+// List*ByDaemon/Sweep* method already carries, orthogonal to the new
+// per-coord narrowing.
+func TestResource_TouchReservationsByCoordsIsNoopForUnrelatedDaemon(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	reg.nowMs = func() int64 { return 1000 }
+	otherID, err := reg.ReserveCreate(ctx, "file:other", resourcespec.KindFile, "actor:a", "daemon-2", "coord-other", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate: %v", err)
+	}
+
+	if err := reg.TouchReservationsByCoords(ctx, "daemon-1", []string{"coord-other"}, 9000); err != nil {
+		t.Fatalf("TouchReservationsByCoords: %v", err)
+	}
+
+	// daemon-2's row was never touched by a daemon-1-scoped call (even though
+	// the coord string matches) — it still ages out on its birth time.
+	swept, err := reg.SweepExpiredReservations(ctx, "daemon-2", 2000)
+	if err != nil {
+		t.Fatalf("SweepExpiredReservations: %v", err)
+	}
+	if len(swept) != 1 || swept[0].ReservationID != otherID {
+		t.Fatalf("swept = %+v, want exactly [%s]", swept, otherID)
+	}
+}
+
+// TestResource_TouchReservationsByCoordsEmptyCoordsTouchesNothing is the
+// abandoned-reservation regression this whole narrowing exists for (期11
+// review): an empty coords list — a daemon that is online/polling but has
+// NOTHING currently open — must touch ZERO rows, never fall back to "every
+// reservation this daemon owns" (the pre-review bug: an always-online daemon
+// suppressing age-sweep forever for a reservation whose write was never
+// opened, or was opened and already closed).
+func TestResource_TouchReservationsByCoordsEmptyCoordsTouchesNothing(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	reg.nowMs = func() int64 { return 1000 }
+	abandonedID, err := reg.ReserveCreate(ctx, "file:abandoned", resourcespec.KindFile, "actor:a", "daemon-1", "coord-abandoned", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate: %v", err)
+	}
+
+	// Repeated ReconcilePull cycles (sweep+touch), each with an empty
+	// activeCoords — the daemon has nothing open at all.
+	for i := 0; i < 3; i++ {
+		if err := reg.TouchReservationsByCoords(ctx, "daemon-1", nil, 9000); err != nil {
+			t.Fatalf("TouchReservationsByCoords: %v", err)
+		}
+	}
+
+	swept, err := reg.SweepExpiredReservations(ctx, "daemon-1", 2000)
+	if err != nil {
+		t.Fatalf("SweepExpiredReservations: %v", err)
+	}
+	if len(swept) != 1 || swept[0].ReservationID != abandonedID {
+		t.Fatalf("swept = %+v, want exactly [%s] — an untouched reservation must age out even though its daemon keeps polling", swept, abandonedID)
+	}
+}
+
 // --- TombstoneDaemon / ListTombstonesByDaemon (§4.7 daemon control-RPC) ------
 
 func TestResource_TombstoneDaemon(t *testing.T) {
@@ -1083,4 +1201,131 @@ func readTombstone(t *testing.T, db *sql.DB, tombstoneID string) (daemonID, coor
 		t.Fatalf("read tombstone %q: %v", tombstoneID, err)
 	}
 	return daemonID, coord, provenance, kind
+}
+
+// TestResource_SweepImmuneToLandedPhase is 期11 review §2.5 #A's P0 guard: a
+// reservation the daemon has reported LANDED (MarkReservationsLanded flips it
+// to phase='landed') is NEVER age-swept, however stale its last_progress_at —
+// its bytes are durably on disk and only the Committed row-write is
+// outstanding, so the sweep must leave it for the daemon's resend, not destroy
+// it as abandoned. A same-daemon, same-age reservation still in phase='reserved'
+// sweeps on schedule.
+func TestResource_SweepImmuneToLandedPhase(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	reg.nowMs = func() int64 { return 1000 }
+	landedID, err := reg.ReserveCreate(ctx, "file:landed", resourcespec.KindFile, "actor:a", "daemon-1", "coord-landed", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate landed: %v", err)
+	}
+	reservedID, err := reg.ReserveCreate(ctx, "file:reserved", resourcespec.KindFile, "actor:a", "daemon-1", "coord-reserved", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate reserved: %v", err)
+	}
+
+	// The daemon's ReconcilePull reports coord-landed present in live/.
+	if err := reg.MarkReservationsLanded(ctx, "daemon-1", []string{"coord-landed"}); err != nil {
+		t.Fatalf("MarkReservationsLanded: %v", err)
+	}
+
+	// A cutoff of 3000 is far past both rows' birth (t=1000, and neither was
+	// ever touched) — the reserved one sweeps, the landed one is immune.
+	swept, err := reg.SweepExpiredReservations(ctx, "daemon-1", 3000)
+	if err != nil {
+		t.Fatalf("SweepExpiredReservations: %v", err)
+	}
+	if len(swept) != 1 || swept[0].ReservationID != reservedID {
+		t.Fatalf("swept = %+v, want exactly [%s] (the phase='reserved' row), never the landed one", swept, reservedID)
+	}
+	if _, found, err := reg.ReservationDaemon(ctx, landedID); err != nil || !found {
+		t.Fatalf("landed reservation was swept (P0 #A data loss): found=%v err=%v", found, err)
+	}
+	if _, found, err := reg.ReservationDaemon(ctx, reservedID); err != nil || found {
+		t.Fatalf("reserved reservation survived the sweep: found=%v err=%v", found, err)
+	}
+}
+
+// TestResource_MarkReservationsLanded_EmptyIsNoop: an idle daemon reporting no
+// landed coords flips nothing (symmetric with TouchReservationsByCoords).
+func TestResource_MarkReservationsLanded_EmptyIsNoop(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	reg.nowMs = func() int64 { return 1000 }
+	id, err := reg.ReserveCreate(ctx, "file:x", resourcespec.KindFile, "actor:a", "daemon-1", "coord-x", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate: %v", err)
+	}
+	if err := reg.MarkReservationsLanded(ctx, "daemon-1", nil); err != nil {
+		t.Fatalf("MarkReservationsLanded(nil): %v", err)
+	}
+	// Still phase='reserved' → still sweepable.
+	swept, err := reg.SweepExpiredReservations(ctx, "daemon-1", 3000)
+	if err != nil {
+		t.Fatalf("SweepExpiredReservations: %v", err)
+	}
+	if len(swept) != 1 || swept[0].ReservationID != id {
+		t.Fatalf("swept = %+v, want [%s] — an empty mark-landed must not have flipped anything", swept, id)
+	}
+}
+
+// TestResource_DeleteSupersedesPendingReservations is 期11 review §2.5 #C: a
+// Delete on a resource_id kills any still-pending reservation for the SAME id
+// (a held-open straggler), writes a reclaim tombstone for its coord, and
+// thereby prevents the straggler's later Committed from resurrecting the id
+// with no fresh authorization — CommitReservation then finds no row and
+// no-ops.
+func TestResource_DeleteSupersedesPendingReservations(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+
+	// The winner reserves + lands "file:doc" (coord-win).
+	winID, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-win", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate win: %v", err)
+	}
+	if _, err := reg.CommitReservation(ctx, winID); err != nil {
+		t.Fatalf("CommitReservation win: %v", err)
+	}
+	// A straggler had ALSO reserved the same id (before the winner landed) and
+	// is still holding its write open — coord-strag.
+	stragID, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:b", "daemon-1", "coord-strag", false)
+	if err != nil {
+		t.Fatalf("ReserveCreate straggler: %v", err)
+	}
+
+	// Delete the resource. This must supersede the straggler reservation.
+	if err := reg.Delete(ctx, "file:doc"); err != nil {
+		t.Fatalf("Delete: %v", err)
+	}
+
+	// The straggler reservation is gone.
+	if _, found, err := reg.ReservationDaemon(ctx, stragID); err != nil || found {
+		t.Fatalf("straggler reservation survived Delete (would resurrect the id): found=%v err=%v", found, err)
+	}
+	// Two tombstones exist on daemon-1: the resource's own (coord-win) AND the
+	// superseded straggler's (coord-strag) — both routed to the ordinary
+	// ReconcilePull Reclaimer.
+	tombs, err := reg.ListTombstonesByDaemon(ctx, "daemon-1")
+	if err != nil {
+		t.Fatalf("ListTombstonesByDaemon: %v", err)
+	}
+	coords := map[string]bool{}
+	for _, ts := range tombs {
+		coords[ts.PlacementCoord] = true
+	}
+	if !coords["coord-win"] || !coords["coord-strag"] {
+		t.Fatalf("tombstone coords = %v, want both coord-win and coord-strag", coords)
+	}
+	// The straggler's later Committed lands NOTHING — no resurrection.
+	found, err := reg.CommitReservation(ctx, stragID)
+	if err != nil {
+		t.Fatalf("CommitReservation straggler after supersede: %v", err)
+	}
+	if found {
+		t.Fatal("straggler CommitReservation returned found=true — the id was resurrected (#C bug)")
+	}
+	if _, exists, err := reg.Resolve(ctx, "file:doc"); err != nil || exists {
+		t.Fatalf("file:doc exists again after straggler commit: exists=%v err=%v", exists, err)
+	}
 }

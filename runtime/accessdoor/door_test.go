@@ -180,6 +180,59 @@ func TestDoorCreateFileKindPlacement(t *testing.T) {
 		}
 	})
 
+	t.Run("content-less create losing the reservation race maps to already_exists, never a fabricated success (期11 S2)", func(t *testing.T) {
+		reg := &fakeRegistry{commitReservationErr: resourcespec.ErrReservationLost}
+		mem := &fakeMembership{isMember: true, lookupHost: "daemon-1", lookupFound: true}
+		mounts := &fakeStorageMounts{mounts: []StorageMount{{DaemonID: "daemon-1", Online: true}}}
+		ctl := &fakeStorageControl{}
+		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
+
+		out, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		mustVerdict(t, out, err, access.AlreadyExists)
+		if len(reg.commitReservationCalls) != 1 {
+			t.Fatalf("CommitReservation calls = %d, want 1", len(reg.commitReservationCalls))
+		}
+		// 期11 review §2.5 #B: the loser's orphaned coord (its AllocRequest
+		// already created an empty live/<coord>) is reclaimed synchronously via
+		// StorageControl.ReclaimRequest, on the SAME daemon the AllocRequest
+		// went to and for the SAME coord.
+		if len(ctl.reclaimCalls) != 1 {
+			t.Fatalf("ReclaimRequest calls = %d, want 1 (content-less loser's coord must be reclaimed, #B)", len(ctl.reclaimCalls))
+		}
+		if ctl.reclaimCalls[0].daemonID != "daemon-1" {
+			t.Fatalf("ReclaimRequest daemonID = %q, want daemon-1", ctl.reclaimCalls[0].daemonID)
+		}
+		if len(ctl.calls) != 1 || ctl.reclaimCalls[0].coord != ctl.calls[0].spec.Coord {
+			t.Fatalf("ReclaimRequest coord = %q, want the same coord the AllocRequest used (%q)", ctl.reclaimCalls[0].coord, ctl.calls[0].spec.Coord)
+		}
+	})
+
+	t.Run("content-less create found=false (no error) must not fabricate success (期11 review残余#4)", func(t *testing.T) {
+		// fakeRegistry's zero value already models this: commitReservationFound
+		// defaults false and commitReservationErr defaults nil — CommitReservation
+		// found nothing to land (superseded by a Delete, or swept by §1.7's
+		// timeout sweep) but returned a CLEAN no-op, not ErrReservationLost.
+		reg := &fakeRegistry{}
+		mem := &fakeMembership{isMember: true, lookupHost: "daemon-1", lookupFound: true}
+		mounts := &fakeStorageMounts{mounts: []StorageMount{{DaemonID: "daemon-1", Online: true}}}
+		ctl := &fakeStorageControl{}
+		d := newFileDoor(reg, &fakeDriver{}, mem, mounts, ctl, "ch1")
+
+		out, err := d.create(t.Context(), "a", "r1", fileSpec, nil)
+		if err != nil {
+			t.Fatalf("unexpected Go error: %v", err)
+		}
+		if out.Accepted() {
+			t.Fatal("found=false must never report success — the pre-fix 假成功 bug")
+		}
+		if len(reg.commitReservationCalls) != 1 {
+			t.Fatalf("CommitReservation calls = %d, want 1", len(reg.commitReservationCalls))
+		}
+	})
+
 	t.Run("with_content=true resolves placement + reservation and returns a write Route", func(t *testing.T) {
 		reg := &fakeRegistry{}
 		mem := &fakeMembership{isMember: true, lookupHost: "daemon-1", lookupFound: true}

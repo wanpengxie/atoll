@@ -9,6 +9,7 @@ package link_test
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
@@ -37,6 +39,8 @@ type fakeStorageHostControl struct {
 	reconcileTombstones   []link.ReconcileTombstone
 	reconcileErr          error
 	reconcileCalls        []string
+	reconcileActiveCoords [][]string
+	reconcileLandedCoords [][]string
 }
 
 func (f *fakeStorageHostControl) Committed(ctx context.Context, senderDaemonID, reservationID string) (bool, bool, error) {
@@ -53,10 +57,12 @@ func (f *fakeStorageHostControl) ReclaimAck(ctx context.Context, senderDaemonID,
 	return f.reclaimFound, f.reclaimErr
 }
 
-func (f *fakeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
+func (f *fakeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords, landedCoords []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reconcileCalls = append(f.reconcileCalls, senderDaemonID)
+	f.reconcileActiveCoords = append(f.reconcileActiveCoords, activeCoords)
+	f.reconcileLandedCoords = append(f.reconcileLandedCoords, landedCoords)
 	return f.reconcileResources, f.reconcileReservations, f.reconcileTombstones, f.reconcileErr
 }
 
@@ -211,7 +217,7 @@ func TestReconcilePull_DaemonToHomeRoundTrip(t *testing.T) {
 	r.shc.reconcileReservations = []link.ReconcileReservation{{ReservationID: "r1", Coord: "c2"}}
 	r.shc.reconcileTombstones = []link.ReconcileTombstone{{TombstoneID: "t1", Coord: "c3", Provenance: "axis-allocated"}}
 
-	reply, err := d.SendReconcilePull(context.Background())
+	reply, err := d.SendReconcilePull(context.Background(), []string{"coord-active"}, []string{"coord-landed"})
 	if err != nil {
 		t.Fatalf("SendReconcilePull: %v", err)
 	}
@@ -226,6 +232,15 @@ func TestReconcilePull_DaemonToHomeRoundTrip(t *testing.T) {
 	}
 	if len(r.shc.reconcileCalls) != 1 || r.shc.reconcileCalls[0] != "daemon-1" {
 		t.Errorf("ReconcilePull calls = %+v", r.shc.reconcileCalls)
+	}
+	// 期11 review's own narrowing addition: ActiveCoords must round-trip
+	// intact over the real WS link, not just in the local struct literal.
+	if len(r.shc.reconcileActiveCoords) != 1 || len(r.shc.reconcileActiveCoords[0]) != 1 || r.shc.reconcileActiveCoords[0][0] != "coord-active" {
+		t.Errorf("ReconcilePull activeCoords = %+v, want [[coord-active]]", r.shc.reconcileActiveCoords)
+	}
+	// 期11 review §2.5 #A: LandedCoords must likewise round-trip intact.
+	if len(r.shc.reconcileLandedCoords) != 1 || len(r.shc.reconcileLandedCoords[0]) != 1 || r.shc.reconcileLandedCoords[0][0] != "coord-landed" {
+		t.Errorf("ReconcilePull landedCoords = %+v, want [[coord-landed]]", r.shc.reconcileLandedCoords)
 	}
 }
 
@@ -255,7 +270,7 @@ func TestStorageControl_NoHandlerWiredAnswersHonestReject(t *testing.T) {
 	if reply, err := d.SendReclaimAck(context.Background(), "ts-1"); err != nil || reply.Reason == "" {
 		t.Errorf("SendReclaimAck with no host wired: reply=%+v err=%v", reply, err)
 	}
-	if reply, err := d.SendReconcilePull(context.Background()); err != nil || reply.Reason == "" {
+	if reply, err := d.SendReconcilePull(context.Background(), nil, nil); err != nil || reply.Reason == "" {
 		t.Errorf("SendReconcilePull with no host wired: reply=%+v err=%v", reply, err)
 	}
 }
@@ -272,7 +287,7 @@ func (b *blockingStorageHostControl) Committed(ctx context.Context, senderDaemon
 func (b *blockingStorageHostControl) ReclaimAck(context.Context, string, string) (bool, error) {
 	return false, nil
 }
-func (b *blockingStorageHostControl) ReconcilePull(context.Context, string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
+func (b *blockingStorageHostControl) ReconcilePull(context.Context, string, []string, []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
 	return nil, nil, nil, nil
 }
 
@@ -325,4 +340,139 @@ func TestSendCommitted_CtxCancelUnblocksWaiter(t *testing.T) {
 	if elapsed > 2*time.Second {
 		t.Errorf("SendCommitted took %v, want bounded near the 100ms ctx deadline", elapsed)
 	}
+}
+
+// TestReclaimRequest_HomeToDaemonRoundTrip drives 期11 review §2.5 #B's new
+// home-initiated frame end to end: the door's (simulated) ReclaimRequest
+// reaches the daemon's wired LocalFileOpener.ReclaimCoord with the coord, and
+// the daemon's OK reply returns to the home caller.
+func TestReclaimRequest_HomeToDaemonRoundTrip(t *testing.T) {
+	r := newStorageRig(t)
+	d := dialStorageDaemon(t, r)
+	opener := &extReclaimOpener{}
+	d.SetLocalFileOpener(opener)
+
+	if err := r.acc.SendReclaimRequest(context.Background(), "daemon-1", "coord-orphan"); err != nil {
+		t.Fatalf("SendReclaimRequest: %v", err)
+	}
+	if len(opener.reclaimed) != 1 || opener.reclaimed[0] != "coord-orphan" {
+		t.Fatalf("daemon reclaimed = %v, want [coord-orphan]", opener.reclaimed)
+	}
+}
+
+// TestReclaimRequest_NoOpenerAnswersHonestNak proves a daemon with no storage
+// host wired answers OK:false (an error at the home caller), never a hang.
+func TestReclaimRequest_NoOpenerAnswersHonestNak(t *testing.T) {
+	r := newStorageRig(t)
+	dialStorageDaemon(t, r) // no SetLocalFileOpener
+	if err := r.acc.SendReclaimRequest(context.Background(), "daemon-1", "c"); err == nil {
+		t.Fatal("expected an error when no storage host is wired on the daemon")
+	}
+}
+
+// --- 期11 review #D: committingWriteHandle.Commit must never fabricate success ---
+
+// fakeCommitWH is a minimal accessdoor.LocalWriteHandle whose own Commit
+// succeeds — committingWriteHandle wraps it, so the test isolates the
+// Committed-relay behavior layered ON TOP of a locally-successful write.
+type fakeCommitWH struct{ committed, aborted bool }
+
+func (f *fakeCommitWH) Write(p []byte) (int, error) { return len(p), nil }
+func (f *fakeCommitWH) Commit() error               { f.committed = true; return nil }
+func (f *fakeCommitWH) Abort() error                { f.aborted = true; return nil }
+
+// extReclaimOpener is the external-package (link_test) LocalFileOpener double
+// for #D's Lost branch — records the reclaimed coord.
+type extReclaimOpener struct{ reclaimed []string }
+
+func (o *extReclaimOpener) OpenRead(string) (io.ReadSeekCloser, error) {
+	return nil, errors.New("extReclaimOpener: OpenRead unexercised")
+}
+func (o *extReclaimOpener) OpenWrite(string) (accessdoor.LocalWriteHandle, error) {
+	return nil, errors.New("extReclaimOpener: OpenWrite unexercised")
+}
+func (o *extReclaimOpener) OpenDir(string) (accessdoor.LocalDirHandle, error) {
+	return nil, errors.New("extReclaimOpener: OpenDir unexercised")
+}
+func (o *extReclaimOpener) ReclaimCoord(coord string) error {
+	o.reclaimed = append(o.reclaimed, coord)
+	return nil
+}
+
+// TestCommittingWriteHandle_Commit_DoesNotFabricateSuccess is #D's守测: the
+// three ways the Committed relay does NOT cleanly land a row must all surface
+// (never the pre-review silent `nil`):
+//   - a send failure (home torn down) → error, resend backstop owns it;
+//   - reply.Lost → reclaim the loser's coord + error;
+//   - reply.Found && !Lost → success (nil), the one真landing case.
+func TestCommittingWriteHandle_Commit_DoesNotFabricateSuccess(t *testing.T) {
+	t.Run("Committed relay failure is surfaced, never a false success", func(t *testing.T) {
+		r := newStorageRig(t)
+		d := dialStorageDaemon(t, r)
+		// Tear the home down so SendCommitted cannot complete.
+		_ = r.acc.Close()
+		r.srv.Close()
+
+		wh := &fakeCommitWH{}
+		h := link.NewCommittingWriteHandleForTest(d, wh, "res-fail", "coord-fail")
+		if err := h.Commit(); err == nil {
+			t.Fatal("Commit returned nil on a failed Committed relay — the pre-#D false-success bug")
+		}
+		if !wh.committed {
+			t.Fatal("the underlying local Commit must still have run (bytes landed locally)")
+		}
+	})
+
+	t.Run("reply.Lost reclaims the coord and fails loud", func(t *testing.T) {
+		r := newStorageRig(t)
+		d := dialStorageDaemon(t, r)
+		opener := &extReclaimOpener{}
+		d.SetLocalFileOpener(opener)
+		r.shc.committedFound = true
+		r.shc.committedLost = true
+
+		wh := &fakeCommitWH{}
+		h := link.NewCommittingWriteHandleForTest(d, wh, "res-lost", "coord-lost")
+		if err := h.Commit(); err == nil {
+			t.Fatal("Commit returned nil on a Lost reservation — a permanent reject must be loud")
+		}
+		if len(opener.reclaimed) != 1 || opener.reclaimed[0] != "coord-lost" {
+			t.Fatalf("reclaimed = %v, want [coord-lost]", opener.reclaimed)
+		}
+	})
+
+	t.Run("Found && !Lost is the one clean success", func(t *testing.T) {
+		r := newStorageRig(t)
+		d := dialStorageDaemon(t, r)
+		r.shc.committedFound = true
+		r.shc.committedLost = false
+
+		wh := &fakeCommitWH{}
+		h := link.NewCommittingWriteHandleForTest(d, wh, "res-ok", "coord-ok")
+		if err := h.Commit(); err != nil {
+			t.Fatalf("Commit errored on a clean landing: %v", err)
+		}
+	})
+
+	// 期11 review残余#2a: a non-empty reply.Reason with Lost==false is the
+	// home explicitly NAK'ing the commit (sender/placement mismatch, a store
+	// error, or no storage control wired — handleCommitted's own
+	// Reason-setting branches, none of which set Found/Lost). The pre-fix
+	// code only checked transport err + reply.Lost, so this branch fell
+	// through to the bottom `return nil` and told the caller the create
+	// succeeded even though the home never landed the row.
+	t.Run("reply.Reason without Lost is a home NAK, fails loud", func(t *testing.T) {
+		r := newStorageRig(t)
+		d := dialStorageDaemon(t, r)
+		r.shc.committedErr = errors.New("store unavailable")
+
+		wh := &fakeCommitWH{}
+		h := link.NewCommittingWriteHandleForTest(d, wh, "res-nak", "coord-nak")
+		if err := h.Commit(); err == nil {
+			t.Fatal("Commit returned nil on a home-rejected commit (reply.Reason set, Lost=false) — the pre-fix false-success bug")
+		}
+		if !wh.committed {
+			t.Fatal("the underlying local Commit must still have run (bytes landed locally)")
+		}
+	})
 }

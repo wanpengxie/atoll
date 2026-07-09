@@ -267,6 +267,9 @@ type LocalFileOpener interface {
 	// the server-zero-storage archtest; this interface names only its method
 	// set). Redeemed for Open(dir资源) on the same-daemon Local route only.
 	OpenDir(coord string) (accessdoor.LocalDirHandle, error)
+	// ReclaimCoord mirrors platform/internal/link.LocalFileOpener's own
+	// ReclaimCoord (期11 S2's "非-land 终态回收") — see its doc.
+	ReclaimCoord(coord string) error
 }
 
 // StorageResourceCoord / StorageReservationCoord / StorageTombstoneCoord are
@@ -313,6 +316,34 @@ type StorageHost interface {
 	// Reconcile runs one Scrubber pass against the home's ReconcilePullReply
 	// (already translated to plain types by storageHostForwarder).
 	Reconcile(ctx context.Context, resources []StorageResourceCoord, pendingReservations []StorageReservationCoord, pendingTombstones []StorageTombstoneCoord, ack StorageReclaimAckFunc, resend StorageCommittedResendFunc)
+	// ActiveWriteCoords snapshots every coord this daemon currently has an
+	// OPEN local WriteHandle for (期11 review's own narrowing addition,
+	// cmd/daemon/internal/storagehost.Host.ActiveWriteCoords's plain-typed
+	// mirror) — storageHostForwarder.pass reads this BEFORE every
+	// ReconcilePull round trip and forwards it as link.ReconcilePull.
+	// ActiveCoords, so the home's liveness touch bumps ONLY reservations
+	// this daemon can actually prove are still being written, never every
+	// reservation it happens to still own.
+	ActiveWriteCoords() []string
+	// LandedCoords snapshots every coord this daemon currently has in its live/
+	// directory (期11 review §2.5 #A, cmd/daemon/internal/storagehost.Host.
+	// LandedCoords's plain-typed mirror) — a disk listing, sourced from the
+	// filesystem so it survives a crash/restart with no daemon-side truth.
+	// storageHostForwarder.pass reads this BEFORE every ReconcilePull round
+	// trip and forwards it as link.ReconcilePull.LandedCoords, so the home
+	// flips matching pending reservations to phase='landed' before its
+	// age-sweep — a landed-but-uncommitted create is thereby immune to the
+	// sweep even after an arbitrarily long crash gap.
+	//
+	// A non-nil error (期11 review残余#1) means the read itself failed — the
+	// caller (storageHostForwarder.pass) MUST skip sending this tick's
+	// ReconcilePull entirely rather than forward a fabricated empty slice: an
+	// empty answer would tell the home NOTHING landed, and the home's
+	// SweepExpiredReservations (same ReconcilePull round trip, run right
+	// after MarkReservationsLanded) could then sweep an already-landed
+	// reservation as abandoned before any later tick ever gets a chance to
+	// report it correctly.
+	LandedCoords() ([]string, error)
 }
 
 // storageHostForwarder is StorageHost's daemon-lifetime bridge to the link
@@ -400,9 +431,38 @@ func (f *storageHostForwarder) pass(ctx context.Context) {
 	if d == nil {
 		return
 	}
-	reply, err := d.SendReconcilePull(ctx)
+	// f.host is guaranteed non-nil here — pump (this method's only caller)
+	// already returns early when it is nil, before ever starting the ticker
+	// loop that reaches this call.
+	activeCoords := f.host.ActiveWriteCoords()
+	landedCoords, lerr := f.host.LandedCoords()
+	if lerr != nil {
+		// 期11 review残余#1: a LandedCoords read failure must NEVER send a
+		// ReconcilePull at all — sending one with a fabricated empty
+		// landedCoords would tell the home nothing landed, and its
+		// same-round-trip SweepExpiredReservations could then sweep an
+		// already-landed reservation as abandoned. Skipping the whole pull
+		// is what makes "the next tick retries" true; the pre-fix code's
+		// silent-empty-slice form only pretended it was.
+		f.logger.Warn("platform.compute.storage_landed_coords_failed", "err", lerr)
+		return
+	}
+	reply, err := d.SendReconcilePull(ctx, activeCoords, landedCoords)
 	if err != nil {
 		f.logger.Warn("platform.compute.storage_reconcile_pull_failed", "err", err)
+		return
+	}
+	if reply.Reason != "" {
+		// 期11 review残余#2b: the home explicitly NAK'd this pull (no storage
+		// host control wired / unattached sender) — Resources/
+		// PendingReservations/PendingTombstones are all zero-value on this
+		// branch (handleReconcilePull's own doc), so feeding them into
+		// Host.Reconcile would run the scrubber against fabricated empty
+		// truth: it could wrongly treat every locally-landed resource as an
+		// orphan to scrub, and every pending reservation/tombstone this
+		// daemon still owes a resend/ack for as already resolved. Skip this
+		// round entirely; the next tick's pull retries.
+		f.logger.Warn("platform.compute.storage_reconcile_pull_rejected", "reason", reply.Reason)
 		return
 	}
 

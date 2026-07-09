@@ -89,9 +89,16 @@ type Acceptor struct {
 	storageControl StorageHostControl
 
 	// pendingAlloc correlates AllocRequest (home→daemon) with its AllocReply —
-	// the ONE home-initiated leg of the control-RPC plane (the other three
-	// frames are daemon-initiated, correlated on the Dialer side instead).
+	// a home-initiated leg of the control-RPC plane (the daemon-initiated
+	// frames — Committed/ReclaimAck/ReconcilePull — are correlated on the
+	// Dialer side instead).
 	pendingAlloc *pendingReplies[AllocReply]
+
+	// pendingReclaim correlates ReclaimRequest (home→daemon) with its
+	// ReclaimReply — the second home-initiated leg (期11 review §2.5 #B, the
+	// content-less create loser's synchronous coord reclaim), same shape as
+	// pendingAlloc.
+	pendingReclaim *pendingReplies[ReclaimReply]
 
 	// lane is §5's resource lane bookkeeping (per-daemon yamux sessions +
 	// the Token-keyed transfer registry) — see lanecontrol.go.
@@ -186,6 +193,7 @@ func NewAcceptor(cfg Config) *Acceptor {
 		cancelReq:      cfg.CancelRequest,
 		storageControl: cfg.StorageHostControl,
 		pendingAlloc:   newPendingReplies[AllocReply](),
+		pendingReclaim: newPendingReplies[ReclaimReply](),
 		lane:           newLaneState(),
 		links:          map[string][]linkHandle{},
 	}
@@ -467,6 +475,12 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				return
 			}
 			a.pendingAlloc.deliver(sf.AllocReply.RequestID, *sf.AllocReply)
+		case ctrlReclaimReply:
+			sf, err := decodeStorageControl(payload)
+			if err != nil || sf.ReclaimReply == nil {
+				return
+			}
+			a.pendingReclaim.deliver(sf.ReclaimReply.RequestID, *sf.ReclaimReply)
 		case ctrlCommitted:
 			sf, err := decodeStorageControl(payload)
 			if err != nil || sf.Committed == nil {
@@ -900,6 +914,51 @@ func (a *Acceptor) SendAllocRequest(ctx context.Context, daemonID string, req Al
 	return nil
 }
 
+// SendReclaimRequest is the door's (accessdoor.StorageControl, via the
+// platform adapter) send-half of 期11 review §2.5 #B's synchronous coord
+// reclaim: routes to daemonID's most recent live link, waits for the
+// correlated ReclaimReply. Exact structural mirror of SendAllocRequest (same
+// home-initiated request/reply discipline, same pending table shape) — used
+// by the content-less create loser path to collect the orphaned empty coord
+// the with-content path's CommittedReply.Lost→ReclaimCoord signal would
+// otherwise have handled. A "no live connection" is a non-fatal Go error the
+// caller logs (the reservation is already gone; a missed reclaim is at worst a
+// leftover empty dir the next resource-delete-scale reclaim never revisits —
+// the same best-effort posture every other daemon-side cleanup in this plane
+// documents).
+func (a *Acceptor) SendReclaimRequest(ctx context.Context, daemonID, coord string) error {
+	a.linksMu.Lock()
+	hs := a.links[daemonID]
+	var lc *linkSession
+	if len(hs) > 0 {
+		lc = hs[len(hs)-1].lc
+	}
+	a.linksMu.Unlock()
+	if lc == nil {
+		return fmt.Errorf("link: no live connection for daemon %q", daemonID)
+	}
+
+	req := ReclaimRequest{RequestID: newRequestID(), Coord: coord}
+	ch := a.pendingReclaim.register(req.RequestID)
+	raw, err := encodeStorageControl(storageControlFrame{Kind: ctrlReclaimRequest, ReclaimRequest: &req})
+	if err != nil {
+		a.pendingReclaim.cancel(req.RequestID)
+		return err
+	}
+	if err := lc.sendControl(raw); err != nil {
+		a.pendingReclaim.cancel(req.RequestID)
+		return err
+	}
+	reply, err := a.pendingReclaim.wait(ctx, req.RequestID, ch, a.ctx.Done())
+	if err != nil {
+		return err
+	}
+	if !reply.OK {
+		return fmt.Errorf("link: reclaim request denied by daemon %q: %s", daemonID, reply.Reason)
+	}
+	return nil
+}
+
 // handleCommitted answers a daemon-initiated Committed(reservation_id) frame
 // (§4.7's second frame): sender-auth (senderDaemonID must equal the
 // reservation's OWN placement_daemon_id, read via ResourceOutbox before
@@ -963,7 +1022,7 @@ func (a *Acceptor) handleReconcilePull(ctx context.Context, lc *linkSession, sen
 	case senderDaemonID == "":
 		reply.Reason = "link: reconcile_pull frame from an unattached sender"
 	default:
-		resources, pendingReservations, pendingTombstones, err := a.storageControl.ReconcilePull(ctx, senderDaemonID)
+		resources, pendingReservations, pendingTombstones, err := a.storageControl.ReconcilePull(ctx, senderDaemonID, msg.ActiveCoords, msg.LandedCoords)
 		if err != nil {
 			reply.Reason = err.Error()
 		} else {
@@ -991,7 +1050,14 @@ type StorageHostControl interface {
 	// ReconcilePull answers senderDaemonID's own recovery picture — landed
 	// resources placed on it, its pending reservations, its pending
 	// tombstones (resourcespec.Registry's three List*ByDaemon methods).
-	ReconcilePull(ctx context.Context, senderDaemonID string) (resources []ReconcileResource, pendingReservations []ReconcileReservation, pendingTombstones []ReconcileTombstone, err error)
+	// activeCoords is the sender's own ReconcilePull.ActiveCoords (期11
+	// review) — the implementor's liveness-touch narrows to exactly these
+	// coords, never a blanket "every reservation this daemon owns".
+	// landedCoords is the sender's ReconcilePull.LandedCoords (期11 review
+	// §2.5 #A) — the implementor flips matching pending reservations to
+	// phase='landed' (MarkReservationsLanded) BEFORE its age-sweep, so a
+	// landed-but-uncommitted create is never swept.
+	ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords, landedCoords []string) (resources []ReconcileResource, pendingReservations []ReconcileReservation, pendingTombstones []ReconcileTombstone, err error)
 }
 
 // emitSink builds the per-link EmitSink: a remote cell's emit is written through

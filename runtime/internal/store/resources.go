@@ -181,10 +181,19 @@ func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.Resour
 		return "", errors.New("store: resource reserve-create: empty creator")
 	}
 	reservationID := uuid.NewString()
+	now := r.nowMs()
+	// last_progress_at seeds to the SAME stamp as reserved_at (期11 S1): a
+	// freshly-minted reservation starts "alive as of right now", identical
+	// to the pre-S1 reserved_at-only behavior until something bumps it —
+	// SweepExpiredReservations judging a never-touched row is unchanged.
+	// phase seeds to 'reserved' (期11 review §2.5): the daemon has not yet
+	// reported these bytes landed. MarkReservationsLanded flips it to 'landed'
+	// once the daemon's ReconcilePull says live/<coord> exists — from which
+	// point the row is immune to the age-sweep.
 	if _, err := r.db.ExecContext(ctx,
-		`INSERT INTO resource_reservations (reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, is_dir)
-		   VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		reservationID, string(id), string(kind), placementDaemonID, placementCoord, string(creator), r.nowMs(), dir,
+		`INSERT INTO resource_reservations (reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, is_dir, last_progress_at, phase)
+		   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved')`,
+		reservationID, string(id), string(kind), placementDaemonID, placementCoord, string(creator), now, dir, now,
 	); err != nil {
 		return "", fmt.Errorf("store: resource reserve-create %q: %w", id, err)
 	}
@@ -289,7 +298,7 @@ func (r *resourceRegistry) TombstoneDaemon(ctx context.Context, tombstoneID stri
 // extension of the sender-auth discipline).
 func (r *resourceRegistry) ListReservationsByDaemon(ctx context.Context, daemonID string) ([]resourcespec.ReservationRow, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at
+		`SELECT reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, last_progress_at
 		   FROM resource_reservations WHERE placement_daemon_id=? ORDER BY reserved_at, reservation_id`,
 		daemonID,
 	)
@@ -302,7 +311,7 @@ func (r *resourceRegistry) ListReservationsByDaemon(ctx context.Context, daemonI
 	for rows.Next() {
 		var row resourcespec.ReservationRow
 		var resID, kind, createdBy string
-		if err := rows.Scan(&row.ReservationID, &resID, &kind, &row.PlacementDaemonID, &row.PlacementCoord, &createdBy, &row.ReservedAt); err != nil {
+		if err := rows.Scan(&row.ReservationID, &resID, &kind, &row.PlacementDaemonID, &row.PlacementCoord, &createdBy, &row.ReservedAt, &row.LastProgressAt); err != nil {
 			return nil, fmt.Errorf("store: list reservations by daemon scan %q: %w", daemonID, err)
 		}
 		row.ResourceID = resource.ResourceID(resID)
@@ -415,15 +424,17 @@ func (r *resourceRegistry) ListByPlacementDaemon(ctx context.Context, daemonID s
 }
 
 // SweepExpiredReservations deletes every resource_reservations row belonging
-// to daemonID whose reserved_at < cutoffMs, returning the swept rows (§1.7's
-// third reservation-deletion trigger — the server ages out a reservation an
-// AllocRequest never reached the daemon for, so nothing would ever resend
-// Committed to clear it). Select-then-delete in one transaction (same shape
-// as CommitReservation's own lookup-then-mutate), so a row cannot be swept
-// out from under a Committed that lands concurrently — either this
-// transaction's DELETE commits first (Committed's later CommitReservation
-// then sees the row already gone, a clean no-op) or CommitReservation's own
-// transaction commits first (this sweep's SELECT simply does not see it).
+// to daemonID whose last_progress_at < cutoffMs, returning the swept rows
+// (§1.7's third reservation-deletion trigger, 期11 S1-narrowed from
+// reserved_at to last_progress_at — see ReservationRow.LastProgressAt's doc:
+// the server ages out a reservation whose placement daemon has gone quiet
+// long enough, not merely one that has been slow-but-alive since birth).
+// Select-then-delete in one transaction (same shape as CommitReservation's
+// own lookup-then-mutate), so a row cannot be swept out from under a
+// Committed that lands concurrently — either this transaction's DELETE
+// commits first (Committed's later CommitReservation then sees the row
+// already gone, a clean no-op) or CommitReservation's own transaction
+// commits first (this sweep's SELECT simply does not see it).
 func (r *resourceRegistry) SweepExpiredReservations(ctx context.Context, daemonID string, cutoffMs int64) ([]resourcespec.ReservationRow, error) {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -431,9 +442,16 @@ func (r *resourceRegistry) SweepExpiredReservations(ctx context.Context, daemonI
 	}
 	defer func() { _ = tx.Rollback() }()
 
+	// phase='reserved' is the 期11 review §2.5 #A guard: a reservation the
+	// daemon has already reported LANDED (phase='landed') is NEVER swept, no
+	// matter how stale its last_progress_at — its bytes are durably on disk and
+	// only the Committed row-write is outstanding, which the daemon's own
+	// ReconcilePull resend (resumeLandedReservations) will eventually land. The
+	// age-sweep only reclaims a reservation whose bytes never made it (P0: a
+	// landed-but-uncommitted create being destroyed as if abandoned).
 	rows, err := tx.QueryContext(ctx,
-		`SELECT reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at
-		   FROM resource_reservations WHERE placement_daemon_id=? AND reserved_at<? ORDER BY reserved_at, reservation_id`,
+		`SELECT reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, last_progress_at
+		   FROM resource_reservations WHERE placement_daemon_id=? AND phase='reserved' AND last_progress_at<? ORDER BY reserved_at, reservation_id`,
 		daemonID, cutoffMs,
 	)
 	if err != nil {
@@ -443,7 +461,7 @@ func (r *resourceRegistry) SweepExpiredReservations(ctx context.Context, daemonI
 	for rows.Next() {
 		var row resourcespec.ReservationRow
 		var resID, kind, createdBy string
-		if err := rows.Scan(&row.ReservationID, &resID, &kind, &row.PlacementDaemonID, &row.PlacementCoord, &createdBy, &row.ReservedAt); err != nil {
+		if err := rows.Scan(&row.ReservationID, &resID, &kind, &row.PlacementDaemonID, &row.PlacementCoord, &createdBy, &row.ReservedAt, &row.LastProgressAt); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("store: sweep expired reservations scan %q: %w", daemonID, err)
 		}
@@ -469,6 +487,78 @@ func (r *resourceRegistry) SweepExpiredReservations(ctx context.Context, daemonI
 		return nil, fmt.Errorf("store: sweep expired reservations commit: %w", err)
 	}
 	return out, nil
+}
+
+// TouchReservationsByCoords bumps last_progress_at=atMs for every currently-
+// pending reservation belonging to daemonID WHOSE placement_coord is in
+// coords (期11 review 收窄修复 — see resourcespec.Registry.
+// TouchReservationsByCoords's doc for why "daemon in touch at all" is the
+// wrong liveness granularity). A plain bulk UPDATE, not a select-then-mutate
+// transaction: unlike SweepExpiredReservations this never deletes a row, so
+// there is no race window to close — a reservation that lands
+// (CommitReservation) or gets lost concurrently simply vanishes from this
+// UPDATE's WHERE match, no different from any other concurrent writer racing
+// a wide predicate.
+//
+// An empty coords touches ZERO rows — this is NOT "no filter" degrading to
+// the old by-daemon behavior, it is the honest answer to "this daemon
+// currently has no active writes" (a daemon with only abandoned reservations
+// and nothing open must bump nothing, or age-sweep could never catch up).
+func (r *resourceRegistry) TouchReservationsByCoords(ctx context.Context, daemonID string, coords []string, atMs int64) error {
+	if len(coords) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(coords))
+	args := make([]any, 0, len(coords)+2)
+	args = append(args, atMs, daemonID)
+	for i, c := range coords {
+		placeholders[i] = "?"
+		args = append(args, c)
+	}
+	query := fmt.Sprintf(
+		`UPDATE resource_reservations SET last_progress_at=? WHERE placement_daemon_id=? AND placement_coord IN (%s)`,
+		strings.Join(placeholders, ","),
+	)
+	if _, err := r.db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("store: touch reservations by coords %q: %w", daemonID, err)
+	}
+	return nil
+}
+
+// MarkReservationsLanded flips phase reserved→landed for every pending
+// reservation belonging to daemonID whose placement_coord is in coords (期11
+// review §2.5 #A). The daemon reports these coords each ReconcilePull from a
+// live/ directory listing — a coord present in live/ means its bytes are
+// fsync+renamed and durable, so the reservation must never again be age-swept
+// (SweepExpiredReservations' phase='reserved' guard). One-way (only
+// reserved→landed; a landed row never goes back), so the home MUST run this
+// BEFORE its sweep in the same ReconcilePull, closing the P0 window where a
+// stale-but-landed reservation would otherwise be reclaimed as abandoned.
+//
+// Empty coords is a clean no-op — an idle/never-landed daemon reports nothing
+// landed, and nothing should flip (symmetric with TouchReservationsByCoords).
+// A plain bulk UPDATE, no select-then-mutate transaction: it never deletes a
+// row, so there is no race window to close — a reservation that commits or is
+// swept concurrently simply falls out of the WHERE match.
+func (r *resourceRegistry) MarkReservationsLanded(ctx context.Context, daemonID string, coords []string) error {
+	if len(coords) == 0 {
+		return nil
+	}
+	placeholders := make([]string, len(coords))
+	args := make([]any, 0, len(coords)+1)
+	args = append(args, daemonID)
+	for i, c := range coords {
+		placeholders[i] = "?"
+		args = append(args, c)
+	}
+	query := fmt.Sprintf(
+		`UPDATE resource_reservations SET phase='landed' WHERE placement_daemon_id=? AND phase='reserved' AND placement_coord IN (%s)`,
+		strings.Join(placeholders, ","),
+	)
+	if _, err := r.db.ExecContext(ctx, query, args...); err != nil {
+		return fmt.Errorf("store: mark reservations landed %q: %w", daemonID, err)
+	}
+	return nil
 }
 
 // ActorAllows queries caller's DIRECT actor entry only. members late-binding is
@@ -563,12 +653,79 @@ func (r *resourceRegistry) SetGrant(ctx context.Context, id resource.ResourceID,
 //     daemon-side Reclaimer (§4, a later addition) collects the bytes
 //     asynchronously afterward. The invariant "a visible row always points
 //     at valid bytes" holds throughout: the row disappears FIRST.
+// supersedePendingReservationsTx is Delete's #C helper: inside the caller's
+// transaction, for every still-pending reservation on id, write a
+// resource_tombstones row for its coord (so the daemon's ordinary
+// ReconcilePull Reclaimer collects the orphaned live/<coord> bytes — the SAME
+// delete-outbox reclaim path a resource delete already uses, no new
+// mechanism) then delete the reservation row. Reservations are always file
+// kind with axis-allocated placement (kv/registered never reserve), so the
+// tombstone's provenance/kind are those constants. A reservation whose write
+// handle is still open when this runs will, on its eventual Commit, hit
+// CommitReservation's found=false no-op — the row is already gone here.
+func (r *resourceRegistry) supersedePendingReservationsTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID) error {
+	rows, err := tx.QueryContext(ctx,
+		`SELECT reservation_id, placement_daemon_id, placement_coord FROM resource_reservations WHERE resource_id=?`,
+		string(id),
+	)
+	if err != nil {
+		return fmt.Errorf("store: supersede reservations select %q: %w", id, err)
+	}
+	type pending struct{ reservationID, daemonID, coord string }
+	var supers []pending
+	for rows.Next() {
+		var p pending
+		if err := rows.Scan(&p.reservationID, &p.daemonID, &p.coord); err != nil {
+			_ = rows.Close()
+			return fmt.Errorf("store: supersede reservations scan %q: %w", id, err)
+		}
+		supers = append(supers, p)
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return fmt.Errorf("store: supersede reservations rows %q: %w", id, err)
+	}
+	if err := rows.Close(); err != nil {
+		return fmt.Errorf("store: supersede reservations close %q: %w", id, err)
+	}
+
+	for _, p := range supers {
+		if _, err := tx.ExecContext(ctx,
+			`INSERT INTO resource_tombstones (tombstone_id, resource_id, daemon_id, placement_coord, provenance, kind, deleted_at)
+			   VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			uuid.NewString(), string(id), p.daemonID, p.coord, string(resourcespec.ProvenanceAxisAllocated), string(resourcespec.KindFile), r.nowMs(),
+		); err != nil {
+			return fmt.Errorf("store: supersede reservations tombstone %q: %w", p.reservationID, err)
+		}
+		if _, err := tx.ExecContext(ctx, `DELETE FROM resource_reservations WHERE reservation_id=?`, p.reservationID); err != nil {
+			return fmt.Errorf("store: supersede reservations delete %q: %w", p.reservationID, err)
+		}
+	}
+	return nil
+}
+
 func (r *resourceRegistry) Delete(ctx context.Context, id resource.ResourceID) error {
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("store: resource delete begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// SUPERSEDED terminal (期11 review §2.5 #C): a Delete on this resource_id
+	// also kills any still-pending reservation for the SAME id and reclaims its
+	// coord. Without this, a write handle held open forever keeps its coord
+	// "active" (TouchReservationsByCoords bumps it every ReconcilePull, so the
+	// age-sweep never fires); across a delete/recreate cycle its straggler
+	// Committed would later find the id free and silently REBUILD it with the
+	// original creator/coord — a resurrection with no fresh OpCreate
+	// authorization. Deleting the reservation row here is the "straggler 落地时
+	//发现已被 delete，拒绝落 row" guard: CommitReservation's own lookup then
+	// returns found=false (a clean replay-safe no-op), never re-landing the id.
+	// Runs FIRST (even when the resource row itself is already gone — an
+	// idempotent re-delete still supersedes any lingering reservation).
+	if err := r.supersedePendingReservationsTx(ctx, tx, id); err != nil {
+		return err
+	}
 
 	var kind, placementDaemonID, placementCoord, provenance string
 	err = tx.QueryRowContext(ctx,

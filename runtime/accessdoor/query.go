@@ -254,8 +254,49 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 			// side, by reserved_at) reclaims it. Nothing to undo here.
 			return Outcome{}, aerr
 		}
-		if _, cerr := d.deps.Registry.CommitReservation(ctx, reservationID); cerr != nil && !errors.Is(cerr, resourcespec.ErrReservationLost) {
+		found, cerr := d.deps.Registry.CommitReservation(ctx, reservationID)
+		if cerr != nil {
+			if errors.Is(cerr, resourcespec.ErrReservationLost) {
+				// This create lost the same-resource_id race (期11 S2,
+				// transfer-lifecycle-spec.md §3's #2): some OTHER reservation
+				// already landed the resource id first. The store already
+				// deleted this reservation row (ErrReservationLost's own
+				// doc), so there is nothing left to retry — the caller must
+				// see the SAME already_exists verdict a synchronous collision
+				// would produce, never a fabricated success (a bare
+				// `return Outcome{}, nil` here would be the "并发败者假成功"
+				// bug: the caller believes it created the resource when
+				// another caller actually owns it).
+				//
+				// 期11 review §2.5 #B: reclaim this loser's orphaned coord. The
+				// AllocRequest above already created an empty live/<coord> on the
+				// daemon; the with-content path collects such a loser via
+				// CommittedReply.Lost→ReclaimCoord, but a content-less create has
+				// no byte stream / Committed round trip, so the door issues the
+				// reclaim synchronously here (the mirror signal on the same
+				// home→daemon channel). Best-effort — a failed reclaim is
+				// discarded (the door carries no logger, and the verdict must
+				// stay AlreadyExists regardless): a missed reclaim leaves at
+				// worst an empty live/<coord> directory, never a correctness
+				// fault, and the daemon's ReclaimCoord is idempotent so a later
+				// duplicate never double-frees.
+				_ = d.deps.StorageControl.ReclaimRequest(ctx, daemonID, coord)
+				return Outcome{RejectReason: access.AlreadyExists}, nil
+			}
 			return createVerdict(ctx, cerr)
+		}
+		if !found {
+			// 期11 review残余#4: found=false with cerr==nil means THIS exact
+			// reservationID was already gone by the time CommitReservation ran
+			// (CommitReservation's own doc: "already committed by an earlier
+			// replay... or swept by the server's own §1.7 timeout sweep — a
+			// clean no-op, not an error") — distinct from ErrReservationLost's
+			// same-resource_id race above, which always carries a non-nil
+			// error. Nothing was ever landed for this create: reporting
+			// success here would be the exact "假成功" bug the Lost branch
+			// above already guards against, just reached through the OTHER
+			// no-row path. Never fabricate accept on a no-op commit.
+			return Outcome{RejectReason: access.DriverError}, nil
 		}
 		return Outcome{}, nil
 
