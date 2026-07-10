@@ -499,3 +499,83 @@ func TestHumanDoor_ResourceFaceKVAndShare(t *testing.T) {
 		t.Fatalf("post-delete read = (%+v, %v), want reject", out, err)
 	}
 }
+
+// TestHumanDoor_ResolveNullPayload (修复批 P1-1 regression): JSON `null` is a
+// legal payload frame value that unmarshals the merge map to nil — Resolve
+// must treat it as "no payload", never panic on the decision write.
+func TestHumanDoor_ResolveNullPayload(t *testing.T) {
+	ctx := context.Background()
+	h := doorHome(t)
+	admit(t, h, "agent:asker", actor.KindAgent)
+	reqID := writeDoorRequest(t, h, "agent:asker", actor.KindAgent, doorUser, TypeHumanApprove, nil)
+
+	handle, err := h.Human(ctx, doorUser)
+	if err != nil {
+		t.Fatalf("Human: %v", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rerr := handle.Resolve(ctx, reqID, "approved", json.RawMessage(`null`))
+		if rerr == nil {
+			break
+		}
+		if !errors.Is(rerr, ErrCellUnavailable) || time.Now().After(deadline) {
+			t.Fatalf("Resolve(payload:null) = %v", rerr)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	term, ok := findTerminal(t, h, reqID)
+	if !ok {
+		t.Fatal("no terminal")
+	}
+	var p struct {
+		Decision string `json:"decision"`
+	}
+	_ = json.Unmarshal(term.Payload, &p)
+	if p.Decision != "approved" {
+		t.Fatalf("terminal payload = %s", string(term.Payload))
+	}
+}
+
+// TestHumanDoor_DriveDuringChurn (修复批 P2-6): hammer the door's write verb
+// from a foreign goroutine WHILE the cell is repeatedly killed and re-minted —
+// the real go-live→Start window and stale-driver replacement races the
+// occupant gate + live membranes exist for. Run under -race; the assertion is
+// "no panic, and every error is one of the honest family".
+func TestHumanDoor_DriveDuringChurn(t *testing.T) {
+	ctx := context.Background()
+	h := doorHome(t)
+	handle, err := h.Human(ctx, doorUser)
+	if err != nil {
+		t.Fatalf("Human: %v", err)
+	}
+
+	stop := make(chan struct{})
+	errs := make(chan error, 1)
+	go func() {
+		defer close(errs)
+		for {
+			select {
+			case <-stop:
+				return
+			default:
+			}
+			_, _, serr := handle.Submit(ctx, SubmitSpec{Type: "human.note", Audience: []actor.ActorID{"agent:x"}})
+			if serr != nil && !errors.Is(serr, ErrCellUnavailable) {
+				var wr *WriteRejectedError
+				if !errors.As(serr, &wr) {
+					errs <- serr
+					return
+				}
+			}
+		}
+	}()
+	for i := 0; i < 40; i++ {
+		h.channel.Cells().DespawnID(doorUser)
+		h.reconcileActivation(ctx)
+	}
+	close(stop)
+	if serr, ok := <-errs; ok && serr != nil {
+		t.Fatalf("drive-during-churn surfaced a non-honest error: %v", serr)
+	}
+}

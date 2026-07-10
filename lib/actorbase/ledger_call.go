@@ -210,13 +210,13 @@ func (l *callLedger) claimBuffered(id message.ID) (*message.Envelope, bool) {
 // over it (F4). An id already gone (a real terminal claimed and consumed it) is
 // likewise a silent no-op — the happy-race outcome, not a fault.
 //
-// KNOWN GAP (spec §1.5 orphan申报, defer): if this caller横死 before its
-// out-station entry closes, this timer dies with it and the entry becomes an
-// orphan — the receiver-side account self-cleans on its own deadline and the
-// truth row reads as a lazy-open request an ExpiresAt reader can level-judge.
-// The eventual fix is generalising the substrate closure reconcile
-// (death.go's ReconcileReceiverUnavailable geometry) to the "caller absent"
-// cell; owner deferred it, pain-driven. A sibling of the same orphan family
+// CLOSED GAP (期12 义务归位): if this caller横死 before its out-station
+// entry closes, this timer dies with it — and the SUBSTRATE EXPIRY REAPER
+// (platform sweepExpired over ix_messages_expires, exactly the "generalise
+// ReconcileReceiverUnavailable's geometry to the caller-absent cell" fix
+// this comment used to defer) closes the truth row at its declared deadline,
+// system-authored. This timer is now the fast-path observer of that same
+// fact, not the obligation's owner. A sibling local-account note
 // (round-2 review, M1): a buffered-final entry whose caller never comes back
 // for it (async Submit → its own wait gave up → final landed late → no
 // further Await/Cancel) lingers in the map until teardown — truth is already

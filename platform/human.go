@@ -298,6 +298,13 @@ func (h HumanHandle) Resolve(ctx context.Context, reqID message.ID, decision str
 		if uerr := json.Unmarshal(payload, &merged); uerr != nil {
 			return &WriteRejectedError{Reason: "bad_payload", Detail: uerr.Error()}
 		}
+		// JSON `null` is legal JSON that unmarshals a map to nil — writing
+		// merged["decision"] below would panic (修复批 P1-1: a ws client
+		// could kill the connection handler with payload:null). A null
+		// payload reads as "no payload".
+		if merged == nil {
+			merged = map[string]any{}
+		}
 	}
 	merged["decision"] = decision
 	raw, _ := json.Marshal(merged)
@@ -567,10 +574,26 @@ func (h *Home) presenceDisconnect(id actor.ActorID, token string) {
 // snapshot — Remove's对称清账 (pending-leftovers #3): the ring's削 is a
 // quiet teardown with no down edge, so the fold would otherwise keep serving
 // a stale "online" forever. Forget decays the id to the honest unknown.
+//
+// Cross-generation guard (修复批 P1-2): both the token clear and the Forget
+// run under presenceMu — the same lock presenceConnect feeds under — and the
+// registry is re-read first: if id is ACTIVE again (a re-Admit already
+// landed), this clear belongs to a dead generation and must not wipe the new
+// session's account/snapshot. Residual honesty: membership writes are not
+// serialized with presenceMu, so an exotic interleaving (re-Admit committing
+// between this read and the clear) can still decay a fresh session to
+// unknown — presence is ADVISORY three-state with unknown as the honest
+// default, so the residual mis-state is a stale "unknown" until the next
+// connect edge, never a false "online"; full linearization would couple the
+// membership tx to the presence account, deliberately not built (pre-launch
+// 不过度安全化).
 func (h *Home) clearPresence(id actor.ActorID) {
 	h.presenceMu.Lock()
+	defer h.presenceMu.Unlock()
+	if rec, ok, err := h.cs.Registry.Lookup(context.Background(), id); err == nil && ok && rec.IsActive() {
+		return // a newer generation already re-admitted this id — not ours to clear
+	}
 	delete(h.presenceSessions, id)
-	h.presenceMu.Unlock()
 	h.deviceFold.Forget(id)
 }
 

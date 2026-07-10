@@ -165,7 +165,8 @@ type ExpiryQuery interface {
 	// ExpiredOpenRequests returns request rows with a declared expires_at <=
 	// beforeMs and no terminal response, ordered by (expires_at, seq)
 	// ascending, strictly after cur, at most limit rows. nextCur points past
-	// the last row returned; a short batch (len < limit) means the scan
-	// reached the end — the caller wraps to the zero cursor next sweep.
+	// the last row returned; the ZERO nextCur means the scan reached the end
+	// (wrap to the top next sweep) — the implementation, not the caller,
+	// derives it.
 	ExpiredOpenRequests(ctx context.Context, beforeMs int64, cur ExpiryCursor, limit int) (rows []ExpiredRow, nextCur ExpiryCursor, err error)
 }

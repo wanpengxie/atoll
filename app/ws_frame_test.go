@@ -1,6 +1,7 @@
 package app_test
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/atoll/app"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -452,8 +455,11 @@ func TestWS_CancelTimerFrame(t *testing.T) {
 		t.Fatalf("duration_ms=0: want invalid_argument, got %v", errFrame)
 	}
 
+	// SHORT timer + wait PAST FireAt (修复批 P2-5: the old 60s-timer/300ms-wait
+	// form passed even with Cancel a no-op): if the cancel is ineffective the
+	// fire lands inside the observation window and the filter catches it.
 	c.send(map[string]any{
-		"type": "after", "ref": "b1", "duration_ms": 60_000,
+		"type": "after", "ref": "b1", "duration_ms": 250,
 		"msg_type": "reminder.later", "payload": map[string]any{},
 	})
 	ack := c.nextAck(3 * time.Second)
@@ -466,14 +472,19 @@ func TestWS_CancelTimerFrame(t *testing.T) {
 	if cAck["type"] != "ack" || cAck["frame"] != "cancel_timer" {
 		t.Fatalf("cancel_timer: want ack, got %v", cAck)
 	}
-	// No fire arrives (bounded negative check).
-	select {
-	case m := <-c.tail:
-		env2, _ := m["envelope"].(map[string]any)
-		if env2 != nil && env2["type"] == "reminder.later" {
-			t.Fatal("cancelled timer fired anyway")
+	// Observe well past FireAt, CONTINUOUSLY filtering for the target type
+	// (an unrelated tail frame must not end the watch early).
+	watchEnd := time.After(1 * time.Second)
+	for {
+		select {
+		case m := <-c.tail:
+			env2, _ := m["envelope"].(map[string]any)
+			if env2 != nil && env2["type"] == "reminder.later" {
+				t.Fatal("cancelled timer fired anyway")
+			}
+		case <-watchEnd:
+			return
 		}
-	case <-time.After(300 * time.Millisecond):
 	}
 }
 
@@ -495,5 +506,29 @@ func TestWS_AfterFrameNonMember(t *testing.T) {
 	c.send(map[string]any{"type": "after", "ref": "n1", "duration_ms": 1000, "msg_type": "reminder.note"})
 	if errFrame := c.nextAck(3 * time.Second); errFrame["error"] != "not_member" {
 		t.Fatalf("non-member after: want not_member, got %v", errFrame)
+	}
+}
+
+// TestWSSubmitErrCode pins the message-frame error mapping (期12 修复批
+// P0-2 的直接测试): a killed cell is the retryable "unavailable", a closing
+// home "closed" — never "internal"; only a genuinely unknown error logs.
+func TestWSSubmitErrCode(t *testing.T) {
+	cases := []struct {
+		err      error
+		code     string
+		internal bool
+	}{
+		{platform.ErrCellUnavailable, "unavailable", false},
+		{platform.ErrClosed, "closed", false},
+		{platform.ErrNotMember, "not_member", false},
+		{&platform.WriteRejectedError{Reason: "write_denied", Detail: "d"}, "write_denied", false},
+		{fmt.Errorf("wrapped: %w", platform.ErrCellUnavailable), "unavailable", false},
+		{errors.New("boom"), "internal", true},
+	}
+	for _, tc := range cases {
+		code, _, internal := app.WSSubmitErrCodeForTest(tc.err)
+		if code != tc.code || internal != tc.internal {
+			t.Fatalf("wsSubmitErrCode(%v) = (%q, internal=%v), want (%q, %v)", tc.err, code, internal, tc.code, tc.internal)
+		}
 	}
 }

@@ -10,10 +10,9 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// TODO(human-canonical): the four review_fixes tests pinning human-door
-// machinery (humanCaller/Home.Human/SubmitSpec/boundedJSONDepth) were removed
-// alongside platform/human.go's整删（2026-07-08）. Re-add per the正典 cell
-// caps 取用 form when app-layer 债②重建 lands.
+// (债②已落：期12 humancell 重建后，human-door 机器的测试住
+// platform/humandoor_test.go——跨 incarnation/冻结环/presence straddle/
+// resource face 真集成；旧 humanCaller 形随 behavior.Caller 拆删不再重建。)
 
 // openWhiteboxHome assembles a Home reachable白盒 (this file is package platform),
 // so a test can stamp Host directly via cs.Membership and read cs.Registry — the

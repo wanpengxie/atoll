@@ -52,6 +52,17 @@ func (w *WriteRejected) Error() string {
 
 var _ actorrt.OccupantDriver = (*engine)(nil)
 
+// driveCtx is the ctx every drive verb runs under: the engine's lifeCtx with
+// its CANCELLATION detached. A drive call runs on the DOOR's goroutine — the
+// cell tearing down mid-call must not abort a write the live membrane would
+// still accept, and must never leak a raw "context canceled" through the
+// seam (the membrane sentinels are the honest WHEN verdict; ctx cancellation
+// is the cell's own lifecycle, not the subject's). The occupant gate at
+// every entry guarantees lifeCtx is non-nil here.
+func (e *engine) driveCtx() context.Context {
+	return context.WithoutCancel(e.lifeCtx)
+}
+
 // driveReady is the occupant-ready gate every Drive* entry runs first (期12
 // S1 P0): actorrt's go-live (embodiments entry + live=true) precedes
 // impl.Start, and lifeCtx is only assigned inside Start — a drive call in
@@ -112,7 +123,7 @@ func (e *engine) DriveWrite(spec actorrt.DriveWrite) (message.ID, int64, error) 
 	// ErrSelfCall — the subject is not waiting on this goroutine, and the
 	// deadline's closure guarantee is the substrate reaper (harness stamps a
 	// default TTL when none is declared, so nothing dangles).
-	out, err := e.pen.Write(e.lifeCtx, env)
+	out, err := e.pen.Write(e.driveCtx(), env)
 	if err != nil {
 		return "", 0, err
 	}
@@ -132,7 +143,7 @@ func (e *engine) DriveRespond(req *message.Envelope, spec actorrt.DriveRespond) 
 	// WithoutCancel: the response is authored on the door's goroutine — a
 	// concurrently-draining lifeCtx must not abort a write the live membrane
 	// would still accept (the membrane, not the ctx, is the WHEN gate).
-	id, err := behavior.Respond(context.WithoutCancel(e.lifeCtx), e.pen, e.clockFn, req, behavior.ResponseSpec{
+	id, err := behavior.Respond(e.driveCtx(), e.pen, e.clockFn, req, behavior.ResponseSpec{
 		Status:  spec.Status,
 		Reason:  spec.Reason,
 		Payload: spec.Payload,
@@ -159,7 +170,7 @@ func (e *engine) DriveAfter(d time.Duration, msgType string, payload []byte) (st
 	// promise (survives restarts/deploys); Sys.After's incarnation bind is
 	// the in-process self-wakeup. No subject-specific abuse limits here —
 	// engine-wide hardening is the anti-storm axis, deferred.
-	id, err := e.sched.Schedule(e.lifeCtx, schedule.ScheduleReq{
+	id, err := e.sched.Schedule(e.driveCtx(), schedule.ScheduleReq{
 		Bind:    schedule.BindIdentity,
 		FireAt:  e.clockFn().Add(d).UnixMilli(),
 		Type:    msgType,
@@ -178,14 +189,14 @@ func (e *engine) DriveCancelTimer(id string) error {
 	if e.sched == nil {
 		return ErrUnsupported
 	}
-	return e.sched.Cancel(e.lifeCtx, schedule.TimerID(id))
+	return e.sched.Cancel(e.driveCtx(), schedule.TimerID(id))
 }
 
 // driveResource returns the SAME adapter Sys.Resource() hands a Proc —
 // literally the same e.access (the cell's liveResourceAccess membrane), so
 // enforcement (membrane WHEN + door R) is one path with zero subject bypass.
 func (e *engine) driveResource() resourceAdapter {
-	return resourceAdapter{h: e.access, ctx: e.life}
+	return resourceAdapter{h: e.access, ctx: e.driveCtx}
 }
 
 func (e *engine) DriveResourceCreate(id resource.ResourceID, args []byte) (accessdoor.Outcome, error) {

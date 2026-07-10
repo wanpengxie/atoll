@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -571,14 +572,69 @@ func TestExpiredOpenRequests(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0].Err != nil || rows[0].Row.Envelope.ID != "e1" {
 		t.Fatalf("page1 = (%v, %+v, %v), want [e1]", rows, cur, err)
 	}
-	// Page 2 from cursor: e2, and the short batch signals end-of-scan.
-	rows, _, err = cs.Expiry.ExpiredOpenRequests(ctx, 1000, cur, 10)
+	// Page 2 from cursor: e2; the exhausted scan reports the ZERO cursor
+	// (the contract's own end-of-scan word — the caller never re-derives it
+	// from batch length).
+	rows, cur2, err := cs.Expiry.ExpiredOpenRequests(ctx, 1000, cur, 10)
 	if err != nil || len(rows) != 1 || rows[0].Row.Envelope.ID != "e2" {
 		t.Fatalf("page2 = (%v, %v), want [e2]", rows, err)
+	}
+	if cur2 != (storespec.ExpiryCursor{}) {
+		t.Fatalf("exhausted scan cursor = %+v, want zero", cur2)
 	}
 	// Zero cursor, wide window: e1+e2 only (e3 answered, e4 not yet due).
 	rows, _, err = cs.Expiry.ExpiredOpenRequests(ctx, 1000, storespec.ExpiryCursor{}, 10)
 	if err != nil || len(rows) != 2 {
 		t.Fatalf("full scan = %d rows (%v), want 2", len(rows), err)
+	}
+}
+
+// TestExpiredOpenRequests_ManyRowsPaginate (DoD-14 half): a backlog well past
+// one batch pages fairly across sweeps — every row is visited exactly once
+// per full scan and the final page reports the zero cursor.
+func TestExpiredOpenRequests_ManyRowsPaginate(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+	const n = 300
+	for i := 0; i < n; i++ {
+		env := newEnv(fmt.Sprintf("m%03d", i), message.KindRequest, message.Audience{"tool:xhs"},
+			withSender(actor.KindAgent, "planner"), withType("xhs.publish"), withExpiresAt(int64(100+i)))
+		if _, err := cs.Log.Append(ctx, env, false); err != nil {
+			t.Fatalf("Append %d: %v", i, err)
+		}
+	}
+	seen := map[message.ID]int{}
+	cur := storespec.ExpiryCursor{}
+	pages := 0
+	for {
+		rows, next, err := cs.Expiry.ExpiredOpenRequests(ctx, 10_000, cur, 128)
+		if err != nil {
+			t.Fatalf("page %d: %v", pages, err)
+		}
+		for _, r := range rows {
+			if r.Err != nil {
+				t.Fatalf("unexpected poison: %v", r.Err)
+			}
+			seen[r.Row.Envelope.ID]++
+		}
+		pages++
+		if next == (storespec.ExpiryCursor{}) {
+			break
+		}
+		cur = next
+		if pages > 10 {
+			t.Fatal("cursor never reached the end")
+		}
+	}
+	if len(seen) != n {
+		t.Fatalf("visited %d distinct rows, want %d", len(seen), n)
+	}
+	for id, c := range seen {
+		if c != 1 {
+			t.Fatalf("row %s visited %d times in one full scan, want 1", id, c)
+		}
+	}
+	if pages != 3 { // 128+128+44
+		t.Fatalf("pages = %d, want 3", pages)
 	}
 }

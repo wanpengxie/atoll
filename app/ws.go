@@ -314,6 +314,12 @@ func (a *App) dispatchFrame(ctx context.Context, chID channel.ID, handle *platfo
 			send(wsErr(f, "invalid_argument", "duration_ms must be a positive millisecond count"))
 			return
 		}
+		if f.MsgType == "" {
+			// The schedule engine rejects an empty type anyway, but that path
+			// reads as internal — a malformed frame is the client's 400.
+			send(wsErr(f, "invalid_argument", "msg_type required"))
+			return
+		}
 		tid, err := handle.After(ctx, time.Duration(f.DurationMs)*time.Millisecond, f.MsgType, f.Payload)
 		if err != nil {
 			send(wsErr(f, doorErrCode(err), err.Error()))
@@ -370,31 +376,34 @@ func (a *App) wsHandleMessage(ctx context.Context, chID channel.ID, handle *plat
 		ExpiresAt:  &exp,
 	})
 	if err != nil {
-		var wr *platform.WriteRejectedError
-		if errors.As(err, &wr) {
-			send(wsErr(f, wr.Reason, wr.Detail))
-			return
+		code, detail, internal := wsSubmitErrCode(err)
+		if internal {
+			a.logger.Error("ws message: submit", "channel", string(chID), "err", err)
 		}
-		if errors.Is(err, platform.ErrNotMember) {
-			send(wsErr(f, "not_member", "not a channel member"))
-			return
-		}
-		// 期12 v0.4 P0-2: the message path does NOT route through doorErrCode
-		// (resolve/cancel's map) — these two arms must live here or a killed
-		// cell reads as internal instead of the honest retryable.
-		if errors.Is(err, platform.ErrCellUnavailable) {
-			send(wsErr(f, "unavailable", "subject cell unavailable — retry"))
-			return
-		}
-		if errors.Is(err, platform.ErrClosed) {
-			send(wsErr(f, "closed", "channel home is closed"))
-			return
-		}
-		a.logger.Error("ws message: submit", "channel", string(chID), "err", err)
-		send(wsErr(f, "internal", ""))
+		send(wsErr(f, code, detail))
 		return
 	}
 	send(wsAck(f, gin.H{"message_id": string(msgID), "seq": seq}))
+}
+
+// wsSubmitErrCode maps a Submit error to the message frame's error code —
+// 期12 v0.4 P0-2: the message path does NOT route through doorErrCode
+// (resolve/cancel's map), so the honest arms (a killed cell is a retryable
+// "unavailable", never "internal") live here, unit-testable.
+func wsSubmitErrCode(err error) (code, detail string, internal bool) {
+	var wr *platform.WriteRejectedError
+	switch {
+	case errors.As(err, &wr):
+		return wr.Reason, wr.Detail, false
+	case errors.Is(err, platform.ErrNotMember):
+		return "not_member", "not a channel member", false
+	case errors.Is(err, platform.ErrCellUnavailable):
+		return "unavailable", "subject cell unavailable — retry", false
+	case errors.Is(err, platform.ErrClosed):
+		return "closed", "channel home is closed", false
+	default:
+		return "internal", "", true
+	}
 }
 
 // doorErrCode maps a HumanHandle verb error to a flat frame error code.

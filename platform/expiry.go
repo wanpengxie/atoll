@@ -7,7 +7,6 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // expiry.go is the substrate's deadline-closure reaper (期12 S3, glue F1 —
@@ -75,11 +74,8 @@ func (h *Home) sweepExpired(ctx context.Context) {
 				"request", string(env.ID), "err", rerr)
 		}
 	}
-	if len(rows) < expirySweepBatch {
-		// Scan reached the end: wrap so the next sweep starts from the top —
-		// rows skipped as poison (or failed to close) become reachable again.
-		h.expiryCursor = storespec.ExpiryCursor{}
-	} else {
-		h.expiryCursor = next
-	}
+	// nextCur's zero value IS the "scan exhausted, wrap to the top" signal
+	// (storespec contract) — rows skipped as poison or failed-to-close become
+	// reachable again on the wrapped sweep.
+	h.expiryCursor = next
 }

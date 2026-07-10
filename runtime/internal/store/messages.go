@@ -325,6 +325,17 @@ func (m *messages) ExpiredOpenRequests(ctx context.Context, beforeMs int64, cur 
 	if err := rows.Err(); err != nil {
 		return out, next, fmt.Errorf("store: expired open requests rows: %w", err)
 	}
+	// Contract (storespec.ExpiryQuery): a scan that reached the end reports
+	// the ZERO cursor — "start from the top next sweep" is the interface's
+	// own word, not something each caller re-derives from batch length.
+	// Known boundary (期12 修复批 B-P2, on record not fixed): a FULL batch of
+	// all-poison rows (>= limit consecutive scan failures) returns next==cur
+	// and the sweep re-reads the same batch forever, starving the tail — it
+	// takes 256+ contiguously unscannable rows (schema-level corruption) to
+	// arm, far below the credible threat line day-1.
+	if len(out) < limit {
+		next = storespec.ExpiryCursor{}
+	}
 	return out, next, nil
 }
 
