@@ -20,7 +20,7 @@ func TestComputePlan_DaemonAssignmentOnly(t *testing.T) {
 	chID := chBody["id"].(string)
 
 	// create a claude agent.
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "Reviewer", "looper": "claude"}, cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Reviewer", "class": "claude"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
 	instID := "agent:" + agentID
@@ -36,8 +36,8 @@ func TestComputePlan_DaemonAssignmentOnly(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 
 	// introduce the claude as a DAEMON-placed instance assigned to THIS daemon.
-	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
-		map[string]any{"agent_id": agentID, "placement": "daemon", "desired_host": daemonID, "make_default": true}, cookies)
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
+		map[string]any{"decl_id": agentID, "placement": "daemon", "desired_host": daemonID, "make_default": true}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 
 	// pull the plan (auth by ?key=, no cookie).
@@ -103,7 +103,7 @@ func TestComputePlan_DesiredHostMutex(t *testing.T) {
 	chID := chBody["id"].(string)
 
 	mkAgent := func(name string) string {
-		w := env.do(t, "POST", "/api/agents", map[string]any{"name": name, "looper": "claude"}, cookies)
+		w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": name, "class": "claude"}, cookies)
 		assertStatus(t, w, http.StatusCreated)
 		return respJSON(t, w)["id"].(string)
 	}
@@ -117,8 +117,8 @@ func TestComputePlan_DesiredHostMutex(t *testing.T) {
 		return d["id"].(string), d["api_key"].(string)
 	}
 	introduce := func(agentID, desiredHost string) {
-		w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
-			map[string]any{"agent_id": agentID, "placement": "daemon", "desired_host": desiredHost}, cookies)
+		w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
+			map[string]any{"decl_id": agentID, "placement": "daemon", "desired_host": desiredHost}, cookies)
 		assertStatus(t, w, http.StatusCreated)
 	}
 	planInstances := func(key string) map[string]bool {

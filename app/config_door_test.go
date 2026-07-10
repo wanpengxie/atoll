@@ -123,8 +123,8 @@ func TestConfigDoor_LegacyEndToEnd(t *testing.T) {
 	s := fullSetup(t, env)
 
 	// Global agent declaration carries snapshot v1 (looper = the s8cfg-legacy class).
-	w := env.do(t, "POST", "/api/agents",
-		map[string]any{"name": "cfgbot", "looper": "s8cfg-legacy", "config": map[string]any{"model": "v1"}},
+	w := env.do(t, "POST", "/api/actor-decls",
+		map[string]any{"name": "cfgbot", "class": "s8cfg-legacy", "config": map[string]any{"model": "v1"}},
 		s.cookies)
 	assertStatus(t, w, http.StatusCreated)
 	var ag map[string]any
@@ -138,7 +138,7 @@ func TestConfigDoor_LegacyEndToEnd(t *testing.T) {
 	sender := actor.ActorID("user:" + s.userID)
 
 	// Introduce server-placed (no per-channel config → global v1 is the snapshot).
-	p1, _ := json.Marshal(map[string]any{"agent_id": agentID, "placement": "server"})
+	p1, _ := json.Marshal(map[string]any{"decl_id": agentID, "placement": "server"})
 	if _, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID), Sender: sender, Payload: p1,
 	}); err != nil {
@@ -151,7 +151,7 @@ func TestConfigDoor_LegacyEndToEnd(t *testing.T) {
 
 	// 改配置门: re-introduce carrying config v2 → UPDATE composition row's config
 	// field → Spawn-replace → new snapshot embodied.
-	p2, _ := json.Marshal(map[string]any{"agent_id": agentID, "config": map[string]any{"model": "v2"}})
+	p2, _ := json.Marshal(map[string]any{"decl_id": agentID, "config": map[string]any{"model": "v2"}})
 	res, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID), Sender: sender, Payload: p2,
 	})

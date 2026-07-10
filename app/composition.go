@@ -21,7 +21,7 @@ import (
 // composition domain.
 
 // compositionRow is one channel_actors instance with its resolved config layers
-// (per-channel over the global agents declaration). The SINGLE row shape
+// (per-channel over the global actor_decls declaration). The SINGLE row shape
 // serverCompositionRows / daemonCompositionRows / compositionBuilder all read (A12: one
 // query, one scan, one build — no手搓 duplication).
 type compositionRow struct {
@@ -33,17 +33,18 @@ type compositionRow struct {
 // instance). The overlay is UNDER the per-channel config (mergeConfig); a non-agent
 // class never matches the join (no overlay), which is correct.
 //
-// deleted_at filter: a soft-deleted agent (agents.deleted_at set) is NEVER composed
-// — the reconcile ring, the daemon plan, and the per-id factory resolve all read
-// through here, so a stale channel_actors intent row that outlived its agent (the
-// delete-time 户籍 debt: handleDeleteAgent could not reach a home that was closed)
-// can never be rebuilt/revived on a restart. `a.id IS NULL` keeps every non-agent
-// class (boost, human — no join match), and only a row whose MATCHED agent is
-// soft-deleted is dropped. The composition read is the substrate-truth guard; the
-// orphan intent row itself is left to the reverse-entropy sweep (owner 拍定).
+// deleted_at filter: a soft-deleted declaration (actor_decls.deleted_at set) is
+// NEVER composed — the reconcile ring, the daemon plan, and the per-id factory
+// resolve all read through here, so a stale channel_actors intent row that
+// outlived its declaration (the delete-time 户籍 debt: handleDeleteDecl could not
+// reach a home that was closed) can never be rebuilt/revived on a restart.
+// `a.id IS NULL` keeps every undeclared class (boost, human — no join match), and
+// only a row whose MATCHED declaration is soft-deleted is dropped. The composition
+// read is the substrate-truth guard; the orphan intent row itself is left to the
+// reverse-entropy sweep (owner 拍定).
 const compositionSelect = `SELECT ca.instance_id, ca.class, COALESCE(ca.config_json, ''), COALESCE(a.config_json, '')
 	   FROM channel_actors ca
-	   LEFT JOIN agents a ON ca.instance_id = 'agent:' || a.id
+	   LEFT JOIN actor_decls a ON ca.instance_id = 'agent:' || a.id
 	  WHERE ca.channel_id = ?
 	    AND (a.id IS NULL OR a.deleted_at IS NULL)`
 

@@ -157,7 +157,7 @@ func (a *App) CreateHalfBuiltChannelForTest(wsID, name string) (string, error) {
 	}
 	if _, err := a.db.ExecContext(context.Background(),
 		`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-		chID, string(defaultAgentInstanceID), defaultBoostLooper, placementServer); err != nil {
+		chID, string(defaultAgentInstanceID), defaultBoostClass, placementServer); err != nil {
 		return "", err
 	}
 	if _, err := a.createHome(channel.ID(chID), dbPath); err != nil {

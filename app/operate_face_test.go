@@ -65,7 +65,7 @@ func TestOperate_IntroducePrivateAgent_Forbidden(t *testing.T) {
 	s := fullSetup(t, env)
 
 	// Owner creates a PRIVATE agent (default visibility).
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "secret", "looper": "go-kimi"}, s.cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "secret", "class": "go-kimi"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
 	var ag map[string]any
 	if err := json.Unmarshal(w.Body.Bytes(), &ag); err != nil {
@@ -74,7 +74,7 @@ func TestOperate_IntroducePrivateAgent_Forbidden(t *testing.T) {
 	agentID := ag["id"].(string)
 
 	face := env.app.OperateFaceForTest()
-	payload, _ := json.Marshal(map[string]any{"agent_id": agentID})
+	payload, _ := json.Marshal(map[string]any{"decl_id": agentID})
 	// A DIFFERENT principal (not the owner) tries to introduce it.
 	_, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
@@ -100,14 +100,14 @@ func TestOperate_IntroduceUnknownClass_Rejected(t *testing.T) {
 	s := fullSetup(t, env)
 
 	// Owner creates a public agent whose default looper is a bogus class.
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "bogus", "looper": "no-such-class"}, s.cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "bogus", "class": "no-such-class"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
 	var ag map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &ag)
 	agentID := ag["id"].(string)
 
 	face := env.app.OperateFaceForTest()
-	payload, _ := json.Marshal(map[string]any{"agent_id": agentID})
+	payload, _ := json.Marshal(map[string]any{"decl_id": agentID})
 	_, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    actor.ActorID("user:" + s.userID),
@@ -129,14 +129,14 @@ func TestOperate_IntroduceInvalidPlacement_Rejected(t *testing.T) {
 
 	// Owner creates a real-class agent (owner may introduce its own regardless of
 	// visibility), so the only reason to reject is the bad placement value.
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "ok", "looper": "go-kimi"}, s.cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "ok", "class": "go-kimi"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
 	var ag map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &ag)
 	agentID := ag["id"].(string)
 
 	face := env.app.OperateFaceForTest()
-	payload, _ := json.Marshal(map[string]any{"agent_id": agentID, "placement": "foo"})
+	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "placement": "foo"})
 	_, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    actor.ActorID("user:" + s.userID),

@@ -6,13 +6,13 @@ import (
 	"testing"
 )
 
-// TestAgentsAPI_CreateIntroduceRestartDelete exercises the agent creation and
+// TestDeclsAPI_CreateIntroduceRestartDelete exercises the agent creation and
 // control surface: create a claude-looper agent (declaration), introduce it to a
 // channel server-placed (which writes the composition row + Admits — embodiment is
 // the reconcile ring's async job now, not a synchronous spawn), restart it
 // (rebuild + Spawn), then soft-delete it (gone from the list + composition). Proves
-// the agents table + two-layer/looper composition + the control API end to end.
-func TestAgentsAPI_CreateIntroduceRestartDelete(t *testing.T) {
+// the actor_decls table + two-layer/class composition + the control API end to end.
+func TestDeclsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 	env := setupTestApp(t)
 	_, cookies := register(t, env, "agents@example.com", "secret123", "AgentOwner")
 	wsBody, cookies := createWorkspace(t, env, cookies, "WS")
@@ -21,27 +21,27 @@ func TestAgentsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 	chID := chBody["id"].(string)
 
 	// create a claude-looper agent
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "Researcher", "looper": "claude"}, cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Researcher", "class": "claude"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agent := respJSON(t, w)
 	agentID, _ := agent["id"].(string)
-	if agentID == "" || agent["looper"] != "claude" {
+	if agentID == "" || agent["class"] != "claude" {
 		t.Fatalf("create agent = %+v", agent)
 	}
 
 	// list returns it
-	w = env.do(t, "GET", "/api/agents", nil, cookies)
+	w = env.do(t, "GET", "/api/actor-decls", nil, cookies)
 	assertStatus(t, w, http.StatusOK)
-	if got := len(respJSON(t, w)["agents"].([]any)); got != 1 {
+	if got := len(respJSON(t, w)["decls"].([]any)); got != 1 {
 		t.Fatalf("list agents = %d, want 1", got)
 	}
 
 	// introduce to channel server-placed → composition row + Admit (created=true)
-	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
-		map[string]any{"agent_id": agentID, "placement": "server", "make_default": true}, cookies)
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
+		map[string]any{"decl_id": agentID, "placement": "server", "make_default": true}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	intro := respJSON(t, w)
-	if intro["instance_id"] != "agent:"+agentID || intro["looper"] != "claude" {
+	if intro["instance_id"] != "agent:"+agentID || intro["class"] != "claude" {
 		t.Fatalf("introduce = %+v", intro)
 	}
 	if intro["placement"] != "server" || intro["created"] != true {
@@ -49,26 +49,26 @@ func TestAgentsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 	}
 
 	// restart rebuilds the server-placed cell(s)
-	w = env.do(t, "POST", "/api/agents/"+agentID+"/restart", nil, cookies)
+	w = env.do(t, "POST", "/api/actor-decls/"+agentID+"/restart", nil, cookies)
 	assertStatus(t, w, http.StatusOK)
 	if n, _ := respJSON(t, w)["restarted"].(float64); n < 1 {
 		t.Fatalf("restart count = %v, want >= 1", n)
 	}
 
 	// soft-delete: gone from the list + composition
-	w = env.do(t, "DELETE", "/api/agents/"+agentID, nil, cookies)
+	w = env.do(t, "DELETE", "/api/actor-decls/"+agentID, nil, cookies)
 	assertStatus(t, w, http.StatusOK)
-	w = env.do(t, "GET", "/api/agents", nil, cookies)
-	if got := len(respJSON(t, w)["agents"].([]any)); got != 0 {
+	w = env.do(t, "GET", "/api/actor-decls", nil, cookies)
+	if got := len(respJSON(t, w)["decls"].([]any)); got != 0 {
 		t.Fatalf("after delete, list = %d, want 0", got)
 	}
 }
 
-// TestIntroduceAgent_HonestReintroduce (SW-8): re-introducing an existing
+// TestIntroduceActor_HonestReintroduce (SW-8): re-introducing an existing
 // composition row reports it as-is ("exists, unchanged") — it does NOT swallow
 // a placement/class change while echoing the caller's new values. Rehoming is
 // remove_actor + re-introduce, never a silent in-place mutation.
-func TestIntroduceAgent_HonestReintroduce(t *testing.T) {
+func TestIntroduceActor_HonestReintroduce(t *testing.T) {
 	env := setupTestApp(t)
 	_, cookies := register(t, env, "sw8@example.com", "secret123", "Owner")
 	wsBody, cookies := createWorkspace(t, env, cookies, "WS")
@@ -76,15 +76,15 @@ func TestIntroduceAgent_HonestReintroduce(t *testing.T) {
 	chBody, cookies := createChannel(t, env, cookies, wsID, "CH")
 	chID := chBody["id"].(string)
 
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "Alice", "looper": "go-kimi"}, cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Alice", "class": "go-kimi"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
 	instID := "agent:" + agentID
 
 	// first introduce: default placement (daemon policy), engine=go-kimi → new row,
 	// created=true.
-	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
-		map[string]any{"agent_id": agentID}, cookies)
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
+		map[string]any{"decl_id": agentID}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	first := respJSON(t, w)
 	if first["created"] != true || first["placement"] != "daemon" || first["class"] != "go-kimi" {
@@ -93,8 +93,8 @@ func TestIntroduceAgent_HonestReintroduce(t *testing.T) {
 
 	// re-introduce with a DIFFERENT placement + engine → honest no-change: 200,
 	// created=false, persisted (daemon/go-kimi) values, NOT the caller's new ones.
-	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
-		map[string]any{"agent_id": agentID, "placement": "server", "engine": "claude"}, cookies)
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
+		map[string]any{"decl_id": agentID, "placement": "server", "class": "claude"}, cookies)
 	assertStatus(t, w, http.StatusOK)
 	again := respJSON(t, w)
 	if again["created"] != false {
@@ -111,9 +111,9 @@ func TestIntroduceAgent_HonestReintroduce(t *testing.T) {
 	}
 }
 
-// TestIntroduceAgent_ServerPlacementRejectsDesiredHost enforces the two-level
+// TestIntroduceActor_ServerPlacementRejectsDesiredHost enforces the two-level
 // invariant at the write face: a 'server' row carries no daemon assignment.
-func TestIntroduceAgent_ServerPlacementRejectsDesiredHost(t *testing.T) {
+func TestIntroduceActor_ServerPlacementRejectsDesiredHost(t *testing.T) {
 	env := setupTestApp(t)
 	_, cookies := register(t, env, "inv@example.com", "secret123", "Owner")
 	wsBody, cookies := createWorkspace(t, env, cookies, "WS")
@@ -121,12 +121,12 @@ func TestIntroduceAgent_ServerPlacementRejectsDesiredHost(t *testing.T) {
 	chBody, cookies := createChannel(t, env, cookies, wsID, "CH")
 	chID := chBody["id"].(string)
 
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "Bob", "looper": "go-kimi"}, cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Bob", "class": "go-kimi"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
 
-	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
-		map[string]any{"agent_id": agentID, "placement": "server", "desired_host": "somebox"}, cookies)
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
+		map[string]any{"decl_id": agentID, "placement": "server", "desired_host": "somebox"}, cookies)
 	assertStatus(t, w, http.StatusBadRequest)
 }
 
@@ -143,12 +143,12 @@ func TestSetDefaultAgentAPI(t *testing.T) {
 	chID := chBody["id"].(string)
 
 	// create + introduce an agent (server placement → live stub, lands in channel_actors)
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "Alice", "looper": "go-kimi"}, cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Alice", "class": "go-kimi"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
 	instID := "agent:" + agentID
-	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
-		map[string]any{"agent_id": agentID}, cookies) // not make_default
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
+		map[string]any{"decl_id": agentID}, cookies) // not make_default
 	assertStatus(t, w, http.StatusCreated)
 
 	// 1) repoint default_agent to Alice (a composition member) → ok + persisted

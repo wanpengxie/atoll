@@ -26,7 +26,44 @@ func OpenDB(path string) (*sql.DB, error) {
 	return db, nil
 }
 
+// migrateDeclTableName renames the legacy `agents` table to `actor_decls`
+// BEFORE the canonical DDL runs. Order is load-bearing: if the canonical
+// `CREATE TABLE IF NOT EXISTS actor_decls` ran first against an old DB, it
+// would create an EMPTY actor_decls, the rename would then fail (target
+// exists) and every existing declaration row would become invisible. Running
+// the rename first means the canonical DDL no-ops on the renamed table.
+// Both tables present = a half-migrated / hand-touched DB: fail loud (refuse
+// to open) rather than silently picking one and shadowing the other's rows.
+func migrateDeclTableName(db *sql.DB) error {
+	has := func(name string) (bool, error) {
+		var n int
+		err := db.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&n)
+		return n > 0, err
+	}
+	hasOld, err := has("agents")
+	if err != nil {
+		return err
+	}
+	hasNew, err := has("actor_decls")
+	if err != nil {
+		return err
+	}
+	switch {
+	case hasOld && hasNew:
+		return fmt.Errorf("both 'agents' and 'actor_decls' tables exist — refusing to guess; resolve the duplicate manually")
+	case hasOld && !hasNew:
+		if _, err := db.Exec(`ALTER TABLE agents RENAME TO actor_decls`); err != nil {
+			return fmt.Errorf("rename agents -> actor_decls: %w", err)
+		}
+	}
+	return nil
+}
+
 func migrate(db *sql.DB) error {
+	if err := migrateDeclTableName(db); err != nil {
+		return err
+	}
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS users (
 			id TEXT PRIMARY KEY,
@@ -100,30 +137,39 @@ func migrate(db *sql.DB) error {
 			desired_host TEXT NOT NULL DEFAULT '',
 			PRIMARY KEY(channel_id, instance_id)
 		);
-		-- agents: global agent IDENTITY declarations. One row per
-		-- agent, cross-channel (key = id). 'default_looper' = the agent's DEFAULT
-		-- engine (a create-time preference, NOT runtime truth): the per-channel
-		-- concrete engine is channel_actors.class (= override ?? default_looper).
-		-- The engine IS the actor class (claude/go-kimi are flat registry classes,
-		-- kind=agent; there is NO umbrella "agent" class). config_json = the global
-		-- identity body (persona/skills + engine knobs), layered UNDER
-		-- channel_actors' per-channel config_json. Distinct from users
-		-- (responsibility owner, never an agent).
+		-- actor_decls: global actor-instance declarations. One row per declared
+		-- instance, cross-channel (key = id): identity + class + config + owner +
+		-- visibility. This is the declaration layer EVERY declared actor instance
+		-- (agent, tool, ...) passes through to enter a channel — the mechanism is
+		-- kind-neutral ("kind 卸重: 法只认 id+凭据+门"). 'default_class' = the
+		-- instance's DEFAULT engine class (a create-time preference, NOT runtime
+		-- truth): the per-channel concrete engine is channel_actors.class
+		-- (= override ?? default_class). The engine IS the actor class
+		-- (claude/go-kimi/echo are flat registry classes; there is NO umbrella
+		-- "agent" class). config_json = the global identity body (persona/skills +
+		-- engine knobs), layered UNDER channel_actors' per-channel config_json.
+		-- Distinct from users (responsibility owner, never a declaration).
 		--
 		-- No "scope" column (cognitive-state scope) BY DESIGN — v1 is implicitly
-		-- channel-scoped: each agent's cognitive state is per-channel isolated,
+		-- channel-scoped: each instance's cognitive state is per-channel isolated,
 		-- NOT shared across channels. entity-scoped (one
-		-- shared memory/persona across an agent's channels = "unified") is v2, added
-		-- additively with the memory subsystem (then: ALTER TABLE ADD COLUMN scope).
-		-- Do NOT read per-channel as permanent truth: the agent IDENTITY is global
-		-- (one row here spans every channel) — only the cognitive STATE is isolated
-		-- in v1. A scope column now would be a single-valued placeholder pointing at
-		-- an unbuilt subsystem, so it is deliberately omitted until needed.
-		CREATE TABLE IF NOT EXISTS agents (
+		-- shared memory/persona across an instance's channels = "unified") is v2,
+		-- added additively with the memory subsystem (then: ALTER TABLE ADD COLUMN
+		-- scope). Do NOT read per-channel as permanent truth: the declared IDENTITY
+		-- is global (one row here spans every channel) — only the cognitive STATE is
+		-- isolated in v1. A scope column now would be a single-valued placeholder
+		-- pointing at an unbuilt subsystem, so it is deliberately omitted until
+		-- needed.
+		--
+		-- Instance ids keep their historical 'agent:' namespace prefix in
+		-- channel_actors / membership / truth logs (persistent names stay constant;
+		-- the prefix carries no classification weight). Renaming the prefix would be
+		-- a truth-data migration — deliberately NOT done here.
+		CREATE TABLE IF NOT EXISTS actor_decls (
 			id          TEXT PRIMARY KEY,
 			name        TEXT NOT NULL,
 			owner          TEXT NOT NULL REFERENCES users(id),
-			default_looper TEXT NOT NULL,
+			default_class  TEXT NOT NULL,
 			config_json TEXT,
 			deleted_at  INTEGER,
 			created_at  INTEGER NOT NULL,
@@ -156,24 +202,26 @@ func migrate(db *sql.DB) error {
 	// enforced at the write face. additive best-effort add for a dev DB.
 	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN desired_host TEXT NOT NULL DEFAULT ''`)
 
-	// agents.looper → default_looper: the engine is now a
-	// per-channel concrete actor class (channel_actors.class); agents keeps only the
-	// create-time DEFAULT. Best-effort rename for an existing dev DB (a fresh CREATE
-	// above already has default_looper; the rename then no-ops on the missing column).
-	_, _ = db.Exec(`ALTER TABLE agents RENAME COLUMN looper TO default_looper`)
+	// Column-rename chain, ordered oldest-vintage first (each step best-effort:
+	// a fresh CREATE above already has default_class, so both renames no-op on
+	// the missing column):
+	//   looper → default_looper (pre-class-split vintage)
+	//   default_looper → default_class (the looper→class vocabulary rename)
+	_, _ = db.Exec(`ALTER TABLE actor_decls RENAME COLUMN looper TO default_looper`)
+	_, _ = db.Exec(`ALTER TABLE actor_decls RENAME COLUMN default_looper TO default_class`)
 
-	// agents.visibility: reference-eligibility axis, orthogonal to owner
+	// actor_decls.visibility: reference-eligibility axis, orthogonal to owner
 	// (management authority). private = only owner may introduce; public = any
 	// member. additive best-effort add for a dev DB.
-	_, _ = db.Exec(`ALTER TABLE agents ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`)
+	_, _ = db.Exec(`ALTER TABLE actor_decls ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`)
 
 	// Backfill channel_actors.class from the old placeholder shell value 'agent' to
 	// the REAL engine class (engine = class now; there is no "agent" class):
-	//   1. agent instances with a declaration → their agents.default_looper.
+	//   1. instances with a declaration → their actor_decls.default_class.
 	//   2. remaining 'agent' shells (e.g. agent:boost, no declaration) → boost engine.
 	_, _ = db.Exec(`UPDATE channel_actors
-		SET class = (SELECT default_looper FROM agents WHERE 'agent:' || agents.id = channel_actors.instance_id)
-		WHERE class = 'agent' AND instance_id IN (SELECT 'agent:' || id FROM agents)`)
+		SET class = (SELECT default_class FROM actor_decls WHERE 'agent:' || actor_decls.id = channel_actors.instance_id)
+		WHERE class = 'agent' AND instance_id IN (SELECT 'agent:' || id FROM actor_decls)`)
 	_, _ = db.Exec(`UPDATE channel_actors SET class = 'go-kimi' WHERE class = 'agent'`)
 
 	// Backfill existing channels to the composition model (don't clear data):

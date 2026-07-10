@@ -22,7 +22,7 @@ import (
 // This is the CANONICAL control path, and now the ONLY one: the channel-control
 // HTTP endpoints are shims (operate_shim.go) that replay the session user through
 // the door (Home.Human(u).Submit, audience=[system]) into this executor — no
-// handler writes the composition tables directly (红线11). handleDeleteAgent stays
+// handler writes the composition tables directly (红线11). handleDeleteDecl stays
 // a world-layer soft-delete (its per-channel cascade is a system-authored mirror,
 // not a member action), outside this face.
 type operateExecutor struct {
@@ -44,12 +44,12 @@ func principalFromSender(sender actor.ActorID) (string, bool) {
 }
 
 type introducePayload struct {
-	AgentID     string `json:"agent_id"`
+	DeclID      string `json:"decl_id"`
 	Target      string `json:"target"` // user form: an explicit id (user:X)
 	Placement   string `json:"placement"`
 	DesiredHost string `json:"desired_host"`
 	MakeDefault bool   `json:"make_default"`
-	Engine      string `json:"engine"`
+	Class       string `json:"class"`
 	// Config is the per-channel config overlay (channel_actors.config_json) — the
 	// tunable field of the composition-row noun. Introduce is the composition
 	// row's UPSERT verb (add-or-update, 防 ioctl 名词-CRUD): absent Config leaves
@@ -105,16 +105,16 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		return map[string]any{"admitted": p.Target}, nil
 	}
 
-	agentID := strings.TrimSpace(p.AgentID)
-	if agentID == "" {
-		return nil, &platform.OperateError{Code: "bad_payload", Detail: "agent_id or user target required"}
+	declID := strings.TrimSpace(p.DeclID)
+	if declID == "" {
+		return nil, &platform.OperateError{Code: "bad_payload", Detail: "decl_id or user target required"}
 	}
-	var owner, visibility, defLooper string
+	var owner, visibility, defClass string
 	err := x.a.db.QueryRowContext(ctx,
-		`SELECT owner, visibility, default_looper FROM agents WHERE id = ? AND deleted_at IS NULL`,
-		agentID).Scan(&owner, &visibility, &defLooper)
+		`SELECT owner, visibility, default_class FROM actor_decls WHERE id = ? AND deleted_at IS NULL`,
+		declID).Scan(&owner, &visibility, &defClass)
 	if err == sql.ErrNoRows {
-		return nil, &platform.OperateError{Code: "agent_not_found", Detail: agentID}
+		return nil, &platform.OperateError{Code: "decl_not_found", Detail: declID}
 	}
 	if err != nil {
 		return nil, err
@@ -122,11 +122,11 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 	// World-layer ref-eligibility (introduce 权是唯一复合世界层判定的动词).
 	principal, hasPrincipal := principalFromSender(req.Sender)
 	if visibility != "public" && !(hasPrincipal && principal == owner) {
-		return nil, &platform.OperateError{Code: "forbidden", Detail: "agent is not public and sender is not its owner"}
+		return nil, &platform.OperateError{Code: "forbidden", Detail: "declaration is not public and sender is not its owner"}
 	}
-	engine := strings.TrimSpace(p.Engine)
+	engine := strings.TrimSpace(p.Class)
 	if engine == "" {
-		engine = defLooper
+		engine = defClass
 	}
 	// Default placement policy (product policy, v1.7): agents default to daemon
 	// (除 human/sysactor/boost 外). Explicit placement参数 kept for API/agent paths.
@@ -135,7 +135,7 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		placement = placementDaemon
 	}
 	desiredHost := strings.TrimSpace(p.DesiredHost)
-	instanceID := "agent:" + agentID
+	instanceID := "agent:" + declID
 	// NB: the request engine's ClassKind + placement are validated ONLY on the create
 	// branch below (after the row query), NOT here. An existing row's class is frozen
 	// (SW-8) — a config/retry introduce against it must走 the frozen effective class,
@@ -229,9 +229,9 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 	if configChanged && placement == placementServer {
 		var gcfg string
 		_ = x.a.db.QueryRowContext(ctx,
-			`SELECT COALESCE(config_json,'') FROM agents WHERE id = ? AND deleted_at IS NULL`,
-			agentID).Scan(&gcfg)
-		if serr := x.a.spawnAgentInstance(req.ChannelID, home, instanceID, engine, string(p.Config), gcfg); serr != nil {
+			`SELECT COALESCE(config_json,'') FROM actor_decls WHERE id = ? AND deleted_at IS NULL`,
+			declID).Scan(&gcfg)
+		if serr := x.a.spawnActorInstance(req.ChannelID, home, instanceID, engine, string(p.Config), gcfg); serr != nil {
 			return nil, &platform.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
 		}
 	}
@@ -301,10 +301,10 @@ func (x *operateExecutor) Restart(ctx context.Context, req platform.OperateReque
 	var gcfg string
 	if strings.HasPrefix(inst, "agent:") {
 		_ = x.a.db.QueryRowContext(ctx,
-			`SELECT COALESCE(config_json,'') FROM agents WHERE id = ? AND deleted_at IS NULL`,
+			`SELECT COALESCE(config_json,'') FROM actor_decls WHERE id = ? AND deleted_at IS NULL`,
 			strings.TrimPrefix(inst, "agent:")).Scan(&gcfg)
 	}
-	if serr := x.a.spawnAgentInstance(req.ChannelID, home, inst, class, cfg, gcfg); serr != nil {
+	if serr := x.a.spawnActorInstance(req.ChannelID, home, inst, class, cfg, gcfg); serr != nil {
 		return nil, &platform.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
 	}
 	return map[string]any{"restarted": inst}, nil

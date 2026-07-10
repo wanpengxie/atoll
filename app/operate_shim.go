@@ -183,8 +183,8 @@ func (a *App) finishControlShim(c *gin.Context, r *doorReceipt, err error, onSuc
 // (unauthorized_sender, internal_error) — the codes only the door路径 can surface.
 func controlErrorHTTP(code, detail string) (int, string) {
 	switch code {
-	case "agent_not_found":
-		return http.StatusNotFound, "agent not found"
+	case "decl_not_found":
+		return http.StatusNotFound, "decl not found"
 	case "forbidden", "unauthorized_sender":
 		return http.StatusForbidden, detail
 	case "channel_unavailable":

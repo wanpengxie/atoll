@@ -40,7 +40,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	chID := chBody["id"].(string)
 
 	// claude agent.
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "Rev", "looper": "claude"}, cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Rev", "class": "claude"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
 	instID := "agent:" + agentID
@@ -54,8 +54,8 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	apiKey := dResp["api_key"].(string)
 
 	// introduce the claude as a DAEMON-placed default assigned to THIS daemon.
-	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", chID),
-		map[string]any{"agent_id": agentID, "placement": "daemon", "desired_host": daemonID, "make_default": true}, cookies)
+	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
+		map[string]any{"decl_id": agentID, "placement": "daemon", "desired_host": daemonID, "make_default": true}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	// 膜律 (v1.8 问①): daemon attach no longer mints membership — the daemon-placed
 	// actor must be admitted by the introduce door first. The old HTTP introduce

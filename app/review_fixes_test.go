@@ -56,7 +56,7 @@ func TestOperate_IntroduceHalfFailedRetry_UsesFrozenClassKind(t *testing.T) {
 	s := fullSetup(t, env)
 
 	// Owner creates an agent (owner may introduce it regardless of visibility).
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "rev", "looper": "claude"}, s.cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "rev", "class": "claude"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
 	instID := "agent:" + agentID
@@ -73,7 +73,7 @@ func TestOperate_IntroduceHalfFailedRetry_UsesFrozenClassKind(t *testing.T) {
 	// Retry the introduce with a DIFFERENT class (claude, kind=agent). The frozen
 	// row's class is test-tool → the Admit must use its kind (tool), not claude's.
 	face := env.app.OperateFaceForTest()
-	payload, _ := json.Marshal(map[string]any{"agent_id": agentID, "engine": "claude"})
+	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "class": "claude"})
 	if _, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    actor.ActorID("user:" + s.userID),
@@ -98,7 +98,7 @@ func TestOperate_IntroduceExistingRow_GarbageEngineSucceeds(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "rev2", "looper": "claude"}, s.cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "rev2", "class": "claude"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
 	instID := "agent:" + agentID
@@ -111,7 +111,7 @@ func TestOperate_IntroduceExistingRow_GarbageEngineSucceeds(t *testing.T) {
 	// Retry with a garbage engine — must succeed on the frozen class, not be rejected
 	// as unknown_class.
 	face := env.app.OperateFaceForTest()
-	payload, _ := json.Marshal(map[string]any{"agent_id": agentID, "engine": "totally-unknown-engine-xyz"})
+	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "class": "totally-unknown-engine-xyz"})
 	res, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    actor.ActorID("user:" + s.userID),
@@ -137,12 +137,12 @@ func TestOperate_IntroduceNewRow_UnknownEngineRejected(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": "rev3", "looper": "claude"}, s.cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "rev3", "class": "claude"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
 
 	face := env.app.OperateFaceForTest()
-	payload, _ := json.Marshal(map[string]any{"agent_id": agentID, "engine": "totally-unknown-engine-xyz"})
+	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "class": "totally-unknown-engine-xyz"})
 	_, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    actor.ActorID("user:" + s.userID),

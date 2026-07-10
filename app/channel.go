@@ -103,7 +103,7 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	if err == nil {
 		_, err = tx.ExecContext(c.Request.Context(),
 			`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-			chID, string(defaultAgentInstanceID), defaultBoostLooper, placementServer,
+			chID, string(defaultAgentInstanceID), defaultBoostClass, placementServer,
 		)
 	}
 	if err != nil {
@@ -413,7 +413,7 @@ func (a *App) handleSetDefaultAgent(c *gin.Context) {
 // handleRemoveActor is the HTTP垫片 for the channel-internal removal半 (红线11): a
 // member removes an actor from THIS channel by replaying through the door
 // (channel.remove_actor, audience=[system]). It is distinct from the world-layer
-// agent soft-delete (handleDeleteAgent, DELETE /agents/:agentID): that de-registers
+// decl soft-delete (handleDeleteDecl, DELETE /actor-decls/:declID): that de-registers
 // a cross-channel identity and cascades via a system-authored mirror; this is one
 // member removing one composition member from one channel, 笔为 user:X.
 func (a *App) handleRemoveActor(c *gin.Context) {

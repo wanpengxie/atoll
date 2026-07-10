@@ -68,20 +68,20 @@ func assertDoorTerminal(t *testing.T, env *testEnv, cookies []*http.Cookie, chID
 // createOwnedAgent creates an agent owned by the session user and returns its id.
 func createOwnedAgent(t *testing.T, env *testEnv, cookies []*http.Cookie, name, looper string) string {
 	t.Helper()
-	w := env.do(t, "POST", "/api/agents", map[string]any{"name": name, "looper": looper}, cookies)
+	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": name, "class": looper}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	return respJSON(t, w)["id"].(string)
 }
 
-// TestShim_IntroduceThroughDoor: POST /channels/:id/agents replays the user through
+// TestShim_IntroduceThroughDoor: POST /channels/:id/actors replays the user through
 // channel.introduce_actor; the composition row lands + the door terminal is 笔为 user:X.
 func TestShim_IntroduceThroughDoor(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 	agentID := createOwnedAgent(t, env, s.cookies, "Rev", "go-kimi")
 
-	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", s.chID),
-		map[string]any{"agent_id": agentID, "placement": "server"}, s.cookies)
+	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", s.chID),
+		map[string]any{"decl_id": agentID, "placement": "server"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
 	if got := respJSON(t, w)["instance_id"]; got != "agent:"+agentID {
 		t.Fatalf("introduce instance_id = %v, want agent:%s", got, agentID)
@@ -96,8 +96,8 @@ func TestShim_SetDefaultThroughDoor(t *testing.T) {
 	s := fullSetup(t, env)
 	agentID := createOwnedAgent(t, env, s.cookies, "Def", "go-kimi")
 	instID := "agent:" + agentID
-	env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", s.chID),
-		map[string]any{"agent_id": agentID, "placement": "server"}, s.cookies)
+	env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", s.chID),
+		map[string]any{"decl_id": agentID, "placement": "server"}, s.cookies)
 
 	w := env.do(t, "PUT", fmt.Sprintf("/api/channels/%s/default_agent", s.chID),
 		map[string]any{"instance_id": instID}, s.cookies)
@@ -115,8 +115,8 @@ func TestShim_RemoveThroughDoor(t *testing.T) {
 	s := fullSetup(t, env)
 	agentID := createOwnedAgent(t, env, s.cookies, "Rm", "go-kimi")
 	instID := "agent:" + agentID
-	env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", s.chID),
-		map[string]any{"agent_id": agentID, "placement": "server"}, s.cookies)
+	env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", s.chID),
+		map[string]any{"decl_id": agentID, "placement": "server"}, s.cookies)
 	if !actorPresent(t, env, s.cookies, s.chID, instID) {
 		t.Fatalf("agent not admitted before remove")
 	}
@@ -132,16 +132,16 @@ func TestShim_RemoveThroughDoor(t *testing.T) {
 	assertDoorTerminal(t, env, s.cookies, s.chID, s.userID, "channel.remove_actor")
 }
 
-// TestShim_RestartThroughDoor: POST /agents/:id/restart replays each per-channel
+// TestShim_RestartThroughDoor: POST /actor-decls/:id/restart replays each per-channel
 // restart through channel.restart_actor; count >= 1 + the door terminal is 笔为 user:X.
 func TestShim_RestartThroughDoor(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 	agentID := createOwnedAgent(t, env, s.cookies, "Res", "claude")
-	env.do(t, "POST", fmt.Sprintf("/api/channels/%s/agents", s.chID),
-		map[string]any{"agent_id": agentID, "placement": "server", "make_default": true}, s.cookies)
+	env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", s.chID),
+		map[string]any{"decl_id": agentID, "placement": "server", "make_default": true}, s.cookies)
 
-	w := env.do(t, "POST", "/api/agents/"+agentID+"/restart", nil, s.cookies)
+	w := env.do(t, "POST", "/api/actor-decls/"+agentID+"/restart", nil, s.cookies)
 	assertStatus(t, w, http.StatusOK)
 	if n, _ := respJSON(t, w)["restarted"].(float64); n < 1 {
 		t.Fatalf("restarted = %v, want >= 1", n)

@@ -184,13 +184,14 @@ func (a *App) registerRoutes() {
 		api.GET("/channels/:chID/cursor", a.handleCursor)
 		api.GET("/channels/:chID/messages", a.handleListMessages)
 
-		// A user's agents (global declaration) + introduce / restart.
-		api.GET("/agents", a.handleListAgents)
-		api.POST("/agents", a.handleCreateAgent)
-		api.PATCH("/agents/:agentID", a.handleUpdateAgent)
-		api.DELETE("/agents/:agentID", a.handleDeleteAgent)
-		api.POST("/agents/:agentID/restart", a.handleRestartAgent)
-		api.POST("/channels/:chID/agents", a.handleIntroduceAgent)
+		// A user's actor-instance declarations (world layer, kind-neutral) +
+		// introduce-to-channel / restart.
+		api.GET("/actor-decls", a.handleListDecls)
+		api.POST("/actor-decls", a.handleCreateDecl)
+		api.PATCH("/actor-decls/:declID", a.handleUpdateDecl)
+		api.DELETE("/actor-decls/:declID", a.handleDeleteDecl)
+		api.POST("/actor-decls/:declID/restart", a.handleRestartDecl)
+		api.POST("/channels/:chID/actors", a.handleIntroduceActor)
 		api.DELETE("/channels/:chID/actors/:instanceID", a.handleRemoveActor)
 		api.PUT("/channels/:chID/default_agent", a.handleSetDefaultAgent)
 
@@ -307,12 +308,12 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 // channel may later repoint it at any other instance id.
 const (
 	defaultAgentInstanceID = actor.ActorID("agent:boost")
-	// defaultBoostLooper is the engine CLASS the always-there boost floor runs.
+	// defaultBoostClass is the engine CLASS the always-there boost floor runs.
 	// An agent's engine IS its actor class — claude/go-kimi are flat registry
 	// classes (kind=agent), there is NO umbrella "agent" class. boost has no
-	// agents declaration row, so it can't carry a default_looper; it runs this
-	// fixed fallback engine.
-	defaultBoostLooper = "go-kimi"
+	// actor_decls declaration row, so it can't carry a default_class; it runs
+	// this fixed fallback engine.
+	defaultBoostClass = "go-kimi"
 	// placementServer marks a composition instance the SERVER hosts (embedded
 	// cell). The reconcile ring only embodies these; daemon-placed rows are pulled
 	// by the daemon's own plan.
@@ -323,8 +324,8 @@ const (
 	placementDaemon = "daemon"
 )
 
-// mergeConfig layers the per-channel config_json OVER the global agents config
-// (one config, two layers). Shallow object merge — channel keys
+// mergeConfig layers the per-channel config_json OVER the global actor_decls
+// config (one config, two layers). Shallow object merge — channel keys
 // win. Empty / non-object inputs degrade gracefully (a raw per-channel blob is
 // preserved as-is so a non-agent class still gets its config_json).
 func mergeConfig(global, perChannel string) json.RawMessage {
@@ -333,7 +334,7 @@ func mergeConfig(global, perChannel string) json.RawMessage {
 	g := map[string]any{}
 	c := map[string]any{}
 	// Bounded-depth pre-check on BOTH layers before the map[string]any Unmarshal:
-	// a poison config persists in the agents/channel_actors tables and is re-hit on
+	// a poison config persists in the actor_decls/channel_actors tables and is re-hit on
 	// EVERY startup (loadChannels → reconcile build → mergeConfig), so a deeply-
 	// nested blob would fatally overflow the stack every boot. An over-deep layer is
 	// treated as NOT an object (skips the merge); the raw bytes are never recursed
