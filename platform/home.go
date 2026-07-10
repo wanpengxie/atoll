@@ -110,20 +110,33 @@ type Home struct {
 	logger     *slog.Logger
 	nowMs      func() int64
 
-	// (humanCallers author#2 index detached — platform/human.go 旧形整删
-	// 2026-07-08，重建见 TODO(human-canonical)。)
+	// (No per-user caller index (期12): a subject's own requests are closed
+	// by the substrate expiry reaper — 义务归位 D3; the subject drives its
+	// cell's caps through the OccupantDriver seam, see human.go.)
 
 	// presenceSessions is the subjectgate door's L3 device-presence session
-	// refcount per subject (channel, user): the gateway ws connect/disconnect are
-	// the ONLY producer of a human's device presence (常驻 cell 不死, decay 挂
-	// down-edge 对它失效, so the door must explicitly feed — 根基档 §4.6/§6). A
-	// (channel,user) may hold several ws (multi-tab/multi-device); online is fed on
-	// the FIRST session, offline only when the LAST drops. The count is mutated and
-	// the fold fed under presenceMu together, so edges are totally ordered — a late
-	// disconnect from an old session can only decrement (never overwrite a still-live
-	// sibling's online), which is the generation guard the refcount subsumes.
+	// TOKEN SET per subject (channel, user) — 期12 S4's token form: the
+	// gateway ws connect/disconnect are the ONLY producer of a human's device
+	// presence (常驻 cell 不死, decay 挂 down-edge 对它失效, so the door must
+	// explicitly feed — 根基档 §4.6/§6). A (channel,user) may hold several ws
+	// (multi-tab/multi-device); online is fed on the FIRST token, offline
+	// only when the LAST goes. Each ws holds its OWN token and a disconnect
+	// removes only ITSELF — a stale disconnect from a pre-Remove session can
+	// never extinguish a re-Admitted sibling's fresh session (the straddle
+	// the plain refcount form couldn't rule out). Mutated and fed under
+	// presenceMu together, so edges are totally ordered.
 	presenceMu       sync.Mutex
-	presenceSessions map[actor.ActorID]int
+	presenceSessions map[actor.ActorID]map[string]struct{}
+
+	// systemPen is the welded system-authored write capability (minted once at
+	// Open). Held on Home for the substrate's own enforcement writers — the
+	// expiry reaper (sweepExpired) writes its unanswered_timeout terminals
+	// through it (义务归位 D3: system-authored, never mint-as-caller).
+	systemPen harness.Pen
+	// expiryCursor is the reaper's keyset position across ticks (batch
+	// fairness only — correctness is the level-scan's; restart-from-zero is
+	// harmless). Touched only on the reconcile goroutine, no lock.
+	expiryCursor storespec.ExpiryCursor
 
 	// placement decides which host a new activity (fork/activation) starts on.
 	// Single fixed-home identity this period (SinglePlacement); shaped now so
@@ -201,12 +214,11 @@ type Home struct {
 	// closed is set true at the very START of Close (before any teardown step), the
 	// authoritative "this home is shutting down" flag every subjectgate verb entry
 	// checks. Close cannot JOIN the ws/垫片 goroutines that hold a HumanHandle (they
-	// live in the app layer, outside Home's teardown), so "cells stopped ⇒ no one can
-	// Arm" does NOT hold: a gateway goroutine could Submit → mint a fresh caller →
-	// Arm AFTER stopAllHumanCallers cleared the index, stranding a死后 timer against
-	// a closing store. The flag closes that window structurally — every verb (and
-	// humanCaller's index write) refuses once it is set. atomic (lock-free read on
-	// the hot Submit path).
+	// live in the app layer, outside Home's teardown), so the flag is what stops a
+	// post-Close verb from touching a closing store: Human()/driverFor refuse from
+	// this instant on (期12: verbs hold no capability of their own — the residual
+	// in-flight write past the gate is fenced by the cell caps' own live membranes
+	// once cells stop). atomic (lock-free read on the hot Submit path).
 	closed atomic.Bool
 }
 
@@ -432,6 +444,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		builder:          cfg.Builder,
 		desired:          cfg.Desired,
 		prevEagerDesired: map[actor.ActorID]bool{},
+		systemPen:        systemPen,
 		reviveLogAt:      map[actor.ActorID]time.Time{},
 		obsReg:           map[actor.ActorID]bool{},
 		pokeCh:           make(chan struct{}, 1),
@@ -507,6 +520,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//     keeps a restart / mid-life-crash cell's open requests alive across the sweep.
 	h.reconcileActivation(ctx)
 	channel.Reconcile(ctx)
+	h.sweepExpired(ctx)
 	sweepEvery := cfg.ReconcileInterval
 	if sweepEvery <= 0 {
 		sweepEvery = reconcileInterval
@@ -524,12 +538,14 @@ func Open(cfg HomeConfig) (*Home, error) {
 			case <-t.C:
 				h.reconcileActivation(reconcileCtx)
 				channel.Reconcile(reconcileCtx)
+				h.sweepExpired(reconcileCtx)
 			case <-h.pokeCh:
 				// Admit poke: run the same activation-then-closure sweep off-tick so
 				// a freshly-admitted member embodies without the ≤30s wait. Boot-order
 				// 红线 holds (activation precedes closure) on this path too.
 				h.reconcileActivation(reconcileCtx)
 				channel.Reconcile(reconcileCtx)
+				h.sweepExpired(reconcileCtx)
 			}
 		}
 	}()
@@ -1021,9 +1037,9 @@ func (h *Home) Subscribe() (<-chan struct{}, func()) {
 func (h *Home) Close() error {
 	// 0. Mark closed FIRST: the subjectgate verbs run on ws/垫片 goroutines Close
 	//    never joins (they are the app's, not Home's), so quiescing cells below is
-	//    NOT enough to stop a fresh Submit→Arm. The flag makes every verb entry (and
-	//    humanCaller's index write) refuse from this instant on, so stopAllHumanCallers
-	//    at step 4.5 clears the index for good — no goroutine can re-mint into it.
+	//    NOT enough to stop a fresh Submit. The flag makes every verb entry refuse
+	//    from this instant on (期12: no caller index exists to clear — verbs drive
+	//    the cells' own caps, and those die with the cells below).
 	h.closed.Store(true)
 	// 1. Reconciler ticker: stop the level sweep and join it, so no Reconcile runs
 	//    against the writer/runtime/stores being torn down below.
@@ -1051,8 +1067,6 @@ func (h *Home) Close() error {
 	//    after cells stop (no more edges produced), before the stores close (a late
 	//    materialise must not write into a closing store). G0-3 teardown序.
 	h.channel.Stop()
-	// 4.5. (human caller teardown detached — platform/human.go 旧形整删
-	//    2026-07-08，重建见 TODO(human-canonical)。)
 	// 5. Schedule engine: every producer is gone, so stopping the run loop now can
 	//    no longer strand a Schedule() into a dead engine.
 	if h.engine != nil {

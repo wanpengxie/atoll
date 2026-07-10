@@ -53,7 +53,12 @@ func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
 	// dereg (WatchObs is append-only; leaving the entry would leak across a
 	// future re-admission of the same id).
 	h.unwatchObs(id)
-	// (human caller cleanup detached — platform/human.go 旧形整删 2026-07-08，
-	// 重建见 TODO(human-canonical)。)
+	// Presence对称清账 (期12 S4, pending-leftovers #3): drop every ws session
+	// token and Forget the fold snapshot — the ring's削 is a quiet teardown
+	// with no down edge, so without this the removed member's device presence
+	// would stay "online" forever. Timer rows are already cleared by the
+	// dereg cascade (clearTimersTx); the scheduler's EnsureLive户籍拒 is the
+	// second line.
+	h.clearPresence(id)
 	return nil
 }

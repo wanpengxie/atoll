@@ -327,6 +327,15 @@ func (c *cell) cancelRequest(id message.ID) {
 	}
 }
 
+// occupantDriver implements embodiment: one-hop type-assert on the hosted
+// impl (cancelRequest's dispatch geometry — dispatch is the runtime's job,
+// disposition is the occupant's). The actorbase engine is the implementing
+// occupant; a Legacy/test double that doesn't implement it reads false.
+func (c *cell) occupantDriver() (OccupantDriver, bool) {
+	d, ok := c.impl.(OccupantDriver)
+	return d, ok
+}
+
 // initiateStop implements embodiment: the non-blocking, idempotent SIGNAL half of
 // teardown — trigger death and return at once, WITHOUT joining c.done. It is the
 // only teardown signal now (the join is the escort's job, bounded by grace) —

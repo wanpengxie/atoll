@@ -538,3 +538,47 @@ func TestDistinctOpenRequestReceivers(t *testing.T) {
 		t.Fatalf("gamma has only a CLOSED request and must be excluded; got %v", recvs)
 	}
 }
+
+// ExpiredOpenRequests (期12 S3): only declared-deadline-passed, still-open
+// requests ride back, ordered (expires_at, seq); keyset cursor pages without
+// re-reading; an answered request never appears (anti-join, not the request
+// row's own is_terminal flag).
+func TestExpiredOpenRequests(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+
+	mkReq := func(id string, expiresAt int64) {
+		t.Helper()
+		env := newEnv(id, message.KindRequest, message.Audience{"tool:xhs"},
+			withSender(actor.KindAgent, "planner"), withType("xhs.publish"), withExpiresAt(expiresAt))
+		if _, err := cs.Log.Append(ctx, env, false); err != nil {
+			t.Fatalf("Append %s: %v", id, err)
+		}
+	}
+
+	mkReq("e1", 100)
+	mkReq("e2", 200)
+	mkReq("e3", 300)  // answered below → never expired-open
+	mkReq("e4", 9000) // future deadline → not expired at now=1000
+	resp := newEnv("e3-final", message.KindResponse, message.Audience{"planner"},
+		withSender(actor.KindTool, "tool:xhs"), withParent("e3"), withType("agent.text"))
+	if _, err := cs.Log.Append(ctx, resp, true); err != nil {
+		t.Fatalf("Append e3-final: %v", err)
+	}
+
+	// Page 1: limit 1 → e1 only, cursor advances.
+	rows, cur, err := cs.Expiry.ExpiredOpenRequests(ctx, 1000, storespec.ExpiryCursor{}, 1)
+	if err != nil || len(rows) != 1 || rows[0].Err != nil || rows[0].Row.Envelope.ID != "e1" {
+		t.Fatalf("page1 = (%v, %+v, %v), want [e1]", rows, cur, err)
+	}
+	// Page 2 from cursor: e2, and the short batch signals end-of-scan.
+	rows, _, err = cs.Expiry.ExpiredOpenRequests(ctx, 1000, cur, 10)
+	if err != nil || len(rows) != 1 || rows[0].Row.Envelope.ID != "e2" {
+		t.Fatalf("page2 = (%v, %v), want [e2]", rows, err)
+	}
+	// Zero cursor, wide window: e1+e2 only (e3 answered, e4 not yet due).
+	rows, _, err = cs.Expiry.ExpiredOpenRequests(ctx, 1000, storespec.ExpiryCursor{}, 10)
+	if err != nil || len(rows) != 2 {
+		t.Fatalf("full scan = %d rows (%v), want 2", len(rows), err)
+	}
+}

@@ -185,9 +185,18 @@ func TestStepResponsePairing_ClosureAuthors(t *testing.T) {
 			reason:  HarnessResponseUnauthorizedSender,
 		},
 		{
-			name:    "system but wrong reason (not receiver_unavailable) not authorized",
+			// 期12 义务归位: the expiry reaper materialises a declared-deadline
+			// terminal — system is the second authorized observer of the
+			// deadline fact (was a reject before the reaper existed).
+			name:    "substrate expiry unanswered_timeout from system authorized",
 			sender:  actor.SystemActorID,
 			payload: `{"status":"failed","reason":"unanswered_timeout"}`,
+			reason:  "",
+		},
+		{
+			name:    "system with receiver's word (receiver_internal_error) not authorized",
+			sender:  actor.SystemActorID,
+			payload: `{"status":"failed","reason":"receiver_internal_error"}`,
 			reason:  HarnessResponseUnauthorizedSender,
 		},
 		{

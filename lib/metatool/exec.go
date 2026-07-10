@@ -12,7 +12,8 @@ import (
 
 // exec.go is the七工具 execution face (期10 S5): the SAME out-station account
 // two caller classes touch (spec §1.5). It replaces the historical metatool.Shell
-// — which held its OWN correlator + behavior.Caller author#2 timer alongside the
+// — which held its OWN correlator + a private author#2 timer (the since-拆删
+// behavior.Caller) alongside the
 // engine's callLedger. The spec collapses those "two historical fragments" into
 // lib/actorbase's JobTable: the机器 moved house, it is not a second one. So the
 // seven meta-tools no longer drive a private Shell; they drive the substrate's

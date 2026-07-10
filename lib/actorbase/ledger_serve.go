@@ -126,6 +126,22 @@ func (l *serveLedger) close(id message.ID) {
 	e.cancel()
 }
 
+// stopTimers halts every armed serve-entry deadline timer on teardown —
+// callLedger.stopTimers's serve-side twin (期12 glue 顺手项): an AfterFunc
+// surviving the incarnation would only fire close() on a dead ledger
+// (harmless but dangling). Entries stay; a deadline close is bookkeeping,
+// never a terminal write, so nothing is lost by reclaiming the timers.
+func (l *serveLedger) stopTimers() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for _, e := range l.entries {
+		if e.timer != nil {
+			e.timer.Stop()
+			e.timer = nil
+		}
+	}
+}
+
 // len reports the number of Admitted (not yet Closed) entries — the DoD's
 // "账 ≤ 未闭合请求数" invariant, directly testable, and "deadline 后必空".
 func (l *serveLedger) len() int {

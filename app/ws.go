@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"math"
 	"net/http"
 	"net/url"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 // ---------------------------------------------------------------------------
@@ -91,6 +93,8 @@ type inFrame struct {
 	ParentID   string          `json:"parent_id"`
 	ReqID      string          `json:"req_id"`
 	Decision   string          `json:"decision"`
+	DurationMs int64           `json:"duration_ms"`
+	TimerID    string          `json:"timer_id"`
 }
 
 func (a *App) handleWS(c *gin.Context) {
@@ -164,10 +168,20 @@ func (a *App) handleWS(c *gin.Context) {
 	// non-member (看得见≠在里面) may only tail — its write frames are refused.
 	userActorID := actor.ActorID("user:" + userID)
 	handle, herr := home.Human(ctx, userActorID)
+	if herr != nil && errors.Is(herr, platform.ErrClosed) {
+		// The home is shutting down: same honest "unavailable" the nil-home
+		// path answers — not a membership verdict.
+		_ = ws.WriteJSON(gin.H{"error": "channel unavailable"})
+		return
+	}
 	isMember := herr == nil
+	var presenceToken string
 	if isMember {
-		handle.PresenceConnect()
-		defer handle.PresenceDisconnect()
+		// Token-form presence (期12 S4): this connection holds its OWN token;
+		// a late disconnect can only remove itself, never a successor
+		// session's online.
+		presenceToken = handle.PresenceConnect()
+		defer handle.PresenceDisconnect(presenceToken)
 	}
 
 	// The SINGLE ws writer. Everything (tail messages, frame acks, errors) is
@@ -287,6 +301,35 @@ func (a *App) dispatchFrame(ctx context.Context, chID channel.ID, handle *platfo
 			return
 		}
 		send(wsAck(f, gin.H{"req_id": f.ReqID}))
+	case "after":
+		if !isMember {
+			send(wsErr(f, "not_member", "not a channel member"))
+			return
+		}
+		// Input bounds (期12 v0.4): the schedule engine treats a past FireAt
+		// as "fire now", so a negative/zero or overflow duration would be a
+		// legal immediate trigger — refuse it at the edge. No upper cap
+		// (abuse hardening is the engine-level anti-storm axis, deferred).
+		if f.DurationMs <= 0 || f.DurationMs > math.MaxInt64/int64(time.Millisecond) {
+			send(wsErr(f, "invalid_argument", "duration_ms must be a positive millisecond count"))
+			return
+		}
+		tid, err := handle.After(ctx, time.Duration(f.DurationMs)*time.Millisecond, f.MsgType, f.Payload)
+		if err != nil {
+			send(wsErr(f, doorErrCode(err), err.Error()))
+			return
+		}
+		send(wsAck(f, gin.H{"timer_id": string(tid)}))
+	case "cancel_timer":
+		if !isMember {
+			send(wsErr(f, "not_member", "not a channel member"))
+			return
+		}
+		if err := handle.CancelTimer(ctx, schedule.TimerID(f.TimerID)); err != nil {
+			send(wsErr(f, doorErrCode(err), err.Error()))
+			return
+		}
+		send(wsAck(f, gin.H{"timer_id": f.TimerID}))
 	default:
 		send(wsErr(f, "unknown_frame", "unrecognised frame type: "+f.Type))
 	}
@@ -336,6 +379,17 @@ func (a *App) wsHandleMessage(ctx context.Context, chID channel.ID, handle *plat
 			send(wsErr(f, "not_member", "not a channel member"))
 			return
 		}
+		// 期12 v0.4 P0-2: the message path does NOT route through doorErrCode
+		// (resolve/cancel's map) — these two arms must live here or a killed
+		// cell reads as internal instead of the honest retryable.
+		if errors.Is(err, platform.ErrCellUnavailable) {
+			send(wsErr(f, "unavailable", "subject cell unavailable — retry"))
+			return
+		}
+		if errors.Is(err, platform.ErrClosed) {
+			send(wsErr(f, "closed", "channel home is closed"))
+			return
+		}
 		a.logger.Error("ws message: submit", "channel", string(chID), "err", err)
 		send(wsErr(f, "internal", ""))
 		return
@@ -356,6 +410,12 @@ func doorErrCode(err error) string {
 		return "already_closed"
 	case errors.Is(err, platform.ErrNotMember):
 		return "not_member"
+	case errors.Is(err, platform.ErrInvalidDecision):
+		return "invalid_decision"
+	case errors.Is(err, platform.ErrClosed):
+		return "closed"
+	case errors.Is(err, platform.ErrCellUnavailable):
+		return "unavailable"
 	}
 	var wr *platform.WriteRejectedError
 	if errors.As(err, &wr) {

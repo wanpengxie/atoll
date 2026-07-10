@@ -5,8 +5,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
 
 // TestDeliverNilEnvelopeIsError: a nil envelope is a true exception (not a
@@ -286,5 +289,72 @@ func TestCurrentIncarnationReplaceIsPointerLevel(t *testing.T) {
 	}
 	if !rt.IsLive(next) {
 		t.Fatal("successor handle reads IsLive=false right after go-live")
+	}
+}
+
+// driverActor is a minimal Actor that also implements OccupantDriver (all
+// no-op) — the seam-lookup fixture. Embedding keeps the test honest about
+// the one-hop impl type-assert (no wrapper forwarding).
+type driverActor struct{ Actor }
+
+func (driverActor) DriveWrite(DriveWrite) (message.ID, int64, error) { return "", 0, nil }
+func (driverActor) DriveRespond(*message.Envelope, DriveRespond) (message.ID, error) {
+	return "", nil
+}
+func (driverActor) DriveAfter(time.Duration, string, []byte) (string, error) {
+	return "", nil
+}
+func (driverActor) DriveCancelTimer(string) error { return nil }
+func (driverActor) DriveResourceCreate(resource.ResourceID, []byte) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{}, nil
+}
+func (driverActor) DriveResourceRead(resource.ResourceID) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{}, nil
+}
+func (driverActor) DriveResourceWrite(resource.ResourceID, []byte) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{}, nil
+}
+func (driverActor) DriveResourceDelete(resource.ResourceID) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{}, nil
+}
+func (driverActor) DriveResourceStat(resource.ResourceID) (accessdoor.StatResult, error) {
+	return accessdoor.StatResult{}, nil
+}
+func (driverActor) DriveResourceList(accessdoor.ListQuery) (accessdoor.ListPage, error) {
+	return accessdoor.ListPage{}, nil
+}
+func (driverActor) DriveResourceShareActor(resource.ResourceID, actor.ActorID, []access.Operation) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{}, nil
+}
+func (driverActor) DriveResourceShareMembers(resource.ResourceID, []access.Operation) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{}, nil
+}
+
+// TestRuntimeDriver covers the occupant-drive seam lookup: a hosted impl that
+// implements OccupantDriver reads (driver, true); a plain Actor reads false
+// (the fold: hosted-but-non-driver); an unhosted id reads false; and after
+// despawn the entry is gone (single authority = embodiments map, no second
+// table to clean).
+func TestRuntimeDriver(t *testing.T) {
+	t.Parallel()
+	rt, _ := New(Config{Parent: context.Background()})
+	defer rt.StopAll()
+
+	rt.Spawn("drv", actor.KindHuman, static(driverActor{newRecordActor()}))
+	rt.Spawn("plain", actor.KindAgent, static(newRecordActor()))
+
+	if d, ok := rt.Driver("drv"); !ok || d == nil {
+		t.Fatal("Driver(drv) = false, want the occupant's driver face")
+	}
+	if _, ok := rt.Driver("plain"); ok {
+		t.Fatal("Driver(plain) = true for a non-driver occupant, want false (fold)")
+	}
+	if _, ok := rt.Driver("absent"); ok {
+		t.Fatal("Driver(absent) = true, want false")
+	}
+
+	rt.DespawnID("drv")
+	if _, ok := rt.Driver("drv"); ok {
+		t.Fatal("Driver after despawn = true, want false (map entry gone)")
 	}
 }

@@ -40,6 +40,20 @@ func (f *Fold) OnObs(_ context.Context, id actor.ActorID, kind actorrt.ObsKind, 
 	f.logger.Debug("devicepresence.folded", "actor", string(id), "snapshot", string(val))
 }
 
+// Forget drops id's folded snapshot outright — decay to the honest unknown.
+// The membership-removal cascade calls it (期12 S4 清账): the supply ring's
+// 削 is a QUIET teardown (no down edge), so without an explicit Forget a
+// removed member's last "online" snapshot would be served forever.
+func (f *Fold) Forget(id actor.ActorID) {
+	f.mu.Lock()
+	_, had := f.latest[id]
+	delete(f.latest, id)
+	f.mu.Unlock()
+	if had {
+		f.logger.Debug("devicepresence.forgotten", "actor", string(id))
+	}
+}
+
 // OnDown implements actorrt.DownWatcher: the actor died — for a remote actor
 // that means its link dropped, so its device presence is no longer observable →
 // decay to unknown (the down-edge decay backstop: abnormal death only — a clean

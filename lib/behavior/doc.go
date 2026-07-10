@@ -7,10 +7,12 @@
 //     kind=response envelopes, including the happy-path (RespondJSON), the
 //     failure short-cut (Fail), and the raw builder (BuildResponseFromRequest).
 //
-//   - author#2 (call.go): the CALL face — building kind=request envelopes and
-//     the per-actor Caller closure that arms in-flight timers and commits
-//     unanswered_timeout terminals back to the caller's own mailbox when a
-//     deadline fires.
+//   - author#2 (call.go): the CALL face — building kind=request envelopes
+//     (RequestSpec/BuildRequest) with their declared ExpiresAt. The deadline's
+//     enforcement lives elsewhere (期12 义务归位): a live caller's actorbase
+//     callLedger is the fast-path observer, the substrate expiry reaper the
+//     guaranteed one. (The former per-actor Caller closure manager was拆删 —
+//     an unconsumed twin of that machinery.)
 //
 //   - author#3 (death.go): the DEATH author — MaterialiseReceiverUnavailable
 //     drains open requests for a dead actor and closes each with a

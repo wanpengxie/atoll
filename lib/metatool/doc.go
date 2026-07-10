@@ -22,7 +22,7 @@
 //     sys.Call face (list_actors/describe — transient introspection queries).
 //
 // 期10 S5 collapse: the historical metatool.Shell (a private correlator holding
-// its OWN behavior.Caller author#2 timer alongside the engine's ledger — the
+// its OWN author#2 timer (the since-拆删 behavior.Caller) alongside the engine's ledger — the
 // "two historical fragments") is GONE. The seven tools drive lib/actorbase's
 // JobTable directly — the SAME machine, moved house, not a second one. The
 // subscribe-before-send correlator, the bounded-window await, the

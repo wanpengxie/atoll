@@ -2,9 +2,14 @@ package actorrt
 
 import (
 	"context"
+	"encoding/json"
+	"time"
 
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
 
 // Actor is the minimal contract the substrate requires of an actor
@@ -71,6 +76,74 @@ type RequestCanceller interface {
 // existing ctx.Done()/panic-recover death path is unchanged.
 type DownReporter interface {
 	Dying() <-chan error
+}
+
+// OccupantDriver is the optional occupant hook for off-process subject drive
+// (第四条占用者缝; siblings: RequestCanceller / DownReporter / Stopper). It is
+// the SYNCHRONOUS calling face an off-process subject's door (platform's
+// HumanHandle) uses to drive the occupant's own capabilities — the metatool
+// JobTable precedent: a cross-goroutine caller invokes the same engine whose
+// ledgers are self-locking, never routed through the mailbox/workQ (no queue,
+// no backpressure, no ack correlator). Concurrency safety is the pen/ledger
+// locks' own contract.
+//
+// Every verb drives the occupant's OWN welded caps (pen/sched/access live on
+// the cell, minted only at buildCaps — P2 能力取用不现铸), so WHEN-validity is
+// the live-membrane rejection the caps already carry: cell dead/replaced →
+// membrane sentinel error, no second liveness mechanism.
+//
+// The resource verbs are the D10 day-1 set (KV six + Share two), typed with
+// runtime/accessdoor (a leaf of protocol/* + resourcespec — no cycle back
+// into actorrt). They dispatch onto the REAL resource face, not a generic
+// invoke (the door's Invoke structurally rejects op=create —
+// ErrCreateViaInvoke); Open/CreateFile are NOT on this seam (a home-hosted
+// occupant has no byte-redemption path day-1 — deferred with 债② file route).
+type OccupantDriver interface {
+	DriveWrite(spec DriveWrite) (message.ID, int64, error)
+	DriveRespond(req *message.Envelope, spec DriveRespond) (message.ID, error)
+	// DriveAfter arms an IDENTITY-bound durable timer (schedule.BindIdentity —
+	// an occupant's reminder is a promise that outlives incarnations; the verb
+	// semantics pick the Bind value, not the actor's category). The timer id
+	// crosses this seam as a plain string: timerspec (the raw durable-store
+	// contract) is archtest-confined to the runtime tree, and runtime/schedule
+	// itself imports actorrt (a cycle) — implementors on either side re-wrap
+	// into their own typed handle (schedule.TimerID shares the string底型).
+	DriveAfter(d time.Duration, msgType string, payload []byte) (string, error)
+	DriveCancelTimer(id string) error
+	DriveResourceCreate(id resource.ResourceID, args []byte) (accessdoor.Outcome, error)
+	DriveResourceRead(id resource.ResourceID) (accessdoor.Outcome, error)
+	DriveResourceWrite(id resource.ResourceID, args []byte) (accessdoor.Outcome, error)
+	DriveResourceDelete(id resource.ResourceID) (accessdoor.Outcome, error)
+	DriveResourceStat(id resource.ResourceID) (accessdoor.StatResult, error)
+	DriveResourceList(q accessdoor.ListQuery) (accessdoor.ListPage, error)
+	DriveResourceShareActor(id resource.ResourceID, target actor.ActorID, ops []access.Operation) (accessdoor.Outcome, error)
+	DriveResourceShareMembers(id resource.ResourceID, ops []access.Operation) (accessdoor.Outcome, error)
+}
+
+// DriveWrite is the occupant-drive write spec: the full envelope shape a
+// subject may author (kind=request/event, visibility, parent, own ID,
+// ExpiresAt) — deliberately WIDER than the engine's own submit/Emit sugar
+// (which hardcode kind/visibility for in-process Proc ergonomics). Field
+// validation (kind whitelist, visibility normalisation) is the implementor's
+// job, not this DTO's.
+type DriveWrite struct {
+	ID         message.ID
+	Type       string
+	Kind       message.Kind
+	Payload    json.RawMessage
+	Audience   []actor.ActorID
+	Visibility message.Visibility
+	ParentID   message.ID
+	ExpiresAt  *int64
+}
+
+// DriveRespond is the occupant-drive response spec for answering a request
+// held in hand (the subject's Resolve/Cancel verbs behind the door's own
+// from-log authorization).
+type DriveRespond struct {
+	Status  string // message.StatusCompleted / message.StatusFailed
+	Reason  string
+	Payload json.RawMessage
 }
 
 // ActorContext is the handle the substrate hands an actor at Start. It exposes

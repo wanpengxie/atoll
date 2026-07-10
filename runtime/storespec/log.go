@@ -135,3 +135,37 @@ type MessageQuery interface {
 type RequestLookup interface {
 	FindByID(ctx context.Context, id message.ID) (*message.Envelope, bool, error)
 }
+
+// ExpiryCursor is ExpiryQuery's keyset position — (expires_at, seq) of the
+// last row a sweep consumed. The zero value means "from the top". Correctness
+// never depends on it (the reaper is a level-scan; restarting from the top is
+// harmless re-reading) — the cursor only buys batch fairness: a persistently
+// failing (poison) row must not occupy the head of every batch and starve the
+// tail.
+type ExpiryCursor struct {
+	ExpiresAt int64
+	Seq       int64
+}
+
+// ExpiredRow is one expired-open-request result with PER-ROW error isolation:
+// a row whose scan fails carries Err (zero Row) instead of aborting the whole
+// batch — the sweep must be able to step over a poison row and keep closing
+// the rest (the sibling queries' scan-error-aborts-batch shape is exactly
+// what this type exists to avoid).
+type ExpiredRow struct {
+	Row StoredRow
+	Err error
+}
+
+// ExpiryQuery is the expiry reaper's READ role (期12 S3) — deliberately its
+// OWN narrow interface, not a MessageQuery method: MessageQuery is shared by
+// tail/behavior/channelkit consumers whose fakes would all be forced to grow
+// an irrelevant method. ix_messages_expires's first consumer.
+type ExpiryQuery interface {
+	// ExpiredOpenRequests returns request rows with a declared expires_at <=
+	// beforeMs and no terminal response, ordered by (expires_at, seq)
+	// ascending, strictly after cur, at most limit rows. nextCur points past
+	// the last row returned; a short batch (len < limit) means the scan
+	// reached the end — the caller wraps to the zero cursor next sweep.
+	ExpiredOpenRequests(ctx context.Context, beforeMs int64, cur ExpiryCursor, limit int) (rows []ExpiredRow, nextCur ExpiryCursor, err error)
+}

@@ -462,9 +462,14 @@ func TestReconcileActivation_IdentityTimerFireRevivesThenAppends(t *testing.T) {
 		t.Fatalf("Open #2: %v", err)
 	}
 	t.Cleanup(func() { _ = h2.Close() })
-	if live(h2, author) {
-		t.Fatal("author live immediately on reopen before the overdue fire — precondition broken")
-	}
+	// (期12: the old "not live immediately on reopen" precondition is gone —
+	// the schedule engine's overdue fire runs async from the instant Start()
+	// lands inside Open, so whether the revive has already happened by the
+	// time Open returns is a pure goroutine race (Open #2 doing one more
+	// startup step — the expiry sweep — tipped it deterministically). The
+	// assertions that matter stand: the fire APPENDS through a builder2
+	// revive, proven by wantID below + builder2's own recording; "Open never
+	// synchronously constructs" has its own dedicated freeze-ring test.)
 
 	wantID := message.ID("timer:" + string(tid))
 	deadline := time.Now().Add(5 * time.Second)

@@ -268,6 +268,66 @@ func (m *messages) OpenRequestsForActor(ctx context.Context, actorID actor.Actor
 	return out, nil
 }
 
+// ExpiredOpenRequests implements storespec.ExpiryQuery (期12 S3): request
+// rows whose DECLARED expires_at passed with no terminal response — the
+// substrate expiry reaper's level-scan feed (ix_messages_expires's first
+// consumer; the partial index covers exactly this WHERE shape). Keyset
+// pagination over (expires_at, seq) with PER-ROW scan-error isolation: a
+// poison row rides back as ExpiredRow.Err so the sweep can step over it —
+// unlike the sibling queries, one bad row must not abort the whole closure
+// batch. is_terminal on a REQUEST row is constitutionally 0 — "open" is the
+// anti-join on a terminal response, never the request's own flag.
+func (m *messages) ExpiredOpenRequests(ctx context.Context, beforeMs int64, cur storespec.ExpiryCursor, limit int) ([]storespec.ExpiredRow, storespec.ExpiryCursor, error) {
+	const q = `SELECT id, ts, ts_received, channel_id,
+	                  sender_kind, sender_id,
+	                  kind, type, payload,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''),
+	                  visibility, audience,
+	                  expires_at,
+	                  is_terminal, seq
+	             FROM messages m
+	             WHERE m.kind = 'request'
+	               AND m.expires_at IS NOT NULL
+	               AND m.expires_at <= ?
+	               AND (m.expires_at > ? OR (m.expires_at = ? AND m.seq > ?))
+	               AND NOT EXISTS (
+	                 SELECT 1 FROM messages r
+	                  WHERE r.parent_id = m.id
+	                    AND r.kind = 'response'
+	                    AND r.is_terminal = 1
+	               )
+	             ORDER BY m.expires_at ASC, m.seq ASC
+	             LIMIT ?`
+	rows, err := m.db.QueryContext(ctx, q, beforeMs, cur.ExpiresAt, cur.ExpiresAt, cur.Seq, limit)
+	if err != nil {
+		return nil, cur, fmt.Errorf("store: expired open requests: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	out := make([]storespec.ExpiredRow, 0, limit)
+	next := cur
+	for rows.Next() {
+		env, scanErr := scanEnvelopeRows(rows)
+		if scanErr != nil {
+			// Per-row isolation: report the poison row and KEEP SCANNING —
+			// ending the batch here would let one persistent poison row at
+			// the head starve everything ordered behind it. The cursor only
+			// advances on rows whose keys we could read, so a trailing
+			// poison row is simply re-read (and re-logged) after the
+			// caller's wrap-to-zero — benign, level-triggered.
+			out = append(out, storespec.ExpiredRow{Err: fmt.Errorf("store: expired open requests scan: %w", scanErr)})
+			continue
+		}
+		out = append(out, storespec.ExpiredRow{Row: env})
+		if env.Envelope.ExpiresAt != nil {
+			next = storespec.ExpiryCursor{ExpiresAt: *env.Envelope.ExpiresAt, Seq: env.Seq}
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return out, next, fmt.Errorf("store: expired open requests rows: %w", err)
+	}
+	return out, next, nil
+}
+
 // DistinctOpenRequestReceivers returns the DISTINCT first-audience receivers of
 // every still-open request — the truth-derived view the closure reconciler
 // scans. Same open-set predicate as OpenRequestsForActor (kind=request,

@@ -23,6 +23,7 @@ type ChannelStores struct {
 
 	Log      storespec.MessageLog   // harness write port (Append + terminal-uniqueness reads)
 	Query    storespec.MessageQuery // tail reads (no Append)
+	Expiry   storespec.ExpiryQuery  // expiry reaper's level-scan feed (期12 S3, own narrow role)
 	Requests storespec.RequestLookup
 
 	// Actor registry exposed via SEGREGATED interfaces (derived from role — a
@@ -88,6 +89,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		db:         db,
 		Log:        msgs,
 		Query:      msgs,
+		Expiry:     msgs,
 		Requests:   newRequestLookup(msgs),
 		Registry:   reg,
 		Membership: reg,

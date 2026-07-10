@@ -648,6 +648,19 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, att *Attac
 					"compute", computeID, "actor", string(d.ActorID))
 				continue
 			}
+			// Ontological gate (期12 S3.5, 主题A A2): a human is恒 home-hosted
+			// (三层律 — the person is a DEVICE behind a gateway link; the cell
+			// lives on home). A daemon declaring a KindHuman id is claiming to
+			// host what cannot run on a daemon — an invalid declaration by
+			// ontology, not a bad-daemon defence (A6 stays deferred). Judged on
+			// the REGISTRY's kind (rec.Kind), never the daemon's self-report:
+			// the declaration is dropped from host-stamp/allow-set/obs alike,
+			// same as an orphan. Sibling of the reserved-system-id guard above.
+			if rec.Kind == actor.KindHuman {
+				a.logger.Warn("link.attach.declaration_human_rejected",
+					"compute", computeID, "actor", string(d.ActorID))
+				continue
+			}
 		}
 		admitted = append(admitted, d)
 	}

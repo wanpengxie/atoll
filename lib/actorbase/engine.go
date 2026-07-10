@@ -218,6 +218,7 @@ func (e *engine) Stop(ctx context.Context) error {
 	if occupantState(e.occupant.Load()) == occupantStarting {
 		e.occupant.Store(int32(occupantDead))
 		e.call.stopTimers()
+		e.serve.stopTimers()
 		return nil
 	}
 	e.occupant.Store(int32(occupantDraining))
@@ -227,6 +228,7 @@ func (e *engine) Stop(ctx context.Context) error {
 	// teardown — they would otherwise outlive the incarnation and fire into a
 	// fail-closed pen (see callLedger.stopTimers).
 	e.call.stopTimers()
+	e.serve.stopTimers()
 	e.occupant.Store(int32(occupantDead))
 	return nil
 }

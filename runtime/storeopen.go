@@ -18,6 +18,7 @@ import (
 type ChannelStores struct {
 	Log        storespec.MessageLog
 	Query      storespec.MessageQuery
+	Expiry     storespec.ExpiryQuery
 	Requests   storespec.RequestLookup
 	Registry   storespec.Registry
 	Membership storespec.MembershipControlPlane
@@ -173,6 +174,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	return &ChannelStores{
 		Log:        cs.Log,
 		Query:      cs.Query,
+		Expiry:     cs.Expiry,
 		Requests:   cs.Requests,
 		Registry:   cs.Registry,
 		Membership: cs.Membership,

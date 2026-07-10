@@ -279,6 +279,7 @@ type fakeErrEmbodiment struct{ started time.Time }
 func (fakeErrEmbodiment) Deliver(*message.Envelope) error { return errors.New("weird enqueue error") }
 func (p fakeErrEmbodiment) startedAt() time.Time          { return p.started }
 func (fakeErrEmbodiment) cancelRequest(message.ID)        {}
+func (fakeErrEmbodiment) occupantDriver() (OccupantDriver, bool) { return nil, false }
 func (fakeErrEmbodiment) initiateStop()                   {}
 func (fakeErrEmbodiment) beginTeardown()                  {}
 func (fakeErrEmbodiment) signalDespawn(context.Context)   {}

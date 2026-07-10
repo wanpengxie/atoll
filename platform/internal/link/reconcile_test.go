@@ -445,3 +445,62 @@ func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
 		t.Fatalf("post-reattach publish observed %d times, want exactly 1 (obsReg/UnwatchObs must clear together)", got)
 	}
 }
+
+// TestAttach_HumanDeclaration_Rejected proves the ontological gate (期12
+// S3.5, 主题A A2): a human is恒 home-hosted (三层律), so a daemon declaring a
+// KindHuman id — judged on the REGISTRY's kind, not the daemon's self-report
+// — is dropped: no Host stamp, and the daemon cannot OpenStream a welded pen
+// for it. A sibling tool declaration on the same attach is unaffected
+// (per-declaration gate, not a wholesale reject).
+func TestAttach_HumanDeclaration_Rejected(t *testing.T) {
+	ctx := context.Background()
+	r := newStoreHomeRig(t)
+
+	const (
+		toolID  = actor.ActorID("tool:member")
+		humanID = actor.ActorID("user:alice")
+	)
+	r.admit(t, toolID)
+	// Admit the human with its TRUE registry kind.
+	if err := r.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
+		{ID: humanID, Kind: actor.KindHuman, At: time.Now().UnixMilli()},
+	}, nil); err != nil {
+		t.Fatalf("admit human: %v", err)
+	}
+
+	// The daemon lies about the kind (self-reports tool) — the gate must
+	// judge on rec.Kind and still reject.
+	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
+		{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+		{ActorID: humanID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+	}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	// Sibling tool gets its Host stamp (attach succeeded, gate is per-decl).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		rec, ok, _ := r.cs.Registry.Lookup(ctx, toolID)
+		if ok && rec.Host == "daemon-1" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sibling tool never got Host=daemon-1")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// The human row is untouched: kind preserved, no Host claim.
+	rec, ok, err := r.cs.Registry.Lookup(ctx, humanID)
+	if err != nil || !ok {
+		t.Fatalf("Lookup(human): ok=%v err=%v", ok, err)
+	}
+	if rec.Kind != actor.KindHuman || rec.Host == "daemon-1" {
+		t.Fatalf("human row = kind %q host %q — attach stamped a daemon host onto a human (本体非法声明放行)", rec.Kind, rec.Host)
+	}
+	// And the daemon cannot open a welded-pen stream for the human id.
+	if _, err := d.OpenStream(humanID, func(*message.Envelope) error { return nil }, func(message.ID) {}); err == nil {
+		t.Fatal("OpenStream(human) must fail — a human declaration is never in a daemon's allow-set")
+	}
+}

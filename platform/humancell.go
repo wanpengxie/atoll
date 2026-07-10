@@ -25,16 +25,15 @@ const (
 // supply is platform internal政 — a per-channel human member's authority lives
 // only in this channel's registry (the app cannot enumerate it), so the reconcile
 // ring keeps a live human cell up whenever the member is admitted, without any
-// app-injected factory. The cell captures the SHARED per-user Caller (author#2)
-// so it Matches replies to requests the same subject Armed via HumanHandle.Submit.
+// app-injected factory.
 //
 // Proc shape (through the actorbase engine, NOT a raw actorrt.Actor implementer —
 // archtest wall): a serve loop that answers each request per the three-choice type
-// table (immediate human.message / deferred human.approve / describe self-answer)
-// and Matches responses onto the author#2 Caller.
-// TODO(human-canonical): author#2 caller 耦合已随 platform/human.go 旧形整删
-// （2026-07-08）——本 cell（层1 embodiment + 三选应答）是正典要保留的半；subject
-// 自发 request 的 caller 台账随债②（human 入站）按正典重建时接回。
+// table (immediate human.message / deferred human.approve / describe self-answer).
+// The cell holds ZERO caller obligations (期12): a subject's own requests are
+// closed by the substrate expiry reaper (义务归位 D3) — no per-user Caller, no
+// Match plumbing. The subject DRIVES this cell's own caps through the
+// OccupantDriver seam (the engine implements it; the door takes it per verb).
 func humanCellFactory(h *Home, id actor.ActorID) ActorFactory {
 	return ActorFactory{Proc: actorbase.Def{
 		Doc: "home-side human embodiment (subjectgate): callable; three-choice per-type closure (immediate human.message / deferred human.approve) + describe; the person answers deferred requests via the door",
@@ -46,8 +45,7 @@ func humanCellFactory(h *Home, id actor.ActorID) ActorFactory {
 
 // humanServe is the human cell's serve loop: requests route through the
 // three-choice type table. Returning on a Recv error is the cooperative
-// termination contract (spec §1.6). (author#2 response Match detached — see
-// TODO(human-canonical) above.)
+// termination contract (spec §1.6).
 func humanServe(sys actorbase.Sys) error {
 	for {
 		msg, err := sys.Recv()
@@ -83,7 +81,12 @@ func humanServeRequest(sys actorbase.Sys, msg actorbase.Msg) {
 		// immediate: 收件即 completed 回执 (log 即收件箱).
 		_, _ = sys.Reply(msg, map[string]any{"delivered": true})
 	default:
-		// deferred (human.approve and any other type): leave OPEN — no Reply/Fail.
+		// default-deferred (D9, owner 拍定): human.approve AND any
+		// unrecognised type are left OPEN — the log IS the inbox and a human
+		// is never structurally unreachable, so the honest default is "held
+		// for the person", never a fabricated failure. Closure of a
+		// never-answered deferred is the sender's declared deadline (expiry
+		// reaper). Declared in describe below as the default row.
 	}
 }
 
@@ -95,6 +98,9 @@ func humanDescribe(id string) introspect.Describe {
 		Types: map[string]introspect.TypeMeta{
 			TypeHumanMessage: {Description: "immediate: delivered to the human's inbox, answered completed on receipt"},
 			TypeHumanApprove: {Description: "deferred: left open until the person answers via the door (Resolve)"},
+			// D9 default-deferred declaration: unrecognised types are accepted
+			// deferred — the log is the inbox, a human is never unreachable.
+			"*": {Description: "default-deferred: any unrecognised type is accepted and left open for the person (the log is the inbox)"},
 		},
 	}
 }

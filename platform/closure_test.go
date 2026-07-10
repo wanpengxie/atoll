@@ -9,6 +9,8 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -31,19 +33,13 @@ type panicOnReceive struct{}
 
 func (panicOnReceive) Receive(context.Context, *message.Envelope) error { panic("boom") }
 
-// silentActor receives the request, arms a Caller (author #2 timer), and
-// deliberately never responds. The caller-scoped timer fires and writes the
-// unanswered_timeout terminal.
-type silentActor struct {
-	caller *behavior.Caller
-}
+// silentActor receives requests and deliberately never responds — the
+// receiver half of the author#2 fixture (期12 S6: the old form armed a
+// behavior.Caller here; the fast-path timer now lives in the CALLER's own
+// actorbase callLedger, where production callers actually hold it).
+type silentActor struct{}
 
-func (a *silentActor) Receive(_ context.Context, env *message.Envelope) error {
-	if env.Kind == message.KindRequest {
-		a.caller.Arm(env)
-	}
-	return nil
-}
+func (silentActor) Receive(context.Context, *message.Envelope) error { return nil }
 
 // penCell is a no-op cell whose only purpose is to capture the welded Pen the
 // substrate Mints for it at admission. In the sealed-pen world a write gate is
@@ -239,47 +235,96 @@ func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T
 // ---------------------------------------------------------------------------
 
 // TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout is the
-// platform-level integration test for closure author #2: a request carries
-// ExpiresAt, the receiving actor never responds, the caller-scoped timer
-// fires and writes an unanswered_timeout terminal into truth.
-//
-// The Caller is an actor-private behaviour primitive. This test wires a
-// silentActor that arms the Caller on receipt but never sends a response.
-// The timer's fireTimeout writes through the same harness pipeline.
+// platform-level integration test for author#2's FAST PATH (期12 迁形): a
+// LIVE caller's own engine (actorbase callLedger — where every production
+// caller's timer actually lives; the old form borrowed the since-拆删
+// behavior.Caller helper) times out an unanswered Call and self-closes with
+// unanswered_timeout under the caller's own welded identity. The durable
+// guarantee for a GONE caller is the expiry reaper's — asserted separately
+// in TestExpiryReaper_SystemAuthoredAcrossRestart.
 func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.T) {
 	ch := newClosureHome(t)
 
-	callerID := actor.ActorID("user:caller")
+	callerID := actor.ActorID("agent:caller")
 	workerID := actor.ActorID("agent:silent")
 
-	// 1. Admit the caller as a pen-bearing cell. Its welded pen is BOTH the request
-	//    writer AND the Caller's terminal author — author #2 is caller self-close,
-	//    so the timeout terminal is committed under the caller's own welded
-	//    identity (no sender passed; the pen welds it). This is exactly how a real
-	//    caller actor holds its Caller primitive.
-	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
+	// 1. The silent receiver: live, admitted, never answers.
 	registerActor(t, ch, workerID, actor.KindAgent)
-
-	// 2. Build a silentActor with a Caller wired to the CALLER's welded pen. The
-	//    Caller's fireTimeout writes the unanswered_timeout terminal through that
-	//    pen, so sender == callerID by construction (caller self-close).
-	sa := &silentActor{
-		caller: behavior.NewCaller(callerPen, time.Now, nil),
-	}
-
-	// 3. Spawn the silent actor cell (membership already seeded; Spawn places it).
 	if err := ch.Spawn(context.Background(), workerID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
-		return sa
+		return silentActor{}
 	}}); err != nil {
 		t.Fatalf("spawn silent cell: %v", err)
 	}
 
-	// 4. Write a request with a short ExpiresAt (now + 300ms).
-	deadline := time.Now().Add(300 * time.Millisecond).UnixMilli()
-	reqID := writeRequest(t, callerPen, workerID, "test.ask", &deadline)
+	// 2. The caller: a REAL actorbase engine cell whose Proc issues one
+	//    Sys.Call on a trigger event. Its callLedger arms the 300ms author#2
+	//    timer (TimeoutResolver hook) and fires the terminal through the
+	//    cell's own welded pen — caller self-close by construction.
+	if err := ch.Admit(context.Background(), callerID, actor.KindAgent); err != nil {
+		t.Fatalf("admit caller: %v", err)
+	}
+	callerFactory := platform.CapsFactory(func(caps actorcaps.Caps) actorrt.Actor {
+		hooks := actorbase.Hooks{TimeoutResolver: func(actor.ActorID, string) (time.Duration, bool) {
+			return 300 * time.Millisecond, true
+		}}
+		return actorbase.New(caps, hooks, actorbase.Def{
+			Doc: "test caller: one Sys.Call per trigger event",
+			New: func() (actorbase.Proc, error) {
+				return func(sys actorbase.Sys) error {
+					for {
+						msg, err := sys.Recv()
+						if err != nil {
+							return nil
+						}
+						if msg.Type == "closure.go" {
+							if _, cerr := sys.Call(workerID, "test.ask", map[string]any{}); cerr != nil {
+								return cerr
+							}
+						}
+					}
+				}, nil
+			},
+		})
+	})
+	if err := ch.Spawn(context.Background(), callerID, actor.KindAgent, callerFactory); err != nil {
+		t.Fatalf("spawn caller cell: %v", err)
+	}
 
-	// 5. Wait for the unanswered_timeout terminal. The Caller timer fires
-	//    ~300ms after the request was armed, then writes through the harness.
+	// 3. Trigger the Call with an event from a third pen.
+	triggerPen := spawnWithPen(t, ch, "user:trigger", actor.KindHuman)
+	trigEnv, err := behavior.BuildEvent(time.Now, behavior.EventSpec{
+		Type: "closure.go", Audience: message.Audience{callerID},
+	})
+	if err != nil {
+		t.Fatalf("build trigger: %v", err)
+	}
+	if res, werr := triggerPen.Write(context.Background(), trigEnv); werr != nil || !res.Accepted() {
+		t.Fatalf("trigger write = (%+v, %v)", res, werr)
+	}
+
+	// 4. Find the caller's request in the log (its engine authored it).
+	var reqID message.ID
+	findDeadline := time.Now().Add(5 * time.Second)
+	for reqID == "" {
+		rows, rerr := ch.View().ReadAfterSeq(context.Background(), 0, 1000)
+		if rerr != nil {
+			t.Fatalf("ReadAfterSeq: %v", rerr)
+		}
+		for _, r := range rows {
+			if r.Envelope.Kind == message.KindRequest && r.Envelope.Type == "test.ask" && r.Envelope.Sender.ID == callerID {
+				reqID = r.Envelope.ID
+			}
+		}
+		if time.Now().After(findDeadline) {
+			t.Fatal("caller engine never authored the Call request")
+		}
+		if reqID == "" {
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+
+	// 5. Wait for the unanswered_timeout terminal — the caller engine's own
+	//    author#2 timer fires ~300ms in and writes through the harness.
 	term := pollForTerminal(t, ch, reqID, 5*time.Second)
 
 	// 6. Verify the terminal.

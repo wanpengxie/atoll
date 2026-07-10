@@ -58,8 +58,9 @@ func (r *actorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec
 	rec.Kind = k
 	// Binding read symmetric with kind: validate against the closed-set contract
 	// (the public predicate ParseBinding, per binding.go) instead of a raw cast.
-	// Empty is a legitimate state (a cell-less member — e.g. a human — has no
-	// binding), so only a non-empty value is parsed; a non-empty out-of-set value
+	// Empty is a legitimate state (a member with an empty binding — e.g. a
+	// human: home-hosted, no daemon binding), so only a non-empty value is
+	// parsed; a non-empty out-of-set value
 	// is a poisoned row and fails loudly, exactly as a poison kind does.
 	if binding != "" {
 		b, ok := actor.ParseBinding(binding)

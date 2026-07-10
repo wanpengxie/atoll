@@ -42,7 +42,8 @@ type callEntry struct {
 }
 
 // callLedger is the out-station account (spec §1.5): "InFlight →(回信对号|
-// author#2 超时终态写成|pending.Cancel)→Closed". behavior.Caller's timer and
+// author#2 超时终态写成|pending.Cancel)→Closed". The former behavior.Caller's
+// timer (拆删于期12 S6) and
 // metatool Shell.pending's correlator are the two historical fragments this
 // ledger is — the SAME machine, moved house (spec: "同一台机器换了家和所有权
 // ,不是消失"). Touched from the pump (match, on Receive) and from whichever
@@ -199,8 +200,10 @@ func (l *callLedger) claimBuffered(id message.ID) (*message.Envelope, bool) {
 	}
 }
 
-// fireTimeout is author#2's durable-deadline executor (spec §1.5, the
-// behavior.Caller precedent collapsed into this ledger): it commits an
+// fireTimeout is author#2's fast-path deadline executor (spec §1.5; the
+// former behavior.Caller precedent collapsed into this ledger and the helper
+// itself was拆删 in 期12 S6 — the durable guarantee is the substrate expiry
+// reaper's, this timer merely races it for a live caller): it commits an
 // unanswered_timeout terminal to truth AS the caller, closing the entry
 // itself. A buffered-final entry (final=true) is a no-op — a real terminal
 // already landed and is owed to wait, so this must neither delete it nor write

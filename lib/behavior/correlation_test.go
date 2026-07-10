@@ -7,64 +7,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// isFinalResponse returns false for a response whose payload is not valid JSON
-// (the unmarshal-error guard): it cannot be parsed, so it is not final.
-func TestIsFinalResponse_UnparseablePayload(t *testing.T) {
-	env := &message.Envelope{
-		Kind:    message.KindResponse,
-		Payload: json.RawMessage(`not-json`),
-	}
-	if isFinalResponse(env) {
-		t.Fatal("an unparseable payload must not be treated as final")
-	}
-}
-
-// isFinalResponse returns false for a non-response envelope.
-func TestIsFinalResponse_NonResponse(t *testing.T) {
-	if isFinalResponse(&message.Envelope{Kind: message.KindEvent}) {
-		t.Fatal("a non-response must not be final")
-	}
-	if isFinalResponse(nil) {
-		t.Fatal("nil must not be final")
-	}
-}
-
-// isFinalResponse returns true for a final status and false for a provisional.
-func TestIsFinalResponse_StatusDriven(t *testing.T) {
-	final := &message.Envelope{Kind: message.KindResponse, Payload: json.RawMessage(`{"status":"completed"}`)}
-	if !isFinalResponse(final) {
-		t.Fatal("completed must be final")
-	}
-	prov := &message.Envelope{Kind: message.KindResponse, Payload: json.RawMessage(`{"status":"processing"}`)}
-	if isFinalResponse(prov) {
-		t.Fatal("processing must not be final")
-	}
-}
-
-// ParseResponseStatus extracts status from payload.
-func TestParseResponseStatus(t *testing.T) {
-	tests := []struct {
-		name string
-		raw  json.RawMessage
-		want string
-	}{
-		{"completed", json.RawMessage(`{"status":"completed"}`), "completed"},
-		{"failed", json.RawMessage(`{"status":"failed"}`), "failed"},
-		{"empty payload", nil, ""},
-		{"invalid json", json.RawMessage(`{bad`), ""},
-		{"no status", json.RawMessage(`{"foo":"bar"}`), ""},
-		{"whitespace status", json.RawMessage(`{"status":" processing "}`), "processing"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := ParseResponseStatus(tt.raw)
-			if got != tt.want {
-				t.Fatalf("ParseResponseStatus = %q, want %q", got, tt.want)
-			}
-		})
-	}
-}
-
 // ParseFinalStatus reports whether the status is Layer 1 final.
 func TestParseFinalStatus(t *testing.T) {
 	tests := []struct {
@@ -75,6 +17,12 @@ func TestParseFinalStatus(t *testing.T) {
 		{[]byte(`{"status":"failed"}`), true},
 		{[]byte(`{"status":"processing"}`), false},
 		{nil, false},
+		// Edge coverage folded in from the deleted ParseResponseStatus/
+		// isFinalResponse helpers (期12 S6 拆删的等价覆盖).
+		{[]byte(`not-json`), false},
+		{[]byte(`{bad`), false},
+		{[]byte(`{"foo":"bar"}`), false},
+		{[]byte(`{"status":" completed "}`), true},
 	}
 	for _, tt := range tests {
 		status, final := ParseFinalStatus(tt.raw)

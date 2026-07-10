@@ -62,11 +62,16 @@ func (a *App) submitControlThroughDoor(ctx context.Context, chID, userID, msgTyp
 	}
 	wake, unsub := home.Subscribe()
 	defer unsub()
+	// Explicit deadline (期12 v0.4): in the reaper world an undeclared
+	// deadline only gets the harness's 24h default — a control request that
+	// nobody serves would sit open a day. Align with the ws write path's TTL.
+	exp := time.Now().UnixMilli() + clientRequestTTLMs
 	reqID, seq, err := handle.Submit(ctx, platform.SubmitSpec{
-		Type:     msgType,
-		Kind:     message.KindRequest,
-		Audience: []actor.ActorID{actor.SystemActorID},
-		Payload:  payload,
+		Type:      msgType,
+		Kind:      message.KindRequest,
+		Audience:  []actor.ActorID{actor.SystemActorID},
+		Payload:   payload,
+		ExpiresAt: &exp,
 	})
 	if err != nil {
 		return nil, err
@@ -147,6 +152,12 @@ func (a *App) finishControlShim(c *gin.Context, r *doorReceipt, err error, onSuc
 			c.JSON(http.StatusForbidden, gin.H{"error": "not an active channel member"})
 		case errors.Is(err, errShimChannelUnavailable):
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel home not open"})
+		// 期12 v0.4 P1-5: a member whose cell is mid-re-mint, or a home in
+		// teardown, is a retryable 503 — not a 500.
+		case errors.Is(err, platform.ErrCellUnavailable):
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "subject cell unavailable — retry"})
+		case errors.Is(err, platform.ErrClosed):
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel home is closing"})
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		}

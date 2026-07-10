@@ -40,18 +40,32 @@ import (
 //     harness_response_reason_invalid (a reason-less failed terminal would
 //     break three-author attribution).
 //
-//   - response.sender authorization has THREE authors, each welded 1:1 to
-//     its ONE failure word (the word IS the authorization), and response.audience
-//     must target the parent request sender exactly:
+//   - response.sender authorization is FACT-WELDED (期12 义务归位): the three
+//     failure words map 1:1 onto three durable FACTS (receiver's own error /
+//     substrate-observed death / declared-deadline passed unanswered), and an
+//     author may write a word iff it durably HOLDS that word's fact. Three
+//     facts, four authorized (author, word) arms — deadline-expiry has two
+//     legitimate observers; response.audience must target the parent request
+//     sender exactly:
 //     1. receiver voluntary — sender ∈ parent.audience: completed /
 //     provisional / failed+receiver_internal_error ONLY;
 //     2. caller self-close — sender == parent.sender writing its own
-//     caller-scoped status=failed + reason=unanswered_timeout ONLY;
+//     caller-scoped status=failed + reason=unanswered_timeout (its fast-path
+//     timer, or its own Cancel);
 //     3. substrate death — on the obs down edge a watcher
 //     materialises the dead receiver's receiver_unavailable, SYSTEM-authored
 //     (sender == SystemActorID; see substrateDeath gate below). This is a
-//     distinct author, NOT a forged dead-receiver sender. The old generic
-//     "system actor terminal fallback" author is DELETED.
+//     distinct author, NOT a forged dead-receiver sender.
+//     4. substrate expiry — the expiry reaper (level-scan over declared
+//     ExpiresAt) materialises failed+unanswered_timeout when the caller's
+//     fast-path timer is gone (crash/dereg/kept-down). Deadline closure is
+//     the SUBSTRATE'S obligation — the caller's own timer is a latency
+//     optimisation of the same enforcement, so this is the guarantee arm,
+//     not a fallback guess. Provenance (which observer wrote it) rides
+//     sender + payload.closed_by, never the vocabulary.
+//     The dividing line that keeps the DELETED generic "system actor terminal
+//     fallback" author dead: the substrate only enforces facts written in
+//     truth (an observed death edge, a declared deadline) — it never guesses.
 //
 //   - Terminal uniqueness: once a final response exists for the parent the
 //     request is closed. A second final → harness_terminal_duplicate; a
@@ -127,36 +141,46 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 		}, nil
 	}
 
-	// ── authorization model ──
+	// ── authorization model (fact-welded, 期12 义务归位) ──
 	//
-	// closure has exactly THREE authors, by "who holds the fact" — and the
-	// terminal_failure_reason closed set has exactly three words, welded
-	// 1:1: each author may write ITS one failure word and nothing else (the
-	// word IS the authorization; the matrix is total):
+	// The word is welded to the FACT; the author set per word = whoever
+	// durably HOLDS that fact. Three facts, three words, four authorized
+	// (author, word) arms:
 	//
 	//   1. receiver voluntary — sender ∈ parent.audience answers:
 	//      completed, any provisional, or failed+receiver_internal_error —
 	//      the callee's own exit reason, the ONE failure word a receiver
 	//      holds. receiver_unavailable would assert substrate-observed death
-	//      and unanswered_timeout would assert the caller's own giving-up:
-	//      facts the receiver does not hold, so writing them here is forgery
-	//      and rejects.
-	//   2. caller self-close   — parent.sender writes its OWN caller-scoped
-	//      status=failed + reason=unanswered_timeout ONLY. It is not in its
-	//      own audience, so this is a distinct authorization.
-	//      audience==[parent.sender] (itself) is naturally satisfied (#7
-	//      unchanged).
+	//      and unanswered_timeout would assert the deadline fact: facts the
+	//      receiver does not hold, so writing them here is forgery and
+	//      rejects.
+	//   2. caller self-close   — parent.sender writes status=failed +
+	//      reason=unanswered_timeout: its own fast-path timer fired, or its
+	//      own Cancel. It is not in its own audience, so this is a distinct
+	//      authorization. audience==[parent.sender] (itself) is naturally
+	//      satisfied (#7 unchanged).
 	//   3. substrate death     — the substrate materialises a dead/gone
 	//      receiver's terminal, SYSTEM-signed (a dead receiver cannot sign
 	//      for itself), under the narrow gate status=failed +
-	//      reason=receiver_unavailable ONLY. The old generic "system actor
-	//      terminal fallback" (any reason, any parent — the global-guess
-	//      author) stays DELETED: the substrate never guesses "slow", it
-	//      only materialises death it positively observed.
+	//      reason=receiver_unavailable ONLY.
+	//   4. substrate expiry    — the substrate's reaper materialises
+	//      status=failed + reason=unanswered_timeout for a request whose
+	//      DECLARED ExpiresAt passed unanswered (期12 义务归位): deadline
+	//      closure is a substrate obligation — a declared deadline is truth
+	//      the substrate always holds, and the caller (who may crash, dereg,
+	//      or be deliberately kept down) cannot structurally guarantee it.
+	//      The caller's own timer (arm 2) is the fast-path observer of the
+	//      SAME fact; provenance rides sender + payload.closed_by.
+	//
+	// The old generic "system actor terminal fallback" (any reason, any
+	// parent — the global-guess author) stays DELETED. The durable line that
+	// keeps it dead: the substrate only enforces facts written in truth
+	// (observed death edge / declared deadline) — it never guesses "slow",
+	// never invents a deadline, never revives anyone to close an account.
 	//
 	// The arms are OR'd: a self-request's sender is simultaneously caller
 	// and receiver and may write either of its two words. A sender that is
-	// none of the three authors rejects as unauthorized; an authorized
+	// none of the authorized arms rejects as unauthorized; an authorized
 	// author writing ANOTHER author's word rejects the same way.
 	isReceiver := audienceContains(parent.Envelope.Audience, env.Sender.ID)
 	receiverAuthored := isReceiver &&
@@ -170,10 +194,20 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 		reasonCheck.failed &&
 		reasonCheck.reason == string(message.TerminalReceiverUnavailable)
 
-	if !receiverAuthored && !callerSelfClose && !substrateDeath {
+	// substrateExpiry (期12 义务归位): the substrate's expiry reaper
+	// materialises a declared-deadline-passed-unanswered terminal when the
+	// caller's own fast-path timer did not (caller crashed / deregistered /
+	// deliberately kept down). Same fact as callerSelfClose's word, second
+	// authorized observer — provenance rides sender + payload.closed_by,
+	// never a new vocabulary word.
+	substrateExpiry := env.Sender.ID == actor.SystemActorID &&
+		reasonCheck.failed &&
+		reasonCheck.reason == string(message.TerminalUnansweredTimeout)
+
+	if !receiverAuthored && !callerSelfClose && !substrateDeath && !substrateExpiry {
 		return outcome{
 			RejectReason: HarnessResponseUnauthorizedSender,
-			Detail:       "response sender is not an authorized closure author for this status/reason (receiver→receiver_internal_error, caller→unanswered_timeout, substrate→receiver_unavailable): " + string(env.Sender.ID),
+			Detail:       "response sender is not an authorized closure author for this status/reason (receiver→receiver_internal_error, caller→unanswered_timeout, substrate→receiver_unavailable|unanswered_timeout): " + string(env.Sender.ID),
 		}, nil
 	}
 	if !audienceExactlySender(env.Audience, parent.Envelope.Sender.ID) {

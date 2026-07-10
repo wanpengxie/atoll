@@ -396,3 +396,104 @@ func TestWS_PresenceMultiTab(t *testing.T) {
 	tab2.close()
 	pollPresence(t, env, s, string(uid), true, false, 2*time.Second)
 }
+
+// ---------------------------------------------------------------------------
+// 期12 S5: after / cancel_timer frames (提醒五路收口物).
+// ---------------------------------------------------------------------------
+
+// TestWS_AfterFrameEndToEnd: a member arms a self-reminder over the ws; the
+// identity-bound timer fires and the reminder message lands on the same tail.
+func TestWS_AfterFrameEndToEnd(t *testing.T) {
+	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
+	s := fullSetup(t, env)
+
+	c := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer c.close()
+
+	c.send(map[string]any{
+		"type": "after", "ref": "a1", "duration_ms": 100,
+		"msg_type": "reminder.note", "payload": map[string]any{"note": "stand up"},
+	})
+	ack := c.nextAck(3 * time.Second)
+	if ack["type"] != "ack" || ack["frame"] != "after" {
+		t.Fatalf("after frame: want ack, got %v", ack)
+	}
+	timerID, _ := ack["timer_id"].(string)
+	if timerID == "" {
+		t.Fatalf("after ack missing timer_id: %v", ack)
+	}
+
+	// The fire appends the reminder as the SUBJECT's own message (identity
+	// timer author = the subject; the fire survives cell churn by design).
+	fired := c.waitTail(func(e map[string]any) bool { return e["type"] == "reminder.note" }, 5*time.Second)
+	sender, _ := fired["sender"].(map[string]any)
+	if sender == nil || sender["id"] != "user:"+s.userID {
+		t.Fatalf("reminder sender = %v, want the subject", fired["sender"])
+	}
+}
+
+// TestWS_CancelTimerFrame: arming then cancelling → no fire; and the input
+// bounds refuse a non-positive duration outright.
+func TestWS_CancelTimerFrame(t *testing.T) {
+	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
+	s := fullSetup(t, env)
+
+	c := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer c.close()
+
+	// Bounds: zero / negative duration is refused at the edge (a past FireAt
+	// would legally fire immediately — 期12 v0.4 P1-7).
+	c.send(map[string]any{"type": "after", "ref": "b0", "duration_ms": 0, "msg_type": "reminder.note"})
+	if errFrame := c.nextAck(3 * time.Second); errFrame["error"] != "invalid_argument" {
+		t.Fatalf("duration_ms=0: want invalid_argument, got %v", errFrame)
+	}
+
+	c.send(map[string]any{
+		"type": "after", "ref": "b1", "duration_ms": 60_000,
+		"msg_type": "reminder.later", "payload": map[string]any{},
+	})
+	ack := c.nextAck(3 * time.Second)
+	timerID, _ := ack["timer_id"].(string)
+	if ack["type"] != "ack" || timerID == "" {
+		t.Fatalf("after frame: %v", ack)
+	}
+	c.send(map[string]any{"type": "cancel_timer", "ref": "b2", "timer_id": timerID})
+	cAck := c.nextAck(3 * time.Second)
+	if cAck["type"] != "ack" || cAck["frame"] != "cancel_timer" {
+		t.Fatalf("cancel_timer: want ack, got %v", cAck)
+	}
+	// No fire arrives (bounded negative check).
+	select {
+	case m := <-c.tail:
+		env2, _ := m["envelope"].(map[string]any)
+		if env2 != nil && env2["type"] == "reminder.later" {
+			t.Fatal("cancelled timer fired anyway")
+		}
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
+// TestWS_AfterFrameNonMember: a tail-only visitor may not arm identity timers.
+func TestWS_AfterFrameNonMember(t *testing.T) {
+	env := setupTestApp(t)
+	srv := httptest.NewServer(env.app.Handler())
+	t.Cleanup(srv.Close)
+	s := fullSetup(t, env)
+
+	// Second user: workspace member (may tail), NOT a channel member.
+	regBody, cookies2 := register(t, env, "visitor@example.com", "secret123", "Visitor")
+	if err := env.app.AddWorkspaceMemberForTest(s.wsID, regBody["id"].(string)); err != nil {
+		t.Fatalf("add workspace member: %v", err)
+	}
+	c := dialWS(t, srv, cookies2, s.chID, 0)
+	defer c.close()
+
+	c.send(map[string]any{"type": "after", "ref": "n1", "duration_ms": 1000, "msg_type": "reminder.note"})
+	if errFrame := c.nextAck(3 * time.Second); errFrame["error"] != "not_member" {
+		t.Fatalf("non-member after: want not_member, got %v", errFrame)
+	}
+}

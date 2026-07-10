@@ -31,6 +31,14 @@ import (
 type embodiment interface {
 	Deliver(env *message.Envelope) error
 	cancelRequest(id message.ID)
+	// occupantDriver exposes the occupant's OccupantDriver face when the
+	// hosted implementation carries one (cell: one-hop type-assert on impl —
+	// the cancelRequest dispatch geometry; port: always false — an occupant
+	// driven from off-process is home-hosted by definition, drive never
+	// crosses the wire). ok=false folds "no live embodiment's impl implements
+	// it" — callers that need to distinguish absent-vs-non-driver do their
+	// own Stat/registry read for error CLASSIFICATION (never enforcement).
+	occupantDriver() (OccupantDriver, bool)
 	startedAt() time.Time
 	// kind is the substrate-stamped protocol classification the embodiment was
 	// minted with (Spawn/SpawnIfAbsent/Fork's kind param, or a port's Attach-time
@@ -376,6 +384,30 @@ func (r *Runtime) CancelRequest(id actor.ActorID, requestID message.ID) {
 		return
 	}
 	p.cancelRequest(requestID)
+}
+
+// Driver returns the live embodiment's OccupantDriver face for id (the
+// off-process subject drive seam — platform's door takes it per verb, no
+// caching). Single authority = the embodiments map (the incarnation-level
+// birth registry); there is deliberately NO second registration table and so
+// no cleanup obligation — replace/despawn swaps the map entry and the old
+// driver's caps membranes reject stale writes (WHEN-validity is the caps'
+// own contract, not this lookup's).
+//
+// ok=false FOLDS two states: "no live embodiment" and "hosted but the
+// occupant implements no driver face" (Legacy cell / port). Harmless for the
+// human path (a humancell is always an actorbase engine) but a seam-family
+// copier (W8 LoadReporter) must know about the fold — error classification
+// (not_member vs cell-unavailable) is the caller's registry read, never this
+// method's.
+func (r *Runtime) Driver(id actor.ActorID) (OccupantDriver, bool) {
+	r.mu.RLock()
+	p, ok := r.embodiments[id]
+	r.mu.RUnlock()
+	if !ok {
+		return nil, false
+	}
+	return p.occupantDriver()
 }
 
 // Outcome is the per-audience truth Deliver reports about its own action — the

@@ -224,7 +224,7 @@ func TestCancelUpstream_CrossWireAcrossReconnect(t *testing.T) {
 	ch := newClosureHome(t)
 
 	const targetID = actor.ActorID("agent:up-wire-target")
-	const callerID = actor.ActorID("user:up-wire-caller")
+	const callerID = actor.ActorID("agent:up-wire-caller")
 
 	// Home-hosted blocking target.
 	cell := &cancelBlockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
@@ -237,7 +237,10 @@ func TestCancelUpstream_CrossWireAcrossReconnect(t *testing.T) {
 
 	// The caller authors its in-flight request to the target (via a home pen; the
 	// daemon then attaches under the same id — the request already lives in truth).
-	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
+	// KindAgent, not KindHuman: a human is恒 home-hosted (期12 S3.5 attach
+	// gate rejects a daemon declaring one) — this test's subject is the
+	// cross-wire cancel plumbing, which any daemon-hostable kind exercises.
+	callerPen := spawnWithPen(t, ch, callerID, actor.KindAgent)
 	reqID := writeRequest(t, callerPen, targetID, "up.wire.probe", nil)
 
 	select {
@@ -252,7 +255,7 @@ func TestCancelUpstream_CrossWireAcrossReconnect(t *testing.T) {
 	defer srv.Close()
 	wsURL := "ws" + srv.URL[4:]
 
-	decls := []link.Declaration{{ActorID: callerID, Kind: actor.KindHuman, Binding: actor.BindingEmbedded}}
+	decls := []link.Declaration{{ActorID: callerID, Kind: actor.KindAgent, Binding: actor.BindingEmbedded}}
 
 	// First connection: attach the caller's stream, then let it tear down.
 	d1, err := link.Dial(context.Background(), wsURL, "daemon-up", decls, nil)

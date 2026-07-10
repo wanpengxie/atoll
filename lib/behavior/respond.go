@@ -141,6 +141,55 @@ func BuildEvent(
 	}, nil
 }
 
+// SubjectWriteSpec is the caller-supplied shape of an off-process subject's
+// drive-write (期12 S2): the FULL envelope surface a subject may author —
+// kind=request/event, visibility, parent, own ID, deadline — deliberately
+// wider than the in-process Proc sugar (submit hardcodes KindRequest, Emit
+// hardcodes VisibilityPublic). Kind/visibility whitelisting is the engine's
+// job (the drive verb), not this builder's; this is only the ONE home for the
+// envelope literal (archtest envelope-construction confinement).
+type SubjectWriteSpec struct {
+	ID         message.ID
+	Type       string // required
+	Kind       message.Kind
+	Payload    json.RawMessage
+	Audience   message.Audience
+	Visibility message.Visibility
+	ParentID   message.ID
+	ExpiresAt  *int64
+}
+
+// BuildSubjectWrite assembles the subject-drive envelope by dispatching onto
+// the two existing kind builders (request → BuildRequest, event → BuildEvent
+// — no third envelope literal). ExpiresAt only rides a request (an event has
+// no closure to deadline); a non-request/event kind is the engine whitelist's
+// rejection, surfaced here too as a defensive floor.
+func BuildSubjectWrite(clock func() time.Time, spec SubjectWriteSpec) (*message.Envelope, error) {
+	switch spec.Kind {
+	case message.KindRequest:
+		return BuildRequest(clock, RequestSpec{
+			ID:         spec.ID,
+			Type:       spec.Type,
+			Payload:    spec.Payload,
+			Audience:   spec.Audience,
+			Visibility: spec.Visibility,
+			ParentID:   spec.ParentID,
+			ExpiresAt:  spec.ExpiresAt,
+		})
+	case message.KindEvent:
+		return BuildEvent(clock, EventSpec{
+			ID:         spec.ID,
+			Type:       spec.Type,
+			Payload:    spec.Payload,
+			Visibility: spec.Visibility,
+			Audience:   spec.Audience,
+			ParentID:   spec.ParentID,
+		})
+	default:
+		return nil, fmt.Errorf("behavior: BuildSubjectWrite kind must be request or event; got %q", spec.Kind)
+	}
+}
+
 // EmitEvent emits one kind=event message through the pen. kind-neutral: the
 // authoring actor's identity is welded onto the pen (sealed-pen), never a
 // parameter.
