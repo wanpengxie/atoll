@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -517,6 +518,18 @@ func nextRedialBackoff(cur time.Duration) time.Duration {
 	return next
 }
 
+// jitterBackoff randomizes d to the range [d/2, d] (AWS "equal jitter") so
+// daemons that all lost the link to the same home outage don't redial in
+// lockstep. It only randomizes the SLEEP; the stored backoff ladder
+// (nextRedialBackoff) stays a clean unjittered doubling sequence.
+func jitterBackoff(d time.Duration) time.Duration {
+	half := d / 2
+	if half <= 0 {
+		return d
+	}
+	return half + time.Duration(rand.Int63n(int64(half)+1))
+}
+
 // RunCompute connects to the channel home and runs the daemon's own reconcile
 // ring against cfg.Desired: it hosts every AlwaysOn desired member as a cell,
 // declaring it to the home (Reattach) before opening its stream. The home
@@ -610,7 +623,7 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 			select {
 			case <-ctx.Done():
 				return nil
-			case <-time.After(backoff):
+			case <-time.After(jitterBackoff(backoff)):
 			}
 			backoff = nextRedialBackoff(backoff)
 			continue
@@ -642,7 +655,7 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 		select {
 		case <-ctx.Done():
 			return nil
-		case <-time.After(backoff):
+		case <-time.After(jitterBackoff(backoff)):
 		}
 		backoff = nextRedialBackoff(backoff)
 	}
