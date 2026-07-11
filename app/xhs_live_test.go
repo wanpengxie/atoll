@@ -288,7 +288,7 @@ const xhsStatusDeviceAddr = "127.0.0.1:18091"
 // This proves the FULL L3 obs-PUSH chain end-to-end: the adapter publishes a
 // device-presence edge (PublishObs) → the daemon's WatchObs forwarder sends it UP
 // the link as a KindObs frame → the home port relays it into publishObs → the
-// home device-presence fold materialises the level → View.DevicePresence → /status reads
+// home presence fold materialises the level → View.Snapshot → /status reads
 // it OUT-OF-BAND (no probe, no truth-log write — the retired anti-pattern).
 func TestXHSLiveActorStatus(t *testing.T) {
 	env := setupTestApp(t)
@@ -372,7 +372,7 @@ func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want
 		// home) proves the want — known:false (unknown) must never satisfy either
 		// assertion vacuously. This exercises the full L3 obs push chain end-to-end:
 		// adapter PublishObs → daemon WatchObs forward → KindObs wire → home port →
-		// publishObs → fold → View.DevicePresence → /status.
+		// publishObs → fold → View.Snapshot → /status.
 		if known, _ := body["known"].(bool); known {
 			if online, ok := body["online"].(bool); ok && online == want {
 				return

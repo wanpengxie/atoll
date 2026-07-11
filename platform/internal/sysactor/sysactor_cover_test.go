@@ -173,7 +173,7 @@ func TestObs_PresentZeroStartedAt(t *testing.T) {
 	// present=true but started=zero time → uptime guarded to 0.
 	s := New(Deps{
 		Registry: reg,
-		Stat:     fakeStat{present: map[actor.ActorID]bool{"actor:a": true}},
+		Presence: fakeStat{present: map[actor.ActorID]bool{"actor:a": true}},
 		Clock:    func() time.Time { return time.Unix(1000, 0) },
 	})
 

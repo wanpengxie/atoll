@@ -23,6 +23,16 @@ type obsPublisherActor struct {
 	self actorrt.ActorContext
 }
 
+func deviceFromView(t *testing.T, h *Home, id actor.ActorID) ([]byte, bool) {
+	t.Helper()
+	snapshot, err := h.View().Snapshot(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Snapshot(%s): %v", id, err)
+	}
+	row, ok := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
+	return row.Val, ok
+}
+
 func (a *obsPublisherActor) Start(_ context.Context, self actorrt.ActorContext) error {
 	a.self = self
 	return nil
@@ -35,7 +45,7 @@ func (a *obsPublisherActor) Receive(context.Context, *message.Envelope) error {
 
 // TestHome_PublishObs_FoldsIntoDevicePresence (DoD §7.6, G8 coral regression):
 // an in-process cell's PublishObs reaches the home's own device-presence fold
-// (no daemon attach involved) — View.DevicePresence lights up.
+// (no daemon attach involved) — View.Snapshot carries the testimony.
 func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
 	h, err := Open(HomeConfig{ChannelID: channel.ID("test-obs-local"), DBPath: dbPath})
@@ -53,7 +63,7 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 	}
 	id = minted
 
-	if _, known := h.View().DevicePresence(id); known {
+	if _, known := deviceFromView(t, h, id); known {
 		t.Fatalf("DevicePresence known before any publish")
 	}
 
@@ -65,7 +75,7 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if snap, known := h.View().DevicePresence(id); known {
+		if snap, known := deviceFromView(t, h, id); known {
 			p, ok := introspect.ParseDevicePresence(snap)
 			if !ok || !p.Online {
 				t.Fatalf("ParseDevicePresence = %+v, ok=%v, want online", p, ok)
@@ -74,7 +84,7 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("View.DevicePresence never lit up after PublishObs")
+	t.Fatal("View.Snapshot never carried testimony after PublishObs")
 }
 
 // countingObsWatcher proves each publish reaches the one population watcher

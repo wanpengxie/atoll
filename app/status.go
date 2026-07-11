@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 // handleActorStatus reports an actor's L3 device-presence for the UI — read
@@ -39,12 +40,21 @@ func (a *App) handleActorStatus(c *gin.Context) {
 		return
 	}
 
-	snapshot, known := home.View().DevicePresence(actor.ActorID(actorID))
+	snapshot, err := home.View().Snapshot(c.Request.Context(), actor.ActorID(actorID))
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "presence unavailable"})
+		return
+	}
+	if !snapshot.Member {
+		c.JSON(http.StatusNotFound, gin.H{"error": "actor not found"})
+		return
+	}
+	testimony, known := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
 	if !known {
 		c.JSON(http.StatusOK, gin.H{"known": false})
 		return
 	}
-	p, ok := introspect.ParseDevicePresence(snapshot)
+	p, ok := introspect.ParseDevicePresence(testimony.Val)
 	if !ok {
 		// A folded value we cannot decode is treated as unknown (the convention is
 		// the adapter+app's; a malformed blob is honestly "we don't know").

@@ -112,14 +112,16 @@ func TestGenerationAndSourceRules(t *testing.T) {
 	}
 	fold.OnObs(context.Background(), "a", current, "broker", []byte("new"))
 	fold.OnDown(context.Background(), "a", old, nil)
-	if got, ok := fold.Device("a", "broker"); !ok || string(got) != "new" {
-		t.Fatalf("old down removed new testimony: %q %v", got, ok)
+	snap, _ = view.Snapshot(context.Background(), "a")
+	if got, ok := snap.L3["broker"]; !ok || string(got.Val) != "new" {
+		t.Fatalf("old down removed new testimony: %q %v", got.Val, ok)
 	}
 	fold.OnDown(context.Background(), "a", current, nil)
-	if _, ok := fold.Device("a", "broker"); ok {
+	snap, _ = view.Snapshot(context.Background(), "a")
+	if _, ok := snap.L3["broker"]; ok {
 		t.Fatal("matching down did not remove broker testimony")
 	}
-	if _, ok := fold.Device("a", "door"); !ok {
+	if _, ok := snap.L3["door"]; !ok {
 		t.Fatal("down removed door-owned testimony")
 	}
 }

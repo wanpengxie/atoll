@@ -354,8 +354,8 @@ func Open(cfg HomeConfig) (*Home, error) {
 			return actorbase.New(caps, hooks, sysactor.Def(sysactor.Deps{
 				Registry: cs.Registry,
 				Clock:    clock,
-				Stat:     &runtimeLivenessAdapter{rt: rt},
-				Device:   devicePresenceAdapter{fold: presenceFold},
+				Presence: presence.NewView(presenceFold, rt, cs.Registry),
+				Logger:   logger,
 				Operate:  cfg.Operate,
 			}))
 		},
@@ -768,7 +768,7 @@ func (h *Home) View() View {
 		registry: h.cs.Registry,
 		links:    h.links,
 		presence: presence.NewView(h.presenceFold, h.channel.Cells(), h.cs.Registry),
-		stat:     &runtimeLivenessAdapter{rt: h.channel.Cells()},
+		rt:       h.channel.Cells(),
 	}
 }
 
@@ -1032,21 +1032,7 @@ type View struct {
 	registry storespec.Registry
 	links    *link.Acceptor
 	presence presence.View
-	stat     *runtimeLivenessAdapter
-}
-
-// DevicePresence returns the latest opaque L3 device-presence snapshot an actor
-// pushed (via the obs axis), folded read-time. known=false = UNKNOWN (the actor
-// never reported, or its link dropped and the fold decayed it) — NOT offline.
-// The caller decodes the bytes via introspect.ParseDevicePresence. Advisory only;
-// authoritative reachability is send→terminal.
-func (v View) DevicePresence(id actor.ActorID) (snapshot []byte, known bool) {
-	snap, err := v.presence.Snapshot(context.Background(), id)
-	if err != nil {
-		return nil, false
-	}
-	testimony, known := snap.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
-	return testimony.Val, known
+	rt       *actorrt.Runtime
 }
 
 // Snapshot composes membership, embodiment and testimony at read time. The
@@ -1064,10 +1050,14 @@ func (v View) Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot
 // asked of the actor, never advisory. The two axes answer different
 // questions and must not be conflated.
 func (v View) Stat(id actor.ActorID) (startedAt time.Time, live bool) {
-	if v.stat == nil {
+	if v.rt == nil {
 		return time.Time{}, false
 	}
-	return v.stat.Stat(id)
+	stat, ok := v.rt.Stat(id)
+	if !ok {
+		return time.Time{}, false
+	}
+	return stat.StartedAt, true
 }
 
 // IsAttached reports whether daemon (compute) id has a live attach right now
@@ -1092,34 +1082,6 @@ func (v View) MaxSeq(ctx context.Context) (int64, error) {
 // ListActors returns all active actors from the membership registry.
 func (v View) ListActors(ctx context.Context) ([]storespec.Record, error) {
 	return v.registry.ListActive(ctx)
-}
-
-// ---------------------------------------------------------------------------
-// runtimeLivenessAdapter -- bridges actorrt.Runtime.Stat -> sysactor.LivenessStat
-// ---------------------------------------------------------------------------
-
-type runtimeLivenessAdapter struct {
-	rt *actorrt.Runtime
-}
-
-type devicePresenceAdapter struct{ fold *presence.Fold }
-
-func (a devicePresenceAdapter) Device(id actor.ActorID) ([]byte, bool) {
-	if a.fold == nil {
-		return nil, false
-	}
-	return a.fold.Device(id, actorrt.ObsKind(introspect.ObsDevicePresence))
-}
-
-func (a *runtimeLivenessAdapter) Stat(id actor.ActorID) (startedAt time.Time, present bool) {
-	if a.rt == nil {
-		return time.Time{}, false
-	}
-	stat, ok := a.rt.Stat(id)
-	if !ok {
-		return time.Time{}, false
-	}
-	return stat.StartedAt, true
 }
 
 // ---------------------------------------------------------------------------

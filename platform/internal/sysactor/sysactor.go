@@ -1,33 +1,22 @@
 package sysactor
 
 import (
+	"context"
+	"encoding/base64"
+	"log/slog"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// LivenessStat is the injected obs-read seam: the consumer-side narrow read of
-// the substrate's AUTHORITATIVE liveness + bind-instant for an actor (present =
-// the bool, uptime = now - startedAt). Defined consumer-side (Go idiom) as the
-// NARROW shape this actor needs, so the composition root supplies a thin reader
-// over the substrate's pull-stat obs seam. A nil seam (not yet wired) reports
-// everyone absent — advisory, never a dispatch gate.
-type LivenessStat interface {
-	Stat(id actor.ActorID) (startedAt time.Time, present bool)
-}
-
-// DevicePresenceStat is the injected obs-read seam over the home device-presence fold:
-// the latest folded L3 device-presence snapshot for an actor (the actor-source
-// obs PUSH a device adapter published). known=false = UNKNOWN (not a device
-// adapter, no signal, or decayed) — NOT offline. Defined consumer-side (narrow);
-// a nil seam means no device column (everyone unknown). Advisory only —
-// authoritative reachability is send→terminal.
-type DevicePresenceStat interface {
-	Device(id actor.ActorID) (snapshot []byte, known bool)
+type PresenceStat interface {
+	Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error)
 }
 
 // SystemActor holds one incarnation's process state: it answers channel-wide
@@ -44,21 +33,17 @@ type DevicePresenceStat interface {
 type SystemActor struct {
 	registry storespec.Registry
 	clock    func() time.Time
-	stat     LivenessStat
-	device   DevicePresenceStat
+	presence PresenceStat
 	operate  OperateExecutor
+	logger   *slog.Logger
 }
 
 // Deps bundles the channel services the system actor needs.
 type Deps struct {
 	Registry storespec.Registry
 	Clock    func() time.Time
-	// Stat is the obs-read seam over the substrate's authoritative liveness +
-	// bind-instant. Nil → actor.list reports everyone absent.
-	Stat LivenessStat
-	// Device is the obs-read seam over the home device-presence fold (L3 device presence).
-	// Nil → actor.list omits the device column (everyone unknown).
-	Device DevicePresenceStat
+	Presence PresenceStat
+	Logger   *slog.Logger
 	// Operate is the injected channel-operate executor (the in-gate control plane's
 	// implementation half; the gate here does permission + routing). Nil → the four
 	// control types are inert (no synthesis) — the injection point is unfilled.
@@ -73,12 +58,16 @@ func New(deps Deps) *SystemActor {
 	if clock == nil {
 		clock = time.Now
 	}
+	logger := deps.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
 	return &SystemActor{
 		registry: deps.Registry,
 		clock:    clock,
-		stat:     deps.Stat,
-		device:   deps.Device,
+		presence: deps.Presence,
 		operate:  deps.Operate,
+		logger:   logger,
 	}
 }
 
@@ -118,6 +107,9 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 			// out on a self-query).
 			s.respondDescribe(sys, msg)
 			return
+		case introspect.QueryStatus:
+			s.respondStatus(sys, msg)
+			return
 		case TypeIntroduceActor, TypeRemoveActor, TypeRestartActor, TypeSetDefaultAgent:
 			// Channel operate face (NP-1=c): in-gate control plane. Permission +
 			// routing here; the injected executor does the intent write + Home call.
@@ -146,14 +138,18 @@ func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	catalog := introspect.Catalog{Actors: make([]introspect.CatalogEntry, 0, len(rows))}
 	for _, r := range rows {
-		present, uptimeMs := s.obs(r.ID)
+		snapshot, err := s.snapshot(msg.Ctx(), r.ID)
+		if err != nil {
+			s.logger.Warn("sysactor.presence_snapshot_failed", "actor", string(r.ID), "error", err)
+		}
+		present, uptimeMs := s.liveness(snapshot)
 		catalog.Actors = append(catalog.Actors, introspect.CatalogEntry{
 			ID:       string(r.ID),
 			Kind:     string(r.Kind),
 			Binding:  string(r.Binding),
 			Present:  present,
 			UptimeMs: uptimeMs,
-			Device:   s.deviceObs(r.ID),
+			Device:   deviceTestimony(snapshot),
 		})
 	}
 	_, _ = sys.Reply(msg, catalog)
@@ -166,12 +162,17 @@ func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
 func systemDescribe() introspect.Describe {
 	return introspect.Describe{
 		ActorID:     string(actor.SystemActorID),
-		Description: "Channel system actor: answers the reserved directory query actor.list (membership ∧ liveness).",
+		Description: "Channel system actor: answers the reserved actor directory and presence queries.",
 		SkillDoc: "# system\n\nReserved channel directory.\n\n## Tool surface\n\n" +
-			"- `actor.list` — channel-wide actor directory: durable membership composed with liveness.\n",
+			"- `actor.list` — channel-wide actor directory: durable membership composed with presence.\n" +
+			"- `actor.status` — read-time presence view for one actor id.\n",
 		Types: map[string]introspect.TypeMeta{
 			introspect.QueryList: {
 				Description:  "channel-wide actor directory: membership ∧ liveness",
+				AllowedKinds: []string{string(message.KindRequest)},
+			},
+			introspect.QueryStatus: {
+				Description:  "read-time presence view for one actor id",
 				AllowedKinds: []string{string(message.KindRequest)},
 			},
 		},
@@ -195,37 +196,62 @@ func (s *SystemActor) respondDescribe(sys actorbase.Sys, msg actorbase.Msg) {
 	_, _ = sys.Reply(msg, answer)
 }
 
-// obs reads the substrate's authoritative obs for id (advisory; NOT a dispatch
-// gate): present, and uptime derived as now - startedAt. A nil seam (not yet
-// wired) reports absent / zero uptime.
-func (s *SystemActor) obs(id actor.ActorID) (present bool, uptimeMs int64) {
-	if s.stat == nil {
-		return false, 0
+func (s *SystemActor) snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error) {
+	if s.presence == nil {
+		return presence.Snapshot{}, nil
 	}
-	startedAt, present := s.stat.Stat(id)
-	if !present {
-		return false, 0
-	}
-	if !startedAt.IsZero() {
-		uptimeMs = s.clock().Sub(startedAt).Milliseconds()
-	}
-	return true, uptimeMs
+	return s.presence.Snapshot(ctx, id)
 }
 
-// deviceObs reads the actor's L3 device presence from the injected fold seam
-// (advisory; NOT a dispatch gate). nil = UNKNOWN (no seam, never reported, or
-// decayed) — the actor.list omits the device column rather than asserting offline.
-func (s *SystemActor) deviceObs(id actor.ActorID) *introspect.DevicePresence {
-	if s.device == nil {
-		return nil
+func (s *SystemActor) liveness(snapshot presence.Snapshot) (bool, int64) {
+	if !snapshot.L1Present {
+		return false, 0
 	}
-	raw, known := s.device.Device(id)
+	uptime := int64(0)
+	if !snapshot.L1StartedAt.IsZero() {
+		uptime = s.clock().Sub(snapshot.L1StartedAt).Milliseconds()
+	}
+	return true, uptime
+}
+
+func deviceTestimony(snapshot presence.Snapshot) *introspect.DevicePresence {
+	row, known := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
 	if !known {
 		return nil
 	}
-	p, ok := introspect.ParseDevicePresence(raw)
+	p, ok := introspect.ParseDevicePresence(row.Val)
 	if !ok {
 		return nil
 	}
 	return &p
+}
+
+func (s *SystemActor) respondStatus(sys actorbase.Sys, msg actorbase.Msg) {
+	req, err := introspect.ParseStatusRequest(msg.Payload)
+	if err != nil {
+		return
+	}
+	snapshot, err := s.snapshot(msg.Ctx(), actor.ActorID(req.ActorID))
+	if err != nil {
+		return
+	}
+	present, uptime := s.liveness(snapshot)
+	answer := introspect.Status{ActorID: req.ActorID, Member: snapshot.Member, Present: present, UptimeMs: uptime}
+	if len(snapshot.L3) > 0 {
+		answer.L3 = make(map[string]introspect.StatusTestimony, len(snapshot.L3))
+	}
+	for kind, row := range snapshot.L3 {
+		out := introspect.StatusTestimony{ReceivedAt: row.ReceivedAt, Source: string(row.Source), StaleFromPriorLife: row.StaleFromPriorLife}
+		if string(kind) == introspect.ObsDevicePresence {
+			if value, ok := introspect.ParseDevicePresence(row.Val); ok {
+				out.Device = &value
+			} else {
+				out.ValueBase64 = base64.StdEncoding.EncodeToString(row.Val)
+			}
+		} else {
+			out.ValueBase64 = base64.StdEncoding.EncodeToString(row.Val)
+		}
+		answer.L3[string(kind)] = out
+	}
+	_, _ = sys.Reply(msg, answer)
 }

@@ -24,6 +24,18 @@ import (
 
 const testChannelID = channel.ID("test-channel")
 
+type memberPresenceRegistry struct{}
+
+func (memberPresenceRegistry) Lookup(_ context.Context, id actor.ActorID) (storespec.Record, bool, error) {
+	return storespec.Record{ID: id}, true, nil
+}
+func (memberPresenceRegistry) Exists(context.Context, actor.ActorID) (bool, error) {
+	return true, nil
+}
+func (memberPresenceRegistry) ListActive(context.Context) ([]storespec.Record, error) {
+	return nil, nil
+}
+
 // --- stubs ---
 
 // stubMinter is the test substrate mint machine: Mint welds (id, chID) onto a stubPen
@@ -972,7 +984,9 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 	fold.OnObs(context.Background(), toolID,
 		gen,
 		actorrt.ObsKind(introspect.ObsDevicePresence), actorrt.ObsValue(`{"online":true}`))
-	if _, known := fold.Device(toolID, actorrt.ObsKind(introspect.ObsDevicePresence)); !known {
+	view := presence.NewView(fold, rt, memberPresenceRegistry{})
+	snapshot, err := view.Snapshot(context.Background(), toolID)
+	if err != nil || snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)].Val == nil {
 		t.Fatal("device presence not folded — precondition broken")
 	}
 
@@ -994,7 +1008,8 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 				downSeen = true
 			}
 		}
-		_, known := fold.Device(toolID, actorrt.ObsKind(introspect.ObsDevicePresence))
+		snapshot, _ := view.Snapshot(context.Background(), toolID)
+		_, known := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
 		if downSeen && !known {
 			return
 		}

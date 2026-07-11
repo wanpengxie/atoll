@@ -198,14 +198,6 @@ func (f *Fold) copy(id actor.ActorID) map[actorrt.ObsKind]entry {
 	return out
 }
 
-// Device is the temporary pre-S4 projection; S4 removes it when both consumers
-// move to Snapshot.
-func (f *Fold) Device(id actor.ActorID, kind actorrt.ObsKind) ([]byte, bool) {
-	rows := f.copy(id)
-	row, ok := rows[kind]
-	return row.val, ok
-}
-
 type View struct {
 	fold     *Fold
 	runtime  *actorrt.Runtime
