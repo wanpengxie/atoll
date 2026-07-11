@@ -1057,6 +1057,18 @@ func TestEndToEnd_DespawnID_CrossWireKill(t *testing.T) {
 	if _, ok := h.rt.Stat(toolID); !ok {
 		t.Fatal("daemon cell not live before DespawnID — precondition broken")
 	}
+	// Barrier: the home-side attach registers the port embodiment asynchronously
+	// to Dial returning; DespawnID before that registration lands returns false.
+	attachDeadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, ok := r.rt.Stat(toolID); ok {
+			break
+		}
+		if time.Now().After(attachDeadline) {
+			t.Fatal("home runtime never registered the port embodiment — attach lost")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 
 	// The home-side kill: exactly Home.Remove step ①.
 	if ok := r.rt.DespawnID(toolID); !ok {

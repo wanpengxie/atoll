@@ -135,6 +135,11 @@ func TestRemoveSnapshotAndReadmitHaveNoPriorTestimony(t *testing.T) {
 	if err != nil {
 		t.Fatalf("re-Admit: %v", err)
 	}
+	// Deregistration is irreversible: a same-principal re-Admit must mint a
+	// fresh identity, never resurrect the removed id.
+	if readmittedID == id {
+		t.Fatalf("re-Admit reused removed id %q", id)
+	}
 	snapshot, err = h.View().Snapshot(ctx, readmittedID)
 	if err != nil || !snapshot.Member || snapshot.L1Present || len(snapshot.L3) != 0 {
 		t.Fatalf("snapshot after same-principal re-Admit = %+v err=%v", snapshot, err)
