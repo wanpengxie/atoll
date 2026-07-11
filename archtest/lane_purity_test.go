@@ -66,6 +66,17 @@ func TestLaneYamuxNeverInExportedSignature(t *testing.T) {
 					}
 					st, ok := ts.Type.(*ast.StructType)
 					if !ok {
+						// The other exported-type leak forms: an exported
+						// INTERFACE whose method takes/returns a yamux type, and
+						// an exported type ALIAS or DEFINED type over a yamux
+						// type (`type Foo = yamux.Session` / `type Foo
+						// yamux.Session`). render(ts.Type) covers all of them —
+						// interface method signatures are rendered inside the
+						// InterfaceType, and an alias/defined type renders its
+						// underlying yamux reference directly.
+						if snippet := render(fset, ts.Type); strings.Contains(strings.ToLower(snippet), "yamux") {
+							violations = append(violations, fmt.Sprintf("%s: exported type %q definition (interface method / alias / defined type) contains a yamux type: %s", path, ts.Name.Name, snippet))
+						}
 						continue
 					}
 					for _, field := range st.Fields.List {

@@ -14,7 +14,6 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -166,8 +165,7 @@ func (a *App) handleWS(c *gin.Context) {
 	// Door handle: workspace ACL (tail) is broader than channel membership. A
 	// channel member gets a HumanHandle (write frames + L3 presence); a
 	// non-member (看得见≠在里面) may only tail — its write frames are refused.
-	userActorID := actor.ActorID("user:" + userID)
-	handle, herr := home.Human(ctx, userActorID)
+	handle, herr := home.HumanPrincipal(ctx, userID)
 	if herr != nil && errors.Is(herr, platform.ErrClosed) {
 		// The home is shutting down: same honest "unavailable" the nil-home
 		// path answers — not a membership verdict.

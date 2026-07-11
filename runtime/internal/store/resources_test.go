@@ -1203,19 +1203,13 @@ func readTombstone(t *testing.T, db *sql.DB, tombstoneID string) (daemonID, coor
 	return daemonID, coord, provenance, kind
 }
 
-// TestResource_SweepImmuneToLandedPhase is 期11 review §2.5 #A's P0 guard: a
-// reservation the daemon has reported LANDED (MarkReservationsLanded flips it
-// to phase='landed') is NEVER age-swept, however stale its last_progress_at —
-// its bytes are durably on disk and only the Committed row-write is
-// outstanding, so the sweep must leave it for the daemon's resend, not destroy
-// it as abandoned. A same-daemon, same-age reservation still in phase='reserved'
-// sweeps on schedule.
-func TestResource_SweepImmuneToLandedPhase(t *testing.T) {
+// Every stale reservation is sweepable; there is no landed phase immunity.
+func TestResource_SweepHasNoLandedPhaseImmunity(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
 	reg.nowMs = func() int64 { return 1000 }
-	landedID, err := reg.ReserveCreate(ctx, "file:landed", resourcespec.KindFile, "actor:a", "daemon-1", "coord-landed", false)
+	_, err := reg.ReserveCreate(ctx, "file:landed", resourcespec.KindFile, "actor:a", "daemon-1", "coord-landed", false)
 	if err != nil {
 		t.Fatalf("ReserveCreate landed: %v", err)
 	}
@@ -1224,31 +1218,20 @@ func TestResource_SweepImmuneToLandedPhase(t *testing.T) {
 		t.Fatalf("ReserveCreate reserved: %v", err)
 	}
 
-	// The daemon's ReconcilePull reports coord-landed present in live/.
-	if err := reg.MarkReservationsLanded(ctx, "daemon-1", []string{"coord-landed"}); err != nil {
-		t.Fatalf("MarkReservationsLanded: %v", err)
-	}
-
-	// A cutoff of 3000 is far past both rows' birth (t=1000, and neither was
-	// ever touched) — the reserved one sweeps, the landed one is immune.
+	// A cutoff of 3000 is far past both rows' birth (t=1000).
 	swept, err := reg.SweepExpiredReservations(ctx, "daemon-1", 3000)
 	if err != nil {
 		t.Fatalf("SweepExpiredReservations: %v", err)
 	}
-	if len(swept) != 1 || swept[0].ReservationID != reservedID {
-		t.Fatalf("swept = %+v, want exactly [%s] (the phase='reserved' row), never the landed one", swept, reservedID)
-	}
-	if _, found, err := reg.ReservationDaemon(ctx, landedID); err != nil || !found {
-		t.Fatalf("landed reservation was swept (P0 #A data loss): found=%v err=%v", found, err)
+	if len(swept) != 2 {
+		t.Fatalf("swept = %+v, want both stale reservations", swept)
 	}
 	if _, found, err := reg.ReservationDaemon(ctx, reservedID); err != nil || found {
 		t.Fatalf("reserved reservation survived the sweep: found=%v err=%v", found, err)
 	}
 }
 
-// TestResource_MarkReservationsLanded_EmptyIsNoop: an idle daemon reporting no
-// landed coords flips nothing (symmetric with TouchReservationsByCoords).
-func TestResource_MarkReservationsLanded_EmptyIsNoop(t *testing.T) {
+func TestResource_StaleReservationSweep(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 	reg.nowMs = func() int64 { return 1000 }
@@ -1256,10 +1239,6 @@ func TestResource_MarkReservationsLanded_EmptyIsNoop(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ReserveCreate: %v", err)
 	}
-	if err := reg.MarkReservationsLanded(ctx, "daemon-1", nil); err != nil {
-		t.Fatalf("MarkReservationsLanded(nil): %v", err)
-	}
-	// Still phase='reserved' → still sweepable.
 	swept, err := reg.SweepExpiredReservations(ctx, "daemon-1", 3000)
 	if err != nil {
 		t.Fatalf("SweepExpiredReservations: %v", err)

@@ -17,17 +17,13 @@ import (
 )
 
 const (
-	// dueBatchLimit caps one Store.Due() page per run-loop tick — a physical
-	// buffer parameter, no semantics (mirrors tap.readBatch: a short page
-	// just means the identity family drains over more ticks, never a
-	// correctness concern).
-	dueBatchLimit = 256
-
 	// backoffDuration is the sleep-until-retry the run loop arms after a
 	// tick makes zero progress across BOTH families (every due row/entry
 	// left in place — a pure transient-failure tick). Real, non-zero pacing
 	// so the loop never busy-spins re-querying an unchanged due set.
-	backoffDuration = 1 * time.Second
+	backoffDuration       = 1 * time.Second
+	perFireTimeout        = 10 * time.Second
+	maxMemTimersPerAuthor = 1024
 )
 
 // memTimer is one incarnation-bind entry in the engine's in-memory due-set —
@@ -57,9 +53,12 @@ type Engine struct {
 	mu  sync.Mutex
 	mem map[TimerID]memTimer
 
-	wake chan struct{} // capacity 1, coalesced — a lost wake is harmless (the next tick recomputes due from scratch)
-	stop chan struct{}
-	done chan struct{}
+	wake      chan struct{} // capacity 1, coalesced — a lost wake is harmless (the next tick recomputes due from scratch)
+	stop      chan struct{}
+	done      chan struct{}
+	ctx       context.Context
+	cancelRun context.CancelFunc
+	closeOnce sync.Once
 
 	// started guards the Start/Close lifecycle pair: double Start panics
 	// loud, Close before Start returns without joining (done is only ever
@@ -97,6 +96,7 @@ func New(deps Deps) (Minter, *Engine, error) {
 		stop: make(chan struct{}),
 		done: make(chan struct{}),
 	}
+	e.ctx, e.cancelRun = context.WithCancel(context.Background())
 	return &minter{engine: e}, e, nil
 }
 
@@ -121,7 +121,7 @@ func (e *Engine) Start() {
 // The stop channel is still closed, so a Start that races/follows sees an
 // already-stopped engine and its run loop exits at once.
 func (e *Engine) Close() {
-	close(e.stop)
+	e.closeOnce.Do(func() { e.cancelRun(); close(e.stop) })
 	if !e.started.Load() {
 		return
 	}
@@ -166,6 +166,12 @@ func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req Schedul
 			CreatedAt:     now,
 		}
 		if err := e.deps.Store.Insert(ctx, row); err != nil {
+			if errors.Is(err, timerspec.ErrAuthorInactive) {
+				return "", ErrAuthorInactive
+			}
+			if errors.Is(err, timerspec.ErrScheduleQuota) {
+				return "", ErrScheduleQuota
+			}
 			return "", err
 		}
 	case BindIncarnation:
@@ -181,6 +187,16 @@ func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req Schedul
 			return "", ErrBadSchedule
 		}
 		e.mu.Lock()
+		count := 0
+		for _, existing := range e.mem {
+			if existing.author == author {
+				count++
+			}
+		}
+		if count >= maxMemTimersPerAuthor {
+			e.mu.Unlock()
+			return "", ErrScheduleQuota
+		}
 		e.mem[id] = memTimer{
 			id:            id,
 			author:        author,
@@ -287,7 +303,7 @@ func (e *Engine) run() {
 	}
 	defer stopAlarm()
 
-	ctx := context.Background()
+	ctx := e.ctx
 	for {
 		nowTime := e.deps.Clock.Now()
 		now := nowTime.UnixMilli()
@@ -405,7 +421,9 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 			continue
 		}
 		env := buildFireEnvelope(t.id, t.author, t.typ, t.payload, message.ID(t.correlationID), nowTime)
-		err := e.deps.Fire.Append(ctx, t.author, env)
+		callCtx, cancel := context.WithTimeout(ctx, perFireTimeout)
+		err := e.deps.Fire.Append(callCtx, t.author, env)
+		cancel()
 		switch {
 		case err == nil || errors.Is(err, ErrDuplicateFire):
 			e.mu.Lock()
@@ -423,35 +441,49 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 		}
 	}
 
-	rows, err := e.deps.Store.Due(ctx, now, dueBatchLimit)
+	rows, err := e.deps.Store.Due(ctx, now)
 	if err != nil {
 		e.deps.Logger.Error("schedule.due_query_failed", "err", err)
 		return progress
 	}
+	blockedAuthor := make(map[actor.ActorID]bool)
 	for _, row := range rows {
+		if blockedAuthor[row.AuthorID] {
+			continue
+		}
 		// Wake-first ordering, welded: the identity family's
 		// "no live actor" case is the NORMAL restart path, not an edge case
 		// — reviving before appending is what keeps the wake from being
 		// lost into a mailbox nobody is hosting yet.
-		if err := e.deps.Revive.EnsureLive(ctx, row.AuthorID); err != nil {
+		callCtx, cancel := context.WithTimeout(ctx, perFireTimeout)
+		reviveErr := e.deps.Revive.EnsureLive(callCtx, row.AuthorID)
+		cancel()
+		if reviveErr != nil {
+			err := reviveErr
 			if isReviveRejected(err) {
 				// Deterministic — this row can NEVER fire (its author is
 				// permanently unrevivable). Dispose it, same arm
 				// as a FireRejected poison row: left in place it would
-				// retry hot forever and, at ≥dueBatchLimit oldest rows,
-				// starve every later-due legitimate row behind it.
-				if _, derr := e.deps.Store.Delete(ctx, row.ID); derr != nil {
+				// retry hot forever and repeatedly consume this author's
+				// per-author due window ahead of later legitimate rows.
+				reason, detail := rejectionDetails(err)
+				if _, evicted, derr := e.deps.Store.MoveToDead(ctx, row.ID, timerspec.DeathReviveRejected, reason, detail, now); derr != nil {
 					e.deps.Logger.Error("schedule.poison_row_delete_failed", "timer_id", string(row.ID), "err", derr)
 					continue
+				} else if evicted > 0 {
+					e.deps.Logger.Warn("schedule.timer_dead_evicted", "count", evicted)
 				}
 				progress = true
 				e.loudLog(row.ID, row.AuthorID, err)
 				continue
 			}
+			blockedAuthor[row.AuthorID] = true
 			continue // transient — leave the row, retry next tick.
 		}
 		env := buildFireEnvelope(row.ID, row.AuthorID, row.Type, row.Payload, message.ID(row.CorrelationID), nowTime)
-		err := e.deps.Fire.Append(ctx, row.AuthorID, env)
+		callCtx, cancel = context.WithTimeout(ctx, perFireTimeout)
+		err := e.deps.Fire.Append(callCtx, row.AuthorID, env)
+		cancel()
 		switch {
 		case err == nil || errors.Is(err, ErrDuplicateFire):
 			if _, derr := e.deps.Store.Delete(ctx, row.ID); derr != nil {
@@ -460,9 +492,12 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 			}
 			progress = true
 		case isFireRejected(err):
-			if _, derr := e.deps.Store.Delete(ctx, row.ID); derr != nil {
+			reason, detail := rejectionDetails(err)
+			if _, evicted, derr := e.deps.Store.MoveToDead(ctx, row.ID, timerspec.DeathFireRejected, reason, detail, now); derr != nil {
 				e.deps.Logger.Error("schedule.poison_row_delete_failed", "timer_id", string(row.ID), "err", derr)
 				continue
+			} else if evicted > 0 {
+				e.deps.Logger.Warn("schedule.timer_dead_evicted", "count", evicted)
 			}
 			progress = true
 			e.loudLog(row.ID, row.AuthorID, err)
@@ -471,6 +506,18 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 		}
 	}
 	return progress
+}
+
+func rejectionDetails(err error) (string, string) {
+	var fire FireRejected
+	if errors.As(err, &fire) {
+		return fire.Reason, fire.Detail
+	}
+	var revive ReviveRejected
+	if errors.As(err, &revive) {
+		return revive.Reason, revive.Detail
+	}
+	return "rejected", err.Error()
 }
 
 // isFireRejected reports whether err is (or wraps) a FireRejected — the

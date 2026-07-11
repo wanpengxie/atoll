@@ -3,6 +3,7 @@ package store_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync/atomic"
 	"testing"
 
@@ -36,36 +37,74 @@ func mirrorEventsOf(t *testing.T, q storespec.MessageQuery, typ string, actorID 
 	return out
 }
 
-// --- Insert / Lookup / Exists / Deregister -----------------------------------
+// --- Admit / Lookup / Exists / Deregister ------------------------------------
 
-func TestRegistry_InsertLookup(t *testing.T) {
+func TestRegistry_AdmitLookup(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	in := storespec.Record{
-		ID: "tool:xhs", Kind: actor.KindTool,
-		Binding: actor.BindingRuntimeInboundViaRelay, CreatedAt: 1000,
+	id, err := cs.Membership.Admit(ctx, actor.KindTool, "xhs", 1000)
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
 	}
-	if err := cs.Membership.Insert(ctx, in); err != nil {
-		t.Fatalf("Insert: %v", err)
-	}
-	rec, ok, err := cs.Registry.Lookup(ctx, "tool:xhs")
+	rec, ok, err := cs.Registry.Lookup(ctx, id)
 	if err != nil || !ok {
 		t.Fatalf("Lookup ok=%v err=%v", ok, err)
 	}
-	if rec.ID != in.ID || rec.Kind != in.Kind || rec.Binding != in.Binding || rec.CreatedAt != 1000 {
-		t.Errorf("rec=%+v want %+v", rec, in)
+	if rec.ID != id || rec.Kind != actor.KindTool || rec.Principal != "xhs" || rec.CreatedAt != 1000 {
+		t.Errorf("rec=%+v", rec)
 	}
 	if !rec.IsActive() {
 		t.Errorf("freshly inserted actor must be active")
 	}
 }
 
-func TestRegistry_InsertRejectsEmptyID(t *testing.T) {
+func TestRegistry_AdmitRejectsInvalidPrincipal(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
-	if err := cs.Membership.Insert(ctx, storespec.Record{Kind: actor.KindAgent, CreatedAt: 1}); err == nil {
-		t.Fatal("Insert with empty ID must error")
+	for _, principal := range []string{"", "bad:principal"} {
+		if _, err := cs.Membership.Admit(ctx, actor.KindAgent, principal, 1); err == nil {
+			t.Fatalf("Admit principal %q must error", principal)
+		}
+	}
+}
+
+func TestRegistry_ConcurrentAdmitConvergesOnOneIdentity(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+	start := make(chan struct{})
+	type result struct {
+		id  actor.ActorID
+		err error
+	}
+	results := make(chan result, 2)
+	for range 2 {
+		go func() {
+			<-start
+			id, err := cs.Membership.Admit(ctx, actor.KindAgent, "same-principal", 1000)
+			results <- result{id: id, err: err}
+		}()
+	}
+	close(start)
+	a, b := <-results, <-results
+	if a.err != nil || b.err != nil {
+		t.Fatalf("concurrent Admit errors: %v, %v", a.err, b.err)
+	}
+	if a.id == "" || a.id != b.id {
+		t.Fatalf("concurrent Admit ids=(%q,%q), want same non-empty id", a.id, b.id)
+	}
+	active, err := cs.Registry.ListActive(ctx)
+	if err != nil {
+		t.Fatalf("ListActive: %v", err)
+	}
+	var matches int
+	for _, rec := range active {
+		if rec.Kind == actor.KindAgent && rec.Principal == "same-principal" {
+			matches++
+		}
+	}
+	if matches != 1 {
+		t.Fatalf("active matching identities=%d want 1", matches)
 	}
 }
 
@@ -87,17 +126,18 @@ func TestRegistry_Exists(t *testing.T) {
 	if ex, err := cs.Registry.Exists(ctx, "tool:xhs"); err != nil || ex {
 		t.Fatalf("pre-insert Exists=%v err=%v", ex, err)
 	}
-	if err := cs.Membership.Insert(ctx, storespec.Record{ID: "tool:xhs", Kind: actor.KindTool, CreatedAt: 1}); err != nil {
-		t.Fatalf("Insert: %v", err)
+	id, err := cs.Membership.Admit(ctx, actor.KindTool, "xhs", 1)
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
 	}
-	if ex, err := cs.Registry.Exists(ctx, "tool:xhs"); err != nil || !ex {
+	if ex, err := cs.Registry.Exists(ctx, id); err != nil || !ex {
 		t.Fatalf("post-insert Exists=%v err=%v", ex, err)
 	}
 	// Exists is true even after soft-deregister (it is existence-of-row, not active).
-	if err := cs.Membership.Deregister(ctx, "tool:xhs", 2000); err != nil {
+	if err := cs.Membership.Deregister(ctx, id, 2000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
-	if ex, err := cs.Registry.Exists(ctx, "tool:xhs"); err != nil || !ex {
+	if ex, err := cs.Registry.Exists(ctx, id); err != nil || !ex {
 		t.Fatalf("post-deregister Exists=%v err=%v want true", ex, err)
 	}
 }
@@ -107,13 +147,14 @@ func TestRegistry_Exists(t *testing.T) {
 func TestRegistry_DeregisterSoftRemoves(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
-	if err := cs.Membership.Insert(ctx, storespec.Record{ID: "tool:xhs", Kind: actor.KindTool, CreatedAt: 1000}); err != nil {
-		t.Fatalf("Insert: %v", err)
+	id, err := cs.Membership.Admit(ctx, actor.KindTool, "xhs", 1000)
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
 	}
-	if err := cs.Membership.Deregister(ctx, "tool:xhs", 5000); err != nil {
+	if err := cs.Membership.Deregister(ctx, id, 5000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
-	rec, ok, err := cs.Registry.Lookup(ctx, "tool:xhs")
+	rec, ok, err := cs.Registry.Lookup(ctx, id)
 	if err != nil || !ok {
 		t.Fatalf("Lookup after deregister ok=%v err=%v (soft-remove keeps the row)", ok, err)
 	}
@@ -136,13 +177,14 @@ func TestRegistry_DeregisterIdempotent(t *testing.T) {
 	if err := cs.Membership.Deregister(ctx, "ghost", 1); err != nil {
 		t.Fatalf("Deregister missing must be no-op, got: %v", err)
 	}
-	if err := cs.Membership.Insert(ctx, storespec.Record{ID: "a", Kind: actor.KindAgent, CreatedAt: 1}); err != nil {
-		t.Fatalf("Insert: %v", err)
+	id, err := cs.Membership.Admit(ctx, actor.KindAgent, "a", 1)
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
 	}
-	if err := cs.Membership.Deregister(ctx, "a", 2); err != nil {
+	if err := cs.Membership.Deregister(ctx, id, 2); err != nil {
 		t.Fatalf("Deregister 1: %v", err)
 	}
-	if err := cs.Membership.Deregister(ctx, "a", 3); err != nil {
+	if err := cs.Membership.Deregister(ctx, id, 3); err != nil {
 		t.Fatalf("Deregister again must be no-op, got: %v", err)
 	}
 }
@@ -151,12 +193,15 @@ func TestRegistry_DeregisterIdempotent(t *testing.T) {
 func TestRegistry_ListActiveSortedAndFiltered(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
-	for _, id := range []actor.ActorID{"zeta", "alpha", "mike"} {
-		if err := cs.Membership.Insert(ctx, storespec.Record{ID: id, Kind: actor.KindAgent, CreatedAt: 1}); err != nil {
-			t.Fatalf("Insert %s: %v", id, err)
+	ids := map[string]actor.ActorID{}
+	for _, principal := range []string{"zeta", "alpha", "mike"} {
+		id, err := cs.Membership.Admit(ctx, actor.KindAgent, principal, 1)
+		if err != nil {
+			t.Fatalf("Admit %s: %v", principal, err)
 		}
+		ids[principal] = id
 	}
-	if err := cs.Membership.Deregister(ctx, "mike", 9); err != nil {
+	if err := cs.Membership.Deregister(ctx, ids["mike"], 9); err != nil {
 		t.Fatalf("Deregister mike: %v", err)
 	}
 	active, err := cs.Registry.ListActive(ctx)
@@ -167,7 +212,7 @@ func TestRegistry_ListActiveSortedAndFiltered(t *testing.T) {
 	for _, r := range active {
 		got = append(got, r.ID)
 	}
-	want := []actor.ActorID{"alpha", "zeta"}
+	want := []actor.ActorID{ids["alpha"], ids["zeta"]}
 	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
 		t.Errorf("ListActive ids=%v want %v (sorted, mike filtered)", got, want)
 	}
@@ -182,22 +227,19 @@ func TestApplyMemberTransitions_AddEmitsMirror(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	adds := []storespec.MemberActorAdd{{
-		ID: "tool:xhs", Kind: actor.KindTool,
-		Binding: actor.BindingRuntimeInboundViaRelay, At: 7000,
-	}}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, adds, nil); err != nil {
-		t.Fatalf("ApplyMemberTransitions: %v", err)
+	id, err := cs.Membership.Admit(ctx, actor.KindTool, "xhs", 7000)
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
 	}
 
 	// Registry projection updated.
-	rec, ok, err := cs.Registry.Lookup(ctx, "tool:xhs")
+	rec, ok, err := cs.Registry.Lookup(ctx, id)
 	if err != nil || !ok || !rec.IsActive() {
 		t.Fatalf("after add: ok=%v active=%v err=%v", ok, rec.IsActive(), err)
 	}
 
 	// Mirror event present in the log, system-addressed, event, non-terminal.
-	mirrors := mirrorEventsOf(t, cs.Query, "system.actor.registered", "tool:xhs")
+	mirrors := mirrorEventsOf(t, cs.Query, "system.actor.registered", string(id))
 	if len(mirrors) != 1 {
 		t.Fatalf("registered mirrors = %d, want 1", len(mirrors))
 	}
@@ -236,24 +278,24 @@ func TestOnCommit_BothWritePathsFire_NoopSilent(t *testing.T) {
 	cs := openTestChannelOnCommit(t, func() { fires.Add(1) })
 
 	// Control-plane path: a real member add appends a mirror row → fires once.
-	add := storespec.MemberActorAdd{ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingEmbedded, At: 7000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
-		t.Fatalf("ApplyMemberTransitions add: %v", err)
+	id, err := cs.Membership.Admit(ctx, actor.KindTool, "xhs", 7000)
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
 	}
 	if got := fires.Load(); got != 1 {
 		t.Fatalf("control-plane add: OnCommit fires=%d want 1 (membership path must signal)", got)
 	}
 
 	// No-op path: re-adding an already-active actor appends nothing → no wake.
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
-		t.Fatalf("ApplyMemberTransitions duplicate add: %v", err)
+	if got, err := cs.Membership.Admit(ctx, actor.KindTool, "xhs", 8000); err != nil || got != id {
+		t.Fatalf("idempotent Admit=%q err=%v", got, err)
 	}
 	if got := fires.Load(); got != 1 {
 		t.Fatalf("no-op transition: OnCommit fires=%d want still 1 (no spurious wake)", got)
 	}
 
 	// Request path: a plain Append commits one row → fires once more.
-	if _, err := cs.Log.Append(ctx, newEnv("m1", message.KindEvent, message.Audience{"tool:xhs"}), false); err != nil {
+	if _, err := cs.Log.Append(ctx, newEnv("m1", message.KindEvent, message.Audience{id}), false); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
 	if got := fires.Load(); got != 2 {
@@ -267,19 +309,17 @@ func TestApplyMemberTransitions_DuplicateAddIdempotent(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	add := storespec.MemberActorAdd{ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingEmbedded, At: 7000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
-		t.Fatalf("first add: %v", err)
+	id, err := cs.Membership.Admit(ctx, actor.KindTool, "xhs", 7000)
+	if err != nil {
+		t.Fatalf("first Admit: %v", err)
 	}
 	// Re-apply with a different At — already active, so it must NOT emit a
 	// second registered mirror (idempotent; substrate identity carries no
 	// per-actor declaration to diff).
-	add2 := add
-	add2.At = 8000
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add2}, nil); err != nil {
-		t.Fatalf("duplicate add: %v", err)
+	if got, err := cs.Membership.Admit(ctx, actor.KindTool, "xhs", 8000); err != nil || got != id {
+		t.Fatalf("duplicate Admit=%q err=%v", got, err)
 	}
-	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", "tool:xhs")); n != 1 {
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", string(id))); n != 1 {
 		t.Errorf("registered mirrors = %d after duplicate add, want 1 (idempotent no-op emits nothing)", n)
 	}
 }
@@ -289,19 +329,19 @@ func TestApplyMemberTransitions_RemoveEmitsMirror(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	add := storespec.MemberActorAdd{ID: "tool:xhs", Kind: actor.KindTool, Binding: actor.BindingEmbedded, At: 7000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
-		t.Fatalf("add: %v", err)
+	id, err := cs.Membership.Admit(ctx, actor.KindTool, "xhs", 7000)
+	if err != nil {
+		t.Fatal(err)
 	}
-	rm := storespec.MemberActorRemove{ID: "tool:xhs", At: 9000}
+	rm := storespec.MemberActorRemove{ID: id, At: 9000}
 	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{rm}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	rec, ok, _ := cs.Registry.Lookup(ctx, "tool:xhs")
+	rec, ok, _ := cs.Registry.Lookup(ctx, id)
 	if !ok || rec.IsActive() {
 		t.Fatalf("after remove: ok=%v active=%v want inactive", ok, rec.IsActive())
 	}
-	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", "tool:xhs")); n != 1 {
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", string(id))); n != 1 {
 		t.Errorf("deregistered mirrors = %d, want 1", n)
 	}
 }
@@ -311,19 +351,19 @@ func TestApplyMemberTransitions_RemoveEmitsMirror(t *testing.T) {
 func TestApplyMemberTransitions_DuplicateRemoveIdempotent(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
-	add := storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, At: 1000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
-		t.Fatalf("add: %v", err)
+	id, err := cs.Membership.Admit(ctx, actor.KindAgent, "a", 1000)
+	if err != nil {
+		t.Fatal(err)
 	}
-	rm := storespec.MemberActorRemove{ID: "a", At: 2000}
+	rm := storespec.MemberActorRemove{ID: id, At: 2000}
 	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{rm}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	rm2 := storespec.MemberActorRemove{ID: "a", At: 3000}
+	rm2 := storespec.MemberActorRemove{ID: id, At: 3000}
 	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{rm2}); err != nil {
 		t.Fatalf("duplicate remove: %v", err)
 	}
-	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", "a")); n != 1 {
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", string(id))); n != 1 {
 		t.Errorf("deregistered mirrors = %d after duplicate remove, want 1 (idempotent no-op emits nothing)", n)
 	}
 }
@@ -343,28 +383,33 @@ func TestApplyMemberTransitions_GuardsInputs(t *testing.T) {
 	}
 }
 
-// Reactivation: a deregistered actor re-added becomes active again and emits a
-// fresh registered mirror.
-func TestApplyMemberTransitions_Reactivation(t *testing.T) {
+// Admission after removal mints a fresh instance id; the old id stays retired.
+func TestApplyMemberTransitions_OldIdentityStaysRetired(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 
-	add := storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, At: 1000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
-		t.Fatalf("add: %v", err)
+	oldID, err := cs.Membership.Admit(ctx, actor.KindAgent, "a", 1000)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{{ID: "a", At: 2000}}); err != nil {
+	if err := cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{{ID: oldID, At: 2000}}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	readd := storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, Binding: actor.BindingEmbedded, At: 3000}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{readd}, nil); err != nil {
-		t.Fatalf("re-add: %v", err)
+	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{{ID: oldID, Kind: actor.KindAgent, At: 3000}}, nil); !errors.Is(err, storespec.ErrMemberInactive) {
+		t.Fatalf("old-id add err=%v", err)
 	}
-	rec, ok, _ := cs.Registry.Lookup(ctx, "a")
+	newID, err := cs.Membership.Admit(ctx, actor.KindAgent, "a", 3000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newID == oldID {
+		t.Fatal("re-admission reused old actor id")
+	}
+	rec, ok, _ := cs.Registry.Lookup(ctx, newID)
 	if !ok || !rec.IsActive() {
-		t.Fatalf("reactivated actor active=%v", rec.IsActive())
+		t.Fatalf("fresh identity active=%v", rec.IsActive())
 	}
-	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", "a")); n != 2 {
-		t.Errorf("registered mirrors = %d after reactivation, want 2 (initial + reactivate)", n)
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", string(newID))); n != 1 {
+		t.Errorf("new-id registered mirrors=%d want 1", n)
 	}
 }

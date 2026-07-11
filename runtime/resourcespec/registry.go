@@ -354,16 +354,6 @@ type Registry interface {
 	// error, when coords is empty or daemonID owns no matching pending
 	// reservation.
 	TouchReservationsByCoords(ctx context.Context, daemonID string, coords []string, atMs int64) error
-
-	// MarkReservationsLanded flips phase reserved→landed for daemonID's pending
-	// reservations whose placement_coord is in coords (期11 review §2.5 #A —
-	// the daemon's live/ directory listing, reported each ReconcilePull). The
-	// home runs this BEFORE SweepExpiredReservations in the same pull, so a
-	// reservation whose bytes are durably in live/ becomes immune to the
-	// age-sweep (phase='reserved' only) — closing the P0 where a
-	// landed-but-uncommitted create is reclaimed as abandoned. Empty coords is
-	// a clean no-op (an idle daemon reports nothing landed).
-	MarkReservationsLanded(ctx context.Context, daemonID string, coords []string) error
 }
 
 // ResourceOutbox is the NARROW slice of Registry the home-side daemon
@@ -388,11 +378,4 @@ type ResourceOutbox interface {
 	ListByPlacementDaemon(ctx context.Context, daemonID string) ([]ResourceRow, error)
 	SweepExpiredReservations(ctx context.Context, daemonID string, cutoffMs int64) ([]ReservationRow, error)
 	TouchReservationsByCoords(ctx context.Context, daemonID string, coords []string, atMs int64) error
-	// MarkReservationsLanded flips phase reserved→landed for daemonID's pending
-	// reservations whose coord is in coords (期11 review §2.5 #A — the daemon's
-	// live/ listing, reported each ReconcilePull). Run BEFORE SweepExpiredReservations
-	// in the same pull: a landed reservation is immune to the age-sweep, so its
-	// bytes survive an arbitrarily delayed Committed rather than being reclaimed
-	// as abandoned. Empty coords is a clean no-op.
-	MarkReservationsLanded(ctx context.Context, daemonID string, coords []string) error
 }

@@ -43,9 +43,6 @@ type fakeOutbox struct {
 
 	touchCalls []touchCall
 	touchErr   error
-
-	markLandedCalls []markLandedCall
-	markLandedErr   error
 }
 
 type sweepCall struct {
@@ -57,11 +54,6 @@ type touchCall struct {
 	daemonID string
 	coords   []string
 	atMs     int64
-}
-
-type markLandedCall struct {
-	daemonID string
-	coords   []string
 }
 
 func (f *fakeOutbox) CommitReservation(ctx context.Context, reservationID string) (bool, error) {
@@ -94,10 +86,6 @@ func (f *fakeOutbox) SweepExpiredReservations(ctx context.Context, daemonID stri
 func (f *fakeOutbox) TouchReservationsByCoords(ctx context.Context, daemonID string, coords []string, atMs int64) error {
 	f.touchCalls = append(f.touchCalls, touchCall{daemonID: daemonID, coords: coords, atMs: atMs})
 	return f.touchErr
-}
-func (f *fakeOutbox) MarkReservationsLanded(ctx context.Context, daemonID string, coords []string) error {
-	f.markLandedCalls = append(f.markLandedCalls, markLandedCall{daemonID: daemonID, coords: coords})
-	return f.markLandedErr
 }
 
 var _ resourcespec.ResourceOutbox = (*fakeOutbox)(nil)
@@ -176,7 +164,7 @@ func TestHomeStorageHostControl_ReconcilePull_ProjectsPerDaemonRows(t *testing.T
 		tombstoneRows:   []resourcespec.TombstoneRow{{TombstoneID: "t1", PlacementCoord: "c3", Provenance: resourcespec.ProvenanceAxisAllocated}},
 	}
 	h := homeStorageHostControl{outbox: ob}
-	resources, reservations, tombstones, err := h.ReconcilePull(t.Context(), "daemon-1", []string{"c2"}, nil)
+	resources, reservations, tombstones, err := h.ReconcilePull(t.Context(), "daemon-1", []string{"c2"})
 	if err != nil {
 		t.Fatalf("ReconcilePull: %v", err)
 	}
@@ -202,7 +190,7 @@ func TestHomeStorageHostControl_ReconcilePull_SweepsExpiredReservationsFirst(t *
 	fixedNow := func() time.Time { return time.UnixMilli(1_000_000) }
 	h := homeStorageHostControl{outbox: ob, timeout: 30 * time.Second, now: fixedNow}
 
-	if _, _, _, err := h.ReconcilePull(t.Context(), "daemon-1", nil, nil); err != nil {
+	if _, _, _, err := h.ReconcilePull(t.Context(), "daemon-1", nil); err != nil {
 		t.Fatalf("ReconcilePull: %v", err)
 	}
 	if len(ob.sweepCalls) != 1 {
@@ -218,23 +206,12 @@ func TestHomeStorageHostControl_ReconcilePull_SweepsExpiredReservationsFirst(t *
 	}
 }
 
-// TestHomeStorageHostControl_ReconcilePull_MarksLandedPassthrough is 期11
-// review §2.5 #A: the daemon's landedCoords pass through to
-// MarkReservationsLanded unfiltered, and MarkReservationsLanded runs alongside
-// the sweep (the ordering — mark BEFORE sweep — is asserted structurally in the
-// handler; here we assert the passthrough and that both fire once).
-func TestHomeStorageHostControl_ReconcilePull_MarksLandedPassthrough(t *testing.T) {
+// ReconcilePull has no landed-phase mutation and still runs the age sweep.
+func TestHomeStorageHostControl_ReconcilePull_HasNoLandedPhase(t *testing.T) {
 	ob := &fakeOutbox{}
 	h := homeStorageHostControl{outbox: ob}
-	landed := []string{"coord-landed-1", "coord-landed-2"}
-	if _, _, _, err := h.ReconcilePull(t.Context(), "daemon-1", nil, landed); err != nil {
+	if _, _, _, err := h.ReconcilePull(t.Context(), "daemon-1", nil); err != nil {
 		t.Fatalf("ReconcilePull: %v", err)
-	}
-	if len(ob.markLandedCalls) != 1 {
-		t.Fatalf("mark-landed calls = %d, want 1", len(ob.markLandedCalls))
-	}
-	if ob.markLandedCalls[0].daemonID != "daemon-1" || !reflect.DeepEqual(ob.markLandedCalls[0].coords, landed) {
-		t.Fatalf("mark-landed call = %+v, want daemon-1 + %v", ob.markLandedCalls[0], landed)
 	}
 	if len(ob.sweepCalls) != 1 {
 		t.Fatalf("sweep calls = %d, want 1", len(ob.sweepCalls))
@@ -254,7 +231,7 @@ func TestHomeStorageHostControl_ReconcilePull_TouchesOnlyActiveCoordsAfterSweep(
 	h := homeStorageHostControl{outbox: ob, timeout: 30 * time.Second, now: fixedNow}
 
 	activeCoords := []string{"coord-active-1", "coord-active-2"}
-	if _, _, _, err := h.ReconcilePull(t.Context(), "daemon-1", activeCoords, nil); err != nil {
+	if _, _, _, err := h.ReconcilePull(t.Context(), "daemon-1", activeCoords); err != nil {
 		t.Fatalf("ReconcilePull: %v", err)
 	}
 	if len(ob.touchCalls) != 1 {
@@ -286,7 +263,7 @@ func TestHomeStorageHostControl_ReconcilePull_EmptyActiveCoordsTouchesNothing(t 
 	ob := &fakeOutbox{}
 	h := homeStorageHostControl{outbox: ob}
 
-	if _, _, _, err := h.ReconcilePull(t.Context(), "daemon-1", nil, nil); err != nil {
+	if _, _, _, err := h.ReconcilePull(t.Context(), "daemon-1", nil); err != nil {
 		t.Fatalf("ReconcilePull: %v", err)
 	}
 	if len(ob.touchCalls) != 1 {
@@ -305,7 +282,7 @@ func TestHomeStorageHostControl_ReconcilePull_DefaultTimeoutAndClock(t *testing.
 	ob := &fakeOutbox{}
 	h := homeStorageHostControl{outbox: ob}
 	before := time.Now()
-	if _, _, _, err := h.ReconcilePull(t.Context(), "daemon-1", nil, nil); err != nil {
+	if _, _, _, err := h.ReconcilePull(t.Context(), "daemon-1", nil); err != nil {
 		t.Fatalf("ReconcilePull: %v", err)
 	}
 	if len(ob.sweepCalls) != 1 {

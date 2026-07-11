@@ -56,7 +56,12 @@ func (s *fakeStore) Delete(ctx context.Context, id timerspec.TimerID) (bool, err
 	return existed, nil
 }
 
-func (s *fakeStore) Due(ctx context.Context, now int64, limit int) ([]timerspec.TimerRow, error) {
+func (s *fakeStore) MoveToDead(ctx context.Context, id timerspec.TimerID, class timerspec.DeathClass, reason, detail string, diedAt int64) (bool, int, error) {
+	moved, err := s.Delete(ctx, id)
+	return moved, 0, err
+}
+
+func (s *fakeStore) Due(ctx context.Context, now int64) ([]timerspec.TimerRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.dueErr != nil {
@@ -69,9 +74,6 @@ func (s *fakeStore) Due(ctx context.Context, now int64, limit int) ([]timerspec.
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].FireAt < out[j].FireAt })
-	if len(out) > limit {
-		out = out[:limit]
-	}
 	return out, nil
 }
 

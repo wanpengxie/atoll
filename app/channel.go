@@ -85,44 +85,10 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	dbPath := filepath.Join(a.channelDBDir, chID+".db")
 	now := time.Now().UnixMilli()
 
-	// Create the channel row + seed its DESIRED composition (channel_actors) + the
-	// default_agent pointer in ONE tx. channel_actors is the canonical writer for
-	// "what this channel runs"; default_agent is a name-agnostic pointer into it,
-	// defaulting to the agent:boost fallback instance.
-	// One tx → never a half-seeded channel (no three-write drift).
-	tx, err := a.db.BeginTx(c.Request.Context(), nil)
-	if err != nil {
-		a.logger.Error("create channel: begin tx", "channel", chID, "err", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
-	}
-	_, err = tx.ExecContext(c.Request.Context(),
-		`INSERT INTO channels (id, workspace_id, name, type, db_path, default_agent, created_at) VALUES (?,?,?,?,?,?,?)`,
-		chID, wsID, req.Name, req.Type, dbPath, string(defaultAgentInstanceID), now,
-	)
-	if err == nil {
-		_, err = tx.ExecContext(c.Request.Context(),
-			`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-			chID, string(defaultAgentInstanceID), defaultBoostClass, placementServer,
-		)
-	}
-	if err != nil {
-		_ = tx.Rollback()
-		a.logger.Error("create channel: seed", "channel", chID, "err", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		a.logger.Error("create channel: commit", "channel", chID, "err", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
-	}
-
+	// Open the substrate first so both genesis principals can be admitted and
+	// yield their authoritative minted ids before app desired truth is written.
 	home, err := a.createHome(channel.ID(chID), dbPath)
 	if err != nil {
-		// Roll back: delete the orphaned channel row.
-		_, _ = a.db.ExecContext(c.Request.Context(),
-			`DELETE FROM channels WHERE id = ?`, chID)
 		a.logger.Error("create channel: init home", "channel", chID, "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
@@ -135,13 +101,13 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	// tear the whole thing down — close the home and roll back the channel row —
 	// and return 5xx, so the caller sees a clean failure it can retry, never a
 	// silent 201 over a broken channel.
-	admit := func(id actor.ActorID, kind actor.Kind) error {
+	admit := func(principal string, kind actor.Kind) (actor.ActorID, error) {
 		if a.seedAdmitFailHook != nil {
 			if err := a.seedAdmitFailHook(); err != nil {
-				return err
+				return "", err
 			}
 		}
-		return home.Admit(c.Request.Context(), id, kind)
+		return home.Admit(c.Request.Context(), kind, principal)
 	}
 	rollback := func(stage string, err error) {
 		cID := channel.ID(chID)
@@ -152,30 +118,54 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 		}
 		a.mu.Unlock()
 		_, _ = a.db.ExecContext(c.Request.Context(), `DELETE FROM channels WHERE id = ?`, chID)
+		_ = os.Remove(dbPath)
 		a.logger.Error("create channel: "+stage, "channel", chID, "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 	}
 
-	actorID := actor.ActorID("user:" + userID)
 	// Membrane law: the creator is a member. Admit is the pure-membership动词 —
 	// the creating user's not→member edge (§4.6). No cell here (the human is
 	// embodied by the ring / subjectgate, never welded at this call site).
-	if mErr := admit(actorID, actor.KindHuman); mErr != nil {
+	if _, mErr := admit(userID, actor.KindHuman); mErr != nil {
 		rollback("creator admit", mErr)
 		return
 	}
-	// Template seeding is a PAIR: the seeded boost composition intent row (written
-	// in the tx above) + its durable membership admission. Idempotent (re-Admit is
-	// a no-op-shaped upsert), and it pokes the ring so boost embodies without
-	// waiting a tick.
-	if mErr := admit(defaultAgentInstanceID, actor.KindAgent); mErr != nil {
+	// Obtain the boost id from substrate; app never manufactures an actor id.
+	boostID, mErr := admit(defaultAgentPrincipal, actor.KindAgent)
+	if mErr != nil {
 		rollback("boost admit", mErr)
 		return
 	}
 
+	// Write directory, desired composition, and default pointer once with the
+	// minted id. No placeholder/repair window exists.
+	tx, err := a.db.BeginTx(c.Request.Context(), nil)
+	if err != nil {
+		rollback("begin tx", err)
+		return
+	}
+	_, err = tx.ExecContext(c.Request.Context(),
+		`INSERT INTO channels (id, workspace_id, name, type, db_path, default_agent, created_at) VALUES (?,?,?,?,?,?,?)`,
+		chID, wsID, req.Name, req.Type, dbPath, string(boostID), now)
+	if err == nil {
+		_, err = tx.ExecContext(c.Request.Context(),
+			`INSERT INTO channel_actors (channel_id, instance_id, principal, class, placement) VALUES (?,?,?,?,?)`,
+			chID, string(boostID), defaultAgentPrincipal, defaultBoostClass, placementServer)
+	}
+	if err != nil {
+		_ = tx.Rollback()
+		rollback("seed", err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		rollback("commit", err)
+		return
+	}
+	_ = home.Restart(c.Request.Context(), boostID) // desired landed after Admit's poke.
+
 	c.JSON(http.StatusCreated, gin.H{
 		"id": chID, "workspace_id": wsID, "name": req.Name,
-		"type": req.Type, "created_at": now,
+		"type": req.Type, "created_at": now, "default_agent": string(boostID),
 	})
 }
 
@@ -309,7 +299,7 @@ func (a *App) handleListActors(c *gin.Context) {
 	for _, rec := range actors {
 		result = append(result, gin.H{
 			"id": string(rec.ID), "kind": string(rec.Kind),
-			"binding": string(rec.Binding), "created_at": rec.CreatedAt,
+			"principal": rec.Principal, "binding": string(rec.Binding), "created_at": rec.CreatedAt,
 		})
 	}
 	if result == nil {

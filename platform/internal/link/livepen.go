@@ -2,7 +2,6 @@ package link
 
 import (
 	"context"
-	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -13,7 +12,7 @@ import (
 // incarnation is no longer the live embodiment (despawned / dead / replaced)
 // refuses to write. It is the death-after-write fence — a capability captured by
 // a goroutine that outlived its incarnation cannot author truth on its behalf.
-var ErrWriterNotLive = errors.New("link: writer no longer the live incarnation")
+var ErrWriterNotLive error = codedSentinel{code: "writer_not_live", message: "link: writer no longer the live incarnation"}
 
 // livePen is the liveCap (WHEN-validity membrane) over a raw
 // harness.Pen: a thin wrapper that, per write, first checks the host that the

@@ -91,15 +91,17 @@ func (a *App) resolveRouting(ctx context.Context, chID channel.ID, in submitInpu
 		return []actor.ActorID{actor.ActorID(da)}, message.KindRequest, nil
 	}
 
-	boostID := string(defaultAgentInstanceID)
-	_, boostLive := view.Stat(defaultAgentInstanceID)
+	var boostID string
+	_ = a.db.QueryRowContext(ctx,
+		`SELECT instance_id FROM channel_actors WHERE channel_id=? AND principal=?`, string(chID), defaultAgentPrincipal).Scan(&boostID)
+	_, boostLive := view.Stat(actor.ActorID(boostID))
 	hasBoost, berr := a.channelHasInstance(ctx, string(chID), boostID)
 	if berr != nil {
 		return nil, kind, berr
 	}
 	switch {
 	case hasBoost && boostLive:
-		return []actor.ActorID{defaultAgentInstanceID}, message.KindRequest, nil
+		return []actor.ActorID{actor.ActorID(boostID)}, message.KindRequest, nil
 	case hasBoost:
 		// boost floor introduced but its cell is not present → channel cannot serve.
 		return nil, kind, &routingError{detail: "the channel's default/fallback agent is down"}

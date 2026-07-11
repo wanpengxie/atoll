@@ -147,7 +147,7 @@ func TestRemoteWriterSeesReject(t *testing.T) {
 func TestRemoteWriterSeesErr(t *testing.T) {
 	t.Parallel()
 	rw, cleanup := remotePair(t, func(env message.Envelope) ipc.EmitAckPayload {
-		return ipc.EmitAckPayload{Err: "boom"}
+		return ipc.EmitAckPayload{ErrorCode: "unknown", ErrorMessage: "boom"}
 	})
 	defer cleanup()
 

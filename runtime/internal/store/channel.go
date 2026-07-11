@@ -29,7 +29,7 @@ type ChannelStores struct {
 	// Actor registry exposed via SEGREGATED interfaces (derived from role — a
 	// reader never receives any membership write):
 	Registry   storespec.Registry               // membership READS only (Lookup/Exists/ListActive)
-	Membership storespec.MembershipControlPlane // membership WRITES: Insert/Deregister + ApplyMemberTransitions (log-emitting)
+	Membership storespec.MembershipControlPlane // membership writes: Admit/Deregister + ApplyMemberTransitions
 
 	// Plane-2 (access/resource) implementations over the SAME channel db. These
 	// are the door's collaborators, handed up as resourcespec CONTRACTS (never

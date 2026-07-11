@@ -3,16 +3,16 @@ package link
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/hashicorp/yamux"
-
-	"sync"
 )
 
 // linksession.go is 期11 片②'s "换底": one top-level yamux.Session rides directly
@@ -61,6 +61,26 @@ const (
 	streamActor   streamKind = "actor"
 	streamLane    streamKind = "lane"
 )
+
+const streamWriteBudget = 10 * time.Second
+const controlQueueDepth = 64
+
+type boundedConn struct {
+	net.Conn
+	logger *slog.Logger
+}
+
+func (c *boundedConn) Write(p []byte) (int, error) {
+	_ = c.Conn.SetWriteDeadline(time.Now().Add(streamWriteBudget))
+	n, err := c.Conn.Write(p)
+	if err != nil {
+		if c.logger != nil {
+			c.logger.Warn("link.stream_write_failed", "error", err)
+		}
+		_ = c.Conn.Close()
+	}
+	return n, err
+}
 
 // streamHeader is the first newline-JSON value written on every substream, read
 // by the accept loop to dispatch the substream to its plane.
@@ -142,7 +162,71 @@ type linkSession struct {
 	// loop), so it can never fire this. nil on the daemon side (holds no Lease).
 	onFrame func()
 
-	logger *slog.Logger
+	logger   *slog.Logger
+	killOnce sync.Once
+
+	controlLifeMu sync.Mutex
+	controlStop   chan struct{}
+	controlClosed bool
+	controlWG     sync.WaitGroup
+}
+
+func (ls *linkSession) beginControlWorker() bool {
+	ls.controlLifeMu.Lock()
+	defer ls.controlLifeMu.Unlock()
+	if ls.controlClosed {
+		return false
+	}
+	if ls.controlStop == nil {
+		ls.controlStop = make(chan struct{})
+	}
+	ls.controlWG.Add(1)
+	return true
+}
+
+func (ls *linkSession) stopControlWorkers() {
+	ls.controlLifeMu.Lock()
+	if !ls.controlClosed {
+		ls.controlClosed = true
+		if ls.controlStop == nil {
+			ls.controlStop = make(chan struct{})
+		}
+		close(ls.controlStop)
+	}
+	ls.controlLifeMu.Unlock()
+}
+
+// waitControlWorkers stops the control worker(s) and joins them, BOUNDED by
+// timeout. Returns true if the join completed within the bound (the normal
+// path — every already-queued control frame's handler drained before teardown,
+// preserving the "die with a clean drain" total order), false if the bound
+// elapsed first.
+//
+// The bound exists because a control worker can be wedged inside a long-lived
+// STORAGE call, not just an out-network write: handleAttach runs
+// registry.Lookup / membership.ApplyMemberTransitions / reconcileHost on the
+// attach reqCtx, and that ctx carries NO deadline of its own — a stalled store
+// (disk-hung db) pins the handler indefinitely. An unbounded join would then
+// propagate that stall straight through this teardown and, via Serve's
+// WaitGroup, into Home shutdown — a jammed store would make the whole station
+// un-closeable. So the join is bounded: normal case keeps the full ordering;
+// pathological (store hung) case degrades to "abandon the join, leave a loud
+// trace, let teardown proceed" — never coupling a stuck store into a station
+// that cannot close. The caller owns the timeout-path logging (it holds the
+// daemon/channel attribution this linkSession does not).
+func (ls *linkSession) waitControlWorkers(timeout time.Duration) bool {
+	ls.stopControlWorkers()
+	done := make(chan struct{})
+	go func() {
+		ls.controlWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // dialLinkSession builds the daemon (client) end: a yamux client over the raw WS
@@ -163,6 +247,7 @@ func dialLinkSession(ws *websocket.Conn, onControl func([]byte), onLane func(net
 		_ = ys.Close()
 		return nil, err
 	}
+	ctrl = &boundedConn{Conn: ctrl, logger: logger}
 	if err := writeStreamHeader(ctrl, streamControl); err != nil {
 		_ = ys.Close()
 		return nil, err
@@ -217,7 +302,9 @@ func (c *frameHookConn) Read(p []byte) (int, error) {
 // daemon has a non-nil ls.ctrl at start.
 func (ls *linkSession) start() {
 	if ls.ctrl != nil {
-		go ls.readControl(ls.ctrl)
+		if ls.beginControlWorker() {
+			go ls.readControl(ls.ctrl)
+		}
 	}
 	go ls.acceptLoop()
 }
@@ -247,9 +334,18 @@ func (ls *linkSession) acceptLoop() {
 // redeem's header/bytes) is exactly the "application frame" set onFrame's doc
 // promises. The wrap is a no-op when ls.onFrame is nil (daemon side).
 func (ls *linkSession) dispatch(conn net.Conn) {
+	conn = &boundedConn{Conn: conn, logger: ls.logger}
 	if ls.onFrame != nil {
 		conn = &frameHookConn{Conn: conn, onFrame: ls.onFrame}
 	}
+	// The header read is bounded by readLaneJSON's own laneHeaderReadTimeout (30s,
+	// lane.go) — the single admission bound for every substream header/ack on this
+	// session — set on its entry and cleared on its return, so the raw byte pump
+	// that follows on the same substream inherits no deadline. No separate
+	// admission deadline is set here: an earlier one was dead code (readLaneJSON
+	// unconditionally overwrote it). Under single-tenancy that 30s header bound
+	// plus the per-link lease TTL backstop is sufficient — no shorter admission
+	// gate is warranted (owner 拍定, H-2).
 	var hdr streamHeader
 	if err := readLaneJSON(conn, &hdr); err != nil {
 		_ = conn.Close()
@@ -257,11 +353,21 @@ func (ls *linkSession) dispatch(conn net.Conn) {
 	}
 	switch hdr.Kind {
 	case streamControl:
-		// The peer's control substream: adopt it for sends, then drive its reads
-		// for the substream's life (this goroutine parks here).
+		// A session has exactly one control spine. A second one would create two
+		// independently ordered workers and route replies onto the wrong stream.
 		ls.ctrlMu.Lock()
+		if ls.ctrl != nil {
+			ls.ctrlMu.Unlock()
+			_ = conn.Close()
+			ls.kill("control_stream_duplicate", errors.New("duplicate control stream"))
+			return
+		}
 		ls.ctrl = conn
 		ls.ctrlMu.Unlock()
+		if !ls.beginControlWorker() {
+			_ = conn.Close()
+			return
+		}
 		ls.readControl(conn)
 	case streamActor:
 		if ls.onActor != nil {
@@ -291,13 +397,57 @@ func (ls *linkSession) dispatch(conn net.Conn) {
 // funnel (closed()) takes over.
 func (ls *linkSession) readControl(conn net.Conn) {
 	dec := json.NewDecoder(conn)
+	queue := make(chan []byte, controlQueueDepth)
+	workerDone := make(chan struct{})
+	ls.controlLifeMu.Lock()
+	stop := ls.controlStop
+	ls.controlLifeMu.Unlock()
+	go func() {
+		defer close(workerDone)
+		defer func() {
+			if v := recover(); v != nil {
+				ls.kill("control_worker_panic", fmt.Errorf("panic: %v", v))
+			}
+		}()
+		for {
+			select {
+			case <-stop:
+				return
+			case raw, ok := <-queue:
+				if !ok {
+					return
+				}
+				// Prefer death over a simultaneously-ready queued frame.
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if ls.onControl != nil {
+					ls.onControl(raw)
+				}
+			}
+		}
+	}()
+	defer func() {
+		close(queue)
+		<-workerDone
+		ls.controlWG.Done()
+	}()
 	for {
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
+			ls.kill("control_decode", err)
 			return
 		}
-		if ls.onControl != nil {
-			ls.onControl([]byte(raw))
+		copyRaw := append([]byte(nil), raw...)
+		select {
+		case <-stop:
+			return
+		case queue <- copyRaw:
+		default:
+			ls.kill("control_queue_full", errors.New("control dispatch queue full"))
+			return
 		}
 	}
 }
@@ -314,6 +464,9 @@ func (ls *linkSession) sendControl(payload []byte) error {
 	buf = append(buf, payload...)
 	buf = append(buf, '\n')
 	_, err := ls.ctrl.Write(buf)
+	if err != nil {
+		ls.kill("control_write", err)
+	}
 	return err
 }
 
@@ -325,6 +478,7 @@ func (ls *linkSession) openStream() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	conn = &boundedConn{Conn: conn, logger: ls.logger}
 	if err := writeStreamHeader(conn, streamActor); err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -340,6 +494,7 @@ func (ls *linkSession) openLane() (net.Conn, error) {
 	if err != nil {
 		return nil, err
 	}
+	conn = &boundedConn{Conn: conn, logger: ls.logger}
 	if err := writeStreamHeader(conn, streamLane); err != nil {
 		_ = conn.Close()
 		return nil, err
@@ -359,5 +514,18 @@ func (ls *linkSession) Close() error {
 	if ls.ys == nil {
 		return nil
 	}
-	return ls.ys.Close()
+	ls.kill("explicit_close", nil)
+	return nil
+}
+
+func (ls *linkSession) kill(reason string, err error) {
+	ls.killOnce.Do(func() {
+		ls.stopControlWorkers()
+		if ls.logger != nil {
+			ls.logger.Warn("link.session_killed", "reason", reason, "error", err)
+		}
+		if ls.ys != nil {
+			_ = ls.ys.Close()
+		}
+	})
 }

@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,7 +17,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // storeHomeRig is the S5b counterpart to homeRig: it wires the Acceptor over a
@@ -70,15 +70,17 @@ func (r *storeHomeRig) wsURL() string { return "ws" + r.srv.URL[4:] }
 // membrane law (v1.8 问①) stopped attach from minting membership, a declared id
 // must be an existing active member for the attach to stamp its Host — this stands
 // in for the introduce door the raw link rig bypasses.
-func (r *storeHomeRig) admit(t *testing.T, ids ...actor.ActorID) {
+func (r *storeHomeRig) admit(t *testing.T, ids ...actor.ActorID) []actor.ActorID {
 	t.Helper()
-	adds := make([]storespec.MemberActorAdd, len(ids))
-	for i, id := range ids {
-		adds[i] = storespec.MemberActorAdd{ID: id, Kind: actor.KindTool, At: time.Now().UnixMilli()}
+	out := make([]actor.ActorID, 0, len(ids))
+	for _, id := range ids {
+		minted, err := r.cs.Membership.Admit(context.Background(), actor.KindTool, strings.ReplaceAll(string(id), ":", "-"), time.Now().UnixMilli())
+		if err != nil {
+			t.Fatalf("admit: %v", err)
+		}
+		out = append(out, minted)
 	}
-	if err := r.cs.Membership.ApplyMemberTransitions(context.Background(), adds, nil); err != nil {
-		t.Fatalf("admit: %v", err)
-	}
+	return out
 }
 
 // deliverProbe drives one request at id straight off the rig's Runtime and
@@ -109,16 +111,16 @@ func TestAttach_DeclarationWithoutMembership_NotMinted(t *testing.T) {
 	ctx := context.Background()
 	r := newStoreHomeRig(t)
 
-	const (
+	var (
 		member = actor.ActorID("tool:member")
 		orphan = actor.ActorID("tool:orphan")
 	)
-	r.admit(t, member) // orphan is deliberately NOT admitted
+	member = r.admit(t, member)[0] // orphan is deliberately NOT admitted
 
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: member, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
 		{ActorID: orphan, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
-	}, nil)
+	}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -154,16 +156,16 @@ func TestAttach_OrphanDeclaration_NotInAllowSet(t *testing.T) {
 	ctx := context.Background()
 	r := newStoreHomeRig(t)
 
-	const (
+	var (
 		member = actor.ActorID("tool:member")
 		orphan = actor.ActorID("tool:orphan")
 	)
-	r.admit(t, member) // orphan deliberately NOT admitted
+	member = r.admit(t, member)[0] // orphan deliberately NOT admitted
 
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: member, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
 		{ActorID: orphan, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
-	}, nil)
+	}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -209,16 +211,17 @@ func TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut(t *testing.T) {
 	ctx := context.Background()
 	r := newStoreHomeRig(t)
 
-	const (
+	var (
 		toolA = actor.ActorID("tool:a")
 		toolB = actor.ActorID("tool:b")
 	)
-	r.admit(t, toolA, toolB)
+	minted := r.admit(t, toolA, toolB)
+	toolA, toolB = minted[0], minted[1]
 
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
 		{ActorID: toolB, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
-	}, nil)
+	}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -350,10 +353,17 @@ func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
 	obs := newCountingObsWatcher()
 	r := newStoreHomeRigWithObs(t, obs)
 
-	const toolA = actor.ActorID("tool:obs-a")
-	r.admit(t, toolA)
+	toolA := actor.ActorID("tool:obs-a")
+	newID, err := r.cs.Membership.Admit(ctx, actor.KindTool, "obs-a", time.Now().UnixMilli())
+	if err != nil {
+		t.Fatalf("re-admit: %v", err)
+	}
+	if newID == toolA {
+		t.Fatal("re-admit reused removed id")
+	}
+	toolA = newID
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -407,7 +417,14 @@ func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
 	// back before attach may stamp Host — membrane law, v1.8 问①), then re-declare
 	// it on the SAME link (a fresh embodiment, same id) — attach re-registers obs
 	// (obsReg[toolA] was cleared).
-	r.admit(t, toolA)
+	oldID := toolA
+	toolA, err = r.cs.Membership.Admit(ctx, actor.KindTool, "obs-a", time.Now().UnixMilli())
+	if err != nil {
+		t.Fatalf("re-admit: %v", err)
+	}
+	if toolA == oldID {
+		t.Fatal("re-admit reused removed id")
+	}
 	if err := d.Reattach(ctx, []link.Declaration{
 		{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
 	}); err != nil {
@@ -456,15 +473,15 @@ func TestAttach_HumanDeclaration_Rejected(t *testing.T) {
 	ctx := context.Background()
 	r := newStoreHomeRig(t)
 
-	const (
+	var (
 		toolID  = actor.ActorID("tool:member")
 		humanID = actor.ActorID("user:alice")
 	)
-	r.admit(t, toolID)
+	toolID = r.admit(t, toolID)[0]
 	// Admit the human with its TRUE registry kind.
-	if err := r.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
-		{ID: humanID, Kind: actor.KindHuman, At: time.Now().UnixMilli()},
-	}, nil); err != nil {
+	var err error
+	humanID, err = r.cs.Membership.Admit(ctx, actor.KindHuman, "alice", time.Now().UnixMilli())
+	if err != nil {
 		t.Fatalf("admit human: %v", err)
 	}
 
@@ -473,7 +490,7 @@ func TestAttach_HumanDeclaration_Rejected(t *testing.T) {
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
 		{ActorID: humanID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
-	}, nil)
+	}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

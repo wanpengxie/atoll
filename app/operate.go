@@ -32,20 +32,9 @@ type operateExecutor struct {
 // operateExecutor implements the injected contract.
 var _ platform.OperateExecutor = (*operateExecutor)(nil)
 
-// principalFromSender extracts the operating user's id from a "user:<id>" sender.
-// A non-user sender (an agent member) has NO principal — it may only introduce a
-// public agent (world-layer delegation to owned agents is deferred, §9 ⑦).
-func principalFromSender(sender actor.ActorID) (string, bool) {
-	s := string(sender)
-	if strings.HasPrefix(s, "user:") {
-		return strings.TrimPrefix(s, "user:"), true
-	}
-	return "", false
-}
-
 type introducePayload struct {
 	DeclID      string `json:"decl_id"`
-	Target      string `json:"target"` // user form: an explicit id (user:X)
+	Principal   string `json:"principal"` // human form: an opaque application principal
 	Placement   string `json:"placement"`
 	DesiredHost string `json:"desired_host"`
 	MakeDefault bool   `json:"make_default"`
@@ -58,7 +47,7 @@ type introducePayload struct {
 	// registry.InstanceSpec.Config into the constructor closure, NEVER a
 	// capability — it does not ride actorcaps.Caps (see buildInstance /
 	// archtest.TestConfigNotInCaps). A config change on a live server-placed row
-	// takes effect via Spawn-replace (下方; A-P14 原语), the same 生效 path restart
+	// takes effect via Restart (下方; A-P14 原语), the same 生效 path restart
 	// uses — placement/class stay frozen (rehoming/reclassing = remove + re-add,
 	// SW-8), only the tunable field moves.
 	Config json.RawMessage `json:"config,omitempty"`
@@ -84,7 +73,7 @@ func channelUnavailable() error {
 //     principal==owner) → ClassKind precheck (unknown class当场拒) → ensure intent
 //     (SW-8: pre-existing row's placement/class如实 unchanged) → optional config
 //     UPDATE (改配置门, S8: config is the row's tunable field) → ensure Admit → poke,
-//     and Spawn-replace when a config change must take on an already-live
+//     and Restart when a config change must take on an already-live
 //     server-placed row (生效). intent and Admit are BOTH ensured even on a
 //     pre-existing row (幂等: a crash between the two writes is self-healed on
 //     retry — else the half-written row is滤成 a never-embodied dead row under
@@ -98,16 +87,17 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 	if home == nil {
 		return nil, channelUnavailable()
 	}
-	if strings.HasPrefix(p.Target, "user:") {
-		if err := home.Admit(ctx, actor.ActorID(p.Target), actor.KindHuman); err != nil {
+	if p.Principal != "" {
+		id, err := home.Admit(ctx, actor.KindHuman, p.Principal)
+		if err != nil {
 			return nil, err
 		}
-		return map[string]any{"admitted": p.Target}, nil
+		return map[string]any{"admitted": id}, nil
 	}
 
 	declID := strings.TrimSpace(p.DeclID)
 	if declID == "" {
-		return nil, &platform.OperateError{Code: "bad_payload", Detail: "decl_id or user target required"}
+		return nil, &platform.OperateError{Code: "bad_payload", Detail: "decl_id or principal required"}
 	}
 	var owner, visibility, defClass string
 	err := x.a.db.QueryRowContext(ctx,
@@ -120,7 +110,14 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		return nil, err
 	}
 	// World-layer ref-eligibility (introduce 权是唯一复合世界层判定的动词).
-	principal, hasPrincipal := principalFromSender(req.Sender)
+	principal, hasPrincipal := "", false
+	if _, herr := home.Human(ctx, req.Sender); herr == nil {
+		if p, ok, perr := home.PrincipalOf(ctx, req.Sender); perr != nil {
+			return nil, perr
+		} else if ok {
+			principal, hasPrincipal = p, true
+		}
+	}
 	if visibility != "public" && !(hasPrincipal && principal == owner) {
 		return nil, &platform.OperateError{Code: "forbidden", Detail: "declaration is not public and sender is not its owner"}
 	}
@@ -135,7 +132,7 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		placement = placementDaemon
 	}
 	desiredHost := strings.TrimSpace(p.DesiredHost)
-	instanceID := "agent:" + declID
+	instanceID := ""
 	// NB: the request engine's ClassKind + placement are validated ONLY on the create
 	// branch below (after the row query), NOT here. An existing row's class is frozen
 	// (SW-8) — a config/retry introduce against it must走 the frozen effective class,
@@ -152,14 +149,15 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		return nil, &platform.OperateError{Code: "bad_payload", Detail: "config must be a JSON object"}
 	}
 
-	var exClass, exPlacement, exDesiredHost string
+	var exID, exClass, exPlacement, exDesiredHost string
 	qerr := x.a.db.QueryRowContext(ctx,
-		`SELECT class, placement, desired_host FROM channel_actors WHERE channel_id = ? AND instance_id = ?`,
-		string(req.ChannelID), instanceID).Scan(&exClass, &exPlacement, &exDesiredHost)
+		`SELECT instance_id, class, placement, desired_host FROM channel_actors WHERE channel_id = ? AND principal = ?`,
+		string(req.ChannelID), declID).Scan(&exID, &exClass, &exPlacement, &exDesiredHost)
 	created := false
 	configChanged := false
 	switch qerr {
 	case nil:
+		instanceID = exID
 		// SW-8: placement/class of a pre-existing row恒不变更 (rehoming/reclassing =
 		// remove + re-introduce). Only config — the tunable field — is mutable here
 		// (改配置门, S8): a present config UPDATEs channel_actors.config_json.
@@ -168,8 +166,8 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		_ = exDesiredHost
 		if hasConfig {
 			if _, err := x.a.db.ExecContext(ctx,
-				`UPDATE channel_actors SET config_json = ? WHERE channel_id = ? AND instance_id = ?`,
-				string(p.Config), string(req.ChannelID), instanceID); err != nil {
+				`UPDATE channel_actors SET config_json = ? WHERE channel_id = ? AND principal = ?`,
+				string(p.Config), string(req.ChannelID), declID); err != nil {
 				return nil, err
 			}
 			configChanged = true
@@ -191,22 +189,9 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		if placement == placementServer && desiredHost != "" {
 			return nil, &platform.OperateError{Code: "invalid_placement", Detail: "server placement cannot carry desired_host"}
 		}
-		var cfg any
-		if hasConfig {
-			cfg = string(p.Config)
-		}
-		if _, err := x.a.db.ExecContext(ctx,
-			`INSERT INTO channel_actors (channel_id, instance_id, class, placement, desired_host, config_json) VALUES (?,?,?,?,?,?)`,
-			string(req.ChannelID), instanceID, engine, placement, desiredHost, cfg); err != nil {
-			return nil, err
-		}
 		created = true
 	default:
 		return nil, qerr
-	}
-	if p.MakeDefault {
-		_, _ = x.a.db.ExecContext(ctx,
-			`UPDATE channels SET default_agent = ? WHERE id = ?`, instanceID, string(req.ChannelID))
 	}
 	// The effective class is now final: a pre-existing row froze engine to exClass
 	// (SW-8). Re-derive kind from THAT class, not the request's engine — a半失败
@@ -218,20 +203,39 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		return nil, &platform.OperateError{Code: "unknown_class", Detail: engine}
 	}
 	// ensure Admit (idempotent) — pokes the ring; embodiment lands on the next sweep.
-	if err := home.Admit(ctx, actor.ActorID(instanceID), kind); err != nil {
+	mintedID, err := home.Admit(ctx, kind, declID)
+	if err != nil {
 		return nil, err
 	}
-	// 生效: a config change on an already-embodied server-placed row won't take on a
-	// mere poke (the live cell's SpawnIfAbsent CAS loses). Spawn-replace rebuilds it
-	// with the fresh merged snapshot — the same 原地换脑 path restart uses (A-P14).
-	// A brand-new row (created) rides the ring's build, which already reads the new
-	// config_json; a daemon-placed row converges on its next plan poll.
-	if configChanged && placement == placementServer {
-		var gcfg string
-		_ = x.a.db.QueryRowContext(ctx,
-			`SELECT COALESCE(config_json,'') FROM actor_decls WHERE id = ? AND deleted_at IS NULL`,
-			declID).Scan(&gcfg)
-		if serr := x.a.spawnActorInstance(req.ChannelID, home, instanceID, engine, string(p.Config), gcfg); serr != nil {
+	if created {
+		var cfg any
+		if hasConfig {
+			cfg = string(p.Config)
+		}
+		if _, err := x.a.db.ExecContext(ctx,
+			`INSERT INTO channel_actors (channel_id, instance_id, principal, class, placement, desired_host, config_json) VALUES (?,?,?,?,?,?,?)`,
+			string(req.ChannelID), string(mintedID), declID, engine, placement, desiredHost, cfg); err != nil {
+			return nil, err
+		}
+		instanceID = string(mintedID)
+		_ = home.Restart(ctx, mintedID) // desired landed after Admit's poke; issue a post-write poke.
+	}
+	if string(mintedID) != instanceID {
+		if _, err := x.a.db.ExecContext(ctx, `UPDATE channel_actors SET instance_id=? WHERE channel_id=? AND instance_id=?`, string(mintedID), string(req.ChannelID), instanceID); err != nil {
+			return nil, err
+		}
+		_, _ = x.a.db.ExecContext(ctx, `UPDATE channels SET default_agent=? WHERE id=? AND default_agent=?`, string(mintedID), string(req.ChannelID), instanceID)
+		instanceID = string(mintedID)
+		_ = home.Restart(ctx, mintedID)
+	}
+	if p.MakeDefault {
+		_, _ = x.a.db.ExecContext(ctx,
+			`UPDATE channels SET default_agent = ? WHERE id = ?`, instanceID, string(req.ChannelID))
+	}
+	// Config takes effect through the same placement-neutral Restart face for
+	// both home cells and daemon-hosted ports. A new row has no predecessor.
+	if configChanged {
+		if serr := home.Restart(ctx, mintedID); serr != nil {
 			return nil, &platform.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
 		}
 	}
@@ -258,6 +262,11 @@ func (x *operateExecutor) Remove(ctx context.Context, req platform.OperateReques
 	if home == nil {
 		return nil, channelUnavailable()
 	}
+	if principal, ok, err := home.PrincipalOf(ctx, actor.ActorID(inst)); err != nil {
+		return nil, err
+	} else if ok && principal == "boost" {
+		return nil, &platform.OperateError{Code: "protected_actor", Detail: "boost cannot be removed"}
+	}
 	if _, err := x.a.db.ExecContext(ctx,
 		`DELETE FROM channel_actors WHERE channel_id = ? AND instance_id = ?`,
 		string(req.ChannelID), inst); err != nil {
@@ -272,9 +281,8 @@ func (x *operateExecutor) Remove(ctx context.Context, req platform.OperateReques
 	return map[string]any{"removed": inst}, nil
 }
 
-// Restart is原地换脑 (A-P14 = Spawn-replace): verify the intent row, rebuild from
-// latest config, Spawn-replace. It does NOT touch intent (红线 3). Server-placed
-// only (a daemon-placed instance restarts on its own host via the plan).
+// Restart kills actual state while leaving desired intact; reconcile rebuilds
+// it on whichever placement owns the instance.
 func (x *operateExecutor) Restart(ctx context.Context, req platform.OperateRequest) (any, error) {
 	var p instancePayload
 	if err := json.Unmarshal(req.Payload, &p); err != nil {
@@ -288,23 +296,17 @@ func (x *operateExecutor) Restart(ctx context.Context, req platform.OperateReque
 	if home == nil {
 		return nil, channelUnavailable()
 	}
-	var class, cfg string
+	var present int
 	err := x.a.db.QueryRowContext(ctx,
-		`SELECT class, COALESCE(config_json,'') FROM channel_actors WHERE channel_id = ? AND instance_id = ? AND placement = ?`,
-		string(req.ChannelID), inst, placementServer).Scan(&class, &cfg)
+		`SELECT 1 FROM channel_actors WHERE channel_id = ? AND instance_id = ?`,
+		string(req.ChannelID), inst).Scan(&present)
 	if err == sql.ErrNoRows {
 		return nil, &platform.OperateError{Code: "not_in_composition", Detail: inst}
 	}
 	if err != nil {
 		return nil, err
 	}
-	var gcfg string
-	if strings.HasPrefix(inst, "agent:") {
-		_ = x.a.db.QueryRowContext(ctx,
-			`SELECT COALESCE(config_json,'') FROM actor_decls WHERE id = ? AND deleted_at IS NULL`,
-			strings.TrimPrefix(inst, "agent:")).Scan(&gcfg)
-	}
-	if serr := x.a.spawnActorInstance(req.ChannelID, home, inst, class, cfg, gcfg); serr != nil {
+	if serr := home.Restart(ctx, actor.ActorID(inst)); serr != nil {
 		return nil, &platform.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
 	}
 	return map[string]any{"restarted": inst}, nil

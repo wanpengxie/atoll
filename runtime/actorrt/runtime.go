@@ -433,65 +433,10 @@ type DeliverResult struct {
 	Per map[actor.ActorID]Outcome
 }
 
-// Spawn creates and starts an IN-PROCESS cell for id, returning its Incarnation
-// handle. If an embodiment already exists for id it is stopped and replaced (one
-// actor, one owner).
-//
-// Two-phase construction (resolves the cap/cell chicken-and-egg):
-//
-//  1. allocShell — allocate the cell shell (impl=nil, live=false). Its pointer
-//     IS inc.p (stable for the incarnation's life).
-//  2. build(inc) — run the platform build closure OUTSIDE the lock to make the
-//     impl. The closure may weld a livePen{pen, inc, host}; because the shell is
-//     not yet in the addressing map, IsLive(inc)==false, so any write attempted
-//     DURING construction is structurally rejected (the "factory must not write"
-//     rule is enforced, not a soft convention).
-//  3. go-live — atomically register the shell and flip its live atomic true.
-//     Concurrent Spawn of the same id is LAST-GO-LIVE-WINS: the prior map entry
-//     is stopped (pointer-identity discipline), and the loser's shell — though it
-//     briefly set live=true — is stopped and marked dead, so the slack is bounded
-//     by the already-accepted in-flight window.
-func (r *Runtime) Spawn(id actor.ActorID, kind actor.Kind, build func(Incarnation) Actor) Incarnation {
-	c := allocShell(r.parent, id, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.reapZombie, r.clock(), r.logger)
-	inc := Incarnation{id: id, p: c}
-	c.impl = build(inc) // OUTSIDE the lock; IsLive(inc)==false during build.
-
-	r.mu.Lock()
-	old := r.embodiments[id]
-	var launch func()
-	if old != nil {
-		// REPLACEMENT-LIVE-FLIP INVARIANT: the predecessor's live→dead flip MUST
-		// happen in the SAME critical section that stops pointing the map at it.
-		// markDead is an idempotent atomic write (it never re-enters r.mu / removeIf),
-		// so it is deadlock-safe here. If it were left to the escort (below, outside
-		// the lock), a window would open where the map no longer points to `old` yet
-		// old.isLive() still reads true — and a stale livePen captured by a goroutine
-		// that outlived `old` would PASS the WHEN gate (IsLive reads old's own atomic,
-		// not the map) and author truth on a replaced incarnation's behalf.
-		old.markDead()
-		// Enrol `old` as a zombie IN THE SAME critical section as the judgement
-		// (P0-1). The escort — launched below, outside the lock — drives the quiet
-		// teardown and the (bounded) join, so the幽灵-live window closes and the new
-		// incarnation starts WITHOUT waiting for the old goroutine to exit.
-		launch = r.retireLocked(old, id, flavorQuiet)
-	}
-	r.embodiments[id] = c
-	c.live.Store(true) // go-live: register + liveness atomic flip are one critical section.
-	r.mu.Unlock()
-	// The escort's teardown signal runs OUTSIDE the lock (red line ⑥). start()
-	// begins the new incarnation immediately — no join on the old (Q8/P0-2:
-	// replace-immediately, do not wait for the predecessor to exit).
-	if launch != nil {
-		launch()
-	}
-	c.start()
-	return inc
-}
-
 // LiveIDs returns a snapshot of every ActorID currently occupying an embodiment
 // slot (reconcile's bulk enumeration for the desired−actual diff) — the
 // KEY SET of r.embodiments, taken under r.mu. It is deliberately NOT filtered by
-// isLive(): Spawn's map-insert and its live-atomic flip are the SAME critical
+// isLive(): birth's map-insert and its live-atomic flip are the SAME critical
 // section (see the go-live step above), so embodiment-map membership already IS
 // "currently live" — re-filtering would be redundant work over an invariant
 // that already holds. Order is unspecified.
@@ -516,17 +461,22 @@ func (r *Runtime) LiveIDs() []actor.ActorID {
 // inserted into embodiments, never started (ok=false). This is a real CAS, not
 // best-effort, because rebuild cost for agent-class actors (re-establishing
 // LLM context) is a real cost, not a theoretical nicety.
-func (r *Runtime) SpawnIfAbsent(id actor.ActorID, kind actor.Kind, build func(Incarnation) Actor) (Incarnation, bool) {
+func (r *Runtime) SpawnIfAbsent(id actor.ActorID, kind actor.Kind, build func(Incarnation) Actor) (Incarnation, bool, error) {
 	r.mu.RLock()
 	_, occupied := r.embodiments[id]
 	r.mu.RUnlock()
 	if occupied { // fast-path: skip the build entirely if already obviously taken.
-		return Incarnation{}, false
+		return Incarnation{}, false, nil
 	}
 
 	c := allocShell(r.parent, id, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.reapZombie, r.clock(), r.logger)
 	inc := Incarnation{id: id, p: c}
-	c.impl = build(inc) // OUTSIDE the lock; IsLive(inc)==false during build.
+	var err error
+	c.impl, err = buildActor(build, inc) // OUTSIDE the lock; IsLive(inc)==false during build.
+	if err != nil {
+		c.cancel()
+		return Incarnation{}, false, err
+	}
 
 	r.mu.Lock()
 	if _, occupied := r.embodiments[id]; occupied { // same critical section re-check
@@ -536,14 +486,14 @@ func (r *Runtime) SpawnIfAbsent(id actor.ActorID, kind actor.Kind, build func(In
 		// r.parent, so an uncancelled discard pins a child-context entry in
 		// the parent's tree for the whole channel lifetime — and the eager
 		// reconcile ring races admission Spawn here every tick.
-		c.cancel()
-		return Incarnation{}, false
+		abortBuild(c)
+		return Incarnation{}, false, nil
 	}
 	r.embodiments[id] = c
 	c.live.Store(true) // go-live: register + liveness atomic flip are one critical section.
 	r.mu.Unlock()
 	c.start()
-	return inc, true
+	return inc, true, nil
 }
 
 // IsLive reports whether inc is still the live incarnation, by POINTER (ABA-safe)

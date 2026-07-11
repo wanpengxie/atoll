@@ -23,7 +23,6 @@ func TestComputePlan_DaemonAssignmentOnly(t *testing.T) {
 	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Reviewer", "class": "claude"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
-	instID := "agent:" + agentID
 
 	// create a daemon + bind it to the channel (so it may pull).
 	w = env.do(t, "POST", "/api/daemons", map[string]any{"name": "mybox"}, cookies)
@@ -39,6 +38,7 @@ func TestComputePlan_DaemonAssignmentOnly(t *testing.T) {
 	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
 		map[string]any{"decl_id": agentID, "placement": "daemon", "desired_host": daemonID, "make_default": true}, cookies)
 	assertStatus(t, w, http.StatusCreated)
+	instID := respJSON(t, w)["instance_id"].(string)
 
 	// pull the plan (auth by ?key=, no cookie).
 	w = env.do(t, "GET", fmt.Sprintf("/compute/plan?key=%s&channel=%s", apiKey, chID), nil, nil)
@@ -93,7 +93,7 @@ func TestComputePlan_ServerOnly_EmptyPlan(t *testing.T) {
 
 // TestComputePlan_DesiredHostMutex (G4): two daemons bound to one channel each
 // pull ONLY the daemon-placed rows assigned to their own id (desired_host); a
-// pool row (desired_host='') is delivered to NEITHER.
+// pool row (desired_host=”) is delivered to NEITHER.
 func TestComputePlan_DesiredHostMutex(t *testing.T) {
 	env := setupTestApp(t)
 	_, cookies := register(t, env, "g4@example.com", "secret123", "Owner")
@@ -116,10 +116,11 @@ func TestComputePlan_DesiredHostMutex(t *testing.T) {
 		assertStatus(t, w, http.StatusOK)
 		return d["id"].(string), d["api_key"].(string)
 	}
-	introduce := func(agentID, desiredHost string) {
+	introduce := func(agentID, desiredHost string) string {
 		w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
 			map[string]any{"decl_id": agentID, "placement": "daemon", "desired_host": desiredHost}, cookies)
 		assertStatus(t, w, http.StatusCreated)
+		return respJSON(t, w)["instance_id"].(string)
 	}
 	planInstances := func(key string) map[string]bool {
 		w := env.do(t, "GET", fmt.Sprintf("/compute/plan?key=%s&channel=%s", key, chID), nil, nil)
@@ -138,16 +139,16 @@ func TestComputePlan_DesiredHostMutex(t *testing.T) {
 	a1 := mkAgent("A1")
 	a2 := mkAgent("A2")
 	aPool := mkAgent("APool")
-	introduce(a1, d1ID)
-	introduce(a2, d2ID)
-	introduce(aPool, "") // unassigned pool row
+	i1 := introduce(a1, d1ID)
+	i2 := introduce(a2, d2ID)
+	iPool := introduce(aPool, "") // unassigned pool row
 
 	p1 := planInstances(d1Key)
-	if !p1["agent:"+a1] || p1["agent:"+a2] || p1["agent:"+aPool] || len(p1) != 1 {
+	if !p1[i1] || p1[i2] || p1[iPool] || len(p1) != 1 {
 		t.Fatalf("daemon1 plan should be exactly {agent:%s}, got %v", a1, p1)
 	}
 	p2 := planInstances(d2Key)
-	if !p2["agent:"+a2] || p2["agent:"+a1] || p2["agent:"+aPool] || len(p2) != 1 {
+	if !p2[i2] || p2[i1] || p2[iPool] || len(p2) != 1 {
 		t.Fatalf("daemon2 plan should be exactly {agent:%s}, got %v", a2, p2)
 	}
 }

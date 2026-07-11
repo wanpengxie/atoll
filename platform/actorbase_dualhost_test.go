@@ -21,7 +21,7 @@ import (
 // actorbase-spec-v1.md §5 DoD⑦: "同一份 Def cell/port 两宿主跑(已知不对称两个:
 // fork=ErrUnsupported、daemon caller cancel 信号半降级)". This file is the
 // dual-host proof: echo.Def() — the SAME Def platform/echo_actorbase_test.go
-// already runs over the cell host (Home.Spawn) — is spawned a SECOND time
+// already runs over the cell host (Home.SpawnIfAbsent) — is spawned a SECOND time
 // here over a real wire, daemon (port) host, using the identical assembly
 // seam (actorbase.New) production code takes (platform.compute.buildOne
 // wires this exact same NewLiveArms(rb, inc, host)+Hooks{} pair; this test
@@ -62,7 +62,7 @@ func spawnActorbaseOverWire(t *testing.T, ch *platform.Home, id actor.ActorID, d
 	wsURL := "ws" + srv.URL[4:]
 
 	d, err := link.Dial(context.Background(), wsURL, "daemon-dualhost",
-		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -78,7 +78,7 @@ func spawnActorbaseOverWire(t *testing.T, ch *platform.Home, id actor.ActorID, d
 		t.Fatalf("OpenStream: %v", err)
 	}
 	rb := link.NewRebindableArms(arms)
-	host.rt.Spawn(id, actor.KindTool, func(inc actorrt.Incarnation) actorrt.Actor {
+	_, _, _ = host.rt.SpawnIfAbsent(id, actor.KindTool, func(inc actorrt.Incarnation) actorrt.Actor {
 		// The SAME two lines platform/compute.go's buildOne runs in production
 		// (link.NewLiveArms + actorbase.Hooks{}) — daemon Canceller stays nil.
 		return actorbase.New(link.NewLiveArms(rb, inc, host.rt), actorbase.Hooks{}, def)
@@ -96,8 +96,8 @@ func TestActorbaseDef_RunsOverBothCellAndPortHosts(t *testing.T) {
 
 	callerID := actor.ActorID("user:dualhost-caller")
 	echoID := actor.ActorID("tool:dualhost-echo")
-	registerActor(t, ch, echoID, actor.KindTool)
-	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
+	registerActor(t, ch, &echoID, actor.KindTool)
+	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
 
 	spawnActorbaseOverWire(t, ch, echoID, echo.Def())
 
@@ -157,8 +157,8 @@ func TestActorbaseDef_DaemonHostForkReturnsErrUnsupported(t *testing.T) {
 
 	callerID := actor.ActorID("user:dualhost-fork-caller")
 	probeID := actor.ActorID("tool:dualhost-fork-probe")
-	registerActor(t, ch, probeID, actor.KindTool)
-	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
+	registerActor(t, ch, &probeID, actor.KindTool)
+	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
 
 	spawnActorbaseOverWire(t, ch, probeID, forkProbeDef())
 

@@ -2,7 +2,9 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
@@ -12,6 +14,20 @@ import (
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+const reviveBuildBackoffBase = time.Second
+const reviveBuildBackoffMax = 5 * time.Minute
+
+type reviveBackoffEntry struct {
+	failures uint
+	next     time.Time
+}
+
+func (h *Home) clearReviveBackoff(id actor.ActorID) {
+	h.reviveLogMu.Lock()
+	delete(h.reviveBackoff, id)
+	h.reviveLogMu.Unlock()
+}
 
 // fireSink is the platform realisation of schedule.FireSink: the time engine's
 // one non-ambient collaborator. It mints a fresh Pen per fire (Mint is cheap,
@@ -149,6 +165,13 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		h.logReviveAttached(id, rec.Host)
 		return fmt.Errorf("platform: revive %s: attached to host %q", id, rec.Host) // transient
 	}
+	now := time.UnixMilli(h.nowMs())
+	h.reviveLogMu.Lock()
+	entry := h.reviveBackoff[id]
+	h.reviveLogMu.Unlock()
+	if !entry.next.IsZero() && now.Before(entry.next) {
+		return fmt.Errorf("platform: revive %s: build backoff until %s", id, entry.next)
+	}
 	// Home-placed, absent: resolve through factoryFor (human → the platform's own
 	// built-in cell factory, needing no builder; others → the组合域 builder, now
 	// load-bearing). A human revive therefore never depends on a wired builder (a
@@ -172,10 +195,28 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	// SpawnIfAbsent is the idempotent CAS: an already-live author is a no-op
 	// (ok=false, shell discarded), so EnsureLive satisfies its idempotency contract
 	// without a separate liveness pre-check.
-	inc, built := h.channel.Cells().SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
+	inc, built, buildErr := h.channel.Cells().SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
 		return build(h.buildCaps(id, kind, inc), h.hooks(), factory)
 	})
+	if buildErr != nil {
+		h.logger.Error("platform.revive.build_failed", "channel", string(h.channelID), "actor", string(id), "error", buildErr)
+		var failure *actorrt.BuildFailure
+		if errors.As(buildErr, &failure) {
+			h.reviveLogMu.Lock()
+			entry = h.reviveBackoff[id]
+			entry.failures++
+			delay := reviveBuildBackoffBase << min(entry.failures-1, 8)
+			if delay > reviveBuildBackoffMax {
+				delay = reviveBuildBackoffMax
+			}
+			entry.next = now.Add(delay)
+			h.reviveBackoff[id] = entry
+			h.reviveLogMu.Unlock()
+		}
+		return buildErr
+	}
 	if !built {
+		h.clearReviveBackoff(id)
 		return nil
 	}
 	// Post-build recheck (S-P20 拍定 A′, Remove's straddle-window closure other
@@ -202,6 +243,7 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		h.logReviveAttached(id, rec2.Host)
 		return fmt.Errorf("platform: revive %s: attached to host %q after build", id, rec2.Host) // transient
 	}
+	h.clearReviveBackoff(id)
 	return nil
 }
 

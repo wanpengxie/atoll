@@ -38,10 +38,11 @@ func openWhiteboxHome(t *testing.T) *Home {
 func TestAdmit_ReAdmitPreservesHost(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	id := actor.ActorID("agent:rev")
+	principal := "rev"
 
 	// Genesis Admit → active row, Host="".
-	if err := h.Admit(ctx, id, actor.KindAgent); err != nil {
+	id, err := h.Admit(ctx, actor.KindAgent, principal)
+	if err != nil {
 		t.Fatalf("Admit genesis: %v", err)
 	}
 	// Stamp a daemon Host (what an attach does): active row + host-diff → UPDATE host.
@@ -55,8 +56,12 @@ func TestAdmit_ReAdmitPreservesHost(t *testing.T) {
 	}
 
 	// Idempotent re-Admit — must be a pure no-op, Host untouched.
-	if err := h.Admit(ctx, id, actor.KindAgent); err != nil {
+	reAdmitted, err := h.Admit(ctx, actor.KindAgent, principal)
+	if err != nil {
 		t.Fatalf("re-Admit: %v", err)
+	}
+	if reAdmitted != id {
+		t.Fatalf("idempotent re-Admit id=%q want %q", reAdmitted, id)
 	}
 	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
 	if err != nil || !ok {

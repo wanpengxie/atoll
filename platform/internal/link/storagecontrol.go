@@ -105,21 +105,9 @@ type ReclaimAckReply struct {
 // forever). Additive field — omitempty keeps an old daemon build's empty
 // slice indistinguishable from "explicitly nothing active", which is exactly
 // what an idle daemon should send.
-//
-// LandedCoords is 期11 review §2.5 #A's addition: every coord this daemon
-// currently has in its live/ directory (cmd/daemon/internal/storagehost.Host.
-// LandedCoords — a plain directory listing, sourced from disk so it survives a
-// crash/restart with no daemon-side truth). The home's MarkReservationsLanded
-// flips any matching pending reservation to phase='landed' BEFORE the
-// age-sweep, so a landed-but-uncommitted create's durable bytes are never
-// destroyed by the sweep (the P0 #A closes). Reported afresh on every pull,
-// disk-derived, never cached — so the very first pull after a >timeout crash
-// gap already protects its landed reservations, before the sweep can fire.
-// Additive omitempty field, exactly like ActiveCoords.
 type ReconcilePull struct {
 	RequestID    string   `json:"request_id"`
 	ActiveCoords []string `json:"active_coords,omitempty"`
-	LandedCoords []string `json:"landed_coords,omitempty"`
 }
 
 // ReclaimRequest is home→daemon: "collect coord's already-landed local bytes"

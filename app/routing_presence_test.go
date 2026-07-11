@@ -6,7 +6,6 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -33,7 +32,7 @@ func TestRouting_DeadDefaultAgentIs503(t *testing.T) {
 
 	// Kill the boost floor's cell — the channel's default_agent still POINTS at it
 	// (channels table unchanged), it is simply no longer embodied.
-	if err := env.app.KillCellForTest(channel.ID(chID), actor.ActorID("agent:boost")); err != nil {
+	if err := env.app.KillCellForTest(channel.ID(chID), s.boostID); err != nil {
 		t.Fatalf("kill cell: %v", err)
 	}
 

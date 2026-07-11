@@ -2,6 +2,7 @@ package platform_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -9,6 +10,22 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
+
+func TestHumanPrincipalAfterCloseReturnsErrClosed(t *testing.T) {
+	h, err := platform.Open(platform.HomeConfig{
+		ChannelID: testChannelID,
+		DBPath:    filepath.Join(t.TempDir(), "closed-home.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := h.HumanPrincipal(context.Background(), "alice"); !errors.Is(err, platform.ErrClosed) {
+		t.Fatalf("HumanPrincipal after Close error=%v want ErrClosed", err)
+	}
+}
 
 const testChannelID = channel.ID("test-home")
 
@@ -60,8 +77,8 @@ func TestView_ListActors_IncludesSystem(t *testing.T) {
 func TestAdmit_CellLessMember(t *testing.T) {
 	h := openTestHome(t)
 	ctx := context.Background()
-	id := actor.ActorID("user:alice")
-	if err := h.Admit(ctx, id, actor.KindHuman); err != nil {
+	id, err := platform.AdmitForTest(h, "alice", actor.KindHuman)
+	if err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
 	actors, err := h.View().ListActors(ctx)
@@ -83,16 +100,12 @@ func TestAdmit_CellLessMember(t *testing.T) {
 	}
 }
 
-// TestSpawn_NonMemberRejected is the restart-verify DoD (v1.8, S2): Spawn-replace
-// VERIFIES membership, it never mints it. Spawning an id with no active membership
-// row (a restart of an orphan) must error and leave the roster untouched — the
-// membrane law推论 that registration only ever happens through Admit.
-func TestSpawn_NonMemberRejected(t *testing.T) {
+func TestRestart_NonMemberRejected(t *testing.T) {
 	h := openTestHome(t)
 	ctx := context.Background()
 	id := actor.ActorID("agent:orphan")
-	if err := h.Spawn(ctx, id, actor.KindAgent, platform.ActorFactory{}); err == nil {
-		t.Fatal("Spawn of a non-member must error (膜律: Spawn-replace verifies, never mints)")
+	if err := h.Restart(ctx, id); err == nil {
+		t.Fatal("Restart of a non-member must error")
 	}
 	actors, err := h.View().ListActors(ctx)
 	if err != nil {

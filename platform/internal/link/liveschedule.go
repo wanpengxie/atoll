@@ -2,7 +2,6 @@ package link
 
 import (
 	"context"
-	"errors"
 
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -13,7 +12,7 @@ import (
 // (despawned / dead / replaced) refuses to schedule or cancel. It is the
 // time-axis twin of ErrWriterNotLive — a capability captured by a goroutine
 // that outlived its incarnation cannot arm timers on its behalf.
-var ErrScheduleNotLive = errors.New("link: schedule capability no longer the live incarnation")
+var ErrScheduleNotLive error = codedSentinel{code: "schedule_not_live", message: "link: schedule capability no longer the live incarnation"}
 
 // liveSchedule is the liveCap (WHEN-validity membrane) over a raw
 // schedule.ScheduleHandle: a thin wrapper that, per call, first checks the host

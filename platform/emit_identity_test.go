@@ -35,10 +35,10 @@ import (
 func TestEmitIdentity_HostWeldsAuthorFromBoundID(t *testing.T) {
 	ch := newClosureHome(t)
 
-	const toolID = actor.ActorID("tool:x")
-	const victimID = actor.ActorID("user:alice")
-	registerActor(t, ch, toolID, actor.KindTool)
-	registerActor(t, ch, victimID, actor.KindHuman)
+	toolID := actor.ActorID("tool:x")
+	victimID := actor.ActorID("user:alice")
+	registerActor(t, ch, &toolID, actor.KindTool)
+	registerActor(t, ch, &victimID, actor.KindHuman)
 
 	// Real home↔daemon link over httptest: the daemon attaches tool:x and gets a
 	// real port embodiment bound to that authenticated id at the handshake.
@@ -49,7 +49,7 @@ func TestEmitIdentity_HostWeldsAuthorFromBoundID(t *testing.T) {
 	wsURL := "ws" + srv.URL[4:]
 
 	d, err := link.Dial(context.Background(), wsURL, "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

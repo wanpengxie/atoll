@@ -104,7 +104,7 @@ type accessListReqFields struct {
 
 // accessResponse is the home→daemon KindAccess verdict — the sum-typed twin
 // of accessRequest. A host-side Go error (structural malformed / not-live
-// fence) rides the ipc RelayAckPayload.Err instead, so a remote cell observes
+// fence) rides the coded ack error fields instead, so a remote cell observes
 // the same (Outcome, error) / (StatResult, error) / (ListPage, error) split a
 // local cell does. Value/Found/RejectReason back BOTH the Invocation and
 // Create arms (both resolve to an accessdoor.Outcome); Stat/List each get
@@ -162,7 +162,7 @@ type scheduleRequest struct {
 }
 
 // scheduleResponse is the home→daemon KindSchedule verdict (the minted TimerID on
-// the schedule path; empty on cancel). Errors ride RelayAckPayload.Err.
+// the schedule path; empty on cancel). Errors ride coded ack fields.
 type scheduleResponse struct {
 	ID schedule.TimerID `json:"id,omitempty"`
 }
@@ -195,7 +195,7 @@ type relayClient struct {
 }
 
 // relayAck carries one resolved ack back to the blocked round-trip: the opaque
-// response bytes and the host-side error (reconstructed from RelayAckPayload.Err).
+// response bytes and the host-side error reconstructed from coded ack fields.
 // transport marks the arm-closed sentinel — a teardown with the request in flight,
 // NOT a host verdict — so roundTrip surfaces it as transportErr (unconfirmed →
 // outcome_unknown on access) rather than as a definite ackErr.
@@ -298,9 +298,7 @@ func (c *relayClient) deliverAck(ack ipc.RelayAckPayload) {
 	c.mu.Unlock()
 
 	var err error
-	if ack.Err != "" {
-		err = errors.New(ack.Err)
-	}
+	err = decodeAckError(ack.ErrorCode, ack.ErrorMessage)
 	waiter <- relayAck{payload: ack.Payload, err: err}
 }
 

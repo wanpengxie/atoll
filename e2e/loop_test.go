@@ -591,21 +591,22 @@ func TestLoop(t *testing.T) {
 	echoDecl := api.must("POST", "/api/actor-decls",
 		map[string]any{"name": "echo-tool", "class": "echo"}, http.StatusCreated)
 	echoDeclID, _ := echoDecl["id"].(string)
-	asstDecl := api.must("POST", "/api/actor-decls",
-		map[string]any{"name": "assistant", "class": "script",
-			"config": map[string]any{"tool_id": "agent:" + echoDeclID}},
-		http.StatusCreated)
-	asstDeclID, _ := asstDecl["id"].(string)
-	assistantID := "agent:" + asstDeclID
-
-	// Introduce both into the channel (5xx = humancell mint window, retry).
-	api.mustRetry5xx("POST", "/api/channels/"+chID+"/actors",
+	// Introduce the tool first so the assistant config receives its substrate-minted
+	// instance id rather than reconstructing one from the declaration principal.
+	echoIntro := api.mustRetry5xx("POST", "/api/channels/"+chID+"/actors",
 		map[string]any{"decl_id": echoDeclID, "placement": "server"},
 		60*time.Second, http.StatusCreated, http.StatusOK, http.StatusAccepted)
-	api.mustRetry5xx("POST", "/api/channels/"+chID+"/actors",
+	echoID, _ := echoIntro["instance_id"].(string)
+	asstDecl := api.must("POST", "/api/actor-decls",
+		map[string]any{"name": "assistant", "class": "script",
+			"config": map[string]any{"tool_id": echoID}},
+		http.StatusCreated)
+	asstDeclID, _ := asstDecl["id"].(string)
+	asstIntro := api.mustRetry5xx("POST", "/api/channels/"+chID+"/actors",
 		map[string]any{"decl_id": asstDeclID, "placement": "daemon",
 			"desired_host": daemonID, "make_default": true},
 		60*time.Second, http.StatusCreated, http.StatusOK, http.StatusAccepted)
+	assistantID, _ := asstIntro["instance_id"].(string)
 
 	startDaemon := func(gen int) *proc {
 		daemonLog = filepath.Join(dirs["logs"], fmt.Sprintf("daemon-%d.log", gen))
@@ -627,7 +628,21 @@ func TestLoop(t *testing.T) {
 	// L1 assertion ②: 户籍 is EXACTLY five members — {system, creator,
 	// agent:boost, echo, assistant} (membrane law: nothing extra slipped in as a
 	// side effect, nothing missing).
-	wantMembers := []string{"system", "user:" + userID, "agent:boost", "agent:" + echoDeclID, assistantID}
+	boostID, _ := ch["default_agent"].(string)
+	var humanID string
+	pollUntil(t, "creator principal is represented by one active human", 30*time.Second, func() bool {
+		_, m := api.do("GET", "/api/channels/"+chID+"/actors", nil)
+		rows, _ := m["actors"].([]any)
+		for _, raw := range rows {
+			row, _ := raw.(map[string]any)
+			if row["kind"] == "human" && row["principal"] == userID {
+				humanID, _ = row["id"].(string)
+				return humanID != ""
+			}
+		}
+		return false
+	})
+	wantMembers := []string{"system", humanID, boostID, echoID, assistantID}
 	sort.Strings(wantMembers)
 	pollUntil(t, "membership is exactly the five expected", 60*time.Second, func() bool {
 		_, m := api.do("GET", "/api/channels/"+chID+"/actors", nil)

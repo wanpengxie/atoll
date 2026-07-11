@@ -44,14 +44,6 @@ type ActiveStaging struct{ Coord string }
 // next tick if this one's connection died).
 type ReclaimAckFunc func(ctx context.Context, tombstoneID string) (found bool, err error)
 
-// CommittedResendFunc is resumeLandedReservations' network callback — the
-// SAME RunCompute-bridge-supplied-closure shape as ReclaimAckFunc, bound to
-// Dialer.SendCommitted (§4.7's Committed RPC, already built/tested — this is
-// its first daemon-INITIATED-on-recovery caller, found+built during 期11 S6
-// walk verification; see resumeLandedReservations' own doc for why it did
-// not already exist).
-type CommittedResendFunc func(ctx context.Context, reservationID string) (found, lost bool, err error)
-
 // Scrubber is §4.1's fourth component: ONE reconcile pass — reclaim pending
 // tombstones (Reclaimer + ack), sweep orphan staging entries a crash left
 // behind, log (never auto-repair) a landed resource whose coord is missing
@@ -80,60 +72,36 @@ func (s *Scrubber) logger() *slog.Logger {
 // before reading staging/ — a snapshot taken at Pass entry would be stale by
 // the time the sweep runs and could delete a write that began in between. nil
 // is allowed (treated as "no active writes").
-func (s *Scrubber) Pass(ctx context.Context, cr *channelRoot, resources []ResourceLanded, pendingReservations []ReservationPending, pendingTombstones []TombstoneToReclaim, activeWrites func() []ActiveStaging, ack ReclaimAckFunc, resend CommittedResendFunc) {
+func (s *Scrubber) Pass(ctx context.Context, cr *channelRoot, resources []ResourceLanded, pendingReservations []ReservationPending, pendingTombstones []TombstoneToReclaim, activeWrites func() []ActiveStaging, ack ReclaimAckFunc) {
 	s.reclaimPendingTombstones(ctx, cr, pendingTombstones, ack)
-	s.resumeLandedReservations(ctx, cr, pendingReservations, resend)
 	s.sweepOrphanStaging(cr, pendingReservations, activeWrites)
 	s.logMissingLiveEntries(cr, resources)
+	s.logOrphanLiveCount(cr, resources, pendingReservations, pendingTombstones)
 }
 
-// resumeLandedReservations resends Committed(reservationID) for any pending
-// reservation whose bytes are ALREADY confirmed present at their live coord
-// — §1.7/§6.3's "另一路": daemon rename后Committed未达即daemon crash→重起
-//对账(ReconcilePull)→server见reservation挂起→daemon续发Committed. Found+
-// built during 期11 S6's platform-level crash-recovery walk verification:
-// §4.1's Scrubber doc named "startup scrub + periodic reconcile" as the
-// daemon's ENTIRE no-truth recovery mechanism, but S4's original Pass only
-// ever swept orphan STAGING entries and reclaimed tombstones — nothing
-// resent Committed for a reservation whose write had already fully landed
-// locally (fsync+rename done) before the daemon died. Without this, such a
-// reservation would sit in resource_reservations forever (server-side, past
-// §1.7's own timeout sweep — a genuine "abandoned, but the bytes are
-// actually fine" case the timeout sweep is not meant to reclaim as an
-// orphan). A pending reservation whose live coord does NOT yet exist is
-// deliberately left untouched — sweepOrphanStaging's own conservative
-// judgment call ("still legitimately in-flight or genuinely orphaned")
-// covers that case; this only ever resumes the ALREADY-COMPLETE case.
-func (s *Scrubber) resumeLandedReservations(ctx context.Context, cr *channelRoot, pending []ReservationPending, resend CommittedResendFunc) {
-	if resend == nil {
+func (s *Scrubber) logOrphanLiveCount(cr *channelRoot, resources []ResourceLanded, reservations []ReservationPending, tombstones []TombstoneToReclaim) {
+	accounted := make(map[string]bool, len(resources)+len(reservations)+len(tombstones))
+	for _, r := range resources {
+		accounted[r.Coord] = true
+	}
+	for _, r := range reservations {
+		accounted[r.Coord] = true
+	}
+	for _, r := range tombstones {
+		accounted[r.Coord] = true
+	}
+	entries, err := fs.ReadDir(cr.root.FS(), liveDir)
+	if err != nil {
+		s.logger().Warn("storagehost.scrubber.orphan_live_count_failed", "err", err)
 		return
 	}
-	for _, p := range pending {
-		lp, err := livePath(p.Coord)
-		if err != nil {
-			continue // a malformed coord would already have failed elsewhere; defensive skip
-		}
-		if _, err := cr.root.Stat(lp); err != nil {
-			continue // not yet landed locally — nothing to resend for
-		}
-		_, lost, err := resend(ctx, p.ReservationID)
-		if err != nil {
-			s.logger().Warn("storagehost.scrubber.resend_committed_failed", "reservation", p.ReservationID, "coord", p.Coord, "err", err)
-			continue
-		}
-		if lost {
-			// 期11 S2 (transfer-lifecycle-spec.md §3's #2): this reservation
-			// lost the create race — the SAME "非-land 终态回收" rule the
-			// synchronous Committed RPC path applies (see
-			// storagehost.Host.ReclaimCoord's doc). Reclaim now, never leave
-			// the loser's already-landed bytes as a permanent orphan just
-			// because the resend happened on a crash-recovery pass rather
-			// than the original in-flight Commit.
-			if rerr := s.Reclaimer.Reclaim(cr, p.Coord, provenanceAxisAllocated); rerr != nil {
-				s.logger().Warn("storagehost.scrubber.reclaim_lost_reservation_failed", "reservation", p.ReservationID, "coord", p.Coord, "err", rerr)
-			}
+	count := 0
+	for _, e := range entries {
+		if !accounted[e.Name()] {
+			count++
 		}
 	}
+	s.logger().Info("storagehost.scrubber.orphan_live_count", "count", count)
 }
 
 // reclaimPendingTombstones collects each tombstone's bytes (Reclaimer) then

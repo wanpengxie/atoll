@@ -42,36 +42,33 @@ func TestRequestLookup_FindByID(t *testing.T) {
 	}
 }
 
-// --- Insert: UNIQUE conflict (actor_id PRIMARY KEY) → exec error arm ----------
-
-// A second Insert of the same actor_id violates the actor_registry PRIMARY KEY
-// and must surface as an error from the INSERT exec (line: actor insert %q).
-func TestInsert_DuplicateIDConflicts(t *testing.T) {
+// Admit is an ensure operation: repeated calls converge on one active id.
+func TestAdmit_RepeatedPrincipalConverges(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
-	rec := storespec.Record{ID: "dup", Kind: actor.KindAgent, CreatedAt: 1}
-	if err := cs.Membership.Insert(ctx, rec); err != nil {
-		t.Fatalf("first Insert: %v", err)
+	first, err := cs.Membership.Admit(ctx, actor.KindAgent, "dup", 1)
+	if err != nil {
+		t.Fatalf("first Admit: %v", err)
 	}
-	if err := cs.Membership.Insert(ctx, rec); err == nil {
-		t.Error("second Insert of same actor_id must conflict on PRIMARY KEY")
+	second, err := cs.Membership.Admit(ctx, actor.KindAgent, "dup", 2)
+	if err != nil || second != first {
+		t.Fatalf("second Admit = %q, %v; want %q", second, err, first)
 	}
 }
 
-// Insert with a non-empty binding takes the binding!=nil branch and commits.
-func TestInsert_WithBindingCommits(t *testing.T) {
+func TestAdmit_PrincipalPersists(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
-	rec := storespec.Record{ID: "b", Kind: actor.KindTool, Binding: actor.BindingEmbedded, CreatedAt: 1}
-	if err := cs.Membership.Insert(ctx, rec); err != nil {
-		t.Fatalf("Insert: %v", err)
+	id, err := cs.Membership.Admit(ctx, actor.KindTool, "b", 1)
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
 	}
-	got, ok, err := cs.Registry.Lookup(ctx, "b")
+	got, ok, err := cs.Registry.Lookup(ctx, id)
 	if err != nil || !ok {
 		t.Fatalf("Lookup ok=%v err=%v", ok, err)
 	}
-	if got.Binding != actor.BindingEmbedded {
-		t.Errorf("binding=%q want embedded", got.Binding)
+	if got.Principal != "b" {
+		t.Errorf("principal=%q want b", got.Principal)
 	}
 }
 
@@ -115,9 +112,9 @@ func TestApplyMemberTransitions_ClosedSetGate(t *testing.T) {
 		t.Fatalf("ListActive after rejected poisons: %v", err)
 	}
 
-	// Insert takes the same gate.
-	if err := cs.Membership.Insert(ctx, storespec.Record{ID: "b1", Kind: "wizard", CreatedAt: 1}); err == nil {
-		t.Error("Insert must gate the kind closed set")
+	// Admit takes the same gate.
+	if _, err := cs.Membership.Admit(ctx, "wizard", "b1", 1); err == nil {
+		t.Error("Admit must gate the kind closed set")
 	}
 }
 
@@ -134,26 +131,30 @@ func TestApplyMemberTransitions_SameMillisecondBounce(t *testing.T) {
 	cs := openTestChannel(t)
 
 	const at = int64(5000)
-	add := storespec.MemberActorAdd{ID: "bounce", Kind: actor.KindAgent, At: at}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
-		t.Fatalf("add: %v", err)
+	oldID, err := cs.Membership.Admit(ctx, actor.KindAgent, "bounce", at)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := cs.Membership.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: "bounce", At: at}}); err != nil {
+		[]storespec.MemberActorRemove{{ID: oldID, At: at}}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
-		t.Fatalf("same-ms re-add must succeed (uuid mirror ids cannot collide): %v", err)
+	newID, err := cs.Membership.Admit(ctx, actor.KindAgent, "bounce", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newID == oldID {
+		t.Fatal("same-ms re-admission reused actor id")
 	}
 
-	rec, ok, _ := cs.Registry.Lookup(ctx, "bounce")
+	rec, ok, _ := cs.Registry.Lookup(ctx, newID)
 	if !ok || !rec.IsActive() {
 		t.Fatalf("bounced actor must be active, ok=%v", ok)
 	}
-	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", "bounce")); n != 2 {
-		t.Errorf("registered mirrors = %d, want 2", n)
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", string(newID))); n != 1 {
+		t.Errorf("new-id registered mirrors=%d want 1", n)
 	}
-	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", "bounce")); n != 1 {
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", string(oldID))); n != 1 {
 		t.Errorf("deregistered mirrors = %d, want 1", n)
 	}
 }

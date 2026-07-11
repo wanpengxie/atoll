@@ -183,6 +183,8 @@ type setupResult struct {
 	userID  string
 	wsID    string
 	chID    string
+	actorID actor.ActorID
+	boostID actor.ActorID
 }
 
 func register(t *testing.T, env *testEnv, email, password, displayName string) (map[string]any, []*http.Cookie) {
@@ -226,7 +228,9 @@ func createChannel(t *testing.T, env *testEnv, cookies []*http.Cookie, wsID, nam
 	// wait for the boost default floor to come up so tests that immediately send a
 	// message find a live default agent (matches the old synchronous readiness).
 	if chID, ok := body["id"].(string); ok {
-		env.app.WaitLiveForTest(chID, actor.ActorID("agent:boost"), 2*time.Second)
+		if boost, ok := body["default_agent"].(string); ok {
+			env.app.WaitLiveForTest(chID, actor.ActorID(boost), 2*time.Second)
+		}
 	}
 	return body, mergeCookies(cookies, extractCookies(w))
 }
@@ -248,12 +252,16 @@ func fullSetup(t *testing.T, env *testEnv) setupResult {
 
 	chBody, cookies := createChannel(t, env, cookies, wsID, "general")
 	chID := chBody["id"].(string)
+	actorID, _ := env.app.ResolvePrincipalForTest(chID, actor.KindHuman, userID)
+	boostID, _ := env.app.ResolvePrincipalForTest(chID, actor.KindAgent, "boost")
 
 	return setupResult{
 		cookies: cookies,
 		userID:  userID,
 		wsID:    wsID,
 		chID:    chID,
+		actorID: actorID,
+		boostID: boostID,
 	}
 }
 

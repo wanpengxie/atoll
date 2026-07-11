@@ -38,7 +38,7 @@ func TestLiveArmsFencesConstructionTimeWrite(t *testing.T) {
 	// so every arm a factory could reach during construction is fenced — the
 	// "factory must not write" rule is structural on the port path too, not a
 	// soft convention left for the daemon alone.
-	inc := rt.Spawn("compute-w", actor.KindTool, func(i actorrt.Incarnation) actorrt.Actor {
+	inc, _, _ := rt.SpawnIfAbsent("compute-w", actor.KindTool, func(i actorrt.Incarnation) actorrt.Actor {
 		caps := link.NewLiveArms(rb, i, rt)
 		_, errs.pen = caps.Pen.Write(context.Background(), &message.Envelope{ID: "during-ctor"})
 		_, errs.access = caps.Access.Invoke(context.Background(), access.Operation(""), resource.ResourceID(""), nil, nil)

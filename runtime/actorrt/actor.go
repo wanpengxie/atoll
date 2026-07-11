@@ -3,6 +3,8 @@ package actorrt
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"runtime/debug"
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -50,7 +52,51 @@ type Starter interface {
 // runtime invokes Stop once, after the mailbox is closed and the last
 // in-flight Receive has returned, on the cell goroutine.
 type Stopper interface {
+	// Stop must be safe before Start, return promptly, and tolerate being called
+	// at most once for an implementation that loses a construction race.
 	Stop(ctx context.Context) error
+}
+
+// BuildFailure reports a deterministic actor-construction failure. PanicValue
+// retains the recovered value and Stack captures the builder stack.
+type BuildFailure struct {
+	PanicValue any
+	Stack      []byte
+	NilActor   bool
+}
+
+func (e *BuildFailure) Error() string {
+	if e.NilActor {
+		return "actorrt: builder returned a nil actor"
+	}
+	return fmt.Sprintf("actorrt: builder panicked: %v", e.PanicValue)
+}
+
+func buildActor(build func(Incarnation) Actor, inc Incarnation) (impl Actor, err error) {
+	defer func() {
+		if v := recover(); v != nil {
+			impl = nil
+			err = &BuildFailure{PanicValue: v, Stack: debug.Stack()}
+		}
+	}()
+	impl = build(inc)
+	if impl == nil {
+		return nil, &BuildFailure{NilActor: true, Stack: debug.Stack()}
+	}
+	return impl, nil
+}
+
+// abortBuild releases a never-started shell. Stop is deliberately outside all
+// runtime locks and isolated because cleanup must not turn a CAS loss into a
+// process-wide failure.
+func abortBuild(c *cell) {
+	c.cancel()
+	if stopper, ok := c.impl.(Stopper); ok {
+		func() {
+			defer func() { _ = recover() }()
+			_ = stopper.Stop(context.Background())
+		}()
+	}
 }
 
 // RequestCanceller is the optional occupant hook for the request-cancel signal

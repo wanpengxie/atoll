@@ -225,8 +225,7 @@ func TestStateSlice4_CascadeClearVsNonLossy(t *testing.T) {
 	// non-lossy witness); the actor-scoped create needs no membership.
 	assertClears := func(t *testing.T, dereg func(t *testing.T, cs *ChannelStores, id actor.ActorID)) {
 		cs := openAccessChannel(t)
-		const A = actor.ActorID("A")
-		seedMember(t, cs, A)
+		A := seedMember(t, cs, actor.ActorID("A"))
 
 		hState := cs.Access.MintState(A)
 		hChan := cs.Access.Mint(A)
@@ -244,12 +243,10 @@ func TestStateSlice4_CascadeClearVsNonLossy(t *testing.T) {
 		out, err := hState.Invoke(ctx, access.OpRead, stateID, nil, nil)
 		expectReason(t, "state read after dereg (cascaded)", out, err, access.ResourceNotFound)
 
-		// Non-lossy: the channel-scoped resource + its creator R grant survive, so A
-		// (whose direct full-rights entry is untouched — object ops consult R, not
-		// membership) still reads it back intact.
+		// The channel-scoped resource survives, while the removed actor's direct
+		// grant is cascaded on the grantee axis.
 		out, err = hChan.Invoke(ctx, access.OpRead, kvID, nil, nil)
-		expectAccepted(t, "channel-scoped kv read after dereg (non-lossy)", out, err)
-		expectBytes(t, "channel-scoped kv value survives", out, kvBytes)
+		expectReason(t, "channel-scoped kv read after dereg", out, err, access.AccessDenied)
 	}
 
 	t.Run("Deregister path", func(t *testing.T) {
@@ -281,8 +278,7 @@ func TestStateSlice5_TwoLociMutuallyInvisible(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 
-	const A = actor.ActorID("A")
-	seedMember(t, cs, A) // member: needed to create a channel-scoped resource
+	A := seedMember(t, cs, actor.ActorID("A")) // member: needed to create a channel-scoped resource
 
 	hChan := cs.Access.Mint(A)
 	hState := cs.Access.MintState(A)

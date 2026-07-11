@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -67,9 +69,13 @@ func (a *App) SetRevokeFailForTest(v bool) {
 // Introduce retry must heal, so a test can assert the retry Admits under the
 // FROZEN row's class-kind, not the request's. Test-only.
 func (a *App) SeedIntentRowForTest(chID, instanceID, class, placement string) error {
+	principal := instanceID
+	if i := strings.IndexByte(principal, ':'); i >= 0 {
+		principal = principal[i+1:]
+	}
 	_, err := a.db.ExecContext(context.Background(),
-		`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-		chID, instanceID, class, placement)
+		`INSERT INTO channel_actors (channel_id, instance_id, principal, class, placement) VALUES (?,?,?,?,?)`,
+		chID, instanceID, principal, class, placement)
 	return err
 }
 
@@ -98,12 +104,31 @@ func (a *App) DropHomeForTest(chID channel.ID) {
 // daemon attach from minting membership, a daemon-hosted actor must be admitted
 // BEFORE its daemon declares it — this test seam stands in for the introduce door
 // the daemon-attach live tests bypass. Test-only.
-func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) error {
+func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) (actor.ActorID, error) {
 	home := a.getHome(channel.ID(chID))
 	if home == nil {
-		return errTestChannelNotLoaded
+		return "", errTestChannelNotLoaded
 	}
-	return home.Admit(context.Background(), id, kind)
+	principal := string(id)
+	if i := strings.IndexByte(principal, ':'); i >= 0 {
+		principal = principal[i+1:]
+	}
+	return home.Admit(context.Background(), kind, principal)
+}
+
+func (a *App) ResolvePrincipalForTest(chID string, kind actor.Kind, principal string) (actor.ActorID, error) {
+	home := a.getHome(channel.ID(chID))
+	if home == nil {
+		return "", errTestChannelNotLoaded
+	}
+	id, ok, err := home.ResolvePrincipal(context.Background(), kind, principal)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return id, nil
+	}
+	return "", fmt.Errorf("principal not found")
 }
 
 // WaitLiveForTest polls chID's home until id has a live embodiment (View.Stat) or
@@ -147,17 +172,18 @@ func (a *App) KillCellForTest(chID channel.ID, id actor.ActorID) error {
 // actor Open seeds). Returns the new channel id. Test-only — proves half-built
 // channels stay deletable and open with clear errors, never a panic. Test-only.
 func (a *App) CreateHalfBuiltChannelForTest(wsID, name string) (string, error) {
+	const legacyPlaceholderID = actor.ActorID("agent:boost")
 	chID := uuid.NewString()
 	dbPath := filepath.Join(a.channelDBDir, chID+".db")
 	now := time.Now().UnixMilli()
 	if _, err := a.db.ExecContext(context.Background(),
 		`INSERT INTO channels (id, workspace_id, name, type, db_path, default_agent, created_at) VALUES (?,?,?,?,?,?,?)`,
-		chID, wsID, name, "group", dbPath, string(defaultAgentInstanceID), now); err != nil {
+		chID, wsID, name, "group", dbPath, string(legacyPlaceholderID), now); err != nil {
 		return "", err
 	}
 	if _, err := a.db.ExecContext(context.Background(),
 		`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-		chID, string(defaultAgentInstanceID), defaultBoostClass, placementServer); err != nil {
+		chID, string(legacyPlaceholderID), defaultBoostClass, placementServer); err != nil {
 		return "", err
 	}
 	if _, err := a.createHome(channel.ID(chID), dbPath); err != nil {

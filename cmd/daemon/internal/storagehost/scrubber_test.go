@@ -21,7 +21,7 @@ func TestScrubber_ReclaimsPendingTombstonesAndAcks(t *testing.T) {
 	}
 	s.Pass(t.Context(), cr, nil, nil, []TombstoneToReclaim{
 		{TombstoneID: "ts1", Coord: "coord1", Provenance: provenanceAxisAllocated},
-	}, nil, ack, nil)
+	}, nil, ack)
 
 	if _, err := (Streamer{}).OpenRead(cr, "coord1"); err == nil {
 		t.Fatal("coord1 bytes must be gone after a reclaim pass")
@@ -43,7 +43,7 @@ func TestScrubber_ReclaimFailureSkipsAck(t *testing.T) {
 	// must never fire for a collection that did not actually happen.
 	s.Pass(t.Context(), cr, nil, nil, []TombstoneToReclaim{
 		{TombstoneID: "ts1", Coord: "../escape", Provenance: provenanceAxisAllocated},
-	}, nil, ack, nil)
+	}, nil, ack)
 	if ackCalled {
 		t.Fatal("ack must not fire when Reclaim failed")
 	}
@@ -69,7 +69,7 @@ func TestScrubber_SweepsOrphanStagingButKeepsPending(t *testing.T) {
 	s := &Scrubber{}
 	s.Pass(t.Context(), cr, nil, []ReservationPending{
 		{ReservationID: "res1", Coord: "pending-coord"},
-	}, nil, nil, nil, nil)
+	}, nil, nil, nil)
 
 	orphanName := strings.TrimPrefix(orphan.stagingRelPath, stagingDir+"/")
 	pendingName := strings.TrimPrefix(pending.stagingRelPath, stagingDir+"/")
@@ -115,7 +115,7 @@ func TestScrubber_ActiveWriteSurvivesSweepWithNoReservationAtAll(t *testing.T) {
 	s := &Scrubber{}
 	// pendingReservations is nil throughout — the ONLY thing distinguishing
 	// active-plain-coord from orphan-plain-coord is the activeWrites entry.
-	s.Pass(t.Context(), cr, nil, nil, nil, func() []ActiveStaging { return []ActiveStaging{{Coord: "active-plain-coord"}} }, nil, nil)
+	s.Pass(t.Context(), cr, nil, nil, nil, func() []ActiveStaging { return []ActiveStaging{{Coord: "active-plain-coord"}} }, nil)
 
 	activeName := strings.TrimPrefix(active.stagingRelPath, stagingDir+"/")
 	orphanName := strings.TrimPrefix(orphan.stagingRelPath, stagingDir+"/")
@@ -135,91 +135,19 @@ func TestScrubber_ActiveWriteSurvivesSweepWithNoReservationAtAll(t *testing.T) {
 	}
 }
 
-// TestScrubber_ResendsCommittedForLandedPendingReservation (期11 S6, the
-// daemon-crash recovery path §1.7/§6.3 names: "daemon rename后Committed未
-//达即daemon crash"): a pending reservation whose coord is ALREADY present
-// in live/ (the crash happened after fsync+rename, before/during the
-// Committed RPC) must resend Committed — exactly once, and it must NOT
-// touch a pending reservation whose coord never landed (still legitimately
-// staging).
-func TestScrubber_ResendsCommittedForLandedPendingReservation(t *testing.T) {
-	cr := newTestChannelRoot(t)
-	var a Allocator
-	if err := a.Alloc(cr, "landed-coord", false); err != nil {
-		t.Fatalf("Alloc landed-coord: %v", err)
-	}
-	// still-staging-coord has NO live/ entry at all (never touched Alloc or
-	// a completed write) — resend must skip it.
-
-	s := &Scrubber{}
-	var resent []string
-	resend := func(ctx context.Context, reservationID string) (bool, bool, error) {
-		resent = append(resent, reservationID)
-		return true, false, nil
-	}
-	s.Pass(t.Context(), cr, nil, []ReservationPending{
-		{ReservationID: "res-landed", Coord: "landed-coord"},
-		{ReservationID: "res-staging", Coord: "still-staging-coord"},
-	}, nil, nil, nil, resend)
-
-	if len(resent) != 1 || resent[0] != "res-landed" {
-		t.Fatalf("resent = %v, want exactly [res-landed]", resent)
-	}
-}
-
-// TestScrubber_NilResendIsNoop confirms a nil resend callback (a daemon
-// build that never wires one, or StorageHost.Reconcile's own nil-safe
-// default) does not panic.
-func TestScrubber_NilResendIsNoop(t *testing.T) {
-	cr := newTestChannelRoot(t)
-	var a Allocator
-	if err := a.Alloc(cr, "landed-coord", false); err != nil {
-		t.Fatalf("Alloc landed-coord: %v", err)
-	}
-	s := &Scrubber{}
-	s.Pass(t.Context(), cr, nil, []ReservationPending{
-		{ReservationID: "res-landed", Coord: "landed-coord"},
-	}, nil, nil, nil, nil)
-}
-
-// TestScrubber_ResendLostReclaimsCoord is 期11 S2's crash-recovery-path DoD
-// proof (transfer-lifecycle-spec.md §3's #2): a resend that comes back
-// lost=true (this reservation landed locally BEFORE the daemon crashed, but
-// lost the same-resource_id race at the home, discovered only on this later
-// resumed Committed) must reclaim the coord's already-landed live bytes —
-// never leave them as a permanent orphan just because the discovery happened
-// on a resend rather than the original synchronous Commit.
-func TestScrubber_ResendLostReclaimsCoord(t *testing.T) {
-	cr := newTestChannelRoot(t)
-	var a Allocator
-	if err := a.Alloc(cr, "loser-coord", false); err != nil {
-		t.Fatalf("Alloc loser-coord: %v", err)
-	}
-
-	s := &Scrubber{}
-	resend := func(ctx context.Context, reservationID string) (bool, bool, error) {
-		return true, true, nil // found, LOST
-	}
-	s.Pass(t.Context(), cr, nil, []ReservationPending{
-		{ReservationID: "res-loser", Coord: "loser-coord"},
-	}, nil, nil, nil, resend)
-
-	if _, err := (Streamer{}).OpenRead(cr, "loser-coord"); err == nil {
-		t.Fatal("loser-coord's live bytes must be reclaimed after a lost resend, no orphan left behind")
-	}
-}
-
+// Missing live entries are counted and logged; scrubber never fabricates or
+// replays a completion.
 func TestScrubber_LogsMissingLiveEntriesWithoutPanicking(t *testing.T) {
 	cr := newTestChannelRoot(t)
 	s := &Scrubber{}
 	// coord "never-landed" has no matching live/ entry — must log, not panic
 	// or error (Pass has no return value to surface it through).
-	s.Pass(t.Context(), cr, []ResourceLanded{{Coord: "never-landed"}}, nil, nil, nil, nil, nil)
+	s.Pass(t.Context(), cr, []ResourceLanded{{Coord: "never-landed"}}, nil, nil, nil, nil)
 }
 
 // TestScrubber_ActiveWritesSnapshotAfterNetworkPhase pins 期11 review P1-1: the
-// active-writes snapshot must be taken AFTER Pass's (multi-second, network-RPC)
-// reclaim/resend phase, immediately before the staging sweep — not at Pass
+// active-writes snapshot must be taken AFTER Pass's network reclaim phase,
+// immediately before the staging sweep — not at Pass
 // entry. A snapshot taken too early would miss a write that begins during the
 // network phase and delete its staging out from under a live writer. The
 // activeWrites arg is a snapshotTER for exactly this reason; here it asserts the
@@ -250,7 +178,7 @@ func TestScrubber_ActiveWritesSnapshotAfterNetworkPhase(t *testing.T) {
 	s := &Scrubber{}
 	s.Pass(t.Context(), cr, nil, nil, []TombstoneToReclaim{
 		{TombstoneID: "t1", Coord: "gone-coord", Provenance: provenanceAxisAllocated},
-	}, activeWrites, ack, nil)
+	}, activeWrites, ack)
 
 	for _, e := range listStagingEntries(t, cr) {
 		if e == liveName {

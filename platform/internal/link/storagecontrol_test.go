@@ -3,7 +3,7 @@ package link_test
 // storagecontrol_test.go — end-to-end coverage for 期11 §4.7's daemon
 // control-RPC plane over a REAL WS link (httptest.Server + link.Dial), not
 // just the frame codec in isolation: AllocRequest home→daemon (Acceptor.
-// SendAllocRequest / Dialer.SetAllocHandler) and the three daemon-initiated
+// SendAllocRequest / DialConfig.AllocHandler) and the three daemon-initiated
 // frames (Committed/ReclaimAck/ReconcilePull, via link.StorageHostControl).
 
 import (
@@ -40,7 +40,6 @@ type fakeStorageHostControl struct {
 	reconcileErr          error
 	reconcileCalls        []string
 	reconcileActiveCoords [][]string
-	reconcileLandedCoords [][]string
 }
 
 func (f *fakeStorageHostControl) Committed(ctx context.Context, senderDaemonID, reservationID string) (bool, bool, error) {
@@ -57,12 +56,11 @@ func (f *fakeStorageHostControl) ReclaimAck(ctx context.Context, senderDaemonID,
 	return f.reclaimFound, f.reclaimErr
 }
 
-func (f *fakeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords, landedCoords []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
+func (f *fakeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reconcileCalls = append(f.reconcileCalls, senderDaemonID)
 	f.reconcileActiveCoords = append(f.reconcileActiveCoords, activeCoords)
-	f.reconcileLandedCoords = append(f.reconcileLandedCoords, landedCoords)
 	return f.reconcileResources, f.reconcileReservations, f.reconcileTombstones, f.reconcileErr
 }
 
@@ -96,9 +94,13 @@ func newStorageRig(t *testing.T) *storageRig {
 
 func (r *storageRig) wsURL() string { return "ws" + r.srv.URL[4:] }
 
-func dialStorageDaemon(t *testing.T, r *storageRig) *link.Dialer {
+func dialStorageDaemon(t *testing.T, r *storageRig, configs ...link.DialConfig) *link.Dialer {
 	t.Helper()
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1", nil, nil)
+	cfg := link.DialConfig{}
+	if len(configs) > 0 {
+		cfg = configs[0]
+	}
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1", nil, cfg, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -112,13 +114,11 @@ func dialStorageDaemon(t *testing.T, r *storageRig) *link.Dialer {
 // the home's waiting caller.
 func TestAllocRequest_HomeToDaemonRoundTrip(t *testing.T) {
 	r := newStorageRig(t)
-	d := dialStorageDaemon(t, r)
-
 	var gotReq link.AllocRequest
-	d.SetAllocHandler(func(req link.AllocRequest) link.AllocReply {
+	dialStorageDaemon(t, r, link.DialConfig{AllocHandler: func(req link.AllocRequest) link.AllocReply {
 		gotReq = req
 		return link.AllocReply{OK: true}
-	})
+	}})
 
 	err := r.acc.SendAllocRequest(context.Background(), "daemon-1", link.AllocRequest{
 		ChannelID: "ch1", Coord: "coord-1", Dir: true,
@@ -135,10 +135,9 @@ func TestAllocRequest_HomeToDaemonRoundTrip(t *testing.T) {
 // surfaces as a Go error at the home's SendAllocRequest caller.
 func TestAllocRequest_NakSurfacesAsError(t *testing.T) {
 	r := newStorageRig(t)
-	d := dialStorageDaemon(t, r)
-	d.SetAllocHandler(func(link.AllocRequest) link.AllocReply {
+	dialStorageDaemon(t, r, link.DialConfig{AllocHandler: func(link.AllocRequest) link.AllocReply {
 		return link.AllocReply{OK: false, Reason: "disk full"}
-	})
+	}})
 
 	err := r.acc.SendAllocRequest(context.Background(), "daemon-1", link.AllocRequest{ChannelID: "ch1", Coord: "coord-1"})
 	if err == nil {
@@ -217,7 +216,7 @@ func TestReconcilePull_DaemonToHomeRoundTrip(t *testing.T) {
 	r.shc.reconcileReservations = []link.ReconcileReservation{{ReservationID: "r1", Coord: "c2"}}
 	r.shc.reconcileTombstones = []link.ReconcileTombstone{{TombstoneID: "t1", Coord: "c3", Provenance: "axis-allocated"}}
 
-	reply, err := d.SendReconcilePull(context.Background(), []string{"coord-active"}, []string{"coord-landed"})
+	reply, err := d.SendReconcilePull(context.Background(), []string{"coord-active"})
 	if err != nil {
 		t.Fatalf("SendReconcilePull: %v", err)
 	}
@@ -238,10 +237,6 @@ func TestReconcilePull_DaemonToHomeRoundTrip(t *testing.T) {
 	if len(r.shc.reconcileActiveCoords) != 1 || len(r.shc.reconcileActiveCoords[0]) != 1 || r.shc.reconcileActiveCoords[0][0] != "coord-active" {
 		t.Errorf("ReconcilePull activeCoords = %+v, want [[coord-active]]", r.shc.reconcileActiveCoords)
 	}
-	// 期11 review §2.5 #A: LandedCoords must likewise round-trip intact.
-	if len(r.shc.reconcileLandedCoords) != 1 || len(r.shc.reconcileLandedCoords[0]) != 1 || r.shc.reconcileLandedCoords[0][0] != "coord-landed" {
-		t.Errorf("ReconcilePull landedCoords = %+v, want [[coord-landed]]", r.shc.reconcileLandedCoords)
-	}
 }
 
 // TestStorageControl_NoHandlerWiredAnswersHonestReject proves every one of
@@ -258,7 +253,7 @@ func TestStorageControl_NoHandlerWiredAnswersHonestReject(t *testing.T) {
 	}))
 	defer func() { _ = acc.Close(); srv.Close() }()
 
-	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1", nil, nil)
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1", nil, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -270,7 +265,7 @@ func TestStorageControl_NoHandlerWiredAnswersHonestReject(t *testing.T) {
 	if reply, err := d.SendReclaimAck(context.Background(), "ts-1"); err != nil || reply.Reason == "" {
 		t.Errorf("SendReclaimAck with no host wired: reply=%+v err=%v", reply, err)
 	}
-	if reply, err := d.SendReconcilePull(context.Background(), nil, nil); err != nil || reply.Reason == "" {
+	if reply, err := d.SendReconcilePull(context.Background(), nil); err != nil || reply.Reason == "" {
 		t.Errorf("SendReconcilePull with no host wired: reply=%+v err=%v", reply, err)
 	}
 }
@@ -287,7 +282,7 @@ func (b *blockingStorageHostControl) Committed(ctx context.Context, senderDaemon
 func (b *blockingStorageHostControl) ReclaimAck(context.Context, string, string) (bool, error) {
 	return false, nil
 }
-func (b *blockingStorageHostControl) ReconcilePull(context.Context, string, []string, []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
+func (b *blockingStorageHostControl) ReconcilePull(context.Context, string, []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
 	return nil, nil, nil, nil
 }
 
@@ -319,7 +314,7 @@ func TestSendCommitted_CtxCancelUnblocksWaiter(t *testing.T) {
 	// this runs.
 	defer func() { _ = acc.Close(); srv.Close() }()
 
-	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1", nil, nil)
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1", nil, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -348,9 +343,8 @@ func TestSendCommitted_CtxCancelUnblocksWaiter(t *testing.T) {
 // the daemon's OK reply returns to the home caller.
 func TestReclaimRequest_HomeToDaemonRoundTrip(t *testing.T) {
 	r := newStorageRig(t)
-	d := dialStorageDaemon(t, r)
 	opener := &extReclaimOpener{}
-	d.SetLocalFileOpener(opener)
+	dialStorageDaemon(t, r, link.DialConfig{LocalFileOpener: opener})
 
 	if err := r.acc.SendReclaimRequest(context.Background(), "daemon-1", "coord-orphan"); err != nil {
 		t.Fatalf("SendReclaimRequest: %v", err)
@@ -425,9 +419,8 @@ func TestCommittingWriteHandle_Commit_DoesNotFabricateSuccess(t *testing.T) {
 
 	t.Run("reply.Lost reclaims the coord and fails loud", func(t *testing.T) {
 		r := newStorageRig(t)
-		d := dialStorageDaemon(t, r)
 		opener := &extReclaimOpener{}
-		d.SetLocalFileOpener(opener)
+		d := dialStorageDaemon(t, r, link.DialConfig{LocalFileOpener: opener})
 		r.shc.committedFound = true
 		r.shc.committedLost = true
 

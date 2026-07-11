@@ -68,6 +68,7 @@ const (
 
 // controlFrame is the stream-0 envelope: one kind, one optional payload each.
 type controlFrame struct {
+	RequestID   string         `json:"request_id,omitempty"`
 	Kind        controlKind    `json:"kind"`
 	Attach      *AttachRequest `json:"attach,omitempty"`
 	AttachReply *AttachReply   `json:"attach_reply,omitempty"`

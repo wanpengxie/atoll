@@ -6,6 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
+
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
 
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -37,13 +41,13 @@ func newActorRegistry(db *sql.DB, channelID channel.ID, onCommit func()) *actorR
 
 // Lookup implements storespec.Registry.
 func (r *actorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec.Record, bool, error) {
-	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''), COALESCE(host,''),
+	const q = `SELECT actor_id, actor_kind, principal, COALESCE(actor_binding,''), COALESCE(host,''),
 	                 created_at, COALESCE(deregistered_at,0)
 	            FROM actor_registry WHERE actor_id=?`
 	var rec storespec.Record
 	var kind, binding string
 	err := r.db.QueryRowContext(ctx, q, string(id)).Scan(
-		&rec.ID, &kind, &binding, &rec.Host, &rec.CreatedAt, &rec.DeregisteredAt,
+		&rec.ID, &kind, &rec.Principal, &binding, &rec.Host, &rec.CreatedAt, &rec.DeregisteredAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storespec.Record{}, false, nil
@@ -72,6 +76,25 @@ func (r *actorRegistry) Lookup(ctx context.Context, id actor.ActorID) (storespec
 	return rec, true, nil
 }
 
+func (r *actorRegistry) LookupActivePrincipal(ctx context.Context, kind actor.Kind, principal string) (storespec.Record, bool, error) {
+	const q = `SELECT actor_id, actor_kind, principal, COALESCE(actor_binding,''), COALESCE(host,''), created_at
+	 FROM actor_registry WHERE actor_kind=? AND principal=? AND deregistered_at IS NULL`
+	var rec storespec.Record
+	var rawKind, binding string
+	err := r.db.QueryRowContext(ctx, q, string(kind), principal).Scan(&rec.ID, &rawKind, &rec.Principal, &binding, &rec.Host, &rec.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storespec.Record{}, false, nil
+	}
+	if err != nil {
+		return storespec.Record{}, false, fmt.Errorf("store: principal lookup: %w", err)
+	}
+	rec.Kind, _ = actor.ParseKind(rawKind)
+	if binding != "" {
+		rec.Binding, _ = actor.ParseBinding(binding)
+	}
+	return rec, true, nil
+}
+
 // Exists implements storespec.Registry — returns true even for soft-deregistered.
 func (r *actorRegistry) Exists(ctx context.Context, id actor.ActorID) (bool, error) {
 	const q = `SELECT 1 FROM actor_registry WHERE actor_id=? LIMIT 1`
@@ -88,7 +111,7 @@ func (r *actorRegistry) Exists(ctx context.Context, id actor.ActorID) (bool, err
 
 // ListActive implements storespec.Registry.
 func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, error) {
-	const q = `SELECT actor_id, actor_kind, COALESCE(actor_binding,''), COALESCE(host,''),
+	const q = `SELECT actor_id, actor_kind, principal, COALESCE(actor_binding,''), COALESCE(host,''),
 	                 created_at
 	            FROM actor_registry
 	            WHERE deregistered_at IS NULL
@@ -103,7 +126,7 @@ func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, err
 	for rows.Next() {
 		var rec storespec.Record
 		var kind, binding string
-		if err := rows.Scan(&rec.ID, &kind, &binding, &rec.Host, &rec.CreatedAt); err != nil {
+		if err := rows.Scan(&rec.ID, &kind, &rec.Principal, &binding, &rec.Host, &rec.CreatedAt); err != nil {
 			return nil, fmt.Errorf("store: list active actors scan: %w", err)
 		}
 		k, ok := actor.ParseKind(kind)
@@ -126,6 +149,73 @@ func (r *actorRegistry) ListActive(ctx context.Context) ([]storespec.Record, err
 	return out, nil
 }
 
+func (r *actorRegistry) Admit(ctx context.Context, kind actor.Kind, principal string, at int64) (actor.ActorID, error) {
+	if principal == "" || strings.Contains(principal, ":") {
+		return "", errors.New("store: principal must be non-empty and contain no colon")
+	}
+	if _, ok := actor.ParseKind(string(kind)); !ok {
+		return "", fmt.Errorf("store: invalid actor kind %q", kind)
+	}
+	if rec, ok, err := r.LookupActivePrincipal(ctx, kind, principal); err != nil {
+		return "", err
+	} else if ok {
+		return rec.ID, nil
+	}
+	for attempt := int64(0); attempt < 1000; attempt++ {
+		id := actor.ActorID(fmt.Sprintf("%s:%s:%d", kind, principal, at+attempt))
+		tx, err := r.db.BeginTx(ctx, nil)
+		if err != nil {
+			return "", err
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO actor_registry (actor_id,actor_kind,principal,actor_binding,host,created_at,deregistered_at) VALUES (?,?,?,NULL,'',?,NULL)`, string(id), string(kind), principal, at+attempt)
+		if err != nil {
+			_ = tx.Rollback()
+			var sqliteErr *sqlite.Error
+			if !errors.As(err, &sqliteErr) {
+				return "", err
+			}
+			switch sqliteErr.Code() {
+			case sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY:
+				// Same-millisecond actor_id collision: advance the diagnostic
+				// timestamp and retry. This is the ONLY retry class.
+				continue
+			case sqlite3.SQLITE_CONSTRAINT_UNIQUE:
+				// Concurrent ensure for the same (kind, principal): converge on
+				// the winner. If it vanished before this read, surface the original
+				// constraint instead of manufacturing a retry/TOCTOU loop.
+				if rec, ok, qerr := r.LookupActivePrincipal(ctx, kind, principal); qerr == nil && ok {
+					return rec.ID, nil
+				}
+				return "", err
+			default:
+				return "", err
+			}
+		}
+		add := storespec.MemberActorAdd{ID: id, Kind: kind, At: at + attempt}
+		if _, err = appendTx(ctx, tx, actorRegisteredEnvelope(r.channelID, add), false); err != nil {
+			_ = tx.Rollback()
+			return "", err
+		}
+		if err = tx.Commit(); err != nil {
+			return "", err
+		}
+		if r.onCommit != nil {
+			r.onCommit()
+		}
+		return id, nil
+	}
+	return "", errors.New("store: unable to mint unique actor id")
+}
+
+func (r *actorRegistry) EnsureSystemActor(ctx context.Context, at int64) error {
+	if exists, err := r.Exists(ctx, actor.SystemActorID); err != nil {
+		return err
+	} else if exists {
+		return nil
+	}
+	return r.insertFixedID(ctx, storespec.Record{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: at})
+}
+
 // validateMemberIdentity gates the membership WRITE path on the protocol
 // closed sets — the control-plane twin of the envelope write path's
 // stepSenderConsistent ParseKind gate, and for the same reason: the read path
@@ -146,8 +236,9 @@ func validateMemberIdentity(id actor.ActorID, kind actor.Kind, binding actor.Bin
 	return nil
 }
 
-// Insert implements storespec.Registry: it adds one membership row.
-func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error {
+// insertFixedID is the private intrinsic-system/bootstrap fixture primitive.
+// Product admission cannot express a caller-selected id and goes through Admit.
+func (r *actorRegistry) insertFixedID(ctx context.Context, rec storespec.Record) error {
 	if rec.ID == "" {
 		return errors.New("store: actor insert: empty ID")
 	}
@@ -220,6 +311,9 @@ func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int
 	// not folded into the state cascade above — one locus, one function (see
 	// clearTimersTx doc in timers.go).
 	if err := clearTimersTx(ctx, tx, id); err != nil {
+		return err
+	}
+	if err := clearActorGrantsTx(ctx, tx, id); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -369,27 +463,9 @@ func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add st
 			}
 			return false, nil
 		}
-		_, err := tx.ExecContext(ctx,
-			`UPDATE actor_registry
-			    SET actor_kind=?, actor_binding=?, host=?, created_at=?, deregistered_at=NULL
-			  WHERE actor_id=?`,
-			string(add.Kind), nullableString(string(add.Binding)), add.Host, add.At, string(add.ID),
-		)
-		if err != nil {
-			return false, fmt.Errorf("store: actor reactivate %q: %w", add.ID, err)
-		}
-		return true, nil
+		return false, fmt.Errorf("store: actor host-stamp %q: %w", add.ID, storespec.ErrMemberInactive)
 	case errors.Is(err, sql.ErrNoRows):
-		_, err := tx.ExecContext(ctx,
-			`INSERT INTO actor_registry
-			   (actor_id, actor_kind, actor_binding, host, created_at, deregistered_at)
-			 VALUES (?, ?, ?, ?, ?, NULL)`,
-			string(add.ID), string(add.Kind), nullableString(string(add.Binding)), add.Host, add.At,
-		)
-		if err != nil {
-			return false, fmt.Errorf("store: actor member insert %q: %w", add.ID, err)
-		}
-		return true, nil
+		return false, fmt.Errorf("store: actor host-stamp %q: %w", add.ID, storespec.ErrMemberInactive)
 	default:
 		return false, fmt.Errorf("store: actor member lookup %q: %w", add.ID, err)
 	}
@@ -433,6 +509,9 @@ func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, rem
 	// Same tx: cascade-clear its identity-level pending timers, parallel to the
 	// state cascade above.
 	if err := clearTimersTx(ctx, tx, remove.ID); err != nil {
+		return false, err
+	}
+	if err := clearActorGrantsTx(ctx, tx, remove.ID); err != nil {
 		return false, err
 	}
 	return true, nil

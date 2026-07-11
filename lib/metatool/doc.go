@@ -18,7 +18,7 @@
 //     (RequestSpec/WaitMode), and payload normalisation
 //   - the Exec face (exec.go): the ONE adapter from a metatool RequestSpec onto
 //     the substrate's out-station JobTable (call_actor/await_result/cancel/
-//     list_pending — the durable correlation account) plus a synchronous
+//     list_pending — the cross-turn correlation account) plus a synchronous
 //     sys.Call face (list_actors/describe — transient introspection queries).
 //
 // 期10 S5 collapse: the historical metatool.Shell (a private correlator holding

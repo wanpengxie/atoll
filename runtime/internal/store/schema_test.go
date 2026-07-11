@@ -75,6 +75,7 @@ func TestChannelLocalTables_Set(t *testing.T) {
 		"resource_tombstones":   true,
 		"actor_state":           true,
 		"timers":                true,
+		"timer_dead":            true,
 	}
 	if len(store.ChannelLocalTables) != len(want) {
 		t.Fatalf("ChannelLocalTables=%v want exactly %v", store.ChannelLocalTables, want)

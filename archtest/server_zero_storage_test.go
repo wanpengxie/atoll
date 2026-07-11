@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -158,12 +159,26 @@ func TestNoDiskWriteStorageHostOutsideDaemonRuntime(t *testing.T) {
 				return true
 			}
 			x, ok := sel.X.(*ast.Ident)
-			if !ok || x.Name != "os" || sel.Sel.Name != "Root" {
+			// Both halves of the disk-write primitive: os.Root (the confined
+			// handle TYPE) and os.OpenRoot (the constructor that mints one) —
+			// naming either outside the daemon runtime is the §8.2 violation.
+			if !ok || x.Name != "os" || (sel.Sel.Name != "Root" && sel.Sel.Name != "OpenRoot") {
 				return true
 			}
-			violations = append(violations, fmt.Sprintf("%s: references os.Root outside cmd/daemon's runtime tree", fset.Position(sel.Pos())))
+			violations = append(violations, fmt.Sprintf("%s: references os.%s outside cmd/daemon's runtime tree", fset.Position(sel.Pos()), sel.Sel.Name))
 			return true
 		})
+		// A `import . "os"` dot-import would let a file call bare Root(...) /
+		// OpenRoot(...) with NO `os.` selector — invisible to the SelectorExpr
+		// scan above. Ban the dot-import itself outside the daemon tree so the
+		// AST scan cannot be blinded by it.
+		for _, imp := range file.Imports {
+			if imp.Name != nil && imp.Name.Name == "." {
+				if p, uerr := strconv.Unquote(imp.Path.Value); uerr == nil && p == "os" {
+					violations = append(violations, fmt.Sprintf("%s: dot-imports \"os\" outside cmd/daemon's runtime tree (would hide bare Root/OpenRoot calls from the selector scan)", fset.Position(imp.Pos())))
+				}
+			}
+		}
 		return nil
 	})
 	if err != nil {

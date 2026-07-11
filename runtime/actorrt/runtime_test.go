@@ -19,7 +19,7 @@ func TestDeliverNilEnvelopeIsError(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", actor.KindAgent, static(newRecordActor()))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(newRecordActor()))
 
 	res, err := rt.deliver([]actor.ActorID{"a"}, nil)
 	if err == nil {
@@ -40,11 +40,11 @@ func TestDeliverPerAudienceTruth(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background(), Mailbox: 16})
 
 	live := newRecordActor()
-	rt.Spawn("live", actor.KindAgent, static(live))
+	_, _, _ = rt.SpawnIfAbsent("live", actor.KindAgent, static(live))
 
 	// "gone" is spawned then despawned: hosted history but no live embodiment now,
 	// so it must read NotHosted, NOT some stale Delivered.
-	gone := rt.Spawn("gone", actor.KindAgent, static(newRecordActor()))
+	gone, _, _ := rt.SpawnIfAbsent("gone", actor.KindAgent, static(newRecordActor()))
 	rt.Despawn(gone)
 
 	audience := []actor.ActorID{"live", "ghost", "gone"}
@@ -76,7 +76,7 @@ func TestDeliverDuplicateAudienceMember(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background(), Mailbox: 16})
 	defer rt.StopAll()
-	rt.Spawn("a", actor.KindAgent, static(newRecordActor()))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(newRecordActor()))
 
 	res, err := rt.deliver([]actor.ActorID{"a", "a"}, env("m"))
 	if err != nil {
@@ -99,7 +99,7 @@ func TestSpawnReplaceStopsOld(t *testing.T) {
 	defer rt.StopAll()
 
 	first := newRecordActor()
-	rt.Spawn("a", actor.KindAgent, static(first))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(first))
 	select {
 	case <-first.startedCh:
 	case <-time.After(time.Second):
@@ -107,7 +107,8 @@ func TestSpawnReplaceStopsOld(t *testing.T) {
 	}
 
 	second := newRecordActor()
-	rt.Spawn("a", actor.KindAgent, static(second))
+	rt.DespawnID("a")
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(second))
 
 	select {
 	case <-first.stoppedCh:
@@ -143,7 +144,7 @@ func TestActorContextSelf(t *testing.T) {
 	a := &selfIDActor{id: make(chan actor.ActorID, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", actor.KindAgent, static(a))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(a))
 	select {
 	case got := <-a.id:
 		if got != actor.ActorID("a") {
@@ -164,7 +165,7 @@ func TestStopAllClearsEmbodiments(t *testing.T) {
 	for _, id := range []actor.ActorID{"a", "b", "c"} {
 		ra := newRecordActor()
 		actors[id] = ra
-		rt.Spawn(id, actor.KindAgent, static(ra))
+		_, _, _ = rt.SpawnIfAbsent(id, actor.KindAgent, static(ra))
 		select {
 		case <-ra.startedCh:
 		case <-time.After(time.Second):
@@ -212,7 +213,7 @@ func TestStatReportsClockStampedStartedAt(t *testing.T) {
 	if _, ok := rt.Stat("a"); ok {
 		t.Fatal("Stat reported present for an unhosted id")
 	}
-	rt.Spawn("a", actor.KindAgent, static(newRecordActor()))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(newRecordActor()))
 
 	st, ok := rt.Stat("a")
 	if !ok {
@@ -230,7 +231,7 @@ func TestCurrentIncarnationLiveHandle(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", actor.KindAgent, static(newRecordActor()))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(newRecordActor()))
 
 	inc, ok := rt.CurrentIncarnation("a")
 	if !ok {
@@ -268,14 +269,15 @@ func TestCurrentIncarnationReplaceIsPointerLevel(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.Spawn("a", actor.KindAgent, static(newRecordActor()))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(newRecordActor()))
 
 	old, ok := rt.CurrentIncarnation("a")
 	if !ok {
 		t.Fatal("CurrentIncarnation reported absent before replace")
 	}
 
-	rt.Spawn("a", actor.KindAgent, static(newRecordActor())) // same-id replace (successor go-live)
+	rt.DespawnID("a")
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(newRecordActor()))
 
 	next, ok := rt.CurrentIncarnation("a")
 	if !ok {
@@ -340,8 +342,8 @@ func TestRuntimeDriver(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	rt.Spawn("drv", actor.KindHuman, static(driverActor{newRecordActor()}))
-	rt.Spawn("plain", actor.KindAgent, static(newRecordActor()))
+	_, _, _ = rt.SpawnIfAbsent("drv", actor.KindHuman, static(driverActor{newRecordActor()}))
+	_, _, _ = rt.SpawnIfAbsent("plain", actor.KindAgent, static(newRecordActor()))
 
 	if d, ok := rt.Driver("drv"); !ok || d == nil {
 		t.Fatal("Driver(drv) = false, want the occupant's driver face")

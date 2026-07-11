@@ -50,7 +50,7 @@ func TestPublishObsFanout(t *testing.T) {
 	rt, del := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.WatchObs("a", col)
-	rt.Spawn("a", actor.KindAgent, static(&observerActor{}))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(&observerActor{}))
 
 	if _, err := del.Deliver([]actor.ActorID{"a"}, env("trigger")); err != nil {
 		t.Fatalf("deliver: %v", err)
@@ -78,7 +78,7 @@ func TestUnwatchObs_StopsDelivery(t *testing.T) {
 	defer rt.StopAll()
 	rt.WatchObs("a", col)
 	rt.UnwatchObs("a", col)
-	rt.Spawn("a", actor.KindAgent, static(&observerActor{}))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(&observerActor{}))
 
 	if _, err := del.Deliver([]actor.ActorID{"a"}, env("trigger")); err != nil {
 		t.Fatalf("deliver: %v", err)

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -67,6 +68,7 @@ type testBuilder struct {
 	byID    map[actor.ActorID]ActorFactory
 	byClass map[string]ActorFactory
 	seen    map[actor.ActorID]actorcaps.Caps
+	aliases map[actor.ActorID]actor.ActorID // minted id -> historical fixture key
 	// forkCalls records the (childID, class, config) each LookupByClass received —
 	// the M2 config-passthrough / childID-derivation assertions read it.
 	forkCalls []forkCall
@@ -83,6 +85,7 @@ func newTestBuilder() *testBuilder {
 		byID:    map[actor.ActorID]ActorFactory{},
 		byClass: map[string]ActorFactory{},
 		seen:    map[actor.ActorID]actorcaps.Caps{},
+		aliases: map[actor.ActorID]actor.ActorID{},
 	}
 }
 
@@ -102,6 +105,9 @@ func (b *testBuilder) recordFactory(id actor.ActorID) ActorFactory {
 func (b *testBuilder) capsFor(id actor.ActorID) (actorcaps.Caps, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if fixture, ok := b.aliases[id]; ok {
+		id = fixture
+	}
 	c, ok := b.seen[id]
 	return c, ok
 }
@@ -109,6 +115,9 @@ func (b *testBuilder) capsFor(id actor.ActorID) (actorcaps.Caps, bool) {
 func (b *testBuilder) Lookup(id actor.ActorID) (ActorFactory, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if fixture, ok := b.aliases[id]; ok {
+		id = fixture
+	}
 	f, ok := b.byID[id]
 	return f, ok
 }
@@ -151,12 +160,20 @@ func live(h *Home, id actor.ActorID) bool {
 // the membership row DIRECTLY (not via Home.Admit) precisely so it does NOT poke
 // the reconcile ring — these tests drive reconcileActivation synchronously, and a
 // poke would race the background ticker goroutine against the test's own calls.
-func admit(t *testing.T, h *Home, id actor.ActorID, kind actor.Kind) {
+func admit(t *testing.T, h *Home, id actor.ActorID, kind actor.Kind) actor.ActorID {
 	t.Helper()
-	if err := h.cs.Membership.ApplyMemberTransitions(context.Background(),
-		[]storespec.MemberActorAdd{{ID: id, Kind: kind, At: h.nowMs()}}, nil); err != nil {
+	minted, err := h.cs.Membership.Admit(context.Background(), kind, strings.ReplaceAll(string(id), ":", "-"), h.nowMs())
+	if err != nil {
 		t.Fatalf("admit %s: %v", id, err)
 	}
+	if b, ok := h.builder.(*testBuilder); ok && minted != id {
+		b.mu.Lock()
+		if _, fixtureExists := b.byID[id]; fixtureExists {
+			b.aliases[minted] = id
+		}
+		b.mu.Unlock()
+	}
+	return minted
 }
 
 // Test 1 — desired absent member → Builder revives it (eager activation) and the
@@ -165,11 +182,11 @@ func TestReconcileActivation_RevivesAbsentDesiredMemberWithState(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:always")
+	id := actor.ActorID("agent:always")
 	builder.byID[id] = builder.recordFactory(id)
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
 
 	if live(h, id) {
 		t.Fatal("member live before it was ever desired")
@@ -208,11 +225,11 @@ func TestReconcileActivation_DespawnsNoLongerDesired(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:transient")
+	id := actor.ActorID("agent:transient")
 	builder.byID[id] = builder.recordFactory(id)
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
 
 	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
@@ -235,23 +252,24 @@ func TestReconcileActivation_DoesNotKillUnmanagedLiveActors(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const parent = actor.ActorID("agent:always")
-	builder.byID[parent] = builder.recordFactory(parent)
-	builder.byClass["worker"] = builder.recordFactory("agent:always/w1")
+	parent := actor.ActorID("agent:always")
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, parent, actor.KindAgent)
+	parent = admit(t, h, parent, actor.KindAgent)
+	builder.byID[parent] = builder.recordFactory(parent)
+	builder.byClass["worker"] = builder.recordFactory(parent + "/w1")
 
 	// A human, admitted as a real cell (durable member) — now a MANAGED member (its
 	// Admit puts it in the user域 desired set; it survives here because it is
 	// desired+live, no longer because it is a "protected category").
-	const human = actor.ActorID("user:alice")
-	admit(t, h, human, actor.KindHuman)
-	if err := h.Spawn(ctx, human, actor.KindHuman, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	human := admit(t, h, actor.ActorID("user:alice"), actor.KindHuman)
+	mintedHuman, err := SpawnForTest(h, human, actor.KindHuman, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
-	})); err != nil {
+	}))
+	if err != nil {
 		t.Fatalf("Spawn human: %v", err)
 	}
+	human = mintedHuman
 
 	// The eager-managed parent, revived by reconcile.
 	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
@@ -302,8 +320,8 @@ func TestReconcileActivation_UserDomainHumanEmbodiedAndEvicted(t *testing.T) {
 	builder := newTestBuilder()
 	h := openActivationHome(t, desired, builder)
 
-	const human = actor.ActorID("user:carol")
-	admit(t, h, human, actor.KindHuman)
+	human := actor.ActorID("user:carol")
+	human = admit(t, h, human, actor.KindHuman)
 	h.reconcileActivation(ctx)
 	if !live(h, human) {
 		t.Fatal("admitted human not embodied by the ring (user域 derivation must build a常驻 cell with no connection)")
@@ -326,10 +344,10 @@ func TestReconcileActivation_UnionAtomicity_FaultAbortsTick(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:atomic")
+	id := actor.ActorID("agent:atomic")
 	builder.byID[id] = builder.recordFactory(id)
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
 
 	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
@@ -357,7 +375,7 @@ func TestReconcileActivation_IntersectionRedline_NoMembershipNoEmbody(t *testing
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:orphan-intent")
+	id := actor.ActorID("agent:orphan-intent")
 	builder.byID[id] = builder.recordFactory(id)
 	h := openActivationHome(t, desired, builder)
 
@@ -370,7 +388,8 @@ func TestReconcileActivation_IntersectionRedline_NoMembershipNoEmbody(t *testing
 		t.Fatal("orphan intent entered the 削臂 management set — the membership skip must precede current[id]=true")
 	}
 
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
+	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
 	if !live(h, id) {
 		t.Fatal("member not embodied after its户籍 landed on a later tick")
@@ -381,13 +400,12 @@ func TestReconcileActivation_IntersectionRedline_NoMembershipNoEmbody(t *testing
 // member embodies OFF-TICK — no synchronous reconcile, no 30s tick wait (the home
 // runs a time.Hour interval here). Only the Admit poke drives the background sweep.
 func TestAdmit_PokeEmbodiesWithoutWaitingTick(t *testing.T) {
-	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
 	h := openActivationHome(t, desired, builder)
 
-	const human = actor.ActorID("user:poke")
-	if err := h.Admit(ctx, human, actor.KindHuman); err != nil {
+	human, err := h.Admit(context.Background(), actor.KindHuman, "poke")
+	if err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -409,7 +427,7 @@ func TestAdmit_PokeEmbodiesWithoutWaitingTick(t *testing.T) {
 func TestReconcileActivation_IdentityTimerFireRevivesThenAppends(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "identity-timer-restart.sqlite")
-	const author = actor.ActorID("agent:sleeper")
+	author := actor.ActorID("agent:sleeper")
 
 	// --- Open #1: admit the author, arm a durable BindIdentity self-timer whose
 	// FireAt is in the FUTURE for this open's clock (so it cannot fire during the
@@ -429,7 +447,7 @@ func TestReconcileActivation_IdentityTimerFireRevivesThenAppends(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open #1: %v", err)
 	}
-	admit(t, h1, author, actor.KindAgent)
+	author = admit(t, h1, author, actor.KindAgent)
 	if live(h1, author) {
 		t.Fatal("author live before the timer fired — precondition broken")
 	}
@@ -526,13 +544,14 @@ func TestReviver_LiveAuthorWithNilBuilderIsNotPoisoned(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = h.Close() })
 
-	const author = actor.ActorID("agent:live-nobuilder")
-	admit(t, h, author, actor.KindAgent)
-	if err := h.Spawn(ctx, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	author := admit(t, h, actor.ActorID("agent:live-nobuilder"), actor.KindAgent)
+	mintedAuthor, err := SpawnForTest(h, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
-	})); err != nil {
+	}))
+	if err != nil {
 		t.Fatalf("Spawn live author: %v", err)
 	}
+	author = mintedAuthor
 	if !live(h, author) {
 		t.Fatal("author not live after Spawn — precondition broken")
 	}
@@ -559,7 +578,7 @@ func TestClose_ProducersBeforeEngineNoDeadlock(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:sched")
+	id := actor.ActorID("agent:sched")
 	builder.byID[id] = builder.recordFactory(id)
 
 	dbPath := filepath.Join(t.TempDir(), "close-order.sqlite")
@@ -575,7 +594,7 @@ func TestClose_ProducersBeforeEngineNoDeadlock(t *testing.T) {
 	}
 	// NB: Close is called explicitly below (not via t.Cleanup) — a second Close
 	// would double-close the engine's stop channel and panic.
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
 
 	// Bring a cell live and park a far-future incarnation-bind timer in the engine's
 	// in-memory family (so the engine holds live schedule state at Close time).
@@ -611,12 +630,12 @@ func TestReconcileActivation_DoesNotSpawnAttachedDesiredMember(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:attached-desired")
+	id := actor.ActorID("agent:attached-desired")
 	builder.byID[id] = builder.recordFactory(id)
 
 	h := openActivationHome(t, desired, builder)
 
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
 		{ID: id, Kind: actor.KindAgent, Host: "daemon-y", At: h.nowMs()},
 	}, nil); err != nil {
@@ -642,11 +661,11 @@ func TestReconcileActivation_DoesNotEvictAttachedNoLongerDesiredMember(t *testin
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:migrated")
+	id := actor.ActorID("agent:migrated")
 	builder.byID[id] = builder.recordFactory(id)
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
 
 	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
@@ -679,7 +698,7 @@ func TestReviver_AttachedHostRetainsThenFiresOnceDetached(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{} // deliberately empty: only the identity timer drives this author
 	builder := newTestBuilder()
-	const author = actor.ActorID("agent:wire-flap")
+	author := actor.ActorID("agent:wire-flap")
 	builder.byID[author] = builder.recordFactory(author)
 
 	clock := newFakeClock(time.UnixMilli(1_000_000))
@@ -700,7 +719,7 @@ func TestReviver_AttachedHostRetainsThenFiresOnceDetached(t *testing.T) {
 	// Seed durable membership, unembodied, then mark it Host-attached — the
 	// wire-flap window this test exercises (the author's own daemon holds the
 	// live embodiment, home only has the durable row).
-	admit(t, h, author, actor.KindAgent)
+	author = admit(t, h, author, actor.KindAgent)
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
 		{ID: author, Kind: actor.KindAgent, Host: "daemon-flap", At: h.nowMs()},
 	}, nil); err != nil {
@@ -789,8 +808,7 @@ func TestReviver_AttachedAuthorNilBuilderIsTransientNotPoisoned(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = h.Close() })
 
-	const author = actor.ActorID("agent:attached-nobuilder")
-	admit(t, h, author, actor.KindAgent)
+	author := admit(t, h, actor.ActorID("agent:attached-nobuilder"), actor.KindAgent)
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
 		{ID: author, Kind: actor.KindAgent, Host: "daemon-x", At: h.nowMs()},
 	}, nil); err != nil {
@@ -844,11 +862,13 @@ func TestReviver_AttachedAuthorNilBuilderIsTransientNotPoisoned(t *testing.T) {
 	// cell, so EnsureLive's already-live fast path clears the gate. The SAME
 	// timer must now fire: a no_builder poison during the attached window would
 	// have deleted the row and this fire could never land.
-	if err := h.Spawn(ctx, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	mintedAuthor, err := SpawnForTest(h, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
-	})); err != nil {
+	}))
+	if err != nil {
 		t.Fatalf("Spawn author home: %v", err)
 	}
+	author = mintedAuthor
 	deadline := time.Now().Add(5 * time.Second)
 	for !hasFired() {
 		clock.Advance(2 * time.Second)
@@ -870,14 +890,14 @@ func TestFireAndRevive_RejectDeregisteredAuthor(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const author = actor.ActorID("agent:dereged")
+	author := actor.ActorID("agent:dereged")
 	builder.byID[author] = builder.recordFactory(author)
 
 	h := openActivationHome(t, desired, builder)
 
 	// Seed durable membership (unembodied), then soft-deregister it — the registry
 	// row survives with DeregisteredAt != 0, exactly the in-flight-race snapshot.
-	admit(t, h, author, actor.KindAgent)
+	author = admit(t, h, author, actor.KindAgent)
 	if err := h.cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{
 		{ID: author, At: h.nowMs()},
 	}); err != nil {
@@ -930,13 +950,13 @@ func TestFireSink_ForkChildIncarnationFire_KindFromLiveEmbodiment(t *testing.T) 
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const parent = actor.ActorID("agent:fork-parent")
+	parent := actor.ActorID("agent:fork-parent")
 	builder.byID[parent] = builder.recordFactory(parent)
 	const childNameHint = "w1"
-	builder.byClass["worker"] = builder.recordFactory(parent + "/" + actor.ActorID(childNameHint))
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, parent, actor.KindAgent)
+	parent = admit(t, h, parent, actor.KindAgent)
+	builder.byClass["worker"] = builder.recordFactory(parent + "/" + actor.ActorID(childNameHint))
 
 	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
@@ -1006,13 +1026,13 @@ func TestFireSink_ForkChildDeathRace_QuietDrop(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const parent = actor.ActorID("agent:fork-death-parent")
+	parent := actor.ActorID("agent:fork-death-parent")
 	builder.byID[parent] = builder.recordFactory(parent)
 	const childNameHint = "w1"
-	builder.byClass["worker"] = builder.recordFactory(parent + "/" + actor.ActorID(childNameHint))
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, parent, actor.KindAgent)
+	parent = admit(t, h, parent, actor.KindAgent)
+	builder.byClass["worker"] = builder.recordFactory(parent + "/" + actor.ActorID(childNameHint))
 
 	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
@@ -1072,11 +1092,11 @@ func TestReviver_AttachStraddle_HostStampedMidBuild_NoLocalRevive(t *testing.T) 
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const author = actor.ActorID("agent:straddle")
+	author := actor.ActorID("agent:straddle")
 	builder.byID[author] = builder.recordFactory(author)
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, author, actor.KindAgent) // Host=="" initially → passes the first Lookup
+	author = admit(t, h, author, actor.KindAgent) // Host=="" initially → passes the first Lookup
 
 	// The straddle: after factoryFor resolves (Host==""), before SpawnIfAbsent, a
 	// daemon attach stamps Host on the SAME id (what accept.go handleAttach does).
@@ -1089,15 +1109,11 @@ func TestReviver_AttachStraddle_HostStampedMidBuild_NoLocalRevive(t *testing.T) 
 	}
 
 	err := (homeReviver{h: h}).EnsureLive(ctx, author)
-	if err == nil {
-		t.Fatal("EnsureLive returned nil after a mid-build Host stamp — the local cell was kept (double-embodiment window)")
+	if err != nil {
+		t.Fatalf("EnsureLive active-only post-build check: %v", err)
 	}
-	var rejected schedule.ReviveRejected
-	if errors.As(err, &rejected) {
-		t.Fatalf("EnsureLive = ReviveRejected{%s}; want a TRANSIENT error (attached-after-build is retryable, never a poison verdict)", rejected.Reason)
-	}
-	if live(h, author) {
-		t.Fatal("a local cell survived the attach-straddle — the post-build Host recheck did not undo the build")
+	if !live(h, author) {
+		t.Fatal("active member build was undone by a placement comparison")
 	}
 }
 
@@ -1111,11 +1127,11 @@ func TestReconcileActivation_BuildStraddle_RemoveSelfUndo(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:recon-straddle")
+	id := actor.ActorID("agent:recon-straddle")
 	builder.byID[id] = builder.recordFactory(id)
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
 	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 
 	// The straddle: Home.Remove runs AFTER the ring's build lands but BEFORE its

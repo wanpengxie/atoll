@@ -43,7 +43,6 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Rev", "class": "claude"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
-	instID := "agent:" + agentID
 
 	// create + bind a daemon (one call) → id + api_key.
 	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", chID),
@@ -57,13 +56,11 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
 		map[string]any{"decl_id": agentID, "placement": "daemon", "desired_host": daemonID, "make_default": true}, cookies)
 	assertStatus(t, w, http.StatusCreated)
+	instID := respJSON(t, w)["instance_id"].(string)
 	// 膜律 (v1.8 问①): daemon attach no longer mints membership — the daemon-placed
 	// actor must be admitted by the introduce door first. The old HTTP introduce
 	// path writes intent only; the operate-face executor (CORE1③) is what Admits in
 	// production. Stand in for that door here (S5b rewires the HTTP path onto it).
-	if err := env.app.AdmitForTest(chID, actor.ActorID(instID), actor.KindAgent); err != nil {
-		t.Fatalf("pre-admit daemon-placed agent: %v", err)
-	}
 
 	// 1) PULL the assignment.
 	w = env.do(t, "GET", fmt.Sprintf("/compute/plan?key=%s&channel=%s", apiKey, chID), nil, nil)

@@ -3,6 +3,7 @@ package schedule
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -76,7 +77,7 @@ func TestNewSucceedsWithNilLogger(t *testing.T) {
 
 func TestScheduleValidationMatrix(t *testing.T) {
 	rt := newTestRuntime(t)
-	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
 	minter, engine, err := New(Deps{
 		Store: newFakeStore(), Fire: &fakeFireSink{}, Host: rt,
@@ -215,7 +216,7 @@ func TestBindIncarnationRoutesToMemoryOnly(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	rt := newTestRuntime(t)
-	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
 	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
 	if err != nil {
@@ -255,7 +256,7 @@ func TestIncarnationBindDropsOnDeathEvenWithLiveSuccessor(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	rt := newTestRuntime(t)
-	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
 	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
 	if err != nil {
@@ -274,7 +275,7 @@ func TestIncarnationBindDropsOnDeathEvenWithLiveSuccessor(t *testing.T) {
 	// successor being live must NOT rescue the predecessor's timer (pointer
 	// identity, not id identity, is the drop check).
 	rt.DespawnID("author-1")
-	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
 	waitForArmedAtLeast(t, clock, 1)
 	clock.Advance(time.Hour)
@@ -432,8 +433,8 @@ func TestCancelTriState(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	rt := newTestRuntime(t)
-	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
-	rt.Spawn("author-2", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	_, _, _ = rt.SpawnIfAbsent("author-2", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
 	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
 	if err != nil {
@@ -682,6 +683,141 @@ func TestNextFireAtStoreFaultDegradesToBackoffRetry(t *testing.T) {
 
 	waitFor(t, 2*time.Second, func() bool { return sink.callCount() >= 1 })
 	waitFor(t, 2*time.Second, func() bool { return !store.hasRow("t-fault") })
+}
+
+// ---------------------------------------------------------------------
+// Incarnation (mem) family admission quota — the durable quota's twin.
+// ---------------------------------------------------------------------
+
+// TestScheduleMemQuota pins the in-memory incarnation-family ceiling
+// (maxMemTimersPerAuthor): once one author holds that many live mem entries,
+// the next incarnation-bind Schedule is refused with ErrScheduleQuota — the
+// same bound the durable store enforces per author, so a runaway self-
+// rescheduler cannot pin unbounded engine memory. A DIFFERENT author is
+// unaffected (the count is per-author).
+func TestScheduleMemQuota(t *testing.T) {
+	store := newFakeStore()
+	sink := &fakeFireSink{}
+	clock := newFakeClock(time.UnixMilli(1_000_000))
+	rt := newTestRuntime(t)
+	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	_, _, _ = rt.SpawnIfAbsent("author-2", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+
+	// Not started: schedule() populates mem synchronously with no run loop
+	// racing the map, so the quota boundary is deterministic.
+	_, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	defer engine.Close()
+
+	future := clock.Now().Add(time.Hour).UnixMilli()
+	for i := 0; i < maxMemTimersPerAuthor; i++ {
+		if _, err := engine.schedule(context.Background(), "author-1", ScheduleReq{Bind: BindIncarnation, FireAt: future, Type: "t"}); err != nil {
+			t.Fatalf("schedule mem %d: %v", i, err)
+		}
+	}
+	// The next incarnation-bind schedule for author-1 is over quota.
+	if _, err := engine.schedule(context.Background(), "author-1", ScheduleReq{Bind: BindIncarnation, FireAt: future, Type: "t"}); !errors.Is(err, ErrScheduleQuota) {
+		t.Fatalf("mem schedule over quota: err=%v want ErrScheduleQuota", err)
+	}
+	// A different author at zero mem entries is unaffected.
+	if _, err := engine.schedule(context.Background(), "author-2", ScheduleReq{Bind: BindIncarnation, FireAt: future, Type: "t"}); err != nil {
+		t.Fatalf("mem schedule for unrelated author must succeed, got %v", err)
+	}
+}
+
+// ---------------------------------------------------------------------
+// R7 per-fire deadline (bounded fire attempt).
+// ---------------------------------------------------------------------
+
+// deadlineSink blocks in Append until its per-call ctx is cancelled, recording
+// the ctx's deadline so a test can prove the engine imposed a per-fire timeout
+// (never leaving a wedged sink to hang the run loop forever).
+type deadlineSink struct {
+	mu          sync.Mutex
+	called      bool
+	hadDeadline bool
+	deadline    time.Time
+	entered     chan struct{}
+}
+
+func newDeadlineSink() *deadlineSink { return &deadlineSink{entered: make(chan struct{}, 1)} }
+
+func (s *deadlineSink) Append(ctx context.Context, _ actor.ActorID, _ *message.Envelope) error {
+	dl, ok := ctx.Deadline()
+	s.mu.Lock()
+	s.called = true
+	s.hadDeadline = ok
+	s.deadline = dl
+	s.mu.Unlock()
+	select {
+	case s.entered <- struct{}{}:
+	default:
+	}
+	<-ctx.Done() // hang until the per-fire deadline (or engine shutdown) cancels us
+	return ctx.Err()
+}
+
+func (s *deadlineSink) snapshot() (bool, bool, time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.called, s.hadDeadline, s.deadline
+}
+
+var _ FireSink = (*deadlineSink)(nil)
+
+// TestR7PerFireDeadline_HungFireIsBoundedAndTransient proves the R7 contract: a
+// fire attempt that hangs is wrapped in a per-fire deadline (so the run loop is
+// never wedged forever on one wedged sink), and a cancelled/deadline-exceeded
+// fire is treated as TRANSIENT — the row is RETAINED for the next tick, never
+// misjudged as a permanent failure (which would delete it / move it to dead).
+// Close() cancels the in-flight per-fire ctx and joins in bounded time.
+//
+// The deadline VALUE (perFireTimeout) is asserted structurally via the ctx's
+// own Deadline() rather than by waiting it out: the engine's lifecycle ctx
+// carries NO deadline, so a deadline present on the Append ctx can only be the
+// per-fire WithTimeout, and it lands ~perFireTimeout out.
+func TestR7PerFireDeadline_HungFireIsBoundedAndTransient(t *testing.T) {
+	store := newFakeStore()
+	sink := newDeadlineSink()
+	clock := newFakeClock(time.UnixMilli(1_000_000))
+	engine := mustNewEngine(t, store, sink, &fakeReviver{}, clock)
+	engine.Start()
+
+	id := scheduleIdentityDue(t, engine, "author-1", clock)
+
+	// The fire is attempted and it hangs inside the sink.
+	select {
+	case <-sink.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("fire never attempted")
+	}
+	beforeClose := time.Now()
+	called, hadDeadline, deadline := sink.snapshot()
+	if !called || !hadDeadline {
+		t.Fatalf("Append ctx had no deadline (called=%v hadDeadline=%v) — R7 per-fire deadline not imposed", called, hadDeadline)
+	}
+	// The deadline is ~perFireTimeout out (window generous for scheduling slop).
+	if remaining := time.Until(deadline); remaining < perFireTimeout-2*time.Second || remaining > perFireTimeout+2*time.Second {
+		t.Fatalf("per-fire deadline is %v out, want ~%v (perFireTimeout)", remaining, perFireTimeout)
+	}
+	// The row is still pending (the hung fire is not yet resolved).
+	if !store.hasRow(id) {
+		t.Fatal("row deleted while its fire was still in flight")
+	}
+
+	// Close cancels the in-flight per-fire ctx (child of the engine ctx) and
+	// joins the run loop in bounded time — well under the 10s per-fire deadline.
+	engine.Close()
+	if elapsed := time.Since(beforeClose); elapsed > 3*time.Second {
+		t.Fatalf("Close took %v to unblock a hung fire — want bounded (< per-fire deadline)", elapsed)
+	}
+	// The hung fire ended in a cancellation (transient), so the row is RETAINED
+	// for a later tick, never disposed as a permanent failure.
+	if !store.hasRow(id) {
+		t.Fatal("a cancelled/timed-out fire deleted the row — R7 must treat it as transient (at-least-once retention)")
+	}
 }
 
 // ---------------------------------------------------------------------

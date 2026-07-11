@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -23,26 +22,7 @@ import (
 // one row = identity + class + config + owner + visibility, for agents and tools
 // alike. It writes the tables directly (declaration data, NOT actor messages);
 // changes take effect when the cell is (re)built, never via live hot update
-// (Spawn replaces).
-
-// spawnActorInstance builds ONE actor instance from its declaration + per-channel
-// row and spawns it live. Spawn REPLACES an existing cell (one actor, one owner),
-// so this doubles as restart = rebuild (new config) + Spawn (the engine resumes
-// from its state slot). The restart executors are its only callers now (A-P14).
-func (a *App) spawnActorInstance(chID channel.ID, home *platform.Home, instanceID, class, channelCfg, globalCfg string) error {
-	// class IS the engine (claude/go-kimi); config = global identity overlaid by
-	// per-channel (mergeConfig). Shared build装配 (A12: same buildInstance the
-	// reconcile builder uses).
-	decl, err := a.buildInstance(chID, compositionRow{
-		instanceID: instanceID, class: class, channelCfg: channelCfg, globalCfg: globalCfg,
-	})
-	if err != nil {
-		return err
-	}
-	// Home.Spawn mints the welded pen inside the admission membrane and hands it to
-	// the factory — the app supplies id + factory, never a pen.
-	return home.Spawn(context.Background(), decl.ID, decl.Kind, decl.Factory)
-}
+// (Restart requests a fresh incarnation).
 
 type createDeclReq struct {
 	Name string `json:"name"`
@@ -189,33 +169,29 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
 		return
 	}
-	// Instance ids keep the historical 'agent:' namespace prefix (persistent name,
-	// carries no classification weight — see actor_decls DDL comment).
-	instanceID := "agent:" + declID
-
 	// Gather the channels this instance is in BEFORE deleting the rows.
-	var chans []string
+	type composedInstance struct{ channelID, instanceID string }
+	var composed []composedInstance
 	if rows, qerr := a.db.QueryContext(ctx,
-		`SELECT channel_id FROM channel_actors WHERE instance_id = ?`, instanceID); qerr == nil {
+		`SELECT channel_id, instance_id FROM channel_actors WHERE principal = ?`, declID); qerr == nil {
 		for rows.Next() {
-			var ch string
-			if rows.Scan(&ch) == nil {
-				chans = append(chans, ch)
+			var item composedInstance
+			if rows.Scan(&item.channelID, &item.instanceID) == nil {
+				composed = append(composed, item)
 			}
 		}
 		rows.Close()
 	}
 	// Clear any channel whose default_agent pointed at the deleted instance (default
 	// routing keys off channels.default_agent).
-	_, _ = a.db.ExecContext(ctx,
-		`UPDATE channels SET default_agent = NULL WHERE default_agent = ?`, instanceID)
 	// Per-channel projection: intent first, then Home control-plane removal.
-	for _, ch := range chans {
+	for _, item := range composed {
+		_, _ = a.db.ExecContext(ctx, `UPDATE channels SET default_agent=NULL WHERE id=? AND default_agent=?`, item.channelID, item.instanceID)
 		_, _ = a.db.ExecContext(ctx,
-			`DELETE FROM channel_actors WHERE channel_id = ? AND instance_id = ?`, ch, instanceID)
-		if home := a.getHome(channel.ID(ch)); home != nil {
-			if rerr := home.Remove(ctx, actor.ActorID(instanceID)); rerr != nil {
-				a.logger.Warn("delete decl: channel removal", "channel", ch, "instance", instanceID, "err", rerr.Error())
+			`DELETE FROM channel_actors WHERE channel_id = ? AND instance_id = ?`, item.channelID, item.instanceID)
+		if home := a.getHome(channel.ID(item.channelID)); home != nil {
+			if rerr := home.Remove(ctx, actor.ActorID(item.instanceID)); rerr != nil {
+				a.logger.Warn("delete decl: channel removal", "channel", item.channelID, "instance", item.instanceID, "err", rerr.Error())
 			}
 		}
 		// 户籍欠账 (owner 拍定, reverse-entropy account): when a channel's home is NOT
@@ -281,9 +257,9 @@ func (a *App) handleIntroduceActor(c *gin.Context) {
 // channel the CALLER is a member of. It is an HTTP垫片 (NP-1=c): world-layer
 // ownership scopes WHICH channels (the caller's own declaration), but each
 // per-channel restart is replayed through the door (channel.restart_actor,
-// audience=[system]) — no direct Home.Spawn from HTTP (红线11). The per-channel
+// audience=[system]) — no direct embodiment mutation from HTTP (红线11). The per-channel
 // authority is the door's member check; a channel the caller is not a member of
-// is skipped (膜律). Restart is原地换脑 (Spawn-replace, A-P14): editing config
+// is skipped (膜律). Restart is原地换脑 (A-P14): editing config
 // does not hot-update a live cell; taking effect needs a rebuild.
 func (a *App) handleRestartDecl(c *gin.Context) {
 	userID := middleware.UserID(c)
@@ -302,31 +278,30 @@ func (a *App) handleRestartDecl(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
 		return
 	}
-	instanceID := "agent:" + declID
-	var chans []string
+	type target struct{ channelID, instanceID string }
+	var targets []target
 	rows, qerr := a.db.QueryContext(ctx,
-		`SELECT channel_id FROM channel_actors WHERE instance_id = ? AND placement = ?`,
-		instanceID, placementServer)
+		`SELECT channel_id, instance_id FROM channel_actors WHERE principal = ?`, declID)
 	if qerr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 	for rows.Next() {
-		var ch string
-		if rows.Scan(&ch) == nil {
-			chans = append(chans, ch)
+		var v target
+		if rows.Scan(&v.channelID, &v.instanceID) == nil {
+			targets = append(targets, v)
 		}
 	}
 	rows.Close()
 
-	payload, _ := json.Marshal(instancePayload{InstanceID: instanceID})
 	restarted := 0
-	for _, ch := range chans {
-		r, derr := a.submitControlThroughDoor(ctx, ch, userID, platform.TypeRestartActor, payload)
+	for _, target := range targets {
+		payload, _ := json.Marshal(instancePayload{InstanceID: target.instanceID})
+		r, derr := a.submitControlThroughDoor(ctx, target.channelID, userID, platform.TypeRestartActor, payload)
 		if derr != nil {
 			// Non-member of that channel (膜律) or unavailable — the caller may only
 			// restart in channels they are a member of.
-			a.logger.Warn("restart decl: door", "channel", ch, "instance", instanceID, "err", derr.Error())
+			a.logger.Warn("restart decl: door", "channel", target.channelID, "instance", target.instanceID, "err", derr.Error())
 			continue
 		}
 		if r.settled && r.completed {

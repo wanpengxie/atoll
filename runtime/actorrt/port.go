@@ -34,7 +34,7 @@ import (
 // It returns the authoritative write verdict (ipc.EmitResult: MessageID +
 // RejectReason) so the port can ack it back to the remote actor — the writer
 // contract is not downgraded across the wire. The error is the transport/write
-// failure (relayed to the remote as the ack's Err string); a rejected-but-
+// failure (relayed as coded error_code/error_message); a rejected-but-
 // processed emit returns a non-zero RejectReason with a nil error.
 type EmitSink func(ctx context.Context, inc Incarnation, env *message.Envelope) (ipc.EmitResult, error)
 
@@ -46,7 +46,7 @@ type EmitSink func(ctx context.Context, inc Incarnation, env *message.Envelope) 
 // imports the access/schedule vocabulary — the port is a pure transport, the same
 // way it never interprets a KindObs value. It returns the opaque response bytes
 // the caller acks back to the remote (verdict, not downgraded across the wire) and
-// an error for a host-side fault (relayed as the ack's Err string).
+// an error for a host-side fault (relayed as coded error_code/error_message).
 //
 // inc is passed (not just the bare id) for the same reason as EmitSink: the home-
 // side sink gates the invocation on this port still being the live embodiment
@@ -449,7 +449,7 @@ func (p *port) readLoop() {
 			res, emitErr := p.sinks.Emit(p.ctx, Incarnation{id: p.id, p: p}, &env)
 			ackPayload := ipc.EmitAckPayload{EmitResult: res}
 			if emitErr != nil {
-				ackPayload.Err = emitErr.Error()
+				ackPayload.ErrorCode, ackPayload.ErrorMessage = ipc.EncodeError(emitErr)
 			}
 			raw, err := json.Marshal(ackPayload)
 			if err != nil {
@@ -561,7 +561,7 @@ func (p *port) relayAck(ackKind ipc.Kind, sink RelaySink, payload []byte, plane 
 	res, relayErr := sink(p.ctx, Incarnation{id: p.id, p: p}, payload)
 	ackPayload := ipc.RelayAckPayload{Payload: res}
 	if relayErr != nil {
-		ackPayload.Err = relayErr.Error()
+		ackPayload.ErrorCode, ackPayload.ErrorMessage = ipc.EncodeError(relayErr)
 	}
 	raw, err := json.Marshal(ackPayload)
 	if err != nil {
@@ -644,7 +644,9 @@ func (p *port) signalDespawn(dl context.Context) {
 		go func() {
 			defer close(frameDone)
 			if payload, err := json.Marshal(ipc.DownPayload{Reason: "despawn"}); err == nil {
-				_ = p.codec.Write(ipc.Frame{Kind: ipc.KindDespawn, Payload: payload})
+				if err := p.codec.Write(ipc.Frame{Kind: ipc.KindDespawn, Payload: payload}); err != nil {
+					p.logger.Error("actorrt.port.despawn_frame_write_failed", "actor", string(p.id), "error", err)
+				}
 			}
 		}()
 		if dl == nil {

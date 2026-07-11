@@ -79,7 +79,7 @@ func TestCellStartErrorPublishesDown(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
-	rt.Spawn("a", actor.KindAgent, static(startErrActor{}))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(startErrActor{}))
 	select {
 	case <-w.notify:
 	case <-time.After(2 * time.Second):
@@ -114,7 +114,7 @@ func TestSafeReceiveSwallowsError(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w)
 	defer rt.StopAll()
-	rt.Spawn("a", actor.KindAgent, static(a))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(a))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-a.got:
@@ -143,7 +143,7 @@ func TestNewDefaultsParent(t *testing.T) {
 	if rt.parent == nil {
 		t.Fatal("New did not default a nil Parent")
 	}
-	rt.Spawn("a", actor.KindAgent, static(newRecordActor()))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(newRecordActor()))
 	if _, ok := rt.Stat("a"); !ok {
 		t.Fatal("runtime built from a zero Config cannot host a cell")
 	}
@@ -188,7 +188,7 @@ func TestPublishDownWatcherPanicGuarded(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(bad)
 	rt.WatchDown(good)
-	rt.Spawn("a", actor.KindAgent, static(panicActor{}))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(panicActor{}))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-bad.notify:
@@ -223,7 +223,7 @@ func TestPublishObsWatcherPanicGuarded(t *testing.T) {
 	defer rt.StopAll()
 	rt.WatchObs("a", bad)
 	rt.WatchObs("a", good)
-	rt.Spawn("a", actor.KindAgent, static(&observerActor{}))
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(&observerActor{}))
 	if _, err := del.Deliver([]actor.ActorID{"a"}, env("trigger")); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
@@ -276,17 +276,17 @@ func TestDeliverStoppedOutcome(t *testing.T) {
 // the substrate refuses to report Delivered for any non-nil enqueue error).
 type fakeErrEmbodiment struct{ started time.Time }
 
-func (fakeErrEmbodiment) Deliver(*message.Envelope) error { return errors.New("weird enqueue error") }
-func (p fakeErrEmbodiment) startedAt() time.Time          { return p.started }
-func (fakeErrEmbodiment) cancelRequest(message.ID)        {}
+func (fakeErrEmbodiment) Deliver(*message.Envelope) error        { return errors.New("weird enqueue error") }
+func (p fakeErrEmbodiment) startedAt() time.Time                 { return p.started }
+func (fakeErrEmbodiment) cancelRequest(message.ID)               {}
 func (fakeErrEmbodiment) occupantDriver() (OccupantDriver, bool) { return nil, false }
-func (fakeErrEmbodiment) initiateStop()                   {}
-func (fakeErrEmbodiment) beginTeardown()                  {}
-func (fakeErrEmbodiment) signalDespawn(context.Context)   {}
-func (fakeErrEmbodiment) doneCh() <-chan struct{}         { return nil }
-func (fakeErrEmbodiment) isLive() bool                    { return false }
-func (fakeErrEmbodiment) markDead()                       {}
-func (fakeErrEmbodiment) kind() actor.Kind                { return "" }
+func (fakeErrEmbodiment) initiateStop()                          {}
+func (fakeErrEmbodiment) beginTeardown()                         {}
+func (fakeErrEmbodiment) signalDespawn(context.Context)          {}
+func (fakeErrEmbodiment) doneCh() <-chan struct{}                { return nil }
+func (fakeErrEmbodiment) isLive() bool                           { return false }
+func (fakeErrEmbodiment) markDead()                              {}
+func (fakeErrEmbodiment) kind() actor.Kind                       { return "" }
 
 // TestDeliverDefaultArmMapsToStopped: an enqueue error that is neither
 // ErrMailboxFull nor ErrCellStopped maps to Stopped (deliver's default switch

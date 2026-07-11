@@ -3,6 +3,7 @@ package app_test
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -41,7 +42,8 @@ func TestDeclsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 		map[string]any{"decl_id": agentID, "placement": "server", "make_default": true}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	intro := respJSON(t, w)
-	if intro["instance_id"] != "agent:"+agentID || intro["class"] != "claude" {
+	instanceID, _ := intro["instance_id"].(string)
+	if !strings.HasPrefix(instanceID, "agent:"+agentID+":") || intro["class"] != "claude" {
 		t.Fatalf("introduce = %+v", intro)
 	}
 	if intro["placement"] != "server" || intro["created"] != true {
@@ -64,6 +66,41 @@ func TestDeclsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 	}
 }
 
+// TestRestartDecl_DaemonPlacedRowNotFilteredOut is F-2's app-entry regression
+// guard (P2-2). handleRestartDecl enumerates channel_actors WITHOUT a placement
+// filter, so a DAEMON-placed row is a restart target exactly like a server one.
+// F-2 removed a placement='server' filter that had silently excluded daemon rows
+// from Restart; if that filter ever creeps back, a daemon-placed instance falls
+// out of the target set and no restart control request is submitted for it. Here
+// the ONLY composed row is daemon-placed, so restarted>=1 (plus a completed
+// channel.restart_actor door terminal 笔为 user:X) proves the enumeration reached
+// the daemon row and submitted its restart through the door. It does NOT re-prove
+// the cross-wire rebuild — the platform-side
+// TestRestartDaemonPlacedActor_RebuildsAcrossWire owns that half; this guard's
+// whole target is "the query does not filter placement".
+func TestRestartDecl_DaemonPlacedRowNotFilteredOut(t *testing.T) {
+	env := setupTestApp(t)
+	s := fullSetup(t, env)
+	agentID := createOwnedAgent(t, env, s.cookies, "DaemonRes", "go-kimi")
+
+	// Introduce with NO placement → default policy = daemon (assert it, so this
+	// test is provably guarding the daemon-placed case, not a server row).
+	wIntro := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", s.chID),
+		map[string]any{"decl_id": agentID}, s.cookies)
+	assertStatus(t, wIntro, http.StatusCreated)
+	if got := respJSON(t, wIntro)["placement"]; got != "daemon" {
+		t.Fatalf("introduce placement = %v, want daemon (the guarded case)", got)
+	}
+
+	w := env.do(t, "POST", "/api/actor-decls/"+agentID+"/restart", nil, s.cookies)
+	assertStatus(t, w, http.StatusOK)
+	if n, _ := respJSON(t, w)["restarted"].(float64); n < 1 {
+		t.Fatalf("restarted = %v, want >= 1 — the daemon-placed row was filtered out of the restart target set (F-2 regression)", n)
+	}
+	// The restart actually crossed the door for the daemon-placed row.
+	assertDoorTerminal(t, env, s.cookies, s.chID, s.userID, "channel.restart_actor")
+}
+
 // TestIntroduceActor_HonestReintroduce (SW-8): re-introducing an existing
 // composition row reports it as-is ("exists, unchanged") — it does NOT swallow
 // a placement/class change while echoing the caller's new values. Rehoming is
@@ -79,7 +116,6 @@ func TestIntroduceActor_HonestReintroduce(t *testing.T) {
 	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Alice", "class": "go-kimi"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
-	instID := "agent:" + agentID
 
 	// first introduce: default placement (daemon policy), engine=go-kimi → new row,
 	// created=true.
@@ -87,6 +123,7 @@ func TestIntroduceActor_HonestReintroduce(t *testing.T) {
 		map[string]any{"decl_id": agentID}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	first := respJSON(t, w)
+	instID := first["instance_id"].(string)
 	if first["created"] != true || first["placement"] != "daemon" || first["class"] != "go-kimi" {
 		t.Fatalf("first introduce = %+v", first)
 	}
@@ -146,10 +183,10 @@ func TestSetDefaultAgentAPI(t *testing.T) {
 	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Alice", "class": "go-kimi"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
-	instID := "agent:" + agentID
 	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
 		map[string]any{"decl_id": agentID}, cookies) // not make_default
 	assertStatus(t, w, http.StatusCreated)
+	instID := respJSON(t, w)["instance_id"].(string)
 
 	// 1) repoint default_agent to Alice (a composition member) → ok + persisted
 	w = env.do(t, "PUT", fmt.Sprintf("/api/channels/%s/default_agent", chID),

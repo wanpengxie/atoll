@@ -4,13 +4,13 @@ import (
 	"context"
 	"log/slog"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/internal/store"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // testChannelID is the channel every harness test binds its Deps to.
@@ -47,15 +47,13 @@ func testDeps(t *testing.T, cs *store.ChannelStores) Deps {
 
 // registerActor seeds an active actor into the registry so sender/audience
 // checks resolve it.
-func registerActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID, kind actor.Kind) {
+func registerActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID, kind actor.Kind) actor.ActorID {
 	t.Helper()
-	if err := cs.Membership.Insert(context.Background(), storespec.Record{
-		ID:        id,
-		Kind:      kind,
-		CreatedAt: fixedNowMs,
-	}); err != nil {
+	minted, err := cs.Membership.Admit(context.Background(), kind, strings.ReplaceAll(string(id), ":", "-"), fixedNowMs)
+	if err != nil {
 		t.Fatalf("register actor %q: %v", id, err)
 	}
+	return minted
 }
 
 // ctxCaller returns a context carrying a caller bound to the test channel.

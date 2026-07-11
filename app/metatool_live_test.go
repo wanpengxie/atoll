@@ -169,7 +169,7 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 // startToolDaemon runs a single daemon (platform.RunCompute) hosting BOTH the
 // tool:xhs and tool:kimi cells over one real /compute link. Returns once started
 // (caller waits for the actors to register via waitForActor).
-func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Server, logger *slog.Logger) {
+func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Server, logger *slog.Logger) (actor.ActorID, actor.ActorID) {
 	t.Helper()
 
 	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID),
@@ -182,17 +182,19 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
-	if err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool); err != nil {
+	xhsID, err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool)
+	if err != nil {
 		t.Fatalf("pre-admit tool:xhs: %v", err)
 	}
-	if err := env.app.AdmitForTest(s.chID, kimi.DefaultActorID, actor.KindTool); err != nil {
+	kimiID, err := env.app.AdmitForTest(s.chID, kimi.DefaultActorID, actor.KindTool)
+	if err != nil {
 		t.Fatalf("pre-admit tool:kimi: %v", err)
 	}
 	runErr := make(chan error, 1)
 	desired, builder := staticActorCompute([]platform.ActorDecl{
 		{
-			ID:      xhs.DefaultActorID,
-			Kind:    actor.KindTool,
+			ID:   xhsID,
+			Kind: actor.KindTool,
 			Factory: platform.ActorFactory{Proc: xhs.Def(xhs.Config{
 				ListenAddr:     metatoolXHSDeviceAddr,
 				ReaperInterval: 20 * time.Millisecond,
@@ -200,8 +202,8 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 			})},
 		},
 		{
-			ID:      kimi.DefaultActorID,
-			Kind:    actor.KindTool,
+			ID:   kimiID,
+			Kind: actor.KindTool,
 			Factory: platform.ActorFactory{Proc: kimi.Def(kimi.Config{
 				ListenAddr:     metatoolKimiDeviceAddr,
 				ReaperInterval: 20 * time.Millisecond,
@@ -222,6 +224,7 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 			t.Log("RunCompute did not return within 3s after cancel")
 		}
 	})
+	return xhsID, kimiID
 }
 
 // mockDevice is a canned-reply device serving one adapter's private /device WS.
@@ -338,9 +341,9 @@ func TestMetatoolLiveCallActor(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelWarn}))
 
 	// One daemon hosting both tool cells.
-	startToolDaemon(t, env, s, srv, logger)
-	waitForActor(t, env, s, "tool:xhs", 5*time.Second)
-	waitForActor(t, env, s, "tool:kimi", 5*time.Second)
+	xhsID, kimiID := startToolDaemon(t, env, s, srv, logger)
+	waitForActor(t, env, s, string(xhsID), 5*time.Second)
+	waitForActor(t, env, s, string(kimiID), 5*time.Second)
 
 	// Connect a mock device to each adapter's private /device WS.
 	xhsDev := startMockDevice(t, metatoolXHSDeviceAddr, xhsCannedUp)
@@ -352,7 +355,7 @@ func TestMetatoolLiveCallActor(t *testing.T) {
 
 	// --- STAGE 1: xhs via call_actor -------------------------------------------
 	t.Run("xhs", func(t *testing.T) {
-		rv := callActorAsync(t, sa, ctx, "tool:xhs", "xhs.search",
+		rv := callActorAsync(t, sa, ctx, string(xhsID), "xhs.search",
 			map[string]any{"keyword": "go"}, 8*time.Second)
 		if rv.IsError {
 			t.Fatalf("xhs call_actor returned error: %+v", rv.Value)
@@ -365,7 +368,7 @@ func TestMetatoolLiveCallActor(t *testing.T) {
 
 	// --- STAGE 2: kimi via call_actor ------------------------------------------
 	t.Run("kimi", func(t *testing.T) {
-		rv := callActorAsync(t, sa, ctx, "tool:kimi", "kimi.command",
+		rv := callActorAsync(t, sa, ctx, string(kimiID), "kimi.command",
 			map[string]any{"action": "navigate", "args": map[string]any{"url": "https://example.com"}}, 8*time.Second)
 		if rv.IsError {
 			t.Fatalf("kimi call_actor returned error: %+v", rv.Value)
@@ -391,9 +394,9 @@ func TestMetatoolLiveCallActor(t *testing.T) {
 		// Wait for the adapter to observe the closed socket (its readLoop flips
 		// device-absent shortly after the close). Poll via the status route so the
 		// next call_actor is guaranteed to hit the offline path, not a race.
-		waitDeviceOnline(t, env, s, "tool:xhs", false, 5*time.Second)
+		waitDeviceOnline(t, env, s, string(xhsID), false, 5*time.Second)
 
-		rv := callActorAsync(t, sa, ctx, "tool:xhs", "xhs.search",
+		rv := callActorAsync(t, sa, ctx, string(xhsID), "xhs.search",
 			map[string]any{"keyword": "go"}, 8*time.Second)
 		if !rv.IsError {
 			t.Fatalf("xhs call_actor after device hang-up should fail, got: %+v", rv.Value)

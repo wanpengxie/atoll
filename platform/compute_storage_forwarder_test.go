@@ -1,14 +1,7 @@
 package platform
 
-// compute_storage_forwarder_test.go covers 期11 review残余#1/#2b's own home
-// half of storageHostForwarder.pass — the daemon-side orchestration layer
-// SITTING ABOVE cmd/daemon/internal/storagehost.Host.LandedCoords (whose own
-// read-error fail-closed contract host_test.go covers) and above the wire
-// (whose reply.Reason plumbing platform/internal/link/storagecontrol_test.go
-// covers): pass() must (1) never send a ReconcilePull at all when
-// LandedCoords itself failed, and (2) never call StorageHost.Reconcile when
-// the home's reply carries a non-empty Reason (a NAK, not an invitation to
-// run the scrubber against fabricated empty truth). A REAL WS link is used
+// compute_storage_forwarder_test.go covers storageHostForwarder.pass above the
+// wire: a reply Reason is a NAK and must not drive local reconciliation. A REAL WS link is used
 // (not a fake Dialer — pass() takes a concrete *link.Dialer, so there is no
 // interface seam to fake through), mirroring platform/internal/link's own
 // storagecontrol_test.go rig.
@@ -43,7 +36,7 @@ func (f *forwarderTestStorageHostControl) Committed(context.Context, string, str
 func (f *forwarderTestStorageHostControl) ReclaimAck(context.Context, string, string) (bool, error) {
 	return false, nil
 }
-func (f *forwarderTestStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords, landedCoords []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
+func (f *forwarderTestStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++
@@ -61,29 +54,19 @@ func (f *forwarderTestStorageHostControl) callCount() int {
 
 var _ link.StorageHostControl = (*forwarderTestStorageHostControl)(nil)
 
-// forwarderTestStorageHost is a configurable platform.StorageHost double:
-// LandedCoords answers either a canned error or a canned slice; Reconcile
-// records whether it ran at all.
+// forwarderTestStorageHost records whether reconciliation ran.
 type forwarderTestStorageHost struct {
 	mu             sync.Mutex
-	landedErr      error
-	landedCoords   []string
 	reconcileCalls int
 }
 
 func (h *forwarderTestStorageHost) Alloc(string, bool) error { return nil }
-func (h *forwarderTestStorageHost) Reconcile(ctx context.Context, resources []StorageResourceCoord, pendingReservations []StorageReservationCoord, pendingTombstones []StorageTombstoneCoord, ack StorageReclaimAckFunc, resend StorageCommittedResendFunc) {
+func (h *forwarderTestStorageHost) Reconcile(ctx context.Context, resources []StorageResourceCoord, pendingReservations []StorageReservationCoord, pendingTombstones []StorageTombstoneCoord, ack StorageReclaimAckFunc) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.reconcileCalls++
 }
 func (h *forwarderTestStorageHost) ActiveWriteCoords() []string { return nil }
-func (h *forwarderTestStorageHost) LandedCoords() ([]string, error) {
-	if h.landedErr != nil {
-		return nil, h.landedErr
-	}
-	return h.landedCoords, nil
-}
 func (h *forwarderTestStorageHost) reconciled() int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -108,7 +91,7 @@ func dialForwarderRig(t *testing.T, shc link.StorageHostControl) *link.Dialer {
 	}))
 	t.Cleanup(func() { _ = acc.Close(); srv.Close() })
 
-	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1", nil, nil)
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1", nil, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -116,27 +99,21 @@ func dialForwarderRig(t *testing.T, shc link.StorageHostControl) *link.Dialer {
 	return d
 }
 
-// TestStorageHostForwarder_LandedCoordsErrorSkipsPullEntirely is 期11 review
-// 残余#1's compute.go-level DoD: a LandedCoords read failure must skip the
-// ReconcilePull round trip ENTIRELY — never send one with a fabricated empty
-// landedCoords (which would tell the home nothing landed, letting its
-// same-round-trip SweepExpiredReservations sweep an already-landed
-// reservation as abandoned).
-func TestStorageHostForwarder_LandedCoordsErrorSkipsPullEntirely(t *testing.T) {
+func TestStorageHostForwarder_ReconcilePullsWithoutLandedPhase(t *testing.T) {
 	shc := &forwarderTestStorageHostControl{}
 	d := dialForwarderRig(t, shc)
 
-	host := &forwarderTestStorageHost{landedErr: errors.New("read live/ failed")}
+	host := &forwarderTestStorageHost{}
 	f := newStorageHostForwarder(host, slog.New(slog.DiscardHandler), time.Second)
 	f.Rebind(d)
 
 	f.pass(context.Background())
 
-	if got := shc.callCount(); got != 0 {
-		t.Fatalf("ReconcilePull calls = %d, want 0 (LandedCoords error must skip the pull entirely)", got)
+	if got := shc.callCount(); got != 1 {
+		t.Fatalf("ReconcilePull calls = %d, want 1", got)
 	}
-	if got := host.reconciled(); got != 0 {
-		t.Fatalf("Reconcile calls = %d, want 0", got)
+	if got := host.reconciled(); got != 1 {
+		t.Fatalf("Reconcile calls = %d, want 1", got)
 	}
 }
 
@@ -165,14 +142,14 @@ func TestStorageHostForwarder_ReplyReasonSkipsReconcile(t *testing.T) {
 }
 
 // TestStorageHostForwarder_HappyPathStillReconciles is the regression guard:
-// a clean reply (no Reason, LandedCoords succeeds) must still drive
+// a clean reply (no Reason) must still drive
 // Reconcile exactly once — the two skip branches above must not have turned
 // into an unconditional skip.
 func TestStorageHostForwarder_HappyPathStillReconciles(t *testing.T) {
 	shc := &forwarderTestStorageHostControl{}
 	d := dialForwarderRig(t, shc)
 
-	host := &forwarderTestStorageHost{landedCoords: []string{"c1"}}
+	host := &forwarderTestStorageHost{}
 	f := newStorageHostForwarder(host, slog.New(slog.DiscardHandler), time.Second)
 	f.Rebind(d)
 

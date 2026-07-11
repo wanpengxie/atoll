@@ -2,11 +2,35 @@ package actorrt
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
+
+func TestSpawnIfAbsent_BuilderFailuresAreTypedAndLeaveNoEmbodiment(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		build func(Incarnation) Actor
+		nil   bool
+	}{
+		{"nil", func(Incarnation) Actor { return nil }, true},
+		{"panic", func(Incarnation) Actor { panic("boom") }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt, _ := New(Config{Parent: context.Background()})
+			_, built, err := rt.SpawnIfAbsent("failed", actor.KindAgent, tc.build)
+			var failure *BuildFailure
+			if built || !errors.As(err, &failure) || failure.NilActor != tc.nil {
+				t.Fatalf("built=%v err=%v failure=%+v", built, err, failure)
+			}
+			if _, live := rt.Stat("failed"); live || len(rt.LiveIDs()) != 0 {
+				t.Fatal("failed builder left a live or registered embodiment")
+			}
+		})
+	}
+}
 
 // TestLiveIDs_MatchesCurrentlySpawnedSet: LiveIDs is the map-key snapshot of
 // r.embodiments — spawning two and despawning one must leave exactly the
@@ -16,8 +40,8 @@ func TestLiveIDs_MatchesCurrentlySpawnedSet(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	a := rt.Spawn("a", actor.KindAgent, static(newRecordActor()))
-	rt.Spawn("b", actor.KindAgent, static(newRecordActor()))
+	a, _, _ := rt.SpawnIfAbsent("a", actor.KindAgent, static(newRecordActor()))
+	_, _, _ = rt.SpawnIfAbsent("b", actor.KindAgent, static(newRecordActor()))
 	rt.Despawn(a)
 
 	ids := rt.LiveIDs()
@@ -37,7 +61,10 @@ func TestSpawnIfAbsent_EmptyIDSucceeds(t *testing.T) {
 	defer rt.StopAll()
 
 	ra := newRecordActor()
-	inc, ok := rt.SpawnIfAbsent("fresh", actor.KindAgent, static(ra))
+	inc, ok, err := rt.SpawnIfAbsent("fresh", actor.KindAgent, static(ra))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !ok {
 		t.Fatal("SpawnIfAbsent(absent id) returned ok=false")
 	}
@@ -67,7 +94,7 @@ func TestSpawnIfAbsent_OccupiedIDNeverReplaces(t *testing.T) {
 	defer rt.StopAll()
 
 	original := newRecordActor()
-	originalInc := rt.Spawn("taken", actor.KindAgent, static(original))
+	originalInc, _, _ := rt.SpawnIfAbsent("taken", actor.KindAgent, static(original))
 	select {
 	case <-original.startedCh:
 	case <-time.After(time.Second):
@@ -75,7 +102,10 @@ func TestSpawnIfAbsent_OccupiedIDNeverReplaces(t *testing.T) {
 	}
 
 	discarded := newRecordActor()
-	_, ok := rt.SpawnIfAbsent("taken", actor.KindAgent, static(discarded))
+	_, ok, err := rt.SpawnIfAbsent("taken", actor.KindAgent, static(discarded))
+	if err != nil {
+		t.Fatal(err)
+	}
 	if ok {
 		t.Fatal("SpawnIfAbsent(occupied id) returned ok=true, want false")
 	}

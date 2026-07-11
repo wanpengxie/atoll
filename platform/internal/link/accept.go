@@ -453,7 +453,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				return
 			}
 			isFirstAttachOnLink := boundID == ""
-			id, accepted := a.handleAttach(reqCtx, lc, cf.Attach, daemonID, isFirstAttachOnLink, &mu, &allowed, &kinds, &portMu, ports)
+			id, accepted := a.handleAttach(reqCtx, lc, cf.RequestID, cf.Attach, daemonID, isFirstAttachOnLink, &mu, &allowed, &kinds, &portMu, ports)
 			// Count the daemon online only after a SUCCESSFUL attach (membership
 			// applied, Accepted reply sent) — a rejected/half attach must not show
 			// online. Once per link (first accepted frame). boundID is read unlocked
@@ -563,7 +563,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	done := make(chan struct{})
 	go lease.Watch(done, func() {
 		a.logger.Info("link.lease_expired", "channel", string(a.channelID))
-		_ = lc.Close()
+		lc.kill("lease_expired", nil)
 	})
 
 	// Acceptor Close tears the link down; quiet-stop this link's ports FIRST so the
@@ -573,9 +573,9 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		select {
 		case <-a.ctx.Done():
 			quietStopPorts()
-			_ = lc.Close()
+			lc.kill("acceptor_closed", a.ctx.Err())
 		case <-reqCtx.Done():
-			_ = lc.Close()
+			lc.kill("accept_request_cancelled", reqCtx.Err())
 		case <-done:
 		}
 	}()
@@ -588,12 +588,32 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// (the same death funnel the old teardown() drove).
 	lc.start()
 	<-lc.closed()
+	// Restore a total order between the last control mutation and teardown's
+	// deferred online/lane cleanup: kill closes the worker stop signal first, so
+	// queued frames cannot START after session death, and joining the worker here
+	// fences whatever was ALREADY running before boundID is inspected by the
+	// defers. The join is BOUNDED (H-1): a control handler wedged in a long-lived
+	// storage call (handleAttach's registry.Lookup / ApplyMemberTransitions /
+	// reconcileHost all run on the attach reqCtx, which has no deadline) must not
+	// pin teardown — and, through Serve's WaitGroup, Home shutdown — on a stalled
+	// store. Bound = 2× the out-network write budget (streamWriteBudget = 10s):
+	// generous for any live handler, decisive against a hung one. On timeout we
+	// abandon the join and proceed with teardown (a stuck store is never allowed
+	// to become an un-closeable station), leaving a loud, attributed trace.
+	if !lc.waitControlWorkers(2 * streamWriteBudget) {
+		boundMu.Lock()
+		b := boundID
+		boundMu.Unlock()
+		a.logger.Error("link.control_worker_join_timeout",
+			"msg", "control worker join timeout, abandoning — teardown proceeding",
+			"daemon", b, "channel", string(a.channelID))
+	}
 	close(done)
 }
 
 // handleAttach processes a stream-0 attach — the first on a link, or a later
 // Reattach (§S-P8): register declared actors into membership (register/
-// reactivate — detach never deregisters), WHOLESALE-REPLACE the link's allowed/
+// restore — detach never deregisters), WHOLESALE-REPLACE the link's allowed/
 // kinds sets to exactly att.Declarations (idempotent — an unchanged re-declare
 // swaps in an identical set; self-correcting — a dropped declaration falls out),
 // reconcile the compute's Host-owned membership rows against the fresh
@@ -604,7 +624,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 // detaching does NOT remove it (membership ≠ attachment) — reconcileHost only
 // removes rows the compute itself no longer declares. It reports (computeID,
 // accepted) so the caller can count link attachment only on success.
-func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, att *AttachRequest, daemonID string, isFirstAttachOnLink bool, mu *sync.Mutex, allowed *map[actor.ActorID]bool, kinds *map[actor.ActorID]actor.Kind, portMu *sync.Mutex, ports map[actor.ActorID]actorrt.Incarnation) (string, bool) {
+func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID string, att *AttachRequest, daemonID string, isFirstAttachOnLink bool, mu *sync.Mutex, allowed *map[actor.ActorID]bool, kinds *map[actor.ActorID]actor.Kind, portMu *sync.Mutex, ports map[actor.ActorID]actorrt.Incarnation) (string, bool) {
 	computeID := att.ComputeID
 	if daemonID != "" {
 		computeID = daemonID
@@ -619,7 +639,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, att *Attac
 	// actor-ownership validation (A6) stays deferred under single-tenancy.
 	for _, d := range att.Declarations {
 		if d.ActorID == actor.SystemActorID {
-			a.sendReply(lc, AttachReply{Accepted: false, Reason: "declared actor id is reserved: " + string(d.ActorID)})
+			a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "declared actor id is reserved: " + string(d.ActorID)})
 			return "", false
 		}
 	}
@@ -640,7 +660,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, att *Attac
 		if a.registry != nil {
 			rec, ok, err := a.registry.Lookup(ctx, d.ActorID)
 			if err != nil {
-				a.sendReply(lc, AttachReply{Accepted: false, Reason: "membership lookup: " + err.Error()})
+				a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "membership lookup: " + err.Error()})
 				return "", false
 			}
 			if !ok || !rec.IsActive() {
@@ -673,7 +693,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, att *Attac
 			adds = append(adds, storespec.MemberActorAdd{ID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Host: computeID, At: nowMs})
 		}
 		if err := a.membership.ApplyMemberTransitions(ctx, adds, nil); err != nil {
-			a.sendReply(lc, AttachReply{Accepted: false, Reason: "register: " + err.Error()})
+			a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "register: " + err.Error()})
 			return "", false
 		}
 	}
@@ -743,7 +763,10 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, att *Attac
 		a.obsMu.Unlock()
 	}
 
-	a.sendReply(lc, AttachReply{ChannelID: a.channelID, Accepted: true, DaemonID: computeID})
+	if err := a.sendReply(lc, requestID, AttachReply{ChannelID: a.channelID, Accepted: true, DaemonID: computeID}); err != nil {
+		a.logger.Info("link.attach_reply_failed", "compute", computeID, "err", err)
+		return computeID, false
+	}
 	a.logger.Info("link.attached", "compute", computeID, "actors", len(att.Declarations))
 	return computeID, true
 }
@@ -844,12 +867,12 @@ func (a *Acceptor) reconcileHost(ctx context.Context, computeID string, newAllow
 	}
 }
 
-func (a *Acceptor) sendReply(lc *linkSession, reply AttachReply) {
-	raw, err := encodeControl(controlFrame{Kind: ctrlAttachReply, AttachReply: &reply})
+func (a *Acceptor) sendReply(lc *linkSession, requestID string, reply AttachReply) error {
+	raw, err := encodeControl(controlFrame{RequestID: requestID, Kind: ctrlAttachReply, AttachReply: &reply})
 	if err != nil {
-		return
+		return err
 	}
-	_ = lc.sendControl(raw)
+	return lc.sendControl(raw)
 }
 
 // peekControlKind reads ONLY the "kind" field of a stream-0 control payload —
@@ -1035,7 +1058,7 @@ func (a *Acceptor) handleReconcilePull(ctx context.Context, lc *linkSession, sen
 	case senderDaemonID == "":
 		reply.Reason = "link: reconcile_pull frame from an unattached sender"
 	default:
-		resources, pendingReservations, pendingTombstones, err := a.storageControl.ReconcilePull(ctx, senderDaemonID, msg.ActiveCoords, msg.LandedCoords)
+		resources, pendingReservations, pendingTombstones, err := a.storageControl.ReconcilePull(ctx, senderDaemonID, msg.ActiveCoords)
 		if err != nil {
 			reply.Reason = err.Error()
 		} else {
@@ -1066,11 +1089,7 @@ type StorageHostControl interface {
 	// activeCoords is the sender's own ReconcilePull.ActiveCoords (期11
 	// review) — the implementor's liveness-touch narrows to exactly these
 	// coords, never a blanket "every reservation this daemon owns".
-	// landedCoords is the sender's ReconcilePull.LandedCoords (期11 review
-	// §2.5 #A) — the implementor flips matching pending reservations to
-	// phase='landed' (MarkReservationsLanded) BEFORE its age-sweep, so a
-	// landed-but-uncommitted create is never swept.
-	ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords, landedCoords []string) (resources []ReconcileResource, pendingReservations []ReconcileReservation, pendingTombstones []ReconcileTombstone, err error)
+	ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords []string) (resources []ReconcileResource, pendingReservations []ReconcileReservation, pendingTombstones []ReconcileTombstone, err error)
 }
 
 // emitSink builds the per-link EmitSink: a remote cell's emit is written through

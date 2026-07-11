@@ -21,6 +21,12 @@ type timerStore struct {
 	db *sql.DB
 }
 
+const (
+	maxPendingTimersPerAuthor = 1024
+	maxDeadTimers             = 4096
+	duePerAuthor              = 32
+)
+
 func newTimerStore(db *sql.DB) *timerStore {
 	return &timerStore{db: db}
 }
@@ -32,16 +38,35 @@ func newTimerStore(db *sql.DB) *timerStore {
 // (unlike resources/actor_state Create, which model a caller-supplied id that
 // legitimately races).
 func (s *timerStore) Insert(ctx context.Context, row timerspec.TimerRow) error {
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	var active, pending int
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(row.AuthorID)).Scan(&active); err != nil {
+		return err
+	}
+	if active == 0 {
+		return timerspec.ErrAuthorInactive
+	}
+	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM timers WHERE author_id=?`, string(row.AuthorID)).Scan(&pending); err != nil {
+		return err
+	}
+	if pending >= maxPendingTimersPerAuthor {
+		return timerspec.ErrScheduleQuota
+	}
+	_, err = tx.ExecContext(ctx,
 		`INSERT INTO timers (timer_id, author_id, fire_at, type, payload, correlation_id, created_at)
-		   VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		 SELECT ?, ?, ?, ?, ?, ?, ? WHERE EXISTS (
+		   SELECT 1 FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL)`,
 		string(row.ID), string(row.AuthorID), row.FireAt, row.Type, row.Payload,
-		nullableString(row.CorrelationID), row.CreatedAt,
+		nullableString(row.CorrelationID), row.CreatedAt, string(row.AuthorID),
 	)
 	if err != nil {
 		return fmt.Errorf("store: timer insert %q: %w", row.ID, err)
 	}
-	return nil
+	return tx.Commit()
 }
 
 // Delete removes one pending row (fire completion / cancel / drop). A missing
@@ -60,13 +85,13 @@ func (s *timerStore) Delete(ctx context.Context, id timerspec.TimerID) (bool, er
 	return n > 0, nil
 }
 
-// Due returns rows with fire_at <= now, ordered by fire_at, capped at limit —
-// the engine's per-tick batch of identity-bind rows to fire. Walks
-// ix_timers_fire_at.
-func (s *timerStore) Due(ctx context.Context, now int64, limit int) ([]timerspec.TimerRow, error) {
-	const q = `SELECT timer_id, author_id, fire_at, type, payload, COALESCE(correlation_id, ''), created_at
-	             FROM timers WHERE fire_at <= ? ORDER BY fire_at LIMIT ?`
-	rows, err := s.db.QueryContext(ctx, q, now, limit)
+// Due returns rows with fire_at <= now, ordered by fire_at and bounded only by
+// the per-author SQL window. There is deliberately no cross-author page limit.
+func (s *timerStore) Due(ctx context.Context, now int64) ([]timerspec.TimerRow, error) {
+	const q = `SELECT timer_id, author_id, fire_at, type, payload, COALESCE(correlation_id, ''), created_at FROM (
+	             SELECT *, ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY fire_at, timer_id) AS rn
+	             FROM timers WHERE fire_at <= ?) WHERE rn <= ? ORDER BY fire_at, timer_id`
+	rows, err := s.db.QueryContext(ctx, q, now, duePerAuthor)
 	if err != nil {
 		return nil, fmt.Errorf("store: timers due: %w", err)
 	}
@@ -89,6 +114,44 @@ func (s *timerStore) Due(ctx context.Context, now int64, limit int) ([]timerspec
 		return nil, fmt.Errorf("store: timers due rows: %w", err)
 	}
 	return out, nil
+}
+
+func (s *timerStore) MoveToDead(ctx context.Context, id timerspec.TimerID, class timerspec.DeathClass, reason, detail string, diedAt int64) (bool, int, error) {
+	if class != timerspec.DeathFireRejected && class != timerspec.DeathReviveRejected {
+		return false, 0, fmt.Errorf("store: invalid timer death class %q", class)
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return false, 0, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	res, err := tx.ExecContext(ctx, `INSERT INTO timer_dead (timer_id,author_id,fire_at,type,payload,correlation_id,created_at,death_class,reason,detail,died_at)
+	 SELECT timer_id,author_id,fire_at,type,payload,correlation_id,created_at,?,?,?,? FROM timers WHERE timer_id=?`, string(class), reason, detail, diedAt, string(id))
+	if err != nil {
+		return false, 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil || n > 1 {
+		return false, 0, fmt.Errorf("store: timer dead insert affected %d: %w", n, err)
+	}
+	if n == 0 {
+		return false, 0, nil
+	}
+	if _, err = tx.ExecContext(ctx, `DELETE FROM timers WHERE timer_id=?`, string(id)); err != nil {
+		return false, 0, err
+	}
+	res, err = tx.ExecContext(ctx, `DELETE FROM timer_dead WHERE dead_seq IN (SELECT dead_seq FROM timer_dead ORDER BY dead_seq DESC LIMIT -1 OFFSET ?)`, maxDeadTimers)
+	if err != nil {
+		return false, 0, err
+	}
+	evicted64, err := res.RowsAffected()
+	if err != nil {
+		return false, 0, err
+	}
+	if err = tx.Commit(); err != nil {
+		return false, 0, err
+	}
+	return true, int(evicted64), nil
 }
 
 // NextFireAt returns the earliest pending fire_at (ok=false when the table is

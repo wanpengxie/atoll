@@ -14,6 +14,15 @@ func NewCommittingWriteHandleForTest(d *Dialer, wh accessdoor.LocalWriteHandle, 
 	return &committingWriteHandle{LocalWriteHandle: wh, dialer: d, reservationID: reservationID, coord: coord}
 }
 
+// LaneLinkPresentForTest reports whether daemonID still has a lane-relay link
+// registered on this Acceptor (a.laneLink != nil). It is the external guard for
+// G-1's "no dead lane session residual after a link tears down": once a link
+// unwinds, deregisterLaneLink must have dropped its entry, so this returns
+// false. Test-only accessor over the unexported lane-relay table.
+func (a *Acceptor) LaneLinkPresentForTest(daemonID string) bool {
+	return a.laneLink(daemonID) != nil
+}
+
 // SetYamuxKeepAliveIntervalForTest overrides the yamux session's own keepalive
 // cadence (normally yamux's DefaultConfig 30s) for every *linkSession built
 // AFTER this call, until reset() runs. It exists so a link_test.go guard test

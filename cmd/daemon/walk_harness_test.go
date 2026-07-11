@@ -271,13 +271,15 @@ func startWalkDaemonAt(t *testing.T, wsURL, computeID, chID, wsRoot string, cfg 
 // home-hosted admission (both go through Admit first: accept.go's 膜律
 // requires an ACTIVE membership row before a daemon's attach may even open
 // that id's stream).
-func (wd *walkDaemon) addActor(t *testing.T, h *platform.Home, id actor.ActorID, kind actor.Kind, def actorbase.Def) {
+func (wd *walkDaemon) addActor(t *testing.T, h *platform.Home, id actor.ActorID, kind actor.Kind, def actorbase.Def) actor.ActorID {
 	t.Helper()
-	if err := h.Admit(context.Background(), id, kind); err != nil {
+	minted, err := h.Admit(context.Background(), kind, strings.ReplaceAll(string(id), ":", "-"))
+	if err != nil {
 		t.Fatalf("admit %s: %v", id, err)
 	}
-	wd.builder.set(id, platform.ActorFactory{Proc: def})
-	wd.desired.add(actorrt.DesiredMember{ID: id, Kind: kind, Lifecycle: actorrt.LifecycleAlwaysOn})
+	wd.builder.set(minted, platform.ActorFactory{Proc: def})
+	wd.desired.add(actorrt.DesiredMember{ID: minted, Kind: kind, Lifecycle: actorrt.LifecycleAlwaysOn})
+	return minted
 }
 
 // --- Controller pen (test driver identity) -------------------------------
@@ -295,14 +297,12 @@ func (controllerPen) Receive(context.Context, *message.Envelope) error { return 
 // returns its welded Pen — the identity the walk test writes requests AS.
 func newControllerPen(t *testing.T, h *platform.Home, id actor.ActorID, kind actor.Kind) harness.Pen {
 	t.Helper()
-	if err := h.Admit(context.Background(), id, kind); err != nil {
-		t.Fatalf("admit controller %s: %v", id, err)
-	}
 	var pen harness.Pen
-	if err := h.Spawn(context.Background(), id, kind, platform.ActorFactory{Legacy: func(p harness.Pen) actorrt.Actor {
+	_, err := platform.SpawnForTesting(h, kind, strings.ReplaceAll(string(id), ":", "-"), platform.ActorFactory{Legacy: func(p harness.Pen) actorrt.Actor {
 		pen = p
 		return controllerPen{pen: p}
-	}}); err != nil {
+	}})
+	if err != nil {
 		t.Fatalf("spawn controller %s: %v", id, err)
 	}
 	return pen

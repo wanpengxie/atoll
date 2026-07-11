@@ -1,16 +1,41 @@
 package platform
 
 import (
+	"context"
+	"fmt"
+	"strings"
+
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
-// HandleCancelUpstreamForTest exposes the unexported KindCancelRequest disposition
-// (reverse-resolve target from the log + sender validation, then Home.CancelRequest)
-// so an external test can drive its four failure branches deterministically without
-// standing up a full daemon wire (the wire relay itself is covered separately by the
-// port-level and cross-wire e2e tests). It is a package-level function, NOT a Home
-// method, so it does not widen Home's guarded public surface (TestHomePublicSurface).
-func HandleCancelUpstreamForTest(h *Home, boundID actor.ActorID, requestID message.ID) {
-	h.handleCancelUpstream(boundID, requestID)
+func AdmitForTest(h *Home, principal string, kind actor.Kind) (actor.ActorID, error) {
+	return h.Admit(context.Background(), kind, principal)
+}
+
+func HandleCancelUpstreamForTest(h *Home, id actor.ActorID, requestID message.ID) {
+	h.handleCancelUpstream(id, requestID)
+}
+
+func SpawnForTest(h *Home, fixtureID actor.ActorID, kind actor.Kind, def ActorFactory) (actor.ActorID, error) {
+	id := fixtureID
+	if rec, ok, err := h.cs.Registry.Lookup(context.Background(), fixtureID); err != nil {
+		return "", err
+	} else if !ok || !rec.IsActive() {
+		id, err = AdmitForTest(h, strings.ReplaceAll(string(fixtureID), ":", "-"), kind)
+		if err != nil {
+			return "", err
+		}
+	}
+	_, built, err := h.channel.Cells().SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
+		return build(h.buildCaps(id, kind, inc), h.hooks(), def)
+	})
+	if err != nil {
+		return "", err
+	}
+	if !built {
+		return "", fmt.Errorf("test spawn %q already occupied", id)
+	}
+	return id, nil
 }

@@ -296,12 +296,7 @@ func TestReadAfterSeq_NonPositiveLimitDefaults(t *testing.T) {
 	}
 }
 
-// --- applyMemberAddTx / applyMemberRemoveTx under a poisoned actor_kind -------
-
-// applyMemberAddTx reactivates a deregistered row. If the row carries a poison
-// kind we still reactivate (the add carries the authoritative new kind), so the
-// reactivate UPDATE arm runs. We separately drive its error arm and the
-// member-lookup default arm.
+// --- applyMemberAddTx / applyMemberRemoveTx failure paths ---------------------
 
 // applyMemberAddTx's lookup default arm: a Scan failure that is neither nil nor
 // ErrNoRows. We force it by giving actor_registry a deregistered_at column that
@@ -360,9 +355,9 @@ func TestApplyMemberRemoveTx_ExecError(t *testing.T) {
 	}
 }
 
-// applyMemberAddTx insert arm error: actor_registry missing a column the INSERT
-// references (no actor_binding) → the no-rows INSERT branch errors.
-func TestApplyMemberAddTx_InsertError(t *testing.T) {
+// A missing registry row is rejected as inactive; add transitions never create
+// caller-selected identities.
+func TestApplyMemberAddTx_MissingIdentityRejected(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := openSqlite(ctx, filepath.Join(dir, "noins.sqlite"), OpenOptions{SkipDDL: true}, "")
@@ -380,14 +375,14 @@ func TestApplyMemberAddTx_InsertError(t *testing.T) {
 		t.Fatalf("BeginTx: %v", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := reg.applyMemberAddTx(ctx, tx, storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, At: 9}); err == nil {
-		t.Error("applyMemberAddTx INSERT must error (table missing actor_binding column)")
+	if _, err := reg.applyMemberAddTx(ctx, tx, storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, At: 9}); !errors.Is(err, storespec.ErrMemberInactive) {
+		t.Fatalf("applyMemberAddTx error=%v want ErrMemberInactive", err)
 	}
 }
 
 // ApplyMemberTransitions must abort (return the helper error) when the add
 // helper's INSERT fails mid-transition — driven over a registry whose
-// actor_registry lacks the actor_binding column.
+// actor_registry lacks the expected schema.
 func TestApplyMemberTransitions_AddHelperError(t *testing.T) {
 	ctx := context.Background()
 	db := brokenRegistryDB(t)
@@ -395,7 +390,7 @@ func TestApplyMemberTransitions_AddHelperError(t *testing.T) {
 	err := reg.ApplyMemberTransitions(ctx,
 		[]storespec.MemberActorAdd{{ID: "a", Kind: actor.KindAgent, At: 9}}, nil)
 	if err == nil {
-		t.Error("ApplyMemberTransitions must propagate the add-helper INSERT error")
+		t.Error("ApplyMemberTransitions must propagate the add-helper error")
 	}
 }
 
@@ -413,8 +408,7 @@ func TestApplyMemberTransitions_RemoveHelperError(t *testing.T) {
 }
 
 // brokenRegistryDB returns a DB with an actor_registry that lacks both
-// actor_binding and deregistered_at, so every add INSERT / reactivate UPDATE /
-// remove UPDATE referencing those columns errors.
+// actor_binding and deregistered_at, so membership operations fail loudly.
 func brokenRegistryDB(t *testing.T) *sql.DB {
 	t.Helper()
 	ctx := context.Background()
@@ -430,9 +424,9 @@ func brokenRegistryDB(t *testing.T) *sql.DB {
 	return db
 }
 
-// applyMemberAddTx reactivate-arm error: a row exists and is deregistered, but
-// the UPDATE references a column (actor_binding) the table lacks.
-func TestApplyMemberAddTx_ReactivateError(t *testing.T) {
+// A retired row stays retired even when the table shape would have allowed an
+// update in the legacy identity model.
+func TestApplyMemberAddTx_RetiredIdentityRejected(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
 	db, err := openSqlite(ctx, filepath.Join(dir, "noreact.sqlite"), OpenOptions{SkipDDL: true}, "")
@@ -444,7 +438,7 @@ func TestApplyMemberAddTx_ReactivateError(t *testing.T) {
 	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, created_at INTEGER, deregistered_at INTEGER, host TEXT)`); err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
-	// Seed a deregistered row so the lookup finds it and takes the reactivate arm.
+	// Seed a deregistered row so the lookup finds an inactive identity.
 	if _, err := db.ExecContext(ctx,
 		`INSERT INTO actor_registry (actor_id, actor_kind, created_at, deregistered_at)
 		 VALUES ('a', 'agent', 1, 5)`); err != nil {
@@ -456,7 +450,7 @@ func TestApplyMemberAddTx_ReactivateError(t *testing.T) {
 		t.Fatalf("BeginTx: %v", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := reg.applyMemberAddTx(ctx, tx, storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, At: 9}); err == nil {
-		t.Error("applyMemberAddTx reactivate UPDATE must error (table missing actor_binding column)")
+	if _, err := reg.applyMemberAddTx(ctx, tx, storespec.MemberActorAdd{ID: "a", Kind: actor.KindAgent, At: 9}); !errors.Is(err, storespec.ErrMemberInactive) {
+		t.Fatalf("applyMemberAddTx error=%v want ErrMemberInactive", err)
 	}
 }

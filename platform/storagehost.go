@@ -38,8 +38,12 @@ type lateAcceptor struct {
 	p atomic.Pointer[link.Acceptor]
 }
 
-func (l *lateAcceptor) bind(a *link.Acceptor) { l.p.Store(a) }
-func (l *lateAcceptor) get() *link.Acceptor   { return l.p.Load() }
+func (l *lateAcceptor) bind(a *link.Acceptor) {
+	if !l.p.CompareAndSwap(nil, a) {
+		panic("platform: late acceptor bound twice")
+	}
+}
+func (l *lateAcceptor) get() *link.Acceptor { return l.p.Load() }
 
 // lateStorageMounts implements accessdoor.StorageMounts over a lateAcceptor
 // — the ONLY data source (期11 spec §4.3): every daemon with a live attach
@@ -194,29 +198,16 @@ func (h homeStorageHostControl) ReclaimAck(ctx context.Context, senderDaemonID, 
 	return h.outbox.ClearTombstone(ctx, tombstoneID)
 }
 
-func (h homeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords, landedCoords []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
+func (h homeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonID string, activeCoords []string) ([]link.ReconcileResource, []link.ReconcileReservation, []link.ReconcileTombstone, error) {
 	// No separate sender-auth check here: unlike Committed/ReclaimAck (which
 	// name a specific reservation/tombstone id that could belong to ANOTHER
 	// daemon), ReconcilePull carries no target id of its own — senderDaemonID
 	// IS the query, and every List*ByDaemon call below is already filtered to
 	// exactly that id server-side (§4.7: "只返回该 sender 名下的 rows").
 	//
-	// Mark landed FIRST, BEFORE the sweep (期11 review §2.5 #A): the daemon's
-	// landedCoords is its fresh live/ directory listing, so a pending
-	// reservation whose bytes are durably renamed into live/ flips to
-	// phase='landed' here — and SweepExpiredReservations (phase='reserved'
-	// only) can then never destroy it, however long its Committed has been
-	// delayed/lost. This closes the P0 where a landed-but-uncommitted create
-	// >timeout old is reclaimed as abandoned before the daemon's resend can
-	// land its row. Disk-derived and reported afresh every pull, so the very
-	// first pull after a long crash gap already protects its landed rows.
-	if err := h.outbox.MarkReservationsLanded(ctx, senderDaemonID, landedCoords); err != nil {
-		return nil, nil, nil, err
-	}
-
 	// Sweep BEFORE listing (§1.7's third trigger, level-triggered exactly
-	// here — "ReconcilePull 响应时删"): a reservation this daemon has aged
-	// past reservationTimeout() (AND still phase='reserved') never appears in
+	// here — "ReconcilePull 响应时删"): an inactive reservation this daemon
+	// owns that has aged past reservationTimeout() never appears in
 	// the pendingReservations this call returns, so the daemon never
 	// resumes/resends for one the server has already abandoned. Sweep reads the
 	// PRE-touch last_progress_at (期11 S1) — a daemon that has gone silent long

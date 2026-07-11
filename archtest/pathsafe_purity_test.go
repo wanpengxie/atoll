@@ -2,6 +2,8 @@ package archtest
 
 import (
 	"fmt"
+	"go/ast"
+	"go/parser"
 	"go/token"
 	"io/fs"
 	"path/filepath"
@@ -67,5 +69,53 @@ func TestPathsafeNeverAStorageNameGenerator(t *testing.T) {
 	}
 	if len(violations) > 0 {
 		t.Fatalf("pathsafe used as a storage-name generator (期11 S6 account item ⑦, judged dead for this role):\n  %s", strings.Join(violations, "\n  "))
+	}
+}
+
+// storagehostDir is the daemon's disk-touching storage host — the package that
+// turns opaque ids into on-disk path segments.
+const storagehostDir = "../cmd/daemon/internal/storagehost"
+
+// TestPathSegmentAssertCentralizedInRootGo is the POSITIVE half of "pathsafe
+// 集中 root.go" (S-3 nail 4): the negative test above forbids the WRONG tool
+// (lib/pathsafe); this pins that the RIGHT one — assertPathSegment, the
+// allow-list charset assert every path-segment constructor must funnel through
+// — is defined exactly ONCE and ONLY in root.go. A second, scattered copy
+// elsewhere in the package (a future constructor that hand-rolls its own,
+// possibly weaker, segment check instead of calling the shared assert) is the
+// violation this catches: path-segment safety must not fragment into
+// divergent per-call implementations.
+func TestPathSegmentAssertCentralizedInRootGo(t *testing.T) {
+	fset := token.NewFileSet()
+	var definedIn []string
+
+	err := filepath.WalkDir(storagehostDir, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		file, perr := parser.ParseFile(fset, path, nil, 0)
+		if perr != nil {
+			return fmt.Errorf("parse %s: %w", path, perr)
+		}
+		for _, decl := range file.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if ok && fn.Recv == nil && fn.Name.Name == "assertPathSegment" {
+				definedIn = append(definedIn, filepath.ToSlash(path))
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", storagehostDir, err)
+	}
+
+	if len(definedIn) != 1 {
+		t.Fatalf("assertPathSegment defined %d times (%v) — path-segment safety must live in exactly one place (root.go), not fragment across the package", len(definedIn), definedIn)
+	}
+	if !strings.HasSuffix(definedIn[0], "/root.go") {
+		t.Fatalf("assertPathSegment defined in %q, want cmd/daemon/internal/storagehost/root.go — the S-3 'pathsafe 集中 root.go' centralization nail", definedIn[0])
 	}
 }

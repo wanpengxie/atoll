@@ -20,6 +20,11 @@ import (
 // site.
 type TimerID = timerspec.TimerID
 
+var (
+	ErrAuthorInactive = errors.New("schedule: author inactive")
+	ErrScheduleQuota  = errors.New("schedule: schedule quota exceeded")
+)
+
 // Bind is the closed set of lifecycle levels a timer's PRODUCT belongs to
 // (the routing question is: should this intent still exist after a crash
 // restart?). It is a ROUTING choice, not a persisted tag: identity routes to
@@ -178,9 +183,8 @@ type LivenessProbe interface {
 //     table, the id can never resolve to a build closure, …) →
 //     ReviveRejected{Reason, Detail} — the engine disposes the row (delete +
 //     loud log), because a row that can never revive is a poison row: left in
-//     place it retries hot forever AND, once such rows fill a due page (≥
-//     dueBatchLimit with the oldest fire_at), they starve every later-due
-//     legitimate row behind them.
+//     place it retries hot forever and consumes the author's bounded due
+//     window ahead of later legitimate rows.
 //   - transient (host busy, momentary spawn failure, …) → any other error —
 //     the row stays, retried next tick (at-least-once, current semantics).
 type Reviver interface {

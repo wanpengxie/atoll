@@ -44,13 +44,14 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = h.Close() })
 
-	ctx := context.Background()
 	id := actor.ActorID("obs-publisher")
 	pub := &obsPublisherActor{}
-	admit(t, h, id, actor.KindAgent)
-	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor { return pub })); err != nil {
+	id = admit(t, h, id, actor.KindAgent)
+	minted, err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor { return pub }))
+	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
+	id = minted
 
 	if _, known := h.View().DevicePresence(id); known {
 		t.Fatalf("DevicePresence known before any publish")
@@ -107,7 +108,7 @@ func TestHome_WatchObs_DedupesAcrossRepeatBuildCaps(t *testing.T) {
 }
 
 // TestHome_BuildCaps_RegistersObs_AcrossBirthPaths (DoD §7.6): buildCaps is the
-// single caps-assembly seam shared by Home.Spawn, the reconcile ring's eager
+// single caps-assembly seam shared by Home.SpawnIfAbsent, the reconcile ring's eager
 // 补臂, homeReviver, and spawnHandle.Fork (all four hold this method value) —
 // exercising it directly for distinct ids covers the convergence point every
 // birth path funnels through, without re-driving each path end to end.
@@ -122,7 +123,7 @@ func TestHome_BuildCaps_RegistersObs_AcrossBirthPaths(t *testing.T) {
 	rt := h.channel.Cells()
 	ids := []actor.ActorID{"birth-spawn", "birth-reconcile", "birth-reviver", "birth-fork"}
 	for _, id := range ids {
-		rt.Spawn(id, actor.KindAgent, func(inc actorrt.Incarnation) actorrt.Actor {
+		_, _, _ = rt.SpawnIfAbsent(id, actor.KindAgent, func(inc actorrt.Incarnation) actorrt.Actor {
 			h.buildCaps(id, actor.KindAgent, inc)
 			return statTestActor{}
 		})
@@ -195,7 +196,7 @@ func awaitCount(t *testing.T, w *countingObsWatcher, id actor.ActorID) {
 }
 
 // TestObsFanout_HomeSpawn_OncePerPublish (DoD §7.6, S5 review fix P2-1): the
-// Home.Spawn birth path — real PublishObs, real counting watcher — fans out
+// Home.SpawnIfAbsent birth path — real PublishObs, real counting watcher — fans out
 // exactly once per publish (not zero, not duplicated).
 func TestObsFanout_HomeSpawn_OncePerPublish(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
@@ -205,14 +206,15 @@ func TestObsFanout_HomeSpawn_OncePerPublish(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = h.Close() })
 
-	ctx := context.Background()
-	const id = actor.ActorID("obs-fanout-spawn")
-	admit(t, h, id, actor.KindAgent)
-	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	id := actor.ActorID("obs-fanout-spawn")
+	id = admit(t, h, id, actor.KindAgent)
+	minted, err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return &obsPublisherActor{}
-	})); err != nil {
+	}))
+	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
+	id = minted
 
 	w := newCountingObsWatcher()
 	h.channel.Cells().WatchObs(id, w)
@@ -228,11 +230,11 @@ func TestObsFanout_ReconcileActivationRevive_OncePerPublish(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:obs-fanout-reconcile")
+	id := actor.ActorID("agent:obs-fanout-reconcile")
 	builder.byID[id] = CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
 
 	if live(h, id) {
 		t.Fatal("member live before it was ever desired")
@@ -258,14 +260,14 @@ func TestObsFanout_HomeReviver_OncePerPublish(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{} // empty: no eager reconcile competing for this id
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:obs-fanout-reviver")
+	id := actor.ActorID("agent:obs-fanout-reviver")
 	builder.byID[id] = CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
 
 	h := openActivationHome(t, desired, builder)
 
 	// Seed durable membership WITHOUT a live cell (Admit — the pure-membership
 	// primitive; embodiment is the reviver's job below).
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
 	if live(h, id) {
 		t.Fatal("member live before EnsureLive ran — precondition broken")
 	}
@@ -291,12 +293,12 @@ func TestObsFanout_Fork_OncePerPublish(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const parent = actor.ActorID("agent:obs-fanout-fork-parent")
+	parent := actor.ActorID("agent:obs-fanout-fork-parent")
 	builder.byID[parent] = builder.recordFactory(parent)
 	builder.byClass["obs-worker"] = CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, parent, actor.KindAgent)
+	parent = admit(t, h, parent, actor.KindAgent)
 
 	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)

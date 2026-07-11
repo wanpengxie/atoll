@@ -31,7 +31,7 @@ type cell struct {
 	id       actor.ActorID
 	mintKind actor.Kind
 	impl     Actor
-	inbox chan *message.Envelope
+	inbox    chan *message.Envelope
 
 	// started is the substrate-stamped bind instant — the obs `uptime` fact's
 	// authoritative source (uptime = now - started, derived by the consumer).

@@ -19,7 +19,10 @@ import (
 // genuinely stuck/half-open stream. The deadline is CLEARED the moment the
 // header is read (readLaneJSON's defer), so it never bounds the raw byte pump
 // that follows on the same stream — a long transfer is unaffected.
-const laneHeaderReadTimeout = 30 * time.Second
+//
+// A var (not a const) SOLELY so a test can shorten it to prove the bounded
+// close without waiting out a real 30s; production never reassigns it.
+var laneHeaderReadTimeout = 30 * time.Second
 
 // lane.go is 期11 spec §5's resource lane transport. 片③ FLATTENED it: a lane
 // redeem is now a PLAIN top-level substream of the link session (linksession.go),

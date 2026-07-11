@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/behavior"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
@@ -18,19 +18,19 @@ import (
 // humandoor_test.go — 期12 S4 的门自验族: 跨 incarnation from-log 权威 /
 // 门不构建(冻结环) / presence token straddle / expiry reaper (DoD 3/5/7/8/13).
 
-const doorUser = actor.ActorID("user:alice")
+const humanFixtureID = actor.ActorID("user:alice")
 
 // doorHome opens a whitebox activation home (hour-long ticker — tests drive
 // the ring synchronously) and admits+embodies the human subject.
-func doorHome(t *testing.T) *Home {
+func doorHome(t *testing.T) (*Home, actor.ActorID) {
 	t.Helper()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
-	admit(t, h, doorUser, actor.KindHuman)
+	humanID := admit(t, h, humanFixtureID, actor.KindHuman)
 	h.reconcileActivation(context.Background())
-	if !live(h, doorUser) {
+	if !live(h, humanID) {
 		t.Fatal("human cell not embodied by the ring")
 	}
-	return h
+	return h, humanID
 }
 
 // writeDoorRequest authors one request through a welded pen (whitebox mint —
@@ -75,13 +75,13 @@ func findTerminal(t *testing.T, h *Home, reqID message.ID) (*message.Envelope, b
 // engine's per-incarnation serve account is NOT the authority.
 func TestHumanDoor_CrossIncarnationResolveCancel(t *testing.T) {
 	ctx := context.Background()
-	h := doorHome(t)
-	admit(t, h, "agent:asker", actor.KindAgent)
+	h, humanID := doorHome(t)
+	askerID := admit(t, h, "agent:asker", actor.KindAgent)
 
 	// An open approve addressed to the subject, and a subject-authored
 	// outbound request — both BEFORE the crash.
-	approveID := writeDoorRequest(t, h, "agent:asker", actor.KindAgent, doorUser, TypeHumanApprove, nil)
-	handle, err := h.Human(ctx, doorUser)
+	approveID := writeDoorRequest(t, h, askerID, actor.KindAgent, humanID, TypeHumanApprove, nil)
+	handle, err := h.Human(ctx, humanID)
 	if err != nil {
 		t.Fatalf("Human: %v", err)
 	}
@@ -100,9 +100,9 @@ func TestHumanDoor_CrossIncarnationResolveCancel(t *testing.T) {
 	}
 
 	// Kill the cell and re-mint a FRESH incarnation (the crash).
-	h.channel.Cells().DespawnID(doorUser)
+	h.channel.Cells().DespawnID(humanID)
 	h.reconcileActivation(ctx)
-	if !live(h, doorUser) {
+	if !live(h, humanID) {
 		t.Fatal("cell not re-minted")
 	}
 
@@ -126,7 +126,7 @@ func TestHumanDoor_CrossIncarnationResolveCancel(t *testing.T) {
 	if !ok {
 		t.Fatal("no terminal for the approve")
 	}
-	if term.Sender.ID != doorUser {
+	if term.Sender.ID != humanID {
 		t.Fatalf("approve terminal sender = %s, want the subject", term.Sender.ID)
 	}
 	var p struct {
@@ -162,14 +162,14 @@ func TestHumanDoor_CrossIncarnationResolveCancel(t *testing.T) {
 // re-mints — no reconnect, no second supply entry.
 func TestHumanDoor_NoConstructionFrozenRing(t *testing.T) {
 	ctx := context.Background()
-	h := doorHome(t)
+	h, humanID := doorHome(t)
 
-	handle, err := h.Human(ctx, doorUser)
+	handle, err := h.Human(ctx, humanID)
 	if err != nil {
 		t.Fatalf("Human: %v", err)
 	}
 	// Kill the cell; the ring is frozen (hour ticker, no poke).
-	h.channel.Cells().DespawnID(doorUser)
+	h.channel.Cells().DespawnID(humanID)
 	before := len(h.channel.Cells().LiveIDs())
 
 	_, _, werr := handle.Submit(ctx, SubmitSpec{Type: "human.note", Audience: []actor.ActorID{"agent:x"}})
@@ -206,9 +206,9 @@ func TestHumanDoor_NoConstructionFrozenRing(t *testing.T) {
 // extinguish a re-admitted sibling's fresh session (token form).
 func TestHumanDoor_PresenceTokenStraddle(t *testing.T) {
 	ctx := context.Background()
-	h := doorHome(t)
+	h, humanID := doorHome(t)
 
-	oldHandle, err := h.Human(ctx, doorUser)
+	oldHandle, err := h.Human(ctx, humanID)
 	if err != nil {
 		t.Fatalf("Human: %v", err)
 	}
@@ -217,15 +217,15 @@ func TestHumanDoor_PresenceTokenStraddle(t *testing.T) {
 	if tok1 == "" || tok2 == "" || tok1 == tok2 {
 		t.Fatalf("tokens = (%q, %q)", tok1, tok2)
 	}
-	if _, known := h.View().DevicePresence(doorUser); !known {
+	if _, known := h.View().DevicePresence(humanID); !known {
 		t.Fatal("device presence unknown after connect")
 	}
 
 	// Remove: presence account cleared, fold forgotten.
-	if err := h.Remove(ctx, doorUser); err != nil {
+	if err := h.Remove(ctx, humanID); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if _, known := h.View().DevicePresence(doorUser); known {
+	if _, known := h.View().DevicePresence(humanID); known {
 		t.Fatal("device presence still known after Remove (Forget 清账破)")
 	}
 	// Stale handle cannot feed a removed id online (straddle gate).
@@ -235,9 +235,15 @@ func TestHumanDoor_PresenceTokenStraddle(t *testing.T) {
 
 	// Re-admit; a fresh session comes online; the OLD tab's late disconnect
 	// only removes itself — the new session stays online.
-	admit(t, h, doorUser, actor.KindHuman)
+	newID, err := h.Admit(ctx, actor.KindHuman, "alice")
+	if err != nil {
+		t.Fatalf("re-Admit: %v", err)
+	}
+	if newID == humanID {
+		t.Fatal("re-Admit reused removed human id")
+	}
 	h.reconcileActivation(ctx)
-	newHandle, err := h.Human(ctx, doorUser)
+	newHandle, err := h.Human(ctx, newID)
 	if err != nil {
 		t.Fatalf("Human #2: %v", err)
 	}
@@ -247,7 +253,7 @@ func TestHumanDoor_PresenceTokenStraddle(t *testing.T) {
 	}
 	oldHandle.PresenceDisconnect(tok1) // stale token: account was cleared — no-op
 	oldHandle.PresenceDisconnect(tok2)
-	if _, known := h.View().DevicePresence(doorUser); !known {
+	if _, known := h.View().DevicePresence(newID); !known {
 		t.Fatal("late stale disconnect extinguished the fresh session (straddle 回归)")
 	}
 	newHandle.PresenceDisconnect(tok3)
@@ -275,10 +281,10 @@ func TestExpiryReaper_SystemAuthoredAcrossRestart(t *testing.T) {
 	// supply revives it) and human.approve is default-deferred — so the
 	// CLOSURE reconciler (receiver-absent → receiver_unavailable) never
 	// touches this request, and the only lawful closer is the expiry reaper.
-	admit(t, h1, "agent:caller", actor.KindAgent)
-	admit(t, h1, doorUser, actor.KindHuman)
+	callerID := admit(t, h1, "agent:caller", actor.KindAgent)
+	humanID := admit(t, h1, humanFixtureID, actor.KindHuman)
 	exp := time.Now().UnixMilli() + 50
-	reqID := writeDoorRequest(t, h1, "agent:caller", actor.KindAgent, doorUser, TypeHumanApprove, &exp)
+	reqID := writeDoorRequest(t, h1, callerID, actor.KindAgent, humanID, TypeHumanApprove, &exp)
 	if err := h1.Close(); err != nil {
 		t.Fatalf("Close #1: %v", err)
 	}
@@ -342,11 +348,11 @@ func TestExpiryReaper_SystemAuthoredAcrossRestart(t *testing.T) {
 // meets the reaper.
 func TestExpiryReaper_AnsweredRequestUntouched(t *testing.T) {
 	ctx := context.Background()
-	h := doorHome(t)
-	admit(t, h, "agent:caller", actor.KindAgent)
+	h, humanID := doorHome(t)
+	callerID := admit(t, h, "agent:caller", actor.KindAgent)
 
 	exp := h.nowMs() + 60_000
-	reqID := writeDoorRequest(t, h, "agent:caller", actor.KindAgent, doorUser, TypeHumanMessage, &exp)
+	reqID := writeDoorRequest(t, h, callerID, actor.KindAgent, humanID, TypeHumanMessage, &exp)
 	// The human cell answers human.message immediately (three-choice table);
 	// wait for its receipt.
 	deadline := time.Now().Add(5 * time.Second)
@@ -381,12 +387,12 @@ func TestExpiryReaper_AnsweredRequestUntouched(t *testing.T) {
 // dead cell answers the honest transient.
 func TestHumanDoor_ResourceFaceKVAndShare(t *testing.T) {
 	ctx := context.Background()
-	h := doorHome(t)
-	const bob = actor.ActorID("user:bob")
-	admit(t, h, bob, actor.KindHuman)
+	h, humanID := doorHome(t)
+	bob := actor.ActorID("user:bob")
+	bob = admit(t, h, bob, actor.KindHuman)
 	h.reconcileActivation(ctx)
 
-	alice, err := h.Human(ctx, doorUser)
+	alice, err := h.Human(ctx, humanID)
 	if err != nil {
 		t.Fatalf("Human(alice): %v", err)
 	}
@@ -465,7 +471,7 @@ func TestHumanDoor_ResourceFaceKVAndShare(t *testing.T) {
 	}
 
 	// Dead cell → honest transient (liveAccess/occupant, not a door verdict).
-	h.channel.Cells().DespawnID(doorUser)
+	h.channel.Cells().DespawnID(humanID)
 	if _, err = alice.ResourceRead(ctx, "cfg.tone"); !errors.Is(err, ErrCellUnavailable) {
 		t.Fatalf("dead-cell read = %v, want ErrCellUnavailable", err)
 	}
@@ -505,11 +511,11 @@ func TestHumanDoor_ResourceFaceKVAndShare(t *testing.T) {
 // must treat it as "no payload", never panic on the decision write.
 func TestHumanDoor_ResolveNullPayload(t *testing.T) {
 	ctx := context.Background()
-	h := doorHome(t)
-	admit(t, h, "agent:asker", actor.KindAgent)
-	reqID := writeDoorRequest(t, h, "agent:asker", actor.KindAgent, doorUser, TypeHumanApprove, nil)
+	h, humanID := doorHome(t)
+	askerID := admit(t, h, "agent:asker", actor.KindAgent)
+	reqID := writeDoorRequest(t, h, askerID, actor.KindAgent, humanID, TypeHumanApprove, nil)
 
-	handle, err := h.Human(ctx, doorUser)
+	handle, err := h.Human(ctx, humanID)
 	if err != nil {
 		t.Fatalf("Human: %v", err)
 	}
@@ -544,8 +550,8 @@ func TestHumanDoor_ResolveNullPayload(t *testing.T) {
 // "no panic, and every error is one of the honest family".
 func TestHumanDoor_DriveDuringChurn(t *testing.T) {
 	ctx := context.Background()
-	h := doorHome(t)
-	handle, err := h.Human(ctx, doorUser)
+	h, humanID := doorHome(t)
+	handle, err := h.Human(ctx, humanID)
 	if err != nil {
 		t.Fatalf("Human: %v", err)
 	}
@@ -571,7 +577,7 @@ func TestHumanDoor_DriveDuringChurn(t *testing.T) {
 		}
 	}()
 	for i := 0; i < 40; i++ {
-		h.channel.Cells().DespawnID(doorUser)
+		h.channel.Cells().DespawnID(humanID)
 		h.reconcileActivation(ctx)
 	}
 	close(stop)
