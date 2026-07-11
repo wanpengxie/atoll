@@ -189,7 +189,7 @@ type recordingWatcher struct {
 	notify chan struct{}
 }
 
-func (w *recordingWatcher) OnDown(ctx context.Context, id actor.ActorID, cause error) {
+func (w *recordingWatcher) OnDown(ctx context.Context, id actor.ActorID, _ Incarnation, cause error) {
 	w.mu.Lock()
 	w.downs = append(w.downs, id)
 	w.mu.Unlock()
@@ -233,7 +233,7 @@ type despawningWatcher struct {
 	notify chan struct{}
 }
 
-func (w *despawningWatcher) OnDown(ctx context.Context, id actor.ActorID, cause error) {
+func (w *despawningWatcher) OnDown(ctx context.Context, id actor.ActorID, _ Incarnation, cause error) {
 	w.rt.Despawn(w.inc)
 	select {
 	case w.notify <- struct{}{}:

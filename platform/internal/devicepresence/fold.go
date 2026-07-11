@@ -30,7 +30,7 @@ func New(logger *slog.Logger) *Fold {
 
 // OnObs implements actorrt.ObsWatcher: fold the latest ObsDevicePresence snapshot
 // (edge → level). Non-device-presence obs kinds are ignored — this fold is device-presence-only.
-func (f *Fold) OnObs(_ context.Context, id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue) {
+func (f *Fold) OnObs(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, kind actorrt.ObsKind, val actorrt.ObsValue) {
 	if string(kind) != introspect.ObsDevicePresence {
 		return
 	}
@@ -59,7 +59,7 @@ func (f *Fold) Forget(id actor.ActorID) {
 // decay to unknown (the down-edge decay backstop: abnormal death only — a clean
 // deactivation publishes no edge; decay rides the same lease/link-down signal,
 // so there is no separate reaper).
-func (f *Fold) OnDown(_ context.Context, id actor.ActorID, _ error) {
+func (f *Fold) OnDown(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, _ error) {
 	f.mu.Lock()
 	_, had := f.latest[id]
 	delete(f.latest, id)

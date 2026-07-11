@@ -623,6 +623,7 @@ func (h *Home) clearPresence(id actor.ActorID) {
 // subject's L3 producer.
 func (h *Home) feedDevicePresence(id actor.ActorID, online bool) {
 	h.deviceFold.OnObs(context.Background(), id,
+		actorrt.Incarnation{},
 		actorrt.ObsKind(introspect.ObsDevicePresence),
 		actorrt.ObsValue(introspect.MarshalDevicePresence(online)))
 }

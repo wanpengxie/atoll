@@ -329,7 +329,7 @@ func newCountingObsWatcher() *countingObsWatcher {
 	return &countingObsWatcher{calls: map[actor.ActorID]int{}}
 }
 
-func (w *countingObsWatcher) OnObs(_ context.Context, id actor.ActorID, _ actorrt.ObsKind, _ actorrt.ObsValue) {
+func (w *countingObsWatcher) OnObs(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, _ actorrt.ObsKind, _ actorrt.ObsValue) {
 	w.mu.Lock()
 	w.calls[id]++
 	w.mu.Unlock()

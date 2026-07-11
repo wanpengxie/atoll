@@ -13,7 +13,7 @@ import (
 //
 //	            pull (consumer-timed)         push (producer-timed)
 //	substrate   Stat(id) → present+StartedAt  WatchDown → OnDown (down edge = death)
-//	actor       —                             PublishObs(kind,val) → WatchObs → OnObs
+//	actor       —                             PublishObs(kind,val) → WatchObsAll → OnObs
 //
 // obs is READ-ONLY (you cannot drive work through it) and NON-TRUTH — that is the
 // structural guarantee it never becomes a business read bus.
@@ -58,5 +58,11 @@ type ObsValue []byte
 // a blocking watcher stalls the producer). No watcher registered → publish is a
 // no-op (empty fanout).
 type ObsWatcher interface {
-	OnObs(ctx context.Context, id actor.ActorID, kind ObsKind, val ObsValue)
+	OnObs(ctx context.Context, id actor.ActorID, incarnation Incarnation, kind ObsKind, val ObsValue)
 }
+
+// DELETED CELL — actor-source per-entity PUSH (WatchObs(id)), ripped W4: a
+// population-wide consumer had to mirror every actor birth and death because the
+// subscription key did not match its interest. Population consumers use
+// WatchObsAll. REBUILD OBLIGATION: when a real per-entity consumer appears,
+// rebuild WatchObs(id) additively and pass the subscription-key-isomorphism gate.

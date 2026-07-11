@@ -964,6 +964,7 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 
 	// Seed a KNOWN device-presence level for the actor — the thing the drop decays.
 	fold.OnObs(context.Background(), toolID,
+		actorrt.Incarnation{},
 		actorrt.ObsKind(introspect.ObsDevicePresence), actorrt.ObsValue(`{"online":true}`))
 	if _, known := fold.Device(toolID); !known {
 		t.Fatal("device presence not folded — precondition broken")

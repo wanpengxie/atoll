@@ -39,7 +39,7 @@ type cellDownWatcher struct {
 }
 
 // OnDown implements actorrt.DownWatcher.
-func (w *cellDownWatcher) OnDown(_ context.Context, id actor.ActorID, cause error) {
+func (w *cellDownWatcher) OnDown(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, cause error) {
 	w.mu.Lock()
 	handler := w.down[id]
 	w.mu.Unlock()
@@ -95,7 +95,7 @@ func newCellObsForwarder() *cellObsForwarder {
 func (f *cellObsForwarder) Rebind(d *link.Dialer) { f.d.Store(d) }
 
 // OnObs implements actorrt.ObsWatcher — non-blocking enqueue (drop on full).
-func (f *cellObsForwarder) OnObs(_ context.Context, id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue) {
+func (f *cellObsForwarder) OnObs(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, kind actorrt.ObsKind, val actorrt.ObsValue) {
 	m := obsMsg{id: id, kind: string(kind), val: append([]byte(nil), val...)}
 	select {
 	case f.ch <- m:

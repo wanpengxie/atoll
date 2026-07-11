@@ -83,7 +83,7 @@ func (f *fakeRaceMembership) ApplyMemberTransitions(_ context.Context, _ []store
 // through obsReg state, not through this watcher receiving anything.
 type raceObsWatcher struct{}
 
-func (w *raceObsWatcher) OnObs(context.Context, actor.ActorID, actorrt.ObsKind, actorrt.ObsValue) {
+func (w *raceObsWatcher) OnObs(context.Context, actor.ActorID, actorrt.Incarnation, actorrt.ObsKind, actorrt.ObsValue) {
 }
 
 // TestReconcileHost_SuccessorTakeoverRace_ObsNotMisclearedOnStaleRow is the P1-3

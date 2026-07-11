@@ -21,7 +21,7 @@ import (
 // keep their single-call shape (production fills c.impl from the Spawn build
 // closure instead). It does NOT go-live (live stays false) — these tests drive
 // start()/stop() directly and do not assert IsLive.
-func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) *cell {
+func newCell(parent context.Context, id actor.ActorID, impl Actor, mailbox int, onDown func(actor.ActorID, embodiment, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), started time.Time, logger *slog.Logger) *cell {
 	c := allocShell(parent, id, actor.KindAgent, mailbox, onDown, onObs, onExit, nil, started, logger)
 	c.impl = impl
 	return c
@@ -156,14 +156,14 @@ func TestWatchersIgnoreNil(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 	rt.WatchDown(nil)
-	rt.WatchObs("a", nil)
+	rt.WatchObsAll(nil)
 	rt.mu.RLock()
 	defer rt.mu.RUnlock()
 	if len(rt.watchers) != 0 {
 		t.Fatalf("nil DownWatcher was enrolled: %d watchers", len(rt.watchers))
 	}
-	if len(rt.obsWatch["a"]) != 0 {
-		t.Fatalf("nil ObsWatcher was enrolled: %d", len(rt.obsWatch["a"]))
+	if len(rt.obsWatchers) != 0 {
+		t.Fatalf("nil ObsWatcher was enrolled: %d", len(rt.obsWatchers))
 	}
 }
 
@@ -171,7 +171,7 @@ func TestWatchersIgnoreNil(t *testing.T) {
 // closure-critical death path cannot crash the process) and log it.
 type panickyDownWatcher struct{ notify chan struct{} }
 
-func (w panickyDownWatcher) OnDown(context.Context, actor.ActorID, error) {
+func (w panickyDownWatcher) OnDown(context.Context, actor.ActorID, Incarnation, error) {
 	if w.notify != nil {
 		w.notify <- struct{}{}
 	}
@@ -205,7 +205,7 @@ func TestPublishDownWatcherPanicGuarded(t *testing.T) {
 // panickyObsWatcher panics in OnObs — publishObs must guard it.
 type panickyObsWatcher struct{ notify chan struct{} }
 
-func (w panickyObsWatcher) OnObs(context.Context, actor.ActorID, ObsKind, ObsValue) {
+func (w panickyObsWatcher) OnObs(context.Context, actor.ActorID, Incarnation, ObsKind, ObsValue) {
 	if w.notify != nil {
 		w.notify <- struct{}{}
 	}
@@ -221,8 +221,8 @@ func TestPublishObsWatcherPanicGuarded(t *testing.T) {
 	good := &obsCollector{notify: make(chan struct{}, 1)}
 	rt, del := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.WatchObs("a", bad)
-	rt.WatchObs("a", good)
+	rt.WatchObsAll(bad)
+	rt.WatchObsAll(good)
 	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(&observerActor{}))
 	if _, err := del.Deliver([]actor.ActorID{"a"}, env("trigger")); err != nil {
 		t.Fatalf("deliver: %v", err)
@@ -371,7 +371,7 @@ func TestPortDownEmptyReasonDefaults(t *testing.T) {
 // downCaptureWatcher captures the cause passed to OnDown.
 type downCaptureWatcher struct{ onDown func(actor.ActorID, error) }
 
-func (w downCaptureWatcher) OnDown(_ context.Context, id actor.ActorID, cause error) {
+func (w downCaptureWatcher) OnDown(_ context.Context, id actor.ActorID, _ Incarnation, cause error) {
 	w.onDown(id, cause)
 }
 
