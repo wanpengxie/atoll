@@ -286,9 +286,9 @@ const xhsStatusDeviceAddr = "127.0.0.1:18091"
 //  2. device disconnects → the same read reports known:true, online:false
 //
 // This proves the FULL L3 obs-PUSH chain end-to-end: the adapter publishes a
-// device-presence edge (PublishObs) → the daemon's WatchObs forwarder sends it UP
+// device-presence edge (PublishObs) → the daemon's population forwarder sends it UP
 // the link as a KindObs frame → the home port relays it into publishObs → the
-// home device-presence fold materialises the level → View.DevicePresence → /status reads
+// home presence fold materialises the level → View.Snapshot → /status reads
 // it OUT-OF-BAND (no probe, no truth-log write — the retired anti-pattern).
 func TestXHSLiveActorStatus(t *testing.T) {
 	env := setupTestApp(t)
@@ -352,7 +352,7 @@ func TestXHSLiveActorStatus(t *testing.T) {
 }
 
 // waitDeviceOnline polls GET /actors/:id/status until the actor returns a
-// SUCCESSFUL actor.status answer (live:true) whose status.device_online matches
+// successful HTTP presence projection whose device status matches
 // want (or fails). It deliberately does NOT accept live:false as proof of
 // offline: live:false means the actor was unreachable (it never answered), which
 // would let a never-answering actor pass the offline assertion vacuously. The
@@ -371,8 +371,8 @@ func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want
 		// actually published a device-presence edge that the obs chain folded at the
 		// home) proves the want — known:false (unknown) must never satisfy either
 		// assertion vacuously. This exercises the full L3 obs push chain end-to-end:
-		// adapter PublishObs → daemon WatchObs forward → KindObs wire → home port →
-		// publishObs → fold → View.DevicePresence → /status.
+		// adapter PublishObs → daemon population forward → KindObs wire → home port →
+		// publishObs → fold → View.Snapshot → /status.
 		if known, _ := body["known"].(bool); known {
 			if online, ok := body["online"].(bool); ok && online == want {
 				return

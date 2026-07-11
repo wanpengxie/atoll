@@ -67,7 +67,7 @@ func TestOnDown_DoesNotDespawnSuccessor(t *testing.T) {
 		t.Fatal("successor not hosted after Spawn")
 	}
 	// A late down edge for "worker" (e.g. from a replaced predecessor).
-	ch.OnDown(context.Background(), "worker", errors.New("late predecessor death"))
+	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, errors.New("late predecessor death"))
 	if _, ok := ch.Cells().Stat("worker"); !ok {
 		t.Fatal("OnDown despawned the live successor — DownWatcher contract violated")
 	}
@@ -289,7 +289,7 @@ func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 		Logger:       slog.New(h),
 	})
 	defer ch.Stop()
-	ch.OnDown(context.Background(), "worker", nil)
+	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, nil)
 	got := h.waitFirstMsg(2 * time.Second)
 	if got == "" {
 		t.Fatal("drain query failed but NO fault logged — silent black hole regression")
@@ -332,7 +332,7 @@ func TestOnDown_PerRequestWriteFault_IsLogged(t *testing.T) {
 		Logger:       slog.New(h),
 	})
 	defer ch.Stop()
-	ch.OnDown(context.Background(), "worker", nil)
+	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, nil)
 	got := h.waitFirstMsg(2 * time.Second)
 	if got == "" {
 		t.Fatal("per-request write failed but NO fault logged — silent black hole regression")
@@ -382,7 +382,7 @@ func TestOnDown_AsyncConsumer_SkipsLivePresentSuccessor(t *testing.T) {
 	_, _, _ = ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
 
 	// A stale edge for "worker" — the async consumer must recheck Present and skip.
-	ch.OnDown(context.Background(), "worker", errors.New("stale predecessor edge"))
+	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, errors.New("stale predecessor edge"))
 
 	// Give the consumer time to (not) write. No terminal must appear.
 	deadline := time.Now().Add(300 * time.Millisecond)

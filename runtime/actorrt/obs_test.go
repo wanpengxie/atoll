@@ -29,12 +29,14 @@ func (o *observerActor) Receive(_ context.Context, _ *message.Envelope) error {
 type obsCollector struct {
 	mu     sync.Mutex
 	got    []ObsKind
+	gens   []Incarnation
 	notify chan struct{}
 }
 
-func (c *obsCollector) OnObs(_ context.Context, _ actor.ActorID, kind ObsKind, _ ObsValue) {
+func (c *obsCollector) OnObs(_ context.Context, _ actor.ActorID, incarnation Incarnation, kind ObsKind, _ ObsValue) {
 	c.mu.Lock()
 	c.got = append(c.got, kind)
+	c.gens = append(c.gens, incarnation)
 	c.mu.Unlock()
 	if c.notify != nil {
 		c.notify <- struct{}{}
@@ -49,7 +51,7 @@ func TestPublishObsFanout(t *testing.T) {
 	col := &obsCollector{notify: make(chan struct{}, 1)}
 	rt, del := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.WatchObs("a", col)
+	rt.WatchObsAll(col)
 	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(&observerActor{}))
 
 	if _, err := del.Deliver([]actor.ActorID{"a"}, env("trigger")); err != nil {
@@ -65,42 +67,77 @@ func TestPublishObsFanout(t *testing.T) {
 	if len(col.got) != 1 || col.got[0] != "quota.consumed" {
 		t.Fatalf("OnObs got %+v, want one quota.consumed", col.got)
 	}
+	if len(col.gens) != 1 || col.gens[0].ID() != "a" || !rt.IsLive(col.gens[0]) {
+		t.Fatalf("OnObs incarnation = %+v, want actor a's live generation", col.gens)
+	}
 }
 
-// TestUnwatchObs_StopsDelivery (H5): the symmetric un-registration removes the
-// watcher from fanout — a publish after UnwatchObs must not reach it (the
-// append-only registry's mirror-image half, so a watcher's registration does
-// not outlive whatever tracked it).
-func TestUnwatchObs_StopsDelivery(t *testing.T) {
+// TestWatchObsAllReceivesEveryProducer proves the population subscription does
+// not require consumers to mirror producer identities.
+func TestWatchObsAllReceivesEveryProducer(t *testing.T) {
 	t.Parallel()
-	col := &obsCollector{notify: make(chan struct{}, 1)}
+	col := &obsCollector{notify: make(chan struct{}, 2)}
 	rt, del := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.WatchObs("a", col)
-	rt.UnwatchObs("a", col)
+	rt.WatchObsAll(col)
 	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(&observerActor{}))
+	_, _, _ = rt.SpawnIfAbsent("b", actor.KindAgent, static(&observerActor{}))
 
-	if _, err := del.Deliver([]actor.ActorID{"a"}, env("trigger")); err != nil {
+	if _, err := del.Deliver([]actor.ActorID{"a", "b"}, env("trigger")); err != nil {
 		t.Fatalf("deliver: %v", err)
 	}
-	select {
-	case <-col.notify:
-		t.Fatal("PublishObs reached the ObsWatcher after UnwatchObs")
-	case <-time.After(200 * time.Millisecond):
+	for range 2 {
+		select {
+		case <-col.notify:
+		case <-time.After(2 * time.Second):
+			t.Fatal("population watcher did not receive both producers")
+		}
 	}
 	col.mu.Lock()
 	defer col.mu.Unlock()
-	if len(col.got) != 0 {
-		t.Fatalf("OnObs got %+v after UnwatchObs, want none", col.got)
+	if len(col.got) != 2 {
+		t.Fatalf("OnObs got %d observations, want 2", len(col.got))
 	}
 }
 
-// TestUnwatchObs_NilAndNotFound_NoOp: nil watcher and an unregistered watcher
-// are both safe no-ops (mirrors WatchObs's nil guard).
-func TestUnwatchObs_NilAndNotFound_NoOp(t *testing.T) {
+// TestWatchObsAll_ChurnDoesNotMultiplyDelivery is the behavior proxy for a
+// daemon reconcile ring repeatedly removing and rebuilding one assigned id.
+// Population subscription state is independent of those incarnations, so the
+// final publish is delivered exactly once.
+func TestWatchObsAll_ChurnDoesNotMultiplyDelivery(t *testing.T) {
 	t.Parallel()
-	rt, _ := New(Config{Parent: context.Background()})
+	col := &obsCollector{notify: make(chan struct{}, 2)}
+	rt, del := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
-	rt.UnwatchObs("a", nil)
-	rt.UnwatchObs("a", &obsCollector{})
+	rt.WatchObsAll(col)
+	for range 20 {
+		inc, _, err := rt.SpawnIfAbsent("a", actor.KindAgent, static(&observerActor{}))
+		if err != nil {
+			t.Fatal(err)
+		}
+		rt.Despawn(inc)
+	}
+	_, _, err := rt.SpawnIfAbsent("a", actor.KindAgent, static(&observerActor{}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := del.Deliver([]actor.ActorID{"a"}, env("trigger")); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-col.notify:
+	case <-time.After(2 * time.Second):
+		t.Fatal("final publish was not delivered")
+	}
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-col.notify:
+		t.Fatal("one publish was multiplied after incarnation churn")
+	default:
+	}
+	col.mu.Lock()
+	defer col.mu.Unlock()
+	if len(col.got) != 1 {
+		t.Fatalf("deliveries=%d, want 1", len(col.got))
+	}
 }

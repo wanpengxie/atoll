@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 // handleActorStatus reports an actor's L3 device-presence for the UI — read
@@ -16,6 +17,8 @@ import (
 // does NOT write the truth log: a UI status read must never pollute truth — that
 // was the retired probe's sin (it sent an actor.status request and polled the log
 // for the self-answer, two log writes to answer a read-only question).
+// The current reserved actor.status is different: the system actor reads this
+// same Snapshot for in-channel callers and never asks the target to self-probe.
 //
 // Three honest states (device presence is ADVISORY; authoritative reachability is
 // send→terminal — try it):
@@ -39,17 +42,34 @@ func (a *App) handleActorStatus(c *gin.Context) {
 		return
 	}
 
-	snapshot, known := home.View().DevicePresence(actor.ActorID(actorID))
+	view := home.View()
+	snapshot, err := view.Snapshot(c.Request.Context(), actor.ActorID(actorID))
+	testimony, known := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
+	projectActorStatus(c, err, snapshot.Member, known, testimony.Val, testimony.ReceivedAt, view.TestimonyAgeMs)
+}
+
+func projectActorStatus(c *gin.Context, err error, member, known bool, val []byte, receivedAt int64, ageMs func(int64) int64) {
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "presence unavailable"})
+		return
+	}
+	if !member {
+		c.JSON(http.StatusNotFound, gin.H{"error": "actor not found"})
+		return
+	}
 	if !known {
 		c.JSON(http.StatusOK, gin.H{"known": false})
 		return
 	}
-	p, ok := introspect.ParseDevicePresence(snapshot)
+	p, ok := introspect.ParseDevicePresence(val)
 	if !ok {
 		// A folded value we cannot decode is treated as unknown (the convention is
 		// the adapter+app's; a malformed blob is honestly "we don't know").
 		c.JSON(http.StatusOK, gin.H{"known": false})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"known": true, "online": p.Online})
+	c.JSON(http.StatusOK, gin.H{
+		"known": true, "online": p.Online,
+		"age_ms": ageMs(receivedAt),
+	})
 }

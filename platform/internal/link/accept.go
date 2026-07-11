@@ -66,14 +66,6 @@ type Acceptor struct {
 	attachedMu sync.Mutex
 	attached   map[string]int
 
-	// obsWatcher folds each attached actor's obs PUSH (L3 device presence) into the
-	// home device-presence fold; registered per declared actor at attach (the home-side
-	// arm of the actor-source obs axis). nil → no folding. obsReg dedups so a
-	// daemon reconnect does not re-append the same watcher.
-	obsWatcher actorrt.ObsWatcher
-	obsMu      sync.Mutex
-	obsReg     map[actor.ActorID]bool
-
 	// cancelReq is the home's injected KindCancelRequest handler (the caller-side
 	// upstream cancel: a daemon-hosted caller abandoning its own outbound request).
 	// Passed straight to runtime.Attach as the port's onCancelRequest — the link
@@ -149,9 +141,6 @@ type Config struct {
 	Logger    *slog.Logger
 	LeasePing time.Duration
 	LeaseTTL  time.Duration
-	// ObsWatcher (optional) receives each attached actor's obs PUSH via per-actor
-	// WatchObs registration at attach — the home-side arm of the L3 device-presence fold.
-	ObsWatcher actorrt.ObsWatcher
 	// CancelRequest (optional) is the home's injected handler for a KindCancelRequest
 	// frame (a daemon-hosted caller abandoning one of its OWN outbound requests). It
 	// is passed the connection's authenticated bound id + the request id; the home
@@ -188,8 +177,6 @@ func NewAcceptor(cfg Config) *Acceptor {
 		ctx:            ctx,
 		cancel:         cancel,
 		attached:       map[string]int{},
-		obsWatcher:     cfg.ObsWatcher,
-		obsReg:         map[actor.ActorID]bool{},
 		cancelReq:      cfg.CancelRequest,
 		storageControl: cfg.StorageHostControl,
 		pendingAlloc:   newPendingReplies[AllocReply](),
@@ -738,7 +725,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 	// The skip condition is narrower than "declarations==nil" alone: a
 	// caller MAY legitimately Reattach(ctx, nil) on an ALREADY-established
 	// link to explicitly shrink its declared set to zero (this package's own
-	// TestReattach_HostReconcile_UnwatchesObsOnDereg does exactly that) — nil
+	// TestReattach_HostReconcile_PopulationObsStaysSingle does exactly that) — nil
 	// is ambiguous by itself; "is this the very FIRST attach frame this
 	// specific link has ever sent" is the real bootstrap signal (isFirstAttachOnLink,
 	// evaluated by the caller BEFORE boundID is set). Only nil-AND-first is
@@ -747,20 +734,6 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 	// empty) declaration ALWAYS reconciles regardless of position.
 	if att.Declarations != nil || !isFirstAttachOnLink {
 		a.reconcileHost(ctx, computeID, newAllowed, portMu, ports)
-	}
-
-	// Fold each ADMITTED actor's obs PUSH (L3 device presence) into the home fold.
-	// Registered here (before the actor's stream opens / port publishes) so no
-	// early edge is missed; deduped so a reconnect does not re-append the watcher.
-	if a.obsWatcher != nil {
-		a.obsMu.Lock()
-		for _, d := range admitted {
-			if !a.obsReg[d.ActorID] {
-				a.runtime.WatchObs(d.ActorID, a.obsWatcher)
-				a.obsReg[d.ActorID] = true
-			}
-		}
-		a.obsMu.Unlock()
 	}
 
 	if err := a.sendReply(lc, requestID, AttachReply{ChannelID: a.channelID, Accepted: true, DaemonID: computeID}); err != nil {
@@ -830,40 +803,6 @@ func (a *Acceptor) reconcileHost(ctx context.Context, computeID string, newAllow
 	if err := a.membership.ApplyMemberTransitions(ctx, nil, removes); err != nil {
 		a.logger.Warn("link.reconcile_host_dereg_failed", "compute", computeID, "err", err)
 		return
-	}
-	// H5 obs cleanup runs AFTER the remove tx commits, and confirms EACH row is
-	// actually gone before touching obsReg — never eagerly on the pre-tx
-	// candidate list (the bug this closes). Race: a successor compute B can take
-	// over rec.ID (attach, re-register under Host==B) between the ListActive
-	// snapshot above and this tx running; ApplyMemberTransitions' ExpectedHost
-	// guard already makes THAT row's removal a 0-rows-affected no-op, but obs
-	// cleanup has no guard of its own — clearing it unconditionally on the
-	// candidate list (as this method used to, inline in the loop above, BEFORE
-	// the tx even ran) would rip out B's now-live obs registration on the
-	// strength of a stale snapshot, even though B's own handleAttach correctly
-	// skipped re-registering it (obsReg dedup saw it already true). There is no
-	// per-row changed signal from ApplyMemberTransitions, so re-Lookup NOW, per
-	// id, and clean obs ONLY for a row confirmed gone/inactive; a row that moved
-	// to a successor (still active, whatever its Host now is) keeps its
-	// registration untouched — it is owned by whoever hosts it now.
-	if a.obsWatcher == nil {
-		return
-	}
-	for _, rm := range removes {
-		rec2, ok2, err2 := a.registry.Lookup(ctx, rm.ID)
-		if err2 != nil {
-			a.logger.Warn("link.reconcile_host_obs_lookup_failed", "compute", computeID, "actor", string(rm.ID), "err", err2)
-			continue
-		}
-		if ok2 && rec2.IsActive() {
-			continue // confirmed NOT gone — leave its obs registration alone
-		}
-		a.obsMu.Lock()
-		if a.obsReg[rm.ID] {
-			a.runtime.UnwatchObs(rm.ID, a.obsWatcher)
-			delete(a.obsReg, rm.ID)
-		}
-		a.obsMu.Unlock()
 	}
 }
 

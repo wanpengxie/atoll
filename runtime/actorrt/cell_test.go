@@ -186,12 +186,14 @@ func (startPanicActor) Start(ctx context.Context, self ActorContext) error      
 type recordingWatcher struct {
 	mu     sync.Mutex
 	downs  []actor.ActorID
+	gens   []Incarnation
 	notify chan struct{}
 }
 
-func (w *recordingWatcher) OnDown(ctx context.Context, id actor.ActorID, cause error) {
+func (w *recordingWatcher) OnDown(ctx context.Context, id actor.ActorID, gen Incarnation, cause error) {
 	w.mu.Lock()
 	w.downs = append(w.downs, id)
+	w.gens = append(w.gens, gen)
 	w.mu.Unlock()
 	if w.notify != nil {
 		w.notify <- struct{}{}
@@ -203,7 +205,7 @@ func TestCellPanicPublishesDown(t *testing.T) {
 	w := &recordingWatcher{notify: make(chan struct{}, 1)}
 	rt, _ := New(Config{Parent: context.Background()})
 	rt.WatchDown(w) // register BEFORE spawn — no edge missed
-	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(panicActor{}))
+	inc, _, _ := rt.SpawnIfAbsent("a", actor.KindAgent, static(panicActor{}))
 	mustDeliver(t, rt, "a", env("x"))
 	select {
 	case <-w.notify:
@@ -214,6 +216,9 @@ func TestCellPanicPublishesDown(t *testing.T) {
 	defer w.mu.Unlock()
 	if len(w.downs) != 1 || w.downs[0] != "a" {
 		t.Fatalf("downs = %+v, want one for actor a", w.downs)
+	}
+	if len(w.gens) != 1 || w.gens[0] != inc {
+		t.Fatalf("down incarnation = %+v, want dead generation %+v", w.gens, inc)
 	}
 	// Self-eviction: the dead instance is unaddressable WITHOUT the watcher
 	// despawning it (OnDown runs AFTER eviction). (B1)
@@ -233,7 +238,7 @@ type despawningWatcher struct {
 	notify chan struct{}
 }
 
-func (w *despawningWatcher) OnDown(ctx context.Context, id actor.ActorID, cause error) {
+func (w *despawningWatcher) OnDown(ctx context.Context, id actor.ActorID, _ Incarnation, cause error) {
 	w.rt.Despawn(w.inc)
 	select {
 	case w.notify <- struct{}{}:

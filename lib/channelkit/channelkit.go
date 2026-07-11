@@ -174,7 +174,7 @@ func (c *Channel) Deliverer() actorrt.Deliverer { return c.deliverer }
 // runtime's pointer-identity removeIf ran before publishing this edge). A
 // watcher Despawn(id) is not pointer-checked, so under same-id replacement it
 // would delete/stop the SUCCESSOR — the exact contract DownWatcher forbids.
-func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
+func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, _ actorrt.Incarnation, cause error) {
 	if c.systemPen == nil || c.openReqs == nil {
 		return
 	}

@@ -123,9 +123,9 @@ type port struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	onDown func(actor.ActorID, error)
+	onDown func(actor.ActorID, embodiment, error)
 	// onObs relays an inbound KindObs (the remote actor's obs PUSH) into the
-	// runtime's per-actor obs fanout — the cross-wire arm of the actor-source obs
+	// runtime's population obs fanout — the cross-wire arm of the actor-source obs
 	// axis. It passes THIS port as the self pointer so the runtime can
 	// pointer-identity-gate the fanout (a replaced predecessor cannot publish obs
 	// attributed to a same-id successor). nil → inbound obs is dropped (no
@@ -180,7 +180,7 @@ type port struct {
 // read runs off-goroutine and newPort selects it against hsCtx; on expiry it
 // closes the conn (unblocking the read) and returns. parent owns the port's
 // LIFETIME (unchanged); hsCtx owns only this one read.
-func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onCancelRequest func(actor.ActorID, message.ID), onExit func(actor.ActorID, embodiment), onReap func(embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
+func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onDown func(actor.ActorID, embodiment, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onCancelRequest func(actor.ActorID, message.ID), onExit func(actor.ActorID, embodiment), onReap func(embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -477,7 +477,7 @@ func (p *port) readLoop() {
 			}
 		case ipc.KindObs:
 			// Actor-source obs PUSH from the remote actor: relay into the runtime's
-			// per-actor obs fanout. Non-fatal (obs is non-truth, best-effort) — a
+			// population obs fanout. Non-fatal (obs is non-truth, best-effort) — a
 			// decode error IS a protocol violation (closed-set discipline) and
 			// fail-closes the port, but a well-formed obs just fans out and the loop
 			// continues. p.id is the connection's authenticated identity (the wire
@@ -592,7 +592,7 @@ func (p *port) die(cause error) {
 			p.onExit(p.id, p)
 		}
 		if !stopping && cause != nil && p.onDown != nil {
-			p.onDown(p.id, cause)
+			p.onDown(p.id, p, cause)
 		}
 	})
 }

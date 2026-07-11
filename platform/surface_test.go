@@ -28,7 +28,10 @@ import (
 func TestHomePublicSurface(t *testing.T) {
 	// Human rejoined the set with the期12 rebuild (subjectgate door面 — lazy
 	// identity-bound handle; caps stay on the live cell, taken per verb).
-	want := []string{"Admit", "CancelRequest", "Close", "Human", "HumanPrincipal", "KickDaemon", "PrincipalOf", "Remove", "ResolvePrincipal", "Restart", "ServeAttach", "Subscribe", "View"}
+	// PresenceSweptCount joined with the W4 presence/obs axis — the corollary-two
+	// enforcement read-out (sweep-cleared orphan tally, DoD-12): a read-only
+	// counter, not an accessor to any internal organ.
+	want := []string{"Admit", "CancelRequest", "Close", "Human", "HumanPrincipal", "KickDaemon", "PresenceSweptCount", "PrincipalOf", "Remove", "ResolvePrincipal", "Restart", "ServeAttach", "Subscribe", "View"}
 
 	typ := reflect.TypeOf((*platform.Home)(nil))
 	var got []string

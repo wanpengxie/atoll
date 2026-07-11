@@ -13,8 +13,9 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/channelkit"
-	"github.com/wanpengxie/atoll/platform/internal/devicepresence"
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -100,16 +101,17 @@ type HomeConfig struct {
 // it; assembly only hands out capabilities. The app layer owns HTTP/transport;
 // Home is pure Go.
 type Home struct {
-	channelID  channelpkg.ID
-	minter     harness.Minter
-	channel    *channelkit.Channel
-	cs         *runtime.ChannelStores
-	signal     *tap.Signal
-	delivery   *tap.Pump
-	links      *link.Acceptor
-	deviceFold *devicepresence.Fold
-	logger     *slog.Logger
-	nowMs      func() int64
+	channelID     channelpkg.ID
+	minter        harness.Minter
+	channel       *channelkit.Channel
+	cs            *runtime.ChannelStores
+	signal        *tap.Signal
+	delivery      *tap.Pump
+	links         *link.Acceptor
+	presenceFold  *presence.Fold
+	presenceSwept atomic.Int64
+	logger        *slog.Logger
+	nowMs         func() int64
 
 	// (No per-user caller index (期12): a subject's own requests are closed
 	// by the substrate expiry reaper — 义务归位 D3; the subject drives its
@@ -193,15 +195,6 @@ type Home struct {
 	reviveLogAt   map[actor.ActorID]time.Time
 	reviveBackoff map[actor.ActorID]reviveBackoffEntry
 
-	// obsReg dedups this home's own per-actor WatchObs registration (the local-cell
-	// arm of the actor-source obs axis, mirroring Acceptor.obsReg's dedup for the
-	// daemon-attach arm) — WatchObs itself is append-only with no built-in dedup
-	// (runtime.go), so a losing SpawnIfAbsent/Fork build (CAS discarded) must not
-	// leave a duplicate registration behind. Registered once, at buildCaps (the
-	// single convergence point for every local birth path).
-	obsMu  sync.Mutex
-	obsReg map[actor.ActorID]bool
-
 	// reviverStraddleHook is a test-only seam (nil in production): see its call
 	// site in homeReviver.EnsureLive.
 	reviverStraddleHook func()
@@ -222,35 +215,6 @@ type Home struct {
 	// in-flight write past the gate is fenced by the cell caps' own live membranes
 	// once cells stop). atomic (lock-free read on the hot Submit path).
 	closed atomic.Bool
-}
-
-// watchObs registers the device-presence fold for id's obs PUSH, deduped so a
-// discarded build (SpawnIfAbsent/Fork CAS loser) never leaves the runtime's
-// append-only obsWatch registry double-appended for the same id.
-func (h *Home) watchObs(id actor.ActorID) {
-	h.obsMu.Lock()
-	defer h.obsMu.Unlock()
-	if h.obsReg[id] {
-		return
-	}
-	h.channel.Cells().WatchObs(id, h.deviceFold)
-	h.obsReg[id] = true
-}
-
-// unwatchObs is watchObs's symmetric un-registration (H5): obsReg is a name
-// registry that must not outlive the membership it tracks (WatchObs is
-// append-only, runtime.go), so a dereg without the matching UnwatchObs would
-// leak the fold's registration across a future re-admission of the same id
-// (mirrors Acceptor.obsReg's own dereg-site cleanup for the daemon-attach arm).
-// A no-op if id was never registered here (e.g. it only ever lived attached).
-func (h *Home) unwatchObs(id actor.ActorID) {
-	h.obsMu.Lock()
-	defer h.obsMu.Unlock()
-	if !h.obsReg[id] {
-		return
-	}
-	h.channel.Cells().UnwatchObs(id, h.deviceFold)
-	delete(h.obsReg, id)
 }
 
 // reviveLogThrottle bounds the attached-host revive-skip log (see
@@ -278,6 +242,11 @@ func Open(cfg HomeConfig) (*Home, error) {
 	}
 	ctx := context.Background()
 	nowMs := func() int64 { return time.Now().UnixMilli() }
+	clock := func() time.Time { return time.UnixMilli(nowMs()) }
+	sweepEvery := cfg.ReconcileInterval
+	if sweepEvery <= 0 {
+		sweepEvery = reconcileInterval
+	}
 
 	// 1. Build the commit Signal (tap fan-out). It has NO dependencies, so it is
 	//    built first and handed to the store as its post-commit source. The
@@ -340,12 +309,10 @@ func Open(cfg HomeConfig) (*Home, error) {
 		return nil, fmt.Errorf("platform: register system actor: %w", err)
 	}
 
-	// 5. Device-presence fold (L3): folds actor-source obs PUSH edges
-	//     into a volatile per-actor level (in-memory; never persisted), decays to
-	//     unknown on the actor's death edge (link-down cascade). Built BEFORE
-	//     channelkit so the system cell can read it (sysactor observes L1/L2/L3);
-	//     registered as a down watcher + per-actor obs watcher below.
-	deviceFold := devicepresence.New(logger)
+	// 5. Presence fold: mechanism-only latest-value cache. Vocabulary remains an
+	// assembly concern through the injected level-kind set.
+	presenceFold := presence.New(logger, clock,
+		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, sweepEvery)
 
 	// 6. channelkit: actorrt runtime + sysactor + death-edge wiring. The system
 	//    cell is built against the LIVE runtime (factory) — its liveness Stat seam
@@ -359,7 +326,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    VARIABLE (not its zero value); by the time a cancel actually fires
 	//    (long after Open returns), h has been assigned.
 	var h *Home
-	clock := func() time.Time { return time.UnixMilli(nowMs()) }
 	channel, err := channelkit.New(channelkit.Config{
 		ChannelID: cfg.ChannelID,
 		System: func(rt *actorrt.Runtime, inc actorrt.Incarnation) actorrt.Actor {
@@ -388,8 +354,8 @@ func Open(cfg HomeConfig) (*Home, error) {
 			return actorbase.New(caps, hooks, sysactor.Def(sysactor.Deps{
 				Registry: cs.Registry,
 				Clock:    clock,
-				Stat:     &runtimeLivenessAdapter{rt: rt},
-				Device:   deviceFold,
+				Presence: presence.NewView(presenceFold, rt, cs.Registry),
+				Logger:   logger,
 				Operate:  cfg.Operate,
 			}))
 		},
@@ -417,10 +383,11 @@ func Open(cfg HomeConfig) (*Home, error) {
 	deliver := deliveryHandle(channel.Deliverer(), cfg.ChannelID, logger)
 	delivery := tap.NewPump(signal, cs.Query, from, deliver, logger)
 
-	// 8. Register the device-presence fold as a global down watcher (so an actor's
-	//     death edge decays its L3 to unknown — the link-down cascade). Per-actor
-	//     obs registration happens at attach (Acceptor below).
-	channel.Cells().WatchDown(deviceFold)
+	// 8. Register the device-presence fold once for the runtime population. Every
+	//    actor's obs wire naturally feeds this single fanout subscription; attach
+	//    churn therefore needs no per-actor watcher bookkeeping.
+	channel.Cells().WatchDown(presenceFold)
+	channel.Cells().WatchObsAll(presenceFold)
 
 	// 9. Assemble the Home shell now: the scheduler's Reviver and the eager
 	//    reconcile arm both close over it (buildCaps, builder, cells), so it must
@@ -435,7 +402,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		cs:               cs,
 		signal:           signal,
 		delivery:         delivery,
-		deviceFold:       deviceFold,
+		presenceFold:     presenceFold,
 		logger:           logger,
 		nowMs:            nowMs,
 		placement:        SinglePlacement{},
@@ -445,7 +412,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 		systemPen:        systemPen,
 		reviveLogAt:      map[actor.ActorID]time.Time{},
 		reviveBackoff:    map[actor.ActorID]reviveBackoffEntry{},
-		obsReg:           map[actor.ActorID]bool{},
 		pokeCh:           make(chan struct{}, 1),
 	}
 
@@ -492,8 +458,8 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//      from — the harness pen Minter, the access door (cs.Access), and the
 	//      schedule engine Minter — so a daemon-hosted cell's message / off-log /
 	//      time-axis capability is behaviourally identical to a local one (transport
-	//      neutrality). It also folds each attached actor's obs PUSH into the
-	//      device-presence fold (per-actor WatchObs at attach).
+	//      neutrality). Attached-port obs enters the runtime's one population
+	//      subscription just like local-cell obs.
 	links := link.NewAcceptor(link.Config{
 		Minter:             minter,
 		Access:             cs.Access,
@@ -503,7 +469,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Registry:           cs.Registry,
 		ChannelID:          cfg.ChannelID,
 		Logger:             logger,
-		ObsWatcher:         deviceFold,
 		CancelRequest:      h.handleCancelUpstream,
 		StorageHostControl: homeStorageHostControl{outbox: cs.Outbox, timeout: cfg.ReservationTimeout},
 	})
@@ -529,10 +494,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	h.reconcileActivation(ctx)
 	channel.Reconcile(ctx)
 	h.sweepExpired(ctx)
-	sweepEvery := cfg.ReconcileInterval
-	if sweepEvery <= 0 {
-		sweepEvery = reconcileInterval
-	}
+	h.sweepPresence(ctx)
 	reconcileCtx, reconcileStop := context.WithCancel(context.Background())
 	reconcileDone := make(chan struct{})
 	go func() {
@@ -547,6 +509,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 				h.reconcileActivation(reconcileCtx)
 				channel.Reconcile(reconcileCtx)
 				h.sweepExpired(reconcileCtx)
+				h.sweepPresence(reconcileCtx)
 			case <-h.pokeCh:
 				// Admit poke: run the same activation-then-closure sweep off-tick so
 				// a freshly-admitted member embodies without the ≤30s wait. Boot-order
@@ -554,6 +517,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 				h.reconcileActivation(reconcileCtx)
 				channel.Reconcile(reconcileCtx)
 				h.sweepExpired(reconcileCtx)
+				h.sweepPresence(reconcileCtx)
 			}
 		}
 	}()
@@ -562,6 +526,38 @@ func Open(cfg HomeConfig) (*Home, error) {
 
 	logger.Info("platform.home.ready", "channel", string(cfg.ChannelID))
 	return h, nil
+}
+
+// sweepPresence enforces fold rows ⊆ (live embodiments ∪ active membership).
+// A failed registry read skips the whole pass: treating failure as an empty set
+// would erase every member's last testimony.
+func (h *Home) sweepPresence(ctx context.Context) {
+	rows, err := h.cs.Registry.ListActive(ctx)
+	if err != nil {
+		h.logger.Warn("platform.presence.sweep_registry_failed", "error", err)
+		return
+	}
+	keep := make(map[actor.ActorID]struct{}, len(rows))
+	for _, row := range rows {
+		keep[row.ID] = struct{}{}
+	}
+	for _, id := range h.channel.Cells().LiveIDs() {
+		keep[id] = struct{}{}
+	}
+	removed := h.presenceFold.Sweep(func(id actor.ActorID) bool {
+		_, ok := keep[id]
+		return ok
+	})
+	if removed > 0 {
+		h.presenceSwept.Add(int64(removed))
+		h.logger.Debug("platform.presence.swept", "rows", removed)
+	}
+}
+
+// PresenceSweptCount reports how many testimony rows the reconciliation
+// backstop has cleared over this Home's lifetime.
+func (h *Home) PresenceSweptCount() int64 {
+	return h.presenceSwept.Load()
 }
 
 // logReviveAttached logs, throttled per author (reviveLogThrottle), that an
@@ -710,11 +706,6 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		if rec, ok := member[id]; ok && rec.Host != "" {
 			continue // attached elsewhere — not gone, not this ring's to evict (反误杀)
 		}
-		// 登记 (latent, H5-对称): DespawnID here does NOT unwatchObs — a no-longer-desired
-		// member may be re-desired later, so its obs registration legitimately survives
-		// a mere deactivation. The only leak is a member whose户籍 row is deleted by RAW
-		// SQL (bypassing Home.Remove, which DOES unwatchObs); that path is not reachable
-		// through any supported verb, so the symmetric un-registration stays with Remove.
 		rt.DespawnID(id)
 	}
 	h.prevEagerDesired = current
@@ -779,11 +770,12 @@ func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, inc actorr
 // actors instead ask the system actor by message (that path is logged).
 func (h *Home) View() View {
 	return View{
-		query:      h.cs.Query,
-		registry:   h.cs.Registry,
-		links:      h.links,
-		deviceFold: h.deviceFold,
-		stat:       &runtimeLivenessAdapter{rt: h.channel.Cells()},
+		query:    h.cs.Query,
+		registry: h.cs.Registry,
+		links:    h.links,
+		presence: presence.NewView(h.presenceFold, h.channel.Cells(), h.cs.Registry),
+		rt:       h.channel.Cells(),
+		nowMs:    h.nowMs,
 	}
 }
 
@@ -923,16 +915,8 @@ func (h *Home) KickDaemon(computeID string) int {
 // liveSchedule membrane the other caps wear — self-targeted timers gated on this
 // incarnation still being live. schedMinter is always set before any participant
 // admission (the system cell does not pass through buildCaps).
-//
-// buildCaps is also the obs-registration convergence point (G8): every local
-// birth path — the reconcile ring's eager 补臂, homeReviver, and
-// spawnHandle.Fork — calls this method to weld a child's caps, so registering
-// h.watchObs(id) here once covers all four without a separate call at each
-// birth site (and its dedup makes a build a losing SpawnIfAbsent/Fork CAS
-// discards a no-op double-registration, not a double fanout).
 func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnation) actorcaps.Caps {
 	rt := h.channel.Cells()
-	h.watchObs(id)
 	return actorcaps.Caps{
 		Pen:      link.NewLivePen(h.minter.Mint(id, kind, h.channelID), inc, rt),
 		Access:   link.NewLiveResourceAccess(h.cs.Access.Mint(id), inc, rt),
@@ -1051,38 +1035,47 @@ func (h *Home) Close() error {
 // (ReadAfterSeq), head cursor (MaxSeq), and active actor roster (ListActors). It
 // holds only read interfaces — there is no write path through a View.
 type View struct {
-	query      storespec.MessageQuery
-	registry   storespec.Registry
-	links      *link.Acceptor
-	deviceFold *devicepresence.Fold
-	stat       *runtimeLivenessAdapter
+	query    storespec.MessageQuery
+	registry storespec.Registry
+	links    *link.Acceptor
+	presence presence.View
+	rt       *actorrt.Runtime
+	nowMs    func() int64
 }
 
-// DevicePresence returns the latest opaque L3 device-presence snapshot an actor
-// pushed (via the obs axis), folded read-time. known=false = UNKNOWN (the actor
-// never reported, or its link dropped and the fold decayed it) — NOT offline.
-// The caller decodes the bytes via introspect.ParseDevicePresence. Advisory only;
-// authoritative reachability is send→terminal.
-func (v View) DevicePresence(id actor.ActorID) (snapshot []byte, known bool) {
-	if v.deviceFold == nil {
-		return nil, false
+// Snapshot composes membership, embodiment and testimony at read time. The
+// fields are advisory and intentionally not a linearizable transaction.
+func (v View) Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error) {
+	return v.presence.Snapshot(ctx, id)
+}
+
+// TestimonyAgeMs projects a fold receipt timestamp through the same clock used
+// to stamp it. Clock skew is represented as age zero, never a negative age.
+func (v View) TestimonyAgeMs(receivedAt int64) int64 {
+	age := v.nowMs() - receivedAt
+	if age < 0 {
+		return 0
 	}
-	return v.deviceFold.Device(id)
+	return age
 }
 
 // Stat reads the authoritative embodiment presence for id: live=true means id
 // has a live embodiment on THIS home right now (cell or attached port — the
 // `kill -0` read, actorrt.Runtime.Stat, transport-neutral). This is NOT the
-// device/L3 advisory axis (DevicePresence above): that is a self-reported,
+// device/L3 advisory axis (Snapshot above): that is a self-reported,
 // three-state, decays-to-unknown push signal from the actor's own client;
 // this is the substrate's own authoritative self-read of embodiment, never
 // asked of the actor, never advisory. The two axes answer different
 // questions and must not be conflated.
 func (v View) Stat(id actor.ActorID) (startedAt time.Time, live bool) {
-	if v.stat == nil {
+	if v.rt == nil {
 		return time.Time{}, false
 	}
-	return v.stat.Stat(id)
+	stat, ok := v.rt.Stat(id)
+	if !ok {
+		return time.Time{}, false
+	}
+	return stat.StartedAt, true
 }
 
 // IsAttached reports whether daemon (compute) id has a live attach right now
@@ -1107,25 +1100,6 @@ func (v View) MaxSeq(ctx context.Context) (int64, error) {
 // ListActors returns all active actors from the membership registry.
 func (v View) ListActors(ctx context.Context) ([]storespec.Record, error) {
 	return v.registry.ListActive(ctx)
-}
-
-// ---------------------------------------------------------------------------
-// runtimeLivenessAdapter -- bridges actorrt.Runtime.Stat -> sysactor.LivenessStat
-// ---------------------------------------------------------------------------
-
-type runtimeLivenessAdapter struct {
-	rt *actorrt.Runtime
-}
-
-func (a *runtimeLivenessAdapter) Stat(id actor.ActorID) (startedAt time.Time, present bool) {
-	if a.rt == nil {
-		return time.Time{}, false
-	}
-	stat, ok := a.rt.Stat(id)
-	if !ok {
-		return time.Time{}, false
-	}
-	return stat.StartedAt, true
 }
 
 // ---------------------------------------------------------------------------

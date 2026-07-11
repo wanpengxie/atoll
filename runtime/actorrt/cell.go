@@ -46,9 +46,9 @@ type cell struct {
 	// runtime wires it to its down-watch fanout. Death is an obs push, not a
 	// control signal and not truth — the watcher's reaction (receiver_unavailable)
 	// is the part that becomes work/truth.
-	onDown func(actor.ActorID, error)
+	onDown func(actor.ActorID, embodiment, error)
 	// onObs publishes an actor-produced obs snapshot (obs push/actor) to the
-	// runtime's per-actor obs watchers. Invoked from the actor via
+	// runtime's population obs watchers. Invoked from the actor via
 	// ActorContext.PublishObs. It passes THIS cell as the self pointer so the
 	// runtime can pointer-identity-gate the fanout (a stale predecessor that
 	// outlived its incarnation cannot publish obs attributed to a same-id
@@ -92,7 +92,7 @@ type cell struct {
 // DELETED) edge; started is the substrate-stamped bind instant (obs uptime);
 // kind is the out-generation attribute welded at mint (Spawn/SpawnIfAbsent/
 // Fork's caller-held kind), read back via Runtime.Stat (UnitStat.Kind).
-func allocShell(parent context.Context, id actor.ActorID, kind actor.Kind, mailbox int, onDown func(actor.ActorID, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), onReap func(embodiment), started time.Time, logger *slog.Logger) *cell {
+func allocShell(parent context.Context, id actor.ActorID, kind actor.Kind, mailbox int, onDown func(actor.ActorID, embodiment, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onExit func(actor.ActorID, embodiment), onReap func(embodiment), started time.Time, logger *slog.Logger) *cell {
 	if mailbox <= 0 {
 		mailbox = 64
 	}
@@ -138,7 +138,7 @@ func (c *cell) markDead() { c.live.Store(false) }
 func (c *cell) doneCh() <-chan struct{} { return c.done }
 
 // PublishObs implements ActorContext: the actor's obs PUSH/producer end. It
-// hands an opaque snapshot to the runtime's per-actor obs fanout (no watcher →
+// hands an opaque snapshot to the runtime's population obs fanout (no watcher →
 // no-op). This is NOT a self-send and NOT truth — it publishes observable state,
 // the substrate forwards it without interpreting.
 func (c *cell) PublishObs(kind ObsKind, val ObsValue) {
@@ -211,7 +211,7 @@ func (c *cell) start() {
 			// against panic; death is positively-observed, the substrate never
 			// guesses "slow".
 			if deathCause != nil && c.onDown != nil {
-				c.onDown(c.id, deathCause)
+				c.onDown(c.id, c, deathCause)
 			}
 			// (c) Best-effort resource release.
 			if st, ok := c.impl.(Stopper); ok {

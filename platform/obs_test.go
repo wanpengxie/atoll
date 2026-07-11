@@ -23,6 +23,16 @@ type obsPublisherActor struct {
 	self actorrt.ActorContext
 }
 
+func deviceFromView(t *testing.T, h *Home, id actor.ActorID) ([]byte, bool) {
+	t.Helper()
+	snapshot, err := h.View().Snapshot(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Snapshot(%s): %v", id, err)
+	}
+	row, ok := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
+	return row.Val, ok
+}
+
 func (a *obsPublisherActor) Start(_ context.Context, self actorrt.ActorContext) error {
 	a.self = self
 	return nil
@@ -35,7 +45,7 @@ func (a *obsPublisherActor) Receive(context.Context, *message.Envelope) error {
 
 // TestHome_PublishObs_FoldsIntoDevicePresence (DoD §7.6, G8 coral regression):
 // an in-process cell's PublishObs reaches the home's own device-presence fold
-// (no daemon attach involved) — View.DevicePresence lights up.
+// (no daemon attach involved) — View.Snapshot carries the testimony.
 func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
 	h, err := Open(HomeConfig{ChannelID: channel.ID("test-obs-local"), DBPath: dbPath})
@@ -53,7 +63,7 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 	}
 	id = minted
 
-	if _, known := h.View().DevicePresence(id); known {
+	if _, known := deviceFromView(t, h, id); known {
 		t.Fatalf("DevicePresence known before any publish")
 	}
 
@@ -65,7 +75,7 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if snap, known := h.View().DevicePresence(id); known {
+		if snap, known := deviceFromView(t, h, id); known {
 			p, ok := introspect.ParseDevicePresence(snap)
 			if !ok || !p.Online {
 				t.Fatalf("ParseDevicePresence = %+v, ok=%v, want online", p, ok)
@@ -74,76 +84,11 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	t.Fatal("View.DevicePresence never lit up after PublishObs")
+	t.Fatal("View.Snapshot never carried testimony after PublishObs")
 }
 
-// TestHome_WatchObs_DedupesAcrossRepeatBuildCaps (DoD §7.6): buildCaps is the
-// convergence point for every local birth path; a repeated build for the same
-// id (e.g. a SpawnIfAbsent/Fork CAS loser rebuilding caps before losing the
-// race) must not leave a duplicate runtime registration — the obsReg map is
-// the dedup guarantee.
-func TestHome_WatchObs_DedupesAcrossRepeatBuildCaps(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
-	h, err := Open(HomeConfig{ChannelID: channel.ID("test-obs-dedup"), DBPath: dbPath})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = h.Close() })
-
-	id := actor.ActorID("dedup-actor")
-	h.watchObs(id)
-	h.watchObs(id)
-	h.watchObs(id)
-
-	h.obsMu.Lock()
-	n := len(h.obsReg)
-	reg := h.obsReg[id]
-	h.obsMu.Unlock()
-	if !reg {
-		t.Fatalf("obsReg[%q] = false, want true after watchObs", id)
-	}
-	if n != 1 {
-		t.Fatalf("obsReg has %d entries after repeated watchObs(same id), want 1", n)
-	}
-}
-
-// TestHome_BuildCaps_RegistersObs_AcrossBirthPaths (DoD §7.6): buildCaps is the
-// single caps-assembly seam shared by Home.SpawnIfAbsent, the reconcile ring's eager
-// 补臂, homeReviver, and spawnHandle.Fork (all four hold this method value) —
-// exercising it directly for distinct ids covers the convergence point every
-// birth path funnels through, without re-driving each path end to end.
-func TestHome_BuildCaps_RegistersObs_AcrossBirthPaths(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
-	h, err := Open(HomeConfig{ChannelID: channel.ID("test-obs-buildcaps"), DBPath: dbPath})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = h.Close() })
-
-	rt := h.channel.Cells()
-	ids := []actor.ActorID{"birth-spawn", "birth-reconcile", "birth-reviver", "birth-fork"}
-	for _, id := range ids {
-		_, _, _ = rt.SpawnIfAbsent(id, actor.KindAgent, func(inc actorrt.Incarnation) actorrt.Actor {
-			h.buildCaps(id, actor.KindAgent, inc)
-			return statTestActor{}
-		})
-	}
-
-	h.obsMu.Lock()
-	defer h.obsMu.Unlock()
-	for _, id := range ids {
-		if !h.obsReg[id] {
-			t.Errorf("obsReg[%q] = false after buildCaps, want true", id)
-		}
-	}
-}
-
-// countingObsWatcher counts OnObs invocations per actor — the fanout-doubling
-// probe: a birth path that accidentally left a duplicate runtime-level
-// WatchObs registration (buildCaps's dedup is obsReg-map-based, per id, not
-// per-registration — see feedback_no_kernel_babysitting-adjacent H5 reasoning
-// in accept.go/scheduler.go) would show up here as count()==2 after exactly
-// one PublishObs, not count()==1.
+// countingObsWatcher proves each publish reaches the one population watcher
+// exactly once, independently of the producer's birth path.
 type countingObsWatcher struct {
 	mu    sync.Mutex
 	calls map[actor.ActorID]int
@@ -153,7 +98,7 @@ func newCountingObsWatcher() *countingObsWatcher {
 	return &countingObsWatcher{calls: map[actor.ActorID]int{}}
 }
 
-func (w *countingObsWatcher) OnObs(_ context.Context, id actor.ActorID, _ actorrt.ObsKind, _ actorrt.ObsValue) {
+func (w *countingObsWatcher) OnObs(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, _ actorrt.ObsKind, _ actorrt.ObsValue) {
 	w.mu.Lock()
 	w.calls[id]++
 	w.mu.Unlock()
@@ -217,7 +162,7 @@ func TestObsFanout_HomeSpawn_OncePerPublish(t *testing.T) {
 	id = minted
 
 	w := newCountingObsWatcher()
-	h.channel.Cells().WatchObs(id, w)
+	h.channel.Cells().WatchObsAll(w)
 	deliverTrigger(t, h, id)
 	awaitCount(t, w, id)
 }
@@ -246,7 +191,7 @@ func TestObsFanout_ReconcileActivationRevive_OncePerPublish(t *testing.T) {
 	}
 
 	w := newCountingObsWatcher()
-	h.channel.Cells().WatchObs(id, w)
+	h.channel.Cells().WatchObsAll(w)
 	deliverTrigger(t, h, id)
 	awaitCount(t, w, id)
 }
@@ -280,7 +225,7 @@ func TestObsFanout_HomeReviver_OncePerPublish(t *testing.T) {
 	}
 
 	w := newCountingObsWatcher()
-	h.channel.Cells().WatchObs(id, w)
+	h.channel.Cells().WatchObsAll(w)
 	deliverTrigger(t, h, id)
 	awaitCount(t, w, id)
 }
@@ -318,7 +263,7 @@ func TestObsFanout_Fork_OncePerPublish(t *testing.T) {
 	}
 
 	w := newCountingObsWatcher()
-	h.channel.Cells().WatchObs(childID, w)
+	h.channel.Cells().WatchObsAll(w)
 	deliverTrigger(t, h, childID)
 	awaitCount(t, w, childID)
 }

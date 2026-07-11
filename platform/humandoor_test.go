@@ -217,7 +217,7 @@ func TestHumanDoor_PresenceTokenStraddle(t *testing.T) {
 	if tok1 == "" || tok2 == "" || tok1 == tok2 {
 		t.Fatalf("tokens = (%q, %q)", tok1, tok2)
 	}
-	if _, known := h.View().DevicePresence(humanID); !known {
+	if _, known := deviceFromView(t, h, humanID); !known {
 		t.Fatal("device presence unknown after connect")
 	}
 
@@ -225,7 +225,7 @@ func TestHumanDoor_PresenceTokenStraddle(t *testing.T) {
 	if err := h.Remove(ctx, humanID); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
-	if _, known := h.View().DevicePresence(humanID); known {
+	if _, known := deviceFromView(t, h, humanID); known {
 		t.Fatal("device presence still known after Remove (Forget 清账破)")
 	}
 	// Stale handle cannot feed a removed id online (straddle gate).
@@ -253,7 +253,7 @@ func TestHumanDoor_PresenceTokenStraddle(t *testing.T) {
 	}
 	oldHandle.PresenceDisconnect(tok1) // stale token: account was cleared — no-op
 	oldHandle.PresenceDisconnect(tok2)
-	if _, known := h.View().DevicePresence(newID); !known {
+	if _, known := deviceFromView(t, h, newID); !known {
 		t.Fatal("late stale disconnect extinguished the fresh session (straddle 回归)")
 	}
 	newHandle.PresenceDisconnect(tok3)

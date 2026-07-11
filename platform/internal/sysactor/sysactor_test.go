@@ -8,8 +8,10 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -32,11 +34,52 @@ type fakeStat struct {
 	started time.Time
 }
 
-func (p fakeStat) Stat(id actor.ActorID) (time.Time, bool) {
+type fixedPresence struct{ snapshot presence.Snapshot }
+
+func (p fixedPresence) Snapshot(context.Context, actor.ActorID) (presence.Snapshot, error) {
+	return p.snapshot, nil
+}
+
+func (p fakeStat) Snapshot(_ context.Context, id actor.ActorID) (presence.Snapshot, error) {
 	if !p.present[id] {
-		return time.Time{}, false
+		return presence.Snapshot{Member: true}, nil
 	}
-	return p.started, true
+	return presence.Snapshot{Member: true, L1Present: true, L1StartedAt: p.started}, nil
+}
+
+func TestActorStatusProjectsPresence(t *testing.T) {
+	started := time.Unix(90, 0)
+	s := New(Deps{
+		Clock: func() time.Time { return time.Unix(100, 0) },
+		Presence: fixedPresence{snapshot: presence.Snapshot{
+			Member: true, L1Present: true, L1StartedAt: started,
+			L3: map[actorrt.ObsKind]presence.Testimony{
+				actorrt.ObsKind(introspect.ObsDevicePresence): {Val: introspect.MarshalDevicePresence(true), ReceivedAt: 7, Source: presence.SourceDoor},
+				"load": {Val: []byte{1, 2}, ReceivedAt: 8, Source: presence.SourceBroker, StaleFromPriorLife: true},
+			},
+		}},
+	})
+	sys := &fakeSys{}
+	s.handle(sys, requestMsg("status", introspect.QueryStatus, []byte(`{"actor_id":"agent:a"}`)))
+	if len(sys.replies) != 1 {
+		t.Fatalf("replies=%d", len(sys.replies))
+	}
+	answer := sys.replies[0].v.(introspect.Status)
+	if !answer.Member || !answer.Present || answer.UptimeMs != 10_000 || answer.L3[introspect.ObsDevicePresence].Device == nil {
+		t.Fatalf("answer=%+v", answer)
+	}
+	if answer.L3["load"].ValueBase64 != "AQI=" || !answer.L3["load"].StaleFromPriorLife {
+		t.Fatalf("unknown-kind testimony=%+v", answer.L3["load"])
+	}
+}
+
+func TestActorStatusMalformedDoesNotSynthesize(t *testing.T) {
+	s := New(Deps{Presence: fixedPresence{}})
+	sys := &fakeSys{}
+	s.handle(sys, requestMsg("status", introspect.QueryStatus, []byte(`{}`)))
+	if len(sys.replies) != 0 {
+		t.Fatalf("malformed status produced %d replies", len(sys.replies))
+	}
 }
 
 // fakeSys is a minimal actorbase.Sys double: it embeds the (nil) interface so
@@ -86,7 +129,7 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	// injected seam when composing actor.list (never a message, never truth).
 	s := New(Deps{
 		Registry: reg,
-		Stat:     fakeStat{present: map[actor.ActorID]bool{"actor:a": true}, started: time.Now()},
+		Presence: fakeStat{present: map[actor.ActorID]bool{"actor:a": true}, started: time.Now()},
 	})
 
 	s.handle(sys, listReq)

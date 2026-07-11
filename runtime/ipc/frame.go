@@ -67,7 +67,7 @@ const (
 	// KindObs (remote→host): the bound actor pushed an opaque obs snapshot about
 	// ITSELF (actor-source obs PUSH — operational/health state like device
 	// presence, NEVER business content, NEVER truth). The host relays it into the
-	// runtime's per-actor obs fanout (publishObs) so home-side WatchObs consumers
+	// runtime's population obs fanout (publishObs) so home-side consumers
 	// see it. Fire-and-forget, unidirectional, NO ack: obs is non-truth and
 	// best-effort (a lost snapshot is superseded by the next one / decayed by the
 	// lease) — so it cannot reuse the ack'd KindEmit path. The actor is implicit

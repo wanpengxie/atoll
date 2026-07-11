@@ -74,6 +74,21 @@ func TestReservedQueryNames(t *testing.T) {
 	if QueryList != "actor.list" {
 		t.Fatalf("QueryList drifted: %q", QueryList)
 	}
+	if QueryStatus != "actor.status" {
+		t.Fatalf("QueryStatus drifted: %q", QueryStatus)
+	}
+}
+
+func TestParseStatusRequest(t *testing.T) {
+	req, err := ParseStatusRequest([]byte(`{"actor_id":"agent:a"}`))
+	if err != nil || req.ActorID != "agent:a" {
+		t.Fatalf("req=%+v err=%v", req, err)
+	}
+	for _, raw := range [][]byte{nil, []byte(`{}`), []byte(`{`)} {
+		if _, err := ParseStatusRequest(raw); err == nil {
+			t.Fatalf("ParseStatusRequest(%q) accepted invalid input", raw)
+		}
+	}
 }
 
 // TestWireFieldNames pins the JSON contract — the exact keys the LLM-facing

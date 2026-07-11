@@ -133,7 +133,7 @@ func (i Incarnation) ID() actor.ActorID { return i.id }
 // watcher that must do blocking closure work hands the id to its own resident
 // consumer (see channelkit) rather than doing it here.
 type DownWatcher interface {
-	OnDown(ctx context.Context, id actor.ActorID, cause error)
+	OnDown(ctx context.Context, id actor.ActorID, incarnation Incarnation, cause error)
 }
 
 // Runtime owns the live embodiments for one channel and is the addressing seam.
@@ -150,7 +150,7 @@ type Runtime struct {
 	mu          sync.RWMutex
 	embodiments map[actor.ActorID]embodiment
 	watchers    []DownWatcher
-	obsWatch    map[actor.ActorID][]ObsWatcher
+	obsWatchers []ObsWatcher
 	mailbox     int
 	// owned tracks the fork ownership edge: parent-embodiment -> its forked
 	// children's embodiments. It lives ONLY in memory (an incarnation
@@ -244,7 +244,6 @@ func New(cfg Config) (*Runtime, Deliverer) {
 		clock:       clock,
 		logger:      logger,
 		embodiments: make(map[actor.ActorID]embodiment),
-		obsWatch:    make(map[actor.ActorID][]ObsWatcher),
 		owned:       make(map[embodiment][]embodiment),
 		zombies:     make(map[embodiment]*zombie),
 		grace:       grace,
@@ -280,7 +279,7 @@ func (r *Runtime) WatchDown(w DownWatcher) {
 // not escape and crash the process through the death path — AND it is logged,
 // because a swallowed fault is a silent black hole. Watchers MUST be non-blocking;
 // a blocking watcher stalls the dying goroutine's reap.
-func (r *Runtime) publishDown(id actor.ActorID, cause error) {
+func (r *Runtime) publishDown(id actor.ActorID, self embodiment, cause error) {
 	r.mu.RLock()
 	ws := make([]DownWatcher, len(r.watchers))
 	copy(ws, r.watchers)
@@ -293,46 +292,22 @@ func (r *Runtime) publishDown(id actor.ActorID, cause error) {
 						"actor", id, "cause", cause, "panic", rec)
 				}
 			}()
-			w.OnDown(context.Background(), id, cause)
+			w.OnDown(context.Background(), id, Incarnation{id: id, p: self}, cause)
 		}()
 	}
 }
 
-// WatchObs registers a watcher for an actor's PUSH obs (snapshots the actor
-// publishes via PublishObs). No-op fanout until the actor publishes. Part of the
-// obs push/actor skeleton — registered consumers are domain (e.g. a monitor).
-func (r *Runtime) WatchObs(id actor.ActorID, w ObsWatcher) {
+// WatchObsAll registers a population-wide watcher for actor PUSH observations.
+// It has the same lifetime shape as WatchDown: watchers are expected to live as
+// long as their runtime owner. A future shorter-lived consumer must add an
+// explicit unsubscribe operation together with documented in-flight semantics.
+func (r *Runtime) WatchObsAll(w ObsWatcher) {
 	if w == nil {
 		return
 	}
 	r.mu.Lock()
-	r.obsWatch[id] = append(r.obsWatch[id], w)
+	r.obsWatchers = append(r.obsWatchers, w)
 	r.mu.Unlock()
-}
-
-// UnwatchObs is the symmetric un-registration to WatchObs (the append-only
-// register is otherwise a name that only grows: it must never leak across
-// dereg/reincarnation). Removes the first occurrence of w for id by identity
-// (interface value equality); no-op if not found. Deletes the map entry once
-// empty so a churned identity does not accumulate empty slices.
-func (r *Runtime) UnwatchObs(id actor.ActorID, w ObsWatcher) {
-	if w == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	ws := r.obsWatch[id]
-	for i, cur := range ws {
-		if cur == w {
-			ws = append(ws[:i], ws[i+1:]...)
-			break
-		}
-	}
-	if len(ws) == 0 {
-		delete(r.obsWatch, id)
-	} else {
-		r.obsWatch[id] = ws
-	}
 }
 
 // publishObs fans an actor-published obs snapshot to that actor's watchers
@@ -353,8 +328,9 @@ func (r *Runtime) publishObs(id actor.ActorID, self embodiment, kind ObsKind, va
 		r.mu.RUnlock()
 		return
 	}
-	ws := append([]ObsWatcher(nil), r.obsWatch[id]...)
+	ws := append([]ObsWatcher(nil), r.obsWatchers...)
 	r.mu.RUnlock()
+	incarnation := Incarnation{id: id, p: self}
 	for _, w := range ws {
 		func() {
 			defer func() {
@@ -362,7 +338,7 @@ func (r *Runtime) publishObs(id actor.ActorID, self embodiment, kind ObsKind, va
 					r.logger.Error("actorrt.obs.watcher_panic", "actor", id, "kind", kind, "panic", rec)
 				}
 			}()
-			w.OnObs(context.Background(), id, kind, val)
+			w.OnObs(context.Background(), id, incarnation, kind, val)
 		}()
 	}
 }

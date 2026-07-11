@@ -12,8 +12,8 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/platform/internal/devicepresence"
 	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -23,6 +23,18 @@ import (
 )
 
 const testChannelID = channel.ID("test-channel")
+
+type memberPresenceRegistry struct{}
+
+func (memberPresenceRegistry) Lookup(_ context.Context, id actor.ActorID) (storespec.Record, bool, error) {
+	return storespec.Record{ID: id}, true, nil
+}
+func (memberPresenceRegistry) Exists(context.Context, actor.ActorID) (bool, error) {
+	return true, nil
+}
+func (memberPresenceRegistry) ListActive(context.Context) ([]storespec.Record, error) {
+	return nil, nil
+}
 
 // --- stubs ---
 
@@ -188,7 +200,7 @@ func newDaemonHost() *daemonHost {
 	return h
 }
 
-func (h *daemonHost) OnDown(_ context.Context, id actor.ActorID, cause error) {
+func (h *daemonHost) OnDown(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, cause error) {
 	h.mu.Lock()
 	handler := h.down[id]
 	h.mu.Unlock()
@@ -242,7 +254,7 @@ func newHomeRig(t *testing.T, leasePing, leaseTTL time.Duration) *homeRig {
 		minter:     &stubMinter{},
 		membership: &stubMembership{},
 	}
-	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ error) {
+	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, _ error) {
 		r.mu.Lock()
 		r.downActors = append(r.downActors, id)
 		r.mu.Unlock()
@@ -272,9 +284,11 @@ func (r *homeRig) getDown() []actor.ActorID {
 	return cp
 }
 
-type watcherFunc func(context.Context, actor.ActorID, error)
+type watcherFunc func(context.Context, actor.ActorID, actorrt.Incarnation, error)
 
-func (f watcherFunc) OnDown(ctx context.Context, id actor.ActorID, cause error) { f(ctx, id, cause) }
+func (f watcherFunc) OnDown(ctx context.Context, id actor.ActorID, incarnation actorrt.Incarnation, cause error) {
+	f(ctx, id, incarnation, cause)
+}
 
 // --- tests ---
 
@@ -890,14 +904,14 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 		minter:     &stubMinter{},
 		membership: &stubMembership{},
 	}
-	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ error) {
+	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, _ error) {
 		r.mu.Lock()
 		r.downActors = append(r.downActors, id)
 		r.mu.Unlock()
 	}))
 	// The device-presence fold rides the SAME down edge (registered exactly as
 	// platform/home.go wires it): the drop must decay its folded level.
-	fold := devicepresence.New(nil)
+	fold := presence.New(nil, time.Now, []actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, 30*time.Second)
 	rt.WatchDown(fold)
 	r.acc = link.NewAcceptor(link.Config{
 		Minter:     r.minter,
@@ -963,9 +977,16 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 	}
 
 	// Seed a KNOWN device-presence level for the actor — the thing the drop decays.
+	gen, ok := rt.CurrentIncarnation(toolID)
+	if !ok {
+		t.Fatal("home port has no live incarnation")
+	}
 	fold.OnObs(context.Background(), toolID,
+		gen,
 		actorrt.ObsKind(introspect.ObsDevicePresence), actorrt.ObsValue(`{"online":true}`))
-	if _, known := fold.Device(toolID); !known {
+	view := presence.NewView(fold, rt, memberPresenceRegistry{})
+	snapshot, err := view.Snapshot(context.Background(), toolID)
+	if err != nil || snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)].Val == nil {
 		t.Fatal("device presence not folded — precondition broken")
 	}
 
@@ -987,7 +1008,8 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 				downSeen = true
 			}
 		}
-		_, known := fold.Device(toolID)
+		snapshot, _ := view.Snapshot(context.Background(), toolID)
+		_, known := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
 		if downSeen && !known {
 			return
 		}
@@ -1034,6 +1056,18 @@ func TestEndToEnd_DespawnID_CrossWireKill(t *testing.T) {
 	// Precondition: the daemon-side cell is actually live before the kill.
 	if _, ok := h.rt.Stat(toolID); !ok {
 		t.Fatal("daemon cell not live before DespawnID — precondition broken")
+	}
+	// Barrier: the home-side attach registers the port embodiment asynchronously
+	// to Dial returning; DespawnID before that registration lands returns false.
+	attachDeadline := time.Now().Add(10 * time.Second)
+	for {
+		if _, ok := r.rt.Stat(toolID); ok {
+			break
+		}
+		if time.Now().After(attachDeadline) {
+			t.Fatal("home runtime never registered the port embodiment — attach lost")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
 
 	// The home-side kill: exactly Home.Remove step ①.
