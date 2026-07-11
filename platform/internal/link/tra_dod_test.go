@@ -44,7 +44,7 @@ func TestControlDeathDropsQueuedFramesBeforeTeardown(t *testing.T) {
 	ls.kill("test_session_death", nil)
 	close(release)
 	_ = writer.Close()
-	ls.waitControlWorkers()
+	ls.waitControlWorkers(2 * time.Second)
 	if got := calls.Load(); got != 1 {
 		t.Fatalf("control handlers after death=%d want only the already-running handler", got)
 	}
@@ -71,21 +71,41 @@ func TestDuplicateControlStreamKillsSession(t *testing.T) {
 	}
 }
 
+// TestMissingStreamHeaderClosesOnlyThatStream pins the honest header-admission
+// contract: a substream that opens but never sends its streamHeader is closed by
+// the EXISTING laneHeaderReadTimeout bound (readLaneJSON's admission deadline,
+// lane.go) — dispatch returns and closes that ONE substream on its own, without
+// escalating into session death. The bound is shortened here purely so the test
+// runs in <1s instead of waiting out the real 30s (the old form of this test
+// leaned on a caller-side read deadline to *appear* to pass while dispatch still
+// blocked the full 30s inside readLaneJSON — the 30s link-package test cost).
 func TestMissingStreamHeaderClosesOnlyThatStream(t *testing.T) {
-	orig := streamHeaderReadTimeout
-	streamHeaderReadTimeout = 30 * time.Millisecond
-	defer func() { streamHeaderReadTimeout = orig }()
+	orig := laneHeaderReadTimeout
+	laneHeaderReadTimeout = 30 * time.Millisecond
+	defer func() { laneHeaderReadTimeout = orig }()
+
 	ls, _, _ := newControlKillRig(t, func([]byte) {})
 	streamA, streamB := net.Pipe()
 	t.Cleanup(func() { _ = streamB.Close() })
 	dispatched := make(chan struct{})
 	go func() { ls.dispatch(streamA); close(dispatched) }()
+
+	// dispatch returns of its own accord once laneHeaderReadTimeout fires — the
+	// headerless substream is bounded-closed, no external deadline needed.
+	select {
+	case <-dispatched:
+	case <-time.After(2 * time.Second):
+		t.Fatal("headerless substream was not closed by laneHeaderReadTimeout")
+	}
+	// dispatch closed streamA, so the peer end now observes the close — proof the
+	// substream was actually torn down, not merely abandoned.
 	_ = streamB.SetReadDeadline(time.Now().Add(time.Second))
 	var one [1]byte
 	if _, err := streamB.Read(one[:]); err == nil {
-		t.Fatal("headerless stream was not closed at its admission deadline")
+		t.Fatal("headerless substream was not closed after its admission bound")
 	}
-	<-dispatched
+	// The bounded close of ONE substream is not a session death — the session (and
+	// thus any sibling substream) stays healthy.
 	select {
 	case <-ls.closed():
 		t.Fatal("header timeout escalated into session death")

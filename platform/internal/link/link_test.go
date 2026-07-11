@@ -1173,6 +1173,88 @@ func TestKickDaemon_ClosesAllLinksIncludingHalfAttached(t *testing.T) {
 	}
 }
 
+// TestControlDeath_LeavesNoZombieOnlineAccount is G-1's real-path guard (P2-1).
+// The generic handler-drop unit test (tra_dod_test.go) only proves a killed
+// control worker stops calling its handler; it says nothing about the ACCOUNT.
+// This drives the FULL production path — Serve → runLink → handleAttach →
+// markAttached + registerLaneLink — then kills the control flow and asserts the
+// terminal account state the工单 names (not a handler call count): the daemon
+// must not linger "online" (the deferred markDetached ran symmetrically) and its
+// lane-relay entry must be gone (deferred deregisterLaneLink ran) — no zombie
+// online row, no dead lane session residual. The teardown ordering H-1's bounded
+// waitControlWorkers preserves is exactly what keeps this account clean.
+func TestControlDeath_LeavesNoZombieOnlineAccount(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+
+	const toolID = actor.ActorID("tool:zombie-probe")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	h := newDaemonHost()
+	defer h.Stop()
+
+	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+		return h.Dispatch(toolID, env)
+	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
+	if err != nil {
+		t.Fatalf("OpenStream: %v", err)
+	}
+	h.Install(toolID, &echoCell{w: arms.Pen}, nil)
+	d.Start()
+
+	// Round-trip a request so the attach is provably COMPLETE — markAttached and
+	// registerLaneLink have both run for daemon-1. The online account is now dirty
+	// by design; the death below must clean it symmetrically.
+	req := &message.Envelope{
+		ID: "req-1", ChannelID: testChannelID, Kind: message.KindRequest, Type: "echo.do",
+		Sender: message.Sender{ID: "user:a", Kind: actor.KindHuman}, Audience: message.Audience{toolID},
+	}
+	if _, err := r.deliver.Deliver([]actor.ActorID{toolID}, req); err != nil {
+		t.Fatalf("home deliver: %v", err)
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for len(r.minter.all()) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("cell emit never reached the home writer (attach not complete)")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Precondition: the account is genuinely dirty before the death.
+	if !r.acc.IsAttached("daemon-1") {
+		t.Fatal("daemon-1 not online after a completed attach — precondition broken")
+	}
+	if !r.acc.LaneLinkPresentForTest("daemon-1") {
+		t.Fatal("daemon-1 has no lane-relay link after attach — precondition broken")
+	}
+
+	// Kill the control flow: the daemon closes its end, the home session dies, and
+	// runLink unwinds through the teardown funnel (waitControlWorkers → deferred
+	// markDetached + deregisterLaneLink). Any control-flow death funnels the same
+	// way; a daemon close is the deterministic trigger.
+	if err := d.Close(); err != nil {
+		t.Fatalf("daemon Close: %v", err)
+	}
+
+	// Terminal account state: daemon-1 gone from the online account (no zombie
+	// "still online") AND no residual lane-relay entry.
+	deadline = time.Now().Add(10 * time.Second)
+	for {
+		online := r.acc.IsAttached("daemon-1")
+		lane := r.acc.LaneLinkPresentForTest("daemon-1")
+		if !online && !lane {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after control death: IsAttached=%v laneLinkPresent=%v — want both false (zombie online account / dead lane residual)", online, lane)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
 func mustDeliver(t *testing.T, r *homeRig, target actor.ActorID) error {
 	t.Helper()
 	_, err := r.deliver.Deliver([]actor.ActorID{target}, &message.Envelope{

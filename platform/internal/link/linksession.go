@@ -105,10 +105,6 @@ var errLinkClosed = errors.New("link: closed")
 // cadence.
 var yamuxKeepAliveIntervalNS atomic.Int64
 
-// streamHeaderReadTimeout bounds the unauthenticated substream admission read.
-// It is below the lease TTL and aligned with the actor attach handshake budget.
-var streamHeaderReadTimeout = attachHandshakeTimeout
-
 // linkYamuxConfig is the top-level session's config. EnableKeepAlive stays at
 // DefaultConfig's true.
 //
@@ -200,9 +196,37 @@ func (ls *linkSession) stopControlWorkers() {
 	ls.controlLifeMu.Unlock()
 }
 
-func (ls *linkSession) waitControlWorkers() {
+// waitControlWorkers stops the control worker(s) and joins them, BOUNDED by
+// timeout. Returns true if the join completed within the bound (the normal
+// path — every already-queued control frame's handler drained before teardown,
+// preserving the "die with a clean drain" total order), false if the bound
+// elapsed first.
+//
+// The bound exists because a control worker can be wedged inside a long-lived
+// STORAGE call, not just an out-network write: handleAttach runs
+// registry.Lookup / membership.ApplyMemberTransitions / reconcileHost on the
+// attach reqCtx, and that ctx carries NO deadline of its own — a stalled store
+// (disk-hung db) pins the handler indefinitely. An unbounded join would then
+// propagate that stall straight through this teardown and, via Serve's
+// WaitGroup, into Home shutdown — a jammed store would make the whole station
+// un-closeable. So the join is bounded: normal case keeps the full ordering;
+// pathological (store hung) case degrades to "abandon the join, leave a loud
+// trace, let teardown proceed" — never coupling a stuck store into a station
+// that cannot close. The caller owns the timeout-path logging (it holds the
+// daemon/channel attribution this linkSession does not).
+func (ls *linkSession) waitControlWorkers(timeout time.Duration) bool {
 	ls.stopControlWorkers()
-	ls.controlWG.Wait()
+	done := make(chan struct{})
+	go func() {
+		ls.controlWG.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }
 
 // dialLinkSession builds the daemon (client) end: a yamux client over the raw WS
@@ -314,13 +338,19 @@ func (ls *linkSession) dispatch(conn net.Conn) {
 	if ls.onFrame != nil {
 		conn = &frameHookConn{Conn: conn, onFrame: ls.onFrame}
 	}
+	// The header read is bounded by readLaneJSON's own laneHeaderReadTimeout (30s,
+	// lane.go) — the single admission bound for every substream header/ack on this
+	// session — set on its entry and cleared on its return, so the raw byte pump
+	// that follows on the same substream inherits no deadline. No separate
+	// admission deadline is set here: an earlier one was dead code (readLaneJSON
+	// unconditionally overwrote it). Under single-tenancy that 30s header bound
+	// plus the per-link lease TTL backstop is sufficient — no shorter admission
+	// gate is warranted (owner 拍定, H-2).
 	var hdr streamHeader
-	_ = conn.SetReadDeadline(time.Now().Add(streamHeaderReadTimeout))
 	if err := readLaneJSON(conn, &hdr); err != nil {
 		_ = conn.Close()
 		return
 	}
-	_ = conn.SetReadDeadline(time.Time{})
 	switch hdr.Kind {
 	case streamControl:
 		// A session has exactly one control spine. A second one would create two

@@ -589,10 +589,25 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	lc.start()
 	<-lc.closed()
 	// Restore a total order between the last control mutation and teardown's
-	// deferred online/lane cleanup. kill closes the worker stop signal first, so
-	// queued frames cannot start after session death; an already-running bounded
-	// handler is joined here before boundID is inspected by the defers.
-	lc.waitControlWorkers()
+	// deferred online/lane cleanup: kill closes the worker stop signal first, so
+	// queued frames cannot START after session death, and joining the worker here
+	// fences whatever was ALREADY running before boundID is inspected by the
+	// defers. The join is BOUNDED (H-1): a control handler wedged in a long-lived
+	// storage call (handleAttach's registry.Lookup / ApplyMemberTransitions /
+	// reconcileHost all run on the attach reqCtx, which has no deadline) must not
+	// pin teardown — and, through Serve's WaitGroup, Home shutdown — on a stalled
+	// store. Bound = 2× the out-network write budget (streamWriteBudget = 10s):
+	// generous for any live handler, decisive against a hung one. On timeout we
+	// abandon the join and proceed with teardown (a stuck store is never allowed
+	// to become an un-closeable station), leaving a loud, attributed trace.
+	if !lc.waitControlWorkers(2 * streamWriteBudget) {
+		boundMu.Lock()
+		b := boundID
+		boundMu.Unlock()
+		a.logger.Error("link.control_worker_join_timeout",
+			"msg", "control worker join timeout, abandoning — teardown proceeding",
+			"daemon", b, "channel", string(a.channelID))
+	}
 	close(done)
 }
 
