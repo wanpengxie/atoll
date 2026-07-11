@@ -17,6 +17,8 @@ import (
 // does NOT write the truth log: a UI status read must never pollute truth — that
 // was the retired probe's sin (it sent an actor.status request and polled the log
 // for the self-answer, two log writes to answer a read-only question).
+// The current reserved actor.status is different: the system actor reads this
+// same Snapshot for in-channel callers and never asks the target to self-probe.
 //
 // Three honest states (device presence is ADVISORY; authoritative reachability is
 // send→terminal — try it):

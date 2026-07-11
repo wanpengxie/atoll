@@ -125,7 +125,7 @@ type port struct {
 
 	onDown func(actor.ActorID, embodiment, error)
 	// onObs relays an inbound KindObs (the remote actor's obs PUSH) into the
-	// runtime's per-actor obs fanout — the cross-wire arm of the actor-source obs
+	// runtime's population obs fanout — the cross-wire arm of the actor-source obs
 	// axis. It passes THIS port as the self pointer so the runtime can
 	// pointer-identity-gate the fanout (a replaced predecessor cannot publish obs
 	// attributed to a same-id successor). nil → inbound obs is dropped (no
@@ -477,7 +477,7 @@ func (p *port) readLoop() {
 			}
 		case ipc.KindObs:
 			// Actor-source obs PUSH from the remote actor: relay into the runtime's
-			// per-actor obs fanout. Non-fatal (obs is non-truth, best-effort) — a
+			// population obs fanout. Non-fatal (obs is non-truth, best-effort) — a
 			// decode error IS a protocol violation (closed-set discipline) and
 			// fail-closes the port, but a well-formed obs just fans out and the loop
 			// continues. p.id is the connection's authenticated identity (the wire

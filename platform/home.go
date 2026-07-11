@@ -458,8 +458,8 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//      from — the harness pen Minter, the access door (cs.Access), and the
 	//      schedule engine Minter — so a daemon-hosted cell's message / off-log /
 	//      time-axis capability is behaviourally identical to a local one (transport
-	//      neutrality). It also folds each attached actor's obs PUSH into the
-	//      device-presence fold (per-actor WatchObs at attach).
+	//      neutrality). Attached-port obs enters the runtime's one population
+	//      subscription just like local-cell obs.
 	links := link.NewAcceptor(link.Config{
 		Minter:             minter,
 		Access:             cs.Access,

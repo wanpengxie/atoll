@@ -60,6 +60,7 @@ type Fold struct {
 	mu         sync.Mutex
 	latest     map[actor.ActorID]map[actorrt.ObsKind]entry
 	dropped    map[actorrt.ObsKind]uint64
+	loggedDrop map[actorrt.ObsKind]uint64
 	levelKinds map[actorrt.ObsKind]struct{}
 	clock      func() time.Time
 	grace      time.Duration
@@ -86,7 +87,7 @@ func New(logger *slog.Logger, clock func() time.Time, levelKinds []actorrt.ObsKi
 		dropped[kind] = 0
 	}
 	dropped[unknownDropBucket] = 0
-	return &Fold{latest: map[actor.ActorID]map[actorrt.ObsKind]entry{}, dropped: dropped, levelKinds: levels, clock: clock, grace: sweepGrace, logger: logger}
+	return &Fold{latest: map[actor.ActorID]map[actorrt.ObsKind]entry{}, dropped: dropped, loggedDrop: map[actorrt.ObsKind]uint64{}, levelKinds: levels, clock: clock, grace: sweepGrace, logger: logger}
 }
 
 func (f *Fold) OnObs(_ context.Context, id actor.ActorID, gen actorrt.Incarnation, kind actorrt.ObsKind, val actorrt.ObsValue) {
@@ -182,7 +183,19 @@ func (f *Fold) Sweep(keep func(actor.ActorID) bool) int {
 			delete(f.latest, id)
 		}
 	}
+	changedDrops := map[actorrt.ObsKind]uint64{}
+	for kind, count := range f.dropped {
+		if count != f.loggedDrop[kind] {
+			changedDrops[kind] = count
+			f.loggedDrop[kind] = count
+		}
+	}
 	f.mu.Unlock()
+	if len(changedDrops) > 0 {
+		// Sweep cadence is the rate limiter: the hot OnObs path only increments
+		// bounded counters and never logs.
+		f.logger.Debug("presence.non_level_dropped", "counts", changedDrops)
+	}
 	return removed
 }
 

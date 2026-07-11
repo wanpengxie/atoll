@@ -203,7 +203,7 @@ type ActorContext interface {
 	// Self returns this actor's id.
 	Self() actor.ActorID
 	// PublishObs publishes an opaque, operational obs snapshot about this actor
-	// to the substrate's per-actor obs watchers (obs push/actor). Read-only,
+	// to the substrate's population obs watchers (obs push/actor). Read-only,
 	// non-truth, never a message — the substrate forwards it without
 	// interpreting. No watcher → no-op. The actor pushes on a CHANGE it deems
 	// worth surfacing (no timer); time-varying derivations are the consumer's.

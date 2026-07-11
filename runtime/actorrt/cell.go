@@ -48,7 +48,7 @@ type cell struct {
 	// is the part that becomes work/truth.
 	onDown func(actor.ActorID, embodiment, error)
 	// onObs publishes an actor-produced obs snapshot (obs push/actor) to the
-	// runtime's per-actor obs watchers. Invoked from the actor via
+	// runtime's population obs watchers. Invoked from the actor via
 	// ActorContext.PublishObs. It passes THIS cell as the self pointer so the
 	// runtime can pointer-identity-gate the fanout (a stale predecessor that
 	// outlived its incarnation cannot publish obs attributed to a same-id
@@ -138,7 +138,7 @@ func (c *cell) markDead() { c.live.Store(false) }
 func (c *cell) doneCh() <-chan struct{} { return c.done }
 
 // PublishObs implements ActorContext: the actor's obs PUSH/producer end. It
-// hands an opaque snapshot to the runtime's per-actor obs fanout (no watcher →
+// hands an opaque snapshot to the runtime's population obs fanout (no watcher →
 // no-op). This is NOT a self-send and NOT truth — it publishes observable state,
 // the substrate forwards it without interpreting.
 func (c *cell) PublishObs(kind ObsKind, val ObsValue) {
