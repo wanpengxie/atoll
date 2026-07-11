@@ -588,6 +588,11 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// (the same death funnel the old teardown() drove).
 	lc.start()
 	<-lc.closed()
+	// Restore a total order between the last control mutation and teardown's
+	// deferred online/lane cleanup. kill closes the worker stop signal first, so
+	// queued frames cannot start after session death; an already-running bounded
+	// handler is joined here before boundID is inspected by the defers.
+	lc.waitControlWorkers()
 	close(done)
 }
 
@@ -743,7 +748,10 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 		a.obsMu.Unlock()
 	}
 
-	a.sendReply(lc, requestID, AttachReply{ChannelID: a.channelID, Accepted: true, DaemonID: computeID})
+	if err := a.sendReply(lc, requestID, AttachReply{ChannelID: a.channelID, Accepted: true, DaemonID: computeID}); err != nil {
+		a.logger.Info("link.attach_reply_failed", "compute", computeID, "err", err)
+		return computeID, false
+	}
 	a.logger.Info("link.attached", "compute", computeID, "actors", len(att.Declarations))
 	return computeID, true
 }
@@ -844,12 +852,12 @@ func (a *Acceptor) reconcileHost(ctx context.Context, computeID string, newAllow
 	}
 }
 
-func (a *Acceptor) sendReply(lc *linkSession, requestID string, reply AttachReply) {
+func (a *Acceptor) sendReply(lc *linkSession, requestID string, reply AttachReply) error {
 	raw, err := encodeControl(controlFrame{RequestID: requestID, Kind: ctrlAttachReply, AttachReply: &reply})
 	if err != nil {
-		return
+		return err
 	}
-	_ = lc.sendControl(raw)
+	return lc.sendControl(raw)
 }
 
 // peekControlKind reads ONLY the "kind" field of a stream-0 control payload —

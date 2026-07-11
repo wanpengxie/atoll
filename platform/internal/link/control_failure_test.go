@@ -23,6 +23,9 @@ func TestControlWorkerPanicKillsSessionWithoutEscaping(t *testing.T) {
 	ls := &linkSession{ys: client, onControl: func([]byte) { panic("handler exploded") }}
 	reader, writer := net.Pipe()
 	done := make(chan struct{})
+	if !ls.beginControlWorker() {
+		t.Fatal("control worker unexpectedly stopped")
+	}
 	go func() {
 		ls.readControl(reader)
 		close(done)

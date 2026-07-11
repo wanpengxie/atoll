@@ -71,6 +71,13 @@ const xCryptoPrefix = "golang.org/x/crypto/"
 // signature primitive shows up here, someone is building the offline-
 // verifiable ticket §8.9 forbids for this phase (deferred whole to "防伪
 // defer 联邦 B 档").
+//
+// This is the nail that keeps ResolveCoord (lanecontrol.go) REPLAY-SAFE: a
+// coord is resolved by a server-side, single-redeem lookup of an opaque uuid,
+// never by verifying a self-contained signed ticket a holder could replay
+// offline. The instant a signing/MAC primitive appears in these files, that
+// server-tracked single-use property is being swapped for an offline-
+// redeemable credential — exactly the replay window §8.9 forbids.
 func TestLeaseNoForgery(t *testing.T) {
 	fset := token.NewFileSet()
 	var violations []string

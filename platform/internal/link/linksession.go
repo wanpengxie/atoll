@@ -105,6 +105,10 @@ var errLinkClosed = errors.New("link: closed")
 // cadence.
 var yamuxKeepAliveIntervalNS atomic.Int64
 
+// streamHeaderReadTimeout bounds the unauthenticated substream admission read.
+// It is below the lease TTL and aligned with the actor attach handshake budget.
+var streamHeaderReadTimeout = attachHandshakeTimeout
+
 // linkYamuxConfig is the top-level session's config. EnableKeepAlive stays at
 // DefaultConfig's true.
 //
@@ -164,6 +168,41 @@ type linkSession struct {
 
 	logger   *slog.Logger
 	killOnce sync.Once
+
+	controlLifeMu sync.Mutex
+	controlStop   chan struct{}
+	controlClosed bool
+	controlWG     sync.WaitGroup
+}
+
+func (ls *linkSession) beginControlWorker() bool {
+	ls.controlLifeMu.Lock()
+	defer ls.controlLifeMu.Unlock()
+	if ls.controlClosed {
+		return false
+	}
+	if ls.controlStop == nil {
+		ls.controlStop = make(chan struct{})
+	}
+	ls.controlWG.Add(1)
+	return true
+}
+
+func (ls *linkSession) stopControlWorkers() {
+	ls.controlLifeMu.Lock()
+	if !ls.controlClosed {
+		ls.controlClosed = true
+		if ls.controlStop == nil {
+			ls.controlStop = make(chan struct{})
+		}
+		close(ls.controlStop)
+	}
+	ls.controlLifeMu.Unlock()
+}
+
+func (ls *linkSession) waitControlWorkers() {
+	ls.stopControlWorkers()
+	ls.controlWG.Wait()
 }
 
 // dialLinkSession builds the daemon (client) end: a yamux client over the raw WS
@@ -239,7 +278,9 @@ func (c *frameHookConn) Read(p []byte) (int, error) {
 // daemon has a non-nil ls.ctrl at start.
 func (ls *linkSession) start() {
 	if ls.ctrl != nil {
-		go ls.readControl(ls.ctrl)
+		if ls.beginControlWorker() {
+			go ls.readControl(ls.ctrl)
+		}
 	}
 	go ls.acceptLoop()
 }
@@ -274,17 +315,29 @@ func (ls *linkSession) dispatch(conn net.Conn) {
 		conn = &frameHookConn{Conn: conn, onFrame: ls.onFrame}
 	}
 	var hdr streamHeader
+	_ = conn.SetReadDeadline(time.Now().Add(streamHeaderReadTimeout))
 	if err := readLaneJSON(conn, &hdr); err != nil {
 		_ = conn.Close()
 		return
 	}
+	_ = conn.SetReadDeadline(time.Time{})
 	switch hdr.Kind {
 	case streamControl:
-		// The peer's control substream: adopt it for sends, then drive its reads
-		// for the substream's life (this goroutine parks here).
+		// A session has exactly one control spine. A second one would create two
+		// independently ordered workers and route replies onto the wrong stream.
 		ls.ctrlMu.Lock()
+		if ls.ctrl != nil {
+			ls.ctrlMu.Unlock()
+			_ = conn.Close()
+			ls.kill("control_stream_duplicate", errors.New("duplicate control stream"))
+			return
+		}
 		ls.ctrl = conn
 		ls.ctrlMu.Unlock()
+		if !ls.beginControlWorker() {
+			_ = conn.Close()
+			return
+		}
 		ls.readControl(conn)
 	case streamActor:
 		if ls.onActor != nil {
@@ -315,19 +368,42 @@ func (ls *linkSession) dispatch(conn net.Conn) {
 func (ls *linkSession) readControl(conn net.Conn) {
 	dec := json.NewDecoder(conn)
 	queue := make(chan []byte, controlQueueDepth)
+	workerDone := make(chan struct{})
+	ls.controlLifeMu.Lock()
+	stop := ls.controlStop
+	ls.controlLifeMu.Unlock()
 	go func() {
+		defer close(workerDone)
 		defer func() {
 			if v := recover(); v != nil {
 				ls.kill("control_worker_panic", fmt.Errorf("panic: %v", v))
 			}
 		}()
-		for raw := range queue {
-			if ls.onControl != nil {
-				ls.onControl(raw)
+		for {
+			select {
+			case <-stop:
+				return
+			case raw, ok := <-queue:
+				if !ok {
+					return
+				}
+				// Prefer death over a simultaneously-ready queued frame.
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				if ls.onControl != nil {
+					ls.onControl(raw)
+				}
 			}
 		}
 	}()
-	defer close(queue)
+	defer func() {
+		close(queue)
+		<-workerDone
+		ls.controlWG.Done()
+	}()
 	for {
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
@@ -336,6 +412,8 @@ func (ls *linkSession) readControl(conn net.Conn) {
 		}
 		copyRaw := append([]byte(nil), raw...)
 		select {
+		case <-stop:
+			return
 		case queue <- copyRaw:
 		default:
 			ls.kill("control_queue_full", errors.New("control dispatch queue full"))
@@ -412,6 +490,7 @@ func (ls *linkSession) Close() error {
 
 func (ls *linkSession) kill(reason string, err error) {
 	ls.killOnce.Do(func() {
+		ls.stopControlWorkers()
 		if ls.logger != nil {
 			ls.logger.Warn("link.session_killed", "reason", reason, "error", err)
 		}

@@ -180,6 +180,9 @@ func (h *Home) Human(ctx context.Context, id actor.ActorID) (*HumanHandle, error
 // HumanPrincipal resolves the current human instance by the opaque principal
 // column. Actor-id segments are diagnostic only and are never parsed.
 func (h *Home) HumanPrincipal(ctx context.Context, principal string) (*HumanHandle, error) {
+	if h.closed.Load() {
+		return nil, ErrClosed
+	}
 	reg, ok := h.cs.Registry.(storespec.PrincipalRegistry)
 	if !ok {
 		return nil, errors.New("platform: principal registry unavailable")

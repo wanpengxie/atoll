@@ -2,6 +2,7 @@ package platform_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -9,6 +10,22 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
+
+func TestHumanPrincipalAfterCloseReturnsErrClosed(t *testing.T) {
+	h, err := platform.Open(platform.HomeConfig{
+		ChannelID: testChannelID,
+		DBPath:    filepath.Join(t.TempDir(), "closed-home.sqlite"),
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if err := h.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := h.HumanPrincipal(context.Background(), "alice"); !errors.Is(err, platform.ErrClosed) {
+		t.Fatalf("HumanPrincipal after Close error=%v want ErrClosed", err)
+	}
+}
 
 const testChannelID = channel.ID("test-home")
 
