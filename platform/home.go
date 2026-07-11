@@ -13,8 +13,9 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/channelkit"
-	"github.com/wanpengxie/atoll/platform/internal/devicepresence"
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -100,16 +101,17 @@ type HomeConfig struct {
 // it; assembly only hands out capabilities. The app layer owns HTTP/transport;
 // Home is pure Go.
 type Home struct {
-	channelID  channelpkg.ID
-	minter     harness.Minter
-	channel    *channelkit.Channel
-	cs         *runtime.ChannelStores
-	signal     *tap.Signal
-	delivery   *tap.Pump
-	links      *link.Acceptor
-	deviceFold *devicepresence.Fold
-	logger     *slog.Logger
-	nowMs      func() int64
+	channelID     channelpkg.ID
+	minter        harness.Minter
+	channel       *channelkit.Channel
+	cs            *runtime.ChannelStores
+	signal        *tap.Signal
+	delivery      *tap.Pump
+	links         *link.Acceptor
+	presenceFold  *presence.Fold
+	presenceSwept atomic.Int64
+	logger        *slog.Logger
+	nowMs         func() int64
 
 	// (No per-user caller index (期12): a subject's own requests are closed
 	// by the substrate expiry reaper — 义务归位 D3; the subject drives its
@@ -240,6 +242,11 @@ func Open(cfg HomeConfig) (*Home, error) {
 	}
 	ctx := context.Background()
 	nowMs := func() int64 { return time.Now().UnixMilli() }
+	clock := func() time.Time { return time.UnixMilli(nowMs()) }
+	sweepEvery := cfg.ReconcileInterval
+	if sweepEvery <= 0 {
+		sweepEvery = reconcileInterval
+	}
 
 	// 1. Build the commit Signal (tap fan-out). It has NO dependencies, so it is
 	//    built first and handed to the store as its post-commit source. The
@@ -302,12 +309,10 @@ func Open(cfg HomeConfig) (*Home, error) {
 		return nil, fmt.Errorf("platform: register system actor: %w", err)
 	}
 
-	// 5. Device-presence fold (L3): folds actor-source obs PUSH edges
-	//     into a volatile per-actor level (in-memory; never persisted), decays to
-	//     unknown on the actor's death edge (link-down cascade). Built BEFORE
-	//     channelkit so the system cell can read it (sysactor observes L1/L2/L3);
-	//     registered as a down watcher + per-actor obs watcher below.
-	deviceFold := devicepresence.New(logger)
+	// 5. Presence fold: mechanism-only latest-value cache. Vocabulary remains an
+	// assembly concern through the injected level-kind set.
+	presenceFold := presence.New(logger, clock,
+		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, sweepEvery)
 
 	// 6. channelkit: actorrt runtime + sysactor + death-edge wiring. The system
 	//    cell is built against the LIVE runtime (factory) — its liveness Stat seam
@@ -321,7 +326,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    VARIABLE (not its zero value); by the time a cancel actually fires
 	//    (long after Open returns), h has been assigned.
 	var h *Home
-	clock := func() time.Time { return time.UnixMilli(nowMs()) }
 	channel, err := channelkit.New(channelkit.Config{
 		ChannelID: cfg.ChannelID,
 		System: func(rt *actorrt.Runtime, inc actorrt.Incarnation) actorrt.Actor {
@@ -351,7 +355,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 				Registry: cs.Registry,
 				Clock:    clock,
 				Stat:     &runtimeLivenessAdapter{rt: rt},
-				Device:   deviceFold,
+				Device:   devicePresenceAdapter{fold: presenceFold},
 				Operate:  cfg.Operate,
 			}))
 		},
@@ -382,8 +386,8 @@ func Open(cfg HomeConfig) (*Home, error) {
 	// 8. Register the device-presence fold as a global down watcher (so an actor's
 	//     death edge decays its L3 to unknown — the link-down cascade). Per-actor
 	//     obs registration happens at attach (Acceptor below).
-	channel.Cells().WatchDown(deviceFold)
-	channel.Cells().WatchObsAll(deviceFold)
+	channel.Cells().WatchDown(presenceFold)
+	channel.Cells().WatchObsAll(presenceFold)
 
 	// 9. Assemble the Home shell now: the scheduler's Reviver and the eager
 	//    reconcile arm both close over it (buildCaps, builder, cells), so it must
@@ -398,7 +402,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		cs:               cs,
 		signal:           signal,
 		delivery:         delivery,
-		deviceFold:       deviceFold,
+		presenceFold:     presenceFold,
 		logger:           logger,
 		nowMs:            nowMs,
 		placement:        SinglePlacement{},
@@ -490,10 +494,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	h.reconcileActivation(ctx)
 	channel.Reconcile(ctx)
 	h.sweepExpired(ctx)
-	sweepEvery := cfg.ReconcileInterval
-	if sweepEvery <= 0 {
-		sweepEvery = reconcileInterval
-	}
+	h.sweepPresence(ctx)
 	reconcileCtx, reconcileStop := context.WithCancel(context.Background())
 	reconcileDone := make(chan struct{})
 	go func() {
@@ -508,6 +509,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 				h.reconcileActivation(reconcileCtx)
 				channel.Reconcile(reconcileCtx)
 				h.sweepExpired(reconcileCtx)
+				h.sweepPresence(reconcileCtx)
 			case <-h.pokeCh:
 				// Admit poke: run the same activation-then-closure sweep off-tick so
 				// a freshly-admitted member embodies without the ≤30s wait. Boot-order
@@ -515,6 +517,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 				h.reconcileActivation(reconcileCtx)
 				channel.Reconcile(reconcileCtx)
 				h.sweepExpired(reconcileCtx)
+				h.sweepPresence(reconcileCtx)
 			}
 		}
 	}()
@@ -523,6 +526,32 @@ func Open(cfg HomeConfig) (*Home, error) {
 
 	logger.Info("platform.home.ready", "channel", string(cfg.ChannelID))
 	return h, nil
+}
+
+// sweepPresence enforces fold rows ⊆ (live embodiments ∪ active membership).
+// A failed registry read skips the whole pass: treating failure as an empty set
+// would erase every member's last testimony.
+func (h *Home) sweepPresence(ctx context.Context) {
+	rows, err := h.cs.Registry.ListActive(ctx)
+	if err != nil {
+		h.logger.Warn("platform.presence.sweep_registry_failed", "error", err)
+		return
+	}
+	keep := make(map[actor.ActorID]struct{}, len(rows))
+	for _, row := range rows {
+		keep[row.ID] = struct{}{}
+	}
+	for _, id := range h.channel.Cells().LiveIDs() {
+		keep[id] = struct{}{}
+	}
+	removed := h.presenceFold.Sweep(func(id actor.ActorID) bool {
+		_, ok := keep[id]
+		return ok
+	})
+	if removed > 0 {
+		h.presenceSwept.Add(int64(removed))
+		h.logger.Debug("platform.presence.swept", "rows", removed)
+	}
 }
 
 // logReviveAttached logs, throttled per author (reviveLogThrottle), that an
@@ -735,11 +764,11 @@ func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, inc actorr
 // actors instead ask the system actor by message (that path is logged).
 func (h *Home) View() View {
 	return View{
-		query:      h.cs.Query,
-		registry:   h.cs.Registry,
-		links:      h.links,
-		deviceFold: h.deviceFold,
-		stat:       &runtimeLivenessAdapter{rt: h.channel.Cells()},
+		query:    h.cs.Query,
+		registry: h.cs.Registry,
+		links:    h.links,
+		presence: presence.NewView(h.presenceFold, h.channel.Cells(), h.cs.Registry),
+		stat:     &runtimeLivenessAdapter{rt: h.channel.Cells()},
 	}
 }
 
@@ -999,11 +1028,11 @@ func (h *Home) Close() error {
 // (ReadAfterSeq), head cursor (MaxSeq), and active actor roster (ListActors). It
 // holds only read interfaces — there is no write path through a View.
 type View struct {
-	query      storespec.MessageQuery
-	registry   storespec.Registry
-	links      *link.Acceptor
-	deviceFold *devicepresence.Fold
-	stat       *runtimeLivenessAdapter
+	query    storespec.MessageQuery
+	registry storespec.Registry
+	links    *link.Acceptor
+	presence presence.View
+	stat     *runtimeLivenessAdapter
 }
 
 // DevicePresence returns the latest opaque L3 device-presence snapshot an actor
@@ -1012,10 +1041,18 @@ type View struct {
 // The caller decodes the bytes via introspect.ParseDevicePresence. Advisory only;
 // authoritative reachability is send→terminal.
 func (v View) DevicePresence(id actor.ActorID) (snapshot []byte, known bool) {
-	if v.deviceFold == nil {
+	snap, err := v.presence.Snapshot(context.Background(), id)
+	if err != nil {
 		return nil, false
 	}
-	return v.deviceFold.Device(id)
+	testimony, known := snap.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
+	return testimony.Val, known
+}
+
+// Snapshot composes membership, embodiment and testimony at read time. The
+// fields are advisory and intentionally not a linearizable transaction.
+func (v View) Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error) {
+	return v.presence.Snapshot(ctx, id)
 }
 
 // Stat reads the authoritative embodiment presence for id: live=true means id
@@ -1063,6 +1100,15 @@ func (v View) ListActors(ctx context.Context) ([]storespec.Record, error) {
 
 type runtimeLivenessAdapter struct {
 	rt *actorrt.Runtime
+}
+
+type devicePresenceAdapter struct{ fold *presence.Fold }
+
+func (a devicePresenceAdapter) Device(id actor.ActorID) ([]byte, bool) {
+	if a.fold == nil {
+		return nil, false
+	}
+	return a.fold.Device(id, actorrt.ObsKind(introspect.ObsDevicePresence))
 }
 
 func (a *runtimeLivenessAdapter) Stat(id actor.ActorID) (startedAt time.Time, present bool) {

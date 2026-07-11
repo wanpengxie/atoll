@@ -12,8 +12,8 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/platform/internal/devicepresence"
 	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -899,7 +899,7 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 	}))
 	// The device-presence fold rides the SAME down edge (registered exactly as
 	// platform/home.go wires it): the drop must decay its folded level.
-	fold := devicepresence.New(nil)
+	fold := presence.New(nil, time.Now, []actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, 30*time.Second)
 	rt.WatchDown(fold)
 	r.acc = link.NewAcceptor(link.Config{
 		Minter:     r.minter,
@@ -965,10 +965,14 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 	}
 
 	// Seed a KNOWN device-presence level for the actor — the thing the drop decays.
+	gen, ok := rt.CurrentIncarnation(toolID)
+	if !ok {
+		t.Fatal("home port has no live incarnation")
+	}
 	fold.OnObs(context.Background(), toolID,
-		actorrt.Incarnation{},
+		gen,
 		actorrt.ObsKind(introspect.ObsDevicePresence), actorrt.ObsValue(`{"online":true}`))
-	if _, known := fold.Device(toolID); !known {
+	if _, known := fold.Device(toolID, actorrt.ObsKind(introspect.ObsDevicePresence)); !known {
 		t.Fatal("device presence not folded — precondition broken")
 	}
 
@@ -990,7 +994,7 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 				downSeen = true
 			}
 		}
-		_, known := fold.Device(toolID)
+		_, known := fold.Device(toolID, actorrt.ObsKind(introspect.ObsDevicePresence))
 		if downSeen && !known {
 			return
 		}

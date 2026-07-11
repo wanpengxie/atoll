@@ -615,15 +615,14 @@ func (h *Home) clearPresence(id actor.ActorID) {
 		return // a newer generation already re-admitted this id — not ours to clear
 	}
 	delete(h.presenceSessions, id)
-	h.deviceFold.Forget(id)
+	h.presenceFold.Forget(id)
 }
 
 // feedDevicePresence pushes an online/offline edge into the home
 // device-presence fold through its ObsWatcher entry — the door is this
 // subject's L3 producer.
 func (h *Home) feedDevicePresence(id actor.ActorID, online bool) {
-	h.deviceFold.OnObs(context.Background(), id,
-		actorrt.Incarnation{},
+	h.presenceFold.PutDoor(id,
 		actorrt.ObsKind(introspect.ObsDevicePresence),
 		actorrt.ObsValue(introspect.MarshalDevicePresence(online)))
 }
