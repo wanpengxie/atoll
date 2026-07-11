@@ -65,7 +65,7 @@ func newCancelDaemonHost() *cancelDaemonHost {
 }
 
 func (h *cancelDaemonHost) install(id actor.ActorID, impl actorrt.Actor) {
-	h.rt.Spawn(id, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return impl })
+	_, _, _ = h.rt.SpawnIfAbsent(id, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return impl })
 }
 
 func (h *cancelDaemonHost) dispatch(target actor.ActorID, env *message.Envelope) error {
@@ -92,7 +92,7 @@ func TestHomeCancelRequest_CrossWire(t *testing.T) {
 	wsURL := "ws" + srv.URL[4:]
 
 	d, err := link.Dial(context.Background(), wsURL, "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -148,7 +148,7 @@ func TestCancelUpstream_Branches(t *testing.T) {
 	// Home-hosted target parks in Receive until its reqCtx is cancelled.
 	cell := &cancelBlockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
 	registerActor(t, ch, targetID, actor.KindAgent)
-	if err := ch.Spawn(context.Background(), targetID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
+	if err := platform.SpawnForTest(ch, targetID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
 		return cell
 	}}); err != nil {
 		t.Fatalf("spawn target: %v", err)
@@ -229,7 +229,7 @@ func TestCancelUpstream_CrossWireAcrossReconnect(t *testing.T) {
 	// Home-hosted blocking target.
 	cell := &cancelBlockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
 	registerActor(t, ch, targetID, actor.KindAgent)
-	if err := ch.Spawn(context.Background(), targetID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
+	if err := platform.SpawnForTest(ch, targetID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
 		return cell
 	}}); err != nil {
 		t.Fatalf("spawn target: %v", err)
@@ -258,7 +258,7 @@ func TestCancelUpstream_CrossWireAcrossReconnect(t *testing.T) {
 	decls := []link.Declaration{{ActorID: callerID, Kind: actor.KindAgent, Binding: actor.BindingEmbedded}}
 
 	// First connection: attach the caller's stream, then let it tear down.
-	d1, err := link.Dial(context.Background(), wsURL, "daemon-up", decls, nil)
+	d1, err := link.Dial(context.Background(), wsURL, "daemon-up", decls, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial d1: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestCancelUpstream_CrossWireAcrossReconnect(t *testing.T) {
 
 	// Second connection: reattach the same caller id on a FRESH Dialer and send the
 	// upstream cancel there. It must still reach the home.
-	d2, err := link.Dial(context.Background(), wsURL, "daemon-up", decls, nil)
+	d2, err := link.Dial(context.Background(), wsURL, "daemon-up", decls, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial d2: %v", err)
 	}

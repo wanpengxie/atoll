@@ -17,7 +17,7 @@ func TestFork_ChildLiveAndOwned(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
+	parentInc, _, _ := rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
 	childInc, err := rt.Fork(parentInc, "parent/child", actor.KindAgent, static(newRecordActor()))
 	if err != nil {
 		t.Fatalf("Fork: %v", err)
@@ -48,7 +48,7 @@ func TestFork_ParentNotLive_FastPath(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
+	parentInc, _, _ := rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
 	rt.Despawn(parentInc)
 
 	_, err := rt.Fork(parentInc, "parent/child", actor.KindAgent, static(newRecordActor()))
@@ -68,8 +68,8 @@ func TestFork_ChildIDCollision_HardFail(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
-	existing := rt.Spawn("parent/child", actor.KindAgent, static(newRecordActor()))
+	parentInc, _, _ := rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
+	existing, _, _ := rt.SpawnIfAbsent("parent/child", actor.KindAgent, static(newRecordActor()))
 
 	_, err := rt.Fork(parentInc, "parent/child", actor.KindAgent, static(newRecordActor()))
 	if !errors.Is(err, ErrChildIDCollision) {
@@ -95,7 +95,7 @@ func TestFork_PrunesDeadChildrenOnNextFork(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
+	parentInc, _, _ := rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
 
 	c1, err := rt.Fork(parentInc, "parent/c1", actor.KindAgent, static(newRecordActor()))
 	if err != nil {
@@ -125,7 +125,7 @@ func TestFork_CascadeOnParentDeath(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
+	parentInc, _, _ := rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
 	childInc, err := rt.Fork(parentInc, "parent/child", actor.KindAgent, static(newRecordActor()))
 	if err != nil {
 		t.Fatalf("Fork: %v", err)
@@ -182,8 +182,8 @@ func TestDespawnChild_AuthorityCheck(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
-	otherInc := rt.Spawn("other", actor.KindAgent, static(newRecordActor()))
+	parentInc, _, _ := rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
+	otherInc, _, _ := rt.SpawnIfAbsent("other", actor.KindAgent, static(newRecordActor()))
 	childInc, err := rt.Fork(parentInc, "parent/child", actor.KindAgent, static(newRecordActor()))
 	if err != nil {
 		t.Fatalf("Fork: %v", err)

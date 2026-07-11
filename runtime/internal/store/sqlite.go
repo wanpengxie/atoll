@@ -125,7 +125,7 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 // guard that an opened file actually carries that shape.
 var channelLocalSchemaShape = map[string][]string{
 	"messages":       {"seq", "id", "type", "kind"},
-	"actor_registry": {"actor_id", "actor_kind", "deregistered_at"},
+	"actor_registry": {"actor_id", "actor_kind", "principal", "deregistered_at"},
 	"resources": {
 		"resource_id", "kind", "bytes",
 		"placement_kind", "placement_daemon_id", "placement_coord", "provenance", "created_by",
@@ -141,6 +141,7 @@ var channelLocalSchemaShape = map[string][]string{
 	},
 	"actor_state": {"owner_id", "resource_id", "bytes", "created_at"},
 	"timers":      {"timer_id", "author_id", "fire_at", "type", "payload", "correlation_id", "created_at"},
+	"timer_dead":  {"dead_seq", "timer_id", "author_id", "fire_at", "type", "payload", "correlation_id", "created_at", "death_class", "reason", "detail", "died_at"},
 }
 
 func verifyChannelLocalSchema(ctx context.Context, db *sql.DB) error {

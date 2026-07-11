@@ -158,11 +158,6 @@ func (r *fakeRegistry) TouchReservationsByCoords(ctx context.Context, daemonID s
 	return errors.New("fakeRegistry: TouchReservationsByCoords not wired (no accessdoor caller)")
 }
 
-func (r *fakeRegistry) MarkReservationsLanded(ctx context.Context, daemonID string, coords []string) error {
-	r.calls++
-	return errors.New("fakeRegistry: MarkReservationsLanded not wired (no accessdoor caller)")
-}
-
 // List is §3.7's door-level consumer (door.list, query.go): canned rows +
 // nextCursor let a test drive the any-grant projection over MULTIPLE rows
 // with distinct grant shapes in one call — a single-bool fake cannot express

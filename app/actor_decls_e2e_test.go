@@ -3,6 +3,7 @@ package app_test
 import (
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -41,7 +42,8 @@ func TestDeclsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 		map[string]any{"decl_id": agentID, "placement": "server", "make_default": true}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	intro := respJSON(t, w)
-	if intro["instance_id"] != "agent:"+agentID || intro["class"] != "claude" {
+	instanceID, _ := intro["instance_id"].(string)
+	if !strings.HasPrefix(instanceID, "agent:"+agentID+":") || intro["class"] != "claude" {
 		t.Fatalf("introduce = %+v", intro)
 	}
 	if intro["placement"] != "server" || intro["created"] != true {
@@ -79,7 +81,6 @@ func TestIntroduceActor_HonestReintroduce(t *testing.T) {
 	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Alice", "class": "go-kimi"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
-	instID := "agent:" + agentID
 
 	// first introduce: default placement (daemon policy), engine=go-kimi → new row,
 	// created=true.
@@ -87,6 +88,7 @@ func TestIntroduceActor_HonestReintroduce(t *testing.T) {
 		map[string]any{"decl_id": agentID}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	first := respJSON(t, w)
+	instID := first["instance_id"].(string)
 	if first["created"] != true || first["placement"] != "daemon" || first["class"] != "go-kimi" {
 		t.Fatalf("first introduce = %+v", first)
 	}
@@ -146,10 +148,10 @@ func TestSetDefaultAgentAPI(t *testing.T) {
 	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Alice", "class": "go-kimi"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)
-	instID := "agent:" + agentID
 	w = env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", chID),
 		map[string]any{"decl_id": agentID}, cookies) // not make_default
 	assertStatus(t, w, http.StatusCreated)
+	instID := respJSON(t, w)["instance_id"].(string)
 
 	// 1) repoint default_agent to Alice (a composition member) → ok + persisted
 	w = env.do(t, "PUT", fmt.Sprintf("/api/channels/%s/default_agent", chID),

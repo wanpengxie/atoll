@@ -72,12 +72,10 @@ func (r *storeHomeRig) wsURL() string { return "ws" + r.srv.URL[4:] }
 // in for the introduce door the raw link rig bypasses.
 func (r *storeHomeRig) admit(t *testing.T, ids ...actor.ActorID) {
 	t.Helper()
-	adds := make([]storespec.MemberActorAdd, len(ids))
-	for i, id := range ids {
-		adds[i] = storespec.MemberActorAdd{ID: id, Kind: actor.KindTool, At: time.Now().UnixMilli()}
-	}
-	if err := r.cs.Membership.ApplyMemberTransitions(context.Background(), adds, nil); err != nil {
-		t.Fatalf("admit: %v", err)
+	for _, id := range ids {
+		if err := r.cs.Membership.Insert(context.Background(), storespec.Record{ID: id, Kind: actor.KindTool, CreatedAt: time.Now().UnixMilli()}); err != nil {
+			t.Fatalf("admit: %v", err)
+		}
 	}
 }
 
@@ -118,7 +116,7 @@ func TestAttach_DeclarationWithoutMembership_NotMinted(t *testing.T) {
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: member, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
 		{ActorID: orphan, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
-	}, nil)
+	}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -163,7 +161,7 @@ func TestAttach_OrphanDeclaration_NotInAllowSet(t *testing.T) {
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: member, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
 		{ActorID: orphan, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
-	}, nil)
+	}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -218,7 +216,7 @@ func TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut(t *testing.T) {
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
 		{ActorID: toolB, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
-	}, nil)
+	}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -350,10 +348,17 @@ func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
 	obs := newCountingObsWatcher()
 	r := newStoreHomeRigWithObs(t, obs)
 
-	const toolA = actor.ActorID("tool:obs-a")
-	r.admit(t, toolA)
+	toolA := actor.ActorID("tool:obs-a")
+	newID, err := r.cs.Membership.Admit(ctx, actor.KindTool, "obs-a", time.Now().UnixMilli())
+	if err != nil {
+		t.Fatalf("re-admit: %v", err)
+	}
+	if newID == toolA {
+		t.Fatal("re-admit reused removed id")
+	}
+	toolA = newID
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -407,7 +412,14 @@ func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
 	// back before attach may stamp Host — membrane law, v1.8 问①), then re-declare
 	// it on the SAME link (a fresh embodiment, same id) — attach re-registers obs
 	// (obsReg[toolA] was cleared).
-	r.admit(t, toolA)
+	oldID := toolA
+	toolA, err = r.cs.Membership.Admit(ctx, actor.KindTool, "obs-a", time.Now().UnixMilli())
+	if err != nil {
+		t.Fatalf("re-admit: %v", err)
+	}
+	if toolA == oldID {
+		t.Fatal("re-admit reused removed id")
+	}
 	if err := d.Reattach(ctx, []link.Declaration{
 		{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
 	}); err != nil {
@@ -462,9 +474,7 @@ func TestAttach_HumanDeclaration_Rejected(t *testing.T) {
 	)
 	r.admit(t, toolID)
 	// Admit the human with its TRUE registry kind.
-	if err := r.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{
-		{ID: humanID, Kind: actor.KindHuman, At: time.Now().UnixMilli()},
-	}, nil); err != nil {
+	if err := r.cs.Membership.Insert(ctx, storespec.Record{ID: humanID, Kind: actor.KindHuman, CreatedAt: time.Now().UnixMilli()}); err != nil {
 		t.Fatalf("admit human: %v", err)
 	}
 
@@ -473,7 +483,7 @@ func TestAttach_HumanDeclaration_Rejected(t *testing.T) {
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
 		{ActorID: humanID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
-	}, nil)
+	}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

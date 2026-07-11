@@ -3,6 +3,8 @@ package channelkit
 import (
 	"context"
 	"log/slog"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/behavior"
@@ -47,6 +49,9 @@ type Channel struct {
 	downCh   chan actor.ActorID
 	downStop chan struct{}
 	downDone chan struct{}
+	system   func(*actorrt.Runtime, actorrt.Incarnation) actorrt.Actor
+	started  atomic.Bool
+	stopOnce sync.Once
 }
 
 // downChBuffer bounds the death-edge hand-off queue. A full buffer drops the
@@ -83,7 +88,7 @@ type Config struct {
 // Channel is the actorrt.DownWatcher — see OnDown) and spawns the intrinsic
 // system cell. Assembly order: runtime → watcher → system cell, so the System
 // factory receives the live runtime (no back-filled runtime pointer).
-func New(cfg Config) *Channel {
+func New(cfg Config) (*Channel, error) {
 	clock := cfg.Clock
 	if clock == nil {
 		clock = time.Now
@@ -101,6 +106,7 @@ func New(cfg Config) *Channel {
 		downCh:    make(chan actor.ActorID, downChBuffer),
 		downStop:  make(chan struct{}),
 		downDone:  make(chan struct{}),
+		system:    cfg.System,
 	}
 	// Share the channel's clock + logger with the runtime: the runtime stamps
 	// each cell's StartedAt with this clock, so the system actor's uptime
@@ -114,15 +120,26 @@ func New(cfg Config) *Channel {
 	// writes singleton SystemActorID terminals, has no successor principal to
 	// impersonate, and the closure reconciler must write even when no cell is live
 	// — gating it would defeat it. So no incarnation is welded here.
-	if cfg.System != nil {
+	return c, nil
+}
+
+// Start births the intrinsic anchor and then starts the closure consumer.
+func (c *Channel) Start() error {
+	if !c.started.CompareAndSwap(false, true) {
+		panic("channelkit: Channel.Start called twice")
+	}
+	if c.system != nil {
 		// Singleton invariant made explicit (was prose only): the system anchor is
 		// the SOLE occupant of SystemActorID and is minted exactly once, here, at
 		// channel assembly. SpawnIfAbsent + created-assert fails fast if the reserved
 		// id is ever already occupied (a second anchor spawn / a member admission
 		// leaking the reserved id) instead of Spawn's silent last-go-live replace.
-		if _, created := c.cells.SpawnIfAbsent(actor.SystemActorID, actor.KindSystem, func(inc actorrt.Incarnation) actorrt.Actor {
-			return cfg.System(c.cells, inc)
-		}); !created {
+		if _, created, err := c.cells.SpawnIfAbsent(actor.SystemActorID, actor.KindSystem, func(inc actorrt.Incarnation) actorrt.Actor {
+			return c.system(c.cells, inc)
+		}); err != nil {
+			c.started.Store(false) // Stop after a failed Start must not wait on an unstarted consumer.
+			return err
+		} else if !created {
 			panic("channelkit: system anchor invariant violated — SystemActorID already occupied at assembly")
 		}
 	}
@@ -132,7 +149,7 @@ func New(cfg Config) *Channel {
 	// (it reads liveness for the recheck) and joined by Stop in Home.Close's
 	// teardown序 (after cells stop, before stores close).
 	go c.consumeDown()
-	return c
+	return nil
 }
 
 // Cells returns the runtime so callers can spawn/address cells in this channel.
@@ -223,8 +240,10 @@ func (c *Channel) closeFor(ctx context.Context, id actor.ActorID, probe liveness
 // buffered at Stop is abandoned to the level scan (the same lossy-edge / level-
 // backstop split as a full-buffer drop).
 func (c *Channel) Stop() {
-	close(c.downStop)
-	<-c.downDone
+	if !c.started.Load() {
+		return
+	}
+	c.stopOnce.Do(func() { close(c.downStop); <-c.downDone })
 }
 
 // livenessProbe adapts the channel's runtime liveness view (Stat) to the behaviour

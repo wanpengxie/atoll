@@ -62,7 +62,7 @@ func TestLivePenFencesPostDeathWrite(t *testing.T) {
 	// The build closure runs inside Spawn, BEFORE go-live: IsLive(inc)==false, so a
 	// write attempted during construction is fenced (the "factory must not write"
 	// rule is structural, not a soft convention).
-	inc := rt.Spawn("w", actor.KindTool, func(i actorrt.Incarnation) actorrt.Actor {
+	inc, _, _ := rt.SpawnIfAbsent("w", actor.KindTool, func(i actorrt.Incarnation) actorrt.Actor {
 		pen = link.NewLivePen(raw, i, rt)
 		_, ctorErr = pen.Write(context.Background(), &message.Envelope{ID: "during-ctor"})
 		return noopLiveActor{}

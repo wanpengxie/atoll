@@ -21,6 +21,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/schedule"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // human.go is the subjectgate door's LAW-FORM face, rebuilt per正典 (期12 —
@@ -170,10 +171,27 @@ func (h *Home) Human(ctx context.Context, id actor.ActorID) (*HumanHandle, error
 	if err != nil {
 		return nil, fmt.Errorf("platform: Human membership lookup: %w", err)
 	}
-	if !ok || !rec.IsActive() {
+	if !ok || !rec.IsActive() || rec.Kind != actor.KindHuman {
 		return nil, ErrNotMember
 	}
 	return &HumanHandle{home: h, userID: id}, nil
+}
+
+// HumanPrincipal resolves the current human instance by the opaque principal
+// column. Actor-id segments are diagnostic only and are never parsed.
+func (h *Home) HumanPrincipal(ctx context.Context, principal string) (*HumanHandle, error) {
+	reg, ok := h.cs.Registry.(storespec.PrincipalRegistry)
+	if !ok {
+		return nil, errors.New("platform: principal registry unavailable")
+	}
+	rec, found, err := reg.LookupActivePrincipal(ctx, actor.KindHuman, principal)
+	if err != nil {
+		return nil, fmt.Errorf("platform: Human principal lookup: %w", err)
+	}
+	if !found {
+		return nil, ErrNotMember
+	}
+	return h.Human(ctx, rec.ID)
 }
 
 // driverFor is every verb's first line: take the live cell's OccupantDriver

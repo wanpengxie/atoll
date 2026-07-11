@@ -39,8 +39,8 @@ import (
 
 func TestWalk1_FatherAuthoredWorkspace(t *testing.T) {
 	const chID = channelpkg.ID("walk1-workspace")
-	const parentID = actor.ActorID("agent:walk1-parent")
-	const childID = actor.ActorID("agent:walk1-child")
+	parentID := actor.ActorID("agent:walk1-parent")
+	childID := actor.ActorID("agent:walk1-child")
 	const wsID = resource.ResourceID("file:walk1-workspace")
 	const noteContent = "hello from the child's os.Root lease\n"
 	const nestedContent = "nested under a subdir the child mkdir'd\n"
@@ -140,8 +140,8 @@ func TestWalk1_FatherAuthoredWorkspace(t *testing.T) {
 		},
 	}
 
-	d.addActor(t, h, parentID, actor.KindAgent, walkActorDef(parentOps))
-	d.addActor(t, h, childID, actor.KindAgent, walkActorDef(childOps))
+	parentID = d.addActor(t, h, parentID, actor.KindAgent, walkActorDef(parentOps))
+	childID = d.addActor(t, h, childID, actor.KindAgent, walkActorDef(childOps))
 	controller := newControllerPen(t, h, actor.ActorID("user:walk1-driver"), actor.KindHuman)
 
 	// --- 1. father CreateFile(dir=true): a real directory workspace lands ----

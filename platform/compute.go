@@ -296,15 +296,6 @@ type (
 // holds a live connection reference itself.
 type StorageReclaimAckFunc func(ctx context.Context, tombstoneID string) (found bool, err error)
 
-// StorageCommittedResendFunc is Reconcile's OTHER network callback (期11 S6,
-// found+built during platform-level crash-recovery walk verification — see
-// cmd/daemon/internal/storagehost.CommittedResendFunc's doc for why it did
-// not already exist): resumes a pending reservation whose bytes already
-// landed locally before this daemon (re)connected, by resending
-// Committed(reservationID) — §1.7's "daemon rename后Committed未达即daemon
-// crash" recovery path.
-type StorageCommittedResendFunc func(ctx context.Context, reservationID string) (found, lost bool, err error)
-
 // StorageHost is the daemon storage host's injection-point contract (期11
 // §4): implemented by cmd/daemon/internal/storagehost.Host (via a thin
 // cmd/daemon-side adapter — Host's own method shapes already match this
@@ -316,7 +307,7 @@ type StorageHost interface {
 	Alloc(coord string, dir bool) error
 	// Reconcile runs one Scrubber pass against the home's ReconcilePullReply
 	// (already translated to plain types by storageHostForwarder).
-	Reconcile(ctx context.Context, resources []StorageResourceCoord, pendingReservations []StorageReservationCoord, pendingTombstones []StorageTombstoneCoord, ack StorageReclaimAckFunc, resend StorageCommittedResendFunc)
+	Reconcile(ctx context.Context, resources []StorageResourceCoord, pendingReservations []StorageReservationCoord, pendingTombstones []StorageTombstoneCoord, ack StorageReclaimAckFunc)
 	// ActiveWriteCoords snapshots every coord this daemon currently has an
 	// OPEN local WriteHandle for (期11 review's own narrowing addition,
 	// cmd/daemon/internal/storagehost.Host.ActiveWriteCoords's plain-typed
@@ -326,25 +317,6 @@ type StorageHost interface {
 	// this daemon can actually prove are still being written, never every
 	// reservation it happens to still own.
 	ActiveWriteCoords() []string
-	// LandedCoords snapshots every coord this daemon currently has in its live/
-	// directory (期11 review §2.5 #A, cmd/daemon/internal/storagehost.Host.
-	// LandedCoords's plain-typed mirror) — a disk listing, sourced from the
-	// filesystem so it survives a crash/restart with no daemon-side truth.
-	// storageHostForwarder.pass reads this BEFORE every ReconcilePull round
-	// trip and forwards it as link.ReconcilePull.LandedCoords, so the home
-	// flips matching pending reservations to phase='landed' before its
-	// age-sweep — a landed-but-uncommitted create is thereby immune to the
-	// sweep even after an arbitrarily long crash gap.
-	//
-	// A non-nil error (期11 review残余#1) means the read itself failed — the
-	// caller (storageHostForwarder.pass) MUST skip sending this tick's
-	// ReconcilePull entirely rather than forward a fabricated empty slice: an
-	// empty answer would tell the home NOTHING landed, and the home's
-	// SweepExpiredReservations (same ReconcilePull round trip, run right
-	// after MarkReservationsLanded) could then sweep an already-landed
-	// reservation as abandoned before any later tick ever gets a chance to
-	// report it correctly.
-	LandedCoords() ([]string, error)
 }
 
 // storageHostForwarder is StorageHost's daemon-lifetime bridge to the link
@@ -374,9 +346,6 @@ func newStorageHostForwarder(host StorageHost, logger *slog.Logger, interval tim
 // state that does not survive a reconnect.
 func (f *storageHostForwarder) Rebind(d *link.Dialer) {
 	f.d.Store(d)
-	if f.host != nil {
-		d.SetAllocHandler(f.handleAlloc)
-	}
 }
 
 // handleAlloc answers one inbound AllocRequest by calling the injected
@@ -436,19 +405,7 @@ func (f *storageHostForwarder) pass(ctx context.Context) {
 	// already returns early when it is nil, before ever starting the ticker
 	// loop that reaches this call.
 	activeCoords := f.host.ActiveWriteCoords()
-	landedCoords, lerr := f.host.LandedCoords()
-	if lerr != nil {
-		// 期11 review残余#1: a LandedCoords read failure must NEVER send a
-		// ReconcilePull at all — sending one with a fabricated empty
-		// landedCoords would tell the home nothing landed, and its
-		// same-round-trip SweepExpiredReservations could then sweep an
-		// already-landed reservation as abandoned. Skipping the whole pull
-		// is what makes "the next tick retries" true; the pre-fix code's
-		// silent-empty-slice form only pretended it was.
-		f.logger.Warn("platform.compute.storage_landed_coords_failed", "err", lerr)
-		return
-	}
-	reply, err := d.SendReconcilePull(ctx, activeCoords, landedCoords)
+	reply, err := d.SendReconcilePull(ctx, activeCoords)
 	if err != nil {
 		f.logger.Warn("platform.compute.storage_reconcile_pull_failed", "err", err)
 		return
@@ -488,15 +445,7 @@ func (f *storageHostForwarder) pass(ctx context.Context) {
 		reply, err := d.SendReclaimAck(ctx, tombstoneID)
 		return reply.Found, err
 	}
-	resend := func(ctx context.Context, reservationID string) (bool, bool, error) {
-		d := f.d.Load() // re-load: a reconnect may have happened between pass start and resend
-		if d == nil {
-			return false, false, fmt.Errorf("platform: no live connection to resend committed %q", reservationID)
-		}
-		reply, err := d.SendCommitted(ctx, reservationID)
-		return reply.Found, reply.Lost, err
-	}
-	f.host.Reconcile(ctx, resources, pendingReservations, pendingTombstones, ack, resend)
+	f.host.Reconcile(ctx, resources, pendingReservations, pendingTombstones, ack)
 }
 
 // redialInitialBackoff / redialMaxBackoff bound the daemon's reconnect retry
@@ -614,7 +563,11 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 		// Dial declares NOTHING yet: every actor this compute hosts is declared by
 		// the ring's own Reattach (the full-set declaration idiom, §S-P8) inside
 		// the first reconcile pass below.
-		d, err := link.Dial(ctx, cfg.ServerWS, computeID, nil, logger)
+		dialCfg := link.DialConfig{DespawnLocal: func(id actor.ActorID) { rt.DespawnID(id) }, LocalFileOpener: cfg.LocalFileOpener}
+		if cfg.StorageHost != nil {
+			dialCfg.AllocHandler = storageFwd.handleAlloc
+		}
+		d, err := link.Dial(ctx, cfg.ServerWS, computeID, nil, dialCfg, logger)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -634,11 +587,9 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 		// actor's arm here (§10.5) — despawn the local cell, the stream loop
 		// replies KindDetach. Re-installed on every connection (it closes over
 		// THIS d's stream read loops).
-		d.SetDespawnLocal(func(id actor.ActorID) { rt.DespawnID(id) })
 		obsFwd.Rebind(d)
 		cancelFwd.Rebind(d)
 		storageFwd.Rebind(d)
-		d.SetLocalFileOpener(cfg.LocalFileOpener)
 		// §5's resource lane needs no per-connection carrier setup any more (片③
 		// flattened it): the Dialer accepts home-relayed inbound lane substreams
 		// via its always-running accept loop, and opens its own redeem substreams
@@ -750,6 +701,9 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 		d.DetachStream(id)
 		delete(r.infeasible, id)
 		delete(r.arms, id)
+		r.watcher.mu.Lock()
+		delete(r.watcher.down, id)
+		r.watcher.mu.Unlock()
 		r.logger.Info("platform.compute.deactivated", "actor", string(id))
 	}
 
@@ -835,7 +789,7 @@ func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer
 	// live — a factory that writes during construction is refused here exactly
 	// like a cell born at home, closing the daemon-side parity gap the raw
 	// (ungated) facades used to leave open.
-	r.rt.Spawn(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
+	_, built, buildErr := r.rt.SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
 		// daemon Hooks.Canceller = the caller-side cancel-upstream forwarder (the
 		// out-generation matrix's former known gap, now filled): a daemon-hosted
 		// caller's Cancel commits its own unanswered_timeout terminal AND forwards a
@@ -844,6 +798,19 @@ func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer
 		// daemon-hosted parity of the cell-path Home.CancelRequest.
 		return build(link.NewLiveArms(rb, inc, r.rt), actorbase.Hooks{Canceller: r.cancelFwd.cancellerFor(id)}, factory)
 	})
+	if buildErr != nil || !built {
+		if buildErr != nil {
+			r.logger.Error("platform.compute.build_failed", "actor", string(id), "error", buildErr)
+		} else {
+			r.logger.Error("platform.compute.build_cas_lost", "actor", string(id))
+		}
+		d.DetachStream(id)
+		delete(r.arms, id)
+		r.watcher.mu.Lock()
+		delete(r.watcher.down, id)
+		r.watcher.mu.Unlock()
+		return
+	}
 	d.StartStream(id)
 	delete(r.infeasible, id)
 }

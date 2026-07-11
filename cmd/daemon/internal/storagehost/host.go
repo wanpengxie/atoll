@@ -2,8 +2,6 @@ package storagehost
 
 import (
 	"context"
-	"fmt"
-	"io/fs"
 	"log/slog"
 	"os"
 	"sync"
@@ -134,38 +132,6 @@ func (h *Host) ActiveWriteCoords() []ActiveStaging {
 	return out
 }
 
-// LandedCoords lists every coord currently present in this channel's live/
-// directory (期11 review §2.5 #A) — the daemon-side source
-// platform.storageHostForwarder.pass forwards as link.ReconcilePull.
-// LandedCoords, from which the home flips matching pending reservations to
-// phase='landed' before its age-sweep. Read straight from disk (not any
-// in-memory registry), so it is authoritative across a crash/restart with no
-// daemon-side truth — the very first ReconcilePull after a long gap already
-// reports every already-landed coord, before the home's sweep can fire.
-//
-// A read error is returned, NEVER papered over as an empty snapshot (期11
-// review残余#1): an empty []string here is indistinguishable on the wire from
-// "genuinely nothing landed" — the home's ReconcilePull would mark NO
-// reservation landed, its very next SweepExpiredReservations (same tick, same
-// pull) would then sweep an already-landed-but-uncommitted reservation as
-// abandoned, and the "retry next tick" this method's caller advertises never
-// actually happens because the caller does not skip the pull on a fabricated
-// empty answer. Returning the error lets the caller (storageHostForwarder.
-// pass) skip sending this tick's ReconcilePull altogether, so the NEXT tick's
-// retry is real. Every live/ entry is a coord (flat directory, root.go's own
-// layout invariant), so the entry name IS the coord verbatim.
-func (h *Host) LandedCoords() ([]string, error) {
-	entries, err := fs.ReadDir(h.cr.root.FS(), liveDir)
-	if err != nil {
-		return nil, fmt.Errorf("storagehost: list live/ for landed coords: %w", err)
-	}
-	out := make([]string, 0, len(entries))
-	for _, e := range entries {
-		out = append(out, e.Name())
-	}
-	return out, nil
-}
-
 // OpenDir hands out a directory-shaped resource's os.Root subtree lease (期11
 // 丁12) — the workspace lease's daemon half.
 func (h *Host) OpenDir(coord string) (*os.Root, error) { return h.streamer.OpenDir(h.cr, coord) }
@@ -189,11 +155,11 @@ func (h *Host) ReclaimCoord(coord string) error {
 // the network callback for resuming a landed-but-uncommitted reservation
 // (§1.7's daemon-crash recovery path). Both are RunCompute-bridge-supplied,
 // bound to whichever connection is currently live.
-func (h *Host) Reconcile(ctx context.Context, resources []ResourceLanded, pendingReservations []ReservationPending, pendingTombstones []TombstoneToReclaim, ack ReclaimAckFunc, resend CommittedResendFunc) {
+func (h *Host) Reconcile(ctx context.Context, resources []ResourceLanded, pendingReservations []ReservationPending, pendingTombstones []TombstoneToReclaim, ack ReclaimAckFunc) {
 	// Pass the snapshotter, NOT a pre-taken snapshot (期11 review P1-1): Pass runs
 	// multi-second network RPCs before its staging sweep, so the sweep must take
 	// the active-writes snapshot itself, immediately before it reads staging/.
-	h.scrubber.Pass(ctx, h.cr, resources, pendingReservations, pendingTombstones, h.ActiveWriteCoords, ack, resend)
+	h.scrubber.Pass(ctx, h.cr, resources, pendingReservations, pendingTombstones, h.ActiveWriteCoords, ack)
 }
 
 // Close releases the resource root's os.Root handle.

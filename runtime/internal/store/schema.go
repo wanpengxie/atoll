@@ -44,9 +44,7 @@ CREATE TABLE IF NOT EXISTS messages (
   is_terminal          INTEGER NOT NULL DEFAULT 0 CHECK (is_terminal IN (0,1))
 );
 
-CREATE INDEX IF NOT EXISTS ix_messages_correlation_ts ON messages(correlation_id, ts_received);
 CREATE INDEX IF NOT EXISTS ix_messages_parent         ON messages(parent_id);
-CREATE INDEX IF NOT EXISTS ix_messages_type_kind      ON messages(type, kind);
 CREATE INDEX IF NOT EXISTS ix_messages_expires        ON messages(expires_at) WHERE expires_at IS NOT NULL AND kind='request';
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
@@ -67,6 +65,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
 CREATE TABLE IF NOT EXISTS actor_registry (
   actor_id           TEXT PRIMARY KEY,
   actor_kind         TEXT NOT NULL,
+  principal          TEXT NOT NULL DEFAULT '', -- opaque continuing-subject anchor; actor_id remains an instance id
   actor_binding      TEXT,
   host               TEXT NOT NULL DEFAULT '',  -- placement locus: '' = home process, compute id = hosting daemon
   created_at         INTEGER NOT NULL,
@@ -76,6 +75,9 @@ CREATE TABLE IF NOT EXISTS actor_registry (
 CREATE INDEX IF NOT EXISTS ix_actor_registry_active
   ON actor_registry(actor_kind)
   WHERE deregistered_at IS NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_principal
+  ON actor_registry(actor_kind, principal)
+  WHERE deregistered_at IS NULL AND principal <> '';
 
 -- (v2: worker_locks table removed. channel-sqlite is append-only truth;
 -- write-path exclusivity is a structural invariant of the single write path,
@@ -153,8 +155,7 @@ CREATE TABLE IF NOT EXISTS resource_reservations (
   created_by           TEXT NOT NULL,           -- door-authenticated creator (never daemon-reported)
   reserved_at          INTEGER NOT NULL,
   is_dir               INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)), -- carried write-ahead so CommitReservation lands the resources row with the correct byte-shape bit (a content-less dir create's shape must survive the ReserveCreate→AllocRequest→Committed round trip; daemon reports no truth, §1.3)
-  last_progress_at     INTEGER NOT NULL DEFAULT 0, -- 期11 S1（在途登记，transfer-lifecycle-spec.md §2）, narrowed by 期11 review: this reservation's most-recent "still alive" stamp, seeded to reserved_at at ReserveCreate and bumped by TouchReservationsByCoords ONLY when its OWN placement_coord is in the daemon's per-ReconcilePull activeCoords list (platform/storagehost.go's ReconcilePull handler — a daemon merely staying online/polling is NOT activity for a coord it has abandoned). SweepExpiredReservations ages on THIS column (AND only phase='reserved'), never reserved_at — a slow-but-alive create must not be judged by its BIRTH time, only by how long it has gone unheard-from. An abandoned coord (never opened, or closed and never reopened) ages out on schedule even while its daemon keeps polling — additive, not a relaxation.
-  phase                TEXT NOT NULL DEFAULT 'reserved' -- 期11 review 补相位 (transfer-lifecycle-spec.md §2.5): {reserved, landed}. reserved=bytes not yet fully landed at live/<coord>; landed=daemon has fsync+renamed the bytes into live/ and only the Committed row-write is still pending. The daemon reports its landed coords each ReconcilePull (link.ReconcilePull.LandedCoords, sourced from a live/ directory listing); the server flips matching pending reservations to landed BEFORE the age-sweep. A landed reservation is IMMUNE to SweepExpiredReservations (WHERE phase='reserved') — its bytes are good, so however long its Committed is delayed/lost, resend eventually lands the row rather than the sweep destroying already-durable data (期11 review #A, the P0 this column exists to close). Go-enforced closed set (resourcespec), no DB CHECK — same discipline as placement_kind/provenance above.
+  last_progress_at     INTEGER NOT NULL DEFAULT 0 -- most-recent activity stamp for the in-flight transfer
 );
 CREATE INDEX IF NOT EXISTS ix_resource_reservations_daemon ON resource_reservations(placement_daemon_id);
 CREATE INDEX IF NOT EXISTS ix_resource_reservations_reserved_at ON resource_reservations(reserved_at);
@@ -169,7 +170,6 @@ CREATE TABLE IF NOT EXISTS resource_tombstones (
   kind            TEXT NOT NULL,
   deleted_at      INTEGER NOT NULL
 );
-CREATE INDEX IF NOT EXISTS ix_resource_tombstones_resource ON resource_tombstones(resource_id);
 CREATE INDEX IF NOT EXISTS ix_resource_tombstones_daemon ON resource_tombstones(daemon_id);
 
 -- =============================================================
@@ -227,6 +227,21 @@ CREATE TABLE IF NOT EXISTS timers (
 );
 CREATE INDEX IF NOT EXISTS ix_timers_fire_at ON timers(fire_at);
 CREATE INDEX IF NOT EXISTS ix_timers_author  ON timers(author_id);
+
+CREATE TABLE IF NOT EXISTS timer_dead (
+  dead_seq       INTEGER PRIMARY KEY AUTOINCREMENT,
+  timer_id       TEXT NOT NULL UNIQUE,
+  author_id      TEXT NOT NULL,
+  fire_at        INTEGER NOT NULL,
+  type           TEXT NOT NULL,
+  payload        BLOB,
+  correlation_id TEXT,
+  created_at     INTEGER NOT NULL,
+  death_class    TEXT NOT NULL,
+  reason         TEXT NOT NULL,
+  detail         TEXT NOT NULL,
+  died_at        INTEGER NOT NULL
+);
 `
 
 // ChannelLocalTables enumerates the channel-local table names in
@@ -244,4 +259,5 @@ var ChannelLocalTables = []string{
 	"resource_tombstones",
 	"actor_state",
 	"timers",
+	"timer_dead",
 }

@@ -2,9 +2,12 @@ package storespec
 
 import (
 	"context"
+	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
+
+var ErrMemberInactive = errors.New("storespec: member missing or deregistered")
 
 // MemberActorAdd is one actor registration transition (membership control
 // plane). Applying it mutates the actor_registry projection AND emits a
@@ -57,4 +60,10 @@ type MembershipControlPlane interface {
 	// events' scope is the binding — a per-call channel arg would be a
 	// pseudo-parameter the caller could mis-stamp (cf. MessageLog.FindByID).
 	ApplyMemberTransitions(ctx context.Context, adds []MemberActorAdd, removes []MemberActorRemove) error
+	// Admit atomically mints a fresh instance id and registers principal, or
+	// returns the existing active instance for an idempotent retry.
+	Admit(ctx context.Context, kind actor.Kind, principal string, at int64) (actor.ActorID, error)
+	// EnsureSystemActor is the sole fixed-id seed. Application identities must
+	// enter through Admit; this arm accepts no caller-selected id.
+	EnsureSystemActor(ctx context.Context, at int64) error
 }

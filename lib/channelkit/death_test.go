@@ -22,6 +22,34 @@ type panicActor struct{}
 func (panicActor) Receive(context.Context, *message.Envelope) error { panic("boom") }
 
 // liveActor is a healthy no-op cell — stands in for a same-id successor.
+func newChannel(cfg channelkit.Config) *channelkit.Channel {
+	c, err := channelkit.New(cfg)
+	if err != nil {
+		panic(err)
+	}
+	if err := c.Start(); err != nil {
+		panic(err)
+	}
+	return c
+}
+
+func TestChannel_StopAfterFailedStartReturns(t *testing.T) {
+	c, err := channelkit.New(channelkit.Config{System: func(*actorrt.Runtime, actorrt.Incarnation) actorrt.Actor { return nil }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Start(); err == nil {
+		t.Fatal("Start with nil system actor succeeded")
+	}
+	done := make(chan struct{})
+	go func() { c.Stop(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Stop blocked after failed Start")
+	}
+}
+
 type liveActor struct{}
 
 func (liveActor) Receive(context.Context, *message.Envelope) error { return nil }
@@ -32,9 +60,9 @@ func (liveActor) Receive(context.Context, *message.Envelope) error { return nil 
 // OnDown also despawned, a same-id successor would be wrongly killed (Despawn is
 // not pointer-checked).
 func TestOnDown_DoesNotDespawnSuccessor(t *testing.T) {
-	ch := channelkit.New(channelkit.Config{ChannelID: "ch", Clock: time.Now})
+	ch := newChannel(channelkit.Config{ChannelID: "ch", Clock: time.Now})
 	defer ch.Stop()
-	ch.Cells().Spawn("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} }) // the live successor
+	_, _, _ = ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
 	if _, ok := ch.Cells().Stat("worker"); !ok {
 		t.Fatal("successor not hosted after Spawn")
 	}
@@ -95,14 +123,14 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 		Audience:  message.Audience{"worker"},
 	}
 	fc := &fakeWriter{}
-	ch := channelkit.New(channelkit.Config{
+	ch := newChannel(channelkit.Config{
 		ChannelID:    "ch",
 		SystemPen:    fc,
 		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
 		Clock:        time.Now,
 	})
 	defer ch.Stop()
-	ch.Cells().Spawn("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return panicActor{} })
+	_, _, _ = ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return panicActor{} })
 
 	// Deliver a request → Receive panics → cell death → OnDown. Delivery goes
 	// through the confined Deliverer (the post-harness fanout's capability), not
@@ -151,7 +179,7 @@ func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
 		Audience:  message.Audience{"worker"},
 	}
 	fc := &fakeWriter{}
-	ch := channelkit.New(channelkit.Config{
+	ch := newChannel(channelkit.Config{
 		ChannelID: "ch",
 		SystemPen: fc,
 		OpenRequests: fakeQuery{
@@ -162,7 +190,7 @@ func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
 	})
 	defer ch.Stop()
 	// Place the worker, then CLEAN despawn it (no panic → no death edge fires).
-	workerInc := ch.Cells().Spawn("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
+	workerInc, _, _ := ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
 
 	// While present, a sweep must NOT close it (the live receiver can answer).
 	ch.Reconcile(context.Background())
@@ -253,7 +281,7 @@ func (h *capHandler) waitFirstMsg(timeout time.Duration) string {
 // surface left after the free function moved to behavior.
 func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 	h := &capHandler{}
-	ch := channelkit.New(channelkit.Config{
+	ch := newChannel(channelkit.Config{
 		ChannelID:    "ch",
 		SystemPen:    &fakeWriter{},
 		OpenRequests: errQuery{},
@@ -296,7 +324,7 @@ func TestOnDown_PerRequestWriteFault_IsLogged(t *testing.T) {
 		Audience:  message.Audience{"worker"},
 	}
 	h := &capHandler{}
-	ch := channelkit.New(channelkit.Config{
+	ch := newChannel(channelkit.Config{
 		ChannelID:    "ch",
 		SystemPen:    errWriter{},
 		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
@@ -319,7 +347,7 @@ func TestOnDown_PerRequestWriteFault_IsLogged(t *testing.T) {
 // cells), and a non-nil System actor must be spawned at the SystemActorID so it
 // is immediately hosted/addressable.
 func TestNew_DefaultClockAndSpawnsSystem(t *testing.T) {
-	ch := channelkit.New(channelkit.Config{
+	ch := newChannel(channelkit.Config{
 		ChannelID: "ch",
 		// intrinsic system cell — built against the live runtime, spawned by New.
 		System: func(*actorrt.Runtime, actorrt.Incarnation) actorrt.Actor { return liveActor{} },
@@ -343,7 +371,7 @@ func TestOnDown_AsyncConsumer_SkipsLivePresentSuccessor(t *testing.T) {
 		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"worker"},
 	}
 	fc := &fakeWriter{}
-	ch := channelkit.New(channelkit.Config{
+	ch := newChannel(channelkit.Config{
 		ChannelID:    "ch",
 		SystemPen:    fc,
 		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
@@ -351,7 +379,7 @@ func TestOnDown_AsyncConsumer_SkipsLivePresentSuccessor(t *testing.T) {
 	})
 	defer ch.Stop()
 	// A live successor occupies "worker".
-	ch.Cells().Spawn("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
+	_, _, _ = ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
 
 	// A stale edge for "worker" — the async consumer must recheck Present and skip.
 	ch.OnDown(context.Background(), "worker", errors.New("stale predecessor edge"))

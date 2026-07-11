@@ -62,7 +62,7 @@ func spawnActorbaseOverWire(t *testing.T, ch *platform.Home, id actor.ActorID, d
 	wsURL := "ws" + srv.URL[4:]
 
 	d, err := link.Dial(context.Background(), wsURL, "daemon-dualhost",
-		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -78,7 +78,7 @@ func spawnActorbaseOverWire(t *testing.T, ch *platform.Home, id actor.ActorID, d
 		t.Fatalf("OpenStream: %v", err)
 	}
 	rb := link.NewRebindableArms(arms)
-	host.rt.Spawn(id, actor.KindTool, func(inc actorrt.Incarnation) actorrt.Actor {
+	_, _, _ = host.rt.SpawnIfAbsent(id, actor.KindTool, func(inc actorrt.Incarnation) actorrt.Actor {
 		// The SAME two lines platform/compute.go's buildOne runs in production
 		// (link.NewLiveArms + actorbase.Hooks{}) — daemon Canceller stays nil.
 		return actorbase.New(link.NewLiveArms(rb, inc, host.rt), actorbase.Hooks{}, def)

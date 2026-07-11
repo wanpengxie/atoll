@@ -32,6 +32,15 @@ type resourceRegistry struct {
 	nowMs func() int64
 }
 
+// clearActorGrantsTx removes only grants whose grantee axis names the actor.
+// Resource ownership and members-scoped grants are orthogonal and survive.
+func clearActorGrantsTx(ctx context.Context, tx *sql.Tx, id actor.ActorID) error {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM resource_grants WHERE grantee_kind='actor' AND grantee=?`, string(id)); err != nil {
+		return fmt.Errorf("store: actor grants cascade clear %q: %w", id, err)
+	}
+	return nil
+}
+
 func newResourceRegistry(db *sql.DB) *resourceRegistry {
 	return &resourceRegistry{db: db, nowMs: func() int64 { return time.Now().UnixMilli() }}
 }
@@ -186,13 +195,9 @@ func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.Resour
 	// freshly-minted reservation starts "alive as of right now", identical
 	// to the pre-S1 reserved_at-only behavior until something bumps it —
 	// SweepExpiredReservations judging a never-touched row is unchanged.
-	// phase seeds to 'reserved' (期11 review §2.5): the daemon has not yet
-	// reported these bytes landed. MarkReservationsLanded flips it to 'landed'
-	// once the daemon's ReconcilePull says live/<coord> exists — from which
-	// point the row is immune to the age-sweep.
 	if _, err := r.db.ExecContext(ctx,
-		`INSERT INTO resource_reservations (reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, is_dir, last_progress_at, phase)
-		   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'reserved')`,
+		`INSERT INTO resource_reservations (reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, is_dir, last_progress_at)
+		   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		reservationID, string(id), string(kind), placementDaemonID, placementCoord, string(creator), now, dir, now,
 	); err != nil {
 		return "", fmt.Errorf("store: resource reserve-create %q: %w", id, err)
@@ -442,16 +447,11 @@ func (r *resourceRegistry) SweepExpiredReservations(ctx context.Context, daemonI
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// phase='reserved' is the 期11 review §2.5 #A guard: a reservation the
-	// daemon has already reported LANDED (phase='landed') is NEVER swept, no
-	// matter how stale its last_progress_at — its bytes are durably on disk and
-	// only the Committed row-write is outstanding, which the daemon's own
-	// ReconcilePull resend (resumeLandedReservations) will eventually land. The
-	// age-sweep only reclaims a reservation whose bytes never made it (P0: a
-	// landed-but-uncommitted create being destroyed as if abandoned).
+	// Every inactive reservation is eligible for the age sweep; there is no
+	// daemon-side landed phase or hidden completion replay.
 	rows, err := tx.QueryContext(ctx,
 		`SELECT reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, reserved_at, last_progress_at
-		   FROM resource_reservations WHERE placement_daemon_id=? AND phase='reserved' AND last_progress_at<? ORDER BY reserved_at, reservation_id`,
+		   FROM resource_reservations WHERE placement_daemon_id=? AND last_progress_at<? ORDER BY reserved_at, reservation_id`,
 		daemonID, cutoffMs,
 	)
 	if err != nil {
@@ -521,42 +521,6 @@ func (r *resourceRegistry) TouchReservationsByCoords(ctx context.Context, daemon
 	)
 	if _, err := r.db.ExecContext(ctx, query, args...); err != nil {
 		return fmt.Errorf("store: touch reservations by coords %q: %w", daemonID, err)
-	}
-	return nil
-}
-
-// MarkReservationsLanded flips phase reserved→landed for every pending
-// reservation belonging to daemonID whose placement_coord is in coords (期11
-// review §2.5 #A). The daemon reports these coords each ReconcilePull from a
-// live/ directory listing — a coord present in live/ means its bytes are
-// fsync+renamed and durable, so the reservation must never again be age-swept
-// (SweepExpiredReservations' phase='reserved' guard). One-way (only
-// reserved→landed; a landed row never goes back), so the home MUST run this
-// BEFORE its sweep in the same ReconcilePull, closing the P0 window where a
-// stale-but-landed reservation would otherwise be reclaimed as abandoned.
-//
-// Empty coords is a clean no-op — an idle/never-landed daemon reports nothing
-// landed, and nothing should flip (symmetric with TouchReservationsByCoords).
-// A plain bulk UPDATE, no select-then-mutate transaction: it never deletes a
-// row, so there is no race window to close — a reservation that commits or is
-// swept concurrently simply falls out of the WHERE match.
-func (r *resourceRegistry) MarkReservationsLanded(ctx context.Context, daemonID string, coords []string) error {
-	if len(coords) == 0 {
-		return nil
-	}
-	placeholders := make([]string, len(coords))
-	args := make([]any, 0, len(coords)+1)
-	args = append(args, daemonID)
-	for i, c := range coords {
-		placeholders[i] = "?"
-		args = append(args, c)
-	}
-	query := fmt.Sprintf(
-		`UPDATE resource_reservations SET phase='landed' WHERE placement_daemon_id=? AND phase='reserved' AND placement_coord IN (%s)`,
-		strings.Join(placeholders, ","),
-	)
-	if _, err := r.db.ExecContext(ctx, query, args...); err != nil {
-		return fmt.Errorf("store: mark reservations landed %q: %w", daemonID, err)
 	}
 	return nil
 }
@@ -653,6 +617,7 @@ func (r *resourceRegistry) SetGrant(ctx context.Context, id resource.ResourceID,
 //     daemon-side Reclaimer (§4, a later addition) collects the bytes
 //     asynchronously afterward. The invariant "a visible row always points
 //     at valid bytes" holds throughout: the row disappears FIRST.
+//
 // supersedePendingReservationsTx is Delete's #C helper: inside the caller's
 // transaction, for every still-pending reservation on id, write a
 // resource_tombstones row for its coord (so the daemon's ordinary

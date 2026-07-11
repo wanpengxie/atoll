@@ -49,7 +49,7 @@ func TestEmitIdentity_HostWeldsAuthorFromBoundID(t *testing.T) {
 	wsURL := "ws" + srv.URL[4:]
 
 	d, err := link.Dial(context.Background(), wsURL, "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

@@ -153,8 +153,7 @@ func live(h *Home, id actor.ActorID) bool {
 // poke would race the background ticker goroutine against the test's own calls.
 func admit(t *testing.T, h *Home, id actor.ActorID, kind actor.Kind) {
 	t.Helper()
-	if err := h.cs.Membership.ApplyMemberTransitions(context.Background(),
-		[]storespec.MemberActorAdd{{ID: id, Kind: kind, At: h.nowMs()}}, nil); err != nil {
+	if err := h.cs.Membership.Insert(context.Background(), storespec.Record{ID: id, Kind: kind, CreatedAt: h.nowMs()}); err != nil {
 		t.Fatalf("admit %s: %v", id, err)
 	}
 }
@@ -247,7 +246,7 @@ func TestReconcileActivation_DoesNotKillUnmanagedLiveActors(t *testing.T) {
 	// desired+live, no longer because it is a "protected category").
 	const human = actor.ActorID("user:alice")
 	admit(t, h, human, actor.KindHuman)
-	if err := h.Spawn(ctx, human, actor.KindHuman, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	if err := SpawnForTest(h, human, actor.KindHuman, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	})); err != nil {
 		t.Fatalf("Spawn human: %v", err)
@@ -381,13 +380,12 @@ func TestReconcileActivation_IntersectionRedline_NoMembershipNoEmbody(t *testing
 // member embodies OFF-TICK — no synchronous reconcile, no 30s tick wait (the home
 // runs a time.Hour interval here). Only the Admit poke drives the background sweep.
 func TestAdmit_PokeEmbodiesWithoutWaitingTick(t *testing.T) {
-	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
 	h := openActivationHome(t, desired, builder)
 
-	const human = actor.ActorID("user:poke")
-	if err := h.Admit(ctx, human, actor.KindHuman); err != nil {
+	human, err := h.Admit(context.Background(), actor.KindHuman, "poke")
+	if err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
 	deadline := time.Now().Add(5 * time.Second)
@@ -528,7 +526,7 @@ func TestReviver_LiveAuthorWithNilBuilderIsNotPoisoned(t *testing.T) {
 
 	const author = actor.ActorID("agent:live-nobuilder")
 	admit(t, h, author, actor.KindAgent)
-	if err := h.Spawn(ctx, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	if err := SpawnForTest(h, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	})); err != nil {
 		t.Fatalf("Spawn live author: %v", err)
@@ -844,7 +842,7 @@ func TestReviver_AttachedAuthorNilBuilderIsTransientNotPoisoned(t *testing.T) {
 	// cell, so EnsureLive's already-live fast path clears the gate. The SAME
 	// timer must now fire: a no_builder poison during the attached window would
 	// have deleted the row and this fire could never land.
-	if err := h.Spawn(ctx, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	if err := SpawnForTest(h, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	})); err != nil {
 		t.Fatalf("Spawn author home: %v", err)
@@ -1089,15 +1087,11 @@ func TestReviver_AttachStraddle_HostStampedMidBuild_NoLocalRevive(t *testing.T) 
 	}
 
 	err := (homeReviver{h: h}).EnsureLive(ctx, author)
-	if err == nil {
-		t.Fatal("EnsureLive returned nil after a mid-build Host stamp — the local cell was kept (double-embodiment window)")
+	if err != nil {
+		t.Fatalf("EnsureLive active-only post-build check: %v", err)
 	}
-	var rejected schedule.ReviveRejected
-	if errors.As(err, &rejected) {
-		t.Fatalf("EnsureLive = ReviveRejected{%s}; want a TRANSIENT error (attached-after-build is retryable, never a poison verdict)", rejected.Reason)
-	}
-	if live(h, author) {
-		t.Fatal("a local cell survived the attach-straddle — the post-build Host recheck did not undo the build")
+	if !live(h, author) {
+		t.Fatal("active member build was undone by a placement comparison")
 	}
 }
 

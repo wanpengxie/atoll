@@ -131,6 +131,7 @@ func migrate(db *sql.DB) error {
 		CREATE TABLE IF NOT EXISTS channel_actors (
 			channel_id  TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
 			instance_id TEXT NOT NULL,
+			principal   TEXT NOT NULL DEFAULT '',
 			class       TEXT NOT NULL,
 			config_json TEXT,
 			placement   TEXT NOT NULL DEFAULT 'server',
@@ -196,6 +197,7 @@ func migrate(db *sql.DB) error {
 	// channel_actors.placement: best-effort add for a DB whose channel_actors was
 	// created before the column existed (a fresh CREATE above already has it).
 	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN placement TEXT NOT NULL DEFAULT 'server'`)
+	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN principal TEXT NOT NULL DEFAULT ''`)
 
 	// channel_actors.desired_host: which specific daemon instance claims a
 	// 'daemon' row (''=unassigned pool). Two-level invariant with placement,
@@ -232,8 +234,8 @@ func migrate(db *sql.DB) error {
 	//      class = 'go-kimi' = the boost engine (engine IS the class).
 	//   2. migrate the old hardcoded pointer agent:main → agent:boost (and fill a
 	//      NULL pointer) so default_agent points at the seeded instance.
-	_, _ = db.Exec(`INSERT OR IGNORE INTO channel_actors (channel_id, instance_id, class, placement)
-		SELECT id, 'agent:boost', 'go-kimi', 'server' FROM channels
+	_, _ = db.Exec(`INSERT OR IGNORE INTO channel_actors (channel_id, instance_id, principal, class, placement)
+		SELECT id, 'agent:boost', 'boost', 'go-kimi', 'server' FROM channels
 		WHERE id NOT IN (SELECT channel_id FROM channel_actors WHERE instance_id = 'agent:boost')`)
 	_, _ = db.Exec(`UPDATE channels SET default_agent = 'agent:boost'
 		WHERE default_agent IS NULL OR default_agent = 'agent:main'`)

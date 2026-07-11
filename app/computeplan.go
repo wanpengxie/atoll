@@ -30,7 +30,7 @@ type daemonAssignment struct {
 // all just rows here — uniform, no special-casing.
 //
 // desired_host filtering resolves G4: two daemons bound to one channel each pull
-// ONLY their own rows; an unassigned pool row (desired_host='') is delivered to
+// ONLY their own rows; an unassigned pool row (desired_host=”) is delivered to
 // no daemon (a legal transient — no daemon claims it yet).
 func (a *App) daemonComposition(chID channel.ID, daemonID string) ([]daemonAssignment, error) {
 	rows, err := a.daemonCompositionRows(chID, daemonID)

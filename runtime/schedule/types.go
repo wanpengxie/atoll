@@ -20,6 +20,11 @@ import (
 // site.
 type TimerID = timerspec.TimerID
 
+var (
+	ErrAuthorInactive = errors.New("schedule: author inactive")
+	ErrScheduleQuota  = errors.New("schedule: schedule quota exceeded")
+)
+
 // Bind is the closed set of lifecycle levels a timer's PRODUCT belongs to
 // (the routing question is: should this intent still exist after a crash
 // restart?). It is a ROUTING choice, not a persisted tag: identity routes to

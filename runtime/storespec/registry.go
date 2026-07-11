@@ -17,9 +17,10 @@ import (
 // compute state, readiness is application business state. Neither is substrate
 // membership.
 type Record struct {
-	ID      actor.ActorID
-	Kind    actor.Kind
-	Binding actor.Binding // empty for human / system
+	ID        actor.ActorID
+	Kind      actor.Kind
+	Principal string
+	Binding   actor.Binding // empty for human / system
 	// Host is the placement locus of the actor's embodiment — "" = the server's
 	// own home process, a compute id = the daemon that hosts the cell. It is a
 	// durable membership fact (which node is responsible for this actor) so the
@@ -44,6 +45,10 @@ type Registry interface {
 	Lookup(ctx context.Context, id actor.ActorID) (Record, bool, error)
 	Exists(ctx context.Context, id actor.ActorID) (bool, error)
 	ListActive(ctx context.Context) ([]Record, error)
+}
+
+type PrincipalRegistry interface {
+	LookupActivePrincipal(ctx context.Context, kind actor.Kind, principal string) (Record, bool, error)
 }
 
 // MembershipWriter is the single-actor membership-write surface (Insert /

@@ -308,6 +308,7 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 // channel may later repoint it at any other instance id.
 const (
 	defaultAgentInstanceID = actor.ActorID("agent:boost")
+	defaultAgentPrincipal  = "boost"
 	// defaultBoostClass is the engine CLASS the always-there boost floor runs.
 	// An agent's engine IS its actor class — claude/go-kimi are flat registry
 	// classes (kind=agent), there is NO umbrella "agent" class. boost has no

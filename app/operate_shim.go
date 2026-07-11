@@ -56,7 +56,7 @@ func (a *App) submitControlThroughDoor(ctx context.Context, chID, userID, msgTyp
 	}
 	// 户籍校验 lives in the door (Home.Human): a non-member gets ErrNotMember. The
 	// shim never admits — that would be the humanFor 膜旁路 reincarnated.
-	handle, err := home.Human(ctx, actor.ActorID("user:"+userID))
+	handle, err := home.HumanPrincipal(ctx, userID)
 	if err != nil {
 		return nil, err
 	}

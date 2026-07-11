@@ -61,12 +61,12 @@ func TestCompositionSelect_ExcludesSoftDeletedAgent(t *testing.T) {
 	mustExec(`INSERT INTO channels (id, workspace_id, name, type, db_path, created_at) VALUES ('c1','w1','ch','group','/tmp/unused.db',0)`)
 	// Live agent + its server-placed intent row.
 	mustExec(`INSERT INTO actor_decls (id, name, owner, default_class, created_at, updated_at) VALUES ('live','L','u1','go-kimi',0,0)`)
-	mustExec(`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES ('c1','agent:live','go-kimi','server')`)
+	mustExec(`INSERT INTO channel_actors (channel_id, instance_id, principal, class, placement) VALUES ('c1','agent:live','live','go-kimi','server')`)
 	// Soft-deleted agent + a SURVIVING (orphan) intent row — the restart hazard.
 	mustExec(`INSERT INTO actor_decls (id, name, owner, default_class, deleted_at, created_at, updated_at) VALUES ('dead','D','u1','go-kimi',123,0,0)`)
-	mustExec(`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES ('c1','agent:dead','go-kimi','server')`)
+	mustExec(`INSERT INTO channel_actors (channel_id, instance_id, principal, class, placement) VALUES ('c1','agent:dead','dead','go-kimi','server')`)
 	// A non-agent (boost) row — no agents join match — must survive.
-	mustExec(`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES ('c1','agent:boost','go-kimi','server')`)
+	mustExec(`INSERT INTO channel_actors (channel_id, instance_id, principal, class, placement) VALUES ('c1','agent:boost','boost','go-kimi','server')`)
 
 	a := &App{db: db}
 	rows, err := a.serverCompositionRows(channel.ID("c1"))

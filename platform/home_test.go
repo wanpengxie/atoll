@@ -61,7 +61,7 @@ func TestAdmit_CellLessMember(t *testing.T) {
 	h := openTestHome(t)
 	ctx := context.Background()
 	id := actor.ActorID("user:alice")
-	if err := h.Admit(ctx, id, actor.KindHuman); err != nil {
+	if err := platform.AdmitExactForTest(h, id, actor.KindHuman); err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
 	actors, err := h.View().ListActors(ctx)
@@ -83,16 +83,12 @@ func TestAdmit_CellLessMember(t *testing.T) {
 	}
 }
 
-// TestSpawn_NonMemberRejected is the restart-verify DoD (v1.8, S2): Spawn-replace
-// VERIFIES membership, it never mints it. Spawning an id with no active membership
-// row (a restart of an orphan) must error and leave the roster untouched — the
-// membrane law推论 that registration only ever happens through Admit.
-func TestSpawn_NonMemberRejected(t *testing.T) {
+func TestRestart_NonMemberRejected(t *testing.T) {
 	h := openTestHome(t)
 	ctx := context.Background()
 	id := actor.ActorID("agent:orphan")
-	if err := h.Spawn(ctx, id, actor.KindAgent, platform.ActorFactory{}); err == nil {
-		t.Fatal("Spawn of a non-member must error (膜律: Spawn-replace verifies, never mints)")
+	if err := h.Restart(ctx, id); err == nil {
+		t.Fatal("Restart of a non-member must error")
 	}
 	actors, err := h.View().ListActors(ctx)
 	if err != nil {

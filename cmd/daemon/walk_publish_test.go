@@ -25,10 +25,10 @@ import (
 
 func TestWalk2_PublishD5(t *testing.T) {
 	const chID = channelpkg.ID("walk2-publish")
-	const publisherID = actor.ActorID("agent:walk2-publisher")
-	const readerID = actor.ActorID("agent:walk2-reader")
-	const outsiderID = actor.ActorID("agent:walk2-outsider")
-	const bystanderID = actor.ActorID("agent:walk2-bystander")
+	publisherID := actor.ActorID("agent:walk2-publisher")
+	readerID := actor.ActorID("agent:walk2-reader")
+	outsiderID := actor.ActorID("agent:walk2-outsider")
+	bystanderID := actor.ActorID("agent:walk2-bystander")
 	const fileID = resource.ResourceID("file:walk2-publish/report.txt")
 	const content = "the published D5 report, in full\n"
 
@@ -146,12 +146,14 @@ func TestWalk2_PublishD5(t *testing.T) {
 		},
 	}
 
-	daemonA.addActor(t, h, publisherID, actor.KindAgent, walkActorDef(publisherOps))
-	daemonB.addActor(t, h, readerID, actor.KindAgent, walkActorDef(readerOps))
-	daemonB.addActor(t, h, outsiderID, actor.KindAgent, walkActorDef(outsiderOps))
+	publisherID = daemonA.addActor(t, h, publisherID, actor.KindAgent, walkActorDef(publisherOps))
+	readerID = daemonB.addActor(t, h, readerID, actor.KindAgent, walkActorDef(readerOps))
+	outsiderID = daemonB.addActor(t, h, outsiderID, actor.KindAgent, walkActorDef(outsiderOps))
 	// bystanderID only needs channel membership to be a legal ShareActor
 	// grantee target — it never itself sends a request in this walk.
-	if err := h.Admit(t.Context(), bystanderID, actor.KindAgent); err != nil {
+	var err error
+	bystanderID, err = h.Admit(t.Context(), actor.KindAgent, "walk2-bystander")
+	if err != nil {
 		t.Fatalf("admit bystander: %v", err)
 	}
 	controller := newControllerPen(t, h, actor.ActorID("user:walk2-driver"), actor.KindHuman)

@@ -157,7 +157,7 @@ func newLaneDoor(t *testing.T, ref *lateAccRef, hosts map[actor.ActorID]string) 
 func dialLaneDaemon(t *testing.T, srv *httptest.Server, daemonID string, actorID actor.ActorID, opener link.LocalFileOpener) (*link.Dialer, link.CellArms) {
 	t.Helper()
 	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], daemonID,
-		[]link.Declaration{{ActorID: actorID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: actorID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{LocalFileOpener: opener}, nil)
 	if err != nil {
 		t.Fatalf("Dial(%s): %v", daemonID, err)
 	}
@@ -167,9 +167,6 @@ func dialLaneDaemon(t *testing.T, srv *httptest.Server, daemonID string, actorID
 		t.Fatalf("OpenStream(%s): %v", daemonID, err)
 	}
 	d.Start()
-	if opener != nil {
-		d.SetLocalFileOpener(opener)
-	}
 	// Flattened lane (片③): no per-link carrier to open. The daemon accepts
 	// home-relayed inbound lane substreams via its always-running accept loop
 	// (onLane → handleLaneInbound), and opens its own redeem substreams on
@@ -435,7 +432,7 @@ func TestLaneCrossDaemonLargeTransfer(t *testing.T) {
 func dialLaneDaemonAt(t *testing.T, srv *httptest.Server, daemonID string, actorID actor.ActorID, opener link.LocalFileOpener) (*link.Dialer, link.CellArms) {
 	t.Helper()
 	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:]+"?daemon="+daemonID, daemonID,
-		[]link.Declaration{{ActorID: actorID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: actorID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{LocalFileOpener: opener}, nil)
 	if err != nil {
 		t.Fatalf("Dial(%s): %v", daemonID, err)
 	}
@@ -445,9 +442,6 @@ func dialLaneDaemonAt(t *testing.T, srv *httptest.Server, daemonID string, actor
 		t.Fatalf("OpenStream(%s): %v", daemonID, err)
 	}
 	d.Start()
-	if opener != nil {
-		d.SetLocalFileOpener(opener)
-	}
 	// Flattened lane (片③): no per-link carrier to open — see dialLaneDaemon.
 	return d, arms
 }

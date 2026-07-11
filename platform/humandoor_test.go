@@ -9,8 +9,8 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/behavior"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
@@ -235,9 +235,15 @@ func TestHumanDoor_PresenceTokenStraddle(t *testing.T) {
 
 	// Re-admit; a fresh session comes online; the OLD tab's late disconnect
 	// only removes itself — the new session stays online.
-	admit(t, h, doorUser, actor.KindHuman)
+	newID, err := h.Admit(ctx, actor.KindHuman, "alice")
+	if err != nil {
+		t.Fatalf("re-Admit: %v", err)
+	}
+	if newID == doorUser {
+		t.Fatal("re-Admit reused removed human id")
+	}
 	h.reconcileActivation(ctx)
-	newHandle, err := h.Human(ctx, doorUser)
+	newHandle, err := h.Human(ctx, newID)
 	if err != nil {
 		t.Fatalf("Human #2: %v", err)
 	}
@@ -247,7 +253,7 @@ func TestHumanDoor_PresenceTokenStraddle(t *testing.T) {
 	}
 	oldHandle.PresenceDisconnect(tok1) // stale token: account was cleared — no-op
 	oldHandle.PresenceDisconnect(tok2)
-	if _, known := h.View().DevicePresence(doorUser); !known {
+	if _, known := h.View().DevicePresence(newID); !known {
 		t.Fatal("late stale disconnect extinguished the fresh session (straddle 回归)")
 	}
 	newHandle.PresenceDisconnect(tok3)

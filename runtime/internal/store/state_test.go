@@ -264,8 +264,7 @@ func TestState_CascadeClearedOnMemberRemove(t *testing.T) {
 	f := openStateFixture(t)
 
 	// Add the member, give it state, then remove it via ApplyMemberTransitions.
-	if err := f.reg.ApplyMemberTransitions(ctx,
-		[]storespec.MemberActorAdd{{ID: "actor:a", Kind: actor.KindTool, At: 100}}, nil); err != nil {
+	if err := f.reg.Insert(ctx, storespec.Record{ID: "actor:a", Kind: actor.KindTool, CreatedAt: 100}); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {

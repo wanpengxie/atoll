@@ -45,7 +45,7 @@ func (a *blockActor) Receive(ctx context.Context, _ *message.Envelope) error {
 func wedge(t *testing.T, rt *Runtime, id actor.ActorID) (Incarnation, *blockActor) {
 	t.Helper()
 	a := newBlockActor(false)
-	inc := rt.Spawn(id, actor.KindAgent, static(a))
+	inc, _, _ := rt.SpawnIfAbsent(id, actor.KindAgent, static(a))
 	mustDeliver(t, rt, id, env("x"))
 	select {
 	case <-a.entered:
@@ -102,13 +102,13 @@ func TestG0_TerminationEntriesNonBlocking(t *testing.T) {
 		// Re-Spawn the same id: the wedged predecessor is judged dead + enrolled;
 		// the successor must go live without waiting for it.
 		mustReturnFast(t, "Spawn-replace", func() {
-			rt.Spawn("a", actor.KindAgent, static(newRecordActor()))
+			_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(newRecordActor()))
 		})
 	})
 	t.Run("DespawnChild", func(t *testing.T) {
 		t.Parallel()
 		rt, _ := New(Config{Parent: context.Background(), ZombieGrace: time.Second})
-		parent := rt.Spawn("p", actor.KindAgent, static(newRecordActor()))
+		parent, _, _ := rt.SpawnIfAbsent("p", actor.KindAgent, static(newRecordActor()))
 		child := newBlockActor(false)
 		childID := actor.ActorID("p/c")
 		if _, err := rt.Fork(parent, childID, actor.KindAgent, static(child)); err != nil {
@@ -138,7 +138,7 @@ func TestG0_AccountEqualsResidue(t *testing.T) {
 		t.Parallel()
 		rt, _ := New(Config{Parent: context.Background(), ZombieGrace: 2 * time.Second})
 		a := newBlockActor(true) // honours ctx → exits when cancelled
-		inc := rt.Spawn("a", actor.KindAgent, static(a))
+		inc, _, _ := rt.SpawnIfAbsent("a", actor.KindAgent, static(a))
 		mustDeliver(t, rt, "a", env("x"))
 		<-a.entered
 		rt.Despawn(inc)
@@ -156,7 +156,7 @@ func TestG0_AccountEqualsResidue(t *testing.T) {
 		t.Parallel()
 		rt, _ := New(Config{Parent: context.Background(), ZombieGrace: 60 * time.Millisecond})
 		a := newBlockActor(false) // ignores ctx → stuck past grace
-		inc := rt.Spawn("a", actor.KindAgent, static(a))
+		inc, _, _ := rt.SpawnIfAbsent("a", actor.KindAgent, static(a))
 		mustDeliver(t, rt, "a", env("x"))
 		<-a.entered
 		rt.Despawn(inc)
@@ -186,7 +186,7 @@ func TestG0_DrainZombiesLeakedList(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background(), ZombieGrace: 80 * time.Millisecond})
 	// N healthy cells (exit promptly on teardown).
 	for _, id := range []actor.ActorID{"h1", "h2", "h3"} {
-		rt.Spawn(id, actor.KindAgent, static(newRecordActor()))
+		_, _, _ = rt.SpawnIfAbsent(id, actor.KindAgent, static(newRecordActor()))
 	}
 	stuck, _ := wedge(t, rt, "stuck")
 	_ = stuck
@@ -218,7 +218,8 @@ func TestG0_ReplaceImmediately(t *testing.T) {
 		default:
 		}
 	}
-	rt.Spawn("a", actor.KindAgent, static(succ)) // replace
+	rt.DespawnID("a")
+	_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(succ))
 	if _, err := del.Deliver([]actor.ActorID{"a"}, env("y")); err != nil {
 		t.Fatalf("deliver to successor: %v", err)
 	}

@@ -119,10 +119,6 @@ func (r *parityRegistry) SweepExpiredReservations(context.Context, string, int64
 func (r *parityRegistry) TouchReservationsByCoords(context.Context, string, []string, int64) error {
 	return errors.New("parityRegistry: TouchReservationsByCoords not exercised by this rig (kv-only)")
 }
-func (r *parityRegistry) MarkReservationsLanded(context.Context, string, []string) error {
-	return errors.New("parityRegistry: MarkReservationsLanded not exercised by this rig (kv-only)")
-}
-
 func (r *parityRegistry) ActorAllows(_ context.Context, caller actor.ActorID, id resource.ResourceID, op access.Operation) (bool, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -295,7 +291,7 @@ func TestResourceFaceThreeAvatarParity(t *testing.T) {
 	t.Cleanup(func() { _ = acc.Close(); srv.Close(); rt.StopAll() })
 
 	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-parity",
-		[]link.Declaration{{ActorID: callerID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: callerID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

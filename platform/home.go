@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -188,8 +189,9 @@ type Home struct {
 	// pace, so an attached author's due identity timer would otherwise log
 	// once a second for as long as it stays attached. Pure log hygiene, not a
 	// correctness mechanism.
-	reviveLogMu sync.Mutex
-	reviveLogAt map[actor.ActorID]time.Time
+	reviveLogMu   sync.Mutex
+	reviveLogAt   map[actor.ActorID]time.Time
+	reviveBackoff map[actor.ActorID]reviveBackoffEntry
 
 	// obsReg dedups this home's own per-actor WatchObs registration (the local-cell
 	// arm of the actor-source obs axis, mirroring Acceptor.obsReg's dedup for the
@@ -333,16 +335,9 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    stays strict (a duplicate is an error, locked by the store's
 	//    coverage test); the idempotent seed lives here at the genesis call site
 	//    (guard the idempotency at the platform bootstrap call site — do not relax substrate).
-	if exists, err := cs.Registry.Exists(ctx, actor.SystemActorID); err != nil {
+	if err := cs.Membership.EnsureSystemActor(ctx, nowMs()); err != nil {
 		_ = cs.Close()
-		return nil, fmt.Errorf("platform: check system actor: %w", err)
-	} else if !exists {
-		if err := cs.Membership.Insert(ctx, storespec.Record{
-			ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: nowMs(),
-		}); err != nil {
-			_ = cs.Close()
-			return nil, fmt.Errorf("platform: register system actor: %w", err)
-		}
+		return nil, fmt.Errorf("platform: register system actor: %w", err)
 	}
 
 	// 5. Device-presence fold (L3): folds actor-source obs PUSH edges
@@ -365,7 +360,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    (long after Open returns), h has been assigned.
 	var h *Home
 	clock := func() time.Time { return time.UnixMilli(nowMs()) }
-	channel := channelkit.New(channelkit.Config{
+	channel, err := channelkit.New(channelkit.Config{
 		ChannelID: cfg.ChannelID,
 		System: func(rt *actorrt.Runtime, inc actorrt.Incarnation) actorrt.Actor {
 			// S6 Q5: the ring0 anchor's four caps arms装真 — all RAW (no
@@ -403,6 +398,10 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Clock:        clock,
 		Logger:       logger,
 	})
+	if err != nil {
+		_ = cs.Close()
+		return nil, fmt.Errorf("platform: construct channel: %w", err)
+	}
 
 	// 7. Build the delivery tap: a Pump over the Signal-fed Deliverer. cursor start
 	//    = current MaxSeq (mailbox semantics: only new commits). DeliverResult
@@ -417,7 +416,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 	}
 	deliver := deliveryHandle(channel.Deliverer(), cfg.ChannelID, logger)
 	delivery := tap.NewPump(signal, cs.Query, from, deliver, logger)
-	delivery.Start()
 
 	// 8. Register the device-presence fold as a global down watcher (so an actor's
 	//     death edge decays its L3 to unknown — the link-down cascade). Per-actor
@@ -446,6 +444,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		prevEagerDesired: map[actor.ActorID]bool{},
 		systemPen:        systemPen,
 		reviveLogAt:      map[actor.ActorID]time.Time{},
+		reviveBackoff:    map[actor.ActorID]reviveBackoffEntry{},
 		obsReg:           map[actor.ActorID]bool{},
 		pokeCh:           make(chan struct{}, 1),
 	}
@@ -476,7 +475,16 @@ func Open(cfg HomeConfig) (*Home, error) {
 	}
 	h.schedMinter = schedMinter
 	h.engine = engine
+	if err := channel.Start(); err != nil {
+		engine.Close()
+		delivery.Close()
+		channel.Cells().StopAll()
+		channel.Cells().DrainZombies(0)
+		_ = cs.Close()
+		return nil, fmt.Errorf("platform: start channel: %w", err)
+	}
 	engine.Start()
+	delivery.Start()
 
 	// 11. Build the link acceptor (physical layer: WS mux + per-actor ipc streams
 	//      + lease judgement for attached computes). It welds an attaching remote
@@ -656,6 +664,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		}
 		current[id] = true
 		if actual[id] {
+			h.clearReviveBackoff(id)
 			continue
 		}
 		if rec.Host != "" {
@@ -668,9 +677,14 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		}
 		kind := rec.Kind
 		mid := id
-		inc, built := rt.SpawnIfAbsent(mid, kind, func(inc actorrt.Incarnation) actorrt.Actor {
+		inc, built, buildErr := rt.SpawnIfAbsent(mid, kind, func(inc actorrt.Incarnation) actorrt.Actor {
 			return build(h.buildCaps(mid, kind, inc), h.hooks(), factory)
 		})
+		if buildErr != nil {
+			h.logger.Error("platform.reconcile.build_failed", "channel", string(h.channelID), "actor", string(mid), "error", buildErr)
+			delete(current, mid)
+			continue
+		}
 		// Post-build straddle recheck (shared verifyPostBuild, mirror of the reviver
 		// arm's S-P20 recheck): a concurrent Home.Remove (dereg) or daemon attach (Host
 		// stamp) can land BETWEEN the Lookup that admitted mid into current above and
@@ -755,10 +769,6 @@ func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, inc actorr
 		h.channel.Cells().Despawn(inc)
 		return storespec.Record{}, recheckGone, nil
 	}
-	if rec2.Host != "" {
-		h.channel.Cells().Despawn(inc)
-		return rec2, recheckAttached, nil
-	}
 	return rec2, recheckOK, nil
 }
 
@@ -777,53 +787,6 @@ func (h *Home) View() View {
 	}
 }
 
-// Spawn admits one actor into the channel as durable membership truth and, when
-// def is non-empty, places it as a live in-process cell (binding=embedded) with
-// a Pen welded to its own (id, channelID).
-//
-// Identity weld at the admission membrane: the app supplies the id (domain authority —
-// "this id may be admitted") and a def (spec §4 S3's ActorFactory); the substrate
-// Mints the welded Pen and hands the caps to def's build in ONE step, so the cell
-// is born with a pen welded to its own id (the substrate's "actorID and write
-// capability are welded inseparably" invariant). The app never sees a bare writer,
-// a Minter, or actorcaps.Caps itself — it only chooses WHAT to place (an
-// ActorFactory over harness.Pen or an actorbase.Def); Home decides HOW.
-//
-// Membership is VERIFIED, not applied (膜律 — the not→member edge belongs to Admit
-// alone; Spawn never mints membership as a side effect). Spawn-replace embodies an
-// EXISTING member (A-P14: restart's single real-factory caller); a Spawn of a
-// non-member id is an error — restarting an orphan row would be a membrane bypass.
-// The verify precedes the cell so the order invariant still holds: durable
-// membership BEFORE the live embodiment (the birth mirror of the death-side
-// "despawn before deregister"). The sender gate does not query the registry (kind
-// is welded into the pen at Mint); membership ≠ embodiment (the live cell layers on
-// top of the durable identity-level truth), and a construction-time plane-2 access
-// invoke needing a member-grant resolves against that durable membership.
-//
-// Two-phase Spawn: the build closure runs inside rt.Spawn. It welds the whole caps
-// bundle bound to THIS incarnation (livePen + liveAccess membranes, spawn handle)
-// and hands the gated bundle to def's build in ONE step — no bare handle escapes. A
-// participant is a gated cap holder; substrate anchors are not (see channelkit/compute).
-func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, def ActorFactory) error {
-	if id == "" {
-		return fmt.Errorf("platform: Spawn id required")
-	}
-	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
-	if err != nil {
-		return fmt.Errorf("platform: Spawn membership lookup: %w", err)
-	}
-	if !ok || !rec.IsActive() {
-		return fmt.Errorf("platform: Spawn requires an active member: %s", id)
-	}
-	rt := h.channel.Cells()
-	rt.Spawn(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-		return build(h.buildCaps(id, kind, inc), h.hooks(), def)
-	})
-	h.logger.Info("platform.member.spawned", "channel", string(h.channelID),
-		"actor", string(id), "kind", string(kind))
-	return nil
-}
-
 // Admit registers one actor as durable channel membership truth and nothing more
 // — the pure-membership primitive (the not→member edge of §4.6). It writes a
 // NEUTRAL row (Binding="" / Host=""): membership precedes embodiment, and the
@@ -832,36 +795,35 @@ func (h *Home) Spawn(ctx context.Context, id actor.ActorID, kind actor.Kind, def
 // member is embodied by the reconcile ring's SpawnIfAbsent (activation) or a
 // daemon attach, never by Admit itself. After the write it pokes the ring so the
 // embodiment lands on the next immediate sweep rather than waiting a full tick.
-// Idempotent: ApplyMemberTransitions upserts a live row (a re-Admit of an existing
-// member is a no-op-shaped write + a harmless extra poke).
-func (h *Home) Admit(ctx context.Context, id actor.ActorID, kind actor.Kind) error {
-	if id == "" {
-		return fmt.Errorf("platform: Admit id required")
-	}
-	// An Admit of an ALREADY-active member is a pure no-op (poke only): it must NOT
-	// re-apply the neutral Host="" row, because applyMemberAddTx UPDATEs host on any
-	// host-diff — a re-Admit of a daemon-hosted member (an idempotent introduce
-	// retry) would else clobber its live Host back to "" (placement authority is the
-	// attach/plan path's, never Admit's). Only an inactive/absent id takes the apply
-	// (reactivate/insert), where Host="" is the correct genesis-neutral state the
-	// host path stamps later.
-	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
+// Idempotent for an already-active (kind, principal): the registry returns the
+// existing minted instance id and the extra reconcile poke is harmless.
+func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, error) {
+	id, err := h.cs.Membership.Admit(ctx, kind, principal, h.nowMs())
 	if err != nil {
-		return fmt.Errorf("platform: Admit membership lookup: %w", err)
-	}
-	if ok && rec.IsActive() {
-		h.pokeReconcile()
-		return nil
-	}
-	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{{
-		ID: id, Kind: kind, Binding: actor.Binding(""), Host: "", At: h.nowMs(),
-	}}, nil); err != nil {
-		return fmt.Errorf("platform: Admit membership: %w", err)
+		return "", fmt.Errorf("platform: Admit membership: %w", err)
 	}
 	h.pokeReconcile()
 	h.logger.Info("platform.member.admitted", "channel", string(h.channelID),
-		"actor", string(id), "kind", string(kind))
-	return nil
+		"actor", string(id), "kind", string(kind), "principal", principal)
+	return id, nil
+}
+
+// PrincipalOf returns the opaque principal recorded for an actor instance.
+func (h *Home) PrincipalOf(ctx context.Context, id actor.ActorID) (string, bool, error) {
+	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
+	if err != nil || !ok {
+		return "", ok, err
+	}
+	return rec.Principal, true, nil
+}
+
+func (h *Home) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {
+	reg, ok := h.cs.Registry.(storespec.PrincipalRegistry)
+	if !ok {
+		return "", false, errors.New("platform: principal registry unavailable")
+	}
+	rec, found, err := reg.LookupActivePrincipal(ctx, kind, principal)
+	return rec.ID, found, err
 }
 
 // pokeReconcile posts a coalesced wake to the reconcile ring (non-blocking: a

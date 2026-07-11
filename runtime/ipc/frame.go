@@ -194,7 +194,8 @@ type EmitResult struct {
 // exact outcome a local cell would.
 type EmitAckPayload struct {
 	EmitResult
-	Err string `json:"err,omitempty"`
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
 }
 
 // RelayAckPayload is the host's reply to one KindAccess / KindSchedule: the
@@ -206,8 +207,22 @@ type EmitAckPayload struct {
 // time-axis call observes the exact outcome a local cell would. The wire
 // contract is not downgraded across the port.
 type RelayAckPayload struct {
-	Payload json.RawMessage `json:"payload,omitempty"`
-	Err     string          `json:"err,omitempty"`
+	Payload      json.RawMessage `json:"payload,omitempty"`
+	ErrorCode    string          `json:"error_code,omitempty"`
+	ErrorMessage string          `json:"error_message,omitempty"`
+}
+
+type errorCoder interface{ ErrorCode() string }
+
+func EncodeError(err error) (string, string) {
+	if err == nil {
+		return "", ""
+	}
+	var coded errorCoder
+	if errors.As(err, &coded) {
+		return coded.ErrorCode(), err.Error()
+	}
+	return "unknown", err.Error()
 }
 
 // DownPayload is the bound actor's death notification — the host turns it into a

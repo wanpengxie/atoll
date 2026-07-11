@@ -44,7 +44,7 @@ type compositionRow struct {
 // reverse-entropy sweep (owner 拍定).
 const compositionSelect = `SELECT ca.instance_id, ca.class, COALESCE(ca.config_json, ''), COALESCE(a.config_json, '')
 	   FROM channel_actors ca
-	   LEFT JOIN actor_decls a ON ca.instance_id = 'agent:' || a.id
+	   LEFT JOIN actor_decls a ON ca.principal = a.id
 	  WHERE ca.channel_id = ?
 	    AND (a.id IS NULL OR a.deleted_at IS NULL)`
 
@@ -120,7 +120,7 @@ func (a *App) instanceCompositionRow(chID channel.ID, instanceID actor.ActorID) 
 // config under the per-channel channel_actors.config_json) rides
 // registry.InstanceSpec.Config into the constructor closure — an instance
 // PARAMETER, never a capability (it does not touch the actorcaps.Caps bundle the
-// platform welds separately). "改配置" is a new snapshot here + Spawn-replace, not
+// platform welds separately). "改配置" is a new snapshot here + Restart, not
 // a live mutation of any handle.
 func (a *App) buildInstance(chID channel.ID, r compositionRow) (platform.ActorDecl, error) {
 	return registry.Build(r.class, registry.InstanceSpec{

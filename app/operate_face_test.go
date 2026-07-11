@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform"
@@ -44,16 +45,18 @@ func TestOperate_IntroduceUserForm_Admits(t *testing.T) {
 		t.Fatalf("target %q already a member before introduce", target)
 	}
 	face := env.app.OperateFaceForTest()
-	payload, _ := json.Marshal(map[string]any{"target": target})
-	if _, err := face.Introduce(context.Background(), platform.OperateRequest{
+	payload, _ := json.Marshal(map[string]any{"principal": strings.TrimPrefix(target, "user:")})
+	got, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
-		Sender:    actor.ActorID("user:" + s.userID),
+		Sender:    s.actorID,
 		Payload:   payload,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Introduce(user form): %v", err)
 	}
-	if !actorPresent(t, env, s.cookies, s.chID, target) {
-		t.Fatalf("target %q not a member after user-form introduce", target)
+	admitted := string(got.(map[string]any)["admitted"].(actor.ActorID))
+	if !actorPresent(t, env, s.cookies, s.chID, admitted) {
+		t.Fatalf("minted target %q not a member after user-form introduce", admitted)
 	}
 }
 
@@ -110,7 +113,7 @@ func TestOperate_IntroduceUnknownClass_Rejected(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID})
 	_, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
-		Sender:    actor.ActorID("user:" + s.userID),
+		Sender:    s.actorID,
 		Payload:   payload,
 	})
 	var oe *platform.OperateError
@@ -139,7 +142,7 @@ func TestOperate_IntroduceInvalidPlacement_Rejected(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "placement": "foo"})
 	_, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
-		Sender:    actor.ActorID("user:" + s.userID),
+		Sender:    s.actorID,
 		Payload:   payload,
 	})
 	var oe *platform.OperateError

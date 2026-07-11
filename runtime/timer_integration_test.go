@@ -267,7 +267,7 @@ func (r *testReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	// SpawnIfAbsent semantics: idempotent no-op for an already-live author
 	// (EnsureLive MUST be idempotent) — the real CAS mint, not a fake
 	// standing in for it.
-	r.rt.SpawnIfAbsent(id, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	_, _, _ = r.rt.SpawnIfAbsent(id, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	return nil
 }
 
@@ -502,6 +502,15 @@ func waitStable(t *testing.T, val func() int, quiet time.Duration) int {
 	}
 }
 
+func admitTimerAuthor(t *testing.T, cs *ChannelStores, principal string) actor.ActorID {
+	t.Helper()
+	id, err := cs.Membership.Admit(context.Background(), actor.KindAgent, principal, time.Now().UnixMilli())
+	if err != nil {
+		t.Fatalf("Admit timer author %q: %v", principal, err)
+	}
+	return id
+}
+
 // ---------------------------------------------------------------------
 // Slice 1 — basic fire: truth lands in log, every envelope field checked
 // against the STORED (post-harness-normalized) row.
@@ -522,7 +531,7 @@ func TestTimerSlice1_BasicFireTruthFields(t *testing.T) {
 	engine.Start()
 	t.Cleanup(engine.Close)
 
-	const author = actor.ActorID("timer-author-1")
+	author := admitTimerAuthor(t, cs, "timer-author-1")
 	handle := minter.Mint(author)
 
 	fireAt := clock.Now().Add(time.Hour).UnixMilli()
@@ -608,8 +617,8 @@ func TestTimerSlice2_SelfTargetedStructural(t *testing.T) {
 	engine.Start()
 	t.Cleanup(engine.Close)
 
-	const authorA = actor.ActorID("author-a")
-	const authorB = actor.ActorID("author-b")
+	authorA := admitTimerAuthor(t, cs, "author-a")
+	authorB := admitTimerAuthor(t, cs, "author-b")
 	hA := minter.Mint(authorA)
 	hB := minter.Mint(authorB)
 
@@ -653,7 +662,7 @@ func TestTimerSlice3_IncarnationDropsOnDeathEvenWithLiveSuccessor(t *testing.T) 
 	cs := openScheduleChannel(t)
 	sink := newRealFireSink(t, cs)
 	rt := newScheduleRuntime(t)
-	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	revive := newTestReviver(rt)
 
@@ -681,7 +690,7 @@ func TestTimerSlice3_IncarnationDropsOnDeathEvenWithLiveSuccessor(t *testing.T) 
 	// successor being live must NOT rescue the predecessor's timer (pointer
 	// identity, not id identity, is the drop check).
 	rt.DespawnID("author-1")
-	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 
 	clock.Advance(time.Hour)
 	// Bounded real-time window for the (non-)fire to settle, then assert it
@@ -733,7 +742,7 @@ func TestTimerSlice4_RestartBatchDropVsIdentitySurvive(t *testing.T) {
 
 	// --- pre-restart process ---
 	rt1 := newScheduleRuntime(t)
-	rt1.Spawn("author-inc", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	_, _, _ = rt1.SpawnIfAbsent("author-inc", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	sink1 := newRealFireSink(t, cs)
 	revive1 := newTestReviver(rt1)
 
@@ -743,7 +752,8 @@ func TestTimerSlice4_RestartBatchDropVsIdentitySurvive(t *testing.T) {
 	}
 	engine1.Start()
 
-	idIdentity, err := minter1.Mint("author-identity").Schedule(ctx, schedule.ScheduleReq{
+	authorIdentity := admitTimerAuthor(t, cs, "author-identity")
+	idIdentity, err := minter1.Mint(authorIdentity).Schedule(ctx, schedule.ScheduleReq{
 		Bind: schedule.BindIdentity, FireAt: fireAt, Type: "demo.identity",
 	})
 	if err != nil {
@@ -867,7 +877,7 @@ func TestTimerSlice5_CrashIdempotencyAndFireSinkTriState(t *testing.T) {
 		// reserved-namespace authority (ingress already blocks the main
 		// entrypoint for a NEW Schedule; this is the leaked-through fallback
 		// case the disposal path exists for).
-		const author = actor.ActorID("author-poison")
+		author := admitTimerAuthor(t, cs, "author-poison")
 		const poisonID = timerspec.TimerID("poison-1")
 		if err := cs.timers.Insert(ctx, timerspec.TimerRow{
 			ID: poisonID, AuthorID: author, FireAt: clock.Now().UnixMilli() - 1,
@@ -904,7 +914,7 @@ func TestTimerSlice5_CrashIdempotencyAndFireSinkTriState(t *testing.T) {
 		engine.Start()
 		t.Cleanup(engine.Close)
 
-		handle := minter.Mint("author-1")
+		handle := minter.Mint(admitTimerAuthor(t, cs, "transient-author"))
 		id, err := handle.Schedule(ctx, schedule.ScheduleReq{
 			Bind: schedule.BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.due",
 		})
@@ -944,7 +954,8 @@ func TestTimerSlice6_CancelTriState(t *testing.T) {
 	cs := openScheduleChannel(t)
 	sink := newRealFireSink(t, cs)
 	rt := newScheduleRuntime(t)
-	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	author1 := admitTimerAuthor(t, cs, "cancel-author-1")
+	_, _, _ = rt.SpawnIfAbsent(author1, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	revive := newTestReviver(rt)
 
@@ -955,7 +966,7 @@ func TestTimerSlice6_CancelTriState(t *testing.T) {
 	engine.Start()
 	t.Cleanup(engine.Close)
 
-	h1 := minter.Mint("author-1")
+	h1 := minter.Mint(author1)
 	h2 := minter.Mint("author-2")
 
 	// Pending identity timer: cancel prevents the fire.
@@ -1096,7 +1107,7 @@ func TestTimerSlice8_ReviveSeamWakeFirstOrdering(t *testing.T) {
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	revive := newTestReviver(rt)
 
-	const author = actor.ActorID("sleepy-author")
+	author := admitTimerAuthor(t, cs, "sleepy-author")
 	// A large count, not a single failNextFor(author, 1): while it stays
 	// large, EVERY retry (the fresh wake, a stray coalesced-wake slip, a
 	// backoff alarm) deterministically fails — no race in which an early
@@ -1168,7 +1179,7 @@ func TestTimerSlice9_ErrBadScheduleMatrix(t *testing.T) {
 	cs := openScheduleChannel(t)
 	sink := newRealFireSink(t, cs)
 	rt := newScheduleRuntime(t)
-	rt.Spawn("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	revive := newTestReviver(rt)
 
@@ -1178,7 +1189,7 @@ func TestTimerSlice9_ErrBadScheduleMatrix(t *testing.T) {
 	}
 	engine.Start()
 	t.Cleanup(engine.Close)
-	handle := minter.Mint("author-1")
+	handle := minter.Mint(admitTimerAuthor(t, cs, "matrix-author"))
 
 	cases := []struct {
 		name    string
@@ -1236,7 +1247,7 @@ func TestTimerSlice11_ConcurrentScheduleCancelRace(t *testing.T) {
 	}
 	engine.Start()
 	t.Cleanup(engine.Close)
-	handle := minter.Mint("author-1")
+	handle := minter.Mint(admitTimerAuthor(t, cs, "race-author"))
 
 	// A keeper timer EARLIER than every churn timer, never cancelled: the
 	// semantic half of this slice — under concurrent Schedule/Cancel churn
@@ -1302,7 +1313,7 @@ func TestTimerSlice12_TimerIDNeverReused(t *testing.T) {
 	}
 	engine.Start()
 	t.Cleanup(engine.Close)
-	handle := minter.Mint("author-1")
+	handle := minter.Mint(admitTimerAuthor(t, cs, "reuse-author"))
 
 	req := schedule.ScheduleReq{Bind: schedule.BindIdentity, FireAt: clock.Now().Add(time.Hour).UnixMilli(), Type: "t"}
 	id1, err := handle.Schedule(ctx, req)
@@ -1348,7 +1359,7 @@ func TestTimerSlice13_BackoffBounded(t *testing.T) {
 	engine.Start()
 	t.Cleanup(engine.Close)
 
-	_, err = minter.Mint("author-1").Schedule(ctx, schedule.ScheduleReq{
+	_, err = minter.Mint(admitTimerAuthor(t, cs, "backoff-author")).Schedule(ctx, schedule.ScheduleReq{
 		Bind: schedule.BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.due",
 	})
 	if err != nil {

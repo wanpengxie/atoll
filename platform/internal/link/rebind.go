@@ -31,7 +31,10 @@ import (
 // marks every pending/future round-trip transport-closed), schedule returns an
 // error. Until Rebind runs again the facades simply keep pointing at that
 // already-closed arm — fail-closed by construction (红线 12), never a stale
-// arm that silently keeps answering as if still connected.
+// arm that silently keeps answering as if still connected. Each arm publishes
+// atomically. A mixed-generation observation fails closed and cannot report a
+// false success. Rebind across the four capabilities is intentionally not a
+// transaction.
 type RebindableArms struct {
 	pen      atomic.Pointer[harness.Pen]
 	access   atomic.Pointer[accessdoor.ResourceAccessHandle]

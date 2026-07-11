@@ -170,9 +170,7 @@ func (w *RemoteWriter) DeliverAck(ack ipc.EmitAckPayload) {
 		RejectDetail: ack.RejectDetail,
 	}
 	var err error
-	if ack.Err != "" {
-		err = errors.New(ack.Err)
-	}
+	err = decodeAckError(ack.ErrorCode, ack.ErrorMessage)
 	waiter <- ackResult{res: res, err: err}
 }
 

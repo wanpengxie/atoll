@@ -62,7 +62,7 @@ func TestRemove_OrderSpy_DespawnBeforeDereg(t *testing.T) {
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
 	const id = actor.ActorID("agent:order-spy")
 	admit(t, h, id, actor.KindAgent)
-	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	if err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	})); err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -96,7 +96,7 @@ func TestRemove_Idempotent(t *testing.T) {
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
 	const id = actor.ActorID("agent:idempotent")
 	admit(t, h, id, actor.KindAgent)
-	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	if err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	})); err != nil {
 		t.Fatalf("Spawn: %v", err)
@@ -128,10 +128,10 @@ func TestRemove_Idempotent(t *testing.T) {
 func TestRemove_CascadeClearsState(t *testing.T) {
 	ctx := context.Background()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
-	const id = actor.ActorID("agent:cascade")
+	id := actor.ActorID("agent:cascade")
 	admit(t, h, id, actor.KindAgent)
 	var caps1 actorcaps.Caps
-	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
+	if err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		caps1 = c
 		return recordActor{caps: c}
 	})); err != nil {
@@ -146,11 +146,17 @@ func TestRemove_CascadeClearsState(t *testing.T) {
 		t.Fatalf("Remove: %v", err)
 	}
 
-	// Re-admit: Remove deregistered the row, so a fresh incarnation must be
-	// re-admitted (the introduce door) before Spawn-replace verifies membership.
-	admit(t, h, id, actor.KindAgent)
+	// Re-admit mints a fresh identity; state cannot cross the old id boundary.
+	newID, err := h.Admit(ctx, actor.KindAgent, "cascade")
+	if err != nil {
+		t.Fatalf("re-Admit: %v", err)
+	}
+	if newID == id {
+		t.Fatal("re-Admit reused removed actor id")
+	}
+	id = newID
 	var caps2 actorcaps.Caps
-	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
+	if err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		caps2 = c
 		return recordActor{caps: c}
 	})); err != nil {

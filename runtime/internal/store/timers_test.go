@@ -52,6 +52,9 @@ func openTimersFixture(t *testing.T) timersFixture {
 
 func mustInsertTimer(t *testing.T, s *timerStore, row timerspec.TimerRow) {
 	t.Helper()
+	if _, err := s.db.Exec(`INSERT OR IGNORE INTO actor_registry (actor_id, actor_kind, created_at) VALUES (?, 'agent', 1)`, string(row.AuthorID)); err != nil {
+		t.Fatalf("register timer author: %v", err)
+	}
 	if err := s.Insert(context.Background(), row); err != nil {
 		t.Fatalf("Insert %q: %v", row.ID, err)
 	}
@@ -274,8 +277,7 @@ func TestTimer_CascadeClearedOnMemberRemove(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)
 
-	if err := f.reg.ApplyMemberTransitions(ctx,
-		[]storespec.MemberActorAdd{{ID: "actor:a", Kind: actor.KindTool, At: 100}}, nil); err != nil {
+	if err := f.reg.Insert(ctx, storespec.Record{ID: "actor:a", Kind: actor.KindTool, CreatedAt: 100}); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
@@ -318,8 +320,7 @@ func TestMemberRemove_ExpectedHostGuard_MigrationWindowNoOp(t *testing.T) {
 
 	const id = actor.ActorID("tool:migrant")
 	// Registered on daemon A, with actor-scoped state and an identity timer.
-	if err := reg.ApplyMemberTransitions(ctx,
-		[]storespec.MemberActorAdd{{ID: id, Kind: actor.KindTool, Host: "daemon-a", At: 100}}, nil); err != nil {
+	if err := reg.Insert(ctx, storespec.Record{ID: id, Kind: actor.KindTool, Host: "daemon-a", CreatedAt: 100}); err != nil {
 		t.Fatalf("add on daemon-a: %v", err)
 	}
 	if err := state.Create(ctx, id, "cursor", []byte("v1")); err != nil {

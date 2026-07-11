@@ -2,8 +2,21 @@ package timerspec
 
 import (
 	"context"
+	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+)
+
+var (
+	ErrAuthorInactive = errors.New("timerspec: author inactive")
+	ErrScheduleQuota  = errors.New("timerspec: schedule quota exceeded")
+)
+
+type DeathClass string
+
+const (
+	DeathFireRejected   DeathClass = "fire_rejected"
+	DeathReviveRejected DeathClass = "revive_rejected"
 )
 
 // TimerID names one pending timer. It is a RUNTIME-level name (control-plane),
@@ -57,8 +70,9 @@ type TimerStore interface {
 	// deleting an absent row reports existed=false, not an error (Cancel
 	// after fire is a no-op — fired truth is not retractable).
 	Delete(ctx context.Context, id TimerID) (existed bool, err error)
-	// Due returns rows with FireAt <= now, ordered by FireAt, capped at limit.
+	// Due returns rows with FireAt <= now, fairly partitioned by author.
 	Due(ctx context.Context, now int64, limit int) ([]TimerRow, error)
+	MoveToDead(ctx context.Context, id TimerID, class DeathClass, reason, detail string, diedAt int64) (moved bool, evicted int, err error)
 	// NextFireAt returns the earliest pending FireAt (ok=false when empty) —
 	// the poll/wake loop's sleep-until target.
 	NextFireAt(ctx context.Context) (fireAt int64, ok bool, err error)

@@ -42,10 +42,10 @@ func TestEcho_CallReplyClosesThroughRealCellHost(t *testing.T) {
 	echoID := echo.DefaultActorID
 
 	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
-	if err := ch.Admit(t.Context(), echoID, actor.KindTool); err != nil {
+	if err := platform.AdmitExactForTest(ch, echoID, actor.KindTool); err != nil {
 		t.Fatalf("admit echo actor: %v", err)
 	}
-	if err := ch.Spawn(t.Context(), echoID, actor.KindTool, platform.ActorFactory{Proc: echo.Def()}); err != nil {
+	if err := platform.SpawnForTest(ch, echoID, actor.KindTool, platform.ActorFactory{Proc: echo.Def()}); err != nil {
 		t.Fatalf("spawn echo actor: %v", err)
 	}
 
@@ -78,10 +78,10 @@ func TestEcho_UnknownTypeFails(t *testing.T) {
 	echoID := echo.DefaultActorID
 
 	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
-	if err := ch.Admit(t.Context(), echoID, actor.KindTool); err != nil {
+	if err := platform.AdmitExactForTest(ch, echoID, actor.KindTool); err != nil {
 		t.Fatalf("admit echo actor: %v", err)
 	}
-	if err := ch.Spawn(t.Context(), echoID, actor.KindTool, platform.ActorFactory{Proc: echo.Def()}); err != nil {
+	if err := platform.SpawnForTest(ch, echoID, actor.KindTool, platform.ActorFactory{Proc: echo.Def()}); err != nil {
 		t.Fatalf("spawn echo actor: %v", err)
 	}
 

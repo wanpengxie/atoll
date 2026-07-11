@@ -2,6 +2,7 @@ package link
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -55,6 +56,11 @@ type fakeRaceMembership struct {
 	hosts   map[actor.ActorID]string // current authoritative host per id
 	removed []actor.ActorID          // ids actually removed (ExpectedHost matched)
 }
+
+func (f *fakeRaceMembership) Admit(context.Context, actor.Kind, string, int64) (actor.ActorID, error) {
+	return "", errors.New("not exercised")
+}
+func (f *fakeRaceMembership) EnsureSystemActor(context.Context, int64) error { return nil }
 
 func (f *fakeRaceMembership) Insert(context.Context, storespec.Record) error { return nil }
 func (f *fakeRaceMembership) Deregister(context.Context, actor.ActorID, int64) error {

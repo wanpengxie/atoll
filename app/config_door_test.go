@@ -132,18 +132,20 @@ func TestConfigDoor_LegacyEndToEnd(t *testing.T) {
 		t.Fatalf("decode agent: %v", err)
 	}
 	agentID := ag["id"].(string)
-	instanceID := actor.ActorID("agent:" + agentID)
+	var instanceID actor.ActorID
 
 	face := env.app.OperateFaceForTest()
-	sender := actor.ActorID("user:" + s.userID)
+	sender := s.actorID
 
 	// Introduce server-placed (no per-channel config → global v1 is the snapshot).
 	p1, _ := json.Marshal(map[string]any{"decl_id": agentID, "placement": "server"})
-	if _, err := face.Introduce(context.Background(), platform.OperateRequest{
+	introduced, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID), Sender: sender, Payload: p1,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("introduce v1: %v", err)
 	}
+	instanceID = actor.ActorID(introduced.(map[string]any)["instance_id"].(string))
 	if !env.app.WaitLiveForTest(s.chID, instanceID, 2*time.Second) {
 		t.Fatalf("instance %s never embodied after introduce", instanceID)
 	}

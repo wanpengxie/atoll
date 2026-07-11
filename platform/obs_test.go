@@ -44,11 +44,10 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = h.Close() })
 
-	ctx := context.Background()
 	id := actor.ActorID("obs-publisher")
 	pub := &obsPublisherActor{}
 	admit(t, h, id, actor.KindAgent)
-	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor { return pub })); err != nil {
+	if err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor { return pub })); err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
 
@@ -122,7 +121,7 @@ func TestHome_BuildCaps_RegistersObs_AcrossBirthPaths(t *testing.T) {
 	rt := h.channel.Cells()
 	ids := []actor.ActorID{"birth-spawn", "birth-reconcile", "birth-reviver", "birth-fork"}
 	for _, id := range ids {
-		rt.Spawn(id, actor.KindAgent, func(inc actorrt.Incarnation) actorrt.Actor {
+		_, _, _ = rt.SpawnIfAbsent(id, actor.KindAgent, func(inc actorrt.Incarnation) actorrt.Actor {
 			h.buildCaps(id, actor.KindAgent, inc)
 			return statTestActor{}
 		})
@@ -205,10 +204,9 @@ func TestObsFanout_HomeSpawn_OncePerPublish(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = h.Close() })
 
-	ctx := context.Background()
 	const id = actor.ActorID("obs-fanout-spawn")
 	admit(t, h, id, actor.KindAgent)
-	if err := h.Spawn(ctx, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	if err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return &obsPublisherActor{}
 	})); err != nil {
 		t.Fatalf("Spawn: %v", err)

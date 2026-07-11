@@ -21,7 +21,7 @@ func TestStat_KindAcrossEmbodimentForms(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc := rt.Spawn("parent", actor.KindAgent, static(newRecordActor()))
+	parentInc, _, _ := rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
 	st, ok := rt.Stat("parent")
 	if !ok {
 		t.Fatal("cell not hosted after Spawn")

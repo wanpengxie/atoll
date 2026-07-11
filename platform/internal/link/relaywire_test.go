@@ -182,7 +182,7 @@ func (r *capsRig) wsURL() string { return "ws" + r.srv.URL[4:] }
 func dialArms(t *testing.T, r *capsRig, id actor.ActorID) (link.CellArms, *link.Dialer) {
 	t.Helper()
 	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -384,7 +384,7 @@ func dialArmsWithMinters(t *testing.T, access accessdoor.AccessMinter, sched sch
 	t.Cleanup(func() { _ = acc.Close(); srv.Close(); rt.StopAll() })
 
 	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1",
-		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

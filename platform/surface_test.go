@@ -28,7 +28,7 @@ import (
 func TestHomePublicSurface(t *testing.T) {
 	// Human rejoined the set with the期12 rebuild (subjectgate door面 — lazy
 	// identity-bound handle; caps stay on the live cell, taken per verb).
-	want := []string{"Admit", "CancelRequest", "Close", "Human", "KickDaemon", "Remove", "ServeAttach", "Spawn", "Subscribe", "View"}
+	want := []string{"Admit", "CancelRequest", "Close", "Human", "HumanPrincipal", "KickDaemon", "PrincipalOf", "Remove", "ResolvePrincipal", "Restart", "ServeAttach", "Subscribe", "View"}
 
 	typ := reflect.TypeOf((*platform.Home)(nil))
 	var got []string

@@ -3,8 +3,10 @@ package app
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -67,9 +69,13 @@ func (a *App) SetRevokeFailForTest(v bool) {
 // Introduce retry must heal, so a test can assert the retry Admits under the
 // FROZEN row's class-kind, not the request's. Test-only.
 func (a *App) SeedIntentRowForTest(chID, instanceID, class, placement string) error {
+	principal := instanceID
+	if i := strings.IndexByte(principal, ':'); i >= 0 {
+		principal = principal[i+1:]
+	}
 	_, err := a.db.ExecContext(context.Background(),
-		`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-		chID, instanceID, class, placement)
+		`INSERT INTO channel_actors (channel_id, instance_id, principal, class, placement) VALUES (?,?,?,?,?)`,
+		chID, instanceID, principal, class, placement)
 	return err
 }
 
@@ -98,12 +104,31 @@ func (a *App) DropHomeForTest(chID channel.ID) {
 // daemon attach from minting membership, a daemon-hosted actor must be admitted
 // BEFORE its daemon declares it — this test seam stands in for the introduce door
 // the daemon-attach live tests bypass. Test-only.
-func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) error {
+func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) (actor.ActorID, error) {
 	home := a.getHome(channel.ID(chID))
 	if home == nil {
-		return errTestChannelNotLoaded
+		return "", errTestChannelNotLoaded
 	}
-	return home.Admit(context.Background(), id, kind)
+	principal := string(id)
+	if i := strings.IndexByte(principal, ':'); i >= 0 {
+		principal = principal[i+1:]
+	}
+	return home.Admit(context.Background(), kind, principal)
+}
+
+func (a *App) ResolvePrincipalForTest(chID string, kind actor.Kind, principal string) (actor.ActorID, error) {
+	home := a.getHome(channel.ID(chID))
+	if home == nil {
+		return "", errTestChannelNotLoaded
+	}
+	id, ok, err := home.ResolvePrincipal(context.Background(), kind, principal)
+	if err != nil {
+		return "", err
+	}
+	if ok {
+		return id, nil
+	}
+	return "", fmt.Errorf("principal not found")
 }
 
 // WaitLiveForTest polls chID's home until id has a live embodiment (View.Stat) or

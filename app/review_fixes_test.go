@@ -74,13 +74,15 @@ func TestOperate_IntroduceHalfFailedRetry_UsesFrozenClassKind(t *testing.T) {
 	// row's class is test-tool → the Admit must use its kind (tool), not claude's.
 	face := env.app.OperateFaceForTest()
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "class": "claude"})
-	if _, err := face.Introduce(context.Background(), platform.OperateRequest{
+	res, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
-		Sender:    actor.ActorID("user:" + s.userID),
+		Sender:    s.actorID,
 		Payload:   payload,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("Introduce retry: %v", err)
 	}
+	instID = res.(map[string]any)["instance_id"].(string)
 
 	if got := actorKind(t, env, s.cookies, s.chID, instID); got != string(actor.KindTool) {
 		t.Fatalf("member kind = %q, want %q (frozen echo class-kind, not the request's claude/agent)",
@@ -114,13 +116,14 @@ func TestOperate_IntroduceExistingRow_GarbageEngineSucceeds(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "class": "totally-unknown-engine-xyz"})
 	res, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
-		Sender:    actor.ActorID("user:" + s.userID),
+		Sender:    s.actorID,
 		Payload:   payload,
 	})
 	if err != nil {
 		t.Fatalf("Introduce against existing row with garbage engine must succeed: %v", err)
 	}
 	m, _ := res.(map[string]any)
+	instID = m["instance_id"].(string)
 	if m["class"] != "test-tool" {
 		t.Fatalf("effective class = %v, want frozen test-tool", m["class"])
 	}
@@ -145,7 +148,7 @@ func TestOperate_IntroduceNewRow_UnknownEngineRejected(t *testing.T) {
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "class": "totally-unknown-engine-xyz"})
 	_, err := face.Introduce(context.Background(), platform.OperateRequest{
 		ChannelID: channel.ID(s.chID),
-		Sender:    actor.ActorID("user:" + s.userID),
+		Sender:    s.actorID,
 		Payload:   payload,
 	})
 	if err == nil {

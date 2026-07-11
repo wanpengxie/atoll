@@ -102,8 +102,8 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	)
 	if err == nil {
 		_, err = tx.ExecContext(c.Request.Context(),
-			`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-			chID, string(defaultAgentInstanceID), defaultBoostClass, placementServer,
+			`INSERT INTO channel_actors (channel_id, instance_id, principal, class, placement) VALUES (?,?,?,?,?)`,
+			chID, string(defaultAgentInstanceID), "boost", defaultBoostClass, placementServer,
 		)
 	}
 	if err != nil {
@@ -135,13 +135,13 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	// tear the whole thing down — close the home and roll back the channel row —
 	// and return 5xx, so the caller sees a clean failure it can retry, never a
 	// silent 201 over a broken channel.
-	admit := func(id actor.ActorID, kind actor.Kind) error {
+	admit := func(principal string, kind actor.Kind) (actor.ActorID, error) {
 		if a.seedAdmitFailHook != nil {
 			if err := a.seedAdmitFailHook(); err != nil {
-				return err
+				return "", err
 			}
 		}
-		return home.Admit(c.Request.Context(), id, kind)
+		return home.Admit(c.Request.Context(), kind, principal)
 	}
 	rollback := func(stage string, err error) {
 		cID := channel.ID(chID)
@@ -156,11 +156,10 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 	}
 
-	actorID := actor.ActorID("user:" + userID)
 	// Membrane law: the creator is a member. Admit is the pure-membership动词 —
 	// the creating user's not→member edge (§4.6). No cell here (the human is
 	// embodied by the ring / subjectgate, never welded at this call site).
-	if mErr := admit(actorID, actor.KindHuman); mErr != nil {
+	if _, mErr := admit(userID, actor.KindHuman); mErr != nil {
 		rollback("creator admit", mErr)
 		return
 	}
@@ -168,14 +167,20 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	// in the tx above) + its durable membership admission. Idempotent (re-Admit is
 	// a no-op-shaped upsert), and it pokes the ring so boost embodies without
 	// waiting a tick.
-	if mErr := admit(defaultAgentInstanceID, actor.KindAgent); mErr != nil {
+	boostID, mErr := admit(defaultAgentPrincipal, actor.KindAgent)
+	if mErr != nil {
 		rollback("boost admit", mErr)
 		return
+	}
+	if string(boostID) != string(defaultAgentInstanceID) {
+		_, _ = a.db.ExecContext(c.Request.Context(), `UPDATE channel_actors SET instance_id=? WHERE channel_id=? AND instance_id=?`, string(boostID), chID, string(defaultAgentInstanceID))
+		_, _ = a.db.ExecContext(c.Request.Context(), `UPDATE channels SET default_agent=? WHERE id=?`, string(boostID), chID)
+		_ = home.Restart(c.Request.Context(), boostID)
 	}
 
 	c.JSON(http.StatusCreated, gin.H{
 		"id": chID, "workspace_id": wsID, "name": req.Name,
-		"type": req.Type, "created_at": now,
+		"type": req.Type, "created_at": now, "default_agent": string(boostID),
 	})
 }
 
@@ -309,7 +314,7 @@ func (a *App) handleListActors(c *gin.Context) {
 	for _, rec := range actors {
 		result = append(result, gin.H{
 			"id": string(rec.ID), "kind": string(rec.Kind),
-			"binding": string(rec.Binding), "created_at": rec.CreatedAt,
+			"principal": rec.Principal, "binding": string(rec.Binding), "created_at": rec.CreatedAt,
 		})
 	}
 	if result == nil {

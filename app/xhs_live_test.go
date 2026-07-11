@@ -94,14 +94,15 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	// --- run the daemon: real /compute attach + hosted tool:xhs cell --------
 	ctx, cancel := context.WithCancel(context.Background())
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
-	if err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool); err != nil {
+	xhsID, err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool)
+	if err != nil {
 		t.Fatalf("pre-admit tool:xhs: %v", err)
 	}
 
 	runErr := make(chan error, 1)
 	desired, builder := staticActorCompute([]platform.ActorDecl{{
-		ID:      xhs.DefaultActorID,
-		Kind:    actor.KindTool,
+		ID:   xhsID,
+		Kind: actor.KindTool,
 		Factory: platform.ActorFactory{Proc: xhs.Def(xhs.Config{
 			ListenAddr:     xhsDeviceAddr,
 			ReaperInterval: 20 * time.Millisecond,
@@ -123,7 +124,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	})
 
 	// --- STAGE 1: daemon attach → tool:xhs registers as a channel member ----
-	waitForActor(t, env, s, "tool:xhs", 5*time.Second)
+	waitForActor(t, env, s, string(xhsID), 5*time.Second)
 
 	// --- STAGE 2: real device connects to the cell's private /device WS -----
 	devURL := fmt.Sprintf("ws://%s/device", xhsDeviceAddr)
@@ -154,7 +155,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 		"msg_type": "xhs.search",
 		"kind":     "request",
 		"payload":  map[string]any{"keyword": "go"},
-		"audience": []string{"tool:xhs"},
+		"audience": []string{string(xhsID)},
 	})
 	if ack["type"] != "ack" {
 		t.Fatalf("send xhs.search: want ack, got %v", ack)
@@ -308,13 +309,14 @@ func TestXHSLiveActorStatus(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
-	if err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool); err != nil {
+	xhsID, err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool)
+	if err != nil {
 		t.Fatalf("pre-admit tool:xhs: %v", err)
 	}
 	runErr := make(chan error, 1)
 	desired, builder := staticActorCompute([]platform.ActorDecl{{
-		ID:      xhs.DefaultActorID,
-		Kind:    actor.KindTool,
+		ID:   xhsID,
+		Kind: actor.KindTool,
 		Factory: platform.ActorFactory{Proc: xhs.Def(xhs.Config{
 			ListenAddr:     xhsStatusDeviceAddr,
 			ReaperInterval: 20 * time.Millisecond,
@@ -336,17 +338,17 @@ func TestXHSLiveActorStatus(t *testing.T) {
 	})
 
 	// Daemon attach → tool:xhs registers as a channel member.
-	waitForActor(t, env, s, "tool:xhs", 5*time.Second)
+	waitForActor(t, env, s, string(xhsID), 5*time.Second)
 
 	// --- STAGE 1: device connected → status reports device_online:true --------
 	devURL := fmt.Sprintf("ws://%s/device", xhsStatusDeviceAddr)
 	conn := dialDeviceWithRetry(t, devURL, 3*time.Second)
 
-	waitDeviceOnline(t, env, s, "tool:xhs", true, 5*time.Second)
+	waitDeviceOnline(t, env, s, string(xhsID), true, 5*time.Second)
 
 	// --- STAGE 2: device disconnects → status reports device_online:false -----
 	_ = conn.Close()
-	waitDeviceOnline(t, env, s, "tool:xhs", false, 5*time.Second)
+	waitDeviceOnline(t, env, s, string(xhsID), false, 5*time.Second)
 }
 
 // waitDeviceOnline polls GET /actors/:id/status until the actor returns a

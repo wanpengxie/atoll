@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
+
+	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // operate_shim_test.go is the DoD for the HTTP垫片 (NP-1=c): the four channel-control
@@ -40,8 +43,9 @@ func assertDoorTerminal(t *testing.T, env *testEnv, cookies []*http.Cookie, chID
 			continue
 		}
 		sender, _ := e["sender"].(map[string]any)
-		if sender["id"] != "user:"+userID {
-			t.Fatalf("%s request sender = %v, want user:%s", msgType, sender["id"], userID)
+		want, _ := env.app.ResolvePrincipalForTest(chID, actor.KindHuman, userID)
+		if sender["id"] != string(want) {
+			t.Fatalf("%s request sender = %v, want %s", msgType, sender["id"], want)
 		}
 		reqID, _ = e["id"].(string)
 	}
@@ -83,8 +87,8 @@ func TestShim_IntroduceThroughDoor(t *testing.T) {
 	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", s.chID),
 		map[string]any{"decl_id": agentID, "placement": "server"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
-	if got := respJSON(t, w)["instance_id"]; got != "agent:"+agentID {
-		t.Fatalf("introduce instance_id = %v, want agent:%s", got, agentID)
+	if got := respJSON(t, w)["instance_id"].(string); !strings.HasPrefix(got, "agent:"+agentID+":") {
+		t.Fatalf("introduce instance_id = %v", got)
 	}
 	assertDoorTerminal(t, env, s.cookies, s.chID, s.userID, "channel.introduce_actor")
 }
@@ -95,9 +99,9 @@ func TestShim_SetDefaultThroughDoor(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 	agentID := createOwnedAgent(t, env, s.cookies, "Def", "go-kimi")
-	instID := "agent:" + agentID
-	env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", s.chID),
+	wIntro := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", s.chID),
 		map[string]any{"decl_id": agentID, "placement": "server"}, s.cookies)
+	instID := respJSON(t, wIntro)["instance_id"].(string)
 
 	w := env.do(t, "PUT", fmt.Sprintf("/api/channels/%s/default_agent", s.chID),
 		map[string]any{"instance_id": instID}, s.cookies)
@@ -114,9 +118,9 @@ func TestShim_RemoveThroughDoor(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 	agentID := createOwnedAgent(t, env, s.cookies, "Rm", "go-kimi")
-	instID := "agent:" + agentID
-	env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", s.chID),
+	wIntro := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/actors", s.chID),
 		map[string]any{"decl_id": agentID, "placement": "server"}, s.cookies)
+	instID := respJSON(t, wIntro)["instance_id"].(string)
 	if !actorPresent(t, env, s.cookies, s.chID, instID) {
 		t.Fatalf("agent not admitted before remove")
 	}

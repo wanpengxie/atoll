@@ -48,7 +48,12 @@ func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, kind actor.Kin
 		return Incarnation{}, ErrParentNotLive
 	}
 	c := allocShell(r.parent, childID, kind, r.mailbox, r.publishDown, r.publishObs, r.removeIf, r.reapZombie, r.clock(), r.logger)
-	c.impl = build(Incarnation{id: childID, p: c}) // outside the lock, same discipline as Spawn.
+	var err error
+	c.impl, err = buildActor(build, Incarnation{id: childID, p: c}) // outside the lock, same discipline as Spawn.
+	if err != nil {
+		c.cancel()
+		return Incarnation{}, err
+	}
 
 	r.mu.Lock()
 	if _, exists := r.embodiments[childID]; exists { // collision = hard fail
@@ -57,12 +62,12 @@ func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, kind actor.Kin
 		// r.parent, so an uncancelled discard would pin a child-context entry
 		// in the parent's tree for the whole channel lifetime (the shell never
 		// started; cancel is idempotent and unobserved).
-		c.cancel()
+		abortBuild(c)
 		return Incarnation{}, ErrChildIDCollision
 	}
 	if r.embodiments[parent.id] != parent.p { // ② same critical section re-check
 		r.mu.Unlock() // not passed: do not insert, do not go-live.
-		c.cancel()    // same discard-release as the collision arm above
+		abortBuild(c) // same discard-release as the collision arm above
 		return Incarnation{}, ErrParentNotLive
 	}
 	r.embodiments[childID] = c

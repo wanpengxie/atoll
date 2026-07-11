@@ -27,7 +27,7 @@ func (a storageHostAdapter) Alloc(coord string, dir bool) error {
 	return a.host.Alloc(coord, dir)
 }
 
-func (a storageHostAdapter) Reconcile(ctx context.Context, resources []platform.StorageResourceCoord, pendingReservations []platform.StorageReservationCoord, pendingTombstones []platform.StorageTombstoneCoord, ack platform.StorageReclaimAckFunc, resend platform.StorageCommittedResendFunc) {
+func (a storageHostAdapter) Reconcile(ctx context.Context, resources []platform.StorageResourceCoord, pendingReservations []platform.StorageReservationCoord, pendingTombstones []platform.StorageTombstoneCoord, ack platform.StorageReclaimAckFunc) {
 	rs := make([]storagehost.ResourceLanded, 0, len(resources))
 	for _, r := range resources {
 		rs = append(rs, storagehost.ResourceLanded{Coord: r.Coord})
@@ -44,11 +44,7 @@ func (a storageHostAdapter) Reconcile(ctx context.Context, resources []platform.
 	if ack != nil {
 		hostAck = storagehost.ReclaimAckFunc(ack)
 	}
-	var hostResend storagehost.CommittedResendFunc
-	if resend != nil {
-		hostResend = storagehost.CommittedResendFunc(resend)
-	}
-	a.host.Reconcile(ctx, rs, prs, pts, hostAck, hostResend)
+	a.host.Reconcile(ctx, rs, prs, pts, hostAck)
 }
 
 // ActiveWriteCoords satisfies platform.StorageHost's own narrowing addition
@@ -63,15 +59,6 @@ func (a storageHostAdapter) ActiveWriteCoords() []string {
 		out = append(out, s.Coord)
 	}
 	return out
-}
-
-// LandedCoords satisfies platform.StorageHost's 期11 review §2.5 #A arm — a
-// plain ([]string, error) mirror of *storagehost.Host.LandedCoords's live/
-// directory listing (期11 review残余#1: the read error is now propagated,
-// never swallowed into a fabricated empty slice — see Host.LandedCoords's
-// own doc for why a read failure must reach the caller).
-func (a storageHostAdapter) LandedCoords() ([]string, error) {
-	return a.host.LandedCoords()
 }
 
 // OpenRead / OpenWrite satisfy platform.LocalFileOpener (期11 §5) — the SAME

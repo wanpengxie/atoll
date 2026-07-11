@@ -2,7 +2,6 @@ package link
 
 import (
 	"context"
-	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -15,7 +14,7 @@ import (
 // (despawned / dead / replaced) refuses to invoke. It is the plane-2 twin of
 // ErrWriterNotLive — a capability captured by a goroutine that outlived its
 // incarnation cannot act on resources on its behalf.
-var ErrAccessNotLive = errors.New("link: access capability no longer the live incarnation")
+var ErrAccessNotLive error = codedSentinel{code: "access_not_live", message: "link: access capability no longer the live incarnation"}
 
 // liveAccess is the liveCap (WHEN-validity membrane) over a raw
 // accessdoor.AccessHandle: a thin wrapper that, per invoke, first checks the

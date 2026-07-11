@@ -134,26 +134,30 @@ func TestApplyMemberTransitions_SameMillisecondBounce(t *testing.T) {
 	cs := openTestChannel(t)
 
 	const at = int64(5000)
-	add := storespec.MemberActorAdd{ID: "bounce", Kind: actor.KindAgent, At: at}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
-		t.Fatalf("add: %v", err)
+	oldID, err := cs.Membership.Admit(ctx, actor.KindAgent, "bounce", at)
+	if err != nil {
+		t.Fatal(err)
 	}
 	if err := cs.Membership.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: "bounce", At: at}}); err != nil {
+		[]storespec.MemberActorRemove{{ID: oldID, At: at}}); err != nil {
 		t.Fatalf("remove: %v", err)
 	}
-	if err := cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{add}, nil); err != nil {
-		t.Fatalf("same-ms re-add must succeed (uuid mirror ids cannot collide): %v", err)
+	newID, err := cs.Membership.Admit(ctx, actor.KindAgent, "bounce", at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newID == oldID {
+		t.Fatal("same-ms re-admission reused actor id")
 	}
 
-	rec, ok, _ := cs.Registry.Lookup(ctx, "bounce")
+	rec, ok, _ := cs.Registry.Lookup(ctx, newID)
 	if !ok || !rec.IsActive() {
 		t.Fatalf("bounced actor must be active, ok=%v", ok)
 	}
-	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", "bounce")); n != 2 {
-		t.Errorf("registered mirrors = %d, want 2", n)
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.registered", string(newID))); n != 1 {
+		t.Errorf("new-id registered mirrors=%d want 1", n)
 	}
-	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", "bounce")); n != 1 {
+	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", string(oldID))); n != 1 {
 		t.Errorf("deregistered mirrors = %d, want 1", n)
 	}
 }

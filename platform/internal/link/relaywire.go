@@ -298,9 +298,7 @@ func (c *relayClient) deliverAck(ack ipc.RelayAckPayload) {
 	c.mu.Unlock()
 
 	var err error
-	if ack.Err != "" {
-		err = errors.New(ack.Err)
-	}
+	err = decodeAckError(ack.ErrorCode, ack.ErrorMessage)
 	waiter <- relayAck{payload: ack.Payload, err: err}
 }
 

@@ -15,6 +15,26 @@ import (
 // here: it is a compute id, never a member id Remove's caller could pass.
 var ErrRemoveAnchor = errors.New("platform: cannot remove the system anchor actor")
 
+var ErrRestartAnchor = errors.New("platform: cannot restart the system anchor actor")
+
+// Restart accepts a reconcile-driven restart: desired membership remains
+// untouched, the current embodiment is killed, and the ring is poked to rebuild.
+func (h *Home) Restart(ctx context.Context, id actor.ActorID) error {
+	if id == actor.SystemActorID {
+		return ErrRestartAnchor
+	}
+	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
+	if err != nil {
+		return fmt.Errorf("platform: Restart membership lookup: %w", err)
+	}
+	if !ok || !rec.IsActive() {
+		return fmt.Errorf("platform: Restart requires an active member: %s", id)
+	}
+	h.channel.Cells().DespawnID(id)
+	h.pokeReconcile()
+	return nil
+}
+
 // Remove is identity-level termination's paved path: despawn-first + dereg
 // cascade + double-tap. This is a COMPOSITION over already-built primitives
 // (DespawnID, ApplyMemberTransitions) — NOT a single atomic operation spanning
@@ -60,5 +80,9 @@ func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
 	// dereg cascade (clearTimersTx); the scheduler's EnsureLive户籍拒 is the
 	// second line.
 	h.clearPresence(id)
+	h.reviveLogMu.Lock()
+	delete(h.reviveLogAt, id)
+	delete(h.reviveBackoff, id)
+	h.reviveLogMu.Unlock()
 	return nil
 }

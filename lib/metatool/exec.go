@@ -25,14 +25,14 @@ import (
 // built once per incarnation from Sys (agent/base.ExecFace) and shared by every
 // turn; the per-turn RuntimeContext is threaded separately (the curTurn/RC 合一).
 type Exec struct {
-	// Jobs is the durable out-station account (the engine's JobTable — the
+	// Jobs is the cross-turn out-station account (the engine's JobTable — the
 	// SAME machine sys.Call/Pending touch). Drives call_actor / await_result /
 	// cancel / list_pending. Required.
 	Jobs actorbase.JobTable
 
 	// Call is the synchronous request+await-final face for introspection
 	// queries (describe_actor / describe_type / list_actors) — sys.Call+Wait,
-	// TRANSIENT (never a durable job in list_pending), so an introspection
+	// TRANSIENT (never a cross-turn job in list_pending), so an introspection
 	// round-trip never litters the tool-managed job table. Required for those
 	// three tools; nil = "tool not configured".
 	Call CallFunc
@@ -169,7 +169,7 @@ func (x *Exec) ExecuteRequest(ctx context.Context, rc RuntimeContext, spec Reque
 }
 
 // CallSyncResult drives a synchronous introspection query through the Call face
-// (transient sys.Call, never a durable job) and renders its FINAL response as a
+// (transient sys.Call, never a cross-turn job) and renders its FINAL response as a
 // ResultValue. Used by describe_actor / describe_type.
 func (x *Exec) CallSyncResult(ctx context.Context, rc RuntimeContext, spec RequestSpec) ResultValue {
 	bspec, deadline := x.buildRequestSpec(rc, spec)

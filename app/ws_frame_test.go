@@ -137,7 +137,8 @@ func addSecondMember(t *testing.T, env *testEnv, s setupResult, email string) ([
 		t.Fatalf("add workspace member: %v", err)
 	}
 	aid := actor.ActorID("user:" + uid)
-	if err := env.app.AdmitForTest(s.chID, aid, actor.KindHuman); err != nil {
+	aid, err := env.app.AdmitForTest(s.chID, aid, actor.KindHuman)
+	if err != nil {
 		t.Fatalf("admit second member: %v", err)
 	}
 	if !env.app.WaitLiveForTest(s.chID, aid, 2*time.Second) {
@@ -341,7 +342,7 @@ func TestWS_Presence(t *testing.T) {
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
-	uid := actor.ActorID("user:" + s.userID)
+	uid := s.actorID
 
 	startedAt0, live0 := env.app.StatForTest(channel.ID(s.chID), uid)
 	if !live0 {
@@ -378,7 +379,7 @@ func TestWS_PresenceMultiTab(t *testing.T) {
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
-	uid := actor.ActorID("user:" + s.userID)
+	uid := s.actorID
 
 	tab1 := dialWS(t, srv, s.cookies, s.chID, 0)
 	tab2 := dialWS(t, srv, s.cookies, s.chID, 0)
@@ -432,7 +433,7 @@ func TestWS_AfterFrameEndToEnd(t *testing.T) {
 	// timer author = the subject; the fire survives cell churn by design).
 	fired := c.waitTail(func(e map[string]any) bool { return e["type"] == "reminder.note" }, 5*time.Second)
 	sender, _ := fired["sender"].(map[string]any)
-	if sender == nil || sender["id"] != "user:"+s.userID {
+	if sender == nil || sender["id"] != string(s.actorID) {
 		t.Fatalf("reminder sender = %v, want the subject", fired["sender"])
 	}
 }

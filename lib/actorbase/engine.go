@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -62,6 +63,8 @@ type engine struct {
 	dying      chan error
 	workerDone chan struct{}
 	rejectStop chan struct{}
+	rejectDone chan struct{}
+	stopOnce   sync.Once
 }
 
 // occupantState is the occupant arc (spec §1.4's Draining note): Starting →
@@ -121,6 +124,7 @@ func New(caps actorcaps.Caps, hooks Hooks, def Def) actorrt.Actor {
 	e.workQ = newWorkDeque(e.queueCap)
 	e.rejectQ = make(chan *message.Envelope, e.queueCap)
 	e.rejectStop = make(chan struct{})
+	e.rejectDone = make(chan struct{})
 	return e
 }
 
@@ -135,6 +139,12 @@ func (e *engine) life() context.Context { return e.lifeCtx }
 func (e *engine) Start(ctx context.Context, self actorrt.ActorContext) error {
 	e.lifeCtx = ctx
 	e.actorCtx = self
+	if e.rejectStop == nil {
+		e.rejectStop = make(chan struct{})
+	}
+	if e.rejectDone == nil {
+		e.rejectDone = make(chan struct{})
+	}
 	// Initialise the lifecycle channels BEFORE def.New (F2): every return path
 	// must leave the engine Stop-able. The cell's teardown defer calls Stop
 	// even after a FAILED Start; a nil workerDone would then hang Stop's join
@@ -182,6 +192,9 @@ func (e *engine) runProc(proc Proc) (err error) {
 }
 
 func (e *engine) runRejectLane() {
+	if e.rejectDone != nil {
+		defer close(e.rejectDone)
+	}
 	for {
 		select {
 		case env := <-e.rejectQ:
@@ -221,9 +234,12 @@ func (e *engine) Stop(ctx context.Context) error {
 		e.serve.stopTimers()
 		return nil
 	}
-	e.occupant.Store(int32(occupantDraining))
-	<-e.workerDone
-	close(e.rejectStop)
+	e.stopOnce.Do(func() {
+		e.occupant.Store(int32(occupantDraining))
+		<-e.workerDone
+		close(e.rejectStop)
+		<-e.rejectDone
+	})
 	// D 族小账: reclaim the call ledger's dangling author#2 AfterFunc timers on
 	// teardown — they would otherwise outlive the incarnation and fire into a
 	// fail-closed pen (see callLedger.stopTimers).

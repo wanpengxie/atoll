@@ -55,7 +55,7 @@ type Dialer struct {
 	// cancellation). nil means no Reattach is in flight, so any attach_reply
 	// received then is either the initial one (still open, closes d.attached) or
 	// a protocol anomaly (logged, dropped).
-	reattachWait chan AttachReply
+	pendingAttach *pendingReplies[AttachReply]
 	// started flips true inside the SAME mu critical section that snapshots the
 	// streams for the initial batch (Start). It makes Start idempotent and is the
 	// boundary a post-Start OpenStream races against: a stream inserted before the
@@ -135,10 +135,16 @@ type CellArms struct {
 	Down     func(cause string)
 }
 
+type DialConfig struct {
+	DespawnLocal    func(actor.ActorID)
+	AllocHandler    func(AllocRequest) AllocReply
+	LocalFileOpener LocalFileOpener
+}
+
 // Dial dials the home, sends the stream-0 attach, and waits for attach_reply. It
 // does NOT open actor streams or start any demux — Start does that after the
 // host is built. Window-period frames sit in the kernel socket buffer.
-func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration, logger *slog.Logger) (*Dialer, error) {
+func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration, cfg DialConfig, logger *slog.Logger) (*Dialer, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -156,7 +162,11 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		pendingReclaim:      newPendingReplies[ReclaimAckReply](),
 		pendingReconcile:    newPendingReplies[ReconcilePullReply](),
 		pendingResolveCoord: newPendingReplies[ResolveCoordReply](),
+		pendingAttach:       newPendingReplies[AttachReply](),
 		done:                make(chan struct{}),
+		despawnLocal:        cfg.DespawnLocal,
+		allocHandler:        cfg.AllocHandler,
+		localFileOpener:     cfg.LocalFileOpener,
 	}
 
 	onControl := func(payload []byte) {
@@ -218,16 +228,9 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		if cf.AttachReply.Accepted && cf.AttachReply.DaemonID != "" {
 			d.daemonID = cf.AttachReply.DaemonID
 		}
-		// A pending Reattach owns the NEXT attach_reply — deliver it there and
-		// return; this is not the initial attach's reply (that already closed
-		// d.attached long before any Reattach could be sent).
-		if pending := d.reattachWait; pending != nil {
-			d.reattachWait = nil
+		if cf.RequestID != "" {
 			d.mu.Unlock()
-			select {
-			case pending <- *cf.AttachReply:
-			default: // waiter already gave up (ctx/timeout) — reply is moot.
-			}
+			d.pendingAttach.deliver(cf.RequestID, *cf.AttachReply)
 			return
 		}
 		select {
@@ -344,24 +347,18 @@ const reattachTimeout = 10 * time.Second
 // reason comes back in the error (F11 — reject reasons are never silently
 // dropped).
 func (d *Dialer) Reattach(ctx context.Context, decls []Declaration) error {
-	d.mu.Lock()
-	if d.reattachWait != nil {
-		d.mu.Unlock()
-		return errors.New("link: reattach already in flight")
-	}
-	ch := make(chan AttachReply, 1)
-	d.reattachWait = ch
-	d.mu.Unlock()
+	id := newRequestID()
+	ch := d.pendingAttach.register(id)
 
-	raw, err := encodeControl(controlFrame{Kind: ctrlAttach, Attach: &AttachRequest{
+	raw, err := encodeControl(controlFrame{RequestID: id, Kind: ctrlAttach, Attach: &AttachRequest{
 		ComputeID: d.computeID, Declarations: decls,
 	}})
 	if err != nil {
-		d.clearReattachWait(ch)
+		d.pendingAttach.cancel(id)
 		return err
 	}
 	if err := d.lc.sendControl(raw); err != nil {
-		d.clearReattachWait(ch)
+		d.pendingAttach.cancel(id)
 		return err
 	}
 
@@ -378,13 +375,13 @@ func (d *Dialer) Reattach(ctx context.Context, decls []Declaration) error {
 		}
 		return nil
 	case <-ctx.Done():
-		d.clearReattachWait(ch)
+		d.pendingAttach.cancel(id)
 		return ctx.Err()
 	case <-d.done:
-		d.clearReattachWait(ch)
+		d.pendingAttach.cancel(id)
 		return errors.New("link: reattach: link closed")
 	case <-timeout.C:
-		d.clearReattachWait(ch)
+		d.pendingAttach.cancel(id)
 		return errors.New("link: reattach: timed out waiting for attach_reply")
 	}
 }
@@ -392,14 +389,6 @@ func (d *Dialer) Reattach(ctx context.Context, decls []Declaration) error {
 // clearReattachWait drops the pending-Reattach marker IF it still points at ch
 // (a concurrent onControl delivery may have already cleared and consumed it —
 // pointer-compare avoids clobbering a later, unrelated Reattach's wait).
-func (d *Dialer) clearReattachWait(ch chan AttachReply) {
-	d.mu.Lock()
-	if d.reattachWait == ch {
-		d.reattachWait = nil
-	}
-	d.mu.Unlock()
-}
-
 // OpenStream opens one actor's link stream, performs the native ipc handshake
 // (LeaseID = actor id), and returns the cell's full capability arms (CellArms:
 // Pen + Access/State + Schedule, all relaying over this one stream) plus a
@@ -734,23 +723,6 @@ func (d *Dialer) SendCancelRequest(id actor.ActorID, requestID message.ID) {
 	}()
 }
 
-// SetDespawnLocal installs the host→remote despawn hook (see Dialer.despawnLocal).
-// Call after Dial, before Start — it is read by the per-stream read loops.
-func (d *Dialer) SetDespawnLocal(fn func(actor.ActorID)) {
-	d.mu.Lock()
-	d.despawnLocal = fn
-	d.mu.Unlock()
-}
-
-// SetAllocHandler installs the storage host's AllocRequest handler (see
-// Dialer.allocHandler) — mirrors SetDespawnLocal's injection pattern. Call
-// after Dial, before Start.
-func (d *Dialer) SetAllocHandler(fn func(AllocRequest) AllocReply) {
-	d.mu.Lock()
-	d.allocHandler = fn
-	d.mu.Unlock()
-}
-
 // handleAllocRequest answers one inbound AllocRequest on the control plane's
 // read-loop goroutine (onControl runs synchronously per stream-0 frame, the
 // same posture handleAttach already has home-side) — a real Allocator mkdir/
@@ -850,12 +822,9 @@ func (d *Dialer) SendReclaimAck(ctx context.Context, tombstoneID string) (Reclai
 // narrowing addition — the caller's (platform.storageHostForwarder's) fresh
 // snapshot of coords with a currently-open local WriteHandle, forwarded
 // as-is so the home's liveness touch can bump exactly these rows and no
-// others (ReconcilePull.ActiveCoords's own doc). landedCoords is 期11 review
-// §2.5 #A's addition — the caller's fresh live/ directory listing, forwarded
-// so the home can flip matching pending reservations to phase='landed' BEFORE
-// its age-sweep (ReconcilePull.LandedCoords's own doc).
-func (d *Dialer) SendReconcilePull(ctx context.Context, activeCoords, landedCoords []string) (ReconcilePullReply, error) {
-	msg := ReconcilePull{RequestID: newRequestID(), ActiveCoords: activeCoords, LandedCoords: landedCoords}
+// others (ReconcilePull.ActiveCoords's own doc).
+func (d *Dialer) SendReconcilePull(ctx context.Context, activeCoords []string) (ReconcilePullReply, error) {
+	msg := ReconcilePull{RequestID: newRequestID(), ActiveCoords: activeCoords}
 	ch := d.pendingReconcile.register(msg.RequestID)
 	raw, err := encodeStorageControl(storageControlFrame{Kind: ctrlReconcilePull, ReconcilePull: &msg})
 	if err != nil {
@@ -867,15 +836,6 @@ func (d *Dialer) SendReconcilePull(ctx context.Context, activeCoords, landedCoor
 		return ReconcilePullReply{}, err
 	}
 	return d.pendingReconcile.wait(ctx, msg.RequestID, ch, d.done)
-}
-
-// SetLocalFileOpener installs the daemon-side same-machine byte-access
-// capability (mirrors SetAllocHandler's injection pattern). Call after Dial,
-// before Start.
-func (d *Dialer) SetLocalFileOpener(o LocalFileOpener) {
-	d.mu.Lock()
-	d.localFileOpener = o
-	d.mu.Unlock()
 }
 
 // handleLaneInbound answers one inbound lane data stream: read the Token,
@@ -938,10 +898,12 @@ func (d *Dialer) handleLaneInbound(conn io.ReadWriteCloser) {
 			return
 		}
 		if reply.ReservationID != "" {
-			// Best-effort: a failed relay here is recovered by the Scrubber's
-			// ReconcilePull (§1.7's third trigger) — the write already
-			// landed locally regardless.
-			_, _ = d.SendCommitted(context.Background(), reply.ReservationID)
+			// WARNING: transfer-lane completion is fire-and-forget. Multi-daemon
+			// recovery remains frozen until this path has a synchronous completion
+			// protocol; there is deliberately no hidden resend ledger.
+			if _, err := d.SendCommitted(context.Background(), reply.ReservationID); err != nil {
+				d.logger.Warn("link.transfer_committed_unconfirmed", "reservation_id", reply.ReservationID, "err", err)
+			}
 		}
 	default:
 		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "link: unknown lane mode " + string(reply.Mode)})
@@ -1070,13 +1032,9 @@ func (h *committingWriteHandle) Commit() error {
 	// home landing the resource row from this reservation.
 	reply, err := h.dialer.SendCommitted(context.Background(), h.reservationID)
 	if err != nil {
-		// 期11 review #D: a send failure (timeout / link down) is NOT success.
-		// The bytes DID land locally and the reservation stays phase=landed, so
-		// the Scrubber's resumeLandedReservations resend is the durable backstop
-		// that eventually lands the row (§1.7's third trigger). But the row is
-		// not visible YET — the actor must not be told the create succeeded.
-		// Surface the error rather than the pre-review bug's silent `nil`.
-		return fmt.Errorf("link: committed relay for reservation %q failed (bytes landed at %q, row reconciled on a later scrubber pass): %w", h.reservationID, h.coord, err)
+		// A send failure is not success: bytes landed locally, but no resource
+		// row is visible. The caller must retry with a new coordinate.
+		return fmt.Errorf("link: committed relay for reservation %q failed after bytes landed at %q: %w", h.reservationID, h.coord, err)
 	}
 	if reply.Reason != "" && !reply.Lost {
 		// 期11 review残余#2a: the transport round-trip succeeded but the home
@@ -1085,11 +1043,8 @@ func (h *committingWriteHandle) Commit() error {
 		// handleCommitted's own Reason-setting branches). The pre-fix code
 		// only checked err/Lost, so this reply.Reason WAS silently dropped
 		// and the caller was told nil (success) even though the row was
-		// never landed home-side. The bytes DID land locally (fsync+rename
-		// already happened above) and the Scrubber's resend backstop
-		// (§1.7's third trigger) is what actually reconciles the row later
-		// — but that is not THIS call's success to report.
-		return fmt.Errorf("link: committed relay for reservation %q rejected by home (bytes landed at %q, row reconciled on a later scrubber pass): %s", h.reservationID, h.coord, reply.Reason)
+		// never landed home-side. This call therefore reports failure.
+		return fmt.Errorf("link: committed relay for reservation %q rejected by home after bytes landed at %q: %s", h.reservationID, h.coord, reply.Reason)
 	}
 	if reply.Lost {
 		// 期11 S2's "非-land 终态回收": this reservation lost the
@@ -1103,10 +1058,10 @@ func (h *committingWriteHandle) Commit() error {
 		return fmt.Errorf("link: create lost the race for its resource id (reservation %q); another create landed it first", h.reservationID)
 	}
 	// reply.Found==true landed the row; reply.Found==false is a benign no-op
-	// (a concurrent scrubber resumeLandedReservations resend already landed it,
-	// or the reservation was superseded by a Delete). Deliberately NO reclaim on
+	// (a concurrent completion already landed it, or the reservation was
+	// superseded by a Delete). Deliberately NO reclaim on
 	// found=false: it cannot be distinguished from a legitimately-committed-by-
-	// resend row, so reclaiming here would risk deleting live committed bytes —
+	// an already-landed row, so reclaiming here would risk deleting live bytes —
 	// data loss strictly worse than a rare leftover empty coord.
 	return nil
 }

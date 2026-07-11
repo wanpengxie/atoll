@@ -20,7 +20,7 @@ func TestRebindableArms_FlapContinuity(t *testing.T) {
 
 	const toolID = actor.ActorID("tool:flap")
 	d1, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial 1: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestRebindableArms_FlapContinuity(t *testing.T) {
 	// Rebind swaps the membrane onto it — h.Install is NOT called again, so the
 	// actorrt embodiment is the exact same one that served the pre-flap write.
 	d2, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, nil)
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial 2: %v", err)
 	}
