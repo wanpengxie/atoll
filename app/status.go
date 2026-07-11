@@ -42,26 +42,34 @@ func (a *App) handleActorStatus(c *gin.Context) {
 		return
 	}
 
-	snapshot, err := home.View().Snapshot(c.Request.Context(), actor.ActorID(actorID))
+	view := home.View()
+	snapshot, err := view.Snapshot(c.Request.Context(), actor.ActorID(actorID))
+	testimony, known := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
+	projectActorStatus(c, err, snapshot.Member, known, testimony.Val, testimony.ReceivedAt, view.TestimonyAgeMs)
+}
+
+func projectActorStatus(c *gin.Context, err error, member, known bool, val []byte, receivedAt int64, ageMs func(int64) int64) {
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "presence unavailable"})
 		return
 	}
-	if !snapshot.Member {
+	if !member {
 		c.JSON(http.StatusNotFound, gin.H{"error": "actor not found"})
 		return
 	}
-	testimony, known := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
 	if !known {
 		c.JSON(http.StatusOK, gin.H{"known": false})
 		return
 	}
-	p, ok := introspect.ParseDevicePresence(testimony.Val)
+	p, ok := introspect.ParseDevicePresence(val)
 	if !ok {
 		// A folded value we cannot decode is treated as unknown (the convention is
 		// the adapter+app's; a malformed blob is honestly "we don't know").
 		c.JSON(http.StatusOK, gin.H{"known": false})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"known": true, "online": p.Online})
+	c.JSON(http.StatusOK, gin.H{
+		"known": true, "online": p.Online,
+		"age_ms": ageMs(receivedAt),
+	})
 }

@@ -383,9 +383,9 @@ func Open(cfg HomeConfig) (*Home, error) {
 	deliver := deliveryHandle(channel.Deliverer(), cfg.ChannelID, logger)
 	delivery := tap.NewPump(signal, cs.Query, from, deliver, logger)
 
-	// 8. Register the device-presence fold as a global down watcher (so an actor's
-	//     death edge decays its L3 to unknown — the link-down cascade). Per-actor
-	//     obs registration happens at attach (Acceptor below).
+	// 8. Register the device-presence fold once for the runtime population. Every
+	//    actor's obs wire naturally feeds this single fanout subscription; attach
+	//    churn therefore needs no per-actor watcher bookkeeping.
 	channel.Cells().WatchDown(presenceFold)
 	channel.Cells().WatchObsAll(presenceFold)
 
@@ -552,6 +552,12 @@ func (h *Home) sweepPresence(ctx context.Context) {
 		h.presenceSwept.Add(int64(removed))
 		h.logger.Debug("platform.presence.swept", "rows", removed)
 	}
+}
+
+// PresenceSweptCount reports how many testimony rows the reconciliation
+// backstop has cleared over this Home's lifetime.
+func (h *Home) PresenceSweptCount() int64 {
+	return h.presenceSwept.Load()
 }
 
 // logReviveAttached logs, throttled per author (reviveLogThrottle), that an
@@ -769,6 +775,7 @@ func (h *Home) View() View {
 		links:    h.links,
 		presence: presence.NewView(h.presenceFold, h.channel.Cells(), h.cs.Registry),
 		rt:       h.channel.Cells(),
+		nowMs:    h.nowMs,
 	}
 }
 
@@ -1033,6 +1040,7 @@ type View struct {
 	links    *link.Acceptor
 	presence presence.View
 	rt       *actorrt.Runtime
+	nowMs    func() int64
 }
 
 // Snapshot composes membership, embodiment and testimony at read time. The
@@ -1041,10 +1049,20 @@ func (v View) Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot
 	return v.presence.Snapshot(ctx, id)
 }
 
+// TestimonyAgeMs projects a fold receipt timestamp through the same clock used
+// to stamp it. Clock skew is represented as age zero, never a negative age.
+func (v View) TestimonyAgeMs(receivedAt int64) int64 {
+	age := v.nowMs() - receivedAt
+	if age < 0 {
+		return 0
+	}
+	return age
+}
+
 // Stat reads the authoritative embodiment presence for id: live=true means id
 // has a live embodiment on THIS home right now (cell or attached port — the
 // `kill -0` read, actorrt.Runtime.Stat, transport-neutral). This is NOT the
-// device/L3 advisory axis (DevicePresence above): that is a self-reported,
+// device/L3 advisory axis (Snapshot above): that is a self-reported,
 // three-state, decays-to-unknown push signal from the actor's own client;
 // this is the substrate's own authoritative self-read of embodiment, never
 // asked of the actor, never advisory. The two axes answer different

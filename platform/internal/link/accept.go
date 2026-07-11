@@ -725,7 +725,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 	// The skip condition is narrower than "declarations==nil" alone: a
 	// caller MAY legitimately Reattach(ctx, nil) on an ALREADY-established
 	// link to explicitly shrink its declared set to zero (this package's own
-	// TestReattach_HostReconcile_UnwatchesObsOnDereg does exactly that) — nil
+	// TestReattach_HostReconcile_PopulationObsStaysSingle does exactly that) — nil
 	// is ambiguous by itself; "is this the very FIRST attach frame this
 	// specific link has ever sent" is the real bootstrap signal (isFirstAttachOnLink,
 	// evaluated by the caller BEFORE boundID is set). Only nil-AND-first is

@@ -618,9 +618,8 @@ func (h *Home) clearPresence(id actor.ActorID) {
 	h.presenceFold.Forget(id)
 }
 
-// feedDevicePresence pushes an online/offline edge into the home
-// device-presence fold through its ObsWatcher entry — the door is this
-// subject's L3 producer.
+// feedDevicePresence pushes an online/offline edge directly through Fold.PutDoor.
+// The door is this subject's L3 producer and deliberately bypasses broker fanout.
 func (h *Home) feedDevicePresence(id actor.ActorID, online bool) {
 	h.presenceFold.PutDoor(id,
 		actorrt.ObsKind(introspect.ObsDevicePresence),
