@@ -71,7 +71,7 @@ type TimerStore interface {
 	// after fire is a no-op — fired truth is not retractable).
 	Delete(ctx context.Context, id TimerID) (existed bool, err error)
 	// Due returns rows with FireAt <= now, fairly partitioned by author.
-	Due(ctx context.Context, now int64, limit int) ([]TimerRow, error)
+	Due(ctx context.Context, now int64) ([]TimerRow, error)
 	MoveToDead(ctx context.Context, id TimerID, class DeathClass, reason, detail string, diedAt int64) (moved bool, evicted int, err error)
 	// NextFireAt returns the earliest pending FireAt (ok=false when empty) —
 	// the poll/wake loop's sleep-until target.

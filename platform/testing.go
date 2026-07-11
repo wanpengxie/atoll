@@ -9,7 +9,7 @@ import (
 )
 
 // SpawnForTesting is a black-box fixture seam. It still uses production Admit
-// and therefore cannot choose an actor id or reactivate a removed identity.
+// and therefore cannot choose an actor id or reuse a removed identity.
 func SpawnForTesting(h *Home, kind actor.Kind, principal string, def ActorFactory) (actor.ActorID, error) {
 	id, err := h.Admit(context.Background(), kind, principal)
 	if err != nil {

@@ -60,8 +60,8 @@ func TestView_ListActors_IncludesSystem(t *testing.T) {
 func TestAdmit_CellLessMember(t *testing.T) {
 	h := openTestHome(t)
 	ctx := context.Background()
-	id := actor.ActorID("user:alice")
-	if err := platform.AdmitExactForTest(h, id, actor.KindHuman); err != nil {
+	id, err := platform.AdmitForTest(h, "alice", actor.KindHuman)
+	if err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
 	actors, err := h.View().ListActors(ctx)

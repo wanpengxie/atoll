@@ -28,29 +28,29 @@ func TestPublicSetArmDayOneMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	seedMember(t, cs, "alice")
-	seedMember(t, cs, "bob")
-	seedMember(t, cs, "carol")
-	seedMember(t, cs, "dave")
+	aliceID := seedMember(t, cs, "alice")
+	bobID := seedMember(t, cs, "bob")
+	carolID := seedMember(t, cs, "carol")
+	daveID := seedMember(t, cs, "dave")
 
 	// alice creates r1 — day-1 reachable birth: creator's full-rights grant is
 	// what every day-1 set/revoke below rides.
-	alice := m.Mint("alice")
+	alice := m.Mint(aliceID)
 	out, err := alice.Create(context.Background(), "r1", resourcespec.CreateSpec{Kind: resourcespec.KindKV}, []byte("v"))
 	mustAccept(t, out, err)
 
 	t.Run("day-1 reachable grant: {read,write}", func(t *testing.T) {
-		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "bob", Ops: []access.Operation{access.OpRead, access.OpWrite}}
+		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: bobID, Ops: []access.Operation{access.OpRead, access.OpWrite}}
 		out, err := alice.Invoke(context.Background(), access.OpSet, "r1", nil, g)
 		mustAccept(t, out, err)
 	})
 
 	t.Run("revoke", func(t *testing.T) {
-		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "bob", Ops: nil}
+		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: bobID, Ops: nil}
 		out, err := alice.Invoke(context.Background(), access.OpSet, "r1", nil, g)
 		mustAccept(t, out, err)
 
-		hasRead, err := cs.Resources.ActorAllows(context.Background(), "bob", "r1", access.OpRead)
+		hasRead, err := cs.Resources.ActorAllows(context.Background(), bobID, "r1", access.OpRead)
 		if err != nil {
 			t.Fatalf("ActorAllows: %v", err)
 		}
@@ -65,10 +65,10 @@ func TestPublicSetArmDayOneMatrix(t *testing.T) {
 		// what the resource's grant table can independently hold), but NOT
 		// read. She can invoke set (she holds set-right) but the escalation
 		// check must deny granting an op she does not herself hold.
-		seedActorGrant(t, cs, "r1", "carol", access.OpWrite, access.OpSet)
-		carolH := m.Mint("carol")
+		seedActorGrant(t, cs, "r1", carolID, access.OpWrite, access.OpSet)
+		carolH := m.Mint(carolID)
 
-		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "dave", Ops: []access.Operation{access.OpRead}}
+		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: daveID, Ops: []access.Operation{access.OpRead}}
 		out, err := carolH.Invoke(context.Background(), access.OpSet, "r1", nil, g)
 		mustVerdict(t, out, err, access.AccessDenied)
 	})

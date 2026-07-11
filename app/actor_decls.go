@@ -281,8 +281,7 @@ func (a *App) handleRestartDecl(c *gin.Context) {
 	type target struct{ channelID, instanceID string }
 	var targets []target
 	rows, qerr := a.db.QueryContext(ctx,
-		`SELECT channel_id, instance_id FROM channel_actors WHERE principal = ? AND placement = ?`,
-		declID, placementServer)
+		`SELECT channel_id, instance_id FROM channel_actors WHERE principal = ?`, declID)
 	if qerr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return

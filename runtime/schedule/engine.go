@@ -441,7 +441,7 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 		}
 	}
 
-	rows, err := e.deps.Store.Due(ctx, now, 0)
+	rows, err := e.deps.Store.Due(ctx, now)
 	if err != nil {
 		e.deps.Logger.Error("schedule.due_query_failed", "err", err)
 		return progress
@@ -464,8 +464,8 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 				// Deterministic — this row can NEVER fire (its author is
 				// permanently unrevivable). Dispose it, same arm
 				// as a FireRejected poison row: left in place it would
-				// retry hot forever and, at ≥dueBatchLimit oldest rows,
-				// starve every later-due legitimate row behind it.
+				// retry hot forever and repeatedly consume this author's
+				// per-author due window ahead of later legitimate rows.
 				reason, detail := rejectionDetails(err)
 				if _, evicted, derr := e.deps.Store.MoveToDead(ctx, row.ID, timerspec.DeathReviveRejected, reason, detail, now); derr != nil {
 					e.deps.Logger.Error("schedule.poison_row_delete_failed", "timer_id", string(row.ID), "err", derr)

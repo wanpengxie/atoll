@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -53,18 +54,17 @@ func (penCell) Receive(context.Context, *message.Envelope) error { return nil }
 // spawnWithPen admits id as an embodiment-bearing cell and returns the Pen welded to
 // (id, channelID). This is the only legitimate way a platform_test obtains a pen:
 // through the same Spawn(factory) admission an agent/tool/human goes through.
-func spawnWithPen(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor.Kind) harness.Pen {
+func spawnWithPen(t *testing.T, ch *platform.Home, id *actor.ActorID, kind actor.Kind) harness.Pen {
 	t.Helper()
-	if err := platform.AdmitExactForTest(ch, id, kind); err != nil {
-		t.Fatalf("admit %s: %v", id, err)
-	}
 	var pen harness.Pen
-	if err := platform.SpawnForTest(ch, id, kind, platform.ActorFactory{Legacy: func(p harness.Pen) actorrt.Actor {
+	minted, err := platform.SpawnForTest(ch, *id, kind, platform.ActorFactory{Legacy: func(p harness.Pen) actorrt.Actor {
 		pen = p
 		return penCell{pen: p}
-	}}); err != nil {
-		t.Fatalf("spawn pen actor %s: %v", id, err)
+	}})
+	if err != nil {
+		t.Fatalf("spawn pen actor %s: %v", *id, err)
 	}
+	*id = minted
 	return pen
 }
 
@@ -90,11 +90,13 @@ func newClosureHome(t *testing.T) *platform.Home {
 // registerActor seeds a membership row (Admit — the pure-membership primitive) so
 // the harness accepts envelopes from / addressed to this actor without embodying a
 // cell.
-func registerActor(t *testing.T, ch *platform.Home, id actor.ActorID, kind actor.Kind) {
+func registerActor(t *testing.T, ch *platform.Home, id *actor.ActorID, kind actor.Kind) {
 	t.Helper()
-	if err := platform.AdmitExactForTest(ch, id, kind); err != nil {
-		t.Fatalf("register actor %s: %v", id, err)
+	minted, err := platform.AdmitForTest(ch, strings.ReplaceAll(string(*id), ":", "-"), kind)
+	if err != nil {
+		t.Fatalf("register actor %s: %v", *id, err)
 	}
+	*id = minted
 }
 
 // writeRequest writes a kind=request envelope through the caller's welded pen (=
@@ -174,14 +176,15 @@ func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T
 
 	// 1. Admit the caller as a pen-bearing cell (its welded pen writes the request)
 	//    and register the worker in membership.
-	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
-	registerActor(t, ch, workerID, actor.KindAgent)
+	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
+	registerActor(t, ch, &workerID, actor.KindAgent)
 
 	// 2. Spawn the panic actor cell (membership already seeded above; Spawn
-	//    reactivates + places the cell).
-	if err := platform.SpawnForTest(ch, workerID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
+	//    restores + places the cell).
+	workerID, err := platform.SpawnForTest(ch, workerID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
 		return panicOnReceive{}
-	}}); err != nil {
+	}})
+	if err != nil {
 		t.Fatalf("spawn worker cell: %v", err)
 	}
 
@@ -249,10 +252,11 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 	workerID := actor.ActorID("agent:silent")
 
 	// 1. The silent receiver: live, admitted, never answers.
-	registerActor(t, ch, workerID, actor.KindAgent)
-	if err := platform.SpawnForTest(ch, workerID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
+	registerActor(t, ch, &workerID, actor.KindAgent)
+	workerID, err := platform.SpawnForTest(ch, workerID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
 		return silentActor{}
-	}}); err != nil {
+	}})
+	if err != nil {
 		t.Fatalf("spawn silent cell: %v", err)
 	}
 
@@ -260,9 +264,6 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 	//    Sys.Call on a trigger event. Its callLedger arms the 300ms author#2
 	//    timer (TimeoutResolver hook) and fires the terminal through the
 	//    cell's own welded pen — caller self-close by construction.
-	if err := platform.AdmitExactForTest(ch, callerID, actor.KindAgent); err != nil {
-		t.Fatalf("admit caller: %v", err)
-	}
 	callerFactory := platform.CapsFactory(func(caps actorcaps.Caps) actorrt.Actor {
 		hooks := actorbase.Hooks{TimeoutResolver: func(actor.ActorID, string) (time.Duration, bool) {
 			return 300 * time.Millisecond, true
@@ -286,12 +287,14 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 			},
 		})
 	})
-	if err := platform.SpawnForTest(ch, callerID, actor.KindAgent, callerFactory); err != nil {
+	callerID, err = platform.SpawnForTest(ch, callerID, actor.KindAgent, callerFactory)
+	if err != nil {
 		t.Fatalf("spawn caller cell: %v", err)
 	}
 
 	// 3. Trigger the Call with an event from a third pen.
-	triggerPen := spawnWithPen(t, ch, "user:trigger", actor.KindHuman)
+	triggerID := actor.ActorID("user:trigger")
+	triggerPen := spawnWithPen(t, ch, &triggerID, actor.KindHuman)
 	trigEnv, err := behavior.BuildEvent(time.Now, behavior.EventSpec{
 		Type: "closure.go", Audience: message.Audience{callerID},
 	})

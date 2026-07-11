@@ -11,6 +11,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"path/filepath"
 	"testing"
 
@@ -79,7 +80,7 @@ func TestTimer_InsertAndDue(t *testing.T) {
 
 	// now=2000 must return t2 (1000) and t3 (2000), ordered by fire_at, and
 	// exclude t1 (3000, not yet due).
-	due, err := f.timers.Due(ctx, 2000, 10)
+	due, err := f.timers.Due(ctx, 2000)
 	if err != nil {
 		t.Fatalf("Due: %v", err)
 	}
@@ -90,17 +91,8 @@ func TestTimer_InsertAndDue(t *testing.T) {
 		t.Errorf("Due(2000) order=%v want [t2 t3]", []timerspec.TimerID{due[0].ID, due[1].ID})
 	}
 
-	// limit caps the batch.
-	due, err = f.timers.Due(ctx, 2000, 1)
-	if err != nil {
-		t.Fatalf("Due limit=1: %v", err)
-	}
-	if len(due) != 1 || due[0].ID != "t2" {
-		t.Fatalf("Due(2000, limit=1)=%+v want single t2", due)
-	}
-
 	// A round trip preserves the row's fields (fetch t1 by pushing now past it).
-	due, err = f.timers.Due(ctx, 3000, 10)
+	due, err = f.timers.Due(ctx, 3000)
 	if err != nil {
 		t.Fatalf("Due(3000): %v", err)
 	}
@@ -113,6 +105,29 @@ func TestTimer_InsertAndDue(t *testing.T) {
 	if got.AuthorID != "actor:a" || got.Type != "wake" || string(got.Payload) != `{"n":1}` ||
 		got.CorrelationID != "corr-1" || got.CreatedAt != 100 || got.FireAt != 3000 {
 		t.Errorf("t1 round-trip=%+v", got)
+	}
+}
+
+func TestTimer_DueIsFairAcrossAuthors(t *testing.T) {
+	ctx := context.Background()
+	f := openTimersFixture(t)
+	for i := 0; i < duePerAuthor+5; i++ {
+		mustInsertTimer(t, f.timers, timerspec.TimerRow{
+			ID: timerspec.TimerID(fmt.Sprintf("a-%03d", i)), AuthorID: "actor:a",
+			FireAt: int64(i), Type: "wake", CreatedAt: 1,
+		})
+	}
+	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "b-only", AuthorID: "actor:b", FireAt: 999, Type: "wake", CreatedAt: 1})
+
+	due, err := f.timers.Due(ctx, 1000)
+	if err != nil {
+		t.Fatalf("Due: %v", err)
+	}
+	if len(due) != duePerAuthor+1 {
+		t.Fatalf("Due len=%d want %d", len(due), duePerAuthor+1)
+	}
+	if due[len(due)-1].ID != "b-only" {
+		t.Fatalf("other author's due timer was globally truncated: tail=%q", due[len(due)-1].ID)
 	}
 }
 
@@ -129,7 +144,7 @@ func TestTimer_Delete(t *testing.T) {
 		t.Fatalf("Delete existing: existed=%v err=%v", existed, err)
 	}
 	// Row is gone (confirmed via Due with a far-future now).
-	due, err := f.timers.Due(ctx, 999999, 10)
+	due, err := f.timers.Due(ctx, 999999)
 	if err != nil || len(due) != 0 {
 		t.Fatalf("Due after delete=%+v err=%v want empty", due, err)
 	}
@@ -185,7 +200,7 @@ func TestTimer_CancelOwned(t *testing.T) {
 	if err != nil || existed {
 		t.Fatalf("CancelOwned foreign author: existed=%v err=%v want false/nil", existed, err)
 	}
-	due, _ := f.timers.Due(ctx, 999999, 10)
+	due, _ := f.timers.Due(ctx, 999999)
 	if len(due) != 1 {
 		t.Fatalf("row must survive a foreign CancelOwned, got %+v", due)
 	}
@@ -195,7 +210,7 @@ func TestTimer_CancelOwned(t *testing.T) {
 	if err != nil || !existed {
 		t.Fatalf("CancelOwned owner: existed=%v err=%v want true/nil", existed, err)
 	}
-	due, _ = f.timers.Due(ctx, 999999, 10)
+	due, _ = f.timers.Due(ctx, 999999)
 	if len(due) != 0 {
 		t.Fatalf("row must be gone after owner CancelOwned, got %+v", due)
 	}
@@ -231,7 +246,7 @@ func TestTimer_CascadeClearedOnDeregister(t *testing.T) {
 		t.Fatalf("Deregister: %v", err)
 	}
 
-	due, err := f.timers.Due(ctx, 999999, 10)
+	due, err := f.timers.Due(ctx, 999999)
 	if err != nil {
 		t.Fatalf("Due: %v", err)
 	}
@@ -255,14 +270,14 @@ func TestTimer_NoCascadeOnNoOpDeregister(t *testing.T) {
 	if err := f.reg.Deregister(ctx, "actor:ghost", 1); err != nil {
 		t.Fatalf("Deregister ghost must be no-op: %v", err)
 	}
-	if due, _ := f.timers.Due(ctx, 999999, 10); len(due) != 1 {
+	if due, _ := f.timers.Due(ctx, 999999); len(due) != 1 {
 		t.Errorf("no-op deregister must not clear another actor's timers, got %+v", due)
 	}
 
 	if err := f.reg.Deregister(ctx, "actor:a", 2); err != nil {
 		t.Fatalf("Deregister a: %v", err)
 	}
-	if due, _ := f.timers.Due(ctx, 999999, 10); len(due) != 0 {
+	if due, _ := f.timers.Due(ctx, 999999); len(due) != 0 {
 		t.Errorf("real deregister must clear timers, got %+v", due)
 	}
 	// A repeat is a no-op and must not error.
@@ -277,7 +292,7 @@ func TestTimer_CascadeClearedOnMemberRemove(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)
 
-	if err := f.reg.Insert(ctx, storespec.Record{ID: "actor:a", Kind: actor.KindTool, CreatedAt: 100}); err != nil {
+	if err := f.reg.insertFixedID(ctx, storespec.Record{ID: "actor:a", Kind: actor.KindTool, CreatedAt: 100}); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
@@ -286,7 +301,7 @@ func TestTimer_CascadeClearedOnMemberRemove(t *testing.T) {
 		[]storespec.MemberActorRemove{{ID: "actor:a", At: 200}}); err != nil {
 		t.Fatalf("remove member: %v", err)
 	}
-	if due, _ := f.timers.Due(ctx, 999999, 10); len(due) != 0 {
+	if due, _ := f.timers.Due(ctx, 999999); len(due) != 0 {
 		t.Errorf("member state must be cascade-cleared on member remove, got %+v", due)
 	}
 
@@ -320,7 +335,7 @@ func TestMemberRemove_ExpectedHostGuard_MigrationWindowNoOp(t *testing.T) {
 
 	const id = actor.ActorID("tool:migrant")
 	// Registered on daemon A, with actor-scoped state and an identity timer.
-	if err := reg.Insert(ctx, storespec.Record{ID: id, Kind: actor.KindTool, Host: "daemon-a", CreatedAt: 100}); err != nil {
+	if err := reg.insertFixedID(ctx, storespec.Record{ID: id, Kind: actor.KindTool, Host: "daemon-a", CreatedAt: 100}); err != nil {
 		t.Fatalf("add on daemon-a: %v", err)
 	}
 	if err := state.Create(ctx, id, "cursor", []byte("v1")); err != nil {
@@ -349,7 +364,7 @@ func TestMemberRemove_ExpectedHostGuard_MigrationWindowNoOp(t *testing.T) {
 	if _, exists, _ := state.Read(ctx, id, "cursor"); !exists {
 		t.Error("actor state was cascade-cleared by a no-op guarded remove")
 	}
-	if due, _ := timers.Due(ctx, 999999, 10); len(due) != 1 || due[0].ID != "t1" {
+	if due, _ := timers.Due(ctx, 999999); len(due) != 1 || due[0].ID != "t1" {
 		t.Errorf("identity timers were cascade-cleared by a no-op guarded remove: %+v", due)
 	}
 
@@ -369,7 +384,7 @@ func TestMemberRemove_ExpectedHostGuard_MigrationWindowNoOp(t *testing.T) {
 	if _, exists, _ := state.Read(ctx, id, "cursor"); exists {
 		t.Error("matching guarded remove did not cascade-clear state")
 	}
-	if due, _ := timers.Due(ctx, 999999, 10); len(due) != 0 {
+	if due, _ := timers.Due(ctx, 999999); len(due) != 0 {
 		t.Errorf("matching guarded remove did not cascade-clear timers: %+v", due)
 	}
 }

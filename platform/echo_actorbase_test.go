@@ -1,7 +1,7 @@
 package platform_test
 
 // actorbase-spec-v1.md §4 S5a: echo is the "concept budget" consumer — this
-// is the DoD's real out-generation path (Home.Spawn, the cell host) proving
+// is the DoD's real out-generation path (Home.SpawnIfAbsent, the cell host) proving
 // a bare actorbase.Proc closes a full call->reply loop through the SAME
 // admission every other actor goes through, not a hand-rolled harness.
 
@@ -32,7 +32,7 @@ func newEchoTestHome(t *testing.T) *platform.Home {
 }
 
 // TestEcho_CallReplyClosesThroughRealCellHost spawns echo.Def() over the
-// production Home.Spawn path and drives one echo.say request end to end:
+// production Home.SpawnIfAbsent path and drives one echo.say request end to end:
 // pen write -> harness -> cell delivery -> actorbase engine -> echo's Proc ->
 // sys.Reply -> pen write of the terminal.
 func TestEcho_CallReplyClosesThroughRealCellHost(t *testing.T) {
@@ -41,11 +41,9 @@ func TestEcho_CallReplyClosesThroughRealCellHost(t *testing.T) {
 	callerID := actor.ActorID("user:caller")
 	echoID := echo.DefaultActorID
 
-	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
-	if err := platform.AdmitExactForTest(ch, echoID, actor.KindTool); err != nil {
-		t.Fatalf("admit echo actor: %v", err)
-	}
-	if err := platform.SpawnForTest(ch, echoID, actor.KindTool, platform.ActorFactory{Proc: echo.Def()}); err != nil {
+	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
+	echoID, err := platform.SpawnForTest(ch, echoID, actor.KindTool, platform.ActorFactory{Proc: echo.Def()})
+	if err != nil {
 		t.Fatalf("spawn echo actor: %v", err)
 	}
 
@@ -77,11 +75,9 @@ func TestEcho_UnknownTypeFails(t *testing.T) {
 	callerID := actor.ActorID("user:caller2")
 	echoID := echo.DefaultActorID
 
-	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
-	if err := platform.AdmitExactForTest(ch, echoID, actor.KindTool); err != nil {
-		t.Fatalf("admit echo actor: %v", err)
-	}
-	if err := platform.SpawnForTest(ch, echoID, actor.KindTool, platform.ActorFactory{Proc: echo.Def()}); err != nil {
+	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
+	echoID, err := platform.SpawnForTest(ch, echoID, actor.KindTool, platform.ActorFactory{Proc: echo.Def()})
+	if err != nil {
 		t.Fatalf("spawn echo actor: %v", err)
 	}
 

@@ -13,7 +13,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // kvSpec is the day-1 CreateSpec every integration test in this file creates
@@ -33,16 +32,16 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	cs := openAccessChannel(t)
 
 	// A, B, C are channel members; X is not (never registered); E joins late.
-	const (
+	var (
 		A = actor.ActorID("A")
 		B = actor.ActorID("B")
 		C = actor.ActorID("C")
 		E = actor.ActorID("E")
 		X = actor.ActorID("X")
 	)
-	seedMember(t, cs, A)
-	seedMember(t, cs, B)
-	seedMember(t, cs, C)
+	A = seedMember(t, cs, A)
+	B = seedMember(t, cs, B)
+	C = seedMember(t, cs, C)
 
 	hA := cs.Access.Mint(A)
 	hB := cs.Access.Mint(B)
@@ -144,7 +143,7 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
 	expectReason(t, "C read after deregister (exit loses access)", out, err, access.AccessDenied)
 
-	seedMember(t, cs, E)
+	E = seedMember(t, cs, E)
 	hE := cs.Access.Mint(E)
 	out, err = hE.Invoke(ctx, access.OpRead, rid, nil, nil)
 	expectAccepted(t, "E read after joining (late join gains access)", out, err)
@@ -165,12 +164,13 @@ func openAccessChannel(t *testing.T) *ChannelStores {
 	return cs
 }
 
-func seedMember(t *testing.T, cs *ChannelStores, id actor.ActorID) {
+func seedMember(t *testing.T, cs *ChannelStores, id actor.ActorID) actor.ActorID {
 	t.Helper()
-	if err := cs.Membership.Insert(context.Background(),
-		storespec.Record{ID: id, Kind: actor.KindAgent, CreatedAt: 1}); err != nil {
+	minted, err := cs.Membership.Admit(context.Background(), actor.KindAgent, string(id), 1)
+	if err != nil {
 		t.Fatalf("seed member %s: %v", id, err)
 	}
+	return minted
 }
 
 func actorGrant(id actor.ActorID, ops ...access.Operation) *access.Grant {

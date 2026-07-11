@@ -3,6 +3,7 @@ package link
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -315,6 +316,11 @@ func (ls *linkSession) readControl(conn net.Conn) {
 	dec := json.NewDecoder(conn)
 	queue := make(chan []byte, controlQueueDepth)
 	go func() {
+		defer func() {
+			if v := recover(); v != nil {
+				ls.kill("control_worker_panic", fmt.Errorf("panic: %v", v))
+			}
+		}()
 		for raw := range queue {
 			if ls.onControl != nil {
 				ls.onControl(raw)

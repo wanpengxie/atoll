@@ -87,7 +87,6 @@ type stubMembership struct {
 	adds []storespec.MemberActorAdd
 }
 
-func (s *stubMembership) Insert(context.Context, storespec.Record) error         { return nil }
 func (s *stubMembership) Deregister(context.Context, actor.ActorID, int64) error { return nil }
 func (s *stubMembership) Admit(context.Context, actor.Kind, string, int64) (actor.ActorID, error) {
 	return "", nil
@@ -306,7 +305,7 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	h.Install(toolID, &echoCell{w: arms.Pen}, nil)
 	d.Start()
 
-	// Membership registered the declared actor (register/reactivate semantics).
+	// Membership contains the declared active actor.
 	if adds := r.membership.getAdds(); len(adds) != 1 || adds[0].ID != toolID {
 		t.Fatalf("membership adds = %+v, want one %s", adds, toolID)
 	}

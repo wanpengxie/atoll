@@ -264,7 +264,7 @@ func TestState_CascadeClearedOnMemberRemove(t *testing.T) {
 	f := openStateFixture(t)
 
 	// Add the member, give it state, then remove it via ApplyMemberTransitions.
-	if err := f.reg.Insert(ctx, storespec.Record{ID: "actor:a", Kind: actor.KindTool, CreatedAt: 100}); err != nil {
+	if err := f.reg.insertFixedID(ctx, storespec.Record{ID: "actor:a", Kind: actor.KindTool, CreatedAt: 100}); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
 	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
@@ -323,7 +323,7 @@ func TestState_ChannelScopedResourcesSurviveDeregister(t *testing.T) {
 
 func mustInsertActor(t *testing.T, reg *actorRegistry, id actor.ActorID) {
 	t.Helper()
-	if err := reg.Insert(context.Background(), storespec.Record{ID: id, Kind: actor.KindTool, CreatedAt: 1}); err != nil {
+	if err := reg.insertFixedID(context.Background(), storespec.Record{ID: id, Kind: actor.KindTool, CreatedAt: 1}); err != nil {
 		t.Fatalf("Insert %q: %v", id, err)
 	}
 }

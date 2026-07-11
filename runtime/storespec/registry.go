@@ -36,7 +36,7 @@ func (r Record) IsActive() bool { return r.DeregisteredAt == 0 }
 
 // Registry is the channel-local actor membership READ contract —
 // deliberately SEGREGATED from the membership-write surface so a read-only
-// consumer never receives Insert/Deregister.
+// consumer never receives membership mutation methods.
 // Membership mutation lives on MembershipWriter / MembershipControlPlane (a
 // control-plane write that is NOT a query). Derived from the reader's
 // role, not from any one consumer. Concrete sqlite backend lives in
@@ -51,14 +51,12 @@ type PrincipalRegistry interface {
 	LookupActivePrincipal(ctx context.Context, kind actor.Kind, principal string) (Record, bool, error)
 }
 
-// MembershipWriter is the single-actor membership-write surface (Insert /
-// Deregister). It is SEGREGATED from the read-only Registry: Insert seeds a
-// new membership row and Deregister soft-removes one. These are
+// MembershipWriter is the single-actor membership-write surface. It is
+// SEGREGATED from the read-only Registry: Deregister soft-removes one. These are
 // control-plane writes, not queries, so a read-only caller cannot reach them.
 // The log-emitting batch transition lives on MembershipControlPlane; this is
-// the imperative single-actor seed/teardown path. Concrete impl in
+// the imperative single-actor teardown path. Concrete impl in
 // runtime/store (actorRegistry).
 type MembershipWriter interface {
-	Insert(ctx context.Context, rec Record) error
 	Deregister(ctx context.Context, id actor.ActorID, at int64) error
 }

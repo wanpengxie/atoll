@@ -160,7 +160,7 @@ func (f *cellCancelForwarder) cancellerFor(id actor.ActorID) func(target actor.A
 }
 
 // ActorDecl declares one actor the daemon will host. Factory is the ActorFactory
-// (def) both admission paths share (Home.Spawn cell-side and RunCompute
+// (def) both admission paths share (Home.SpawnIfAbsent cell-side and RunCompute
 // daemon-side). On the daemon the Pen + plane-2 (Access/State) + time-axis
 // (Schedule) caps are all wired as relay-only proxies over the actor's port
 // stream; only Spawn stays nil (the fork/despawn arm does not cross the wire
@@ -783,7 +783,7 @@ func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer
 	// Register the obs forwarder BEFORE Spawn so no early obs edge is missed
 	// (same discipline as WatchDown).
 	r.rt.WatchObs(id, r.obsFwd)
-	// Two-phase Spawn, port-path mirror of Home.Spawn (§10.13 推导7①/G12): the
+	// Two-phase construction, mirroring the home activation path (§10.13 推导7①/G12): the
 	// build closure runs inside Spawn, BEFORE go-live, so link.NewLiveArms welds
 	// the cell's caps to THIS incarnation and fences every call until it goes
 	// live — a factory that writes during construction is refused here exactly

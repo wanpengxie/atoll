@@ -908,7 +908,7 @@ func (h *Home) KickDaemon(computeID string) int {
 // buildCaps assembles the caps bundle — the five-capability bundle welded to (id,
 // inc). Handing out the handle and wrapping the live membrane happen in the same
 // step (invariant: no bare handle escapes). It is the SINGLE
-// caps assembler, shared by admission (Home.Spawn) and by fork (spawnHandle.Fork
+// caps assembler, shared by activation and by fork (spawnHandle.Fork
 // holds this method value as its capsAssembler and re-runs it against each child's
 // incarnation) — so a fork child is born with the IDENTICAL membrane set as a
 // top-level admission (recursive assembly), never a raw un-membraned closure.
@@ -925,7 +925,7 @@ func (h *Home) KickDaemon(computeID string) int {
 // admission (the system cell does not pass through buildCaps).
 //
 // buildCaps is also the obs-registration convergence point (G8): every local
-// birth path — Home.Spawn, the reconcile ring's eager 补臂, homeReviver, and
+// birth path — the reconcile ring's eager 补臂, homeReviver, and
 // spawnHandle.Fork — calls this method to weld a child's caps, so registering
 // h.watchObs(id) here once covers all four without a separate call at each
 // birth site (and its dedup makes a build a losing SpawnIfAbsent/Fork CAS

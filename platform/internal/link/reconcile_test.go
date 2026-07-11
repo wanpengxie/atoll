@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,7 +17,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // storeHomeRig is the S5b counterpart to homeRig: it wires the Acceptor over a
@@ -70,13 +70,17 @@ func (r *storeHomeRig) wsURL() string { return "ws" + r.srv.URL[4:] }
 // membrane law (v1.8 问①) stopped attach from minting membership, a declared id
 // must be an existing active member for the attach to stamp its Host — this stands
 // in for the introduce door the raw link rig bypasses.
-func (r *storeHomeRig) admit(t *testing.T, ids ...actor.ActorID) {
+func (r *storeHomeRig) admit(t *testing.T, ids ...actor.ActorID) []actor.ActorID {
 	t.Helper()
+	out := make([]actor.ActorID, 0, len(ids))
 	for _, id := range ids {
-		if err := r.cs.Membership.Insert(context.Background(), storespec.Record{ID: id, Kind: actor.KindTool, CreatedAt: time.Now().UnixMilli()}); err != nil {
+		minted, err := r.cs.Membership.Admit(context.Background(), actor.KindTool, strings.ReplaceAll(string(id), ":", "-"), time.Now().UnixMilli())
+		if err != nil {
 			t.Fatalf("admit: %v", err)
 		}
+		out = append(out, minted)
 	}
+	return out
 }
 
 // deliverProbe drives one request at id straight off the rig's Runtime and
@@ -107,11 +111,11 @@ func TestAttach_DeclarationWithoutMembership_NotMinted(t *testing.T) {
 	ctx := context.Background()
 	r := newStoreHomeRig(t)
 
-	const (
+	var (
 		member = actor.ActorID("tool:member")
 		orphan = actor.ActorID("tool:orphan")
 	)
-	r.admit(t, member) // orphan is deliberately NOT admitted
+	member = r.admit(t, member)[0] // orphan is deliberately NOT admitted
 
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: member, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
@@ -152,11 +156,11 @@ func TestAttach_OrphanDeclaration_NotInAllowSet(t *testing.T) {
 	ctx := context.Background()
 	r := newStoreHomeRig(t)
 
-	const (
+	var (
 		member = actor.ActorID("tool:member")
 		orphan = actor.ActorID("tool:orphan")
 	)
-	r.admit(t, member) // orphan deliberately NOT admitted
+	member = r.admit(t, member)[0] // orphan deliberately NOT admitted
 
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: member, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
@@ -207,11 +211,12 @@ func TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut(t *testing.T) {
 	ctx := context.Background()
 	r := newStoreHomeRig(t)
 
-	const (
+	var (
 		toolA = actor.ActorID("tool:a")
 		toolB = actor.ActorID("tool:b")
 	)
-	r.admit(t, toolA, toolB)
+	minted := r.admit(t, toolA, toolB)
+	toolA, toolB = minted[0], minted[1]
 
 	d, err := link.Dial(ctx, r.wsURL(), "daemon-1", []link.Declaration{
 		{ActorID: toolA, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
@@ -468,13 +473,15 @@ func TestAttach_HumanDeclaration_Rejected(t *testing.T) {
 	ctx := context.Background()
 	r := newStoreHomeRig(t)
 
-	const (
+	var (
 		toolID  = actor.ActorID("tool:member")
 		humanID = actor.ActorID("user:alice")
 	)
-	r.admit(t, toolID)
+	toolID = r.admit(t, toolID)[0]
 	// Admit the human with its TRUE registry kind.
-	if err := r.cs.Membership.Insert(ctx, storespec.Record{ID: humanID, Kind: actor.KindHuman, CreatedAt: time.Now().UnixMilli()}); err != nil {
+	var err error
+	humanID, err = r.cs.Membership.Admit(ctx, actor.KindHuman, "alice", time.Now().UnixMilli())
+	if err != nil {
 		t.Fatalf("admit human: %v", err)
 	}
 

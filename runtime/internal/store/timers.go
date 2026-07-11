@@ -85,10 +85,9 @@ func (s *timerStore) Delete(ctx context.Context, id timerspec.TimerID) (bool, er
 	return n > 0, nil
 }
 
-// Due returns rows with fire_at <= now, ordered by fire_at, capped at limit —
-// the engine's per-tick batch of identity-bind rows to fire. Walks
-// ix_timers_fire_at.
-func (s *timerStore) Due(ctx context.Context, now int64, limit int) ([]timerspec.TimerRow, error) {
+// Due returns rows with fire_at <= now, ordered by fire_at and bounded only by
+// the per-author SQL window. There is deliberately no cross-author page limit.
+func (s *timerStore) Due(ctx context.Context, now int64) ([]timerspec.TimerRow, error) {
 	const q = `SELECT timer_id, author_id, fire_at, type, payload, COALESCE(correlation_id, ''), created_at FROM (
 	             SELECT *, ROW_NUMBER() OVER (PARTITION BY author_id ORDER BY fire_at, timer_id) AS rn
 	             FROM timers WHERE fire_at <= ?) WHERE rn <= ? ORDER BY fire_at, timer_id`
@@ -110,9 +109,6 @@ func (s *timerStore) Due(ctx context.Context, now int64, limit int) ([]timerspec
 		row.Type = typ
 		row.CorrelationID = corr
 		out = append(out, row)
-		if limit > 0 && len(out) >= limit {
-			break
-		}
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("store: timers due rows: %w", err)

@@ -80,10 +80,9 @@ func (h *cancelDaemonHost) dispatch(target actor.ActorID, env *message.Envelope)
 func TestHomeCancelRequest_CrossWire(t *testing.T) {
 	ch := newClosureHome(t)
 
-	const toolID = actor.ActorID("tool:cancel-probe")
-	const senderID = actor.ActorID("user:cancel-caller")
-	registerActor(t, ch, toolID, actor.KindTool)
-	registerActor(t, ch, senderID, actor.KindHuman)
+	toolID := actor.ActorID("tool:cancel-probe")
+	senderID := actor.ActorID("user:cancel-caller")
+	registerActor(t, ch, &toolID, actor.KindTool)
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		ch.ServeAttach(w, r, "daemon-1")
@@ -112,7 +111,7 @@ func TestHomeCancelRequest_CrossWire(t *testing.T) {
 	host.install(toolID, cell)
 	d.Start()
 
-	pen := spawnWithPen(t, ch, senderID, actor.KindHuman)
+	pen := spawnWithPen(t, ch, &senderID, actor.KindHuman)
 	reqID := writeRequest(t, pen, toolID, "cancel.probe", nil)
 
 	select {
@@ -141,21 +140,23 @@ func TestHomeCancelRequest_CrossWire(t *testing.T) {
 func TestCancelUpstream_Branches(t *testing.T) {
 	ch := newClosureHome(t)
 
-	const targetID = actor.ActorID("agent:up-target")
-	const callerID = actor.ActorID("user:up-caller")
+	targetID := actor.ActorID("agent:up-target")
+	callerID := actor.ActorID("user:up-caller")
 	const otherID = actor.ActorID("user:up-other")
 
 	// Home-hosted target parks in Receive until its reqCtx is cancelled.
 	cell := &cancelBlockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
-	registerActor(t, ch, targetID, actor.KindAgent)
-	if err := platform.SpawnForTest(ch, targetID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
+	registerActor(t, ch, &targetID, actor.KindAgent)
+	var err error
+	targetID, err = platform.SpawnForTest(ch, targetID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
 		return cell
-	}}); err != nil {
+	}})
+	if err != nil {
 		t.Fatalf("spawn target: %v", err)
 	}
 
 	// The authentic caller authors an in-flight request to the target.
-	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
+	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
 	reqID := writeRequest(t, callerPen, targetID, "up.probe", nil)
 
 	select {
@@ -223,15 +224,17 @@ func TestCancelUpstream_Branches(t *testing.T) {
 func TestCancelUpstream_CrossWireAcrossReconnect(t *testing.T) {
 	ch := newClosureHome(t)
 
-	const targetID = actor.ActorID("agent:up-wire-target")
-	const callerID = actor.ActorID("agent:up-wire-caller")
+	targetID := actor.ActorID("agent:up-wire-target")
+	callerID := actor.ActorID("agent:up-wire-caller")
 
 	// Home-hosted blocking target.
 	cell := &cancelBlockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
-	registerActor(t, ch, targetID, actor.KindAgent)
-	if err := platform.SpawnForTest(ch, targetID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
+	registerActor(t, ch, &targetID, actor.KindAgent)
+	var err error
+	targetID, err = platform.SpawnForTest(ch, targetID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
 		return cell
-	}}); err != nil {
+	}})
+	if err != nil {
 		t.Fatalf("spawn target: %v", err)
 	}
 
@@ -240,7 +243,7 @@ func TestCancelUpstream_CrossWireAcrossReconnect(t *testing.T) {
 	// KindAgent, not KindHuman: a human is恒 home-hosted (期12 S3.5 attach
 	// gate rejects a daemon declaring one) — this test's subject is the
 	// cross-wire cancel plumbing, which any daemon-hostable kind exercises.
-	callerPen := spawnWithPen(t, ch, callerID, actor.KindAgent)
+	callerPen := spawnWithPen(t, ch, &callerID, actor.KindAgent)
 	reqID := writeRequest(t, callerPen, targetID, "up.wire.probe", nil)
 
 	select {

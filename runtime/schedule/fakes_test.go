@@ -61,7 +61,7 @@ func (s *fakeStore) MoveToDead(ctx context.Context, id timerspec.TimerID, class 
 	return moved, 0, err
 }
 
-func (s *fakeStore) Due(ctx context.Context, now int64, limit int) ([]timerspec.TimerRow, error) {
+func (s *fakeStore) Due(ctx context.Context, now int64) ([]timerspec.TimerRow, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.dueErr != nil {
@@ -74,9 +74,6 @@ func (s *fakeStore) Due(ctx context.Context, now int64, limit int) ([]timerspec.
 		}
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].FireAt < out[j].FireAt })
-	if limit > 0 && len(out) > limit {
-		out = out[:limit]
-	}
 	return out, nil
 }
 

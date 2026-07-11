@@ -172,17 +172,18 @@ func (a *App) KillCellForTest(chID channel.ID, id actor.ActorID) error {
 // actor Open seeds). Returns the new channel id. Test-only — proves half-built
 // channels stay deletable and open with clear errors, never a panic. Test-only.
 func (a *App) CreateHalfBuiltChannelForTest(wsID, name string) (string, error) {
+	const legacyPlaceholderID = actor.ActorID("agent:boost")
 	chID := uuid.NewString()
 	dbPath := filepath.Join(a.channelDBDir, chID+".db")
 	now := time.Now().UnixMilli()
 	if _, err := a.db.ExecContext(context.Background(),
 		`INSERT INTO channels (id, workspace_id, name, type, db_path, default_agent, created_at) VALUES (?,?,?,?,?,?,?)`,
-		chID, wsID, name, "group", dbPath, string(defaultAgentInstanceID), now); err != nil {
+		chID, wsID, name, "group", dbPath, string(legacyPlaceholderID), now); err != nil {
 		return "", err
 	}
 	if _, err := a.db.ExecContext(context.Background(),
 		`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-		chID, string(defaultAgentInstanceID), defaultBoostClass, placementServer); err != nil {
+		chID, string(legacyPlaceholderID), defaultBoostClass, placementServer); err != nil {
 		return "", err
 	}
 	if _, err := a.createHome(channel.ID(chID), dbPath); err != nil {

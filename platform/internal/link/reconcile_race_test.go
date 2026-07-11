@@ -62,7 +62,6 @@ func (f *fakeRaceMembership) Admit(context.Context, actor.Kind, string, int64) (
 }
 func (f *fakeRaceMembership) EnsureSystemActor(context.Context, int64) error { return nil }
 
-func (f *fakeRaceMembership) Insert(context.Context, storespec.Record) error { return nil }
 func (f *fakeRaceMembership) Deregister(context.Context, actor.ActorID, int64) error {
 	return nil
 }

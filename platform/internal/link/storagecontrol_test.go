@@ -3,7 +3,7 @@ package link_test
 // storagecontrol_test.go — end-to-end coverage for 期11 §4.7's daemon
 // control-RPC plane over a REAL WS link (httptest.Server + link.Dial), not
 // just the frame codec in isolation: AllocRequest home→daemon (Acceptor.
-// SendAllocRequest / Dialer.SetAllocHandler) and the three daemon-initiated
+// SendAllocRequest / DialConfig.AllocHandler) and the three daemon-initiated
 // frames (Committed/ReclaimAck/ReconcilePull, via link.StorageHostControl).
 
 import (

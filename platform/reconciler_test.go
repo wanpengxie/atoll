@@ -82,8 +82,8 @@ func TestReconciler_LevelSweep_ClosesOrphanWithAbsentReceiver(t *testing.T) {
 
 	callerID := actor.ActorID("user:caller")
 	workerID := actor.ActorID("agent:worker")
-	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
-	registerActor(t, ch, workerID, actor.KindAgent)
+	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
+	registerActor(t, ch, &workerID, actor.KindAgent)
 
 	reqID := writeRequest(t, callerPen, workerID, "test.do", nil)
 
@@ -111,8 +111,8 @@ func TestReconciler_Idempotent_NoDuplicateTerminal(t *testing.T) {
 
 	callerID := actor.ActorID("user:caller")
 	workerID := actor.ActorID("agent:worker")
-	callerPen := spawnWithPen(t, ch, callerID, actor.KindHuman)
-	registerActor(t, ch, workerID, actor.KindAgent)
+	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
+	registerActor(t, ch, &workerID, actor.KindAgent)
 
 	// Open request to an absent receiver (registered, never placed as a cell).
 	reqID := writeRequest(t, callerPen, workerID, "test.do", nil)

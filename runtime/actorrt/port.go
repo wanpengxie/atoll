@@ -34,7 +34,7 @@ import (
 // It returns the authoritative write verdict (ipc.EmitResult: MessageID +
 // RejectReason) so the port can ack it back to the remote actor — the writer
 // contract is not downgraded across the wire. The error is the transport/write
-// failure (relayed to the remote as the ack's Err string); a rejected-but-
+// failure (relayed as coded error_code/error_message); a rejected-but-
 // processed emit returns a non-zero RejectReason with a nil error.
 type EmitSink func(ctx context.Context, inc Incarnation, env *message.Envelope) (ipc.EmitResult, error)
 
@@ -46,7 +46,7 @@ type EmitSink func(ctx context.Context, inc Incarnation, env *message.Envelope) 
 // imports the access/schedule vocabulary — the port is a pure transport, the same
 // way it never interprets a KindObs value. It returns the opaque response bytes
 // the caller acks back to the remote (verdict, not downgraded across the wire) and
-// an error for a host-side fault (relayed as the ack's Err string).
+// an error for a host-side fault (relayed as coded error_code/error_message).
 //
 // inc is passed (not just the bare id) for the same reason as EmitSink: the home-
 // side sink gates the invocation on this port still being the live embodiment

@@ -58,8 +58,8 @@ func TestClosedDB_MembershipWritesError(t *testing.T) {
 	ctx := context.Background()
 	h := closedChannel(t)
 
-	if err := h.Membership.Insert(ctx, storespec.Record{ID: "a", Kind: actor.KindAgent, CreatedAt: 1}); err == nil {
-		t.Error("Insert on closed DB must error (BeginTx fails)")
+	if _, err := h.Membership.Admit(ctx, actor.KindAgent, "a", 1); err == nil {
+		t.Error("Admit on closed DB must error")
 	}
 	if err := h.Membership.Deregister(ctx, "a", 1); err == nil {
 		t.Error("Deregister on closed DB must error")

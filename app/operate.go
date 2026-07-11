@@ -232,16 +232,9 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		_, _ = x.a.db.ExecContext(ctx,
 			`UPDATE channels SET default_agent = ? WHERE id = ?`, instanceID, string(req.ChannelID))
 	}
-	// 生效: a config change on an already-embodied server-placed row won't take on a
-	// mere poke (the live cell's SpawnIfAbsent CAS loses). Restart rebuilds it
-	// with the fresh merged snapshot — the same 原地换脑 path restart uses (A-P14).
-	// A brand-new row (created) rides the ring's build, which already reads the new
-	// config_json; a daemon-placed row converges on its next plan poll.
-	if configChanged && placement == placementServer {
-		var gcfg string
-		_ = x.a.db.QueryRowContext(ctx,
-			`SELECT COALESCE(config_json,'') FROM actor_decls WHERE id = ? AND deleted_at IS NULL`,
-			declID).Scan(&gcfg)
+	// Config takes effect through the same placement-neutral Restart face for
+	// both home cells and daemon-hosted ports. A new row has no predecessor.
+	if configChanged {
 		if serr := home.Restart(ctx, mintedID); serr != nil {
 			return nil, &platform.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
 		}

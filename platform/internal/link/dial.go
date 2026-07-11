@@ -49,12 +49,7 @@ type Dialer struct {
 	streams  map[actor.ActorID]*actorStream
 	attached chan struct{} // closed when attach_reply arrives
 	reply    AttachReply
-	// reattachWait, when non-nil, is the pending Reattach's reply channel — set
-	// right before sending a post-initial ctrlAttach, cleared by onControl when
-	// the matching attach_reply arrives (or by the waiter itself on timeout/
-	// cancellation). nil means no Reattach is in flight, so any attach_reply
-	// received then is either the initial one (still open, closes d.attached) or
-	// a protocol anomaly (logged, dropped).
+	// pendingAttach correlates concurrent Reattach calls by RequestID.
 	pendingAttach *pendingReplies[AttachReply]
 	// started flips true inside the SAME mu critical section that snapshots the
 	// streams for the initial batch (Start). It makes Start idempotent and is the
@@ -72,8 +67,8 @@ type Dialer struct {
 	// allocHandler answers an inbound AllocRequest (home→daemon, §4.7's first
 	// frame): the daemon storage host's Allocator does the real mkdir/touch
 	// and returns the verdict this Dialer relays back as an AllocReply.
-	// Injected by RunCompute (mirrors despawnLocal's pattern) after Dial,
-	// before Start. nil → every AllocRequest is answered OK:false (no
+	// Supplied in DialConfig before any read loop starts. nil → every
+	// AllocRequest is answered OK:false (no
 	// storage host wired on this compute — an honest reject, never a silent
 	// drop: this RPC plane is request/response).
 	allocHandler func(AllocRequest) AllocReply
@@ -92,9 +87,7 @@ type Dialer struct {
 	pendingResolveCoord *pendingReplies[ResolveCoordReply]
 
 	// localFileOpener is the daemon-side same-machine byte-access capability
-	// (lane.go's LocalFileOpener) — injected via SetLocalFileOpener, mirrors
-	// SetAllocHandler/SetDespawnLocal's post-Dial, pre-Start injection
-	// pattern. nil → every file byte redemption on this compute answers an
+	// (lane.go's LocalFileOpener) — supplied in DialConfig. nil → every file byte redemption on this compute answers an
 	// honest "no storage host wired" error (never a silent no-op).
 	localFileOpener LocalFileOpener
 
@@ -386,9 +379,6 @@ func (d *Dialer) Reattach(ctx context.Context, decls []Declaration) error {
 	}
 }
 
-// clearReattachWait drops the pending-Reattach marker IF it still points at ch
-// (a concurrent onControl delivery may have already cleared and consumed it —
-// pointer-compare avoids clobbering a later, unrelated Reattach's wait).
 // OpenStream opens one actor's link stream, performs the native ipc handshake
 // (LeaseID = actor id), and returns the cell's full capability arms (CellArms:
 // Pen + Access/State + Schedule, all relaying over this one stream) plus a
@@ -693,8 +683,8 @@ var cancelForwardWriteGrace = 5 * time.Second
 // The actual write runs OFF the caller's goroutine (often the cell/ledger
 // goroutine abandoning its own outbound request — never something this signal
 // may pin on a stuck peer) and is bounded by cancelForwardWriteGrace: a second
-// goroutine races the write against a grace timer and force-closes the link if
-// the timer wins, guaranteeing the write goroutine can never leak past grace
+// goroutine races the write against a grace timer and force-closes that actor
+// stream if the timer wins, guaranteeing the write goroutine can never leak past grace
 // (it unblocks either on write completion or on the closed conn erroring the
 // write out). The codec write mutex still serialises this against the cell's
 // other KindEmit/Access/Schedule writes on the same stream.
@@ -718,7 +708,7 @@ func (d *Dialer) SendCancelRequest(id actor.ActorID, requestID message.ID) {
 		select {
 		case <-frameDone:
 		case <-time.After(cancelForwardWriteGrace):
-			_ = d.lc.Close() // stuck write: unblock it by killing the (evidently dead) link
+			_ = as.stream.Close() // one wedged actor stream never kills healthy siblings
 		}
 	}()
 }

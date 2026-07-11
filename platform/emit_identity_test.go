@@ -35,10 +35,10 @@ import (
 func TestEmitIdentity_HostWeldsAuthorFromBoundID(t *testing.T) {
 	ch := newClosureHome(t)
 
-	const toolID = actor.ActorID("tool:x")
-	const victimID = actor.ActorID("user:alice")
-	registerActor(t, ch, toolID, actor.KindTool)
-	registerActor(t, ch, victimID, actor.KindHuman)
+	toolID := actor.ActorID("tool:x")
+	victimID := actor.ActorID("user:alice")
+	registerActor(t, ch, &toolID, actor.KindTool)
+	registerActor(t, ch, &victimID, actor.KindHuman)
 
 	// Real home↔daemon link over httptest: the daemon attaches tool:x and gets a
 	// real port embodiment bound to that authenticated id at the handshake.

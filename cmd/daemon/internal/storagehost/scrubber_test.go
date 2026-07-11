@@ -135,14 +135,8 @@ func TestScrubber_ActiveWriteSurvivesSweepWithNoReservationAtAll(t *testing.T) {
 	}
 }
 
-// TestScrubber_ResendsCommittedForLandedPendingReservation (期11 S6, the
-// daemon-crash recovery path §1.7/§6.3 names: "daemon rename后Committed未
-// 达即daemon crash"): a pending reservation whose coord is ALREADY present
-// in live/ (the crash happened after fsync+rename, before/during the
-// Committed RPC) must resend Committed — exactly once, and it must NOT
-// touch a pending reservation whose coord never landed (still legitimately
-// staging).
-
+// Missing live entries are counted and logged; scrubber never fabricates or
+// replays a completion.
 func TestScrubber_LogsMissingLiveEntriesWithoutPanicking(t *testing.T) {
 	cr := newTestChannelRoot(t)
 	s := &Scrubber{}
@@ -152,8 +146,8 @@ func TestScrubber_LogsMissingLiveEntriesWithoutPanicking(t *testing.T) {
 }
 
 // TestScrubber_ActiveWritesSnapshotAfterNetworkPhase pins 期11 review P1-1: the
-// active-writes snapshot must be taken AFTER Pass's (multi-second, network-RPC)
-// reclaim/resend phase, immediately before the staging sweep — not at Pass
+// active-writes snapshot must be taken AFTER Pass's network reclaim phase,
+// immediately before the staging sweep — not at Pass
 // entry. A snapshot taken too early would miss a write that begins during the
 // network phase and delete its staging out from under a live writer. The
 // activeWrites arg is a snapshotTER for exactly this reason; here it asserts the

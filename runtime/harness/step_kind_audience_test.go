@@ -12,7 +12,7 @@ import (
 func TestStepKindAndAudience_AudienceCardinality(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)
-	registerActor(t, cs, actor.ActorID("tool:xhs"), actor.KindTool)
+	toolID := registerActor(t, cs, actor.ActorID("tool:xhs"), actor.KindTool)
 
 	tests := []struct {
 		name     string
@@ -46,14 +46,14 @@ func TestStepKindAndAudience_AudienceCardinality(t *testing.T) {
 			name:     "request audience cardinality must be 1",
 			kind:     message.KindRequest,
 			typ:      "xhs.publish",
-			audience: message.Audience{"tool:xhs", "extra"},
+			audience: message.Audience{toolID, "extra"},
 			reason:   HarnessRequestAudienceInvalid,
 		},
 		{
 			name:     "request with cardinality-1 audience accepts (no liveness check)",
 			kind:     message.KindRequest,
 			typ:      "xhs.publish",
-			audience: message.Audience{"tool:xhs"},
+			audience: message.Audience{toolID},
 			reason:   "",
 		},
 		{
@@ -90,12 +90,12 @@ func TestStepKindAndAudience_AudienceCardinality(t *testing.T) {
 func TestStepKindAndAudience_DefaultRequestTTL(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)
-	registerActor(t, cs, actor.ActorID("tool:xhs"), actor.KindTool)
+	toolID := registerActor(t, cs, actor.ActorID("tool:xhs"), actor.KindTool)
 
 	e := &message.Envelope{
 		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{"tool:xhs"},
+		Audience: message.Audience{toolID},
 	}
 	out, err := runStep(t, newStepKindAndAudience, deps, context.Background(), e)
 	if err != nil {
@@ -117,13 +117,13 @@ func TestStepKindAndAudience_DefaultRequestTTL(t *testing.T) {
 func TestStepKindAndAudience_CallerExpiresPreserved(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)
-	registerActor(t, cs, actor.ActorID("tool:xhs"), actor.KindTool)
+	toolID := registerActor(t, cs, actor.ActorID("tool:xhs"), actor.KindTool)
 
 	custom := fixedNowMs + 5000
 	e := &message.Envelope{
 		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
 		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{"tool:xhs"}, ExpiresAt: &custom,
+		Audience: message.Audience{toolID}, ExpiresAt: &custom,
 	}
 	if _, err := runStep(t, newStepKindAndAudience, deps, context.Background(), e); err != nil {
 		t.Fatalf("err: %v", err)

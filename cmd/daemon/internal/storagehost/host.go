@@ -151,10 +151,7 @@ func (h *Host) ReclaimCoord(coord string) error {
 }
 
 // Reconcile runs one Scrubber pass against the home's recovery picture. ack
-// is the network callback for confirming a collected tombstone; resend is
-// the network callback for resuming a landed-but-uncommitted reservation
-// (§1.7's daemon-crash recovery path). Both are RunCompute-bridge-supplied,
-// bound to whichever connection is currently live.
+// confirms a collected tombstone over the currently bound connection.
 func (h *Host) Reconcile(ctx context.Context, resources []ResourceLanded, pendingReservations []ReservationPending, pendingTombstones []TombstoneToReclaim, ack ReclaimAckFunc) {
 	// Pass the snapshotter, NOT a pre-taken snapshot (期11 review P1-1): Pass runs
 	// multi-second network RPCs before its staging sweep, so the sweep must take

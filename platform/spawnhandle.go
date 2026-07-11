@@ -24,8 +24,7 @@ var ErrClassNotFound = errors.New("platform: fork class not found in builder")
 // CapsFactoryBuilder is the PLATFORM-layer factory table for the two mint
 // triggers that resolve a factory AFTER the original admission closure is gone —
 // fork (by Class) and activation (by id). It resolves either key to the actor's
-// ActorFactory (spec §4 S3's "def") — the SAME shape a top-level admission
-// (Home.Spawn) consumes.
+// ActorFactory (spec §4 S3's "def") — the SAME shape activation consumes.
 //
 // It is deliberately NOT actorrt.Builder (whose Lookup/LookupByClass hand back
 // `func(Incarnation) Actor`): the caps seam — the livePen/liveAccess/liveState/

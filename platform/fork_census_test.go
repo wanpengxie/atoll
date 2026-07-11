@@ -31,14 +31,14 @@ func TestFork_ConfigAndChildID_Passthrough(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const parent = actor.ActorID("agent:fork-cfg-parent")
+	parent := actor.ActorID("agent:fork-cfg-parent")
 	const nameHint = "cfg1"
-	childID := parent + "/" + actor.ActorID(nameHint)
 	builder.byID[parent] = builder.recordFactory(parent)
-	builder.byClass["worker"] = builder.recordFactory(childID)
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, parent, actor.KindAgent)
+	parent = admit(t, h, parent, actor.KindAgent)
+	childID := parent + "/" + actor.ActorID(nameHint)
+	builder.byClass["worker"] = builder.recordFactory(childID)
 	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
 	parentCaps, ok := builder.capsFor(parent)
@@ -78,14 +78,14 @@ func TestFork_MemoryStateEvaporates_ZeroInheritance(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const parent = actor.ActorID("agent:fork-state-parent")
+	parent := actor.ActorID("agent:fork-state-parent")
 	const nameHint = "w1"
-	childID := parent + "/" + actor.ActorID(nameHint)
 	builder.byID[parent] = builder.recordFactory(parent)
-	builder.byClass["worker"] = builder.recordFactory(childID)
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, parent, actor.KindAgent)
+	parent = admit(t, h, parent, actor.KindAgent)
+	childID := parent + "/" + actor.ActorID(nameHint)
+	builder.byClass["worker"] = builder.recordFactory(childID)
 	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
 	parentCaps, ok := builder.capsFor(parent)
@@ -174,14 +174,14 @@ func TestFork_ChildDurableCreateDenied(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const parent = actor.ActorID("agent:fork-orphan-parent")
+	parent := actor.ActorID("agent:fork-orphan-parent")
 	const nameHint = "w1"
-	childID := parent + "/" + actor.ActorID(nameHint)
 	builder.byID[parent] = builder.recordFactory(parent)
-	builder.byClass["worker"] = builder.recordFactory(childID)
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, parent, actor.KindAgent)
+	parent = admit(t, h, parent, actor.KindAgent)
+	childID := parent + "/" + actor.ActorID(nameHint)
+	builder.byClass["worker"] = builder.recordFactory(childID)
 	desired.set(actorrt.DesiredMember{ID: parent, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 	h.reconcileActivation(ctx)
 	parentCaps, ok := builder.capsFor(parent)
@@ -228,14 +228,14 @@ func TestFork_ParentDeathCascadesChild(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()
-	const parent = actor.ActorID("agent:fork-cascade-parent")
+	parent := actor.ActorID("agent:fork-cascade-parent")
 	const nameHint = "w1"
-	childID := parent + "/" + actor.ActorID(nameHint)
 	builder.byID[parent] = builder.recordFactory(parent)
-	builder.byClass["worker"] = builder.recordFactory(childID)
 
 	h := openActivationHome(t, desired, builder)
-	admit(t, h, parent, actor.KindAgent)
+	parent = admit(t, h, parent, actor.KindAgent)
+	childID := parent + "/" + actor.ActorID(nameHint)
+	builder.byClass["worker"] = builder.recordFactory(childID)
 	// Parent is NOT desired-always-on here: we admit + spawn via reconcile once,
 	// then despawn it directly and assert the child dies too WITHOUT the ring
 	// reviving the parent (ReconcileInterval is 1h; no tick fires).

@@ -563,7 +563,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	done := make(chan struct{})
 	go lease.Watch(done, func() {
 		a.logger.Info("link.lease_expired", "channel", string(a.channelID))
-		_ = lc.Close()
+		lc.kill("lease_expired", nil)
 	})
 
 	// Acceptor Close tears the link down; quiet-stop this link's ports FIRST so the
@@ -573,9 +573,9 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		select {
 		case <-a.ctx.Done():
 			quietStopPorts()
-			_ = lc.Close()
+			lc.kill("acceptor_closed", a.ctx.Err())
 		case <-reqCtx.Done():
-			_ = lc.Close()
+			lc.kill("accept_request_cancelled", reqCtx.Err())
 		case <-done:
 		}
 	}()
@@ -593,7 +593,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 
 // handleAttach processes a stream-0 attach — the first on a link, or a later
 // Reattach (§S-P8): register declared actors into membership (register/
-// reactivate — detach never deregisters), WHOLESALE-REPLACE the link's allowed/
+// restore — detach never deregisters), WHOLESALE-REPLACE the link's allowed/
 // kinds sets to exactly att.Declarations (idempotent — an unchanged re-declare
 // swaps in an identical set; self-correcting — a dropped declaration falls out),
 // reconcile the compute's Host-owned membership rows against the fresh

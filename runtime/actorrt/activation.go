@@ -36,7 +36,7 @@ type DesiredMember struct {
 // the desired−actual diff whose actual half is LiveIDs(). The interface is
 // substrate-defined; the IMPLEMENTATION is injected by the app assembly root
 // and must yield only confirmed durable members — activation skips membership
-// apply (SpawnIfAbsent, never Home.Spawn), so feeding it a raw intent row that
+// apply (SpawnIfAbsent, never membership admission), so feeding it a raw intent row that
 // never landed in durable membership would mint an actor with no membership
 // at all. Substrate does not know or touch the table behind this.
 type DesiredSource interface {

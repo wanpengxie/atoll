@@ -22,7 +22,6 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -301,14 +300,8 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 	return home, nil
 }
 
-// defaultAgentInstanceID is the canonical fallback/bootstrap agent instance —
-// the always-there server-embedded "boost" floor: every channel gets a
-// server-cell agent for never-brainless behavior plus onboarding.
-// default_agent points here by default; it is a name-agnostic pointer, so a
-// channel may later repoint it at any other instance id.
 const (
-	defaultAgentInstanceID = actor.ActorID("agent:boost")
-	defaultAgentPrincipal  = "boost"
+	defaultAgentPrincipal = "boost"
 	// defaultBoostClass is the engine CLASS the always-there boost floor runs.
 	// An agent's engine IS its actor class — claude/go-kimi are flat registry
 	// classes (kind=agent), there is NO umbrella "agent" class. boost has no

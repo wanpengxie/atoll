@@ -8,6 +8,9 @@ import (
 	"fmt"
 	"strings"
 
+	"modernc.org/sqlite"
+	sqlite3 "modernc.org/sqlite/lib"
+
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -167,10 +170,26 @@ func (r *actorRegistry) Admit(ctx context.Context, kind actor.Kind, principal st
 		_, err = tx.ExecContext(ctx, `INSERT INTO actor_registry (actor_id,actor_kind,principal,actor_binding,host,created_at,deregistered_at) VALUES (?,?,?,NULL,'',?,NULL)`, string(id), string(kind), principal, at+attempt)
 		if err != nil {
 			_ = tx.Rollback()
-			if rec, ok, qerr := r.LookupActivePrincipal(ctx, kind, principal); qerr == nil && ok {
-				return rec.ID, nil
+			var sqliteErr *sqlite.Error
+			if !errors.As(err, &sqliteErr) {
+				return "", err
 			}
-			continue
+			switch sqliteErr.Code() {
+			case sqlite3.SQLITE_CONSTRAINT_PRIMARYKEY:
+				// Same-millisecond actor_id collision: advance the diagnostic
+				// timestamp and retry. This is the ONLY retry class.
+				continue
+			case sqlite3.SQLITE_CONSTRAINT_UNIQUE:
+				// Concurrent ensure for the same (kind, principal): converge on
+				// the winner. If it vanished before this read, surface the original
+				// constraint instead of manufacturing a retry/TOCTOU loop.
+				if rec, ok, qerr := r.LookupActivePrincipal(ctx, kind, principal); qerr == nil && ok {
+					return rec.ID, nil
+				}
+				return "", err
+			default:
+				return "", err
+			}
 		}
 		add := storespec.MemberActorAdd{ID: id, Kind: kind, At: at + attempt}
 		if _, err = appendTx(ctx, tx, actorRegisteredEnvelope(r.channelID, add), false); err != nil {
@@ -194,7 +213,7 @@ func (r *actorRegistry) EnsureSystemActor(ctx context.Context, at int64) error {
 	} else if exists {
 		return nil
 	}
-	return r.Insert(ctx, storespec.Record{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: at})
+	return r.insertFixedID(ctx, storespec.Record{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: at})
 }
 
 // validateMemberIdentity gates the membership WRITE path on the protocol
@@ -217,9 +236,9 @@ func validateMemberIdentity(id actor.ActorID, kind actor.Kind, binding actor.Bin
 	return nil
 }
 
-// Insert is the low-level fixed-id seed used only by the intrinsic system
-// bootstrap and store fixtures. Product admission goes through Admit.
-func (r *actorRegistry) Insert(ctx context.Context, rec storespec.Record) error {
+// insertFixedID is the private intrinsic-system/bootstrap fixture primitive.
+// Product admission cannot express a caller-selected id and goes through Admit.
+func (r *actorRegistry) insertFixedID(ctx context.Context, rec storespec.Record) error {
 	if rec.ID == "" {
 		return errors.New("store: actor insert: empty ID")
 	}

@@ -7,10 +7,22 @@ import (
 	"go/token"
 	"io/fs"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+// TestMembershipCannotAdmitCallerSelectedID pins the type-level boundary: the
+// public membership write contract has no fixed-id insertion operation.
+func TestMembershipCannotAdmitCallerSelectedID(t *testing.T) {
+	typ := reflect.TypeOf((*storespec.MembershipControlPlane)(nil)).Elem()
+	if _, ok := typ.MethodByName("Insert"); ok {
+		t.Fatal("caller-selected membership IDs must be unrepresentable")
+	}
+}
 
 // TestAppDoesNotMintOrParseActorIDs keeps substrate-minted instance ids opaque
 // at the application layer. Historical SQL migration literals are data repair,

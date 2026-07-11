@@ -418,7 +418,7 @@ const farFutureMs = int64(1) << 61
 
 func storeRowCount(t *testing.T, cs *ChannelStores) int {
 	t.Helper()
-	rows, err := cs.timers.Due(context.Background(), farFutureMs, 10000)
+	rows, err := cs.timers.Due(context.Background(), farFutureMs)
 	if err != nil {
 		t.Fatalf("timers.Due: %v", err)
 	}
@@ -1048,8 +1048,7 @@ func TestTimerSlice7_DeregCascadeClear(t *testing.T) {
 		engine.Start()
 		t.Cleanup(engine.Close)
 
-		const author = actor.ActorID("A")
-		seedMember(t, cs, author)
+		author := seedMember(t, cs, actor.ActorID("A"))
 		handle := minter.Mint(author)
 
 		id, err := handle.Schedule(ctx, schedule.ScheduleReq{

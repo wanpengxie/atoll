@@ -108,11 +108,13 @@ func seedMembersGrant(t *testing.T, cs *store.ChannelStores, id resource.Resourc
 }
 
 // seedMember registers id as an active channel member.
-func seedMember(t *testing.T, cs *store.ChannelStores, id actor.ActorID) {
+func seedMember(t *testing.T, cs *store.ChannelStores, id actor.ActorID) actor.ActorID {
 	t.Helper()
-	if err := cs.Membership.Insert(context.Background(), storespec.Record{ID: id, Kind: actor.KindAgent, CreatedAt: 1}); err != nil {
+	minted, err := cs.Membership.Admit(context.Background(), actor.KindAgent, string(id), 1)
+	if err != nil {
 		t.Fatalf("seed member %q: %v", id, err)
 	}
+	return minted
 }
 
 var fullObjectOps = []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete}
@@ -221,17 +223,17 @@ func TestSetArmMembersRowParticipatesInBasis(t *testing.T) {
 	d := newDecayDoor(cs)
 	seedResource(t, cs, "r1", "creator")
 	seedMembersGrant(t, cs, "r1", access.OpRead, access.OpSet) // any current member: read+set
-	seedMember(t, cs, "alice")                                 // alice has NO direct actor entry
+	alice := seedMember(t, cs, "alice")                        // alice has NO direct actor entry
 
 	t.Run("current member grants within the members row's ops", func(t *testing.T) {
 		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "bob", Ops: []access.Operation{access.OpRead}}
-		out, err := d.invoke(context.Background(), "alice", access.OpSet, "r1", nil, g)
+		out, err := d.invoke(context.Background(), alice, access.OpSet, "r1", nil, g)
 		mustAccept(t, out, err)
 	})
 
 	t.Run("current member cannot grant beyond the members row's ops", func(t *testing.T) {
 		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "carol", Ops: []access.Operation{access.OpWrite}}
-		out, err := d.invoke(context.Background(), "alice", access.OpSet, "r1", nil, g)
+		out, err := d.invoke(context.Background(), alice, access.OpSet, "r1", nil, g)
 		mustVerdict(t, out, err, access.AccessDenied)
 	})
 }
@@ -263,9 +265,9 @@ func TestEffectiveOpsDropsDeregisteredMembersRights(t *testing.T) {
 	d := newDecayDoor(cs)
 	seedResource(t, cs, "r1", "creator")
 	seedMembersGrant(t, cs, "r1", access.OpRead, access.OpWrite)
-	seedMember(t, cs, "alice")
+	alice := seedMember(t, cs, "alice")
 
-	eff, err := d.effectiveOps(context.Background(), "alice", "r1")
+	eff, err := d.effectiveOps(context.Background(), alice, "r1")
 	if err != nil {
 		t.Fatalf("effectiveOps: %v", err)
 	}
@@ -273,11 +275,11 @@ func TestEffectiveOpsDropsDeregisteredMembersRights(t *testing.T) {
 		t.Fatalf("active member should hold the members row's ops, got %v", eff)
 	}
 
-	if err := cs.Membership.Deregister(context.Background(), "alice", 2); err != nil {
+	if err := cs.Membership.Deregister(context.Background(), alice, 2); err != nil {
 		t.Fatalf("deregister: %v", err)
 	}
 
-	eff, err = d.effectiveOps(context.Background(), "alice", "r1")
+	eff, err = d.effectiveOps(context.Background(), alice, "r1")
 	if err != nil {
 		t.Fatalf("effectiveOps after deregister: %v", err)
 	}
@@ -295,9 +297,9 @@ func TestStatDropsDeregisteredMembersRights(t *testing.T) {
 	d := newDecayDoor(cs)
 	seedResource(t, cs, "r1", "creator")
 	seedMembersGrant(t, cs, "r1", access.OpRead, access.OpWrite)
-	seedMember(t, cs, "alice")
+	alice := seedMember(t, cs, "alice")
 
-	res, err := d.stat(context.Background(), "alice", "r1")
+	res, err := d.stat(context.Background(), alice, "r1")
 	if err != nil {
 		t.Fatalf("stat: %v", err)
 	}
@@ -305,11 +307,11 @@ func TestStatDropsDeregisteredMembersRights(t *testing.T) {
 		t.Fatalf("active member should see the members row's ops via Stat, got %+v", res)
 	}
 
-	if err := cs.Membership.Deregister(context.Background(), "alice", 2); err != nil {
+	if err := cs.Membership.Deregister(context.Background(), alice, 2); err != nil {
 		t.Fatalf("deregister: %v", err)
 	}
 
-	res, err = d.stat(context.Background(), "alice", "r1")
+	res, err = d.stat(context.Background(), alice, "r1")
 	if err != nil {
 		t.Fatalf("stat after deregister: %v", err)
 	}
@@ -326,9 +328,9 @@ func TestListDropsDeregisteredMembersRights(t *testing.T) {
 	d := newDecayDoor(cs)
 	seedResource(t, cs, "r1", "creator")
 	seedMembersGrant(t, cs, "r1", access.OpRead, access.OpWrite)
-	seedMember(t, cs, "alice")
+	alice := seedMember(t, cs, "alice")
 
-	page, err := d.list(context.Background(), "alice", ListQuery{})
+	page, err := d.list(context.Background(), alice, ListQuery{})
 	if err != nil {
 		t.Fatalf("list: %v", err)
 	}
@@ -336,11 +338,11 @@ func TestListDropsDeregisteredMembersRights(t *testing.T) {
 		t.Fatalf("active member should see r1 via List, got %+v", page.Entries)
 	}
 
-	if err := cs.Membership.Deregister(context.Background(), "alice", 2); err != nil {
+	if err := cs.Membership.Deregister(context.Background(), alice, 2); err != nil {
 		t.Fatalf("deregister: %v", err)
 	}
 
-	page, err = d.list(context.Background(), "alice", ListQuery{})
+	page, err = d.list(context.Background(), alice, ListQuery{})
 	if err != nil {
 		t.Fatalf("list after deregister: %v", err)
 	}
@@ -354,17 +356,17 @@ func TestSetArmDropsDeregisteredMembersRights(t *testing.T) {
 	d := newDecayDoor(cs)
 	seedResource(t, cs, "r1", "creator")
 	seedMembersGrant(t, cs, "r1", access.OpRead, access.OpSet)
-	seedMember(t, cs, "alice")
+	alice := seedMember(t, cs, "alice")
 
 	g1 := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "bob", Ops: []access.Operation{access.OpRead}}
-	out, err := d.invoke(context.Background(), "alice", access.OpSet, "r1", nil, g1)
+	out, err := d.invoke(context.Background(), alice, access.OpSet, "r1", nil, g1)
 	mustAccept(t, out, err) // active member: members row still counts
 
-	if err := cs.Membership.Deregister(context.Background(), "alice", 2); err != nil {
+	if err := cs.Membership.Deregister(context.Background(), alice, 2); err != nil {
 		t.Fatalf("deregister: %v", err)
 	}
 
 	g2 := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "carol", Ops: []access.Operation{access.OpRead}}
-	out, err = d.invoke(context.Background(), "alice", access.OpSet, "r1", nil, g2)
+	out, err = d.invoke(context.Background(), alice, access.OpSet, "r1", nil, g2)
 	mustVerdict(t, out, err, access.AccessDenied) // deregistered: members row no longer counts
 }

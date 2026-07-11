@@ -195,8 +195,8 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, cause error) {
 // consumeDown is the resident closure goroutine: it drains dead ids serially and
 // does the blocking closure work off the death-edge reap path. Started by New,
 // joined by Stop. Before materialising, it RE-CHECKS liveness (Present) — the
-// async hand-off widens the window in which a same-id successor may have taken
-// over, so the edge path must guard against mis-closing the successor's callers
+// async hand-off widens the window in which a Restart successor incarnation may
+// have taken over under the same membership id, so the edge path must guard against mis-closing its callers
 // exactly as the level scan does.
 func (c *Channel) consumeDown() {
 	defer close(c.downDone)
@@ -212,8 +212,8 @@ func (c *Channel) consumeDown() {
 }
 
 // closeFor materialises receiver_unavailable for every in-flight request
-// addressed to id — UNLESS a same-id successor is already live (Present), in
-// which case the edge is stale and skipped (its callers are the successor's, not
+// addressed to id — UNLESS a Restart successor incarnation is already live
+// (Present), in which case the edge is stale and skipped (its callers are the successor's, not
 // black holes). System-authored: identity rides the system pen.
 func (c *Channel) closeFor(ctx context.Context, id actor.ActorID, probe livenessProbe) {
 	if probe.Present(id) {

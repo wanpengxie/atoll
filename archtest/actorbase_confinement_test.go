@@ -14,7 +14,7 @@ import (
 )
 
 // actorbase-spec-v1.md §4 S3 / §5 red line ③: the eight out-generation call
-// faces (CapsFactoryBuilder / ComputeBuilder / Home.Spawn / ActorDecl /
+// faces (CapsFactoryBuilder / ComputeBuilder / Home.SpawnIfAbsent / ActorDecl /
 // registry.Constructor / app-human / cmd-daemon / test fixtures) were reshaped
 // so downstream never again needs to name actorcaps.Caps — it speaks
 // platform.ActorFactory (harness.Pen for the pre-actorbase "Legacy" shape,

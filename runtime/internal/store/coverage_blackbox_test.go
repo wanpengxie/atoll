@@ -42,36 +42,33 @@ func TestRequestLookup_FindByID(t *testing.T) {
 	}
 }
 
-// --- Insert: UNIQUE conflict (actor_id PRIMARY KEY) → exec error arm ----------
-
-// A second Insert of the same actor_id violates the actor_registry PRIMARY KEY
-// and must surface as an error from the INSERT exec (line: actor insert %q).
-func TestInsert_DuplicateIDConflicts(t *testing.T) {
+// Admit is an ensure operation: repeated calls converge on one active id.
+func TestAdmit_RepeatedPrincipalConverges(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
-	rec := storespec.Record{ID: "dup", Kind: actor.KindAgent, CreatedAt: 1}
-	if err := cs.Membership.Insert(ctx, rec); err != nil {
-		t.Fatalf("first Insert: %v", err)
+	first, err := cs.Membership.Admit(ctx, actor.KindAgent, "dup", 1)
+	if err != nil {
+		t.Fatalf("first Admit: %v", err)
 	}
-	if err := cs.Membership.Insert(ctx, rec); err == nil {
-		t.Error("second Insert of same actor_id must conflict on PRIMARY KEY")
+	second, err := cs.Membership.Admit(ctx, actor.KindAgent, "dup", 2)
+	if err != nil || second != first {
+		t.Fatalf("second Admit = %q, %v; want %q", second, err, first)
 	}
 }
 
-// Insert with a non-empty binding takes the binding!=nil branch and commits.
-func TestInsert_WithBindingCommits(t *testing.T) {
+func TestAdmit_PrincipalPersists(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
-	rec := storespec.Record{ID: "b", Kind: actor.KindTool, Binding: actor.BindingEmbedded, CreatedAt: 1}
-	if err := cs.Membership.Insert(ctx, rec); err != nil {
-		t.Fatalf("Insert: %v", err)
+	id, err := cs.Membership.Admit(ctx, actor.KindTool, "b", 1)
+	if err != nil {
+		t.Fatalf("Admit: %v", err)
 	}
-	got, ok, err := cs.Registry.Lookup(ctx, "b")
+	got, ok, err := cs.Registry.Lookup(ctx, id)
 	if err != nil || !ok {
 		t.Fatalf("Lookup ok=%v err=%v", ok, err)
 	}
-	if got.Binding != actor.BindingEmbedded {
-		t.Errorf("binding=%q want embedded", got.Binding)
+	if got.Principal != "b" {
+		t.Errorf("principal=%q want b", got.Principal)
 	}
 }
 
@@ -115,9 +112,9 @@ func TestApplyMemberTransitions_ClosedSetGate(t *testing.T) {
 		t.Fatalf("ListActive after rejected poisons: %v", err)
 	}
 
-	// Insert takes the same gate.
-	if err := cs.Membership.Insert(ctx, storespec.Record{ID: "b1", Kind: "wizard", CreatedAt: 1}); err == nil {
-		t.Error("Insert must gate the kind closed set")
+	// Admit takes the same gate.
+	if _, err := cs.Membership.Admit(ctx, "wizard", "b1", 1); err == nil {
+		t.Error("Admit must gate the kind closed set")
 	}
 }
 

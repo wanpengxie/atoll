@@ -60,13 +60,14 @@ func (s *spyMembership) ApplyMemberTransitions(ctx context.Context, adds []store
 func TestRemove_OrderSpy_DespawnBeforeDereg(t *testing.T) {
 	ctx := context.Background()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
-	const id = actor.ActorID("agent:order-spy")
-	admit(t, h, id, actor.KindAgent)
-	if err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	id := admit(t, h, actor.ActorID("agent:order-spy"), actor.KindAgent)
+	minted, err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
-	})); err != nil {
+	}))
+	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
+	id = minted
 	if !live(h, id) {
 		t.Fatal("precondition: id must be live before Remove")
 	}
@@ -94,13 +95,14 @@ func TestRemove_OrderSpy_DespawnBeforeDereg(t *testing.T) {
 func TestRemove_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
-	const id = actor.ActorID("agent:idempotent")
-	admit(t, h, id, actor.KindAgent)
-	if err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	id := admit(t, h, actor.ActorID("agent:idempotent"), actor.KindAgent)
+	minted, err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
-	})); err != nil {
+	}))
+	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
+	id = minted
 
 	if err := h.Remove(ctx, id); err != nil {
 		t.Fatalf("first Remove: %v", err)
@@ -128,15 +130,16 @@ func TestRemove_Idempotent(t *testing.T) {
 func TestRemove_CascadeClearsState(t *testing.T) {
 	ctx := context.Background()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
-	id := actor.ActorID("agent:cascade")
-	admit(t, h, id, actor.KindAgent)
+	id := admit(t, h, actor.ActorID("agent:cascade"), actor.KindAgent)
 	var caps1 actorcaps.Caps
-	if err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
+	minted, err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		caps1 = c
 		return recordActor{caps: c}
-	})); err != nil {
+	}))
+	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
+	id = minted
 	const key = resource.ResourceID("cursor")
 	if _, err := caps1.State.Invoke(ctx, access.OpCreate, key, []byte("v1"), nil); err != nil {
 		t.Fatalf("state create: %v", err)
@@ -156,12 +159,14 @@ func TestRemove_CascadeClearsState(t *testing.T) {
 	}
 	id = newID
 	var caps2 actorcaps.Caps
-	if err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
+	minted, err = SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		caps2 = c
 		return recordActor{caps: c}
-	})); err != nil {
+	}))
+	if err != nil {
 		t.Fatalf("re-Spawn: %v", err)
 	}
+	id = minted
 	out, err := caps2.State.Invoke(ctx, access.OpRead, key, nil, nil)
 	if err == nil && out.RejectReason == "" {
 		t.Fatalf("state survived Remove's dereg cascade: read back %q, want not_found", out.Value)
@@ -174,11 +179,11 @@ func TestRemove_CascadeClearsState(t *testing.T) {
 func TestRemove_DueFireRace(t *testing.T) {
 	ctx := context.Background()
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:due-race")
+	id := actor.ActorID("agent:due-race")
 	builder.byID[id] = builder.recordFactory(id)
 	h := openActivationHome(t, &testDesired{}, builder)
 
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
 	if _, err := h.schedMinter.Mint(id).Schedule(ctx, schedule.ScheduleReq{
 		Bind: schedule.BindIdentity, FireAt: h.nowMs() - 1, Type: "demo.tick",
 	}); err != nil {
@@ -220,11 +225,11 @@ func TestRemove_DueFireRace(t *testing.T) {
 func TestRemove_ReviverStraddle_SelfUndo(t *testing.T) {
 	ctx := context.Background()
 	builder := newTestBuilder()
-	const id = actor.ActorID("agent:straddle")
+	id := actor.ActorID("agent:straddle")
 	builder.byID[id] = builder.recordFactory(id)
 	h := openActivationHome(t, &testDesired{}, builder)
 
-	admit(t, h, id, actor.KindAgent)
+	id = admit(t, h, id, actor.KindAgent)
 
 	paused := make(chan struct{})
 	resume := make(chan struct{})

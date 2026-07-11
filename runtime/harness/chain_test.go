@@ -34,15 +34,15 @@ func TestChain_NewValidatesDeps(t *testing.T) {
 // Full accept path: a well-formed event writes a durable row and returns a seq.
 func TestChain_WriteAcceptsEventDurably(t *testing.T) {
 	cs := newTestStore(t)
-	registerActor(t, cs, actor.ActorID("agent:p"), actor.KindAgent)
+	author := registerActor(t, cs, actor.ActorID("agent:p"), actor.KindAgent)
 	c := newTestChain(t, cs)
 
 	e := &message.Envelope{
 		ID: "m1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
-		Sender: message.Sender{ID: "agent:p"}, Kind: message.KindEvent, Type: "agent.text",
+		Sender: message.Sender{ID: author}, Kind: message.KindEvent, Type: "agent.text",
 		Audience: message.Audience{"x"},
 	}
-	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), e)
+	res, err := c.write(ctxCallerKind(author, actor.KindAgent), e)
 	if err != nil {
 		t.Fatalf("Write: %v", err)
 	}
@@ -135,28 +135,28 @@ func TestChain_WriteNilEnvelope(t *testing.T) {
 // the store. Then a SECOND final must reject (terminal uniqueness, end to end).
 func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 	cs := newTestStore(t)
-	registerActor(t, cs, actor.ActorID("agent:caller"), actor.KindAgent)
-	registerActor(t, cs, actor.ActorID("tool:xhs"), actor.KindTool)
+	callerID := registerActor(t, cs, actor.ActorID("agent:caller"), actor.KindAgent)
+	toolID := registerActor(t, cs, actor.ActorID("tool:xhs"), actor.KindTool)
 	c := newTestChain(t, cs)
 
 	// 1. caller sends a request to tool:xhs.
 	req := &message.Envelope{
 		ID: "req1", TS: fixedNowMs - 1000, ChannelID: testChannelID,
-		Sender: message.Sender{ID: "agent:caller"}, Kind: message.KindRequest, Type: "xhs.publish",
-		Audience: message.Audience{"tool:xhs"}, Payload: json.RawMessage(`{}`),
+		Sender: message.Sender{ID: callerID}, Kind: message.KindRequest, Type: "xhs.publish",
+		Audience: message.Audience{toolID}, Payload: json.RawMessage(`{}`),
 	}
-	if res, err := c.write(ctxCallerKind("agent:caller", actor.KindAgent), req); err != nil || !res.Accepted() {
+	if res, err := c.write(ctxCallerKind(callerID, actor.KindAgent), req); err != nil || !res.Accepted() {
 		t.Fatalf("request write: err=%v reason=%q", err, res.RejectReason)
 	}
 
 	// 2. tool:xhs answers final completed.
 	resp := &message.Envelope{
 		ID: "resp1", TS: fixedNowMs, ChannelID: testChannelID,
-		Sender: message.Sender{ID: "tool:xhs"}, Kind: message.KindResponse, Type: "xhs.publish",
-		ParentID: "req1", Audience: message.Audience{"agent:caller"},
+		Sender: message.Sender{ID: toolID}, Kind: message.KindResponse, Type: "xhs.publish",
+		ParentID: "req1", Audience: message.Audience{callerID},
 		Payload: json.RawMessage(`{"status":"completed"}`),
 	}
-	res, err := c.write(ctxCallerKind("tool:xhs", actor.KindTool), resp)
+	res, err := c.write(ctxCallerKind(toolID, actor.KindTool), resp)
 	if err != nil || !res.Accepted() {
 		t.Fatalf("response write: err=%v reason=%q", err, res.RejectReason)
 	}
@@ -172,11 +172,11 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 	// 3. a SECOND final response must be rejected (terminal uniqueness).
 	resp2 := &message.Envelope{
 		ID: "resp2", TS: fixedNowMs, ChannelID: testChannelID,
-		Sender: message.Sender{ID: "tool:xhs"}, Kind: message.KindResponse, Type: "xhs.publish",
-		ParentID: "req1", Audience: message.Audience{"agent:caller"},
+		Sender: message.Sender{ID: toolID}, Kind: message.KindResponse, Type: "xhs.publish",
+		ParentID: "req1", Audience: message.Audience{callerID},
 		Payload: json.RawMessage(`{"status":"failed","reason":"receiver_internal_error"}`),
 	}
-	res2, err := c.write(ctxCallerKind("tool:xhs", actor.KindTool), resp2)
+	res2, err := c.write(ctxCallerKind(toolID, actor.KindTool), resp2)
 	if err != nil {
 		t.Fatalf("second response write err: %v", err)
 	}
@@ -188,20 +188,20 @@ func TestChain_RequestThenFinalResponseClosure(t *testing.T) {
 // A duplicate envelope.id is a pure integrity reject surfaced at engine append.
 func TestChain_DuplicateEnvelopeIDRejectsAtAppend(t *testing.T) {
 	cs := newTestStore(t)
-	registerActor(t, cs, actor.ActorID("agent:p"), actor.KindAgent)
+	author := registerActor(t, cs, actor.ActorID("agent:p"), actor.KindAgent)
 	c := newTestChain(t, cs)
 
 	mk := func() *message.Envelope {
 		return &message.Envelope{
 			ID: "dup", TS: fixedNowMs - 1000, ChannelID: testChannelID,
-			Sender: message.Sender{ID: "agent:p"}, Kind: message.KindEvent, Type: "agent.text",
+			Sender: message.Sender{ID: author}, Kind: message.KindEvent, Type: "agent.text",
 			Audience: message.Audience{"x"},
 		}
 	}
-	if res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), mk()); err != nil || !res.Accepted() {
+	if res, err := c.write(ctxCallerKind(author, actor.KindAgent), mk()); err != nil || !res.Accepted() {
 		t.Fatalf("first write: err=%v reason=%q", err, res.RejectReason)
 	}
-	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), mk())
+	res, err := c.write(ctxCallerKind(author, actor.KindAgent), mk())
 	if err != nil {
 		t.Fatalf("second write err: %v", err)
 	}
