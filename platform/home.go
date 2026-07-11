@@ -193,15 +193,6 @@ type Home struct {
 	reviveLogAt   map[actor.ActorID]time.Time
 	reviveBackoff map[actor.ActorID]reviveBackoffEntry
 
-	// obsReg dedups this home's own per-actor WatchObs registration (the local-cell
-	// arm of the actor-source obs axis, mirroring Acceptor.obsReg's dedup for the
-	// daemon-attach arm) — WatchObs itself is append-only with no built-in dedup
-	// (runtime.go), so a losing SpawnIfAbsent/Fork build (CAS discarded) must not
-	// leave a duplicate registration behind. Registered once, at buildCaps (the
-	// single convergence point for every local birth path).
-	obsMu  sync.Mutex
-	obsReg map[actor.ActorID]bool
-
 	// reviverStraddleHook is a test-only seam (nil in production): see its call
 	// site in homeReviver.EnsureLive.
 	reviverStraddleHook func()
@@ -222,35 +213,6 @@ type Home struct {
 	// in-flight write past the gate is fenced by the cell caps' own live membranes
 	// once cells stop). atomic (lock-free read on the hot Submit path).
 	closed atomic.Bool
-}
-
-// watchObs registers the device-presence fold for id's obs PUSH, deduped so a
-// discarded build (SpawnIfAbsent/Fork CAS loser) never leaves the runtime's
-// append-only obsWatch registry double-appended for the same id.
-func (h *Home) watchObs(id actor.ActorID) {
-	h.obsMu.Lock()
-	defer h.obsMu.Unlock()
-	if h.obsReg[id] {
-		return
-	}
-	h.channel.Cells().WatchObs(id, h.deviceFold)
-	h.obsReg[id] = true
-}
-
-// unwatchObs is watchObs's symmetric un-registration (H5): obsReg is a name
-// registry that must not outlive the membership it tracks (WatchObs is
-// append-only, runtime.go), so a dereg without the matching UnwatchObs would
-// leak the fold's registration across a future re-admission of the same id
-// (mirrors Acceptor.obsReg's own dereg-site cleanup for the daemon-attach arm).
-// A no-op if id was never registered here (e.g. it only ever lived attached).
-func (h *Home) unwatchObs(id actor.ActorID) {
-	h.obsMu.Lock()
-	defer h.obsMu.Unlock()
-	if !h.obsReg[id] {
-		return
-	}
-	h.channel.Cells().UnwatchObs(id, h.deviceFold)
-	delete(h.obsReg, id)
 }
 
 // reviveLogThrottle bounds the attached-host revive-skip log (see
@@ -421,6 +383,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//     death edge decays its L3 to unknown — the link-down cascade). Per-actor
 	//     obs registration happens at attach (Acceptor below).
 	channel.Cells().WatchDown(deviceFold)
+	channel.Cells().WatchObsAll(deviceFold)
 
 	// 9. Assemble the Home shell now: the scheduler's Reviver and the eager
 	//    reconcile arm both close over it (buildCaps, builder, cells), so it must
@@ -445,7 +408,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 		systemPen:        systemPen,
 		reviveLogAt:      map[actor.ActorID]time.Time{},
 		reviveBackoff:    map[actor.ActorID]reviveBackoffEntry{},
-		obsReg:           map[actor.ActorID]bool{},
 		pokeCh:           make(chan struct{}, 1),
 	}
 
@@ -503,7 +465,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Registry:           cs.Registry,
 		ChannelID:          cfg.ChannelID,
 		Logger:             logger,
-		ObsWatcher:         deviceFold,
 		CancelRequest:      h.handleCancelUpstream,
 		StorageHostControl: homeStorageHostControl{outbox: cs.Outbox, timeout: cfg.ReservationTimeout},
 	})
@@ -710,11 +671,6 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		if rec, ok := member[id]; ok && rec.Host != "" {
 			continue // attached elsewhere — not gone, not this ring's to evict (反误杀)
 		}
-		// 登记 (latent, H5-对称): DespawnID here does NOT unwatchObs — a no-longer-desired
-		// member may be re-desired later, so its obs registration legitimately survives
-		// a mere deactivation. The only leak is a member whose户籍 row is deleted by RAW
-		// SQL (bypassing Home.Remove, which DOES unwatchObs); that path is not reachable
-		// through any supported verb, so the symmetric un-registration stays with Remove.
 		rt.DespawnID(id)
 	}
 	h.prevEagerDesired = current
@@ -923,16 +879,8 @@ func (h *Home) KickDaemon(computeID string) int {
 // liveSchedule membrane the other caps wear — self-targeted timers gated on this
 // incarnation still being live. schedMinter is always set before any participant
 // admission (the system cell does not pass through buildCaps).
-//
-// buildCaps is also the obs-registration convergence point (G8): every local
-// birth path — the reconcile ring's eager 补臂, homeReviver, and
-// spawnHandle.Fork — calls this method to weld a child's caps, so registering
-// h.watchObs(id) here once covers all four without a separate call at each
-// birth site (and its dedup makes a build a losing SpawnIfAbsent/Fork CAS
-// discards a no-op double-registration, not a double fanout).
 func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnation) actorcaps.Caps {
 	rt := h.channel.Cells()
-	h.watchObs(id)
 	return actorcaps.Caps{
 		Pen:      link.NewLivePen(h.minter.Mint(id, kind, h.channelID), inc, rt),
 		Access:   link.NewLiveResourceAccess(h.cs.Access.Mint(id), inc, rt),

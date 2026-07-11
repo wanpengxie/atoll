@@ -69,10 +69,6 @@ func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
 	// ③ double-tap: kill whatever the Reviver may have spawned in the window
 	// between ① and ②'s commit (see the doc comment above).
 	h.channel.Cells().DespawnID(id)
-	// H5: id is no longer a member — its obs registration must not survive the
-	// dereg (WatchObs is append-only; leaving the entry would leak across a
-	// future re-admission of the same id).
-	h.unwatchObs(id)
 	// Presence对称清账 (期12 S4, pending-leftovers #3): drop every ws session
 	// token and Forget the fold snapshot — the ring's削 is a quiet teardown
 	// with no down edge, so without this the removed member's device presence

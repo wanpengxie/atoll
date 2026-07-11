@@ -46,6 +46,9 @@ func newStoreHomeRigWithObs(t *testing.T, obsWatcher actorrt.ObsWatcher) *storeH
 	t.Cleanup(func() { _ = cs.Close() })
 
 	rt, del := actorrt.New(actorrt.Config{Parent: context.Background()})
+	if obsWatcher != nil {
+		rt.WatchObsAll(obsWatcher)
+	}
 	r := &storeHomeRig{rt: rt, deliver: del, cs: cs}
 	r.acc = link.NewAcceptor(link.Config{
 		Minter:     &stubMinter{},
@@ -55,7 +58,6 @@ func newStoreHomeRigWithObs(t *testing.T, obsWatcher actorrt.ObsWatcher) *storeH
 		ChannelID:  testChannelID,
 		LeasePing:  5 * time.Second,
 		LeaseTTL:   30 * time.Second,
-		ObsWatcher: obsWatcher,
 	})
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.acc.Serve(w, req, "daemon-1")
@@ -317,9 +319,8 @@ func TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut(t *testing.T) {
 	}
 }
 
-// countingObsWatcher counts OnObs invocations per actor — the fanout-doubling
-// probe: a leaked WatchObs registration (obsReg cleared without the matching
-// UnwatchObs, or vice versa) makes a SINGLE upstream publish land twice.
+// countingObsWatcher proves the one population subscription remains single
+// across declaration churn and same-name reattachment.
 type countingObsWatcher struct {
 	mu    sync.Mutex
 	calls map[actor.ActorID]int
@@ -341,14 +342,9 @@ func (w *countingObsWatcher) count(id actor.ActorID) int {
 	return w.calls[id]
 }
 
-// TestReattach_HostReconcile_UnwatchesObsOnDereg (H5): the fallen-out dereg
-// cascade must clear BOTH the obsReg dedup entry AND the runtime registration
-// (UnwatchObs) together — clearing only one half leaves the actor-source obs
-// PUSH axis wrong on the next attach for the same id: obsReg cleared without
-// UnwatchObs would double-register (the old registration still fires) on
-// re-attach, and a publish after that would be observed TWICE by the SAME
-// watcher instance.
-func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
+// TestReattach_HostReconcile_PopulationObsStaysSingle proves attach/dereg churn
+// performs no subscription bookkeeping and each publish still arrives once.
+func TestReattach_HostReconcile_PopulationObsStaysSingle(t *testing.T) {
 	ctx := context.Background()
 	obs := newCountingObsWatcher()
 	r := newStoreHomeRigWithObs(t, obs)
@@ -396,8 +392,8 @@ func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 	}
 
-	// Shrink the declared set to {} — toolA falls out: despawn-first, then
-	// dereg (which must clear obsReg[toolA] AND UnwatchObs it).
+	// Shrink the declared set to {} — toolA falls out without touching obs
+	// subscription state.
 	if err := d.Reattach(ctx, nil); err != nil {
 		t.Fatalf("Reattach (drop toolA): %v", err)
 	}
@@ -415,8 +411,7 @@ func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
 
 	// Re-admit toolA (the introduce door re-runs: a deregistered id needs its户籍
 	// back before attach may stamp Host — membrane law, v1.8 问①), then re-declare
-	// it on the SAME link (a fresh embodiment, same id) — attach re-registers obs
-	// (obsReg[toolA] was cleared).
+	// it on the SAME link (a fresh embodiment, same id).
 	oldID := toolA
 	toolA, err = r.cs.Membership.Admit(ctx, actor.KindTool, "obs-a", time.Now().UnixMilli())
 	if err != nil {
@@ -455,11 +450,10 @@ func TestReattach_HostReconcile_UnwatchesObsOnDereg(t *testing.T) {
 		}
 		time.Sleep(5 * time.Millisecond)
 	}
-	// Settle: give a leaked double-registration a chance to double-fire before
-	// asserting the count stayed at exactly one new call.
+	// Settle before asserting the count stayed at exactly one new call.
 	time.Sleep(50 * time.Millisecond)
 	if got := obs.count(toolA) - before; got != 1 {
-		t.Fatalf("post-reattach publish observed %d times, want exactly 1 (obsReg/UnwatchObs must clear together)", got)
+		t.Fatalf("post-reattach publish observed %d times, want exactly 1 population delivery", got)
 	}
 }
 

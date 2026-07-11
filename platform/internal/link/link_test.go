@@ -188,7 +188,7 @@ func newDaemonHost() *daemonHost {
 	return h
 }
 
-func (h *daemonHost) OnDown(_ context.Context, id actor.ActorID, cause error) {
+func (h *daemonHost) OnDown(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, cause error) {
 	h.mu.Lock()
 	handler := h.down[id]
 	h.mu.Unlock()
@@ -242,7 +242,7 @@ func newHomeRig(t *testing.T, leasePing, leaseTTL time.Duration) *homeRig {
 		minter:     &stubMinter{},
 		membership: &stubMembership{},
 	}
-	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ error) {
+	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, _ error) {
 		r.mu.Lock()
 		r.downActors = append(r.downActors, id)
 		r.mu.Unlock()
@@ -272,9 +272,11 @@ func (r *homeRig) getDown() []actor.ActorID {
 	return cp
 }
 
-type watcherFunc func(context.Context, actor.ActorID, error)
+type watcherFunc func(context.Context, actor.ActorID, actorrt.Incarnation, error)
 
-func (f watcherFunc) OnDown(ctx context.Context, id actor.ActorID, cause error) { f(ctx, id, cause) }
+func (f watcherFunc) OnDown(ctx context.Context, id actor.ActorID, incarnation actorrt.Incarnation, cause error) {
+	f(ctx, id, incarnation, cause)
+}
 
 // --- tests ---
 
@@ -890,7 +892,7 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 		minter:     &stubMinter{},
 		membership: &stubMembership{},
 	}
-	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ error) {
+	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, _ error) {
 		r.mu.Lock()
 		r.downActors = append(r.downActors, id)
 		r.mu.Unlock()

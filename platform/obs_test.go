@@ -77,73 +77,8 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 	t.Fatal("View.DevicePresence never lit up after PublishObs")
 }
 
-// TestHome_WatchObs_DedupesAcrossRepeatBuildCaps (DoD §7.6): buildCaps is the
-// convergence point for every local birth path; a repeated build for the same
-// id (e.g. a SpawnIfAbsent/Fork CAS loser rebuilding caps before losing the
-// race) must not leave a duplicate runtime registration — the obsReg map is
-// the dedup guarantee.
-func TestHome_WatchObs_DedupesAcrossRepeatBuildCaps(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
-	h, err := Open(HomeConfig{ChannelID: channel.ID("test-obs-dedup"), DBPath: dbPath})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = h.Close() })
-
-	id := actor.ActorID("dedup-actor")
-	h.watchObs(id)
-	h.watchObs(id)
-	h.watchObs(id)
-
-	h.obsMu.Lock()
-	n := len(h.obsReg)
-	reg := h.obsReg[id]
-	h.obsMu.Unlock()
-	if !reg {
-		t.Fatalf("obsReg[%q] = false, want true after watchObs", id)
-	}
-	if n != 1 {
-		t.Fatalf("obsReg has %d entries after repeated watchObs(same id), want 1", n)
-	}
-}
-
-// TestHome_BuildCaps_RegistersObs_AcrossBirthPaths (DoD §7.6): buildCaps is the
-// single caps-assembly seam shared by Home.SpawnIfAbsent, the reconcile ring's eager
-// 补臂, homeReviver, and spawnHandle.Fork (all four hold this method value) —
-// exercising it directly for distinct ids covers the convergence point every
-// birth path funnels through, without re-driving each path end to end.
-func TestHome_BuildCaps_RegistersObs_AcrossBirthPaths(t *testing.T) {
-	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
-	h, err := Open(HomeConfig{ChannelID: channel.ID("test-obs-buildcaps"), DBPath: dbPath})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	t.Cleanup(func() { _ = h.Close() })
-
-	rt := h.channel.Cells()
-	ids := []actor.ActorID{"birth-spawn", "birth-reconcile", "birth-reviver", "birth-fork"}
-	for _, id := range ids {
-		_, _, _ = rt.SpawnIfAbsent(id, actor.KindAgent, func(inc actorrt.Incarnation) actorrt.Actor {
-			h.buildCaps(id, actor.KindAgent, inc)
-			return statTestActor{}
-		})
-	}
-
-	h.obsMu.Lock()
-	defer h.obsMu.Unlock()
-	for _, id := range ids {
-		if !h.obsReg[id] {
-			t.Errorf("obsReg[%q] = false after buildCaps, want true", id)
-		}
-	}
-}
-
-// countingObsWatcher counts OnObs invocations per actor — the fanout-doubling
-// probe: a birth path that accidentally left a duplicate runtime-level
-// WatchObs registration (buildCaps's dedup is obsReg-map-based, per id, not
-// per-registration — see feedback_no_kernel_babysitting-adjacent H5 reasoning
-// in accept.go/scheduler.go) would show up here as count()==2 after exactly
-// one PublishObs, not count()==1.
+// countingObsWatcher proves each publish reaches the one population watcher
+// exactly once, independently of the producer's birth path.
 type countingObsWatcher struct {
 	mu    sync.Mutex
 	calls map[actor.ActorID]int
@@ -217,7 +152,7 @@ func TestObsFanout_HomeSpawn_OncePerPublish(t *testing.T) {
 	id = minted
 
 	w := newCountingObsWatcher()
-	h.channel.Cells().WatchObs(id, w)
+	h.channel.Cells().WatchObsAll(w)
 	deliverTrigger(t, h, id)
 	awaitCount(t, w, id)
 }
@@ -246,7 +181,7 @@ func TestObsFanout_ReconcileActivationRevive_OncePerPublish(t *testing.T) {
 	}
 
 	w := newCountingObsWatcher()
-	h.channel.Cells().WatchObs(id, w)
+	h.channel.Cells().WatchObsAll(w)
 	deliverTrigger(t, h, id)
 	awaitCount(t, w, id)
 }
@@ -280,7 +215,7 @@ func TestObsFanout_HomeReviver_OncePerPublish(t *testing.T) {
 	}
 
 	w := newCountingObsWatcher()
-	h.channel.Cells().WatchObs(id, w)
+	h.channel.Cells().WatchObsAll(w)
 	deliverTrigger(t, h, id)
 	awaitCount(t, w, id)
 }
@@ -318,7 +253,7 @@ func TestObsFanout_Fork_OncePerPublish(t *testing.T) {
 	}
 
 	w := newCountingObsWatcher()
-	h.channel.Cells().WatchObs(childID, w)
+	h.channel.Cells().WatchObsAll(w)
 	deliverTrigger(t, h, childID)
 	awaitCount(t, w, childID)
 }

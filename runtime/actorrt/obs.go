@@ -61,8 +61,8 @@ type ObsWatcher interface {
 	OnObs(ctx context.Context, id actor.ActorID, incarnation Incarnation, kind ObsKind, val ObsValue)
 }
 
-// DELETED CELL — actor-source per-entity PUSH (WatchObs(id)), ripped W4: a
+// DELETED CELL — actor-source per-entity PUSH subscription, ripped W4: a
 // population-wide consumer had to mirror every actor birth and death because the
 // subscription key did not match its interest. Population consumers use
 // WatchObsAll. REBUILD OBLIGATION: when a real per-entity consumer appears,
-// rebuild WatchObs(id) additively and pass the subscription-key-isomorphism gate.
+// rebuild a keyed API additively and pass the subscription-key-isomorphism gate.

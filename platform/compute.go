@@ -534,6 +534,7 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 	// The obs arm outlives every individual link the same way rt does — built
 	// once, Rebind'd per connection, pumped for the daemon's whole life.
 	obsFwd := newCellObsForwarder()
+	rt.WatchObsAll(obsFwd)
 	go obsFwd.pump(ctx)
 	// The caller-side cancel arm, like the obs arm, outlives every individual link:
 	// built once, Rebind'd per connection, so a hosted caller's Canceller always
@@ -780,9 +781,6 @@ func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer
 	r.watcher.mu.Lock()
 	r.watcher.down[id] = arms.Down
 	r.watcher.mu.Unlock()
-	// Register the obs forwarder BEFORE Spawn so no early obs edge is missed
-	// (same discipline as WatchDown).
-	r.rt.WatchObs(id, r.obsFwd)
 	// Two-phase construction, mirroring the home activation path (§10.13 推导7①/G12): the
 	// build closure runs inside Spawn, BEFORE go-live, so link.NewLiveArms welds
 	// the cell's caps to THIS incarnation and fences every call until it goes

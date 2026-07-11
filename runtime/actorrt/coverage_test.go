@@ -149,7 +149,7 @@ func TestNewDefaultsParent(t *testing.T) {
 	}
 }
 
-// TestWatchersIgnoreNil: WatchDown(nil) and WatchObs(nil) are no-ops — a nil
+// TestWatchersIgnoreNil: WatchDown(nil) and WatchObsAll(nil) are no-ops — a nil
 // watcher must never be enrolled (it would panic on the closure-critical path).
 func TestWatchersIgnoreNil(t *testing.T) {
 	t.Parallel()
