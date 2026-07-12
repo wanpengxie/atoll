@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"time"
 
@@ -92,10 +93,16 @@ func (g *Gateway) Attach(ctx context.Context, home *platform.Home, chID channel.
 		bindingGen = gen
 		s.ctx, s.cancel = context.WithCancel(s.arm.context())
 	} else {
-		// tail-only observer: its own lifecycle (no arm seal — revocation of a bare
-		// observer is deferred, see build-spec申报; the read pump's per-batch recheck
-		// is a member-only backstop).
-		s.ctx, s.cancel = context.WithCancel(context.Background())
+		// tail-only observer (看得见≠在里面): no arm seal — revocation of a bare
+		// observer is deferred (build-spec申报; the read pump's per-batch recheck is a
+		// member-only backstop). But it STILL passes the closed gate and derives its ctx
+		// from the gateway ctx (P1) — so a post-Close attach is refused and Close's cancel
+		// silences a live tail pump BEFORE Home (关站序 tail closure, symmetric with member).
+		tctx, tcancel, aerr := g.seatTailOnly()
+		if aerr != nil {
+			return nil, 0, aerr
+		}
+		s.ctx, s.cancel = tctx, tcancel
 	}
 	return s, bindingGen, nil
 }
@@ -171,6 +178,8 @@ func (s *Session) runFeed() {
 	defer s.lane.close()
 	if s.arm != nil {
 		defer s.arm.untrack()
+	} else {
+		defer s.gw.tailPumps.Done() // paired with beginFeed's tailPumps.Add (tail-only)
 	}
 	notify, cancelSub := s.home.Subscribe()
 	defer cancelSub()
@@ -309,8 +318,16 @@ func (s *Session) Upstream(ctx context.Context, f platform.Frame) platform.Frame
 			}
 			f = routed
 		}
-		res, derr := s.slot.Deliver(f)
+		// 递交线性化点核验 (P0-1 下half): pass the frame's binding_gen so the slot
+		// re-verifies it against the current层2世代 UNDER its lock — a rebind that
+		// landed between admitUpstream and here (初验→seal→新臂→Deliver) is refused
+		// stale_binding at the linearization point, not silently written into the
+		// successor binding.
+		res, derr := s.slot.Deliver(f, f.BindingGen)
 		if derr != nil {
+			if errors.Is(derr, platform.ErrStaleBinding) {
+				return errFrame(platform.CodeStaleBinding, "binding superseded during delivery (rebound)")
+			}
 			// ErrNoOccupant (cell mid-re-mint / torn down) → retryable unavailable.
 			return errFrame(platform.CodeUnavailable, "subject cell unavailable — retry")
 		}

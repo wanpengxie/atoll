@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"fmt"
+	"net"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -129,6 +130,77 @@ func TestAttachMultiTabSharesBinding(t *testing.T) {
 	}
 }
 
+// TestDeliverStaleAfterSealRebindRealPath (P0-1 real interleave): the ABA guard end
+// to end over the real Attach + slot path. A frame passed the arm's admitUpstream初验
+// on binding A; before it reaches the slot's Deliver, A is sealed (detach) and a fresh
+// attach rebinds binding B into the SAME slot. Two properties must hold together: (1)
+// the绑定世代 is monotonic across rebuild (genB strictly > genA — no per-arm reset
+// re-issuing genA, ABA), and (2) the stale gen-A frame reaching Deliver AFTER the
+// rebind is refused ErrStaleBinding at the linearization point, never written into
+// binding B — while a gen-B frame delivers. Either fix alone is insufficient: without
+// (1) the gens collide and (2)'s check passes the stale frame; without (2) the TOCTOU
+// window stays open. Together they close it.
+func TestDeliverStaleAfterSealRebindRealPath(t *testing.T) {
+	h, subjectID := openAttachHome(t)
+	g := New(Config{})
+	ctx := context.Background()
+	ch := attachTestChannelID
+
+	s1, genA, err := g.Attach(ctx, h, ch, "alice", nil)
+	if err != nil {
+		t.Fatalf("attach A: %v", err)
+	}
+	defer s1.Close()
+
+	// Make the member slot live with a trivial interpreter (no reconcile ring here),
+	// so Deliver reaches the gen gate rather than short-circuiting on no-occupant.
+	slot, ok := h.SubjectSlotFor(subjectID)
+	if !ok {
+		t.Fatal("member slot must exist after attach")
+	}
+	frames, _, release := slot.AttachInterpreter()
+	defer release()
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case job := <-frames:
+				r, _ := platform.NewFrame(platform.FrameReceipt, 0, job.Frame.Ref, platform.SubmitReceipt{MessageID: "m", Seq: 1})
+				job.Reply(platform.FrameResult{Frame: r})
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer close(stop)
+
+	// The in-flight frame that passed admitUpstream on binding A.
+	inflight := mustSubmit(t, genA)
+
+	// Seal A (detach) + rebind B into the same slot.
+	detach, _ := platform.NewFrame(platform.FrameDetach, genA, "d", platform.DetachPayload{ChannelID: string(ch)})
+	s1.Upstream(ctx, detach)
+	s2, genB, err := g.Attach(ctx, h, ch, "alice", nil)
+	if err != nil {
+		t.Fatalf("attach B (rebind): %v", err)
+	}
+	defer s2.Close()
+
+	// (1) Monotonic across rebuild — the ABA precondition.
+	if genB <= genA {
+		t.Fatalf("rebind must mint a strictly greater binding gen (ABA fix): genA=%d genB=%d", genA, genB)
+	}
+	// (2) The stale gen-A frame reaching Deliver after the rebind is refused at the
+	// linearization point (not silently written into binding B).
+	if _, derr := slot.Deliver(inflight, genA); derr != platform.ErrStaleBinding {
+		t.Fatalf("stale gen-A frame at Deliver must be refused ErrStaleBinding, got %v", derr)
+	}
+	// A current gen-B frame delivers.
+	if _, derr := slot.Deliver(mustSubmit(t, genB), genB); derr != nil {
+		t.Fatalf("current gen-B frame must deliver, got %v", derr)
+	}
+}
+
 // TestGatewayCloseAttachStraddleRealPath (P0-4, real Attach): concurrent full
 // Gateway.Attach (seat + gen grant + StartFeed) racing Close. Every attach either
 // seats fully (its pump then joined by Close's seal, zero leak) or is refused
@@ -181,20 +253,25 @@ func TestGatewayCloseAttachStraddleRealPath(t *testing.T) {
 	}
 }
 
-// TestSealJoinIsolatesStuckWriter (Gap 4 A×L, real feed pump not a模型替身): the seal
-// join set covers ONLY the feed pump. A genuinely stuck consumer (a goroutine that never
-// drains the lane, modelling a ws writer blocked on a dead peer) is present throughout,
-// yet the REAL runFeed pump fills the non-draining lane to capacity, tears itself down
-// (满→断连), and seal joins it in budget — never waiting for the stuck writer (which is
-// NOT tracked: lane closure isolates it). A regression that either failed to tear the
-// pump down on a full lane, or folded the writer into the join set, would hang here.
+// TestSealJoinIsolatesStuckWriter (A×L, REAL writer over a REAL connection): the seal
+// join set covers ONLY the feed pump. A genuine stuck writer — a goroutine that drains
+// the REAL lane (sess.Down()) and writes each frame to a REAL net.Pipe whose far end is
+// never read, so a synchronous write blocks exactly like connector/web's writerPump
+// parked on a dead peer — stays parked straight through the seal. The writer holds a
+// strong *Session ref (the isolation argument is LIVENESS, not resource-freedom): (1)
+// the REAL runFeed pump fills the non-draining lane to capacity and tears itself down
+// (满→断连); (2) seal joins that pump within the REAL 15s budget WITHOUT waiting for the
+// parked writer — proven by seal returning far below both the writer's write deadline
+// and the join budget; (3) the writer's own write deadline fires and unwinds it (退出链
+// reachable), independent of the seal. Folding the writer into the join set (or failing
+// to tear the pump down on a full lane) would blow the budget assertion.
 func TestSealJoinIsolatesStuckWriter(t *testing.T) {
 	h, _ := openAttachHome(t)
 	ctx := context.Background()
 	ch := attachTestChannelID
 
 	// Generate > LaneCapacity committed feed rows (each Admit writes one registration
-	// event) so the pump's backfill overflows a non-draining lane.
+	// event) so the pump's backfill overflows the (barely-drained) lane.
 	for i := 0; i < LaneCapacity+10; i++ {
 		if _, err := h.Admit(ctx, actor.KindHuman, fmt.Sprintf("filler-%d", i)); err != nil {
 			t.Fatalf("admit filler %d: %v", i, err)
@@ -207,43 +284,150 @@ func TestSealJoinIsolatesStuckWriter(t *testing.T) {
 		t.Fatalf("attach: %v", err)
 	}
 	defer s.Close()
-	s.arm.joinTimeout = time.Second // shrink so a regression that waited on the writer fails fast
 
-	// The stuck writer: a real goroutine that NEVER drains the lane and stays blocked
-	// straight through the seal (it is not tracked by the arm — the isolation under test).
-	writerStuck := make(chan struct{})
+	// production wsWriteWait is LaneWriteTimeoutMs (10s); shrunk here so the deadline-
+	// driven exit-chain assertion runs on a short wall clock. It stays comfortably >
+	// the expected seal time (ms) so seal-fast vs writer-deadline is an unambiguous
+	// discriminator: a seal that joined the writer would take ~writerDeadline.
+	const writerDeadline = 2 * time.Second
+	p1, p2 := net.Pipe()
+	defer p1.Close()
+	defer p2.Close() // p2 is NEVER read → p1.Write blocks (synchronous pipe)
+
+	writerBlocking := make(chan struct{})
 	writerGone := make(chan struct{})
 	go func() {
 		defer close(writerGone)
-		<-writerStuck
+		// Take the first frame unconditionally (backfill guarantees ≥1) and park on the
+		// write — the stuck writer we are isolating. Parked in Write it can no longer
+		// observe lane closure, exactly like writerPump stuck in ws.WriteMessage.
+		b, ok := <-s.Down()
+		if !ok {
+			return
+		}
+		_ = p1.SetWriteDeadline(time.Now().Add(writerDeadline))
+		close(writerBlocking)
+		_, _ = p1.Write(b) // blocks until the write deadline (p2 never read)
+		s.Close()          // deadline fired → the writer unwinds (holds a *Session ref, but exits)
 	}()
 
-	// Launch the real feed pump; with nothing draining the lane it fills to capacity and
-	// the next push tears it down (满→断连). Because seal has NOT run yet, the only
-	// possible teardown cause is the full lane.
+	// Launch the real feed pump; the parked writer drains only one frame, so the lane
+	// fills to capacity and the next push tears the pump down (满→断连).
 	s.StartFeed()
+	<-writerBlocking // the writer is now genuinely parked in a blocking write
 	select {
 	case <-s.Done():
 	case <-time.After(5 * time.Second):
-		t.Fatal("feed pump never tore down the full non-draining lane (满→断连 broken)")
+		t.Fatal("feed pump never tore down the full lane (满→断连 broken)")
 	}
 
-	// Seal joins the (already-terminated) feed pump promptly, without waiting for the
-	// stuck writer or blowing the join budget.
+	// Seal uses the REAL 15s join budget (法条 F). It joins ONLY the feed pump (already
+	// torn down), never the parked writer — so it returns in milliseconds, far below the
+	// writer's still-pending write deadline. A seal that had joined the writer would
+	// instead take ~writerDeadline.
 	start := time.Now()
 	s.arm.seal()
-	if elapsed := time.Since(start); elapsed >= s.arm.joinTimeout {
-		t.Fatalf("seal waited the join budget (%v) — a stuck writer dragged it out", elapsed)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("seal took %v — a stuck writer dragged it out (writer must be isolated, not joined)", elapsed)
+	}
+	if elapsed := time.Since(start); elapsed >= ArmSealJoinTimeout {
+		t.Fatalf("seal waited the full join budget (%v)", elapsed)
 	}
 	if leaked := g.LeakedPumps(); leaked != 0 {
 		t.Fatalf("feed pump not joined cleanly: leaked=%d", leaked)
 	}
-	// The writer is STILL stuck — proof the seal never joined/waited on it.
+	// The writer's exit chain IS reachable: its write deadline fires and unwinds it,
+	// independent of the seal (which already returned).
 	select {
 	case <-writerGone:
-		t.Fatal("stuck writer exited — it must be isolated from the seal, not part of it")
-	default:
+	case <-time.After(writerDeadline + 3*time.Second):
+		t.Fatal("stuck writer never exited via its write deadline (退出链 unreachable)")
 	}
-	close(writerStuck)
-	<-writerGone
+}
+
+// TestTailOnlyClosedGateAndCascade (P1): a tail-only observer session passes the same
+// closed admission gate as a member and derives its ctx from the gateway ctx — so Close
+// cancels its read pump and JOINS it before returning (关站静默, symmetric with member
+// arm seal), and a post-Close tail attach is refused ErrGatewayClosed.
+func TestTailOnlyClosedGateAndCascade(t *testing.T) {
+	h, _ := openAttachHome(t)
+	ctx := context.Background()
+	ch := attachTestChannelID
+
+	g := New(Config{})
+	// "bob" is not an admitted member → a tail-only (workspace observer) session.
+	s, gen, err := g.Attach(ctx, h, ch, "bob", nil)
+	if err != nil {
+		t.Fatalf("tail attach: %v", err)
+	}
+	if s.IsMember() {
+		t.Fatal("bob must be a tail-only observer (not a channel member)")
+	}
+	if gen != 0 {
+		t.Fatalf("a tail-only attach grants no binding gen, got %d", gen)
+	}
+	s.StartFeed()
+
+	done := make(chan struct{})
+	go func() { _ = g.Close(); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Close did not return — a tail pump was not joined (关站静默 broken)")
+	}
+	select {
+	case <-s.ctx.Done():
+	default:
+		t.Fatal("Close must cancel the tail session ctx (关站序 tail closure)")
+	}
+	if _, _, err := g.Attach(ctx, h, ch, "bob", nil); err != ErrGatewayClosed {
+		t.Fatalf("post-Close tail attach want ErrGatewayClosed, got %v", err)
+	}
+	s.Close()
+}
+
+// TestGatewayCloseTailOnlyStraddleRealPath (P1, straddle tail格): concurrent tail-only
+// Attach + StartFeed racing Close. Every attach either refuses cleanly (ErrGatewayClosed)
+// or seats and has its pump joined by Close's tailPumps.Wait; never a hang or a pump left
+// reading a closing Home. After Close every later tail attach is refused.
+func TestGatewayCloseTailOnlyStraddleRealPath(t *testing.T) {
+	h, _ := openAttachHome(t)
+	ctx := context.Background()
+	ch := attachTestChannelID
+
+	for iter := 0; iter < 25; iter++ {
+		g := New(Config{})
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		var sessions []*Session
+		const N = 6
+		for i := 0; i < N; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				s, _, err := g.Attach(ctx, h, ch, "bob", nil)
+				if err == ErrGatewayClosed {
+					return
+				}
+				if err != nil {
+					t.Errorf("tail attach: %v", err)
+					return
+				}
+				s.StartFeed() // self-closes if Close landed after the seat
+				mu.Lock()
+				sessions = append(sessions, s)
+				mu.Unlock()
+			}()
+		}
+		wg.Add(1)
+		go func() { defer wg.Done(); _ = g.Close() }() // returns only after tailPumps join
+		wg.Wait()
+
+		if _, _, err := g.Attach(ctx, h, ch, "bob", nil); err != ErrGatewayClosed {
+			t.Fatalf("iter %d: post-Close tail attach want ErrGatewayClosed, got %v", iter, err)
+		}
+		for _, s := range sessions {
+			s.Close()
+		}
+	}
 }

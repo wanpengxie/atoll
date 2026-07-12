@@ -73,6 +73,26 @@ type Gateway struct {
 	closed  bool // set by Close; a later Attach is refused (关站序 straddle, P0-4)
 	entries map[actor.ActorID]*userEntry
 
+	// ctx is the gateway-lifetime context; Close cancels it so tail-only sessions
+	// (which own no arm to seal) still go silent BEFORE Home — their read pumps
+	// derive from it (关站序 tail closure, P1). Member sessions are cancelled via
+	// their arm's seal; tail-only sessions have no arm, so this ctx is their edge.
+	ctx    context.Context
+	cancel context.CancelFunc
+
+	// tailPumps joins the tail-only read pumps at Close (symmetric with the member
+	// path's per-arm join). A tail pump's wg.Add is taken in beginFeed under the SAME
+	// closed re-check as a member's arm.track, so Close either observes the pump (and
+	// waits it out) or has already set closed (and the late pump is refused).
+	tailPumps sync.WaitGroup
+
+	// bindingSeq is the gateway-global绑定世代 source shared into every arm. It MUST
+	// outlive an arm's rebuild (ABA fix, P0-1): drawing每 fresh binding's gen from one
+	// monotonic counter makes the绑定世代 strictly increase per (subject,channel)
+	// across seal→rebind, so a stale in-flight frame is distinguishable from the new
+	// binding at the slot's delivery linearization point (see arm.nextGen / slot.Deliver).
+	bindingSeq atomic.Int64
+
 	// edgeSeq is the gateway-global presence edge cursor. It MUST outlive an
 	// entry's recreation: a reconnect mints a fresh userEntry, but the slot still
 	// remembers the last edgeSeq at this epoch — so a per-entry counter reset would
@@ -111,12 +131,15 @@ func New(cfg Config) *Gateway {
 	if epoch == 0 {
 		epoch = defaultEpoch()
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Gateway{
 		epoch:      epoch,
 		routing:    cfg.Routing,
 		revocation: cfg.Revocation,
 		logger:     logger,
 		entries:    map[actor.ActorID]*userEntry{},
+		ctx:        ctx,
+		cancel:     cancel,
 	}
 }
 
@@ -135,7 +158,12 @@ func (g *Gateway) Start() error {
 // Home. Idempotent.
 func (g *Gateway) Close() error {
 	g.mu.Lock()
+	if g.closed {
+		g.mu.Unlock()
+		return nil // idempotent
+	}
 	g.closed = true
+	g.cancel() // tail-only sessions' ctx cascade → their read pumps unblock
 	var arms []*channelArm
 	for _, e := range g.entries {
 		for _, a := range e.arms {
@@ -146,6 +174,10 @@ func (g *Gateway) Close() error {
 	for _, a := range arms {
 		a.seal()
 	}
+	// Join the tail-only pumps too (the member pumps were joined per-arm by seal).
+	// They own no arm/Home resource beyond the read流句柄 and unblock on the cancel
+	// above, so a plain join suffices — 设计 §5.5 defers only裸观众撤权, never关站静默.
+	g.tailPumps.Wait()
 	return nil
 }
 
@@ -196,7 +228,7 @@ func (g *Gateway) ensureArmLocked(home *platform.Home, chID channel.ID, subjectI
 	}
 	arm := e.arms[chID]
 	if arm == nil {
-		arm = newChannelArm(home, chID, subjectID, slot)
+		arm = newChannelArm(home, chID, subjectID, slot, &g.bindingSeq)
 		arm.leaked = &g.leaked
 		arm.leakMu = &g.leakMu
 		e.arms[chID] = arm
@@ -237,12 +269,29 @@ func (g *Gateway) seatMember(home *platform.Home, chID channel.ID, subjectID act
 	return gen, nil
 }
 
+// seatTailOnly is the tail-only (non-member observer) attach's closed-gated critical
+// section (P1 straddle closure, symmetric with seatMember): the closed gate AND the
+// ctx derivation land under ONE g.mu hold, so a concurrent Close either refuses (closed
+// → ErrGatewayClosed, zero residual) or the tail session's ctx derives from the live
+// gateway ctx and Close's cancel then reaches it. A tail-only session owns no arm/slot/
+// device (看得见≠在里面) — its only substrate coupling is the read流句柄, gated here.
+func (g *Gateway) seatTailOnly() (context.Context, context.CancelFunc, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return nil, nil, ErrGatewayClosed
+	}
+	ctx, cancel := context.WithCancel(g.ctx)
+	return ctx, cancel, nil
+}
+
 // beginFeed admits the read pump under the gateway lock's closed re-check (P0-4
-// straddle other half): a member's arm join-track (wg.Add) is taken HERE, in the SAME
-// critical section that reads closed, so Close's seal either observes the track (and
-// its wg.Wait joins the pump) or has already set closed (and the pump is refused). A
-// tail-only pump has no arm to track but is still refused after closed so it never
-// reads a closing Home. Returns false → the caller tears the session down.
+// straddle other half): the pump's join-track (wg.Add) is taken HERE, in the SAME
+// critical section that reads closed, so Close either observes the track (and its
+// join waits the pump out) or has already set closed (and the pump is refused). A
+// member pump tracks on its arm (seal joins it); a tail-only pump has no arm, so it
+// tracks on the gateway's tailPumps set (Close joins it) — both refused after closed
+// so neither reads a closing Home. Returns false → the caller tears the session down.
 func (g *Gateway) beginFeed(s *Session) bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -251,6 +300,8 @@ func (g *Gateway) beginFeed(s *Session) bool {
 	}
 	if s.arm != nil {
 		s.arm.track()
+	} else {
+		g.tailPumps.Add(1)
 	}
 	return true
 }

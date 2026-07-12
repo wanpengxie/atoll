@@ -95,6 +95,23 @@ type FrameResult struct {
 // unavailable code.
 var ErrNoOccupant = errors.New("subjectgate: no live occupant for slot")
 
+// ErrStaleBinding is Deliver's verdict when the frame's binding generation no
+// longer matches the slot's current layer-2 generation — a rebind (seal → fresh
+// arm → SetBinding) superseded the binding AFTER the gateway's upstream初验 but
+// BEFORE this delivery reached the linearization point. Comparing under the slot
+// lock (atomic with the live check) closes the初验→seal→rebind→Deliver TOCTOU
+// window: the gateway side初验 and the slot side re-verify form the two ends of
+// the双向世代 gate. The gateway maps it to the stale_binding边界 code.
+var ErrStaleBinding = errors.New("subjectgate: stale binding generation")
+
+// DeliverAnyGen bypasses the binding-generation assertion in Deliver. It is for
+// trusted platform-internal delivery paths (the app control shim) that carry NO
+// gateway binding — there is no gateway session/arm behind them, so a stale
+// gateway binding is not a possible fault. The gateway ALWAYS passes the
+// session's own granted gen (≥1), so a superseded binding is refused at the
+// delivery linearization point.
+const DeliverAnyGen int64 = -1
+
 func newSlot(id actor.ActorID) *Slot {
 	return &Slot{
 		id:        id,
@@ -227,11 +244,22 @@ func (s *Slot) AttachInterpreter() (<-chan Job, uint64, func()) {
 // Deliver hands one upstream frame to the attached interpreter and blocks for
 // its reply (synchronous, 零 ack 关联器). No interpreter, or the interpreter
 // detaches mid-flight → ErrNoOccupant.
-func (s *Slot) Deliver(f Frame) (FrameResult, error) {
+//
+// bindingGen is the递交线性化点 gate (下half of the双向世代 gate): the frame's
+// claimed binding generation is re-verified against the slot's current layer-2
+// generation UNDER the slot lock — atomic with the live check — so a rebind that
+// landed between the gateway's upstream初验 and this delivery (初验→seal→新臂→
+// Deliver interleave) is caught here and refused ErrStaleBinding. Pass
+// DeliverAnyGen from trusted platform-internal paths that carry no gateway binding.
+func (s *Slot) Deliver(f Frame, bindingGen int64) (FrameResult, error) {
 	s.mu.Lock()
 	if !s.live {
 		s.mu.Unlock()
 		return FrameResult{}, ErrNoOccupant
+	}
+	if bindingGen != DeliverAnyGen && bindingGen != s.bindingGen {
+		s.mu.Unlock()
+		return FrameResult{}, ErrStaleBinding
 	}
 	dead := s.dead
 	frames := s.frames

@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
@@ -40,13 +41,27 @@ type channelArm struct {
 	cancel context.CancelFunc
 	wg     sync.WaitGroup // the arm's read pumps
 
+	// bindingSeq is the绑定世代 source. It MUST outlive an arm's rebuild (ABA fix,
+	// P0-1): a seal drops the arm and the next attach mints a NEW arm, so a per-arm
+	// counter would reset to 1 and re-issue the SAME gen the sealed arm used —
+	// making a stale in-flight frame (that passed初验 on the old arm) indistinguish-
+	// able from the new binding at the delivery linearization point (ABA). Drawing
+	// from a shared (gateway-level) monotonic counter makes the绑定世代 strictly
+	// increase per (subject,channel) across every rebuild, so the slot's SetBinding
+	// value differs across rebind and Deliver's gen gate can reject the stale frame.
+	// A bare-arm unit test passes nil → a fresh local counter (single-arm scope).
+	bindingSeq *atomic.Int64
+
 	leaked      *int64 // gateway-level abandoned-pump tally (set by owner)
 	leakMu      *sync.Mutex
 	joinTimeout time.Duration // ArmSealJoinTimeout in production; test-tunable
 }
 
-func newChannelArm(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot) *channelArm {
+func newChannelArm(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot, bindingSeq *atomic.Int64) *channelArm {
 	ctx, cancel := context.WithCancel(context.Background())
+	if bindingSeq == nil {
+		bindingSeq = &atomic.Int64{} // bare-arm unit test: local monotonic counter
+	}
 	return &channelArm{
 		home:        home,
 		chID:        chID,
@@ -54,22 +69,25 @@ func newChannelArm(home *platform.Home, chID channel.ID, subjectID actor.ActorID
 		slot:        slot,
 		ctx:         ctx,
 		cancel:      cancel,
+		bindingSeq:  bindingSeq,
 		joinTimeout: ArmSealJoinTimeout,
 	}
 }
 
-// nextGen advances the绑定世代 and, for a member arm, writes it into the slot's
-// layer-2 register. Returns the new gen. 世代属于"绑定"(臂的一次生命)非"设备"
-// (§5.6 恢复差异): it advances ONCE, when the arm is FIRST built (a fresh binding)
-// — a later device joining an already-live arm reuses the current gen (ensureArmLocked
-// hands it currentGen, never a fresh nextGen), so a second tab never staled the first
-// (多设备同时合法 fix). A seal drops the arm; the next attach mints a NEW arm whose
-// own nextGen starts its fresh binding — the old (sealed) arm refuses every gen, so
-// cross-arm gen values never need to be comparable.
+// nextGen advances the绑定世代 (from the shared monotonic source) and, for a member
+// arm, writes it into the slot's layer-2 register. Returns the new gen. 世代属于
+// "绑定"(臂的一次生命)非"设备" (§5.6 恢复差异): it advances ONCE, when the arm is
+// FIRST built (a fresh binding) — a later device joining an already-live arm reuses
+// the current gen (ensureArmLocked hands it currentGen, never a fresh nextGen), so a
+// second tab never staled the first (多设备同时合法 fix). A seal drops the arm; the
+// next attach mints a NEW arm whose nextGen draws the NEXT value from the shared
+// counter (strictly greater than any the sealed arm used, ABA fix P0-1) — so a stale
+// frame's gen is distinguishable from the new binding at the delivery linearization
+// point, and the old (sealed) arm ALSO refuses via its sealed flag (belt + braces).
 func (a *channelArm) nextGen() int64 {
+	gen := a.bindingSeq.Add(1)
 	a.mu.Lock()
-	a.gen++
-	gen := a.gen
+	a.gen = gen
 	a.mu.Unlock()
 	if a.slot != nil {
 		a.slot.SetBinding(gen)
@@ -122,14 +140,16 @@ func (a *channelArm) context() context.Context { return a.ctx }
 // Seal-join 账的边界 (§5.5 join 上界, ledger A×L): the join set covers ONLY the
 // feed pump (runFeed) — the single goroutine that references arm/Home resources
 // (arm ctx, home.Subscribe, View().ReadAfterSeq, the lane cursor). The connector's
-// ws writer goroutine (connector/web writerPump) is deliberately NOT tracked: it
-// touches only the lane buffer + the wire, never arm or Home state, so lane closure
-// isolates it completely — when runFeed exits (seal cancels the arm ctx, or a full
-// lane tears it down) its deferred lane.close() unblocks the writer, and a writer
-// stuck on a slow/dead peer dies independently at its own LaneWriteTimeoutMs deadline,
-// which 法条 F pins STRICTLY < ArmSealJoinTimeout. So a stuck writer can never drag
-// out a seal: seal joins the pump (which stops the moment the lane fills or the ctx
-// cancels) and returns within budget while the doomed writer unwinds on its own clock.
+// ws writer goroutine (connector/web writerPump) is deliberately NOT tracked. The
+// isolation argument is NOT "the writer holds no resources" — it does hold a strong
+// *Session reference (and through it home/entry/arm). The argument is a LIVENESS one:
+// the writer is guaranteed to exit regardless — its per-write deadline (wsWriteWait /
+// LaneWriteTimeoutMs = 10s) fires on a stuck peer and errors the write, and runFeed's
+// deferred lane.close() unblocks a writer parked on the drain — so its strong ref
+// never keeps anything alive past its own bounded clock. Because that deadline is
+// pinned STRICTLY < ArmSealJoinTimeout (法条 F), the writer cannot drag out a seal:
+// seal joins ONLY the feed pump (which stops the moment the lane fills or the arm ctx
+// cancels) and returns within budget, while the doomed writer unwinds independently.
 func (a *channelArm) track()   { a.wg.Add(1) }
 func (a *channelArm) untrack() { a.wg.Done() }
 

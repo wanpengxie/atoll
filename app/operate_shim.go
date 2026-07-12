@@ -114,7 +114,10 @@ func (a *App) submitControlThroughDoor(ctx context.Context, chID, userID, msgTyp
 	if ferr != nil {
 		return nil, ferr
 	}
-	res, derr := slot.Deliver(f)
+	// DeliverAnyGen: the control shim carries no gateway binding (no session/arm),
+	// so the binding-generation assertion does not apply — a stale gateway binding
+	// is not a possible fault on this trusted platform-internal path.
+	res, derr := slot.Deliver(f, platform.DeliverAnyGen)
 	if derr != nil {
 		// ErrNoOccupant (cell mid-re-mint / torn down) → retryable unavailable.
 		return nil, errShimCellUnavailable

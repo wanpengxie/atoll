@@ -10,7 +10,7 @@ import (
 // success — the shared世代 admission gate refuses (admit=false) and the arm reports
 // sealed (DoD-5 双向零可观察成功). Seal is idempotent.
 func TestArmDetachSealBidirectional(t *testing.T) {
-	a := newChannelArm(nil, "chan", "subj", nil) // tail-form arm (nil slot) exercises the seal mechanics
+	a := newChannelArm(nil, "chan", "subj", nil, nil) // tail-form arm (nil slot) exercises the seal mechanics
 	if !a.admit() {
 		t.Fatal("a fresh arm should admit")
 	}
@@ -34,7 +34,7 @@ func TestArmDetachSealBidirectional(t *testing.T) {
 // sealed — a real admission decision, not a counter increment (假核销修正). The真投
 // stale-帧-through-a-Session assertion lives in gateway_test TestUpstreamStaleGenRefused.
 func TestArmGenerationGate(t *testing.T) {
-	a := newChannelArm(nil, "chan", "subj", nil)
+	a := newChannelArm(nil, "chan", "subj", nil, nil)
 	g1 := a.nextGen()
 	g2 := a.nextGen()
 	if g1 == g2 || g2 != g1+1 {
@@ -59,7 +59,7 @@ func TestArmGenerationGate(t *testing.T) {
 func TestArmSealJoinsPumps(t *testing.T) {
 	var leaked int64
 	var mu sync.Mutex
-	a := newChannelArm(nil, "chan", "subj", nil)
+	a := newChannelArm(nil, "chan", "subj", nil, nil)
 	a.leaked = &leaked
 	a.leakMu = &mu
 
@@ -88,7 +88,7 @@ func TestArmSealJoinsPumps(t *testing.T) {
 func TestArmSealLeakOnTimeout(t *testing.T) {
 	var leaked int64
 	var mu sync.Mutex
-	a := newChannelArm(nil, "chan", "subj", nil)
+	a := newChannelArm(nil, "chan", "subj", nil, nil)
 	a.leaked = &leaked
 	a.leakMu = &mu
 	a.joinTimeout = 30 * time.Millisecond
@@ -120,8 +120,11 @@ func TestArmSealJoinBudgetOrdering(t *testing.T) {
 	}
 }
 
-// The A×L "slow writer × seal" interleave is proven by the REAL feed-pump path in
-// TestSealJoinIsolatesStuckWriter (attach_integration_test.go): a genuinely stuck,
-// never-draining consumer + the real runFeed pump over a real Home, asserting 满→断连
-// tears the pump down and seal joins it in budget without waiting for the writer. The
-// former timer-goroutine stand-in here modelled nothing load-bearing and was removed.
+// The A×L "stuck writer × seal" interleave is proven by the REAL feed-pump path in
+// TestSealJoinIsolatesStuckWriter (attach_integration_test.go): a REAL writer draining
+// the REAL lane and parked in a blocking write on a REAL net.Pipe whose far end is never
+// read (modelling writerPump stuck on a dead peer), + the real runFeed pump over a real
+// Home — asserting 满→断连 tears the pump down, seal joins ONLY that pump within the real
+// 15s budget (returning in ms, not waiting the parked writer), and the writer's own write
+// deadline unwinds it independently. The former channel-blocked goroutine stand-in
+// modelled nothing load-bearing (blocked on an unrelated channel, no lane/connection).

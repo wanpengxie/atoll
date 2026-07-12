@@ -100,10 +100,15 @@ const (
 // ParseFrame / NewFrame re-exported so a connector decodes/encodes wire bytes
 // without reaching internal.
 var (
-	ParseFrame    = subjectgate.ParseFrame
-	NewFrame      = subjectgate.NewFrame
-	ErrNoOccupant = subjectgate.ErrNoOccupant
+	ParseFrame      = subjectgate.ParseFrame
+	NewFrame        = subjectgate.NewFrame
+	ErrNoOccupant   = subjectgate.ErrNoOccupant
+	ErrStaleBinding = subjectgate.ErrStaleBinding
 )
+
+// DeliverAnyGen bypasses the binding-generation assertion in SubjectSlot.Deliver
+// (trusted platform-internal delivery paths carrying no gateway binding).
+const DeliverAnyGen = subjectgate.DeliverAnyGen
 
 // Presence level values (层3 device-aggregate testimony the gateway writes into
 // a slot; NOT derived from层2 bound/unbound — 禁互训).

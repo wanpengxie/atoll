@@ -127,7 +127,7 @@ func TestDeliverSyncAndUnblock(t *testing.T) {
 	}()
 
 	f, _ := NewFrame(FrameSubmit, 0, "ref-9", SubmitPayload{MsgType: "m"})
-	res, err := s.Deliver(f)
+	res, err := s.Deliver(f, 0)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -139,7 +139,7 @@ func TestDeliverSyncAndUnblock(t *testing.T) {
 	close(stop)
 	wg.Wait()
 	release()
-	if _, err := s.Deliver(f); err != ErrNoOccupant {
+	if _, err := s.Deliver(f, 0); err != ErrNoOccupant {
 		t.Fatalf("Deliver after release want ErrNoOccupant, got %v", err)
 	}
 }
@@ -153,7 +153,7 @@ func TestDeliverBlockedUnblocksOnRelease(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		f, _ := NewFrame(FrameSubmit, 0, "r", SubmitPayload{MsgType: "m"})
-		_, err := s.Deliver(f)
+		_, err := s.Deliver(f, 0)
 		done <- err
 	}()
 
@@ -193,7 +193,7 @@ func TestAttachInterpreterIncarnationGate(t *testing.T) {
 	relA()
 
 	f, _ := NewFrame(FrameSubmit, 0, "ref-b", SubmitPayload{MsgType: "m"})
-	res, err := s.Deliver(f)
+	res, err := s.Deliver(f, 0)
 	if err != nil {
 		t.Fatalf("Deliver after stale release of A must reach live B, got %v", err)
 	}
@@ -203,8 +203,47 @@ func TestAttachInterpreterIncarnationGate(t *testing.T) {
 
 	// Now B releases (the current incarnation) → the slot refuses.
 	relB()
-	if _, err := s.Deliver(f); err != ErrNoOccupant {
+	if _, err := s.Deliver(f, 0); err != ErrNoOccupant {
 		t.Fatalf("Deliver after current release want ErrNoOccupant, got %v", err)
+	}
+}
+
+// TestDeliverStaleBindingRefused pins the递交线性化点世代 gate (P0-1 下half): a
+// frame carrying a superseded binding_gen is refused ErrStaleBinding UNDER the slot
+// lock (atomic with the live check), while the current gen delivers. This is the
+// slot-side half of the双向世代 gate that closes the初验→seal→rebind→Deliver window.
+func TestDeliverStaleBindingRefused(t *testing.T) {
+	s := newSlot(testID)
+	ch, _, release := s.AttachInterpreter()
+	defer release()
+	stop := make(chan struct{})
+	go func() {
+		for {
+			select {
+			case job := <-ch:
+				r, _ := NewFrame(FrameReceipt, 0, job.Frame.Ref, SubmitReceipt{MessageID: "m", Seq: 1})
+				job.Reply(FrameResult{Frame: r})
+			case <-stop:
+				return
+			}
+		}
+	}()
+	defer close(stop)
+
+	s.SetBinding(1) // first binding
+	s.SetBinding(2) // rebind (seal → fresh arm → SetBinding) supersedes gen 1
+
+	f, _ := NewFrame(FrameSubmit, 1, "ref-stale", SubmitPayload{MsgType: "m"})
+	if _, err := s.Deliver(f, 1); err != ErrStaleBinding {
+		t.Fatalf("a stale binding_gen must be refused ErrStaleBinding at the linearization point, got %v", err)
+	}
+	// The current binding gen delivers.
+	if _, err := s.Deliver(f, 2); err != nil {
+		t.Fatalf("current binding_gen must deliver, got %v", err)
+	}
+	// DeliverAnyGen bypasses the assertion (trusted internal path).
+	if _, err := s.Deliver(f, DeliverAnyGen); err != nil {
+		t.Fatalf("DeliverAnyGen must bypass the gen gate, got %v", err)
 	}
 }
 
