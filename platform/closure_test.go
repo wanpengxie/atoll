@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/goleak"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
@@ -83,7 +84,14 @@ func newClosureHome(t *testing.T) *platform.Home {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { _ = ch.Close() })
+	t.Cleanup(func() {
+		if err := ch.Close(); err != nil {
+			t.Errorf("Home.Close: %v", err)
+		}
+		if err := goleak.Find(); err != nil {
+			t.Errorf("post-close goroutines: %v", err)
+		}
+	})
 	return ch
 }
 

@@ -199,6 +199,10 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		return build(h.buildCaps(id, kind, inc), h.hooks(), factory)
 	})
 	if buildErr != nil {
+		if errors.Is(buildErr, actorrt.ErrRuntimeSealed) {
+			h.logger.Info("platform.revive.runtime_sealed", "channel", string(h.channelID), "actor", string(id))
+			return buildErr
+		}
 		h.logger.Error("platform.revive.build_failed", "channel", string(h.channelID), "actor", string(id), "error", buildErr)
 		var failure *actorrt.BuildFailure
 		if errors.As(buildErr, &failure) {
