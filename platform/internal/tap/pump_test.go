@@ -2,6 +2,8 @@ package tap
 
 import (
 	"context"
+	"errors"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -100,6 +102,59 @@ func TestOpenPumpCloseBoundsReaderIgnoringContext(t *testing.T) {
 	case <-p.done:
 	case <-time.After(time.Second):
 		t.Fatal("released pump did not exit")
+	}
+}
+
+// TestPumpHandleErrorGatesCursorAndRetriesSameRow locks the cursor-gate
+// contract (投递红线的 at-least-once 半): a handle error stops the cursor AT
+// that row, and the next wake retries the SAME row — the gate is live
+// machinery, not a dead branch.
+func TestPumpHandleErrorGatesCursorAndRetriesSameRow(t *testing.T) {
+	all := []storespec.StoredRow{{Seq: 1}, {Seq: 2}}
+	q := pumpQuery{read: func(_ context.Context, after int64, _ int) ([]storespec.StoredRow, error) {
+		var out []storespec.StoredRow
+		for _, row := range all {
+			if row.Seq > after {
+				out = append(out, row)
+			}
+		}
+		return out, nil
+	}}
+	var mu sync.Mutex
+	var seen []int64
+	var failedOnce bool
+	sig := NewSignal()
+	p := OpenPump(sig, q, 0, func(row storespec.StoredRow) error {
+		mu.Lock()
+		defer mu.Unlock()
+		seen = append(seen, row.Seq)
+		if row.Seq == 1 && !failedOnce {
+			failedOnce = true
+			return errors.New("consumer gates the cursor")
+		}
+		return nil
+	}, nil)
+	defer p.Close()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		mu.Lock()
+		done := len(seen) >= 3
+		got := append([]int64(nil), seen...)
+		mu.Unlock()
+		if done {
+			want := []int64{1, 1, 2}
+			for i, seq := range want {
+				if got[i] != seq {
+					t.Fatalf("handle sequence = %v, want %v (row 1 retried, then advance)", got, want)
+				}
+			}
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("gated row never retried: seen %v", got)
+		}
+		sig.Notify() // next wake retries from the gated cursor
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 

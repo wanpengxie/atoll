@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"errors"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"path/filepath"
 	"reflect"
 	"strings"
@@ -20,6 +22,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -225,6 +228,9 @@ func (d *blockingDesired) Members(context.Context) ([]actorrt.DesiredMember, err
 }
 
 func TestHomeCloseBoundsDesiredAndSealPrecedesAbandon(t *testing.T) {
+	// H5's silence half: once the released reconcile converges, nothing it did
+	// after the abandon may have left a goroutine behind.
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 	d := &blockingDesired{entered: make(chan struct{}), release: make(chan struct{})}
 	var mu sync.Mutex
 	var events []string
@@ -279,6 +285,87 @@ func TestHomeCloseBoundsDesiredAndSealPrecedesAbandon(t *testing.T) {
 // TestHomeConcurrentCloseShareOneCloseErr locks Close's completion semantics
 // on the NORMAL path (no panic): N concurrent callers all wait for the single
 // teardown run and every one of them receives the same closeErr.
+// TestCloseWindowDueTimerNeitherRevivesNorPoisons is C10's real path: a due
+// identity timer fires INSIDE the close window (runtime sealed, cells already
+// stopped, engine still running — the exact revival window the Seal axiom
+// closes). Two assertions, both ends of the disaster: the fire must NOT
+// revive a new cell into the closing station, and the sealed rejection must
+// stay transient — the timer row survives the shutdown and lands as truth on
+// the next boot (a poison would have deleted a live author's wake forever).
+func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "c10-window.sqlite")
+	cfg := HomeConfig{ChannelID: channel.ID("lifecycle-c10"), DBPath: db}
+	var logs bytes.Buffer
+	cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
+	parked, release := make(chan struct{}), make(chan struct{})
+	var h *Home
+	h1, err := openHome(cfg, &homeFaults{
+		created: func(got *Home) { h = got },
+		action:  map[string]func(){"close.engine": func() { close(parked); <-release }},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := h1.Admit(context.Background(), actor.KindHuman, "c10-user")
+	if err != nil {
+		t.Fatal(err)
+	}
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- h1.Close() }()
+	<-parked
+	// The window: sealed + StopAll done (author absent) + engine alive. A timer
+	// due right now fires here — Revive → EnsureLive → SpawnIfAbsent → sealed.
+	if _, err := h.schedMinter.Mint(id).Schedule(context.Background(), schedule.ScheduleReq{
+		Bind: schedule.BindIdentity, FireAt: h.nowMs() + 20,
+		Type: "test.c10.wake", Payload: []byte(`{}`),
+	}); err != nil {
+		t.Fatalf("schedule in close window: %v", err)
+	}
+	deadline := time.Now().Add(900 * time.Millisecond)
+	for time.Now().Before(deadline) {
+		if _, ok := h.channel.Cells().Stat(id); ok {
+			t.Fatal("due timer fire revived a cell inside the close window")
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	close(release)
+	if err := <-closeErr; err != nil {
+		t.Fatal(err)
+	}
+	// The fire must have actually HAPPENED in the window and hit the seal —
+	// otherwise the absence poll above proves nothing (a vacuous pass).
+	if !strings.Contains(logs.String(), "platform.revive.runtime_sealed") {
+		t.Fatal("no revive attempt hit the seal inside the close window — the test never exercised the revival path")
+	}
+	// Reboot the same station: a transient (non-poisoned) row is still there
+	// and the SAME wake must now fire normally and land as truth.
+	h2, err := Open(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h2.Close()
+	fireDeadline := time.Now().Add(10 * time.Second)
+	for {
+		rows, err := h2.cs.Query.ReadAfterSeq(context.Background(), 0, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		found := false
+		for _, row := range rows {
+			if row.Envelope.Type == "test.c10.wake" {
+				found = true
+			}
+		}
+		if found {
+			break
+		}
+		if time.Now().After(fireDeadline) {
+			t.Fatal("retained timer never fired after reboot — the sealed rejection was not transient")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}
+
 func TestHomeConcurrentCloseShareOneCloseErr(t *testing.T) {
 	fault := errors.New("injected close.stores")
 	h, err := openHome(lifecycleConfig(t, "concurrent-close"), &homeFaults{
@@ -365,5 +452,30 @@ func TestHomeStateTransitionsAndUnpublishIssuedHandles(t *testing.T) {
 	}
 	if _, _, err := h.PrincipalOf(context.Background(), "issued-human"); err == nil {
 		t.Fatal("read after stores close did not surface an error")
+	}
+	// Unpublish 对账, per-entry (H9): every mutating entry point refuses with
+	// ErrClosed; Subscribe hands back an already-closed channel (a waiter must
+	// wake, not hang); ServeAttach answers 503 through the closed Acceptor.
+	ctx := context.Background()
+	if _, err := h.Admit(ctx, actor.KindHuman, "late-admit"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Admit after Close = %v, want ErrClosed", err)
+	}
+	if err := h.Remove(ctx, "issued-human"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Remove after Close = %v, want ErrClosed", err)
+	}
+	if err := h.Restart(ctx, "issued-human"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Restart after Close = %v, want ErrClosed", err)
+	}
+	sub, cancelSub := h.Subscribe()
+	select {
+	case <-sub:
+	default:
+		t.Fatal("Subscribe after Close did not return a closed channel")
+	}
+	cancelSub()
+	rec := httptest.NewRecorder()
+	h.ServeAttach(rec, httptest.NewRequest("GET", "/attach", nil), "daemon-late")
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("ServeAttach after Close = %d, want 503", rec.Code)
 	}
 }
