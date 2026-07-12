@@ -12,6 +12,15 @@ type (
 	Frame     = subjectgate.Frame
 	FrameType = subjectgate.FrameType
 
+	// Slot-side handles the gateway (drivers/gateway) drives through the platform
+	// export boundary (裁决3 / 表⑤): the concrete lives in platform/internal/
+	// subjectgate, unreachable by the伞包, so these aliases are the ONLY surface.
+	SubjectSlot    = subjectgate.Slot
+	Level          = subjectgate.Level
+	PresenceUpdate = subjectgate.PresenceUpdate
+	FrameResult    = subjectgate.FrameResult
+	Job            = subjectgate.Job
+
 	AttachPayload      = subjectgate.AttachPayload
 	DetachPayload      = subjectgate.DetachPayload
 	SubmitPayload      = subjectgate.SubmitPayload
@@ -91,6 +100,14 @@ const (
 // ParseFrame / NewFrame re-exported so a connector decodes/encodes wire bytes
 // without reaching internal.
 var (
-	ParseFrame = subjectgate.ParseFrame
-	NewFrame   = subjectgate.NewFrame
+	ParseFrame    = subjectgate.ParseFrame
+	NewFrame      = subjectgate.NewFrame
+	ErrNoOccupant = subjectgate.ErrNoOccupant
+)
+
+// Presence level values (层3 device-aggregate testimony the gateway writes into
+// a slot; NOT derived from层2 bound/unbound — 禁互训).
+const (
+	LevelOnline  = subjectgate.LevelOnline
+	LevelOffline = subjectgate.LevelOffline
 )

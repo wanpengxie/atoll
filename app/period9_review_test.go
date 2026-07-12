@@ -28,7 +28,7 @@ func TestWS_OversizedFrameClosesConn(t *testing.T) {
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?channel=" + s.chID
 	hdr := http.Header{}
 	var parts []string
 	for _, ck := range s.cookies {
@@ -41,15 +41,16 @@ func TestWS_OversizedFrameClosesConn(t *testing.T) {
 	}
 	defer conn.Close()
 
-	if err := conn.WriteJSON(map[string]any{"type": "subscribe", "channel_id": s.chID, "since_seq": 0}); err != nil {
-		t.Fatalf("subscribe: %v", err)
+	// Opening attach frame (the connector's read limit is armed before this read).
+	if err := conn.WriteJSON(map[string]any{"v": 1, "frame_type": "attach", "payload": map[string]any{"channel_id": s.chID}}); err != nil {
+		t.Fatalf("attach: %v", err)
 	}
 
-	// ~2 MB payload — well past the few-hundred-KB read limit.
+	// ~2 MB frame — well past the 512KB read limit (connector SetReadLimit).
 	big := strings.Repeat("x", 2*1024*1024)
 	if err := conn.WriteJSON(map[string]any{
-		"type": "message", "msg_type": "chat.text", "kind": "event",
-		"payload": map[string]any{"text": big},
+		"v": 1, "frame_type": "submit",
+		"payload": map[string]any{"msg_type": "chat.text", "kind": "event", "payload": map[string]any{"text": big}},
 	}); err != nil {
 		return // a write error here already means the server closed — acceptable
 	}

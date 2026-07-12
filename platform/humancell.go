@@ -3,7 +3,9 @@ package platform
 import (
 	"context"
 	"encoding/json"
+	"math"
 	"sync"
+	"time"
 
 	"github.com/google/uuid"
 
@@ -62,14 +64,19 @@ func humanCellFactory(h *Home, id actor.ActorID) ActorFactory {
 	}}
 }
 
-// subjectgateSlot returns the per-identity slot IFF the gateway has ensured one
-// (装配链 step③): a lookup, never a create (attach owns创建, step②). No registry
-// (defensive) or no slot → mailbox-only.
+// subjectgateSlot returns the per-identity slot, ENSURING it exists (装配链
+// step③). The slot must outlive incarnations and pre-exist any gateway attach:
+// an always-on human cell is born by the reconcile ring at Admit — BEFORE any ws
+// attach — so a lazy lookup would leave the cell permanently mailbox-only (a
+// later attach's EnsureSlot would create a slot the already-running cell never
+// observed). The cell owns its own frame-delivery endpoint's creation (the slot
+// is the identity's, not a connection's); the gateway (S3) then looks it up at
+// attach and drives it. nil registry (defensive) → mailbox-only.
 func (h *Home) subjectgateSlot(id actor.ActorID) (*subjectgate.Slot, bool) {
 	if h.subjectgate == nil {
 		return nil, false
 	}
-	return h.subjectgate.Slot(id)
+	return h.subjectgate.EnsureSlot(id), true
 }
 
 // runHumanCell is the human cell's Proc body: it wires the frame interpreter +
@@ -387,6 +394,17 @@ func interpretAfter(sys actorbase.Sys, f subjectgate.Frame, receipt frameBuild, 
 	var p subjectgate.AfterPayload
 	if err := f.DecodePayload(&p); err != nil {
 		return errFrame(subjectgate.CodeBadPayload, err.Error())
+	}
+	// Input bounds (期12 v0.4, migrated from the app edge to the driver — the error
+	// vocabulary is the driver's): the schedule engine treats a past FireAt as "fire
+	// now", so a non-positive / overflow duration would be a legal immediate trigger.
+	// Refuse it as bad_payload (裁决8 平面词). No upper cap (abuse hardening is the
+	// engine-level anti-storm axis, deferred).
+	if p.DurationMs <= 0 || p.DurationMs > math.MaxInt64/int64(time.Millisecond) {
+		return errFrame(subjectgate.CodeBadPayload, "duration_ms must be a positive millisecond count")
+	}
+	if p.MsgType == "" {
+		return errFrame(subjectgate.CodeBadPayload, "msg_type required")
 	}
 	id, err := sys.AfterIdentity(durationMs(p.DurationMs), p.MsgType, p.Payload)
 	if err != nil {

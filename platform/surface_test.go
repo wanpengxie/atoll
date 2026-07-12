@@ -31,7 +31,11 @@ func TestHomePublicSurface(t *testing.T) {
 	// PresenceSweptCount joined with the W4 presence/obs axis — the corollary-two
 	// enforcement read-out (sweep-cleared orphan tally, DoD-12): a read-only
 	// counter, not an accessor to any internal organ.
-	want := []string{"Admit", "CancelRequest", "Close", "Human", "HumanPrincipal", "KickDaemon", "PresenceSweptCount", "PrincipalOf", "Remove", "ResolvePrincipal", "Restart", "ServeAttach", "Subscribe", "View"}
+	// EnsureSubjectSlot/SubjectSlotFor/RemoveSubjectSlot joined with the gateway
+	// 期 S3: the per-identity binding slot seam the drivers/gateway伞包 drives
+	// through (the concrete Registry stays internal — these hand out the exported
+	// *SubjectSlot capability handle, never the bare registry object).
+	want := []string{"Admit", "CancelRequest", "Close", "EnsureSubjectSlot", "Human", "HumanPrincipal", "KickDaemon", "PresenceSweptCount", "PrincipalOf", "Remove", "RemoveSubjectSlot", "ResolvePrincipal", "Restart", "ServeAttach", "SubjectSlotFor", "Subscribe", "View"}
 
 	typ := reflect.TypeOf((*platform.Home)(nil))
 	var got []string

@@ -86,5 +86,12 @@ func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
 	delete(h.reviveLogAt, id)
 	delete(h.reviveBackoff, id)
 	h.reviveLogMu.Unlock()
+	// Membership撤销 emit point (gateway 期 S3 表②): the dereg cascade has committed,
+	// so a subject that just lost membership must have its read-side频道臂 sealed.
+	// The assembly root bridges this into the gateway's RevocationSource; the gateway
+	// seals the arm and Forgets the slot testimony. nil sink (no gateway) → no-op.
+	if h.onRevoke != nil {
+		h.onRevoke(id)
+	}
 	return nil
 }

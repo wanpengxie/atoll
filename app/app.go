@@ -23,9 +23,20 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/jsondepth"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
+
+// WSGateway is the human-ingress serving面 the assembly root (cmd/server) injects:
+// the gateway 期 connector (drivers/gateway/connector/web) satisfies it. app → drivers
+// is fenced, so the app names only this interface and cmd/server bridges the concrete
+// connector in. The app membrane authenticates (session→principal + channel ACL) then
+// hands the upgraded-pending request off — the connector upgrades the ws and runs the
+// session cross. nil (unwired) → /ws answers 503.
+type WSGateway interface {
+	ServeWeb(w http.ResponseWriter, r *http.Request, home *platform.Home, chID channel.ID, principal string)
+}
 
 // App is the product application server.
 type App struct {
@@ -39,6 +50,14 @@ type App struct {
 
 	channelDBDir string
 	uiDist       string
+
+	// wsGateway is the injected human-ingress connector (gateway 期 S3); revokeSink
+	// is the injected revocation fan-in (RevocationHub.Emit) both the platform emit
+	// point (HomeConfig.OnRevoke, wired in createHome) and the app's own ACL write
+	// points feed. Both are set by the assembly root via SetGateway/SetRevokeSink
+	// after New (the gateway needs the app's routing面, breaking the構造 cycle).
+	wsGateway  WSGateway
+	revokeSink func(channel.ID, actor.ActorID)
 
 	// controlShimTimeout bounds how long a channel-control HTTP shim waits for the
 	// door's terminal reply before returning 202 + request_id (前端语义不变). A test
@@ -103,6 +122,18 @@ func New(cfg Config) (*App, error) {
 
 	return a, nil
 }
+
+// SetGateway injects the human-ingress connector (gateway 期 S3). The assembly
+// root calls it after New — the gateway is constructed with the app's routing面,
+// so the app cannot hold it at New time (construction cycle). /ws answers 503 until
+// it is set.
+func (a *App) SetGateway(g WSGateway) { a.wsGateway = g }
+
+// SetRevokeSink injects the revocation fan-in (RevocationHub.Emit). createHome
+// forwards it into each home's HomeConfig.OnRevoke (the membership emit point), and
+// the app's own ACL write points call it (the ACL emit point). nil → no live
+// revocation (reconnect re-auth + the read-side每批 recheck remain the backstop).
+func (a *App) SetRevokeSink(fn func(channel.ID, actor.ActorID)) { a.revokeSink = fn }
 
 // Run starts the HTTP server and blocks until it is Shutdown (or errors). It
 // holds an explicit http.Server so cmd can drain in-flight requests on signal;
@@ -299,6 +330,14 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 		// sees every producer (substrate stays blind to agent/), so it hands the
 		// union of actorbase's and agentbase's diagnostic kinds in.
 		EventDropKinds: eventDropKinds(),
+		// Membership撤销 emit point (gateway 期 S3 表②①): Home.Remove fires this after
+		// the dereg cascade; the app forwards it (with this channel's id) into the
+		// injected revocation fan-in so the gateway seals the subject's频道臂.
+		OnRevoke: func(subject actor.ActorID) {
+			if a.revokeSink != nil {
+				a.revokeSink(chID, subject)
+			}
+		},
 	})
 	if err != nil {
 		return nil, err

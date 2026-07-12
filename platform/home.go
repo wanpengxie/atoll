@@ -95,6 +95,13 @@ type HomeConfig struct {
 	// timeout path needs a fast, deterministic window rather than production's
 	// multi-minute backstop.
 	ReservationTimeout time.Duration
+	// OnRevoke, when set, is fired by Remove AFTER the dereg cascade commits (the
+	// membership撤销 emit point, gateway 期 S3 表② remove.go). The assembly root
+	// bridges it into the gateway's RevocationSource so the subject's频道臂 seals
+	// (read-side revocation). nil → no bridge (the fold Sweep + read-side reader
+	// resource recheck remain the level backstop). Home passes its own channelID at
+	// the call site, so the sink is (channel, subject)-addressed.
+	OnRevoke func(subject actor.ActorID)
 	// EventDropKinds is the producer-owned vocabulary of non-level diagnostic obs
 	// kinds the presence fold buckets per name (queue overflow, closure fault,
 	// checkpoint drop, …). The substrate names no such word: it stays blind to the
@@ -139,6 +146,10 @@ type Home struct {
 	// presenceMu together, so edges are totally ordered.
 	presenceMu       sync.Mutex
 	presenceSessions map[actor.ActorID]map[string]struct{}
+
+	// onRevoke is HomeConfig.OnRevoke (the membership撤销 emit point) — fired by
+	// Remove after the dereg cascade so the gateway can seal the subject's频道臂.
+	onRevoke func(subject actor.ActorID)
 
 	// subjectgate is the human接入轴 binding registry (gateway 期 S2): the
 	// per-identity slot store (four-tuple {绑定世代, gateway epoch, 帧递交端,
@@ -518,6 +529,7 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	h.reviveLogAt = map[actor.ActorID]time.Time{}
 	h.reviveBackoff = map[actor.ActorID]reviveBackoffEntry{}
 	h.pokeCh = make(chan struct{}, 1)
+	h.onRevoke = cfg.OnRevoke
 	// 装配链 step① (gateway 期 S2): the binding registry exists BEFORE any cell
 	// construction path (human cells are born at the reconcile sweep below), so
 	// the factory's step③ slot lookup never races an absent registry.

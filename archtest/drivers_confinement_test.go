@@ -79,6 +79,12 @@ func TestDriversImportConfinement(t *testing.T) {
 var driversTestImporterAllowlist = map[string]bool{
 	"../app/xhs_live_test.go":      true,
 	"../app/metatool_live_test.go": true,
+	// gateway 期 S3: the app test harness (setupTestApp) wires the real human-ingress
+	// connector into the app exactly as cmd/server does — the black-box ws frame
+	// tests drive the app HTTP stack against the real gateway, and drivers→app forbids
+	// moving them into the drivers domain, so this is a named exception (not a blanket
+	// relaxation), same posture as the two live tests above.
+	"../app/e2e_test.go": true,
 }
 
 // TestDriversConsumerConfinement — fence B.

@@ -1,11 +1,13 @@
 package app_test
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,72 +20,156 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// wsClient — a black-box gateway ws driver for the S4 frame族 (message / resolve
-// / cancel up, tail + ack/error down). One reader goroutine fans the two
-// downstream frame families into buffered channels so a test can await either.
+// wsClient — a black-box gateway ws driver for the standard frame protocol
+// (gateway 期 S3: attach opening / submit·resolve·cancel·after·cancel_timer up;
+// feed·receipt·error down). The client translates the old {"type":…} test-body maps
+// into standard frames and normalises the downstream frames back into the
+// {"type":"ack"/"error"/"message"} shape the assertions read.
 // ---------------------------------------------------------------------------
+
+type wireFrame struct {
+	V       int             `json:"v"`
+	Type    string          `json:"frame_type"`
+	Ref     string          `json:"ref"`
+	Payload json.RawMessage `json:"payload"`
+}
 
 type wsClient struct {
 	t    *testing.T
 	conn *websocket.Conn
 	tail chan map[string]any
 	acks chan map[string]any
+
+	mu      sync.Mutex
+	refType map[string]string // ref → originating frame type (for ack["frame"])
 }
 
-// dialWS opens a gateway ws with the given session cookies and sends the opening
-// subscribe frame (channel + cursor).
+// dialWS opens a gateway ws for chID (query param — the app membrane authenticates
+// pre-upgrade) and sends the opening attach frame (channel + since cursor).
 func dialWS(t *testing.T, srv *httptest.Server, cookies []*http.Cookie, chID string, sinceSeq int64) *wsClient {
 	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?channel=" + chID
 	hdr := http.Header{}
 	var parts []string
-	for _, c := range cookies {
-		parts = append(parts, c.Name+"="+c.Value)
+	for _, ck := range cookies {
+		parts = append(parts, ck.Name+"="+ck.Value)
 	}
 	hdr.Set("Cookie", strings.Join(parts, "; "))
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
 	if err != nil {
 		t.Fatalf("dial ws: %v", err)
 	}
-	if err := conn.WriteJSON(map[string]any{"type": "subscribe", "channel_id": chID, "since_seq": sinceSeq}); err != nil {
-		t.Fatalf("subscribe frame: %v", err)
-	}
 	c := &wsClient{
-		t:    t,
-		conn: conn,
-		tail: make(chan map[string]any, 512),
-		acks: make(chan map[string]any, 64),
+		t:       t,
+		conn:    conn,
+		tail:    make(chan map[string]any, 512),
+		acks:    make(chan map[string]any, 64),
+		refType: map[string]string{},
 	}
+	attach := map[string]any{"channel_id": chID}
+	if sinceSeq > 0 {
+		attach["since"] = map[string]int64{chID: sinceSeq}
+	}
+	c.writeFrame("attach", "", attach)
 	go c.readLoop()
 	return c
 }
 
+// writeFrame builds one standard frame (frame_type + ref + payload) and writes it.
+func (c *wsClient) writeFrame(frameType, ref string, payload map[string]any) {
+	c.t.Helper()
+	if ref != "" {
+		c.mu.Lock()
+		c.refType[ref] = frameType
+		c.mu.Unlock()
+	}
+	f := map[string]any{"v": 1, "frame_type": frameType}
+	if ref != "" {
+		f["ref"] = ref
+	}
+	if payload != nil {
+		f["payload"] = payload
+	}
+	if err := c.conn.WriteJSON(f); err != nil {
+		c.t.Fatalf("ws write: %v", err)
+	}
+}
+
 func (c *wsClient) readLoop() {
 	for {
-		var m map[string]any
-		if err := c.conn.ReadJSON(&m); err != nil {
+		var wf wireFrame
+		if err := c.conn.ReadJSON(&wf); err != nil {
 			return
 		}
-		switch m["type"] {
-		case "message":
+		switch wf.Type {
+		case "feed":
+			var fp struct {
+				ChannelID string          `json:"channel_id"`
+				Seq       int64           `json:"seq"`
+				Envelope  json.RawMessage `json:"envelope"`
+			}
+			_ = json.Unmarshal(wf.Payload, &fp)
+			var env map[string]any
+			_ = json.Unmarshal(fp.Envelope, &env)
+			m := map[string]any{"type": "message", "channel_id": fp.ChannelID, "seq": fp.Seq, "envelope": env}
 			select {
 			case c.tail <- m:
 			default:
 			}
-		case "ack", "error":
+		case "receipt":
+			var pm map[string]any
+			_ = json.Unmarshal(wf.Payload, &pm)
+			// The opening attach receipt (binding_gen only) is not a business ack —
+			// drop it so a test's first nextAck is its own frame's receipt.
+			if _, isAttach := pm["binding_gen"]; isAttach && len(pm) == 1 {
+				continue
+			}
+			ack := map[string]any{"type": "ack"}
+			for k, v := range pm {
+				ack[k] = v
+			}
+			c.mu.Lock()
+			if ft, ok := c.refType[wf.Ref]; ok {
+				ack["frame"] = ft
+			}
+			c.mu.Unlock()
 			select {
-			case c.acks <- m:
+			case c.acks <- ack:
+			default:
+			}
+		case "error":
+			var ep struct {
+				Frame  string `json:"frame"`
+				Code   string `json:"code"`
+				Detail string `json:"detail"`
+			}
+			_ = json.Unmarshal(wf.Payload, &ep)
+			select {
+			case c.acks <- map[string]any{"type": "error", "error": ep.Code, "detail": ep.Detail, "frame": ep.Frame}:
 			default:
 			}
 		}
 	}
 }
 
+// send translates one old-style {"type":…} test map into a standard frame: "type"
+// is the frame kind, "ref" is the correlation id, and the remaining keys are the
+// frame payload (their names already match the payload struct json tags).
 func (c *wsClient) send(m map[string]any) {
 	c.t.Helper()
-	if err := c.conn.WriteJSON(m); err != nil {
-		c.t.Fatalf("ws write: %v", err)
+	frameType, _ := m["type"].(string)
+	ref, _ := m["ref"].(string)
+	payload := map[string]any{}
+	for k, v := range m {
+		if k == "type" || k == "ref" {
+			continue
+		}
+		payload[k] = v
 	}
+	if len(payload) == 0 {
+		payload = nil
+	}
+	c.writeFrame(frameType, ref, payload)
 }
 
 // nextAck returns the next ack OR error frame.
@@ -98,10 +184,10 @@ func (c *wsClient) nextAck(timeout time.Duration) map[string]any {
 	}
 }
 
-// sendMessage sends a write message frame and returns its ack/error frame.
+// sendMessage sends a submit frame and returns its receipt/error frame.
 func (c *wsClient) sendMessage(frame map[string]any) map[string]any {
 	c.t.Helper()
-	frame["type"] = "message"
+	frame["type"] = "submit"
 	c.send(frame)
 	return c.nextAck(3 * time.Second)
 }
@@ -177,11 +263,11 @@ func pollPresence(t *testing.T, env *testEnv, s setupResult, actorID string, wan
 }
 
 // ---------------------------------------------------------------------------
-// DoD 5 (S4 wire): message / resolve / cancel frames + presence.
+// DoD 2 (wire): submit / resolve / cancel / after / cancel_timer frames + presence.
 // ---------------------------------------------------------------------------
 
-// TestWS_MessageFrameEndToEnd: a member's message frame commits truth through the
-// door (POST /messages is废) and comes back on the same ws's tail.
+// TestWS_MessageFrameEndToEnd: a member's submit frame commits truth through its own
+// cell (POST /messages is废) and comes back on the same ws's feed.
 func TestWS_MessageFrameEndToEnd(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
@@ -197,7 +283,7 @@ func TestWS_MessageFrameEndToEnd(t *testing.T) {
 		"payload":  map[string]any{"text": "hello via frame"},
 	})
 	if ack["type"] != "ack" {
-		t.Fatalf("message frame: want ack, got %v", ack)
+		t.Fatalf("submit frame: want ack, got %v", ack)
 	}
 	msgID, _ := ack["message_id"].(string)
 	if msgID == "" {
@@ -206,7 +292,7 @@ func TestWS_MessageFrameEndToEnd(t *testing.T) {
 
 	env2 := c.waitTail(func(e map[string]any) bool { return e["id"] == msgID }, 3*time.Second)
 	if env2["type"] != "chat.text" {
-		t.Fatalf("tail envelope type = %v, want chat.text", env2["type"])
+		t.Fatalf("feed envelope type = %v, want chat.text", env2["type"])
 	}
 
 	// POST /messages is gone (write path is the frame): the route 404s.
@@ -218,14 +304,13 @@ func TestWS_MessageFrameEndToEnd(t *testing.T) {
 }
 
 // TestWS_NonMemberWriteRejected: a workspace member who is NOT a channel member may
-// tail but a message frame is refused (膜律 看得见≠在里面).
+// tail but a submit frame is refused (膜律 看得见≠在里面).
 func TestWS_NonMemberWriteRejected(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
-	// A second user in the workspace but NOT admitted to the channel.
 	regBody, cookies := register(t, env, "outsider@test.com", "secret123", "Outsider")
 	if err := env.app.AddWorkspaceMemberForTest(s.wsID, regBody["id"].(string)); err != nil {
 		t.Fatalf("add workspace member: %v", err)
@@ -243,7 +328,7 @@ func TestWS_NonMemberWriteRejected(t *testing.T) {
 }
 
 // TestWS_ResolveFrameEndToEnd: A requests B (human.approve → left open); B resolves
-// via a resolve frame; A's tail sees the completed terminal with the decision.
+// via a resolve frame; A's feed sees the completed terminal with the decision.
 func TestWS_ResolveFrameEndToEnd(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
@@ -312,7 +397,7 @@ func TestWS_CancelFrameEndToEnd(t *testing.T) {
 		t.Fatalf("non-sender cancel: want error unauthorized_sender, got %v", be)
 	}
 
-	// Sender A cancels → ack, and the cancel terminal lands on the tail.
+	// Sender A cancels → ack, and the cancel terminal lands on the feed.
 	ca.send(map[string]any{"type": "cancel", "req_id": reqID})
 	cack := ca.nextAck(3 * time.Second)
 	if cack["type"] != "ack" {
@@ -352,17 +437,14 @@ func TestWS_Presence(t *testing.T) {
 	c := dialWS(t, srv, s.cookies, s.chID, 0)
 	pollPresence(t, env, s, string(uid), true, true, 2*time.Second)
 
-	// Stat stays live and unchanged while a device is connected.
 	startedAt1, live1 := env.app.StatForTest(channel.ID(s.chID), uid)
 	if !live1 || !startedAt1.Equal(startedAt0) {
 		t.Fatalf("Stat moved on connect: live=%v startedAt %v→%v (presence must not touch L1)", live1, startedAt0, startedAt1)
 	}
 
-	// Disconnect → explicit offline snapshot (known stays true, online false).
 	c.close()
 	pollPresence(t, env, s, string(uid), true, false, 2*time.Second)
 
-	// Reconnect → SAME cell (startedAt unchanged), still live.
 	c2 := dialWS(t, srv, s.cookies, s.chID, 0)
 	defer c2.close()
 	pollPresence(t, env, s, string(uid), true, true, 2*time.Second)
@@ -372,8 +454,8 @@ func TestWS_Presence(t *testing.T) {
 	}
 }
 
-// TestWS_PresenceMultiTab: two ws for one (channel, user) — closing one tab must
-// NOT flip the still-connected tab to offline; only the LAST disconnect does.
+// TestWS_PresenceMultiTab: two ws for one (channel, user) — closing one tab must NOT
+// flip the still-connected tab to offline; only the LAST disconnect does.
 func TestWS_PresenceMultiTab(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
@@ -385,9 +467,7 @@ func TestWS_PresenceMultiTab(t *testing.T) {
 	tab2 := dialWS(t, srv, s.cookies, s.chID, 0)
 	pollPresence(t, env, s, string(uid), true, true, 2*time.Second)
 
-	// Close tab1 — tab2 is still open, so presence must remain online.
 	tab1.close()
-	// Give the server time to process tab1's disconnect, then assert still online.
 	time.Sleep(200 * time.Millisecond)
 	w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, string(uid)), nil, s.cookies)
 	assertStatus(t, w, http.StatusOK)
@@ -396,17 +476,16 @@ func TestWS_PresenceMultiTab(t *testing.T) {
 		t.Fatalf("after one tab closed the other is still open: want online, got %v", m)
 	}
 
-	// Close the last tab — now offline.
 	tab2.close()
 	pollPresence(t, env, s, string(uid), true, false, 2*time.Second)
 }
 
 // ---------------------------------------------------------------------------
-// 期12 S5: after / cancel_timer frames (提醒五路收口物).
+// after / cancel_timer frames (提醒五路收口物).
 // ---------------------------------------------------------------------------
 
 // TestWS_AfterFrameEndToEnd: a member arms a self-reminder over the ws; the
-// identity-bound timer fires and the reminder message lands on the same tail.
+// identity-bound timer fires and the reminder message lands on the same feed.
 func TestWS_AfterFrameEndToEnd(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
@@ -429,8 +508,6 @@ func TestWS_AfterFrameEndToEnd(t *testing.T) {
 		t.Fatalf("after ack missing timer_id: %v", ack)
 	}
 
-	// The fire appends the reminder as the SUBJECT's own message (identity
-	// timer author = the subject; the fire survives cell churn by design).
 	fired := c.waitTail(func(e map[string]any) bool { return e["type"] == "reminder.note" }, 5*time.Second)
 	sender, _ := fired["sender"].(map[string]any)
 	if sender == nil || sender["id"] != string(s.actorID) {
@@ -438,8 +515,8 @@ func TestWS_AfterFrameEndToEnd(t *testing.T) {
 	}
 }
 
-// TestWS_CancelTimerFrame: arming then cancelling → no fire; and the input
-// bounds refuse a non-positive duration outright.
+// TestWS_CancelTimerFrame: arming then cancelling → no fire; and the input bounds
+// refuse a non-positive duration outright (bad_payload — the driver's error词表).
 func TestWS_CancelTimerFrame(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
@@ -449,16 +526,13 @@ func TestWS_CancelTimerFrame(t *testing.T) {
 	c := dialWS(t, srv, s.cookies, s.chID, 0)
 	defer c.close()
 
-	// Bounds: zero / negative duration is refused at the edge (a past FireAt
-	// would legally fire immediately — 期12 v0.4 P1-7).
+	// Bounds: zero / negative duration is refused at the driver (a past FireAt would
+	// legally fire immediately — 期12 v0.4 P1-7). Error code is the driver's平面词.
 	c.send(map[string]any{"type": "after", "ref": "b0", "duration_ms": 0, "msg_type": "reminder.note"})
-	if errFrame := c.nextAck(3 * time.Second); errFrame["error"] != "invalid_argument" {
-		t.Fatalf("duration_ms=0: want invalid_argument, got %v", errFrame)
+	if errFrame := c.nextAck(3 * time.Second); errFrame["error"] != "bad_payload" {
+		t.Fatalf("duration_ms=0: want bad_payload, got %v", errFrame)
 	}
 
-	// SHORT timer + wait PAST FireAt (修复批 P2-5: the old 60s-timer/300ms-wait
-	// form passed even with Cancel a no-op): if the cancel is ineffective the
-	// fire lands inside the observation window and the filter catches it.
 	c.send(map[string]any{
 		"type": "after", "ref": "b1", "duration_ms": 250,
 		"msg_type": "reminder.later", "payload": map[string]any{},
@@ -473,8 +547,6 @@ func TestWS_CancelTimerFrame(t *testing.T) {
 	if cAck["type"] != "ack" || cAck["frame"] != "cancel_timer" {
 		t.Fatalf("cancel_timer: want ack, got %v", cAck)
 	}
-	// Observe well past FireAt, CONTINUOUSLY filtering for the target type
-	// (an unrelated tail frame must not end the watch early).
 	watchEnd := time.After(1 * time.Second)
 	for {
 		select {
@@ -496,7 +568,6 @@ func TestWS_AfterFrameNonMember(t *testing.T) {
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
-	// Second user: workspace member (may tail), NOT a channel member.
 	regBody, cookies2 := register(t, env, "visitor@example.com", "secret123", "Visitor")
 	if err := env.app.AddWorkspaceMemberForTest(s.wsID, regBody["id"].(string)); err != nil {
 		t.Fatalf("add workspace member: %v", err)
@@ -510,9 +581,9 @@ func TestWS_AfterFrameNonMember(t *testing.T) {
 	}
 }
 
-// TestWSSubmitErrCode pins the message-frame error mapping (期12 修复批
-// P0-2 的直接测试): a killed cell is the retryable "unavailable", a closing
-// home "closed" — never "internal"; only a genuinely unknown error logs.
+// TestWSSubmitErrCode pins the message-frame error mapping (期12 修复批 P0-2 的直接
+// 测试): a killed cell is the retryable "unavailable", a closing home "closed" —
+// never "internal"; only a genuinely unknown error logs.
 func TestWSSubmitErrCode(t *testing.T) {
 	cases := []struct {
 		err      error
