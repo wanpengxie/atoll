@@ -242,6 +242,14 @@ func TestHomeCloseBoundsDesiredAndSealPrecedesAbandon(t *testing.T) {
 	if h.reconcileLeaked.Load() != 1 {
 		t.Fatalf("reconcile leaks = %d", h.reconcileLeaked.Load())
 	}
+	// The runtime itself must ALREADY be sealed here — the abandon has
+	// happened, the leaked reconcile goroutine is still alive, and any build
+	// it (or anyone) attempts must hit the gate. A recorder can only prove
+	// checkpoint order; this probes the actual admission authority.
+	if _, _, err := h.channel.Cells().SpawnIfAbsent("post-seal-probe", actor.KindAgent,
+		func(actorrt.Incarnation) actorrt.Actor { return lifecycleActor{} }); !errors.Is(err, actorrt.ErrRuntimeSealed) {
+		t.Fatalf("SpawnIfAbsent during abandoned close = %v, want ErrRuntimeSealed", err)
+	}
 	close(d.release)
 	select {
 	case <-h.reconcileDone:
