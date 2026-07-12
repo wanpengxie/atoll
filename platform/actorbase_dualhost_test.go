@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/actors/echo"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
@@ -20,7 +19,7 @@ import (
 
 // actorbase-spec-v1.md §5 DoD⑦: "同一份 Def cell/port 两宿主跑(已知不对称两个:
 // fork=ErrUnsupported、daemon caller cancel 信号半降级)". This file is the
-// dual-host proof: echo.Def() — the SAME Def platform/echo_actorbase_test.go
+// dual-host proof: echoProbeDef() — the SAME Def platform/echo_actorbase_test.go
 // already runs over the cell host (Home.SpawnIfAbsent) — is spawned a SECOND time
 // here over a real wire, daemon (port) host, using the identical assembly
 // seam (actorbase.New) production code takes (platform.compute.buildOne
@@ -87,7 +86,7 @@ func spawnActorbaseOverWire(t *testing.T, ch *platform.Home, id actor.ActorID, d
 	return d, host
 }
 
-// TestActorbaseDef_RunsOverBothCellAndPortHosts is DoD⑦: echo.Def() closes
+// TestActorbaseDef_RunsOverBothCellAndPortHosts is DoD⑦: echoProbeDef() closes
 // the identical call->reply loop over the daemon (port) host that
 // TestEcho_CallReplyClosesThroughRealCellHost (platform/echo_actorbase_test.go)
 // already proves over the cell host — same Def, both hosts.
@@ -99,9 +98,9 @@ func TestActorbaseDef_RunsOverBothCellAndPortHosts(t *testing.T) {
 	registerActor(t, ch, &echoID, actor.KindTool)
 	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
 
-	spawnActorbaseOverWire(t, ch, echoID, echo.Def())
+	spawnActorbaseOverWire(t, ch, echoID, echoProbeDef())
 
-	reqID := writeRequest(t, callerPen, echoID, echo.TypeSay, nil)
+	reqID := writeRequest(t, callerPen, echoID, echoProbeType, nil)
 	term := pollForTerminal(t, ch, reqID, 5*time.Second)
 
 	if term.Sender.ID != echoID {

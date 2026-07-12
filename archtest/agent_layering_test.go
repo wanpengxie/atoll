@@ -13,10 +13,10 @@ import (
 
 // Agent subsystem layering locks.
 //
-// The agent is its OWN top-level subsystem (agent/), NOT an actor under actors/.
-// These tests pin the dependency direction so it can't silently rot back:
+// The agent is its OWN top-level subsystem (agent/), NOT a tool driver under
+// drivers/tools/. These tests pin the dependency direction so it can't rot back:
 //
-//   {actors/*, agent/, app} → registry → platform (substrate, blind upward)
+//   {drivers/*, agent/, app} → registry → platform (substrate, blind upward)
 //
 //   1. Engine SDKs (go-kimi / go-claude-agent-sdk) are quarantined to
 //      agent/provider/* — agent core / app / substrate stay engine-agnostic.
@@ -117,7 +117,7 @@ func TestSubstrateBlindToAgent(t *testing.T) {
 		}
 		if imp == agentPkg || strings.HasPrefix(imp, agentPkg+"/") || imp == registryPkg {
 			v = append(v, fmt.Sprintf(
-				"%s imports %q — substrate must stay blind to the agent subsystem and the domain registry (composition flows {actors,agent,app} → registry → platform, never back)",
+				"%s imports %q — substrate must stay blind to the agent subsystem and the domain registry (composition flows {drivers,agent,app} → registry → platform, never back)",
 				slash, imp))
 		}
 	})

@@ -15,8 +15,8 @@
 package all
 
 import (
-	_ "github.com/wanpengxie/atoll/actors/device"
-	_ "github.com/wanpengxie/atoll/actors/echo"
-	_ "github.com/wanpengxie/atoll/actors/kimi"
-	_ "github.com/wanpengxie/atoll/actors/xhs"
+	_ "github.com/wanpengxie/atoll/drivers/tools/device"
+	_ "github.com/wanpengxie/atoll/drivers/tools/echo"
+	_ "github.com/wanpengxie/atoll/drivers/tools/kimi"
+	_ "github.com/wanpengxie/atoll/drivers/tools/xhs"
 )

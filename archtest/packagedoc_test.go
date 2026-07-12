@@ -13,7 +13,7 @@ import (
 
 // docConventionRoots are the four layers owner unified this round: the package
 // doc-comment of every production package here lives in doc.go and ONLY in
-// doc.go. Downstream (app/, cmd/, actors/) is deliberately NOT in scope — this
+// doc.go. Downstream (app/, cmd/, drivers/) is deliberately NOT in scope — this
 // tripwire guards the substrate/library layers, not the domain.
 var docConventionRoots = []string{"protocol", "runtime", "lib", "platform"}
 

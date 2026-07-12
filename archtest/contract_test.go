@@ -129,8 +129,8 @@ func TestContractShapesLiveOnlyInIntrospect(t *testing.T) {
 // TestEnvelopeConstructionLivesOnlyInBehavior enforces the no-parallel-
 // primitives law: lib/behavior is the ONE home of envelope construction
 // (BuildRequest / BuildResponseFromRequest / BuildEvent). Adapters (metatool,
-// actors) compose those builders; a hand-rolled non-empty message.Envelope{…}
-// literal anywhere else in lib/ or actors/ is a parallel primitive — exactly
+// drivers) compose those builders; a hand-rolled non-empty message.Envelope{…}
+// literal anywhere else in lib/ or drivers/ is a parallel primitive — exactly
 // the split (callkit / hand-rolled agent envelopes) this repo just removed.
 // Zero-value returns (message.Envelope{}) are allowed. runtime/ is exempt
 // (the substrate itself is the authority); app/ joins the scan once
@@ -139,7 +139,7 @@ func TestEnvelopeConstructionLivesOnlyInBehavior(t *testing.T) {
 	fset := token.NewFileSet()
 	var violations []string
 
-	for _, root := range []string{"../lib", "../actors"} {
+	for _, root := range []string{"../lib", "../drivers"} {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err
@@ -212,7 +212,7 @@ const platformModulePrefix = "github.com/wanpengxie/atoll/"
 // TestPlatformDependencyDirection enforces the platform reshape's dependency
 // figure: platform is the assembly layer BELOW app/cmd and ABOVE the
 // substrate. It must never import downstream
-// (actors/, app/) — that would let a domain actor or the HTTP layer back-flow
+// (drivers/, app/) — that would let a domain driver or the HTTP layer back-flow
 // into the physical layer. The wire VOCABULARY (runtime/ipc + the mux) lives
 // ONLY in platform/internal/link: no other platform package may carry it (the computebus
 // drift this reshape removed must not regrow a second home).
@@ -259,7 +259,7 @@ func TestPlatformDependencyDirection(t *testing.T) {
 			}
 			sub := strings.TrimPrefix(imp, platformModulePrefix)
 			// Downstream back-flow: platform must not import domain/app.
-			if strings.HasPrefix(sub, "actors/") || strings.HasPrefix(sub, "app/") || sub == "app" {
+			if strings.HasPrefix(sub, "drivers/") || strings.HasPrefix(sub, "app/") || sub == "app" {
 				violations = append(violations,
 					fmt.Sprintf("%s: platform imports downstream %q (dependency direction violated)", rel, imp))
 			}

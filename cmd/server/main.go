@@ -23,7 +23,7 @@ import (
 	// might host (G21): whether it actually runs is answered honestly by
 	// Build/creds, not gated by binary contents. agent/all = the LLM engine
 	// classes (go-kimi + claude); actors/all = tools + devices.
-	_ "github.com/wanpengxie/atoll/actors/all"
+	_ "github.com/wanpengxie/atoll/drivers/tools/all"
 	_ "github.com/wanpengxie/atoll/agent/all"
 )
 
