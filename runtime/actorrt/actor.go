@@ -104,10 +104,11 @@ func abortBuild(c *cell) {
 // wire-crossing cancelRequest). cell.cancelRequest hands the id off to it in
 // ONE HOP — dispatch is the runtime's job, disposition is the occupant's
 // (mirrors port writing a KindCancel frame and leaving the remote to act on
-// it). An occupant that does not implement RequestCanceller keeps the
-// built-in per-request reqCtx cancellation (the fallback path test doubles
-// rely on) — this interface is purely additive, it does not replace that
-// path for non-implementers.
+// it). An occupant that does NOT implement RequestCanceller has no built-in
+// fallback (the 期10 S5 reqCtx wiring that once backed this was removed —
+// cell.go's cancelRequest doc comment carries the matching note): cancel is
+// best-effort no-op for it — the signal is dropped and the request is left to
+// its own deadline to resolve.
 type RequestCanceller interface {
 	CancelRequest(id message.ID)
 }

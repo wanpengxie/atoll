@@ -94,6 +94,14 @@ type HomeConfig struct {
 	// timeout path needs a fast, deterministic window rather than production's
 	// multi-minute backstop.
 	ReservationTimeout time.Duration
+	// EventDropKinds is the producer-owned vocabulary of non-level diagnostic obs
+	// kinds the presence fold buckets per name (queue overflow, closure fault,
+	// checkpoint drop, …). The substrate names no such word: it stays blind to the
+	// agent subsystem (archtest TestSubstrateBlindToAgent), so the assembly root
+	// that CAN see every producer (app → lib/actorbase.ObsDropKinds ∪ agent/base.
+	// ObsDropKinds) hands the union in. Empty → every drop lands in the "unknown"
+	// bucket (honest, just uninformative).
+	EventDropKinds []actorrt.ObsKind
 }
 
 // Home is the assembled channel-home. Its public surface is the capability set in
@@ -141,10 +149,6 @@ type Home struct {
 	// harmless). Touched only on the reconcile goroutine, no lock.
 	expiryCursor storespec.ExpiryCursor
 
-	// placement decides which host a new activity (fork/activation) starts on.
-	// Single fixed-home identity this period (SinglePlacement); shaped now so
-	// fork/activation route through Place() and multi-home swaps additively.
-	placement actorrt.Placement
 	// builder is the platform-layer class → caps-factory table (the fork
 	// injection-point contract, CapsFactoryBuilder). nil until the domain's
 	// factory table is injected — a nil builder makes SpawnHandle.Fork fail-fast
@@ -230,6 +234,10 @@ type homeFaults struct {
 	action   map[string]func()
 	created  func(*Home)
 	delivery func(storespec.StoredRow) error
+	// wrapMembership, when set, decorates the membership control plane handed to
+	// the link acceptor (only) — a test seam for injecting reconcileHost write
+	// faults without touching the membership every other arm reads.
+	wrapMembership func(storespec.MembershipControlPlane) storespec.MembershipControlPlane
 }
 
 func (f *homeFaults) checkpoint(name string) error {
@@ -271,8 +279,9 @@ const reconcileInterval = 30 * time.Second
 // Open assembles the channel home. Assembly is linearised by the tap seam (no
 // construction cycle, no back-fill):
 //
-//	signal -> stores(OnCommit=signal.Notify) -> harness -> channelkit(spawns
-//	sysactor against the live runtime) -> delivery tap -> link acceptor.
+//	signal -> stores(OnCommit=signal.Notify) -> harness -> channelkit(registers
+//	the sysactor factory; Start births it against the live runtime) ->
+//	delivery tap -> link acceptor.
 func Open(cfg HomeConfig) (*Home, error) { return openHome(cfg, nil) }
 
 func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
@@ -381,10 +390,11 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: register system actor: %w", err)
 	}
 
-	// 5. Presence fold: mechanism-only latest-value cache. Vocabulary remains an
-	// assembly concern through the injected level-kind set.
+	// 5. Presence fold: mechanism-only latest-value cache. Both vocabularies are
+	// an assembly concern: the level-kind set (folded testimony) and the injected
+	// event-drop-kind set (producer-owned diagnostic buckets, see HomeConfig).
 	presenceFold := presence.New(logger, clock,
-		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, sweepEvery)
+		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, cfg.EventDropKinds, sweepEvery)
 
 	// 6. channelkit: actorrt runtime + sysactor + death-edge wiring. The system
 	//    cell is built against the LIVE runtime (factory) — its liveness Stat seam
@@ -393,10 +403,11 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	//    h is predeclared (nil) here and assigned below (step 9): sysactor is a
 	//    ring0 special Proc (spec §3's out-generation matrix) that still enters
 	//    through actorbase.New like every other actor, so its Hooks.Canceller
-	//    wants Home.CancelRequest — but the system cell is spawned INSIDE
-	//    channelkit.New, before Home exists. The closure captures the h
-	//    VARIABLE (not its zero value); by the time a cancel actually fires
-	//    (long after Open returns), h has been assigned.
+	//    wants Home.CancelRequest — but the system cell's factory is registered
+	//    at channelkit.New (and the cell birthed at channel.Start), before Home
+	//    is assigned. The closure captures the h VARIABLE (not its zero value);
+	//    by the time a cancel actually fires (long after Open returns), h has
+	//    been assigned.
 	channel, err := channelkit.New(channelkit.Config{
 		ChannelID: cfg.ChannelID,
 		System: func(rt *actorrt.Runtime, inc actorrt.Incarnation) actorrt.Actor {
@@ -432,8 +443,22 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 		},
 		SystemPen:    systemPen,
 		OpenRequests: cs.Query,
-		Clock:        clock,
-		Logger:       logger,
+		// ClosedForever is closure's monotone predicate (拔根 #14/#15): a receiver's
+		// callers are closed with receiver_unavailable ONLY when it is deregistered
+		// or never a member — the irreversible facts (an actor id is minted once and
+		// never reused; dereg never reverts). Same classification as the scheduler's
+		// not_a_member reject. A crashed-but-still-registered receiver returns false
+		// here and is left to the expiry reaper (its callers wait for the request
+		// deadline) — no liveness snapshot is ever a terminal-write dependency.
+		ClosedForever: func(ctx context.Context, id actor.ActorID) (bool, error) {
+			rec, ok, err := cs.Registry.Lookup(ctx, id)
+			if err != nil {
+				return false, err // transient: skip this round, the reconciler retries next tick.
+			}
+			return !ok || !rec.IsActive(), nil
+		},
+		Clock:  clock,
+		Logger: logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct channel: %w", err)
@@ -476,7 +501,6 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	h.presenceFold = presenceFold
 	h.logger = logger
 	h.nowMs = nowMs
-	h.placement = SinglePlacement{}
 	h.builder = cfg.Builder
 	h.desired = cfg.Desired
 	h.prevEagerDesired = map[actor.ActorID]bool{}
@@ -522,12 +546,16 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	//      behaviourally identical to a local one (transport neutrality).
 	//      Attached-port obs enters the runtime's one population subscription
 	//      just like local-cell obs.
+	acceptorMembership := storespec.MembershipControlPlane(cs.Membership)
+	if faults != nil && faults.wrapMembership != nil {
+		acceptorMembership = faults.wrapMembership(cs.Membership)
+	}
 	links := link.NewAcceptor(link.Config{
 		Minter:             minter,
 		Access:             cs.Access,
 		Schedule:           schedMinter,
 		Runtime:            rt,
-		Membership:         cs.Membership,
+		Membership:         acceptorMembership,
 		Registry:           cs.Registry,
 		ChannelID:          cfg.ChannelID,
 		Logger:             logger,
@@ -562,25 +590,16 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	lateAcc.bind(links)
 
 	// 13. Reconcilers (level backstops). Run one sweep of EACH at startup —
-	//     activation re-mints the always-on desired set; closure is the home-restart
-	//     recovery path (#4, close orphan open requests whose receiver's embodiment
-	//     predates this process). Then a low-frequency ticker keeps both as the
-	//     safety net for any lost death edge / intent change. The death edge (OnDown)
-	//     remains the lossy fast-path for closure.
-	//
-	//     BOOT-ORDER红线 (红线12): activation MUST precede closure, at the first sweep
-	//     AND every tick. closure's verdict is "absent right now" (livenessProbe),
-	//     not "predates this process" — so a receiver whose desired cell the ring has
-	//     not yet (re)minted this sweep would be scanned as receiver_unavailable and
-	//     its deferred open requests wrongly closed. Minting first, then scanning,
-	//     keeps a restart / mid-life-crash cell's open requests alive across the sweep.
+	//     activation re-mints the always-on desired set; closure closes orphan open
+	//     requests whose receiver is closed forever (deregistered / never a member)
+	//     — a lost dereg edge, or a dereg that predates this process. Then a
+	//     low-frequency ticker keeps both as the safety net for any lost death edge
+	//     / intent change. The death edge (OnDown) remains the lossy fast-path for
+	//     closure. Step order is fixed inside reconcileSweep (see its head).
 	if err := faults.checkpoint("publish.sweep"); err != nil {
 		return nil, err
 	}
-	h.reconcileActivation(ctx)
-	channel.Reconcile(ctx)
-	h.sweepExpired(ctx)
-	h.sweepPresence(ctx)
+	h.reconcileSweep(ctx)
 	reconcileCtx, reconcileStop := context.WithCancel(context.Background())
 	reconcileDone := make(chan struct{})
 	h.reconcileStop = reconcileStop
@@ -594,36 +613,11 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 			case <-reconcileCtx.Done():
 				return
 			case <-t.C:
-				h.reconcileActivation(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				channel.Reconcile(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				h.sweepExpired(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				h.sweepPresence(reconcileCtx)
+				h.reconcileSweep(reconcileCtx)
 			case <-h.pokeCh:
-				// Admit poke: run the same activation-then-closure sweep off-tick so
-				// a freshly-admitted member embodies without the ≤30s wait. Boot-order
-				// 红线 holds (activation precedes closure) on this path too.
-				h.reconcileActivation(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				channel.Reconcile(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				h.sweepExpired(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				h.sweepPresence(reconcileCtx)
+				// Admit poke: run the same sweep off-tick so a freshly-admitted member
+				// embodies without the ≤30s wait.
+				h.reconcileSweep(reconcileCtx)
 			}
 		}
 	}()
@@ -637,6 +631,34 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	}
 	logger.Info("platform.home.ready", "channel", string(cfg.ChannelID))
 	return h, nil
+}
+
+// reconcileSweep runs the home's level-reconcile quartet in the fixed
+// activation → closure → expiry → presence order; each step re-checks ctx so a
+// cancel between steps stops the sweep before the next component.
+//
+// Closure (channel.Reconcile) authors a terminal ONLY on the monotone
+// closed-forever fact (deregistered / never a member), never on liveness — so a
+// receiver whose desired cell the ring has not yet (re)minted this sweep is still
+// a registered member and is left untouched (its open requests wait for the
+// deadline reaper), regardless of sweep order. Keying closure on the irreversible
+// dereg fact instead of a reversible liveness dip dissolves the old
+// "not-yet-minted cell mis-scanned as a corpse" hazard; activation is kept first
+// as the natural order — re-mint the always-on desired set before the backstops.
+func (h *Home) reconcileSweep(ctx context.Context) {
+	h.reconcileActivation(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	h.channel.Reconcile(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	h.sweepExpired(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	h.sweepPresence(ctx)
 }
 
 // sweepPresence enforces fold rows ⊆ (live embodiments ∪ active membership).
@@ -765,6 +787,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 	}
 
 	rt := h.channel.Cells()
+	now := time.UnixMilli(h.nowMs())
 	actual := make(map[actor.ActorID]bool)
 	for _, id := range rt.LiveIDs() {
 		actual[id] = true
@@ -785,6 +808,16 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		}
 		if rec.Host != "" {
 			continue // attached elsewhere — not this ring's authority to embody (反误杀)
+		}
+		if _, held := h.backoffGate(id, now); held {
+			// Build backoff active (a prior BuildFailure has not elapsed): skip the
+			// build this tick — the SAME account EnsureLive maintains, so the ring and
+			// the reviver back a failing actor off in lockstep instead of the ring
+			// re-hammering it every tick/poke while the reviver waits. Drop id from
+			// current exactly as the build-failure arm below does: a member that never
+			// embodied is not carried as managed into prevEagerDesired.
+			delete(current, id)
+			continue
 		}
 		factory, ok := h.factoryFor(rec)
 		if !ok {
@@ -808,6 +841,10 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 				return
 			}
 			h.logger.Error("platform.reconcile.build_failed", "channel", string(h.channelID), "actor", string(mid), "error", buildErr)
+			var failure *actorrt.BuildFailure
+			if errors.As(buildErr, &failure) {
+				h.recordBuildFailure(mid, now)
+			}
 			delete(current, mid)
 			continue
 		}
@@ -840,6 +877,14 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 			continue // attached elsewhere — not gone, not this ring's to evict (反误杀)
 		}
 		rt.DespawnID(id)
+		// The削 arm's own account cleanup, mirroring Remove's teardown (remove.go):
+		// an id this ring stops managing must not leave a permanently stale revive-
+		// backoff/log-throttle entry behind (e.g. intent withdrawn for a build-
+		// failing member — its backoff account would otherwise never be cleared).
+		h.clearReviveBackoff(id)
+		h.reviveLogMu.Lock()
+		delete(h.reviveLogAt, id)
+		h.reviveLogMu.Unlock()
 	}
 	h.prevEagerDesired = current
 }
@@ -1066,7 +1111,7 @@ func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnat
 		// descendant is an incarnation-level citizen (spec §4.1), so its private
 		// state must be per-incarnation memory, not this durable MintState arm. Any
 		// actor's fork children — top-level or itself a child — take that path.
-		Spawn: newSpawnHandle(inc, rt, h.builder, h.buildChildCaps, h.placement, h.hooks()),
+		Spawn: newSpawnHandle(inc, rt, h.builder, h.buildChildCaps, h.hooks()),
 	}
 }
 

@@ -82,7 +82,30 @@ type cell struct {
 	// closed guards inbox-send so Deliver never enqueues into a torn-down cell.
 	mu     sync.Mutex
 	closed bool
+
+	// pending-cancel organ (§16 signal-throttle): request-cancel is a SIGNAL, and
+	// signal absorption is the RECIPIENT's organ (Linux's pending bitmap lives on
+	// the target task_struct; BEAM funnels every signal into the receiver's own
+	// queue). Each cell owns a bounded pending-cancel SET — same id merges
+	// idempotently — that a SINGLE drain goroutine empties via the one-hop
+	// RequestCanceller handoff, OFF both the delivering goroutine and the cell's
+	// serial Receive line. Merge-on-demand keeps at most one drainer per cell at
+	// any instant (cancelDraining CAS), replacing the retired per-frame `go`
+	// (unbounded goroutine spawn on the daemon read loop).
+	cancelMu       sync.Mutex
+	pendingCancel  map[message.ID]struct{}
+	cancelDraining atomic.Bool
+	cancelOverflow atomic.Uint64
 }
+
+// cancelSetCap bounds a cell's pending-cancel set. Sized to the serve ledger's
+// own capacity (actorbase engine.go: newServeLedger(…, 256)) — the account of
+// in-flight requests a cell can be serving is the natural ceiling on how many
+// distinct live request ids there could ever be anything to cancel, so the same
+// order of magnitude is the right bound. Overflow is counted, warned, and
+// dropped: cancel is a best-effort hint, the request's own deadline backstops a
+// dropped one.
+const cancelSetCap = 256
 
 // allocShell allocates a cell SHELL (impl=nil, live=false) — phase 1 of the
 // two-phase Spawn. The returned pointer is the incarnation's stable p;
@@ -101,18 +124,19 @@ func allocShell(parent context.Context, id actor.ActorID, kind actor.Kind, mailb
 	}
 	ctx, cancel := context.WithCancel(parent)
 	return &cell{
-		id:       id,
-		mintKind: kind,
-		inbox:    make(chan *message.Envelope, mailbox),
-		started:  started,
-		ctx:      ctx,
-		cancel:   cancel,
-		onDown:   onDown,
-		onObs:    onObs,
-		logger:   logger,
-		onExit:   onExit,
-		onReap:   onReap,
-		done:     make(chan struct{}),
+		id:            id,
+		mintKind:      kind,
+		inbox:         make(chan *message.Envelope, mailbox),
+		started:       started,
+		ctx:           ctx,
+		cancel:        cancel,
+		onDown:        onDown,
+		onObs:         onObs,
+		logger:        logger,
+		onExit:        onExit,
+		onReap:        onReap,
+		done:          make(chan struct{}),
+		pendingCancel: map[message.ID]struct{}{},
 	}
 }
 
@@ -313,17 +337,77 @@ func (c *cell) safeReceive(env *message.Envelope) {
 	}
 }
 
-// cancelRequest implements embodiment: deliver the request-cancel signal for id,
-// off the cell goroutine, as a ONE-HOP handoff to the occupant's RequestCanceller
-// (dispatch/disposition split — the occupant decides what cancelling id means to
-// its own in-flight work). 期10 S5 retired the built-in reqCtx fallback (the
-// per-request cancel machine): the sole occupant is the actorbase engine, which
-// implements RequestCanceller (engine.CancelRequest → serve-ledger close), so a
-// non-implementing occupant is a best-effort no-op — the caller's own closure
+// cancelRequest implements embodiment: absorb the request-cancel SIGNAL for id
+// into this cell's pending-cancel organ (§16). It is NON-BLOCKING — a merge into
+// a bounded set, never a call into the occupant on the caller's goroutine — so
+// the daemon read loop (and every other caller of Runtime.CancelRequest) returns
+// at once, no per-frame goroutine spawn. The one-hop handoff to the occupant's
+// RequestCanceller (dispatch/disposition split — the occupant decides what
+// cancelling id means to its own in-flight work) happens on the cell's single
+// drain goroutine. 期10 S5 retired the built-in reqCtx fallback: the sole
+// occupant is the actorbase engine (engine.CancelRequest → serve-ledger close),
+// so a non-implementing occupant drains-and-drops — the caller's own closure
 // owns the terminal, the cancel is only a hint.
 func (c *cell) cancelRequest(id message.ID) {
-	if rc, ok := c.impl.(RequestCanceller); ok {
-		rc.CancelRequest(id)
+	c.cancelMu.Lock()
+	if _, dup := c.pendingCancel[id]; dup {
+		c.cancelMu.Unlock()
+		return // same id merges idempotently
+	}
+	if len(c.pendingCancel) >= cancelSetCap {
+		c.cancelMu.Unlock()
+		n := c.cancelOverflow.Add(1)
+		c.logger.Warn("actorrt.cancel_set_overflow", "actor", string(c.id), "cap", cancelSetCap, "dropped_total", n)
+		return
+	}
+	c.pendingCancel[id] = struct{}{}
+	c.cancelMu.Unlock()
+	// Merge-on-demand泄流: only the goroutine that flips cancelDraining false→true
+	// spawns the drainer, so any instant holds ≤1 drainer per cell.
+	if c.cancelDraining.CompareAndSwap(false, true) {
+		go c.drainCancels()
+	}
+}
+
+// drainCancels empties the pending-cancel set, handing each id one-hop to the
+// occupant's RequestCanceller (disposition is the occupant's), then exits —
+// leaving cancelDraining false unless a racing insert refilled the set, in which
+// case it re-acquires the drainer so no id is stranded with no consumer. A
+// non-RequestCanceller occupant (shell / test double) drains-and-drops. Runs OFF
+// the cell goroutine, so a blocking Receive never delays a cancel reaching the
+// engine (the §16 修正案's aliveness invariant).
+func (c *cell) drainCancels() {
+	for {
+		c.cancelMu.Lock()
+		ids := make([]message.ID, 0, len(c.pendingCancel))
+		for id := range c.pendingCancel {
+			ids = append(ids, id)
+		}
+		clear(c.pendingCancel)
+		c.cancelMu.Unlock()
+
+		if len(ids) == 0 {
+			// Set drained: release the drainer, then re-check for an insert that
+			// raced the empty read. If it refilled, re-acquire — but if a fresh
+			// caller already CAS'd the drainer, that caller owns it and this one
+			// exits (still exactly one drainer).
+			c.cancelDraining.Store(false)
+			c.cancelMu.Lock()
+			refilled := len(c.pendingCancel) > 0
+			c.cancelMu.Unlock()
+			if !refilled || !c.cancelDraining.CompareAndSwap(false, true) {
+				return
+			}
+			continue
+		}
+
+		rc, ok := c.impl.(RequestCanceller)
+		if !ok {
+			continue // no canceller wired: ids drop, keep draining until empty
+		}
+		for _, id := range ids {
+			rc.CancelRequest(id)
+		}
 	}
 }
 

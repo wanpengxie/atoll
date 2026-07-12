@@ -35,7 +35,7 @@ build-release:
 # test / lint
 # ----------------------------------------------------------------------------
 test:
-	go test ./...
+	go test -race ./...
 
 # e2e-loop — C1 最小闭环：真双进程六段旅程（e2e/ 黑盒 harness）。
 # 裸 go test ./... 不受影响（ATOLL_E2E_BIN 空则 skip）。

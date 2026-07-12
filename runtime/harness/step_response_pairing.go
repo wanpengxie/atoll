@@ -182,7 +182,7 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 	// and receiver and may write either of its two words. A sender that is
 	// none of the authorized arms rejects as unauthorized; an authorized
 	// author writing ANOTHER author's word rejects the same way.
-	isReceiver := audienceContains(parent.Envelope.Audience, env.Sender.ID)
+	isReceiver := parent.Envelope.Audience.Contains(env.Sender.ID)
 	receiverAuthored := isReceiver &&
 		(!reasonCheck.failed || reasonCheck.reason == string(message.TerminalReceiverInternalError))
 
@@ -254,15 +254,6 @@ func (s *stepResponsePairing) Run(ctx context.Context, env *message.Envelope) (o
 	// is_terminal derives purely from the Layer 1 final closed set —
 	// this derivation is uniform across all types.
 	return outcome{IsTerminal: statusCls.isFinal}, nil
-}
-
-func audienceContains(audience message.Audience, want actor.ActorID) bool {
-	for _, id := range audience {
-		if id == want {
-			return true
-		}
-	}
-	return false
 }
 
 func audienceExactlySender(audience message.Audience, sender actor.ActorID) bool {

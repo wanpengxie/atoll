@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -1155,5 +1156,99 @@ func TestReconcileActivation_BuildStraddle_RemoveSelfUndo(t *testing.T) {
 	}
 	if h.prevEagerDesired[id] {
 		t.Fatal("straddled id was carried into the managed set (prevEagerDesired) despite being Removed")
+	}
+}
+
+// backoffEntry reads id's build-failure backoff account under reviveLogMu (the map
+// is lock-guarded even though these tests drive reconcileActivation synchronously).
+func backoffEntry(t *testing.T, h *Home, id actor.ActorID) reviveBackoffEntry {
+	t.Helper()
+	h.reviveLogMu.Lock()
+	defer h.reviveLogMu.Unlock()
+	return h.reviveBackoff[id]
+}
+
+// glue-v2 #8: the reconcile ring's 补臂 must consult the SAME CrashLoopBackOff
+// account homeReviver.EnsureLive maintains. Before the fix the 补臂 (also the poke
+// path — Admit re-runs it immediately) re-hammered a persistently-failing build
+// every tick/poke with no backoff. Both entry points funnel through
+// reconcileActivation, so driving it synchronously exercises both. This test pins
+// (a) a failed build records one ladder step, (b) an in-window tick is gated with
+// NO fresh build attempt, and (c) the retry interval climbs the exponential ladder
+// (1s→2s→4s…) toward its plateau.
+func TestReconcileActivation_BuildFailureBackoffLadder(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	id := actor.ActorID("agent:crashloop")
+	var builds atomic.Int64
+	builder.byID[id] = CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+		builds.Add(1)
+		panic("build boom") // deterministic BuildFailure (actorrt recovers it)
+	})
+
+	h := openActivationHome(t, desired, builder)
+	id = admit(t, h, id, actor.KindAgent)
+
+	// White-box controllable clock: the backoff account stamps off h.nowMs. The
+	// synchronous driving below never races the (hour-interval) ticker, so a plain
+	// captured int64 is race-free.
+	var nowMs int64 = 1_000_000
+	h.nowMs = func() int64 { return nowMs }
+
+	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
+
+	// Tick 1: build attempted, panics, ladder set to now+1s.
+	h.reconcileActivation(ctx)
+	if got := builds.Load(); got != 1 {
+		t.Fatalf("tick1 build attempts = %d, want 1", got)
+	}
+	if live(h, id) {
+		t.Fatal("a crashlooping member must not be live")
+	}
+	if h.prevEagerDesired[id] {
+		t.Fatal("a build that never embodied must not enter the managed set")
+	}
+	e := backoffEntry(t, h, id)
+	if e.failures != 1 || e.next != time.UnixMilli(nowMs).Add(time.Second) {
+		t.Fatalf("tick1 backoff = {failures:%d next:+%s}, want {1 +1s}", e.failures, e.next.Sub(time.UnixMilli(nowMs)))
+	}
+
+	// Within the 1s window (poke/tick): gated, NO fresh build attempt.
+	nowMs += 500
+	h.reconcileActivation(ctx)
+	if got := builds.Load(); got != 1 {
+		t.Fatalf("in-window build attempts = %d, want 1 (gate must skip the build)", got)
+	}
+
+	// Climb the ladder: each retry jumps just past the current gate, attempts one
+	// build, and the interval doubles (base<<min(failures-1,8), capped) — the
+	// plateau is 256s (the shift caps before the 5min ceiling ever binds).
+	for f := 2; f <= 11; f++ {
+		nowMs = backoffEntry(t, h, id).next.UnixMilli() + 1
+		before := builds.Load()
+		h.reconcileActivation(ctx)
+		if builds.Load() != before+1 {
+			t.Fatalf("failure %d: build attempts %d→%d, want one fresh attempt", f, before, builds.Load())
+		}
+		e := backoffEntry(t, h, id)
+		if int(e.failures) != f {
+			t.Fatalf("failure %d: entry.failures = %d", f, e.failures)
+		}
+		shift := f - 1
+		if shift > 8 {
+			shift = 8
+		}
+		want := time.Duration(1<<shift) * time.Second
+		if want > reviveBuildBackoffMax {
+			want = reviveBuildBackoffMax
+		}
+		if got := e.next.Sub(time.UnixMilli(nowMs)); got != want {
+			t.Fatalf("failure %d: retry interval = %s, want %s", f, got, want)
+		}
+	}
+	// Plateau reached (failures 9,10,11 all 256s): the ladder is bounded, not runaway.
+	if got := backoffEntry(t, h, id).next.Sub(time.UnixMilli(nowMs)); got != 256*time.Second {
+		t.Fatalf("ladder plateau = %s, want 256s", got)
 	}
 }

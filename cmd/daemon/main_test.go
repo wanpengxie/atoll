@@ -161,8 +161,8 @@ func TestFetchPlan_Non200(t *testing.T) {
 // TestPlanSource_BuildFailureDoesNotCullDesired pins the削臂 fix: a per-row Build
 // failure must NOT drop the row from the desired set (which would let computeRing
 // cull a still-assigned live cell). Desired is generated from the plan row itself;
-// only the BUILDER is absent for the failing row → the ring records it infeasible
-// and retries, while the buildable row and every other plan member stay desired.
+// only the BUILDER is absent for the failing row → the ring logs and retries,
+// while the buildable row and every other plan member stay desired.
 func TestPlanSource_BuildFailureDoesNotCullDesired(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -190,6 +190,6 @@ func TestPlanSource_BuildFailureDoesNotCullDesired(t *testing.T) {
 		t.Fatal("buildable row must have a builder")
 	}
 	if _, ok := p.Lookup("agent:bad"); ok {
-		t.Fatal("build-failing row must have NO builder (infeasible → retried), yet stay in desired")
+		t.Fatal("build-failing row must have NO builder (absent from live/missing this round, retried next reconcile), yet stay in desired")
 	}
 }

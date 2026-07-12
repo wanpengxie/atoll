@@ -166,29 +166,34 @@ func pollForTerminal(t *testing.T, ch *platform.Home, parentID message.ID, timeo
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: Author #3 — actor death -> receiver_unavailable
+// Test 1 (C7 新测② · 崩溃在册者不被 RU、由 sweepExpired 按 deadline 关)
 // ---------------------------------------------------------------------------
 
-// TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable is the
-// platform-level integration test for closure author #3: a cell panics ->
-// down edge -> channelkit OnDown -> MaterialiseReceiverUnavailable
-// writes a system-authored receiver_unavailable terminal into truth.
+// TestClosure_CrashedButRegistered_ClosedByDeadlineNotEdge locks the C7 拔根
+// semantic change: a cell that crashes while still a REGISTERED member is NOT
+// closed by the death edge — liveness absence is no longer a terminal-write
+// dependency (a successor incarnation may yet be re-embodied). Its stranded
+// request is closed only when its declared deadline passes, by the expiry reaper,
+// with reason=unanswered_timeout (the writer moves from closure to expiry). The
+// 快速失败延迟=TTL cost is asserted here.
 //
-// The full commit pipeline is exercised: write -> harness -> sqlite append ->
-// notify -> delivery tap delivers to cell -> cell panic -> death edge -> closure.
-func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T) {
-	ch := newClosureHome(t)
+// The full commit pipeline still runs: write -> harness -> sqlite append ->
+// notify -> delivery tap delivers to cell -> cell panic -> death edge (skipped,
+// worker still a member) -> deadline -> expiry reaper.
+func TestClosure_CrashedButRegistered_ClosedByDeadlineNotEdge(t *testing.T) {
+	// Fast ticker so the automatic reconcile sweep (which includes sweepExpired)
+	// closes the request shortly after its short declared deadline.
+	ch := newSweepingHome(t, 30*time.Millisecond)
 
 	callerID := actor.ActorID("user:caller")
 	workerID := actor.ActorID("agent:worker")
 
-	// 1. Admit the caller as a pen-bearing cell (its welded pen writes the request)
-	//    and register the worker in membership.
+	// 1. Admit the caller as a pen-bearing cell and register the worker.
 	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
 	registerActor(t, ch, &workerID, actor.KindAgent)
 
-	// 2. Spawn the panic actor cell (membership already seeded above; Spawn
-	//    restores + places the cell).
+	// 2. Spawn the panic actor cell — it dies on delivery, firing the death edge,
+	//    but the worker stays a registered member throughout (never deregistered).
 	workerID, err := platform.SpawnForTest(ch, workerID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
 		return panicOnReceive{}
 	}})
@@ -196,16 +201,18 @@ func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T
 		t.Fatalf("spawn worker cell: %v", err)
 	}
 
-	// 3. Write a request addressed to the worker through the full pipeline.
-	//    The delivery tap delivers it to the worker cell, which panics.
-	reqID := writeRequest(t, callerPen, workerID, "test.do", nil)
+	// 3. Request with a SHORT declared deadline. Delivery -> panic -> death edge ->
+	//    the closure predicate finds the worker still registered -> NO
+	//    receiver_unavailable. Only the reaper closes it, at the deadline.
+	exp := time.Now().UnixMilli() + 200
+	reqID := writeRequest(t, callerPen, workerID, "test.do", &exp)
 
-	// 4. Wait for the receiver_unavailable terminal to appear in truth.
-	//    The chain: panic -> cell death -> publishDown -> OnDown ->
-	//    MaterialiseReceiverUnavailable -> harness.Write -> sqlite append.
+	// 4. The terminal that eventually appears must be the expiry reaper's
+	//    unanswered_timeout — NEVER the death edge's receiver_unavailable (the
+	//    per-request UNIQUE index means whichever wrote first is the only terminal,
+	//    so a wrong edge-close would surface here).
 	term := pollForTerminal(t, ch, reqID, 5*time.Second)
 
-	// 5. Verify the terminal.
 	if term.Kind != message.KindResponse {
 		t.Fatalf("terminal kind=%s, want response", term.Kind)
 	}
@@ -213,13 +220,9 @@ func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T
 		t.Fatalf("terminal parent_id=%s, want %s", term.ParentID, reqID)
 	}
 	if term.Sender.ID != actor.SystemActorID {
-		t.Fatalf("terminal sender.id=%s, want %s (system substrate-death author)", term.Sender.ID, actor.SystemActorID)
-	}
-	if term.Sender.Kind != actor.KindSystem {
-		t.Fatalf("terminal sender.kind=%s, want system", term.Sender.Kind)
+		t.Fatalf("terminal sender.id=%s, want %s (system expiry author)", term.Sender.ID, actor.SystemActorID)
 	}
 
-	// Verify payload carries status=failed + reason=receiver_unavailable.
 	var payload struct {
 		Status string `json:"status"`
 		Reason string `json:"reason"`
@@ -227,15 +230,14 @@ func TestClosure_Author3_ActorDeath_MaterialisesReceiverUnavailable(t *testing.T
 	if err := json.Unmarshal(term.Payload, &payload); err != nil {
 		t.Fatalf("unmarshal terminal payload: %v (raw=%s)", err, term.Payload)
 	}
-	if payload.Status != "failed" {
-		t.Fatalf("terminal payload.status=%q, want failed", payload.Status)
+	if payload.Reason == string(message.TerminalReceiverUnavailable) {
+		t.Fatal("崩溃在册者被 death 边沿误关 (receiver_unavailable) — C7 拔根回归")
 	}
-	if payload.Reason != string(message.TerminalReceiverUnavailable) {
-		t.Fatalf("terminal payload.reason=%q, want receiver_unavailable", payload.Reason)
+	if payload.Status != "failed" || payload.Reason != string(message.TerminalUnansweredTimeout) {
+		t.Fatalf("terminal payload=%s, want failed/unanswered_timeout (deadline reaper)", term.Payload)
 	}
 
-	// Verify audience targets the original caller (response flows back to
-	// whoever sent the request).
+	// Audience still targets the original caller (the reaper reflects the request).
 	if len(term.Audience) != 1 || term.Audience[0] != callerID {
 		t.Fatalf("terminal audience=%v, want [%s]", term.Audience, callerID)
 	}

@@ -34,7 +34,10 @@ import (
 // arm that silently keeps answering as if still connected. Each arm publishes
 // atomically. A mixed-generation observation fails closed and cannot report a
 // false success. Rebind across the four capabilities is intentionally not a
-// transaction.
+// transaction: the four independent atomic Stores are a declared-benign
+// single-point tolerance (a mid-Rebind read straddling old/new arms is safe
+// precisely because every arm's stale side already fails closed — no
+// transaction is required to prevent a false success).
 type RebindableArms struct {
 	pen      atomic.Pointer[harness.Pen]
 	access   atomic.Pointer[accessdoor.ResourceAccessHandle]

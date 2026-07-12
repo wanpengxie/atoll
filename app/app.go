@@ -4,12 +4,10 @@
 package app
 
 import (
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"os"
@@ -20,9 +18,13 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	agentbase "github.com/wanpengxie/atoll/agent/base"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/jsondepth"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 // App is the product application server.
@@ -269,6 +271,14 @@ func (a *App) homeOrError(c *gin.Context, chID channel.ID) *platform.Home {
 	return nil
 }
 
+// eventDropKinds is the union of every substrate/domain producer's diagnostic
+// obs kinds, handed to the presence fold's drop buckets. Assembled here because
+// this is the one layer above both producers (the substrate must not import
+// agent/).
+func eventDropKinds() []actorrt.ObsKind {
+	return append(actorbase.ObsDropKinds(), agentbase.ObsDropKinds()...)
+}
+
 func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error) {
 	home, err := platform.Open(platform.HomeConfig{
 		ChannelID: chID,
@@ -285,6 +295,10 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 		// Fill the operate-face injection point: the in-gate control plane's
 		// executor half (intent write + Home call). One instance, channel-resolved.
 		Operate: a.operateFace(),
+		// The presence fold's drop-bucket vocabulary: app is the assembly root that
+		// sees every producer (substrate stays blind to agent/), so it hands the
+		// union of actorbase's and agentbase's diagnostic kinds in.
+		EventDropKinds: eventDropKinds(),
 	})
 	if err != nil {
 		return nil, err
@@ -334,8 +348,8 @@ func mergeConfig(global, perChannel string) json.RawMessage {
 	// treated as NOT an object (skips the merge); the raw bytes are never recursed
 	// into here — a two-poison case falls through to the verbatim raw return below,
 	// where the looper self-parses opaquely in its own subprocess.
-	gObj := gl != "" && boundedJSONDepth([]byte(gl)) == nil && json.Unmarshal([]byte(gl), &g) == nil
-	cObj := pc != "" && boundedJSONDepth([]byte(pc)) == nil && json.Unmarshal([]byte(pc), &c) == nil
+	gObj := gl != "" && jsondepth.Bounded([]byte(gl)) == nil && json.Unmarshal([]byte(gl), &g) == nil
+	cObj := pc != "" && jsondepth.Bounded([]byte(pc)) == nil && json.Unmarshal([]byte(pc), &c) == nil
 	// Two-layer shallow merge ONLY when both are JSON objects (channel keys win).
 	if gObj && cObj {
 		for k, v := range c {
@@ -355,42 +369,6 @@ func mergeConfig(global, perChannel string) json.RawMessage {
 		return json.RawMessage(gl)
 	}
 	return nil
-}
-
-// maxJSONDepth bounds the container nesting a client-supplied JSON config may carry
-// before it is decoded into an UNSTRUCTURED map[string]any. encoding/json's
-// Unmarshal recurses per nested container, so a deeply-nested blob overflows the
-// goroutine stack — a fatal, unrecoverable crash. A poison config persists and is
-// re-hit every startup, so the guard runs before every such decode. 64 levels is
-// far past any legitimate config.
-const maxJSONDepth = 64
-
-// boundedJSONDepth scans raw's structural tokens WITHOUT materialising any value
-// (json.Decoder.Token is iterative — a slice-backed scanner stack, never call-stack
-// recursion) and errors if container nesting exceeds maxJSONDepth. A malformed blob
-// is left to the caller's own decode to report (returns nil here); only over-deep
-// nesting is refused up front.
-func boundedJSONDepth(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	depth := 0
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return nil // malformed: the caller's own decode surfaces the parse error
-		}
-		switch tok {
-		case json.Delim('{'), json.Delim('['):
-			depth++
-			if depth > maxJSONDepth {
-				return fmt.Errorf("app: json nesting exceeds %d levels", maxJSONDepth)
-			}
-		case json.Delim('}'), json.Delim(']'):
-			depth--
-		}
-	}
 }
 
 func (a *App) loadChannels() error {

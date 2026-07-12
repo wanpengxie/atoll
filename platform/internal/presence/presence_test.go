@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	agentbase "github.com/wanpengxie/atoll/agent/base"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -56,7 +58,7 @@ func spawn(t *testing.T, rt *actorrt.Runtime, id actor.ActorID) actorrt.Incarnat
 
 func TestSnapshotFourCellStateSpace(t *testing.T) {
 	now := time.Unix(100, 0)
-	fold := New(nil, func() time.Time { return now }, []actorrt.ObsKind{"level"}, time.Second)
+	fold := New(nil, func() time.Time { return now }, []actorrt.ObsKind{"level"}, nil, time.Second)
 	rt, _ := actorrt.New(actorrt.Config{Clock: func() time.Time { return now }})
 	t.Cleanup(rt.StopAll)
 	reg := &fakeRegistry{rows: map[actor.ActorID]storespec.Record{
@@ -94,7 +96,7 @@ func TestSnapshotFourCellStateSpace(t *testing.T) {
 
 func TestGenerationAndSourceRules(t *testing.T) {
 	now := time.Unix(100, 0)
-	fold := New(nil, func() time.Time { return now }, []actorrt.ObsKind{"broker", "door"}, time.Second)
+	fold := New(nil, func() time.Time { return now }, []actorrt.ObsKind{"broker", "door"}, nil, time.Second)
 	rt, _ := actorrt.New(actorrt.Config{})
 	t.Cleanup(rt.StopAll)
 	old := spawn(t, rt, "a")
@@ -128,14 +130,16 @@ func TestGenerationAndSourceRules(t *testing.T) {
 
 func TestFilteringIsBoundedAndSweepHonorsGrace(t *testing.T) {
 	now := time.Unix(100, 0)
-	fold := New(nil, func() time.Time { return now }, []actorrt.ObsKind{"level"}, time.Second)
+	eventKinds := []actorrt.ObsKind{"queue_overflow", "closure_fault"}
+	fold := New(nil, func() time.Time { return now }, []actorrt.ObsKind{"level"}, eventKinds, time.Second)
 	fold.OnObs(context.Background(), "orphan", actorrt.Incarnation{}, "level", []byte("v"))
 	for i := 0; i < 100; i++ {
 		fold.OnObs(context.Background(), "a", actorrt.Incarnation{}, actorrt.ObsKind("unknown-"+time.Duration(i).String()), nil)
 	}
 	fold.OnObs(context.Background(), "a", actorrt.Incarnation{}, "queue_overflow", nil)
 	counts := fold.DroppedCounts()
-	if len(counts) != len(eventKinds)+2 || counts[unknownDropBucket] != 100 || counts["queue_overflow"] != 1 {
+	// buckets = one level kind + injected event kinds + the unknown bucket.
+	if len(counts) != 1+len(eventKinds)+1 || counts[unknownDropBucket] != 100 || counts["queue_overflow"] != 1 {
 		t.Fatalf("dropped counts = %#v", counts)
 	}
 	if removed := fold.Sweep(func(actor.ActorID) bool { return false }); removed != 0 {
@@ -144,5 +148,28 @@ func TestFilteringIsBoundedAndSweepHonorsGrace(t *testing.T) {
 	now = now.Add(2 * time.Second)
 	if removed := fold.Sweep(func(actor.ActorID) bool { return false }); removed != 1 {
 		t.Fatalf("old orphan sweep = %d, want 1", removed)
+	}
+}
+
+// TestRealProducerKindsLandInNamedBuckets is the #18 regression: fed the EXACT
+// namespaced kinds real producers publish (actorbase/agentbase's own exported
+// constants — the same union app hands the fold), every event drops into its
+// OWN named bucket, and the unknown bucket stays 0. Before the injection fix the
+// fold's private shadow table held bare strings, so every producer kind fell
+// through to unknown and all named buckets were永远 0 — this asserts that flip.
+func TestRealProducerKindsLandInNamedBuckets(t *testing.T) {
+	eventKinds := append(actorbase.ObsDropKinds(), agentbase.ObsDropKinds()...)
+	fold := New(nil, time.Now, []actorrt.ObsKind{"level"}, eventKinds, time.Second)
+	for _, kind := range eventKinds {
+		fold.OnObs(context.Background(), "producer", actorrt.Incarnation{}, kind, nil)
+	}
+	counts := fold.DroppedCounts()
+	if counts[unknownDropBucket] != 0 {
+		t.Fatalf("real producer kinds leaked into unknown bucket: %#v", counts)
+	}
+	for _, kind := range eventKinds {
+		if counts[kind] != 1 {
+			t.Fatalf("producer kind %q did not land in its named bucket (got %d): %#v", kind, counts[kind], counts)
+		}
 	}
 }

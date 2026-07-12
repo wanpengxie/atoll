@@ -2,6 +2,7 @@ package channelkit
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -29,12 +30,14 @@ type Channel struct {
 
 	// Death-edge closure: on a death edge the watcher writes
 	// receiver_unavailable for every in-flight request addressed to the dead
-	// actor. nil systemPen/openReqs → OnDown writes no terminals locally (the dead
-	// cell already self-evicted); the caller is responsible for closing the
+	// actor — but ONLY once closedForever confirms the id can never answer again
+	// (deregistered / never a member). A nil closure triple (systemPen/openReqs/
+	// closedForever) → OnDown writes no terminals locally; the caller closes the
 	// in-flight requests elsewhere.
-	systemPen harness.Pen
-	openReqs  storespec.MessageQuery
-	clock     func() time.Time
+	systemPen     harness.Pen
+	openReqs      storespec.MessageQuery
+	closedForever behavior.ClosedForever
+	clock         func() time.Time
 
 	// logger surfaces closure-drain FAULTS (a swallowed drain failure is a
 	// black hole — the loudest thing the watcher can hit). nil → discard.
@@ -83,7 +86,16 @@ type Config struct {
 	// authored by construction — channelkit never stamps a caller itself.
 	SystemPen    harness.Pen
 	OpenRequests storespec.MessageQuery
-	Clock        func() time.Time
+	// ClosedForever is the monotone closure predicate the composition root injects
+	// (registry: !ok || !IsActive → closed). channelkit closes a receiver's callers
+	// ONLY on this fact — deregistered / never a member, the states that can never
+	// gain a successor. A crashed-but-registered receiver is left to the deadline
+	// reaper (its callers wait for the request TTL). channelkit holds no registry
+	// itself: whose liveness/membership counts is the assembler's word, not the
+	// channel wiring's. Part of the closure triple — all of {SystemPen,
+	// OpenRequests, ClosedForever} or none.
+	ClosedForever behavior.ClosedForever
+	Clock         func() time.Time
 	// Logger surfaces closure-drain faults. nil → discard (silent).
 	Logger *slog.Logger
 }
@@ -92,6 +104,25 @@ type Config struct {
 // edge. Start later births the intrinsic system cell and closure consumer, so
 // the composition root can finish cross-component wiring first.
 func New(cfg Config) (*Channel, error) {
+	// Closure is a three-seam capability: the writer (SystemPen), the open-request
+	// source (OpenRequests) and the monotone closed-forever predicate
+	// (ClosedForever). All three or none — a partial wiring would leave the death
+	// edge/level scan unable to author terminals, a silent black hole for every
+	// caller of a departed actor. Refuse it at assembly rather than discover it as
+	// a hang in production.
+	set := 0
+	if cfg.SystemPen != nil {
+		set++
+	}
+	if cfg.OpenRequests != nil {
+		set++
+	}
+	if cfg.ClosedForever != nil {
+		set++
+	}
+	if set != 0 && set != 3 {
+		return nil, fmt.Errorf("channelkit: closure wiring incomplete — SystemPen, OpenRequests and ClosedForever are all-or-nothing")
+	}
 	clock := cfg.Clock
 	if clock == nil {
 		clock = time.Now
@@ -102,18 +133,19 @@ func New(cfg Config) (*Channel, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	c := &Channel{
-		channelID: cfg.ChannelID,
-		systemPen: cfg.SystemPen,
-		openReqs:  cfg.OpenRequests,
-		clock:     clock,
-		logger:    logger,
-		downCh:    make(chan actor.ActorID, downChBuffer),
-		downStop:  make(chan struct{}),
-		downDone:  make(chan struct{}),
-		ctx:       ctx,
-		cancel:    cancel,
-		closeDone: make(chan struct{}),
-		system:    cfg.System,
+		channelID:     cfg.ChannelID,
+		systemPen:     cfg.SystemPen,
+		openReqs:      cfg.OpenRequests,
+		closedForever: cfg.ClosedForever,
+		clock:         clock,
+		logger:        logger,
+		downCh:        make(chan actor.ActorID, downChBuffer),
+		downStop:      make(chan struct{}),
+		downDone:      make(chan struct{}),
+		ctx:           ctx,
+		cancel:        cancel,
+		closeDone:     make(chan struct{}),
+		system:        cfg.System,
 	}
 	// Share the channel's clock + logger with the runtime: the runtime stamps
 	// each cell's StartedAt with this clock, so the system actor's uptime
@@ -169,20 +201,23 @@ func (c *Channel) Cells() *actorrt.Runtime { return c.cells }
 func (c *Channel) Deliverer() actorrt.Deliverer { return c.deliverer }
 
 // OnDown implements actorrt.DownWatcher: death is the DELETED edge of
-// the embodiment (obs push), and the Channel is just a subscriber. On the edge it
-// materialises receiver_unavailable (the closure REACTION — work that lands in
-// truth) for every in-flight request addressed to the dead actor. The terminal
-// is SYSTEM-authored — the harness authorises sender==system +
-// reason==receiver_unavailable. This is the substrate's ONLY closure obligation;
-// without it a dead cell is a black hole that hangs every waiting caller.
-// Death itself is NOT truth; this reaction is.
+// the embodiment (obs push), and the Channel is just a subscriber. The edge is a
+// TRIGGER: it hands the dead id to the resident consumer, which — only if the id
+// is closed forever (deregistered / never a member) — materialises
+// receiver_unavailable (the closure REACTION — work that lands in truth) for every
+// in-flight request addressed to it. The terminal is SYSTEM-authored — the harness
+// authorises sender==system + reason==receiver_unavailable. This is the
+// substrate's ONLY closure obligation; without it a departed member is a black
+// hole that hangs every waiting caller. Death itself is NOT truth; this reaction
+// is. A crash whose member is still registered writes NO terminal here — its
+// callers wait for the request deadline (a successor may yet answer).
 //
 // It MUST NOT despawn the id: the dead embodiment has ALREADY self-evicted (the
 // runtime's pointer-identity removeIf ran before publishing this edge). A
 // watcher Despawn(id) is not pointer-checked, so under same-id replacement it
 // would delete/stop the SUCCESSOR — the exact contract DownWatcher forbids.
 func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, _ actorrt.Incarnation, cause error) {
-	if c.systemPen == nil || c.openReqs == nil {
+	if c.systemPen == nil || c.openReqs == nil || c.closedForever == nil {
 		return
 	}
 	// O(1) hand-off ONLY (G0-3): the closure materialisation (a store scan +
@@ -201,13 +236,12 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, _ actorrt.Incarn
 
 // consumeDown is the resident closure goroutine: it drains dead ids serially and
 // does the blocking closure work off the death-edge reap path. Started by Start,
-// joined by Close. Before materialising, it RE-CHECKS liveness (Present) — the
-// async hand-off widens the window in which a Restart successor incarnation may
-// have taken over under the same membership id, so the edge path must guard against mis-closing its callers
-// exactly as the level scan does.
+// joined by Close. The death edge is only a TRIGGER: closeFor re-derives the
+// monotone closed-forever fact before authoring anything, so an edge for an id
+// that is still a registered member (a crash whose successor may yet take over)
+// writes no terminal — exactly as the level scan judges.
 func (c *Channel) consumeDown() {
 	defer close(c.downDone)
-	probe := livenessProbe{rt: c.cells}
 	for {
 		select {
 		case <-c.downStop:
@@ -218,18 +252,29 @@ func (c *Channel) consumeDown() {
 		case <-c.downStop:
 			return
 		case id := <-c.downCh:
-			c.closeFor(c.ctx, id, probe)
+			c.closeFor(c.ctx, id)
 		}
 	}
 }
 
 // closeFor materialises receiver_unavailable for every in-flight request
-// addressed to id — UNLESS a Restart successor incarnation is already live
-// (Present), in which case the edge is stale and skipped (its callers are the successor's, not
-// black holes). System-authored: identity rides the system pen.
-func (c *Channel) closeFor(ctx context.Context, id actor.ActorID, probe livenessProbe) {
-	if probe.Present(id) {
-		return // a successor took over between the edge and this consume — not a corpse.
+// addressed to id — ONLY when id is CLOSED FOREVER (deregistered / never a
+// member), the monotone fact that guarantees no successor will ever answer. A
+// still-registered id (a crashed instance that may be re-embodied) is left to
+// the request deadline — its callers wait for the TTL, never mis-closed. A
+// predicate-lookup failure skips this round entirely (never a false close); the
+// level scan is the backstop. System-authored: identity rides the system pen.
+func (c *Channel) closeFor(ctx context.Context, id actor.ActorID) {
+	gone, err := c.closedForever(ctx, id)
+	if err != nil {
+		// The lookup failed → do NOT close (a lookup failure is never a dereg). The
+		// lossy edge is abandoned; the level scan retries next tick.
+		c.logger.Error("channelkit.closure.predicate_failed",
+			"channel", c.channelID, "dead_actor", id, "err", err)
+		return
+	}
+	if !gone {
+		return // still a registered member — the edge is a crash, not a corpse; the deadline closes it.
 	}
 	onFault := func(reqID message.ID, err error) {
 		c.logger.Error("channelkit.closure.write_failed",
@@ -258,13 +303,23 @@ func (c *Channel) Close() {
 func (c *Channel) closeWithin(timeout time.Duration) {
 	c.closeOnce.Do(func() {
 		defer close(c.closeDone)
-		c.cancel()
 		if !c.started.Load() {
+			c.cancel()
 			return
 		}
+		// Signal-then-join BEFORE cancel: closing downStop lets consumeDown finish
+		// whatever closeFor call is already in flight under a STILL-LIVE ctx, then
+		// notice the stop signal and return on its own next loop iteration. Only
+		// once it has actually joined (or the bounded timeout gives up on it) do we
+		// cancel c.ctx. Cancelling first (the prior order) raced an in-flight
+		// closeFor's predicate/drain queries against ctx.Done() on every routine
+		// shutdown, misreporting the loudest closure fault
+		// (predicate_failed/drain_query_failed — "every caller of the dead actor is
+		// a black hole") for what is just an ordinary Close, not a real fault.
 		close(c.downStop)
 		select {
 		case <-c.downDone:
+			c.cancel()
 		case <-time.After(timeout):
 			// Bounded abandon proof: the only write is idempotent UNIQUE-backed
 			// closure materialisation (or a loud closed-store error); this consumer
@@ -272,6 +327,7 @@ func (c *Channel) closeWithin(timeout time.Duration) {
 			c.leaked.Add(1)
 			c.logger.Error("channelkit.close.join_timeout", "timeout", timeout,
 				"safety", "writes are idempotent and no actors are produced")
+			c.cancel()
 		}
 	})
 	<-c.closeDone
@@ -279,30 +335,25 @@ func (c *Channel) closeWithin(timeout time.Duration) {
 
 func (c *Channel) Leaked() int64 { return c.leaked.Load() }
 
-// livenessProbe adapts the channel's runtime liveness view (Stat) to the behaviour
-// reconciler's LivenessProbe seam: present = a live instance hosted right now
-// (Stat's is_process_alive authority). Absent = closure owed.
-type livenessProbe struct{ rt *actorrt.Runtime }
-
-func (p livenessProbe) Present(id actor.ActorID) bool {
-	_, ok := p.rt.Stat(id)
-	return ok
-}
-
 // Reconcile runs the closure level scan (the reconciler): for every
-// receiver that still holds an open request and is currently ABSENT from the
-// substrate liveness view, materialise receiver_unavailable. This is the
-// level-triggered correctness backstop the death edge alone cannot give — a lost
-// edge (clean despawn, ctx-cancel, an open request predating a home restart)
-// leaves an orphan that only a scan can close. Idempotent: re-writing a terminal
-// collides with the per-request UNIQUE index, so repeated scans produce no
-// duplicate closure. The composition root drives it at startup and on a
-// low-frequency ticker; the death edge (OnDown) remains the lossy fast-path that
-// closes the common case immediately without waiting for the next scan.
+// receiver that still holds an open request and is CLOSED FOREVER (deregistered /
+// never a member), materialise receiver_unavailable. This is the level-triggered
+// correctness backstop the death edge alone cannot give — a lost edge (an edge
+// dropped from a full buffer, an open request predating a home restart, a dereg
+// whose edge never fired) leaves an orphan that only a scan can close. Idempotent:
+// re-writing a terminal collides with the per-request UNIQUE index, so repeated
+// scans produce no duplicate closure. The composition root drives it at startup
+// and on a low-frequency ticker; the death edge (OnDown) remains the lossy
+// fast-path that closes the common case immediately without waiting for the next
+// scan.
 //
-// nil writer/openReqs → no closure capability injected → no-op (mirrors OnDown).
+// A receiver merely absent from liveness (crashed, not yet placed) is NOT closed
+// here — still a registered member, it may get a successor, so its stranded
+// requests are the deadline reaper's to close, not this scan's.
+//
+// nil closure triple → no closure capability injected → no-op (mirrors OnDown).
 func (c *Channel) Reconcile(ctx context.Context) {
-	if c.systemPen == nil || c.openReqs == nil {
+	if c.systemPen == nil || c.openReqs == nil || c.closedForever == nil {
 		return
 	}
 	// System-authored (same as OnDown): the injected writer is the system Pen, so
@@ -313,7 +364,7 @@ func (c *Channel) Reconcile(ctx context.Context) {
 			"channel", c.channelID, "request", reqID, "err", err)
 	}
 	if err := behavior.ReconcileReceiverUnavailable(ctx,
-		c.systemPen, c.openReqs, livenessProbe{rt: c.cells},
+		c.systemPen, c.openReqs, c.closedForever,
 		c.clock, onFault); err != nil {
 		// The distinct-receivers scan failed → no orphan can be enumerated →
 		// every absent receiver's callers stay black holes until the next scan.

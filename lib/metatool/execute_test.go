@@ -379,6 +379,38 @@ func TestExecuteDescribeActor_UsesCallFace(t *testing.T) {
 	}
 }
 
+// TestExecuteDescribeActor_TerminalFailureNormalized pins that describe_actor
+// now routes its final through the SAME actor-CLI normalization as call_actor
+// (#11): a failed describe response renders as the closed error set, not the
+// raw透传 {error:reason} shape it did before.
+func TestExecuteDescribeActor_TerminalFailureNormalized(t *testing.T) {
+	call := func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		return finalResp("d", map[string]any{
+			"status": "failed",
+			"reason": string(message.TerminalReceiverUnavailable),
+		}), true, nil
+	}
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
+	rv := metatool.ExecuteDescribeActor(context.Background(),
+		json.RawMessage(`{"actor_id":"tool:xhs"}`), x, defaultRC())
+	assertIsError(t, rv, "actor_unreachable")
+}
+
+// TestExecuteDescribeType_TerminalFailureNormalized: same normalization for the
+// per-type query (#11).
+func TestExecuteDescribeType_TerminalFailureNormalized(t *testing.T) {
+	call := func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
+		return finalResp("d", map[string]any{
+			"status": "failed",
+			"reason": string(message.TerminalUnansweredTimeout),
+		}), true, nil
+	}
+	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: call, Clock: time.Now}
+	rv := metatool.ExecuteDescribeType(context.Background(),
+		json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search"}`), x, defaultRC())
+	assertIsError(t, rv, "timeout")
+}
+
 func TestExecuteDescribeType_MissingType(t *testing.T) {
 	x := &metatool.Exec{Jobs: &fakeJobs{}, Call: func(_ context.Context, _ behavior.RequestSpec, _ time.Duration) (*message.Envelope, bool, error) {
 		return nil, false, nil

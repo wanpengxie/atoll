@@ -165,7 +165,7 @@ func (p *planSource) Members(ctx context.Context) ([]actorrt.DesiredMember, erro
 		// Desired is generated from the plan row ALONE (ClassKind, a pure pre-Build
 		// table lookup), decoupled from Build. So a per-row Build failure (missing
 		// creds, transient) keeps the id IN desired — the ring finds no builder,
-		// records it infeasible, and retries next tick, while computeRing's削臂
+		// logs and retries next tick, while computeRing's削臂
 		// (prevCurrent−current) never culls a live cell that is still in the plan.
 		// Only a plan that genuinely drops the row removes it from desired. An
 		// unknown class has no derivable kind (unactivatable) — skipped, as the

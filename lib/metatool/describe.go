@@ -50,7 +50,7 @@ func ExecuteDescribeActor(ctx context.Context, params json.RawMessage, x *Exec, 
 	if !rc.InTurn() {
 		return NewError("describe_actor", InternalError, "describe_actor invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
 	}
-	return x.CallSyncResult(ctx, rc, RequestSpec{
+	result := x.CallSyncResult(ctx, rc, RequestSpec{
 		ToolName:       "describe_actor",
 		EnvelopeType:   "actor.describe",
 		HandlerActorID: p.ActorID,
@@ -58,6 +58,7 @@ func ExecuteDescribeActor(ctx context.Context, params json.RawMessage, x *Exec, 
 		Timeout:        DefaultTimeout,
 		WaitMode:       WaitUnbounded,
 	})
+	return NormalizeCallActorResult(result, p.ActorID, "")
 }
 
 // DescribeTypeSpec is the protocol-layer definition of describe_type.
@@ -110,7 +111,7 @@ func ExecuteDescribeType(ctx context.Context, params json.RawMessage, x *Exec, r
 		return NewError("describe_type", InternalError, "describe_type invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
 	}
 	payload, _ := json.Marshal(map[string]string{"type": p.Type})
-	return x.CallSyncResult(ctx, rc, RequestSpec{
+	result := x.CallSyncResult(ctx, rc, RequestSpec{
 		ToolName:       "describe_type",
 		EnvelopeType:   "actor.describe",
 		HandlerActorID: p.ActorID,
@@ -118,4 +119,5 @@ func ExecuteDescribeType(ctx context.Context, params json.RawMessage, x *Exec, r
 		Timeout:        DefaultTimeout,
 		WaitMode:       WaitUnbounded,
 	})
+	return NormalizeCallActorResult(result, p.ActorID, p.Type)
 }

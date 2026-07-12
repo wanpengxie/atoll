@@ -45,11 +45,11 @@ type Dialer struct {
 	// (see AttachReply.DaemonID's doc). Read via DaemonID().
 	daemonID string
 
-	mu       sync.Mutex
-	streams  map[actor.ActorID]*actorStream
-	attached chan struct{} // closed when attach_reply arrives
-	reply    AttachReply
-	// pendingAttach correlates concurrent Reattach calls by RequestID.
+	mu      sync.Mutex
+	streams map[actor.ActorID]*actorStream
+	// pendingAttach correlates every attach round-trip by RequestID — the
+	// initial Dial attach AND every later Reattach share this one table (the
+	// initial attach is no longer a bespoke one-shot channel/reply pair).
 	pendingAttach *pendingReplies[AttachReply]
 	// started flips true inside the SAME mu critical section that snapshots the
 	// streams for the initial batch (Start). It makes Start idempotent and is the
@@ -150,7 +150,6 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		computeID:           computeID,
 		logger:              logger,
 		streams:             map[actor.ActorID]*actorStream{},
-		attached:            make(chan struct{}),
 		pendingCommitted:    newPendingReplies[CommittedReply](),
 		pendingReclaim:      newPendingReplies[ReclaimAckReply](),
 		pendingReconcile:    newPendingReplies[ReconcilePullReply](),
@@ -221,23 +220,15 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		if cf.AttachReply.Accepted && cf.AttachReply.DaemonID != "" {
 			d.daemonID = cf.AttachReply.DaemonID
 		}
-		if cf.RequestID != "" {
-			d.mu.Unlock()
-			d.pendingAttach.deliver(cf.RequestID, *cf.AttachReply)
+		d.mu.Unlock()
+		if cf.RequestID == "" {
+			// Every attach (initial AND Reattach) now carries a RequestID, so a
+			// reply without one cannot be correlated to any waiter — a protocol/
+			// ordering anomaly, never silently dropped (F11).
+			d.logger.Warn("link.attach_reply_no_request_id")
 			return
 		}
-		select {
-		case <-d.attached:
-			// No Reattach in flight and the initial attach already resolved: an
-			// extra attach_reply is a protocol/ordering anomaly (F11 — reject
-			// reasons, and anomalies generally, are never silently dropped).
-			d.logger.Warn("link.unexpected_attach_reply")
-		default:
-			d.reply = *cf.AttachReply
-			d.channelID = string(cf.AttachReply.ChannelID)
-			close(d.attached)
-		}
-		d.mu.Unlock()
+		d.pendingAttach.deliver(cf.RequestID, *cf.AttachReply)
 	}
 	// onLane handles a HOME-opened lane substream: the home is relaying a
 	// redeemed transfer whose TARGET is this daemon (§5). It runs on the per-
@@ -267,36 +258,51 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		close(d.done)
 	}()
 
-	// Send attach on the control substream.
-	raw, err := encodeControl(controlFrame{Kind: ctrlAttach, Attach: &AttachRequest{
+	// Send attach on the control substream, correlated by RequestID through the
+	// same pendingAttach table Reattach uses (白拿: the initial attach inherits
+	// the table's send-failure cancel discipline the bespoke one-shot lacked).
+	attachID := newRequestID()
+	ch := d.pendingAttach.register(attachID)
+	raw, err := encodeControl(controlFrame{RequestID: attachID, Kind: ctrlAttach, Attach: &AttachRequest{
 		ComputeID: computeID, Declarations: decls,
 	}})
 	if err != nil {
+		d.pendingAttach.cancel(attachID)
 		_ = d.lc.Close()
 		return nil, err
 	}
 	if err := d.lc.sendControl(raw); err != nil {
+		d.pendingAttach.cancel(attachID)
 		_ = d.lc.Close()
 		return nil, err
 	}
 
+	// Wait on the correlation channel — ctx and link-death exits unchanged from
+	// the retired bespoke wait (no controlRPCTimeout: the initial attach has no
+	// wall-clock bound by design, matching the prior semantics).
+	var reply AttachReply
 	select {
-	case <-d.attached:
+	case reply = <-ch:
 	case <-ctx.Done():
+		d.pendingAttach.cancel(attachID)
 		_ = d.lc.Close()
 		return nil, ctx.Err()
 	case <-d.done:
+		d.pendingAttach.cancel(attachID)
 		_ = d.lc.Close()
 		return nil, errors.New("link: dial closed before attach reply")
 	}
-	if !d.reply.Accepted {
+	if !reply.Accepted {
 		_ = d.lc.Close()
 		reason := "link: attach rejected"
-		if d.reply.Reason != "" {
-			reason = "link: " + d.reply.Reason
+		if reply.Reason != "" {
+			reason = "link: " + reply.Reason
 		}
 		return nil, errors.New(reason)
 	}
+	d.mu.Lock()
+	d.channelID = string(reply.ChannelID)
+	d.mu.Unlock()
 	return d, nil
 }
 
@@ -334,11 +340,13 @@ const reattachTimeout = 10 * time.Second
 // Reattach re-declares this compute's FULL current actor set on stream 0 (the
 // kubelet node-status idiom — always the whole set, never an increment, §S-P8)
 // and waits for the home's verdict, so the caller can OpenStream a newly-desired
-// actor only once the home's allowed set actually covers it. Only one Reattach
-// may be in flight at a time (the reconcile ring drives it from a single
-// goroutine; the guard keeps the contract honest regardless). A rejected reply's
-// reason comes back in the error (F11 — reject reasons are never silently
-// dropped).
+// actor only once the home's allowed set actually covers it. The reconcile ring
+// drives Reattach from a single goroutine, so in practice only one call is ever
+// in flight at a time — but that is a caller discipline, not a guard this
+// function enforces: nothing here serializes concurrent callers. A concurrent
+// call would simply register its own RequestID/waiter and race independently
+// (no corruption, just no exclusion). A rejected reply's reason comes back in
+// the error (F11 — reject reasons are never silently dropped).
 func (d *Dialer) Reattach(ctx context.Context, decls []Declaration) error {
 	id := newRequestID()
 	ch := d.pendingAttach.register(id)
@@ -546,14 +554,16 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 				d.logger.Error("link.cancel_decode", "actor", string(as.id), "err", err)
 				continue
 			}
-			// Fire the cancel OFF this read loop's goroutine — and crucially OFF the
-			// cell goroutine the host routes it to. The request to cancel is the one
-			// occupying that cell goroutine; queuing the cancel on-loop behind the
-			// work it means to interrupt would deadlock. The host's CancelRequest
-			// fires the reqCtx's CancelFunc (concurrent-safe), so a bare goroutine
-			// is the right vehicle. nil cancel (none installed) is a no-op.
+			// Non-blocking hand-off into the target cell's pending-cancel organ
+			// (§16): as.cancel → rt.CancelRequest → cell.cancelRequest merges the
+			// id into a bounded set and lets that cell's single drain goroutine
+			// dispatch it one-hop to the occupant's RequestCanceller — OFF this
+			// read loop AND off the cell's serial Receive line. This arm therefore
+			// no longer spawns a goroutine per frame; the old死锁 concern here
+			// described the per-request reqCtx machine that 期10 S5 already铲除.
+			// nil cancel (none installed) is a no-op.
 			if as.cancel != nil {
-				go as.cancel(cp.RequestID)
+				as.cancel(cp.RequestID)
 			}
 		default:
 			// Fail-closed on an out-of-closed-set kind, mirroring the home port's
@@ -876,6 +886,14 @@ func (d *Dialer) handleLaneInbound(conn io.ReadWriteCloser) {
 			_ = writeLaneJSON(conn, laneAck{OK: false, Reason: oerr.Error()})
 			return
 		}
+		// Reuse the local write route's completion wrapper (redeemFileRoute's SAME
+		// ReservationID!="" construction condition): committingWriteHandle.Commit
+		// fires Committed(reservationID) and — on a home Lost verdict — reclaims
+		// this write's orphaned coord. #19 合并形: one commit-completion
+		// implementation, not the lane's own hand-written SendCommitted copy.
+		if reply.ReservationID != "" {
+			wh = &committingWriteHandle{LocalWriteHandle: wh, dialer: d, reservationID: reply.ReservationID, coord: reply.Coord}
+		}
 		if err := writeLaneJSON(conn, laneAck{OK: true}); err != nil {
 			_ = wh.Abort()
 			return
@@ -885,15 +903,12 @@ func (d *Dialer) handleLaneInbound(conn io.ReadWriteCloser) {
 			return
 		}
 		if cerr := wh.Commit(); cerr != nil {
-			return
-		}
-		if reply.ReservationID != "" {
-			// WARNING: transfer-lane completion is fire-and-forget. Multi-daemon
-			// recovery remains frozen until this path has a synchronous completion
-			// protocol; there is deliberately no hidden resend ledger.
-			if _, err := d.SendCommitted(context.Background(), reply.ReservationID); err != nil {
-				d.logger.Warn("link.transfer_committed_unconfirmed", "reservation_id", reply.ReservationID, "err", err)
-			}
+			// The lane protocol has NO completion-reply frame slot: the sender is
+			// not waiting on one (恢复协议的"发送方知情"半格仍留 A4). A failed
+			// commit — transport error, an explicit home NAK, or a Lost race whose
+			// orphan bytes committingWriteHandle.Commit already reclaimed — is
+			// surfaced as a Warn here, never a silent drop.
+			d.logger.Warn("link.lane_commit_failed", "reservation_id", reply.ReservationID, "coord", reply.Coord, "err", cerr)
 		}
 	default:
 		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "link: unknown lane mode " + string(reply.Mode)})

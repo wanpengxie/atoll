@@ -25,8 +25,12 @@ type workDeque struct {
 }
 
 func newWorkDeque(capacity int) *workDeque {
+	// Fail loud at assembly time — called only from New (a compile-time constant)
+	// and whitebox tests, so a panic surfaces the mistake at wiring, never at
+	// request time. A silent <=0 → 256 remap would hide a mis-wired capacity the
+	// same way it did for serveLedger (see F8).
 	if capacity <= 0 {
-		capacity = 256
+		panic("actorbase: work deque capacity must be positive")
 	}
 	return &workDeque{cap: capacity, sig: make(chan struct{}, 1)}
 }

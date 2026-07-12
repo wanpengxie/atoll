@@ -167,7 +167,7 @@ func (d compositionDesired) Members(context.Context) ([]actorrt.DesiredMember, e
 // resolves a durable member id to its ActorFactory by reading the channel_actors
 // row and building it (the same read+build the reconcile ring's activation does,
 // resolved for the builder instead of eagerly spawned). A build failure (missing creds, unknown class) is (zero,false) — the
-// ring records it infeasible and retries next tick. LookupByClass is fork's entry
+// ring logs and retries next tick. LookupByClass is fork's entry
 // (M2): a parent's委托 (childID + class + config) → the child's ActorFactory via
 // the SAME registry.Build the id-based Lookup runs, config carried on
 // InstanceSpec.Config (fork is its second灌入口 after S8's composition rows).

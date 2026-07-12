@@ -229,10 +229,12 @@ func deviceTestimony(snapshot presence.Snapshot) *introspect.DevicePresence {
 func (s *SystemActor) respondStatus(sys actorbase.Sys, msg actorbase.Msg) {
 	req, err := introspect.ParseStatusRequest(msg.Payload)
 	if err != nil {
+		s.logger.Warn("sysactor.status.bad_request", "error", err)
 		return
 	}
 	snapshot, err := s.snapshot(msg.Ctx(), actor.ActorID(req.ActorID))
 	if err != nil {
+		s.logger.Warn("sysactor.status.snapshot_failed", "actor", req.ActorID, "error", err)
 		return
 	}
 	present, uptime := s.liveness(snapshot)
