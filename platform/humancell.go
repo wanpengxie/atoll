@@ -96,22 +96,7 @@ func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
 			openCheck:  h.isRequestOpen,
 			cancelHint: h.CancelRequest,
 		}
-		// presence self-report (design §5.4): read the slot snapshot (step④) and
-		// self-report its level; nothing published (unknown) → say nothing (fold
-		// 无行 = unknown 诚实默认). Then observe edges by this incarnation's token —
-		// an old cell's摘除 (its token) can never unregister this one.
-		token := uuid.NewString()
-		if level, _, _, present := slot.Snapshot(); present {
-			publishPresence(sys, level)
-		}
-		slot.RegisterObserver(token, func(u subjectgate.PresenceUpdate) {
-			// Only positive edges are self-reported; a revocation (Live=false) is
-			// the容器 owner's证词账清洁 (Forget/epoch teardown, S4), not the cell's
-			// to retract via PublishObs.
-			if u.Live {
-				publishPresence(sys, u.Level)
-			}
-		})
+		token := wirePresenceSelfReport(sys, slot)
 		frames, release := slot.AttachInterpreter()
 		wg.Add(1)
 		go func() {
@@ -126,6 +111,28 @@ func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
 	close(stop)
 	wg.Wait()
 	return err
+}
+
+// wirePresenceSelfReport wires the cell's device-presence self-report against its
+// slot (装配链 step③④; design §5.4). It reads the current slot snapshot (step④) and
+// self-reports its level — nothing published (unknown) → say nothing (fold 无行 =
+// unknown 诚实默认) — then observes edges by THIS incarnation's token so an old
+// cell's摘除 (its token) can never unregister this one. Only positive edges are
+// self-reported: a revocation (Live=false) is the容器 owner's证词账清洁 (Forget/epoch
+// teardown, S4), NOT the cell's to retract via PublishObs. Returns the token the
+// caller defers RemoveObserver on. (Extracted from runHumanCell for churn testing —
+// gateway S6; behavior identical.)
+func wirePresenceSelfReport(sys actorbase.Sys, slot *subjectgate.Slot) string {
+	token := uuid.NewString()
+	if level, _, _, present := slot.Snapshot(); present {
+		publishPresence(sys, level)
+	}
+	slot.RegisterObserver(token, func(u subjectgate.PresenceUpdate) {
+		if u.Live {
+			publishPresence(sys, u.Level)
+		}
+	})
+	return token
 }
 
 func publishPresence(sys actorbase.Sys, level subjectgate.Level) {

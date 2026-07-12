@@ -40,7 +40,7 @@ test:
 # e2e-loop — C1 最小闭环：真双进程六段旅程（e2e/ 黑盒 harness）。
 # 裸 go test ./... 不受影响（ATOLL_E2E_BIN 空则 skip）。
 e2e-loop: build-go
-	ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -run TestLoop -v -timeout 300s
+	ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -run 'TestLoop|TestGatewayFrames' -v -timeout 300s
 
 # lint — go vet + 架构约束（archtest：契约形状只许住 lib/introspect）
 lint:
