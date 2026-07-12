@@ -28,6 +28,22 @@ func closedForeverVerdict(gone bool) func(context.Context, actor.ActorID) (bool,
 	return func(context.Context, actor.ActorID) (bool, error) { return gone, nil }
 }
 
+// closedForeverVerdictNotify is closedForeverVerdict plus a "called" signal: it
+// pushes the queried id onto called (non-blocking, so a small buffer must be
+// sized by the caller) every time the predicate is consulted. Tests that assert
+// an ABSENCE of a terminal must first wait on called — otherwise a consumer that
+// never even reached the predicate (e.g. the edge was dropped, or consumeDown
+// hadn't scheduled yet) would pass the same assertion vacuously.
+func closedForeverVerdictNotify(gone bool, called chan actor.ActorID) func(context.Context, actor.ActorID) (bool, error) {
+	return func(_ context.Context, id actor.ActorID) (bool, error) {
+		select {
+		case called <- id:
+		default:
+		}
+		return gone, nil
+	}
+}
+
 // liveActor is a healthy no-op cell — stands in for a same-id successor.
 func newChannel(cfg channelkit.Config) *channelkit.Channel {
 	c, err := channelkit.New(cfg)
@@ -381,11 +397,12 @@ func TestOnDown_SkipsStillRegisteredReceiver(t *testing.T) {
 		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"worker"},
 	}
 	fc := &fakeWriter{}
+	called := make(chan actor.ActorID, 4)
 	ch := newChannel(channelkit.Config{
 		ChannelID:     "ch",
 		SystemPen:     fc,
 		OpenRequests:  fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
-		ClosedForever: closedForeverVerdict(false), // worker is still a registered member
+		ClosedForever: closedForeverVerdictNotify(false, called), // worker is still a registered member
 		Clock:         time.Now,
 	})
 	defer ch.Close()
@@ -393,7 +410,18 @@ func TestOnDown_SkipsStillRegisteredReceiver(t *testing.T) {
 	// An edge for a crashed-but-registered "worker" — the consumer must skip it.
 	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, errors.New("crashed but still a member"))
 
-	// Give the consumer time to (not) write. No terminal must appear.
+	// Wait until the closure predicate has actually been consulted for this edge
+	// — otherwise the no-write assertion below would pass vacuously if the edge
+	// were never even consumed (a dropped/unscheduled edge, not a skip verdict).
+	select {
+	case <-called:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closure predicate was never consulted for the down edge — assertion would be vacuous")
+	}
+
+	// closeFor returns immediately once the predicate reports gone=false (no
+	// write path is reachable past that point), so a short grace window is
+	// enough to catch any regression that writes anyway.
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if fc.count() != 0 {
@@ -433,6 +461,79 @@ func TestOnDown_PredicateFailure_SkipsAndLogs(t *testing.T) {
 	}
 	if fc.count() != 0 {
 		t.Fatalf("a predicate lookup failure must NOT close anyone (错误当注销=误杀), got %d writes", fc.count())
+	}
+}
+
+// TestClose_QuietDuringInFlightClosure proves closeWithin's signal-then-cancel
+// fix: a closeFor call already in flight when Close is invoked must be allowed
+// to finish under its still-live ctx, not raced against ctx cancellation.
+// Regression this locks: the old cancel-then-signal order cancelled c.ctx
+// BEFORE an in-flight closeFor's predicate/drain queries ran, which then failed
+// on ctx.Err() and logged the loudest closure fault (predicate_failed /
+// drain_query_failed — "every caller of the dead actor is a black hole") for
+// what is just an ordinary Close — pure noise, not a real fault. Close must stay
+// quiet and the in-flight closure must still complete (bounded shutdown, not a
+// silently dropped one).
+func TestClose_QuietDuringInFlightClosure(t *testing.T) {
+	req := message.Envelope{
+		ID: "req-1", ChannelID: "ch", Kind: message.KindRequest, Type: "x.do",
+		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"worker"},
+	}
+	fc := &fakeWriter{}
+	h := &capHandler{}
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	ch := newChannel(channelkit.Config{
+		ChannelID:    "ch",
+		SystemPen:    fc,
+		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
+		ClosedForever: func(ctx context.Context, _ actor.ActorID) (bool, error) {
+			select {
+			case entered <- struct{}{}:
+			default:
+			}
+			<-release // held open until the test lets it proceed, simulating an in-flight closeFor
+			return true, ctx.Err()
+		},
+		Clock:  time.Now,
+		Logger: slog.New(h),
+	})
+
+	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, errors.New("dead"))
+
+	// Wait until closeFor's predicate call is actually in flight (blocked on release).
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("closure predicate was never entered — test setup is broken")
+	}
+
+	closeDone := make(chan struct{})
+	go func() {
+		ch.Close()
+		close(closeDone)
+	}()
+
+	// Give Close time to observe downStop and start waiting on the consumer's
+	// join before releasing the in-flight call — this is the window the old
+	// cancel-first order would have raced.
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+
+	select {
+	case <-closeDone:
+	case <-time.After(3 * time.Second):
+		t.Fatal("Close did not return after the in-flight closure finished")
+	}
+
+	h.mu.Lock()
+	msgs := append([]string(nil), h.msgs...)
+	h.mu.Unlock()
+	if len(msgs) != 0 {
+		t.Fatalf("normal Close during in-flight closeFor logged fault(s) %v — should be quiet", msgs)
+	}
+	if fc.count() != 1 {
+		t.Fatalf("in-flight closure should have completed and written its terminal, count=%d", fc.count())
 	}
 }
 

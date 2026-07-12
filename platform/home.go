@@ -877,6 +877,14 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 			continue // attached elsewhere — not gone, not this ring's to evict (反误杀)
 		}
 		rt.DespawnID(id)
+		// The削 arm's own account cleanup, mirroring Remove's teardown (remove.go):
+		// an id this ring stops managing must not leave a permanently stale revive-
+		// backoff/log-throttle entry behind (e.g. intent withdrawn for a build-
+		// failing member — its backoff account would otherwise never be cleared).
+		h.clearReviveBackoff(id)
+		h.reviveLogMu.Lock()
+		delete(h.reviveLogAt, id)
+		h.reviveLogMu.Unlock()
 	}
 	h.prevEagerDesired = current
 }

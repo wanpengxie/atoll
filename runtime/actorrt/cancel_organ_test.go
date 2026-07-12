@@ -133,9 +133,14 @@ func TestCancelOrgan_OverflowCounted(t *testing.T) {
 }
 
 // TestCancelOrgan_StormSingleDrainerPerCell: 10k concurrent cancel frames at one
-// cell must never spin up more than one drain goroutine — the RequestCanceller,
-// invoked only from that single drainer, is never entered concurrently
-// (maxConc <= 1). This is the §16 修正案 storm invariant (每 cell ≤1 消费者).
+// cell must never dispatch into the occupant's RequestCanceller concurrently
+// (maxConc <= 1, proven by gatedCanceller's own mutex-guarded counter — this
+// proves disposition never overlaps, NOT that only one drain goroutine ever
+// existed; §16 修正案's storm invariant is about serialized dispatch, and that is
+// what maxConc actually witnesses). After the storm settles, waitDrainIdle
+// additionally proves the organ actually CONVERGES: no drainer flag left set and
+// the pending-cancel set left empty — not just that concurrency stayed bounded
+// while frames were still arriving.
 func TestCancelOrgan_StormSingleDrainerPerCell(t *testing.T) {
 	t.Parallel()
 	g := &gatedCanceller{} // no gate: dispatch runs freely

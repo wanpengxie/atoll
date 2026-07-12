@@ -303,13 +303,23 @@ func (c *Channel) Close() {
 func (c *Channel) closeWithin(timeout time.Duration) {
 	c.closeOnce.Do(func() {
 		defer close(c.closeDone)
-		c.cancel()
 		if !c.started.Load() {
+			c.cancel()
 			return
 		}
+		// Signal-then-join BEFORE cancel: closing downStop lets consumeDown finish
+		// whatever closeFor call is already in flight under a STILL-LIVE ctx, then
+		// notice the stop signal and return on its own next loop iteration. Only
+		// once it has actually joined (or the bounded timeout gives up on it) do we
+		// cancel c.ctx. Cancelling first (the prior order) raced an in-flight
+		// closeFor's predicate/drain queries against ctx.Done() on every routine
+		// shutdown, misreporting the loudest closure fault
+		// (predicate_failed/drain_query_failed — "every caller of the dead actor is
+		// a black hole") for what is just an ordinary Close, not a real fault.
 		close(c.downStop)
 		select {
 		case <-c.downDone:
+			c.cancel()
 		case <-time.After(timeout):
 			// Bounded abandon proof: the only write is idempotent UNIQUE-backed
 			// closure materialisation (or a loud closed-store error); this consumer
@@ -317,6 +327,7 @@ func (c *Channel) closeWithin(timeout time.Duration) {
 			c.leaked.Add(1)
 			c.logger.Error("channelkit.close.join_timeout", "timeout", timeout,
 				"safety", "writes are idempotent and no actors are produced")
+			c.cancel()
 		}
 	})
 	<-c.closeDone

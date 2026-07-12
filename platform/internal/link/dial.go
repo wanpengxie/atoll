@@ -340,11 +340,13 @@ const reattachTimeout = 10 * time.Second
 // Reattach re-declares this compute's FULL current actor set on stream 0 (the
 // kubelet node-status idiom — always the whole set, never an increment, §S-P8)
 // and waits for the home's verdict, so the caller can OpenStream a newly-desired
-// actor only once the home's allowed set actually covers it. Only one Reattach
-// may be in flight at a time (the reconcile ring drives it from a single
-// goroutine; the guard keeps the contract honest regardless). A rejected reply's
-// reason comes back in the error (F11 — reject reasons are never silently
-// dropped).
+// actor only once the home's allowed set actually covers it. The reconcile ring
+// drives Reattach from a single goroutine, so in practice only one call is ever
+// in flight at a time — but that is a caller discipline, not a guard this
+// function enforces: nothing here serializes concurrent callers. A concurrent
+// call would simply register its own RequestID/waiter and race independently
+// (no corruption, just no exclusion). A rejected reply's reason comes back in
+// the error (F11 — reject reasons are never silently dropped).
 func (d *Dialer) Reattach(ctx context.Context, decls []Declaration) error {
 	id := newRequestID()
 	ch := d.pendingAttach.register(id)

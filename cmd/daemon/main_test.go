@@ -190,6 +190,6 @@ func TestPlanSource_BuildFailureDoesNotCullDesired(t *testing.T) {
 		t.Fatal("buildable row must have a builder")
 	}
 	if _, ok := p.Lookup("agent:bad"); ok {
-		t.Fatal("build-failing row must have NO builder (infeasible → retried), yet stay in desired")
+		t.Fatal("build-failing row must have NO builder (absent from live/missing this round, retried next reconcile), yet stay in desired")
 	}
 }
