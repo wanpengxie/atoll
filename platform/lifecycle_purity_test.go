@@ -441,9 +441,6 @@ func TestHomeStateTransitionsAndUnpublishIssuedHandles(t *testing.T) {
 	if !reflect.DeepEqual(gotStates, wantStates) {
 		t.Fatalf("states = %v, want %v", gotStates, wantStates)
 	}
-	if token := issued.PresenceConnect(); token != "" {
-		t.Fatalf("PresenceConnect after Close minted token %q", token)
-	}
 	if _, _, err := issued.Submit(context.Background(), SubmitSpec{}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("issued handle Submit after Close = %v", err)
 	}

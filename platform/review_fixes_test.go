@@ -96,7 +96,7 @@ func TestPresenceSweep_ClearsBypassDeregOrphan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.presenceFold.PutDoor(id, actorrt.ObsKind(introspect.ObsDevicePresence), introspect.MarshalDevicePresence(true))
+	h.presenceFold.OnObs(ctx, id, actorrt.Incarnation{}, actorrt.ObsKind(introspect.ObsDevicePresence), introspect.MarshalDevicePresence(true))
 	if got := h.PresenceSweptCount(); got != 0 {
 		t.Fatalf("initial swept count = %d", got)
 	}
@@ -123,7 +123,7 @@ func TestRemoveSnapshotAndReadmitHaveNoPriorTestimony(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.presenceFold.PutDoor(id, actorrt.ObsKind(introspect.ObsDevicePresence), introspect.MarshalDevicePresence(true))
+	h.presenceFold.OnObs(ctx, id, actorrt.Incarnation{}, actorrt.ObsKind(introspect.ObsDevicePresence), introspect.MarshalDevicePresence(true))
 	if err := h.Remove(ctx, id); err != nil {
 		t.Fatal(err)
 	}
@@ -163,7 +163,7 @@ func TestSweepPresence_ListActiveFailureSkipsWholePass(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.presenceFold.PutDoor(id, actorrt.ObsKind(introspect.ObsDevicePresence), introspect.MarshalDevicePresence(true))
+	h.presenceFold.OnObs(ctx, id, actorrt.Incarnation{}, actorrt.ObsKind(introspect.ObsDevicePresence), introspect.MarshalDevicePresence(true))
 	now = now.Add(2 * time.Second)
 	original := h.cs.Registry
 	h.cs.Registry = listFailRegistry{Registry: original}

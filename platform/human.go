@@ -10,7 +10,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/lib/jsondepth"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -484,110 +483,4 @@ func (h HumanHandle) ResourceShareMembers(ctx context.Context, id resource.Resou
 	}
 	out, derr := drv.DriveResourceShareMembers(id, ops)
 	return out, mapDriveErr(derr)
-}
-
-// --- L3 device presence (token form, 期12 S4) -------------------------------
-
-// PresenceConnect feeds this subject's L3 device presence online for one
-// gateway ws session and returns that session's own token (层3 obs 轴,
-// advisory — 正交 actor 活性, 绝不互训). Token-set form: each ws connection
-// holds its OWN token and a late disconnect can only remove ITSELF — the
-// Remove→re-Admit straddle (an old tab's dying ws extinguishing a fresh
-// session's online) is structurally gone, no generation counter needed.
-// Straddle gate: membership + closed are re-checked INSIDE presenceMu so a
-// stale handle held across a Remove cannot feed a removed id online (returns
-// "" — a no-op token). Classification read, not enforcement.
-func (h HumanHandle) PresenceConnect() string {
-	return h.home.presenceConnect(h.userID)
-}
-
-// PresenceDisconnect drops one session token; the offline snapshot is fed
-// only when the LAST token goes (显式 offline, 不靠 decay — 常驻 cell 不死).
-// An empty or unknown token is a no-op.
-func (h HumanHandle) PresenceDisconnect(token string) {
-	h.home.presenceDisconnect(h.userID, token)
-}
-
-func (h *Home) presenceConnect(id actor.ActorID) string {
-	h.presenceMu.Lock()
-	defer h.presenceMu.Unlock()
-	// Straddle gate (DoD-13): a handle minted before a Remove must not feed
-	// a removed id online. Checked under presenceMu so it is ordered against
-	// clearPresence's own lock hold.
-	if h.closed.Load() {
-		return ""
-	}
-	if rec, ok, err := h.cs.Registry.Lookup(context.Background(), id); err != nil || !ok || !rec.IsActive() {
-		return ""
-	}
-	if h.presenceSessions == nil {
-		h.presenceSessions = map[actor.ActorID]map[string]struct{}{}
-	}
-	set := h.presenceSessions[id]
-	if set == nil {
-		set = map[string]struct{}{}
-		h.presenceSessions[id] = set
-	}
-	token := uuid.NewString()
-	first := len(set) == 0
-	set[token] = struct{}{}
-	if first {
-		h.feedDevicePresence(id, true)
-	}
-	return token
-}
-
-func (h *Home) presenceDisconnect(id actor.ActorID, token string) {
-	if token == "" {
-		return
-	}
-	h.presenceMu.Lock()
-	defer h.presenceMu.Unlock()
-	set := h.presenceSessions[id]
-	if set == nil {
-		return
-	}
-	if _, ok := set[token]; !ok {
-		return
-	}
-	delete(set, token)
-	if len(set) == 0 {
-		delete(h.presenceSessions, id)
-		h.feedDevicePresence(id, false)
-	}
-}
-
-// clearPresence clears every session token for id and Forgets its fold
-// snapshot — Remove's对称清账 (pending-leftovers #3): the ring's削 is a
-// quiet teardown with no down edge, so the fold would otherwise keep serving
-// a stale "online" forever. Forget decays the id to the honest unknown.
-//
-// Cross-generation guard (修复批 P1-2): both the token clear and the Forget
-// run under presenceMu — the same lock presenceConnect feeds under — and the
-// registry is re-read first: if id is ACTIVE again (a re-Admit already
-// landed), this clear belongs to a dead generation and must not wipe the new
-// session's account/snapshot. Residual honesty: membership writes are not
-// serialized with presenceMu, so an exotic interleaving (re-Admit committing
-// between this read and the clear) can still decay a fresh session to
-// unknown — presence is ADVISORY three-state with unknown as the honest
-// default, so the residual mis-state is a stale "unknown" until the next
-// connect edge, never a false "online"; full linearization would couple the
-// membership tx to the presence account, deliberately not built (pre-launch
-// 不过度安全化).
-func (h *Home) clearPresence(id actor.ActorID) {
-	h.presenceMu.Lock()
-	defer h.presenceMu.Unlock()
-	if rec, ok, err := h.cs.Registry.Lookup(context.Background(), id); err == nil && ok && rec.IsActive() {
-		return // a newer generation already re-admitted this id — not ours to clear
-	}
-	delete(h.presenceSessions, id)
-	h.presenceFold.Forget(id)
-}
-
-// feedDevicePresence pushes an online/offline edge directly through Fold.PutDoor.
-// The door is this subject's L3 producer and deliberately bypasses broker fanout.
-func (h *Home) feedDevicePresence(id actor.ActorID, online bool) {
-	h.presenceFold.PutDoor(id,
-		actorrt.ObsKind(introspect.ObsDevicePresence),
-		actorrt.ObsValue(introspect.MarshalDevicePresence(online)))
 }

@@ -70,7 +70,7 @@ func TestSnapshotFourCellStateSpace(t *testing.T) {
 	fold.OnObs(context.Background(), "member-live", liveGen, "level", []byte("a"))
 	fold.OnObs(context.Background(), "member-absent", liveGen, "level", []byte("b"))
 	fold.OnObs(context.Background(), "ephemeral", ephGen, "level", []byte("c"))
-	fold.PutDoor("neither", "level", []byte("must-not-leak"))
+	fold.OnObs(context.Background(), "neither", actorrt.Incarnation{}, "level", []byte("must-not-leak"))
 
 	view := NewView(fold, rt, reg)
 	tests := []struct {
@@ -94,14 +94,17 @@ func TestSnapshotFourCellStateSpace(t *testing.T) {
 	}
 }
 
-func TestGenerationAndSourceRules(t *testing.T) {
+// TestBrokerGenerationRules covers the ONLY remaining source semantics after the
+// 来源轴归一 (design v0.6.1): every testimony is broker-sourced, marked stale when
+// its incarnation is not the current one, and a down edge deletes only the rows
+// whose gen matches (never a fresh successor's).
+func TestBrokerGenerationRules(t *testing.T) {
 	now := time.Unix(100, 0)
-	fold := New(nil, func() time.Time { return now }, []actorrt.ObsKind{"broker", "door"}, nil, time.Second)
+	fold := New(nil, func() time.Time { return now }, []actorrt.ObsKind{"broker"}, nil, time.Second)
 	rt, _ := actorrt.New(actorrt.Config{})
 	t.Cleanup(rt.StopAll)
 	old := spawn(t, rt, "a")
 	fold.OnObs(context.Background(), "a", old, "broker", []byte("old"))
-	fold.PutDoor("a", "door", []byte("online"))
 	rt.Despawn(old)
 	current := spawn(t, rt, "a")
 	view := NewView(fold, rt, &fakeRegistry{rows: map[actor.ActorID]storespec.Record{"a": {ID: "a"}}})
@@ -109,8 +112,8 @@ func TestGenerationAndSourceRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !snap.L3["broker"].StaleFromPriorLife || snap.L3["door"].StaleFromPriorLife {
-		t.Fatalf("stale flags = broker:%v door:%v", snap.L3["broker"].StaleFromPriorLife, snap.L3["door"].StaleFromPriorLife)
+	if !snap.L3["broker"].StaleFromPriorLife {
+		t.Fatalf("prior-life testimony not marked stale: %v", snap.L3["broker"].StaleFromPriorLife)
 	}
 	fold.OnObs(context.Background(), "a", current, "broker", []byte("new"))
 	fold.OnDown(context.Background(), "a", old, nil)
@@ -122,9 +125,6 @@ func TestGenerationAndSourceRules(t *testing.T) {
 	snap, _ = view.Snapshot(context.Background(), "a")
 	if _, ok := snap.L3["broker"]; ok {
 		t.Fatal("matching down did not remove broker testimony")
-	}
-	if _, ok := snap.L3["door"]; !ok {
-		t.Fatal("down removed door-owned testimony")
 	}
 }
 

@@ -200,64 +200,10 @@ func TestHumanDoor_NoConstructionFrozenRing(t *testing.T) {
 	}
 }
 
-// TestHumanDoor_PresenceTokenStraddle is DoD-7/13: multi-tab token set;
-// Remove clears the account and Forgets the fold (honest unknown); a stale
-// pre-Remove handle can neither feed a removed id online (straddle gate) nor
-// extinguish a re-admitted sibling's fresh session (token form).
-func TestHumanDoor_PresenceTokenStraddle(t *testing.T) {
-	ctx := context.Background()
-	h, humanID := doorHome(t)
-
-	oldHandle, err := h.Human(ctx, humanID)
-	if err != nil {
-		t.Fatalf("Human: %v", err)
-	}
-	tok1 := oldHandle.PresenceConnect()
-	tok2 := oldHandle.PresenceConnect()
-	if tok1 == "" || tok2 == "" || tok1 == tok2 {
-		t.Fatalf("tokens = (%q, %q)", tok1, tok2)
-	}
-	if _, known := deviceFromView(t, h, humanID); !known {
-		t.Fatal("device presence unknown after connect")
-	}
-
-	// Remove: presence account cleared, fold forgotten.
-	if err := h.Remove(ctx, humanID); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	if _, known := deviceFromView(t, h, humanID); known {
-		t.Fatal("device presence still known after Remove (Forget 清账破)")
-	}
-	// Stale handle cannot feed a removed id online (straddle gate).
-	if tok := oldHandle.PresenceConnect(); tok != "" {
-		t.Fatalf("removed subject PresenceConnect = %q, want no-op token", tok)
-	}
-
-	// Re-admit; a fresh session comes online; the OLD tab's late disconnect
-	// only removes itself — the new session stays online.
-	newID, err := h.Admit(ctx, actor.KindHuman, "alice")
-	if err != nil {
-		t.Fatalf("re-Admit: %v", err)
-	}
-	if newID == humanID {
-		t.Fatal("re-Admit reused removed human id")
-	}
-	h.reconcileActivation(ctx)
-	newHandle, err := h.Human(ctx, newID)
-	if err != nil {
-		t.Fatalf("Human #2: %v", err)
-	}
-	tok3 := newHandle.PresenceConnect()
-	if tok3 == "" {
-		t.Fatal("fresh session got no token")
-	}
-	oldHandle.PresenceDisconnect(tok1) // stale token: account was cleared — no-op
-	oldHandle.PresenceDisconnect(tok2)
-	if _, known := deviceFromView(t, h, newID); !known {
-		t.Fatal("late stale disconnect extinguished the fresh session (straddle 回归)")
-	}
-	newHandle.PresenceDisconnect(tok3)
-}
+// (gateway 期 S4: TestHumanDoor_PresenceTokenStraddle removed with the door's
+// PresenceConnect/Disconnect token machinery — human device-presence production
+// moved to the gateway会话账 (drivers/gateway, S3); its churn/straddle coverage
+// now lives in the gateway's TestUserEntry* and platform's TestPresenceChurn*.)
 
 // TestExpiryReaper_SystemAuthoredAcrossRestart is DoD-8's core: a declared
 // deadline outlives the home process — reopening past the deadline, the

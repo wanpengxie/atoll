@@ -133,20 +133,6 @@ type Home struct {
 	// by the substrate expiry reaper — 义务归位 D3; the subject drives its
 	// cell's caps through the OccupantDriver seam, see human.go.)
 
-	// presenceSessions is the subjectgate door's L3 device-presence session
-	// TOKEN SET per subject (channel, user) — 期12 S4's token form: the
-	// gateway ws connect/disconnect are the ONLY producer of a human's device
-	// presence (常驻 cell 不死, decay 挂 down-edge 对它失效, so the door must
-	// explicitly feed — 根基档 §4.6/§6). A (channel,user) may hold several ws
-	// (multi-tab/multi-device); online is fed on the FIRST token, offline
-	// only when the LAST goes. Each ws holds its OWN token and a disconnect
-	// removes only ITSELF — a stale disconnect from a pre-Remove session can
-	// never extinguish a re-Admitted sibling's fresh session (the straddle
-	// the plain refcount form couldn't rule out). Mutated and fed under
-	// presenceMu together, so edges are totally ordered.
-	presenceMu       sync.Mutex
-	presenceSessions map[actor.ActorID]map[string]struct{}
-
 	// onRevoke is HomeConfig.OnRevoke (the membership撤销 emit point) — fired by
 	// Remove after the dereg cascade so the gateway can seal the subject's频道臂.
 	onRevoke func(subject actor.ActorID)
