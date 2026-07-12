@@ -552,14 +552,16 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 				d.logger.Error("link.cancel_decode", "actor", string(as.id), "err", err)
 				continue
 			}
-			// Fire the cancel OFF this read loop's goroutine — and crucially OFF the
-			// cell goroutine the host routes it to. The request to cancel is the one
-			// occupying that cell goroutine; queuing the cancel on-loop behind the
-			// work it means to interrupt would deadlock. The host's CancelRequest
-			// fires the reqCtx's CancelFunc (concurrent-safe), so a bare goroutine
-			// is the right vehicle. nil cancel (none installed) is a no-op.
+			// Non-blocking hand-off into the target cell's pending-cancel organ
+			// (§16): as.cancel → rt.CancelRequest → cell.cancelRequest merges the
+			// id into a bounded set and lets that cell's single drain goroutine
+			// dispatch it one-hop to the occupant's RequestCanceller — OFF this
+			// read loop AND off the cell's serial Receive line. This arm therefore
+			// no longer spawns a goroutine per frame; the old死锁 concern here
+			// described the per-request reqCtx machine that 期10 S5 already铲除.
+			// nil cancel (none installed) is a no-op.
 			if as.cancel != nil {
-				go as.cancel(cp.RequestID)
+				as.cancel(cp.RequestID)
 			}
 		default:
 			// Fail-closed on an out-of-closed-set kind, mirroring the home port's
