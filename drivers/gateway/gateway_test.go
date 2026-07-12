@@ -4,6 +4,7 @@ import (
 	"context"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -173,6 +174,57 @@ func TestGatewayConcurrentClose(t *testing.T) {
 		// joined). The member arms owned no real pump here, so this asserts the tail set
 		// was fully drained by the teardown.
 		g.tailPumps.Wait()
+	}
+}
+
+// TestGatewayConcurrentCloseBarrier (修复批五轮 P2): a controllable seal-join barrier
+// PROVES the second concurrent Close arrives while the first is still mid-teardown, and
+// that NEITHER returns until the barrier releases — the sync.Once teardown gates every
+// caller. The barrier = a pump tracked on an arm, so seal's bounded join parks until we
+// untrack it (well within ArmSealJoinTimeout, so no leak/timeout is provoked). After
+// release both Close return with every arm sealed and the pump accounting at zero.
+func TestGatewayConcurrentCloseBarrier(t *testing.T) {
+	g := New(Config{})
+	subj := actor.ActorID("user:barrier")
+	e, arm := g.mustArm(t, channel.ID("c"), subj)
+	g.addDevice(e, g.newBareSession(subj))
+
+	// Track a pump on the arm: seal's a.wg.Wait() now parks until we untrack it.
+	arm.track()
+
+	returned := make(chan struct{}, 2)
+	for i := 0; i < 2; i++ {
+		go func() { _ = g.Close(); returned <- struct{}{} }()
+	}
+
+	// Barrier held: NEITHER Close may return — the first is parked in seal's join, the
+	// second is parked in closeOnce.Do waiting on the first's single teardown.
+	select {
+	case <-returned:
+		t.Fatal("a Close returned while the seal-join barrier was still held (teardown not gating)")
+	case <-time.After(100 * time.Millisecond):
+	}
+	// seal marks the arm sealed BEFORE it joins, so the flag is already set under the barrier.
+	if !arm.isSealed() {
+		t.Fatal("seal must mark the arm sealed before the join barrier")
+	}
+
+	// Release the barrier: the join drains, the single teardown completes, BOTH Close return.
+	arm.untrack()
+	for i := 0; i < 2; i++ {
+		select {
+		case <-returned:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("Close %d did not return after the barrier released", i)
+		}
+	}
+	if !arm.isSealed() {
+		t.Fatal("arm must be sealed after Close")
+	}
+	// Accounting归零: no tail pump left un-joined, and nothing abandoned (released < timeout).
+	g.tailPumps.Wait()
+	if n := g.LeakedPumps(); n != 0 {
+		t.Fatalf("no pump should have been abandoned (barrier released before timeout), leaked=%d", n)
 	}
 }
 

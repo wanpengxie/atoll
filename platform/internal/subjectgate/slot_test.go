@@ -247,6 +247,74 @@ func TestDeliverStaleBindingRefused(t *testing.T) {
 	}
 }
 
+// TestBindingGuardSerializesRebindAfterCommit pins the五轮 P0 fix: a SetBinding
+// (rebind) that races an in-flight interpreter commit is held by the绑定世代提交守卫's
+// exclusive Lock until the commit's落账动词 has run — the复核↔落账 third window (gen-read
+// → verb) is closed. The commit ran under the still-valid old binding, so its
+// serialization序 is commit ≺ rebind (legal), and the rebind returns only afterwards.
+func TestBindingGuardSerializesRebindAfterCommit(t *testing.T) {
+	s := newSlot(testID)
+	s.SetBinding(1)
+
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	committed := make(chan bool, 1)
+	go func() {
+		_, ok := s.WithBindingGuard(1, func(int64) {
+			close(entered) // recheck passed — inside the commit临界区 (RLock held)
+			<-proceed      // hold the落账动词 open so a rebind must wait
+		})
+		committed <- ok
+	}()
+	<-entered // the commit is inside the guard with the verb not yet done
+
+	// A concurrent rebind must NOT return while the commit still holds the RLock.
+	rebindDone := make(chan struct{})
+	go func() { s.SetBinding(2); close(rebindDone) }()
+	select {
+	case <-rebindDone:
+		t.Fatal("SetBinding returned while an in-flight commit still held the guard (window open)")
+	case <-time.After(50 * time.Millisecond):
+		// expected: the rebind is parked on the exclusive Lock.
+	}
+
+	// Release the commit: it lands legally under the old binding, THEN the rebind returns.
+	close(proceed)
+	if ok := <-committed; !ok {
+		t.Fatal("commit under the still-current binding must succeed (串行化序 commit ≺ rebind)")
+	}
+	select {
+	case <-rebindDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetBinding did not return after the commit released the guard")
+	}
+	if s.BindingGen() != 2 {
+		t.Fatalf("rebind must have advanced the binding to 2, got %d", s.BindingGen())
+	}
+}
+
+// TestBindingGuardRefusesCommitAfterRebind pins the reverse serialization: a rebind
+// that完成 BEFORE the commit's recheck → the commit sees the advanced gen and is refused
+// (ok=false), and its落账动词 NEVER runs (the frame never lands in the successor binding).
+func TestBindingGuardRefusesCommitAfterRebind(t *testing.T) {
+	s := newSlot(testID)
+	s.SetBinding(1)
+	s.SetBinding(2) // rebind completes first
+
+	ran := false
+	if _, ok := s.WithBindingGuard(1, func(int64) { ran = true }); ok {
+		t.Fatal("a commit carrying the stale gen 1 must be refused after the rebind to 2")
+	}
+	if ran {
+		t.Fatal("the落账动词 must NOT run for a refused (stale) commit")
+	}
+	// DeliverAnyGen bypasses the gen comparison but still commits under the guard.
+	anyRan := false
+	if _, ok := s.WithBindingGuard(DeliverAnyGen, func(int64) { anyRan = true }); !ok || !anyRan {
+		t.Fatal("DeliverAnyGen must commit under the guard regardless of gen")
+	}
+}
+
 // TestRegistryEnsureIdempotent pins EnsureSlot idempotency + Slot/Remove.
 func TestRegistryEnsureIdempotent(t *testing.T) {
 	r := NewRegistry()

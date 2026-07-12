@@ -47,6 +47,20 @@ type Slot struct {
 	id actor.ActorID
 	mu sync.Mutex
 
+	// genGuard is the绑定世代提交守卫 (读-写锁): it freezes the binding generation for
+	// the duration of an interpreter commit临界区. A commit (WithBindingGuard) holds a
+	// SHARED RLock while it re-verifies the carried gen AND runs its落账 verbs; a rebind
+	// (SetBinding) takes the EXCLUSIVE Lock, so it全序化 against every in-flight commit —
+	// it排在提交后 (waits until the RLock releases, i.e. the verb has committed under the
+	// still-valid old binding) OR排在提交前 (the next commit sees the advanced gen and is
+	// refused). This closes the复核↔落账窗口 (humancell interpretFrame: gen-read → verb)
+	// where SetBinding could otherwise insert between the recheck and the落账动词.
+	//
+	// 锁序纪律 (钉死单向序): genGuard is ALWAYS taken OUTSIDE slot.mu — both SetBinding
+	// and a guard-held reader take genGuard first, then (briefly) mu to touch bindingGen.
+	// The two are never taken in the opposite order, so no lock-order deadlock is possible.
+	genGuard sync.RWMutex
+
 	// Layer-2 (binding axis), written ONLY by SetBinding.
 	bindingGen int64
 
@@ -132,10 +146,58 @@ func newSlot(id actor.ActorID) *Slot {
 // SetBinding writes the layer-2 binding generation. Per the独立性不变式 it NEVER
 // touches the presence register — a pure rebind produces zero presence side
 // effect (build spec §2 pair B×E).
+//
+// It takes the genGuard EXCLUSIVE Lock: a rebind is全序化 against every in-flight
+// interpreter commit (WithBindingGuard's shared RLock). The Lock BLOCKS until all
+// in-flight commits have released — i.e. their落账动词 have committed under the still-
+// valid old binding — then advances the generation, so any subsequent commit sees the
+// new gen and is refused stale_binding. This is what closes the复核↔落账 third window.
+// The wait is bounded: an in-flight commit is a pen落账 (WithoutCancel bounded write),
+// so the rebind (gateway attach/seal path) never blocks unboundedly.
 func (s *Slot) SetBinding(gen int64) {
+	s.genGuard.Lock()
 	s.mu.Lock()
 	s.bindingGen = gen
 	s.mu.Unlock()
+	s.genGuard.Unlock()
+}
+
+// WithBindingGuard runs the interpreter's commit closure under the绑定世代提交守卫: it
+// holds a SHARED RLock for the whole of commit, re-verifies carriedGen against the
+// current层2世代 UNDER the guard, and runs commit ONLY if the gen still matches (else
+// ok=false and the caller emits stale_binding). Because SetBinding takes the EXCLUSIVE
+// Lock, no rebind can advance the generation between the recheck and commit's落账动词:
+//   - a rebind serialized BEFORE this commit → the recheck sees the new gen → refused,
+//     the frame never lands in the successor binding;
+//   - a rebind serialized AFTER this commit → it waits on the exclusive Lock until this
+//     RLock releases, i.e. until the落账动词 has committed under the still-valid old
+//     binding (串行化序 = commit ≺ rebind, legal — the check saw the old binding still
+//     current, so committing under it is correct).
+//
+// Multiple commits share the RLock (concurrent); only rebind is exclusive.
+//
+// carriedGen == DeliverAnyGen (trusted platform-internal shim, no gateway binding)
+// skips the gen comparison but STILL takes the RLock — the rebind-freeze semantics stay
+// uniform (a control-shim commit is not torn by a concurrent rebind either).
+//
+// 死锁论证: the落账动词 run inside commit (SubmitEnvelope / RespondEnvelope /
+// AfterIdentity / CancelTimerIdentity / ResourceIdentity·*) are actorbase pen writes to
+// the Home log; NONE calls back into slot.SetBinding or genGuard.Lock — SetBinding's
+// ONLY caller is the gateway arm rebind (drivers/gateway/arm.go nextGen), a different
+// goroutine never reached from a pen落账. So a goroutine never holds RLock while seeking
+// the exclusive Lock: no self-deadlock. genGuard is never taken nested inside slot.mu
+// (single pin: genGuard OUTSIDE mu), so no lock-order deadlock either.
+func (s *Slot) WithBindingGuard(carriedGen int64, commit func(gen int64)) (gen int64, ok bool) {
+	s.genGuard.RLock()
+	defer s.genGuard.RUnlock()
+	s.mu.Lock()
+	gen = s.bindingGen
+	s.mu.Unlock()
+	if carriedGen != DeliverAnyGen && carriedGen != gen {
+		return gen, false
+	}
+	commit(gen)
+	return gen, true
 }
 
 // BindingGen reads the current layer-2 generation (receipts stamp it downstream).
