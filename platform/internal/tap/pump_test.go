@@ -103,6 +103,49 @@ func TestOpenPumpCloseBoundsReaderIgnoringContext(t *testing.T) {
 	}
 }
 
+// TestOpenPumpConcurrentCloseWaitsForCompletion locks 公理 3's completion
+// semantics on the Pump: N concurrent Close callers all participate in or
+// wait for the ONE real teardown — nobody returns while the winning closer is
+// still inside its bounded join, and the abandon incident counts once.
+func TestOpenPumpConcurrentCloseWaitsForCompletion(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	q := pumpQuery{read: func(context.Context, int64, int) ([]storespec.StoredRow, error) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+		return nil, nil
+	}}
+	p := OpenPump(NewSignal(), q, 0, func(storespec.StoredRow) error { return nil }, nil)
+	<-entered
+	done := make(chan struct{}, 2)
+	go func() { p.closeWithin(100 * time.Millisecond); done <- struct{}{} }()
+	go func() { p.closeWithin(100 * time.Millisecond); done <- struct{}{} }()
+	select {
+	case <-done:
+		t.Fatal("a Close returned before the one real teardown converged")
+	case <-time.After(50 * time.Millisecond):
+	}
+	for range 2 {
+		select {
+		case <-done:
+		case <-time.After(time.Second):
+			t.Fatal("a Close caller did not converge with the one teardown")
+		}
+	}
+	if p.Leaked() != 1 {
+		t.Fatalf("Leaked = %d, want one incident", p.Leaked())
+	}
+	close(release)
+	select {
+	case <-p.done:
+	case <-time.After(time.Second):
+		t.Fatal("released pump did not exit")
+	}
+}
+
 // TestOpenPumpAbandonedReaderRowsNeverReachHandle locks the abandoned pump's
 // silence promise (弃证的写路径半): a reader that ignores ctx parks past the
 // bounded Close, then RECOVERS and returns rows — those rows must never reach

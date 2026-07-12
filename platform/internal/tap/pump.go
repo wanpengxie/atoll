@@ -39,6 +39,7 @@ type Pump struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	closeOnce sync.Once
+	closeDone chan struct{}
 	leaked    atomic.Int64
 
 	// handleMu/handleSealed fence handle invocation against Close's bounded
@@ -71,10 +72,11 @@ func OpenPump(sig *Signal, reader storespec.MessageQuery, from int64,
 		reader: reader,
 		handle: handle,
 		logger: logger,
-		cursor: from,
-		done:   make(chan struct{}),
-		ctx:    ctx,
-		cancel: cancel,
+		cursor:    from,
+		done:      make(chan struct{}),
+		closeDone: make(chan struct{}),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
 	p.wake, p.cancelSub = p.sig.Subscribe()
 	go p.run()
@@ -162,6 +164,11 @@ func (p *Pump) Close() {
 
 func (p *Pump) closeWithin(timeout time.Duration) {
 	p.closeOnce.Do(func() {
+		// Completion semantics (公理 3, per-component): closeDone is closed by
+		// defer so it survives a teardown panic — a later Close never returns
+		// before the one real teardown has fully converged (or panicked out),
+		// decoupling "done" from Once's own burnt flag.
+		defer close(p.closeDone)
 		p.cancel()
 		if p.cancelSub != nil {
 			p.cancelSub()
@@ -185,6 +192,7 @@ func (p *Pump) closeWithin(timeout time.Duration) {
 				"safety", "reader/handle cannot produce actors; writes remain cursor-gated")
 		}
 	})
+	<-p.closeDone // 后到者一律等 closeDone (公理 3)
 }
 
 func (p *Pump) Leaked() int64 { return p.leaked.Load() }

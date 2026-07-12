@@ -1245,9 +1245,13 @@ func (a *Acceptor) scheduleSink() actorrt.RelaySink {
 }
 
 // Close stops accepting new links and tears down active ones, waiting for all
-// Serve goroutines to exit.
+// Serve goroutines to exit. The outer bound is DERIVED from the inner joins a
+// runLink teardown can legitimately spend back to back — the control-worker
+// join (2×streamWriteBudget) then the actor-gate join (attachHandshakeTimeout)
+// — plus margin, so the backstop never abandons (and double-counts) a link
+// whose inner waits are still within their own ratified budgets.
 func (a *Acceptor) Close() error {
-	return a.closeWithin(25 * time.Second)
+	return a.closeWithin(2*streamWriteBudget + attachHandshakeTimeout + 5*time.Second)
 }
 
 func (a *Acceptor) closeWithin(timeout time.Duration) error {
