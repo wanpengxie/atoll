@@ -45,11 +45,11 @@ type Dialer struct {
 	// (see AttachReply.DaemonID's doc). Read via DaemonID().
 	daemonID string
 
-	mu       sync.Mutex
-	streams  map[actor.ActorID]*actorStream
-	attached chan struct{} // closed when attach_reply arrives
-	reply    AttachReply
-	// pendingAttach correlates concurrent Reattach calls by RequestID.
+	mu      sync.Mutex
+	streams map[actor.ActorID]*actorStream
+	// pendingAttach correlates every attach round-trip by RequestID — the
+	// initial Dial attach AND every later Reattach share this one table (the
+	// initial attach is no longer a bespoke one-shot channel/reply pair).
 	pendingAttach *pendingReplies[AttachReply]
 	// started flips true inside the SAME mu critical section that snapshots the
 	// streams for the initial batch (Start). It makes Start idempotent and is the
@@ -150,7 +150,6 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		computeID:           computeID,
 		logger:              logger,
 		streams:             map[actor.ActorID]*actorStream{},
-		attached:            make(chan struct{}),
 		pendingCommitted:    newPendingReplies[CommittedReply](),
 		pendingReclaim:      newPendingReplies[ReclaimAckReply](),
 		pendingReconcile:    newPendingReplies[ReconcilePullReply](),
@@ -221,23 +220,15 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		if cf.AttachReply.Accepted && cf.AttachReply.DaemonID != "" {
 			d.daemonID = cf.AttachReply.DaemonID
 		}
-		if cf.RequestID != "" {
-			d.mu.Unlock()
-			d.pendingAttach.deliver(cf.RequestID, *cf.AttachReply)
+		d.mu.Unlock()
+		if cf.RequestID == "" {
+			// Every attach (initial AND Reattach) now carries a RequestID, so a
+			// reply without one cannot be correlated to any waiter — a protocol/
+			// ordering anomaly, never silently dropped (F11).
+			d.logger.Warn("link.attach_reply_no_request_id")
 			return
 		}
-		select {
-		case <-d.attached:
-			// No Reattach in flight and the initial attach already resolved: an
-			// extra attach_reply is a protocol/ordering anomaly (F11 — reject
-			// reasons, and anomalies generally, are never silently dropped).
-			d.logger.Warn("link.unexpected_attach_reply")
-		default:
-			d.reply = *cf.AttachReply
-			d.channelID = string(cf.AttachReply.ChannelID)
-			close(d.attached)
-		}
-		d.mu.Unlock()
+		d.pendingAttach.deliver(cf.RequestID, *cf.AttachReply)
 	}
 	// onLane handles a HOME-opened lane substream: the home is relaying a
 	// redeemed transfer whose TARGET is this daemon (§5). It runs on the per-
@@ -267,36 +258,51 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		close(d.done)
 	}()
 
-	// Send attach on the control substream.
-	raw, err := encodeControl(controlFrame{Kind: ctrlAttach, Attach: &AttachRequest{
+	// Send attach on the control substream, correlated by RequestID through the
+	// same pendingAttach table Reattach uses (白拿: the initial attach inherits
+	// the table's send-failure cancel discipline the bespoke one-shot lacked).
+	attachID := newRequestID()
+	ch := d.pendingAttach.register(attachID)
+	raw, err := encodeControl(controlFrame{RequestID: attachID, Kind: ctrlAttach, Attach: &AttachRequest{
 		ComputeID: computeID, Declarations: decls,
 	}})
 	if err != nil {
+		d.pendingAttach.cancel(attachID)
 		_ = d.lc.Close()
 		return nil, err
 	}
 	if err := d.lc.sendControl(raw); err != nil {
+		d.pendingAttach.cancel(attachID)
 		_ = d.lc.Close()
 		return nil, err
 	}
 
+	// Wait on the correlation channel — ctx and link-death exits unchanged from
+	// the retired bespoke wait (no controlRPCTimeout: the initial attach has no
+	// wall-clock bound by design, matching the prior semantics).
+	var reply AttachReply
 	select {
-	case <-d.attached:
+	case reply = <-ch:
 	case <-ctx.Done():
+		d.pendingAttach.cancel(attachID)
 		_ = d.lc.Close()
 		return nil, ctx.Err()
 	case <-d.done:
+		d.pendingAttach.cancel(attachID)
 		_ = d.lc.Close()
 		return nil, errors.New("link: dial closed before attach reply")
 	}
-	if !d.reply.Accepted {
+	if !reply.Accepted {
 		_ = d.lc.Close()
 		reason := "link: attach rejected"
-		if d.reply.Reason != "" {
-			reason = "link: " + d.reply.Reason
+		if reply.Reason != "" {
+			reason = "link: " + reply.Reason
 		}
 		return nil, errors.New(reason)
 	}
+	d.mu.Lock()
+	d.channelID = string(reply.ChannelID)
+	d.mu.Unlock()
 	return d, nil
 }
 
