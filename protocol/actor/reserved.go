@@ -20,7 +20,7 @@ package actor
 // WORK events (kind=event, they enter the log as truth) — NOT the actor control
 // channel (reload/quota/stop signals, which are non-truth). The wire-only
 // `system.heartbeat` keepalive is intentionally NOT here (it is a transport
-// keepalive frame, never a channel envelope — see core_types.go).
+// keepalive frame, never a channel envelope).
 //
 // Deliberately NO membership predicate (no IsReservedSystemEventType) and no
 // backing slice — UNLIKE the Kind/Binding/Visibility ADT closed sets. Those

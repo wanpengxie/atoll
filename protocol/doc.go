@@ -14,7 +14,7 @@
 //   - protocol/channel  — channel ID type (opaque stable string).
 //   - protocol/message  — envelope schema (14 wire content fields;
 //     sender flattened into sender.kind/sender.id), kind /
-//     visibility closed sets, core-type table, and the terminal-failure reason
+//     visibility closed sets, and the terminal-failure reason
 //     closed set (INVARIANT-10).
 //   - protocol/resource — the opaque ResourceID, the passive object of the
 //     access plane (second plane, subject/object closure); single-level

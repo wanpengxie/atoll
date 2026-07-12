@@ -23,7 +23,7 @@ var reservedBootstrapTypeSet = map[string]struct{}{
 // stepTypeRegistered enforces the substrate's RESERVED-NAMESPACE AUTHORITY for
 // the `system.*` events: those may only be emitted by the channel system actor,
 // protecting the substrate's own mirror-event vocabulary from forgery. Every
-// OTHER type — core, business, OR the actor.* introspection convention — passes
+// OTHER type — business OR the actor.* introspection convention — passes
 // through: the substrate is type-AGNOSTIC. (actor.* is NOT special-cased: the
 // generic sender-consistency step already prevents forging an answer about
 // another actor, so the actor.* convention is an upper-layer concern, not
@@ -53,7 +53,7 @@ func (s *stepTypeRegistered) Run(ctx context.Context, env *message.Envelope) (ou
 			Detail:       "non-reserved system namespace type is not installable: " + env.Type,
 		}, nil
 	}
-	// Any non-system type — core, business, OR actor.* introspection — passes.
+	// Any non-system type — business OR actor.* introspection — passes.
 	// The substrate does not gatekeep non-system vocabulary (type-agnostic); an
 	// unknown/typo'd type is delivered to its addressed actor, which rejects it
 	// (closure then materialises a terminal) — the Erlang model, not a

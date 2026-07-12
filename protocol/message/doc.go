@@ -1,6 +1,5 @@
 // Package message defines the v4 message envelope, message kind /
-// visibility enums, the core-type table, and the terminal-failure reason
-// closed set.
+// visibility enums, and the terminal-failure reason closed set.
 //
 // Key invariants:
 //

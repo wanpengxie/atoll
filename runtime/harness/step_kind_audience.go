@@ -18,7 +18,7 @@ const defaultRequestTTLMs int64 = 24 * 60 * 60 * 1000
 // stepKindAndAudience performs Kind+Audience validation — the
 // substrate-essential STRUCTURE checks, with NO business-type vocabulary:
 //
-//   - core / reserved-namespace types: kind must match their kernel-defined rule
+//   - reserved-namespace types: kind must match their kernel-defined rule
 //   - kind=request / kind=response: audience cardinality exactly-one
 //   - a request without expires_at gets the global fallback closure deadline
 //
@@ -43,20 +43,9 @@ func newStepKindAndAudience(d Deps) step { return &stepKindAndAudience{deps: d} 
 func (s *stepKindAndAudience) ID() stepID { return StepKindAndAudience }
 
 func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (outcome, error) {
-	// (1) core / reserved-namespace type→kind rules — kernel's OWN vocabulary.
-	// This AllowOverride=false branch is the LIVE enforcer of
-	// CoreTypeRule.DefaultKind as a constraint (not a fill). It currently has NO
-	// subject — both live core types are AllowOverride=true — but is kept as
-	// additive-ready machinery: a future non-overridable core
-	// type reactivates it. The reserved-bootstrap branch below is its live sibling.
-	if rule, ok := message.LookupCoreType(env.Type); ok {
-		if !rule.AllowOverride && env.Kind != rule.DefaultKind {
-			return outcome{
-				RejectReason: HarnessKindNotAllowedForType,
-				Detail:       fmt.Sprintf("core type %s allows only kind=%s", env.Type, rule.DefaultKind),
-			}, nil
-		}
-	} else if _, reserved := reservedBootstrapTypeSet[env.Type]; reserved {
+	// (1) reserved-bootstrap type→kind rule — kernel's OWN vocabulary. The
+	// reserved system.* bootstrap events are kind=event only.
+	if _, reserved := reservedBootstrapTypeSet[env.Type]; reserved {
 		if env.Kind != message.KindEvent {
 			return outcome{
 				RejectReason: HarnessKindNotAllowedForType,

@@ -39,12 +39,10 @@ func TestStepNormalize_Defaults(t *testing.T) {
 	// not by normalize — the full-Write contract is pinned in chain_test.go.
 }
 
-// TestStepNormalize_DoesNotFillKind pins the invariant: normalize
-// NEVER fills kind — not for core types, not for business types. kind is
-// sender-required and enforced upstream by stepEnvelopeShape (empty kind →
-// field_missing, short-circuit), so a kind-fill in normalize is dead code.
-// The core-type table's kind field is a constraint in stepKindAndAudience,
-// not a fill.
+// TestStepNormalize_DoesNotFillKind pins the invariant: normalize NEVER
+// fills kind for any type. kind is sender-required and enforced upstream by
+// stepEnvelopeShape (empty kind → field_missing, short-circuit), so a
+// kind-fill in normalize is dead code.
 func TestStepNormalize_DoesNotFillKind(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)

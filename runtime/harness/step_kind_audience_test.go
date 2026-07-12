@@ -133,12 +133,9 @@ func TestStepKindAndAudience_CallerExpiresPreserved(t *testing.T) {
 	}
 }
 
-// NB: the core-type AllowOverride=false constraint branch (step_kind_audience:
-// "!rule.AllowOverride && env.Kind != rule.DefaultKind") currently has no
-// test subject, since both remaining core types (human.text, agent.text) are
-// AllowOverride=true. Whether to keep that branch as additive-ready constraint
-// machinery or remove it is an open decision; the reserved-bootstrap kind rule
-// below covers the sibling enforcement path.
+// NB: the former core-type AllowOverride constraint branch was removed with
+// the core-type table (2026-07-13, zero live subject); the reserved-bootstrap
+// kind rule below is the surviving enforcement path.
 
 // Reserved bootstrap system.* type allows only kind=event.
 func TestStepKindAndAudience_ReservedBootstrapKindRule(t *testing.T) {
