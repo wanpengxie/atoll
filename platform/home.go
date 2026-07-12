@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
+	"github.com/wanpengxie/atoll/platform/internal/subjectgate"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -138,6 +139,15 @@ type Home struct {
 	// presenceMu together, so edges are totally ordered.
 	presenceMu       sync.Mutex
 	presenceSessions map[actor.ActorID]map[string]struct{}
+
+	// subjectgate is the human接入轴 binding registry (gateway 期 S2): the
+	// per-identity slot store (four-tuple {绑定世代, gateway epoch, 帧递交端,
+	// presence level}). Built once at Open (装配链 step①, before any cell
+	// construction path). A human cell's factory consults it at Proc start
+	// (step③④) for its frame delivery端 + presence self-report槽; a nil-slot
+	// (no gateway attach yet) cell is mailbox-only. The gateway (S3) ensures
+	// slots at attach (step②) and drives frames through them.
+	subjectgate *subjectgate.Registry
 
 	// systemPen is the welded system-authored write capability (minted once at
 	// Open). Held on Home for the substrate's own enforcement writers — the
@@ -508,6 +518,10 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	h.reviveLogAt = map[actor.ActorID]time.Time{}
 	h.reviveBackoff = map[actor.ActorID]reviveBackoffEntry{}
 	h.pokeCh = make(chan struct{}, 1)
+	// 装配链 step① (gateway 期 S2): the binding registry exists BEFORE any cell
+	// construction path (human cells are born at the reconcile sweep below), so
+	// the factory's step③ slot lookup never races an absent registry.
+	h.subjectgate = subjectgate.NewRegistry()
 
 	// 10. Time axis (OpenScheduler). FireSink mints a pen per fire (author-welded);
 	//     Reviver activates an absent identity-timer author via SpawnIfAbsent. The

@@ -1,0 +1,202 @@
+package platform
+
+import (
+	"context"
+	"encoding/json"
+	"testing"
+
+	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/internal/subjectgate"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/schedule"
+)
+
+// fakeSys implements only the identity-dimension verbs (plus Self/PublishObs)
+// the frame interpreter drives; the rest of actorbase.Sys is embedded nil (a
+// call the interpreter never makes would nil-panic, which is the honest test
+// contract — assert the interpreter touches ONLY the identity face).
+type fakeSys struct {
+	actorbase.Sys
+	self actor.ActorID
+
+	submitSpec  behavior.SubjectWriteSpec
+	submitID    message.ID
+	submitSeq   int64
+	submitErr   error
+	respondReq  *message.Envelope
+	respondSpec behavior.ResponseSpec
+	respondID   message.ID
+	respondErr  error
+	cancelTID   schedule.TimerID
+	rh          actorbase.ResourceHandle
+	obs         [][]byte
+}
+
+func (f *fakeSys) Self() actor.ActorID { return f.self }
+func (f *fakeSys) SubmitEnvelope(spec behavior.SubjectWriteSpec) (message.ID, int64, error) {
+	f.submitSpec = spec
+	return f.submitID, f.submitSeq, f.submitErr
+}
+func (f *fakeSys) RespondEnvelope(req *message.Envelope, spec behavior.ResponseSpec) (message.ID, error) {
+	f.respondReq, f.respondSpec = req, spec
+	return f.respondID, f.respondErr
+}
+func (f *fakeSys) CancelTimerIdentity(id schedule.TimerID) error { f.cancelTID = id; return nil }
+func (f *fakeSys) ResourceIdentity() actorbase.ResourceHandle    { return f.rh }
+func (f *fakeSys) PublishObs(kind actorrt.ObsKind, val actorrt.ObsValue) error {
+	f.obs = append(f.obs, []byte(val))
+	return nil
+}
+
+func newDeps(self actor.ActorID, req *message.Envelope, open bool) humanDriverDeps {
+	return humanDriverDeps{
+		self:      self,
+		requests:  &fakeReq{req: req},
+		openCheck: func(context.Context, actor.ActorID, message.ID) (bool, error) { return open, nil },
+		cancelHint: func(actor.ActorID, message.ID) {},
+	}
+}
+
+type fakeReq struct{ req *message.Envelope }
+
+func (f *fakeReq) FindByID(context.Context, message.ID) (*message.Envelope, bool, error) {
+	return f.req, f.req != nil, nil
+}
+
+func decodeErr(t *testing.T, f subjectgate.Frame) subjectgate.ErrorPayload {
+	t.Helper()
+	var p subjectgate.ErrorPayload
+	if err := f.DecodePayload(&p); err != nil {
+		t.Fatalf("decode error payload: %v", err)
+	}
+	return p
+}
+
+func TestInterpretSubmit(t *testing.T) {
+	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
+	slot.SetBinding(3)
+	fs := &fakeSys{self: "human:alice", submitID: "m1", submitSeq: 42}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, 0, "ref-1", subjectgate.SubmitPayload{
+		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: json.RawMessage(`{"x":1}`),
+	})
+	got := interpretFrame(fs, slot, newDeps("human:alice", nil, false), f)
+	if got.Type != subjectgate.FrameReceipt || got.Ref != "ref-1" || got.BindingGen != 3 {
+		t.Fatalf("unexpected receipt frame: %+v", got)
+	}
+	var rc subjectgate.SubmitReceipt
+	_ = got.DecodePayload(&rc)
+	if rc.MessageID != "m1" || rc.Seq != 42 {
+		t.Fatalf("receipt mismatch: %+v", rc)
+	}
+	// default kind = request; audience carried through.
+	if fs.submitSpec.Kind != message.KindRequest || len(fs.submitSpec.Audience) != 1 {
+		t.Fatalf("submit spec not built correctly: %+v", fs.submitSpec)
+	}
+}
+
+func TestInterpretResolveFiveStep(t *testing.T) {
+	req := &message.Envelope{ID: "r1", Sender: message.Sender{ID: "tool:kimi"}, Audience: message.Audience{"human:alice"}}
+	fs := &fakeSys{self: "human:alice", respondID: "resp1"}
+	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
+
+	// happy path.
+	f, _ := subjectgate.NewFrame(subjectgate.FrameResolve, 0, "r", subjectgate.ResolvePayload{ReqID: "r1", Decision: "approved"})
+	got := interpretFrame(fs, slot, newDeps("human:alice", req, true), f)
+	if got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("resolve happy path should receipt: %+v (%s)", got, decodeErr(t, got).Code)
+	}
+	if fs.respondSpec.Status != message.StatusCompleted {
+		t.Fatalf("resolve must map to completed, got %q", fs.respondSpec.Status)
+	}
+
+	// invalid decision.
+	bad, _ := subjectgate.NewFrame(subjectgate.FrameResolve, 0, "r", subjectgate.ResolvePayload{ReqID: "r1", Decision: "maybe"})
+	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", req, true), bad)); e.Code != subjectgate.CodeInvalidDecision {
+		t.Fatalf("want invalid_decision, got %q", e.Code)
+	}
+	// not in audience.
+	other := newDeps("human:bob", req, true)
+	if e := decodeErr(t, interpretFrame(fs, slot, other, f)); e.Code != subjectgate.CodeNotInAudience {
+		t.Fatalf("want not_in_audience, got %q", e.Code)
+	}
+	// already closed.
+	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", req, false), f)); e.Code != subjectgate.CodeAlreadyClosed {
+		t.Fatalf("want already_closed, got %q", e.Code)
+	}
+	// not found.
+	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", nil, true), f)); e.Code != subjectgate.CodeRequestNotFound {
+		t.Fatalf("want request_not_found, got %q", e.Code)
+	}
+}
+
+func TestInterpretCancelSenderGate(t *testing.T) {
+	req := &message.Envelope{ID: "r1", Sender: message.Sender{ID: "human:alice"}, Audience: message.Audience{"tool:kimi"}}
+	fs := &fakeSys{self: "human:alice", respondID: "resp1"}
+	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
+	f, _ := subjectgate.NewFrame(subjectgate.FrameCancel, 0, "r", subjectgate.CancelPayload{ReqID: "r1"})
+	if got := interpretFrame(fs, slot, newDeps("human:alice", req, true), f); got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("cancel by sender should receipt: %s", decodeErr(t, got).Code)
+	}
+	if fs.respondSpec.Status != message.StatusFailed {
+		t.Fatalf("cancel must map to failed terminal, got %q", fs.respondSpec.Status)
+	}
+	// non-sender refused.
+	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:bob", req, true), f)); e.Code != subjectgate.CodeUnauthorizedSender {
+		t.Fatalf("want unauthorized_sender, got %q", e.Code)
+	}
+}
+
+func TestInterpretUnexpectedFrame(t *testing.T) {
+	fs := &fakeSys{self: "human:alice"}
+	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
+	f, _ := subjectgate.NewFrame(subjectgate.FrameAttach, 0, "r", subjectgate.AttachPayload{ChannelID: "c"})
+	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", nil, false), f)); e.Code != subjectgate.CodeBadPayload {
+		t.Fatalf("attach through the cell interpreter is unexpected, got %q", e.Code)
+	}
+}
+
+func TestInterpretResourceCreate(t *testing.T) {
+	fs := &fakeSys{self: "human:alice", rh: &fakeResource{out: accessdoor.Outcome{}}}
+	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
+	f, _ := subjectgate.NewFrame(subjectgate.FrameResource, 0, "r", subjectgate.ResourcePayload{Op: subjectgate.ResCreate, ResourceID: "res:1", Args: json.RawMessage(`{"a":1}`)})
+	got := interpretFrame(fs, slot, newDeps("human:alice", nil, false), f)
+	if got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("resource create should receipt: %s", decodeErr(t, got).Code)
+	}
+	var o subjectgate.ResourceOutcome
+	_ = got.DecodePayload(&o)
+	if o.Status != "ok" {
+		t.Fatalf("want ok outcome, got %+v", o)
+	}
+}
+
+func TestPublishPresenceMapping(t *testing.T) {
+	fs := &fakeSys{}
+	publishPresence(fs, subjectgate.LevelOnline)
+	publishPresence(fs, subjectgate.LevelOffline)
+	if len(fs.obs) != 2 {
+		t.Fatalf("want 2 obs pushes, got %d", len(fs.obs))
+	}
+	p1, ok1 := introspect.ParseDevicePresence(fs.obs[0])
+	p2, ok2 := introspect.ParseDevicePresence(fs.obs[1])
+	if !ok1 || !ok2 || !p1.Online || p2.Online {
+		t.Fatalf("level→online mapping wrong: %+v %+v", p1, p2)
+	}
+}
+
+var _ actorbase.ResourceHandle = (*fakeResource)(nil)
+
+type fakeResource struct {
+	actorbase.ResourceHandle
+	out accessdoor.Outcome
+}
+
+func (f *fakeResource) Create(resource.ResourceID, []byte) (accessdoor.Outcome, error) {
+	return f.out, nil
+}
