@@ -884,6 +884,14 @@ func (d *Dialer) handleLaneInbound(conn io.ReadWriteCloser) {
 			_ = writeLaneJSON(conn, laneAck{OK: false, Reason: oerr.Error()})
 			return
 		}
+		// Reuse the local write route's completion wrapper (redeemFileRoute's SAME
+		// ReservationID!="" construction condition): committingWriteHandle.Commit
+		// fires Committed(reservationID) and — on a home Lost verdict — reclaims
+		// this write's orphaned coord. #19 合并形: one commit-completion
+		// implementation, not the lane's own hand-written SendCommitted copy.
+		if reply.ReservationID != "" {
+			wh = &committingWriteHandle{LocalWriteHandle: wh, dialer: d, reservationID: reply.ReservationID, coord: reply.Coord}
+		}
 		if err := writeLaneJSON(conn, laneAck{OK: true}); err != nil {
 			_ = wh.Abort()
 			return
@@ -893,15 +901,12 @@ func (d *Dialer) handleLaneInbound(conn io.ReadWriteCloser) {
 			return
 		}
 		if cerr := wh.Commit(); cerr != nil {
-			return
-		}
-		if reply.ReservationID != "" {
-			// WARNING: transfer-lane completion is fire-and-forget. Multi-daemon
-			// recovery remains frozen until this path has a synchronous completion
-			// protocol; there is deliberately no hidden resend ledger.
-			if _, err := d.SendCommitted(context.Background(), reply.ReservationID); err != nil {
-				d.logger.Warn("link.transfer_committed_unconfirmed", "reservation_id", reply.ReservationID, "err", err)
-			}
+			// The lane protocol has NO completion-reply frame slot: the sender is
+			// not waiting on one (恢复协议的"发送方知情"半格仍留 A4). A failed
+			// commit — transport error, an explicit home NAK, or a Lost race whose
+			// orphan bytes committingWriteHandle.Commit already reclaimed — is
+			// surfaced as a Warn here, never a silent drop.
+			d.logger.Warn("link.lane_commit_failed", "reservation_id", reply.ReservationID, "coord", reply.Coord, "err", cerr)
 		}
 	default:
 		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "link: unknown lane mode " + string(reply.Mode)})
