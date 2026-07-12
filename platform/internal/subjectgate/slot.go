@@ -63,9 +63,13 @@ type Slot struct {
 	frames chan Job
 	// live is true while an interpreter is attached; dead is closed when the
 	// current interpreter detaches (so a blocked Deliver unblocks). dead is
-	// re-created on each AttachInterpreter (per incarnation).
-	live bool
-	dead chan struct{}
+	// re-created on each AttachInterpreter (per incarnation). incarnation is the
+	// current interpreter's token: a stale incarnation's delayed release closes its
+	// OWN dead channel but must NOT flip live/dead for the successor that already
+	// took over (旧 incarnation 延迟 release 摘不掉新 interpreter, straddle gate).
+	live        bool
+	dead        chan struct{}
+	incarnation uint64
 }
 
 // Job is one upstream frame handed to the interpreter goroutine. The interpreter
@@ -190,10 +194,17 @@ func (s *Slot) notifyLocked(u PresenceUpdate) {
 }
 
 // AttachInterpreter marks the slot occupied and returns the frame job stream the
-// interpreter goroutine consumes + a release func it defers. release closes the
-// dead channel so any Deliver blocked on this incarnation unblocks (解阻).
-func (s *Slot) AttachInterpreter() (<-chan Job, func()) {
+// interpreter goroutine consumes, this incarnation's token, and a release func it
+// defers. release closes THIS incarnation's dead channel so any Deliver blocked on
+// it unblocks (解阻), but it only flips the slot's live flag if this incarnation is
+// still the current one — a stale incarnation whose release runs AFTER a successor
+// has taken over never摘 the successor's liveness (incarnation gate, 照 observer
+// token). A fresh AttachInterpreter overrides: it stamps a new incarnation + dead
+// channel, so a subsequent Deliver sees the successor.
+func (s *Slot) AttachInterpreter() (<-chan Job, uint64, func()) {
 	s.mu.Lock()
+	s.incarnation++
+	token := s.incarnation
 	s.live = true
 	s.dead = make(chan struct{})
 	dead := s.dead
@@ -203,12 +214,14 @@ func (s *Slot) AttachInterpreter() (<-chan Job, func()) {
 	release := func() {
 		once.Do(func() {
 			s.mu.Lock()
-			s.live = false
-			close(dead)
+			if s.incarnation == token {
+				s.live = false // still the current incarnation → the slot goes idle
+			}
+			close(dead) // always unblock THIS incarnation's stranded Delivers
 			s.mu.Unlock()
 		})
 	}
-	return frames, release
+	return frames, token, release
 }
 
 // Deliver hands one upstream frame to the attached interpreter and blocks for

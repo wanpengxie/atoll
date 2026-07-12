@@ -37,8 +37,9 @@ type wsClient struct {
 	tail chan map[string]any
 	acks chan map[string]any
 
-	mu      sync.Mutex
-	refType map[string]string // ref → originating frame type (for ack["frame"])
+	mu         sync.Mutex
+	refType    map[string]string // ref → originating frame type (for ack["frame"])
+	bindingGen int64             // granted at attach; stamped on every upstream frame (P0-2 世代 gate)
 }
 
 // dialWS opens a gateway ws for chID (query param — the app membrane authenticates
@@ -68,6 +69,17 @@ func dialWS(t *testing.T, srv *httptest.Server, cookies []*http.Cookie, chID str
 		attach["since"] = map[string]int64{chID: sinceSeq}
 	}
 	c.writeFrame("attach", "", attach)
+	// Read the attach receipt synchronously to capture the granted binding_gen — every
+	// subsequent upstream frame must carry it or the世代 gate refuses it (P0-2).
+	var wf wireFrame
+	if err := conn.ReadJSON(&wf); err != nil {
+		t.Fatalf("attach receipt read: %v", err)
+	}
+	var ar struct {
+		BindingGen int64 `json:"binding_gen"`
+	}
+	_ = json.Unmarshal(wf.Payload, &ar)
+	c.bindingGen = ar.BindingGen
 	go c.readLoop()
 	return c
 }
@@ -80,7 +92,7 @@ func (c *wsClient) writeFrame(frameType, ref string, payload map[string]any) {
 		c.refType[ref] = frameType
 		c.mu.Unlock()
 	}
-	f := map[string]any{"v": 1, "frame_type": frameType}
+	f := map[string]any{"v": 1, "frame_type": frameType, "binding_gen": c.bindingGen}
 	if ref != "" {
 		f["ref"] = ref
 	}

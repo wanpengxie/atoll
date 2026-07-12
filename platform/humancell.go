@@ -64,19 +64,19 @@ func humanCellFactory(h *Home, id actor.ActorID) ActorFactory {
 	}}
 }
 
-// subjectgateSlot returns the per-identity slot, ENSURING it exists (装配链
-// step③). The slot must outlive incarnations and pre-exist any gateway attach:
-// an always-on human cell is born by the reconcile ring at Admit — BEFORE any ws
-// attach — so a lazy lookup would leave the cell permanently mailbox-only (a
-// later attach's EnsureSlot would create a slot the already-running cell never
-// observed). The cell owns its own frame-delivery endpoint's creation (the slot
-// is the identity's, not a connection's); the gateway (S3) then looks it up at
-// attach and drives it. nil registry (defensive) → mailbox-only.
+// subjectgateSlot LOOKS UP the per-identity slot — it never creates one (装配链
+// step③, v0.4.1 勘误: 槽随户籍准入 ensure, factory/cell 只 lookup). The slot's
+//生死随户籍级联 (ensured at membership准入 = factoryFor/Admit, dropped at Remove) —
+// having the cell construction path self-ensure would be装配授权走私 (the cell
+// minting its own binding-slot existence). A missing slot for a real human member
+// is an assembly bug (factoryFor ensures it BEFORE the cell is built); this
+// degrades to mailbox-only rather than fabricating a failure that kills the cell
+// (defensive, same posture as the nil-registry case). nil registry → mailbox-only.
 func (h *Home) subjectgateSlot(id actor.ActorID) (*subjectgate.Slot, bool) {
 	if h.subjectgate == nil {
 		return nil, false
 	}
-	return h.subjectgate.EnsureSlot(id), true
+	return h.subjectgate.Slot(id)
 }
 
 // runHumanCell is the human cell's Proc body: it wires the frame interpreter +
@@ -97,7 +97,7 @@ func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
 			cancelHint: h.CancelRequest,
 		}
 		token := wirePresenceSelfReport(sys, slot)
-		frames, release := slot.AttachInterpreter()
+		frames, _, release := slot.AttachInterpreter()
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
@@ -295,6 +295,7 @@ func interpretSubmit(sys actorbase.Sys, f subjectgate.Frame, receipt frameBuild,
 		Audience:   aud,
 		Visibility: message.Visibility(p.Visibility),
 		ParentID:   message.ID(p.ParentID),
+		ExpiresAt:  p.ExpiresAt, // additive透传 (v0.4.1); nil → harness default TTL
 	})
 	if err != nil {
 		return mapVerbErr(err, errFrame)

@@ -21,6 +21,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,11 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
+
+// ErrGatewayClosed refuses an Attach after the gateway has begun关站 (Close): a
+// still-arriving connection gets an unavailable-class refusal, never a session that
+// could touch a closing Home (关站序: gateway 先静默 before Home).
+var ErrGatewayClosed = errors.New("gateway: closed")
 
 // Routing is the app-domain routing-resolution面 the assembly root injects (design
 // §5.3: routing政策留 app). Given a raw submit intent with a (possibly empty)
@@ -64,6 +70,7 @@ type Gateway struct {
 	logger     *slog.Logger
 
 	mu      sync.Mutex
+	closed  bool // set by Close; a later Attach is refused (关站序 straddle, P0-4)
 	entries map[actor.ActorID]*userEntry
 
 	// edgeSeq is the gateway-global presence edge cursor. It MUST outlive an
@@ -80,15 +87,17 @@ type Gateway struct {
 }
 
 // userEntry is the十字路口 for one subject (§5.6 user件 column): its device set (the
-// north-face lanes), its presence edge cursor, and its single频道臂 (today one
-// connection = one channel, so the arm is 1:1 with the entry). Born on the first
-// device's认证成功 attach (两相: a failed auth leaves NO entry — 零残账); dies on the
-// last device out ∨ gateway Close.
+// north-face lanes, presence aggregated per-identity across channels), its
+// per-identity slot, and its频道臂集 arms — one arm per (subject × channel) (design
+// §5.6: user 件死=全臂同死；membership 撤销=仅此一臂死, so the entry holds Σ_channel
+// arms, not a single one). Born on the first device's认证成功 attach (两相: a failed
+// auth leaves NO entry — 零残账); dies on the last device out ∨ gateway Close.
+// Presence首入末出 is per-identity (the device set aggregates across all channel
+// arms — 多频道臂 does not change it).
 type userEntry struct {
 	subjectID actor.ActorID
-	chID      channel.ID
 	slot      *platform.SubjectSlot
-	arm       *channelArm
+	arms      map[channel.ID]*channelArm
 	devices   map[*Session]struct{}
 }
 
@@ -126,9 +135,12 @@ func (g *Gateway) Start() error {
 // Home. Idempotent.
 func (g *Gateway) Close() error {
 	g.mu.Lock()
-	arms := make([]*channelArm, 0, len(g.entries))
+	g.closed = true
+	var arms []*channelArm
 	for _, e := range g.entries {
-		arms = append(arms, e.arm)
+		for _, a := range e.arms {
+			arms = append(arms, a)
+		}
 	}
 	g.mu.Unlock()
 	for _, a := range arms {
@@ -145,38 +157,65 @@ func (g *Gateway) LeakedPumps() int64 {
 	return g.leaked
 }
 
-// onRevoked seals the subject's频道臂 (membership/ACL revocation, §5.5 臂死亡触发②③).
-// A subject with no live entry is a no-op (nothing to seal).
+// onRevoked seals PRECISELY the subject's (channel) 频道臂 (membership/ACL revocation,
+// §5.5 臂死亡触发②③: 仅此一臂死, never误杀 the subject's other channels' arms), then
+// drops it so a fresh attach rebinds a live arm. A subject with no live entry / no arm
+// for that channel is a no-op.
 func (g *Gateway) onRevoked(ch channel.ID, subject actor.ActorID) {
 	g.mu.Lock()
-	e := g.entries[subject]
+	var arm *channelArm
+	if e := g.entries[subject]; e != nil {
+		arm = e.arms[ch]
+	}
 	g.mu.Unlock()
-	if e != nil {
-		e.arm.seal()
+	if arm != nil {
+		arm.seal()
+		g.dropArm(subject, ch, arm)
 	}
 }
 
-// ensureEntry gets-or-creates the subject's user件 under the gateway lock. The
-// entry pre-exists in the map so a later attach for the same subject (multi-tab)
-// reuses it (device aggregation) rather than minting a rival件.
-func (g *Gateway) ensureEntry(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot) *userEntry {
+// ensureArm gets-or-creates the subject's user件 AND its (channel) 频道臂 under the
+// gateway lock. The entry pre-exists in the map so a later attach for the same
+// subject (multi-tab / another channel) reuses it (device aggregation) rather than
+// minting a rival件; the arm is keyed by channel so distinct channels never share a
+// binding世代 (跨频道 arm 串线 fix, P0-1). Refuses after Close (P0-4 straddle: taken
+// under the same lock Close sets closed).
+func (g *Gateway) ensureArm(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot) (*userEntry, *channelArm, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	if g.closed {
+		return nil, nil, ErrGatewayClosed
+	}
 	e := g.entries[subjectID]
 	if e == nil {
-		arm := newChannelArm(home, chID, subjectID, slot)
-		arm.leaked = &g.leaked
-		arm.leakMu = &g.leakMu
 		e = &userEntry{
 			subjectID: subjectID,
-			chID:      chID,
 			slot:      slot,
-			arm:       arm,
+			arms:      map[channel.ID]*channelArm{},
 			devices:   map[*Session]struct{}{},
 		}
 		g.entries[subjectID] = e
 	}
-	return e
+	arm := e.arms[chID]
+	if arm == nil {
+		arm = newChannelArm(home, chID, subjectID, slot)
+		arm.leaked = &g.leaked
+		arm.leakMu = &g.leakMu
+		e.arms[chID] = arm
+	}
+	return e, arm, nil
+}
+
+// dropArm removes a sealed (channel) arm from the subject's entry IFF it is still the
+// map's current one — a fresh attach that already rebound a live arm is never touched
+// (旧臂晚删摘不掉新臂). The entry itself is retired by removeDevice (末出); a dropped arm
+// with no more devices leaves the entry to be retired there.
+func (g *Gateway) dropArm(subjectID actor.ActorID, chID channel.ID, arm *channelArm) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if e := g.entries[subjectID]; e != nil && e.arms[chID] == arm {
+		delete(e.arms, chID)
+	}
 }
 
 // addDevice registers one session on the entry's device set and, on the FIRST

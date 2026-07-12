@@ -108,7 +108,7 @@ func TestForgetRevokesAndFoldsUnknown(t *testing.T) {
 // Deliver returns ErrNoOccupant.
 func TestDeliverSyncAndUnblock(t *testing.T) {
 	s := newSlot(testID)
-	ch, release := s.AttachInterpreter()
+	ch, _, release := s.AttachInterpreter()
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -148,7 +148,7 @@ func TestDeliverSyncAndUnblock(t *testing.T) {
 // an idle interpreter when the interpreter detaches.
 func TestDeliverBlockedUnblocksOnRelease(t *testing.T) {
 	s := newSlot(testID)
-	_, release := s.AttachInterpreter() // attached but nobody reads the channel
+	_, _, release := s.AttachInterpreter() // attached but nobody reads the channel
 
 	done := make(chan error, 1)
 	go func() {
@@ -167,6 +167,44 @@ func TestDeliverBlockedUnblocksOnRelease(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("Deliver did not unblock on release (解阻 broken)")
+	}
+}
+
+// TestAttachInterpreterIncarnationGate: an old incarnation's delayed release must
+// not摘掉 the successor that already took over (C×interpreter straddle). A attaches,
+// B attaches (覆盖), A releases late — B is still live and a Deliver reaches B; only
+// once B releases does the slot refuse (P0-5 incarnation gate).
+func TestAttachInterpreterIncarnationGate(t *testing.T) {
+	s := newSlot(testID)
+	_, tokA, relA := s.AttachInterpreter()
+	framesB, tokB, relB := s.AttachInterpreter()
+	if tokA == tokB {
+		t.Fatal("each AttachInterpreter must mint a distinct incarnation token")
+	}
+
+	// B answers one job.
+	go func() {
+		job := <-framesB
+		r, _ := NewFrame(FrameReceipt, 0, job.Frame.Ref, SubmitReceipt{MessageID: "mb", Seq: 1})
+		job.Reply(FrameResult{Frame: r})
+	}()
+
+	// A's stale release: it must NOT flip B's liveness.
+	relA()
+
+	f, _ := NewFrame(FrameSubmit, 0, "ref-b", SubmitPayload{MsgType: "m"})
+	res, err := s.Deliver(f)
+	if err != nil {
+		t.Fatalf("Deliver after stale release of A must reach live B, got %v", err)
+	}
+	if res.Frame.Ref != "ref-b" {
+		t.Fatalf("unexpected receipt from B: %+v", res.Frame)
+	}
+
+	// Now B releases (the current incarnation) → the slot refuses.
+	relB()
+	if _, err := s.Deliver(f); err != ErrNoOccupant {
+		t.Fatalf("Deliver after current release want ErrNoOccupant, got %v", err)
 	}
 }
 

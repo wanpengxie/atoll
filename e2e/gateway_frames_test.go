@@ -208,20 +208,28 @@ func TestGatewayFrames(t *testing.T) {
 	}
 
 	// ---- detach ------------------------------------------------------------
-	// On a SECOND connection so the primary session stays up. detach's ack is the
-	// SEAL/teardown, not a receipt frame (spec §S2 表② detach receipt载荷 = "—",
-	// 线性化点 = "seal 完成"): the server seals the arm and tears the connection down.
-	// (S6 申报: session.go Upstream builds a detach receipt but s.Close() runs before
-	// it is queued, so it is deterministically dropped — align to the "—" contract or
-	// deliver it; owner/后片 call.)
+	// A SECOND connection shares the subject's (channel) 频道臂 with the primary `ws`
+	// (same principal + channel = one arm, per design §5.6). detach SEALS that shared
+	// arm — 世代失效 → pump join → 双向 gate 生效 — and投 NO receipt frame (spec §S2 表②
+	// detach receipt = "—", 线性化点 = seal 完成; the seal + teardown IS the result).
+	// 真断言 (P0-3): the seal propagates to the CO-ARM device — BOTH ws2 AND the primary
+	// `ws` are torn down, proving detach sealed the shared binding (not just closed
+	// ws2's own socket).
 	ws2 := dialWS(t, base, cookie, chID, 0)
 	if err := ws2.send("detach", "detach-1", map[string]any{"channel_id": chID}); err != nil {
 		t.Fatalf("detach send: %v", err)
 	}
+	// No receipt/error frame is expected for detach; if the server ever sent one it
+	// would surface as a stray ack — assert the teardown instead.
 	select {
 	case <-ws2.done:
 	case <-time.After(10 * time.Second):
-		t.Fatal("detach: server did not tear the session down within 10s")
+		t.Fatal("detach: server did not tear the detaching session down within 10s")
+	}
+	select {
+	case <-ws.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("detach seal must tear down the CO-ARM primary session too (shared 频道臂 sealed)")
 	}
 
 	server.kill9(t)

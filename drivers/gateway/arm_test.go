@@ -29,14 +29,28 @@ func TestArmDetachSealBidirectional(t *testing.T) {
 	a.seal() // idempotent, no panic
 }
 
-// TestArmGenerationGate: each attach advances the绑定世代 (臂世代), so a stale-世代
-// frame is distinguishable from a fresh one (DoD-5 pair B×A 越代写/读).
+// TestArmGenerationGate (DoD-5 pair B×A 越代写/读): the shared世代 admission gate
+// admits ONLY the current binding_gen on an unsealed arm, and refuses every gen once
+// sealed — a real admission decision, not a counter increment (假核销修正). The真投
+// stale-帧-through-a-Session assertion lives in gateway_test TestUpstreamStaleGenRefused.
 func TestArmGenerationGate(t *testing.T) {
 	a := newChannelArm(nil, "chan", "subj", nil)
 	g1 := a.nextGen()
 	g2 := a.nextGen()
 	if g1 == g2 || g2 != g1+1 {
 		t.Fatalf("binding generations must strictly increase: %d then %d", g1, g2)
+	}
+	// Current gen admitted; a stale (earlier) gen refused (not sealed).
+	if ok, sealed := a.admitUpstream(g2); !ok || sealed {
+		t.Fatalf("current gen must be admitted: ok=%v sealed=%v", ok, sealed)
+	}
+	if ok, sealed := a.admitUpstream(g1); ok || sealed {
+		t.Fatalf("stale gen must be refused (not sealed): ok=%v sealed=%v", ok, sealed)
+	}
+	// After seal, even the current gen is refused, flagged sealed.
+	a.seal()
+	if ok, sealed := a.admitUpstream(g2); ok || !sealed {
+		t.Fatalf("sealed arm must refuse+flag sealed: ok=%v sealed=%v", ok, sealed)
 	}
 }
 
@@ -103,5 +117,46 @@ func TestArmSealJoinBudgetOrdering(t *testing.T) {
 	if !(LaneWriteTimeoutMs < int(ArmSealJoinTimeout/time.Millisecond)) {
 		t.Fatalf("lane write timeout %dms must be < arm seal join budget %dms (法条 F)",
 			LaneWriteTimeoutMs, ArmSealJoinTimeout/time.Millisecond)
+	}
+}
+
+// TestArmSealJoinRacesSlowPump (§2 pair A×L, real interleave not a constant): a slow
+// pump (modelling a device whose写 stalls) dies at its own write-timeout STRICTLY
+// before the seal join budget — so seal joins it cleanly with ZERO leak. The two
+// durations are in the production ratio (lane死 < join budget) but scaled tiny; if
+// the ordering ever inverted, the pump would outlive the budget and this would
+// observe a leak. Real timers, real join — the lane先死 seal后完 ordering is proven,
+// not asserted as a constant.
+func TestArmSealJoinRacesSlowPump(t *testing.T) {
+	var leaked int64
+	var mu sync.Mutex
+	a := newChannelArm(nil, "chan", "subj", nil)
+	a.leaked = &leaked
+	a.leakMu = &mu
+	const laneDeath = 30 * time.Millisecond
+	a.joinTimeout = 10 * laneDeath // join budget strictly > lane death (法条 F ratio)
+
+	a.track()
+	go func() {
+		defer a.untrack()
+		// A slow writer: it ignores the seal ctx and only stops when its own write
+		// deadline (laneDeath) elapses — the lane dying is what frees it.
+		timer := time.NewTimer(laneDeath)
+		defer timer.Stop()
+		<-timer.C
+	}()
+
+	start := time.Now()
+	a.seal() // joins; the pump dies at laneDeath, well within the budget
+	elapsed := time.Since(start)
+
+	if elapsed >= a.joinTimeout {
+		t.Fatalf("seal should have joined at lane-death (~%v), not waited the budget (%v)", laneDeath, a.joinTimeout)
+	}
+	mu.Lock()
+	got := leaked
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("lane死 before the join budget → seal joins cleanly, want 0 leak, got %d", got)
 	}
 }

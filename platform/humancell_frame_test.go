@@ -100,6 +100,34 @@ func TestInterpretSubmit(t *testing.T) {
 	}
 }
 
+// TestInterpretSubmitExpiresAt (P1-6): the submit frame's optional expires_at_ms
+// rides through to SubjectWriteSpec.ExpiresAt verbatim (additive透传); absent → nil.
+func TestInterpretSubmitExpiresAt(t *testing.T) {
+	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
+	exp := int64(1_777_000_000_123)
+	fs := &fakeSys{self: "human:alice", submitID: "m1", submitSeq: 1}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, 0, "ref", subjectgate.SubmitPayload{
+		MsgType: "human.approve", Kind: "request", Audience: []string{"tool:kimi"},
+		Payload: json.RawMessage(`{}`), ExpiresAt: &exp,
+	})
+	if got := interpretFrame(fs, slot, newDeps("human:alice", nil, false), f); got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("submit with expires_at should succeed, got %+v", got)
+	}
+	if fs.submitSpec.ExpiresAt == nil || *fs.submitSpec.ExpiresAt != exp {
+		t.Fatalf("ExpiresAt must透传 verbatim: got %v want %d", fs.submitSpec.ExpiresAt, exp)
+	}
+
+	// Absent expires_at → nil (harness default TTL).
+	fs2 := &fakeSys{self: "human:alice", submitID: "m2", submitSeq: 2}
+	f2, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, 0, "ref2", subjectgate.SubmitPayload{
+		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: json.RawMessage(`{}`),
+	})
+	_ = interpretFrame(fs2, slot, newDeps("human:alice", nil, false), f2)
+	if fs2.submitSpec.ExpiresAt != nil {
+		t.Fatalf("absent expires_at must be nil, got %v", *fs2.submitSpec.ExpiresAt)
+	}
+}
+
 func TestInterpretResolveFiveStep(t *testing.T) {
 	req := &message.Envelope{ID: "r1", Sender: message.Sender{ID: "tool:kimi"}, Audience: message.Audience{"human:alice"}}
 	fs := &fakeSys{self: "human:alice", respondID: "resp1"}

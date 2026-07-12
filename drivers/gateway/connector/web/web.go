@@ -133,7 +133,11 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *platf
 			sess.Send(errFrame("", platform.CodeBadPayload, perr.Error()))
 			continue
 		}
-		sess.Send(sess.Upstream(ctx, fr))
+		// detach returns an empty frame (表② detach receipt = "—"): send nothing, the
+		// seal + teardown IS the result.
+		if resp := sess.Upstream(ctx, fr); resp.Type != "" {
+			sess.Send(resp)
+		}
 	}
 }
 

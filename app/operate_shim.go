@@ -30,6 +30,13 @@ import (
 
 const defaultControlShimTimeout = 5 * time.Second
 
+// clientRequestTTLMs is the explicit short deadline a control-shim request declares
+// (product default: 30s). A channel-control action is a bounded interactive request —
+// it must not linger open indefinitely if no one serves it; the expiry reaper closes
+// it at this deadline (restored from the pre-gateway edge, now透传 via the submit
+// frame's expires_at_ms field).
+const clientRequestTTLMs int64 = 30_000
+
 // errShimChannelUnavailable is the getHome==nil / no-slot sentinel (the channel's
 // universe is not open) → 503, distinct from a non-member rejection (→403).
 var errShimChannelUnavailable = errors.New("app: channel home not open")
@@ -85,20 +92,24 @@ func (a *App) submitControlThroughDoor(ctx context.Context, chID, userID, msgTyp
 	if !found {
 		return nil, errShimNotMember
 	}
-	slot := home.EnsureSubjectSlot(subjectID)
-	if slot == nil {
+	slot, ok := home.SubjectSlotFor(subjectID)
+	if !ok || slot == nil {
+		// 装配链 (v0.4.1): the shim only LOOKS up the slot (ensure is户籍准入's job). A
+		// member with no slot is the embodiment-lag transient → channel-unavailable.
 		return nil, errShimChannelUnavailable
 	}
 	wake, unsub := home.Subscribe()
 	defer unsub()
-	// The submit frame carries no expires_at (the wire contract omits it, gateway
-	// 期): the control request gets the harness's default TTL, the same as every
-	// ws-authored request now — the reaper closes it if no one serves it.
+	// The control request declares an explicit short TTL (clientRequestTTLMs) via the
+	// submit frame's expires_at_ms — a bounded interactive action the reaper closes if
+	// no one serves it (restored from the pre-gateway edge; §S2 status v0.4.1 勘误).
+	exp := time.Now().UnixMilli() + clientRequestTTLMs
 	f, ferr := platform.NewFrame(platform.FrameSubmit, 0, "", platform.SubmitPayload{
-		MsgType:  msgType,
-		Kind:     string(message.KindRequest),
-		Audience: []string{string(actor.SystemActorID)},
-		Payload:  payload,
+		MsgType:   msgType,
+		Kind:      string(message.KindRequest),
+		Audience:  []string{string(actor.SystemActorID)},
+		Payload:   payload,
+		ExpiresAt: &exp,
 	})
 	if ferr != nil {
 		return nil, ferr

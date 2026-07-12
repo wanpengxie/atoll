@@ -917,6 +917,14 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 // not-found). Kind is caller-held (rec.Kind), never re-answered.
 func (h *Home) factoryFor(rec storespec.Record) (ActorFactory, bool) {
 	if rec.Kind == actor.KindHuman {
+		// 装配链 step② (gateway 期 v0.4.1 勘误: 槽随户籍准入 ensure): the per-identity
+		// binding slot is ensured HERE — the platform-authoritative membership→
+		// embodiment dispatch (shared by the reconcile 补臂 and homeReviver.EnsureLive),
+		// which covers BOTH a fresh Admit-poke AND a restart's durable re-read (a member
+		// read from the store with no Admit call this run). This runs BEFORE the cell is
+		// built, so the cell/factory step③ is a pure lookup — never a construction-path
+		// self-ensure (装配授权走私). Idempotent; nil registry is a defensive no-op.
+		h.EnsureSubjectSlot(rec.ID)
 		return humanCellFactory(h, rec.ID), true
 	}
 	if h.builder == nil {
@@ -996,6 +1004,13 @@ func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (ac
 	id, err := h.cs.Membership.Admit(ctx, kind, principal, h.nowMs())
 	if err != nil {
 		return "", fmt.Errorf("platform: Admit membership: %w", err)
+	}
+	// 装配链 step② (gateway 期 v0.4.1 勘误): a human's binding slot生死随户籍级联 — ensure
+	// it at准入 (before the reconcile poke, so it strictly precedes any gateway attach
+	// that could look it up), synchronously so a client that attaches right after Admit
+	// never races an absent slot. Idempotent with factoryFor's ensure (restart path).
+	if kind == actor.KindHuman {
+		h.EnsureSubjectSlot(id)
 	}
 	h.pokeReconcile()
 	h.logger.Info("platform.member.admitted", "channel", string(h.channelID),

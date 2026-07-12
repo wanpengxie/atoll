@@ -161,6 +161,11 @@ type SubmitPayload struct {
 	Audience   []string        `json:"audience,omitempty"`
 	Visibility string          `json:"visibility,omitempty"`
 	ParentID   string          `json:"parent_id,omitempty"`
+	// ExpiresAt is the OPTIONAL declared request deadline in epoch-ms (additive,
+	// v0.4.1). Absent (nil) → the harness default TTL. A control-shim submit sets an
+	// explicit short TTL (clientRequestTTLMs); it only rides a request (an event has
+	// no deadline — behavior.BuildRequest drops it for other kinds).
+	ExpiresAt *int64 `json:"expires_at_ms,omitempty"`
 }
 
 type ResolvePayload struct {

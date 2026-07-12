@@ -64,11 +64,23 @@ func (g *Gateway) Attach(ctx context.Context, home *platform.Home, chID channel.
 	}
 	var bindingGen int64
 	if found {
+		// 装配链 step③ (v0.4.1): the gateway only LOOKS the slot up — it never creates
+		// one (ensure is户籍准入's job: Admit / factoryFor). A member with no slot is an
+		// embodiment-lag transient (a restart attach racing the first reconcile tick),
+		// reported unavailable-retryable, never a smuggled create.
+		slot, ok := home.SubjectSlotFor(subjectID)
+		if !ok {
+			return nil, 0, platform.ErrNoOccupant
+		}
 		s.isMember = true
 		s.subjectID = subjectID
-		s.slot = home.EnsureSubjectSlot(subjectID)
-		s.entry = g.ensureEntry(home, chID, subjectID, s.slot)
-		s.arm = s.entry.arm
+		s.slot = slot
+		entry, arm, aerr := g.ensureArm(home, chID, subjectID, slot)
+		if aerr != nil {
+			return nil, 0, aerr
+		}
+		s.entry = entry
+		s.arm = arm
 		bindingGen = s.arm.nextGen()
 		s.ctx, s.cancel = context.WithCancel(s.arm.context())
 		g.addDevice(s.entry, s)
@@ -115,12 +127,13 @@ func (s *Session) Done() <-chan struct{} { return s.lane.closed }
 // IsMember reports whether this session may drive business frames.
 func (s *Session) IsMember() bool { return s.isMember }
 
-// BindingGen returns the session's current层2 binding generation (0 for tail-only).
+// BindingGen returns the current层2 binding generation (0 for tail-only). It reads
+// through the arm's locked accessor (P0-9: never a raw a.gen read).
 func (s *Session) BindingGen() int64 {
 	if s.arm == nil {
 		return 0
 	}
-	return s.arm.gen
+	return s.arm.currentGen()
 }
 
 // Close tears the session down: cancel its pump, close the lane (stops the
@@ -176,6 +189,9 @@ func (s *Session) pumpBatch() bool {
 		return false
 	}
 	cur := s.lane.cursor
+	// Feed frames carry the current臂世代 (P0-2 下行: 非 0 for a member; 0 for tail-only)
+	// as an advisory binding stamp; a snapshot per batch is enough (rebind is rare).
+	gen := s.BindingGen()
 	for {
 		select {
 		case <-s.ctx.Done():
@@ -191,7 +207,7 @@ func (s *Session) pumpBatch() bool {
 			if merr != nil {
 				continue
 			}
-			fr, ferr := platform.NewFrame(platform.FrameFeed, 0, "", platform.FeedPayload{
+			fr, ferr := platform.NewFrame(platform.FrameFeed, gen, "", platform.FeedPayload{
 				ChannelID: string(s.chID),
 				Seq:       r.Seq,
 				Envelope:  env,
@@ -249,9 +265,17 @@ func (s *Session) Upstream(ctx context.Context, f platform.Frame) platform.Frame
 	}
 	switch f.Type {
 	case platform.FrameDetach:
+		// detach撤权线性化 (P0-3): seal the (channel) 频道臂 FIRST — 世代失效 → pump join
+		// (上界 ArmSealJoinTimeout) → purge未推帧 → 双向 gate 生效 — so同臂其他设备/并发
+		// goroutine 在 seal 后 Upstream 必拒 (stale_binding). Only then tear the
+		// connection down. detach投 NO receipt (表② detach receipt = "—"; 结果 = seal 完成
+		// + 连接关闭): an empty frame tells the connector to send nothing (P2-10).
+		if s.arm != nil {
+			s.arm.seal()
+			s.gw.dropArm(s.subjectID, s.chID, s.arm)
+		}
 		s.Close()
-		fr, _ := platform.NewFrame(platform.FrameReceipt, gen, f.Ref, platform.DetachPayload{ChannelID: string(s.chID)})
-		return fr
+		return platform.Frame{}
 	case platform.FrameAttach:
 		return errFrame(platform.CodeBadPayload, "attach is the opening frame, not a mid-stream verb")
 	case platform.FrameSubmit, platform.FrameResolve, platform.FrameCancel,
@@ -259,8 +283,12 @@ func (s *Session) Upstream(ctx context.Context, f platform.Frame) platform.Frame
 		if !s.isMember {
 			return errFrame(platform.CodeNotMember, "not a channel member")
 		}
-		if s.arm.isSealed() {
-			return errFrame(platform.CodeStaleBinding, "binding sealed (detached / revoked)")
+		// 共享世代 admission gate (P0-2): refuse a sealed arm OR a stale binding_gen.
+		if ok, sealed := s.arm.admitUpstream(f.BindingGen); !ok {
+			if sealed {
+				return errFrame(platform.CodeStaleBinding, "binding sealed (detached / revoked)")
+			}
+			return errFrame(platform.CodeStaleBinding, "stale binding generation (rebound)")
 		}
 		if f.Type == platform.FrameSubmit {
 			routed, rerr := s.applyRouting(ctx, f)

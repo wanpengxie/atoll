@@ -82,6 +82,31 @@ func (a *channelArm) admit() bool {
 
 func (a *channelArm) isSealed() bool { return !a.admit() }
 
+// currentGen reads the绑定世代 under the arm lock (P0-9: a.gen is never read raw —
+// nextGen writes it under a.mu, so every read takes the same lock).
+func (a *channelArm) currentGen() int64 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.gen
+}
+
+// admitUpstream is the上行 half of the双向共享 admission gate (P0-2): an upstream
+// business frame is admitted only while the arm is unsealed AND its binding_gen
+// matches the current绑定世代. Both checks under ONE lock so a concurrent seal /
+// rebind can never straddle them. sealed distinguishes the stale cause in the caller
+// (both map to stale_binding — the边界 vs unavailable is 世代不符/已封 vs cell 暂缺).
+func (a *channelArm) admitUpstream(bindingGen int64) (ok, sealed bool) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if a.sealed {
+		return false, true
+	}
+	if bindingGen != a.gen {
+		return false, false
+	}
+	return true, false
+}
+
 // context returns the arm's cancellation context (every pump/reader derives from
 // it, so seal unblocks them all at once).
 func (a *channelArm) context() context.Context { return a.ctx }
