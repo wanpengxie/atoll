@@ -763,6 +763,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 	}
 
 	rt := h.channel.Cells()
+	now := time.UnixMilli(h.nowMs())
 	actual := make(map[actor.ActorID]bool)
 	for _, id := range rt.LiveIDs() {
 		actual[id] = true
@@ -783,6 +784,16 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		}
 		if rec.Host != "" {
 			continue // attached elsewhere — not this ring's authority to embody (反误杀)
+		}
+		if _, held := h.backoffGate(id, now); held {
+			// Build backoff active (a prior BuildFailure has not elapsed): skip the
+			// build this tick — the SAME account EnsureLive maintains, so the ring and
+			// the reviver back a failing actor off in lockstep instead of the ring
+			// re-hammering it every tick/poke while the reviver waits. Drop id from
+			// current exactly as the build-failure arm below does: a member that never
+			// embodied is not carried as managed into prevEagerDesired.
+			delete(current, id)
+			continue
 		}
 		factory, ok := h.factoryFor(rec)
 		if !ok {
@@ -806,6 +817,10 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 				return
 			}
 			h.logger.Error("platform.reconcile.build_failed", "channel", string(h.channelID), "actor", string(mid), "error", buildErr)
+			var failure *actorrt.BuildFailure
+			if errors.As(buildErr, &failure) {
+				h.recordBuildFailure(mid, now)
+			}
 			delete(current, mid)
 			continue
 		}

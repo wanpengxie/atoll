@@ -475,7 +475,7 @@ func (f *storageHostForwarder) pass(ctx context.Context) {
 // (§10.13 推导3: link death degrades the wire, never the hosted work — so the
 // daemon just keeps trying to get the wire back, at no accelerating cost to
 // the home). Exponential from the floor, capped at the ceiling; reset to the
-// floor the moment a connection succeeds.
+// floor only after a connection PROVES itself (see redialBackoffAfterLink).
 const (
 	redialInitialBackoff = 1 * time.Second
 	redialMaxBackoff     = 30 * time.Second
@@ -488,6 +488,21 @@ func nextRedialBackoff(cur time.Duration) time.Duration {
 		return redialMaxBackoff
 	}
 	return next
+}
+
+// redialBackoffAfterLink decides the pre-sleep backoff after a non-graceful link
+// drop, from how long the session `lived`. A session that reached redialMaxBackoff
+// is a genuine connection that later dropped — reset the ladder to the floor. A
+// shorter session is a Dial-succeeds-then-instantly-drops flap: keep the ladder
+// where it is (the caller grows it once more before the next dial) so an
+// "attach → 1s death" loop backs off toward the ceiling instead of hammering the
+// home at 1/s forever. The reset is deliberately NOT keyed on Dial success: the
+// WS+attach round trip says nothing about link lifespan.
+func redialBackoffAfterLink(cur, lived time.Duration) time.Duration {
+	if lived >= redialMaxBackoff {
+		return redialInitialBackoff
+	}
+	return cur
 }
 
 // jitterBackoff randomizes d to the range [d/2, d] (AWS "equal jitter") so
@@ -669,7 +684,6 @@ func runCompute(ctx context.Context, cfg ComputeConfig, hooks *computeLifecycleH
 			backoff = nextRedialBackoff(backoff)
 			continue
 		}
-		backoff = redialInitialBackoff
 
 		// Host→remote despawn hook: a KindDespawn frame from the home ends that
 		// actor's arm here (§10.5) — despawn the local cell, the stream loop
@@ -684,11 +698,13 @@ func runCompute(ctx context.Context, cfg ComputeConfig, hooks *computeLifecycleH
 		// on demand — both live for the connection's whole life without a
 		// dedicated open step here.
 
+		linkStart := time.Now()
 		graceful := ring.runLink(ctx, d, cfg.Desired, poll)
 		_ = d.Close() // idempotent: a no-op if the link already tore itself down.
 		if graceful {
 			return nil
 		}
+		backoff = redialBackoffAfterLink(backoff, time.Since(linkStart))
 
 		logger.Warn("platform.compute.link_down", "retry_in", backoff)
 		select {

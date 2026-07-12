@@ -29,6 +29,38 @@ func (h *Home) clearReviveBackoff(id actor.ActorID) {
 	h.reviveLogMu.Unlock()
 }
 
+// backoffGate reports whether id is currently held off from a build attempt by a
+// not-yet-elapsed build-failure backoff, and until when. Both activation paths —
+// homeReviver.EnsureLive and reconcileActivation's 补臂 — consult it BEFORE a
+// SpawnIfAbsent build so a persistently failing actor retries at the
+// CrashLoopBackOff pace instead of being re-hammered every wake / tick / poke.
+func (h *Home) backoffGate(id actor.ActorID, now time.Time) (until time.Time, held bool) {
+	h.reviveLogMu.Lock()
+	entry := h.reviveBackoff[id]
+	h.reviveLogMu.Unlock()
+	if !entry.next.IsZero() && now.Before(entry.next) {
+		return entry.next, true
+	}
+	return time.Time{}, false
+}
+
+// recordBuildFailure advances id's build-failure backoff one step: exponential from
+// reviveBuildBackoffBase, capped at reviveBuildBackoffMax. Only a deterministic
+// BuildFailure feeds it — a sealed runtime or a transient fault is not a build
+// verdict and leaves the ladder untouched (the caller filters before calling).
+func (h *Home) recordBuildFailure(id actor.ActorID, now time.Time) {
+	h.reviveLogMu.Lock()
+	entry := h.reviveBackoff[id]
+	entry.failures++
+	delay := reviveBuildBackoffBase << min(entry.failures-1, 8)
+	if delay > reviveBuildBackoffMax {
+		delay = reviveBuildBackoffMax
+	}
+	entry.next = now.Add(delay)
+	h.reviveBackoff[id] = entry
+	h.reviveLogMu.Unlock()
+}
+
 // fireSink is the platform realisation of schedule.FireSink: the time engine's
 // one non-ambient collaborator. It mints a fresh Pen per fire (Mint is cheap,
 // same posture as the port emitSink) so the fired envelope is authored AS the
@@ -166,11 +198,8 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		return fmt.Errorf("platform: revive %s: attached to host %q", id, rec.Host) // transient
 	}
 	now := time.UnixMilli(h.nowMs())
-	h.reviveLogMu.Lock()
-	entry := h.reviveBackoff[id]
-	h.reviveLogMu.Unlock()
-	if !entry.next.IsZero() && now.Before(entry.next) {
-		return fmt.Errorf("platform: revive %s: build backoff until %s", id, entry.next)
+	if until, held := h.backoffGate(id, now); held {
+		return fmt.Errorf("platform: revive %s: build backoff until %s", id, until)
 	}
 	// Home-placed, absent: resolve through factoryFor (human → the platform's own
 	// built-in cell factory, needing no builder; others → the组合域 builder, now
@@ -206,16 +235,7 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		h.logger.Error("platform.revive.build_failed", "channel", string(h.channelID), "actor", string(id), "error", buildErr)
 		var failure *actorrt.BuildFailure
 		if errors.As(buildErr, &failure) {
-			h.reviveLogMu.Lock()
-			entry = h.reviveBackoff[id]
-			entry.failures++
-			delay := reviveBuildBackoffBase << min(entry.failures-1, 8)
-			if delay > reviveBuildBackoffMax {
-				delay = reviveBuildBackoffMax
-			}
-			entry.next = now.Add(delay)
-			h.reviveBackoff[id] = entry
-			h.reviveLogMu.Unlock()
+			h.recordBuildFailure(id, now)
 		}
 		return buildErr
 	}
