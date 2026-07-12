@@ -82,7 +82,7 @@ func installControlledPresenceFold(h *Home, now *time.Time) {
 	<-h.reconcileDone
 	h.nowMs = func() int64 { return now.UnixMilli() }
 	h.presenceFold = presence.New(nil, func() time.Time { return *now },
-		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, time.Second)
+		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, nil, time.Second)
 }
 
 // TestPresenceSweep_ClearsBypassDeregOrphan covers the reconciliation backstop

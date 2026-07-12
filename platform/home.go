@@ -94,6 +94,14 @@ type HomeConfig struct {
 	// timeout path needs a fast, deterministic window rather than production's
 	// multi-minute backstop.
 	ReservationTimeout time.Duration
+	// EventDropKinds is the producer-owned vocabulary of non-level diagnostic obs
+	// kinds the presence fold buckets per name (queue overflow, closure fault,
+	// checkpoint drop, …). The substrate names no such word: it stays blind to the
+	// agent subsystem (archtest TestSubstrateBlindToAgent), so the assembly root
+	// that CAN see every producer (app → lib/actorbase.ObsDropKinds ∪ agent/base.
+	// ObsDropKinds) hands the union in. Empty → every drop lands in the "unknown"
+	// bucket (honest, just uninformative).
+	EventDropKinds []actorrt.ObsKind
 }
 
 // Home is the assembled channel-home. Its public surface is the capability set in
@@ -378,10 +386,11 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: register system actor: %w", err)
 	}
 
-	// 5. Presence fold: mechanism-only latest-value cache. Vocabulary remains an
-	// assembly concern through the injected level-kind set.
+	// 5. Presence fold: mechanism-only latest-value cache. Both vocabularies are
+	// an assembly concern: the level-kind set (folded testimony) and the injected
+	// event-drop-kind set (producer-owned diagnostic buckets, see HomeConfig).
 	presenceFold := presence.New(logger, clock,
-		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, sweepEvery)
+		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, cfg.EventDropKinds, sweepEvery)
 
 	// 6. channelkit: actorrt runtime + sysactor + death-edge wiring. The system
 	//    cell is built against the LIVE runtime (factory) — its liveness Stat seam

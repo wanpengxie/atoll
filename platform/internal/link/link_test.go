@@ -911,7 +911,7 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 	}))
 	// The device-presence fold rides the SAME down edge (registered exactly as
 	// platform/home.go wires it): the drop must decay its folded level.
-	fold := presence.New(nil, time.Now, []actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, 30*time.Second)
+	fold := presence.New(nil, time.Now, []actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, nil, 30*time.Second)
 	rt.WatchDown(fold)
 	r.acc = link.NewAcceptor(link.Config{
 		Minter:     r.minter,

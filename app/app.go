@@ -20,9 +20,12 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	agentbase "github.com/wanpengxie/atoll/agent/base"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 // App is the product application server.
@@ -269,6 +272,14 @@ func (a *App) homeOrError(c *gin.Context, chID channel.ID) *platform.Home {
 	return nil
 }
 
+// eventDropKinds is the union of every substrate/domain producer's diagnostic
+// obs kinds, handed to the presence fold's drop buckets. Assembled here because
+// this is the one layer above both producers (the substrate must not import
+// agent/).
+func eventDropKinds() []actorrt.ObsKind {
+	return append(actorbase.ObsDropKinds(), agentbase.ObsDropKinds()...)
+}
+
 func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error) {
 	home, err := platform.Open(platform.HomeConfig{
 		ChannelID: chID,
@@ -285,6 +296,10 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 		// Fill the operate-face injection point: the in-gate control plane's
 		// executor half (intent write + Home call). One instance, channel-resolved.
 		Operate: a.operateFace(),
+		// The presence fold's drop-bucket vocabulary: app is the assembly root that
+		// sees every producer (substrate stays blind to agent/), so it hands the
+		// union of actorbase's and agentbase's diagnostic kinds in.
+		EventDropKinds: eventDropKinds(),
 	})
 	if err != nil {
 		return nil, err

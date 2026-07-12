@@ -83,12 +83,24 @@ type obsMsg struct {
 // nil/disconnected d (no link right now) just drops the queued edge, the same
 // best-effort posture a dead stream already has.
 type cellObsForwarder struct {
-	d  atomic.Pointer[link.Dialer]
-	ch chan obsMsg
+	d       atomic.Pointer[link.Dialer]
+	ch      chan obsMsg
+	dropped atomic.Uint64
+	logger  *slog.Logger
+	// reportEvery is pump's drop-account report cadence (the rate limiter that
+	// keeps OnObs's hot path log-free). Defaulted by the constructor.
+	reportEvery time.Duration
 }
 
-func newCellObsForwarder() *cellObsForwarder {
-	return &cellObsForwarder{ch: make(chan obsMsg, obsForwardQueue)}
+// obsDropReportInterval paces the pump-side drop Warn — generous, a diagnostic
+// backstop rather than a per-event log (the OnObs hot path only bumps an atomic).
+const obsDropReportInterval = 30 * time.Second
+
+func newCellObsForwarder(logger *slog.Logger) *cellObsForwarder {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	return &cellObsForwarder{ch: make(chan obsMsg, obsForwardQueue), logger: logger, reportEvery: obsDropReportInterval}
 }
 
 // Rebind swaps in the currently-connected Dialer — call once per (re)connect,
@@ -101,17 +113,27 @@ func (f *cellObsForwarder) OnObs(_ context.Context, id actor.ActorID, _ actorrt.
 	select {
 	case f.ch <- m:
 	default: // queue full: drop (obs is best-effort; next edge / lease decay covers it)
+		f.dropped.Add(1) // S6: drop 必记账 — the account is read by pump's periodic Warn.
 	}
 }
 
 // pump drains the queue onto the CURRENT link OFF the cell goroutine, for the
 // life of the daemon (ctx) — it survives any number of individual link deaths
-// and reconnects, reading whatever Dialer Rebind last stored.
+// and reconnects, reading whatever Dialer Rebind last stored. A periodic tick
+// surfaces the drop account (never logged on the OnObs hot path).
 func (f *cellObsForwarder) pump(ctx context.Context) {
+	t := time.NewTicker(f.reportEvery)
+	defer t.Stop()
+	var lastReported uint64
 	for {
 		select {
 		case <-ctx.Done():
 			return
+		case <-t.C:
+			if n := f.dropped.Load(); n != lastReported {
+				f.logger.Warn("platform.compute.obs_forward_dropped", "dropped", n, "delta", n-lastReported)
+				lastReported = n
+			}
 		case m := <-f.ch:
 			if d := f.d.Load(); d != nil {
 				d.SendObs(m.id, m.kind, m.val)
@@ -548,7 +570,7 @@ func runCompute(ctx context.Context, cfg ComputeConfig, hooks *computeLifecycleH
 	rt.WatchDown(watcher)
 	// The obs arm outlives every individual link the same way rt does — built
 	// once, Rebind'd per connection, pumped for the daemon's whole life.
-	obsFwd := newCellObsForwarder()
+	obsFwd := newCellObsForwarder(logger)
 	rt.WatchObsAll(obsFwd)
 	var forwarders sync.WaitGroup
 	forwarders.Add(1)

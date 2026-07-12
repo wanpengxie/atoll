@@ -124,6 +124,15 @@ func newProc(cfg Config) actorbase.Proc {
 	}
 }
 
+// ObsCheckpointDrop is the diagnostic kind this base PUSHes when a resume-seed
+// persist fails/rejects. agentbase owns this word (producer = word owner); a
+// drop-bucketing consumer takes it by injection, never re-spelling it.
+const ObsCheckpointDrop actorrt.ObsKind = "agentbase.checkpoint_drop"
+
+// ObsDropKinds returns every diagnostic kind agentbase publishes, for an
+// assembly root wiring a drop-bucketing consumer.
+func ObsDropKinds() []actorrt.ObsKind { return []actorrt.ObsKind{ObsCheckpointDrop} }
+
 // publishCheckpointDrop surfaces a failed/rejected resume-seed persist on the
 // actor-source obs push (kind agentbase.checkpoint_drop) — the same honest-degrade
 // face the engine's recordDrop uses. The turn is NOT failed and the actor does NOT
@@ -135,7 +144,7 @@ func publishCheckpointDrop(sys actorbase.Sys, out accessdoor.Outcome, err error)
 		detail["error"] = err.Error()
 	}
 	val, _ := json.Marshal(detail)
-	_ = sys.PublishObs(actorrt.ObsKind("agentbase.checkpoint_drop"), val)
+	_ = sys.PublishObs(ObsCheckpointDrop, val)
 }
 
 // readSeed reads the durable resume seed at boot. A missing/empty locus (cold

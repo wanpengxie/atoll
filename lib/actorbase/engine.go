@@ -290,7 +290,7 @@ func (e *engine) Receive(_ context.Context, env *message.Envelope) error {
 				e.serve.close(env.ID)
 				e.offerReject(env)
 			} else {
-				e.recordDrop(dropped, actorrt.ObsKind("actorbase.queue_overflow"))
+				e.recordDrop(dropped, ObsQueueOverflow)
 			}
 		}
 		return nil
@@ -308,7 +308,7 @@ func (e *engine) offerReject(env *message.Envelope) {
 	select {
 	case e.rejectQ <- env:
 	default:
-		e.recordDrop(env, actorrt.ObsKind("actorbase.reject_lane_overflow"))
+		e.recordDrop(env, ObsRejectLaneOverflow)
 	}
 }
 
@@ -320,8 +320,26 @@ func (e *engine) offerReject(env *message.Envelope) {
 // legitimate degrade, never a liveness break (spec §1.3 + G0-4).
 func (e *engine) enqueueWork(env *message.Envelope) {
 	if dropped := e.workQ.push(env); dropped != nil {
-		e.recordDrop(dropped, actorrt.ObsKind("actorbase.queue_overflow"))
+		e.recordDrop(dropped, ObsQueueOverflow)
 	}
+}
+
+// The engine's diagnostic obs kinds — the vocabulary this Proc底座 PUSHes when
+// a bounded queue overflows or an author#2 closure write faults. actorbase owns
+// these words (the producer is the word owner); any consumer that buckets drops
+// by kind (e.g. the presence fold) takes them by injection, never re-spelling
+// them. ObsDropKinds is the full set an assembly root hands such a consumer.
+const (
+	ObsQueueOverflow      actorrt.ObsKind = "actorbase.queue_overflow"
+	ObsRejectLaneOverflow actorrt.ObsKind = "actorbase.reject_lane_overflow"
+	ObsClosureFault       actorrt.ObsKind = "actorbase.closure_fault"
+	ObsStaleDelivery      actorrt.ObsKind = "actorbase.stale_delivery"
+)
+
+// ObsDropKinds returns every diagnostic kind actorbase publishes, for an
+// assembly root wiring a drop-bucketing consumer.
+func ObsDropKinds() []actorrt.ObsKind {
+	return []actorrt.ObsKind{ObsQueueOverflow, ObsRejectLaneOverflow, ObsClosureFault, ObsStaleDelivery}
 }
 
 // recordDrop surfaces an engine-internal drop through the actor's own obs
@@ -346,7 +364,7 @@ func (e *engine) closureFault(id message.ID, err error) {
 		return
 	}
 	val, _ := json.Marshal(map[string]any{"id": id, "error": err.Error()})
-	e.actorCtx.PublishObs(actorrt.ObsKind("actorbase.closure_fault"), val)
+	e.actorCtx.PublishObs(ObsClosureFault, val)
 }
 
 // --- Sys: response / terminal writes ------------------------------------
@@ -805,7 +823,7 @@ func (e *engine) projectWork(env *message.Envelope) (Msg, bool) {
 	if env.Kind == message.KindRequest {
 		ctx, ok := e.serve.ctxFor(env.ID)
 		if !ok {
-			e.recordDrop(env, actorrt.ObsKind("actorbase.stale_delivery"))
+			e.recordDrop(env, ObsStaleDelivery)
 			return Msg{}, false
 		}
 		return NewMsg(ctx, *env), true

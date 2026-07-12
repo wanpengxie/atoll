@@ -20,14 +20,6 @@ const (
 
 const unknownDropBucket actorrt.ObsKind = "unknown"
 
-var eventKinds = map[actorrt.ObsKind]struct{}{
-	"checkpoint_drop":      {},
-	"closure_fault":        {},
-	"queue_overflow":       {},
-	"reject_lane_overflow": {},
-	"stale_delivery":       {},
-}
-
 type entry struct {
 	val        []byte
 	receivedAt int64
@@ -62,12 +54,17 @@ type Fold struct {
 	dropped    map[actorrt.ObsKind]uint64
 	loggedDrop map[actorrt.ObsKind]uint64
 	levelKinds map[actorrt.ObsKind]struct{}
+	eventKinds map[actorrt.ObsKind]struct{}
 	clock      func() time.Time
 	grace      time.Duration
 	logger     *slog.Logger
 }
 
-func New(logger *slog.Logger, clock func() time.Time, levelKinds []actorrt.ObsKind, sweepGrace time.Duration) *Fold {
+// New builds a fold. Both vocabularies are injected: levelKinds (obs folded into
+// the latest-value cache) and eventKinds (non-level diagnostic kinds counted per
+// named drop bucket). The fold names no concrete word itself — the producer owns
+// the word, the assembly root hands both sets in (substrate 守结构不守词汇).
+func New(logger *slog.Logger, clock func() time.Time, levelKinds, eventKinds []actorrt.ObsKind, sweepGrace time.Duration) *Fold {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -78,16 +75,18 @@ func New(logger *slog.Logger, clock func() time.Time, levelKinds []actorrt.ObsKi
 		sweepGrace = 30 * time.Second
 	}
 	levels := make(map[actorrt.ObsKind]struct{}, len(levelKinds))
+	events := make(map[actorrt.ObsKind]struct{}, len(eventKinds))
 	dropped := make(map[actorrt.ObsKind]uint64, len(levelKinds)+len(eventKinds)+1)
 	for _, kind := range levelKinds {
 		levels[kind] = struct{}{}
 		dropped[kind] = 0
 	}
-	for kind := range eventKinds {
+	for _, kind := range eventKinds {
+		events[kind] = struct{}{}
 		dropped[kind] = 0
 	}
 	dropped[unknownDropBucket] = 0
-	return &Fold{latest: map[actor.ActorID]map[actorrt.ObsKind]entry{}, dropped: dropped, loggedDrop: map[actorrt.ObsKind]uint64{}, levelKinds: levels, clock: clock, grace: sweepGrace, logger: logger}
+	return &Fold{latest: map[actor.ActorID]map[actorrt.ObsKind]entry{}, dropped: dropped, loggedDrop: map[actorrt.ObsKind]uint64{}, levelKinds: levels, eventKinds: events, clock: clock, grace: sweepGrace, logger: logger}
 }
 
 func (f *Fold) OnObs(_ context.Context, id actor.ActorID, gen actorrt.Incarnation, kind actorrt.ObsKind, val actorrt.ObsValue) {
@@ -126,7 +125,7 @@ func (f *Fold) isLevel(kind actorrt.ObsKind) bool {
 
 func (f *Fold) countDrop(kind actorrt.ObsKind) {
 	f.mu.Lock()
-	if _, known := eventKinds[kind]; known {
+	if _, known := f.eventKinds[kind]; known {
 		f.dropped[kind]++
 	} else {
 		f.dropped[unknownDropBucket]++
