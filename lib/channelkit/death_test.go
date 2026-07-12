@@ -42,11 +42,11 @@ func TestChannel_StopAfterFailedStartReturns(t *testing.T) {
 		t.Fatal("Start with nil system actor succeeded")
 	}
 	done := make(chan struct{})
-	go func() { c.Stop(); close(done) }()
+	go func() { c.Close(); close(done) }()
 	select {
 	case <-done:
 	case <-time.After(time.Second):
-		t.Fatal("Stop blocked after failed Start")
+		t.Fatal("Close blocked after failed Start")
 	}
 }
 
@@ -61,7 +61,7 @@ func (liveActor) Receive(context.Context, *message.Envelope) error { return nil 
 // not pointer-checked).
 func TestOnDown_DoesNotDespawnSuccessor(t *testing.T) {
 	ch := newChannel(channelkit.Config{ChannelID: "ch", Clock: time.Now})
-	defer ch.Stop()
+	defer ch.Close()
 	_, _, _ = ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
 	if _, ok := ch.Cells().Stat("worker"); !ok {
 		t.Fatal("successor not hosted after Spawn")
@@ -129,7 +129,7 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
 		Clock:        time.Now,
 	})
-	defer ch.Stop()
+	defer ch.Close()
 	_, _, _ = ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return panicActor{} })
 
 	// Deliver a request → Receive panics → cell death → OnDown. Delivery goes
@@ -188,7 +188,7 @@ func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
 		},
 		Clock: time.Now,
 	})
-	defer ch.Stop()
+	defer ch.Close()
 	// Place the worker, then CLEAN despawn it (no panic → no death edge fires).
 	workerInc, _, _ := ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
 
@@ -288,7 +288,7 @@ func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 		Clock:        time.Now,
 		Logger:       slog.New(h),
 	})
-	defer ch.Stop()
+	defer ch.Close()
 	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, nil)
 	got := h.waitFirstMsg(2 * time.Second)
 	if got == "" {
@@ -331,7 +331,7 @@ func TestOnDown_PerRequestWriteFault_IsLogged(t *testing.T) {
 		Clock:        time.Now,
 		Logger:       slog.New(h),
 	})
-	defer ch.Stop()
+	defer ch.Close()
 	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, nil)
 	got := h.waitFirstMsg(2 * time.Second)
 	if got == "" {
@@ -353,7 +353,7 @@ func TestNew_DefaultClockAndSpawnsSystem(t *testing.T) {
 		System: func(*actorrt.Runtime, actorrt.Incarnation) actorrt.Actor { return liveActor{} },
 		// Clock left nil → New must default it (time.Now) without panicking.
 	})
-	defer ch.Stop()
+	defer ch.Close()
 	if _, ok := ch.Cells().Stat(actor.SystemActorID); !ok {
 		t.Fatal("New did not spawn the intrinsic System cell at SystemActorID")
 	}
@@ -377,7 +377,7 @@ func TestOnDown_AsyncConsumer_SkipsLivePresentSuccessor(t *testing.T) {
 		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
 		Clock:        time.Now,
 	})
-	defer ch.Stop()
+	defer ch.Close()
 	// A live successor occupies "worker".
 	_, _, _ = ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
 

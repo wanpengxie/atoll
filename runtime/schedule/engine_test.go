@@ -820,6 +820,38 @@ func TestR7PerFireDeadline_HungFireIsBoundedAndTransient(t *testing.T) {
 	}
 }
 
+type cancellationIgnoringSink struct{ entered, release chan struct{} }
+
+func (s *cancellationIgnoringSink) Append(context.Context, actor.ActorID, *message.Envelope) error {
+	select {
+	case <-s.entered:
+	default:
+		close(s.entered)
+	}
+	<-s.release
+	return nil
+}
+
+func TestEngineCloseBoundsFireIgnoringContext(t *testing.T) {
+	store := newFakeStore()
+	sink := &cancellationIgnoringSink{entered: make(chan struct{}), release: make(chan struct{})}
+	clock := newFakeClock(time.UnixMilli(1_000_000))
+	engine := mustNewEngine(t, store, sink, &fakeReviver{}, clock)
+	engine.Start()
+	scheduleIdentityDue(t, engine, "author-1", clock)
+	<-sink.entered
+	engine.closeWithin(25 * time.Millisecond)
+	if engine.Leaked() != 1 {
+		t.Fatalf("Leaked = %d, want 1", engine.Leaked())
+	}
+	close(sink.release)
+	select {
+	case <-engine.done:
+	case <-time.After(time.Second):
+		t.Fatal("released engine did not exit")
+	}
+}
+
 // ---------------------------------------------------------------------
 // Reviver two-class error contract (mirrors the FireSink tri-state).
 // ---------------------------------------------------------------------

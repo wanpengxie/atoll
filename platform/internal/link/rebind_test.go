@@ -107,3 +107,48 @@ func TestRebindableArms_FlapContinuity(t *testing.T) {
 		t.Fatalf("home writes across the flap = %v, want [resp-1 resp-2] (resp-during-flap must never land)", ids)
 	}
 }
+
+func TestRuntimeSealRejectsActorArmWithoutKillingWholeLink(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+	r.rt.Seal()
+	const id = actor.ActorID("tool:sealed-arm")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+
+	open := func() link.CellArms {
+		arms, err := d.OpenStream(id, func(*message.Envelope) error { return nil }, nil)
+		if err != nil {
+			t.Fatalf("OpenStream: %v", err)
+		}
+		d.StartStream(id)
+		return arms
+	}
+	arms := open()
+	deadline := time.Now().Add(time.Second)
+	for {
+		_, err = arms.Pen.Write(context.Background(), &message.Envelope{
+			ID: "probe", Kind: message.KindEvent, Type: "sealed.probe",
+			Payload: []byte(`{}`), Visibility: message.VisibilityPublic,
+			Audience: message.Audience{"nobody"},
+		})
+		if err != nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sealed actor stream did not close")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-d.Done():
+		t.Fatal("one sealed actor arm killed the whole link")
+	default:
+	}
+	// The same live Dialer can perform the stream-level 补臂 attempt again;
+	// RunCompute's reconcile loop therefore reopens this arm, not the whole link.
+	_ = open()
+}

@@ -376,12 +376,11 @@ func Open(cfg HomeConfig) (*Home, error) {
 	if err != nil {
 		channel.Cells().StopAll()
 		channel.Cells().DrainZombies(0)
-		channel.Stop()
+		channel.Close()
 		_ = cs.Close()
 		return nil, fmt.Errorf("platform: read max seq: %w", err)
 	}
 	deliver := deliveryHandle(channel.Deliverer(), cfg.ChannelID, logger)
-	delivery := tap.NewPump(signal, cs.Query, from, deliver, logger)
 
 	// 8. Register the device-presence fold once for the runtime population. Every
 	//    actor's obs wire naturally feeds this single fanout subscription; attach
@@ -401,7 +400,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 		channel:          channel,
 		cs:               cs,
 		signal:           signal,
-		delivery:         delivery,
+		delivery:         nil,
 		presenceFold:     presenceFold,
 		logger:           logger,
 		nowMs:            nowMs,
@@ -432,10 +431,9 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Logger: logger,
 	})
 	if err != nil {
-		delivery.Close()
 		channel.Cells().StopAll()
 		channel.Cells().DrainZombies(0)
-		channel.Stop()
+		channel.Close()
 		_ = cs.Close()
 		return nil, fmt.Errorf("platform: open scheduler: %w", err)
 	}
@@ -443,14 +441,13 @@ func Open(cfg HomeConfig) (*Home, error) {
 	h.engine = engine
 	if err := channel.Start(); err != nil {
 		engine.Close()
-		delivery.Close()
 		channel.Cells().StopAll()
 		channel.Cells().DrainZombies(0)
 		_ = cs.Close()
 		return nil, fmt.Errorf("platform: start channel: %w", err)
 	}
 	engine.Start()
-	delivery.Start()
+	h.delivery = tap.OpenPump(signal, cs.Query, from, deliver, logger)
 
 	// 11. Build the link acceptor (physical layer: WS mux + per-actor ipc streams
 	//      + lease judgement for attached computes). It welds an attaching remote
@@ -1012,7 +1009,7 @@ func (h *Home) Close() error {
 	// 4.2. Closure consumer: join channelkit's resident down-edge goroutine now —
 	//    after cells stop (no more edges produced), before the stores close (a late
 	//    materialise must not write into a closing store). G0-3 teardown序.
-	h.channel.Stop()
+	h.channel.Close()
 	// 5. Schedule engine: every producer is gone, so stopping the run loop now can
 	//    no longer strand a Schedule() into a dead engine.
 	if h.engine != nil {

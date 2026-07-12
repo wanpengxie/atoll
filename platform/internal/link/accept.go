@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -55,9 +56,15 @@ type Acceptor struct {
 	leasePing  time.Duration
 	leaseTTL   time.Duration
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	admissionMu   sync.Mutex
+	closed        bool
+	closeOnce     sync.Once
+	closeDone     chan struct{}
+	leaked        atomic.Int64
+	admissionHook func()
 
 	// attached is the live attach refcount per compute id (daemon). A daemon is
 	// "online" (attached) iff its count > 0. Refcount, not bool, so an
@@ -176,6 +183,7 @@ func NewAcceptor(cfg Config) *Acceptor {
 		leaseTTL:       cfg.LeaseTTL,
 		ctx:            ctx,
 		cancel:         cancel,
+		closeDone:      make(chan struct{}),
 		attached:       map[string]int{},
 		cancelReq:      cfg.CancelRequest,
 		storageControl: cfg.StorageHostControl,
@@ -294,12 +302,11 @@ func (a *Acceptor) AttachedComputeIDs() []string {
 // app layer (empty → the daemon's self-declared id, dev mode). It blocks until
 // the link tears down (peer gone, lease expiry, or acceptor Close).
 func (a *Acceptor) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
-	if a.ctx.Err() != nil {
+	if !a.beginServe() {
 		http.Error(w, "link acceptor closed", http.StatusServiceUnavailable)
 		return
 	}
-	a.wg.Add(1)
-	defer a.wg.Done()
+	defer a.endServe()
 
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -308,11 +315,27 @@ func (a *Acceptor) Serve(w http.ResponseWriter, r *http.Request, daemonID string
 	a.runLink(r.Context(), ws, daemonID)
 }
 
+func (a *Acceptor) beginServe() bool {
+	a.admissionMu.Lock()
+	defer a.admissionMu.Unlock()
+	if a.closed {
+		return false
+	}
+	if a.admissionHook != nil {
+		a.admissionHook()
+	}
+	a.wg.Add(1)
+	return true
+}
+
+func (a *Acceptor) endServe() { a.wg.Done() }
+
 // runLink drives one accepted link: build the mux, handle the stream-0 attach,
 // then demux actor streams to runtime.Attach while the lease watchdog judges
 // liveness.
 func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID string) {
 	defer func() { _ = ws.Close() }()
+	var actorWG sync.WaitGroup
 
 	// allowed is the attach declaration set: the resolve seam checks that an
 	// opening actor stream is one the daemon actually declared (membership-backed).
@@ -386,7 +409,9 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// across the wire). Runs off the accept-dispatch goroutine (its own goroutine)
 	// so the bounded handshake never stalls the accept loop.
 	onActor := func(conn net.Conn) {
+		actorWG.Add(1)
 		go func() {
+			defer actorWG.Done()
 			// The handshake is bounded by attachHandshakeTimeout (substrate self-
 			// guards the time limit). The port LIFETIME stays the runtime's, not
 			// this bounded ctx — Attach only uses hsCtx for the handshake read.
@@ -588,12 +613,18 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// abandon the join and proceed with teardown (a stuck store is never allowed
 	// to become an un-closeable station), leaving a loud, attributed trace.
 	if !lc.waitControlWorkers(2 * streamWriteBudget) {
+		a.recordControlWorkerLeak()
 		boundMu.Lock()
 		b := boundID
 		boundMu.Unlock()
 		a.logger.Error("link.control_worker_join_timeout",
 			"msg", "control worker join timeout, abandoning — teardown proceeding",
 			"daemon", b, "channel", string(a.channelID))
+	}
+	if !waitGroupWithin(&actorWG, attachHandshakeTimeout) {
+		a.leaked.Add(1)
+		a.logger.Error("link.actor_worker_join_timeout", "timeout", attachHandshakeTimeout,
+			"safety", "runtime admission is sealed and stores reject late writes")
 	}
 	close(done)
 }
@@ -1218,8 +1249,44 @@ func (a *Acceptor) scheduleSink() actorrt.RelaySink {
 // Close stops accepting new links and tears down active ones, waiting for all
 // Serve goroutines to exit.
 func (a *Acceptor) Close() error {
-	a.cancel()
-	a.wg.Wait()
-	a.logger.Info("link.acceptor_closed")
+	return a.closeWithin(25 * time.Second)
+}
+
+func (a *Acceptor) closeWithin(timeout time.Duration) error {
+	a.closeOnce.Do(func() {
+		defer close(a.closeDone)
+		a.admissionMu.Lock()
+		a.closed = true
+		a.admissionMu.Unlock()
+		a.cancel()
+		if !waitGroupWithin(&a.wg, timeout) {
+			// Bounded abandon proof: late link writes hit the closed store, while
+			// every Attach production attempt is rejected by Runtime.Seal.
+			a.leaked.Add(1)
+			a.logger.Error("link.acceptor_join_timeout", "timeout", timeout,
+				"safety", "runtime admission is sealed and stores reject late writes")
+		}
+		a.logger.Info("link.acceptor_closed")
+	})
+	<-a.closeDone
 	return nil
+}
+
+func (a *Acceptor) Leaked() int64 { return a.leaked.Load() }
+
+func (a *Acceptor) recordControlWorkerLeak() {
+	// One incident owns both residues: the stuck worker and the waiter goroutine
+	// that remains until that worker eventually returns.
+	a.leaked.Add(1)
+}
+
+func waitGroupWithin(wg *sync.WaitGroup, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }

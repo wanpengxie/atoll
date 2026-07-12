@@ -3,6 +3,9 @@ package tap
 import (
 	"context"
 	"log/slog"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -32,35 +35,35 @@ type Pump struct {
 	cancelSub func()
 	wake      <-chan struct{}
 	done      chan struct{}
-	stop      chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	leaked    atomic.Int64
 }
 
-// NewPump builds a pump that reads rows with seq > from, advancing past each row
+// OpenPump builds and starts a pump that reads rows with seq > from, advancing past each row
 // handle accepts. logger surfaces read faults (a failed ReadAfterSeq is the only
 // fault the pump itself can hit); nil → discard. The pump does not start until
 // Start is called.
-func NewPump(sig *Signal, reader storespec.MessageQuery, from int64,
+func OpenPump(sig *Signal, reader storespec.MessageQuery, from int64,
 	handle func(storespec.StoredRow) error, logger *slog.Logger) *Pump {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &Pump{
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &Pump{
 		sig:    sig,
 		reader: reader,
 		handle: handle,
 		logger: logger,
 		cursor: from,
 		done:   make(chan struct{}),
-		stop:   make(chan struct{}),
+		ctx:    ctx,
+		cancel: cancel,
 	}
-}
-
-// Start subscribes to the signal and launches the pump loop. It runs one initial
-// drain (so rows committed between the from cursor and subscription are not
-// missed) then blocks on wakes.
-func (p *Pump) Start() {
 	p.wake, p.cancelSub = p.sig.Subscribe()
 	go p.run()
+	return p
 }
 
 func (p *Pump) run() {
@@ -69,7 +72,7 @@ func (p *Pump) run() {
 	p.drain()
 	for {
 		select {
-		case <-p.stop:
+		case <-p.ctx.Done():
 			return
 		case <-p.wake:
 			p.drain()
@@ -81,14 +84,13 @@ func (p *Pump) run() {
 // handle gates the cursor. A read fault leaves the cursor put — the next wake
 // retries from the same position.
 func (p *Pump) drain() {
-	ctx := context.Background()
 	for {
 		select {
-		case <-p.stop:
+		case <-p.ctx.Done():
 			return
 		default:
 		}
-		rows, err := p.reader.ReadAfterSeq(ctx, p.cursor, readBatch)
+		rows, err := p.reader.ReadAfterSeq(p.ctx, p.cursor, readBatch)
 		if err != nil {
 			p.logger.Error("tap.pump.read_failed", "cursor", p.cursor, "err", err)
 			return
@@ -120,9 +122,26 @@ func (p *Pump) drain() {
 
 // Close stops the pump loop and unsubscribes from the signal.
 func (p *Pump) Close() {
-	close(p.stop)
-	if p.cancelSub != nil {
-		p.cancelSub()
-	}
-	<-p.done
+	p.closeWithin(5 * time.Second)
 }
+
+func (p *Pump) closeWithin(timeout time.Duration) {
+	p.closeOnce.Do(func() {
+		p.cancel()
+		if p.cancelSub != nil {
+			p.cancelSub()
+		}
+		select {
+		case <-p.done:
+		case <-time.After(timeout):
+			// Bounded abandon proof: the pump can only read and invoke the strictly
+			// non-blocking delivery handle (write path); it has no actor/goroutine
+			// production capability, and later cell teardown rejects late delivery.
+			p.leaked.Add(1)
+			p.logger.Error("tap.pump.join_timeout", "timeout", timeout,
+				"safety", "reader/handle cannot produce actors; writes remain cursor-gated")
+		}
+	})
+}
+
+func (p *Pump) Leaked() int64 { return p.leaked.Load() }

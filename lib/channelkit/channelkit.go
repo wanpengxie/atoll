@@ -46,12 +46,16 @@ type Channel struct {
 	// not run on the dying goroutine's reap path (G0-3). A bounded buffer (a
 	// full one drops + logs — the level scan is the load-bearing backstop, the
 	// edge is a lossy fast-path, P0-3); consumeDown drains it serially.
-	downCh   chan actor.ActorID
-	downStop chan struct{}
-	downDone chan struct{}
-	system   func(*actorrt.Runtime, actorrt.Incarnation) actorrt.Actor
-	started  atomic.Bool
-	stopOnce sync.Once
+	downCh    chan actor.ActorID
+	downStop  chan struct{}
+	downDone  chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	system    func(*actorrt.Runtime, actorrt.Incarnation) actorrt.Actor
+	started   atomic.Bool
+	closeOnce sync.Once
+	closeDone chan struct{}
+	leaked    atomic.Int64
 }
 
 // downChBuffer bounds the death-edge hand-off queue. A full buffer drops the
@@ -84,10 +88,9 @@ type Config struct {
 	Logger *slog.Logger
 }
 
-// New builds the channel, subscribes to the substrate's down edge (the
-// Channel is the actorrt.DownWatcher — see OnDown) and spawns the intrinsic
-// system cell. Assembly order: runtime → watcher → system cell, so the System
-// factory receives the live runtime (no back-filled runtime pointer).
+// New builds the inert channel wiring and subscribes to the substrate's down
+// edge. Start later births the intrinsic system cell and closure consumer, so
+// the composition root can finish cross-component wiring first.
 func New(cfg Config) (*Channel, error) {
 	clock := cfg.Clock
 	if clock == nil {
@@ -97,6 +100,7 @@ func New(cfg Config) (*Channel, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
+	ctx, cancel := context.WithCancel(context.Background())
 	c := &Channel{
 		channelID: cfg.ChannelID,
 		systemPen: cfg.SystemPen,
@@ -106,16 +110,19 @@ func New(cfg Config) (*Channel, error) {
 		downCh:    make(chan actor.ActorID, downChBuffer),
 		downStop:  make(chan struct{}),
 		downDone:  make(chan struct{}),
+		ctx:       ctx,
+		cancel:    cancel,
+		closeDone: make(chan struct{}),
 		system:    cfg.System,
 	}
 	// Share the channel's clock + logger with the runtime: the runtime stamps
 	// each cell's StartedAt with this clock, so the system actor's uptime
 	// (now - StartedAt) stays consistent under a test/non-realtime clock.
 	c.cells, c.deliverer = actorrt.New(actorrt.Config{Clock: clock, Logger: logger})
-	// Register the death watcher BEFORE spawning any cell — no down edge
+	// Register the death watcher BEFORE Start can spawn any cell — no down edge
 	// may be missed (closure-critical path).
 	c.cells.WatchDown(c)
-	// Spawn the intrinsic system cell, built against the live runtime. It uses the
+	// Retain the intrinsic system-cell factory for Start. The resulting cell uses the
 	// RAW system pen (anchor not wrapped in a livePen): the system actor
 	// writes singleton SystemActorID terminals, has no successor principal to
 	// impersonate, and the closure reconciler must write even when no cell is live
@@ -137,7 +144,7 @@ func (c *Channel) Start() error {
 		if _, created, err := c.cells.SpawnIfAbsent(actor.SystemActorID, actor.KindSystem, func(inc actorrt.Incarnation) actorrt.Actor {
 			return c.system(c.cells, inc)
 		}); err != nil {
-			c.started.Store(false) // Stop after a failed Start must not wait on an unstarted consumer.
+			c.started.Store(false) // Close after a failed Start must not wait on an unstarted consumer.
 			return err
 		} else if !created {
 			panic("channelkit: system anchor invariant violated — SystemActorID already occupied at assembly")
@@ -146,7 +153,7 @@ func (c *Channel) Start() error {
 	// Start the resident closure consumer: OnDown only O(1)-posts a dead id; this
 	// goroutine drains the buffer serially and does the blocking closure work off
 	// the dying goroutine's reap path (G0-3). Started after the runtime exists
-	// (it reads liveness for the recheck) and joined by Stop in Home.Close's
+	// (it reads liveness for the recheck) and joined by Close in Home.Close's
 	// teardown序 (after cells stop, before stores close).
 	go c.consumeDown()
 	return nil
@@ -193,8 +200,8 @@ func (c *Channel) OnDown(ctx context.Context, id actor.ActorID, _ actorrt.Incarn
 }
 
 // consumeDown is the resident closure goroutine: it drains dead ids serially and
-// does the blocking closure work off the death-edge reap path. Started by New,
-// joined by Stop. Before materialising, it RE-CHECKS liveness (Present) — the
+// does the blocking closure work off the death-edge reap path. Started by Start,
+// joined by Close. Before materialising, it RE-CHECKS liveness (Present) — the
 // async hand-off widens the window in which a Restart successor incarnation may
 // have taken over under the same membership id, so the edge path must guard against mis-closing its callers
 // exactly as the level scan does.
@@ -203,10 +210,15 @@ func (c *Channel) consumeDown() {
 	probe := livenessProbe{rt: c.cells}
 	for {
 		select {
-		case id := <-c.downCh:
-			c.closeFor(context.Background(), id, probe)
 		case <-c.downStop:
 			return
+		default:
+		}
+		select {
+		case <-c.downStop:
+			return
+		case id := <-c.downCh:
+			c.closeFor(c.ctx, id, probe)
 		}
 	}
 }
@@ -233,18 +245,39 @@ func (c *Channel) closeFor(ctx context.Context, id actor.ActorID, probe liveness
 	}
 }
 
-// Stop joins the resident closure consumer — the down-edge goroutine's teardown
+// Close joins the resident closure consumer — the down-edge goroutine's teardown
 // seam Home.Close drives AFTER cells stop (no more edges will be produced) and
 // BEFORE the stores close (a late materialise must not write into a closing
 // store). Idempotent-safe: Home.Close calls it exactly once. Any id still
-// buffered at Stop is abandoned to the level scan (the same lossy-edge / level-
+// buffered at Close is abandoned to the level scan (the same lossy-edge / level-
 // backstop split as a full-buffer drop).
-func (c *Channel) Stop() {
-	if !c.started.Load() {
-		return
-	}
-	c.stopOnce.Do(func() { close(c.downStop); <-c.downDone })
+func (c *Channel) Close() {
+	c.closeWithin(5 * time.Second)
 }
+
+func (c *Channel) closeWithin(timeout time.Duration) {
+	c.closeOnce.Do(func() {
+		defer close(c.closeDone)
+		c.cancel()
+		if !c.started.Load() {
+			return
+		}
+		close(c.downStop)
+		select {
+		case <-c.downDone:
+		case <-time.After(timeout):
+			// Bounded abandon proof: the only write is idempotent UNIQUE-backed
+			// closure materialisation (or a loud closed-store error); this consumer
+			// owns no Spawn/Fork/Attach or goroutine-production capability.
+			c.leaked.Add(1)
+			c.logger.Error("channelkit.close.join_timeout", "timeout", timeout,
+				"safety", "writes are idempotent and no actors are produced")
+		}
+	})
+	<-c.closeDone
+}
+
+func (c *Channel) Leaked() int64 { return c.leaked.Load() }
 
 // livenessProbe adapts the channel's runtime liveness view (Stat) to the behaviour
 // reconciler's LivenessProbe seam: present = a live instance hosted right now

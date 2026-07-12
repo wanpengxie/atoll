@@ -44,6 +44,12 @@ var ErrChildIDCollision = errors.New("actorrt: child id collision")
 // always holds it; the child's incarnation household must carry it, same as an
 // admission Spawn's), read back later via Runtime.Stat.
 func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, kind actor.Kind, build func(Incarnation) Actor) (Incarnation, error) {
+	r.mu.RLock()
+	sealed := r.sealed
+	r.mu.RUnlock()
+	if sealed {
+		return Incarnation{}, ErrRuntimeSealed
+	}
 	if !r.IsLive(parent) { // ① fast-path, lock-free
 		return Incarnation{}, ErrParentNotLive
 	}
@@ -56,6 +62,11 @@ func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, kind actor.Kin
 	}
 
 	r.mu.Lock()
+	if r.sealed {
+		r.mu.Unlock()
+		abortBuild(c)
+		return Incarnation{}, ErrRuntimeSealed
+	}
 	if _, exists := r.embodiments[childID]; exists { // collision = hard fail
 		r.mu.Unlock()
 		// Release the discarded shell's ctx node: allocShell derived it from
