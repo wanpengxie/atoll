@@ -63,3 +63,13 @@ func resourceOutcomeFrame(out accessdoor.Outcome, err error, receipt frameBuild,
 	}
 	return receipt(o)
 }
+
+// resourceOutcomeFrameGen adapts resourceOutcomeFrame to the gen-stamped frame
+// builders (守卫圈收窄 refactor, 六轮 P1): it binds the receipt/error frames to gen (the
+// guard's generation for a write op, the守卫外 advisory gen for a pure read).
+func resourceOutcomeFrameGen(gen int64, f subjectgate.Frame, out accessdoor.Outcome, err error) subjectgate.Frame {
+	return resourceOutcomeFrame(out, err,
+		func(load any) subjectgate.Frame { return receiptGen(gen, f, load) },
+		func(code, detail string) subjectgate.Frame { return errFrameGen(gen, f, code, detail) },
+	)
+}

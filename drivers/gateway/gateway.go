@@ -80,6 +80,12 @@ type Gateway struct {
 	// (修复批四轮 P1: 并发 Close 统一等 teardown).
 	closeOnce sync.Once
 
+	// closeEntered is a TEST-ONLY seam (nil in production): invoked at the top of every
+	// Close BEFORE closeOnce.Do, so a test can count/handshake how many goroutines have
+	// entered Close and prove a second concurrent caller is parked on the single teardown
+	// (修复批六轮 P2: 并发 Close 屏障握手, not a sleep竞猜).
+	closeEntered func()
+
 	// ctx is the gateway-lifetime context; Close cancels it so tail-only sessions
 	// (which own no arm to seal) still go silent BEFORE Home — their read pumps
 	// derive from it (关站序 tail closure, P1). Member sessions are cancelled via
@@ -164,6 +170,9 @@ func (g *Gateway) Start() error {
 // Forgotten, sessions torn down) so no still-live session can touch a closing
 // Home. Idempotent.
 func (g *Gateway) Close() error {
+	if g.closeEntered != nil {
+		g.closeEntered() // test seam: a caller has entered Close (before the Once gate)
+	}
 	// sync.Once.Do blocks concurrent callers until the one teardown returns, so EVERY
 	// Close (first or Nth, concurrent or serial) returns only after the arms are all
 	// sealed and every pump joined — a second Close can never return while the first is

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
@@ -36,11 +37,21 @@ type fakeSys struct {
 	cancelTID   schedule.TimerID
 	rh          actorbase.ResourceHandle
 	obs         [][]byte
+
+	// commit gate (P1 tests): if commitProceed is non-nil, SubmitEnvelope signals
+	// commitEntered (it is INSIDE the绑定世代提交守卫) then parks on commitProceed — so a
+	// test can hold the SINGLE write open and prove SetBinding waits behind it.
+	commitEntered chan struct{}
+	commitProceed chan struct{}
 }
 
 func (f *fakeSys) Self() actor.ActorID { return f.self }
 func (f *fakeSys) SubmitEnvelope(spec behavior.SubjectWriteSpec) (message.ID, int64, error) {
 	f.submitSpec = spec
+	if f.commitProceed != nil {
+		close(f.commitEntered)
+		<-f.commitProceed
+	}
 	return f.submitID, f.submitSeq, f.submitErr
 }
 func (f *fakeSys) RespondEnvelope(req *message.Envelope, spec behavior.ResponseSpec) (message.ID, error) {
@@ -281,6 +292,100 @@ func TestStaleJobTraversalRefusedAtCommit(t *testing.T) {
 	}
 	if fs.submitSpec.Type != "" {
 		t.Fatalf("a stale Job must NOT 落账, but submitSpec was set: %+v", fs.submitSpec)
+	}
+}
+
+// TestGuardExcludesFiveStepCheck (修复批六轮 P1, 守卫圈收窄证据①): the五步核查 (a slow /
+// unbounded DB read) runs OUTSIDE the绑定世代提交守卫, so a concurrent SetBinding is NOT
+// blocked while the check is outstanding. A resolve frame is parked in its openCheck; a
+// rebind must return promptly (proving the guard is not held during the check), after
+// which the commit rechecks the advanced gen and is refused stale — never落账.
+func TestGuardExcludesFiveStepCheck(t *testing.T) {
+	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
+	slot.SetBinding(1)
+	req := &message.Envelope{ID: "r1", Sender: message.Sender{ID: "tool:kimi"}, Audience: message.Audience{"human:alice"}}
+	fs := &fakeSys{self: "human:alice", respondID: "resp1"}
+
+	openEntered := make(chan struct{})
+	releaseOpen := make(chan struct{})
+	deps := humanDriverDeps{
+		self:     "human:alice",
+		requests: &fakeReq{req: req},
+		openCheck: func(context.Context, actor.ActorID, message.ID) (bool, error) {
+			close(openEntered)
+			<-releaseOpen // slow五步核查, held open OUTSIDE the guard
+			return true, nil
+		},
+		cancelHint: func(actor.ActorID, message.ID) {},
+	}
+
+	done := make(chan subjectgate.Frame, 1)
+	f, _ := subjectgate.NewFrame(subjectgate.FrameResolve, 1, "r", subjectgate.ResolvePayload{ReqID: "r1", Decision: "approved"})
+	go func() { done <- interpretFrame(fs, slot, deps, f, 1) }()
+
+	<-openEntered // the interpreter is parked in the五步核查, NOT in the guard
+
+	// A concurrent rebind must NOT be blocked (the guard is not held during the check).
+	rebindReturned := make(chan struct{})
+	go func() { slot.SetBinding(2); close(rebindReturned) }()
+	select {
+	case <-rebindReturned:
+		// expected: the rebind proceeds freely while the五步核查 is outstanding.
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetBinding blocked during the五步核查 — the guard圈 is too wide (P1 regression)")
+	}
+
+	// Release the check: the commit then rechecks the (now advanced) gen and is refused.
+	close(releaseOpen)
+	got := <-done
+	if e := decodeErr(t, got); got.Type != subjectgate.FrameError || e.Code != subjectgate.CodeStaleBinding {
+		t.Fatalf("commit after a concurrent rebind must be refused stale_binding, got %+v", got)
+	}
+	if fs.respondReq != nil {
+		t.Fatal("the refused commit must NOT 落账 (no RespondEnvelope)")
+	}
+}
+
+// TestGuardCoversSingleWrite (修复批六轮 P1, 守卫圈收窄证据②): the SINGLE落账 verb IS under
+// the guard — while a write is in-flight (held open inside SubmitEnvelope), a concurrent
+// SetBinding is parked on the exclusive Lock until the write releases, then commit succeeds
+// under the still-valid old binding (串行化序 commit ≺ rebind). This is the narrow window
+// that must remain covered (six-round FIXED本体 not regressed).
+func TestGuardCoversSingleWrite(t *testing.T) {
+	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
+	slot.SetBinding(1)
+	entered := make(chan struct{})
+	proceed := make(chan struct{})
+	fs := &fakeSys{self: "human:alice", submitID: "m1", submitSeq: 1, commitEntered: entered, commitProceed: proceed}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, 1, "ref", subjectgate.SubmitPayload{
+		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: json.RawMessage(`{}`),
+	})
+
+	done := make(chan subjectgate.Frame, 1)
+	go func() { done <- interpretFrame(fs, slot, newDeps("human:alice", nil, false), f, 1) }()
+	<-entered // the SINGLE write is in-flight INSIDE the guard (RLock held)
+
+	rebindReturned := make(chan struct{})
+	go func() { slot.SetBinding(2); close(rebindReturned) }()
+	select {
+	case <-rebindReturned:
+		t.Fatal("SetBinding returned while the single write held the guard — the write is not covered")
+	case <-time.After(50 * time.Millisecond):
+		// expected: the rebind is parked on the exclusive Lock behind the in-flight write.
+	}
+
+	close(proceed) // the write lands under the still-valid old binding
+	got := <-done
+	if got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("commit under the still-current binding must receipt, got %+v", got)
+	}
+	select {
+	case <-rebindReturned:
+	case <-time.After(2 * time.Second):
+		t.Fatal("SetBinding did not return after the single write released the guard")
+	}
+	if slot.BindingGen() != 2 {
+		t.Fatalf("rebind must have advanced the binding to 2, got %d", slot.BindingGen())
 	}
 }
 

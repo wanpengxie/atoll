@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -177,36 +178,52 @@ func TestGatewayConcurrentClose(t *testing.T) {
 	}
 }
 
-// TestGatewayConcurrentCloseBarrier (修复批五轮 P2): a controllable seal-join barrier
-// PROVES the second concurrent Close arrives while the first is still mid-teardown, and
-// that NEITHER returns until the barrier releases — the sync.Once teardown gates every
-// caller. The barrier = a pump tracked on an arm, so seal's bounded join parks until we
-// untrack it (well within ArmSealJoinTimeout, so no leak/timeout is provoked). After
-// release both Close return with every arm sealed and the pump accounting at zero.
+// TestGatewayConcurrentCloseBarrier (修复批六轮 P2, 握手证据): a controllable seal-join
+// barrier + a Close-entry handshake PROVE the second concurrent Close was actually
+// scheduled AND entered Close, and that NEITHER returns until the barrier releases — the
+// sync.Once teardown gates every caller. Prior version used a bare 100ms无返回 which would
+// pass even if the second goroutine never ran; now the closeEntered seam counts real
+// entries and every wait is a channel select (not a sleep竞猜). The barrier = a pump
+// tracked on an arm, so seal's bounded join parks until we untrack it (well within
+// ArmSealJoinTimeout, no leak/timeout provoked). After release both Close return.
 func TestGatewayConcurrentCloseBarrier(t *testing.T) {
 	g := New(Config{})
 	subj := actor.ActorID("user:barrier")
 	e, arm := g.mustArm(t, channel.ID("c"), subj)
 	g.addDevice(e, g.newBareSession(subj))
 
-	// Track a pump on the arm: seal's a.wg.Wait() now parks until we untrack it.
+	// Handshake seam: each goroutine ENTERING Close signals here BEFORE closeOnce.Do.
+	var entered int32
+	enteredCh := make(chan struct{}, 2)
+	g.closeEntered = func() {
+		atomic.AddInt32(&entered, 1)
+		enteredCh <- struct{}{}
+	}
+
+	// Track a pump on the arm: the FIRST Close's seal a.wg.Wait() parks until we untrack.
 	arm.track()
 
-	returned := make(chan struct{}, 2)
-	for i := 0; i < 2; i++ {
-		go func() { _ = g.Close(); returned <- struct{}{} }()
+	returned := make(chan int, 2)
+	// Start the FIRST Close and wait until it has entered AND reached the seal join. seal
+	// marks the arm sealed BEFORE the join, so isSealed is the "inside teardown" edge.
+	go func() { _ = g.Close(); returned <- 1 }()
+	<-enteredCh // first Close entered
+	waitFor(t, arm.isSealed, "first Close did not reach the seal join (arm never sealed)")
+
+	// Now start the SECOND Close and PROVE (real handshake, not sleep) it was scheduled
+	// and entered Close — it will then park in closeOnce.Do behind the first's teardown.
+	go func() { _ = g.Close(); returned <- 2 }()
+	<-enteredCh // handshake: the second goroutine actually ran AND entered Close
+	if got := atomic.LoadInt32(&entered); got != 2 {
+		t.Fatalf("both Close calls must have entered Close, got %d", got)
 	}
 
-	// Barrier held: NEITHER Close may return — the first is parked in seal's join, the
-	// second is parked in closeOnce.Do waiting on the first's single teardown.
+	// Barrier still held → NEITHER may return. Proven by a real wait on the return channel
+	// (the first parked in seal's join, the second parked in closeOnce.Do).
 	select {
-	case <-returned:
-		t.Fatal("a Close returned while the seal-join barrier was still held (teardown not gating)")
+	case n := <-returned:
+		t.Fatalf("Close %d returned while the seal-join barrier was still held (teardown not gating)", n)
 	case <-time.After(100 * time.Millisecond):
-	}
-	// seal marks the arm sealed BEFORE it joins, so the flag is already set under the barrier.
-	if !arm.isSealed() {
-		t.Fatal("seal must mark the arm sealed before the join barrier")
 	}
 
 	// Release the barrier: the join drains, the single teardown completes, BOTH Close return.
@@ -215,7 +232,7 @@ func TestGatewayConcurrentCloseBarrier(t *testing.T) {
 		select {
 		case <-returned:
 		case <-time.After(2 * time.Second):
-			t.Fatalf("Close %d did not return after the barrier released", i)
+			t.Fatalf("a Close did not return after the barrier released")
 		}
 	}
 	if !arm.isSealed() {
@@ -225,6 +242,24 @@ func TestGatewayConcurrentCloseBarrier(t *testing.T) {
 	g.tailPumps.Wait()
 	if n := g.LeakedPumps(); n != 0 {
 		t.Fatalf("no pump should have been abandoned (barrier released before timeout), leaked=%d", n)
+	}
+}
+
+// waitFor polls cond until true or a 2s deadline (a real condition-wait, not a sleep竞猜).
+func waitFor(t *testing.T, cond func() bool, msg string) {
+	t.Helper()
+	deadline := time.After(2 * time.Second)
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for {
+		if cond() {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatal(msg)
+		case <-tick.C:
+		}
 	}
 }
 

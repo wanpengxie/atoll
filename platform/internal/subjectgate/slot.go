@@ -152,8 +152,14 @@ func newSlot(id actor.ActorID) *Slot {
 // in-flight commits have released — i.e. their落账动词 have committed under the still-
 // valid old binding — then advances the generation, so any subsequent commit sees the
 // new gen and is refused stale_binding. This is what closes the复核↔落账 third window.
-// The wait is bounded: an in-flight commit is a pen落账 (WithoutCancel bounded write),
-// so the rebind (gateway attach/seal path) never blocks unboundedly.
+//
+// 冻结窗上界 (修复批六轮 P1): the guard's shared RLock covers ONLY the interpreter's
+// SINGLE truth-mutating call (one pen落账 — SubmitEnvelope / RespondEnvelope /
+// AfterIdentity / CancelTimerIdentity / ResourceIdentity·write), NOT the whole frame
+// interpretation. The decode / 五步核查 DB reads / eligibility queries / pure-read
+// resource ops all run守卫外, so a slow or unbounded DB query can never park a rebind.
+// SetBinding's wait上界 is therefore exactly one pen write's duration — the SAME
+// exposure级 as any pen writer, never the full解释过程.
 func (s *Slot) SetBinding(gen int64) {
 	s.genGuard.Lock()
 	s.mu.Lock()
@@ -180,8 +186,12 @@ func (s *Slot) SetBinding(gen int64) {
 // skips the gen comparison but STILL takes the RLock — the rebind-freeze semantics stay
 // uniform (a control-shim commit is not torn by a concurrent rebind either).
 //
+// 守卫圈 = single write (修复批六轮 P1): commit wraps ONLY the动词's one truth-mutating
+// call. The caller (humancell commitWrite) does all decode / 五步核查 / 资格查询 / 纯读
+// OUTSIDE this guard, so the RLock冻结窗 is one pen write, not the whole解释过程.
+//
 // 死锁论证: the落账动词 run inside commit (SubmitEnvelope / RespondEnvelope /
-// AfterIdentity / CancelTimerIdentity / ResourceIdentity·*) are actorbase pen writes to
+// AfterIdentity / CancelTimerIdentity / ResourceIdentity·write) are actorbase pen writes to
 // the Home log; NONE calls back into slot.SetBinding or genGuard.Lock — SetBinding's
 // ONLY caller is the gateway arm rebind (drivers/gateway/arm.go nextGen), a different
 // goroutine never reached from a pen落账. So a goroutine never holds RLock while seeking
