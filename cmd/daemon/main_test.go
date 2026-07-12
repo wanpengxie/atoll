@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -14,6 +15,15 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
 )
+
+func TestStorageRootCloseDecisionTransfersOnForwarderLeak(t *testing.T) {
+	if shouldCloseStorageRoot(errors.Join(errors.New("other"), platform.ErrComputeForwardersLeaked)) {
+		t.Fatal("forwarder leak must transfer Root ownership to process exit")
+	}
+	if !shouldCloseStorageRoot(errors.New("ordinary failure")) {
+		t.Fatal("ordinary failure must still close Root")
+	}
+}
 
 // Test-only classes: one that builds, one whose constructor always errors. They
 // let TestPlanSource_BuildFailureDoesNotCullDesired drive a per-row Build failure

@@ -10,6 +10,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -495,7 +496,21 @@ func jitterBackoff(d time.Duration) time.Duration {
 // first) — a link death alone only re-enters the redial loop.
 //
 // RunCompute blocks until ctx is cancelled.
-func RunCompute(ctx context.Context, cfg ComputeConfig) error {
+var ErrComputeForwardersLeaked = errors.New("platform: compute forwarders leaked; storage root ownership transferred to process exit")
+
+type computeLifecycleHooks struct {
+	forwarderTimeout time.Duration
+	// forwarderLeaked, when non-nil, replaces the invocation-local forwarder
+	// leak account so a test can assert its delta directly.
+	forwarderLeaked *atomic.Int64
+	obsExited       func()
+	storageExited   func()
+	storagePump     func(context.Context, *storageHostForwarder)
+}
+
+func RunCompute(ctx context.Context, cfg ComputeConfig) error { return runCompute(ctx, cfg, nil) }
+
+func runCompute(ctx context.Context, cfg ComputeConfig, hooks *computeLifecycleHooks) (retErr error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -535,7 +550,17 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 	// once, Rebind'd per connection, pumped for the daemon's whole life.
 	obsFwd := newCellObsForwarder()
 	rt.WatchObsAll(obsFwd)
-	go obsFwd.pump(ctx)
+	var forwarders sync.WaitGroup
+	forwarders.Add(1)
+	go func() {
+		defer forwarders.Done()
+		defer func() {
+			if hooks != nil && hooks.obsExited != nil {
+				hooks.obsExited()
+			}
+		}()
+		obsFwd.pump(ctx)
+	}()
 	// The caller-side cancel arm, like the obs arm, outlives every individual link:
 	// built once, Rebind'd per connection, so a hosted caller's Canceller always
 	// sends up whichever Dialer is currently connected.
@@ -544,7 +569,48 @@ func RunCompute(ctx context.Context, cfg ComputeConfig) error {
 	// obsFwd/cancelFwd — built once (nil-host-safe: cfg.StorageHost may be
 	// nil), Rebind'd per connection, pumped for the daemon's whole life.
 	storageFwd := newStorageHostForwarder(cfg.StorageHost, logger, cfg.ScrubberInterval)
-	go storageFwd.pump(ctx)
+	forwarders.Add(1)
+	go func() {
+		defer forwarders.Done()
+		defer func() {
+			if hooks != nil && hooks.storageExited != nil {
+				hooks.storageExited()
+			}
+		}()
+		if hooks != nil && hooks.storagePump != nil {
+			hooks.storagePump(ctx, storageFwd)
+			return
+		}
+		storageFwd.pump(ctx)
+	}()
+	// forwarderLeaked is this RunCompute invocation's forwarder leak account —
+	// the same per-instance atomic every other lifecycle component keeps. The
+	// single deferred close arbitration below is its only writer, so one
+	// timeout incident counts exactly once.
+	forwarderLeaked := &atomic.Int64{}
+	if hooks != nil && hooks.forwarderLeaked != nil {
+		forwarderLeaked = hooks.forwarderLeaked
+	}
+	defer func() {
+		timeout := 5 * time.Second
+		if hooks != nil && hooks.forwarderTimeout > 0 {
+			timeout = hooks.forwarderTimeout
+		}
+		done := make(chan struct{})
+		go func() { forwarders.Wait(); close(done) }()
+		select {
+		case <-done:
+		case <-time.After(timeout):
+			// Bounded abandon proof: neither pump produces actors. A storage pump
+			// may still hold the pure os.Root handle, so ownership is transferred
+			// intact to process exit and daemon main must skip sh.Close.
+			forwarderLeaked.Add(1)
+			logger.Error("platform.compute.forwarder_join_timeout", "timeout", timeout,
+				"leaked", forwarderLeaked.Load(),
+				"safety", "pure os.Root handle ownership transferred to process exit; no actor production")
+			retErr = errors.Join(retErr, ErrComputeForwardersLeaked)
+		}
+	}()
 
 	ring := &computeRing{
 		rt:          rt,

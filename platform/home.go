@@ -173,8 +173,9 @@ type Home struct {
 	prevEagerDesired map[actor.ActorID]bool
 
 	// reconcileStop tears down the closure reconciler ticker (level backstop).
-	reconcileStop context.CancelFunc
-	reconcileDone chan struct{}
+	reconcileStop   context.CancelFunc
+	reconcileDone   chan struct{}
+	reconcileLeaked atomic.Int64
 
 	// pokeCh is the coalesced activation wake: Admit (a fresh membership write)
 	// posts a non-blocking edge here so the reconcile ring runs its next sweep
@@ -214,8 +215,48 @@ type Home struct {
 	// this instant on (期12: verbs hold no capability of their own — the residual
 	// in-flight write past the gate is fenced by the cell caps' own live membranes
 	// once cells stop). atomic (lock-free read on the hot Submit path).
-	closed atomic.Bool
+	closed    atomic.Bool
+	state     atomic.Uint32
+	closeOnce sync.Once
+	closeDone chan struct{}
+	closeErr  error
+	faults    *homeFaults
 }
+
+type homeFaults struct {
+	fail     map[string]error
+	panicAt  map[string]any
+	record   func(string)
+	action   map[string]func()
+	created  func(*Home)
+	delivery func(storespec.StoredRow) error
+}
+
+func (f *homeFaults) checkpoint(name string) error {
+	if f == nil {
+		return nil
+	}
+	if f.record != nil {
+		f.record(name)
+	}
+	if action := f.action[name]; action != nil {
+		action()
+	}
+	if p, ok := f.panicAt[name]; ok {
+		panic(p)
+	}
+	return f.fail[name]
+}
+
+type homeState uint32
+
+const (
+	homeConstructing homeState = iota
+	homeActivating
+	homePublished
+	homeClosing
+	homeClosed
+)
 
 // reviveLogThrottle bounds the attached-host revive-skip log (see
 // Home.reviveLogAt).
@@ -232,7 +273,9 @@ const reconcileInterval = 30 * time.Second
 //
 //	signal -> stores(OnCommit=signal.Notify) -> harness -> channelkit(spawns
 //	sysactor against the live runtime) -> delivery tap -> link acceptor.
-func Open(cfg HomeConfig) (*Home, error) {
+func Open(cfg HomeConfig) (*Home, error) { return openHome(cfg, nil) }
+
+func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -240,6 +283,29 @@ func Open(cfg HomeConfig) (*Home, error) {
 	if cfg.ChannelID == "" {
 		return nil, fmt.Errorf("platform: ChannelID required")
 	}
+	h := &Home{channelID: cfg.ChannelID, logger: logger, closeDone: make(chan struct{}), faults: faults}
+	if faults != nil && faults.created != nil {
+		faults.created(h)
+	}
+	h.state.Store(uint32(homeConstructing))
+	_ = faults.checkpoint("state.constructing")
+	defer func() {
+		if p := recover(); p != nil {
+			func() {
+				defer func() {
+					if q := recover(); q != nil {
+						logger.Error("home.rollback.panic", "panic", q)
+					}
+				}()
+				_ = h.closeInternal("panic")
+			}()
+			panic(p)
+		}
+		if retErr != nil {
+			logger.Error("platform.home.rollback", "channel", cfg.ChannelID, "cause", retErr)
+			retErr = errors.Join(retErr, h.closeInternal("rollback"))
+		}
+	}()
 	ctx := context.Background()
 	nowMs := func() int64 { return time.Now().UnixMilli() }
 	clock := func() time.Time { return time.UnixMilli(nowMs()) }
@@ -255,6 +321,10 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    and the control-plane membership mirror) fire it through the store,
 	//    instead of only the harness path being wrapped.
 	signal := tap.NewSignal()
+	h.signal = signal
+	if err := faults.checkpoint("construct.open_channel"); err != nil {
+		return nil, fmt.Errorf("platform: open channel store: %w", err)
+	}
 
 	// 2. Open channel stores (substrate), wiring the commit signal as the store's
 	//    OnCommit. Now any durable append — request or control-plane — wakes the
@@ -274,6 +344,7 @@ func Open(cfg HomeConfig) (*Home, error) {
 	if err != nil {
 		return nil, fmt.Errorf("platform: open channel store: %w", err)
 	}
+	h.cs = cs
 
 	// 3. Build the harness Minter (the substrate mint machine). New returns a Minter, never a
 	//    bare chain — the bare writer's visibility is compile-time capped inside the
@@ -287,7 +358,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Logger:    logger,
 	})
 	if err != nil {
-		_ = cs.Close()
 		return nil, fmt.Errorf("platform: build harness: %w", err)
 	}
 	// The system Pen: every system-authored write (sysactor serve responses,
@@ -304,8 +374,10 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    stays strict (a duplicate is an error, locked by the store's
 	//    coverage test); the idempotent seed lives here at the genesis call site
 	//    (guard the idempotency at the platform bootstrap call site — do not relax substrate).
+	if err := faults.checkpoint("construct.ensure_system"); err != nil {
+		return nil, fmt.Errorf("platform: register system actor: %w", err)
+	}
 	if err := cs.Membership.EnsureSystemActor(ctx, nowMs()); err != nil {
-		_ = cs.Close()
 		return nil, fmt.Errorf("platform: register system actor: %w", err)
 	}
 
@@ -325,7 +397,6 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    channelkit.New, before Home exists. The closure captures the h
 	//    VARIABLE (not its zero value); by the time a cancel actually fires
 	//    (long after Open returns), h has been assigned.
-	var h *Home
 	channel, err := channelkit.New(channelkit.Config{
 		ChannelID: cfg.ChannelID,
 		System: func(rt *actorrt.Runtime, inc actorrt.Incarnation) actorrt.Actor {
@@ -365,23 +436,24 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Logger:       logger,
 	})
 	if err != nil {
-		_ = cs.Close()
 		return nil, fmt.Errorf("platform: construct channel: %w", err)
 	}
+	h.channel = channel
 
 	// 7. Build the delivery tap: a Pump over the Signal-fed Deliverer. cursor start
 	//    = current MaxSeq (mailbox semantics: only new commits). DeliverResult
 	//    lands here as structured per-audience logs.
+	if err := faults.checkpoint("construct.max_seq"); err != nil {
+		return nil, fmt.Errorf("platform: read max seq: %w", err)
+	}
 	from, err := cs.Query.MaxSeq(ctx)
 	if err != nil {
-		channel.Cells().StopAll()
-		channel.Cells().DrainZombies(0)
-		channel.Stop()
-		_ = cs.Close()
 		return nil, fmt.Errorf("platform: read max seq: %w", err)
 	}
 	deliver := deliveryHandle(channel.Deliverer(), cfg.ChannelID, logger)
-	delivery := tap.NewPump(signal, cs.Query, from, deliver, logger)
+	if faults != nil && faults.delivery != nil {
+		deliver = faults.delivery
+	}
 
 	// 8. Register the device-presence fold once for the runtime population. Every
 	//    actor's obs wire naturally feeds this single fanout subscription; attach
@@ -395,25 +467,23 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//    the link acceptor is built AFTER the scheduler because it welds a remote
 	//    port's incarnation onto the schedule Minter (the time-axis wire arm), which
 	//    only exists once OpenScheduler has run.
-	h = &Home{
-		channelID:        cfg.ChannelID,
-		minter:           minter,
-		channel:          channel,
-		cs:               cs,
-		signal:           signal,
-		delivery:         delivery,
-		presenceFold:     presenceFold,
-		logger:           logger,
-		nowMs:            nowMs,
-		placement:        SinglePlacement{},
-		builder:          cfg.Builder,
-		desired:          cfg.Desired,
-		prevEagerDesired: map[actor.ActorID]bool{},
-		systemPen:        systemPen,
-		reviveLogAt:      map[actor.ActorID]time.Time{},
-		reviveBackoff:    map[actor.ActorID]reviveBackoffEntry{},
-		pokeCh:           make(chan struct{}, 1),
-	}
+	h.channelID = cfg.ChannelID
+	h.minter = minter
+	h.channel = channel
+	h.cs = cs
+	h.signal = signal
+	h.delivery = nil
+	h.presenceFold = presenceFold
+	h.logger = logger
+	h.nowMs = nowMs
+	h.placement = SinglePlacement{}
+	h.builder = cfg.Builder
+	h.desired = cfg.Desired
+	h.prevEagerDesired = map[actor.ActorID]bool{}
+	h.systemPen = systemPen
+	h.reviveLogAt = map[actor.ActorID]time.Time{}
+	h.reviveBackoff = map[actor.ActorID]reviveBackoffEntry{}
+	h.pokeCh = make(chan struct{}, 1)
 
 	// 10. Time axis (OpenScheduler). FireSink mints a pen per fire (author-welded);
 	//     Reviver activates an absent identity-timer author via SpawnIfAbsent. The
@@ -424,6 +494,9 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//     always-on set — and append has no backfill, so the wake must be revivable
 	//     from the first instant.
 	rt := channel.Cells()
+	if err := faults.checkpoint("construct.open_scheduler"); err != nil {
+		return nil, fmt.Errorf("platform: open scheduler: %w", err)
+	}
 	schedMinter, engine, err := runtime.OpenScheduler(cs, schedule.AssemblyDeps{
 		Fire:   fireSink{minter: minter, registry: cs.Registry, rt: rt, chID: cfg.ChannelID},
 		Host:   rt,
@@ -432,34 +505,23 @@ func Open(cfg HomeConfig) (*Home, error) {
 		Logger: logger,
 	})
 	if err != nil {
-		delivery.Close()
-		channel.Cells().StopAll()
-		channel.Cells().DrainZombies(0)
-		channel.Stop()
-		_ = cs.Close()
 		return nil, fmt.Errorf("platform: open scheduler: %w", err)
 	}
 	h.schedMinter = schedMinter
 	h.engine = engine
-	if err := channel.Start(); err != nil {
-		engine.Close()
-		delivery.Close()
-		channel.Cells().StopAll()
-		channel.Cells().DrainZombies(0)
-		_ = cs.Close()
-		return nil, fmt.Errorf("platform: start channel: %w", err)
-	}
-	engine.Start()
-	delivery.Start()
 
 	// 11. Build the link acceptor (physical layer: WS mux + per-actor ipc streams
-	//      + lease judgement for attached computes). It welds an attaching remote
+	//      + lease judgement for attached computes). Still Construct — pure
+	//      fallible preparation, zero goroutines: NewAcceptor only allocates its
+	//      tables (Serve is what runs links, and nothing serves until the app
+	//      binds an HTTP route after Open returns). It welds an attaching remote
 	//      port's incarnation onto the same three minters a local cell's Caps draw
 	//      from — the harness pen Minter, the access door (cs.Access), and the
-	//      schedule engine Minter — so a daemon-hosted cell's message / off-log /
-	//      time-axis capability is behaviourally identical to a local one (transport
-	//      neutrality). Attached-port obs enters the runtime's one population
-	//      subscription just like local-cell obs.
+	//      schedule engine Minter (which is why it must follow OpenScheduler) —
+	//      so a daemon-hosted cell's message / off-log / time-axis capability is
+	//      behaviourally identical to a local one (transport neutrality).
+	//      Attached-port obs enters the runtime's one population subscription
+	//      just like local-cell obs.
 	links := link.NewAcceptor(link.Config{
 		Minter:             minter,
 		Access:             cs.Access,
@@ -473,12 +535,33 @@ func Open(cfg HomeConfig) (*Home, error) {
 		StorageHostControl: homeStorageHostControl{outbox: cs.Outbox, timeout: cfg.ReservationTimeout},
 	})
 	h.links = links
+
+	// 12. Activate: construct is complete (every fallible preparation done, all
+	//     ownership already in h) — start the components: channel cells, the
+	//     schedule engine, then the delivery pump.
+	h.state.Store(uint32(homeActivating))
+	_ = faults.checkpoint("state.activating")
+	if err := faults.checkpoint("activate.channel_start"); err != nil {
+		return nil, fmt.Errorf("platform: start channel: %w", err)
+	}
+	if err := channel.Start(); err != nil {
+		return nil, fmt.Errorf("platform: start channel: %w", err)
+	}
+	engine.Start()
+	if err := faults.checkpoint("activate.before_pump"); err != nil {
+		return nil, err
+	}
+	h.delivery = tap.OpenPump(signal, cs.Query, from, deliver, logger)
+
 	// Close the late-binding window (see step 2's lateAcc note): every
 	// file-kind placement decision from this instant on can actually route an
 	// AllocRequest / see attached daemons as storage-mount candidates.
+	if err := faults.checkpoint("publish.bind"); err != nil {
+		return nil, err
+	}
 	lateAcc.bind(links)
 
-	// 12. Reconcilers (level backstops). Run one sweep of EACH at startup —
+	// 13. Reconcilers (level backstops). Run one sweep of EACH at startup —
 	//     activation re-mints the always-on desired set; closure is the home-restart
 	//     recovery path (#4, close orphan open requests whose receiver's embodiment
 	//     predates this process). Then a low-frequency ticker keeps both as the
@@ -491,12 +574,17 @@ func Open(cfg HomeConfig) (*Home, error) {
 	//     not yet (re)minted this sweep would be scanned as receiver_unavailable and
 	//     its deferred open requests wrongly closed. Minting first, then scanning,
 	//     keeps a restart / mid-life-crash cell's open requests alive across the sweep.
+	if err := faults.checkpoint("publish.sweep"); err != nil {
+		return nil, err
+	}
 	h.reconcileActivation(ctx)
 	channel.Reconcile(ctx)
 	h.sweepExpired(ctx)
 	h.sweepPresence(ctx)
 	reconcileCtx, reconcileStop := context.WithCancel(context.Background())
 	reconcileDone := make(chan struct{})
+	h.reconcileStop = reconcileStop
+	h.reconcileDone = reconcileDone
 	go func() {
 		defer close(reconcileDone)
 		t := time.NewTicker(sweepEvery)
@@ -507,23 +595,46 @@ func Open(cfg HomeConfig) (*Home, error) {
 				return
 			case <-t.C:
 				h.reconcileActivation(reconcileCtx)
+				if reconcileCtx.Err() != nil {
+					return
+				}
 				channel.Reconcile(reconcileCtx)
+				if reconcileCtx.Err() != nil {
+					return
+				}
 				h.sweepExpired(reconcileCtx)
+				if reconcileCtx.Err() != nil {
+					return
+				}
 				h.sweepPresence(reconcileCtx)
 			case <-h.pokeCh:
 				// Admit poke: run the same activation-then-closure sweep off-tick so
 				// a freshly-admitted member embodies without the ≤30s wait. Boot-order
 				// 红线 holds (activation precedes closure) on this path too.
 				h.reconcileActivation(reconcileCtx)
+				if reconcileCtx.Err() != nil {
+					return
+				}
 				channel.Reconcile(reconcileCtx)
+				if reconcileCtx.Err() != nil {
+					return
+				}
 				h.sweepExpired(reconcileCtx)
+				if reconcileCtx.Err() != nil {
+					return
+				}
 				h.sweepPresence(reconcileCtx)
 			}
 		}
 	}()
-	h.reconcileStop = reconcileStop
-	h.reconcileDone = reconcileDone
-
+	if err := faults.checkpoint("publish.goroutine_started"); err != nil {
+		return nil, err
+	}
+	h.state.Store(uint32(homePublished))
+	_ = faults.checkpoint("state.published")
+	if err := faults.checkpoint("publish.published"); err != nil {
+		return nil, err
+	}
 	logger.Info("platform.home.ready", "channel", string(cfg.ChannelID))
 	return h, nil
 }
@@ -624,10 +735,16 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 			return
 		}
 		composed = m
+		if ctx.Err() != nil {
+			return
+		}
 	}
 	actives, err := h.cs.Registry.ListActive(ctx)
 	if err != nil {
 		h.logger.Error("platform.reconcile.registry_failed", "channel", string(h.channelID), "err", err)
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 	// The active-membership snapshot serves BOTH roles, read once for atomicity: it
@@ -654,6 +771,9 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 	}
 	current := make(map[actor.ActorID]bool)
 	for id := range desiredIDs {
+		if ctx.Err() != nil {
+			return
+		}
 		rec, ok := member[id]
 		if !ok || !rec.IsActive() {
 			continue // 交集红线: desired-but-not-a-durable-member — skip BEFORE current
@@ -676,7 +796,17 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		inc, built, buildErr := rt.SpawnIfAbsent(mid, kind, func(inc actorrt.Incarnation) actorrt.Actor {
 			return build(h.buildCaps(mid, kind, inc), h.hooks(), factory)
 		})
+		if ctx.Err() != nil {
+			if built {
+				rt.Despawn(inc)
+			}
+			return
+		}
 		if buildErr != nil {
+			if errors.Is(buildErr, actorrt.ErrRuntimeSealed) {
+				h.logger.Info("platform.reconcile.runtime_sealed", "channel", string(h.channelID), "actor", string(mid))
+				return
+			}
 			h.logger.Error("platform.reconcile.build_failed", "channel", string(h.channelID), "actor", string(mid), "error", buildErr)
 			delete(current, mid)
 			continue
@@ -700,6 +830,9 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		}
 	}
 	for id := range h.prevEagerDesired {
+		if ctx.Err() != nil {
+			return
+		}
 		if current[id] {
 			continue
 		}
@@ -752,6 +885,10 @@ const (
 // attached case's log; err is set only for recheckFault (the caller wraps it).
 func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, inc actorrt.Incarnation) (rec storespec.Record, res recheckResult, err error) {
 	rec2, ok2, lerr := h.cs.Registry.Lookup(ctx, id)
+	if ctx.Err() != nil {
+		h.channel.Cells().Despawn(inc)
+		return storespec.Record{}, recheckFault, ctx.Err()
+	}
 	if lerr != nil {
 		h.channel.Cells().Despawn(inc)
 		return storespec.Record{}, recheckFault, lerr
@@ -790,6 +927,9 @@ func (h *Home) View() View {
 // Idempotent for an already-active (kind, principal): the registry returns the
 // existing minted instance id and the extra reconcile poke is harmless.
 func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, error) {
+	if h.closed.Load() {
+		return "", ErrClosed
+	}
 	id, err := h.cs.Membership.Admit(ctx, kind, principal, h.nowMs())
 	if err != nil {
 		return "", fmt.Errorf("platform: Admit membership: %w", err)
@@ -949,6 +1089,10 @@ func (h *Home) buildChildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Inc
 // daemon can attach its actor streams. Home keeps the internal link acceptor and
 // only exposes this capability — the acceptor object never escapes.
 func (h *Home) ServeAttach(w http.ResponseWriter, r *http.Request, daemonID string) {
+	if h.closed.Load() || h.links == nil {
+		http.Error(w, "home closed", http.StatusServiceUnavailable)
+		return
+	}
 	h.links.Serve(w, r, daemonID)
 }
 
@@ -956,6 +1100,11 @@ func (h *Home) ServeAttach(w http.ResponseWriter, r *http.Request, daemonID stri
 // the commit Signal and reads forward from its own seq cursor. It returns the
 // wake channel and the unsubscribe func — the internal Signal never escapes.
 func (h *Home) Subscribe() (<-chan struct{}, func()) {
+	if h.closed.Load() {
+		ch := make(chan struct{})
+		close(ch)
+		return ch, func() {}
+	}
 	return h.signal.Subscribe()
 }
 
@@ -980,51 +1129,138 @@ func (h *Home) Subscribe() (<-chan struct{}, func()) {
 // insert into mem + post a wake, never join the run loop), and engine.Close only
 // joins its own run goroutine (fireDue's Append/Revive never block on the
 // already-stopped cells).
-func (h *Home) Close() error {
-	// 0. Mark closed FIRST: the subjectgate verbs run on ws/垫片 goroutines Close
-	//    never joins (they are the app's, not Home's), so quiescing cells below is
-	//    NOT enough to stop a fresh Submit. The flag makes every verb entry refuse
-	//    from this instant on (期12: no caller index exists to clear — verbs drive
-	//    the cells' own caps, and those die with the cells below).
-	h.closed.Store(true)
-	// 1. Reconciler ticker: stop the level sweep and join it, so no Reconcile runs
-	//    against the writer/runtime/stores being torn down below.
-	if h.reconcileStop != nil {
-		h.reconcileStop()
-		<-h.reconcileDone
-	}
-	// 2. Link acceptor: close all WS links, tear down every actor stream, wait for
-	//    Serve goroutines. Stops external compute traffic (and its port-side
-	//    schedule/access producers) before the runtime/stores underneath shut down.
-	linkErr := h.links.Close()
-	// 3. Delivery tap: stop the pump so no fresh delivery drives a cell to produce.
-	h.delivery.Close()
-	// 4. Cells: judge every actor cell dead (system actors included) — the last
-	//    schedule/emit producers. StopAll no longer joins (G0): it enrols each as a
-	//    zombie and returns; DrainZombies is the sole aggregate join.
-	h.channel.Cells().StopAll()
-	// 4.1. Drain the zombie cohort under one aggregate grace; a卡死 cell that never
-	//    exits is reported as leaked (into the shutdown log) instead of hanging Close
-	//    forever — the whole point of the zombie ledger.
-	if leaked := h.channel.Cells().DrainZombies(0); len(leaked) > 0 {
-		h.logger.Warn("home.close.zombies_leaked", "channel", h.channelID, "count", len(leaked), "actors", leaked)
-	}
-	// 4.2. Closure consumer: join channelkit's resident down-edge goroutine now —
-	//    after cells stop (no more edges produced), before the stores close (a late
-	//    materialise must not write into a closing store). G0-3 teardown序.
-	h.channel.Stop()
-	// 5. Schedule engine: every producer is gone, so stopping the run loop now can
-	//    no longer strand a Schedule() into a dead engine.
-	if h.engine != nil {
-		h.engine.Close()
-	}
-	// 6. Channel stores (DB) last.
-	csErr := h.cs.Close()
+func (h *Home) Close() error { return h.closeInternal("normal") }
 
-	if linkErr != nil {
-		return linkErr
-	}
-	return csErr
+func (h *Home) closeInternal(reason string) error {
+	return h.closeInternalWithin(reason, 5*time.Second)
+}
+
+func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration) error {
+	h.closeOnce.Do(func() {
+		started := time.Now()
+		defer close(h.closeDone)
+		var errs []error
+		addErr := func(err error) {
+			if err != nil {
+				errs = append(errs, err)
+			}
+		}
+		var teardownPanic any
+		guard := func(name string, fn func()) {
+			defer func() {
+				if p := recover(); p != nil {
+					if teardownPanic == nil {
+						teardownPanic = p
+					}
+					h.logger.Error("home.teardown.panic", "step", name, "panic", p)
+				}
+			}()
+			fn()
+		}
+		step := func(name string, fn func()) {
+			guard(name+".checkpoint", func() {
+				if err := h.faults.checkpoint(name); err != nil {
+					errs = append(errs, err)
+				}
+			})
+			guard(name, fn)
+		}
+		// Step ZERO seals the construction authority — before even the closing
+		// state flip, so there is no instant at which the Home is observably
+		// "entering close" while the runtime still admits new embodiments
+		// (公理 7: 进入关闭即封门, and close entry IS this line).
+		step("close.seal", func() {
+			if h.channel != nil && h.channel.Cells() != nil {
+				h.channel.Cells().Seal()
+			}
+		})
+		step("close.begin", func() {
+			h.state.Store(uint32(homeClosing))
+			_ = h.faults.checkpoint("state.closing")
+			h.closed.Store(true)
+		})
+		step("close.reconcile", func() {
+			if h.reconcileStop == nil {
+				return
+			}
+			h.reconcileStop()
+			if h.reconcileDone == nil {
+				return
+			}
+			select {
+			case <-h.reconcileDone:
+			case <-time.After(reconcileTimeout):
+				h.reconcileLeaked.Add(1)
+				h.logger.Error("home.reconcile.join_timeout", "timeout", reconcileTimeout,
+					"safety", "runtime admission sealed; late writes hit closed stores")
+			}
+		})
+		step("close.links", func() {
+			if h.links != nil {
+				addErr(h.links.Close())
+			}
+		})
+		step("close.delivery", func() {
+			if h.delivery != nil {
+				h.delivery.Close()
+			}
+		})
+		step("close.cells", func() {
+			if h.channel == nil {
+				return
+			}
+			rt := h.channel.Cells()
+			if rt != nil {
+				rt.StopAll()
+				if leaked := rt.DrainZombies(0); len(leaked) > 0 {
+					h.logger.Warn("home.close.zombies_leaked", "channel", h.channelID, "count", len(leaked), "actors", leaked)
+				}
+			}
+			h.channel.Close()
+		})
+		step("close.engine", func() {
+			if h.engine != nil {
+				h.engine.Close()
+			}
+		})
+		step("close.stores", func() {
+			if h.cs != nil {
+				addErr(h.cs.Close())
+			}
+		})
+		h.closeErr = errors.Join(errs...)
+		leaked := h.reconcileLeaked.Load()
+		if h.links != nil {
+			leaked += h.links.Leaked()
+		}
+		if h.delivery != nil {
+			leaked += h.delivery.Leaked()
+		}
+		// zombieTotal is the runtime's LIFETIME zombie count — a cumulative
+		// account, not this close's delta — so it is reported as its own field
+		// rather than folded into leaked (which sums per-instance close deltas).
+		var zombieTotal int64
+		if h.channel != nil {
+			leaked += h.channel.Leaked()
+			if h.channel.Cells() != nil {
+				zombieTotal = h.channel.Cells().LeakedTotal()
+			}
+		}
+		if h.engine != nil {
+			leaked += h.engine.Leaked()
+		}
+		h.state.Store(uint32(homeClosed))
+		_ = h.faults.checkpoint("state.closed")
+		step("close.end", func() {})
+		h.logger.Info("platform.home.closed", "channel", h.channelID, "reason", reason,
+			"cleanup_errors", len(errs), "leaked", leaked, "zombie_total", zombieTotal,
+			"duration", time.Since(started))
+		if teardownPanic != nil {
+			panic(teardownPanic)
+		}
+	})
+	<-h.closeDone
+	return h.closeErr
 }
 
 // ---------------------------------------------------------------------------

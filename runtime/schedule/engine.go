@@ -59,6 +59,8 @@ type Engine struct {
 	ctx       context.Context
 	cancelRun context.CancelFunc
 	closeOnce sync.Once
+	closeDone chan struct{}
+	leaked    atomic.Int64
 
 	// started guards the Start/Close lifecycle pair: double Start panics
 	// loud, Close before Start returns without joining (done is only ever
@@ -90,11 +92,12 @@ func New(deps Deps) (Minter, *Engine, error) {
 		deps.Logger = slog.New(slog.DiscardHandler)
 	}
 	e := &Engine{
-		deps: deps,
-		mem:  make(map[TimerID]memTimer),
-		wake: make(chan struct{}, 1),
-		stop: make(chan struct{}),
-		done: make(chan struct{}),
+		deps:      deps,
+		mem:       make(map[TimerID]memTimer),
+		wake:      make(chan struct{}, 1),
+		stop:      make(chan struct{}),
+		done:      make(chan struct{}),
+		closeDone: make(chan struct{}),
 	}
 	e.ctx, e.cancelRun = context.WithCancel(context.Background())
 	return &minter{engine: e}, e, nil
@@ -112,8 +115,7 @@ func (e *Engine) Start() {
 }
 
 // Close stops the run loop and joins its goroutine, then never touches the
-// store again (mirrors tap.Pump.Close). Safe to call once; a second call
-// would panic on the closed stop channel, same discipline as Pump.
+// store again. Concurrent and repeated calls wait for the same bounded close.
 //
 // Close BEFORE Start (an assembly error-path `defer Close()` that fires when
 // a later wiring step failed) is legal and returns immediately: there is no
@@ -121,12 +123,32 @@ func (e *Engine) Start() {
 // The stop channel is still closed, so a Start that races/follows sees an
 // already-stopped engine and its run loop exits at once.
 func (e *Engine) Close() {
-	e.closeOnce.Do(func() { e.cancelRun(); close(e.stop) })
-	if !e.started.Load() {
-		return
-	}
-	<-e.done
+	e.closeWithin(5 * time.Second)
 }
+
+func (e *Engine) closeWithin(timeout time.Duration) {
+	e.closeOnce.Do(func() {
+		defer close(e.closeDone)
+		e.cancelRun()
+		close(e.stop)
+		if !e.started.Load() {
+			return
+		}
+		select {
+		case <-e.done:
+		case <-time.After(timeout):
+			// Bounded abandon proof: fire writes are replay-idempotent; its only
+			// production arm is Revive, which the owner's step-zero Runtime.Seal
+			// rejects before this join can be abandoned.
+			e.leaked.Add(1)
+			e.deps.Logger.Error("schedule.engine.join_timeout", "timeout", timeout,
+				"safety", "writes are idempotent; runtime admission is sealed by owner")
+		}
+	})
+	<-e.closeDone
+}
+
+func (e *Engine) Leaked() int64 { return e.leaked.Load() }
 
 // mintTimerID mints a fresh, never-reused TimerID: reusing a TimerID would
 // let an old fire's messages.id UNIQUE swallow a legitimate new fire. The

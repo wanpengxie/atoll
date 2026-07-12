@@ -17,6 +17,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -300,7 +301,12 @@ func main() {
 	if err != nil {
 		log.Fatalf("daemon: open storage host: %v", err)
 	}
-	defer func() { _ = sh.Close() }()
+	closeStorageRoot := true
+	defer func() {
+		if closeStorageRoot {
+			_ = sh.Close()
+		}
+	}()
 
 	if err := platform.RunCompute(ctx, platform.ComputeConfig{
 		ServerWS:        serverWS,
@@ -310,6 +316,15 @@ func main() {
 		StorageHost:     storageHostAdapter{host: sh},
 		LocalFileOpener: storageHostAdapter{host: sh},
 	}); err != nil {
+		if !shouldCloseStorageRoot(err) {
+			closeStorageRoot = false
+			logger.Error("daemon: storage root ownership transferred to process exit", "err", err)
+			return
+		}
 		log.Fatalf("daemon: %v", err)
 	}
+}
+
+func shouldCloseStorageRoot(err error) bool {
+	return !errors.Is(err, platform.ErrComputeForwardersLeaked)
 }

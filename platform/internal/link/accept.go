@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -55,9 +56,15 @@ type Acceptor struct {
 	leasePing  time.Duration
 	leaseTTL   time.Duration
 
-	ctx    context.Context
-	cancel context.CancelFunc
-	wg     sync.WaitGroup
+	ctx           context.Context
+	cancel        context.CancelFunc
+	wg            sync.WaitGroup
+	admissionMu   sync.Mutex
+	closed        bool
+	closeOnce     sync.Once
+	closeDone     chan struct{}
+	leaked        atomic.Int64
+	admissionHook func()
 
 	// attached is the live attach refcount per compute id (daemon). A daemon is
 	// "online" (attached) iff its count > 0. Refcount, not bool, so an
@@ -176,6 +183,7 @@ func NewAcceptor(cfg Config) *Acceptor {
 		leaseTTL:       cfg.LeaseTTL,
 		ctx:            ctx,
 		cancel:         cancel,
+		closeDone:      make(chan struct{}),
 		attached:       map[string]int{},
 		cancelReq:      cfg.CancelRequest,
 		storageControl: cfg.StorageHostControl,
@@ -294,12 +302,11 @@ func (a *Acceptor) AttachedComputeIDs() []string {
 // app layer (empty → the daemon's self-declared id, dev mode). It blocks until
 // the link tears down (peer gone, lease expiry, or acceptor Close).
 func (a *Acceptor) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
-	if a.ctx.Err() != nil {
+	if !a.beginServe() {
 		http.Error(w, "link acceptor closed", http.StatusServiceUnavailable)
 		return
 	}
-	a.wg.Add(1)
-	defer a.wg.Done()
+	defer a.endServe()
 
 	ws, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -308,11 +315,27 @@ func (a *Acceptor) Serve(w http.ResponseWriter, r *http.Request, daemonID string
 	a.runLink(r.Context(), ws, daemonID)
 }
 
+func (a *Acceptor) beginServe() bool {
+	a.admissionMu.Lock()
+	defer a.admissionMu.Unlock()
+	if a.closed {
+		return false
+	}
+	if a.admissionHook != nil {
+		a.admissionHook()
+	}
+	a.wg.Add(1)
+	return true
+}
+
+func (a *Acceptor) endServe() { a.wg.Done() }
+
 // runLink drives one accepted link: build the mux, handle the stream-0 attach,
 // then demux actor streams to runtime.Attach while the lease watchdog judges
 // liveness.
 func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID string) {
 	defer func() { _ = ws.Close() }()
+	var gate actorGate
 
 	// allowed is the attach declaration set: the resolve seam checks that an
 	// opening actor stream is one the daemon actually declared (membership-backed).
@@ -386,7 +409,17 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// across the wire). Runs off the accept-dispatch goroutine (its own goroutine)
 	// so the bounded handshake never stalls the accept loop.
 	onActor := func(conn net.Conn) {
+		// Admission gate first (公理 7 的通用款, per-link instance): a dispatch
+		// goroutine can still be delivering a substream while teardown has begun
+		// its bounded join — admitting through the gate makes a late Add against
+		// an in-progress Wait impossible (WaitGroup reuse panic); a stream
+		// arriving after the seal is closed on the spot.
+		if !gate.admit() {
+			_ = conn.Close()
+			return
+		}
 		go func() {
+			defer gate.done()
 			// The handshake is bounded by attachHandshakeTimeout (substrate self-
 			// guards the time limit). The port LIFETIME stays the runtime's, not
 			// this bounded ctx — Attach only uses hsCtx for the handshake read.
@@ -587,14 +620,10 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// generous for any live handler, decisive against a hung one. On timeout we
 	// abandon the join and proceed with teardown (a stuck store is never allowed
 	// to become an un-closeable station), leaving a loud, attributed trace.
-	if !lc.waitControlWorkers(2 * streamWriteBudget) {
-		boundMu.Lock()
-		b := boundID
-		boundMu.Unlock()
-		a.logger.Error("link.control_worker_join_timeout",
-			"msg", "control worker join timeout, abandoning — teardown proceeding",
-			"daemon", b, "channel", string(a.channelID))
-	}
+	boundMu.Lock()
+	b := boundID
+	boundMu.Unlock()
+	a.joinLinkWorkers(lc, &gate, b, 2*streamWriteBudget, attachHandshakeTimeout)
 	close(done)
 }
 
@@ -1216,10 +1245,105 @@ func (a *Acceptor) scheduleSink() actorrt.RelaySink {
 }
 
 // Close stops accepting new links and tears down active ones, waiting for all
-// Serve goroutines to exit.
+// Serve goroutines to exit. The outer bound is DERIVED from the inner joins a
+// runLink teardown can legitimately spend back to back — the control-worker
+// join (2×streamWriteBudget) then the actor-gate join (attachHandshakeTimeout)
+// — plus margin, so the backstop never abandons (and double-counts) a link
+// whose inner waits are still within their own ratified budgets.
 func (a *Acceptor) Close() error {
-	a.cancel()
-	a.wg.Wait()
-	a.logger.Info("link.acceptor_closed")
+	return a.closeWithin(2*streamWriteBudget + attachHandshakeTimeout + 5*time.Second)
+}
+
+func (a *Acceptor) closeWithin(timeout time.Duration) error {
+	a.closeOnce.Do(func() {
+		defer close(a.closeDone)
+		a.admissionMu.Lock()
+		a.closed = true
+		a.admissionMu.Unlock()
+		a.cancel()
+		if !waitGroupWithin(&a.wg, timeout) {
+			// Bounded abandon proof: late link writes hit the closed store, while
+			// every Attach production attempt is rejected by Runtime.Seal.
+			a.leaked.Add(1)
+			a.logger.Error("link.acceptor_join_timeout", "timeout", timeout,
+				"safety", "runtime admission is sealed and stores reject late writes")
+		}
+		a.logger.Info("link.acceptor_closed")
+	})
+	<-a.closeDone
 	return nil
+}
+
+func (a *Acceptor) Leaked() int64 { return a.leaked.Load() }
+
+// actorGate fences one link's actor-stream worker admission against teardown's
+// bounded join — the same closed+mutex+WaitGroup shape as the Acceptor's own
+// Serve admission (beginServe/closeWithin), instantiated per link. The seal
+// and the Add live under one mutex (公理 7 通用款: 关门判断与登记同一临界区),
+// so once sealAndWait has taken the lock no later admit can Add against the
+// in-progress Wait (which would both leave an unjoined worker and violate
+// WaitGroup's reuse precondition).
+type actorGate struct {
+	mu     sync.Mutex
+	sealed bool
+	wg     sync.WaitGroup
+}
+
+// admit registers one actor worker; false = the gate is sealed (teardown has
+// begun) and the stream must be refused.
+func (g *actorGate) admit() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.sealed {
+		return false
+	}
+	g.wg.Add(1)
+	return true
+}
+
+func (g *actorGate) done() { g.wg.Done() }
+
+// sealAndWait closes admission, then joins the admitted workers within
+// timeout; false = at least one worker is still running past the bound.
+func (g *actorGate) sealAndWait(timeout time.Duration) bool {
+	g.mu.Lock()
+	g.sealed = true
+	g.mu.Unlock()
+	return waitGroupWithin(&g.wg, timeout)
+}
+
+// joinLinkWorkers is runLink's teardown join half — control workers first
+// (they can be wedged in a store call), then the actor-stream workers behind
+// their admission gate. Budgets are parameters so a test can drive this exact
+// production path (accounting included) with compressed budgets; runLink
+// passes 2×streamWriteBudget / attachHandshakeTimeout.
+func (a *Acceptor) joinLinkWorkers(lc *linkSession, gate *actorGate, boundID string, controlBudget, actorBudget time.Duration) {
+	if !lc.waitControlWorkers(controlBudget) {
+		a.recordControlWorkerLeak()
+		a.logger.Error("link.control_worker_join_timeout",
+			"msg", "control worker join timeout, abandoning — teardown proceeding",
+			"daemon", boundID, "channel", string(a.channelID))
+	}
+	if !gate.sealAndWait(actorBudget) {
+		a.leaked.Add(1)
+		a.logger.Error("link.actor_worker_join_timeout", "timeout", actorBudget,
+			"safety", "runtime admission is sealed and stores reject late writes")
+	}
+}
+
+func (a *Acceptor) recordControlWorkerLeak() {
+	// One incident owns both residues: the stuck worker and the waiter goroutine
+	// that remains until that worker eventually returns.
+	a.leaked.Add(1)
+}
+
+func waitGroupWithin(wg *sync.WaitGroup, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() { wg.Wait(); close(done) }()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }

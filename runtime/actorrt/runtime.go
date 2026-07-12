@@ -100,6 +100,10 @@ type embodiment interface {
 // ErrNotHosted is returned when no embodiment is hosted for the addressed id.
 var ErrNotHosted = errors.New("actorrt: actor not hosted")
 
+// ErrRuntimeSealed means the runtime has entered terminal shutdown and will
+// never admit another embodiment.
+var ErrRuntimeSealed = errors.New("actorrt: runtime sealed")
+
 // Incarnation is the opaque handle to ONE live embodiment of an ActorID — a
 // (id, embodiment-pointer) pair. Identity is single-level (one stable ActorID),
 // but a capability welded to a specific incarnation can outlive it (a goroutine
@@ -172,7 +176,9 @@ type Runtime struct {
 	grace time.Duration
 	// leakedTotal counts corpses ever declared leaked (red line ⑤: leaks counted,
 	// never silent). Cumulative — survives the reap that clears the entry.
-	leakedTotal atomic.Int64
+	leakedTotal        atomic.Int64
+	sealed             bool   // guarded by mu; admission check and registration are linearized together
+	attachStraddleHook func() // test-only: ACK complete, immediately before admission lock
 }
 
 // defaultZombieGrace is the aggregate teardown grace (P0-1 = 5s, not a config
@@ -439,8 +445,12 @@ func (r *Runtime) LiveIDs() []actor.ActorID {
 // LLM context) is a real cost, not a theoretical nicety.
 func (r *Runtime) SpawnIfAbsent(id actor.ActorID, kind actor.Kind, build func(Incarnation) Actor) (Incarnation, bool, error) {
 	r.mu.RLock()
+	sealed := r.sealed
 	_, occupied := r.embodiments[id]
 	r.mu.RUnlock()
+	if sealed {
+		return Incarnation{}, false, ErrRuntimeSealed
+	}
 	if occupied { // fast-path: skip the build entirely if already obviously taken.
 		return Incarnation{}, false, nil
 	}
@@ -455,6 +465,11 @@ func (r *Runtime) SpawnIfAbsent(id actor.ActorID, kind actor.Kind, build func(In
 	}
 
 	r.mu.Lock()
+	if r.sealed {
+		r.mu.Unlock()
+		abortBuild(c)
+		return Incarnation{}, false, ErrRuntimeSealed
+	}
 	if _, occupied := r.embodiments[id]; occupied { // same critical section re-check
 		r.mu.Unlock() // lost the race: discard the shell, never c.start() it.
 		// Release the discarded shell's ctx node (same discard-release as
@@ -520,7 +535,15 @@ func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, sinks S
 	if err != nil {
 		return Incarnation{}, err
 	}
+	if r.attachStraddleHook != nil {
+		r.attachStraddleHook()
+	}
 	r.mu.Lock()
+	if r.sealed {
+		r.mu.Unlock()
+		p.closeConn()
+		return Incarnation{}, ErrRuntimeSealed
+	}
 	old, existed := r.embodiments[p.id]
 	var launch func()
 	if existed {
@@ -734,6 +757,7 @@ func (r *Runtime) deliver(audience []actor.ActorID, env *message.Envelope) (Deli
 // in the background; a caller that wants the leaked list calls DrainZombies next.
 func (r *Runtime) StopAll() {
 	r.mu.Lock()
+	r.sealLocked()
 	launches := make([]func(), 0, len(r.embodiments))
 	for id, p := range r.embodiments {
 		// REPLACEMENT-LIVE-FLIP INVARIANT: dead-flip every embodiment in the SAME
@@ -750,6 +774,15 @@ func (r *Runtime) StopAll() {
 		launch() // fire each escort OUTSIDE the lock (red line ⑥); none joins here.
 	}
 }
+
+// Seal permanently closes embodiment admission. It is idempotent.
+func (r *Runtime) Seal() {
+	r.mu.Lock()
+	r.sealLocked()
+	r.mu.Unlock()
+}
+
+func (r *Runtime) sealLocked() { r.sealed = true }
 
 // UnitStat is the substrate-owned obs facts about one hosted unit, read
 // out-of-band (side-effect-free, never through the mailbox, never truth). It

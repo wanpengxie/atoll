@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform"
@@ -24,6 +25,43 @@ func TestHumanPrincipalAfterCloseReturnsErrClosed(t *testing.T) {
 	}
 	if _, err := h.HumanPrincipal(context.Background(), "alice"); !errors.Is(err, platform.ErrClosed) {
 		t.Fatalf("HumanPrincipal after Close error=%v want ErrClosed", err)
+	}
+}
+
+func TestHomeCloseConcurrentCompletionAndUnpublish(t *testing.T) {
+	h := openTestHome(t)
+	const callers = 12
+	var wg sync.WaitGroup
+	errs := make(chan error, callers)
+	for range callers {
+		wg.Add(1)
+		go func() { defer wg.Done(); errs <- h.Close() }()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent Close: %v", err)
+		}
+	}
+	if _, err := h.Admit(context.Background(), actor.KindHuman, "late"); !errors.Is(err, platform.ErrClosed) {
+		t.Fatalf("Admit after Close = %v", err)
+	}
+	if err := h.Remove(context.Background(), "late"); !errors.Is(err, platform.ErrClosed) {
+		t.Fatalf("Remove after Close = %v", err)
+	}
+	if err := h.Restart(context.Background(), "late"); !errors.Is(err, platform.ErrClosed) {
+		t.Fatalf("Restart after Close = %v", err)
+	}
+	wake, unsubscribe := h.Subscribe()
+	unsubscribe()
+	select {
+	case _, ok := <-wake:
+		if ok {
+			t.Fatal("Subscribe after Close returned open wake")
+		}
+	default:
+		t.Fatal("Subscribe after Close did not return an already-closed wake")
 	}
 }
 

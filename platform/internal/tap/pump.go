@@ -2,7 +2,11 @@ package tap
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -32,35 +36,51 @@ type Pump struct {
 	cancelSub func()
 	wake      <-chan struct{}
 	done      chan struct{}
-	stop      chan struct{}
+	ctx       context.Context
+	cancel    context.CancelFunc
+	closeOnce sync.Once
+	closeDone chan struct{}
+	leaked    atomic.Int64
+
+	// handleMu/handleSealed fence handle invocation against Close's bounded
+	// abandon (公理 7 通用款的 per-component instance): a ctx check alone
+	// leaves a check→call window — the drain goroutine can pass the check,
+	// park, and only resume after Close has abandoned and returned. The seal
+	// and the call share one critical section, and the abandon path seals
+	// BEFORE returning (blocking at most one strictly non-blocking handle),
+	// so "Close 返回后 handle=0" holds absolutely, not probabilistically.
+	handleMu     sync.Mutex
+	handleSealed bool
 }
 
-// NewPump builds a pump that reads rows with seq > from, advancing past each row
+// errPumpSealed stops drain at the current row when Close has abandoned the
+// pump — same control flow as a handle gating the cursor (neither advances).
+var errPumpSealed = errors.New("tap: pump sealed by bounded close")
+
+// OpenPump builds and starts a pump that reads rows with seq > from, advancing past each row
 // handle accepts. logger surfaces read faults (a failed ReadAfterSeq is the only
 // fault the pump itself can hit); nil → discard. The pump does not start until
 // Start is called.
-func NewPump(sig *Signal, reader storespec.MessageQuery, from int64,
+func OpenPump(sig *Signal, reader storespec.MessageQuery, from int64,
 	handle func(storespec.StoredRow) error, logger *slog.Logger) *Pump {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	return &Pump{
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &Pump{
 		sig:    sig,
 		reader: reader,
 		handle: handle,
 		logger: logger,
-		cursor: from,
-		done:   make(chan struct{}),
-		stop:   make(chan struct{}),
+		cursor:    from,
+		done:      make(chan struct{}),
+		closeDone: make(chan struct{}),
+		ctx:       ctx,
+		cancel:    cancel,
 	}
-}
-
-// Start subscribes to the signal and launches the pump loop. It runs one initial
-// drain (so rows committed between the from cursor and subscription are not
-// missed) then blocks on wakes.
-func (p *Pump) Start() {
 	p.wake, p.cancelSub = p.sig.Subscribe()
 	go p.run()
+	return p
 }
 
 func (p *Pump) run() {
@@ -69,7 +89,7 @@ func (p *Pump) run() {
 	p.drain()
 	for {
 		select {
-		case <-p.stop:
+		case <-p.ctx.Done():
 			return
 		case <-p.wake:
 			p.drain()
@@ -81,23 +101,30 @@ func (p *Pump) run() {
 // handle gates the cursor. A read fault leaves the cursor put — the next wake
 // retries from the same position.
 func (p *Pump) drain() {
-	ctx := context.Background()
 	for {
 		select {
-		case <-p.stop:
+		case <-p.ctx.Done():
 			return
 		default:
 		}
-		rows, err := p.reader.ReadAfterSeq(ctx, p.cursor, readBatch)
+		rows, err := p.reader.ReadAfterSeq(p.ctx, p.cursor, readBatch)
 		if err != nil {
 			p.logger.Error("tap.pump.read_failed", "cursor", p.cursor, "err", err)
+			return
+		}
+		// Re-check ctx AFTER the read returns: a reader that ignores ctx can park
+		// past Close's bounded abandon and hand rows back to a goroutine the owner
+		// already gave up on — those rows must never reach handle (the abandoned
+		// pump's silence promise: Home tears down cells/stores right after the
+		// abandon, and a late handle call would touch them).
+		if p.ctx.Err() != nil {
 			return
 		}
 		if len(rows) == 0 {
 			return
 		}
 		for _, row := range rows {
-			if err := p.handle(row); err != nil {
+			if err := p.guardedHandle(row); err != nil {
 				// Cursor gated at this row: stop here, retry on next wake. This IS
 				// the at-least-once delivery contract's physical implementation
 				// (the same skeleton as a Kafka consumer offset / WAL apply
@@ -118,11 +145,54 @@ func (p *Pump) drain() {
 	}
 }
 
+// guardedHandle invokes handle under the admission fence: sealed → the row is
+// refused (errPumpSealed, cursor stays put, drain stops). The fast-path ctx
+// checks in drain remain, but only this critical section is the proof.
+func (p *Pump) guardedHandle(row storespec.StoredRow) error {
+	p.handleMu.Lock()
+	defer p.handleMu.Unlock()
+	if p.handleSealed {
+		return errPumpSealed
+	}
+	return p.handle(row)
+}
+
 // Close stops the pump loop and unsubscribes from the signal.
 func (p *Pump) Close() {
-	close(p.stop)
-	if p.cancelSub != nil {
-		p.cancelSub()
-	}
-	<-p.done
+	p.closeWithin(5 * time.Second)
 }
+
+func (p *Pump) closeWithin(timeout time.Duration) {
+	p.closeOnce.Do(func() {
+		// Completion semantics (公理 3, per-component): closeDone is closed by
+		// defer so it survives a teardown panic — a later Close never returns
+		// before the one real teardown has fully converged (or panicked out),
+		// decoupling "done" from Once's own burnt flag.
+		defer close(p.closeDone)
+		p.cancel()
+		if p.cancelSub != nil {
+			p.cancelSub()
+		}
+		select {
+		case <-p.done:
+		case <-time.After(timeout):
+			// Seal the handle fence BEFORE returning: the leaked goroutine may
+			// still be parked anywhere (even past a ctx check), but it can never
+			// again enter handle. Taking the mutex waits out at most one
+			// in-flight strictly non-blocking handle call — bounded.
+			p.handleMu.Lock()
+			p.handleSealed = true
+			p.handleMu.Unlock()
+			// Bounded abandon proof: the pump can only read and invoke the strictly
+			// non-blocking delivery handle (write path); the fence above makes the
+			// write path unreachable after this return, and the pump has no
+			// actor/goroutine production capability.
+			p.leaked.Add(1)
+			p.logger.Error("tap.pump.join_timeout", "timeout", timeout,
+				"safety", "reader/handle cannot produce actors; writes remain cursor-gated")
+		}
+	})
+	<-p.closeDone // 后到者一律等 closeDone (公理 3)
+}
+
+func (p *Pump) Leaked() int64 { return p.leaked.Load() }
