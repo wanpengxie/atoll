@@ -2,9 +2,44 @@ package subjectgate
 
 import (
 	"encoding/json"
+	"reflect"
 	"strings"
 	"testing"
 )
+
+// TestFrameCarriesNoIdentity (DoD-7 帧不携身份锚, 表⑤法度墙): the wire envelope and
+// every upstream payload carry NO sender/identity/principal field. A subject's
+// identity is bound at the authenticated connection (the槽/cell's own from-log
+// authorization), never asserted by the client in a frame — so a client can never
+// forge who it is. This is a structural regression guard: adding a sender-shaped
+// field to any frame type must fail here.
+func TestFrameCarriesNoIdentity(t *testing.T) {
+	forbidden := []string{"sender", "identity", "principal", "actor_id", "actorid", "from", "author", "on_behalf", "impersonat"}
+	types := []reflect.Type{
+		reflect.TypeOf(Frame{}),
+		reflect.TypeOf(AttachPayload{}),
+		reflect.TypeOf(DetachPayload{}),
+		reflect.TypeOf(SubmitPayload{}),
+		reflect.TypeOf(ResolvePayload{}),
+		reflect.TypeOf(CancelPayload{}),
+		reflect.TypeOf(AfterPayload{}),
+		reflect.TypeOf(CancelTimerPayload{}),
+		reflect.TypeOf(ResourcePayload{}),
+	}
+	for _, ty := range types {
+		for i := 0; i < ty.NumField(); i++ {
+			f := ty.Field(i)
+			tag := strings.ToLower(f.Tag.Get("json"))
+			name := strings.ToLower(f.Name)
+			for _, bad := range forbidden {
+				if strings.Contains(tag, bad) || strings.Contains(name, bad) {
+					t.Fatalf("%s.%s (json=%q) looks like an identity field — frames must NOT carry sender identity (帧不携身份, DoD-7)",
+						ty.Name(), f.Name, f.Tag.Get("json"))
+				}
+			}
+		}
+	}
+}
 
 // TestFrameRoundTrip round-trips every frame type through Marshal/ParseFrame,
 // asserts the version bit rides, and that an unknown frame_type is refused.

@@ -1,8 +1,10 @@
 package gateway
 
 import (
+	"context"
 	"testing"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -84,6 +86,40 @@ func TestGatewayCloseSealsArms(t *testing.T) {
 	}
 	if !e.arm.isSealed() {
 		t.Fatal("Close must seal every live arm (关站序)")
+	}
+}
+
+// TestGatewayCloseOrder (DoD-9 gateway全序断言): 关站期帧得 closed 不 panic. After
+// Close has sealed the arms, a business frame driven upstream through a member
+// session bound to that arm must return a sealed (stale_binding) error frame —
+// gracefully closed, never a panic — because the共享世代 admission gate refuses
+// every business frame on a sealed arm (gateway 先静默 before Home).
+func TestGatewayCloseOrder(t *testing.T) {
+	g := New(Config{})
+	subj := actor.ActorID("user:erin")
+	e := g.ensureEntry(nil, channel.ID("c"), subj, nil)
+	// A member session bound to this subject's arm (the arm is what Close seals).
+	s := &Session{gw: g, subjectID: subj, isMember: true, arm: e.arm}
+	g.addDevice(e, s)
+
+	if err := g.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	// Drive a business frame after the关站: it must return a sealed error, not panic.
+	f, _ := platform.NewFrame(platform.FrameSubmit, s.BindingGen(), "ref-late", platform.SubmitPayload{
+		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: []byte(`{}`),
+	})
+	got := s.Upstream(context.Background(), f)
+	if got.Type != platform.FrameError {
+		t.Fatalf("frame after Close should be an error frame, got %q", got.Type)
+	}
+	var p platform.ErrorPayload
+	if err := got.DecodePayload(&p); err != nil {
+		t.Fatalf("decode error payload: %v", err)
+	}
+	if p.Code != platform.CodeStaleBinding {
+		t.Fatalf("frame after Close should be stale_binding (sealed), got %q", p.Code)
 	}
 }
 

@@ -152,6 +152,40 @@ func TestInterpretCancelSenderGate(t *testing.T) {
 	}
 }
 
+// TestCancelOwnRequestAcrossIncarnation (DoD-3, the cancel-authority half of the
+// two-author-authority split): cancel authority系于 identity, NOT per-life state.
+// The request being cancelled was authored in a PRIOR life — this fresh
+// incarnation (a bare fakeSys with zero call-ledger memory of it) never Recv'd or
+// sent it in-process. It is recovered purely from the durable log (FindByID), and
+// the sender-identity gate (req.Sender.ID == self) grants the cancel. The terminal
+// failed response lands, closing the request — no per-life ledger was consulted.
+// (Paired sibling of TestRespondEnvelopeAcrossIncarnation, which covers the
+// respond-authority half at the engine level.)
+func TestCancelOwnRequestAcrossIncarnation(t *testing.T) {
+	// Request authored by human:alice in a life this incarnation has no memory of.
+	priorLifeReq := &message.Envelope{
+		ID:       "r-priorlife",
+		Sender:   message.Sender{ID: "human:alice"},
+		Audience: message.Audience{"tool:kimi"},
+	}
+	// Fresh incarnation: no call ledger, no serve ledger — authority is log-derived only.
+	fs := &fakeSys{self: "human:alice", respondID: "resp-x"}
+	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
+	f, _ := subjectgate.NewFrame(subjectgate.FrameCancel, 0, "ref-c", subjectgate.CancelPayload{ReqID: "r-priorlife"})
+
+	got := interpretFrame(fs, slot, newDeps("human:alice", priorLifeReq, true), f)
+	if got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("cross-incarnation cancel of own request should receipt: %s", decodeErr(t, got).Code)
+	}
+	// The terminal response addressed the recovered request — truth closed from the log.
+	if fs.respondReq == nil || fs.respondReq.ID != "r-priorlife" {
+		t.Fatalf("cancel must respond to the log-recovered request, got %+v", fs.respondReq)
+	}
+	if fs.respondSpec.Status != message.StatusFailed {
+		t.Fatalf("cancel must map to failed terminal, got %q", fs.respondSpec.Status)
+	}
+}
+
 func TestInterpretUnexpectedFrame(t *testing.T) {
 	fs := &fakeSys{self: "human:alice"}
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
