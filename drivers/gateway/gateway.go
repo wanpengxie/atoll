@@ -174,18 +174,16 @@ func (g *Gateway) onRevoked(ch channel.ID, subject actor.ActorID) {
 	}
 }
 
-// ensureArm gets-or-creates the subject's user件 AND its (channel) 频道臂 under the
-// gateway lock. The entry pre-exists in the map so a later attach for the same
-// subject (multi-tab / another channel) reuses it (device aggregation) rather than
-// minting a rival件; the arm is keyed by channel so distinct channels never share a
-// binding世代 (跨频道 arm 串线 fix, P0-1). Refuses after Close (P0-4 straddle: taken
-// under the same lock Close sets closed).
-func (g *Gateway) ensureArm(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot) (*userEntry, *channelArm, error) {
-	g.mu.Lock()
-	defer g.mu.Unlock()
-	if g.closed {
-		return nil, nil, ErrGatewayClosed
-	}
+// ensureArmLocked gets-or-creates the subject's user件 AND its (channel) 频道臂; the
+// caller holds g.mu and has verified !g.closed. The entry pre-exists in the map so a
+// later attach for the same subject (multi-tab / another channel) reuses it (device
+// aggregation) rather than minting a rival件; the arm is keyed by channel so distinct
+// channels never share a binding世代 (跨频道 arm 串线 fix, P0-1). Returns the GRANTED
+// binding gen: a freshly-built arm advances its gen once (a new binding); an
+// already-live arm hands back its current gen UNCHANGED — a second device joining a
+// live arm shares the binding, never推进 it, so it can never stale a co-arm tab
+// (多设备同时合法, §5.6 恢复差异).
+func (g *Gateway) ensureArmLocked(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot) (*userEntry, *channelArm, int64) {
 	e := g.entries[subjectID]
 	if e == nil {
 		e = &userEntry{
@@ -202,8 +200,59 @@ func (g *Gateway) ensureArm(home *platform.Home, chID channel.ID, subjectID acto
 		arm.leaked = &g.leaked
 		arm.leakMu = &g.leakMu
 		e.arms[chID] = arm
+		return e, arm, arm.nextGen() // fresh binding: advance once
 	}
+	return e, arm, arm.currentGen() // join a live binding: share the gen
+}
+
+// ensureArm is the locked test seam over ensureArmLocked (refuses after Close, P0-4
+// straddle). Production attach goes through seatMember (which fuses the closed gate
+// with device seating).
+func (g *Gateway) ensureArm(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot) (*userEntry, *channelArm, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return nil, nil, ErrGatewayClosed
+	}
+	e, arm, _ := g.ensureArmLocked(home, chID, subjectID, slot)
 	return e, arm, nil
+}
+
+// seatMember is the member attach's single critical section (P0-4 straddle closure):
+// the closed gate, arm ensure + gen grant, AND device seating (末入 online publish)
+// all land under ONE g.mu hold, so a concurrent Close can never straddle between the
+// closed check and the device landing — it either wins the lock (closed → refuse, zero
+// residual) or seats fully and Close then seals the arm it can see. Returns the granted
+// binding gen. On refusal nothing is written (no half-open entry, no orphan device).
+func (g *Gateway) seatMember(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot, s *Session) (int64, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return 0, ErrGatewayClosed
+	}
+	e, arm, gen := g.ensureArmLocked(home, chID, subjectID, slot)
+	s.entry = e
+	s.arm = arm
+	g.addDeviceLocked(e, s)
+	return gen, nil
+}
+
+// beginFeed admits the read pump under the gateway lock's closed re-check (P0-4
+// straddle other half): a member's arm join-track (wg.Add) is taken HERE, in the SAME
+// critical section that reads closed, so Close's seal either observes the track (and
+// its wg.Wait joins the pump) or has already set closed (and the pump is refused). A
+// tail-only pump has no arm to track but is still refused after closed so it never
+// reads a closing Home. Returns false → the caller tears the session down.
+func (g *Gateway) beginFeed(s *Session) bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.closed {
+		return false
+	}
+	if s.arm != nil {
+		s.arm.track()
+	}
+	return true
 }
 
 // dropArm removes a sealed (channel) arm from the subject's entry IFF it is still the
@@ -225,6 +274,12 @@ func (g *Gateway) dropArm(subjectID actor.ActorID, chID channel.ID, arm *channel
 func (g *Gateway) addDevice(e *userEntry, s *Session) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
+	g.addDeviceLocked(e, s)
+}
+
+// addDeviceLocked seats one device (caller holds g.mu). Fused into seatMember's
+// critical section so device landing is atomic with the closed gate.
+func (g *Gateway) addDeviceLocked(e *userEntry, s *Session) {
 	first := len(e.devices) == 0
 	e.devices[s] = struct{}{}
 	if first && e.slot != nil {

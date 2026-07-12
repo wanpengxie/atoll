@@ -37,6 +37,12 @@ type Session struct {
 	slot  *platform.SubjectSlot // nil for tail-only
 	lane  *lane
 
+	// grantedGen is the绑定世代 this session was granted at attach (the arm's gen at
+	// the moment it seated). It is the session's OWN stamp — read by BindingGen — so a
+	// later device joining the SAME live arm shares it and a rebind on a NEW arm never
+	// retro-stales this session's frames (多设备互杀 fix). 0 for tail-only.
+	grantedGen int64
+
 	ctx    context.Context
 	cancel context.CancelFunc
 
@@ -46,10 +52,10 @@ type Session struct {
 // Attach opens a session for one authenticated connection (the connector calls it
 // after the app membrane resolved session→principal + channel ACL). principal
 // resolves to the subject; found → member (slot + presence + write); not found →
-// tail-only observer. It ensures the slot (装配链 step②, before the cell ever races
-// it — though the always-on cell already ensured its own, EnsureSubjectSlot is
-// idempotent), advances the绑定世代, seats the device (首入 → online), and starts the
-// read pump. Returns the session + the granted binding_gen for the attach receipt.
+// tail-only observer. It looks the slot up (装配链 step③ — ensure is户籍准入's job),
+// grants the绑定世代 (a fresh arm advances it once; a device joining a live arm shares
+// it), and seats the device (首入 → online) — all under seatMember's single closed-gated
+// critical section. Returns the session + the granted binding_gen for the attach receipt.
 func (g *Gateway) Attach(ctx context.Context, home *platform.Home, chID channel.ID, principal string, since map[channel.ID]int64) (*Session, int64, error) {
 	subjectID, found, err := home.ResolvePrincipal(ctx, actor.KindHuman, principal)
 	if err != nil {
@@ -75,15 +81,16 @@ func (g *Gateway) Attach(ctx context.Context, home *platform.Home, chID channel.
 		s.isMember = true
 		s.subjectID = subjectID
 		s.slot = slot
-		entry, arm, aerr := g.ensureArm(home, chID, subjectID, slot)
+		// seatMember fuses the closed gate, arm+gen grant, and device seating under one
+		// g.mu hold (P0-4 straddle closure): either a fully-seated session with a granted
+		// gen, or ErrGatewayClosed with zero residual.
+		gen, aerr := g.seatMember(home, chID, subjectID, slot, s)
 		if aerr != nil {
 			return nil, 0, aerr
 		}
-		s.entry = entry
-		s.arm = arm
-		bindingGen = s.arm.nextGen()
+		s.grantedGen = gen
+		bindingGen = gen
 		s.ctx, s.cancel = context.WithCancel(s.arm.context())
-		g.addDevice(s.entry, s)
 	} else {
 		// tail-only observer: its own lifecycle (no arm seal — revocation of a bare
 		// observer is deferred, see build-spec申报; the read pump's per-batch recheck
@@ -95,11 +102,14 @@ func (g *Gateway) Attach(ctx context.Context, home *platform.Home, chID channel.
 
 // StartFeed launches the read pump. The connector calls it AFTER sending the
 // attach receipt so the receipt is not interleaved behind backfill on a cold
-// channel. The arm join-track is taken HERE (paired with runFeed's untrack), so a
-// seal never blocks on a pump that was counted but never launched.
+// channel. The arm join-track is taken inside beginFeed (under the same closed
+// re-check as Close), paired with runFeed's untrack, so a seal never blocks on a
+// pump that was counted but never launched — and a pump arriving after Close is
+// refused rather than left reading a closing Home (P0-4 straddle other half).
 func (s *Session) StartFeed() {
-	if s.arm != nil {
-		s.arm.track()
+	if !s.gw.beginFeed(s) {
+		s.Close() // gateway closing — refuse the late pump, unwind the connector
+		return
 	}
 	go s.runFeed()
 }
@@ -127,13 +137,15 @@ func (s *Session) Done() <-chan struct{} { return s.lane.closed }
 // IsMember reports whether this session may drive business frames.
 func (s *Session) IsMember() bool { return s.isMember }
 
-// BindingGen returns the current层2 binding generation (0 for tail-only). It reads
-// through the arm's locked accessor (P0-9: never a raw a.gen read).
+// BindingGen returns the层2 binding generation this session was GRANTED at attach
+// (0 for tail-only). It is the session's own stamp, NOT a live read of the arm's
+// current gen: a device joining a live arm shares the arm's gen at seat time, and a
+// rebind establishes a NEW arm — so returning the granted gen is what lets multiple
+// devices on one binding all stay valid (多设备互杀 fix), while a truly stale frame
+// (from a superseded binding on a re-minted arm) is refused by the arm's own seal /
+// gen gate in admitUpstream.
 func (s *Session) BindingGen() int64 {
-	if s.arm == nil {
-		return 0
-	}
-	return s.arm.currentGen()
+	return s.grantedGen
 }
 
 // Close tears the session down: cancel its pump, close the lane (stops the

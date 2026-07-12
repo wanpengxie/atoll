@@ -966,6 +966,17 @@ func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, inc actorr
 	}
 	if !ok2 || !rec2.IsActive() {
 		h.channel.Cells().Despawn(inc)
+		// 死 ID 槽级联清 (gateway 期 P1, mirror remove.go §级联删槽): factoryFor embodies a
+		// human by EnsureSubjectSlot BEFORE this build (装配链 step②). A stale-rec 补臂/
+		// EnsureLive whose Lookup predated a concurrent Home.Remove can therefore RE-create
+		// the binding slot AFTER Remove's RemoveSubjectSlot ran — resurrecting a dead id's
+		// slot. Despawn alone (above)只 evicts the cell, not the slot, so close the笔 here
+		// with the SAME idempotent cascade Remove uses (id is confirmed dead — 身份不可复活
+		// mints a fresh id on any re-Admit, so this only ever targets THIS dead id, never a
+		// live successor). A no-op for a non-human (no slot was ever ensured) and when
+		// Remove already cleaned it.
+		h.RemoveSubjectSlot(id)
+		h.presenceFold.Forget(id)
 		return storespec.Record{}, recheckGone, nil
 	}
 	return rec2, recheckOK, nil

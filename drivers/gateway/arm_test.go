@@ -120,43 +120,8 @@ func TestArmSealJoinBudgetOrdering(t *testing.T) {
 	}
 }
 
-// TestArmSealJoinRacesSlowPump (§2 pair A×L, real interleave not a constant): a slow
-// pump (modelling a device whose写 stalls) dies at its own write-timeout STRICTLY
-// before the seal join budget — so seal joins it cleanly with ZERO leak. The two
-// durations are in the production ratio (lane死 < join budget) but scaled tiny; if
-// the ordering ever inverted, the pump would outlive the budget and this would
-// observe a leak. Real timers, real join — the lane先死 seal后完 ordering is proven,
-// not asserted as a constant.
-func TestArmSealJoinRacesSlowPump(t *testing.T) {
-	var leaked int64
-	var mu sync.Mutex
-	a := newChannelArm(nil, "chan", "subj", nil)
-	a.leaked = &leaked
-	a.leakMu = &mu
-	const laneDeath = 30 * time.Millisecond
-	a.joinTimeout = 10 * laneDeath // join budget strictly > lane death (法条 F ratio)
-
-	a.track()
-	go func() {
-		defer a.untrack()
-		// A slow writer: it ignores the seal ctx and only stops when its own write
-		// deadline (laneDeath) elapses — the lane dying is what frees it.
-		timer := time.NewTimer(laneDeath)
-		defer timer.Stop()
-		<-timer.C
-	}()
-
-	start := time.Now()
-	a.seal() // joins; the pump dies at laneDeath, well within the budget
-	elapsed := time.Since(start)
-
-	if elapsed >= a.joinTimeout {
-		t.Fatalf("seal should have joined at lane-death (~%v), not waited the budget (%v)", laneDeath, a.joinTimeout)
-	}
-	mu.Lock()
-	got := leaked
-	mu.Unlock()
-	if got != 0 {
-		t.Fatalf("lane死 before the join budget → seal joins cleanly, want 0 leak, got %d", got)
-	}
-}
+// The A×L "slow writer × seal" interleave is proven by the REAL feed-pump path in
+// TestSealJoinIsolatesStuckWriter (attach_integration_test.go): a genuinely stuck,
+// never-draining consumer + the real runFeed pump over a real Home, asserting 满→断连
+// tears the pump down and seal joins it in budget without waiting for the writer. The
+// former timer-goroutine stand-in here modelled nothing load-bearing and was removed.

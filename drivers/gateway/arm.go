@@ -58,8 +58,14 @@ func newChannelArm(home *platform.Home, chID channel.ID, subjectID actor.ActorID
 	}
 }
 
-// nextGen advances the绑定世代 (a fresh attach establishes a new binding) and, for
-// a member arm, writes it into the slot's layer-2 register. Returns the new gen.
+// nextGen advances the绑定世代 and, for a member arm, writes it into the slot's
+// layer-2 register. Returns the new gen. 世代属于"绑定"(臂的一次生命)非"设备"
+// (§5.6 恢复差异): it advances ONCE, when the arm is FIRST built (a fresh binding)
+// — a later device joining an already-live arm reuses the current gen (ensureArmLocked
+// hands it currentGen, never a fresh nextGen), so a second tab never staled the first
+// (多设备同时合法 fix). A seal drops the arm; the next attach mints a NEW arm whose
+// own nextGen starts its fresh binding — the old (sealed) arm refuses every gen, so
+// cross-arm gen values never need to be comparable.
 func (a *channelArm) nextGen() int64 {
 	a.mu.Lock()
 	a.gen++
@@ -112,6 +118,18 @@ func (a *channelArm) admitUpstream(bindingGen int64) (ok, sealed bool) {
 func (a *channelArm) context() context.Context { return a.ctx }
 
 // track registers one read pump on the arm's join set.
+//
+// Seal-join 账的边界 (§5.5 join 上界, ledger A×L): the join set covers ONLY the
+// feed pump (runFeed) — the single goroutine that references arm/Home resources
+// (arm ctx, home.Subscribe, View().ReadAfterSeq, the lane cursor). The connector's
+// ws writer goroutine (connector/web writerPump) is deliberately NOT tracked: it
+// touches only the lane buffer + the wire, never arm or Home state, so lane closure
+// isolates it completely — when runFeed exits (seal cancels the arm ctx, or a full
+// lane tears it down) its deferred lane.close() unblocks the writer, and a writer
+// stuck on a slow/dead peer dies independently at its own LaneWriteTimeoutMs deadline,
+// which 法条 F pins STRICTLY < ArmSealJoinTimeout. So a stuck writer can never drag
+// out a seal: seal joins the pump (which stops the moment the lane fills or the ctx
+// cancels) and returns within budget while the doomed writer unwinds on its own clock.
 func (a *channelArm) track()   { a.wg.Add(1) }
 func (a *channelArm) untrack() { a.wg.Done() }
 
