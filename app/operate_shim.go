@@ -18,20 +18,41 @@ import (
 // operate_shim.go is the HTTP垫片 half of NP-1=c: the four channel-control HTTP
 // endpoints (introduce / remove / restart / set_default_agent) do NOT call the
 // executor / Home face directly — they replay the SESSION USER as a channel member
-// submitting a control request (audience=[system]) through the SAME in-gate door a
-// message frame will use, then bounded-wait for the door's terminal reply. The pen
-// welds user:X, so the whole action (request + terminal) lands in the log, is
-// replayable, and the permission verdict has ONE authority (the gate). This is not
-// a bypass — it is "the subject speaking" over a transitional outermost transport;
-// it retires with the H2/H3 frame族. 红线11: no channel-internal control ability
-// may exist on an HTTP-only private path — the shim only "walks the user through
-// the door", it grows no logic outside it.
+// submitting a control request (audience=[system]) through the SAME subjectgate
+// frame path a ws message frame uses (a submit frame delivered onto the subject's
+// own cell through its slot), then bounded-wait for the door's terminal reply. The
+// cell's own welded pen stamps user:X, so the whole action (request + terminal)
+// lands in the log, is replayable, and the permission verdict has ONE authority
+// (the gate). This is not a bypass — it is "the subject speaking" over a
+// transitional outermost transport; it retires with the H2/H3 frame族. 红线11: no
+// channel-internal control ability may exist on an HTTP-only private path — the
+// shim only "walks the user through the door", it grows no logic outside it.
 
 const defaultControlShimTimeout = 5 * time.Second
 
-// errShimChannelUnavailable is the getHome==nil sentinel (the channel's universe
-// is not open) → 503, distinct from a non-member rejection (→403).
+// errShimChannelUnavailable is the getHome==nil / no-slot sentinel (the channel's
+// universe is not open) → 503, distinct from a non-member rejection (→403).
 var errShimChannelUnavailable = errors.New("app: channel home not open")
+
+// errShimNotMember is the non-member rejection (膜律: 严禁 Admit 兜底 — the UI引导
+// "先加入频道") → 403. The session user resolved no active subject in this channel.
+var errShimNotMember = errors.New("app: not an active channel member")
+
+// errShimCellUnavailable is the honest transient: the subject IS a member but its
+// cell is not currently drivable (the supply ring's re-mint window / a torn-down
+// slot). Retryable → 503, never a 500.
+var errShimCellUnavailable = errors.New("app: subject cell unavailable — retry")
+
+// shimFrameError carries a subjectgate submit error frame's flat code + detail
+// (表①) up to the HTTP mapping. It surfaces only when the submit itself is
+// refused before any terminal (a write reject, or a transient) — the door's own
+// terminal failures ride the doorReceipt path instead.
+type shimFrameError struct {
+	code   string
+	detail string
+}
+
+func (e *shimFrameError) Error() string { return "app: submit rejected: " + e.code + " (" + e.detail + ")" }
 
 // doorReceipt is the parsed outcome of one control-shim submit: either the door's
 // terminal reply (settled), or a timeout (settled=false → 202+request_id).
@@ -44,37 +65,52 @@ type doorReceipt struct {
 	detail    string         // failed: detail
 }
 
-// submitControlThroughDoor is the shared shim path. Non-member session user →
-// platform.ErrNotMember (膜律: 严禁 Admit 兜底 — the UI引导 "先加入频道"). It subscribes
-// the commit Signal BEFORE Submit (so the terminal's wake is never missed), then
-// polls the log by request-id (the existing tap fan-out — no new correlator) until
-// the door's terminal for this request appears or the bounded wait elapses.
+// submitControlThroughDoor is the shared shim path. It resolves the session
+// user's principal to the subject's active actor id (a non-member →
+// errShimNotMember; the shim never admits — that would be the humanFor 膜旁路
+// reincarnated), subscribes the commit Signal BEFORE the submit (so the
+// terminal's wake is never missed), delivers a submit frame onto the subject's
+// own cell through its slot, then polls the log by request-id (the existing tap
+// fan-out — no new correlator) until the door's terminal for this request
+// appears or the bounded wait elapses.
 func (a *App) submitControlThroughDoor(ctx context.Context, chID, userID, msgType string, payload json.RawMessage) (*doorReceipt, error) {
 	home := a.getHome(channel.ID(chID))
 	if home == nil {
 		return nil, errShimChannelUnavailable
 	}
-	// 户籍校验 lives in the door (Home.Human): a non-member gets ErrNotMember. The
-	// shim never admits — that would be the humanFor 膜旁路 reincarnated.
-	handle, err := home.HumanPrincipal(ctx, userID)
+	subjectID, found, err := home.ResolvePrincipal(ctx, actor.KindHuman, userID)
 	if err != nil {
 		return nil, err
 	}
+	if !found {
+		return nil, errShimNotMember
+	}
+	slot := home.EnsureSubjectSlot(subjectID)
+	if slot == nil {
+		return nil, errShimChannelUnavailable
+	}
 	wake, unsub := home.Subscribe()
 	defer unsub()
-	// Explicit deadline (期12 v0.4): in the reaper world an undeclared
-	// deadline only gets the harness's 24h default — a control request that
-	// nobody serves would sit open a day. Align with the ws write path's TTL.
-	exp := time.Now().UnixMilli() + clientRequestTTLMs
-	reqID, seq, err := handle.Submit(ctx, platform.SubmitSpec{
-		Type:      msgType,
-		Kind:      message.KindRequest,
-		Audience:  []actor.ActorID{actor.SystemActorID},
-		Payload:   payload,
-		ExpiresAt: &exp,
+	// The submit frame carries no expires_at (the wire contract omits it, gateway
+	// 期): the control request gets the harness's default TTL, the same as every
+	// ws-authored request now — the reaper closes it if no one serves it.
+	f, ferr := platform.NewFrame(platform.FrameSubmit, 0, "", platform.SubmitPayload{
+		MsgType:  msgType,
+		Kind:     string(message.KindRequest),
+		Audience: []string{string(actor.SystemActorID)},
+		Payload:  payload,
 	})
-	if err != nil {
-		return nil, err
+	if ferr != nil {
+		return nil, ferr
+	}
+	res, derr := slot.Deliver(f)
+	if derr != nil {
+		// ErrNoOccupant (cell mid-re-mint / torn down) → retryable unavailable.
+		return nil, errShimCellUnavailable
+	}
+	reqID, seq, rerr := parseSubmitReceipt(res.Frame)
+	if rerr != nil {
+		return nil, rerr
 	}
 	receipt := &doorReceipt{requestID: string(reqID)}
 	deadline := time.Now().Add(a.controlShimTimeout)
@@ -99,6 +135,28 @@ func (a *App) submitControlThroughDoor(ctx context.Context, chID, userID, msgTyp
 		case <-ctx.Done():
 			return receipt, nil
 		}
+	}
+}
+
+// parseSubmitReceipt reads a submit Deliver result: a receipt frame yields the
+// request id + write seq; an error frame becomes a *shimFrameError carrying its
+// flat code (表①). Any other frame type is an internal inconsistency.
+func parseSubmitReceipt(f platform.Frame) (message.ID, int64, error) {
+	switch f.Type {
+	case platform.FrameReceipt:
+		var r platform.SubmitReceipt
+		if err := f.DecodePayload(&r); err != nil {
+			return "", 0, err
+		}
+		return message.ID(r.MessageID), r.Seq, nil
+	case platform.FrameError:
+		var e platform.ErrorPayload
+		if err := f.DecodePayload(&e); err != nil {
+			return "", 0, err
+		}
+		return "", 0, &shimFrameError{code: e.Code, detail: e.Detail}
+	default:
+		return "", 0, errors.New("app: unexpected submit result frame " + string(f.Type))
 	}
 }
 
@@ -147,17 +205,26 @@ func fillReceipt(r *doorReceipt, env message.Envelope) {
 // handler's status + shape).
 func (a *App) finishControlShim(c *gin.Context, r *doorReceipt, err error, onSuccess func(map[string]any) (int, any)) {
 	if err != nil {
+		var fe *shimFrameError
 		switch {
-		case errors.Is(err, platform.ErrNotMember):
+		case errors.Is(err, errShimNotMember):
 			c.JSON(http.StatusForbidden, gin.H{"error": "not an active channel member"})
 		case errors.Is(err, errShimChannelUnavailable):
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel home not open"})
-		// 期12 v0.4 P1-5: a member whose cell is mid-re-mint, or a home in
-		// teardown, is a retryable 503 — not a 500.
-		case errors.Is(err, platform.ErrCellUnavailable):
+		// A member whose cell is mid-re-mint, or a home in teardown, is a
+		// retryable 503 — not a 500.
+		case errors.Is(err, errShimCellUnavailable):
 			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "subject cell unavailable — retry"})
-		case errors.Is(err, platform.ErrClosed):
-			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel home is closing"})
+		case errors.As(err, &fe):
+			// A submit error frame before any terminal (write reject / transient):
+			// unavailable is retryable, everything else is the write reject reason.
+			if fe.code == "unavailable" || fe.code == "closed" {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "subject cell unavailable — retry"})
+			} else if fe.code == "bad_payload" {
+				c.JSON(http.StatusBadRequest, gin.H{"error": fe.detail})
+			} else {
+				c.JSON(http.StatusUnprocessableEntity, gin.H{"error": fe.detail})
+			}
 		default:
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		}

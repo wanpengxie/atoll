@@ -43,8 +43,8 @@ type (
 )
 
 // The four channel-operate message types re-exported at the platform boundary so
-// the app's HTTP shims can Submit them through the door (Home.Human(u).Submit,
-// audience=[system]) WITHOUT importing platform/internal/sysactor. They are the
+// the app's HTTP shims can submit them through the subjectgate frame path
+// (audience=[system]) WITHOUT importing platform/internal/sysactor. They are the
 // door's wire vocabulary — the shim must speak the exact strings the gate
 // dispatches on, so a single home avoids drift (same posture as the contract
 // type re-exports above; white-list ⑤).
@@ -54,6 +54,12 @@ const (
 	TypeRestartActor    = sysactor.TypeRestartActor
 	TypeSetDefaultAgent = sysactor.TypeSetDefaultAgent
 )
+
+// ErrClosed is the refusal every mutating Home entry point (Admit / Remove /
+// Restart / subjectgate slot verbs) returns once Home.Close has begun. Checked
+// BEFORE any store read so a verb racing teardown never touches a closing
+// store. The app maps it to 503.
+var ErrClosed = errors.New("platform: channel home is closed")
 
 // HomeConfig configures the channel-home assembly.
 type HomeConfig struct {
@@ -131,7 +137,8 @@ type Home struct {
 
 	// (No per-user caller index (期12): a subject's own requests are closed
 	// by the substrate expiry reaper — 义务归位 D3; the subject drives its
-	// cell's caps through the OccupantDriver seam, see human.go.)
+	// own cell's caps through the subjectgate frame protocol → the cell's
+	// identity-dimension Sys verbs, see humancell.go.)
 
 	// onRevoke is HomeConfig.OnRevoke (the membership撤销 emit point) — fired by
 	// Remove after the dereg cascade so the gateway can seal the subject's频道臂.
@@ -219,13 +226,12 @@ type Home struct {
 	reconcileBuildHook func(actor.ActorID)
 
 	// closed is set true at the very START of Close (before any teardown step), the
-	// authoritative "this home is shutting down" flag every subjectgate verb entry
-	// checks. Close cannot JOIN the ws/垫片 goroutines that hold a HumanHandle (they
-	// live in the app layer, outside Home's teardown), so the flag is what stops a
-	// post-Close verb from touching a closing store: Human()/driverFor refuse from
-	// this instant on (期12: verbs hold no capability of their own — the residual
-	// in-flight write past the gate is fenced by the cell caps' own live membranes
-	// once cells stop). atomic (lock-free read on the hot Submit path).
+	// authoritative "this home is shutting down" flag every mutating entry point
+	// checks. Close cannot JOIN the gateway session goroutines in the app layer
+	// (outside Home's teardown), so the flag is what stops a post-Close Admit/
+	// Remove/Restart from touching a closing store; a residual in-flight subject
+	// write past the gate is fenced by the cell caps' own live membranes once
+	// cells stop. atomic (lock-free read on the hot path).
 	closed    atomic.Bool
 	state     atomic.Uint32
 	closeOnce sync.Once

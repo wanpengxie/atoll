@@ -427,7 +427,6 @@ func TestHomeStateTransitionsAndUnpublishIssuedHandles(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	issued := HumanHandle{home: h, userID: "issued-human"}
 	if err := h.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -441,9 +440,12 @@ func TestHomeStateTransitionsAndUnpublishIssuedHandles(t *testing.T) {
 	if !reflect.DeepEqual(gotStates, wantStates) {
 		t.Fatalf("states = %v, want %v", gotStates, wantStates)
 	}
-	if _, _, err := issued.Submit(context.Background(), SubmitSpec{}); !errors.Is(err, ErrClosed) {
-		t.Fatalf("issued handle Submit after Close = %v", err)
-	}
+	// The former "issued HumanHandle refuses after Close" assertion retired with
+	// the door (gateway 期 S5): a subject's post-Close write now fails at the cell
+	// caps' live membrane / a torn-down slot's ErrNoOccupant, and the mutating
+	// entry-point refusals below (Admit/Remove/Restart = ErrClosed) carry the
+	// unpublish 对账 for Home itself. Gateway close-order frame behaviour is
+	// covered in drivers/gateway (TestGatewayCloseSealsArms).
 	if got := h.KickDaemon("none"); got != 0 {
 		t.Fatalf("KickDaemon after Close = %d", got)
 	}

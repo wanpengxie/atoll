@@ -3,7 +3,6 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"sync"
 	"time"
 
@@ -29,6 +28,7 @@ type Session struct {
 	gw        *Gateway
 	home      *platform.Home
 	chID      channel.ID
+	principal string
 	subjectID actor.ActorID
 	isMember  bool
 
@@ -56,10 +56,11 @@ func (g *Gateway) Attach(ctx context.Context, home *platform.Home, chID channel.
 		return nil, 0, err
 	}
 	s := &Session{
-		gw:   g,
-		home: home,
-		chID: chID,
-		lane: newLane(newCursor(since)),
+		gw:        g,
+		home:      home,
+		chID:      chID,
+		principal: principal,
+		lane:      newLane(newCursor(since)),
 	}
 	var bindingGen int64
 	if found {
@@ -221,14 +222,15 @@ func (s *Session) readerStillValid() bool {
 	if s.arm != nil && s.arm.isSealed() {
 		return false
 	}
-	// Re-classify the subject through the door's own membership read: an active
-	// member → nil; a removed one → ErrNotMember (a lost revocation caught here).
-	// A transient/closing error keeps serving (never false-revoke on a store blip).
-	_, herr := s.home.Human(context.Background(), s.subjectID)
-	if herr == nil {
+	// Re-classify the subject through the principal membership read: an active
+	// principal still resolves (found → keep serving); a removed one no longer
+	// resolves (found=false → stop, a lost revocation caught here). A store error
+	// keeps serving (never false-revoke on a transient blip).
+	_, found, err := s.home.ResolvePrincipal(context.Background(), actor.KindHuman, s.principal)
+	if err != nil {
 		return true
 	}
-	return !errors.Is(herr, platform.ErrNotMember)
+	return found
 }
 
 // Upstream drives one parsed upstream frame onto the subject's own cell (through

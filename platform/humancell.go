@@ -482,3 +482,24 @@ func operationsOf(ops []string) []access.Operation {
 	}
 	return out
 }
+
+// isRequestOpen reports whether reqID is still an open request addressed to
+// receiver — the truth-derived open-status check the frame interpreter's
+// from-log five steps use ("仍 open"). A closed (terminal-answered) or unknown
+// request is not open. (Relocated here from the removed HumanHandle door — the
+// cell's own driver deps are its only consumer now.)
+func (h *Home) isRequestOpen(ctx context.Context, receiver actor.ActorID, reqID message.ID) (bool, error) {
+	if receiver == "" {
+		return false, nil
+	}
+	rows, err := h.cs.Query.OpenRequestsForActor(ctx, receiver)
+	if err != nil {
+		return false, err
+	}
+	for _, r := range rows {
+		if r.Envelope.ID == reqID {
+			return true, nil
+		}
+	}
+	return false, nil
+}

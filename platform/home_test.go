@@ -12,22 +12,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-func TestHumanPrincipalAfterCloseReturnsErrClosed(t *testing.T) {
-	h, err := platform.Open(platform.HomeConfig{
-		ChannelID: testChannelID,
-		DBPath:    filepath.Join(t.TempDir(), "closed-home.sqlite"),
-	})
-	if err != nil {
-		t.Fatalf("Open: %v", err)
-	}
-	if err := h.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-	if _, err := h.HumanPrincipal(context.Background(), "alice"); !errors.Is(err, platform.ErrClosed) {
-		t.Fatalf("HumanPrincipal after Close error=%v want ErrClosed", err)
-	}
-}
-
 func TestHomeCloseConcurrentCompletionAndUnpublish(t *testing.T) {
 	h := openTestHome(t)
 	const callers = 12

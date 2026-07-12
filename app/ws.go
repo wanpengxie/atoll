@@ -1,13 +1,11 @@
 package app
 
 import (
-	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -68,25 +66,6 @@ func (a *App) handleWS(c *gin.Context) {
 	// Hand off to the connector: it upgrades the ws and runs the gateway session
 	// cross. principal = the session's user id (the door resolves it to the subject).
 	a.wsGateway.ServeWeb(c.Writer, c.Request, home, chID, userID)
-}
-
-// wsSubmitErrCode maps a Submit error to the message frame's error code (期12 v0.4
-// P0-2 的honest arms). Retained until S5 folds the WriteRejectedError public form —
-// exposed to WSSubmitErrCodeForTest.
-func wsSubmitErrCode(err error) (code, detail string, internal bool) {
-	var wr *platform.WriteRejectedError
-	switch {
-	case errors.As(err, &wr):
-		return wr.Reason, wr.Detail, false
-	case errors.Is(err, platform.ErrNotMember):
-		return "not_member", "not a channel member", false
-	case errors.Is(err, platform.ErrCellUnavailable):
-		return "unavailable", "subject cell unavailable — retry", false
-	case errors.Is(err, platform.ErrClosed):
-		return "closed", "channel home is closed", false
-	default:
-		return "internal", "", true
-	}
 }
 
 // ---------------------------------------------------------------------------

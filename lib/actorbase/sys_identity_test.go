@@ -1,14 +1,56 @@
 package actorbase
 
 import (
+	"context"
 	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
+
+// recordingSchedule captures the ScheduleReq — the Bind-value assertion
+// (AfterIdentity=BindIdentity vs Sys.After=BindIncarnation) needs to see it.
+type recordingSchedule struct {
+	mu   sync.Mutex
+	reqs []schedule.ScheduleReq
+}
+
+func (r *recordingSchedule) Schedule(_ context.Context, req schedule.ScheduleReq) (schedule.TimerID, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reqs = append(r.reqs, req)
+	return schedule.TimerID("t-1"), nil
+}
+func (r *recordingSchedule) Cancel(_ context.Context, _ schedule.TimerID) error { return nil }
+
+// runningEngine marks the occupant Running with a live ctx — the whitebox
+// stand-in for Start() having completed (its lifeCtx-then-Store order is the
+// production happens-before edge; tests reproduce the end state).
+func runningEngine(t *testing.T, pen harness.Pen) *engine {
+	t.Helper()
+	e := &engine{
+		pen:      pen,
+		access:   fakeAccess{},
+		state:    fakeAccess{},
+		sched:    fakeSchedule{},
+		spawn:    fakeSpawn{},
+		clockFn:  time.Now,
+		queueCap: 8,
+	}
+	e.serve = newServeLedger(e.life, 8)
+	e.call = newCallLedger(e.life, e.pen, e.clockFn, Hooks{}, e.closureFault)
+	e.workQ = newWorkDeque(8)
+	e.rejectQ = make(chan *message.Envelope, 8)
+	e.rejectStop = make(chan struct{})
+	e.lifeCtx = context.Background()
+	e.occupant.Store(int32(occupantRunning))
+	return e
+}
 
 // TestRespondEnvelopeAcrossIncarnation: response authority系于 identity, not the
 // per-life serve projection (D1). A fresh incarnation that never Recv'd the

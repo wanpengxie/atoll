@@ -2,7 +2,6 @@ package app_test
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,8 +12,6 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/wanpengxie/atoll/app"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -581,26 +578,3 @@ func TestWS_AfterFrameNonMember(t *testing.T) {
 	}
 }
 
-// TestWSSubmitErrCode pins the message-frame error mapping (期12 修复批 P0-2 的直接
-// 测试): a killed cell is the retryable "unavailable", a closing home "closed" —
-// never "internal"; only a genuinely unknown error logs.
-func TestWSSubmitErrCode(t *testing.T) {
-	cases := []struct {
-		err      error
-		code     string
-		internal bool
-	}{
-		{platform.ErrCellUnavailable, "unavailable", false},
-		{platform.ErrClosed, "closed", false},
-		{platform.ErrNotMember, "not_member", false},
-		{&platform.WriteRejectedError{Reason: "write_denied", Detail: "d"}, "write_denied", false},
-		{fmt.Errorf("wrapped: %w", platform.ErrCellUnavailable), "unavailable", false},
-		{errors.New("boom"), "internal", true},
-	}
-	for _, tc := range cases {
-		code, _, internal := app.WSSubmitErrCodeForTest(tc.err)
-		if code != tc.code || internal != tc.internal {
-			t.Fatalf("wsSubmitErrCode(%v) = (%q, internal=%v), want (%q, %v)", tc.err, code, internal, tc.code, tc.internal)
-		}
-	}
-}

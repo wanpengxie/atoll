@@ -18,9 +18,11 @@ import (
 // and Home.View (live roster) — actors/ and platform/ must not carry it.
 //
 // The WRITE itself is NOT here: a person writes truth ONLY through the subjectgate
-// door's welded pen (Home.Human → HumanHandle.Submit), never through an app-held
-// write gate (sealed-pen: the app holds no Minter, no bare Pen). This file resolves
-// routing and hands the result to the door; the door welds identity and commits.
+// frame path onto their own cell's welded pen (a submit frame → the cell's
+// identity-dimension Sys verb), never through an app-held write gate (sealed-pen:
+// the app holds no Minter, no bare Pen). This file resolves routing and hands the
+// result to the gateway (via ResolveRoutingForGateway); the cell welds identity
+// and commits.
 
 // submitInput is the user's RAW intent (the parsed HTTP body) — NOT a ready
 // envelope. Routing resolution turns its (possibly empty) audience into a
@@ -43,10 +45,6 @@ type routingError struct {
 }
 
 func (e *routingError) Error() string { return e.detail }
-
-// clientRequestTTLMs is the default TTL for client-sent messages (product
-// decision, lives in the app layer).
-const clientRequestTTLMs int64 = 30_000
 
 // ResolveRoutingForGateway is the gateway 期 S3 injection adapter (design §5.3:
 // routing政策留 app, 组装根注入路由解析面). The gateway core (drivers/gateway) holds

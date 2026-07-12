@@ -1,7 +1,9 @@
 package actorbase
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -18,10 +20,63 @@ import (
 // human driver is only the first动词级 consumer — the same path closes agent's
 // latent cross-incarnation gap (answering a log-open request after a re-cast).
 //
-// Bodies mirror drive.go's Drive* verbs verbatim — same driveReady occupant
-// gate, WithoutCancel ctx (driveCtx), typed WriteRejected carrier, serve-ledger
-// close, BindIdentity timer. drive.go itself (the actorrt.OccupantDriver seam)
-// is torn out in S5; these Sys methods are its permanent home.
+// The gateway 期 S5 tore out the former actorrt.OccupantDriver seam (drive.go):
+// these Sys methods are the permanent home of that logic. The shared gate
+// helpers below (driveReady/driveCtx/driveWriteKindAllowed) and the typed
+// WriteRejected carrier moved here with them.
+
+// ErrOccupantNotReady is the engine-side occupant gate sentinel: an
+// identity-verb call landed before Start finished wiring lifeCtx (go-live
+// precedes impl.Start) or after Stop began draining. The subjectgate frame
+// interpreter maps it (with the live-membrane sentinels) to the retryable
+// unavailable code — actorbase cannot name a platform error itself.
+var ErrOccupantNotReady = errors.New("actorbase: occupant not running")
+
+// WriteRejected is the typed harness-reject carrier: Reason/Detail cross the
+// verb boundary typed so the subjectgate interpreter can surface the reason as
+// the flat error-frame code (裁决8) without parsing strings. It is an error
+// value, not a sentinel — match with errors.As.
+type WriteRejected struct {
+	Reason string
+	Detail string
+}
+
+func (w *WriteRejected) Error() string {
+	return fmt.Sprintf("actorbase: write rejected: %s (%s)", w.Reason, w.Detail)
+}
+
+// driveCtx is the ctx every identity verb runs under: the engine's lifeCtx with
+// its CANCELLATION detached (裁决 4 WithoutCancel). A verb call runs on the
+// caller's goroutine — the cell tearing down mid-call must not abort a write the
+// live membrane would still accept, and must never leak a raw "context
+// canceled" through the boundary (the membrane sentinels are the honest WHEN
+// verdict; ctx cancellation is the cell's own lifecycle). The occupant gate at
+// every entry guarantees lifeCtx is non-nil here.
+func (e *engine) driveCtx() context.Context {
+	return context.WithoutCancel(e.lifeCtx)
+}
+
+// driveReady is the occupant-ready gate every identity verb runs first:
+// actorrt's go-live (embodiments entry + live=true) precedes impl.Start, and
+// lifeCtx is only assigned inside Start — a verb call in that window would
+// pen.Write(nil)/WithoutCancel(nil) panic and race the lifeCtx write. The
+// atomic occupant load doubles as the happens-before edge for reading lifeCtx
+// (Start assigns lifeCtx BEFORE Store(occupantRunning)). Starting/Draining/Dead
+// all refuse.
+func (e *engine) driveReady() error {
+	if occupantState(e.occupant.Load()) != occupantRunning {
+		return ErrOccupantNotReady
+	}
+	return nil
+}
+
+// driveWriteKindAllowed pins SubmitEnvelope's kind whitelist: request/event
+// only. A response MUST go through RespondEnvelope (from-log five-step
+// authorization) — a subject hand-writing kind=response would forge closure
+// around that enforcement.
+func driveWriteKindAllowed(k message.Kind) bool {
+	return k == message.KindRequest || k == message.KindEvent
+}
 
 // SubmitEnvelope commits a full off-process-subject envelope. It receives a
 // SPEC, not a finished envelope: the engine builds and validates it (kind
