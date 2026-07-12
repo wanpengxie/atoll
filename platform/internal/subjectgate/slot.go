@@ -76,9 +76,18 @@ type Slot struct {
 // answers it exactly once via Reply — the reply channel is buffered(1) so a
 // Reply never blocks even if the delivering gateway goroutine has already given
 // up (its Deliver saw the slot go dead).
+//
+// BindingGen is the绑定世代 Deliver was invoked with, carried WITH the job so the
+// interpreter can re-verify it against the slot's current层2世代 at the真线性化点
+// (the commit / pen 落账, north of this queue): the enqueue-time check under the
+// slot lock is only a fast reject — a rebind (SetBinding) can still land AFTER the
+// check but BEFORE the interpreter commits, so the authoritative gate is the
+// interpreter's commit-point recheck of this carried gen. DeliverAnyGen rides
+// through unchanged (trusted platform-internal shim → exempt at the commit point).
 type Job struct {
-	Frame Frame
-	reply chan FrameResult
+	Frame      Frame
+	BindingGen int64
+	reply      chan FrameResult
 }
 
 // Reply answers this job's frame with its receipt-or-error result.
@@ -245,12 +254,15 @@ func (s *Slot) AttachInterpreter() (<-chan Job, uint64, func()) {
 // its reply (synchronous, 零 ack 关联器). No interpreter, or the interpreter
 // detaches mid-flight → ErrNoOccupant.
 //
-// bindingGen is the递交线性化点 gate (下half of the双向世代 gate): the frame's
-// claimed binding generation is re-verified against the slot's current layer-2
-// generation UNDER the slot lock — atomic with the live check — so a rebind that
-// landed between the gateway's upstream初验 and this delivery (初验→seal→新臂→
-// Deliver interleave) is caught here and refused ErrStaleBinding. Pass
-// DeliverAnyGen from trusted platform-internal paths that carry no gateway binding.
+// bindingGen is the递交 gate. The enqueue-time comparison against the slot's
+// current layer-2 generation UNDER the slot lock (atomic with the live check) is a
+// FAST reject only — it is NOT the linearization point: a rebind (SetBinding) can
+// still land between this check and the interpreter's actual commit, so bindingGen
+// is ALSO carried into the Job and re-verified by the interpreter immediately
+// before it 落账 (the真线性化点, north of this queue). A stale frame that slips the
+// fast check is then refused stale_binding at commit, so its queue traversal is
+// harmless. Pass DeliverAnyGen from trusted platform-internal paths that carry no
+// gateway binding (exempt at both the fast check and the commit-point recheck).
 func (s *Slot) Deliver(f Frame, bindingGen int64) (FrameResult, error) {
 	s.mu.Lock()
 	if !s.live {
@@ -267,7 +279,7 @@ func (s *Slot) Deliver(f Frame, bindingGen int64) (FrameResult, error) {
 
 	reply := make(chan FrameResult, 1)
 	select {
-	case frames <- Job{Frame: f, reply: reply}:
+	case frames <- Job{Frame: f, BindingGen: bindingGen, reply: reply}:
 	case <-dead:
 		return FrameResult{}, ErrNoOccupant
 	}

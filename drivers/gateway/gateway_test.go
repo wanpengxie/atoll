@@ -141,6 +141,41 @@ func TestGatewayCloseSealsArms(t *testing.T) {
 	}
 }
 
+// TestGatewayConcurrentClose (修复批四轮 P1): two concurrent Close calls must BOTH
+// return only after the single teardown completes — the second caller cannot return
+// early while the first is still mid-seal/join. After both return, every arm is
+// sealed and the tail-pump accounting is at zero (no pump left un-joined).
+func TestGatewayConcurrentClose(t *testing.T) {
+	for iter := 0; iter < 5; iter++ {
+		g := New(Config{})
+		var arms []*channelArm
+		for i := 0; i < 4; i++ {
+			subj := actor.ActorID(rune('a' + i))
+			e, arm := g.mustArm(t, channel.ID("c"), subj)
+			g.addDevice(e, g.newBareSession(subj))
+			arms = append(arms, arm)
+		}
+
+		var wg sync.WaitGroup
+		for i := 0; i < 2; i++ {
+			wg.Add(1)
+			go func() { defer wg.Done(); _ = g.Close() }()
+		}
+		wg.Wait()
+
+		// Both Close calls returned → the teardown is complete: every arm sealed.
+		for i, arm := range arms {
+			if !arm.isSealed() {
+				t.Fatalf("iter %d: arm %d not sealed after concurrent Close returned", iter, i)
+			}
+		}
+		// Pump accounting归零: a fresh WaitGroup.Wait must not block (all tracked pumps
+		// joined). The member arms owned no real pump here, so this asserts the tail set
+		// was fully drained by the teardown.
+		g.tailPumps.Wait()
+	}
+}
+
 // TestGatewayCloseRejectsAttach (P0-4 straddle): after Close, ensureArm (the
 // gateway-lock inner half of Attach) refuses with ErrGatewayClosed — a
 // still-arriving connection never mints a session that could touch a closing Home.

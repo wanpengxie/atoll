@@ -85,7 +85,7 @@ func TestInterpretSubmit(t *testing.T) {
 	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, 0, "ref-1", subjectgate.SubmitPayload{
 		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: json.RawMessage(`{"x":1}`),
 	})
-	got := interpretFrame(fs, slot, newDeps("human:alice", nil, false), f)
+	got := interpretFrame(fs, slot, newDeps("human:alice", nil, false), f, slot.BindingGen())
 	if got.Type != subjectgate.FrameReceipt || got.Ref != "ref-1" || got.BindingGen != 3 {
 		t.Fatalf("unexpected receipt frame: %+v", got)
 	}
@@ -110,7 +110,7 @@ func TestInterpretSubmitExpiresAt(t *testing.T) {
 		MsgType: "human.approve", Kind: "request", Audience: []string{"tool:kimi"},
 		Payload: json.RawMessage(`{}`), ExpiresAt: &exp,
 	})
-	if got := interpretFrame(fs, slot, newDeps("human:alice", nil, false), f); got.Type != subjectgate.FrameReceipt {
+	if got := interpretFrame(fs, slot, newDeps("human:alice", nil, false), f, slot.BindingGen()); got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("submit with expires_at should succeed, got %+v", got)
 	}
 	if fs.submitSpec.ExpiresAt == nil || *fs.submitSpec.ExpiresAt != exp {
@@ -122,7 +122,7 @@ func TestInterpretSubmitExpiresAt(t *testing.T) {
 	f2, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, 0, "ref2", subjectgate.SubmitPayload{
 		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: json.RawMessage(`{}`),
 	})
-	_ = interpretFrame(fs2, slot, newDeps("human:alice", nil, false), f2)
+	_ = interpretFrame(fs2, slot, newDeps("human:alice", nil, false), f2, slot.BindingGen())
 	if fs2.submitSpec.ExpiresAt != nil {
 		t.Fatalf("absent expires_at must be nil, got %v", *fs2.submitSpec.ExpiresAt)
 	}
@@ -135,7 +135,7 @@ func TestInterpretResolveFiveStep(t *testing.T) {
 
 	// happy path.
 	f, _ := subjectgate.NewFrame(subjectgate.FrameResolve, 0, "r", subjectgate.ResolvePayload{ReqID: "r1", Decision: "approved"})
-	got := interpretFrame(fs, slot, newDeps("human:alice", req, true), f)
+	got := interpretFrame(fs, slot, newDeps("human:alice", req, true), f, slot.BindingGen())
 	if got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("resolve happy path should receipt: %+v (%s)", got, decodeErr(t, got).Code)
 	}
@@ -145,20 +145,20 @@ func TestInterpretResolveFiveStep(t *testing.T) {
 
 	// invalid decision.
 	bad, _ := subjectgate.NewFrame(subjectgate.FrameResolve, 0, "r", subjectgate.ResolvePayload{ReqID: "r1", Decision: "maybe"})
-	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", req, true), bad)); e.Code != subjectgate.CodeInvalidDecision {
+	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", req, true), bad, slot.BindingGen())); e.Code != subjectgate.CodeInvalidDecision {
 		t.Fatalf("want invalid_decision, got %q", e.Code)
 	}
 	// not in audience.
 	other := newDeps("human:bob", req, true)
-	if e := decodeErr(t, interpretFrame(fs, slot, other, f)); e.Code != subjectgate.CodeNotInAudience {
+	if e := decodeErr(t, interpretFrame(fs, slot, other, f, slot.BindingGen())); e.Code != subjectgate.CodeNotInAudience {
 		t.Fatalf("want not_in_audience, got %q", e.Code)
 	}
 	// already closed.
-	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", req, false), f)); e.Code != subjectgate.CodeAlreadyClosed {
+	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", req, false), f, slot.BindingGen())); e.Code != subjectgate.CodeAlreadyClosed {
 		t.Fatalf("want already_closed, got %q", e.Code)
 	}
 	// not found.
-	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", nil, true), f)); e.Code != subjectgate.CodeRequestNotFound {
+	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", nil, true), f, slot.BindingGen())); e.Code != subjectgate.CodeRequestNotFound {
 		t.Fatalf("want request_not_found, got %q", e.Code)
 	}
 }
@@ -168,14 +168,14 @@ func TestInterpretCancelSenderGate(t *testing.T) {
 	fs := &fakeSys{self: "human:alice", respondID: "resp1"}
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 	f, _ := subjectgate.NewFrame(subjectgate.FrameCancel, 0, "r", subjectgate.CancelPayload{ReqID: "r1"})
-	if got := interpretFrame(fs, slot, newDeps("human:alice", req, true), f); got.Type != subjectgate.FrameReceipt {
+	if got := interpretFrame(fs, slot, newDeps("human:alice", req, true), f, slot.BindingGen()); got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("cancel by sender should receipt: %s", decodeErr(t, got).Code)
 	}
 	if fs.respondSpec.Status != message.StatusFailed {
 		t.Fatalf("cancel must map to failed terminal, got %q", fs.respondSpec.Status)
 	}
 	// non-sender refused.
-	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:bob", req, true), f)); e.Code != subjectgate.CodeUnauthorizedSender {
+	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:bob", req, true), f, slot.BindingGen())); e.Code != subjectgate.CodeUnauthorizedSender {
 		t.Fatalf("want unauthorized_sender, got %q", e.Code)
 	}
 }
@@ -201,7 +201,7 @@ func TestCancelOwnRequestAcrossIncarnation(t *testing.T) {
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 	f, _ := subjectgate.NewFrame(subjectgate.FrameCancel, 0, "ref-c", subjectgate.CancelPayload{ReqID: "r-priorlife"})
 
-	got := interpretFrame(fs, slot, newDeps("human:alice", priorLifeReq, true), f)
+	got := interpretFrame(fs, slot, newDeps("human:alice", priorLifeReq, true), f, slot.BindingGen())
 	if got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("cross-incarnation cancel of own request should receipt: %s", decodeErr(t, got).Code)
 	}
@@ -214,11 +214,81 @@ func TestCancelOwnRequestAcrossIncarnation(t *testing.T) {
 	}
 }
 
+// TestInterpretStaleBindingAtCommit (修复批四轮 P0, 递交线性化点核验): a frame whose
+// carried绑定世代 no longer matches the slot's current层2世代 (a rebind superseded it
+// while it sat in the queue) is refused stale_binding at the interpreter's commit
+// path — and crucially NEVER 落账 (no SubmitEnvelope). The gate lives at the真线性化
+// 点, so the enqueue-time fast check being non-authoritative is harmless.
+func TestInterpretStaleBindingAtCommit(t *testing.T) {
+	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
+	genA := int64(5)
+	slot.SetBinding(genA)
+	fs := &fakeSys{self: "human:alice", submitID: "m1", submitSeq: 1}
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, genA, "ref", subjectgate.SubmitPayload{
+		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: json.RawMessage(`{}`),
+	})
+	// Rebind (seal → fresh arm → SetBinding) lands BEFORE the interpreter commits.
+	slot.SetBinding(genA + 1)
+	got := interpretFrame(fs, slot, newDeps("human:alice", nil, false), f, genA)
+	if e := decodeErr(t, got); got.Type != subjectgate.FrameError || e.Code != subjectgate.CodeStaleBinding {
+		t.Fatalf("superseded frame must return stale_binding error frame, got %+v (%s)", got, e.Code)
+	}
+	if fs.submitSpec.Type != "" {
+		t.Fatalf("a superseded frame must NOT 落账 (no SubmitEnvelope), but submitSpec was set: %+v", fs.submitSpec)
+	}
+
+	// DeliverAnyGen (trusted platform-internal shim) is exempt even under a mismatch.
+	fs2 := &fakeSys{self: "human:alice", submitID: "m2", submitSeq: 2}
+	if got := interpretFrame(fs2, slot, newDeps("human:alice", nil, false), f, subjectgate.DeliverAnyGen); got.Type != subjectgate.FrameReceipt {
+		t.Fatalf("DeliverAnyGen must ride through the commit-point gate, got %+v", got)
+	}
+}
+
+// TestStaleJobTraversalRefusedAtCommit (修复批四轮 P0, 真交错): the frame passes the
+// enqueue-time fast check (slot at genA when Deliver runs), traverses the帧递交端
+// queue, and the rebind to genA+1 lands via the interpreter闸门 AFTER the job is
+// dequeued (enqueue done) but BEFORE the commit. The unbuffered frames channel makes
+// the ordering deterministic (Deliver's send rendezvous with the dequeue). Assert the
+// stale Job is refused stale_binding at commit and does NOT 落账 —穿越无害.
+func TestStaleJobTraversalRefusedAtCommit(t *testing.T) {
+	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
+	genA := int64(7)
+	slot.SetBinding(genA)
+	fs := &fakeSys{self: "human:alice", submitID: "m1", submitSeq: 1}
+	deps := newDeps("human:alice", nil, false)
+
+	frames, _, release := slot.AttachInterpreter()
+	defer release()
+
+	rebound := make(chan struct{})
+	go func() {
+		job := <-frames           // rendezvous: unblocks Deliver's send (enqueue done)
+		slot.SetBinding(genA + 1) // rebind lands after enqueue, before commit
+		close(rebound)
+		job.Reply(subjectgate.FrameResult{Frame: interpretFrame(fs, slot, deps, job.Frame, job.BindingGen)})
+	}()
+
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, genA, "ref", subjectgate.SubmitPayload{
+		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: json.RawMessage(`{}`),
+	})
+	res, err := slot.Deliver(f, genA) // fast check passes (genA current), enqueues, blocks on reply
+	if err != nil {
+		t.Fatalf("Deliver returned Go error: %v", err)
+	}
+	<-rebound
+	if e := decodeErr(t, res.Frame); res.Frame.Type != subjectgate.FrameError || e.Code != subjectgate.CodeStaleBinding {
+		t.Fatalf("stale Job traversing the queue must be refused stale_binding at commit, got %+v (%s)", res.Frame, e.Code)
+	}
+	if fs.submitSpec.Type != "" {
+		t.Fatalf("a stale Job must NOT 落账, but submitSpec was set: %+v", fs.submitSpec)
+	}
+}
+
 func TestInterpretUnexpectedFrame(t *testing.T) {
 	fs := &fakeSys{self: "human:alice"}
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 	f, _ := subjectgate.NewFrame(subjectgate.FrameAttach, 0, "r", subjectgate.AttachPayload{ChannelID: "c"})
-	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", nil, false), f)); e.Code != subjectgate.CodeBadPayload {
+	if e := decodeErr(t, interpretFrame(fs, slot, newDeps("human:alice", nil, false), f, slot.BindingGen())); e.Code != subjectgate.CodeBadPayload {
 		t.Fatalf("attach through the cell interpreter is unexpected, got %q", e.Code)
 	}
 }
@@ -227,7 +297,7 @@ func TestInterpretResourceCreate(t *testing.T) {
 	fs := &fakeSys{self: "human:alice", rh: &fakeResource{out: accessdoor.Outcome{}}}
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 	f, _ := subjectgate.NewFrame(subjectgate.FrameResource, 0, "r", subjectgate.ResourcePayload{Op: subjectgate.ResCreate, ResourceID: "res:1", Args: json.RawMessage(`{"a":1}`)})
-	got := interpretFrame(fs, slot, newDeps("human:alice", nil, false), f)
+	got := interpretFrame(fs, slot, newDeps("human:alice", nil, false), f, slot.BindingGen())
 	if got.Type != subjectgate.FrameReceipt {
 		t.Fatalf("resource create should receipt: %s", decodeErr(t, got).Code)
 	}

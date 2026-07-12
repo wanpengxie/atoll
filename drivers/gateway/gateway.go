@@ -73,6 +73,13 @@ type Gateway struct {
 	closed  bool // set by Close; a later Attach is refused (关站序 straddle, P0-4)
 	entries map[actor.ActorID]*userEntry
 
+	// closeOnce runs the teardown (seal every arm + join all pumps) EXACTLY once.
+	// sync.Once.Do blocks every concurrent caller until the one teardown returns, so
+	// a second Close never observes closed and races ahead while the first is still
+	// mid-seal/join — all Close callers return only after the SAME teardown completes
+	// (修复批四轮 P1: 并发 Close 统一等 teardown).
+	closeOnce sync.Once
+
 	// ctx is the gateway-lifetime context; Close cancels it so tail-only sessions
 	// (which own no arm to seal) still go silent BEFORE Home — their read pumps
 	// derive from it (关站序 tail closure, P1). Member sessions are cancelled via
@@ -157,27 +164,29 @@ func (g *Gateway) Start() error {
 // Forgotten, sessions torn down) so no still-live session can touch a closing
 // Home. Idempotent.
 func (g *Gateway) Close() error {
-	g.mu.Lock()
-	if g.closed {
-		g.mu.Unlock()
-		return nil // idempotent
-	}
-	g.closed = true
-	g.cancel() // tail-only sessions' ctx cascade → their read pumps unblock
-	var arms []*channelArm
-	for _, e := range g.entries {
-		for _, a := range e.arms {
-			arms = append(arms, a)
+	// sync.Once.Do blocks concurrent callers until the one teardown returns, so EVERY
+	// Close (first or Nth, concurrent or serial) returns only after the arms are all
+	// sealed and every pump joined — a second Close can never return while the first is
+	// still mid-seal/join (修复批四轮 P1).
+	g.closeOnce.Do(func() {
+		g.mu.Lock()
+		g.closed = true
+		g.cancel() // tail-only sessions' ctx cascade → their read pumps unblock
+		var arms []*channelArm
+		for _, e := range g.entries {
+			for _, a := range e.arms {
+				arms = append(arms, a)
+			}
 		}
-	}
-	g.mu.Unlock()
-	for _, a := range arms {
-		a.seal()
-	}
-	// Join the tail-only pumps too (the member pumps were joined per-arm by seal).
-	// They own no arm/Home resource beyond the read流句柄 and unblock on the cancel
-	// above, so a plain join suffices — 设计 §5.5 defers only裸观众撤权, never关站静默.
-	g.tailPumps.Wait()
+		g.mu.Unlock()
+		for _, a := range arms {
+			a.seal()
+		}
+		// Join the tail-only pumps too (the member pumps were joined per-arm by seal).
+		// They own no arm/Home resource beyond the read流句柄 and unblock on the cancel
+		// above, so a plain join suffices — 设计 §5.5 defers only裸观众撤权, never关站静默.
+		g.tailPumps.Wait()
+	})
 	return nil
 }
 

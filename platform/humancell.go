@@ -225,7 +225,7 @@ func interpretFrames(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriver
 	for {
 		select {
 		case job := <-frames:
-			job.Reply(subjectgate.FrameResult{Frame: interpretFrame(sys, slot, deps, job.Frame)})
+			job.Reply(subjectgate.FrameResult{Frame: interpretFrame(sys, slot, deps, job.Frame, job.BindingGen)})
 		case <-stop:
 			return
 		}
@@ -236,7 +236,16 @@ func interpretFrames(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriver
 // returns the receipt (or error) frame. binding_gen is stamped from the slot's
 // current layer-2 generation. attach/detach/presence are gateway control frames
 // (handled north of the cell) — they are unexpected here.
-func interpretFrame(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriverDeps, f subjectgate.Frame) subjectgate.Frame {
+//
+// carriedGen is the绑定世代 Deliver was invoked with, carried WITH the job. This is
+// the真线性化点 of the双向世代 gate (design §5.4 / 修复批四轮): the gateway's upstream
+// 初验 and Deliver's enqueue-time check are BOTH pre-queue — a rebind (seal→新臂→
+// SetBinding) can land while the job sits in the帧递交端 queue, so the authoritative
+// re-verification happens HERE, on the interpreter's commit path, immediately before
+// any落账 verb. A superseded frame is refused stale_binding and NEVER lands in the
+// successor binding; the queue traversal is thereby harmless. DeliverAnyGen (trusted
+// platform-internal shim, no gateway binding behind it) is exempt.
+func interpretFrame(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriverDeps, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
 	gen := slot.BindingGen()
 	errFrame := func(code, detail string) subjectgate.Frame {
 		fr, _ := subjectgate.NewFrame(subjectgate.FrameError, gen, f.Ref, subjectgate.ErrorPayload{
@@ -247,6 +256,13 @@ func interpretFrame(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriverD
 	receipt := func(load any) subjectgate.Frame {
 		fr, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, gen, f.Ref, load)
 		return fr
+	}
+
+	// 递交线性化点核验: refuse a frame whose carried gen no longer matches the slot's
+	// current层2世代 (a rebind superseded it while it sat in the queue). gen was read
+	// under the slot lock just above, so this comparison is the commit-point recheck.
+	if carriedGen != subjectgate.DeliverAnyGen && carriedGen != gen {
+		return errFrame(subjectgate.CodeStaleBinding, "binding superseded before commit (rebound)")
 	}
 
 	switch f.Type {
