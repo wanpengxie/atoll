@@ -58,7 +58,7 @@ func TestHomeRollbackFailureArmsUseOneCloseCore(t *testing.T) {
 				t.Fatalf("Open = (%v, %v)", h, err)
 			}
 			got := closeEvents(events)
-			if len(got) == 0 || got[0] != "close.begin" || got[len(got)-1] != "close.end" {
+			if len(got) == 0 || got[0] != "close.seal" || got[len(got)-1] != "close.end" {
 				t.Fatalf("rollback did not traverse close core: %v", got)
 			}
 			if text := logs.String(); !strings.Contains(text, "platform.home.rollback") || !strings.Contains(text, "platform.home.closed") {
@@ -265,6 +265,34 @@ func TestHomeCloseBoundsDesiredAndSealPrecedesAbandon(t *testing.T) {
 	}
 	if seal < 0 || reconcile < 0 || seal >= reconcile {
 		t.Fatalf("Seal not first: %v", got)
+	}
+}
+
+// TestHomeConcurrentCloseShareOneCloseErr locks Close's completion semantics
+// on the NORMAL path (no panic): N concurrent callers all wait for the single
+// teardown run and every one of them receives the same closeErr.
+func TestHomeConcurrentCloseShareOneCloseErr(t *testing.T) {
+	fault := errors.New("injected close.stores")
+	h, err := openHome(lifecycleConfig(t, "concurrent-close"), &homeFaults{
+		fail: map[string]error{"close.stores": fault},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	const callers = 8
+	results := make(chan error, callers)
+	for range callers {
+		go func() { results <- h.Close() }()
+	}
+	for range callers {
+		select {
+		case got := <-results:
+			if !errors.Is(got, fault) {
+				t.Fatalf("concurrent Close err = %v, want the one closeErr", got)
+			}
+		case <-time.After(5 * time.Second):
+			t.Fatal("concurrent Close wedged")
+		}
 	}
 }
 

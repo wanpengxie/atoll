@@ -335,7 +335,7 @@ func (a *Acceptor) endServe() { a.wg.Done() }
 // liveness.
 func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID string) {
 	defer func() { _ = ws.Close() }()
-	var actorWG sync.WaitGroup
+	var gate actorGate
 
 	// allowed is the attach declaration set: the resolve seam checks that an
 	// opening actor stream is one the daemon actually declared (membership-backed).
@@ -409,9 +409,17 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// across the wire). Runs off the accept-dispatch goroutine (its own goroutine)
 	// so the bounded handshake never stalls the accept loop.
 	onActor := func(conn net.Conn) {
-		actorWG.Add(1)
+		// Admission gate first (公理 7 的通用款, per-link instance): a dispatch
+		// goroutine can still be delivering a substream while teardown has begun
+		// its bounded join — admitting through the gate makes a late Add against
+		// an in-progress Wait impossible (WaitGroup reuse panic); a stream
+		// arriving after the seal is closed on the spot.
+		if !gate.admit() {
+			_ = conn.Close()
+			return
+		}
 		go func() {
-			defer actorWG.Done()
+			defer gate.done()
 			// The handshake is bounded by attachHandshakeTimeout (substrate self-
 			// guards the time limit). The port LIFETIME stays the runtime's, not
 			// this bounded ctx — Attach only uses hsCtx for the handshake read.
@@ -612,20 +620,10 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// generous for any live handler, decisive against a hung one. On timeout we
 	// abandon the join and proceed with teardown (a stuck store is never allowed
 	// to become an un-closeable station), leaving a loud, attributed trace.
-	if !lc.waitControlWorkers(2 * streamWriteBudget) {
-		a.recordControlWorkerLeak()
-		boundMu.Lock()
-		b := boundID
-		boundMu.Unlock()
-		a.logger.Error("link.control_worker_join_timeout",
-			"msg", "control worker join timeout, abandoning — teardown proceeding",
-			"daemon", b, "channel", string(a.channelID))
-	}
-	if !waitGroupWithin(&actorWG, attachHandshakeTimeout) {
-		a.leaked.Add(1)
-		a.logger.Error("link.actor_worker_join_timeout", "timeout", attachHandshakeTimeout,
-			"safety", "runtime admission is sealed and stores reject late writes")
-	}
+	boundMu.Lock()
+	b := boundID
+	boundMu.Unlock()
+	a.joinLinkWorkers(lc, &gate, b, 2*streamWriteBudget, attachHandshakeTimeout)
 	close(done)
 }
 
@@ -1273,6 +1271,61 @@ func (a *Acceptor) closeWithin(timeout time.Duration) error {
 }
 
 func (a *Acceptor) Leaked() int64 { return a.leaked.Load() }
+
+// actorGate fences one link's actor-stream worker admission against teardown's
+// bounded join — the same closed+mutex+WaitGroup shape as the Acceptor's own
+// Serve admission (beginServe/closeWithin), instantiated per link. The seal
+// and the Add live under one mutex (公理 7 通用款: 关门判断与登记同一临界区),
+// so once sealAndWait has taken the lock no later admit can Add against the
+// in-progress Wait (which would both leave an unjoined worker and violate
+// WaitGroup's reuse precondition).
+type actorGate struct {
+	mu     sync.Mutex
+	sealed bool
+	wg     sync.WaitGroup
+}
+
+// admit registers one actor worker; false = the gate is sealed (teardown has
+// begun) and the stream must be refused.
+func (g *actorGate) admit() bool {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.sealed {
+		return false
+	}
+	g.wg.Add(1)
+	return true
+}
+
+func (g *actorGate) done() { g.wg.Done() }
+
+// sealAndWait closes admission, then joins the admitted workers within
+// timeout; false = at least one worker is still running past the bound.
+func (g *actorGate) sealAndWait(timeout time.Duration) bool {
+	g.mu.Lock()
+	g.sealed = true
+	g.mu.Unlock()
+	return waitGroupWithin(&g.wg, timeout)
+}
+
+// joinLinkWorkers is runLink's teardown join half — control workers first
+// (they can be wedged in a store call), then the actor-stream workers behind
+// their admission gate. Budgets are parameters so a test can drive this exact
+// production path (accounting included) with compressed budgets; runLink
+// passes 2×streamWriteBudget / attachHandshakeTimeout.
+func (a *Acceptor) joinLinkWorkers(lc *linkSession, gate *actorGate, boundID string, controlBudget, actorBudget time.Duration) {
+	if !lc.waitControlWorkers(controlBudget) {
+		a.recordControlWorkerLeak()
+		a.logger.Error("link.control_worker_join_timeout",
+			"msg", "control worker join timeout, abandoning — teardown proceeding",
+			"daemon", boundID, "channel", string(a.channelID))
+	}
+	if !gate.sealAndWait(actorBudget) {
+		a.leaked.Add(1)
+		a.logger.Error("link.actor_worker_join_timeout", "timeout", actorBudget,
+			"safety", "runtime admission is sealed and stores reject late writes")
+	}
+}
 
 func (a *Acceptor) recordControlWorkerLeak() {
 	// One incident owns both residues: the stuck worker and the waiter goroutine

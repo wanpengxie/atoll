@@ -95,10 +95,21 @@ func (p *Pump) drain() {
 			p.logger.Error("tap.pump.read_failed", "cursor", p.cursor, "err", err)
 			return
 		}
+		// Re-check ctx AFTER the read returns: a reader that ignores ctx can park
+		// past Close's bounded abandon and hand rows back to a goroutine the owner
+		// already gave up on — those rows must never reach handle (the abandoned
+		// pump's silence promise: Home tears down cells/stores right after the
+		// abandon, and a late handle call would touch them).
+		if p.ctx.Err() != nil {
+			return
+		}
 		if len(rows) == 0 {
 			return
 		}
 		for _, row := range rows {
+			if p.ctx.Err() != nil {
+				return
+			}
 			if err := p.handle(row); err != nil {
 				// Cursor gated at this row: stop here, retry on next wake. This IS
 				// the at-least-once delivery contract's physical implementation

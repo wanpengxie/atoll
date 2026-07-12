@@ -43,21 +43,12 @@ func TestAcceptorServeCloseAdmissionStraddle(t *testing.T) {
 	}
 }
 
-func TestControlWorkerTimeoutAccountsWorkerAndWaiterOnce(t *testing.T) {
-	a := NewAcceptor(Config{})
-	var workers sync.WaitGroup
-	workers.Add(1)
-	if waitGroupWithin(&workers, 20*time.Millisecond) {
-		t.Fatal("stuck worker joined")
-	}
-	a.recordControlWorkerLeak()
-	if a.Leaked() != 1 {
-		t.Fatalf("Leaked = %d, want one incident", a.Leaked())
-	}
-	workers.Done() // releases both the worker account and its timeout waiter
-}
-
-func TestControlWorkerRealSessionTimeoutAndRecovery(t *testing.T) {
+// TestControlWorkerTimeoutAccountedThroughJoin drives the REAL teardown join
+// (joinLinkWorkers — the exact function runLink calls) against a real
+// linkSession whose control worker is wedged in its handler: the join must
+// abandon within the control budget, count worker+waiter as ONE incident, and
+// converge once the handler is released.
+func TestControlWorkerTimeoutAccountedThroughJoin(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
 	ls, writer, _ := newControlKillRig(t, func([]byte) { close(entered); <-release })
 	if _, err := writer.Write([]byte("{}\n")); err != nil {
@@ -65,11 +56,17 @@ func TestControlWorkerRealSessionTimeoutAndRecovery(t *testing.T) {
 	}
 	<-entered
 	ls.kill("test-close", nil)
-	if ls.waitControlWorkers(20 * time.Millisecond) {
-		t.Fatal("blocked control worker joined")
-	}
 	a := NewAcceptor(Config{})
-	a.recordControlWorkerLeak()
+	joined := make(chan struct{})
+	go func() {
+		a.joinLinkWorkers(ls, &actorGate{}, "daemon-x", 20*time.Millisecond, 20*time.Millisecond)
+		close(joined)
+	}()
+	select {
+	case <-joined:
+	case <-time.After(time.Second):
+		t.Fatal("join did not abandon the wedged control worker within its budget")
+	}
 	if a.Leaked() != 1 {
 		t.Fatalf("Leaked = %d, want one worker+waiter incident", a.Leaked())
 	}
@@ -80,18 +77,64 @@ func TestControlWorkerRealSessionTimeoutAndRecovery(t *testing.T) {
 	}
 }
 
-func TestActorWorkerGroupIsBoundedAndAccounted(t *testing.T) {
+// TestActorGateSealFencesLateAdmission locks the Add×Wait race repair: a
+// worker admitted before the seal is joined (or abandoned on the bound and
+// accounted), and an admission attempt AFTER sealAndWait has begun must be
+// refused — no Add can ever chase an in-progress Wait.
+func TestActorGateSealFencesLateAdmission(t *testing.T) {
+	ls, writer, _ := newControlKillRig(t, func([]byte) {})
+	ls.kill("test-close", nil)
+	_ = writer.Close() // control worker exits cleanly; this test is about the actor half
+	if !ls.waitControlWorkers(time.Second) {
+		t.Fatal("control worker did not exit after writer close")
+	}
 	a := NewAcceptor(Config{})
-	var actors sync.WaitGroup
-	actors.Add(1)
-	if waitGroupWithin(&actors, 20*time.Millisecond) {
-		t.Fatal("stuck actor handshake joined")
+	gate := &actorGate{}
+	if !gate.admit() {
+		t.Fatal("pre-seal admission refused")
 	}
-	a.leaked.Add(1)
+	release := make(chan struct{})
+	go func() { <-release; gate.done() }()
+	joined := make(chan struct{})
+	go func() {
+		a.joinLinkWorkers(ls, gate, "daemon-x", time.Second, 20*time.Millisecond)
+		close(joined)
+	}()
+	select {
+	case <-joined:
+	case <-time.After(time.Second):
+		t.Fatal("join did not abandon the stuck actor worker within its budget")
+	}
 	if a.Leaked() != 1 {
-		t.Fatalf("Leaked = %d, want 1", a.Leaked())
+		t.Fatalf("Leaked = %d, want one actor-join incident", a.Leaked())
 	}
-	actors.Done()
+	if gate.admit() {
+		t.Fatal("admission after seal was accepted — late Add can chase the Wait")
+	}
+	close(release)
+}
+
+// TestActorGateAdmitRaceWithSeal stresses concurrent admit×sealAndWait under
+// -race: every admit that returns true is matched by done(), every admit that
+// loses to the seal must not Add — the Wait converges without panic.
+func TestActorGateAdmitRaceWithSeal(t *testing.T) {
+	for range 200 {
+		gate := &actorGate{}
+		var admitted sync.WaitGroup
+		for range 4 {
+			admitted.Add(1)
+			go func() {
+				defer admitted.Done()
+				if gate.admit() {
+					gate.done()
+				}
+			}()
+		}
+		if !gate.sealAndWait(time.Second) {
+			t.Fatal("gate did not converge")
+		}
+		admitted.Wait()
+	}
 }
 
 func TestAcceptorConcurrentCloseCountsOneLeak(t *testing.T) {

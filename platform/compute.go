@@ -500,9 +500,12 @@ var ErrComputeForwardersLeaked = errors.New("platform: compute forwarders leaked
 
 type computeLifecycleHooks struct {
 	forwarderTimeout time.Duration
-	obsExited        func()
-	storageExited    func()
-	storagePump      func(context.Context, *storageHostForwarder)
+	// forwarderLeaked, when non-nil, replaces the invocation-local forwarder
+	// leak account so a test can assert its delta directly.
+	forwarderLeaked *atomic.Int64
+	obsExited       func()
+	storageExited   func()
+	storagePump     func(context.Context, *storageHostForwarder)
 }
 
 func RunCompute(ctx context.Context, cfg ComputeConfig) error { return runCompute(ctx, cfg, nil) }
@@ -580,6 +583,14 @@ func runCompute(ctx context.Context, cfg ComputeConfig, hooks *computeLifecycleH
 		}
 		storageFwd.pump(ctx)
 	}()
+	// forwarderLeaked is this RunCompute invocation's forwarder leak account —
+	// the same per-instance atomic every other lifecycle component keeps. The
+	// single deferred close arbitration below is its only writer, so one
+	// timeout incident counts exactly once.
+	forwarderLeaked := &atomic.Int64{}
+	if hooks != nil && hooks.forwarderLeaked != nil {
+		forwarderLeaked = hooks.forwarderLeaked
+	}
 	defer func() {
 		timeout := 5 * time.Second
 		if hooks != nil && hooks.forwarderTimeout > 0 {
@@ -593,7 +604,9 @@ func runCompute(ctx context.Context, cfg ComputeConfig, hooks *computeLifecycleH
 			// Bounded abandon proof: neither pump produces actors. A storage pump
 			// may still hold the pure os.Root handle, so ownership is transferred
 			// intact to process exit and daemon main must skip sh.Close.
+			forwarderLeaked.Add(1)
 			logger.Error("platform.compute.forwarder_join_timeout", "timeout", timeout,
+				"leaked", forwarderLeaked.Load(),
 				"safety", "pure os.Root handle ownership transferred to process exit; no actor production")
 			retErr = errors.Join(retErr, ErrComputeForwardersLeaked)
 		}

@@ -3,6 +3,7 @@ package platform
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -42,14 +43,19 @@ func TestRunComputeForwarderTimeoutTransfersRootOwnership(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	entered, release, exited := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	var leaked atomic.Int64
 	err := runCompute(ctx, ComputeConfig{ServerWS: "ws://invalid", Desired: emptyComputePlan{}, Builder: emptyComputePlan{}}, &computeLifecycleHooks{
 		forwarderTimeout: 25 * time.Millisecond,
+		forwarderLeaked:  &leaked,
 		storagePump:      func(context.Context, *storageHostForwarder) { close(entered); <-release },
 		storageExited:    func() { close(exited) },
 	})
 	<-entered
 	if !errors.Is(err, ErrComputeForwardersLeaked) {
 		t.Fatalf("err = %v", err)
+	}
+	if got := leaked.Load(); got != 1 {
+		t.Fatalf("forwarder leak account = %d, want exactly one incident", got)
 	}
 	select {
 	case <-exited:

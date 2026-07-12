@@ -484,8 +484,6 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	h.reviveLogAt = map[actor.ActorID]time.Time{}
 	h.reviveBackoff = map[actor.ActorID]reviveBackoffEntry{}
 	h.pokeCh = make(chan struct{}, 1)
-	h.state.Store(uint32(homeActivating))
-	_ = faults.checkpoint("state.activating")
 
 	// 10. Time axis (OpenScheduler). FireSink mints a pen per fire (author-welded);
 	//     Reviver activates an absent identity-timer author via SpawnIfAbsent. The
@@ -511,26 +509,19 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	}
 	h.schedMinter = schedMinter
 	h.engine = engine
-	if err := faults.checkpoint("activate.channel_start"); err != nil {
-		return nil, fmt.Errorf("platform: start channel: %w", err)
-	}
-	if err := channel.Start(); err != nil {
-		return nil, fmt.Errorf("platform: start channel: %w", err)
-	}
-	engine.Start()
-	if err := faults.checkpoint("activate.before_pump"); err != nil {
-		return nil, err
-	}
-	h.delivery = tap.OpenPump(signal, cs.Query, from, deliver, logger)
 
 	// 11. Build the link acceptor (physical layer: WS mux + per-actor ipc streams
-	//      + lease judgement for attached computes). It welds an attaching remote
+	//      + lease judgement for attached computes). Still Construct — pure
+	//      fallible preparation, zero goroutines: NewAcceptor only allocates its
+	//      tables (Serve is what runs links, and nothing serves until the app
+	//      binds an HTTP route after Open returns). It welds an attaching remote
 	//      port's incarnation onto the same three minters a local cell's Caps draw
 	//      from — the harness pen Minter, the access door (cs.Access), and the
-	//      schedule engine Minter — so a daemon-hosted cell's message / off-log /
-	//      time-axis capability is behaviourally identical to a local one (transport
-	//      neutrality). Attached-port obs enters the runtime's one population
-	//      subscription just like local-cell obs.
+	//      schedule engine Minter (which is why it must follow OpenScheduler) —
+	//      so a daemon-hosted cell's message / off-log / time-axis capability is
+	//      behaviourally identical to a local one (transport neutrality).
+	//      Attached-port obs enters the runtime's one population subscription
+	//      just like local-cell obs.
 	links := link.NewAcceptor(link.Config{
 		Minter:             minter,
 		Access:             cs.Access,
@@ -544,6 +535,24 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 		StorageHostControl: homeStorageHostControl{outbox: cs.Outbox, timeout: cfg.ReservationTimeout},
 	})
 	h.links = links
+
+	// 12. Activate: construct is complete (every fallible preparation done, all
+	//     ownership already in h) — start the components: channel cells, the
+	//     schedule engine, then the delivery pump.
+	h.state.Store(uint32(homeActivating))
+	_ = faults.checkpoint("state.activating")
+	if err := faults.checkpoint("activate.channel_start"); err != nil {
+		return nil, fmt.Errorf("platform: start channel: %w", err)
+	}
+	if err := channel.Start(); err != nil {
+		return nil, fmt.Errorf("platform: start channel: %w", err)
+	}
+	engine.Start()
+	if err := faults.checkpoint("activate.before_pump"); err != nil {
+		return nil, err
+	}
+	h.delivery = tap.OpenPump(signal, cs.Query, from, deliver, logger)
+
 	// Close the late-binding window (see step 2's lateAcc note): every
 	// file-kind placement decision from this instant on can actually route an
 	// AllocRequest / see attached daemons as storage-mount candidates.
@@ -552,7 +561,7 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	}
 	lateAcc.bind(links)
 
-	// 12. Reconcilers (level backstops). Run one sweep of EACH at startup —
+	// 13. Reconcilers (level backstops). Run one sweep of EACH at startup —
 	//     activation re-mints the always-on desired set; closure is the home-restart
 	//     recovery path (#4, close orphan open requests whose receiver's embodiment
 	//     predates this process). Then a low-frequency ticker keeps both as the
@@ -1156,16 +1165,19 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 			})
 			guard(name, fn)
 		}
-		step("close.begin", func() {
-			h.state.Store(uint32(homeClosing))
-			_ = h.faults.checkpoint("state.closing")
-			h.closed.Store(true)
-		})
-		// Step zero seals the construction authority before any bounded abandon.
+		// Step ZERO seals the construction authority — before even the closing
+		// state flip, so there is no instant at which the Home is observably
+		// "entering close" while the runtime still admits new embodiments
+		// (公理 7: 进入关闭即封门, and close entry IS this line).
 		step("close.seal", func() {
 			if h.channel != nil && h.channel.Cells() != nil {
 				h.channel.Cells().Seal()
 			}
+		})
+		step("close.begin", func() {
+			h.state.Store(uint32(homeClosing))
+			_ = h.faults.checkpoint("state.closing")
+			h.closed.Store(true)
 		})
 		step("close.reconcile", func() {
 			if h.reconcileStop == nil {
@@ -1224,10 +1236,14 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 		if h.delivery != nil {
 			leaked += h.delivery.Leaked()
 		}
+		// zombieTotal is the runtime's LIFETIME zombie count — a cumulative
+		// account, not this close's delta — so it is reported as its own field
+		// rather than folded into leaked (which sums per-instance close deltas).
+		var zombieTotal int64
 		if h.channel != nil {
 			leaked += h.channel.Leaked()
 			if h.channel.Cells() != nil {
-				leaked += h.channel.Cells().LeakedTotal()
+				zombieTotal = h.channel.Cells().LeakedTotal()
 			}
 		}
 		if h.engine != nil {
@@ -1237,7 +1253,8 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 		_ = h.faults.checkpoint("state.closed")
 		step("close.end", func() {})
 		h.logger.Info("platform.home.closed", "channel", h.channelID, "reason", reason,
-			"cleanup_errors", len(errs), "leaked", leaked, "duration", time.Since(started))
+			"cleanup_errors", len(errs), "leaked", leaked, "zombie_total", zombieTotal,
+			"duration", time.Since(started))
 		if teardownPanic != nil {
 			panic(teardownPanic)
 		}

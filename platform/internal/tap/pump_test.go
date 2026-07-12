@@ -102,3 +102,38 @@ func TestOpenPumpCloseBoundsReaderIgnoringContext(t *testing.T) {
 		t.Fatal("released pump did not exit")
 	}
 }
+
+// TestOpenPumpAbandonedReaderRowsNeverReachHandle locks the abandoned pump's
+// silence promise (弃证的写路径半): a reader that ignores ctx parks past the
+// bounded Close, then RECOVERS and returns rows — those rows must never reach
+// handle, because the owner has moved on to tearing down the very things
+// handle touches (cells, stores).
+func TestOpenPumpAbandonedReaderRowsNeverReachHandle(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	q := pumpQuery{read: func(context.Context, int64, int) ([]storespec.StoredRow, error) {
+		select {
+		case <-entered:
+		default:
+			close(entered)
+		}
+		<-release
+		return []storespec.StoredRow{{Seq: 1}}, nil
+	}}
+	var handled atomic.Int64
+	p := OpenPump(NewSignal(), q, 0, func(storespec.StoredRow) error { handled.Add(1); return nil }, nil)
+	<-entered
+	p.closeWithin(25 * time.Millisecond)
+	if p.Leaked() != 1 {
+		t.Fatalf("Leaked = %d, want 1", p.Leaked())
+	}
+	close(release) // the parked reader recovers and hands rows to the leaked goroutine
+	select {
+	case <-p.done:
+	case <-time.After(time.Second):
+		t.Fatal("released pump did not exit")
+	}
+	if got := handled.Load(); got != 0 {
+		t.Fatalf("handle called %d times after abandoned Close, want 0", got)
+	}
+}
