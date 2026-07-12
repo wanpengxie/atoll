@@ -21,6 +21,13 @@ type panicActor struct{}
 
 func (panicActor) Receive(context.Context, *message.Envelope) error { panic("boom") }
 
+// closedForeverVerdict wires the closure triple's monotone predicate with a fixed
+// verdict: gone=true → deregistered / never a member → closure owed; gone=false →
+// still a registered member → no closure (its callers wait for the deadline).
+func closedForeverVerdict(gone bool) func(context.Context, actor.ActorID) (bool, error) {
+	return func(context.Context, actor.ActorID) (bool, error) { return gone, nil }
+}
+
 // liveActor is a healthy no-op cell — stands in for a same-id successor.
 func newChannel(cfg channelkit.Config) *channelkit.Channel {
 	c, err := channelkit.New(cfg)
@@ -124,10 +131,11 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 	}
 	fc := &fakeWriter{}
 	ch := newChannel(channelkit.Config{
-		ChannelID:    "ch",
-		SystemPen:    fc,
-		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
-		Clock:        time.Now,
+		ChannelID:     "ch",
+		SystemPen:     fc,
+		OpenRequests:  fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
+		ClosedForever: closedForeverVerdict(true), // worker is deregistered → closure owed
+		Clock:         time.Now,
 	})
 	defer ch.Close()
 	_, _, _ = ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return panicActor{} })
@@ -163,13 +171,15 @@ func TestOnDown_MaterialisesReceiverUnavailable(t *testing.T) {
 	}
 }
 
-// TestReconcile_Despawn_ClosesWithoutCaller proves the closure reconciler (the
-// level scan) closes a CLEAN-despawned actor's inbound open request WITHOUT the
-// caller doing anything (F5: Despawn carries no "callers MUST collapse before"
-// obligation). A clean despawn fires NO death edge — only the level scan, which
-// finds the open request's receiver absent from liveness and materialises
+// TestReconcile_ClosesDeregisteredReceiver proves the closure reconciler (the
+// level scan) closes a DEREGISTERED receiver's inbound open request WITHOUT the
+// caller doing anything (F5: closure carries no "callers MUST collapse before"
+// obligation). Closure is keyed on the MONOTONE dereg fact, not liveness: while
+// the receiver is still a registered member the scan leaves it (a successor may
+// yet answer — its callers wait for the request deadline); once it is closed
+// forever (deregistered / never a member) the scan materialises
 // receiver_unavailable.
-func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
+func TestReconcile_ClosesDeregisteredReceiver(t *testing.T) {
 	req := message.Envelope{
 		ID:        "req-1",
 		ChannelID: "ch",
@@ -179,6 +189,7 @@ func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
 		Audience:  message.Audience{"worker"},
 	}
 	fc := &fakeWriter{}
+	gone := false // starts as a live registered member
 	ch := newChannel(channelkit.Config{
 		ChannelID: "ch",
 		SystemPen: fc,
@@ -186,28 +197,25 @@ func TestReconcile_Despawn_ClosesWithoutCaller(t *testing.T) {
 			reqs:      []storespec.StoredRow{{Envelope: req}},
 			receivers: []actor.ActorID{"worker"}, // the open request's receiver
 		},
-		Clock: time.Now,
+		ClosedForever: func(context.Context, actor.ActorID) (bool, error) { return gone, nil },
+		Clock:         time.Now,
 	})
 	defer ch.Close()
-	// Place the worker, then CLEAN despawn it (no panic → no death edge fires).
-	workerInc, _, _ := ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
 
-	// While present, a sweep must NOT close it (the live receiver can answer).
+	// While still a registered member, a sweep must NOT close it (a successor
+	// could still answer — closure is not owed on mere liveness absence).
 	ch.Reconcile(context.Background())
 	if fc.count() != 0 {
-		t.Fatal("reconciler closed a request whose receiver is still PRESENT")
+		t.Fatal("reconciler closed a request whose receiver is still a registered member")
 	}
 
-	// Clean despawn — no edge. The caller does NOTHING to collapse the request.
-	ch.Cells().Despawn(workerInc)
-	if _, ok := ch.Cells().Stat("worker"); ok {
-		t.Fatal("worker still present after Despawn")
-	}
+	// Deregister → closed forever. The caller does NOTHING to collapse the request.
+	gone = true
 
 	// The level scan alone closes the orphan.
 	ch.Reconcile(context.Background())
 	if fc.count() != 1 {
-		t.Fatalf("despawn reconciler did not close the inbound open request (count=%d)", fc.count())
+		t.Fatalf("reconciler did not close the deregistered receiver's inbound open request (count=%d)", fc.count())
 	}
 	term := fc.written[0]
 	if term.ParentID != "req-1" || term.Sender.ID != actor.SystemActorID {
@@ -282,11 +290,12 @@ func (h *capHandler) waitFirstMsg(timeout time.Duration) string {
 func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 	h := &capHandler{}
 	ch := newChannel(channelkit.Config{
-		ChannelID:    "ch",
-		SystemPen:    &fakeWriter{},
-		OpenRequests: errQuery{},
-		Clock:        time.Now,
-		Logger:       slog.New(h),
+		ChannelID:     "ch",
+		SystemPen:     &fakeWriter{},
+		OpenRequests:  errQuery{},
+		ClosedForever: closedForeverVerdict(true), // deregistered → closure attempted → drain fails
+		Clock:         time.Now,
+		Logger:        slog.New(h),
 	})
 	defer ch.Close()
 	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, nil)
@@ -325,11 +334,12 @@ func TestOnDown_PerRequestWriteFault_IsLogged(t *testing.T) {
 	}
 	h := &capHandler{}
 	ch := newChannel(channelkit.Config{
-		ChannelID:    "ch",
-		SystemPen:    errWriter{},
-		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
-		Clock:        time.Now,
-		Logger:       slog.New(h),
+		ChannelID:     "ch",
+		SystemPen:     errWriter{},
+		OpenRequests:  fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
+		ClosedForever: closedForeverVerdict(true), // deregistered → closure attempted → per-request write fails
+		Clock:         time.Now,
+		Logger:        slog.New(h),
 	})
 	defer ch.Close()
 	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, nil)
@@ -359,38 +369,70 @@ func TestNew_DefaultClockAndSpawnsSystem(t *testing.T) {
 	}
 }
 
-// TestOnDown_AsyncConsumer_SkipsLivePresentSuccessor (DoD⑤ + G0-3): the down
-// edge is now O(1)-posted and materialised by a resident consumer, which RE-CHECKS
-// liveness before writing — so a stale edge for an id whose same-id successor is
-// already live is skipped (no terminal), exactly as the level scan guards. A
-// live "worker" is present, an edge arrives for it, and NO closure terminal is
-// written.
-func TestOnDown_AsyncConsumer_SkipsLivePresentSuccessor(t *testing.T) {
+// TestOnDown_SkipsStillRegisteredReceiver (C7 拔根 · 崩溃在册者不被 RU): the down
+// edge is now O(1)-posted and materialised by a resident consumer, which re-derives
+// the monotone closed-forever fact before writing — so an edge for an id that is
+// still a REGISTERED MEMBER (a crash whose incarnation may yet be re-embodied) is
+// skipped (no terminal); its callers wait for the request deadline. This is the
+// core semantic change: liveness absence alone no longer authors a terminal.
+func TestOnDown_SkipsStillRegisteredReceiver(t *testing.T) {
 	req := message.Envelope{
 		ID: "req-1", ChannelID: "ch", Kind: message.KindRequest, Type: "x.do",
 		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"worker"},
 	}
 	fc := &fakeWriter{}
 	ch := newChannel(channelkit.Config{
-		ChannelID:    "ch",
-		SystemPen:    fc,
-		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
-		Clock:        time.Now,
+		ChannelID:     "ch",
+		SystemPen:     fc,
+		OpenRequests:  fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
+		ClosedForever: closedForeverVerdict(false), // worker is still a registered member
+		Clock:         time.Now,
 	})
 	defer ch.Close()
-	// A live successor occupies "worker".
-	_, _, _ = ch.Cells().SpawnIfAbsent("worker", actor.KindTool, func(actorrt.Incarnation) actorrt.Actor { return liveActor{} })
 
-	// A stale edge for "worker" — the async consumer must recheck Present and skip.
-	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, errors.New("stale predecessor edge"))
+	// An edge for a crashed-but-registered "worker" — the consumer must skip it.
+	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, errors.New("crashed but still a member"))
 
 	// Give the consumer time to (not) write. No terminal must appear.
 	deadline := time.Now().Add(300 * time.Millisecond)
 	for time.Now().Before(deadline) {
 		if fc.count() != 0 {
-			t.Fatalf("consumer wrote a terminal for a live-present successor — recheck did not skip")
+			t.Fatalf("consumer wrote a terminal for a still-registered receiver — 崩溃在册者被误关 (regression)")
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestOnDown_PredicateFailure_SkipsAndLogs (C7 失败政策 · edge 路): a closure-
+// predicate LOOKUP failure on the edge path must NEVER be treated as closed — the
+// consumer writes no terminal and surfaces a predicate_failed fault; the level
+// scan is the backstop. Locks 错误绝不当注销 on the fast path.
+func TestOnDown_PredicateFailure_SkipsAndLogs(t *testing.T) {
+	req := message.Envelope{
+		ID: "req-1", ChannelID: "ch", Kind: message.KindRequest, Type: "x.do",
+		Sender: message.Sender{Kind: actor.KindAgent, ID: "caller"}, Audience: message.Audience{"worker"},
+	}
+	fc := &fakeWriter{}
+	h := &capHandler{}
+	ch := newChannel(channelkit.Config{
+		ChannelID:    "ch",
+		SystemPen:    fc,
+		OpenRequests: fakeQuery{reqs: []storespec.StoredRow{{Envelope: req}}},
+		ClosedForever: func(context.Context, actor.ActorID) (bool, error) {
+			return false, errors.New("registry lookup down")
+		},
+		Clock:  time.Now,
+		Logger: slog.New(h),
+	})
+	defer ch.Close()
+
+	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, nil)
+	got := h.waitFirstMsg(2 * time.Second)
+	if got != "channelkit.closure.predicate_failed" {
+		t.Fatalf("predicate failure fault msg=%q, want channelkit.closure.predicate_failed", got)
+	}
+	if fc.count() != 0 {
+		t.Fatalf("a predicate lookup failure must NOT close anyone (错误当注销=误杀), got %d writes", fc.count())
 	}
 }
 

@@ -8,7 +8,10 @@
 //
 // Reconcile is the level-triggered backstop for the same closure: the death
 // edge is a lossy fast path (a missed or predating edge leaves an orphan open
-// request), so Reconcile scans for receivers absent from substrate liveness
-// and closes them directly — idempotent against the terminal-uniqueness index,
-// driven by the composition root on a ticker, not by any edge.
+// request), so Reconcile scans for receivers that are CLOSED FOREVER
+// (deregistered / never a member — the injected monotone predicate) and closes
+// them directly — idempotent against the terminal-uniqueness index, driven by
+// the composition root on a ticker, not by any edge. A receiver merely absent
+// from liveness is still a member: it is left to the deadline reaper, never
+// closed on a reversible liveness dip.
 package channelkit

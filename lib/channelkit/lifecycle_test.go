@@ -43,7 +43,8 @@ func TestChannelCloseBoundsStoreIgnoringContext(t *testing.T) {
 	q := lifecycleQuery{row: storespec.StoredRow{Envelope: message.Envelope{
 		ID: "req", Kind: message.KindRequest, Audience: message.Audience{"dead"},
 	}}}
-	c, err := New(Config{ChannelID: "ch", SystemPen: pen, OpenRequests: q})
+	c, err := New(Config{ChannelID: "ch", SystemPen: pen, OpenRequests: q,
+		ClosedForever: func(context.Context, actor.ActorID) (bool, error) { return true, nil }})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -443,8 +443,22 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 		},
 		SystemPen:    systemPen,
 		OpenRequests: cs.Query,
-		Clock:        clock,
-		Logger:       logger,
+		// ClosedForever is closure's monotone predicate (拔根 #14/#15): a receiver's
+		// callers are closed with receiver_unavailable ONLY when it is deregistered
+		// or never a member — the irreversible facts (an actor id is minted once and
+		// never reused; dereg never reverts). Same classification as the scheduler's
+		// not_a_member reject. A crashed-but-still-registered receiver returns false
+		// here and is left to the expiry reaper (its callers wait for the request
+		// deadline) — no liveness snapshot is ever a terminal-write dependency.
+		ClosedForever: func(ctx context.Context, id actor.ActorID) (bool, error) {
+			rec, ok, err := cs.Registry.Lookup(ctx, id)
+			if err != nil {
+				return false, err // transient: skip this round, the reconciler retries next tick.
+			}
+			return !ok || !rec.IsActive(), nil
+		},
+		Clock:  clock,
+		Logger: logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct channel: %w", err)
@@ -576,12 +590,12 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	lateAcc.bind(links)
 
 	// 13. Reconcilers (level backstops). Run one sweep of EACH at startup —
-	//     activation re-mints the always-on desired set; closure is the home-restart
-	//     recovery path (#4, close orphan open requests whose receiver's embodiment
-	//     predates this process). Then a low-frequency ticker keeps both as the
-	//     safety net for any lost death edge / intent change. The death edge (OnDown)
-	//     remains the lossy fast-path for closure. Step order is fixed inside
-	//     reconcileSweep (BOOT-ORDER红线12 — see its head).
+	//     activation re-mints the always-on desired set; closure closes orphan open
+	//     requests whose receiver is closed forever (deregistered / never a member)
+	//     — a lost dereg edge, or a dereg that predates this process. Then a
+	//     low-frequency ticker keeps both as the safety net for any lost death edge
+	//     / intent change. The death edge (OnDown) remains the lossy fast-path for
+	//     closure. Step order is fixed inside reconcileSweep (see its head).
 	if err := faults.checkpoint("publish.sweep"); err != nil {
 		return nil, err
 	}
@@ -619,16 +633,18 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	return h, nil
 }
 
-// reconcileSweep runs the home's level-reconcile quartet in the one order the
-// BOOT-ORDER红线 (红线12) fixes — activation MUST precede closure, at the first
-// sweep AND every tick.
+// reconcileSweep runs the home's level-reconcile quartet in the fixed
+// activation → closure → expiry → presence order; each step re-checks ctx so a
+// cancel between steps stops the sweep before the next component.
 //
-// closure's verdict is "absent right now" (livenessProbe), not "predates this
-// process" — so a receiver whose desired cell the ring has not yet (re)minted
-// this sweep would be scanned as receiver_unavailable and its deferred open
-// requests wrongly closed. Minting first, then scanning, keeps a restart /
-// mid-life-crash cell's open requests alive across the sweep. Each step re-checks
-// ctx so a cancel between steps stops the sweep before the next component.
+// Closure (channel.Reconcile) authors a terminal ONLY on the monotone
+// closed-forever fact (deregistered / never a member), never on liveness — so a
+// receiver whose desired cell the ring has not yet (re)minted this sweep is still
+// a registered member and is left untouched (its open requests wait for the
+// deadline reaper), regardless of sweep order. Keying closure on the irreversible
+// dereg fact instead of a reversible liveness dip dissolves the old
+// "not-yet-minted cell mis-scanned as a corpse" hazard; activation is kept first
+// as the natural order — re-mint the always-on desired set before the backstops.
 func (h *Home) reconcileSweep(ctx context.Context) {
 	h.reconcileActivation(ctx)
 	if ctx.Err() != nil {
