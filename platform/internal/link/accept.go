@@ -66,6 +66,13 @@ type Acceptor struct {
 	leaked        atomic.Int64
 	admissionHook func()
 
+	// reconcileDeregFailed counts reconcileHost dereg-write failures (#7 子案):
+	// each leaves a host row zombie (still Host==computeID, still active) until a
+	// later full-set Reattach — the daemon's periodic resync — re-runs the diff
+	// and收敛s it. The count is that convergence dashboard: a rising number is
+	// the signal that resync is the only thing keeping rows from stranding.
+	reconcileDeregFailed atomic.Uint64
+
 	// attached is the live attach refcount per compute id (daemon). A daemon is
 	// "online" (attached) iff its count > 0. Refcount, not bool, so an
 	// overlapping reconnect (old link tearing down after the new one attached)
@@ -830,7 +837,11 @@ func (a *Acceptor) reconcileHost(ctx context.Context, computeID string, newAllow
 		return
 	}
 	if err := a.membership.ApplyMemberTransitions(ctx, nil, removes); err != nil {
-		a.logger.Warn("link.reconcile_host_dereg_failed", "compute", computeID, "err", err)
+		// Error, not Warn (#7 子案): a failed dereg strands the row live until the
+		// daemon's next full-set Reattach/resync re-runs this diff — a real account-
+		// vs-reality divergence, not a benign transient. The count is its dashboard.
+		n := a.reconcileDeregFailed.Add(1)
+		a.logger.Error("link.reconcile_host_dereg_failed", "compute", computeID, "err", err, "removes", len(removes), "total_failures", n)
 		return
 	}
 }

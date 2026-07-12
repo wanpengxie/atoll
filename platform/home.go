@@ -234,6 +234,10 @@ type homeFaults struct {
 	action   map[string]func()
 	created  func(*Home)
 	delivery func(storespec.StoredRow) error
+	// wrapMembership, when set, decorates the membership control plane handed to
+	// the link acceptor (only) — a test seam for injecting reconcileHost write
+	// faults without touching the membership every other arm reads.
+	wrapMembership func(storespec.MembershipControlPlane) storespec.MembershipControlPlane
 }
 
 func (f *homeFaults) checkpoint(name string) error {
@@ -528,12 +532,16 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	//      behaviourally identical to a local one (transport neutrality).
 	//      Attached-port obs enters the runtime's one population subscription
 	//      just like local-cell obs.
+	acceptorMembership := storespec.MembershipControlPlane(cs.Membership)
+	if faults != nil && faults.wrapMembership != nil {
+		acceptorMembership = faults.wrapMembership(cs.Membership)
+	}
 	links := link.NewAcceptor(link.Config{
 		Minter:             minter,
 		Access:             cs.Access,
 		Schedule:           schedMinter,
 		Runtime:            rt,
-		Membership:         cs.Membership,
+		Membership:         acceptorMembership,
 		Registry:           cs.Registry,
 		ChannelID:          cfg.ChannelID,
 		Logger:             logger,

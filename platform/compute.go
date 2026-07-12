@@ -216,6 +216,12 @@ type ComputeBuilder interface {
 // ComputeConfig.Poll is unset (S-P10).
 const defaultComputePoll = 30 * time.Second
 
+// defaultResyncInterval is the ring's slow-cadence periodic full-set re-
+// declaration period (kubelet periodic resync) when ComputeConfig.Resync is
+// unset — minute-level, a level-triggered convergence backstop rather than a
+// liveness signal (the poll cadence above is the fast edge-driven half).
+const defaultResyncInterval = 5 * time.Minute
+
 // ComputeConfig configures the attached compute. ServerWS carries any auth
 // credential in its query string (the ?key= the app layer resolves on WS
 // upgrade) — the link layer is auth-agnostic, so there is no separate key field.
@@ -242,6 +248,14 @@ type ComputeConfig struct {
 	Builder ComputeBuilder
 	// Poll is the ring's desired-source poll period. <=0 → defaultComputePoll.
 	Poll time.Duration
+	// Resync is the ring's slow-cadence periodic full-set re-declaration period
+	// (kubelet periodic resync 半, #7): every Resync the ring unconditionally
+	// Reattaches its full current declared set — even with no missing/削 diff —
+	// so the home's reconcileHost re-runs and absorbs any account-vs-reality
+	// drift into bounded convergence (a削章 dereg-write that failed once, a late
+	// migration, any future divergence source). Level-triggered backstop; the
+	// Poll cadence is the fast edge-driven half. <=0 → defaultResyncInterval.
+	Resync time.Duration
 	// StorageHost (optional, 期11 §4) is the daemon's file-kind storage host
 	// — cmd/daemon/internal/storagehost.Host, injected by cmd/daemon/main.go
 	// (this package cannot construct one itself: the concrete os.Root-touching
@@ -566,6 +580,10 @@ func runCompute(ctx context.Context, cfg ComputeConfig, hooks *computeLifecycleH
 	if poll <= 0 {
 		poll = defaultComputePoll
 	}
+	resync := cfg.Resync
+	if resync <= 0 {
+		resync = defaultResyncInterval
+	}
 
 	// Cell running is the kernel: the daemon owns an actorrt.Runtime directly. It
 	// is built HERE, once — OUTSIDE the redial loop below (F14) — because a
@@ -699,7 +717,7 @@ func runCompute(ctx context.Context, cfg ComputeConfig, hooks *computeLifecycleH
 		// dedicated open step here.
 
 		linkStart := time.Now()
-		graceful := ring.runLink(ctx, d, cfg.Desired, poll)
+		graceful := ring.runLink(ctx, d, cfg.Desired, poll, resync)
 		_ = d.Close() // idempotent: a no-op if the link already tore itself down.
 		if graceful {
 			return nil
@@ -749,11 +767,13 @@ type computeRing struct {
 // the home's ports die QUIET — and false if the link itself goes down, so the
 // caller redials. It never touches rt's cells: a link death degrades the wire,
 // the hosted work is untouched (§10.13 推导3).
-func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, desired actorrt.DesiredSource, poll time.Duration) (graceful bool) {
-	r.reconcile(ctx, d, desired)
+func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, desired actorrt.DesiredSource, poll, resync time.Duration) (graceful bool) {
+	r.reconcile(ctx, d, desired, false)
 
 	t := time.NewTicker(poll)
 	defer t.Stop()
+	resyncT := time.NewTicker(resync)
+	defer resyncT.Stop()
 	for {
 		select {
 		case <-ctx.Done():
@@ -765,7 +785,12 @@ func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, desired actor
 		case <-d.Done():
 			return false
 		case <-t.C:
-			r.reconcile(ctx, d, desired)
+			r.reconcile(ctx, d, desired, false)
+		case <-resyncT.C:
+			// Periodic resync (#7 kubelet 两件套 半②): re-declare the full set
+			// unconditionally so the home re-diffs and absorbs any漏网 drift —
+			// level-triggered, independent of whether this tick has a diff.
+			r.reconcile(ctx, d, desired, true)
 		}
 	}
 }
@@ -779,7 +804,14 @@ func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, desired actor
 // Spawn, StartStream) or reopenOne (already live: OpenStream, Rebind, Start-
 // Stream — never re-Spawn). A desired-read failure leaves the prior state
 // untouched and retries next tick.
-func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired actorrt.DesiredSource) {
+//
+// The full-set Reattach fires on ANY of three conditions (#7 kubelet 两件套):
+// 补边 (missing ids need their stream opened), 削边 (this tick shrank the set —
+// a pure缩容 has no missing but the home must still be told, else the fallen-out
+// host row滞留 indefinitely, account收敛 only on a later privileged扩容/reconnect),
+// or resync (the caller's slow periodic re-declaration, level-triggered兜底 that
+// absorbs any drift — a削章 dereg that failed home-side, a late migration).
+func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired actorrt.DesiredSource, resync bool) {
 	members, err := desired.Members(ctx)
 	if err != nil {
 		r.logger.Error("platform.compute.desired_failed", "err", err)
@@ -793,6 +825,10 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 
 	// 削: previously-declared ids no longer desired. Local despawn ends the cell's
 	// execution arm; DetachStream tells the home this arm is gone QUIET (§10.5/S1).
+	// DetachStream is attachment-only (membership ≠ attachment): the home host row
+	// only falls out when a later full-set Reattach re-diffs, so a 削 forces that
+	// Reattach this same tick (shrank) rather than waiting for a补边 that may never come.
+	shrank := false
 	for id := range r.prevCurrent {
 		if _, ok := current[id]; ok {
 			continue
@@ -803,6 +839,7 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 		r.watcher.mu.Lock()
 		delete(r.watcher.down, id)
 		r.watcher.mu.Unlock()
+		shrank = true
 		r.logger.Info("platform.compute.deactivated", "actor", string(id))
 	}
 
@@ -819,10 +856,12 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 		}
 	}
 
-	if len(missing) > 0 {
+	if len(missing) > 0 || shrank || resync {
 		// Reattach the FULL current declared set (kubelet node-status idiom, never
 		// an increment — §S-P8) so the home's allowed set covers every id about to
-		// OpenStream, then build/reopen each missing actor.
+		// OpenStream, then build/reopen each missing actor. On a削-only or resync
+		// tick missing is empty, so the loop below is a no-op — the Reattach itself
+		// is the payload (re-diff the home's host rows).
 		decls := make([]link.Declaration, 0, len(current))
 		for id, kind := range current {
 			decls = append(decls, link.Declaration{ActorID: id, Kind: kind, Binding: actor.BindingRuntimeInboundViaRelay})
@@ -830,7 +869,9 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 		if err := d.Reattach(ctx, decls); err != nil {
 			r.logger.Warn("platform.compute.reattach_failed", "err", err, "actors", len(decls))
 			// Every missing id stays not-fully-hosted, so next tick's diff retries
-			// them (the ids remain in `current`, untouched below).
+			// them (the ids remain in `current`, untouched below). A失败的削 Reattach
+			// is not re-fired by the poll loop (prevCurrent updates to current below,
+			// so the 削 does not re-diff) — the periodic resync is its收敛 backstop.
 		} else {
 			for _, id := range missing {
 				if live[id] {
