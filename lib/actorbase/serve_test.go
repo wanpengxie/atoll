@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -90,6 +91,19 @@ func (f *fakeSys) Recv() (Msg, error) {
 }
 
 func (f *fakeSys) Life() context.Context { return context.Background() }
+
+// Identity-dimension variants (gateway 期 S1): dispatch/Serve never reach them.
+func (f *fakeSys) SubmitEnvelope(behavior.SubjectWriteSpec) (message.ID, int64, error) {
+	return "", 0, ErrUnsupported
+}
+func (f *fakeSys) RespondEnvelope(*message.Envelope, behavior.ResponseSpec) (message.ID, error) {
+	return "", ErrUnsupported
+}
+func (f *fakeSys) AfterIdentity(time.Duration, string, json.RawMessage) (schedule.TimerID, error) {
+	return "", ErrUnsupported
+}
+func (f *fakeSys) CancelTimerIdentity(schedule.TimerID) error { return ErrUnsupported }
+func (f *fakeSys) ResourceIdentity() ResourceHandle           { return nil }
 
 var _ Sys = (*fakeSys)(nil)
 

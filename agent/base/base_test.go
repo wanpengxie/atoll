@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -119,6 +120,19 @@ func (s *fakeSys) Recv() (actorbase.Msg, error) {
 	}
 	return msg, nil
 }
+
+// Identity-dimension variants (gateway 期 S1): the base Proc never drives them.
+func (s *fakeSys) SubmitEnvelope(behavior.SubjectWriteSpec) (message.ID, int64, error) {
+	return "", 0, actorbase.ErrUnsupported
+}
+func (s *fakeSys) RespondEnvelope(*message.Envelope, behavior.ResponseSpec) (message.ID, error) {
+	return "", actorbase.ErrUnsupported
+}
+func (s *fakeSys) AfterIdentity(time.Duration, string, json.RawMessage) (schedule.TimerID, error) {
+	return "", actorbase.ErrUnsupported
+}
+func (s *fakeSys) CancelTimerIdentity(schedule.TimerID) error         { return actorbase.ErrUnsupported }
+func (s *fakeSys) ResourceIdentity() actorbase.ResourceHandle         { return nil }
 
 var _ actorbase.Sys = (*fakeSys)(nil)
 

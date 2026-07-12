@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -17,9 +18,12 @@ import (
 // line ever runs, and nothing in this interface lets the holder self-report a
 // different one. It is a SATISFYING MAP of the substrate's closed capability
 // face (spec §1.2): every internal-primitive column of the verb table has
-// exactly one Sys method, and Sys defines NOTHING beyond that table (additive
-// only — a capability-face addition earns a new method; nothing here exists
-// for a hypothetical future consumer).
+// exactly one Sys method — EXCEPT the identity-dimension variants
+// (SubmitEnvelope/RespondEnvelope/AfterIdentity/CancelTimerIdentity/
+// ResourceIdentity), which are a WithoutCancel + identity-bound reflection of
+// the same columns for the off-process subject (gateway 期 S1). Sys defines
+// NOTHING beyond those tables (additive only — a capability-face addition earns
+// a new method; nothing here exists for a hypothetical future consumer).
 //
 // ctx PROVENANCE (the one rule every Proc author must internalise — owner
 // 2026-07-04, "只修 Wait 修不了生态" is why this is a rule and not a magic
@@ -104,6 +108,31 @@ type Sys interface {
 	// this incarnation's occupant forsakes the arena (return/panic), never
 	// before.
 	Life() context.Context
+
+	// --- Identity-dimension variants (gateway 期 S1) ------------------
+	// Four write/schedule verbs + one resource handle whose lifecycle promise
+	//系于 IDENTITY (the log is truth), not this incarnation's serve projection:
+	// any Proc may drive them, an off-process subject's door (gateway's human
+	// driver) is the first动词级 consumer. Each mirrors its in-process sibling
+	// but detaches ctx cancellation (WithoutCancel) so a write the live membrane
+	// would still accept is not aborted by concurrent teardown.
+	//
+	// SubmitEnvelope receives a SPEC, not a finished envelope: the engine builds
+	// and validates it (kind whitelist / visibility / audience). Returns
+	// (message id, harness seq, err).
+	SubmitEnvelope(spec behavior.SubjectWriteSpec) (message.ID, int64, error)
+	// RespondEnvelope answers a request recovered from the log this incarnation
+	// may never have Recv'd (cross-incarnation response — the serve account is
+	// only a per-life projection: an entry closes if present, else zero action).
+	RespondEnvelope(req *message.Envelope, spec behavior.ResponseSpec) (message.ID, error)
+	// AfterIdentity arms an IDENTITY-bound durable timer (survives incarnations)
+	// — the Bind value is the ONE difference from After. payload is carried
+	// verbatim as RawMessage (never []byte→base64).
+	AfterIdentity(d time.Duration, msgType string, payload json.RawMessage) (schedule.TimerID, error)
+	CancelTimerIdentity(id schedule.TimerID) error
+	// ResourceIdentity is Resource()'s WithoutCancel variant: the same access
+	// membrane driven under a ctx detached from this incarnation's teardown.
+	ResourceIdentity() ResourceHandle
 }
 
 // ErrUnsupported is returned by a Sys verb that a given host cannot honour —
