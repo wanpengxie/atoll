@@ -78,16 +78,15 @@ type capsAssembler func(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnati
 type spawnHandle struct {
 	inc       actorrt.Incarnation
 	rt        *actorrt.Runtime
-	builder   CapsFactoryBuilder // nil until the class→factory table is injected.
-	assemble  capsAssembler      // the shared caps seam assembler (Home.buildCaps); never nil.
-	placement actorrt.Placement  // single-home identity this period (SinglePlacement).
-	hooks     actorbase.Hooks    // the actorbase engine's per-host wiring (spec §3); a fork child inherits its parent home's hooks.
+	builder  CapsFactoryBuilder // nil until the class→factory table is injected.
+	assemble capsAssembler      // the shared caps seam assembler (Home.buildCaps); never nil.
+	hooks    actorbase.Hooks    // the actorbase engine's per-host wiring (spec §3); a fork child inherits its parent home's hooks.
 }
 
-// newSpawnHandle welds a SpawnHandle to parent incarnation inc. rt/assemble/
-// placement are always present; builder may be nil (see ErrNoBuilder).
-func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, builder CapsFactoryBuilder, assemble capsAssembler, placement actorrt.Placement, hooks actorbase.Hooks) actorrt.SpawnHandle {
-	return spawnHandle{inc: inc, rt: rt, builder: builder, assemble: assemble, placement: placement, hooks: hooks}
+// newSpawnHandle welds a SpawnHandle to parent incarnation inc. rt/assemble are
+// always present; builder may be nil (see ErrNoBuilder).
+func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, builder CapsFactoryBuilder, assemble capsAssembler, hooks actorbase.Hooks) actorrt.SpawnHandle {
+	return spawnHandle{inc: inc, rt: rt, builder: builder, assemble: assemble, hooks: hooks}
 }
 
 // Fork mints a child owned by this handle's parent incarnation.
@@ -97,8 +96,8 @@ func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, builder CapsFa
 // factory from the builder table, then wraps it in a build closure that runs the
 // assembler against the CHILD's incarnation, so the child is born with its own
 // livePen/liveAccess/liveState membranes welded to itself — recursive assembly,
-// not a raw closure handed straight through. This handle derives the child name,
-// asks placement, and drives the substrate fork primitive.
+// not a raw closure handed straight through. This handle derives the child name
+// and drives the substrate fork primitive.
 func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 	if h.builder == nil {
 		return "", ErrNoBuilder
@@ -111,12 +110,6 @@ func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 	factory, ok := h.builder.LookupByClass(childID, spec.Class, spec.Config)
 	if !ok {
 		return "", ErrClassNotFound
-	}
-	// Placement answers the physical host (single-home identity this period);
-	// call it so multi-home can additively swap the implementation later without
-	// touching this call site.
-	if _, err := h.placement.Place(childID, spec.Kind); err != nil {
-		return "", err
 	}
 	// Weld the child's caps seam at the platform assembler (same seam as
 	// admission): the build closure runs INSIDE rt.Fork (pre-go-live,
@@ -137,20 +130,4 @@ func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 // the handle itself never leaves the substrate.
 func (h spawnHandle) Despawn(childID actor.ActorID) error {
 	return h.rt.DespawnChild(h.inc, childID)
-}
-
-// singleHostRef is the fixed host of the single-home deployment. Opaque to
-// actorrt (it never interprets a HostRef); the value only needs to be stable and
-// non-empty. Multi-home selection is the split-brain wall — deferred.
-const singleHostRef actorrt.HostRef = "local"
-
-// SinglePlacement is the single fixed-home Placement implementation — ships
-// shape only. Every id/kind resolves to the same host — a placement never
-// touches membership, and multi-home selection is deferred until a second home
-// exists.
-type SinglePlacement struct{}
-
-// Place implements actorrt.Placement — always the single home, never an error.
-func (SinglePlacement) Place(actor.ActorID, actor.Kind) (actorrt.HostRef, error) {
-	return singleHostRef, nil
 }

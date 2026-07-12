@@ -141,10 +141,6 @@ type Home struct {
 	// harmless). Touched only on the reconcile goroutine, no lock.
 	expiryCursor storespec.ExpiryCursor
 
-	// placement decides which host a new activity (fork/activation) starts on.
-	// Single fixed-home identity this period (SinglePlacement); shaped now so
-	// fork/activation route through Place() and multi-home swaps additively.
-	placement actorrt.Placement
 	// builder is the platform-layer class → caps-factory table (the fork
 	// injection-point contract, CapsFactoryBuilder). nil until the domain's
 	// factory table is injected — a nil builder makes SpawnHandle.Fork fail-fast
@@ -271,8 +267,9 @@ const reconcileInterval = 30 * time.Second
 // Open assembles the channel home. Assembly is linearised by the tap seam (no
 // construction cycle, no back-fill):
 //
-//	signal -> stores(OnCommit=signal.Notify) -> harness -> channelkit(spawns
-//	sysactor against the live runtime) -> delivery tap -> link acceptor.
+//	signal -> stores(OnCommit=signal.Notify) -> harness -> channelkit(registers
+//	the sysactor factory; Start births it against the live runtime) ->
+//	delivery tap -> link acceptor.
 func Open(cfg HomeConfig) (*Home, error) { return openHome(cfg, nil) }
 
 func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
@@ -393,10 +390,11 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	//    h is predeclared (nil) here and assigned below (step 9): sysactor is a
 	//    ring0 special Proc (spec §3's out-generation matrix) that still enters
 	//    through actorbase.New like every other actor, so its Hooks.Canceller
-	//    wants Home.CancelRequest — but the system cell is spawned INSIDE
-	//    channelkit.New, before Home exists. The closure captures the h
-	//    VARIABLE (not its zero value); by the time a cancel actually fires
-	//    (long after Open returns), h has been assigned.
+	//    wants Home.CancelRequest — but the system cell's factory is registered
+	//    at channelkit.New (and the cell birthed at channel.Start), before Home
+	//    is assigned. The closure captures the h VARIABLE (not its zero value);
+	//    by the time a cancel actually fires (long after Open returns), h has
+	//    been assigned.
 	channel, err := channelkit.New(channelkit.Config{
 		ChannelID: cfg.ChannelID,
 		System: func(rt *actorrt.Runtime, inc actorrt.Incarnation) actorrt.Actor {
@@ -476,7 +474,6 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	h.presenceFold = presenceFold
 	h.logger = logger
 	h.nowMs = nowMs
-	h.placement = SinglePlacement{}
 	h.builder = cfg.Builder
 	h.desired = cfg.Desired
 	h.prevEagerDesired = map[actor.ActorID]bool{}
@@ -566,21 +563,12 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	//     recovery path (#4, close orphan open requests whose receiver's embodiment
 	//     predates this process). Then a low-frequency ticker keeps both as the
 	//     safety net for any lost death edge / intent change. The death edge (OnDown)
-	//     remains the lossy fast-path for closure.
-	//
-	//     BOOT-ORDER红线 (红线12): activation MUST precede closure, at the first sweep
-	//     AND every tick. closure's verdict is "absent right now" (livenessProbe),
-	//     not "predates this process" — so a receiver whose desired cell the ring has
-	//     not yet (re)minted this sweep would be scanned as receiver_unavailable and
-	//     its deferred open requests wrongly closed. Minting first, then scanning,
-	//     keeps a restart / mid-life-crash cell's open requests alive across the sweep.
+	//     remains the lossy fast-path for closure. Step order is fixed inside
+	//     reconcileSweep (BOOT-ORDER红线12 — see its head).
 	if err := faults.checkpoint("publish.sweep"); err != nil {
 		return nil, err
 	}
-	h.reconcileActivation(ctx)
-	channel.Reconcile(ctx)
-	h.sweepExpired(ctx)
-	h.sweepPresence(ctx)
+	h.reconcileSweep(ctx)
 	reconcileCtx, reconcileStop := context.WithCancel(context.Background())
 	reconcileDone := make(chan struct{})
 	h.reconcileStop = reconcileStop
@@ -594,36 +582,11 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 			case <-reconcileCtx.Done():
 				return
 			case <-t.C:
-				h.reconcileActivation(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				channel.Reconcile(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				h.sweepExpired(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				h.sweepPresence(reconcileCtx)
+				h.reconcileSweep(reconcileCtx)
 			case <-h.pokeCh:
-				// Admit poke: run the same activation-then-closure sweep off-tick so
-				// a freshly-admitted member embodies without the ≤30s wait. Boot-order
-				// 红线 holds (activation precedes closure) on this path too.
-				h.reconcileActivation(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				channel.Reconcile(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				h.sweepExpired(reconcileCtx)
-				if reconcileCtx.Err() != nil {
-					return
-				}
-				h.sweepPresence(reconcileCtx)
+				// Admit poke: run the same sweep off-tick so a freshly-admitted member
+				// embodies without the ≤30s wait.
+				h.reconcileSweep(reconcileCtx)
 			}
 		}
 	}()
@@ -637,6 +600,32 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	}
 	logger.Info("platform.home.ready", "channel", string(cfg.ChannelID))
 	return h, nil
+}
+
+// reconcileSweep runs the home's level-reconcile quartet in the one order the
+// BOOT-ORDER红线 (红线12) fixes — activation MUST precede closure, at the first
+// sweep AND every tick.
+//
+// closure's verdict is "absent right now" (livenessProbe), not "predates this
+// process" — so a receiver whose desired cell the ring has not yet (re)minted
+// this sweep would be scanned as receiver_unavailable and its deferred open
+// requests wrongly closed. Minting first, then scanning, keeps a restart /
+// mid-life-crash cell's open requests alive across the sweep. Each step re-checks
+// ctx so a cancel between steps stops the sweep before the next component.
+func (h *Home) reconcileSweep(ctx context.Context) {
+	h.reconcileActivation(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	h.channel.Reconcile(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	h.sweepExpired(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	h.sweepPresence(ctx)
 }
 
 // sweepPresence enforces fold rows ⊆ (live embodiments ∪ active membership).
@@ -1066,7 +1055,7 @@ func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnat
 		// descendant is an incarnation-level citizen (spec §4.1), so its private
 		// state must be per-incarnation memory, not this durable MintState arm. Any
 		// actor's fork children — top-level or itself a child — take that path.
-		Spawn: newSpawnHandle(inc, rt, h.builder, h.buildChildCaps, h.placement, h.hooks()),
+		Spawn: newSpawnHandle(inc, rt, h.builder, h.buildChildCaps, h.hooks()),
 	}
 }
 

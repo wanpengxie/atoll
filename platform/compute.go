@@ -621,7 +621,6 @@ func runCompute(ctx context.Context, cfg ComputeConfig, hooks *computeLifecycleH
 		builder:     cfg.Builder,
 		logger:      logger,
 		prevCurrent: map[actor.ActorID]actor.Kind{},
-		infeasible:  map[actor.ActorID]error{},
 		arms:        map[actor.ActorID]*link.RebindableArms{},
 	}
 
@@ -699,10 +698,6 @@ type computeRing struct {
 	// local category never gets silently evicted). Touched only from the single
 	// caller goroutine (RunCompute's own loop), so it needs no lock.
 	prevCurrent map[actor.ActorID]actor.Kind
-	// infeasible records the last build/declare/open failure per id — surfaced via
-	// structured logging each pass; the diff itself retries every tick (a failed id
-	// stays "not live", so it is always back in next tick's missing set).
-	infeasible map[actor.ActorID]error
 	// arms is the per-id wire-flap membrane (§10.13 推导3): populated once at
 	// buildOne, Rebind'd (never re-created) on every later reopen — the cell's
 	// Caps were built from these facades, so a reconnect never touches the cell.
@@ -766,7 +761,6 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 		}
 		r.rt.DespawnID(id)
 		d.DetachStream(id)
-		delete(r.infeasible, id)
 		delete(r.arms, id)
 		r.watcher.mu.Lock()
 		delete(r.watcher.down, id)
@@ -798,10 +792,7 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 		if err := d.Reattach(ctx, decls); err != nil {
 			r.logger.Warn("platform.compute.reattach_failed", "err", err, "actors", len(decls))
 			// Every missing id stays not-fully-hosted, so next tick's diff retries
-			// them (the ids remain in `current`, untouched below); record the reason.
-			for _, id := range missing {
-				r.infeasible[id] = err
-			}
+			// them (the ids remain in `current`, untouched below).
 		} else {
 			for _, id := range missing {
 				if live[id] {
@@ -818,13 +809,11 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 
 // buildOne opens the actor's link stream, resolves its factory via the builder,
 // and spawns + starts it — the FIRST time this id is ever hosted. A failure at
-// any step is recorded in r.infeasible and logged; the id stays out of the live
-// set, so next tick's diff retries it.
+// any step is logged; the id stays out of the live set, so next tick's diff
+// retries it.
 func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer) {
 	factory, ok := r.builder.Lookup(id)
 	if !ok {
-		err := fmt.Errorf("no factory for %q", id)
-		r.infeasible[id] = err
 		r.logger.Warn("platform.compute.no_builder", "actor", string(id))
 		return
 	}
@@ -834,7 +823,6 @@ func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer
 	// stream IS the target — no audience demux on the daemon).
 	arms, err := d.OpenStream(id, r.dispatchFor(id, d), r.cancelFor(id))
 	if err != nil {
-		r.infeasible[id] = err
 		r.logger.Warn("platform.compute.open_stream_failed", "actor", string(id), "err", err)
 		return
 	}
@@ -876,7 +864,6 @@ func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer
 		return
 	}
 	d.StartStream(id)
-	delete(r.infeasible, id)
 }
 
 // reopenOne re-establishes an ALREADY-LIVE actor's link stream on d — a fresh
@@ -884,7 +871,7 @@ func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer
 // stream that died while the link stayed up (F6). It OpenStreams again and
 // Rebinds the actor's membrane to the fresh arms, but never re-Spawns: the
 // cell (identity + in-memory state) outlives the wire session, only the wire
-// arm is replaced. A failure here is recorded/retried exactly like buildOne's
+// arm is replaced. A failure here is logged/retried exactly like buildOne's
 // — the cell keeps running throughout, its wire arm just stays in the
 // disconnect-window (fail-closed) state a moment longer.
 func (r *computeRing) reopenOne(id actor.ActorID, d *link.Dialer) {
@@ -892,14 +879,11 @@ func (r *computeRing) reopenOne(id actor.ActorID, d *link.Dialer) {
 	if rb == nil {
 		// Cannot happen in practice (live ⟹ buildOne already ran and populated
 		// r.arms), but fail closed rather than lose the membrane silently.
-		err := fmt.Errorf("no rebindable arms for live actor %q", id)
-		r.infeasible[id] = err
 		r.logger.Error("platform.compute.reopen_missing_arms", "actor", string(id))
 		return
 	}
 	arms, err := d.OpenStream(id, r.dispatchFor(id, d), r.cancelFor(id))
 	if err != nil {
-		r.infeasible[id] = err
 		r.logger.Warn("platform.compute.reopen_stream_failed", "actor", string(id), "err", err)
 		return
 	}
@@ -908,7 +892,6 @@ func (r *computeRing) reopenOne(id actor.ActorID, d *link.Dialer) {
 	r.watcher.down[id] = arms.Down
 	r.watcher.mu.Unlock()
 	d.StartStream(id)
-	delete(r.infeasible, id)
 }
 
 // dispatchFor builds one actor's inbound dispatch closure over link d: deliver

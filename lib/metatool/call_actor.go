@@ -23,11 +23,12 @@ Workflow:
   4. Call call_actor.
 
 Result shapes (fast-path, default):
-  - Short calls (the downstream finishes within ~15s): the response payload
-    arrives INLINE in your tool result, exactly as if it were synchronous.
+  - Short calls (the downstream finishes within the fast-path window, ~15s by
+    default): the response payload arrives INLINE in your tool result, exactly
+    as if it were synchronous.
     On failure the result is {ok:false,error:{code,message,recovery_hint,detail?}}
     where code is the actor-CLI closed set.
-  - Long calls (still running after ~15s): you get an ACK instead —
+  - Long calls (still running past the fast-path window): you get an ACK instead —
     {status:"accepted", request_id, est_wait_ms, guidance, to_wait, if_not_waiting}.
     The call keeps running. To collect it, call await_result(request_id) to block,
     or do other work — the result will return on its own as a NEW message
