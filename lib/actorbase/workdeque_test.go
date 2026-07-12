@@ -86,3 +86,20 @@ func TestWorkDeque_AllRequestsFull_DropsNewEvent(t *testing.T) {
 		t.Fatalf("survivors = %s,%s want R1,R2", a.ID, b.ID)
 	}
 }
+
+// TestWorkDeque_NonPositiveCapPanics (#12): a non-positive capacity is a wiring
+// bug and must panic at construction, not silently remap to 256 — parity with
+// newServeLedger's F8 policy.
+func TestWorkDeque_NonPositiveCapPanics(t *testing.T) {
+	t.Parallel()
+	for _, capacity := range []int{0, -1} {
+		func() {
+			defer func() {
+				if recover() == nil {
+					t.Fatalf("expected newWorkDeque(cap=%d) to panic", capacity)
+				}
+			}()
+			_ = newWorkDeque(capacity)
+		}()
+	}
+}

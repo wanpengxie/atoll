@@ -1,18 +1,17 @@
 package platform
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"time"
 
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/lib/jsondepth"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -81,39 +80,6 @@ var ErrNotInAudience = errors.New("platform: not in the request's audience")
 // approved / rejected are valid human decisions (both close the request —
 // they BOTH map to completed+payload.decision). The app maps it to 400.
 var ErrInvalidDecision = errors.New("platform: resolve decision must be approved or rejected")
-
-// maxJSONDepth bounds the container nesting a client-supplied JSON blob may
-// carry before it is decoded into an UNSTRUCTURED map[string]any (Unmarshal
-// recurses per nesting level — an over-deep blob is a fatal stack overflow,
-// not a catchable error).
-const maxJSONDepth = 64
-
-// boundedJSONDepth scans raw's structural tokens WITHOUT materialising any
-// value (json.Decoder.Token is iterative) and errors when container nesting
-// exceeds maxJSONDepth. Malformed JSON returns nil here — the caller's own
-// Unmarshal surfaces the parse error.
-func boundedJSONDepth(raw []byte) error {
-	dec := json.NewDecoder(bytes.NewReader(raw))
-	depth := 0
-	for {
-		tok, err := dec.Token()
-		if err == io.EOF {
-			return nil
-		}
-		if err != nil {
-			return nil
-		}
-		switch tok {
-		case json.Delim('{'), json.Delim('['):
-			depth++
-			if depth > maxJSONDepth {
-				return fmt.Errorf("platform: json nesting exceeds %d levels", maxJSONDepth)
-			}
-		case json.Delim('}'), json.Delim(']'):
-			depth--
-		}
-	}
-}
 
 // WriteRejectedError wraps a substrate write reject so the app can surface it
 // (422) without touching harness/actorbase types itself — the door re-wraps
@@ -301,7 +267,7 @@ func (h HumanHandle) Resolve(ctx context.Context, reqID message.ID, decision str
 	if !ok || req == nil {
 		return ErrRequestNotFound
 	}
-	if !audienceContains(req.Audience, h.userID) {
+	if !req.Audience.Contains(h.userID) {
 		return ErrNotInAudience
 	}
 	open, err := h.home.isRequestOpen(ctx, h.userID, reqID)
@@ -313,7 +279,7 @@ func (h HumanHandle) Resolve(ctx context.Context, reqID message.ID, decision str
 	}
 	merged := map[string]any{}
 	if len(payload) > 0 {
-		if derr := boundedJSONDepth(payload); derr != nil {
+		if derr := jsondepth.Bounded(payload); derr != nil {
 			return &WriteRejectedError{Reason: "bad_payload", Detail: derr.Error()}
 		}
 		if uerr := json.Unmarshal(payload, &merged); uerr != nil {
@@ -624,14 +590,4 @@ func (h *Home) feedDevicePresence(id actor.ActorID, online bool) {
 	h.presenceFold.PutDoor(id,
 		actorrt.ObsKind(introspect.ObsDevicePresence),
 		actorrt.ObsValue(introspect.MarshalDevicePresence(online)))
-}
-
-// audienceContains reports whether id is in the audience list.
-func audienceContains(aud message.Audience, id actor.ActorID) bool {
-	for _, a := range aud {
-		if a == id {
-			return true
-		}
-	}
-	return false
 }

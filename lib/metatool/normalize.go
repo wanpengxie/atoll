@@ -37,11 +37,11 @@ func ResponseFailureReason(raw json.RawMessage) string {
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		return ""
 	}
-	if status := StringValue(obj["status"]); strings.EqualFold(status, "failed") {
+	if status := StringValue(obj["status"]); strings.EqualFold(status, message.StatusFailed) {
 		if reason := StringValue(obj["reason"]); reason != "" {
 			return reason
 		}
-		return "failed"
+		return message.StatusFailed
 	}
 	return ""
 }

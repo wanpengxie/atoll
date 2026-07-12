@@ -56,14 +56,3 @@ func TestMergeConfig_DeepPoisonNotRecursed(t *testing.T) {
 		t.Fatalf("two-layer merge wrong: %v (want a preserved, model=c)", m)
 	}
 }
-
-// TestBoundedJSONDepth pins the app-side depth gate directly.
-func TestBoundedJSONDepth(t *testing.T) {
-	over := strings.Repeat("[", maxJSONDepth+1) + strings.Repeat("]", maxJSONDepth+1)
-	if err := boundedJSONDepth([]byte(over)); err == nil {
-		t.Fatal("boundedJSONDepth accepted an over-deep blob")
-	}
-	if err := boundedJSONDepth([]byte(`{"a":{"b":1}}`)); err != nil {
-		t.Fatalf("boundedJSONDepth rejected a shallow blob: %v", err)
-	}
-}
