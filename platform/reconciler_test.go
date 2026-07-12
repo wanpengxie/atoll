@@ -3,6 +3,7 @@ package platform_test
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -101,42 +102,81 @@ func TestReconciler_LevelSweep_ClosesDeregisteredReceiver(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2 (C7 新测③ · 注销+边沿竞态无双终态): idempotency — repeated reconciler sweeps
-// (and, in production, a dereg death edge racing them) produce no duplicate
-// terminal. Both the level scan and the death edge funnel every closure through
-// behavior.Respond → the ux_terminal_response_per_request UNIQUE index, so a
-// second attempt collides and is rejected — exactly one terminal survives.
+// Test 2 (C7 新测③ · 注销+边沿竞态无双终态): the two closure AUTHORS — the death
+// edge (OnDown → downCh → consumeDown → closeFor) and the level scan
+// (channel.Reconcile) — race concurrently on the SAME closed-forever fact. Both
+// funnel every terminal through behavior → the ux_terminal_response_per_request
+// UNIQUE index, so however they interleave, exactly one terminal survives.
+//
+// The prior version only re-ran the level sweep and proved level-vs-level
+// idempotency; it never generated a death edge, so the cross-author arbitration
+// this格 owes went unverified. Here a barrier releases many edge-path AND
+// level-path authors at once (best exercised under -race), then we assert a
+// single terminal.
 // ---------------------------------------------------------------------------
-func TestReconciler_Idempotent_NoDuplicateTerminal(t *testing.T) {
-	// A very fast ticker sweeps MANY times over the orphan's lifetime. The first
-	// sweep closes the deregistered receiver's request; every subsequent sweep
-	// re-attempts the same terminal and collides with the UNIQUE index — so exactly
-	// one terminal must remain no matter how many times the level sweep runs.
-	ch := newSweepingHome(t, 10*time.Millisecond)
+func TestReconciler_DeregEdgeRace_NoDuplicateTerminal(t *testing.T) {
+	// A long interval so the background ticker's own sweep never fires during the
+	// storm — the ONLY authors are the ones this test releases at the barrier, so a
+	// duplicate terminal could come only from edge-vs-level (or edge-vs-edge) racing,
+	// which is exactly what格③ must rule out.
+	ch := newSweepingHome(t, time.Hour)
 
 	callerID := actor.ActorID("user:caller")
 	workerID := actor.ActorID("agent:worker")
 	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
-	registerActor(t, ch, &workerID, actor.KindAgent)
+	// Worker is a LIVE cell so its embodiment is real; Remove despawns AND deregs it.
+	workerPen := spawnWithPen(t, ch, &workerID, actor.KindAgent)
+	_ = workerPen
 
-	// Open request, then deregister the receiver → closed forever, closure owed.
+	// Open request, then Remove the receiver → closed-forever fact holds and the
+	// inbound request is still open (Remove never closes inbound requests). A
+	// terminal may already exist here if Remove's own despawn edge landed after the
+	// dereg committed — that is fine; the assertion is a COUNT, so a pre-existing
+	// terminal only makes the race's collision surface larger.
 	reqID := writeRequest(t, callerPen, workerID, "test.do", nil)
 	if err := ch.Remove(context.Background(), workerID); err != nil {
 		t.Fatalf("Remove worker: %v", err)
 	}
 
-	// Wait for the first sweep to close it.
+	// Release many edge-path and level-path authors simultaneously. Each edge post
+	// travels the real OnDown→consumeDown→closeFor path; each Reconcile is the real
+	// level scan. Both re-derive gone==true for workerID and attempt the terminal.
+	const authors = 8
+	const rounds = 25
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < authors; i++ {
+		wg.Add(1)
+		edge := i%2 == 0
+		go func(edge bool) {
+			defer wg.Done()
+			<-start
+			for r := 0; r < rounds; r++ {
+				if edge {
+					platform.DriveDownEdgeForTest(ch, workerID)
+				} else {
+					platform.ReconcileClosureForTest(ch)
+				}
+			}
+		}(edge)
+	}
+	close(start)
+	wg.Wait()
+
+	// Edge posts are drained asynchronously by consumeDown; wait for a terminal to
+	// exist, then let the queue settle, then assert exactly one.
 	deadline := time.Now().Add(5 * time.Second)
 	for !terminalExists(t, ch, reqID) && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	if !terminalExists(t, ch, reqID) {
-		t.Fatal("level sweep did not close the open request")
+		t.Fatal("neither the death edge nor the level scan closed the deregistered receiver's request")
 	}
-
-	// Let the fast ticker sweep many more times, then assert exactly one terminal.
+	// A final level scan drains any straggler edge-path write still in flight, then
+	// re-attempts once more — the last chance to expose a duplicate.
 	time.Sleep(200 * time.Millisecond)
+	platform.ReconcileClosureForTest(ch)
 	if n := countTerminals(t, ch, reqID); n != 1 {
-		t.Fatalf("idempotency broken: %d terminals for one request, want exactly 1", n)
+		t.Fatalf("dereg+edge race broke UNIQUE arbitration: %d terminals for one request, want exactly 1", n)
 	}
 }
