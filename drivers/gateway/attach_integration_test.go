@@ -192,11 +192,11 @@ func TestDeliverStaleAfterSealRebindRealPath(t *testing.T) {
 	}
 	// (2) The stale gen-A frame reaching Deliver after the rebind is refused at the
 	// linearization point (not silently written into binding B).
-	if _, derr := slot.Deliver(inflight, genA); derr != platform.ErrStaleBinding {
+	if _, derr := slot.Deliver(context.Background(), inflight, genA); derr != platform.ErrStaleBinding {
 		t.Fatalf("stale gen-A frame at Deliver must be refused ErrStaleBinding, got %v", derr)
 	}
 	// A current gen-B frame delivers.
-	if _, derr := slot.Deliver(mustSubmit(t, genB), genB); derr != nil {
+	if _, derr := slot.Deliver(context.Background(), mustSubmit(t, genB), genB); derr != nil {
 		t.Fatalf("current gen-B frame must deliver, got %v", derr)
 	}
 }

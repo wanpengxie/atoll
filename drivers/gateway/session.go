@@ -323,7 +323,7 @@ func (s *Session) Upstream(ctx context.Context, f platform.Frame) platform.Frame
 		// landed between admitUpstream and here (初验→seal→新臂→Deliver) is refused
 		// stale_binding at the linearization point, not silently written into the
 		// successor binding.
-		res, derr := s.slot.Deliver(f, f.BindingGen)
+		res, derr := s.slot.Deliver(ctx, f, f.BindingGen)
 		if derr != nil {
 			if errors.Is(derr, platform.ErrStaleBinding) {
 				return errFrame(platform.CodeStaleBinding, "binding superseded during delivery (rebound)")

@@ -282,7 +282,7 @@ func TestStaleJobTraversalRefusedAtCommit(t *testing.T) {
 	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, genA, "ref", subjectgate.SubmitPayload{
 		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: json.RawMessage(`{}`),
 	})
-	res, err := slot.Deliver(f, genA) // fast check passes (genA current), enqueues, blocks on reply
+	res, err := slot.Deliver(context.Background(), f, genA) // fast check passes (genA current), enqueues, blocks on reply
 	if err != nil {
 		t.Fatalf("Deliver returned Go error: %v", err)
 	}

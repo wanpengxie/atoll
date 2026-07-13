@@ -1,6 +1,7 @@
 package subjectgate
 
 import (
+	"context"
 	"errors"
 	"sync"
 
@@ -324,7 +325,12 @@ func (s *Slot) AttachInterpreter() (<-chan Job, uint64, func()) {
 
 // Deliver hands one upstream frame to the attached interpreter and blocks for
 // its reply (synchronous, 零 ack 关联器). No interpreter, or the interpreter
-// detaches mid-flight → ErrNoOccupant.
+// detaches mid-flight → ErrNoOccupant. ctx is the CALLER's exit (纪律④三路出口:
+// ctx / interpreter dead / reply) — a dead connector or a cancelled HTTP request
+// unblocks its own wait instead of parking until cell death. Abandoning the wait
+// does NOT un-send: an already-enqueued frame may still commit (the reply channel
+// is buffered, the interpreter never blocks) — the caller's outcome is then
+// UNKNOWN, never a fabricated failure (包住定理: ctx.Err() 即 OutcomeUnknown 词).
 //
 // bindingGen is the递交 gate. The enqueue-time comparison against the slot's
 // current layer-2 generation UNDER the slot lock (atomic with the live check) is a
@@ -335,7 +341,7 @@ func (s *Slot) AttachInterpreter() (<-chan Job, uint64, func()) {
 // fast check is then refused stale_binding at commit, so its queue traversal is
 // harmless. Pass DeliverAnyGen from trusted platform-internal paths that carry no
 // gateway binding (exempt at both the fast check and the commit-point recheck).
-func (s *Slot) Deliver(f Frame, bindingGen int64) (FrameResult, error) {
+func (s *Slot) Deliver(ctx context.Context, f Frame, bindingGen int64) (FrameResult, error) {
 	s.mu.Lock()
 	if !s.live {
 		s.mu.Unlock()
@@ -354,18 +360,23 @@ func (s *Slot) Deliver(f Frame, bindingGen int64) (FrameResult, error) {
 	case frames <- Job{Frame: f, BindingGen: bindingGen, reply: reply}:
 	case <-dead:
 		return FrameResult{}, ErrNoOccupant
+	case <-ctx.Done():
+		return FrameResult{}, ctx.Err()
 	}
 	select {
 	case r := <-reply:
 		return r, nil
 	case <-dead:
 		return FrameResult{}, ErrNoOccupant
+	case <-ctx.Done():
+		return FrameResult{}, ctx.Err()
 	}
 }
 
 // Registry is the per-Home binding registry (built at Home.Open, step①). It owns
-// every subject's slot; slots are ensured at attach (step②, before any cell
-// construction path) and read by the cell factory (step③).
+// every subject's slot; slots are ensured at户籍准入 (step②, v0.4.1 勘误: Admit +
+// factoryFor — platform authority, before any cell construction path); the cell
+// factory, gateway attach and the control shim are all LOOKUP-ONLY consumers (step③).
 type Registry struct {
 	mu    sync.Mutex
 	slots map[actor.ActorID]*Slot
@@ -376,9 +387,10 @@ func NewRegistry() *Registry {
 	return &Registry{slots: map[actor.ActorID]*Slot{}}
 }
 
-// EnsureSlot returns id's slot, creating it on first call (idempotent). The
-// gateway calls this at attach BEFORE the cell is constructed (step②), so the
-// factory's step③ lookup never races an absent slot.
+// EnsureSlot returns id's slot, creating it on first call (idempotent). 户籍准入
+// (Admit + factoryFor, v0.4.1 勘误) calls this BEFORE the cell is constructed
+// (step②), so every step③ lookup — factory, gateway attach, control shim — never
+// races an absent slot. Attach paths must NOT ensure (装配授权归户籍, 反走私).
 func (r *Registry) EnsureSlot(id actor.ActorID) *Slot {
 	r.mu.Lock()
 	defer r.mu.Unlock()

@@ -1,6 +1,7 @@
 package subjectgate
 
 import (
+	"context"
 	"sync"
 	"testing"
 	"time"
@@ -127,7 +128,7 @@ func TestDeliverSyncAndUnblock(t *testing.T) {
 	}()
 
 	f, _ := NewFrame(FrameSubmit, 0, "ref-9", SubmitPayload{MsgType: "m"})
-	res, err := s.Deliver(f, 0)
+	res, err := s.Deliver(context.Background(), f, 0)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -139,7 +140,7 @@ func TestDeliverSyncAndUnblock(t *testing.T) {
 	close(stop)
 	wg.Wait()
 	release()
-	if _, err := s.Deliver(f, 0); err != ErrNoOccupant {
+	if _, err := s.Deliver(context.Background(), f, 0); err != ErrNoOccupant {
 		t.Fatalf("Deliver after release want ErrNoOccupant, got %v", err)
 	}
 }
@@ -153,7 +154,7 @@ func TestDeliverBlockedUnblocksOnRelease(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		f, _ := NewFrame(FrameSubmit, 0, "r", SubmitPayload{MsgType: "m"})
-		_, err := s.Deliver(f, 0)
+		_, err := s.Deliver(context.Background(), f, 0)
 		done <- err
 	}()
 
@@ -193,7 +194,7 @@ func TestAttachInterpreterIncarnationGate(t *testing.T) {
 	relA()
 
 	f, _ := NewFrame(FrameSubmit, 0, "ref-b", SubmitPayload{MsgType: "m"})
-	res, err := s.Deliver(f, 0)
+	res, err := s.Deliver(context.Background(), f, 0)
 	if err != nil {
 		t.Fatalf("Deliver after stale release of A must reach live B, got %v", err)
 	}
@@ -203,7 +204,7 @@ func TestAttachInterpreterIncarnationGate(t *testing.T) {
 
 	// Now B releases (the current incarnation) → the slot refuses.
 	relB()
-	if _, err := s.Deliver(f, 0); err != ErrNoOccupant {
+	if _, err := s.Deliver(context.Background(), f, 0); err != ErrNoOccupant {
 		t.Fatalf("Deliver after current release want ErrNoOccupant, got %v", err)
 	}
 }
@@ -234,15 +235,15 @@ func TestDeliverStaleBindingRefused(t *testing.T) {
 	s.SetBinding(2) // rebind (seal → fresh arm → SetBinding) supersedes gen 1
 
 	f, _ := NewFrame(FrameSubmit, 1, "ref-stale", SubmitPayload{MsgType: "m"})
-	if _, err := s.Deliver(f, 1); err != ErrStaleBinding {
+	if _, err := s.Deliver(context.Background(), f, 1); err != ErrStaleBinding {
 		t.Fatalf("a stale binding_gen must be refused ErrStaleBinding at the linearization point, got %v", err)
 	}
 	// The current binding gen delivers.
-	if _, err := s.Deliver(f, 2); err != nil {
+	if _, err := s.Deliver(context.Background(), f, 2); err != nil {
 		t.Fatalf("current binding_gen must deliver, got %v", err)
 	}
 	// DeliverAnyGen bypasses the assertion (trusted internal path).
-	if _, err := s.Deliver(f, DeliverAnyGen); err != nil {
+	if _, err := s.Deliver(context.Background(), f, DeliverAnyGen); err != nil {
 		t.Fatalf("DeliverAnyGen must bypass the gen gate, got %v", err)
 	}
 }
@@ -329,5 +330,31 @@ func TestRegistryEnsureIdempotent(t *testing.T) {
 	r.Remove(testID)
 	if _, ok := r.Slot(testID); ok {
 		t.Fatal("Remove should drop the slot")
+	}
+}
+
+// TestDeliverCtxExit (法典纪律④三路出口): a caller whose own life ends (dead ws
+// connector, cancelled HTTP request) must unblock its Deliver wait via ctx — not
+// park until cell death — while an interpreter is attached but never replies.
+func TestDeliverCtxExit(t *testing.T) {
+	s := newSlot(testID)
+	_, _, release := s.AttachInterpreter() // attached, but nobody drains frames
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		f, _ := NewFrame(FrameSubmit, 0, "ref", SubmitPayload{MsgType: "m"})
+		_, err := s.Deliver(ctx, f, DeliverAnyGen)
+		done <- err
+	}()
+	cancel()
+	select {
+	case err := <-done:
+		if err != context.Canceled {
+			t.Fatalf("cancelled caller must get ctx.Err(), got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Deliver did not unblock on ctx cancel (纪律④出口缺格)")
 	}
 }
