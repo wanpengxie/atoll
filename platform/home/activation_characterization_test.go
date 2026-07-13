@@ -845,15 +845,19 @@ func TestCharReviver_RecheckGone_Rejected_CascadesSubjectSlot(t *testing.T) {
 }
 
 // ===========================================================================
-// §1.9 reviver 取消交叉矩阵 — CURRENT (pre-T1) behavior, all three cells.
-// T2 flips each of these to `actCancelled` uniformly; these tests are the
-// "现状" half of the diff each flip is measured against.
+// §1.9 reviver 取消交叉矩阵 — POST-T1 behavior, all three cells (spec §1.9
+// 申报臂: flipped by T1's extraction, since activateOne's shared ctx gate now
+// applies to the reviver's path too — see the core's ctx 闸 comment). A prior
+// revision of these three tests pinned the PRE-extraction "现状" (buildErr/
+// sealed/CAS-loser win over a same-window cancel); T1 flips all three
+// uniformly to `actCancelled` per spec §1.9①, replacing those assertions
+// with this file's own diff record.
 // ===========================================================================
 
-// 取消∧建造失败 现状: records the backoff account, error-logs, returns the
-// raw buildErr — ctx is never consulted on this branch (buildErr short-
-// circuits before verifyPostBuild's own ctx gate is ever reached).
-func TestCharReviverMatrix_CancelledAndBuildFailed_CurrentRecordsAndReturnsBuildErr(t *testing.T) {
+// 取消∧建造失败 (spec §1.9①, flipped by T1): the core's ctx gate now wins
+// BEFORE buildErr classification — no backoff account write, no build_failed
+// log, a Cancelled transient instead of the raw buildErr.
+func TestCharReviverMatrix_CancelledAndBuildFailed_FlippedToCancelled(t *testing.T) {
 	builder := newTestBuilder()
 	id := actor.ActorID("agent:char-rv-matrix-buildfail")
 	builder.byID[id] = panicFactory()
@@ -871,18 +875,23 @@ func TestCharReviverMatrix_CancelledAndBuildFailed_CurrentRecordsAndReturnsBuild
 
 	err := (homeReviver{h: h}).EnsureLive(tctx, id)
 	if err == nil {
-		t.Fatal("want the raw buildErr, got nil")
+		t.Fatal("want the Cancelled transient, got nil")
 	}
-	if !rh.has("platform.revive.build_failed") {
-		t.Fatal("现状: cancelled∧build-failed must still error-log build_failed")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("spec §1.9①: cancelled∧build-failed must now return the Cancelled wrap, got %v", err)
 	}
-	if e := backoffEntry(t, h, id); e.failures != 1 {
-		t.Fatalf("现状: cancelled∧build-failed must still record one backoff step, got %+v", e)
+	if rh.has("platform.revive.build_failed") {
+		t.Fatal("spec §1.9①: cancelled∧build-failed must NOT error-log build_failed anymore — the ctx gate wins first")
+	}
+	if e := backoffEntry(t, h, id); e.failures != 0 {
+		t.Fatalf("spec §1.9①: cancelled∧build-failed must NOT record a backoff step anymore, got %+v", e)
 	}
 }
 
-// 取消∧Sealed 现状: info-logs, returns the raw sealed buildErr.
-func TestCharReviverMatrix_CancelledAndSealed_CurrentInfoLogsReturnsSealed(t *testing.T) {
+// 取消∧Sealed (spec §1.9①, flipped by T1): the core's ctx gate wins before
+// the buildErr is even inspected — no info log, a Cancelled transient instead
+// of the raw ErrRuntimeSealed.
+func TestCharReviverMatrix_CancelledAndSealed_FlippedToCancelled(t *testing.T) {
 	builder := newTestBuilder()
 	id := actor.ActorID("agent:char-rv-matrix-sealed")
 	builder.byID[id] = builder.recordFactory(id)
@@ -896,17 +905,21 @@ func TestCharReviverMatrix_CancelledAndSealed_CurrentInfoLogsReturnsSealed(t *te
 	h.reviverStraddleHook = func() { tctx.cancel() } // see rationale above
 
 	err := (homeReviver{h: h}).EnsureLive(tctx, id)
-	if !errors.Is(err, actorrt.ErrRuntimeSealed) {
-		t.Fatalf("现状: cancelled∧sealed must return the raw ErrRuntimeSealed, got %v", err)
+	if errors.Is(err, actorrt.ErrRuntimeSealed) {
+		t.Fatalf("spec §1.9①: cancelled∧sealed must NOT return the raw ErrRuntimeSealed anymore, got %v", err)
 	}
-	if !rh.has("platform.revive.runtime_sealed") {
-		t.Fatal("现状: cancelled∧sealed must still info-log runtime_sealed")
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("spec §1.9①: cancelled∧sealed must now return the Cancelled wrap, got %v", err)
+	}
+	if rh.has("platform.revive.runtime_sealed") {
+		t.Fatal("spec §1.9①: cancelled∧sealed must NOT info-log runtime_sealed anymore — the ctx gate wins first")
 	}
 }
 
-// 取消∧CAS 输家 现状: clears the backoff account and returns nil — ctx is
-// never consulted on the !built branch.
-func TestCharReviverMatrix_CancelledAndCASLoser_CurrentClearsBackoffReturnsNil(t *testing.T) {
+// 取消∧CAS 输家 (spec §1.9①, flipped by T1): the core's ctx gate now applies
+// to the !built branch too — no backoff clear, a Cancelled transient instead
+// of nil.
+func TestCharReviverMatrix_CancelledAndCASLoser_FlippedToCancelled(t *testing.T) {
 	builder := newTestBuilder()
 	id := actor.ActorID("agent:char-rv-matrix-casloser")
 
@@ -928,13 +941,17 @@ func TestCharReviverMatrix_CancelledAndCASLoser_CurrentClearsBackoffReturnsNil(t
 	}); err != nil || !built {
 		t.Fatalf("racer spawn: built=%v err=%v", built, err)
 	}
-	tctx.cancel() // cancel BEFORE releasing — proves the !built branch ignores ctx entirely
+	tctx.cancel() // cancel BEFORE releasing — the core's ctx gate now consults it on this branch too
 	close(release)
 
-	if err := <-errCh; err != nil {
-		t.Fatalf("现状: cancelled∧CAS-loser must return nil, got %v", err)
+	err := <-errCh
+	if err == nil {
+		t.Fatal("spec §1.9①: cancelled∧CAS-loser must now return the Cancelled transient, not nil")
 	}
-	if e := backoffEntry(t, h, id); e.failures != 0 {
-		t.Fatalf("现状: cancelled∧CAS-loser must still clear the backoff account, got %+v", e)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("spec §1.9①: cancelled∧CAS-loser must return the Cancelled wrap, got %v", err)
+	}
+	if e := backoffEntry(t, h, id); e.failures == 0 {
+		t.Fatalf("spec §1.9①: cancelled∧CAS-loser must NOT clear the backoff account anymore, got %+v", e)
 	}
 }
