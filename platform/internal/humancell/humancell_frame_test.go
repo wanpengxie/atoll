@@ -1,4 +1,4 @@
-package platform
+package humancell
 
 import (
 	"context"
@@ -65,12 +65,12 @@ func (f *fakeSys) PublishObs(kind actorrt.ObsKind, val actorrt.ObsValue) error {
 	return nil
 }
 
-func newDeps(self actor.ActorID, req *message.Envelope, open bool) humanDriverDeps {
-	return humanDriverDeps{
-		self:      self,
-		requests:  &fakeReq{req: req},
-		openCheck: func(context.Context, actor.ActorID, message.ID) (bool, error) { return open, nil },
-		cancelHint: func(actor.ActorID, message.ID) {},
+func newDeps(self actor.ActorID, req *message.Envelope, open bool) Deps {
+	return Deps{
+		Self:       self,
+		Requests:   &fakeReq{req: req},
+		OpenCheck:  func(context.Context, actor.ActorID, message.ID) (bool, error) { return open, nil },
+		CancelHint: func(actor.ActorID, message.ID) {},
 	}
 }
 
@@ -308,15 +308,15 @@ func TestGuardExcludesFiveStepCheck(t *testing.T) {
 
 	openEntered := make(chan struct{})
 	releaseOpen := make(chan struct{})
-	deps := humanDriverDeps{
-		self:     "human:alice",
-		requests: &fakeReq{req: req},
-		openCheck: func(context.Context, actor.ActorID, message.ID) (bool, error) {
+	deps := Deps{
+		Self:     "human:alice",
+		Requests: &fakeReq{req: req},
+		OpenCheck: func(context.Context, actor.ActorID, message.ID) (bool, error) {
 			close(openEntered)
 			<-releaseOpen // slow五步核查, held open OUTSIDE the guard
 			return true, nil
 		},
-		cancelHint: func(actor.ActorID, message.ID) {},
+		CancelHint: func(actor.ActorID, message.ID) {},
 	}
 
 	done := make(chan subjectgate.Frame, 1)

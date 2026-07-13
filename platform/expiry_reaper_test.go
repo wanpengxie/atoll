@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/platform/internal/humancell"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
@@ -96,7 +97,7 @@ func TestExpiryReaper_SystemAuthoredAcrossRestart(t *testing.T) {
 	callerID := admit(t, h1, "agent:caller", actor.KindAgent)
 	humanID := admit(t, h1, humanFixtureID, actor.KindHuman)
 	exp := time.Now().UnixMilli() + 50
-	reqID := writeDoorRequest(t, h1, callerID, actor.KindAgent, humanID, TypeHumanApprove, &exp)
+	reqID := writeDoorRequest(t, h1, callerID, actor.KindAgent, humanID, humancell.TypeHumanApprove, &exp)
 	if err := h1.Close(); err != nil {
 		t.Fatalf("Close #1: %v", err)
 	}
@@ -164,7 +165,7 @@ func TestExpiryReaper_AnsweredRequestUntouched(t *testing.T) {
 	callerID := admit(t, h, "agent:caller", actor.KindAgent)
 
 	exp := h.nowMs() + 60_000
-	reqID := writeDoorRequest(t, h, callerID, actor.KindAgent, humanID, TypeHumanMessage, &exp)
+	reqID := writeDoorRequest(t, h, callerID, actor.KindAgent, humanID, humancell.TypeHumanMessage, &exp)
 	// The human cell answers human.message immediately (three-choice table);
 	// wait for its receipt.
 	deadline := time.Now().Add(5 * time.Second)
@@ -189,4 +190,3 @@ func TestExpiryReaper_AnsweredRequestUntouched(t *testing.T) {
 		t.Fatalf("terminals = %d, want 1 (reaper touched an answered request)", terms)
 	}
 }
-

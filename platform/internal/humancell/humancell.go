@@ -1,10 +1,9 @@
-package platform
+package humancell
 
 import (
 	"context"
 	"encoding/json"
 	"math"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -34,86 +33,7 @@ const (
 	TypeHumanApprove = "human.approve"
 )
 
-// humanCellFactory is the platform's built-in home-side human embodiment. user域
-// supply is platform internal政 — a per-channel human member's authority lives
-// only in this channel's registry (the app cannot enumerate it), so the reconcile
-// ring keeps a live human cell up whenever the member is admitted, without any
-// app-injected factory.
-//
-// Proc shape (through the actorbase engine, NOT a raw actorrt.Actor implementer —
-// archtest wall): TWO input faces run concurrently (标准型, design §5.2) —
-//
-//   - the MAILBOX serve loop (humanServe): answers each delivered request per the
-//     three-choice type table (immediate human.message / deferred human.approve /
-//     describe self-answer);
-//   - the FRAME interpreter (gateway 期 S2): the person's OWN actions arrive as
-//     wire frames through the per-identity slot's帧递交端 and are driven onto this
-//     cell's own caps via the identity-dimension Sys verbs (SubmitEnvelope/
-//     RespondEnvelope/AfterIdentity/…). No slot (no gateway attach yet) → this
-//     face is dormant and the cell is mailbox-only.
-//
-// The cell holds ZERO caller obligations (期12): a subject's own requests are
-// closed by the substrate expiry reaper (义务归位 D3) — no per-user Caller, no
-// Match plumbing.
-func humanCellFactory(h *Home, id actor.ActorID) ActorFactory {
-	return ActorFactory{Proc: actorbase.Def{
-		Doc: "home-side human embodiment (subjectgate): callable; three-choice per-type closure (immediate human.message / deferred human.approve) + describe; the person drives own actions via wire frames through the slot",
-		New: func() (actorbase.Proc, error) {
-			return func(sys actorbase.Sys) error { return h.runHumanCell(id, sys) }, nil
-		},
-	}}
-}
-
-// subjectgateSlot LOOKS UP the per-identity slot — it never creates one (装配链
-// step③, v0.4.1 勘误: 槽随户籍准入 ensure, factory/cell 只 lookup). The slot's
-//生死随户籍级联 (ensured at membership准入 = factoryFor/Admit, dropped at Remove) —
-// having the cell construction path self-ensure would be装配授权走私 (the cell
-// minting its own binding-slot existence). A missing slot for a real human member
-// is an assembly bug (factoryFor ensures it BEFORE the cell is built); this
-// degrades to mailbox-only rather than fabricating a failure that kills the cell
-// (defensive, same posture as the nil-registry case). nil registry → mailbox-only.
-func (h *Home) subjectgateSlot(id actor.ActorID) (*subjectgate.Slot, bool) {
-	if h.subjectgate == nil {
-		return nil, false
-	}
-	return h.subjectgate.Slot(id)
-}
-
-// runHumanCell is the human cell's Proc body: it wires the frame interpreter +
-// presence self-report against the slot (装配链 step③④) if one exists, then runs
-// the mailbox serve loop. On serve-loop exit (Recv error = cooperative
-// termination) it stops the interpreter goroutine and joins it (S1 纪律照 kimi:
-// wg join +解阻 — closing stop detaches the slot so any blocked gateway Deliver
-// unblocks with ErrNoOccupant).
-func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
-	var wg sync.WaitGroup
-	stop := make(chan struct{})
-
-	if slot, ok := h.subjectgateSlot(id); ok {
-		deps := humanDriverDeps{
-			self:       id,
-			requests:   h.cs.Requests,
-			openCheck:  h.isRequestOpen,
-			cancelHint: h.CancelRequest,
-		}
-		token := wirePresenceSelfReport(sys, slot)
-		frames, _, release := slot.AttachInterpreter()
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer release()
-			defer slot.RemoveObserver(token)
-			interpretFrames(sys, slot, deps, frames, stop)
-		}()
-	}
-
-	err := humanServe(sys)
-	close(stop)
-	wg.Wait()
-	return err
-}
-
-// wirePresenceSelfReport wires the cell's device-presence self-report against its
+// WirePresenceSelfReport wires the cell's device-presence self-report against its
 // slot (装配链 step③④; design §5.4). It reads the current slot snapshot (step④) and
 // self-reports its level — nothing published (unknown) → say nothing (fold 无行 =
 // unknown 诚实默认) — then observes edges by THIS incarnation's token so an old
@@ -122,7 +42,7 @@ func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
 // teardown, S4), NOT the cell's to retract via PublishObs. Returns the token the
 // caller defers RemoveObserver on. (Extracted from runHumanCell for churn testing —
 // gateway S6; behavior identical.)
-func wirePresenceSelfReport(sys actorbase.Sys, slot *subjectgate.Slot) string {
+func WirePresenceSelfReport(sys actorbase.Sys, slot *subjectgate.Slot) string {
 	token := uuid.NewString()
 	if level, _, _, present := slot.Snapshot(); present {
 		publishPresence(sys, level)
@@ -139,10 +59,10 @@ func publishPresence(sys actorbase.Sys, level subjectgate.Level) {
 	_ = sys.PublishObs(introspect.ObsDevicePresence, introspect.MarshalDevicePresence(level == subjectgate.LevelOnline))
 }
 
-// humanServe is the human cell's mailbox serve loop: delivered requests route
+// HumanServe is the human cell's mailbox serve loop: delivered requests route
 // through the three-choice type table. Returning on a Recv error is the
 // cooperative termination contract (spec §1.6).
-func humanServe(sys actorbase.Sys) error {
+func HumanServe(sys actorbase.Sys) error {
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
@@ -201,27 +121,27 @@ func humanDescribe(id string) introspect.Describe {
 	}
 }
 
-// humanDriverDeps is the frame interpreter's injected read-only face (五步核查经
+// Deps is the frame interpreter's injected read-only face (五步核查经
 // Deps 注入, sysactor Deps 形): the from-log request lookup + open check + the
 // cancel-hint reach (Hooks.Canceller = Home.CancelRequest, factory-captured).
 // No capability of its own — every write goes through the cell's own Sys verbs.
-type humanDriverDeps struct {
-	self       actor.ActorID
-	requests   requestLookup
-	openCheck  func(ctx context.Context, receiver actor.ActorID, reqID message.ID) (bool, error)
-	cancelHint func(target actor.ActorID, requestID message.ID)
+type Deps struct {
+	Self       actor.ActorID
+	Requests   RequestLookup
+	OpenCheck  func(ctx context.Context, receiver actor.ActorID, reqID message.ID) (bool, error)
+	CancelHint func(target actor.ActorID, requestID message.ID)
 }
 
-// requestLookup is the from-log recovery seam (cs.Requests satisfies it).
-type requestLookup interface {
+// RequestLookup is the from-log recovery seam (cs.Requests satisfies it).
+type RequestLookup interface {
 	FindByID(ctx context.Context, id message.ID) (*message.Envelope, bool, error)
 }
 
-// interpretFrames is the frame interpreter goroutine (S1 纪律照 kimi): it
+// InterpretFrames is the frame interpreter goroutine (S1 纪律照 kimi): it
 // consumes upstream frame jobs from the slot and answers each with a
 // receipt-or-error frame. stop (closed by the Proc on serve-loop exit) is the
 // 解阻/join edge.
-func interpretFrames(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriverDeps, frames <-chan subjectgate.Job, stop <-chan struct{}) {
+func InterpretFrames(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, frames <-chan subjectgate.Job, stop <-chan struct{}) {
 	for {
 		select {
 		case job := <-frames:
@@ -253,7 +173,7 @@ func interpretFrames(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriver
 // waits on the exclusive Lock only for the one write's duration). DeliverAnyGen (trusted
 // platform-internal shim, no gateway binding behind it) skips the gen comparison but still
 // commits under the guard.
-func interpretFrame(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriverDeps, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
+func interpretFrame(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
 	switch f.Type {
 	case subjectgate.FrameSubmit:
 		return interpretSubmit(sys, slot, f, carriedGen)
@@ -374,7 +294,7 @@ func interpretSubmit(sys actorbase.Sys, slot *subjectgate.Slot, f subjectgate.Fr
 	})
 }
 
-func interpretResolve(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriverDeps, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
+func interpretResolve(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
 	prepErr := func(code, detail string) subjectgate.Frame { return errFrameGen(slot.BindingGen(), f, code, detail) }
 	var p subjectgate.ResolvePayload
 	if err := f.DecodePayload(&p); err != nil {
@@ -388,17 +308,17 @@ func interpretResolve(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDrive
 	// FindByID or openCheck must never freeze SetBinding.
 	ctx := context.Background()
 	reqID := message.ID(p.ReqID)
-	req, ok, err := deps.requests.FindByID(ctx, reqID)
+	req, ok, err := deps.Requests.FindByID(ctx, reqID)
 	if err != nil {
 		return prepErr(subjectgate.CodeUnavailable, err.Error())
 	}
 	if !ok || req == nil {
 		return prepErr(subjectgate.CodeRequestNotFound, "no such request")
 	}
-	if !req.Audience.Contains(deps.self) {
+	if !req.Audience.Contains(deps.Self) {
 		return prepErr(subjectgate.CodeNotInAudience, "request not addressed to this subject")
 	}
-	open, err := deps.openCheck(ctx, deps.self, reqID)
+	open, err := deps.OpenCheck(ctx, deps.Self, reqID)
 	if err != nil {
 		return prepErr(subjectgate.CodeUnavailable, err.Error())
 	}
@@ -428,7 +348,7 @@ func interpretResolve(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDrive
 	})
 }
 
-func interpretCancel(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriverDeps, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
+func interpretCancel(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
 	prepErr := func(code, detail string) subjectgate.Frame { return errFrameGen(slot.BindingGen(), f, code, detail) }
 	var p subjectgate.CancelPayload
 	if err := f.DecodePayload(&p); err != nil {
@@ -437,21 +357,21 @@ func interpretCancel(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriver
 	// 核查 (all reads) OUTSIDE the guard (P1).
 	ctx := context.Background()
 	reqID := message.ID(p.ReqID)
-	req, ok, err := deps.requests.FindByID(ctx, reqID)
+	req, ok, err := deps.Requests.FindByID(ctx, reqID)
 	if err != nil {
 		return prepErr(subjectgate.CodeUnavailable, err.Error())
 	}
 	if !ok || req == nil {
 		return prepErr(subjectgate.CodeRequestNotFound, "no such request")
 	}
-	if req.Sender.ID != deps.self {
+	if req.Sender.ID != deps.Self {
 		return prepErr(subjectgate.CodeUnauthorizedSender, "only the sender may cancel")
 	}
 	var receiver actor.ActorID
 	if len(req.Audience) > 0 {
 		receiver = req.Audience[0]
 	}
-	open, err := deps.openCheck(ctx, receiver, reqID)
+	open, err := deps.OpenCheck(ctx, receiver, reqID)
 	if err != nil {
 		return prepErr(subjectgate.CodeUnavailable, err.Error())
 	}
@@ -476,8 +396,8 @@ func interpretCancel(sys actorbase.Sys, slot *subjectgate.Slot, deps humanDriver
 	})
 	// best-effort打断 hint (后送) OUTSIDE the guard — fired ONLY once truth is actually
 	// closed (a receipt); a stale/refused or verb-errored commit sends no hint.
-	if out.Type == subjectgate.FrameReceipt && receiver != "" && deps.cancelHint != nil {
-		deps.cancelHint(receiver, reqID)
+	if out.Type == subjectgate.FrameReceipt && receiver != "" && deps.CancelHint != nil {
+		deps.CancelHint(receiver, reqID)
 	}
 	return out
 }
@@ -604,25 +524,4 @@ func operationsOf(ops []string) []access.Operation {
 		out = append(out, access.Operation(o))
 	}
 	return out
-}
-
-// isRequestOpen reports whether reqID is still an open request addressed to
-// receiver — the truth-derived open-status check the frame interpreter's
-// from-log five steps use ("仍 open"). A closed (terminal-answered) or unknown
-// request is not open. (Relocated here from the removed HumanHandle door — the
-// cell's own driver deps are its only consumer now.)
-func (h *Home) isRequestOpen(ctx context.Context, receiver actor.ActorID, reqID message.ID) (bool, error) {
-	if receiver == "" {
-		return false, nil
-	}
-	rows, err := h.cs.Query.OpenRequestsForActor(ctx, receiver)
-	if err != nil {
-		return false, err
-	}
-	for _, r := range rows {
-		if r.Envelope.ID == reqID {
-			return true, nil
-		}
-	}
-	return false, nil
 }

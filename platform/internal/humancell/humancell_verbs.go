@@ -1,4 +1,4 @@
-package platform
+package humancell
 
 import (
 	"encoding/json"

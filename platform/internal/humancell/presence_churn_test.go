@@ -1,4 +1,4 @@
-package platform
+package humancell
 
 import (
 	"testing"
@@ -8,7 +8,7 @@ import (
 )
 
 // presence_churn_test.go is the platform-layer presence CHURN family (DoD-4): it
-// drives the REAL cell self-report policy (wirePresenceSelfReport + publishPresence)
+// drives the REAL cell self-report policy (WirePresenceSelfReport + publishPresence)
 // against a REAL slot across incarnation churn, epoch失效 and layer-2 rebind. The
 // slot-mechanic invariants (edgeSeq dedup, new-epoch revoke-then-snapshot,
 // independence, observer-pointer removal, Forget-folds-unknown) are ALSO pinned at
@@ -40,7 +40,7 @@ func TestPresenceChurnSnapshotSelfReportOnIncarnation(t *testing.T) {
 
 	// incarnation 1 wires and observes an online edge.
 	fs1 := &fakeSys{}
-	tok1 := wirePresenceSelfReport(fs1, slot)
+	tok1 := WirePresenceSelfReport(fs1, slot)
 	slot.PublishLevel(1, 1, subjectgate.LevelOnline)
 	if got := obsLevels(t, fs1); len(got) != 1 || !got[0] {
 		t.Fatalf("incarnation 1 obs = %v, want [online]", got)
@@ -51,7 +51,7 @@ func TestPresenceChurnSnapshotSelfReportOnIncarnation(t *testing.T) {
 	// incarnation 2 is born AFTER the online was published: it must read the
 	// snapshot at Start and self-report online with zero new edges.
 	fs2 := &fakeSys{}
-	_ = wirePresenceSelfReport(fs2, slot)
+	_ = WirePresenceSelfReport(fs2, slot)
 	if got := obsLevels(t, fs2); len(got) != 1 || !got[0] {
 		t.Fatalf("incarnation 2 snapshot self-report = %v, want [online]", got)
 	}
@@ -63,9 +63,9 @@ func TestPresenceChurnSnapshotSelfReportOnIncarnation(t *testing.T) {
 func TestPresenceChurnOldObserverCannotUnmountNew(t *testing.T) {
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 	fs1 := &fakeSys{}
-	tok1 := wirePresenceSelfReport(fs1, slot)
+	tok1 := WirePresenceSelfReport(fs1, slot)
 	fs2 := &fakeSys{}
-	_ = wirePresenceSelfReport(fs2, slot)
+	_ = WirePresenceSelfReport(fs2, slot)
 
 	// The stale incarnation tears its own observer down by its own token.
 	slot.RemoveObserver(tok1)
@@ -88,7 +88,7 @@ func TestPresenceChurnOldObserverCannotUnmountNew(t *testing.T) {
 func TestPresenceChurnForgetNotSelfRetracted(t *testing.T) {
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 	fs := &fakeSys{}
-	_ = wirePresenceSelfReport(fs, slot)
+	_ = WirePresenceSelfReport(fs, slot)
 	slot.PublishLevel(1, 1, subjectgate.LevelOnline)
 
 	before := len(fs.obs)
@@ -104,7 +104,7 @@ func TestPresenceChurnForgetNotSelfRetracted(t *testing.T) {
 		t.Fatal("slot still present after Forget — must fold to unknown")
 	}
 	fresh := &fakeSys{}
-	_ = wirePresenceSelfReport(fresh, slot)
+	_ = WirePresenceSelfReport(fresh, slot)
 	if got := obsLevels(t, fresh); len(got) != 0 {
 		t.Fatalf("post-Forget incarnation obs = %v, want [] (unknown 诚实默认)", got)
 	}
@@ -116,7 +116,7 @@ func TestPresenceChurnForgetNotSelfRetracted(t *testing.T) {
 func TestPresenceChurnPureRebindNoPresence(t *testing.T) {
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 	fs := &fakeSys{}
-	_ = wirePresenceSelfReport(fs, slot)
+	_ = WirePresenceSelfReport(fs, slot)
 	slot.SetBinding(2)
 	slot.SetBinding(3)
 	if got := obsLevels(t, fs); len(got) != 0 {
@@ -131,9 +131,9 @@ func TestPresenceChurnPureRebindNoPresence(t *testing.T) {
 func TestPresenceChurnEdgeSeqAndEpoch(t *testing.T) {
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 	fs := &fakeSys{}
-	_ = wirePresenceSelfReport(fs, slot)
+	_ = WirePresenceSelfReport(fs, slot)
 
-	slot.PublishLevel(1, 2, subjectgate.LevelOnline) // online
+	slot.PublishLevel(1, 2, subjectgate.LevelOnline)  // online
 	slot.PublishLevel(1, 2, subjectgate.LevelOffline) // same epoch, edgeSeq not increasing → dropped
 	slot.PublishLevel(1, 1, subjectgate.LevelOffline) // same epoch, lower edgeSeq → dropped
 	if got := obsLevels(t, fs); len(got) != 1 || !got[0] {
