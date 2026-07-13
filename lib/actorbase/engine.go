@@ -369,28 +369,17 @@ func (e *engine) closureFault(id message.ID, err error) {
 
 // --- Sys: response / terminal writes ------------------------------------
 
-// envelopeFromMsg reconstructs the "request held in hand" behavior's
-// response/call builders want, out of a Msg's own content fields (Msg IS a
-// 1:1 projection of an Envelope — NewMsg's mirror). Field-by-field
-// assignment onto a zero-value literal, not a populated composite literal:
-// archtest's envelope-construction contract confines a POPULATED
-// message.Envelope{...} to lib/behavior alone (this is a projection back,
-// not a second construction primitive).
+// envelopeFromMsg hands back the "request held in hand" behavior's
+// response/call builders want. Msg EMBEDS the envelope (a structural 1:1 —
+// no hand-copied field table in either direction since the purity 手动档
+// rework), so this is just a value copy of the embedded field: no composite
+// literal, so archtest's envelope-construction contract (which confines a
+// POPULATED message.Envelope{...} to lib/behavior alone) is not even
+// brushed. The copy keeps the old no-retention property: builders never
+// alias the delivered Msg's own envelope.
 func envelopeFromMsg(m Msg) *message.Envelope {
-	env := &message.Envelope{}
-	env.ID = m.ID
-	env.TS = m.TS
-	env.ChannelID = m.ChannelID
-	env.Sender = m.Sender
-	env.Kind = m.Kind
-	env.Type = m.Type
-	env.Payload = m.Payload
-	env.ParentID = m.ParentID
-	env.CorrelationID = m.CorrelationID
-	env.Visibility = m.Visibility
-	env.Audience = m.Audience
-	env.ExpiresAt = m.ExpiresAt
-	return env
+	env := m.Envelope
+	return &env
 }
 
 func (e *engine) Reply(msg Msg, v any) (message.ID, error) {
