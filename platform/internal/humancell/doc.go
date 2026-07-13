@@ -8,12 +8,12 @@
 // gateway drives frames through), but its request-type table
 // (human.message/human.approve/…), its error codes, and its verb vocabulary
 // are all DOMAIN words — the "human subject" convention, not a substrate
-// invariant every actor must obey. platform/internal/subjectgate is the
+// invariant every actor must obey. platform/subjectgate is the
 // substrate seam (registry + slot + wire frame contract) this body drives;
-// platform (the root package) is the assembly root that wires a live cell
-// per admitted member (humancell_wiring.go: humanCellFactory/runHumanCell) —
-// this package holds none of that assembly, only the body Home hands a Sys
-// to run.
+// platform/home is the assembly root that wires a live cell per admitted
+// member (humancell_wiring.go: humanCellFactory/runHumanCell) — this
+// package holds none of that assembly, only the body Home hands a Sys to
+// run.
 //
 // Exported surface (the wiring seam, five names): Deps (the interpreter's
 // injected read-only face), RequestLookup (Deps' from-log recovery

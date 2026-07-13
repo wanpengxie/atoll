@@ -59,7 +59,7 @@ type Dialer struct {
 	started bool
 	// despawnLocal is the host→remote despawn hook: on a KindDespawn frame the
 	// stream read loop despawns the named local cell (ending its execution arm) and
-	// replies KindDetach. Injected by RunCompute (→ rt.DespawnID) after Dial, before
+	// replies KindDetach. Injected by compute.Run (→ rt.DespawnID) after Dial, before
 	// Start (so it is set before any read loop runs). nil → a KindDespawn only
 	// closes the stream (no local cell to end, e.g. a test dialer).
 	despawnLocal func(actor.ActorID)

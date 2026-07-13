@@ -46,6 +46,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/metatool"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -166,7 +167,7 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 	return &testEnv{handler: a.Handler(), app: a, tmpDir: tmpDir}
 }
 
-// startToolDaemon runs a single daemon (platform.RunCompute) hosting BOTH the
+// startToolDaemon runs a single daemon (compute.Run) hosting BOTH the
 // tool:xhs and tool:kimi cells over one real /compute link. Returns once started
 // (caller waits for the actors to register via waitForActor).
 func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Server, logger *slog.Logger) (actor.ActorID, actor.ActorID) {
@@ -212,8 +213,8 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 		},
 	})
 	go func() {
-		runErr <- platform.RunCompute(ctx,
-			platform.ComputeConfig{ServerWS: serverWS, Logger: logger, Desired: desired, Builder: builder},
+		runErr <- compute.Run(ctx,
+			compute.Config{ServerWS: serverWS, Logger: logger, Desired: desired, Builder: builder},
 		)
 	}()
 	t.Cleanup(func() {
@@ -221,7 +222,7 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 		select {
 		case <-runErr:
 		case <-time.After(3 * time.Second):
-			t.Log("RunCompute did not return within 3s after cancel")
+			t.Log("compute.Run did not return within 3s after cancel")
 		}
 	})
 	return xhsID, kimiID

@@ -100,7 +100,7 @@ func main() {
 	// Human-ingress gateway (gateway 期 S3): constructed AFTER the app so it can
 	// hold the app's routing面, then injected back (the construction cycle is broken
 	// by the two setters). The revocation hub fans the two emit points (platform
-	// Home.Remove via HomeConfig.OnRevoke + the app's ACL write points) into the
+	// home.Home.Remove via home.Config.OnRevoke + the app's ACL write points) into the
 	// gateway's arm-seal.
 	revHub := gateway.NewRevocationHub()
 	gw := gateway.New(gateway.Config{

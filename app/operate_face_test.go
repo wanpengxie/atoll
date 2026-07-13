@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -46,7 +46,7 @@ func TestOperate_IntroduceUserForm_Admits(t *testing.T) {
 	}
 	face := env.app.OperateFaceForTest()
 	payload, _ := json.Marshal(map[string]any{"principal": strings.TrimPrefix(target, "user:")})
-	got, err := face.Introduce(context.Background(), platform.OperateRequest{
+	got, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    s.actorID,
 		Payload:   payload,
@@ -79,12 +79,12 @@ func TestOperate_IntroducePrivateAgent_Forbidden(t *testing.T) {
 	face := env.app.OperateFaceForTest()
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID})
 	// A DIFFERENT principal (not the owner) tries to introduce it.
-	_, err := face.Introduce(context.Background(), platform.OperateRequest{
+	_, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    "user:someone-else",
 		Payload:   payload,
 	})
-	var oe *platform.OperateError
+	var oe *home.OperateError
 	if err == nil {
 		t.Fatalf("non-owner introduce of private agent succeeded, want forbidden")
 	}
@@ -111,12 +111,12 @@ func TestOperate_IntroduceUnknownClass_Rejected(t *testing.T) {
 
 	face := env.app.OperateFaceForTest()
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID})
-	_, err := face.Introduce(context.Background(), platform.OperateRequest{
+	_, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    s.actorID,
 		Payload:   payload,
 	})
-	var oe *platform.OperateError
+	var oe *home.OperateError
 	if err == nil || !errors.As(err, &oe) || oe.Code != "unknown_class" {
 		t.Fatalf("want error_code=unknown_class, got %v", err)
 	}
@@ -140,12 +140,12 @@ func TestOperate_IntroduceInvalidPlacement_Rejected(t *testing.T) {
 
 	face := env.app.OperateFaceForTest()
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "placement": "foo"})
-	_, err := face.Introduce(context.Background(), platform.OperateRequest{
+	_, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    s.actorID,
 		Payload:   payload,
 	})
-	var oe *platform.OperateError
+	var oe *home.OperateError
 	if err == nil || !errors.As(err, &oe) || oe.Code != "invalid_placement" {
 		t.Fatalf("want error_code=invalid_placement, got %v", err)
 	}
@@ -166,7 +166,7 @@ func TestOperate_IntroduceInvalidPlacement_Rejected(t *testing.T) {
 //
 // It introduces a DAEMON-placed row, then re-introduces it with a CHANGED config,
 // and asserts the config-effect path ran to success FOR THE DAEMON ROW: no error
-// (a placement-gated / rebuild_failed Restart would surface as *platform.OperateError),
+// (a placement-gated / rebuild_failed Restart would surface as *home.OperateError),
 // created=false, placement=daemon, config_updated=true.
 //
 // Guard boundary: the innermost Home.Restart *invocation* for a daemon row has no
@@ -189,7 +189,7 @@ func TestOperate_ConfigChange_DaemonPlacedTakesEffect(t *testing.T) {
 
 	// First introduce: NO placement → default policy = daemon, WITH an initial config.
 	p1, _ := json.Marshal(map[string]any{"decl_id": agentID, "config": map[string]any{"tone": "calm"}})
-	got1, err := face.Introduce(context.Background(), platform.OperateRequest{
+	got1, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: p1,
 	})
 	if err != nil {
@@ -205,7 +205,7 @@ func TestOperate_ConfigChange_DaemonPlacedTakesEffect(t *testing.T) {
 	// daemon row. A placement-gated effect Restart would fail here (rebuild_failed)
 	// or never mark config_updated.
 	p2, _ := json.Marshal(map[string]any{"decl_id": agentID, "config": map[string]any{"tone": "brisk"}})
-	got2, err := face.Introduce(context.Background(), platform.OperateRequest{
+	got2, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: p2,
 	})
 	if err != nil {

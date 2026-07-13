@@ -149,6 +149,6 @@ func TestRuntimeSealRejectsActorArmWithoutKillingWholeLink(t *testing.T) {
 	default:
 	}
 	// The same live Dialer can perform the stream-level 补臂 attempt again;
-	// RunCompute's reconcile loop therefore reopens this arm, not the whole link.
+	// compute.Run's reconcile loop therefore reopens this arm, not the whole link.
 	_ = open()
 }

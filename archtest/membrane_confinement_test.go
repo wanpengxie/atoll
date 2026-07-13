@@ -62,25 +62,27 @@ var membraneConstructors = map[string]bool{
 //     — and, since S7, so is livearms.go's NewLiveArms body: it weaves
 //     NewLivePen/NewLiveAccess/NewLiveSchedule over the RebindableArms facades,
 //     gated on the DAEMON's own incarnation).
-//   - platform/caps.go is the SINGLE home-side caps assembler (buildCaps) — it
-//     may weave the three raw membranes, never the daemon bundle. (platform
-//     拓扑批 T3: buildCaps moved out of home.go into its own file.)
-//   - platform/ring.go is the SINGLE daemon-side assembly site (the build
-//     closure inside computeRing.buildOne, ex-compute.go) — it may call
+//   - platform/home/caps.go is the SINGLE home-side caps assembler (buildCaps) —
+//     it may weave the three raw membranes, never the daemon bundle. (platform
+//     拓扑批 T3: buildCaps moved out of home.go into its own file; T5b: home
+//     成包, path moved under platform/home/.)
+//   - platform/compute/ring.go is the SINGLE daemon-side assembly site (the
+//     build closure inside computeRing.buildOne, ex-compute.go) — it may call
 //     link.NewLiveArms, and ONLY that: it never touches the raw per-plane
-//     constructors directly.
+//     constructors directly. (T5b: compute 成包, path moved under
+//     platform/compute/.)
 //
 // Everything else — spawnhandle.go (delegates to the assembler, weaves nothing)
 // and any future platform file — is OUT: adding a NewLive* reference anywhere
 // else, or a raw-membrane reference in ring.go / a NewLiveArms reference in
 // caps.go, must turn this test red.
 var membraneWeaveAllowlist = map[string]map[string]bool{
-	"../platform/caps.go": {
+	"../platform/home/caps.go": {
 		"NewLivePen":      true,
 		"NewLiveAccess":   true,
 		"NewLiveSchedule": true,
 	},
-	"../platform/ring.go": {
+	"../platform/compute/ring.go": {
 		"NewLiveArms": true,
 	},
 }

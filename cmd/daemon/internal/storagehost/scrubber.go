@@ -13,8 +13,8 @@ import (
 // — plain mirrors of platform/internal/link's ReconcileResource/
 // ReconcileReservation/ReconcileTombstone wire shapes. This package cannot
 // import platform/internal/link (cmd/daemon sits outside Go's internal/
-// visibility boundary for it) — RunCompute's own bridge code
-// (cmd/daemon-side platform.RunCompute, which CAN see both type universes)
+// visibility boundary for it) — compute.Run's own bridge code
+// (cmd/daemon-side compute.Run, which CAN see both type universes)
 // does the field-by-field translation at the one seam that needs it, the
 // SAME boundary-crossing shape resourcespec/store and accessdoor/resourcespec
 // already draw elsewhere in this build.
@@ -35,7 +35,7 @@ type TombstoneToReclaim struct{ TombstoneID, Coord, Provenance string }
 // a write that is ACTUALLY in flight on a live Host).
 type ActiveStaging struct{ Coord string }
 
-// ReclaimAckFunc is Pass's network callback — RunCompute's bridge supplies a
+// ReclaimAckFunc is Pass's network callback — compute.Run's bridge supplies a
 // closure bound to whichever *link.Dialer is CURRENTLY connected (this
 // package never holds a live connection reference itself: unlike
 // cellObsForwarder/cellCancelForwarder's Rebind pattern, there is nothing
@@ -49,7 +49,7 @@ type ReclaimAckFunc func(ctx context.Context, tombstoneID string) (found bool, e
 // behind, log (never auto-repair) a landed resource whose coord is missing
 // on disk. WHEN to run a pass (startup + periodic ticker) and HOW to reach
 // the home (SendReconcilePull/SendReclaimAck) are platform-side concerns
-// (RunCompute's bridge, which alone can hold a *link.Dialer) — this type is
+// (compute.Run's bridge, which alone can hold a *link.Dialer) — this type is
 // pure local-filesystem policy, independently testable with no network.
 type Scrubber struct {
 	Reclaimer Reclaimer

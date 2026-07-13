@@ -37,10 +37,18 @@ const storageHostNameFragment = "storagehost"
 // serverClosureRoots are the two assembly entry points §8.2 names: the
 // SERVER BINARY's own composition root (cmd/server, whose import closure is
 // literally everything that ends up in the atoll-server binary) and the
-// PLATFORM package (the channel-home assembly layer platform.Open lives in
-// — already part of cmd/server's closure via app, walked again here by name
-// so a future entry point that reaches platform WITHOUT routing through
-// cmd/server — e.g. a second server-shaped binary — is covered too).
+// PLATFORM tree (the channel-home assembly layer the Open constructor lives
+// in, under platform/home since platform-topology 批 T5b — already part of
+// cmd/server's closure via app, walked again here by name so a future entry
+// point that reaches platform WITHOUT routing through cmd/server — e.g. a
+// second server-shaped binary — is covered too). NOTE (T5b flag, not fixed
+// here — outside this batch's four-file archtest scope): "platform" as a
+// walk root now only covers the root membrane's own two files (decl.go /
+// actorfactory.go); it no longer transitively covers platform/home the way
+// walking the old, undivided platform package did. cmd/server's own closure
+// still covers platform/home via app, so today's coverage is unchanged; a
+// future non-cmd/server entry point into platform/home would need
+// "platform/home" named here too.
 var serverClosureRoots = []string{"cmd/server", "platform"}
 
 // TestServerAssemblyNeverImportsStorageHost pins 期11 spec §8.2 ("server 零

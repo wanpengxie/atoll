@@ -35,6 +35,7 @@ import (
 
 	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
@@ -121,7 +122,7 @@ func fetchPlan(ctx context.Context, serverWS, key, chID string) ([]daemonAssignm
 }
 
 // planSource is the daemon's LIVE compute-plan source: it is BOTH the reconcile
-// ring's actorrt.DesiredSource (Members) and its platform.ComputeBuilder (Lookup),
+// ring's actorrt.DesiredSource (Members) and its compute.Builder (Lookup),
 // sharing one fetched-plan snapshot. The reconcile ring calls Members every poll
 // tick (compute.runLink), so Members RE-FETCHES /compute/plan each tick and
 // rebuilds the desired set + the id→factory table together — a plan changed on the
@@ -271,14 +272,14 @@ func main() {
 	// The daemon's compute plan is pulled LIVE, not snapshotted: planSource re-fetches
 	// /compute/plan every reconcile tick and rebuilds the desired set + factory table
 	// together (a plan change on the server converges with no daemon restart — SW-6).
-	// Startup does NOT gate on a first fetch: RunCompute connects the link, then the
+	// Startup does NOT gate on a first fetch: compute.Run connects the link, then the
 	// ring calls Members, which tolerates a fetch failure (last-known-good, initially
 	// empty) — connect first, pull later, keep retrying.
 	source := newPlanSource(*ws, *key, chID, wsRoot, deviceName, logger)
 
 	// The link layer is auth-agnostic: the api key rides the server WS url's query
 	// string (?key=), which the app layer resolves on WS upgrade. There is no
-	// separate credential field on ComputeConfig.
+	// separate credential field on compute.Config.
 	serverWS := *ws
 	if *key != "" {
 		sep := "?"
@@ -293,7 +294,7 @@ func main() {
 	// staging} tree, a SIBLING of wsRoot/<channelID>'s device workspace tree
 	// (never nested under it, §4.2). Opened unconditionally: a daemon that
 	// never hosts a file-kind resource simply never receives an AllocRequest
-	// for it (RunCompute's bridge only calls into StorageHost when the home
+	// for it (compute.Run's bridge only calls into StorageHost when the home
 	// actually sends one), so there is no cost to always wiring it — and no
 	// silent gap the day a channel this daemon serves DOES need file
 	// placement.
@@ -308,7 +309,7 @@ func main() {
 		}
 	}()
 
-	if err := platform.RunCompute(ctx, platform.ComputeConfig{
+	if err := compute.Run(ctx, compute.Config{
 		ServerWS:        serverWS,
 		Logger:          logger,
 		Desired:         source,
@@ -326,5 +327,5 @@ func main() {
 }
 
 func shouldCloseStorageRoot(err error) bool {
-	return !errors.Is(err, platform.ErrComputeForwardersLeaked)
+	return !errors.Is(err, compute.ErrForwardersLeaked)
 }

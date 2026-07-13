@@ -9,7 +9,7 @@ import (
 
 // ActorFactory is the "def" every out-generation entry point speaks (spec
 // actorbase-v1 §4 S3: _, _, _ = Home.SpawnIfAbsent(ctx,id,kind,def) / CapsFactoryBuilder /
-// ComputeBuilder / ActorDecl all resolve to this ONE shape). It replaces the
+// compute.Builder / ActorDecl all resolve to this ONE shape). It replaces the
 // old bare `func(actorcaps.Caps) actorrt.Actor` — no downstream package ever
 // names actorcaps.Caps to produce one; the caps→actor weld happens INSIDE
 // platform's build (below), the single seam this period.

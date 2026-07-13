@@ -14,7 +14,7 @@ import (
 )
 
 // actorbase-spec-v1.md §4 S3 / §5 red line ③: the eight out-generation call
-// faces (CapsFactoryBuilder / ComputeBuilder / Home.SpawnIfAbsent / ActorDecl /
+// faces (CapsFactoryBuilder / compute.Builder / home.Home.SpawnIfAbsent / ActorDecl /
 // registry.Constructor / app-human / cmd-daemon / test fixtures) were reshaped
 // so downstream never again needs to name actorcaps.Caps — it speaks
 // platform.ActorFactory (harness.Pen for the pre-actorbase "Legacy" shape,
@@ -116,7 +116,7 @@ const oldFactoryShape = "func(actorcaps.Caps) actorrt.Actor"
 // TestNoOldCapsFactoryShapeResidual — ③ of the four (numbered ② in the DoD
 // list; kept in this file for the shared walk helper): zero residual of the
 // retired bare factory shape ActorDecl.Factory / CapsFactoryBuilder.Lookup /
-// ComputeBuilder.Lookup used to carry, across the explicit scan surface the
+// compute.Builder.Lookup used to carry, across the explicit scan surface the
 // spec names (registry/drivers/agent providers/cmd) plus app (the human front-
 // end entry point) — platform itself is exempt (ActorFactory.fullCaps, the
 // platform-only test seam CapsFactory() builds, is a deliberately DIFFERENT,

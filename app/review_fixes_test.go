@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
@@ -74,7 +75,7 @@ func TestOperate_IntroduceHalfFailedRetry_UsesFrozenClassKind(t *testing.T) {
 	// row's class is test-tool → the Admit must use its kind (tool), not claude's.
 	face := env.app.OperateFaceForTest()
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "class": "claude"})
-	res, err := face.Introduce(context.Background(), platform.OperateRequest{
+	res, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    s.actorID,
 		Payload:   payload,
@@ -114,7 +115,7 @@ func TestOperate_IntroduceExistingRow_GarbageEngineSucceeds(t *testing.T) {
 	// as unknown_class.
 	face := env.app.OperateFaceForTest()
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "class": "totally-unknown-engine-xyz"})
-	res, err := face.Introduce(context.Background(), platform.OperateRequest{
+	res, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    s.actorID,
 		Payload:   payload,
@@ -146,7 +147,7 @@ func TestOperate_IntroduceNewRow_UnknownEngineRejected(t *testing.T) {
 
 	face := env.app.OperateFaceForTest()
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "class": "totally-unknown-engine-xyz"})
-	_, err := face.Introduce(context.Background(), platform.OperateRequest{
+	_, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID),
 		Sender:    s.actorID,
 		Payload:   payload,
@@ -154,7 +155,7 @@ func TestOperate_IntroduceNewRow_UnknownEngineRejected(t *testing.T) {
 	if err == nil {
 		t.Fatal("Introduce of a NEW row with an unknown engine must be rejected (create-branch class check)")
 	}
-	oe, ok := err.(*platform.OperateError)
+	oe, ok := err.(*home.OperateError)
 	if !ok || oe.Code != "unknown_class" {
 		t.Fatalf("want unknown_class OperateError, got %v", err)
 	}

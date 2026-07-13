@@ -10,6 +10,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -139,7 +140,7 @@ func TestConfigDoor_LegacyEndToEnd(t *testing.T) {
 
 	// Introduce server-placed (no per-channel config → global v1 is the snapshot).
 	p1, _ := json.Marshal(map[string]any{"decl_id": agentID, "placement": "server"})
-	introduced, err := face.Introduce(context.Background(), platform.OperateRequest{
+	introduced, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID), Sender: sender, Payload: p1,
 	})
 	if err != nil {
@@ -154,7 +155,7 @@ func TestConfigDoor_LegacyEndToEnd(t *testing.T) {
 	// 改配置门: re-introduce carrying config v2 → UPDATE composition row's config
 	// field → Spawn-replace → new snapshot embodied.
 	p2, _ := json.Marshal(map[string]any{"decl_id": agentID, "config": map[string]any{"model": "v2"}})
-	res, err := face.Introduce(context.Background(), platform.OperateRequest{
+	res, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID), Sender: sender, Payload: p2,
 	})
 	if err != nil {

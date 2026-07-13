@@ -17,7 +17,7 @@ type Lifecycle string
 
 const (
 	// LifecycleAlwaysOn: the eager reconcile ring keeps a live incarnation up
-	// whenever this member appears in desired (platform.Home.reconcileActivation /
+	// whenever this member appears in desired (home.Home.reconcileActivation /
 	// computeRing.reconcile).
 	LifecycleAlwaysOn Lifecycle = "always_on"
 )

@@ -12,7 +12,7 @@ import (
 // interpreter (platform/internal/humancell/humancell.go +
 // humancell_verbs.go — the gateway 期 successor to the removed HumanHandle
 // door, quarantined to platform/internal/humancell by platform 拓扑批 T2) and
-// the expiry reaper (platform/expiry.go) may NEVER mint a
+// the expiry reaper (platform/home/expiry.go) may NEVER mint a
 // capability or construct an embodiment — the interpreter only drives the cell's
 // OWN welded caps through the identity-dimension Sys verbs (P2 能力取用), and the
 // reaper writes through the home's existing systemPen (D3 — never mint-as-caller).
@@ -33,7 +33,7 @@ func TestSubjectgateFilesNeverMintOrConstruct(t *testing.T) {
 	for _, file := range []string{
 		"../platform/internal/humancell/humancell.go",
 		"../platform/internal/humancell/humancell_verbs.go",
-		"../platform/expiry.go",
+		"../platform/home/expiry.go",
 	} {
 		fset := token.NewFileSet()
 		f, err := parser.ParseFile(fset, file, nil, 0)

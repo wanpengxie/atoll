@@ -25,12 +25,17 @@ import (
 // an unrecognised type degrades to the deferred (收件箱) default rather than a
 // fabricated failure.
 const (
-	// TypeHumanMessage is IMMEDIATE: a message to the human's inbox, answered
+	// typeHumanMessage is IMMEDIATE: a message to the human's inbox, answered
 	// completed on receipt (durable delivery to the log IS the answer).
-	TypeHumanMessage = "human.message"
-	// TypeHumanApprove is DEFERRED: left OPEN until the person answers via the
+	// Unexported (platform-topology 批 T5b 裁决9②): not part of humancell's
+	// five-name wiring seam (Deps/RequestLookup/InterpretFrames/HumanServe/
+	// WirePresenceSelfReport) — the request-type literal is a private detail
+	// of this package's own dispatch table, not a word a caller needs.
+	typeHumanMessage = "human.message"
+	// typeHumanApprove is DEFERRED: left OPEN until the person answers via the
 	// door (the resolve frame). Closure is the sender's caller-scoped timer.
-	TypeHumanApprove = "human.approve"
+	// Unexported for the same reason as typeHumanMessage above.
+	typeHumanApprove = "human.approve"
 )
 
 // WirePresenceSelfReport wires the cell's device-presence self-report against its
@@ -93,7 +98,7 @@ func humanServeRequest(sys actorbase.Sys, msg actorbase.Msg) {
 			return
 		}
 		_, _ = sys.Reply(msg, answer)
-	case TypeHumanMessage:
+	case typeHumanMessage:
 		// immediate: 收件即 completed 回执 (log 即收件箱).
 		_, _ = sys.Reply(msg, map[string]any{"delivered": true})
 	default:
@@ -112,8 +117,8 @@ func humanDescribe(id string) introspect.Describe {
 		ActorID:     id,
 		Description: "human subject — occupant off-process; the log is the inbox",
 		Types: map[string]introspect.TypeMeta{
-			TypeHumanMessage: {Description: "immediate: delivered to the human's inbox, answered completed on receipt"},
-			TypeHumanApprove: {Description: "deferred: left open until the person answers via the door (resolve)"},
+			typeHumanMessage: {Description: "immediate: delivered to the human's inbox, answered completed on receipt"},
+			typeHumanApprove: {Description: "deferred: left open until the person answers via the door (resolve)"},
 			// D9 default-deferred declaration: unrecognised types are accepted
 			// deferred — the log is the inbox, a human is never unreachable.
 			"*": {Description: "default-deferred: any unrecognised type is accepted and left open for the person (the log is the inbox)"},

@@ -11,7 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/atoll/platform"
+	platformhome "github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -30,7 +30,7 @@ func (a *App) SetControlShimTimeoutForTest(d time.Duration) {
 // tests can drive the four control verbs directly (as the sysactor gate would
 // after authorising the sender), without the not-yet-built message senders
 // (S5b/shims). Test-only.
-func (a *App) OperateFaceForTest() platform.OperateExecutor {
+func (a *App) OperateFaceForTest() platformhome.OperateExecutor {
 	return a.operateFace()
 }
 

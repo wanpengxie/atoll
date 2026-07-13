@@ -184,7 +184,7 @@ func (b *blockingCell) CancelRequest(_ message.ID) {
 
 // daemonHost is the test-local daemon side: an actorrt.Runtime (the cells) plus
 // the per-actor downHandler the link installs so a dead cell closes its own
-// stream. It mirrors exactly what platform.RunCompute wires inline — cell
+// stream. It mirrors exactly what compute.Run wires inline — cell
 // running is the kernel, the only daemon glue is the down watcher.
 type daemonHost struct {
 	rt   *actorrt.Runtime
@@ -1024,7 +1024,7 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 // across a real wire — the mechanism period8 S1's Home.Remove step ① composes
 // over (rt.DespawnID(id) reaching a daemon-attached identity, not merely
 // deleting a local map entry). SetDespawnLocal (the daemon's own
-// RunCompute-style wiring, platform/compute.go:287) is installed so a
+// compute.Run-style wiring, platform/compute/ring.go) is installed so a
 // KindDespawn frame really ends the remote cell's execution arm; the daemon
 // replies KindDetach and the port dies STOPPING (stopDespawn sets `stopping`
 // before the wire write, port.go), so the home publishes NO down edge for a
@@ -1042,7 +1042,7 @@ func TestEndToEnd_DespawnID_CrossWireKill(t *testing.T) {
 	}
 	defer func() { _ = d.Close() }()
 	// The daemon's own kill wiring: a host KindDespawn frame despawns the local
-	// cell in the daemon's runtime (exactly platform/compute.go's RunCompute).
+	// cell in the daemon's runtime (exactly platform/compute/ring.go's compute.Run).
 
 	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)

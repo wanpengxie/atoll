@@ -15,6 +15,7 @@ import (
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
@@ -24,13 +25,13 @@ import (
 // ---------------------------------------------------------------------------
 
 // staticActorCompute adapts a fixed []platform.ActorDecl list — the shape every
-// RunCompute test call site held before period 7 S3 collapsed RunCompute's
-// signature to (ctx, cfg) — into the ComputeConfig.Desired/Builder pair the new
+// compute.Run test call site held before period 7 S3 collapsed compute.Run's
+// signature to (ctx, cfg) — into the compute.Config.Desired/Builder pair the new
 // signature reads. Purely mechanical test-call-form migration (§4 red line 8'):
 // it changes no test semantics, only how a fixed actor list is handed to
-// RunCompute. Every decl is AlwaysOn (a live test daemon has no lazy-activation
+// compute.Run. Every decl is AlwaysOn (a live test daemon has no lazy-activation
 // analogue to exercise).
-func staticActorCompute(decls []platform.ActorDecl) (actorrt.DesiredSource, platform.ComputeBuilder) {
+func staticActorCompute(decls []platform.ActorDecl) (actorrt.DesiredSource, compute.Builder) {
 	members := make(staticDesiredMembers, 0, len(decls))
 	factories := make(staticFactoryTable, len(decls))
 	for _, d := range decls {
@@ -492,7 +493,7 @@ func TestE2E_DaemonCreateAttachDetach(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Test4: Daemon attach + message send (simplified -- HTTP API layer only)
 //
-// The full RunCompute test (in-process daemon echoing) is complex due to
+// The full compute.Run test (in-process daemon echoing) is complex due to
 // WS transport; this test exercises the message write path through a daemon-
 // attached channel and verifies the message is readable.
 // ---------------------------------------------------------------------------
@@ -513,7 +514,7 @@ func TestE2E_DaemonAttachAndMessageFlow(t *testing.T) {
 	_ = daemonID
 
 	// Send an event-kind message through the channel that has a daemon attached.
-	// Without RunCompute there is no daemon actor cell to receive request-kind
+	// Without compute.Run there is no daemon actor cell to receive request-kind
 	// messages (the harness enforces exactly-one active target for requests), so
 	// we use kind=event which has no cardinality constraint.
 	c := dialWS(t, srv, s.cookies, s.chID, 0)

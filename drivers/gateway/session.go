@@ -7,7 +7,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -28,7 +28,7 @@ const feedBatch = 100
 // refused not_member.
 type Session struct {
 	gw        *Gateway
-	home      *platform.Home
+	home      *home.Home
 	chID      channel.ID
 	principal string
 	subjectID actor.ActorID
@@ -58,7 +58,7 @@ type Session struct {
 // grants the绑定世代 (a fresh arm advances it once; a device joining a live arm shares
 // it), and seats the device (首入 → online) — all under seatMember's single closed-gated
 // critical section. Returns the session + the granted binding_gen for the attach receipt.
-func (g *Gateway) Attach(ctx context.Context, home *platform.Home, chID channel.ID, principal string, since map[channel.ID]int64) (*Session, int64, error) {
+func (g *Gateway) Attach(ctx context.Context, home *home.Home, chID channel.ID, principal string, since map[channel.ID]int64) (*Session, int64, error) {
 	subjectID, found, err := home.ResolvePrincipal(ctx, actor.KindHuman, principal)
 	if err != nil {
 		return nil, 0, err

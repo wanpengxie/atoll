@@ -13,7 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/atoll/drivers/gateway"
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -63,7 +63,7 @@ func New(gw *gateway.Gateway) *Connector {
 // eligibility) inside Attach. The opening frame MUST be an attach naming this
 // channel; then the reader loop drives每 upstream frame onto the subject's cell and
 // the writer pump drains the lane (feed + receipts) to the wire.
-func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *platform.Home, chID channel.ID, principal string) {
+func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *home.Home, chID channel.ID, principal string) {
 	ws, err := c.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return

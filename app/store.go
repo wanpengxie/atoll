@@ -9,7 +9,7 @@ import (
 
 // OpenDB opens the app-level SQLite database (identity, workspace, channel
 // catalog, daemon registry). This is NOT channel truth -- each channel's
-// message log lives in its own DB managed by platform.Home.
+// message log lives in its own DB managed by home.Home.
 func OpenDB(path string) (*sql.DB, error) {
 	// modernc.org/sqlite reads pragmas via the _pragma= DSN form (applied per
 	// connection, so they hold across the database/sql pool). foreign_keys(1) is

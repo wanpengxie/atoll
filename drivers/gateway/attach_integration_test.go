@@ -9,14 +9,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // These are white-box integration tests over the REAL Gateway.Attach path (a real
-// platform.Home + a real admitted human slot), not the bare-session十字 helpers — the
+// home.Home + a real admitted human slot), not the bare-session十字 helpers — the
 // two regressions they cover (多设备互杀, Close×Attach straddle) only manifest through
 // the full attach seat + gen grant + feed launch, so they must exercise it end to end.
 
@@ -26,10 +26,10 @@ const attachTestChannelID = channel.ID("gw-attach")
 // Admit ensures synchronously — so a real Attach finds a member slot (no live cell is
 // needed: Attach only LOOKS the slot up, and an empty channel feeds nothing). The long
 // reconcile interval keeps the background ticker from racing the test.
-func openAttachHome(t *testing.T) (*platform.Home, actor.ActorID) {
+func openAttachHome(t *testing.T) (*home.Home, actor.ActorID) {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "gw-attach.sqlite")
-	h, err := platform.Open(platform.HomeConfig{
+	h, err := home.Open(home.Config{
 		ChannelID:         attachTestChannelID,
 		DBPath:            dbPath,
 		ReconcileInterval: time.Hour,

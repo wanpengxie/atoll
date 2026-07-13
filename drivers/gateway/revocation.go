@@ -10,8 +10,10 @@ import (
 // RevocationSource is the gateway's read-side revocation feed (build spec §S3 /
 // design §5.5 臂死亡触发②③). The gateway subscribes; the assembly root (cmd/server)
 // implements it and feeds two emit points into it:
-//   ① platform membership撤销 = Home.Remove dereg cascade (HomeConfig.OnRevoke);
-//   ② app ACL撤销 = workspace member-change write point (workspace_members delete).
+//
+//	① platform membership撤销 = home.Home.Remove dereg cascade (home.Config.OnRevoke);
+//	② app ACL撤销 = workspace member-change write point (workspace_members delete).
+//
 // A revoked (channel, subject) seals that subject's频道臂 — the read pump stops,
 // the slot testimony is Forgotten, and未推 feed frames are purged (真相 never
 // touched). Missed events degrade to the read-side每批 reader-resource recheck
@@ -26,7 +28,7 @@ type RevocationSource interface {
 // RevocationHub is the assembly-root-owned fan-in the two emit points feed and the
 // gateway subscribes to. It lives in this package (the natural owner of the
 // contract) so cmd/server constructs it, hands Emit to platform (via
-// HomeConfig.OnRevoke) and app (the workspace write point), and hands the hub
+// home.Config.OnRevoke) and app (the workspace write point), and hands the hub
 // itself to the gateway as its RevocationSource — bridging both emitters without
 // drivers importing app.
 type RevocationHub struct {

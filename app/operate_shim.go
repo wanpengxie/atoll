@@ -9,7 +9,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -178,7 +178,7 @@ func parseSubmitReceipt(f subjectgate.Frame) (message.ID, int64, error) {
 // scanForTerminal reads forward from *after (advancing it) looking for the terminal
 // response row whose parent_id is reqID. It drains the whole tail before returning
 // not-found so a batch cap never strands the terminal beyond the read window.
-func scanForTerminal(ctx context.Context, home *platform.Home, after *int64, reqID message.ID) (bool, message.Envelope, error) {
+func scanForTerminal(ctx context.Context, home *home.Home, after *int64, reqID message.ID) (bool, message.Envelope, error) {
 	const batch = 200
 	for {
 		rows, err := home.View().ReadAfterSeq(ctx, *after, batch)

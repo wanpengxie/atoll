@@ -1,9 +1,9 @@
 package main
 
 // walk_harness_test.go is 期11 spec §6's shared platform-level walk rig: a
-// REAL platform.Home (real sqlite channel truth) wired to one or more REAL
+// REAL home.Home (real sqlite channel truth) wired to one or more REAL
 // daemons — real cmd/daemon/internal/storagehost.Host (real os.Root-confined
-// filesystem) driven by real platform.RunCompute, connected over a real
+// filesystem) driven by real compute.Run, connected over a real
 // httptest+websocket link (Home.ServeAttach / link.Dial), with NO app-layer
 // HTTP hop (ServeAttach IS the daemon-attach endpoint; app's HTTP plan-pull
 // layer is a separate concern this rig never touches — this file lives
@@ -54,6 +54,8 @@ import (
 	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/compute"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -70,12 +72,12 @@ func testLogger() *slog.Logger {
 
 // --- Home -------------------------------------------------------------
 
-// newWalkHome opens a real platform.Home over a temp sqlite file.
-func newWalkHome(t *testing.T, chID channelpkg.ID) *platform.Home {
+// newWalkHome opens a real home.Home over a temp sqlite file.
+func newWalkHome(t *testing.T, chID channelpkg.ID) *home.Home {
 	t.Helper()
-	h, err := platform.Open(platform.HomeConfig{ChannelID: chID, DBPath: walkDBPath(t)})
+	h, err := home.Open(home.Config{ChannelID: chID, DBPath: walkDBPath(t)})
 	if err != nil {
-		t.Fatalf("platform.Open: %v", err)
+		t.Fatalf("home.Open: %v", err)
 	}
 	t.Cleanup(func() { _ = h.Close() })
 	return h
@@ -87,24 +89,24 @@ func walkDBPath(t *testing.T) string {
 	return t.TempDir() + "/walk.sqlite"
 }
 
-// newWalkHomeWithConfig opens a real platform.Home from an explicit
-// HomeConfig (DBPath included) and does NOT register a t.Cleanup — the
+// newWalkHomeWithConfig opens a real home.Home from an explicit
+// home.Config (DBPath included) and does NOT register a t.Cleanup — the
 // crash-recovery walk manages Home lifecycle itself (a "server crash"
 // closes h1 and opens a fresh h2 against the SAME DBPath mid-test).
-func newWalkHomeWithConfig(t *testing.T, cfg platform.HomeConfig) *platform.Home {
+func newWalkHomeWithConfig(t *testing.T, cfg home.Config) *home.Home {
 	t.Helper()
-	h, err := platform.Open(cfg)
+	h, err := home.Open(cfg)
 	if err != nil {
-		t.Fatalf("platform.Open: %v", err)
+		t.Fatalf("home.Open: %v", err)
 	}
 	return h
 }
 
 // newWalkDaemonServer wraps h.ServeAttach in an httptest server that always
 // authenticates the attaching connection as daemonID (mirrors every other
-// cross-wire test in this codebase, e.g. platform.TestHomeCancelRequest_CrossWire
+// cross-wire test in this codebase, e.g. home.TestHomeCancelRequest_CrossWire
 // — a real WS round trip, no app-layer HTTP hop).
-func newWalkDaemonServer(t *testing.T, h *platform.Home, daemonID string) string {
+func newWalkDaemonServer(t *testing.T, h *home.Home, daemonID string) string {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeAttach(w, r, daemonID)
@@ -115,20 +117,20 @@ func newWalkDaemonServer(t *testing.T, h *platform.Home, daemonID string) string
 
 // newWalkDaemonServerSwappable is newWalkDaemonServer's crash-recovery
 // variant (§6.3's "server crash + restart"): the httptest handler routes
-// through an atomically-swappable *platform.Home pointer, so a test can
+// through an atomically-swappable *home.Home pointer, so a test can
 // simulate "the server process restarted" by opening a FRESH Home against
 // the SAME sqlite path and swapping it in — the daemon's own ServerWS URL
 // (and so its redial loop's target) never changes, exactly matching how a
 // real daemon reconnects to the same address after a server restart.
-func newWalkDaemonServerSwappable(t *testing.T, daemonID string, initial *platform.Home) (wsURL string, swap func(*platform.Home)) {
+func newWalkDaemonServerSwappable(t *testing.T, daemonID string, initial *home.Home) (wsURL string, swap func(*home.Home)) {
 	t.Helper()
-	var cur atomic.Pointer[platform.Home]
+	var cur atomic.Pointer[home.Home]
 	cur.Store(initial)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cur.Load().ServeAttach(w, r, daemonID)
 	}))
 	t.Cleanup(srv.Close)
-	return "ws" + strings.TrimPrefix(srv.URL, "http"), func(h *platform.Home) { cur.Store(h) }
+	return "ws" + strings.TrimPrefix(srv.URL, "http"), func(h *home.Home) { cur.Store(h) }
 }
 
 // --- Daemon-side desired/builder (a minimal static reconcile source) ------
@@ -154,7 +156,7 @@ func (d *staticDesired) add(m actorrt.DesiredMember) {
 	d.members = append(d.members, m)
 }
 
-// staticBuilder is a minimal platform.ComputeBuilder over a plain map.
+// staticBuilder is a minimal compute.Builder over a plain map.
 type staticBuilder struct {
 	mu   sync.Mutex
 	byID map[actor.ActorID]platform.ActorFactory
@@ -181,7 +183,7 @@ func (b *staticBuilder) set(id actor.ActorID, f platform.ActorFactory) {
 
 // walkDaemon is one real daemon this rig runs in-process: a real
 // storagehost.Host rooted at its own temp workspace, driven by a real
-// platform.RunCompute goroutine dialed at a walk home's ServeAttach.
+// compute.Run goroutine dialed at a walk home's ServeAttach.
 type walkDaemon struct {
 	ComputeID string
 	WSRoot    string
@@ -202,13 +204,13 @@ type walkDaemon struct {
 // startWalkDaemon.
 type walkDaemonConfig struct {
 	ScrubberInterval time.Duration
-	LocalFileOpener  func(sh *storagehost.Host) platform.LocalFileOpener // nil -> storageHostAdapter{host: sh}
+	LocalFileOpener  func(sh *storagehost.Host) compute.LocalFileOpener // nil -> storageHostAdapter{host: sh}
 }
 
 // startWalkDaemon opens a fresh storagehost.Host (its own fresh temp
-// workspace root) and runs platform.RunCompute against wsURL in the
+// workspace root) and runs compute.Run against wsURL in the
 // background, for the lifetime of t. Actors are added via addActor AFTER
-// this call (RunCompute's ring reconciles whatever staticDesired/
+// this call (compute.Run's ring reconciles whatever staticDesired/
 // staticBuilder currently hold on every poll tick).
 func startWalkDaemon(t *testing.T, wsURL, computeID, chID string, cfg walkDaemonConfig) *walkDaemon {
 	t.Helper()
@@ -232,7 +234,7 @@ func startWalkDaemonAt(t *testing.T, wsURL, computeID, chID, wsRoot string, cfg 
 	if scrubberInterval <= 0 {
 		scrubberInterval = 200 * time.Millisecond
 	}
-	var localOpener platform.LocalFileOpener = storageHostAdapter{host: sh}
+	var localOpener compute.LocalFileOpener = storageHostAdapter{host: sh}
 	if cfg.LocalFileOpener != nil {
 		localOpener = cfg.LocalFileOpener(sh)
 	}
@@ -243,7 +245,7 @@ func startWalkDaemonAt(t *testing.T, wsURL, computeID, chID, wsRoot string, cfg 
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_ = platform.RunCompute(ctx, platform.ComputeConfig{
+		_ = compute.Run(ctx, compute.Config{
 			ServerWS:         wsURL,
 			ComputeID:        computeID,
 			Logger:           testLogger(),
@@ -271,7 +273,7 @@ func startWalkDaemonAt(t *testing.T, wsURL, computeID, chID, wsRoot string, cfg 
 // home-hosted admission (both go through Admit first: accept.go's 膜律
 // requires an ACTIVE membership row before a daemon's attach may even open
 // that id's stream).
-func (wd *walkDaemon) addActor(t *testing.T, h *platform.Home, id actor.ActorID, kind actor.Kind, def actorbase.Def) actor.ActorID {
+func (wd *walkDaemon) addActor(t *testing.T, h *home.Home, id actor.ActorID, kind actor.Kind, def actorbase.Def) actor.ActorID {
 	t.Helper()
 	minted, err := h.Admit(context.Background(), kind, strings.ReplaceAll(string(id), ":", "-"))
 	if err != nil {
@@ -295,10 +297,10 @@ func (controllerPen) Receive(context.Context, *message.Envelope) error { return 
 
 // newControllerPen admits+spawns id as a home-hosted pen-bearing cell and
 // returns its welded Pen — the identity the walk test writes requests AS.
-func newControllerPen(t *testing.T, h *platform.Home, id actor.ActorID, kind actor.Kind) harness.Pen {
+func newControllerPen(t *testing.T, h *home.Home, id actor.ActorID, kind actor.Kind) harness.Pen {
 	t.Helper()
 	var pen harness.Pen
-	_, err := platform.SpawnForTesting(h, kind, strings.ReplaceAll(string(id), ":", "-"), platform.ActorFactory{Legacy: func(p harness.Pen) actorrt.Actor {
+	_, err := home.SpawnForTesting(h, kind, strings.ReplaceAll(string(id), ":", "-"), platform.ActorFactory{Legacy: func(p harness.Pen) actorrt.Actor {
 		pen = p
 		return controllerPen{pen: p}
 	}})
@@ -315,10 +317,10 @@ func newControllerPen(t *testing.T, h *platform.Home, id actor.ActorID, kind act
 // message id (never resending a terminalized one) on a receiver_unavailable
 // terminal or on an outright timeout with no terminal at all — both are the
 // same underlying race: the daemon-hosted target may not have finished
-// attaching (RunCompute's ring reconciles on its own poll tick + real WS
+// attaching (compute.Run's ring reconciles on its own poll tick + real WS
 // dial latency) by the time the FIRST attempt lands. overall bounds the
 // whole retry loop.
-func sendAndAwait(t *testing.T, h *platform.Home, callerPen harness.Pen, target actor.ActorID, reqType string, payload any, overall time.Duration) message.Envelope {
+func sendAndAwait(t *testing.T, h *home.Home, callerPen harness.Pen, target actor.ActorID, reqType string, payload any, overall time.Duration) message.Envelope {
 	t.Helper()
 	term, err := trySendAndAwait(h, callerPen, target, reqType, payload, overall)
 	if err != nil {
@@ -334,7 +336,7 @@ func sendAndAwait(t *testing.T, h *platform.Home, callerPen harness.Pen, target 
 // pollUntilLanded, waiting for an EVENTUAL landing across a simulated
 // crash+reconnect) needs: a single connectivity hiccup must not abort the
 // whole test the way a bare sendAndAwait call would.
-func trySendAndAwait(h *platform.Home, callerPen harness.Pen, target actor.ActorID, reqType string, payload any, overall time.Duration) (message.Envelope, error) {
+func trySendAndAwait(h *home.Home, callerPen harness.Pen, target actor.ActorID, reqType string, payload any, overall time.Duration) (message.Envelope, error) {
 	var raw json.RawMessage
 	if payload == nil {
 		raw = json.RawMessage(`{}`) // L0 §2.2: envelope.payload=null is not legal
@@ -388,7 +390,7 @@ func trySendAndAwait(h *platform.Home, callerPen harness.Pen, target actor.Actor
 // pass to notice + resend Committed" primitive. A connectivity hiccup
 // (mid-redial) is tolerated and simply retried, unlike a bare sendAndAwait
 // call, which would abort the whole test on the FIRST such hiccup.
-func pollUntilLanded(t *testing.T, h *platform.Home, callerPen harness.Pen, target actor.ActorID, op string, overall time.Duration) walkResult {
+func pollUntilLanded(t *testing.T, h *home.Home, callerPen harness.Pen, target actor.ActorID, op string, overall time.Duration) walkResult {
 	t.Helper()
 	deadline := time.Now().Add(overall)
 	var last walkResult
@@ -427,7 +429,7 @@ func pollUntilLanded(t *testing.T, h *platform.Home, callerPen harness.Pen, targ
 
 // waitForTerminal polls the channel log for a kind=response with the given
 // parentID, up to timeout.
-func waitForTerminal(h *platform.Home, parentID message.ID, timeout time.Duration) (message.Envelope, bool) {
+func waitForTerminal(h *home.Home, parentID message.ID, timeout time.Duration) (message.Envelope, bool) {
 	ctx := context.Background()
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {

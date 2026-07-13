@@ -45,7 +45,7 @@ type AttachReply struct {
 	// the pre-authenticated daemonID the Acceptor received from the app
 	// layer, or (dev/self-declared mode, daemonID=="") the ComputeID the
 	// daemon itself sent. Today a daemon that dials with no explicit
-	// ComputeID gets a random uuid from RunCompute and never learns whether
+	// ComputeID gets a random uuid from compute.Run and never learns whether
 	// the home overrode it (Acceptor.handleAttach's computeID var already
 	// does exactly that override when daemonID != ""). The daemon updates
 	// its OWN identity on receipt (Dialer.DaemonID) — replacing the random

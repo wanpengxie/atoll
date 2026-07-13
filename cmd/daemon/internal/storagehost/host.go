@@ -8,11 +8,11 @@ import (
 )
 
 // Host ties the four §4.1 components into the one object cmd/daemon/main.go
-// constructs and injects into platform.ComputeConfig.StorageHost (via a
+// constructs and injects into compute.Config.StorageHost (via a
 // small implements-the-interface adapter cmd/daemon/main.go itself writes —
 // Host's own method shapes are already exactly what that interface needs,
 // see its doc for why the interface lives in plain-typed form). One Host per
-// daemon process, scoped to the ONE channel RunCompute connects to (a daemon
+// daemon process, scoped to the ONE channel compute.Run connects to (a daemon
 // hosts exactly one channel's assignment, cmd/daemon/main.go's own doc).
 type Host struct {
 	cr        *channelRoot
@@ -36,7 +36,7 @@ type Host struct {
 
 // Open opens (creating if necessary) this channel's resource root under
 // workspaceRoot and returns a ready Host. Call once per daemon process
-// (mirrors RunCompute's own actorrt.Runtime — built once, outlives any
+// (mirrors compute.Run's own actorrt.Runtime — built once, outlives any
 // single link connection/reconnect).
 func Open(workspaceRoot, channelID string, logger *slog.Logger) (*Host, error) {
 	cr, err := openChannelRoot(workspaceRoot, channelID)
@@ -60,7 +60,7 @@ func (h *Host) Alloc(coord string, dir bool) error {
 // OpenRead / OpenWrite hand out this channel's local Streamer handles —
 // §3.4's "daemon 本地颁 os.Root 子句柄给 caller" for a same-machine consumer.
 // §5's lane has since landed: cmd/daemon's storageadapter.go wraps this Host
-// as platform.LocalFileOpener, which platform/internal/link's lane.go
+// as compute.LocalFileOpener, which platform/internal/link's lane.go
 // consults for both the same-daemon Local route and this daemon acting as a
 // lane transfer's target.
 func (h *Host) OpenRead(coord string) (*ReadHandle, error) { return h.streamer.OpenRead(h.cr, coord) }
@@ -112,7 +112,7 @@ func (h *Host) markWriteDone(coord string) {
 // ActiveWriteCoords snapshots every coord with at least one currently-open
 // local WriteHandle — Reconcile's own feed into the Scrubber's
 // sweepOrphanStaging (期11 S1 #6), AND (期11 review's own narrowing
-// addition) the daemon-side source platform.storageHostForwarder.pass reads
+// addition) the daemon-side source compute.storageHostForwarder.pass reads
 // before every ReconcilePull round trip, to tell the home which reservations
 // are actually alive (see platform/storagehost.go's ReconcilePull doc — a
 // daemon merely staying online/polling is NOT liveness for a coord it has

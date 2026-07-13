@@ -15,6 +15,7 @@ import (
 
 	"github.com/wanpengxie/atoll/drivers/tools/xhs"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
@@ -61,7 +62,7 @@ func cannedUp(down devDownFrame) devUpFrame {
 }
 
 // TestXHSLiveEndToEnd is the green gate for the xhs adapter under REAL live
-// conditions: a real HTTP/WS server, a real daemon (platform.RunCompute) that
+// conditions: a real HTTP/WS server, a real daemon (compute.Run) that
 // attaches over a real /compute WS and hosts the tool:xhs cell, a real device
 // connected over the cell's private /device WS, and a real xhs.search request
 // that traverses the whole path and comes back as a completed response.
@@ -110,8 +111,8 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 		})},
 	}})
 	go func() {
-		runErr <- platform.RunCompute(ctx,
-			platform.ComputeConfig{ServerWS: serverWS, Logger: logger, Desired: desired, Builder: builder},
+		runErr <- compute.Run(ctx,
+			compute.Config{ServerWS: serverWS, Logger: logger, Desired: desired, Builder: builder},
 		)
 	}()
 	t.Cleanup(func() {
@@ -119,7 +120,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 		select {
 		case <-runErr:
 		case <-time.After(3 * time.Second):
-			t.Log("RunCompute did not return within 3s after cancel")
+			t.Log("compute.Run did not return within 3s after cancel")
 		}
 	})
 
@@ -324,8 +325,8 @@ func TestXHSLiveActorStatus(t *testing.T) {
 		})},
 	}})
 	go func() {
-		runErr <- platform.RunCompute(ctx,
-			platform.ComputeConfig{ServerWS: serverWS, Logger: logger, Desired: desired, Builder: builder},
+		runErr <- compute.Run(ctx,
+			compute.Config{ServerWS: serverWS, Logger: logger, Desired: desired, Builder: builder},
 		)
 	}()
 	t.Cleanup(func() {
@@ -333,7 +334,7 @@ func TestXHSLiveActorStatus(t *testing.T) {
 		select {
 		case <-runErr:
 		case <-time.After(3 * time.Second):
-			t.Log("RunCompute did not return within 3s after cancel")
+			t.Log("compute.Run did not return within 3s after cancel")
 		}
 	})
 
