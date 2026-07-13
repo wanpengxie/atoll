@@ -90,7 +90,6 @@ app/         HTTP API surface (identity, workspace, channel, daemon, WS)
 drivers/     external-world drivers: tools/ (echo, device, kimi, xhs), agents/ (LLM engine providers: claudecode, kimi), gateway/ (human ingress)
 registry/    actor class registry (config → running actor)
 cmd/         binaries (server, daemon, cli)
-sdk/         Go SDK
 archtest/    architecture enforcement tests
 ```
 
