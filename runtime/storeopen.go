@@ -16,11 +16,22 @@ import (
 // storespec interfaces. The raw *sql.DB is confined inside runtime/internal/store;
 // this public type re-exports only the interface handles.
 type ChannelStores struct {
-	Log        storespec.MessageLog
-	Query      storespec.MessageQuery
-	Expiry     storespec.ExpiryQuery
-	Requests   storespec.RequestLookup
-	Registry   storespec.Registry
+	Log      storespec.MessageLog
+	Query    storespec.MessageQuery
+	Expiry   storespec.ExpiryQuery
+	Requests storespec.RequestLookup
+	Registry storespec.Registry
+
+	// Principals is the principal-axis read face (LookupActivePrincipal — the
+	// admission path's "which active instance embodies this subject" query),
+	// wired EXPLICITLY as its own field even though the same concrete backend
+	// serves Registry above. Precedent rule: a consumer needing a capability
+	// face gets it declared here at assembly — never recovered by
+	// type-asserting a narrower field back to the concrete's wider surface
+	// (that assertion is a bypass valve: it voids the interface segregation
+	// for every ChannelStores holder at once — 反旁路结构墙).
+	Principals storespec.PrincipalRegistry
+
 	Membership storespec.MembershipControlPlane
 
 	// Access is the plane-2 door's single outward face — the welded AccessMinter.
@@ -177,6 +188,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Expiry:     cs.Expiry,
 		Requests:   cs.Requests,
 		Registry:   cs.Registry,
+		Principals: cs.Principals,
 		Membership: cs.Membership,
 		Access:     access,
 		Outbox:     cs.Resources,

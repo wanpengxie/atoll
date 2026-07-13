@@ -27,8 +27,11 @@ type ChannelStores struct {
 	Requests storespec.RequestLookup
 
 	// Actor registry exposed via SEGREGATED interfaces (derived from role — a
-	// reader never receives any membership write):
+	// reader never receives any membership write). Each face a consumer needs
+	// is its own explicit field over the one concrete actorRegistry; nothing
+	// downstream may type-assert one face back into another.
 	Registry   storespec.Registry               // membership READS only (Lookup/Exists/ListActive)
+	Principals storespec.PrincipalRegistry      // principal-axis read (LookupActivePrincipal, admission path)
 	Membership storespec.MembershipControlPlane // membership writes: Admit/Deregister + ApplyMemberTransitions
 
 	// Plane-2 (access/resource) implementations over the SAME channel db. These
@@ -92,6 +95,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Expiry:     msgs,
 		Requests:   newRequestLookup(msgs),
 		Registry:   reg,
+		Principals: reg,
 		Membership: reg,
 		Resources:  newResourceRegistry(db),
 		KVDriver:   newKVDriver(db),
