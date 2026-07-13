@@ -15,7 +15,7 @@ import (
 )
 
 // eligRoutes reads the session's published资格账 route set (test helper).
-func eligRoutes(s *Session) map[channel.ID]Route { return s.elig.Load().routes }
+func eligRoutes(s *Session) map[channel.ID]Route    { return s.elig.Load().routes }
 func eligPaused(s *Session) map[channel.ID]struct{} { return s.elig.Load().paused }
 
 // TestReconcileSubscribeThenRetire (成功查得无资格立即退订): a member route → reconcile
@@ -25,7 +25,7 @@ func eligPaused(s *Session) map[channel.ID]struct{} { return s.elig.Load().pause
 func TestReconcileSubscribeThenRetire(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	const principal = "mia"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
@@ -62,7 +62,7 @@ func TestLeaseThenPauseThenResume(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
 	cap := &logCapture{}
-	g := New(Config{Resolver: res, Clock: clk.now, Logger: cap.logger()})
+	g := New(Config{Resolver: res, Clock: clk, Logger: cap.logger()})
 	const principal = "nan"
 	h, id := openHome(t, channel.ID("c"), principal)
 
@@ -110,6 +110,61 @@ func TestLeaseThenPauseThenResume(t *testing.T) {
 	}
 }
 
+// TestSweepJustBeforeLeaseDeadlineRearmsAtDeadline is the R2 P1-1 boundary sequence:
+// the regular sweep fires one second before lastOK+T_stale, the resolver fails, and
+// the running pump must arm its NEXT real timer at the remaining one-second lease
+// boundary (not reset a full T_sweep). Advancing the injected clock to exactly that
+// boundary pauses the stream without any hand-called reconcile.
+func TestSweepJustBeforeLeaseDeadlineRearmsAtDeadline(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	const stale = 30 * time.Second
+	g := New(Config{
+		Resolver:      res,
+		Clock:         clk,
+		StaleLease:    stale,
+		SweepInterval: stale - time.Second,
+	})
+	const principal = "lease-boundary"
+	h, id := openHome(t, channel.ID("c"), principal)
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	s, _ := g.Attach(context.Background(), principal, nil)
+	s.StartFeed()
+	defer func() {
+		s.Close()
+		g.pumps.Wait()
+	}()
+
+	// StartFeed does one synchronous check; runFeed's initial-dirty does the second and
+	// arms the loop timer. Establish that baseline before changing the resolver.
+	waitFor(t, func() bool { return res.callCount() >= 2 && clk.armCount() >= 2 },
+		"running pump did not complete its initial timer-backed reconcile")
+	baselineCalls := res.callCount()
+	leaseDeadline := clk.now().Add(stale)
+	res.set(principal, nil, nil, errors.New("resolver down")) // no poke
+
+	// First real sweep: t0+29s, still one second inside the lease.
+	clk.advance(stale - time.Second)
+	waitFor(t, func() bool { return res.callCount() > baselineCalls },
+		"real sweep timer did not drive the pre-deadline resolver failure")
+	if _, ok := eligRoutes(s)["c"]; !ok {
+		t.Fatal("the pre-deadline failure must still ride the remaining lease")
+	}
+	waitFor(t, func() bool { return clk.lastDeadline().Equal(leaseDeadline) },
+		"failed sweep did not re-arm at lastOK+T_stale")
+
+	// The remaining one second is the true upper bound. At the absolute deadline the
+	// loop fires and pauses; no T_sweep reset and no direct reconcile call are involved.
+	clk.advance(time.Second)
+	waitFor(t, func() bool {
+		_, paused := eligPaused(s)["c"]
+		return paused
+	}, "stream remained live beyond lastOK+T_stale")
+	if got := clk.now(); !got.Equal(leaseDeadline) {
+		t.Fatalf("pause observed at %s, want exact lease deadline %s", got, leaseDeadline)
+	}
+}
+
 // TestPartialFailureLeaseVsAbsent (spec §3.2 部分失败语义): a per-channel FAILURE ("查得
 // 坏消息") rides the T_stale lease then pauses; a channel simply ABSENT from routes
 // ("查不到" = confirmed no eligibility) retires immediately. The two must not be
@@ -118,7 +173,7 @@ func TestLeaseThenPauseThenResume(t *testing.T) {
 func TestPartialFailureLeaseVsAbsent(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	const principal = "opa"
 	h1, id1 := openHome(t, channel.ID("c1"), principal)
 	h2, id2 := openHome(t, channel.ID("c2"), principal)
@@ -171,7 +226,7 @@ func TestWholeSnapshotFailureFirstReconcileUnavailable(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
 	res.set("uma", nil, nil, errors.New("directory query failed"))
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	s, _ := g.Attach(context.Background(), "uma", nil)
 	defer s.Close()
 
@@ -191,7 +246,7 @@ func TestNewChannelFailureUnavailableNotForbidden(t *testing.T) {
 	res := newResolver()
 	const principal = "vic"
 	res.set(principal, nil, []ChannelFailure{{Channel: "new-ch", Err: errors.New("query failed")}}, nil)
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	s, _ := g.Attach(context.Background(), principal, nil)
 	defer s.Close()
 
@@ -216,7 +271,7 @@ func TestNewChannelFailureUnavailableNotForbidden(t *testing.T) {
 func TestStartFeedSyncEligibility(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	const principal = "pat"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
@@ -234,7 +289,7 @@ func TestStartFeedSyncEligibility(t *testing.T) {
 // TestReconcileNoResolverForbidsAll: with no resolver injected, reconcile publishes an
 // empty资格账 (every business frame forbidden — no channel is ever eligible).
 func TestReconcileNoResolverForbidsAll(t *testing.T) {
-	g := New(Config{Clock: newClock().now}) // no Resolver
+	g := New(Config{Clock: newClock()}) // no Resolver
 	s, _ := g.Attach(context.Background(), "q", nil)
 	defer s.Close()
 	s.reconcile()

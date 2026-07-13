@@ -319,7 +319,11 @@ func verifySoakLogs(t *testing.T, logDir string, killTimes []time.Time, baseline
 		}
 		for _, ln := range strings.Split(string(b), "\n") {
 			ln = strings.TrimSpace(ln)
-			if ln == "" || ln[0] != '{' {
+			if ln == "" {
+				continue
+			}
+			if ln[0] != '{' {
+				badJSONLines++
 				continue
 			}
 			var e soakLogLine
@@ -432,6 +436,9 @@ func verifySoakLogs(t *testing.T, logDir string, killTimes []time.Time, baseline
 	// three assertions rest on — escalate to a real failure rather than a silent skip.
 	if fileReadErrs > 0 {
 		t.Errorf("DoD-12: %d soak log file(s) failed to read — verification is INCOMPLETE, not passing", fileReadErrs)
+	}
+	if badJSONLines > 0 {
+		t.Errorf("DoD-12: %d non-empty malformed/non-JSON log line(s) — verification evidence is corrupt, not passing", badJSONLines)
 	}
 
 	t.Logf("soak log verify: refused=%d paused=%d control_decode=%d baseline=%d added=%d removed=%d kills=%d peer_closed=%d final=%d fileReadErrs=%d badJSONLines=%d",

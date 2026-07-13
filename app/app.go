@@ -75,6 +75,11 @@ type App struct {
 	// daemon-delete revocation tx (→ rollback + 5xx, no Kick, no false ok).
 	seedAdmitFailHook func() error
 	revokeFailHook    func() error
+	// homeCloseHook is a test-only failpoint (nil in production), invoked only AFTER a
+	// Home handle has been detached under a.mu and the lock released, immediately before
+	// Home.Close. It lets app-package anchors park all three teardown arms and prove a
+	// concurrent entitlement enumeration is never trapped behind a.mu.
+	homeCloseHook func(op string, chID channel.ID)
 }
 
 // Config configures the App.
@@ -182,12 +187,25 @@ func (a *App) Close() error {
 	a.homes = make(map[channel.ID]*home.Home)
 	a.mu.Unlock()
 	var firstErr error
-	for _, h := range homes {
-		if err := h.Close(); err != nil && firstErr == nil {
+	for chID, h := range homes {
+		if err := a.closeDetachedHome("app-close", chID, h); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
+}
+
+// closeDetachedHome is the single lock-outside-close point for App.Close, channel
+// deletion, and create rollback. Callers must remove h from a.homes and release a.mu
+// before entering; the test hook deliberately blocks here to make that order observable.
+func (a *App) closeDetachedHome(op string, chID channel.ID, h *home.Home) error {
+	if a.homeCloseHook != nil {
+		a.homeCloseHook(op, chID)
+	}
+	if h == nil {
+		return nil
+	}
+	return h.Close()
 }
 
 // ---------------------------------------------------------------------------

@@ -39,7 +39,7 @@ func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
 	return nil
 }
 func (c *logCapture) WithAttrs([]slog.Attr) slog.Handler { return c }
-func (c *logCapture) WithGroup(string) slog.Handler       { return c }
+func (c *logCapture) WithGroup(string) slog.Handler      { return c }
 func (c *logCapture) has(msg string) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -96,8 +96,10 @@ func (r *fakeResolver) callCount() int {
 // and reconcile timestamps read it, so a test drives lease expiry by advancing it
 // rather than sleeping 30s.
 type fakeClock struct {
-	mu sync.Mutex
-	t  time.Time
+	mu      sync.Mutex
+	t       time.Time
+	pending []*fakeTimer
+	arms    []time.Time
 }
 
 func newClock() *fakeClock { return &fakeClock{t: time.Unix(1_700_000_000, 0)} }
@@ -108,10 +110,91 @@ func (c *fakeClock) now() time.Time {
 	return c.t
 }
 
+func (c *fakeClock) Now() time.Time { return c.now() }
+
+type fakeTimer struct {
+	mu       sync.Mutex
+	deadline time.Time
+	ch       chan time.Time
+	stopped  bool
+	fired    bool
+}
+
+func (t *fakeTimer) C() <-chan time.Time { return t.ch }
+func (t *fakeTimer) Stop() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped || t.fired {
+		return false
+	}
+	t.stopped = true
+	return true
+}
+func (t *fakeTimer) fire(now time.Time) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.stopped || t.fired || t.deadline.After(now) {
+		return false
+	}
+	t.fired = true
+	return true
+}
+func (t *fakeTimer) settled() bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.stopped || t.fired
+}
+
+// NewTimer and advance form a deterministic injected clock, but the code under test
+// still arms/receives a real Timer through the production loop's select. Tests never
+// send timer channels or call reconcile directly to stand in for an alarm.
+func (c *fakeClock) NewTimer(deadline time.Time) Timer {
+	c.mu.Lock()
+	t := &fakeTimer{deadline: deadline, ch: make(chan time.Time, 1)}
+	c.arms = append(c.arms, deadline)
+	if !deadline.After(c.t) {
+		t.fired = true
+		t.ch <- c.t
+	} else {
+		c.pending = append(c.pending, t)
+	}
+	c.mu.Unlock()
+	return t
+}
+
 func (c *fakeClock) advance(d time.Duration) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	c.t = c.t.Add(d)
+	now := c.t
+	var due []*fakeTimer
+	remaining := c.pending[:0]
+	for _, timer := range c.pending {
+		if timer.fire(now) {
+			due = append(due, timer)
+		} else if !timer.settled() {
+			remaining = append(remaining, timer)
+		}
+	}
+	c.pending = remaining
+	c.mu.Unlock()
+	for _, timer := range due {
+		timer.ch <- now
+	}
+}
+
+func (c *fakeClock) armCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.arms)
+}
+
+func (c *fakeClock) lastDeadline() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.arms) == 0 {
+		return time.Time{}
+	}
+	return c.arms[len(c.arms)-1]
 }
 
 // openHome opens a real channel Home and admits `principal` as a human member, whose

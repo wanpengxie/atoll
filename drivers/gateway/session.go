@@ -88,6 +88,12 @@ type Session struct {
 	elig atomic.Pointer[eligState]
 
 	onceClose sync.Once
+
+	// beforeDeliver/feedStarted are TEST-ONLY failpoints (nil in production). The
+	// former parks a parsed frame before it takes a delivery permit; the latter proves
+	// that a registered-but-blocked StartFeed never starts after Close returned.
+	beforeDeliver func()
+	feedStarted   func()
 }
 
 // Attach opens a session for one authenticated connection (连接模型勘误期: the app
@@ -129,6 +135,17 @@ func (s *Session) StartFeed() {
 		return
 	}
 	s.reconcile()
+	// The synchronous resolver is allowed to ignore ctx. Close may therefore set the
+	// session latch and return from its bounded join while this call is still parked.
+	// Re-check the SAME latch before spawning: a late return retires its registration
+	// here and can never launch a post-Close goroutine.
+	s.mu.Lock()
+	closed := s.closed
+	s.mu.Unlock()
+	if closed {
+		s.gw.unregisterPump()
+		return
+	}
 	go s.runFeed()
 }
 
@@ -218,17 +235,34 @@ func (s *Session) endDeliver() { s.gw.delivering.Done() }
 // 公平) → 积压续跑 or wait on ctx/wake/sweep/Home-signals. On exit it closes every
 // subscription, the lane, untracks the pump, and closes the session.
 func (s *Session) runFeed() {
+	if s.feedStarted != nil {
+		s.feedStarted()
+	}
 	defer func() {
 		for _, sub := range s.subs {
 			sub.cancel()
 		}
-		s.gw.pumps.Done()
 		s.Close()
+		// Pump registration retires LAST. Gateway.Close's join must cover the whole
+		// deferred teardown (subscription cancel + Session.Close), not merely the read
+		// loop body; otherwise TempDir/Home cleanup can race this tail.
+		s.gw.unregisterPump()
 	}()
 
 	s.dirty.Store(true) // initial-dirty
-	sweep := time.NewTimer(s.gw.tSweep)
-	defer sweep.Stop()
+	var sweep Timer
+	resetSweep := func() {
+		if sweep != nil {
+			sweep.Stop()
+		}
+		sweep = s.gw.clock.NewTimer(s.nextSweepDeadline())
+	}
+	resetSweep()
+	defer func() {
+		if sweep != nil {
+			sweep.Stop()
+		}
+	}()
 	rot := 0
 
 	for {
@@ -253,13 +287,13 @@ func (s *Session) runFeed() {
 		default:
 		}
 		select {
-		case <-sweep.C:
-			sweep.Reset(s.gw.tSweep)
+		case <-sweep.C():
 			s.dirty.Store(true)
 		default:
 		}
 		if s.dirty.Swap(false) {
 			s.reconcile()
+			resetSweep()
 		}
 		// Pump every active (non-paused) subscription one batch, round-robin fair.
 		chans := s.activeChannels()
@@ -303,11 +337,11 @@ func (s *Session) activeChannels() []channel.ID {
 // §3.2: 泵相位零新 goroutine — one reflect.Select over the dynamic subscription set).
 // Returns false on ctx cancel. wake/sweep re-arm dirty (re-resolve); a bare Home
 // signal just proceeds to pump.
-func (s *Session) wait(sweep *time.Timer) bool {
+func (s *Session) wait(sweep Timer) bool {
 	cases := []reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.ctx.Done())},
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.wake)},
-		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(sweep.C)},
+		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(sweep.C())},
 	}
 	subs := s.activeChannels()
 	for _, ch := range subs {
@@ -320,7 +354,6 @@ func (s *Session) wait(sweep *time.Timer) bool {
 	case 1:
 		s.dirty.Store(true) // poke
 	case 2:
-		sweep.Reset(s.gw.tSweep)
 		s.dirty.Store(true) // periodic sweep → re-resolve
 	default:
 		// a Home commit signal → pump (dirty untouched)
@@ -328,18 +361,46 @@ func (s *Session) wait(sweep *time.Timer) bool {
 	return true
 }
 
+// nextSweepDeadline returns the absolute next entitlement check. A successful route
+// is never allowed to sleep past its own lastOK+T_stale: if the resolver has failed by
+// that boundary the timer-driven reconcile pauses it at the boundary, even when a
+// regular T_sweep fired an instant before it or T_sweep is configured larger.
+func (s *Session) nextSweepDeadline() time.Time {
+	now := s.gw.clock.Now()
+	next := now.Add(s.gw.tSweep)
+	for _, sub := range s.subs {
+		if sub.paused {
+			continue
+		}
+		leaseDeadline := sub.lastOK.Add(s.gw.tStale)
+		if leaseDeadline.Before(next) {
+			next = leaseDeadline
+		}
+	}
+	return next
+}
+
 // reconcile resolves this principal's entitlement and converges the subscription set
 // (spec §3.2 收敛对象甲 differences: 缺→订+补流 / 多→退订 / 换值→换订; failed→T_stale
 // lease; confirmed-absent→退订 immediately). Then it publishes the资格账 for Upstream.
 func (s *Session) reconcile() {
-	now := s.gw.clock()
 	if s.gw.resolver == nil {
-		s.publishElig(now, false, nil) // no resolver → nothing eligible (every frame forbidden)
+		s.publishElig(s.gw.clock.Now(), false, nil) // no resolver → nothing eligible (every frame forbidden)
 		return
 	}
 	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	routes, failed, err := s.gw.resolver.Snapshot(rctx, s.principal)
 	cancel()
+	// A resolver is allowed to ignore ctx and return after Close. Once the session
+	// lifetime is canceled, never create/refresh subscriptions from that stale return;
+	// StartFeed's post-reconcile latch check will retire the pump registration.
+	if s.ctx.Err() != nil {
+		return
+	}
+	// Anchor success/failure at CHECK COMPLETION, not before the resolver call. A
+	// resolver begun just inside the lease may return after lastOK+T_stale; using its
+	// start time would incorrectly permit one more batch after the true deadline.
+	now := s.gw.clock.Now()
 
 	if err != nil {
 		// whole-snapshot failure → the entire prior snapshot rides its lease; any sub
@@ -401,7 +462,7 @@ func (s *Session) reconcile() {
 // check, then pauses it (streaming stops + telemetry) — the sub stays so a later
 // success can resume it.
 func (s *Session) leaseOrPause(sub *subscription, now time.Time) {
-	if now.Sub(sub.lastOK) <= s.gw.tStale {
+	if now.Before(sub.lastOK.Add(s.gw.tStale)) {
 		return // within lease: keep serving from last good
 	}
 	if !sub.paused {
@@ -520,6 +581,9 @@ func (s *Session) Upstream(ctx context.Context, f subjectgate.Frame) subjectgate
 		}
 		if r.Access != AccessMember {
 			return errFrame(subjectgate.CodeForbidden, "observer may not drive business frames")
+		}
+		if s.beforeDeliver != nil {
+			s.beforeDeliver()
 		}
 		// Delivery permit (统一会话闸): a已获准 delivery blocks Close's排水 counter.
 		if !s.beginDeliver() {

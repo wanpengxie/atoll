@@ -76,6 +76,35 @@ const (
 // genuine internal failure.
 type Routing func(ctx context.Context, chID channel.ID, audienceIn []actor.ActorID, kindIn message.Kind) (audience []actor.ActorID, kind message.Kind, retryable string, err error)
 
+// Clock is the gateway's single injected time source. Now anchors leases and
+// telemetry; NewTimer arms the actual reconcile loops at an ABSOLUTE deadline. The
+// absolute form is load-bearing: a scheduler pause between computing a remaining
+// lease and arming a relative timer must not move the alarm past lastOK+T_stale.
+type Clock interface {
+	Now() time.Time
+	NewTimer(deadline time.Time) Timer
+}
+
+// Timer is the one-shot alarm shape used by the entitlement and presence loops.
+// Production wraps time.Timer; tests advance an injected clock and still drive the
+// real loop/select path rather than calling reconcile by hand.
+type Timer interface {
+	C() <-chan time.Time
+	Stop() bool
+}
+
+type systemClock struct{}
+
+func (systemClock) Now() time.Time { return time.Now() }
+func (systemClock) NewTimer(deadline time.Time) Timer {
+	return systemTimer{timer: time.NewTimer(time.Until(deadline))}
+}
+
+type systemTimer struct{ timer *time.Timer }
+
+func (t systemTimer) C() <-chan time.Time { return t.timer.C }
+func (t systemTimer) Stop() bool          { return t.timer.Stop() }
+
 // Config configures the Gateway (assembly-root injected).
 type Config struct {
 	// Epoch is the gateway epoch stamped on every presence level (design §5.4). A
@@ -88,8 +117,9 @@ type Config struct {
 	// presence loop does not run and every business frame is forbidden (no channel is
 	// ever resolved eligible).
 	Resolver EntitlementResolver
-	// Clock is the injectable wall clock (lease anchoring); nil → time.Now.
-	Clock  func() time.Time
+	// Clock drives both lease anchoring and the real sweep/presence alarms; nil →
+	// the system wall clock.
+	Clock  Clock
 	Logger *slog.Logger
 
 	// The four reconcile clocks (spec §3.2), each 0 → its documented default (see the
@@ -123,7 +153,7 @@ type Gateway struct {
 	epoch    int64
 	routing  Routing
 	resolver EntitlementResolver
-	clock    func() time.Time
+	clock    Clock
 	logger   *slog.Logger
 
 	// Reconcile clocks (spec §3.2), resolved from Config with defaults in New.
@@ -146,8 +176,11 @@ type Gateway struct {
 	// reconcile is stuck in a resolver that ignores ctx) must not hang Close forever —
 	// it is counted into leakedPumps and logged instead.
 	pumps sync.WaitGroup
-	// leakedPumps counts pump-join timeouts at Close (账目诚实, §2.1 #11).
-	leakedPumps atomic.Int64
+	// registeredPumps is the exact number of beginFeed registrations not yet retired.
+	// It gives bounded Close an honest N-pump timeout snapshot (WaitGroup exposes no
+	// count). leakedPumps records that snapshot at the timeout boundary.
+	registeredPumps atomic.Int64
+	leakedPumps     atomic.Int64
 
 	// delivering is the递交许可 counter half of the统一会话闸 (spec §3.2, 四轮 P0-3):
 	// a business-frame delivery Adds under the session's closed gate and Dones when
@@ -175,6 +208,10 @@ type Gateway struct {
 	// every Close BEFORE closeOnce.Do, so a test can prove a second concurrent caller
 	// is parked on the single teardown.
 	closeEntered func()
+	// beforePresenceWait is a TEST-ONLY failpoint (nil in production). It parks the
+	// real loop immediately before its poke/timer select, allowing tests to merge
+	// concurrent poke edges deterministically without hand-running a reconcile.
+	beforePresenceWait func()
 }
 
 // userEntry is the device account for one principal (spec §3.2 终形 {devices}): the
@@ -194,7 +231,7 @@ func New(cfg Config) *Gateway {
 	}
 	clock := cfg.Clock
 	if clock == nil {
-		clock = time.Now
+		clock = systemClock{}
 	}
 	epoch := cfg.Epoch
 	if epoch == 0 {
@@ -324,7 +361,15 @@ func (g *Gateway) tryRegisterPump() bool {
 		return false
 	}
 	g.pumps.Add(1)
+	g.registeredPumps.Add(1)
 	return true
+}
+
+// unregisterPump retires exactly one successful beginFeed registration, whether the
+// async pump ran or a post-reconcile close re-check prevented that late start.
+func (g *Gateway) unregisterPump() {
+	g.registeredPumps.Add(-1)
+	g.pumps.Done()
 }
 
 // Close tears the gateway down (关站全序). 停圈 → join 圈 → 清账 (spec §3.2 六轮
@@ -336,7 +381,7 @@ func (g *Gateway) Close() error {
 	if g.closeEntered != nil {
 		g.closeEntered()
 	}
-	started := g.clock()
+	started := g.clock.Now()
 	g.closeOnce.Do(func() {
 		g.mu.Lock()
 		g.closed = true
@@ -364,7 +409,7 @@ func (g *Gateway) Close() error {
 		}
 		g.joinPumpsBounded()
 		g.delivering.Wait()
-		g.logger.Info("platform.gateway.closed", "duration", g.clock().Sub(started))
+		g.logger.Info("platform.gateway.closed", "duration", g.clock.Now().Sub(started))
 	})
 	return nil
 }
@@ -386,8 +431,9 @@ func (g *Gateway) joinPumpsBounded() {
 	select {
 	case <-done:
 	case <-time.After(g.pumpJoinTimeout):
-		g.leakedPumps.Add(1)
-		g.logger.Error("platform.gateway.pump_join_timeout", "leaked", g.leakedPumps.Load())
+		leaked := g.registeredPumps.Load()
+		g.leakedPumps.Add(leaked)
+		g.logger.Error("platform.gateway.pump_join_timeout", "leaked", leaked)
 	}
 }
 
@@ -398,8 +444,12 @@ func (g *Gateway) joinPumpsBounded() {
 // device/资格 poke (毫秒级) + T_presence周期兜底.
 func (g *Gateway) presenceLoop() {
 	defer g.presenceWG.Done()
-	ticker := time.NewTicker(g.tPresence)
-	defer ticker.Stop()
+	var timer Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 	for {
 		select {
 		case <-g.presenceCtx.Done():
@@ -407,11 +457,18 @@ func (g *Gateway) presenceLoop() {
 		default:
 		}
 		g.presenceReconcile()
+		if timer != nil {
+			timer.Stop()
+		}
+		timer = g.clock.NewTimer(g.clock.Now().Add(g.tPresence))
+		if g.beforePresenceWait != nil {
+			g.beforePresenceWait()
+		}
 		select {
 		case <-g.presenceCtx.Done():
 			return
 		case <-g.presencePoke:
-		case <-ticker.C:
+		case <-timer.C():
 		}
 	}
 }
@@ -477,7 +534,7 @@ func (g *Gateway) presenceReconcile() {
 		}
 	}
 
-	now := g.clock()
+	now := g.clock.Now()
 	// 缺 → 补 online (idempotent); 换值 → 撤旧补新.
 	for k, slot := range desired {
 		cur := g.coverage[k]

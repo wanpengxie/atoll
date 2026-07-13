@@ -20,7 +20,7 @@ import (
 // gate.
 func TestUpstreamSixFramesFourCodes(t *testing.T) {
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: newClock().now})
+	g := New(Config{Resolver: res, Clock: newClock()})
 
 	newSess := func(t *testing.T) *Session {
 		s, err := g.Attach(context.Background(), "u", nil)
@@ -78,7 +78,7 @@ func TestUpstreamSixFramesFourCodes(t *testing.T) {
 // frame — the gate refuses forbidden before any delivery (表① observer/absent →
 // forbidden).
 func TestUpstreamObserverForbidden(t *testing.T) {
-	g := New(Config{Resolver: newResolver(), Clock: newClock().now})
+	g := New(Config{Resolver: newResolver(), Clock: newClock()})
 	s, _ := g.Attach(context.Background(), "obs", nil)
 	defer s.Close()
 	s.elig.Store(&eligState{
@@ -96,7 +96,7 @@ func TestUpstreamObserverForbidden(t *testing.T) {
 func TestUpstreamNoOccupantUnavailable(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	const principal = "kim"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
@@ -116,7 +116,7 @@ func TestUpstreamNoOccupantUnavailable(t *testing.T) {
 func TestRevocationInFlightThenRefused(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	const principal = "leo"
 	// openHomeWired (六轮终审 P1-5, barrier authenticity): a REAL membership-change poke
 	// wire, so this test's revocation drives the actual Remove→poke edge — not a
@@ -124,7 +124,14 @@ func TestRevocationInFlightThenRefused(t *testing.T) {
 	h, id := openHomeWired(t, channel.ID("c"), principal, g)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
 	s, _ := g.Attach(context.Background(), principal, nil)
-	defer s.Close()
+	// Home's TempDir cleanup must not race the session pump's deferred subscription
+	// cancel. Use the owning Gateway.Close join (not Session.Close's async signal), then
+	// synchronously close the Home before TempDir removes sqlite files (R2 flaky
+	// "directory not empty"). Both later t.Cleanup calls are idempotent.
+	defer func() {
+		_ = g.Close()
+		_ = h.Close()
+	}()
 	s.StartFeed() // real running pump (StartFeed's synchronous first reconcile resolves "c")
 	slot, _ := h.SubjectSlotFor(id)
 

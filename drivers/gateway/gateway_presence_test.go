@@ -9,6 +9,7 @@ import (
 	"errors"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -42,7 +43,7 @@ func (o *slotObs) count() int { o.mu.Lock(); defer o.mu.Unlock(); return len(o.e
 func TestCrossChannelPresenceIsolated(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 
 	const principal = "alice"
 	h1, id1 := openHome(t, channel.ID("c1"), principal)
@@ -117,7 +118,7 @@ func TestCrossChannelPresenceIsolated(t *testing.T) {
 func TestT6RealRemoveCascadeIsolated(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	const principal = "wren"
 	h1, id1 := openHomeWired(t, channel.ID("c1"), principal, g)
 	h2, id2 := openHomeWired(t, channel.ID("c2"), principal, g)
@@ -175,7 +176,7 @@ func TestT6RealRemoveCascadeIsolated(t *testing.T) {
 func TestMultiTabPresenceThreeEdges(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 
 	const principal = "bob"
 	h, id := openHome(t, channel.ID("c"), principal)
@@ -221,7 +222,7 @@ func TestMultiTabPresenceThreeEdges(t *testing.T) {
 func TestPresenceConvergesFromAnyDirty(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 
 	const principal = "carol"
 	h, id := openHome(t, channel.ID("c"), principal)
@@ -259,17 +260,53 @@ func TestPresenceConvergesFromAnyDirty(t *testing.T) {
 	}
 }
 
-// TestPresenceRebindNewSlot (DoD-7⑧, Remove→秒 re-Admit 换值差集): the key (principal×
-// channel) is unchanged but the slotRef换代 (a new subject id / a fresh admit) → one 圈
-// 撤旧 online, 向新补 online, and coverage's value tracks the NEW slot. The connection
-// never drops.
+// TestPresenceTickConvergesWithoutPoke is the periodic half of DoD-6/7④: after the
+// real presence loop has drained the attach poke and is waiting, a membership route is
+// added without an OnMembershipChange wire. Only the injected PresenceTick alarm can
+// wake the loop; advancing the clock proves that timer path publishes online.
+func TestPresenceTickConvergesWithoutPoke(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	const tick = 7 * time.Second
+	g := New(Config{Resolver: res, Clock: clk, PresenceTick: tick})
+	const principal = "presence-tick"
+	res.set(principal, nil, nil, nil)
+	s, _ := g.Attach(context.Background(), principal, nil)
+	defer s.Close()
+	if err := g.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer g.Close()
+
+	// Initial circle + the already-buffered attach poke circle must both finish, leaving
+	// no prompt edge that could falsely receive credit for the convergence below.
+	waitFor(t, func() bool { return res.callCount() >= 2 && clk.armCount() >= 2 },
+		"presence loop did not drain its initial attach poke")
+	baselineCalls := res.callCount()
+
+	h, id := openHome(t, channel.ID("late-presence"), principal) // no poke wire
+	res.set(principal, []Route{memberRoute("late-presence", h, id, clk.now())}, nil, nil)
+	slot, _ := h.SubjectSlotFor(id)
+	clk.advance(tick)
+	waitFor(t, func() bool {
+		level, _, _, set := slot.Snapshot()
+		return set && level == subjectgate.LevelOnline && res.callCount() > baselineCalls
+	}, "PresenceTick did not drive the no-poke online convergence")
+}
+
+// TestPresenceRebindNewSlot (DoD-7⑧, Remove→秒 re-Admit 合并 poke 换值差集): the
+// real presence loop is parked immediately before its wait select with an EMPTY poke
+// buffer. Home.Remove and Home.Admit then fire two genuine membership pokes while the
+// loop is parked; buffered(1) merges them. Releasing the failpoint lets exactly one
+// poke drive one circle, which withdraws the old slot and publishes the new one. No
+// hand-called presenceReconcile repairs the result.
 func TestPresenceRebindNewSlot(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 
 	const principal = "dave"
-	h1, id1 := openHome(t, channel.ID("c"), principal)
+	h1, id1 := openHomeWired(t, channel.ID("c"), principal, g)
 	res.set(principal, []Route{memberRoute("c", h1, id1, clk.now())}, nil, nil)
 	slotOld, _ := h1.SubjectSlotFor(id1)
 	obsOld := &slotObs{}
@@ -277,17 +314,53 @@ func TestPresenceRebindNewSlot(t *testing.T) {
 
 	s, _ := g.Attach(context.Background(), principal, nil)
 	defer s.Close()
-	g.presenceReconcile()
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	converged := make(chan struct{})
+	finish := make(chan struct{})
+	var waits int
+	var waitMu sync.Mutex
+	g.beforePresenceWait = func() {
+		waitMu.Lock()
+		waits++
+		n := waits
+		waitMu.Unlock()
+		switch n {
+		case 2:
+			close(parked)
+			<-release
+		case 3:
+			close(converged)
+			<-finish
+		}
+	}
+	if err := g.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer g.Close()
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+		select {
+		case <-finish:
+		default:
+			close(finish)
+		}
+	}()
+	select {
+	case <-parked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("presence loop did not reach the empty-buffer pre-wait failpoint")
+	}
 	if lvl, _, _, set := slotOld.Snapshot(); !set || lvl != subjectgate.LevelOnline {
-		t.Fatalf("old slot must be online, got set=%v lvl=%v", set, lvl)
+		t.Fatalf("old slot must be online before rebind, got set=%v lvl=%v", set, lvl)
 	}
 
-	// Remove→秒 re-Admit (六轮终审 P1-5: the original test admitted a DIFFERENT principal
-	// "dave-2" — no Remove, not the same person — which cannot exercise 换值 (the key is
-	// principal×channel; a different principal is a DIFFERENT key, not a value change on
-	// the same key). The real geometry: THIS principal ("dave") is removed (身份不可复活:
-	// the old id1 never comes back) then immediately re-admitted — same principal, same
-	// channel, a FRESH minted id2 → a NEW slot for the SAME covKey.
+	// Both callbacks run while the loop is parked. The first fills presencePoke; the
+	// second is coalesced by its capacity-one edge buffer.
 	if err := h1.Remove(context.Background(), id1); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
@@ -303,7 +376,12 @@ func TestPresenceRebindNewSlot(t *testing.T) {
 	slotNew.RegisterObserver("new", obsNew.fn)
 	res.set(principal, []Route{memberRoute("c", h1, id2, clk.now())}, nil, nil)
 
-	g.presenceReconcile()
+	close(release)
+	select {
+	case <-converged: // circle driven by the one merged poke is complete and parked.
+	case <-time.After(2 * time.Second):
+		t.Fatal("merged Remove→re-Admit poke did not complete one presence circle")
+	}
 	// 撤旧: old slot offline.
 	eo := obsOld.snapshot()
 	if eo[len(eo)-1].Level != subjectgate.LevelOffline {
@@ -318,6 +396,7 @@ func TestPresenceRebindNewSlot(t *testing.T) {
 	if ce == nil || ce.slot != slotNew {
 		t.Fatalf("coverage value must track the new slotRef")
 	}
+	close(finish)
 }
 
 // TestBirthHandshakeInterleave (DoD-7⑦): the presence 圈's publish and a cell's
@@ -328,7 +407,7 @@ func TestPresenceRebindNewSlot(t *testing.T) {
 func TestBirthHandshakeInterleave(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	const principal = "erin"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
@@ -368,7 +447,7 @@ func TestBirthHandshakeInterleave(t *testing.T) {
 func TestPresencePerChannelFailurePreservesCoverage(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	const principal = "yara"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
@@ -407,7 +486,7 @@ func TestPresencePerChannelFailurePreservesCoverage(t *testing.T) {
 func TestCloseCleanupNarrow(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Epoch: 100, Resolver: res, Clock: clk.now})
+	g := New(Config{Epoch: 100, Resolver: res, Clock: clk})
 
 	const principal = "frank"
 	h, id := openHome(t, channel.ID("c"), principal)

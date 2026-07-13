@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -20,7 +21,7 @@ import (
 // and the session is torn down, never left reading a closing Home.
 func TestLateStartFeedRefused(t *testing.T) {
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: newClock().now})
+	g := New(Config{Resolver: res, Clock: newClock()})
 	s, err := g.Attach(context.Background(), "late", nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
@@ -49,7 +50,7 @@ func TestLateStartFeedRefused(t *testing.T) {
 func TestBlockedDeliverUnblocksOnClose(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 
 	const principal = "gwen"
 	h, id := openHome(t, channel.ID("c"), principal)
@@ -94,12 +95,14 @@ func TestBlockedDeliverUnblocksOnClose(t *testing.T) {
 	}
 }
 
-// TestCloseGateRefusesFrame (DoD-7② 关站闩): a business frame driven after the session
-// is closed is refused with `closed` at the delivery permit gate (统一会话闸), never a
-// panic — even though it holds a valid member route.
+// TestCloseGateRefusesFrame (DoD-7② 关站闩真交错): Upstream has already parsed the
+// frame, extracted channel_id, and selected a valid member route, but a failpoint parks
+// it immediately BEFORE the delivery permit. Concurrent Gateway.Close sets the session
+// latch; releasing the parsed frame then makes beginDeliver refuse it as closed. This is
+// the read-before-permit interleave, not a sequential "Close then call Upstream" proxy.
 func TestCloseGateRefusesFrame(t *testing.T) {
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: newClock().now})
+	g := New(Config{Resolver: res, Clock: newClock()})
 	s, _ := g.Attach(context.Background(), "hank", nil)
 	// A member route in the资格账 (nil Home is never dereferenced — beginDeliver refuses
 	// first once closed).
@@ -107,10 +110,46 @@ func TestCloseGateRefusesFrame(t *testing.T) {
 		routes: map[channel.ID]Route{"c": {Channel: "c", Access: AccessMember}},
 		paused: map[channel.ID]struct{}{},
 	})
-	s.Close()
-	got := s.Upstream(context.Background(), mkBusiness(t, subjectgate.FrameSubmit, "c"))
-	if code := codeOf(t, got); code != subjectgate.CodeClosed {
-		t.Fatalf("frame after session Close must be closed, got %q", code)
+	parsed := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	s.beforeDeliver = func() {
+		close(parsed)
+		<-release
+	}
+	frame := mkBusiness(t, subjectgate.FrameSubmit, "c")
+	result := make(chan subjectgate.Frame, 1)
+	go func() {
+		result <- s.Upstream(context.Background(), frame)
+	}()
+	select {
+	case <-parsed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("frame never reached the read-before-delivery-permit failpoint")
+	}
+
+	closeDone := make(chan struct{})
+	go func() { _ = g.Close(); close(closeDone) }()
+	select {
+	case <-closeDone:
+		// No permit existed yet, so Close has no delivery to drain and may return.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Gateway.Close did not set the latch while the parsed frame was pre-permit")
+	}
+	close(release)
+	select {
+	case got := <-result:
+		if code := codeOf(t, got); code != subjectgate.CodeClosed {
+			t.Fatalf("pre-permit frame released after Close must be closed, got %q", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("pre-permit frame did not return after failpoint release")
 	}
 }
 
@@ -140,7 +179,7 @@ func (r *barrierResolver) Snapshot(ctx context.Context, principal string) ([]Rou
 // gates every caller. After release both return, coverage is cleaned, pumps joined.
 func TestConcurrentCloseGated(t *testing.T) {
 	br := &barrierResolver{entered: make(chan struct{}), release: make(chan struct{})}
-	g := New(Config{Resolver: br, Clock: newClock().now})
+	g := New(Config{Resolver: br, Clock: newClock()})
 
 	// Seat a device so the presence loop has a principal to enumerate, then Start it.
 	if _, err := g.Attach(context.Background(), "iris", nil); err != nil {
@@ -206,7 +245,7 @@ func TestConcurrentCloseGated(t *testing.T) {
 // still-open gateway and register a pump for a dead session.
 func TestSessionClosedThenStartFeedRefused(t *testing.T) {
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: newClock().now})
+	g := New(Config{Resolver: res, Clock: newClock()})
 	s, err := g.Attach(context.Background(), "direct-close", nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
@@ -226,38 +265,53 @@ func TestSessionClosedThenStartFeedRefused(t *testing.T) {
 type hangingResolver struct {
 	entered chan struct{}
 	release chan struct{}
-	once    sync.Once
 }
 
 func (r *hangingResolver) Snapshot(ctx context.Context, principal string) ([]Route, []ChannelFailure, error) {
-	r.once.Do(func() { close(r.entered) })
+	r.entered <- struct{}{}
 	<-r.release
 	return nil, nil, nil
 }
 
-// TestClosePumpJoinBounded (P1-3, §2.1 #11/#12 有界 join + LeakedPumps): a pump that
-// registers (tryRegisterPump succeeds) but whose goroutine never gets to run — because
-// StartFeed's SYNCHRONOUS first reconcile is stuck inside a resolver that ignores ctx —
-// must not hang Gateway.Close() forever. Close returns within the injected
-// PumpJoinTimeout and counts the stuck pump into LeakedPumps (账目诚实), rather than
-// blocking indefinitely on g.pumps.Wait() (the bug: the old code had no bound at all).
+// TestClosePumpJoinBounded (R2 P2-1, §2.1 #11/#12): N sessions register pumps, then
+// all N park in StartFeed's synchronous resolver before their goroutines can launch.
+// Close returns within its bound and records exactly N leaked pumps (not one timeout
+// incident). When the resolver is later released, every StartFeed retires its register
+// at the post-reconcile latch check: zero runFeed goroutines start after Close returned.
 func TestClosePumpJoinBounded(t *testing.T) {
-	hr := &hangingResolver{entered: make(chan struct{}), release: make(chan struct{})}
-	defer close(hr.release) // test hygiene only: let the permanently-stuck goroutine exit after the test.
-	g := New(Config{Resolver: hr, Clock: newClock().now, PumpJoinTimeout: 50 * time.Millisecond})
-	s, err := g.Attach(context.Background(), "leak", nil)
-	if err != nil {
-		t.Fatalf("Attach: %v", err)
+	const n = 3
+	hr := &hangingResolver{entered: make(chan struct{}, n), release: make(chan struct{})}
+	defer func() {
+		select {
+		case <-hr.release:
+		default:
+			close(hr.release)
+		}
+	}()
+	g := New(Config{Resolver: hr, Clock: newClock(), PumpJoinTimeout: 50 * time.Millisecond})
+	var starts atomic.Int64
+	startDone := make(chan struct{}, n)
+	for i := 0; i < n; i++ {
+		s, err := g.Attach(context.Background(), fmt.Sprintf("leak-%d", i), nil)
+		if err != nil {
+			t.Fatalf("Attach %d: %v", i, err)
+		}
+		s.feedStarted = func() { starts.Add(1) }
+		go func() {
+			s.StartFeed()
+			startDone <- struct{}{}
+		}()
 	}
-	go s.StartFeed()
-	select {
-	case <-hr.entered:
-	case <-time.After(2 * time.Second):
-		t.Fatal("StartFeed's synchronous first reconcile never reached the resolver")
+	for i := 0; i < n; i++ {
+		select {
+		case <-hr.entered:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("StartFeed %d never reached the blocking resolver", i)
+		}
 	}
-	// At this point tryRegisterPump has already Add(1)'d g.pumps (beginFeed runs BEFORE
-	// the blocking reconcile), but `go s.runFeed()` has not executed yet — its Done() can
-	// never fire until hr.release closes, which Close must not wait for.
+	if got := g.registeredPumps.Load(); got != n {
+		t.Fatalf("registered pump count before Close = %d, want %d", got, n)
+	}
 	closeDone := make(chan struct{})
 	go func() { _ = g.Close(); close(closeDone) }()
 	select {
@@ -265,8 +319,24 @@ func TestClosePumpJoinBounded(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close did not return within the bounded pump-join budget (P1-3 leak accounting broken)")
 	}
-	if got := g.LeakedPumps(); got != 1 {
-		t.Fatalf("Close must count the stuck pump as leaked, got %d", got)
+	if got := g.LeakedPumps(); got != n {
+		t.Fatalf("Close must count leaked pumps, not timeout incidents: got %d want %d", got, n)
+	}
+
+	// Close has returned. A resolver that finally wakes must not create late-owned
+	// goroutines against already-closing Homes.
+	close(hr.release)
+	for i := 0; i < n; i++ {
+		select {
+		case <-startDone:
+		case <-time.After(2 * time.Second):
+			t.Fatalf("released StartFeed %d did not retire", i)
+		}
+	}
+	waitFor(t, func() bool { return g.registeredPumps.Load() == 0 },
+		"released blocked registrations did not retire to zero")
+	if got := starts.Load(); got != 0 {
+		t.Fatalf("%d runFeed goroutine(s) started after Close returned; want zero", got)
 	}
 }
 
@@ -281,7 +351,7 @@ func TestResolverEnumerationConcurrentWithClose(t *testing.T) {
 	for iter := 0; iter < 20; iter++ {
 		clk := newClock()
 		res := newResolver()
-		g := New(Config{Resolver: res, Clock: clk.now})
+		g := New(Config{Resolver: res, Clock: clk})
 		const principal = "jack"
 		h, id := openHome(t, channel.ID("c"), principal)
 		res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
@@ -289,9 +359,9 @@ func TestResolverEnumerationConcurrentWithClose(t *testing.T) {
 		if err := g.Start(); err != nil { // presence loop enumerates
 			t.Fatalf("Start: %v", err)
 		}
-		s.StartFeed()      // read pump enumerates
-		g.kickPresence()   // ensure the presence loop is actively re-enumerating
-		s.markDirty()      // ensure the pump is actively re-resolving
+		s.StartFeed()    // read pump enumerates
+		g.kickPresence() // ensure the presence loop is actively re-enumerating
+		s.markDirty()    // ensure the pump is actively re-resolving
 
 		done := make(chan struct{})
 		go func() { _ = g.Close(); close(done) }()

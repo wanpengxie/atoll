@@ -2,8 +2,10 @@
 // the end-to-end proof of "连接即人" over the real /ws. ONE user, TWO channels, ONE
 // connection: a single channel-blind attach hands over a two-key游标表, the connection
 // receives feed for BOTH channels, business frames name their own channel_id and land
-// on the right channel, and revoking eligibility to c1 (deleting the channel) stops
-// c1's stream while c2 keeps flowing — a single-channel loss never tears the pipe.
+// on the right channel, and deleting c1 leaves a bounded no-c1-frame window while c2
+// keeps flowing — a single-channel loss never tears the pipe. Under the current public
+// API this is deliberately a conservative source-deletion assertion, not proof of an
+// independently revocable read-eligibility half (see the defer declaration below).
 //
 // It is server-ONLY (no daemon): the two channels' creators are auto-admitted human
 // members, so a public event addressed to the member lands on that channel's feed,
@@ -106,8 +108,11 @@ func TestMultiChannelOnePipe(t *testing.T) {
 	// membership removal: workspace membership carries observer/tail visibility into
 	// every channel of that workspace by design (app/entitlement.go) — losing channel
 	// MEMBERSHIP is not losing the WORKSPACE relationship that grants read access. The
-	// zero-feed proof (below) instead exercises the channel's full deletion, which
-	// removes the directory row entirely and so removes even the observer route.
+	// bounded no-feed assertion (below) instead exercises the channel's full deletion,
+	// which removes the directory row entirely and so removes even the observer route.
+	// 资格退订半在当前公开 API 下不可独立验证（workspace observer 语义），挂
+	// tail-only 撤权 defer 账. Therefore this test must not claim that the scoped
+	// membership removal proved c1 read-feed revocation.
 	api.must("DELETE", "/api/channels/"+c1+"/actors/"+human1, nil, http.StatusOK)
 	pollUntil(t, "c1 submit is forbidden after scoped membership removal", 30*time.Second, func() bool {
 		code, errored := mcTrySubmit(t, ws, c1, human1, "one-dead-scoped")
@@ -120,23 +125,66 @@ func TestMultiChannelOnePipe(t *testing.T) {
 		t.Fatalf("c2 stream must keep flowing after c1's scoped membership removal")
 	}
 
-	// ---- 撤销 c1 (full deletion) → c1 零新 feed，c2 仍照常 --------------------------
+	// ---- 删除 c1 源 → 保守的 c1 零新帧窗口，c2 仍照常 -------------------------
 	// Delete c1 entirely: the directory row disappears, so the resolver's per-channel
 	// enumeration no longer returns c1 at ALL (not even as an observer) — genuine
-	// confirmed-absence, the only path that actually yields a真实 empty-feed guarantee.
+	// confirmed-absence. Because the Home/data source also disappears, this can assert
+	// observed no-feed behavior but cannot diagnose "subscription retired" versus "source
+	// absent"; that qualification-half proof remains the declared defer above.
 	api.must("DELETE", "/api/channels/"+c1, nil, http.StatusOK)
 	pollUntil(t, "c1 submit is forbidden after full channel deletion", 30*time.Second, func() bool {
 		code, errored := mcTrySubmit(t, ws, c1, human1, "one-dead-deleted")
 		return errored && code == "forbidden"
 	})
 
-	// c2 照常: a fresh c2 event still round-trips on the same pipe post-revocation.
+	// Drain anything received before the measurement boundary, then write a fresh c2
+	// marker. For the entire observation window the same connection must receive zero c1
+	// frames and must still receive that c2 marker (R2 DoD-2a conservative form).
+	mcDrainFeed(ws)
 	id3 := mcSubmitEvent(t, ws, c2, human2, "two-c")
-	if _, ok := mcAwaitFeed(t, ws, c2, id3, 15*time.Second); !ok {
-		t.Fatalf("c2 stream must keep flowing after c1 revocation (连接即人: pipes independent)")
-	}
+	mcAssertNoChannelFeedWhileAwaiting(t, ws, c1, c2, id3, 2*time.Second)
 
 	server.kill9(t)
+}
+
+func mcDrainFeed(ws *wsClient) {
+	for {
+		select {
+		case <-ws.tail:
+		default:
+			return
+		}
+	}
+}
+
+// mcAssertNoChannelFeedWhileAwaiting observes the whole window, not just until the c2
+// marker arrives: any c1 feed frame is a failure, and absence of the c2 marker is also a
+// failure. This proves the conservative no-new-frame behavior after source deletion.
+func mcAssertNoChannelFeedWhileAwaiting(t *testing.T, ws *wsClient, forbiddenCh, markerCh, markerID string, window time.Duration) {
+	t.Helper()
+	deadline := time.NewTimer(window)
+	defer deadline.Stop()
+	markerSeen := false
+	for {
+		select {
+		case fp := <-ws.tail:
+			ch, _ := fp["channel_id"].(string)
+			if ch == forbiddenCh {
+				t.Fatalf("received a new %s feed frame inside the %s no-feed window: %v", forbiddenCh, window, fp)
+			}
+			if ch == markerCh {
+				env, _ := fp["envelope"].(map[string]any)
+				if env != nil && env["id"] == markerID {
+					markerSeen = true
+				}
+			}
+		case <-deadline.C:
+			if !markerSeen {
+				t.Fatalf("%s marker %s did not arrive while asserting zero %s frames", markerCh, markerID, forbiddenCh)
+			}
+			return
+		}
+	}
 }
 
 // mcResolveHuman waits until the channel's creator is represented by one active human

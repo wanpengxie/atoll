@@ -1,6 +1,6 @@
 SHELL := /usr/bin/env bash
 
-.PHONY: install build build-go build-release test lint dev dev-server clean e2e-loop
+.PHONY: install build build-go build-release test lint check-gateway-retired dev dev-server clean e2e-loop
 
 GO_BINARIES := server daemon
 
@@ -55,9 +55,14 @@ e2e-loop: build-go
 	ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -run 'TestLoop|TestGatewayFrames|TestMultiChannelOnePipe' -v -timeout 300s
 
 # lint — go vet + 架构约束（archtest：契约形状只许住 lib/introspect）
-lint:
+lint: check-gateway-retired
 	go vet ./...
 	go test ./archtest/
+
+# DoD-4 expected-diff gate: retirement comments are the sole allowlist; any live
+# identifier/string/semantic hit fails mechanically.
+check-gateway-retired:
+	./scripts/check-gateway-retired-symbols.sh
 
 # ----------------------------------------------------------------------------
 # dev — 起 server(API-only)。web UI 在独立仓库 atoll-web:

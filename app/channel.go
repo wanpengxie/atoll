@@ -117,9 +117,7 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 		h := a.homes[cID]
 		delete(a.homes, cID)
 		a.mu.Unlock()
-		if h != nil {
-			_ = h.Close()
-		}
+		_ = a.closeDetachedHome("create-rollback", cID, h)
 		_, _ = a.db.ExecContext(c.Request.Context(), `DELETE FROM channels WHERE id = ?`, chID)
 		_ = os.Remove(dbPath)
 		a.logger.Error("create channel: "+stage, "channel", chID, "err", err)
@@ -234,9 +232,7 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 	h := a.homes[cID]
 	delete(a.homes, cID)
 	a.mu.Unlock()
-	if h != nil {
-		_ = h.Close()
-	}
+	_ = a.closeDetachedHome("delete-channel", cID, h)
 
 	// Remove daemon bindings, then the channel row.
 	_, _ = a.db.ExecContext(c.Request.Context(),

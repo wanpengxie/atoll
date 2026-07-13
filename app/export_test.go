@@ -64,6 +64,13 @@ func (a *App) SetRevokeFailForTest(v bool) {
 	a.revokeFailHook = nil
 }
 
+// SetHomeCloseHookForTest installs the failpoint immediately after a Home is detached
+// from a.homes and a.mu is released, before its potentially blocking Close. op is one
+// of "app-close", "delete-channel", or "create-rollback". Test-only.
+func (a *App) SetHomeCloseHookForTest(fn func(op string, chID channel.ID)) {
+	a.homeCloseHook = fn
+}
+
 // SeedIntentRowForTest inserts a raw channel_actors intent row WITHOUT admitting
 // its membership — reproducing the半失败 state (intent landed, Admit did not) an
 // Introduce retry must heal, so a test can assert the retry Admits under the

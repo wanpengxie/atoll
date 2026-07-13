@@ -25,7 +25,7 @@ import (
 func TestStaticBacklogFullDelivery(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	const principal = "rob"
 	h, id := openHome(t, channel.ID("c"), principal)
 	admitRows(t, h, 2*feedBatch+5) // >2×feedBatch rows beyond the member's own admit row
@@ -60,7 +60,7 @@ func TestStaticBacklogFullDelivery(t *testing.T) {
 func TestPumpFairness(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	const principal = "sam"
 	hot, hotID := openHome(t, channel.ID("hot"), principal)
 	cold, coldID := openHome(t, channel.ID("cold"), principal)
@@ -97,7 +97,7 @@ func TestPumpFairness(t *testing.T) {
 func TestBusyLoopObservesSweepUnderSustainedBacklog(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now, SweepInterval: 10 * time.Millisecond})
+	g := New(Config{Resolver: res, Clock: clk, SweepInterval: 10 * time.Millisecond})
 	const principal = "revoked-busy"
 	h, id := openHome(t, channel.ID("c"), principal)
 	admitRows(t, h, 3*feedBatch) // deep backlog: every batch read is a full feedBatch.
@@ -119,6 +119,7 @@ func TestBusyLoopObservesSweepUnderSustainedBacklog(t *testing.T) {
 	// Revoke NOW, with NO poke — the read side must self-discover this via the sweep
 	// backstop even while continuously busy (P0-1).
 	res.set(principal, nil, nil, nil)
+	clk.advance(10 * time.Millisecond) // fire the injected clock's real sweep timer
 
 	waitFor(t, func() bool {
 		_, ok := eligRoutes(s)["c"]
@@ -138,6 +139,37 @@ func TestBusyLoopObservesSweepUnderSustainedBacklog(t *testing.T) {
 	stop()
 }
 
+// TestAdmitWithoutPokeConvergesOnSweep (DoD-6/7③ timer backstop): the connection is
+// already running with no channels. A real Home.Admit then appears in resolver truth,
+// but there is deliberately NO OnMembershipChange wire and no hand Poke. Advancing the
+// injected clock fires runFeed's real sweep timer and the new channel enters the stream.
+func TestAdmitWithoutPokeConvergesOnSweep(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	const sweep = 10 * time.Second
+	g := New(Config{Resolver: res, Clock: clk, SweepInterval: sweep})
+	const principal = "no-poke-admit"
+	res.set(principal, nil, nil, nil)
+
+	s, _ := g.Attach(context.Background(), principal, nil)
+	_, stop := drainFeed(s)
+	s.StartFeed()
+	waitFor(t, func() bool { return res.callCount() >= 2 && clk.armCount() >= 2 },
+		"running pump did not arm its sweep timer")
+
+	// Admit after the pump is waiting. openHome has no membership callback, so this
+	// truth change cannot reach the gateway except through the periodic sweep.
+	h, id := openHome(t, channel.ID("late"), principal)
+	res.set(principal, []Route{memberRoute("late", h, id, clk.now())}, nil, nil)
+	head, _ := h.View().MaxSeq(context.Background())
+	clk.advance(sweep)
+	waitFor(t, func() bool { return s.lane.cursor.at("late") >= head },
+		"no-poke Admit did not converge through the real sweep timer")
+
+	s.Close()
+	stop()
+}
+
 // TestAdmitPokeEntersStream (DoD-7③): a running pump with NO eligibility yet; when the
 // resolver gains a channel and a poke fires (the Admit membership-change poke), the
 // channel enters the stream within a bounded time (≤下一泵轮) — the dirty/wake edge
@@ -145,7 +177,7 @@ func TestBusyLoopObservesSweepUnderSustainedBacklog(t *testing.T) {
 func TestAdmitPokeEntersStream(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk.now})
+	g := New(Config{Resolver: res, Clock: clk})
 	const principal = "tom"
 	h, id := openHome(t, channel.ID("c"), principal)
 	// Start with NO eligibility for tom.
