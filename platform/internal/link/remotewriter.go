@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
@@ -28,6 +27,12 @@ import (
 // ipc fall back to a protocol-only wire leaf and frees actorrt's compile closure
 // of harness.
 //
+// MECHANISM: RemoteWriter is the EMIT DIALECT of relayCore (relaycore.go) — the
+// shared FIFO no-id synchronous round-trip machine (six axioms there, in one
+// place). This type only translates the emit dialect: EmitPayload out, an
+// EmitAckPayload rebuilt into a harness.WriteResult back. It owns no FIFO / lock /
+// head-dissolve logic of its own.
+//
 // INVARIANT: the proxy pen NEVER injects identity and NEVER fail-fasts. It only
 // relays the envelope up the wire; the identity weld + fail-fast live on the
 // HOST side, where the link's emitSink Mints a Pen for the connection's
@@ -41,44 +46,28 @@ import (
 // returned harness.WriteResult is reconstructed from that ack, so a remote
 // cell's Respond observes the EXACT outcome a local cell's Respond would — the
 // write contract is not downgraded across the wire.
-//
-// Correlation is FIFO with no id (the wire contract, pinned in ipc/frame.go): the
-// host acks emits in receipt order, so a pending queue resolved head-first is
-// the complete and only mechanism needed. Concurrent Write calls pipeline:
-// their emits are written in mutex order and their waiters enqueued in the same
-// order, matching the order the host receives and therefore acks them.
 type RemoteWriter struct {
-	codec *ipc.Codec
-
-	// writeMu serializes "enqueue waiter + write emit to the wire" as one atomic
-	// step, so on-wire emit order == FIFO waiter order. It is HELD ACROSS the
-	// (possibly blocking) codec.Write — but DeliverAck/Close take only mu, never
-	// writeMu, so an incoming ack can always be delivered even while a Write is
-	// blocked on a synchronous transport. Holding both locks across the wire
-	// write would deadlock: the host cannot ack until it reads the emit, and the
-	// remote reader cannot deliver that ack if it needs the same lock.
-	writeMu sync.Mutex
-
-	mu      sync.Mutex
-	pending []chan ackResult // FIFO wait queue; head is the oldest unacked emit
-	closed  bool
+	core *relayCore[ackResult]
 }
 
-// ackResult carries one resolved KindEmitAck back to the blocked Write.
+// ackResult carries one resolved KindEmitAck back to the blocked Write: the
+// reconstructed harness verdict plus the host-side error decoded from the ack.
 type ackResult struct {
 	res harness.WriteResult
 	err error
 }
 
 // errRemoteWriterClosed is returned to a blocked or new Write once the writer is
-// torn down (the connection died with emits still in flight).
+// torn down (the connection died with emits still in flight). It is the emit
+// dialect's close sentinel (relayCore.closedErr) — its identity stays stable so
+// consumers can still judge a teardown apart from a host verdict.
 var errRemoteWriterClosed = errors.New("link: remote writer closed")
 
 // NewRemoteWriter binds a remote writer to codec (the actor's port connection).
 // The codec's write side is mutex-guarded, so emits may share it with the
 // actor's other outbound frames.
 func NewRemoteWriter(codec *ipc.Codec) *RemoteWriter {
-	return &RemoteWriter{codec: codec}
+	return &RemoteWriter{core: newRelayCore[ackResult](codec, ipc.KindEmit, errRemoteWriterClosed)}
 }
 
 // Write sends env upward as a KindEmit and blocks until the host returns the
@@ -88,10 +77,11 @@ func NewRemoteWriter(codec *ipc.Codec) *RemoteWriter {
 // authoritative verdict. It does NOT inject identity here — the host emitSink's
 // Mint welds the bound id (see the type doc invariant).
 //
-// On ctx cancellation the waiter is abandoned in place: the host still acks in
-// receipt order, and DeliverAck resolving an abandoned (already-closed-context)
-// waiter is harmless — the FIFO head is still consumed, keeping the queue
-// aligned with the host's ack order.
+// The FIFO round-trip mechanics live in relayCore.roundTrip; Write only maps the
+// emit dialect onto core.roundTrip's outcome triple, and both the pre-send-cancel
+// (definiteErr) and the teardown-in-flight (transportErr → errRemoteWriterClosed)
+// arms collapse to the same Pen (WriteResult, error) contract: they surface as an
+// error, never a fabricated verdict.
 func (w *RemoteWriter) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	if env == nil {
 		return harness.WriteResult{}, errors.New("link: remote writer nil envelope")
@@ -100,97 +90,43 @@ func (w *RemoteWriter) Write(ctx context.Context, env *message.Envelope) (harnes
 	if err != nil {
 		return harness.WriteResult{}, err
 	}
-	waiter := make(chan ackResult, 1)
-
-	// writeMu makes "enqueue waiter + write emit" atomic with respect to other
-	// Writes, so on-wire emit order == FIFO waiter order. mu is taken only for
-	// the brief pending-slice mutations; the blocking codec.Write happens under
-	// writeMu but NOT under mu, so DeliverAck/Close stay unblocked.
-	w.writeMu.Lock()
-	defer w.writeMu.Unlock()
-
-	w.mu.Lock()
-	if w.closed {
-		w.mu.Unlock()
-		return harness.WriteResult{}, errRemoteWriterClosed
+	ack, transportErr, definiteErr := w.core.roundTrip(ctx, payload)
+	if definiteErr != nil {
+		// Pre-send ctx cancel: the emit frame provably never left the wire (the host
+		// never saw it), so we honestly report ctx.Err() as a non-execution — not a
+		//普通取消 after the emit already reached the host.
+		return harness.WriteResult{}, definiteErr
 	}
-	w.pending = append(w.pending, waiter)
-	w.mu.Unlock()
-
-	if err := w.codec.Write(ipc.Frame{Kind: ipc.KindEmit, Payload: payload}); err != nil {
-		// Nothing reached the host: drop this waiter. writeMu guarantees no other
-		// Write appended after it, so it is the tail (head pops by DeliverAck only
-		// shrink from the front).
-		w.removeTailWaiter(waiter)
-		return harness.WriteResult{}, err
+	if transportErr != nil {
+		// Wire-write failure, post-send cancel, or teardown-in-flight
+		// (errRemoteWriterClosed). The Pen contract has no unknown-verdict slot, so an
+		// unconfirmed emit is surfaced as an error — the identity/text of a teardown
+		// stays errRemoteWriterClosed, so the consumer's behaviour is unchanged.
+		return harness.WriteResult{}, transportErr
 	}
-
-	select {
-	case <-ctx.Done():
-		return harness.WriteResult{}, ctx.Err()
-	case r := <-waiter:
-		return r.res, r.err
-	}
+	return ack.res, ack.err
 }
 
-// removeTailWaiter drops waiter from the pending queue after a failed wire
-// write. It is the tail (writeMu held since enqueue), but DeliverAck may have
-// popped the head meanwhile, so it locates the waiter by identity rather than
-// assuming a fixed index.
-func (w *RemoteWriter) removeTailWaiter(waiter chan ackResult) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	for i := len(w.pending) - 1; i >= 0; i-- {
-		if w.pending[i] == waiter {
-			w.pending = append(w.pending[:i], w.pending[i+1:]...)
-			return
-		}
-	}
-}
-
-// DeliverAck routes one inbound KindEmitAck into the FIFO head waiter. The
-// remote's single read loop calls this when it decodes a KindEmitAck frame
-// (the wire contract pins acks to receipt order, so the head waiter is always
-// the correct target). It reconstructs the harness.WriteResult verdict and the
-// transport error from the ack payload.
+// DeliverAck routes one inbound KindEmitAck into the FIFO head waiter via the
+// core. The remote's single read loop calls this when it decodes a KindEmitAck
+// frame. It reconstructs the harness.WriteResult verdict and the transport error
+// from the ack payload before handing the emit-dialect Ack to the core.
 func (w *RemoteWriter) DeliverAck(ack ipc.EmitAckPayload) {
-	w.mu.Lock()
-	if len(w.pending) == 0 {
-		w.mu.Unlock()
-		return // a stray ack with no waiter (protocol violation upstream); ignore
-	}
-	waiter := w.pending[0]
-	w.pending = w.pending[1:]
-	w.mu.Unlock()
-
-	res := harness.WriteResult{
-		MessageID:    ack.MessageID,
-		Seq:          ack.Seq,
-		RejectReason: harness.HarnessRejectReason(ack.RejectReason),
-		RejectDetail: ack.RejectDetail,
-	}
-	var err error
-	err = decodeAckError(ack.ErrorCode, ack.ErrorMessage)
-	waiter <- ackResult{res: res, err: err}
+	w.core.deliverAck(ackResult{
+		res: harness.WriteResult{
+			MessageID:    ack.MessageID,
+			Seq:          ack.Seq,
+			RejectReason: harness.HarnessRejectReason(ack.RejectReason),
+			RejectDetail: ack.RejectDetail,
+		},
+		err: decodeAckError(ack.ErrorCode, ack.ErrorMessage),
+	})
 }
 
 // Close fails every pending waiter with errRemoteWriterClosed and rejects
 // subsequent Writes. The connection died with emits in flight: those cells must
 // see a transport error, not block forever.
-func (w *RemoteWriter) Close() {
-	w.mu.Lock()
-	if w.closed {
-		w.mu.Unlock()
-		return
-	}
-	w.closed = true
-	pending := w.pending
-	w.pending = nil
-	w.mu.Unlock()
-	for _, waiter := range pending {
-		waiter <- ackResult{err: errRemoteWriterClosed}
-	}
-}
+func (w *RemoteWriter) Close() { w.core.close() }
 
 // Verify the remote writer satisfies the harness Pen contract at compile time —
 // the whole point is that a remote cell's pen is indistinguishable from a local

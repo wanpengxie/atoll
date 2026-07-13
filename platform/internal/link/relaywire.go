@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -172,151 +171,68 @@ type scheduleResponse struct {
 // ---------------------------------------------------------------------------
 
 // errRelayClosed is returned to a blocked or new round-trip once the arm is torn
-// down (the connection died with an invocation in flight).
+// down (the connection died with an invocation in flight). It is this dialect's
+// close sentinel (relayCore.closedErr).
 var errRelayClosed = errors.New("link: relay arm closed")
 
 // relayClient is the out-of-process end of one opaque capability arm (KindAccess
-// or KindSchedule) — the plane-agnostic twin of RemoteWriter. It sends a request
-// frame of its fixed kind and blocks until the matching ack returns (FIFO, no id,
-// receipt-order — the host acks on its single read loop). Concurrent round-trips
-// pipeline: emits are written in mutex order and waiters enqueued in the same
-// order, matching the order the host receives and acks them.
+// or KindSchedule) — the plane-agnostic twin of RemoteWriter. Both are dialects of
+// the SAME machine: relayClient is the OPAQUE-BYTES dialect of relayCore
+// (relaycore.go), which owns the FIFO no-id synchronous round-trip (six axioms
+// there, in one place). This type only translates the opaque dialect — request
+// bytes out, RelayAckPayload rebuilt into (payload, decoded error) back — and
+// maps core.roundTrip's outcome triple onto its own (ackPayload, ackErr,
+// transportErr) contract.
 type relayClient struct {
-	codec       *ipc.Codec
-	requestKind ipc.Kind
-
-	// writeMu serialises "enqueue waiter + write request" as one atomic step, so
-	// on-wire order == FIFO waiter order (same discipline as RemoteWriter.writeMu).
-	writeMu sync.Mutex
-
-	mu      sync.Mutex
-	pending []chan relayAck
-	closed  bool
+	core *relayCore[relayAck]
 }
 
 // relayAck carries one resolved ack back to the blocked round-trip: the opaque
-// response bytes and the host-side error reconstructed from coded ack fields.
-// transport marks the arm-closed sentinel — a teardown with the request in flight,
-// NOT a host verdict — so roundTrip surfaces it as transportErr (unconfirmed →
-// outcome_unknown on access) rather than as a definite ackErr.
+// response bytes and the host-side error reconstructed from coded ack fields. The
+// teardown/unconfirmed distinction is NOT carried here — it lives on the core's
+// coreResult.transport (axiom 5) and is surfaced through roundTrip's transportErr.
 type relayAck struct {
-	payload   json.RawMessage
-	err       error
-	transport bool
+	payload json.RawMessage
+	err     error
 }
 
 func newRelayClient(codec *ipc.Codec, requestKind ipc.Kind) *relayClient {
-	return &relayClient{codec: codec, requestKind: requestKind}
+	return &relayClient{core: newRelayCore[relayAck](codec, requestKind, errRelayClosed)}
 }
 
 // roundTrip sends payload as a request frame and blocks for the ack. It reports
-// three distinct outcomes:
-//   - transportErr != nil: the op GENUINELY crossed the wire and its result is now
-//     UNCONFIRMED (the ctx was cancelled AFTER the frame was sent, or the arm died
-//     with the request in flight) — the caller surfaces this as an in-flight
-//     unknown (access → outcome_unknown, schedule → error). A pre-send wire-write
-//     failure also lands here (nothing to confirm either way);
+// three distinct outcomes (a straight remap of relayCore.roundTrip's triple):
+//   - transportErr != nil: the op's result is UNCONFIRMED — the ctx was cancelled
+//     AFTER the frame was sent, the arm died with the request in flight
+//     (errRelayClosed), or a pre-send wire-write failed (nothing to confirm) — the
+//     caller surfaces this as an in-flight unknown (access → outcome_unknown,
+//     schedule → error);
 //   - transportErr == nil, ackErr != nil: a DEFINITE, op-did-not-produce-an-unknown
 //     failure — either the host returned a definite error verdict (structural /
 //     not-live), OR the ctx was ALREADY cancelled before the frame left (a pre-send
-//     abort: the op provably never reached the home). Both are relayed as a plain
-//     error on both arms — NEVER outcome_unknown, because the op verifiably did not
-//     execute-with-unknown-result;
+//     abort: the op provably never reached the home, core's definiteErr). Both are
+//     relayed as a plain error — NEVER outcome_unknown, because the op verifiably
+//     did not execute-with-unknown-result;
 //   - both nil: ackPayload is the host's opaque verdict bytes.
 func (c *relayClient) roundTrip(ctx context.Context, payload []byte) (ackPayload json.RawMessage, ackErr error, transportErr error) {
-	// Pre-send ctx check: an already-cancelled ctx means the frame never leaves the
-	// wire, so the op provably did not reach the home — a DEFINITE non-execution,
-	// surfaced through the ackErr slot (a plain error), never transportErr. This is
-	// the pre/post-send split: outcome_unknown is reserved for an op that actually
-	// crossed the wire (post-send cancel / in-flight arm death below), never one
-	// that never sent.
-	if err := ctx.Err(); err != nil {
-		return nil, err, nil
+	ack, txErr, definiteErr := c.core.roundTrip(ctx, payload)
+	if definiteErr != nil {
+		return nil, definiteErr, nil
 	}
-
-	waiter := make(chan relayAck, 1)
-
-	c.writeMu.Lock()
-	defer c.writeMu.Unlock()
-
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return nil, nil, errRelayClosed
+	if txErr != nil {
+		return nil, nil, txErr
 	}
-	c.pending = append(c.pending, waiter)
-	c.mu.Unlock()
-
-	if err := c.codec.Write(ipc.Frame{Kind: c.requestKind, Payload: json.RawMessage(payload)}); err != nil {
-		c.removeTailWaiter(waiter)
-		return nil, nil, err
-	}
-
-	select {
-	case <-ctx.Done():
-		// POST-SEND cancel: the frame is already on the wire, so the op is
-		// GENUINELY in flight and its result unconfirmed → transportErr (→
-		// outcome_unknown on access), NOT the pre-send definite-error path above.
-		// Waiter abandoned in place: the host still acks in receipt order and
-		// deliverAck consuming an abandoned waiter is harmless (buffered chan, no
-		// reader) — the FIFO head is still consumed, keeping the queue aligned.
-		return nil, nil, ctx.Err()
-	case r := <-waiter:
-		if r.transport {
-			// The arm was torn down with this request in flight (connection died):
-			// nothing was confirmed — surface it as transportErr, not a host verdict.
-			return nil, nil, r.err
-		}
-		return r.payload, r.err, nil
-	}
+	return ack.payload, ack.err, nil
 }
 
-// removeTailWaiter drops waiter after a failed wire write (it is the tail —
-// writeMu has been held since enqueue — but deliverAck may have popped the head
-// meanwhile, so it locates by identity).
-func (c *relayClient) removeTailWaiter(waiter chan relayAck) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	for i := len(c.pending) - 1; i >= 0; i-- {
-		if c.pending[i] == waiter {
-			c.pending = append(c.pending[:i], c.pending[i+1:]...)
-			return
-		}
-	}
-}
-
-// deliverAck routes one inbound ack into the FIFO head waiter (the wire pins acks
-// to receipt order, so the head is always the correct target).
+// deliverAck reconstructs the opaque-dialect Ack from one inbound RelayAckPayload
+// and routes it into the core's FIFO head waiter.
 func (c *relayClient) deliverAck(ack ipc.RelayAckPayload) {
-	c.mu.Lock()
-	if len(c.pending) == 0 {
-		c.mu.Unlock()
-		return // stray ack with no waiter (upstream protocol violation); ignore
-	}
-	waiter := c.pending[0]
-	c.pending = c.pending[1:]
-	c.mu.Unlock()
-
-	var err error
-	err = decodeAckError(ack.ErrorCode, ack.ErrorMessage)
-	waiter <- relayAck{payload: ack.Payload, err: err}
+	c.core.deliverAck(relayAck{payload: ack.Payload, err: decodeAckError(ack.ErrorCode, ack.ErrorMessage)})
 }
 
 // close fails every pending round-trip with errRelayClosed and rejects new ones.
-func (c *relayClient) close() {
-	c.mu.Lock()
-	if c.closed {
-		c.mu.Unlock()
-		return
-	}
-	c.closed = true
-	pending := c.pending
-	c.pending = nil
-	c.mu.Unlock()
-	for _, waiter := range pending {
-		waiter <- relayAck{err: errRelayClosed, transport: true}
-	}
-}
+func (c *relayClient) close() { c.core.close() }
 
 // ---------------------------------------------------------------------------
 // remote handles — the daemon-side capability faces an out-of-process cell holds.

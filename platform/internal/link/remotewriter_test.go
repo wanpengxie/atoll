@@ -3,6 +3,7 @@ package link
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"sync"
 	"testing"
@@ -269,6 +270,94 @@ func TestRemoteWriterCtxCancel(t *testing.T) {
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("ctx cancel did not unblock Write")
+	}
+}
+
+// TestRemoteWriterPreSendCancelDoesNotEmit pins behaviour-correction #1: a ctx
+// already cancelled BEFORE Write means the emit frame provably never reaches the
+// host — the pre-send ctx check short-circuits before codec.Write. The old
+// hand-copied writer had NO pre-send check: it wrote the emit onto the wire and
+// only then observed ctx.Done(), lying an already-executed emit down as a plain
+// cancellation. Now the frame stays off the wire (host sees zero emits) and Write
+// returns ctx.Err().
+func TestRemoteWriterPreSendCancelDoesNotEmit(t *testing.T) {
+	t.Parallel()
+	hostConn, remoteConn := net.Pipe()
+	var mu sync.Mutex
+	emits := 0
+	go func() {
+		c := ipc.NewCodec(hostConn, hostConn)
+		for {
+			f, err := c.Read()
+			if err != nil {
+				return
+			}
+			if f.Kind == ipc.KindEmit {
+				mu.Lock()
+				emits++
+				mu.Unlock()
+			}
+		}
+	}()
+	rcodec := ipc.NewCodec(remoteConn, remoteConn)
+	rw := NewRemoteWriter(rcodec)
+	defer func() { _ = hostConn.Close(); _ = remoteConn.Close() }()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // already cancelled before Write
+
+	_, err := rw.Write(ctx, &message.Envelope{ID: "pre"})
+	if err != context.Canceled {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+	// Give any (erroneous) emit time to cross the pipe before asserting none did.
+	time.Sleep(50 * time.Millisecond)
+	mu.Lock()
+	got := emits
+	mu.Unlock()
+	if got != 0 {
+		t.Fatalf("host received %d emit frames, want 0 (pre-send cancel must not put the emit on the wire)", got)
+	}
+}
+
+// TestRemoteWriterCloseSettlesInFlightAsClosed pins behaviour-correction #2: a
+// teardown with an emit in flight settles that Write with the errRemoteWriterClosed
+// sentinel identity (relayCore boxes it as an unconfirmed transport settlement, and
+// the adapter surfaces that identity unchanged), and a Write after Close is
+// rejected with the same sentinel. The consumer-visible contract is still an error
+// carrying errRemoteWriterClosed — the boxing is internal.
+func TestRemoteWriterCloseSettlesInFlightAsClosed(t *testing.T) {
+	t.Parallel()
+	hostConn, remoteConn := net.Pipe()
+	go func() {
+		c := ipc.NewCodec(hostConn, hostConn)
+		for {
+			if _, err := c.Read(); err != nil {
+				return // read the emit, never ack
+			}
+		}
+	}()
+	rcodec := ipc.NewCodec(remoteConn, remoteConn)
+	rw := NewRemoteWriter(rcodec)
+	defer func() { _ = hostConn.Close(); _ = remoteConn.Close() }()
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := rw.Write(context.Background(), &message.Envelope{ID: "inflight"})
+		done <- err
+	}()
+	time.Sleep(20 * time.Millisecond)
+	rw.Close()
+	select {
+	case err := <-done:
+		if !errors.Is(err, errRemoteWriterClosed) {
+			t.Fatalf("in-flight Write err = %v, want errRemoteWriterClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("in-flight Write never unblocked after Close")
+	}
+	if _, err := rw.Write(context.Background(), &message.Envelope{ID: "after"}); !errors.Is(err, errRemoteWriterClosed) {
+		t.Fatalf("Write after Close err = %v, want errRemoteWriterClosed", err)
 	}
 }
 
