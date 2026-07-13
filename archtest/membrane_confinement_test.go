@@ -24,7 +24,7 @@ import (
 // symbols one layer earlier: the membrane must be woven where the raw handle is
 // minted (minting the handle and wrapping it in the live membrane happen in the
 // same step) — the single caps assembler
-// (platform/home.go buildCaps) and the port emitSink path
+// (platform/caps.go buildCaps) and the port emitSink path
 // (platform/internal/link)
 // — and nowhere else. A downstream cell holds only the woven membrane it was born
 // with; it never re-constructs one (that would let a raw handle escape unwrapped,
@@ -62,23 +62,25 @@ var membraneConstructors = map[string]bool{
 //     — and, since S7, so is livearms.go's NewLiveArms body: it weaves
 //     NewLivePen/NewLiveAccess/NewLiveSchedule over the RebindableArms facades,
 //     gated on the DAEMON's own incarnation).
-//   - platform/home.go is the SINGLE home-side caps assembler (buildCaps) — it
-//     may weave the three raw membranes, never the daemon bundle.
-//   - platform/compute.go is the SINGLE daemon-side assembly site (the build
-//     closure inside Spawn) — it may call link.NewLiveArms, and ONLY that: it
-//     never touches the raw per-plane constructors directly.
+//   - platform/caps.go is the SINGLE home-side caps assembler (buildCaps) — it
+//     may weave the three raw membranes, never the daemon bundle. (platform
+//     拓扑批 T3: buildCaps moved out of home.go into its own file.)
+//   - platform/ring.go is the SINGLE daemon-side assembly site (the build
+//     closure inside computeRing.buildOne, ex-compute.go) — it may call
+//     link.NewLiveArms, and ONLY that: it never touches the raw per-plane
+//     constructors directly.
 //
 // Everything else — spawnhandle.go (delegates to the assembler, weaves nothing)
 // and any future platform file — is OUT: adding a NewLive* reference anywhere
-// else, or a raw-membrane reference in compute.go / a NewLiveArms reference in
-// home.go, must turn this test red.
+// else, or a raw-membrane reference in ring.go / a NewLiveArms reference in
+// caps.go, must turn this test red.
 var membraneWeaveAllowlist = map[string]map[string]bool{
-	"../platform/home.go": {
+	"../platform/caps.go": {
 		"NewLivePen":      true,
 		"NewLiveAccess":   true,
 		"NewLiveSchedule": true,
 	},
-	"../platform/compute.go": {
+	"../platform/ring.go": {
 		"NewLiveArms": true,
 	},
 }
@@ -153,7 +155,7 @@ func TestLiveMembraneConstructionConfinedToPlatform(t *testing.T) {
 		t.Fatalf("walk: %v", err)
 	}
 	if len(violations) > 0 {
-		t.Fatalf("live-membrane construction confinement (link.NewLivePen/NewLiveAccess/NewLiveSchedule only in home.go's buildCaps; link.NewLiveArms only in compute.go's build closure):\n  %s",
+		t.Fatalf("live-membrane construction confinement (link.NewLivePen/NewLiveAccess/NewLiveSchedule only in caps.go's buildCaps; link.NewLiveArms only in ring.go's build closure):\n  %s",
 			strings.Join(violations, "\n  "))
 	}
 }
