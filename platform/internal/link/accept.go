@@ -792,7 +792,16 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 		a.logger.Info("link.attach_reply_failed", "compute", computeID, "err", err)
 		return computeID, false
 	}
-	a.logger.Info("link.attached", "compute", computeID, "actors", len(att.Declarations))
+	// "接上了" and "重申了一遍" are different events — the daemon re-declares its
+	// full set every reconcile tick, and logging both as link.attached makes the
+	// attach/detach ledger permanently unbalanced (12 attach vs 2 detach over one
+	// soak run) besides growing linearly with uptime. First frame on the link is
+	// the attach; every later Reattach is a redeclare, on the record at Debug.
+	if isFirstAttachOnLink {
+		a.logger.Info("link.attached", "compute", computeID, "actors", len(att.Declarations))
+	} else {
+		a.logger.Debug("link.redeclared", "compute", computeID, "actors", len(att.Declarations))
+	}
 	return computeID, true
 }
 

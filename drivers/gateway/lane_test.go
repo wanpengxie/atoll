@@ -3,8 +3,9 @@ package gateway
 import "testing"
 
 // TestLaneCapacityFullDisconnect: the lane accepts exactly LaneCapacity frames
-// without a drainer, then the overflow push is refused (满策略 = 断连) and counted
-// (DoD-11 lane 三断言: 容量 64 / 满断连 / drop 计数).
+// without a drainer, then the overflow push is refused, counted, AND seals the
+// lane itself (满 → 自封断连 — the disconnect verdict is the lane's own, not a
+// caller convention; DoD-11 lane 三断言: 容量 64 / 满自封 / drop 计数).
 func TestLaneCapacityFullDisconnect(t *testing.T) {
 	l := newLane(newCursor(nil))
 	for i := 0; i < LaneCapacity; i++ {
@@ -13,30 +14,22 @@ func TestLaneCapacityFullDisconnect(t *testing.T) {
 		}
 	}
 	if l.push([]byte("overflow")) {
-		t.Fatal("push past capacity should be refused (满 → 断连)")
+		t.Fatal("push past capacity should be refused (满 → 自封断连)")
 	}
 	if got := l.DroppedCount(); got != 1 {
 		t.Fatalf("dropped count = %d, want 1", got)
 	}
-	if !l.fullBreak.Load() {
-		t.Fatal("full push should latch the disconnect signal")
+	if !l.isClosed() {
+		t.Fatal("overflow must seal the lane itself — a caller ignoring ok=false must not leave a doomed lane half-alive")
+	}
+	if l.push([]byte("after-seal")) {
+		t.Fatal("push after the overflow seal must be refused")
+	}
+	if got := l.DroppedCount(); got != 1 {
+		t.Fatalf("post-seal pushes are refusals of a closed lane, not new drops: dropped = %d, want 1", got)
 	}
 	if LaneCapacity != 64 {
 		t.Fatalf("lane capacity = %d, want 64 (照 ws.go outbound)", LaneCapacity)
-	}
-}
-
-// TestLaneDropCountAccumulates: every overflow push increments the drop tally.
-func TestLaneDropCountAccumulates(t *testing.T) {
-	l := newLane(newCursor(nil))
-	for i := 0; i < LaneCapacity; i++ {
-		l.push([]byte("x"))
-	}
-	for i := 0; i < 5; i++ {
-		l.push([]byte("drop"))
-	}
-	if got := l.DroppedCount(); got != 5 {
-		t.Fatalf("dropped = %d, want 5", got)
 	}
 }
 

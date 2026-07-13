@@ -143,8 +143,15 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	if err := faults.checkpoint("construct.ensure_system"); err != nil {
 		return nil, fmt.Errorf("platform: register system actor: %w", err)
 	}
-	if err := cs.Membership.EnsureSystemActor(ctx, nowMs()); err != nil {
+	// The genesis seed is the system member's ONE admission — put it on the
+	// record through the same telemetry point Admit uses (census parity: every
+	// membership entry leaves a trace). The idempotent re-ensure of every later
+	// Open reports seeded=false and stays silent.
+	if seeded, err := cs.Membership.EnsureSystemActor(ctx, nowMs()); err != nil {
 		return nil, fmt.Errorf("platform: register system actor: %w", err)
+	} else if seeded {
+		logger.Info("platform.member.admitted", "channel", string(cfg.ChannelID),
+			"actor", string(actor.SystemActorID), "kind", string(actor.KindSystem), "principal", "")
 	}
 
 	// 5. Presence fold: mechanism-only latest-value cache. Both vocabularies are

@@ -103,7 +103,7 @@ func (s *stubMembership) Deregister(context.Context, actor.ActorID, int64) error
 func (s *stubMembership) Admit(context.Context, actor.Kind, string, int64) (actor.ActorID, error) {
 	return "", nil
 }
-func (s *stubMembership) EnsureSystemActor(context.Context, int64) error { return nil }
+func (s *stubMembership) EnsureSystemActor(context.Context, int64) (bool, error) { return false, nil }
 func (s *stubMembership) ApplyMemberTransitions(_ context.Context, adds []storespec.MemberActorAdd, _ []storespec.MemberActorRemove) error {
 	s.mu.Lock()
 	s.adds = append(s.adds, adds...)

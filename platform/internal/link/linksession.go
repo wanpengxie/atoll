@@ -437,7 +437,16 @@ func (ls *linkSession) readControl(conn net.Conn) {
 	for {
 		var raw json.RawMessage
 		if err := dec.Decode(&raw); err != nil {
-			ls.kill("control_decode", err)
+			// A vanished peer (EOF / closed carrier / dead yamux session) is not a
+			// decode failure — folding both under "control_decode" buries real
+			// malformed-frame bugs beneath every ordinary daemon death. Classify by
+			// cause so the session_killed reason names what actually happened.
+			reason := "control_decode"
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+				errors.Is(err, net.ErrClosed) || errors.Is(err, yamux.ErrSessionShutdown) {
+				reason = "peer_closed"
+			}
+			ls.kill(reason, err)
 			return
 		}
 		copyRaw := append([]byte(nil), raw...)

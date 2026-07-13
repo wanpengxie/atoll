@@ -82,6 +82,8 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 		return
 	}
 	if !authed {
+		s.logger.Info("sysactor.operate.refused", "type", msg.Type,
+			"sender", string(msg.Sender.ID), "code", "unauthorized_sender")
 		_, _ = sys.Fail(msg, "unauthorized_sender", "sender is not an active channel member")
 		return
 	}
@@ -102,6 +104,12 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	if err != nil {
 		var oe *OperateError
 		if errors.As(err, &oe) {
+			// The refusal already lands in the channel log as this request's
+			// failed terminal (replayable truth); this line is the OPS-side trace
+			// — a storm of refused control actions must be visible in the server
+			// log too, not only inside per-channel sqlite.
+			s.logger.Info("sysactor.operate.refused", "type", msg.Type,
+				"sender", string(msg.Sender.ID), "code", oe.Code)
 			_, _ = sys.Fail(msg, oe.Code, oe.Detail)
 			return
 		}

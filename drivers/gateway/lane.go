@@ -21,8 +21,8 @@ const (
 
 // lane is one connection's outbound queue (§5.6 lane column). The gateway read
 // pump enqueues serialized downstream frames; the connector's writer goroutine
-// drains out to the wire. Full → the enqueue is DROPPED and the lane marked for
-// disconnect (满策略 = 断连); every drop is counted (obs记账, DoD-11).
+// drains out to the wire. Full → the enqueue is DROPPED and the lane SEALS
+// ITSELF (满 → 自封断连, see push); the drop is counted (obs记账, DoD-11).
 type lane struct {
 	out    chan []byte
 	closed chan struct{}
@@ -32,8 +32,7 @@ type lane struct {
 	// server 零持久化). Touched only by the read pump goroutine, so no lock.
 	cursor *cursor
 
-	dropped   atomic.Int64
-	fullBreak atomic.Bool // set when a push found the queue full (disconnect signal)
+	dropped atomic.Int64
 }
 
 func newLane(cur *cursor) *lane {
@@ -44,10 +43,13 @@ func newLane(cur *cursor) *lane {
 	}
 }
 
-// push enqueues one serialized downstream frame. ok=false means the queue was
-// full (满 → the caller disconnects the lane) OR the lane is already closed. A
-// full push increments the drop counter and latches fullBreak so the read pump
-// stops feeding a doomed lane.
+// push enqueues one serialized downstream frame. ok=false means the lane is
+// closed — including by THIS call: a full queue seals the lane itself (满 →
+// 自封断连). A dropped frame is a hole in the device's tail that only a
+// reconnect-with-cursor can heal, so the lane is doomed the moment one drops;
+// making the overflow CLOSE the lane keeps that verdict structural — the
+// drainer unblocks and the connector tears the session down off Done() even if
+// a push caller forgot to act on ok=false (断连权威在 lane，不在调用方约定).
 func (l *lane) push(b []byte) (ok bool) {
 	select {
 	case <-l.closed:
@@ -61,7 +63,7 @@ func (l *lane) push(b []byte) (ok bool) {
 		return false
 	default:
 		l.dropped.Add(1)
-		l.fullBreak.Store(true)
+		l.close()
 		return false
 	}
 }

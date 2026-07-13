@@ -219,13 +219,16 @@ func (r *actorRegistry) Admit(ctx context.Context, kind actor.Kind, principal st
 	return "", errors.New("store: unable to mint unique actor id")
 }
 
-func (r *actorRegistry) EnsureSystemActor(ctx context.Context, at int64) error {
+func (r *actorRegistry) EnsureSystemActor(ctx context.Context, at int64) (bool, error) {
 	if exists, err := r.Exists(ctx, actor.SystemActorID); err != nil {
-		return err
+		return false, err
 	} else if exists {
-		return nil
+		return false, nil
 	}
-	return r.insertFixedID(ctx, storespec.Record{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: at})
+	if err := r.insertFixedID(ctx, storespec.Record{ID: actor.SystemActorID, Kind: actor.KindSystem, CreatedAt: at}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // validateMemberIdentity gates the membership WRITE path on the protocol

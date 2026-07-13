@@ -64,6 +64,9 @@ type MembershipControlPlane interface {
 	// returns the existing active instance for an idempotent retry.
 	Admit(ctx context.Context, kind actor.Kind, principal string, at int64) (actor.ActorID, error)
 	// EnsureSystemActor is the sole fixed-id seed. Application identities must
-	// enter through Admit; this arm accepts no caller-selected id.
-	EnsureSystemActor(ctx context.Context, at int64) error
+	// enter through Admit; this arm accepts no caller-selected id. seeded
+	// reports whether THIS call inserted the row (false = already present), so
+	// the caller can put the one genuine admission on the record without the
+	// idempotent re-ensure of every later Open masquerading as a new admit.
+	EnsureSystemActor(ctx context.Context, at int64) (seeded bool, err error)
 }
