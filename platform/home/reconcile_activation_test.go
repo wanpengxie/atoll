@@ -1123,7 +1123,7 @@ func TestReviver_AttachRace_ReplaceSemanticsSelfResolve(t *testing.T) {
 		t.Fatalf("EnsureLive active-only post-build check: %v", err)
 	}
 	if !live(h, author) {
-		t.Fatal("active member build was undone by a placement comparison — verifyPostBuild is active-only (#24), it must never re-compare Host")
+		t.Fatal("active member build was undone by a placement comparison")
 	}
 }
 

@@ -189,7 +189,13 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
 	}
 	switch v := h.activateOne(ctx, rec); v.kind {
-	case actEmbodied, actAlreadyLive:
+	case actEmbodied:
+		h.clearReviveBackoff(id)
+		return nil
+	case actAlreadyLive:
+		// Kept as its own arm (not merged with actEmbodied above) so the four
+		// clearReviveBackoff write sites §1.4 enumerates stay individually
+		// visible: ring fast-path, ring削臂, and the reviver's two verdicts.
 		h.clearReviveBackoff(id)
 		return nil
 	case actNotMember: // the deregistered-row case: caught HERE by activateOne's own IsActive check

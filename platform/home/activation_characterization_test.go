@@ -548,10 +548,22 @@ func TestCharRingMatrix_CancelledAndBuildFailed_CtxGateWinsBeforeBuildErr(t *tes
 	id = admit(t, h, id, actor.KindAgent)
 	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
 
+	// Sentinel baseline (codex 终审 P1-2): plant a prior-pass entry so the
+	// whole-ring EARLY RETURN is distinguishable from a completed pass that
+	// committed an empty current — an early return leaves prevEagerDesired
+	// UNTOUCHED (sentinel survives); a run-to-completion pass would sweep the
+	// no-longer-desired sentinel out (削臂 DespawnID + rewrite).
+	sentinel := actor.ActorID("agent:char-matrix-sentinel")
+	h.prevEagerDesired[sentinel] = true
+	rh.reset()
+
 	h.reconcileActivation(tctx)
 
 	if live(h, id) {
 		t.Fatal("member must not be live")
+	}
+	if !h.prevEagerDesired[sentinel] {
+		t.Fatal("cancel must EARLY-RETURN the whole ring — prevEagerDesired rewritten means the pass ran to completion")
 	}
 	if h.prevEagerDesired[id] {
 		t.Fatal("current must not carry the id (ctx gate wins, not the BuildFailed continue arm)")
@@ -559,8 +571,8 @@ func TestCharRingMatrix_CancelledAndBuildFailed_CtxGateWinsBeforeBuildErr(t *tes
 	if e := backoffEntry(t, h, id); e.failures != 0 {
 		t.Fatalf("ctx gate must win BEFORE buildErr classification — no backoff account written, got %+v", e)
 	}
-	if rh.has("platform.reconcile.build_failed") {
-		t.Fatal("ctx gate must win BEFORE buildErr classification — no build_failed log")
+	if rh.count() != 0 {
+		t.Fatalf("cancelled ring pass must log NOTHING, got %d records", rh.count())
 	}
 }
 
@@ -873,6 +885,7 @@ func TestCharReviverMatrix_CancelledAndBuildFailed_FlippedToCancelled(t *testing
 	tctx := newToggleCtx()
 	h.reviverStraddleHook = func() { tctx.cancel() }
 
+	rh.reset() // zero-log assertion below covers admission noise too (codex 终审 P1-2)
 	err := (homeReviver{h: h}).EnsureLive(tctx, id)
 	if err == nil {
 		t.Fatal("want the Cancelled transient, got nil")
@@ -880,8 +893,8 @@ func TestCharReviverMatrix_CancelledAndBuildFailed_FlippedToCancelled(t *testing
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("spec §1.9①: cancelled∧build-failed must now return the Cancelled wrap, got %v", err)
 	}
-	if rh.has("platform.revive.build_failed") {
-		t.Fatal("spec §1.9①: cancelled∧build-failed must NOT error-log build_failed anymore — the ctx gate wins first")
+	if rh.count() != 0 {
+		t.Fatalf("spec §1.9①: a cancelled attempt must log NOTHING (build_failed included), got %d records", rh.count())
 	}
 	if e := backoffEntry(t, h, id); e.failures != 0 {
 		t.Fatalf("spec §1.9①: cancelled∧build-failed must NOT record a backoff step anymore, got %+v", e)
@@ -904,6 +917,7 @@ func TestCharReviverMatrix_CancelledAndSealed_FlippedToCancelled(t *testing.T) {
 	tctx := newToggleCtx()
 	h.reviverStraddleHook = func() { tctx.cancel() } // see rationale above
 
+	rh.reset() // zero-log assertion below covers admission noise too (codex 终审 P1-2)
 	err := (homeReviver{h: h}).EnsureLive(tctx, id)
 	if errors.Is(err, actorrt.ErrRuntimeSealed) {
 		t.Fatalf("spec §1.9①: cancelled∧sealed must NOT return the raw ErrRuntimeSealed anymore, got %v", err)
@@ -911,8 +925,8 @@ func TestCharReviverMatrix_CancelledAndSealed_FlippedToCancelled(t *testing.T) {
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("spec §1.9①: cancelled∧sealed must now return the Cancelled wrap, got %v", err)
 	}
-	if rh.has("platform.revive.runtime_sealed") {
-		t.Fatal("spec §1.9①: cancelled∧sealed must NOT info-log runtime_sealed anymore — the ctx gate wins first")
+	if rh.count() != 0 {
+		t.Fatalf("spec §1.9①: a cancelled attempt must log NOTHING (runtime_sealed included), got %d records", rh.count())
 	}
 }
 
@@ -927,11 +941,13 @@ func TestCharReviverMatrix_CancelledAndCASLoser_FlippedToCancelled(t *testing.T)
 	release := make(chan struct{})
 	builder.byID[id] = blockingFactory(started, release)
 
-	h := openCharHome(t, &testDesired{}, builder, nil)
+	logger, rh := newRecordingLogger()
+	h := openCharHome(t, &testDesired{}, builder, logger)
 	id = admit(t, h, id, actor.KindAgent)
 	h.recordBuildFailure(id, time.Now().Add(-time.Hour)) // already-elapsed window — must actually build
 
 	tctx := newToggleCtx()
+	rh.reset() // zero-log assertion below (codex 终审 P1-2)
 	errCh := make(chan error, 1)
 	go func() { errCh <- (homeReviver{h: h}).EnsureLive(tctx, id) }()
 
@@ -953,5 +969,8 @@ func TestCharReviverMatrix_CancelledAndCASLoser_FlippedToCancelled(t *testing.T)
 	}
 	if e := backoffEntry(t, h, id); e.failures == 0 {
 		t.Fatalf("spec §1.9①: cancelled∧CAS-loser must NOT clear the backoff account anymore, got %+v", e)
+	}
+	if rh.count() != 0 {
+		t.Fatalf("spec §1.9①: a cancelled attempt must log NOTHING, got %d records", rh.count())
 	}
 }
