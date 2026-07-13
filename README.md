@@ -85,7 +85,8 @@ protocol/    protocol types (envelope, actor, channel, access, resource)
 runtime/     the kernel runtime (harness admission pipeline, actorrt cells/ports,
              sqlite store, schedule/timers, access door)
 lib/         stdlib for actor authors (behavior, channelkit, metatool, introspect)
-platform/    channel assembly (server-side ChannelHome + daemon-side RunCompute)
+platform/    channel assembly (server-side ChannelHome + daemon-side RunCompute +
+             the caps-weld membrane between them; subjectgate/ + internal/ subpackages)
 app/         HTTP API surface (identity, workspace, channel, daemon, WS)
 drivers/     external-world drivers: tools/ (echo, device, kimi, xhs), agents/ (LLM engine providers: claudecode, kimi), gateway/ (human ingress)
 registry/    actor class registry (config → running actor)
