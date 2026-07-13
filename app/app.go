@@ -21,7 +21,7 @@ import (
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/jsondepth"
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -34,7 +34,7 @@ import (
 // hands the upgraded-pending request off — the connector upgrades the ws and runs the
 // session cross. nil (unwired) → /ws answers 503.
 type WSGateway interface {
-	ServeWeb(w http.ResponseWriter, r *http.Request, home *platform.Home, chID channel.ID, principal string)
+	ServeWeb(w http.ResponseWriter, r *http.Request, home *home.Home, chID channel.ID, principal string)
 }
 
 // App is the product application server.
@@ -45,7 +45,7 @@ type App struct {
 	srv    *http.Server // set by Run; drained by Shutdown
 
 	mu    sync.RWMutex
-	homes map[channel.ID]*platform.Home
+	homes map[channel.ID]*home.Home
 
 	channelDBDir string
 	uiDist       string
@@ -56,7 +56,7 @@ type App struct {
 
 	// wsGateway is the injected human-ingress connector (gateway 期 S3); revokeSink
 	// is the injected revocation fan-in (RevocationHub.Emit) both the platform emit
-	// point (HomeConfig.OnRevoke, wired in createHome) and the app's own ACL write
+	// point (home.Config.OnRevoke, wired in createHome) and the app's own ACL write
 	// points feed. Both are set by the assembly root via SetGateway/SetRevokeSink
 	// after New (the gateway needs the app's routing面, breaking the構造 cycle).
 	wsGateway  WSGateway
@@ -111,7 +111,7 @@ func New(cfg Config) (*App, error) {
 	a := &App{
 		db:                 cfg.DB,
 		logger:             logger,
-		homes:              make(map[channel.ID]*platform.Home),
+		homes:              make(map[channel.ID]*home.Home),
 		channelDBDir:       cfg.ChannelDBDir,
 		uiDist:             cfg.UIDist,
 		controlShimTimeout: defaultControlShimTimeout,
@@ -141,7 +141,7 @@ func New(cfg Config) (*App, error) {
 func (a *App) SetGateway(g WSGateway) { a.wsGateway = g }
 
 // SetRevokeSink injects the revocation fan-in (RevocationHub.Emit). createHome
-// forwards it into each home's HomeConfig.OnRevoke (the membership emit point), and
+// forwards it into each home's home.Config.OnRevoke (the membership emit point), and
 // the app's own ACL write points call it (the ACL emit point). nil → no live
 // revocation (reconnect re-auth + the read-side每批 recheck remain the backstop).
 func (a *App) SetRevokeSink(fn func(channel.ID, actor.ActorID)) { a.revokeSink = fn }
@@ -284,7 +284,7 @@ func (a *App) registerRoutes() {
 // Channel home management
 // ---------------------------------------------------------------------------
 
-func (a *App) getHome(chID channel.ID) *platform.Home {
+func (a *App) getHome(chID channel.ID) *home.Home {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.homes[chID]
@@ -299,7 +299,7 @@ func (a *App) getHome(chID channel.ID) *platform.Home {
 //
 // The two states must not collapse: a caller retrying a 503 is right to; a caller
 // retrying a 404 is not. Every handler that needs a live Home routes through here.
-func (a *App) homeOrError(c *gin.Context, chID channel.ID) *platform.Home {
+func (a *App) homeOrError(c *gin.Context, chID channel.ID) *home.Home {
 	if home := a.getHome(chID); home != nil {
 		return home
 	}
@@ -321,8 +321,8 @@ func (a *App) eventDropKinds() []actorrt.ObsKind {
 	return append(actorbase.ObsDropKinds(), a.extraDropKinds...)
 }
 
-func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error) {
-	home, err := platform.Open(platform.HomeConfig{
+func (a *App) createHome(chID channel.ID, dbPath string) (*home.Home, error) {
+	home, err := home.Open(home.Config{
 		ChannelID: chID,
 		DBPath:    dbPath,
 		Logger:    a.logger,

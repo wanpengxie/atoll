@@ -12,12 +12,13 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
 )
 
 func TestStorageRootCloseDecisionTransfersOnForwarderLeak(t *testing.T) {
-	if shouldCloseStorageRoot(errors.Join(errors.New("other"), platform.ErrComputeForwardersLeaked)) {
+	if shouldCloseStorageRoot(errors.Join(errors.New("other"), compute.ErrForwardersLeaked)) {
 		t.Fatal("forwarder leak must transfer Root ownership to process exit")
 	}
 	if !shouldCloseStorageRoot(errors.New("ordinary failure")) {

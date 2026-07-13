@@ -18,7 +18,7 @@ import (
 // path): "a factory must not write" is a structural rule on the cell path —
 // rt.Spawn's build closure runs BEFORE go-live, so a livePen constructed
 // inside it always fences (IsLive(inc)==false until the closure returns).
-// Before this membrane, RunCompute's build closure handed the factory the
+// Before this membrane, compute.Run's build closure handed the factory the
 // RAW RebindableArms facades directly — ungated, already "live" the instant
 // the wire stream was open — so a daemon-hosted actor's construction-time
 // write escaped un-fenced, a softened half of the invariant relative to a
@@ -27,7 +27,7 @@ import (
 // home's buildCaps.
 //
 // Spawn is deliberately left zero — the fork/despawn arm does not cross the
-// wire this period (期6 拍); RunCompute's factory is only ever handed the
+// wire this period (期6 拍); compute.Run's factory is only ever handed the
 // four wire-flap arms.
 func NewLiveArms(rb *RebindableArms, inc actorrt.Incarnation, host *actorrt.Runtime) actorcaps.Caps {
 	return actorcaps.Caps{

@@ -7,7 +7,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -27,15 +28,15 @@ const feedBatch = 100
 // refused not_member.
 type Session struct {
 	gw        *Gateway
-	home      *platform.Home
+	home      *home.Home
 	chID      channel.ID
 	principal string
 	subjectID actor.ActorID
 	isMember  bool
 
-	entry *userEntry            // nil for tail-only
-	arm   *channelArm           // nil for tail-only
-	slot  *platform.SubjectSlot // nil for tail-only
+	entry *userEntry        // nil for tail-only
+	arm   *channelArm       // nil for tail-only
+	slot  *subjectgate.Slot // nil for tail-only
 	lane  *lane
 
 	// grantedGen is the绑定世代 this session was granted at attach (the arm's gen at
@@ -57,7 +58,7 @@ type Session struct {
 // grants the绑定世代 (a fresh arm advances it once; a device joining a live arm shares
 // it), and seats the device (首入 → online) — all under seatMember's single closed-gated
 // critical section. Returns the session + the granted binding_gen for the attach receipt.
-func (g *Gateway) Attach(ctx context.Context, home *platform.Home, chID channel.ID, principal string, since map[channel.ID]int64) (*Session, int64, error) {
+func (g *Gateway) Attach(ctx context.Context, home *home.Home, chID channel.ID, principal string, since map[channel.ID]int64) (*Session, int64, error) {
 	subjectID, found, err := home.ResolvePrincipal(ctx, actor.KindHuman, principal)
 	if err != nil {
 		return nil, 0, err
@@ -77,7 +78,7 @@ func (g *Gateway) Attach(ctx context.Context, home *platform.Home, chID channel.
 		// reported unavailable-retryable, never a smuggled create.
 		slot, ok := home.SubjectSlotFor(subjectID)
 		if !ok {
-			return nil, 0, platform.ErrNoOccupant
+			return nil, 0, subjectgate.ErrNoOccupant
 		}
 		s.isMember = true
 		s.subjectID = subjectID
@@ -123,7 +124,7 @@ func (s *Session) StartFeed() {
 
 // Send serializes one downstream frame and queues it on the lane (the single
 // writer drains it). A full lane (满 → 断连) tears the session down.
-func (s *Session) Send(f platform.Frame) {
+func (s *Session) Send(f subjectgate.Frame) {
 	b, err := f.Marshal()
 	if err != nil {
 		return
@@ -228,7 +229,7 @@ func (s *Session) pumpBatch() bool {
 			if merr != nil {
 				continue
 			}
-			fr, ferr := platform.NewFrame(platform.FrameFeed, gen, "", platform.FeedPayload{
+			fr, ferr := subjectgate.NewFrame(subjectgate.FrameFeed, gen, "", subjectgate.FeedPayload{
 				ChannelID: string(s.chID),
 				Seq:       r.Seq,
 				Envelope:  env,
@@ -276,16 +277,16 @@ func (s *Session) readerStillValid() bool {
 // frame (stale_binding); a tail-only session refuses them (not_member); a submit's
 // empty audience is routing-resolved (app政策 via the injected面); everything else
 // is delivered to the cell whose from-log五步 does the real authorization.
-func (s *Session) Upstream(ctx context.Context, f platform.Frame) platform.Frame {
+func (s *Session) Upstream(ctx context.Context, f subjectgate.Frame) subjectgate.Frame {
 	gen := s.BindingGen()
-	errFrame := func(code, detail string) platform.Frame {
-		fr, _ := platform.NewFrame(platform.FrameError, gen, f.Ref, platform.ErrorPayload{
+	errFrame := func(code, detail string) subjectgate.Frame {
+		fr, _ := subjectgate.NewFrame(subjectgate.FrameError, gen, f.Ref, subjectgate.ErrorPayload{
 			Frame: string(f.Type), Code: code, Detail: detail,
 		})
 		return fr
 	}
 	switch f.Type {
-	case platform.FrameDetach:
+	case subjectgate.FrameDetach:
 		// detach撤权线性化 (P0-3): seal the (channel) 频道臂 FIRST — 世代失效 → pump join
 		// (上界 ArmSealJoinTimeout) → purge未推帧 → 双向 gate 生效 — so同臂其他设备/并发
 		// goroutine 在 seal 后 Upstream 必拒 (stale_binding). Only then tear the
@@ -296,22 +297,22 @@ func (s *Session) Upstream(ctx context.Context, f platform.Frame) platform.Frame
 			s.gw.dropArm(s.subjectID, s.chID, s.arm)
 		}
 		s.Close()
-		return platform.Frame{}
-	case platform.FrameAttach:
-		return errFrame(platform.CodeBadPayload, "attach is the opening frame, not a mid-stream verb")
-	case platform.FrameSubmit, platform.FrameResolve, platform.FrameCancel,
-		platform.FrameAfter, platform.FrameCancelTimer, platform.FrameResource:
+		return subjectgate.Frame{}
+	case subjectgate.FrameAttach:
+		return errFrame(subjectgate.CodeBadPayload, "attach is the opening frame, not a mid-stream verb")
+	case subjectgate.FrameSubmit, subjectgate.FrameResolve, subjectgate.FrameCancel,
+		subjectgate.FrameAfter, subjectgate.FrameCancelTimer, subjectgate.FrameResource:
 		if !s.isMember {
-			return errFrame(platform.CodeNotMember, "not a channel member")
+			return errFrame(subjectgate.CodeNotMember, "not a channel member")
 		}
 		// 共享世代 admission gate (P0-2): refuse a sealed arm OR a stale binding_gen.
 		if ok, sealed := s.arm.admitUpstream(f.BindingGen); !ok {
 			if sealed {
-				return errFrame(platform.CodeStaleBinding, "binding sealed (detached / revoked)")
+				return errFrame(subjectgate.CodeStaleBinding, "binding sealed (detached / revoked)")
 			}
-			return errFrame(platform.CodeStaleBinding, "stale binding generation (rebound)")
+			return errFrame(subjectgate.CodeStaleBinding, "stale binding generation (rebound)")
 		}
-		if f.Type == platform.FrameSubmit {
+		if f.Type == subjectgate.FrameSubmit {
 			routed, rerr := s.applyRouting(ctx, f)
 			if rerr != nil {
 				return *rerr
@@ -325,15 +326,15 @@ func (s *Session) Upstream(ctx context.Context, f platform.Frame) platform.Frame
 		// successor binding.
 		res, derr := s.slot.Deliver(ctx, f, f.BindingGen)
 		if derr != nil {
-			if errors.Is(derr, platform.ErrStaleBinding) {
-				return errFrame(platform.CodeStaleBinding, "binding superseded during delivery (rebound)")
+			if errors.Is(derr, subjectgate.ErrStaleBinding) {
+				return errFrame(subjectgate.CodeStaleBinding, "binding superseded during delivery (rebound)")
 			}
 			// ErrNoOccupant (cell mid-re-mint / torn down) → retryable unavailable.
-			return errFrame(platform.CodeUnavailable, "subject cell unavailable — retry")
+			return errFrame(subjectgate.CodeUnavailable, "subject cell unavailable — retry")
 		}
 		return res.Frame
 	default:
-		return errFrame(platform.CodeBadPayload, "unknown frame_type: "+string(f.Type))
+		return errFrame(subjectgate.CodeBadPayload, "unknown frame_type: "+string(f.Type))
 	}
 }
 
@@ -343,11 +344,11 @@ func (s *Session) Upstream(ctx context.Context, f platform.Frame) platform.Frame
 // a nil resolver leaves the frame untouched (the cell's own SubmitEnvelope
 // validation catches an illegal empty-audience request). A per-request routing
 // condition (no reachable brain) → an unavailable error frame (never写黑洞).
-func (s *Session) applyRouting(ctx context.Context, f platform.Frame) (platform.Frame, *platform.Frame) {
-	var p platform.SubmitPayload
+func (s *Session) applyRouting(ctx context.Context, f subjectgate.Frame) (subjectgate.Frame, *subjectgate.Frame) {
+	var p subjectgate.SubmitPayload
 	if err := f.DecodePayload(&p); err != nil {
-		fr, _ := platform.NewFrame(platform.FrameError, s.BindingGen(), f.Ref, platform.ErrorPayload{
-			Frame: string(f.Type), Code: platform.CodeBadPayload, Detail: err.Error(),
+		fr, _ := subjectgate.NewFrame(subjectgate.FrameError, s.BindingGen(), f.Ref, subjectgate.ErrorPayload{
+			Frame: string(f.Type), Code: subjectgate.CodeBadPayload, Detail: err.Error(),
 		})
 		return f, &fr
 	}
@@ -361,8 +362,8 @@ func (s *Session) applyRouting(ctx context.Context, f platform.Frame) (platform.
 			s.gw.logger.Error("gateway.routing", "channel", string(s.chID), "err", err)
 			detail = "routing unavailable"
 		}
-		fr, _ := platform.NewFrame(platform.FrameError, s.BindingGen(), f.Ref, platform.ErrorPayload{
-			Frame: string(f.Type), Code: platform.CodeUnavailable, Detail: detail,
+		fr, _ := subjectgate.NewFrame(subjectgate.FrameError, s.BindingGen(), f.Ref, subjectgate.ErrorPayload{
+			Frame: string(f.Type), Code: subjectgate.CodeUnavailable, Detail: detail,
 		})
 		return f, &fr
 	}
@@ -371,6 +372,6 @@ func (s *Session) applyRouting(ctx context.Context, f platform.Frame) (platform.
 		p.Audience = append(p.Audience, string(a))
 	}
 	p.Kind = string(kind)
-	routed, _ := platform.NewFrame(platform.FrameSubmit, f.BindingGen, f.Ref, p)
+	routed, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, f.BindingGen, f.Ref, p)
 	return routed, nil
 }

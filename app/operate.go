@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"strings"
 
-	"github.com/wanpengxie/atoll/platform"
+	platformhome "github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
 )
@@ -15,7 +15,7 @@ import (
 // assembly's world-layer/intent-write half of the four channel-control verbs. The
 // gate (platform/internal/sysactor) already authorised the sender (active member,
 // NP-2=a) and supplies channel scope + operator id; this executor does the intent
-// write + Home-face call and returns a reply value (or a *platform.OperateError
+// write + Home-face call and returns a reply value (or a *platformhome.OperateError
 // picking the fail code). One instance serves every channel — it resolves the
 // home per req.ChannelID.
 //
@@ -30,7 +30,7 @@ type operateExecutor struct {
 }
 
 // operateExecutor implements the injected contract.
-var _ platform.OperateExecutor = (*operateExecutor)(nil)
+var _ platformhome.OperateExecutor = (*operateExecutor)(nil)
 
 type introducePayload struct {
 	DeclID      string `json:"decl_id"`
@@ -58,11 +58,11 @@ type instancePayload struct {
 }
 
 func badPayload(err error) error {
-	return &platform.OperateError{Code: "bad_payload", Detail: err.Error()}
+	return &platformhome.OperateError{Code: "bad_payload", Detail: err.Error()}
 }
 
 func channelUnavailable() error {
-	return &platform.OperateError{Code: "channel_unavailable", Detail: "channel home not open"}
+	return &platformhome.OperateError{Code: "channel_unavailable", Detail: "channel home not open"}
 }
 
 // Introduce is the UPSERT half of composition CRUD (add-or-update the composition
@@ -78,7 +78,7 @@ func channelUnavailable() error {
 //     pre-existing row (幂等: a crash between the two writes is self-healed on
 //     retry — else the half-written row is滤成 a never-embodied dead row under
 //     desired=intent∩membership).
-func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateRequest) (any, error) {
+func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.OperateRequest) (any, error) {
 	var p introducePayload
 	if err := json.Unmarshal(req.Payload, &p); err != nil {
 		return nil, badPayload(err)
@@ -97,14 +97,14 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 
 	declID := strings.TrimSpace(p.DeclID)
 	if declID == "" {
-		return nil, &platform.OperateError{Code: "bad_payload", Detail: "decl_id or principal required"}
+		return nil, &platformhome.OperateError{Code: "bad_payload", Detail: "decl_id or principal required"}
 	}
 	var owner, visibility, defClass string
 	err := x.a.db.QueryRowContext(ctx,
 		`SELECT owner, visibility, default_class FROM actor_decls WHERE id = ? AND deleted_at IS NULL`,
 		declID).Scan(&owner, &visibility, &defClass)
 	if err == sql.ErrNoRows {
-		return nil, &platform.OperateError{Code: "decl_not_found", Detail: declID}
+		return nil, &platformhome.OperateError{Code: "decl_not_found", Detail: declID}
 	}
 	if err != nil {
 		return nil, err
@@ -123,7 +123,7 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		principal, hasPrincipal = p, true
 	}
 	if visibility != "public" && !(hasPrincipal && principal == owner) {
-		return nil, &platform.OperateError{Code: "forbidden", Detail: "declaration is not public and sender is not its owner"}
+		return nil, &platformhome.OperateError{Code: "forbidden", Detail: "declaration is not public and sender is not its owner"}
 	}
 	engine := strings.TrimSpace(p.Class)
 	if engine == "" {
@@ -150,7 +150,7 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 	rawCfg := strings.TrimSpace(string(p.Config))
 	hasConfig := rawCfg != "" && rawCfg != "null"
 	if hasConfig && !isJSONObject(p.Config) {
-		return nil, &platform.OperateError{Code: "bad_payload", Detail: "config must be a JSON object"}
+		return nil, &platformhome.OperateError{Code: "bad_payload", Detail: "config must be a JSON object"}
 	}
 
 	var exID, exClass, exPlacement, exDesiredHost string
@@ -180,7 +180,7 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		// Create branch only: NOW validate the request engine's ClassKind (unknown
 		// class当场拒 — before we persist an unbuildable row) and the placement shape.
 		if _, ok := registry.ClassKind(engine); !ok {
-			return nil, &platform.OperateError{Code: "unknown_class", Detail: engine}
+			return nil, &platformhome.OperateError{Code: "unknown_class", Detail: engine}
 		}
 		// placement闭集 {server, daemon}: an explicit garbage value is fail-closed
 		// (same posture as unknown_class) — a row with an unknown placement builds on
@@ -188,10 +188,10 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 		// it would persist as a silently-dead row. Empty already defaulted to daemon
 		// above, so by here placement is non-empty.
 		if placement != placementServer && placement != placementDaemon {
-			return nil, &platform.OperateError{Code: "invalid_placement", Detail: placement}
+			return nil, &platformhome.OperateError{Code: "invalid_placement", Detail: placement}
 		}
 		if placement == placementServer && desiredHost != "" {
-			return nil, &platform.OperateError{Code: "invalid_placement", Detail: "server placement cannot carry desired_host"}
+			return nil, &platformhome.OperateError{Code: "invalid_placement", Detail: "server placement cannot carry desired_host"}
 		}
 		created = true
 	default:
@@ -204,7 +204,7 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 	// (the kind precheck above only guards the create path's unknown-class reject).
 	kind, ok := registry.ClassKind(engine)
 	if !ok {
-		return nil, &platform.OperateError{Code: "unknown_class", Detail: engine}
+		return nil, &platformhome.OperateError{Code: "unknown_class", Detail: engine}
 	}
 	// ensure Admit (idempotent) — pokes the ring; embodiment lands on the next sweep.
 	mintedID, err := home.Admit(ctx, kind, declID)
@@ -240,7 +240,7 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 	// both home cells and daemon-hosted ports. A new row has no predecessor.
 	if configChanged {
 		if serr := home.Restart(ctx, mintedID); serr != nil {
-			return nil, &platform.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
+			return nil, &platformhome.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
 		}
 	}
 	return map[string]any{
@@ -253,14 +253,14 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 // authority — the ring won't re-mint) then Home.Remove (despawn→dereg级联). A
 // crash between the two leaves an orphan户籍 row, reaped by主体域/反熵 backstop
 // (non-crash atomicity not苛求).
-func (x *operateExecutor) Remove(ctx context.Context, req platform.OperateRequest) (any, error) {
+func (x *operateExecutor) Remove(ctx context.Context, req platformhome.OperateRequest) (any, error) {
 	var p instancePayload
 	if err := json.Unmarshal(req.Payload, &p); err != nil {
 		return nil, badPayload(err)
 	}
 	inst := strings.TrimSpace(p.InstanceID)
 	if inst == "" {
-		return nil, &platform.OperateError{Code: "bad_payload", Detail: "instance_id required"}
+		return nil, &platformhome.OperateError{Code: "bad_payload", Detail: "instance_id required"}
 	}
 	home := x.a.getHome(req.ChannelID)
 	if home == nil {
@@ -269,7 +269,7 @@ func (x *operateExecutor) Remove(ctx context.Context, req platform.OperateReques
 	if principal, ok, err := home.PrincipalOf(ctx, actor.ActorID(inst)); err != nil {
 		return nil, err
 	} else if ok && principal == "boost" {
-		return nil, &platform.OperateError{Code: "protected_actor", Detail: "boost cannot be removed"}
+		return nil, &platformhome.OperateError{Code: "protected_actor", Detail: "boost cannot be removed"}
 	}
 	if _, err := x.a.db.ExecContext(ctx,
 		`DELETE FROM channel_actors WHERE channel_id = ? AND instance_id = ?`,
@@ -287,14 +287,14 @@ func (x *operateExecutor) Remove(ctx context.Context, req platform.OperateReques
 
 // Restart kills actual state while leaving desired intact; reconcile rebuilds
 // it on whichever placement owns the instance.
-func (x *operateExecutor) Restart(ctx context.Context, req platform.OperateRequest) (any, error) {
+func (x *operateExecutor) Restart(ctx context.Context, req platformhome.OperateRequest) (any, error) {
 	var p instancePayload
 	if err := json.Unmarshal(req.Payload, &p); err != nil {
 		return nil, badPayload(err)
 	}
 	inst := strings.TrimSpace(p.InstanceID)
 	if inst == "" {
-		return nil, &platform.OperateError{Code: "bad_payload", Detail: "instance_id required"}
+		return nil, &platformhome.OperateError{Code: "bad_payload", Detail: "instance_id required"}
 	}
 	home := x.a.getHome(req.ChannelID)
 	if home == nil {
@@ -305,20 +305,20 @@ func (x *operateExecutor) Restart(ctx context.Context, req platform.OperateReque
 		`SELECT 1 FROM channel_actors WHERE channel_id = ? AND instance_id = ?`,
 		string(req.ChannelID), inst).Scan(&present)
 	if err == sql.ErrNoRows {
-		return nil, &platform.OperateError{Code: "not_in_composition", Detail: inst}
+		return nil, &platformhome.OperateError{Code: "not_in_composition", Detail: inst}
 	}
 	if err != nil {
 		return nil, err
 	}
 	if serr := home.Restart(ctx, actor.ActorID(inst)); serr != nil {
-		return nil, &platform.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
+		return nil, &platformhome.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
 	}
 	return map[string]any{"restarted": inst}, nil
 }
 
 // SetDefaultAgent updates the channel's default_agent pointer (the update half of
 // composition CRUD). The target must已在 composition; empty clears the pointer.
-func (x *operateExecutor) SetDefaultAgent(ctx context.Context, req platform.OperateRequest) (any, error) {
+func (x *operateExecutor) SetDefaultAgent(ctx context.Context, req platformhome.OperateRequest) (any, error) {
 	var p instancePayload
 	if err := json.Unmarshal(req.Payload, &p); err != nil {
 		return nil, badPayload(err)
@@ -330,7 +330,7 @@ func (x *operateExecutor) SetDefaultAgent(ctx context.Context, req platform.Oper
 			return nil, err
 		}
 		if !has {
-			return nil, &platform.OperateError{Code: "not_in_composition", Detail: inst}
+			return nil, &platformhome.OperateError{Code: "not_in_composition", Detail: inst}
 		}
 	}
 	var val any
@@ -346,6 +346,6 @@ func (x *operateExecutor) SetDefaultAgent(ctx context.Context, req platform.Oper
 
 // operateFace returns the executor injected into every channel home's operate
 // gate (one instance, channel-resolved per request).
-func (a *App) operateFace() platform.OperateExecutor {
+func (a *App) operateFace() platformhome.OperateExecutor {
 	return &operateExecutor{a: a}
 }

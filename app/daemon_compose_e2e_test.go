@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
@@ -21,7 +22,7 @@ import (
 //	introduce claude (placement='daemon')
 //	  → PULL the assignment from GET /compute/plan         (what daemon does 1st)
 //	  → BUILD decls from it via registry.Build             (no blind-build)
-//	  → ATTACH over a real /compute link (platform.RunCompute)
+//	  → ATTACH over a real /compute link (compute.Run)
 //	  → the agent becomes a LIVE channel member (actor_registry / ListActors)
 //
 // The app_test stub stands in for the claude engine (registry.Build("claude")
@@ -98,7 +99,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), chID, apiKey)
 	desired, builder := staticActorCompute(decls)
 	go func() {
-		runErr <- platform.RunCompute(ctx, platform.ComputeConfig{ServerWS: serverWS, Desired: desired, Builder: builder})
+		runErr <- compute.Run(ctx, compute.Config{ServerWS: serverWS, Desired: desired, Builder: builder})
 	}()
 	t.Cleanup(func() {
 		cancel()

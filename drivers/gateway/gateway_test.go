@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -323,18 +323,18 @@ func TestGatewayCloseOrder(t *testing.T) {
 	}
 
 	// Drive a business frame after the关站: it must return a sealed error, not panic.
-	f, _ := platform.NewFrame(platform.FrameSubmit, s.BindingGen(), "ref-late", platform.SubmitPayload{
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, s.BindingGen(), "ref-late", subjectgate.SubmitPayload{
 		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: []byte(`{}`),
 	})
 	got := s.Upstream(context.Background(), f)
-	if got.Type != platform.FrameError {
+	if got.Type != subjectgate.FrameError {
 		t.Fatalf("frame after Close should be an error frame, got %q", got.Type)
 	}
-	var p platform.ErrorPayload
+	var p subjectgate.ErrorPayload
 	if err := got.DecodePayload(&p); err != nil {
 		t.Fatalf("decode error payload: %v", err)
 	}
-	if p.Code != platform.CodeStaleBinding {
+	if p.Code != subjectgate.CodeStaleBinding {
 		t.Fatalf("frame after Close should be stale_binding (sealed), got %q", p.Code)
 	}
 }
@@ -375,12 +375,12 @@ func TestUpstreamStaleGenRefused(t *testing.T) {
 		t.Fatal("rebind must advance the binding generation")
 	}
 	// A frame stamped with the STALE g1 while the arm is at g2.
-	stale, _ := platform.NewFrame(platform.FrameSubmit, g1, "ref-stale", platform.SubmitPayload{
+	stale, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, g1, "ref-stale", subjectgate.SubmitPayload{
 		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: []byte(`{}`),
 	})
 	got := s.Upstream(context.Background(), stale)
-	var p platform.ErrorPayload
-	if got.Type != platform.FrameError || got.DecodePayload(&p) != nil || p.Code != platform.CodeStaleBinding {
+	var p subjectgate.ErrorPayload
+	if got.Type != subjectgate.FrameError || got.DecodePayload(&p) != nil || p.Code != subjectgate.CodeStaleBinding {
 		t.Fatalf("stale-gen frame must be refused stale_binding, got type=%q code=%q", got.Type, p.Code)
 	}
 	// The CURRENT gen g2 passes the世代 gate (the Session would then reach the slot);
@@ -407,7 +407,7 @@ func TestDetachSealRefusesCoArmDevice(t *testing.T) {
 	g.addDevice(e, sB)
 
 	// Device A detaches → seals the shared arm, drops it, returns an empty frame.
-	detach, _ := platform.NewFrame(platform.FrameDetach, arm.currentGen(), "ref-detach", platform.DetachPayload{ChannelID: "c"})
+	detach, _ := subjectgate.NewFrame(subjectgate.FrameDetach, arm.currentGen(), "ref-detach", subjectgate.DetachPayload{ChannelID: "c"})
 	resp := sA.Upstream(context.Background(), detach)
 	if resp.Type != "" {
 		t.Fatalf("detach must return NO frame (表② '—'), got type %q", resp.Type)
@@ -416,12 +416,12 @@ func TestDetachSealRefusesCoArmDevice(t *testing.T) {
 		t.Fatal("detach must seal the shared arm")
 	}
 	// Co-arm device B's business frame is now refused stale_binding (sealed).
-	f, _ := platform.NewFrame(platform.FrameSubmit, arm.currentGen(), "ref-b", platform.SubmitPayload{
+	f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, arm.currentGen(), "ref-b", subjectgate.SubmitPayload{
 		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: []byte(`{}`),
 	})
 	got := sB.Upstream(context.Background(), f)
-	var p platform.ErrorPayload
-	if got.Type != platform.FrameError || got.DecodePayload(&p) != nil || p.Code != platform.CodeStaleBinding {
+	var p subjectgate.ErrorPayload
+	if got.Type != subjectgate.FrameError || got.DecodePayload(&p) != nil || p.Code != subjectgate.CodeStaleBinding {
 		t.Fatalf("co-arm device after seal must get stale_binding, got type=%q code=%q", got.Type, p.Code)
 	}
 }

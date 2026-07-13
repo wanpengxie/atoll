@@ -741,7 +741,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 	// node-status idiom, never an increment" — an id absent from THIS
 	// declaration is deregistered outright) — it must run ONLY against a
 	// caller's genuinely-authoritative declared set, never against
-	// RunCompute's own bootstrap attach. That FIRST attach on every (re)dial
+	// compute.Run's own bootstrap attach. That FIRST attach on every (re)dial
 	// deliberately carries att.Declarations==nil (compute.go's own doc:
 	// "Dial declares NOTHING yet: every actor this compute hosts is declared
 	// by the ring's own Reattach... inside the first reconcile pass") — a

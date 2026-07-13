@@ -15,7 +15,7 @@ import (
 // pure local-handle primitive, self-contained and independently testable
 // (mkdir/touch, staging→commit/abort) regardless of who calls it. Its
 // consumer is cmd/daemon's storageadapter.go, which wraps *Host (this type's
-// owner) as platform.LocalFileOpener for lane.go to consult.
+// owner) as compute.LocalFileOpener for lane.go to consult.
 type Streamer struct{}
 
 // ReadHandle is the read-side local handle: a裸 read-only *os.File opened

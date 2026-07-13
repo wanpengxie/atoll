@@ -10,7 +10,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -242,7 +242,7 @@ func (a *App) handleIntroduceActor(c *gin.Context) {
 		MakeDefault: req.MakeDefault, Class: req.Class,
 	})
 	r, err := a.submitControlThroughDoor(c.Request.Context(), chID, middleware.UserID(c),
-		platform.TypeIntroduceActor, payload)
+		home.TypeIntroduceActor, payload)
 	a.finishControlShim(c, r, err, func(body map[string]any) (int, any) {
 		body["channel_id"] = chID
 		status := http.StatusOK
@@ -297,7 +297,7 @@ func (a *App) handleRestartDecl(c *gin.Context) {
 	restarted := 0
 	for _, target := range targets {
 		payload, _ := json.Marshal(instancePayload{InstanceID: target.instanceID})
-		r, derr := a.submitControlThroughDoor(ctx, target.channelID, userID, platform.TypeRestartActor, payload)
+		r, derr := a.submitControlThroughDoor(ctx, target.channelID, userID, home.TypeRestartActor, payload)
 		if derr != nil {
 			// Non-member of that channel (膜律) or unavailable — the caller may only
 			// restart in channels they are a member of.

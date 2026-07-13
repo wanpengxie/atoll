@@ -9,7 +9,7 @@ import (
 
 // Shape-pinning for the contract-first activation symbols (DesiredSource /
 // DesiredMember / Lifecycle): the eager reconcile ring
-// (platform.Home.reconcileActivation / computeRing.reconcile) consumes these;
+// (home.Home.reconcileActivation / computeRing.reconcile) consumes these;
 // these COMPILE-TIME assertions are the only thing preventing a refactor from
 // silently deforming the pinned contract shapes. A signature change here must
 // be a conscious contract revision, not a drive-by.

@@ -6,7 +6,8 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -29,10 +30,10 @@ const ArmSealJoinTimeout = 15 * time.Second
 // no push). 已提交进真相的 upstream writes are never retracted — purge only touches
 //未推 lane frames.
 type channelArm struct {
-	home      *platform.Home
+	home      *home.Home
 	chID      channel.ID
 	subjectID actor.ActorID
-	slot      *platform.SubjectSlot // nil for a tail-only (non-member) arm
+	slot      *subjectgate.Slot // nil for a tail-only (non-member) arm
 
 	mu     sync.Mutex
 	gen    int64
@@ -57,7 +58,7 @@ type channelArm struct {
 	joinTimeout time.Duration // ArmSealJoinTimeout in production; test-tunable
 }
 
-func newChannelArm(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot, bindingSeq *atomic.Int64) *channelArm {
+func newChannelArm(home *home.Home, chID channel.ID, subjectID actor.ActorID, slot *subjectgate.Slot, bindingSeq *atomic.Int64) *channelArm {
 	ctx, cancel := context.WithCancel(context.Background())
 	if bindingSeq == nil {
 		bindingSeq = &atomic.Int64{} // bare-arm unit test: local monotonic counter

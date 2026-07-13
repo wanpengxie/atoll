@@ -13,7 +13,7 @@
 //   - Streamer — the daemon half of the symmetric data path: local os.Root
 //     handles for a same-machine consumer, and (§5's lane, now landed) bytes
 //     forwarded through the server for a cross-daemon consumer. cmd/daemon's
-//     storageadapter.go wraps this Host as platform.LocalFileOpener, which
+//     storageadapter.go wraps this Host as compute.LocalFileOpener, which
 //     platform/internal/link's lane.go consults on both call sites §5 wires:
 //     a same-daemon caller's Local route and this daemon acting as a lane
 //     transfer's target.

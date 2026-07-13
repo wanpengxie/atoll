@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -393,7 +393,7 @@ func (a *App) handleSetDefaultAgent(c *gin.Context) {
 	}
 	payload, _ := json.Marshal(instancePayload{InstanceID: strings.TrimSpace(req.InstanceID)})
 	r, err := a.submitControlThroughDoor(c.Request.Context(), chID, middleware.UserID(c),
-		platform.TypeSetDefaultAgent, payload)
+		home.TypeSetDefaultAgent, payload)
 	a.finishControlShim(c, r, err, func(body map[string]any) (int, any) {
 		da, _ := body["default_agent"].(string)
 		return http.StatusOK, gin.H{"channel_id": chID, "default_agent": da}
@@ -418,7 +418,7 @@ func (a *App) handleRemoveActor(c *gin.Context) {
 	}
 	payload, _ := json.Marshal(instancePayload{InstanceID: inst})
 	r, err := a.submitControlThroughDoor(c.Request.Context(), chID, middleware.UserID(c),
-		platform.TypeRemoveActor, payload)
+		home.TypeRemoveActor, payload)
 	a.finishControlShim(c, r, err, func(body map[string]any) (int, any) {
 		removed, _ := body["removed"].(string)
 		return http.StatusOK, gin.H{"channel_id": chID, "removed": removed}
