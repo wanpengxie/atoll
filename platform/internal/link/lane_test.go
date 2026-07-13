@@ -370,6 +370,9 @@ func TestLaneCrossDaemonStreamRoute(t *testing.T) {
 // larger than that cap must complete cleanly through the full
 // requester→home→target relay.
 func TestLaneCrossDaemonLargeTransfer(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: ~1.4s large cross-daemon byte transfer — full gate (make test-full) runs it")
+	}
 	const daemonA = "daemon-A-large"
 	const daemonB = "daemon-B-large"
 	const readerB = actor.ActorID("tool:reader-B-large")

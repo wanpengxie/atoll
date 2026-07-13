@@ -100,6 +100,9 @@ type lifecycleActor struct{}
 func (lifecycleActor) Receive(context.Context, *message.Envelope) error { return nil }
 
 func TestHomeActivateInvariantPanicBeatsCleanupPanic(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: ~5s real-interleaving/goleak-settle test — full gate (make test-full) runs it")
+	}
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 	var h *Home
 	var logs bytes.Buffer
@@ -293,6 +296,9 @@ func TestHomeCloseBoundsDesiredAndSealPrecedesAbandon(t *testing.T) {
 // stay transient — the timer row survives the shutdown and lands as truth on
 // the next boot (a poison would have deleted a live author's wake forever).
 func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: ~1.2s shutdown-window interleaving — full gate (make test-full) runs it")
+	}
 	db := filepath.Join(t.TempDir(), "c10-window.sqlite")
 	cfg := Config{ChannelID: channel.ID("lifecycle-c10"), DBPath: db}
 	var logs bytes.Buffer

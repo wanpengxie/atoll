@@ -315,6 +315,9 @@ func kimiCannedUp(down metatoolDownFrame) metatoolUpFrame {
 // drives BOTH daemon-hosted adapters end to end, then a device hang-up surfaces
 // as a call_actor failure.
 func TestMetatoolLiveCallActor(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: ~2s live tool round-trip journey — full gate (make test-full) runs it")
+	}
 	var (
 		agentMu sync.Mutex
 		agent   *shellAgent

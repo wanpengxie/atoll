@@ -34,14 +34,18 @@ build-release:
 # ----------------------------------------------------------------------------
 # test / lint
 # ----------------------------------------------------------------------------
-# test — 日常/收口通用门。atolltestfast 只影响测试进程内的 sqlite 同步档
-# （fsync 关闭：测试不做崩溃恢复，同步纯浪费；生产二进制无此 tag，见
-# runtime/internal/store/pragma_sync.go）。
+# test — 日常档：-short 跳过打标的慢测试（真实等待窗/重交错类，每个 skip
+# 自带原因），atolltestfast 关掉测试进程内 sqlite 的 fsync（测试不做崩溃
+# 恢复；生产二进制无此 tag，见 runtime/internal/store/pragma_sync.go）。
 test:
+	go test -tags atolltestfast -short -race ./...
+
+# test-full — 收口门（合 main 前 / 批次终审前）：一个不跳全量跑。
+test-full:
 	go test -tags atolltestfast -race ./...
 
 # test-strict — 不带任何测试加速 tag 的全真档（怀疑加速档掩盖了
-# durability 相关行为时用；常规收口用 test 即可）。
+# durability 相关行为时用；常规收口用 test-full 即可）。
 test-strict:
 	go test -race ./...
 

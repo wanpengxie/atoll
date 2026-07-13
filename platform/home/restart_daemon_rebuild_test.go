@@ -141,6 +141,9 @@ func tokenOf(payload json.RawMessage) string {
 // TestRestartDaemonPlacedActor_RebuildsAcrossWire is the F-2 daemon-placement
 // rebuild proof.
 func TestRestartDaemonPlacedActor_RebuildsAcrossWire(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: ~1.5s real-wire restart journey — full gate (make test-full) runs it")
+	}
 	ch := newClosureHome(t)
 
 	callerID := actor.ActorID("user:restart-caller")
