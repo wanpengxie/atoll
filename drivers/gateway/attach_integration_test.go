@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -44,9 +45,9 @@ func openAttachHome(t *testing.T) (*platform.Home, actor.ActorID) {
 	return h, id
 }
 
-func mustSubmit(t *testing.T, gen int64) platform.Frame {
+func mustSubmit(t *testing.T, gen int64) subjectgate.Frame {
 	t.Helper()
-	f, err := platform.NewFrame(platform.FrameSubmit, gen, "ref", platform.SubmitPayload{
+	f, err := subjectgate.NewFrame(subjectgate.FrameSubmit, gen, "ref", subjectgate.SubmitPayload{
 		MsgType: "human.message", Audience: []string{"tool:kimi"}, Payload: []byte(`{}`),
 	})
 	if err != nil {
@@ -56,12 +57,12 @@ func mustSubmit(t *testing.T, gen int64) platform.Frame {
 }
 
 // codeOf returns the error code of an error frame, or "" for a non-error frame.
-func codeOf(t *testing.T, f platform.Frame) string {
+func codeOf(t *testing.T, f subjectgate.Frame) string {
 	t.Helper()
-	if f.Type != platform.FrameError {
+	if f.Type != subjectgate.FrameError {
 		return ""
 	}
-	var p platform.ErrorPayload
+	var p subjectgate.ErrorPayload
 	if err := f.DecodePayload(&p); err != nil {
 		t.Fatalf("decode error payload: %v", err)
 	}
@@ -99,21 +100,21 @@ func TestAttachMultiTabSharesBinding(t *testing.T) {
 	// Both tabs' business frames pass the gen gate after both attached — the regression
 	// was tab1 getting stale_binding once tab2 attached. No live cell → unavailable is
 	// the honest downstream verdict; stale_binding here would be the bug.
-	if got := codeOf(t, s1.Upstream(ctx, mustSubmit(t, gen1))); got == platform.CodeStaleBinding {
+	if got := codeOf(t, s1.Upstream(ctx, mustSubmit(t, gen1))); got == subjectgate.CodeStaleBinding {
 		t.Fatal("tab1 frame staled by tab2's attach (多设备互杀 regression)")
 	}
-	if got := codeOf(t, s2.Upstream(ctx, mustSubmit(t, gen2))); got == platform.CodeStaleBinding {
+	if got := codeOf(t, s2.Upstream(ctx, mustSubmit(t, gen2))); got == subjectgate.CodeStaleBinding {
 		t.Fatalf("tab2 frame unexpectedly stale: %q", got)
 	}
 
 	// Seal-then-rebind: tab1 detaches → seals the shared arm → drops it.
-	detach, _ := platform.NewFrame(platform.FrameDetach, gen1, "d", platform.DetachPayload{ChannelID: string(ch)})
+	detach, _ := subjectgate.NewFrame(subjectgate.FrameDetach, gen1, "d", subjectgate.DetachPayload{ChannelID: string(ch)})
 	s1.Upstream(ctx, detach)
 	if !s2.arm.isSealed() {
 		t.Fatal("detach must seal the shared arm")
 	}
 	// tab2 (an old device on the now-sealed binding) is refused stale_binding.
-	if got := codeOf(t, s2.Upstream(ctx, mustSubmit(t, gen2))); got != platform.CodeStaleBinding {
+	if got := codeOf(t, s2.Upstream(ctx, mustSubmit(t, gen2))); got != subjectgate.CodeStaleBinding {
 		t.Fatalf("old device after seal must get stale_binding, got %q", got)
 	}
 	// A fresh attach rebinds a NEW arm (fresh binding); its frames are not stale.
@@ -125,7 +126,7 @@ func TestAttachMultiTabSharesBinding(t *testing.T) {
 	if s3.arm == s2.arm {
 		t.Fatal("rebind after seal must mint a NEW arm")
 	}
-	if got := codeOf(t, s3.Upstream(ctx, mustSubmit(t, gen3))); got == platform.CodeStaleBinding {
+	if got := codeOf(t, s3.Upstream(ctx, mustSubmit(t, gen3))); got == subjectgate.CodeStaleBinding {
 		t.Fatal("rebound session frame must not be stale")
 	}
 }
@@ -165,8 +166,8 @@ func TestDeliverStaleAfterSealRebindRealPath(t *testing.T) {
 		for {
 			select {
 			case job := <-frames:
-				r, _ := platform.NewFrame(platform.FrameReceipt, 0, job.Frame.Ref, platform.SubmitReceipt{MessageID: "m", Seq: 1})
-				job.Reply(platform.FrameResult{Frame: r})
+				r, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, 0, job.Frame.Ref, subjectgate.SubmitReceipt{MessageID: "m", Seq: 1})
+				job.Reply(subjectgate.FrameResult{Frame: r})
 			case <-stop:
 				return
 			}
@@ -178,7 +179,7 @@ func TestDeliverStaleAfterSealRebindRealPath(t *testing.T) {
 	inflight := mustSubmit(t, genA)
 
 	// Seal A (detach) + rebind B into the same slot.
-	detach, _ := platform.NewFrame(platform.FrameDetach, genA, "d", platform.DetachPayload{ChannelID: string(ch)})
+	detach, _ := subjectgate.NewFrame(subjectgate.FrameDetach, genA, "d", subjectgate.DetachPayload{ChannelID: string(ch)})
 	s1.Upstream(ctx, detach)
 	s2, genB, err := g.Attach(ctx, h, ch, "alice", nil)
 	if err != nil {
@@ -192,7 +193,7 @@ func TestDeliverStaleAfterSealRebindRealPath(t *testing.T) {
 	}
 	// (2) The stale gen-A frame reaching Deliver after the rebind is refused at the
 	// linearization point (not silently written into binding B).
-	if _, derr := slot.Deliver(context.Background(), inflight, genA); derr != platform.ErrStaleBinding {
+	if _, derr := slot.Deliver(context.Background(), inflight, genA); derr != subjectgate.ErrStaleBinding {
 		t.Fatalf("stale gen-A frame at Deliver must be refused ErrStaleBinding, got %v", derr)
 	}
 	// A current gen-B frame delivers.

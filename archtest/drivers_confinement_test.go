@@ -35,15 +35,42 @@ import (
 const driversPrefix = platformModulePrefix + "drivers/"
 
 // driversAllowedImportPrefixes is fence A's allowlist (module-relative, i.e.
-// the text after platformModulePrefix). "platform" with no trailing slash also
-// admits the platform root package itself.
+// the text after platformModulePrefix), for the HasPrefix-matched entries.
+// The platform export face is NOT a HasPrefix entry here (platform-topology
+// 批 裁决7): "platform" as a bare prefix would also admit
+// platform/internal/* — Go's internal/ visibility rule already blocks that
+// import, but a prefix-matched archtest allowlist saying so is a false
+// "second lock". driversAllowedExactPlatform below is the real, precise
+// admission list for the platform export face.
 var driversAllowedImportPrefixes = []string{
-	"drivers/",   // intra-umbrella
-	"lib/",       // stdlib faces (actorbase, introspect, …)
-	"protocol/",  // the wire ontology
-	"runtime/",   // exported runtime faces (actorrt, schedule)
-	"platform",   // the substrate export face (platform, platform/…)
-	"registry",   // driver self-registration target (drivers→registry, 裁决 2)
+	"drivers/",  // intra-umbrella
+	"lib/",      // stdlib faces (actorbase, introspect, …)
+	"protocol/", // the wire ontology
+	"runtime/",  // exported runtime faces (actorrt, schedule)
+	"registry",  // driver self-registration target (drivers→registry, 裁决 2)
+}
+
+// driversAllowedExactPlatform is fence A's precise platform-export-face
+// admission (platform-topology 批 裁决7): exactly the platform root package
+// and the platform/subjectgate export subpackage — nothing under
+// platform/internal/* is named here, so this allowlist plus Go's internal/
+// rule is a REAL double lock, not a prefix that silently also admits
+// platform/internal/*.
+var driversAllowedExactPlatform = map[string]bool{
+	"platform":             true,
+	"platform/subjectgate": true,
+}
+
+func driversImportAllowed(sub string) bool {
+	if driversAllowedExactPlatform[sub] || strings.HasPrefix(sub, "platform/subjectgate/") {
+		return true
+	}
+	for _, p := range driversAllowedImportPrefixes {
+		if strings.HasPrefix(sub, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // TestDriversImportConfinement — fence A.
@@ -57,13 +84,11 @@ func TestDriversImportConfinement(t *testing.T) {
 			return // stdlib / third-party (gorilla) — not this fence's concern
 		}
 		sub := strings.TrimPrefix(imp, platformModulePrefix)
-		for _, p := range driversAllowedImportPrefixes {
-			if strings.HasPrefix(sub, p) {
-				return
-			}
+		if driversImportAllowed(sub) {
+			return
 		}
 		v = append(v, fmt.Sprintf(
-			"%s imports %q — drivers/* may name only lib/protocol/runtime + platform export face + registry; drivers→app is forbidden (routing/membership reach the gateway through injected seams the assembly root wires)",
+			"%s imports %q — drivers/* may name only lib/protocol/runtime + platform export face (platform, platform/subjectgate) + registry; drivers→app is forbidden (routing/membership reach the gateway through injected seams the assembly root wires)",
 			slash, imp))
 	})
 	failViolations(t, "drivers/* import confinement (lib/protocol/runtime + platform + registry only)", v)

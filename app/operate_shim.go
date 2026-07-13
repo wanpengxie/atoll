@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -104,7 +105,7 @@ func (a *App) submitControlThroughDoor(ctx context.Context, chID, userID, msgTyp
 	// submit frame's expires_at_ms — a bounded interactive action the reaper closes if
 	// no one serves it (restored from the pre-gateway edge; §S2 status v0.4.1 勘误).
 	exp := time.Now().UnixMilli() + clientRequestTTLMs
-	f, ferr := platform.NewFrame(platform.FrameSubmit, 0, "", platform.SubmitPayload{
+	f, ferr := subjectgate.NewFrame(subjectgate.FrameSubmit, 0, "", subjectgate.SubmitPayload{
 		MsgType:   msgType,
 		Kind:      string(message.KindRequest),
 		Audience:  []string{string(actor.SystemActorID)},
@@ -117,7 +118,7 @@ func (a *App) submitControlThroughDoor(ctx context.Context, chID, userID, msgTyp
 	// DeliverAnyGen: the control shim carries no gateway binding (no session/arm),
 	// so the binding-generation assertion does not apply — a stale gateway binding
 	// is not a possible fault on this trusted platform-internal path.
-	res, derr := slot.Deliver(ctx, f, platform.DeliverAnyGen)
+	res, derr := slot.Deliver(ctx, f, subjectgate.DeliverAnyGen)
 	if derr != nil {
 		// ErrNoOccupant (cell mid-re-mint / torn down) → retryable unavailable.
 		return nil, errShimCellUnavailable
@@ -155,16 +156,16 @@ func (a *App) submitControlThroughDoor(ctx context.Context, chID, userID, msgTyp
 // parseSubmitReceipt reads a submit Deliver result: a receipt frame yields the
 // request id + write seq; an error frame becomes a *shimFrameError carrying its
 // flat code (表①). Any other frame type is an internal inconsistency.
-func parseSubmitReceipt(f platform.Frame) (message.ID, int64, error) {
+func parseSubmitReceipt(f subjectgate.Frame) (message.ID, int64, error) {
 	switch f.Type {
-	case platform.FrameReceipt:
-		var r platform.SubmitReceipt
+	case subjectgate.FrameReceipt:
+		var r subjectgate.SubmitReceipt
 		if err := f.DecodePayload(&r); err != nil {
 			return "", 0, err
 		}
 		return message.ID(r.MessageID), r.Seq, nil
-	case platform.FrameError:
-		var e platform.ErrorPayload
+	case subjectgate.FrameError:
+		var e subjectgate.ErrorPayload
 		if err := f.DecodePayload(&e); err != nil {
 			return "", 0, err
 		}

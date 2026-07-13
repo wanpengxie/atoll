@@ -14,6 +14,7 @@ import (
 
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -69,7 +70,7 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *platf
 	}
 	defer ws.Close()
 
-	ws.SetReadLimit(platform.MaxFrameBytes)
+	ws.SetReadLimit(subjectgate.MaxFrameBytes)
 	_ = ws.SetReadDeadline(time.Now().Add(wsPongWait))
 	ws.SetPongHandler(func(string) error {
 		return ws.SetReadDeadline(time.Now().Add(wsPongWait))
@@ -80,29 +81,29 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *platf
 	if err != nil {
 		return
 	}
-	f, perr := platform.ParseFrame(data)
-	if perr != nil || f.Type != platform.FrameAttach {
-		writeErr(ws, "attach", platform.CodeBadPayload, "opening frame must be a valid attach")
+	f, perr := subjectgate.ParseFrame(data)
+	if perr != nil || f.Type != subjectgate.FrameAttach {
+		writeErr(ws, "attach", subjectgate.CodeBadPayload, "opening frame must be a valid attach")
 		return
 	}
-	var ap platform.AttachPayload
+	var ap subjectgate.AttachPayload
 	if err := f.DecodePayload(&ap); err != nil {
-		writeErr(ws, "attach", platform.CodeBadPayload, err.Error())
+		writeErr(ws, "attach", subjectgate.CodeBadPayload, err.Error())
 		return
 	}
 	if ap.ChannelID != "" && channel.ID(ap.ChannelID) != chID {
-		writeErr(ws, "attach", platform.CodeBadPayload, "attach channel_id does not match the authenticated channel")
+		writeErr(ws, "attach", subjectgate.CodeBadPayload, "attach channel_id does not match the authenticated channel")
 		return
 	}
 	since, serr := parseSince(ap, chID)
 	if serr != "" {
-		writeErr(ws, "attach", platform.CodeBadPayload, serr)
+		writeErr(ws, "attach", subjectgate.CodeBadPayload, serr)
 		return
 	}
 
 	sess, gen, aerr := c.gw.Attach(r.Context(), home, chID, principal, since)
 	if aerr != nil {
-		writeErr(ws, "attach", platform.CodeUnavailable, "channel unavailable")
+		writeErr(ws, "attach", subjectgate.CodeUnavailable, "channel unavailable")
 		return
 	}
 	defer sess.Close()
@@ -117,7 +118,7 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *platf
 	}()
 
 	// Attach receipt (before the feed backfill so it is not interleaved behind it).
-	receipt, _ := platform.NewFrame(platform.FrameReceipt, gen, f.Ref, platform.AttachReceipt{BindingGen: gen})
+	receipt, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, gen, f.Ref, subjectgate.AttachReceipt{BindingGen: gen})
 	sess.Send(receipt)
 	sess.StartFeed()
 
@@ -128,9 +129,9 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *platf
 		if err != nil {
 			return
 		}
-		fr, perr := platform.ParseFrame(data)
+		fr, perr := subjectgate.ParseFrame(data)
 		if perr != nil {
-			sess.Send(errFrame("", platform.CodeBadPayload, perr.Error()))
+			sess.Send(errFrame("", subjectgate.CodeBadPayload, perr.Error()))
 			continue
 		}
 		// detach returns an empty frame (表② detach receipt = "—"): send nothing, the
@@ -169,7 +170,7 @@ func (c *Connector) writerPump(ws *websocket.Conn, sess *gateway.Session) {
 // parseSince validates the attach since map (裁决7: today a single-element map keyed
 // by this channel; a multi-key payload is refused bad_payload) and returns the
 // per-channel cursor vector.
-func parseSince(ap platform.AttachPayload, chID channel.ID) (map[channel.ID]int64, string) {
+func parseSince(ap subjectgate.AttachPayload, chID channel.ID) (map[channel.ID]int64, string) {
 	if len(ap.Since) == 0 {
 		return nil, ""
 	}
@@ -186,8 +187,8 @@ func parseSince(ap platform.AttachPayload, chID channel.ID) (map[channel.ID]int6
 	return out, ""
 }
 
-func errFrame(frameType, code, detail string) platform.Frame {
-	f, _ := platform.NewFrame(platform.FrameError, 0, "", platform.ErrorPayload{Frame: frameType, Code: code, Detail: detail})
+func errFrame(frameType, code, detail string) subjectgate.Frame {
+	f, _ := subjectgate.NewFrame(subjectgate.FrameError, 0, "", subjectgate.ErrorPayload{Frame: frameType, Code: code, Detail: detail})
 	return f
 }
 

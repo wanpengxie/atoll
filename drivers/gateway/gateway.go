@@ -27,6 +27,7 @@ import (
 	"sync/atomic"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -129,7 +130,7 @@ type Gateway struct {
 // arms — 多频道臂 does not change it).
 type userEntry struct {
 	subjectID actor.ActorID
-	slot      *platform.SubjectSlot
+	slot      *subjectgate.Slot
 	arms      map[channel.ID]*channelArm
 	devices   map[*Session]struct{}
 }
@@ -233,7 +234,7 @@ func (g *Gateway) onRevoked(ch channel.ID, subject actor.ActorID) {
 // already-live arm hands back its current gen UNCHANGED — a second device joining a
 // live arm shares the binding, never推进 it, so it can never stale a co-arm tab
 // (多设备同时合法, §5.6 恢复差异).
-func (g *Gateway) ensureArmLocked(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot) (*userEntry, *channelArm, int64) {
+func (g *Gateway) ensureArmLocked(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *subjectgate.Slot) (*userEntry, *channelArm, int64) {
 	e := g.entries[subjectID]
 	if e == nil {
 		e = &userEntry{
@@ -258,7 +259,7 @@ func (g *Gateway) ensureArmLocked(home *platform.Home, chID channel.ID, subjectI
 // ensureArm is the locked test seam over ensureArmLocked (refuses after Close, P0-4
 // straddle). Production attach goes through seatMember (which fuses the closed gate
 // with device seating).
-func (g *Gateway) ensureArm(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot) (*userEntry, *channelArm, error) {
+func (g *Gateway) ensureArm(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *subjectgate.Slot) (*userEntry, *channelArm, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
@@ -274,7 +275,7 @@ func (g *Gateway) ensureArm(home *platform.Home, chID channel.ID, subjectID acto
 // closed check and the device landing — it either wins the lock (closed → refuse, zero
 // residual) or seats fully and Close then seals the arm it can see. Returns the granted
 // binding gen. On refusal nothing is written (no half-open entry, no orphan device).
-func (g *Gateway) seatMember(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *platform.SubjectSlot, s *Session) (int64, error) {
+func (g *Gateway) seatMember(home *platform.Home, chID channel.ID, subjectID actor.ActorID, slot *subjectgate.Slot, s *Session) (int64, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
@@ -352,7 +353,7 @@ func (g *Gateway) addDeviceLocked(e *userEntry, s *Session) {
 	first := len(e.devices) == 0
 	e.devices[s] = struct{}{}
 	if first && e.slot != nil {
-		e.slot.PublishLevel(g.epoch, g.edgeSeq.Add(1), platform.LevelOnline)
+		e.slot.PublishLevel(g.epoch, g.edgeSeq.Add(1), subjectgate.LevelOnline)
 	}
 }
 
@@ -374,7 +375,7 @@ func (g *Gateway) removeDevice(e *userEntry, s *Session) {
 	delete(e.devices, s)
 	if len(e.devices) == 0 {
 		if e.slot != nil {
-			e.slot.PublishLevel(g.epoch, g.edgeSeq.Add(1), platform.LevelOffline)
+			e.slot.PublishLevel(g.epoch, g.edgeSeq.Add(1), subjectgate.LevelOffline)
 		}
 		delete(g.entries, e.subjectID)
 	}

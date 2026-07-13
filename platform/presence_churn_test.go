@@ -4,7 +4,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/platform/internal/subjectgate"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 )
 
 // presence_churn_test.go is the platform-layer presence CHURN family (DoD-4): it
@@ -12,7 +12,7 @@ import (
 // against a REAL slot across incarnation churn, epoch失效 and layer-2 rebind. The
 // slot-mechanic invariants (edgeSeq dedup, new-epoch revoke-then-snapshot,
 // independence, observer-pointer removal, Forget-folds-unknown) are ALSO pinned at
-// the slot layer in platform/internal/subjectgate/slot_test.go; this family asserts
+// the slot layer in platform/subjectgate/slot_test.go; this family asserts
 // they hold as the human cell OBSERVES them — i.e. what the person's device actually
 // self-reports. The 真路径 online-after-attach (real gateway + ws + cell) is the e2e
 // TestGatewayFrames; 多设备首入末出 is the gateway TestUserEntry* family.
