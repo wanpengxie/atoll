@@ -21,11 +21,17 @@ type timerStore struct {
 	db *sql.DB
 }
 
-const (
+// maxPendingTimersPerAuthor / maxDeadTimers are vars ONLY so same-package
+// tests can shrink them and exercise the quota/ring SEMANTICS without
+// physically inserting thousands of fsync'd rows (the ring-eviction test
+// alone burned 34s at production size); production never writes them, and
+// the production values are pinned by TestTimerCapsProductionValues.
+var (
 	maxPendingTimersPerAuthor = 1024
 	maxDeadTimers             = 4096
-	duePerAuthor              = 32
 )
+
+const duePerAuthor = 32
 
 func newTimerStore(db *sql.DB) *timerStore {
 	return &timerStore{db: db}

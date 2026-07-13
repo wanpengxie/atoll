@@ -304,6 +304,13 @@ func TestTimer_MoveToDead_RejectsZeroDeathClass(t *testing.T) {
 func TestTimer_MoveToDead_RingEviction(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)
+	// Shrink the ring: the semantics under test (evict-oldest, count surfaced,
+	// row count capped) are size-independent, and at the production 4096 this
+	// test burned 34s in ~8200 fsync'd transactions. The production value is
+	// pinned by TestTimerCapsProductionValues.
+	prev := maxDeadTimers
+	maxDeadTimers = 8
+	t.Cleanup(func() { maxDeadTimers = prev })
 
 	// Register the shared author once; each iteration inserts one live row then
 	// immediately moves it dead (so pending never exceeds the per-author quota).
@@ -311,7 +318,7 @@ func TestTimer_MoveToDead_RingEviction(t *testing.T) {
 		t.Fatalf("register author: %v", err)
 	}
 
-	const overflow = maxDeadTimers + 1
+	overflow := maxDeadTimers + 1
 	totalEvicted := 0
 	firstEvictedByCall := -1
 	for i := 0; i < overflow; i++ {
@@ -366,6 +373,12 @@ func TestTimer_MoveToDead_RingEviction(t *testing.T) {
 func TestTimer_Insert_DurableQuota(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)
+	// Shrink the quota: per-author admission semantics are size-independent
+	// (see the ring-eviction test's note); production value pinned by
+	// TestTimerCapsProductionValues.
+	prev := maxPendingTimersPerAuthor
+	maxPendingTimersPerAuthor = 8
+	t.Cleanup(func() { maxPendingTimersPerAuthor = prev })
 
 	if _, err := f.timers.db.Exec(`INSERT OR IGNORE INTO actor_registry (actor_id, actor_kind, created_at) VALUES ('actor:a', 'agent', 1)`); err != nil {
 		t.Fatalf("register author a: %v", err)
@@ -555,5 +568,19 @@ func TestMemberRemove_ExpectedHostGuard_MigrationWindowNoOp(t *testing.T) {
 	}
 	if due, _ := timers.Due(ctx, 999999); len(due) != 0 {
 		t.Errorf("matching guarded remove did not cascade-clear timers: %+v", due)
+	}
+}
+
+// TestTimerCapsProductionValues pins the production sizes of the two timer
+// caps that tests above temporarily shrink — the values themselves are拍定
+// constants (W3 S2: quota 千行级 / dead-letter ring 4096), and this pin is
+// what lets the semantic tests run at toy size without silently losing the
+// chosen production numbers.
+func TestTimerCapsProductionValues(t *testing.T) {
+	if maxPendingTimersPerAuthor != 1024 {
+		t.Fatalf("maxPendingTimersPerAuthor = %d, want the拍定 1024", maxPendingTimersPerAuthor)
+	}
+	if maxDeadTimers != 4096 {
+		t.Fatalf("maxDeadTimers = %d, want the拍定 4096", maxDeadTimers)
 	}
 }
