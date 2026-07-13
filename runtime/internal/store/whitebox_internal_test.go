@@ -454,3 +454,63 @@ func TestApplyMemberAddTx_RetiredIdentityRejected(t *testing.T) {
 		t.Fatalf("applyMemberAddTx error=%v want ErrMemberInactive", err)
 	}
 }
+
+// --- LookupActivePrincipal: poison-row discipline (third machine over the
+// same table — purity v3 A2: it silently discarded ParseKind/ParseBinding
+// errors while Lookup/ListActive fail loudly; the three read machines must
+// share one discipline, and THIS one feeds the admission path
+// (census.ResolvePrincipal)). ---------------------------------------------
+
+// The reachable poison surface on this path is the binding column: the query
+// filters actor_kind by the caller's (already-parsed) kind, but actor_binding
+// is read unfiltered off the row.
+func TestLookupActivePrincipal_PoisonBinding(t *testing.T) {
+	ctx := context.Background()
+	db := openRelaxed(t)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO actor_registry (actor_id, actor_kind, principal, actor_binding, created_at, deregistered_at)
+		 VALUES ('x', 'agent', 'p', 'teleport', 1, NULL)`); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	reg := newActorRegistry(db, "C", nil)
+	if _, _, err := reg.LookupActivePrincipal(ctx, actor.KindAgent, "p"); err == nil {
+		t.Error("LookupActivePrincipal must error on out-of-closed-set binding, not return a silently blank record")
+	}
+}
+
+// Kind poison is unreachable through parsed callers (the WHERE clause echoes
+// the caller's kind back), but the guard is kept symmetric with the other two
+// machines — this whitebox probe passes the poison kind straight through.
+func TestLookupActivePrincipal_PoisonKind(t *testing.T) {
+	ctx := context.Background()
+	db := openRelaxed(t)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO actor_registry (actor_id, actor_kind, principal, actor_binding, created_at, deregistered_at)
+		 VALUES ('x', 'wizard', 'p', NULL, 1, NULL)`); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	reg := newActorRegistry(db, "C", nil)
+	if _, _, err := reg.LookupActivePrincipal(ctx, actor.Kind("wizard"), "p"); err == nil {
+		t.Error("LookupActivePrincipal must error on out-of-closed-set kind")
+	}
+}
+
+// Empty binding stays a legitimate state on this path too (a human member
+// carries no binding) — the guard rejects only NON-empty out-of-set values.
+func TestLookupActivePrincipal_EmptyBindingAccepted(t *testing.T) {
+	ctx := context.Background()
+	db := openRelaxed(t)
+	if _, err := db.ExecContext(ctx,
+		`INSERT INTO actor_registry (actor_id, actor_kind, principal, actor_binding, created_at, deregistered_at)
+		 VALUES ('h', 'human', 'p', NULL, 1, NULL)`); err != nil {
+		t.Fatalf("inject: %v", err)
+	}
+	reg := newActorRegistry(db, "C", nil)
+	rec, ok, err := reg.LookupActivePrincipal(ctx, actor.KindHuman, "p")
+	if err != nil || !ok {
+		t.Fatalf("LookupActivePrincipal empty-binding member: ok=%v err=%v", ok, err)
+	}
+	if rec.Binding != "" {
+		t.Errorf("empty binding must read back as \"\", got %q", rec.Binding)
+	}
+}
