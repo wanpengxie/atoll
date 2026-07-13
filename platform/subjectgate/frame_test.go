@@ -57,11 +57,9 @@ func TestFrameRoundTrip(t *testing.T) {
 		{"after", FrameAfter, AfterPayload{DurationMs: 1000, MsgType: "wake"}},
 		{"cancel_timer", FrameCancelTimer, CancelTimerPayload{TimerID: "t1"}},
 		{"resource", FrameResource, ResourcePayload{Op: ResRead, ResourceID: "res:1"}},
-		{"presence", FramePresence, PresencePayload{Level: "online", Epoch: 3, EdgeSeq: 9}},
 		{"feed", FrameFeed, FeedPayload{ChannelID: "c1", Seq: 5, Envelope: json.RawMessage(`{}`)}},
 		{"receipt", FrameReceipt, SubmitReceipt{MessageID: "m1", Seq: 5}},
 		{"error", FrameError, ErrorPayload{Frame: "submit", Code: CodeBadPayload, Detail: "bad"}},
-		{"notify", FrameNotify, NotifyPayload{ReqID: "r1", MsgType: "human.approve"}},
 	}
 	if len(cases) != len(knownFrameTypes) {
 		t.Fatalf("round-trip covers %d frames but %d are known", len(cases), len(knownFrameTypes))

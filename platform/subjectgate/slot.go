@@ -45,7 +45,9 @@ type presenceState struct {
 // the cell's interpreter goroutine to answer (零队列零 ack 关联器 — the reply
 // channel IS the correlation).
 type Slot struct {
-	id actor.ActorID
+	// (No self-identity field: addressing is the Registry map key's job. A
+	// slot-side id was minted at construction once and never read — purity v3
+	// C5; re-add only together with an actual reader.)
 	mu sync.Mutex
 
 	// genGuard is the绑定世代提交守卫 (读-写锁): it freezes the binding generation for
@@ -141,9 +143,8 @@ var ErrStaleBinding = errors.New("subjectgate: stale binding generation")
 // delivery linearization point.
 const DeliverAnyGen int64 = -1
 
-func newSlot(id actor.ActorID) *Slot {
+func newSlot() *Slot {
 	return &Slot{
-		id:        id,
 		observers: map[string]func(PresenceUpdate){},
 		frames:    make(chan Job),
 	}
@@ -401,7 +402,7 @@ func (r *Registry) EnsureSlot(id actor.ActorID) *Slot {
 	defer r.mu.Unlock()
 	s := r.slots[id]
 	if s == nil {
-		s = newSlot(id)
+		s = newSlot()
 		r.slots[id] = s
 	}
 	return s

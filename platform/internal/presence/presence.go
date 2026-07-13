@@ -205,6 +205,13 @@ func NewView(fold *Fold, runtime *actorrt.Runtime, registry storespec.Registry) 
 	return View{fold: fold, runtime: runtime, registry: registry}
 }
 
+// DroppedCounts projects the fold's drop ledger through the read face — the
+// reader DroppedCounts was minted for (law-of-loudness accounting: an event
+// the fold refused must stay countable, purity v3 C7).
+func (v View) DroppedCounts() map[actorrt.ObsKind]uint64 {
+	return v.fold.DroppedCounts()
+}
+
 // Snapshot physically copies fold state before reading runtime and registry.
 // Those reads are intentionally non-atomic: presence is advisory and reports a
 // best-effort current view, never a dispatch guarantee.

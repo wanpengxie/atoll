@@ -49,6 +49,14 @@ func (v View) Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot
 	return v.presence.Snapshot(ctx, id)
 }
 
+// PresenceDrops reports the presence fold's dropped-event accounting per obs
+// kind — the operator-facing reader of the fold's loudness ledger (an event
+// the fold refused to hold must stay countable and queryable; purity v3 C7
+// wired this face to its account).
+func (v View) PresenceDrops() map[actorrt.ObsKind]uint64 {
+	return v.presence.DroppedCounts()
+}
+
 // TestimonyAgeMs projects a fold receipt timestamp through the same clock used
 // to stamp it. Clock skew is represented as age zero, never a negative age.
 func (v View) TestimonyAgeMs(receivedAt int64) int64 {

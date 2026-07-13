@@ -12,7 +12,7 @@ const testID = "human:alice"
 // TestPublishLevelEdgeSeqDedup pins same-epoch strictly-increasing dedup
 // (build spec §2 pair C×E / DoD-4 edgeSeq去重).
 func TestPublishLevelEdgeSeqDedup(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	var got []PresenceUpdate
 	s.RegisterObserver("tok", func(u PresenceUpdate) { got = append(got, u) })
 	if !s.PublishLevel(1, 1, LevelOnline) {
@@ -35,7 +35,7 @@ func TestPublishLevelEdgeSeqDedup(t *testing.T) {
 // TestPublishLevelNewEpochRevokeThenSnapshot pins new-epoch = revoke old then
 // snapshot new (build spec §2 pair C×E / DoD-4).
 func TestPublishLevelNewEpochRevokeThenSnapshot(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	var got []PresenceUpdate
 	s.RegisterObserver("tok", func(u PresenceUpdate) { got = append(got, u) })
 	s.PublishLevel(1, 5, LevelOnline)
@@ -55,7 +55,7 @@ func TestPublishLevelNewEpochRevokeThenSnapshot(t *testing.T) {
 // TestIndependenceInvariant pins that a layer-2 rebind produces ZERO presence
 // side effect (build spec §2 pair B×E / design §5.2 独立性不变式).
 func TestIndependenceInvariant(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	fired := false
 	s.RegisterObserver("tok", func(PresenceUpdate) { fired = true })
 	s.PublishLevel(1, 1, LevelOnline)
@@ -77,7 +77,7 @@ func TestIndependenceInvariant(t *testing.T) {
 // cannot remove a newer cell's registration (build spec §2 pair C×B / DoD-4
 // 旧观察者摘不掉新登记).
 func TestObserverPointerGenerationRemoval(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	var newFired int
 	s.RegisterObserver("old", func(PresenceUpdate) {})
 	s.RegisterObserver("new", func(PresenceUpdate) { newFired++ })
@@ -91,7 +91,7 @@ func TestObserverPointerGenerationRemoval(t *testing.T) {
 
 // TestForgetRevokesAndFoldsUnknown pins Forget = revoke + unknown (design §5.4).
 func TestForgetRevokesAndFoldsUnknown(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	var last PresenceUpdate
 	s.RegisterObserver("tok", func(u PresenceUpdate) { last = u })
 	s.PublishLevel(1, 1, LevelOnline)
@@ -108,7 +108,7 @@ func TestForgetRevokesAndFoldsUnknown(t *testing.T) {
 // an attached interpreter answers Deliver synchronously; after release a blocked
 // Deliver returns ErrNoOccupant.
 func TestDeliverSyncAndUnblock(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	ch, _, release := s.AttachInterpreter()
 
 	var wg sync.WaitGroup
@@ -148,7 +148,7 @@ func TestDeliverSyncAndUnblock(t *testing.T) {
 // TestDeliverBlockedUnblocksOnRelease pins解阻 for a Deliver already blocked on
 // an idle interpreter when the interpreter detaches.
 func TestDeliverBlockedUnblocksOnRelease(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	_, _, release := s.AttachInterpreter() // attached but nobody reads the channel
 
 	done := make(chan error, 1)
@@ -176,7 +176,7 @@ func TestDeliverBlockedUnblocksOnRelease(t *testing.T) {
 // B attaches (覆盖), A releases late — B is still live and a Deliver reaches B; only
 // once B releases does the slot refuse (P0-5 incarnation gate).
 func TestAttachInterpreterIncarnationGate(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	_, tokA, relA := s.AttachInterpreter()
 	framesB, tokB, relB := s.AttachInterpreter()
 	if tokA == tokB {
@@ -214,7 +214,7 @@ func TestAttachInterpreterIncarnationGate(t *testing.T) {
 // lock (atomic with the live check), while the current gen delivers. This is the
 // slot-side half of the双向世代 gate that closes the初验→seal→rebind→Deliver window.
 func TestDeliverStaleBindingRefused(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	ch, _, release := s.AttachInterpreter()
 	defer release()
 	stop := make(chan struct{})
@@ -254,7 +254,7 @@ func TestDeliverStaleBindingRefused(t *testing.T) {
 // → verb) is closed. The commit ran under the still-valid old binding, so its
 // serialization序 is commit ≺ rebind (legal), and the rebind returns only afterwards.
 func TestBindingGuardSerializesRebindAfterCommit(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	s.SetBinding(1)
 
 	entered := make(chan struct{})
@@ -298,7 +298,7 @@ func TestBindingGuardSerializesRebindAfterCommit(t *testing.T) {
 // that完成 BEFORE the commit's recheck → the commit sees the advanced gen and is refused
 // (ok=false), and its落账动词 NEVER runs (the frame never lands in the successor binding).
 func TestBindingGuardRefusesCommitAfterRebind(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	s.SetBinding(1)
 	s.SetBinding(2) // rebind completes first
 
@@ -337,7 +337,7 @@ func TestRegistryEnsureIdempotent(t *testing.T) {
 // connector, cancelled HTTP request) must unblock its Deliver wait via ctx — not
 // park until cell death — while an interpreter is attached but never replies.
 func TestDeliverCtxExit(t *testing.T) {
-	s := newSlot(testID)
+	s := newSlot()
 	_, _, release := s.AttachInterpreter() // attached, but nobody drains frames
 	defer release()
 

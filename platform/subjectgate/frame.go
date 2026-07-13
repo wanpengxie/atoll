@@ -30,20 +30,31 @@ const (
 	FrameAfter       FrameType = "after"
 	FrameCancelTimer FrameType = "cancel_timer"
 	FrameResource    FrameType = "resource"
-	FramePresence    FrameType = "presence"
 	// Downstream.
 	FrameFeed    FrameType = "feed"
 	FrameReceipt FrameType = "receipt"
 	FrameError   FrameType = "error"
-	FrameNotify  FrameType = "notify"
 )
+
+// Retired words (purity v3 C1/C2 — minted by the spec's frame table for
+// closed-set completeness, but with ZERO producers ever wired; a word enters
+// the closed set only WITH its producer, 词表第四问):
+//   - "presence" (+PresencePayload{Level, Epoch, EdgeSeq, Detail}): presence's
+//     real path is the gateway session ledger writing the slot DIRECTLY
+//     (same process) — it never crosses this wire. If a remote connector ever
+//     needs presence over the wire, re-add as ONE vertical slice: frame const
+//     + payload type + knownFrameTypes entry + producer (gateway session
+//     edge) + interpreter dispatch, landing together.
+//   - "notify" (+NotifyPayload{ReqID, MsgType, Summary}): the notify feature
+//     itself was never built. Same rule: const + payload + both sides'
+//     dispatch tables land as one slice with the feature, not ahead of it.
 
 // knownFrameTypes is the closed set enforced at Unmarshal. A frame_type outside
 // it is refused (unknown-frame rejection, DoD-12).
 var knownFrameTypes = map[FrameType]struct{}{
 	FrameAttach: {}, FrameDetach: {}, FrameSubmit: {}, FrameResolve: {},
 	FrameCancel: {}, FrameAfter: {}, FrameCancelTimer: {}, FrameResource: {},
-	FramePresence: {}, FrameFeed: {}, FrameReceipt: {}, FrameError: {}, FrameNotify: {},
+	FrameFeed: {}, FrameReceipt: {}, FrameError: {},
 }
 
 // Error-code closed set (build spec 表①; 裁决8 平面词律): an error frame's `code`
@@ -217,15 +228,8 @@ type ResourcePayload struct {
 	Query      *ResourceQuery  `json:"query,omitempty"`
 }
 
-// PresencePayload is BOTH the upstream client→gateway hint AND the载荷 of a
-// level投递 (its wire serialization). level ∈ {online, offline}; detail is an
-// opaque富语义 blob the substrate never interprets.
-type PresencePayload struct {
-	Level   string          `json:"level"`
-	Epoch   int64           `json:"epoch"`
-	EdgeSeq int64           `json:"edge_seq"`
-	Detail  json.RawMessage `json:"detail,omitempty"`
-}
+// (PresencePayload retired with the "presence" frame word — see the retired-
+// words note by the FrameType consts.)
 
 // --- Downstream payloads --------------------------------------------------
 
@@ -291,8 +295,5 @@ type ErrorPayload struct {
 	Detail string `json:"detail,omitempty"`
 }
 
-type NotifyPayload struct {
-	ReqID   string          `json:"req_id"`
-	MsgType string          `json:"msg_type"`
-	Summary json.RawMessage `json:"summary,omitempty"`
-}
+// (NotifyPayload retired with the "notify" frame word — see the retired-words
+// note by the FrameType consts.)

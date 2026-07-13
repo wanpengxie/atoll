@@ -27,6 +27,28 @@ import (
 //     no liveness signal, or its link dropped and
 //     the fold decayed it. NOT offline.
 //   - known:true, online:true/false → the adapter's last device-presence edge.
+// handleChannelPresenceDrops reports the channel presence fold's dropped-event
+// counters per obs kind — the operator read of the fold's loudness ledger
+// (events the fold refused must stay countable: a silently shrinking fold is
+// indistinguishable from a healthy one without this account). Same OUT-OF-BAND
+// discipline as handleActorStatus: a read never writes truth.
+func (a *App) handleChannelPresenceDrops(c *gin.Context) {
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return
+	}
+	home := a.homeOrError(c, channel.ID(chID))
+	if home == nil {
+		return
+	}
+	drops := home.View().PresenceDrops()
+	out := make(map[string]uint64, len(drops))
+	for kind, n := range drops {
+		out[string(kind)] = n
+	}
+	c.JSON(http.StatusOK, gin.H{"drops": out})
+}
+
 func (a *App) handleActorStatus(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {

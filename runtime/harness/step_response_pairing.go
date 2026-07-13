@@ -307,15 +307,12 @@ func terminalFailureReasonAllowed(reason string) bool {
 	return message.IsValidTerminalFailureReason(message.TerminalFailureReason(reason))
 }
 
-// layer2ProvisionalStatuses is the Layer 2 provisional core closed set.
-// Expansion is a protocol-level revision.
-var layer2ProvisionalStatuses = map[string]struct{}{
-	"received":    {},
-	"queued":      {},
-	"processing":  {},
-	"deferred":    {},
-	"unavailable": {},
-}
+// The Layer 2 provisional core closed set's vocabulary home is
+// protocol/message (Status* consts + IsProvisionalCoreStatus predicate) —
+// this step is the ENFORCEMENT site and references the predicate, the same
+// vocabulary/judgment split Layer 1 already had via IsFinalStatus (purity v3
+// C8: the five words used to live here as bare strings, a closed set homed
+// in its consumer instead of the protocol that owns the wire words).
 
 // layer3StatusRegex enforces the Layer 3 provisional business extension
 // grammar:
@@ -355,12 +352,12 @@ func classifyResponseStatus(payload []byte, senderID actor.ActorID) statusClassi
 	if message.IsFinalStatus(status) {
 		return statusClassification{isFinal: true}
 	}
-	if _, ok := layer2ProvisionalStatuses[status]; ok {
+	if message.IsProvisionalCoreStatus(status) {
 		return statusClassification{isFinal: false}
 	}
 	if layer3StatusRegex.MatchString(status) {
 		namespace := status[:strings.IndexByte(status, '.')]
-		if _, ok := layer2ProvisionalStatuses[namespace]; ok {
+		if message.IsProvisionalCoreStatus(namespace) {
 			return statusClassification{
 				reject: HarnessResponseStatusInvalid,
 				detail: fmt.Sprintf("payload.status namespace %q collides with Layer 2 provisional name", namespace),

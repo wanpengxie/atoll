@@ -224,6 +224,7 @@ func (a *App) registerRoutes() {
 		// message frame replaced POST /messages (H1=a, zero backward-compat).
 		api.GET("/channels/:chID/actors", a.handleListActors)
 		api.GET("/channels/:chID/actors/:actorID/status", a.handleActorStatus)
+		api.GET("/channels/:chID/presence-drops", a.handleChannelPresenceDrops)
 		api.GET("/channels/:chID/cursor", a.handleCursor)
 		api.GET("/channels/:chID/messages", a.handleListMessages)
 
