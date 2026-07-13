@@ -3,6 +3,7 @@ package home
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
@@ -78,17 +79,28 @@ type capsAssembler func(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnati
 // against it inside the substrate (childID's owner must equal inc). The child's
 // truth-handle never leaves substrate — Fork returns only the child's NAME.
 type spawnHandle struct {
-	inc       actorrt.Incarnation
-	rt        *actorrt.Runtime
+	inc      actorrt.Incarnation
+	rt       *actorrt.Runtime
 	builder  CapsFactoryBuilder // nil until the class→factory table is injected.
 	assemble capsAssembler      // the shared caps seam assembler (Home.buildCaps); never nil.
 	hooks    actorbase.Hooks    // the actorbase engine's per-host wiring (spec §3); a fork child inherits its parent home's hooks.
+	logger   *slog.Logger       // oplog seam (nil-safe: falls back to discard); the second admit/remove-shaped lifecycle链路 (spec telemetry C8).
 }
 
 // newSpawnHandle welds a SpawnHandle to parent incarnation inc. rt/assemble are
-// always present; builder may be nil (see ErrNoBuilder).
-func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, builder CapsFactoryBuilder, assemble capsAssembler, hooks actorbase.Hooks) actorrt.SpawnHandle {
-	return spawnHandle{inc: inc, rt: rt, builder: builder, assemble: assemble, hooks: hooks}
+// always present; builder may be nil (see ErrNoBuilder). logger is variadic and
+// nil-safe (falls back to a discard logger) so every EXISTING call site
+// (caps.go/sysanchorcaps.go, out of this cluster's file scope) keeps compiling
+// unchanged with no oplog wired yet; a future caller opts in by passing one.
+func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, builder CapsFactoryBuilder, assemble capsAssembler, hooks actorbase.Hooks, logger ...*slog.Logger) actorrt.SpawnHandle {
+	var lg *slog.Logger
+	if len(logger) > 0 {
+		lg = logger[0]
+	}
+	if lg == nil {
+		lg = slog.New(slog.DiscardHandler)
+	}
+	return spawnHandle{inc: inc, rt: rt, builder: builder, assemble: assemble, hooks: hooks, logger: lg}
 }
 
 // Fork mints a child owned by this handle's parent incarnation.
@@ -102,6 +114,8 @@ func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, builder CapsFa
 // and drives the substrate fork primitive.
 func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 	if h.builder == nil {
+		h.logger.Warn("actorrt.fork.rejected", "parent", string(h.inc.ID()),
+			"class", spec.Class, "kind", string(spec.Kind), "error", ErrNoBuilder)
 		return "", ErrNoBuilder
 	}
 	// childID = parentID + "/" + NameHint (namespace derivation — no substrate id
@@ -111,6 +125,9 @@ func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 	childID := h.inc.ID() + "/" + actor.ActorID(spec.NameHint)
 	factory, ok := h.builder.LookupByClass(childID, spec.Class, spec.Config)
 	if !ok {
+		h.logger.Warn("actorrt.fork.rejected", "parent", string(h.inc.ID()),
+			"child", string(childID), "class", spec.Class, "kind", string(spec.Kind),
+			"error", ErrClassNotFound)
 		return "", ErrClassNotFound
 	}
 	// Weld the child's caps seam at the platform assembler (same seam as
@@ -121,8 +138,12 @@ func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 		return hostcommon.Build(h.assemble(childID, spec.Kind, childInc), h.hooks, factory)
 	}
 	if _, err := h.rt.Fork(h.inc, childID, spec.Kind, buildChild); err != nil {
+		h.logger.Warn("actorrt.fork.rejected", "parent", string(h.inc.ID()),
+			"child", string(childID), "class", spec.Class, "kind", string(spec.Kind), "error", err)
 		return "", err
 	}
+	h.logger.Info("actorrt.fork.admitted", "parent", string(h.inc.ID()),
+		"child", string(childID), "class", spec.Class, "kind", string(spec.Kind))
 	return childID, nil
 }
 
@@ -131,5 +152,13 @@ func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 // inside the substrate (DespawnChild), so the caller never holds a bare kill —
 // the handle itself never leaves the substrate.
 func (h spawnHandle) Despawn(childID actor.ActorID) error {
-	return h.rt.DespawnChild(h.inc, childID)
+	h.logger.Info("actorrt.despawn.requested", "parent", string(h.inc.ID()), "child", string(childID))
+	err := h.rt.DespawnChild(h.inc, childID)
+	if err != nil {
+		h.logger.Warn("actorrt.despawn.rejected", "parent", string(h.inc.ID()),
+			"child", string(childID), "error", err)
+		return err
+	}
+	h.logger.Info("actorrt.despawn.removed", "parent", string(h.inc.ID()), "child", string(childID))
+	return nil
 }

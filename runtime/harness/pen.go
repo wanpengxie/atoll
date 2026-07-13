@@ -58,9 +58,11 @@ func (p *boundPen) Write(ctx context.Context, env *message.Envelope) (WriteResul
 		return p.chain.write(ctx, env)
 	}
 	if env.Sender.ID != "" || env.ChannelID != "" {
+		const detail = "sender.id/channel_id are substrate-injected, not caller-settable"
+		p.chain.observeReject(ctx, env, StepCallerAuth, HarnessIdentityNotCallerSettable, detail)
 		return WriteResult{
 			RejectReason: HarnessIdentityNotCallerSettable,
-			RejectDetail: "sender.id/channel_id are substrate-injected, not caller-settable",
+			RejectDetail: detail,
 		}, nil
 	}
 	env.Sender.ID = p.principal.actorID

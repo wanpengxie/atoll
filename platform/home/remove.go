@@ -72,6 +72,16 @@ func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
 	}); err != nil {
 		return fmt.Errorf("platform: Remove dereg %s: %w", id, err)
 	}
+	// A4/C2: symmetric to Admit's platform.member.admitted (census.go) — P1
+	// migration-pair rule, same posture (fires on every successful call,
+	// idempotent retries included, matching admitted's own precedent).
+	// MembershipControlPlane's frozen ApplyMemberTransitions signature (many
+	// callers outside this package/cluster) carries back no changed/count
+	// signal, so this line cannot condition on "did it actually cascade" or
+	// name the state/timers/grants row counts — those land durably instead
+	// on the system.actor.deregistered mirror payload's state_cleared/
+	// timers_cleared/grants_cleared fields (actors.go), inspectable per event.
+	h.logger.Info("platform.member.removed", "channel", string(h.channelID), "actor", string(id))
 	// ③ double-tap: kill whatever the Reviver may have spawned in the window
 	// between ① and ②'s commit (see the doc comment above).
 	h.channel.Cells().DespawnID(id)

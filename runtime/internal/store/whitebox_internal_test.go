@@ -350,7 +350,7 @@ func TestApplyMemberRemoveTx_ExecError(t *testing.T) {
 		t.Fatalf("BeginTx: %v", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if _, err := reg.applyMemberRemoveTx(ctx, tx, storespec.MemberActorRemove{ID: "a", At: 9}); err == nil {
+	if _, _, err := reg.applyMemberRemoveTx(ctx, tx, storespec.MemberActorRemove{ID: "a", At: 9}); err == nil {
 		t.Error("applyMemberRemoveTx must surface the UPDATE error (missing deregistered_at column)")
 	}
 }

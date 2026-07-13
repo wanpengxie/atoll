@@ -27,12 +27,19 @@ func (a *App) kickDaemonConverge(chID channel.ID, daemonID string) {
 	if home == nil {
 		return
 	}
-	for i := 0; i < 3 && home.View().IsAttached(daemonID); i++ {
+	attempts := 0
+	for ; attempts < 3 && home.View().IsAttached(daemonID); attempts++ {
 		home.KickDaemon(daemonID)
 	}
 	if home.View().IsAttached(daemonID) {
 		a.logger.Warn("app: daemon kick did not converge", "channel", string(chID), "daemon", daemonID)
+		return
 	}
+	// Convergence succeeded — the common case, previously silent. Without this
+	// an explicit revocation ("who kicked which daemon off which channel and
+	// when") is unreconstructable from slog; only the rare non-convergence
+	// path had a trace.
+	a.logger.Info("app: daemon kick converged", "channel", string(chID), "daemon", daemonID, "attempts", attempts)
 }
 
 // ---------------------------------------------------------------------------
@@ -238,6 +245,10 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 	}
 
 	// Only now that the revocation is durable do we Kick the live links to silence.
+	// Info marks this as an explicit, deliberate revocation (the daemon's key
+	// itself was just deleted) — distinct from "home closing" (platform.home's
+	// own bulk teardown) as a source of the same links dying.
+	a.logger.Info("app: daemon delete kicking live links", "daemon", daemonID, "channels", bound)
 	for _, ch := range bound {
 		a.kickDaemonConverge(channel.ID(ch), daemonID)
 	}
@@ -336,6 +347,10 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "detach failed"})
 		return
 	}
+	// Info marks this as an explicit, deliberate revocation (a single-channel
+	// detach request) — same distinguishing purpose as handleDeleteDaemon's
+	// own kick-start marker.
+	a.logger.Info("app: daemon detach kicking live link", "channel", string(chID), "daemon", daemonID)
 	a.kickDaemonConverge(channel.ID(chID), daemonID)
 	_, _ = a.db.ExecContext(ctx,
 		`UPDATE channel_actors SET desired_host = '' WHERE channel_id = ? AND desired_host = ?`,

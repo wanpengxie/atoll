@@ -3,6 +3,7 @@ package home
 import (
 	"context"
 	"errors"
+	"sync"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
@@ -15,6 +16,29 @@ import (
 // reviveLogThrottle bounds the attached-host revive-skip log (see
 // Home.reviveLogAt).
 const reviveLogThrottle = 30 * time.Second
+
+// noFactoryWarned edge-dedups the platform.reconcile.no_factory Warn (B3): an
+// actor ID is minted once per lifetime (never reused — see identity-instance-
+// spec), so a package-level set keyed by ActorID is safe across every Home
+// without threading a new field through the Home struct (out of this file's
+// change scope). Guarded by noFactoryWarnedMu since multiple Homes' reconcile
+// ticks run concurrently. Entry is set on first no_factory observation for an
+// id and cleared the moment that id resolves to any other activation verdict
+// or stops being managed by this ring — so steady-state no_factory (soak's
+// 74x repeat) goes silent after the first Warn, without ever going fully mute
+// across restarts (fresh process = fresh empty set = first sighting warns).
+var (
+	noFactoryWarnedMu sync.Mutex
+	noFactoryWarned   = make(map[actor.ActorID]struct{})
+)
+
+// clearNoFactoryWarned drops id's no_factory edge marker, e.g. once a factory
+// becomes available or the id is no longer this ring's to manage.
+func clearNoFactoryWarned(id actor.ActorID) {
+	noFactoryWarnedMu.Lock()
+	delete(noFactoryWarned, id)
+	noFactoryWarnedMu.Unlock()
+}
 
 // reconcileSweep runs the home's level-reconcile quartet in the fixed
 // activation → closure → expiry → presence order; each step re-checks ctx so a
@@ -343,6 +367,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 			// current stays true (already set above); no log; no account write
 			// (环翻译器 never clears the backoff account — §1.4 现状, CAS-loser
 			// included: reserved to the fast-path arm above and to 削 below).
+			clearNoFactoryWarned(id) // left no_factory (a factory now resolves) — B3 edge reset
 		case actNotMember:
 			// Defensive-only (①防御复判): unreachable given the selector's own
 			// pre-filter two lines up, on the SAME rec — treated conservatively
@@ -351,7 +376,19 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		case actBackoffHeld:
 			delete(current, id)
 		case actNoFactory:
-			h.logger.Warn("platform.reconcile.no_factory", "channel", string(h.channelID), "actor", string(id))
+			// B3: edge-only — warn once per id on first no_factory sighting,
+			// silent through steady-state repeats (soak observed 74x/pass without
+			// this dedup). clearNoFactoryWarned resets the marker once the id
+			// leaves this state (factory resolves, or the ring stops managing it).
+			noFactoryWarnedMu.Lock()
+			_, alreadyWarned := noFactoryWarned[id]
+			if !alreadyWarned {
+				noFactoryWarned[id] = struct{}{}
+			}
+			noFactoryWarnedMu.Unlock()
+			if !alreadyWarned {
+				h.logger.Warn("platform.reconcile.no_factory", "channel", string(h.channelID), "actor", string(id))
+			}
 		case actSealed:
 			h.logger.Info("platform.reconcile.runtime_sealed", "channel", string(h.channelID), "actor", string(id))
 			return // whole tick aborts — prevEagerDesired stays exactly the pre-tick baseline
@@ -383,6 +420,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		h.reviveMu.Lock()
 		delete(h.reviveLogAt, id)
 		h.reviveMu.Unlock()
+		clearNoFactoryWarned(id) // ring stopped managing id — B3 edge reset
 	}
 	h.prevEagerDesired = current
 }

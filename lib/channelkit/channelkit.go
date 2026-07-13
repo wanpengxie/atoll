@@ -187,6 +187,10 @@ func (c *Channel) Start() error {
 	// the dying goroutine's reap path (G0-3). Started after the runtime exists
 	// (it reads liveness for the recheck) and joined by Close in Home.Close's
 	// teardown序 (after cells stop, before stores close).
+	// One-time armed signal (aligns with platform.home.ready's shape): a
+	// resident goroutine about to start is a genuine one-off edge, not a
+	// per-drain steady-state event (consumeDown itself stays silent per drain).
+	c.logger.Info("channelkit.closure.consumer_armed", "channel", c.channelID)
 	go c.consumeDown()
 	return nil
 }
@@ -359,16 +363,31 @@ func (c *Channel) Reconcile(ctx context.Context) {
 	// System-authored (same as OnDown): the injected writer is the system Pen, so
 	// the reconciler's terminals carry sender==SystemActorID by construction. No
 	// caller injection — identity rides the pen.
+	var faults int
 	onFault := func(reqID message.ID, err error) {
+		faults++
 		c.logger.Error("channelkit.closure.reconcile_fault",
 			"channel", c.channelID, "request", reqID, "err", err)
 	}
-	if err := behavior.ReconcileReceiverUnavailable(ctx,
+	err := behavior.ReconcileReceiverUnavailable(ctx,
 		c.systemPen, c.openReqs, c.closedForever,
-		c.clock, onFault); err != nil {
+		c.clock, onFault)
+	if err != nil {
 		// The distinct-receivers scan failed → no orphan can be enumerated →
 		// every absent receiver's callers stay black holes until the next scan.
 		c.logger.Error("channelkit.closure.reconcile_scan_failed",
 			"channel", c.channelID, "err", err)
+		return
+	}
+	// Low-frequency summary (the reconciler already runs at ticker cadence, not
+	// per-request, so one line per pass is edge-only by construction — no new
+	// scan added for this log): faults>0 is the only per-pass count available
+	// without behavior.ReconcileReceiverUnavailable returning scanned/closed
+	// (out of this cluster's file scope, see D1 deviation note); a clean pass
+	// stays at Debug to avoid steady-state Info noise.
+	if faults > 0 {
+		c.logger.Info("channelkit.closure.reconcile_swept", "channel", c.channelID, "faults", faults)
+	} else {
+		c.logger.Debug("channelkit.closure.reconcile_swept", "channel", c.channelID, "faults", 0)
 	}
 }

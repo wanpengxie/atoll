@@ -71,7 +71,9 @@ func (h *Home) handleCancelUpstream(boundID actor.ActorID, requestID message.ID)
 // authority to decide WHEN to kick (a daemon's credential was just revoked)
 // lives entirely in the app layer; this method only executes the mechanical
 // teardown. Kicked ports fall silent (quiet-stop, no receiver_unavailable) —
-// a kick is a voluntary revocation, not an observed death.
+// a kick is a voluntary revocation, not an observed death. The link.kick_daemon
+// Info (computeID + closed count) is logged by the wrapped link.Acceptor
+// itself, not duplicated at this pass-through — see accept.go's KickDaemon.
 func (h *Home) KickDaemon(computeID string) int {
 	return h.links.KickDaemon(computeID)
 }

@@ -278,6 +278,11 @@ func (r *Runtime) WatchDown(w DownWatcher) {
 // because a swallowed fault is a silent black hole. Watchers MUST be non-blocking;
 // a blocking watcher stalls the dying goroutine's reap.
 func (r *Runtime) publishDown(id actor.ActorID, self embodiment, cause error) {
+	if cause != nil {
+		r.logger.Warn("actorrt.down", "actor", id, "cause", cause)
+	} else {
+		r.logger.Debug("actorrt.down", "actor", id)
+	}
 	r.mu.RLock()
 	ws := make([]DownWatcher, len(r.watchers))
 	copy(ws, r.watchers)

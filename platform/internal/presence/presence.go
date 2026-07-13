@@ -99,8 +99,15 @@ func (f *Fold) put(id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue,
 		byKind = map[actorrt.ObsKind]entry{}
 		f.latest[id] = byKind
 	}
+	_, existed := byKind[kind]
 	byKind[kind] = entry{val: append([]byte(nil), val...), receivedAt: f.clock().UnixMilli(), gen: gen}
 	f.mu.Unlock()
+	if !existed {
+		// edge-only: this (actor,kind) row went absent→present (online). Not a
+		// re-log of the testimony value (P5) — just the oplog fact that a
+		// presence edge occurred.
+		f.logger.Info("platform.presence.edge", "actor", string(id), "kind", string(kind), "edge", "online")
+	}
 }
 
 func (f *Fold) isLevel(kind actorrt.ObsKind) bool {
@@ -130,21 +137,33 @@ func (f *Fold) DroppedCounts() map[actorrt.ObsKind]uint64 {
 
 func (f *Fold) Forget(id actor.ActorID) {
 	f.mu.Lock()
+	_, existed := f.latest[id]
 	delete(f.latest, id)
 	f.mu.Unlock()
+	if existed {
+		f.logger.Debug("platform.presence.edge", "actor", string(id), "kind", "*", "edge", "forget")
+	}
 }
 
 func (f *Fold) OnDown(_ context.Context, id actor.ActorID, gen actorrt.Incarnation, _ error) {
+	var offlineKinds []actorrt.ObsKind
 	f.mu.Lock()
 	for kind, row := range f.latest[id] {
 		if row.gen == gen {
 			delete(f.latest[id], kind)
+			offlineKinds = append(offlineKinds, kind)
 		}
 	}
 	if len(f.latest[id]) == 0 {
 		delete(f.latest, id)
 	}
 	f.mu.Unlock()
+	// edge-only: each removed row is a present→absent (offline) edge, not the
+	// per-tick down path itself (that already logs elsewhere) — this is the
+	// oplog fact that presence testimony went offline for this actor/kind.
+	for _, kind := range offlineKinds {
+		f.logger.Info("platform.presence.edge", "actor", string(id), "kind", string(kind), "edge", "offline")
+	}
 }
 
 // Sweep enforces fold rows ⊆ (live embodiments ∪ active membership). Fresh

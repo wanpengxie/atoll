@@ -218,6 +218,9 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 			if derr := d.deps.Registry.Delete(ctx, id); derr != nil {
 				return executeFailure(ctx, derr)
 			}
+			if d.deps.Logger != nil {
+				d.deps.Logger.Info("resource deleted", "id", string(id), "kind", string(meta.Kind), "tombstoned", true)
+			}
 			return Outcome{}, nil
 		}
 		// kv (and any future inline-byte kind): bytes first, existence row
@@ -233,6 +236,9 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		}
 		if derr := d.deps.Registry.Delete(ctx, id); derr != nil {
 			return executeFailure(ctx, derr)
+		}
+		if d.deps.Logger != nil {
+			d.deps.Logger.Info("resource deleted", "id", string(id), "kind", string(meta.Kind), "tombstoned", false)
 		}
 		return Outcome{}, nil
 

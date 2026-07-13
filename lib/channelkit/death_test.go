@@ -276,25 +276,48 @@ func (h *capHandler) Handle(_ context.Context, r slog.Record) error {
 func (h *capHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *capHandler) WithGroup(string) slog.Handler      { return h }
 
-// waitFirstMsg polls until at least one message is captured, returning the first
-// (or "" on timeout). The down edge is now async: OnDown only O(1)-posts, the
-// resident consumer does the closure work + logging on its own goroutine.
-func (h *capHandler) waitFirstMsg(timeout time.Duration) string {
+// nonFaultMsgs is the closed set of NON-fault channelkit slog messages a test's
+// capHandler will see incidentally — steady-state/edge heartbeats, not closure
+// faults. They are filtered out of fault assertions so a new heartbeat log never
+// silently breaks a fault test (the old waitFirstMsg assumed msgs[0] was always
+// the fault, which a Start-time consumer_armed heartbeat now violates).
+var nonFaultMsgs = map[string]bool{
+	"channelkit.closure.consumer_armed":  true,
+	"channelkit.closure.reconcile_swept": true,
+}
+
+// waitMsg polls until a message equal to want is captured (skipping incidental
+// heartbeats), returning true; false on timeout. This replaces the fragile
+// "msgs[0] is the fault" assumption — it waits for the SPECIFIC fault regardless
+// of what non-fault heartbeats precede it.
+func (h *capHandler) waitMsg(want string, timeout time.Duration) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		h.mu.Lock()
-		n := len(h.msgs)
-		var first string
-		if n > 0 {
-			first = h.msgs[0]
+		for _, m := range h.msgs {
+			if m == want {
+				h.mu.Unlock()
+				return true
+			}
 		}
 		h.mu.Unlock()
-		if n > 0 {
-			return first
-		}
 		time.Sleep(2 * time.Millisecond)
 	}
-	return ""
+	return false
+}
+
+// faults returns the captured messages with incidental heartbeats filtered out —
+// what "did any closure fault surface" assertions should look at.
+func (h *capHandler) faults() []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	var out []string
+	for _, m := range h.msgs {
+		if !nonFaultMsgs[m] {
+			out = append(out, m)
+		}
+	}
+	return out
 }
 
 // TestClosureDrainFailure_IsSurfaced proves a swallowed-drain regression cannot
@@ -315,12 +338,8 @@ func TestClosureDrainFailure_IsSurfaced(t *testing.T) {
 	})
 	defer ch.Close()
 	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, nil)
-	got := h.waitFirstMsg(2 * time.Second)
-	if got == "" {
-		t.Fatal("drain query failed but NO fault logged — silent black hole regression")
-	}
-	if got != "channelkit.closure.drain_query_failed" {
-		t.Fatalf("fault msg=%q, want channelkit.closure.drain_query_failed", got)
+	if !h.waitMsg("channelkit.closure.drain_query_failed", 2*time.Second) {
+		t.Fatalf("drain query failed but fault not logged — silent black hole regression; faults=%v", h.faults())
 	}
 }
 
@@ -359,12 +378,8 @@ func TestOnDown_PerRequestWriteFault_IsLogged(t *testing.T) {
 	})
 	defer ch.Close()
 	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, nil)
-	got := h.waitFirstMsg(2 * time.Second)
-	if got == "" {
-		t.Fatal("per-request write failed but NO fault logged — silent black hole regression")
-	}
-	if got != "channelkit.closure.write_failed" {
-		t.Fatalf("fault msg=%q, want channelkit.closure.write_failed", got)
+	if !h.waitMsg("channelkit.closure.write_failed", 2*time.Second) {
+		t.Fatalf("per-request write failed but fault not logged — silent black hole regression; faults=%v", h.faults())
 	}
 }
 
@@ -455,9 +470,8 @@ func TestOnDown_PredicateFailure_SkipsAndLogs(t *testing.T) {
 	defer ch.Close()
 
 	ch.OnDown(context.Background(), "worker", actorrt.Incarnation{}, nil)
-	got := h.waitFirstMsg(2 * time.Second)
-	if got != "channelkit.closure.predicate_failed" {
-		t.Fatalf("predicate failure fault msg=%q, want channelkit.closure.predicate_failed", got)
+	if !h.waitMsg("channelkit.closure.predicate_failed", 2*time.Second) {
+		t.Fatalf("predicate failure fault not logged; faults=%v", h.faults())
 	}
 	if fc.count() != 0 {
 		t.Fatalf("a predicate lookup failure must NOT close anyone (错误当注销=误杀), got %d writes", fc.count())
@@ -526,11 +540,8 @@ func TestClose_QuietDuringInFlightClosure(t *testing.T) {
 		t.Fatal("Close did not return after the in-flight closure finished")
 	}
 
-	h.mu.Lock()
-	msgs := append([]string(nil), h.msgs...)
-	h.mu.Unlock()
-	if len(msgs) != 0 {
-		t.Fatalf("normal Close during in-flight closeFor logged fault(s) %v — should be quiet", msgs)
+	if f := h.faults(); len(f) != 0 {
+		t.Fatalf("normal Close during in-flight closeFor logged fault(s) %v — should be quiet (heartbeats excluded)", f)
 	}
 	if fc.count() != 1 {
 		t.Fatalf("in-flight closure should have completed and written its terminal, count=%d", fc.count())

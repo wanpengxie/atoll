@@ -25,6 +25,7 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
@@ -178,6 +179,7 @@ func (g *Gateway) Close() error {
 	// Close (first or Nth, concurrent or serial) returns only after the arms are all
 	// sealed and every pump joined — a second Close can never return while the first is
 	// still mid-seal/join (修复批四轮 P1).
+	started := time.Now()
 	g.closeOnce.Do(func() {
 		g.mu.Lock()
 		g.closed = true
@@ -196,6 +198,8 @@ func (g *Gateway) Close() error {
 		// They own no arm/Home resource beyond the read流句柄 and unblock on the cancel
 		// above, so a plain join suffices — 设计 §5.5 defers only裸观众撤权, never关站静默.
 		g.tailPumps.Wait()
+		g.logger.Info("platform.gateway.closed", "leaked_pumps", g.LeakedPumps(),
+			"duration", time.Since(started))
 	})
 	return nil
 }
@@ -378,6 +382,14 @@ func (g *Gateway) removeDevice(e *userEntry, s *Session) {
 			e.slot.PublishLevel(g.epoch, g.edgeSeq.Add(1), subjectgate.LevelOffline)
 		}
 		delete(g.entries, e.subjectID)
+	}
+	// Summarize this device's own lane drops at teardown — not per-push (P3):
+	// a lane that never filled logs nothing.
+	if s.lane != nil {
+		if dropped := s.lane.DroppedCount(); dropped > 0 {
+			g.logger.Info("platform.gateway.lane_dropped", "subject", string(e.subjectID),
+				"dropped", dropped)
+		}
 	}
 }
 

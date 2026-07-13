@@ -251,6 +251,13 @@ func (a *Acceptor) KickDaemon(computeID string) int {
 		h.quietStop()
 		_ = h.lc.Close()
 	}
+	// Loud on every call (not edge-gated): each call is itself a discrete
+	// revocation act, not a repeating steady-state poll — the only way to
+	// reconstruct "who revoked which daemon and how many links it actually
+	// closed" from slog. count==0 (nothing was registered under this id) is
+	// still worth a line — it says the revocation found no live link, not
+	// that nothing happened.
+	a.logger.Info("link.kick_daemon", "compute", computeID, "closed", len(hs))
 	return len(hs)
 }
 
@@ -274,10 +281,19 @@ func (a *Acceptor) markDetached(id string) {
 		return
 	}
 	a.attachedMu.Lock()
-	if a.attached[id]--; a.attached[id] <= 0 {
+	a.attached[id]--
+	zeroed := a.attached[id] <= 0
+	if zeroed {
 		delete(a.attached, id)
 	}
 	a.attachedMu.Unlock()
+	// Only the refcount's TRUE zero edge is loud (an overlapping reconnect's
+	// stale link tearing down while a newer one is still live decrements
+	// without reaching zero — that must stay silent, not flap a false
+	// "detached" signal) — symmetric with markAttached's link.attached.
+	if zeroed {
+		a.logger.Info("link.detached", "compute", id)
+	}
 }
 
 // IsAttached reports whether compute id has a live attach right now (L0).
@@ -936,11 +952,14 @@ func (a *Acceptor) SendAllocRequest(ctx context.Context, daemonID string, req Al
 // home-initiated request/reply discipline, same pending table shape) — used
 // by the content-less create loser path to collect the orphaned empty coord
 // the with-content path's CommittedReply.Lost→ReclaimCoord signal would
-// otherwise have handled. A "no live connection" is a non-fatal Go error the
-// caller logs (the reservation is already gone; a missed reclaim is at worst a
-// leftover empty dir the next resource-delete-scale reclaim never revisits —
-// the same best-effort posture every other daemon-side cleanup in this plane
-// documents).
+// otherwise have handled). A "no live connection" is a non-fatal Go error
+// this package itself does NOT log — the failure is surfaced at the
+// accessdoor door side instead (runtime/accessdoor/query.go's ReclaimRequest
+// caller WARNs it, A5), the same seam that owns every other content-less-
+// create-loser cleanup decision (the reservation is already gone; a missed
+// reclaim is at worst a leftover empty dir the next resource-delete-scale
+// reclaim never revisits — the same best-effort posture every other
+// daemon-side cleanup in this plane documents).
 func (a *Acceptor) SendReclaimRequest(ctx context.Context, daemonID, coord string) error {
 	a.linksMu.Lock()
 	hs := a.links[daemonID]
