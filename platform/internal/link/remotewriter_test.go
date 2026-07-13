@@ -285,7 +285,9 @@ func TestRemoteWriterPreSendCancelDoesNotEmit(t *testing.T) {
 	hostConn, remoteConn := net.Pipe()
 	var mu sync.Mutex
 	emits := 0
+	readerDone := make(chan struct{})
 	go func() {
+		defer close(readerDone)
 		c := ipc.NewCodec(hostConn, hostConn)
 		for {
 			f, err := c.Read()
@@ -310,8 +312,15 @@ func TestRemoteWriterPreSendCancelDoesNotEmit(t *testing.T) {
 	if err != context.Canceled {
 		t.Fatalf("err = %v, want context.Canceled", err)
 	}
-	// Give any (erroneous) emit time to cross the pipe before asserting none did.
-	time.Sleep(50 * time.Millisecond)
+	// Deterministic zero-frame assertion (codex 终审 P2 hardening): close the
+	// remote end and wait for the host reader to drain to EOF — every frame that
+	// was ever written is counted before we assert none was.
+	_ = remoteConn.Close()
+	select {
+	case <-readerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("host reader never drained after remote close")
+	}
 	mu.Lock()
 	got := emits
 	mu.Unlock()
@@ -329,12 +338,25 @@ func TestRemoteWriterPreSendCancelDoesNotEmit(t *testing.T) {
 func TestRemoteWriterCloseSettlesInFlightAsClosed(t *testing.T) {
 	t.Parallel()
 	hostConn, remoteConn := net.Pipe()
+	// hostGotEmit makes the interleaving DETERMINISTIC (codex 终审 P2): Close
+	// fires only after the host has provably READ the emit off the wire, so the
+	// Write is genuinely in flight — never a lost race where Close wins before
+	// the frame was even enqueued.
+	hostGotEmit := make(chan struct{}, 1)
 	go func() {
 		c := ipc.NewCodec(hostConn, hostConn)
 		for {
-			if _, err := c.Read(); err != nil {
-				return // read the emit, never ack
+			f, err := c.Read()
+			if err != nil {
+				return
 			}
+			if f.Kind == ipc.KindEmit {
+				select {
+				case hostGotEmit <- struct{}{}:
+				default:
+				}
+			}
+			// read the emit, never ack
 		}
 	}()
 	rcodec := ipc.NewCodec(remoteConn, remoteConn)
@@ -346,7 +368,11 @@ func TestRemoteWriterCloseSettlesInFlightAsClosed(t *testing.T) {
 		_, err := rw.Write(context.Background(), &message.Envelope{ID: "inflight"})
 		done <- err
 	}()
-	time.Sleep(20 * time.Millisecond)
+	select {
+	case <-hostGotEmit:
+	case <-time.After(2 * time.Second):
+		t.Fatal("host never received the in-flight emit")
+	}
 	rw.Close()
 	select {
 	case err := <-done:
