@@ -1,0 +1,195 @@
+package gateway
+
+// 资格对账 (spec §3.2 收敛对象甲) + T_stale 租约 (DoD-8) tests: subscribe/retire,
+// whole-snapshot-failure lease → pause → resume, per-channel 部分失败 vs confirmed-absent,
+// and StartFeed's synchronous first reconcile (connect-then-act).
+
+import (
+	"context"
+	"errors"
+	"testing"
+	"time"
+
+	"github.com/wanpengxie/atoll/protocol/channel"
+)
+
+// eligRoutes reads the session's published资格账 route set (test helper).
+func eligRoutes(s *Session) map[channel.ID]Route { return s.elig.Load().routes }
+func eligPaused(s *Session) map[channel.ID]struct{} { return s.elig.Load().paused }
+
+// TestReconcileSubscribeThenRetire (成功查得无资格立即退订): a member route → reconcile
+// subscribes + publishes it in the资格账; when the resolver later confirms NO
+// eligibility (absent from BOTH routes and failed), the next reconcile退订 immediately —
+// no lease for a confirmed absence.
+func TestReconcileSubscribeThenRetire(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := New(Config{Resolver: res, Clock: clk.now})
+	const principal = "mia"
+	h, id := openHome(t, channel.ID("c"), principal)
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	s, _ := g.Attach(context.Background(), principal, nil)
+	defer s.Close()
+
+	s.reconcile()
+	if _, ok := eligRoutes(s)["c"]; !ok {
+		t.Fatal("a member route must be subscribed + published after reconcile")
+	}
+	if len(s.subs) != 1 {
+		t.Fatalf("expected one subscription, got %d", len(s.subs))
+	}
+
+	// Confirmed no eligibility → immediate退订 (not a lease).
+	res.set(principal, nil, nil, nil)
+	s.reconcile()
+	if _, ok := eligRoutes(s)["c"]; ok {
+		t.Fatal("confirmed-absent channel must退订 immediately")
+	}
+	if len(s.subs) != 0 {
+		t.Fatalf("subscription must be dropped on confirmed absence, got %d", len(s.subs))
+	}
+	if _, paused := eligPaused(s)["c"]; paused {
+		t.Fatal("a confirmed absence must NOT be treated as a paused lease")
+	}
+}
+
+// TestLeaseThenPauseThenResume (DoD-8, whole-snapshot failure): after a successful
+// check, a resolver error rides the T_stale lease (still served within 30s of the last
+// SUCCESS), then pauses the channel past the lease; a later success resumes it. Clock is
+// injected — no real 30s wait.
+func TestLeaseThenPauseThenResume(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	cap := &logCapture{}
+	g := New(Config{Resolver: res, Clock: clk.now, Logger: cap.logger()})
+	const principal = "nan"
+	h, id := openHome(t, channel.ID("c"), principal)
+
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	s, _ := g.Attach(context.Background(), principal, nil)
+	defer s.Close()
+	s.reconcile() // lastOK = t0
+
+	// Whole-snapshot failure within the lease (t0 + 10s): still served, NOT paused.
+	res.set(principal, nil, nil, errors.New("resolver down"))
+	clk.advance(10 * time.Second)
+	s.reconcile()
+	if _, paused := eligPaused(s)["c"]; paused {
+		t.Fatal("within T_stale lease the channel must keep serving (not paused)")
+	}
+	if _, ok := eligRoutes(s)["c"]; !ok {
+		t.Fatal("within lease the route must still be published")
+	}
+
+	// Past the lease (t0 + 31s): the channel pauses (streaming stops) → business frame
+	// maps to unavailable.
+	clk.advance(21 * time.Second) // now t0 + 31s
+	s.reconcile()
+	if _, paused := eligPaused(s)["c"]; !paused {
+		t.Fatal("past T_stale the channel must pause (lease expired)")
+	}
+	if _, ok := eligRoutes(s)["c"]; ok {
+		t.Fatal("a paused channel must NOT be a live eligible route")
+	}
+	if !cap.has("gateway.entitlement.paused") {
+		t.Fatal("lease expiry must emit gateway.entitlement.paused (DoD-8 记账)")
+	}
+
+	// Recovery: the resolver answers again → the channel resumes (lastOK re-anchored).
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	s.reconcile()
+	if _, paused := eligPaused(s)["c"]; paused {
+		t.Fatal("a recovered resolver must resume the paused channel")
+	}
+	if _, ok := eligRoutes(s)["c"]; !ok {
+		t.Fatal("resumed channel must be a live eligible route again")
+	}
+	if !cap.has("gateway.entitlement.resumed") {
+		t.Fatal("resume must emit gateway.entitlement.resumed (DoD-8 记账)")
+	}
+}
+
+// TestPartialFailureLeaseVsAbsent (spec §3.2 部分失败语义): a per-channel FAILURE ("查得
+// 坏消息") rides the T_stale lease then pauses; a channel simply ABSENT from routes
+// ("查不到" = confirmed no eligibility) retires immediately. The two must not be
+// conflated — a failed channel keeps its subscription for a later resume, an absent one
+// does not.
+func TestPartialFailureLeaseVsAbsent(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := New(Config{Resolver: res, Clock: clk.now})
+	const principal = "opa"
+	h1, id1 := openHome(t, channel.ID("c1"), principal)
+	h2, id2 := openHome(t, channel.ID("c2"), principal)
+
+	// Both channels start eligible.
+	res.set(principal, []Route{
+		memberRoute("c1", h1, id1, clk.now()),
+		memberRoute("c2", h2, id2, clk.now()),
+	}, nil, nil)
+	s, _ := g.Attach(context.Background(), principal, nil)
+	defer s.Close()
+	s.reconcile()
+	if len(s.subs) != 2 {
+		t.Fatalf("both channels subscribed, got %d", len(s.subs))
+	}
+
+	// c1 → per-channel failure (查得坏消息); c2 → absent (查不到). Within the lease c1
+	// stays served; c2 retires immediately.
+	res.set(principal, nil, []ChannelFailure{{Channel: "c1", Err: errors.New("c1 query failed")}}, nil)
+	clk.advance(5 * time.Second)
+	s.reconcile()
+	if _, ok := s.subs["c1"]; !ok {
+		t.Fatal("a per-channel FAILURE must keep the subscription (lease), not retire it")
+	}
+	if _, paused := eligPaused(s)["c1"]; paused {
+		t.Fatal("c1 within its lease must not be paused yet")
+	}
+	if _, ok := s.subs["c2"]; ok {
+		t.Fatal("a channel absent from routes (查不到) must退订 immediately")
+	}
+
+	// Past c1's lease → it pauses (still subscribed, awaiting resume).
+	clk.advance(30 * time.Second)
+	s.reconcile()
+	if _, paused := eligPaused(s)["c1"]; !paused {
+		t.Fatal("c1 past its lease must pause")
+	}
+	if _, ok := s.subs["c1"]; !ok {
+		t.Fatal("a paused (failed) channel keeps its subscription for a later resume")
+	}
+}
+
+// TestStartFeedSyncEligibility (spec §3.2 StartFeed synchronous first reconcile /
+// connect-then-act): after StartFeed returns, eligibility is ALREADY resolved (the
+// synchronous first reconcile), so a client acting immediately does not race the pump's
+// first async圈.
+func TestStartFeedSyncEligibility(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := New(Config{Resolver: res, Clock: clk.now})
+	const principal = "pat"
+	h, id := openHome(t, channel.ID("c"), principal)
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	s, _ := g.Attach(context.Background(), principal, nil)
+
+	s.StartFeed()
+	// Immediately after StartFeed the资格账 already carries the route (synchronous
+	// reconcile happened before the pump goroutine launched).
+	if _, ok := eligRoutes(s)["c"]; !ok {
+		t.Fatal("StartFeed must resolve eligibility synchronously (connect-then-act)")
+	}
+	g.Close()
+}
+
+// TestReconcileNoResolverForbidsAll: with no resolver injected, reconcile publishes an
+// empty资格账 (every business frame forbidden — no channel is ever eligible).
+func TestReconcileNoResolverForbidsAll(t *testing.T) {
+	g := New(Config{Clock: newClock().now}) // no Resolver
+	s, _ := g.Attach(context.Background(), "q", nil)
+	defer s.Close()
+	s.reconcile()
+	if len(eligRoutes(s)) != 0 {
+		t.Fatal("no resolver → empty资格账 (all forbidden)")
+	}
+}

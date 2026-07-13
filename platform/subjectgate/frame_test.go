@@ -2,6 +2,7 @@ package subjectgate
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -114,6 +115,26 @@ func TestFrameSizeLimit(t *testing.T) {
 	over := make([]byte, MaxFrameBytes+1)
 	if _, err := ParseFrame(over); err == nil {
 		t.Fatal("expected oversize ParseFrame to be refused")
+	}
+}
+
+// TestRequireChannelID pins the连接模型勘误期 v2 required-field validator (§S1, DoD-4):
+// every business frame's channel_id is required — absent / empty / whitespace-only is
+// rejected with the typed ErrMissingChannelID (mapped to bad_payload by the upper
+// layer). A non-blank id passes. "Required" is a validation layer, not a struct tag: a
+// Go decode turns an absent field into an empty string, so the validator — not the
+// decoder — is the enforcement point.
+func TestRequireChannelID(t *testing.T) {
+	rejected := []string{"", " ", "\t", "\n", "  \t \n "}
+	for _, cid := range rejected {
+		if err := RequireChannelID(cid); !errors.Is(err, ErrMissingChannelID) {
+			t.Fatalf("RequireChannelID(%q) must reject with ErrMissingChannelID, got %v", cid, err)
+		}
+	}
+	for _, cid := range []string{"c1", " c1 ", "channel:abc"} {
+		if err := RequireChannelID(cid); err != nil {
+			t.Fatalf("RequireChannelID(%q) must pass, got %v", cid, err)
+		}
 	}
 }
 
