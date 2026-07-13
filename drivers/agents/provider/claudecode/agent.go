@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/wanpengxie/atoll/agent/base"
+	"github.com/wanpengxie/atoll/drivers/agents/base"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"

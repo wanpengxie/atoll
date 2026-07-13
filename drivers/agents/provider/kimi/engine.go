@@ -28,7 +28,7 @@ import (
 	// Force-register the anthropic provider factory (init() side-effects).
 	_ "github.com/wanpengxie/go-kimi/pkg/kimi/llm/anthropic"
 
-	"github.com/wanpengxie/atoll/agent/base"
+	"github.com/wanpengxie/atoll/drivers/agents/base"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/lib/metatool"

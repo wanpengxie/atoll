@@ -87,8 +87,7 @@ runtime/     the kernel runtime (harness admission pipeline, actorrt cells/ports
 lib/         stdlib for actor authors (behavior, channelkit, metatool, introspect)
 platform/    channel assembly (server-side ChannelHome + daemon-side RunCompute)
 app/         HTTP API surface (identity, workspace, channel, daemon, WS)
-drivers/     external-world drivers: tools/ (echo, device, kimi, xhs), gateway/ (human ingress)
-agent/       agent looper providers (claudecode, kimi)
+drivers/     external-world drivers: tools/ (echo, device, kimi, xhs), agents/ (LLM engine providers: claudecode, kimi), gateway/ (human ingress)
 registry/    actor class registry (config → running actor)
 cmd/         binaries (server, daemon, cli)
 sdk/         Go SDK

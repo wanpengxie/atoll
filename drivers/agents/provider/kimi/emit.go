@@ -11,7 +11,7 @@ import (
 	kimierrors "github.com/wanpengxie/go-kimi/pkg/kimi/errors"
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
-	"github.com/wanpengxie/atoll/agent/base"
+	"github.com/wanpengxie/atoll/drivers/agents/base"
 )
 
 // errSinkWrite wraps a base.Sink emit failure so Turn can tell a plumbing break

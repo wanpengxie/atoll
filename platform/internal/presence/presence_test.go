@@ -5,7 +5,6 @@ import (
 	"testing"
 	"time"
 
-	agentbase "github.com/wanpengxie/atoll/agent/base"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -158,7 +157,11 @@ func TestFilteringIsBoundedAndSweepHonorsGrace(t *testing.T) {
 // fold's private shadow table held bare strings, so every producer kind fell
 // through to unknown and all named buckets were永远 0 — this asserts that flip.
 func TestRealProducerKindsLandInNamedBuckets(t *testing.T) {
-	eventKinds := append(actorbase.ObsDropKinds(), agentbase.ObsDropKinds()...)
+	// agentbase's kind is a LITERAL COPY here (agentbase.ObsCheckpointDrop):
+	// platform may not import drivers/* (围栏 Fence B covers _test), and the
+	// vocabulary value is a wire-stable constant — drift would be caught by the
+	// producer's own tests, this one only needs a real namespaced kind.
+	eventKinds := append(actorbase.ObsDropKinds(), actorrt.ObsKind("agentbase.checkpoint_drop"))
 	fold := New(nil, time.Now, []actorrt.ObsKind{"level"}, eventKinds, time.Second)
 	for _, kind := range eventKinds {
 		fold.OnObs(context.Background(), "producer", actorrt.Incarnation{}, kind, nil)

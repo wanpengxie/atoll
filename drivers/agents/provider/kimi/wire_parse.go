@@ -9,7 +9,7 @@ import (
 
 	"github.com/wanpengxie/go-kimi/pkg/kimi/wire"
 
-	"github.com/wanpengxie/atoll/agent/base"
+	"github.com/wanpengxie/atoll/drivers/agents/base"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 

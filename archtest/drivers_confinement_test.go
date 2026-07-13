@@ -8,7 +8,7 @@ import (
 
 // gateway-build-spec.md §1 S0 / 表⑤ 法度墙: the drivers/ umbrella package
 // (drivers/tools = the ex-actors adapters, drivers/gateway = the human ingress
-// component, later drivers/agents) is a leaf subsystem. Two invariants, defined
+// component, drivers/agents = the LLM engine adapters) is a leaf subsystem. Two invariants, defined
 // here BEFORE the gateway body lands (裁决 2 "围栏定义先行合入"):
 //
 //   A. drivers/* import confinement — a driver may name only the substrate +

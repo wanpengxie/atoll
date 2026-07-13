@@ -59,7 +59,7 @@ func TestActorcapsConfinedToPlatformAndActorbase(t *testing.T) {
 // invariant distinct from ①'s repo-wide sweep (belt and suspenders: a plugin
 // author reaching for actorcaps is a domain-layer offence even if some other
 // future non-plugin downstream were ever exempted from ①).
-var pluginDirs = []string{"../drivers/tools/", "../agent/provider/"}
+var pluginDirs = []string{"../drivers/tools/", "../drivers/agents/provider/"}
 
 // TestPluginDirsForbidCapsAndDoorImports — ② the plugin-directory-scoped
 // reinforcement: no actor/engine implementation package may import
@@ -122,7 +122,7 @@ const oldFactoryShape = "func(actorcaps.Caps) actorrt.Actor"
 // platform-only test seam CapsFactory() builds, is a deliberately DIFFERENT,
 // narrower-scoped shape that never leaves this package).
 func TestNoOldCapsFactoryShapeResidual(t *testing.T) {
-	scanRoots := []string{"../registry", "../drivers", "../agent", "../cmd", "../app"}
+	scanRoots := []string{"../registry", "../drivers", "../cmd", "../app"}
 	var v []string
 	for _, root := range scanRoots {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -182,7 +182,7 @@ func TestDirectActorImplementersAllowlisted(t *testing.T) {
 	}
 	fset := token.NewFileSet()
 	var v []string
-	roots := []string{"../registry", "../drivers", "../agent", "../cmd", "../app", "../platform", "../lib/actorbase"}
+	roots := []string{"../registry", "../drivers", "../cmd", "../app", "../platform", "../lib/actorbase"}
 	for _, root := range roots {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {

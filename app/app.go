@@ -18,7 +18,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 
-	agentbase "github.com/wanpengxie/atoll/agent/base"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/jsondepth"
@@ -50,6 +49,10 @@ type App struct {
 
 	channelDBDir string
 	uiDist       string
+
+	// extraDropKinds: drivers-side producers' diagnostic obs kinds, injected via
+	// Config (see Config.ExtraDropKinds).
+	extraDropKinds []actorrt.ObsKind
 
 	// wsGateway is the injected human-ingress connector (gateway 期 S3); revokeSink
 	// is the injected revocation fan-in (RevocationHub.Emit) both the platform emit
@@ -85,6 +88,13 @@ type Config struct {
 	// dist/ — the UI lives in its own repository since the open-source split).
 	// Empty = UI routes are not registered and the server is API-only.
 	UIDist string
+
+	// ExtraDropKinds is the domain producers' diagnostic obs vocabulary (e.g.
+	// agentbase's), supplied by the assembly root (cmd/server) — app sits below
+	// drivers/ (fence: only cmd imports drivers/*), so it cannot union the
+	// drivers-side kinds itself. Appended to actorbase's own kinds. Nil is fine
+	// (substrate kinds only).
+	ExtraDropKinds []actorrt.ObsKind
 }
 
 // New assembles the App: gin engine, routes, and loads existing channels.
@@ -105,6 +115,7 @@ func New(cfg Config) (*App, error) {
 		channelDBDir:       cfg.ChannelDBDir,
 		uiDist:             cfg.UIDist,
 		controlShimTimeout: defaultControlShimTimeout,
+		extraDropKinds:     cfg.ExtraDropKinds,
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -302,12 +313,12 @@ func (a *App) homeOrError(c *gin.Context, chID channel.ID) *platform.Home {
 	return nil
 }
 
-// eventDropKinds is the union of every substrate/domain producer's diagnostic
-// obs kinds, handed to the presence fold's drop buckets. Assembled here because
-// this is the one layer above both producers (the substrate must not import
-// agent/).
-func eventDropKinds() []actorrt.ObsKind {
-	return append(actorbase.ObsDropKinds(), agentbase.ObsDropKinds()...)
+// eventDropKinds is the union of every producer's diagnostic obs kinds, handed
+// to the presence fold's drop buckets: actorbase's own (substrate side, app may
+// import lib) + the injected drivers-side vocabulary (agentbase's — supplied by
+// cmd/server, the only legal drivers/* importer; drivers 围栏 Fence B).
+func (a *App) eventDropKinds() []actorrt.ObsKind {
+	return append(actorbase.ObsDropKinds(), a.extraDropKinds...)
 }
 
 func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error) {
@@ -326,10 +337,9 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*platform.Home, error)
 		// Fill the operate-face injection point: the in-gate control plane's
 		// executor half (intent write + Home call). One instance, channel-resolved.
 		Operate: a.operateFace(),
-		// The presence fold's drop-bucket vocabulary: app is the assembly root that
-		// sees every producer (substrate stays blind to agent/), so it hands the
-		// union of actorbase's and agentbase's diagnostic kinds in.
-		EventDropKinds: eventDropKinds(),
+		// The presence fold's drop-bucket vocabulary: substrate kinds + the
+		// drivers-side kinds the assembly root injected (Config.ExtraDropKinds).
+		EventDropKinds: a.eventDropKinds(),
 		// Membership撤销 emit point (gateway 期 S3 表②①): Home.Remove fires this after
 		// the dereg cascade; the app forwards it (with this channel's id) into the
 		// injected revocation fan-in so the gateway seals the subject's频道臂.

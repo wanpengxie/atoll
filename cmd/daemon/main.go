@@ -45,7 +45,7 @@ import (
 	// agent/all = the LLM engine classes (claude / go-kimi). What actually runs is
 	// the pulled assignment, never "one of each".
 	_ "github.com/wanpengxie/atoll/drivers/tools/all"
-	_ "github.com/wanpengxie/atoll/agent/all"
+	_ "github.com/wanpengxie/atoll/drivers/agents/all"
 )
 
 // channelFromServerURL extracts the ?channel= query from the server WS URL.

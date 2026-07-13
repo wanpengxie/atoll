@@ -88,7 +88,7 @@ func TestEngineQuarantine(t *testing.T) {
 		if !strings.HasPrefix(imp, engineKimi) && !strings.HasPrefix(imp, engineClaude) {
 			return
 		}
-		if strings.HasPrefix(slash, "../agent/provider/") {
+		if strings.HasPrefix(slash, "../drivers/agents/provider/") {
 			return // the legitimate quarantine
 		}
 		v = append(v, fmt.Sprintf(
@@ -128,7 +128,7 @@ func TestSubstrateBlindToAgent(t *testing.T) {
 func TestAgentNotImportApp(t *testing.T) {
 	var v []string
 	walkImports(t, func(slash, imp string) {
-		if !strings.HasPrefix(slash, "../agent/") {
+		if !strings.HasPrefix(slash, "../drivers/agents/") {
 			return
 		}
 		if imp == appPkg || strings.HasPrefix(imp, appPkg+"/") {

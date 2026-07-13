@@ -11,7 +11,7 @@
 package all
 
 import (
-	_ "github.com/wanpengxie/atoll/agent/provider/claudecode" // engine class: claude
-	_ "github.com/wanpengxie/atoll/agent/provider/kimi"       // engine class: go-kimi
-	_ "github.com/wanpengxie/atoll/agent/provider/script"     // engine class: script (deterministic, e2e loop)
+	_ "github.com/wanpengxie/atoll/drivers/agents/provider/claudecode" // engine class: claude
+	_ "github.com/wanpengxie/atoll/drivers/agents/provider/kimi"       // engine class: go-kimi
+	_ "github.com/wanpengxie/atoll/drivers/agents/provider/script"     // engine class: script (deterministic, e2e loop)
 )

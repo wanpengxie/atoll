@@ -15,6 +15,7 @@ import (
 
 	"github.com/wanpengxie/atoll/app"
 	"github.com/wanpengxie/atoll/cmd/internal/dotenv"
+	agentbase "github.com/wanpengxie/atoll/drivers/agents/base"
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 
@@ -26,7 +27,7 @@ import (
 	// Build/creds, not gated by binary contents. agent/all = the LLM engine
 	// classes (go-kimi + claude); actors/all = tools + devices.
 	_ "github.com/wanpengxie/atoll/drivers/tools/all"
-	_ "github.com/wanpengxie/atoll/agent/all"
+	_ "github.com/wanpengxie/atoll/drivers/agents/all"
 )
 
 // shutdownTimeout bounds the in-flight drain so a wedged request cannot hold the
@@ -87,6 +88,10 @@ func main() {
 		Logger:       logger,
 		ChannelDBDir: *channelDBDir,
 		UIDist:       *uiDist,
+		// drivers-side diagnostic obs vocabulary: the assembly root is the only
+		// legal drivers/* importer (围栏 Fence B), so the agentbase kinds are
+		// supplied here, not assembled inside app.
+		ExtraDropKinds: agentbase.ObsDropKinds(),
 	})
 	if err != nil {
 		log.Fatalf("server: %v", err)
