@@ -24,7 +24,7 @@ import (
 // symbols one layer earlier: the membrane must be woven where the raw handle is
 // minted (minting the handle and wrapping it in the live membrane happen in the
 // same step) — the single caps assembler
-// (platform/caps.go buildCaps) and the port emitSink path
+// (platform/home/caps.go buildCaps) and the port emitSink path
 // (platform/internal/link)
 // — and nowhere else. A downstream cell holds only the woven membrane it was born
 // with; it never re-constructs one (that would let a raw handle escape unwrapped,

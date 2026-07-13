@@ -34,22 +34,20 @@ const storageHostPkg = platformModulePrefix + "cmd/daemon/internal/storagehost"
 // blind the moment the directory moves; this substring check does not.
 const storageHostNameFragment = "storagehost"
 
-// serverClosureRoots are the two assembly entry points §8.2 names: the
-// SERVER BINARY's own composition root (cmd/server, whose import closure is
-// literally everything that ends up in the atoll-server binary) and the
-// PLATFORM tree (the channel-home assembly layer the Open constructor lives
-// in, under platform/home since platform-topology 批 T5b — already part of
-// cmd/server's closure via app, walked again here by name so a future entry
-// point that reaches platform WITHOUT routing through cmd/server — e.g. a
-// second server-shaped binary — is covered too). NOTE (T5b flag, not fixed
-// here — outside this batch's four-file archtest scope): "platform" as a
-// walk root now only covers the root membrane's own two files (decl.go /
-// actorfactory.go); it no longer transitively covers platform/home the way
-// walking the old, undivided platform package did. cmd/server's own closure
-// still covers platform/home via app, so today's coverage is unchanged; a
-// future non-cmd/server entry point into platform/home would need
-// "platform/home" named here too.
-var serverClosureRoots = []string{"cmd/server", "platform"}
+// serverClosureRoots are the server-side assembly entry points §8.2 names:
+// the SERVER BINARY's own composition root (cmd/server, whose import closure
+// is literally everything that ends up in the atoll-server binary), the
+// PLATFORM root membrane (the shared declaration vocabulary), and the
+// CHANNEL-HOME assembly package itself (platform/home, where the Open
+// constructor lives since platform-topology 批 T5b). home is named as its OWN
+// root — not left to ride cmd/server's closure via app — because this anchor
+// exists precisely to outlive placement accidents: a future entry point that
+// reaches platform/home WITHOUT routing through cmd/server (e.g. a second
+// server-shaped binary) must stay covered structurally, not by "today's
+// import graph happens to pass through app". platform/compute is deliberately
+// ABSENT: it is the daemon-side host — pinning what compute may depend on is
+// a different fence with different semantics, not this one.
+var serverClosureRoots = []string{"cmd/server", "platform", "platform/home"}
 
 // TestServerAssemblyNeverImportsStorageHost pins 期11 spec §8.2 ("server 零
 // 存储...archtest 钉死") + §9 DoD#6 mechanically: walk cmd/server's and

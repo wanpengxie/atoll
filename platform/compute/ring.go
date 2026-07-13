@@ -64,7 +64,7 @@ func jitterBackoff(d time.Duration) time.Duration {
 
 // ErrForwardersLeaked reports that Run's teardown could not join
 // its background forwarder goroutines within the bounded timeout.
-var ErrForwardersLeaked = errors.New("platform: compute forwarders leaked; storage root ownership transferred to process exit")
+var ErrForwardersLeaked = errors.New("compute: forwarders leaked; storage root ownership transferred to process exit")
 
 type computeLifecycleHooks struct {
 	forwarderTimeout time.Duration

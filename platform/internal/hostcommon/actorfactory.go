@@ -12,7 +12,7 @@ import (
 // compute.Builder / ActorDecl all resolve to this ONE shape). It replaces the
 // old bare `func(actorcaps.Caps) actorrt.Actor` — no downstream package ever
 // names actorcaps.Caps to produce one; the caps→actor weld happens INSIDE
-// platform's build (below), the single seam this period.
+// hostcommon's Build (below), the single seam this period.
 //
 // Exactly one of Proc / Legacy is set (fullCaps is platform's own test seam,
 // see CapsFactory):
@@ -30,19 +30,20 @@ type ActorFactory struct {
 	Proc   actorbase.Def
 	Legacy func(pen harness.Pen) actorrt.Actor
 
-	// fullCaps is platform's OWN internal test seam: platform is the one
-	// place actorcaps.Caps is a legitimate, freely-nameable type (spec's
-	// confinement allowlist), so its own tests may exercise a factory over
-	// the WHOLE bundle (e.g. asserting which caps a fork child was welded)
-	// without inventing a second production-facing form. Never set outside
-	// this package's _test.go files.
+	// fullCaps is the platform tree's OWN internal test seam: the platform
+	// tree is the one place actorcaps.Caps is a legitimate, freely-nameable
+	// type (spec's confinement allowlist), so its tests may exercise a
+	// factory over the WHOLE bundle (e.g. asserting which caps a fork child
+	// was welded) without inventing a second production-facing form. Set
+	// only via CapsFactory, only from platform-tree _test.go files (today:
+	// platform/home's internal and external tests).
 	fullCaps func(actorcaps.Caps) actorrt.Actor
 }
 
 // CapsFactory builds an ActorFactory from a raw full-Caps constructor — for
-// platform's own tests (see ActorFactory.fullCaps' doc). Exported so
-// platform_test (external test package) files can reach it; production code
-// never calls this.
+// the platform tree's own tests (see ActorFactory.fullCaps' doc). Exported so
+// platform-tree test packages (today: platform/home's internal and external
+// tests) can reach it; production code never calls this.
 func CapsFactory(f func(actorcaps.Caps) actorrt.Actor) ActorFactory {
 	return ActorFactory{fullCaps: f}
 }

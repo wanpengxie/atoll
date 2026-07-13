@@ -201,7 +201,7 @@ func (f *storageHostForwarder) Rebind(d *link.Dialer) {
 // than silently dropping (this RPC plane is request/response).
 func (f *storageHostForwarder) handleAlloc(req link.AllocRequest) link.AllocReply {
 	if f.host == nil {
-		return link.AllocReply{OK: false, Reason: "platform: no storage host wired on this compute"}
+		return link.AllocReply{OK: false, Reason: "compute: no storage host wired on this compute"}
 	}
 	if err := f.host.Alloc(req.Coord, req.Dir); err != nil {
 		return link.AllocReply{OK: false, Reason: err.Error()}
@@ -288,7 +288,7 @@ func (f *storageHostForwarder) pass(ctx context.Context) {
 	ack := func(ctx context.Context, tombstoneID string) (bool, error) {
 		d := f.d.Load() // re-load: a reconnect may have happened between pass start and ack
 		if d == nil {
-			return false, fmt.Errorf("platform: no live connection to ack tombstone %q", tombstoneID)
+			return false, fmt.Errorf("compute: no live connection to ack tombstone %q", tombstoneID)
 		}
 		reply, err := d.SendReclaimAck(ctx, tombstoneID)
 		return reply.Found, err

@@ -125,10 +125,10 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 		logger = slog.New(slog.DiscardHandler)
 	}
 	if cfg.Desired == nil {
-		return fmt.Errorf("platform: Run requires a Desired source (nil never turns the ring — fail-fast, not a silent no-op)")
+		return fmt.Errorf("compute: Run requires a Desired source (nil never turns the ring — fail-fast, not a silent no-op)")
 	}
 	if cfg.Builder == nil {
-		return fmt.Errorf("platform: Run requires a Builder (nil never resolves a factory — fail-fast, not a silent no-op)")
+		return fmt.Errorf("compute: Run requires a Builder (nil never resolves a factory — fail-fast, not a silent no-op)")
 	}
 	computeID := cfg.ComputeID
 	if computeID == "" {
