@@ -6,6 +6,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
@@ -116,7 +117,7 @@ func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 	// IsLive(childInc)==false), so a construction-time write is fenced exactly as
 	// for a top-level Spawn.
 	buildChild := func(childInc actorrt.Incarnation) actorrt.Actor {
-		return build(h.assemble(childID, spec.Kind, childInc), h.hooks, factory)
+		return hostcommon.Build(h.assemble(childID, spec.Kind, childInc), h.hooks, factory)
 	}
 	if _, err := h.rt.Fork(h.inc, childID, spec.Kind, buildChild); err != nil {
 		return "", err

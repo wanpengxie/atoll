@@ -9,6 +9,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -57,7 +58,7 @@ func TestHome_PublishObs_FoldsIntoDevicePresence(t *testing.T) {
 	id := actor.ActorID("obs-publisher")
 	pub := &obsPublisherActor{}
 	id = admit(t, h, id, actor.KindAgent)
-	minted, err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor { return pub }))
+	minted, err := SpawnForTest(h, id, actor.KindAgent, hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor { return pub }))
 	if err != nil {
 		t.Fatalf("Spawn: %v", err)
 	}
@@ -153,7 +154,7 @@ func TestObsFanout_HomeSpawn_OncePerPublish(t *testing.T) {
 
 	id := actor.ActorID("obs-fanout-spawn")
 	id = admit(t, h, id, actor.KindAgent)
-	minted, err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	minted, err := SpawnForTest(h, id, actor.KindAgent, hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return &obsPublisherActor{}
 	}))
 	if err != nil {
@@ -176,7 +177,7 @@ func TestObsFanout_ReconcileActivationRevive_OncePerPublish(t *testing.T) {
 	desired := &testDesired{}
 	builder := newTestBuilder()
 	id := actor.ActorID("agent:obs-fanout-reconcile")
-	builder.byID[id] = CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
+	builder.byID[id] = hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
 
 	h := openActivationHome(t, desired, builder)
 	id = admit(t, h, id, actor.KindAgent)
@@ -206,7 +207,7 @@ func TestObsFanout_HomeReviver_OncePerPublish(t *testing.T) {
 	desired := &testDesired{} // empty: no eager reconcile competing for this id
 	builder := newTestBuilder()
 	id := actor.ActorID("agent:obs-fanout-reviver")
-	builder.byID[id] = CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
+	builder.byID[id] = hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
 
 	h := openActivationHome(t, desired, builder)
 
@@ -240,7 +241,7 @@ func TestObsFanout_Fork_OncePerPublish(t *testing.T) {
 	builder := newTestBuilder()
 	parent := actor.ActorID("agent:obs-fanout-fork-parent")
 	builder.byID[parent] = builder.recordFactory(parent)
-	builder.byClass["obs-worker"] = CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
+	builder.byClass["obs-worker"] = hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor { return &obsPublisherActor{} })
 
 	h := openActivationHome(t, desired, builder)
 	parent = admit(t, h, parent, actor.KindAgent)

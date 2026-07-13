@@ -9,6 +9,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
@@ -21,7 +22,7 @@ func TestActorStatus_AgentThroughGate(t *testing.T) {
 	id := actor.ActorID("agent:presence-caller")
 	registerActor(t, h, &id, actor.KindAgent)
 	answers := make(chan introspect.Status, 1)
-	factory := platform.CapsFactory(func(caps actorcaps.Caps) actorrt.Actor {
+	factory := hostcommon.CapsFactory(func(caps actorcaps.Caps) actorrt.Actor {
 		return actorbase.New(caps, actorbase.Hooks{}, actorbase.Def{
 			Doc: "presence status e2e caller",
 			New: func() (actorbase.Proc, error) {

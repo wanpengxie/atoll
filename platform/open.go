@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/channelkit"
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
@@ -419,25 +420,8 @@ func deliveryHandle(d actorrt.Deliverer, chID channelpkg.ID, logger *slog.Logger
 			}
 			logger.Warn("platform.delivery.outcome",
 				"channel", string(chID), "seq", row.Seq, "envelope", string(env.ID),
-				"audience", string(id), "outcome", outcomeString(outcome))
+				"audience", string(id), "outcome", hostcommon.OutcomeString(outcome))
 		}
 		return nil
-	}
-}
-
-// outcomeString names an actorrt.Outcome for structured logging (an observation
-// label, not a semantic branch — the handle does not act differently per kind).
-func outcomeString(o actorrt.Outcome) string {
-	switch o {
-	case actorrt.Delivered:
-		return "delivered"
-	case actorrt.NotHosted:
-		return "not_hosted"
-	case actorrt.MailboxFull:
-		return "mailbox_full"
-	case actorrt.Stopped:
-		return "stopped"
-	default:
-		return "unknown"
 	}
 }

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -208,7 +209,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		kind := rec.Kind
 		mid := id
 		inc, built, buildErr := rt.SpawnIfAbsent(mid, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-			return build(h.buildCaps(mid, kind, inc), h.hooks(), factory)
+			return hostcommon.Build(h.buildCaps(mid, kind, inc), h.hooks(), factory)
 		})
 		if ctx.Err() != nil {
 			if built {

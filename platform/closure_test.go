@@ -15,6 +15,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -274,7 +275,7 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 	//    Sys.Call on a trigger event. Its callLedger arms the 300ms author#2
 	//    timer (TimeoutResolver hook) and fires the terminal through the
 	//    cell's own welded pen — caller self-close by construction.
-	callerFactory := platform.CapsFactory(func(caps actorcaps.Caps) actorrt.Actor {
+	callerFactory := hostcommon.CapsFactory(func(caps actorcaps.Caps) actorrt.Actor {
 		hooks := actorbase.Hooks{TimeoutResolver: func(actor.ActorID, string) (time.Duration, bool) {
 			return 300 * time.Millisecond, true
 		}}

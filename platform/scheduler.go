@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -225,7 +226,7 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	// (ok=false, shell discarded), so EnsureLive satisfies its idempotency contract
 	// without a separate liveness pre-check.
 	inc, built, buildErr := h.channel.Cells().SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-		return build(h.buildCaps(id, kind, inc), h.hooks(), factory)
+		return hostcommon.Build(h.buildCaps(id, kind, inc), h.hooks(), factory)
 	})
 	if buildErr != nil {
 		if errors.Is(buildErr, actorrt.ErrRuntimeSealed) {

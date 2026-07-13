@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -61,7 +62,7 @@ func TestRemove_OrderSpy_DespawnBeforeDereg(t *testing.T) {
 	ctx := context.Background()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
 	id := admit(t, h, actor.ActorID("agent:order-spy"), actor.KindAgent)
-	minted, err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	minted, err := SpawnForTest(h, id, actor.KindAgent, hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	}))
 	if err != nil {
@@ -96,7 +97,7 @@ func TestRemove_Idempotent(t *testing.T) {
 	ctx := context.Background()
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
 	id := admit(t, h, actor.ActorID("agent:idempotent"), actor.KindAgent)
-	minted, err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	minted, err := SpawnForTest(h, id, actor.KindAgent, hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	}))
 	if err != nil {
@@ -132,7 +133,7 @@ func TestRemove_CascadeClearsState(t *testing.T) {
 	h := openActivationHome(t, &testDesired{}, newTestBuilder())
 	id := admit(t, h, actor.ActorID("agent:cascade"), actor.KindAgent)
 	var caps1 actorcaps.Caps
-	minted, err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
+	minted, err := SpawnForTest(h, id, actor.KindAgent, hostcommon.CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		caps1 = c
 		return recordActor{caps: c}
 	}))
@@ -159,7 +160,7 @@ func TestRemove_CascadeClearsState(t *testing.T) {
 	}
 	id = newID
 	var caps2 actorcaps.Caps
-	minted, err = SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
+	minted, err = SpawnForTest(h, id, actor.KindAgent, hostcommon.CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		caps2 = c
 		return recordActor{caps: c}
 	}))

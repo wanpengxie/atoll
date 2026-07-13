@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -268,7 +269,7 @@ func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer
 		// KindCancelRequest frame up this caller's stream, so the home reverse-
 		// resolves the target and reaches the receiver's in-station account — the
 		// daemon-hosted parity of the cell-path Home.CancelRequest.
-		return build(link.NewLiveArms(rb, inc, r.rt), actorbase.Hooks{Canceller: r.cancelFwd.cancellerFor(id)}, factory)
+		return hostcommon.Build(link.NewLiveArms(rb, inc, r.rt), actorbase.Hooks{Canceller: r.cancelFwd.cancellerFor(id)}, factory)
 	})
 	if buildErr != nil || !built {
 		if buildErr != nil {
@@ -328,7 +329,7 @@ func (r *computeRing) dispatchFor(id actor.ActorID, d *link.Dialer) func(env *me
 			return derr
 		}
 		if outcome, ok := res.Per[id]; ok && outcome != actorrt.Delivered {
-			d.SendDeliverResult(id, env.ID, outcomeString(outcome), "")
+			d.SendDeliverResult(id, env.ID, hostcommon.OutcomeString(outcome), "")
 		}
 		return nil
 	}

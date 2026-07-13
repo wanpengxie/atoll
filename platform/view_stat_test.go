@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -36,7 +37,7 @@ func TestView_Stat_TriState(t *testing.T) {
 	}
 
 	id = admit(t, h, id, actor.KindAgent)
-	minted, err := SpawnForTest(h, id, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	minted, err := SpawnForTest(h, id, actor.KindAgent, hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return statTestActor{}
 	}))
 	if err != nil {

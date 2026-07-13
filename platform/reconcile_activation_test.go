@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -95,7 +96,7 @@ func newTestBuilder() *testBuilder {
 // (fork). Built over CapsFactory — platform's own test seam over the whole
 // caps bundle (ActorFactory's doc).
 func (b *testBuilder) recordFactory(id actor.ActorID) ActorFactory {
-	return CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
+	return hostcommon.CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
 		b.mu.Lock()
 		b.seen[id] = c
 		b.mu.Unlock()
@@ -264,7 +265,7 @@ func TestReconcileActivation_DoesNotKillUnmanagedLiveActors(t *testing.T) {
 	// Admit puts it in the user域 desired set; it survives here because it is
 	// desired+live, no longer because it is a "protected category").
 	human := admit(t, h, actor.ActorID("user:alice"), actor.KindHuman)
-	mintedHuman, err := SpawnForTest(h, human, actor.KindHuman, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	mintedHuman, err := SpawnForTest(h, human, actor.KindHuman, hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	}))
 	if err != nil {
@@ -546,7 +547,7 @@ func TestReviver_LiveAuthorWithNilBuilderIsNotPoisoned(t *testing.T) {
 	t.Cleanup(func() { _ = h.Close() })
 
 	author := admit(t, h, actor.ActorID("agent:live-nobuilder"), actor.KindAgent)
-	mintedAuthor, err := SpawnForTest(h, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	mintedAuthor, err := SpawnForTest(h, author, actor.KindAgent, hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	}))
 	if err != nil {
@@ -863,7 +864,7 @@ func TestReviver_AttachedAuthorNilBuilderIsTransientNotPoisoned(t *testing.T) {
 	// cell, so EnsureLive's already-live fast path clears the gate. The SAME
 	// timer must now fire: a no_builder poison during the attached window would
 	// have deleted the row and this fire could never land.
-	mintedAuthor, err := SpawnForTest(h, author, actor.KindAgent, CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	mintedAuthor, err := SpawnForTest(h, author, actor.KindAgent, hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return recordActor{}
 	}))
 	if err != nil {
@@ -1182,7 +1183,7 @@ func TestReconcileActivation_BuildFailureBackoffLadder(t *testing.T) {
 	builder := newTestBuilder()
 	id := actor.ActorID("agent:crashloop")
 	var builds atomic.Int64
-	builder.byID[id] = CapsFactory(func(actorcaps.Caps) actorrt.Actor {
+	builder.byID[id] = hostcommon.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		builds.Add(1)
 		panic("build boom") // deterministic BuildFailure (actorrt recovers it)
 	})
