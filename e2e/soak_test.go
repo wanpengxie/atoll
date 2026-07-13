@@ -33,6 +33,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -213,7 +214,7 @@ func TestSoak(t *testing.T) {
 		}
 	}()
 
-	// --- Workload 4: presence churn — multi-device attach/detach ----------
+	// --- Workload 4: presence churn — multi-device attach/close -----------
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -227,6 +228,11 @@ func TestSoak(t *testing.T) {
 	}()
 
 	// --- Chaos: periodic daemon kill -9 -----------------------------------
+	// killTimes records the instant of each daemon SIGKILL so the DoD-12③ log
+	// verifier can bound the ±2s window it expects exactly one peer_closed
+	// session_killed inside.
+	var killMu sync.Mutex
+	var killTimes []time.Time
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -235,6 +241,9 @@ func TestSoak(t *testing.T) {
 			if !time.Now().Before(deadline) {
 				break
 			}
+			killMu.Lock()
+			killTimes = append(killTimes, time.Now())
+			killMu.Unlock()
 			daemon.reclaim()
 			daemonKills.Add(1)
 			daemon = startDaemon()
@@ -243,11 +252,156 @@ func TestSoak(t *testing.T) {
 
 	wg.Wait()
 	daemon.reclaim()
+
+	// Capture the FINAL membership via the API while the server is still up (DoD-12①
+	// 期末 /actors 实测) — the verifier compares it against the logged admit/remove
+	// transitions to prove membership 守恒 by identity.
+	finalActors := actorIDs(t, api, chID)
+
 	server.kill9(t)
 
 	t.Logf("soak done: chats=%d ok=%d miss=%d | intro/remove=%d | bad-decls=%d | presence-cycles=%d | daemon-kills=%d",
 		chats.Load(), chatOK.Load(), chatMiss.Load(), introRemove.Load(), badDecls.Load(), presenceCh.Load(), daemonKills.Load())
 	t.Logf("logs for analysis: %s (grep by level×msg to find storms / blind spots / asymmetries)", logDir)
+
+	// DoD-12: machine log verifier — the four assertions replace human grep.
+	verifySoakLogs(t, logDir, killTimes, finalActors, badDecls.Load())
+}
+
+// soakLogLine is the subset of a slog JSON line the verifier reads (server + daemon
+// both log with slog.NewJSONHandler, so every line is a JSON object with time/msg +
+// the event's own attrs).
+type soakLogLine struct {
+	Time   string `json:"time"`
+	Msg    string `json:"msg"`
+	Reason string `json:"reason"`
+	Actor  string `json:"actor"`
+}
+
+// verifySoakLogs parses every *.log in logDir and lands the four DoD-12 machine
+// assertions — no human grep. It is the soak's own acceptance gate (the observation
+// run stays gated behind ATOLL_SOAK; this replaces "eyeball the logs" with断言).
+func verifySoakLogs(t *testing.T, logDir string, killTimes []time.Time, finalActors []string, injectedBad int64) {
+	t.Helper()
+	files, _ := filepath.Glob(filepath.Join(logDir, "*.log"))
+	var (
+		refused       int
+		pausedLines   int
+		controlDecode int
+	)
+	addedIDs := map[string]bool{}
+	removedIDs := map[string]bool{}
+	var peerClosed []time.Time // link.session_killed{reason=peer_closed} timestamps
+	for _, f := range files {
+		b, err := os.ReadFile(f)
+		if err != nil {
+			continue
+		}
+		for _, ln := range strings.Split(string(b), "\n") {
+			ln = strings.TrimSpace(ln)
+			if ln == "" || ln[0] != '{' {
+				continue
+			}
+			var e soakLogLine
+			if json.Unmarshal([]byte(ln), &e) != nil {
+				continue
+			}
+			switch e.Msg {
+			case "sysactor.operate.refused":
+				refused++
+			case "gateway.entitlement.paused":
+				pausedLines++
+			case "platform.member.admitted":
+				if e.Actor != "" {
+					addedIDs[e.Actor] = true
+				}
+			case "platform.member.removed":
+				if e.Actor != "" {
+					removedIDs[e.Actor] = true
+				}
+			case "link.session_killed":
+				switch e.Reason {
+				case "control_decode":
+					controlDecode++
+				case "peer_closed":
+					if ts, ok := parseSoakLogTime(e.Time); ok {
+						peerClosed = append(peerClosed, ts)
+					}
+				}
+			}
+		}
+	}
+
+	// ② sysactor.operate.refused ≥ the injected bad-config declarations (every坏声明
+	// must have produced at least one refusal — no silent swallow).
+	if int64(refused) < injectedBad {
+		t.Errorf("DoD-12②: sysactor.operate.refused=%d < injected bad declarations=%d", refused, injectedBad)
+	}
+
+	// ④ no resolver fault was injected (the server never dies mid-soak), so the
+	// entitlement lease must never expire → zero gateway.entitlement.paused.
+	if pausedLines != 0 {
+		t.Errorf("DoD-12④: gateway.entitlement.paused=%d, want 0 (no resolver fault injected)", pausedLines)
+	}
+
+	// ③ every daemon kill -9 surfaces EXACTLY ONE peer_closed session_killed inside its
+	// ±2s window, and a control_decode reason must NEVER appear (a decode fault would
+	// mean the kill was misclassified — the whole point of the peer_closed/control_decode
+	// split, linksession.go).
+	if controlDecode != 0 {
+		t.Errorf("DoD-12③: %d link.session_killed{reason=control_decode} — a decode fault leaked (want 0)", controlDecode)
+	}
+	for i, kt := range killTimes {
+		n := 0
+		for _, ke := range peerClosed {
+			d := ke.Sub(kt)
+			if d < 0 {
+				d = -d
+			}
+			if d <= 2*time.Second {
+				n++
+			}
+		}
+		if n != 1 {
+			t.Errorf("DoD-12③: daemon kill #%d at %s: %d peer_closed session_killed in ±2s window, want exactly 1",
+				i+1, kt.Format(time.RFC3339Nano), n)
+		}
+	}
+
+	// ① membership 守恒 by identity (真变迁, robust to the admitted/removed idempotent
+	// re-log — daemon reconnect re-Admits without a real transition, so a raw line
+	// COUNT over-counts; a set over actor ids does not): every removed member is absent
+	// from the final /actors set, and every admitted-but-never-removed member is present.
+	final := map[string]bool{}
+	for _, id := range finalActors {
+		final[id] = true
+	}
+	for id := range removedIDs {
+		if final[id] {
+			t.Errorf("DoD-12①: actor %s was removed yet is still in the final /actors set (membership leak)", id)
+		}
+	}
+	for id := range addedIDs {
+		if removedIDs[id] {
+			continue
+		}
+		if !final[id] {
+			t.Errorf("DoD-12①: actor %s was admitted, never removed, yet is absent from the final /actors set (lost member)", id)
+		}
+	}
+
+	t.Logf("soak log verify: refused=%d paused=%d control_decode=%d added=%d removed=%d kills=%d peer_closed=%d final=%d",
+		refused, pausedLines, controlDecode, len(addedIDs), len(removedIDs), len(killTimes), len(peerClosed), len(finalActors))
+}
+
+// parseSoakLogTime parses a slog JSON "time" field (RFC3339 with optional nanos).
+func parseSoakLogTime(s string) (time.Time, bool) {
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339} {
+		if ts, err := time.Parse(layout, s); err == nil {
+			return ts, true
+		}
+	}
+	return time.Time{}, false
 }
 
 // trySubmit is submitAndAwaitTerminal without the t.Fatal — returns ("","") on

@@ -40,11 +40,12 @@ func makeDirs(t *testing.T, root string, names ...string) map[string]string {
 
 // TestGatewayFrames is the gateway-期 frame-protocol black-box (DoD-2): a home-side
 // human member drives ALL five business frames (submit / resolve / cancel / after /
-// cancel_timer) plus the two control frames (attach / detach) over the real /ws,
-// and its presence自报 is read back out-of-band through the status API. It is
-// server-ONLY — the human embodiment is home-side (the reconcile ring keeps the
-// admitted member's cell up), so no daemon is needed; keeping it daemon-free makes
-// the frame contract deterministic and fast.
+// cancel_timer) plus the opening attach control frame over the real /ws, and its
+// presence自报 is read back out-of-band through the status API. It is server-ONLY —
+// the human embodiment is home-side (the reconcile ring keeps the admitted member's
+// cell up), so no daemon is needed; keeping it daemon-free makes the frame contract
+// deterministic and fast. (detach is整删 in the连接模型勘误期 v2 — the client-visible
+// unbind verb has no ontology; a connection is an authenticated person + one pipe.)
 //
 // The four control-垫片 types (introduce / remove / restart / set_default_agent)
 // ride the SAME subjectgate submit-frame path and are exercised end-to-end in
@@ -207,29 +208,23 @@ func TestGatewayFrames(t *testing.T) {
 		t.Fatalf("cancel_timer receipt timer_id=%q want %q", got, timerID)
 	}
 
-	// ---- detach ------------------------------------------------------------
-	// A SECOND connection shares the subject's (channel) 频道臂 with the primary `ws`
-	// (same principal + channel = one arm, per design §5.6). detach SEALS that shared
-	// arm — 世代失效 → pump join → 双向 gate 生效 — and投 NO receipt frame (spec §S2 表②
-	// detach receipt = "—", 线性化点 = seal 完成; the seal + teardown IS the result).
-	// 真断言 (P0-3): the seal propagates to the CO-ARM device — BOTH ws2 AND the primary
-	// `ws` are torn down, proving detach sealed the shared binding (not just closed
-	// ws2's own socket).
-	ws2 := dialWS(t, base, cookie, chID, 0)
-	if err := ws2.send("detach", "detach-1", map[string]any{"channel_id": chID}); err != nil {
-		t.Fatalf("detach send: %v", err)
-	}
-	// No receipt/error frame is expected for detach; if the server ever sent one it
-	// would surface as a stray ack — assert the teardown instead.
-	select {
-	case <-ws2.done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("detach: server did not tear the detaching session down within 10s")
-	}
+	// ---- a SECOND connection for the same principal is independent -----------
+	// 连接即人 v2: two connections are just two pipes for the same person — closing
+	// one leaves the other fully live (there is NO shared 频道臂 to seal, no detach to
+	// propagate). Prove it: open ws2, close it, and confirm the primary `ws` still
+	// drives a frame round-trip.
+	ws2 := dialWSMulti(t, base, cookie, chID, map[string]int64{chID: 0})
+	ws2.close()
 	select {
 	case <-ws.done:
-	case <-time.After(10 * time.Second):
-		t.Fatal("detach seal must tear down the CO-ARM primary session too (shared 频道臂 sealed)")
+		t.Fatal("closing a second connection must NOT tear down the primary (连接即人: pipes are independent)")
+	case <-time.After(500 * time.Millisecond):
+	}
+	rec = frameVerb(t, ws, "after", "after-2", map[string]any{
+		"duration_ms": 60000, "msg_type": "human.message", "payload": json.RawMessage(`{}`),
+	})
+	if receiptField(rec, "timer_id") == "" {
+		t.Fatalf("primary session dead after peer close: %v", rec)
 	}
 
 	server.kill9(t)

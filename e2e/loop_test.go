@@ -281,29 +281,32 @@ func waitHealthz(t *testing.T, base string, p *proc, timeout time.Duration) {
 // Gateway ws client: single reader, ref-matched receipts, buffered feed tail
 // ---------------------------------------------------------------------------
 
-// wsClient speaks the standard gateway frame protocol (gateway 期 S3+): every wire
-// frame is {v, frame_type, binding_gen, ref, payload}. ONE reader goroutine fans
-// frames by type — feed frames (the channel投影) into tail, receipt/error/notify
-// into acks — and requests are matched by TOP-LEVEL ref (never "read the next frame
-// and call it the receipt"). The opening frame is an attach naming this channel; its
-// receipt grants the binding_gen every upstream frame then echoes. Frames are
-// hand-rolled maps: this package imports ZERO atoll packages (red line 1) — the
-// frame shape is part of the /ws contract it speaks.
+// wsClient speaks the standard gateway frame protocol (连接模型勘误期 v2 — 连接即人):
+// every wire frame is {v(=2), frame_type, ref, payload}. There is NO binding_gen (the
+// client-visible binding axis is retired) and the /ws URL names NO channel (a
+// connection is an authenticated person + one pipe subscribing to ALL the person's合法
+//频道). ONE reader goroutine fans frames by type — feed frames (each carrying its own
+// channel_id) into tail, receipt/error into acks — and requests are matched by
+// TOP-LEVEL ref. The opening frame is a channel-blind attach handing over a multi-key
+// 游标表 (since); its receipt is an empty报到 ack. Every UPSTREAM business frame carries
+// a required channel_id (send stamps the session's primary channel when the caller
+// doesn't name its own). Frames are hand-rolled maps: this package imports ZERO atoll
+// packages (red line 1) — the frame shape is part of the /ws contract it speaks.
 type wsClient struct {
 	t    *testing.T
 	conn *websocket.Conn
 	tail chan map[string]any // feed-frame payloads {channel_id, seq, envelope}
-	acks chan map[string]any // receipt/error/notify frames (whole frame, ref at top)
+	acks chan map[string]any // receipt/error frames (whole frame, ref at top)
 	done chan struct{}       // closed when the reader exits (server tore the session down)
 
-	bindingGen int64
+	chID string // primary channel: the default channel_id stamped onto business frames
 }
 
-const frameVersion = 1
+const frameVersion = 2
 
-// frame builds one wire frame map.
-func frame(frameType, ref string, gen int64, payload any) map[string]any {
-	m := map[string]any{"v": frameVersion, "frame_type": frameType, "binding_gen": gen}
+// frame builds one wire frame map (v2 envelope: no binding_gen).
+func frame(frameType, ref string, payload any) map[string]any {
+	m := map[string]any{"v": frameVersion, "frame_type": frameType}
 	if ref != "" {
 		m["ref"] = ref
 	}
@@ -313,29 +316,37 @@ func frame(frameType, ref string, gen int64, payload any) map[string]any {
 	return m
 }
 
+// dialWS opens ONE connection whose primary channel is chID, seeding its游标表 with a
+// single since key. Business frames sent through it default their channel_id to chID.
 func dialWS(t *testing.T, base, cookie, chID string, sinceSeq int64) *wsClient {
 	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/ws?channel=" + url.QueryEscape(chID)
+	return dialWSMulti(t, base, cookie, chID, map[string]int64{chID: sinceSeq})
+}
+
+// dialWSMulti opens ONE channel-blind connection (连接即人 v2): the /ws URL carries no
+// channel and the opening attach hands over a multi-key游标表 (since). primaryCh is the
+// default channel_id stamped onto business frames that don't name their own — the
+// multi-channel test passes channel_id explicitly per frame.
+func dialWSMulti(t *testing.T, base, cookie, primaryCh string, since map[string]int64) *wsClient {
+	t.Helper()
+	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/ws"
 	hdr := http.Header{}
 	hdr.Set("Cookie", cookie)
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
 	if err != nil {
 		t.Fatalf("dial ws: %v", err)
 	}
-	c := &wsClient{t: t, conn: conn,
+	c := &wsClient{t: t, conn: conn, chID: primaryCh,
 		tail: make(chan map[string]any, 16384),
 		acks: make(chan map[string]any, 256),
 		done: make(chan struct{}),
 	}
 	t.Cleanup(c.close)
 	go c.readLoop()
-	// Opening attach frame: since is a single-element map keyed by this channel
-	// (裁决7). Await the attach receipt to learn the granted binding_gen.
-	ref := "attach-" + chID
-	if err := conn.WriteJSON(frame("attach", ref, 0, map[string]any{
-		"channel_id": chID,
-		"since":      map[string]int64{chID: sinceSeq},
-	})); err != nil {
+	// Opening attach: channel-blind report-in handing over the游标表 (since map). The
+	// receipt is an empty报到 ack (attach no longer grants a binding_gen).
+	ref := "attach-" + primaryCh
+	if err := conn.WriteJSON(frame("attach", ref, map[string]any{"since": since})); err != nil {
 		t.Fatalf("attach frame: %v", err)
 	}
 	rec, ok := c.awaitRef(ref, 10*time.Second)
@@ -344,11 +355,6 @@ func dialWS(t *testing.T, base, cookie, chID string, sinceSeq int64) *wsClient {
 	}
 	if rec["frame_type"] != "receipt" {
 		t.Fatalf("attach not accepted: %v", rec)
-	}
-	if p, ok := rec["payload"].(map[string]any); ok {
-		if g, ok := p["binding_gen"].(float64); ok {
-			c.bindingGen = int64(g)
-		}
 	}
 	return c
 }
@@ -367,15 +373,22 @@ func (c *wsClient) readLoop() {
 			if p, _ := m["payload"].(map[string]any); p != nil {
 				c.tail <- p
 			}
-		case "receipt", "error", "notify":
+		case "receipt", "error":
 			c.acks <- m
 		}
 	}
 }
 
-// send writes one upstream frame stamped with the session's binding_gen.
+// send writes one upstream business frame (连接模型勘误期 v2). When the caller's payload
+// is a map that doesn't name its own channel_id, it is stamped with the session's
+// primary channel — every business frame carries a required channel_id.
 func (c *wsClient) send(frameType, ref string, payload any) error {
-	return c.conn.WriteJSON(frame(frameType, ref, c.bindingGen, payload))
+	if m, ok := payload.(map[string]any); ok {
+		if _, has := m["channel_id"]; !has && c.chID != "" {
+			m["channel_id"] = c.chID
+		}
+	}
+	return c.conn.WriteJSON(frame(frameType, ref, payload))
 }
 
 // awaitRef returns the receipt/error/notify frame whose TOP-LEVEL ref matches
