@@ -410,7 +410,7 @@ func extractPayloadStatus(payload []byte) (string, bool) {
 // namespace ownership rule: everything after the last `:`, falling back
 // to the full id when no `:` is present.
 //
-//	"tool:xhs"       → "xhs"
+//	"tool:demo"      → "demo"
 //	"agent:planner"  → "planner"
 //	"daemon"         → "daemon"
 //	"a:b:c"          → "c"

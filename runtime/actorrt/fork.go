@@ -129,8 +129,8 @@ type Builder interface {
 type ForkSpec struct {
 	// Kind is the substrate's own protocol classification (the closed set
 	// welded into Mint(id, kind, chID)) — it does NOT select which
-	// implementation runs (kimi/xhs/echo are all Kind=KindTool; Kind cannot
-	// distinguish them). Orthogonal to Class.
+	// implementation runs (every tool class shares Kind=KindTool; Kind cannot
+	// distinguish one tool implementation from another). Orthogonal to Class.
 	Kind actor.Kind
 	// Class is the opaque implementation-selection key the Builder looks up
 	// (LookupByClass) — substrate does not interpret this value, it is passed
