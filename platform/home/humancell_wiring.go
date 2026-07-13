@@ -91,11 +91,23 @@ func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
 			CancelHint: h.CancelRequest,
 		}
 		token := humancell.WirePresenceSelfReport(sys, slot)
-		frames, _, release := slot.AttachInterpreter()
+		frames, incarnation, release := slot.AttachInterpreter()
+		h.logger.Debug("platform.subjectgate.interpreter_attached", "channel", string(h.channelID),
+			"actor", string(id), "incarnation", incarnation, "reason", "cell activate")
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			defer release()
+			defer func() {
+				reason := "normal exit"
+				select {
+				case <-stop:
+					reason = "stop"
+				default:
+				}
+				h.logger.Debug("platform.subjectgate.interpreter_released", "channel", string(h.channelID),
+					"actor", string(id), "incarnation", incarnation, "reason", reason)
+				release()
+			}()
 			defer slot.RemoveObserver(token)
 			humancell.InterpretFrames(sys, slot, deps, frames, stop)
 		}()

@@ -24,6 +24,12 @@ const (
 	backoffDuration       = 1 * time.Second
 	perFireTimeout        = 10 * time.Second
 	maxMemTimersPerAuthor = 1024
+
+	// storeErrLogPeriod paces the "still faulting" summary Warn while a
+	// store-backed query/delete stays broken across many ticks — the
+	// schedule-side twin of the no_factory soak finding: a 1s-tick backoff
+	// re-hitting a dead store must never re-log at tick cadence.
+	storeErrLogPeriod = 30 * time.Second
 )
 
 // memTimer is one incarnation-bind entry in the engine's in-memory due-set —
@@ -67,6 +73,37 @@ type Engine struct {
 	// closed by a run loop that ran). Lifecycle misuse is an assembly bug —
 	// it must fail at the misuse site, not deadlock or double-fire later.
 	started atomic.Bool
+
+	// storeErr and transient are edge-dedup bookkeeping for the run loop's
+	// own slog cadence (P3): both are touched ONLY from the single run()
+	// goroutine (fireDue/nextFireAt never run concurrently with themselves),
+	// so neither needs mu.
+	storeErr  storeFault
+	transient map[transientKey]int64
+}
+
+// storeFault is the run loop's edge-dedup state for a store-backed query or
+// delete that starts failing: entering a NEW kind (or the very first fault)
+// logs loud once; the SAME kind persisting logs a periodic summary Warn
+// (storeErrLogPeriod cadence) instead of at tick cadence; clearing logs a
+// loud recovery edge. kind is the failing operation's name (e.g.
+// "due_query_failed") — the schedule-side twin of no_factory's per-actor
+// edge state, scoped to "one active store fault at a time" because a
+// down store degrades every query in the same tick together in practice.
+type storeFault struct {
+	kind         string
+	streak       int64
+	firstAt      time.Time
+	lastLoggedAt time.Time
+}
+
+// transientKey identifies one consecutive-transient-retry streak: kind
+// separates the three transient families (mem-family Fire.Append, Reviver
+// EnsureLive, identity-family Fire.Append) that would otherwise collide on a
+// shared id space; id is the timer or author id the streak is keyed to.
+type transientKey struct {
+	kind string
+	id   string
 }
 
 // New assembles the engine from deps and returns its two outward faces — a
@@ -98,6 +135,7 @@ func New(deps Deps) (Minter, *Engine, error) {
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
 		closeDone: make(chan struct{}),
+		transient: make(map[transientKey]int64),
 	}
 	e.ctx, e.cancelRun = context.WithCancel(context.Background())
 	return &minter{engine: e}, e, nil
@@ -388,7 +426,7 @@ func (e *Engine) nextFireAt(ctx context.Context) (int64, bool) {
 
 	storeNext, storeOK, err := e.deps.Store.NextFireAt(ctx)
 	if err != nil {
-		e.deps.Logger.Error("schedule.next_fire_at_query_failed", "err", err)
+		e.noteStoreErr(time.Now(), "next_fire_at_query_failed", err)
 		// Degrade to a backoff-paced RETRY, never a bare wait: folding this
 		// fault into "durable family has nothing due" would — on a tick where
 		// the mem family is also empty — park the run loop on wake alone, so a
@@ -396,6 +434,8 @@ func (e *Engine) nextFireAt(ctx context.Context) (int64, bool) {
 		// rows. Same posture the Due-fault path already has via
 		// progress=false; this is its NextFireAt twin.
 		storeNext, storeOK = e.deps.Clock.Now().Add(backoffDuration).UnixMilli(), true
+	} else {
+		e.noteStoreRecovered(time.Now(), "next_fire_at_query_failed")
 	}
 
 	switch {
@@ -440,6 +480,7 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 			delete(e.mem, t.id)
 			e.mu.Unlock()
 			progress = true
+			e.clearTransient("mem_fire", string(t.id))
 			continue
 		}
 		env := buildFireEnvelope(t.id, t.author, t.typ, t.payload, message.ID(t.correlationID), nowTime)
@@ -452,22 +493,26 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 			delete(e.mem, t.id)
 			e.mu.Unlock()
 			progress = true
+			e.clearTransient("mem_fire", string(t.id))
 		case isFireRejected(err):
 			e.mu.Lock()
 			delete(e.mem, t.id)
 			e.mu.Unlock()
 			progress = true
 			e.loudLog(t.id, t.author, err)
+			e.clearTransient("mem_fire", string(t.id))
 		default:
 			// transient — leave the entry, retry next tick.
+			e.noteTransient("mem_fire", string(t.id), t.id, t.author, err)
 		}
 	}
 
 	rows, err := e.deps.Store.Due(ctx, now)
 	if err != nil {
-		e.deps.Logger.Error("schedule.due_query_failed", "err", err)
+		e.noteStoreErr(time.Now(), "due_query_failed", err)
 		return progress
 	}
+	e.noteStoreRecovered(time.Now(), "due_query_failed")
 	blockedAuthor := make(map[actor.ActorID]bool)
 	for _, row := range rows {
 		if blockedAuthor[row.AuthorID] {
@@ -490,18 +535,24 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 				// per-author due window ahead of later legitimate rows.
 				reason, detail := rejectionDetails(err)
 				if _, evicted, derr := e.deps.Store.MoveToDead(ctx, row.ID, timerspec.DeathReviveRejected, reason, detail, now); derr != nil {
-					e.deps.Logger.Error("schedule.poison_row_delete_failed", "timer_id", string(row.ID), "err", derr)
+					e.noteStoreErr(time.Now(), "poison_row_delete_failed", derr, "timer_id", string(row.ID))
 					continue
-				} else if evicted > 0 {
-					e.deps.Logger.Warn("schedule.timer_dead_evicted", "count", evicted)
+				} else {
+					e.noteStoreRecovered(time.Now(), "poison_row_delete_failed")
+					if evicted > 0 {
+						e.deps.Logger.Warn("schedule.timer_dead_evicted", "count", evicted)
+					}
 				}
 				progress = true
 				e.loudLog(row.ID, row.AuthorID, err)
+				e.clearTransient("revive", string(row.AuthorID))
 				continue
 			}
 			blockedAuthor[row.AuthorID] = true
+			e.noteTransient("revive", string(row.AuthorID), row.ID, row.AuthorID, err)
 			continue // transient — leave the row, retry next tick.
 		}
+		e.clearTransient("revive", string(row.AuthorID))
 		env := buildFireEnvelope(row.ID, row.AuthorID, row.Type, row.Payload, message.ID(row.CorrelationID), nowTime)
 		callCtx, cancel = context.WithTimeout(ctx, perFireTimeout)
 		err := e.deps.Fire.Append(callCtx, row.AuthorID, env)
@@ -509,22 +560,29 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 		switch {
 		case err == nil || errors.Is(err, ErrDuplicateFire):
 			if _, derr := e.deps.Store.Delete(ctx, row.ID); derr != nil {
-				e.deps.Logger.Error("schedule.completed_row_delete_failed", "timer_id", string(row.ID), "err", derr)
+				e.noteStoreErr(time.Now(), "completed_row_delete_failed", derr, "timer_id", string(row.ID))
 				continue
 			}
+			e.noteStoreRecovered(time.Now(), "completed_row_delete_failed")
 			progress = true
+			e.clearTransient("identity_fire", string(row.ID))
 		case isFireRejected(err):
 			reason, detail := rejectionDetails(err)
 			if _, evicted, derr := e.deps.Store.MoveToDead(ctx, row.ID, timerspec.DeathFireRejected, reason, detail, now); derr != nil {
-				e.deps.Logger.Error("schedule.poison_row_delete_failed", "timer_id", string(row.ID), "err", derr)
+				e.noteStoreErr(time.Now(), "poison_row_delete_failed", derr, "timer_id", string(row.ID))
 				continue
-			} else if evicted > 0 {
-				e.deps.Logger.Warn("schedule.timer_dead_evicted", "count", evicted)
+			} else {
+				e.noteStoreRecovered(time.Now(), "poison_row_delete_failed")
+				if evicted > 0 {
+					e.deps.Logger.Warn("schedule.timer_dead_evicted", "count", evicted)
+				}
 			}
 			progress = true
 			e.loudLog(row.ID, row.AuthorID, err)
+			e.clearTransient("identity_fire", string(row.ID))
 		default:
 			// transient — leave the row, at-least-once.
+			e.noteTransient("identity_fire", string(row.ID), row.ID, row.AuthorID, err)
 		}
 	}
 	return progress
@@ -574,6 +632,71 @@ func (e *Engine) loudLog(id TimerID, author actor.ActorID, err error) {
 		"reason", reason,
 		"detail", detail,
 	)
+}
+
+// noteStoreErr records one occurrence of a store-backed fault named kind
+// (P3 edge cadence, shared by nextFireAt's query and fireDue's query/delete
+// calls): entering a NEW kind — including the very first fault — logs Error
+// once; the SAME kind persisting logs a periodic Warn summary at
+// storeErrLogPeriod cadence instead of every tick; between periods it is
+// silent. fields are extra slog key/value pairs specific to the call site
+// (e.g. "timer_id").
+func (e *Engine) noteStoreErr(now time.Time, kind string, err error, fields ...any) {
+	if e.storeErr.kind != kind {
+		e.storeErr = storeFault{kind: kind, streak: 1, firstAt: now, lastLoggedAt: now}
+		args := append(append([]any{}, fields...), "err", err)
+		e.deps.Logger.Error("schedule."+kind, args...)
+		return
+	}
+	e.storeErr.streak++
+	if now.Sub(e.storeErr.lastLoggedAt) >= storeErrLogPeriod {
+		e.storeErr.lastLoggedAt = now
+		args := append(append([]any{}, fields...), "err", err, "streak", e.storeErr.streak, "since", e.storeErr.firstAt)
+		e.deps.Logger.Warn("schedule."+kind+"_ongoing", args...)
+	}
+}
+
+// noteStoreRecovered clears the active fault edge for kind if this call
+// site is the one currently holding it, logging a loud Info recovery edge
+// once (P3 loud-on-clear). A different kind's active streak is left alone —
+// this call site's own success says nothing about whether some OTHER
+// store operation is still faulting.
+func (e *Engine) noteStoreRecovered(now time.Time, kind string) {
+	if e.storeErr.kind != kind {
+		return
+	}
+	e.deps.Logger.Info("schedule."+kind+"_recovered",
+		"streak", e.storeErr.streak,
+		"duration_ms", now.Sub(e.storeErr.firstAt).Milliseconds(),
+	)
+	e.storeErr = storeFault{}
+}
+
+// noteTransient records one consecutive-transient occurrence for (kind,
+// id) — the run loop's other P3 edge state, for the three FireSink/Reviver
+// branches that only ever leave a comment ("retry next tick") today: the
+// first occurrence for an id logs Warn loud; every subsequent consecutive
+// occurrence for the same id is counted silently (no log) until
+// clearTransient resets it on recovery, reject-disposal, or removal from
+// the due set.
+func (e *Engine) noteTransient(kind, id string, timerID TimerID, author actor.ActorID, err error) {
+	key := transientKey{kind: kind, id: id}
+	e.transient[key]++
+	if e.transient[key] == 1 {
+		e.deps.Logger.Warn("schedule."+kind+"_transient",
+			"timer_id", string(timerID),
+			"author", string(author),
+			"err", err,
+		)
+	}
+}
+
+// clearTransient resets the consecutive-transient counter for (kind, id) —
+// called whenever the id resolves (success, reject-disposal, or drop) so a
+// resolved condition never keeps counting toward a summary that will never
+// come.
+func (e *Engine) clearTransient(kind, id string) {
+	delete(e.transient, transientKey{kind: kind, id: id})
 }
 
 // buildFireEnvelope constructs the fire envelope per the field table:

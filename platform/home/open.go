@@ -322,7 +322,7 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 		ChannelID:          cfg.ChannelID,
 		Logger:             logger,
 		CancelRequest:      h.handleCancelUpstream,
-		StorageHostControl: homeStorageHostControl{outbox: cs.Outbox, timeout: cfg.ReservationTimeout},
+		StorageHostControl: homeStorageHostControl{outbox: cs.Outbox, timeout: cfg.ReservationTimeout, logger: logger},
 	})
 	h.links = links
 

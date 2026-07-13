@@ -275,12 +275,16 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 				// no byte stream / Committed round trip, so the door issues the
 				// reclaim synchronously here (the mirror signal on the same
 				// home→daemon channel). Best-effort — a failed reclaim is
-				// discarded (the door carries no logger, and the verdict must
-				// stay AlreadyExists regardless): a missed reclaim leaves at
-				// worst an empty live/<coord> directory, never a correctness
-				// fault, and the daemon's ReclaimCoord is idempotent so a later
-				// duplicate never double-frees.
-				_ = d.deps.StorageControl.ReclaimRequest(ctx, daemonID, coord)
+				// WARN-logged (nil-safe Deps.Logger) and otherwise swallowed —
+				// the verdict must stay AlreadyExists regardless: a missed
+				// reclaim leaves at worst an empty live/<coord> directory, never
+				// a correctness fault, and the daemon's ReclaimCoord is
+				// idempotent so a later duplicate never double-frees.
+				if rerr2 := d.deps.StorageControl.ReclaimRequest(ctx, daemonID, coord); rerr2 != nil && d.deps.Logger != nil {
+					d.deps.Logger.Warn("accessdoor.reclaim_failed",
+						"channel", string(d.deps.ChannelID), "daemon", daemonID,
+						"coord", coord, "err", rerr2)
+				}
 				return Outcome{RejectReason: access.AlreadyExists}, nil
 			}
 			return createVerdict(ctx, cerr)

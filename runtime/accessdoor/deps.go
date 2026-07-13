@@ -2,6 +2,7 @@ package accessdoor
 
 import (
 	"context"
+	"log/slog"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -113,9 +114,10 @@ type StorageControl interface {
 	// Committed round trip on which the with-content path's
 	// CommittedReply.Lost→ReclaimCoord signal could ride — this is that signal
 	// for the synchronous path. Best-effort from the door's view: a returned
-	// error is logged, never propagated into the caller-facing verdict (the
-	// create already resolved AlreadyExists; a missed reclaim leaves at worst an
-	// empty directory, never a correctness fault).
+	// error is logged (query.go's reclaim-loser branch, nil-safe Deps.Logger),
+	// never propagated into the caller-facing verdict (the create already
+	// resolved AlreadyExists; a missed reclaim leaves at worst an empty
+	// directory, never a correctness fault).
 	ReclaimRequest(ctx context.Context, daemonID string, coord string) error
 }
 
@@ -148,4 +150,11 @@ type Deps struct {
 	// (a kv-only test rig or an assembly that never wires the lane simply
 	// cannot route file bytes, honestly, never a silent kv-shaped route).
 	LaneControl LaneControl
+
+	// Logger is the door's oplog seam (telemetry-completion spec A5/C4):
+	// purely a self-report channel, never a decision input — nil-safe
+	// absent (a test rig that never wires one simply gets no slog, never a
+	// panic). Currently used by the reclaim-loser Warn (query.go) and the
+	// OpDelete landed-Info (door.go).
+	Logger *slog.Logger
 }

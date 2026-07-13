@@ -16,6 +16,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sync/atomic"
 	"time"
 
@@ -139,6 +140,20 @@ type homeStorageHostControl struct {
 	// without a real 5-minute wait.
 	timeout time.Duration
 	now     func() time.Time
+	// logger is nil-safe (§0 A3/C12): existing test literals construct this
+	// struct without it, and the zero value must never panic — logging is
+	// best-effort self-description, not load-bearing behaviour.
+	logger *slog.Logger
+}
+
+// log returns a non-nil logger (§0 nil-safe rule): callers unconditionally
+// call methods on it, so a missing h.logger degrades to a discard sink
+// instead of a nil-pointer panic.
+func (h homeStorageHostControl) log() *slog.Logger {
+	if h.logger != nil {
+		return h.logger
+	}
+	return slog.New(slog.DiscardHandler)
 }
 
 func (h homeStorageHostControl) reservationTimeout() time.Duration {
@@ -214,8 +229,21 @@ func (h homeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonI
 	// enough still ages out on schedule, even though every call that DOES
 	// arrive touches its own rows immediately below.
 	cutoff := h.nowFn()().Add(-h.reservationTimeout()).UnixMilli()
-	if _, err := h.outbox.SweepExpiredReservations(ctx, senderDaemonID, cutoff); err != nil {
+	swept, err := h.outbox.SweepExpiredReservations(ctx, senderDaemonID, cutoff)
+	if err != nil {
 		return nil, nil, nil, err
+	}
+	// A3/C12: reservation age-out is the same "unrecoverable judged-dead +
+	// reclaim" shape as the schedule engine's timer_dead_evicted, which IS
+	// loud — this sibling was silent. edge-only: only fires when the sweep
+	// actually evicted something, never on the common empty-sweep tick.
+	if len(swept) > 0 {
+		ids := make([]string, len(swept))
+		for i, row := range swept {
+			ids[i] = row.ReservationID
+		}
+		h.log().Warn("platform.storage.reservation_expired",
+			"daemon", senderDaemonID, "count", len(swept), "reservation_ids", ids)
 	}
 
 	// Touch AFTER sweep, BEFORE listing (期11 S1's "在途登记" liveness bump —

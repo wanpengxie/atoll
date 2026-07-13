@@ -270,7 +270,9 @@ func (e *engine) CancelRequest(id message.ID) {
 func (e *engine) Receive(_ context.Context, env *message.Envelope) error {
 	switch env.Kind {
 	case message.KindResponse:
-		e.call.match(env)
+		if !e.call.match(env) {
+			e.recordDrop(env, ObsUnmatchedResponse)
+		}
 		return nil
 	case message.KindRequest:
 		if occupantState(e.occupant.Load()) != occupantRunning || !e.serve.admit(env) {
@@ -334,12 +336,17 @@ const (
 	ObsRejectLaneOverflow actorrt.ObsKind = "actorbase.reject_lane_overflow"
 	ObsClosureFault       actorrt.ObsKind = "actorbase.closure_fault"
 	ObsStaleDelivery      actorrt.ObsKind = "actorbase.stale_delivery"
+	// ObsUnmatchedResponse is the response-side mirror of ObsStaleDelivery: a
+	// KindResponse envelope whose ParentID resolves to no InFlight call ledger
+	// entry (already matched, timed out, or cancelled) — response-side
+	// counterpart to projectWork's request-side recordDrop.
+	ObsUnmatchedResponse actorrt.ObsKind = "actorbase.unmatched_response"
 )
 
 // ObsDropKinds returns every diagnostic kind actorbase publishes, for an
 // assembly root wiring a drop-bucketing consumer.
 func ObsDropKinds() []actorrt.ObsKind {
-	return []actorrt.ObsKind{ObsQueueOverflow, ObsRejectLaneOverflow, ObsClosureFault, ObsStaleDelivery}
+	return []actorrt.ObsKind{ObsQueueOverflow, ObsRejectLaneOverflow, ObsClosureFault, ObsStaleDelivery, ObsUnmatchedResponse}
 }
 
 // recordDrop surfaces an engine-internal drop through the actor's own obs
