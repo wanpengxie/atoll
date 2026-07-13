@@ -17,6 +17,14 @@ import (
 // live in the middleware package (the request guard).
 const sessionDuration = 30 * 24 * time.Hour
 
+// bcryptCost is the password-hash work factor. Production always runs
+// bcrypt.DefaultCost; it is a var ONLY so the test seam
+// (SetBcryptCostForTest) can drop it to MinCost — under the race detector a
+// single DefaultCost hash+compare costs ~1.7s of pure CPU, which multiplied
+// by every register+login fixture was the app test suite's single biggest
+// time sink (34 tests × ~1.7s). Nothing outside export_test may write it.
+var bcryptCost = bcrypt.DefaultCost
+
 func (a *App) isWorkspaceMember(ctx context.Context, wsID, userID string) bool {
 	var count int
 	err := a.db.QueryRowContext(ctx,
@@ -68,7 +76,7 @@ func (a *App) handleRegister(c *gin.Context) {
 		return
 	}
 
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcryptCost)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "hash failed"})
 		return

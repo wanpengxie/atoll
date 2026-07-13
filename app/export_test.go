@@ -212,3 +212,13 @@ func (a *App) StatForTest(chID channel.ID, id actor.ActorID) (startedAt time.Tim
 	}
 	return home.View().Stat(id)
 }
+
+// SetBcryptCostForTest drops the password work factor for test fixtures —
+// under -race a DefaultCost hash+compare burns ~1.7s of pure CPU per
+// register+login, which was the app suite's dominant cost. Returns a restore
+// func for cleanup. Test-only seam; production always runs DefaultCost.
+func SetBcryptCostForTest(cost int) (restore func()) {
+	prev := bcryptCost
+	bcryptCost = cost
+	return func() { bcryptCost = prev }
+}

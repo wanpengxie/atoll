@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // ---------------------------------------------------------------------------
@@ -64,6 +65,12 @@ type testEnv struct {
 
 func setupTestApp(t *testing.T) *testEnv {
 	t.Helper()
+
+	// Drop the password work factor for the suite: every fullSetup does a
+	// register+login, and under -race a DefaultCost hash+compare burns ~1.7s
+	// of pure CPU per test — the suite's single biggest time sink (owner
+	// 2026-07-13). MinCost (~1ms) tests the same code path.
+	t.Cleanup(app.SetBcryptCostForTest(bcrypt.MinCost))
 
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "app.db")
