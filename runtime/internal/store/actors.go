@@ -88,9 +88,21 @@ func (r *actorRegistry) LookupActivePrincipal(ctx context.Context, kind actor.Ki
 	if err != nil {
 		return storespec.Record{}, false, fmt.Errorf("store: principal lookup: %w", err)
 	}
-	rec.Kind, _ = actor.ParseKind(rawKind)
+	// Poisoned-row discipline, same as Lookup/ListActive over this table: a
+	// non-empty out-of-closed-set kind/binding fails loudly — this is the
+	// admission path (census.ResolvePrincipal), the one place a silently blank
+	// Kind must never pass as a live record.
+	k, ok := actor.ParseKind(rawKind)
+	if !ok {
+		return storespec.Record{}, false, fmt.Errorf("store: actor %q invalid kind %q (out of closed set)", rec.ID, rawKind)
+	}
+	rec.Kind = k
 	if binding != "" {
-		rec.Binding, _ = actor.ParseBinding(binding)
+		b, ok := actor.ParseBinding(binding)
+		if !ok {
+			return storespec.Record{}, false, fmt.Errorf("store: actor %q invalid binding %q (out of closed set)", rec.ID, binding)
+		}
+		rec.Binding = b
 	}
 	return rec, true, nil
 }
