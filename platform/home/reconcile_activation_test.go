@@ -1084,14 +1084,21 @@ func TestFireSink_ForkChildDeathRace_QuietDrop(t *testing.T) {
 	}
 }
 
-// Test 14 — attach-straddle (period 9 review #4): a daemon attach stamps Host in the
-// registry BETWEEN the reviver's initial Lookup (which saw Host=="", home-placed) and
-// its SpawnIfAbsent build landing — the exact window accept.go's handleAttach opens
-// (Host stamped on the control frame; the port incarnation installed later on the
-// separate stream-open). The post-build recheck must catch the now-non-empty Host,
-// UNDO the local build (Despawn), and classify TRANSIENT — never leave a local cell
-// double-embodying the daemon's incoming port, and never a poison ReviveRejected.
-func TestReviver_AttachStraddle_HostStampedMidBuild_NoLocalRevive(t *testing.T) {
+// Test 14 — attach race, replace-semantics self-resolve (period 9 review #4;
+// renamed + re-reasoned #24, purity v3 B1 §0.5-A): a daemon attach stamps Host in
+// the registry BETWEEN the reviver's initial Lookup (which saw Host=="",
+// home-placed) and its SpawnIfAbsent build landing — the exact window accept.go's
+// handleAttach opens (Host stamped on the control frame; the port incarnation
+// installed later on the separate stream-open). verifyPostBuild's post-build
+// recheck is ACTIVE-ONLY (it does NOT re-compare Host — #24: the recheckAttached
+// word was dead code, since removed) — this interleaving is NOT the recheck's
+// window to close at all. It self-resolves via Attach's OWN replace semantics:
+// whichever of {this build, the attach} lands second wins outright, so no
+// interleaving ever leaves two live embodiments. This ordering (build lands, THEN
+// attach stamps Host, both while the member stays active throughout) is the
+// build-wins-first half — the local cell must stay live, exactly as an ordinary
+// Embodied revive would.
+func TestReviver_AttachRace_ReplaceSemanticsSelfResolve(t *testing.T) {
 	ctx := context.Background()
 	desired := &testDesired{}
 	builder := newTestBuilder()

@@ -2,11 +2,9 @@ package home
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -157,6 +155,12 @@ type homeReviver struct{ h *Home }
 // FireSink: a structurally unrevivable author (no builder wired, class not in the
 // table, id not a durable member) is a ReviveRejected poison row the engine
 // disposes of; a transient registry fault is a plain error the engine retries.
+// Everything from the placement filter through the post-build straddle recheck
+// runs inside the shared activateOne core (§1.1); this is its reviver 翻译器
+// (§1.7): the ONLY vocabulary it speaks back to the schedule engine is
+// ReviveRejected (the poison class) vs a plain transient error, plus the two
+// account side effects (clearReviveBackoff / the throttled attached log) each
+// word's row in §1.7 names.
 func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	h := r.h
 	// Already live: an idempotent no-op — return BEFORE the builder gate. Liveness
@@ -169,107 +173,68 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	if _, ok := h.channel.Cells().CurrentIncarnation(id); ok {
 		return nil
 	}
-	// S6 (§10.13 推导2/3): consult the placement fact BEFORE the class table —
-	// AND before the nil-builder gate. An attached author's activation authority
-	// is its daemon's own feasible check, not home's: a nil-builder home hosting
-	// an attached author's identity timer must classify the wake as transient
-	// (S6), never as ReviveRejected{no_builder} — the builder is only ever needed
-	// to activate a HOME-placed absent author, so gating on it before placement
-	// classification would poison-delete a live daemon actor's timer row. A
-	// registry fault or an attached Host are BOTH plain (transient) errors, never
-	// ReviveRejected: the row is retained and retried next tick, so the SAME wake
-	// fires normally once the fault clears or the author is no longer attached
-	// (poisoning here would turn a placement fact into a false identity-death
-	// verdict).
+	// Single-point Lookup + its transient semantics stay OUTSIDE the core (§1.8):
+	// a registry fault here is a plain transient error. !ok (never a member at
+	// all — no row to even hand the core) is handled HERE, never by calling
+	// IsActive on a zero-value Record (whose zero DeregisteredAt would read as
+	// active); an EXISTING-but-deregistered row is instead handed to
+	// activateOne, whose own ①IsActive 防御复判 is this path's REAL (not merely
+	// defensive) not-a-member detector — DoD §4.2's 3-site IsActive() closure
+	// counts on EnsureLive itself making no separate IsActive() call.
 	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
 	if err != nil {
 		return fmt.Errorf("platform: revive lookup %s: %w", id, err) // transient
 	}
-	if !ok || !rec.IsActive() {
-		// !ok: never a member. !IsActive: deregistered after this wake was
-		// snapshotted as due but before revive ran (the same deadline-boundary race
-		// FireSink.Append closes) — reviving would resurrect a zombie cell for an
-		// identity the dereg cascade already tore down (state + timers cleared).
-		// Both are the deterministic unrevivable class: dispose the row, never
-		// hot-retry (soft-dereg is monotonic, it never reverts to active).
+	if !ok {
 		return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
 	}
-	if rec.Host != "" {
-		h.logReviveAttached(id, rec.Host)
-		return fmt.Errorf("platform: revive %s: attached to host %q", id, rec.Host) // transient
-	}
-	now := time.UnixMilli(h.nowMs())
-	if until, held := h.backoffGate(id, now); held {
-		return fmt.Errorf("platform: revive %s: build backoff until %s", id, until)
-	}
-	// Home-placed, absent: resolve through factoryFor (human → the platform's own
-	// built-in cell factory, needing no builder; others → the组合域 builder, now
-	// load-bearing). A human revive therefore never depends on a wired builder (a
-	// nil-builder home still revives its identity-timer-bearing humans); a non-human
-	// miss splits into the two structurally-unrevivable classes the engine disposes.
-	kind := rec.Kind
-	factory, ok := h.factoryFor(rec)
-	if !ok {
-		if h.builder == nil {
-			return schedule.ReviveRejected{Reason: "no_builder", Detail: string(id)}
-		}
-		return schedule.ReviveRejected{Reason: "class_not_found", Detail: string(id)}
-	}
-	// straddleHook (test-only, nil in production): fires AFTER the Lookup above
-	// passed but BEFORE SpawnIfAbsent below — the exact window Home.Remove's
-	// double-tap closure argument (S-P20) requires a test able to park a build
-	// in. Zero cost when nil.
-	if h.reviverStraddleHook != nil {
-		h.reviverStraddleHook()
-	}
-	// SpawnIfAbsent is the idempotent CAS: an already-live author is a no-op
-	// (ok=false, shell discarded), so EnsureLive satisfies its idempotency contract
-	// without a separate liveness pre-check.
-	inc, built, buildErr := h.channel.Cells().SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-		return hostcommon.Build(h.buildCaps(id, kind, inc), h.hooks(), factory)
-	})
-	if buildErr != nil {
-		if errors.Is(buildErr, actorrt.ErrRuntimeSealed) {
-			h.logger.Info("platform.revive.runtime_sealed", "channel", string(h.channelID), "actor", string(id))
-			return buildErr
-		}
-		h.logger.Error("platform.revive.build_failed", "channel", string(h.channelID), "actor", string(id), "error", buildErr)
-		var failure *actorrt.BuildFailure
-		if errors.As(buildErr, &failure) {
-			h.recordBuildFailure(id, now)
-		}
-		return buildErr
-	}
-	if !built {
+	switch v := h.activateOne(ctx, rec); v.kind {
+	case actEmbodied:
 		h.clearReviveBackoff(id)
 		return nil
-	}
-	// Post-build recheck (S-P20 拍定 A′, Remove's straddle-window closure other
-	// half): the id could have been Remove'd (dereg) or daemon-attached (Host stamp)
-	// BETWEEN the Lookup above and this build landing (Remove's own double-tap only
-	// guards its own before/after, not a build that starts after Remove's ① and
-	// finishes after its ③). verifyPostBuild re-reads under the fresh inc and undoes
-	// the build (pointer-guarded Despawn) on any non-OK outcome; here we only map its
-	// verdict onto the engine's two-class contract:
-	//   - fault: transient — the recheck itself failed, so the freshly-built cell is
-	//     unconfirmed (an unverified build is not a validated live one); retry next tick.
-	//   - gone: ReviveRejected{not_a_member} — the dereg cascade already tore down its
-	//     state + timers; reviving would resurrect a zombie.
-	//   - attached: transient — home is not the placement authority for an attached
-	//     identity; the SAME wake fires normally once the port installs (already-live
-	//     fast path) or the author detaches back home.
-	rec2, res, lerr := h.verifyPostBuild(ctx, id, inc)
-	switch res {
-	case recheckFault:
-		return fmt.Errorf("platform: revive post-build recheck %s: %w", id, lerr)
-	case recheckGone:
+	case actAlreadyLive:
+		// Kept as its own arm (not merged with actEmbodied above) so the four
+		// clearReviveBackoff write sites §1.4 enumerates stay individually
+		// visible: ring fast-path, ring削臂, and the reviver's two verdicts.
+		h.clearReviveBackoff(id)
+		return nil
+	case actNotMember: // the deregistered-row case: caught HERE by activateOne's own IsActive check
 		return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
-	case recheckAttached:
-		h.logReviveAttached(id, rec2.Host)
-		return fmt.Errorf("platform: revive %s: attached to host %q after build", id, rec2.Host) // transient
+	case actAttached:
+		// S6 (§10.13 推导2/3): home is not the placement authority for an attached
+		// identity — the SAME wake fires normally once the port installs
+		// (already-live fast path above) or the author detaches back home.
+		h.logReviveAttached(id, v.host)
+		return fmt.Errorf("platform: revive %s: attached to host %q", id, v.host) // transient
+	case actBackoffHeld:
+		return fmt.Errorf("platform: revive %s: build backoff until %s", id, v.until)
+	case actNoFactory:
+		return schedule.ReviveRejected{Reason: v.reason, Detail: string(id)}
+	case actSealed:
+		h.logger.Info("platform.revive.runtime_sealed", "channel", string(h.channelID), "actor", string(id))
+		return v.err // transient
+	case actBuildFailed:
+		h.logger.Error("platform.revive.build_failed", "channel", string(h.channelID), "actor", string(id), "error", v.err)
+		return v.err // transient
+	case actCancelled:
+		// §1.9②: net behavior unchanged (the freshly built cell is undone inside
+		// the core either way) — only the error wording changes, from the former
+		// recheckFault wrap to its own Cancelled word (this branch used to be
+		// unreachable from EnsureLive's own control flow pre-extraction; sharing
+		// the core's ctx gate is what newly routes a same-window cancel here —
+		// §1.9①'s three flipped cross-cells).
+		return fmt.Errorf("platform: revive %s: cancelled post-spawn: %w", id, ctx.Err())
+	case actRecheckFault:
+		return fmt.Errorf("platform: revive post-build recheck %s: %w", id, v.err)
+	case actRecheckGone:
+		// The dereg cascade already tore down state + timers; reviving would
+		// resurrect a zombie. #24 (§0.5-A): no actAttached-shaped case exists
+		// here — a concurrent daemon attach in this same window is a DIFFERENT
+		// race, closed by Attach's own replace semantics, never by this recheck
+		// (see verifyPostBuild's doc).
+		return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
 	}
-	h.clearReviveBackoff(id)
-	return nil
+	return nil // unreachable: the switch above is exhaustive over activationOutcome
 }
 
 var _ schedule.Reviver = homeReviver{}
