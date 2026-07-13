@@ -6,7 +6,7 @@
 //	Open(cfg) → *Home
 //	View()  View              — read-only observation set (ReadAfterSeq/MaxSeq/ListActors/Stat/Snapshot/IsAttached)
 //	Admit(ctx,kind,principal) — mint/idempotently resolve active membership
-//	Human(ctx,id) → HumanHandle — subjectgate door面 (a subject's Submit/Resolve/Cancel/After verbs + PresenceConnect/Disconnect L3 device-presence feed; welded pen stays in the wall)
+//	EnsureSubjectSlot(id) / SubjectSlotFor(id) / RemoveSubjectSlot(id) — the per-identity subjectgate binding slot seam the gateway drives (a subject's own Submit/Resolve/Cancel/After actions arrive as wire frames onto their cell through the slot; welded pen stays in the wall)
 //	Restart(ctx,id)           — accepted-unconfirmed embodiment replacement request
 //	ServeAttach(w,r,daemonID) — attach acceptance surface (app hands an upgraded WS here)
 //	Subscribe() (<-chan struct{}, func()) — subscription registration surface (client push)

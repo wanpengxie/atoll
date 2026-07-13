@@ -16,6 +16,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
+	"github.com/wanpengxie/atoll/platform/internal/subjectgate"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -42,8 +43,8 @@ type (
 )
 
 // The four channel-operate message types re-exported at the platform boundary so
-// the app's HTTP shims can Submit them through the door (Home.Human(u).Submit,
-// audience=[system]) WITHOUT importing platform/internal/sysactor. They are the
+// the app's HTTP shims can submit them through the subjectgate frame path
+// (audience=[system]) WITHOUT importing platform/internal/sysactor. They are the
 // door's wire vocabulary — the shim must speak the exact strings the gate
 // dispatches on, so a single home avoids drift (same posture as the contract
 // type re-exports above; white-list ⑤).
@@ -53,6 +54,12 @@ const (
 	TypeRestartActor    = sysactor.TypeRestartActor
 	TypeSetDefaultAgent = sysactor.TypeSetDefaultAgent
 )
+
+// ErrClosed is the refusal every mutating Home entry point (Admit / Remove /
+// Restart / subjectgate slot verbs) returns once Home.Close has begun. Checked
+// BEFORE any store read so a verb racing teardown never touches a closing
+// store. The app maps it to 503.
+var ErrClosed = errors.New("platform: channel home is closed")
 
 // HomeConfig configures the channel-home assembly.
 type HomeConfig struct {
@@ -94,6 +101,13 @@ type HomeConfig struct {
 	// timeout path needs a fast, deterministic window rather than production's
 	// multi-minute backstop.
 	ReservationTimeout time.Duration
+	// OnRevoke, when set, is fired by Remove AFTER the dereg cascade commits (the
+	// membership撤销 emit point, gateway 期 S3 表② remove.go). The assembly root
+	// bridges it into the gateway's RevocationSource so the subject's频道臂 seals
+	// (read-side revocation). nil → no bridge (the fold Sweep + read-side reader
+	// resource recheck remain the level backstop). Home passes its own channelID at
+	// the call site, so the sink is (channel, subject)-addressed.
+	OnRevoke func(subject actor.ActorID)
 	// EventDropKinds is the producer-owned vocabulary of non-level diagnostic obs
 	// kinds the presence fold buckets per name (queue overflow, closure fault,
 	// checkpoint drop, …). The substrate names no such word: it stays blind to the
@@ -123,21 +137,21 @@ type Home struct {
 
 	// (No per-user caller index (期12): a subject's own requests are closed
 	// by the substrate expiry reaper — 义务归位 D3; the subject drives its
-	// cell's caps through the OccupantDriver seam, see human.go.)
+	// own cell's caps through the subjectgate frame protocol → the cell's
+	// identity-dimension Sys verbs, see humancell.go.)
 
-	// presenceSessions is the subjectgate door's L3 device-presence session
-	// TOKEN SET per subject (channel, user) — 期12 S4's token form: the
-	// gateway ws connect/disconnect are the ONLY producer of a human's device
-	// presence (常驻 cell 不死, decay 挂 down-edge 对它失效, so the door must
-	// explicitly feed — 根基档 §4.6/§6). A (channel,user) may hold several ws
-	// (multi-tab/multi-device); online is fed on the FIRST token, offline
-	// only when the LAST goes. Each ws holds its OWN token and a disconnect
-	// removes only ITSELF — a stale disconnect from a pre-Remove session can
-	// never extinguish a re-Admitted sibling's fresh session (the straddle
-	// the plain refcount form couldn't rule out). Mutated and fed under
-	// presenceMu together, so edges are totally ordered.
-	presenceMu       sync.Mutex
-	presenceSessions map[actor.ActorID]map[string]struct{}
+	// onRevoke is HomeConfig.OnRevoke (the membership撤销 emit point) — fired by
+	// Remove after the dereg cascade so the gateway can seal the subject's频道臂.
+	onRevoke func(subject actor.ActorID)
+
+	// subjectgate is the human接入轴 binding registry (gateway 期 S2): the
+	// per-identity slot store (four-tuple {绑定世代, gateway epoch, 帧递交端,
+	// presence level}). Built once at Open (装配链 step①, before any cell
+	// construction path). A human cell's factory consults it at Proc start
+	// (step③④) for its frame delivery端 + presence self-report槽; a nil-slot
+	// (no gateway attach yet) cell is mailbox-only. The gateway (S3) ensures
+	// slots at attach (step②) and drives frames through them.
+	subjectgate *subjectgate.Registry
 
 	// systemPen is the welded system-authored write capability (minted once at
 	// Open). Held on Home for the substrate's own enforcement writers — the
@@ -212,13 +226,12 @@ type Home struct {
 	reconcileBuildHook func(actor.ActorID)
 
 	// closed is set true at the very START of Close (before any teardown step), the
-	// authoritative "this home is shutting down" flag every subjectgate verb entry
-	// checks. Close cannot JOIN the ws/垫片 goroutines that hold a HumanHandle (they
-	// live in the app layer, outside Home's teardown), so the flag is what stops a
-	// post-Close verb from touching a closing store: Human()/driverFor refuse from
-	// this instant on (期12: verbs hold no capability of their own — the residual
-	// in-flight write past the gate is fenced by the cell caps' own live membranes
-	// once cells stop). atomic (lock-free read on the hot Submit path).
+	// authoritative "this home is shutting down" flag every mutating entry point
+	// checks. Close cannot JOIN the gateway session goroutines in the app layer
+	// (outside Home's teardown), so the flag is what stops a post-Close Admit/
+	// Remove/Restart from touching a closing store; a residual in-flight subject
+	// write past the gate is fenced by the cell caps' own live membranes once
+	// cells stop. atomic (lock-free read on the hot path).
 	closed    atomic.Bool
 	state     atomic.Uint32
 	closeOnce sync.Once
@@ -508,6 +521,11 @@ func openHome(cfg HomeConfig, faults *homeFaults) (_ *Home, retErr error) {
 	h.reviveLogAt = map[actor.ActorID]time.Time{}
 	h.reviveBackoff = map[actor.ActorID]reviveBackoffEntry{}
 	h.pokeCh = make(chan struct{}, 1)
+	h.onRevoke = cfg.OnRevoke
+	// 装配链 step① (gateway 期 S2): the binding registry exists BEFORE any cell
+	// construction path (human cells are born at the reconcile sweep below), so
+	// the factory's step③ slot lookup never races an absent registry.
+	h.subjectgate = subjectgate.NewRegistry()
 
 	// 10. Time axis (OpenScheduler). FireSink mints a pen per fire (author-welded);
 	//     Reviver activates an absent identity-timer author via SpawnIfAbsent. The
@@ -899,6 +917,14 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 // not-found). Kind is caller-held (rec.Kind), never re-answered.
 func (h *Home) factoryFor(rec storespec.Record) (ActorFactory, bool) {
 	if rec.Kind == actor.KindHuman {
+		// 装配链 step② (gateway 期 v0.4.1 勘误: 槽随户籍准入 ensure): the per-identity
+		// binding slot is ensured HERE — the platform-authoritative membership→
+		// embodiment dispatch (shared by the reconcile 补臂 and homeReviver.EnsureLive),
+		// which covers BOTH a fresh Admit-poke AND a restart's durable re-read (a member
+		// read from the store with no Admit call this run). This runs BEFORE the cell is
+		// built, so the cell/factory step③ is a pure lookup — never a construction-path
+		// self-ensure (装配授权走私). Idempotent; nil registry is a defensive no-op.
+		h.EnsureSubjectSlot(rec.ID)
 		return humanCellFactory(h, rec.ID), true
 	}
 	if h.builder == nil {
@@ -940,6 +966,17 @@ func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, inc actorr
 	}
 	if !ok2 || !rec2.IsActive() {
 		h.channel.Cells().Despawn(inc)
+		// 死 ID 槽级联清 (gateway 期 P1, mirror remove.go §级联删槽): factoryFor embodies a
+		// human by EnsureSubjectSlot BEFORE this build (装配链 step②). A stale-rec 补臂/
+		// EnsureLive whose Lookup predated a concurrent Home.Remove can therefore RE-create
+		// the binding slot AFTER Remove's RemoveSubjectSlot ran — resurrecting a dead id's
+		// slot. Despawn alone (above)只 evicts the cell, not the slot, so close the笔 here
+		// with the SAME idempotent cascade Remove uses (id is confirmed dead — 身份不可复活
+		// mints a fresh id on any re-Admit, so this only ever targets THIS dead id, never a
+		// live successor). A no-op for a non-human (no slot was ever ensured) and when
+		// Remove already cleaned it.
+		h.RemoveSubjectSlot(id)
+		h.presenceFold.Forget(id)
 		return storespec.Record{}, recheckGone, nil
 	}
 	return rec2, recheckOK, nil
@@ -978,6 +1015,13 @@ func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (ac
 	id, err := h.cs.Membership.Admit(ctx, kind, principal, h.nowMs())
 	if err != nil {
 		return "", fmt.Errorf("platform: Admit membership: %w", err)
+	}
+	// 装配链 step② (gateway 期 v0.4.1 勘误): a human's binding slot生死随户籍级联 — ensure
+	// it at准入 (before the reconcile poke, so it strictly precedes any gateway attach
+	// that could look it up), synchronously so a client that attaches right after Admit
+	// never races an absent slot. Idempotent with factoryFor's ensure (restart path).
+	if kind == actor.KindHuman {
+		h.EnsureSubjectSlot(id)
 	}
 	h.pokeReconcile()
 	h.logger.Info("platform.member.admitted", "channel", string(h.channelID),

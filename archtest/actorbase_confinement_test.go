@@ -59,7 +59,7 @@ func TestActorcapsConfinedToPlatformAndActorbase(t *testing.T) {
 // invariant distinct from ①'s repo-wide sweep (belt and suspenders: a plugin
 // author reaching for actorcaps is a domain-layer offence even if some other
 // future non-plugin downstream were ever exempted from ①).
-var pluginDirs = []string{"../actors/", "../agent/provider/"}
+var pluginDirs = []string{"../drivers/tools/", "../agent/provider/"}
 
 // TestPluginDirsForbidCapsAndDoorImports — ② the plugin-directory-scoped
 // reinforcement: no actor/engine implementation package may import
@@ -117,12 +117,12 @@ const oldFactoryShape = "func(actorcaps.Caps) actorrt.Actor"
 // list; kept in this file for the shared walk helper): zero residual of the
 // retired bare factory shape ActorDecl.Factory / CapsFactoryBuilder.Lookup /
 // ComputeBuilder.Lookup used to carry, across the explicit scan surface the
-// spec names (registry/actors/agent providers/cmd) plus app (the human front-
+// spec names (registry/drivers/agent providers/cmd) plus app (the human front-
 // end entry point) — platform itself is exempt (ActorFactory.fullCaps, the
 // platform-only test seam CapsFactory() builds, is a deliberately DIFFERENT,
 // narrower-scoped shape that never leaves this package).
 func TestNoOldCapsFactoryShapeResidual(t *testing.T) {
-	scanRoots := []string{"../registry", "../actors", "../agent", "../cmd", "../app"}
+	scanRoots := []string{"../registry", "../drivers", "../agent", "../cmd", "../app"}
 	var v []string
 	for _, root := range scanRoots {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -158,7 +158,7 @@ func TestNoOldCapsFactoryShapeResidual(t *testing.T) {
 // actorrt.Actor 者仅引擎+测试 stub"): lib/actorbase's engine is the ONE
 // production implementer — the migration queue is now EMPTY. _test.go stubs are
 // exempt everywhere (a test double is not a production implementer). echo, kimi
-// (actors/kimi), sysactor, the plugin adapters xhs + actors/device (期10 S3),
+// (drivers/tools/kimi), sysactor, the plugin adapters xhs + drivers/tools/device (期10 S3),
 // and now the two agent-provider engines claude + go-kimi (期10 S5) have all
 // migrated to actorbase.Proc — the Legacy queue is zeroed and the cell's
 // per-request machine铲除 (spec §3 / 红线6).
@@ -182,7 +182,7 @@ func TestDirectActorImplementersAllowlisted(t *testing.T) {
 	}
 	fset := token.NewFileSet()
 	var v []string
-	roots := []string{"../registry", "../actors", "../agent", "../cmd", "../app", "../platform", "../lib/actorbase"}
+	roots := []string{"../registry", "../drivers", "../agent", "../cmd", "../app", "../platform", "../lib/actorbase"}
 	for _, root := range roots {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {

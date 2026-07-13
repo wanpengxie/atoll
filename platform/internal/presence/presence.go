@@ -11,19 +11,11 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-type Source string
-
-const (
-	SourceBroker Source = "broker"
-	SourceDoor   Source = "door"
-)
-
 const unknownDropBucket actorrt.ObsKind = "unknown"
 
 type entry struct {
 	val        []byte
 	receivedAt int64
-	source     Source
 	gen        actorrt.Incarnation
 }
 
@@ -32,7 +24,6 @@ type entry struct {
 type Testimony struct {
 	Val                []byte
 	ReceivedAt         int64
-	Source             Source
 	StaleFromPriorLife bool
 }
 
@@ -47,7 +38,11 @@ type Snapshot struct {
 }
 
 // Fold owns the bounded latest-value cache. Each row is keyed by the smallest
-// lifecycle unit, (actor id, observation kind), and records its source owner.
+// lifecycle unit, (actor id, observation kind). Every row is broker-sourced (an
+// actor's own incarnation testimony) — the来源轴 (Source/PutDoor) is归一 removed
+// (design v0.6.1): device presence now flows as normal broker obs off the human
+// cell, re-established per incarnation from its binding slot, not a special
+// door-source row that outlived down edges.
 type Fold struct {
 	mu         sync.Mutex
 	latest     map[actor.ActorID]map[actorrt.ObsKind]entry
@@ -94,27 +89,17 @@ func (f *Fold) OnObs(_ context.Context, id actor.ActorID, gen actorrt.Incarnatio
 		f.countDrop(kind)
 		return
 	}
-	f.put(id, kind, val, SourceBroker, gen)
+	f.put(id, kind, val, gen)
 }
 
-// PutDoor records testimony owned by a subject-gate session, not an actor
-// incarnation. Down edges therefore never delete it.
-func (f *Fold) PutDoor(id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue) {
-	if !f.isLevel(kind) {
-		f.countDrop(kind)
-		return
-	}
-	f.put(id, kind, val, SourceDoor, actorrt.Incarnation{})
-}
-
-func (f *Fold) put(id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue, source Source, gen actorrt.Incarnation) {
+func (f *Fold) put(id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue, gen actorrt.Incarnation) {
 	f.mu.Lock()
 	byKind := f.latest[id]
 	if byKind == nil {
 		byKind = map[actorrt.ObsKind]entry{}
 		f.latest[id] = byKind
 	}
-	byKind[kind] = entry{val: append([]byte(nil), val...), receivedAt: f.clock().UnixMilli(), source: source, gen: gen}
+	byKind[kind] = entry{val: append([]byte(nil), val...), receivedAt: f.clock().UnixMilli(), gen: gen}
 	f.mu.Unlock()
 }
 
@@ -152,7 +137,7 @@ func (f *Fold) Forget(id actor.ActorID) {
 func (f *Fold) OnDown(_ context.Context, id actor.ActorID, gen actorrt.Incarnation, _ error) {
 	f.mu.Lock()
 	for kind, row := range f.latest[id] {
-		if row.source == SourceBroker && row.gen == gen {
+		if row.gen == gen {
 			delete(f.latest[id], kind)
 		}
 	}
@@ -240,8 +225,8 @@ func (v View) Snapshot(ctx context.Context, id actor.ActorID) (Snapshot, error) 
 		return out, nil
 	}
 	for kind, row := range rows {
-		stale := row.source == SourceBroker && hasGen && row.gen != gen
-		out.L3[kind] = Testimony{Val: row.val, ReceivedAt: row.receivedAt, Source: row.source, StaleFromPriorLife: stale}
+		stale := hasGen && row.gen != gen
+		out.L3[kind] = Testimony{Val: row.val, ReceivedAt: row.receivedAt, StaleFromPriorLife: stale}
 	}
 	return out, nil
 }

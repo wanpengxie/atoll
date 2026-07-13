@@ -212,7 +212,3 @@ func (a *App) StatForTest(chID channel.ID, id actor.ActorID) (startedAt time.Tim
 	}
 	return home.View().Stat(id)
 }
-
-// WSSubmitErrCodeForTest exposes the message-frame submit error mapping —
-// the 期12 P0-2 arm's direct test seam. Test-only.
-func WSSubmitErrCodeForTest(err error) (string, string, bool) { return wsSubmitErrCode(err) }

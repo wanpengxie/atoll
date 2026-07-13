@@ -44,7 +44,7 @@ import (
 	// daemon CAN build any class the server assigns. actors/all = tools/devices;
 	// agent/all = the LLM engine classes (claude / go-kimi). What actually runs is
 	// the pulled assignment, never "one of each".
-	_ "github.com/wanpengxie/atoll/actors/all"
+	_ "github.com/wanpengxie/atoll/drivers/tools/all"
 	_ "github.com/wanpengxie/atoll/agent/all"
 )
 

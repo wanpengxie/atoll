@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/app"
+	"github.com/wanpengxie/atoll/drivers/gateway"
+	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -80,10 +82,23 @@ func setupTestApp(t *testing.T) *testEnv {
 		t.Fatalf("app.New: %v", err)
 	}
 	testAgentBuilder = stubAgentFactory
+
+	// gateway 期 S3: wire the real human-ingress connector into the app test harness,
+	// exactly as cmd/server does (the app cannot construct it — app → drivers is
+	// fenced — so the assembly-root wiring is reproduced here; e2e_test.go is a named
+	// Fence-B allowlist importer).
+	revHub := gateway.NewRevocationHub()
+	gw := gateway.New(gateway.Config{Routing: a.ResolveRoutingForGateway, Revocation: revHub})
+	_ = gw.Start()
+	a.SetGateway(web.New(gw))
+	a.SetRevokeSink(revHub.Emit)
+
 	t.Cleanup(func() {
-		// Close the app FIRST (joins every home's reconcile ticker goroutine, which
-		// reads testAgentBuilder in its build path) BEFORE nil-ing the global — else a
+		// gateway先静默 (seal every arm) BEFORE the homes it drives close, then close
+		// the app (joins every home's reconcile ticker goroutine, which reads
+		// testAgentBuilder in its build path) BEFORE nil-ing the global — else a
 		// still-running ticker races the write under -race.
+		gw.Close()
 		a.Close()
 		testAgentBuilder = nil
 		db.Close()

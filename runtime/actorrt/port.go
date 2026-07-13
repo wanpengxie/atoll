@@ -354,12 +354,6 @@ func (p *port) cancelRequest(id message.ID) {
 	_ = p.codec.Write(ipc.Frame{Kind: ipc.KindCancel, Payload: payload})
 }
 
-// occupantDriver implements embodiment: always false — an off-process subject
-// is home-hosted by definition (三层律: the drive verbs are the home-side
-// door's synchronous face), so occupant drive never crosses the wire. A
-// daemon-hosted actor is driven by its own remote engine, not by this seam.
-func (p *port) occupantDriver() (OccupantDriver, bool) { return nil, false }
-
 // start launches the write + read loops and closes done once both exit.
 func (p *port) start() {
 	p.wg.Add(2)

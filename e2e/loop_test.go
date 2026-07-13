@@ -278,61 +278,108 @@ func waitHealthz(t *testing.T, base string, p *proc, timeout time.Duration) {
 }
 
 // ---------------------------------------------------------------------------
-// Gateway ws client: single reader, ref-matched acks, buffered tail
+// Gateway ws client: single reader, ref-matched receipts, buffered feed tail
 // ---------------------------------------------------------------------------
 
-// wsClient follows the spec's ws discipline: ONE reader goroutine fans frames
-// by type into tail and ack/error channels; requests are matched by ref (never
-// "read the next frame and call it the ack" — subscribe backfills history and
-// tail shares the outbound pump with acks).
+// wsClient speaks the standard gateway frame protocol (gateway 期 S3+): every wire
+// frame is {v, frame_type, binding_gen, ref, payload}. ONE reader goroutine fans
+// frames by type — feed frames (the channel投影) into tail, receipt/error/notify
+// into acks — and requests are matched by TOP-LEVEL ref (never "read the next frame
+// and call it the receipt"). The opening frame is an attach naming this channel; its
+// receipt grants the binding_gen every upstream frame then echoes. Frames are
+// hand-rolled maps: this package imports ZERO atoll packages (red line 1) — the
+// frame shape is part of the /ws contract it speaks.
 type wsClient struct {
 	t    *testing.T
 	conn *websocket.Conn
-	tail chan map[string]any
-	acks chan map[string]any
+	tail chan map[string]any // feed-frame payloads {channel_id, seq, envelope}
+	acks chan map[string]any // receipt/error/notify frames (whole frame, ref at top)
+	done chan struct{}       // closed when the reader exits (server tore the session down)
+
+	bindingGen int64
+}
+
+const frameVersion = 1
+
+// frame builds one wire frame map.
+func frame(frameType, ref string, gen int64, payload any) map[string]any {
+	m := map[string]any{"v": frameVersion, "frame_type": frameType, "binding_gen": gen}
+	if ref != "" {
+		m["ref"] = ref
+	}
+	if payload != nil {
+		m["payload"] = payload
+	}
+	return m
 }
 
 func dialWS(t *testing.T, base, cookie, chID string, sinceSeq int64) *wsClient {
 	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/ws"
+	wsURL := "ws" + strings.TrimPrefix(base, "http") + "/ws?channel=" + url.QueryEscape(chID)
 	hdr := http.Header{}
 	hdr.Set("Cookie", cookie)
 	conn, _, err := websocket.DefaultDialer.Dial(wsURL, hdr)
 	if err != nil {
 		t.Fatalf("dial ws: %v", err)
 	}
-	if err := conn.WriteJSON(map[string]any{"type": "subscribe", "channel_id": chID, "since_seq": sinceSeq}); err != nil {
-		t.Fatalf("subscribe frame: %v", err)
-	}
 	c := &wsClient{t: t, conn: conn,
 		tail: make(chan map[string]any, 16384),
 		acks: make(chan map[string]any, 256),
+		done: make(chan struct{}),
 	}
 	t.Cleanup(c.close)
 	go c.readLoop()
+	// Opening attach frame: since is a single-element map keyed by this channel
+	// (裁决7). Await the attach receipt to learn the granted binding_gen.
+	ref := "attach-" + chID
+	if err := conn.WriteJSON(frame("attach", ref, 0, map[string]any{
+		"channel_id": chID,
+		"since":      map[string]int64{chID: sinceSeq},
+	})); err != nil {
+		t.Fatalf("attach frame: %v", err)
+	}
+	rec, ok := c.awaitRef(ref, 10*time.Second)
+	if !ok {
+		t.Fatalf("no attach receipt within 10s")
+	}
+	if rec["frame_type"] != "receipt" {
+		t.Fatalf("attach not accepted: %v", rec)
+	}
+	if p, ok := rec["payload"].(map[string]any); ok {
+		if g, ok := p["binding_gen"].(float64); ok {
+			c.bindingGen = int64(g)
+		}
+	}
 	return c
 }
 
 func (c *wsClient) close() { _ = c.conn.Close() }
 
 func (c *wsClient) readLoop() {
+	defer close(c.done)
 	for {
 		var m map[string]any
 		if err := c.conn.ReadJSON(&m); err != nil {
 			return
 		}
-		switch m["type"] {
-		case "message":
-			c.tail <- m
-		case "ack", "error":
+		switch m["frame_type"] {
+		case "feed":
+			if p, _ := m["payload"].(map[string]any); p != nil {
+				c.tail <- p
+			}
+		case "receipt", "error", "notify":
 			c.acks <- m
 		}
 	}
 }
 
-func (c *wsClient) send(m map[string]any) error { return c.conn.WriteJSON(m) }
+// send writes one upstream frame stamped with the session's binding_gen.
+func (c *wsClient) send(frameType, ref string, payload any) error {
+	return c.conn.WriteJSON(frame(frameType, ref, c.bindingGen, payload))
+}
 
-// awaitRef returns the ack/error frame whose ref matches (skipping strays).
+// awaitRef returns the receipt/error/notify frame whose TOP-LEVEL ref matches
+// (skipping strays).
 func (c *wsClient) awaitRef(ref string, timeout time.Duration) (map[string]any, bool) {
 	deadline := time.After(timeout)
 	for {
@@ -347,13 +394,14 @@ func (c *wsClient) awaitRef(ref string, timeout time.Duration) (map[string]any, 
 	}
 }
 
-// awaitTail returns the first tail envelope matching pred.
+// awaitTail returns the first feed envelope matching pred (a feed frame's
+// payload.envelope).
 func (c *wsClient) awaitTail(pred func(env map[string]any) bool, timeout time.Duration) (map[string]any, bool) {
 	deadline := time.After(timeout)
 	for {
 		select {
-		case m := <-c.tail:
-			env, _ := m["envelope"].(map[string]any)
+		case fp := <-c.tail:
+			env, _ := fp["envelope"].(map[string]any)
 			if env != nil && pred(env) {
 				return env, true
 			}
@@ -361,6 +409,20 @@ func (c *wsClient) awaitTail(pred func(env map[string]any) bool, timeout time.Du
 			return nil, false
 		}
 	}
+}
+
+// frameErrCode / frameErrDetail extract an error frame's flat code + detail (表①,
+// 裁决8: code is always a single flat word).
+func frameErrCode(m map[string]any) string {
+	p, _ := m["payload"].(map[string]any)
+	code, _ := p["code"].(string)
+	return code
+}
+
+func frameErrDetail(m map[string]any) string {
+	p, _ := m["payload"].(map[string]any)
+	d, _ := p["detail"].(string)
+	return d
 }
 
 // ---------------------------------------------------------------------------
@@ -412,31 +474,33 @@ func submitAndAwaitTerminal(t *testing.T, ws *wsClient, msgType string, payload 
 		attemptEnd := time.Now().Add(28 * time.Second)
 		refCounter++
 		ref := fmt.Sprintf("%s-%d", msgType, refCounter)
-		if err := ws.send(map[string]any{
-			"type": "message", "ref": ref, "msg_type": msgType, "payload": payload,
-		}); err != nil {
+		// A submit frame's payload = {msg_type, payload:<message body>} (no audience
+		// → the gateway routing面 resolves the default_agent). The message body's
+		// bytes survive verbatim (json.RawMessage).
+		if err := ws.send("submit", ref, map[string]any{"msg_type": msgType, "payload": payload}); err != nil {
 			t.Fatalf("%s: ws send: %v", msgType, err)
 		}
-		ack, ok := ws.awaitRef(ref, 10*time.Second)
+		rec, ok := ws.awaitRef(ref, 10*time.Second)
 		if !ok {
-			t.Fatalf("%s: no ack/error frame for ref %s within 10s", msgType, ref)
+			t.Fatalf("%s: no receipt/error frame for ref %s within 10s", msgType, ref)
 		}
-		if ack["type"] == "error" {
-			code, _ := ack["error"].(string)
+		if rec["frame_type"] == "error" {
+			code := frameErrCode(rec)
 			if retryableFrameErr(code) {
 				time.Sleep(time.Second)
 				continue
 			}
-			t.Fatalf("%s: frame error %q (detail %v)", msgType, code, ack["detail"])
+			t.Fatalf("%s: frame error %q (detail %q)", msgType, code, frameErrDetail(rec))
 		}
-		id, _ := ack["message_id"].(string)
+		rp, _ := rec["payload"].(map[string]any)
+		id, _ := rp["message_id"].(string)
 		if id == "" {
-			t.Fatalf("%s: ack carries no message_id: %v", msgType, ack)
+			t.Fatalf("%s: receipt carries no message_id: %v", msgType, rec)
 		}
-		// The ack receipt is {message_id, seq} — the commit seq is part of the
+		// The submit receipt is {message_id, seq} — the commit seq is part of the
 		// L2 acceptance shape, so its absence/zero is a contract break.
-		if seq, ok := ack["seq"].(float64); !ok || seq <= 0 {
-			t.Fatalf("%s: ack carries no positive seq: %v", msgType, ack)
+		if seq, ok := rp["seq"].(float64); !ok || seq <= 0 {
+			t.Fatalf("%s: receipt carries no positive seq: %v", msgType, rec)
 		}
 		// Await THIS request's terminal (a failed terminal carries
 		// payload.status=failed + reason).
@@ -720,6 +784,20 @@ func TestLoop(t *testing.T) {
 
 	// ③: the ORIGINAL file still reads back byte-exact across BOTH restarts.
 	verifyResource(t, ws2, rid1, chatPayload1)
+
+	// ---- 控制垫片四 type 全走帧路径 (DoD-2) --------------------------------
+	// The four channel-control HTTP endpoints replay the session user as a channel
+	// member submitting a control request through the SAME subjectgate frame path a
+	// ws message frame uses (app/operate_shim.go). introduce is already exercised
+	// above (POST /actors); here the remaining three. 200 = the door settled
+	// completed, 202 = it went through and is pending — both prove the frame path.
+	api2.mustRetry5xx("PUT", "/api/channels/"+chID+"/default_agent",
+		map[string]any{"instance_id": assistantID}, 30*time.Second,
+		http.StatusOK, http.StatusAccepted)
+	api2.mustRetry5xx("POST", "/api/actor-decls/"+echoDeclID+"/restart",
+		map[string]any{}, 30*time.Second, http.StatusOK)
+	api2.mustRetry5xx("DELETE", "/api/channels/"+chID+"/actors/"+echoID,
+		nil, 30*time.Second, http.StatusOK, http.StatusAccepted)
 
 	// Success path also reclaims both processes explicitly (t.Cleanup would too;
 	// doing it here keeps "进程收干净" an asserted step, not a teardown side

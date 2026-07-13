@@ -9,11 +9,13 @@ import (
 )
 
 // TestHomePublicSurface pins *platform.Home's exported method set to EXACTLY the
-// ten capabilities the design fixes: View / Admit / Human / Spawn / Remove /
-// ServeAttach / Subscribe / CancelRequest / KickDaemon / Close. Human is the
-// subjectgate door面 (a subject's Submit/Resolve/Cancel/After verbs; the welded
-// pen never escapes it). Admit is the pure-membership
-// primitive (neutral row + ring poke); embodiment is the ring's, never Admit's.
+// capabilities the design fixes: View / Admit / Remove / ServeAttach /
+// Subscribe / CancelRequest / KickDaemon / Close + the subjectgate slot seam.
+// The gateway 期 removed the HumanHandle door (Human/HumanPrincipal): an
+// off-process subject now drives its own cell through the subjectgate frame
+// protocol, so no synchronous door face hangs off Home. Admit is the
+// pure-membership primitive (neutral row + ring poke); embodiment is the
+// ring's, never Admit's.
 // Gate is GONE under sealed-pen —
 // Home no longer hands out a bare write gate; it Mints a welded Pen internally at
 // each admission point (the Minter never escapes). Remove (期8 S1) is the
@@ -26,12 +28,16 @@ import (
 // handing out an internal object instead of a capability method) turns this
 // test red (assembly hands out keys only — compile-time red line).
 func TestHomePublicSurface(t *testing.T) {
-	// Human rejoined the set with the期12 rebuild (subjectgate door面 — lazy
-	// identity-bound handle; caps stay on the live cell, taken per verb).
 	// PresenceSweptCount joined with the W4 presence/obs axis — the corollary-two
 	// enforcement read-out (sweep-cleared orphan tally, DoD-12): a read-only
 	// counter, not an accessor to any internal organ.
-	want := []string{"Admit", "CancelRequest", "Close", "Human", "HumanPrincipal", "KickDaemon", "PresenceSweptCount", "PrincipalOf", "Remove", "ResolvePrincipal", "Restart", "ServeAttach", "Subscribe", "View"}
+	// EnsureSubjectSlot/SubjectSlotFor/RemoveSubjectSlot joined with the gateway
+	// 期 S3: the per-identity binding slot seam the drivers/gateway伞包 drives
+	// through (the concrete Registry stays internal — these hand out the exported
+	// *SubjectSlot capability handle, never the bare registry object).
+	// ResolvePrincipal/PrincipalOf are the principal↔actor-id resolution the
+	// gateway + operate shim use to reach a subject's slot (no door handle).
+	want := []string{"Admit", "CancelRequest", "Close", "EnsureSubjectSlot", "KickDaemon", "PresenceSweptCount", "PrincipalOf", "Remove", "RemoveSubjectSlot", "ResolvePrincipal", "Restart", "ServeAttach", "SubjectSlotFor", "Subscribe", "View"}
 
 	typ := reflect.TypeOf((*platform.Home)(nil))
 	var got []string

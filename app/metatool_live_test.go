@@ -39,8 +39,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/wanpengxie/atoll/actors/kimi"
-	"github.com/wanpengxie/atoll/actors/xhs"
+	"github.com/wanpengxie/atoll/drivers/tools/kimi"
+	"github.com/wanpengxie/atoll/drivers/tools/xhs"
 	"github.com/wanpengxie/atoll/agent/base"
 	"github.com/wanpengxie/atoll/app"
 	"github.com/wanpengxie/atoll/lib/actorbase"

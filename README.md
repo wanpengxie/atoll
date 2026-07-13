@@ -87,7 +87,7 @@ runtime/     the kernel runtime (harness admission pipeline, actorrt cells/ports
 lib/         stdlib for actor authors (behavior, channelkit, metatool, introspect)
 platform/    channel assembly (server-side ChannelHome + daemon-side RunCompute)
 app/         HTTP API surface (identity, workspace, channel, daemon, WS)
-actors/      built-in actors (echo, device, kimi, xhs)
+drivers/     external-world drivers: tools/ (echo, device, kimi, xhs), gateway/ (human ingress)
 agent/       agent looper providers (claudecode, kimi)
 registry/    actor class registry (config → running actor)
 cmd/         binaries (server, daemon, cli)
@@ -121,7 +121,7 @@ An actor implements `Receive` and registers a constructor. The capabilities it g
 (`Caps`) are handed to it at birth — including the pen that welds its identity:
 
 ```go
-// actors/hello/hello.go
+// drivers/tools/hello/hello.go
 func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
     // handle the request, write the reply — the pen fills in identity;
     // Sender/ChannelID are not yours to set.
@@ -131,7 +131,7 @@ func (a *Actor) Receive(ctx context.Context, env *message.Envelope) error {
 ```
 
 ```go
-// actors/hello/register.go
+// drivers/tools/hello/register.go
 func init() { registry.Register("hello", construct) }
 
 func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {

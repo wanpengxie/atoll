@@ -216,6 +216,74 @@ func TestRemove_DueFireRace(t *testing.T) {
 	}
 }
 
+// TestRemove_ReviverStraddle_HumanSlotCleaned (gateway 期 P1, 死 ID 槽复建): a human's
+// factoryFor embodies it via EnsureSubjectSlot (装配链 step②). A stale-rec 补臂/EnsureLive
+// whose Lookup predated a concurrent Remove can RE-create the dead id's binding slot AFTER
+// RemoveSubjectSlot ran; verifyPostBuild's recheckGone branch must级联删槽 (RemoveSubjectSlot
+// + Forget), not merely Despawn the cell — else a dead-id slot leaks forever.
+func TestRemove_ReviverStraddle_HumanSlotCleaned(t *testing.T) {
+	ctx := context.Background()
+	h := openActivationHome(t, &testDesired{}, newTestBuilder())
+	id := admit(t, h, actor.ActorID("user:ghost"), actor.KindHuman)
+	if _, ok := h.SubjectSlotFor(id); ok {
+		t.Fatal("precondition: direct admit must not create the slot (factoryFor does)")
+	}
+
+	paused := make(chan struct{})
+	resume := make(chan struct{})
+	var once sync.Once
+	h.reviverStraddleHook = func() {
+		once.Do(func() { close(paused) })
+		<-resume
+	}
+
+	reviveErr := make(chan error, 1)
+	go func() { reviveErr <- (homeReviver{h: h}).EnsureLive(ctx, id) }()
+
+	select {
+	case <-paused:
+	case <-time.After(5 * time.Second):
+		t.Fatal("reviver never reached the straddle hook")
+	}
+	// factoryFor ran before the hook → the slot now exists for a still-active member.
+	if _, ok := h.SubjectSlotFor(id); !ok {
+		t.Fatal("factoryFor should have ensured the human slot before the hook")
+	}
+
+	// Remove runs FULLY inside the window: dereg + RemoveSubjectSlot drop the slot.
+	if err := h.Remove(ctx, id); err != nil {
+		t.Fatalf("Remove during straddle: %v", err)
+	}
+	if _, ok := h.SubjectSlotFor(id); ok {
+		t.Fatal("Remove must drop the slot")
+	}
+	// Model the concurrent stale-rec factoryFor: it RE-creates the dead id's slot AFTER
+	// Remove — the exact resurrection verifyPostBuild's recheckGone must undo.
+	h.EnsureSubjectSlot(id)
+	if _, ok := h.SubjectSlotFor(id); !ok {
+		t.Fatal("modelled stale-rec factoryFor should have re-created the slot")
+	}
+
+	// Resume the build: verifyPostBuild sees the id gone and must self-undo BOTH the cell
+	// AND the resurrected slot.
+	close(resume)
+	var rejected schedule.ReviveRejected
+	select {
+	case err := <-reviveErr:
+		if !errors.As(err, &rejected) {
+			t.Fatalf("EnsureLive post-Remove = %v, want ReviveRejected (self-undo)", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("reviver never returned after resume")
+	}
+	if live(h, id) {
+		t.Fatal("post-build recheck failed to Despawn the straddling cell")
+	}
+	if _, ok := h.SubjectSlotFor(id); ok {
+		t.Fatal("recheckGone must级联删槽 the resurrected dead-id slot (死 ID 槽复建 fix)")
+	}
+}
+
 // TestRemove_ReviverStraddle_SelfUndo (DoD ⓑ, S-P20's other half): the
 // reviver is parked BETWEEN its Lookup (which passed) and SpawnIfAbsent via
 // the test-only straddle hook; Remove runs to completion FULLY inside that

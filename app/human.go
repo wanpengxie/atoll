@@ -3,6 +3,7 @@ package app
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -17,9 +18,11 @@ import (
 // and Home.View (live roster) — actors/ and platform/ must not carry it.
 //
 // The WRITE itself is NOT here: a person writes truth ONLY through the subjectgate
-// door's welded pen (Home.Human → HumanHandle.Submit), never through an app-held
-// write gate (sealed-pen: the app holds no Minter, no bare Pen). This file resolves
-// routing and hands the result to the door; the door welds identity and commits.
+// frame path onto their own cell's welded pen (a submit frame → the cell's
+// identity-dimension Sys verb), never through an app-held write gate (sealed-pen:
+// the app holds no Minter, no bare Pen). This file resolves routing and hands the
+// result to the gateway (via ResolveRoutingForGateway); the cell welds identity
+// and commits.
 
 // submitInput is the user's RAW intent (the parsed HTTP body) — NOT a ready
 // envelope. Routing resolution turns its (possibly empty) audience into a
@@ -43,9 +46,28 @@ type routingError struct {
 
 func (e *routingError) Error() string { return e.detail }
 
-// clientRequestTTLMs is the default TTL for client-sent messages (product
-// decision, lives in the app layer).
-const clientRequestTTLMs int64 = 30_000
+// ResolveRoutingForGateway is the gateway 期 S3 injection adapter (design §5.3:
+// routing政策留 app, 组装根注入路由解析面). The gateway core (drivers/gateway) holds
+// this method value as its Routing面; the assembly root bridges it (app → drivers is
+// fenced). It wraps resolveRouting, mapping a per-request routingError into the
+// retryable-detail return so the gateway emits an unavailable error frame (never
+// writing the condition as truth), and a genuine failure into err. audienceIn is the
+// client's explicit audience (empty → policy resolves it).
+func (a *App) ResolveRoutingForGateway(ctx context.Context, chID channel.ID, audienceIn []actor.ActorID, kindIn message.Kind) ([]actor.ActorID, message.Kind, string, error) {
+	in := submitInput{Kind: string(kindIn)}
+	for _, id := range audienceIn {
+		in.Audience = append(in.Audience, string(id))
+	}
+	audience, kind, err := a.resolveRouting(ctx, chID, in)
+	if err != nil {
+		var re *routingError
+		if errors.As(err, &re) {
+			return nil, kind, re.detail, nil
+		}
+		return nil, kind, "", err
+	}
+	return audience, kind, "", nil
+}
 
 // resolveRouting reproduces the channel's no-audience routing policy: an explicit
 // audience is honoured as-is; otherwise default_agent is the INTENT pointer,

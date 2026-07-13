@@ -54,8 +54,8 @@ func TestActorStatusProjectsPresence(t *testing.T) {
 		Presence: fixedPresence{snapshot: presence.Snapshot{
 			Member: true, L1Present: true, L1StartedAt: started,
 			L3: map[actorrt.ObsKind]presence.Testimony{
-				actorrt.ObsKind(introspect.ObsDevicePresence): {Val: introspect.MarshalDevicePresence(true), ReceivedAt: 7, Source: presence.SourceDoor},
-				"load": {Val: []byte{1, 2}, ReceivedAt: 8, Source: presence.SourceBroker, StaleFromPriorLife: true},
+				actorrt.ObsKind(introspect.ObsDevicePresence): {Val: introspect.MarshalDevicePresence(true), ReceivedAt: 7},
+				"load": {Val: []byte{1, 2}, ReceivedAt: 8, StaleFromPriorLife: true},
 			},
 		}},
 	})

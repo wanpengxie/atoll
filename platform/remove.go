@@ -75,16 +75,29 @@ func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
 	// ③ double-tap: kill whatever the Reviver may have spawned in the window
 	// between ① and ②'s commit (see the doc comment above).
 	h.channel.Cells().DespawnID(id)
-	// Presence对称清账 (期12 S4, pending-leftovers #3): drop every ws session
-	// token and Forget the fold snapshot — the ring's削 is a quiet teardown
-	// with no down edge, so without this the removed member's device presence
-	// would stay "online" forever. Timer rows are already cleared by the
-	// dereg cascade (clearTimersTx); the scheduler's EnsureLive户籍拒 is the
-	// second line.
-	h.clearPresence(id)
+	// Presence归一清账 (gateway 期 S4, design §5.4 "Forget 证词账清洁边"): the
+	// ring's削 is a quiet teardown with no down edge, so without this the removed
+	// member's device presence would fold "online" forever. Two owner-side清账:
+	// 级联删槽 (RemoveSubjectSlot — drop the binding slot from the registry and
+	// revoke its layer-3 testimony to any observer) + Forget the presence fold row
+	// (unknown 恒 = 无行). Attribution honesty: RemoveSubjectSlot/Forget are not
+	// serialized against a concurrent re-Admit, but 身份不可复活 mints a FRESH id on
+	// re-Admit, so this targets the dead id only; a residual race is at worst a
+	// false-unknown (advisory-safe, never a false-online — 解绑永不训练 offline).
+	// Timer rows are already cleared by the dereg cascade (clearTimersTx); the
+	// scheduler's EnsureLive户籍拒 is the second line.
+	h.RemoveSubjectSlot(id)
+	h.presenceFold.Forget(id)
 	h.reviveLogMu.Lock()
 	delete(h.reviveLogAt, id)
 	delete(h.reviveBackoff, id)
 	h.reviveLogMu.Unlock()
+	// Membership撤销 emit point (gateway 期 S3 表②): the dereg cascade has committed,
+	// so a subject that just lost membership must have its read-side频道臂 sealed.
+	// The assembly root bridges this into the gateway's RevocationSource; the gateway
+	// seals the arm and Forgets the slot testimony. nil sink (no gateway) → no-op.
+	if h.onRevoke != nil {
+		h.onRevoke(id)
+	}
 	return nil
 }

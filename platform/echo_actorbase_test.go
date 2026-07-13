@@ -7,11 +7,12 @@ package platform_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/actors/echo"
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -19,6 +20,38 @@ import (
 )
 
 const echoTestChannelID = channel.ID("test-echo-actorbase")
+
+// echoProbeType / echoProbeID / echoProbeDef are an inline echo-equivalent Proc
+// (reply payload unchanged on echoProbeType, else fail type_unsupported). The
+// concept-budget consumer these host tests exercise only needs SOME bare
+// actorbase.Proc, not the drivers/tools/echo package — inlining it keeps
+// platform_test from importing downstream (drivers/*), which the drivers fence
+// forbids for everyone but the assembly root cmd/*.
+const echoProbeType = "echo.say"
+
+const echoProbeID = actor.ActorID("echo")
+
+func echoProbeDef() actorbase.Def {
+	return actorbase.Def{
+		Doc: "test-only inline echo: echo.say replies payload unchanged, else type_unsupported",
+		New: func() (actorbase.Proc, error) {
+			return func(sys actorbase.Sys) error {
+				for {
+					msg, err := sys.Recv()
+					if err != nil {
+						return err
+					}
+					switch msg.Type {
+					case echoProbeType:
+						_, _ = sys.Reply(msg, msg.Payload)
+					default:
+						_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("echo actor does not handle %s", msg.Type))
+					}
+				}
+			}, nil
+		},
+	}
+}
 
 func newEchoTestHome(t *testing.T) *platform.Home {
 	t.Helper()
@@ -31,7 +64,7 @@ func newEchoTestHome(t *testing.T) *platform.Home {
 	return h
 }
 
-// TestEcho_CallReplyClosesThroughRealCellHost spawns echo.Def() over the
+// TestEcho_CallReplyClosesThroughRealCellHost spawns echoProbeDef() over the
 // production Home.SpawnIfAbsent path and drives one echo.say request end to end:
 // pen write -> harness -> cell delivery -> actorbase engine -> echo's Proc ->
 // sys.Reply -> pen write of the terminal.
@@ -39,15 +72,15 @@ func TestEcho_CallReplyClosesThroughRealCellHost(t *testing.T) {
 	ch := newEchoTestHome(t)
 
 	callerID := actor.ActorID("user:caller")
-	echoID := echo.DefaultActorID
+	echoID := echoProbeID
 
 	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
-	echoID, err := platform.SpawnForTest(ch, echoID, actor.KindTool, platform.ActorFactory{Proc: echo.Def()})
+	echoID, err := platform.SpawnForTest(ch, echoID, actor.KindTool, platform.ActorFactory{Proc: echoProbeDef()})
 	if err != nil {
 		t.Fatalf("spawn echo actor: %v", err)
 	}
 
-	reqID := writeRequest(t, callerPen, echoID, echo.TypeSay, nil)
+	reqID := writeRequest(t, callerPen, echoID, echoProbeType, nil)
 
 	term := pollForTerminal(t, ch, reqID, 5*time.Second)
 	if term.Kind != message.KindResponse {
@@ -73,10 +106,10 @@ func TestEcho_UnknownTypeFails(t *testing.T) {
 	ch := newEchoTestHome(t)
 
 	callerID := actor.ActorID("user:caller2")
-	echoID := echo.DefaultActorID
+	echoID := echoProbeID
 
 	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
-	echoID, err := platform.SpawnForTest(ch, echoID, actor.KindTool, platform.ActorFactory{Proc: echo.Def()})
+	echoID, err := platform.SpawnForTest(ch, echoID, actor.KindTool, platform.ActorFactory{Proc: echoProbeDef()})
 	if err != nil {
 		t.Fatalf("spawn echo actor: %v", err)
 	}

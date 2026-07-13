@@ -21,8 +21,8 @@ import (
 //
 // This is the CANONICAL control path, and now the ONLY one: the channel-control
 // HTTP endpoints are shims (operate_shim.go) that replay the session user through
-// the door (Home.Human(u).Submit, audience=[system]) into this executor — no
-// handler writes the composition tables directly (红线11). handleDeleteDecl stays
+// the subjectgate frame path (a submit frame, audience=[system]) into this
+// executor — no handler writes the composition tables directly (红线11). handleDeleteDecl stays
 // a world-layer soft-delete (its per-channel cascade is a system-authored mirror,
 // not a member action), outside this face.
 type operateExecutor struct {
@@ -109,14 +109,18 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platform.OperateReq
 	if err != nil {
 		return nil, err
 	}
-	// World-layer ref-eligibility (introduce 权是唯一复合世界层判定的动词).
+	// World-layer ref-eligibility (introduce 权是唯一复合世界层判定的动词). The
+	// authority test is the template two-axis law — owner 恒是 principal 匹配, with
+	// NO species restriction: any sender whose principal == the decl's owner may
+	// introduce it. (纠错归位, gateway 期 S5: the former home.Human() guard smuggled
+	// a Kind==human limit into this authorization path — an off-species owner would
+	// have been wrongly refused. The registry principal query (PrincipalOf) is the
+	// sole owner-match source.)
 	principal, hasPrincipal := "", false
-	if _, herr := home.Human(ctx, req.Sender); herr == nil {
-		if p, ok, perr := home.PrincipalOf(ctx, req.Sender); perr != nil {
-			return nil, perr
-		} else if ok {
-			principal, hasPrincipal = p, true
-		}
+	if p, ok, perr := home.PrincipalOf(ctx, req.Sender); perr != nil {
+		return nil, perr
+	} else if ok {
+		principal, hasPrincipal = p, true
 	}
 	if visibility != "public" && !(hasPrincipal && principal == owner) {
 		return nil, &platform.OperateError{Code: "forbidden", Detail: "declaration is not public and sender is not its owner"}

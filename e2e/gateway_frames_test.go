@@ -1,0 +1,278 @@
+package e2e
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+// requireE2EBin skips unless ATOLL_E2E_BIN points at a dir with atoll-server (the
+// binaries `make e2e-loop` builds). Bare `go test ./...` leaves it unset → skip.
+func requireE2EBin(t *testing.T) string {
+	t.Helper()
+	binDir := os.Getenv("ATOLL_E2E_BIN")
+	if binDir == "" {
+		t.Skip("ATOLL_E2E_BIN not set; run via `make e2e-loop`")
+	}
+	if _, err := os.Stat(filepath.Join(binDir, "atoll-server")); err != nil {
+		t.Fatalf("binary missing: %v", err)
+	}
+	return binDir
+}
+
+// makeDirs creates the named subdirs under root and returns their absolute paths.
+func makeDirs(t *testing.T, root string, names ...string) map[string]string {
+	t.Helper()
+	out := map[string]string{}
+	for _, n := range names {
+		p := filepath.Join(root, n)
+		if err := os.MkdirAll(p, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", n, err)
+		}
+		out[n] = p
+	}
+	return out
+}
+
+// TestGatewayFrames is the gateway-期 frame-protocol black-box (DoD-2): a home-side
+// human member drives ALL five business frames (submit / resolve / cancel / after /
+// cancel_timer) plus the two control frames (attach / detach) over the real /ws,
+// and its presence自报 is read back out-of-band through the status API. It is
+// server-ONLY — the human embodiment is home-side (the reconcile ring keeps the
+// admitted member's cell up), so no daemon is needed; keeping it daemon-free makes
+// the frame contract deterministic and fast.
+//
+// The four control-垫片 types (introduce / remove / restart / set_default_agent)
+// ride the SAME subjectgate submit-frame path and are exercised end-to-end in
+// TestLoop (which has real agents to operate on). 非成员 tail-only (a workspace
+// member who is not a channel member gets a read-only session whose business
+// frames are refused not_member) is NOT reachable through today's HTTP surface —
+// there is no endpoint to add a second workspace member, and a channel's creator is
+// auto-admitted as a member — so it is covered at the gateway Session unit layer,
+// not here (申报, S6 return).
+func TestGatewayFrames(t *testing.T) {
+	binDir := requireE2EBin(t)
+	serverBin := filepath.Join(binDir, "atoll-server")
+
+	root := t.TempDir()
+	dirs := makeDirs(t, root, "serverwd", "channels", "home", "logs")
+	dbPath := filepath.Join(root, "app.db")
+	env := scrubbedEnv(dirs["home"])
+
+	var serverLog string
+	t.Cleanup(func() {
+		if t.Failed() && serverLog != "" {
+			t.Logf("server log tail:\n%s", tailLog(serverLog, 60))
+		}
+	})
+
+	// Start the server with the same probe→listen bind-retry TestLoop uses.
+	var server *proc
+	var base string
+	gen := 0
+	for attempt := 1; ; attempt++ {
+		port := freePort(t)
+		base = fmt.Sprintf("http://127.0.0.1:%d", port)
+		gen++
+		serverLog = filepath.Join(dirs["logs"], fmt.Sprintf("server-%d.log", gen))
+		server = startProc(t, fmt.Sprintf("gwframes-server#%d", gen), serverBin, []string{
+			"-addr", fmt.Sprintf("127.0.0.1:%d", port),
+			"-db", dbPath,
+			"-channel-db-dir", dirs["channels"],
+		}, dirs["serverwd"], serverLog, env)
+		if waitHealthzErr(base, server, 30*time.Second) == nil {
+			break
+		}
+		if server.exited() && attempt < 3 {
+			server.reclaim()
+			continue
+		}
+		t.Fatalf("server not healthy; log tail:\n%s", tailLog(serverLog, 50))
+	}
+
+	api := newAPIClient(t, base)
+	reg := api.must("POST", "/api/identity/register",
+		map[string]any{"email": "gw@example.com", "password": "secret123", "display_name": "GW"},
+		http.StatusCreated)
+	userID, _ := reg["id"].(string)
+	ws1 := api.must("POST", "/api/workspaces", map[string]any{"name": "gw-ws"}, http.StatusCreated)
+	wsID, _ := ws1["id"].(string)
+	ch := api.must("POST", "/api/workspaces/"+wsID+"/channels", map[string]any{"name": "home"}, http.StatusCreated)
+	chID, _ := ch["id"].(string)
+
+	// The creator is auto-admitted as a human channel member (the reconcile ring
+	// spins its home-side cell). Resolve its actor id — the subject we drive frames
+	// as, and the audience of the self-addressed requests below.
+	var humanID string
+	pollUntil(t, "creator represented by one active human", 30*time.Second, func() bool {
+		_, m := api.do("GET", "/api/channels/"+chID+"/actors", nil)
+		rows, _ := m["actors"].([]any)
+		for _, raw := range rows {
+			row, _ := raw.(map[string]any)
+			if row["kind"] == "human" && row["principal"] == userID {
+				humanID, _ = row["id"].(string)
+				return humanID != ""
+			}
+		}
+		return false
+	})
+
+	cookie := api.cookieHeader()
+	ws := dialWS(t, base, cookie, chID, 0)
+
+	// ---- presence 真路径 ---------------------------------------------------
+	// The attach seated a device (首入 → online); the home-side human cell reads its
+	// slot snapshot and self-reports device presence, folded read-time into the
+	// status API (out-of-band, never a truth-log write).
+	pollUntil(t, "human self-reports device online after attach", 30*time.Second, func() bool {
+		_, m := api.do("GET", "/api/channels/"+chID+"/actors/"+humanID+"/status", nil)
+		known, _ := m["known"].(bool)
+		online, _ := m["online"].(bool)
+		return known && online
+	})
+
+	// ---- submit (event) ----------------------------------------------------
+	// An explicit audience skips gateway routing; a public event lands in the log
+	// and shows on the feed投影.
+	eventID := frameSubmit(t, ws, map[string]any{
+		"msg_type":   "gw.note",
+		"kind":       "event",
+		"visibility": "public",
+		"audience":   []string{humanID},
+		"payload":    json.RawMessage(`{"n":1}`),
+	})
+	if _, ok := ws.awaitTail(func(env map[string]any) bool { return env["id"] == eventID }, 15*time.Second); !ok {
+		t.Fatalf("event %s never appeared on the feed", eventID)
+	}
+
+	// ---- submit (request) + resolve ---------------------------------------
+	// A self-addressed human.approve request is left OPEN by the mailbox serve loop
+	// (default-deferred); the person's resolve frame is the real answer.
+	reqID := frameSubmit(t, ws, map[string]any{
+		"msg_type": "human.approve",
+		"kind":     "request",
+		"audience": []string{humanID},
+		"payload":  json.RawMessage(`{}`),
+	})
+	rec := frameVerb(t, ws, "resolve", "resolve-1", map[string]any{
+		"req_id": reqID, "decision": "approved", "payload": json.RawMessage(`{"note":"ok"}`),
+	})
+	if got := receiptField(rec, "req_id"); got != reqID {
+		t.Fatalf("resolve receipt req_id=%q want %q", got, reqID)
+	}
+	respEnv, ok := ws.awaitTail(func(env map[string]any) bool {
+		return env["kind"] == "response" && env["parent_id"] == reqID && terminalStatus(env) == "completed"
+	}, 15*time.Second)
+	if !ok {
+		t.Fatalf("resolve: no completed terminal for %s", reqID)
+	}
+	if d := payloadField(respEnv, "decision"); d != "approved" {
+		t.Fatalf("resolve terminal decision=%q want approved (payload %v)", d, respEnv["payload"])
+	}
+
+	// ---- submit (request) + cancel (self-cancel) --------------------------
+	// The sender may cancel its own open request → a failed terminal (义务归位: a
+	// subject's own request, self-closed).
+	req2 := frameSubmit(t, ws, map[string]any{
+		"msg_type": "human.approve",
+		"kind":     "request",
+		"audience": []string{humanID},
+		"payload":  json.RawMessage(`{}`),
+	})
+	rec = frameVerb(t, ws, "cancel", "cancel-1", map[string]any{"req_id": req2})
+	if got := receiptField(rec, "req_id"); got != req2 {
+		t.Fatalf("cancel receipt req_id=%q want %q", got, req2)
+	}
+	if _, ok := ws.awaitTail(func(env map[string]any) bool {
+		return env["kind"] == "response" && env["parent_id"] == req2 && terminalStatus(env) == "failed"
+	}, 15*time.Second); !ok {
+		t.Fatalf("cancel: no failed terminal for %s", req2)
+	}
+
+	// ---- after + cancel_timer ---------------------------------------------
+	// A durable timer far in the future, then cancelled before it can fire.
+	rec = frameVerb(t, ws, "after", "after-1", map[string]any{
+		"duration_ms": 60000, "msg_type": "human.message", "payload": json.RawMessage(`{}`),
+	})
+	timerID := receiptField(rec, "timer_id")
+	if timerID == "" {
+		t.Fatalf("after receipt carries no timer_id: %v", rec)
+	}
+	rec = frameVerb(t, ws, "cancel_timer", "ct-1", map[string]any{"timer_id": timerID})
+	if got := receiptField(rec, "timer_id"); got != timerID {
+		t.Fatalf("cancel_timer receipt timer_id=%q want %q", got, timerID)
+	}
+
+	// ---- detach ------------------------------------------------------------
+	// A SECOND connection shares the subject's (channel) 频道臂 with the primary `ws`
+	// (same principal + channel = one arm, per design §5.6). detach SEALS that shared
+	// arm — 世代失效 → pump join → 双向 gate 生效 — and投 NO receipt frame (spec §S2 表②
+	// detach receipt = "—", 线性化点 = seal 完成; the seal + teardown IS the result).
+	// 真断言 (P0-3): the seal propagates to the CO-ARM device — BOTH ws2 AND the primary
+	// `ws` are torn down, proving detach sealed the shared binding (not just closed
+	// ws2's own socket).
+	ws2 := dialWS(t, base, cookie, chID, 0)
+	if err := ws2.send("detach", "detach-1", map[string]any{"channel_id": chID}); err != nil {
+		t.Fatalf("detach send: %v", err)
+	}
+	// No receipt/error frame is expected for detach; if the server ever sent one it
+	// would surface as a stray ack — assert the teardown instead.
+	select {
+	case <-ws2.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("detach: server did not tear the detaching session down within 10s")
+	}
+	select {
+	case <-ws.done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("detach seal must tear down the CO-ARM primary session too (shared 频道臂 sealed)")
+	}
+
+	server.kill9(t)
+}
+
+// frameSubmit sends one submit frame and asserts a receipt, returning the minted
+// message id (an error frame fails the test).
+func frameSubmit(t *testing.T, ws *wsClient, payload map[string]any) string {
+	t.Helper()
+	refCounter++
+	ref := fmt.Sprintf("gwsubmit-%d", refCounter)
+	rec := sendAndAwait(t, ws, "submit", ref, payload)
+	return receiptField(rec, "message_id")
+}
+
+// frameVerb sends one upstream verb frame and returns its receipt (an error frame
+// fails the test).
+func frameVerb(t *testing.T, ws *wsClient, frameType, ref string, payload map[string]any) map[string]any {
+	t.Helper()
+	return sendAndAwait(t, ws, frameType, ref, payload)
+}
+
+func sendAndAwait(t *testing.T, ws *wsClient, frameType, ref string, payload map[string]any) map[string]any {
+	t.Helper()
+	if err := ws.send(frameType, ref, payload); err != nil {
+		t.Fatalf("%s: ws send: %v", frameType, err)
+	}
+	rec, ok := ws.awaitRef(ref, 10*time.Second)
+	if !ok {
+		t.Fatalf("%s: no receipt/error frame for ref %s within 10s", frameType, ref)
+	}
+	if rec["frame_type"] == "error" {
+		t.Fatalf("%s: frame error %q (detail %q)", frameType, frameErrCode(rec), frameErrDetail(rec))
+	}
+	if rec["frame_type"] != "receipt" {
+		t.Fatalf("%s: unexpected frame %v", frameType, rec)
+	}
+	return rec
+}
+
+// receiptField reads one string field from a receipt frame's payload.
+func receiptField(rec map[string]any, key string) string {
+	p, _ := rec["payload"].(map[string]any)
+	v, _ := p[key].(string)
+	return v
+}

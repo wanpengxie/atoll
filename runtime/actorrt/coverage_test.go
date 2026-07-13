@@ -276,17 +276,16 @@ func TestDeliverStoppedOutcome(t *testing.T) {
 // the substrate refuses to report Delivered for any non-nil enqueue error).
 type fakeErrEmbodiment struct{ started time.Time }
 
-func (fakeErrEmbodiment) Deliver(*message.Envelope) error        { return errors.New("weird enqueue error") }
-func (p fakeErrEmbodiment) startedAt() time.Time                 { return p.started }
-func (fakeErrEmbodiment) cancelRequest(message.ID)               {}
-func (fakeErrEmbodiment) occupantDriver() (OccupantDriver, bool) { return nil, false }
-func (fakeErrEmbodiment) initiateStop()                          {}
-func (fakeErrEmbodiment) beginTeardown()                         {}
-func (fakeErrEmbodiment) signalDespawn(context.Context)          {}
-func (fakeErrEmbodiment) doneCh() <-chan struct{}                { return nil }
-func (fakeErrEmbodiment) isLive() bool                           { return false }
-func (fakeErrEmbodiment) markDead()                              {}
-func (fakeErrEmbodiment) kind() actor.Kind                       { return "" }
+func (fakeErrEmbodiment) Deliver(*message.Envelope) error { return errors.New("weird enqueue error") }
+func (p fakeErrEmbodiment) startedAt() time.Time          { return p.started }
+func (fakeErrEmbodiment) cancelRequest(message.ID)        {}
+func (fakeErrEmbodiment) initiateStop()                   {}
+func (fakeErrEmbodiment) beginTeardown()                  {}
+func (fakeErrEmbodiment) signalDespawn(context.Context)   {}
+func (fakeErrEmbodiment) doneCh() <-chan struct{}         { return nil }
+func (fakeErrEmbodiment) isLive() bool                    { return false }
+func (fakeErrEmbodiment) markDead()                       {}
+func (fakeErrEmbodiment) kind() actor.Kind                { return "" }
 
 // TestDeliverDefaultArmMapsToStopped: an enqueue error that is neither
 // ErrMailboxFull nor ErrCellStopped maps to Stopped (deliver's default switch
