@@ -34,7 +34,15 @@ build-release:
 # ----------------------------------------------------------------------------
 # test / lint
 # ----------------------------------------------------------------------------
+# test — 日常/收口通用门。atolltestfast 只影响测试进程内的 sqlite 同步档
+# （fsync 关闭：测试不做崩溃恢复，同步纯浪费；生产二进制无此 tag，见
+# runtime/internal/store/pragma_sync.go）。
 test:
+	go test -tags atolltestfast -race ./...
+
+# test-strict — 不带任何测试加速 tag 的全真档（怀疑加速档掩盖了
+# durability 相关行为时用；常规收口用 test 即可）。
+test-strict:
 	go test -race ./...
 
 # e2e-loop — C1 最小闭环：真双进程六段旅程（e2e/ 黑盒 harness）。

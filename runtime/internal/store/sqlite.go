@@ -87,8 +87,8 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 	// is the per-connection geometry. (journal_mode is persisted in the file
 	// itself; synchronous / foreign_keys / busy_timeout are per-connection.)
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)",
-		dbPath)
+		"file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(%s)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)",
+		dbPath, syncPragma)
 	if opts.ReadOnly {
 		// WAL/synchronous not applicable to a read-only open; FK still guards
 		// any PRAGMA-sensitive read semantics, busy_timeout still applies.
