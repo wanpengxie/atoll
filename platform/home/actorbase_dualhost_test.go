@@ -17,15 +17,16 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
-// actorbase-spec-v1.md §5 DoD⑦: "同一份 Def cell/port 两宿主跑(已知不对称两个:
-// fork=ErrUnsupported、daemon caller cancel 信号半降级)". This file is the
-// dual-host proof: echoProbeDef() — the SAME Def platform/home/echo_actorbase_test.go
-// already runs over the cell host (Home.SpawnIfAbsent) — is spawned a SECOND time
-// here over a real wire, daemon (port) host, using the identical assembly
-// seam (actorbase.New) production code takes (compute.computeRing.buildOne
-// wires this exact same NewLiveArms(rb, inc, host)+Hooks{} pair; this test
-// only substitutes a hand-rolled daemon-side runtime for computeRing's
-// reconcile loop so it can wire a SINGLE known decl deterministically).
+// actorbase-spec-v1.md §5 DoD⑦: "同一份 Def cell/port 两宿主跑(已知不对称:
+// fork=ErrUnsupported)". This file is the dual-host proof: echoProbeDef() —
+// the SAME Def platform/home/echo_actorbase_test.go already runs over the
+// cell host (Home.SpawnIfAbsent) — is spawned a SECOND time here over a real
+// wire, daemon (port) host, using the same assembly seam (actorbase.New)
+// production code takes (compute.computeRing.buildOne wires the same
+// NewLiveArms(rb, inc, host); this test substitutes a hand-rolled daemon-side
+// runtime for computeRing's reconcile loop so it can wire a SINGLE known decl
+// deterministically, and deliberately leaves Hooks.Canceller nil — production
+// wires cellCancelForwarder there — since dual-host echo needs no cancel arm).
 
 // dualHostDaemon is the minimal test-local daemon side: an actorrt.Runtime
 // dispatching inbound envelopes to whichever cell OpenStream installed —
@@ -49,9 +50,11 @@ func (h *dualHostDaemon) dispatch(target actor.ActorID, env *message.Envelope) e
 // spawnActorbaseOverWire installs def as a daemon-hosted actorbase Proc: it
 // dials ch's real /compute attach endpoint, OpenStreams id, and spawns
 // actorbase.New(link.NewLiveArms(...), actorbase.Hooks{}, def) over the
-// daemon's own actorrt.Runtime — the exact production wiring
-// platform/compute/ring.go's buildOne performs (daemon Hooks{}: Canceller nil,
-// spec §3's known cancel-upstream gap).
+// daemon's own actorrt.Runtime — the same wiring platform/compute/ring.go's
+// buildOne performs EXCEPT Hooks: production fills Canceller with
+// cellCancelForwarder's cancel-upstream closure (forwarders.go); this test
+// deliberately passes Hooks{} (nil Canceller) because the echo probe makes no
+// outbound calls and the test drives no cancel path.
 func spawnActorbaseOverWire(t *testing.T, ch *home.Home, id actor.ActorID, def actorbase.Def) (*link.Dialer, *dualHostDaemon) {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -78,8 +81,10 @@ func spawnActorbaseOverWire(t *testing.T, ch *home.Home, id actor.ActorID, def a
 	}
 	rb := link.NewRebindableArms(arms)
 	_, _, _ = host.rt.SpawnIfAbsent(id, actor.KindTool, func(inc actorrt.Incarnation) actorrt.Actor {
-		// The SAME two lines platform/compute/ring.go's buildOne runs in production
-		// (link.NewLiveArms + actorbase.Hooks{}) — daemon Canceller stays nil.
+		// Mirrors platform/compute/ring.go's buildOne (link.NewLiveArms), except
+		// production fills Hooks.Canceller with cellCancelForwarder's closure —
+		// this test deliberately passes Hooks{} (nil Canceller) because the echo
+		// probe makes no outbound calls and drives no cancel path.
 		return actorbase.New(link.NewLiveArms(rb, inc, host.rt), actorbase.Hooks{}, def)
 	})
 	d.Start()
@@ -146,11 +151,13 @@ func forkProbeDef() actorbase.Def {
 	}
 }
 
-// TestActorbaseDef_DaemonHostForkReturnsErrUnsupported is DoD⑦'s second named
-// asymmetry (the first, cancel, is already unit-tested by
-// TestEngine_PendingCancelSelfClosesAndSkipsCancellerWhenNil at the ledger
-// level): a daemon-hosted Sys.Fork must answer actorbase.ErrUnsupported
-// through the real wire-hosted assembly, not silently succeed or panic.
+// TestActorbaseDef_DaemonHostForkReturnsErrUnsupported is DoD⑦'s remaining
+// named asymmetry (fork; the former cancel asymmetry is closed in production
+// by computeRing's cellCancelForwarder, and the nil-Canceller behaviour is
+// unit-tested by TestEngine_PendingCancelSelfClosesAndSkipsCancellerWhenNil at
+// the ledger level): a daemon-hosted Sys.Fork must answer
+// actorbase.ErrUnsupported through the real wire-hosted assembly, not
+// silently succeed or panic.
 func TestActorbaseDef_DaemonHostForkReturnsErrUnsupported(t *testing.T) {
 	ch := newClosureHome(t)
 

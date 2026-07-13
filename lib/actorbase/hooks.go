@@ -14,11 +14,14 @@ import (
 type Hooks struct {
 	// Canceller reaches the protocol-level cancel signal for one in-flight
 	// outbound request (pending.Cancel's "经 Canceller 投递" half, spec
-	// §1.5) — the assembly root wires it to Home.CancelRequest (cell hosts)
-	// or leaves it nil (daemon hosts, spec §3's known gap: the caller-side
-	// cancel upstream frame does not exist yet). nil = Cancel still commits
-	// the caller's own unanswered_timeout terminal; only the signal to the
-	// receiver's in-station account is skipped.
+	// §1.5). Both production assembly paths fill it: cell hosts wire it to
+	// Home.CancelRequest, and daemon hosts wire it to computeRing's
+	// cellCancelForwarder, which forwards a cancel-upstream frame up the
+	// caller's link stream (platform/compute/forwarders.go — the frame exists;
+	// the former §3 gap is closed). nil only occurs in tests or an unassembled
+	// stage; there Cancel still commits the caller's own unanswered_timeout
+	// terminal and only the signal to the receiver's in-station account is
+	// skipped.
 	Canceller func(target actor.ActorID, requestID message.ID)
 
 	// TimeoutResolver supplies the per-(target, request type) closure

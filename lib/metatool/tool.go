@@ -62,7 +62,8 @@ type RuntimeContext struct {
 func (rc RuntimeContext) InTurn() bool { return rc.Trigger.Envelope.ID != "" }
 
 // payloadHint builds the recovery hint for a payload_invalid error.
-// Tool names (list_actors, describe_type) live here in metatool, not in
+// Tool names (list_actors, describe_type) live here in metatool, not in a
+// separate names package — the tool vocabulary is owned by this layer.
 func payloadHint(actorID, typeName string) string {
 	if actorID != "" && typeName != "" {
 		return fmt.Sprintf("Call describe_type(%q, %q) to see payload_example", actorID, typeName)

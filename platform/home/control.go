@@ -11,9 +11,10 @@ import (
 
 // hooks is the actorbase engine's per-host wiring for every Proc-shaped def
 // this Home builds (spec §3's out-generation matrix, row 1): a cell host always
-// has a live CancelRequest reach, so Hooks.Canceller is never nil here (the
-// daemon-side gap — no caller-side cancel upstream frame — is a DIFFERENT
-// host, wired in compute.go instead).
+// has a live CancelRequest reach, so Hooks.Canceller is never nil here. The
+// daemon host wires its own Canceller too — computeRing's cellCancelForwarder
+// sends the caller-side cancel-upstream frame (platform/compute/forwarders.go),
+// which handleCancelUpstream below receives.
 func (h *Home) hooks() actorbase.Hooks {
 	return actorbase.Hooks{Canceller: h.CancelRequest}
 }

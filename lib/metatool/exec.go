@@ -190,19 +190,43 @@ func (x *Exec) CallSyncResult(ctx context.Context, rc RuntimeContext, spec Reque
 }
 
 // CallSyncRaw drives a synchronous introspection query and returns the FINAL
-// response payload as raw JSON (list_actors' live-catalog path). A failed /
-// missing final yields ok=false.
-func (x *Exec) CallSyncRaw(ctx context.Context, rc RuntimeContext, spec RequestSpec) (rawPayload []byte, ok bool) {
+// response payload as raw JSON (list_actors' live-catalog path). On failure it
+// returns a ready actor-CLI closed-set error carrying the failure's REAL
+// category (CallSyncResult's own distinctions, never one collapsed bucket): a
+// call/wire error or an illegal non-response final → internal_error; no final
+// within the window → timeout; an actor-returned failure → the terminal-reason
+// mapping (NormalizeCallActorResult's law). nil failure = rawPayload is the
+// live final payload.
+func (x *Exec) CallSyncRaw(ctx context.Context, rc RuntimeContext, spec RequestSpec) (rawPayload []byte, failure *ResultValue) {
 	bspec, deadline := x.buildRequestSpec(rc, spec)
 	window := ResolveFastPathWindow(deadline, DefaultTimeout, true)
 	finalEnv, ok, err := x.Call(ctx, bspec, window)
-	if err != nil || !ok || finalEnv == nil || finalEnv.Kind != message.KindResponse {
-		return nil, false
+	if err != nil {
+		rv := NewError(spec.ToolName, InternalError,
+			"channel request "+spec.EnvelopeType+" failed: "+err.Error(),
+			"Inspect adapter/link status and retry", nil)
+		return nil, &rv
 	}
-	if ResponseFailureReason(finalEnv.Payload) != "" {
-		return nil, false
+	if !ok || finalEnv == nil {
+		// This path is a TRANSIENT sys.Call — never a cross-turn job — so the
+		// hint must not point at list_pending (the request is not in the
+		// JobTable).
+		rv := NewError(spec.ToolName, Timeout,
+			spec.EnvelopeType+" did not return a result in time",
+			"Retry, or check that the system actor is present", nil)
+		return nil, &rv
 	}
-	return finalEnv.Payload, true
+	if finalEnv.Kind != message.KindResponse {
+		rv := NewError(spec.ToolName, InternalError,
+			spec.EnvelopeType+" final envelope is not a response (kind="+string(finalEnv.Kind)+")",
+			"Inspect adapter logs and retry", nil)
+		return nil, &rv
+	}
+	if reason := ResponseFailureReason(finalEnv.Payload); reason != "" {
+		rv := TerminalFailureToActorCLI(spec.ToolName, spec.HandlerActorID, spec.EnvelopeType, reason, nil)
+		return nil, &rv
+	}
+	return finalEnv.Payload, nil
 }
 
 // ackResult renders the immediate ack with the standard collect-it guidance.
@@ -210,10 +234,6 @@ func (x *Exec) ackResult(toolName string, ack AckDescriptor) ResultValue {
 	id := ack.RequestID.String()
 	ack.Guidance = "Accepted. To wait, call await_result(request_id=" + id +
 		"). If you do not wait, the result returns as a new message (parent_id=" + id + ")."
-	ack.ToWait = ToWaitHint{
-		Tool:   "await_result",
-		Params: map[string]any{"request_id": id},
-	}
-	ack.NotWaiting = "result returns as kind=response, parent_id=" + id + " new turn trigger"
+	ack.ToWait, ack.NotWaiting = newCollectHint(id)
 	return AckResult(toolName, ack)
 }

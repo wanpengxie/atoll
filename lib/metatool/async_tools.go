@@ -87,6 +87,7 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 	}
 	if !ok {
 		// Still pending after the window — hand control back with an ack.
+		toWait, notWaiting := newCollectHint(reqID.String())
 		return AckResult("await_result", AckDescriptor{
 			RequestID: reqID,
 			Accepted:  true,
@@ -94,8 +95,8 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 			EstWaitMs: int64(timeout / time.Millisecond),
 			Guidance: "Still running after the wait window. The call keeps running; try await_result again, " +
 				"or do other work and react to the result when it returns as a new message.",
-			ToWait:     ToWaitHint{Tool: "await_result", Params: map[string]any{"request_id": reqID.String()}},
-			NotWaiting: "result returns as kind=response, parent_id=" + reqID.String() + " new turn trigger",
+			ToWait:     toWait,
+			NotWaiting: notWaiting,
 		})
 	}
 	rv, _ := ResultFromResponse("await_result", *finalEnv)

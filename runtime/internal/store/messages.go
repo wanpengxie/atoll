@@ -543,9 +543,15 @@ func classifyAppendErr(err error, envID string) error {
 			Detail:           msg,
 			PartialMessageID: message.ID(envID),
 		}
-	case strings.Contains(msg, "ux_terminal_response_per_request") ||
-		strings.Contains(msg, "UNIQUE constraint failed: messages.parent_id") ||
-		strings.Contains(msg, "parent_id, kind, is_terminal"):
+	// Two real UNIQUE constraints live on the messages table (schema.go): the
+	// `id UNIQUE` column (matched above) and the ux_terminal_response_per_request
+	// partial index on parent_id. modernc.org/sqlite reports the latter as
+	// "UNIQUE constraint failed: messages.parent_id" (the column, not the index
+	// name — this is the form the integration path actually produces, see
+	// TestAppend_TerminalResponseUniquePerRequest); the index-name form is kept
+	// as a defensive match for driver/version variants that name the index.
+	case strings.Contains(msg, "UNIQUE constraint failed: messages.parent_id") ||
+		strings.Contains(msg, "ux_terminal_response_per_request"):
 		return &storespec.AppendError{
 			Reason:           storespec.AppendRejectTerminalDuplicate,
 			Detail:           msg,

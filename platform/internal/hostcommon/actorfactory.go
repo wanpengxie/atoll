@@ -51,9 +51,9 @@ func CapsFactory(f func(actorcaps.Caps) actorrt.Actor) ActorFactory {
 // Build constructs the actorrt.Actor one ActorFactory declares, over one
 // incarnation's already-welded caps bundle. hooks configures the actorbase
 // engine when Proc is set (spec §3's out-generation matrix: Home wires its
-// own CancelRequest, a daemon host wires none — the known cancel-upstream
-// gap); Legacy/fullCaps ignore it (a raw actor owns whatever cancel wiring it
-// has today, unchanged).
+// own CancelRequest, a daemon host wires computeRing's cellCancelForwarder —
+// the cancel-upstream frame, platform/compute/forwarders.go); Legacy/fullCaps
+// ignore it (a raw actor owns whatever cancel wiring it has today, unchanged).
 func Build(caps actorcaps.Caps, hooks actorbase.Hooks, f ActorFactory) actorrt.Actor {
 	switch {
 	case f.fullCaps != nil:

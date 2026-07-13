@@ -118,14 +118,19 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 	return db, nil
 }
 
-// channelLocalSchemaShape is the authoritative set of (table -> required
-// columns) that ChannelLocalDDL guarantees. verifyChannelLocalSchema checks
-// an opened DB against it. Keep in lockstep with schema.go ChannelLocalDDL —
-// the DDL is the single source of truth; this map is just the fail-fast
-// guard that an opened file actually carries that shape.
+// channelLocalSchemaShape is the authoritative set of (table -> columns) that
+// ChannelLocalDDL guarantees. verifyChannelLocalSchema checks an opened DB
+// against it. Keep in lockstep with schema.go ChannelLocalDDL — the DDL is the
+// single source of truth; this map is the fail-fast guard that an opened file
+// actually carries that shape. Every table below MIRRORS its DDL column set in
+// full, EXCEPT messages, whose entry is a deliberate representative probe (the
+// four load-bearing columns), not the whole 16-column row — the append-only
+// truth core needs only a shape sniff, not a per-column mirror.
+// TestChannelLocalSchemaShapeMatchesDDL machine-reconciles the two so the
+// mirror can never silently drift again.
 var channelLocalSchemaShape = map[string][]string{
-	"messages":       {"seq", "id", "type", "kind"},
-	"actor_registry": {"actor_id", "actor_kind", "principal", "deregistered_at"},
+	"messages":       {"seq", "id", "type", "kind"}, // intentional subset — see doc above
+	"actor_registry": {"actor_id", "actor_kind", "principal", "actor_binding", "host", "created_at", "deregistered_at"},
 	"resources": {
 		"resource_id", "kind", "bytes",
 		"placement_kind", "placement_daemon_id", "placement_coord", "provenance", "created_by",
@@ -134,7 +139,7 @@ var channelLocalSchemaShape = map[string][]string{
 	"resource_grants": {"resource_id", "grantee_kind", "grantee", "ops"},
 	"resource_reservations": {
 		"reservation_id", "resource_id", "kind",
-		"placement_daemon_id", "placement_coord", "created_by", "reserved_at", "is_dir",
+		"placement_daemon_id", "placement_coord", "created_by", "reserved_at", "is_dir", "last_progress_at",
 	},
 	"resource_tombstones": {
 		"tombstone_id", "resource_id", "daemon_id", "placement_coord", "provenance", "kind", "deleted_at",

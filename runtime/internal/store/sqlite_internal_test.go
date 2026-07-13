@@ -92,6 +92,100 @@ func TestTableColumns_QueryError(t *testing.T) {
 	}
 }
 
+// ddlTableColumns executes ChannelLocalDDL into a throwaway sqlite and reads
+// back, per created table, the REAL column set (the package's own tableColumns,
+// i.e. PRAGMA table_info). The database engine is the parser — no hand-rolled
+// DDL text scanning, so there is zero room for a false green on DDL syntax a
+// scanner did not anticipate (e.g. two columns declared on one line).
+func ddlTableColumns(t *testing.T) map[string]map[string]struct{} {
+	t.Helper()
+	ctx := context.Background()
+	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "ddl.sqlite"), OpenOptions{}, ChannelLocalDDL)
+	if err != nil {
+		t.Fatalf("openSqlite with ChannelLocalDDL: %v", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+
+	rows, err := db.QueryContext(ctx,
+		`SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'`)
+	if err != nil {
+		t.Fatalf("list tables: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var names []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			t.Fatalf("scan table name: %v", err)
+		}
+		names = append(names, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("iterate tables: %v", err)
+	}
+
+	tables := map[string]map[string]struct{}{}
+	for _, name := range names {
+		cols, err := tableColumns(ctx, db, name)
+		if err != nil {
+			t.Fatalf("tableColumns(%q): %v", name, err)
+		}
+		tables[name] = cols
+	}
+	return tables
+}
+
+// TestChannelLocalSchemaShapeMatchesDDL machine-reconciles channelLocalSchemaShape
+// against the schema.go DDL so the two can never silently drift by手抄 again
+// (the failure mode that had actor_registry / resource_reservations lose columns
+// that were added to the DDL). Every table's column set must be bidirectionally
+// equal to the DDL's — EXCEPT messages, whose shape entry is a deliberate
+// representative probe (documented at channelLocalSchemaShape) and is only
+// required to be a subset of the DDL's columns.
+func TestChannelLocalSchemaShapeMatchesDDL(t *testing.T) {
+	ddl := ddlTableColumns(t)
+
+	// Every shaped table must exist in the DDL, and every DDL table must be
+	// shaped — the table-name sets are bidirectionally equal.
+	for table := range channelLocalSchemaShape {
+		if _, ok := ddl[table]; !ok {
+			t.Errorf("shape lists table %q that the DDL does not declare", table)
+		}
+	}
+	for table := range ddl {
+		if _, ok := channelLocalSchemaShape[table]; !ok {
+			t.Errorf("DDL declares table %q that the shape does not list", table)
+		}
+	}
+
+	for table, cols := range channelLocalSchemaShape {
+		ddlCols, ok := ddl[table]
+		if !ok {
+			continue // already reported above
+		}
+		shapeCols := map[string]struct{}{}
+		for _, c := range cols {
+			shapeCols[c] = struct{}{}
+		}
+		// Every shaped column must exist in the DDL (both messages-subset and
+		// full-mirror tables demand this direction).
+		for c := range shapeCols {
+			if _, ok := ddlCols[c]; !ok {
+				t.Errorf("table %q: shape column %q is not in the DDL", table, c)
+			}
+		}
+		if table == "messages" {
+			continue // intentional subset — direction above is the only assertion
+		}
+		// Full-mirror tables: the DDL must carry no column the shape omits.
+		for c := range ddlCols {
+			if _, ok := shapeCols[c]; !ok {
+				t.Errorf("table %q: DDL column %q is missing from the shape (drift)", table, c)
+			}
+		}
+	}
+}
+
 // tableColumns over a real table returns the column set (the happy rows loop) —
 // pins the success path the verify guard depends on.
 func TestTableColumns_ReturnsColumnSet(t *testing.T) {

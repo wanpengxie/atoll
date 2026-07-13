@@ -29,12 +29,12 @@ appear here. Call it whenever you need the current actor set.
 // ExecuteListActors is the protocol-layer execute function for list_actors.
 func ExecuteListActors(ctx context.Context, _ json.RawMessage, x *Exec, rc RuntimeContext) ResultValue {
 	if x == nil || x.Call == nil {
-		return errorResultValue("list_actors", "list_actors tool not configured")
+		return NewError("list_actors", InternalError, "list_actors tool not configured", "Retry after the bridge is configured", nil)
 	}
 	if !rc.InTurn() {
-		return errorResultValue("list_actors", "list_actors invoked outside a bridge turn")
+		return NewError("list_actors", InternalError, "list_actors invoked outside a bridge turn", "Retry from inside an active bridge turn", nil)
 	}
-	raw, ok := x.CallSyncRaw(ctx, rc, RequestSpec{
+	raw, failure := x.CallSyncRaw(ctx, rc, RequestSpec{
 		ToolName:       "list_actors",
 		EnvelopeType:   "actor.list",
 		HandlerActorID: string(actor.SystemActorID),
@@ -42,25 +42,19 @@ func ExecuteListActors(ctx context.Context, _ json.RawMessage, x *Exec, rc Runti
 		Timeout:        DefaultTimeout,
 		WaitMode:       WaitUnbounded,
 	})
-	if !ok {
-		return errorResultValue("list_actors", "list_actors did not receive a live catalog (request still pending or failed); retry")
+	if failure != nil {
+		// CallSyncRaw already categorised the failure into the actor-CLI
+		// closed set (timeout vs internal_error vs terminal-reason mapping).
+		return *failure
 	}
 	var catalog introspect.Catalog
 	if err := json.Unmarshal(raw, &catalog); err != nil {
-		return errorResultValue("list_actors", fmt.Sprintf("decode actor.list catalog: %v", err))
+		return NewError("list_actors", InternalError,
+			fmt.Sprintf("decode actor.list catalog: %v", err),
+			"Inspect adapter logs and retry", nil)
 	}
 	return ResultValue{
 		Name:  "list_actors",
 		Value: FormatCatalog(catalog),
-	}
-}
-
-// errorResultValue builds a simple error ResultValue (not the actor-CLI
-// closed set — just a plain error string for framework-level failures).
-func errorResultValue(toolName, msg string) ResultValue {
-	return ResultValue{
-		Name:    toolName,
-		Value:   map[string]any{"error": strings.TrimSpace(msg)},
-		IsError: true,
 	}
 }
