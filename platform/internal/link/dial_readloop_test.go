@@ -69,6 +69,11 @@ func TestStreamReadLoop_UnknownKindFailsClosed(t *testing.T) {
 	pr, pw := io.Pipe()
 	as := testReadLoopStream("actor:a", pr, io.Discard)
 	d.streams["actor:a"] = as
+	// A sibling arm on the SAME Dialer (i.e. same link/session) — the no-team-
+	// kill witness: "actor:a"'s fail-closed teardown must not reach past its
+	// own table entry into a sibling actor's arm.
+	sibling := &actorStream{id: "actor:b"}
+	d.streams["actor:b"] = sibling
 
 	done := make(chan struct{})
 	go func() { d.streamReadLoop(as, nil); close(done) }()
@@ -84,8 +89,12 @@ func TestStreamReadLoop_UnknownKindFailsClosed(t *testing.T) {
 	}
 	d.mu.Lock()
 	_, still := d.streams["actor:a"]
+	siblingEntry, siblingStill := d.streams["actor:b"]
 	d.mu.Unlock()
 	if still {
 		t.Fatal("failed-closed stream must be removed from the streams table")
+	}
+	if !siblingStill || siblingEntry != sibling {
+		t.Fatal("sibling actor's arm was torn down by actor:a's fail-closed teardown (team-kill)")
 	}
 }

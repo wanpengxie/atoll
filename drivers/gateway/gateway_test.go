@@ -123,6 +123,37 @@ func TestCrossChannelArmsIsolated(t *testing.T) {
 	if got, _ := g.entryFor(subj); got.arms[channel.ID("c1")] != nil || got.arms[channel.ID("c2")] != arm2 {
 		t.Fatal("revocation must drop only c1's arm from the entry")
 	}
+
+	// Refcount守恒: revoking c1's arm must NOT touch the entry's shared device set —
+	// presence/device accounting is per-identity (§5.6), not per-arm, so c1's seal
+	// must never误杀 the device count the other channel's arm still depends on.
+	if got, _ := g.entryFor(subj); len(got.devices) != 2 {
+		t.Fatalf("revoking c1's arm must not touch the shared device/presence account, got %d devices", len(got.devices))
+	}
+
+	// 撤销后重新attach续接: a fresh attach on the revoked channel mints a NEW live
+	// arm (never the sealed one) that admits normally — revocation is not a
+	// permanent ban on the channel, only a teardown of the one stale binding.
+	_, arm1b := g.mustArm(t, channel.ID("c1"), subj)
+	if arm1b == arm1 {
+		t.Fatal("re-attach after revocation must mint a NEW arm, not reuse the sealed one")
+	}
+	if arm1b.isSealed() {
+		t.Fatal("the re-attached (rebound) arm must be live, not sealed")
+	}
+	if !arm1b.admit() {
+		t.Fatal("the re-attached arm must admit (续接 succeeds)")
+	}
+
+	// ABA (旧entry晚到的teardown摘不掉后续新entryB, arm-level twin of
+	// TestUserEntryStaleTeardownMissesSuccessor): a stale dropArm call carrying the
+	// OLD (already-sealed, already-evicted) c1 arm — as if a delayed/duplicate
+	// onRevoked from before the rebind finally lands late — must be a no-op against
+	// the entry's CURRENT c1 arm (arm1b), never evicting the successor.
+	g.dropArm(subj, channel.ID("c1"), arm1)
+	if got, _ := g.entryFor(subj); got.arms[channel.ID("c1")] != arm1b {
+		t.Fatal("stale dropArm(old arm) must not evict the successor arm (ABA)")
+	}
 }
 
 // TestGatewayCloseSealsArms: Close seals every live arm across all entries/channels

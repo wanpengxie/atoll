@@ -343,6 +343,14 @@ func TestResource_CommitReservation_LosingRaceDeletesLoserReservation(t *testing
 	if found2 {
 		t.Error("loser reservation must have been deleted on its first (losing) commit")
 	}
+
+	// Replaying the dead loser reservation ID must not resurrect or mutate
+	// the already-landed resource — the winner's row must be byte-identical
+	// to what it was before this no-op replay.
+	metaAfter, ok2, _ := reg.Resolve(ctx, "file:doc")
+	if !ok2 || metaAfter != meta {
+		t.Errorf("landed row mutated by replaying dead loser reservation: before=%+v after=%+v", meta, metaAfter)
+	}
 }
 
 // --- ReservationDaemon / ListReservationsByDaemon (§4.7 daemon control-RPC) --

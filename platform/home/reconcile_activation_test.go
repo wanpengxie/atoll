@@ -348,7 +348,14 @@ func TestReconcileActivation_UnionAtomicity_FaultAbortsTick(t *testing.T) {
 	desired := &testDesired{}
 	builder := newTestBuilder()
 	id := actor.ActorID("agent:atomic")
-	builder.byID[id] = builder.recordFactory(id)
+	var builds atomic.Int64
+	builder.byID[id] = hostcommon.CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
+		builds.Add(1)
+		builder.mu.Lock()
+		builder.seen[id] = c
+		builder.mu.Unlock()
+		return recordActor{caps: c}
+	})
 	h := openActivationHome(t, desired, builder)
 	id = admit(t, h, id, actor.KindAgent)
 
@@ -360,6 +367,7 @@ func TestReconcileActivation_UnionAtomicity_FaultAbortsTick(t *testing.T) {
 	if !h.prevEagerDesired[id] {
 		t.Fatal("precondition: member not in prevEagerDesired after the good tick")
 	}
+	buildsAfterGoodTick := builds.Load()
 
 	desired.fail(errors.New("injected desired-source fault"))
 	h.reconcileActivation(ctx)
@@ -368,6 +376,25 @@ func TestReconcileActivation_UnionAtomicity_FaultAbortsTick(t *testing.T) {
 	}
 	if !h.prevEagerDesired[id] {
 		t.Fatal("prevEagerDesired mutated on a faulted tick — must stay untouched until a complete read")
+	}
+	// Not half-铸 either: the faulted tick must never even ATTEMPT a fresh
+	// build for the already-live member (current/prevEagerDesired stay the
+	// exact pre-tick snapshot, not a partially-recomputed one that happens to
+	// still show the member live).
+	if got := builds.Load(); got != buildsAfterGoodTick {
+		t.Fatalf("faulted tick attempted %d fresh build(s) — union read failure must abort BEFORE any 补/削 arm runs (half-铸 detected)", got-buildsAfterGoodTick)
+	}
+
+	// The next GOOD tick must still manage the member normally — the fault
+	// must not have left prevEagerDesired/current in a state that permanently
+	// protects (or wrongly kills) it. Restore a good read with the member no
+	// longer desired: the 削臂 must still fire, proving the abort was a clean,
+	// one-tick skip rather than a lasting corruption of the managed set.
+	desired.fail(nil)
+	desired.set()
+	h.reconcileActivation(ctx)
+	if live(h, id) {
+		t.Fatal("next good tick could not despawn the no-longer-desired member — the faulted tick left reconcile state half-mutated (union atomicity broken)")
 	}
 }
 
@@ -612,6 +639,8 @@ func TestClose_ProducersBeforeEngineNoDeadlock(t *testing.T) {
 		t.Fatalf("Schedule incarnation timer: %v", err)
 	}
 
+	engine := h.engine // captured before Close for the post-close ordering checks below
+
 	done := make(chan error, 1)
 	go func() { done <- h.Close() }()
 	select {
@@ -621,6 +650,26 @@ func TestClose_ProducersBeforeEngineNoDeadlock(t *testing.T) {
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("Close did not complete within 10s — teardown deadlock")
+	}
+
+	// Producers actually quiesced (not just "Close returned"): the schedule
+	// PRODUCER (the cell) must be gone by the time Close finishes — the
+	// invariant the reorder exists to guarantee, not merely the absence of a
+	// hang. Not deadlocking is compatible with a regression that silently
+	// reverts to "engine first" as long as both steps still eventually
+	// return; a still-live cell here would catch that.
+	if live(h, id) {
+		t.Fatal("cell producer still live after Close — teardown did not quiesce producers")
+	}
+	// The engine's own join must have completed CLEANLY (no abandoned/timed-out
+	// wait) — engine.Close only blocks on its run loop's own exit, which exits
+	// promptly once nothing is still driving Schedule()/wake into it. If
+	// producers were NOT stopped first, a still-live cell racing a Schedule()
+	// call against the engine's teardown is exactly the scenario the old
+	// "engine first" order left open; a clean (non-leaked) join here is
+	// consistent with producers having gone quiet before the engine closed.
+	if got := engine.Leaked(); got != 0 {
+		t.Fatalf("schedule engine reported %d leaked (abandoned) close join(s) — producers were not quiesced before the engine stopped", got)
 	}
 }
 
@@ -1069,8 +1118,18 @@ func TestFireSink_ForkChildDeathRace_QuietDrop(t *testing.T) {
 		Audience: message.Audience{childID},
 	}
 	var fireRejected schedule.FireRejected
-	if ferr := sink.Append(ctx, childID, env); !errors.As(ferr, &fireRejected) {
+	ferr := sink.Append(ctx, childID, env)
+	if !errors.As(ferr, &fireRejected) {
 		t.Fatalf("Append(dead fork child) = %v, want FireRejected (death-race quiet drop)", ferr)
+	}
+	// Pin the EXACT reject reason: both the live-embodiment oracle and the
+	// registry fallback must come up empty for a fork child, and the specific
+	// reason must be author_not_member — not some other deterministic reject
+	// (e.g. a malformed-envelope or reserved-type reason) that would happen
+	// to also satisfy errors.As(FireRejected) while masking a different bug
+	// (a wrong oracle answer, or the wrong guard tripping first).
+	if fireRejected.Reason != "author_not_member" {
+		t.Fatalf("Append(dead fork child) reason = %q, want %q", fireRejected.Reason, "author_not_member")
 	}
 
 	rows, rerr := h.View().ReadAfterSeq(ctx, 0, 1000)
@@ -1079,8 +1138,15 @@ func TestFireSink_ForkChildDeathRace_QuietDrop(t *testing.T) {
 	}
 	for _, r := range rows {
 		if r.Envelope.ID == env.ID {
-			t.Fatal("a dead-race fire landed in truth — G11 death-race guard broken (dead-write)")
+			t.Fatal("a dead-race fire landed in truth — G11 death-race guard broken (dead-write, not a quiet drop)")
 		}
+	}
+	// The drop must be genuinely quiet, not merely "no truth landed" — the
+	// live cell registry must never have been resurrected as a side effect of
+	// handling the race (a "silent false success" would leave the child
+	// looking alive again rather than staying dead).
+	if live(h, childID) {
+		t.Fatal("dead fork child came back live as a side effect of the rejected Append (resurrection, not a quiet drop)")
 	}
 }
 
@@ -1233,12 +1299,30 @@ func TestReconcileActivation_BuildFailureBackoffLadder(t *testing.T) {
 	// Climb the ladder: each retry jumps just past the current gate, attempts one
 	// build, and the interval doubles (base<<min(failures-1,8), capped) — the
 	// plateau is 256s (the shift caps before the 5min ceiling ever binds).
+	// prevInterval tracks the ladder's own progression independently of the
+	// formula below — a real doubling assertion, not just "matches this
+	// computed constant" (which would pass even if both the code and this
+	// formula regressed to the same wrong shape).
+	// plateauCap is the ladder's OWN observed ceiling (1<<8 seconds — the shift
+	// cap binds before reviveBuildBackoffMax's 5-minute ceiling ever does, per
+	// the comment above), distinct from reviveBuildBackoffMax itself.
+	const plateauCap = 256 * time.Second
+	prevInterval := time.Second
 	for f := 2; f <= 11; f++ {
 		nowMs = backoffEntry(t, h, id).next.UnixMilli() + 1
 		before := builds.Load()
 		h.reconcileActivation(ctx)
 		if builds.Load() != before+1 {
 			t.Fatalf("failure %d: build attempts %d→%d, want one fresh attempt", f, before, builds.Load())
+		}
+		// A crashlooping member must never become live or re-enter the ring's
+		// managed set (prevEagerDesired) at ANY rung of the ladder — not just
+		// on the first failure.
+		if live(h, id) {
+			t.Fatalf("failure %d: crashlooping member is live", f)
+		}
+		if h.prevEagerDesired[id] {
+			t.Fatalf("failure %d: crashlooping member entered the managed set (prevEagerDesired)", f)
 		}
 		e := backoffEntry(t, h, id)
 		if int(e.failures) != f {
@@ -1252,12 +1336,31 @@ func TestReconcileActivation_BuildFailureBackoffLadder(t *testing.T) {
 		if want > reviveBuildBackoffMax {
 			want = reviveBuildBackoffMax
 		}
-		if got := e.next.Sub(time.UnixMilli(nowMs)); got != want {
+		got := e.next.Sub(time.UnixMilli(nowMs))
+		if got != want {
 			t.Fatalf("failure %d: retry interval = %s, want %s", f, got, want)
 		}
+		// Independent doubling/cap check: strictly climbs while under the cap,
+		// holds flat exactly at reviveBuildBackoffMax once reached — never
+		// stays tight (same interval retried) below the cap, and never
+		// exceeds the cap (unbounded growth) above it.
+		switch {
+		case prevInterval < plateauCap:
+			if got <= prevInterval {
+				t.Fatalf("failure %d: backoff interval %s did not increase past previous %s (ladder must climb, not tight-loop)", f, got, prevInterval)
+			}
+			if got > plateauCap {
+				t.Fatalf("failure %d: backoff interval %s exceeded the %s cap", f, got, plateauCap)
+			}
+		default:
+			if got != plateauCap {
+				t.Fatalf("failure %d: backoff interval %s left the %s plateau", f, got, plateauCap)
+			}
+		}
+		prevInterval = got
 	}
 	// Plateau reached (failures 9,10,11 all 256s): the ladder is bounded, not runaway.
-	if got := backoffEntry(t, h, id).next.Sub(time.UnixMilli(nowMs)); got != 256*time.Second {
-		t.Fatalf("ladder plateau = %s, want 256s", got)
+	if got := backoffEntry(t, h, id).next.Sub(time.UnixMilli(nowMs)); got != plateauCap {
+		t.Fatalf("ladder plateau = %s, want %s", got, plateauCap)
 	}
 }

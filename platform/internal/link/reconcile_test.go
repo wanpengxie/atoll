@@ -268,38 +268,43 @@ func TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut(t *testing.T) {
 		t.Fatalf("Reattach (shrink): %v", err)
 	}
 
-	// Despawn-first: the home Runtime no longer hosts toolA at all (the guarded
-	// Despawn matched this link's own retained pointer and evicted it) — a
-	// deliver reports NotHosted, not a silent drop.
+	// Despawn-first ORDERING invariant (not just "both eventually happen"):
+	// sample hosted-status and Registry-active-status TOGETHER on every tick and
+	// fail the instant a sample shows the FORBIDDEN intermediate state — the
+	// Registry row already deregistered while the port is still hosted. Two
+	// independent poll loops (one for NotHosted, then one for dereg) would NOT
+	// catch a reordering regression: each loop only waits for its own condition
+	// to eventually go true, so it passes even if dereg raced ahead of despawn.
+	// Sampling both facts on the same tick is what actually pins the order.
 	deadline = time.Now().Add(10 * time.Second)
+	var sawNotHosted, sawDeregistered bool
 	for {
 		outcome, err := r.deliverProbe(toolA)
 		if err != nil {
 			t.Fatalf("deliverProbe(toolA): %v", err)
 		}
-		if outcome == actorrt.NotHosted {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("toolA still hosted after shrink Reattach (outcome=%v), want NotHosted", outcome)
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-
-	// Dereg: the real Registry row is now deregistered.
-	deadline = time.Now().Add(10 * time.Second)
-	for {
+		hosted := outcome != actorrt.NotHosted
 		rec, ok, err := r.cs.Registry.Lookup(ctx, toolA)
 		if err != nil {
 			t.Fatalf("Lookup(toolA): %v", err)
 		}
-		if ok && !rec.IsActive() {
+		deregistered := ok && !rec.IsActive()
+		if deregistered && hosted {
+			t.Fatalf("toolA Registry row deregistered while the port is STILL hosted (outcome=%v) — dereg ran ahead of (or decoupled from) despawn", outcome)
+		}
+		if !hosted {
+			sawNotHosted = true
+		}
+		if deregistered {
+			sawDeregistered = true
+		}
+		if sawNotHosted && sawDeregistered {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatal("toolA never deregistered after shrink Reattach")
+			t.Fatalf("shrink Reattach never reached terminal state: notHosted=%v deregistered=%v", sawNotHosted, sawDeregistered)
 		}
-		time.Sleep(5 * time.Millisecond)
+		time.Sleep(2 * time.Millisecond)
 	}
 
 	// toolB (still declared) stays active and untouched.

@@ -110,14 +110,52 @@ func TestRebindableArms_FlapContinuity(t *testing.T) {
 
 func TestRuntimeSealRejectsActorArmWithoutKillingWholeLink(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
-	r.rt.Seal()
 	const id = actor.ActorID("tool:sealed-arm")
+	const siblingID = actor.ActorID("tool:sealed-sibling")
 	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+		[]link.Declaration{
+			{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+			{ActorID: siblingID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+		}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer d.Close()
+
+	h := newDaemonHost()
+	defer h.Stop()
+
+	// Attach the sibling BEFORE sealing: Seal only closes admission for NEW
+	// embodiments, so this is a live embodiment + live stream the seal below
+	// must not be able to touch. It is the "other actor on the same link"
+	// witness for the no-team-kill assertion at the bottom.
+	siblingArms, err := d.OpenStream(siblingID, func(*message.Envelope) error { return nil }, nil)
+	if err != nil {
+		t.Fatalf("OpenStream sibling: %v", err)
+	}
+	h.Install(siblingID, &echoCell{w: siblingArms.Pen}, nil)
+	d.StartStream(siblingID)
+
+	probe := func(id message.ID) error {
+		_, err := siblingArms.Pen.Write(context.Background(), &message.Envelope{
+			ID: id, Kind: message.KindEvent, Type: "sealed.probe",
+			Payload: []byte(`{}`), Visibility: message.VisibilityPublic,
+			Audience: message.Audience{"nobody"},
+		})
+		return err
+	}
+	deadline := time.Now().Add(10 * time.Second)
+	for {
+		if err := probe("sibling-pre-seal"); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("sibling pre-seal write never succeeded (attach not complete)")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+
+	r.rt.Seal()
 
 	open := func() link.CellArms {
 		arms, err := d.OpenStream(id, func(*message.Envelope) error { return nil }, nil)
@@ -128,7 +166,7 @@ func TestRuntimeSealRejectsActorArmWithoutKillingWholeLink(t *testing.T) {
 		return arms
 	}
 	arms := open()
-	deadline := time.Now().Add(time.Second)
+	deadline = time.Now().Add(time.Second)
 	for {
 		_, err = arms.Pen.Write(context.Background(), &message.Envelope{
 			ID: "probe", Kind: message.KindEvent, Type: "sealed.probe",
@@ -148,6 +186,15 @@ func TestRuntimeSealRejectsActorArmWithoutKillingWholeLink(t *testing.T) {
 		t.Fatal("one sealed actor arm killed the whole link")
 	default:
 	}
+
+	// No team-kill: the sibling's already-live embodiment + stream (control
+	// plane included — the write above round-trips through the SAME yamux
+	// session's control substream) must still be fully functional after the
+	// sealed arm's teardown, not merely un-closed.
+	if err := probe("sibling-post-seal"); err != nil {
+		t.Fatalf("sibling write failed after the sealed arm's teardown (team-kill): %v", err)
+	}
+
 	// The same live Dialer can perform the stream-level 补臂 attempt again;
 	// compute.Run's reconcile loop therefore reopens this arm, not the whole link.
 	_ = open()
