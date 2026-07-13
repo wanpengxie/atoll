@@ -91,11 +91,6 @@ const (
 // that needs a different child Kind cannot get one through this verb yet.
 const forkKind = actor.KindTool
 
-// progressStatus is Sys.Progress's non-final response status — the Layer-2
-// core "processing" word (protocol/message's provisional set; not yet a
-// named const there).
-const progressStatus = "processing"
-
 // ErrRecvDone is Sys.Recv()'s loop-termination signal (spec §1.2): the
 // occupant is being torn down (Start's lifeCtx is Done) and no further
 // delivery will ever be handed to this Proc.
@@ -410,25 +405,12 @@ func (e *engine) Progress(msg Msg, v any) (message.ID, error) {
 	if e.serve.isClosed(msg.ID) {
 		return "", ErrRequestClosed
 	}
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return "", err
-	}
-	env, err := behavior.BuildResponseFromRequest(envelopeFromMsg(msg), e.clockFn, behavior.ResponseSpec{
-		Status:  progressStatus,
-		Payload: raw,
-	})
-	if err != nil {
-		return "", err
-	}
-	out, err := e.pen.Write(e.lifeCtx, env)
-	if err != nil {
-		return "", err
-	}
-	if !out.Accepted() && out.RejectReason != harness.HarnessTerminalDuplicate {
-		return "", fmt.Errorf("actorbase: progress rejected: %s (%s)", out.RejectReason, out.RejectDetail)
-	}
-	return out.MessageID, nil
+	// One-line delegate to behavior.Progress — Reply/Fail's non-final sibling
+	// at the same layer (purity 手动档 B5 collapsed the hand-rolled copy of
+	// the write discipline that used to live here). Deliberately NO
+	// serve.close: a provisional never closes the request — that asymmetry
+	// with Reply/Fail is THIS method's whole meaning and stays engine-side.
+	return behavior.Progress(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), v)
 }
 
 // --- Sys: event write ----------------------------------------------------
