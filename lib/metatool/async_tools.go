@@ -100,7 +100,14 @@ func ExecuteAwaitResult(ctx context.Context, params json.RawMessage, x *Exec, _ 
 		})
 	}
 	rv, _ := ResultFromResponse("await_result", *finalEnv)
-	return rv
+	// Stage two of the render→normalize pipeline (the same law every other
+	// collector applies — call_actor:114, describe.go:61/122): await_result is
+	// call_actor's second half, and the SAME actor-returned failure must reach
+	// the LLM in the SAME closed-set error shape whichever half collected it.
+	// This mount was the pipeline's one missing outlet (purity 手动档 B3).
+	// The answering actor's identity and the response type ride on the final
+	// envelope itself.
+	return NormalizeCallActorResult(rv, string(finalEnv.Sender.ID), finalEnv.Type)
 }
 
 // CancelSpec is the protocol-layer definition of cancel.

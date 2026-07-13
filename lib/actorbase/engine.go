@@ -91,11 +91,6 @@ const (
 // that needs a different child Kind cannot get one through this verb yet.
 const forkKind = actor.KindTool
 
-// progressStatus is Sys.Progress's non-final response status — the Layer-2
-// core "processing" word (protocol/message's provisional set; not yet a
-// named const there).
-const progressStatus = "processing"
-
 // ErrRecvDone is Sys.Recv()'s loop-termination signal (spec §1.2): the
 // occupant is being torn down (Start's lifeCtx is Done) and no further
 // delivery will ever be handed to this Proc.
@@ -234,11 +229,32 @@ func (e *engine) Stop(ctx context.Context) error {
 		e.serve.stopTimers()
 		return nil
 	}
+	var abandoned bool
 	e.stopOnce.Do(func() {
 		e.occupant.Store(int32(occupantDraining))
-		<-e.workerDone
+		// Both joins consume ctx (法条 D / 审查两问: "卡住等多久、谁收尾" —
+		// this used to be an UNBOUNDED wait on the occupant's own drain, so a
+		// stuck Receive pinned the cell's unwind goroutine forever). On ctx
+		// expiry the join is ABANDONED, never the teardown ORDER: a background
+		// waiter finishes the rejectStop-after-worker sequence if the worker
+		// ever unblocks, so a late exit still tears down cleanly.
+		select {
+		case <-e.workerDone:
+		case <-ctx.Done():
+			abandoned = true
+			go func() {
+				<-e.workerDone
+				close(e.rejectStop)
+				<-e.rejectDone
+			}()
+			return
+		}
 		close(e.rejectStop)
-		<-e.rejectDone
+		select {
+		case <-e.rejectDone:
+		case <-ctx.Done():
+			abandoned = true
+		}
 	})
 	// D 族小账: reclaim the call ledger's dangling author#2 AfterFunc timers on
 	// teardown — they would otherwise outlive the incarnation and fire into a
@@ -246,6 +262,9 @@ func (e *engine) Stop(ctx context.Context) error {
 	e.call.stopTimers()
 	e.serve.stopTimers()
 	e.occupant.Store(int32(occupantDead))
+	if abandoned {
+		return fmt.Errorf("actorbase: engine stop abandoned join after budget (worker goroutine may be leaked): %w", ctx.Err())
+	}
 	return nil
 }
 
@@ -417,25 +436,12 @@ func (e *engine) Progress(msg Msg, v any) (message.ID, error) {
 	if e.serve.isClosed(msg.ID) {
 		return "", ErrRequestClosed
 	}
-	raw, err := json.Marshal(v)
-	if err != nil {
-		return "", err
-	}
-	env, err := behavior.BuildResponseFromRequest(envelopeFromMsg(msg), e.clockFn, behavior.ResponseSpec{
-		Status:  progressStatus,
-		Payload: raw,
-	})
-	if err != nil {
-		return "", err
-	}
-	out, err := e.pen.Write(e.lifeCtx, env)
-	if err != nil {
-		return "", err
-	}
-	if !out.Accepted() && out.RejectReason != harness.HarnessTerminalDuplicate {
-		return "", fmt.Errorf("actorbase: progress rejected: %s (%s)", out.RejectReason, out.RejectDetail)
-	}
-	return out.MessageID, nil
+	// One-line delegate to behavior.Progress — Reply/Fail's non-final sibling
+	// at the same layer (purity 手动档 B5 collapsed the hand-rolled copy of
+	// the write discipline that used to live here). Deliberately NO
+	// serve.close: a provisional never closes the request — that asymmetry
+	// with Reply/Fail is THIS method's whole meaning and stays engine-side.
+	return behavior.Progress(e.lifeCtx, e.pen, e.clockFn, envelopeFromMsg(msg), v)
 }
 
 // --- Sys: event write ----------------------------------------------------

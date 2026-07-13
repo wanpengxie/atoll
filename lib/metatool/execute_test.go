@@ -311,6 +311,27 @@ func TestExecuteAwaitResult_ResolvesFinal(t *testing.T) {
 	}
 }
 
+// TestExecuteAwaitResult_FailedFinalNormalized pins the render→normalize
+// pipeline's await_result outlet (purity 手动档 B3): an actor-returned
+// failure collected via await_result must reach the LLM in the SAME
+// closed-set error shape call_actor produces — {ok:false, error:{code,...}}
+// via NormalizeCallActorResult — never the raw {error: reason} render.
+func TestExecuteAwaitResult_FailedFinalNormalized(t *testing.T) {
+	jobs := &fakeJobs{}
+	jobs.awaitFn = func(id message.ID) (*message.Envelope, bool, error) {
+		return finalResp(id, map[string]any{
+			"status": "failed", "reason": "receiver_unavailable",
+		}), true, nil
+	}
+	x := newExec(jobs, nil)
+	rv := metatool.ExecuteAwaitResult(context.Background(),
+		json.RawMessage(`{"request_id":"req-1"}`), x, defaultRC())
+	assertIsError(t, rv, "actor_unreachable")
+	if rv.Value["ok"] != false {
+		t.Fatalf("normalized closed-set shape must carry ok:false, got %+v", rv.Value)
+	}
+}
+
 // --- cancel ----------------------------------------------------------------
 
 func TestExecuteCancel_NilExec(t *testing.T) {

@@ -168,22 +168,41 @@ func (x *Exec) ExecuteRequest(ctx context.Context, rc RuntimeContext, spec Reque
 	return x.ackResult(spec.ToolName, ack)
 }
 
-// CallSyncResult drives a synchronous introspection query through the Call face
-// (transient sys.Call, never a cross-turn job) and renders its FINAL response as a
-// ResultValue. Used by describe_actor / describe_type.
-func (x *Exec) CallSyncResult(ctx context.Context, rc RuntimeContext, spec RequestSpec) ResultValue {
+// callSyncFinal is the shared head of the two CallSync* faces: drive a
+// synchronous query through the Call face (transient sys.Call, never a
+// cross-turn job) and hand back the FINAL envelope, or the machinery failure
+// already rendered in the actor-CLI closed error shape. timeoutHint is
+// caller-supplied because it is CONTEXT, not drift: describe-class tools
+// point the LLM at list_actors, while list_actors itself cannot
+// self-reference and points at the system actor instead.
+func (x *Exec) callSyncFinal(ctx context.Context, rc RuntimeContext, spec RequestSpec, timeoutHint string) (*message.Envelope, *ResultValue) {
 	bspec, deadline := x.buildRequestSpec(rc, spec)
 	window := ResolveFastPathWindow(deadline, DefaultTimeout, true)
 	finalEnv, ok, err := x.Call(ctx, bspec, window)
 	if err != nil {
-		return NewError(spec.ToolName, InternalError,
+		rv := NewError(spec.ToolName, InternalError,
 			"channel request "+spec.EnvelopeType+" failed: "+err.Error(),
 			"Inspect adapter/link status and retry", nil)
+		return nil, &rv
 	}
 	if !ok || finalEnv == nil {
-		return NewError(spec.ToolName, Timeout,
+		rv := NewError(spec.ToolName, Timeout,
 			spec.EnvelopeType+" did not return a result in time",
-			"Retry, or call list_actors to confirm the actor is present", nil)
+			timeoutHint, nil)
+		return nil, &rv
+	}
+	return finalEnv, nil
+}
+
+// CallSyncResult drives a synchronous introspection query and renders its
+// FINAL response as a ResultValue. Used by describe_actor / describe_type
+// (both wrap the result in NormalizeCallActorResult — stage two of the
+// render→normalize pipeline).
+func (x *Exec) CallSyncResult(ctx context.Context, rc RuntimeContext, spec RequestSpec) ResultValue {
+	finalEnv, failure := x.callSyncFinal(ctx, rc, spec,
+		"Retry, or call list_actors to confirm the actor is present")
+	if failure != nil {
+		return *failure
 	}
 	rv, _ := ResultFromResponse(spec.ToolName, *finalEnv)
 	return rv
@@ -198,23 +217,12 @@ func (x *Exec) CallSyncResult(ctx context.Context, rc RuntimeContext, spec Reque
 // mapping (NormalizeCallActorResult's law). nil failure = rawPayload is the
 // live final payload.
 func (x *Exec) CallSyncRaw(ctx context.Context, rc RuntimeContext, spec RequestSpec) (rawPayload []byte, failure *ResultValue) {
-	bspec, deadline := x.buildRequestSpec(rc, spec)
-	window := ResolveFastPathWindow(deadline, DefaultTimeout, true)
-	finalEnv, ok, err := x.Call(ctx, bspec, window)
-	if err != nil {
-		rv := NewError(spec.ToolName, InternalError,
-			"channel request "+spec.EnvelopeType+" failed: "+err.Error(),
-			"Inspect adapter/link status and retry", nil)
-		return nil, &rv
-	}
-	if !ok || finalEnv == nil {
-		// This path is a TRANSIENT sys.Call — never a cross-turn job — so the
-		// hint must not point at list_pending (the request is not in the
-		// JobTable).
-		rv := NewError(spec.ToolName, Timeout,
-			spec.EnvelopeType+" did not return a result in time",
-			"Retry, or check that the system actor is present", nil)
-		return nil, &rv
+	// Timeout hint deliberately differs from CallSyncResult's: this face's one
+	// caller IS list_actors, which cannot tell the LLM to call list_actors.
+	finalEnv, headFailure := x.callSyncFinal(ctx, rc, spec,
+		"Retry, or check that the system actor is present")
+	if headFailure != nil {
+		return nil, headFailure
 	}
 	if finalEnv.Kind != message.KindResponse {
 		rv := NewError(spec.ToolName, InternalError,

@@ -79,6 +79,47 @@ func RespondJSON(
 		ResponseSpec{Status: message.StatusCompleted, Payload: raw})
 }
 
+// Progress marshals result and commits a status=processing PROVISIONAL
+// response for the request held in hand — Reply/Fail's non-final sibling,
+// living at the same layer so the write discipline (build → pen → settle)
+// exists once (purity 手动档 B5: the engine used to hand-roll this whole
+// sequence because Respond's final-only gate — load-bearing, it means
+// "close the request" — could not carry a provisional). A provisional NEVER
+// closes the request: any number may precede the final. Settlement tolerance
+// mirrors Respond's: a HarnessTerminalDuplicate reject means the request
+// already closed under this progress write's feet — a benign race (the
+// caller's final wins), not an error.
+func Progress(
+	ctx context.Context,
+	pen harness.Pen,
+	clock func() time.Time,
+	request *message.Envelope,
+	result any,
+) (message.ID, error) {
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("behavior: progress marshal: %w", err)
+	}
+	env, err := BuildResponseFromRequest(request, clock, ResponseSpec{
+		Status:  message.StatusProcessing,
+		Payload: raw,
+	})
+	if err != nil {
+		return "", err
+	}
+	out, werr := pen.Write(ctx, env)
+	if werr != nil {
+		return "", fmt.Errorf("behavior: progress write: %w", werr)
+	}
+	if out.RejectReason == harness.HarnessTerminalDuplicate {
+		return out.MessageID, nil
+	}
+	if out.RejectReason != "" {
+		return "", fmt.Errorf("behavior: progress rejected: %s (%s)", out.RejectReason, out.RejectDetail)
+	}
+	return out.MessageID, nil
+}
+
 // Fail commits a status=failed final carrying the conventional failure
 // payload {error_code, detail} — the ONE home of that shape. The terminal
 // reason is pinned to receiver_internal_error (the serve-side catch-all);

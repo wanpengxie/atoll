@@ -2,11 +2,9 @@ package home
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // Admit registers one actor as durable channel membership truth and nothing more
@@ -50,10 +48,10 @@ func (h *Home) PrincipalOf(ctx context.Context, id actor.ActorID) (string, bool,
 }
 
 func (h *Home) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {
-	reg, ok := h.cs.Registry.(storespec.PrincipalRegistry)
-	if !ok {
-		return "", false, errors.New("platform: principal registry unavailable")
-	}
-	rec, found, err := reg.LookupActivePrincipal(ctx, kind, principal)
+	// Principals is its own assembly-declared face (ChannelStores.Principals);
+	// the old type-assertion that recovered it from the narrow Registry field
+	// was a bypass valve (it voided the read-face segregation for every
+	// ChannelStores holder at once) and is gone — purity 手动档, 反旁路结构墙.
+	rec, found, err := h.cs.Principals.LookupActivePrincipal(ctx, kind, principal)
 	return rec.ID, found, err
 }
