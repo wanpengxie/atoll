@@ -683,3 +683,46 @@ func TestEngine_ForkAndDespawnChildReturnErrUnsupportedWhenSpawnNil(t *testing.T
 		t.Fatalf("DespawnChild with nil Spawn arm err = %v, want ErrUnsupported", err)
 	}
 }
+
+// TestEngine_StopAbandonsStuckWorkerOnBudget pins the bounded-stop contract
+// (purity 手动档, owner 拍 5s at the CELL call site; here the budget is the
+// test's own short ctx): a worker that never drains must not pin Stop forever
+// — past the ctx budget Stop abandons the join, reports the leak as an error,
+// and still runs its ledger/occupant teardown. 审查两问执行件: "卡住等多久、
+// 谁收尾" now has a mechanical answer.
+func TestEngine_StopAbandonsStuckWorkerOnBudget(t *testing.T) {
+	pen := &fakePen{self: "actor:test"}
+	e := newTestEngine(t, pen, Hooks{}, 8, 8)
+	actx := &fakeActorContext{self: "actor:test"}
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	e.def = Def{New: func() (Proc, error) {
+		return func(sys Sys) error {
+			close(started)
+			<-release // stuck occupant: ignores Life() entirely
+			return nil
+		}, nil
+	}}
+	if err := e.Start(context.Background(), actx); err != nil {
+		t.Fatalf("unexpected Start error: %v", err)
+	}
+	<-started
+
+	stopCtx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() { done <- e.Stop(stopCtx) }()
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("Stop must report the abandoned join, got nil")
+		}
+		if !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("abandonment must wrap the budget ctx error, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Stop still blocked past its ctx budget — the unbounded join is back")
+	}
+	close(release) // unblock the worker: the background waiter finishes teardown order
+}

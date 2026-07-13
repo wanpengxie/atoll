@@ -229,11 +229,32 @@ func (e *engine) Stop(ctx context.Context) error {
 		e.serve.stopTimers()
 		return nil
 	}
+	var abandoned bool
 	e.stopOnce.Do(func() {
 		e.occupant.Store(int32(occupantDraining))
-		<-e.workerDone
+		// Both joins consume ctx (法条 D / 审查两问: "卡住等多久、谁收尾" —
+		// this used to be an UNBOUNDED wait on the occupant's own drain, so a
+		// stuck Receive pinned the cell's unwind goroutine forever). On ctx
+		// expiry the join is ABANDONED, never the teardown ORDER: a background
+		// waiter finishes the rejectStop-after-worker sequence if the worker
+		// ever unblocks, so a late exit still tears down cleanly.
+		select {
+		case <-e.workerDone:
+		case <-ctx.Done():
+			abandoned = true
+			go func() {
+				<-e.workerDone
+				close(e.rejectStop)
+				<-e.rejectDone
+			}()
+			return
+		}
 		close(e.rejectStop)
-		<-e.rejectDone
+		select {
+		case <-e.rejectDone:
+		case <-ctx.Done():
+			abandoned = true
+		}
 	})
 	// D 族小账: reclaim the call ledger's dangling author#2 AfterFunc timers on
 	// teardown — they would otherwise outlive the incarnation and fire into a
@@ -241,6 +262,9 @@ func (e *engine) Stop(ctx context.Context) error {
 	e.call.stopTimers()
 	e.serve.stopTimers()
 	e.occupant.Store(int32(occupantDead))
+	if abandoned {
+		return fmt.Errorf("actorbase: engine stop abandoned join after budget (worker goroutine may be leaked): %w", ctx.Err())
+	}
 	return nil
 }
 
