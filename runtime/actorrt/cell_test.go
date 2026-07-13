@@ -517,3 +517,67 @@ func TestCellTeardownDoesNotWaitInFlight(t *testing.T) {
 		t.Fatalf("LeakedTotal = %d, want 0 (the corpse exited within grace)", rt.LeakedTotal())
 	}
 }
+
+// panicOnCancelActor blocks in Receive until the cell ctx is cancelled, then
+// panics — the deterministic Draining×panic interleaving: initiateStop marks
+// stopping (c.closed) BEFORE cancelling ctx, so by the time Receive unblocks
+// and panics, the stopping position is guaranteed set.
+type panicOnCancelActor struct{}
+
+func (panicOnCancelActor) Receive(ctx context.Context, _ *message.Envelope) error {
+	<-ctx.Done()
+	panic("boom during draining")
+}
+
+// TestPanicDuringDrainingIsQuiet (purity v3 A1): §1.4 forces a worker's ANY
+// exit during Draining quiet — panic included. The recover path once assigned
+// deathCause without arbitration, so a panic while an external Despawn was in
+// flight published the exact down edge the spec suppresses (a self-ordered
+// teardown misreported as receiver_unavailable).
+func TestPanicDuringDrainingIsQuiet(t *testing.T) {
+	t.Parallel()
+	w := &recordingWatcher{notify: make(chan struct{}, 1)}
+	rt, _ := New(Config{Parent: context.Background()})
+	rt.WatchDown(w)
+	inc, _, _ := rt.SpawnIfAbsent("a", actor.KindAgent, static(panicOnCancelActor{}))
+	mustDeliver(t, rt, "a", env("x")) // Receive now blocked on ctx.Done()
+	rt.Despawn(inc)                   // stopping set, then ctx cancel → Receive panics mid-Draining
+	if _, ok := rt.Stat("a"); ok {
+		t.Fatal("cell still addressable after Despawn joined")
+	}
+	select {
+	case <-w.notify:
+		t.Fatal("panic during Draining must be quiet — no down edge (§1.4 ②>①)")
+	case <-time.After(100 * time.Millisecond):
+	}
+}
+
+// startErrOnCancelActor mirrors panicOnCancelActor for the Start-failure
+// death source: Start blocks until the cell ctx is cancelled, then errors.
+type startErrOnCancelActor struct{}
+
+func (startErrOnCancelActor) Receive(context.Context, *message.Envelope) error { return nil }
+func (startErrOnCancelActor) Start(ctx context.Context, _ ActorContext) error {
+	<-ctx.Done()
+	return errors.New("start failed during draining")
+}
+
+// TestStartErrorDuringDrainingIsQuiet: the fourth death source (Start failure)
+// passes the same single exit-gate arbitration — an external Despawn racing a
+// slow Start must not misfire a down edge either (§1.4 "ANY exit").
+func TestStartErrorDuringDrainingIsQuiet(t *testing.T) {
+	t.Parallel()
+	w := &recordingWatcher{notify: make(chan struct{}, 1)}
+	rt, _ := New(Config{Parent: context.Background()})
+	rt.WatchDown(w)
+	inc, _, _ := rt.SpawnIfAbsent("a", actor.KindAgent, static(startErrOnCancelActor{}))
+	rt.Despawn(inc) // stopping set, then ctx cancel → Start returns its error mid-Draining
+	if _, ok := rt.Stat("a"); ok {
+		t.Fatal("cell still addressable after Despawn joined")
+	}
+	select {
+	case <-w.notify:
+		t.Fatal("Start failure during Draining must be quiet — no down edge (§1.4 ②>①)")
+	case <-time.After(100 * time.Millisecond):
+	}
+}

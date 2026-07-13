@@ -214,6 +214,13 @@ func (c *cell) start() {
 			if r := recover(); r != nil {
 				deathCause = fmt.Errorf("actorrt: cell %s panicked: %v", c.id, r)
 			}
+			// Single death verdict at the one exit gate (§1.4 ②>①): every death
+			// cause — occupant exit code, Start failure, panic — passes the SAME
+			// stopping arbitration exactly once, here, where the down edge is
+			// published. Sources above only report causes; deciding loud-vs-quiet
+			// at a source is how the panic path once skipped arbitration and a
+			// Draining panic misfired receiver_unavailable (purity v3 A1).
+			deathCause = c.arbitrateDeath(deathCause)
 			// (a-1) Flip liveness off FIRST so a livePen fences this incarnation the
 			// instant the goroutine begins to unwind (before self-eviction / death
 			// edge). markDead is idempotent; onExit/Despawn may flip it again.
@@ -262,16 +269,17 @@ func (c *cell) start() {
 		for {
 			select {
 			case <-c.ctx.Done():
-				// Non-stopping arbitration (§1.4) prefers a dying signal that raced
-				// ctx.Done() to plain readiness: re-check dying NON-BLOCKINGLY before
-				// returning, so a simultaneously-ready exit code is not lost to
-				// select's random choice between two ready cases.
+				// Prefer a dying signal that raced ctx.Done() to plain readiness:
+				// re-check dying NON-BLOCKINGLY before returning, so a
+				// simultaneously-ready exit code is not lost to select's random
+				// choice between two ready cases. (Arbitration happens once at the
+				// exit gate above, not here.)
 				if err, ok := drainDying(dying); ok {
-					deathCause = c.arbitrateDeath(err)
+					deathCause = err
 				}
 				return
 			case err := <-dying:
-				deathCause = c.arbitrateDeath(err)
+				deathCause = err
 				return
 			case env := <-c.inbox:
 				c.safeReceive(env)
@@ -297,10 +305,12 @@ func drainDying(dying <-chan error) (err error, ok bool) {
 
 // arbitrateDeath applies the ②>① priority (opus review, §1.4): regulation ②
 // (stopping position pre-empts everything) wins over the occupant's own exit
-// code — a worker's ANY return during Draining (external Stop/Despawn/replace
-// in flight) is forced quiet, because the natural graceful-shutdown write is
-// `return ctx.Err()`, which regulation ① alone would misjudge loud. Outside
-// stopping, the occupant's code stands: nil is quiet, non-nil is loud.
+// code — a worker's ANY exit during Draining (external Stop/Despawn/replace
+// in flight; return err, Start failure and panic alike) is forced quiet,
+// because the natural graceful-shutdown write is `return ctx.Err()`, which
+// regulation ① alone would misjudge loud. Outside stopping, the occupant's
+// code stands: nil is quiet, non-nil is loud. Called exactly once, at the
+// loop goroutine's deferred exit gate — never at a death-cause source.
 func (c *cell) arbitrateDeath(err error) error {
 	if c.isStopping() {
 		return nil
