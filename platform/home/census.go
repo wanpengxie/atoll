@@ -25,7 +25,7 @@ func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (ac
 	if err != nil {
 		return "", fmt.Errorf("platform: Admit membership: %w", err)
 	}
-	// 装配链 step② (gateway 期 v0.4.1 勘误): a human's binding slot生死随户籍级联 — ensure
+	// 装配链 step② (gateway 期 v0.4.1 勘误): a human's slot (在场与递交接头盒)生死随户籍级联 — ensure
 	// it at准入 (before the reconcile poke, so it strictly precedes any gateway attach
 	// that could look it up), synchronously so a client that attaches right after Admit
 	// never races an absent slot. Idempotent with factoryFor's ensure (restart path).
@@ -33,6 +33,13 @@ func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (ac
 		h.EnsureSubjectSlot(id)
 	}
 	h.pokeReconcile()
+	// Membership-change poke emit point (连接模型勘误期 §3.2 表②, Admit 侧新增): the
+	// person gained a channel — poke so their gateway session re-resolves its
+	// subscriptions/presence on the next immediate loop rather than waiting a sweep.
+	// Pure及时性 (a lost poke only delays convergence); the principal is right here.
+	if h.onMembershipChange != nil {
+		h.onMembershipChange(principal)
+	}
 	h.logger.Info("platform.member.admitted", "channel", string(h.channelID),
 		"actor", string(id), "kind", string(kind), "principal", principal)
 	return id, nil

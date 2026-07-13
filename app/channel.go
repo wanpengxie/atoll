@@ -111,12 +111,15 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	}
 	rollback := func(stage string, err error) {
 		cID := channel.ID(chID)
+		// 锁纪律 (连接模型勘误期 §3.2 P1-6): 摘把手 under a.mu, Close OUTSIDE it — a
+		// home.Close held under a.mu blocks every concurrent getHome / resolver read.
 		a.mu.Lock()
-		if h, ok := a.homes[cID]; ok {
-			_ = h.Close()
-			delete(a.homes, cID)
-		}
+		h := a.homes[cID]
+		delete(a.homes, cID)
 		a.mu.Unlock()
+		if h != nil {
+			_ = h.Close()
+		}
 		_, _ = a.db.ExecContext(c.Request.Context(), `DELETE FROM channels WHERE id = ?`, chID)
 		_ = os.Remove(dbPath)
 		a.logger.Error("create channel: "+stage, "channel", chID, "err", err)
@@ -213,13 +216,15 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 	}
 
 	// Close the in-memory channel home (stops links, delivery tap, cells, stores).
+	// 锁纪律 (连接模型勘误期 §3.2 P1-6): 摘把手 under a.mu, Close OUTSIDE it.
 	cID := channel.ID(chID)
 	a.mu.Lock()
-	if home, exists := a.homes[cID]; exists {
-		_ = home.Close()
-		delete(a.homes, cID)
-	}
+	h := a.homes[cID]
+	delete(a.homes, cID)
 	a.mu.Unlock()
+	if h != nil {
+		_ = h.Close()
+	}
 
 	// Remove daemon bindings, then the channel row.
 	_, _ = a.db.ExecContext(c.Request.Context(),

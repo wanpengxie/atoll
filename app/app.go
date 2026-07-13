@@ -22,7 +22,6 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/jsondepth"
 	"github.com/wanpengxie/atoll/platform/home"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
@@ -30,11 +29,11 @@ import (
 // WSGateway is the human-ingress serving面 the assembly root (cmd/server) injects:
 // the gateway 期 connector (drivers/gateway/connector/web) satisfies it. app → drivers
 // is fenced, so the app names only this interface and cmd/server bridges the concrete
-// connector in. The app membrane authenticates (session→principal + channel ACL) then
-// hands the upgraded-pending request off — the connector upgrades the ws and runs the
-// session cross. nil (unwired) → /ws answers 503.
+// connector in. The app membrane authenticates (session→principal ONLY — 连接即人, no
+// connection-level channel ACL; channel eligibility is the gateway's live per-frame
+// resolve) then hands the upgraded-pending request off. nil (unwired) → /ws answers 503.
 type WSGateway interface {
-	ServeWeb(w http.ResponseWriter, r *http.Request, home *home.Home, chID channel.ID, principal string)
+	ServeWeb(w http.ResponseWriter, r *http.Request, principal string)
 }
 
 // App is the product application server.
@@ -54,13 +53,13 @@ type App struct {
 	// Config (see Config.ExtraDropKinds).
 	extraDropKinds []actorrt.ObsKind
 
-	// wsGateway is the injected human-ingress connector (gateway 期 S3); revokeSink
-	// is the injected revocation fan-in (RevocationHub.Emit) both the platform emit
-	// point (home.Config.OnRevoke, wired in createHome) and the app's own ACL write
-	// points feed. Both are set by the assembly root via SetGateway/SetRevokeSink
-	// after New (the gateway needs the app's routing面, breaking the構造 cycle).
-	wsGateway  WSGateway
-	revokeSink func(channel.ID, actor.ActorID)
+	// wsGateway is the injected human-ingress connector (gateway 期 S3); membershipPoke
+	// is the injected membership-change poke fan-in (PokeHub.Poke) the platform emit
+	// points (home.Config.OnMembershipChange, wired in createHome — Admit/Remove) feed.
+	// Both are set by the assembly root via SetGateway/SetMembershipPoke after New (the
+	// gateway needs the app's routing/entitlement面, breaking the構造 cycle).
+	wsGateway      WSGateway
+	membershipPoke func(principal string)
 
 	// controlShimTimeout bounds how long a channel-control HTTP shim waits for the
 	// door's terminal reply before returning 202 + request_id (前端语义不变). A test
@@ -140,11 +139,11 @@ func New(cfg Config) (*App, error) {
 // it is set.
 func (a *App) SetGateway(g WSGateway) { a.wsGateway = g }
 
-// SetRevokeSink injects the revocation fan-in (RevocationHub.Emit). createHome
-// forwards it into each home's home.Config.OnRevoke (the membership emit point), and
-// the app's own ACL write points call it (the ACL emit point). nil → no live
-// revocation (reconnect re-auth + the read-side每批 recheck remain the backstop).
-func (a *App) SetRevokeSink(fn func(channel.ID, actor.ActorID)) { a.revokeSink = fn }
+// SetMembershipPoke injects the membership-change poke fan-in (PokeHub.Poke). createHome
+// forwards it into each home's home.Config.OnMembershipChange (Admit/Remove emit points).
+// nil → no live poke (reconnect re-auth + the resolver's每批 recheck / sweep remain the
+// correctness正门 — a lost poke only delays convergence).
+func (a *App) SetMembershipPoke(fn func(principal string)) { a.membershipPoke = fn }
 
 // Run starts the HTTP server and blocks until it is Shutdown (or errors). It
 // holds an explicit http.Server so cmd can drain in-flight requests on signal;
@@ -173,16 +172,20 @@ func (a *App) Shutdown(ctx context.Context) error {
 	return srv.Shutdown(ctx)
 }
 
-// Close tears down all channel homes.
+// Close tears down all channel homes. 锁纪律 (连接模型勘误期 §3.2 P1-6): snapshot +
+// clear the map UNDER a.mu, then Close each home OUTSIDE the lock — a home.Close held
+// under a.mu would block every concurrent getHome (a.mu.RLock), and the entitlement
+// resolver's bounded read (T_read) cannot cancel a lock wait.
 func (a *App) Close() error {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	homes := a.homes
+	a.homes = make(map[channel.ID]*home.Home)
+	a.mu.Unlock()
 	var firstErr error
-	for id, home := range a.homes {
-		if err := home.Close(); err != nil && firstErr == nil {
+	for _, h := range homes {
+		if err := h.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
-		delete(a.homes, id)
 	}
 	return firstErr
 }
@@ -341,12 +344,14 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*home.Home, error) {
 		// The presence fold's drop-bucket vocabulary: substrate kinds + the
 		// drivers-side kinds the assembly root injected (Config.ExtraDropKinds).
 		EventDropKinds: a.eventDropKinds(),
-		// Membership撤销 emit point (gateway 期 S3 表②①): Home.Remove fires this after
-		// the dereg cascade; the app forwards it (with this channel's id) into the
-		// injected revocation fan-in so the gateway seals the subject's频道臂.
-		OnRevoke: func(subject actor.ActorID) {
-			if a.revokeSink != nil {
-				a.revokeSink(chID, subject)
+		// Membership-change poke emit point (连接模型勘误期 §3.2 表②): Home.Admit (入籍)
+		// and Home.Remove (注销, principal captured before the dereg cascade) fire this;
+		// the app forwards the principal into the injected poke fan-in so the gateway
+		// re-resolves that principal's channel set (subscriptions + presence). Channel is
+		// no longer part of the address — the resolver enumerates the whole set.
+		OnMembershipChange: func(principal string) {
+			if a.membershipPoke != nil {
+				a.membershipPoke(principal)
 			}
 		},
 	})

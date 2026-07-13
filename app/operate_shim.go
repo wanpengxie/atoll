@@ -105,7 +105,8 @@ func (a *App) submitControlThroughDoor(ctx context.Context, chID, userID, msgTyp
 	// submit frame's expires_at_ms — a bounded interactive action the reaper closes if
 	// no one serves it (restored from the pre-gateway edge; §S2 status v0.4.1 勘误).
 	exp := time.Now().UnixMilli() + clientRequestTTLMs
-	f, ferr := subjectgate.NewFrame(subjectgate.FrameSubmit, 0, "", subjectgate.SubmitPayload{
+	f, ferr := subjectgate.NewFrame(subjectgate.FrameSubmit, "", subjectgate.SubmitPayload{
+		ChannelID: chID,
 		MsgType:   msgType,
 		Kind:      string(message.KindRequest),
 		Audience:  []string{string(actor.SystemActorID)},
@@ -115,10 +116,11 @@ func (a *App) submitControlThroughDoor(ctx context.Context, chID, userID, msgTyp
 	if ferr != nil {
 		return nil, ferr
 	}
-	// DeliverAnyGen: the control shim carries no gateway binding (no session/arm),
-	// so the binding-generation assertion does not apply — a stale gateway binding
-	// is not a possible fault on this trusted platform-internal path.
-	res, derr := slot.Deliver(ctx, f, subjectgate.DeliverAnyGen)
+	// Deliver carries no gateway binding-generation argument (连接模型勘误期: the
+	// client-visible binding axis was proven a false axis and整删, and the trusted-path
+	// exemption sentinel went with it). This trusted platform-internal path delivers
+	// the submit straight onto the subject's own cell through its slot.
+	res, derr := slot.Deliver(ctx, f)
 	if derr != nil {
 		// ErrNoOccupant (cell mid-re-mint / torn down) → retryable unavailable.
 		return nil, errShimCellUnavailable

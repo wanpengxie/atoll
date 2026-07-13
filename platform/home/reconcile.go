@@ -436,7 +436,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 func (h *Home) factoryFor(rec storespec.Record) (platform.ActorFactory, bool) {
 	if rec.Kind == actor.KindHuman {
 		// 装配链 step② (gateway 期 v0.4.1 勘误: 槽随户籍准入 ensure): the per-identity
-		// binding slot is ensured HERE — the platform-authoritative membership→
+		// slot (在场与递交接头盒) is ensured HERE — the platform-authoritative membership→
 		// embodiment dispatch (shared by the reconcile 补臂 and homeReviver.EnsureLive),
 		// which covers BOTH a fresh Admit-poke AND a restart's durable re-read (a member
 		// read from the store with no Admit call this run). This runs BEFORE the cell is
@@ -499,7 +499,7 @@ func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, inc actorr
 		// 死 ID 槽级联清 (gateway 期 P1, mirror remove.go §级联删槽): factoryFor embodies a
 		// human by EnsureSubjectSlot BEFORE this build (装配链 step②). A stale-rec 补臂/
 		// EnsureLive whose Lookup predated a concurrent Home.Remove can therefore RE-create
-		// the binding slot AFTER Remove's RemoveSubjectSlot ran — resurrecting a dead id's
+		// the slot AFTER Remove's RemoveSubjectSlot ran — resurrecting a dead id's
 		// slot. Despawn alone (above)只 evicts the cell, not the slot, so close the笔 here
 		// with the SAME idempotent cascade Remove uses (id is confirmed dead — 身份不可复活
 		// mints a fresh id on any re-Admit, so this only ever targets THIS dead id, never a

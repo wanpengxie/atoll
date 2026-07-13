@@ -6,7 +6,7 @@
 //	Open(cfg) → *Home
 //	View()  View              — read-only observation set (ReadAfterSeq/MaxSeq/ListActors/Stat/Snapshot/IsAttached)
 //	Admit(ctx,kind,principal) — mint/idempotently resolve active membership
-//	EnsureSubjectSlot(id) / SubjectSlotFor(id) / RemoveSubjectSlot(id) — the per-identity subjectgate binding slot seam the gateway drives (a subject's own Submit/Resolve/Cancel/After actions arrive as wire frames onto their cell through the slot; welded pen stays in the wall)
+//	EnsureSubjectSlot(id) / SubjectSlotFor(id) / RemoveSubjectSlot(id) — the per-identity subjectgate slot seam (在场与递交接头盒) the gateway drives (a subject's own Submit/Resolve/Cancel/After actions arrive as wire frames onto their cell through the slot; welded pen stays in the wall)
 //	Restart(ctx,id)           — accepted-unconfirmed embodiment replacement request
 //	ServeAttach(w,r,daemonID) — attach acceptance surface (app hands an upgraded WS here)
 //	Subscribe() (<-chan struct{}, func()) — subscription registration surface (client push)

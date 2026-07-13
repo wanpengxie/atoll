@@ -37,16 +37,19 @@ type wsClient struct {
 	tail chan map[string]any
 	acks chan map[string]any
 
-	mu         sync.Mutex
-	refType    map[string]string // ref → originating frame type (for ack["frame"])
-	bindingGen int64             // granted at attach; stamped on every upstream frame (P0-2 世代 gate)
+	chID string // the channel this test client drives (stamped as channel_id on every business frame — 连接模型勘误期 v2)
+
+	mu      sync.Mutex
+	refType map[string]string // ref → originating frame type (for ack["frame"])
 }
 
-// dialWS opens a gateway ws for chID (query param — the app membrane authenticates
-// pre-upgrade) and sends the opening attach frame (channel + since cursor).
+// dialWS opens a gateway ws (连接模型勘误期: 连接即人 — /ws is channel-blind, the app
+// membrane authenticates session→principal only) and sends the opening attach frame
+// (报到 + a 游标表 keyed by chID). chID is retained so every business frame this test
+// client sends carries it as the required channel_id (v2).
 func dialWS(t *testing.T, srv *httptest.Server, cookies []*http.Cookie, chID string, sinceSeq int64) *wsClient {
 	t.Helper()
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?channel=" + chID
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
 	hdr := http.Header{}
 	var parts []string
 	for _, ck := range cookies {
@@ -60,31 +63,30 @@ func dialWS(t *testing.T, srv *httptest.Server, cookies []*http.Cookie, chID str
 	c := &wsClient{
 		t:       t,
 		conn:    conn,
+		chID:    chID,
 		tail:    make(chan map[string]any, 512),
 		acks:    make(chan map[string]any, 64),
 		refType: map[string]string{},
 	}
-	attach := map[string]any{"channel_id": chID}
+	var attach map[string]any
 	if sinceSeq > 0 {
-		attach["since"] = map[string]int64{chID: sinceSeq}
+		attach = map[string]any{"since": map[string]int64{chID: sinceSeq}}
 	}
 	c.writeFrame("attach", "", attach)
-	// Read the attach receipt synchronously to capture the granted binding_gen — every
-	// subsequent upstream frame must carry it or the世代 gate refuses it (P0-2).
+	// Read the attach receipt synchronously (报到 ack — an EMPTY payload now; attach is
+	// no longer a binding grant) so a test's first nextAck is its own frame's receipt.
 	var wf wireFrame
 	if err := conn.ReadJSON(&wf); err != nil {
 		t.Fatalf("attach receipt read: %v", err)
 	}
-	var ar struct {
-		BindingGen int64 `json:"binding_gen"`
-	}
-	_ = json.Unmarshal(wf.Payload, &ar)
-	c.bindingGen = ar.BindingGen
 	go c.readLoop()
 	return c
 }
 
-// writeFrame builds one standard frame (frame_type + ref + payload) and writes it.
+// writeFrame builds one standard frame (frame_type + ref + payload) and writes it. For
+// every business frame (not attach) it injects the required channel_id (连接模型勘误期
+// v2: the connection is channel-blind, so each frame names its channel) unless the
+// caller已 set one explicitly (a test may set "" to exercise bad_payload).
 func (c *wsClient) writeFrame(frameType, ref string, payload map[string]any) {
 	c.t.Helper()
 	if ref != "" {
@@ -92,7 +94,15 @@ func (c *wsClient) writeFrame(frameType, ref string, payload map[string]any) {
 		c.refType[ref] = frameType
 		c.mu.Unlock()
 	}
-	f := map[string]any{"v": 1, "frame_type": frameType, "binding_gen": c.bindingGen}
+	if frameType != "attach" {
+		if payload == nil {
+			payload = map[string]any{}
+		}
+		if _, ok := payload["channel_id"]; !ok {
+			payload["channel_id"] = c.chID
+		}
+	}
+	f := map[string]any{"v": 2, "frame_type": frameType}
 	if ref != "" {
 		f["ref"] = ref
 	}
@@ -128,11 +138,8 @@ func (c *wsClient) readLoop() {
 		case "receipt":
 			var pm map[string]any
 			_ = json.Unmarshal(wf.Payload, &pm)
-			// The opening attach receipt (binding_gen only) is not a business ack —
-			// drop it so a test's first nextAck is its own frame's receipt.
-			if _, isAttach := pm["binding_gen"]; isAttach && len(pm) == 1 {
-				continue
-			}
+			// The opening attach receipt (empty payload) is consumed synchronously in
+			// dialWS before this loop starts, so every receipt here is a business ack.
 			ack := map[string]any{"type": "ack"}
 			for k, v := range pm {
 				ack[k] = v
@@ -331,8 +338,10 @@ func TestWS_NonMemberWriteRejected(t *testing.T) {
 		"msg_type": "chat.text", "kind": "event",
 		"payload": map[string]any{"text": "let me in"},
 	})
-	if ack["type"] != "error" || ack["error"] != "not_member" {
-		t.Fatalf("non-member write: want error not_member, got %v", ack)
+	// not_member retired (连接模型勘误期): a connection has no身份色 — an eligibility
+	// refusal is uniformly forbidden (observer may not drive business frames, 表①).
+	if ack["type"] != "error" || ack["error"] != "forbidden" {
+		t.Fatalf("non-member write: want error forbidden, got %v", ack)
 	}
 }
 
@@ -585,8 +594,9 @@ func TestWS_AfterFrameNonMember(t *testing.T) {
 	defer c.close()
 
 	c.send(map[string]any{"type": "after", "ref": "n1", "duration_ms": 1000, "msg_type": "reminder.note"})
-	if errFrame := c.nextAck(3 * time.Second); errFrame["error"] != "not_member" {
-		t.Fatalf("non-member after: want not_member, got %v", errFrame)
+	// not_member retired → uniformly forbidden (连接模型勘误期 表①).
+	if errFrame := c.nextAck(3 * time.Second); errFrame["error"] != "forbidden" {
+		t.Fatalf("non-member after: want forbidden, got %v", errFrame)
 	}
 }
 

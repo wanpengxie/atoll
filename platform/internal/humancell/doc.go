@@ -4,8 +4,8 @@
 // welded caps.
 //
 // It is 受养驱动 (domain 件), not substrate law: the cell lives INSIDE the
-// membrane because it holds a 受养特权 (a per-identity binding slot the
-// gateway drives frames through), but its request-type table
+// membrane because it holds a 受养特权 (a per-identity slot — the在场与递交
+// 接头盒 the gateway drives frames through), but its request-type table
 // (human.message/human.approve/…), its error codes, and its verb vocabulary
 // are all DOMAIN words — the "human subject" convention, not a substrate
 // invariant every actor must obey. platform/subjectgate is the

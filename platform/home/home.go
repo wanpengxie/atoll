@@ -94,13 +94,15 @@ type Config struct {
 	// timeout path needs a fast, deterministic window rather than production's
 	// multi-minute backstop.
 	ReservationTimeout time.Duration
-	// OnRevoke, when set, is fired by Remove AFTER the dereg cascade commits (the
-	// membership撤销 emit point, gateway 期 S3 表② remove.go). The assembly root
-	// bridges it into the gateway's RevocationSource so the subject's频道臂 seals
-	// (read-side revocation). nil → no bridge (the fold Sweep + read-side reader
-	// resource recheck remain the level backstop). Home passes its own channelID at
-	// the call site, so the sink is (channel, subject)-addressed.
-	OnRevoke func(subject actor.ActorID)
+	// OnMembershipChange, when set, is fired by Admit (after the membership write)
+	// and by Remove (with the principal captured BEFORE the dereg cascade, since the
+	// registry row is gone after). It is the membership-change poke emit point
+	// (连接模型勘误期 §3.2 表② 逐符号迁移: the old (channel, subject) OnRevoke is reborn
+	// as a per-principal poke — 性质 changed from 撤销执行 to pure及时性). The assembly
+	// root bridges it into the gateway's PokeHub → Gateway.Poke(principal); the gateway
+	// re-resolves that principal's WHOLE channel set (subscriptions + presence). nil →
+	// no poke (the resolver's每批 recheck + sweep remain the correctness正门).
+	OnMembershipChange func(principal string)
 	// EventDropKinds is the producer-owned vocabulary of non-level diagnostic obs
 	// kinds the presence fold buckets per name (queue overflow, closure fault,
 	// checkpoint drop, …). The substrate names no such word: it stays blind to the
@@ -133,13 +135,15 @@ type Home struct {
 	// own cell's caps through the subjectgate frame protocol → the cell's
 	// identity-dimension Sys verbs, see humancell.go.)
 
-	// onRevoke is Config.OnRevoke (the membership撤销 emit point) — fired by
-	// Remove after the dereg cascade so the gateway can seal the subject's频道臂.
-	onRevoke func(subject actor.ActorID)
+	// onMembershipChange is Config.OnMembershipChange (the membership-change poke emit
+	// point) — fired by Admit (after the write) and Remove (principal captured before
+	// the dereg cascade) so the gateway re-resolves that principal's channel set.
+	// 连接模型勘误期 §3.2.
+	onMembershipChange func(principal string)
 
-	// subjectgate is the human接入轴 binding registry (gateway 期 S2): the
-	// per-identity slot store (four-tuple {绑定世代, gateway epoch, 帧递交端,
-	// presence level}). Built once at Open (装配链 step①, before any cell
+	// subjectgate is the human接入轴 slot registry (gateway 期 S2): the
+	// per-identity slot store — each slot is the在场与递交接头盒 (the gateway
+	// epoch presence register + the帧递交端). Built once at Open (装配链 step①, before any cell
 	// construction path). A human cell's factory consults it at Proc start
 	// (step③④) for its frame delivery端 + presence self-report槽; a nil-slot
 	// (no gateway attach yet) cell is mailbox-only. The gateway (S3) ensures

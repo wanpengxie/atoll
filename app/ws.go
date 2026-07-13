@@ -13,14 +13,14 @@ import (
 // WebSocket: the subject's single gateway link (/ws)
 // ---------------------------------------------------------------------------
 //
-// gateway 期 S3: the ws transport + frame protocol moved to the drivers/gateway伞包
-// (the connector does byte↔IR, the gateway core does the session cross). The app
-// keeps only the MEMBRANE half — authenticate the session, enforce the workspace
-// (tail) ACL, resolve the open Home — then hand the upgraded-pending request to the
-// injected connector (WSGateway). Channel membership (write eligibility) is the
-// gateway's own resolve; a workspace member who is not a channel member gets a
-// tail-only session whose business frames are refused not_member. The single-link
-// law (红线 10) is unchanged: one ws carries the feed DOWN and the standard frames UP.
+// gateway 期 S3 (连接模型勘误期): the ws transport + frame protocol live in the
+// drivers/gateway伞包 (the connector does byte↔IR, the gateway core does the session
+// cross). 连接即人: the app membrane authenticates ONLY session→principal — there is NO
+// connection-level channel query and NO connection-level channel ACL. A connection
+// subscribes to the实时动态 of ALL the person's合法频道 (户籍 ∪ 读资格), resolved LIVE by
+// the gateway's injected EntitlementResolver per frame/batch; "which window is open" is
+// client内政. The single-link law (红线 10) is unchanged: one ws carries the feed DOWN
+// (for every eligible channel) and the standard frames UP (each naming its channel_id).
 func (a *App) handleWS(c *gin.Context) {
 	if a.wsGateway == nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "gateway unavailable"})
@@ -37,35 +37,9 @@ func (a *App) handleWS(c *gin.Context) {
 		return
 	}
 
-	chID := channel.ID(c.Query("channel"))
-	if chID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "channel query param required"})
-		return
-	}
-
-	// Channel-access ACL (tail eligibility): a valid session is not enough — the
-	// user must be a member of the channel's workspace, the same gate REST goes
-	// through. This is broader than channel membership; the gateway resolves the
-	// narrower channel membership (write eligibility) itself.
-	wsID, okWs := a.channelWorkspaceID(c.Request.Context(), string(chID))
-	if !okWs || !a.isWorkspaceMember(c.Request.Context(), wsID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-		return
-	}
-
-	home := a.getHome(chID)
-	if home == nil {
-		// Access passed (workspace member of an existing channel) but the universe is
-		// not open (A-P8): honestly "unavailable" (retryable), not "not found".
-		a.logger.Warn("channel unavailable: directory has channel but its home is not open",
-			"channel", string(chID))
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
-		return
-	}
-
-	// Hand off to the connector: it upgrades the ws and runs the gateway session
-	// cross. principal = the session's user id (the door resolves it to the subject).
-	a.wsGateway.ServeWeb(c.Writer, c.Request, home, chID, userID)
+	// Hand off to the connector: it upgrades the ws and runs the gateway session.
+	// principal = the session's user id; the gateway resolves eligibility live.
+	a.wsGateway.ServeWeb(c.Writer, c.Request, userID)
 }
 
 // ---------------------------------------------------------------------------

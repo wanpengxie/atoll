@@ -13,7 +13,6 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/atoll/drivers/gateway"
-	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -57,13 +56,16 @@ func New(gw *gateway.Gateway) *Connector {
 	}
 }
 
-// ServeWeb upgrades one authenticated connection and runs the gateway session. The
-// app membrane has already resolved session→principal + channel ACL (workspace
-// membership = tail eligibility); the gateway resolves channel membership (write
-// eligibility) inside Attach. The opening frame MUST be an attach naming this
-// channel; then the reader loop drives每 upstream frame onto the subject's cell and
-// the writer pump drains the lane (feed + receipts) to the wire.
-func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *home.Home, chID channel.ID, principal string) {
+// ServeWeb upgrades one authenticated connection and runs the gateway session
+// (连接模型勘误期: 连接即人). The app membrane has only resolved session→principal —
+// there is NO connection-level channel ACL, because channel eligibility is a
+// per-frame/per-batch fact the gateway resolves live (户籍 ∪ 读资格 via the injected
+// EntitlementResolver). The opening frame MUST be an attach, but it names no channel:
+// it just hands over the游标表 (a multi-key since map). Then the writer pump drains
+// the lane (feed for ALL the person's合法频道 + receipts) and the reader loop drives每
+// upstream business frame — each carrying its own channel_id — onto that channel's
+// subject cell.
+func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal string) {
 	ws, err := c.upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return
@@ -76,7 +78,7 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *home.
 		return ws.SetReadDeadline(time.Now().Add(wsPongWait))
 	})
 
-	// Opening frame: attach.
+	// Opening frame: attach (channel-blind — just the游标表 handoff).
 	_, data, err := ws.ReadMessage()
 	if err != nil {
 		return
@@ -91,19 +93,10 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *home.
 		writeErr(ws, "attach", subjectgate.CodeBadPayload, err.Error())
 		return
 	}
-	if ap.ChannelID != "" && channel.ID(ap.ChannelID) != chID {
-		writeErr(ws, "attach", subjectgate.CodeBadPayload, "attach channel_id does not match the authenticated channel")
-		return
-	}
-	since, serr := parseSince(ap, chID)
-	if serr != "" {
-		writeErr(ws, "attach", subjectgate.CodeBadPayload, serr)
-		return
-	}
 
-	sess, gen, aerr := c.gw.Attach(r.Context(), home, chID, principal, since)
+	sess, aerr := c.gw.Attach(r.Context(), principal, parseSince(ap))
 	if aerr != nil {
-		writeErr(ws, "attach", subjectgate.CodeUnavailable, "channel unavailable")
+		writeErr(ws, "attach", subjectgate.CodeUnavailable, "gateway unavailable")
 		return
 	}
 	defer sess.Close()
@@ -117,12 +110,14 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *home.
 		_ = ws.SetReadDeadline(time.Now())
 	}()
 
-	// Attach receipt (before the feed backfill so it is not interleaved behind it).
-	receipt, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, gen, f.Ref, subjectgate.AttachReceipt{BindingGen: gen})
+	// Attach receipt (报到 ack, empty payload — attach is no longer a binding grant).
+	// Sent before the feed backfill so it is not interleaved behind it.
+	receipt, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, subjectgate.AttachReceipt{})
 	sess.Send(receipt)
 	sess.StartFeed()
 
-	// Reader loop: the SINGLE ws reader.
+	// Reader loop: the SINGLE ws reader. detach is整删 (no client-visible unbind);
+	// every business frame names its own channel_id and returns a receipt-or-error.
 	ctx := r.Context()
 	for {
 		_, data, err := ws.ReadMessage()
@@ -134,8 +129,6 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, home *home.
 			sess.Send(errFrame("", subjectgate.CodeBadPayload, perr.Error()))
 			continue
 		}
-		// detach returns an empty frame (表② detach receipt = "—"): send nothing, the
-		// seal + teardown IS the result.
 		if resp := sess.Upstream(ctx, fr); resp.Type != "" {
 			sess.Send(resp)
 		}
@@ -167,28 +160,22 @@ func (c *Connector) writerPump(ws *websocket.Conn, sess *gateway.Session) {
 	}
 }
 
-// parseSince validates the attach since map (裁决7: today a single-element map keyed
-// by this channel; a multi-key payload is refused bad_payload) and returns the
-// per-channel cursor vector.
-func parseSince(ap subjectgate.AttachPayload, chID channel.ID) (map[channel.ID]int64, string) {
+// parseSince converts the attach since map into the per-channel cursor vector
+// (连接模型勘误期: multi-key is legal — a connection carries游标 for ALL its channels;
+// a key with no eligibility is harmless and silently dropped downstream).
+func parseSince(ap subjectgate.AttachPayload) map[channel.ID]int64 {
 	if len(ap.Since) == 0 {
-		return nil, ""
+		return nil
 	}
-	if len(ap.Since) > 1 {
-		return nil, "since map may carry only this connection's channel (today 单元素)"
-	}
-	out := make(map[channel.ID]int64, 1)
+	out := make(map[channel.ID]int64, len(ap.Since))
 	for k, v := range ap.Since {
-		if k != string(chID) {
-			return nil, "since key must be the attached channel"
-		}
 		out[channel.ID(k)] = v
 	}
-	return out, ""
+	return out
 }
 
 func errFrame(frameType, code, detail string) subjectgate.Frame {
-	f, _ := subjectgate.NewFrame(subjectgate.FrameError, 0, "", subjectgate.ErrorPayload{Frame: frameType, Code: code, Detail: detail})
+	f, _ := subjectgate.NewFrame(subjectgate.FrameError, "", subjectgate.ErrorPayload{Frame: frameType, Code: code, Detail: detail})
 	return f
 }
 

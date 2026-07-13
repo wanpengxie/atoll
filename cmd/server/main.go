@@ -43,10 +43,10 @@ type appShutdowner interface {
 
 // gracefulShutdown runs the ordered teardown — the order IS the semantics: ①
 // drain the HTTP entry (stop accepting, finish in-flight), ② silence the gateway
-// (seal every频道臂 — gateway先静默 before Home, design §5.5 / DoD-9), ③ close
-// channel homes (the substrate behind the entry), ④ close the app db. Each step
-// logs before it runs so the order is assertable. All run even if an earlier one
-// errors; errors are joined.
+// (关站全序: 停在场圈 → close every session → join read pumps → 等已获准递交归零 —
+// gateway先静默 before Home, 连接模型勘误期 §3.2 / DoD-9), ③ close channel homes (the
+// substrate behind the entry), ④ close the app db. Each step logs before it runs so
+// the order is assertable. All run even if an earlier one errors; errors are joined.
 func gracefulShutdown(ctx context.Context, logger *slog.Logger, a appShutdowner, gw io.Closer, db io.Closer) error {
 	logger.Info("server: shutdown step 1/4: draining http")
 	e1 := a.Shutdown(ctx)
@@ -57,6 +57,41 @@ func gracefulShutdown(ctx context.Context, logger *slog.Logger, a appShutdowner,
 	logger.Info("server: shutdown step 4/4: closing app db")
 	e4 := db.Close()
 	return errors.Join(e1, e2, e3, e4)
+}
+
+// gatewayResolver bridges the app's own entitlement DTO into the gateway's
+// EntitlementResolver seam (连接模型勘误期 §3.2: app → drivers is fenced, so the
+// assembly root maps DTO→DTO). The app resolves 户籍 ∪ 读资格 per principal; the bridge
+// only translates the flat access class into gateway.AccessClass.
+func gatewayResolver(a *app.App) gateway.EntitlementResolver {
+	return gateway.ResolverFunc(func(ctx context.Context, principal string) ([]gateway.Route, []gateway.ChannelFailure, error) {
+		routes, failed, err := a.EntitlementSnapshot(ctx, principal)
+		if err != nil {
+			return nil, nil, err
+		}
+		gr := make([]gateway.Route, 0, len(routes))
+		for _, r := range routes {
+			access := gateway.AccessObserver
+			if r.Access == "member" {
+				access = gateway.AccessMember
+			}
+			gr = append(gr, gateway.Route{
+				Channel:   r.Channel,
+				Home:      r.Home,
+				Access:    access,
+				SubjectID: r.SubjectID,
+				CheckedAt: r.CheckedAt,
+			})
+		}
+		var gf []gateway.ChannelFailure
+		if len(failed) > 0 {
+			gf = make([]gateway.ChannelFailure, 0, len(failed))
+			for _, f := range failed {
+				gf = append(gf, gateway.ChannelFailure{Channel: f.Channel, Err: f.Err})
+			}
+		}
+		return gr, gf, nil
+	})
 }
 
 func main() {
@@ -97,22 +132,24 @@ func main() {
 		log.Fatalf("server: %v", err)
 	}
 
-	// Human-ingress gateway (gateway 期 S3): constructed AFTER the app so it can
-	// hold the app's routing面, then injected back (the construction cycle is broken
-	// by the two setters). The revocation hub fans the two emit points (platform
-	// home.Home.Remove via home.Config.OnRevoke + the app's ACL write points) into the
-	// gateway's arm-seal.
-	revHub := gateway.NewRevocationHub()
+	// Human-ingress gateway (gateway 期 S3, 连接模型勘误期): constructed AFTER the app so
+	// it can hold the app's routing + entitlement面, then injected back (the construction
+	// cycle is broken by the setters). The poke hub fans the platform membership-change
+	// emit points (home.Home.Admit/Remove via home.Config.OnMembershipChange) into
+	// Gateway.Poke; the entitlement resolver bridges the app's own DTO into gateway.Route
+	// (app → drivers is fenced, so the assembly root does the DTO→DTO map here).
+	pokeHub := gateway.NewPokeHub()
 	gw := gateway.New(gateway.Config{
-		Routing:    a.ResolveRoutingForGateway,
-		Revocation: revHub,
-		Logger:     logger,
+		Routing:  a.ResolveRoutingForGateway,
+		Resolver: gatewayResolver(a),
+		Logger:   logger,
 	})
+	pokeHub.Subscribe(gw.Poke)
 	if err := gw.Start(); err != nil {
 		log.Fatalf("server: %v", err)
 	}
 	a.SetGateway(web.New(gw))
-	a.SetRevokeSink(revHub.Emit)
+	a.SetMembershipPoke(pokeHub.Poke)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

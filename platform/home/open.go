@@ -272,8 +272,8 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	h.reviveLogAt = map[actor.ActorID]time.Time{}
 	h.reviveBackoff = map[actor.ActorID]reviveBackoffEntry{}
 	h.pokeCh = make(chan struct{}, 1)
-	h.onRevoke = cfg.OnRevoke
-	// 装配链 step① (gateway 期 S2): the binding registry exists BEFORE any cell
+	h.onMembershipChange = cfg.OnMembershipChange
+	// 装配链 step① (gateway 期 S2): the slot registry exists BEFORE any cell
 	// construction path (human cells are born at the reconcile sweep below), so
 	// the factory's step③ slot lookup never races an absent registry.
 	h.subjectgate = subjectgate.NewRegistry()

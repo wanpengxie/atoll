@@ -22,11 +22,11 @@ import (
 // subjectgate_seam.go 的 gateway 期 S3 公共缝三方法（EnsureSubjectSlot/
 // SubjectSlotFor/RemoveSubjectSlot）也收进本文件: the drivers/gateway伞包
 // drives a subject's per-identity slot through these Home methods. The slot
-// itself is *subjectgate.Slot; its exported methods (SetBinding/BindingGen/
-// PublishLevel/Forget/Deliver) are the gateway's controlled面. Home hands out
-// the slot handle, never the internal Registry object — the organ-bag red
-// line (surface_test) stays intact: these three are capability methods, not
-// bare-accessor leaks.
+// itself is *subjectgate.Slot — the在场与递交接头盒; its exported methods
+// (PublishLevel/PublishCurrent/ForgetEpoch/Forget/Deliver) are the gateway's
+// controlled面. Home hands out the slot handle, never the internal Registry
+// object — the organ-bag red line (surface_test) stays intact: these three are
+// capability methods, not bare-accessor leaks.
 
 // humanCellFactory is the platform's built-in home-side human embodiment. user域
 // supply is platform internal政 — a per-channel human member's authority lives
@@ -140,7 +140,7 @@ func (h *Home) isRequestOpen(ctx context.Context, receiver actor.ActorID, reqID 
 	return false, nil
 }
 
-// EnsureSubjectSlot returns id's binding slot, creating it on first call
+// EnsureSubjectSlot returns id's slot (在场与递交接头盒), creating it on first call
 // (idempotent). The gateway calls this at attach (装配链 step②) BEFORE the human
 // cell's factory looks the slot up (step③), so the factory never races an absent
 // slot. A nil registry (never assembled) is defensive — every Open builds one.

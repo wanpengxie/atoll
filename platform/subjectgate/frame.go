@@ -4,12 +4,17 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // FrameVersion is the wire envelope version every frame carries in `v`. A frame
-// with a different version is refused at Unmarshal (fail-closed): the protocol
-// evolves additively but a version mismatch is never silently reinterpreted.
-const FrameVersion = 1
+// with a different version is refused at Unmarshal (fail-closed): a version
+// mismatch is never silently reinterpreted. v2 (连接模型勘误期): the connection
+// is channel-blind (attach drops channel_id, business frames carry a required
+// channel_id, binding_gen is gone) — a breaking change from v1, so v1 frames are
+// refused; the only deployment form is the same-repo atoll-web switching in the
+// same batch (atomic deploy).
+const FrameVersion = 2
 
 // MaxFrameBytes caps one serialized frame at 512KB (build spec §S2 envelope
 // note). A larger frame is refused (connector maps to a CloseMessageTooBig).
@@ -22,7 +27,6 @@ type FrameType string
 const (
 	// Upstream control.
 	FrameAttach FrameType = "attach"
-	FrameDetach FrameType = "detach"
 	// Upstream business (the person's actions, driven onto the cell's own caps).
 	FrameSubmit      FrameType = "submit"
 	FrameResolve     FrameType = "resolve"
@@ -48,11 +52,32 @@ const (
 //   - "notify" (+NotifyPayload{ReqID, MsgType, Summary}): the notify feature
 //     itself was never built. Same rule: const + payload + both sides'
 //     dispatch tables land as one slice with the feature, not ahead of it.
+//
+// Retired words (连接模型勘误期 — the client-visible binding axis was proven a
+// false axis: "连接即人", a connection is an authenticated person + one pipe,
+// with NO client-controllable channel binding/subscription state):
+//   - "detach" frame (+DetachPayload{ChannelID}): the "撤绑定" verb has no
+//     ontology — not-listening is the client's own business, leaving a channel
+//     is a 户籍 verb, being revoked is server internal务. It was the残余 of the
+//     "门动词形" disease (a封臂 machine grew a client trigger). Re-add ONLY if a
+//     real, defensible client-side unbind semantics ever appears — as one
+//     vertical slice with its producer.
+//   - "binding_gen" (Frame envelope field + AttachReceipt grant + BindingGen
+//     methods): the client-visible binding generation. With the binding axis
+//     dead there is no client-visible binding to echo or version; revocation is
+//     server-internal (read-pump per-batch eligibility recheck + lease upper
+//     bound), not a client-carried generation.
+//   - "stale_binding" (CodeStaleBinding): the错误码 for a client generation
+//     mismatch — no client-visible binding can be陈旧; its slots are covered by
+//     not_member/forbidden/unavailable.
+//   - "not_member" (CodeNotMember): the会话级 membership-color error code. A
+//     connection has no身份色 — eligibility is a per-frame/per-batch fact, and
+//     an eligibility refusal is uniformly forbidden (表①).
 
 // knownFrameTypes is the closed set enforced at Unmarshal. A frame_type outside
 // it is refused (unknown-frame rejection, DoD-12).
 var knownFrameTypes = map[FrameType]struct{}{
-	FrameAttach: {}, FrameDetach: {}, FrameSubmit: {}, FrameResolve: {},
+	FrameAttach: {}, FrameSubmit: {}, FrameResolve: {},
 	FrameCancel: {}, FrameAfter: {}, FrameCancelTimer: {}, FrameResource: {},
 	FrameFeed: {}, FrameReceipt: {}, FrameError: {},
 }
@@ -63,16 +88,17 @@ var knownFrameTypes = map[FrameType]struct{}{
 // the door's OWN vocabulary, not exhaustive of every harness reason.
 const (
 	CodeBadPayload         = "bad_payload"
-	CodeNotMember          = "not_member"
 	CodeNotInAudience      = "not_in_audience"
 	CodeUnauthorizedSender = "unauthorized_sender"
 	CodeAlreadyClosed      = "already_closed"
 	CodeRequestNotFound    = "request_not_found"
 	CodeInvalidDecision    = "invalid_decision"
 	CodeUnavailable        = "unavailable"
-	CodeStaleBinding       = "stale_binding"
 	CodeForbidden          = "forbidden"
 	CodeClosed             = "closed"
+	// (CodeNotMember / CodeStaleBinding retired with the client-visible binding
+	// axis — see the retired-words note by the FrameType consts. Eligibility
+	// refusal is uniformly CodeForbidden.)
 )
 
 // ErrUnknownFrameType is Unmarshal's verdict for a frame_type outside the closed
@@ -86,21 +112,25 @@ var ErrFrameVersion = errors.New("subjectgate: unsupported frame version")
 // MaxFrameBytes.
 var ErrFrameTooBig = errors.New("subjectgate: frame exceeds size limit")
 
+// ErrMissingChannelID is RequireChannelID's typed verdict when a business frame
+// payload's required channel_id is absent/empty/whitespace-only. Typed so the
+// upper layer maps it to CodeBadPayload with errors.Is.
+var ErrMissingChannelID = errors.New("subjectgate: business frame missing required channel_id")
+
 // Frame is the wire envelope every frame shares (build spec §S2). ref lives at
 // the top level ONLY (裁决9): receipt/error echo it back here, never duplicated
-// inside a payload. binding_gen=0 on an attach request means "binding not yet
-// established" (the receipt grants the first generation).
+// inside a payload. (binding_gen retired with the client-visible binding axis —
+// 连接模型勘误期; see the retired-words note by the FrameType consts.)
 type Frame struct {
-	V          int             `json:"v"`
-	Type       FrameType       `json:"frame_type"`
-	BindingGen int64           `json:"binding_gen"`
-	Ref        string          `json:"ref,omitempty"`
-	Payload    json.RawMessage `json:"payload,omitempty"`
+	V       int             `json:"v"`
+	Type    FrameType       `json:"frame_type"`
+	Ref     string          `json:"ref,omitempty"`
+	Payload json.RawMessage `json:"payload,omitempty"`
 }
 
 // NewFrame builds a frame with payload marshaled from v (nil → no payload).
-func NewFrame(t FrameType, bindingGen int64, ref string, v any) (Frame, error) {
-	f := Frame{V: FrameVersion, Type: t, BindingGen: bindingGen, Ref: ref}
+func NewFrame(t FrameType, ref string, v any) (Frame, error) {
+	f := Frame{V: FrameVersion, Type: t, Ref: ref}
 	if v != nil {
 		raw, err := json.Marshal(v)
 		if err != nil {
@@ -152,19 +182,28 @@ func ParseFrame(b []byte) (Frame, error) {
 
 // --- Upstream payloads (build spec §S2 逐帧字段表) -------------------------------
 
-// AttachPayload's since is a map form day-1 (裁决7): today a single-element map
-// keyed by channel_id (a multi-key payload is refused bad_payload); multi-channel
-// single-connection evolution is zero frame change.
+// AttachPayload is the report-in + cursor-table handoff (连接模型勘误期 v2):
+// since is a multi-key游标表 keyed by any channel id (channel_id is gone — a
+// connection is channel-blind). A key with no eligibility is silently dropped
+// (a harmless read位置 — the client may hold a stale cursor for a channel it已
+// left). The receipt is empty (报到 ack).
 type AttachPayload struct {
-	ChannelID string           `json:"channel_id"`
-	Since     map[string]int64 `json:"since,omitempty"`
+	Since map[string]int64 `json:"since,omitempty"`
 }
 
-type DetachPayload struct {
-	ChannelID string `json:"channel_id"`
+// RequireChannelID validates a business frame payload's required channel_id
+// (连接模型勘误期 v2: the connection is channel-blind, so every business frame
+// names its channel). Absent / empty / whitespace-only → ErrMissingChannelID,
+// a typed verdict the upper layer maps to bad_payload (表①).
+func RequireChannelID(chID string) error {
+	if strings.TrimSpace(chID) == "" {
+		return ErrMissingChannelID
+	}
+	return nil
 }
 
 type SubmitPayload struct {
+	ChannelID  string          `json:"channel_id"`
 	ID         string          `json:"id,omitempty"`
 	MsgType    string          `json:"msg_type"`
 	Kind       string          `json:"kind,omitempty"`
@@ -180,23 +219,27 @@ type SubmitPayload struct {
 }
 
 type ResolvePayload struct {
-	ReqID    string          `json:"req_id"`
-	Decision string          `json:"decision"`
-	Payload  json.RawMessage `json:"payload,omitempty"`
+	ChannelID string          `json:"channel_id"`
+	ReqID     string          `json:"req_id"`
+	Decision  string          `json:"decision"`
+	Payload   json.RawMessage `json:"payload,omitempty"`
 }
 
 type CancelPayload struct {
-	ReqID string `json:"req_id"`
+	ChannelID string `json:"channel_id"`
+	ReqID     string `json:"req_id"`
 }
 
 type AfterPayload struct {
+	ChannelID  string          `json:"channel_id"`
 	DurationMs int64           `json:"duration_ms"`
 	MsgType    string          `json:"msg_type"`
 	Payload    json.RawMessage `json:"payload,omitempty"`
 }
 
 type CancelTimerPayload struct {
-	TimerID string `json:"timer_id"`
+	ChannelID string `json:"channel_id"`
+	TimerID   string `json:"timer_id"`
 }
 
 // ResourceOp is the closed resource-verb enum (build spec §S2 resource row).
@@ -220,6 +263,7 @@ type ResourceQuery struct {
 }
 
 type ResourcePayload struct {
+	ChannelID  string          `json:"channel_id"`
 	Op         ResourceOp      `json:"op"`
 	ResourceID string          `json:"resource_id"`
 	Args       json.RawMessage `json:"args,omitempty"`
@@ -239,11 +283,9 @@ type FeedPayload struct {
 	Envelope  json.RawMessage `json:"envelope"`
 }
 
-// AttachReceipt grants the first (or current) binding generation. binding_gen
-// also echoes in the frame envelope; the receipt载荷 carries the granted value.
-type AttachReceipt struct {
-	BindingGen int64 `json:"binding_gen"`
-}
+// AttachReceipt is the report-in ack (连接模型勘误期 v2): an empty载荷. attach is
+// no longer a binding grant — it just hands over the游标表 and acks receipt.
+type AttachReceipt struct{}
 
 // SubmitReceipt's seq is the harness write seq — NOT a feed cursor (write位≠读位,
 // 契约注释钉死, build spec §S2). A client must never advance a feed cursor from it.

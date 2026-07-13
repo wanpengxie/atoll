@@ -39,19 +39,17 @@ const (
 )
 
 // WirePresenceSelfReport wires the cell's device-presence self-report against its
-// slot (装配链 step③④; design §5.4). It reads the current slot snapshot (step④) and
-// self-reports its level — nothing published (unknown) → say nothing (fold 无行 =
-// unknown 诚实默认) — then observes edges by THIS incarnation's token so an old
-// cell's摘除 (its token) can never unregister this one. Only positive edges are
-// self-reported: a revocation (Live=false) is the容器 owner's证词账清洁 (Forget/epoch
-// teardown, S4), NOT the cell's to retract via PublishObs. Returns the token the
-// caller defers RemoveObserver on. (Extracted from runHumanCell for churn testing —
-// gateway S6; behavior identical.)
+// slot (装配链 step③④; design §5.4). It observes edges by THIS incarnation's token
+// so an old cell's摘除 (its token) can never unregister this one. The CURRENT value
+// (if any) arrives as RegisterObserver's FIRST callback投递, under the slot lock and
+// in-order with every subsequent edge (出生握手, §3.2 六轮 P0-2) — the cell no longer
+// self-reads Snapshot (whose out-of-lock return value could逆序 behind a newer edge).
+// Only positive edges are self-reported: a revocation (Live=false) is the容器 owner's
+// 证词账清洁 (Forget/ForgetEpoch/epoch teardown, S4), NOT the cell's to retract via
+// PublishObs. Returns the token the caller defers RemoveObserver on. (Extracted from
+// runHumanCell for churn testing — gateway S6; behavior identical.)
 func WirePresenceSelfReport(sys actorbase.Sys, slot *subjectgate.Slot) string {
 	token := uuid.NewString()
-	if level, _, _, present := slot.Snapshot(); present {
-		publishPresence(sys, level)
-	}
 	slot.RegisterObserver(token, func(u subjectgate.PresenceUpdate) {
 		if u.Live {
 			publishPresence(sys, u.Level)
@@ -145,12 +143,14 @@ type RequestLookup interface {
 // InterpretFrames is the frame interpreter goroutine (S1 纪律照 kimi): it
 // consumes upstream frame jobs from the slot and answers each with a
 // receipt-or-error frame. stop (closed by the Proc on serve-loop exit) is the
-// 解阻/join edge.
+// 解阻/join edge. (slot is retained in the wiring seam signature though the
+// interpreter no longer reaches into it — the client-visible binding-generation
+// axis it re-verified against was整删, 连接模型勘误期.)
 func InterpretFrames(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, frames <-chan subjectgate.Job, stop <-chan struct{}) {
 	for {
 		select {
 		case job := <-frames:
-			job.Reply(subjectgate.FrameResult{Frame: interpretFrame(sys, slot, deps, job.Frame, job.BindingGen)})
+			job.Reply(subjectgate.FrameResult{Frame: interpretFrame(sys, deps, job.Frame)})
 		case <-stop:
 			return
 		}
@@ -158,114 +158,61 @@ func InterpretFrames(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, frame
 }
 
 // interpretFrame drives one upstream business frame onto the cell's own caps and
-// returns the receipt (or error) frame. attach/detach/presence are gateway control
-// frames (handled north of the cell) — they are unexpected here.
+// returns the receipt (or error) frame. attach is a gateway control frame (handled
+// north of the cell) — it is unexpected here. The frame's channel_id (business
+// frames carry a required one, 连接模型勘误期 v2) is the gateway's concern — this
+// body only消费 the payload's action fields, never校验 channel归属.
 //
-// carriedGen is the绑定世代 Deliver was invoked with, carried WITH the job. This is
-// the真线性化点 of the双向世代 gate (design §5.4 / 修复批五轮): the gateway's upstream
-// 初验 and Deliver's enqueue-time check are BOTH pre-queue — a rebind (seal→新臂→
-// SetBinding) can land while the job sits in the帧递交端 queue, so the authoritative
-// re-verification happens HERE, on the interpreter's commit path.
-//
-// 守卫圈收窄至单写 (修复批六轮 P1): each verb does ALL of its decode / 五步核查 DB reads /
-// 资格查询 / pure-read resource ops / cancel 后送 hint OUTSIDE the绑定世代提交守卫. The guard
-// (slot.WithBindingGuard, a shared RLock) wraps ONLY the动词's SINGLE truth-mutating
-// call (see commitWrite), so a slow五步核查 or an unbounded DB query never freezes SetBinding
-// — only the actual落账 does (one pen write, same exposure级 as any pen writer). The
-// recheck↔落账 atomicity is preserved (WithBindingGuard rechecks + commits under the same
-// RLock, 六轮 FIXED 本体): a rebind serializes either before this commit (recheck sees the
-// new gen → refused, the frame never lands in the successor binding) or after it (SetBinding
-// waits on the exclusive Lock only for the one write's duration). DeliverAnyGen (trusted
-// platform-internal shim, no gateway binding behind it) skips the gen comparison but still
-// commits under the guard.
-func interpretFrame(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
+// (The绑定世代提交守卫 was整删 with the client-visible binding axis, 连接模型勘误期 §3.3-c
+// A案: there is no client generation to re-verify at the commit point — the write
+// verb's落账 runs directly. Revocation is server-internal — the read pump's per-batch
+// eligibility recheck + lease upper bound, north of this queue.)
+func interpretFrame(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectgate.Frame {
 	switch f.Type {
 	case subjectgate.FrameSubmit:
-		return interpretSubmit(sys, slot, f, carriedGen)
+		return interpretSubmit(sys, f)
 	case subjectgate.FrameResolve:
-		return interpretResolve(sys, slot, deps, f, carriedGen)
+		return interpretResolve(sys, deps, f)
 	case subjectgate.FrameCancel:
-		return interpretCancel(sys, slot, deps, f, carriedGen)
+		return interpretCancel(sys, deps, f)
 	case subjectgate.FrameAfter:
-		return interpretAfter(sys, slot, f, carriedGen)
+		return interpretAfter(sys, f)
 	case subjectgate.FrameCancelTimer:
-		return interpretCancelTimer(sys, slot, f, carriedGen)
+		return interpretCancelTimer(sys, f)
 	case subjectgate.FrameResource:
-		return interpretResource(sys, slot, f, carriedGen)
+		return interpretResource(sys, f)
 	default:
-		return errFrameGen(slot.BindingGen(), f, subjectgate.CodeBadPayload, "unexpected frame_type for a subject driver: "+string(f.Type))
+		return errFrame(f, subjectgate.CodeBadPayload, "unexpected frame_type for a subject driver: "+string(f.Type))
 	}
 }
 
-// commitWrite runs a write verb's SINGLE truth-mutating call inside the绑定世代提交守卫's
-// narrow window: WithBindingGuard rechecks carriedGen against the slot's current层2世代
-// under the shared RLock and runs build ONLY if the gen still matches, so no rebind
-// (SetBinding, exclusive Lock) can insert between the recheck and this one write
-// (复核↔落账 atomicity, 六轮 FIXED 本体). build receives the guard's gen and returns the
-// receipt / verb-error frame stamped with it. A rebind that advanced the gen first →
-// build never runs, stale_binding is returned. This one call is the ONLY thing under the
-// guard — all decode / 五步核查 / 资格查询 / 纯读 stay OUTSIDE it (P1: 守卫圈收窄至单写).
-func commitWrite(slot *subjectgate.Slot, carriedGen int64, f subjectgate.Frame, build func(gen int64) subjectgate.Frame) subjectgate.Frame {
-	var out subjectgate.Frame
-	gen, ok := slot.WithBindingGuard(carriedGen, func(gen int64) {
-		out = build(gen)
-	})
-	if !ok {
-		// 复核不符: a rebind advanced the绑定世代 before this frame could commit. gen is
-		// the current (post-rebind) generation read under the guard. The frame NEVER lands.
-		return staleBindingFrame(gen, f)
-	}
-	return out
-}
-
-// freshReadGen is the守卫外 advisory gen compare for PURE-READ resource verbs
-// (read/stat/list). A read never mutates truth, so a rebind landing right after this
-// compare exposes only a stale READ (advisory) — never a write into a superseded
-// binding — so these verbs stay OUT of the绑定世代提交守卫 entirely (P1: 守卫圈收窄至单写).
-// DeliverAnyGen is exempt. ok=false → an advisory stale_binding refusal.
-func freshReadGen(slot *subjectgate.Slot, carriedGen int64) (gen int64, ok bool) {
-	gen = slot.BindingGen()
-	if carriedGen != subjectgate.DeliverAnyGen && carriedGen != gen {
-		return gen, false
-	}
-	return gen, true
-}
-
-func staleBindingFrame(gen int64, f subjectgate.Frame) subjectgate.Frame {
-	fr, _ := subjectgate.NewFrame(subjectgate.FrameError, gen, f.Ref, subjectgate.ErrorPayload{
-		Frame: string(f.Type), Code: subjectgate.CodeStaleBinding, Detail: "binding superseded before commit (rebound)",
-	})
-	return fr
-}
-
-// errFrameGen builds an error frame stamped with gen. Prep-time (守卫外) errors read the
-// slot's current gen — the exact value is advisory since an error never lands in truth.
-func errFrameGen(gen int64, f subjectgate.Frame, code, detail string) subjectgate.Frame {
-	fr, _ := subjectgate.NewFrame(subjectgate.FrameError, gen, f.Ref, subjectgate.ErrorPayload{
+// errFrame builds an error frame for f (裁决8 平面词).
+func errFrame(f subjectgate.Frame, code, detail string) subjectgate.Frame {
+	fr, _ := subjectgate.NewFrame(subjectgate.FrameError, f.Ref, subjectgate.ErrorPayload{
 		Frame: string(f.Type), Code: code, Detail: detail,
 	})
 	return fr
 }
 
-func receiptGen(gen int64, f subjectgate.Frame, load any) subjectgate.Frame {
-	fr, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, gen, f.Ref, load)
+func receipt(f subjectgate.Frame, load any) subjectgate.Frame {
+	fr, _ := subjectgate.NewFrame(subjectgate.FrameReceipt, f.Ref, load)
 	return fr
 }
 
-// mapVerbErrGen folds a Sys-verb error into an error frame stamped with the guard's gen.
-func mapVerbErrGen(err error, gen int64, f subjectgate.Frame) subjectgate.Frame {
+// mapVerbErrFrame folds a Sys-verb error into an error frame for f.
+func mapVerbErrFrame(err error, f subjectgate.Frame) subjectgate.Frame {
 	return mapVerbErr(err, func(code, detail string) subjectgate.Frame {
-		return errFrameGen(gen, f, code, detail)
+		return errFrame(f, code, detail)
 	})
 }
 
 type frameBuild func(load any) subjectgate.Frame
 type frameErr func(code, detail string) subjectgate.Frame
 
-func interpretSubmit(sys actorbase.Sys, slot *subjectgate.Slot, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
+func interpretSubmit(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame {
 	var p subjectgate.SubmitPayload
 	if err := f.DecodePayload(&p); err != nil {
-		return errFrameGen(slot.BindingGen(), f, subjectgate.CodeBadPayload, err.Error())
+		return errFrame(f, subjectgate.CodeBadPayload, err.Error())
 	}
 	kind := message.Kind(p.Kind)
 	if kind == "" {
@@ -289,18 +236,15 @@ func interpretSubmit(sys actorbase.Sys, slot *subjectgate.Slot, f subjectgate.Fr
 		ParentID:   message.ID(p.ParentID),
 		ExpiresAt:  p.ExpiresAt, // additive透传 (v0.4.1); nil → harness default TTL
 	}
-	// 单写落账 under the guard; the spec assembly above is守卫外.
-	return commitWrite(slot, carriedGen, f, func(gen int64) subjectgate.Frame {
-		msgID, seq, err := sys.SubmitEnvelope(spec)
-		if err != nil {
-			return mapVerbErrGen(err, gen, f)
-		}
-		return receiptGen(gen, f, subjectgate.SubmitReceipt{MessageID: string(msgID), Seq: seq})
-	})
+	msgID, seq, err := sys.SubmitEnvelope(spec)
+	if err != nil {
+		return mapVerbErrFrame(err, f)
+	}
+	return receipt(f, subjectgate.SubmitReceipt{MessageID: string(msgID), Seq: seq})
 }
 
-func interpretResolve(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
-	prepErr := func(code, detail string) subjectgate.Frame { return errFrameGen(slot.BindingGen(), f, code, detail) }
+func interpretResolve(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectgate.Frame {
+	prepErr := func(code, detail string) subjectgate.Frame { return errFrame(f, code, detail) }
 	var p subjectgate.ResolvePayload
 	if err := f.DecodePayload(&p); err != nil {
 		return prepErr(subjectgate.CodeBadPayload, err.Error())
@@ -309,8 +253,6 @@ func interpretResolve(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, f su
 	if p.Decision != "approved" && p.Decision != "rejected" {
 		return prepErr(subjectgate.CodeInvalidDecision, "decision must be approved or rejected")
 	}
-	// 五步核查 (all reads) run OUTSIDE the guard (P1: 守卫圈收窄至单写) — a slow/unbounded
-	// FindByID or openCheck must never freeze SetBinding.
 	ctx := context.Background()
 	reqID := message.ID(p.ReqID)
 	req, ok, err := deps.Requests.FindByID(ctx, reqID)
@@ -344,22 +286,18 @@ func interpretResolve(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, f su
 	}
 	merged["decision"] = p.Decision
 	raw, _ := json.Marshal(merged)
-	// 单写落账 under the guard.
-	return commitWrite(slot, carriedGen, f, func(gen int64) subjectgate.Frame {
-		if _, err := sys.RespondEnvelope(req, behavior.ResponseSpec{Status: message.StatusCompleted, Payload: raw}); err != nil {
-			return mapVerbErrGen(err, gen, f)
-		}
-		return receiptGen(gen, f, subjectgate.ResolveReceipt{ReqID: p.ReqID})
-	})
+	if _, err := sys.RespondEnvelope(req, behavior.ResponseSpec{Status: message.StatusCompleted, Payload: raw}); err != nil {
+		return mapVerbErrFrame(err, f)
+	}
+	return receipt(f, subjectgate.ResolveReceipt{ReqID: p.ReqID})
 }
 
-func interpretCancel(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
-	prepErr := func(code, detail string) subjectgate.Frame { return errFrameGen(slot.BindingGen(), f, code, detail) }
+func interpretCancel(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectgate.Frame {
+	prepErr := func(code, detail string) subjectgate.Frame { return errFrame(f, code, detail) }
 	var p subjectgate.CancelPayload
 	if err := f.DecodePayload(&p); err != nil {
 		return prepErr(subjectgate.CodeBadPayload, err.Error())
 	}
-	// 核查 (all reads) OUTSIDE the guard (P1).
 	ctx := context.Background()
 	reqID := message.ID(p.ReqID)
 	req, ok, err := deps.Requests.FindByID(ctx, reqID)
@@ -388,27 +326,26 @@ func interpretCancel(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, f sub
 		"detail":     "cancelled by sender",
 		"cancelled":  true,
 	})
-	// 单写自闭落账 under the guard.
-	out := commitWrite(slot, carriedGen, f, func(gen int64) subjectgate.Frame {
+	out := func() subjectgate.Frame {
 		if _, err := sys.RespondEnvelope(req, behavior.ResponseSpec{
 			Status:  message.StatusFailed,
 			Reason:  string(message.TerminalUnansweredTimeout),
 			Payload: cancelPayload,
 		}); err != nil {
-			return mapVerbErrGen(err, gen, f)
+			return mapVerbErrFrame(err, f)
 		}
-		return receiptGen(gen, f, subjectgate.CancelReceipt{ReqID: p.ReqID})
-	})
-	// best-effort打断 hint (后送) OUTSIDE the guard — fired ONLY once truth is actually
-	// closed (a receipt); a stale/refused or verb-errored commit sends no hint.
+		return receipt(f, subjectgate.CancelReceipt{ReqID: p.ReqID})
+	}()
+	// best-effort打断 hint (后送) — fired ONLY once truth is actually closed (a
+	// receipt); a verb-errored self-close sends no hint.
 	if out.Type == subjectgate.FrameReceipt && receiver != "" && deps.CancelHint != nil {
 		deps.CancelHint(receiver, reqID)
 	}
 	return out
 }
 
-func interpretAfter(sys actorbase.Sys, slot *subjectgate.Slot, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
-	prepErr := func(code, detail string) subjectgate.Frame { return errFrameGen(slot.BindingGen(), f, code, detail) }
+func interpretAfter(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame {
+	prepErr := func(code, detail string) subjectgate.Frame { return errFrame(f, code, detail) }
 	var p subjectgate.AfterPayload
 	if err := f.DecodePayload(&p); err != nil {
 		return prepErr(subjectgate.CodeBadPayload, err.Error())
@@ -417,109 +354,81 @@ func interpretAfter(sys actorbase.Sys, slot *subjectgate.Slot, f subjectgate.Fra
 	// vocabulary is the driver's): the schedule engine treats a past FireAt as "fire
 	// now", so a non-positive / overflow duration would be a legal immediate trigger.
 	// Refuse it as bad_payload (裁决8 平面词). No upper cap (abuse hardening is the
-	// engine-level anti-storm axis, deferred). These bounds are守卫外 (P1).
+	// engine-level anti-storm axis, deferred).
 	if p.DurationMs <= 0 || p.DurationMs > math.MaxInt64/int64(time.Millisecond) {
 		return prepErr(subjectgate.CodeBadPayload, "duration_ms must be a positive millisecond count")
 	}
 	if p.MsgType == "" {
 		return prepErr(subjectgate.CodeBadPayload, "msg_type required")
 	}
-	// 单写落账 under the guard.
-	return commitWrite(slot, carriedGen, f, func(gen int64) subjectgate.Frame {
-		id, err := sys.AfterIdentity(durationMs(p.DurationMs), p.MsgType, p.Payload)
-		if err != nil {
-			return mapVerbErrGen(err, gen, f)
-		}
-		return receiptGen(gen, f, subjectgate.AfterReceipt{TimerID: string(id)})
-	})
+	id, err := sys.AfterIdentity(durationMs(p.DurationMs), p.MsgType, p.Payload)
+	if err != nil {
+		return mapVerbErrFrame(err, f)
+	}
+	return receipt(f, subjectgate.AfterReceipt{TimerID: string(id)})
 }
 
-func interpretCancelTimer(sys actorbase.Sys, slot *subjectgate.Slot, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
+func interpretCancelTimer(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame {
 	var p subjectgate.CancelTimerPayload
 	if err := f.DecodePayload(&p); err != nil {
-		return errFrameGen(slot.BindingGen(), f, subjectgate.CodeBadPayload, err.Error())
+		return errFrame(f, subjectgate.CodeBadPayload, err.Error())
 	}
-	// 单写落账 under the guard.
-	return commitWrite(slot, carriedGen, f, func(gen int64) subjectgate.Frame {
-		if err := sys.CancelTimerIdentity(scheduleTimerID(p.TimerID)); err != nil {
-			return mapVerbErrGen(err, gen, f)
-		}
-		return receiptGen(gen, f, subjectgate.CancelTimerReceipt{TimerID: p.TimerID})
-	})
+	if err := sys.CancelTimerIdentity(scheduleTimerID(p.TimerID)); err != nil {
+		return mapVerbErrFrame(err, f)
+	}
+	return receipt(f, subjectgate.CancelTimerReceipt{TimerID: p.TimerID})
 }
 
-func interpretResource(sys actorbase.Sys, slot *subjectgate.Slot, f subjectgate.Frame, carriedGen int64) subjectgate.Frame {
+func interpretResource(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame {
 	var p subjectgate.ResourcePayload
 	if err := f.DecodePayload(&p); err != nil {
-		return errFrameGen(slot.BindingGen(), f, subjectgate.CodeBadPayload, err.Error())
+		return errFrame(f, subjectgate.CodeBadPayload, err.Error())
 	}
 	rh := sys.ResourceIdentity()
 	rid := resource.ResourceID(p.ResourceID)
 	switch p.Op {
-	// --- write ops: the SINGLE truth-mutating call under the绑定世代提交守卫 (P1) ---
+	// --- write ops ---
 	case subjectgate.ResCreate:
-		return commitWrite(slot, carriedGen, f, func(gen int64) subjectgate.Frame {
-			out, err := rh.Create(rid, p.Args)
-			return resourceOutcomeFrameGen(gen, f, out, err)
-		})
+		out, err := rh.Create(rid, p.Args)
+		return resourceOutcomeFrameFor(f, out, err)
 	case subjectgate.ResWrite:
-		return commitWrite(slot, carriedGen, f, func(gen int64) subjectgate.Frame {
-			out, err := rh.Write(rid, p.Args)
-			return resourceOutcomeFrameGen(gen, f, out, err)
-		})
+		out, err := rh.Write(rid, p.Args)
+		return resourceOutcomeFrameFor(f, out, err)
 	case subjectgate.ResDelete:
-		return commitWrite(slot, carriedGen, f, func(gen int64) subjectgate.Frame {
-			out, err := rh.Delete(rid)
-			return resourceOutcomeFrameGen(gen, f, out, err)
-		})
+		out, err := rh.Delete(rid)
+		return resourceOutcomeFrameFor(f, out, err)
 	case subjectgate.ResShareActor:
-		return commitWrite(slot, carriedGen, f, func(gen int64) subjectgate.Frame {
-			out, err := rh.ShareActor(rid, actor.ActorID(p.Target), operationsOf(p.Ops))
-			return resourceOutcomeFrameGen(gen, f, out, err)
-		})
+		out, err := rh.ShareActor(rid, actor.ActorID(p.Target), operationsOf(p.Ops))
+		return resourceOutcomeFrameFor(f, out, err)
 	case subjectgate.ResShareMembers:
-		return commitWrite(slot, carriedGen, f, func(gen int64) subjectgate.Frame {
-			out, err := rh.ShareMembers(rid, operationsOf(p.Ops))
-			return resourceOutcomeFrameGen(gen, f, out, err)
-		})
-	// --- pure-read ops: NO guard, only a守卫外 advisory gen compare (read不改真相, P1) ---
+		out, err := rh.ShareMembers(rid, operationsOf(p.Ops))
+		return resourceOutcomeFrameFor(f, out, err)
+	// --- pure-read ops ---
 	case subjectgate.ResRead:
-		gen, ok := freshReadGen(slot, carriedGen)
-		if !ok {
-			return staleBindingFrame(gen, f)
-		}
 		out, err := rh.Read(rid)
-		return resourceOutcomeFrameGen(gen, f, out, err)
+		return resourceOutcomeFrameFor(f, out, err)
 	case subjectgate.ResStat:
-		gen, ok := freshReadGen(slot, carriedGen)
-		if !ok {
-			return staleBindingFrame(gen, f)
-		}
 		st, err := rh.Stat(rid)
 		if err != nil {
-			return mapVerbErrGen(err, gen, f)
+			return mapVerbErrFrame(err, f)
 		}
 		// exists = the resource resolved & is visible to this subject (a
 		// not-found / denied verdict rides Reject, not a Go error — §3.9').
 		meta, _ := json.Marshal(st.Meta)
-		return receiptGen(gen, f, subjectgate.ResourceStat{Exists: st.Reject == "", Meta: meta})
+		return receipt(f, subjectgate.ResourceStat{Exists: st.Reject == "", Meta: meta})
 	case subjectgate.ResList:
-		gen, ok := freshReadGen(slot, carriedGen)
-		if !ok {
-			return staleBindingFrame(gen, f)
-		}
 		page, err := rh.List(listQueryOf(p.Query))
 		if err != nil {
-			return mapVerbErrGen(err, gen, f)
+			return mapVerbErrFrame(err, f)
 		}
 		items := make([]json.RawMessage, 0, len(page.Entries))
 		for _, it := range page.Entries {
 			raw, _ := json.Marshal(it)
 			items = append(items, raw)
 		}
-		return receiptGen(gen, f, subjectgate.ResourcePage{Items: items, Next: page.Next})
+		return receipt(f, subjectgate.ResourcePage{Items: items, Next: page.Next})
 	default:
-		return errFrameGen(slot.BindingGen(), f, subjectgate.CodeBadPayload, "unknown resource op: "+string(p.Op))
+		return errFrame(f, subjectgate.CodeBadPayload, "unknown resource op: "+string(p.Op))
 	}
 }
 

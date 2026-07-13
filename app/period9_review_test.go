@@ -28,7 +28,7 @@ func TestWS_OversizedFrameClosesConn(t *testing.T) {
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
-	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws?channel=" + s.chID
+	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http") + "/ws"
 	hdr := http.Header{}
 	var parts []string
 	for _, ck := range s.cookies {
@@ -41,16 +41,17 @@ func TestWS_OversizedFrameClosesConn(t *testing.T) {
 	}
 	defer conn.Close()
 
-	// Opening attach frame (the connector's read limit is armed before this read).
-	if err := conn.WriteJSON(map[string]any{"v": 1, "frame_type": "attach", "payload": map[string]any{"channel_id": s.chID}}); err != nil {
+	// Opening attach frame (channel-blind, v2 — the connector's read limit is armed
+	// before this read).
+	if err := conn.WriteJSON(map[string]any{"v": 2, "frame_type": "attach"}); err != nil {
 		t.Fatalf("attach: %v", err)
 	}
 
 	// ~2 MB frame — well past the 512KB read limit (connector SetReadLimit).
 	big := strings.Repeat("x", 2*1024*1024)
 	if err := conn.WriteJSON(map[string]any{
-		"v": 1, "frame_type": "submit",
-		"payload": map[string]any{"msg_type": "chat.text", "kind": "event", "payload": map[string]any{"text": big}},
+		"v": 2, "frame_type": "submit",
+		"payload": map[string]any{"channel_id": s.chID, "msg_type": "chat.text", "kind": "event", "payload": map[string]any{"text": big}},
 	}); err != nil {
 		return // a write error here already means the server closed — acceptable
 	}
@@ -115,14 +116,15 @@ func TestHalfBuiltChannel_OpenClearError(t *testing.T) {
 	}
 
 	// Opening the ws: a non-channel-member (no Admit ever landed) may tail but a
-	// write frame is refused with a clear not_member error — never a panic.
+	// write frame is refused with a clear forbidden error — never a panic (not_member
+	// retired 连接模型勘误期: eligibility refusal is uniformly forbidden, 表①).
 	c := dialWS(t, srv, s.cookies, chID, 0)
 	defer c.close()
 	ack := c.sendMessage(map[string]any{
 		"msg_type": "chat.text", "kind": "event",
 		"payload": map[string]any{"text": "anyone home?"},
 	})
-	if ack["type"] != "error" || ack["error"] != "not_member" {
-		t.Fatalf("write to half-built channel: want error not_member, got %v", ack)
+	if ack["type"] != "error" || ack["error"] != "forbidden" {
+		t.Fatalf("write to half-built channel: want error forbidden, got %v", ack)
 	}
 }

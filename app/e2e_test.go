@@ -63,6 +63,34 @@ type testEnv struct {
 	tmpDir  string
 }
 
+// testGatewayResolver reproduces cmd/server's app→gateway entitlement DTO bridge
+// (连接模型勘误期 §3.2: app → drivers is fenced, so the assembly root — here the test
+// harness, a named Fence-B allowlist importer — maps the app's own DTO into gateway.Route).
+func testGatewayResolver(a *app.App) gateway.EntitlementResolver {
+	return gateway.ResolverFunc(func(ctx context.Context, principal string) ([]gateway.Route, []gateway.ChannelFailure, error) {
+		routes, failed, err := a.EntitlementSnapshot(ctx, principal)
+		if err != nil {
+			return nil, nil, err
+		}
+		gr := make([]gateway.Route, 0, len(routes))
+		for _, r := range routes {
+			access := gateway.AccessObserver
+			if r.Access == "member" {
+				access = gateway.AccessMember
+			}
+			gr = append(gr, gateway.Route{
+				Channel: r.Channel, Home: r.Home, Access: access,
+				SubjectID: r.SubjectID, CheckedAt: r.CheckedAt,
+			})
+		}
+		var gf []gateway.ChannelFailure
+		for _, f := range failed {
+			gf = append(gf, gateway.ChannelFailure{Channel: f.Channel, Err: f.Err})
+		}
+		return gr, gf, nil
+	})
+}
+
 func setupTestApp(t *testing.T) *testEnv {
 	t.Helper()
 
@@ -95,14 +123,18 @@ func setupTestApp(t *testing.T) *testEnv {
 	// exactly as cmd/server does (the app cannot construct it — app → drivers is
 	// fenced — so the assembly-root wiring is reproduced here; e2e_test.go is a named
 	// Fence-B allowlist importer).
-	revHub := gateway.NewRevocationHub()
-	gw := gateway.New(gateway.Config{Routing: a.ResolveRoutingForGateway, Revocation: revHub})
+	pokeHub := gateway.NewPokeHub()
+	gw := gateway.New(gateway.Config{
+		Routing:  a.ResolveRoutingForGateway,
+		Resolver: testGatewayResolver(a),
+	})
+	pokeHub.Subscribe(gw.Poke)
 	_ = gw.Start()
 	a.SetGateway(web.New(gw))
-	a.SetRevokeSink(revHub.Emit)
+	a.SetMembershipPoke(pokeHub.Poke)
 
 	t.Cleanup(func() {
-		// gateway先静默 (seal every arm) BEFORE the homes it drives close, then close
+		// gateway先静默 (关站全序: stop presence loop, close sessions, drain) BEFORE the homes it drives close, then close
 		// the app (joins every home's reconcile ticker goroutine, which reads
 		// testAgentBuilder in its build path) BEFORE nil-ing the global — else a
 		// still-running ticker races the write under -race.

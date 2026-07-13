@@ -37,38 +37,31 @@ type presenceState struct {
 	set     bool
 }
 
-// Slot is the per-identity binding slot (build spec §S2): the four-tuple
-// {绑定世代(bindingGen), gateway epoch(presence.epoch), 帧递交端(frames), presence
-// level} with the独立性不变式 — level's ONLY writer is PublishLevel (layer-3),
-// never co-written with SetBinding (layer-2). The frame delivery端 is a
-// synchronous request/reply surface: the gateway calls Deliver and blocks for
-// the cell's interpreter goroutine to answer (零队列零 ack 关联器 — the reply
-// channel IS the correlation).
+// Slot is the per-identity presence-and-delivery接头盒 (连接模型勘误期): a
+// junction box carrying the gateway's在场证词 (the layer-3 presence register)
+// and the帧递交端 (the synchronous frame delivery surface into the cell's
+// interpreter). The frame delivery端 is a synchronous request/reply surface: the
+// gateway calls Deliver and blocks for the cell's interpreter goroutine to answer
+// (零队列零 ack 关联器 — the reply channel IS the correlation).
+//
+// (The client-visible binding-generation axis — bindingGen/SetBinding/genGuard/
+// WithBindingGuard — was整删 with the假轴 it guarded: the binding was never a
+// client-visible concept, so a client generation cannot be陈旧; revocation is
+// server-internal, 连接模型勘误期. See the retired-words note in frame.go.)
 type Slot struct {
 	// (No self-identity field: addressing is the Registry map key's job. A
 	// slot-side id was minted at construction once and never read — purity v3
 	// C5; re-add only together with an actual reader.)
 	mu sync.Mutex
 
-	// genGuard is the绑定世代提交守卫 (读-写锁): it freezes the binding generation for
-	// the duration of an interpreter commit临界区. A commit (WithBindingGuard) holds a
-	// SHARED RLock while it re-verifies the carried gen AND runs its落账 verbs; a rebind
-	// (SetBinding) takes the EXCLUSIVE Lock, so it全序化 against every in-flight commit —
-	// it排在提交后 (waits until the RLock releases, i.e. the verb has committed under the
-	// still-valid old binding) OR排在提交前 (the next commit sees the advanced gen and is
-	// refused). This closes the复核↔落账窗口 (humancell interpretFrame: gen-read → verb)
-	// where SetBinding could otherwise insert between the recheck and the落账动词.
-	//
-	// 锁序纪律 (钉死单向序): genGuard is ALWAYS taken OUTSIDE slot.mu — both SetBinding
-	// and a guard-held reader take genGuard first, then (briefly) mu to touch bindingGen.
-	// The two are never taken in the opposite order, so no lock-order deadlock is possible.
-	genGuard sync.RWMutex
-
-	// Layer-2 (binding axis), written ONLY by SetBinding.
-	bindingGen int64
-
-	// Layer-3 (presence axis), written ONLY by PublishLevel/Forget.
+	// Layer-3 (presence axis), written ONLY by PublishLevel/PublishCurrent/
+	// ForgetEpoch/Forget.
 	presence presenceState
+	// edgeSeq is the slot-minted monotonic edge cursor (10 移位: the序号 is
+	// minted by the slot, not a global counter — the slot outlives every entry
+	// that publishes into it, so it is naturally monotonic). It never resets
+	// across Forget so a fresh testimony always carries a strictly greater seq.
+	edgeSeq int64
 
 	// Observers keyed by an OBSERVER token — an opaque string the observing
 	// cell mints for itself (its own uuid). This is a DIFFERENT concept from
@@ -98,18 +91,9 @@ type Slot struct {
 // answers it exactly once via Reply — the reply channel is buffered(1) so a
 // Reply never blocks even if the delivering gateway goroutine has already given
 // up (its Deliver saw the slot go dead).
-//
-// BindingGen is the绑定世代 Deliver was invoked with, carried WITH the job so the
-// interpreter can re-verify it against the slot's current层2世代 at the真线性化点
-// (the commit / pen 落账, north of this queue): the enqueue-time check under the
-// slot lock is only a fast reject — a rebind (SetBinding) can still land AFTER the
-// check but BEFORE the interpreter commits, so the authoritative gate is the
-// interpreter's commit-point recheck of this carried gen. DeliverAnyGen rides
-// through unchanged (trusted platform-internal shim → exempt at the commit point).
 type Job struct {
-	Frame      Frame
-	BindingGen int64
-	reply      chan FrameResult
+	Frame Frame
+	reply chan FrameResult
 }
 
 // Reply answers this job's frame with its receipt-or-error result.
@@ -126,23 +110,6 @@ type FrameResult struct {
 // unavailable code.
 var ErrNoOccupant = errors.New("subjectgate: no live occupant for slot")
 
-// ErrStaleBinding is Deliver's verdict when the frame's binding generation no
-// longer matches the slot's current layer-2 generation — a rebind (seal → fresh
-// arm → SetBinding) superseded the binding AFTER the gateway's upstream初验 but
-// BEFORE this delivery reached the linearization point. Comparing under the slot
-// lock (atomic with the live check) closes the初验→seal→rebind→Deliver TOCTOU
-// window: the gateway side初验 and the slot side re-verify form the two ends of
-// the双向世代 gate. The gateway maps it to the stale_binding边界 code.
-var ErrStaleBinding = errors.New("subjectgate: stale binding generation")
-
-// DeliverAnyGen bypasses the binding-generation assertion in Deliver. It is for
-// trusted platform-internal delivery paths (the app control shim) that carry NO
-// gateway binding — there is no gateway session/arm behind them, so a stale
-// gateway binding is not a possible fault. The gateway ALWAYS passes the
-// session's own granted gen (≥1), so a superseded binding is refused at the
-// delivery linearization point.
-const DeliverAnyGen int64 = -1
-
 func newSlot() *Slot {
 	return &Slot{
 		observers: map[string]func(PresenceUpdate){},
@@ -150,114 +117,72 @@ func newSlot() *Slot {
 	}
 }
 
-// SetBinding writes the layer-2 binding generation. Per the独立性不变式 it NEVER
-// touches the presence register — a pure rebind produces zero presence side
-// effect (build spec §2 pair B×E).
-//
-// It takes the genGuard EXCLUSIVE Lock: a rebind is全序化 against every in-flight
-// interpreter commit (WithBindingGuard's shared RLock). The Lock BLOCKS until all
-// in-flight commits have released — i.e. their落账动词 have committed under the still-
-// valid old binding — then advances the generation, so any subsequent commit sees the
-// new gen and is refused stale_binding. This is what closes the复核↔落账 third window.
-//
-// 冻结窗上界 (修复批六轮 P1): the guard's shared RLock covers ONLY the interpreter's
-// SINGLE truth-mutating call (one pen落账 — SubmitEnvelope / RespondEnvelope /
-// AfterIdentity / CancelTimerIdentity / ResourceIdentity·write), NOT the whole frame
-// interpretation. The decode / 五步核查 DB reads / eligibility queries / pure-read
-// resource ops all run守卫外, so a slow or unbounded DB query can never park a rebind.
-// SetBinding's wait上界 is therefore exactly one pen write's duration — the SAME
-// exposure级 as any pen writer, never the full解释过程.
-func (s *Slot) SetBinding(gen int64) {
-	s.genGuard.Lock()
-	s.mu.Lock()
-	s.bindingGen = gen
-	s.mu.Unlock()
-	s.genGuard.Unlock()
-}
-
-// WithBindingGuard runs the interpreter's commit closure under the绑定世代提交守卫: it
-// holds a SHARED RLock for the whole of commit, re-verifies carriedGen against the
-// current层2世代 UNDER the guard, and runs commit ONLY if the gen still matches (else
-// ok=false and the caller emits stale_binding). Because SetBinding takes the EXCLUSIVE
-// Lock, no rebind can advance the generation between the recheck and commit's落账动词:
-//   - a rebind serialized BEFORE this commit → the recheck sees the new gen → refused,
-//     the frame never lands in the successor binding;
-//   - a rebind serialized AFTER this commit → it waits on the exclusive Lock until this
-//     RLock releases, i.e. until the落账动词 has committed under the still-valid old
-//     binding (串行化序 = commit ≺ rebind, legal — the check saw the old binding still
-//     current, so committing under it is correct).
-//
-// Multiple commits share the RLock (concurrent); only rebind is exclusive.
-//
-// carriedGen == DeliverAnyGen (trusted platform-internal shim, no gateway binding)
-// skips the gen comparison but STILL takes the RLock — the rebind-freeze semantics stay
-// uniform (a control-shim commit is not torn by a concurrent rebind either).
-//
-// 守卫圈 = single write (修复批六轮 P1): commit wraps ONLY the动词's one truth-mutating
-// call. The caller (humancell commitWrite) does all decode / 五步核查 / 资格查询 / 纯读
-// OUTSIDE this guard, so the RLock冻结窗 is one pen write, not the whole解释过程.
-//
-// 死锁论证: the落账动词 run inside commit (SubmitEnvelope / RespondEnvelope /
-// AfterIdentity / CancelTimerIdentity / ResourceIdentity·write) are actorbase pen writes to
-// the Home log; NONE calls back into slot.SetBinding or genGuard.Lock — SetBinding's
-// ONLY caller is the gateway arm rebind (drivers/gateway/arm.go nextGen), a different
-// goroutine never reached from a pen落账. So a goroutine never holds RLock while seeking
-// the exclusive Lock: no self-deadlock. genGuard is never taken nested inside slot.mu
-// (single pin: genGuard OUTSIDE mu), so no lock-order deadlock either.
-func (s *Slot) WithBindingGuard(carriedGen int64, commit func(gen int64)) (gen int64, ok bool) {
-	s.genGuard.RLock()
-	defer s.genGuard.RUnlock()
-	s.mu.Lock()
-	gen = s.bindingGen
-	s.mu.Unlock()
-	if carriedGen != DeliverAnyGen && carriedGen != gen {
-		return gen, false
-	}
-	commit(gen)
-	return gen, true
-}
-
-// BindingGen reads the current layer-2 generation (receipts stamp it downstream).
-func (s *Slot) BindingGen() int64 {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.bindingGen
-}
-
-// PublishLevel is the ONLY layer-3 writer. Dedup/ordering (build spec §S2):
-//   - same epoch: edgeSeq must strictly increase, else the edge is dropped;
+// PublishLevel publishes a new presence edge for epoch (the ONLY layer-3 writer
+// besides PublishCurrent/ForgetEpoch/Forget). edgeSeq is slot-minted (self-
+// bootstrapping monotonic cursor). Dedup/ordering (build spec §S2):
+//   - same or first epoch: a new edge is minted (slot mints a strictly greater seq);
 //   - new (greater) epoch: the old testimony is REVOKED (observers see Live=false)
 //     then the new value is snapshotted and delivered;
 //   - lesser epoch: dropped (stale gateway).
 //
-// It returns whether the edge was applied (a dropped duplicate/stale returns
-// false). Observers are notified under the slot lock so edges are totally ordered.
-func (s *Slot) PublishLevel(epoch, edgeSeq int64, level Level) bool {
+// It returns whether the edge was applied (a stale epoch returns false). Observers
+// are notified under the slot lock so edges are totally ordered.
+func (s *Slot) PublishLevel(epoch int64, level Level) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.publishLocked(epoch, level)
+}
+
+// PublishCurrent is the idempotent re-publish (§3.2 幂等补发): if the slot's
+// current testimony already equals (epoch, level), it is a no-op (zero notify,
+// zero edge advance) so re-reporting the current aggregate每轮 never惊扰 the
+// observer. Otherwise it publishes like PublishLevel.
+func (s *Slot) PublishCurrent(epoch int64, level Level) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.presence.set && s.presence.epoch == epoch && s.presence.level == level {
+		return false
+	}
+	return s.publishLocked(epoch, level)
+}
+
+func (s *Slot) publishLocked(epoch int64, level Level) bool {
 	cur := s.presence
 	switch {
 	case !cur.set:
 		// first testimony.
 	case epoch == cur.epoch:
-		if edgeSeq <= cur.edgeSeq {
-			return false // duplicate/reorder within the same epoch — dropped.
-		}
+		// same epoch: a new edge (slot mints a strictly greater seq below).
 	case epoch > cur.epoch:
 		// new epoch: revoke the prior testimony before snapshotting the new one.
 		s.notifyLocked(PresenceUpdate{Epoch: cur.epoch, EdgeSeq: cur.edgeSeq, Level: cur.level, Live: false})
 	default:
 		return false // epoch < cur.epoch — stale gateway, dropped.
 	}
-	s.presence = presenceState{epoch: epoch, edgeSeq: edgeSeq, level: level, set: true}
-	s.notifyLocked(PresenceUpdate{Epoch: epoch, EdgeSeq: edgeSeq, Level: level, Live: true})
+	s.edgeSeq++
+	s.presence = presenceState{epoch: epoch, edgeSeq: s.edgeSeq, level: level, set: true}
+	s.notifyLocked(PresenceUpdate{Epoch: epoch, EdgeSeq: s.edgeSeq, Level: level, Live: true})
 	return true
 }
 
-// Forget clears the slot's layer-3 testimony (证词账清洁边 — the容器 owner清账,
-// NOT a produced证词; build spec §S2 / design §5.4). Observers see a revocation
-// and the register folds back to unknown (no value). Used by the gateway epoch
-// teardown / 户籍级联 (S4).
+// ForgetEpoch clears the slot's layer-3 testimony IFF the current testimony
+// belongs to epoch (CAS form, §3.2/§3.4 gateway 关站条件清账): a stale gateway's
+// late Close can never抹 a newer epoch's testimony. Observers see a revocation
+// and the register folds back to unknown. A no-op if the current testimony is a
+// different (or absent) epoch.
+func (s *Slot) ForgetEpoch(epoch int64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.presence.set && s.presence.epoch == epoch {
+		s.notifyLocked(PresenceUpdate{Epoch: s.presence.epoch, EdgeSeq: s.presence.edgeSeq, Level: s.presence.level, Live: false})
+		s.presence = presenceState{}
+	}
+}
+
+// Forget unconditionally clears the slot's layer-3 testimony (证词账清洁边 — the
+// 容器 owner清账, NOT a produced证词; build spec §S2 / design §5.4). Observers see
+// a revocation and the register folds back to unknown. Used by the户籍级联
+// (Registry.Remove, §3.4 作者①).
 func (s *Slot) Forget() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -267,8 +192,10 @@ func (s *Slot) Forget() {
 	s.presence = presenceState{}
 }
 
-// Snapshot reads the current layer-3 register atomically (the cell Start read).
-// ok=false = unknown (nothing published) — the cell self-reports nothing.
+// Snapshot reads the current layer-3 register atomically. ok=false = unknown
+// (nothing published). (The cell's出生自报 no longer reads this — it takes the
+// current value as RegisterObserver's first callback投递, §3.2 出生握手; Snapshot
+// stays as an atomic read for assertions/other consumers.)
 func (s *Slot) Snapshot() (level Level, epoch, edgeSeq int64, ok bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -278,10 +205,21 @@ func (s *Slot) Snapshot() (level Level, epoch, edgeSeq int64, ok bool) {
 // RegisterObserver registers fn under token (the cell's incarnation token). A
 // re-registration under the same token replaces. The registration is摘除 by
 // RemoveObserver(token); a stale token misses a newer cell's entry.
+//
+// 出生握手 (§3.2, 六轮 P0-2): the current value (if any) is delivered as fn's
+// FIRST PresenceUpdate, UNDER the slot lock — so it shares one totally-ordered
+// delivery channel with every subsequent update (a newer update can never
+//逆序 ahead of this snapshot: both go through the same lock-held notify path).
+// This replaces the prior "read Snapshot out-of-lock then subscribe" form whose
+// return-value snapshot could be consumed AFTER a newer value had already been
+// delivered (permanent错序 after dedup).
 func (s *Slot) RegisterObserver(token string, fn func(PresenceUpdate)) {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.observers[token] = fn
-	s.mu.Unlock()
+	if s.presence.set {
+		fn(PresenceUpdate{Epoch: s.presence.epoch, EdgeSeq: s.presence.edgeSeq, Level: s.presence.level, Live: true})
+	}
 }
 
 // RemoveObserver摘除 the registration for token IFF it is still the one present
@@ -332,30 +270,19 @@ func (s *Slot) AttachInterpreter() (<-chan Job, uint64, func()) {
 // Deliver hands one upstream frame to the attached interpreter and blocks for
 // its reply (synchronous, 零 ack 关联器). No interpreter, or the interpreter
 // detaches mid-flight → ErrNoOccupant. ctx is the CALLER's exit (纪律④三路出口:
-// ctx / interpreter dead / reply) — a dead connector or a cancelled HTTP request
+// ctx / interpreter dead / reply) — a dead connector or a cancelled session ctx
 // unblocks its own wait instead of parking until cell death. Abandoning the wait
 // does NOT un-send: an already-enqueued frame may still commit (the reply channel
 // is buffered, the interpreter never blocks) — the caller's outcome is then
 // UNKNOWN, never a fabricated failure (包住定理: ctx.Err() 即 OutcomeUnknown 词).
 //
-// bindingGen is the递交 gate. The enqueue-time comparison against the slot's
-// current layer-2 generation UNDER the slot lock (atomic with the live check) is a
-// FAST reject only — it is NOT the linearization point: a rebind (SetBinding) can
-// still land between this check and the interpreter's actual commit, so bindingGen
-// is ALSO carried into the Job and re-verified by the interpreter immediately
-// before it 落账 (the真线性化点, north of this queue). A stale frame that slips the
-// fast check is then refused stale_binding at commit, so its queue traversal is
-// harmless. Pass DeliverAnyGen from trusted platform-internal paths that carry no
-// gateway binding (exempt at both the fast check and the commit-point recheck).
-func (s *Slot) Deliver(ctx context.Context, f Frame, bindingGen int64) (FrameResult, error) {
+// (The bindingGen递交 gate was整删 with the client-visible binding axis: there is
+// no client generation to re-verify — revocation is server-internal, 连接模型勘误期.)
+func (s *Slot) Deliver(ctx context.Context, f Frame) (FrameResult, error) {
 	s.mu.Lock()
 	if !s.live {
 		s.mu.Unlock()
 		return FrameResult{}, ErrNoOccupant
-	}
-	if bindingGen != DeliverAnyGen && bindingGen != s.bindingGen {
-		s.mu.Unlock()
-		return FrameResult{}, ErrStaleBinding
 	}
 	dead := s.dead
 	frames := s.frames
@@ -363,7 +290,7 @@ func (s *Slot) Deliver(ctx context.Context, f Frame, bindingGen int64) (FrameRes
 
 	reply := make(chan FrameResult, 1)
 	select {
-	case frames <- Job{Frame: f, BindingGen: bindingGen, reply: reply}:
+	case frames <- Job{Frame: f, reply: reply}:
 	case <-dead:
 		return FrameResult{}, ErrNoOccupant
 	case <-ctx.Done():
@@ -379,7 +306,7 @@ func (s *Slot) Deliver(ctx context.Context, f Frame, bindingGen int64) (FrameRes
 	}
 }
 
-// Registry is the per-Home binding registry (built at Home.Open, step①). It owns
+// Registry is the per-Home slot container (built at Home.Open, step①). It owns
 // every subject's slot; slots are ensured at户籍准入 (step②, v0.4.1 勘误: Admit +
 // factoryFor — platform authority, before any cell construction path); the cell
 // factory, gateway attach and the control shim are all LOOKUP-ONLY consumers (step③).

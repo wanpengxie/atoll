@@ -18,7 +18,6 @@ func TestFrameCarriesNoIdentity(t *testing.T) {
 	types := []reflect.Type{
 		reflect.TypeOf(Frame{}),
 		reflect.TypeOf(AttachPayload{}),
-		reflect.TypeOf(DetachPayload{}),
 		reflect.TypeOf(SubmitPayload{}),
 		reflect.TypeOf(ResolvePayload{}),
 		reflect.TypeOf(CancelPayload{}),
@@ -49,14 +48,13 @@ func TestFrameRoundTrip(t *testing.T) {
 		typ  FrameType
 		load any
 	}{
-		{"attach", FrameAttach, AttachPayload{ChannelID: "c1", Since: map[string]int64{"c1": 7}}},
-		{"detach", FrameDetach, DetachPayload{ChannelID: "c1"}},
-		{"submit", FrameSubmit, SubmitPayload{MsgType: "human.message", Kind: "request", Audience: []string{"a"}, Payload: json.RawMessage(`{"x":1}`)}},
-		{"resolve", FrameResolve, ResolvePayload{ReqID: "r1", Decision: "approved"}},
-		{"cancel", FrameCancel, CancelPayload{ReqID: "r1"}},
-		{"after", FrameAfter, AfterPayload{DurationMs: 1000, MsgType: "wake"}},
-		{"cancel_timer", FrameCancelTimer, CancelTimerPayload{TimerID: "t1"}},
-		{"resource", FrameResource, ResourcePayload{Op: ResRead, ResourceID: "res:1"}},
+		{"attach", FrameAttach, AttachPayload{Since: map[string]int64{"c1": 7}}},
+		{"submit", FrameSubmit, SubmitPayload{ChannelID: "c1", MsgType: "human.message", Kind: "request", Audience: []string{"a"}, Payload: json.RawMessage(`{"x":1}`)}},
+		{"resolve", FrameResolve, ResolvePayload{ChannelID: "c1", ReqID: "r1", Decision: "approved"}},
+		{"cancel", FrameCancel, CancelPayload{ChannelID: "c1", ReqID: "r1"}},
+		{"after", FrameAfter, AfterPayload{ChannelID: "c1", DurationMs: 1000, MsgType: "wake"}},
+		{"cancel_timer", FrameCancelTimer, CancelTimerPayload{ChannelID: "c1", TimerID: "t1"}},
+		{"resource", FrameResource, ResourcePayload{ChannelID: "c1", Op: ResRead, ResourceID: "res:1"}},
 		{"feed", FrameFeed, FeedPayload{ChannelID: "c1", Seq: 5, Envelope: json.RawMessage(`{}`)}},
 		{"receipt", FrameReceipt, SubmitReceipt{MessageID: "m1", Seq: 5}},
 		{"error", FrameError, ErrorPayload{Frame: "submit", Code: CodeBadPayload, Detail: "bad"}},
@@ -66,7 +64,7 @@ func TestFrameRoundTrip(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			f, err := NewFrame(tc.typ, 4, "ref-1", tc.load)
+			f, err := NewFrame(tc.typ, "ref-1", tc.load)
 			if err != nil {
 				t.Fatalf("NewFrame: %v", err)
 			}
@@ -81,7 +79,7 @@ func TestFrameRoundTrip(t *testing.T) {
 			if got.V != FrameVersion {
 				t.Fatalf("version bit lost: %d", got.V)
 			}
-			if got.Type != tc.typ || got.BindingGen != 4 || got.Ref != "ref-1" {
+			if got.Type != tc.typ || got.Ref != "ref-1" {
 				t.Fatalf("envelope mismatch: %+v", got)
 			}
 		})
@@ -89,14 +87,15 @@ func TestFrameRoundTrip(t *testing.T) {
 }
 
 func TestFrameUnknownTypeRejected(t *testing.T) {
-	b := []byte(`{"v":1,"frame_type":"teleport","binding_gen":0}`)
+	b := []byte(`{"v":2,"frame_type":"teleport"}`)
 	if _, err := ParseFrame(b); err == nil {
 		t.Fatal("expected unknown frame_type to be refused")
 	}
 }
 
 func TestFrameVersionRejected(t *testing.T) {
-	b := []byte(`{"v":2,"frame_type":"attach","binding_gen":0}`)
+	// v1 (the pre-连接模型勘误期 envelope) is now refused — v2 is the current version.
+	b := []byte(`{"v":1,"frame_type":"attach"}`)
 	if _, err := ParseFrame(b); err == nil {
 		t.Fatal("expected version mismatch to be refused")
 	}
@@ -104,7 +103,7 @@ func TestFrameVersionRejected(t *testing.T) {
 
 func TestFrameSizeLimit(t *testing.T) {
 	big := strings.Repeat("x", MaxFrameBytes)
-	f, err := NewFrame(FrameSubmit, 0, "", SubmitPayload{MsgType: "m", Payload: json.RawMessage(`"` + big + `"`)})
+	f, err := NewFrame(FrameSubmit, "", SubmitPayload{ChannelID: "c1", MsgType: "m", Payload: json.RawMessage(`"` + big + `"`)})
 	if err != nil {
 		t.Fatalf("NewFrame: %v", err)
 	}

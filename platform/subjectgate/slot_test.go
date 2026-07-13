@@ -9,26 +9,79 @@ import (
 
 const testID = "human:alice"
 
-// TestPublishLevelEdgeSeqDedup pins same-epoch strictly-increasing dedup
-// (build spec §2 pair C×E / DoD-4 edgeSeq去重).
-func TestPublishLevelEdgeSeqDedup(t *testing.T) {
+// TestPublishLevelMintsMonotonicEdgeSeq pins the连接模型勘误期 form: edgeSeq is
+// slot-minted (not client-supplied), so every same-or-greater-epoch PublishLevel
+// applies with a strictly-increasing seq; a lesser epoch is stale-dropped.
+func TestPublishLevelMintsMonotonicEdgeSeq(t *testing.T) {
 	s := newSlot()
 	var got []PresenceUpdate
 	s.RegisterObserver("tok", func(u PresenceUpdate) { got = append(got, u) })
-	if !s.PublishLevel(1, 1, LevelOnline) {
+	if !s.PublishLevel(1, LevelOnline) {
 		t.Fatal("first edge should apply")
 	}
-	if s.PublishLevel(1, 1, LevelOffline) {
-		t.Fatal("duplicate edgeSeq must be dropped")
-	}
-	if s.PublishLevel(1, 0, LevelOffline) {
-		t.Fatal("lower edgeSeq must be dropped")
-	}
-	if !s.PublishLevel(1, 2, LevelOffline) {
-		t.Fatal("higher edgeSeq should apply")
+	if !s.PublishLevel(1, LevelOffline) {
+		t.Fatal("a same-epoch edge applies with a slot-minted greater seq")
 	}
 	if len(got) != 2 {
 		t.Fatalf("want 2 delivered edges, got %d: %+v", len(got), got)
+	}
+	if got[1].EdgeSeq <= got[0].EdgeSeq {
+		t.Fatalf("slot-minted edgeSeq must strictly increase: %d then %d", got[0].EdgeSeq, got[1].EdgeSeq)
+	}
+	if s.PublishLevel(0, LevelOnline) {
+		t.Fatal("a lesser epoch must be dropped (stale gateway)")
+	}
+}
+
+// TestPublishCurrentIdempotent pins the§3.2 幂等补发: re-publishing the current
+// (epoch, level) is a no-op (zero notify), while a changed value publishes.
+func TestPublishCurrentIdempotent(t *testing.T) {
+	s := newSlot()
+	var got []PresenceUpdate
+	s.RegisterObserver("tok", func(u PresenceUpdate) { got = append(got, u) })
+	if !s.PublishCurrent(1, LevelOnline) {
+		t.Fatal("first PublishCurrent should apply")
+	}
+	if s.PublishCurrent(1, LevelOnline) {
+		t.Fatal("re-publishing the same (epoch,level) must be a no-op")
+	}
+	if len(got) != 1 {
+		t.Fatalf("idempotent re-publish must not notify: got %d edges", len(got))
+	}
+	if !s.PublishCurrent(1, LevelOffline) {
+		t.Fatal("a changed level must publish")
+	}
+	if len(got) != 2 {
+		t.Fatalf("a changed level must notify: got %d edges", len(got))
+	}
+}
+
+// TestRegisterObserverDeliversCurrentFirst pins the出生握手 (§3.2 六轮 P0-2): the
+// current value (if any) is delivered as the observer's FIRST callback, under the
+// slot lock, in-order with every subsequent edge.
+func TestRegisterObserverDeliversCurrentFirst(t *testing.T) {
+	s := newSlot()
+	s.PublishLevel(3, LevelOnline)
+	var got []PresenceUpdate
+	s.RegisterObserver("tok", func(u PresenceUpdate) { got = append(got, u) })
+	if len(got) != 1 || !got[0].Live || got[0].Level != LevelOnline || got[0].Epoch != 3 {
+		t.Fatalf("RegisterObserver must deliver the current value as its first callback, got %+v", got)
+	}
+	// A new epoch follows in order: revoke(epoch3) then snapshot(epoch4).
+	s.PublishLevel(4, LevelOffline)
+	if len(got) != 3 || got[1].Live || got[1].Epoch != 3 || !got[2].Live || got[2].Epoch != 4 {
+		t.Fatalf("want snapshot then revoke(3)+snapshot(4), got %+v", got)
+	}
+}
+
+// TestRegisterObserverNoCurrentNoFirst: with nothing published, RegisterObserver
+// delivers no first edge (unknown 诚实默认).
+func TestRegisterObserverNoCurrentNoFirst(t *testing.T) {
+	s := newSlot()
+	fired := 0
+	s.RegisterObserver("tok", func(PresenceUpdate) { fired++ })
+	if fired != 0 {
+		t.Fatalf("no testimony → no first callback, got %d", fired)
 	}
 }
 
@@ -38,38 +91,17 @@ func TestPublishLevelNewEpochRevokeThenSnapshot(t *testing.T) {
 	s := newSlot()
 	var got []PresenceUpdate
 	s.RegisterObserver("tok", func(u PresenceUpdate) { got = append(got, u) })
-	s.PublishLevel(1, 5, LevelOnline)
+	s.PublishLevel(1, LevelOnline)
 	got = nil
-	if !s.PublishLevel(2, 1, LevelOnline) {
+	if !s.PublishLevel(2, LevelOnline) {
 		t.Fatal("new epoch should apply")
 	}
 	if len(got) != 2 || got[0].Live || got[0].Epoch != 1 || !got[1].Live || got[1].Epoch != 2 {
 		t.Fatalf("want revoke(epoch1) then snapshot(epoch2), got %+v", got)
 	}
 	// A lesser epoch is stale.
-	if s.PublishLevel(1, 99, LevelOffline) {
+	if s.PublishLevel(1, LevelOffline) {
 		t.Fatal("stale (lesser) epoch must be dropped")
-	}
-}
-
-// TestIndependenceInvariant pins that a layer-2 rebind produces ZERO presence
-// side effect (build spec §2 pair B×E / design §5.2 独立性不变式).
-func TestIndependenceInvariant(t *testing.T) {
-	s := newSlot()
-	fired := false
-	s.RegisterObserver("tok", func(PresenceUpdate) { fired = true })
-	s.PublishLevel(1, 1, LevelOnline)
-	fired = false
-	s.SetBinding(2)
-	s.SetBinding(3)
-	if fired {
-		t.Fatal("SetBinding must not touch the presence register (禁互训)")
-	}
-	if level, _, _, ok := s.Snapshot(); !ok || level != LevelOnline {
-		t.Fatalf("rebind altered presence snapshot: %v %v", level, ok)
-	}
-	if s.BindingGen() != 3 {
-		t.Fatalf("bindingGen not updated: %d", s.BindingGen())
 	}
 }
 
@@ -83,7 +115,7 @@ func TestObserverPointerGenerationRemoval(t *testing.T) {
 	s.RegisterObserver("new", func(PresenceUpdate) { newFired++ })
 	// The old cell tears down and摘除 with ITS token.
 	s.RemoveObserver("old")
-	s.PublishLevel(1, 1, LevelOnline)
+	s.PublishLevel(1, LevelOnline)
 	if newFired != 1 {
 		t.Fatalf("new observer should still receive edges after old摘除: %d", newFired)
 	}
@@ -94,13 +126,39 @@ func TestForgetRevokesAndFoldsUnknown(t *testing.T) {
 	s := newSlot()
 	var last PresenceUpdate
 	s.RegisterObserver("tok", func(u PresenceUpdate) { last = u })
-	s.PublishLevel(1, 1, LevelOnline)
+	s.PublishLevel(1, LevelOnline)
 	s.Forget()
 	if last.Live {
 		t.Fatal("Forget should deliver a revocation")
 	}
 	if _, _, _, ok := s.Snapshot(); ok {
 		t.Fatal("Forget should fold the register to unknown (no value)")
+	}
+}
+
+// TestForgetEpochConditional pins the CAS 清账 (§3.2/§3.4): ForgetEpoch clears
+// ONLY when the current testimony belongs to the given epoch — a stale epoch is a
+// no-op, so a late Close never抹 a newer epoch's testimony.
+func TestForgetEpochConditional(t *testing.T) {
+	s := newSlot()
+	fired := 0
+	var last PresenceUpdate
+	s.RegisterObserver("tok", func(u PresenceUpdate) { last = u; fired++ })
+	s.PublishLevel(5, LevelOnline)
+	before := fired
+	s.ForgetEpoch(4) // different epoch → no-op
+	if fired != before {
+		t.Fatal("ForgetEpoch for a different epoch must be a no-op")
+	}
+	if _, _, _, ok := s.Snapshot(); !ok {
+		t.Fatal("testimony must survive a non-matching ForgetEpoch")
+	}
+	s.ForgetEpoch(5) // matching epoch → clears
+	if last.Live {
+		t.Fatal("matching ForgetEpoch must revoke")
+	}
+	if _, _, _, ok := s.Snapshot(); ok {
+		t.Fatal("matching ForgetEpoch must fold to unknown")
 	}
 }
 
@@ -119,7 +177,7 @@ func TestDeliverSyncAndUnblock(t *testing.T) {
 		for {
 			select {
 			case job := <-ch:
-				r, _ := NewFrame(FrameReceipt, 0, job.Frame.Ref, SubmitReceipt{MessageID: "m1", Seq: 1})
+				r, _ := NewFrame(FrameReceipt, job.Frame.Ref, SubmitReceipt{MessageID: "m1", Seq: 1})
 				job.Reply(FrameResult{Frame: r})
 			case <-stop:
 				return
@@ -127,8 +185,8 @@ func TestDeliverSyncAndUnblock(t *testing.T) {
 		}
 	}()
 
-	f, _ := NewFrame(FrameSubmit, 0, "ref-9", SubmitPayload{MsgType: "m"})
-	res, err := s.Deliver(context.Background(), f, 0)
+	f, _ := NewFrame(FrameSubmit, "ref-9", SubmitPayload{ChannelID: "c1", MsgType: "m"})
+	res, err := s.Deliver(context.Background(), f)
 	if err != nil {
 		t.Fatalf("Deliver: %v", err)
 	}
@@ -140,7 +198,7 @@ func TestDeliverSyncAndUnblock(t *testing.T) {
 	close(stop)
 	wg.Wait()
 	release()
-	if _, err := s.Deliver(context.Background(), f, 0); err != ErrNoOccupant {
+	if _, err := s.Deliver(context.Background(), f); err != ErrNoOccupant {
 		t.Fatalf("Deliver after release want ErrNoOccupant, got %v", err)
 	}
 }
@@ -153,8 +211,8 @@ func TestDeliverBlockedUnblocksOnRelease(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		f, _ := NewFrame(FrameSubmit, 0, "r", SubmitPayload{MsgType: "m"})
-		_, err := s.Deliver(context.Background(), f, 0)
+		f, _ := NewFrame(FrameSubmit, "r", SubmitPayload{ChannelID: "c1", MsgType: "m"})
+		_, err := s.Deliver(context.Background(), f)
 		done <- err
 	}()
 
@@ -186,15 +244,15 @@ func TestAttachInterpreterIncarnationGate(t *testing.T) {
 	// B answers one job.
 	go func() {
 		job := <-framesB
-		r, _ := NewFrame(FrameReceipt, 0, job.Frame.Ref, SubmitReceipt{MessageID: "mb", Seq: 1})
+		r, _ := NewFrame(FrameReceipt, job.Frame.Ref, SubmitReceipt{MessageID: "mb", Seq: 1})
 		job.Reply(FrameResult{Frame: r})
 	}()
 
 	// A's stale release: it must NOT flip B's liveness.
 	relA()
 
-	f, _ := NewFrame(FrameSubmit, 0, "ref-b", SubmitPayload{MsgType: "m"})
-	res, err := s.Deliver(context.Background(), f, 0)
+	f, _ := NewFrame(FrameSubmit, "ref-b", SubmitPayload{ChannelID: "c1", MsgType: "m"})
+	res, err := s.Deliver(context.Background(), f)
 	if err != nil {
 		t.Fatalf("Deliver after stale release of A must reach live B, got %v", err)
 	}
@@ -204,115 +262,8 @@ func TestAttachInterpreterIncarnationGate(t *testing.T) {
 
 	// Now B releases (the current incarnation) → the slot refuses.
 	relB()
-	if _, err := s.Deliver(context.Background(), f, 0); err != ErrNoOccupant {
+	if _, err := s.Deliver(context.Background(), f); err != ErrNoOccupant {
 		t.Fatalf("Deliver after current release want ErrNoOccupant, got %v", err)
-	}
-}
-
-// TestDeliverStaleBindingRefused pins the递交线性化点世代 gate (P0-1 下half): a
-// frame carrying a superseded binding_gen is refused ErrStaleBinding UNDER the slot
-// lock (atomic with the live check), while the current gen delivers. This is the
-// slot-side half of the双向世代 gate that closes the初验→seal→rebind→Deliver window.
-func TestDeliverStaleBindingRefused(t *testing.T) {
-	s := newSlot()
-	ch, _, release := s.AttachInterpreter()
-	defer release()
-	stop := make(chan struct{})
-	go func() {
-		for {
-			select {
-			case job := <-ch:
-				r, _ := NewFrame(FrameReceipt, 0, job.Frame.Ref, SubmitReceipt{MessageID: "m", Seq: 1})
-				job.Reply(FrameResult{Frame: r})
-			case <-stop:
-				return
-			}
-		}
-	}()
-	defer close(stop)
-
-	s.SetBinding(1) // first binding
-	s.SetBinding(2) // rebind (seal → fresh arm → SetBinding) supersedes gen 1
-
-	f, _ := NewFrame(FrameSubmit, 1, "ref-stale", SubmitPayload{MsgType: "m"})
-	if _, err := s.Deliver(context.Background(), f, 1); err != ErrStaleBinding {
-		t.Fatalf("a stale binding_gen must be refused ErrStaleBinding at the linearization point, got %v", err)
-	}
-	// The current binding gen delivers.
-	if _, err := s.Deliver(context.Background(), f, 2); err != nil {
-		t.Fatalf("current binding_gen must deliver, got %v", err)
-	}
-	// DeliverAnyGen bypasses the assertion (trusted internal path).
-	if _, err := s.Deliver(context.Background(), f, DeliverAnyGen); err != nil {
-		t.Fatalf("DeliverAnyGen must bypass the gen gate, got %v", err)
-	}
-}
-
-// TestBindingGuardSerializesRebindAfterCommit pins the五轮 P0 fix: a SetBinding
-// (rebind) that races an in-flight interpreter commit is held by the绑定世代提交守卫's
-// exclusive Lock until the commit's落账动词 has run — the复核↔落账 third window (gen-read
-// → verb) is closed. The commit ran under the still-valid old binding, so its
-// serialization序 is commit ≺ rebind (legal), and the rebind returns only afterwards.
-func TestBindingGuardSerializesRebindAfterCommit(t *testing.T) {
-	s := newSlot()
-	s.SetBinding(1)
-
-	entered := make(chan struct{})
-	proceed := make(chan struct{})
-	committed := make(chan bool, 1)
-	go func() {
-		_, ok := s.WithBindingGuard(1, func(int64) {
-			close(entered) // recheck passed — inside the commit临界区 (RLock held)
-			<-proceed      // hold the落账动词 open so a rebind must wait
-		})
-		committed <- ok
-	}()
-	<-entered // the commit is inside the guard with the verb not yet done
-
-	// A concurrent rebind must NOT return while the commit still holds the RLock.
-	rebindDone := make(chan struct{})
-	go func() { s.SetBinding(2); close(rebindDone) }()
-	select {
-	case <-rebindDone:
-		t.Fatal("SetBinding returned while an in-flight commit still held the guard (window open)")
-	case <-time.After(50 * time.Millisecond):
-		// expected: the rebind is parked on the exclusive Lock.
-	}
-
-	// Release the commit: it lands legally under the old binding, THEN the rebind returns.
-	close(proceed)
-	if ok := <-committed; !ok {
-		t.Fatal("commit under the still-current binding must succeed (串行化序 commit ≺ rebind)")
-	}
-	select {
-	case <-rebindDone:
-	case <-time.After(2 * time.Second):
-		t.Fatal("SetBinding did not return after the commit released the guard")
-	}
-	if s.BindingGen() != 2 {
-		t.Fatalf("rebind must have advanced the binding to 2, got %d", s.BindingGen())
-	}
-}
-
-// TestBindingGuardRefusesCommitAfterRebind pins the reverse serialization: a rebind
-// that完成 BEFORE the commit's recheck → the commit sees the advanced gen and is refused
-// (ok=false), and its落账动词 NEVER runs (the frame never lands in the successor binding).
-func TestBindingGuardRefusesCommitAfterRebind(t *testing.T) {
-	s := newSlot()
-	s.SetBinding(1)
-	s.SetBinding(2) // rebind completes first
-
-	ran := false
-	if _, ok := s.WithBindingGuard(1, func(int64) { ran = true }); ok {
-		t.Fatal("a commit carrying the stale gen 1 must be refused after the rebind to 2")
-	}
-	if ran {
-		t.Fatal("the落账动词 must NOT run for a refused (stale) commit")
-	}
-	// DeliverAnyGen bypasses the gen comparison but still commits under the guard.
-	anyRan := false
-	if _, ok := s.WithBindingGuard(DeliverAnyGen, func(int64) { anyRan = true }); !ok || !anyRan {
-		t.Fatal("DeliverAnyGen must commit under the guard regardless of gen")
 	}
 }
 
@@ -334,7 +285,7 @@ func TestRegistryEnsureIdempotent(t *testing.T) {
 }
 
 // TestDeliverCtxExit (法典纪律④三路出口): a caller whose own life ends (dead ws
-// connector, cancelled HTTP request) must unblock its Deliver wait via ctx — not
+// connector, cancelled session ctx) must unblock its Deliver wait via ctx — not
 // park until cell death — while an interpreter is attached but never replies.
 func TestDeliverCtxExit(t *testing.T) {
 	s := newSlot()
@@ -344,8 +295,8 @@ func TestDeliverCtxExit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		f, _ := NewFrame(FrameSubmit, 0, "ref", SubmitPayload{MsgType: "m"})
-		_, err := s.Deliver(ctx, f, DeliverAnyGen)
+		f, _ := NewFrame(FrameSubmit, "ref", SubmitPayload{ChannelID: "c1", MsgType: "m"})
+		_, err := s.Deliver(ctx, f)
 		done <- err
 	}()
 	cancel()

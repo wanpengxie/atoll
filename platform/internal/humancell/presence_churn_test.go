@@ -9,13 +9,13 @@ import (
 
 // presence_churn_test.go is the platform-layer presence CHURN family (DoD-4): it
 // drives the REAL cell self-report policy (WirePresenceSelfReport + publishPresence)
-// against a REAL slot across incarnation churn, epoch失效 and layer-2 rebind. The
-// slot-mechanic invariants (edgeSeq dedup, new-epoch revoke-then-snapshot,
-// independence, observer-pointer removal, Forget-folds-unknown) are ALSO pinned at
-// the slot layer in platform/subjectgate/slot_test.go; this family asserts
-// they hold as the human cell OBSERVES them — i.e. what the person's device actually
-// self-reports. The 真路径 online-after-attach (real gateway + ws + cell) is the e2e
-// TestGatewayFrames; 多设备首入末出 is the gateway TestUserEntry* family.
+// against a REAL slot across incarnation churn and epoch失效. The slot-mechanic
+// invariants (new-epoch revoke-then-snapshot, observer-pointer removal, Forget-folds-
+// unknown, 出生握手首投) are ALSO pinned at the slot layer in
+// platform/subjectgate/slot_test.go; this family asserts they hold as the human cell
+// OBSERVES them — i.e. what the person's device actually self-reports. The 真路径
+// online-after-attach (real gateway + ws + cell) is the e2e TestGatewayFrames;
+// 多设备首入末出 is the gateway TestUserEntry* family.
 
 // obsLevels decodes a fakeSys's captured device-presence obs into online/offline
 // booleans (one per PublishObs).
@@ -32,28 +32,29 @@ func obsLevels(t *testing.T, fs *fakeSys) []bool {
 	return out
 }
 
-// TestPresenceChurnSnapshotSelfReportOnIncarnation: the slot outlives incarnations,
-// so a FRESH cell born after a level was published reads the snapshot at Start and
-// self-reports it (换代槽快照自报) — no new edge required.
-func TestPresenceChurnSnapshotSelfReportOnIncarnation(t *testing.T) {
+// TestPresenceChurnFirstCallbackSelfReportOnIncarnation: the slot outlives
+// incarnations, so a FRESH cell born after a level was published self-reports it —
+// the current value arrives as RegisterObserver's FIRST callback (出生握手首投,
+// 连接模型勘误期; no self-read of Snapshot).
+func TestPresenceChurnFirstCallbackSelfReportOnIncarnation(t *testing.T) {
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 
 	// incarnation 1 wires and observes an online edge.
 	fs1 := &fakeSys{}
 	tok1 := WirePresenceSelfReport(fs1, slot)
-	slot.PublishLevel(1, 1, subjectgate.LevelOnline)
+	slot.PublishLevel(1, subjectgate.LevelOnline)
 	if got := obsLevels(t, fs1); len(got) != 1 || !got[0] {
 		t.Fatalf("incarnation 1 obs = %v, want [online]", got)
 	}
 	// incarnation 1 dies (its observer摘除 by ITS token).
 	slot.RemoveObserver(tok1)
 
-	// incarnation 2 is born AFTER the online was published: it must read the
-	// snapshot at Start and self-report online with zero new edges.
+	// incarnation 2 is born AFTER the online was published: it must receive the
+	// current value as its first observer callback and self-report online.
 	fs2 := &fakeSys{}
 	_ = WirePresenceSelfReport(fs2, slot)
 	if got := obsLevels(t, fs2); len(got) != 1 || !got[0] {
-		t.Fatalf("incarnation 2 snapshot self-report = %v, want [online]", got)
+		t.Fatalf("incarnation 2 first-callback self-report = %v, want [online]", got)
 	}
 }
 
@@ -71,7 +72,7 @@ func TestPresenceChurnOldObserverCannotUnmountNew(t *testing.T) {
 	slot.RemoveObserver(tok1)
 
 	// A fresh edge must still reach incarnation 2.
-	slot.PublishLevel(1, 1, subjectgate.LevelOnline)
+	slot.PublishLevel(1, subjectgate.LevelOnline)
 	if got := obsLevels(t, fs2); len(got) != 1 || !got[0] {
 		t.Fatalf("live incarnation obs = %v, want [online] (stale RemoveObserver must not have unmounted it)", got)
 	}
@@ -89,7 +90,7 @@ func TestPresenceChurnForgetNotSelfRetracted(t *testing.T) {
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 	fs := &fakeSys{}
 	_ = WirePresenceSelfReport(fs, slot)
-	slot.PublishLevel(1, 1, subjectgate.LevelOnline)
+	slot.PublishLevel(1, subjectgate.LevelOnline)
 
 	before := len(fs.obs)
 	slot.Forget() // revocation (Live=false) — the cell must not self-report anything.
@@ -110,39 +111,22 @@ func TestPresenceChurnForgetNotSelfRetracted(t *testing.T) {
 	}
 }
 
-// TestPresenceChurnPureRebindNoPresence: a pure layer-2 rebind (SetBinding) produces
-// ZERO presence self-report — the独立性不变式 (level's only writer is PublishLevel,
-// never co-written with a rebind; build spec §2 pair B×E) as the cell observes it.
-func TestPresenceChurnPureRebindNoPresence(t *testing.T) {
-	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
-	fs := &fakeSys{}
-	_ = WirePresenceSelfReport(fs, slot)
-	slot.SetBinding(2)
-	slot.SetBinding(3)
-	if got := obsLevels(t, fs); len(got) != 0 {
-		t.Fatalf("pure rebind produced presence obs %v, want [] (level绝不随层2联写)", got)
-	}
-}
-
-// TestPresenceChurnEdgeSeqAndEpoch: as the cell observes them — a same-epoch
-// duplicate/reorder is dropped (no self-report), and a new (greater) epoch revokes
-// the old testimony (Live=false, NOT self-reported) then delivers the new level
-// (self-reported).
-func TestPresenceChurnEdgeSeqAndEpoch(t *testing.T) {
+// TestPresenceChurnEpochRevokeNotSelfReported: as the cell observes it — a new
+// (greater) epoch revokes the old testimony (Live=false, NOT self-reported) then
+// delivers the new level (self-reported).
+func TestPresenceChurnEpochRevokeNotSelfReported(t *testing.T) {
 	slot := subjectgate.NewRegistry().EnsureSlot("human:alice")
 	fs := &fakeSys{}
 	_ = WirePresenceSelfReport(fs, slot)
 
-	slot.PublishLevel(1, 2, subjectgate.LevelOnline)  // online
-	slot.PublishLevel(1, 2, subjectgate.LevelOffline) // same epoch, edgeSeq not increasing → dropped
-	slot.PublishLevel(1, 1, subjectgate.LevelOffline) // same epoch, lower edgeSeq → dropped
+	slot.PublishLevel(1, subjectgate.LevelOnline) // online (self-reported)
 	if got := obsLevels(t, fs); len(got) != 1 || !got[0] {
-		t.Fatalf("after dup/reorder obs = %v, want [online] (dedup)", got)
+		t.Fatalf("after online obs = %v, want [online]", got)
 	}
 
 	// New epoch offline: the observer sees revoke(old, Live=false, skipped) then
 	// deliver(offline, Live=true, self-reported).
-	slot.PublishLevel(2, 1, subjectgate.LevelOffline)
+	slot.PublishLevel(2, subjectgate.LevelOffline)
 	got := obsLevels(t, fs)
 	if len(got) != 2 || !got[0] || got[1] {
 		t.Fatalf("after new-epoch offline obs = %v, want [online, offline] (revoke not self-reported, new level is)", got)
