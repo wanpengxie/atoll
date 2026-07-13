@@ -15,7 +15,6 @@ import (
 // Keys reference protocol/actor constants (the frozen closed set) rather
 // than bare literals so a kernel rename can never silently diverge here.
 var reservedBootstrapTypeSet = map[string]struct{}{
-	actor.ReservedSystemChannelCreated:    {},
 	actor.ReservedSystemActorRegistered:   {},
 	actor.ReservedSystemActorDeregistered: {},
 }

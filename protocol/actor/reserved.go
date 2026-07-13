@@ -33,10 +33,16 @@ package actor
 // is authorized to emit it is the write engine's job (in the harness), never a
 // kernel concern. These are plain string consts by design, not a set type.
 const (
-	ReservedSystemChannelCreated    = "system.channel.created"
 	ReservedSystemActorRegistered   = "system.actor.registered"
 	ReservedSystemActorDeregistered = "system.actor.deregistered"
 )
+
+// "system.channel.created" was retired from the reserved vocabulary with zero
+// producers ever wired (purity v1 S2 — a word enters the closed set only WITH
+// its producer, 词表第四问; owner 2026-07-13). If channel genesis ever needs a
+// mirror event, re-add the const together with its ONE producer (the
+// channel-creation commit path) and the harness allowlist entry as a single
+// vertical slice.
 
 // NOTE: there is NO system.config.updated event. The substrate has no
 // channel-level config as a first-class concept: a config surface is only
