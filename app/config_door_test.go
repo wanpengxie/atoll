@@ -22,12 +22,12 @@ import (
 // config_door_test.go is the S8 DoD (spec §7 DoD 10): ctx.Config is the read-only
 // per-instance snapshot that reaches an actor via registry.InstanceSpec.Config in
 // BOTH forms (Legacy / Proc), never through actorcaps.Caps (that half is the
-// TestConfigNotInCaps archtest), and 改配置 flows door → Spawn-replace → a fresh
+// TestConfigNotInCaps archtest), and 改配置 flows door → reconcile-replace (削 → SpawnIfAbsent rebuild) → a fresh
 // incarnation over the new snapshot.
 
 // configSink records the "model" each incarnation of an id was BUILT with — the
 // live proof of which snapshot the constructor closure captured. Keyed by id;
-// overwritten on every (re)build, so a post-Spawn-replace read sees the new value.
+// overwritten on every (re)build, so a post-reconcile-replace read sees the new value.
 var configSink = struct {
 	mu sync.Mutex
 	m  map[actor.ActorID]string
@@ -47,7 +47,7 @@ func readConfig(id actor.ActorID) (string, bool) {
 }
 
 // waitConfig polls configSink until id's recorded model == want (a rebuild is
-// async in the ring path; Spawn-replace builds the closure synchronously but the
+// async in the ring path; reconcile-replace builds the closure synchronously but the
 // cell start is scheduled).
 func waitConfig(t *testing.T, id actor.ActorID, want string, timeout time.Duration) {
 	t.Helper()
@@ -118,7 +118,7 @@ func (a *cfgLegacyActor) Receive(context.Context, *message.Envelope) error { ret
 // TestConfigDoor_LegacyEndToEnd is the end-to-end DoD: introduce a server-placed
 // agent (snapshot v1 from its global config), then change config through the door
 // (introduce upsert carrying config) and observe the new snapshot v2 embodied via
-// Spawn-replace.
+// reconcile-replace.
 func TestConfigDoor_LegacyEndToEnd(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
@@ -153,7 +153,7 @@ func TestConfigDoor_LegacyEndToEnd(t *testing.T) {
 	waitConfig(t, instanceID, "v1", 2*time.Second)
 
 	// 改配置门: re-introduce carrying config v2 → UPDATE composition row's config
-	// field → Spawn-replace → new snapshot embodied.
+	// field → reconcile-replace → new snapshot embodied.
 	p2, _ := json.Marshal(map[string]any{"decl_id": agentID, "config": map[string]any{"model": "v2"}})
 	res, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID), Sender: sender, Payload: p2,

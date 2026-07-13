@@ -18,12 +18,12 @@ var objectOps = []access.Operation{access.OpRead, access.OpWrite, access.OpSet, 
 // resource — the A8 formula (期11 spec §2 item 2): for each object op,
 // ActorAllows(caller) ∪ (MembersAllow ∧ IsMember(caller)). Door-internal only:
 // it never crosses the wire and never appears in a public signature. THREE
-// loci are meant to share this ONE function (期11 build order — only the
-// first is wired as of this section):
-//   - the set arm's escalation check (door.go, THIS section): set(X, ops)
-//     requires ops ⊆ effectiveOps(caller);
-//   - Stat's echoed ops (§3, not yet built);
-//   - List's per-row projection (§3, not yet built).
+// loci share this ONE formula (期11 spec §2 item 2 — all three wired):
+//   - the set arm's escalation check (door.go): set(X, ops) requires
+//     ops ⊆ effectiveOps(caller);
+//   - Stat's echoed ops (query.go stat — calls effectiveOps directly);
+//   - List's per-row projection (query.go list — effectiveOpsFromGrants, the
+//     same formula computed over the grant rows List already fetched).
 //
 // Computing the union differently in even one of the three would let a
 // departed member's residual members-row rights leak through that ONE path

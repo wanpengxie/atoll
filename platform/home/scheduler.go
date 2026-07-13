@@ -25,9 +25,9 @@ type reviveBackoffEntry struct {
 }
 
 func (h *Home) clearReviveBackoff(id actor.ActorID) {
-	h.reviveLogMu.Lock()
+	h.reviveMu.Lock()
 	delete(h.reviveBackoff, id)
-	h.reviveLogMu.Unlock()
+	h.reviveMu.Unlock()
 }
 
 // backoffGate reports whether id is currently held off from a build attempt by a
@@ -36,9 +36,9 @@ func (h *Home) clearReviveBackoff(id actor.ActorID) {
 // SpawnIfAbsent build so a persistently failing actor retries at the
 // CrashLoopBackOff pace instead of being re-hammered every wake / tick / poke.
 func (h *Home) backoffGate(id actor.ActorID, now time.Time) (until time.Time, held bool) {
-	h.reviveLogMu.Lock()
+	h.reviveMu.Lock()
 	entry := h.reviveBackoff[id]
-	h.reviveLogMu.Unlock()
+	h.reviveMu.Unlock()
 	if !entry.next.IsZero() && now.Before(entry.next) {
 		return entry.next, true
 	}
@@ -50,7 +50,7 @@ func (h *Home) backoffGate(id actor.ActorID, now time.Time) (until time.Time, he
 // BuildFailure feeds it — a sealed runtime or a transient fault is not a build
 // verdict and leaves the ladder untouched (the caller filters before calling).
 func (h *Home) recordBuildFailure(id actor.ActorID, now time.Time) {
-	h.reviveLogMu.Lock()
+	h.reviveMu.Lock()
 	entry := h.reviveBackoff[id]
 	entry.failures++
 	delay := reviveBuildBackoffBase << min(entry.failures-1, 8)
@@ -59,7 +59,7 @@ func (h *Home) recordBuildFailure(id actor.ActorID, now time.Time) {
 	}
 	entry.next = now.Add(delay)
 	h.reviveBackoff[id] = entry
-	h.reviveLogMu.Unlock()
+	h.reviveMu.Unlock()
 }
 
 // fireSink is the platform realisation of schedule.FireSink: the time engine's

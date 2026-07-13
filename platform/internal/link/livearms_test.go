@@ -19,7 +19,7 @@ import (
 // arms to one incarnation, gated on the DAEMON's own rt.IsLive — mirroring
 // TestLivePenFencesPostDeathWrite's construction-time case, generalised to the
 // whole caps bundle. It proves G12 closed (§10.13 推导7①): a factory that
-// calls any arm from INSIDE the Spawn build closure (before go-live) is
+// calls any arm from INSIDE the SpawnIfAbsent build closure (before go-live) is
 // refused on every arm, not just the pen.
 func TestLiveArmsFencesConstructionTimeWrite(t *testing.T) {
 	t.Parallel()
@@ -34,7 +34,7 @@ func TestLiveArmsFencesConstructionTimeWrite(t *testing.T) {
 
 	var errs struct{ pen, access, state, schedule error }
 
-	// The build closure runs inside Spawn, BEFORE go-live: IsLive(inc)==false,
+	// The build closure runs inside SpawnIfAbsent, BEFORE go-live: IsLive(inc)==false,
 	// so every arm a factory could reach during construction is fenced — the
 	// "factory must not write" rule is structural on the port path too, not a
 	// soft convention left for the daemon alone.

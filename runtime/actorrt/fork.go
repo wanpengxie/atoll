@@ -15,7 +15,7 @@ import (
 var ErrParentNotLive = errors.New("actorrt: parent not live")
 
 // ErrChildIDCollision is returned by Fork when childID already names a live
-// embodiment. Unlike Spawn (last-go-live-wins replace), a fork collision is a
+// embodiment. Unlike Attach (whose wire re-bind stops and replaces, last-go-live-wins), a fork collision is a
 // HARD failure — fork always mints a fresh identity; a colliding
 // childID is a caller bug, not a legitimate replace scenario.
 var ErrChildIDCollision = errors.New("actorrt: child id collision")

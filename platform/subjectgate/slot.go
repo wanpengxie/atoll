@@ -68,9 +68,13 @@ type Slot struct {
 	// Layer-3 (presence axis), written ONLY by PublishLevel/Forget.
 	presence presenceState
 
-	// Observers keyed by an incarnation token (the cell's own uuid). A stale
-	// remove carrying an old token can never摘 a fresh cell's registration —
-	// the tokens differ, so RemoveObserver(oldToken) misses the new entry.
+	// Observers keyed by an OBSERVER token — an opaque string the observing
+	// cell mints for itself (its own uuid). This is a DIFFERENT concept from
+	// the interpreter incarnation counter below: observer tokens identify who
+	// is watching presence, the uint64 incarnation identifies which attached
+	// interpreter currently owns the frame lane. A stale remove carrying an
+	// old observer token can never摘 a fresh cell's registration — the tokens
+	// differ, so RemoveObserver(oldToken) misses the new entry.
 	observers map[string]func(PresenceUpdate)
 
 	// frames is the帧递交端, one per identity (outlives incarnations). Unbuffered:
@@ -78,8 +82,9 @@ type Slot struct {
 	frames chan Job
 	// live is true while an interpreter is attached; dead is closed when the
 	// current interpreter detaches (so a blocked Deliver unblocks). dead is
-	// re-created on each AttachInterpreter (per incarnation). incarnation is the
-	// current interpreter's token: a stale incarnation's delayed release closes its
+	// re-created on each AttachInterpreter (per incarnation). incarnation is a
+	// slot-local uint64 counter stamping the CURRENT interpreter attachment —
+	// unrelated to the string observer tokens above: a stale incarnation's delayed release closes its
 	// OWN dead channel but must NOT flip live/dead for the successor that already
 	// took over (旧 incarnation 延迟 release 摘不掉新 interpreter, straddle gate).
 	live        bool

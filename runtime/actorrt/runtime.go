@@ -402,7 +402,7 @@ func (r *Runtime) LiveIDs() []actor.ActorID {
 
 // SpawnIfAbsent mints id ONLY IF no embodiment currently occupies it — activation's
 // atomic CAS mint, mirroring Fork's two-phase-with-recheck discipline.
-// Unlike Spawn (last-go-live-wins replace), SpawnIfAbsent NEVER replaces an
+// Unlike Attach (whose wire re-bind stops and replaces, last-go-live-wins), SpawnIfAbsent NEVER replaces an
 // existing embodiment: build runs OUTSIDE the lock (same discipline as
 // Spawn/Fork), then absence is RE-CHECKED inside the SAME critical section as
 // the insert. If id is already occupied by the time the lock is taken —

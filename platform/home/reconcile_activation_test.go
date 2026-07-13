@@ -1161,12 +1161,12 @@ func TestReconcileActivation_BuildStraddle_RemoveSelfUndo(t *testing.T) {
 	}
 }
 
-// backoffEntry reads id's build-failure backoff account under reviveLogMu (the map
+// backoffEntry reads id's build-failure backoff account under reviveMu (the map
 // is lock-guarded even though these tests drive reconcileActivation synchronously).
 func backoffEntry(t *testing.T, h *Home, id actor.ActorID) reviveBackoffEntry {
 	t.Helper()
-	h.reviveLogMu.Lock()
-	defer h.reviveLogMu.Unlock()
+	h.reviveMu.Lock()
+	defer h.reviveMu.Unlock()
 	return h.reviveBackoff[id]
 }
 

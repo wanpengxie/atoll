@@ -61,7 +61,7 @@ func TestFork_ParentNotLive_FastPath(t *testing.T) {
 }
 
 // TestFork_ChildIDCollision_HardFail: a childID that already names a live
-// embodiment is a HARD failure — NOT Spawn's last-go-live-wins replace
+// embodiment is a HARD failure — NOT Attach's last-go-live-wins replace
 // semantics. The pre-existing embodiment must be untouched.
 func TestFork_ChildIDCollision_HardFail(t *testing.T) {
 	t.Parallel()

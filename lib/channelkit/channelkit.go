@@ -172,7 +172,7 @@ func (c *Channel) Start() error {
 		// the SOLE occupant of SystemActorID and is minted exactly once, here, at
 		// channel assembly. SpawnIfAbsent + created-assert fails fast if the reserved
 		// id is ever already occupied (a second anchor spawn / a member admission
-		// leaking the reserved id) instead of Spawn's silent last-go-live replace.
+		// leaking the reserved id) instead of Attach's silent last-go-live replace.
 		if _, created, err := c.cells.SpawnIfAbsent(actor.SystemActorID, actor.KindSystem, func(inc actorrt.Incarnation) actorrt.Actor {
 			return c.system(c.cells, inc)
 		}); err != nil {

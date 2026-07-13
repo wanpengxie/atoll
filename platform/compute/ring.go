@@ -143,8 +143,8 @@ func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, desired actor
 // (F6: a fresh reconnect where nothing has a stream yet, or a single stream
 // that died while the link stayed up). Reattach the full declared set, then
 // per missing id either buildOne (never live: resolve factory, OpenStream,
-// Spawn, StartStream) or reopenOne (already live: OpenStream, Rebind, Start-
-// Stream — never re-Spawn). A desired-read failure leaves the prior state
+// SpawnIfAbsent, StartStream) or reopenOne (already live: OpenStream, Rebind, Start-
+// Stream — never re-SpawnIfAbsent). A desired-read failure leaves the prior state
 // untouched and retries next tick.
 //
 // The full-set Reattach fires on ANY of three conditions (#7 kubelet 两件套):
@@ -257,7 +257,7 @@ func (r *computeRing) buildOne(id actor.ActorID, kind actor.Kind, d *link.Dialer
 	r.watcher.down[id] = arms.Down
 	r.watcher.mu.Unlock()
 	// Two-phase construction, mirroring the home activation path (§10.13 推导7①/G12): the
-	// build closure runs inside Spawn, BEFORE go-live, so link.NewLiveArms welds
+	// build closure runs inside SpawnIfAbsent, BEFORE go-live, so link.NewLiveArms welds
 	// the cell's caps to THIS incarnation and fences every call until it goes
 	// live — a factory that writes during construction is refused here exactly
 	// like a cell born at home, closing the daemon-side parity gap the raw

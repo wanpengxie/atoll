@@ -4,7 +4,7 @@ package compute
 // to the channel home, no actors declared yet) → actorrt.Runtime (business
 // cells, built once and outlives any single link) → the daemon's own reconcile
 // ring (computeRing), which diffs Config.Desired against the locally-live
-// set and drives Reattach → OpenStream → Spawn → StartStream per actor.
+// set and drives Reattach → OpenStream → SpawnIfAbsent → StartStream per actor.
 // Cloud daemon and user-proxy daemon are the same binary; cmd selects concrete
 // actors.
 

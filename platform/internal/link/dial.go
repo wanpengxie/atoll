@@ -27,7 +27,7 @@ import (
 // port-wire protocol with a real handshake (LeaseID = actor id). A hosted cell's
 // pen is the stream's RemoteWriter (emits flow UP, block on the home's
 // EmitAck). Dial does WS + attach with NO inbound consumption; each actor arm is
-// then built in three steps — OpenStream (handshake) → caller Spawn (install the
+// then built in three steps — OpenStream (handshake) → caller SpawnIfAbsent (install the
 // cell) → StartStream (start the read loop) — so no dispatch races a half-built
 // host. Start drives StartStream across the initial batch; the ring drives it
 // per stream for a mid-life open.
@@ -55,7 +55,7 @@ type Dialer struct {
 	// streams for the initial batch (Start). It makes Start idempotent and is the
 	// boundary a post-Start OpenStream races against: a stream inserted before the
 	// critical section is launched by Start; one inserted after is the ring's to
-	// launch via StartStream (the fixed OpenStream→Spawn→StartStream arm order).
+	// launch via StartStream (the fixed OpenStream→SpawnIfAbsent→StartStream arm order).
 	started bool
 	// despawnLocal is the host→remote despawn hook: on a KindDespawn frame the
 	// stream read loop despawns the named local cell (ending its execution arm) and
@@ -395,7 +395,7 @@ func (d *Dialer) Reattach(ctx context.Context, decls []Declaration) error {
 // routes it into the cell's mailbox. cancel is invoked for each KindCancel frame
 // — the host fires the named request's reqCtx OFF the cell goroutine (the work
 // it interrupts is the goroutine's occupant). OpenStream is step one of three:
-// OpenStream (handshake + build the arm) → caller Spawn (install the cell) →
+// OpenStream (handshake + build the arm) → caller SpawnIfAbsent (install the cell) →
 // StartStream (start the read loop). It never starts the read loop itself, so a
 // deliver can never race a not-yet-spawned cell — true for the initial batch and
 // for a post-Start open the ring adds mid-life.
@@ -584,7 +584,7 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 }
 
 // StartStream launches one actor stream's read loop — step three of the
-// OpenStream→Spawn→StartStream arm order. Idempotent per stream (loopStarted): a
+// OpenStream→SpawnIfAbsent→StartStream arm order. Idempotent per stream (loopStarted): a
 // second call, or a call for a stream Start already launched, is a no-op, so the
 // initial-batch launch and a mid-life ring launch compose without racing.
 // Deferring the loop to here (rather than starting it in OpenStream) is the

@@ -197,13 +197,15 @@ type Home struct {
 	// covers genesis).
 	pokeCh chan struct{}
 
-	// reviveLogMu/reviveLogAt throttle the attached-host revive-skip log (see
+	// reviveMu guards BOTH per-author revive accounts below: reviveLogAt (the
+	// attached-host revive-skip log throttle) and reviveBackoff (the transient
+	// EnsureLive failure backoff entries). reviveLogAt throttles the log (see
 	// reviveLogThrottle) to once per author per window — the schedule engine
 	// backs off a transient EnsureLive failure at schedule.backoffDuration (1s)
 	// pace, so an attached author's due identity timer would otherwise log
 	// once a second for as long as it stays attached. Pure log hygiene, not a
 	// correctness mechanism.
-	reviveLogMu   sync.Mutex
+	reviveMu   sync.Mutex
 	reviveLogAt   map[actor.ActorID]time.Time
 	reviveBackoff map[actor.ActorID]reviveBackoffEntry
 

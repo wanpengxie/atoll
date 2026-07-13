@@ -81,13 +81,13 @@ func (h *Home) PresenceSweptCount() int64 {
 // daemon (§10.13 推导2/3) rather than home.
 func (h *Home) logReviveAttached(id actor.ActorID, host string) {
 	now := time.Now()
-	h.reviveLogMu.Lock()
+	h.reviveMu.Lock()
 	if last, ok := h.reviveLogAt[id]; ok && now.Sub(last) < reviveLogThrottle {
-		h.reviveLogMu.Unlock()
+		h.reviveMu.Unlock()
 		return
 	}
 	h.reviveLogAt[id] = now
-	h.reviveLogMu.Unlock()
+	h.reviveMu.Unlock()
 	h.logger.Warn("platform.revive.attached", "channel", string(h.channelID), "actor", string(id), "host", host)
 }
 
@@ -265,9 +265,9 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		// backoff/log-throttle entry behind (e.g. intent withdrawn for a build-
 		// failing member — its backoff account would otherwise never be cleared).
 		h.clearReviveBackoff(id)
-		h.reviveLogMu.Lock()
+		h.reviveMu.Lock()
 		delete(h.reviveLogAt, id)
-		h.reviveLogMu.Unlock()
+		h.reviveMu.Unlock()
 	}
 	h.prevEagerDesired = current
 }

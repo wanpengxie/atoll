@@ -17,7 +17,7 @@ import (
 // OWN welded caps through the identity-dimension Sys verbs (P2 能力取用), and the
 // reaper writes through the home's existing systemPen (D3 — never mint-as-caller).
 // The forbidden call names are checked as selector suffixes so a re-plumb through
-// any holder (h.minter.Mint / schedMinter.Mint / rt.Spawn / EnsureLive) trips it.
+// any holder (h.minter.Mint / schedMinter.Mint / rt.SpawnIfAbsent / EnsureLive) trips it.
 //
 // Scope is deliberately these three files, not the platform tree: buildCaps /
 // the supply ring / the scheduler's reviver are the LEGITIMATE mint/spawn

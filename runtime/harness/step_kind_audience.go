@@ -31,7 +31,7 @@ const defaultRequestTTLMs int64 = 24 * 60 * 60 * 1000
 //
 // Business types carry NO substrate kind / handler constraint: their kind is a
 // kernel closed-set value (validated at envelope-shape), and which kind is
-// meaningful for "xhs.publish" — and which actor handles it — is the receiving
+// meaningful for "domain.verb" — and which actor handles it — is the receiving
 // actor's contract + the caller's catalog, not the substrate's. There is no
 // per-type registry lookup and no type→handler routing.
 type stepKindAndAudience struct {

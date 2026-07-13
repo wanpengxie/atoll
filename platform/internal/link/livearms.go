@@ -16,7 +16,7 @@ import (
 //
 // This closes G12 (§10.13 推导7①, sealed-pen prior art extended to the port
 // path): "a factory must not write" is a structural rule on the cell path —
-// rt.Spawn's build closure runs BEFORE go-live, so a livePen constructed
+// rt.SpawnIfAbsent's build closure runs BEFORE go-live, so a livePen constructed
 // inside it always fences (IsLive(inc)==false until the closure returns).
 // Before this membrane, compute.Run's build closure handed the factory the
 // RAW RebindableArms facades directly — ungated, already "live" the instant

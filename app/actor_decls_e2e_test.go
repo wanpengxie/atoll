@@ -11,7 +11,7 @@ import (
 // control surface: create a claude-looper agent (declaration), introduce it to a
 // channel server-placed (which writes the composition row + Admits — embodiment is
 // the reconcile ring's async job now, not a synchronous spawn), restart it
-// (rebuild + Spawn), then soft-delete it (gone from the list + composition). Proves
+// (rebuild + SpawnIfAbsent), then soft-delete it (gone from the list + composition). Proves
 // the actor_decls table + two-layer/class composition + the control API end to end.
 func TestDeclsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 	env := setupTestApp(t)
