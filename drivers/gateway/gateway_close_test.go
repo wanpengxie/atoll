@@ -28,9 +28,9 @@ func TestLateStartFeedRefused(t *testing.T) {
 	if err := g.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	// beginFeed must refuse after Close.
-	if g.beginFeed() {
-		t.Fatal("beginFeed must refuse after Close (迟启泵)")
+	// tryRegisterPump (gateway half of beginFeed) must refuse after Close.
+	if g.tryRegisterPump() {
+		t.Fatal("tryRegisterPump must refuse after Close (迟启泵)")
 	}
 	// StartFeed on the closed gateway tears the session down (no pump left running).
 	s.StartFeed()
@@ -196,6 +196,78 @@ func TestConcurrentCloseGated(t *testing.T) {
 		t.Fatalf("Close must clean coverage, got %d entries", len(g.coverage))
 	}
 	g.pumps.Wait()
+}
+
+// TestSessionClosedThenStartFeedRefused (P1-3, 会话闸 session half): a session closed
+// DIRECTLY (s.Close(), not via Gateway.Close — the gateway itself stays open) must
+// refuse a late beginFeed. Before the fix, beginFeed only consulted the GATEWAY's
+// closed flag (g.mu) — a session that was already torn down by its own connector
+// (e.g. a failed receipt write calling s.Close()) would still pass that check on a
+// still-open gateway and register a pump for a dead session.
+func TestSessionClosedThenStartFeedRefused(t *testing.T) {
+	res := newResolver()
+	g := New(Config{Resolver: res, Clock: newClock().now})
+	s, err := g.Attach(context.Background(), "direct-close", nil)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	s.Close() // session closed directly; the gateway is untouched.
+	if g.closed {
+		t.Fatal("this test exercises the SESSION half of the gate — the gateway must stay open")
+	}
+	if s.beginFeed() {
+		t.Fatal("beginFeed must refuse once the SESSION itself is closed (统一会话闸 session half)")
+	}
+}
+
+// hangingResolver signals `entered` on its first Snapshot call, then blocks on
+// `release` FOREVER — it deliberately ignores ctx, modelling a badly-behaved app-side
+// resolver (or a stuck DB call) that a bounded ctx timeout cannot rescue.
+type hangingResolver struct {
+	entered chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (r *hangingResolver) Snapshot(ctx context.Context, principal string) ([]Route, []ChannelFailure, error) {
+	r.once.Do(func() { close(r.entered) })
+	<-r.release
+	return nil, nil, nil
+}
+
+// TestClosePumpJoinBounded (P1-3, §2.1 #11/#12 有界 join + LeakedPumps): a pump that
+// registers (tryRegisterPump succeeds) but whose goroutine never gets to run — because
+// StartFeed's SYNCHRONOUS first reconcile is stuck inside a resolver that ignores ctx —
+// must not hang Gateway.Close() forever. Close returns within the injected
+// PumpJoinTimeout and counts the stuck pump into LeakedPumps (账目诚实), rather than
+// blocking indefinitely on g.pumps.Wait() (the bug: the old code had no bound at all).
+func TestClosePumpJoinBounded(t *testing.T) {
+	hr := &hangingResolver{entered: make(chan struct{}), release: make(chan struct{})}
+	defer close(hr.release) // test hygiene only: let the permanently-stuck goroutine exit after the test.
+	g := New(Config{Resolver: hr, Clock: newClock().now, PumpJoinTimeout: 50 * time.Millisecond})
+	s, err := g.Attach(context.Background(), "leak", nil)
+	if err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	go s.StartFeed()
+	select {
+	case <-hr.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("StartFeed's synchronous first reconcile never reached the resolver")
+	}
+	// At this point tryRegisterPump has already Add(1)'d g.pumps (beginFeed runs BEFORE
+	// the blocking reconcile), but `go s.runFeed()` has not executed yet — its Done() can
+	// never fire until hr.release closes, which Close must not wait for.
+	closeDone := make(chan struct{})
+	go func() { _ = g.Close(); close(closeDone) }()
+	select {
+	case <-closeDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close did not return within the bounded pump-join budget (P1-3 leak accounting broken)")
+	}
+	if got := g.LeakedPumps(); got != 1 {
+		t.Fatalf("Close must count the stuck pump as leaked, got %d", got)
+	}
 }
 
 // TestResolverEnumerationConcurrentWithClose (DoD-7⑥ gateway half): the resolver

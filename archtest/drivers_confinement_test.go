@@ -114,6 +114,12 @@ var driversTestImporterAllowlist = map[string]bool{
 	// moving them into the drivers domain, so this is a named exception (not a blanket
 	// relaxation), same posture as the two live tests above.
 	"../app/e2e_test.go": true,
+	// 连接模型勘误期修复批 P1-4: same posture as e2e_test.go above — a real write-order
+	// regression test (creator's directory-commit poke ordering) needs the SAME real
+	// gateway wiring against the real app HTTP stack; it cannot move into drivers/*
+	// (drivers→app is forbidden) nor inline-double the wiring without losing the very
+	// thing under test (the real Admit/tx-commit/poke sequence).
+	"../app/channel_poke_test.go": true,
 }
 
 // TestDriversConsumerConfinement — fence B.

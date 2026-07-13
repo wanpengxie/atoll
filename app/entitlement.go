@@ -62,7 +62,16 @@ func (a *App) EntitlementSnapshot(ctx context.Context, principal string) ([]Enti
 	for rows.Next() {
 		var id string
 		if scanErr := rows.Scan(&id); scanErr != nil {
-			continue
+			// P2-10 (六轮终审): a row-scan failure gives no channel id to attribute a
+			// ChannelFailure to, so silently `continue`-ing here does not degrade that
+			// one channel to "查得坏消息" (failed, rides T_stale) — it makes it vanish
+			// from BOTH routes and failed, which the gateway reads as "confirmed no
+			// eligibility" and retires IMMEDIATELY (表①). A directory read this broken
+			// cannot be trusted to have enumerated the full channel set either, so this
+			// escalates to a whole-snapshot failure (rides the lease) rather than
+			// silently dropping one unidentified channel out of the result.
+			rows.Close()
+			return nil, nil, scanErr
 		}
 		chIDs = append(chIDs, id)
 	}

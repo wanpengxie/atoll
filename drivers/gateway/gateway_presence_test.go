@@ -6,6 +6,7 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"testing"
 
@@ -101,6 +102,70 @@ func TestCrossChannelPresenceIsolated(t *testing.T) {
 	}
 	if _, ok := g.coverage[covKey{principal: principal, channel: "c2"}]; !ok {
 		t.Fatal("c2 coverage must survive")
+	}
+}
+
+// TestT6RealRemoveCascadeIsolated (DoD-2/T6 消融钉锚, 六轮终审 P1-6): the canonical T6
+// anchor driven through a REAL Home.Remove (not a fake-resolver route drop standing in
+// for it) — Remove's own cascade (户籍级联, platform/home/remove.go) must have actually
+// torn c1's slot down (RemoveSubjectSlot: a later SubjectSlotFor lookup on the SAME id
+// misses), and c2's slot/presence account must be UNTOUCHED — proving the T6-era bug
+// ("一人两频道共享同一 per-identity 槽") cannot recur: a c1 removal's cascade has no
+// path to c2's slot because they were never the same registry entry to begin with.
+// Convergence is driven by the REAL membership-change poke (openHomeWired), no manual
+// g.presenceReconcile() call.
+func TestT6RealRemoveCascadeIsolated(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := New(Config{Resolver: res, Clock: clk.now})
+	const principal = "wren"
+	h1, id1 := openHomeWired(t, channel.ID("c1"), principal, g)
+	h2, id2 := openHomeWired(t, channel.ID("c2"), principal, g)
+	res.set(principal, []Route{
+		memberRoute("c1", h1, id1, clk.now()),
+		memberRoute("c2", h2, id2, clk.now()),
+	}, nil, nil)
+
+	s, _ := g.Attach(context.Background(), principal, nil)
+	defer s.Close()
+	if err := g.Start(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	s.StartFeed()
+
+	slot2, ok2 := h2.SubjectSlotFor(id2)
+	if !ok2 {
+		t.Fatal("c2 slot must exist after Admit")
+	}
+	obs2 := &slotObs{}
+	slot2.RegisterObserver("o2", obs2.fn)
+	g.kickPresence()
+	waitFor(t, func() bool {
+		lvl, _, _, set := slot2.Snapshot()
+		return set && lvl == subjectgate.LevelOnline
+	}, "c2 must reach online before the c1 Remove")
+	c2EdgesBefore := obs2.count()
+
+	// REAL Remove on c1's subject (the fake resolver's answer is updated too — in
+	// production the resolver IS the membership truth; here it stands in for it, but
+	// the actual cascade + poke below are real, not hand-driven).
+	res.set(principal, []Route{memberRoute("c2", h2, id2, clk.now())}, nil, nil)
+	if err := h1.Remove(context.Background(), id1); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+
+	// c1 槽级联销毁: RemoveSubjectSlot ran — a lookup on the SAME id now misses.
+	waitFor(t, func() bool {
+		_, ok := h1.SubjectSlotFor(id1)
+		return !ok
+	}, "Remove must cascade RemoveSubjectSlot on c1's slot")
+
+	// c2 分毫不动: no new edge, still online, coverage untouched.
+	if got := obs2.count(); got != c2EdgesBefore {
+		t.Fatalf("a c1 Remove must not touch c2's presence account: c2 edges %d→%d", c2EdgesBefore, got)
+	}
+	if lvl, _, _, set := slot2.Snapshot(); !set || lvl != subjectgate.LevelOnline {
+		t.Fatalf("c2 slot testimony must survive a c1 Remove: set=%v lvl=%v", set, lvl)
 	}
 }
 
@@ -217,9 +282,16 @@ func TestPresenceRebindNewSlot(t *testing.T) {
 		t.Fatalf("old slot must be online, got set=%v lvl=%v", set, lvl)
 	}
 
-	// Remove→秒 re-Admit: a NEW admit on the SAME channel/principal mints a new subject
-	// id → a NEW slot for the same covKey.
-	id2, err := h1.Admit(context.Background(), "human", "dave-2")
+	// Remove→秒 re-Admit (六轮终审 P1-5: the original test admitted a DIFFERENT principal
+	// "dave-2" — no Remove, not the same person — which cannot exercise 换值 (the key is
+	// principal×channel; a different principal is a DIFFERENT key, not a value change on
+	// the same key). The real geometry: THIS principal ("dave") is removed (身份不可复活:
+	// the old id1 never comes back) then immediately re-admitted — same principal, same
+	// channel, a FRESH minted id2 → a NEW slot for the SAME covKey.
+	if err := h1.Remove(context.Background(), id1); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	id2, err := h1.Admit(context.Background(), "human", principal)
 	if err != nil {
 		t.Fatalf("re-admit: %v", err)
 	}
@@ -271,14 +343,60 @@ func TestBirthHandshakeInterleave(t *testing.T) {
 		go func() { defer wg.Done(); g.presenceReconcile() }()
 		go func() { defer wg.Done(); slot.RegisterObserver("cell", obs.fn) }()
 		wg.Wait()
-		// After both, one more 圈 guarantees the online is (re)published idempotently;
-		// the observer must end asserting online, never a lost/stale edge.
-		g.presenceReconcile()
+		// NO extra corrective 圈 here (六轮终审 P1-5: the original test ran ONE MORE
+		// g.presenceReconcile() after the race, which would silently repair any edge the
+		// interleave actually lost — masking exactly the bug this test exists to catch).
+		// The出生握手原子化 guarantee (spec §3.2) is that RegisterObserver's FIRST callback,
+		// delivered under the slot lock, already reflects whatever value is current at
+		// the instant it registers — no matter how the two goroutines above interleaved —
+		// so the assertion must hold on the observer's state immediately after wg.Wait(),
+		// with no help from a follow-up round.
 		es := obs.snapshot()
 		if len(es) == 0 || !es[len(es)-1].Live || es[len(es)-1].Level != subjectgate.LevelOnline {
-			t.Fatalf("iter %d: birth handshake lost the online edge, got %+v", iter, es)
+			t.Fatalf("iter %d: birth handshake lost the online edge (no corrective 圈 masking it), got %+v", iter, es)
 		}
 		slot.RemoveObserver("cell")
+	}
+}
+
+// TestPresencePerChannelFailurePreservesCoverage (P2-9, 六轮终审): a per-channel
+// ChannelFailure on a round where the WHOLE snapshot otherwise succeeds must not force
+// an immediate false-offline — the same principle N2 already applies to a whole-
+// snapshot failure, extended per-channel. Before the fix, presenceReconcile discarded
+// the `failed` return value entirely, so a single transient per-channel query error
+// looked identical to "confirmed gone" and published offline immediately.
+func TestPresencePerChannelFailurePreservesCoverage(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	g := New(Config{Resolver: res, Clock: clk.now})
+	const principal = "yara"
+	h, id := openHome(t, channel.ID("c"), principal)
+	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	s, _ := g.Attach(context.Background(), principal, nil)
+	defer s.Close()
+
+	g.presenceReconcile()
+	slot, _ := h.SubjectSlotFor(id)
+	if lvl, _, _, set := slot.Snapshot(); !set || lvl != subjectgate.LevelOnline {
+		t.Fatalf("channel must be online after the first 圈, got set=%v lvl=%v", set, lvl)
+	}
+	obs := &slotObs{}
+	slot.RegisterObserver("o", obs.fn)
+	edgesBefore := obs.count()
+
+	// A per-channel failure THIS round (whole snapshot succeeds — routes=nil, err=nil —
+	// but this channel is reported as a query failure, not confirmed absent).
+	res.set(principal, nil, []ChannelFailure{{Channel: "c", Err: errors.New("transient")}}, nil)
+	g.presenceReconcile()
+
+	if got := obs.count(); got != edgesBefore {
+		t.Fatalf("a per-channel failure must NOT force an offline edge: edges %d→%d", edgesBefore, got)
+	}
+	if lvl, _, _, set := slot.Snapshot(); !set || lvl != subjectgate.LevelOnline {
+		t.Fatalf("a per-channel failure must preserve existing online coverage, got set=%v lvl=%v", set, lvl)
+	}
+	if _, ok := g.coverage[covKey{principal: principal, channel: "c"}]; !ok {
+		t.Fatal("a per-channel failure must not drop the coverage entry")
 	}
 }
 

@@ -118,11 +118,14 @@ func TestRevocationInFlightThenRefused(t *testing.T) {
 	res := newResolver()
 	g := New(Config{Resolver: res, Clock: clk.now})
 	const principal = "leo"
-	h, id := openHome(t, channel.ID("c"), principal)
+	// openHomeWired (六轮终审 P1-5, barrier authenticity): a REAL membership-change poke
+	// wire, so this test's revocation drives the actual Remove→poke edge — not a
+	// hand-called s.reconcile() standing in for it.
+	h, id := openHomeWired(t, channel.ID("c"), principal, g)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
 	s, _ := g.Attach(context.Background(), principal, nil)
 	defer s.Close()
-	s.reconcile()
+	s.StartFeed() // real running pump (StartFeed's synchronous first reconcile resolves "c")
 	slot, _ := h.SubjectSlotFor(id)
 
 	got := make(chan struct{}, 1)
@@ -141,9 +144,17 @@ func TestRevocationInFlightThenRefused(t *testing.T) {
 		t.Fatal("delivery never reached the interpreter")
 	}
 
-	// The revocation lands NOW (eligibility drops) and the pump re-resolves.
+	// The revocation lands NOW: the resolver drops the route AND a REAL Home.Remove
+	// fires the real membership-change poke (六轮终审 P1-5) — no manual s.reconcile()
+	// call. The running pump must self-discover this asynchronously off the poke.
 	res.set(principal, nil, nil, nil)
-	s.reconcile()
+	if err := h.Remove(context.Background(), id); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	waitFor(t, func() bool {
+		_, ok := eligRoutes(s)["c"]
+		return !ok
+	}, "real Remove→poke must retire the channel without a hand-called reconcile")
 
 	// Release the in-flight delivery → it STILL commits (best-effort, 已过检可落账).
 	close(release)

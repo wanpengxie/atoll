@@ -31,6 +31,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/subjectgate"
@@ -44,17 +45,27 @@ import (
 // unavailable-class refusal, never a session that could touch a closing Home.
 var ErrGatewayClosed = errors.New("gateway: closed")
 
-// Reconcile clocks (spec §3.2). Injectable via Config for deterministic tests.
+// Reconcile clocks (spec §3.2). Default values; each is INJECTABLE per-Gateway via
+// Config (六轮 P1-5: a fast deterministic test needs to shrink T_sweep/T_presence
+// without waiting the real 30s/5s backstop — a package const could never be shortened
+// per-test-instance).
 const (
-	// tStale is the per-channel eligibility lease: after the last SUCCESSFUL check,
-	// a query failure is tolerated this long before the channel is paused.
-	tStale = 30 * time.Second
-	// tSweep is the entitlement reconcile's periodic backstop (poke 为主, sweep 兜底).
-	tSweep = 30 * time.Second
-	// tRead bounds every resolver / ReadAfterSeq call (no unbounded lock waits).
-	tRead = 5 * time.Second
-	// tPresence is the presence reconcile loop's periodic backstop.
-	tPresence = 5 * time.Second
+	// defaultStale is the per-channel eligibility lease: after the last SUCCESSFUL
+	// check, a query failure is tolerated this long before the channel is paused.
+	defaultStale = 30 * time.Second
+	// defaultSweep is the entitlement reconcile's periodic backstop (poke 为主, sweep
+	// 兜底).
+	defaultSweep = 30 * time.Second
+	// defaultRead bounds every resolver / ReadAfterSeq call (no unbounded lock waits).
+	defaultRead = 5 * time.Second
+	// defaultPresence is the presence reconcile loop's periodic backstop.
+	defaultPresence = 5 * time.Second
+	// defaultPumpJoinTimeout bounds Gateway.Close's wait for every read pump to
+	// self-report (§2.1 #11/#12, 五轮 P1-3 平移: the old ArmSealJoinTimeout's有界 join
+	// budget, migrated to the unified session pump). A pump that misses this deadline
+	// (e.g. a resolver that ignores its ctx and blocks forever) is counted as LEAKED —
+	// Close logs it and proceeds rather than hanging indefinitely.
+	defaultPumpJoinTimeout = 10 * time.Second
 )
 
 // Routing is the app-domain routing-resolution面 the assembly root injects (design
@@ -80,6 +91,15 @@ type Config struct {
 	// Clock is the injectable wall clock (lease anchoring); nil → time.Now.
 	Clock  func() time.Time
 	Logger *slog.Logger
+
+	// The four reconcile clocks (spec §3.2), each 0 → its documented default (see the
+	// default* consts). A test shrinks these to observe the sweep/presence backstops
+	// converge without a real 30s/5s wait (六轮 P1-5).
+	StaleLease      time.Duration // per-channel eligibility lease (defaultStale)
+	SweepInterval   time.Duration // entitlement reconcile periodic backstop (defaultSweep)
+	ReadTimeout     time.Duration // resolver / ReadAfterSeq bound (defaultRead)
+	PresenceTick    time.Duration // presence reconcile periodic backstop (defaultPresence)
+	PumpJoinTimeout time.Duration // Close's bounded pump-join budget (defaultPumpJoinTimeout)
 }
 
 // covKey identifies one presence coverage cell: this principal, this channel.
@@ -106,6 +126,13 @@ type Gateway struct {
 	clock    func() time.Time
 	logger   *slog.Logger
 
+	// Reconcile clocks (spec §3.2), resolved from Config with defaults in New.
+	tStale          time.Duration
+	tSweep          time.Duration
+	tRead           time.Duration
+	tPresence       time.Duration
+	pumpJoinTimeout time.Duration
+
 	mu      sync.Mutex
 	closed  bool // set by Close; a later Attach/beginFeed is refused (关站序 straddle)
 	entries map[string]*userEntry
@@ -113,8 +140,14 @@ type Gateway struct {
 	// pumps joins every session read pump at Close (泵联结组合一, §2.1 #12): its
 	// Add is taken in beginFeed under the SAME closed re-check as Close, so Close
 	// either observes the pump (and joins it) or has already set closed (late pump
-	// refused).
+	// refused). Close's join on this WaitGroup is BOUNDED by pumpJoinTimeout (§2.1
+	// #11/#12, 五轮 P1-3): a pump that never reaches its Done (e.g. registered via
+	// beginFeed but its goroutine never got to launch because the synchronous first
+	// reconcile is stuck in a resolver that ignores ctx) must not hang Close forever —
+	// it is counted into leakedPumps and logged instead.
 	pumps sync.WaitGroup
+	// leakedPumps counts pump-join timeouts at Close (账目诚实, §2.1 #11).
+	leakedPumps atomic.Int64
 
 	// delivering is the递交许可 counter half of the统一会话闸 (spec §3.2, 四轮 P0-3):
 	// a business-frame delivery Adds under the session's closed gate and Dones when
@@ -168,20 +201,35 @@ func New(cfg Config) *Gateway {
 		epoch = defaultEpoch()
 	}
 	pctx, pcancel := context.WithCancel(context.Background())
+	durOr := func(d, def time.Duration) time.Duration {
+		if d <= 0 {
+			return def
+		}
+		return d
+	}
 	g := &Gateway{
-		epoch:          epoch,
-		routing:        cfg.Routing,
-		resolver:       cfg.Resolver,
-		clock:          clock,
-		logger:         logger,
-		entries:        map[string]*userEntry{},
-		presenceCtx:    pctx,
-		presenceCancel: pcancel,
-		presencePoke:   make(chan struct{}, 1),
-		coverage:       map[covKey]*covEntry{},
+		epoch:           epoch,
+		routing:         cfg.Routing,
+		resolver:        cfg.Resolver,
+		clock:           clock,
+		logger:          logger,
+		tStale:          durOr(cfg.StaleLease, defaultStale),
+		tSweep:          durOr(cfg.SweepInterval, defaultSweep),
+		tRead:           durOr(cfg.ReadTimeout, defaultRead),
+		tPresence:       durOr(cfg.PresenceTick, defaultPresence),
+		pumpJoinTimeout: durOr(cfg.PumpJoinTimeout, defaultPumpJoinTimeout),
+		entries:         map[string]*userEntry{},
+		presenceCtx:     pctx,
+		presenceCancel:  pcancel,
+		presencePoke:    make(chan struct{}, 1),
+		coverage:        map[covKey]*covEntry{},
 	}
 	return g
 }
+
+// LeakedPumps reports how many read pumps Close gave up joining within
+// pumpJoinTimeout (账目诚实, §2.1 #11).
+func (g *Gateway) LeakedPumps() int64 { return g.leakedPumps.Load() }
 
 // Start brings the gateway up: it launches the presence reconcile loop (once a
 // resolver is present). Idempotent-safe when called once by the assembly root.
@@ -262,12 +310,14 @@ func (g *Gateway) removeDevice(principal string, s *Session) {
 	}
 }
 
-// beginFeed admits the read pump under the closed re-check (泵登记 half of the统一
-// 会话闸): the pump's join-track (pumps.Add) is taken HERE, in the SAME critical
-// section that reads closed, so Close either observes the pump (and joins it) or has
-// already set closed (and the late pump is refused). Returns false → tear the
-// session down (迟启泵 barrier).
-func (g *Gateway) beginFeed() bool {
+// tryRegisterPump is the GATEWAY half of泵登记 (统一会话闸, 五轮 P1-3): under g.mu it
+// refuses after the全站闩 (Close already set g.closed) and otherwise joins the pump
+// into g.pumps. It does NOT by itself decide "is THIS session closed" — that is
+// s.beginFeed's job, gated under s.mu, the session's own half of the same统一会话闸
+// (spec §3.2: "closed、泵登记、递交许可 三者同一把锁" means both halves must be
+// consulted, not just the gateway's — a session that called s.Close() directly, with
+// the gateway still open, must still refuse a late StartFeed).
+func (g *Gateway) tryRegisterPump() bool {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	if g.closed {
@@ -308,15 +358,37 @@ func (g *Gateway) Close() error {
 		}
 		g.coverage = map[covKey]*covEntry{}
 
-		// 关全部 Session (cancel session ctx) → join 读泵 → 等已获准递交归零.
+		// 关全部 Session (cancel session ctx) → join 读泵 (有界, 五轮 P1-3) → 等已获准递交归零.
 		for _, s := range sessions {
 			s.Close()
 		}
-		g.pumps.Wait()
+		g.joinPumpsBounded()
 		g.delivering.Wait()
 		g.logger.Info("platform.gateway.closed", "duration", g.clock().Sub(started))
 	})
 	return nil
+}
+
+// joinPumpsBounded waits g.pumps to zero, bounded by pumpJoinTimeout (§2.1 #11/#12,
+// 五轮 P1-3 平移 of the old ArmSealJoinTimeout budget to the unified会话闸's single pump
+// WaitGroup). Every session was already Close()d by the caller, which cancels its ctx
+// and so unblocks any pump loop that is actually running — the only way this join can
+// miss its deadline is a pump that was REGISTERED (tryRegisterPump's Add) but whose
+// goroutine never got to run (e.g. parked in StartFeed's synchronous first reconcile,
+// itself stuck in a resolver call that ignores ctx). That pump is leaked: Close counts
+// it, logs it, and proceeds rather than hanging forever (账目诚实, never a silent hang).
+func (g *Gateway) joinPumpsBounded() {
+	done := make(chan struct{})
+	go func() {
+		g.pumps.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(g.pumpJoinTimeout):
+		g.leakedPumps.Add(1)
+		g.logger.Error("platform.gateway.pump_join_timeout", "leaked", g.leakedPumps.Load())
+	}
 }
 
 // presenceLoop is the在场对账圈 (spec §3.2 收敛对象乙): one goroutine that每圈 from
@@ -326,7 +398,7 @@ func (g *Gateway) Close() error {
 // device/资格 poke (毫秒级) + T_presence周期兜底.
 func (g *Gateway) presenceLoop() {
 	defer g.presenceWG.Done()
-	ticker := time.NewTicker(tPresence)
+	ticker := time.NewTicker(g.tPresence)
 	defer ticker.Stop()
 	for {
 		select {
@@ -364,8 +436,8 @@ func (g *Gateway) presenceReconcile() {
 			return
 		default:
 		}
-		rctx, cancel := context.WithTimeout(g.presenceCtx, tRead)
-		routes, _, err := g.resolver.Snapshot(rctx, p)
+		rctx, cancel := context.WithTimeout(g.presenceCtx, g.tRead)
+		routes, failed, err := g.resolver.Snapshot(rctx, p)
 		cancel()
 		if err != nil {
 			// whole-snapshot failure → preserve this principal's current coverage
@@ -387,6 +459,21 @@ func (g *Gateway) presenceReconcile() {
 				continue // embodiment lag — no slot yet, next圈
 			}
 			desired[covKey{principal: p, channel: r.Channel}] = slot
+		}
+		// per-channel failures (P2-9, 六轮终审): a channel reported as a per-channel
+		// ChannelFailure this round (whole-snapshot SUCCEEDED, only this one channel's
+		// query failed) must NOT be treated as "gone" — that would force an immediate
+		// false-offline on a transient blip, the exact thing N2's whole-snapshot
+		// preservation already guards against, just not extended to the per-channel
+		// case. Preserve this principal's EXISTING coverage for any such channel.
+		for _, cf := range failed {
+			k := covKey{principal: p, channel: cf.Channel}
+			if _, already := desired[k]; already {
+				continue
+			}
+			if ce, ok := g.coverage[k]; ok {
+				desired[k] = ce.slot
+			}
 		}
 	}
 

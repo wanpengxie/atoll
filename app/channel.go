@@ -166,6 +166,18 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	}
 	_ = home.Restart(c.Request.Context(), boostID) // desired landed after Admit's poke.
 
+	// 目录行提交后补一次 poke (连接模型勘误期 P1-4, 六轮终审): the two Admits above
+	// (creator + boost) each fired a membership-change poke SYNCHRONOUSLY, inside
+	// home.Admit, BEFORE this transaction committed — at that instant the resolver
+	// (EntitlementSnapshot enumerates the `channels` directory table) could not
+	// possibly see this channel yet, so a session poked at that moment re-resolves
+	// into the SAME stale answer it already had. Poke again now that the directory
+	// row is actually visible, so the creator's live session (if any) subscribes
+	// within ≤下一泵轮 instead of waiting the T_sweep 30s backstop.
+	if a.membershipPoke != nil {
+		a.membershipPoke(userID)
+	}
+
 	c.JSON(http.StatusCreated, gin.H{
 		"id": chID, "workspace_id": wsID, "name": req.Name,
 		"type": req.Type, "created_at": now, "default_agent": string(boostID),

@@ -89,21 +89,49 @@ func TestMultiChannelOnePipe(t *testing.T) {
 		t.Fatalf("c2 event %s never appeared on the feed of the shared pipe", id2)
 	}
 
-	// ---- 撤销 c1 → c1 停流 c2 照常 ------------------------------------------
-	// Delete c1: the principal loses ALL eligibility to it (route disappears), so the
-	// read pump退订s c1 and any c1 business frame is refused — while c2, on the SAME
-	// pipe, stays fully live (a single-channel loss never tears the connection).
-	api.must("DELETE", "/api/channels/"+c1, nil, http.StatusOK)
+	// ---- 撤销 c1 (scoped membership removal) → c1 提交停 c2 照常 -------------------
+	// Remove ONLY the creator's c1 MEMBERSHIP (real Home.Remove cascade via the
+	// channel-internal removal surface, app/channel.go handleRemoveActor) — the
+	// channel itself is untouched (still has its boost agent, still resolvable). This
+	// is the precise scoped-revocation the terminal review asked for (not "delete the
+	// whole channel" standing in for a membership change).
+	//
+	// The resulting entitlement code is EXACTLY forbidden, no fallback codes accepted:
+	// app/entitlement.go demotes a former member who is still a WORKSPACE member (as
+	// this creator is — both c1 and c2 live in the same workspace) to an OBSERVER
+	// route, never a confirmed-absent one, so the gate's own表① mapping is unambiguous
+	// (observer → forbidden on any business frame, never unavailable/closed).
+	//
+	// A genuinely EMPTY feed on c1 is NOT the correct assertion after a scoped
+	// membership removal: workspace membership carries observer/tail visibility into
+	// every channel of that workspace by design (app/entitlement.go) — losing channel
+	// MEMBERSHIP is not losing the WORKSPACE relationship that grants read access. The
+	// zero-feed proof (below) instead exercises the channel's full deletion, which
+	// removes the directory row entirely and so removes even the observer route.
+	api.must("DELETE", "/api/channels/"+c1+"/actors/"+human1, nil, http.StatusOK)
+	pollUntil(t, "c1 submit is forbidden after scoped membership removal", 30*time.Second, func() bool {
+		code, errored := mcTrySubmit(t, ws, c1, human1, "one-dead-scoped")
+		return errored && code == "forbidden"
+	})
 
-	// c1 停流: a submit naming c1 now errors (forbidden / closed / unavailable — the
-	// channel is gone). Poll: deletion propagation to the resolver is not instantaneous.
-	pollUntil(t, "c1 submit is refused after revocation", 30*time.Second, func() bool {
-		code, errored := mcTrySubmit(t, ws, c1, human1, "one-dead")
-		return errored && (code == "forbidden" || code == "closed" || code == "unavailable")
+	// c2 照常 mid-way: the scoped c1 removal must not touch c2's stream.
+	id2b := mcSubmitEvent(t, ws, c2, human2, "two-b")
+	if _, ok := mcAwaitFeed(t, ws, c2, id2b, 15*time.Second); !ok {
+		t.Fatalf("c2 stream must keep flowing after c1's scoped membership removal")
+	}
+
+	// ---- 撤销 c1 (full deletion) → c1 零新 feed，c2 仍照常 --------------------------
+	// Delete c1 entirely: the directory row disappears, so the resolver's per-channel
+	// enumeration no longer returns c1 at ALL (not even as an observer) — genuine
+	// confirmed-absence, the only path that actually yields a真实 empty-feed guarantee.
+	api.must("DELETE", "/api/channels/"+c1, nil, http.StatusOK)
+	pollUntil(t, "c1 submit is forbidden after full channel deletion", 30*time.Second, func() bool {
+		code, errored := mcTrySubmit(t, ws, c1, human1, "one-dead-deleted")
+		return errored && code == "forbidden"
 	})
 
 	// c2 照常: a fresh c2 event still round-trips on the same pipe post-revocation.
-	id3 := mcSubmitEvent(t, ws, c2, human2, "two-b")
+	id3 := mcSubmitEvent(t, ws, c2, human2, "two-c")
 	if _, ok := mcAwaitFeed(t, ws, c2, id3, 15*time.Second); !ok {
 		t.Fatalf("c2 stream must keep flowing after c1 revocation (连接即人: pipes independent)")
 	}

@@ -61,7 +61,14 @@ func TestSoak(t *testing.T) {
 	if logDir == "" {
 		logDir = filepath.Join("/tmp", "atoll-soak")
 	}
-	// Durable log dir (NOT t.TempDir — the logs must survive for post-run analysis).
+	// Per-run subdirectory (P1-8, 六轮终审): startProc opens each log file O_APPEND, so
+	// a fixed logDir reused across invocations would read a SECOND run's verifier
+	// straight into the FIRST run's still-there lines — corrupting both the identity
+	// 守恒 set (added/removed) and the count-based assertions (refused/paused/
+	// control_decode). A nanosecond-timestamped run directory under the (possibly
+	// user-chosen) base guarantees every invocation gets a disjoint, clean log set,
+	// while still landing under the durable base for post-run inspection.
+	logDir = filepath.Join(logDir, fmt.Sprintf("run-%s", time.Now().Format("20060102-150405.000000000")))
 	if err := os.MkdirAll(logDir, 0o755); err != nil {
 		t.Fatalf("mkdir logdir: %v", err)
 	}
@@ -128,6 +135,13 @@ func TestSoak(t *testing.T) {
 	api.mustRetry5xx("POST", "/api/channels/"+chID+"/actors",
 		map[string]any{"decl_id": asstDeclID, "placement": "daemon", "desired_host": daemonID, "make_default": true},
 		60*time.Second, http.StatusCreated, http.StatusOK, http.StatusAccepted)
+
+	// Baseline (P1-8, N5 六轮终审): captured BEFORE any workload goroutine starts, so
+	// the creator + boost + echo-tool + scripted-assistant bootstrap membership lands
+	// in baseline (not counted as "added by the soak loop"). The verifier's full-set
+	// equality is final == (baseline ∪ admitted) − removed — a set that can only be
+	// checked with this snapshot in hand.
+	baselineActors := actorIDs(t, api, chID)
 
 	daemonGen := 0
 	startDaemon := func() *proc {
@@ -265,7 +279,7 @@ func TestSoak(t *testing.T) {
 	t.Logf("logs for analysis: %s (grep by level×msg to find storms / blind spots / asymmetries)", logDir)
 
 	// DoD-12: machine log verifier — the four assertions replace human grep.
-	verifySoakLogs(t, logDir, killTimes, finalActors, badDecls.Load())
+	verifySoakLogs(t, logDir, killTimes, baselineActors, finalActors, badDecls.Load())
 }
 
 // soakLogLine is the subset of a slog JSON line the verifier reads (server + daemon
@@ -281,13 +295,15 @@ type soakLogLine struct {
 // verifySoakLogs parses every *.log in logDir and lands the four DoD-12 machine
 // assertions — no human grep. It is the soak's own acceptance gate (the observation
 // run stays gated behind ATOLL_SOAK; this replaces "eyeball the logs" with断言).
-func verifySoakLogs(t *testing.T, logDir string, killTimes []time.Time, finalActors []string, injectedBad int64) {
+func verifySoakLogs(t *testing.T, logDir string, killTimes []time.Time, baselineActors, finalActors []string, injectedBad int64) {
 	t.Helper()
 	files, _ := filepath.Glob(filepath.Join(logDir, "*.log"))
 	var (
 		refused       int
 		pausedLines   int
 		controlDecode int
+		fileReadErrs  int
+		badJSONLines  int
 	)
 	addedIDs := map[string]bool{}
 	removedIDs := map[string]bool{}
@@ -295,6 +311,10 @@ func verifySoakLogs(t *testing.T, logDir string, killTimes []time.Time, finalAct
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil {
+			// N5 (六轮终审): a file this verifier could not read is evidence it never
+			// saw, silently degrading the identity 守恒 check into a false pass. Count
+			// it instead of skipping quietly — see the fileReadErrs assertion below.
+			fileReadErrs++
 			continue
 		}
 		for _, ln := range strings.Split(string(b), "\n") {
@@ -304,6 +324,7 @@ func verifySoakLogs(t *testing.T, logDir string, killTimes []time.Time, finalAct
 			}
 			var e soakLogLine
 			if json.Unmarshal([]byte(ln), &e) != nil {
+				badJSONLines++
 				continue
 			}
 			switch e.Msg {
@@ -368,30 +389,53 @@ func verifySoakLogs(t *testing.T, logDir string, killTimes []time.Time, finalAct
 		}
 	}
 
-	// ① membership 守恒 by identity (真变迁, robust to the admitted/removed idempotent
-	// re-log — daemon reconnect re-Admits without a real transition, so a raw line
-	// COUNT over-counts; a set over actor ids does not): every removed member is absent
-	// from the final /actors set, and every admitted-but-never-removed member is present.
+	// ① membership 守恒 by IDENTITY-SET EQUALITY (N5, 六轮终审: the original assertion
+	// was two one-directional implications — "removed ⇒ absent from final" and
+	// "admitted-never-removed ⇒ present in final" — which never checks that final
+	// contains ONLY what baseline∪admitted−removed predicts, so an unexplained EXTRA
+	// member in final (a leak neither logged as admitted nor accounted by baseline)
+	// passed silently. The full-set equality:
+	//     final == (baseline ∪ addedIDs) − removedIDs
+	// is checked in BOTH directions below. addedIDs/removedIDs are the真变迁 identity
+	// sets (robust to idempotent re-log — a daemon reconnect re-Admits without a real
+	// transition, so a raw line COUNT over-counts; a set over actor ids does not).
+	baseline := map[string]bool{}
+	for _, id := range baselineActors {
+		baseline[id] = true
+	}
 	final := map[string]bool{}
 	for _, id := range finalActors {
 		final[id] = true
 	}
-	for id := range removedIDs {
-		if final[id] {
-			t.Errorf("DoD-12①: actor %s was removed yet is still in the final /actors set (membership leak)", id)
-		}
+	expected := map[string]bool{}
+	for id := range baseline {
+		expected[id] = true
 	}
 	for id := range addedIDs {
-		if removedIDs[id] {
-			continue
-		}
+		expected[id] = true
+	}
+	for id := range removedIDs {
+		delete(expected, id)
+	}
+	for id := range expected {
 		if !final[id] {
-			t.Errorf("DoD-12①: actor %s was admitted, never removed, yet is absent from the final /actors set (lost member)", id)
+			t.Errorf("DoD-12①: actor %s expected in final (baseline∪admitted−removed) but absent (lost member)", id)
+		}
+	}
+	for id := range final {
+		if !expected[id] {
+			t.Errorf("DoD-12①: actor %s present in final but not accounted for by baseline∪admitted−removed (unexplained extra member — leak or untracked mutation)", id)
 		}
 	}
 
-	t.Logf("soak log verify: refused=%d paused=%d control_decode=%d added=%d removed=%d kills=%d peer_closed=%d final=%d",
-		refused, pausedLines, controlDecode, len(addedIDs), len(removedIDs), len(killTimes), len(peerClosed), len(finalActors))
+	// N5 (六轮终审): a broken log file is a hole in the evidence this verifier's other
+	// three assertions rest on — escalate to a real failure rather than a silent skip.
+	if fileReadErrs > 0 {
+		t.Errorf("DoD-12: %d soak log file(s) failed to read — verification is INCOMPLETE, not passing", fileReadErrs)
+	}
+
+	t.Logf("soak log verify: refused=%d paused=%d control_decode=%d baseline=%d added=%d removed=%d kills=%d peer_closed=%d final=%d fileReadErrs=%d badJSONLines=%d",
+		refused, pausedLines, controlDecode, len(baseline), len(addedIDs), len(removedIDs), len(killTimes), len(peerClosed), len(finalActors), fileReadErrs, badJSONLines)
 }
 
 // parseSoakLogTime parses a slog JSON "time" field (RFC3339 with optional nanos).

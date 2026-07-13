@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -157,6 +158,54 @@ func TestPartialFailureLeaseVsAbsent(t *testing.T) {
 	}
 	if _, ok := s.subs["c1"]; !ok {
 		t.Fatal("a paused (failed) channel keeps its subscription for a later resume")
+	}
+}
+
+// TestWholeSnapshotFailureFirstReconcileUnavailable (P1-2, 六轮终审): the VERY FIRST
+// reconcile a session ever does hits a whole-snapshot resolver failure (no prior
+// subscription exists for ANY channel — s.subs is empty). Before the fix, an unknown
+// channel_id fell through routes/paused into "confirmed absent" → forbidden; but a
+// whole-snapshot failure confirms NOTHING, so the correct verdict is unavailable
+// (表①: 查询无法完成 → unavailable, not a confirmed-absence forbidden).
+func TestWholeSnapshotFailureFirstReconcileUnavailable(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	res.set("uma", nil, nil, errors.New("directory query failed"))
+	g := New(Config{Resolver: res, Clock: clk.now})
+	s, _ := g.Attach(context.Background(), "uma", nil)
+	defer s.Close()
+
+	s.reconcile() // first-ever reconcile; whole-snapshot failure, s.subs is empty.
+	if code := codeOf(t, s.Upstream(context.Background(), mkBusiness(t, subjectgate.FrameSubmit, "never-seen"))); code != subjectgate.CodeUnavailable {
+		t.Fatalf("a never-subscribed channel after a whole-snapshot failure must be unavailable, not forbidden; got %q", code)
+	}
+}
+
+// TestNewChannelFailureUnavailableNotForbidden (P1-2, 六轮终审): a channel appears in
+// the resolver's per-channel ChannelFailure list on a round where it has NO prior
+// subscription (a first-seen / newly failing channel) — before the fix, publishElig
+// only recorded `paused` for channels that already had a subscription, so this channel
+// fell through to forbidden. It must map to unavailable ("查得坏消息" ≠ "查不到").
+func TestNewChannelFailureUnavailableNotForbidden(t *testing.T) {
+	clk := newClock()
+	res := newResolver()
+	const principal = "vic"
+	res.set(principal, nil, []ChannelFailure{{Channel: "new-ch", Err: errors.New("query failed")}}, nil)
+	g := New(Config{Resolver: res, Clock: clk.now})
+	s, _ := g.Attach(context.Background(), principal, nil)
+	defer s.Close()
+
+	s.reconcile()
+	if _, ok := s.subs["new-ch"]; ok {
+		t.Fatal("a per-channel failure with no prior subscription must not fabricate one")
+	}
+	if code := codeOf(t, s.Upstream(context.Background(), mkBusiness(t, subjectgate.FrameSubmit, "new-ch"))); code != subjectgate.CodeUnavailable {
+		t.Fatalf("a new channel reported as a per-channel failure must be unavailable, not forbidden; got %q", code)
+	}
+	// A channel that is neither in routes nor in failed remains a confirmed-absence
+	// forbidden (control: the fix must not blanket every unknown channel_id).
+	if code := codeOf(t, s.Upstream(context.Background(), mkBusiness(t, subjectgate.FrameSubmit, "truly-unknown"))); code != subjectgate.CodeForbidden {
+		t.Fatalf("a channel absent from BOTH routes and failed must stay forbidden; got %q", code)
 	}
 }
 

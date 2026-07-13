@@ -14,8 +14,9 @@ const (
 	LaneCapacity = 64
 	// LaneWriteTimeoutMs is how long one downstream write may block a drainer
 	// before the lane is torn down (照 ws.go wsWriteWait 10s). Law条 F: this is
-	// strictly < the arm seal join budget (ArmSealJoinTimeout) so a slow lane
-	// dies BEFORE it can drag out a detach seal.
+	// strictly < the pump-join budget (Config.PumpJoinTimeout / defaultPumpJoinTimeout,
+	// the channelArm-era ArmSealJoinTimeout's successor, §2.1 #11/#12) so a slow lane
+	// dies BEFORE it can drag out Gateway.Close's bounded pump join.
 	LaneWriteTimeoutMs = 10_000
 )
 

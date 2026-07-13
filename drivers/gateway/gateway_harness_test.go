@@ -137,6 +137,31 @@ func openHome(t *testing.T, chID channel.ID, principal string) (*home.Home, acto
 	return h, id
 }
 
+// openHomeWired is openHome plus a REAL membership-change poke wire (spec §3.2 表②):
+// Home.Admit/Home.Remove fire g.Poke(principal) exactly as the assembly root bridges
+// PokeHub → Gateway.Poke in production (app.go/cmd/server main.go). Tests that must
+// exercise a genuine Remove→poke edge (not a hand-called s.reconcile()/g.Poke) use this
+// instead of openHome (六轮终审 P1-5: barrier authenticity).
+func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*home.Home, actor.ActorID) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), string(chID)+".sqlite")
+	h, err := home.Open(home.Config{
+		ChannelID:          chID,
+		DBPath:             dbPath,
+		ReconcileInterval:  time.Hour,
+		OnMembershipChange: g.Poke,
+	})
+	if err != nil {
+		t.Fatalf("home.Open(%s): %v", chID, err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	id, err := h.Admit(context.Background(), actor.KindHuman, principal)
+	if err != nil {
+		t.Fatalf("Admit(%s): %v", principal, err)
+	}
+	return h, id
+}
+
 // memberRoute builds a member Route to a Home's admitted subject (checked at now).
 func memberRoute(chID channel.ID, h *home.Home, subj actor.ActorID, now time.Time) Route {
 	return Route{Channel: chID, Home: h, Access: AccessMember, SubjectID: subj, CheckedAt: now}

@@ -32,14 +32,25 @@ type subscription struct {
 	paused bool
 }
 
-// eligState is the session's资格账 snapshot (spec §3.2 v0.8): the pump SINGLE-writes
-// it (atomic pointer), Upstream reads it — so a business frame's channel_id maps to
-// its Route (member? which subject? which Home?) without touching the pump-owned
-// subscription map. paused = channels whose lease expired (business frame →
-// unavailable, retryable). checkedAt is the last reconcile time.
+// eligState is the session's资格账 snapshot (spec §3.2 v0.8, 六轮 P1-2 修形): the pump
+// SINGLE-writes it (atomic pointer), Upstream reads it — so a business frame's
+// channel_id maps to its Route (member? which subject? which Home?) without touching
+// the pump-owned subscription map. paused = channels with an EXISTING subscription
+// whose lease expired (business frame → unavailable, retryable). failed = channels the
+// most recent resolver call explicitly reported as a per-channel failure THIS ROUND,
+// whether or not a subscription already existed for them (a first-seen/new channel that
+// fails resolution has no subscription yet, so it can never land in paused — without
+// this set it would silently fall through to "confirmed absent" → forbidden, which is
+// the wrong verdict for "查得坏消息"). globalErr = the last resolver call was a
+// whole-snapshot failure (no routes/failed are trustworthy at all) — any channel_id not
+// already a known live route maps to unavailable rather than forbidden, because a
+// forbidden verdict asserts confirmed absence and we cannot currently confirm anything.
+// checkedAt is the last reconcile time.
 type eligState struct {
 	routes    map[channel.ID]Route
 	paused    map[channel.ID]struct{}
+	failed    map[channel.ID]struct{}
+	globalErr bool
 	checkedAt time.Time
 }
 
@@ -92,7 +103,7 @@ func (g *Gateway) Attach(ctx context.Context, principal string, since map[channe
 		subs:      map[channel.ID]*subscription{},
 	}
 	s.ctx, s.cancel = context.WithCancel(context.Background())
-	s.elig.Store(&eligState{routes: map[channel.ID]Route{}, paused: map[channel.ID]struct{}{}})
+	s.elig.Store(&eligState{routes: map[channel.ID]Route{}, paused: map[channel.ID]struct{}{}, failed: map[channel.ID]struct{}{}})
 	if err := g.addDevice(principal, s); err != nil {
 		s.cancel()
 		return nil, err
@@ -113,12 +124,33 @@ func (g *Gateway) Attach(ctx context.Context, principal string, since map[channe
 // are pump-owned thereafter (this reconcile completes before the pump goroutine starts,
 // so there is no concurrent access).
 func (s *Session) StartFeed() {
-	if !s.gw.beginFeed() {
+	if !s.beginFeed() {
 		s.Close()
 		return
 	}
 	s.reconcile()
 	go s.runFeed()
+}
+
+// beginFeed is the SESSION half of泵登记 (统一会话闸, 五轮 P1-3): closed, 泵登记, and
+// 递交许可 must all be gated by the SAME lock consulting the SAME closed flag. Before
+// this fix beginFeed only checked the gateway's g.closed (under g.mu) — a session that
+// had ALREADY been Close()d directly (s.closed=true under s.mu), while the gateway
+// itself was still open, would still pass that check and register a pump for a dead
+// session. Checking s.closed here, under s.mu, closes that gap: Close() sets s.closed
+// under this same lock, so a beginFeed racing a Close either observes closed=true
+// (refuse) or completes registration before Close can set it (registered, and Close's
+// later s.Close() cancels the session ctx, unblocking the pump the normal way).
+func (s *Session) beginFeed() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	if !s.gw.tryRegisterPump() {
+		return false
+	}
+	return true
 }
 
 // Send serializes one downstream frame and queues it on the lane. A full lane (满 →
@@ -195,7 +227,7 @@ func (s *Session) runFeed() {
 	}()
 
 	s.dirty.Store(true) // initial-dirty
-	sweep := time.NewTimer(tSweep)
+	sweep := time.NewTimer(s.gw.tSweep)
 	defer sweep.Stop()
 	rot := 0
 
@@ -203,6 +235,27 @@ func (s *Session) runFeed() {
 		select {
 		case <-s.ctx.Done():
 			return
+		default:
+		}
+		// 每批资格窄窗复核 (spec §2.1 #18/§3.2, P0-1): a poke or the periodic sweep must
+		// still be OBSERVED even while the busy→continue path below keeps this loop
+		// runnable indefinitely (a hot channel that returns a full feedBatch every poll
+		// never reaches wait() — that is the only place the old code drained wake/
+		// sweep.C). Without this non-blocking drain here, a revoked channel with a
+		// sustained backlog would stream past its revocation with no bound: dirty never
+		// gets set (no wait() to catch the poke) and the expired tSweep timer just sits
+		// unread. Draining both here, every iteration, means a lost/delayed poke and the
+		// sweep backstop both still force a re-resolve before the next batch — this IS
+		// the promotion of 每批复核 from "leak backstop" to "撤销停流正门".
+		select {
+		case <-s.wake:
+			s.dirty.Store(true)
+		default:
+		}
+		select {
+		case <-sweep.C:
+			sweep.Reset(s.gw.tSweep)
+			s.dirty.Store(true)
 		default:
 		}
 		if s.dirty.Swap(false) {
@@ -267,7 +320,7 @@ func (s *Session) wait(sweep *time.Timer) bool {
 	case 1:
 		s.dirty.Store(true) // poke
 	case 2:
-		sweep.Reset(tSweep)
+		sweep.Reset(s.gw.tSweep)
 		s.dirty.Store(true) // periodic sweep → re-resolve
 	default:
 		// a Home commit signal → pump (dirty untouched)
@@ -281,20 +334,22 @@ func (s *Session) wait(sweep *time.Timer) bool {
 func (s *Session) reconcile() {
 	now := s.gw.clock()
 	if s.gw.resolver == nil {
-		s.publishElig(now) // no resolver → nothing eligible (every frame forbidden)
+		s.publishElig(now, false, nil) // no resolver → nothing eligible (every frame forbidden)
 		return
 	}
-	rctx, cancel := context.WithTimeout(s.ctx, tRead)
+	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	routes, failed, err := s.gw.resolver.Snapshot(rctx, s.principal)
 	cancel()
 
 	if err != nil {
 		// whole-snapshot failure → the entire prior snapshot rides its lease; any sub
-		// past T_stale from its lastOK is paused. Never退订 on a transient blip.
+		// past T_stale from its lastOK is paused. Never退订 on a transient blip. globalErr
+		// = true tells Upstream that an UNKNOWN channel_id (never subscribed) must also
+		// map to unavailable, not forbidden — we have confirmed nothing this round.
 		for _, sub := range s.subs {
 			s.leaseOrPause(sub, now)
 		}
-		s.publishElig(now)
+		s.publishElig(now, true, nil)
 		return
 	}
 
@@ -339,14 +394,14 @@ func (s *Session) reconcile() {
 		sub.cancel()
 		delete(s.subs, ch)
 	}
-	s.publishElig(now)
+	s.publishElig(now, false, failedSet)
 }
 
 // leaseOrPause keeps a failed channel served within T_stale of its last SUCCESSFUL
 // check, then pauses it (streaming stops + telemetry) — the sub stays so a later
 // success can resume it.
 func (s *Session) leaseOrPause(sub *subscription, now time.Time) {
-	if now.Sub(sub.lastOK) <= tStale {
+	if now.Sub(sub.lastOK) <= s.gw.tStale {
 		return // within lease: keep serving from last good
 	}
 	if !sub.paused {
@@ -364,8 +419,11 @@ func (s *Session) subscribe(ch channel.ID, r Route, now time.Time) {
 
 // publishElig snapshots the资格账 for Upstream (atomic single-write). Non-paused subs
 // are eligible routes; paused subs go into the paused set (business frame →
-// unavailable). A confirmed-absent channel is in neither (→ forbidden).
-func (s *Session) publishElig(now time.Time) {
+// unavailable). A confirmed-absent channel is in neither (→ forbidden) UNLESS it is
+// also in failedThisRound (a per-channel failure with no subscription yet — 六轮 P1-2)
+// or globalErr is set (a whole-snapshot failure — nothing is confirmed this round),
+// either of which must map to unavailable, not forbidden (表①: 查得坏消息 ≠ 查不到).
+func (s *Session) publishElig(now time.Time, globalErr bool, failedThisRound map[channel.ID]struct{}) {
 	routes := make(map[channel.ID]Route, len(s.subs))
 	paused := map[channel.ID]struct{}{}
 	for ch, sub := range s.subs {
@@ -375,14 +433,14 @@ func (s *Session) publishElig(now time.Time) {
 		}
 		routes[ch] = sub.route
 	}
-	s.elig.Store(&eligState{routes: routes, paused: paused, checkedAt: now})
+	s.elig.Store(&eligState{routes: routes, paused: paused, failed: failedThisRound, globalErr: globalErr, checkedAt: now})
 }
 
 // pumpChannel drains up to feedBatch rows after ch's cursor into the lane as feed
 // frames. Returns (full, ok): full = read a whole batch (积压续跑 → stay runnable);
 // ok=false = full lane (→ 断连). receipt.seq is never folded here (write位≠读位).
 func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) {
-	rctx, cancel := context.WithTimeout(s.ctx, tRead)
+	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	defer cancel()
 	at := s.lane.cursor.at(ch)
 	rows, err := sub.route.Home.View().ReadAfterSeq(rctx, at, feedBatch)
@@ -445,6 +503,17 @@ func (s *Session) Upstream(ctx context.Context, f subjectgate.Frame) subjectgate
 		r, ok := st.routes[cid]
 		if !ok {
 			if _, paused := st.paused[cid]; paused {
+				return errFrame(subjectgate.CodeUnavailable, "channel eligibility unavailable — retry")
+			}
+			if _, failed := st.failed[cid]; failed {
+				// 查得坏消息 for this channel THIS round, no prior subscription to lease
+				// from (六轮 P1-2) — unavailable, not a confirmed-absence forbidden.
+				return errFrame(subjectgate.CodeUnavailable, "channel eligibility unavailable — retry")
+			}
+			if st.globalErr {
+				// The last resolver call was a whole-snapshot failure: nothing is
+				// confirmed this round, so an unknown/never-subscribed channel_id must
+				// not be told forbidden (that asserts confirmed absence).
 				return errFrame(subjectgate.CodeUnavailable, "channel eligibility unavailable — retry")
 			}
 			return errFrame(subjectgate.CodeForbidden, "no eligibility for channel")
