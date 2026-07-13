@@ -71,19 +71,19 @@ func (c channelMembershipCheck) IsMember(ctx context.Context, id actor.ActorID) 
 }
 
 // Lookup adapts storespec.Registry.Lookup to accessdoor.MembershipCheck's
-// placement-routing seam (期11 spec §4.3's policy chain ①): kind + Host, "not
+// placement-routing seam (期11 spec §4.3's policy chain ①): Host only, "not
 // found" collapsed to found=false regardless of whether the row is merely
 // absent or present-but-deregistered (IsActive, mirroring IsMember above —
 // a deregistered actor is not a valid creator-affinity source either).
-func (c channelMembershipCheck) Lookup(ctx context.Context, id actor.ActorID) (actor.Kind, string, bool, error) {
+func (c channelMembershipCheck) Lookup(ctx context.Context, id actor.ActorID) (string, bool, error) {
 	rec, ok, err := c.registry.Lookup(ctx, id)
 	if err != nil {
-		return "", "", false, err
+		return "", false, err
 	}
 	if !ok || !rec.IsActive() {
-		return "", "", false, nil
+		return "", false, nil
 	}
-	return rec.Kind, rec.Host, true, nil
+	return rec.Host, true, nil
 }
 
 // Close releases the underlying store resources.

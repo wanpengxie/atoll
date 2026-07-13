@@ -841,7 +841,7 @@ func TestTimerSlice5_CrashIdempotencyAndFireSinkTriState(t *testing.T) {
 
 		env := &message.Envelope{
 			ID: "timer:reserved-1", TS: 1_000_000, Kind: message.KindEvent,
-			Type: actor.ReservedSystemChannelCreated, Payload: []byte("{}"),
+			Type: actor.ReservedSystemActorRegistered, Payload: []byte("{}"),
 			Audience: message.Audience{author},
 		}
 		err := sink.Append(ctx, author, env)
@@ -881,7 +881,7 @@ func TestTimerSlice5_CrashIdempotencyAndFireSinkTriState(t *testing.T) {
 		const poisonID = timerspec.TimerID("poison-1")
 		if err := cs.timers.Insert(ctx, timerspec.TimerRow{
 			ID: poisonID, AuthorID: author, FireAt: clock.Now().UnixMilli() - 1,
-			Type: actor.ReservedSystemChannelCreated, CreatedAt: clock.Now().UnixMilli(),
+			Type: actor.ReservedSystemActorRegistered, CreatedAt: clock.Now().UnixMilli(),
 		}); err != nil {
 			t.Fatalf("direct timers.Insert: %v", err)
 		}

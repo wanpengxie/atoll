@@ -226,8 +226,8 @@ func (parityMembership) IsMember(context.Context, actor.ActorID) (bool, error) {
 
 // Lookup is not exercised by this kv-only parity rig (file-kind placement
 // routing, §4.3).
-func (parityMembership) Lookup(context.Context, actor.ActorID) (actor.Kind, string, bool, error) {
-	return "", "", false, nil
+func (parityMembership) Lookup(context.Context, actor.ActorID) (string, bool, error) {
+	return "", false, nil
 }
 
 // parityState is a StateStore no-op stub (Deps requires one; this rig never

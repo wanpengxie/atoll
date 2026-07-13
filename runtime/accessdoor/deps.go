@@ -16,17 +16,18 @@ import (
 type MembershipCheck interface {
 	IsMember(ctx context.Context, id actor.ActorID) (bool, error)
 
-	// Lookup answers "who is this actor" for placement routing's creator-
-	// affinity locus (期11 spec §4.3 policy chain ①): kind and Host — the
-	// compute id currently hosting id if it is daemon-attached ("" for a
-	// home-placed cell, a human, or an id with no active membership at all).
+	// Lookup answers "where is this actor" for placement routing's creator-
+	// affinity locus (期11 spec §4.3 policy chain ①): Host — the compute id
+	// currently hosting id if it is daemon-attached ("" for a home-placed
+	// cell, a human, or an id with no active membership at all).
 	// found=false when id has no active membership row (mirrors IsMember's
 	// own IsActive discipline, never Exists). Host is read-time (the SAME
-	// membership column Home.reconcileActivation's placement filter and
+	// membership column the home reconcile ring's placement filter and
 	// link.Acceptor.reconcileHost already consult), never cached — a daemon
 	// attach/detach between two Lookup calls is not this seam's problem to
-	// paper over.
-	Lookup(ctx context.Context, id actor.ActorID) (kind actor.Kind, host string, found bool, err error)
+	// paper over. (A kind return was retired: every caller wants placement,
+	// none ever read the kind — purity v1 S3, owner 2026-07-13.)
+	Lookup(ctx context.Context, id actor.ActorID) (host string, found bool, err error)
 }
 
 // DriverTable resolves a ResourceKind to its Driver. Closed-but-additive: a plain

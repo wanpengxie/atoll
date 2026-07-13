@@ -148,7 +148,6 @@ func TestActorIDStringRoundTrip(t *testing.T) {
 
 func TestReservedSystemEventTypeValues(t *testing.T) {
 	cases := map[string]string{
-		actor.ReservedSystemChannelCreated:    "system.channel.created",
 		actor.ReservedSystemActorRegistered:   "system.actor.registered",
 		actor.ReservedSystemActorDeregistered: "system.actor.deregistered",
 	}

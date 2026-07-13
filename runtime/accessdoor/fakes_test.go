@@ -225,10 +225,9 @@ type fakeMembership struct {
 	err      error
 	calls    int
 
-	// lookupKind/lookupHost/lookupFound/lookupErr back Lookup (§4.3 placement
-	// chain ①'s creator-affinity read). lookupCalls records every caller id
-	// Lookup was asked about.
-	lookupKind  actor.Kind
+	// lookupHost/lookupFound/lookupErr back Lookup (§4.3 placement chain ①'s
+	// creator-affinity read). lookupCalls records every caller id Lookup was
+	// asked about.
 	lookupHost  string
 	lookupFound bool
 	lookupErr   error
@@ -240,10 +239,10 @@ func (m *fakeMembership) IsMember(ctx context.Context, id actor.ActorID) (bool, 
 	return m.isMember, m.err
 }
 
-func (m *fakeMembership) Lookup(ctx context.Context, id actor.ActorID) (actor.Kind, string, bool, error) {
+func (m *fakeMembership) Lookup(ctx context.Context, id actor.ActorID) (string, bool, error) {
 	m.calls++
 	m.lookupCalls = append(m.lookupCalls, id)
-	return m.lookupKind, m.lookupHost, m.lookupFound, m.lookupErr
+	return m.lookupHost, m.lookupFound, m.lookupErr
 }
 
 // fakeStorageMounts is a configurable StorageMounts stub (§4.3 placement

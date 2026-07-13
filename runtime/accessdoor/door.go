@@ -27,7 +27,7 @@ func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, place
 	if d.deps.Membership == nil {
 		return nil, errors.New("accessdoor: file byte route needs Deps.Membership (Lookup)")
 	}
-	_, host, found, err := d.deps.Membership.Lookup(ctx, caller)
+	host, found, err := d.deps.Membership.Lookup(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
