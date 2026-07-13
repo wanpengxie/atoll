@@ -48,7 +48,7 @@ func (d *door) choosePlacement(ctx context.Context, caller actor.ActorID) (strin
 	// that SAME daemon is a live (online) storage mount for this channel — the
 	// creator's own workspace is the natural place for its own file bytes to
 	// land (§4.3's "创建者daemon-hosted→落其宿主daemon").
-	_, host, found, err := d.deps.Membership.Lookup(ctx, caller)
+	host, found, err := d.deps.Membership.Lookup(ctx, caller)
 	if err != nil {
 		return "", err
 	}

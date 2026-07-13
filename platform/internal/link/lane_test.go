@@ -37,12 +37,12 @@ import (
 type laneMembership struct{ hosts map[actor.ActorID]string }
 
 func (laneMembership) IsMember(context.Context, actor.ActorID) (bool, error) { return true, nil }
-func (m laneMembership) Lookup(_ context.Context, id actor.ActorID) (actor.Kind, string, bool, error) {
+func (m laneMembership) Lookup(_ context.Context, id actor.ActorID) (string, bool, error) {
 	host, ok := m.hosts[id]
 	if !ok {
-		return "", "", false, nil
+		return "", false, nil
 	}
-	return actor.KindTool, host, true, nil
+	return host, true, nil
 }
 
 // laneLocalFile is an in-memory link.LocalFileOpener — the daemon-side

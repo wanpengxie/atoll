@@ -58,15 +58,15 @@ func (m decayMembership) IsMember(ctx context.Context, id actor.ActorID) (bool, 
 
 // Lookup mirrors runtime's channelMembershipCheck.Lookup (same duplication
 // rationale as IsMember above).
-func (m decayMembership) Lookup(ctx context.Context, id actor.ActorID) (actor.Kind, string, bool, error) {
+func (m decayMembership) Lookup(ctx context.Context, id actor.ActorID) (string, bool, error) {
 	rec, ok, err := m.registry.Lookup(ctx, id)
 	if err != nil {
-		return "", "", false, err
+		return "", false, err
 	}
 	if !ok || !rec.IsActive() {
-		return "", "", false, nil
+		return "", false, nil
 	}
-	return rec.Kind, rec.Host, true, nil
+	return rec.Host, true, nil
 }
 
 // newDecayDoor builds a bare door directly over a real store (past-the-Minter,
