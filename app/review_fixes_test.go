@@ -8,24 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/registry"
 )
-
-// test-tool is a tool-kind class the app test binary otherwise lacks (only
-// agent-kind engines are registered), so the cross-kind半失败 retry test can freeze
-// a row to a class whose kind differs from the retry request's engine.
-func init() {
-	registry.Register("test-tool", registry.ClassDecl{
-		Kind: actor.KindTool,
-		New: func(registry.InstanceSpec, registry.Deps) (platform.ActorDecl, error) {
-			return platform.ActorDecl{}, fmt.Errorf("test-tool not buildable")
-		},
-	})
-}
 
 // actorKind returns the Home registry kind for id, or "".
 func actorKind(t *testing.T, env *testEnv, cookies []*http.Cookie, chID, id string) string {

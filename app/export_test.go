@@ -15,7 +15,6 @@ import (
 	platformhome "github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -129,35 +128,6 @@ func (a *App) SetRevokeFailForTest(v bool) {
 // of "app-close", "delete-channel", or "create-rollback". Test-only.
 func (a *App) SetHomeCloseHookForTest(fn func(op string, chID channel.ID)) {
 	a.homeCloseHook = fn
-}
-
-// SeedIntentRowForTest inserts channel-local composition WITHOUT retaining its
-// membership — reproducing the半失败 state (intent landed, membership did not) an
-// Introduce retry must heal, so a test can assert the retry Admits under the
-// FROZEN row's class-kind, not the request's. Test-only.
-func (a *App) SeedIntentRowForTest(chID, instanceID, class, placement string) error {
-	principal := instanceID
-	if i := strings.IndexByte(principal, ':'); i >= 0 {
-		principal = principal[i+1:]
-	}
-	h := a.getHome(channel.ID(chID))
-	if h == nil {
-		return errTestChannelNotLoaded
-	}
-	kind, ok := registry.ClassKind(class)
-	if !ok {
-		return fmt.Errorf("unknown test class %q", class)
-	}
-	rec, _, _, err := h.IntroduceComposition(context.Background(), storespec.CompositionIntroduce{
-		DeclID: principal, Principal: principal, Class: class,
-		Placement: storespec.Placement(placement), Kind: kind, At: time.Now().UnixMilli(),
-	})
-	if err != nil {
-		return err
-	}
-	// Identity-only Remove deliberately leaves desired composition intact,
-	// reproducing the crash half-state the retry must repair.
-	return h.Remove(context.Background(), rec.InstanceID)
 }
 
 // Handler exposes the assembled gin engine as an http.Handler so black-box

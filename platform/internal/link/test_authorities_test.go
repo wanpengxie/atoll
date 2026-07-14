@@ -33,6 +33,30 @@ type blockingPortIndex struct {
 	release <-chan struct{}
 }
 
+type blockingSecondDaemonValidation struct {
+	inner   link.DaemonAuthority
+	entered chan<- struct{}
+	release <-chan struct{}
+	mu      sync.Mutex
+	calls   int
+}
+
+func (x *blockingSecondDaemonValidation) LockAndValidate(ctx context.Context, daemonID string, chID channel.ID) (func(), error) {
+	x.mu.Lock()
+	x.calls++
+	call := x.calls
+	x.mu.Unlock()
+	if call == 2 { // first validates the link attach; second is the first actor stream.
+		close(x.entered)
+		select {
+		case <-x.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	return x.inner.LockAndValidate(ctx, daemonID, chID)
+}
+
 func (x blockingPortIndex) Register(owner link.PortOwner, inc actorrt.Incarnation) {
 	close(x.entered)
 	<-x.release

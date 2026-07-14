@@ -67,7 +67,7 @@ func TestAppendTx_GuardsEnvelope(t *testing.T) {
 func TestAppendTx_GenericInsertError(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "narrow.sqlite"), OpenOptions{SkipDDL: true}, "")
+	db, err := openSqlite(ctx, filepath.Join(dir, "narrow.sqlite"), OpenOptions{}, "")
 	if err != nil {
 		t.Fatalf("openSqlite: %v", err)
 	}
@@ -226,7 +226,7 @@ func TestLookup_EmptyBindingAccepted(t *testing.T) {
 func TestListActive_RawScanError(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "txtcreated.sqlite"), OpenOptions{SkipDDL: true}, "")
+	db, err := openSqlite(ctx, filepath.Join(dir, "txtcreated.sqlite"), OpenOptions{}, "")
 	if err != nil {
 		t.Fatalf("openSqlite: %v", err)
 	}
@@ -304,7 +304,7 @@ func TestReadAfterSeq_NonPositiveLimitDefaults(t *testing.T) {
 func TestApplyMemberAddTx_LookupScanError(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "poison.sqlite"), OpenOptions{SkipDDL: true}, "")
+	db, err := openSqlite(ctx, filepath.Join(dir, "poison.sqlite"), OpenOptions{}, "")
 	if err != nil {
 		t.Fatalf("openSqlite: %v", err)
 	}
@@ -335,7 +335,7 @@ func TestApplyMemberAddTx_LookupScanError(t *testing.T) {
 func TestApplyMemberRemoveTx_ExecError(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "noderg.sqlite"), OpenOptions{SkipDDL: true}, "")
+	db, err := openSqlite(ctx, filepath.Join(dir, "noderg.sqlite"), OpenOptions{}, "")
 	if err != nil {
 		t.Fatalf("openSqlite: %v", err)
 	}
@@ -360,7 +360,7 @@ func TestApplyMemberRemoveTx_ExecError(t *testing.T) {
 func TestApplyMemberAddTx_MissingIdentityRejected(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "noins.sqlite"), OpenOptions{SkipDDL: true}, "")
+	db, err := openSqlite(ctx, filepath.Join(dir, "noins.sqlite"), OpenOptions{}, "")
 	if err != nil {
 		t.Fatalf("openSqlite: %v", err)
 	}
@@ -412,7 +412,7 @@ func TestApplyMemberTransitions_RemoveHelperError(t *testing.T) {
 func brokenRegistryDB(t *testing.T) *sql.DB {
 	t.Helper()
 	ctx := context.Background()
-	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "broken.sqlite"), OpenOptions{SkipDDL: true}, "")
+	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "broken.sqlite"), OpenOptions{}, "")
 	if err != nil {
 		t.Fatalf("openSqlite: %v", err)
 	}
@@ -429,7 +429,7 @@ func brokenRegistryDB(t *testing.T) *sql.DB {
 func TestApplyMemberAddTx_RetiredIdentityRejected(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	db, err := openSqlite(ctx, filepath.Join(dir, "noreact.sqlite"), OpenOptions{SkipDDL: true}, "")
+	db, err := openSqlite(ctx, filepath.Join(dir, "noreact.sqlite"), OpenOptions{}, "")
 	if err != nil {
 		t.Fatalf("openSqlite: %v", err)
 	}

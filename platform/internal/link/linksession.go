@@ -484,7 +484,7 @@ func (ls *linkSession) sendControl(payload []byte) error {
 }
 
 // openStream opens one fresh actor substream (daemon side), tagging it so the
-// home's accept loop routes it to runtime.Attach. yamux assigns the substream id
+// home's accept loop routes it through runtime port preparation and commit. yamux assigns the substream id
 // itself — the retired mux's nextID hand-numbering is gone.
 func (ls *linkSession) openStream(ctx context.Context) (net.Conn, func(), error) {
 	return ls.openTagged(ctx, streamActor)

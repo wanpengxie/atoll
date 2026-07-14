@@ -115,6 +115,47 @@ for i in "${!patterns[@]}"; do
 	check_live "${labels[$i]}" "${patterns[$i]}"
 done
 
+# These names describe executable seams that no longer exist at all. Unlike the
+# broader retired vocabulary above, even a comment referring to one is stale
+# architecture documentation, so scan source text without the comment exemption.
+strict_labels=(
+	"test-only channel schema opener"
+	"retired channel instance helper"
+	"impossible-half-state test seeder"
+	"deleted channel-control HTTP adapter"
+	"deleted one-step runtime attach name"
+)
+strict_patterns=(
+	'\bSkipDDL\b'
+	'\bchannelHasInstance\b'
+	'\bSeedIntentRowForTest\b'
+	'operate_http\.go'
+	'runtime\.Attach\b'
+)
+strict_samples=(
+	'SkipDDL bool'
+	'func channelHasInstance() {}'
+	'func SeedIntentRowForTest() {}'
+	'// see operate_http.go'
+	'// call runtime.Attach'
+)
+if (( ${#strict_labels[@]} != ${#strict_patterns[@]} || ${#strict_patterns[@]} != ${#strict_samples[@]} )); then
+	echo "[link-seam-retired] strict rule table length mismatch" >&2
+	exit 2
+fi
+for i in "${!strict_patterns[@]}"; do
+	if ! printf '%s\n' "${strict_samples[$i]}" | rg -q "${strict_patterns[$i]}"; then
+		echo "[link-seam-retired] strict self-test failed: ${strict_labels[$i]}" >&2
+		exit 2
+	fi
+	hits=$(rg -n --type go "${strict_patterns[$i]}" app/ cmd/ platform/ runtime/ e2e/ 2>/dev/null || true)
+	if [[ -n "$hits" ]]; then
+		echo "[link-seam-retired] ${strict_labels[$i]}: retired text remains:" >&2
+		echo "$hits" >&2
+		failures=$((failures + 1))
+	fi
+done
+
 if (( failures > 0 )); then
 	echo "[link-seam-retired] FAIL: ${failures} live retired-symbol hit(s)" >&2
 	exit 1

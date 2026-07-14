@@ -78,7 +78,7 @@ type ResolveFunc func(ipc.HandshakePayload) (actor.ActorID, error)
 // incarnation-household birth position welds the out-generation Kind
 // attribute, none may leave it a silent zero value). It is a LOOKUP keyed by
 // the id resolve() just produced, not a static value handed to Attach ahead of
-// time: Attach itself never learns which actor is connecting until the ipc
+// time: preparation does not learn which actor is connecting until the ipc
 // handshake decodes the lease and resolve() maps it to an id — the kind is
 // looked up immediately after, from the same declaration cache the id came
 // from (the injecting caller's per-link kind cache, e.g. the link layer's
@@ -172,9 +172,9 @@ type port struct {
 }
 
 // newPort parses the connect-in handshake on conn (read KindHandshake →
-// resolve lease to an ActorID) and builds an uncommitted port. Runtime.Attach
-// owns the later prepare → ACK → commit sequence.
-// The handshake is synchronous (runs inside Attach) and is the connection's
+// resolve lease to an ActorID) and builds an uncommitted port. PrepareHandshake
+// returns the single object that owns the later ACK → commit sequence.
+// The handshake is synchronous during preparation and is the connection's
 // one-time authentication.
 //
 // hsCtx bounds the handshake READ. The handshake is a substrate-OWNED protocol
@@ -346,9 +346,9 @@ func (p *port) Deliver(env *message.Envelope) error {
 // because cancel is off-loop: it must not queue behind the very deliver work it
 // means to interrupt, and the codec's write mutex already serialises it against
 // concurrent deliver writes. The remote host's disposition depends on the
-// occupant: an actorbase engine closes the request's in-station ledger entry
-// (msg.Ctx cancel + account close); a legacy stack-form occupant fires the
-// matching reqCtx. Best-effort: a write error on a dying conn is dropped (the
+// occupant: the actorbase engine closes the request's in-station ledger entry
+// (msg.Ctx cancel + account close), which cancels the matching request context.
+// Best-effort: a write error on a dying conn is dropped (the
 // request's deadline + the caller's closure still own the terminal); a torn-down
 // port is a no-op.
 func (p *port) cancelRequest(id message.ID) {

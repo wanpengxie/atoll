@@ -104,13 +104,15 @@ var appSchema = []schemaObject{
 		targets_json TEXT NOT NULL,
 		attempt INTEGER NOT NULL DEFAULT 0,
 		last_error TEXT,
+		next_attempt_at INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER NOT NULL,
-		done_at INTEGER
+		done_at INTEGER,
+		dead_at INTEGER
 	)`},
 	{"index", "ux_decl_jobs_dedup", `CREATE UNIQUE INDEX ux_decl_jobs_dedup
-		ON decl_fanout_jobs(decl_id, op) WHERE done_at IS NULL AND op='delete'`},
+		ON decl_fanout_jobs(decl_id, op) WHERE done_at IS NULL AND dead_at IS NULL AND op='delete'`},
 	{"index", "ix_decl_jobs_pending", `CREATE INDEX ix_decl_jobs_pending
-		ON decl_fanout_jobs(decl_id) WHERE done_at IS NULL`},
+		ON decl_fanout_jobs(next_attempt_at, job_id) WHERE done_at IS NULL AND dead_at IS NULL`},
 	{"table", "daemon_revoke_jobs", `CREATE TABLE daemon_revoke_jobs (
 		job_id INTEGER PRIMARY KEY AUTOINCREMENT,
 		daemon_id TEXT NOT NULL,
@@ -118,11 +120,13 @@ var appSchema = []schemaObject{
 		targets_json TEXT NOT NULL,
 		attempt INTEGER NOT NULL DEFAULT 0,
 		last_error TEXT,
+		next_attempt_at INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER NOT NULL,
-		done_at INTEGER
+		done_at INTEGER,
+		dead_at INTEGER
 	)`},
 	{"index", "ix_daemon_jobs_pending", `CREATE INDEX ix_daemon_jobs_pending
-		ON daemon_revoke_jobs(daemon_id) WHERE done_at IS NULL`},
+		ON daemon_revoke_jobs(next_attempt_at, job_id) WHERE done_at IS NULL AND dead_at IS NULL`},
 	{"table", "actor_decls", `CREATE TABLE actor_decls (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,

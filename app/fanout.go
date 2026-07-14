@@ -28,6 +28,28 @@ type fanoutJob struct {
 	id, attempt                        int64
 }
 
+type permanentFanoutError struct{ cause error }
+
+func (e permanentFanoutError) Error() string { return e.cause.Error() }
+func (e permanentFanoutError) Unwrap() error { return e.cause }
+
+func permanentFanout(cause error) error { return permanentFanoutError{cause: cause} }
+
+func fanoutRetryDelay(attempt int64) time.Duration {
+	switch attempt {
+	case 1:
+		return 250 * time.Millisecond
+	case 2:
+		return time.Second
+	case 3:
+		return 4 * time.Second
+	case 4:
+		return 16 * time.Second
+	default:
+		return time.Minute
+	}
+}
+
 type fanoutWorker struct {
 	app    *App
 	ctx    context.Context
@@ -132,11 +154,12 @@ func (w *fanoutWorker) claim(which int) (fanoutJob, bool, error) {
 			_, _ = conn.ExecContext(context.Background(), `ROLLBACK`)
 		}
 	}()
-	query := fmt.Sprintf(`SELECT job_id,op,%s,%s,targets_json,attempt FROM %s WHERE done_at IS NULL AND job_id>? ORDER BY job_id LIMIT 1`, keyCol, map[bool]string{true: "initiator", false: "''"}[which == 0], table)
+	query := fmt.Sprintf(`SELECT job_id,op,%s,%s,targets_json,attempt FROM %s WHERE done_at IS NULL AND dead_at IS NULL AND next_attempt_at<=? AND job_id>? ORDER BY job_id LIMIT 1`, keyCol, map[bool]string{true: "initiator", false: "''"}[which == 0], table)
 	var job fanoutJob
 	job.table = table
+	now := time.Now().UnixMilli()
 	scan := func(cursor int64) error {
-		return conn.QueryRowContext(w.ctx, query, cursor).Scan(&job.id, &job.op, &job.key, &job.initiator, &job.targets, &job.attempt)
+		return conn.QueryRowContext(w.ctx, query, now, cursor).Scan(&job.id, &job.op, &job.key, &job.initiator, &job.targets, &job.attempt)
 	}
 	err = scan(w.cursor[which])
 	if errors.Is(err, sql.ErrNoRows) && w.cursor[which] != 0 {
@@ -168,7 +191,15 @@ func (w *fanoutWorker) apply(job fanoutJob) error {
 	case "decl_fanout_jobs":
 		var targets []declFanoutTarget
 		if err := json.Unmarshal([]byte(job.targets), &targets); err != nil {
-			return fmt.Errorf("decode decl targets: %w", err)
+			return permanentFanout(fmt.Errorf("decode decl targets: %w", err))
+		}
+		if job.op != "delete" && job.op != "restart" {
+			return permanentFanout(fmt.Errorf("unknown declaration fanout operation %q", job.op))
+		}
+		for _, target := range targets {
+			if target.ChannelID == "" || target.InstanceID == "" {
+				return permanentFanout(errors.New("declaration fanout target is incomplete"))
+			}
 		}
 		release := w.app.declLocks.lock(job.key)
 		defer release()
@@ -196,10 +227,24 @@ func (w *fanoutWorker) apply(job fanoutJob) error {
 	case "daemon_revoke_jobs":
 		var targets []daemonFanoutTarget
 		if err := json.Unmarshal([]byte(job.targets), &targets); err != nil {
-			return fmt.Errorf("decode daemon targets: %w", err)
+			return permanentFanout(fmt.Errorf("decode daemon targets: %w", err))
+		}
+		if job.op != "delete" && job.op != "detach" {
+			return permanentFanout(fmt.Errorf("unknown daemon fanout operation %q", job.op))
+		}
+		for _, target := range targets {
+			if target.ChannelID == "" {
+				return permanentFanout(errors.New("daemon fanout target is incomplete"))
+			}
 		}
 		release := w.app.daemonLocks.lock(job.key)
-		defer release()
+		locked := true
+		defer func() {
+			if locked {
+				release()
+			}
+		}()
+		var kicks []func()
 		for _, target := range targets {
 			if job.op == "detach" {
 				var n int
@@ -220,10 +265,17 @@ func (w *fanoutWorker) apply(job fanoutJob) error {
 			if err := h.RevokeDaemonTarget(w.ctx, job.key); err != nil {
 				return err
 			}
+			kickHome := h
+			kicks = append(kicks, func() { kickHome.KickDaemon(job.key) })
+		}
+		release()
+		locked = false
+		for _, kick := range kicks {
+			kick()
 		}
 		return nil
 	default:
-		return fmt.Errorf("unknown fanout table %q", job.table)
+		return permanentFanout(fmt.Errorf("unknown fanout table %q", job.table))
 	}
 }
 
@@ -238,10 +290,12 @@ func (w *fanoutWorker) fail(job fanoutJob, cause error) {
 	if errors.Is(cause, context.Canceled) {
 		return
 	}
-	if job.attempt >= 5 {
-		_, _ = w.app.db.ExecContext(context.Background(), fmt.Sprintf(`UPDATE %s SET done_at=?,last_error=? WHERE job_id=? AND done_at IS NULL`, job.table), time.Now().UnixMilli(), "poisoned: "+cause.Error(), job.id)
-		w.app.logger.Error("fanout.poisoned", "table", job.table, "job", job.id, "err", cause)
+	var permanent permanentFanoutError
+	if errors.As(cause, &permanent) {
+		_, _ = w.app.db.ExecContext(context.Background(), fmt.Sprintf(`UPDATE %s SET dead_at=?,last_error=?,next_attempt_at=0 WHERE job_id=? AND done_at IS NULL AND dead_at IS NULL`, job.table), time.Now().UnixMilli(), permanent.Error(), job.id)
+		w.app.logger.Error("fanout.dead_letter", "table", job.table, "job", job.id, "err", permanent)
 		return
 	}
-	_, _ = w.app.db.ExecContext(context.Background(), fmt.Sprintf(`UPDATE %s SET last_error=? WHERE job_id=? AND done_at IS NULL`, job.table), cause.Error(), job.id)
+	next := time.Now().Add(fanoutRetryDelay(job.attempt)).UnixMilli()
+	_, _ = w.app.db.ExecContext(context.Background(), fmt.Sprintf(`UPDATE %s SET last_error=?,next_attempt_at=? WHERE job_id=? AND done_at IS NULL AND dead_at IS NULL`, job.table), cause.Error(), next, job.id)
 }

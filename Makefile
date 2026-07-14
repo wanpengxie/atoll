@@ -49,10 +49,13 @@ test-full:
 test-strict:
 	go test -race ./...
 
-# e2e-loop — C1 最小闭环：真双进程六段旅程（e2e/ 黑盒 harness）。
+# e2e-loop — server frame contract + canonical authenticated server/daemon journey.
 # 裸 go test ./... 不受影响（ATOLL_E2E_BIN 空则 skip）。
 e2e-loop: build-go
-	ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -run 'TestLoop|TestGatewayFrames|TestMultiChannelOnePipe' -v -timeout 300s
+	@for test in TestGatewayFrames TestDaemonBinaryCanonicalControl; do \
+		ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -list "^$$test$$" | grep -qx "$$test" || { echo "[e2e] missing $$test" >&2; exit 1; }; \
+	done
+	ATOLL_E2E_BIN=$(PWD)/bin go test ./e2e/ -run '^(TestGatewayFrames|TestDaemonBinaryCanonicalControl)$$' -v -timeout 600s
 
 # lint — go vet + 架构约束（archtest：契约形状只许住 lib/introspect）
 lint: check-gateway-retired check-link-seam-retired

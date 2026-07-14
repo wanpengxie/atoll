@@ -169,7 +169,12 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 func (a *App) handleDeleteDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
 	release := a.daemonLocks.lock(daemonID)
-	defer release()
+	locked := true
+	defer func() {
+		if locked {
+			release()
+		}
+	}()
 	userID := middleware.UserID(c)
 	ctx := c.Request.Context()
 
@@ -259,6 +264,13 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
+	// The durable authority decision is complete. Do not hold the daemon
+	// authority lock while Kick seals and joins admitted actor handshakes: an
+	// already-admitted handshake may itself be waiting to revalidate under this
+	// lock. Releasing here lets it observe the deleted binding and fail before
+	// publication, while the voluntary link teardown remains quiet.
+	release()
+	locked = false
 
 	// Only now that the revocation is durable do we Kick the live links to silence.
 	// Info marks this as an explicit, deliberate revocation (the daemon's key
@@ -356,7 +368,12 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 	}
 	daemonID := c.Param("id")
 	release := a.daemonLocks.lock(daemonID)
-	defer release()
+	locked := true
+	defer func() {
+		if locked {
+			release()
+		}
+	}()
 	ctx := c.Request.Context()
 
 	targetsJSON, _ := json.Marshal([]daemonFanoutTarget{{ChannelID: chID}})
@@ -380,6 +397,10 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "detach failed"})
 		return
 	}
+	// Binding deletion is now authoritative. Release before Kick for the same
+	// daemon-lock -> admitted-handshake join ordering used by full revocation.
+	release()
+	locked = false
 	// Info marks this as an explicit, deliberate revocation (a single-channel
 	// detach request) — same distinguishing purpose as handleDeleteDaemon's
 	// own kick-start marker.

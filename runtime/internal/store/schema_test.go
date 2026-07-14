@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -189,9 +190,9 @@ func TestOpenChannel_WriteCreatesParentDir(t *testing.T) {
 	}
 }
 
-// Reopening an existing valid channel DB with SkipDDL=true succeeds and the
-// schema verification passes.
-func TestOpenChannel_SkipDDLReopenValid(t *testing.T) {
+// Reopening an existing valid channel DB in MustExist mode succeeds and the
+// exact schema verification passes.
+func TestOpenChannel_MustExistReopenValid(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "ch.sqlite")
 	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{}, nil)
@@ -200,16 +201,16 @@ func TestOpenChannel_SkipDDLReopenValid(t *testing.T) {
 	}
 	_ = cs.Close()
 
-	cs2, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{SkipDDL: true}, nil)
+	cs2, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil)
 	if err != nil {
-		t.Fatalf("SkipDDL reopen of valid DB: %v", err)
+		t.Fatalf("MustExist reopen of valid DB: %v", err)
 	}
 	_ = cs2.Close()
 }
 
-// Opening a non-empty file that lacks the baseline schema (SkipDDL, no tables)
+// Opening a non-empty file that lacks the baseline schema (MustExist, no tables)
 // fails fast with a stale-DB error rather than silently migrating.
-func TestOpenChannel_SkipDDLStaleSchemaFailsFast(t *testing.T) {
+func TestOpenChannel_MustExistStaleSchemaFailsFast(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "empty.sqlite")
 
@@ -223,7 +224,91 @@ func TestOpenChannel_SkipDDLStaleSchemaFailsFast(t *testing.T) {
 	}
 	_ = raw.Close()
 
-	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{SkipDDL: true}, nil); err == nil {
-		t.Fatal("SkipDDL open of a DB missing the baseline schema must fail fast")
+	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil); err == nil {
+		t.Fatal("MustExist open of a DB missing the baseline schema must fail fast")
 	}
+}
+
+func TestOpenChannel_MustExistRejectsEverySchemaMismatchWithoutMutation(t *testing.T) {
+	replaceOne := func(old, replacement string) func(string) string {
+		return func(ddl string) string {
+			if strings.Count(ddl, old) != 1 {
+				t.Fatalf("schema test fixture expected one occurrence of %q", old)
+			}
+			return strings.Replace(ddl, old, replacement, 1)
+		}
+	}
+	cases := []struct {
+		name   string
+		mutate func(string) string
+	}{
+		{"missing-message-column", replaceOne("  payload              TEXT NOT NULL,\n", "")},
+		{"wrong-message-column-type", replaceOne("  payload              TEXT NOT NULL,\n", "  payload              BLOB NOT NULL,\n")},
+		{"missing-message-unique-constraint", replaceOne("  id                   TEXT NOT NULL UNIQUE,\n", "  id                   TEXT NOT NULL,\n")},
+		{"missing-partial-index", replaceOne("CREATE INDEX IF NOT EXISTS ix_messages_expires        ON messages(expires_at) WHERE expires_at IS NOT NULL AND kind='request';\n", "")},
+		{"extra-table", func(ddl string) string { return ddl + `CREATE TABLE retired_shadow (x INTEGER);` }},
+		{"extra-index", func(ddl string) string { return ddl + `CREATE INDEX retired_index ON messages(type);` }},
+		{"extra-view", func(ddl string) string { return ddl + `CREATE VIEW retired_view AS SELECT id FROM messages;` }},
+		{"extra-trigger", func(ddl string) string {
+			return ddl + `CREATE TRIGGER retired_trigger AFTER INSERT ON messages BEGIN SELECT 1; END;`
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			path := filepath.Join(t.TempDir(), "channel.sqlite")
+			db, err := sql.Open("sqlite", path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := db.ExecContext(ctx, tc.mutate(store.ChannelLocalDDL)); err != nil {
+				_ = db.Close()
+				t.Fatalf("seed mismatched schema: %v", err)
+			}
+			before := schemaCatalog(t, db)
+			if err := db.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			if cs, err := store.OpenChannel(ctx, "C-test", path, store.OpenOptions{MustExist: true}, nil); err == nil {
+				_ = cs.Close()
+				t.Fatal("strict reopen accepted a mismatched channel schema")
+			}
+
+			db, err = sql.Open("sqlite", "file:"+path+"?mode=ro")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer db.Close()
+			if after := schemaCatalog(t, db); after != before {
+				t.Fatalf("failed strict reopen mutated schema:\nbefore=%s\nafter=%s", before, after)
+			}
+		})
+	}
+}
+
+func schemaCatalog(t *testing.T, db *sql.DB) string {
+	t.Helper()
+	rows, err := db.Query(`SELECT type,name,sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var out strings.Builder
+	for rows.Next() {
+		var typ, name, ddl string
+		if err := rows.Scan(&typ, &name, &ddl); err != nil {
+			t.Fatal(err)
+		}
+		out.WriteString(typ)
+		out.WriteByte('\x00')
+		out.WriteString(name)
+		out.WriteByte('\x00')
+		out.WriteString(ddl)
+		out.WriteByte('\n')
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	return out.String()
 }

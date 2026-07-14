@@ -108,12 +108,11 @@ func (c *ChannelStores) Close() error {
 
 // OpenChannelOptions tunes the store open.
 type OpenChannelOptions struct {
-	// ReadOnly / MustExist / SkipDDL skip fresh-schema initialization while the
+	// ReadOnly / MustExist skip fresh-schema initialization while the
 	// verifier still runs. They require an existing DB with the current schema;
 	// no released legacy schema is migrated in place.
 	ReadOnly  bool
 	MustExist bool
-	SkipDDL   bool
 
 	// OnCommit is the post-commit signal source: the store fires it after any
 	// durable append commit (request path AND control-plane mirror), so a tap is
@@ -156,7 +155,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	cs, err := store.OpenChannel(ctx, channelID, dbPath, store.OpenOptions{
 		ReadOnly:  opts.ReadOnly,
 		MustExist: opts.MustExist,
-		SkipDDL:   opts.SkipDDL,
 	}, opts.OnCommit)
 	if err != nil {
 		return nil, err

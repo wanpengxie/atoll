@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -39,7 +40,7 @@ func TestFanoutClaimCrashReplayCountsAttempt(t *testing.T) {
 	}
 }
 
-func TestFanoutPoisonDoesNotStarveEitherTable(t *testing.T) {
+func TestFanoutDeadLetterDoesNotStarveEitherTable(t *testing.T) {
 	a := fanoutTestApp(t)
 	_, _ = a.db.Exec(`INSERT INTO decl_fanout_jobs(decl_id,op,initiator,targets_json,created_at) VALUES ('bad','restart','u','{',1)`)
 	_, _ = a.db.Exec(`INSERT INTO decl_fanout_jobs(decl_id,op,initiator,targets_json,created_at) VALUES ('good','restart','u','[]',2)`)
@@ -48,12 +49,12 @@ func TestFanoutPoisonDoesNotStarveEitherTable(t *testing.T) {
 	w.drain()
 
 	var attempt int
-	var done, last any
-	if err := a.db.QueryRow(`SELECT attempt,done_at,last_error FROM decl_fanout_jobs WHERE decl_id='bad'`).Scan(&attempt, &done, &last); err != nil {
+	var done, dead, last any
+	if err := a.db.QueryRow(`SELECT attempt,done_at,dead_at,last_error FROM decl_fanout_jobs WHERE decl_id='bad'`).Scan(&attempt, &done, &dead, &last); err != nil {
 		t.Fatal(err)
 	}
-	if attempt != 5 || done == nil || last == nil {
-		t.Fatalf("poison row attempt=%d done=%v last=%v", attempt, done, last)
+	if attempt != 1 || done != nil || dead == nil || last == nil {
+		t.Fatalf("dead-letter row attempt=%d done=%v dead=%v last=%v", attempt, done, dead, last)
 	}
 	for _, query := range []string{
 		`SELECT COUNT(*) FROM decl_fanout_jobs WHERE decl_id='good' AND done_at IS NOT NULL AND attempt=1`,
@@ -62,6 +63,55 @@ func TestFanoutPoisonDoesNotStarveEitherTable(t *testing.T) {
 		var n int
 		if err := a.db.QueryRowContext(context.Background(), query).Scan(&n); err != nil || n != 1 {
 			t.Fatalf("completed query %q: n=%d err=%v", query, n, err)
+		}
+	}
+}
+
+func TestFanoutTransientFailureWaitsForNextAttempt(t *testing.T) {
+	a := fanoutTestApp(t)
+	now := time.Now().UnixMilli()
+	for _, stmt := range []string{
+		`INSERT INTO users(id,email,password,created_at) VALUES ('u','u@example.test','x',1)`,
+		`INSERT INTO workspaces(id,owner_id,name,created_at) VALUES ('w','u','w',1)`,
+		`INSERT INTO channels(id,workspace_id,name,db_path,created_at) VALUES ('c','w','c','/missing/c.sqlite',1)`,
+		`INSERT INTO decl_fanout_jobs(decl_id,op,initiator,targets_json,created_at) VALUES ('retry','restart','u','[{"channel_id":"c","instance_id":"agent:x"}]',1)`,
+	} {
+		if _, err := a.db.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	w := newFanoutWorker(a)
+	w.drain()
+
+	var attempt int
+	var next int64
+	var done, dead, last any
+	if err := a.db.QueryRow(`SELECT attempt,next_attempt_at,done_at,dead_at,last_error FROM decl_fanout_jobs WHERE decl_id='retry'`).Scan(&attempt, &next, &done, &dead, &last); err != nil {
+		t.Fatal(err)
+	}
+	if attempt != 1 || next <= now || done != nil || dead != nil || last == nil {
+		t.Fatalf("first failure attempt=%d next=%d done=%v dead=%v last=%v", attempt, next, done, dead, last)
+	}
+
+	// Making the row due simulates the next scheduled pass. It receives exactly
+	// one more attempt rather than burning the remaining budget in the first pass.
+	if _, err := a.db.Exec(`UPDATE decl_fanout_jobs SET next_attempt_at=0 WHERE decl_id='retry'`); err != nil {
+		t.Fatal(err)
+	}
+	w.drain()
+	if err := a.db.QueryRow(`SELECT attempt FROM decl_fanout_jobs WHERE decl_id='retry'`).Scan(&attempt); err != nil {
+		t.Fatal(err)
+	}
+	if attempt != 2 {
+		t.Fatalf("second scheduled pass attempt=%d, want 2", attempt)
+	}
+}
+
+func TestFanoutRetryDelaySchedule(t *testing.T) {
+	want := []time.Duration{250 * time.Millisecond, time.Second, 4 * time.Second, 16 * time.Second, time.Minute, time.Minute}
+	for i, d := range want {
+		if got := fanoutRetryDelay(int64(i + 1)); got != d {
+			t.Fatalf("attempt %d delay=%v want %v", i+1, got, d)
 		}
 	}
 }

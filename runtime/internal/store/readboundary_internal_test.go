@@ -45,7 +45,7 @@ CREATE TABLE actor_registry (
 func openRelaxed(t *testing.T) *sql.DB {
 	t.Helper()
 	ctx := context.Background()
-	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "relaxed.sqlite"), OpenOptions{SkipDDL: true}, "")
+	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "relaxed.sqlite"), OpenOptions{}, "")
 	if err != nil {
 		t.Fatalf("openSqlite: %v", err)
 	}

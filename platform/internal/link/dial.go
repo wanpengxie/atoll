@@ -467,7 +467,7 @@ func (d *Dialer) Reattach(ctx context.Context, decls []Declaration) error {
 func (d *Dialer) OpenStream(ctx context.Context, id actor.ActorID, epoch int64, dispatch func(env *message.Envelope) error, cancel func(requestID message.ID)) (CellArms, error) {
 	// yamux assigns the substream id itself (the retired mux's nextID
 	// hand-numbering is gone); openStream tags the substream tag=actor so the
-	// home's accept loop routes it to runtime.Attach.
+	// home's accept loop routes it through runtime port preparation and commit.
 	s, finish, err := d.lc.openStream(ctx)
 	if err != nil {
 		return CellArms{}, err

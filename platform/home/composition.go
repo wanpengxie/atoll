@@ -235,7 +235,6 @@ func (h *Home) RevokeDaemonTarget(ctx context.Context, daemonID string) error {
 	for _, id := range ids {
 		h.channel.Cells().DespawnID(id)
 	}
-	h.links.KickDaemon(daemonID)
 	h.pokeReconcile()
 	return nil
 }

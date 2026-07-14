@@ -1,7 +1,6 @@
 package app
 
 import (
-	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -373,15 +372,4 @@ func (a *App) handleListWorkspaceMembers(c *gin.Context) {
 		result = []gin.H{}
 	}
 	c.JSON(http.StatusOK, gin.H{"members": result})
-}
-
-// channelHasInstance reports whether instanceID is in the channel's composition
-// (channel-local composition) — used to validate a default_agent pointer and resolve the
-// agent:boost failover floor at routing time.
-func (a *App) channelHasInstance(ctx context.Context, chID, instanceID string) (bool, error) {
-	h := a.getHome(channel.ID(chID))
-	if h == nil {
-		return false, channelUnavailable()
-	}
-	return h.HasComposition(ctx, actor.ActorID(instanceID))
 }

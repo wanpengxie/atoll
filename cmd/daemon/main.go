@@ -185,12 +185,10 @@ func main() {
 		log.Fatalf("daemon: -server %q has no ?channel= query; pass e.g. -server ws://host:8080/compute?channel=<channel-id>", *ws)
 	}
 
-	// The daemon's compute plan is pulled LIVE, not snapshotted: planSource re-fetches
-	// the link plan every reconcile tick and rebuilds the desired set + factory table
-	// together (a plan change on the server converges with no daemon restart — SW-6).
-	// Startup does NOT gate on a first fetch: compute.Run connects the link, then the
-	// ring calls Members, which tolerates a fetch failure (last-known-good, initially
-	// empty) — connect first, pull later, keep retrying.
+	// The daemon's compute plan is pulled over its authenticated link on every
+	// reconcile pass and applied as one desired-set/factory snapshot. Startup
+	// connects first; pull failures retain the previous snapshot (initially empty)
+	// and the next pass retries without a second plan source.
 	source := newPlanSource(chID, wsRoot, deviceName, logger)
 
 	// The link layer is auth-agnostic: the api key rides the server WS url's query

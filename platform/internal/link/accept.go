@@ -54,7 +54,7 @@ const attachRejectDrain = 25 * time.Millisecond
 
 // Acceptor is the home end of the link: it upgrades attaching daemon
 // connections, registers declared actors into membership, and binds each
-// actor stream to runtime.Attach (the stream runs native ipc, so a remote cell
+// actor stream through the runtime prepare/commit port admission (the stream runs native ipc, so a remote cell
 // is indistinguishable from a local one — zero translation). It judges liveness
 // via the per-link lease. It owns NO business logic — Writer/Runtime/Membership
 // are injected capabilities of the home.
@@ -89,7 +89,7 @@ type Acceptor struct {
 
 	// cancelReq is the home's injected KindCancelRequest handler (the caller-side
 	// upstream cancel: a daemon-hosted caller abandoning its own outbound request).
-	// Passed straight to runtime.Attach as the port's onCancelRequest — the link
+	// Passed into runtime port preparation as onCancelRequest — the link
 	// layer holds no request-lookup logic (the closure is Home's).
 	cancelReq func(actor.ActorID, message.ID)
 
@@ -565,7 +565,7 @@ func (a *Acceptor) afterOwned(delay time.Duration, fn func()) {
 }
 
 // runLink drives one accepted link: build the mux, handle the stream-0 attach,
-// then demux actor streams to runtime.Attach while the lease watchdog judges
+// then demux actor streams to the runtime port admission while the lease watchdog judges
 // liveness.
 func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID string) {
 	defer func() { _ = ws.Close() }()
@@ -629,7 +629,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	}
 
 	// onActor: each peer-opened tag=actor substream runs native ipc — hand it
-	// straight to runtime.Attach. The substrate does the ipc handshake on the
+	// straight to runtime port preparation. The substrate does the ipc handshake on the
 	// stream, resolves the actor (checks it is in the declared set), and registers
 	// it as a port embodiment. EOF on the substream (its own Close or session
 	// teardown) = the port reads EOF = down edge. The emitSink is the home write

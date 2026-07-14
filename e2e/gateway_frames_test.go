@@ -47,9 +47,9 @@ func makeDirs(t *testing.T, root string, names ...string) map[string]string {
 // deterministic and fast. (detach is整删 in the连接模型勘误期 v2 — the client-visible
 // unbind verb has no ontology; a connection is an authenticated person + one pipe.)
 //
-// The four control-垫片 types (introduce / remove / restart / set_default_agent)
-// ride the SAME subjectgate submit-frame path and are exercised end-to-end in
-// TestLoop (which has real agents to operate on). 非成员 tail-only (a workspace
+// The four composition controls (introduce / remove / restart / set_default_agent)
+// ride the same subjectgate submit-frame path and are exercised end-to-end by
+// TestDaemonBinaryCanonicalControl with the real daemon binary. 非成员 tail-only (a workspace
 // member who is not a channel member gets a read-only session whose business
 // frames are refused not_member) is NOT reachable through today's HTTP surface —
 // there is no endpoint to add a second workspace member, and a channel's creator is
@@ -71,7 +71,7 @@ func TestGatewayFrames(t *testing.T) {
 		}
 	})
 
-	// Start the server with the same probe→listen bind-retry TestLoop uses.
+	// Start the server with a bounded probe→listen retry.
 	var server *proc
 	var base string
 	gen := 0

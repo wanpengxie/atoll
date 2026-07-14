@@ -21,10 +21,9 @@ import (
 // picking the fail code). One instance serves every channel — it resolves the
 // home per req.ChannelID.
 //
-// This is the CANONICAL control path, and now the ONLY one: the channel-control
-// HTTP endpoints are adapters (operate_http.go) that replay the session user through
-// the subjectgate frame path (a submit frame, audience=[system]) into this
-// executor — no handler writes the composition tables directly (红线11). handleDeleteDecl stays
+// This is the only channel-control path: an authenticated subjectgate submit
+// frame addressed to the system actor reaches this executor. No HTTP handler or
+// alternate transport writes channel composition directly. handleDeleteDecl stays
 // a world-layer soft-delete (its per-channel cascade is a system-authored mirror,
 // not a member action), outside this face.
 type operateExecutor struct {
@@ -76,10 +75,8 @@ func channelUnavailable() error {
 //     (SW-8: pre-existing row's placement/class如实 unchanged) → optional config
 //     UPDATE (改配置门, S8: config is the row's tunable field) → ensure Admit → poke,
 //     and Restart when a config change must take on an already-live
-//     server-placed row (生效). intent and Admit are BOTH ensured even on a
-//     pre-existing row (幂等: a crash between the two writes is self-healed on
-//     retry — else the half-written row is滤成 a never-embodied dead row under
-//     desired=intent∩membership).
+//     server-placed row (生效). Composition intent and active membership commit
+//     atomically in the channel store, so callers never observe a partial row.
 func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.OperateRequest) (any, error) {
 	var p introducePayload
 	if err := json.Unmarshal(req.Payload, &p); err != nil {
@@ -345,8 +342,9 @@ func (x *operateExecutor) Restart(ctx context.Context, req platformhome.OperateR
 	return map[string]any{"restarted": inst}, nil
 }
 
-// SetDefaultAgent updates the channel's default_agent pointer (the update half of
-// composition CRUD). The target must已在 composition; empty clears the pointer.
+// SetDefaultAgent updates the composition's single default marker (the update
+// half of composition CRUD). The target must already be in the composition;
+// empty clears the marker.
 func (x *operateExecutor) SetDefaultAgent(ctx context.Context, req platformhome.OperateRequest) (any, error) {
 	var p instancePayload
 	if err := json.Unmarshal(req.Payload, &p); err != nil {

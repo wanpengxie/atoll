@@ -480,19 +480,18 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 	return inc.p.isLive()
 }
 
-// Attach binds an out-of-process actor that CONNECTED IN over conn, registering
-// it as a `port` embodiment. The substrate does not spawn the remote (it connects
-// in); Attach performs the handshake, resolves
+// PrepareHandshake begins binding an out-of-process actor that connected over a
+// stream. The substrate does not spawn the remote; preparation parses the handshake, resolves
 // the connection's credential to an ActorID via resolve, relays the remote's
 // upward invocations through sinks (Emit for the message plane, Access/Schedule
 // for the opaque plane-2 / time-axis arms), and returns the bound Incarnation. If
 // an embodiment already exists for the resolved id it is stopped and replaced.
 //
-// kindOf resolves the just-resolved id's declared Kind (G11: Attach is a birth
+// kindOf resolves the just-resolved id's declared Kind (G11: port commit is a birth
 // position in the incarnation household exactly like Spawn/SpawnIfAbsent/Fork,
 // so it must weld the SAME out-generation attribute — no embodiment form may
 // answer a silent zero-value Kind from Runtime.Stat). It runs AFTER resolve
-// yields the id — Attach itself never learns which actor is connecting before
+// yields the id — preparation does not know which actor is connecting before
 // the handshake decodes the lease — so kindOf is a lookup keyed by the
 // resolved id, not a static value; a nil kindOf (or a false ok) welds the zero
 // value, same as before this parameter existed.
@@ -511,7 +510,7 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 // sends a handshake must not pin this goroutine forever). It does NOT scope the
 // port's LIFETIME: the bound port lives for the runtime's (r.parent), not for
 // this call — a per-call lifetime ctx would wrongly tear the port down when
-// Attach returns. Pass a deadline ctx to guard the handshake; a nil/background
+// preparation returns. Pass a deadline ctx to guard the handshake; a nil/background
 // ctx degrades to an unbounded handshake read.
 // PreparedAttach is a parsed and authenticated port handshake that has not yet
 // entered the Runtime address table and has not emitted an ACK. The caller must

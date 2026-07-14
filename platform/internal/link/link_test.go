@@ -248,16 +248,24 @@ type homeRig struct {
 }
 
 func newHomeRig(t *testing.T, leasePing, leaseTTL time.Duration) *homeRig {
-	return newHomeRigWithPortIndex(t, leasePing, leaseTTL, nil)
+	return newHomeRigWithAuthorities(t, leasePing, leaseTTL, nil, nil)
 }
 
 func newHomeRigWithPortIndex(t *testing.T, leasePing, leaseTTL time.Duration, decorate func(link.PortIndex) link.PortIndex) *homeRig {
+	return newHomeRigWithAuthorities(t, leasePing, leaseTTL, decorate, nil)
+}
+
+func newHomeRigWithAuthorities(t *testing.T, leasePing, leaseTTL time.Duration, decoratePort func(link.PortIndex) link.PortIndex, decorateDaemon func(link.DaemonAuthority) link.DaemonAuthority) *homeRig {
 	t.Helper()
 	rt, del := actorrt.New(actorrt.Config{Parent: context.Background()})
 	authorities := newTestAuthorities()
 	var portIndex link.PortIndex = authorities
-	if decorate != nil {
-		portIndex = decorate(portIndex)
+	if decoratePort != nil {
+		portIndex = decoratePort(portIndex)
+	}
+	var daemonAuthority link.DaemonAuthority = authorities
+	if decorateDaemon != nil {
+		daemonAuthority = decorateDaemon(daemonAuthority)
 	}
 	r := &homeRig{
 		rt:         rt,
@@ -279,7 +287,7 @@ func newHomeRigWithPortIndex(t *testing.T, leasePing, leaseTTL time.Duration, de
 		Declarations:    authorities,
 		Composition:     authorities,
 		Registry:        authorities,
-		DaemonAuthority: authorities,
+		DaemonAuthority: daemonAuthority,
 		ActorLock:       func(actor.ActorID) func() { return func() {} },
 		PortIndex:       portIndex,
 	})
@@ -516,6 +524,114 @@ func testQuietCloseDuringPortPublication(t *testing.T, quietClose func(*homeRig)
 	}
 	if down := r.getDown(); len(down) != 0 {
 		t.Fatalf("Close during port publication emitted down edge(s): %+v", down)
+	}
+}
+
+func TestHomeCloseBeforePortCommitIsQuiet(t *testing.T) {
+	testQuietCloseBeforePortCommit(t, func(r *homeRig) error { return r.acc.Close() })
+}
+
+func TestKickDaemonBeforePortCommitIsQuiet(t *testing.T) {
+	testQuietCloseBeforePortCommit(t, func(r *homeRig) error {
+		if got := r.acc.KickDaemon("daemon-1"); got != 1 {
+			return fmt.Errorf("KickDaemon closed %d links, want 1", got)
+		}
+		return nil
+	})
+}
+
+func testQuietCloseBeforePortCommit(t *testing.T, quietClose func(*homeRig) error) {
+	t.Helper()
+	entered, release := make(chan struct{}), make(chan struct{})
+	r := newHomeRigWithAuthorities(t, 5*time.Second, 30*time.Second, nil, func(authority link.DaemonAuthority) link.DaemonAuthority {
+		return &blockingSecondDaemonValidation{inner: authority, entered: entered, release: release}
+	})
+
+	const toolID = actor.ActorID("tool:precommit-window")
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	var releaseOnce sync.Once
+	releaseHook := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseHook()
+	openDone := make(chan error, 1)
+	go func() {
+		_, openErr := d.OpenStream(context.Background(), toolID, 0, func(*message.Envelope) error { return nil }, func(message.ID) {})
+		openDone <- openErr
+	}()
+	<-entered
+	if _, live := r.rt.Stat(toolID); live {
+		t.Fatal("port became live before authority validation and commit")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- quietClose(r) }()
+	select {
+	case err := <-closeDone:
+		t.Fatalf("quiet close returned before the admitted pre-commit worker settled: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	releaseHook()
+	if err := <-openDone; err != nil {
+		t.Fatalf("OpenStream after authority release: %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatal(err)
+	}
+	if _, live := r.rt.Stat(toolID); live {
+		t.Fatal("quiet close left the committed port live")
+	}
+	if down := r.getDown(); len(down) != 0 {
+		t.Fatalf("pre-commit quiet close emitted down edge(s): %+v", down)
+	}
+}
+
+func TestHomeCloseActorHandshakeTimeoutRemainsQuietAndCountsOnce(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	r := newHomeRigWithAuthorities(t, 5*time.Second, 30*time.Second, nil, func(authority link.DaemonAuthority) link.DaemonAuthority {
+		return &blockingSecondDaemonValidation{inner: authority, entered: entered, release: release}
+	})
+	const toolID = actor.ActorID("tool:timeout-window")
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = d.Close() }()
+	openDone := make(chan error, 1)
+	go func() {
+		_, openErr := d.OpenStream(context.Background(), toolID, 0, func(*message.Envelope) error { return nil }, func(message.ID) {})
+		openDone <- openErr
+	}()
+	<-entered
+
+	started := time.Now()
+	if err := r.acc.Close(); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(started)
+	if elapsed < 9*time.Second || elapsed > 15*time.Second {
+		t.Fatalf("Close timeout duration=%v, want one 10s actor budget", elapsed)
+	}
+	if got := r.acc.Leaked(); got != 1 {
+		t.Fatalf("Leaked=%d, want one shared actor-timeout incident", got)
+	}
+	close(release)
+	select {
+	case <-openDone:
+	case <-time.After(time.Second):
+		t.Fatal("late pre-commit worker did not settle after teardown")
+	}
+	if _, live := r.rt.Stat(toolID); live {
+		t.Fatal("late worker published a port after timeout teardown")
+	}
+	if down := r.getDown(); len(down) != 0 {
+		t.Fatalf("timeout teardown emitted down edge(s): %+v", down)
 	}
 }
 
