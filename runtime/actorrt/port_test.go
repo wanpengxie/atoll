@@ -74,31 +74,91 @@ func nopEmit(context.Context, Incarnation, *message.Envelope) (ipc.EmitResult, e
 	return ipc.EmitResult{}, nil
 }
 
-func TestPortParentDeathCascadesForkedChild(t *testing.T) {
-	rt, _ := New(Config{Parent: context.Background()})
-	defer rt.StopAll()
+// TestPortParentDespawnCascadesForkedChildBeforeEscort is the port-parent
+// counterpart of TestFork_CascadeOnParentDeath. The remote deliberately stops
+// reading after the handshake, so the parent's despawn-frame write remains
+// parked until grace. Child cancellation must still happen first: ownership is
+// taken and children are signalled before the parent escort starts.
+func TestPortParentDespawnCascadesForkedChildBeforeEscort(t *testing.T) {
+	rt, _ := New(Config{Parent: context.Background(), ZombieGrace: 500 * time.Millisecond})
+	t.Cleanup(func() { rt.StopAll() })
 
 	parentID := actor.ActorID("tool:remote-parent")
 	_, remote := dialPort(t, rt, "lease", nopEmit, staticResolve(parentID), nil)
+	t.Cleanup(func() { _ = remote.conn.Close() })
+	// No goroutine reads remote.codec after dialPort consumes the handshake ACK.
+	// A KindDespawn write therefore cannot complete cooperatively.
 	parent, ok := rt.CurrentIncarnation(parentID)
 	if !ok {
 		t.Fatal("attached port parent is not live")
 	}
-	child, err := rt.Fork(parent, "tool:remote-parent/child", actor.KindTool, static(newRecordActor()))
+	childActor := newRecordActor()
+	child, err := rt.Fork(parent, "tool:remote-parent/child", actor.KindTool, static(childActor))
 	if err != nil {
 		t.Fatalf("Fork from port parent: %v", err)
 	}
 	if !rt.IsLive(child) {
 		t.Fatal("forked child is not live")
 	}
+	select {
+	case <-childActor.startedCh:
+	case <-time.After(time.Second):
+		t.Fatal("forked child did not start")
+	}
+	rt.mu.RLock()
+	owned := append([]embodiment(nil), rt.owned[parent.p]...)
+	rt.mu.RUnlock()
+	if len(owned) != 1 || owned[0] != child.p {
+		t.Fatalf("owned port children = %v, want exactly the forked child", owned)
+	}
 
-	_ = remote.conn.Close()
-	deadline := time.Now().Add(time.Second)
-	for rt.IsLive(child) && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
+	start := time.Now()
+	rt.Despawn(parent)
+	if elapsed := time.Since(start); elapsed > 250*time.Millisecond {
+		t.Fatalf("Despawn(port parent) blocked %v on non-reading peer", elapsed)
 	}
 	if rt.IsLive(child) {
-		t.Fatal("forked child survived its port parent's death")
+		t.Fatal("forked child remained live after port parent was judged dead")
+	}
+	rt.mu.RLock()
+	_, ownsChildren := rt.owned[parent.p]
+	_, parentEscorting := rt.zombies[parent.p]
+	rt.mu.RUnlock()
+	if ownsChildren {
+		t.Fatal("port parent's owned bookkeeping survived parent despawn")
+	}
+	if !parentEscorting {
+		t.Fatal("non-cooperative port parent completed before its child cascade could be compared")
+	}
+
+	select {
+	case <-childActor.stoppedCh:
+		// The peer still is not reading and the parent remains in its escort below:
+		// child Stop therefore precedes parent grace/escort completion.
+	case <-time.After(250 * time.Millisecond):
+		t.Fatal("forked child did not stop before the port parent's grace bound")
+	}
+	rt.mu.RLock()
+	_, parentEscorting = rt.zombies[parent.p]
+	rt.mu.RUnlock()
+	if !parentEscorting {
+		t.Fatal("port parent escort completed before child Stop")
+	}
+
+	// Repeating both parent and child termination is a no-op: no ownership edge
+	// is recreated and the child's Stop hook runs at most once.
+	rt.Despawn(parent)
+	rt.Despawn(child)
+	select {
+	case <-childActor.stoppedCh:
+		t.Fatal("repeated termination invoked child Stop more than once")
+	case <-time.After(20 * time.Millisecond):
+	}
+	rt.mu.RLock()
+	_, ownsChildren = rt.owned[parent.p]
+	rt.mu.RUnlock()
+	if ownsChildren {
+		t.Fatal("repeated termination recreated port ownership bookkeeping")
 	}
 }
 
