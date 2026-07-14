@@ -12,43 +12,44 @@ package gateway
 
 import (
 	"context"
+	"slices"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // TestStaticBacklogFullDelivery (DoD-7⑤): a channel with a static backlog >2×feedBatch
 // and zero new writes is fully delivered — the pump's 积压续跑 keeps a channel runnable
 // while it reads a full batch, so it drains the whole tail rather than one batch per
-// edge. Asserted on the lane cursor reaching the channel head (every row pushed).
+// edge. Asserted on the real downstream feed reaching the channel head.
 func TestStaticBacklogFullDelivery(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "rob"
 	h, id := openHome(t, channel.ID("c"), principal)
 	admitRows(t, h, 2*feedBatch+5) // >2×feedBatch rows beyond the member's own admit row
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
 
-	head, err := h.View().MaxSeq(context.Background())
-	if err != nil {
-		t.Fatalf("MaxSeq: %v", err)
-	}
+	want := sourceSeqs(t, h)
+	head := want[len(want)-1]
 	if head <= 2*feedBatch {
 		t.Fatalf("test needs a backlog >2×feedBatch, got head=%d", head)
 	}
 
-	s, _ := g.Attach(context.Background(), principal, nil)
-	_, stop := drainFeed(s)
+	s, _ := g.Attach(principal, nil)
+	feed, stop := observeFeed(s)
 	s.StartFeed()
 
-	waitFor(t, func() bool { return s.lane.cursor.at("c") >= head },
+	waitFor(t, func() bool { return len(feed.sequences("c")) >= len(want) },
 		"static backlog was not fully delivered (积压续跑 broken)")
 	s.Close()
 	stop()
-	if got := s.lane.cursor.at("c"); got != head {
-		t.Fatalf("cursor must reach the channel head: got %d want %d", got, head)
+	if got := feed.sequences("c"); !slices.Equal(got, want) {
+		t.Fatalf("downstream feed sequence mismatch: got %v want %v", got, want)
 	}
 }
 
@@ -60,7 +61,7 @@ func TestStaticBacklogFullDelivery(t *testing.T) {
 func TestPumpFairness(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "sam"
 	hot, hotID := openHome(t, channel.ID("hot"), principal)
 	cold, coldID := openHome(t, channel.ID("cold"), principal)
@@ -73,15 +74,56 @@ func TestPumpFairness(t *testing.T) {
 	}, nil, nil)
 
 	coldHead, _ := cold.View().MaxSeq(context.Background())
-	s, _ := g.Attach(context.Background(), principal, nil)
-	_, stop := drainFeed(s)
+	hotHead, _ := hot.View().MaxSeq(context.Background())
+	s, _ := g.Attach(principal, nil)
+	var feed *feedObserver
+	var stop func()
+	coldReached := make(chan int64, 1)
+	var coldOnce sync.Once
+	feed, stop = observeFeed(s, func(ch channel.ID, _ int) {
+		if ch == "cold" && feed.lastSeq("cold") >= coldHead {
+			coldOnce.Do(func() { coldReached <- feed.lastSeq("hot") })
+		}
+	})
 	s.StartFeed()
 
-	// The cold channel reaches its head promptly (not starved by the hot backlog).
-	waitFor(t, func() bool { return s.lane.cursor.at("cold") >= coldHead },
-		"cold channel starved by the hot channel (fairness broken)")
+	var hotAtCold int64
+	select {
+	case hotAtCold = <-coldReached:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cold channel starved by the hot channel (fairness broken)")
+	}
+	// At the exact wire boundary where cold reaches its head, hot may have emitted at
+	// most its one batch for that round. An implementation that drains hot completely
+	// before visiting cold therefore fails instead of passing on eventual delivery.
+	if hotAtCold > feedBatch || hotAtCold >= hotHead {
+		t.Fatalf("cold arrived only after hot overran its one-batch turn: hot=%d head=%d batch=%d", hotAtCold, hotHead, feedBatch)
+	}
 	s.Close()
 	stop()
+}
+
+func sourceSeqs(t *testing.T, h *home.Home) []int64 {
+	t.Helper()
+	var seqs []int64
+	after := int64(0)
+	for {
+		rows, err := h.View().ReadAfterSeq(context.Background(), after, feedBatch)
+		if err != nil {
+			t.Fatalf("ReadAfterSeq(%d): %v", after, err)
+		}
+		for _, row := range rows {
+			seqs = append(seqs, row.Seq)
+			after = row.Seq
+		}
+		if len(rows) < feedBatch {
+			break
+		}
+	}
+	if len(seqs) == 0 {
+		t.Fatal("source log unexpectedly empty")
+	}
+	return seqs
 }
 
 // TestBusyLoopObservesSweepUnderSustainedBacklog (P0-1 终审锚): a channel with a deep
@@ -97,29 +139,38 @@ func TestPumpFairness(t *testing.T) {
 func TestBusyLoopObservesSweepUnderSustainedBacklog(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk, SweepInterval: 10 * time.Millisecond})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk, sweepInterval: 10 * time.Millisecond})
 	const principal = "revoked-busy"
 	h, id := openHome(t, channel.ID("c"), principal)
 	admitRows(t, h, 3*feedBatch) // deep backlog: every batch read is a full feedBatch.
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
 
-	s, _ := g.Attach(context.Background(), principal, nil)
-	_, stop := drainFeed(s)
-	s.StartFeed()
-
-	// Let the pump get busy (at least one full batch already read) before revoking.
-	waitFor(t, func() bool { return s.lane.cursor.at("c") >= feedBatch },
-		"pump never started draining the backlog")
-
 	head, err := h.View().MaxSeq(context.Background())
 	if err != nil {
 		t.Fatalf("MaxSeq: %v", err)
 	}
+	revoked := make(chan struct{})
+	var revokeOnce sync.Once
+	s, _ := g.Attach(principal, nil)
+	feed, stop := observeFeed(s, func(ch channel.ID, count int) {
+		if ch != "c" || count != 1 {
+			return
+		}
+		revokeOnce.Do(func() {
+			// Revoke while the first full batch is visibly crossing the downstream
+			// boundary. runFeed has armed its sweep before it can emit this frame.
+			res.set(principal, nil, nil, nil)
+			clk.advance(10 * time.Millisecond)
+			close(revoked)
+		})
+	})
+	s.StartFeed()
 
-	// Revoke NOW, with NO poke — the read side must self-discover this via the sweep
-	// backstop even while continuously busy (P0-1).
-	res.set(principal, nil, nil, nil)
-	clk.advance(10 * time.Millisecond) // fire the injected clock's real sweep timer
+	select {
+	case <-revoked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("pump never began crossing the first full batch")
+	}
 
 	waitFor(t, func() bool {
 		_, ok := eligRoutes(s)["c"]
@@ -130,7 +181,7 @@ func TestBusyLoopObservesSweepUnderSustainedBacklog(t *testing.T) {
 	// otherwise this test would pass even on the pre-fix code merely because the busy
 	// loop happened to finish the whole backlog before anyone looked (proving nothing
 	// about bounded revocation response).
-	stoppedAt := s.lane.cursor.at("c")
+	stoppedAt := feed.lastSeq("c")
 	if stoppedAt >= head {
 		t.Fatalf("backlog (%d rows) fully drained before the sweep-bound revocation could be observed; deepen the backlog or shrink SweepInterval — stoppedAt=%d head=%d", 3*feedBatch, stoppedAt, head)
 	}
@@ -147,12 +198,12 @@ func TestAdmitWithoutPokeConvergesOnSweep(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
 	const sweep = 10 * time.Second
-	g := New(Config{Resolver: res, Clock: clk, SweepInterval: sweep})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk, sweepInterval: sweep})
 	const principal = "no-poke-admit"
 	res.set(principal, nil, nil, nil)
 
-	s, _ := g.Attach(context.Background(), principal, nil)
-	_, stop := drainFeed(s)
+	s, _ := g.Attach(principal, nil)
+	feed, stop := observeFeed(s)
 	s.StartFeed()
 	waitFor(t, func() bool { return res.callCount() >= 2 && clk.armCount() >= 2 },
 		"running pump did not arm its sweep timer")
@@ -163,7 +214,7 @@ func TestAdmitWithoutPokeConvergesOnSweep(t *testing.T) {
 	res.set(principal, []Route{memberRoute("late", h, id, clk.now())}, nil, nil)
 	head, _ := h.View().MaxSeq(context.Background())
 	clk.advance(sweep)
-	waitFor(t, func() bool { return s.lane.cursor.at("late") >= head },
+	waitFor(t, func() bool { return feed.lastSeq("late") >= head },
 		"no-poke Admit did not converge through the real sweep timer")
 
 	s.Close()
@@ -173,18 +224,18 @@ func TestAdmitWithoutPokeConvergesOnSweep(t *testing.T) {
 // TestAdmitPokeEntersStream (DoD-7③): a running pump with NO eligibility yet; when the
 // resolver gains a channel and a poke fires (the Admit membership-change poke), the
 // channel enters the stream within a bounded time (≤下一泵轮) — the dirty/wake edge
-// re-resolves, subscribes, and pumps the backlog. Asserted on the cursor advancing.
+// re-resolves, subscribes, and pumps the backlog. Asserted on the real feed advancing.
 func TestAdmitPokeEntersStream(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "tom"
 	h, id := openHome(t, channel.ID("c"), principal)
 	// Start with NO eligibility for tom.
 	res.set(principal, nil, nil, nil)
 
-	s, _ := g.Attach(context.Background(), principal, nil)
-	_, stop := drainFeed(s)
+	s, _ := g.Attach(principal, nil)
+	feed, stop := observeFeed(s)
 	s.StartFeed()
 	// Initially no subscription (nothing eligible).
 	waitFor(t, func() bool { return len(eligRoutes(s)) == 0 }, "expected no eligibility initially")
@@ -194,7 +245,7 @@ func TestAdmitPokeEntersStream(t *testing.T) {
 	g.Poke(principal)
 
 	head, _ := h.View().MaxSeq(context.Background())
-	waitFor(t, func() bool { return s.lane.cursor.at("c") >= head },
+	waitFor(t, func() bool { return feed.lastSeq("c") >= head },
 		"Admit poke did not bring the channel into the stream (≤下一泵轮 broken)")
 	s.Close()
 	stop()

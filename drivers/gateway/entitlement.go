@@ -2,7 +2,6 @@ package gateway
 
 import (
 	"context"
-	"time"
 
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -20,23 +19,13 @@ const (
 
 // Route is one channel a principal is currently entitled to (spec §3.2 解析面
 // 输出定形): the channel id, the Home handle that serves its log/signal, the
-// access class, the member's per-channel subject id (member only — empty for an
-// observer), and the wall-clock at which this fact was checked (lease anchor).
+// access class and the member's per-channel subject id (member only — empty for an
+// observer). The gateway anchors leases when resolution completes on its own clock.
 type Route struct {
 	Channel   channel.ID
 	Home      *home.Home
 	Access    AccessClass
 	SubjectID actor.ActorID // member only; zero value for observer
-	CheckedAt time.Time
-}
-
-// ChannelFailure carries a per-channel resolution failure (spec §3.2 部分失败
-// 语义): "查得坏消息" for exactly this channel. The session keeps serving it from
-// the last good snapshot within the T_stale lease, then pauses it — distinct from
-// a channel simply absent from routes (= confirmed no eligibility, retire now).
-type ChannelFailure struct {
-	Channel channel.ID
-	Err     error
 }
 
 // EntitlementResolver is the app-domain seam (injected by the assembly root, spec
@@ -54,13 +43,13 @@ type ChannelFailure struct {
 //     pause.
 //   - err != nil = whole-snapshot failure → the entire prior snapshot rides its lease.
 type EntitlementResolver interface {
-	Snapshot(ctx context.Context, principal string) (routes []Route, failed []ChannelFailure, err error)
+	Snapshot(ctx context.Context, principal string) (routes []Route, failed []channel.ID, err error)
 }
 
 // ResolverFunc adapts a bare function to EntitlementResolver (like http.HandlerFunc).
-type ResolverFunc func(ctx context.Context, principal string) ([]Route, []ChannelFailure, error)
+type ResolverFunc func(ctx context.Context, principal string) ([]Route, []channel.ID, error)
 
 // Snapshot implements EntitlementResolver.
-func (f ResolverFunc) Snapshot(ctx context.Context, principal string) ([]Route, []ChannelFailure, error) {
+func (f ResolverFunc) Snapshot(ctx context.Context, principal string) ([]Route, []channel.ID, error) {
 	return f(ctx, principal)
 }

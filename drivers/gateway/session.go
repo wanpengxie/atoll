@@ -14,7 +14,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// defaultEpoch is the process-lifetime gateway epoch when Config.Epoch is 0.
+// defaultEpoch mints the production process-lifetime gateway epoch.
 func defaultEpoch() int64 { return time.Now().UnixNano() }
 
 // feedBatch is the read pump's per-poll, per-channel row budget (照 ws.go wsTail 100).
@@ -45,13 +45,11 @@ type subscription struct {
 // whole-snapshot failure (no routes/failed are trustworthy at all) — any channel_id not
 // already a known live route maps to unavailable rather than forbidden, because a
 // forbidden verdict asserts confirmed absence and we cannot currently confirm anything.
-// checkedAt is the last reconcile time.
 type eligState struct {
 	routes    map[channel.ID]Route
 	paused    map[channel.ID]struct{}
 	failed    map[channel.ID]struct{}
 	globalErr bool
-	checkedAt time.Time
 }
 
 // Session is one attached connection's handle into the gateway (spec §3.2 终形):
@@ -88,19 +86,13 @@ type Session struct {
 	elig atomic.Pointer[eligState]
 
 	onceClose sync.Once
-
-	// beforeDeliver/feedStarted are TEST-ONLY failpoints (nil in production). The
-	// former parks a parsed frame before it takes a delivery permit; the latter proves
-	// that a registered-but-blocked StartFeed never starts after Close returned.
-	beforeDeliver func()
-	feedStarted   func()
 }
 
 // Attach opens a session for one authenticated connection (连接模型勘误期: the app
 // membrane resolved cookie→principal — no channel ACL at connection level). It seats
 // the device (首入 → 踢在场圈) and hands back the session; the attach receipt is now
 // EMPTY (报到 ack — attach is no longer a binding grant). Refused after Close.
-func (g *Gateway) Attach(ctx context.Context, principal string, since map[channel.ID]int64) (*Session, error) {
+func (g *Gateway) Attach(principal string, since map[channel.ID]int64) (*Session, error) {
 	s := &Session{
 		gw:        g,
 		principal: principal,
@@ -135,10 +127,8 @@ func (s *Session) StartFeed() {
 		return
 	}
 	s.reconcile()
-	// The synchronous resolver is allowed to ignore ctx. Close may therefore set the
-	// session latch and return from its bounded join while this call is still parked.
-	// Re-check the SAME latch before spawning: a late return retires its registration
-	// here and can never launch a post-Close goroutine.
+	// Defensively re-check the same latch before spawning. Production resolvers must
+	// honor ctx; even a faulty late return cannot launch a post-Close goroutine.
 	s.mu.Lock()
 	closed := s.closed
 	s.mu.Unlock()
@@ -170,8 +160,8 @@ func (s *Session) beginFeed() bool {
 	return true
 }
 
-// Send serializes one downstream frame and queues it on the lane. A full lane (满 →
-// 断连) tears the session down.
+// Send serializes one downstream frame and queues it on the lane. A temporarily full
+// lane applies backpressure; a closed lane tears the session down.
 func (s *Session) Send(f subjectgate.Frame) {
 	b, err := f.Marshal()
 	if err != nil {
@@ -235,9 +225,6 @@ func (s *Session) endDeliver() { s.gw.delivering.Done() }
 // 公平) → 积压续跑 or wait on ctx/wake/sweep/Home-signals. On exit it closes every
 // subscription, the lane, untracks the pump, and closes the session.
 func (s *Session) runFeed() {
-	if s.feedStarted != nil {
-		s.feedStarted()
-	}
 	defer func() {
 		for _, sub := range s.subs {
 			sub.cancel()
@@ -250,7 +237,7 @@ func (s *Session) runFeed() {
 	}()
 
 	s.dirty.Store(true) // initial-dirty
-	var sweep Timer
+	var sweep timer
 	resetSweep := func() {
 		if sweep != nil {
 			sweep.Stop()
@@ -307,7 +294,7 @@ func (s *Session) runFeed() {
 				}
 				full, ok := s.pumpChannel(ch, sub)
 				if !ok {
-					return // full lane → 断连
+					return // lane closed → stop the pump
 				}
 				if full {
 					busy = true
@@ -337,7 +324,7 @@ func (s *Session) activeChannels() []channel.ID {
 // §3.2: 泵相位零新 goroutine — one reflect.Select over the dynamic subscription set).
 // Returns false on ctx cancel. wake/sweep re-arm dirty (re-resolve); a bare Home
 // signal just proceeds to pump.
-func (s *Session) wait(sweep Timer) bool {
+func (s *Session) wait(sweep timer) bool {
 	cases := []reflect.SelectCase{
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.ctx.Done())},
 		{Dir: reflect.SelectRecv, Chan: reflect.ValueOf(s.wake)},
@@ -384,15 +371,11 @@ func (s *Session) nextSweepDeadline() time.Time {
 // (spec §3.2 收敛对象甲 differences: 缺→订+补流 / 多→退订 / 换值→换订; failed→T_stale
 // lease; confirmed-absent→退订 immediately). Then it publishes the资格账 for Upstream.
 func (s *Session) reconcile() {
-	if s.gw.resolver == nil {
-		s.publishElig(s.gw.clock.Now(), false, nil) // no resolver → nothing eligible (every frame forbidden)
-		return
-	}
 	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	routes, failed, err := s.gw.resolver.Snapshot(rctx, s.principal)
 	cancel()
-	// A resolver is allowed to ignore ctx and return after Close. Once the session
-	// lifetime is canceled, never create/refresh subscriptions from that stale return;
+	// Defend against a faulty resolver returning after Close. Once the session lifetime
+	// is canceled, never create/refresh subscriptions from that stale return;
 	// StartFeed's post-reconcile latch check will retire the pump registration.
 	if s.ctx.Err() != nil {
 		return
@@ -410,7 +393,7 @@ func (s *Session) reconcile() {
 		for _, sub := range s.subs {
 			s.leaseOrPause(sub, now)
 		}
-		s.publishElig(now, true, nil)
+		s.publishElig(true, nil)
 		return
 	}
 
@@ -419,8 +402,8 @@ func (s *Session) reconcile() {
 		desired[r.Channel] = r
 	}
 	failedSet := make(map[channel.ID]struct{}, len(failed))
-	for _, cf := range failed {
-		failedSet[cf.Channel] = struct{}{}
+	for _, ch := range failed {
+		failedSet[ch] = struct{}{}
 	}
 
 	// additions + home rebind + confirmed-live refresh.
@@ -455,7 +438,7 @@ func (s *Session) reconcile() {
 		sub.cancel()
 		delete(s.subs, ch)
 	}
-	s.publishElig(now, false, failedSet)
+	s.publishElig(false, failedSet)
 }
 
 // leaseOrPause keeps a failed channel served within T_stale of its last SUCCESSFUL
@@ -484,7 +467,7 @@ func (s *Session) subscribe(ch channel.ID, r Route, now time.Time) {
 // also in failedThisRound (a per-channel failure with no subscription yet — 六轮 P1-2)
 // or globalErr is set (a whole-snapshot failure — nothing is confirmed this round),
 // either of which must map to unavailable, not forbidden (表①: 查得坏消息 ≠ 查不到).
-func (s *Session) publishElig(now time.Time, globalErr bool, failedThisRound map[channel.ID]struct{}) {
+func (s *Session) publishElig(globalErr bool, failedThisRound map[channel.ID]struct{}) {
 	routes := make(map[channel.ID]Route, len(s.subs))
 	paused := map[channel.ID]struct{}{}
 	for ch, sub := range s.subs {
@@ -494,12 +477,12 @@ func (s *Session) publishElig(now time.Time, globalErr bool, failedThisRound map
 		}
 		routes[ch] = sub.route
 	}
-	s.elig.Store(&eligState{routes: routes, paused: paused, failed: failedThisRound, globalErr: globalErr, checkedAt: now})
+	s.elig.Store(&eligState{routes: routes, paused: paused, failed: failedThisRound, globalErr: globalErr})
 }
 
 // pumpChannel drains up to feedBatch rows after ch's cursor into the lane as feed
 // frames. Returns (full, ok): full = read a whole batch (积压续跑 → stay runnable);
-// ok=false = full lane (→ 断连). receipt.seq is never folded here (write位≠读位).
+// ok=false = lane closed. receipt.seq is never folded here (write位≠读位).
 func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) {
 	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	defer cancel()
@@ -526,7 +509,7 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 			continue
 		}
 		if !s.lane.push(b) {
-			return false, false // full lane → 断连
+			return false, false // Session/lane closed
 		}
 		s.lane.cursor.advance(ch, r.Seq)
 	}
@@ -539,7 +522,7 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 // channel_id names the channel; the gateway resolves it against the资格账 (member →
 // deliver; observer/absent → forbidden; lease-expired → unavailable) and looks up the
 // slot现场. The detach frame is整删 (no case). Error mapping照表①.
-func (s *Session) Upstream(ctx context.Context, f subjectgate.Frame) subjectgate.Frame {
+func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 	errFrame := func(code, detail string) subjectgate.Frame {
 		fr, _ := subjectgate.NewFrame(subjectgate.FrameError, f.Ref, subjectgate.ErrorPayload{
 			Frame: string(f.Type), Code: code, Detail: detail,
@@ -581,9 +564,6 @@ func (s *Session) Upstream(ctx context.Context, f subjectgate.Frame) subjectgate
 		}
 		if r.Access != AccessMember {
 			return errFrame(subjectgate.CodeForbidden, "observer may not drive business frames")
-		}
-		if s.beforeDeliver != nil {
-			s.beforeDeliver()
 		}
 		// Delivery permit (统一会话闸): a已获准 delivery blocks Close's排水 counter.
 		if !s.beginDeliver() {
@@ -635,8 +615,8 @@ func channelIDOf(f subjectgate.Frame) (string, error) {
 
 // applyRouting resolves an empty-audience submit through the injected app routing面
 // and rewrites the payload with the concrete audience + kind (design §5.3: routing
-// 政策留 app). An explicit audience is honoured as-is; a nil resolver leaves the frame
-// untouched. A per-request routing condition (no reachable brain) → unavailable
+// 政策留 app). An explicit audience is honoured as-is. A per-request routing condition
+// (no reachable brain) → unavailable
 // (never写黑洞). channel_id is preserved through the rewrite.
 func (s *Session) applyRouting(cid channel.ID, f subjectgate.Frame) (subjectgate.Frame, *subjectgate.Frame) {
 	var p subjectgate.SubmitPayload
@@ -646,10 +626,10 @@ func (s *Session) applyRouting(cid channel.ID, f subjectgate.Frame) (subjectgate
 		})
 		return f, &fr
 	}
-	if len(p.Audience) > 0 || s.gw.routing == nil {
+	if len(p.Audience) > 0 {
 		return f, nil
 	}
-	aud, kind, retryable, err := s.gw.routing(s.ctx, cid, nil, message.Kind(p.Kind))
+	aud, kind, retryable, err := s.gw.routing(s.ctx, cid, message.Kind(p.Kind))
 	if retryable != "" || err != nil {
 		detail := retryable
 		if detail == "" {

@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"time"
 
 	platformhome "github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -260,7 +261,7 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 	record, created, configChanged, err := home.IntroduceComposition(ctx, storespec.CompositionIntroduce{
 		DeclID: declID, Principal: declID, Class: engine, ConfigJSON: cfg,
 		Placement: storespec.Placement(placement), DesiredHost: desiredHost,
-		MakeDefault: p.MakeDefault, Kind: kind, At: x.a.now().UnixMilli(),
+		MakeDefault: p.MakeDefault, Kind: kind, At: time.Now().UnixMilli(),
 	})
 	if err != nil {
 		return nil, err

@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -24,19 +23,6 @@ import (
 // result to the gateway (via ResolveRoutingForGateway); the cell welds identity
 // and commits.
 
-// submitInput is the user's RAW intent (the parsed HTTP body) — NOT a ready
-// envelope. Routing resolution turns its (possibly empty) audience into a
-// concrete audience + kind; identity is left for the door's pen to weld.
-type submitInput struct {
-	ID         string
-	Type       string
-	Kind       string
-	Payload    json.RawMessage
-	Audience   []string
-	Visibility string
-	ParentID   string
-}
-
 // routingError carries a per-request routing condition (no reachable brain / a
 // down default agent) back to the HTTP layer as a 503 to the SENDING user — it is
 // NOT written into the channel as truth. (errors.As-friendly.)
@@ -51,14 +37,10 @@ func (e *routingError) Error() string { return e.detail }
 // this method value as its Routing面; the assembly root bridges it (app → drivers is
 // fenced). It wraps resolveRouting, mapping a per-request routingError into the
 // retryable-detail return so the gateway emits an unavailable error frame (never
-// writing the condition as truth), and a genuine failure into err. audienceIn is the
-// client's explicit audience (empty → policy resolves it).
-func (a *App) ResolveRoutingForGateway(ctx context.Context, chID channel.ID, audienceIn []actor.ActorID, kindIn message.Kind) ([]actor.ActorID, message.Kind, string, error) {
-	in := submitInput{Kind: string(kindIn)}
-	for _, id := range audienceIn {
-		in.Audience = append(in.Audience, string(id))
-	}
-	audience, kind, err := a.resolveRouting(ctx, chID, in)
+// writing the condition as truth), and a genuine failure into err. The gateway calls
+// this only for an empty-audience submit.
+func (a *App) ResolveRoutingForGateway(ctx context.Context, chID channel.ID, kindIn message.Kind) ([]actor.ActorID, message.Kind, string, error) {
+	audience, kind, err := a.resolveRouting(ctx, chID, kindIn)
 	if err != nil {
 		var re *routingError
 		if errors.As(err, &re) {
@@ -69,8 +51,8 @@ func (a *App) ResolveRoutingForGateway(ctx context.Context, chID channel.ID, aud
 	return audience, kind, "", nil
 }
 
-// resolveRouting reproduces the channel's no-audience routing policy: an explicit
-// audience is honoured as-is; otherwise default_agent is the INTENT pointer,
+// resolveRouting reproduces the channel's no-audience routing policy: default_agent is
+// the INTENT pointer,
 // resolved against live PRESENCE (View.Stat, the substrate's authoritative
 // embodiment self-read) with the agent:boost floor as the failover target:
 //   - default_agent points at a PRESENT agent   → agent-centric: request to it.
@@ -85,16 +67,8 @@ func (a *App) ResolveRoutingForGateway(ctx context.Context, chID channel.ID, aud
 //
 // "cannot serve" / "no brain" are per-request conditions for the SENDING user —
 // returned as a routingError, NEVER written as a channel envelope.
-func (a *App) resolveRouting(ctx context.Context, chID channel.ID, in submitInput) ([]actor.ActorID, message.Kind, error) {
-	audience := make([]actor.ActorID, 0, len(in.Audience))
-	for _, id := range in.Audience {
-		audience = append(audience, actor.ActorID(id))
-	}
-	kind := message.Kind(in.Kind)
-	if len(audience) > 0 {
-		return audience, kind, nil
-	}
-
+func (a *App) resolveRouting(ctx context.Context, chID channel.ID, kind message.Kind) ([]actor.ActorID, message.Kind, error) {
+	var audience []actor.ActorID
 	home := a.getHome(chID)
 	if home == nil {
 		return nil, kind, &routingError{detail: "channel unavailable"}

@@ -3,7 +3,6 @@ package app_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -110,31 +109,6 @@ func TestOperateIntroduceAcquiresDaemonBeforeDeclaration(t *testing.T) {
 	}
 }
 
-// TestCreateChannel_SeedAdmitFails_RollsBack pins the create-channel transaction
-// fix: a failed seeding Admit (creator or boost) must tear the channel down (close
-// home + delete the row) and return 5xx — never a silent 201 over a channel whose
-// creator is not a member.
-func TestCreateChannel_SeedAdmitFails_RollsBack(t *testing.T) {
-	env := setupTestApp(t)
-	_, cookies := register(t, env, "rollback@example.com", "secret123", "Owner")
-	wsBody, cookies := createWorkspace(t, env, cookies, "WS")
-	wsID := wsBody["id"].(string)
-
-	env.app.SetSeedAdmitFailForTest(true)
-	w := env.do(t, "POST", fmt.Sprintf("/api/workspaces/%s/channels", wsID),
-		map[string]any{"name": "doomed"}, cookies)
-	assertStatus(t, w, http.StatusInternalServerError)
-	env.app.SetSeedAdmitFailForTest(false)
-
-	// The channel row must be rolled back — it appears in no listing.
-	w = env.do(t, "GET", fmt.Sprintf("/api/workspaces/%s/channels", wsID), nil, cookies)
-	assertStatus(t, w, http.StatusOK)
-	chans, _ := respJSON(t, w)["channels"].([]any)
-	if len(chans) != 0 {
-		t.Fatalf("channel row not rolled back after seed-admit failure: %v", chans)
-	}
-}
-
 // TestDeleteDaemon_RevokePersistFails_Returns5xx pins the daemon-delete fix: if the
 // revocation cannot reach durable storage, the handler must return 5xx (not a false
 // ok) and leave the daemon intact — never silently drop the key while reporting
@@ -158,10 +132,16 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 		map[string]any{"daemon_ids": []string{daemonID}}, cookies2)
 	assertStatus(t, w, http.StatusOK)
 
-	env.app.SetRevokeFailForTest(true)
+	// A normal schema trigger (not TEMP/connection-local) fails the third write after
+	// both DELETEs have executed inside the handler transaction.
+	if _, err := env.db.Exec(`CREATE TRIGGER fail_daemon_revoke_job
+		BEFORE INSERT ON daemon_revoke_jobs
+		BEGIN SELECT RAISE(ABORT, 'forced revoke failure'); END`); err != nil {
+		t.Fatalf("install revoke trigger: %v", err)
+	}
+	defer env.db.Exec(`DROP TRIGGER IF EXISTS fail_daemon_revoke_job`)
 	w = env.do(t, "DELETE", "/api/daemons/"+daemonID, nil, cookies2)
 	assertStatus(t, w, http.StatusInternalServerError)
-	env.app.SetRevokeFailForTest(false)
 
 	// The daemon must still exist — revocation was not persisted, so not reported ok.
 	w = env.do(t, "GET", "/api/daemons", nil, cookies2)
@@ -189,6 +169,13 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 	}
 	if !bindingSurvived {
 		t.Fatal("daemon_channels binding was deleted despite the revocation tx rolling back (half-applied)")
+	}
+	var pending int
+	if err := env.db.QueryRow(`SELECT COUNT(*) FROM daemon_revoke_jobs WHERE daemon_id=?`, daemonID).Scan(&pending); err != nil {
+		t.Fatal(err)
+	}
+	if pending != 0 {
+		t.Fatalf("failed revocation left %d pending jobs, want 0", pending)
 	}
 }
 

@@ -18,6 +18,7 @@ import (
 	agentbase "github.com/wanpengxie/atoll/drivers/agents/base"
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
+	"github.com/wanpengxie/atoll/protocol/channel"
 
 	// Composition root wires the catalog: the BINARY pins which classes are
 	// compiled in — not the app library (which stays impl-agnostic, so
@@ -64,7 +65,7 @@ func gracefulShutdown(ctx context.Context, logger *slog.Logger, a appShutdowner,
 // assembly root maps DTO→DTO). The app resolves 户籍 ∪ 读资格 per principal; the bridge
 // only translates the flat access class into gateway.AccessClass.
 func gatewayResolver(a *app.App) gateway.EntitlementResolver {
-	return gateway.ResolverFunc(func(ctx context.Context, principal string) ([]gateway.Route, []gateway.ChannelFailure, error) {
+	return gateway.ResolverFunc(func(ctx context.Context, principal string) ([]gateway.Route, []channel.ID, error) {
 		routes, failed, err := a.EntitlementSnapshot(ctx, principal)
 		if err != nil {
 			return nil, nil, err
@@ -80,17 +81,9 @@ func gatewayResolver(a *app.App) gateway.EntitlementResolver {
 				Home:      r.Home,
 				Access:    access,
 				SubjectID: r.SubjectID,
-				CheckedAt: r.CheckedAt,
 			})
 		}
-		var gf []gateway.ChannelFailure
-		if len(failed) > 0 {
-			gf = make([]gateway.ChannelFailure, 0, len(failed))
-			for _, f := range failed {
-				gf = append(gf, gateway.ChannelFailure{Channel: f.Channel, Err: f.Err})
-			}
-		}
-		return gr, gf, nil
+		return gr, failed, nil
 	})
 }
 
@@ -136,22 +129,21 @@ func main() {
 
 	// Human-ingress gateway (gateway 期 S3, 连接模型勘误期): constructed AFTER the app so
 	// it can hold the app's routing + entitlement面, then injected back (the construction
-	// cycle is broken by the setters). The poke hub fans the platform membership-change
-	// emit points (home.Home.Admit/Remove via home.Config.OnMembershipChange) into
-	// Gateway.Poke; the entitlement resolver bridges the app's own DTO into gateway.Route
+	// cycle is broken by the setters). The platform membership-change emit points
+	// (home.Home.Admit/Remove via home.Config.OnMembershipChange) call Gateway.Poke
+	// directly; the entitlement resolver bridges the app's own DTO into gateway.Route
 	// (app → drivers is fenced, so the assembly root does the DTO→DTO map here).
-	pokeHub := gateway.NewPokeHub()
-	gw := gateway.New(gateway.Config{
+	gw, err := gateway.New(gateway.Config{
 		Routing:  a.ResolveRoutingForGateway,
 		Resolver: gatewayResolver(a),
 		Logger:   logger,
 	})
-	pokeHub.Subscribe(gw.Poke)
-	if err := gw.Start(); err != nil {
+	if err != nil {
 		log.Fatalf("server: %v", err)
 	}
+	gw.Start()
 	a.SetGateway(web.New(gw))
-	a.SetMembershipPoke(pokeHub.Poke)
+	a.SetMembershipPoke(gw.Poke)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

@@ -246,14 +246,6 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 		return
 	}
 	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
-	// Injected test seam (nil in production): force the revocation persist to fail
-	// so the rollback + 5xx path is exercised deterministically.
-	if a.revokeFailHook != nil {
-		if herr := a.revokeFailHook(); herr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-			return
-		}
-	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM daemon_channels WHERE daemon_id=?`, daemonID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return

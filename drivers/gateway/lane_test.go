@@ -1,35 +1,78 @@
 package gateway
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
-// TestLaneCapacityFullDisconnect: the lane accepts exactly LaneCapacity frames
-// without a drainer, then the overflow push is refused, counted, AND seals the
-// lane itself (满 → 自封断连 — the disconnect verdict is the lane's own, not a
-// caller convention; DoD-11 lane 三断言: 容量 64 / 满自封 / drop 计数).
-func TestLaneCapacityFullDisconnect(t *testing.T) {
+// TestLaneFullAppliesBackpressureAtFixedCapacity: capacity remains bounded at 64,
+// but a transiently full queue waits for its already-runnable drainer instead of
+// misclassifying scheduling latency as a slow consumer.
+func TestLaneFullAppliesBackpressureAtFixedCapacity(t *testing.T) {
 	l := newLane(newCursor(nil))
-	for i := 0; i < LaneCapacity; i++ {
+	for i := 0; i < laneCapacity; i++ {
 		if !l.push([]byte("x")) {
-			t.Fatalf("push %d/%d should fit within capacity", i, LaneCapacity)
+			t.Fatalf("push %d/%d should fit within capacity", i, laneCapacity)
 		}
 	}
-	if l.push([]byte("overflow")) {
-		t.Fatal("push past capacity should be refused (满 → 自封断连)")
+	started := make(chan struct{})
+	pushed := make(chan bool, 1)
+	go func() {
+		close(started)
+		pushed <- l.push([]byte("backpressured"))
+	}()
+	<-started
+	select {
+	case ok := <-pushed:
+		t.Fatalf("push past capacity returned before a drain: ok=%v", ok)
+	case <-time.After(50 * time.Millisecond):
 	}
-	if got := l.DroppedCount(); got != 1 {
-		t.Fatalf("dropped count = %d, want 1", got)
+	<-l.out
+	select {
+	case ok := <-pushed:
+		if !ok {
+			t.Fatal("backpressured push must succeed after the drainer makes room")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("backpressured push did not resume after the drainer made room")
 	}
-	if !l.isClosed() {
-		t.Fatal("overflow must seal the lane itself — a caller ignoring ok=false must not leave a doomed lane half-alive")
+	select {
+	case <-l.closed:
+		t.Fatal("temporary queue pressure must not close the lane")
+	default:
 	}
-	if l.push([]byte("after-seal")) {
-		t.Fatal("push after the overflow seal must be refused")
+	if laneCapacity != 64 {
+		t.Fatalf("lane capacity = %d, want 64 (照 ws.go outbound)", laneCapacity)
 	}
-	if got := l.DroppedCount(); got != 1 {
-		t.Fatalf("post-seal pushes are refusals of a closed lane, not new drops: dropped = %d, want 1", got)
+}
+
+func TestLaneCloseReleasesBackpressuredPush(t *testing.T) {
+	l := newLane(newCursor(nil))
+	for i := 0; i < laneCapacity; i++ {
+		if !l.push([]byte("x")) {
+			t.Fatalf("push %d/%d should fit within capacity", i, laneCapacity)
+		}
 	}
-	if LaneCapacity != 64 {
-		t.Fatalf("lane capacity = %d, want 64 (照 ws.go outbound)", LaneCapacity)
+	started := make(chan struct{})
+	pushed := make(chan bool, 1)
+	go func() {
+		close(started)
+		pushed <- l.push([]byte("blocked"))
+	}()
+	<-started
+	select {
+	case ok := <-pushed:
+		t.Fatalf("full-lane push returned before Close: ok=%v", ok)
+	case <-time.After(50 * time.Millisecond):
+	}
+	l.close()
+	select {
+	case ok := <-pushed:
+		if ok {
+			t.Fatal("push released by Close must be refused")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Close did not release a backpressured push")
 	}
 }
 
@@ -43,8 +86,10 @@ func TestLaneCloseRefusesPush(t *testing.T) {
 	if l.push([]byte("b")) {
 		t.Fatal("push on a closed lane must be refused")
 	}
-	if !l.isClosed() {
-		t.Fatal("lane should report closed")
+	select {
+	case <-l.closed:
+	default:
+		t.Fatal("lane should be closed")
 	}
 	l.close() // idempotent
 }

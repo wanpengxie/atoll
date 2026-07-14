@@ -24,6 +24,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -47,12 +48,27 @@ func (gatewayTestDaemonAuthority) LockAndValidate(context.Context, string, chann
 type logCapture struct {
 	mu   sync.Mutex
 	msgs []string
+	ints map[string]map[string]int64
 }
 
 func (c *logCapture) Enabled(context.Context, slog.Level) bool { return true }
 func (c *logCapture) Handle(_ context.Context, r slog.Record) error {
 	c.mu.Lock()
 	c.msgs = append(c.msgs, r.Message)
+	if c.ints == nil {
+		c.ints = make(map[string]map[string]int64)
+	}
+	r.Attrs(func(a slog.Attr) bool {
+		if a.Value.Kind() == slog.KindInt64 {
+			m := c.ints[r.Message]
+			if m == nil {
+				m = make(map[string]int64)
+				c.ints[r.Message] = m
+			}
+			m[a.Key] = a.Value.Int64()
+		}
+		return true
+	})
 	c.mu.Unlock()
 	return nil
 }
@@ -69,6 +85,12 @@ func (c *logCapture) has(msg string) bool {
 	return false
 }
 func (c *logCapture) logger() *slog.Logger { return slog.New(c) }
+func (c *logCapture) intAttr(msg, key string) (int64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	v, ok := c.ints[msg][key]
+	return v, ok
+}
 
 // fakeResolver is a controllable EntitlementResolver (spec §3.2 解析面): the test sets
 // per-principal routes / per-channel failures / a whole-snapshot error, each read under
@@ -76,7 +98,7 @@ func (c *logCapture) logger() *slog.Logger { return slog.New(c) }
 type fakeResolver struct {
 	mu     sync.Mutex
 	routes map[string][]Route
-	failed map[string][]ChannelFailure
+	failed map[string][]channel.ID
 	err    map[string]error
 	calls  int
 }
@@ -84,19 +106,19 @@ type fakeResolver struct {
 func newResolver() *fakeResolver {
 	return &fakeResolver{
 		routes: map[string][]Route{},
-		failed: map[string][]ChannelFailure{},
+		failed: map[string][]channel.ID{},
 		err:    map[string]error{},
 	}
 }
 
-func (r *fakeResolver) Snapshot(ctx context.Context, principal string) ([]Route, []ChannelFailure, error) {
+func (r *fakeResolver) Snapshot(ctx context.Context, principal string) ([]Route, []channel.ID, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
 	return r.routes[principal], r.failed[principal], r.err[principal]
 }
 
-func (r *fakeResolver) set(principal string, routes []Route, failed []ChannelFailure, err error) {
+func (r *fakeResolver) set(principal string, routes []Route, failed []channel.ID, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.routes[principal] = routes
@@ -166,7 +188,7 @@ func (t *fakeTimer) settled() bool {
 // NewTimer and advance form a deterministic injected clock, but the code under test
 // still arms/receives a real Timer through the production loop's select. Tests never
 // send timer channels or call reconcile directly to stand in for an alarm.
-func (c *fakeClock) NewTimer(deadline time.Time) Timer {
+func (c *fakeClock) NewTimer(deadline time.Time) timer {
 	c.mu.Lock()
 	t := &fakeTimer{deadline: deadline, ch: make(chan time.Time, 1)}
 	c.arms = append(c.arms, deadline)
@@ -242,7 +264,7 @@ func openHome(t *testing.T, chID channel.ID, principal string) (*home.Home, acto
 
 // openHomeWired is openHome plus a REAL membership-change poke wire (spec §3.2 表②):
 // Home.Admit/Home.Remove fire g.Poke(principal) exactly as the assembly root bridges
-// PokeHub → Gateway.Poke in production (app.go/cmd/server main.go). Tests that must
+// App → Gateway.Poke in production (app.go/cmd/server main.go). Tests that must
 // exercise a genuine Remove→poke edge (not a hand-called s.reconcile()/g.Poke) use this
 // instead of openHome (六轮终审 P1-5: barrier authenticity).
 func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*home.Home, actor.ActorID) {
@@ -267,9 +289,25 @@ func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) 
 	return h, id
 }
 
-// memberRoute builds a member Route to a Home's admitted subject (checked at now).
+var testRouting Routing = func(context.Context, channel.ID, message.Kind) ([]actor.ActorID, message.Kind, string, error) {
+	return []actor.ActorID{"test-agent"}, message.KindRequest, "", nil
+}
+
+func newTestGateway(t testing.TB, cfg Config, set settings) *Gateway {
+	t.Helper()
+	if cfg.Routing == nil {
+		cfg.Routing = testRouting
+	}
+	g, err := newGateway(cfg, set)
+	if err != nil {
+		t.Fatalf("newGateway: %v", err)
+	}
+	return g
+}
+
+// memberRoute builds a member Route to a Home's admitted subject.
 func memberRoute(chID channel.ID, h *home.Home, subj actor.ActorID, now time.Time) Route {
-	return Route{Channel: chID, Home: h, Access: AccessMember, SubjectID: subj, CheckedAt: now}
+	return Route{Channel: chID, Home: h, Access: AccessMember, SubjectID: subj}
 }
 
 // mkBusiness builds a business frame of type typ carrying channel_id=cid (empty cid →
@@ -380,14 +418,43 @@ func admitRows(t *testing.T, h *home.Home, n int) {
 	}
 }
 
-// drainFeed drains a session's downstream lane in a goroutine, counting FrameFeed
-// frames, until the session's Done() closes. Returns a func giving the current count.
-func drainFeed(s *Session) (count func() int, stop func()) {
-	var mu sync.Mutex
-	n := 0
+// feedObserver consumes the real downstream wire and records the exact feed sequence
+// observed for each channel. Pump tests deliberately observe this public boundary:
+// cursor is owner-only session state and must not be read from another goroutine.
+type feedObserver struct {
+	mu    sync.Mutex
+	last  map[channel.ID]int64
+	count map[channel.ID]int
+	seqs  map[channel.ID][]int64
+}
+
+func (o *feedObserver) lastSeq(ch channel.ID) int64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.last[ch]
+}
+
+func (o *feedObserver) sequences(ch channel.ID) []int64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return append([]int64(nil), o.seqs[ch]...)
+}
+
+// observeFeed drains a session's downstream lane until Done closes. An optional
+// callback runs after each observed feed frame; it lets a test change external truth
+// at a real wire boundary without adding a scheduling seam to production code.
+// The function returns the wire observer and a stop func that waits for its goroutine.
+func observeFeed(s *Session, onFeed ...func(channel.ID, int)) (*feedObserver, func()) {
+	observer := &feedObserver{
+		last:  make(map[channel.ID]int64),
+		count: make(map[channel.ID]int),
+		seqs:  make(map[channel.ID][]int64),
+	}
+	ready := make(chan struct{})
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
+		close(ready)
 		for {
 			select {
 			case b, ok := <-s.Down():
@@ -396,20 +463,30 @@ func drainFeed(s *Session) (count func() int, stop func()) {
 				}
 				f, err := subjectgate.ParseFrame(b)
 				if err == nil && f.Type == subjectgate.FrameFeed {
-					mu.Lock()
-					n++
-					mu.Unlock()
+					var payload subjectgate.FeedPayload
+					if f.DecodePayload(&payload) != nil {
+						continue
+					}
+					ch := channel.ID(payload.ChannelID)
+					observer.mu.Lock()
+					observer.count[ch]++
+					observer.seqs[ch] = append(observer.seqs[ch], payload.Seq)
+					count := observer.count[ch]
+					if payload.Seq > observer.last[ch] {
+						observer.last[ch] = payload.Seq
+					}
+					observer.mu.Unlock()
+					for _, fn := range onFeed {
+						fn(ch, count)
+					}
 				}
 			case <-s.Done():
 				return
 			}
 		}
 	}()
-	return func() int {
-			mu.Lock()
-			defer mu.Unlock()
-			return n
-		}, func() {
-			<-done
-		}
+	<-ready
+	return observer, func() {
+		<-done
+	}
 }

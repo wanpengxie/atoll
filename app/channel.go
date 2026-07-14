@@ -1,6 +1,7 @@
 package app
 
 import (
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -20,6 +22,37 @@ import (
 // ---------------------------------------------------------------------------
 // Channel handlers
 // ---------------------------------------------------------------------------
+
+// rollbackOpenedChannel removes every artifact owned by an opened-but-incomplete
+// channel. The Home handle is detached under a.mu and closed after the lock is gone.
+func (a *App) rollbackOpenedChannel(ctx context.Context, chID channel.ID, dbPath string) {
+	if h := a.detachHome(chID); h != nil {
+		_ = h.Close()
+	}
+	_, _ = a.db.ExecContext(context.WithoutCancel(ctx), `DELETE FROM channels WHERE id = ?`, string(chID))
+	_ = os.Remove(dbPath)
+}
+
+// seedOpenedChannel performs the required post-open genesis writes against the real
+// Home and owns rollback on failure. It has no injectable callback: tests exercise
+// failure by closing the Home, which is the same failure surface production handles.
+func (a *App) seedOpenedChannel(ctx context.Context, h *home.Home, chID channel.ID, dbPath, userID string, at int64) (actor.ActorID, actor.ActorID, error) {
+	creatorID, err := h.Admit(ctx, actor.KindHuman, userID)
+	if err != nil {
+		a.rollbackOpenedChannel(ctx, chID, dbPath)
+		return "", "", err
+	}
+	boost, _, _, err := h.IntroduceComposition(ctx, storespec.CompositionIntroduce{
+		DeclID: "sys:boost", Principal: defaultAgentPrincipal, Class: defaultBoostClass,
+		Placement: storespec.PlacementServer, MakeDefault: true,
+		Kind: actor.KindAgent, At: at,
+	})
+	if err != nil {
+		a.rollbackOpenedChannel(ctx, chID, dbPath)
+		return "", "", err
+	}
+	return creatorID, boost.InstanceID, nil
+}
 
 func (a *App) handleListChannels(c *gin.Context) {
 	wsID := c.Param("wsID")
@@ -99,25 +132,10 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	// tear the whole thing down — close the home and roll back the channel row —
 	// and return 5xx, so the caller sees a clean failure it can retry, never a
 	// silent 201 over a broken channel.
-	admit := func(principal string, kind actor.Kind) (actor.ActorID, error) {
-		if a.seedAdmitFailHook != nil {
-			if err := a.seedAdmitFailHook(); err != nil {
-				return "", err
-			}
-		}
-		return home.Admit(c.Request.Context(), kind, principal)
-	}
 	rollback := func(stage string, err error) {
-		cID := channel.ID(chID)
 		// 锁纪律 (连接模型勘误期 §3.2 P1-6): 摘把手 under a.mu, Close OUTSIDE it — a
 		// home.Close held under a.mu blocks every concurrent getHome / resolver read.
-		a.mu.Lock()
-		h := a.homes[cID]
-		delete(a.homes, cID)
-		a.mu.Unlock()
-		_ = a.closeDetachedHome("create-rollback", cID, h)
-		_, _ = a.db.ExecContext(c.Request.Context(), `DELETE FROM channels WHERE id = ?`, chID)
-		_ = os.Remove(dbPath)
+		a.rollbackOpenedChannel(c.Request.Context(), channel.ID(chID), dbPath)
 		a.logger.Error("create channel: "+stage, "channel", chID, "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 	}
@@ -125,29 +143,12 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	// Membrane law: the creator is a member. Admit is the pure-membership动词 —
 	// the creating user's not→member edge (§4.6). No cell here (the human is
 	// embodied by the ring / subjectgate, never welded at this call site).
-	creatorID, mErr := admit(userID, actor.KindHuman)
+	creatorID, boostID, mErr := a.seedOpenedChannel(c.Request.Context(), home, channel.ID(chID), dbPath, userID, now)
 	if mErr != nil {
-		rollback("creator admit", mErr)
+		a.logger.Error("create channel: genesis seed", "channel", chID, "err", mErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	// Boost is the composition-domain seed: membership + channel intent +
-	// default flag commit together in the channel database.
-	if a.seedAdmitFailHook != nil {
-		if err := a.seedAdmitFailHook(); err != nil {
-			rollback("boost admit", err)
-			return
-		}
-	}
-	boost, _, _, mErr := home.IntroduceComposition(c.Request.Context(), storespec.CompositionIntroduce{
-		DeclID: "sys:boost", Principal: defaultAgentPrincipal, Class: defaultBoostClass,
-		Placement: storespec.PlacementServer, MakeDefault: true,
-		Kind: actor.KindAgent, At: now,
-	})
-	if mErr != nil {
-		rollback("boost admit", mErr)
-		return
-	}
-	boostID := boost.InstanceID
 
 	// Write directory, desired composition, and default pointer once with the
 	// minted id. No placeholder/repair window exists.
@@ -317,12 +318,9 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 
 	// Directory intent is gone; now detach and close the in-memory universe
 	// outside a.mu.
-	cID := channel.ID(chID)
-	a.mu.Lock()
-	h := a.homes[cID]
-	delete(a.homes, cID)
-	a.mu.Unlock()
-	_ = a.closeDetachedHome("delete-channel", cID, h)
+	if h := a.detachHome(channel.ID(chID)); h != nil {
+		_ = h.Close()
+	}
 
 	// Remove the per-channel sqlite file.
 	_ = os.Remove(dbPath)

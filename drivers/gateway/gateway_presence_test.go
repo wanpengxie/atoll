@@ -6,7 +6,6 @@ package gateway
 
 import (
 	"context"
-	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -43,7 +42,7 @@ func (o *slotObs) count() int { o.mu.Lock(); defer o.mu.Unlock(); return len(o.e
 func TestCrossChannelPresenceIsolated(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 
 	const principal = "alice"
 	h1, id1 := openHome(t, channel.ID("c1"), principal)
@@ -54,8 +53,8 @@ func TestCrossChannelPresenceIsolated(t *testing.T) {
 	}, nil, nil)
 
 	// Two devices for alice.
-	s1, _ := g.Attach(context.Background(), principal, nil)
-	s2, _ := g.Attach(context.Background(), principal, nil)
+	s1, _ := g.Attach(principal, nil)
+	s2, _ := g.Attach(principal, nil)
 	defer s1.Close()
 	defer s2.Close()
 
@@ -118,7 +117,7 @@ func TestCrossChannelPresenceIsolated(t *testing.T) {
 func TestT6RealRemoveCascadeIsolated(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "wren"
 	h1, id1 := openHomeWired(t, channel.ID("c1"), principal, g)
 	h2, id2 := openHomeWired(t, channel.ID("c2"), principal, g)
@@ -127,11 +126,9 @@ func TestT6RealRemoveCascadeIsolated(t *testing.T) {
 		memberRoute("c2", h2, id2, clk.now()),
 	}, nil, nil)
 
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	defer s.Close()
-	if err := g.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	g.Start()
 	s.StartFeed()
 
 	slot2, ok2 := h2.SubjectSlotFor(id2)
@@ -176,7 +173,7 @@ func TestT6RealRemoveCascadeIsolated(t *testing.T) {
 func TestMultiTabPresenceThreeEdges(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 
 	const principal = "bob"
 	h, id := openHome(t, channel.ID("c"), principal)
@@ -185,8 +182,8 @@ func TestMultiTabPresenceThreeEdges(t *testing.T) {
 	obs := &slotObs{}
 	slot.RegisterObserver("o", obs.fn)
 
-	s1, _ := g.Attach(context.Background(), principal, nil)
-	s2, _ := g.Attach(context.Background(), principal, nil)
+	s1, _ := g.Attach(principal, nil)
+	s2, _ := g.Attach(principal, nil)
 	g.presenceReconcile()
 	last := func() subjectgate.PresenceUpdate { es := obs.snapshot(); return es[len(es)-1] }
 	if !last().Live || last().Level != subjectgate.LevelOnline {
@@ -208,7 +205,7 @@ func TestMultiTabPresenceThreeEdges(t *testing.T) {
 	}
 
 	// Reconnect 首入 → online again.
-	s3, _ := g.Attach(context.Background(), principal, nil)
+	s3, _ := g.Attach(principal, nil)
 	defer s3.Close()
 	g.presenceReconcile()
 	if !last().Live || last().Level != subjectgate.LevelOnline {
@@ -222,13 +219,13 @@ func TestMultiTabPresenceThreeEdges(t *testing.T) {
 func TestPresenceConvergesFromAnyDirty(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 
 	const principal = "carol"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
 	slot, _ := h.SubjectSlotFor(id)
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	defer s.Close()
 	key := covKey{principal: principal, channel: "c"}
 
@@ -268,14 +265,12 @@ func TestPresenceTickConvergesWithoutPoke(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
 	const tick = 7 * time.Second
-	g := New(Config{Resolver: res, Clock: clk, PresenceTick: tick})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk, presenceTick: tick})
 	const principal = "presence-tick"
 	res.set(principal, nil, nil, nil)
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	defer s.Close()
-	if err := g.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	g.Start()
 	defer g.Close()
 
 	// Initial circle + the already-buffered attach poke circle must both finish, leaving
@@ -294,16 +289,15 @@ func TestPresenceTickConvergesWithoutPoke(t *testing.T) {
 	}, "PresenceTick did not drive the no-poke online convergence")
 }
 
-// TestPresenceRebindNewSlot (DoD-7⑧, Remove→秒 re-Admit 合并 poke 换值差集): the
-// real presence loop is parked immediately before its wait select with an EMPTY poke
-// buffer. Home.Remove and Home.Admit then fire two genuine membership pokes while the
-// loop is parked; buffered(1) merges them. Releasing the failpoint lets exactly one
-// poke drive one circle, which withdraws the old slot and publishes the new one. No
-// hand-called presenceReconcile repairs the result.
+// TestPresenceRebindNewSlot (DoD-7⑧, Remove→秒 re-Admit 换值差集): Home.Remove and
+// Home.Admit fire genuine membership pokes through production wiring; a public timely
+// hint after the resolver snapshot changes then drives the real presence loop. One of
+// its circles must withdraw the old slot and publish the new one. No production
+// failpoint or hand-called presenceReconcile repairs the result.
 func TestPresenceRebindNewSlot(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 
 	const principal = "dave"
 	h1, id1 := openHomeWired(t, channel.ID("c"), principal, g)
@@ -312,55 +306,16 @@ func TestPresenceRebindNewSlot(t *testing.T) {
 	obsOld := &slotObs{}
 	slotOld.RegisterObserver("old", obsOld.fn)
 
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	defer s.Close()
-	parked := make(chan struct{})
-	release := make(chan struct{})
-	converged := make(chan struct{})
-	finish := make(chan struct{})
-	var waits int
-	var waitMu sync.Mutex
-	g.beforePresenceWait = func() {
-		waitMu.Lock()
-		waits++
-		n := waits
-		waitMu.Unlock()
-		switch n {
-		case 2:
-			close(parked)
-			<-release
-		case 3:
-			close(converged)
-			<-finish
-		}
-	}
-	if err := g.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	g.Start()
 	defer g.Close()
-	defer func() {
-		select {
-		case <-release:
-		default:
-			close(release)
-		}
-		select {
-		case <-finish:
-		default:
-			close(finish)
-		}
-	}()
-	select {
-	case <-parked:
-	case <-time.After(2 * time.Second):
-		t.Fatal("presence loop did not reach the empty-buffer pre-wait failpoint")
-	}
-	if lvl, _, _, set := slotOld.Snapshot(); !set || lvl != subjectgate.LevelOnline {
-		t.Fatalf("old slot must be online before rebind, got set=%v lvl=%v", set, lvl)
-	}
+	waitFor(t, func() bool {
+		lvl, _, _, set := slotOld.Snapshot()
+		return set && lvl == subjectgate.LevelOnline
+	}, "old slot never became online before rebind")
 
-	// Both callbacks run while the loop is parked. The first fills presencePoke; the
-	// second is coalesced by its capacity-one edge buffer.
+	// Both real membership callbacks fire through Home's production wiring.
 	if err := h1.Remove(context.Background(), id1); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
@@ -375,13 +330,14 @@ func TestPresenceRebindNewSlot(t *testing.T) {
 	obsNew := &slotObs{}
 	slotNew.RegisterObserver("new", obsNew.fn)
 	res.set(principal, []Route{memberRoute("c", h1, id2, clk.now())}, nil, nil)
-
-	close(release)
-	select {
-	case <-converged: // circle driven by the one merged poke is complete and parked.
-	case <-time.After(2 * time.Second):
-		t.Fatal("merged Remove→re-Admit poke did not complete one presence circle")
-	}
+	// The re-admit callback may race the resolver update above, so issue the same public
+	// timely hint the app uses after its directory commit. Correctness still rests on the
+	// resolver + reconcile loop, not a production test seam.
+	g.Poke(principal)
+	waitFor(t, func() bool {
+		lvl, _, _, set := slotNew.Snapshot()
+		return set && lvl == subjectgate.LevelOnline
+	}, "Remove→re-Admit poke did not converge presence to the new slot")
 	// 撤旧: old slot offline.
 	eo := obsOld.snapshot()
 	if eo[len(eo)-1].Level != subjectgate.LevelOffline {
@@ -396,7 +352,6 @@ func TestPresenceRebindNewSlot(t *testing.T) {
 	if ce == nil || ce.slot != slotNew {
 		t.Fatalf("coverage value must track the new slotRef")
 	}
-	close(finish)
 }
 
 // TestBirthHandshakeInterleave (DoD-7⑦): the presence 圈's publish and a cell's
@@ -407,11 +362,11 @@ func TestPresenceRebindNewSlot(t *testing.T) {
 func TestBirthHandshakeInterleave(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "erin"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	defer s.Close()
 	slot, _ := h.SubjectSlotFor(id)
 
@@ -438,20 +393,20 @@ func TestBirthHandshakeInterleave(t *testing.T) {
 	}
 }
 
-// TestPresencePerChannelFailurePreservesCoverage (P2-9, 六轮终审): a per-channel
-// ChannelFailure on a round where the WHOLE snapshot otherwise succeeds must not force
+// TestPresenceFailedChannelPreservesCoverage (P2-9, 六轮终审): a per-channel failure
+// on a round where the WHOLE snapshot otherwise succeeds must not force
 // an immediate false-offline — the same principle N2 already applies to a whole-
 // snapshot failure, extended per-channel. Before the fix, presenceReconcile discarded
 // the `failed` return value entirely, so a single transient per-channel query error
 // looked identical to "confirmed gone" and published offline immediately.
-func TestPresencePerChannelFailurePreservesCoverage(t *testing.T) {
+func TestPresenceFailedChannelPreservesCoverage(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "yara"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	defer s.Close()
 
 	g.presenceReconcile()
@@ -465,7 +420,7 @@ func TestPresencePerChannelFailurePreservesCoverage(t *testing.T) {
 
 	// A per-channel failure THIS round (whole snapshot succeeds — routes=nil, err=nil —
 	// but this channel is reported as a query failure, not confirmed absent).
-	res.set(principal, nil, []ChannelFailure{{Channel: "c", Err: errors.New("transient")}}, nil)
+	res.set(principal, nil, []channel.ID{"c"}, nil)
 	g.presenceReconcile()
 
 	if got := obs.count(); got != edgesBefore {
@@ -486,12 +441,12 @@ func TestPresencePerChannelFailurePreservesCoverage(t *testing.T) {
 func TestCloseCleanupNarrow(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Epoch: 100, Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{epoch: 100, clock: clk})
 
 	const principal = "frank"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	g.presenceReconcile() // this-epoch online coverage for (frank,c)
 	onlineSlot, _ := h.SubjectSlotFor(id)
 

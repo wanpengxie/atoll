@@ -12,7 +12,6 @@ package app_test
 // backstop) is what converged it.
 
 import (
-	"context"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -42,15 +41,16 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 		t.Fatalf("app.New: %v", err)
 	}
 
-	pokeHub := gateway.NewPokeHub()
-	gw := gateway.New(gateway.Config{
+	gw, err := gateway.New(gateway.Config{
 		Routing:  a.ResolveRoutingForGateway,
 		Resolver: testGatewayResolver(a),
 	})
-	pokeHub.Subscribe(gw.Poke)
-	_ = gw.Start()
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	gw.Start()
 	a.SetGateway(web.New(gw))
-	a.SetMembershipPoke(pokeHub.Poke)
+	a.SetMembershipPoke(gw.Poke)
 	t.Cleanup(func() {
 		gw.Close()
 		a.Close()
@@ -71,7 +71,7 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 	// Attach the creator's gateway session BEFORE the channel exists — its first
 	// (synchronous) reconcile sees an empty entitlement set, exactly the steady-state a
 	// long-lived connection is in when the user goes on to create a new channel.
-	s, err := gw.Attach(context.Background(), userID, nil)
+	s, err := gw.Attach(userID, nil)
 	if err != nil {
 		t.Fatalf("gw.Attach: %v", err)
 	}
@@ -100,7 +100,7 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 		if ferr != nil {
 			t.Fatalf("NewFrame: %v", ferr)
 		}
-		resp := s.Upstream(context.Background(), f)
+		resp := s.Upstream(f)
 		if resp.Type != subjectgate.FrameError {
 			break // resolved eligible — the submit reached the door (whatever it decides next is out of scope here).
 		}

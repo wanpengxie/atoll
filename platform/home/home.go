@@ -101,7 +101,7 @@ type Config struct {
 	// registry row is gone after). It is the membership-change poke emit point
 	// (连接模型勘误期 §3.2 表② 逐符号迁移: the old (channel, subject) OnRevoke is reborn
 	// as a per-principal poke — 性质 changed from 撤销执行 to pure及时性). The assembly
-	// root bridges it into the gateway's PokeHub → Gateway.Poke(principal); the gateway
+	// root bridges it directly into Gateway.Poke(principal); the gateway
 	// re-resolves that principal's WHOLE channel set (subscriptions + presence). nil →
 	// no poke (the resolver's每批 recheck + sweep remain the correctness正门).
 	OnMembershipChange func(principal string)

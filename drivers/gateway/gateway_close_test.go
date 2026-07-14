@@ -8,7 +8,6 @@ import (
 	"context"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -21,8 +20,8 @@ import (
 // and the session is torn down, never left reading a closing Home.
 func TestLateStartFeedRefused(t *testing.T) {
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: newClock()})
-	s, err := g.Attach(context.Background(), "late", nil)
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: newClock()})
+	s, err := g.Attach("late", nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -42,6 +41,32 @@ func TestLateStartFeedRefused(t *testing.T) {
 	}
 }
 
+func TestLifecycleOwnerMisuseFailsLoud(t *testing.T) {
+	t.Run("double Start", func(t *testing.T) {
+		g := newTestGateway(t, Config{Resolver: newResolver()}, settings{clock: newClock()})
+		g.Start()
+		defer g.Close()
+		mustPanic(t, g.Start)
+	})
+	t.Run("Start after Close", func(t *testing.T) {
+		g := newTestGateway(t, Config{Resolver: newResolver()}, settings{clock: newClock()})
+		if err := g.Close(); err != nil {
+			t.Fatal(err)
+		}
+		mustPanic(t, g.Start)
+	})
+}
+
+func mustPanic(t *testing.T, fn func()) {
+	t.Helper()
+	defer func() {
+		if recover() == nil {
+			t.Fatal("expected lifecycle misuse to panic")
+		}
+	}()
+	fn()
+}
+
 // TestBlockedDeliverUnblocksOnClose (DoD-7⑩ 阻塞递交 + Close 等在途归零): a delivery that
 // has passed the eligibility check and is blocked inside Deliver (interpreter attached
 // but not replying) unblocks when Gateway.Close cancels the session ctx; the upstream
@@ -50,12 +75,12 @@ func TestLateStartFeedRefused(t *testing.T) {
 func TestBlockedDeliverUnblocksOnClose(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 
 	const principal = "gwen"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	s.reconcile() // establish eligibility (member route for c)
 	slot, _ := h.SubjectSlotFor(id)
 
@@ -66,7 +91,7 @@ func TestBlockedDeliverUnblocksOnClose(t *testing.T) {
 
 	upstreamDone := make(chan subjectgate.Frame, 1)
 	go func() {
-		upstreamDone <- s.Upstream(context.Background(), mkBusiness(t, subjectgate.FrameSubmit, "c"))
+		upstreamDone <- s.Upstream(mkBusiness(t, subjectgate.FrameSubmit, "c"))
 	}()
 	// Wait until the delivery is in-flight (interpreter received the job, now blocked).
 	select {
@@ -95,61 +120,57 @@ func TestBlockedDeliverUnblocksOnClose(t *testing.T) {
 	}
 }
 
-// TestCloseGateRefusesFrame (DoD-7② 关站闩真交错): Upstream has already parsed the
-// frame, extracted channel_id, and selected a valid member route, but a failpoint parks
-// it immediately BEFORE the delivery permit. Concurrent Gateway.Close sets the session
-// latch; releasing the parsed frame then makes beginDeliver refuse it as closed. This is
-// the read-before-permit interleave, not a sequential "Close then call Upstream" proxy.
-func TestCloseGateRefusesFrame(t *testing.T) {
-	res := newResolver()
-	g := New(Config{Resolver: res, Clock: newClock()})
-	s, _ := g.Attach(context.Background(), "hank", nil)
-	// A member route in the资格账 (nil Home is never dereferenced — beginDeliver refuses
-	// first once closed).
-	s.elig.Store(&eligState{
-		routes: map[channel.ID]Route{"c": {Channel: "c", Access: AccessMember}},
-		paused: map[channel.ID]struct{}{},
-	})
-	parsed := make(chan struct{})
-	release := make(chan struct{})
-	defer func() {
-		select {
-		case <-release:
-		default:
-			close(release)
+// TestCloseSealsAllSessionsBeforePresenceJoin is the P0 regression: a real presence
+// resolver parks the presence loop, then Close begins. Every session in the frozen
+// snapshot — including multiple devices for one principal and another principal — must
+// be sealed before Close reaches the blocked presence join.
+func TestCloseSealsAllSessionsBeforePresenceJoin(t *testing.T) {
+	br := &barrierResolver{entered: make(chan struct{}), release: make(chan struct{})}
+	g := newTestGateway(t, Config{Resolver: br}, settings{clock: newClock()})
+	var sessions []*Session
+	for _, principal := range []string{"hank", "hank", "jill"} {
+		s, err := g.Attach(principal, nil)
+		if err != nil {
+			t.Fatalf("Attach(%s): %v", principal, err)
 		}
-	}()
-	s.beforeDeliver = func() {
-		close(parsed)
-		<-release
+		s.elig.Store(&eligState{
+			routes: map[channel.ID]Route{"c": {Channel: "c", Access: AccessMember}},
+			paused: map[channel.ID]struct{}{},
+		})
+		sessions = append(sessions, s)
 	}
-	frame := mkBusiness(t, subjectgate.FrameSubmit, "c")
-	result := make(chan subjectgate.Frame, 1)
-	go func() {
-		result <- s.Upstream(context.Background(), frame)
-	}()
+	g.Start()
 	select {
-	case <-parsed:
+	case <-br.entered:
 	case <-time.After(2 * time.Second):
-		t.Fatal("frame never reached the read-before-delivery-permit failpoint")
+		t.Fatal("presence loop never entered the blocking resolver")
 	}
 
 	closeDone := make(chan struct{})
 	go func() { _ = g.Close(); close(closeDone) }()
+	deadline := time.After(2 * time.Second)
+	for i, s := range sessions {
+		select {
+		case <-s.Done():
+		case <-deadline:
+			t.Fatalf("Close did not seal session %d/%d before the blocked presence join", i+1, len(sessions))
+		}
+	}
 	select {
 	case <-closeDone:
-		// No permit existed yet, so Close has no delivery to drain and may return.
-	case <-time.After(2 * time.Second):
-		t.Fatal("Gateway.Close did not set the latch while the parsed frame was pre-permit")
+		t.Fatal("Close returned while the real presence barrier was still held")
+	default:
 	}
-	close(release)
-	select {
-	case got := <-result:
-		if code := codeOf(t, got); code != subjectgate.CodeClosed {
-			t.Fatalf("pre-permit frame released after Close must be closed, got %q", code)
+	for i, s := range sessions {
+		if code := codeOf(t, s.Upstream(mkBusiness(t, subjectgate.FrameSubmit, "c"))); code != subjectgate.CodeClosed {
+			t.Fatalf("frame for sealed session %d must be closed, got %q", i+1, code)
 		}
+	}
+	close(br.release)
+	select {
+	case <-closeDone:
 	case <-time.After(2 * time.Second):
-		t.Fatal("pre-permit frame did not return after failpoint release")
+		t.Fatal("Close did not return after the presence barrier released")
 	}
 }
 
@@ -164,7 +185,7 @@ type barrierResolver struct {
 	once    sync.Once
 }
 
-func (r *barrierResolver) Snapshot(ctx context.Context, principal string) ([]Route, []ChannelFailure, error) {
+func (r *barrierResolver) Snapshot(ctx context.Context, principal string) ([]Route, []channel.ID, error) {
 	r.once.Do(func() {
 		close(r.entered)
 		<-r.release
@@ -173,21 +194,20 @@ func (r *barrierResolver) Snapshot(ctx context.Context, principal string) ([]Rou
 }
 
 // TestConcurrentCloseGated (关站 idempotent + 单 teardown gating): two concurrent Close
-// calls BOTH enter Close (proven by the closeEntered handshake seam); the presence loop
+// calls start from one test-side barrier; the presence loop
 // is parked inside a blocking resolver Snapshot, holding the first Close at
 // presenceWG.Wait; NEITHER returns until the barrier releases — the sync.Once teardown
 // gates every caller. After release both return, coverage is cleaned, pumps joined.
 func TestConcurrentCloseGated(t *testing.T) {
 	br := &barrierResolver{entered: make(chan struct{}), release: make(chan struct{})}
-	g := New(Config{Resolver: br, Clock: newClock()})
+	g := newTestGateway(t, Config{Resolver: br}, settings{clock: newClock()})
 
 	// Seat a device so the presence loop has a principal to enumerate, then Start it.
-	if _, err := g.Attach(context.Background(), "iris", nil); err != nil {
+	s, err := g.Attach("iris", nil)
+	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
-	if err := g.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
+	g.Start()
 	// The loop's first 圈 calls Snapshot and blocks.
 	select {
 	case <-br.entered:
@@ -195,23 +215,25 @@ func TestConcurrentCloseGated(t *testing.T) {
 		t.Fatal("presence loop never entered the resolver")
 	}
 
-	// Handshake seam: count real entries into Close.
-	var entered int32
-	enteredCh := make(chan struct{}, 2)
-	g.closeEntered = func() {
-		atomic.AddInt32(&entered, 1)
-		enteredCh <- struct{}{}
-	}
-
+	start := make(chan struct{})
+	var ready sync.WaitGroup
+	ready.Add(2)
 	returned := make(chan int, 2)
 	for i := 1; i <= 2; i++ {
 		n := i
-		go func() { _ = g.Close(); returned <- n }()
+		go func() {
+			ready.Done()
+			<-start
+			_ = g.Close()
+			returned <- n
+		}()
 	}
-	<-enteredCh
-	<-enteredCh
-	if got := atomic.LoadInt32(&entered); got != 2 {
-		t.Fatalf("both Close calls must enter Close, got %d", got)
+	ready.Wait()
+	close(start)
+	select {
+	case <-s.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("the single teardown never sealed its session set")
 	}
 
 	// Barrier held (presence loop parked in Snapshot): NEITHER Close may return.
@@ -245,8 +267,8 @@ func TestConcurrentCloseGated(t *testing.T) {
 // still-open gateway and register a pump for a dead session.
 func TestSessionClosedThenStartFeedRefused(t *testing.T) {
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: newClock()})
-	s, err := g.Attach(context.Background(), "direct-close", nil)
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: newClock()})
+	s, err := g.Attach("direct-close", nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -267,7 +289,7 @@ type hangingResolver struct {
 	release chan struct{}
 }
 
-func (r *hangingResolver) Snapshot(ctx context.Context, principal string) ([]Route, []ChannelFailure, error) {
+func (r *hangingResolver) Snapshot(ctx context.Context, principal string) ([]Route, []channel.ID, error) {
 	r.entered <- struct{}{}
 	<-r.release
 	return nil, nil, nil
@@ -288,15 +310,15 @@ func TestClosePumpJoinBounded(t *testing.T) {
 			close(hr.release)
 		}
 	}()
-	g := New(Config{Resolver: hr, Clock: newClock(), PumpJoinTimeout: 50 * time.Millisecond})
-	var starts atomic.Int64
+	clk := newClock()
+	cap := &logCapture{}
+	g := newTestGateway(t, Config{Resolver: hr, Logger: cap.logger()}, settings{clock: clk, pumpJoinTimeout: 50 * time.Millisecond})
 	startDone := make(chan struct{}, n)
 	for i := 0; i < n; i++ {
-		s, err := g.Attach(context.Background(), fmt.Sprintf("leak-%d", i), nil)
+		s, err := g.Attach(fmt.Sprintf("leak-%d", i), nil)
 		if err != nil {
 			t.Fatalf("Attach %d: %v", i, err)
 		}
-		s.feedStarted = func() { starts.Add(1) }
 		go func() {
 			s.StartFeed()
 			startDone <- struct{}{}
@@ -319,8 +341,8 @@ func TestClosePumpJoinBounded(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Close did not return within the bounded pump-join budget (P1-3 leak accounting broken)")
 	}
-	if got := g.LeakedPumps(); got != n {
-		t.Fatalf("Close must count leaked pumps, not timeout incidents: got %d want %d", got, n)
+	if got, ok := cap.intAttr("platform.gateway.pump_join_timeout", "leaked"); !ok || got != n {
+		t.Fatalf("pump timeout log leaked = %d, %v; want %d, true", got, ok, n)
 	}
 
 	// Close has returned. A resolver that finally wakes must not create late-owned
@@ -335,8 +357,8 @@ func TestClosePumpJoinBounded(t *testing.T) {
 	}
 	waitFor(t, func() bool { return g.registeredPumps.Load() == 0 },
 		"released blocked registrations did not retire to zero")
-	if got := starts.Load(); got != 0 {
-		t.Fatalf("%d runFeed goroutine(s) started after Close returned; want zero", got)
+	if got := clk.armCount(); got != 0 {
+		t.Fatalf("late resolver return armed %d feed timers after Close; want zero", got)
 	}
 }
 
@@ -351,14 +373,12 @@ func TestResolverEnumerationConcurrentWithClose(t *testing.T) {
 	for iter := 0; iter < 20; iter++ {
 		clk := newClock()
 		res := newResolver()
-		g := New(Config{Resolver: res, Clock: clk})
+		g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 		const principal = "jack"
 		h, id := openHome(t, channel.ID("c"), principal)
 		res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
-		s, _ := g.Attach(context.Background(), principal, nil)
-		if err := g.Start(); err != nil { // presence loop enumerates
-			t.Fatalf("Start: %v", err)
-		}
+		s, _ := g.Attach(principal, nil)
+		g.Start()        // presence loop enumerates
 		s.StartFeed()    // read pump enumerates
 		g.kickPresence() // ensure the presence loop is actively re-enumerating
 		s.markDirty()    // ensure the pump is actively re-resolving

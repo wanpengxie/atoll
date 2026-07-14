@@ -120,7 +120,7 @@ func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
 	// Membership-change poke emit point (连接模型勘误期 §3.2 表②): the dereg cascade has
 	// committed, so the subject that just lost membership must have their gateway
 	// session re-resolve (drop the subscription + stop the stream). The assembly root
-	// bridges this into the gateway's PokeHub → Gateway.Poke(principal); the read-side
+	// bridges this directly into Gateway.Poke(principal); the read-side
 	//每批 recheck is the correctness正门, this poke is pure及时性. nil sink / empty
 	// principal → no-op.
 	if h.onMembershipChange != nil && principal != "" {

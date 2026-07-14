@@ -2,8 +2,6 @@ package app
 
 import (
 	"context"
-	"errors"
-	"time"
 
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -20,22 +18,7 @@ type EntitlementRoute struct {
 	Home      *home.Home
 	Access    string        // "member" (户籍) | "observer" (workspace 观众/读资格)
 	SubjectID actor.ActorID // member only; empty for an observer
-	CheckedAt time.Time
 }
-
-// EntitlementFailure carries a per-channel resolution failure (spec §3.2 部分失败
-// 语义): "查得坏消息" for exactly this channel — the gateway serves it from the last
-// good snapshot within T_stale, then pauses. Distinct from a channel simply absent
-// from routes (= confirmed no eligibility, retire now).
-type EntitlementFailure struct {
-	Channel channel.ID
-	Err     error
-}
-
-// errChannelHomeNotOpen is the per-channel transient: the directory lists the channel
-// (the principal is a workspace member) but its universe is not open yet (getHome==nil)
-// — a retryable "unavailable", rides the lease, never a confirmed "no eligibility".
-var errChannelHomeNotOpen = errors.New("app: channel home not open")
 
 // EntitlementSnapshot resolves the full set of channels principal is currently
 // entitled to (连接模型勘误期 §3.2 解析面): every channel in a workspace the principal
@@ -49,7 +32,7 @@ var errChannelHomeNotOpen = errors.New("app: channel home not open")
 //   - failed: per-channel query failure (or home-not-open transient) → rides T_stale.
 //   - err: a whole-snapshot failure (the directory query itself) → the entire prior
 //     snapshot rides its lease.
-func (a *App) EntitlementSnapshot(ctx context.Context, principal string) ([]EntitlementRoute, []EntitlementFailure, error) {
+func (a *App) EntitlementSnapshot(ctx context.Context, principal string) ([]EntitlementRoute, []channel.ID, error) {
 	// Every channel in any workspace the principal is a member of (observer candidates).
 	rows, err := a.db.QueryContext(ctx,
 		`SELECT c.id FROM channels c
@@ -63,7 +46,7 @@ func (a *App) EntitlementSnapshot(ctx context.Context, principal string) ([]Enti
 		var id string
 		if scanErr := rows.Scan(&id); scanErr != nil {
 			// P2-10 (六轮终审): a row-scan failure gives no channel id to attribute a
-			// ChannelFailure to, so silently `continue`-ing here does not degrade that
+			// failed channel id to, so silently `continue`-ing here does not degrade that
 			// one channel to "查得坏消息" (failed, rides T_stale) — it makes it vanish
 			// from BOTH routes and failed, which the gateway reads as "confirmed no
 			// eligibility" and retires IMMEDIATELY (表①). A directory read this broken
@@ -80,37 +63,27 @@ func (a *App) EntitlementSnapshot(ctx context.Context, principal string) ([]Enti
 		return nil, nil, rErr
 	}
 
-	now := a.now()
 	var routes []EntitlementRoute
-	var failed []EntitlementFailure
+	var failed []channel.ID
 	for _, id := range chIDs {
 		chID := channel.ID(id)
 		h := a.getHome(chID)
 		if h == nil {
 			// Directory has it (workspace member) but the home is not open — transient.
-			failed = append(failed, EntitlementFailure{Channel: chID, Err: errChannelHomeNotOpen})
+			failed = append(failed, chID)
 			continue
 		}
 		subjectID, found, rerr := h.ResolvePrincipal(ctx, actor.KindHuman, principal)
 		if rerr != nil {
-			failed = append(failed, EntitlementFailure{Channel: chID, Err: rerr})
+			failed = append(failed, chID)
 			continue
 		}
 		if found {
-			routes = append(routes, EntitlementRoute{
-				Channel: chID, Home: h, Access: "member", SubjectID: subjectID, CheckedAt: now,
-			})
+			routes = append(routes, EntitlementRoute{Channel: chID, Home: h, Access: "member", SubjectID: subjectID})
 			continue
 		}
 		// Workspace member but not a channel member → observer (read/tail only).
-		routes = append(routes, EntitlementRoute{
-			Channel: chID, Home: h, Access: "observer", CheckedAt: now,
-		})
+		routes = append(routes, EntitlementRoute{Channel: chID, Home: h, Access: "observer"})
 	}
 	return routes, failed, nil
 }
-
-// now is the app's wall clock (production time.Now; a test may not need to override it,
-// but keeping it a method mirrors the gateway's injectable clock so CheckedAt anchors
-// consistently with the lease logic).
-func (a *App) now() time.Time { return time.Now() }

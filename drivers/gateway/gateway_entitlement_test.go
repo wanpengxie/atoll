@@ -5,7 +5,6 @@ package gateway
 // and StartFeed's synchronous first reconcile (connect-then-act).
 
 import (
-	"context"
 	"errors"
 	"testing"
 	"time"
@@ -25,11 +24,11 @@ func eligPaused(s *Session) map[channel.ID]struct{} { return s.elig.Load().pause
 func TestReconcileSubscribeThenRetire(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "mia"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	defer s.Close()
 
 	s.reconcile()
@@ -62,12 +61,12 @@ func TestLeaseThenPauseThenResume(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
 	cap := &logCapture{}
-	g := New(Config{Resolver: res, Clock: clk, Logger: cap.logger()})
+	g := newTestGateway(t, Config{Resolver: res, Logger: cap.logger()}, settings{clock: clk})
 	const principal = "nan"
 	h, id := openHome(t, channel.ID("c"), principal)
 
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	defer s.Close()
 	s.reconcile() // lastOK = t0
 
@@ -119,16 +118,13 @@ func TestSweepJustBeforeLeaseDeadlineRearmsAtDeadline(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
 	const stale = 30 * time.Second
-	g := New(Config{
-		Resolver:      res,
-		Clock:         clk,
-		StaleLease:    stale,
-		SweepInterval: stale - time.Second,
+	g := newTestGateway(t, Config{Resolver: res}, settings{
+		clock: clk, staleLease: stale, sweepInterval: stale - time.Second,
 	})
 	const principal = "lease-boundary"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	s.StartFeed()
 	defer func() {
 		s.Close()
@@ -173,7 +169,7 @@ func TestSweepJustBeforeLeaseDeadlineRearmsAtDeadline(t *testing.T) {
 func TestPartialFailureLeaseVsAbsent(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "opa"
 	h1, id1 := openHome(t, channel.ID("c1"), principal)
 	h2, id2 := openHome(t, channel.ID("c2"), principal)
@@ -183,7 +179,7 @@ func TestPartialFailureLeaseVsAbsent(t *testing.T) {
 		memberRoute("c1", h1, id1, clk.now()),
 		memberRoute("c2", h2, id2, clk.now()),
 	}, nil, nil)
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 	defer s.Close()
 	s.reconcile()
 	if len(s.subs) != 2 {
@@ -192,7 +188,7 @@ func TestPartialFailureLeaseVsAbsent(t *testing.T) {
 
 	// c1 → per-channel failure (查得坏消息); c2 → absent (查不到). Within the lease c1
 	// stays served; c2 retires immediately.
-	res.set(principal, nil, []ChannelFailure{{Channel: "c1", Err: errors.New("c1 query failed")}}, nil)
+	res.set(principal, nil, []channel.ID{"c1"}, nil)
 	clk.advance(5 * time.Second)
 	s.reconcile()
 	if _, ok := s.subs["c1"]; !ok {
@@ -226,40 +222,40 @@ func TestWholeSnapshotFailureFirstReconcileUnavailable(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
 	res.set("uma", nil, nil, errors.New("directory query failed"))
-	g := New(Config{Resolver: res, Clock: clk})
-	s, _ := g.Attach(context.Background(), "uma", nil)
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+	s, _ := g.Attach("uma", nil)
 	defer s.Close()
 
 	s.reconcile() // first-ever reconcile; whole-snapshot failure, s.subs is empty.
-	if code := codeOf(t, s.Upstream(context.Background(), mkBusiness(t, subjectgate.FrameSubmit, "never-seen"))); code != subjectgate.CodeUnavailable {
+	if code := codeOf(t, s.Upstream(mkBusiness(t, subjectgate.FrameSubmit, "never-seen"))); code != subjectgate.CodeUnavailable {
 		t.Fatalf("a never-subscribed channel after a whole-snapshot failure must be unavailable, not forbidden; got %q", code)
 	}
 }
 
-// TestNewChannelFailureUnavailableNotForbidden (P1-2, 六轮终审): a channel appears in
-// the resolver's per-channel ChannelFailure list on a round where it has NO prior
+// TestNewFailedChannelUnavailableNotForbidden (P1-2, 六轮终审): a channel appears in
+// the resolver's per-channel failed list on a round where it has NO prior
 // subscription (a first-seen / newly failing channel) — before the fix, publishElig
 // only recorded `paused` for channels that already had a subscription, so this channel
 // fell through to forbidden. It must map to unavailable ("查得坏消息" ≠ "查不到").
-func TestNewChannelFailureUnavailableNotForbidden(t *testing.T) {
+func TestNewFailedChannelUnavailableNotForbidden(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
 	const principal = "vic"
-	res.set(principal, nil, []ChannelFailure{{Channel: "new-ch", Err: errors.New("query failed")}}, nil)
-	g := New(Config{Resolver: res, Clock: clk})
-	s, _ := g.Attach(context.Background(), principal, nil)
+	res.set(principal, nil, []channel.ID{"new-ch"}, nil)
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
+	s, _ := g.Attach(principal, nil)
 	defer s.Close()
 
 	s.reconcile()
 	if _, ok := s.subs["new-ch"]; ok {
 		t.Fatal("a per-channel failure with no prior subscription must not fabricate one")
 	}
-	if code := codeOf(t, s.Upstream(context.Background(), mkBusiness(t, subjectgate.FrameSubmit, "new-ch"))); code != subjectgate.CodeUnavailable {
+	if code := codeOf(t, s.Upstream(mkBusiness(t, subjectgate.FrameSubmit, "new-ch"))); code != subjectgate.CodeUnavailable {
 		t.Fatalf("a new channel reported as a per-channel failure must be unavailable, not forbidden; got %q", code)
 	}
 	// A channel that is neither in routes nor in failed remains a confirmed-absence
 	// forbidden (control: the fix must not blanket every unknown channel_id).
-	if code := codeOf(t, s.Upstream(context.Background(), mkBusiness(t, subjectgate.FrameSubmit, "truly-unknown"))); code != subjectgate.CodeForbidden {
+	if code := codeOf(t, s.Upstream(mkBusiness(t, subjectgate.FrameSubmit, "truly-unknown"))); code != subjectgate.CodeForbidden {
 		t.Fatalf("a channel absent from BOTH routes and failed must stay forbidden; got %q", code)
 	}
 }
@@ -271,11 +267,11 @@ func TestNewChannelFailureUnavailableNotForbidden(t *testing.T) {
 func TestStartFeedSyncEligibility(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
-	g := New(Config{Resolver: res, Clock: clk})
+	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "pat"
 	h, id := openHome(t, channel.ID("c"), principal)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
-	s, _ := g.Attach(context.Background(), principal, nil)
+	s, _ := g.Attach(principal, nil)
 
 	s.StartFeed()
 	// Immediately after StartFeed the资格账 already carries the route (synchronous
@@ -286,14 +282,11 @@ func TestStartFeedSyncEligibility(t *testing.T) {
 	g.Close()
 }
 
-// TestReconcileNoResolverForbidsAll: with no resolver injected, reconcile publishes an
-// empty资格账 (every business frame forbidden — no channel is ever eligible).
-func TestReconcileNoResolverForbidsAll(t *testing.T) {
-	g := New(Config{Clock: newClock()}) // no Resolver
-	s, _ := g.Attach(context.Background(), "q", nil)
-	defer s.Close()
-	s.reconcile()
-	if len(eligRoutes(s)) != 0 {
-		t.Fatal("no resolver → empty资格账 (all forbidden)")
+func TestNewRequiresRoutingAndResolver(t *testing.T) {
+	if _, err := New(Config{Resolver: newResolver()}); err == nil {
+		t.Fatal("New without Routing must fail")
+	}
+	if _, err := New(Config{Routing: testRouting}); err == nil {
+		t.Fatal("New without Resolver must fail")
 	}
 }

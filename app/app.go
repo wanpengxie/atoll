@@ -53,27 +53,12 @@ type App struct {
 	extraDropKinds []actorrt.ObsKind
 
 	// wsGateway is the injected human-ingress connector (gateway 期 S3); membershipPoke
-	// is the injected membership-change poke fan-in (PokeHub.Poke) the platform emit
+	// is the injected direct Gateway.Poke callback that the platform emission
 	// points (home.Config.OnMembershipChange, wired in createHome — Admit/Remove) feed.
 	// Both are set by the assembly root via SetGateway/SetMembershipPoke after New (the
 	// gateway needs the app's routing/entitlement面, breaking the構造 cycle).
 	wsGateway      WSGateway
 	membershipPoke func(principal string)
-
-	// seedAdmitFailHook / revokeFailHook are test-only injected failure seams (nil
-	// in production — no if-bool branch survives in the production handlers, mirroring
-	// platform's reviverStraddleHook). When set (via export_test.go) they return a
-	// non-nil error to force a specific persist failure so a test can exercise the
-	// transactional rollback path: seedAdmitFailHook fails a create-channel seeding
-	// Admit (→ close home + delete channel row + 5xx); revokeFailHook aborts the
-	// daemon-delete revocation tx (→ rollback + 5xx, no Kick, no false ok).
-	seedAdmitFailHook func() error
-	revokeFailHook    func() error
-	// homeCloseHook is a test-only failpoint (nil in production), invoked only AFTER a
-	// Home handle has been detached under a.mu and the lock released, immediately before
-	// Home.Close. It lets app-package anchors park all three teardown arms and prove a
-	// concurrent entitlement enumeration is never trapped behind a.mu.
-	homeCloseHook func(op string, chID channel.ID)
 
 	daemonLocks *keyedLockSet
 	declLocks   *keyedLockSet
@@ -145,7 +130,7 @@ func New(cfg Config) (*App, error) {
 // it is set.
 func (a *App) SetGateway(g WSGateway) { a.wsGateway = g }
 
-// SetMembershipPoke injects the membership-change poke fan-in (PokeHub.Poke). createHome
+// SetMembershipPoke injects Gateway.Poke directly. createHome
 // forwards it into each home's home.Config.OnMembershipChange (Admit/Remove emit points).
 // nil → no live poke (reconnect re-auth + the resolver's每批 recheck / sweep remain the
 // correctness正门 — a lost poke only delays convergence).
@@ -186,30 +171,14 @@ func (a *App) Close() error {
 	if a.fanout != nil {
 		a.fanout.close()
 	}
-	a.mu.Lock()
-	homes := a.homes
-	a.homes = make(map[channel.ID]*home.Home)
-	a.mu.Unlock()
+	homes := a.detachAllHomes()
 	var firstErr error
-	for chID, h := range homes {
-		if err := a.closeDetachedHome("app-close", chID, h); err != nil && firstErr == nil {
+	for _, h := range homes {
+		if err := h.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	return firstErr
-}
-
-// closeDetachedHome is the single lock-outside-close point for App.Close, channel
-// deletion, and create rollback. Callers must remove h from a.homes and release a.mu
-// before entering; the test hook deliberately blocks here to make that order observable.
-func (a *App) closeDetachedHome(op string, chID channel.ID, h *home.Home) error {
-	if a.homeCloseHook != nil {
-		a.homeCloseHook(op, chID)
-	}
-	if h == nil {
-		return nil
-	}
-	return h.Close()
 }
 
 // ---------------------------------------------------------------------------
@@ -294,6 +263,26 @@ func (a *App) getHome(chID channel.ID) *home.Home {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	return a.homes[chID]
+}
+
+// detachHome removes one Home handle while holding a.mu and returns it for teardown
+// outside the lock. Callers must never call Home.Close while holding a.mu.
+func (a *App) detachHome(chID channel.ID) *home.Home {
+	a.mu.Lock()
+	h := a.homes[chID]
+	delete(a.homes, chID)
+	a.mu.Unlock()
+	return h
+}
+
+// detachAllHomes atomically empties the Home registry and returns the detached
+// handles. Teardown is deliberately left to the caller after the lock is released.
+func (a *App) detachAllHomes() map[channel.ID]*home.Home {
+	a.mu.Lock()
+	homes := a.homes
+	a.homes = make(map[channel.ID]*home.Home)
+	a.mu.Unlock()
+	return homes
 }
 
 // homeOrError resolves the open Home for chID, or writes the honest two-state
@@ -438,11 +427,7 @@ func mergeConfig(global, perChannel string) json.RawMessage {
 }
 
 func (a *App) closeLoadedHomes() {
-	a.mu.Lock()
-	homes := a.homes
-	a.homes = make(map[channel.ID]*home.Home)
-	a.mu.Unlock()
-	for id, h := range homes {
-		_ = a.closeDetachedHome("load-rollback", id, h)
+	for _, h := range a.detachAllHomes() {
+		_ = h.Close()
 	}
 }

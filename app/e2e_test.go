@@ -3,6 +3,7 @@ package app_test
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -99,6 +100,7 @@ func truthRowsForTest(t *testing.T, env *testEnv, chID string) []any {
 type testEnv struct {
 	handler http.Handler
 	app     *app.App
+	db      *sql.DB
 	tmpDir  string
 }
 
@@ -106,7 +108,7 @@ type testEnv struct {
 // (连接模型勘误期 §3.2: app → drivers is fenced, so the assembly root — here the test
 // harness, a named Fence-B allowlist importer — maps the app's own DTO into gateway.Route).
 func testGatewayResolver(a *app.App) gateway.EntitlementResolver {
-	return gateway.ResolverFunc(func(ctx context.Context, principal string) ([]gateway.Route, []gateway.ChannelFailure, error) {
+	return gateway.ResolverFunc(func(ctx context.Context, principal string) ([]gateway.Route, []channel.ID, error) {
 		routes, failed, err := a.EntitlementSnapshot(ctx, principal)
 		if err != nil {
 			return nil, nil, err
@@ -119,14 +121,10 @@ func testGatewayResolver(a *app.App) gateway.EntitlementResolver {
 			}
 			gr = append(gr, gateway.Route{
 				Channel: r.Channel, Home: r.Home, Access: access,
-				SubjectID: r.SubjectID, CheckedAt: r.CheckedAt,
+				SubjectID: r.SubjectID,
 			})
 		}
-		var gf []gateway.ChannelFailure
-		for _, f := range failed {
-			gf = append(gf, gateway.ChannelFailure{Channel: f.Channel, Err: f.Err})
-		}
-		return gr, gf, nil
+		return gr, failed, nil
 	})
 }
 
@@ -162,15 +160,16 @@ func setupTestApp(t *testing.T) *testEnv {
 	// exactly as cmd/server does (the app cannot construct it — app → drivers is
 	// fenced — so the assembly-root wiring is reproduced here; e2e_test.go is a named
 	// Fence-B allowlist importer).
-	pokeHub := gateway.NewPokeHub()
-	gw := gateway.New(gateway.Config{
+	gw, err := gateway.New(gateway.Config{
 		Routing:  a.ResolveRoutingForGateway,
 		Resolver: testGatewayResolver(a),
 	})
-	pokeHub.Subscribe(gw.Poke)
-	_ = gw.Start()
+	if err != nil {
+		t.Fatalf("gateway.New: %v", err)
+	}
+	gw.Start()
 	a.SetGateway(web.New(gw))
-	a.SetMembershipPoke(pokeHub.Poke)
+	a.SetMembershipPoke(gw.Poke)
 
 	t.Cleanup(func() {
 		// gateway先静默 (关站全序: stop presence loop, close sessions, drain) BEFORE the homes it drives close, then close
@@ -186,6 +185,7 @@ func setupTestApp(t *testing.T) *testEnv {
 	return &testEnv{
 		handler: a.Handler(),
 		app:     a,
+		db:      db,
 		tmpDir:  tmpDir,
 	}
 }

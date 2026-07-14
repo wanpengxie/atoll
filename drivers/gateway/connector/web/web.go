@@ -19,7 +19,7 @@ import (
 
 const (
 	// wsWriteWait bounds one ws write so a stuck peer cannot pin the single writer
-	// pump forever (照 ws.go wsWriteWait 10s == LaneWriteTimeoutMs).
+	// pump forever (the connector owns its wire deadline independently of lane sizing).
 	wsWriteWait = 10 * time.Second
 	// wsPongWait is the read deadline; each pong renews it, reclaiming a half-open
 	// conn within one window.
@@ -94,7 +94,7 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 		return
 	}
 
-	sess, aerr := c.gw.Attach(r.Context(), principal, parseSince(ap))
+	sess, aerr := c.gw.Attach(principal, parseSince(ap))
 	if aerr != nil {
 		writeErr(ws, "attach", subjectgate.CodeUnavailable, "gateway unavailable")
 		return
@@ -118,7 +118,6 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 
 	// Reader loop: the SINGLE ws reader. detach is整删 (no client-visible unbind);
 	// every business frame names its own channel_id and returns a receipt-or-error.
-	ctx := r.Context()
 	for {
 		_, data, err := ws.ReadMessage()
 		if err != nil {
@@ -129,9 +128,7 @@ func (c *Connector) ServeWeb(w http.ResponseWriter, r *http.Request, principal s
 			sess.Send(errFrame("", subjectgate.CodeBadPayload, perr.Error()))
 			continue
 		}
-		if resp := sess.Upstream(ctx, fr); resp.Type != "" {
-			sess.Send(resp)
-		}
+		sess.Send(sess.Upstream(fr))
 	}
 }
 
