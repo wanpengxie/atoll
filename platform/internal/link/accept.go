@@ -81,6 +81,9 @@ type Acceptor struct {
 	closeDone     chan struct{}
 	leaked        atomic.Int64
 	admissionHook func()
+	// portPublishedHook is test-only: local port publication completed and
+	// portMu released, immediately before Home index registration.
+	portPublishedHook func()
 
 	// reconcileDeregFailed counts reconcileHost dereg-write failures (#7 子案):
 	// each leaves a host row zombie (still Host==computeID, still active) until a
@@ -754,15 +757,18 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				a.logger.Info("link.attach_stream_failed", "err", err)
 				return
 			}
-			// Retain the Incarnation so a home-side Close can quiet-stop this port
-			// (see the ports map above). A same-id reattach overwrites the entry.
+			// Publish to the link-local quiet-stop fallback BEFORE releasing portMu.
+			// CommitWhile has already made the port live; opening any gap here would
+			// let Home Close/Kick observe neither this table nor the Home index and
+			// turn a voluntary teardown into a loud death edge.
+			ports[inc.ID()] = inc
 			portMu.Unlock()
+			if a.portPublishedHook != nil {
+				a.portPublishedHook()
+			}
 			if a.portIndex != nil {
 				a.portIndex.Register(portOwner, inc)
 			}
-			portMu.Lock()
-			ports[inc.ID()] = inc
-			portMu.Unlock()
 			if !a.runtime.IsLive(inc) {
 				removePort(inc)
 			}

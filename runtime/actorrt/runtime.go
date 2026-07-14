@@ -854,7 +854,10 @@ func (r *Runtime) DespawnID(id actor.ActorID) bool {
 	if candidate != nil {
 		candidate.initiateStop()
 	}
-	return ok || candidate != nil
+	// The bool remains the documented "live embodiment existed" verdict. A
+	// candidate is cancelled to prevent resurrection, but was never live and must
+	// not be reported as one.
+	return ok
 }
 
 // deliver routes env to every audience embodiment hosted by this Runtime by

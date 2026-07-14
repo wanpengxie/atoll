@@ -444,6 +444,70 @@ func TestHomeCloseQuietTeardown_NoDownEdge(t *testing.T) {
 	}
 }
 
+// TestHomeCloseDuringPortPublicationIsQuiet pins the Commit→publication seam.
+// The port is already runtime-live, and is present in the link-local fallback,
+// but has not yet reached the Home index. A concurrent Close must find it through
+// that local table, DespawnQuiet it, and join the parked attach without emitting
+// a loud down edge.
+func TestHomeCloseDuringPortPublicationIsQuiet(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+
+	const toolID = actor.ActorID("tool:publish-window")
+	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	if err != nil {
+		t.Fatalf("Dial: %v", err)
+	}
+	defer func() { _ = d.Close() }()
+
+	entered, release := make(chan struct{}), make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHook := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseHook()
+	r.acc.SetPortPublishedHookForTest(func() {
+		close(entered)
+		<-release
+	})
+	openDone := make(chan error, 1)
+	go func() {
+		_, openErr := d.OpenStream(context.Background(), toolID, 0, func(*message.Envelope) error { return nil }, func(message.ID) {})
+		openDone <- openErr
+	}()
+	<-entered
+	if _, live := r.rt.Stat(toolID); !live {
+		t.Fatal("port was not runtime-live at publication barrier")
+	}
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- r.acc.Close() }()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, live := r.rt.Stat(toolID); !live {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("Close missed the locally-published port before Home index registration")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case err := <-closeDone:
+		t.Fatalf("Close returned before the parked attach worker was released: %v", err)
+	default:
+	}
+
+	releaseHook()
+	if err := <-openDone; err != nil {
+		t.Fatalf("OpenStream after successful ACK: %v", err)
+	}
+	if err := <-closeDone; err != nil {
+		t.Fatalf("Acceptor.Close: %v", err)
+	}
+	if down := r.getDown(); len(down) != 0 {
+		t.Fatalf("Close during port publication emitted down edge(s): %+v", down)
+	}
+}
+
 // TestDispatchInOpenStreamWindow_NotDropped pins the step-0 race fix in its
 // per-stream form: a deliver the home sends AFTER the daemon opens the stream
 // (so the home-side port is live) but BEFORE the daemon installs the cell and

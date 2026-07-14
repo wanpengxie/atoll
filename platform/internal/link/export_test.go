@@ -31,6 +31,11 @@ func (a *Acceptor) LaneLinkPresentForTest(daemonID string) bool {
 	return a.laneLink(daemonID) != nil
 }
 
+// SetPortPublishedHookForTest parks an actor attach after its live incarnation
+// is in the link-local quiet-stop table and portMu has been released, but before
+// Home index registration. It drives the Close×publication barrier test.
+func (a *Acceptor) SetPortPublishedHookForTest(fn func()) { a.portPublishedHook = fn }
+
 // SetYamuxKeepAliveIntervalForTest overrides the yamux session's own keepalive
 // cadence (normally yamux's DefaultConfig 30s) for every *linkSession built
 // AFTER this call, until reset() runs. It exists so a link_test.go guard test

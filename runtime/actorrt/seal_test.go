@@ -202,6 +202,51 @@ func TestPreparedAttachIsInvisibleAndStopAllReapsIt(t *testing.T) {
 	}
 }
 
+func TestDespawnIDCancelsPreparedCandidateButReportsNoLiveBody(t *testing.T) {
+	rt, _ := New(Config{})
+	prepared, release := make(chan struct{}), make(chan struct{})
+	rt.attachPreparedHook = func() { close(prepared); <-release }
+
+	host, remote := net.Pipe()
+	codec := ipc.NewCodec(remote, remote)
+	peerDone := make(chan error, 1)
+	go func() {
+		payload, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "lease"})
+		if err := codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: payload}); err != nil {
+			peerDone <- err
+			return
+		}
+		_, err := codec.Read()
+		peerDone <- err
+	}()
+	attachDone := make(chan error, 1)
+	go func() {
+		_, err := rt.Attach(context.Background(), host, Sinks{Emit: nopEmit}, staticResolve("remote"), nil, nil)
+		attachDone <- err
+	}()
+	<-prepared
+
+	if stoppedLive := rt.DespawnID("remote"); stoppedLive {
+		t.Fatal("DespawnID reported a prepared-only candidate as a live embodiment")
+	}
+	close(release)
+	if err := <-attachDone; err == nil {
+		t.Fatal("candidate committed after DespawnID cancelled it")
+	}
+	select {
+	case err := <-peerDone:
+		if err == nil {
+			t.Fatal("cancelled candidate delivered an ACK")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("candidate peer was not closed")
+	}
+	if _, live := rt.Stat("remote"); live {
+		t.Fatal("cancelled candidate became live")
+	}
+	waitZombiesZero(t, rt, time.Second)
+}
+
 func TestPrepareHandshakeSendsNoAckAndAbortLeavesNoRuntimeState(t *testing.T) {
 	rt, _ := New(Config{})
 	host, remote := net.Pipe()
