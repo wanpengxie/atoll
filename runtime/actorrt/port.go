@@ -154,7 +154,7 @@ type port struct {
 	// (isLive) so a dangling emit from a torn-down port is rejected.
 	live atomic.Bool
 	// prepared is true after the handshake has been parsed and the port has
-	// entered Runtime's map, but before handshake_ack commits it live.
+	// entered Runtime's candidate slot, but before handshake_ack commits it live.
 	prepared atomic.Bool
 	doneOnce sync.Once
 

@@ -43,6 +43,38 @@ func TestAcceptorServeCloseAdmissionStraddle(t *testing.T) {
 	}
 }
 
+// TestAcceptorCloseJoinsOwnedDelayedCallback proves reject-drain timers share
+// Acceptor's admission barrier: a callback admitted before Close is joined, so
+// it cannot run against link state after Close returns.
+func TestAcceptorCloseJoinsOwnedDelayedCallback(t *testing.T) {
+	a := NewAcceptor(Config{})
+	entered, release := make(chan struct{}), make(chan struct{})
+	a.afterOwned(0, func() {
+		close(entered)
+		<-release
+	})
+	<-entered
+	closed := make(chan struct{})
+	go func() {
+		_ = a.closeWithin(time.Second)
+		close(closed)
+	}()
+	select {
+	case <-closed:
+		t.Fatal("Close returned while an owned delayed callback was still running")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not join the released delayed callback")
+	}
+	if got := a.Leaked(); got != 0 {
+		t.Fatalf("Leaked = %d, want 0", got)
+	}
+}
+
 // TestControlWorkerTimeoutAccountedThroughJoin drives the REAL teardown join
 // (joinLinkWorkers — the exact function runLink calls) against a real
 // linkSession whose control worker is wedged in its handler: the join must

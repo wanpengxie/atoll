@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/home"
@@ -158,6 +159,60 @@ func TestOperate_IntroduceNewRow_UnknownEngineRejected(t *testing.T) {
 	oe, ok := err.(*home.OperateError)
 	if !ok || oe.Code != "unknown_class" {
 		t.Fatalf("want unknown_class OperateError, got %v", err)
+	}
+}
+
+// TestOperateIntroduceAcquiresDaemonBeforeDeclaration is a barrier proof of the
+// global keyed-lock order. Once Introduce is observed waiting behind a held
+// daemon lock, the declaration lock must still be free; the retired reverse
+// order held declaration while waiting for daemon and deadlocked this crossing.
+func TestOperateIntroduceAcquiresDaemonBeforeDeclaration(t *testing.T) {
+	env := setupTestApp(t)
+	s := fullSetup(t, env)
+
+	w := env.do(t, "POST", "/api/daemons", map[string]any{"name": "lock-order"}, s.cookies)
+	assertStatus(t, w, http.StatusCreated)
+	daemonID := respJSON(t, w)["id"].(string)
+	w = env.do(t, "POST", "/api/channels/"+s.chID+"/daemons/attach",
+		map[string]any{"daemon_ids": []string{daemonID}}, s.cookies)
+	assertStatus(t, w, http.StatusOK)
+	w = env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "ordered", "class": "claude"}, s.cookies)
+	assertStatus(t, w, http.StatusCreated)
+	declID := respJSON(t, w)["id"].(string)
+
+	releaseDaemon := env.app.LockDaemonForTest(daemonID)
+	payload, _ := json.Marshal(map[string]any{
+		"decl_id": declID, "placement": "daemon", "desired_host": daemonID,
+	})
+	introduced := make(chan error, 1)
+	go func() {
+		_, err := env.app.OperateFaceForTest().Introduce(context.Background(), home.OperateRequest{
+			ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: payload,
+		})
+		introduced <- err
+	}()
+	if !env.app.WaitDaemonLockRefsForTest(daemonID, 2, time.Second) {
+		releaseDaemon()
+		t.Fatal("Introduce never reached the daemon lock")
+	}
+
+	declLock := make(chan func(), 1)
+	go func() { declLock <- env.app.LockDeclForTest(declID) }()
+	select {
+	case releaseDecl := <-declLock:
+		releaseDecl()
+	case <-time.After(time.Second):
+		releaseDaemon()
+		if err := <-introduced; err != nil {
+			t.Fatalf("Introduce after releasing deadlock rig: %v", err)
+		}
+		releaseDecl := <-declLock
+		releaseDecl()
+		t.Fatal("Introduce held declaration lock while waiting for daemon lock")
+	}
+	releaseDaemon()
+	if err := <-introduced; err != nil {
+		t.Fatalf("Introduce: %v", err)
 	}
 }
 

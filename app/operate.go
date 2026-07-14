@@ -101,8 +101,108 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 	if declID == "" {
 		return nil, &platformhome.OperateError{Code: "bad_payload", Detail: "decl_id or principal required"}
 	}
-	releaseDecl := x.a.declLocks.lock(declID)
+	// Default placement policy (product policy, v1.7): agents default to daemon
+	// (除 human/sysactor/boost 外). Explicit placement参数 kept for API/agent paths.
+	placement := strings.TrimSpace(p.Placement)
+	if placement == "" {
+		placement = placementDaemon
+	}
+	desiredHost := strings.TrimSpace(p.DesiredHost)
+
+	// A present config must be a JSON object (persona/knobs) — same guard the
+	// agent-config API applies. Absent (missing / null) leaves the field untouched;
+	// json.RawMessage round-trips a JSON null as the literal "null", so treat it as
+	// absent rather than a malformed object.
+	rawCfg := strings.TrimSpace(string(p.Config))
+	hasConfig := rawCfg != "" && rawCfg != "null"
+	if hasConfig && !isJSONObject(p.Config) {
+		return nil, &platformhome.OperateError{Code: "bad_payload", Detail: "config must be a JSON object"}
+	}
+
+	// §1's only legal composite lock order is daemon -> declaration. The daemon
+	// key is itself channel-composition state (an existing row freezes placement
+	// and desired_host), so discover a candidate without locks, acquire in the
+	// global order, then re-read under the declaration lock. A concurrent create/
+	// revoke that changed the candidate makes us release and retry; we never chase
+	// a second daemon lock while holding the declaration lock.
+	readDaemonTarget := func() (string, error) {
+		record, exists, err := home.CompositionByPrincipal(ctx, declID)
+		if err != nil {
+			return "", err
+		}
+		if exists {
+			if record.Placement == storespec.PlacementDaemon {
+				return record.DesiredHost, nil
+			}
+			return "", nil
+		}
+		if placement == placementDaemon {
+			return desiredHost, nil
+		}
+		return "", nil
+	}
+	var (
+		releaseDaemon func()
+		releaseDecl   func()
+		existing      storespec.CompositionRecord
+		exists        bool
+	)
+	for {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		lockedHost, err := readDaemonTarget()
+		if err != nil {
+			return nil, err
+		}
+		if lockedHost != "" {
+			releaseDaemon, err = (appDaemonAuthority{app: x.a}).LockAndValidate(ctx, lockedHost, req.ChannelID)
+			if err != nil {
+				// The authority check can lose to a concurrent revoke between the
+				// preview and lock acquisition. Retry only when the authoritative
+				// composition target actually moved; a stable invalid binding is a
+				// genuine request error.
+				latestHost, readErr := readDaemonTarget()
+				if readErr != nil {
+					return nil, readErr
+				}
+				if latestHost != lockedHost {
+					continue
+				}
+				return nil, &platformhome.OperateError{Code: "invalid_desired_host", Detail: err.Error()}
+			}
+		}
+		releaseDecl = x.a.declLocks.lock(declID)
+		existing, exists, err = home.CompositionByPrincipal(ctx, declID)
+		if err != nil {
+			releaseDecl()
+			if releaseDaemon != nil {
+				releaseDaemon()
+			}
+			return nil, err
+		}
+		actualHost := ""
+		if exists {
+			if existing.Placement == storespec.PlacementDaemon {
+				actualHost = existing.DesiredHost
+			}
+		} else if placement == placementDaemon {
+			actualHost = desiredHost
+		}
+		if actualHost == lockedHost {
+			break
+		}
+		releaseDecl()
+		if releaseDaemon != nil {
+			releaseDaemon()
+			releaseDaemon = nil
+		}
+	}
+	if releaseDaemon != nil {
+		defer releaseDaemon()
+	}
 	defer releaseDecl()
+
 	var owner, visibility, defClass string
 	err := x.a.db.QueryRowContext(ctx,
 		`SELECT owner, visibility, default_class FROM actor_decls WHERE id = ? AND deleted_at IS NULL`,
@@ -133,33 +233,12 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 	if engine == "" {
 		engine = defClass
 	}
-	// Default placement policy (product policy, v1.7): agents default to daemon
-	// (除 human/sysactor/boost 外). Explicit placement参数 kept for API/agent paths.
-	placement := strings.TrimSpace(p.Placement)
-	if placement == "" {
-		placement = placementDaemon
-	}
-	desiredHost := strings.TrimSpace(p.DesiredHost)
 	// NB: the request engine's ClassKind + placement are validated ONLY on the create
 	// branch below (after the row query), NOT here. An existing row's class is frozen
 	// (SW-8) — a config/retry introduce against it must走 the frozen effective class,
 	// so validating the (possibly stale/garbage) request engine up-front would wrongly
 	// reject a legitimate update of an already-composed row.
 
-	// A present config must be a JSON object (persona/knobs) — same guard the
-	// agent-config API applies. Absent (missing / null) leaves the field untouched;
-	// json.RawMessage round-trips a JSON null as the literal "null", so treat it as
-	// absent rather than a malformed object.
-	rawCfg := strings.TrimSpace(string(p.Config))
-	hasConfig := rawCfg != "" && rawCfg != "null"
-	if hasConfig && !isJSONObject(p.Config) {
-		return nil, &platformhome.OperateError{Code: "bad_payload", Detail: "config must be a JSON object"}
-	}
-
-	existing, exists, err := home.CompositionByPrincipal(ctx, declID)
-	if err != nil {
-		return nil, err
-	}
 	if exists {
 		engine = existing.Class
 		placement = string(existing.Placement)
@@ -180,15 +259,6 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 	if hasConfig {
 		value := string(p.Config)
 		cfg = &value
-	}
-	var releaseDaemon func()
-	if placement == placementDaemon && desiredHost != "" {
-		var lockErr error
-		releaseDaemon, lockErr = (appDaemonAuthority{app: x.a}).LockAndValidate(ctx, desiredHost, req.ChannelID)
-		if lockErr != nil {
-			return nil, &platformhome.OperateError{Code: "invalid_desired_host", Detail: lockErr.Error()}
-		}
-		defer releaseDaemon()
 	}
 	record, created, configChanged, err := home.IntroduceComposition(ctx, storespec.CompositionIntroduce{
 		DeclID: declID, Principal: declID, Class: engine, ConfigJSON: cfg,

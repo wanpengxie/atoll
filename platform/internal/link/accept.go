@@ -351,7 +351,7 @@ func (p *incumbentPin) finish(ok bool) {
 		}
 		p.a.slotMu.Unlock()
 		if kill {
-			time.AfterFunc(attachRejectDrain, func() { p.link.kill("attach_rejected", nil) })
+			p.a.afterOwned(attachRejectDrain, func() { p.link.kill("attach_rejected", nil) })
 		}
 	})
 }
@@ -551,6 +551,25 @@ func (a *Acceptor) beginServe() bool {
 }
 
 func (a *Acceptor) endServe() { a.wg.Done() }
+
+// afterOwned schedules a short Acceptor-owned callback. Its admission and wg.Add
+// share admissionMu with Close's seal, so Close either joins the callback or the
+// callback loses admission and runs synchronously — no timer goroutine can touch
+// Acceptor/link state after Close returns.
+func (a *Acceptor) afterOwned(delay time.Duration, fn func()) {
+	a.admissionMu.Lock()
+	if a.closed {
+		a.admissionMu.Unlock()
+		fn()
+		return
+	}
+	a.wg.Add(1)
+	a.admissionMu.Unlock()
+	time.AfterFunc(delay, func() {
+		defer a.wg.Done()
+		fn()
+	})
+}
 
 // runLink drives one accepted link: build the mux, handle the stream-0 attach,
 // then demux actor streams to runtime.Attach while the lease watchdog judges
@@ -900,7 +919,13 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				incs = append(incs, inc)
 			}
 		}
-		ports = map[actor.ActorID]actorrt.Incarnation{}
+		// Keep the map object stable: control dispatch passes this reference to
+		// handleAttach concurrently. Rebinding the captured variable races even
+		// though all element access is under portMu; clearing in place preserves
+		// the single protected ownership object.
+		for id := range ports {
+			delete(ports, id)
+		}
 		portMu.Unlock()
 		for _, inc := range incs {
 			a.runtime.DespawnQuiet(inc)
@@ -1331,7 +1356,7 @@ func (a *Acceptor) rejectAttach(lc *linkSession, requestID, reason, killReason s
 		lc.kill(killReason, errors.Join(cause, err))
 		return
 	}
-	time.AfterFunc(attachRejectDrain, func() { lc.kill(killReason, cause) })
+	a.afterOwned(attachRejectDrain, func() { lc.kill(killReason, cause) })
 }
 
 // peekControlKind reads ONLY the "kind" field of a stream-0 control payload —
@@ -1739,7 +1764,8 @@ func (a *Acceptor) scheduleSink() actorrt.RelaySink {
 }
 
 // Close stops accepting new links and tears down active ones, waiting for all
-// Serve goroutines to exit. The outer bound is DERIVED from the inner joins a
+// Serve goroutines and admitted delayed-reject callbacks to exit. The outer
+// bound is DERIVED from the inner joins a
 // runLink teardown can legitimately spend back to back — the control-worker
 // join (2×streamWriteBudget) then the actor-gate join (attachHandshakeTimeout)
 // — plus margin, so the backstop never abandons (and double-counts) a link

@@ -145,6 +145,11 @@ type Runtime struct {
 
 	mu          sync.RWMutex
 	embodiments map[actor.ActorID]embodiment
+	// prepared holds at most one authenticated, ACK-in-flight port candidate per
+	// id. It is deliberately separate from embodiments: the incumbent remains the
+	// live/addressable truth until the candidate's ACK succeeds, so a failed ACK
+	// cannot create an unhosted replacement window. Guarded by mu.
+	prepared    map[actor.ActorID]*port
 	watchers    []DownWatcher
 	obsWatchers []ObsWatcher
 	mailbox     int
@@ -171,7 +176,7 @@ type Runtime struct {
 	leakedTotal        atomic.Int64
 	sealed             bool   // guarded by mu; admission check and registration are linearized together
 	attachStraddleHook func() // test-only: handshake parsed, immediately before prepare lock
-	attachPreparedHook func() // test-only: prepared pointer installed, immediately before ACK
+	attachPreparedHook func() // test-only: prepared candidate registered, immediately before ACK
 }
 
 // defaultZombieGrace is the aggregate teardown grace (P0-1 = 5s, not a config
@@ -243,6 +248,7 @@ func New(cfg Config) (*Runtime, Deliverer) {
 		clock:       clock,
 		logger:      logger,
 		embodiments: make(map[actor.ActorID]embodiment),
+		prepared:    make(map[actor.ActorID]*port),
 		owned:       make(map[embodiment][]embodiment),
 		zombies:     make(map[embodiment]*zombie),
 		grace:       grace,
@@ -389,9 +395,9 @@ type DeliverResult struct {
 	Per map[actor.ActorID]Outcome
 }
 
-// LiveIDs returns a snapshot of every live ActorID. Attach temporarily installs
-// a prepared (not yet live) port before writing its ACK, so map membership alone
-// is not sufficient to establish liveness.
+// LiveIDs returns a snapshot of every live ActorID. ACK-in-flight attach
+// candidates live in Runtime.prepared, never in the authoritative embodiments
+// map, so an incumbent remains visible until its replacement truly commits.
 func (r *Runtime) LiveIDs() []actor.ActorID {
 	r.mu.RLock()
 	ids := make([]actor.ActorID, 0, len(r.embodiments))
@@ -419,6 +425,9 @@ func (r *Runtime) SpawnIfAbsent(id actor.ActorID, kind actor.Kind, build func(In
 	r.mu.RLock()
 	sealed := r.sealed
 	_, occupied := r.embodiments[id]
+	if !occupied {
+		_, occupied = r.prepared[id]
+	}
 	r.mu.RUnlock()
 	if sealed {
 		return Incarnation{}, false, ErrRuntimeSealed
@@ -442,7 +451,11 @@ func (r *Runtime) SpawnIfAbsent(id actor.ActorID, kind actor.Kind, build func(In
 		abortBuild(c)
 		return Incarnation{}, false, ErrRuntimeSealed
 	}
-	if _, occupied := r.embodiments[id]; occupied { // same critical section re-check
+	_, occupied = r.embodiments[id]
+	if !occupied {
+		_, occupied = r.prepared[id]
+	}
+	if occupied { // same critical section re-check
 		r.mu.Unlock() // lost the race: discard the shell, never c.start() it.
 		// Release the discarded shell's ctx node (same discard-release as
 		// Fork's collision/parent-dead arms): allocShell derived it from
@@ -561,9 +574,10 @@ func (r *Runtime) PrepareHandshakeObserved(hsCtx context.Context, conn io.ReadWr
 	return &PreparedAttach{runtime: r, port: p}, nil
 }
 
-// Commit installs the prepared pointer, emits the handshake ACK, and makes the
-// port live only if the exact pointer is still current and the Runtime remains
-// open. Failures conditionally remove and close this port.
+// Commit registers an invisible candidate, emits the handshake ACK, and only
+// then atomically replaces the incumbent. The old embodiment remains live and
+// addressable until that final commit; failures remove and close only the
+// candidate.
 func (p *PreparedAttach) Commit() (Incarnation, error) {
 	return p.CommitWhile(nil)
 }
@@ -595,34 +609,27 @@ func (p *PreparedAttach) CommitWhile(valid func() bool) (Incarnation, error) {
 		}
 		return Incarnation{}, ErrRuntimeSealed
 	}
-	old, existed := r.embodiments[port.id]
-	var retirement retirementWork
-	if existed {
-		// REPLACEMENT-LIVE-FLIP INVARIANT (same as Spawn): flip the predecessor
-		// dead in the SAME critical section as the map swap. Otherwise a replaced
-		// port's in-flight cross-wire emit — welded to `old`'s Incarnation — would
-		// still pass IsLive during the lock-release-to-escort window and author
-		// truth on the successor's id. markDead is an idempotent atomic (no r.mu
-		// re-entry), deadlock-safe in-lock. Enrol `old` as a zombie in the SAME
-		// critical section (P0-1); the escort drives the quiet teardown + bounded
-		// join, so the new port goes live without waiting for the old to exit.
-		retirement = r.retireCurrentLocked(port.id, old, flavorQuiet)
-	}
 	port.prepared.Store(true)
-	r.embodiments[port.id] = port
+	previousCandidate := r.prepared[port.id]
+	r.prepared[port.id] = port
 	r.mu.Unlock()
-	runRetirement(retirement)
+	// Only one ACK-in-flight candidate per id. A later candidate deposes the
+	// earlier one without touching the still-live incumbent. initiateStop can
+	// synchronously re-enter Runtime through onExit, so it stays outside r.mu.
+	if previousCandidate != nil && previousCandidate != port {
+		previousCandidate.initiateStop()
+	}
 	if r.attachPreparedHook != nil {
 		r.attachPreparedHook()
 	}
-	// ACK is sent only after the prepared pointer is installed. Any failure
-	// conditionally aborts this exact pointer; it never registers live or starts.
+	// ACK is sent while the incumbent remains authoritative. Any failure
+	// conditionally aborts this exact candidate; the old body is untouched.
 	if err := port.writeHandshakeAck(); err != nil {
 		r.abortPrepared(port)
 		return Incarnation{}, err
 	}
 	r.mu.Lock()
-	cur, stillCurrent := r.embodiments[port.id]
+	cur, stillCurrent := r.prepared[port.id]
 	if r.sealed || !stillCurrent || cur != port || !port.prepared.Load() || (valid != nil && !valid()) {
 		r.mu.Unlock()
 		r.abortPrepared(port)
@@ -631,10 +638,22 @@ func (p *PreparedAttach) CommitWhile(valid func() bool) (Incarnation, error) {
 		}
 		return Incarnation{}, errors.New("actorrt: prepared attach was deposed before commit")
 	}
+	delete(r.prepared, port.id)
+	old, existed := r.embodiments[port.id]
+	var retirement retirementWork
+	if existed {
+		// REPLACEMENT-LIVE-FLIP INVARIANT (same as Spawn): the predecessor dies
+		// in the SAME critical section as the authoritative map swap. The only
+		// difference from the old sequence is timing: this happens after ACK, so
+		// an ACK failure leaves the predecessor fully intact.
+		retirement = r.retireCurrentLocked(port.id, old, flavorQuiet)
+	}
+	r.embodiments[port.id] = port
 	port.prepared.Store(false)
 	port.live.Store(true)
 	port.start()
 	r.mu.Unlock()
+	runRetirement(retirement)
 	// Return the Incarnation (id + this embodiment pointer): the home-side port
 	// death-write gate welds a livePen to it and gates each cross-wire emit
 	// on IsLive, so a replaced/torn-down port's in-flight emit is fenced by
@@ -660,11 +679,20 @@ func (p *PreparedAttach) Abort() {
 
 func (r *Runtime) abortPrepared(p *port) {
 	r.mu.Lock()
-	if cur, ok := r.embodiments[p.id]; ok && cur == p {
-		delete(r.embodiments, p.id)
+	if cur, ok := r.prepared[p.id]; ok && cur == p {
+		delete(r.prepared, p.id)
 	}
 	r.mu.Unlock()
 	p.initiateStop()
+}
+
+// takePreparedLocked removes the ACK-in-flight candidate for id. Callers use it
+// when an explicit by-id/by-incarnation teardown wins, so that candidate cannot
+// resurrect the just-terminated identity after its ACK completes. r.mu held.
+func (r *Runtime) takePreparedLocked(id actor.ActorID) *port {
+	p := r.prepared[id]
+	delete(r.prepared, id)
+	return p
 }
 
 // removeIf is the pointer-identity-checked self-eviction hook handed to each
@@ -748,6 +776,7 @@ func (r *Runtime) Despawn(inc Incarnation) {
 	cur, ok := r.embodiments[inc.id]
 	matched := ok && cur == inc.p
 	var retirement retirementWork
+	var candidate *port
 	if matched {
 		// REPLACEMENT-LIVE-FLIP INVARIANT: flip dead in the SAME critical section as
 		// the map delete, so no window opens where the entry is gone but IsLive still
@@ -756,12 +785,16 @@ func (r *Runtime) Despawn(inc Incarnation) {
 		// SAME critical section (P0-1); the escort drives the despawn teardown +
 		// bounded join, so Despawn returns in O(judge-dead) not O(goroutine-exit).
 		retirement = r.retireCurrentLocked(inc.id, inc.p, flavorDespawn)
+		candidate = r.takePreparedLocked(inc.id)
 	}
 	r.mu.Unlock()
 	// Guarded by POINTER IDENTITY: only despawn IFF the map still points to this
 	// very incarnation, so despawning a stale handle (a replaced predecessor, or
 	// an id never hosted) is a safe no-op and can never evict a same-id successor.
 	runRetirement(retirement)
+	if candidate != nil {
+		candidate.initiateStop()
+	}
 }
 
 // DespawnQuiet is Despawn's QUIET twin: same pointer-identity guard, same map
@@ -776,14 +809,19 @@ func (r *Runtime) DespawnQuiet(inc Incarnation) {
 	cur, ok := r.embodiments[inc.id]
 	matched := ok && cur == inc.p
 	var retirement retirementWork
+	var candidate *port
 	if matched {
 		// Quiet flavour: no KindDespawn frame (a graceful host teardown is a link
 		// drop the remote can redial, not a by-name arm termination). Enrol in-lock
 		// (P0-1); the escort fires the quiet teardown + bounded join.
 		retirement = r.retireCurrentLocked(inc.id, inc.p, flavorQuiet)
+		candidate = r.takePreparedLocked(inc.id)
 	}
 	r.mu.Unlock()
 	runRetirement(retirement)
+	if candidate != nil {
+		candidate.initiateStop()
+	}
 }
 
 // DespawnID stops and removes whatever embodiment CURRENTLY occupies id, if any
@@ -810,9 +848,13 @@ func (r *Runtime) DespawnID(id actor.ActorID) bool {
 		// the escort drives the despawn teardown + bounded join.
 		retirement = r.retireCurrentLocked(id, p, flavorDespawn)
 	}
+	candidate := r.takePreparedLocked(id)
 	r.mu.Unlock()
 	runRetirement(retirement)
-	return ok
+	if candidate != nil {
+		candidate.initiateStop()
+	}
+	return ok || candidate != nil
 }
 
 // deliver routes env to every audience embodiment hosted by this Runtime by
@@ -838,13 +880,6 @@ func (r *Runtime) deliver(audience []actor.ActorID, env *message.Envelope) (Deli
 	for _, id := range audience {
 		p, ok := r.embodiments[id]
 		if !ok {
-			res.Per[id] = NotHosted
-			continue
-		}
-		// A prepared attach has authenticated but has not committed; it is not
-		// addressable yet. Other non-live entries can exist transiently during
-		// teardown and retain the established Stopped outcome.
-		if port, isPort := p.(*port); isPort && port.prepared.Load() {
 			res.Per[id] = NotHosted
 			continue
 		}
@@ -884,9 +919,17 @@ func (r *Runtime) StopAll() {
 		// flavour (channel teardown sends no KindDespawn — the remote learns via EOF).
 		retirements = append(retirements, r.retireCurrentLocked(id, p, flavorQuiet))
 	}
+	candidates := make([]*port, 0, len(r.prepared))
+	for id, p := range r.prepared {
+		delete(r.prepared, id)
+		candidates = append(candidates, p)
+	}
 	r.mu.Unlock()
 	for _, retirement := range retirements {
 		runRetirement(retirement)
+	}
+	for _, candidate := range candidates {
+		candidate.initiateStop()
 	}
 }
 

@@ -67,7 +67,11 @@ func (r *Runtime) Fork(parent Incarnation, childID actor.ActorID, kind actor.Kin
 		abortBuild(c)
 		return Incarnation{}, ErrRuntimeSealed
 	}
-	if _, exists := r.embodiments[childID]; exists { // collision = hard fail
+	_, exists := r.embodiments[childID]
+	if !exists {
+		_, exists = r.prepared[childID]
+	}
+	if exists { // collision = hard fail
 		r.mu.Unlock()
 		// Release the discarded shell's ctx node: allocShell derived it from
 		// r.parent, so an uncancelled discard would pin a child-context entry
@@ -207,6 +211,7 @@ func (r *Runtime) DespawnChild(parent Incarnation, childID actor.ActorID) error 
 	// re-enters r.mu, so it is deadlock-safe in-lock. Enrol as a zombie in the SAME
 	// critical section (P0-1).
 	retirement := r.retireCurrentLocked(childID, child, flavorDespawn)
+	candidate := r.takePreparedLocked(childID)
 	r.mu.Unlock()
 	// Mirrors Despawn's own guarded teardown: the escort drives signalDespawn (a
 	// by-name termination — a port emits KindDespawn before closing; a cell child,
@@ -215,5 +220,8 @@ func (r *Runtime) DespawnChild(parent Incarnation, childID actor.ActorID) error 
 	// child goroutine. The stale r.owned[parent.p] entry is left in place — it is
 	// !isLive() from here on and gets pruned on the parent's next Fork.
 	runRetirement(retirement)
+	if candidate != nil {
+		candidate.initiateStop()
+	}
 	return nil
 }

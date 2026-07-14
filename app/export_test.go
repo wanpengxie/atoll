@@ -36,6 +36,36 @@ func (a *App) OperateFaceForTest() platformhome.OperateExecutor {
 	return a.operateFace()
 }
 
+// LockDaemonForTest / LockDeclForTest expose only the keyed-lock barriers needed
+// to prove composite acquisition order. They return the production lock's
+// idempotent release closure and exist only in the test build.
+func (a *App) LockDaemonForTest(id string) func() { return a.daemonLocks.lock(id) }
+func (a *App) LockDeclForTest(id string) func()   { return a.declLocks.lock(id) }
+
+// WaitDaemonLockRefsForTest waits until refs contenders (holder included) have
+// registered for id. keyedLockSet increments refs before blocking on the entry,
+// making this a deterministic barrier rather than a timeout-based lock-order
+// guess.
+func (a *App) WaitDaemonLockRefsForTest(id string, refs int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		a.daemonLocks.mu.Lock()
+		entry := a.daemonLocks.m[id]
+		got := 0
+		if entry != nil {
+			got = entry.refs
+		}
+		a.daemonLocks.mu.Unlock()
+		if got >= refs {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 // errTestSeedAdmitFail / errTestRevokeFail are the forced failures the injected
 // seams raise in place of a real persist, to drive the rollback paths.
 var (

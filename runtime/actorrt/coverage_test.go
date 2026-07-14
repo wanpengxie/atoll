@@ -526,6 +526,45 @@ func TestNewPortHandshakeAckWriteError(t *testing.T) {
 	waitZombiesZero(t, rt, time.Second)
 }
 
+// TestAttachAckFailurePreservesIncumbent pins replacement commit ordering: an
+// authenticated same-id candidate whose ACK write fails must not retire or hide
+// the healthy incumbent. The old incarnation remains both pointer-live and
+// addressable throughout the failed replacement.
+func TestAttachAckFailurePreservesIncumbent(t *testing.T) {
+	rt, deliver := New(Config{Parent: context.Background()})
+	_, remote := dialPort(t, rt, "old", nopEmit, staticResolve("remote-1"), nil)
+	defer remote.conn.Close()
+	defer rt.StopAll()
+	old, ok := rt.CurrentIncarnation("remote-1")
+	if !ok {
+		t.Fatal("incumbent missing before replacement")
+	}
+
+	hostConn, remoteConn := net.Pipe()
+	go func() {
+		codec := ipc.NewCodec(remoteConn, remoteConn)
+		payload, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "replacement"})
+		_ = codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: payload})
+		_ = remoteConn.Close() // force the host's ACK write to fail
+	}()
+	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil); err == nil {
+		t.Fatal("replacement succeeded despite failed ACK")
+	}
+
+	current, ok := rt.CurrentIncarnation("remote-1")
+	if !ok || current != old || !rt.IsLive(old) {
+		t.Fatalf("failed ACK displaced incumbent: current=%v ok=%v old_live=%v", current, ok, rt.IsLive(old))
+	}
+	result, err := deliver.Deliver([]actor.ActorID{"remote-1"}, env("after-failed-replace"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Per["remote-1"]; got != Delivered {
+		t.Fatalf("deliver after failed replacement = %v, want Delivered", got)
+	}
+	waitZombiesZero(t, rt, time.Second)
+}
+
 // TestNewPortNilLoggerDefaulted: newPort defaults a nil logger to discard (the
 // port is constructed and usable). Driven directly so the logger arg is nil.
 func TestNewPortNilLoggerDefaulted(t *testing.T) {
