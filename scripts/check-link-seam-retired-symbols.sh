@@ -23,6 +23,9 @@ labels=(
 	"one-step runtime attach API"
 	"unlocked public app DB opener"
 	"pre-release adoption/repair semantics"
+	"retired HTTP channel transport symbols"
+	"retired HTTP channel routes"
+	"duplicate daemon plan DTO"
 )
 
 patterns=(
@@ -42,6 +45,9 @@ patterns=(
 	'func[[:space:]]*\(r[[:space:]]+\*Runtime\)[[:space:]]+Attach\b|PrepareHandshakeObserved|CommitWhile'
 	'func[[:space:]]+OpenDB[[:space:]]*\('
 	'migration generation|pre-epoch|repairs inactive|half-written.*repaired|old daemon build|historical.*migration'
+	'submitControlThroughDoor|controlRequestTimeout|handle(ListActors|ActorStatus|ChannelPresenceDrops|Cursor|ListMessages|IntroduceActor|RestartDecl|RemoveActor|SetDefaultAgent)'
+	'"/channels/:chID/(actors|presence-drops|cursor|messages|default_agent)|"/actor-decls/:declID/restart'
+	'type[[:space:]]+daemonAssignment[[:space:]]+struct'
 )
 
 samples=(
@@ -61,6 +67,9 @@ samples=(
 	'func (r *Runtime) Attach() {}'
 	'func OpenDB(path string) {}'
 	'const mode = "pre-epoch"'
+	'func submitControlThroughDoor() {}'
+	'router.GET("/channels/:chID/actors", handler)'
+	'type daemonAssignment struct{}'
 )
 
 if (( ${#labels[@]} != ${#patterns[@]} || ${#patterns[@]} != ${#samples[@]} )); then

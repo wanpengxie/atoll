@@ -334,10 +334,9 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 // handleListWorkspaceMembers lists the WORKSPACE roster reachable through this
 // channel (workspace_members JOIN users) — a world-layer / subject-domain
 // projection (HTTP legitimate), NOT the channel's actor census. Named honestly:
-// "who is in the workspace", not "who is in the channel". The channel's real
-// roster (its admitted actors) is served by handleListActors (/actors), backed by
-// the in-gate sysactor actor.list; the two are different questions and must not be
-// conflated (A11).
+// "who is in the workspace", not "who is in the channel". Channel actor truth
+// is available only through the canonical in-gate subject protocol; the two
+// questions must not be conflated (A11).
 func (a *App) handleListWorkspaceMembers(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {

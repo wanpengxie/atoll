@@ -74,7 +74,7 @@ func (p *e2eLinkPlan) snapshot() ([]platform.PlanActor, int) {
 // the FULL daemon flow against a real server —
 //
 //	introduce claude (placement='daemon')
-//	  → PULL the assignment from GET /compute/plan         (what daemon does 1st)
+//	  → PULL the assignment over the authenticated link    (what daemon does 1st)
 //	  → BUILD decls from it via registry.Build             (no blind-build)
 //	  → ATTACH over a real /compute link (compute.Run)
 //	  → the agent becomes a LIVE channel member (Home's canonical view)
@@ -86,10 +86,18 @@ func (p *e2eLinkPlan) snapshot() ([]platform.PlanActor, int) {
 func TestDaemonComposition_E2E(t *testing.T) {
 	env := setupTestApp(t)
 	baseBuilder := testAgentBuilder
-	var builds atomic.Int32
+	var builds sync.Map
 	testAgentBuilder = func(chID channel.ID, id actor.ActorID) (actorbase.Proc, error) {
-		builds.Add(1)
+		counter, _ := builds.LoadOrStore(id, &atomic.Int32{})
+		counter.(*atomic.Int32).Add(1)
 		return baseBuilder(chID, id)
+	}
+	buildCount := func(id actor.ActorID) int32 {
+		counter, ok := builds.Load(id)
+		if !ok {
+			return 0
+		}
+		return counter.(*atomic.Int32).Load()
 	}
 	srv := httptest.NewServer(env.handler)
 	defer srv.Close()
@@ -143,7 +151,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	go func() {
 		runErr <- compute.Run(ctx, compute.Config{
 			ServerWS: serverWS, PlanSource: plan,
-			Poll: time.Hour, Resync: 30 * time.Millisecond,
+			Poll: time.Hour, Resync: 100 * time.Millisecond,
 		})
 	}()
 	t.Cleanup(func() {
@@ -157,10 +165,17 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	// Durable membership exists as soon as the intent is introduced, so it is
 	// not a liveness oracle. Wait for the daemon's applied snapshot and actual
 	// factory construction before taking the membership identity baseline.
-	waitDaemonComposition(t, func() bool {
-		rows, _ := plan.snapshot()
-		return len(rows) == 1 && rows[0].InstanceID == actor.ActorID(instID) && builds.Load() == 1
-	}, "daemon never applied and built the introduced actor")
+	buildDeadline := time.Now().Add(3 * time.Second)
+	for {
+		rows, applies := plan.snapshot()
+		if len(rows) == 1 && rows[0].InstanceID == actor.ActorID(instID) && buildCount(actor.ActorID(instID)) >= 1 {
+			break
+		}
+		if time.Now().After(buildDeadline) {
+			t.Fatalf("daemon never applied and built actor: rows=%#v applies=%d builds=%d", rows, applies, buildCount(actor.ActorID(instID)))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	planBeforeRestart, applyBaseline := plan.snapshot()
 	if len(planBeforeRestart) != 1 || planBeforeRestart[0].InstanceID != actor.ActorID(instID) {
 		t.Fatalf("initial applied plan = %#v, want exactly %s", planBeforeRestart, instID)
@@ -189,8 +204,8 @@ func TestDaemonComposition_E2E(t *testing.T) {
 		rows, applies := plan.snapshot()
 		return applies >= applyBaseline+2 && reflect.DeepEqual(rows, planBeforeRestart)
 	}, "unchanged plan was not reapplied by periodic resync")
-	if builds.Load() != 1 {
-		t.Fatalf("unchanged resync rebuilt actor: build count = %d, want 1", builds.Load())
+	if got := buildCount(actor.ActorID(instID)); got != 1 {
+		t.Fatalf("unchanged resync rebuilt actor: build count = %d, want 1", got)
 	}
 
 	// Restart is an epoch transition of the same desired/member identity. The
@@ -203,7 +218,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	}
 	waitDaemonComposition(t, func() bool {
 		rows, _ := plan.snapshot()
-		return len(rows) == 1 && rows[0].Epoch == planBeforeRestart[0].Epoch+1 && builds.Load() == 2
+		return len(rows) == 1 && rows[0].Epoch == planBeforeRestart[0].Epoch+1 && buildCount(actor.ActorID(instID)) == 2
 	}, "epoch restart did not replace the daemon body")
 	actorsAfterRestart, err := env.app.ActorsForTest(channel.ID(chID))
 	if err != nil {

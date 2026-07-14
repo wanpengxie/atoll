@@ -54,16 +54,11 @@ func channelFromServerURL(raw string) string {
 	return u.Query().Get("channel")
 }
 
-// planSource is the daemon's LIVE compute-plan source: it is BOTH the reconcile
-// ring's actorrt.DesiredSource (Members) and its compute.ActorFactorySource (Lookup),
-// sharing one fetched-plan snapshot. The reconcile ring calls Members every poll
-// tick (compute.runLink), so Members pulls a fresh link plan each tick and
-// rebuilds the desired set + the id→factory table together — a plan changed on the
-// server converges WITHOUT a daemon restart (SW-6). A fetch failure is NON-FATAL:
-// Members logs and returns the last-known-good set (empty until the first success),
-// so the daemon stays connected and keeps trying ("connect first, pull later" —
-// no 3-try-fatal startup gate). Members updates the builder table BEFORE returning,
-// so the ring's subsequent per-id Lookup sees a consistent snapshot.
+// planSource is the daemon's single applied compute-plan snapshot. The reconcile
+// ring pulls the authenticated plan through its link, calls ApplyPlan, then reads
+// Members and Lookup from this same atomically replaced desired/factory pair.
+// A pull or build failure leaves the last-known-good snapshot intact, so the
+// daemon stays connected and retries without introducing a second plan source.
 type planSource struct {
 	chID, wsRoot, deviceName string
 	logger                   *slog.Logger
