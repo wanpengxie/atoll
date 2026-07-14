@@ -27,6 +27,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -77,6 +78,23 @@ type staticDesired struct{ members []actorrt.DesiredMember }
 
 func (s staticDesired) Members(context.Context) ([]actorrt.DesiredMember, error) {
 	return s.members, nil
+}
+
+type epochDesired struct {
+	mu     sync.Mutex
+	member actorrt.DesiredMember
+}
+
+func (d *epochDesired) Members(context.Context) ([]actorrt.DesiredMember, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return []actorrt.DesiredMember{d.member}, nil
+}
+
+func (d *epochDesired) setEpoch(epoch int64) {
+	d.mu.Lock()
+	d.member.Epoch = epoch
+	d.mu.Unlock()
 }
 
 // oneActorBuilder resolves exactly one id to a Proc factory.
@@ -196,5 +214,54 @@ func TestRestartDaemonPlacedActor_RebuildsAcrossWire(t *testing.T) {
 	token2 := awaitToken(t, ch, callerPen, agentID, token1, 15*time.Second)
 	if token2 == token1 || token2 == "" {
 		t.Fatalf("after Restart, probe token=%q (before=%q) — daemon-placed Restart did not rebuild the embodiment", token2, token1)
+	}
+}
+
+func TestDaemonEpochDelta_ReplacesExactlyOnceAndStableEpochIsNoOp(t *testing.T) {
+	if testing.Short() {
+		t.Skip("short: real-wire epoch replacement journey")
+	}
+	ch := newClosureHome(t)
+	callerID := actor.ActorID("user:epoch-caller")
+	agentID := actor.ActorID("tool:epoch-probe")
+	registerActor(t, ch, &agentID, actor.KindTool)
+	callerPen := spawnWithPen(t, ch, &callerID, actor.KindHuman)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ch.ServeAttach(w, r, "daemon-epoch")
+	}))
+	t.Cleanup(srv.Close)
+
+	desired := &epochDesired{member: actorrt.DesiredMember{
+		ID: agentID, Kind: actor.KindTool, Lifecycle: actorrt.LifecycleAlwaysOn, Epoch: 1,
+	}}
+	builder := oneActorBuilder{id: agentID, f: platform.ActorFactory{Proc: restartProbeDef()}}
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = compute.Run(ctx, compute.Config{
+			ServerWS: "ws" + srv.URL[4:], ComputeID: "daemon-epoch",
+			Desired: desired, Builder: builder, Poll: 40 * time.Millisecond,
+		})
+	}()
+	t.Cleanup(func() { cancel(); <-done })
+
+	token1 := awaitToken(t, ch, callerPen, agentID, "", 10*time.Second)
+	// Several identical ticks must not rebuild the incarnation.
+	time.Sleep(250 * time.Millisecond)
+	if stable := awaitToken(t, ch, callerPen, agentID, "", 5*time.Second); stable != token1 {
+		t.Fatalf("stable epoch rebuilt actor: before=%q after=%q", token1, stable)
+	}
+
+	desired.setEpoch(2)
+	token2 := awaitToken(t, ch, callerPen, agentID, token1, 15*time.Second)
+	if token2 == "" || token2 == token1 {
+		t.Fatalf("epoch delta did not replace incarnation: before=%q after=%q", token1, token2)
+	}
+	// The newly recorded epoch suppresses repeated replacement on later ticks.
+	time.Sleep(250 * time.Millisecond)
+	if stable := awaitToken(t, ch, callerPen, agentID, "", 5*time.Second); stable != token2 {
+		t.Fatalf("epoch 2 was not recorded after build: first=%q later=%q", token2, stable)
 	}
 }

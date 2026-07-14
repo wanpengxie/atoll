@@ -137,6 +137,35 @@ func TestActorGateAdmitRaceWithSeal(t *testing.T) {
 	}
 }
 
+func TestActorGateTimeoutObserversShareOneTerminal(t *testing.T) {
+	gate := &actorGate{}
+	if !gate.admit() {
+		t.Fatal("initial admission refused")
+	}
+	const observers = 8
+	results := make(chan bool, observers)
+	for range observers {
+		go func() { results <- gate.sealAndWait(10 * time.Millisecond) }()
+	}
+	for range observers {
+		if <-results {
+			t.Fatal("observer joined before worker completion")
+		}
+	}
+	gate.done()
+	if !gate.sealAndWait(time.Second) {
+		t.Fatal("terminal observer did not see the shared completion edge")
+	}
+	gate.mu.Lock()
+	done := gate.waitDone
+	gate.mu.Unlock()
+	select {
+	case <-done:
+	default:
+		t.Fatal("shared terminal channel was not closed")
+	}
+}
+
 func TestAcceptorConcurrentCloseCountsOneLeak(t *testing.T) {
 	a := NewAcceptor(Config{})
 	if !a.beginServe() {

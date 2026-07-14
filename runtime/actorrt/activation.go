@@ -30,6 +30,10 @@ type DesiredMember struct {
 	ID        actor.ActorID
 	Kind      actor.Kind
 	Lifecycle Lifecycle
+	// Epoch identifies the desired incarnation. A changed epoch is not a
+	// metadata refresh: reconcile must tear down the body built for the old
+	// value and build a new one, recording the epoch only after build succeeds.
+	Epoch int64
 }
 
 // DesiredSource is the reconcile loop's read of desired: the intent half of

@@ -13,9 +13,9 @@ import (
 
 // OpenOptions tunes DSN-level pragmas. Zero value is fine for production.
 //
-// NOTE (schema baseline): ReadOnly and SkipDDL both skip the idempotent
-// CREATE TABLE IF NOT EXISTS bootstrap — this package's only migration
-// mechanism — while the schema verifier still runs on every open. They
+// NOTE (schema baseline): ordinary writable Open runs the idempotent additive
+// ChannelLocalDDL migration before verification. ReadOnly and SkipDDL skip it,
+// while the schema verifier still runs on every open. They
 // therefore REQUIRE the file to already carry the current baseline: a file
 // last touched by an older binary fails fast with "stale channel DB" until
 // one ordinary read-write open self-heals it. Deliberate — admitting a
@@ -47,15 +47,13 @@ func openChannelDB(ctx context.Context, dbPath string, opts OpenOptions) (*sql.D
 	if err != nil {
 		return nil, err
 	}
-	// Single authoritative schema: ChannelLocalDDL (schema.go) is the only
-	// place the channel-local shape is defined. There is no in-code
-	// migration path. A fresh open (SkipDDL=false) installs the full
-	// baseline; an existing open (SkipDDL=true, used when re-opening an
-	// already-initialised channel file, e.g. tests) MUST already match the
-	// baseline. We never ALTER or drop —
-	// channel sqlite holds the append-only message-log truth (INVARIANT-2 /
-	// INVARIANT-12); a stale DB is recreated by a human, not silently
-	// migrated. Validate shape on every open and fail-fast on mismatch.
+	// Single authoritative schema: ChannelLocalDDL (schema.go) is the in-code
+	// additive migration and full fresh-install baseline. Ordinary writable
+	// opens install missing tables/indexes before verification; SkipDDL/ReadOnly
+	// opens require the current shape already to exist. Destructive ALTER/DROP
+	// remains forbidden here; the composition migration itself is coordinated by
+	// the app startup migrator. Validate shape on every open and fail fast on an
+	// incomplete/unknown vintage.
 	if err := verifyChannelLocalSchema(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -131,6 +129,12 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 var channelLocalSchemaShape = map[string][]string{
 	"messages":       {"seq", "id", "type", "kind"}, // intentional subset — see doc above
 	"actor_registry": {"actor_id", "actor_kind", "principal", "actor_binding", "host", "created_at", "deregistered_at"},
+	"channel_composition": {
+		"instance_id", "decl_id", "principal", "class", "config_json", "placement",
+		"desired_host", "is_default", "restart_epoch",
+	},
+	"restart_applied":      {"job_id", "instance_id", "applied_at"},
+	"composition_migrated": {"one_row", "migrated_at"},
 	"resources": {
 		"resource_id", "kind", "bytes",
 		"placement_kind", "placement_daemon_id", "placement_coord", "provenance", "created_by",

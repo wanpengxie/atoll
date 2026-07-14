@@ -5,8 +5,10 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // kickDaemonConverge drives the substrate half of a daemon revocation to
@@ -131,6 +134,8 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 	}
 
 	daemonID := uuid.NewString()
+	release := a.daemonLocks.lock(daemonID)
+	defer release()
 	apiKey := uuid.NewString() // plaintext, returned once
 	keyHash := hashAPIKey(apiKey)
 	now := time.Now().UnixMilli()
@@ -163,6 +168,8 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 // links fall silent.
 func (a *App) handleDeleteDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
+	release := a.daemonLocks.lock(daemonID)
+	defer release()
 	userID := middleware.UserID(c)
 	ctx := c.Request.Context()
 
@@ -177,14 +184,50 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 		return
 	}
 
-	// The three revocation writes (delete bindings, clear desired_host, delete the
-	// daemons row) are ONE atomic tx: a failure on any of them must leave NONE
-	// applied — a half-revoked state (e.g. bindings gone but the key row surviving,
-	// or desired_host cleared but the daemon still resolvable) is precisely the
-	// inconsistency the old sequential-write path could commit. Only after the tx
-	// COMMITS is the revocation durable and the live links safe to Kick (a link
-	// kicked but not revoked reconnects). Any write error → rollback (deferred) +
-	// 5xx, no Kick.
+	targetSet := map[string]struct{}{}
+	rows, err := a.db.QueryContext(ctx, `SELECT channel_id FROM daemon_channels WHERE daemon_id=?`, daemonID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	for rows.Next() {
+		var ch string
+		if err := rows.Scan(&ch); err == nil {
+			targetSet[ch] = struct{}{}
+		}
+	}
+	_ = rows.Close()
+	a.mu.RLock()
+	homes := make(map[channel.ID]interface {
+		Composition(context.Context) ([]storespec.CompositionRecord, error)
+	}, len(a.homes))
+	for id, h := range a.homes {
+		homes[id] = h
+	}
+	a.mu.RUnlock()
+	for id, h := range homes {
+		composition, err := h.Composition(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+			return
+		}
+		for _, row := range composition {
+			if row.DesiredHost == daemonID {
+				targetSet[string(id)] = struct{}{}
+			}
+		}
+	}
+	var targetIDs []string
+	for id := range targetSet {
+		targetIDs = append(targetIDs, id)
+	}
+	sort.Strings(targetIDs)
+	targets := make([]daemonFanoutTarget, 0, len(targetIDs))
+	for _, id := range targetIDs {
+		targets = append(targets, daemonFanoutTarget{ChannelID: id})
+	}
+	targetsJSON, _ := json.Marshal(targets)
+
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
@@ -199,43 +242,16 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 			return
 		}
 	}
-	// Delete the bindings and capture the kick set IN THE SAME tx (RETURNING): the
-	// channels to Kick are exactly the rows this DELETE removed, closing the window
-	// where a concurrent attach binds a channel between a separate pre-read and the
-	// delete (a residual port on a channel the kick loop would never visit).
-	var bound []string
-	kickRows, err := tx.QueryContext(ctx,
-		`DELETE FROM daemon_channels WHERE daemon_id = ? RETURNING channel_id`, daemonID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
-	for kickRows.Next() {
-		var ch string
-		if err := kickRows.Scan(&ch); err != nil {
-			_ = kickRows.Close()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-			return
-		}
-		bound = append(bound, ch)
-	}
-	if err := kickRows.Err(); err != nil {
-		_ = kickRows.Close()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
-	// Close the rows cursor before the next statement on this tx (sqlite runs the tx
-	// on a single connection — an open cursor would block the following Exec).
-	_ = kickRows.Close()
-	// Clear desired_host on this daemon's rows (placement恒不变; the pool row stays,
-	// no daemon claims it, the live cell is simply absent until a re-指派).
-	if _, err := tx.ExecContext(ctx,
-		`UPDATE channel_actors SET desired_host = '' WHERE desired_host = ?`, daemonID); err != nil {
+	if _, err := tx.ExecContext(ctx, `DELETE FROM daemon_channels WHERE daemon_id=?`, daemonID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM daemons WHERE id = ? AND owner_id = ?`, daemonID, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO daemon_revoke_jobs(daemon_id,op,targets_json,created_at) VALUES (?,?,?,?)`, daemonID, "delete", string(targetsJSON), time.Now().UnixMilli()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
@@ -248,9 +264,12 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 	// Info marks this as an explicit, deliberate revocation (the daemon's key
 	// itself was just deleted) — distinct from "home closing" (platform.home's
 	// own bulk teardown) as a source of the same links dying.
-	a.logger.Info("app: daemon delete kicking live links", "daemon", daemonID, "channels", bound)
-	for _, ch := range bound {
+	a.logger.Info("app: daemon delete kicking live links", "daemon", daemonID, "channels", targetIDs)
+	for _, ch := range targetIDs {
 		a.kickDaemonConverge(channel.ID(ch), daemonID)
+	}
+	if a.fanout != nil {
+		a.fanout.notify()
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -306,11 +325,13 @@ func (a *App) handleAttachDaemons(c *gin.Context) {
 
 	userID := middleware.UserID(c)
 	for _, did := range req.DaemonIDs {
+		release := a.daemonLocks.lock(did)
 		var ownerID string
 		err := a.db.QueryRowContext(c.Request.Context(),
 			`SELECT owner_id FROM daemons WHERE id = ?`, did,
 		).Scan(&ownerID)
 		if err != nil || ownerID != userID {
+			release()
 			c.JSON(http.StatusForbidden, gin.H{"error": "daemon not found or not owned by you"})
 			return
 		}
@@ -318,6 +339,7 @@ func (a *App) handleAttachDaemons(c *gin.Context) {
 			`INSERT OR IGNORE INTO daemon_channels (daemon_id, channel_id) VALUES (?,?)`,
 			did, chID,
 		)
+		release()
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
@@ -333,17 +355,28 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 		return
 	}
 	daemonID := c.Param("id")
+	release := a.daemonLocks.lock(daemonID)
+	defer release()
 	ctx := c.Request.Context()
 
-	// 登记 (non-atomic, dirty-column self-heal level): these three writes (delete
-	// binding, kick, clear desired_host) are NOT one tx — a crash between them leaves
-	// a stale desired_host on this channel's rows. Benign: the pool row's placement is
-	// unchanged and the next re-指派 overwrites the dirty column; unlike deleteDaemon
-	// (world-layer revocation) a single-channel detach has no half-revoked key state
-	// to protect, so the atomicity is not现在 owed.
-	if _, err := a.db.ExecContext(ctx,
+	targetsJSON, _ := json.Marshal([]daemonFanoutTarget{{ChannelID: chID}})
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "detach failed"})
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM daemon_channels WHERE daemon_id = ? AND channel_id = ?`,
 		daemonID, chID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "detach failed"})
+		return
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO daemon_revoke_jobs(daemon_id,op,targets_json,created_at) VALUES (?,?,?,?)`, daemonID, "detach", string(targetsJSON), time.Now().UnixMilli()); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "detach failed"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "detach failed"})
 		return
 	}
@@ -352,9 +385,9 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 	// own kick-start marker.
 	a.logger.Info("app: daemon detach kicking live link", "channel", string(chID), "daemon", daemonID)
 	a.kickDaemonConverge(channel.ID(chID), daemonID)
-	_, _ = a.db.ExecContext(ctx,
-		`UPDATE channel_actors SET desired_host = '' WHERE channel_id = ? AND desired_host = ?`,
-		chID, daemonID)
+	if a.fanout != nil {
+		a.fanout.notify()
+	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 
@@ -403,6 +436,8 @@ func (a *App) handleCreateAndAttachDaemon(c *gin.Context) {
 	}
 
 	daemonID := uuid.NewString()
+	release := a.daemonLocks.lock(daemonID)
+	defer release()
 	apiKey := uuid.NewString()
 	keyHash := hashAPIKey(apiKey)
 	now := time.Now().UnixMilli()

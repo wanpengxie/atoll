@@ -100,6 +100,9 @@ func createVerdict(ctx context.Context, err error) (Outcome, error) {
 	if errors.Is(err, resourcespec.ErrAlreadyExists) {
 		return Outcome{RejectReason: access.AlreadyExists}, nil // race collision decided atomically
 	}
+	if errors.Is(err, resourcespec.ErrOwnerInactive) {
+		return Outcome{RejectReason: access.OwnerInactive}, nil
+	}
 	return executeFailure(ctx, err)
 }
 

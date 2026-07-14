@@ -16,7 +16,7 @@ import (
 )
 
 // actor_decls.go is the create-and-control face: a direct API over the
-// `actor_decls` declaration table + `channel_actors` composition — the front-end
+// `actor_decls` declaration table + channel-local composition — the front-end
 // UI's CRUD for a user's declared actor instances (create / introduce-to-channel
 // / edit config / restart / soft-delete). The declaration layer is kind-neutral:
 // one row = identity + class + config + owner + visibility, for agents and tools
@@ -157,8 +157,41 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 	userID := middleware.UserID(c)
 	declID := c.Param("declID")
 	ctx := c.Request.Context()
+	release := a.declLocks.lock(declID)
+	defer release()
+
+	a.mu.RLock()
+	homes := make(map[channel.ID]*home.Home, len(a.homes))
+	for id, h := range a.homes {
+		homes[id] = h
+	}
+	a.mu.RUnlock()
+	var targets []declFanoutTarget
+	for id, h := range homes {
+		rows, err := h.Composition(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "channel composition unavailable"})
+			return
+		}
+		for _, row := range rows {
+			if row.DeclID == declID {
+				targets = append(targets, declFanoutTarget{ChannelID: string(id), InstanceID: string(row.InstanceID)})
+			}
+		}
+	}
+	targetsJSON, err := json.Marshal(targets)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
 	now := time.Now().UnixMilli()
-	res, err := a.db.ExecContext(ctx,
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx,
 		`UPDATE actor_decls SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner = ? AND deleted_at IS NULL`,
 		now, now, declID, userID)
 	if err != nil {
@@ -169,41 +202,18 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
 		return
 	}
-	// Gather the channels this instance is in BEFORE deleting the rows.
-	type composedInstance struct{ channelID, instanceID string }
-	var composed []composedInstance
-	if rows, qerr := a.db.QueryContext(ctx,
-		`SELECT channel_id, instance_id FROM channel_actors WHERE principal = ?`, declID); qerr == nil {
-		for rows.Next() {
-			var item composedInstance
-			if rows.Scan(&item.channelID, &item.instanceID) == nil {
-				composed = append(composed, item)
-			}
-		}
-		rows.Close()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO decl_fanout_jobs(decl_id,op,initiator,targets_json,created_at) VALUES (?,?,?,?,?)`, declID, "delete", userID, string(targetsJSON), now); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
 	}
-	// Clear any channel whose default_agent pointed at the deleted instance (default
-	// routing keys off channels.default_agent).
-	// Per-channel projection: intent first, then Home control-plane removal.
-	for _, item := range composed {
-		_, _ = a.db.ExecContext(ctx, `UPDATE channels SET default_agent=NULL WHERE id=? AND default_agent=?`, item.channelID, item.instanceID)
-		_, _ = a.db.ExecContext(ctx,
-			`DELETE FROM channel_actors WHERE channel_id = ? AND instance_id = ?`, item.channelID, item.instanceID)
-		if home := a.getHome(channel.ID(item.channelID)); home != nil {
-			if rerr := home.Remove(ctx, actor.ActorID(item.instanceID)); rerr != nil {
-				a.logger.Warn("delete decl: channel removal", "channel", item.channelID, "instance", item.instanceID, "err", rerr.Error())
-			}
-		}
-		// 户籍欠账 (owner 拍定, reverse-entropy account): when a channel's home is NOT
-		// open here, the intent row above is deleted but Home.Remove never runs, so the
-		// instance's per-channel membership 户籍 (a row in the closed channel's own db)
-		// survives — a display-layer stale row. It is HARMLESS to composition: the
-		// deleted_at filter in compositionSelect keeps the ring from ever rebuilding
-		// the instance on that channel's next open, and no other path revives a
-		// member without an intent row. Cleaning the orphan census row is deferred to
-		// a reverse-entropy sweep, not force-opened here.
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
 	}
-	c.JSON(http.StatusOK, gin.H{"deleted": declID})
+	if a.fanout != nil {
+		a.fanout.notify()
+	}
+	c.JSON(http.StatusOK, gin.H{"deleted": declID, "queued": len(targets)})
 }
 
 type introduceActorReq struct {
@@ -214,7 +224,7 @@ type introduceActorReq struct {
 	// Class optionally OVERRIDES the declaration's default_class for THIS channel
 	// (per-channel runtime engine). Empty = use the declaration's default_class.
 	// Effective engine = Class ?? actor_decls.default_class, resolved here (eager)
-	// into channel_actors.class.
+	// into the channel-local composition class.
 	Class string `json:"class"`
 }
 
@@ -265,6 +275,8 @@ func (a *App) handleRestartDecl(c *gin.Context) {
 	userID := middleware.UserID(c)
 	declID := c.Param("declID")
 	ctx := c.Request.Context()
+	release := a.declLocks.lock(declID)
+	defer release()
 	// World-layer scope: the caller owns this declaration (enumerate ITS channels).
 	// The per-channel restart authority is the door's member check, not ownership.
 	var owned int
@@ -278,35 +290,46 @@ func (a *App) handleRestartDecl(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
 		return
 	}
-	type target struct{ channelID, instanceID string }
-	var targets []target
-	rows, qerr := a.db.QueryContext(ctx,
-		`SELECT channel_id, instance_id FROM channel_actors WHERE principal = ?`, declID)
-	if qerr != nil {
+	var targets []declFanoutTarget
+	a.mu.RLock()
+	homes := make(map[channel.ID]*home.Home, len(a.homes))
+	for id, h := range a.homes {
+		homes[id] = h
+	}
+	a.mu.RUnlock()
+	for id, h := range homes {
+		_, member, err := h.ResolvePrincipal(ctx, actor.KindHuman, userID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		if !member {
+			continue
+		}
+		rows, err := h.Composition(ctx)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		for _, row := range rows {
+			if row.DeclID == declID {
+				targets = append(targets, declFanoutTarget{ChannelID: string(id), InstanceID: string(row.InstanceID)})
+			}
+		}
+	}
+	targetsJSON, err := json.Marshal(targets)
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	for rows.Next() {
-		var v target
-		if rows.Scan(&v.channelID, &v.instanceID) == nil {
-			targets = append(targets, v)
-		}
+	res, err := a.db.ExecContext(ctx, `INSERT INTO decl_fanout_jobs(decl_id,op,initiator,targets_json,created_at) VALUES (?,?,?,?,?)`, declID, "restart", userID, string(targetsJSON), time.Now().UnixMilli())
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
 	}
-	rows.Close()
-
-	restarted := 0
-	for _, target := range targets {
-		payload, _ := json.Marshal(instancePayload{InstanceID: target.instanceID})
-		r, derr := a.submitControlThroughDoor(ctx, target.channelID, userID, home.TypeRestartActor, payload)
-		if derr != nil {
-			// Non-member of that channel (膜律) or unavailable — the caller may only
-			// restart in channels they are a member of.
-			a.logger.Warn("restart decl: door", "channel", target.channelID, "instance", target.instanceID, "err", derr.Error())
-			continue
-		}
-		if r.settled && r.completed {
-			restarted++
-		}
+	jobID, _ := res.LastInsertId()
+	if a.fanout != nil {
+		a.fanout.notify()
 	}
-	c.JSON(http.StatusOK, gin.H{"decl_id": declID, "restarted": restarted})
+	c.JSON(http.StatusOK, gin.H{"decl_id": declID, "restarted": len(targets), "job_id": jobID})
 }

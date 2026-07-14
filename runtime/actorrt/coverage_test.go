@@ -517,6 +517,13 @@ func TestNewPortHandshakeAckWriteError(t *testing.T) {
 	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil); err == nil {
 		t.Fatal("Attach succeeded despite a failed ack write")
 	}
+	if ids := rt.LiveIDs(); len(ids) != 0 {
+		t.Fatalf("failed ACK left live IDs: %v", ids)
+	}
+	if _, ok := rt.Stat("remote-1"); ok {
+		t.Fatal("failed ACK left a visible port")
+	}
+	waitZombiesZero(t, rt, time.Second)
 }
 
 // TestNewPortNilLoggerDefaulted: newPort defaults a nil logger to discard (the
@@ -532,7 +539,7 @@ func TestNewPortNilLoggerDefaulted(t *testing.T) {
 		_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		_, _ = c.Read() // consume ack
 	}()
-	p, err := newPort(context.Background(), context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil, nil, nil, nil, nil, time.Now(), nil)
+	p, err := newPort(context.Background(), context.Background(), hostConn, Sinks{Emit: nopEmit}, handshakeResolve(staticResolve("remote-1")), nil, nil, nil, nil, nil, nil, time.Now(), nil)
 	if err != nil {
 		t.Fatalf("newPort: %v", err)
 	}

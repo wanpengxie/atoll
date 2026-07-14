@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/channelkit"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
@@ -72,6 +73,13 @@ type Config struct {
 	// against once the original admission closure is gone. nil → Fork and identity-
 	// timer revival fail-fast (structural refusal, never a phantom actor).
 	Builder CapsFactoryBuilder
+	// CompositionResolver supplies only the world-declaration half. When set,
+	// Home reads channel composition from its own channel store and derives both
+	// Desired and Builder from one source; Desired/Builder above are retained as
+	// a compatibility seam for isolated platform tests.
+	CompositionResolver CompositionResolver
+	PlanProvider        PlanProvider
+	DaemonAuthority     DaemonAuthority
 	// Operate is the channel-operate executor injected into the system actor's
 	// in-gate control plane (NP-1=c). nil → the four control types are inert (the
 	// injection point is unfilled) — the app assembly fills it (executor = intent
@@ -111,6 +119,22 @@ type Config struct {
 	// ObsDropKinds) hands the union in. Empty → every drop lands in the "unknown"
 	// bucket (honest, just uninformative).
 	EventDropKinds []actorrt.ObsKind
+}
+
+type PlanProvider interface {
+	Plan(context.Context, channelpkg.ID, string) ([]platform.PlanActor, error)
+}
+
+// DaemonAuthority is the app-owned directory lease used by link admission.
+// The returned release function relinquishes the per-daemon keyed lock.
+type DaemonAuthority interface {
+	LockAndValidate(context.Context, string, channelpkg.ID) (release func(), err error)
+}
+
+type daemonAuthorityAdapter struct{ inner DaemonAuthority }
+
+func (a daemonAuthorityAdapter) LockAndValidate(ctx context.Context, daemonID string, channelID channelpkg.ID) (func(), error) {
+	return a.inner.LockAndValidate(ctx, daemonID, channelID)
 }
 
 // Home is the assembled channel-home. Its public surface is the capability set in
@@ -185,7 +209,14 @@ type Home struct {
 	// goroutine (and the one synchronous startup sweep before that goroutine
 	// launches), so it needs no lock.
 	desired          actorrt.DesiredSource
-	prevEagerDesired map[actor.ActorID]bool
+	prevEagerDesired map[actor.ActorID]desiredIncarnation
+	// builtEpoch is an incarnation account, not desired truth. It is updated
+	// only after this ring successfully builds a body; missing or mismatched
+	// entries force a quiet replace on the next sweep.
+	builtEpoch map[actor.ActorID]int64
+	actorGates actorLifecycleGate
+	indexMu    sync.Mutex
+	portIndex  map[actor.ActorID]homePortEntry
 
 	// reconcileStop tears down the closure reconciler ticker (level backstop).
 	reconcileStop   context.CancelFunc
@@ -209,7 +240,7 @@ type Home struct {
 	// pace, so an attached author's due identity timer would otherwise log
 	// once a second for as long as it stays attached. Pure log hygiene, not a
 	// correctness mechanism.
-	reviveMu   sync.Mutex
+	reviveMu      sync.Mutex
 	reviveLogAt   map[actor.ActorID]time.Time
 	reviveBackoff map[actor.ActorID]reviveBackoffEntry
 

@@ -79,6 +79,37 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_principal
   ON actor_registry(actor_kind, principal)
   WHERE deregistered_at IS NULL AND principal <> '';
 
+-- =============================================================
+-- 3b) channel composition  (channel-local desired truth)
+-- =============================================================
+CREATE TABLE IF NOT EXISTS channel_composition (
+  instance_id   TEXT PRIMARY KEY,
+  decl_id       TEXT NOT NULL,
+  principal     TEXT NOT NULL,
+  class         TEXT NOT NULL,
+  config_json   TEXT,
+  placement     TEXT NOT NULL CHECK(placement IN ('server','daemon')),
+  desired_host  TEXT NOT NULL DEFAULT ''
+                CHECK(placement='daemon' OR desired_host=''),
+  is_default    INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1)),
+  restart_epoch INTEGER NOT NULL DEFAULT 0,
+  UNIQUE(principal)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_channel_composition_one_default
+  ON channel_composition(is_default) WHERE is_default=1;
+
+CREATE TABLE IF NOT EXISTS restart_applied (
+  job_id      INTEGER NOT NULL,
+  instance_id TEXT NOT NULL,
+  applied_at  INTEGER NOT NULL,
+  PRIMARY KEY(job_id, instance_id)
+);
+
+CREATE TABLE IF NOT EXISTS composition_migrated (
+  one_row     INTEGER PRIMARY KEY CHECK(one_row=1),
+  migrated_at INTEGER NOT NULL
+);
+
 -- (v2: worker_locks table removed. channel-sqlite is append-only truth;
 -- write-path exclusivity is a structural invariant of the single write path,
 -- not a per-row lease.)
@@ -253,6 +284,9 @@ CREATE TABLE IF NOT EXISTS timer_dead (
 var ChannelLocalTables = []string{
 	"messages",
 	"actor_registry",
+	"channel_composition",
+	"restart_applied",
+	"composition_migrated",
 	"resources",
 	"resource_grants",
 	"resource_reservations",

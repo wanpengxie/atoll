@@ -162,7 +162,7 @@ func dialLaneDaemon(t *testing.T, srv *httptest.Server, daemonID string, actorID
 		t.Fatalf("Dial(%s): %v", daemonID, err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
-	arms, err := d.OpenStream(actorID, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), actorID, 0, func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream(%s): %v", daemonID, err)
 	}
@@ -440,7 +440,7 @@ func dialLaneDaemonAt(t *testing.T, srv *httptest.Server, daemonID string, actor
 		t.Fatalf("Dial(%s): %v", daemonID, err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
-	arms, err := d.OpenStream(actorID, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), actorID, 0, func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream(%s): %v", daemonID, err)
 	}

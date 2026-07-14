@@ -15,6 +15,12 @@ import (
 // the door never resolves-then-creates in two steps.
 var ErrAlreadyExists = errors.New("resourcespec: resource already exists")
 
+// ErrOwnerInactive means an actor-scoped resource could not be born because
+// its owning actor was missing or already deregistered. StateStore.Create
+// decides this in the same transaction as its conditional insert, so callers
+// never observe a successful create that outlives an inactive owner.
+var ErrOwnerInactive = errors.New("resourcespec: actor-scoped resource owner inactive")
+
 // ErrReservationLost is CommitReservation's same-transaction race sentinel
 // (期11 spec §1.7's "并发败者"): landing lost the same-resource_id race
 // against another reservation's earlier-committed row. The transaction still

@@ -21,13 +21,16 @@
 //     BOTH hosts. The concrete representation + the shared Build/OutcomeString
 //     helpers live in platform/internal/hostcommon (T5a); the root only
 //     re-exports the name downstream code imports.
+//   - PlanActor (plan.go) — the authenticated link-plan DTO shared by the home
+//     provider and compute sink, including the restart epoch and canonical
+//     declaration metadata both hosts compare.
 //
 // # Root-file topology
 //
 // Every non-test .go file directly under platform/ (sub-packages excluded —
 // platform/home, platform/compute, platform/subjectgate, and
 // platform/internal/* are packages of their own, not root files) falls into
-// this closed set: doc.go, decl.go, actorfactory.go. archtest's root-
+// this closed set: doc.go, decl.go, actorfactory.go, plan.go. archtest's root-
 // classification anchor enforces this as a closed set — a new root file
 // turns that tripwire red; the root does not grow by accretion, only by a
 // spec decision that a new word is genuinely cross-host truth.

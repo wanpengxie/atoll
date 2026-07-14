@@ -86,6 +86,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	assertStatus(t, w, http.StatusCreated)
 	daemonBody := respJSON(t, w)
 	apiKey := daemonBody["api_key"].(string)
+	daemonID := daemonBody["id"].(string)
 	if apiKey == "" {
 		t.Fatal("daemon api_key empty")
 	}
@@ -95,7 +96,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	// --- run the daemon: real /compute attach + hosted tool:xhs cell --------
 	ctx, cancel := context.WithCancel(context.Background())
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
-	xhsID, err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool)
+	xhsID, err := env.app.ComposeDaemonForTest(s.chID, "xhs", "xhs", daemonID, actor.KindTool)
 	if err != nil {
 		t.Fatalf("pre-admit tool:xhs: %v", err)
 	}
@@ -301,7 +302,9 @@ func TestXHSLiveActorStatus(t *testing.T) {
 	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID),
 		map[string]any{"name": "xhs-status-daemon"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
-	apiKey := respJSON(t, w)["api_key"].(string)
+	daemonBody := respJSON(t, w)
+	apiKey := daemonBody["api_key"].(string)
+	daemonID := daemonBody["id"].(string)
 	if apiKey == "" {
 		t.Fatal("daemon api_key empty")
 	}
@@ -310,7 +313,7 @@ func TestXHSLiveActorStatus(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
-	xhsID, err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool)
+	xhsID, err := env.app.ComposeDaemonForTest(s.chID, "xhs", "xhs", daemonID, actor.KindTool)
 	if err != nil {
 		t.Fatalf("pre-admit tool:xhs: %v", err)
 	}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -30,6 +31,13 @@ import (
 // declared may not bind an embodiment).
 var errUndeclaredActor = errors.New("link: actor not in attach declarations")
 
+type declarationSnapshotEntry struct {
+	Kind     actor.Kind
+	Binding  actor.Binding
+	Epoch    int64
+	DaemonID string
+}
+
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
 
 // attachHandshakeTimeout bounds one actor stream's connect-in handshake. A
@@ -38,6 +46,12 @@ var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return
 // supplies the deadline.
 const attachHandshakeTimeout = 10 * time.Second
 
+// attachRejectDrain gives the already-written attach_reply one scheduler turn
+// to reach the peer's control dispatcher before the rejected session is killed.
+// The write itself is synchronous, but yamux session teardown can otherwise win
+// the peer's read-loop select and erase the precise rejection reason.
+const attachRejectDrain = 25 * time.Millisecond
+
 // Acceptor is the home end of the link: it upgrades attaching daemon
 // connections, registers declared actors into membership, and binds each
 // actor stream to runtime.Attach (the stream runs native ipc, so a remote cell
@@ -45,16 +59,18 @@ const attachHandshakeTimeout = 10 * time.Second
 // via the per-link lease. It owns NO business logic — Writer/Runtime/Membership
 // are injected capabilities of the home.
 type Acceptor struct {
-	minter     harness.Minter
-	access     accessdoor.AccessMinter
-	sched      schedule.Minter
-	runtime    *actorrt.Runtime
-	membership storespec.MembershipControlPlane
-	registry   storespec.Registry
-	channelID  channel.ID
-	logger     *slog.Logger
-	leasePing  time.Duration
-	leaseTTL   time.Duration
+	minter       harness.Minter
+	access       accessdoor.AccessMinter
+	sched        schedule.Minter
+	runtime      *actorrt.Runtime
+	membership   storespec.MembershipControlPlane
+	registry     storespec.Registry
+	composition  storespec.CompositionReader
+	declarations DeclarationCoordinator
+	channelID    channel.ID
+	logger       *slog.Logger
+	leasePing    time.Duration
+	leaseTTL     time.Duration
 
 	ctx           context.Context
 	cancel        context.CancelFunc
@@ -92,7 +108,12 @@ type Acceptor struct {
 	// wired on this channel yet), never a silent drop (§4.7's own frames are
 	// request/response; a daemon retrying forever against a home that just
 	// swallows the frame would be a worse failure mode than an explicit nak).
-	storageControl StorageHostControl
+	storageControl  StorageHostControl
+	planProvider    PlanProvider
+	daemonAuthority DaemonAuthority
+	actorLock       func(actor.ActorID) func()
+	portIndex       PortIndex
+	nextPortOwner   atomic.Uint64
 
 	// pendingAlloc correlates AllocRequest (home→daemon) with its AllocReply —
 	// a home-initiated leg of the control-RPC plane (the daemon-initiated
@@ -120,6 +141,36 @@ type Acceptor struct {
 	// never registered — Kick cannot target what auth never named.
 	linksMu sync.Mutex
 	links   map[string][]linkHandle
+
+	// slots is the one-incumbent state machine per compute. A link must reserve
+	// candidate before declaration writes and is promoted only after its accepted
+	// reply is on the wire and all declaration writers have exited.
+	slotMu sync.Mutex
+	slots  map[string]*incumbentSlot
+}
+
+type incumbentState uint8
+
+const (
+	incumbentCandidate incumbentState = iota + 1
+	incumbentActive
+)
+
+type incumbentSlot struct {
+	link     *linkSession
+	state    incumbentState
+	writers  int
+	accepted bool
+	dead     bool
+	deadFlag atomic.Bool
+}
+
+type incumbentPin struct {
+	a       *Acceptor
+	compute string
+	link    *linkSession
+	slot    *incumbentSlot
+	once    sync.Once
 }
 
 // linkHandle is what Kick needs to voluntarily tear one link down: quietStop
@@ -150,11 +201,13 @@ type Config struct {
 	// lists which actors this compute currently owns (Host==computeID) so a
 	// shrunk declaration set can detect what fell out. Optional — nil skips
 	// attach reconciliation (existing single-declare callers unaffected).
-	Registry  storespec.Registry
-	ChannelID channel.ID
-	Logger    *slog.Logger
-	LeasePing time.Duration
-	LeaseTTL  time.Duration
+	Registry     storespec.Registry
+	Composition  storespec.CompositionReader
+	Declarations DeclarationCoordinator
+	ChannelID    channel.ID
+	Logger       *slog.Logger
+	LeasePing    time.Duration
+	LeaseTTL     time.Duration
 	// CancelRequest (optional) is the home's injected handler for a KindCancelRequest
 	// frame (a daemon-hosted caller abandoning one of its OWN outbound requests). It
 	// is passed the connection's authenticated bound id + the request id; the home
@@ -168,6 +221,39 @@ type Config struct {
 	// §4.7 storage control-RPC plane (Committed/ReclaimAck/ReconcilePull).
 	// nil → those three frames get an honest error reply.
 	StorageHostControl StorageHostControl
+	PlanProvider       PlanProvider
+	DaemonAuthority    DaemonAuthority
+	ActorLock          func(actor.ActorID) func()
+	PortIndex          PortIndex
+}
+
+type PlanProvider interface {
+	Plan(context.Context, string) ([]platform.PlanActor, error)
+}
+
+// DeclarationCoordinator is the Home-owned S2 seam. It brackets the channel
+// transaction and body actions with actor lifecycle gates, returning only the
+// declarations that may be published to the link snapshot.
+type DeclarationCoordinator interface {
+	ApplyComputeDeclaration(context.Context, PortOwner, string, []storespec.ComputeDeclaration) ([]storespec.ComputeDeclaration, error)
+}
+
+// DaemonAuthority holds the app-owned per-daemon keyed lock while it freshly
+// validates the daemon and its binding to this channel.
+type DaemonAuthority interface {
+	LockAndValidate(context.Context, string, channel.ID) (release func(), err error)
+}
+
+type PortOwner uint64
+
+// PortIndex is Home's authoritative cross-link remote-port index. Every method
+// is pointer-conditional and performs only an index pointer swap while holding
+// its own leaf lock.
+type PortIndex interface {
+	Register(PortOwner, actorrt.Incarnation)
+	Remove(PortOwner, actorrt.Incarnation)
+	Take(PortOwner, actor.ActorID) (actorrt.Incarnation, bool)
+	TakeOwner(PortOwner) []actorrt.Incarnation
 }
 
 // NewAcceptor builds an Acceptor.
@@ -178,27 +264,140 @@ func NewAcceptor(cfg Config) *Acceptor {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Acceptor{
-		minter:         cfg.Minter,
-		access:         cfg.Access,
-		sched:          cfg.Schedule,
-		runtime:        cfg.Runtime,
-		membership:     cfg.Membership,
-		registry:       cfg.Registry,
-		channelID:      cfg.ChannelID,
-		logger:         logger,
-		leasePing:      cfg.LeasePing,
-		leaseTTL:       cfg.LeaseTTL,
-		ctx:            ctx,
-		cancel:         cancel,
-		closeDone:      make(chan struct{}),
-		attached:       map[string]int{},
-		cancelReq:      cfg.CancelRequest,
-		storageControl: cfg.StorageHostControl,
-		pendingAlloc:   newPendingReplies[AllocReply](),
-		pendingReclaim: newPendingReplies[ReclaimReply](),
-		lane:           newLaneState(),
-		links:          map[string][]linkHandle{},
+		minter:          cfg.Minter,
+		access:          cfg.Access,
+		sched:           cfg.Schedule,
+		runtime:         cfg.Runtime,
+		membership:      cfg.Membership,
+		registry:        cfg.Registry,
+		composition:     cfg.Composition,
+		declarations:    cfg.Declarations,
+		channelID:       cfg.ChannelID,
+		logger:          logger,
+		leasePing:       cfg.LeasePing,
+		leaseTTL:        cfg.LeaseTTL,
+		ctx:             ctx,
+		cancel:          cancel,
+		closeDone:       make(chan struct{}),
+		attached:        map[string]int{},
+		cancelReq:       cfg.CancelRequest,
+		storageControl:  cfg.StorageHostControl,
+		planProvider:    cfg.PlanProvider,
+		daemonAuthority: cfg.DaemonAuthority,
+		actorLock:       cfg.ActorLock,
+		portIndex:       cfg.PortIndex,
+		pendingAlloc:    newPendingReplies[AllocReply](),
+		pendingReclaim:  newPendingReplies[ReclaimReply](),
+		lane:            newLaneState(),
+		links:           map[string][]linkHandle{},
+		slots:           map[string]*incumbentSlot{},
 	}
+}
+
+func (a *Acceptor) enterDeclarationWriter(compute string, lc *linkSession) (*incumbentPin, string) {
+	a.slotMu.Lock()
+	defer a.slotMu.Unlock()
+	s := a.slots[compute]
+	if s == nil {
+		s = &incumbentSlot{link: lc, state: incumbentCandidate, writers: 1}
+		a.slots[compute] = s
+		return &incumbentPin{a: a, compute: compute, link: lc, slot: s}, ""
+	}
+	if s.link != lc || s.dead {
+		return nil, "compute_busy"
+	}
+	if s.state == incumbentCandidate {
+		return nil, "duplicate_attach"
+	}
+	s.writers++
+	return &incumbentPin{a: a, compute: compute, link: lc, slot: s}, ""
+}
+
+func (a *Acceptor) enterPortWriter(compute string, lc *linkSession) (*incumbentPin, error) {
+	a.slotMu.Lock()
+	defer a.slotMu.Unlock()
+	s := a.slots[compute]
+	if s == nil || s.link != lc || s.state != incumbentActive || !s.accepted || s.dead {
+		return nil, errors.New("link: actor attach is not on the active incumbent")
+	}
+	s.writers++
+	return &incumbentPin{a: a, compute: compute, link: lc, slot: s}, nil
+}
+
+func (p *incumbentPin) valid() bool {
+	return p != nil && p.slot != nil && !p.slot.deadFlag.Load()
+}
+
+func (p *incumbentPin) finish(ok bool) {
+	if p == nil {
+		return
+	}
+	p.once.Do(func() {
+		p.a.slotMu.Lock()
+		s := p.a.slots[p.compute]
+		kill := false
+		if s != nil && s.link == p.link {
+			if s.writers > 0 {
+				s.writers--
+			}
+			if !ok {
+				s.dead = true
+				s.deadFlag.Store(true)
+				kill = true
+			}
+			if s.dead && s.writers == 0 {
+				delete(p.a.slots, p.compute)
+			}
+		}
+		p.a.slotMu.Unlock()
+		if kill {
+			time.AfterFunc(attachRejectDrain, func() { p.link.kill("attach_rejected", nil) })
+		}
+	})
+}
+
+func (a *Acceptor) acceptIncumbent(compute string, lc *linkSession) bool {
+	a.slotMu.Lock()
+	defer a.slotMu.Unlock()
+	s := a.slots[compute]
+	if s == nil || s.link != lc || s.dead {
+		return false
+	}
+	s.accepted = true
+	if s.state == incumbentCandidate && s.writers == 0 {
+		s.state = incumbentActive
+		return true
+	}
+	return s.state == incumbentActive
+}
+
+func (a *Acceptor) failIncumbent(compute string, lc *linkSession, cause string) {
+	a.slotMu.Lock()
+	s := a.slots[compute]
+	if s != nil && s.link == lc {
+		s.dead = true
+		s.deadFlag.Store(true)
+		if s.writers == 0 {
+			delete(a.slots, compute)
+		}
+	}
+	a.slotMu.Unlock()
+	lc.kill(cause, nil)
+}
+
+func (a *Acceptor) markIncumbentDead(lc *linkSession) {
+	a.slotMu.Lock()
+	for id, s := range a.slots {
+		if s.link != lc {
+			continue
+		}
+		s.dead = true
+		s.deadFlag.Store(true)
+		if s.writers == 0 {
+			delete(a.slots, id)
+		}
+	}
+	a.slotMu.Unlock()
 }
 
 // registerLink adds this link's handle under id — called at runLink entry
@@ -359,30 +558,47 @@ func (a *Acceptor) endServe() { a.wg.Done() }
 func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID string) {
 	defer func() { _ = ws.Close() }()
 	var gate actorGate
+	var lc *linkSession
+	portOwner := PortOwner(a.nextPortOwner.Add(1))
 
-	// allowed is the attach declaration set: the resolve seam checks that an
-	// opening actor stream is one the daemon actually declared (membership-backed).
-	// kinds caches each declared actor's Kind alongside allowed (populated in the
-	// SAME critical section at attach): emitSink needs it to Mint a pen welded to
-	// the actor's kind — without it a daemon-attached actor's Sender.Kind would be
-	// a silent empty value and blunt the harness sender gate. Volatile, per-link.
+	// One pointer-shaped declaration snapshot carries every freshness field. Each
+	// successful declaration transaction publishes it wholesale; readers can
+	// never combine allowed from one generation with kind/epoch from another.
 	var (
-		mu      sync.Mutex
-		allowed = map[actor.ActorID]bool{}
-		kinds   = map[actor.ActorID]actor.Kind{}
+		mu       sync.Mutex
+		declared = map[actor.ActorID]declarationSnapshotEntry{}
 	)
-	// Both maps are wholesale-replaced (never merged) by each successful
-	// handleAttach — see the &allowed/&kinds pointer pass below.
+	var (
+		portMu sync.Mutex
+		ports  = map[actor.ActorID]actorrt.Incarnation{}
+	)
+	removePort := func(inc actorrt.Incarnation) {
+		if a.portIndex != nil {
+			a.portIndex.Remove(portOwner, inc)
+		}
+	}
+	defer func() {
+		if a.portIndex == nil {
+			return
+		}
+		for _, inc := range a.portIndex.TakeOwner(portOwner) {
+			portMu.Lock()
+			if cur, ok := ports[inc.ID()]; ok && cur == inc {
+				delete(ports, inc.ID())
+			}
+			portMu.Unlock()
+		}
+	}()
 	// ports holds the live port Incarnation per attached actor on THIS link (stored
 	// at onOpen). It is the graceful-teardown handle: on a home-side Close the link
 	// quiet-stops each port (pointer-guarded, no down edge) so in-flight requests do
 	// not materialise receiver_unavailable. A stale entry (the port already died /
 	// was replaced) is a safe no-op — DespawnQuiet guards by pointer identity — so no
 	// explicit stream-death eviction is needed (the map lives only for this link).
-	var (
-		portMu sync.Mutex
-		ports  = map[actor.ActorID]actorrt.Incarnation{}
-	)
+	// Runtime exit callbacks intentionally remove only from the Home-wide leaf
+	// index. They can run synchronously while CommitWhile's caller holds portMu;
+	// touching this link-local map from that callback would recursively acquire
+	// portMu. Link teardown/reconcile owns stale local-entry cleanup instead.
 	// boundID is the compute id this link counts as online under, set once on the
 	// first accepted attach and torn down when runLink returns. It is WRITTEN only
 	// by onControl (the single control-substream read goroutine), but READ across
@@ -402,24 +618,24 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			a.markDetached(b)
 		}
 	}()
-	resolve := func(leaseID string) (actor.ActorID, error) {
-		id := actor.ActorID(leaseID)
+	lookupDeclared := func(hp ipc.HandshakePayload) (actor.ActorID, declarationSnapshotEntry, error) {
+		id := actor.ActorID(hp.LeaseID)
 		mu.Lock()
-		ok := allowed[id]
+		meta, ok := declared[id]
 		mu.Unlock()
 		if !ok {
-			return "", errUndeclaredActor
+			return "", declarationSnapshotEntry{}, errUndeclaredActor
 		}
-		return id, nil
+		return id, meta, nil
 	}
 	// kindOf reads the cached declaration Kind for an attached actor (under the
 	// same mu as allowed). ok=false only when no attach ever declared the id —
 	// which resolve already excludes, so a live port's emit is never a miss.
 	kindOf := func(id actor.ActorID) (actor.Kind, bool) {
 		mu.Lock()
-		k, ok := kinds[id]
+		meta, ok := declared[id]
 		mu.Unlock()
-		return k, ok
+		return meta.Kind, ok
 	}
 
 	// onActor: each peer-opened tag=actor substream runs native ipc — hand it
@@ -455,16 +671,82 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				Access:   a.accessSink(),
 				Schedule: a.scheduleSink(),
 			}
-			inc, err := a.runtime.Attach(hsCtx, conn, sinks, resolve, actorrt.KindOf(kindOf), a.cancelReq)
+			var (
+				writerPin        *incumbentPin
+				authorityRelease func()
+				actorRelease     func()
+			)
+			releaseOuter := func() {
+				if actorRelease != nil {
+					actorRelease()
+					actorRelease = nil
+				}
+				if writerPin != nil {
+					writerPin.finish(true)
+					writerPin = nil
+				}
+				if authorityRelease != nil {
+					authorityRelease()
+					authorityRelease = nil
+				}
+			}
+			resolve := func(hp ipc.HandshakePayload) (actor.ActorID, error) {
+				id, meta, err := lookupDeclared(hp)
+				if err != nil {
+					return "", err
+				}
+				if a.daemonAuthority != nil {
+					authorityRelease, err = a.daemonAuthority.LockAndValidate(reqCtx, meta.DaemonID, a.channelID)
+					if err != nil {
+						return "", err
+					}
+				}
+				pin, err := a.enterPortWriter(meta.DaemonID, lc)
+				if err != nil {
+					releaseOuter()
+					return "", err
+				}
+				writerPin = pin
+				if a.actorLock != nil {
+					actorRelease = a.actorLock(id)
+				}
+				id, err = a.resolveFreshHandshake(reqCtx, hp, meta)
+				if err != nil {
+					releaseOuter()
+					return "", err
+				}
+				return id, nil
+			}
+			// Parse and authenticate before taking portMu. This is the ordering seam
+			// for the outer daemon/slot/actor gates: those higher locks are acquired
+			// after the actor id is known, while portMu spans only prepared insertion
+			// + ACK + commit.
+			prepared, err := a.runtime.PrepareHandshakeObserved(hsCtx, conn, sinks, resolve, actorrt.KindOf(kindOf), a.cancelReq, removePort)
 			if err != nil {
+				releaseOuter()
+				a.logger.Info("link.attach_stream_failed", "err", err)
+				return
+			}
+			defer releaseOuter()
+			portMu.Lock()
+			inc, err := prepared.CommitWhile(writerPin.valid)
+			if err != nil {
+				portMu.Unlock()
 				a.logger.Info("link.attach_stream_failed", "err", err)
 				return
 			}
 			// Retain the Incarnation so a home-side Close can quiet-stop this port
 			// (see the ports map above). A same-id reattach overwrites the entry.
+			portMu.Unlock()
+			if a.portIndex != nil {
+				a.portIndex.Register(portOwner, inc)
+			}
 			portMu.Lock()
 			ports[inc.ID()] = inc
 			portMu.Unlock()
+			if !a.runtime.IsLive(inc) {
+				removePort(inc)
+			}
 		}()
 	}
 
@@ -487,7 +769,6 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// the per-link lease, refreshed by any inbound frame.
 	lease := NewLease(a.leasePing, a.leaseTTL)
 
-	var lc *linkSession
 	onControl := func(payload []byte) {
 		switch peekControlKind(payload) {
 		case ctrlAttach:
@@ -496,7 +777,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				return
 			}
 			isFirstAttachOnLink := boundID == ""
-			id, accepted := a.handleAttach(reqCtx, lc, cf.RequestID, cf.Attach, daemonID, isFirstAttachOnLink, &mu, &allowed, &kinds, &portMu, ports)
+			id, accepted := a.handleAttach(reqCtx, lc, cf.RequestID, cf.Attach, daemonID, isFirstAttachOnLink, &mu, &declared, portOwner, &portMu, ports)
 			// Count the daemon online only after a SUCCESSFUL attach (membership
 			// applied, Accepted reply sent) — a rejected/half attach must not show
 			// online. Once per link (first accepted frame). boundID is read unlocked
@@ -553,6 +834,32 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				return
 			}
 			_ = lc.sendControl(raw)
+		case ctrlPlanPull:
+			cf, err := decodeControl(payload)
+			if err != nil || cf.PlanPull == nil {
+				return
+			}
+			boundMu.Lock()
+			confirmed := boundID
+			boundMu.Unlock()
+			reply := PlanReply{}
+			switch {
+			case confirmed == "":
+				reply.Error = "link: plan pull before accepted attach"
+			case cf.PlanPull.BoundID != confirmed:
+				reply.Error = "link: plan pull bound_id mismatch"
+			case a.planProvider == nil:
+				reply.Error = "link: no plan provider"
+			default:
+				reply.Actors, err = a.planProvider.Plan(reqCtx, confirmed)
+				if err != nil {
+					reply.Error = err.Error()
+				}
+			}
+			raw, eerr := encodeControl(controlFrame{RequestID: cf.RequestID, Kind: ctrlPlanReply, PlanReply: &reply})
+			if eerr == nil {
+				_ = lc.sendControl(raw)
+			}
 		}
 	}
 
@@ -568,17 +875,32 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		a.logger.Info("link.accept_session_failed", "err", lerr)
 		return
 	}
+	defer a.markIncumbentDead(lc)
 
 	// quietStopPorts tears down every port on this link WITHOUT a down edge — the
 	// home is going away gracefully, so its port-hosted actors must fall silent (no
 	// receiver_unavailable for in-flight requests) rather than surfacing a spurious
 	// death. Pointer-guarded per incarnation (a since-replaced/dead port is a no-op).
 	quietStopPorts := func() {
-		portMu.Lock()
-		incs := make([]actorrt.Incarnation, 0, len(ports))
-		for _, inc := range ports {
-			incs = append(incs, inc)
+		var indexed []actorrt.Incarnation
+		if a.portIndex != nil {
+			indexed = a.portIndex.TakeOwner(portOwner)
 		}
+		portMu.Lock()
+		incs := append([]actorrt.Incarnation(nil), indexed...)
+		for _, inc := range ports {
+			seen := false
+			for _, known := range incs {
+				if known == inc {
+					seen = true
+					break
+				}
+			}
+			if !seen {
+				incs = append(incs, inc)
+			}
+		}
+		ports = map[actor.ActorID]actorrt.Incarnation{}
 		portMu.Unlock()
 		for _, inc := range incs {
 			a.runtime.DespawnQuiet(inc)
@@ -650,6 +972,30 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	close(done)
 }
 
+func (a *Acceptor) resolveFreshHandshake(ctx context.Context, hp ipc.HandshakePayload, meta declarationSnapshotEntry) (actor.ActorID, error) {
+	id := actor.ActorID(hp.LeaseID)
+	if hp.Epoch != meta.Epoch {
+		return "", fmt.Errorf("link: stale handshake epoch: handshake=%d declaration=%d", hp.Epoch, meta.Epoch)
+	}
+	if a.composition == nil {
+		return id, nil
+	}
+	row, found, err := a.composition.LookupComposition(ctx, id)
+	if err != nil {
+		return "", fmt.Errorf("link: composition lookup: %w", err)
+	}
+	canonical := actor.BindingRuntimeInboundViaRelay
+	if !found || row.Placement != storespec.PlacementDaemon || row.DesiredHost != meta.DaemonID ||
+		row.Epoch != meta.Epoch || meta.Binding != canonical {
+		return "", errors.New("link: declaration/handshake no longer matches composition")
+	}
+	rec, found, err := a.registry.Lookup(ctx, id)
+	if err != nil || !found || !rec.IsActive() || rec.Host != meta.DaemonID || rec.Kind != meta.Kind || rec.Binding != canonical {
+		return "", errors.New("link: declaration/handshake no longer matches active registry")
+	}
+	return id, nil
+}
+
 // handleAttach processes a stream-0 attach — the first on a link, or a later
 // Reattach (§S-P8): register declared actors into membership (register/
 // restore — detach never deregisters), WHOLESALE-REPLACE the link's allowed/
@@ -663,7 +1009,11 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 // detaching does NOT remove it (membership ≠ attachment) — reconcileHost only
 // removes rows the compute itself no longer declares. It reports (computeID,
 // accepted) so the caller can count link attachment only on success.
-func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID string, att *AttachRequest, daemonID string, isFirstAttachOnLink bool, mu *sync.Mutex, allowed *map[actor.ActorID]bool, kinds *map[actor.ActorID]actor.Kind, portMu *sync.Mutex, ports map[actor.ActorID]actorrt.Incarnation) (string, bool) {
+func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID string, att *AttachRequest, daemonID string, isFirstAttachOnLink bool, mu *sync.Mutex, declared *map[actor.ActorID]declarationSnapshotEntry, portOwner PortOwner, portMu *sync.Mutex, ports map[actor.ActorID]actorrt.Incarnation) (string, bool) {
+	if reason := validateAttachEnvelope(att); reason != "" {
+		a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: reason})
+		return "", false
+	}
 	computeID := att.ComputeID
 	if daemonID != "" {
 		computeID = daemonID
@@ -682,6 +1032,30 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 			return "", false
 		}
 	}
+	var authorityRelease func()
+	if a.daemonAuthority != nil {
+		var err error
+		authorityRelease, err = a.daemonAuthority.LockAndValidate(ctx, computeID, a.channelID)
+		if err != nil {
+			a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "daemon_binding_stale"})
+			time.AfterFunc(attachRejectDrain, func() { lc.kill("attach_daemon_binding_stale", err) })
+			return "", false
+		}
+		defer authorityRelease()
+	}
+
+	pin, reason := a.enterDeclarationWriter(computeID, lc)
+	if reason != "" {
+		a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: reason})
+		time.AfterFunc(attachRejectDrain, func() { lc.kill("attach_"+reason, nil) })
+		return "", false
+	}
+	pinFinished := false
+	defer func() {
+		if !pinFinished {
+			pin.finish(false)
+		}
+	}()
 
 	// 膜律 (问①, v1.8): a declaration is admitted ONLY if it names an id with an
 	// active户籍 — one active-census Lookup per declaration, and that ONE verdict
@@ -695,45 +1069,78 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 	// to consult). 问②③ (placement / desired_host authority) is enforced at plan
 	// generation (app), not here.
 	admitted := make([]Declaration, 0, len(att.Declarations))
-	for _, d := range att.Declarations {
-		if a.registry != nil {
-			rec, ok, err := a.registry.Lookup(ctx, d.ActorID)
-			if err != nil {
-				a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "membership lookup: " + err.Error()})
+	if a.declarations != nil {
+		input := make([]storespec.ComputeDeclaration, 0, len(att.Declarations))
+		for _, d := range att.Declarations {
+			input = append(input, storespec.ComputeDeclaration{ActorID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Epoch: d.Epoch})
+		}
+		allowed, err := a.declarations.ApplyComputeDeclaration(ctx, portOwner, computeID, input)
+		if err != nil {
+			a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "apply_declaration: " + err.Error()})
+			return "", false
+		}
+		for _, d := range allowed {
+			admitted = append(admitted, Declaration{ActorID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Epoch: d.Epoch})
+		}
+	} else {
+		// Compatibility seam for substrate-only rigs that intentionally assemble
+		// no channel declaration coordinator. Production Home always injects one.
+		for _, d := range att.Declarations {
+			if a.composition != nil {
+				row, ok, err := a.composition.LookupComposition(ctx, d.ActorID)
+				if err != nil {
+					a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "composition lookup: " + err.Error()})
+					return "", false
+				}
+				if !ok || row.Placement != storespec.PlacementDaemon || row.DesiredHost != computeID ||
+					d.Binding != actor.BindingRuntimeInboundViaRelay || row.Epoch != d.Epoch {
+					a.logger.Warn("link.attach.declaration_composition_mismatch", "compute", computeID, "actor", string(d.ActorID))
+					continue
+				}
+			}
+			if a.registry != nil {
+				rec, ok, err := a.registry.Lookup(ctx, d.ActorID)
+				if err != nil {
+					a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "membership lookup: " + err.Error()})
+					return "", false
+				}
+				if !ok || !rec.IsActive() {
+					a.logger.Warn("link.attach.declaration_no_membership",
+						"compute", computeID, "actor", string(d.ActorID))
+					continue
+				}
+				if rec.Kind != d.Kind {
+					a.logger.Warn("link.attach.declaration_kind_mismatch", "compute", computeID, "actor", string(d.ActorID))
+					continue
+				}
+				// Ontological gate (期12 S3.5, 主题A A2): a human is恒 home-hosted
+				// (三层律 — the person is a DEVICE behind a gateway link; the cell
+				// lives on home). A daemon declaring a KindHuman id is claiming to
+				// host what cannot run on a daemon — an invalid declaration by
+				// ontology, not a bad-daemon defence (A6 stays deferred). Judged on
+				// the REGISTRY's kind (rec.Kind), never the daemon's self-report:
+				// the declaration is dropped from host-stamp/allow-set/obs alike,
+				// same as an orphan. Sibling of the reserved-system-id guard above.
+				if rec.Kind == actor.KindHuman {
+					a.logger.Warn("link.attach.declaration_human_rejected",
+						"compute", computeID, "actor", string(d.ActorID))
+					continue
+				}
+			}
+			admitted = append(admitted, d)
+		}
+
+		if a.membership != nil && len(admitted) > 0 {
+			nowMs := time.Now().UnixMilli()
+			adds := make([]storespec.MemberActorAdd, 0, len(admitted))
+			for _, d := range admitted {
+				// 有户籍 → applyMemberAddTx only UPDATEs host for an active row (只盖 Host).
+				adds = append(adds, storespec.MemberActorAdd{ID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Host: computeID, At: nowMs})
+			}
+			if err := a.membership.ApplyMemberTransitions(ctx, adds, nil); err != nil {
+				a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "register: " + err.Error()})
 				return "", false
 			}
-			if !ok || !rec.IsActive() {
-				a.logger.Warn("link.attach.declaration_no_membership",
-					"compute", computeID, "actor", string(d.ActorID))
-				continue
-			}
-			// Ontological gate (期12 S3.5, 主题A A2): a human is恒 home-hosted
-			// (三层律 — the person is a DEVICE behind a gateway link; the cell
-			// lives on home). A daemon declaring a KindHuman id is claiming to
-			// host what cannot run on a daemon — an invalid declaration by
-			// ontology, not a bad-daemon defence (A6 stays deferred). Judged on
-			// the REGISTRY's kind (rec.Kind), never the daemon's self-report:
-			// the declaration is dropped from host-stamp/allow-set/obs alike,
-			// same as an orphan. Sibling of the reserved-system-id guard above.
-			if rec.Kind == actor.KindHuman {
-				a.logger.Warn("link.attach.declaration_human_rejected",
-					"compute", computeID, "actor", string(d.ActorID))
-				continue
-			}
-		}
-		admitted = append(admitted, d)
-	}
-
-	if a.membership != nil && len(admitted) > 0 {
-		nowMs := time.Now().UnixMilli()
-		adds := make([]storespec.MemberActorAdd, 0, len(admitted))
-		for _, d := range admitted {
-			// 有户籍 → applyMemberAddTx only UPDATEs host for an active row (只盖 Host).
-			adds = append(adds, storespec.MemberActorAdd{ID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Host: computeID, At: nowMs})
-		}
-		if err := a.membership.ApplyMemberTransitions(ctx, adds, nil); err != nil {
-			a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "register: " + err.Error()})
-			return "", false
 		}
 	}
 
@@ -743,14 +1150,13 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 	// was allowed before is simply not in newAllowed after. Orphans were already
 	// dropped above, so they never enter the allow-set (the 问① OpenStream gate).
 	newAllowed := make(map[actor.ActorID]bool, len(admitted))
-	newKinds := make(map[actor.ActorID]actor.Kind, len(admitted))
+	newDeclared := make(map[actor.ActorID]declarationSnapshotEntry, len(admitted))
 	for _, d := range admitted {
 		newAllowed[d.ActorID] = true
-		newKinds[d.ActorID] = d.Kind
+		newDeclared[d.ActorID] = declarationSnapshotEntry{Kind: d.Kind, Binding: d.Binding, Epoch: d.Epoch, DaemonID: computeID}
 	}
 	mu.Lock()
-	*allowed = newAllowed
-	*kinds = newKinds
+	*declared = newDeclared
 	mu.Unlock()
 
 	// reconcileHost is a DESTRUCTIVE full-set diff (§S-P8's "kubelet
@@ -784,12 +1190,22 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 	// the placeholder case; nil-on-a-later-Reattach keeps its full
 	// authoritative shrink-to-zero meaning unchanged, and a non-nil (even
 	// empty) declaration ALWAYS reconciles regardless of position.
-	if att.Declarations != nil || !isFirstAttachOnLink {
-		a.reconcileHost(ctx, computeID, newAllowed, portMu, ports)
+	if a.declarations == nil && (att.Declarations != nil || !isFirstAttachOnLink) {
+		a.reconcileHost(ctx, computeID, newAllowed, portOwner, portMu, ports)
 	}
+	// The store transaction/diff and the single-pointer declaration publication
+	// are complete. Exit the writer before the reply; a candidate cannot promote
+	// until this count is zero AND acceptIncumbent records a successful reply.
+	pin.finish(true)
+	pinFinished = true
 
 	if err := a.sendReply(lc, requestID, AttachReply{ChannelID: a.channelID, Accepted: true, DaemonID: computeID}); err != nil {
 		a.logger.Info("link.attach_reply_failed", "compute", computeID, "err", err)
+		a.failIncumbent(computeID, lc, "attach_reply_failed")
+		return computeID, false
+	}
+	if !a.acceptIncumbent(computeID, lc) {
+		a.failIncumbent(computeID, lc, "attach_candidate_deposed")
 		return computeID, false
 	}
 	// "接上了" and "重申了一遍" are different events — the daemon re-declares its
@@ -803,6 +1219,24 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 		a.logger.Debug("link.redeclared", "compute", computeID, "actors", len(att.Declarations))
 	}
 	return computeID, true
+}
+
+// validateAttachEnvelope is the parse-level gate: it runs before writer
+// admission and before any registry/store action. Duplicate ids make the whole
+// declaration ambiguous (kind/binding/epoch would otherwise be last-wins), so
+// the frame is rejected atomically rather than partially normalized.
+func validateAttachEnvelope(att *AttachRequest) string {
+	if att == nil || att.Proto < 2 {
+		return "protocol_too_old"
+	}
+	seen := make(map[actor.ActorID]struct{}, len(att.Declarations))
+	for _, decl := range att.Declarations {
+		if _, exists := seen[decl.ActorID]; exists {
+			return "duplicate_declaration"
+		}
+		seen[decl.ActorID] = struct{}{}
+	}
+	return ""
 }
 
 // reconcileHost is the attach-time membership reconciliation (§10.13 推导7 /
@@ -829,7 +1263,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 // link (e.g. it was declared on a since-dead prior connection and its
 // embodiment already reaped with that connection) has nothing local to
 // despawn — the row removal alone is safe.
-func (a *Acceptor) reconcileHost(ctx context.Context, computeID string, newAllowed map[actor.ActorID]bool, portMu *sync.Mutex, ports map[actor.ActorID]actorrt.Incarnation) {
+func (a *Acceptor) reconcileHost(ctx context.Context, computeID string, newAllowed map[actor.ActorID]bool, portOwner PortOwner, portMu *sync.Mutex, ports map[actor.ActorID]actorrt.Incarnation) {
 	if a.registry == nil || a.membership == nil || computeID == "" {
 		return
 	}
@@ -844,9 +1278,20 @@ func (a *Acceptor) reconcileHost(ctx context.Context, computeID string, newAllow
 		if rec.Host != computeID || newAllowed[rec.ID] {
 			continue
 		}
+		var inc actorrt.Incarnation
+		var ok bool
+		if a.portIndex != nil {
+			inc, ok = a.portIndex.Take(portOwner, rec.ID)
+		}
 		portMu.Lock()
-		inc, ok := ports[rec.ID]
+		local, localOK := ports[rec.ID]
+		if localOK && (!ok || local == inc) {
+			delete(ports, rec.ID)
+		}
 		portMu.Unlock()
+		if !ok {
+			inc, ok = local, localOK
+		}
 		if ok {
 			a.runtime.Despawn(inc)
 		}
@@ -1323,9 +1768,11 @@ func (a *Acceptor) Leaked() int64 { return a.leaked.Load() }
 // in-progress Wait (which would both leave an unjoined worker and violate
 // WaitGroup's reuse precondition).
 type actorGate struct {
-	mu     sync.Mutex
-	sealed bool
-	wg     sync.WaitGroup
+	mu       sync.Mutex
+	sealed   bool
+	wg       sync.WaitGroup
+	waitOnce sync.Once
+	waitDone chan struct{}
 }
 
 // admit registers one actor worker; false = the gate is sealed (teardown has
@@ -1347,8 +1794,29 @@ func (g *actorGate) done() { g.wg.Done() }
 func (g *actorGate) sealAndWait(timeout time.Duration) bool {
 	g.mu.Lock()
 	g.sealed = true
+	if g.waitDone == nil {
+		g.waitDone = make(chan struct{})
+	}
+	done := g.waitDone
 	g.mu.Unlock()
-	return waitGroupWithin(&g.wg, timeout)
+	// All callers observe one waiter and one terminal channel. A caller whose
+	// budget expires abandons only its own observation; it never leaves another
+	// Wait goroutine behind. Once the admitted workers finish, the shared done
+	// edge settles permanently and every later observer returns immediately.
+	g.waitOnce.Do(func() {
+		go func() {
+			g.wg.Wait()
+			close(done)
+		}()
+	})
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		return false
+	}
 }
 
 // joinLinkWorkers is runLink's teardown join half — control workers first

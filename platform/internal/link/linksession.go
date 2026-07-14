@@ -1,6 +1,7 @@
 package link
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -141,6 +142,13 @@ func linkYamuxConfig() *yamux.Config {
 type linkSession struct {
 	ys *yamux.Session
 
+	// openGate is the single context-aware admission gate for every locally
+	// initiated yamux Session.Open (control, actor, and lane).  A canceled
+	// waiter never issues an Open; cancellation after admission kills the whole
+	// session so an already-issued yamux open cannot survive its caller.
+	openGateOnce sync.Once
+	openGate     chan struct{}
+
 	// ctrl is the single bidirectional control substream (opened by the daemon,
 	// accepted by the home). ctrlMu serialises writes to it (sendControl may be
 	// called from many goroutines — pingLoop, the storage/lane RPC senders, the
@@ -236,22 +244,18 @@ func (ls *linkSession) waitControlWorkers(timeout time.Duration) bool {
 // lane substream (the daemon is that transfer's target) to the daemon's inbound-
 // target handler — the daemon opens no actor/control substreams for the home to
 // accept, so it needs no onActor.
-func dialLinkSession(ws *websocket.Conn, onControl func([]byte), onLane func(net.Conn), logger *slog.Logger) (*linkSession, error) {
+func dialLinkSession(ctx context.Context, ws *websocket.Conn, onControl func([]byte), onLane func(net.Conn), logger *slog.Logger) (*linkSession, error) {
 	ys, err := yamux.Client(newWSByteStream(ws), linkYamuxConfig())
 	if err != nil {
 		return nil, err
 	}
 	ls := &linkSession{ys: ys, onControl: onControl, onLane: onLane, logger: logger}
-	ctrl, err := ys.Open()
+	ctrl, finish, err := ls.openTagged(ctx, streamControl)
 	if err != nil {
 		_ = ys.Close()
 		return nil, err
 	}
-	ctrl = &boundedConn{Conn: ctrl, logger: logger}
-	if err := writeStreamHeader(ctrl, streamControl); err != nil {
-		_ = ys.Close()
-		return nil, err
-	}
+	finish()
 	ls.ctrlMu.Lock()
 	ls.ctrl = ctrl
 	ls.ctrlMu.Unlock()
@@ -482,33 +486,80 @@ func (ls *linkSession) sendControl(payload []byte) error {
 // openStream opens one fresh actor substream (daemon side), tagging it so the
 // home's accept loop routes it to runtime.Attach. yamux assigns the substream id
 // itself — the retired mux's nextID hand-numbering is gone.
-func (ls *linkSession) openStream() (net.Conn, error) {
-	conn, err := ls.ys.Open()
-	if err != nil {
-		return nil, err
-	}
-	conn = &boundedConn{Conn: conn, logger: ls.logger}
-	if err := writeStreamHeader(conn, streamActor); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
-	return conn, nil
+func (ls *linkSession) openStream(ctx context.Context) (net.Conn, func(), error) {
+	return ls.openTagged(ctx, streamActor)
 }
 
 // openLane opens a fresh top-level tag=lane substream (daemon side): §5's
 // resource-lane redeem rides directly on it (片③ flattened the lane — no
 // nested yamux session, see lane.go).
-func (ls *linkSession) openLane() (net.Conn, error) {
-	conn, err := ls.ys.Open()
+func (ls *linkSession) openLane(ctx context.Context) (net.Conn, error) {
+	conn, finish, err := ls.openTagged(ctx, streamLane)
 	if err != nil {
 		return nil, err
 	}
-	conn = &boundedConn{Conn: conn, logger: ls.logger}
-	if err := writeStreamHeader(conn, streamLane); err != nil {
-		_ = conn.Close()
-		return nil, err
-	}
+	finish()
 	return conn, nil
+}
+
+// openTagged owns one complete open attempt: context-aware gate admission,
+// yamux Open, and the mandatory stream header. The returned finish keeps the
+// cancellation watcher alive for callers (notably OpenStream) that extend the
+// same attempt through an application handshake. Once admitted, cancellation
+// is link-fatal by contract: yamux has no per-Open context and abandoning an
+// issued SYN could otherwise leave an unowned stream behind.
+func (ls *linkSession) openTagged(ctx context.Context, kind streamKind) (net.Conn, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ls.openGateOnce.Do(func() { ls.openGate = make(chan struct{}, 1) })
+	select {
+	case ls.openGate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, nil, ctx.Err()
+	case <-ls.closed():
+		return nil, nil, errLinkClosed
+	}
+
+	attemptDone := make(chan struct{})
+	var complete atomic.Bool
+	var finishOnce sync.Once
+	finish := func() {
+		finishOnce.Do(func() {
+			complete.Store(true)
+			close(attemptDone)
+			<-ls.openGate
+		})
+	}
+	go func() {
+		select {
+		case <-ctx.Done():
+			if !complete.Load() {
+				ls.kill("open_canceled", ctx.Err())
+			}
+		case <-attemptDone:
+		case <-ls.closed():
+		}
+	}()
+
+	conn, err := ls.ys.Open()
+	if err != nil {
+		finish()
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		return nil, nil, err
+	}
+	conn = &boundedConn{Conn: conn, logger: ls.logger}
+	if err := writeStreamHeader(conn, kind); err != nil {
+		_ = conn.Close()
+		finish()
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		return nil, nil, err
+	}
+	return conn, finish, nil
 }
 
 // closed returns a channel closed when the session dies (peer gone, carrier

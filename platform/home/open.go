@@ -265,9 +265,17 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	h.presenceFold = presenceFold
 	h.logger = logger
 	h.nowMs = nowMs
-	h.builder = cfg.Builder
-	h.desired = cfg.Desired
-	h.prevEagerDesired = map[actor.ActorID]bool{}
+	if cfg.CompositionResolver != nil {
+		view := &compositionView{h: h, resolver: cfg.CompositionResolver}
+		h.builder = view
+		h.desired = view
+	} else {
+		h.builder = cfg.Builder
+		h.desired = cfg.Desired
+	}
+	h.prevEagerDesired = map[actor.ActorID]desiredIncarnation{}
+	h.builtEpoch = map[actor.ActorID]int64{}
+	h.portIndex = map[actor.ActorID]homePortEntry{}
 	h.systemPen = systemPen
 	h.reviveLogAt = map[actor.ActorID]time.Time{}
 	h.reviveBackoff = map[actor.ActorID]reviveBackoffEntry{}
@@ -319,6 +327,16 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	if faults != nil && faults.wrapMembership != nil {
 		acceptorMembership = faults.wrapMembership(cs.Membership)
 	}
+	var linkComposition storespec.CompositionReader
+	var declarationCoordinator link.DeclarationCoordinator
+	if cfg.CompositionResolver != nil {
+		linkComposition = cs.Composition
+		declarationCoordinator = homeDeclarationCoordinator{h: h}
+	}
+	var daemonAuthority link.DaemonAuthority
+	if cfg.DaemonAuthority != nil {
+		daemonAuthority = daemonAuthorityAdapter{inner: cfg.DaemonAuthority}
+	}
 	links := link.NewAcceptor(link.Config{
 		Minter:             minter,
 		Access:             cs.Access,
@@ -326,10 +344,16 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 		Runtime:            rt,
 		Membership:         acceptorMembership,
 		Registry:           cs.Registry,
+		Composition:        linkComposition,
+		Declarations:       declarationCoordinator,
 		ChannelID:          cfg.ChannelID,
 		Logger:             logger,
 		CancelRequest:      h.handleCancelUpstream,
 		StorageHostControl: homeStorageHostControl{outbox: cs.Outbox, timeout: cfg.ReservationTimeout, logger: logger},
+		PlanProvider:       boundPlanProvider{channelID: cfg.ChannelID, provider: cfg.PlanProvider},
+		DaemonAuthority:    daemonAuthority,
+		ActorLock:          h.actorGates.lock,
+		PortIndex:          homePortIndex{h: h},
 	})
 	h.links = links
 

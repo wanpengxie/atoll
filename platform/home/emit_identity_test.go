@@ -55,7 +55,7 @@ func TestEmitIdentity_HostWeldsAuthorFromBoundID(t *testing.T) {
 	}
 	defer func() { _ = d.Close() }()
 
-	arms, err := d.OpenStream(toolID, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}

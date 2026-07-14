@@ -2,6 +2,7 @@ package link_test
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -9,6 +10,37 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
+
+func TestOneIncumbentPerComputeAndSameLinkReattach(t *testing.T) {
+	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+	d1, err := link.Dial(context.Background(), r.wsURL(), "daemon-one", nil, link.DialConfig{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := link.Dial(context.Background(), r.wsURL(), "daemon-one", nil, link.DialConfig{}, nil); err == nil || !strings.Contains(err.Error(), "compute_busy") {
+		t.Fatalf("second incumbent Dial error = %v, want compute_busy", err)
+	}
+	if err := d1.Reattach(context.Background(), []link.Declaration{}); err != nil {
+		t.Fatalf("same-link Reattach was not admitted: %v", err)
+	}
+	if err := d1.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		d3, err := link.Dial(context.Background(), r.wsURL(), "daemon-one", nil, link.DialConfig{}, nil)
+		if err == nil {
+			_ = d3.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("incumbent slot did not clear after link death: %v", err)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
 
 // TestRebindableArms_FlapContinuity is S4's flap-continuity proof (§10.13
 // 推导3): a hosted cell's write capability survives a wire flap without ever
@@ -28,7 +60,7 @@ func TestRebindableArms_FlapContinuity(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms1, err := d1.OpenStream(toolID, func(env *message.Envelope) error {
+	arms1, err := d1.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, nil)
 	if err != nil {
@@ -85,7 +117,7 @@ func TestRebindableArms_FlapContinuity(t *testing.T) {
 	}
 	defer func() { _ = d2.Close() }()
 
-	arms2, err := d2.OpenStream(toolID, func(env *message.Envelope) error {
+	arms2, err := d2.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, nil)
 	if err != nil {
@@ -129,7 +161,7 @@ func TestRuntimeSealRejectsActorArmWithoutKillingWholeLink(t *testing.T) {
 	// embodiments, so this is a live embodiment + live stream the seal below
 	// must not be able to touch. It is the "other actor on the same link"
 	// witness for the no-team-kill assertion at the bottom.
-	siblingArms, err := d.OpenStream(siblingID, func(*message.Envelope) error { return nil }, nil)
+	siblingArms, err := d.OpenStream(context.Background(), siblingID, 0, func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream sibling: %v", err)
 	}
@@ -157,29 +189,21 @@ func TestRuntimeSealRejectsActorArmWithoutKillingWholeLink(t *testing.T) {
 
 	r.rt.Seal()
 
-	open := func() link.CellArms {
-		arms, err := d.OpenStream(id, func(*message.Envelope) error { return nil }, nil)
+	open := func() error {
+		arms, err := d.OpenStream(context.Background(), id, 0, func(*message.Envelope) error { return nil }, nil)
 		if err != nil {
-			t.Fatalf("OpenStream: %v", err)
+			return err
 		}
 		d.StartStream(id)
-		return arms
-	}
-	arms := open()
-	deadline = time.Now().Add(time.Second)
-	for {
 		_, err = arms.Pen.Write(context.Background(), &message.Envelope{
 			ID: "probe", Kind: message.KindEvent, Type: "sealed.probe",
 			Payload: []byte(`{}`), Visibility: message.VisibilityPublic,
 			Audience: message.Audience{"nobody"},
 		})
-		if err != nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("sealed actor stream did not close")
-		}
-		time.Sleep(time.Millisecond)
+		return err
+	}
+	if err := open(); err == nil {
+		t.Fatal("sealed runtime acknowledged a new actor arm")
 	}
 	select {
 	case <-d.Done():
@@ -197,5 +221,7 @@ func TestRuntimeSealRejectsActorArmWithoutKillingWholeLink(t *testing.T) {
 
 	// The same live Dialer can perform the stream-level 补臂 attempt again;
 	// compute.Run's reconcile loop therefore reopens this arm, not the whole link.
-	_ = open()
+	if err := open(); err == nil {
+		t.Fatal("sealed runtime acknowledged a retry actor arm")
+	}
 }

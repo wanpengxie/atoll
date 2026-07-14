@@ -460,6 +460,13 @@ func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add st
 	switch {
 	case err == nil:
 		if !deregistered.Valid {
+			var curKind, curBinding string
+			if err := tx.QueryRowContext(ctx, `SELECT actor_kind, COALESCE(actor_binding,'') FROM actor_registry WHERE actor_id=?`, string(add.ID)).Scan(&curKind, &curBinding); err != nil {
+				return false, fmt.Errorf("store: actor metadata lookup %q: %w", add.ID, err)
+			}
+			if curKind != string(add.Kind) {
+				return false, fmt.Errorf("store: actor host-stamp %q kind mismatch: registry=%q declaration=%q", add.ID, curKind, add.Kind)
+			}
 			// Row is already active (reconnect / retried update_members /
 			// re-run of a boot-time seed). Substrate identity is {ID, Kind,
 			// Binding} and carries no per-actor declaration to diff — that is an
@@ -471,12 +478,12 @@ func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add st
 			// change UPDATEs the row but returns changed=false, so it emits NO
 			// system.actor.registered mirror — the mirror never carries host, and
 			// re-homing is not a re-registration.
-			if curHost == add.Host {
+			if curHost == add.Host && curBinding == string(add.Binding) {
 				return false, nil
 			}
 			if _, err := tx.ExecContext(ctx,
-				`UPDATE actor_registry SET host=? WHERE actor_id=?`,
-				add.Host, string(add.ID),
+				`UPDATE actor_registry SET host=?, actor_binding=? WHERE actor_id=?`,
+				add.Host, nullableBinding(add.Binding), string(add.ID),
 			); err != nil {
 				return false, fmt.Errorf("store: actor rehost %q: %w", add.ID, err)
 			}
@@ -488,6 +495,13 @@ func (r *actorRegistry) applyMemberAddTx(ctx context.Context, tx *sql.Tx, add st
 	default:
 		return false, fmt.Errorf("store: actor member lookup %q: %w", add.ID, err)
 	}
+}
+
+func nullableBinding(binding actor.Binding) any {
+	if binding == "" {
+		return nil
+	}
+	return string(binding)
 }
 
 // cascadeCounts is the rows-affected tally of a deregistration's three

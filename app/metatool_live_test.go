@@ -39,10 +39,10 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/atoll/app"
+	"github.com/wanpengxie/atoll/drivers/agents/base"
 	"github.com/wanpengxie/atoll/drivers/tools/kimi"
 	"github.com/wanpengxie/atoll/drivers/tools/xhs"
-	"github.com/wanpengxie/atoll/drivers/agents/base"
-	"github.com/wanpengxie/atoll/app"
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/metatool"
 	"github.com/wanpengxie/atoll/platform"
@@ -176,18 +176,20 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID),
 		map[string]any{"name": "tool-daemon"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
-	apiKey := respJSON(t, w)["api_key"].(string)
+	daemonBody := respJSON(t, w)
+	apiKey := daemonBody["api_key"].(string)
+	daemonID := daemonBody["id"].(string)
 	if apiKey == "" {
 		t.Fatal("daemon api_key empty")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), s.chID, apiKey)
-	xhsID, err := env.app.AdmitForTest(s.chID, xhs.DefaultActorID, actor.KindTool)
+	xhsID, err := env.app.ComposeDaemonForTest(s.chID, "xhs", "xhs", daemonID, actor.KindTool)
 	if err != nil {
 		t.Fatalf("pre-admit tool:xhs: %v", err)
 	}
-	kimiID, err := env.app.AdmitForTest(s.chID, kimi.DefaultActorID, actor.KindTool)
+	kimiID, err := env.app.ComposeDaemonForTest(s.chID, "kimi", "kimi", daemonID, actor.KindTool)
 	if err != nil {
 		t.Fatalf("pre-admit tool:kimi: %v", err)
 	}

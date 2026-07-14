@@ -26,8 +26,8 @@ import (
 	// might host (G21): whether it actually runs is answered honestly by
 	// Build/creds, not gated by binary contents. agent/all = the LLM engine
 	// classes (go-kimi + claude); actors/all = tools + devices.
-	_ "github.com/wanpengxie/atoll/drivers/tools/all"
 	_ "github.com/wanpengxie/atoll/drivers/agents/all"
+	_ "github.com/wanpengxie/atoll/drivers/tools/all"
 )
 
 // shutdownTimeout bounds the in-flight drain so a wedged request cannot hold the
@@ -99,6 +99,7 @@ func main() {
 	dbPath := flag.String("db", "atoll.db", "app database path")
 	channelDBDir := flag.String("channel-db-dir", "/tmp/atoll-dev/channels", "directory for channel databases")
 	uiDist := flag.String("ui-dist", "", "path to the built web UI (atoll-web repo's dist/); empty = API-only")
+	initDB := flag.Bool("init", false, "create a new app database; omit to open an existing database")
 	flag.Parse()
 
 	logger := slog.New(slog.NewJSONHandler(os.Stdout, nil))
@@ -112,11 +113,12 @@ func main() {
 		logger.Info("server: loaded .env", "vars_set", n)
 	}
 
-	appDB, err := app.OpenDB(*dbPath)
+	processDB, err := app.OpenProcessDB(*dbPath, *initDB)
 	if err != nil {
 		log.Fatalf("server: %v", err)
 	}
-	defer appDB.Close() // early-exit safety; graceful path closes it as step 3/3 (double close is a no-op)
+	defer processDB.Close()
+	appDB := processDB.DB
 
 	a, err := app.New(app.Config{
 		DB:           appDB,
@@ -168,7 +170,7 @@ func main() {
 		logger.Info("server: signal received, shutting down")
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer cancel()
-		if err := gracefulShutdown(shutdownCtx, logger, a, gw, appDB); err != nil {
+		if err := gracefulShutdown(shutdownCtx, logger, a, gw, processDB); err != nil {
 			logger.Error("server: shutdown", "err", err.Error())
 		}
 	}

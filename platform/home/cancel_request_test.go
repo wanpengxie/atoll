@@ -102,7 +102,7 @@ func TestHomeCancelRequest_CrossWire(t *testing.T) {
 	defer host.rt.StopAll()
 
 	cell := &cancelBlockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return host.dispatch(toolID, env)
 	}, func(requestID message.ID) { host.rt.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -266,7 +266,7 @@ func TestCancelUpstream_CrossWireAcrossReconnect(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Dial d1: %v", err)
 	}
-	if _, err := d1.OpenStream(callerID, func(*message.Envelope) error { return nil }, func(message.ID) {}); err != nil {
+	if _, err := d1.OpenStream(context.Background(), callerID, 0, func(*message.Envelope) error { return nil }, func(message.ID) {}); err != nil {
 		t.Fatalf("OpenStream d1: %v", err)
 	}
 	d1.Start()
@@ -279,7 +279,7 @@ func TestCancelUpstream_CrossWireAcrossReconnect(t *testing.T) {
 		t.Fatalf("Dial d2: %v", err)
 	}
 	defer func() { _ = d2.Close() }()
-	if _, err := d2.OpenStream(callerID, func(*message.Envelope) error { return nil }, func(message.ID) {}); err != nil {
+	if _, err := d2.OpenStream(context.Background(), callerID, 0, func(*message.Envelope) error { return nil }, func(message.ID) {}); err != nil {
 		t.Fatalf("OpenStream d2: %v", err)
 	}
 	d2.Start()

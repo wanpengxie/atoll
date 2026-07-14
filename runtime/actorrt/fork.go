@@ -201,14 +201,12 @@ func (r *Runtime) DespawnChild(parent Incarnation, childID actor.ActorID) error 
 		r.mu.Unlock()
 		return ErrNotOwner
 	}
-	delete(r.embodiments, childID)
 	// REPLACEMENT-LIVE-FLIP INVARIANT (same as Despawn/DespawnID): flip dead in the
 	// SAME critical section as the map delete — no live-but-unmapped window for a
 	// stale welded cap to pass IsLive. markDead is an idempotent atomic and never
 	// re-enters r.mu, so it is deadlock-safe in-lock. Enrol as a zombie in the SAME
 	// critical section (P0-1).
-	child.markDead()
-	launch := r.retireLocked(child, childID, flavorDespawn)
+	retirement := r.retireCurrentLocked(childID, child, flavorDespawn)
 	r.mu.Unlock()
 	// Mirrors Despawn's own guarded teardown: the escort drives signalDespawn (a
 	// by-name termination — a port emits KindDespawn before closing; a cell child,
@@ -216,6 +214,6 @@ func (r *Runtime) DespawnChild(parent Incarnation, childID actor.ActorID) error 
 	// bounded by grace. DespawnChild returns in O(judge-dead), never waiting on the
 	// child goroutine. The stale r.owned[parent.p] entry is left in place — it is
 	// !isLive() from here on and gets pruned on the parent's next Fork.
-	launch()
+	runRetirement(retirement)
 	return nil
 }

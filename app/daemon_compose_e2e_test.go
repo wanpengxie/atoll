@@ -2,10 +2,10 @@ package app_test
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,7 +14,45 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
+
+type e2eLinkPlan struct {
+	mu       sync.Mutex
+	desired  []actorrt.DesiredMember
+	builders map[actor.ActorID]platform.ActorFactory
+	chID     channel.ID
+}
+
+func (p *e2eLinkPlan) Members(context.Context) ([]actorrt.DesiredMember, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]actorrt.DesiredMember(nil), p.desired...), nil
+}
+
+func (p *e2eLinkPlan) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	f, ok := p.builders[id]
+	return f, ok
+}
+
+func (p *e2eLinkPlan) ApplyPlan(rows []platform.PlanActor) error {
+	desired := make([]actorrt.DesiredMember, 0, len(rows))
+	builders := make(map[actor.ActorID]platform.ActorFactory, len(rows))
+	for _, row := range rows {
+		decl, err := registry.Build(row.Class, registry.InstanceSpec{ID: row.InstanceID, Config: row.Config}, registry.Deps{ChannelID: p.chID})
+		if err != nil {
+			return err
+		}
+		desired = append(desired, actorrt.DesiredMember{ID: row.InstanceID, Kind: row.Kind, Lifecycle: actorrt.LifecycleAlwaysOn, Epoch: row.Epoch})
+		builders[row.InstanceID] = decl.Factory
+	}
+	p.mu.Lock()
+	p.desired, p.builders = desired, builders
+	p.mu.Unlock()
+	return nil
+}
 
 // TestDaemonComposition_E2E is the daemon-composition acceptance test: it runs
 // the FULL daemon flow against a real server —
@@ -63,43 +101,14 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	// path writes intent only; the operate-face executor (CORE1③) is what Admits in
 	// production. Stand in for that door here (S5b rewires the HTTP path onto it).
 
-	// 1) PULL the assignment.
-	w = env.do(t, "GET", fmt.Sprintf("/compute/plan?key=%s&channel=%s", apiKey, chID), nil, nil)
-	assertStatus(t, w, http.StatusOK)
-	var planResp struct {
-		Assignments []struct {
-			InstanceID string          `json:"instance_id"`
-			Class      string          `json:"class"`
-			Config     json.RawMessage `json:"config"`
-		} `json:"assignments"`
-	}
-	if err := json.Unmarshal(w.Body.Bytes(), &planResp); err != nil {
-		t.Fatalf("decode plan: %v", err)
-	}
-	if len(planResp.Assignments) != 1 {
-		t.Fatalf("want 1 assignment, got %d", len(planResp.Assignments))
-	}
-
-	// 2) BUILD decls from the assignment (registry.Build — stub stands in for claude).
-	var decls []platform.ActorDecl
-	for _, asg := range planResp.Assignments {
-		decl, err := registry.Build(asg.Class, registry.InstanceSpec{
-			ID:     actor.ActorID(asg.InstanceID),
-			Config: asg.Config,
-		}, registry.Deps{ChannelID: channel.ID(chID)})
-		if err != nil {
-			t.Fatalf("build %s: %v", asg.Class, err)
-		}
-		decls = append(decls, decl)
-	}
-
-	// 3) ATTACH over a real /compute link.
+	// ATTACH over a real /compute link. The first reconcile pulls the authenticated
+	// plan on stream 0, atomically publishes desired+builder, then declares/builds.
 	ctx, cancel := context.WithCancel(context.Background())
 	runErr := make(chan error, 1)
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), chID, apiKey)
-	desired, builder := staticActorCompute(decls)
+	plan := &e2eLinkPlan{chID: channel.ID(chID), builders: map[actor.ActorID]platform.ActorFactory{}}
 	go func() {
-		runErr <- compute.Run(ctx, compute.Config{ServerWS: serverWS, Desired: desired, Builder: builder})
+		runErr <- compute.Run(ctx, compute.Config{ServerWS: serverWS, Desired: plan, Builder: plan, PlanSink: plan, Poll: 20 * time.Millisecond})
 	}()
 	t.Cleanup(func() {
 		cancel()

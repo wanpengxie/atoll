@@ -136,8 +136,8 @@ func TestShim_RemoveThroughDoor(t *testing.T) {
 	assertDoorTerminal(t, env, s.cookies, s.chID, s.userID, "channel.remove_actor")
 }
 
-// TestShim_RestartThroughDoor: POST /actor-decls/:id/restart replays each per-channel
-// restart through channel.restart_actor; count >= 1 + the door terminal is 笔为 user:X.
+// TestShim_RestartThroughDoor: the world restart endpoint freezes the caller's
+// authorized per-channel target set into a durable fanout job.
 func TestShim_RestartThroughDoor(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
@@ -150,7 +150,6 @@ func TestShim_RestartThroughDoor(t *testing.T) {
 	if n, _ := respJSON(t, w)["restarted"].(float64); n < 1 {
 		t.Fatalf("restarted = %v, want >= 1", n)
 	}
-	assertDoorTerminal(t, env, s.cookies, s.chID, s.userID, "channel.restart_actor")
 }
 
 // TestShim_NonMemberForbidden (膜律): a workspace member who is NOT a channel member

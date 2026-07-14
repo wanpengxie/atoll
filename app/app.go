@@ -80,6 +80,10 @@ type App struct {
 	// Home.Close. It lets app-package anchors park all three teardown arms and prove a
 	// concurrent entitlement enumeration is never trapped behind a.mu.
 	homeCloseHook func(op string, chID channel.ID)
+
+	daemonLocks *keyedLockSet
+	declLocks   *keyedLockSet
+	fanout      *fanoutWorker
 }
 
 // Config configures the App.
@@ -120,6 +124,8 @@ func New(cfg Config) (*App, error) {
 		uiDist:             cfg.UIDist,
 		controlShimTimeout: defaultControlShimTimeout,
 		extraDropKinds:     cfg.ExtraDropKinds,
+		daemonLocks:        newKeyedLockSet(),
+		declLocks:          newKeyedLockSet(),
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -134,6 +140,8 @@ func New(cfg Config) (*App, error) {
 	if err := a.loadChannels(); err != nil {
 		return nil, fmt.Errorf("app: load channels: %w", err)
 	}
+	a.fanout = newFanoutWorker(a)
+	a.fanout.start()
 
 	return a, nil
 }
@@ -182,6 +190,9 @@ func (a *App) Shutdown(ctx context.Context) error {
 // under a.mu would block every concurrent getHome (a.mu.RLock), and the entitlement
 // resolver's bounded read (T_read) cannot cancel a lock wait.
 func (a *App) Close() error {
+	if a.fanout != nil {
+		a.fanout.close()
+	}
 	a.mu.Lock()
 	homes := a.homes
 	a.homes = make(map[channel.ID]*home.Home)
@@ -278,11 +289,6 @@ func (a *App) registerRoutes() {
 	// WebSocket endpoints.
 	a.engine.GET("/ws", a.handleWS)
 	a.engine.GET("/compute", a.handleCompute)
-	// Daemon composition pull: the daemon GETs its channel's placement='daemon'
-	// assignment, then builds exactly that set (no blind-build). Same
-	// ?key=+?channel= auth as /compute.
-	a.engine.GET("/compute/plan", a.handleComputePlan)
-
 	// Static files — only when a built UI is supplied (the UI lives in its
 	// own repository, atoll-web; empty UIDist = API-only server).
 	if a.uiDist != "" {
@@ -354,8 +360,9 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*home.Home, error) {
 		// user域 (per-channel human members) is derived by the platform ring itself
 		// (see Home.reconcileActivation) — the app cannot enumerate it. Both non-nil
 		// (double-nil灭: a nil pair leaves the ring inert).
-		Desired: compositionDesired{app: a, chID: chID},
-		Builder: compositionBuilder{app: a, chID: chID},
+		CompositionResolver: compositionResolver{app: a},
+		PlanProvider:        appPlanProvider{app: a},
+		DaemonAuthority:     appDaemonAuthority{app: a},
 		// Fill the operate-face injection point: the in-gate control plane's
 		// executor half (intent write + Home call). One instance, channel-resolved.
 		Operate: a.operateFace(),
@@ -376,7 +383,6 @@ func (a *App) createHome(chID channel.ID, dbPath string) (*home.Home, error) {
 	if err != nil {
 		return nil, err
 	}
-
 	a.mu.Lock()
 	a.homes[chID] = home
 	a.mu.Unlock()
@@ -400,7 +406,7 @@ const (
 	// by the daemon's own plan.
 	placementServer = "server"
 	// placementDaemon marks a composition instance a connected DAEMON hosts. The
-	// server never spawns these; the daemon pulls them (GET /compute/plan) and
+	// server never spawns these; the daemon pulls them over its bound link and
 	// builds them with its LOCAL creds.
 	placementDaemon = "daemon"
 )
@@ -415,7 +421,7 @@ func mergeConfig(global, perChannel string) json.RawMessage {
 	g := map[string]any{}
 	c := map[string]any{}
 	// Bounded-depth pre-check on BOTH layers before the map[string]any Unmarshal:
-	// a poison config persists in the actor_decls/channel_actors tables and is re-hit on
+	// a poison config persists in world declarations/channel composition and is re-hit on
 	// EVERY startup (loadChannels → reconcile build → mergeConfig), so a deeply-
 	// nested blob would fatally overflow the stack every boot. An over-deep layer is
 	// treated as NOT an object (skips the merge); the raw bytes are never recursed
@@ -444,22 +450,12 @@ func mergeConfig(global, perChannel string) json.RawMessage {
 	return nil
 }
 
-func (a *App) loadChannels() error {
-	rows, err := a.db.Query(`SELECT id, db_path FROM channels`)
-	if err != nil {
-		return err
+func (a *App) closeLoadedHomes() {
+	a.mu.Lock()
+	homes := a.homes
+	a.homes = make(map[channel.ID]*home.Home)
+	a.mu.Unlock()
+	for id, h := range homes {
+		_ = a.closeDetachedHome("load-rollback", id, h)
 	}
-	defer rows.Close()
-
-	for rows.Next() {
-		var id, dbPath string
-		if err := rows.Scan(&id, &dbPath); err != nil {
-			continue
-		}
-		if _, err := a.createHome(channel.ID(id), dbPath); err != nil {
-			a.logger.Warn("app: load channel failed", "channel", id, "err", err.Error())
-			// Continue loading other channels.
-		}
-	}
-	return nil
 }

@@ -2,8 +2,8 @@
 // Cloud daemon and user/proxy daemon are the same binary.
 //
 // What the daemon RUNS is NOT "one of every compiled class" — it is exactly the
-// set the SERVER assigns this channel (channel_actors placement='daemon'),
-// PULLED at startup from GET /compute/plan. Two
+// set the SERVER assigns this channel (channel composition placement='daemon'),
+// pulled over the authenticated link control stream. Two
 // orthogonal axes: compiled-in (availability — actors/all + agent/all are linked
 // so the daemon CAN build any tool/looper/device) vs run (the pulled assignment
 // decides). NOTHING auto-runs. tool / looper / device are uniform — all just
@@ -16,14 +16,10 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"flag"
-	"fmt"
-	"io"
 	"log"
 	"log/slog"
-	"net/http"
 	"net/url"
 	"os"
 	"os/signal"
@@ -31,7 +27,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
 	"github.com/wanpengxie/atoll/platform"
@@ -45,8 +40,8 @@ import (
 	// daemon CAN build any class the server assigns. actors/all = tools/devices;
 	// agent/all = the LLM engine classes (claude / go-kimi). What actually runs is
 	// the pulled assignment, never "one of each".
-	_ "github.com/wanpengxie/atoll/drivers/tools/all"
 	_ "github.com/wanpengxie/atoll/drivers/agents/all"
+	_ "github.com/wanpengxie/atoll/drivers/tools/all"
 )
 
 // channelFromServerURL extracts the ?channel= query from the server WS URL.
@@ -58,73 +53,10 @@ func channelFromServerURL(raw string) string {
 	return u.Query().Get("channel")
 }
 
-// daemonAssignment mirrors the server's GET /compute/plan JSON. Decoded into
-// the daemon's OWN struct — a loose HTTP contract; the daemon must not import
-// the server app package.
-type daemonAssignment struct {
-	InstanceID string          `json:"instance_id"`
-	Class      string          `json:"class"`
-	Config     json.RawMessage `json:"config,omitempty"`
-}
-
-// planURLFromWS turns the server WS url (ws://h/compute) into the plan url
-// (http(s)://h/compute/plan?key=&channel=).
-func planURLFromWS(serverWS, key, chID string) (string, error) {
-	u, err := url.Parse(serverWS)
-	if err != nil {
-		return "", err
-	}
-	switch u.Scheme {
-	case "ws":
-		u.Scheme = "http"
-	case "wss":
-		u.Scheme = "https"
-	}
-	u.Path = "/compute/plan"
-	q := url.Values{}
-	q.Set("key", key)
-	q.Set("channel", chID)
-	u.RawQuery = q.Encode()
-	return u.String(), nil
-}
-
-// planHTTPClient bounds the plan pull — a long-running daemon must not hang
-// forever on a wedged server.
-var planHTTPClient = &http.Client{Timeout: 10 * time.Second}
-
-// fetchPlan pulls this daemon's assignment for the channel from the server (the
-// daemon builds EXACTLY this set — no blind-build).
-func fetchPlan(ctx context.Context, serverWS, key, chID string) ([]daemonAssignment, error) {
-	planURL, err := planURLFromWS(serverWS, key, chID)
-	if err != nil {
-		return nil, err
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, planURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	resp, err := planHTTPClient.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	var out struct {
-		Assignments []daemonAssignment `json:"assignments"`
-	}
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode: %w", err)
-	}
-	return out.Assignments, nil
-}
-
 // planSource is the daemon's LIVE compute-plan source: it is BOTH the reconcile
 // ring's actorrt.DesiredSource (Members) and its compute.Builder (Lookup),
 // sharing one fetched-plan snapshot. The reconcile ring calls Members every poll
-// tick (compute.runLink), so Members RE-FETCHES /compute/plan each tick and
+// tick (compute.runLink), so Members pulls a fresh link plan each tick and
 // rebuilds the desired set + the id→factory table together — a plan changed on the
 // server converges WITHOUT a daemon restart (SW-6). A fetch failure is NON-FATAL:
 // Members logs and returns the last-known-good set (empty until the first success),
@@ -150,15 +82,16 @@ func newPlanSource(ws, key, chID, wsRoot, deviceName string, logger *slog.Logger
 	}
 }
 
-func (p *planSource) Members(ctx context.Context) ([]actorrt.DesiredMember, error) {
-	plan, err := fetchPlan(ctx, p.ws, p.key, p.chID)
-	if err != nil {
-		p.logger.Warn("daemon: refetch plan failed, using last-known-good", "err", err.Error())
-		p.mu.Lock()
-		d := p.lastDesired
-		p.mu.Unlock()
-		return d, nil // never error the ring; last-known-good keeps hosted work alive
-	}
+func (p *planSource) Members(context.Context) ([]actorrt.DesiredMember, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]actorrt.DesiredMember(nil), p.lastDesired...), nil
+}
+
+// ApplyPlan builds both desired and factory halves off-lock, then publishes one
+// atomic snapshot. A failed build for one row keeps that id desired (so the ring
+// retries) while omitting only its factory; a pull/apply failure never clears LKG.
+func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 	var desired []actorrt.DesiredMember
 	builders := map[actor.ActorID]platform.ActorFactory{}
 	for _, asg := range plan {
@@ -177,7 +110,7 @@ func (p *planSource) Members(ctx context.Context) ([]actorrt.DesiredMember, erro
 				"instance", asg.InstanceID, "class", asg.Class)
 			continue
 		}
-		desired = append(desired, actorrt.DesiredMember{ID: id, Kind: kind, Lifecycle: actorrt.LifecycleAlwaysOn})
+		desired = append(desired, actorrt.DesiredMember{ID: id, Kind: kind, Lifecycle: actorrt.LifecycleAlwaysOn, Epoch: asg.Epoch})
 		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
 			ID:     id,
 			Config: asg.Config,
@@ -217,7 +150,7 @@ func (p *planSource) Members(ctx context.Context) ([]actorrt.DesiredMember, erro
 		p.logger.Info("daemon: composition", "channel", p.chID,
 			"assigned", len(plan), "desired", len(desired), "built", len(builders))
 	}
-	return desired, nil
+	return nil
 }
 
 func (p *planSource) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
@@ -270,7 +203,7 @@ func main() {
 	}
 
 	// The daemon's compute plan is pulled LIVE, not snapshotted: planSource re-fetches
-	// /compute/plan every reconcile tick and rebuilds the desired set + factory table
+	// the link plan every reconcile tick and rebuilds the desired set + factory table
 	// together (a plan change on the server converges with no daemon restart — SW-6).
 	// Startup does NOT gate on a first fetch: compute.Run connects the link, then the
 	// ring calls Members, which tolerates a fetch failure (last-known-good, initially
@@ -314,6 +247,7 @@ func main() {
 		Logger:          logger,
 		Desired:         source,
 		Builder:         source,
+		PlanSink:        source,
 		StorageHost:     storageHostAdapter{host: sh},
 		LocalFileOpener: storageHostAdapter{host: sh},
 	}); err != nil {

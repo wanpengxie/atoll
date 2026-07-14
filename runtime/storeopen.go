@@ -32,7 +32,8 @@ type ChannelStores struct {
 	// for every ChannelStores holder at once — 反旁路结构墙).
 	Principals storespec.PrincipalRegistry
 
-	Membership storespec.MembershipControlPlane
+	Membership  storespec.MembershipControlPlane
+	Composition storespec.CompositionControlPlane
 
 	// Access is the plane-2 door's single outward face — the welded AccessMinter.
 	// The resourcespec.Registry / Driver behind it are deliberately NOT re-exported:
@@ -183,16 +184,17 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	}
 
 	return &ChannelStores{
-		Log:        cs.Log,
-		Query:      cs.Query,
-		Expiry:     cs.Expiry,
-		Requests:   cs.Requests,
-		Registry:   cs.Registry,
-		Principals: cs.Principals,
-		Membership: cs.Membership,
-		Access:     access,
-		Outbox:     cs.Resources,
-		timers:     cs.Timers(),
-		closer:     cs.Close,
+		Log:         cs.Log,
+		Query:       cs.Query,
+		Expiry:      cs.Expiry,
+		Requests:    cs.Requests,
+		Registry:    cs.Registry,
+		Principals:  cs.Principals,
+		Membership:  cs.Membership,
+		Composition: cs.Composition,
+		Access:      access,
+		Outbox:      cs.Resources,
+		timers:      cs.Timers(),
+		closer:      cs.Close,
 	}, nil
 }

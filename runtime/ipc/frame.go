@@ -155,6 +155,7 @@ type Frame struct {
 // HandshakePayload is sent remote → host on connect.
 type HandshakePayload struct {
 	LeaseID string `json:"lease_id"`
+	Epoch   int64  `json:"epoch"`
 }
 
 // HandshakeAckPayload is the host's reply: the bound actor identity.

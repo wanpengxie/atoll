@@ -23,13 +23,14 @@ import (
 // TestFaultDualCrash: normal assembly + one successful chat round, then a
 // CONCURRENT kill -9 of both server and daemon, then a fixed-order restart
 // (server first, daemon second). Three invariants:
-//   ① 自愈  — default_agent reconverges to the assistant, membership
-//     reconverges to the five-member baseline, the daemon re-attaches —
-//     none of that deadlocks (neither side wedges waiting on the other).
-//   ② 不丢  — the pre-crash chat request+response replay byte-exact from
-//     seq 0 after the restart.
-//   ③ 走通  — a brand-new chat completes end-to-end post-restart (daemon
-//     redial → reconcile revival → routing → call → resource all live).
+//
+//	① 自愈  — default_agent reconverges to the assistant, membership
+//	  reconverges to the five-member baseline, the daemon re-attaches —
+//	  none of that deadlocks (neither side wedges waiting on the other).
+//	② 不丢  — the pre-crash chat request+response replay byte-exact from
+//	  seq 0 after the restart.
+//	③ 走通  — a brand-new chat completes end-to-end post-restart (daemon
+//	  redial → reconcile revival → routing → call → resource all live).
 func TestFaultDualCrash(t *testing.T) {
 	binDir := requireE2EBin(t)
 	serverBin := filepath.Join(binDir, "atoll-server")
@@ -61,11 +62,15 @@ func TestFaultDualCrash(t *testing.T) {
 	startServerProc := func() *proc {
 		serverGen++
 		serverLog = filepath.Join(dirs["logs"], fmt.Sprintf("server-%d.log", serverGen))
-		return startProc(t, fmt.Sprintf("dualcrash-server#%d", serverGen), serverBin, []string{
+		args := []string{
 			"-addr", fmt.Sprintf("127.0.0.1:%d", port),
 			"-db", dbPath,
 			"-channel-db-dir", dirs["channels"],
-		}, dirs["serverwd"], serverLog, env)
+		}
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			args = append(args, "-init")
+		}
+		return startProc(t, fmt.Sprintf("dualcrash-server#%d", serverGen), serverBin, args, dirs["serverwd"], serverLog, env)
 	}
 
 	// ---- L1 起: bind-retry, same discipline as TestLoop -----------------

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -16,6 +17,7 @@ type Declaration struct {
 	ActorID actor.ActorID `json:"actor_id"`
 	Kind    actor.Kind    `json:"kind"`
 	Binding actor.Binding `json:"binding"`
+	Epoch   int64         `json:"epoch"`
 }
 
 // AttachRequest is the stream-0 control message a daemon sends to join a
@@ -30,6 +32,7 @@ type Declaration struct {
 // differs). A credential field here would be a dead leak of an app concern into
 // the wire vocabulary.
 type AttachRequest struct {
+	Proto        int           `json:"proto"`
 	ComputeID    string        `json:"compute_id"`
 	Declarations []Declaration `json:"declarations"`
 }
@@ -64,7 +67,18 @@ type controlKind string
 const (
 	ctrlAttach      controlKind = "attach"
 	ctrlAttachReply controlKind = "attach_reply"
+	ctrlPlanPull    controlKind = "plan_pull"
+	ctrlPlanReply   controlKind = "plan_reply"
 )
+
+type PlanPull struct {
+	BoundID string `json:"bound_id"`
+}
+
+type PlanReply struct {
+	Actors []platform.PlanActor `json:"actors"`
+	Error  string               `json:"error,omitempty"`
+}
 
 // controlFrame is the stream-0 envelope: one kind, one optional payload each.
 type controlFrame struct {
@@ -72,6 +86,8 @@ type controlFrame struct {
 	Kind        controlKind    `json:"kind"`
 	Attach      *AttachRequest `json:"attach,omitempty"`
 	AttachReply *AttachReply   `json:"attach_reply,omitempty"`
+	PlanPull    *PlanPull      `json:"plan_pull,omitempty"`
+	PlanReply   *PlanReply     `json:"plan_reply,omitempty"`
 }
 
 func encodeControl(f controlFrame) ([]byte, error) { return json.Marshal(f) }

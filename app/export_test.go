@@ -14,6 +14,8 @@ import (
 	platformhome "github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // errTestChannelNotLoaded stands in for a torn-down home in the test seams below.
@@ -80,10 +82,24 @@ func (a *App) SeedIntentRowForTest(chID, instanceID, class, placement string) er
 	if i := strings.IndexByte(principal, ':'); i >= 0 {
 		principal = principal[i+1:]
 	}
-	_, err := a.db.ExecContext(context.Background(),
-		`INSERT INTO channel_actors (channel_id, instance_id, principal, class, placement) VALUES (?,?,?,?,?)`,
-		chID, instanceID, principal, class, placement)
-	return err
+	h := a.getHome(channel.ID(chID))
+	if h == nil {
+		return errTestChannelNotLoaded
+	}
+	kind, ok := registry.ClassKind(class)
+	if !ok {
+		return fmt.Errorf("unknown test class %q", class)
+	}
+	rec, _, _, err := h.IntroduceComposition(context.Background(), storespec.CompositionIntroduce{
+		DeclID: principal, Principal: principal, Class: class,
+		Placement: storespec.Placement(placement), Kind: kind, At: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		return err
+	}
+	// Identity-only Remove deliberately leaves desired composition intact,
+	// reproducing the crash half-state the retry must repair.
+	return h.Remove(context.Background(), rec.InstanceID)
 }
 
 // Handler exposes the assembled gin engine as an http.Handler so black-box
@@ -102,8 +118,12 @@ func (a *App) Handler() http.Handler {
 // answers with 503 (A-P8). Test-only.
 func (a *App) DropHomeForTest(chID channel.ID) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
+	h := a.homes[chID]
 	delete(a.homes, chID)
+	a.mu.Unlock()
+	if h != nil {
+		_ = h.Close()
+	}
 }
 
 // AdmitForTest admits id as a durable member of chID's home (the pure-membership
@@ -121,6 +141,19 @@ func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) (acto
 		principal = principal[i+1:]
 	}
 	return home.Admit(context.Background(), kind, principal)
+}
+
+func (a *App) ComposeDaemonForTest(chID, principal, class, daemonID string, kind actor.Kind) (actor.ActorID, error) {
+	h := a.getHome(channel.ID(chID))
+	if h == nil {
+		return "", errTestChannelNotLoaded
+	}
+	rec, _, _, err := h.IntroduceComposition(context.Background(), storespec.CompositionIntroduce{
+		DeclID: "sys:test:" + principal, Principal: principal, Class: class,
+		Placement: storespec.PlacementDaemon, DesiredHost: daemonID,
+		Kind: kind, At: time.Now().UnixMilli(),
+	})
+	return rec.InstanceID, err
 }
 
 func (a *App) ResolvePrincipalForTest(chID string, kind actor.Kind, principal string) (actor.ActorID, error) {
@@ -179,18 +212,12 @@ func (a *App) KillCellForTest(chID channel.ID, id actor.ActorID) error {
 // actor Open seeds). Returns the new channel id. Test-only — proves half-built
 // channels stay deletable and open with clear errors, never a panic. Test-only.
 func (a *App) CreateHalfBuiltChannelForTest(wsID, name string) (string, error) {
-	const legacyPlaceholderID = actor.ActorID("agent:boost")
 	chID := uuid.NewString()
 	dbPath := filepath.Join(a.channelDBDir, chID+".db")
 	now := time.Now().UnixMilli()
 	if _, err := a.db.ExecContext(context.Background(),
-		`INSERT INTO channels (id, workspace_id, name, type, db_path, default_agent, created_at) VALUES (?,?,?,?,?,?,?)`,
-		chID, wsID, name, "group", dbPath, string(legacyPlaceholderID), now); err != nil {
-		return "", err
-	}
-	if _, err := a.db.ExecContext(context.Background(),
-		`INSERT INTO channel_actors (channel_id, instance_id, class, placement) VALUES (?,?,?,?)`,
-		chID, string(legacyPlaceholderID), defaultBoostClass, placementServer); err != nil {
+		`INSERT INTO channels (id, workspace_id, name, type, db_path, created_at) VALUES (?,?,?,?,?,?)`,
+		chID, wsID, name, "group", dbPath, now); err != nil {
 		return "", err
 	}
 	if _, err := a.createHome(channel.ID(chID), dbPath); err != nil {

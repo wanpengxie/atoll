@@ -8,8 +8,8 @@ import (
 )
 
 // platform-topology 批 T5b / spec §0 裁决 2 + 裁决 8: the root now purifies to
-// the cross-host membrane's own shared word table — exactly three non-test
-// files (doc.go / decl.go / actorfactory.go). Both hosts (platform/home,
+// the cross-host membrane's own shared word table — exactly four non-test
+// files (doc.go / decl.go / actorfactory.go / plan.go). Both hosts (platform/home,
 // platform/compute) moved out into their own packages in T5b; the T4-era
 // three-way channel-host/compute-host/membrane classification is retired —
 // there is nothing left at root to classify BY host, only the membrane
@@ -21,6 +21,7 @@ var platformRootClosedSet = map[string]bool{
 	"doc.go":          true,
 	"decl.go":         true,
 	"actorfactory.go": true,
+	"plan.go":         true,
 }
 
 // TestPlatformRootTopologyClosedSet enforces platform/doc.go's root-file
@@ -61,7 +62,7 @@ func TestPlatformRootTopologyClosedSet(t *testing.T) {
 
 	if len(unclassified) > 0 {
 		sort.Strings(unclassified)
-		t.Errorf("platform root files outside the closed set {doc.go, decl.go, actorfactory.go} (doc.go's Root-file topology section + this test's set must both list them): %v", unclassified)
+		t.Errorf("platform root files outside the closed set {doc.go, decl.go, actorfactory.go, plan.go} (doc.go's Root-file topology section + this test's set must both list them): %v", unclassified)
 	}
 	if len(stale) > 0 {
 		sort.Strings(stale)

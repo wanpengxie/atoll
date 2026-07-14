@@ -86,11 +86,15 @@ func TestSoak(t *testing.T) {
 	startServer := func() *proc {
 		serverGen++
 		lp := filepath.Join(logDir, fmt.Sprintf("server-%d.log", serverGen))
-		return startProc(t, fmt.Sprintf("server#%d", serverGen), serverBin, []string{
+		args := []string{
 			"-addr", fmt.Sprintf("127.0.0.1:%d", port),
 			"-db", dbPath,
 			"-channel-db-dir", dirs["channels"],
-		}, dirs["serverwd"], lp, env)
+		}
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			args = append(args, "-init")
+		}
+		return startProc(t, fmt.Sprintf("server#%d", serverGen), serverBin, args, dirs["serverwd"], lp, env)
 	}
 
 	var server *proc

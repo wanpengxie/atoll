@@ -55,11 +55,19 @@ type Channel struct {
 	ctx       context.Context
 	cancel    context.CancelFunc
 	system    func(*actorrt.Runtime, actorrt.Incarnation) actorrt.Actor
-	started   atomic.Bool
+	state     atomic.Int32
+	startDone chan struct{}
 	closeOnce sync.Once
 	closeDone chan struct{}
 	leaked    atomic.Int64
 }
+
+const (
+	channelNew int32 = iota
+	channelStarting
+	channelStarted
+	channelClosed
+)
 
 // downChBuffer bounds the death-edge hand-off queue. A full buffer drops the
 // edge (logged) — the 30s level scan + startup first-scan close whatever the
@@ -144,6 +152,7 @@ func New(cfg Config) (*Channel, error) {
 		downDone:      make(chan struct{}),
 		ctx:           ctx,
 		cancel:        cancel,
+		startDone:     make(chan struct{}),
 		closeDone:     make(chan struct{}),
 		system:        cfg.System,
 	}
@@ -164,9 +173,18 @@ func New(cfg Config) (*Channel, error) {
 
 // Start births the intrinsic anchor and then starts the closure consumer.
 func (c *Channel) Start() error {
-	if !c.started.CompareAndSwap(false, true) {
+	if !c.state.CompareAndSwap(channelNew, channelStarting) {
+		if c.state.Load() == channelClosed {
+			return fmt.Errorf("channelkit: Channel.Start called after Close")
+		}
 		panic("channelkit: Channel.Start called twice")
 	}
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			c.failStart()
+			panic(recovered)
+		}
+	}()
 	if c.system != nil {
 		// Singleton invariant made explicit (was prose only): the system anchor is
 		// the SOLE occupant of SystemActorID and is minted exactly once, here, at
@@ -176,7 +194,10 @@ func (c *Channel) Start() error {
 		if _, created, err := c.cells.SpawnIfAbsent(actor.SystemActorID, actor.KindSystem, func(inc actorrt.Incarnation) actorrt.Actor {
 			return c.system(c.cells, inc)
 		}); err != nil {
-			c.started.Store(false) // Close after a failed Start must not wait on an unstarted consumer.
+			// No consumer was launched, so this Start attempt owns all teardown.
+			// Publish closed before releasing Close's start barrier: once Close
+			// observes startDone, no anchor or consumer can still be born.
+			c.failStart()
 			return err
 		} else if !created {
 			panic("channelkit: system anchor invariant violated — SystemActorID already occupied at assembly")
@@ -192,7 +213,23 @@ func (c *Channel) Start() error {
 	// per-drain steady-state event (consumeDown itself stays silent per drain).
 	c.logger.Info("channelkit.closure.consumer_armed", "channel", c.channelID)
 	go c.consumeDown()
+	if !c.state.CompareAndSwap(channelStarting, channelStarted) {
+		panic("channelkit: invalid state after successful Start")
+	}
+	close(c.startDone)
 	return nil
+}
+
+func (c *Channel) failStart() {
+	if !c.state.CompareAndSwap(channelStarting, channelClosed) {
+		return
+	}
+	c.closeOnce.Do(func() {
+		close(c.downDone)
+		c.cancel()
+		close(c.closeDone)
+	})
+	close(c.startDone)
 }
 
 // Cells returns the runtime so callers can spawn/address cells in this channel.
@@ -305,12 +342,43 @@ func (c *Channel) Close() {
 }
 
 func (c *Channel) closeWithin(timeout time.Duration) {
+	for {
+		switch c.state.Load() {
+		case channelNew:
+			if !c.state.CompareAndSwap(channelNew, channelClosed) {
+				continue
+			}
+			c.closeOnce.Do(func() {
+				c.cancel()
+				close(c.closeDone)
+			})
+			<-c.closeDone
+			return
+		case channelStarting:
+			// Start owns the starting state until it has either launched every
+			// resident producer or cleaned up a failed launch. Waiting here closes
+			// the CAS-before-spawn window: Close cannot return while Start can still
+			// create an anchor or consumer.
+			<-c.startDone
+			continue
+		case channelClosed:
+			<-c.closeDone
+			return
+		case channelStarted:
+			if !c.state.CompareAndSwap(channelStarted, channelClosed) {
+				continue
+			}
+			c.closeStartedWithin(timeout)
+			return
+		default:
+			panic("channelkit: invalid lifecycle state")
+		}
+	}
+}
+
+func (c *Channel) closeStartedWithin(timeout time.Duration) {
 	c.closeOnce.Do(func() {
 		defer close(c.closeDone)
-		if !c.started.Load() {
-			c.cancel()
-			return
-		}
 		// Signal-then-join BEFORE cancel: closing downStop lets consumeDown finish
 		// whatever closeFor call is already in flight under a STILL-LIVE ctx, then
 		// notice the stop signal and return on its own next loop iteration. Only

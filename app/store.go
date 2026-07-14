@@ -13,7 +13,7 @@ import (
 func OpenDB(path string) (*sql.DB, error) {
 	// modernc.org/sqlite reads pragmas via the _pragma= DSN form (applied per
 	// connection, so they hold across the database/sql pool). foreign_keys(1) is
-	// required for the ON DELETE CASCADE on daemon_channels / channel_actors to
+	// required for the ON DELETE CASCADE on daemon_channels and other app tables to
 	// actually fire — SQLite leaves FK enforcement OFF by default.
 	db, err := sql.Open("sqlite", path+"?_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
 	if err != nil {
@@ -96,7 +96,6 @@ func migrate(db *sql.DB) error {
 			name TEXT NOT NULL,
 			type TEXT NOT NULL DEFAULT 'group',
 			db_path TEXT NOT NULL,
-			default_agent TEXT,
 			created_at INTEGER NOT NULL
 		);
 		CREATE TABLE IF NOT EXISTS daemons (
@@ -111,44 +110,45 @@ func migrate(db *sql.DB) error {
 			channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
 			PRIMARY KEY(daemon_id, channel_id)
 		);
-		-- channel_actors: a channel's DESIRED actor-instance set (composition /
-		-- "spec"), the canonical writer for what a channel should run.
-		-- One row = one instance = (class) + spec.
-		-- This is INTENT, never live truth: "who is actually running" is the
-		-- substrate's actor_registry (read via Home.View().ListActors), never this
-		-- table. default_agent is a name-agnostic pointer INTO this set.
-		--
-		-- placement = which host CLASS runs the instance ('server' = server-embedded
-		-- cell, 'daemon' = a connected daemon). desired_host = which specific
-		-- daemon INSTANCE claims a 'daemon' row (''=unassigned pool). Two-level
-		-- invariant (enforced at the write face): placement='server' ⟹
-		-- desired_host=''; placement='daemon' AND desired_host='' = a legal
-		-- unassigned pool row (delivered to NO daemon). /compute/plan filters a
-		-- daemon's assignment on desired_host = its own id (G4: two daemons on one
-		-- channel each pull only their own rows). desired_host (intent) is a
-		-- separate plane from the embodiment fact (membership Host); never join
-		-- them to judge liveness.
-		CREATE TABLE IF NOT EXISTS channel_actors (
-			channel_id  TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-			instance_id TEXT NOT NULL,
-			principal   TEXT NOT NULL DEFAULT '',
-			class       TEXT NOT NULL,
-			config_json TEXT,
-			placement   TEXT NOT NULL DEFAULT 'server',
-			desired_host TEXT NOT NULL DEFAULT '',
-			PRIMARY KEY(channel_id, instance_id)
+		CREATE TABLE IF NOT EXISTS decl_fanout_jobs (
+			job_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+			decl_id      TEXT NOT NULL,
+			op           TEXT NOT NULL CHECK(op IN ('delete','restart')),
+			initiator    TEXT NOT NULL,
+			targets_json TEXT NOT NULL,
+			attempt      INTEGER NOT NULL DEFAULT 0,
+			last_error   TEXT,
+			created_at   INTEGER NOT NULL,
+			done_at      INTEGER
 		);
+		CREATE UNIQUE INDEX IF NOT EXISTS ux_decl_jobs_dedup
+			ON decl_fanout_jobs(decl_id, op) WHERE done_at IS NULL AND op='delete';
+		CREATE INDEX IF NOT EXISTS ix_decl_jobs_pending
+			ON decl_fanout_jobs(decl_id) WHERE done_at IS NULL;
+
+		CREATE TABLE IF NOT EXISTS daemon_revoke_jobs (
+			job_id       INTEGER PRIMARY KEY AUTOINCREMENT,
+			daemon_id    TEXT NOT NULL,
+			op           TEXT NOT NULL CHECK(op IN ('delete','detach')),
+			targets_json TEXT NOT NULL,
+			attempt      INTEGER NOT NULL DEFAULT 0,
+			last_error   TEXT,
+			created_at   INTEGER NOT NULL,
+			done_at      INTEGER
+		);
+		CREATE INDEX IF NOT EXISTS ix_daemon_jobs_pending
+			ON daemon_revoke_jobs(daemon_id) WHERE done_at IS NULL;
 		-- actor_decls: global actor-instance declarations. One row per declared
 		-- instance, cross-channel (key = id): identity + class + config + owner +
 		-- visibility. This is the declaration layer EVERY declared actor instance
 		-- (agent, tool, ...) passes through to enter a channel — the mechanism is
 		-- kind-neutral ("kind 卸重: 法只认 id+凭据+门"). 'default_class' = the
 		-- instance's DEFAULT engine class (a create-time preference, NOT runtime
-		-- truth): the per-channel concrete engine is channel_actors.class
+		-- truth): the per-channel concrete engine lives in channel-local composition
 		-- (= override ?? default_class). The engine IS the actor class
 		-- (claude/go-kimi/echo are flat registry classes; there is NO umbrella
 		-- "agent" class). config_json = the global identity body (persona/skills +
-		-- engine knobs), layered UNDER channel_actors' per-channel config_json.
+		-- engine knobs), layered UNDER the channel-local composition config.
 		-- Distinct from users (responsibility owner, never a declaration).
 		--
 		-- No "scope" column (cognitive-state scope) BY DESIGN — v1 is implicitly
@@ -163,7 +163,7 @@ func migrate(db *sql.DB) error {
 		-- needed.
 		--
 		-- Instance ids keep their historical 'agent:' namespace prefix in
-		-- channel_actors / membership / truth logs (persistent names stay constant;
+		-- channel composition / membership / truth logs (persistent names stay constant;
 		-- the prefix carries no classification weight). Renaming the prefix would be
 		-- a truth-data migration — deliberately NOT done here.
 		CREATE TABLE IF NOT EXISTS actor_decls (
@@ -189,20 +189,7 @@ func migrate(db *sql.DB) error {
 	for _, col := range []string{"status", "hostname", "platform", "last_heartbeat"} {
 		_, _ = db.Exec(`ALTER TABLE daemons DROP COLUMN ` + col)
 	}
-	// channels.default_agent: a name-agnostic pointer into the channel's
-	// composition (channel_actors), defaulting to the agent:boost fallback
-	// instance. Best-effort add for an existing dev DB.
-	_, _ = db.Exec(`ALTER TABLE channels ADD COLUMN default_agent TEXT`)
-
-	// channel_actors.placement: best-effort add for a DB whose channel_actors was
-	// created before the column existed (a fresh CREATE above already has it).
-	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN placement TEXT NOT NULL DEFAULT 'server'`)
-	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN principal TEXT NOT NULL DEFAULT ''`)
-
-	// channel_actors.desired_host: which specific daemon instance claims a
-	// 'daemon' row (''=unassigned pool). Two-level invariant with placement,
-	// enforced at the write face. additive best-effort add for a dev DB.
-	_, _ = db.Exec(`ALTER TABLE channel_actors ADD COLUMN desired_host TEXT NOT NULL DEFAULT ''`)
+	migrateLegacyCompositionShape(db)
 
 	// Column-rename chain, ordered oldest-vintage first (each step best-effort:
 	// a fresh CREATE above already has default_class, so both renames no-op on
@@ -217,27 +204,5 @@ func migrate(db *sql.DB) error {
 	// member. additive best-effort add for a dev DB.
 	_, _ = db.Exec(`ALTER TABLE actor_decls ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`)
 
-	// Backfill channel_actors.class from the old placeholder shell value 'agent' to
-	// the REAL engine class (engine = class now; there is no "agent" class):
-	//   1. instances with a declaration → their actor_decls.default_class.
-	//   2. remaining 'agent' shells (e.g. agent:boost, no declaration) → boost engine.
-	_, _ = db.Exec(`UPDATE channel_actors
-		SET class = (SELECT default_class FROM actor_decls WHERE 'agent:' || actor_decls.id = channel_actors.instance_id)
-		WHERE class = 'agent' AND instance_id IN (SELECT 'agent:' || id FROM actor_decls)`)
-	_, _ = db.Exec(`UPDATE channel_actors SET class = 'go-kimi' WHERE class = 'agent'`)
-
-	// Backfill existing channels to the composition model (don't clear data):
-	//   1. seed an agent:boost row for any channel that lacks ONE (not just
-	//      channels with no rows at all — a channel with other composition but no
-	//      boost would otherwise get default_agent=agent:boost with no matching
-	//      instance to spawn). placement='server' = the server-embedded fallback.
-	//      class = 'go-kimi' = the boost engine (engine IS the class).
-	//   2. migrate the old hardcoded pointer agent:main → agent:boost (and fill a
-	//      NULL pointer) so default_agent points at the seeded instance.
-	_, _ = db.Exec(`INSERT OR IGNORE INTO channel_actors (channel_id, instance_id, principal, class, placement)
-		SELECT id, 'agent:boost', 'boost', 'go-kimi', 'server' FROM channels
-		WHERE id NOT IN (SELECT channel_id FROM channel_actors WHERE instance_id = 'agent:boost')`)
-	_, _ = db.Exec(`UPDATE channels SET default_agent = 'agent:boost'
-		WHERE default_agent IS NULL OR default_agent = 'agent:main'`)
 	return nil
 }

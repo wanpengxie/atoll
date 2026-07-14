@@ -18,6 +18,11 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
+func isEagerManaged(h *Home, id actor.ActorID) bool {
+	_, ok := h.prevEagerDesired[id]
+	return ok
+}
+
 // ---------------------------------------------------------------------------
 // T0 characterization fixtures (purity v3 B1 §2 T0).
 //
@@ -192,7 +197,7 @@ func TestCharRing_Embodied_FastPath_ClearsBackoffKeepsCurrent(t *testing.T) {
 	if !live(h, id) {
 		t.Fatal("embodied member must remain live")
 	}
-	if !h.prevEagerDesired[id] {
+	if !isEagerManaged(h, id) {
 		t.Fatal("current must stay true for the fast-path word")
 	}
 	if e := backoffEntry(t, h, id); e.failures != 0 {
@@ -247,7 +252,7 @@ func TestCharRing_AlreadyLive_CASLoser_DoesNotClearBackoff(t *testing.T) {
 	if !live(h, id) {
 		t.Fatal("id must be live (the racer's build won)")
 	}
-	if !h.prevEagerDesired[id] {
+	if !isEagerManaged(h, id) {
 		t.Fatal("current must stay true for the CAS-loser word")
 	}
 	if e := backoffEntry(t, h, id); e.failures == 0 {
@@ -280,7 +285,7 @@ func TestCharRing_Attached_KeepsCurrent_NoBuildNoLog(t *testing.T) {
 	if live(h, id) {
 		t.Fatal("attached member must not be spawned locally")
 	}
-	if !h.prevEagerDesired[id] {
+	if !isEagerManaged(h, id) {
 		t.Fatal("current must stay true for Attached")
 	}
 	if _, ok := builder.capsFor(id); ok {
@@ -315,7 +320,7 @@ func TestCharRing_BackoffHeld_DropsCurrent_NoBuildAttempt(t *testing.T) {
 	if live(h, id) {
 		t.Fatal("backoff-held member must not embody this tick")
 	}
-	if h.prevEagerDesired[id] {
+	if isEagerManaged(h, id) {
 		t.Fatal("current must be dropped for BackoffHeld")
 	}
 	if builds != 0 {
@@ -343,7 +348,7 @@ func TestCharRing_NoFactory_KeepsCurrent_WarnLog(t *testing.T) {
 	if live(h, id) {
 		t.Fatal("no-factory member must not embody")
 	}
-	if !h.prevEagerDesired[id] {
+	if !isEagerManaged(h, id) {
 		t.Fatal("current must stay true for NoFactory")
 	}
 	if !rh.has("platform.reconcile.no_factory") {
@@ -364,7 +369,7 @@ func TestCharRing_Sealed_InfoLog_AbortsWholeTick(t *testing.T) {
 	h := openCharHome(t, desired, builder, logger)
 	id = admit(t, h, id, actor.KindAgent)
 
-	baseline := map[actor.ActorID]bool{"sentinel-untouched": true}
+	baseline := map[actor.ActorID]desiredIncarnation{"sentinel-untouched": {}}
 	h.prevEagerDesired = baseline
 
 	h.channel.Cells().Seal()
@@ -374,7 +379,7 @@ func TestCharRing_Sealed_InfoLog_AbortsWholeTick(t *testing.T) {
 	if !rh.has("platform.reconcile.runtime_sealed") {
 		t.Fatal("Sealed must info-log platform.reconcile.runtime_sealed")
 	}
-	if len(h.prevEagerDesired) != 1 || !h.prevEagerDesired["sentinel-untouched"] {
+	if len(h.prevEagerDesired) != 1 || !isEagerManaged(h, "sentinel-untouched") {
 		t.Fatalf("Sealed must abort the WHOLE tick — prevEagerDesired must stay exactly the pre-tick baseline, got %v", h.prevEagerDesired)
 	}
 }
@@ -415,7 +420,7 @@ func TestCharRing_BuildFailed_ErrorLog_RecordsBackoff_ContinuesTick(t *testing.T
 	if live(h, id) {
 		t.Fatal("build-failed member must not be live")
 	}
-	if h.prevEagerDesired[id] {
+	if isEagerManaged(h, id) {
 		t.Fatal("current must be dropped for BuildFailed")
 	}
 	if !rh.has("platform.reconcile.build_failed") {
@@ -424,7 +429,7 @@ func TestCharRing_BuildFailed_ErrorLog_RecordsBackoff_ContinuesTick(t *testing.T
 	if e := backoffEntry(t, h, id); e.failures != 1 {
 		t.Fatalf("BuildFailed must record one backoff step, got %+v", e)
 	}
-	if !h.prevEagerDesired[id2] {
+	if !isEagerManaged(h, id2) {
 		t.Fatal("BuildFailed must NOT abort the whole tick — the sibling fast-path member must still land in current")
 	}
 }
@@ -447,7 +452,7 @@ func TestCharRing_Cancelled_DespawnsBuiltCell_AbortsWholeTick(t *testing.T) {
 	h := openCharHome(t, desired, builder, nil)
 	id = admit(t, h, id, actor.KindAgent)
 
-	baseline := map[actor.ActorID]bool{"sentinel-untouched": true}
+	baseline := map[actor.ActorID]desiredIncarnation{"sentinel-untouched": {}}
 	h.prevEagerDesired = baseline
 
 	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn})
@@ -456,7 +461,7 @@ func TestCharRing_Cancelled_DespawnsBuiltCell_AbortsWholeTick(t *testing.T) {
 	if live(h, id) {
 		t.Fatal("a cancelled-mid-build cell must be despawned, never left live")
 	}
-	if len(h.prevEagerDesired) != 1 || !h.prevEagerDesired["sentinel-untouched"] {
+	if len(h.prevEagerDesired) != 1 || !isEagerManaged(h, "sentinel-untouched") {
 		t.Fatalf("Cancelled must abort the WHOLE tick — prevEagerDesired must stay exactly the pre-tick baseline, got %v", h.prevEagerDesired)
 	}
 }
@@ -484,7 +489,7 @@ func TestCharRing_RecheckFault_DespawnsCell_DropsCurrent_DoesNotAbort(t *testing
 	if live(h, id) {
 		t.Fatal("RecheckFault must despawn the freshly built cell")
 	}
-	if h.prevEagerDesired[id] {
+	if isEagerManaged(h, id) {
 		t.Fatal("RecheckFault must drop current for this id")
 	}
 }
@@ -520,7 +525,7 @@ func TestCharRing_RecheckGone_DespawnsCell_DropsCurrent_CascadesSubjectSlot(t *t
 	if live(h, human) {
 		t.Fatal("RecheckGone must despawn the straddled cell")
 	}
-	if h.prevEagerDesired[human] {
+	if isEagerManaged(h, human) {
 		t.Fatal("RecheckGone must drop current for this id")
 	}
 	if _, ok := h.SubjectSlotFor(human); ok {
@@ -554,7 +559,7 @@ func TestCharRingMatrix_CancelledAndBuildFailed_CtxGateWinsBeforeBuildErr(t *tes
 	// UNTOUCHED (sentinel survives); a run-to-completion pass would sweep the
 	// no-longer-desired sentinel out (削臂 DespawnID + rewrite).
 	sentinel := actor.ActorID("agent:char-matrix-sentinel")
-	h.prevEagerDesired[sentinel] = true
+	h.prevEagerDesired[sentinel] = desiredIncarnation{}
 	rh.reset()
 
 	h.reconcileActivation(tctx)
@@ -562,10 +567,10 @@ func TestCharRingMatrix_CancelledAndBuildFailed_CtxGateWinsBeforeBuildErr(t *tes
 	if live(h, id) {
 		t.Fatal("member must not be live")
 	}
-	if !h.prevEagerDesired[sentinel] {
+	if !isEagerManaged(h, sentinel) {
 		t.Fatal("cancel must EARLY-RETURN the whole ring — prevEagerDesired rewritten means the pass ran to completion")
 	}
-	if h.prevEagerDesired[id] {
+	if isEagerManaged(h, id) {
 		t.Fatal("current must not carry the id (ctx gate wins, not the BuildFailed continue arm)")
 	}
 	if e := backoffEntry(t, h, id); e.failures != 0 {

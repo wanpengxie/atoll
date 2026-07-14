@@ -19,6 +19,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -58,6 +59,10 @@ type Config struct {
 	// misconfiguration, not "no actors" (an intentionally-empty daemon should
 	// still supply a Builder that finds nothing).
 	Builder Builder
+	// PlanSink receives authenticated link plan snapshots. When non-nil the ring
+	// pulls before each desired read; sink publication must atomically update its
+	// Desired and Builder faces, retaining LKG on errors.
+	PlanSink PlanSink
 	// Poll is the ring's desired-source poll period. <=0 → defaultComputePoll.
 	Poll time.Duration
 	// Resync is the ring's slow-cadence periodic full-set re-declaration period
@@ -99,6 +104,10 @@ type Config struct {
 	// byte redemption on this compute answers an honest "no storage host
 	// wired" error.
 	LocalFileOpener LocalFileOpener
+}
+
+type PlanSink interface {
+	ApplyPlan([]platform.PlanActor) error
 }
 
 // Run connects to the channel home and runs the daemon's own reconcile
@@ -157,7 +166,7 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 			logger.Warn("compute.close.zombies_leaked", "compute", computeID, "count", len(leaked), "actors", leaked)
 		}
 	}()
-	watcher := &cellDownWatcher{down: map[actor.ActorID]func(cause string){}}
+	watcher := &cellDownWatcher{down: map[actor.ActorID]cellDownEntry{}}
 	rt.WatchDown(watcher)
 	// The obs arm outlives every individual link the same way rt does — built
 	// once, Rebind'd per connection, pumped for the daemon's whole life.
@@ -232,8 +241,10 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 		obsFwd:      obsFwd,
 		cancelFwd:   cancelFwd,
 		builder:     cfg.Builder,
+		planSink:    cfg.PlanSink,
 		logger:      logger,
-		prevCurrent: map[actor.ActorID]actor.Kind{},
+		prevCurrent: map[actor.ActorID]desiredIncarnation{},
+		builtEpoch:  map[actor.ActorID]int64{},
 		arms:        map[actor.ActorID]*link.RebindableArms{},
 	}
 

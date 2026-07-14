@@ -285,7 +285,7 @@ func waitHealthz(t *testing.T, base string, p *proc, timeout time.Duration) {
 // every wire frame is {v(=2), frame_type, ref, payload}. There is NO binding_gen (the
 // client-visible binding axis is retired) and the /ws URL names NO channel (a
 // connection is an authenticated person + one pipe subscribing to ALL the person's合法
-//频道). ONE reader goroutine fans frames by type — feed frames (each carrying its own
+// 频道). ONE reader goroutine fans frames by type — feed frames (each carrying its own
 // channel_id) into tail, receipt/error into acks — and requests are matched by
 // TOP-LEVEL ref. The opening frame is a channel-blind attach handing over a multi-key
 // 游标表 (since); its receipt is an empty报到 ack. Every UPSTREAM business frame carries
@@ -614,11 +614,15 @@ func TestLoop(t *testing.T) {
 	startServerProc := func() *proc {
 		serverGen++
 		serverLog = filepath.Join(dirs["logs"], fmt.Sprintf("server-%d.log", serverGen))
-		return startProc(t, fmt.Sprintf("server#%d", serverGen), serverBin, []string{
+		args := []string{
 			"-addr", fmt.Sprintf("127.0.0.1:%d", port),
 			"-db", dbPath,
 			"-channel-db-dir", dirs["channels"],
-		}, dirs["serverwd"], serverLog, env)
+		}
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			args = append(args, "-init")
+		}
+		return startProc(t, fmt.Sprintf("server#%d", serverGen), serverBin, args, dirs["serverwd"], serverLog, env)
 	}
 
 	// ---- L1 起 -----------------------------------------------------------

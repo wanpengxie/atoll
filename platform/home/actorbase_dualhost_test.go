@@ -73,7 +73,7 @@ func spawnActorbaseOverWire(t *testing.T, ch *home.Home, id actor.ActorID, def a
 	host := newDualHostDaemon()
 	t.Cleanup(host.rt.StopAll)
 
-	arms, err := d.OpenStream(id, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), id, 0, func(env *message.Envelope) error {
 		return host.dispatch(id, env)
 	}, func(requestID message.ID) { host.rt.CancelRequest(id, requestID) })
 	if err != nil {

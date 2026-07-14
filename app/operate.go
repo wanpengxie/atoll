@@ -4,11 +4,13 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"strings"
 
 	platformhome "github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // operate.go fills the sysactor operate-face injection point (NP-1=c): the app
@@ -39,7 +41,7 @@ type introducePayload struct {
 	DesiredHost string `json:"desired_host"`
 	MakeDefault bool   `json:"make_default"`
 	Class       string `json:"class"`
-	// Config is the per-channel config overlay (channel_actors.config_json) — the
+	// Config is the per-channel composition config overlay — the
 	// tunable field of the composition-row noun. Introduce is the composition
 	// row's UPSERT verb (add-or-update, 防 ioctl 名词-CRUD): absent Config leaves
 	// the field untouched (pure add / ensure); present Config writes it. This is
@@ -99,6 +101,8 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 	if declID == "" {
 		return nil, &platformhome.OperateError{Code: "bad_payload", Detail: "decl_id or principal required"}
 	}
+	releaseDecl := x.a.declLocks.lock(declID)
+	defer releaseDecl()
 	var owner, visibility, defClass string
 	err := x.a.db.QueryRowContext(ctx,
 		`SELECT owner, visibility, default_class FROM actor_decls WHERE id = ? AND deleted_at IS NULL`,
@@ -136,7 +140,6 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 		placement = placementDaemon
 	}
 	desiredHost := strings.TrimSpace(p.DesiredHost)
-	instanceID := ""
 	// NB: the request engine's ClassKind + placement are validated ONLY on the create
 	// branch below (after the row query), NOT here. An existing row's class is frozen
 	// (SW-8) — a config/retry introduce against it must走 the frozen effective class,
@@ -153,106 +156,63 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 		return nil, &platformhome.OperateError{Code: "bad_payload", Detail: "config must be a JSON object"}
 	}
 
-	var exID, exClass, exPlacement, exDesiredHost string
-	qerr := x.a.db.QueryRowContext(ctx,
-		`SELECT instance_id, class, placement, desired_host FROM channel_actors WHERE channel_id = ? AND principal = ?`,
-		string(req.ChannelID), declID).Scan(&exID, &exClass, &exPlacement, &exDesiredHost)
-	created := false
-	configChanged := false
-	switch qerr {
-	case nil:
-		instanceID = exID
-		// SW-8: placement/class of a pre-existing row恒不变更 (rehoming/reclassing =
-		// remove + re-introduce). Only config — the tunable field — is mutable here
-		// (改配置门, S8): a present config UPDATEs channel_actors.config_json.
-		placement = exPlacement
-		engine = exClass
-		_ = exDesiredHost
-		if hasConfig {
-			if _, err := x.a.db.ExecContext(ctx,
-				`UPDATE channel_actors SET config_json = ? WHERE channel_id = ? AND principal = ?`,
-				string(p.Config), string(req.ChannelID), declID); err != nil {
-				return nil, err
-			}
-			configChanged = true
-		}
-	case sql.ErrNoRows:
-		// Create branch only: NOW validate the request engine's ClassKind (unknown
-		// class当场拒 — before we persist an unbuildable row) and the placement shape.
-		if _, ok := registry.ClassKind(engine); !ok {
-			return nil, &platformhome.OperateError{Code: "unknown_class", Detail: engine}
-		}
-		// placement闭集 {server, daemon}: an explicit garbage value is fail-closed
-		// (same posture as unknown_class) — a row with an unknown placement builds on
-		// neither host (the ring only embodies server, the plan only pulls daemon), so
-		// it would persist as a silently-dead row. Empty already defaulted to daemon
-		// above, so by here placement is non-empty.
+	existing, exists, err := home.CompositionByPrincipal(ctx, declID)
+	if err != nil {
+		return nil, err
+	}
+	if exists {
+		engine = existing.Class
+		placement = string(existing.Placement)
+		desiredHost = existing.DesiredHost
+	} else {
 		if placement != placementServer && placement != placementDaemon {
 			return nil, &platformhome.OperateError{Code: "invalid_placement", Detail: placement}
 		}
 		if placement == placementServer && desiredHost != "" {
 			return nil, &platformhome.OperateError{Code: "invalid_placement", Detail: "server placement cannot carry desired_host"}
 		}
-		created = true
-	default:
-		return nil, qerr
 	}
-	// The effective class is now final: a pre-existing row froze engine to exClass
-	// (SW-8). Re-derive kind from THAT class, not the request's engine — a半失败
-	// retry (intent landed, Admit didn't) whose request carries a different class
-	// must Admit under the row's ACTUAL class-kind, never the request's stale one
-	// (the kind precheck above only guards the create path's unknown-class reject).
 	kind, ok := registry.ClassKind(engine)
 	if !ok {
 		return nil, &platformhome.OperateError{Code: "unknown_class", Detail: engine}
 	}
-	// ensure Admit (idempotent) — pokes the ring; embodiment lands on the next sweep.
-	mintedID, err := home.Admit(ctx, kind, declID)
+	var cfg *string
+	if hasConfig {
+		value := string(p.Config)
+		cfg = &value
+	}
+	var releaseDaemon func()
+	if placement == placementDaemon && desiredHost != "" {
+		var lockErr error
+		releaseDaemon, lockErr = (appDaemonAuthority{app: x.a}).LockAndValidate(ctx, desiredHost, req.ChannelID)
+		if lockErr != nil {
+			return nil, &platformhome.OperateError{Code: "invalid_desired_host", Detail: lockErr.Error()}
+		}
+		defer releaseDaemon()
+	}
+	record, created, configChanged, err := home.IntroduceComposition(ctx, storespec.CompositionIntroduce{
+		DeclID: declID, Principal: declID, Class: engine, ConfigJSON: cfg,
+		Placement: storespec.Placement(placement), DesiredHost: desiredHost,
+		MakeDefault: p.MakeDefault, Kind: kind, At: x.a.now().UnixMilli(),
+	})
 	if err != nil {
 		return nil, err
 	}
-	if created {
-		var cfg any
-		if hasConfig {
-			cfg = string(p.Config)
-		}
-		if _, err := x.a.db.ExecContext(ctx,
-			`INSERT INTO channel_actors (channel_id, instance_id, principal, class, placement, desired_host, config_json) VALUES (?,?,?,?,?,?,?)`,
-			string(req.ChannelID), string(mintedID), declID, engine, placement, desiredHost, cfg); err != nil {
-			return nil, err
-		}
-		instanceID = string(mintedID)
-		_ = home.Restart(ctx, mintedID) // desired landed after Admit's poke; issue a post-write poke.
-	}
-	if string(mintedID) != instanceID {
-		if _, err := x.a.db.ExecContext(ctx, `UPDATE channel_actors SET instance_id=? WHERE channel_id=? AND instance_id=?`, string(mintedID), string(req.ChannelID), instanceID); err != nil {
-			return nil, err
-		}
-		_, _ = x.a.db.ExecContext(ctx, `UPDATE channels SET default_agent=? WHERE id=? AND default_agent=?`, string(mintedID), string(req.ChannelID), instanceID)
-		instanceID = string(mintedID)
-		_ = home.Restart(ctx, mintedID)
-	}
-	if p.MakeDefault {
-		_, _ = x.a.db.ExecContext(ctx,
-			`UPDATE channels SET default_agent = ? WHERE id = ?`, instanceID, string(req.ChannelID))
-	}
-	// Config takes effect through the same placement-neutral Restart face for
-	// both home cells and daemon-hosted ports. A new row has no predecessor.
 	if configChanged {
-		if serr := home.Restart(ctx, mintedID); serr != nil {
+		if _, serr := home.RestartInstanceDirect(ctx, record.InstanceID); serr != nil {
 			return nil, &platformhome.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
 		}
 	}
 	return map[string]any{
-		"instance_id": instanceID, "class": engine, "placement": placement,
+		"instance_id": string(record.InstanceID), "class": record.Class, "placement": string(record.Placement),
 		"created": created, "config_updated": configChanged,
 	}, nil
 }
 
-// Remove is the delete half of composition CRUD (G17): intent FIRST (desired
-// authority — the ring won't re-mint) then Home.Remove (despawn→dereg级联). A
-// crash between the two leaves an orphan户籍 row, reaped by主体域/反熵 backstop
-// (non-crash atomicity not苛求).
+// Remove handles the channel-scoped actor surface's two legitimate domains:
+// composition instances use the atomic composition+deregister verb; structural
+// members such as humans use membership removal and never fabricate an intent
+// row merely to be removable.
 func (x *operateExecutor) Remove(ctx context.Context, req platformhome.OperateRequest) (any, error) {
 	var p instancePayload
 	if err := json.Unmarshal(req.Payload, &p); err != nil {
@@ -271,15 +231,17 @@ func (x *operateExecutor) Remove(ctx context.Context, req platformhome.OperateRe
 	} else if ok && principal == "boost" {
 		return nil, &platformhome.OperateError{Code: "protected_actor", Detail: "boost cannot be removed"}
 	}
-	if _, err := x.a.db.ExecContext(ctx,
-		`DELETE FROM channel_actors WHERE channel_id = ? AND instance_id = ?`,
-		string(req.ChannelID), inst); err != nil {
+	id := actor.ActorID(inst)
+	composed, err := home.HasComposition(ctx, id)
+	if err != nil {
 		return nil, err
 	}
-	_, _ = x.a.db.ExecContext(ctx,
-		`UPDATE channels SET default_agent = NULL WHERE id = ? AND default_agent = ?`,
-		string(req.ChannelID), inst)
-	if err := home.Remove(ctx, actor.ActorID(inst)); err != nil {
+	if composed {
+		err = home.RemoveInstance(ctx, id)
+	} else {
+		err = home.Remove(ctx, id)
+	}
+	if err != nil {
 		return nil, err
 	}
 	return map[string]any{"removed": inst}, nil
@@ -300,17 +262,14 @@ func (x *operateExecutor) Restart(ctx context.Context, req platformhome.OperateR
 	if home == nil {
 		return nil, channelUnavailable()
 	}
-	var present int
-	err := x.a.db.QueryRowContext(ctx,
-		`SELECT 1 FROM channel_actors WHERE channel_id = ? AND instance_id = ?`,
-		string(req.ChannelID), inst).Scan(&present)
-	if err == sql.ErrNoRows {
-		return nil, &platformhome.OperateError{Code: "not_in_composition", Detail: inst}
-	}
+	has, err := home.HasComposition(ctx, actor.ActorID(inst))
 	if err != nil {
 		return nil, err
 	}
-	if serr := home.Restart(ctx, actor.ActorID(inst)); serr != nil {
+	if !has {
+		return nil, &platformhome.OperateError{Code: "not_in_composition", Detail: inst}
+	}
+	if _, serr := home.RestartInstanceDirect(ctx, actor.ActorID(inst)); serr != nil {
 		return nil, &platformhome.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
 	}
 	return map[string]any{"restarted": inst}, nil
@@ -324,21 +283,14 @@ func (x *operateExecutor) SetDefaultAgent(ctx context.Context, req platformhome.
 		return nil, badPayload(err)
 	}
 	inst := strings.TrimSpace(p.InstanceID)
-	if inst != "" {
-		has, err := x.a.channelHasInstance(ctx, string(req.ChannelID), inst)
-		if err != nil {
-			return nil, err
-		}
-		if !has {
+	home := x.a.getHome(req.ChannelID)
+	if home == nil {
+		return nil, channelUnavailable()
+	}
+	if err := home.SetDefaultAgent(ctx, actor.ActorID(inst)); err != nil {
+		if errors.Is(err, storespec.ErrCompositionNotFound) {
 			return nil, &platformhome.OperateError{Code: "not_in_composition", Detail: inst}
 		}
-	}
-	var val any
-	if inst != "" {
-		val = inst
-	}
-	if _, err := x.a.db.ExecContext(ctx,
-		`UPDATE channels SET default_agent = ? WHERE id = ?`, val, string(req.ChannelID)); err != nil {
 		return nil, err
 	}
 	return map[string]any{"default_agent": inst}, nil

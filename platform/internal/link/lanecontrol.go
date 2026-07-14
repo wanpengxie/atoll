@@ -204,7 +204,9 @@ func (a *Acceptor) handleLaneRedeem(daemonID string, conn net.Conn) {
 	// openLane writes the streamHeader{lane} on the target's link; the
 	// laneRedeemHeader below rides right after it, exactly as the requester's own
 	// redeem substream carried its header after its streamHeader.
-	targetConn, err := targetLC.openLane()
+	openCtx, cancel := context.WithTimeout(a.ctx, streamWriteBudget)
+	targetConn, err := targetLC.openLane(openCtx)
+	cancel()
 	if err != nil {
 		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "open target lane stream: " + err.Error()})
 		return

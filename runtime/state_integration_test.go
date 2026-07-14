@@ -22,10 +22,10 @@ import (
 // the owner, the real stateStore realizes bytes, and the real actor_registry
 // dereg path cascades the clear.
 //
-// State handles are actor-scoped: the reachable set is structurally ≡ {owner}, so
-// owners are NOT seeded as channel members here (membership is never consulted on
-// this locus — that absence IS the scope law). Members are seeded only where a
-// slice also touches the channel-scoped plane (slices 4 and 5).
+// State handles are actor-scoped: the reachable set is structurally ≡ {owner}.
+// Birth nevertheless requires that owner to be active, so every slice that creates
+// state seeds its owner first. After birth, actor-scoped read/write/delete still do
+// not consult membership per operation; that absence remains the scope law.
 
 // ---- slice 1: privacy by structure -----------------------------------------
 
@@ -39,10 +39,8 @@ func TestStateSlice1_PrivacyByStructure(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 
-	const (
-		A = actor.ActorID("A")
-		B = actor.ActorID("B")
-	)
+	A := seedMember(t, cs, actor.ActorID("A"))
+	B := seedMember(t, cs, actor.ActorID("B"))
 	hA := cs.Access.MintState(A)
 	hB := cs.Access.MintState(B)
 
@@ -80,7 +78,7 @@ func TestStateSlice2_FourStepOrderAndOpDistinctions(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 
-	const A = actor.ActorID("A")
+	A := seedMember(t, cs, actor.ActorID("A"))
 	hA := cs.Access.MintState(A)
 	const id = resource.ResourceID("k")
 
@@ -140,7 +138,7 @@ func TestStateSlice2b_EmptyBytes(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 
-	const A = actor.ActorID("A")
+	A := seedMember(t, cs, actor.ActorID("A"))
 	hA := cs.Access.MintState(A)
 
 	// create(nil) → existing row, NULL bytes → read: accepted, Found:false, Value:nil.
@@ -195,7 +193,7 @@ func TestStateSlice3_WhichDataIsIdentity(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
 
-	const A = actor.ActorID("A")
+	A := seedMember(t, cs, actor.ActorID("A"))
 	const id = resource.ResourceID("checkpoint")
 	v := []byte("continuity across incarnations")
 

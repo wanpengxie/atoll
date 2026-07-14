@@ -109,6 +109,13 @@ func TestInvokeActorScopedTree(t *testing.T) {
 		mustVerdict(t, out, err, access.AlreadyExists)
 	})
 
+	t.Run("create under inactive owner → owner_inactive", func(t *testing.T) {
+		st := &fakeStateStore{createErr: resourcespec.ErrOwnerInactive}
+		d := newStateDoor(st, &fakeRegistry{}, &fakeMembership{})
+		out, err := d.invokeActorScoped(t.Context(), owner, access.OpCreate, id, nil)
+		mustVerdict(t, out, err, access.OwnerInactive)
+	})
+
 	t.Run("read existing row with bytes → Found:true", func(t *testing.T) {
 		st := &fakeStateStore{readPresent: true, readValue: []byte("v")}
 		d := newStateDoor(st, &fakeRegistry{}, &fakeMembership{})

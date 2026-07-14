@@ -174,14 +174,14 @@ func TestAttach_OrphanDeclaration_NotInAllowSet(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	// The admitted member's stream opens (it is in the allow-set).
-	if _, err := d.OpenStream(member, func(*message.Envelope) error { return nil }, func(message.ID) {}); err != nil {
+	if _, err := d.OpenStream(context.Background(), member, 0, func(*message.Envelope) error { return nil }, func(message.ID) {}); err != nil {
 		t.Fatalf("OpenStream(member) must succeed (admitted): %v", err)
 	}
 	// The orphan's stream is refused: resolve rejects the undeclared id, the home
 	// closes the stream, and OpenStream's handshake-ack read fails. Before the fix
 	// the orphan sat in the allow-set and this would succeed → a welded pen for a
 	// non-member (truth forgery surface).
-	if _, err := d.OpenStream(orphan, func(*message.Envelope) error { return nil }, func(message.ID) {}); err == nil {
+	if _, err := d.OpenStream(context.Background(), orphan, 0, func(*message.Envelope) error { return nil }, func(message.ID) {}); err == nil {
 		t.Fatal("OpenStream(orphan) must fail — an un-admitted declaration is NOT in the allow-set (问① gate broken)")
 	}
 
@@ -230,10 +230,10 @@ func TestReattach_HostReconcile_DespawnsAndDeregistersFallenOut(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	noopDispatch := func(*message.Envelope) error { return nil }
-	if _, err := d.OpenStream(toolA, noopDispatch, nil); err != nil {
+	if _, err := d.OpenStream(context.Background(), toolA, 0, noopDispatch, nil); err != nil {
 		t.Fatalf("OpenStream(a): %v", err)
 	}
-	if _, err := d.OpenStream(toolB, noopDispatch, nil); err != nil {
+	if _, err := d.OpenStream(context.Background(), toolB, 0, noopDispatch, nil); err != nil {
 		t.Fatalf("OpenStream(b): %v", err)
 	}
 	d.Start()
@@ -371,7 +371,7 @@ func TestReattach_HostReconcile_PopulationObsStaysSingle(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	noopDispatch := func(*message.Envelope) error { return nil }
-	if _, err := d.OpenStream(toolA, noopDispatch, nil); err != nil {
+	if _, err := d.OpenStream(context.Background(), toolA, 0, noopDispatch, nil); err != nil {
 		t.Fatalf("OpenStream(a): %v", err)
 	}
 	d.Start()
@@ -430,7 +430,7 @@ func TestReattach_HostReconcile_PopulationObsStaysSingle(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Reattach (re-add toolA): %v", err)
 	}
-	if _, err := d.OpenStream(toolA, noopDispatch, nil); err != nil {
+	if _, err := d.OpenStream(context.Background(), toolA, 0, noopDispatch, nil); err != nil {
 		t.Fatalf("OpenStream(a) after re-attach: %v", err)
 	}
 
@@ -516,7 +516,7 @@ func TestAttach_HumanDeclaration_Rejected(t *testing.T) {
 		t.Fatalf("human row = kind %q host %q — attach stamped a daemon host onto a human (本体非法声明放行)", rec.Kind, rec.Host)
 	}
 	// And the daemon cannot open a welded-pen stream for the human id.
-	if _, err := d.OpenStream(humanID, func(*message.Envelope) error { return nil }, func(message.ID) {}); err == nil {
+	if _, err := d.OpenStream(context.Background(), humanID, 0, func(*message.Envelope) error { return nil }, func(message.ID) {}); err == nil {
 		t.Fatal("OpenStream(human) must fail — a human declaration is never in a daemon's allow-set")
 	}
 }

@@ -67,11 +67,15 @@ func TestFaultMembershipConservation(t *testing.T) {
 	startServerProc := func() *proc {
 		serverGen++
 		serverLog = filepath.Join(dirs["logs"], fmt.Sprintf("fm-server-%d.log", serverGen))
-		return startProc(t, fmt.Sprintf("fm-server#%d", serverGen), serverBin, []string{
+		args := []string{
 			"-addr", fmt.Sprintf("127.0.0.1:%d", port),
 			"-db", dbPath,
 			"-channel-db-dir", dirs["channels"],
-		}, dirs["serverwd"], serverLog, env)
+		}
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			args = append(args, "-init")
+		}
+		return startProc(t, fmt.Sprintf("fm-server#%d", serverGen), serverBin, args, dirs["serverwd"], serverLog, env)
 	}
 
 	// ---- boot: same assembly template TestLoop uses ------------------------

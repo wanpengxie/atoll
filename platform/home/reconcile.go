@@ -32,6 +32,11 @@ var (
 	noFactoryWarned   = make(map[actor.ActorID]struct{})
 )
 
+type desiredIncarnation struct {
+	Kind  actor.Kind
+	Epoch int64
+}
+
 // clearNoFactoryWarned drops id's no_factory edge marker, e.g. once a factory
 // becomes available or the id is no longer this ring's to manage.
 func clearNoFactoryWarned(id actor.ActorID) {
@@ -122,7 +127,7 @@ func (h *Home) logReviveAttached(id actor.ActorID, host string) {
 // by the same ticker as the closure backstop.
 //
 // desired = 两源之并 (union of two intent sources), read to completion BEFORE any
-// mint/despawn: 组合域 — the app-injected DesiredSource (channel_actors intent
+// mint/despawn: 组合域 — the channel-local composition DesiredSource (intent
 // rows); user域 — platform-internal, derived from THIS channel's own registry (the
 // per-channel human members, Kind==human && Host==""). The user域 authority lives
 // only inside the channel truth born within Open, so the app cannot enumerate it
@@ -326,13 +331,13 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 	for _, rec := range actives {
 		member[rec.ID] = rec
 	}
-	desiredIDs := make(map[actor.ActorID]bool, len(composed)+len(actives))
+	desiredIDs := make(map[actor.ActorID]desiredIncarnation, len(composed)+len(actives))
 	for _, m := range composed {
-		desiredIDs[m.ID] = true
+		desiredIDs[m.ID] = desiredIncarnation{Kind: m.Kind, Epoch: m.Epoch}
 	}
 	for _, rec := range actives {
 		if rec.Kind == actor.KindHuman && rec.Host == "" {
-			desiredIDs[rec.ID] = true
+			desiredIDs[rec.ID] = desiredIncarnation{Kind: rec.Kind}
 		}
 	}
 
@@ -341,8 +346,8 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 	for _, id := range rt.LiveIDs() {
 		actual[id] = true
 	}
-	current := make(map[actor.ActorID]bool)
-	for id := range desiredIDs {
+	current := make(map[actor.ActorID]desiredIncarnation)
+	for id, want := range desiredIDs {
 		if ctx.Err() != nil {
 			return
 		}
@@ -350,10 +355,40 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		if !ok || !rec.IsActive() {
 			continue // 交集红线: desired-but-not-a-durable-member — skip BEFORE current
 		}
-		current[id] = true
+		current[id] = want
+		if rec.Host != "" {
+			// A daemon-hosted incarnation is not this ring's build account. Drop
+			// any stale local epoch so a later return home cannot inherit it.
+			delete(h.builtEpoch, id)
+			if actual[id] {
+				h.clearReviveBackoff(id)
+				continue
+			}
+		}
 		if actual[id] {
-			h.clearReviveBackoff(id)
-			continue
+			got, recorded := h.builtEpoch[id]
+			// Epoch zero is the migration generation. A live local body at the
+			// moment this in-memory account first appears necessarily completed a
+			// runtime build, so adopt it once instead of churning every pre-epoch
+			// channel/test fixture. Non-zero generations never infer: they require
+			// an explicit post-build registration.
+			if !recorded && want.Epoch == 0 {
+				h.builtEpoch[id] = 0
+				recorded = true
+				got = 0
+			}
+			if recorded && got == want.Epoch {
+				h.clearReviveBackoff(id)
+				continue
+			}
+			if rec.Host == "" {
+				// Either epoch changed or another activation arm produced an
+				// unaccounted body. Only a build completed by this ring may register
+				// builtEpoch, so replace first and retry from a clean absence.
+				rt.DespawnID(id)
+				delete(actual, id)
+				delete(h.builtEpoch, id)
+			}
 		}
 		// 补: resolve activateOne's 11-word verdict (§1.6 环翻译器) — the core
 		// covers everything from here through the post-build straddle recheck
@@ -363,7 +398,10 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		// Attach's own replace semantics rather than a post-build recheck —
 		// #24, see verifyPostBuild's doc).
 		switch v := h.activateOne(ctx, rec); v.kind {
-		case actEmbodied, actAlreadyLive, actAttached:
+		case actEmbodied:
+			h.builtEpoch[id] = want.Epoch
+			clearNoFactoryWarned(id)
+		case actAlreadyLive, actAttached:
 			// current stays true (already set above); no log; no account write
 			// (环翻译器 never clears the backoff account — §1.4 现状, CAS-loser
 			// included: reserved to the fast-path arm above and to 削 below).
@@ -405,13 +443,14 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if current[id] {
+		if _, ok := current[id]; ok {
 			continue
 		}
 		if rec, ok := member[id]; ok && rec.Host != "" {
 			continue // attached elsewhere — not gone, not this ring's to evict (反误杀)
 		}
 		rt.DespawnID(id)
+		delete(h.builtEpoch, id)
 		// The削 arm's own account cleanup, mirroring Remove's teardown (remove.go):
 		// an id this ring stops managing must not leave a permanently stale revive-
 		// backoff/log-throttle entry behind (e.g. intent withdrawn for a build-

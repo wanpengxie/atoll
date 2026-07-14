@@ -222,6 +222,59 @@ func TestReconcileActivation_RevivesAbsentDesiredMemberWithState(t *testing.T) {
 	}
 }
 
+func TestReconcileActivation_EpochDeltaReplacesOnceAndRegistersOnlySuccess(t *testing.T) {
+	ctx := context.Background()
+	desired := &testDesired{}
+	builder := newTestBuilder()
+	id := actor.ActorID("agent:epoch-home")
+	fixtureID := id
+	var builds atomic.Int64
+	good := hostcommon.CapsFactory(func(c actorcaps.Caps) actorrt.Actor {
+		builds.Add(1)
+		return recordActor{caps: c}
+	})
+	builder.byID[id] = good
+	h := openActivationHome(t, desired, builder)
+	id = admit(t, h, id, actor.KindAgent)
+
+	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn, Epoch: 1})
+	h.reconcileActivation(ctx)
+	if builds.Load() != 1 || h.builtEpoch[id] != 1 {
+		t.Fatalf("initial build account: builds=%d epoch=%d", builds.Load(), h.builtEpoch[id])
+	}
+	for range 3 {
+		h.reconcileActivation(ctx)
+	}
+	if builds.Load() != 1 {
+		t.Fatalf("stable epoch rebuilt %d times", builds.Load())
+	}
+
+	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn, Epoch: 2})
+	h.reconcileActivation(ctx)
+	if builds.Load() != 2 || h.builtEpoch[id] != 2 {
+		t.Fatalf("epoch replacement account: builds=%d epoch=%d", builds.Load(), h.builtEpoch[id])
+	}
+
+	// A failed next generation must leave the account missing, so recovery can
+	// retry rather than treating a body that never existed as built.
+	builder.mu.Lock()
+	builder.byID[fixtureID] = panicFactory()
+	builder.mu.Unlock()
+	desired.set(actorrt.DesiredMember{ID: id, Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn, Epoch: 3})
+	h.reconcileActivation(ctx)
+	if _, recorded := h.builtEpoch[id]; recorded {
+		t.Fatalf("failed epoch 3 build was recorded: %v", h.builtEpoch)
+	}
+	builder.mu.Lock()
+	builder.byID[fixtureID] = good
+	builder.mu.Unlock()
+	h.clearReviveBackoff(id)
+	h.reconcileActivation(ctx)
+	if builds.Load() != 3 || h.builtEpoch[id] != 3 {
+		t.Fatalf("recovered epoch build account: builds=%d epoch=%d", builds.Load(), h.builtEpoch[id])
+	}
+}
+
 // Test 2 — a member this ring previously minted, no longer desired, is deactivated
 // via DespawnID (the prevEagerDesired − currentDesired 削 arm).
 func TestReconcileActivation_DespawnsNoLongerDesired(t *testing.T) {
@@ -364,7 +417,7 @@ func TestReconcileActivation_UnionAtomicity_FaultAbortsTick(t *testing.T) {
 	if !live(h, id) {
 		t.Fatal("precondition: member not embodied on the good tick")
 	}
-	if !h.prevEagerDesired[id] {
+	if !isEagerManaged(h, id) {
 		t.Fatal("precondition: member not in prevEagerDesired after the good tick")
 	}
 	buildsAfterGoodTick := builds.Load()
@@ -374,7 +427,7 @@ func TestReconcileActivation_UnionAtomicity_FaultAbortsTick(t *testing.T) {
 	if !live(h, id) {
 		t.Fatal("member evicted on a faulted tick — 削臂 ran against a truncated desired (atomicity broken)")
 	}
-	if !h.prevEagerDesired[id] {
+	if !isEagerManaged(h, id) {
 		t.Fatal("prevEagerDesired mutated on a faulted tick — must stay untouched until a complete read")
 	}
 	// Not half-铸 either: the faulted tick must never even ATTEMPT a fresh
@@ -414,7 +467,7 @@ func TestReconcileActivation_IntersectionRedline_NoMembershipNoEmbody(t *testing
 	if live(h, id) {
 		t.Fatal("orphan intent (no户籍) was embodied — 交集红线 broken")
 	}
-	if h.prevEagerDesired[id] {
+	if isEagerManaged(h, id) {
 		t.Fatal("orphan intent entered the 削臂 management set — the membership skip must precede current[id]=true")
 	}
 
@@ -1229,7 +1282,7 @@ func TestReconcileActivation_BuildStraddle_RemoveSelfUndo(t *testing.T) {
 	if live(h, id) {
 		t.Fatal("a cell survived the reconcile build straddle — post-build recheck did not self-undo")
 	}
-	if h.prevEagerDesired[id] {
+	if isEagerManaged(h, id) {
 		t.Fatal("straddled id was carried into the managed set (prevEagerDesired) despite being Removed")
 	}
 }
@@ -1281,7 +1334,7 @@ func TestReconcileActivation_BuildFailureBackoffLadder(t *testing.T) {
 	if live(h, id) {
 		t.Fatal("a crashlooping member must not be live")
 	}
-	if h.prevEagerDesired[id] {
+	if isEagerManaged(h, id) {
 		t.Fatal("a build that never embodied must not enter the managed set")
 	}
 	e := backoffEntry(t, h, id)
@@ -1321,7 +1374,7 @@ func TestReconcileActivation_BuildFailureBackoffLadder(t *testing.T) {
 		if live(h, id) {
 			t.Fatalf("failure %d: crashlooping member is live", f)
 		}
-		if h.prevEagerDesired[id] {
+		if isEagerManaged(h, id) {
 			t.Fatalf("failure %d: crashlooping member entered the managed set (prevEagerDesired)", f)
 		}
 		e := backoffEntry(t, h, id)

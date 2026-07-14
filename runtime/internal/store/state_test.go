@@ -53,6 +53,7 @@ func openStateFixture(t *testing.T) stateFixture {
 func TestState_CRUDLifecycle(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
+	mustInsertActor(t, f.reg, "actor:a")
 
 	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
 		t.Fatalf("Create: %v", err)
@@ -89,6 +90,7 @@ func TestState_CRUDLifecycle(t *testing.T) {
 func TestState_CreateCollisionSentinel(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
+	mustInsertActor(t, f.reg, "actor:a")
 
 	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("v1")); err != nil {
 		t.Fatalf("first Create: %v", err)
@@ -136,6 +138,7 @@ func TestState_PresentFalseOnAbsent(t *testing.T) {
 func TestState_NullBytesResolvedButEmpty(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
+	mustInsertActor(t, f.reg, "actor:a")
 
 	// create(nil initial) → an existing row whose bytes are NULL = resolved-but-
 	// empty: exists=true, value=nil (door maps to Found=false).
@@ -172,6 +175,8 @@ func TestState_NullBytesResolvedButEmpty(t *testing.T) {
 func TestState_OwnerScopedIsolation(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
+	mustInsertActor(t, f.reg, "actor:a")
+	mustInsertActor(t, f.reg, "actor:b")
 
 	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("A")); err != nil {
 		t.Fatalf("Create a: %v", err)
@@ -185,6 +190,52 @@ func TestState_OwnerScopedIsolation(t *testing.T) {
 	}
 	if val, _, _ := f.state.Read(ctx, "actor:b", "cursor"); string(val) != "B" {
 		t.Errorf("owner b value=%q want B", val)
+	}
+}
+
+func TestState_CreateRejectsInactiveOwnerWithoutResidue(t *testing.T) {
+	ctx := context.Background()
+	f := openStateFixture(t)
+
+	// Missing and deregistered are the same inactive-owner fact. Neither order
+	// may leave a state row behind.
+	if err := f.state.Create(ctx, "actor:missing", "cursor", []byte("x")); !errors.Is(err, resourcespec.ErrOwnerInactive) {
+		t.Fatalf("missing owner Create err=%v want ErrOwnerInactive", err)
+	}
+	if _, exists, err := f.state.Read(ctx, "actor:missing", "cursor"); err != nil || exists {
+		t.Fatalf("missing owner residue: exists=%v err=%v", exists, err)
+	}
+
+	mustInsertActor(t, f.reg, "actor:gone")
+	if err := f.reg.Deregister(ctx, "actor:gone", 2); err != nil {
+		t.Fatalf("Deregister: %v", err)
+	}
+	if err := f.state.Create(ctx, "actor:gone", "cursor", []byte("x")); !errors.Is(err, resourcespec.ErrOwnerInactive) {
+		t.Fatalf("deregistered owner Create err=%v want ErrOwnerInactive", err)
+	}
+	if _, exists, err := f.state.Read(ctx, "actor:gone", "cursor"); err != nil || exists {
+		t.Fatalf("deregistered owner residue: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestState_CreateInactiveTakesPriorityOverCollision(t *testing.T) {
+	ctx := context.Background()
+	f := openStateFixture(t)
+	mustInsertActor(t, f.reg, "actor:a")
+	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("old")); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	// Simulate the classification shape directly: an inactive registry row and
+	// an old colliding state row. The public deregister path normally cascades
+	// the row, but inactive must still win if recovery encounters this state.
+	if _, err := f.state.db.ExecContext(ctx, `UPDATE actor_registry SET deregistered_at=2 WHERE actor_id='actor:a'`); err != nil {
+		t.Fatalf("mark inactive: %v", err)
+	}
+	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("new")); !errors.Is(err, resourcespec.ErrOwnerInactive) {
+		t.Fatalf("Create err=%v want inactive to precede collision", err)
+	}
+	if got, _, _ := f.state.Read(ctx, "actor:a", "cursor"); string(got) != "old" {
+		t.Fatalf("colliding bytes changed to %q", got)
 	}
 }
 

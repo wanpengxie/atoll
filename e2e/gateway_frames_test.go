@@ -80,11 +80,15 @@ func TestGatewayFrames(t *testing.T) {
 		base = fmt.Sprintf("http://127.0.0.1:%d", port)
 		gen++
 		serverLog = filepath.Join(dirs["logs"], fmt.Sprintf("server-%d.log", gen))
-		server = startProc(t, fmt.Sprintf("gwframes-server#%d", gen), serverBin, []string{
+		args := []string{
 			"-addr", fmt.Sprintf("127.0.0.1:%d", port),
 			"-db", dbPath,
 			"-channel-db-dir", dirs["channels"],
-		}, dirs["serverwd"], serverLog, env)
+		}
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			args = append(args, "-init")
+		}
+		server = startProc(t, fmt.Sprintf("gwframes-server#%d", gen), serverBin, args, dirs["serverwd"], serverLog, env)
 		if waitHealthzErr(base, server, 30*time.Second) == nil {
 			break
 		}

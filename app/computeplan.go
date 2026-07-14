@@ -1,12 +1,15 @@
 package app
 
 import (
+	"context"
 	"encoding/json"
-	"net/http"
+	"strings"
 
-	"github.com/gin-gonic/gin"
-
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // daemonAssignment is one actor instance the server assigns a daemon to host for
@@ -19,10 +22,30 @@ type daemonAssignment struct {
 	InstanceID string          `json:"instance_id"`
 	Class      string          `json:"class"`
 	Config     json.RawMessage `json:"config,omitempty"`
+	Epoch      int64           `json:"epoch"`
+}
+
+type appPlanProvider struct{ app *App }
+
+func (p appPlanProvider) Plan(_ context.Context, chID channel.ID, daemonID string) ([]platform.PlanActor, error) {
+	assignments, err := p.app.daemonComposition(chID, daemonID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]platform.PlanActor, 0, len(assignments))
+	for _, a := range assignments {
+		kind, ok := registry.ClassKind(a.Class)
+		if !ok {
+			continue
+		}
+		out = append(out, platform.PlanActor{InstanceID: actor.ActorID(a.InstanceID), Class: a.Class, Config: a.Config,
+			Kind: kind, Binding: actor.BindingRuntimeInboundViaRelay, Epoch: a.Epoch})
+	}
+	return out, nil
 }
 
 // daemonComposition reads the channel's DESIRED daemon-placed composition
-// assigned to THIS daemon (channel_actors placement='daemon' AND
+// assigned to THIS daemon (channel-local composition placement='daemon' AND
 // desired_host=daemonID) and resolves each instance's config — the SAME read +
 // global/per-channel overlay serverCompositionRows does for server-placed rows, but
 // it RETURNS the data instead of spawning (the daemon builds + runs them with
@@ -33,54 +56,34 @@ type daemonAssignment struct {
 // ONLY their own rows; an unassigned pool row (desired_host=”) is delivered to
 // no daemon (a legal transient — no daemon claims it yet).
 func (a *App) daemonComposition(chID channel.ID, daemonID string) ([]daemonAssignment, error) {
-	rows, err := a.daemonCompositionRows(chID, daemonID)
+	h := a.getHome(chID)
+	if h == nil {
+		return nil, channelUnavailable()
+	}
+	rows, err := h.Composition(context.Background())
 	if err != nil {
 		return nil, err
 	}
 	out := make([]daemonAssignment, 0, len(rows))
 	for _, r := range rows {
+		if r.Placement != storespec.PlacementDaemon || r.DesiredHost != daemonID {
+			continue
+		}
+		global := ""
+		if !strings.HasPrefix(r.DeclID, "sys:") {
+			if err := a.db.QueryRow(`SELECT COALESCE(config_json,'') FROM actor_decls WHERE id=? AND deleted_at IS NULL`, r.DeclID).Scan(&global); err != nil {
+				continue
+			}
+		}
+		if _, ok := registry.ClassKind(r.Class); !ok {
+			continue
+		}
 		out = append(out, daemonAssignment{
-			InstanceID: r.instanceID,
-			Class:      r.class,
-			Config:     mergeConfig(r.globalCfg, r.channelCfg),
+			InstanceID: string(r.InstanceID),
+			Class:      r.Class,
+			Config:     mergeConfig(global, r.ConfigJSON),
+			Epoch:      r.Epoch,
 		})
 	}
 	return out, nil
-}
-
-// handleComputePlan is the daemon's pull endpoint: authenticated by the same
-// ?key=+?channel= as /compute, it returns the channel's placement='daemon'
-// assignment so the daemon builds EXACTLY that set. The link/attach protocol
-// is untouched — the daemon declares what it builds, as today. This pull avoids a server→
-// daemon wire change AND the membership-needs-Kind/Binding problem of a push
-// model (cmd/server does not import actors/all, so it could not synthesise tool
-// Kind/Binding; the daemon, which builds the decls, has them for free).
-func (a *App) handleComputePlan(c *gin.Context) {
-	apiKey := c.Query("key")
-	chIDStr := c.Query("channel")
-	if apiKey == "" {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "api key required"})
-		return
-	}
-	if chIDStr == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "channel query param required"})
-		return
-	}
-	chID := channel.ID(chIDStr)
-	// Same single auth path as /compute: verify key + daemon-channel binding. A
-	// flat 403 (no oracle) on any failure. The resolved daemonID filters the
-	// plan to this daemon's own assignment (G4).
-	daemonID, err := a.authAndResolve(apiKey, chID)
-	if err != nil {
-		a.logger.Warn("compute plan: auth failed", "channel", string(chID), "err", err.Error())
-		c.JSON(http.StatusForbidden, gin.H{"error": "forbidden"})
-		return
-	}
-	plan, err := a.daemonComposition(chID, daemonID)
-	if err != nil {
-		a.logger.Error("compute plan: read composition", "channel", string(chID), "err", err.Error())
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"assignments": plan})
 }

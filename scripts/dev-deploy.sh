@@ -125,10 +125,15 @@ fi
 # -----------------------------------------------------------------------------
 blue "[deploy] step 5: start server :8832"
 mkdir -p "$DATA_DIR"
+SERVER_INIT_ARGS=()
+if [ ! -e "$DB_PATH" ]; then
+  SERVER_INIT_ARGS+=(--init)
+fi
 # Start services in a new session so non-interactive runners that clean up
 # their own process group do not tear down the deployed stack on exit.
 setsid ./bin/atoll-server \
   -db "$DB_PATH" \
+  "${SERVER_INIT_ARGS[@]}" \
   -addr :8832 \
   -ui-dist ./ui/dist \
   -installer-dir ./bin/installers \

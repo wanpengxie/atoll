@@ -70,6 +70,10 @@ func staticResolve(id actor.ActorID) ResolveFunc {
 	return func(string) (actor.ActorID, error) { return id, nil }
 }
 
+func handshakeResolve(resolve ResolveFunc) HandshakeResolveFunc {
+	return func(hp ipc.HandshakePayload) (actor.ActorID, error) { return resolve(hp.LeaseID) }
+}
+
 func nopEmit(context.Context, Incarnation, *message.Envelope) (ipc.EmitResult, error) {
 	return ipc.EmitResult{}, nil
 }

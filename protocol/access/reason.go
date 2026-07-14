@@ -27,6 +27,10 @@ const (
 	// both verdicts: absent-when-expected-present (not_found) and present-when-expected-absent.
 	AlreadyExists FailureReason = "already_exists"
 
+	// OwnerInactive — EXECUTE precondition for actor-scoped create: the welded
+	// owner is missing or deregistered, so no private state may be born under it.
+	OwnerInactive FailureReason = "owner_inactive"
+
 	// AccessDenied — AUTHORIZE stage: the caller is not authorized — for object ops
 	// (read/write/set/delete) R.allows(caller, resource, op) is false; for create the caller is
 	// not a member of the container channel (two loci). Day-1 the object check is the
@@ -50,7 +54,7 @@ const (
 // the predicate, not a mutable enumeration (an exported slice would let an importer
 // rewrite the protocol closed set).
 var allFailureReasons = []FailureReason{
-	ResourceNotFound, AlreadyExists, AccessDenied, DriverError, OutcomeUnknown,
+	ResourceNotFound, AlreadyExists, OwnerInactive, AccessDenied, DriverError, OutcomeUnknown,
 }
 
 // String returns the wire form of r.

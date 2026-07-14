@@ -101,9 +101,11 @@ func (a *App) resolveRouting(ctx context.Context, chID channel.ID, in submitInpu
 	}
 	view := home.View()
 
-	var da string
-	_ = a.db.QueryRowContext(ctx,
-		`SELECT COALESCE(default_agent, '') FROM channels WHERE id = ?`, string(chID)).Scan(&da)
+	defaultID, hasDefault, err := home.DefaultAgent(ctx)
+	if err != nil {
+		return nil, kind, err
+	}
+	da := string(defaultID)
 
 	daLive := false
 	if da != "" {
@@ -113,21 +115,19 @@ func (a *App) resolveRouting(ctx context.Context, chID channel.ID, in submitInpu
 		return []actor.ActorID{actor.ActorID(da)}, message.KindRequest, nil
 	}
 
-	var boostID string
-	_ = a.db.QueryRowContext(ctx,
-		`SELECT instance_id FROM channel_actors WHERE channel_id=? AND principal=?`, string(chID), defaultAgentPrincipal).Scan(&boostID)
-	_, boostLive := view.Stat(actor.ActorID(boostID))
-	hasBoost, berr := a.channelHasInstance(ctx, string(chID), boostID)
-	if berr != nil {
-		return nil, kind, berr
+	boost, hasBoost, err := home.CompositionByPrincipal(ctx, defaultAgentPrincipal)
+	if err != nil {
+		return nil, kind, err
 	}
+	boostID := string(boost.InstanceID)
+	_, boostLive := view.Stat(actor.ActorID(boostID))
 	switch {
 	case hasBoost && boostLive:
 		return []actor.ActorID{actor.ActorID(boostID)}, message.KindRequest, nil
 	case hasBoost:
 		// boost floor introduced but its cell is not present → channel cannot serve.
 		return nil, kind, &routingError{detail: "the channel's default/fallback agent is down"}
-	case da == "":
+	case !hasDefault:
 		// no floor + no default → pure group-chat: broadcast to human MEMBERS
 		// (membership axis, not presence — an event lands in each human's log inbox).
 		actors, lerr := view.ListActors(ctx)

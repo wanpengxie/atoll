@@ -26,6 +26,11 @@ func (h *Home) Restart(ctx context.Context, id actor.ActorID) error {
 	if id == actor.SystemActorID {
 		return ErrRestartAnchor
 	}
+	unlock := h.actorGates.lock(id)
+	defer unlock()
+	if h.closed.Load() {
+		return ErrClosed
+	}
 	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
 	if err != nil {
 		return fmt.Errorf("platform: Restart membership lookup: %w", err)
@@ -50,7 +55,7 @@ func (h *Home) Restart(ctx context.Context, id actor.ActorID) error {
 // completely (owner 2026-07-03 拍定 A′): no third straddle case exists.
 //
 // desired 权威口径 (红线 5): Remove never touches desired/intent. If
-// channel_actors still lists id, the next reconcile tick re-minting it is the
+// channel composition still lists id, the next reconcile tick re-minting it is the
 // CORRECT reconcile behaviour (same as killing a pod without deleting its
 // Deployment) — the caller's obligation is to remove intent FIRST, then call
 // Remove (asserted at the app call site, period 9).
@@ -60,6 +65,11 @@ func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
 	}
 	if id == actor.SystemActorID {
 		return ErrRemoveAnchor
+	}
+	unlock := h.actorGates.lock(id)
+	defer unlock()
+	if h.closed.Load() {
+		return ErrClosed
 	}
 	// Capture the principal for the membership-change poke BEFORE the dereg cascade
 	// (连接模型勘误期 §3.2 表②: ② ApplyMemberTransitions deregisters the registry row,

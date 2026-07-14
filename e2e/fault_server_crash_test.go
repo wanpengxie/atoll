@@ -21,16 +21,16 @@ import (
 // bug) — so the test detects which branch actually happened and asserts the
 // matching recovery invariant instead of assuming one:
 //
-//  ① not lost      — if the request DID commit, its request envelope replays
-//     from seq 0 after the restart (same proof TestLoop uses for its
-//     pre-crash chat).
-//  ② not duplicated — the request reaches EXACTLY ONE terminal (completed or
-//     an honest failed) — never a second terminal for the same parent_id —
-//     and if completed, the echo's resource side-effect was written exactly
-//     once (loop.verify reads back byte-exact content, not corrupted by a
-//     double execution).
-//  ③ self-heals    — a brand-new chat submitted after the restart still walks
-//     the whole path end to end (routing + daemon redial + echo + verify).
+//	① not lost      — if the request DID commit, its request envelope replays
+//	   from seq 0 after the restart (same proof TestLoop uses for its
+//	   pre-crash chat).
+//	② not duplicated — the request reaches EXACTLY ONE terminal (completed or
+//	   an honest failed) — never a second terminal for the same parent_id —
+//	   and if completed, the echo's resource side-effect was written exactly
+//	   once (loop.verify reads back byte-exact content, not corrupted by a
+//	   double execution).
+//	③ self-heals    — a brand-new chat submitted after the restart still walks
+//	   the whole path end to end (routing + daemon redial + echo + verify).
 func TestFaultServerCrashBeforeTerminal(t *testing.T) {
 	binDir := requireE2EBin(t)
 	serverBin := filepath.Join(binDir, "atoll-server")
@@ -62,11 +62,15 @@ func TestFaultServerCrashBeforeTerminal(t *testing.T) {
 	startServerProc := func() *proc {
 		serverGen++
 		serverLog = filepath.Join(dirs["logs"], fmt.Sprintf("fcserver-%d.log", serverGen))
-		return startProc(t, fmt.Sprintf("fcserver#%d", serverGen), serverBin, []string{
+		args := []string{
 			"-addr", fmt.Sprintf("127.0.0.1:%d", port),
 			"-db", dbPath,
 			"-channel-db-dir", dirs["channels"],
-		}, dirs["serverwd"], serverLog, env)
+		}
+		if _, err := os.Stat(dbPath); os.IsNotExist(err) {
+			args = append(args, "-init")
+		}
+		return startProc(t, fmt.Sprintf("fcserver#%d", serverGen), serverBin, args, dirs["serverwd"], serverLog, env)
 	}
 
 	// ---- L1 起: initial start, bind-retry on a fresh port (same pattern as

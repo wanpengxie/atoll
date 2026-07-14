@@ -21,21 +21,40 @@ import (
 // in-flight requests.
 type cellDownWatcher struct {
 	mu   sync.Mutex
-	down map[actor.ActorID]func(cause string)
+	down map[actor.ActorID]cellDownEntry
+}
+
+type cellDownEntry struct {
+	inc     actorrt.Incarnation
+	handler func(cause string)
 }
 
 // OnDown implements actorrt.DownWatcher.
-func (w *cellDownWatcher) OnDown(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, cause error) {
+func (w *cellDownWatcher) OnDown(_ context.Context, id actor.ActorID, inc actorrt.Incarnation, cause error) {
 	w.mu.Lock()
-	handler := w.down[id]
+	entry, ok := w.down[id]
 	w.mu.Unlock()
-	if handler != nil {
+	if ok && entry.inc == inc && entry.handler != nil {
 		msg := ""
 		if cause != nil {
 			msg = cause.Error()
 		}
-		handler(msg)
+		entry.handler(msg)
 	}
+}
+
+func (w *cellDownWatcher) install(id actor.ActorID, inc actorrt.Incarnation, handler func(string)) {
+	w.mu.Lock()
+	w.down[id] = cellDownEntry{inc: inc, handler: handler}
+	w.mu.Unlock()
+}
+
+func (w *cellDownWatcher) removeIf(id actor.ActorID, inc actorrt.Incarnation) {
+	w.mu.Lock()
+	if cur, ok := w.down[id]; ok && cur.inc == inc {
+		delete(w.down, id)
+	}
+	w.mu.Unlock()
 }
 
 // obsForwardQueue bounds the daemon's async obs-forward buffer. obs is non-truth

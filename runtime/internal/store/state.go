@@ -42,11 +42,21 @@ func (s *stateStore) Create(ctx context.Context, owner actor.ActorID, id resourc
 	// No empty-owner/id guards: owner is a COORDINATE the door welds at mint
 	// (store-not-validate, per the struct doc), and an empty id is rejected by
 	// the door's ingress (checkResourceID) before the store is reached.
-	res, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("store: actor_state create begin %q/%q: %w", owner, id, err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO actor_state (owner_id, resource_id, bytes, created_at)
-		   VALUES (?, ?, ?, ?)
+		 SELECT ?, ?, ?, ?
+		  WHERE EXISTS (
+		        SELECT 1 FROM actor_registry
+		         WHERE actor_id=? AND deregistered_at IS NULL
+		  )
 		 ON CONFLICT(owner_id, resource_id) DO NOTHING`,
-		string(owner), string(id), initial, s.nowMs(),
+		string(owner), string(id), initial, s.nowMs(), string(owner),
 	)
 	if err != nil {
 		return fmt.Errorf("store: actor_state create %q/%q: %w", owner, id, err)
@@ -60,7 +70,22 @@ func (s *stateStore) Create(ctx context.Context, owner actor.ActorID, id resourc
 		return fmt.Errorf("store: actor_state create rows-affected %q/%q: %w", owner, id, err)
 	}
 	if n == 0 {
+		// Classification is deliberately in this transaction and inactive wins
+		// over collision. That order makes an old state row under a subsequently
+		// deregistered owner report the scope failure, never "already exists".
+		var active int
+		if err := tx.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL)`,
+			string(owner)).Scan(&active); err != nil {
+			return fmt.Errorf("store: actor_state create classify owner %q/%q: %w", owner, id, err)
+		}
+		if active == 0 {
+			return resourcespec.ErrOwnerInactive
+		}
 		return resourcespec.ErrAlreadyExists
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("store: actor_state create commit %q/%q: %w", owner, id, err)
 	}
 	return nil
 }

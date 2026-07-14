@@ -104,18 +104,18 @@ func TestSealWinsAttachAfterHandshakeBeforeRegistration(t *testing.T) {
 	rt.attachStraddleHook = func() { close(parked); <-release }
 	host, remote := net.Pipe()
 	codec := ipc.NewCodec(remote, remote)
-	acked := make(chan error, 1)
+	peerDone := make(chan error, 1)
 	go func() {
 		payload, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "lease"})
 		if err := codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: payload}); err != nil {
-			acked <- err
+			peerDone <- err
 			return
 		}
 		frame, err := codec.Read()
 		if err == nil && frame.Kind != ipc.KindHandshakeAck {
 			err = errors.New("wrong handshake ack")
 		}
-		acked <- err
+		peerDone <- err
 	}()
 	result := make(chan error, 1)
 	go func() {
@@ -123,9 +123,6 @@ func TestSealWinsAttachAfterHandshakeBeforeRegistration(t *testing.T) {
 		result <- err
 	}()
 	<-parked
-	if err := <-acked; err != nil {
-		t.Fatal(err)
-	}
 	rt.Seal()
 	close(release)
 	if err := <-result; !errors.Is(err, ErrRuntimeSealed) {
@@ -134,9 +131,118 @@ func TestSealWinsAttachAfterHandshakeBeforeRegistration(t *testing.T) {
 	if _, ok := rt.Stat("remote"); ok {
 		t.Fatal("straddling attach entered sealed runtime")
 	}
-	_ = remote.SetReadDeadline(time.Now().Add(time.Second))
-	if _, err := codec.Read(); err == nil {
-		t.Fatal("sealed Attach did not close acknowledged stream")
+	select {
+	case err := <-peerDone:
+		if err == nil {
+			t.Fatal("sealed Attach sent an ACK")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("sealed Attach did not close uncommitted stream")
+	}
+}
+
+func TestPreparedAttachIsInvisibleAndStopAllReapsIt(t *testing.T) {
+	rt, deliver := New(Config{ZombieGrace: time.Second})
+	prepared, release := make(chan struct{}), make(chan struct{})
+	rt.attachPreparedHook = func() { close(prepared); <-release }
+
+	host, remote := net.Pipe()
+	codec := ipc.NewCodec(remote, remote)
+	peerDone := make(chan error, 1)
+	go func() {
+		payload, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "lease"})
+		if err := codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: payload}); err != nil {
+			peerDone <- err
+			return
+		}
+		_, err := codec.Read()
+		peerDone <- err
+	}()
+
+	attachDone := make(chan error, 1)
+	go func() {
+		_, err := rt.Attach(context.Background(), host, Sinks{Emit: nopEmit}, staticResolve("remote"), nil, nil)
+		attachDone <- err
+	}()
+	<-prepared
+
+	if ids := rt.LiveIDs(); len(ids) != 0 {
+		t.Fatalf("prepared port visible in LiveIDs: %v", ids)
+	}
+	if _, ok := rt.Stat("remote"); ok {
+		t.Fatal("prepared port visible in Stat")
+	}
+	if _, ok := rt.CurrentIncarnation("remote"); ok {
+		t.Fatal("prepared port visible through CurrentIncarnation")
+	}
+	result, err := deliver.Deliver([]actor.ActorID{"remote"}, env("before-ack"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := result.Per["remote"]; got != NotHosted {
+		t.Fatalf("deliver to prepared port = %v, want NotHosted", got)
+	}
+
+	rt.StopAll()
+	close(release)
+	if err := <-attachDone; err == nil {
+		t.Fatal("Attach committed after StopAll won during ACK preparation")
+	}
+	select {
+	case err := <-peerDone:
+		if err == nil {
+			t.Fatal("peer received ACK after StopAll")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("prepared peer was not closed by StopAll")
+	}
+	waitZombiesZero(t, rt, time.Second)
+	if got := rt.LeakedTotal(); got != 0 {
+		t.Fatalf("LeakedTotal = %d, want 0", got)
+	}
+}
+
+func TestPrepareHandshakeSendsNoAckAndAbortLeavesNoRuntimeState(t *testing.T) {
+	rt, _ := New(Config{})
+	host, remote := net.Pipe()
+	codec := ipc.NewCodec(remote, remote)
+	peerRead := make(chan error, 1)
+	go func() {
+		payload, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "lease"})
+		if err := codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: payload}); err != nil {
+			peerRead <- err
+			return
+		}
+		_, err := codec.Read()
+		peerRead <- err
+	}()
+
+	prepared, err := rt.PrepareHandshake(context.Background(), host, Sinks{Emit: nopEmit}, handshakeResolve(staticResolve("remote")), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := prepared.ID(); got != "remote" {
+		t.Fatalf("prepared ID = %q, want remote", got)
+	}
+	select {
+	case err := <-peerRead:
+		t.Fatalf("peer read completed before Commit/Abort: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	if len(rt.LiveIDs()) != 0 {
+		t.Fatal("parsed handshake entered Runtime before Commit")
+	}
+	prepared.Abort()
+	select {
+	case err := <-peerRead:
+		if err == nil {
+			t.Fatal("Abort emitted an ACK")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Abort did not close the handshake transport")
+	}
+	if len(rt.LiveIDs()) != 0 || len(rt.Zombies()) != 0 {
+		t.Fatalf("Abort left runtime state: live=%v zombies=%v", rt.LiveIDs(), rt.Zombies())
 	}
 }
 

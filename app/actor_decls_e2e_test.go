@@ -97,8 +97,8 @@ func TestRestartDecl_DaemonPlacedRowNotFilteredOut(t *testing.T) {
 	if n, _ := respJSON(t, w)["restarted"].(float64); n < 1 {
 		t.Fatalf("restarted = %v, want >= 1 — the daemon-placed row was filtered out of the restart target set (F-2 regression)", n)
 	}
-	// The restart actually crossed the door for the daemon-placed row.
-	assertDoorTerminal(t, env, s.cookies, s.chID, s.userID, "channel.restart_actor")
+	// The fanout worker owns the per-channel application; this endpoint freezes
+	// the target set instead of replaying a synthetic door request.
 }
 
 // TestIntroduceActor_HonestReintroduce (SW-8): re-introducing an existing

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -69,6 +70,9 @@ func TestChannelLocalTables_Set(t *testing.T) {
 	want := map[string]bool{
 		"messages":              true,
 		"actor_registry":        true,
+		"channel_composition":   true,
+		"restart_applied":       true,
+		"composition_migrated":  true,
 		"resources":             true,
 		"resource_grants":       true,
 		"resource_reservations": true,
@@ -85,6 +89,66 @@ func TestChannelLocalTables_Set(t *testing.T) {
 			t.Errorf("unexpected table %q in ChannelLocalTables", n)
 		}
 	}
+}
+
+func TestOpenChannel_CompositionMigrationIsAdditiveAndIdempotent(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "ch.sqlite")
+	for i := 0; i < 2; i++ {
+		cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{}, nil)
+		if err != nil {
+			t.Fatalf("OpenChannel pass %d: %v", i+1, err)
+		}
+		if err := cs.Close(); err != nil {
+			t.Fatalf("Close pass %d: %v", i+1, err)
+		}
+	}
+	raw, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var markers, rows int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM composition_migrated`).Scan(&markers); err != nil {
+		t.Fatalf("marker count: %v", err)
+	}
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_composition`).Scan(&rows); err != nil {
+		t.Fatalf("composition count: %v", err)
+	}
+	if markers != 0 || rows != 0 {
+		t.Fatalf("dormant B1 schema mutated data: markers=%d composition=%d", markers, rows)
+	}
+}
+
+func TestOpenChannel_AddsCompositionTablesToExistingBaseline(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "old.sqlite")
+	const begin = "-- 3b) channel composition"
+	const end = "-- (v2: worker_locks table removed."
+	before, after, ok := strings.Cut(store.ChannelLocalDDL, begin)
+	if !ok {
+		t.Fatal("composition DDL begin marker missing")
+	}
+	_, tail, ok := strings.Cut(after, end)
+	if !ok {
+		t.Fatal("composition DDL end marker missing")
+	}
+	oldDDL := before + end + tail
+	raw, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, oldDDL); err != nil {
+		t.Fatalf("seed old baseline: %v", err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{}, nil)
+	if err != nil {
+		t.Fatalf("ordinary open must add the new tables: %v", err)
+	}
+	_ = cs.Close()
 }
 
 // A read-only open must have NO filesystem write side-effect: it never creates

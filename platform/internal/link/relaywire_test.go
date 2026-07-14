@@ -186,7 +186,7 @@ func dialArms(t *testing.T, r *capsRig, id actor.ActorID) (link.CellArms, *link.
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	arms, err := d.OpenStream(id, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), id, 0, func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -388,7 +388,7 @@ func dialArmsWithMinters(t *testing.T, access accessdoor.AccessMinter, sched sch
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	arms, err := d.OpenStream(id, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), id, 0, func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}

@@ -12,6 +12,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -290,7 +291,43 @@ func (f watcherFunc) OnDown(ctx context.Context, id actor.ActorID, incarnation a
 	f(ctx, id, incarnation, cause)
 }
 
+type planProviderFunc func(context.Context, string) ([]platform.PlanActor, error)
+
+func (f planProviderFunc) Plan(ctx context.Context, id string) ([]platform.PlanActor, error) {
+	return f(ctx, id)
+}
+
 // --- tests ---
+
+func TestPlanPull_UsesAcceptedBoundIdentityAndCarriesEpoch(t *testing.T) {
+	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
+	acc := link.NewAcceptor(link.Config{
+		Minter: &stubMinter{}, Runtime: rt, Membership: &stubMembership{}, ChannelID: testChannelID,
+		PlanProvider: planProviderFunc(func(_ context.Context, daemonID string) ([]platform.PlanActor, error) {
+			if daemonID != "daemon-authoritative" {
+				t.Fatalf("provider daemon = %q", daemonID)
+			}
+			return []platform.PlanActor{{InstanceID: "tool:a", Class: "echo", Kind: actor.KindTool,
+				Binding: actor.BindingRuntimeInboundViaRelay, Epoch: 9}}, nil
+		}),
+	})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		acc.Serve(w, req, "daemon-authoritative")
+	}))
+	t.Cleanup(func() { _ = acc.Close(); srv.Close() })
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "self-claimed", nil, link.DialConfig{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = d.Close() })
+	plan, err := d.PullPlan(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plan) != 1 || plan[0].InstanceID != "tool:a" || plan[0].Epoch != 9 || plan[0].Binding != actor.BindingRuntimeInboundViaRelay {
+		t.Fatalf("plan = %+v", plan)
+	}
+}
 
 // TestEndToEnd_AttachDispatchEmit drives a full home↔daemon link: a daemon
 // attaches one actor, the home dispatches a request down the actor's stream into
@@ -310,7 +347,7 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -374,7 +411,7 @@ func TestHomeCloseQuietTeardown_NoDownEdge(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -428,7 +465,7 @@ func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -499,7 +536,7 @@ func TestPostStartOpenStream_StartStreamDrives(t *testing.T) {
 	defer h.Stop()
 
 	// Initial batch: open + spawn the first actor, then Start launches its loop.
-	armsInit, err := d.OpenStream(initID, func(env *message.Envelope) error {
+	armsInit, err := d.OpenStream(context.Background(), initID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(initID, env)
 	}, func(requestID message.ID) { h.CancelRequest(initID, requestID) })
 	if err != nil {
@@ -510,7 +547,7 @@ func TestPostStartOpenStream_StartStreamDrives(t *testing.T) {
 
 	// Post-Start open: the second actor's stream comes up AFTER Start, so Start's
 	// batch snapshot never covered it — its loop is the ring's to launch.
-	armsLate, err := d.OpenStream(lateID, func(env *message.Envelope) error {
+	armsLate, err := d.OpenStream(context.Background(), lateID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(lateID, env)
 	}, func(requestID message.ID) { h.CancelRequest(lateID, requestID) })
 	if err != nil {
@@ -570,7 +607,7 @@ func TestEndToEnd_CellDeath_ClosesStreamToOnDown(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -615,7 +652,7 @@ func TestLease_NoTraffic_ExpiresToDown(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -684,7 +721,7 @@ func TestLease_KeepAliveAliveButAppFrozen_ExpiresToDown(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -764,7 +801,7 @@ func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 	defer h.Stop()
 
 	cell := &blockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -831,7 +868,7 @@ func TestReattach_FullSetReplace(t *testing.T) {
 	noopDispatch := func(*message.Envelope) error { return nil }
 
 	// toolB was never declared: its stream must not open.
-	if _, err := d.OpenStream(toolB, noopDispatch, nil); err == nil {
+	if _, err := d.OpenStream(context.Background(), toolB, 0, noopDispatch, nil); err == nil {
 		t.Fatal("OpenStream(toolB) succeeded before any declaration — want rejected")
 	}
 
@@ -842,7 +879,7 @@ func TestReattach_FullSetReplace(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Reattach (add): %v", err)
 	}
-	if _, err := d.OpenStream(toolB, noopDispatch, nil); err != nil {
+	if _, err := d.OpenStream(context.Background(), toolB, 0, noopDispatch, nil); err != nil {
 		t.Fatalf("OpenStream(toolB) after Reattach: %v", err)
 	}
 
@@ -853,7 +890,7 @@ func TestReattach_FullSetReplace(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Reattach (shrink): %v", err)
 	}
-	if _, err := d.OpenStream(toolA, noopDispatch, nil); err == nil {
+	if _, err := d.OpenStream(context.Background(), toolA, 0, noopDispatch, nil); err == nil {
 		t.Fatal("OpenStream(toolA) succeeded after it fell out of the Reattach set — want rejected")
 	}
 }
@@ -882,7 +919,7 @@ func TestReattach_RejectedLeavesPriorSetIntact(t *testing.T) {
 
 	// The prior set (toolA) must still be intact — the rejected Reattach never
 	// replaced it.
-	if _, err := d.OpenStream(toolA, func(*message.Envelope) error { return nil }, nil); err != nil {
+	if _, err := d.OpenStream(context.Background(), toolA, 0, func(*message.Envelope) error { return nil }, nil); err != nil {
 		t.Fatalf("OpenStream(toolA) after a rejected Reattach: %v", err)
 	}
 }
@@ -951,7 +988,7 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -1044,7 +1081,7 @@ func TestEndToEnd_DespawnID_CrossWireKill(t *testing.T) {
 	// The daemon's own kill wiring: a host KindDespawn frame despawns the local
 	// cell in the daemon's runtime (exactly platform/compute/ring.go's compute.Run).
 
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -1122,7 +1159,7 @@ func TestKickDaemon_ClosesAllLinksIncludingHalfAttached(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -1231,7 +1268,7 @@ func TestControlDeath_LeavesNoZombieOnlineAccount(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(toolID, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
