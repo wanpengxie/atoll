@@ -24,7 +24,7 @@ type MembershipCheck interface {
 	// found=false when id has no active membership row (mirrors IsMember's
 	// own IsActive discipline, never Exists). Host is read-time (the SAME
 	// membership column the home reconcile ring's placement filter and
-	// link.Acceptor.reconcileHost already consult), never cached — a daemon
+	// Home's declaration coordinator already consults), never cached — a daemon
 	// attach/detach between two Lookup calls is not this seam's problem to
 	// paper over. (A kind return was retired: every caller wants placement,
 	// none ever read the kind — purity v1 S3, owner 2026-07-13.)

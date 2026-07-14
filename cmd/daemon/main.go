@@ -55,7 +55,7 @@ func channelFromServerURL(raw string) string {
 }
 
 // planSource is the daemon's LIVE compute-plan source: it is BOTH the reconcile
-// ring's actorrt.DesiredSource (Members) and its compute.Builder (Lookup),
+// ring's actorrt.DesiredSource (Members) and its compute.ActorFactorySource (Lookup),
 // sharing one fetched-plan snapshot. The reconcile ring calls Members every poll
 // tick (compute.runLink), so Members pulls a fresh link plan each tick and
 // rebuilds the desired set + the id→factory table together — a plan changed on the
@@ -233,9 +233,7 @@ func main() {
 	if err := compute.Run(ctx, compute.Config{
 		ServerWS:        serverWS,
 		Logger:          logger,
-		Desired:         source,
-		Builder:         source,
-		PlanSink:        source,
+		PlanSource:      source,
 		StorageHost:     storageHostAdapter{host: sh},
 		LocalFileOpener: storageHostAdapter{host: sh},
 	}); err != nil {

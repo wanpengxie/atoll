@@ -37,7 +37,7 @@ func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnat
 		// descendant is an incarnation-level citizen (spec §4.1), so its private
 		// state must be per-incarnation memory, not this durable MintState arm. Any
 		// actor's fork children — top-level or itself a child — take that path.
-		Spawn: newSpawnHandle(inc, rt, h.builder, h.buildChildCaps, h.hooks()),
+		Spawn: newSpawnHandle(inc, rt, h.factories, h.buildChildCaps, h.hooks()),
 	}
 }
 

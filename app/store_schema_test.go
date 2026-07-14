@@ -1,17 +1,20 @@
 package app
 
 import (
+	"bytes"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 )
 
 func TestOpenDB_InstallsFreshSchemaAndReopensWithoutRetiredObjects(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.db")
-	db, err := OpenDB(path)
+	p, err := OpenProcessDB(path, true)
 	if err != nil {
 		t.Fatalf("OpenDB fresh: %v", err)
 	}
+	db := p.DB
 	if _, err := db.Exec(
 		`INSERT INTO users (id, email, password, created_at) VALUES ('u1','a@b','x',0)`); err != nil {
 		t.Fatalf("seed user: %v", err)
@@ -24,11 +27,15 @@ func TestOpenDB_InstallsFreshSchemaAndReopensWithoutRetiredObjects(t *testing.T)
 		t.Fatalf("close fresh DB: %v", err)
 	}
 
-	db, err = OpenDB(path)
+	if err := p.Close(); err != nil {
+		t.Fatalf("close fresh process DB: %v", err)
+	}
+	p, err = OpenProcessDB(path, false)
 	if err != nil {
 		t.Fatalf("OpenDB reopen: %v", err)
 	}
-	defer db.Close()
+	defer p.Close()
+	db = p.DB
 	var class string
 	if err := db.QueryRow(`SELECT default_class FROM actor_decls WHERE id='d1'`).Scan(&class); err != nil {
 		t.Fatalf("read declaration after reopen: %v", err)
@@ -50,6 +57,99 @@ func TestOpenDB_InstallsFreshSchemaAndReopensWithoutRetiredObjects(t *testing.T)
 	assertColumnAbsent(t, db, "channels", "default_agent")
 	assertColumnAbsent(t, db, "actor_decls", "looper")
 	assertColumnAbsent(t, db, "actor_decls", "default_looper")
+}
+
+func TestOpenProcessDB_StrictReopenRejectsMalformedSchemaWithoutMutation(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(*testing.T, string)
+	}{
+		{
+			name: "empty",
+			build: func(t *testing.T, path string) {
+				db := openRawSQLite(t, path)
+				if err := db.Ping(); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "incomplete",
+			build: func(t *testing.T, path string) {
+				db := openRawSQLite(t, path)
+				if _, err := db.Exec(`CREATE TABLE users (id TEXT PRIMARY KEY)`); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "extra object",
+			build: func(t *testing.T, path string) {
+				p, err := OpenProcessDB(path, true)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := p.DB.Exec(`CREATE TABLE unexpected (id TEXT)`); err != nil {
+					t.Fatal(err)
+				}
+				if err := p.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "type incompatible",
+			build: func(t *testing.T, path string) {
+				db := openRawSQLite(t, path)
+				if err := initializeSchema(db); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`ALTER TABLE users ADD COLUMN incompatible BLOB`); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "app.db")
+			tc.build(t, path)
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			p, err := OpenProcessDB(path, false)
+			if err == nil {
+				_ = p.Close()
+				t.Fatal("strict reopen accepted malformed schema")
+			}
+			after, readErr := os.ReadFile(path)
+			if readErr != nil {
+				t.Fatal(readErr)
+			}
+			if !bytes.Equal(after, before) {
+				t.Fatal("strict reopen mutated rejected database")
+			}
+		})
+	}
+}
+
+func openRawSQLite(t *testing.T, path string) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return db
 }
 
 func assertColumnAbsent(t *testing.T, db *sql.DB, table, column string) {

@@ -138,7 +138,7 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 	dbPath := filepath.Join(tmpDir, "app.db")
 	chDBDir := filepath.Join(tmpDir, "channels")
 
-	db, err := app.OpenDB(dbPath)
+	db, err := openTestAppDB(t, dbPath)
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
@@ -194,7 +194,7 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 		t.Fatalf("pre-admit tool:kimi: %v", err)
 	}
 	runErr := make(chan error, 1)
-	desired, builder := staticActorCompute([]platform.ActorDecl{
+	plan := authenticatedTestPlan([]platform.ActorDecl{
 		{
 			ID:   xhsID,
 			Kind: actor.KindTool,
@@ -216,7 +216,7 @@ func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Se
 	})
 	go func() {
 		runErr <- compute.Run(ctx,
-			compute.Config{ServerWS: serverWS, Logger: logger, Desired: desired, Builder: builder},
+			compute.Config{ServerWS: serverWS, Logger: logger, PlanSource: plan},
 		)
 	}()
 	t.Cleanup(func() {

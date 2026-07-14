@@ -77,10 +77,9 @@ func newStorageRig(t *testing.T) *storageRig {
 	t.Helper()
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
 	shc := &fakeStorageHostControl{}
-	acc := link.NewAcceptor(link.Config{
+	acc := newTestAcceptor(t, link.Config{
 		Minter:             &stubMinter{},
 		Runtime:            rt,
-		Membership:         &stubMembership{},
 		ChannelID:          testChannelID,
 		StorageHostControl: shc,
 	})
@@ -100,7 +99,7 @@ func dialStorageDaemon(t *testing.T, r *storageRig, configs ...link.DialConfig) 
 	if len(configs) > 0 {
 		cfg = configs[0]
 	}
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1", nil, cfg, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(), nil, cfg, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -244,8 +243,8 @@ func TestReconcilePull_DaemonToHomeRoundTrip(t *testing.T) {
 // drop / hang) when no StorageHostControl is wired on the home.
 func TestStorageControl_NoHandlerWiredAnswersHonestReject(t *testing.T) {
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	acc := link.NewAcceptor(link.Config{
-		Minter: &stubMinter{}, Runtime: rt, Membership: &stubMembership{}, ChannelID: testChannelID,
+	acc := newTestAcceptor(t, link.Config{
+		Minter: &stubMinter{}, Runtime: rt, ChannelID: testChannelID,
 		// StorageHostControl deliberately nil.
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -253,7 +252,7 @@ func TestStorageControl_NoHandlerWiredAnswersHonestReject(t *testing.T) {
 	}))
 	defer func() { _ = acc.Close(); srv.Close() }()
 
-	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1", nil, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], nil, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -300,8 +299,8 @@ func (b *blockingStorageHostControl) ReconcilePull(context.Context, string, []st
 func TestSendCommitted_CtxCancelUnblocksWaiter(t *testing.T) {
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
 	shc := &blockingStorageHostControl{unblock: make(chan struct{})}
-	acc := link.NewAcceptor(link.Config{
-		Minter: &stubMinter{}, Runtime: rt, Membership: &stubMembership{}, ChannelID: testChannelID,
+	acc := newTestAcceptor(t, link.Config{
+		Minter: &stubMinter{}, Runtime: rt, ChannelID: testChannelID,
 		StorageHostControl: shc,
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -314,7 +313,7 @@ func TestSendCommitted_CtxCancelUnblocksWaiter(t *testing.T) {
 	// this runs.
 	defer func() { _ = acc.Close(); srv.Close() }()
 
-	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1", nil, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], nil, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

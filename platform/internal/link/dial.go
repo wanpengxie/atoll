@@ -36,13 +36,10 @@ import (
 type Dialer struct {
 	lc        *linkSession
 	channelID string
-	computeID string
 	logger    *slog.Logger
 
-	// daemonID is the home-confirmed compute id (期11 spec §4.7's AttachReply.
-	// DaemonID) — updated under mu on every attach_reply (initial AND every
-	// Reattach), replacing whatever self-declared/random value computeID
-	// started as. This is the one value per-channel resource root paths,
+	// daemonID is the home-confirmed compute id (AttachReply.DaemonID), updated
+	// under mu on every accepted attach reply. This is the one value per-channel resource root paths,
 	// AllocRequest routing, and reservation/tombstone ownership may rely on
 	// (see AttachReply.DaemonID's doc). Read via DaemonID().
 	daemonID string
@@ -176,7 +173,7 @@ type DialConfig struct {
 // Dial dials the home, sends the stream-0 attach, and waits for attach_reply. It
 // does NOT open actor streams or start any demux — Start does that after the
 // host is built. Window-period frames sit in the kernel socket buffer.
-func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration, cfg DialConfig, logger *slog.Logger) (*Dialer, error) {
+func Dial(ctx context.Context, serverURL string, decls []Declaration, cfg DialConfig, logger *slog.Logger) (*Dialer, error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -186,7 +183,6 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 	}
 	d := &Dialer{
 		channelID:           "",
-		computeID:           computeID,
 		logger:              logger,
 		streams:             map[actor.ActorID]*actorStream{},
 		pendingCommitted:    newPendingReplies[CommittedReply](),
@@ -260,7 +256,7 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 		// Every attach_reply (initial AND every later Reattach) updates the
 		// home-confirmed daemon id — the authoritative value AttachReply.
 		// DaemonID's doc names (§4.7). An accepted reply always carries a
-		// non-empty DaemonID (Acceptor.handleAttach stamps computeID
+		// non-empty DaemonID (Acceptor.handleAttach stamps the authenticated id
 		// unconditionally); a rejected one may not, so only update on Accepted
 		// to avoid clobbering a previously-confirmed id with an empty string.
 		if cf.AttachReply.Accepted && cf.AttachReply.DaemonID != "" {
@@ -310,7 +306,7 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 	attachID := newRequestID()
 	ch := d.pendingAttach.register(attachID)
 	raw, err := encodeControl(controlFrame{RequestID: attachID, Kind: ctrlAttach, Attach: &AttachRequest{
-		Proto: 2, ComputeID: computeID, Declarations: decls,
+		Proto: 2, Declarations: decls,
 	}})
 	if err != nil {
 		d.pendingAttach.cancel(attachID)
@@ -357,8 +353,7 @@ func Dial(ctx context.Context, serverURL, computeID string, decls []Declaration,
 func (d *Dialer) PullPlan(ctx context.Context) ([]platform.PlanActor, error) {
 	id := newRequestID()
 	ch := d.pendingPlan.register(id)
-	boundID := d.DaemonID()
-	raw, err := encodeControl(controlFrame{RequestID: id, Kind: ctrlPlanPull, PlanPull: &PlanPull{BoundID: boundID}})
+	raw, err := encodeControl(controlFrame{RequestID: id, Kind: ctrlPlanPull, PlanPull: &PlanPull{}})
 	if err != nil {
 		d.pendingPlan.cancel(id)
 		return nil, err
@@ -377,13 +372,12 @@ func (d *Dialer) PullPlan(ctx context.Context) ([]platform.PlanActor, error) {
 	return reply.Actors, nil
 }
 
-// DaemonID returns the home-confirmed compute id (期11 spec §4.7's
-// AttachReply.DaemonID) — empty until the FIRST attach_reply lands (Dial
-// already blocks until then, so any caller reaching a live *Dialer sees a
-// non-empty value in every non-dev-self-declared deployment). This is the
+// DaemonID returns the home-confirmed compute id. Dial blocks until the first
+// accepted attach reply, so every caller reaching a live Dialer sees a non-empty
+// authenticated value. This is the
 // identity the storage host's per-channel resource root, AllocRequest
 // routing, and reservation/tombstone ownership must all key on — never the
-// possibly-random ComputeID passed to Dial.
+// sole daemon identity used by the link.
 func (d *Dialer) DaemonID() string {
 	d.mu.Lock()
 	defer d.mu.Unlock()
@@ -423,7 +417,7 @@ func (d *Dialer) Reattach(ctx context.Context, decls []Declaration) error {
 	ch := d.pendingAttach.register(id)
 
 	raw, err := encodeControl(controlFrame{RequestID: id, Kind: ctrlAttach, Attach: &AttachRequest{
-		Proto: 2, ComputeID: d.computeID, Declarations: decls,
+		Proto: 2, Declarations: decls,
 	}})
 	if err != nil {
 		d.pendingAttach.cancel(id)

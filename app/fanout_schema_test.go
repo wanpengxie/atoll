@@ -5,13 +5,14 @@ import (
 	"testing"
 )
 
-func TestFanoutJobSchemaIdempotenceAndDedupShape(t *testing.T) {
+func TestFanoutJobSchemaStrictReopenAndDedupShape(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.sqlite")
 	for pass := 0; pass < 2; pass++ {
-		db, err := OpenDB(path)
+		p, err := OpenProcessDB(path, pass == 0)
 		if err != nil {
-			t.Fatalf("OpenDB pass %d: %v", pass+1, err)
+			t.Fatalf("OpenProcessDB pass %d: %v", pass+1, err)
 		}
+		db := p.DB
 		if pass == 0 {
 			// Restart is deliberately one job per request.
 			for i := 0; i < 2; i++ {
@@ -37,7 +38,7 @@ func TestFanoutJobSchemaIdempotenceAndDedupShape(t *testing.T) {
 				t.Fatalf("daemon job insert: %v", err)
 			}
 		}
-		if err := db.Close(); err != nil {
+		if err := p.Close(); err != nil {
 			t.Fatalf("Close pass %d: %v", pass+1, err)
 		}
 	}

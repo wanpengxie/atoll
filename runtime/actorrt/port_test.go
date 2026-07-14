@@ -55,7 +55,7 @@ func dialPort(t *testing.T, r *Runtime, leaseID string, emit EmitSink, resolve R
 		hsErr <- nil
 	}()
 
-	inc, err := r.Attach(context.Background(), hostConn, Sinks{Emit: emit}, resolve, kindOf, nil)
+	inc, err := attachTest(r, context.Background(), hostConn, Sinks{Emit: emit}, resolve, kindOf, nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}
@@ -72,6 +72,34 @@ func staticResolve(id actor.ActorID) ResolveFunc {
 
 func nopEmit(context.Context, Incarnation, *message.Envelope) (ipc.EmitResult, error) {
 	return ipc.EmitResult{}, nil
+}
+
+func TestPortParentDeathCascadesForkedChild(t *testing.T) {
+	rt, _ := New(Config{Parent: context.Background()})
+	defer rt.StopAll()
+
+	parentID := actor.ActorID("tool:remote-parent")
+	_, remote := dialPort(t, rt, "lease", nopEmit, staticResolve(parentID), nil)
+	parent, ok := rt.CurrentIncarnation(parentID)
+	if !ok {
+		t.Fatal("attached port parent is not live")
+	}
+	child, err := rt.Fork(parent, "tool:remote-parent/child", actor.KindTool, static(newRecordActor()))
+	if err != nil {
+		t.Fatalf("Fork from port parent: %v", err)
+	}
+	if !rt.IsLive(child) {
+		t.Fatal("forked child is not live")
+	}
+
+	_ = remote.conn.Close()
+	deadline := time.Now().Add(time.Second)
+	for rt.IsLive(child) && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	if rt.IsLive(child) {
+		t.Fatal("forked child survived its port parent's death")
+	}
 }
 
 // TestPortHandshakeBindsResolvedID: Attach resolves the presented lease to an
@@ -116,7 +144,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			// An EMIT frame where a handshake is required — protocol violation.
 			_ = c.Write(ipc.Frame{Kind: ipc.KindEmit})
 		}()
-		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil, nil); err == nil {
+		if _, err := attachTest(rt, context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil, nil); err == nil {
 			t.Fatal("Attach accepted a non-handshake first frame")
 		}
 	})
@@ -131,7 +159,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		}()
 		resolve := func(ipc.HandshakePayload) (actor.ActorID, error) { return "", io.ErrUnexpectedEOF }
-		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, resolve, nil, nil); err == nil {
+		if _, err := attachTest(rt, context.Background(), hostConn, Sinks{Emit: nopEmit}, resolve, nil, nil); err == nil {
 			t.Fatal("Attach accepted a connection whose lease failed to resolve")
 		}
 	})
@@ -145,7 +173,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			p, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "anon"})
 			_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		}()
-		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve(""), nil, nil); err == nil {
+		if _, err := attachTest(rt, context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve(""), nil, nil); err == nil {
 			t.Fatal("Attach accepted an empty resolved actor id")
 		}
 	})
@@ -167,7 +195,7 @@ func TestAttachHandshakeBounded(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		_, err := rt.Attach(hsCtx, hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil, nil)
+		_, err := attachTest(rt, hsCtx, hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil, nil)
 		done <- err
 	}()
 
@@ -187,11 +215,11 @@ func TestPortRequiresSinks(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, _ := net.Pipe()
-	if _, err := rt.Attach(context.Background(), hostConn, Sinks{}, staticResolve("x"), nil, nil); err == nil {
+	if _, err := attachTest(rt, context.Background(), hostConn, Sinks{}, staticResolve("x"), nil, nil); err == nil {
 		t.Fatal("Attach accepted a nil EmitSink")
 	}
 	hostConn2, _ := net.Pipe()
-	if _, err := rt.Attach(context.Background(), hostConn2, Sinks{Emit: nopEmit}, nil, nil, nil); err == nil {
+	if _, err := attachTest(rt, context.Background(), hostConn2, Sinks{Emit: nopEmit}, nil, nil, nil); err == nil {
 		t.Fatal("Attach accepted a nil ResolveFunc")
 	}
 }
@@ -589,7 +617,7 @@ func dialPortCancel(t *testing.T, r *Runtime, leaseID string, resolve ResolveFun
 		}
 		hsErr <- nil
 	}()
-	inc, err := r.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, resolve, nil, onCancel)
+	inc, err := attachTest(r, context.Background(), hostConn, Sinks{Emit: nopEmit}, resolve, nil, onCancel)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}

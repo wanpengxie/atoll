@@ -212,7 +212,7 @@ func (ls *linkSession) stopControlWorkers() {
 //
 // The bound exists because a control worker can be wedged inside a long-lived
 // STORAGE call, not just an out-network write: handleAttach runs
-// registry.Lookup / membership.ApplyMemberTransitions / reconcileHost on the
+// declaration coordinator on the
 // attach reqCtx, and that ctx carries NO deadline of its own — a stalled store
 // (disk-hung db) pins the handler indefinitely. An unbounded join would then
 // propagate that stall straight through this teardown and, via Serve's

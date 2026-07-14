@@ -275,23 +275,22 @@ func TestResourceFaceThreeAvatarParity(t *testing.T) {
 	realMinter := newParityDoor(t)
 
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	acc := link.NewAcceptor(link.Config{
-		Minter:     &stubMinter{},
-		Access:     realMinter,
-		Schedule:   &fakeScheduleMinter{},
-		Runtime:    rt,
-		Membership: &stubMembership{},
-		ChannelID:  testChannelID,
-		LeasePing:  5 * time.Second,
-		LeaseTTL:   30 * time.Second,
+	acc := newTestAcceptor(t, link.Config{
+		Minter:    &stubMinter{},
+		Access:    realMinter,
+		Schedule:  &fakeScheduleMinter{},
+		Runtime:   rt,
+		ChannelID: testChannelID,
+		LeasePing: 5 * time.Second,
+		LeaseTTL:  30 * time.Second,
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		acc.Serve(w, req, "daemon-parity")
 	}))
 	t.Cleanup(func() { _ = acc.Close(); srv.Close(); rt.StopAll() })
 
-	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-parity",
-		[]link.Declaration{{ActorID: callerID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:],
+		[]link.Declaration{{ActorID: callerID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

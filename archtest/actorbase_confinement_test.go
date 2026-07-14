@@ -14,7 +14,7 @@ import (
 )
 
 // actorbase-spec-v1.md §4 S3 / §5 red line ③: the eight out-generation call
-// faces (CapsFactoryBuilder / compute.Builder / home.Home.SpawnIfAbsent / ActorDecl /
+// construction faces (home, compute, declarations, and plugin registries)
 // registry.Constructor / app-human / cmd-daemon / test fixtures) were reshaped
 // so production downstream never again needs to name actorcaps.Caps — it
 // speaks platform.ActorFactory with a single actorbase.Def model. These four locks are
@@ -32,8 +32,7 @@ var actorcapsAllowedPrefix = []string{"../platform/", "../lib/actorbase/", "../l
 // TestActorcapsConfinedToPlatformAndActorbase — ① import confinement,
 // repo-wide, _test.go included (spec: "含 _test.go 扫描"). A downstream
 // package never names actorcaps.Caps: actorbase.Def is the only production
-// factory shape. Test files may use platform.CapsFactory to inspect the welded
-// bundle directly.
+// factory shape. Tests observe behavior through the same actorbase.Def shape.
 func TestActorcapsConfinedToPlatformAndActorbase(t *testing.T) {
 	var v []string
 	walkImportsAll(t, func(slash, imp string) {
@@ -115,16 +114,13 @@ func TestPluginDirsForbidCapsAndDoorImports(t *testing.T) {
 // offence.
 const oldFactoryShape = "func(actorcaps.Caps) actorrt.Actor"
 
-// TestNoOldCapsFactoryShapeResidual — ③ of the four (numbered ② in the DoD
+// TestNoRetiredFactoryShapeResidual — ③ of the four (numbered ② in the DoD
 // list; kept in this file for the shared walk helper): zero residual of the
-// retired bare factory shape ActorDecl.Factory / CapsFactoryBuilder.Lookup /
-// compute.Builder.Lookup used to carry, across the explicit scan surface the
-// spec names (registry/drivers/agent providers/cmd) plus app (the human front-
-// end entry point) — platform itself is exempt (ActorFactory.fullCaps, the
-// platform-only test seam CapsFactory() builds, is a deliberately DIFFERENT,
-// narrower-scoped shape that never leaves this package).
-func TestNoOldCapsFactoryShapeResidual(t *testing.T) {
-	scanRoots := []string{"../registry", "../drivers", "../cmd", "../app"}
+// retired bare factory signature across the explicit scan surface the
+// spec names, including platform: no test or production assembly receives an
+// exemption to recreate the retired representation.
+func TestNoRetiredFactoryShapeResidual(t *testing.T) {
+	scanRoots := []string{"../registry", "../drivers", "../cmd", "../app", "../platform"}
 	var v []string
 	for _, root := range scanRoots {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {

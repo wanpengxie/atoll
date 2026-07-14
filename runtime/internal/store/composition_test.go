@@ -48,7 +48,7 @@ func TestCompositionIntroduceAndRemoveAreRegistryAtomic(t *testing.T) {
 	}
 }
 
-func TestCompositionRetryFreezesMetadataAndRepairsInactiveID(t *testing.T) {
+func TestCompositionRetryFreezesMetadataAndRejectsInactiveHalfState(t *testing.T) {
 	ctx := context.Background()
 	cs := openTestChannel(t)
 	r := introduceAgent(t, cs.Composition, "decl-a", 100)
@@ -66,16 +66,16 @@ func TestCompositionRetryFreezesMetadataAndRepairsInactiveID(t *testing.T) {
 	if err := cs.Membership.Deregister(ctx, r.InstanceID, 120); err != nil {
 		t.Fatal(err)
 	}
-	repaired, created, _, err := cs.Composition.IntroduceComposition(ctx, storespec.CompositionIntroduce{
+	_, created, changed, err = cs.Composition.IntroduceComposition(ctx, storespec.CompositionIntroduce{
 		DeclID: "decl-a", Principal: "decl-a", Class: "agent.test", Placement: storespec.PlacementServer,
 		Kind: actor.KindAgent, At: 130,
 	})
-	if err != nil || created || repaired.InstanceID == r.InstanceID {
-		t.Fatalf("repair = %+v created=%v err=%v", repaired, created, err)
+	if err == nil || created || changed {
+		t.Fatalf("invariant retry: created=%v changed=%v err=%v", created, changed, err)
 	}
-	member, ok, err := cs.Registry.Lookup(ctx, repaired.InstanceID)
-	if err != nil || !ok || !member.IsActive() {
-		t.Fatalf("repaired member = %+v ok=%v err=%v", member, ok, err)
+	member, ok, err := cs.Registry.Lookup(ctx, r.InstanceID)
+	if err != nil || !ok || member.IsActive() {
+		t.Fatalf("inactive half-state mutated: member=%+v ok=%v err=%v", member, ok, err)
 	}
 }
 

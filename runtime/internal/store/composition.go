@@ -153,17 +153,11 @@ func (s *compositionStore) IntroduceComposition(ctx context.Context, in storespe
 			string(in.Placement), in.DesiredHost, 0)
 	} else {
 		id = existing.InstanceID
-		// A half-written/inactive registry side is repaired with the freshly
-		// minted active id while immutable class/placement remain frozen.
 		var active int
 		qerr := tx.QueryRowContext(ctx, `SELECT 1 FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(id)).Scan(&active)
 		if errors.Is(qerr, sql.ErrNoRows) {
-			var repaired bool
-			id, repaired, err = s.ensureActivePrincipalTx(ctx, tx, in.Kind, in.Principal, in.At)
-			admitted = admitted || repaired
-			if err == nil {
-				_, err = tx.ExecContext(ctx, `UPDATE channel_composition SET instance_id=? WHERE principal=?`, string(id), in.Principal)
-			}
+			return storespec.CompositionRecord{}, false, false,
+				fmt.Errorf("store: composition invariant violated: %s has no active registry row", id)
 		} else if qerr != nil {
 			err = qerr
 		}

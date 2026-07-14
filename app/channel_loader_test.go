@@ -8,7 +8,7 @@ import (
 
 func TestNew_ExistingChannelDirectoryRowRequiresExistingDB(t *testing.T) {
 	dir := t.TempDir()
-	db, err := OpenDB(filepath.Join(dir, "app.sqlite"))
+	db, err := openTestAppDB(t, filepath.Join(dir, "app.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}

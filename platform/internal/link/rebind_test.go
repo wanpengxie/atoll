@@ -13,12 +13,12 @@ import (
 
 func TestOneIncumbentPerComputeAndSameLinkReattach(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
-	d1, err := link.Dial(context.Background(), r.wsURL(), "daemon-one", nil, link.DialConfig{}, nil)
+	d1, err := link.Dial(context.Background(), r.wsURL(), nil, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := link.Dial(context.Background(), r.wsURL(), "daemon-one", nil, link.DialConfig{}, nil); err == nil || !strings.Contains(err.Error(), "compute_busy") {
+	if _, err := link.Dial(context.Background(), r.wsURL(), nil, link.DialConfig{}, nil); err == nil || !strings.Contains(err.Error(), "compute_busy") {
 		t.Fatalf("second incumbent Dial error = %v, want compute_busy", err)
 	}
 	if err := d1.Reattach(context.Background(), []link.Declaration{}); err != nil {
@@ -30,7 +30,7 @@ func TestOneIncumbentPerComputeAndSameLinkReattach(t *testing.T) {
 
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		d3, err := link.Dial(context.Background(), r.wsURL(), "daemon-one", nil, link.DialConfig{}, nil)
+		d3, err := link.Dial(context.Background(), r.wsURL(), nil, link.DialConfig{}, nil)
 		if err == nil {
 			_ = d3.Close()
 			break
@@ -51,8 +51,8 @@ func TestRebindableArms_FlapContinuity(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
 	const toolID = actor.ActorID("tool:flap")
-	d1, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d1, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial 1: %v", err)
 	}
@@ -110,8 +110,8 @@ func TestRebindableArms_FlapContinuity(t *testing.T) {
 	// Reconnect: a NEW Dialer, a NEW stream opened for the SAME actor id.
 	// Rebind swaps the membrane onto it — h.Install is NOT called again, so the
 	// actorrt embodiment is the exact same one that served the pre-flap write.
-	d2, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d2, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial 2: %v", err)
 	}
@@ -144,10 +144,10 @@ func TestRuntimeSealRejectsActorArmWithoutKillingWholeLink(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 	const id = actor.ActorID("tool:sealed-arm")
 	const siblingID = actor.ActorID("tool:sealed-sibling")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+	d, err := link.Dial(context.Background(), r.wsURL(),
 		[]link.Declaration{
-			{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
-			{ActorID: siblingID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+			{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay},
+			{ActorID: siblingID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay},
 		}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatal(err)

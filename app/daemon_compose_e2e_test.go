@@ -108,7 +108,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	serverWS := fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), chID, apiKey)
 	plan := &e2eLinkPlan{chID: channel.ID(chID), builders: map[actor.ActorID]platform.ActorFactory{}}
 	go func() {
-		runErr <- compute.Run(ctx, compute.Config{ServerWS: serverWS, Desired: plan, Builder: plan, PlanSink: plan, Poll: 20 * time.Millisecond})
+		runErr <- compute.Run(ctx, compute.Config{ServerWS: serverWS, PlanSource: plan, Poll: 20 * time.Millisecond})
 	}()
 	t.Cleanup(func() {
 		cancel()

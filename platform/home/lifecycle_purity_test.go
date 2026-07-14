@@ -11,8 +11,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -28,7 +26,7 @@ import (
 
 func lifecycleConfig(t *testing.T, name string) Config {
 	t.Helper()
-	return Config{ChannelID: channel.ID("lifecycle-" + name), DBPath: filepath.Join(t.TempDir(), name+".sqlite")}
+	return Config{CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{}, ChannelID: channel.ID("lifecycle-" + name), DBPath: filepath.Join(t.TempDir(), name+".sqlite")}
 }
 
 func closeEvents(events []string) []string {
@@ -197,7 +195,7 @@ func TestHomeCursorWindowInitialDrainDoesNotLoseRow(t *testing.T) {
 
 func TestHomeSeedSurvivesLaterAssemblyFailureAndReplays(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "seed-replay.sqlite")
-	cfg := Config{ChannelID: channel.ID("seed-replay"), DBPath: db}
+	cfg := Config{CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{}, ChannelID: channel.ID("seed-replay"), DBPath: db}
 	fault := errors.New("after seed")
 	if _, err := openHome(cfg, &homeFaults{fail: map[string]error{"construct.max_seq": fault}}); !errors.Is(err, fault) {
 		t.Fatalf("faulted Open err = %v", err)
@@ -208,80 +206,6 @@ func TestHomeSeedSurvivesLaterAssemblyFailureAndReplays(t *testing.T) {
 	}
 	if err := h.Close(); err != nil {
 		t.Fatal(err)
-	}
-}
-
-type blockingDesired struct {
-	calls   atomic.Int64
-	entered chan struct{}
-	release chan struct{}
-}
-
-func (d *blockingDesired) Members(context.Context) ([]actorrt.DesiredMember, error) {
-	if d.calls.Add(1) == 1 {
-		return nil, nil
-	}
-	select {
-	case <-d.entered:
-	default:
-		close(d.entered)
-	}
-	<-d.release
-	return []actorrt.DesiredMember{{ID: "must-not-build", Kind: actor.KindAgent, Lifecycle: actorrt.LifecycleAlwaysOn}}, nil
-}
-
-func TestHomeCloseBoundsDesiredAndSealPrecedesAbandon(t *testing.T) {
-	// H5's silence half: once the released reconcile converges, nothing it did
-	// after the abandon may have left a goroutine behind.
-	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
-	d := &blockingDesired{entered: make(chan struct{}), release: make(chan struct{})}
-	var mu sync.Mutex
-	var events []string
-	h, err := openHome(Config{
-		ChannelID: channel.ID("lifecycle-blocking"), DBPath: filepath.Join(t.TempDir(), "blocking.sqlite"),
-		Desired: d, ReconcileInterval: time.Millisecond,
-	}, &homeFaults{record: func(s string) { mu.Lock(); events = append(events, s); mu.Unlock() }})
-	if err != nil {
-		t.Fatal(err)
-	}
-	<-d.entered
-	if err := h.closeInternalWithin("test", 25*time.Millisecond); err != nil {
-		t.Fatal(err)
-	}
-	if h.reconcileLeaked.Load() != 1 {
-		t.Fatalf("reconcile leaks = %d", h.reconcileLeaked.Load())
-	}
-	// The runtime itself must ALREADY be sealed here — the abandon has
-	// happened, the leaked reconcile goroutine is still alive, and any build
-	// it (or anyone) attempts must hit the gate. A recorder can only prove
-	// checkpoint order; this probes the actual admission authority.
-	if _, _, err := h.channel.Cells().SpawnIfAbsent("post-seal-probe", actor.KindAgent,
-		func(actorrt.Incarnation) actorrt.Actor { return lifecycleActor{} }); !errors.Is(err, actorrt.ErrRuntimeSealed) {
-		t.Fatalf("SpawnIfAbsent during abandoned close = %v, want ErrRuntimeSealed", err)
-	}
-	close(d.release)
-	select {
-	case <-h.reconcileDone:
-	case <-time.After(time.Second):
-		t.Fatal("released reconcile did not exit")
-	}
-	if _, ok := h.channel.Cells().Stat("must-not-build"); ok {
-		t.Fatal("abandoned reconcile built after Seal")
-	}
-	mu.Lock()
-	got := closeEvents(events)
-	mu.Unlock()
-	seal, reconcile := -1, -1
-	for i, event := range got {
-		if event == "close.seal" {
-			seal = i
-		}
-		if event == "close.reconcile" {
-			reconcile = i
-		}
-	}
-	if seal < 0 || reconcile < 0 || seal >= reconcile {
-		t.Fatalf("Seal not first: %v", got)
 	}
 }
 
@@ -300,7 +224,7 @@ func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
 		t.Skip("short: ~1.2s shutdown-window interleaving — full gate (make test-full) runs it")
 	}
 	db := filepath.Join(t.TempDir(), "c10-window.sqlite")
-	cfg := Config{ChannelID: channel.ID("lifecycle-c10"), DBPath: db}
+	cfg := Config{CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{}, ChannelID: channel.ID("lifecycle-c10"), DBPath: db}
 	var logs bytes.Buffer
 	cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
 	parked, release := make(chan struct{}), make(chan struct{})

@@ -7,7 +7,7 @@
 //
 //	Run(ctx, cfg) error
 //
-// Config's Desired/Builder are the daemon's own reconcile ring halves — the
+// Config's PlanSource is the daemon's authenticated reconcile snapshot — the
 // same host-neutral diff-loop paradigm platform/home's reconcile ring runs,
 // applied to a daemon's own hosted set rather than a channel's membership.
 // StorageHost/LocalFileOpener are the optional injection points a daemon that
@@ -19,10 +19,10 @@
 // compute.go (Run/Config — the daemon assembly root: dial, redial loop,
 // forwarder lifecycle), ring.go (computeRing — dial/reattach/spawn/dispatch/
 // cancel + redial backoff), forwarders.go (cellDownWatcher + obs/cancel/
-// storage-host forwarders), decl.go (Builder/LocalFileOpener/StorageHost +
+// storage-host forwarders), decl.go (ActorFactorySource/LocalFileOpener/StorageHost +
 // the storage mirror types — the decl-family words compute alone speaks; see
 // decl.go's own B′ header comment for why ActorDecl itself stays on the
-// platform root instead). ActorFactory (the def shape Builder.Lookup
+// platform root instead). ActorFactory (the def shape ActorFactorySource.Lookup
 // resolves to) is platform.ActorFactory (platform-topology 批 T5b: compute
 // consumes the cross-host membrane's word, never defines its own).
 package compute

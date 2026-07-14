@@ -100,8 +100,6 @@ func TestSealWinsSpawnAndForkBuildStraddles(t *testing.T) {
 
 func TestSealWinsAttachAfterHandshakeBeforeRegistration(t *testing.T) {
 	rt, _ := New(Config{})
-	parked, release := make(chan struct{}), make(chan struct{})
-	rt.attachStraddleHook = func() { close(parked); <-release }
 	host, remote := net.Pipe()
 	codec := ipc.NewCodec(remote, remote)
 	peerDone := make(chan error, 1)
@@ -117,15 +115,12 @@ func TestSealWinsAttachAfterHandshakeBeforeRegistration(t *testing.T) {
 		}
 		peerDone <- err
 	}()
-	result := make(chan error, 1)
-	go func() {
-		_, err := rt.Attach(context.Background(), host, Sinks{Emit: nopEmit}, staticResolve("remote"), nil, nil)
-		result <- err
-	}()
-	<-parked
+	prepared, err := rt.PrepareHandshake(context.Background(), host, Sinks{Emit: nopEmit}, staticResolve("remote"), nil, nil, func(Incarnation) {})
+	if err != nil {
+		t.Fatal(err)
+	}
 	rt.Seal()
-	close(release)
-	if err := <-result; !errors.Is(err, ErrRuntimeSealed) {
+	if _, err := prepared.Commit(func() bool { return true }); !errors.Is(err, ErrRuntimeSealed) {
 		t.Fatalf("Attach err = %v", err)
 	}
 	if _, ok := rt.Stat("remote"); ok {
@@ -143,11 +138,10 @@ func TestSealWinsAttachAfterHandshakeBeforeRegistration(t *testing.T) {
 
 func TestPreparedAttachIsInvisibleAndStopAllReapsIt(t *testing.T) {
 	rt, deliver := New(Config{ZombieGrace: time.Second})
-	prepared, release := make(chan struct{}), make(chan struct{})
-	rt.attachPreparedHook = func() { close(prepared); <-release }
 
 	host, remote := net.Pipe()
 	codec := ipc.NewCodec(remote, remote)
+	allowRead := make(chan struct{})
 	peerDone := make(chan error, 1)
 	go func() {
 		payload, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "lease"})
@@ -155,16 +149,21 @@ func TestPreparedAttachIsInvisibleAndStopAllReapsIt(t *testing.T) {
 			peerDone <- err
 			return
 		}
+		<-allowRead
 		_, err := codec.Read()
 		peerDone <- err
 	}()
+	prepared, err := rt.PrepareHandshake(context.Background(), host, Sinks{Emit: nopEmit}, staticResolve("remote"), nil, nil, func(Incarnation) {})
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	attachDone := make(chan error, 1)
 	go func() {
-		_, err := rt.Attach(context.Background(), host, Sinks{Emit: nopEmit}, staticResolve("remote"), nil, nil)
+		_, err := prepared.Commit(func() bool { return true })
 		attachDone <- err
 	}()
-	<-prepared
+	waitPreparedCandidate(t, rt, "remote")
 
 	if ids := rt.LiveIDs(); len(ids) != 0 {
 		t.Fatalf("prepared port visible in LiveIDs: %v", ids)
@@ -184,7 +183,7 @@ func TestPreparedAttachIsInvisibleAndStopAllReapsIt(t *testing.T) {
 	}
 
 	rt.StopAll()
-	close(release)
+	close(allowRead)
 	if err := <-attachDone; err == nil {
 		t.Fatal("Attach committed after StopAll won during ACK preparation")
 	}
@@ -204,11 +203,10 @@ func TestPreparedAttachIsInvisibleAndStopAllReapsIt(t *testing.T) {
 
 func TestDespawnIDCancelsPreparedCandidateButReportsNoLiveBody(t *testing.T) {
 	rt, _ := New(Config{})
-	prepared, release := make(chan struct{}), make(chan struct{})
-	rt.attachPreparedHook = func() { close(prepared); <-release }
 
 	host, remote := net.Pipe()
 	codec := ipc.NewCodec(remote, remote)
+	allowRead := make(chan struct{})
 	peerDone := make(chan error, 1)
 	go func() {
 		payload, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "lease"})
@@ -216,20 +214,25 @@ func TestDespawnIDCancelsPreparedCandidateButReportsNoLiveBody(t *testing.T) {
 			peerDone <- err
 			return
 		}
+		<-allowRead
 		_, err := codec.Read()
 		peerDone <- err
 	}()
+	prepared, err := rt.PrepareHandshake(context.Background(), host, Sinks{Emit: nopEmit}, staticResolve("remote"), nil, nil, func(Incarnation) {})
+	if err != nil {
+		t.Fatal(err)
+	}
 	attachDone := make(chan error, 1)
 	go func() {
-		_, err := rt.Attach(context.Background(), host, Sinks{Emit: nopEmit}, staticResolve("remote"), nil, nil)
+		_, err := prepared.Commit(func() bool { return true })
 		attachDone <- err
 	}()
-	<-prepared
+	waitPreparedCandidate(t, rt, "remote")
 
 	if stoppedLive := rt.DespawnID("remote"); stoppedLive {
 		t.Fatal("DespawnID reported a prepared-only candidate as a live embodiment")
 	}
-	close(release)
+	close(allowRead)
 	if err := <-attachDone; err == nil {
 		t.Fatal("candidate committed after DespawnID cancelled it")
 	}
@@ -247,6 +250,23 @@ func TestDespawnIDCancelsPreparedCandidateButReportsNoLiveBody(t *testing.T) {
 	waitZombiesZero(t, rt, time.Second)
 }
 
+func waitPreparedCandidate(t *testing.T, rt *Runtime, id actor.ActorID) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for {
+		rt.mu.Lock()
+		_, ok := rt.prepared[id]
+		rt.mu.Unlock()
+		if ok {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("prepared candidate %q was not registered", id)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
 func TestPrepareHandshakeSendsNoAckAndAbortLeavesNoRuntimeState(t *testing.T) {
 	rt, _ := New(Config{})
 	host, remote := net.Pipe()
@@ -262,7 +282,7 @@ func TestPrepareHandshakeSendsNoAckAndAbortLeavesNoRuntimeState(t *testing.T) {
 		peerRead <- err
 	}()
 
-	prepared, err := rt.PrepareHandshake(context.Background(), host, Sinks{Emit: nopEmit}, staticResolve("remote"), nil, nil)
+	prepared, err := rt.PrepareHandshake(context.Background(), host, Sinks{Emit: nopEmit}, staticResolve("remote"), nil, nil, func(Incarnation) {})
 	if err != nil {
 		t.Fatal(err)
 	}

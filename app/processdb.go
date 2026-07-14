@@ -39,9 +39,9 @@ func (p *ProcessDB) Close() error {
 }
 
 // OpenProcessDB is the stop-the-world production opener. init=true creates a
-// brand-new database and refuses an existing path; init=false upgrades an
-// existing database and refuses a missing path. Exclusion is acquired before
-// OpenDB can execute any DDL.
+// brand-new database and refuses an existing path; init=false strictly reopens
+// an existing database and refuses a missing path. Exclusion is acquired before
+// SQLite is opened; reopen mode executes no DDL.
 func OpenProcessDB(path string, init bool) (_ *ProcessDB, retErr error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -99,7 +99,7 @@ func OpenProcessDB(path string, init bool) (_ *ProcessDB, retErr error) {
 	if err := syscall.Flock(int(p.inode.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
 		return nil, fmt.Errorf("app: database inode already locked: %w", err)
 	}
-	p.DB, err = OpenDB(canonical)
+	p.DB, err = openDB(canonical, init)
 	if err != nil {
 		return nil, err
 	}

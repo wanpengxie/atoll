@@ -242,14 +242,10 @@ func (h *Home) activateOne(ctx context.Context, rec storespec.Record) activation
 		return activationVerdict{kind: actBackoffHeld, until: until}
 	}
 	// ④factoryFor: the single activation-dispatch point (human → platform's
-	// own built-in factory; other kinds → the app-injected builder table).
+	// own built-in factory; other kinds → the required composition resolver).
 	factory, ok := h.factoryFor(rec)
 	if !ok {
-		reason := "class_not_found"
-		if h.builder == nil {
-			reason = "no_builder"
-		}
-		return activationVerdict{kind: actNoFactory, reason: reason}
+		return activationVerdict{kind: actNoFactory, reason: "class_not_found"}
 	}
 	// reviverStraddleHook (test-only, nil in production): the S-P20 straddle
 	// seam — fires AFTER factoryFor resolves, BEFORE the CAS below.
@@ -304,17 +300,13 @@ func (h *Home) activateOne(ctx context.Context, rec storespec.Record) activation
 }
 
 func (h *Home) reconcileActivation(ctx context.Context) {
-	var composed []actorrt.DesiredMember
-	if h.desired != nil {
-		m, err := h.desired.Members(ctx)
-		if err != nil {
-			h.logger.Error("platform.reconcile.desired_failed", "channel", string(h.channelID), "err", err)
-			return
-		}
-		composed = m
-		if ctx.Err() != nil {
-			return
-		}
+	composed, err := h.desired.Members(ctx)
+	if err != nil {
+		h.logger.Error("platform.reconcile.desired_failed", "channel", string(h.channelID), "err", err)
+		return
+	}
+	if ctx.Err() != nil {
+		return
 	}
 	actives, err := h.cs.Registry.ListActive(ctx)
 	if err != nil {
@@ -367,16 +359,6 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		}
 		if actual[id] {
 			got, recorded := h.builtEpoch[id]
-			// Epoch zero is the migration generation. A live local body at the
-			// moment this in-memory account first appears necessarily completed a
-			// runtime build, so adopt it once instead of churning every pre-epoch
-			// channel/test fixture. Non-zero generations never infer: they require
-			// an explicit post-build registration.
-			if !recorded && want.Epoch == 0 {
-				h.builtEpoch[id] = 0
-				recorded = true
-				got = 0
-			}
 			if recorded && got == want.Epoch {
 				h.clearReviveBackoff(id)
 				continue
@@ -469,9 +451,9 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 // ActorFactory that embodies it. A human member (Kind==KindHuman) resolves to the
 // platform's OWN built-in human cell factory — user域 supply is platform internal
 // 政 (the per-channel human member's authority lives only in this channel's
-// registry, unreachable by the app), so the app-injected builder is never asked
-// for it. Every other kind resolves through the组合域 builder table (nil builder →
-// not-found). Kind is caller-held (rec.Kind), never re-answered.
+// registry, unreachable by the app), so the composition resolver is never asked
+// for it. Every other kind resolves through the required composition view.
+// Kind is caller-held (rec.Kind), never re-answered.
 func (h *Home) factoryFor(rec storespec.Record) (platform.ActorFactory, bool) {
 	if rec.Kind == actor.KindHuman {
 		// 装配链 step② (gateway 期 v0.4.1 勘误: 槽随户籍准入 ensure): the per-identity
@@ -484,10 +466,7 @@ func (h *Home) factoryFor(rec storespec.Record) (platform.ActorFactory, bool) {
 		h.EnsureSubjectSlot(rec.ID)
 		return humanCellFactory(h, rec.ID), true
 	}
-	if h.builder == nil {
-		return platform.ActorFactory{}, false
-	}
-	return h.builder.Lookup(rec.ID)
+	return h.factories.Lookup(rec.ID)
 }
 
 // recheckResult classifies a post-build straddle recheck (verifyPostBuild).

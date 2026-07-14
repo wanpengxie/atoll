@@ -13,18 +13,11 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
-// ErrNoBuilder is returned by spawnHandle.Fork when no builder is wired into the
-// home yet — the injection point contract is in place but its implementation (the
-// domain's class→factory table) has not been injected. A fork with no builder is
-// a structural refusal, never a silent no-op: the parent gets a clear error
-// rather than a phantom child id.
-var ErrNoBuilder = errors.New("platform: no builder wired — fork unavailable")
-
-// ErrClassNotFound is returned by spawnHandle.Fork when the builder has no
+// ErrClassNotFound is returned by spawnHandle.Fork when the resolver has no
 // factory registered under spec.Class — a structural reject, not silent.
-var ErrClassNotFound = errors.New("platform: fork class not found in builder")
+var ErrClassNotFound = errors.New("platform: fork class not found")
 
-// CapsFactoryBuilder is the PLATFORM-layer factory table for the two mint
+// ActorFactoryResolver is the platform-layer factory table for the two mint
 // triggers that resolve a factory AFTER the original admission closure is gone —
 // fork (by Class) and activation (by id). It resolves either key to the actor's
 // ActorFactory (spec §4 S3's "def") — the SAME shape activation consumes.
@@ -42,7 +35,7 @@ var ErrClassNotFound = errors.New("platform: fork class not found in builder")
 // "platform承接 the construction" posture the wiring spec pins for BOTH
 // actorrt.Builder entries: the runtime contract is not bent to carry caps; the
 // platform seam owns the weld.
-type CapsFactoryBuilder interface {
+type ActorFactoryResolver interface {
 	// LookupByClass resolves a caller-declared, opaque implementation-selection key
 	// to its ActorFactory — fork's entry (ForkSpec.Class). Kind is NOT
 	// re-answered here (it is caller-held on ForkSpec.Kind). It takes the
@@ -79,20 +72,20 @@ type capsAssembler func(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnati
 // against it inside the substrate (childID's owner must equal inc). The child's
 // truth-handle never leaves substrate — Fork returns only the child's NAME.
 type spawnHandle struct {
-	inc      actorrt.Incarnation
-	rt       *actorrt.Runtime
-	builder  CapsFactoryBuilder // nil until the class→factory table is injected.
-	assemble capsAssembler      // the shared caps seam assembler (Home.buildCaps); never nil.
-	hooks    actorbase.Hooks    // the actorbase engine's per-host wiring (spec §3); a fork child inherits its parent home's hooks.
-	logger   *slog.Logger       // oplog seam (nil-safe: falls back to discard); the second admit/remove-shaped lifecycle链路 (spec telemetry C8).
+	inc       actorrt.Incarnation
+	rt        *actorrt.Runtime
+	factories ActorFactoryResolver
+	assemble  capsAssembler   // the shared caps seam assembler (Home.buildCaps); never nil.
+	hooks     actorbase.Hooks // the actorbase engine's per-host wiring (spec §3); a fork child inherits its parent home's hooks.
+	logger    *slog.Logger    // oplog seam (nil-safe: falls back to discard); the second admit/remove-shaped lifecycle链路 (spec telemetry C8).
 }
 
 // newSpawnHandle welds a SpawnHandle to parent incarnation inc. rt/assemble are
-// always present; builder may be nil (see ErrNoBuilder). logger is variadic and
+// All construction dependencies are required. logger is variadic and
 // nil-safe (falls back to a discard logger) so every EXISTING call site
 // (caps.go/sysanchorcaps.go, out of this cluster's file scope) keeps compiling
 // unchanged with no oplog wired yet; a future caller opts in by passing one.
-func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, builder CapsFactoryBuilder, assemble capsAssembler, hooks actorbase.Hooks, logger ...*slog.Logger) actorrt.SpawnHandle {
+func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, factories ActorFactoryResolver, assemble capsAssembler, hooks actorbase.Hooks, logger ...*slog.Logger) actorrt.SpawnHandle {
 	var lg *slog.Logger
 	if len(logger) > 0 {
 		lg = logger[0]
@@ -100,7 +93,7 @@ func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, builder CapsFa
 	if lg == nil {
 		lg = slog.New(slog.DiscardHandler)
 	}
-	return spawnHandle{inc: inc, rt: rt, builder: builder, assemble: assemble, hooks: hooks, logger: lg}
+	return spawnHandle{inc: inc, rt: rt, factories: factories, assemble: assemble, hooks: hooks, logger: lg}
 }
 
 // Fork mints a child owned by this handle's parent incarnation.
@@ -113,17 +106,12 @@ func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, builder CapsFa
 // not a raw closure handed straight through. This handle derives the child name
 // and drives the substrate fork primitive.
 func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
-	if h.builder == nil {
-		h.logger.Warn("actorrt.fork.rejected", "parent", string(h.inc.ID()),
-			"class", spec.Class, "kind", string(spec.Kind), "error", ErrNoBuilder)
-		return "", ErrNoBuilder
-	}
 	// childID = parentID + "/" + NameHint (namespace derivation — no substrate id
 	// allocator). Derived BEFORE the builder lookup: the domain's Build needs the
 	// child's id to construct the instance (InstanceSpec{ID} — a provider
 	// constructor rejects an empty ID), so the class→factory resolve is id-aware.
 	childID := h.inc.ID() + "/" + actor.ActorID(spec.NameHint)
-	factory, ok := h.builder.LookupByClass(childID, spec.Class, spec.Config)
+	factory, ok := h.factories.LookupByClass(childID, spec.Class, spec.Config)
 	if !ok {
 		h.logger.Warn("actorrt.fork.rejected", "parent", string(h.inc.ID()),
 			"child", string(childID), "class", spec.Class, "kind", string(spec.Kind),

@@ -6,6 +6,75 @@ cd "$ROOT"
 
 failures=0
 
+labels=(
+	"retired app composition table"
+	"retired composition migration marker"
+	"retired default SQL column"
+	"retired HTTP plan endpoint"
+	"retired actor factory branch"
+	"retired handshake resolver interface"
+	"client-declared daemon identity"
+	"alternate Home desired/builder source"
+	"optional composition resolver"
+	"optional attach authorities"
+	"link-local port ownership"
+	"alternate compute plan sink"
+	"second actor factory representation"
+	"one-step runtime attach API"
+	"unlocked public app DB opener"
+	"pre-release adoption/repair semantics"
+)
+
+patterns=(
+	'channel_actors'
+	'composition_migrated'
+	'(channels|c)\.default_agent|ADD COLUMN default_agent|DROP COLUMN default_agent'
+	'/compute/plan'
+	'\bLegacy\b'
+	'HandshakeResolveFunc|AttachHandshake'
+	'\bComputeID\b|\bBoundID\b|json:"(compute_id|bound_id)"'
+	'cfg\.Desired|cfg\.Builder'
+	'CompositionResolver[[:space:]]*!=[[:space:]]*nil'
+	'a\.(declarations|composition|registry|daemonAuthority|actorLock|portIndex)[[:space:]]*(!=|==)[[:space:]]*nil'
+	'ports[[:space:]]*=[[:space:]]*map\[actor\.ActorID\]actorrt\.Incarnation|link-local quiet-stop fallback'
+	'\bPlanSink\b|\bplanSink\b'
+	'\bfullCaps\b|func[[:space:]]+CapsFactory[[:space:]]*\('
+	'func[[:space:]]*\(r[[:space:]]+\*Runtime\)[[:space:]]+Attach\b|PrepareHandshakeObserved|CommitWhile'
+	'func[[:space:]]+OpenDB[[:space:]]*\('
+	'migration generation|pre-epoch|repairs inactive|half-written.*repaired|old daemon build|historical.*migration'
+)
+
+samples=(
+	'var table = "channel_actors"'
+	'var marker = "composition_migrated"'
+	'query := "ALTER TABLE channels ADD COLUMN default_agent TEXT"'
+	'const endpoint = "/compute/plan"'
+	'type Legacy struct{}'
+	'type HandshakeResolveFunc func()'
+	'type request struct { ComputeID string }'
+	'use(cfg.Desired)'
+	'if cfg.CompositionResolver != nil {}'
+	'if a.declarations == nil {}'
+	'ports = map[actor.ActorID]actorrt.Incarnation{}'
+	'var sink PlanSink'
+	'func CapsFactory() {}'
+	'func (r *Runtime) Attach() {}'
+	'func OpenDB(path string) {}'
+	'const mode = "pre-epoch"'
+)
+
+if (( ${#labels[@]} != ${#patterns[@]} || ${#patterns[@]} != ${#samples[@]} )); then
+	echo "[link-seam-retired] internal rule table length mismatch" >&2
+	exit 2
+fi
+
+for i in "${!patterns[@]}"; do
+	if ! printf '%s\n' "${samples[$i]}" | rg -q "${patterns[$i]}"; then
+		echo "[link-seam-retired] self-test failed: ${labels[$i]}" >&2
+		exit 2
+	fi
+done
+
 check_live() {
 	local label=$1
 	local pattern=$2
@@ -34,12 +103,9 @@ check_live() {
 	done <<< "$hits"
 }
 
-check_live "app composition source" 'channel_actors'
-check_live "composition migration marker" 'composition_migrated'
-check_live "retired default SQL column" '(channels|c)\.default_agent|ADD COLUMN default_agent|DROP COLUMN default_agent'
-check_live "retired HTTP plan endpoint" '/compute/plan'
-check_live "retired actor factory branch" '\bLegacy\b'
-check_live "retired handshake resolver interface" 'HandshakeResolveFunc|AttachHandshake'
+for i in "${!patterns[@]}"; do
+	check_live "${labels[$i]}" "${patterns[$i]}"
+done
 
 if (( failures > 0 )); then
 	echo "[link-seam-retired] FAIL: ${failures} live retired-symbol hit(s)" >&2

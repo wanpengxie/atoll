@@ -49,6 +49,12 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	if cfg.ChannelID == "" {
 		return nil, fmt.Errorf("platform: ChannelID required")
 	}
+	if cfg.CompositionResolver == nil {
+		return nil, fmt.Errorf("platform: CompositionResolver required")
+	}
+	if cfg.DaemonAuthority == nil {
+		return nil, fmt.Errorf("platform: DaemonAuthority required")
+	}
 	h := &Home{channelID: cfg.ChannelID, logger: logger, closeDone: make(chan struct{}), faults: faults}
 	if faults != nil && faults.created != nil {
 		faults.created(h)
@@ -266,14 +272,9 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	h.presenceFold = presenceFold
 	h.logger = logger
 	h.nowMs = nowMs
-	if cfg.CompositionResolver != nil {
-		view := &compositionView{h: h, resolver: cfg.CompositionResolver}
-		h.builder = view
-		h.desired = view
-	} else {
-		h.builder = cfg.Builder
-		h.desired = cfg.Desired
-	}
+	view := &compositionView{h: h, resolver: cfg.CompositionResolver}
+	h.factories = view
+	h.desired = view
 	h.prevEagerDesired = map[actor.ActorID]desiredIncarnation{}
 	h.builtEpoch = map[actor.ActorID]int64{}
 	h.portIndex = map[actor.ActorID]homePortEntry{}
@@ -324,38 +325,26 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	//      behaviourally identical to a local one (transport neutrality).
 	//      Attached-port obs enters the runtime's one population subscription
 	//      just like local-cell obs.
-	acceptorMembership := storespec.MembershipControlPlane(cs.Membership)
-	if faults != nil && faults.wrapMembership != nil {
-		acceptorMembership = faults.wrapMembership(cs.Membership)
-	}
-	var linkComposition storespec.CompositionReader
-	var declarationCoordinator link.DeclarationCoordinator
-	if cfg.CompositionResolver != nil {
-		linkComposition = cs.Composition
-		declarationCoordinator = homeDeclarationCoordinator{h: h}
-	}
-	var daemonAuthority link.DaemonAuthority
-	if cfg.DaemonAuthority != nil {
-		daemonAuthority = daemonAuthorityAdapter{inner: cfg.DaemonAuthority}
-	}
-	links := link.NewAcceptor(link.Config{
+	links, err := link.NewAcceptor(link.Config{
 		Minter:             minter,
 		Access:             cs.Access,
 		Schedule:           schedMinter,
 		Runtime:            rt,
-		Membership:         acceptorMembership,
 		Registry:           cs.Registry,
-		Composition:        linkComposition,
-		Declarations:       declarationCoordinator,
+		Composition:        cs.Composition,
+		Declarations:       homeDeclarationCoordinator{h: h},
 		ChannelID:          cfg.ChannelID,
 		Logger:             logger,
 		CancelRequest:      h.handleCancelUpstream,
 		StorageHostControl: homeStorageHostControl{outbox: cs.Outbox, timeout: cfg.ReservationTimeout, logger: logger},
 		PlanProvider:       boundPlanProvider{channelID: cfg.ChannelID, provider: cfg.PlanProvider},
-		DaemonAuthority:    daemonAuthority,
+		DaemonAuthority:    daemonAuthorityAdapter{inner: cfg.DaemonAuthority},
 		ActorLock:          h.actorGates.lock,
 		PortIndex:          homePortIndex{h: h},
 	})
+	if err != nil {
+		return nil, fmt.Errorf("platform: construct link acceptor: %w", err)
+	}
 	h.links = links
 
 	// 12. Activate: construct is complete (every fallible preparation done, all

@@ -62,7 +62,7 @@ func (m lateStorageMounts) ListStorageDaemons(ctx context.Context, _ channelpkg.
 	if a == nil {
 		return nil, nil // no candidates before the Acceptor exists — an honest empty list, not an error
 	}
-	ids := a.AttachedComputeIDs()
+	ids := a.AttachedDaemonIDs()
 	out := make([]accessdoor.StorageMount, 0, len(ids))
 	for _, id := range ids {
 		out = append(out, accessdoor.StorageMount{DaemonID: id, Online: true})

@@ -32,7 +32,7 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 	dbPath := filepath.Join(tmpDir, "app.db")
 	chDBDir := filepath.Join(tmpDir, "channels")
 
-	db, err := app.OpenDB(dbPath)
+	db, err := openTestAppDB(t, dbPath)
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}

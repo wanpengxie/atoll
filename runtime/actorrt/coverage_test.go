@@ -476,7 +476,7 @@ func TestNewPortHandshakeReadError(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, remoteConn := net.Pipe()
 	remoteConn.Close() // no handshake — read fails immediately
-	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil, nil); err == nil {
+	if _, err := attachTest(rt, context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil, nil); err == nil {
 		t.Fatal("Attach accepted a connection that never sent a handshake")
 	}
 }
@@ -493,7 +493,7 @@ func TestNewPortHandshakeDecodeError(t *testing.T) {
 		// HandshakePayload.
 		_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: json.RawMessage(`12345`)})
 	}()
-	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil, nil); err == nil {
+	if _, err := attachTest(rt, context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("x"), nil, nil); err == nil {
 		t.Fatal("Attach accepted a handshake with an undecodable payload")
 	}
 }
@@ -514,7 +514,7 @@ func TestNewPortHandshakeAckWriteError(t *testing.T) {
 		_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		remoteConn.Close()
 	}()
-	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil); err == nil {
+	if _, err := attachTest(rt, context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil); err == nil {
 		t.Fatal("Attach succeeded despite a failed ack write")
 	}
 	if ids := rt.LiveIDs(); len(ids) != 0 {
@@ -547,7 +547,7 @@ func TestAttachAckFailurePreservesIncumbent(t *testing.T) {
 		_ = codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: payload})
 		_ = remoteConn.Close() // force the host's ACK write to fail
 	}()
-	if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil); err == nil {
+	if _, err := attachTest(rt, context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-1"), nil, nil); err == nil {
 		t.Fatal("replacement succeeded despite failed ACK")
 	}
 

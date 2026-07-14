@@ -1,18 +1,33 @@
 package link
 
 import (
+	"context"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
 )
 
+func newLifecycleAcceptor() *Acceptor {
+	ctx, cancel := context.WithCancel(context.Background())
+	return &Acceptor{
+		ctx:       ctx,
+		cancel:    cancel,
+		closeDone: make(chan struct{}),
+		logger:    slog.New(slog.DiscardHandler),
+	}
+}
+
 func TestAcceptorServeCloseAdmissionStraddle(t *testing.T) {
-	a := NewAcceptor(Config{})
-	parked, release := make(chan struct{}), make(chan struct{})
-	a.admissionHook = func() { close(parked); <-release }
-	admitted := make(chan bool, 1)
-	go func() { admitted <- a.beginServe() }()
-	<-parked
+	a := newLifecycleAcceptor()
+	// Linearize one admitted Serve while holding the same barrier beginServe and
+	// Close use. This exercises the actual wait-group/close ordering without a
+	// production hook.
+	a.admissionMu.Lock()
+	if a.closed {
+		t.Fatal("fresh acceptor is closed")
+	}
+	a.wg.Add(1)
 	closed := make(chan struct{})
 	go func() { _ = a.closeWithin(time.Second); close(closed) }()
 	select {
@@ -20,10 +35,7 @@ func TestAcceptorServeCloseAdmissionStraddle(t *testing.T) {
 		t.Fatal("Close crossed an in-flight admission")
 	case <-time.After(20 * time.Millisecond):
 	}
-	close(release)
-	if !<-admitted {
-		t.Fatal("admission that linearized before Close was rejected")
-	}
+	a.admissionMu.Unlock()
 	select {
 	case <-closed:
 		t.Fatal("Close returned before admitted Serve completed")
@@ -47,7 +59,7 @@ func TestAcceptorServeCloseAdmissionStraddle(t *testing.T) {
 // Acceptor's admission barrier: a callback admitted before Close is joined, so
 // it cannot run against link state after Close returns.
 func TestAcceptorCloseJoinsOwnedDelayedCallback(t *testing.T) {
-	a := NewAcceptor(Config{})
+	a := newLifecycleAcceptor()
 	entered, release := make(chan struct{}), make(chan struct{})
 	a.afterOwned(0, func() {
 		close(entered)
@@ -88,7 +100,7 @@ func TestControlWorkerTimeoutAccountedThroughJoin(t *testing.T) {
 	}
 	<-entered
 	ls.kill("test-close", nil)
-	a := NewAcceptor(Config{})
+	a := newLifecycleAcceptor()
 	joined := make(chan struct{})
 	go func() {
 		a.joinLinkWorkers(ls, &actorGate{}, "daemon-x", 20*time.Millisecond, 20*time.Millisecond)
@@ -120,7 +132,7 @@ func TestActorGateSealFencesLateAdmission(t *testing.T) {
 	if !ls.waitControlWorkers(time.Second) {
 		t.Fatal("control worker did not exit after writer close")
 	}
-	a := NewAcceptor(Config{})
+	a := newLifecycleAcceptor()
 	gate := &actorGate{}
 	if !gate.admit() {
 		t.Fatal("pre-seal admission refused")
@@ -162,7 +174,7 @@ func TestActorGateAdmitRaceWithSeal(t *testing.T) {
 				}
 			}()
 		}
-		if !gate.sealAndWait(time.Second) {
+		if joined, _ := gate.sealAndWait(time.Second); !joined {
 			t.Fatal("gate did not converge")
 		}
 		admitted.Wait()
@@ -177,7 +189,10 @@ func TestActorGateTimeoutObserversShareOneTerminal(t *testing.T) {
 	const observers = 8
 	results := make(chan bool, observers)
 	for range observers {
-		go func() { results <- gate.sealAndWait(10 * time.Millisecond) }()
+		go func() {
+			joined, _ := gate.sealAndWait(10 * time.Millisecond)
+			results <- joined
+		}()
 	}
 	for range observers {
 		if <-results {
@@ -185,21 +200,21 @@ func TestActorGateTimeoutObserversShareOneTerminal(t *testing.T) {
 		}
 	}
 	gate.done()
-	if !gate.sealAndWait(time.Second) {
-		t.Fatal("terminal observer did not see the shared completion edge")
-	}
 	gate.mu.Lock()
 	done := gate.waitDone
 	gate.mu.Unlock()
 	select {
 	case <-done:
-	default:
-		t.Fatal("shared terminal channel was not closed")
+	case <-time.After(time.Second):
+		t.Fatal("shared terminal channel was not closed after worker completion")
+	}
+	if joined, _ := gate.sealAndWait(time.Second); !joined {
+		t.Fatal("terminal observer did not see the settled completion edge")
 	}
 }
 
 func TestAcceptorConcurrentCloseCountsOneLeak(t *testing.T) {
-	a := NewAcceptor(Config{})
+	a := newLifecycleAcceptor()
 	if !a.beginServe() {
 		t.Fatal("initial Serve rejected")
 	}

@@ -17,9 +17,43 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+type forwarderAuthorities struct{}
+
+func (forwarderAuthorities) ApplyComputeDeclaration(context.Context, link.PortOwner, string, []storespec.ComputeDeclaration) ([]storespec.ComputeDeclaration, error) {
+	return nil, nil
+}
+func (forwarderAuthorities) LookupComposition(context.Context, actor.ActorID) (storespec.CompositionRecord, bool, error) {
+	return storespec.CompositionRecord{}, false, nil
+}
+func (forwarderAuthorities) LookupCompositionPrincipal(context.Context, string) (storespec.CompositionRecord, bool, error) {
+	return storespec.CompositionRecord{}, false, nil
+}
+func (forwarderAuthorities) ListComposition(context.Context) ([]storespec.CompositionRecord, error) {
+	return nil, nil
+}
+func (forwarderAuthorities) DefaultComposition(context.Context) (actor.ActorID, bool, error) {
+	return "", false, nil
+}
+func (forwarderAuthorities) Lookup(context.Context, actor.ActorID) (storespec.Record, bool, error) {
+	return storespec.Record{}, false, nil
+}
+func (forwarderAuthorities) Exists(context.Context, actor.ActorID) (bool, error)    { return false, nil }
+func (forwarderAuthorities) ListActive(context.Context) ([]storespec.Record, error) { return nil, nil }
+func (forwarderAuthorities) LockAndValidate(context.Context, string, channel.ID) (func(), error) {
+	return func() {}, nil
+}
+func (forwarderAuthorities) Register(link.PortOwner, actorrt.Incarnation) {}
+func (forwarderAuthorities) Remove(link.PortOwner, actorrt.Incarnation)   {}
+func (forwarderAuthorities) Take(link.PortOwner, actor.ActorID) (actorrt.Incarnation, bool) {
+	return actorrt.Incarnation{}, false
+}
+func (forwarderAuthorities) TakeOwner(link.PortOwner) []actorrt.Incarnation { return nil }
 
 // forwarderTestStorageHostControl is a minimal link.StorageHostControl stub:
 // ReconcilePull answers either a canned reject (err != nil, surfaced by the
@@ -81,17 +115,27 @@ var _ StorageHost = (*forwarderTestStorageHost)(nil)
 func dialForwarderRig(t *testing.T, shc link.StorageHostControl) *link.Dialer {
 	t.Helper()
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	acc := link.NewAcceptor(link.Config{
+	auth := forwarderAuthorities{}
+	acc, err := link.NewAcceptor(link.Config{
 		Runtime:            rt,
 		ChannelID:          channel.ID("test-channel"),
 		StorageHostControl: shc,
+		Declarations:       auth,
+		Composition:        auth,
+		Registry:           auth,
+		DaemonAuthority:    auth,
+		ActorLock:          func(actor.ActorID) func() { return func() {} },
+		PortIndex:          auth,
 	})
+	if err != nil {
+		t.Fatalf("NewAcceptor: %v", err)
+	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		acc.Serve(w, req, "daemon-1")
 	}))
 	t.Cleanup(func() { _ = acc.Close(); srv.Close() })
 
-	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1", nil, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], nil, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

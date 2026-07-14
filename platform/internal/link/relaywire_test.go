@@ -159,15 +159,14 @@ func newCapsRig(t *testing.T) *capsRig {
 	t.Helper()
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
 	r := &capsRig{access: &fakeAccessMinter{}, sched: &fakeScheduleMinter{}}
-	r.acc = link.NewAcceptor(link.Config{
-		Minter:     &stubMinter{},
-		Access:     r.access,
-		Schedule:   r.sched,
-		Runtime:    rt,
-		Membership: &stubMembership{},
-		ChannelID:  testChannelID,
-		LeasePing:  5 * time.Second,
-		LeaseTTL:   30 * time.Second,
+	r.acc = newTestAcceptor(t, link.Config{
+		Minter:    &stubMinter{},
+		Access:    r.access,
+		Schedule:  r.sched,
+		Runtime:   rt,
+		ChannelID: testChannelID,
+		LeasePing: 5 * time.Second,
+		LeaseTTL:  30 * time.Second,
 	})
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.acc.Serve(w, req, "daemon-1")
@@ -181,8 +180,8 @@ func (r *capsRig) wsURL() string { return "ws" + r.srv.URL[4:] }
 // dialArms attaches a daemon hosting one actor and returns its port-side arms.
 func dialArms(t *testing.T, r *capsRig, id actor.ActorID) (link.CellArms, *link.Dialer) {
 	t.Helper()
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -368,23 +367,22 @@ func TestScheduleArmCellPortParity(t *testing.T) {
 func dialArmsWithMinters(t *testing.T, access accessdoor.AccessMinter, sched schedule.Minter, id actor.ActorID) (link.CellArms, *link.Dialer) {
 	t.Helper()
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	acc := link.NewAcceptor(link.Config{
-		Minter:     &stubMinter{},
-		Access:     access,
-		Schedule:   sched,
-		Runtime:    rt,
-		Membership: &stubMembership{},
-		ChannelID:  testChannelID,
-		LeasePing:  5 * time.Second,
-		LeaseTTL:   30 * time.Second,
+	acc := newTestAcceptor(t, link.Config{
+		Minter:    &stubMinter{},
+		Access:    access,
+		Schedule:  sched,
+		Runtime:   rt,
+		ChannelID: testChannelID,
+		LeasePing: 5 * time.Second,
+		LeaseTTL:  30 * time.Second,
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		acc.Serve(w, req, "daemon-1")
 	}))
 	t.Cleanup(func() { _ = acc.Close(); srv.Close(); rt.StopAll() })
 
-	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "daemon-1",
-		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:],
+		[]link.Declaration{{ActorID: id, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

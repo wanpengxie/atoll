@@ -114,9 +114,8 @@ type laneTransfer struct {
 // links maps each attached daemon's confirmed id (boundID) to its live link
 // session, so a redeem arriving on the REQUESTER's link (handleLaneRedeem) can
 // open a fresh lane substream toward the TARGET daemon's link (the relay). It
-// is keyed by boundID (not the Serve-level pre-auth daemonID that a.links uses
-// for Kick) because a transfer's target/requester ids ARE boundIDs — and in
-// dev self-declared mode (empty auth id) boundID is the only id there is. One
+// is keyed by the authenticated bound daemon id because transfer target and
+// requester ids use that same authority. One
 // entry per daemon (most-recent link wins an overlapping reconnect); registered
 // at attach success, deregistered pointer-guarded on link teardown.
 type laneState struct {

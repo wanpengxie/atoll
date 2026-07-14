@@ -3,7 +3,7 @@ package compute
 // compute.go is the daemon (attached-compute) assembly root: link.Dial (connect
 // to the channel home, no actors declared yet) → actorrt.Runtime (business
 // cells, built once and outlives any single link) → the daemon's own reconcile
-// ring (computeRing), which diffs Config.Desired against the locally-live
+// ring (computeRing), which diffs the authenticated PlanSource snapshot against the locally-live
 // set and drives Reattach → OpenStream → SpawnIfAbsent → StartStream per actor.
 // Cloud daemon and user-proxy daemon are the same binary; cmd selects concrete
 // actors.
@@ -16,8 +16,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-
-	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
@@ -38,37 +36,19 @@ const defaultResyncInterval = 5 * time.Minute
 // Config configures the attached compute. ServerWS carries any auth
 // credential in its query string (the ?key= the app layer resolves on WS
 // upgrade) — the link layer is auth-agnostic, so there is no separate key field.
-//
-// Desired and Builder are the two halves of the daemon's OWN reconcile ring
-// (§10.13 推导2: the reconcile paradigm is host-neutral — every host that carries
-// live embodiments runs the same diff loop over its own desired source). Neither
-// may be nil: a compute with no desired source or no builder never turns the
-// ring at all, so Run fails fast rather than silently running an empty
-// daemon (same nil discipline as home.Config.Builder — a structural refusal, never
-// a phantom no-op).
 type Config struct {
-	ServerWS  string
-	ComputeID string
-	Logger    *slog.Logger
-	// Desired is the reconcile ring's read of intent — the same DesiredSource
-	// contract the home's eager-activation ring reads (AlwaysOn members only;
-	// lazy activation does not apply to a daemon, which has no delivery seam of
-	// its own to activate on demand against).
-	Desired actorrt.DesiredSource
-	// Builder resolves each desired member's factory. nil is a fail-fast
-	// misconfiguration, not "no actors" (an intentionally-empty daemon should
-	// still supply a Builder that finds nothing).
-	Builder Builder
-	// PlanSink receives authenticated link plan snapshots. When non-nil the ring
-	// pulls before each desired read; sink publication must atomically update its
-	// Desired and Builder faces, retaining LKG on errors.
-	PlanSink PlanSink
+	ServerWS string
+	Logger   *slog.Logger
+	// PlanSource is the sole daemon intent/build authority. Each reconcile pulls
+	// the authenticated link plan and atomically applies it here; Members and
+	// Lookup must read the same last-known-good snapshot.
+	PlanSource PlanSource
 	// Poll is the ring's desired-source poll period. <=0 → defaultComputePoll.
 	Poll time.Duration
 	// Resync is the ring's slow-cadence periodic full-set re-declaration period
 	// (kubelet periodic resync 半, #7): every Resync the ring unconditionally
 	// Reattaches its full current declared set — even with no missing/削 diff —
-	// so the home's reconcileHost re-runs and absorbs any account-vs-reality
+	// so the home's declaration decision table re-runs and absorbs any account-vs-reality
 	// drift into bounded convergence (a削章 dereg-write that failed once, a late
 	// migration, any future divergence source). Level-triggered backstop; the
 	// Poll cadence is the fast edge-driven half. <=0 → defaultResyncInterval.
@@ -106,12 +86,14 @@ type Config struct {
 	LocalFileOpener LocalFileOpener
 }
 
-type PlanSink interface {
+type PlanSource interface {
 	ApplyPlan([]platform.PlanActor) error
+	actorrt.DesiredSource
+	ActorFactorySource
 }
 
 // Run connects to the channel home and runs the daemon's own reconcile
-// ring against cfg.Desired: it hosts every AlwaysOn desired member as a cell,
+// ring against the authenticated plan snapshot: it hosts every AlwaysOn member as a cell,
 // declaring it to the home (Reattach) before opening its stream. The home
 // dispatches envelopes down each actor's link stream into the cell's mailbox;
 // the cell's emits flow UP that same stream as native ipc (blocking on the
@@ -133,15 +115,8 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
-	if cfg.Desired == nil {
-		return fmt.Errorf("compute: Run requires a Desired source (nil never turns the ring — fail-fast, not a silent no-op)")
-	}
-	if cfg.Builder == nil {
-		return fmt.Errorf("compute: Run requires a Builder (nil never resolves a factory — fail-fast, not a silent no-op)")
-	}
-	computeID := cfg.ComputeID
-	if computeID == "" {
-		computeID = uuid.NewString()
+	if cfg.PlanSource == nil {
+		return fmt.Errorf("compute: Run requires one authenticated PlanSource")
 	}
 	poll := cfg.Poll
 	if poll <= 0 {
@@ -163,7 +138,7 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 		// into the shutdown log instead of hanging Run's teardown forever.
 		rt.StopAll()
 		if leaked := rt.DrainZombies(0); len(leaked) > 0 {
-			logger.Warn("compute.close.zombies_leaked", "compute", computeID, "count", len(leaked), "actors", leaked)
+			logger.Warn("compute.close.zombies_leaked", "count", len(leaked), "actors", leaked)
 		}
 	}()
 	watcher := &cellDownWatcher{down: map[actor.ActorID]cellDownEntry{}}
@@ -240,8 +215,7 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 		watcher:     watcher,
 		obsFwd:      obsFwd,
 		cancelFwd:   cancelFwd,
-		builder:     cfg.Builder,
-		planSink:    cfg.PlanSink,
+		source:      cfg.PlanSource,
 		logger:      logger,
 		prevCurrent: map[actor.ActorID]desiredIncarnation{},
 		builtEpoch:  map[actor.ActorID]int64{},
@@ -257,7 +231,7 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 		if cfg.StorageHost != nil {
 			dialCfg.AllocHandler = storageFwd.handleAlloc
 		}
-		d, err := link.Dial(ctx, cfg.ServerWS, computeID, nil, dialCfg, logger)
+		d, err := link.Dial(ctx, cfg.ServerWS, nil, dialCfg, logger)
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil
@@ -286,7 +260,7 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 		// dedicated open step here.
 
 		linkStart := time.Now()
-		graceful := ring.runLink(ctx, d, cfg.Desired, poll, resync)
+		graceful := ring.runLink(ctx, d, poll, resync)
 		_ = d.Close() // idempotent: a no-op if the link already tore itself down.
 		if graceful {
 			return nil

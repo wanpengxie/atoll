@@ -9,12 +9,12 @@ import (
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
 
-// Builder resolves a desired member's id to its ActorFactory — the
+// ActorFactorySource resolves a desired member's id to its ActorFactory — the
 // daemon-side counterpart of the reconcile ring's activation resolve (mirrors
-// CapsFactoryBuilder.Lookup, but scoped to compute: a daemon never forks, so it
+// Home's actor-factory resolver, but scoped to compute: a daemon never forks, so it
 // carries no LookupByClass entry). Kind is never re-answered here — it is
 // caller-held on the DesiredMember the reconcile loop already read.
-type Builder interface {
+type ActorFactorySource interface {
 	Lookup(id actor.ActorID) (def platform.ActorFactory, ok bool)
 }
 

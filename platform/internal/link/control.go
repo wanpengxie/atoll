@@ -33,7 +33,6 @@ type Declaration struct {
 // the wire vocabulary.
 type AttachRequest struct {
 	Proto        int           `json:"proto"`
-	ComputeID    string        `json:"compute_id"`
 	Declarations []Declaration `json:"declarations"`
 }
 
@@ -43,19 +42,10 @@ type AttachReply struct {
 	ChannelID channel.ID `json:"channel_id"`
 	Accepted  bool       `json:"accepted"`
 	Reason    string     `json:"reason,omitempty"`
-	// DaemonID is the AUTHORITATIVE compute id the home just counted this
-	// link online under (期11 spec §4.7's "AttachReply 增 daemonID 回传") —
-	// the pre-authenticated daemonID the Acceptor received from the app
-	// layer, or (dev/self-declared mode, daemonID=="") the ComputeID the
-	// daemon itself sent. Today a daemon that dials with no explicit
-	// ComputeID gets a random uuid from compute.Run and never learns whether
-	// the home overrode it (Acceptor.handleAttach's computeID var already
-	// does exactly that override when daemonID != ""). The daemon updates
-	// its OWN identity on receipt (Dialer.DaemonID) — replacing the random
-	// uuid — because per-channel resource root paths, AllocRequest routing,
-	// and reservation/tombstone ownership all need this SAME value to be the
-	// one unambiguous authority, not a value the daemon merely hoped the
-	// home would agree with.
+	// DaemonID is the authenticated compute id the app bound to this link before
+	// handing it to Home. The peer never supplies an identity claim on the link
+	// protocol; this reply lets it key local resource ownership by the server's
+	// authoritative identity.
 	DaemonID string `json:"daemon_id,omitempty"`
 }
 
@@ -71,9 +61,7 @@ const (
 	ctrlPlanReply   controlKind = "plan_reply"
 )
 
-type PlanPull struct {
-	BoundID string `json:"bound_id"`
-}
+type PlanPull struct{}
 
 type PlanReply struct {
 	Actors []platform.PlanActor `json:"actors"`

@@ -102,7 +102,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	}
 
 	runErr := make(chan error, 1)
-	desired, builder := staticActorCompute([]platform.ActorDecl{{
+	plan := authenticatedTestPlan([]platform.ActorDecl{{
 		ID:   xhsID,
 		Kind: actor.KindTool,
 		Factory: platform.ActorFactory{Proc: xhs.Def(xhs.Config{
@@ -113,7 +113,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	}})
 	go func() {
 		runErr <- compute.Run(ctx,
-			compute.Config{ServerWS: serverWS, Logger: logger, Desired: desired, Builder: builder},
+			compute.Config{ServerWS: serverWS, Logger: logger, PlanSource: plan},
 		)
 	}()
 	t.Cleanup(func() {
@@ -318,7 +318,7 @@ func TestXHSLiveActorStatus(t *testing.T) {
 		t.Fatalf("pre-admit tool:xhs: %v", err)
 	}
 	runErr := make(chan error, 1)
-	desired, builder := staticActorCompute([]platform.ActorDecl{{
+	plan := authenticatedTestPlan([]platform.ActorDecl{{
 		ID:   xhsID,
 		Kind: actor.KindTool,
 		Factory: platform.ActorFactory{Proc: xhs.Def(xhs.Config{
@@ -329,7 +329,7 @@ func TestXHSLiveActorStatus(t *testing.T) {
 	}})
 	go func() {
 		runErr <- compute.Run(ctx,
-			compute.Config{ServerWS: serverWS, Logger: logger, Desired: desired, Builder: builder},
+			compute.Config{ServerWS: serverWS, Logger: logger, PlanSource: plan},
 		)
 	}()
 	t.Cleanup(func() {

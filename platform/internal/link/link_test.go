@@ -247,8 +247,17 @@ type homeRig struct {
 }
 
 func newHomeRig(t *testing.T, leasePing, leaseTTL time.Duration) *homeRig {
+	return newHomeRigWithPortIndex(t, leasePing, leaseTTL, nil)
+}
+
+func newHomeRigWithPortIndex(t *testing.T, leasePing, leaseTTL time.Duration, decorate func(link.PortIndex) link.PortIndex) *homeRig {
 	t.Helper()
 	rt, del := actorrt.New(actorrt.Config{Parent: context.Background()})
+	authorities := newTestAuthorities()
+	var portIndex link.PortIndex = authorities
+	if decorate != nil {
+		portIndex = decorate(portIndex)
+	}
 	r := &homeRig{
 		rt:         rt,
 		deliver:    del,
@@ -260,13 +269,18 @@ func newHomeRig(t *testing.T, leasePing, leaseTTL time.Duration) *homeRig {
 		r.downActors = append(r.downActors, id)
 		r.mu.Unlock()
 	}))
-	r.acc = link.NewAcceptor(link.Config{
-		Minter:     r.minter,
-		Runtime:    rt,
-		Membership: r.membership,
-		ChannelID:  testChannelID,
-		LeasePing:  leasePing,
-		LeaseTTL:   leaseTTL,
+	r.acc = newTestAcceptor(t, link.Config{
+		Minter:          r.minter,
+		Runtime:         rt,
+		ChannelID:       testChannelID,
+		LeasePing:       leasePing,
+		LeaseTTL:        leaseTTL,
+		Declarations:    authorities,
+		Composition:     authorities,
+		Registry:        authorities,
+		DaemonAuthority: authorities,
+		ActorLock:       func(actor.ActorID) func() { return func() {} },
+		PortIndex:       portIndex,
 	})
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.acc.Serve(w, req, "daemon-1")
@@ -301,8 +315,8 @@ func (f planProviderFunc) Plan(ctx context.Context, id string) ([]platform.PlanA
 
 func TestPlanPull_UsesAcceptedBoundIdentityAndCarriesEpoch(t *testing.T) {
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	acc := link.NewAcceptor(link.Config{
-		Minter: &stubMinter{}, Runtime: rt, Membership: &stubMembership{}, ChannelID: testChannelID,
+	acc := newTestAcceptor(t, link.Config{
+		Minter: &stubMinter{}, Runtime: rt, ChannelID: testChannelID,
 		PlanProvider: planProviderFunc(func(_ context.Context, daemonID string) ([]platform.PlanActor, error) {
 			if daemonID != "daemon-authoritative" {
 				t.Fatalf("provider daemon = %q", daemonID)
@@ -315,7 +329,7 @@ func TestPlanPull_UsesAcceptedBoundIdentityAndCarriesEpoch(t *testing.T) {
 		acc.Serve(w, req, "daemon-authoritative")
 	}))
 	t.Cleanup(func() { _ = acc.Close(); srv.Close() })
-	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], "self-claimed", nil, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], nil, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -337,8 +351,8 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
 	const toolID = actor.ActorID("tool:echo")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -355,11 +369,6 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	}
 	h.Install(toolID, &echoCell{w: arms.Pen}, nil)
 	d.Start()
-
-	// Membership contains the declared active actor.
-	if adds := r.membership.getAdds(); len(adds) != 1 || adds[0].ID != toolID {
-		t.Fatalf("membership adds = %+v, want one %s", adds, toolID)
-	}
 
 	// Home dispatches a request to the actor's port (the daemon stream).
 	req := &message.Envelope{
@@ -401,8 +410,8 @@ func TestHomeCloseQuietTeardown_NoDownEdge(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
 	const toolID = actor.ActorID("tool:echo")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -445,29 +454,26 @@ func TestHomeCloseQuietTeardown_NoDownEdge(t *testing.T) {
 }
 
 // TestHomeCloseDuringPortPublicationIsQuiet pins the Commit→publication seam.
-// The port is already runtime-live, and is present in the link-local fallback,
-// but has not yet reached the Home index. A concurrent Close must find it through
-// that local table, DespawnQuiet it, and join the parked attach without emitting
-// a loud down edge.
+// The port is already runtime-live but the ordered publication barrier has not
+// yet installed it in the Home index. Close must first join that admitted worker;
+// only after publication completes may it snapshot and quiet the indexed port.
 func TestHomeCloseDuringPortPublicationIsQuiet(t *testing.T) {
-	r := newHomeRig(t, 5*time.Second, 30*time.Second)
+	entered, release := make(chan struct{}), make(chan struct{})
+	r := newHomeRigWithPortIndex(t, 5*time.Second, 30*time.Second, func(index link.PortIndex) link.PortIndex {
+		return blockingPortIndex{PortIndex: index, entered: entered, release: release}
+	})
 
 	const toolID = actor.ActorID("tool:publish-window")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer func() { _ = d.Close() }()
 
-	entered, release := make(chan struct{}), make(chan struct{})
 	var releaseOnce sync.Once
 	releaseHook := func() { releaseOnce.Do(func() { close(release) }) }
 	defer releaseHook()
-	r.acc.SetPortPublishedHookForTest(func() {
-		close(entered)
-		<-release
-	})
 	openDone := make(chan error, 1)
 	go func() {
 		_, openErr := d.OpenStream(context.Background(), toolID, 0, func(*message.Envelope) error { return nil }, func(message.ID) {})
@@ -480,20 +486,10 @@ func TestHomeCloseDuringPortPublicationIsQuiet(t *testing.T) {
 
 	closeDone := make(chan error, 1)
 	go func() { closeDone <- r.acc.Close() }()
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, live := r.rt.Stat(toolID); !live {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("Close missed the locally-published port before Home index registration")
-		}
-		time.Sleep(time.Millisecond)
-	}
 	select {
 	case err := <-closeDone:
 		t.Fatalf("Close returned before the parked attach worker was released: %v", err)
-	default:
+	case <-time.After(20 * time.Millisecond):
 	}
 
 	releaseHook()
@@ -519,8 +515,8 @@ func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
 	const toolID = actor.ActorID("tool:echo")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -586,10 +582,10 @@ func TestPostStartOpenStream_StartStreamDrives(t *testing.T) {
 
 	const initID = actor.ActorID("tool:init")
 	const lateID = actor.ActorID("tool:late")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+	d, err := link.Dial(context.Background(), r.wsURL(),
 		[]link.Declaration{
-			{ActorID: initID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
-			{ActorID: lateID, Kind: actor.KindTool, Binding: actor.BindingEmbedded},
+			{ActorID: initID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay},
+			{ActorID: lateID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay},
 		}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -661,8 +657,8 @@ func TestEndToEnd_CellDeath_ClosesStreamToOnDown(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
 	const toolID = actor.ActorID("tool:doomed")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -706,8 +702,8 @@ func TestLease_NoTraffic_ExpiresToDown(t *testing.T) {
 	r := newHomeRig(t, 20*time.Millisecond, 60*time.Millisecond)
 
 	const toolID = actor.ActorID("tool:frozen")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -775,8 +771,8 @@ func TestLease_KeepAliveAliveButAppFrozen_ExpiresToDown(t *testing.T) {
 	r := newHomeRig(t, 20*time.Millisecond, 200*time.Millisecond)
 
 	const toolID = actor.ActorID("tool:frozen-app-live-keepalive")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -854,8 +850,8 @@ func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
 	const toolID = actor.ActorID("tool:blocker")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -922,7 +918,7 @@ func TestReattach_FullSetReplace(t *testing.T) {
 		toolA = actor.ActorID("tool:a")
 		toolB = actor.ActorID("tool:b")
 	)
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+	d, err := link.Dial(context.Background(), r.wsURL(),
 		[]link.Declaration{{ActorID: toolA, Kind: actor.KindTool}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
@@ -975,7 +971,7 @@ func TestReattach_TerminalRejectKillsLink(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			r := newHomeRig(t, 5*time.Second, 30*time.Second)
-			d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+			d, err := link.Dial(context.Background(), r.wsURL(),
 				[]link.Declaration{{ActorID: "tool:a", Kind: actor.KindTool}}, link.DialConfig{}, nil)
 			if err != nil {
 				t.Fatalf("Dial: %v", err)
@@ -1020,13 +1016,12 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 	// platform/home.go wires it): the drop must decay its folded level.
 	fold := presence.New(nil, time.Now, []actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, nil, 30*time.Second)
 	rt.WatchDown(fold)
-	r.acc = link.NewAcceptor(link.Config{
-		Minter:     r.minter,
-		Runtime:    rt,
-		Membership: r.membership,
-		ChannelID:  testChannelID,
-		LeasePing:  5 * time.Second,
-		LeaseTTL:   30 * time.Second,
+	r.acc = newTestAcceptor(t, link.Config{
+		Minter:    r.minter,
+		Runtime:   rt,
+		ChannelID: testChannelID,
+		LeasePing: 5 * time.Second,
+		LeaseTTL:  30 * time.Second,
 	})
 	// httptest's Close/CloseClientConnections never touch a hijacked WS conn, so
 	// the raw transport handle is captured via ConnState — closing IT is the hard
@@ -1048,8 +1043,8 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 	t.Cleanup(func() { _ = r.acc.Close(); srv.Close() })
 
 	const toolID = actor.ActorID("tool:device")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -1142,8 +1137,8 @@ func TestEndToEnd_DespawnID_CrossWireKill(t *testing.T) {
 	defer h.Stop()
 
 	const toolID = actor.ActorID("tool:despawn-target")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{DespawnLocal: func(id actor.ActorID) { h.rt.DespawnID(id) }}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{DespawnLocal: func(id actor.ActorID) { h.rt.DespawnID(id) }}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -1219,8 +1214,8 @@ func TestKickDaemon_ClosesAllLinksIncludingHalfAttached(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
 	const toolID = actor.ActorID("tool:echo")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -1328,8 +1323,8 @@ func TestControlDeath_LeavesNoZombieOnlineAccount(t *testing.T) {
 	r := newHomeRig(t, 5*time.Second, 30*time.Second)
 
 	const toolID = actor.ActorID("tool:zombie-probe")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{}, nil)
+	d, err := link.Dial(context.Background(), r.wsURL(),
+		[]link.Declaration{{ActorID: toolID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{}, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}

@@ -11,6 +11,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -18,11 +19,28 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+type gatewayTestCompositionResolver struct{}
+
+func (gatewayTestCompositionResolver) ResolveComposition(context.Context, channel.ID, storespec.CompositionRecord) (platform.ActorDecl, bool, error) {
+	return platform.ActorDecl{}, false, nil
+}
+func (gatewayTestCompositionResolver) BuildClass(channel.ID, actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool) {
+	return platform.ActorFactory{}, false
+}
+
+type gatewayTestDaemonAuthority struct{}
+
+func (gatewayTestDaemonAuthority) LockAndValidate(context.Context, string, channel.ID) (func(), error) {
+	return func() {}, nil
+}
 
 // logCapture is a slog.Handler that records every emitted message (for telemetry
 // assertions — e.g. gateway.entitlement.paused/resumed, DoD-8).
@@ -205,9 +223,11 @@ func openHome(t *testing.T, chID channel.ID, principal string) (*home.Home, acto
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), string(chID)+".sqlite")
 	h, err := home.Open(home.Config{
-		ChannelID:         chID,
-		DBPath:            dbPath,
-		ReconcileInterval: time.Hour,
+		ChannelID:           chID,
+		DBPath:              dbPath,
+		ReconcileInterval:   time.Hour,
+		CompositionResolver: gatewayTestCompositionResolver{},
+		DaemonAuthority:     gatewayTestDaemonAuthority{},
 	})
 	if err != nil {
 		t.Fatalf("home.Open(%s): %v", chID, err)
@@ -229,10 +249,12 @@ func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) 
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), string(chID)+".sqlite")
 	h, err := home.Open(home.Config{
-		ChannelID:          chID,
-		DBPath:             dbPath,
-		ReconcileInterval:  time.Hour,
-		OnMembershipChange: g.Poke,
+		ChannelID:           chID,
+		DBPath:              dbPath,
+		ReconcileInterval:   time.Hour,
+		CompositionResolver: gatewayTestCompositionResolver{},
+		DaemonAuthority:     gatewayTestDaemonAuthority{},
+		OnMembershipChange:  g.Poke,
 	})
 	if err != nil {
 		t.Fatalf("home.Open(%s): %v", chID, err)

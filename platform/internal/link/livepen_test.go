@@ -18,6 +18,14 @@ import (
 	"github.com/wanpengxie/atoll/runtime/ipc"
 )
 
+func attachPortForTest(r *actorrt.Runtime, ctx context.Context, conn io.ReadWriteCloser, sinks actorrt.Sinks, resolve actorrt.ResolveFunc, kindOf actorrt.KindOf, cancel func(actor.ActorID, message.ID)) (actorrt.Incarnation, error) {
+	prepared, err := r.PrepareHandshake(ctx, conn, sinks, resolve, kindOf, cancel, func(actorrt.Incarnation) {})
+	if err != nil {
+		return actorrt.Incarnation{}, err
+	}
+	return prepared.Commit(func() bool { return true })
+}
+
 // recordPen is a minimal raw harness.Pen: it counts the writes that reach it and
 // always accepts. Wrapping it in a livePen lets a test assert which writes the
 // incarnation gate let THROUGH to the raw pen versus fenced before it.
@@ -121,7 +129,7 @@ func attachTestPort(t *testing.T, rt *actorrt.Runtime, id actor.ActorID) (actorr
 		}
 		hsErr <- nil
 	}()
-	inc, err := rt.Attach(context.Background(),
+	inc, err := attachPortForTest(rt, context.Background(),
 		hostConn,
 		actorrt.Sinks{Emit: func(context.Context, actorrt.Incarnation, *message.Envelope) (ipc.EmitResult, error) {
 			return ipc.EmitResult{}, nil
@@ -227,7 +235,7 @@ func attachGatedPort(t *testing.T, rt *actorrt.Runtime, id actor.ActorID, emit a
 			}
 		}
 	}()
-	inc, err := rt.Attach(context.Background(), hostConn, actorrt.Sinks{Emit: emit}, func(ipc.HandshakePayload) (actor.ActorID, error) { return id, nil }, nil, nil)
+	inc, err := attachPortForTest(rt, context.Background(), hostConn, actorrt.Sinks{Emit: emit}, func(ipc.HandshakePayload) (actor.ActorID, error) { return id, nil }, nil, nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}

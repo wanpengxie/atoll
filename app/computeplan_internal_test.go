@@ -32,7 +32,7 @@ func TestAppPlanProvider_InvalidCompositionRowFailsWholePlan(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ctx := context.Background()
 			dir := t.TempDir()
-			db, err := OpenDB(filepath.Join(dir, "app.sqlite"))
+			db, err := openTestAppDB(t, filepath.Join(dir, "app.sqlite"))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -47,7 +47,12 @@ func TestAppPlanProvider_InvalidCompositionRowFailsWholePlan(t *testing.T) {
 			}
 
 			chID := channel.ID("plan-channel")
-			h, err := home.Open(home.Config{ChannelID: chID, DBPath: filepath.Join(dir, "channel.sqlite")})
+			a := &App{db: db, homes: map[channel.ID]*home.Home{}}
+			h, err := home.Open(home.Config{
+				ChannelID: chID, DBPath: filepath.Join(dir, "channel.sqlite"),
+				CompositionResolver: compositionResolver{app: a},
+				DaemonAuthority:     appDaemonAuthority{app: a},
+			})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -60,7 +65,7 @@ func TestAppPlanProvider_InvalidCompositionRowFailsWholePlan(t *testing.T) {
 				t.Fatal(err)
 			}
 
-			a := &App{db: db, homes: map[channel.ID]*home.Home{chID: h}}
+			a.homes[chID] = h
 			if _, err := (appPlanProvider{app: a}).Plan(ctx, chID, "daemon-1"); err == nil {
 				t.Fatal("invalid composition row produced a successful partial plan")
 			}

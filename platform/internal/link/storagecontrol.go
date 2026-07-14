@@ -102,9 +102,8 @@ type ReclaimAckReply struct {
 // "this daemon is still polling" is deliberately NOT treated as "every
 // reservation this daemon owns is alive" (that blanket form let an abandoned
 // reservation's daemon merely staying online forever suppress its age-sweep
-// forever). Additive field — omitempty keeps an old daemon build's empty
-// slice indistinguishable from "explicitly nothing active", which is exactly
-// what an idle daemon should send.
+// forever). The empty slice is indistinguishable from "explicitly nothing
+// active", which is exactly what an idle daemon should send.
 type ReconcilePull struct {
 	RequestID    string   `json:"request_id"`
 	ActiveCoords []string `json:"active_coords,omitempty"`

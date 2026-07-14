@@ -24,7 +24,7 @@ import (
 // placement facts no public verb exposes.
 func openWhiteboxHome(t *testing.T) *Home {
 	t.Helper()
-	h, err := Open(Config{
+	h, err := Open(Config{CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{},
 		ChannelID: channelpkg.ID("test-review-fixes"),
 		DBPath:    filepath.Join(t.TempDir(), "home.sqlite"),
 	})
@@ -86,7 +86,7 @@ func installControlledPresenceFold(h *Home, now *time.Time) {
 }
 
 // TestPresenceSweep_ClearsBypassDeregOrphan covers the reconciliation backstop
-// used after reconcileHost deregisters membership without calling Home.Remove.
+// used after declaration reconciliation deregisters membership without calling Home.Remove.
 func TestPresenceSweep_ClearsBypassDeregOrphan(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()

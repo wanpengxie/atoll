@@ -156,8 +156,8 @@ func newLaneDoor(t *testing.T, ref *lateAccRef, hosts map[actor.ActorID]string) 
 // LocalFileOpener. Returns the Dialer and the actor's CellArms.
 func dialLaneDaemon(t *testing.T, srv *httptest.Server, daemonID string, actorID actor.ActorID, opener link.LocalFileOpener) (*link.Dialer, link.CellArms) {
 	t.Helper()
-	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:], daemonID,
-		[]link.Declaration{{ActorID: actorID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{LocalFileOpener: opener}, nil)
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:],
+		[]link.Declaration{{ActorID: actorID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{LocalFileOpener: opener}, nil)
 	if err != nil {
 		t.Fatalf("Dial(%s): %v", daemonID, err)
 	}
@@ -189,9 +189,9 @@ func TestLaneSameDaemonLocalRoute(t *testing.T) {
 	minter, reg := newLaneDoor(t, ref, map[actor.ActorID]string{readerID: daemonID})
 
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	acc := link.NewAcceptor(link.Config{
+	acc := newTestAcceptor(t, link.Config{
 		Minter: &stubMinter{}, Access: minter, Schedule: &fakeScheduleMinter{}, Runtime: rt,
-		Membership: &stubMembership{}, ChannelID: testChannelID,
+		ChannelID: testChannelID,
 		LeasePing: 5 * time.Second, LeaseTTL: 30 * time.Second,
 	})
 	ref.acc = acc
@@ -277,9 +277,9 @@ func TestLaneCrossDaemonStreamRoute(t *testing.T) {
 	minter, reg := newLaneDoor(t, ref, map[actor.ActorID]string{readerB: daemonB})
 
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	acc := link.NewAcceptor(link.Config{
+	acc := newTestAcceptor(t, link.Config{
 		Minter: &stubMinter{}, Access: minter, Schedule: &fakeScheduleMinter{}, Runtime: rt,
-		Membership: &stubMembership{}, ChannelID: testChannelID,
+		ChannelID: testChannelID,
 		LeasePing: 5 * time.Second, LeaseTTL: 30 * time.Second,
 	})
 	ref.acc = acc
@@ -384,9 +384,9 @@ func TestLaneCrossDaemonLargeTransfer(t *testing.T) {
 	minter, reg := newLaneDoor(t, ref, map[actor.ActorID]string{readerB: daemonB})
 
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	acc := link.NewAcceptor(link.Config{
+	acc := newTestAcceptor(t, link.Config{
 		Minter: &stubMinter{}, Access: minter, Schedule: &fakeScheduleMinter{}, Runtime: rt,
-		Membership: &stubMembership{}, ChannelID: testChannelID,
+		ChannelID: testChannelID,
 		LeasePing: 5 * time.Second, LeaseTTL: 30 * time.Second,
 	})
 	ref.acc = acc
@@ -434,8 +434,8 @@ func TestLaneCrossDaemonLargeTransfer(t *testing.T) {
 // daemonID is otherwise fixed per-handler in the single-daemon tests above).
 func dialLaneDaemonAt(t *testing.T, srv *httptest.Server, daemonID string, actorID actor.ActorID, opener link.LocalFileOpener) (*link.Dialer, link.CellArms) {
 	t.Helper()
-	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:]+"?daemon="+daemonID, daemonID,
-		[]link.Declaration{{ActorID: actorID, Kind: actor.KindTool, Binding: actor.BindingEmbedded}}, link.DialConfig{LocalFileOpener: opener}, nil)
+	d, err := link.Dial(context.Background(), "ws"+srv.URL[4:]+"?daemon="+daemonID,
+		[]link.Declaration{{ActorID: actorID, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}, link.DialConfig{LocalFileOpener: opener}, nil)
 	if err != nil {
 		t.Fatalf("Dial(%s): %v", daemonID, err)
 	}

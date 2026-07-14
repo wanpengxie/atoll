@@ -3,13 +3,11 @@ package app_test
 import (
 	"path/filepath"
 	"testing"
-
-	"github.com/wanpengxie/atoll/app"
 )
 
 // TestDaemonBindingsCascadeOnDelete pins the remaining app-directory FK cascade.
 func TestDaemonBindingsCascadeOnDelete(t *testing.T) {
-	db, err := app.OpenDB(filepath.Join(t.TempDir(), "app.db"))
+	db, err := openTestAppDB(t, filepath.Join(t.TempDir(), "app.db"))
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}

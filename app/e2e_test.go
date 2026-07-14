@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -15,7 +16,6 @@ import (
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"golang.org/x/crypto/bcrypt"
@@ -25,33 +25,48 @@ import (
 // Helpers
 // ---------------------------------------------------------------------------
 
-// staticActorCompute adapts a fixed []platform.ActorDecl list — the shape every
-// compute.Run test call site held before period 7 S3 collapsed compute.Run's
-// signature to (ctx, cfg) — into the compute.Config.Desired/Builder pair the new
-// signature reads. Purely mechanical test-call-form migration (§4 red line 8'):
-// it changes no test semantics, only how a fixed actor list is handed to
-// compute.Run. Every decl is AlwaysOn (a live test daemon has no lazy-activation
-// analogue to exercise).
-func staticActorCompute(decls []platform.ActorDecl) (actorrt.DesiredSource, compute.Builder) {
-	members := make(staticDesiredMembers, 0, len(decls))
-	factories := make(staticFactoryTable, len(decls))
+func authenticatedTestPlan(decls []platform.ActorDecl) *testPlanSource {
+	factories := make(map[actor.ActorID]platform.ActorFactory, len(decls))
 	for _, d := range decls {
-		members = append(members, actorrt.DesiredMember{ID: d.ID, Kind: d.Kind, Lifecycle: actorrt.LifecycleAlwaysOn})
 		factories[d.ID] = d.Factory
 	}
-	return members, factories
+	return &testPlanSource{factories: factories, builds: map[actor.ActorID]platform.ActorFactory{}}
 }
 
-type staticDesiredMembers []actorrt.DesiredMember
-
-func (m staticDesiredMembers) Members(context.Context) ([]actorrt.DesiredMember, error) {
-	return m, nil
+type testPlanSource struct {
+	mu        sync.Mutex
+	factories map[actor.ActorID]platform.ActorFactory
+	members   []actorrt.DesiredMember
+	builds    map[actor.ActorID]platform.ActorFactory
 }
 
-type staticFactoryTable map[actor.ActorID]platform.ActorFactory
+func (p *testPlanSource) ApplyPlan(rows []platform.PlanActor) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	members := make([]actorrt.DesiredMember, 0, len(rows))
+	builds := make(map[actor.ActorID]platform.ActorFactory, len(rows))
+	for _, row := range rows {
+		f, ok := p.factories[row.InstanceID]
+		if !ok {
+			continue
+		}
+		members = append(members, actorrt.DesiredMember{ID: row.InstanceID, Kind: row.Kind, Lifecycle: actorrt.LifecycleAlwaysOn, Epoch: row.Epoch})
+		builds[row.InstanceID] = f
+	}
+	p.members, p.builds = members, builds
+	return nil
+}
 
-func (t staticFactoryTable) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
-	f, ok := t[id]
+func (p *testPlanSource) Members(context.Context) ([]actorrt.DesiredMember, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]actorrt.DesiredMember(nil), p.members...), nil
+}
+
+func (p *testPlanSource) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	f, ok := p.builds[id]
 	return f, ok
 }
 
@@ -104,7 +119,7 @@ func setupTestApp(t *testing.T) *testEnv {
 	dbPath := filepath.Join(tmpDir, "app.db")
 	chDBDir := filepath.Join(tmpDir, "channels")
 
-	db, err := app.OpenDB(dbPath)
+	db, err := openTestAppDB(t, dbPath)
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}

@@ -68,15 +68,6 @@ type Config struct {
 	// period (the backstop for lost death edges). <=0 → the default. The death
 	// edge closes the common case immediately; this sweep is a rare backstop.
 	ReconcileInterval time.Duration
-	// Desired is the eager-activation reconcile ring's read of intent (the
-	// desired−actual diff's desired half). Injected by the app assembly root — the
-	// substrate never knows the table behind it and must yield only confirmed
-	// durable members. nil → no eager activation (the closure backstop still runs).
-	Desired actorrt.DesiredSource
-	// Builder is the platform class/id→factory table fork and activation resolve
-	// against once the original admission closure is gone. nil → Fork and identity-
-	// timer revival fail-fast (structural refusal, never a phantom actor).
-	Builder CapsFactoryBuilder
 	// CompositionResolver supplies the world-declaration half for the app-owned
 	// assembly. Home then reads channel composition from its own channel store
 	// and derives both Desired and Builder from that authoritative source.
@@ -187,15 +178,12 @@ type Home struct {
 	// harmless). Touched only on the reconcile goroutine, no lock.
 	expiryCursor storespec.ExpiryCursor
 
-	// builder is the platform-layer class → caps-factory table (the fork
-	// injection-point contract, CapsFactoryBuilder). nil until the domain's
-	// factory table is injected — a nil builder makes SpawnHandle.Fork fail-fast
-	// with ErrNoBuilder rather than fabricate a child. The table hands back the RAW
-	// factory (func(Caps) Actor); the caps weld happens at the platform assembler
+	// factories is the required platform-layer class/id → actor definition
+	// resolver used by fork and activation. The caps weld happens at the platform assembler
 	// (buildCaps) when a fork child is born, so a child gets the identical membrane
 	// set as a top-level admission (purity: the domain fills WHAT to build, the
 	// platform seam owns HOW caps are welded — actorrt never touches harness/link).
-	builder CapsFactoryBuilder
+	factories ActorFactoryResolver
 
 	// schedMinter mints a per-actor ScheduleHandle for the caps seam; engine is
 	// the time-axis run loop assembled by OpenScheduler. The engine's Start/Close
@@ -280,10 +268,6 @@ type homeFaults struct {
 	action   map[string]func()
 	created  func(*Home)
 	delivery func(storespec.StoredRow) error
-	// wrapMembership, when set, decorates the membership control plane handed to
-	// the link acceptor (only) — a test seam for injecting reconcileHost write
-	// faults without touching the membership every other arm reads.
-	wrapMembership func(storespec.MembershipControlPlane) storespec.MembershipControlPlane
 }
 
 func (f *homeFaults) checkpoint(name string) error {

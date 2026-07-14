@@ -303,7 +303,7 @@ func TestLateStorageMounts_BeforeAndAfterBind(t *testing.T) {
 		t.Fatalf("before bind: (%v,%v), want (empty,nil)", mounts, err)
 	}
 
-	a := link.NewAcceptor(link.Config{})
+	a := &link.Acceptor{}
 	acc.bind(a)
 	// No attach has happened, so the mount list is still empty — this just
 	// proves the late-bind seam itself works (a real attach is exercised by

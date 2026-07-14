@@ -14,6 +14,7 @@ import (
 
 type emptyComputePlan struct{}
 
+func (emptyComputePlan) ApplyPlan([]platform.PlanActor) error                     { return nil }
 func (emptyComputePlan) Members(context.Context) ([]actorrt.DesiredMember, error) { return nil, nil }
 func (emptyComputePlan) Lookup(actor.ActorID) (platform.ActorFactory, bool) {
 	return platform.ActorFactory{}, false
@@ -23,7 +24,7 @@ func TestRunComputeReturnsAfterBothForwardersExit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	obs, storage := make(chan struct{}), make(chan struct{})
-	err := runCompute(ctx, Config{ServerWS: "ws://invalid", Desired: emptyComputePlan{}, Builder: emptyComputePlan{}}, &computeLifecycleHooks{
+	err := runCompute(ctx, Config{ServerWS: "ws://invalid", PlanSource: emptyComputePlan{}}, &computeLifecycleHooks{
 		forwarderTimeout: time.Second,
 		obsExited:        func() { close(obs) }, storageExited: func() { close(storage) },
 	})
@@ -47,7 +48,7 @@ func TestRunComputeForwarderTimeoutTransfersRootOwnership(t *testing.T) {
 	cancel()
 	entered, release, exited := make(chan struct{}), make(chan struct{}), make(chan struct{})
 	var leaked atomic.Int64
-	err := runCompute(ctx, Config{ServerWS: "ws://invalid", Desired: emptyComputePlan{}, Builder: emptyComputePlan{}}, &computeLifecycleHooks{
+	err := runCompute(ctx, Config{ServerWS: "ws://invalid", PlanSource: emptyComputePlan{}}, &computeLifecycleHooks{
 		forwarderTimeout: 25 * time.Millisecond,
 		forwarderLeaked:  &leaked,
 		storagePump:      func(context.Context, *storageHostForwarder) { close(entered); <-release },

@@ -45,6 +45,8 @@ func SpawnForTest(h *Home, fixtureID actor.ActorID, kind actor.Kind, def platfor
 			return "", err
 		}
 	}
+	unlock := h.actorGates.lock(id)
+	defer unlock()
 	_, built, err := h.channel.Cells().SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
 		return hostcommon.Build(h.buildCaps(id, kind, inc), h.hooks(), def)
 	})
@@ -54,5 +56,6 @@ func SpawnForTest(h *Home, fixtureID actor.ActorID, kind actor.Kind, def platfor
 	if !built {
 		return "", fmt.Errorf("test spawn %q already occupied", id)
 	}
+	h.builtEpoch[id] = 0
 	return id, nil
 }

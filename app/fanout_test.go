@@ -12,7 +12,7 @@ import (
 
 func fanoutTestApp(t *testing.T) *App {
 	t.Helper()
-	db, err := OpenDB(filepath.Join(t.TempDir(), "app.sqlite"))
+	db, err := openTestAppDB(t, filepath.Join(t.TempDir(), "app.sqlite"))
 	if err != nil {
 		t.Fatal(err)
 	}

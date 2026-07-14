@@ -173,10 +173,8 @@ type Runtime struct {
 	grace time.Duration
 	// leakedTotal counts corpses ever declared leaked (red line ⑤: leaks counted,
 	// never silent). Cumulative — survives the reap that clears the entry.
-	leakedTotal        atomic.Int64
-	sealed             bool   // guarded by mu; admission check and registration are linearized together
-	attachStraddleHook func() // test-only: handshake parsed, immediately before prepare lock
-	attachPreparedHook func() // test-only: prepared candidate registered, immediately before ACK
+	leakedTotal atomic.Int64
+	sealed      bool // guarded by mu; admission check and registration are linearized together
 }
 
 // defaultZombieGrace is the aggregate teardown grace (P0-1 = 5s, not a config
@@ -515,17 +513,6 @@ func (r *Runtime) IsLive(inc Incarnation) bool {
 // this call — a per-call lifetime ctx would wrongly tear the port down when
 // Attach returns. Pass a deadline ctx to guard the handshake; a nil/background
 // ctx degrades to an unbounded handshake read.
-func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onCancelRequest func(actor.ActorID, message.ID)) (Incarnation, error) {
-	if resolve == nil {
-		return Incarnation{}, errors.New("actorrt: port requires ResolveFunc")
-	}
-	prepared, err := r.PrepareHandshake(hsCtx, conn, sinks, resolve, kindOf, onCancelRequest)
-	if err != nil {
-		return Incarnation{}, err
-	}
-	return prepared.Commit()
-}
-
 // PreparedAttach is a parsed and authenticated port handshake that has not yet
 // entered the Runtime address table and has not emitted an ACK. The caller must
 // invoke exactly one of Commit or Abort. This split lets an outer coordinator
@@ -547,29 +534,22 @@ func (p *PreparedAttach) ID() actor.ActorID {
 	return p.port.id
 }
 
-// PrepareHandshake reads, decodes, and resolves the handshake without sending
-// an ACK or publishing the port in any Runtime observation surface.
-func (r *Runtime) PrepareHandshake(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onCancelRequest func(actor.ActorID, message.ID)) (*PreparedAttach, error) {
-	return r.PrepareHandshakeObserved(hsCtx, conn, sinks, resolve, kindOf, onCancelRequest, nil)
-}
-
-// PrepareHandshakeObserved is PrepareHandshake with a pointer-identity exit
-// observer used by the Home port index. The callback runs after Runtime's own
-// conditional map eviction on every terminal path, including quiet teardown.
-func (r *Runtime) PrepareHandshakeObserved(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onCancelRequest func(actor.ActorID, message.ID), onExit func(Incarnation)) (*PreparedAttach, error) {
-	exit := r.removeIf
-	if onExit != nil {
-		exit = func(id actor.ActorID, self embodiment) {
-			r.removeIf(id, self)
-			onExit(Incarnation{id: id, p: self})
-		}
+// PrepareHandshake reads, resolves, and authenticates a handshake without
+// publishing it. onExit is the required pointer-identity index observer.
+func (r *Runtime) PrepareHandshake(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onCancelRequest func(actor.ActorID, message.ID), onExit func(Incarnation)) (*PreparedAttach, error) {
+	if resolve == nil {
+		return nil, errors.New("actorrt: port requires ResolveFunc")
+	}
+	if onExit == nil {
+		return nil, errors.New("actorrt: port requires exit observer")
+	}
+	exit := func(id actor.ActorID, self embodiment) {
+		r.removeIf(id, self)
+		onExit(Incarnation{id: id, p: self})
 	}
 	p, err := newPort(r.parent, hsCtx, conn, sinks, resolve, kindOf, r.publishDown, r.publishObs, onCancelRequest, exit, r.reapZombie, r.clock(), r.logger)
 	if err != nil {
 		return nil, err
-	}
-	if r.attachStraddleHook != nil {
-		r.attachStraddleHook()
 	}
 	return &PreparedAttach{runtime: r, port: p}, nil
 }
@@ -578,17 +558,16 @@ func (r *Runtime) PrepareHandshakeObserved(hsCtx context.Context, conn io.ReadWr
 // then atomically replaces the incumbent. The old embodiment remains live and
 // addressable until that final commit; failures remove and close only the
 // candidate.
-func (p *PreparedAttach) Commit() (Incarnation, error) {
-	return p.CommitWhile(nil)
-}
-
-// CommitWhile is Commit with an additional lock-free outer-generation fence.
+// Commit uses a required lock-free outer-generation fence.
 // valid is evaluated while r.mu is held both before prepared installation and
 // at the final commit point; it must not acquire locks. A false verdict aborts
 // without making the port live.
-func (p *PreparedAttach) CommitWhile(valid func() bool) (Incarnation, error) {
+func (p *PreparedAttach) Commit(valid func() bool) (Incarnation, error) {
 	if p == nil || p.runtime == nil || p.port == nil {
 		return Incarnation{}, errors.New("actorrt: nil prepared attach")
+	}
+	if valid == nil {
+		return Incarnation{}, errors.New("actorrt: prepared attach requires generation validator")
 	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -600,7 +579,7 @@ func (p *PreparedAttach) CommitWhile(valid func() bool) (Incarnation, error) {
 	port := p.port
 	r.mu.Lock()
 	sealed := r.sealed
-	if sealed || (valid != nil && !valid()) {
+	if sealed || !valid() {
 		r.mu.Unlock()
 		port.prepared.Store(true)
 		port.initiateStop()
@@ -619,9 +598,6 @@ func (p *PreparedAttach) CommitWhile(valid func() bool) (Incarnation, error) {
 	if previousCandidate != nil && previousCandidate != port {
 		previousCandidate.initiateStop()
 	}
-	if r.attachPreparedHook != nil {
-		r.attachPreparedHook()
-	}
 	// ACK is sent while the incumbent remains authoritative. Any failure
 	// conditionally aborts this exact candidate; the old body is untouched.
 	if err := port.writeHandshakeAck(); err != nil {
@@ -630,7 +606,7 @@ func (p *PreparedAttach) CommitWhile(valid func() bool) (Incarnation, error) {
 	}
 	r.mu.Lock()
 	cur, stillCurrent := r.prepared[port.id]
-	if r.sealed || !stillCurrent || cur != port || !port.prepared.Load() || (valid != nil && !valid()) {
+	if r.sealed || !stillCurrent || cur != port || !port.prepared.Load() || !valid() {
 		r.mu.Unlock()
 		r.abortPrepared(port)
 		if r.sealed {

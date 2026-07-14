@@ -76,7 +76,7 @@ type computeLifecycleHooks struct {
 	storagePump     func(context.Context, *storageHostForwarder)
 }
 
-// computeRing is the daemon's reconcile ring: it diffs cfg.Desired against the
+// computeRing is the daemon's reconcile ring: it diffs its plan snapshot against the
 // locally-live cells and drives the actor lifecycle (open/spawn/start, despawn/
 // detach) to close the gap. It is the daemon-hosted counterpart of Home's
 // reconcileActivation — same paradigm (§10.13 推导2), different host.
@@ -86,8 +86,7 @@ type computeRing struct {
 	watcher   *cellDownWatcher
 	obsFwd    *cellObsForwarder
 	cancelFwd *cellCancelForwarder
-	builder   Builder
-	planSink  PlanSink
+	source    PlanSource
 	logger    *slog.Logger
 
 	// prevCurrent is the AlwaysOn desired set the LAST reconcile pass declared —
@@ -118,8 +117,8 @@ type desiredIncarnation struct {
 // the home's ports die QUIET — and false if the link itself goes down, so the
 // caller redials. It never touches rt's cells: a link death degrades the wire,
 // the hosted work is untouched (§10.13 推导3).
-func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, desired actorrt.DesiredSource, poll, resync time.Duration) (graceful bool) {
-	r.reconcile(ctx, d, desired, false)
+func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, poll, resync time.Duration) (graceful bool) {
+	r.reconcile(ctx, d, false)
 
 	t := time.NewTicker(poll)
 	defer t.Stop()
@@ -136,12 +135,12 @@ func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, desired actor
 		case <-d.Done():
 			return false
 		case <-t.C:
-			r.reconcile(ctx, d, desired, false)
+			r.reconcile(ctx, d, false)
 		case <-resyncT.C:
 			// Periodic resync (#7 kubelet 两件套 半②): re-declare the full set
 			// unconditionally so the home re-diffs and absorbs any漏网 drift —
 			// level-triggered, independent of whether this tick has a diff.
-			r.reconcile(ctx, d, desired, true)
+			r.reconcile(ctx, d, true)
 		}
 	}
 }
@@ -162,16 +161,14 @@ func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, desired actor
 // host row滞留 indefinitely, account收敛 only on a later privileged扩容/reconnect),
 // or resync (the caller's slow periodic re-declaration, level-triggered兜底 that
 // absorbs any drift — a削章 dereg that failed home-side, a late migration).
-func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired actorrt.DesiredSource, resync bool) {
-	if r.planSink != nil {
-		plan, err := d.PullPlan(ctx)
-		if err != nil {
-			r.logger.Warn("platform.compute.plan_pull_failed", "err", err)
-		} else if err := r.planSink.ApplyPlan(plan); err != nil {
-			r.logger.Warn("platform.compute.plan_apply_failed", "err", err)
-		}
+func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, resync bool) {
+	plan, err := d.PullPlan(ctx)
+	if err != nil {
+		r.logger.Warn("platform.compute.plan_pull_failed", "err", err)
+	} else if err := r.source.ApplyPlan(plan); err != nil {
+		r.logger.Warn("platform.compute.plan_apply_failed", "err", err)
 	}
-	members, err := desired.Members(ctx)
+	members, err := r.source.Members(ctx)
 	if err != nil {
 		r.logger.Error("platform.compute.desired_failed", "err", err)
 		return
@@ -278,7 +275,7 @@ func (r *computeRing) reconcile(ctx context.Context, d *link.Dialer, desired act
 // any step is logged; the id stays out of the live set, so next tick's diff
 // retries it.
 func (r *computeRing) buildOne(ctx context.Context, id actor.ActorID, kind actor.Kind, epoch int64, d *link.Dialer) bool {
-	factory, ok := r.builder.Lookup(id)
+	factory, ok := r.source.Lookup(id)
 	if !ok {
 		r.logger.Warn("platform.compute.no_builder", "actor", string(id))
 		return false
