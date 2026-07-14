@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net/url"
@@ -89,26 +90,18 @@ func (p *planSource) Members(context.Context) ([]actorrt.DesiredMember, error) {
 }
 
 // ApplyPlan builds both desired and factory halves off-lock, then publishes one
-// atomic snapshot. A failed build for one row keeps that id desired (so the ring
-// retries) while omitting only its factory; a pull/apply failure never clears LKG.
+// atomic snapshot. Any invalid row rejects the whole candidate so the previous
+// last-known-good snapshot remains authoritative.
 func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 	var desired []actorrt.DesiredMember
 	builders := map[actor.ActorID]platform.ActorFactory{}
 	for _, asg := range plan {
 		id := actor.ActorID(asg.InstanceID)
-		// Desired is generated from the plan row ALONE (ClassKind, a pure pre-Build
-		// table lookup), decoupled from Build. So a per-row Build failure (missing
-		// creds, transient) keeps the id IN desired — the ring finds no builder,
-		// logs and retries next tick, while computeRing's削臂
-		// (prevCurrent−current) never culls a live cell that is still in the plan.
-		// Only a plan that genuinely drops the row removes it from desired. An
-		// unknown class has no derivable kind (unactivatable) — skipped, as the
-		// server-side compositionDesired does.
+		// Desired is generated from the plan row alone, but publication is atomic:
+		// unknown classes, build failures, and identity drift reject the full plan.
 		kind, ok := registry.ClassKind(asg.Class)
 		if !ok {
-			p.logger.Error("daemon: unknown class in plan, skipping",
-				"instance", asg.InstanceID, "class", asg.Class)
-			continue
+			return fmt.Errorf("daemon: plan instance %s has unknown class %q", asg.InstanceID, asg.Class)
 		}
 		desired = append(desired, actorrt.DesiredMember{ID: id, Kind: kind, Lifecycle: actorrt.LifecycleAlwaysOn, Epoch: asg.Epoch})
 		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
@@ -121,22 +114,17 @@ func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 			Logger:       p.logger,
 		})
 		if berr != nil {
-			p.logger.Error("daemon: build assigned instance",
-				"instance", asg.InstanceID, "class", asg.Class, "err", berr.Error())
-			continue
+			return fmt.Errorf("daemon: build plan instance %s class %q: %w", asg.InstanceID, asg.Class, berr)
 		}
 		// The builder table is keyed on the PLAN's InstanceID (what desired carries
 		// and what the ring Lookups), NOT decl.ID. A constructor that rewrites the id
 		// (device derives its own id from the device identity, "ignores ID and derives
 		// it") would otherwise file the factory under the derived id — permanently
 		// unreachable by the ring's Lookup(InstanceID) → no_builder forever, yet Build
-		// reported success. Treat an id drift as a build failure: skip the row loud
-		// (desired keeps it, ring records no_builder, retries) rather than file a
-		// silently-dead entry. (痛感前哨 for a future ClassDecl.IDPolicy; 止血 here.)
+		// reported success. Treat an id drift as a full candidate failure so the
+		// prior LKG remains intact rather than publishing an unreachable builder.
 		if decl.ID != id {
-			p.logger.Warn("daemon: built instance id differs from plan instance id, skipping",
-				"instance", asg.InstanceID, "class", asg.Class, "built_id", string(decl.ID))
-			continue
+			return fmt.Errorf("daemon: plan instance %s class %q built mismatched id %s", asg.InstanceID, asg.Class, decl.ID)
 		}
 		builders[id] = decl.Factory
 	}

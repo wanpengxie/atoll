@@ -895,32 +895,38 @@ func TestReattach_FullSetReplace(t *testing.T) {
 	}
 }
 
-// TestReattach_RejectedLeavesPriorSetIntact proves a REJECTED Reattach (the
-// reserved system-actor-id guard) surfaces its reason in the returned error and
-// does not clobber the link's existing declared set — a previously-declared
-// actor's stream still opens normally afterwards.
-func TestReattach_RejectedLeavesPriorSetIntact(t *testing.T) {
-	r := newHomeRig(t, 5*time.Second, 30*time.Second)
-
-	const toolA = actor.ActorID("tool:a")
-	d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
-		[]link.Declaration{{ActorID: toolA, Kind: actor.KindTool}}, link.DialConfig{}, nil)
-	if err != nil {
-		t.Fatalf("Dial: %v", err)
+// TestReattach_TerminalRejectKillsLink proves malformed/reserved declarations
+// cannot retain a half-attached session after receiving their reject reply.
+func TestReattach_TerminalRejectKillsLink(t *testing.T) {
+	cases := []struct {
+		name  string
+		decls []link.Declaration
+	}{
+		{name: "reserved actor", decls: []link.Declaration{{ActorID: actor.SystemActorID, Kind: actor.KindSystem}}},
+		{name: "duplicate declaration", decls: []link.Declaration{
+			{ActorID: "tool:duplicate", Kind: actor.KindTool},
+			{ActorID: "tool:duplicate", Kind: actor.KindAgent},
+		}},
 	}
-	defer func() { _ = d.Close() }()
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			r := newHomeRig(t, 5*time.Second, 30*time.Second)
+			d, err := link.Dial(context.Background(), r.wsURL(), "daemon-1",
+				[]link.Declaration{{ActorID: "tool:a", Kind: actor.KindTool}}, link.DialConfig{}, nil)
+			if err != nil {
+				t.Fatalf("Dial: %v", err)
+			}
+			defer func() { _ = d.Close() }()
 
-	err = d.Reattach(context.Background(), []link.Declaration{
-		{ActorID: actor.SystemActorID, Kind: actor.KindSystem},
-	})
-	if err == nil {
-		t.Fatal("Reattach declaring the reserved system actor id unexpectedly succeeded")
-	}
-
-	// The prior set (toolA) must still be intact — the rejected Reattach never
-	// replaced it.
-	if _, err := d.OpenStream(context.Background(), toolA, 0, func(*message.Envelope) error { return nil }, nil); err != nil {
-		t.Fatalf("OpenStream(toolA) after a rejected Reattach: %v", err)
+			if err := d.Reattach(context.Background(), tc.decls); err == nil {
+				t.Fatal("invalid Reattach unexpectedly succeeded")
+			}
+			select {
+			case <-d.Done():
+			case <-time.After(time.Second):
+				t.Fatal("rejected Reattach left the link alive")
+			}
+		})
 	}
 }
 

@@ -1011,7 +1011,7 @@ func (a *Acceptor) resolveFreshHandshake(ctx context.Context, hp ipc.HandshakePa
 // accepted) so the caller can count link attachment only on success.
 func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID string, att *AttachRequest, daemonID string, isFirstAttachOnLink bool, mu *sync.Mutex, declared *map[actor.ActorID]declarationSnapshotEntry, portOwner PortOwner, portMu *sync.Mutex, ports map[actor.ActorID]actorrt.Incarnation) (string, bool) {
 	if reason := validateAttachEnvelope(att); reason != "" {
-		a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: reason})
+		a.rejectAttach(lc, requestID, reason, "attach_"+reason, nil)
 		return "", false
 	}
 	computeID := att.ComputeID
@@ -1028,7 +1028,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 	// actor-ownership validation (A6) stays deferred under single-tenancy.
 	for _, d := range att.Declarations {
 		if d.ActorID == actor.SystemActorID {
-			a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "declared actor id is reserved: " + string(d.ActorID)})
+			a.rejectAttach(lc, requestID, "declared actor id is reserved: "+string(d.ActorID), "attach_reserved_actor", nil)
 			return "", false
 		}
 	}
@@ -1037,8 +1037,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 		var err error
 		authorityRelease, err = a.daemonAuthority.LockAndValidate(ctx, computeID, a.channelID)
 		if err != nil {
-			a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "daemon_binding_stale"})
-			time.AfterFunc(attachRejectDrain, func() { lc.kill("attach_daemon_binding_stale", err) })
+			a.rejectAttach(lc, requestID, "daemon_binding_stale", "attach_daemon_binding_stale", err)
 			return "", false
 		}
 		defer authorityRelease()
@@ -1046,8 +1045,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 
 	pin, reason := a.enterDeclarationWriter(computeID, lc)
 	if reason != "" {
-		a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: reason})
-		time.AfterFunc(attachRejectDrain, func() { lc.kill("attach_"+reason, nil) })
+		a.rejectAttach(lc, requestID, reason, "attach_"+reason, nil)
 		return "", false
 	}
 	pinFinished := false
@@ -1322,6 +1320,18 @@ func (a *Acceptor) sendReply(lc *linkSession, requestID string, reply AttachRepl
 		return err
 	}
 	return lc.sendControl(raw)
+}
+
+// rejectAttach delivers the terminal reject when possible, then closes the
+// session after a short bounded drain so a rejected peer cannot keep a
+// half-attached link alive by sending frames that refresh its lease. A failed
+// reply write closes immediately because there is nothing left to drain.
+func (a *Acceptor) rejectAttach(lc *linkSession, requestID, reason, killReason string, cause error) {
+	if err := a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: reason}); err != nil {
+		lc.kill(killReason, errors.Join(cause, err))
+		return
+	}
+	time.AfterFunc(attachRejectDrain, func() { lc.kill(killReason, cause) })
 }
 
 // peekControlKind reads ONLY the "kind" field of a stream-0 control payload —
