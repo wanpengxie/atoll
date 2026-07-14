@@ -84,7 +84,7 @@ func newShellAgent(self actor.ActorID, chID channel.ID) *shellAgent {
 // publish it, then idle so the cell (and its response-matching pump) stays live.
 func (a *shellAgent) run(sys actorbase.Sys) error {
 	a.mu.Lock()
-	a.exec = base.ExecFace(sys, 10*time.Second, nil)
+	a.exec = base.ExecFace(sys, 10*time.Second)
 	a.mu.Unlock()
 	close(a.ready)
 	for {

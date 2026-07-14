@@ -351,7 +351,7 @@ func TestHomeClosePanicDoesNotWedgeWaiters(t *testing.T) {
 	}
 }
 
-func TestHomeStateTransitionsAndUnpublishIssuedHandles(t *testing.T) {
+func TestHomeFaultCheckpointOrderAndUnpublishIssuedHandles(t *testing.T) {
 	var events []string
 	h, err := openHome(lifecycleConfig(t, "state-unpublish"), &homeFaults{record: func(s string) { events = append(events, s) }})
 	if err != nil {
@@ -360,15 +360,15 @@ func TestHomeStateTransitionsAndUnpublishIssuedHandles(t *testing.T) {
 	if err := h.Close(); err != nil {
 		t.Fatal(err)
 	}
-	wantStates := []string{"state.constructing", "state.activating", "state.published", "state.closing", "state.closed"}
-	var gotStates []string
+	wantCheckpoints := []string{"state.constructing", "state.activating", "state.published", "state.closing", "state.closed"}
+	var gotCheckpoints []string
 	for _, event := range events {
 		if len(event) >= 6 && event[:6] == "state." {
-			gotStates = append(gotStates, event)
+			gotCheckpoints = append(gotCheckpoints, event)
 		}
 	}
-	if !reflect.DeepEqual(gotStates, wantStates) {
-		t.Fatalf("states = %v, want %v", gotStates, wantStates)
+	if !reflect.DeepEqual(gotCheckpoints, wantCheckpoints) {
+		t.Fatalf("fault checkpoints = %v, want %v", gotCheckpoints, wantCheckpoints)
 	}
 	// The former "issued HumanHandle refuses after Close" assertion retired with
 	// the door (gateway 期 S5): a subject's post-Close write now fails at the cell

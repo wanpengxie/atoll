@@ -71,6 +71,30 @@ func TestActorStatusProjectsPresence(t *testing.T) {
 	if answer.L3["load"].ValueBase64 != "AQI=" || !answer.L3["load"].StaleFromPriorLife {
 		t.Fatalf("unknown-kind testimony=%+v", answer.L3["load"])
 	}
+	wire, err := json.Marshal(answer)
+	if err != nil {
+		t.Fatalf("marshal actor.status answer: %v", err)
+	}
+	var shape struct {
+		L3 map[string]map[string]json.RawMessage `json:"l3"`
+	}
+	if err := json.Unmarshal(wire, &shape); err != nil {
+		t.Fatalf("decode actor.status wire shape: %v", err)
+	}
+	assertKeys := func(kind string, want ...string) {
+		t.Helper()
+		got := shape.L3[kind]
+		if len(got) != len(want) {
+			t.Fatalf("actor.status l3[%q] keys=%v, want exactly %v", kind, got, want)
+		}
+		for _, key := range want {
+			if _, ok := got[key]; !ok {
+				t.Fatalf("actor.status l3[%q] missing key %q: %v", kind, key, got)
+			}
+		}
+	}
+	assertKeys(introspect.ObsDevicePresence, "received_at", "device")
+	assertKeys("load", "received_at", "stale_from_prior_life", "value_b64")
 }
 
 func TestActorStatusMalformedDoesNotSynthesize(t *testing.T) {

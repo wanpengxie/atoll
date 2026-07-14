@@ -37,19 +37,10 @@ type MembershipCheck interface {
 type DriverTable map[resourcespec.ResourceKind]resourcespec.Driver
 
 // StorageMount is one channel-attached daemon's storage-placement candidacy —
-// §4.3 policy chain ③④'s raw input. OwnerUserID is day-1 UNUSED (populated ""
-// by every current StorageMounts implementor): policy chain ② (owner-level
-// creator affinity) is deferred whole to the human-inbound debt this field's
-// consumer would need (§4.3's own text: "此数据流与human接线同源，day-1不实现"),
-// so the field exists for the day ② lands, not exercised now — declaring it
-// without a consumer is NOT the half-built-slice violation the project's
-// substrate-purity rule warns against, because ITS OWN CONSUMER (②) is
-// explicitly named and deferred by the spec text this type implements, not
-// invented ahead of a real use case.
+// §4.3 policy chain ③④'s raw input.
 type StorageMount struct {
-	DaemonID    string
-	OwnerUserID string
-	Online      bool
+	DaemonID string
+	Online   bool
 }
 
 // StorageMounts is placement routing's mount-table Dep (期11 spec §4.3): "which

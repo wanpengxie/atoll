@@ -11,18 +11,10 @@ import (
 	"testing"
 )
 
-// pathsafePkg is lib/pathsafe's import path — a plain stdlib-shaped string
-// util (character-replace), NOT collision-free (":" -> "-" and "-" collide;
-// "/" and "\\" both -> "_" and collide). 期11 S6 account item ⑦'s explicit
-// two-way decision: adopt it (with an added collision check) as channelID's
-// path-segment home, OR judge it dead for that role. Resolved toward the
-// latter — channelID's real, already-shipped path-segment safety is
-// cmd/daemon/internal/storagehost's assertPathSegment (an ALLOW-LIST charset
-// assert, collision-free BY CONSTRUCTION: an illegal id is rejected outright,
-// never lossily rewritten into a colliding neighbor). Adopting pathsafe here
-// would be a strict regression for zero benefit. This test pins that
-// resolution: pathsafe must never be imported by the resource axis's
-// storage-name-generating packages.
+// pathsafePkg is the retired lib/pathsafe import path. Its character replacement
+// was not collision-free (":" -> "-" and "-" collide; "/" and "\\" both ->
+// "_"). ChannelID's path-segment safety is instead storagehost's allow-list
+// assert: an illegal id is rejected rather than rewritten into a neighbor.
 const pathsafePkg = platformModulePrefix + "lib/pathsafe"
 
 // storageNamingDirs are the packages that turn opaque ids (channelID, coord)
@@ -30,13 +22,8 @@ const pathsafePkg = platformModulePrefix + "lib/pathsafe"
 // ONLY place a "storage name generator" could legitimately live.
 var storageNamingDirs = []string{"../cmd/daemon/internal/storagehost", "../runtime/resourcespec"}
 
-// TestPathsafeNeverAStorageNameGenerator (期11 S6 account item ⑦): lib/pathsafe
-// is a generic id-to-path-segment convenience util, but it must NEVER be the
-// mechanism behind a durable storage name (channelID/coord path segments) —
-// its lossy character-replace shape can collide two distinct ids into the
-// same on-disk name, silently mixing data across channels/resources. The
-// resource axis's actual path-segment safety is assertPathSegment's
-// allow-list charset assert (collision-free by construction, no rewrite).
+// TestPathsafeNeverAStorageNameGenerator prevents the retired lossy helper from
+// returning as a durable storage-name mechanism.
 func TestPathsafeNeverAStorageNameGenerator(t *testing.T) {
 	fset := token.NewFileSet()
 	var violations []string
@@ -76,9 +63,8 @@ func TestPathsafeNeverAStorageNameGenerator(t *testing.T) {
 // turns opaque ids into on-disk path segments.
 const storagehostDir = "../cmd/daemon/internal/storagehost"
 
-// TestPathSegmentAssertCentralizedInRootGo is the POSITIVE half of "pathsafe
-// 集中 root.go" (S-3 nail 4): the negative test above forbids the WRONG tool
-// (lib/pathsafe); this pins that the RIGHT one — assertPathSegment, the
+// TestPathSegmentAssertCentralizedInRootGo is the positive half: the negative
+// test above forbids the retired helper; this pins that assertPathSegment, the
 // allow-list charset assert every path-segment constructor must funnel through
 // — is defined exactly ONCE and ONLY in root.go. A second, scattered copy
 // elsewhere in the package (a future constructor that hand-rolls its own,
@@ -116,6 +102,6 @@ func TestPathSegmentAssertCentralizedInRootGo(t *testing.T) {
 		t.Fatalf("assertPathSegment defined %d times (%v) — path-segment safety must live in exactly one place (root.go), not fragment across the package", len(definedIn), definedIn)
 	}
 	if !strings.HasSuffix(definedIn[0], "/root.go") {
-		t.Fatalf("assertPathSegment defined in %q, want cmd/daemon/internal/storagehost/root.go — the S-3 'pathsafe 集中 root.go' centralization nail", definedIn[0])
+		t.Fatalf("assertPathSegment defined in %q, want cmd/daemon/internal/storagehost/root.go", definedIn[0])
 	}
 }

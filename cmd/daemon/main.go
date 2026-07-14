@@ -98,7 +98,7 @@ func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 		if !ok {
 			return fmt.Errorf("daemon: plan instance %s has unknown class %q", asg.InstanceID, asg.Class)
 		}
-		desired = append(desired, actorrt.DesiredMember{ID: id, Kind: kind, Lifecycle: actorrt.LifecycleAlwaysOn, Epoch: asg.Epoch})
+		desired = append(desired, actorrt.DesiredMember{ID: id, Kind: kind, Epoch: asg.Epoch})
 		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
 			ID:     id,
 			Config: asg.Config,

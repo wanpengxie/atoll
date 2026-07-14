@@ -34,13 +34,11 @@ func TestValidPlacementKind(t *testing.T) {
 }
 
 func TestValidProvenance(t *testing.T) {
-	for _, p := range []Provenance{ProvenanceAxisAllocated, ProvenanceRegistered} {
-		if !ValidProvenance(p) {
-			t.Errorf("ValidProvenance(%q) = false, want true", p)
-		}
+	if !ValidProvenance(ProvenanceAxisAllocated) {
+		t.Errorf("ValidProvenance(%q) = false, want true", ProvenanceAxisAllocated)
 	}
 	// Unlike PlacementKind, "" is NOT legal — every row is always stamped.
-	for _, raw := range []Provenance{"", "adopted", "AXIS-ALLOCATED"} {
+	for _, raw := range []Provenance{"", "registered", "adopted", "AXIS-ALLOCATED"} {
 		if ValidProvenance(raw) {
 			t.Errorf("ValidProvenance(%q) = true, want false (out of set)", raw)
 		}

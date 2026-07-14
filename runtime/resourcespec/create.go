@@ -81,13 +81,9 @@ func ValidPlacementKind(raw PlacementKind) bool {
 	return false
 }
 
-// Provenance is the closed set of how a resource's placement came to be
-// known to the registry. Day-1 every row (kv and file alike) is stamped
-// ProvenanceAxisAllocated by the door at create time (期11 spec §1 item 1:
-// "provenance 由门盖章，day-1 恒 axis-allocated") — ProvenanceRegistered
-// names the future "adopt an externally-created object" form (the登记式
-// create, deferred whole to coral, Q-D) and is declared here so its column
-// value has a home the day it lands, not pre-wired to any behavior now.
+// Provenance records how a resource's placement came to be known to the
+// registry. Every current row (kv and file alike) is stamped
+// ProvenanceAxisAllocated by the door at create time.
 type Provenance string
 
 const (
@@ -95,21 +91,13 @@ const (
 	// placement via create-outbox's coord generation (§1.6): day-1's only
 	// value, for every kind.
 	ProvenanceAxisAllocated Provenance = "axis-allocated"
-
-	// ProvenanceRegistered — an externally-created object was adopted into
-	// the registry after the fact. Declared, UNUSED day-1 (registration is
-	// deferred whole to coral): the Reclaimer (§4) branches on it once it
-	// exists — axis-allocated bytes are collected on delete (rm -rf),
-	// registered bytes are only unlinked from the registry, never touched on
-	// disk.
-	ProvenanceRegistered Provenance = "registered"
 )
 
-var allProvenances = []Provenance{ProvenanceAxisAllocated, ProvenanceRegistered}
+var allProvenances = []Provenance{ProvenanceAxisAllocated}
 
 // ValidProvenance reports whether raw is a member of the closed set. Unlike
 // PlacementKind, Provenance has no "legal empty" case — every resources row
-// is stamped with one of the two values at create time.
+// is stamped at create time.
 func ValidProvenance(raw Provenance) bool {
 	for _, want := range allProvenances {
 		if raw == want {

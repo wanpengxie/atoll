@@ -25,12 +25,12 @@ import (
 // helpers below (driveReady/driveCtx/driveWriteKindAllowed) and the typed
 // WriteRejected carrier moved here with them.
 
-// ErrOccupantNotReady is the engine-side occupant gate sentinel: an
+// errOccupantNotReady is the engine-side occupant gate sentinel: an
 // identity-verb call landed before Start finished wiring lifeCtx (go-live
 // precedes impl.Start) or after Stop began draining. The subjectgate frame
 // interpreter maps it (with the live-membrane sentinels) to the retryable
 // unavailable code — actorbase cannot name a platform error itself.
-var ErrOccupantNotReady = errors.New("actorbase: occupant not running")
+var errOccupantNotReady = errors.New("actorbase: occupant not running")
 
 // WriteRejected is the typed harness-reject carrier: Reason/Detail cross the
 // verb boundary typed so the subjectgate interpreter can surface the reason as
@@ -65,7 +65,7 @@ func (e *engine) driveCtx() context.Context {
 // all refuse.
 func (e *engine) driveReady() error {
 	if occupantState(e.occupant.Load()) != occupantRunning {
-		return ErrOccupantNotReady
+		return errOccupantNotReady
 	}
 	return nil
 }

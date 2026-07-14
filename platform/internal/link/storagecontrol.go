@@ -75,8 +75,8 @@ type CommittedReply struct {
 }
 
 // ReclaimAck is daemon→home: delete-outbox's closure signal (§1.8/§4.7's
-// third frame) — sent after the Reclaimer confirms the tombstoned bytes are
-// collected (axis-allocated: rm -rf'd; registered: day-1 unreachable).
+// third frame) — sent after the Reclaimer confirms the axis-allocated
+// tombstone's bytes are collected.
 type ReclaimAck struct {
 	RequestID   string `json:"request_id"`
 	TombstoneID string `json:"tombstone_id"`
@@ -157,14 +157,13 @@ type ReconcileReservation struct {
 }
 
 // ReconcileTombstone is one row of ReconcilePullReply's "待收 tombstone" —
-// bytes this daemon still owes a ReclaimAck for. Provenance is the SAME
-// closed-set string resourcespec.Provenance carries ("axis-allocated" |
-// "registered") — plain string here, deliberately: this package sits
-// outside the runtime tree (archtest confines resourcespec's own type to
-// runtime/*), so the wire carries its string value, and the daemon-side
-// Reclaimer branches on the two literal values directly (day-1 only
-// "axis-allocated" is ever produced, but the wire is honest about the
-// closed set it mirrors rather than silently assuming one value).
+// bytes this daemon still owes a ReclaimAck for. Provenance is the plain-string
+// wire mirror of resourcespec.Provenance; its current closed set contains only
+// "axis-allocated". This package deliberately carries the string form because
+// it sits outside the runtime tree (archtest confines resourcespec's own type
+// to runtime/*). The daemon-side Reclaimer removes bytes only for that known
+// value and treats an unrecognized value as a fail-safe no-op. Any future
+// provenance addition must update both sides of this wire together.
 type ReconcileTombstone struct {
 	TombstoneID string `json:"tombstone_id"`
 	Coord       string `json:"coord"`

@@ -243,11 +243,7 @@ func (s *SystemActor) respondStatus(sys actorbase.Sys, msg actorbase.Msg) {
 		answer.L3 = make(map[string]introspect.StatusTestimony, len(snapshot.L3))
 	}
 	for kind, row := range snapshot.L3 {
-		// 来源轴归一 (design v0.6.1): the internal fold no longer carries a
-		// per-row Source — every testimony is broker-sourced. The wire face
-		// StatusTestimony.Source is preserved and恒 "broker" (zero external
-		// consumer change).
-		out := introspect.StatusTestimony{ReceivedAt: row.ReceivedAt, Source: "broker", StaleFromPriorLife: row.StaleFromPriorLife}
+		out := introspect.StatusTestimony{ReceivedAt: row.ReceivedAt, StaleFromPriorLife: row.StaleFromPriorLife}
 		if string(kind) == introspect.ObsDevicePresence {
 			if value, ok := introspect.ParseDevicePresence(row.Val); ok {
 				out.Device = &value

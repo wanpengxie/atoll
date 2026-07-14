@@ -59,7 +59,6 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	if faults != nil && faults.created != nil {
 		faults.created(h)
 	}
-	h.state.Store(uint32(homeConstructing))
 	_ = faults.checkpoint("state.constructing")
 	defer func() {
 		if p := recover(); p != nil {
@@ -350,7 +349,6 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	// 12. Activate: construct is complete (every fallible preparation done, all
 	//     ownership already in h) — start the components: channel cells, the
 	//     schedule engine, then the delivery pump.
-	h.state.Store(uint32(homeActivating))
 	_ = faults.checkpoint("state.activating")
 	if err := faults.checkpoint("activate.channel_start"); err != nil {
 		return nil, fmt.Errorf("platform: start channel: %w", err)
@@ -407,7 +405,6 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	if err := faults.checkpoint("publish.goroutine_started"); err != nil {
 		return nil, err
 	}
-	h.state.Store(uint32(homePublished))
 	_ = faults.checkpoint("state.published")
 	if err := faults.checkpoint("publish.published"); err != nil {
 		return nil, err

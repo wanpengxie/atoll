@@ -141,7 +141,7 @@ func newEngineFn(cfg Config, factory agentFactory) base.NewEngine {
 			return nil, fmt.Errorf("kimi: workdir: %w", err)
 		}
 		e := &engine{cfg: cfg, workDir: workDir}
-		e.x = base.ExecFace(sys, cfg.FastPathWindow, nil)
+		e.x = base.ExecFace(sys, cfg.FastPathWindow)
 
 		provider, err := e.buildProvider()
 		if err != nil {

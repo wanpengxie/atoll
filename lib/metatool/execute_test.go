@@ -190,27 +190,6 @@ func TestExecuteCallActor_FanOutSubmitsRequest(t *testing.T) {
 	}
 }
 
-// TestExecuteCallActor_TimeoutResolverOverridesDefault pins P13: a resolver
-// answer is the deadline actually used (ExpiresAt reflects it).
-func TestExecuteCallActor_TimeoutResolverOverridesDefault(t *testing.T) {
-	jobs := &fakeJobs{}
-	now := time.Now()
-	x := &metatool.Exec{
-		Jobs:  jobs,
-		Clock: func() time.Time { return now },
-		TimeoutResolver: func(target actor.ActorID, reqType string) (time.Duration, bool) {
-			return 3 * time.Second, true
-		},
-	}
-	params := json.RawMessage(`{"actor_id":"tool:xhs","type":"xhs.search","wait":false}`)
-	metatool.ExecuteCallActor(context.Background(), params, x, defaultRC())
-	got := jobs.submitted[0]
-	wantExpiry := now.Add(3 * time.Second).UnixMilli()
-	if got.ExpiresAt == nil || *got.ExpiresAt != wantExpiry {
-		t.Fatalf("ExpiresAt = %v, want %d (now+3s)", got.ExpiresAt, wantExpiry)
-	}
-}
-
 // TestExecuteCallActor_SyncResolvesInline pins the sync experience: a final in
 // the window returns inline as the actor's completed result.
 func TestExecuteCallActor_SyncResolvesInline(t *testing.T) {

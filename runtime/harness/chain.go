@@ -54,10 +54,6 @@ func New(deps Deps) (Minter, error) {
 	if deps.Logger == nil {
 		deps.Logger = slog.New(slog.DiscardHandler)
 	}
-	if deps.Metrics == nil {
-		deps.Metrics = NoopMetrics{}
-	}
-
 	steps := []step{
 		newStepCallerAuth(deps),
 		newStepEnvelopeShape(deps),
@@ -156,7 +152,6 @@ func (c *chain) observeReject(ctx context.Context, env *message.Envelope, step s
 	if reason == "" {
 		return
 	}
-	c.deps.Metrics.IncCounter("harness.reject", "reason", string(reason), "step", stepName(step))
 	c.deps.Logger.Warn("harness.write.reject",
 		"step", int(step),
 		"step_name", stepName(step),
@@ -171,7 +166,6 @@ func (c *chain) observeReject(ctx context.Context, env *message.Envelope, step s
 }
 
 func (c *chain) observeError(ctx context.Context, env *message.Envelope, step stepID, err error) {
-	c.deps.Metrics.IncCounter("harness.error", "step", stepName(step))
 	c.deps.Logger.Error("harness.write.error",
 		"step", int(step),
 		"step_name", stepName(step),

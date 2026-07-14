@@ -46,14 +46,6 @@ type Exec struct {
 	// the VOLATILE half平移 from Shell.Await's window: a per-call UX bound, NOT
 	// the durable closure deadline. Zero means metatool's 15s default.
 	FastPathWindow time.Duration
-
-	// TimeoutResolver supplies the per-(target, request-type) closure deadline
-	// when a RequestSpec leaves Timeout unset (the injection-point contract vs
-	// implementation-fill split — the consumer holding a describe cache fills
-	// it). nil, or a false ok, falls back to DefaultTimeout. The fast-path
-	// window is DERIVED from the resolved deadline (min(FastPathWindow,
-	// deadline)), never a separate per-type knob.
-	TimeoutResolver func(target actor.ActorID, reqType string) (time.Duration, bool)
 }
 
 // CallFunc is the synchronous request+await-final face the introspection
@@ -73,14 +65,15 @@ func (x *Exec) now() time.Time {
 
 // buildRequestSpec is the ONE adapter (复审 P2-2) from a metatool RequestSpec +
 // the turn's RuntimeContext to a behavior.RequestSpec — the four elements the
-// seven tools share (parent request id, the resolved closure deadline via the
-// timeout resolver, and — returned alongside for the ack/window — the deadline
-// the wait mode and fast-path window are derived from) are resolved here once,
-// never re-拼 per tool. It returns the behavior spec plus the resolved deadline.
+// seven tools share (parent request id, the closure deadline resolved from
+// spec.Timeout or DefaultTimeout, and — returned alongside for the ack/window —
+// the deadline the wait mode and fast-path window are derived from) are resolved
+// here once, never re-拼 per tool. It returns the behavior spec plus the resolved
+// deadline.
 func (x *Exec) buildRequestSpec(rc RuntimeContext, spec RequestSpec) (behavior.RequestSpec, time.Duration) {
 	deadline := spec.Timeout
 	if deadline <= 0 {
-		deadline = x.resolveTimeout(actor.ActorID(spec.HandlerActorID), spec.EnvelopeType)
+		deadline = DefaultTimeout
 	}
 	expiresAt := x.now().Add(deadline).UnixMilli()
 	return behavior.RequestSpec{
@@ -95,18 +88,6 @@ func (x *Exec) buildRequestSpec(rc RuntimeContext, spec RequestSpec) (behavior.R
 		CorrelationID: behavior.CorrelationID(rc.Trigger.CorrelationID, rc.Trigger.Envelope.ID),
 		ExpiresAt:     &expiresAt,
 	}, deadline
-}
-
-// resolveTimeout answers the closure deadline for a request whose spec left
-// Timeout unset: the configured TimeoutResolver's per-(target, type) value, or
-// DefaultTimeout when unconfigured / it declines.
-func (x *Exec) resolveTimeout(target actor.ActorID, reqType string) time.Duration {
-	if x.TimeoutResolver != nil {
-		if d, ok := x.TimeoutResolver(target, reqType); ok && d > 0 {
-			return d
-		}
-	}
-	return DefaultTimeout
 }
 
 // resolveWindow computes the inline wait window from the wait mode + the

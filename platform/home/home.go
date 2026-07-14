@@ -254,7 +254,6 @@ type Home struct {
 	// write past the gate is fenced by the cell caps' own live membranes once
 	// cells stop. atomic (lock-free read on the hot path).
 	closed    atomic.Bool
-	state     atomic.Uint32
 	closeOnce sync.Once
 	closeDone chan struct{}
 	closeErr  error
@@ -285,13 +284,3 @@ func (f *homeFaults) checkpoint(name string) error {
 	}
 	return f.fail[name]
 }
-
-type homeState uint32
-
-const (
-	homeConstructing homeState = iota
-	homeActivating
-	homePublished
-	homeClosing
-	homeClosed
-)

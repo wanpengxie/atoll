@@ -4,5 +4,5 @@
 // nested blob overflows the goroutine stack — a fatal, unrecoverable crash that
 // no recover can catch. Callers decoding untrusted bytes into an open shape
 // (map[string]any and friends) run this guard first. A plain stdlib util, no
-// layer of its own — the same shape as lib/pathsafe.
+// layer of its own — a small stdlib-shaped helper.
 package jsondepth

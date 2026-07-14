@@ -32,17 +32,8 @@ func (s stubLog) HasFinalResponse(ctx context.Context, parentID message.ID) (boo
 	return s.hasFinalFn(ctx, parentID)
 }
 
-// spyMetrics records every IncCounter call so observe* paths can be asserted.
-type spyMetrics struct {
-	calls [][]string
-}
-
-func (m *spyMetrics) IncCounter(name string, tags ...string) {
-	m.calls = append(m.calls, append([]string{name}, tags...))
-}
-
 // ---------------------------------------------------------------------
-// deps.go — Validate + NoopMetrics.IncCounter + New defaults
+// deps.go — Validate + New defaults
 // ---------------------------------------------------------------------
 
 func TestDeps_ValidateMissingFields(t *testing.T) {
@@ -61,12 +52,7 @@ func TestDeps_ValidateMissingFields(t *testing.T) {
 	}
 }
 
-func TestNoopMetrics_IncCounter(t *testing.T) {
-	// Pure no-op — exercises deps.go:33. Must not panic.
-	NoopMetrics{}.IncCounter("anything", "k", "v")
-}
-
-// New must fill NowMs / Logger / Metrics defaults when nil (chain.go:36-44).
+// New must fill NowMs / Logger defaults when nil.
 func TestNew_FillsDefaults(t *testing.T) {
 	lg := stubLog{
 		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
@@ -75,7 +61,7 @@ func TestNew_FillsDefaults(t *testing.T) {
 		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
-	// NowMs / Logger / Metrics all nil → defaults filled.
+	// NowMs / Logger nil → defaults filled.
 	m, err := New(Deps{ChannelID: testChannelID, Log: lg})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -114,21 +100,18 @@ func TestStepName_DefaultUnknownID(t *testing.T) {
 	}
 }
 
-// chainWith builds the internal chain with stub deps + a spy Metrics,
-// exercising the observe* metric paths directly (step-isolation).
-func chainWith(t *testing.T, lg storespec.MessageLog) (*chain, *spyMetrics) {
+// chainWith builds the internal chain with stub deps.
+func chainWith(t *testing.T, lg storespec.MessageLog) *chain {
 	t.Helper()
-	spy := &spyMetrics{}
 	m, err := New(Deps{
 		ChannelID: testChannelID,
 		Log:       lg,
 		NowMs:     func() int64 { return fixedNowMs },
-		Metrics:   spy,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return m.(*minter).chain, spy
+	return m.(*minter).chain
 }
 
 // A step that returns a hard error (not a reject) → Write maps it through
@@ -146,7 +129,7 @@ func TestWrite_StepError_ObservedAndReturned(t *testing.T) {
 		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, findErr },
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
-	c, spy := chainWith(t, lg)
+	c := chainWith(t, lg)
 
 	resp := makeResponse("")
 	resp.Payload = []byte(`{"status":"completed"}`)
@@ -156,10 +139,6 @@ func TestWrite_StepError_ObservedAndReturned(t *testing.T) {
 	}
 	if !errors.Is(err, findErr) {
 		t.Fatalf("error = %v, want wrapping %v", err, findErr)
-	}
-	// observeError must have incremented harness.error.
-	if !hasMetric(spy, "harness.error") {
-		t.Fatalf("observeError did not record harness.error counter; calls=%v", spy.calls)
 	}
 }
 
@@ -177,7 +156,7 @@ func TestWrite_AppendTypedError_MapsToReject(t *testing.T) {
 		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
-	c, spy := chainWith(t, lg)
+	c := chainWith(t, lg)
 
 	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), validEvent("m-app", "agent:p"))
 	if err != nil {
@@ -189,13 +168,10 @@ func TestWrite_AppendTypedError_MapsToReject(t *testing.T) {
 	if res.MessageID != "m-partial" {
 		t.Fatalf("MessageID = %q, want m-partial", res.MessageID)
 	}
-	if !hasMetricTag(spy, "harness.reject", string(HarnessTerminalDuplicate)) {
-		t.Fatalf("observeReject did not record reject counter; calls=%v", spy.calls)
-	}
 }
 
 // Append returns a PLAIN error (not *AppendError) → chain.go:117-118 wraps it
-// and observeError records harness.error.
+// and observeError logs it.
 func TestWrite_AppendPlainError_WrappedAsError(t *testing.T) {
 	appendErr := errors.New("disk on fire")
 	lg := stubLog{
@@ -205,14 +181,11 @@ func TestWrite_AppendPlainError_WrappedAsError(t *testing.T) {
 		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
-	c, spy := chainWith(t, lg)
+	c := chainWith(t, lg)
 
 	_, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), validEvent("m-plain", "agent:p"))
 	if err == nil || !errors.Is(err, appendErr) {
 		t.Fatalf("plain append error = %v, want wrapping %v", err, appendErr)
-	}
-	if !hasMetric(spy, "harness.error") {
-		t.Fatalf("observeError missing for append plain error; calls=%v", spy.calls)
 	}
 }
 
@@ -229,7 +202,7 @@ func TestWrite_PanicRecovered(t *testing.T) {
 		},
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
-	c, _ := chainWith(t, lg)
+	c := chainWith(t, lg)
 
 	resp := makeResponse("")
 	resp.Payload = []byte(`{"status":"completed"}`)
@@ -241,8 +214,7 @@ func TestWrite_PanicRecovered(t *testing.T) {
 
 // observeReject's reason=="" early-return (chain.go:142-144) is reachable only
 // through the engine-append path: a typed *AppendError carrying an EMPTY Reason
-// makes Chain.Write call observeReject with reason "". We assert no
-// harness.reject counter is recorded (the metric branch is skipped).
+// makes Chain.Write call observeReject with reason "".
 func TestWrite_AppendEmptyReason_ObserveRejectNoOp(t *testing.T) {
 	lg := stubLog{
 		appendFn: func(context.Context, *message.Envelope, bool) (storespec.AppendResult, error) {
@@ -251,7 +223,7 @@ func TestWrite_AppendEmptyReason_ObserveRejectNoOp(t *testing.T) {
 		findByID:   func(context.Context, message.ID) (*storespec.StoredRow, bool, error) { return nil, false, nil },
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
-	c, spy := chainWith(t, lg)
+	c := chainWith(t, lg)
 
 	res, err := c.write(ctxCallerKind("agent:p", actor.KindAgent), validEvent("m-empty", "agent:p"))
 	if err != nil {
@@ -259,35 +231,10 @@ func TestWrite_AppendEmptyReason_ObserveRejectNoOp(t *testing.T) {
 	}
 	// An empty Reason produces a WriteResult with empty RejectReason, so
 	// Accepted() is degenerately true — but the partial message id is carried
-	// and observeReject's metric branch is SKIPPED (reason=="" early return).
+	// and observeReject returns immediately for an empty reason.
 	if res.MessageID != "" {
 		t.Fatalf("empty-reason result MessageID = %q, want empty (no PartialMessageID set)", res.MessageID)
 	}
-	if hasMetric(spy, "harness.reject") {
-		t.Fatalf("observeReject should skip metric on empty reason; calls=%v", spy.calls)
-	}
-}
-
-func hasMetric(spy *spyMetrics, name string) bool {
-	for _, c := range spy.calls {
-		if len(c) > 0 && c[0] == name {
-			return true
-		}
-	}
-	return false
-}
-
-func hasMetricTag(spy *spyMetrics, name, tagVal string) bool {
-	for _, c := range spy.calls {
-		if len(c) > 0 && c[0] == name {
-			for _, t := range c[1:] {
-				if t == tagVal {
-					return true
-				}
-			}
-		}
-	}
-	return false
 }
 
 // ---------------------------------------------------------------------

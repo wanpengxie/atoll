@@ -23,10 +23,10 @@ import (
 // dispatch / per-turn checkpoint挂账 all live in agent/base. It封s the claude
 // CLI's synchronous SDK message shape entirely — the base never sees it.
 type engine struct {
-	cfg      Config
-	client   claudeClient
-	x        *metatool.Exec // the meta-tool execution face (built from Sys)
-	workDir  string         // the claude session's per-process Cwd
+	cfg     Config
+	client  claudeClient
+	x       *metatool.Exec // the meta-tool execution face (built from Sys)
+	workDir string         // the claude session's per-process Cwd
 
 	// curMu guards curRC — the in-flight turn's RuntimeContext, read by the MCP
 	// tool handlers (which fire on the SDK's own goroutine mid-turn). Turns are
@@ -67,7 +67,7 @@ func newEngineFn(cfg Config, factory clientFactory) base.NewEngine {
 			return nil, fmt.Errorf("claude: workdir: %w", err)
 		}
 		e := &engine{cfg: cfg, workDir: workDir}
-		e.x = base.ExecFace(sys, cfg.FastPathWindow, nil)
+		e.x = base.ExecFace(sys, cfg.FastPathWindow)
 		client, err := factory(e, seed)
 		if err != nil {
 			return nil, err

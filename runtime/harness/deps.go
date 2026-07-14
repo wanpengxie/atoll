@@ -22,16 +22,6 @@ import (
 // substrate does not define its own Logger vocabulary — that was a reinvention
 // of slog. nil → caller defaults to slog.New(slog.DiscardHandler).)
 
-// Metrics is the minimal counter seam used for harness reject accounting.
-type Metrics interface {
-	IncCounter(name string, tags ...string)
-}
-
-// NoopMetrics drops every metric call.
-type NoopMetrics struct{}
-
-func (NoopMetrics) IncCounter(string, ...string) {}
-
 // caller carries the principal + transport metadata the harness needs to
 // verify a write. It is plumbed through context.Context (see ctxWithCaller /
 // callerFromCtx) so step implementations do not need a per-step parameter; the
@@ -83,9 +73,6 @@ type Deps struct {
 
 	// Logger receives per-step pass/reject diagnostics. nil → discard.
 	Logger *slog.Logger
-
-	// Metrics receives per-reject counters. nil → NoopMetrics.
-	Metrics Metrics
 }
 
 // Validate returns nil when Deps is wired enough to assemble the engine.

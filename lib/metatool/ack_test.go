@@ -16,28 +16,28 @@ func TestResolveFastPathWindow(t *testing.T) {
 		want           time.Duration
 	}{
 		{
-			name:           "bounded, type timeout > fast path",
+			name:           "bounded, request deadline > fast path",
 			typeTimeout:    30 * time.Second,
 			defaultTimeout: 30 * time.Second,
 			waitUnbounded:  false,
 			want:           metatool.FastPathWindow,
 		},
 		{
-			name:           "bounded, type timeout < fast path",
+			name:           "bounded, request deadline < fast path",
 			typeTimeout:    5 * time.Second,
 			defaultTimeout: 30 * time.Second,
 			waitUnbounded:  false,
 			want:           5 * time.Second,
 		},
 		{
-			name:           "unbounded uses type timeout",
+			name:           "unbounded uses request deadline",
 			typeTimeout:    60 * time.Second,
 			defaultTimeout: 30 * time.Second,
 			waitUnbounded:  true,
 			want:           60 * time.Second,
 		},
 		{
-			name:           "zero type timeout uses default",
+			name:           "zero request deadline uses default",
 			typeTimeout:    0,
 			defaultTimeout: 20 * time.Second,
 			waitUnbounded:  true,

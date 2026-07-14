@@ -8,7 +8,6 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/metatool"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
@@ -22,18 +21,16 @@ import (
 //   - a synchronous sys.Call face (describe×2/list_actors): a transient
 //     request+await-final round-trip that never litters the durable job table.
 //
-// fastPathWindow is the volatile inline-wait cap (the sync EXPERIENCE);
-// resolver supplies the per-(target,type) closure deadline when a call omits
-// its own (nil = DefaultTimeout). The provider builds this once per incarnation
-// (inside NewEngine) and threads it into its engine's tool handlers.
-func ExecFace(sys actorbase.Sys, fastPathWindow time.Duration, resolver func(target actor.ActorID, reqType string) (time.Duration, bool)) *metatool.Exec {
+// fastPathWindow is the volatile inline-wait cap (the sync EXPERIENCE). The
+// provider builds this once per incarnation and threads it into its engine's
+// tool handlers.
+func ExecFace(sys actorbase.Sys, fastPathWindow time.Duration) *metatool.Exec {
 	jobs, _ := sys.(actorbase.JobTable)
 	return &metatool.Exec{
-		Jobs:            jobs,
-		Call:            callFace(sys),
-		Clock:           time.Now,
-		FastPathWindow:  fastPathWindow,
-		TimeoutResolver: resolver,
+		Jobs:           jobs,
+		Call:           callFace(sys),
+		Clock:          time.Now,
+		FastPathWindow: fastPathWindow,
 	}
 }
 

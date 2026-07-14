@@ -42,7 +42,6 @@ const errMissingActorID statusRequestError = "actor_id required"
 
 type StatusTestimony struct {
 	ReceivedAt         int64           `json:"received_at"`
-	Source             string          `json:"source"`
 	StaleFromPriorLife bool            `json:"stale_from_prior_life,omitempty"`
 	Device             *DevicePresence `json:"device,omitempty"`
 	ValueBase64        string          `json:"value_b64,omitempty"`

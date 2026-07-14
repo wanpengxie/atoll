@@ -57,7 +57,7 @@ func (v *compositionView) Members(ctx context.Context) ([]actorrt.DesiredMember,
 		if !ok {
 			continue
 		}
-		out = append(out, actorrt.DesiredMember{ID: row.InstanceID, Kind: decl.Kind, Lifecycle: actorrt.LifecycleAlwaysOn, Epoch: row.Epoch})
+		out = append(out, actorrt.DesiredMember{ID: row.InstanceID, Kind: decl.Kind, Epoch: row.Epoch})
 	}
 	return out, nil
 }

@@ -62,7 +62,7 @@ func (p *e2eLinkPlan) ApplyPlan(rows []platform.PlanActor) error {
 		if err != nil {
 			return err
 		}
-		desired = append(desired, actorrt.DesiredMember{ID: row.InstanceID, Kind: row.Kind, Lifecycle: actorrt.LifecycleAlwaysOn, Epoch: row.Epoch})
+		desired = append(desired, actorrt.DesiredMember{ID: row.InstanceID, Kind: row.Kind, Epoch: row.Epoch})
 		builders[row.InstanceID] = decl.Factory
 	}
 	p.mu.Lock()

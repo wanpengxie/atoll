@@ -40,7 +40,6 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 		// entry points check closed before touching durable state, so no scheduler
 		// handoff or fault checkpoint between close entry and Runtime.Seal can leave
 		// a store-write window open.
-		h.state.Store(uint32(homeClosing))
 		h.closed.Store(true)
 		var errs []error
 		addErr := func(err error) {
@@ -146,7 +145,6 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 		if h.engine != nil {
 			leaked += h.engine.Leaked()
 		}
-		h.state.Store(uint32(homeClosed))
 		_ = h.faults.checkpoint("state.closed")
 		step("close.end", func() {})
 		h.logger.Info("platform.home.closed", "channel", h.channelID, "reason", reason,

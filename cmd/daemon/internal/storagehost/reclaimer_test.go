@@ -18,7 +18,7 @@ func TestReclaimer_AxisAllocatedRemovesBytes(t *testing.T) {
 	}
 }
 
-func TestReclaimer_RegisteredNeverTouchesDisk(t *testing.T) {
+func TestReclaimer_UnknownProvenanceNeverTouchesDisk(t *testing.T) {
 	cr := newTestChannelRoot(t)
 	var a Allocator
 	if err := a.Alloc(cr, "coord2", false); err != nil {
@@ -26,11 +26,11 @@ func TestReclaimer_RegisteredNeverTouchesDisk(t *testing.T) {
 	}
 
 	var r Reclaimer
-	if err := r.Reclaim(cr, "coord2", "registered"); err != nil {
+	if err := r.Reclaim(cr, "coord2", "unknown-provenance"); err != nil {
 		t.Fatalf("Reclaim: %v", err)
 	}
 	if _, err := (Streamer{}).OpenRead(cr, "coord2"); err != nil {
-		t.Fatalf("registered provenance must never touch disk, but bytes are gone: %v", err)
+		t.Fatalf("unknown provenance must never touch disk, but bytes are gone: %v", err)
 	}
 }
 

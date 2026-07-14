@@ -102,8 +102,5 @@ func runStep(t *testing.T, mk func(Deps) step, deps Deps, ctx context.Context, e
 	if deps.Logger == nil {
 		deps.Logger = slog.New(slog.DiscardHandler)
 	}
-	if deps.Metrics == nil {
-		deps.Metrics = NoopMetrics{}
-	}
 	return mk(deps).Run(ctx, env)
 }
