@@ -106,7 +106,6 @@ type CompositionControlPlane interface {
 	ApplyRestartComposition(context.Context, int64, actor.ActorID, int64) (newEpoch int64, applied bool, err error)
 	SetDefaultComposition(context.Context, actor.ActorID) error
 	RevokeDaemonTarget(context.Context, string) ([]actor.ActorID, error)
-	MarkCompositionMigrated(context.Context, int64) error
 	// ApplyComputeDeclaration is the complete channel-local declaration
 	// decision function. beforeWrite runs inside the transaction after the full
 	// decision set is known and before any Host/deregister write. A callback

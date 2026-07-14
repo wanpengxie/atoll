@@ -37,10 +37,8 @@ type InstanceSpec struct {
 	ID actor.ActorID
 	// Config is THE per-instance config injection point — the app-rewire spec's
 	// "ctx.Config" (K2=a/S8). It is NOT a new runtime surface; the constructor
-	// closure captures it and hands it to the actor in BOTH forms: a Legacy
-	// actor's constructor parses it and closes over the result in the
-	// func(pen) closure; a Proc actor's constructor closes it into its Def
-	// (Constructor(spec,deps) → Def → New() per incarnation; see
+	// closure captures it into its Proc Def (Constructor(spec,deps) → Def →
+	// New() per incarnation; see
 	// actorbase.Def's doc). Either way config rides the constructor, NOT the
 	// capability bundle: it is an independent PARAMETER, never welded into
 	// actorcaps.Caps (S-P16 红线; enforced by archtest.TestConfigNotInCaps).

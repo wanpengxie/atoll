@@ -171,11 +171,6 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 		rollback("commit", err)
 		return
 	}
-	if err := home.MarkCompositionMigrated(c.Request.Context(), now); err != nil {
-		rollback("migration marker", err)
-		return
-	}
-
 	// 目录行提交后补一次 poke (连接模型勘误期 P1-4, 六轮终审): the two Admits above
 	// (creator + boost) each fired a membership-change poke SYNCHRONOUSLY, inside
 	// home.Admit, BEFORE this transaction committed — at that instant the resolver
@@ -498,7 +493,7 @@ func (a *App) handleSetDefaultAgent(c *gin.Context) {
 	payload, _ := json.Marshal(instancePayload{InstanceID: strings.TrimSpace(req.InstanceID)})
 	r, err := a.submitControlThroughDoor(c.Request.Context(), chID, middleware.UserID(c),
 		home.TypeSetDefaultAgent, payload)
-	a.finishControlShim(c, r, err, func(body map[string]any) (int, any) {
+	a.finishControlRequest(c, r, err, func(body map[string]any) (int, any) {
 		da, _ := body["default_agent"].(string)
 		return http.StatusOK, gin.H{"channel_id": chID, "default_agent": da}
 	})
@@ -523,7 +518,7 @@ func (a *App) handleRemoveActor(c *gin.Context) {
 	payload, _ := json.Marshal(instancePayload{InstanceID: inst})
 	r, err := a.submitControlThroughDoor(c.Request.Context(), chID, middleware.UserID(c),
 		home.TypeRemoveActor, payload)
-	a.finishControlShim(c, r, err, func(body map[string]any) (int, any) {
+	a.finishControlRequest(c, r, err, func(body map[string]any) (int, any) {
 		removed, _ := body["removed"].(string)
 		return http.StatusOK, gin.H{"channel_id": chID, "removed": removed}
 	})

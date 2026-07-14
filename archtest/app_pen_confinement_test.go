@@ -20,8 +20,7 @@ import (
 // references — any reappearance (an app handler reaching for a raw pen to write
 // truth directly, bypassing the door + its户籍校验) turns this red.
 //
-// Scope: NON-TEST source only (!_test.go). Live tests legitimately mint their own
-// Legacy-shape actor doubles over harness.Pen (xhs/metatool/agent-stub factories);
+// Scope: NON-TEST source only (!_test.go). Live tests may mint actor doubles;
 // those are test fixtures, not production write paths, and are listed in the S4
 // cleanup ledger — the compile-time wall is over what ships.
 func TestAppTreeHasNoHarnessPen(t *testing.T) {

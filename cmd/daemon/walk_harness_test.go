@@ -53,6 +53,7 @@ import (
 
 	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/platform/home"
@@ -300,10 +301,11 @@ func (controllerPen) Receive(context.Context, *message.Envelope) error { return 
 func newControllerPen(t *testing.T, h *home.Home, id actor.ActorID, kind actor.Kind) harness.Pen {
 	t.Helper()
 	var pen harness.Pen
-	_, err := home.SpawnForTesting(h, kind, strings.ReplaceAll(string(id), ":", "-"), platform.ActorFactory{Legacy: func(p harness.Pen) actorrt.Actor {
+	_, err := home.SpawnForTesting(h, kind, strings.ReplaceAll(string(id), ":", "-"), platform.CapsFactory(func(caps actorcaps.Caps) actorrt.Actor {
+		p := caps.Pen
 		pen = p
 		return controllerPen{pen: p}
-	}})
+	}))
 	if err != nil {
 		t.Fatalf("spawn controller %s: %v", id, err)
 	}

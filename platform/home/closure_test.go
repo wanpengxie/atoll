@@ -60,10 +60,11 @@ func (penCell) Receive(context.Context, *message.Envelope) error { return nil }
 func spawnWithPen(t *testing.T, ch *home.Home, id *actor.ActorID, kind actor.Kind) harness.Pen {
 	t.Helper()
 	var pen harness.Pen
-	minted, err := home.SpawnForTest(ch, *id, kind, platform.ActorFactory{Legacy: func(p harness.Pen) actorrt.Actor {
+	minted, err := home.SpawnForTest(ch, *id, kind, platform.CapsFactory(func(caps actorcaps.Caps) actorrt.Actor {
+		p := caps.Pen
 		pen = p
 		return penCell{pen: p}
-	}})
+	}))
 	if err != nil {
 		t.Fatalf("spawn pen actor %s: %v", *id, err)
 	}
@@ -196,9 +197,9 @@ func TestClosure_CrashedButRegistered_ClosedByDeadlineNotEdge(t *testing.T) {
 
 	// 2. Spawn the panic actor cell — it dies on delivery, firing the death edge,
 	//    but the worker stays a registered member throughout (never deregistered).
-	workerID, err := home.SpawnForTest(ch, workerID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
+	workerID, err := home.SpawnForTest(ch, workerID, actor.KindAgent, platform.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return panicOnReceive{}
-	}})
+	}))
 	if err != nil {
 		t.Fatalf("spawn worker cell: %v", err)
 	}
@@ -265,9 +266,9 @@ func TestClosure_Author2_CallerTimeout_MaterialisesUnansweredTimeout(t *testing.
 
 	// 1. The silent receiver: live, admitted, never answers.
 	registerActor(t, ch, &workerID, actor.KindAgent)
-	workerID, err := home.SpawnForTest(ch, workerID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
+	workerID, err := home.SpawnForTest(ch, workerID, actor.KindAgent, platform.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return silentActor{}
-	}})
+	}))
 	if err != nil {
 		t.Fatalf("spawn silent cell: %v", err)
 	}

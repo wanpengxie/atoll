@@ -11,7 +11,6 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/ipc"
 )
 
 // embodiment is one live actor's substrate-side embodiment, regardless of where
@@ -507,12 +506,6 @@ func (r *Runtime) Attach(hsCtx context.Context, conn io.ReadWriteCloser, sinks S
 	if resolve == nil {
 		return Incarnation{}, errors.New("actorrt: port requires ResolveFunc")
 	}
-	return r.AttachHandshake(hsCtx, conn, sinks, func(hp ipc.HandshakePayload) (actor.ActorID, error) {
-		return resolve(hp.LeaseID)
-	}, kindOf, onCancelRequest)
-}
-
-func (r *Runtime) AttachHandshake(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve HandshakeResolveFunc, kindOf KindOf, onCancelRequest func(actor.ActorID, message.ID)) (Incarnation, error) {
 	prepared, err := r.PrepareHandshake(hsCtx, conn, sinks, resolve, kindOf, onCancelRequest)
 	if err != nil {
 		return Incarnation{}, err
@@ -543,14 +536,14 @@ func (p *PreparedAttach) ID() actor.ActorID {
 
 // PrepareHandshake reads, decodes, and resolves the handshake without sending
 // an ACK or publishing the port in any Runtime observation surface.
-func (r *Runtime) PrepareHandshake(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve HandshakeResolveFunc, kindOf KindOf, onCancelRequest func(actor.ActorID, message.ID)) (*PreparedAttach, error) {
+func (r *Runtime) PrepareHandshake(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onCancelRequest func(actor.ActorID, message.ID)) (*PreparedAttach, error) {
 	return r.PrepareHandshakeObserved(hsCtx, conn, sinks, resolve, kindOf, onCancelRequest, nil)
 }
 
 // PrepareHandshakeObserved is PrepareHandshake with a pointer-identity exit
 // observer used by the Home port index. The callback runs after Runtime's own
 // conditional map eviction on every terminal path, including quiet teardown.
-func (r *Runtime) PrepareHandshakeObserved(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve HandshakeResolveFunc, kindOf KindOf, onCancelRequest func(actor.ActorID, message.ID), onExit func(Incarnation)) (*PreparedAttach, error) {
+func (r *Runtime) PrepareHandshakeObserved(hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onCancelRequest func(actor.ActorID, message.ID), onExit func(Incarnation)) (*PreparedAttach, error) {
 	exit := r.removeIf
 	if onExit != nil {
 		exit = func(id actor.ActorID, self embodiment) {

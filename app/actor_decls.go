@@ -253,7 +253,7 @@ func (a *App) handleIntroduceActor(c *gin.Context) {
 	})
 	r, err := a.submitControlThroughDoor(c.Request.Context(), chID, middleware.UserID(c),
 		home.TypeIntroduceActor, payload)
-	a.finishControlShim(c, r, err, func(body map[string]any) (int, any) {
+	a.finishControlRequest(c, r, err, func(body map[string]any) (int, any) {
 		body["channel_id"] = chID
 		status := http.StatusOK
 		if created, _ := body["created"].(bool); created {

@@ -33,7 +33,7 @@ type recordActor struct{ caps actorcaps.Caps }
 func (recordActor) Receive(context.Context, *message.Envelope) error { return nil }
 
 // testDesired is an in-memory, swappable DesiredSource (the intent half the app
-// assembly root injects for real, over channel_actors).
+// assembly root injects for real, over channel_composition).
 type testDesired struct {
 	mu      sync.Mutex
 	members []actorrt.DesiredMember

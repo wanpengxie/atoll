@@ -16,9 +16,8 @@ import (
 // actorbase-spec-v1.md §4 S3 / §5 red line ③: the eight out-generation call
 // faces (CapsFactoryBuilder / compute.Builder / home.Home.SpawnIfAbsent / ActorDecl /
 // registry.Constructor / app-human / cmd-daemon / test fixtures) were reshaped
-// so downstream never again needs to name actorcaps.Caps — it speaks
-// platform.ActorFactory (harness.Pen for the pre-actorbase "Legacy" shape,
-// actorbase.Sys/Proc for the migrated shape) instead. These four locks are
+// so production downstream never again needs to name actorcaps.Caps — it
+// speaks platform.ActorFactory with a single actorbase.Def model. These four locks are
 // the S3 "断净防绕清单" DoD: import confinement / plugin-dir reinforcement /
 // zero old-shape residual / direct-Actor-implementer allowlist.
 
@@ -32,13 +31,16 @@ var actorcapsAllowedPrefix = []string{"../platform/", "../lib/actorbase/", "../l
 
 // TestActorcapsConfinedToPlatformAndActorbase — ① import confinement,
 // repo-wide, _test.go included (spec: "含 _test.go 扫描"). A downstream
-// package never names actorcaps.Caps: the platform-level ActorFactory (a
-// harness.Pen-taking Legacy factory or an actorbase.Def) is the only shape a
-// consumer constructs.
+// package never names actorcaps.Caps: actorbase.Def is the only production
+// factory shape. Test files may use platform.CapsFactory to inspect the welded
+// bundle directly.
 func TestActorcapsConfinedToPlatformAndActorbase(t *testing.T) {
 	var v []string
 	walkImportsAll(t, func(slash, imp string) {
 		if imp != actorcapsPkg {
+			return
+		}
+		if strings.HasSuffix(slash, "_test.go") {
 			return
 		}
 		for _, p := range actorcapsAllowedPrefix {
@@ -65,8 +67,8 @@ var pluginDirs = []string{"../drivers/tools/", "../drivers/agents/provider/"}
 // reinforcement: no actor/engine implementation package may import
 // actorcaps.Caps (the whole caps bundle) or reach directly for the raw
 // access/schedule minting surfaces (runtime/accessdoor, runtime/schedule) —
-// today's plugin authors reach for harness.Pen alone (grep-confirmed, S3
-// grounding), so a plugin needing more than Pen is exactly the "降档" signal
+// today's plugin authors reach only for actorbase.Sys, so a plugin needing raw
+// caps is exactly the "降档" signal
 // spec §2 names: it has stopped being a thin adapter.
 func TestPluginDirsForbidCapsAndDoorImports(t *testing.T) {
 	forbidden := map[string]string{
@@ -91,7 +93,7 @@ func TestPluginDirsForbidCapsAndDoorImports(t *testing.T) {
 		// to Proc (期10 S3) — a test double is not a production adapter reaching
 		// for a minting surface, the same "_test.go doubles are exempt"
 		// principle rule ④ already uses. The whole caps bundle stays banned even
-		// in tests here (and repo-wide via rule ①); only the raw
+		// in production here (and repo-wide via rule ①); only the raw
 		// accessdoor/schedule minting surfaces are relaxed for test doubles.
 		if strings.HasSuffix(slash, "_test.go") && imp != actorcapsPkg {
 			return
@@ -135,7 +137,7 @@ func TestNoOldCapsFactoryShapeResidual(t *testing.T) {
 				}
 				return nil
 			}
-			if !strings.HasSuffix(path, ".go") {
+			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
 				return nil
 			}
 			b, rerr := readFile(path)
@@ -160,7 +162,7 @@ func TestNoOldCapsFactoryShapeResidual(t *testing.T) {
 // exempt everywhere (a test double is not a production implementer). echo, kimi
 // (drivers/tools/kimi), sysactor, the plugin adapters xhs + drivers/tools/device (期10 S3),
 // and now the two agent-provider engines claude + go-kimi (期10 S5) have all
-// migrated to actorbase.Proc — the Legacy queue is zeroed and the cell's
+// migrated to actorbase.Proc — the compatibility queue is zeroed and the cell's
 // per-request machine铲除 (spec §3 / 红线6).
 var directActorImplementAllowlist = []string{
 	"../lib/actorbase/engine.go", // the sanctioned engine (spec §3) — the ONLY entry

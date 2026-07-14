@@ -36,7 +36,7 @@ import (
 
 // Env keys read at config time. The ATOLL_CHANNEL_TYPE / ATOLL_DOMAIN_PROMPT
 // env keys are GONE (A3 / Q7): the per-channel domain prompt now rides
-// InstanceSpec.Config (channel_actors.config_json), the ONE config承载.
+// InstanceSpec.Config (channel_composition.config_json), the ONE config承载.
 const (
 	EnvKeyAPIKey  = "KIMI_API_KEY"
 	EnvKeyBaseURL = "KIMI_BASE_URL"
@@ -55,7 +55,7 @@ type Config struct {
 	FastPathWindow time.Duration
 }
 
-// specOverlay is the per-instance config (channel_actors.config_json) the looper
+// specOverlay is the per-instance config (channel_composition.config_json) the looper
 // self-parses: creds/model overrides plus the channel's domain prompt facts
 // (A3/Q7 — what ATOLL_CHANNEL_TYPE / ATOLL_DOMAIN_PROMPT once carried).
 type specOverlay struct {

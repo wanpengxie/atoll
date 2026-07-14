@@ -126,7 +126,7 @@ func attachTestPort(t *testing.T, rt *actorrt.Runtime, id actor.ActorID) (actorr
 		actorrt.Sinks{Emit: func(context.Context, actorrt.Incarnation, *message.Envelope) (ipc.EmitResult, error) {
 			return ipc.EmitResult{}, nil
 		}},
-		func(string) (actor.ActorID, error) { return id, nil },
+		func(ipc.HandshakePayload) (actor.ActorID, error) { return id, nil },
 		nil,
 		nil,
 	)
@@ -227,7 +227,7 @@ func attachGatedPort(t *testing.T, rt *actorrt.Runtime, id actor.ActorID, emit a
 			}
 		}
 	}()
-	inc, err := rt.Attach(context.Background(), hostConn, actorrt.Sinks{Emit: emit}, func(string) (actor.ActorID, error) { return id, nil }, nil, nil)
+	inc, err := rt.Attach(context.Background(), hostConn, actorrt.Sinks{Emit: emit}, func(ipc.HandshakePayload) (actor.ActorID, error) { return id, nil }, nil, nil)
 	if err != nil {
 		t.Fatalf("Attach: %v", err)
 	}

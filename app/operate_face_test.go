@@ -124,7 +124,7 @@ func TestOperate_IntroduceUnknownClass_Rejected(t *testing.T) {
 
 // TestOperate_IntroduceInvalidPlacement_Rejected proves the placement闭集 guard (#5):
 // an explicit garbage placement is fail-closed (error_code=invalid_placement) — the
-// same posture as unknown_class — and NO channel_actors row lands (rejected before the
+// same posture as unknown_class — and NO channel_composition row lands (rejected before the
 // INSERT). Empty placement still defaults to daemon (unaffected).
 func TestOperate_IntroduceInvalidPlacement_Rejected(t *testing.T) {
 	env := setupTestApp(t)
@@ -201,7 +201,7 @@ func TestOperate_ConfigChange_DaemonPlacedTakesEffect(t *testing.T) {
 	}
 
 	// Re-introduce the SAME row with a CHANGED config → the configChanged branch:
-	// UPDATE channel_actors.config_json + the placement-neutral Home.Restart for the
+	// UPDATE channel_composition.config_json + the placement-neutral Home.Restart for the
 	// daemon row. A placement-gated effect Restart would fail here (rebuild_failed)
 	// or never mark config_updated.
 	p2, _ := json.Marshal(map[string]any{"decl_id": agentID, "config": map[string]any{"tone": "brisk"}})

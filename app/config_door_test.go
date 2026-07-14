@@ -13,15 +13,12 @@ import (
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // config_door_test.go is the S8 DoD (spec §7 DoD 10): ctx.Config is the read-only
 // per-instance snapshot that reaches an actor via registry.InstanceSpec.Config in
-// BOTH forms (Legacy / Proc), never through actorcaps.Caps (that half is the
+// the Proc model, never through actorcaps.Caps (that half is the
 // TestConfigNotInCaps archtest), and 改配置 flows door → reconcile-replace (削 → SpawnIfAbsent rebuild) → a fresh
 // incarnation over the new snapshot.
 
@@ -75,23 +72,7 @@ func configModel(raw json.RawMessage) string {
 }
 
 func init() {
-	// Legacy form: the constructor parses spec.Config and closes over the result in
-	// the func(pen) factory closure — config rides the constructor, not caps.
-	legacy := func(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
-		model := configModel(spec.Config)
-		id := spec.ID
-		return platform.ActorDecl{
-			ID:   id,
-			Kind: actor.KindAgent,
-			Factory: platform.ActorFactory{Legacy: func(pen harness.Pen) actorrt.Actor {
-				recordConfig(id, model) // runs when THIS incarnation is built
-				return &cfgLegacyActor{pen: pen}
-			}},
-		}, nil
-	}
-	registry.Register("s8cfg-legacy", registry.ClassDecl{Kind: actor.KindAgent, New: legacy})
-
-	// Proc form: the same constructor closure captures spec.Config into the Def
+	// The constructor closure captures spec.Config into the Def
 	// (Constructor(spec,deps) → Def → New() per incarnation), never into caps.
 	proc := func(spec registry.InstanceSpec, ctx registry.Deps) (platform.ActorDecl, error) {
 		model := configModel(spec.Config)
@@ -103,7 +84,13 @@ func init() {
 				Doc: "s8 config snapshot proc",
 				New: func() (actorbase.Proc, error) {
 					recordConfig(id, model) // Def carries the snapshot into the incarnation
-					return func(sys actorbase.Sys) error { return nil }, nil
+					return func(sys actorbase.Sys) error {
+						for {
+							if _, err := sys.Recv(); err != nil {
+								return err
+							}
+						}
+					}, nil
 				},
 			}},
 		}, nil
@@ -111,62 +98,42 @@ func init() {
 	registry.Register("s8cfg-proc", registry.ClassDecl{Kind: actor.KindAgent, New: proc})
 }
 
-type cfgLegacyActor struct{ pen harness.Pen }
-
-func (a *cfgLegacyActor) Receive(context.Context, *message.Envelope) error { return nil }
-
-// TestConfigDoor_LegacyEndToEnd is the end-to-end DoD: introduce a server-placed
-// agent (snapshot v1 from its global config), then change config through the door
-// (introduce upsert carrying config) and observe the new snapshot v2 embodied via
-// reconcile-replace.
-func TestConfigDoor_LegacyEndToEnd(t *testing.T) {
+func TestConfigDoor_ProcEndToEnd(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
-
-	// Global agent declaration carries snapshot v1 (looper = the s8cfg-legacy class).
 	w := env.do(t, "POST", "/api/actor-decls",
-		map[string]any{"name": "cfgbot", "class": "s8cfg-legacy", "config": map[string]any{"model": "v1"}},
+		map[string]any{"name": "cfgbot", "class": "s8cfg-proc", "config": map[string]any{"model": "v1"}},
 		s.cookies)
 	assertStatus(t, w, http.StatusCreated)
-	var ag map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &ag); err != nil {
-		t.Fatalf("decode agent: %v", err)
+	var declaration map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &declaration); err != nil {
+		t.Fatalf("decode declaration: %v", err)
 	}
-	agentID := ag["id"].(string)
-	var instanceID actor.ActorID
+	declID := declaration["id"].(string)
 
-	face := env.app.OperateFaceForTest()
-	sender := s.actorID
-
-	// Introduce server-placed (no per-channel config → global v1 is the snapshot).
-	p1, _ := json.Marshal(map[string]any{"decl_id": agentID, "placement": "server"})
-	introduced, err := face.Introduce(context.Background(), home.OperateRequest{
-		ChannelID: channel.ID(s.chID), Sender: sender, Payload: p1,
+	payload, _ := json.Marshal(map[string]any{"decl_id": declID, "placement": "server"})
+	introduced, err := env.app.OperateFaceForTest().Introduce(context.Background(), home.OperateRequest{
+		ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: payload,
 	})
 	if err != nil {
 		t.Fatalf("introduce v1: %v", err)
 	}
-	instanceID = actor.ActorID(introduced.(map[string]any)["instance_id"].(string))
+	instanceID := actor.ActorID(introduced.(map[string]any)["instance_id"].(string))
 	if !env.app.WaitLiveForTest(s.chID, instanceID, 2*time.Second) {
 		t.Fatalf("instance %s never embodied after introduce", instanceID)
 	}
 	waitConfig(t, instanceID, "v1", 2*time.Second)
 
-	// 改配置门: re-introduce carrying config v2 → UPDATE composition row's config
-	// field → reconcile-replace → new snapshot embodied.
-	p2, _ := json.Marshal(map[string]any{"decl_id": agentID, "config": map[string]any{"model": "v2"}})
-	res, err := face.Introduce(context.Background(), home.OperateRequest{
-		ChannelID: channel.ID(s.chID), Sender: sender, Payload: p2,
+	payload, _ = json.Marshal(map[string]any{"decl_id": declID, "config": map[string]any{"model": "v2"}})
+	updated, err := env.app.OperateFaceForTest().Introduce(context.Background(), home.OperateRequest{
+		ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: payload,
 	})
 	if err != nil {
-		t.Fatalf("introduce v2 (config change): %v", err)
+		t.Fatalf("introduce v2: %v", err)
 	}
-	m, _ := res.(map[string]any)
-	if created, _ := m["created"].(bool); created {
-		t.Fatalf("config-change introduce reported created=true (should update existing row)")
-	}
-	if updated, _ := m["config_updated"].(bool); !updated {
-		t.Fatalf("config-change introduce did not report config_updated")
+	result := updated.(map[string]any)
+	if result["created"] == true || result["config_updated"] != true {
+		t.Fatalf("config update result=%v", result)
 	}
 	waitConfig(t, instanceID, "v2", 2*time.Second)
 }

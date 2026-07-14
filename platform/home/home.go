@@ -59,7 +59,11 @@ var ErrClosed = errors.New("platform: channel home is closed")
 type Config struct {
 	ChannelID channelpkg.ID
 	DBPath    string
-	Logger    *slog.Logger
+	// MustExistDB is set when reopening a channel already present in the app
+	// directory. The store then refuses to create a missing file or repair an
+	// incomplete schema. New-channel creation leaves it false.
+	MustExistDB bool
+	Logger      *slog.Logger
 	// ReconcileInterval tunes the closure reconciler's level safety-net sweep
 	// period (the backstop for lost death edges). <=0 → the default. The death
 	// edge closes the common case immediately; this sweep is a rare backstop.
@@ -73,10 +77,9 @@ type Config struct {
 	// against once the original admission closure is gone. nil → Fork and identity-
 	// timer revival fail-fast (structural refusal, never a phantom actor).
 	Builder CapsFactoryBuilder
-	// CompositionResolver supplies only the world-declaration half. When set,
-	// Home reads channel composition from its own channel store and derives both
-	// Desired and Builder from one source; Desired/Builder above are retained as
-	// a compatibility seam for isolated platform tests.
+	// CompositionResolver supplies the world-declaration half for the app-owned
+	// assembly. Home then reads channel composition from its own channel store
+	// and derives both Desired and Builder from that authoritative source.
 	CompositionResolver CompositionResolver
 	PlanProvider        PlanProvider
 	DaemonAuthority     DaemonAuthority

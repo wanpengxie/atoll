@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite"
@@ -52,7 +51,7 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 		}
 	}
 	// Retired epoch: the type_registry tables must NOT exist.
-	for _, gone := range []string{"type_registry", "type_registry_schemas", "action_ledger", "worker_locks"} {
+	for _, gone := range []string{"type_registry", "type_registry_schemas", "action_ledger", "worker_locks", "composition_migrated"} {
 		if present[gone] {
 			t.Errorf("retired table %q must not be created", gone)
 		}
@@ -72,7 +71,6 @@ func TestChannelLocalTables_Set(t *testing.T) {
 		"actor_registry":        true,
 		"channel_composition":   true,
 		"restart_applied":       true,
-		"composition_migrated":  true,
 		"resources":             true,
 		"resource_grants":       true,
 		"resource_reservations": true,
@@ -91,64 +89,77 @@ func TestChannelLocalTables_Set(t *testing.T) {
 	}
 }
 
-func TestOpenChannel_CompositionMigrationIsAdditiveAndIdempotent(t *testing.T) {
+func TestOpenChannel_FreshSchemaReopensWithoutMutation(t *testing.T) {
 	ctx := context.Background()
 	dbPath := filepath.Join(t.TempDir(), "ch.sqlite")
-	for i := 0; i < 2; i++ {
-		cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{}, nil)
-		if err != nil {
-			t.Fatalf("OpenChannel pass %d: %v", i+1, err)
-		}
-		if err := cs.Close(); err != nil {
-			t.Fatalf("Close pass %d: %v", i+1, err)
-		}
+	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{}, nil)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("close create: %v", err)
+	}
+	cs, err = store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil)
+	if err != nil {
+		t.Fatalf("reopen current schema: %v", err)
+	}
+	if err := cs.Close(); err != nil {
+		t.Fatalf("close reopen: %v", err)
 	}
 	raw, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer raw.Close()
-	var markers, rows int
-	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM composition_migrated`).Scan(&markers); err != nil {
-		t.Fatalf("marker count: %v", err)
-	}
+	var rows int
 	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_composition`).Scan(&rows); err != nil {
 		t.Fatalf("composition count: %v", err)
 	}
-	if markers != 0 || rows != 0 {
-		t.Fatalf("dormant B1 schema mutated data: markers=%d composition=%d", markers, rows)
+	if rows != 0 {
+		t.Fatalf("fresh/reopen mutated composition data: rows=%d", rows)
 	}
 }
 
-func TestOpenChannel_AddsCompositionTablesToExistingBaseline(t *testing.T) {
+func TestOpenChannel_MustExistDoesNotCreateMissingPath(t *testing.T) {
 	ctx := context.Background()
-	dbPath := filepath.Join(t.TempDir(), "old.sqlite")
-	const begin = "-- 3b) channel composition"
-	const end = "-- (v2: worker_locks table removed."
-	before, after, ok := strings.Cut(store.ChannelLocalDDL, begin)
-	if !ok {
-		t.Fatal("composition DDL begin marker missing")
+	missingDir := filepath.Join(t.TempDir(), "missing")
+	dbPath := filepath.Join(missingDir, "channel.sqlite")
+	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil); err == nil {
+		t.Fatal("MustExist open of a missing path succeeded")
 	}
-	_, tail, ok := strings.Cut(after, end)
-	if !ok {
-		t.Fatal("composition DDL end marker missing")
+	if _, err := os.Stat(missingDir); !os.IsNotExist(err) {
+		t.Fatalf("MustExist created parent directory: stat err=%v", err)
 	}
-	oldDDL := before + end + tail
+}
+
+func TestOpenChannel_MustExistRejectsEmptyDBBeforeDDL(t *testing.T) {
+	ctx := context.Background()
+	dbPath := filepath.Join(t.TempDir(), "empty.sqlite")
 	raw, err := sql.Open("sqlite", dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.ExecContext(ctx, oldDDL); err != nil {
-		t.Fatalf("seed old baseline: %v", err)
+	if err := raw.PingContext(ctx); err != nil {
+		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
-	cs, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{}, nil)
-	if err != nil {
-		t.Fatalf("ordinary open must add the new tables: %v", err)
+	if _, err := store.OpenChannel(ctx, "C-test", dbPath, store.OpenOptions{MustExist: true}, nil); err == nil {
+		t.Fatal("MustExist accepted an empty DB and installed schema")
 	}
-	_ = cs.Close()
+	raw, err = sql.Open("sqlite", "file:"+dbPath+"?mode=ro")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer raw.Close()
+	var tables int
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type='table'`).Scan(&tables); err != nil {
+		t.Fatal(err)
+	}
+	if tables != 0 {
+		t.Fatalf("MustExist mutated empty DB: tables=%d", tables)
+	}
 }
 
 // A read-only open must have NO filesystem write side-effect: it never creates

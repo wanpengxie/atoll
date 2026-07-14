@@ -61,10 +61,10 @@ type App struct {
 	wsGateway      WSGateway
 	membershipPoke func(principal string)
 
-	// controlShimTimeout bounds how long a channel-control HTTP shim waits for the
+	// controlRequestTimeout bounds how long a channel-control HTTP request waits for the
 	// door's terminal reply before returning 202 + request_id (前端语义不变). A test
 	// seam sets it tiny to exercise the timeout branch deterministically.
-	controlShimTimeout time.Duration
+	controlRequestTimeout time.Duration
 
 	// seedAdmitFailHook / revokeFailHook are test-only injected failure seams (nil
 	// in production — no if-bool branch survives in the production handlers, mirroring
@@ -117,15 +117,15 @@ func New(cfg Config) (*App, error) {
 	}
 
 	a := &App{
-		db:                 cfg.DB,
-		logger:             logger,
-		homes:              make(map[channel.ID]*home.Home),
-		channelDBDir:       cfg.ChannelDBDir,
-		uiDist:             cfg.UIDist,
-		controlShimTimeout: defaultControlShimTimeout,
-		extraDropKinds:     cfg.ExtraDropKinds,
-		daemonLocks:        newKeyedLockSet(),
-		declLocks:          newKeyedLockSet(),
+		db:                    cfg.DB,
+		logger:                logger,
+		homes:                 make(map[channel.ID]*home.Home),
+		channelDBDir:          cfg.ChannelDBDir,
+		uiDist:                cfg.UIDist,
+		controlRequestTimeout: defaultControlRequestTimeout,
+		extraDropKinds:        cfg.ExtraDropKinds,
+		daemonLocks:           newKeyedLockSet(),
+		declLocks:             newKeyedLockSet(),
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -251,7 +251,7 @@ func (a *App) registerRoutes() {
 		api.DELETE("/channels/:chID", a.handleDeleteChannel)
 		api.GET("/channels/:chID/workspace-members", a.handleListWorkspaceMembers)
 		// DEPRECATED (第二链路, H2 defer): channel-internal reads move onto the
-		// gateway ws (roster/tail/cursor frames). Kept as read shims until帧化; no
+		// gateway ws (roster/tail/cursor frames). These read adapters do not
 		// new consumers. The channel-internal WRITE path is already gone — the ws
 		// message frame replaced POST /messages (H1=a, zero backward-compat).
 		api.GET("/channels/:chID/actors", a.handleListActors)
@@ -350,10 +350,19 @@ func (a *App) eventDropKinds() []actorrt.ObsKind {
 }
 
 func (a *App) createHome(chID channel.ID, dbPath string) (*home.Home, error) {
+	return a.openHome(chID, dbPath, false)
+}
+
+func (a *App) openExistingHome(chID channel.ID, dbPath string) (*home.Home, error) {
+	return a.openHome(chID, dbPath, true)
+}
+
+func (a *App) openHome(chID channel.ID, dbPath string, mustExist bool) (*home.Home, error) {
 	home, err := home.Open(home.Config{
-		ChannelID: chID,
-		DBPath:    dbPath,
-		Logger:    a.logger,
+		ChannelID:   chID,
+		DBPath:      dbPath,
+		MustExistDB: mustExist,
+		Logger:      a.logger,
 		// Fill the two eager-activation injection points with the组合域 supply:
 		// Desired = server-placed intent (the reconcile ring's desired half),
 		// Builder = the id→ActorFactory table (activation/reviver resolve). The

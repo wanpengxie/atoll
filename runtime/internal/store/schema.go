@@ -105,11 +105,6 @@ CREATE TABLE IF NOT EXISTS restart_applied (
   PRIMARY KEY(job_id, instance_id)
 );
 
-CREATE TABLE IF NOT EXISTS composition_migrated (
-  one_row     INTEGER PRIMARY KEY CHECK(one_row=1),
-  migrated_at INTEGER NOT NULL
-);
-
 -- (v2: worker_locks table removed. channel-sqlite is append-only truth;
 -- write-path exclusivity is a structural invariant of the single write path,
 -- not a per-row lease.)
@@ -286,7 +281,6 @@ var ChannelLocalTables = []string{
 	"actor_registry",
 	"channel_composition",
 	"restart_applied",
-	"composition_migrated",
 	"resources",
 	"resource_grants",
 	"resource_reservations",

@@ -374,27 +374,3 @@ func (s *compositionStore) RevokeDaemonTarget(ctx context.Context, daemonID stri
 	}
 	return ids, nil
 }
-
-func (s *compositionStore) MarkCompositionMigrated(ctx context.Context, at int64) error {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `UPDATE actor_registry
-		SET actor_binding=(SELECT CASE c.placement WHEN 'daemon' THEN ? ELSE ? END FROM channel_composition c WHERE c.instance_id=actor_registry.actor_id)
-		WHERE deregistered_at IS NULL AND EXISTS(SELECT 1 FROM channel_composition c WHERE c.instance_id=actor_registry.actor_id)`,
-		string(actor.BindingRuntimeInboundViaRelay), string(actor.BindingEmbedded)); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `UPDATE actor_registry SET host=''
-		WHERE deregistered_at IS NULL AND host<>'' AND NOT EXISTS(
-			SELECT 1 FROM channel_composition c WHERE c.instance_id=actor_registry.actor_id
-			AND c.placement='daemon' AND c.desired_host=actor_registry.host)`); err != nil {
-		return err
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO composition_migrated(one_row,migrated_at) VALUES (1,?)`, at); err != nil {
-		return err
-	}
-	return tx.Commit()
-}

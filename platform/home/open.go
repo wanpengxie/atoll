@@ -102,6 +102,7 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	//    (§4.3's own "late-bound...延迟解析,调用时才读在线态" escape hatch).
 	lateAcc := &lateAcceptor{}
 	cs, err := runtime.OpenChannel(ctx, cfg.ChannelID, cfg.DBPath, runtime.OpenChannelOptions{
+		MustExist:      cfg.MustExistDB,
 		OnCommit:       signal.Notify,
 		StorageMounts:  lateStorageMounts{acc: lateAcc},
 		StorageControl: lateStorageControl{acc: lateAcc},

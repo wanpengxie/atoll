@@ -37,7 +37,7 @@ func TestHomePublicSurface(t *testing.T) {
 	// *subjectgate.Slot capability handle, never the bare registry object).
 	// ResolvePrincipal/PrincipalOf are the principal↔actor-id resolution the
 	// gateway + operate shim use to reach a subject's slot (no door handle).
-	want := []string{"Admit", "ApplyRestartTarget", "CancelRequest", "Close", "Composition", "CompositionByPrincipal", "DefaultAgent", "EnsureSubjectSlot", "HasComposition", "IntroduceComposition", "KickDaemon", "MarkCompositionMigrated", "PresenceSweptCount", "PrincipalOf", "Remove", "RemoveInstance", "RemoveSubjectSlot", "ResolvePrincipal", "Restart", "RestartInstanceDirect", "RevokeDaemonTarget", "ServeAttach", "SetDefaultAgent", "SubjectSlotFor", "Subscribe", "View"}
+	want := []string{"Admit", "ApplyRestartTarget", "CancelRequest", "Close", "Composition", "CompositionByPrincipal", "DefaultAgent", "EnsureSubjectSlot", "HasComposition", "IntroduceComposition", "KickDaemon", "PresenceSweptCount", "PrincipalOf", "Remove", "RemoveInstance", "RemoveSubjectSlot", "ResolvePrincipal", "Restart", "RestartInstanceDirect", "RevokeDaemonTarget", "ServeAttach", "SetDefaultAgent", "SubjectSlotFor", "Subscribe", "View"}
 
 	typ := reflect.TypeOf((*home.Home)(nil))
 	var got []string

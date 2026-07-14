@@ -108,14 +108,12 @@ func (c *ChannelStores) Close() error {
 
 // OpenChannelOptions tunes the store open.
 type OpenChannelOptions struct {
-	// ReadOnly / SkipDDL skip the idempotent DDL bootstrap (the only migration
-	// mechanism) while the schema verifier still runs — they REQUIRE the file to
-	// already carry the current schema baseline. A file last touched by an older
-	// binary fails fast ("stale channel DB") until one ordinary read-write open
-	// self-heals it. Deliberate: admitting a table-short DB would only defer the
-	// crash to the first query against the missing table.
-	ReadOnly bool
-	SkipDDL  bool
+	// ReadOnly / MustExist / SkipDDL skip fresh-schema initialization while the
+	// verifier still runs. They require an existing DB with the current schema;
+	// no released legacy schema is migrated in place.
+	ReadOnly  bool
+	MustExist bool
+	SkipDDL   bool
 
 	// OnCommit is the post-commit signal source: the store fires it after any
 	// durable append commit (request path AND control-plane mirror), so a tap is
@@ -156,8 +154,9 @@ type OpenChannelOptions struct {
 // never a per-call arg).
 func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts OpenChannelOptions) (*ChannelStores, error) {
 	cs, err := store.OpenChannel(ctx, channelID, dbPath, store.OpenOptions{
-		ReadOnly: opts.ReadOnly,
-		SkipDDL:  opts.SkipDDL,
+		ReadOnly:  opts.ReadOnly,
+		MustExist: opts.MustExist,
+		SkipDDL:   opts.SkipDDL,
 	}, opts.OnCommit)
 	if err != nil {
 		return nil, err

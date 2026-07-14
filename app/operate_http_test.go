@@ -11,9 +11,9 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
-// operate_shim_test.go is the DoD for the HTTP垫片 (NP-1=c): the four channel-control
+// operate_http_test.go covers the HTTP adapter for the four channel-control
 // endpoints replay the session user through the door and reflect the door's terminal
-// reply. Each type gets one end-to-end case that asserts (a) the shim's HTTP result
+// reply. Each type gets one end-to-end case that asserts (a) the adapter's HTTP result
 // matches the door receipt and (b) the request in the log is 笔为 user:X with a
 // completed terminal. Plus the non-member 403 (膜律) and timeout 202 branches.
 
@@ -32,7 +32,7 @@ func channelMessages(t *testing.T, env *testEnv, cookies []*http.Cookie, chID st
 
 // assertDoorTerminal asserts the log holds a control request of type msgType
 // authored by user:userID (笔为 user:X) and its completed terminal (parent_id match)
-// — the door actually processed the shim's submission.
+// — the door actually processed the adapter's submission.
 func assertDoorTerminal(t *testing.T, env *testEnv, cookies []*http.Cookie, chID, userID, msgType string) {
 	t.Helper()
 	rows := channelMessages(t, env, cookies, chID)
@@ -77,9 +77,9 @@ func createOwnedAgent(t *testing.T, env *testEnv, cookies []*http.Cookie, name, 
 	return respJSON(t, w)["id"].(string)
 }
 
-// TestShim_IntroduceThroughDoor: POST /channels/:id/actors replays the user through
+// TestHTTPControl_IntroduceThroughDoor: POST /channels/:id/actors replays the user through
 // channel.introduce_actor; the composition row lands + the door terminal is 笔为 user:X.
-func TestShim_IntroduceThroughDoor(t *testing.T) {
+func TestHTTPControl_IntroduceThroughDoor(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 	agentID := createOwnedAgent(t, env, s.cookies, "Rev", "go-kimi")
@@ -93,9 +93,9 @@ func TestShim_IntroduceThroughDoor(t *testing.T) {
 	assertDoorTerminal(t, env, s.cookies, s.chID, s.userID, "channel.introduce_actor")
 }
 
-// TestShim_SetDefaultThroughDoor: PUT /channels/:id/default_agent replays the user
+// TestHTTPControl_SetDefaultThroughDoor: PUT /channels/:id/default_agent replays the user
 // through channel.set_default_agent; the pointer moves + terminal is 笔为 user:X.
-func TestShim_SetDefaultThroughDoor(t *testing.T) {
+func TestHTTPControl_SetDefaultThroughDoor(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 	agentID := createOwnedAgent(t, env, s.cookies, "Def", "go-kimi")
@@ -112,9 +112,9 @@ func TestShim_SetDefaultThroughDoor(t *testing.T) {
 	assertDoorTerminal(t, env, s.cookies, s.chID, s.userID, "channel.set_default_agent")
 }
 
-// TestShim_RemoveThroughDoor: DELETE /channels/:id/actors/:instanceID replays the
+// TestHTTPControl_RemoveThroughDoor: DELETE /channels/:id/actors/:instanceID replays the
 // user through channel.remove_actor; the actor leaves the roster + terminal 笔为 user:X.
-func TestShim_RemoveThroughDoor(t *testing.T) {
+func TestHTTPControl_RemoveThroughDoor(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 	agentID := createOwnedAgent(t, env, s.cookies, "Rm", "go-kimi")
@@ -136,9 +136,9 @@ func TestShim_RemoveThroughDoor(t *testing.T) {
 	assertDoorTerminal(t, env, s.cookies, s.chID, s.userID, "channel.remove_actor")
 }
 
-// TestShim_RestartThroughDoor: the world restart endpoint freezes the caller's
+// TestHTTPControl_RestartThroughDoor: the world restart endpoint freezes the caller's
 // authorized per-channel target set into a durable fanout job.
-func TestShim_RestartThroughDoor(t *testing.T) {
+func TestHTTPControl_RestartThroughDoor(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 	agentID := createOwnedAgent(t, env, s.cookies, "Res", "claude")
@@ -152,9 +152,9 @@ func TestShim_RestartThroughDoor(t *testing.T) {
 	}
 }
 
-// TestShim_NonMemberForbidden (膜律): a workspace member who is NOT a channel member
-// is refused by the door's户籍校验 — the shim NEVER admits as a fallback (严禁 Admit 兜底).
-func TestShim_NonMemberForbidden(t *testing.T) {
+// TestHTTPControl_NonMemberForbidden (膜律): a workspace member who is NOT a channel member
+// is refused by the door's户籍校验 — the adapter NEVER admits as a fallback (严禁 Admit 兜底).
+func TestHTTPControl_NonMemberForbidden(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 	outsider, cookies2 := register(t, env, "outsider@example.com", "secret123", "Outsider")
@@ -169,12 +169,12 @@ func TestShim_NonMemberForbidden(t *testing.T) {
 	assertStatus(t, w, http.StatusForbidden)
 }
 
-// TestShim_TimeoutReturns202: when the door does not settle within the bounded wait,
-// the shim returns 202 + request_id (前端语义不变). A near-zero timeout forces it.
-func TestShim_TimeoutReturns202(t *testing.T) {
+// TestHTTPControl_TimeoutReturns202: when the door does not settle within the bounded wait,
+// the adapter returns 202 + request_id. A near-zero timeout forces it.
+func TestHTTPControl_TimeoutReturns202(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
-	env.app.SetControlShimTimeoutForTest(time.Nanosecond)
+	env.app.SetControlRequestTimeoutForTest(time.Nanosecond)
 
 	w := env.do(t, "PUT", fmt.Sprintf("/api/channels/%s/default_agent", s.chID),
 		map[string]any{"instance_id": ""}, s.cookies)

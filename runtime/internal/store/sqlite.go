@@ -13,26 +13,29 @@ import (
 
 // OpenOptions tunes DSN-level pragmas. Zero value is fine for production.
 //
-// NOTE (schema baseline): ordinary writable Open runs the idempotent additive
-// ChannelLocalDDL migration before verification. ReadOnly and SkipDDL skip it,
-// while the schema verifier still runs on every open. They
-// therefore REQUIRE the file to already carry the current baseline: a file
-// last touched by an older binary fails fast with "stale channel DB" until
-// one ordinary read-write open self-heals it. Deliberate — admitting a
-// table-short DB read-only would only defer the crash to the first query
-// against the missing table.
+// NOTE (schema baseline): a create open installs ChannelLocalDDL once. A
+// MustExist, ReadOnly, or SkipDDL open never installs or repairs schema; the
+// verifier requires the file to carry the current baseline already. The
+// product has no released legacy DB, so there is deliberately no in-code
+// channel schema migration.
 type OpenOptions struct {
 	// ReadOnly opens the database in read-only mode (mode=ro); no filesystem
 	// write side-effects.
 	ReadOnly bool
+
+	// MustExist opens in SQLite mode=rw and performs no parent-directory or DDL
+	// creation. It is the production reopen mode for a channel already listed in
+	// the app directory.
+	MustExist bool
 
 	// SkipDDL skips the schema bootstrap step. Useful for tests that
 	// install custom DDL or open an existing file.
 	SkipDDL bool
 }
 
-// openChannelDB opens (creating if absent) the per-channel messages.sqlite at
-// dbPath, runs ChannelLocalDDL, and returns the raw *sql.DB. Unexported by
+// openChannelDB opens the per-channel messages.sqlite and returns the raw
+// *sql.DB. A create open installs ChannelLocalDDL; MustExist only verifies the
+// current schema. Unexported by
 // design: the raw handle must never cross the store boundary — only the
 // OpenChannel assembly (channel.go) may hold it, exposing storespec interfaces.
 //
@@ -47,13 +50,10 @@ func openChannelDB(ctx context.Context, dbPath string, opts OpenOptions) (*sql.D
 	if err != nil {
 		return nil, err
 	}
-	// Single authoritative schema: ChannelLocalDDL (schema.go) is the in-code
-	// additive migration and full fresh-install baseline. Ordinary writable
-	// opens install missing tables/indexes before verification; SkipDDL/ReadOnly
-	// opens require the current shape already to exist. Destructive ALTER/DROP
-	// remains forbidden here; the composition migration itself is coordinated by
-	// the app startup migrator. Validate shape on every open and fail fast on an
-	// incomplete/unknown vintage.
+	// Single authoritative schema: ChannelLocalDDL (schema.go) is the fresh-
+	// install baseline. Every reopen validates the complete shape and fails fast
+	// on a missing or incomplete file; it never mutates an old shape into a new
+	// one.
 	if err := verifyChannelLocalSchema(ctx, db); err != nil {
 		_ = db.Close()
 		return nil, err
@@ -65,10 +65,9 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 	if dbPath == "" {
 		return nil, errors.New("store: dbPath empty")
 	}
-	// A read-only open must have NO filesystem write side-effect: it never
-	// creates the directory. A missing path then surfaces as a clean open
-	// error (mode=ro on a non-existent file), not a silently-created dir.
-	if !opts.ReadOnly {
+	// Existing and read-only opens must have NO filesystem creation side effect.
+	// Missing paths surface as open errors instead of becoming replacement DBs.
+	if !opts.ReadOnly && !opts.MustExist {
 		if dir := filepath.Dir(dbPath); dir != "" {
 			if err := os.MkdirAll(dir, 0o755); err != nil {
 				return nil, fmt.Errorf("store: mkdir %q: %w", dir, err)
@@ -85,12 +84,16 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 	// is the per-connection geometry. (journal_mode is persisted in the file
 	// itself; synchronous / foreign_keys / busy_timeout are per-connection.)
 	dsn := fmt.Sprintf(
-		"file:%s?_pragma=journal_mode(WAL)&_pragma=synchronous(%s)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)",
+		"file:%s?mode=rwc&_pragma=journal_mode(WAL)&_pragma=synchronous(%s)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)",
 		dbPath, syncPragma)
 	if opts.ReadOnly {
 		// WAL/synchronous not applicable to a read-only open; FK still guards
 		// any PRAGMA-sensitive read semantics, busy_timeout still applies.
 		dsn = fmt.Sprintf("file:%s?mode=ro&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)", dbPath)
+	} else if opts.MustExist {
+		dsn = fmt.Sprintf(
+			"file:%s?mode=rw&_pragma=journal_mode(WAL)&_pragma=synchronous(%s)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)",
+			dbPath, syncPragma)
 	}
 
 	db, err := sql.Open("sqlite", dsn)
@@ -106,7 +109,7 @@ func openSqlite(ctx context.Context, dbPath string, opts OpenOptions, ddl string
 	db.SetMaxOpenConns(1)
 	db.SetMaxIdleConns(1)
 
-	if !opts.SkipDDL && !opts.ReadOnly {
+	if !opts.SkipDDL && !opts.ReadOnly && !opts.MustExist {
 		if _, err := db.ExecContext(ctx, ddl); err != nil {
 			_ = db.Close()
 			return nil, fmt.Errorf("store: exec DDL on %q: %w", dbPath, err)
@@ -133,8 +136,7 @@ var channelLocalSchemaShape = map[string][]string{
 		"instance_id", "decl_id", "principal", "class", "config_json", "placement",
 		"desired_host", "is_default", "restart_epoch",
 	},
-	"restart_applied":      {"job_id", "instance_id", "applied_at"},
-	"composition_migrated": {"one_row", "migrated_at"},
+	"restart_applied": {"job_id", "instance_id", "applied_at"},
 	"resources": {
 		"resource_id", "kind", "bytes",
 		"placement_kind", "placement_daemon_id", "placement_coord", "provenance", "created_by",

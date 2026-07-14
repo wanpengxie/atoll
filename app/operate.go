@@ -22,7 +22,7 @@ import (
 // home per req.ChannelID.
 //
 // This is the CANONICAL control path, and now the ONLY one: the channel-control
-// HTTP endpoints are shims (operate_shim.go) that replay the session user through
+// HTTP endpoints are adapters (operate_http.go) that replay the session user through
 // the subjectgate frame path (a submit frame, audience=[system]) into this
 // executor — no handler writes the composition tables directly (红线11). handleDeleteDecl stays
 // a world-layer soft-delete (its per-channel cascade is a system-authored mirror,

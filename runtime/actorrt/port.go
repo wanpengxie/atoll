@@ -67,16 +67,11 @@ type Sinks struct {
 	Schedule RelaySink
 }
 
-// ResolveFunc is the connect-in auth seam: it maps a connecting actor's lease
-// credential to the ActorID the substrate binds the connection to. This is the
-// connection's ONE-TIME
+// ResolveFunc is the connect-in auth seam: it validates the complete handshake
+// and returns the ActorID the substrate binds the connection to. This is the connection's ONE-TIME
 // authentication — there is no per-frame re-auth (the stream is trusted once
 // the handshake binds it).
-type ResolveFunc func(leaseID string) (actor.ActorID, error)
-
-// HandshakeResolveFunc is the epoch-aware connect-in auth seam. The legacy
-// ResolveFunc wrapper remains for callers that do not own generation truth.
-type HandshakeResolveFunc func(ipc.HandshakePayload) (actor.ActorID, error)
+type ResolveFunc func(ipc.HandshakePayload) (actor.ActorID, error)
 
 // KindOf resolves an already-resolved actor's declared Kind — the port-birth
 // counterpart of Spawn/SpawnIfAbsent/Fork's caller-held kind param (G11: every
@@ -189,7 +184,7 @@ type port struct {
 // read runs off-goroutine and newPort selects it against hsCtx; on expiry it
 // closes the conn (unblocking the read) and returns. parent owns the port's
 // LIFETIME (unchanged); hsCtx owns only this one read.
-func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve HandshakeResolveFunc, kindOf KindOf, onDown func(actor.ActorID, embodiment, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onCancelRequest func(actor.ActorID, message.ID), onExit func(actor.ActorID, embodiment), onReap func(embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
+func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteCloser, sinks Sinks, resolve ResolveFunc, kindOf KindOf, onDown func(actor.ActorID, embodiment, error), onObs func(actor.ActorID, embodiment, ObsKind, ObsValue), onCancelRequest func(actor.ActorID, message.ID), onExit func(actor.ActorID, embodiment), onReap func(embodiment), started time.Time, logger *slog.Logger) (p *port, err error) {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}

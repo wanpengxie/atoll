@@ -217,7 +217,7 @@ func TestPrepareHandshakeSendsNoAckAndAbortLeavesNoRuntimeState(t *testing.T) {
 		peerRead <- err
 	}()
 
-	prepared, err := rt.PrepareHandshake(context.Background(), host, Sinks{Emit: nopEmit}, handshakeResolve(staticResolve("remote")), nil, nil)
+	prepared, err := rt.PrepareHandshake(context.Background(), host, Sinks{Emit: nopEmit}, staticResolve("remote"), nil, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

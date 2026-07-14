@@ -9,13 +9,13 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // cancelBlockingCell parks in Receive on a request until its own per-request
@@ -149,9 +149,9 @@ func TestCancelUpstream_Branches(t *testing.T) {
 	cell := &cancelBlockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
 	registerActor(t, ch, &targetID, actor.KindAgent)
 	var err error
-	targetID, err = home.SpawnForTest(ch, targetID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
+	targetID, err = home.SpawnForTest(ch, targetID, actor.KindAgent, platform.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return cell
-	}})
+	}))
 	if err != nil {
 		t.Fatalf("spawn target: %v", err)
 	}
@@ -232,9 +232,9 @@ func TestCancelUpstream_CrossWireAcrossReconnect(t *testing.T) {
 	cell := &cancelBlockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
 	registerActor(t, ch, &targetID, actor.KindAgent)
 	var err error
-	targetID, err = home.SpawnForTest(ch, targetID, actor.KindAgent, platform.ActorFactory{Legacy: func(harness.Pen) actorrt.Actor {
+	targetID, err = home.SpawnForTest(ch, targetID, actor.KindAgent, platform.CapsFactory(func(actorcaps.Caps) actorrt.Actor {
 		return cell
-	}})
+	}))
 	if err != nil {
 		t.Fatalf("spawn target: %v", err)
 	}

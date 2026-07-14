@@ -240,13 +240,6 @@ func (h *Home) RevokeDaemonTarget(ctx context.Context, daemonID string) error {
 	return nil
 }
 
-func (h *Home) MarkCompositionMigrated(ctx context.Context, at int64) error {
-	if h.closed.Load() {
-		return ErrClosed
-	}
-	return h.cs.Composition.MarkCompositionMigrated(ctx, at)
-}
-
 // ApplyComputeDeclaration is the Home coordinator for S2. Every actor in the
 // store's affected-set is gated before the transaction; the store invokes the
 // body callback after producing the complete decision set and before any DB

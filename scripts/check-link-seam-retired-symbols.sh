@@ -13,7 +13,6 @@ check_live() {
 	set +e
 	hits=$(rg -n --type go \
 		--glob '!**/*_test.go' \
-		--glob '!**/*migrator.go' \
 		"$pattern" app/ cmd/ platform/ runtime/ 2>&1)
 	status=$?
 	set -e
@@ -26,7 +25,7 @@ check_live() {
 		[[ -z "$hit" ]] && continue
 		local source=${hit#*:*:}
 		# Documentation may name what was retired. Executable identifiers, string
-		# literals, and SQL outside the explicit migrator allowlist may not.
+		# literals and executable identifiers may not.
 		if [[ "$source" =~ ^[[:space:]]*// ]] || [[ "$source" =~ ^[[:space:]]*-- ]]; then
 			continue
 		fi
@@ -36,8 +35,11 @@ check_live() {
 }
 
 check_live "app composition source" 'channel_actors'
+check_live "composition migration marker" 'composition_migrated'
 check_live "retired default SQL column" '(channels|c)\.default_agent|ADD COLUMN default_agent|DROP COLUMN default_agent'
 check_live "retired HTTP plan endpoint" '/compute/plan'
+check_live "retired actor factory branch" '\bLegacy\b'
+check_live "retired handshake resolver interface" 'HandshakeResolveFunc|AttachHandshake'
 
 if (( failures > 0 )); then
 	echo "[link-seam-retired] FAIL: ${failures} live retired-symbol hit(s)" >&2

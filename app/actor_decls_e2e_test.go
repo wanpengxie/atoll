@@ -67,7 +67,7 @@ func TestDeclsAPI_CreateIntroduceRestartDelete(t *testing.T) {
 }
 
 // TestRestartDecl_DaemonPlacedRowNotFilteredOut is F-2's app-entry regression
-// guard (P2-2). handleRestartDecl enumerates channel_actors WITHOUT a placement
+// guard (P2-2). handleRestartDecl enumerates channel composition WITHOUT a placement
 // filter, so a DAEMON-placed row is a restart target exactly like a server one.
 // F-2 removed a placement='server' filter that had silently excluded daemon rows
 // from Restart; if that filter ever creeps back, a daemon-placed instance falls
@@ -179,7 +179,7 @@ func TestSetDefaultAgentAPI(t *testing.T) {
 	chBody, cookies := createChannel(t, env, cookies, wsID, "CH")
 	chID := chBody["id"].(string)
 
-	// create + introduce an agent (server placement → live stub, lands in channel_actors)
+	// create + introduce an agent (server placement → live stub, lands in channel_composition)
 	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "Alice", "class": "go-kimi"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	agentID := respJSON(t, w)["id"].(string)

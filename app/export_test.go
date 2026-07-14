@@ -21,17 +21,17 @@ import (
 // errTestChannelNotLoaded stands in for a torn-down home in the test seams below.
 var errTestChannelNotLoaded = errors.New("app: channel not loaded")
 
-// SetControlShimTimeoutForTest overrides the channel-control HTTP shim's bounded
+// SetControlRequestTimeoutForTest overrides the channel-control HTTP adapter's bounded
 // wait so a test can exercise the timeout branch (202+request_id) deterministically
 // (a near-zero timeout times out before the async door reply can commit). Test-only.
-func (a *App) SetControlShimTimeoutForTest(d time.Duration) {
-	a.controlShimTimeout = d
+func (a *App) SetControlRequestTimeoutForTest(d time.Duration) {
+	a.controlRequestTimeout = d
 }
 
 // OperateFaceForTest exposes the app's channel-operate executor so black-box
 // tests can drive the four control verbs directly (as the sysactor gate would
 // after authorising the sender), without the not-yet-built message senders
-// (S5b/shims). Test-only.
+// (S5b/HTTP adapters). Test-only.
 func (a *App) OperateFaceForTest() platformhome.OperateExecutor {
 	return a.operateFace()
 }
@@ -73,8 +73,8 @@ func (a *App) SetHomeCloseHookForTest(fn func(op string, chID channel.ID)) {
 	a.homeCloseHook = fn
 }
 
-// SeedIntentRowForTest inserts a raw channel_actors intent row WITHOUT admitting
-// its membership — reproducing the半失败 state (intent landed, Admit did not) an
+// SeedIntentRowForTest inserts channel-local composition WITHOUT retaining its
+// membership — reproducing the半失败 state (intent landed, membership did not) an
 // Introduce retry must heal, so a test can assert the retry Admits under the
 // FROZEN row's class-kind, not the request's. Test-only.
 func (a *App) SeedIntentRowForTest(chID, instanceID, class, placement string) error {
@@ -204,10 +204,8 @@ func (a *App) KillCellForTest(chID channel.ID, id actor.ActorID) error {
 	return home.Remove(context.Background(), id)
 }
 
-// CreateHalfBuiltChannelForTest reproduces the createChannel CRASH window: the
-// app-db channels row + its seeded channel_actors intent are committed and the home
-// is opened, but NO Admit ran — the creator + boost never became channel members
-// (the process died between tx.Commit and the seeding Admits). The result is a valid
+// CreateHalfBuiltChannelForTest creates a directory row and fresh channel DB but
+// deliberately skips creator/boost admission. The result is a valid
 // directory entry over an EMPTY channel-db membership (only the intrinsic system
 // actor Open seeds). Returns the new channel id. Test-only — proves half-built
 // channels stay deletable and open with clear errors, never a panic. Test-only.

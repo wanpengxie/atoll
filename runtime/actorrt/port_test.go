@@ -67,11 +67,7 @@ func dialPort(t *testing.T, r *Runtime, leaseID string, emit EmitSink, resolve R
 
 // staticResolve binds every lease to the same id.
 func staticResolve(id actor.ActorID) ResolveFunc {
-	return func(string) (actor.ActorID, error) { return id, nil }
-}
-
-func handshakeResolve(resolve ResolveFunc) HandshakeResolveFunc {
-	return func(hp ipc.HandshakePayload) (actor.ActorID, error) { return resolve(hp.LeaseID) }
+	return func(ipc.HandshakePayload) (actor.ActorID, error) { return id, nil }
 }
 
 func nopEmit(context.Context, Incarnation, *message.Envelope) (ipc.EmitResult, error) {
@@ -87,8 +83,8 @@ func TestPortHandshakeBindsResolvedID(t *testing.T) {
 	defer rt.StopAll()
 
 	gotLease := make(chan string, 1)
-	resolve := func(lease string) (actor.ActorID, error) {
-		gotLease <- lease
+	resolve := func(hp ipc.HandshakePayload) (actor.ActorID, error) {
+		gotLease <- hp.LeaseID
 		return "remote-1", nil
 	}
 	id, remote := dialPort(t, rt, "lease-xyz", nopEmit, resolve, nil)
@@ -134,7 +130,7 @@ func TestPortHandshakeRejects(t *testing.T) {
 			p, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "bad"})
 			_ = c.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: p})
 		}()
-		resolve := func(string) (actor.ActorID, error) { return "", io.ErrUnexpectedEOF }
+		resolve := func(ipc.HandshakePayload) (actor.ActorID, error) { return "", io.ErrUnexpectedEOF }
 		if _, err := rt.Attach(context.Background(), hostConn, Sinks{Emit: nopEmit}, resolve, nil, nil); err == nil {
 			t.Fatal("Attach accepted a connection whose lease failed to resolve")
 		}

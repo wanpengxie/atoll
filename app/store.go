@@ -19,51 +19,19 @@ func OpenDB(path string) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("app: open db: %w", err)
 	}
-	if err := migrate(db); err != nil {
+	if err := initializeSchema(db); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("app: migrate: %w", err)
+		return nil, fmt.Errorf("app: initialize schema: %w", err)
 	}
 	return db, nil
 }
 
-// migrateDeclTableName renames the legacy `agents` table to `actor_decls`
-// BEFORE the canonical DDL runs. Order is load-bearing: if the canonical
-// `CREATE TABLE IF NOT EXISTS actor_decls` ran first against an old DB, it
-// would create an EMPTY actor_decls, the rename would then fail (target
-// exists) and every existing declaration row would become invisible. Running
-// the rename first means the canonical DDL no-ops on the renamed table.
-// Both tables present = a half-migrated / hand-touched DB: fail loud (refuse
-// to open) rather than silently picking one and shadowing the other's rows.
-func migrateDeclTableName(db *sql.DB) error {
-	has := func(name string) (bool, error) {
-		var n int
-		err := db.QueryRow(
-			`SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, name).Scan(&n)
-		return n > 0, err
-	}
-	hasOld, err := has("agents")
-	if err != nil {
-		return err
-	}
-	hasNew, err := has("actor_decls")
-	if err != nil {
-		return err
-	}
-	switch {
-	case hasOld && hasNew:
-		return fmt.Errorf("both 'agents' and 'actor_decls' tables exist — refusing to guess; resolve the duplicate manually")
-	case hasOld && !hasNew:
-		if _, err := db.Exec(`ALTER TABLE agents RENAME TO actor_decls`); err != nil {
-			return fmt.Errorf("rename agents -> actor_decls: %w", err)
-		}
-	}
-	return nil
-}
-
-func migrate(db *sql.DB) error {
-	if err := migrateDeclTableName(db); err != nil {
-		return err
-	}
+// initializeSchema installs the one supported app schema. The product has not
+// shipped and has no legacy databases, so startup deliberately performs no
+// rename, ALTER, backfill, or data-copy migration. CREATE IF NOT EXISTS keeps
+// ordinary same-version restarts idempotent; schema evolution begins only once
+// a released database version actually exists.
+func initializeSchema(db *sql.DB) error {
 	_, err := db.Exec(`
 		CREATE TABLE IF NOT EXISTS users (
 			id TEXT PRIMARY KEY,
@@ -178,31 +146,5 @@ func migrate(db *sql.DB) error {
 			visibility  TEXT NOT NULL DEFAULT 'private'
 		);
 	`)
-	if err != nil {
-		return err
-	}
-	// Drop the dead daemon liveness columns (status/hostname/platform/
-	// last_heartbeat): attachment is volatile link state, read live from the
-	// platform View — never a persisted directory column (it only ever lied).
-	// Best-effort per column: a fresh DB created above never had them (no such
-	// column → ignore); an existing dev DB gets them dropped, rows preserved.
-	for _, col := range []string{"status", "hostname", "platform", "last_heartbeat"} {
-		_, _ = db.Exec(`ALTER TABLE daemons DROP COLUMN ` + col)
-	}
-	migrateLegacyCompositionShape(db)
-
-	// Column-rename chain, ordered oldest-vintage first (each step best-effort:
-	// a fresh CREATE above already has default_class, so both renames no-op on
-	// the missing column):
-	//   looper → default_looper (pre-class-split vintage)
-	//   default_looper → default_class (the looper→class vocabulary rename)
-	_, _ = db.Exec(`ALTER TABLE actor_decls RENAME COLUMN looper TO default_looper`)
-	_, _ = db.Exec(`ALTER TABLE actor_decls RENAME COLUMN default_looper TO default_class`)
-
-	// actor_decls.visibility: reference-eligibility axis, orthogonal to owner
-	// (management authority). private = only owner may introduce; public = any
-	// member. additive best-effort add for a dev DB.
-	_, _ = db.Exec(`ALTER TABLE actor_decls ADD COLUMN visibility TEXT NOT NULL DEFAULT 'private'`)
-
-	return nil
+	return err
 }
