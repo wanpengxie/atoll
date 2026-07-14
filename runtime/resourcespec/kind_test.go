@@ -17,3 +17,17 @@ func TestValidKind(t *testing.T) {
 		}
 	}
 }
+
+func TestValidPlacementKind(t *testing.T) {
+	if !ValidPlacementKind("") {
+		t.Error(`ValidPlacementKind("") = false, want true (kv has no placement axis)`)
+	}
+	if !ValidPlacementKind(PlacementDaemonLocal) {
+		t.Errorf("ValidPlacementKind(%q) = false, want true", PlacementDaemonLocal)
+	}
+	for _, raw := range []PlacementKind{"cloud", "daemon-local ", "DAEMON-LOCAL"} {
+		if ValidPlacementKind(raw) {
+			t.Errorf("ValidPlacementKind(%q) = true, want false (out of set)", raw)
+		}
+	}
+}

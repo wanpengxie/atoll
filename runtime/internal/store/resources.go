@@ -53,6 +53,16 @@ func newResourceRegistry(db *sql.DB) *resourceRegistry {
 	return &resourceRegistry{db: db, nowMs: func() int64 { return time.Now().UnixMilli() }}
 }
 
+// placementKindFor derives the public placement projection from the durable
+// resource kind. placement_kind is intentionally not persisted: there is no
+// independent placement choice in the current architecture.
+func placementKindFor(kind resourcespec.ResourceKind) resourcespec.PlacementKind {
+	if kind == resourcespec.KindFile {
+		return resourcespec.PlacementDaemonLocal
+	}
+	return ""
+}
+
 // Resolve reads back existence + full routing/audit meta. kind is returned as
 // the raw persisted value with NO closed-set parse (unlike actor_kind):
 // ResourceKind is a runtime routing key, and
@@ -76,6 +86,7 @@ func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) 
 	return resourcespec.ResourceMeta{
 		Kind:              resourcespec.ResourceKind(kind),
 		CreatedAt:         createdAt,
+		PlacementKind:     placementKindFor(resourcespec.ResourceKind(kind)),
 		PlacementDaemonID: placementDaemonID,
 		PlacementCoord:    placementCoord,
 		CreatedBy:         actor.ActorID(createdBy),
@@ -397,6 +408,7 @@ func (r *resourceRegistry) ListByPlacementDaemon(ctx context.Context, daemonID s
 			Meta: resourcespec.ResourceMeta{
 				Kind:              resourcespec.ResourceKind(b.kind),
 				CreatedAt:         b.createdAt,
+				PlacementKind:     placementKindFor(resourcespec.ResourceKind(b.kind)),
 				PlacementDaemonID: b.placementDaemonID,
 				PlacementCoord:    b.placementCoord,
 				CreatedBy:         actor.ActorID(b.createdBy),
@@ -806,6 +818,7 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 			Meta: resourcespec.ResourceMeta{
 				Kind:              resourcespec.ResourceKind(b.kind),
 				CreatedAt:         b.createdAt,
+				PlacementKind:     placementKindFor(resourcespec.ResourceKind(b.kind)),
 				PlacementDaemonID: b.placementDaemonID,
 				PlacementCoord:    b.placementCoord,
 				CreatedBy:         actor.ActorID(b.createdBy),

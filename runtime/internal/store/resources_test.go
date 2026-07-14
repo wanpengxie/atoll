@@ -94,6 +94,9 @@ func TestResource_CreateKVRoutingAndAudit(t *testing.T) {
 	if meta.PlacementDaemonID != "" {
 		t.Errorf("kv PlacementDaemonID=%q want empty", meta.PlacementDaemonID)
 	}
+	if meta.PlacementKind != "" {
+		t.Errorf("kv PlacementKind=%q want empty (no placement axis)", meta.PlacementKind)
+	}
 	if meta.PlacementCoord != "" {
 		t.Errorf("kv PlacementCoord=%q want empty", meta.PlacementCoord)
 	}
@@ -103,7 +106,8 @@ func TestResource_CreateKVRoutingAndAudit(t *testing.T) {
 }
 
 // A file-kind row created via the direct immediate path persists the real
-// placement daemon and coord supplied by the door.
+// placement daemon and coord supplied by the door, while deriving the
+// caller-visible placement mechanism from KindFile.
 func TestResource_CreateFilePersistsRoute(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
@@ -118,6 +122,9 @@ func TestResource_CreateFilePersistsRoute(t *testing.T) {
 	}
 	if meta.PlacementDaemonID != "daemon-1" {
 		t.Errorf("PlacementDaemonID=%q want daemon-1", meta.PlacementDaemonID)
+	}
+	if meta.PlacementKind != resourcespec.PlacementDaemonLocal {
+		t.Errorf("PlacementKind=%q want %q", meta.PlacementKind, resourcespec.PlacementDaemonLocal)
 	}
 	if meta.PlacementCoord != "coord-xyz" {
 		t.Errorf("PlacementCoord=%q want coord-xyz", meta.PlacementCoord)

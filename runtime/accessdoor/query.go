@@ -72,6 +72,7 @@ func opSetFromEffective(eff map[access.Operation]bool) OpSet {
 // CANNOT carry a coord: the field does not exist on this type.
 type StatMeta struct {
 	Kind              resourcespec.ResourceKind
+	PlacementKind     resourcespec.PlacementKind
 	PlacementDaemonID string
 	CreatedAt         int64
 	CreatedBy         actor.ActorID
@@ -334,6 +335,7 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 	return StatResult{
 		Meta: StatMeta{
 			Kind:              meta.Kind,
+			PlacementKind:     meta.PlacementKind,
 			PlacementDaemonID: meta.PlacementDaemonID,
 			CreatedAt:         meta.CreatedAt,
 			CreatedBy:         meta.CreatedBy,

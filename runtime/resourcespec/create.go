@@ -44,6 +44,32 @@ type CreateSpec struct {
 	WithContent bool
 }
 
+// PlacementKind names the door-back storage locus mechanism projected for a
+// resource. It is not an independently persisted axis: with today's resource
+// kinds, KindFile derives PlacementDaemonLocal and KindKV derives the empty
+// value because the placement axis does not apply to inline bytes.
+type PlacementKind string
+
+// PlacementDaemonLocal is KindFile's current placement mechanism: the bytes
+// live on the daemon named by ResourceMeta.PlacementDaemonID.
+const PlacementDaemonLocal PlacementKind = "daemon-local"
+
+var allPlacementKinds = []PlacementKind{PlacementDaemonLocal}
+
+// ValidPlacementKind reports whether raw is a legal public projection. The
+// empty value is valid for KindKV, where no external placement exists.
+func ValidPlacementKind(raw PlacementKind) bool {
+	if raw == "" {
+		return true
+	}
+	for _, want := range allPlacementKinds {
+		if raw == want {
+			return true
+		}
+	}
+	return false
+}
+
 // coordSeedBytes is the random seed width GenerateCoord hashes — 256 bits,
 // matching the sha256 digest it feeds (design doc C1: "种子=random/
 // salted-hash").

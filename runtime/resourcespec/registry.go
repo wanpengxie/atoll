@@ -52,6 +52,12 @@ type ResourceMeta struct {
 	Kind      ResourceKind
 	CreatedAt int64
 
+	// PlacementKind is the caller-visible storage-locus projection derived
+	// from Kind at the registry read boundary. It is deliberately not an
+	// independent storage column: KindFile maps to PlacementDaemonLocal and
+	// KindKV maps to "" because inline bytes have no placement axis.
+	PlacementKind PlacementKind
+
 	// PlacementDaemonID is the explicit routing column: which daemon's
 	// Streamer holds the bytes ("" for kv). A durable daemon identity (§4),
 	// never re-derived from PlacementCoord.

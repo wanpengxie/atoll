@@ -42,7 +42,8 @@ func TestDoorStat(t *testing.T) {
 
 	t.Run("holder sees meta + effective ops, never a coord field", func(t *testing.T) {
 		meta := resourcespec.ResourceMeta{
-			Kind: resourcespec.KindKV, CreatedAt: 42,
+			Kind: resourcespec.KindFile, CreatedAt: 42,
+			PlacementKind:     resourcespec.PlacementDaemonLocal,
 			PlacementDaemonID: "", PlacementCoord: "should-never-surface",
 			CreatedBy: "creator",
 		}
@@ -55,7 +56,7 @@ func TestDoorStat(t *testing.T) {
 		if res.Reject != "" {
 			t.Fatalf("reject = %q, want none", res.Reject)
 		}
-		if res.Meta.CreatedAt != 42 || res.Meta.CreatedBy != "creator" || res.Meta.Kind != resourcespec.KindKV {
+		if res.Meta.CreatedAt != 42 || res.Meta.CreatedBy != "creator" || res.Meta.Kind != resourcespec.KindFile || res.Meta.PlacementKind != resourcespec.PlacementDaemonLocal {
 			t.Fatalf("meta = %+v", res.Meta)
 		}
 		if len(res.Ops) == 0 {
