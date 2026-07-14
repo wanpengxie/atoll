@@ -162,7 +162,12 @@ func (s *compositionStore) IntroduceComposition(ctx context.Context, in storespe
 			err = qerr
 		}
 		if err == nil && in.ConfigJSON != nil {
-			res, uerr := tx.ExecContext(ctx, `UPDATE channel_composition SET config_json=? WHERE principal=? AND COALESCE(config_json,'')<>?`, *in.ConfigJSON, in.Principal, *in.ConfigJSON)
+			// Config publication and the restart intent are one state transition.
+			// Keeping both columns in this statement removes the crash window where
+			// a committed config could be returned before a separate restart call.
+			res, uerr := tx.ExecContext(ctx, `UPDATE channel_composition
+				SET config_json=?, restart_epoch=restart_epoch+1
+				WHERE principal=? AND COALESCE(config_json,'')<>?`, *in.ConfigJSON, in.Principal, *in.ConfigJSON)
 			err = uerr
 			if uerr == nil {
 				n, _ := res.RowsAffected()

@@ -130,11 +130,12 @@ type Acceptor struct {
 	// overlapping reconnect (old link tearing down as the new one comes up);
 	// Kick tears down every one of them. Every key is an authenticated daemon id.
 	linksMu sync.Mutex
-	links   map[string][]linkHandle
+	links   map[string][]*linkHandle
 
 	// slots is the one-incumbent state machine per compute. A link must reserve
-	// candidate before declaration writes and is promoted only after its accepted
-	// reply is on the wire and all declaration writers have exited.
+	// candidate before declaration writes and is promoted after all declaration
+	// writers have exited, immediately before its accepted reply is put on the
+	// wire. A failed reply write kills the promoted incumbent.
 	slotMu sync.Mutex
 	slots  map[string]*incumbentSlot
 }
@@ -163,12 +164,43 @@ type incumbentPin struct {
 	once    sync.Once
 }
 
-// linkHandle is what Kick needs to voluntarily tear one link down. prepareQuietClose
-// seals actor admission, joins admitted handshakes, and silences the complete
-// authoritative port snapshot before lc.Close drives the teardown funnel.
+// linkHandle is the complete graceful-close capability for one link. Keeping
+// this as a pointer gives the registry one stable identity and, more
+// importantly, makes every graceful initiator share the same closeOnce and the
+// same ordered pipeline.
 type linkHandle struct {
-	lc                *linkSession
-	prepareQuietClose func()
+	closeOnce    sync.Once
+	gate         *actorGate
+	invalidate   func()
+	waitWorkers  func()
+	takePorts    func() []actorrt.Incarnation
+	quietPort    func(actorrt.Incarnation)
+	closeCarrier func()
+	sendControl  func([]byte) error
+}
+
+func (h *linkHandle) closeQuietly() {
+	if h == nil {
+		return
+	}
+	h.closeOnce.Do(func() {
+		// Publication fence: after seal returns no actor handshake can newly
+		// enter the set whose successful commits publish into the port index.
+		h.gate.seal()
+		h.invalidate()
+		h.waitWorkers()
+		for _, inc := range h.takePorts() {
+			h.quietPort(inc)
+		}
+		h.closeCarrier()
+	})
+}
+
+func (h *linkHandle) send(raw []byte) error {
+	if h == nil || h.sendControl == nil {
+		return errors.New("link: connection is closed")
+	}
+	return h.sendControl(raw)
 }
 
 // Config configures an Acceptor. Auth is the app layer's concern — Serve
@@ -289,7 +321,7 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 		pendingAlloc:    newPendingReplies[AllocReply](),
 		pendingReclaim:  newPendingReplies[ReclaimReply](),
 		lane:            newLaneState(),
-		links:           map[string][]linkHandle{},
+		links:           map[string][]*linkHandle{},
 		slots:           map[string]*incumbentSlot{},
 	}, nil
 }
@@ -371,6 +403,24 @@ func (a *Acceptor) acceptIncumbent(compute string, lc *linkSession) bool {
 	return s.state == incumbentActive
 }
 
+// publishAcceptedAttach linearizes local incumbent activation before the
+// success reply is externally observable. The callback is the actual wire
+// write; keeping that boundary explicit gives the ordering invariant a direct,
+// deterministic test instead of relying on scheduler luck in an end-to-end
+// attach race.
+func (a *Acceptor) publishAcceptedAttach(compute string, lc *linkSession, sendAccepted func() error) bool {
+	if !a.acceptIncumbent(compute, lc) {
+		a.failIncumbent(compute, lc, "attach_candidate_deposed")
+		return false
+	}
+	if err := sendAccepted(); err != nil {
+		a.logger.Info("link.attach_reply_failed", "compute", compute, "err", err)
+		a.failIncumbent(compute, lc, "attach_reply_failed")
+		return false
+	}
+	return true
+}
+
 func (a *Acceptor) failIncumbent(compute string, lc *linkSession, cause string) {
 	a.slotMu.Lock()
 	s := a.slots[compute]
@@ -402,7 +452,7 @@ func (a *Acceptor) markIncumbentDead(lc *linkSession) {
 
 // registerLink adds this link's handle under id — called at runLink entry
 // (daemonID known, attach not yet processed), not at markAttached time.
-func (a *Acceptor) registerLink(id string, h linkHandle) {
+func (a *Acceptor) registerLink(id string, h *linkHandle) {
 	if id == "" {
 		return
 	}
@@ -411,16 +461,16 @@ func (a *Acceptor) registerLink(id string, h linkHandle) {
 	a.linksMu.Unlock()
 }
 
-// deregisterLink removes exactly this link's handle (identity match on lc, not
+// deregisterLink removes exactly this link's handle (pointer identity, not
 // a wholesale clear) — an overlapping reconnect leaves the other entry intact.
-func (a *Acceptor) deregisterLink(id string, lc *linkSession) {
+func (a *Acceptor) deregisterLink(id string, target *linkHandle) {
 	if id == "" {
 		return
 	}
 	a.linksMu.Lock()
 	hs := a.links[id]
 	for i, h := range hs {
-		if h.lc == lc {
+		if h == target {
 			hs = append(hs[:i], hs[i+1:]...)
 			break
 		}
@@ -444,11 +494,10 @@ func (a *Acceptor) deregisterLink(id string, lc *linkSession) {
 // loop (`while IsAttached { Kick }`, §6), not by a shadow revoked-set here.
 func (a *Acceptor) KickDaemon(computeID string) int {
 	a.linksMu.Lock()
-	hs := append([]linkHandle(nil), a.links[computeID]...)
+	hs := append([]*linkHandle(nil), a.links[computeID]...)
 	a.linksMu.Unlock()
 	for _, h := range hs {
-		h.prepareQuietClose()
-		_ = h.lc.Close()
+		h.closeQuietly()
 	}
 	// Loud on every call (not edge-gated): each call is itself a discrete
 	// revocation act, not a repeating steady-state poll — the only way to
@@ -585,6 +634,8 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		a.portIndex.Remove(portOwner, inc)
 	}
 	defer func() {
+		// Hard-death safety net. The graceful pipeline has already consumed this
+		// owner snapshot before it closes the carrier.
 		portMu.Lock()
 		_ = a.portIndex.TakeOwner(portOwner)
 		portMu.Unlock()
@@ -857,21 +908,25 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	}
 	defer a.markIncumbentDead(lc)
 
-	// quietStopPorts tears down every port on this link WITHOUT a down edge — the
-	// home is going away gracefully, so its port-hosted actors must fall silent (no
-	// receiver_unavailable for in-flight requests) rather than surfacing a spurious
-	// death. Pointer-guarded per incarnation (a since-replaced/dead port is a no-op).
-	quietStopPorts := func() {
-		portMu.Lock()
-		incs := a.portIndex.TakeOwner(portOwner)
-		portMu.Unlock()
-		for _, inc := range incs {
-			a.runtime.DespawnQuiet(inc)
-		}
-	}
-	prepareQuietClose := func() {
-		a.joinActorWorkers(&gate, daemonID, attachHandshakeTimeout)
-		quietStopPorts()
+	// One pointer-shaped handle owns the complete graceful-close protocol. The
+	// port snapshot is taken only after admission is sealed and every worker that
+	// crossed the gate has either published its port or finished unsuccessfully.
+	handle := &linkHandle{
+		gate:       &gate,
+		invalidate: func() { a.markIncumbentDead(lc) },
+		waitWorkers: func() {
+			a.joinActorWorkers(&gate, daemonID, attachHandshakeTimeout)
+		},
+		takePorts: func() []actorrt.Incarnation {
+			portMu.Lock()
+			defer portMu.Unlock()
+			return a.portIndex.TakeOwner(portOwner)
+		},
+		quietPort: a.runtime.DespawnQuiet,
+		closeCarrier: func() {
+			_ = lc.Close()
+		},
+		sendControl: lc.sendControl,
 	}
 
 	// Register this link's Kick handle BEFORE the attach frame is even read (not
@@ -879,8 +934,8 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	// closes the half-attach window (§S-P21): a daemon that is pre-authenticated
 	// but has not yet completed its attach handshake is still reachable by
 	// KickDaemon. Deregistered on runLink exit regardless of how it ends.
-	a.registerLink(daemonID, linkHandle{lc: lc, prepareQuietClose: prepareQuietClose})
-	defer a.deregisterLink(daemonID, lc)
+	a.registerLink(daemonID, handle)
+	defer a.deregisterLink(daemonID, handle)
 	// Evict this link from the lane-relay table on teardown (keyed by boundID,
 	// read at defer-run time — pointer-guarded so an overlapping reconnect's
 	// newer registration survives this stale link's exit).
@@ -904,10 +959,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	go func() {
 		select {
 		case <-a.ctx.Done():
-			// Seal first and settle every handshake that already crossed admission.
-			// Only then can the authoritative index snapshot be complete and quiet.
-			prepareQuietClose()
-			lc.kill("acceptor_closed", a.ctx.Err())
+			handle.closeQuietly()
 		case <-reqCtx.Done():
 			lc.kill("accept_request_cancelled", reqCtx.Err())
 		case <-done:
@@ -1031,18 +1083,17 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 	mu.Unlock()
 
 	// The store transaction/diff and the single-pointer declaration publication
-	// are complete. Exit the writer before the reply; a candidate cannot promote
-	// until this count is zero AND acceptIncumbent records a successful reply.
+	// are complete. Exit the writer, then commit the candidate locally before the
+	// success reply becomes externally observable. Once the peer sees Accepted it
+	// may immediately open an actor stream, so promotion after the write creates a
+	// real wire-order race. A failed write rolls the promoted incumbent back by
+	// marking it dead and closing the session.
 	pin.finish(true)
 	pinFinished = true
 
-	if err := a.sendReply(lc, requestID, AttachReply{ChannelID: a.channelID, Accepted: true, DaemonID: computeID}); err != nil {
-		a.logger.Info("link.attach_reply_failed", "compute", computeID, "err", err)
-		a.failIncumbent(computeID, lc, "attach_reply_failed")
-		return computeID, false
-	}
-	if !a.acceptIncumbent(computeID, lc) {
-		a.failIncumbent(computeID, lc, "attach_candidate_deposed")
+	if !a.publishAcceptedAttach(computeID, lc, func() error {
+		return a.sendReply(lc, requestID, AttachReply{ChannelID: a.channelID, Accepted: true, DaemonID: computeID})
+	}) {
 		return computeID, false
 	}
 	// "接上了" and "重申了一遍" are different events — the daemon re-declares its
@@ -1139,12 +1190,12 @@ func (a *Acceptor) sendStorageControl(lc *linkSession, f storageControlFrame) {
 func (a *Acceptor) SendAllocRequest(ctx context.Context, daemonID string, req AllocRequest) error {
 	a.linksMu.Lock()
 	hs := a.links[daemonID]
-	var lc *linkSession
+	var handle *linkHandle
 	if len(hs) > 0 {
-		lc = hs[len(hs)-1].lc // most recently registered connection for this compute
+		handle = hs[len(hs)-1] // most recently registered connection for this compute
 	}
 	a.linksMu.Unlock()
-	if lc == nil {
+	if handle == nil {
 		return fmt.Errorf("link: no live connection for daemon %q", daemonID)
 	}
 
@@ -1157,7 +1208,7 @@ func (a *Acceptor) SendAllocRequest(ctx context.Context, daemonID string, req Al
 		a.pendingAlloc.cancel(req.RequestID)
 		return err
 	}
-	if err := lc.sendControl(raw); err != nil {
+	if err := handle.send(raw); err != nil {
 		a.pendingAlloc.cancel(req.RequestID)
 		return err
 	}
@@ -1189,12 +1240,12 @@ func (a *Acceptor) SendAllocRequest(ctx context.Context, daemonID string, req Al
 func (a *Acceptor) SendReclaimRequest(ctx context.Context, daemonID, coord string) error {
 	a.linksMu.Lock()
 	hs := a.links[daemonID]
-	var lc *linkSession
+	var handle *linkHandle
 	if len(hs) > 0 {
-		lc = hs[len(hs)-1].lc
+		handle = hs[len(hs)-1]
 	}
 	a.linksMu.Unlock()
-	if lc == nil {
+	if handle == nil {
 		return fmt.Errorf("link: no live connection for daemon %q", daemonID)
 	}
 
@@ -1205,7 +1256,7 @@ func (a *Acceptor) SendReclaimRequest(ctx context.Context, daemonID, coord strin
 		a.pendingReclaim.cancel(req.RequestID)
 		return err
 	}
-	if err := lc.sendControl(raw); err != nil {
+	if err := handle.send(raw); err != nil {
 		a.pendingReclaim.cancel(req.RequestID)
 		return err
 	}
@@ -1504,11 +1555,16 @@ func (a *Acceptor) scheduleSink() actorrt.RelaySink {
 // Serve goroutines and admitted delayed-reject callbacks to exit. The outer
 // bound is DERIVED from the inner joins a
 // runLink teardown can legitimately spend back to back — the control-worker
-// join (2×streamWriteBudget) then the actor-gate join (attachHandshakeTimeout)
+// join (2×streamWriteBudget), the actor-gate join (attachHandshakeTimeout),
+// and the graceful carrier close (streamWriteBudget)
 // — plus margin, so the backstop never abandons (and double-counts) a link
 // whose inner waits are still within their own ratified budgets.
 func (a *Acceptor) Close() error {
-	return a.closeWithin(2*streamWriteBudget + attachHandshakeTimeout + 5*time.Second)
+	return a.closeWithin(acceptorCloseBudget())
+}
+
+func acceptorCloseBudget() time.Duration {
+	return 3*streamWriteBudget + attachHandshakeTimeout + 5*time.Second
 }
 
 func (a *Acceptor) closeWithin(timeout time.Duration) error {
@@ -1537,7 +1593,7 @@ func (a *Acceptor) Leaked() int64 { return a.leaked.Load() }
 // bounded join — the same closed+mutex+WaitGroup shape as the Acceptor's own
 // Serve admission (beginServe/closeWithin), instantiated per link. The seal
 // and the Add live under one mutex (公理 7 通用款: 关门判断与登记同一临界区),
-// so once sealAndWait has taken the lock no later admit can Add against the
+// so once seal has taken the lock no later admit can Add against the
 // in-progress Wait (which would both leave an unjoined worker and violate
 // WaitGroup's reuse precondition).
 type actorGate struct {
@@ -1563,18 +1619,16 @@ func (g *actorGate) admit() bool {
 
 func (g *actorGate) done() { g.wg.Done() }
 
-// sealAndWait closes admission, then joins the admitted workers within
-// timeout. account is true for exactly one timeout observer; once that bounded
-// verdict is recorded, later teardown stages only sample completion and never
-// spend a second actor wait budget.
-func (g *actorGate) sealAndWait(timeout time.Duration) (joined, account bool) {
+// seal closes admission immediately and starts the one shared waiter. It is a
+// separate phase so graceful close can establish the publication fence before
+// performing any other teardown action.
+func (g *actorGate) seal() {
 	g.mu.Lock()
 	g.sealed = true
 	if g.waitDone == nil {
 		g.waitDone = make(chan struct{})
 	}
 	done := g.waitDone
-	abandoned := g.abandoned
 	g.mu.Unlock()
 	// All callers observe one waiter and one terminal channel. A caller whose
 	// budget expires abandons only its own observation; it never leaves another
@@ -1586,6 +1640,17 @@ func (g *actorGate) sealAndWait(timeout time.Duration) (joined, account bool) {
 			close(done)
 		}()
 	})
+}
+
+// waitWithin joins admitted workers within timeout. account is true for
+// exactly one timeout observer; later teardown stages sample the same terminal
+// channel and never spend a second actor wait budget.
+func (g *actorGate) waitWithin(timeout time.Duration) (joined, account bool) {
+	g.seal()
+	g.mu.Lock()
+	done := g.waitDone
+	abandoned := g.abandoned
+	g.mu.Unlock()
 	if abandoned {
 		select {
 		case <-done:
@@ -1611,14 +1676,14 @@ func (g *actorGate) sealAndWait(timeout time.Duration) (joined, account bool) {
 }
 
 func (a *Acceptor) joinActorWorkers(gate *actorGate, daemonID string, budget time.Duration) {
-	joined, account := gate.sealAndWait(budget)
+	joined, account := gate.waitWithin(budget)
 	if joined || !account {
 		return
 	}
 	a.leaked.Add(1)
 	a.logger.Error("link.actor_worker_join_timeout", "timeout", budget,
 		"daemon", daemonID,
-		"safety", "actor admission is sealed; teardown proceeds without a second wait budget")
+		"safety", "actor admission is sealed and incumbent publication is fenced; teardown proceeds without a second wait budget")
 }
 
 // joinLinkWorkers is runLink's teardown join half — control workers first

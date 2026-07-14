@@ -113,8 +113,8 @@ type desiredIncarnation struct {
 // runLink drives ONE connected session on d: an initial reconcile pass (which
 // reopens every already-live actor's stream on this new link, F6, before it
 // resolves anything freshly missing) followed by a poll loop. It returns true
-// (graceful) only on ctx cancellation — having first detached every stream so
-// the home's ports die QUIET — and false if the link itself goes down, so the
+// (graceful) only on ctx cancellation; Dialer.Close owns the complete detach,
+// drain, and carrier-close protocol. It returns false if the link itself goes down, so the
 // caller redials. It never touches rt's cells: a link death degrades the wire,
 // the hosted work is untouched (§10.13 推导3).
 func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, poll, resync time.Duration) (graceful bool) {
@@ -127,10 +127,6 @@ func (r *computeRing) runLink(ctx context.Context, d *link.Dialer, poll, resync 
 	for {
 		select {
 		case <-ctx.Done():
-			// Graceful shutdown: detach each actor stream (KindDetach) so the home
-			// ports die QUIET (no receiver_unavailable) instead of on a raw EOF down
-			// edge. rt itself is untouched here — Run's defer StopAll's it.
-			d.DetachAll()
 			return true
 		case <-d.Done():
 			return false

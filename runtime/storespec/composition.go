@@ -100,6 +100,9 @@ type CompositionReader interface {
 // effects must share one channel transaction.
 type CompositionControlPlane interface {
 	CompositionReader
+	// IntroduceComposition atomically advances restart_epoch when it changes an
+	// existing row's config. configChanged reports whether that combined state
+	// transition occurred; callers must not issue a second restart mutation.
 	IntroduceComposition(context.Context, CompositionIntroduce) (record CompositionRecord, created, configChanged bool, err error)
 	RemoveComposition(context.Context, actor.ActorID, int64) (removed bool, err error)
 	RestartComposition(context.Context, actor.ActorID) (newEpoch int64, err error)

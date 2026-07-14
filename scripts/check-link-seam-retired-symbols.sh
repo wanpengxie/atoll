@@ -124,6 +124,10 @@ strict_labels=(
 	"impossible-half-state test seeder"
 	"deleted channel-control HTTP adapter"
 	"deleted one-step runtime attach name"
+	"split graceful-close preparation path"
+	"public whole-link detach path"
+	"combined actor-gate seal-and-wait path"
+	"split quiet port snapshot path"
 )
 strict_patterns=(
 	'\bSkipDDL\b'
@@ -131,6 +135,10 @@ strict_patterns=(
 	'\bSeedIntentRowForTest\b'
 	'operate_http\.go'
 	'runtime\.Attach\b'
+	'\bprepareQuietClose\b'
+	'\bDetachAll\b'
+	'\bsealAndWait\b'
+	'\bquietStopPorts\b'
 )
 strict_samples=(
 	'SkipDDL bool'
@@ -138,6 +146,10 @@ strict_samples=(
 	'func SeedIntentRowForTest() {}'
 	'// see operate_http.go'
 	'// call runtime.Attach'
+	'prepareQuietClose()'
+	'func (d *Dialer) DetachAll()'
+	'gate.sealAndWait(timeout)'
+	'quietStopPorts()'
 )
 if (( ${#strict_labels[@]} != ${#strict_patterns[@]} || ${#strict_patterns[@]} != ${#strict_samples[@]} )); then
 	echo "[link-seam-retired] strict rule table length mismatch" >&2

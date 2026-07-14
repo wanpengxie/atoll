@@ -63,6 +63,16 @@ func TestCompositionRetryFreezesMetadataAndRejectsInactiveHalfState(t *testing.T
 	if got.InstanceID != r.InstanceID || got.Class != "agent.test" || got.Placement != storespec.PlacementServer || got.ConfigJSON != cfg {
 		t.Fatalf("retry changed frozen metadata: %+v", got)
 	}
+	if got.Epoch != 1 {
+		t.Fatalf("config update epoch=%d want 1", got.Epoch)
+	}
+	got, created, changed, err = cs.Composition.IntroduceComposition(ctx, storespec.CompositionIntroduce{
+		DeclID: "ignored", Principal: "decl-a", Class: "ignored", ConfigJSON: &cfg,
+		Placement: storespec.PlacementDaemon, DesiredHost: "ignored", Kind: actor.KindAgent, At: 111,
+	})
+	if err != nil || created || changed || got.Epoch != 1 {
+		t.Fatalf("same-config retry: created=%v changed=%v epoch=%d err=%v", created, changed, got.Epoch, err)
+	}
 	if err := cs.Membership.Deregister(ctx, r.InstanceID, 120); err != nil {
 		t.Fatal(err)
 	}

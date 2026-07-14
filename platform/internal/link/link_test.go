@@ -577,8 +577,8 @@ func testQuietCloseBeforePortCommit(t *testing.T, quietClose func(*homeRig) erro
 	}
 
 	releaseHook()
-	if err := <-openDone; err != nil {
-		t.Fatalf("OpenStream after authority release: %v", err)
+	if err := <-openDone; err == nil {
+		t.Fatal("pre-commit handshake survived incumbent invalidation")
 	}
 	if err := <-closeDone; err != nil {
 		t.Fatal(err)

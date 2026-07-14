@@ -103,6 +103,51 @@ func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {
 	})
 }
 
+func TestCompositionConfigChangeAdvancesEpochAndRebuildsFromOneCommit(t *testing.T) {
+	resolver := &compositionActivationResolver{}
+	h, err := Open(Config{
+		ChannelID:           "composition-config-rebuild",
+		DBPath:              filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver: resolver,
+		DaemonAuthority:     allowTestDaemonAuthority{},
+		ReconcileInterval:   10 * time.Millisecond,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+
+	record, _, _, err := h.IntroduceComposition(context.Background(), storespec.CompositionIntroduce{
+		DeclID: "decl:probe", Principal: "probe", Class: "probe",
+		Placement: storespec.PlacementServer, Kind: actor.KindAgent, At: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitHomeCondition(t, func() bool { return resolver.builds.Load() == 1 })
+	first, ok := h.channel.Cells().CurrentIncarnation(record.InstanceID)
+	if !ok {
+		t.Fatal("initial composition member was not embodied")
+	}
+
+	cfg := `{"tone":"brisk"}`
+	updated, created, changed, err := h.IntroduceComposition(context.Background(), storespec.CompositionIntroduce{
+		DeclID: "ignored", Principal: "probe", Class: "ignored", ConfigJSON: &cfg,
+		Placement: storespec.PlacementDaemon, DesiredHost: "ignored", Kind: actor.KindAgent, At: time.Now().UnixMilli(),
+	})
+	if err != nil || created || !changed {
+		t.Fatalf("config update: created=%v changed=%v err=%v", created, changed, err)
+	}
+	if updated.Epoch != record.Epoch+1 || updated.ConfigJSON != cfg {
+		t.Fatalf("config update record=%+v", updated)
+	}
+	waitHomeCondition(t, func() bool { return resolver.builds.Load() == 2 })
+	second, ok := h.channel.Cells().CurrentIncarnation(record.InstanceID)
+	if !ok || second == first {
+		t.Fatal("atomic config epoch did not replace the server incarnation")
+	}
+}
+
 func waitHomeCondition(t *testing.T, condition func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)

@@ -154,7 +154,7 @@ func TestOperate_IntroduceInvalidPlacement_Rejected(t *testing.T) {
 // TestOperate_ConfigChange_DaemonPlacedTakesEffect is the config-effect arm's
 // placement-neutrality regression guard (F-2, P2-2). A config change on an
 // already-composed row takes effect through operateExecutor.Introduce's
-// configChanged branch, which calls the placement-neutral Home.Restart for a
+// store transition, which atomically updates config and restart_epoch for a
 // daemon-placed row exactly as it would for a server one. (Driven on the operate
 // executor directly, as the sysactor gate would after authorising the sender —
 // the HTTP introduce垫片 does not forward config, so the config-effect arm is only
@@ -165,11 +165,9 @@ func TestOperate_IntroduceInvalidPlacement_Rejected(t *testing.T) {
 // (a placement-gated / rebuild_failed Restart would surface as *home.OperateError),
 // created=false, placement=daemon, config_updated=true.
 //
-// Guard boundary: the innermost Home.Restart *invocation* for a daemon row has no
-// observable production seam here without a real attached daemon (the platform-side
-// TestRestartDaemonPlacedActor_RebuildsAcrossWire owns the actual cross-wire
-// rebuild). This guards that the config-effect branch is NOT gated on placement at
-// its entry and completes for a daemon-placed row.
+// Guard boundary: the platform reconcile loop owns observing the advanced epoch
+// and rebuilding across the wire. This test guards that the atomic config intent
+// transition is not gated on placement.
 func TestOperate_ConfigChange_DaemonPlacedTakesEffect(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
@@ -196,10 +194,8 @@ func TestOperate_ConfigChange_DaemonPlacedTakesEffect(t *testing.T) {
 		t.Fatalf("first introduce = %+v, want daemon/created (the guarded case)", m1)
 	}
 
-	// Re-introduce the SAME row with a CHANGED config → the configChanged branch:
-	// UPDATE channel_composition.config_json + the placement-neutral Home.Restart for the
-	// daemon row. A placement-gated effect Restart would fail here (rebuild_failed)
-	// or never mark config_updated.
+	// Re-introduce the SAME row with a CHANGED config → one atomic UPDATE of
+	// config_json + restart_epoch for the daemon row.
 	p2, _ := json.Marshal(map[string]any{"decl_id": agentID, "config": map[string]any{"tone": "brisk"}})
 	got2, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: p2,

@@ -265,11 +265,6 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 	if err != nil {
 		return nil, err
 	}
-	if configChanged {
-		if _, serr := home.RestartInstanceDirect(ctx, record.InstanceID); serr != nil {
-			return nil, &platformhome.OperateError{Code: "rebuild_failed", Detail: serr.Error()}
-		}
-	}
 	return map[string]any{
 		"instance_id": string(record.InstanceID), "class": record.Class, "placement": string(record.Placement),
 		"created": created, "config_updated": configChanged,

@@ -101,6 +101,7 @@ type Dialer struct {
 	terminalTasks   sync.WaitGroup
 	terminalLost    [4]atomic.Uint64
 	terminalTimeout atomic.Uint64
+	closeOnce       sync.Once
 }
 
 // actorStream is one hosted actor's link stream + its native ipc plumbing. The
@@ -544,6 +545,14 @@ func (d *Dialer) claimTerminal(as *actorStream, verdict terminalVerdict, reason 
 		d.logger.Debug("terminal_cas_lost", "verdict", verdict.String(), "actor", string(as.id))
 		return false
 	}
+	return d.enrollTerminalWinner(as, verdict, reason)
+}
+
+// enrollTerminalWinner is the post-CAS half of terminal arbitration. It is
+// deliberately separate so the CAS→admission seam can be tested
+// deterministically: Close and a winner paused here must still serialize on
+// terminalMu before any Wait begins.
+func (d *Dialer) enrollTerminalWinner(as *actorStream, verdict terminalVerdict, reason string) bool {
 	if verdict == terminalSilent {
 		_ = as.stream.Close()
 		return true
@@ -1235,8 +1244,9 @@ func (d *Dialer) SendDeliverResult(id actor.ActorID, envID message.ID, outcome, 
 
 // DetachStream sends a graceful KindDetach on ONE actor's stream (remote→host
 // "I am removing this arm" — the home port reads it and dies QUIET, no down
-// edge) then closes it. Used both by DetachAll (daemon shutdown) and the
-// reconcile ring's 削 path (a locally-dropped desired member, §10.13). No-op if
+// edge) then closes it. Used by the reconcile ring's 削 path (a
+// locally-dropped desired member, §10.13); whole-link graceful shutdown is
+// owned exclusively by Close. No-op if
 // the actor has no open stream (already gone).
 func (d *Dialer) DetachStream(id actor.ActorID) {
 	d.mu.Lock()
@@ -1248,37 +1258,39 @@ func (d *Dialer) DetachStream(id actor.ActorID) {
 	d.claimTerminal(as, terminalDetach, "detach")
 }
 
-// DetachAll sends a graceful KindDetach on every open actor stream then closes
-// each. Called on daemon ctx-cancel (graceful shutdown) so the home's port-
-// hosted actors fall silent instead of materialising receiver_unavailable; a
-// hard link drop (kill -9) skips this and the home reads EOF as the loud,
-// positively-observed down edge instead.
-func (d *Dialer) DetachAll() {
+func (d *Dialer) snapshotStreams() []*actorStream {
 	d.mu.Lock()
-	ids := make([]actor.ActorID, 0, len(d.streams))
-	for id := range d.streams {
-		ids = append(ids, id)
+	streams := make([]*actorStream, 0, len(d.streams))
+	for _, as := range d.streams {
+		streams = append(streams, as)
 	}
 	d.mu.Unlock()
-	for _, id := range ids {
-		d.DetachStream(id)
-	}
+	return streams
 }
 
 // Done returns a channel closed when the link tears down (peer gone, lease
 // expiry on the home side, or Close).
 func (d *Dialer) Done() <-chan struct{} { return d.done }
 
-// Close tears the link down, seals terminal-task admission, and boundedly joins
-// every winner admitted before the seal. A late terminal CAS may still win its
-// per-stream account, but it cannot Add after Wait has begun and closes inline.
+// Close is the only whole-link graceful shutdown protocol: claim Detach for the
+// current stream snapshot, seal post-CAS task admission, join every admitted
+// bounded terminal write, then close the carrier. A winner paused between CAS
+// and enrollment serializes on terminalMu; it either Adds before the seal or
+// observes terminalClosed and closes inline, so WaitGroup.Add can never race
+// Wait.
 func (d *Dialer) Close() error {
-	d.terminalMu.Lock()
-	d.terminalClosed = true
-	d.terminalMu.Unlock()
-	err := d.lc.Close()
-	if !waitGroupWithin(&d.terminalTasks, terminalJoinGrace) {
-		d.logger.Warn("terminal_task_join_timeout")
-	}
-	return err
+	d.closeOnce.Do(func() {
+		for _, as := range d.snapshotStreams() {
+			d.claimTerminal(as, terminalDetach, "detach")
+		}
+
+		d.terminalMu.Lock()
+		d.terminalClosed = true
+		d.terminalMu.Unlock()
+		if !waitGroupWithin(&d.terminalTasks, terminalJoinGrace) {
+			d.logger.Warn("terminal_task_join_timeout")
+		}
+		_ = d.lc.Close()
+	})
+	return nil
 }

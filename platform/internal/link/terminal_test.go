@@ -111,6 +111,12 @@ func TestTerminalGate_IndependentTimerClosesBlockedWriteAndDrainsTask(t *testing
 	}
 }
 
+func TestTerminalBudgetsKeepOuterJoinAboveInnerWrite(t *testing.T) {
+	if terminalJoinGrace <= terminalWriteGrace {
+		t.Fatalf("terminal join grace=%v must exceed write grace=%v", terminalJoinGrace, terminalWriteGrace)
+	}
+}
+
 func TestTerminalGate_CloseSealsAdmissionAndLateWinnerAddsNoTask(t *testing.T) {
 	d := terminalTestDialer()
 	if err := d.Close(); err != nil {
@@ -128,6 +134,136 @@ func TestTerminalGate_CloseSealsAdmissionAndLateWinnerAddsNoTask(t *testing.T) {
 	}
 	if !waitGroupWithin(&d.terminalTasks, 50*time.Millisecond) {
 		t.Fatal("late winner enrolled a task after Close")
+	}
+}
+
+func TestDialerCloseDetachesSnapshotBeforeCarrierClose(t *testing.T) {
+	ls, controlPeer, _ := newControlKillRig(t, func([]byte) {})
+	defer controlPeer.Close()
+	d := terminalTestDialer()
+	d.lc = ls
+
+	peers := make([]net.Conn, 0, 2)
+	for _, id := range []actor.ActorID{"tool:a", "tool:b"} {
+		local, peer := net.Pipe()
+		peers = append(peers, peer)
+		d.streams[id] = &actorStream{id: id, stream: local, codec: ipc.NewCodec(local, local)}
+	}
+	defer func() {
+		for _, peer := range peers {
+			_ = peer.Close()
+		}
+	}()
+
+	closed := make(chan struct{})
+	go func() { _ = d.Close(); close(closed) }()
+	select {
+	case <-ls.closed():
+		t.Fatal("carrier closed while terminal detach writes were still blocked")
+	case <-time.After(20 * time.Millisecond):
+	}
+	for i, peer := range peers {
+		frame, err := ipc.NewCodec(peer, peer).Read()
+		if err != nil || frame.Kind != ipc.KindDetach {
+			t.Fatalf("stream %d terminal frame=%+v err=%v", i, frame, err)
+		}
+	}
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not drain terminal writes and close the carrier")
+	}
+	select {
+	case <-ls.closed():
+	default:
+		t.Fatal("Close returned before carrier close")
+	}
+}
+
+func TestTerminalGate_WinnerPausedAfterCASCannotEnrollAfterCloseSeal(t *testing.T) {
+	d := terminalTestDialer()
+	wire := newBlockingTerminalRWC()
+	as := &actorStream{id: "tool:paused", stream: wire, codec: ipc.NewCodec(wire, wire)}
+	d.streams[as.id] = as
+	if !as.terminal.CompareAndSwap(uint32(terminalUnclaimed), uint32(terminalDown)) {
+		t.Fatal("failed to establish post-CAS seam")
+	}
+
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if !d.enrollTerminalWinner(as, terminalDown, "paused") {
+		t.Fatal("post-CAS winner did not complete")
+	}
+	select {
+	case <-wire.closed:
+	default:
+		t.Fatal("winner resumed after seal without closing inline")
+	}
+	if !waitGroupWithin(&d.terminalTasks, 50*time.Millisecond) {
+		t.Fatal("winner enrolled a terminal task after Close sealed admission")
+	}
+}
+
+func TestDialerConcurrentCloseSharesOneDetachAndDrain(t *testing.T) {
+	ls, controlPeer, _ := newControlKillRig(t, func([]byte) {})
+	defer controlPeer.Close()
+	d := terminalTestDialer()
+	d.lc = ls
+	local, peer := net.Pipe()
+	defer peer.Close()
+	as := &actorStream{id: "tool:once", stream: local, codec: ipc.NewCodec(local, local)}
+	d.streams[as.id] = as
+
+	done := make(chan struct{}, 2)
+	for range 2 {
+		go func() { _ = d.Close(); done <- struct{}{} }()
+	}
+	select {
+	case <-done:
+		t.Fatal("Close returned before the shared detach write drained")
+	case <-time.After(20 * time.Millisecond):
+	}
+	frame, err := ipc.NewCodec(peer, peer).Read()
+	if err != nil || frame.Kind != ipc.KindDetach {
+		t.Fatalf("terminal frame=%+v err=%v", frame, err)
+	}
+	<-done
+	<-done
+	if got := terminalVerdict(as.terminal.Load()); got != terminalDetach {
+		t.Fatalf("terminal verdict=%s want detach", got)
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(50 * time.Millisecond))
+	if _, err := ipc.NewCodec(peer, peer).Read(); err == nil {
+		t.Fatal("concurrent Close emitted a second terminal frame")
+	}
+}
+
+func TestDialerCloseAfterHardDeadSessionIsFastAndDoesNotReclaimTerminal(t *testing.T) {
+	ls, controlPeer, _ := newControlKillRig(t, func([]byte) {})
+	defer controlPeer.Close()
+	d := terminalTestDialer()
+	d.lc = ls
+	local, peer := net.Pipe()
+	as := &actorStream{id: "tool:dead", stream: local, codec: ipc.NewCodec(local, local)}
+	as.terminal.Store(uint32(terminalSilent))
+	d.streams[as.id] = as
+	_ = local.Close()
+	_ = peer.Close()
+	ls.kill("hard-test", nil)
+
+	started := time.Now()
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("hard-dead cleanup took %v", elapsed)
+	}
+	if got := terminalVerdict(as.terminal.Load()); got != terminalSilent {
+		t.Fatalf("terminal verdict changed to %s", got)
+	}
+	if got := d.terminalLost[terminalDetach].Load(); got != 1 {
+		t.Fatalf("detach loser accounting=%d want 1", got)
 	}
 }
 
