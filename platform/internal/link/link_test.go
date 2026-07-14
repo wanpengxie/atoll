@@ -2,6 +2,7 @@ package link_test
 
 import (
 	"context"
+	"fmt"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -458,6 +459,20 @@ func TestHomeCloseQuietTeardown_NoDownEdge(t *testing.T) {
 // yet installed it in the Home index. Close must first join that admitted worker;
 // only after publication completes may it snapshot and quiet the indexed port.
 func TestHomeCloseDuringPortPublicationIsQuiet(t *testing.T) {
+	testQuietCloseDuringPortPublication(t, func(r *homeRig) error { return r.acc.Close() })
+}
+
+func TestKickDaemonDuringPortPublicationIsQuiet(t *testing.T) {
+	testQuietCloseDuringPortPublication(t, func(r *homeRig) error {
+		if got := r.acc.KickDaemon("daemon-1"); got != 1 {
+			return fmt.Errorf("KickDaemon closed %d links, want 1", got)
+		}
+		return nil
+	})
+}
+
+func testQuietCloseDuringPortPublication(t *testing.T, quietClose func(*homeRig) error) {
+	t.Helper()
 	entered, release := make(chan struct{}), make(chan struct{})
 	r := newHomeRigWithPortIndex(t, 5*time.Second, 30*time.Second, func(index link.PortIndex) link.PortIndex {
 		return blockingPortIndex{PortIndex: index, entered: entered, release: release}
@@ -485,7 +500,7 @@ func TestHomeCloseDuringPortPublicationIsQuiet(t *testing.T) {
 	}
 
 	closeDone := make(chan error, 1)
-	go func() { closeDone <- r.acc.Close() }()
+	go func() { closeDone <- quietClose(r) }()
 	select {
 	case err := <-closeDone:
 		t.Fatalf("Close returned before the parked attach worker was released: %v", err)

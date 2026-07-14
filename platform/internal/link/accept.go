@@ -163,13 +163,12 @@ type incumbentPin struct {
 	once    sync.Once
 }
 
-// linkHandle is what Kick needs to voluntarily tear one link down: quietStop
-// silences this link's ports FIRST (kick is a revocation, not a death — the
-// same silent edge as a graceful detach), then lc.Close() drives it through the
-// existing teardown funnel (frame.go).
+// linkHandle is what Kick needs to voluntarily tear one link down. prepareQuietClose
+// seals actor admission, joins admitted handshakes, and silences the complete
+// authoritative port snapshot before lc.Close drives the teardown funnel.
 type linkHandle struct {
-	lc        *linkSession
-	quietStop func()
+	lc                *linkSession
+	prepareQuietClose func()
 }
 
 // Config configures an Acceptor. Auth is the app layer's concern — Serve
@@ -437,8 +436,8 @@ func (a *Acceptor) deregisterLink(id string, lc *linkSession) {
 // KickDaemon closes every link currently registered under computeID — the
 // substrate half of a revocation (S3 §8.3). It is a snapshot-then-act: the
 // handle slice is copied under the lock, then each handle is torn down OUTSIDE
-// it (quietStop first — kick is a voluntary teardown, not a death edge — then
-// Close through the existing funnel), so a concurrent runLink deregistration
+// it (seal/join/quiet first — kick is a voluntary teardown, not a death edge —
+// then Close through the existing funnel), so a concurrent runLink deregistration
 // never deadlocks against it. Returns the number of links closed. No
 // generation/tombstone bookkeeping (S-P21 拍定 A): a residual pre-auth
 // connection that has not registered yet is closed by the app-side convergence
@@ -448,7 +447,7 @@ func (a *Acceptor) KickDaemon(computeID string) int {
 	hs := append([]linkHandle(nil), a.links[computeID]...)
 	a.linksMu.Unlock()
 	for _, h := range hs {
-		h.quietStop()
+		h.prepareQuietClose()
 		_ = h.lc.Close()
 	}
 	// Loud on every call (not edge-gated): each call is itself a discrete
@@ -870,13 +869,17 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			a.runtime.DespawnQuiet(inc)
 		}
 	}
+	prepareQuietClose := func() {
+		a.joinActorWorkers(&gate, daemonID, attachHandshakeTimeout)
+		quietStopPorts()
+	}
 
 	// Register this link's Kick handle BEFORE the attach frame is even read (not
 	// only after a successful attach, unlike markAttached/boundID above) — this
 	// closes the half-attach window (§S-P21): a daemon that is pre-authenticated
 	// but has not yet completed its attach handshake is still reachable by
 	// KickDaemon. Deregistered on runLink exit regardless of how it ends.
-	a.registerLink(daemonID, linkHandle{lc: lc, quietStop: quietStopPorts})
+	a.registerLink(daemonID, linkHandle{lc: lc, prepareQuietClose: prepareQuietClose})
 	defer a.deregisterLink(daemonID, lc)
 	// Evict this link from the lane-relay table on teardown (keyed by boundID,
 	// read at defer-run time — pointer-guarded so an overlapping reconnect's
@@ -903,8 +906,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		case <-a.ctx.Done():
 			// Seal first and settle every handshake that already crossed admission.
 			// Only then can the authoritative index snapshot be complete and quiet.
-			a.joinActorWorkers(&gate, daemonID, attachHandshakeTimeout)
-			quietStopPorts()
+			prepareQuietClose()
 			lc.kill("acceptor_closed", a.ctx.Err())
 		case <-reqCtx.Done():
 			lc.kill("accept_request_cancelled", reqCtx.Err())
