@@ -125,13 +125,9 @@ func newProc(cfg Config) actorbase.Proc {
 }
 
 // ObsCheckpointDrop is the diagnostic kind this base PUSHes when a resume-seed
-// persist fails/rejects. agentbase owns this word (producer = word owner); a
-// drop-bucketing consumer takes it by injection, never re-spelling it.
+// persist fails/rejects. agentbase owns this word because the producer owns its
+// diagnostic vocabulary.
 const ObsCheckpointDrop actorrt.ObsKind = "agentbase.checkpoint_drop"
-
-// ObsDropKinds returns every diagnostic kind agentbase publishes, for an
-// assembly root wiring a drop-bucketing consumer.
-func ObsDropKinds() []actorrt.ObsKind { return []actorrt.ObsKind{ObsCheckpointDrop} }
 
 // publishCheckpointDrop surfaces a failed/rejected resume-seed persist on the
 // actor-source obs push (kind agentbase.checkpoint_drop) — the same honest-degrade

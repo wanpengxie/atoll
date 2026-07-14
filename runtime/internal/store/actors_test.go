@@ -341,8 +341,17 @@ func TestApplyMemberTransitions_RemoveEmitsMirror(t *testing.T) {
 	if !ok || rec.IsActive() {
 		t.Fatalf("after remove: ok=%v active=%v want inactive", ok, rec.IsActive())
 	}
-	if n := len(mirrorEventsOf(t, cs.Query, "system.actor.deregistered", string(id))); n != 1 {
+	events := mirrorEventsOf(t, cs.Query, "system.actor.deregistered", string(id))
+	if n := len(events); n != 1 {
 		t.Errorf("deregistered mirrors = %d, want 1", n)
+	} else {
+		var payload map[string]any
+		if err := json.Unmarshal(events[0].Envelope.Payload, &payload); err != nil {
+			t.Fatalf("decode deregistered payload: %v", err)
+		}
+		if len(payload) != 2 || payload["actor_id"] != string(id) || payload["deregistered_at"] != float64(9000) {
+			t.Fatalf("deregistered payload = %#v, want actor_id+deregistered_at only", payload)
+		}
 	}
 }
 

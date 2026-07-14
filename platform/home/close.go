@@ -38,8 +38,8 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 		defer close(h.closeDone)
 		// Publish the lifecycle fence as the first close action. Public mutation
 		// entry points check closed before touching durable state, so no scheduler
-		// handoff or fault checkpoint between close entry and Runtime.Seal can leave
-		// a store-write window open.
+		// handoff or intermediate teardown step before Runtime.Seal can leave a
+		// store-write window open.
 		h.closed.Store(true)
 		var errs []error
 		addErr := func(err error) {
@@ -59,14 +59,7 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 			}()
 			fn()
 		}
-		step := func(name string, fn func()) {
-			guard(name+".checkpoint", func() {
-				if err := h.faults.checkpoint(name); err != nil {
-					errs = append(errs, err)
-				}
-			})
-			guard(name, fn)
-		}
+		step := guard
 		// Step ZERO seals the construction authority immediately after the public
 		// lifecycle fence above.
 		step("close.seal", func() {
@@ -74,7 +67,6 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 				h.channel.Cells().Seal()
 			}
 		})
-		guard("state.closing.checkpoint", func() { _ = h.faults.checkpoint("state.closing") })
 		step("close.reconcile", func() {
 			if h.reconcileStop == nil {
 				return
@@ -145,8 +137,6 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 		if h.engine != nil {
 			leaked += h.engine.Leaked()
 		}
-		_ = h.faults.checkpoint("state.closed")
-		step("close.end", func() {})
 		h.logger.Info("platform.home.closed", "channel", h.channelID, "reason", reason,
 			"cleanup_errors", len(errs), "leaked", leaked, "zombie_total", zombieTotal,
 			"duration", time.Since(started))

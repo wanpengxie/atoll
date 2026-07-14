@@ -347,9 +347,7 @@ func (e *engine) enqueueWork(env *message.Envelope) {
 
 // The engine's diagnostic obs kinds — the vocabulary this Proc底座 PUSHes when
 // a bounded queue overflows or an author#2 closure write faults. actorbase owns
-// these words (the producer is the word owner); any consumer that buckets drops
-// by kind (e.g. the presence fold) takes them by injection, never re-spelling
-// them. ObsDropKinds is the full set an assembly root hands such a consumer.
+// these words because the producer owns its diagnostic vocabulary.
 const (
 	ObsQueueOverflow      actorrt.ObsKind = "actorbase.queue_overflow"
 	ObsRejectLaneOverflow actorrt.ObsKind = "actorbase.reject_lane_overflow"
@@ -361,12 +359,6 @@ const (
 	// counterpart to projectWork's request-side recordDrop.
 	ObsUnmatchedResponse actorrt.ObsKind = "actorbase.unmatched_response"
 )
-
-// ObsDropKinds returns every diagnostic kind actorbase publishes, for an
-// assembly root wiring a drop-bucketing consumer.
-func ObsDropKinds() []actorrt.ObsKind {
-	return []actorrt.ObsKind{ObsQueueOverflow, ObsRejectLaneOverflow, ObsClosureFault, ObsStaleDelivery, ObsUnmatchedResponse}
-}
 
 // recordDrop surfaces an engine-internal drop through the actor's own obs
 // PUSH (no watcher → no-op, per ActorContext.PublishObs's contract).

@@ -82,7 +82,22 @@ func installControlledPresenceFold(h *Home, now *time.Time) {
 	<-h.reconcileDone
 	h.nowMs = func() int64 { return now.UnixMilli() }
 	h.presenceFold = presence.New(nil, func() time.Time { return *now },
-		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, nil, time.Second)
+		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, time.Second)
+}
+
+func TestNoFactoryWarningStateIsPerHome(t *testing.T) {
+	const id actor.ActorID = "agent:missing-factory"
+	var first, second Home
+	if !first.firstNoFactoryWarning(id) || first.firstNoFactoryWarning(id) {
+		t.Fatal("first Home did not preserve one warning per continuous edge")
+	}
+	if !second.firstNoFactoryWarning(id) {
+		t.Fatal("second Home inherited another Home's no-factory edge state")
+	}
+	first.clearNoFactoryWarned(id)
+	if !first.firstNoFactoryWarning(id) {
+		t.Fatal("cleared no-factory edge did not become warnable again")
+	}
 }
 
 // TestPresenceSweep_ClearsBypassDeregOrphan covers the reconciliation backstop

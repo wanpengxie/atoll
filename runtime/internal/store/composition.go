@@ -282,12 +282,12 @@ func (s *compositionStore) RemoveComposition(ctx context.Context, id actor.Actor
 	if err != nil || n == 0 {
 		return false, err
 	}
-	changed, counts, err := s.reg.applyMemberRemoveTx(ctx, tx, storespec.MemberActorRemove{ID: id, At: at})
+	changed, err := s.reg.applyMemberRemoveTx(ctx, tx, storespec.MemberActorRemove{ID: id, At: at})
 	if err != nil {
 		return false, err
 	}
 	if changed {
-		if _, err := appendTx(ctx, tx, actorDeregisteredEnvelope(s.reg.channelID, storespec.MemberActorRemove{ID: id, At: at}, counts), false); err != nil {
+		if _, err := appendTx(ctx, tx, actorDeregisteredEnvelope(s.reg.channelID, storespec.MemberActorRemove{ID: id, At: at}), false); err != nil {
 			return false, err
 		}
 	}

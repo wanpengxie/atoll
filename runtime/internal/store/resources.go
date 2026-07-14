@@ -34,19 +34,12 @@ type resourceRegistry struct {
 
 // clearActorGrantsTx removes only grants whose grantee axis names the actor.
 // Resource ownership and members-scoped grants are orthogonal and survive.
-// Returns RowsAffected (A4/C2 cascade telemetry) — the caller (actors.go's
-// applyMemberRemoveTx) folds this into the deregistration mirror payload's
-// grants_cleared field; store itself still never logs (§0 分工).
-func clearActorGrantsTx(ctx context.Context, tx *sql.Tx, id actor.ActorID) (int64, error) {
-	res, err := tx.ExecContext(ctx, `DELETE FROM resource_grants WHERE grantee_kind='actor' AND grantee=?`, string(id))
+func clearActorGrantsTx(ctx context.Context, tx *sql.Tx, id actor.ActorID) error {
+	_, err := tx.ExecContext(ctx, `DELETE FROM resource_grants WHERE grantee_kind='actor' AND grantee=?`, string(id))
 	if err != nil {
-		return 0, fmt.Errorf("store: actor grants cascade clear %q: %w", id, err)
+		return fmt.Errorf("store: actor grants cascade clear %q: %w", id, err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("store: actor grants cascade clear rows-affected %q: %w", id, err)
-	}
-	return n, nil
+	return nil
 }
 
 func newResourceRegistry(db *sql.DB) *resourceRegistry {

@@ -1,16 +1,13 @@
 package home
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"reflect"
-	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,321 +15,260 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 func lifecycleConfig(t *testing.T, name string) Config {
 	t.Helper()
-	return Config{CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{}, ChannelID: channel.ID("lifecycle-" + name), DBPath: filepath.Join(t.TempDir(), name+".sqlite")}
-}
-
-func closeEvents(events []string) []string {
-	var out []string
-	for _, event := range events {
-		if len(event) >= 6 && event[:6] == "close." {
-			out = append(out, event)
-		}
+	return Config{
+		CompositionResolver: emptyCompositionResolver{},
+		DaemonAuthority:     allowTestDaemonAuthority{},
+		ChannelID:           channel.ID("lifecycle-" + name),
+		DBPath:              filepath.Join(t.TempDir(), name+".sqlite"),
 	}
-	return out
 }
 
-func TestHomeRollbackFailureArmsUseOneCloseCore(t *testing.T) {
+// lifecycleLogHandler exercises slog's real callback boundary. It can hold a
+// lifecycle operation at an observable production event and, separately, model
+// a downstream logger panic. Neither capability is visible to production code.
+type lifecycleLogHandler struct {
+	mu       sync.Mutex
+	seen     map[string]int
+	parkOn   string
+	entered  chan struct{}
+	release  <-chan struct{}
+	parkOnce sync.Once
+	panicOn  map[string]any
+}
+
+func newLifecycleLogHandler() *lifecycleLogHandler {
+	return &lifecycleLogHandler{seen: make(map[string]int)}
+}
+
+func (h *lifecycleLogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *lifecycleLogHandler) Handle(_ context.Context, r slog.Record) error {
+	h.mu.Lock()
+	h.seen[r.Message]++
+	h.mu.Unlock()
+	if r.Message == h.parkOn {
+		h.parkOnce.Do(func() { close(h.entered) })
+		<-h.release
+	}
+	if p, ok := h.panicOn[r.Message]; ok {
+		panic(p)
+	}
+	return nil
+}
+
+func (h *lifecycleLogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *lifecycleLogHandler) WithGroup(string) slog.Handler      { return h }
+
+func (h *lifecycleLogHandler) saw(message string) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.seen[message] > 0
+}
+
+func TestHomeOpenMissingRequiredDBRollsBack(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
-	steps := []string{
-		"construct.open_channel", "construct.ensure_system", "construct.max_seq",
-		"construct.open_scheduler", "activate.channel_start",
-	}
-	for _, step := range steps {
-		t.Run(step, func(t *testing.T) {
-			var events []string
-			var logs bytes.Buffer
-			fault := errors.New("injected " + step)
-			cfg := lifecycleConfig(t, step)
-			cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
-			h, err := openHome(cfg, &homeFaults{
-				fail: map[string]error{step: fault}, record: func(s string) { events = append(events, s) },
-			})
-			if h != nil || !errors.Is(err, fault) {
-				t.Fatalf("Open = (%v, %v)", h, err)
-			}
-			got := closeEvents(events)
-			if len(got) == 0 || got[0] != "close.seal" || got[len(got)-1] != "close.end" {
-				t.Fatalf("rollback did not traverse close core: %v", got)
-			}
-			if text := logs.String(); !strings.Contains(text, "platform.home.rollback") || !strings.Contains(text, "platform.home.closed") {
-				t.Fatalf("rollback observability incomplete: %s", text)
-			}
-		})
+	cfg := lifecycleConfig(t, "missing-db")
+	cfg.MustExistDB = true
+	h, err := Open(cfg)
+	if h != nil || err == nil {
+		t.Fatalf("Open = (%v, %v), want nil home and an error", h, err)
 	}
 }
 
-func TestHomePublishPanicsRollbackAndPreserveOriginal(t *testing.T) {
+func TestHomeLateOpenPanicRollsBackAndPreservesOriginal(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
-	for _, step := range []string{"publish.bind", "publish.sweep", "publish.goroutine_started", "publish.published"} {
-		t.Run(step, func(t *testing.T) {
-			var events []string
-			original := "panic:" + step
-			func() {
-				defer func() {
-					if got := recover(); got != original {
-						t.Fatalf("panic = %v", got)
-					}
-				}()
-				_, _ = openHome(lifecycleConfig(t, step), &homeFaults{
-					panicAt: map[string]any{step: original}, record: func(s string) { events = append(events, s) },
-				})
-			}()
-			got := closeEvents(events)
-			if len(got) == 0 || got[len(got)-1] != "close.end" {
-				t.Fatalf("cleanup incomplete: %v", got)
-			}
-		})
+	cfg := lifecycleConfig(t, "late-open-panic")
+	handler := newLifecycleLogHandler()
+	handler.panicOn = map[string]any{
+		"platform.home.ready":  "ready-panic",
+		"link.acceptor_closed": "cleanup-panic",
 	}
-}
+	cfg.Logger = slog.New(handler)
 
-type lifecycleActor struct{}
-
-func (lifecycleActor) Receive(context.Context, *message.Envelope) error { return nil }
-
-func TestHomeActivateInvariantPanicBeatsCleanupPanic(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: ~5s real-interleaving/goleak-settle test — full gate (make test-full) runs it")
-	}
-	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
-	var h *Home
-	var logs bytes.Buffer
-	original := any(nil)
+	var got any
 	func() {
-		defer func() { original = recover() }()
-		cfg := lifecycleConfig(t, "dual-panic")
-		cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
-		_, _ = openHome(cfg, &homeFaults{
-			created: func(got *Home) { h = got },
-			action: map[string]func(){"activate.channel_start": func() {
-				_, _, err := h.channel.Cells().SpawnIfAbsent(actor.SystemActorID, actor.KindSystem, func(actorrt.Incarnation) actorrt.Actor { return lifecycleActor{} })
-				if err != nil {
-					panic(err)
-				}
-			}},
-			panicAt: map[string]any{"close.delivery": "cleanup-panic"},
-		})
+		defer func() { got = recover() }()
+		_, _ = Open(cfg)
 	}()
-	if original == nil || original == "cleanup-panic" {
-		t.Fatalf("original invariant panic lost: %v", original)
+	if got != "ready-panic" {
+		t.Fatalf("panic = %v, want the original ready panic", got)
 	}
-	if text := logs.String(); !strings.Contains(text, "home.teardown.panic") || !strings.Contains(text, "home.rollback.panic") {
-		t.Fatalf("cleanup panic not attached to logs: %s", text)
+	if !handler.saw("home.teardown.panic") || !handler.saw("home.rollback.panic") {
+		t.Fatal("cleanup panic was not observed while preserving the original panic")
 	}
-	select {
-	case <-h.closeDone:
-	case <-time.After(time.Second):
-		t.Fatal("cleanup panic wedged closeDone")
-	}
-}
 
-func TestHomeRollbackAndNormalCloseHaveSameOrder(t *testing.T) {
-	var normalEvents []string
-	h, err := openHome(lifecycleConfig(t, "normal-order"), &homeFaults{record: func(s string) { normalEvents = append(normalEvents, s) }})
+	// Reopening the same database proves the late rollback released every owned
+	// resource and left the durable genesis seed replayable.
+	cfg.Logger = nil
+	h, err := Open(cfg)
 	if err != nil {
-		t.Fatal(err)
+		t.Fatalf("reopen after rollback: %v", err)
 	}
 	if err := h.Close(); err != nil {
 		t.Fatal(err)
 	}
-	var rollbackEvents []string
-	_, err = openHome(lifecycleConfig(t, "rollback-order"), &homeFaults{
-		fail:   map[string]error{"publish.published": errors.New("rollback")},
-		record: func(s string) { rollbackEvents = append(rollbackEvents, s) },
-	})
-	if err == nil {
-		t.Fatal("faulted Open succeeded")
-	}
-	if got, want := closeEvents(rollbackEvents), closeEvents(normalEvents); !reflect.DeepEqual(got, want) {
-		t.Fatalf("rollback order %v != normal %v", got, want)
-	}
 }
 
-func TestHomeCursorWindowInitialDrainDoesNotLoseRow(t *testing.T) {
-	var h *Home
-	delivered := make(chan storespec.StoredRow, 1)
-	cfg := lifecycleConfig(t, "cursor-window")
-	home, err := openHome(cfg, &homeFaults{
-		created:  func(got *Home) { h = got },
-		delivery: func(row storespec.StoredRow) error { delivered <- row; return nil },
-		action: map[string]func(){"activate.before_pump": func() {
-			_, appendErr := h.cs.Log.Append(context.Background(), &message.Envelope{
-				ID: "window-row", ChannelID: cfg.ChannelID, Kind: message.KindEvent,
-				Type: "test.window", Payload: json.RawMessage(`{}`),
-				Sender:     message.Sender{ID: actor.SystemActorID, Kind: actor.KindSystem},
-				Audience:   message.Audience{actor.SystemActorID},
-				Visibility: message.VisibilitySystem,
-			}, false)
-			if appendErr != nil {
-				panic(appendErr)
-			}
-		}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer home.Close()
-	rows, qerr := home.cs.Query.ReadAfterSeq(context.Background(), 0, 100)
-	if qerr != nil || len(rows) == 0 {
-		t.Fatalf("window row not in store: rows=%d err=%v", len(rows), qerr)
-	}
-	select {
-	case row := <-delivered:
-		if row.Envelope.ID != "window-row" {
-			t.Fatalf("delivered %s", row.Envelope.ID)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("row appended after MaxSeq and before OpenPump was lost")
-	}
-}
-
-func TestHomeSeedSurvivesLaterAssemblyFailureAndReplays(t *testing.T) {
-	db := filepath.Join(t.TempDir(), "seed-replay.sqlite")
-	cfg := Config{CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{}, ChannelID: channel.ID("seed-replay"), DBPath: db}
-	fault := errors.New("after seed")
-	if _, err := openHome(cfg, &homeFaults{fail: map[string]error{"construct.max_seq": fault}}); !errors.Is(err, fault) {
-		t.Fatalf("faulted Open err = %v", err)
+func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
+	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
+	db := filepath.Join(t.TempDir(), "close-window.sqlite")
+	clock := newFakeClock(time.Unix(1_700_000_000, 0))
+	release := make(chan struct{})
+	handler := newLifecycleLogHandler()
+	handler.parkOn = "link.acceptor_closed"
+	handler.entered = make(chan struct{})
+	handler.release = release
+	cfg := Config{
+		CompositionResolver: emptyCompositionResolver{},
+		DaemonAuthority:     allowTestDaemonAuthority{},
+		ChannelID:           channel.ID("lifecycle-close-window"),
+		DBPath:              db,
+		Clock:               clock,
+		Logger:              slog.New(handler),
+		ReconcileInterval:   time.Hour,
 	}
 	h, err := Open(cfg)
 	if err != nil {
-		t.Fatalf("replay Open: %v", err)
-	}
-	if err := h.Close(); err != nil {
 		t.Fatal(err)
 	}
-}
-
-// TestHomeConcurrentCloseShareOneCloseErr locks Close's completion semantics
-// on the NORMAL path (no panic): N concurrent callers all wait for the single
-// teardown run and every one of them receives the same closeErr.
-// TestCloseWindowDueTimerNeitherRevivesNorPoisons is C10's real path: a due
-// identity timer fires INSIDE the close window (runtime sealed, cells already
-// stopped, engine still running — the exact revival window the Seal axiom
-// closes). Two assertions, both ends of the disaster: the fire must NOT
-// revive a new cell into the closing station, and the sealed rejection must
-// stay transient — the timer row survives the shutdown and lands as truth on
-// the next boot (a poison would have deleted a live author's wake forever).
-func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
-	if testing.Short() {
-		t.Skip("short: ~1.2s shutdown-window interleaving — full gate (make test-full) runs it")
-	}
-	db := filepath.Join(t.TempDir(), "c10-window.sqlite")
-	cfg := Config{CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{}, ChannelID: channel.ID("lifecycle-c10"), DBPath: db}
-	var logs bytes.Buffer
-	cfg.Logger = slog.New(slog.NewTextHandler(&logs, nil))
-	parked, release := make(chan struct{}), make(chan struct{})
-	var h *Home
-	h1, err := openHome(cfg, &homeFaults{
-		created: func(got *Home) { h = got },
-		action:  map[string]func(){"close.engine": func() { close(parked); <-release }},
-	})
+	id, err := h.Admit(context.Background(), actor.KindHuman, "close-window-user")
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := h1.Admit(context.Background(), actor.KindHuman, "c10-user")
-	if err != nil {
-		t.Fatal(err)
-	}
-	closeErr := make(chan error, 1)
-	go func() { closeErr <- h1.Close() }()
-	<-parked
-	// The window: sealed + StopAll done (author absent) + engine alive. A timer
-	// due right now fires here — Revive → EnsureLive → SpawnIfAbsent → sealed.
-	if _, err := h.schedMinter.Mint(id).Schedule(context.Background(), schedule.ScheduleReq{
-		Bind: schedule.BindIdentity, FireAt: h.nowMs() + 20,
-		Type: "test.c10.wake", Payload: []byte(`{}`),
-	}); err != nil {
-		t.Fatalf("schedule in close window: %v", err)
-	}
-	deadline := time.Now().Add(900 * time.Millisecond)
-	for time.Now().Before(deadline) {
+	deadline := time.Now().Add(time.Second)
+	for {
 		if _, ok := h.channel.Cells().Stat(id); ok {
-			t.Fatal("due timer fire revived a cell inside the close window")
+			break
 		}
-		time.Sleep(20 * time.Millisecond)
+		if time.Now().After(deadline) {
+			t.Fatal("admitted human was not embodied")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, err := h.schedMinter.Mint(id).Schedule(context.Background(), schedule.ScheduleReq{
+		Bind: schedule.BindIdentity, FireAt: clock.Now().Add(time.Second).UnixMilli(),
+		Type: "test.close-window.wake", Payload: []byte(`{}`),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !h.channel.Cells().DespawnID(id) {
+		t.Fatal("scheduled author was not live before the close-window setup")
+	}
+
+	closeErr := make(chan error, 1)
+	go func() { closeErr <- h.Close() }()
+	select {
+	case <-handler.entered:
+	case <-time.After(time.Second):
+		t.Fatal("Close did not reach the real link teardown boundary")
+	}
+	// closed + Runtime.Seal are already published, while the schedule engine and
+	// stores are still alive. The absent author therefore reaches the real sealed
+	// revival verdict without requiring a source-line hook after StopAll.
+	clock.Advance(time.Second)
+	deadline = time.Now().Add(time.Second)
+	for !handler.saw("platform.revive.runtime_sealed") {
+		if time.Now().After(deadline) {
+			t.Fatal("due timer never exercised sealed revival")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if _, ok := h.channel.Cells().Stat(id); ok {
+		t.Fatal("due timer revived an actor after Home began closing")
 	}
 	close(release)
 	if err := <-closeErr; err != nil {
 		t.Fatal(err)
 	}
-	// The fire must have actually HAPPENED in the window and hit the seal —
-	// otherwise the absence poll above proves nothing (a vacuous pass).
-	if !strings.Contains(logs.String(), "platform.revive.runtime_sealed") {
-		t.Fatal("no revive attempt hit the seal inside the close window — the test never exercised the revival path")
-	}
-	// Reboot the same station: a transient (non-poisoned) row is still there
-	// and the SAME wake must now fire normally and land as truth.
+
+	// A sealed rejection is transient: the durable timer remains and fires after
+	// the station is reopened.
+	cfg.Logger = nil
 	h2, err := Open(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer h2.Close()
-	fireDeadline := time.Now().Add(10 * time.Second)
+	deadline = time.Now().Add(2 * time.Second)
 	for {
 		rows, err := h2.cs.Query.ReadAfterSeq(context.Background(), 0, 1000)
 		if err != nil {
 			t.Fatal(err)
 		}
-		found := false
 		for _, row := range rows {
-			if row.Envelope.Type == "test.c10.wake" {
-				found = true
+			if row.Envelope.Type == "test.close-window.wake" {
+				return
 			}
 		}
-		if found {
-			break
+		if time.Now().After(deadline) {
+			t.Fatal("transiently rejected timer did not fire after reopen")
 		}
-		if time.Now().After(fireDeadline) {
-			t.Fatal("retained timer never fired after reboot — the sealed rejection was not transient")
-		}
-		time.Sleep(50 * time.Millisecond)
+		time.Sleep(time.Millisecond)
 	}
 }
 
-func TestHomeConcurrentCloseShareOneCloseErr(t *testing.T) {
-	fault := errors.New("injected close.stores")
-	h, err := openHome(lifecycleConfig(t, "concurrent-close"), &homeFaults{
-		fail: map[string]error{"close.stores": fault},
-	})
+func TestHomeConcurrentCloseWaitsForOneTeardown(t *testing.T) {
+	release := make(chan struct{})
+	handler := newLifecycleLogHandler()
+	handler.parkOn = "link.acceptor_closed"
+	handler.entered = make(chan struct{})
+	handler.release = release
+	cfg := lifecycleConfig(t, "concurrent-close")
+	cfg.Logger = slog.New(handler)
+	h, err := Open(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	const callers = 8
 	results := make(chan error, callers)
-	for range callers {
+	go func() { results <- h.Close() }()
+	<-handler.entered
+	for range callers - 1 {
 		go func() { results <- h.Close() }()
 	}
+	select {
+	case err := <-results:
+		t.Fatalf("Close returned before the one teardown completed: %v", err)
+	case <-time.After(50 * time.Millisecond):
+	}
+	close(release)
 	for range callers {
 		select {
-		case got := <-results:
-			if !errors.Is(got, fault) {
-				t.Fatalf("concurrent Close err = %v, want the one closeErr", got)
+		case err := <-results:
+			if err != nil {
+				t.Fatalf("Close: %v", err)
 			}
-		case <-time.After(5 * time.Second):
-			t.Fatal("concurrent Close wedged")
+		case <-time.After(time.Second):
+			t.Fatal("concurrent Close caller wedged")
 		}
 	}
 }
 
 func TestHomeClosePanicDoesNotWedgeWaiters(t *testing.T) {
-	parked, release := make(chan struct{}), make(chan struct{})
-	h, err := openHome(lifecycleConfig(t, "close-panic"), &homeFaults{
-		action:  map[string]func(){"close.delivery": func() { close(parked); <-release }},
-		panicAt: map[string]any{"close.delivery": "teardown-panic"},
-	})
+	release := make(chan struct{})
+	handler := newLifecycleLogHandler()
+	handler.parkOn = "link.acceptor_closed"
+	handler.entered = make(chan struct{})
+	handler.release = release
+	handler.panicOn = map[string]any{"link.acceptor_closed": "teardown-panic"}
+	cfg := lifecycleConfig(t, "close-panic")
+	cfg.Logger = slog.New(handler)
+	h, err := Open(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	first := make(chan any, 1)
-	go func() { defer func() { first <- recover() }(); _ = h.Close() }()
-	<-parked
+	go func() {
+		defer func() { first <- recover() }()
+		_ = h.Close()
+	}()
+	<-handler.entered
 	waiter := make(chan error, 1)
 	go func() { waiter <- h.Close() }()
 	close(release)
@@ -340,51 +276,34 @@ func TestHomeClosePanicDoesNotWedgeWaiters(t *testing.T) {
 		t.Fatalf("panic = %v", got)
 	}
 	select {
-	case <-waiter:
+	case err := <-waiter:
+		if err != nil {
+			t.Fatalf("waiting Close: %v", err)
+		}
 	case <-time.After(time.Second):
-		t.Fatal("concurrent Close wedged")
+		t.Fatal("waiting Close wedged after teardown panic")
 	}
 	select {
 	case <-h.closeDone:
 	default:
-		t.Fatal("closeDone not closed")
+		t.Fatal("closeDone was not closed")
 	}
 }
 
-func TestHomeFaultCheckpointOrderAndUnpublishIssuedHandles(t *testing.T) {
-	var events []string
-	h, err := openHome(lifecycleConfig(t, "state-unpublish"), &homeFaults{record: func(s string) { events = append(events, s) }})
+func TestHomeCloseUnpublishesEveryEntryPoint(t *testing.T) {
+	h, err := Open(lifecycleConfig(t, "unpublish"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if err := h.Close(); err != nil {
 		t.Fatal(err)
 	}
-	wantCheckpoints := []string{"state.constructing", "state.activating", "state.published", "state.closing", "state.closed"}
-	var gotCheckpoints []string
-	for _, event := range events {
-		if len(event) >= 6 && event[:6] == "state." {
-			gotCheckpoints = append(gotCheckpoints, event)
-		}
-	}
-	if !reflect.DeepEqual(gotCheckpoints, wantCheckpoints) {
-		t.Fatalf("fault checkpoints = %v, want %v", gotCheckpoints, wantCheckpoints)
-	}
-	// The former "issued HumanHandle refuses after Close" assertion retired with
-	// the door (gateway 期 S5): a subject's post-Close write now fails at the cell
-	// caps' live membrane / a torn-down slot's ErrNoOccupant, and the mutating
-	// entry-point refusals below (Admit/Remove/Restart = ErrClosed) carry the
-	// unpublish 对账 for Home itself. Gateway close-order frame behaviour is
-	// covered in drivers/gateway (TestGatewayCloseSealsArms).
 	if got := h.KickDaemon("none"); got != 0 {
 		t.Fatalf("KickDaemon after Close = %d", got)
 	}
 	if _, _, err := h.PrincipalOf(context.Background(), "issued-human"); err == nil {
 		t.Fatal("read after stores close did not surface an error")
 	}
-	// Unpublish 对账, per-entry (H9): every mutating entry point refuses with
-	// ErrClosed; Subscribe hands back an already-closed channel (a waiter must
-	// wake, not hang); ServeAttach answers 503 through the closed Acceptor.
 	ctx := context.Background()
 	if _, err := h.Admit(ctx, actor.KindHuman, "late-admit"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Admit after Close = %v, want ErrClosed", err)
@@ -403,38 +322,36 @@ func TestHomeFaultCheckpointOrderAndUnpublishIssuedHandles(t *testing.T) {
 	}
 	cancelSub()
 	rec := httptest.NewRecorder()
-	h.ServeAttach(rec, httptest.NewRequest("GET", "/attach", nil), "daemon-late")
+	h.ServeAttach(rec, httptest.NewRequest(http.MethodGet, "/attach", nil), "daemon-late")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("ServeAttach after Close = %d, want 503", rec.Code)
 	}
 }
 
-func TestHomeClosePublishesMutationFenceBeforeSealCheckpoint(t *testing.T) {
-	parked := make(chan struct{})
+func TestHomeClosePublishesMutationFenceBeforeTeardown(t *testing.T) {
 	release := make(chan struct{})
-	h, err := openHome(lifecycleConfig(t, "close-mutation-fence"), &homeFaults{
-		action: map[string]func(){
-			"close.seal": func() {
-				close(parked)
-				<-release
-			},
-		},
-	})
+	handler := newLifecycleLogHandler()
+	handler.parkOn = "link.acceptor_closed"
+	handler.entered = make(chan struct{})
+	handler.release = release
+	cfg := lifecycleConfig(t, "mutation-fence")
+	cfg.Logger = slog.New(handler)
+	h, err := Open(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
 	closed := make(chan error, 1)
 	go func() { closed <- h.Close() }()
-	<-parked
+	<-handler.entered
 
 	if _, _, _, err := h.IntroduceComposition(context.Background(), storespec.CompositionIntroduce{}); !errors.Is(err, ErrClosed) {
-		t.Fatalf("IntroduceComposition during close = %v, want ErrClosed", err)
+		t.Fatalf("IntroduceComposition during Close = %v, want ErrClosed", err)
 	}
 	if err := h.Restart(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
-		t.Fatalf("Restart during close = %v, want ErrClosed", err)
+		t.Fatalf("Restart during Close = %v, want ErrClosed", err)
 	}
 	if err := h.Remove(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
-		t.Fatalf("Remove during close = %v, want ErrClosed", err)
+		t.Fatalf("Remove during Close = %v, want ErrClosed", err)
 	}
 	rows, err := h.cs.Composition.ListComposition(context.Background())
 	if err != nil {
@@ -443,7 +360,6 @@ func TestHomeClosePublishesMutationFenceBeforeSealCheckpoint(t *testing.T) {
 	if len(rows) != 0 {
 		t.Fatalf("close-window mutations persisted rows: %+v", rows)
 	}
-
 	close(release)
 	if err := <-closed; err != nil {
 		t.Fatal(err)

@@ -11,8 +11,6 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-const unknownDropBucket actorrt.ObsKind = "unknown"
-
 type entry struct {
 	val        []byte
 	receivedAt int64
@@ -44,22 +42,19 @@ type Snapshot struct {
 // cell, re-established per incarnation from its binding slot, not a special
 // door-source row that outlived down edges.
 type Fold struct {
-	mu         sync.Mutex
-	latest     map[actor.ActorID]map[actorrt.ObsKind]entry
-	dropped    map[actorrt.ObsKind]uint64
-	loggedDrop map[actorrt.ObsKind]uint64
-	levelKinds map[actorrt.ObsKind]struct{}
-	eventKinds map[actorrt.ObsKind]struct{}
-	clock      func() time.Time
-	grace      time.Duration
-	logger     *slog.Logger
+	mu              sync.Mutex
+	latest          map[actor.ActorID]map[actorrt.ObsKind]entry
+	levelKinds      map[actorrt.ObsKind]struct{}
+	nonLevelLogOnce sync.Once
+	clock           func() time.Time
+	grace           time.Duration
+	logger          *slog.Logger
 }
 
-// New builds a fold. Both vocabularies are injected: levelKinds (obs folded into
-// the latest-value cache) and eventKinds (non-level diagnostic kinds counted per
-// named drop bucket). The fold names no concrete word itself — the producer owns
-// the word, the assembly root hands both sets in (substrate 守结构不守词汇).
-func New(logger *slog.Logger, clock func() time.Time, levelKinds, eventKinds []actorrt.ObsKind, sweepGrace time.Duration) *Fold {
+// New builds a fold for the injected level-kind vocabulary. Non-level obs are
+// deliberately not accumulated into a second truth-like ledger; the first one
+// observed is logged locally at debug level, then the fold stays silent.
+func New(logger *slog.Logger, clock func() time.Time, levelKinds []actorrt.ObsKind, sweepGrace time.Duration) *Fold {
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
 	}
@@ -70,23 +65,17 @@ func New(logger *slog.Logger, clock func() time.Time, levelKinds, eventKinds []a
 		sweepGrace = 30 * time.Second
 	}
 	levels := make(map[actorrt.ObsKind]struct{}, len(levelKinds))
-	events := make(map[actorrt.ObsKind]struct{}, len(eventKinds))
-	dropped := make(map[actorrt.ObsKind]uint64, len(levelKinds)+len(eventKinds)+1)
 	for _, kind := range levelKinds {
 		levels[kind] = struct{}{}
-		dropped[kind] = 0
 	}
-	for _, kind := range eventKinds {
-		events[kind] = struct{}{}
-		dropped[kind] = 0
-	}
-	dropped[unknownDropBucket] = 0
-	return &Fold{latest: map[actor.ActorID]map[actorrt.ObsKind]entry{}, dropped: dropped, loggedDrop: map[actorrt.ObsKind]uint64{}, levelKinds: levels, eventKinds: events, clock: clock, grace: sweepGrace, logger: logger}
+	return &Fold{latest: map[actor.ActorID]map[actorrt.ObsKind]entry{}, levelKinds: levels, clock: clock, grace: sweepGrace, logger: logger}
 }
 
 func (f *Fold) OnObs(_ context.Context, id actor.ActorID, gen actorrt.Incarnation, kind actorrt.ObsKind, val actorrt.ObsValue) {
 	if !f.isLevel(kind) {
-		f.countDrop(kind)
+		f.nonLevelLogOnce.Do(func() {
+			f.logger.Debug("presence.non_level_ignored", "kind", string(kind))
+		})
 		return
 	}
 	f.put(id, kind, val, gen)
@@ -113,26 +102,6 @@ func (f *Fold) put(id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue,
 func (f *Fold) isLevel(kind actorrt.ObsKind) bool {
 	_, ok := f.levelKinds[kind]
 	return ok
-}
-
-func (f *Fold) countDrop(kind actorrt.ObsKind) {
-	f.mu.Lock()
-	if _, known := f.eventKinds[kind]; known {
-		f.dropped[kind]++
-	} else {
-		f.dropped[unknownDropBucket]++
-	}
-	f.mu.Unlock()
-}
-
-func (f *Fold) DroppedCounts() map[actorrt.ObsKind]uint64 {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := make(map[actorrt.ObsKind]uint64, len(f.dropped))
-	for kind, count := range f.dropped {
-		out[kind] = count
-	}
-	return out
 }
 
 func (f *Fold) Forget(id actor.ActorID) {
@@ -186,19 +155,7 @@ func (f *Fold) Sweep(keep func(actor.ActorID) bool) int {
 			delete(f.latest, id)
 		}
 	}
-	changedDrops := map[actorrt.ObsKind]uint64{}
-	for kind, count := range f.dropped {
-		if count != f.loggedDrop[kind] {
-			changedDrops[kind] = count
-			f.loggedDrop[kind] = count
-		}
-	}
 	f.mu.Unlock()
-	if len(changedDrops) > 0 {
-		// Sweep cadence is the rate limiter: the hot OnObs path only increments
-		// bounded counters and never logs.
-		f.logger.Debug("presence.non_level_dropped", "counts", changedDrops)
-	}
 	return removed
 }
 
@@ -222,13 +179,6 @@ type View struct {
 
 func NewView(fold *Fold, runtime *actorrt.Runtime, registry storespec.Registry) View {
 	return View{fold: fold, runtime: runtime, registry: registry}
-}
-
-// DroppedCounts projects the fold's drop ledger through the read face — the
-// reader DroppedCounts was minted for (law-of-loudness accounting: an event
-// the fold refused must stay countable, purity v3 C7).
-func (v View) DroppedCounts() map[actorrt.ObsKind]uint64 {
-	return v.fold.DroppedCounts()
 }
 
 // Snapshot physically copies fold state before reading runtime and registry.

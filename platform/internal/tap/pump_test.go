@@ -75,6 +75,41 @@ func TestOpenPumpCloseReturnsSilent(t *testing.T) {
 	}
 }
 
+func TestOpenPumpInitialDrainCoversCursorSubscribeWindow(t *testing.T) {
+	var rows []storespec.StoredRow
+	q := pumpQuery{read: func(_ context.Context, after int64, _ int) ([]storespec.StoredRow, error) {
+		var out []storespec.StoredRow
+		for _, row := range rows {
+			if row.Seq > after {
+				out = append(out, row)
+			}
+		}
+		return out, nil
+	}}
+	from, err := q.MaxSeq(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The commit lands after the caller anchors its cursor but before OpenPump
+	// subscribes. No notification is sent: the pump's own initial drain is the
+	// mechanism that must cover this window.
+	rows = append(rows, storespec.StoredRow{Seq: from + 1})
+	handled := make(chan int64, 1)
+	p := OpenPump(NewSignal(), q, from, func(row storespec.StoredRow) error {
+		handled <- row.Seq
+		return nil
+	}, nil)
+	defer p.Close()
+	select {
+	case got := <-handled:
+		if got != from+1 {
+			t.Fatalf("handled seq = %d, want %d", got, from+1)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("initial drain lost the row committed before subscription")
+	}
+}
+
 func TestOpenPumpCloseBoundsReaderIgnoringContext(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})

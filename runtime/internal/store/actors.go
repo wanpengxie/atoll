@@ -328,11 +328,7 @@ func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int
 	if err := clearTimersTx(ctx, tx, id); err != nil {
 		return err
 	}
-	// Cascade counts have no sink on this entry point (Deregister writes no
-	// mirror event and has no production caller — see applyMemberRemoveTx
-	// below for the entry point that actually surfaces them); discarding
-	// here rather than half-wiring a count nothing reads.
-	if _, err := clearActorGrantsTx(ctx, tx, id); err != nil {
+	if err := clearActorGrantsTx(ctx, tx, id); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -425,14 +421,14 @@ func (r *actorRegistry) ApplyMemberTransitions(
 		if remove.At == 0 {
 			return fmt.Errorf("store: actor member remove %q missing timestamp", remove.ID)
 		}
-		changed, counts, err := r.applyMemberRemoveTx(ctx, tx, remove)
+		changed, err := r.applyMemberRemoveTx(ctx, tx, remove)
 		if err != nil {
 			return err
 		}
 		if !changed {
 			continue
 		}
-		env := actorDeregisteredEnvelope(r.channelID, remove, counts)
+		env := actorDeregisteredEnvelope(r.channelID, remove)
 		if _, err := appendTx(ctx, tx, env, false); err != nil {
 			return fmt.Errorf("store: actor deregistered mirror %q: %w", remove.ID, err)
 		}
@@ -504,19 +500,7 @@ func nullableBinding(binding actor.Binding) any {
 	return string(binding)
 }
 
-// cascadeCounts is the rows-affected tally of a deregistration's three
-// cascade deletes (actor-scoped state / pending timers / actor-grantee
-// grants) — store-internal telemetry-plumbing only, never a truth type: it
-// rides the actorDeregisteredEnvelope mirror payload as three plain int
-// fields (§0: store package itself never logs; platform/home/remove.go is
-// the caller-side slog seam).
-type cascadeCounts struct {
-	StateCleared  int64
-	TimersCleared int64
-	GrantsCleared int64
-}
-
-func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, remove storespec.MemberActorRemove) (bool, cascadeCounts, error) {
+func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, remove storespec.MemberActorRemove) (bool, error) {
 	// The unguarded form is the product-level deregistration (identity removal
 	// is host-agnostic). A non-empty ExpectedHost narrows the arm to the
 	// attach-reconcile entry point: the row must STILL be placed on that host,
@@ -531,7 +515,7 @@ func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, rem
 	}
 	res, err := tx.ExecContext(ctx, query, args...)
 	if err != nil {
-		return false, cascadeCounts{}, fmt.Errorf("store: actor member deregister %q: %w", remove.ID, err)
+		return false, fmt.Errorf("store: actor member deregister %q: %w", remove.ID, err)
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
@@ -539,48 +523,27 @@ func (r *actorRegistry) applyMemberRemoveTx(ctx context.Context, tx *sql.Tx, rem
 		// falling into the no-op branch would let the enclosing tx COMMIT a
 		// deregistered_at that took effect while skipping the state/timer
 		// cascade and the mirror event — a silently half-applied removal.
-		return false, cascadeCounts{}, fmt.Errorf("store: actor member deregister rows-affected %q: %w", remove.ID, err)
+		return false, fmt.Errorf("store: actor member deregister rows-affected %q: %w", remove.ID, err)
 	}
 	if n != 1 {
 		// Already-deregistered / missing member: idempotent no-op, no cascade (a
 		// re-run must not re-clear).
-		return false, cascadeCounts{}, nil
-	}
-	// Cascade telemetry (A4/C2): clearActorScopedTx/clearTimersTx live in
-	// state.go/timers.go beside their locus's other SQL (one-locus-one-
-	// function, see their doc comments) and their signatures stay
-	// error-only — a pre-delete COUNT(*) here, in the same tx and over the
-	// identical predicate, gets the row tally without duplicating either
-	// locus's DELETE statement or touching those files. Same connection,
-	// same tx: no concurrent writer can land between the COUNT and the
-	// DELETE that follows.
-	var counts cascadeCounts
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM actor_state WHERE owner_id=?`, string(remove.ID),
-	).Scan(&counts.StateCleared); err != nil {
-		return false, cascadeCounts{}, fmt.Errorf("store: actor_state cascade count %q: %w", remove.ID, err)
-	}
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM timers WHERE author_id=?`, string(remove.ID),
-	).Scan(&counts.TimersCleared); err != nil {
-		return false, cascadeCounts{}, fmt.Errorf("store: timers cascade count %q: %w", remove.ID, err)
+		return false, nil
 	}
 	// Deregistration took effect this tx — cascade-clear the actor's state in the
 	// same tx (scope law), atomic with the deregistered_at write.
 	if err := clearActorScopedTx(ctx, tx, remove.ID); err != nil {
-		return false, cascadeCounts{}, err
+		return false, err
 	}
 	// Same tx: cascade-clear its identity-level pending timers, parallel to the
 	// state cascade above.
 	if err := clearTimersTx(ctx, tx, remove.ID); err != nil {
-		return false, cascadeCounts{}, err
+		return false, err
 	}
-	grantsCleared, err := clearActorGrantsTx(ctx, tx, remove.ID)
-	if err != nil {
-		return false, cascadeCounts{}, err
+	if err := clearActorGrantsTx(ctx, tx, remove.ID); err != nil {
+		return false, err
 	}
-	counts.GrantsCleared = grantsCleared
-	return true, counts, nil
+	return true, nil
 }
 
 // Mirror event IDs are random uuids, the same as every ordinary envelope —
@@ -617,17 +580,10 @@ func actorRegisteredEnvelope(channelID channel.ID, add storespec.MemberActorAdd)
 	}
 }
 
-func actorDeregisteredEnvelope(channelID channel.ID, remove storespec.MemberActorRemove, counts cascadeCounts) *message.Envelope {
+func actorDeregisteredEnvelope(channelID channel.ID, remove storespec.MemberActorRemove) *message.Envelope {
 	payload, _ := json.Marshal(map[string]any{
 		"actor_id":        remove.ID,
 		"deregistered_at": remove.At,
-		// Cascade telemetry (A4/C2, additive payload fields — same envelope
-		// shape, no new envelope/reserved type): how many rows this
-		// deregistration's state/timer/grant cascade actually cleared, so a
-		// truth-log reader can see cascade blast radius without a slog line.
-		"state_cleared":  counts.StateCleared,
-		"timers_cleared": counts.TimersCleared,
-		"grants_cleared": counts.GrantsCleared,
 	})
 	return &message.Envelope{
 		ID:         message.ID(uuid.NewString()), // random, same law as registered (see above)

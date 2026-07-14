@@ -105,14 +105,6 @@ type Config struct {
 	// re-resolves that principal's WHOLE channel set (subscriptions + presence). nil →
 	// no poke (the resolver's每批 recheck + sweep remain the correctness正门).
 	OnMembershipChange func(principal string)
-	// EventDropKinds is the producer-owned vocabulary of non-level diagnostic obs
-	// kinds the presence fold buckets per name (queue overflow, closure fault,
-	// checkpoint drop, …). The substrate names no such word: it stays blind to the
-	// agent subsystem (archtest TestSubstrateBlindToAgent), so the assembly root
-	// that CAN see every producer (app → lib/actorbase.ObsDropKinds ∪ agent/base.
-	// ObsDropKinds) hands the union in. Empty → every drop lands in the "unknown"
-	// bucket (honest, just uninformative).
-	EventDropKinds []actorrt.ObsKind
 }
 
 type PlanProvider interface {
@@ -201,6 +193,10 @@ type Home struct {
 	// launches), so it needs no lock.
 	desired          actorrt.DesiredSource
 	prevEagerDesired map[actor.ActorID]desiredIncarnation
+	// noFactoryWarned is this Home's edge-only log state: one warning per
+	// continuously unresolved actor, cleared when resolution succeeds or the
+	// actor leaves the reconcile set. It is not shared across channel homes.
+	noFactoryWarned map[actor.ActorID]struct{}
 	// builtEpoch is an incarnation account, not desired truth. It is updated
 	// only after this ring successfully builds a body; missing or mismatched
 	// entries force a quiet replace on the next sweep.
@@ -235,17 +231,6 @@ type Home struct {
 	reviveLogAt   map[actor.ActorID]time.Time
 	reviveBackoff map[actor.ActorID]reviveBackoffEntry
 
-	// reviverStraddleHook is a test-only seam (nil in production): see its call
-	// site in homeReviver.EnsureLive.
-	reviverStraddleHook func()
-
-	// reconcileBuildHook is a test-only seam (nil in production): fired in
-	// reconcileActivation's 补臂 AFTER a real SpawnIfAbsent build lands but BEFORE
-	// verifyPostBuild runs — the window a concurrent Home.Remove must be parked in
-	// to prove the ring's own post-build straddle recheck self-undoes (mirror of
-	// reviverStraddleHook for the reviver arm).
-	reconcileBuildHook func(actor.ActorID)
-
 	// closed is set true at the very START of Close (before any teardown step), the
 	// authoritative "this home is shutting down" flag every mutating entry point
 	// checks. Close cannot JOIN the gateway session goroutines in the app layer
@@ -257,30 +242,4 @@ type Home struct {
 	closeOnce sync.Once
 	closeDone chan struct{}
 	closeErr  error
-	faults    *homeFaults
-}
-
-type homeFaults struct {
-	fail     map[string]error
-	panicAt  map[string]any
-	record   func(string)
-	action   map[string]func()
-	created  func(*Home)
-	delivery func(storespec.StoredRow) error
-}
-
-func (f *homeFaults) checkpoint(name string) error {
-	if f == nil {
-		return nil
-	}
-	if f.record != nil {
-		f.record(name)
-	}
-	if action := f.action[name]; action != nil {
-		action()
-	}
-	if p, ok := f.panicAt[name]; ok {
-		panic(p)
-	}
-	return f.fail[name]
 }

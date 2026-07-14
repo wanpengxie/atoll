@@ -97,15 +97,6 @@ func writeStreamHeader(w io.Writer, k streamKind) error {
 // gone (its control substream never established, or already torn down).
 var errLinkClosed = errors.New("link: closed")
 
-// yamuxKeepAliveInterval overrides yamux's own DefaultConfig KeepAliveInterval
-// (30s) when non-zero (nanoseconds, atomic — linkYamuxConfig reads it from
-// whichever goroutine builds a session). Production never sets it — this
-// exists SOLELY so a test can speed yamux's real keepalive traffic up
-// (export_test.go's SetYamuxKeepAliveIntervalForTest) to prove the Lease's TTL
-// judgment survives independently of it, without waiting out a real 30s
-// cadence.
-var yamuxKeepAliveIntervalNS atomic.Int64
-
 // linkYamuxConfig is the top-level session's config. EnableKeepAlive stays at
 // DefaultConfig's true.
 //
@@ -128,9 +119,6 @@ var yamuxKeepAliveIntervalNS atomic.Int64
 func linkYamuxConfig() *yamux.Config {
 	cfg := yamux.DefaultConfig()
 	cfg.LogOutput = io.Discard // route yamux's own logging away from stderr
-	if ns := yamuxKeepAliveIntervalNS.Load(); ns > 0 {
-		cfg.KeepAliveInterval = time.Duration(ns)
-	}
 	return cfg
 }
 

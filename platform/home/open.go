@@ -39,9 +39,7 @@ const reconcileInterval = 30 * time.Second
 //	signal -> stores(OnCommit=signal.Notify) -> harness -> channelkit(registers
 //	the sysactor factory; Start births it against the live runtime) ->
 //	delivery tap -> link acceptor.
-func Open(cfg Config) (*Home, error) { return openHome(cfg, nil) }
-
-func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
+func Open(cfg Config) (_ *Home, retErr error) {
 	logger := cfg.Logger
 	if logger == nil {
 		logger = slog.New(slog.DiscardHandler)
@@ -55,11 +53,7 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	if cfg.DaemonAuthority == nil {
 		return nil, fmt.Errorf("platform: DaemonAuthority required")
 	}
-	h := &Home{channelID: cfg.ChannelID, logger: logger, closeDone: make(chan struct{}), faults: faults}
-	if faults != nil && faults.created != nil {
-		faults.created(h)
-	}
-	_ = faults.checkpoint("state.constructing")
+	h := &Home{channelID: cfg.ChannelID, logger: logger, closeDone: make(chan struct{})}
 	defer func() {
 		if p := recover(); p != nil {
 			func() {
@@ -93,9 +87,6 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	//    instead of only the harness path being wrapped.
 	signal := tap.NewSignal()
 	h.signal = signal
-	if err := faults.checkpoint("construct.open_channel"); err != nil {
-		return nil, fmt.Errorf("platform: open channel store: %w", err)
-	}
 
 	// 2. Open channel stores (substrate), wiring the commit signal as the store's
 	//    OnCommit. Now any durable append — request or control-plane — wakes the
@@ -146,9 +137,6 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	//    stays strict (a duplicate is an error, locked by the store's
 	//    coverage test); the idempotent seed lives here at the genesis call site
 	//    (guard the idempotency at the platform bootstrap call site — do not relax substrate).
-	if err := faults.checkpoint("construct.ensure_system"); err != nil {
-		return nil, fmt.Errorf("platform: register system actor: %w", err)
-	}
 	// The genesis seed is the system member's ONE admission — put it on the
 	// record through the same telemetry point Admit uses (census parity: every
 	// membership entry leaves a trace). The idempotent re-ensure of every later
@@ -160,11 +148,10 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 			"actor", string(actor.SystemActorID), "kind", string(actor.KindSystem), "principal", "")
 	}
 
-	// 5. Presence fold: mechanism-only latest-value cache. Both vocabularies are
-	// an assembly concern: the level-kind set (folded testimony) and the injected
-	// event-drop-kind set (producer-owned diagnostic buckets, see Config).
+	// 5. Presence fold: mechanism-only latest-value cache. The level-kind set is
+	// an assembly concern; non-level diagnostics are not accumulated here.
 	presenceFold := presence.New(logger, clock,
-		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, cfg.EventDropKinds, sweepEvery)
+		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, sweepEvery)
 
 	// 6. channelkit: actorrt runtime + sysactor + death-edge wiring. The system
 	//    cell is built against the LIVE runtime (factory) — its liveness Stat seam
@@ -238,17 +225,11 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	// 7. Build the delivery tap: a Pump over the Signal-fed Deliverer. cursor start
 	//    = current MaxSeq (mailbox semantics: only new commits). DeliverResult
 	//    lands here as structured per-audience logs.
-	if err := faults.checkpoint("construct.max_seq"); err != nil {
-		return nil, fmt.Errorf("platform: read max seq: %w", err)
-	}
 	from, err := cs.Query.MaxSeq(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("platform: read max seq: %w", err)
 	}
 	deliver := deliveryHandle(channel.Deliverer(), cfg.ChannelID, logger)
-	if faults != nil && faults.delivery != nil {
-		deliver = faults.delivery
-	}
 
 	// 8. Register the device-presence fold once for the runtime population. Every
 	//    actor's obs wire naturally feeds this single fanout subscription; attach
@@ -275,6 +256,7 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	h.factories = view
 	h.desired = view
 	h.prevEagerDesired = map[actor.ActorID]desiredIncarnation{}
+	h.noFactoryWarned = map[actor.ActorID]struct{}{}
 	h.builtEpoch = map[actor.ActorID]int64{}
 	h.portIndex = map[actor.ActorID]homePortEntry{}
 	h.systemPen = systemPen
@@ -296,9 +278,6 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	//     always-on set — and append has no backfill, so the wake must be revivable
 	//     from the first instant.
 	rt := channel.Cells()
-	if err := faults.checkpoint("construct.open_scheduler"); err != nil {
-		return nil, fmt.Errorf("platform: open scheduler: %w", err)
-	}
 	schedMinter, engine, err := runtime.OpenScheduler(cs, schedule.AssemblyDeps{
 		Fire:   fireSink{minter: minter, registry: cs.Registry, rt: rt, chID: cfg.ChannelID},
 		Host:   rt,
@@ -349,25 +328,15 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	// 12. Activate: construct is complete (every fallible preparation done, all
 	//     ownership already in h) — start the components: channel cells, the
 	//     schedule engine, then the delivery pump.
-	_ = faults.checkpoint("state.activating")
-	if err := faults.checkpoint("activate.channel_start"); err != nil {
-		return nil, fmt.Errorf("platform: start channel: %w", err)
-	}
 	if err := channel.Start(); err != nil {
 		return nil, fmt.Errorf("platform: start channel: %w", err)
 	}
 	engine.Start()
-	if err := faults.checkpoint("activate.before_pump"); err != nil {
-		return nil, err
-	}
 	h.delivery = tap.OpenPump(signal, cs.Query, from, deliver, logger)
 
 	// Close the late-binding window (see step 2's lateAcc note): every
 	// file-kind placement decision from this instant on can actually route an
 	// AllocRequest / see attached daemons as storage-mount candidates.
-	if err := faults.checkpoint("publish.bind"); err != nil {
-		return nil, err
-	}
 	lateAcc.bind(links)
 
 	// 13. Reconcilers (level backstops). Run one sweep of EACH at startup —
@@ -377,9 +346,6 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 	//     low-frequency ticker keeps both as the safety net for any lost death edge
 	//     / intent change. The death edge (OnDown) remains the lossy fast-path for
 	//     closure. Step order is fixed inside reconcileSweep (see its head).
-	if err := faults.checkpoint("publish.sweep"); err != nil {
-		return nil, err
-	}
 	h.reconcileSweep(ctx)
 	reconcileCtx, reconcileStop := context.WithCancel(context.Background())
 	reconcileDone := make(chan struct{})
@@ -402,13 +368,6 @@ func openHome(cfg Config, faults *homeFaults) (_ *Home, retErr error) {
 			}
 		}
 	}()
-	if err := faults.checkpoint("publish.goroutine_started"); err != nil {
-		return nil, err
-	}
-	_ = faults.checkpoint("state.published")
-	if err := faults.checkpoint("publish.published"); err != nil {
-		return nil, err
-	}
 	logger.Info("platform.home.ready", "channel", string(cfg.ChannelID))
 	return h, nil
 }

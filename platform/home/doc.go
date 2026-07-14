@@ -23,7 +23,7 @@
 //
 // # File map
 //
-// home.go (types + checkpoint), open.go (Open), reconcile.go (activation
+// home.go (types), open.go (Open), reconcile.go (activation
 // reconcile ring + sweep), census.go (Admit/PrincipalOf/ResolvePrincipal),
 // control.go (CancelRequest/KickDaemon/ServeAttach/Subscribe), close.go
 // (Close), view.go (View), remove.go (Remove), expiry.go (deadline-closure

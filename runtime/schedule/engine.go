@@ -79,7 +79,7 @@ type Engine struct {
 	// goroutine (fireDue/nextFireAt never run concurrently with themselves),
 	// so neither needs mu.
 	storeErr  storeFault
-	transient map[transientKey]int64
+	transient map[transientKey]struct{}
 }
 
 // storeFault is the run loop's edge-dedup state for a store-backed query or
@@ -135,7 +135,7 @@ func New(deps Deps) (Minter, *Engine, error) {
 		stop:      make(chan struct{}),
 		done:      make(chan struct{}),
 		closeDone: make(chan struct{}),
-		transient: make(map[transientKey]int64),
+		transient: make(map[transientKey]struct{}),
 	}
 	e.ctx, e.cancelRun = context.WithCancel(context.Background())
 	return &minter{engine: e}, e, nil
@@ -676,22 +676,23 @@ func (e *Engine) noteStoreRecovered(now time.Time, kind string) {
 // id) — the run loop's other P3 edge state, for the three FireSink/Reviver
 // branches that only ever leave a comment ("retry next tick") today: the
 // first occurrence for an id logs Warn loud; every subsequent consecutive
-// occurrence for the same id is counted silently (no log) until
+// occurrence for the same id is remembered silently (no count, no log) until
 // clearTransient resets it on recovery, reject-disposal, or removal from
 // the due set.
 func (e *Engine) noteTransient(kind, id string, timerID TimerID, author actor.ActorID, err error) {
 	key := transientKey{kind: kind, id: id}
-	e.transient[key]++
-	if e.transient[key] == 1 {
-		e.deps.Logger.Warn("schedule."+kind+"_transient",
-			"timer_id", string(timerID),
-			"author", string(author),
-			"err", err,
-		)
+	if _, seen := e.transient[key]; seen {
+		return
 	}
+	e.transient[key] = struct{}{}
+	e.deps.Logger.Warn("schedule."+kind+"_transient",
+		"timer_id", string(timerID),
+		"author", string(author),
+		"err", err,
+	)
 }
 
-// clearTransient resets the consecutive-transient counter for (kind, id) —
+// clearTransient resets the consecutive-transient marker for (kind, id) —
 // called whenever the id resolves (success, reject-disposal, or drop) so a
 // resolved condition never keeps counting toward a summary that will never
 // come.

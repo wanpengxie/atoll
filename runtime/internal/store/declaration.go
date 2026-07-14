@@ -143,12 +143,12 @@ func (s *compositionStore) ApplyComputeDeclaration(
 		switch {
 		case !compOK && reg.active && reg.host == in.DaemonID:
 			remove := storespec.MemberActorRemove{ID: d.ActorID, ExpectedHost: in.DaemonID, At: in.At}
-			changed, counts, err := s.reg.applyMemberRemoveTx(ctx, tx, remove)
+			changed, err := s.reg.applyMemberRemoveTx(ctx, tx, remove)
 			if err != nil {
 				return storespec.ComputeDeclarationResult{}, err
 			}
 			if changed {
-				if _, err := appendTx(ctx, tx, actorDeregisteredEnvelope(s.reg.channelID, remove, counts), false); err != nil {
+				if _, err := appendTx(ctx, tx, actorDeregisteredEnvelope(s.reg.channelID, remove), false); err != nil {
 					return storespec.ComputeDeclarationResult{}, err
 				}
 				appended++

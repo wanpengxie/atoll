@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -46,6 +47,123 @@ func (r *compositionActivationResolver) BuildClass(_ channel.ID, _ actor.ActorID
 		return platform.ActorFactory{}, false
 	}
 	return r.factory(), true
+}
+
+// buildWindowResolver mutates durable membership from the real composition
+// resolver boundary. activateOne resolves the factory after its first registry
+// read and before SpawnIfAbsent publishes the body, so the selected resolution
+// call exercises the complete pre-read/build/post-read window without a
+// production test hook.
+type buildWindowResolver struct {
+	onResolve func()
+	resolveAt int32
+	resolves  atomic.Int32
+}
+
+func (r *buildWindowResolver) factory() platform.ActorFactory {
+	return platform.ActorFactory{Proc: actorbase.Def{New: func() (actorbase.Proc, error) {
+		return func(sys actorbase.Sys) error {
+			<-sys.Life().Done()
+			return nil
+		}, nil
+	}}}
+}
+
+func (r *buildWindowResolver) ResolveComposition(_ context.Context, _ channel.ID, row storespec.CompositionRecord) (platform.ActorDecl, bool, error) {
+	if row.DeclID != "decl:build-window" {
+		return platform.ActorDecl{}, false, nil
+	}
+	if r.resolves.Add(1) == r.resolveAt && r.onResolve != nil {
+		r.onResolve()
+	}
+	return platform.ActorDecl{ID: row.InstanceID, Kind: actor.KindAgent, Factory: r.factory()}, true, nil
+}
+
+func (r *buildWindowResolver) BuildClass(_ channel.ID, _ actor.ActorID, class string, _ json.RawMessage) (platform.ActorFactory, bool) {
+	if class != "build-window" {
+		return platform.ActorFactory{}, false
+	}
+	return r.factory(), true
+}
+
+func openBuildWindowHome(t *testing.T, name string, resolver *buildWindowResolver) *Home {
+	t.Helper()
+	h, err := Open(Config{
+		ChannelID:           channel.ID(name),
+		DBPath:              filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver: resolver,
+		DaemonAuthority:     allowTestDaemonAuthority{},
+		ReconcileInterval:   time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	return h
+}
+
+func introduceBuildWindowComposition(t *testing.T, h *Home, principal string) storespec.CompositionRecord {
+	t.Helper()
+	record, _, _, err := h.cs.Composition.IntroduceComposition(context.Background(), storespec.CompositionIntroduce{
+		DeclID: "decl:build-window", Principal: principal, Class: "build-window",
+		Placement: storespec.PlacementServer, Kind: actor.KindAgent, At: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return record
+}
+
+func TestHomeReviverBuildWindowRemoveSelfUndoes(t *testing.T) {
+	ctx := context.Background()
+	resolver := &buildWindowResolver{resolveAt: 1}
+	h := openBuildWindowHome(t, "reviver-build-window", resolver)
+	record := introduceBuildWindowComposition(t, h, "reviver-build-window")
+	if _, live := h.channel.Cells().CurrentIncarnation(record.InstanceID); live {
+		t.Fatal("precondition: composition was embodied before the test drove revival")
+	}
+
+	var removeErr error
+	resolver.onResolve = func() { removeErr = h.Remove(ctx, record.InstanceID) }
+	err := (homeReviver{h: h}).EnsureLive(ctx, record.InstanceID)
+	if removeErr != nil {
+		t.Fatalf("Remove inside build window: %v", removeErr)
+	}
+	var rejected schedule.ReviveRejected
+	if !errors.As(err, &rejected) || rejected.Reason != "not_a_member" {
+		t.Fatalf("EnsureLive after window Remove = %v, want not_a_member", err)
+	}
+	if resolver.resolves.Load() != 1 {
+		t.Fatalf("factory resolutions = %d, want the post-lookup resolution", resolver.resolves.Load())
+	}
+	if _, live := h.channel.Cells().CurrentIncarnation(record.InstanceID); live {
+		t.Fatal("reviver left a body live after membership disappeared during build")
+	}
+}
+
+func TestReconcileActivationBuildWindowRemoveSelfUndoes(t *testing.T) {
+	ctx := context.Background()
+	resolver := &buildWindowResolver{resolveAt: 2}
+	h := openBuildWindowHome(t, "reconcile-build-window", resolver)
+	record := introduceBuildWindowComposition(t, h, "reconcile-build-window")
+	if _, live := h.channel.Cells().CurrentIncarnation(record.InstanceID); live {
+		t.Fatal("precondition: composition was embodied before the test drove reconcile")
+	}
+	var removeErr error
+	resolver.onResolve = func() { removeErr = h.Remove(ctx, record.InstanceID) }
+	h.reconcileActivation(ctx)
+	if removeErr != nil {
+		t.Fatalf("Remove inside build window: %v", removeErr)
+	}
+	if resolver.resolves.Load() != 2 {
+		t.Fatalf("factory resolutions = %d, want desired read plus post-lookup resolution", resolver.resolves.Load())
+	}
+	if _, live := h.channel.Cells().CurrentIncarnation(record.InstanceID); live {
+		t.Fatal("reconcile left a body live after membership disappeared during build")
+	}
+	if _, managed := h.prevEagerDesired[record.InstanceID]; managed {
+		t.Fatal("reconcile retained the removed id in its managed set")
+	}
 }
 
 func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {

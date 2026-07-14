@@ -3,7 +3,6 @@ package home
 import (
 	"context"
 	"errors"
-	"sync"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
@@ -17,32 +16,27 @@ import (
 // Home.reviveLogAt).
 const reviveLogThrottle = 30 * time.Second
 
-// noFactoryWarned edge-dedups the platform.reconcile.no_factory Warn (B3): an
-// actor ID is minted once per lifetime (never reused — see identity-instance-
-// spec), so a package-level set keyed by ActorID is safe across every Home
-// without threading a new field through the Home struct (out of this file's
-// change scope). Guarded by noFactoryWarnedMu since multiple Homes' reconcile
-// ticks run concurrently. Entry is set on first no_factory observation for an
-// id and cleared the moment that id resolves to any other activation verdict
-// or stops being managed by this ring — so steady-state no_factory (soak's
-// 74x repeat) goes silent after the first Warn, without ever going fully mute
-// across restarts (fresh process = fresh empty set = first sighting warns).
-var (
-	noFactoryWarnedMu sync.Mutex
-	noFactoryWarned   = make(map[actor.ActorID]struct{})
-)
-
 type desiredIncarnation struct {
 	Kind  actor.Kind
 	Epoch int64
 }
 
-// clearNoFactoryWarned drops id's no_factory edge marker, e.g. once a factory
-// becomes available or the id is no longer this ring's to manage.
-func clearNoFactoryWarned(id actor.ActorID) {
-	noFactoryWarnedMu.Lock()
-	delete(noFactoryWarned, id)
-	noFactoryWarnedMu.Unlock()
+// clearNoFactoryWarned drops this Home's no_factory edge marker once a factory
+// becomes available or the id is no longer this ring's to manage. The map is
+// owned by the single reconcile loop, so it needs no cross-Home global lock.
+func (h *Home) clearNoFactoryWarned(id actor.ActorID) {
+	delete(h.noFactoryWarned, id)
+}
+
+func (h *Home) firstNoFactoryWarning(id actor.ActorID) bool {
+	if h.noFactoryWarned == nil {
+		h.noFactoryWarned = make(map[actor.ActorID]struct{})
+	}
+	if _, seen := h.noFactoryWarned[id]; seen {
+		return false
+	}
+	h.noFactoryWarned[id] = struct{}{}
+	return true
 }
 
 // reconcileSweep runs the home's level-reconcile quartet in the fixed
@@ -247,11 +241,6 @@ func (h *Home) activateOne(ctx context.Context, rec storespec.Record) activation
 	if !ok {
 		return activationVerdict{kind: actNoFactory, reason: "class_not_found"}
 	}
-	// reviverStraddleHook (test-only, nil in production): the S-P20 straddle
-	// seam — fires AFTER factoryFor resolves, BEFORE the CAS below.
-	if h.reviverStraddleHook != nil {
-		h.reviverStraddleHook()
-	}
 	// ⑤SpawnIfAbsent: the atomic placement CAS — discards the shell if some
 	// other path (admission, a concurrent revive) already won the race.
 	inc, built, buildErr := h.channel.Cells().SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
@@ -280,11 +269,6 @@ func (h *Home) activateOne(ctx context.Context, rec storespec.Record) activation
 	}
 	if !built {
 		return activationVerdict{kind: actAlreadyLive}
-	}
-	// reconcileBuildHook (test-only, nil in production): fires on a REAL CAS
-	// win, right before the post-build recheck below.
-	if h.reconcileBuildHook != nil {
-		h.reconcileBuildHook(id)
 	}
 	// ⑥verifyPostBuild: the shared straddle-window closure (its own internal
 	// ctx gate is left untouched inside it, P1-B).
@@ -382,12 +366,12 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		switch v := h.activateOne(ctx, rec); v.kind {
 		case actEmbodied:
 			h.builtEpoch[id] = want.Epoch
-			clearNoFactoryWarned(id)
+			h.clearNoFactoryWarned(id)
 		case actAlreadyLive, actAttached:
 			// current stays true (already set above); no log; no account write
 			// (环翻译器 never clears the backoff account — §1.4 现状, CAS-loser
 			// included: reserved to the fast-path arm above and to 削 below).
-			clearNoFactoryWarned(id) // left no_factory (a factory now resolves) — B3 edge reset
+			h.clearNoFactoryWarned(id) // left no_factory (a factory now resolves) — B3 edge reset
 		case actNotMember:
 			// Defensive-only (①防御复判): unreachable given the selector's own
 			// pre-filter two lines up, on the SAME rec — treated conservatively
@@ -400,13 +384,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 			// silent through steady-state repeats (soak observed 74x/pass without
 			// this dedup). clearNoFactoryWarned resets the marker once the id
 			// leaves this state (factory resolves, or the ring stops managing it).
-			noFactoryWarnedMu.Lock()
-			_, alreadyWarned := noFactoryWarned[id]
-			if !alreadyWarned {
-				noFactoryWarned[id] = struct{}{}
-			}
-			noFactoryWarnedMu.Unlock()
-			if !alreadyWarned {
+			if h.firstNoFactoryWarning(id) {
 				h.logger.Warn("platform.reconcile.no_factory", "channel", string(h.channelID), "actor", string(id))
 			}
 		case actSealed:
@@ -441,7 +419,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		h.reviveMu.Lock()
 		delete(h.reviveLogAt, id)
 		h.reviveMu.Unlock()
-		clearNoFactoryWarned(id) // ring stopped managing id — B3 edge reset
+		h.clearNoFactoryWarned(id) // ring stopped managing id — B3 edge reset
 	}
 	h.prevEagerDesired = current
 }

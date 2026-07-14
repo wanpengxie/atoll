@@ -18,11 +18,9 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/jsondepth"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 // WSGateway is the human-ingress serving面 the assembly root (cmd/server) injects:
@@ -48,10 +46,6 @@ type App struct {
 	channelDBDir string
 	uiDist       string
 
-	// extraDropKinds: drivers-side producers' diagnostic obs kinds, injected via
-	// Config (see Config.ExtraDropKinds).
-	extraDropKinds []actorrt.ObsKind
-
 	// wsGateway is the injected human-ingress connector (gateway 期 S3); membershipPoke
 	// is the injected direct Gateway.Poke callback that the platform emission
 	// points (home.Config.OnMembershipChange, wired in createHome — Admit/Remove) feed.
@@ -75,13 +69,6 @@ type Config struct {
 	// dist/ — the UI lives in its own repository since the open-source split).
 	// Empty = UI routes are not registered and the server is API-only.
 	UIDist string
-
-	// ExtraDropKinds is the domain producers' diagnostic obs vocabulary (e.g.
-	// agentbase's), supplied by the assembly root (cmd/server) — app sits below
-	// drivers/ (fence: only cmd imports drivers/*), so it cannot union the
-	// drivers-side kinds itself. Appended to actorbase's own kinds. Nil is fine
-	// (substrate kinds only).
-	ExtraDropKinds []actorrt.ObsKind
 }
 
 // New assembles the App: gin engine, routes, and loads existing channels.
@@ -96,14 +83,13 @@ func New(cfg Config) (*App, error) {
 	}
 
 	a := &App{
-		db:             cfg.DB,
-		logger:         logger,
-		homes:          make(map[channel.ID]*home.Home),
-		channelDBDir:   cfg.ChannelDBDir,
-		uiDist:         cfg.UIDist,
-		extraDropKinds: cfg.ExtraDropKinds,
-		daemonLocks:    newKeyedLockSet(),
-		declLocks:      newKeyedLockSet(),
+		db:           cfg.DB,
+		logger:       logger,
+		homes:        make(map[channel.ID]*home.Home),
+		channelDBDir: cfg.ChannelDBDir,
+		uiDist:       cfg.UIDist,
+		daemonLocks:  newKeyedLockSet(),
+		declLocks:    newKeyedLockSet(),
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -308,14 +294,6 @@ func (a *App) homeOrError(c *gin.Context, chID channel.ID) *home.Home {
 	return nil
 }
 
-// eventDropKinds is the union of every producer's diagnostic obs kinds, handed
-// to the presence fold's drop buckets: actorbase's own (substrate side, app may
-// import lib) + the injected drivers-side vocabulary (agentbase's — supplied by
-// cmd/server, the only legal drivers/* importer; drivers 围栏 Fence B).
-func (a *App) eventDropKinds() []actorrt.ObsKind {
-	return append(actorbase.ObsDropKinds(), a.extraDropKinds...)
-}
-
 func (a *App) createHome(chID channel.ID, dbPath string) (*home.Home, error) {
 	return a.openHome(chID, dbPath, false)
 }
@@ -342,9 +320,6 @@ func (a *App) openHome(chID channel.ID, dbPath string, mustExist bool) (*home.Ho
 		// Fill the operate-face injection point: the in-gate control plane's
 		// executor half (intent write + Home call). One instance, channel-resolved.
 		Operate: a.operateFace(),
-		// The presence fold's drop-bucket vocabulary: substrate kinds + the
-		// drivers-side kinds the assembly root injected (Config.ExtraDropKinds).
-		EventDropKinds: a.eventDropKinds(),
 		// Membership-change poke emit point (连接模型勘误期 §3.2 表②): Home.Admit (入籍)
 		// and Home.Remove (注销, principal captured before the dereg cascade) fire this;
 		// the app forwards the principal into the injected poke fan-in so the gateway
