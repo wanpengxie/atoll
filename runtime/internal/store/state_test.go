@@ -352,7 +352,7 @@ func TestState_ChannelScopedResourcesSurviveDeregister(t *testing.T) {
 	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("state")); err != nil {
 		t.Fatalf("Create state: %v", err)
 	}
-	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", resourcespec.ProvenanceAxisAllocated, []byte("resource")); err != nil {
+	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", []byte("resource")); err != nil {
 		t.Fatalf("Create resource: %v", err)
 	}
 

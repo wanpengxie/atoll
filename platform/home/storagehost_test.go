@@ -161,7 +161,7 @@ func TestHomeStorageHostControl_ReconcilePull_ProjectsPerDaemonRows(t *testing.T
 	ob := &fakeOutbox{
 		byPlacementRows: []resourcespec.ResourceRow{{Meta: resourcespec.ResourceMeta{PlacementCoord: "c1"}}},
 		reservationRows: []resourcespec.ReservationRow{{ReservationID: "r1", PlacementCoord: "c2"}},
-		tombstoneRows:   []resourcespec.TombstoneRow{{TombstoneID: "t1", PlacementCoord: "c3", Provenance: resourcespec.ProvenanceAxisAllocated}},
+		tombstoneRows:   []resourcespec.TombstoneRow{{TombstoneID: "t1", PlacementCoord: "c3"}},
 	}
 	h := homeStorageHostControl{outbox: ob}
 	resources, reservations, tombstones, err := h.ReconcilePull(t.Context(), "daemon-1", []string{"c2"})
@@ -174,7 +174,7 @@ func TestHomeStorageHostControl_ReconcilePull_ProjectsPerDaemonRows(t *testing.T
 	if len(reservations) != 1 || reservations[0].ReservationID != "r1" || reservations[0].Coord != "c2" {
 		t.Errorf("reservations = %+v", reservations)
 	}
-	if len(tombstones) != 1 || tombstones[0].TombstoneID != "t1" || tombstones[0].Coord != "c3" || tombstones[0].Provenance != "axis-allocated" {
+	if len(tombstones) != 1 || tombstones[0].TombstoneID != "t1" || tombstones[0].Coord != "c3" {
 		t.Errorf("tombstones = %+v", tombstones)
 	}
 }

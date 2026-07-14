@@ -285,7 +285,7 @@ func (h homeStorageHostControl) ReconcilePull(ctx context.Context, senderDaemonI
 	}
 	pendingTombstones := make([]link.ReconcileTombstone, 0, len(tombstones))
 	for _, t := range tombstones {
-		pendingTombstones = append(pendingTombstones, link.ReconcileTombstone{TombstoneID: t.TombstoneID, Coord: t.PlacementCoord, Provenance: string(t.Provenance)})
+		pendingTombstones = append(pendingTombstones, link.ReconcileTombstone{TombstoneID: t.TombstoneID, Coord: t.PlacementCoord})
 	}
 	return resources, pendingReservations, pendingTombstones, nil
 }

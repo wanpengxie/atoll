@@ -301,7 +301,7 @@ func (f *storageHostForwarder) pass(ctx context.Context) {
 	}
 	pendingTombstones := make([]StorageTombstoneCoord, 0, len(reply.PendingTombstones))
 	for _, t := range reply.PendingTombstones {
-		pendingTombstones = append(pendingTombstones, StorageTombstoneCoord{TombstoneID: t.TombstoneID, Coord: t.Coord, Provenance: t.Provenance})
+		pendingTombstones = append(pendingTombstones, StorageTombstoneCoord{TombstoneID: t.TombstoneID, Coord: t.Coord})
 	}
 
 	ack := func(ctx context.Context, tombstoneID string) (bool, error) {

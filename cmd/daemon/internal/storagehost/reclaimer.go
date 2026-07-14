@@ -6,25 +6,14 @@ import (
 	"os"
 )
 
-// provenanceAxisAllocated mirrors resourcespec.ProvenanceAxisAllocated's wire
-// value as a plain string (this package sits outside the runtime tree and
-// must not import resourcespec — the control-RPC wire, platform/internal/
-// link.ReconcileTombstone, already carries the string form; see its doc).
-const provenanceAxisAllocated = "axis-allocated"
-
 // Reclaimer is §4.1's delete-side component: it collects a tombstoned
-// axis-allocated resource's bytes.
+// resource's bytes.
 type Reclaimer struct{}
 
 // Reclaim removes coord's live bytes (idempotent: an already-gone entry —
 // e.g. a repeat ReclaimAck's collection request, or an Alloc that never
-// actually landed anything — is a clean no-op, never an error) for an
-// axis-allocated tombstone; an unrecognized provenance value is a fail-safe
-// no-op, never permission to destroy bytes.
-func (Reclaimer) Reclaim(cr *channelRoot, coord, provenance string) error {
-	if provenance != provenanceAxisAllocated {
-		return nil
-	}
+// actually landed anything — is a clean no-op, never an error).
+func (Reclaimer) Reclaim(cr *channelRoot, coord string) error {
 	p, err := livePath(coord)
 	if err != nil {
 		return err

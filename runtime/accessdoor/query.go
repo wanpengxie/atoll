@@ -72,7 +72,6 @@ func opSetFromEffective(eff map[access.Operation]bool) OpSet {
 // CANNOT carry a coord: the field does not exist on this type.
 type StatMeta struct {
 	Kind              resourcespec.ResourceKind
-	PlacementKind     resourcespec.PlacementKind
 	PlacementDaemonID string
 	CreatedAt         int64
 	CreatedBy         actor.ActorID
@@ -192,7 +191,7 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 
 	switch spec.Kind {
 	case resourcespec.KindKV:
-		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, "", "", resourcespec.ProvenanceAxisAllocated, initial); err != nil {
+		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, "", "", initial); err != nil {
 			return createVerdict(ctx, err)
 		}
 		return Outcome{}, nil
@@ -335,7 +334,6 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 	return StatResult{
 		Meta: StatMeta{
 			Kind:              meta.Kind,
-			PlacementKind:     meta.PlacementKind,
 			PlacementDaemonID: meta.PlacementDaemonID,
 			CreatedAt:         meta.CreatedAt,
 			CreatedBy:         meta.CreatedBy,

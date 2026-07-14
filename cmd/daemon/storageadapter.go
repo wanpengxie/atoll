@@ -38,7 +38,7 @@ func (a storageHostAdapter) Reconcile(ctx context.Context, resources []compute.S
 	}
 	pts := make([]storagehost.TombstoneToReclaim, 0, len(pendingTombstones))
 	for _, t := range pendingTombstones {
-		pts = append(pts, storagehost.TombstoneToReclaim{TombstoneID: t.TombstoneID, Coord: t.Coord, Provenance: t.Provenance})
+		pts = append(pts, storagehost.TombstoneToReclaim{TombstoneID: t.TombstoneID, Coord: t.Coord})
 	}
 	var hostAck storagehost.ReclaimAckFunc
 	if ack != nil {

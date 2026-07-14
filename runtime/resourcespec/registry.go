@@ -52,11 +52,6 @@ type ResourceMeta struct {
 	Kind      ResourceKind
 	CreatedAt int64
 
-	// PlacementKind names the door-back storage LOCUS mechanism this
-	// resource's bytes live at ("" for kv — no placement axis applies;
-	// PlacementDaemonLocal for file). Additive column (期11 spec §1 item 2).
-	PlacementKind PlacementKind
-
 	// PlacementDaemonID is the explicit routing column: which daemon's
 	// Streamer holds the bytes ("" for kv). A durable daemon identity (§4),
 	// never re-derived from PlacementCoord.
@@ -71,11 +66,6 @@ type ResourceMeta struct {
 	// type, §3), not here; ResourceMeta is the registry's full internal
 	// truth, not a caller-facing shape.
 	PlacementCoord string
-
-	// Provenance records how this resource's placement came to be known —
-	// day-1 always ProvenanceAxisAllocated for every kind (door-stamped at
-	// create time).
-	Provenance Provenance
 
 	// CreatedBy is the durable creator identity — a PURE AUDIT column, not
 	// an authorization predicate: the creator's authority is the full-rights
@@ -129,7 +119,6 @@ type TombstoneRow struct {
 	ResourceID     resource.ResourceID
 	DaemonID       string
 	PlacementCoord string
-	Provenance     Provenance
 	Kind           ResourceKind
 	DeletedAt      int64
 }
@@ -158,7 +147,7 @@ type Registry interface {
 
 	// Create is op=create's ATOMIC birth event (the IMMEDIATE-landing half —
 	// kv, and empty/dir file creates that carry no byte stream, §1.5): the
-	// existence row (kind + all placement/provenance/audit columns) + the
+	// existence row (kind + routing/audit columns) + the
 	// creator's full-rights grant (an actor entry, ops = read/write/set/delete)
 	// + the initial bytes, all in ONE transaction. The atomicity is a
 	// door-visible contract, not an implementation coincidence: create is the
@@ -172,12 +161,11 @@ type Registry interface {
 	//
 	// placementDaemonID/placementCoord are door-computed (§4 placement
 	// routing / §1.6 coord generation), NOT client input — "" for kv (no
-	// placement axis). provenance is door-stamped, day-1 always
-	// ProvenanceAxisAllocated for every kind. initial is per-kind (§1 item 4):
+	// placement axis). initial is per-kind (§1 item 4):
 	// kv's inline value; always nil for file (its bytes never ride this
 	// param — a with-content file create lands via ReserveCreate +
 	// CommitReservation instead, never this method).
-	Create(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, provenance Provenance, initial []byte) error
+	Create(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte) error
 
 	// ReserveCreate is the create-outbox's SERVER-side write-ahead half
 	// (§1.3/§1.7, for a with-content file create ONLY — kv and
@@ -201,8 +189,8 @@ type Registry interface {
 	// daemon's Committed(reservation_id) RPC, §4.7): looks up reservationID,
 	// then performs the SAME atomic birth Create does — using the
 	// RESERVATION's door-authenticated creator/coord, never a daemon-
-	// reported value, with Provenance always ProvenanceAxisAllocated and
-	// Initial always nil (file bytes live at placementCoord, never inline)
+	// reported value, with Initial always nil (file bytes live at
+	// placementCoord, never inline)
 	// — then deletes the reservation row, all in ONE transaction (§1.7's
 	// "server 用 reservation_id 查表落户口行").
 	//
@@ -249,7 +237,7 @@ type Registry interface {
 	//   - kv: bytes live INLINE in the row itself, so removing the row IS
 	//     removing the bytes — same as before, no tombstone.
 	//   - file: ROW-FIRST-BYTES-LAST — this call reads the row (kind,
-	//     placement_daemon_id, placement_coord, provenance) inside its own
+	//     placement_daemon_id, placement_coord) inside its own
 	//     transaction, writes a resource_tombstones row from those values,
 	//     THEN deletes the resource row + grants — all ONE transaction. The
 	//     daemon-side Reclaimer (§4, a later addition) consumes the

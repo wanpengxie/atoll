@@ -208,7 +208,7 @@ func TestLaneSameDaemonLocalRoute(t *testing.T) {
 	// query_test.go already cover it) with PlacementDaemonID == daemonID so
 	// the door's resolveFileRoute picks Local.
 	ctx := context.Background()
-	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerID, daemonID, coord, resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerID, daemonID, coord, nil); err != nil {
 		t.Fatalf("seed file row: %v", err)
 	}
 
@@ -299,7 +299,7 @@ func TestLaneCrossDaemonStreamRoute(t *testing.T) {
 	_, armsB := dialLaneDaemonAt(t, srv, daemonB, readerB, nil)
 
 	ctx := context.Background()
-	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerB, daemonA, coord, resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerB, daemonA, coord, nil); err != nil {
 		t.Fatalf("seed file row: %v", err)
 	}
 
@@ -407,7 +407,7 @@ func TestLaneCrossDaemonLargeTransfer(t *testing.T) {
 	_, armsB := dialLaneDaemonAt(t, srv, daemonB, readerB, nil)
 
 	ctx := context.Background()
-	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerB, daemonA, coord, resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerB, daemonA, coord, nil); err != nil {
 		t.Fatalf("seed file row: %v", err)
 	}
 

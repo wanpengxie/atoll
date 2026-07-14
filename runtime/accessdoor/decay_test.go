@@ -84,7 +84,7 @@ func newDecayDoor(cs *store.ChannelStores) *door {
 // (resourcespec.Registry.Create's own contract — not hand-seeded).
 func seedResource(t *testing.T, cs *store.ChannelStores, id resource.ResourceID, creator actor.ActorID) {
 	t.Helper()
-	if err := cs.Resources.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+	if err := cs.Resources.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", nil); err != nil {
 		t.Fatalf("seed resource %q: %v", id, err)
 	}
 }

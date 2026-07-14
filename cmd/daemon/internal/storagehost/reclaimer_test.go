@@ -2,7 +2,7 @@ package storagehost
 
 import "testing"
 
-func TestReclaimer_AxisAllocatedRemovesBytes(t *testing.T) {
+func TestReclaimer_RemovesTombstonedBytes(t *testing.T) {
 	cr := newTestChannelRoot(t)
 	var a Allocator
 	if err := a.Alloc(cr, "coord1", false); err != nil {
@@ -10,34 +10,18 @@ func TestReclaimer_AxisAllocatedRemovesBytes(t *testing.T) {
 	}
 
 	var r Reclaimer
-	if err := r.Reclaim(cr, "coord1", provenanceAxisAllocated); err != nil {
+	if err := r.Reclaim(cr, "coord1"); err != nil {
 		t.Fatalf("Reclaim: %v", err)
 	}
 	if _, err := (Streamer{}).OpenRead(cr, "coord1"); err == nil {
-		t.Fatal("bytes must be gone after Reclaim(axis-allocated)")
-	}
-}
-
-func TestReclaimer_UnknownProvenanceNeverTouchesDisk(t *testing.T) {
-	cr := newTestChannelRoot(t)
-	var a Allocator
-	if err := a.Alloc(cr, "coord2", false); err != nil {
-		t.Fatalf("Alloc: %v", err)
-	}
-
-	var r Reclaimer
-	if err := r.Reclaim(cr, "coord2", "unknown-provenance"); err != nil {
-		t.Fatalf("Reclaim: %v", err)
-	}
-	if _, err := (Streamer{}).OpenRead(cr, "coord2"); err != nil {
-		t.Fatalf("unknown provenance must never touch disk, but bytes are gone: %v", err)
+		t.Fatal("bytes must be gone after Reclaim")
 	}
 }
 
 func TestReclaimer_UnknownCoordIsNoop(t *testing.T) {
 	cr := newTestChannelRoot(t)
 	var r Reclaimer
-	if err := r.Reclaim(cr, "never-existed", provenanceAxisAllocated); err != nil {
+	if err := r.Reclaim(cr, "never-existed"); err != nil {
 		t.Fatalf("Reclaim on a never-existed coord must be a clean no-op: %v", err)
 	}
 }

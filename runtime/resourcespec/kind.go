@@ -43,11 +43,10 @@ const (
 	KindKV ResourceKind = "kv"
 
 	// KindFile is the daemon-local file driver (期11 §1): bytes live on one
-	// daemon's physical disk (ResourceMeta.PlacementKind=PlacementDaemonLocal),
-	// addressed by an opaque placement_coord the owning daemon's Streamer
-	// interprets — never inline in the resources row (its bytes column stays
-	// NULL for this kind, same "resolved but not stored here" shape as an
-	// empty kv row, different reason). The byte-realizing Driver (Allocator/
+	// daemon's physical disk, addressed by an opaque placement_coord the owning
+	// daemon's Streamer interprets — never inline in the resources row (its
+	// bytes column stays NULL for this kind, same "resolved but not stored here"
+	// shape as an empty kv row, different reason). The byte-realizing Driver (Allocator/
 	// Streamer, §4, a LATER daemon-runtime addition) is not required for this
 	// kind's closed-set membership or ingress validation to exist — a kind can
 	// be a legal name before anything creates one, the same way a protocol

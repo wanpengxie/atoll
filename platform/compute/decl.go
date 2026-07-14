@@ -53,7 +53,7 @@ type LocalFileOpener interface {
 type (
 	StorageResourceCoord    struct{ Coord string }
 	StorageReservationCoord struct{ ReservationID, Coord string }
-	StorageTombstoneCoord   struct{ TombstoneID, Coord, Provenance string }
+	StorageTombstoneCoord   struct{ TombstoneID, Coord string }
 )
 
 // StorageReclaimAckFunc is Reconcile's network callback — Run's

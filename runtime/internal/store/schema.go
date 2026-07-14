@@ -133,18 +133,13 @@ CREATE TABLE IF NOT EXISTS restart_applied (
 -- No CHECK on grantee_kind: it is a Go-enforced closed set (access.GranteeKind,
 -- validated by the door's ValidateGrant on the write path), same discipline as
 -- sender_kind / actor_kind above — a DB CHECK would weld an evolving vocabulary
--- to every existing channel file. Same discipline extends to the five columns
--- 期11 (resource 轴完备化) adds below: placement_kind / provenance are
--- Go-enforced closed sets (resourcespec.ValidPlacementKind / ValidProvenance,
--- read-path fail-fast, resourcespec/create.go), no DB CHECK.
+-- to every existing channel file.
 CREATE TABLE IF NOT EXISTS resources (
   resource_id           TEXT PRIMARY KEY,
   kind                  TEXT NOT NULL,
   bytes                 BLOB,                     -- KindKV driver's inline bytes; NULL for kv = resolved-but-empty, ALWAYS NULL for file (its bytes live at placement_coord, never inline)
-  placement_kind        TEXT NOT NULL DEFAULT '', -- resourcespec.PlacementKind closed set; '' for kv (no placement axis — non-NULL, structurally distinct from "unknown")
   placement_daemon_id   TEXT NOT NULL DEFAULT '', -- explicit routing column: which daemon's Streamer holds the bytes; '' for kv
   placement_coord       TEXT NOT NULL DEFAULT '', -- opaque storage handle, server-registry-generated (§1.6); '' for kv; NEVER crosses Stat/List to a caller (§3.6 red line, enforced one layer up)
-  provenance            TEXT NOT NULL DEFAULT '', -- resourcespec.Provenance closed set; day-1 always 'axis-allocated' for every kind (door-stamped at create)
   created_by            TEXT NOT NULL DEFAULT '', -- durable creator actor id; PURE AUDIT column, not the authorization predicate (the creator's full-rights grant in resource_grants is)
   created_at            INTEGER NOT NULL,
   is_dir                INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)) -- file BYTE-SHAPE bit (the inode's S_IFDIR analogue): 1 = directory-shaped file resource (workspace, bytes = a whole tree委托真fs, Open→os.Root lease句柄), 0 = regular blob (Open→single-file staging句柄) / kv (always 0). Structural boolean integrity, KEEPS its CHECK (same discipline as is_terminal); this is the door's Open ROUTING truth, read at resolve, never a leaf the daemon re-derives from disk
@@ -192,7 +187,6 @@ CREATE TABLE IF NOT EXISTS resource_tombstones (
   resource_id     TEXT NOT NULL,          -- NON-unique index: same-name delete/recreate can leave multiple tombstones co-existing without colliding on the primary key
   daemon_id       TEXT NOT NULL DEFAULT '',
   placement_coord TEXT NOT NULL DEFAULT '',
-  provenance      TEXT NOT NULL,          -- the Reclaimer branches on this: axis-allocated bytes are rm -rf'd, registered bytes are left on disk
   kind            TEXT NOT NULL,
   deleted_at      INTEGER NOT NULL
 );

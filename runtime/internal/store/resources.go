@@ -53,36 +53,19 @@ func newResourceRegistry(db *sql.DB) *resourceRegistry {
 	return &resourceRegistry{db: db, nowMs: func() int64 { return time.Now().UnixMilli() }}
 }
 
-// placementKindFor derives ResourceMeta.PlacementKind from kind — it is NOT
-// an independent Create input (the Registry.Create/ReserveCreate signatures
-// carry no placementKind param, 期11 spec §1 item 9' ②): kv has no placement
-// axis ("", not a PlacementKind member); file's day-1 (and so-far only)
-// placement mechanism is daemon-local. A future second file placement (e.g.
-// cloud) would need this to become an explicit input — day-1 it is fully
-// determined by kind.
-func placementKindFor(kind resourcespec.ResourceKind) resourcespec.PlacementKind {
-	if kind == resourcespec.KindFile {
-		return resourcespec.PlacementDaemonLocal
-	}
-	return ""
-}
-
-// Resolve reads back existence + full meta (all placement/provenance/audit
-// columns). kind is returned as the raw persisted value with NO closed-set
-// parse (unlike actor_kind): ResourceKind is a runtime routing key, and
+// Resolve reads back existence + full routing/audit meta. kind is returned as
+// the raw persisted value with NO closed-set parse (unlike actor_kind):
+// ResourceKind is a runtime routing key, and
 // whether a kind resolves to a registered driver is the door's question, not
-// a poison-row guard here. placement_kind/provenance ARE validated against
-// their Go closed sets (resourcespec.ValidPlacementKind/ValidProvenance) —
-// an out-of-set persisted value fails loud rather than silently handing the
-// door a value it cannot interpret (schema.go's read-path discipline).
+// a poison-row guard here.
 func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
-	const q = `SELECT kind, placement_kind, placement_daemon_id, placement_coord, provenance, created_by, created_at, is_dir
+	const q = `SELECT kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir
 	             FROM resources WHERE resource_id=?`
-	var kind, placementKind, placementDaemonID, placementCoord, provenance, createdBy string
+	var kind, placementDaemonID, placementCoord, createdBy string
 	var createdAt int64
 	var isDir bool
 	err := r.db.QueryRowContext(ctx, q, string(id)).Scan(
-		&kind, &placementKind, &placementDaemonID, &placementCoord, &provenance, &createdBy, &createdAt, &isDir,
+		&kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt, &isDir,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return resourcespec.ResourceMeta{}, false, nil
@@ -90,19 +73,11 @@ func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) 
 	if err != nil {
 		return resourcespec.ResourceMeta{}, false, fmt.Errorf("store: resource resolve %q: %w", id, err)
 	}
-	if !resourcespec.ValidPlacementKind(resourcespec.PlacementKind(placementKind)) {
-		return resourcespec.ResourceMeta{}, false, fmt.Errorf("store: resource resolve %q: unknown placement_kind %q", id, placementKind)
-	}
-	if !resourcespec.ValidProvenance(resourcespec.Provenance(provenance)) {
-		return resourcespec.ResourceMeta{}, false, fmt.Errorf("store: resource resolve %q: unknown provenance %q", id, provenance)
-	}
 	return resourcespec.ResourceMeta{
 		Kind:              resourcespec.ResourceKind(kind),
 		CreatedAt:         createdAt,
-		PlacementKind:     resourcespec.PlacementKind(placementKind),
 		PlacementDaemonID: placementDaemonID,
 		PlacementCoord:    placementCoord,
-		Provenance:        resourcespec.Provenance(provenance),
 		CreatedBy:         actor.ActorID(createdBy),
 		Dir:               isDir,
 	}, true, nil
@@ -111,7 +86,7 @@ func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) 
 // Create is op=create's atomic birth event for the IMMEDIATE-landing path
 // (kv, and content-less file creates). See createResourceTx for the shared
 // atomic-insert half CommitReservation also drives.
-func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, provenance resourcespec.Provenance, initial []byte) error {
+func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte) error {
 	if id == "" {
 		return errors.New("store: resource create: empty id")
 	}
@@ -129,7 +104,7 @@ func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, k
 	// direct Create is day-1 only ever kv (a file always routes through
 	// ReserveCreate+CommitReservation), which is never directory-shaped —
 	// so dir is unconditionally false here.
-	if err := r.createResourceTx(ctx, tx, id, kind, creator, placementDaemonID, placementCoord, provenance, initial, false); err != nil {
+	if err := r.createResourceTx(ctx, tx, id, kind, creator, placementDaemonID, placementCoord, initial, false); err != nil {
 		return err // resourcespec.ErrAlreadyExists or a wrapped infra error
 	}
 
@@ -148,7 +123,7 @@ func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, k
 // INSERT ... ON CONFLICT DO NOTHING (the race window never has a
 // resolve-then-create gap) — the caller decides what the collision means (a
 // plain failure for direct Create; "lost the race" for CommitReservation).
-func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, provenance resourcespec.Provenance, initial []byte, dir bool) error {
+func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, dir bool) error {
 	// The creator's grant is full object-rights: read/write/set/delete. set-right
 	// is what makes the creator the controller (control = a full grant in R, no
 	// separate owner column).
@@ -158,10 +133,10 @@ func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id 
 	}
 
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO resources (resource_id, kind, bytes, placement_kind, placement_daemon_id, placement_coord, provenance, created_by, created_at, is_dir)
-		   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO resources (resource_id, kind, bytes, placement_daemon_id, placement_coord, created_by, created_at, is_dir)
+		   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(resource_id) DO NOTHING`,
-		string(id), string(kind), initial, string(placementKindFor(kind)), placementDaemonID, placementCoord, string(provenance), string(creator), r.nowMs(), dir,
+		string(id), string(kind), initial, placementDaemonID, placementCoord, string(creator), r.nowMs(), dir,
 	)
 	if err != nil {
 		return fmt.Errorf("store: resource create insert %q: %w", id, err)
@@ -248,7 +223,7 @@ func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID 
 
 	createErr := r.createResourceTx(ctx, tx,
 		resource.ResourceID(resourceID), resourcespec.ResourceKind(kind), actor.ActorID(createdBy),
-		placementDaemonID, placementCoord, resourcespec.ProvenanceAxisAllocated, nil, isDir,
+		placementDaemonID, placementCoord, nil, isDir,
 	)
 	if createErr != nil && !errors.Is(createErr, resourcespec.ErrAlreadyExists) {
 		return false, fmt.Errorf("store: commit reservation create %q: %w", resourceID, createErr)
@@ -342,7 +317,7 @@ func (r *resourceRegistry) ListReservationsByDaemon(ctx context.Context, daemonI
 // §4.7 ReconcilePull's "待收 tombstone" answer.
 func (r *resourceRegistry) ListTombstonesByDaemon(ctx context.Context, daemonID string) ([]resourcespec.TombstoneRow, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT tombstone_id, resource_id, daemon_id, placement_coord, provenance, kind, deleted_at
+		`SELECT tombstone_id, resource_id, daemon_id, placement_coord, kind, deleted_at
 		   FROM resource_tombstones WHERE daemon_id=? ORDER BY deleted_at, tombstone_id`,
 		daemonID,
 	)
@@ -354,12 +329,11 @@ func (r *resourceRegistry) ListTombstonesByDaemon(ctx context.Context, daemonID 
 	var out []resourcespec.TombstoneRow
 	for rows.Next() {
 		var row resourcespec.TombstoneRow
-		var resID, provenance, kind string
-		if err := rows.Scan(&row.TombstoneID, &resID, &row.DaemonID, &row.PlacementCoord, &provenance, &kind, &row.DeletedAt); err != nil {
+		var resID, kind string
+		if err := rows.Scan(&row.TombstoneID, &resID, &row.DaemonID, &row.PlacementCoord, &kind, &row.DeletedAt); err != nil {
 			return nil, fmt.Errorf("store: list tombstones by daemon scan %q: %w", daemonID, err)
 		}
 		row.ResourceID = resource.ResourceID(resID)
-		row.Provenance = resourcespec.Provenance(provenance)
 		row.Kind = resourcespec.ResourceKind(kind)
 		out = append(out, row)
 	}
@@ -379,7 +353,7 @@ func (r *resourceRegistry) ListTombstonesByDaemon(ctx context.Context, daemonID 
 // method rather than a bespoke narrower one.
 func (r *resourceRegistry) ListByPlacementDaemon(ctx context.Context, daemonID string) ([]resourcespec.ResourceRow, error) {
 	rows, err := r.db.QueryContext(ctx,
-		`SELECT resource_id, kind, placement_kind, placement_daemon_id, placement_coord, provenance, created_by, created_at
+		`SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, created_at
 		   FROM resources WHERE placement_daemon_id=? ORDER BY created_at, resource_id`,
 		daemonID,
 	)
@@ -389,16 +363,15 @@ func (r *resourceRegistry) ListByPlacementDaemon(ctx context.Context, daemonID s
 	// Buffer + close before any nested grantsFor query — same single-connection
 	// deadlock avoidance as List (see its comment).
 	type baseRow struct {
-		id                                                                 resource.ResourceID
-		kind, placementKind, placementDaemonID, placementCoord, provenance string
-		createdBy                                                          string
-		createdAt                                                          int64
+		id                                                 resource.ResourceID
+		kind, placementDaemonID, placementCoord, createdBy string
+		createdAt                                          int64
 	}
 	var base []baseRow
 	for rows.Next() {
 		var b baseRow
 		var id string
-		if err := rows.Scan(&id, &b.kind, &b.placementKind, &b.placementDaemonID, &b.placementCoord, &b.provenance, &b.createdBy, &b.createdAt); err != nil {
+		if err := rows.Scan(&id, &b.kind, &b.placementDaemonID, &b.placementCoord, &b.createdBy, &b.createdAt); err != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("store: list by placement daemon scan %q: %w", daemonID, err)
 		}
@@ -424,10 +397,8 @@ func (r *resourceRegistry) ListByPlacementDaemon(ctx context.Context, daemonID s
 			Meta: resourcespec.ResourceMeta{
 				Kind:              resourcespec.ResourceKind(b.kind),
 				CreatedAt:         b.createdAt,
-				PlacementKind:     resourcespec.PlacementKind(b.placementKind),
 				PlacementDaemonID: b.placementDaemonID,
 				PlacementCoord:    b.placementCoord,
-				Provenance:        resourcespec.Provenance(b.provenance),
 				CreatedBy:         actor.ActorID(b.createdBy),
 			},
 			Grants: grants,
@@ -619,8 +590,8 @@ func (r *resourceRegistry) SetGrant(ctx context.Context, id resource.ResourceID,
 // byte-collection time-order is KIND-DEPENDENT (期11 spec §1 item 8):
 //   - kv: bytes live inline, so removing the row removes the bytes — no
 //     tombstone, same shape as before.
-//   - file: ROW-FIRST-BYTES-LAST — this reads the row (kind + placement +
-//     provenance) inside the SAME transaction, writes a resource_tombstones
+//   - file: ROW-FIRST-BYTES-LAST — this reads the row (kind + placement)
+//     inside the SAME transaction, writes a resource_tombstones
 //     row from those values, then deletes the resource row + grants. The
 //     daemon-side Reclaimer (§4, a later addition) collects the bytes
 //     asynchronously afterward. The invariant "a visible row always points
@@ -632,8 +603,7 @@ func (r *resourceRegistry) SetGrant(ctx context.Context, id resource.ResourceID,
 // ReconcilePull Reclaimer collects the orphaned live/<coord> bytes — the SAME
 // delete-outbox reclaim path a resource delete already uses, no new
 // mechanism) then delete the reservation row. Reservations are always file
-// kind with axis-allocated placement (kv/registered never reserve), so the
-// tombstone's provenance/kind are those constants. A reservation whose write
+// kind, so the tombstone's kind is fixed. A reservation whose write
 // handle is still open when this runs will, on its eventual Commit, hit
 // CommitReservation's found=false no-op — the row is already gone here.
 func (r *resourceRegistry) supersedePendingReservationsTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID) error {
@@ -664,9 +634,9 @@ func (r *resourceRegistry) supersedePendingReservationsTx(ctx context.Context, t
 
 	for _, p := range supers {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO resource_tombstones (tombstone_id, resource_id, daemon_id, placement_coord, provenance, kind, deleted_at)
-			   VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			uuid.NewString(), string(id), p.daemonID, p.coord, string(resourcespec.ProvenanceAxisAllocated), string(resourcespec.KindFile), r.nowMs(),
+			`INSERT INTO resource_tombstones (tombstone_id, resource_id, daemon_id, placement_coord, kind, deleted_at)
+			   VALUES (?, ?, ?, ?, ?, ?)`,
+			uuid.NewString(), string(id), p.daemonID, p.coord, string(resourcespec.KindFile), r.nowMs(),
 		); err != nil {
 			return fmt.Errorf("store: supersede reservations tombstone %q: %w", p.reservationID, err)
 		}
@@ -700,11 +670,11 @@ func (r *resourceRegistry) Delete(ctx context.Context, id resource.ResourceID) e
 		return err
 	}
 
-	var kind, placementDaemonID, placementCoord, provenance string
+	var kind, placementDaemonID, placementCoord string
 	err = tx.QueryRowContext(ctx,
-		`SELECT kind, placement_daemon_id, placement_coord, provenance FROM resources WHERE resource_id=?`,
+		`SELECT kind, placement_daemon_id, placement_coord FROM resources WHERE resource_id=?`,
 		string(id),
-	).Scan(&kind, &placementDaemonID, &placementCoord, &provenance)
+	).Scan(&kind, &placementDaemonID, &placementCoord)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Already gone: delete is idempotent, retryable, no cross-call
 		// atomicity needed (only create does, for its controller-grab window).
@@ -719,9 +689,9 @@ func (r *resourceRegistry) Delete(ctx context.Context, id resource.ResourceID) e
 
 	if kind == string(resourcespec.KindFile) {
 		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO resource_tombstones (tombstone_id, resource_id, daemon_id, placement_coord, provenance, kind, deleted_at)
-			   VALUES (?, ?, ?, ?, ?, ?, ?)`,
-			uuid.NewString(), string(id), placementDaemonID, placementCoord, provenance, kind, r.nowMs(),
+			`INSERT INTO resource_tombstones (tombstone_id, resource_id, daemon_id, placement_coord, kind, deleted_at)
+			   VALUES (?, ?, ?, ?, ?, ?)`,
+			uuid.NewString(), string(id), placementDaemonID, placementCoord, kind, r.nowMs(),
 		); err != nil {
 			return fmt.Errorf("store: resource delete tombstone %q: %w", id, err)
 		}
@@ -777,7 +747,7 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 		}
 	}
 
-	q := `SELECT resource_id, kind, placement_kind, placement_daemon_id, placement_coord, provenance, created_by, created_at
+	q := `SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, created_at
 	        FROM resources
 	       WHERE (created_at > ? OR (created_at = ? AND resource_id > ?))`
 	args := []any{afterCreatedAt, afterCreatedAt, afterID}
@@ -799,16 +769,15 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 	// re-check), so a nested QueryContext while this cursor still holds it
 	// would deadlock waiting for a connection the pool will never hand out.
 	type baseRow struct {
-		id                                                                 resource.ResourceID
-		kind, placementKind, placementDaemonID, placementCoord, provenance string
-		createdBy                                                          string
-		createdAt                                                          int64
+		id                                                 resource.ResourceID
+		kind, placementDaemonID, placementCoord, createdBy string
+		createdAt                                          int64
 	}
 	var base []baseRow
 	for rows.Next() {
 		var b baseRow
 		var id string
-		if err := rows.Scan(&id, &b.kind, &b.placementKind, &b.placementDaemonID, &b.placementCoord, &b.provenance, &b.createdBy, &b.createdAt); err != nil {
+		if err := rows.Scan(&id, &b.kind, &b.placementDaemonID, &b.placementCoord, &b.createdBy, &b.createdAt); err != nil {
 			_ = rows.Close()
 			return nil, "", fmt.Errorf("store: resource list scan: %w", err)
 		}
@@ -837,10 +806,8 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 			Meta: resourcespec.ResourceMeta{
 				Kind:              resourcespec.ResourceKind(b.kind),
 				CreatedAt:         b.createdAt,
-				PlacementKind:     resourcespec.PlacementKind(b.placementKind),
 				PlacementDaemonID: b.placementDaemonID,
 				PlacementCoord:    b.placementCoord,
-				Provenance:        resourcespec.Provenance(b.provenance),
 				CreatedBy:         actor.ActorID(b.createdBy),
 			},
 			Grants: grants,

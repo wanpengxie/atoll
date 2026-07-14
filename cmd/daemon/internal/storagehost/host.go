@@ -142,12 +142,11 @@ func (h *Host) OpenDir(coord string) (*os.Root, error) { return h.streamer.OpenD
 // rename→landed its bytes at live/<coord> before the home ever gets to say
 // so (this daemon fsync+renamed at Commit time, §3.5; the home only decides
 // the WINNER after that). Reusing the SAME Reclaimer a tombstone's delete
-// already collects through (content-bearing create's placement is always
-// axis-allocated, never registered) — no new collection mechanism, just a
-// new caller of the existing one. Idempotent (Reclaimer.Reclaim's own doc):
+// already collects through — no new collection mechanism, just a new caller
+// of the existing one. Idempotent (Reclaimer.Reclaim's own doc):
 // a coord with nothing there is a clean no-op, never an error.
 func (h *Host) ReclaimCoord(coord string) error {
-	return h.scrubber.Reclaimer.Reclaim(h.cr, coord, provenanceAxisAllocated)
+	return h.scrubber.Reclaimer.Reclaim(h.cr, coord)
 }
 
 // Reconcile runs one Scrubber pass against the home's recovery picture. ack

@@ -35,11 +35,10 @@ func openResourceReg(t *testing.T) *resourceRegistry {
 
 func kvOf(r *resourceRegistry) *kvDriver { return newKVDriver(r.db) }
 
-// createKV is the day-1 kv shape: no placement axis (empty daemon/coord),
-// provenance always axis-allocated.
+// createKV is the day-1 kv shape: no external placement (empty daemon/coord).
 func createKV(t *testing.T, reg *resourceRegistry, id resource.ResourceID, creator actor.ActorID, initial []byte) {
 	t.Helper()
-	if err := reg.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", resourcespec.ProvenanceAxisAllocated, initial); err != nil {
+	if err := reg.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", initial); err != nil {
 		t.Fatalf("Create %q: %v", id, err)
 	}
 }
@@ -50,7 +49,7 @@ func TestResource_CreateWritesRowGrantBytes(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	if err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:a", "", "", resourcespec.ProvenanceAxisAllocated, []byte("hello")); err != nil {
+	if err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:a", "", "", []byte("hello")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -82,10 +81,8 @@ func TestResource_CreateWritesRowGrantBytes(t *testing.T) {
 	}
 }
 
-// kv rows must persist the additive placement/provenance/audit columns:
-// placement axis empty (structurally distinct from "unknown" — non-NULL
-// empty string), provenance always axis-allocated, created_by = creator.
-func TestResource_CreateKVPlacementColumnsAllEmptyProvenanceAxisAllocated(t *testing.T) {
+// KV rows carry no external route, while retaining their creator audit fact.
+func TestResource_CreateKVRoutingAndAudit(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 	createKV(t, reg, "kv:doc", "actor:a", []byte("v"))
@@ -94,40 +91,30 @@ func TestResource_CreateKVPlacementColumnsAllEmptyProvenanceAxisAllocated(t *tes
 	if err != nil || !ok {
 		t.Fatalf("Resolve ok=%v err=%v", ok, err)
 	}
-	if meta.PlacementKind != "" {
-		t.Errorf("kv PlacementKind=%q want empty (no placement axis)", meta.PlacementKind)
-	}
 	if meta.PlacementDaemonID != "" {
 		t.Errorf("kv PlacementDaemonID=%q want empty", meta.PlacementDaemonID)
 	}
 	if meta.PlacementCoord != "" {
 		t.Errorf("kv PlacementCoord=%q want empty", meta.PlacementCoord)
 	}
-	if meta.Provenance != resourcespec.ProvenanceAxisAllocated {
-		t.Errorf("kv Provenance=%q want axis-allocated", meta.Provenance)
-	}
 	if meta.CreatedBy != "actor:a" {
 		t.Errorf("CreatedBy=%q want actor:a", meta.CreatedBy)
 	}
 }
 
-// A file-kind row (created via the direct immediate path — a content-less
-// file create, §1.5) must stamp PlacementKind=daemon-local and carry whatever
-// placement_daemon_id/coord the door supplied.
-func TestResource_CreateFileStampsPlacementDaemonLocal(t *testing.T) {
+// A file-kind row created via the direct immediate path persists the real
+// placement daemon and coord supplied by the door.
+func TestResource_CreateFilePersistsRoute(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", nil); err != nil {
 		t.Fatalf("Create file: %v", err)
 	}
 
 	meta, ok, err := reg.Resolve(ctx, "file:doc")
 	if err != nil || !ok {
 		t.Fatalf("Resolve ok=%v err=%v", ok, err)
-	}
-	if meta.PlacementKind != resourcespec.PlacementDaemonLocal {
-		t.Errorf("file PlacementKind=%q want daemon-local", meta.PlacementKind)
 	}
 	if meta.PlacementDaemonID != "daemon-1" {
 		t.Errorf("PlacementDaemonID=%q want daemon-1", meta.PlacementDaemonID)
@@ -148,7 +135,7 @@ func TestResource_CreateCollisionSentinel(t *testing.T) {
 	reg := openResourceReg(t)
 
 	createKV(t, reg, "kv:doc", "actor:a", []byte("v1"))
-	err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:b", "", "", resourcespec.ProvenanceAxisAllocated, []byte("v2"))
+	err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:b", "", "", []byte("v2"))
 	if err == nil {
 		t.Fatal("second Create on same id must collide")
 	}
@@ -168,10 +155,10 @@ func TestResource_CreateCollisionSentinel(t *testing.T) {
 func TestResource_CreateGuardsEmptyInputs(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
-	if err := reg.Create(ctx, "", resourcespec.KindKV, "actor:a", "", "", resourcespec.ProvenanceAxisAllocated, nil); err == nil {
+	if err := reg.Create(ctx, "", resourcespec.KindKV, "actor:a", "", "", nil); err == nil {
 		t.Error("Create with empty id must error")
 	}
-	if err := reg.Create(ctx, "kv:x", resourcespec.KindKV, "", "", "", resourcespec.ProvenanceAxisAllocated, nil); err == nil {
+	if err := reg.Create(ctx, "kv:x", resourcespec.KindKV, "", "", "", nil); err == nil {
 		t.Error("Create with empty creator must error")
 	}
 }
@@ -212,9 +199,6 @@ func TestResource_ReserveCreateAndCommitLandsRow(t *testing.T) {
 	}
 	if meta.PlacementDaemonID != "daemon-1" || meta.PlacementCoord != "coord-1" {
 		t.Errorf("placement = (%q,%q) want (daemon-1,coord-1)", meta.PlacementDaemonID, meta.PlacementCoord)
-	}
-	if meta.Provenance != resourcespec.ProvenanceAxisAllocated {
-		t.Errorf("Provenance=%q want axis-allocated", meta.Provenance)
 	}
 	// Creator holds the full object-rights grant, same as the direct path.
 	if !allowActor(t, reg, "actor:a", "file:doc", access.OpDelete) {
@@ -610,7 +594,7 @@ func TestResource_TouchReservationsByCoordsEmptyCoordsTouchesNothing(t *testing.
 func TestResource_TombstoneDaemon(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
-	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", nil); err != nil {
 		t.Fatalf("Create file: %v", err)
 	}
 	if err := reg.Delete(ctx, "file:doc"); err != nil {
@@ -643,7 +627,7 @@ func TestResource_ListTombstonesByDaemonFiltersPerDaemon(t *testing.T) {
 		{"file:b", "daemon-1", "coord-b"},
 		{"file:c", "daemon-2", "coord-c"},
 	} {
-		if err := reg.Create(ctx, resource.ResourceID(tc.id), resourcespec.KindFile, "actor:a", tc.daemon, tc.coord, resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+		if err := reg.Create(ctx, resource.ResourceID(tc.id), resourcespec.KindFile, "actor:a", tc.daemon, tc.coord, nil); err != nil {
 			t.Fatalf("Create %s: %v", tc.id, err)
 		}
 		if err := reg.Delete(ctx, resource.ResourceID(tc.id)); err != nil {
@@ -671,10 +655,10 @@ func TestResource_ListByPlacementDaemonFiltersPerDaemonAndExcludesKV(t *testing.
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	if err := reg.Create(ctx, "file:a", resourcespec.KindFile, "actor:a", "daemon-1", "coord-a", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+	if err := reg.Create(ctx, "file:a", resourcespec.KindFile, "actor:a", "daemon-1", "coord-a", nil); err != nil {
 		t.Fatalf("Create file a: %v", err)
 	}
-	if err := reg.Create(ctx, "file:b", resourcespec.KindFile, "actor:a", "daemon-2", "coord-b", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+	if err := reg.Create(ctx, "file:b", resourcespec.KindFile, "actor:a", "daemon-2", "coord-b", nil); err != nil {
 		t.Fatalf("Create file b: %v", err)
 	}
 	createKV(t, reg, "kv:c", "actor:a", []byte("v"))
@@ -794,13 +778,13 @@ func TestResource_DeleteKVWritesNoTombstone(t *testing.T) {
 }
 
 // file delete is row-first-bytes-last + tombstone (§1.8): the row/grants are
-// gone but a tombstone row carries daemon_id/coord/provenance/kind for the
+// gone but a tombstone row carries daemon_id/coord/kind for the
 // (later) Reclaimer, and ClearTombstone removes it once collection is
 // confirmed.
 func TestResource_DeleteFileWritesTombstoneThenClearTombstone(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
-	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", nil); err != nil {
 		t.Fatalf("Create file: %v", err)
 	}
 
@@ -814,12 +798,9 @@ func TestResource_DeleteFileWritesTombstoneThenClearTombstone(t *testing.T) {
 	}
 
 	tombstoneID := onlyTombstoneID(t, reg.db, "file:doc")
-	daemonID, coord, provenance, kind := readTombstone(t, reg.db, tombstoneID)
+	daemonID, coord, kind := readTombstone(t, reg.db, tombstoneID)
 	if daemonID != "daemon-1" || coord != "coord-xyz" {
 		t.Errorf("tombstone placement = (%q,%q) want (daemon-1,coord-xyz)", daemonID, coord)
-	}
-	if provenance != string(resourcespec.ProvenanceAxisAllocated) {
-		t.Errorf("tombstone provenance=%q want axis-allocated", provenance)
 	}
 	if kind != string(resourcespec.KindFile) {
 		t.Errorf("tombstone kind=%q want file", kind)
@@ -857,13 +838,13 @@ func TestResource_DeleteRecreateDeleteLeavesTwoTombstones(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", nil); err != nil {
 		t.Fatalf("Create 1: %v", err)
 	}
 	if err := reg.Delete(ctx, "file:doc"); err != nil {
 		t.Fatalf("Delete 1: %v", err)
 	}
-	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-2", resourcespec.ProvenanceAxisAllocated, nil); err != nil {
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-2", nil); err != nil {
 		t.Fatalf("Create 2 (recreate): %v", err)
 	}
 	if err := reg.Delete(ctx, "file:doc"); err != nil {
@@ -1106,7 +1087,7 @@ func TestKVDriver_DeleteIsNoop(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 	kv := kvOf(reg)
-	if err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:a", "", "", resourcespec.ProvenanceAxisAllocated, []byte("keep")); err != nil {
+	if err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:a", "", "", []byte("keep")); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if err := kv.Delete(ctx, "kv:doc"); err != nil {
@@ -1197,18 +1178,17 @@ func onlyTombstoneID(t *testing.T, db *sql.DB, resourceID resource.ResourceID) s
 	return ids[0]
 }
 
-// readTombstone reads back one tombstone row's daemon_id/placement_coord/
-// provenance/kind by tombstone_id.
-func readTombstone(t *testing.T, db *sql.DB, tombstoneID string) (daemonID, coord, provenance, kind string) {
+// readTombstone reads back one tombstone row's daemon_id/placement_coord/kind.
+func readTombstone(t *testing.T, db *sql.DB, tombstoneID string) (daemonID, coord, kind string) {
 	t.Helper()
 	err := db.QueryRowContext(context.Background(),
-		`SELECT daemon_id, placement_coord, provenance, kind FROM resource_tombstones WHERE tombstone_id=?`,
+		`SELECT daemon_id, placement_coord, kind FROM resource_tombstones WHERE tombstone_id=?`,
 		tombstoneID,
-	).Scan(&daemonID, &coord, &provenance, &kind)
+	).Scan(&daemonID, &coord, &kind)
 	if err != nil {
 		t.Fatalf("read tombstone %q: %v", tombstoneID, err)
 	}
-	return daemonID, coord, provenance, kind
+	return daemonID, coord, kind
 }
 
 // Every stale reservation is sweepable; there is no landed phase immunity.

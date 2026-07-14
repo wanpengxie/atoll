@@ -43,7 +43,7 @@ func TestDoorStat(t *testing.T) {
 	t.Run("holder sees meta + effective ops, never a coord field", func(t *testing.T) {
 		meta := resourcespec.ResourceMeta{
 			Kind: resourcespec.KindKV, CreatedAt: 42,
-			PlacementKind: "", PlacementDaemonID: "", PlacementCoord: "should-never-surface",
+			PlacementDaemonID: "", PlacementCoord: "should-never-surface",
 			CreatedBy: "creator",
 		}
 		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}

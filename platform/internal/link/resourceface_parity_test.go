@@ -68,7 +68,7 @@ func (r *parityRegistry) Resolve(_ context.Context, id resource.ResourceID) (res
 	return meta, ok, nil
 }
 
-func (r *parityRegistry) Create(_ context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID, placementCoord string, provenance resourcespec.Provenance, initial []byte) error {
+func (r *parityRegistry) Create(_ context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID, placementCoord string, initial []byte) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.rows[id]; exists {
@@ -76,8 +76,8 @@ func (r *parityRegistry) Create(_ context.Context, id resource.ResourceID, kind 
 	}
 	r.rows[id] = resourcespec.ResourceMeta{
 		Kind: kind, CreatedAt: time.Now().UnixNano(),
-		PlacementKind: "", PlacementDaemonID: placementDaemonID, PlacementCoord: placementCoord,
-		Provenance: provenance, CreatedBy: creator,
+		PlacementDaemonID: placementDaemonID, PlacementCoord: placementCoord,
+		CreatedBy: creator,
 	}
 	r.bytes[id] = initial
 	// Birth-time full-rights grant — the ownership predicate (design doc's

@@ -213,7 +213,7 @@ func TestReconcilePull_DaemonToHomeRoundTrip(t *testing.T) {
 	d := dialStorageDaemon(t, r)
 	r.shc.reconcileResources = []link.ReconcileResource{{Coord: "c1"}}
 	r.shc.reconcileReservations = []link.ReconcileReservation{{ReservationID: "r1", Coord: "c2"}}
-	r.shc.reconcileTombstones = []link.ReconcileTombstone{{TombstoneID: "t1", Coord: "c3", Provenance: "axis-allocated"}}
+	r.shc.reconcileTombstones = []link.ReconcileTombstone{{TombstoneID: "t1", Coord: "c3"}}
 
 	reply, err := d.SendReconcilePull(context.Background(), []string{"coord-active"})
 	if err != nil {
@@ -225,7 +225,7 @@ func TestReconcilePull_DaemonToHomeRoundTrip(t *testing.T) {
 	if len(reply.PendingReservations) != 1 || reply.PendingReservations[0].ReservationID != "r1" {
 		t.Errorf("PendingReservations = %+v", reply.PendingReservations)
 	}
-	if len(reply.PendingTombstones) != 1 || reply.PendingTombstones[0].TombstoneID != "t1" || reply.PendingTombstones[0].Provenance != "axis-allocated" {
+	if len(reply.PendingTombstones) != 1 || reply.PendingTombstones[0].TombstoneID != "t1" || reply.PendingTombstones[0].Coord != "c3" {
 		t.Errorf("PendingTombstones = %+v", reply.PendingTombstones)
 	}
 	if len(r.shc.reconcileCalls) != 1 || r.shc.reconcileCalls[0] != "daemon-1" {

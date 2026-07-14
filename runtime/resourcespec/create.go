@@ -44,69 +44,6 @@ type CreateSpec struct {
 	WithContent bool
 }
 
-// PlacementKind is the closed set of file-object storage placement
-// mechanisms — the door-back LOCUS a driver's bytes live at, dual to
-// ResourceKind's door-back BYTE FORMAT axis. kv carries no placement concept
-// at all: its persisted placement_kind column is the empty string, which is
-// NOT a member of this set — it is "the placement axis does not apply to
-// this row" (ValidPlacementKind treats "" as legal precisely to express
-// that non-membership, not to smuggle in a zero-value PlacementKind).
-type PlacementKind string
-
-// PlacementDaemonLocal is KindFile's day-1 (and so-far only) placement:
-// bytes live on one daemon's physical disk, addressed by an opaque
-// placement_coord that daemon's Streamer alone interprets. A cloud-backed
-// placement value is a future substrate driver addition — additive to this
-// set when a real driver demands it, never pre-reserved.
-const PlacementDaemonLocal PlacementKind = "daemon-local"
-
-var allPlacementKinds = []PlacementKind{PlacementDaemonLocal}
-
-// ValidPlacementKind reports whether raw is a legal persisted placement_kind
-// column value: either "" (kv's non-membership) or a member of the closed
-// set. An unrecognized non-empty value is a fail-fast signal — a future
-// driver's placement landed in the column ahead of the Go closed set that
-// names it — never silently accepted (the same discipline schema.go's doc
-// describes for sender_kind/actor_kind: Go-enforced closed sets fail loud on
-// read, no DB CHECK).
-func ValidPlacementKind(raw PlacementKind) bool {
-	if raw == "" {
-		return true
-	}
-	for _, want := range allPlacementKinds {
-		if raw == want {
-			return true
-		}
-	}
-	return false
-}
-
-// Provenance records how a resource's placement came to be known to the
-// registry. Every current row (kv and file alike) is stamped
-// ProvenanceAxisAllocated by the door at create time.
-type Provenance string
-
-const (
-	// ProvenanceAxisAllocated — the registry itself minted this resource's
-	// placement via create-outbox's coord generation (§1.6): day-1's only
-	// value, for every kind.
-	ProvenanceAxisAllocated Provenance = "axis-allocated"
-)
-
-var allProvenances = []Provenance{ProvenanceAxisAllocated}
-
-// ValidProvenance reports whether raw is a member of the closed set. Unlike
-// PlacementKind, Provenance has no "legal empty" case — every resources row
-// is stamped at create time.
-func ValidProvenance(raw Provenance) bool {
-	for _, want := range allProvenances {
-		if raw == want {
-			return true
-		}
-	}
-	return false
-}
-
 // coordSeedBytes is the random seed width GenerateCoord hashes — 256 bits,
 // matching the sha256 digest it feeds (design doc C1: "种子=random/
 // salted-hash").

@@ -69,7 +69,6 @@ type createCall struct {
 	kind                              resourcespec.ResourceKind
 	creator                           actor.ActorID
 	placementDaemonID, placementCoord string
-	provenance                        resourcespec.Provenance
 	initial                           []byte
 }
 
@@ -78,12 +77,12 @@ func (r *fakeRegistry) Resolve(ctx context.Context, id resource.ResourceID) (res
 	return r.resolveMeta, r.resolveExists, r.resolveErr
 }
 
-func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, provenance resourcespec.Provenance, initial []byte) error {
+func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte) error {
 	r.calls++
 	r.createCalls = append(r.createCalls, createCall{
 		id: id, kind: kind, creator: creator,
 		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
-		provenance: provenance, initial: initial,
+		initial: initial,
 	})
 	return r.createErr
 }

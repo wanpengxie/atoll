@@ -20,7 +20,7 @@ func TestScrubber_ReclaimsPendingTombstonesAndAcks(t *testing.T) {
 		return true, nil
 	}
 	s.Pass(t.Context(), cr, nil, nil, []TombstoneToReclaim{
-		{TombstoneID: "ts1", Coord: "coord1", Provenance: provenanceAxisAllocated},
+		{TombstoneID: "ts1", Coord: "coord1"},
 	}, nil, ack)
 
 	if _, err := (Streamer{}).OpenRead(cr, "coord1"); err == nil {
@@ -42,7 +42,7 @@ func TestScrubber_ReclaimFailureSkipsAck(t *testing.T) {
 	// A bad coord makes Reclaimer.Reclaim fail (assertPathSegment) — ack
 	// must never fire for a collection that did not actually happen.
 	s.Pass(t.Context(), cr, nil, nil, []TombstoneToReclaim{
-		{TombstoneID: "ts1", Coord: "../escape", Provenance: provenanceAxisAllocated},
+		{TombstoneID: "ts1", Coord: "../escape"},
 	}, nil, ack)
 	if ackCalled {
 		t.Fatal("ack must not fire when Reclaim failed")
@@ -177,7 +177,7 @@ func TestScrubber_ActiveWritesSnapshotAfterNetworkPhase(t *testing.T) {
 
 	s := &Scrubber{}
 	s.Pass(t.Context(), cr, nil, nil, []TombstoneToReclaim{
-		{TombstoneID: "t1", Coord: "gone-coord", Provenance: provenanceAxisAllocated},
+		{TombstoneID: "t1", Coord: "gone-coord"},
 	}, activeWrites, ack)
 
 	for _, e := range listStagingEntries(t, cr) {

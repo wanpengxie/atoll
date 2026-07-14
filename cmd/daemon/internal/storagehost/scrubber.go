@@ -20,7 +20,7 @@ import (
 // already draw elsewhere in this build.
 type ResourceLanded struct{ Coord string }
 type ReservationPending struct{ ReservationID, Coord string }
-type TombstoneToReclaim struct{ TombstoneID, Coord, Provenance string }
+type TombstoneToReclaim struct{ TombstoneID, Coord string }
 
 // ActiveStaging is one coord with a currently-open local WriteHandle (期11 S1
 // #6, transfer-lifecycle-spec.md §2's "plain write: 轻量 staging 登记"): the
@@ -111,7 +111,7 @@ func (s *Scrubber) logOrphanLiveCount(cr *channelRoot, resources []ResourceLande
 // never a partial ack.
 func (s *Scrubber) reclaimPendingTombstones(ctx context.Context, cr *channelRoot, pending []TombstoneToReclaim, ack ReclaimAckFunc) {
 	for _, ts := range pending {
-		if err := s.Reclaimer.Reclaim(cr, ts.Coord, ts.Provenance); err != nil {
+		if err := s.Reclaimer.Reclaim(cr, ts.Coord); err != nil {
 			s.logger().Warn("storagehost.scrubber.reclaim_failed", "tombstone", ts.TombstoneID, "coord", ts.Coord, "err", err)
 			continue
 		}
