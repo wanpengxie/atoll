@@ -13,20 +13,16 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// actorPresent reports whether id is in the channel's actor roster (GET /actors,
-// backed by the in-gate sysactor actor.list → membership registry).
+// actorPresent reads the Home registry directly through the test assembly.
 func actorPresent(t *testing.T, env *testEnv, cookies []*http.Cookie, chID, id string) bool {
 	t.Helper()
-	w := env.do(t, "GET", "/api/channels/"+chID+"/actors", nil, cookies)
-	assertStatus(t, w, http.StatusOK)
-	var body struct {
-		Actors []map[string]any `json:"actors"`
+	_ = cookies
+	actors, err := env.app.ActorsForTest(channel.ID(chID))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode actors: %v", err)
-	}
-	for _, a := range body.Actors {
-		if a["id"] == id {
+	for _, a := range actors {
+		if a.ID == actor.ActorID(id) {
 			return true
 		}
 	}

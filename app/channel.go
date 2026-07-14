@@ -2,12 +2,10 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -15,7 +13,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -129,7 +126,8 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	// Membrane law: the creator is a member. Admit is the pure-membership动词 —
 	// the creating user's not→member edge (§4.6). No cell here (the human is
 	// embodied by the ring / subjectgate, never welded at this call site).
-	if _, mErr := admit(userID, actor.KindHuman); mErr != nil {
+	creatorID, mErr := admit(userID, actor.KindHuman)
+	if mErr != nil {
 		rollback("creator admit", mErr)
 		return
 	}
@@ -186,6 +184,7 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"id": chID, "workspace_id": wsID, "name": req.Name,
 		"type": req.Type, "created_at": now, "default_agent": string(boostID),
+		"creator_actor_id": string(creatorID),
 	})
 }
 
@@ -375,153 +374,6 @@ func (a *App) handleListWorkspaceMembers(c *gin.Context) {
 		result = []gin.H{}
 	}
 	c.JSON(http.StatusOK, gin.H{"members": result})
-}
-
-func (a *App) handleListActors(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
-	if !ok {
-		return
-	}
-	home := a.homeOrError(c, channel.ID(chID))
-	if home == nil {
-		return
-	}
-
-	actors, err := home.View().ListActors(c.Request.Context())
-	if err != nil {
-		a.logger.Error("list actors", "channel", chID, "err", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
-	}
-
-	var result []gin.H
-	for _, rec := range actors {
-		result = append(result, gin.H{
-			"id": string(rec.ID), "kind": string(rec.Kind),
-			"principal": rec.Principal, "binding": string(rec.Binding), "created_at": rec.CreatedAt,
-		})
-	}
-	if result == nil {
-		result = []gin.H{}
-	}
-	c.JSON(http.StatusOK, gin.H{"channel_id": chID, "actors": result})
-}
-
-// ---------------------------------------------------------------------------
-// Message handlers
-// ---------------------------------------------------------------------------
-
-func (a *App) handleCursor(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
-	if !ok {
-		return
-	}
-	home := a.homeOrError(c, channel.ID(chID))
-	if home == nil {
-		return
-	}
-	seq, err := home.View().MaxSeq(c.Request.Context())
-	if err != nil {
-		a.logger.Error("cursor: max seq", "channel", chID, "err", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"last_received_seq": seq})
-}
-
-func (a *App) handleListMessages(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
-	if !ok {
-		return
-	}
-	home := a.homeOrError(c, channel.ID(chID))
-	if home == nil {
-		return
-	}
-
-	afterStr := c.DefaultQuery("after", "0")
-	after, _ := strconv.ParseInt(afterStr, 10, 64)
-	limitStr := c.DefaultQuery("limit", "100")
-	limit, _ := strconv.Atoi(limitStr)
-	if limit <= 0 || limit > 1000 {
-		limit = 100
-	}
-
-	rows, err := home.View().ReadAfterSeq(c.Request.Context(), after, limit)
-	if err != nil {
-		a.logger.Error("list messages", "channel", chID, "err", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
-	}
-
-	result := make([]gin.H, 0, len(rows))
-	for _, r := range rows {
-		result = append(result, gin.H{
-			"seq":         r.Seq,
-			"is_terminal": r.IsTerminal,
-			"envelope":    r.Envelope,
-		})
-	}
-	c.JSON(http.StatusOK, result)
-}
-
-// ---------------------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------------------
-
-type setDefaultAgentReq struct {
-	InstanceID string `json:"instance_id"`
-}
-
-// handleSetDefaultAgent re-points (or clears) a channel's default_agent — the
-// entry point for "user repoints the brain" (install a daemon agent and make it
-// default, or fail back to agent:boost). It is an HTTP垫片 (NP-1=c): it replays the
-// session user through the door (channel.set_default_agent, audience=[system]), so
-// the pointer-validation + write live in the executor and the action lands 笔为
-// user:X in the log. The pointer may only target an instance already in the
-// channel's composition; an empty instance_id clears it.
-func (a *App) handleSetDefaultAgent(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
-	if !ok {
-		return
-	}
-	var req setDefaultAgentReq
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "bad request"})
-		return
-	}
-	payload, _ := json.Marshal(instancePayload{InstanceID: strings.TrimSpace(req.InstanceID)})
-	r, err := a.submitControlThroughDoor(c.Request.Context(), chID, middleware.UserID(c),
-		home.TypeSetDefaultAgent, payload)
-	a.finishControlRequest(c, r, err, func(body map[string]any) (int, any) {
-		da, _ := body["default_agent"].(string)
-		return http.StatusOK, gin.H{"channel_id": chID, "default_agent": da}
-	})
-}
-
-// handleRemoveActor is the HTTP垫片 for the channel-internal removal半 (红线11): a
-// member removes an actor from THIS channel by replaying through the door
-// (channel.remove_actor, audience=[system]). It is distinct from the world-layer
-// decl soft-delete (handleDeleteDecl, DELETE /actor-decls/:declID): that de-registers
-// a cross-channel identity and cascades via a system-authored mirror; this is one
-// member removing one channel member or composition instance, 笔为 user:X.
-func (a *App) handleRemoveActor(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
-	if !ok {
-		return
-	}
-	inst := strings.TrimSpace(c.Param("instanceID"))
-	if inst == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "instance_id required"})
-		return
-	}
-	payload, _ := json.Marshal(instancePayload{InstanceID: inst})
-	r, err := a.submitControlThroughDoor(c.Request.Context(), chID, middleware.UserID(c),
-		home.TypeRemoveActor, payload)
-	a.finishControlRequest(c, r, err, func(body map[string]any) (int, any) {
-		removed, _ := body["removed"].(string)
-		return http.StatusOK, gin.H{"channel_id": chID, "removed": removed}
-	})
 }
 
 // channelHasInstance reports whether instanceID is in the channel's composition

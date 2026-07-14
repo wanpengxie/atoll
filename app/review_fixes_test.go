@@ -27,22 +27,17 @@ func init() {
 	})
 }
 
-// actorKind returns the roster kind the channel records for id (GET /actors,
-// backed by the in-gate sysactor actor.list → membership registry), or "".
+// actorKind returns the Home registry kind for id, or "".
 func actorKind(t *testing.T, env *testEnv, cookies []*http.Cookie, chID, id string) string {
 	t.Helper()
-	w := env.do(t, "GET", "/api/channels/"+chID+"/actors", nil, cookies)
-	assertStatus(t, w, http.StatusOK)
-	var body struct {
-		Actors []map[string]any `json:"actors"`
+	_ = cookies
+	actors, err := env.app.ActorsForTest(channel.ID(chID))
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode actors: %v", err)
-	}
-	for _, a := range body.Actors {
-		if a["id"] == id {
-			k, _ := a["kind"].(string)
-			return k
+	for _, a := range actors {
+		if a.ID == actor.ActorID(id) {
+			return string(a.Kind)
 		}
 	}
 	return ""

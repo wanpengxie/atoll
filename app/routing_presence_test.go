@@ -1,8 +1,6 @@
 package app_test
 
 import (
-	"fmt"
-	"net/http"
 	"net/http/httptest"
 	"testing"
 
@@ -41,26 +39,5 @@ func TestRouting_DeadDefaultAgentIs503(t *testing.T) {
 	ack2 := c.sendMessage(map[string]any{"msg_type": "chat.text", "payload": map[string]any{"text": "hi again"}})
 	if ack2["type"] != "error" || ack2["error"] != "unavailable" {
 		t.Fatalf("dead default: want error unavailable, got %v", ack2)
-	}
-}
-
-// TestHomeUnavailable_TwoState (A10, DoD): home==nil splits honestly by whether
-// the directory (channels table) knows the channel — absent → 404 (permanent),
-// present-but-not-open → 503 "channel unavailable" (retryable). One handler, two
-// states, never conflated.
-func TestHomeUnavailable_TwoState(t *testing.T) {
-	env := setupTestApp(t)
-	s := fullSetup(t, env)
-
-	// (i) directory has no such channel → 404.
-	w := env.do(t, "GET", "/api/channels/does-not-exist/messages", nil, s.cookies)
-	assertStatus(t, w, http.StatusNotFound)
-
-	// (ii) directory HAS the channel but its home is not open → 503 unavailable.
-	env.app.DropHomeForTest(channel.ID(s.chID))
-	w = env.do(t, "GET", fmt.Sprintf("/api/channels/%s/messages", s.chID), nil, s.cookies)
-	assertStatus(t, w, http.StatusServiceUnavailable)
-	if got := respJSON(t, w)["error"]; got != "channel unavailable" {
-		t.Fatalf("503 body error = %q, want %q", got, "channel unavailable")
 	}
 }

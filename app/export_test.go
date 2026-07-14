@@ -11,21 +11,49 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/atoll/lib/introspect"
 	platformhome "github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // errTestChannelNotLoaded stands in for a torn-down home in the test seams below.
 var errTestChannelNotLoaded = errors.New("app: channel not loaded")
 
-// SetControlRequestTimeoutForTest overrides the channel-control HTTP adapter's bounded
-// wait so a test can exercise the timeout branch (202+request_id) deterministically
-// (a near-zero timeout times out before the async door reply can commit). Test-only.
-func (a *App) SetControlRequestTimeoutForTest(d time.Duration) {
-	a.controlRequestTimeout = d
+func (a *App) ActorsForTest(chID channel.ID) ([]storespec.Record, error) {
+	h := a.getHome(chID)
+	if h == nil {
+		return nil, errTestChannelNotLoaded
+	}
+	return h.View().ListActors(context.Background())
+}
+
+func (a *App) MessagesForTest(chID channel.ID) ([]storespec.StoredRow, error) {
+	h := a.getHome(chID)
+	if h == nil {
+		return nil, errTestChannelNotLoaded
+	}
+	return h.View().ReadAfterSeq(context.Background(), 0, 1000)
+}
+
+func (a *App) PresenceForTest(chID channel.ID, id actor.ActorID) (member, known, online bool, err error) {
+	h := a.getHome(chID)
+	if h == nil {
+		return false, false, false, errTestChannelNotLoaded
+	}
+	snapshot, err := h.View().Snapshot(context.Background(), id)
+	if err != nil {
+		return false, false, false, err
+	}
+	testimony, known := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
+	if !known {
+		return snapshot.Member, false, false, nil
+	}
+	p, ok := introspect.ParseDevicePresence(testimony.Val)
+	return snapshot.Member, ok, ok && p.Online, nil
 }
 
 // OperateFaceForTest exposes the app's channel-operate executor so black-box

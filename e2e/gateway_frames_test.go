@@ -109,36 +109,15 @@ func TestGatewayFrames(t *testing.T) {
 	ch := api.must("POST", "/api/workspaces/"+wsID+"/channels", map[string]any{"name": "home"}, http.StatusCreated)
 	chID, _ := ch["id"].(string)
 
-	// The creator is auto-admitted as a human channel member (the reconcile ring
-	// spins its home-side cell). Resolve its actor id — the subject we drive frames
-	// as, and the audience of the self-addressed requests below.
-	var humanID string
-	pollUntil(t, "creator represented by one active human", 30*time.Second, func() bool {
-		_, m := api.do("GET", "/api/channels/"+chID+"/actors", nil)
-		rows, _ := m["actors"].([]any)
-		for _, raw := range rows {
-			row, _ := raw.(map[string]any)
-			if row["kind"] == "human" && row["principal"] == userID {
-				humanID, _ = row["id"].(string)
-				return humanID != ""
-			}
-		}
-		return false
-	})
+	// Channel creation returns the creator's admitted subject identity. Channel
+	// internals have no parallel HTTP roster transport.
+	humanID, _ := ch["creator_actor_id"].(string)
+	if humanID == "" || userID == "" {
+		t.Fatalf("channel creation omitted creator subject identity: %v", ch)
+	}
 
 	cookie := api.cookieHeader()
 	ws := dialWS(t, base, cookie, chID, 0)
-
-	// ---- presence 真路径 ---------------------------------------------------
-	// The attach seated a device (首入 → online); the home-side human cell reads its
-	// slot snapshot and self-reports device presence, folded read-time into the
-	// status API (out-of-band, never a truth-log write).
-	pollUntil(t, "human self-reports device online after attach", 30*time.Second, func() bool {
-		_, m := api.do("GET", "/api/channels/"+chID+"/actors/"+humanID+"/status", nil)
-		known, _ := m["known"].(bool)
-		online, _ := m["online"].(bool)
-		return known && online
-	})
 
 	// ---- submit (event) ----------------------------------------------------
 	// An explicit audience skips gateway routing; a public event lands in the log

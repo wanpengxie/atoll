@@ -39,9 +39,6 @@ func TestActorcapsConfinedToPlatformAndActorbase(t *testing.T) {
 		if imp != actorcapsPkg {
 			return
 		}
-		if strings.HasSuffix(slash, "_test.go") {
-			return
-		}
 		for _, p := range actorcapsAllowedPrefix {
 			if strings.HasPrefix(slash, p) {
 				return
@@ -133,7 +130,7 @@ func TestNoRetiredFactoryShapeResidual(t *testing.T) {
 				}
 				return nil
 			}
-			if !strings.HasSuffix(path, ".go") || strings.HasSuffix(path, "_test.go") {
+			if !strings.HasSuffix(path, ".go") {
 				return nil
 			}
 			b, rerr := readFile(path)

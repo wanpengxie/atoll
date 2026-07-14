@@ -17,6 +17,8 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // xhsDeviceAddr is a fixed loopback port for the adapter's private device
@@ -191,21 +193,20 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	}
 }
 
-// waitForActor polls /api/channels/:chID/actors until the given actor id appears
-// as a member, or fails. This IS the daemon-attach verification point: the actor
+// waitForActor polls the canonical Home registry until the given actor id appears
+// as a member. This IS the daemon-attach verification point: the actor
 // only registers once the daemon's /compute link handshake declared its cells.
 func waitForActor(t *testing.T, env *testEnv, s setupResult, id string, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors", s.chID), nil, s.cookies)
-		assertStatus(t, w, http.StatusOK)
-		body := respJSON(t, w)
-		if actors, ok := body["actors"].([]any); ok {
-			for _, raw := range actors {
-				if m, ok := raw.(map[string]any); ok && m["id"] == id {
-					return
-				}
+		actors, err := env.app.ActorsForTest(channel.ID(s.chID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, rec := range actors {
+			if rec.ID == actor.ActorID(id) {
+				return
 			}
 		}
 		if time.Now().After(deadline) {
@@ -221,20 +222,13 @@ func waitForResponse(t *testing.T, env *testEnv, s setupResult, parentID string,
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/messages?after=0", s.chID), nil, s.cookies)
-		assertStatus(t, w, http.StatusOK)
-		for _, raw := range respJSONArray(t, w) {
-			row, ok := raw.(map[string]any)
-			if !ok {
-				continue
-			}
-			envMap := decodeEnvelope(row["envelope"])
-			if envMap == nil {
-				continue
-			}
-			if envMap["kind"] == "response" && envMap["parent_id"] == parentID {
-				pl, _ := json.Marshal(envMap["payload"])
-				return pl
+		rows, err := env.app.MessagesForTest(channel.ID(s.chID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, row := range rows {
+			if row.Envelope.Kind == message.KindResponse && string(row.Envelope.ParentID) == parentID {
+				return append(json.RawMessage(nil), row.Envelope.Payload...)
 			}
 		}
 		if time.Now().After(deadline) {
@@ -355,9 +349,8 @@ func TestXHSLiveActorStatus(t *testing.T) {
 	waitDeviceOnline(t, env, s, string(xhsID), false, 5*time.Second)
 }
 
-// waitDeviceOnline polls GET /actors/:id/status until the actor returns a
-// successful HTTP presence projection whose device status matches
-// want (or fails). It deliberately does NOT accept live:false as proof of
+// waitDeviceOnline polls the canonical Home presence fold until the device
+// status matches want. It deliberately does NOT accept live:false as proof of
 // offline: live:false means the actor was unreachable (it never answered), which
 // would let a never-answering actor pass the offline assertion vacuously. The
 // offline proof must be a real answer carrying device_online:false — that is what
@@ -368,22 +361,21 @@ func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, id), nil, s.cookies)
-		assertStatus(t, w, http.StatusOK)
-		body := respJSON(t, w)
-		// New shape: {known:bool, online:bool}. Only a KNOWN device presence (the adapter
+		_, known, online, err := env.app.PresenceForTest(channel.ID(s.chID), actor.ActorID(id))
+		if err != nil {
+			t.Fatal(err)
+		}
+		// Only a KNOWN device presence (the adapter
 		// actually published a device-presence edge that the obs chain folded at the
 		// home) proves the want — known:false (unknown) must never satisfy either
 		// assertion vacuously. This exercises the full L3 obs push chain end-to-end:
 		// adapter PublishObs → daemon population forward → KindObs wire → home port →
 		// publishObs → fold → View.Snapshot → /status.
-		if known, _ := body["known"].(bool); known {
-			if online, ok := body["online"].(bool); ok && online == want {
-				return
-			}
+		if known && online == want {
+			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("status online never became %v (via a known device presence) within %s (last body=%v)", want, timeout, body)
+			t.Fatalf("status online never became %v (via a known device presence) within %s (known=%v online=%v)", want, timeout, known, online)
 		}
 		time.Sleep(25 * time.Millisecond)
 	}

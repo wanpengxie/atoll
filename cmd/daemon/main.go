@@ -65,8 +65,8 @@ func channelFromServerURL(raw string) string {
 // no 3-try-fatal startup gate). Members updates the builder table BEFORE returning,
 // so the ring's subsequent per-id Lookup sees a consistent snapshot.
 type planSource struct {
-	ws, key, chID, wsRoot, deviceName string
-	logger                            *slog.Logger
+	chID, wsRoot, deviceName string
+	logger                   *slog.Logger
 
 	mu          sync.Mutex
 	lastDesired []actorrt.DesiredMember
@@ -74,9 +74,9 @@ type planSource struct {
 	lastBuilt   int // -1 until the first successful fetch (to Info-log only on change)
 }
 
-func newPlanSource(ws, key, chID, wsRoot, deviceName string, logger *slog.Logger) *planSource {
+func newPlanSource(chID, wsRoot, deviceName string, logger *slog.Logger) *planSource {
 	return &planSource{
-		ws: ws, key: key, chID: chID, wsRoot: wsRoot, deviceName: deviceName,
+		chID: chID, wsRoot: wsRoot, deviceName: deviceName,
 		logger:    logger,
 		builders:  map[actor.ActorID]platform.ActorFactory{},
 		lastBuilt: -1,
@@ -196,7 +196,7 @@ func main() {
 	// Startup does NOT gate on a first fetch: compute.Run connects the link, then the
 	// ring calls Members, which tolerates a fetch failure (last-known-good, initially
 	// empty) — connect first, pull later, keep retrying.
-	source := newPlanSource(*ws, *key, chID, wsRoot, deviceName, logger)
+	source := newPlanSource(chID, wsRoot, deviceName, logger)
 
 	// The link layer is auth-agnostic: the api key rides the server WS url's query
 	// string (?key=), which the app layer resolves on WS upgrade. There is no

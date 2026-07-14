@@ -18,7 +18,7 @@ import (
 type EntitlementRoute struct {
 	Channel   channel.ID
 	Home      *home.Home
-	Access    string // "member" (户籍) | "observer" (workspace 观众/读资格)
+	Access    string        // "member" (户籍) | "observer" (workspace 观众/读资格)
 	SubjectID actor.ActorID // member only; empty for an observer
 	CheckedAt time.Time
 }

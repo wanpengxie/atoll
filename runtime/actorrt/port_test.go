@@ -239,11 +239,11 @@ func TestPortHandshakeRejects(t *testing.T) {
 	})
 }
 
-// TestAttachHandshakeBounded (F8): a peer that connects but NEVER sends a
+// TestPortHandshakeBounded (F8): a peer that connects but NEVER sends a
 // handshake must not pin the Attach goroutine forever — the substrate self-
 // guards the handshake time bound via hsCtx. With a short-deadline hsCtx, Attach
 // returns an error promptly instead of blocking on the parked read.
-func TestAttachHandshakeBounded(t *testing.T) {
+func TestPortHandshakeBounded(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})
 	hostConn, remoteConn := net.Pipe()

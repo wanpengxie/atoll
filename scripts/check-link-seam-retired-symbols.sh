@@ -81,7 +81,6 @@ check_live() {
 	local hits status
 	set +e
 	hits=$(rg -n --type go \
-		--glob '!**/*_test.go' \
 		"$pattern" app/ cmd/ platform/ runtime/ 2>&1)
 	status=$?
 	set -e

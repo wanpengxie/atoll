@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -68,6 +69,29 @@ func (p *testPlanSource) Lookup(id actor.ActorID) (platform.ActorFactory, bool) 
 	defer p.mu.Unlock()
 	f, ok := p.builds[id]
 	return f, ok
+}
+
+func truthRowsForTest(t *testing.T, env *testEnv, chID string) []any {
+	t.Helper()
+	rows, err := env.app.MessagesForTest(channel.ID(chID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := make([]any, 0, len(rows))
+	for _, row := range rows {
+		b, err := json.Marshal(row.Envelope)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var envelope any
+		if err := json.Unmarshal(b, &envelope); err != nil {
+			t.Fatal(err)
+		}
+		out = append(out, map[string]any{
+			"seq": float64(row.Seq), "is_terminal": row.IsTerminal, "envelope": envelope,
+		})
+	}
+	return out
 }
 
 // testEnv holds a fresh App + handler for one test. Each test gets an isolated
@@ -449,10 +473,8 @@ func TestE2E_SendMessageAndReadBack(t *testing.T) {
 		t.Fatal("send message returned empty message_id")
 	}
 
-	// Read back messages.
-	w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/messages?after=0", s.chID), nil, s.cookies)
-	assertStatus(t, w, http.StatusOK)
-	msgs := respJSONArray(t, w)
+	// Read back through the canonical Home truth view.
+	msgs := truthRowsForTest(t, env, s.chID)
 	if len(msgs) == 0 {
 		t.Fatal("expected at least one message, got 0")
 	}
@@ -585,9 +607,7 @@ func TestE2E_DaemonAttachAndMessageFlow(t *testing.T) {
 	reqMsgID := ack["message_id"].(string)
 
 	// Read back -- should contain the request message.
-	w = env.do(t, "GET", fmt.Sprintf("/api/channels/%s/messages?after=0", s.chID), nil, s.cookies)
-	assertStatus(t, w, http.StatusOK)
-	msgs := respJSONArray(t, w)
+	msgs := truthRowsForTest(t, env, s.chID)
 	if len(msgs) == 0 {
 		t.Fatal("expected at least one message")
 	}
@@ -664,9 +684,7 @@ func TestE2E_SendMessageNoAudienceDefaultFill(t *testing.T) {
 	}
 
 	// Verify both messages exist in truth.
-	w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/messages?after=0", s.chID), nil, s.cookies)
-	assertStatus(t, w, http.StatusOK)
-	msgs := respJSONArray(t, w)
+	msgs := truthRowsForTest(t, env, s.chID)
 	if len(msgs) < 2 {
 		t.Fatalf("expected at least 2 messages, got %d", len(msgs))
 	}

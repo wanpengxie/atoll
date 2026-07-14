@@ -36,6 +36,12 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 	h.closeOnce.Do(func() {
 		started := time.Now()
 		defer close(h.closeDone)
+		// Publish the lifecycle fence as the first close action. Public mutation
+		// entry points check closed before touching durable state, so no scheduler
+		// handoff or fault checkpoint between close entry and Runtime.Seal can leave
+		// a store-write window open.
+		h.state.Store(uint32(homeClosing))
+		h.closed.Store(true)
 		var errs []error
 		addErr := func(err error) {
 			if err != nil {
@@ -62,20 +68,14 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 			})
 			guard(name, fn)
 		}
-		// Step ZERO seals the construction authority — before even the closing
-		// state flip, so there is no instant at which the Home is observably
-		// "entering close" while the runtime still admits new embodiments
-		// (公理 7: 进入关闭即封门, and close entry IS this line).
+		// Step ZERO seals the construction authority immediately after the public
+		// lifecycle fence above.
 		step("close.seal", func() {
 			if h.channel != nil && h.channel.Cells() != nil {
 				h.channel.Cells().Seal()
 			}
 		})
-		step("close.begin", func() {
-			h.state.Store(uint32(homeClosing))
-			_ = h.faults.checkpoint("state.closing")
-			h.closed.Store(true)
-		})
+		guard("state.closing.checkpoint", func() { _ = h.faults.checkpoint("state.closing") })
 		step("close.reconcile", func() {
 			if h.reconcileStop == nil {
 				return

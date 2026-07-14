@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -13,36 +12,10 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// daemonAssignment is one actor instance the server assigns a daemon to host for
-// a channel. It carries only what the daemon needs to BUILD the instance: id +
-// class (the engine/tool class) + the resolved config (global identity overlaid
-// by per-channel). Deliberately NO state/seed: a daemon-placed looper resumes
-// from its OWN local state slot (claude self-manages locally); the server holds
-// no state for daemon instances (a server-side audit copy is a future addition).
-type daemonAssignment struct {
-	InstanceID string          `json:"instance_id"`
-	Class      string          `json:"class"`
-	Config     json.RawMessage `json:"config,omitempty"`
-	Epoch      int64           `json:"epoch"`
-}
-
 type appPlanProvider struct{ app *App }
 
 func (p appPlanProvider) Plan(ctx context.Context, chID channel.ID, daemonID string) ([]platform.PlanActor, error) {
-	assignments, err := p.app.daemonComposition(ctx, chID, daemonID)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]platform.PlanActor, 0, len(assignments))
-	for _, a := range assignments {
-		kind, ok := registry.ClassKind(a.Class)
-		if !ok {
-			return nil, fmt.Errorf("app: plan instance %s has unknown class %q", a.InstanceID, a.Class)
-		}
-		out = append(out, platform.PlanActor{InstanceID: actor.ActorID(a.InstanceID), Class: a.Class, Config: a.Config,
-			Kind: kind, Binding: actor.BindingRuntimeInboundViaRelay, Epoch: a.Epoch})
-	}
-	return out, nil
+	return p.app.daemonComposition(ctx, chID, daemonID)
 }
 
 // daemonComposition reads the channel's DESIRED daemon-placed composition
@@ -56,7 +29,7 @@ func (p appPlanProvider) Plan(ctx context.Context, chID channel.ID, daemonID str
 // desired_host filtering resolves G4: two daemons bound to one channel each pull
 // ONLY their own rows; an unassigned pool row (desired_host=”) is delivered to
 // no daemon (a legal transient — no daemon claims it yet).
-func (a *App) daemonComposition(ctx context.Context, chID channel.ID, daemonID string) ([]daemonAssignment, error) {
+func (a *App) daemonComposition(ctx context.Context, chID channel.ID, daemonID string) ([]platform.PlanActor, error) {
 	h := a.getHome(chID)
 	if h == nil {
 		return nil, channelUnavailable()
@@ -65,7 +38,7 @@ func (a *App) daemonComposition(ctx context.Context, chID channel.ID, daemonID s
 	if err != nil {
 		return nil, err
 	}
-	out := make([]daemonAssignment, 0, len(rows))
+	out := make([]platform.PlanActor, 0, len(rows))
 	for _, r := range rows {
 		if r.Placement != storespec.PlacementDaemon || r.DesiredHost != daemonID {
 			continue
@@ -76,13 +49,16 @@ func (a *App) daemonComposition(ctx context.Context, chID channel.ID, daemonID s
 				return nil, fmt.Errorf("app: plan instance %s resolve declaration %q: %w", r.InstanceID, r.DeclID, err)
 			}
 		}
-		if _, ok := registry.ClassKind(r.Class); !ok {
+		kind, ok := registry.ClassKind(r.Class)
+		if !ok {
 			return nil, fmt.Errorf("app: plan instance %s has unknown class %q", r.InstanceID, r.Class)
 		}
-		out = append(out, daemonAssignment{
-			InstanceID: string(r.InstanceID),
+		out = append(out, platform.PlanActor{
+			InstanceID: r.InstanceID,
 			Class:      r.Class,
 			Config:     mergeConfig(global, r.ConfigJSON),
+			Kind:       kind,
+			Binding:    actor.BindingRuntimeInboundViaRelay,
 			Epoch:      r.Epoch,
 		})
 	}

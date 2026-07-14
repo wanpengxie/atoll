@@ -5,10 +5,11 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
-func TestOpenDB_InstallsFreshSchemaAndReopensWithoutRetiredObjects(t *testing.T) {
+func TestOpenDB_InstallsFreshSchemaAndReopens(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "app.db")
 	p, err := OpenProcessDB(path, true)
 	if err != nil {
@@ -44,16 +45,6 @@ func TestOpenDB_InstallsFreshSchemaAndReopensWithoutRetiredObjects(t *testing.T)
 		t.Fatalf("default_class=%q want echo", class)
 	}
 
-	for _, retired := range []string{"agents", "channel_actors"} {
-		var n int
-		if err := db.QueryRow(
-			`SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?`, retired).Scan(&n); err != nil {
-			t.Fatalf("inspect retired table %q: %v", retired, err)
-		}
-		if n != 0 {
-			t.Errorf("retired table %q exists in fresh schema", retired)
-		}
-	}
 	assertColumnAbsent(t, db, "channels", "default_agent")
 	assertColumnAbsent(t, db, "actor_decls", "looper")
 	assertColumnAbsent(t, db, "actor_decls", "default_looper")
@@ -118,6 +109,66 @@ func TestOpenProcessDB_StrictReopenRejectsMalformedSchemaWithoutMutation(t *test
 				}
 			},
 		},
+		{
+			name: "constraint incompatible",
+			build: func(t *testing.T, path string) {
+				db := openRawSQLite(t, path)
+				initializeSchemaVariant(t, db, func(object schemaObject) string {
+					if object.name == "users" {
+						return strings.Replace(object.sql, "email TEXT UNIQUE NOT NULL", "email TEXT", 1)
+					}
+					return object.sql
+				})
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "index definition incompatible",
+			build: func(t *testing.T, path string) {
+				db := openRawSQLite(t, path)
+				initializeSchemaVariant(t, db, func(object schemaObject) string {
+					if object.name == "ux_decl_jobs_dedup" {
+						return `CREATE INDEX ux_decl_jobs_dedup ON decl_fanout_jobs(op, decl_id)`
+					}
+					return object.sql
+				})
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "extra trigger",
+			build: func(t *testing.T, path string) {
+				db := openRawSQLite(t, path)
+				if err := initializeSchema(db); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`CREATE TRIGGER unexpected_trigger AFTER INSERT ON users BEGIN SELECT 1; END`); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "extra view",
+			build: func(t *testing.T, path string) {
+				db := openRawSQLite(t, path)
+				if err := initializeSchema(db); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := db.Exec(`CREATE VIEW unexpected_view AS SELECT id FROM users`); err != nil {
+					t.Fatal(err)
+				}
+				if err := db.Close(); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
@@ -150,6 +201,15 @@ func openRawSQLite(t *testing.T, path string) *sql.DB {
 		t.Fatal(err)
 	}
 	return db
+}
+
+func initializeSchemaVariant(t *testing.T, db *sql.DB, definition func(schemaObject) string) {
+	t.Helper()
+	for _, object := range appSchema {
+		if _, err := db.Exec(definition(object)); err != nil {
+			t.Fatalf("create schema variant object %s: %v", object.name, err)
+		}
+	}
 }
 
 func assertColumnAbsent(t *testing.T, db *sql.DB, table, column string) {

@@ -14,7 +14,6 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/gin-gonic/gin"
 
@@ -60,11 +59,6 @@ type App struct {
 	// gateway needs the app's routing/entitlement面, breaking the構造 cycle).
 	wsGateway      WSGateway
 	membershipPoke func(principal string)
-
-	// controlRequestTimeout bounds how long a channel-control HTTP request waits for the
-	// door's terminal reply before returning 202 + request_id (前端语义不变). A test
-	// seam sets it tiny to exercise the timeout branch deterministically.
-	controlRequestTimeout time.Duration
 
 	// seedAdmitFailHook / revokeFailHook are test-only injected failure seams (nil
 	// in production — no if-bool branch survives in the production handlers, mirroring
@@ -117,15 +111,14 @@ func New(cfg Config) (*App, error) {
 	}
 
 	a := &App{
-		db:                    cfg.DB,
-		logger:                logger,
-		homes:                 make(map[channel.ID]*home.Home),
-		channelDBDir:          cfg.ChannelDBDir,
-		uiDist:                cfg.UIDist,
-		controlRequestTimeout: defaultControlRequestTimeout,
-		extraDropKinds:        cfg.ExtraDropKinds,
-		daemonLocks:           newKeyedLockSet(),
-		declLocks:             newKeyedLockSet(),
+		db:             cfg.DB,
+		logger:         logger,
+		homes:          make(map[channel.ID]*home.Home),
+		channelDBDir:   cfg.ChannelDBDir,
+		uiDist:         cfg.UIDist,
+		extraDropKinds: cfg.ExtraDropKinds,
+		daemonLocks:    newKeyedLockSet(),
+		declLocks:      newKeyedLockSet(),
 	}
 
 	gin.SetMode(gin.ReleaseMode)
@@ -250,26 +243,11 @@ func (a *App) registerRoutes() {
 		api.GET("/channels/:chID", a.handleGetChannel)
 		api.DELETE("/channels/:chID", a.handleDeleteChannel)
 		api.GET("/channels/:chID/workspace-members", a.handleListWorkspaceMembers)
-		// DEPRECATED (第二链路, H2 defer): channel-internal reads move onto the
-		// gateway ws (roster/tail/cursor frames). These read adapters do not
-		// new consumers. The channel-internal WRITE path is already gone — the ws
-		// message frame replaced POST /messages (H1=a, zero backward-compat).
-		api.GET("/channels/:chID/actors", a.handleListActors)
-		api.GET("/channels/:chID/actors/:actorID/status", a.handleActorStatus)
-		api.GET("/channels/:chID/presence-drops", a.handleChannelPresenceDrops)
-		api.GET("/channels/:chID/cursor", a.handleCursor)
-		api.GET("/channels/:chID/messages", a.handleListMessages)
-
-		// A user's actor-instance declarations (world layer, kind-neutral) +
-		// introduce-to-channel / restart.
+		// A user's actor-instance declarations (world layer, kind-neutral).
 		api.GET("/actor-decls", a.handleListDecls)
 		api.POST("/actor-decls", a.handleCreateDecl)
 		api.PATCH("/actor-decls/:declID", a.handleUpdateDecl)
 		api.DELETE("/actor-decls/:declID", a.handleDeleteDecl)
-		api.POST("/actor-decls/:declID/restart", a.handleRestartDecl)
-		api.POST("/channels/:chID/actors", a.handleIntroduceActor)
-		api.DELETE("/channels/:chID/actors/:instanceID", a.handleRemoveActor)
-		api.PUT("/channels/:chID/default_agent", a.handleSetDefaultAgent)
 
 		api.GET("/daemons", a.handleListDaemons)
 		api.POST("/daemons", a.handleCreateDaemon)

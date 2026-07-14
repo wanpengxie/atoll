@@ -249,30 +249,20 @@ func addSecondMember(t *testing.T, env *testEnv, s setupResult, email string) ([
 	return cookies, aid
 }
 
-// pollPresence polls the actor-status endpoint until (known, online) matches, or
-// fatals. When wantKnown is false only known is checked.
+// pollPresence polls the canonical Home presence fold until (known, online)
+// matches. When wantKnown is false only known is checked.
 func pollPresence(t *testing.T, env *testEnv, s setupResult, actorID string, wantKnown, wantOnline bool, timeout time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
-	var last string
 	for {
-		w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, actorID), nil, s.cookies)
-		last = w.Body.String()
-		if w.Code == http.StatusOK {
-			m := respJSON(t, w)
-			known, _ := m["known"].(bool)
-			if known == wantKnown {
-				if !wantKnown {
-					return
-				}
-				online, _ := m["online"].(bool)
-				if online == wantOnline {
-					return
-				}
+		_, known, online, err := env.app.PresenceForTest(channel.ID(s.chID), actor.ActorID(actorID))
+		if err == nil && known == wantKnown {
+			if !wantKnown || online == wantOnline {
+				return
 			}
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("presence %s: want known=%v online=%v; last: %s", actorID, wantKnown, wantOnline, last)
+			t.Fatalf("presence %s: want known=%v online=%v; got known=%v online=%v err=%v", actorID, wantKnown, wantOnline, known, online, err)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
@@ -487,11 +477,9 @@ func TestWS_PresenceMultiTab(t *testing.T) {
 
 	tab1.close()
 	time.Sleep(200 * time.Millisecond)
-	w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors/%s/status", s.chID, string(uid)), nil, s.cookies)
-	assertStatus(t, w, http.StatusOK)
-	m := respJSON(t, w)
-	if m["known"] != true || m["online"] != true {
-		t.Fatalf("after one tab closed the other is still open: want online, got %v", m)
+	_, known, online, err := env.app.PresenceForTest(channel.ID(s.chID), uid)
+	if err != nil || !known || !online {
+		t.Fatalf("after one tab closed the other is still open: known=%v online=%v err=%v", known, online, err)
 	}
 
 	tab2.close()
@@ -599,4 +587,3 @@ func TestWS_AfterFrameNonMember(t *testing.T) {
 		t.Fatalf("non-member after: want forbidden, got %v", errFrame)
 	}
 }
-

@@ -1,7 +1,6 @@
 package app_test
 
 import (
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +8,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // ---------------------------------------------------------------------------
@@ -109,10 +110,10 @@ func TestHalfBuiltChannel_OpenClearError(t *testing.T) {
 	if g := env.do(t, "GET", "/api/channels/"+chID, nil, s.cookies); g.Code != http.StatusOK {
 		t.Fatalf("GET half-built channel: want 200, got %d (%s)", g.Code, g.Body.String())
 	}
-	// The actor roster reads cleanly too (the intrinsic system actor is always
-	// present; no panic on empty user membership).
-	if la := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/actors", chID), nil, s.cookies); la.Code != http.StatusOK {
-		t.Fatalf("list actors on half-built channel: want 200, got %d (%s)", la.Code, la.Body.String())
+	// The canonical Home registry reads cleanly too (the intrinsic system actor
+	// is always present; no panic on empty user membership).
+	if _, err := env.app.ActorsForTest(channel.ID(chID)); err != nil {
+		t.Fatalf("list actors on half-built channel: %v", err)
 	}
 
 	// Opening the ws: a non-channel-member (no Admit ever landed) may tail but a

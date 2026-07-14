@@ -408,3 +408,44 @@ func TestHomeStateTransitionsAndUnpublishIssuedHandles(t *testing.T) {
 		t.Fatalf("ServeAttach after Close = %d, want 503", rec.Code)
 	}
 }
+
+func TestHomeClosePublishesMutationFenceBeforeSealCheckpoint(t *testing.T) {
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	h, err := openHome(lifecycleConfig(t, "close-mutation-fence"), &homeFaults{
+		action: map[string]func(){
+			"close.seal": func() {
+				close(parked)
+				<-release
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	closed := make(chan error, 1)
+	go func() { closed <- h.Close() }()
+	<-parked
+
+	if _, _, _, err := h.IntroduceComposition(context.Background(), storespec.CompositionIntroduce{}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("IntroduceComposition during close = %v, want ErrClosed", err)
+	}
+	if err := h.Restart(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Restart during close = %v, want ErrClosed", err)
+	}
+	if err := h.Remove(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Remove during close = %v, want ErrClosed", err)
+	}
+	rows, err := h.cs.Composition.ListComposition(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("close-window mutations persisted rows: %+v", rows)
+	}
+
+	close(release)
+	if err := <-closed; err != nil {
+		t.Fatal(err)
+	}
+}

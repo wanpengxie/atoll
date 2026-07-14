@@ -50,12 +50,6 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 			t.Errorf("expected channel-local table %q missing after OpenChannel", name)
 		}
 	}
-	// Retired epoch: the type_registry tables must NOT exist.
-	for _, gone := range []string{"type_registry", "type_registry_schemas", "action_ledger", "worker_locks", "composition_migrated"} {
-		if present[gone] {
-			t.Errorf("retired table %q must not be created", gone)
-		}
-	}
 }
 
 // ChannelLocalTables enumerates exactly the surviving channel-local tables:

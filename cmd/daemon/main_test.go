@@ -62,7 +62,7 @@ func TestPlanSource_InvalidCandidatePreservesLastKnownGood(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			p := newPlanSource("ws://unused", "k", "c", "", "dev", slog.New(slog.NewTextHandler(io.Discard, nil)))
+			p := newPlanSource("c", "", "dev", slog.New(slog.NewTextHandler(io.Discard, nil)))
 			if err := p.ApplyPlan([]platform.PlanActor{{InstanceID: "agent:stable", Class: "test-ok-daemon"}}); err != nil {
 				t.Fatalf("seed LKG: %v", err)
 			}
