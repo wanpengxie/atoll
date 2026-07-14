@@ -21,18 +21,25 @@ import (
 
 // kickDaemonConverge drives the substrate half of a daemon revocation to
 // convergence on ONE channel home: KickDaemon (close every link the home holds
-// for computeID) is a hint, so it is retried a bounded number of times until
-// View.IsAttached reports the daemon gone, and a still-attached daemon after the
-// budget is logged (not an error — the link teardown is best-effort). No-op if the
-// home is not open in this process.
+// for computeID) is a hint, so it is executed at least once and then retried a
+// bounded number of times until View.IsAttached reports the daemon gone. The
+// unconditional first write matters because links register before attach
+// publication: IsAttached is a convergence observation, never permission to
+// skip the revocation command. A still-attached daemon after the budget is
+// logged (not an error — the link teardown is best-effort). No-op if the home
+// is not open in this process.
 func (a *App) kickDaemonConverge(chID channel.ID, daemonID string) {
 	home := a.getHome(chID)
 	if home == nil {
 		return
 	}
 	attempts := 0
-	for ; attempts < 3 && home.View().IsAttached(daemonID); attempts++ {
+	for attempts < 3 {
 		home.KickDaemon(daemonID)
+		attempts++
+		if !home.View().IsAttached(daemonID) {
+			break
+		}
 	}
 	if home.View().IsAttached(daemonID) {
 		a.logger.Warn("app: daemon kick did not converge", "channel", string(chID), "daemon", daemonID)
