@@ -56,11 +56,15 @@ func (h *Home) Declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 	if err != nil || !ok {
 		return DeclareResult{}, err
 	}
-	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}}) {
-		return DeclareResult{}, errors.New("platform: invalid declared control row")
-	}
+	// Assembly order (装配序): liveness row BEFORE authority publish — same
+	// rule as fork admission. Publishing authority first opens a window where
+	// a delivery finds no L row, returns invalid, and the pump advances past
+	// the request with no wake debt recorded.
 	if admitted.Created && h.liveness.AdmitIdentity(admitted.ID) != transitionApplied {
 		return DeclareResult{}, errors.New("platform: invalid declared liveness row")
+	}
+	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}}) {
+		return DeclareResult{}, errors.New("platform: invalid declared control row")
 	}
 	updated := false
 	if !admitted.Created && in.Config != nil && !bytes.Equal(row.Config, config) {

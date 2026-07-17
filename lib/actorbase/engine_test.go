@@ -247,6 +247,64 @@ func TestAutomaticTimerAckFailureIsObservedAndLeftRetryable(t *testing.T) {
 	}
 }
 
+// TestServeAutomaticTimerAckFiresOnHandlerSuccessNotOnError closes the gap
+// serve_test.go's fakeSys left open (spec S8/DoD 4: "Serve 道 = handler 正常
+// 返回"): fakeSys never implemented settleTimer, so dispatch's type-asserted
+// settle hook silently no-op'd there and no test ever proved Serve's
+// dispatch loop actually reaches the engine's real ack口 (settleTimer →
+// ackTimerObserved → ackTimer → sched.Ack). This drives a fired-timer-shaped
+// delivery through the REAL engine (not fakeSys) via Receive/Recv/dispatch —
+// the exact path Serve(routes) itself runs — and asserts against a recording
+// schedule fake: a handler that returns nil settles (real Ack call fires);
+// a handler that returns an error must NOT settle (no Ack call at all, so
+// the fired truth survives for redelivery, DoD 4's "处理中失败→不销").
+func TestServeAutomaticTimerAckFiresOnHandlerSuccessNotOnError(t *testing.T) {
+	e := newTestEngine(t, &fakePen{self: "actor:test"}, Hooks{}, 8, 8)
+	sched := &failingAckSchedule{} // err=nil: every delegated Ack call succeeds and is recorded.
+	e.sched = sched
+	e.lifeCtx = context.Background()
+	e.occupant.Store(int32(occupantRunning))
+
+	// Handler success: dispatch must settle true → real Ack call to sched.
+	okEnv := &message.Envelope{ID: "timer:fired-ok", Kind: message.KindEvent, Type: "tick"}
+	if err := e.Receive(context.Background(), okEnv); err != nil {
+		t.Fatalf("Receive(ok): %v", err)
+	}
+	msg, err := e.Recv()
+	if err != nil {
+		t.Fatalf("Recv(ok): %v", err)
+	}
+	dispatch(e, msg, map[string]Handler{
+		"tick": func(ctx context.Context, msg Msg) (any, error) { return "ok", nil },
+	})
+	sched.mu.Lock()
+	calls := append([]schedule.TimerID(nil), sched.calls...)
+	sched.mu.Unlock()
+	if !reflect.DeepEqual(calls, []schedule.TimerID{"fired-ok"}) {
+		t.Fatalf("Ack calls after handler success = %v, want [fired-ok]", calls)
+	}
+
+	// Handler error: dispatch must settle false → NO Ack call, fired truth
+	// left intact for redelivery.
+	errEnv := &message.Envelope{ID: "timer:fired-err", Kind: message.KindEvent, Type: "boom"}
+	if err := e.Receive(context.Background(), errEnv); err != nil {
+		t.Fatalf("Receive(err): %v", err)
+	}
+	msg, err = e.Recv()
+	if err != nil {
+		t.Fatalf("Recv(err): %v", err)
+	}
+	dispatch(e, msg, map[string]Handler{
+		"boom": func(ctx context.Context, msg Msg) (any, error) { return nil, errors.New("boom") },
+	})
+	sched.mu.Lock()
+	calls = append([]schedule.TimerID(nil), sched.calls...)
+	sched.mu.Unlock()
+	if !reflect.DeepEqual(calls, []schedule.TimerID{"fired-ok"}) {
+		t.Fatalf("Ack calls after handler error = %v, want unchanged [fired-ok] (no ack on failure)", calls)
+	}
+}
+
 // --- serve ledger: deadline-close and late-write judgement -----------------
 
 func TestServeLedger_DeadlineFiresThenLedgerEmpty(t *testing.T) {

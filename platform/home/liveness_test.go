@@ -274,4 +274,65 @@ func TestAttachmentFenceInvalidatesBeforeIntentDestruction(t *testing.T) {
 			t.Fatal("version migration left old version fence valid")
 		}
 	})
+	// The three events below are the ones the spec calls out by name
+	// ("fence 生命周期三事件——ApproveIdle、本地 ObserveDown、AbortEnsure 各自使
+	// 原子票据字失效") that the original five subtests above did not cover.
+	t.Run("approve_idle", func(t *testing.T) {
+		l, fence, ticket := makeFence(t)
+		q := &testCarrier{}
+		if l.PublishLocal("a", ticket, q) != transitionApplied {
+			t.Fatal("publish local before idle")
+		}
+		if !fence.Valid() {
+			t.Fatal("publishing under the SAME ticket must not invalidate the captured fence")
+		}
+		if _, verdict := l.ApproveIdle("a"); verdict != transitionApplied {
+			t.Fatalf("ApproveIdle=%v", verdict)
+		}
+		if fence.Valid() {
+			t.Fatal("idle-approved (occRunning -> occNone) left in-flight attachment fence valid")
+		}
+	})
+	t.Run("observe_down_local", func(t *testing.T) {
+		l, fence, ticket := makeFence(t)
+		q := &testCarrier{}
+		if l.PublishLocal("a", ticket, q) != transitionApplied {
+			t.Fatal("publish local before local down")
+		}
+		if !fence.Valid() {
+			t.Fatal("publishing under the SAME ticket must not invalidate the captured fence")
+		}
+		if l.ObserveDown("a", false, false) != transitionApplied {
+			t.Fatal("local (non-port) down")
+		}
+		if fence.Valid() {
+			t.Fatal("local cell down (occRunning -> occNone, non-voluntary) left in-flight attachment fence valid")
+		}
+	})
+	t.Run("observe_down_port_does_not_invalidate", func(t *testing.T) {
+		// Contrast case (not one of the three fence-invalidating events): a PORT
+		// down (occRunning -> occDetached) is the A2b "carrier removed, body not yet
+		// judged dead" state — the same incarnation is expected to rebind with the
+		// SAME ticket, so the fence must survive it (§2.6 occDetached semantics).
+		l, fence, ticket := makeFence(t)
+		q := &testCarrier{}
+		if l.PublishLocal("a", ticket, q) != transitionApplied {
+			t.Fatal("publish local before port down")
+		}
+		if l.ObserveDown("a", true, false) != transitionApplied {
+			t.Fatal("port down")
+		}
+		if !fence.Valid() {
+			t.Fatal("port down (detach-for-rebind) must NOT invalidate the same-ticket fence")
+		}
+	})
+	t.Run("abort_ensure", func(t *testing.T) {
+		l, fence, ticket := makeFence(t)
+		if l.AbortEnsure("a", ticket) != transitionApplied {
+			t.Fatal("AbortEnsure")
+		}
+		if fence.Valid() {
+			t.Fatal("aborted ensure left in-flight attachment fence valid")
+		}
+	})
 }

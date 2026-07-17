@@ -19,10 +19,14 @@ var ErrStateHandleUnavailable = errors.New("accessdoor: state handle unavailable
 
 // StateHandleResolver is the sole world-sensitive State resolution seam.
 // Callers never receive a raw in-memory backend or implement their own world
-// switch.
+// switch. Resolve takes the caller's full authenticated AuthorStamp — never a
+// bare id — so the incarnation's welded birth version rides through to the
+// minted handle: a stale-generation caller (its declaration has advanced past
+// the version it was born with) fails closed here instead of being silently
+// re-certified at the current version.
 type StateHandleResolver interface {
 	AdmitRun(actor.ActorID) error
-	Resolve(context.Context, actor.ActorID) (AccessHandle, error)
+	Resolve(context.Context, storespec.AuthorStamp) (AccessHandle, error)
 	EndBatch([]actor.ActorID)
 }
 
@@ -53,8 +57,8 @@ func (h *actorStateHandles) AdmitRun(id actor.ActorID) error {
 	return nil
 }
 
-func (h *actorStateHandles) Resolve(ctx context.Context, id actor.ActorID) (AccessHandle, error) {
-	world, ok, err := h.authority.WorldOf(ctx, id)
+func (h *actorStateHandles) Resolve(ctx context.Context, stamp storespec.AuthorStamp) (AccessHandle, error) {
+	world, ok, err := h.authority.WorldOf(ctx, stamp.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -63,14 +67,26 @@ func (h *actorStateHandles) Resolve(ctx context.Context, id actor.ActorID) (Acce
 	}
 	switch world {
 	case storespec.WorldDurable:
-		row, active, err := h.authority.LookupActive(ctx, id)
-		if err != nil || !active {
+		// Version gate through the ONE authority verdict口 (never an inline
+		// version comparison — the archtest wall): the handle is minted at
+		// the caller's welded birth version, and only while that version is
+		// still the current one. A port born at v1 asking after apply v2
+		// lands here with a stale stamp and must NOT be re-certified at v2 —
+		// that would let a zombie incarnation write durable State
+		// concurrently with its successor.
+		verdict, err := h.authority.CheckAuthor(ctx, stamp)
+		if err != nil {
+			return nil, err
+		}
+		if verdict != storespec.AuthorOK {
 			return nil, ErrStateHandleUnavailable
 		}
-		return h.durable.MintState(storespec.AuthorStamp{ID: id, BirthVersion: row.CurrentDeclVersion}), nil
+		return h.durable.MintState(stamp), nil
 	case storespec.WorldRun:
+		// Run-world identities never version-advance (forked rows are pinned
+		// at birth version 1), so the welded handle itself is the gate.
 		h.mu.RLock()
-		handle := h.run[id]
+		handle := h.run[stamp.ID]
 		h.mu.RUnlock()
 		if handle == nil {
 			return nil, ErrStateHandleUnavailable

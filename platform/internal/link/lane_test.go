@@ -31,20 +31,11 @@ import (
 // (home relays between two daemons' links via top-level lane substreams) — never
 // the fakes runtime/accessdoor's own package-private test doubles use.
 
-// laneMembership is a configurable accessdoor.MembershipCheck: IsMember
-// always true (this rig is not about membership decay), Lookup answers a
-// per-caller host from a plain map — the file route's own same-daemon-vs-
-// cross-host decision input.
+// laneMembership is a configurable storespec.ActorAuthority (this rig is not
+// about membership decay — every id LookupActive-resolves as an active
+// member): LookupActive answers a per-caller host from a plain map — the
+// file route's own same-daemon-vs-cross-host decision input.
 type laneMembership struct{ hosts map[actor.ActorID]string }
-
-func (laneMembership) IsMember(context.Context, actor.ActorID) (bool, error) { return true, nil }
-func (m laneMembership) Lookup(_ context.Context, id actor.ActorID) (string, bool, error) {
-	host, ok := m.hosts[id]
-	if !ok {
-		return "", false, nil
-	}
-	return host, true, nil
-}
 
 func (m laneMembership) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
 	host := m.hosts[id]

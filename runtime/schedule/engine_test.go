@@ -512,6 +512,88 @@ func TestCancelTriState(t *testing.T) {
 	}
 }
 
+// cancelRacingDurableFire simulates a concurrent Cancel landing in the exact
+// race window between the engine's Due() read and its DurableFire.Fire call:
+// it cancels the row itself (deleting it from the store) immediately before
+// delegating to the real fire path, so the underlying FireAndMark CAS
+// observes an already-gone row and legitimately answers FireCancelled — the
+// same race FireAndMark's own tri-state result exists to resolve (spec S8:
+// "FireAndMark×并发 Cancel 两序合法"). DoD 4: "Cancel 获胜→零 dirty 零 revive".
+type cancelRacingDurableFire struct {
+	store  *fakeStore
+	inner  TimerFirePen
+	author actor.ActorID
+}
+
+func (f cancelRacingDurableFire) Fire(ctx context.Context, row timerspec.TimerRow, env *message.Envelope) (timerspec.FireOutcome, error) {
+	if _, err := f.store.CancelOwned(ctx, row.ID, f.author); err != nil {
+		return 0, err
+	}
+	return f.inner.Fire(ctx, row, env)
+}
+
+// TestCancelWinningFireRaceNeverRevivesOrDirties is the tick-loop-level
+// counterpart to TestCancelTriState's store-level Cancelled assertion: DoD 4
+// requires that when Cancel wins the FireAndMark CAS race, the schedule
+// engine's due-row loop treats it as "fire never happened" all the way
+// through its OWN accelerator decision — zero calls to Revive.EnsureLive
+// (the seam that would otherwise set Home's dirty bit / wake debt and poke
+// reconcile). A FireCommitted row, in contrast, MUST revive exactly once —
+// asserted here too so this test cannot pass by coincidentally never
+// reaching the revive call.
+func TestCancelWinningFireRaceNeverRevivesOrDirties(t *testing.T) {
+	store := newFakeStore()
+	sink := &fakeFireSink{}
+	revive := &fakeReviver{}
+	clock := newFakeClock(time.UnixMilli(1_000_000))
+	rt := newTestRuntime(t)
+	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+	_, _, _ = rt.SpawnIfAbsent("author-2", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
+
+	racingFire := cancelRacingDurableFire{store: store, inner: fakeDurableFire{store: store, sink: sink}, author: "author-1"}
+	minter, engine, err := New(Deps{Store: store, Fire: sink, DurableFire: racingFire, Host: rt, Revive: revive, Clock: clock, Authority: allowScheduleAuthority{}})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	engine.Start()
+	defer engine.Close()
+
+	h1 := minter.Mint(testStamp("author-1"))
+	cancelled, err := h1.Schedule(context.Background(), ScheduleReq{
+		Bind: BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "t.cancel-race",
+	})
+	if err != nil {
+		t.Fatalf("Schedule (cancel-race row): %v", err)
+	}
+
+	// The due-row loop must process this row: cancelRacingDurableFire deletes
+	// it (as a genuine Cancel would) right before FireAndMark observes it —
+	// wait for that deletion, which only happens once the engine's tick has
+	// actually driven this row through DurableFire.Fire.
+	waitFor(t, 2*time.Second, func() bool { return !store.hasRow(cancelled) })
+
+	// Give any (incorrect) revive/poke call a chance to land before asserting
+	// its absence — a flaky pass-by-omission here would be worse than a slow
+	// test.
+	time.Sleep(50 * time.Millisecond)
+	if got := revive.callCount(); got != 0 {
+		t.Fatalf("revive.callCount() = %d after a Cancel-won fire race, want 0 (零 dirty 零 revive)", got)
+	}
+
+	// Contrast: an ordinary FireCommitted row on a DIFFERENT author (not
+	// routed through the racing wrapper) still revives exactly once — proving
+	// the zero above is Cancel's own effect, not a broken Revive seam.
+	h2 := minter.Mint(testStamp("author-2"))
+	committed, err := h2.Schedule(context.Background(), ScheduleReq{
+		Bind: BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "t.commit-control",
+	})
+	if err != nil {
+		t.Fatalf("Schedule (commit-control row): %v", err)
+	}
+	_ = committed
+	waitFor(t, 2*time.Second, func() bool { return revive.callCount() >= 1 })
+}
+
 // ---------------------------------------------------------------------
 // TimerID never reused.
 // ---------------------------------------------------------------------

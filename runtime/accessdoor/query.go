@@ -397,6 +397,23 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 	entries := make([]ListEntry, 0, len(rows))
 	for _, row := range rows {
 		eff := effectiveOpsFromGrants(caller, row.Grants, isMember)
+		// Overlay half: session grants (forked grantees, forked-creator
+		// convenience) live only in the volatile overlay — Invoke/Stat merge
+		// them via effectiveOps, so List must project the same union or an
+		// overlay-granted caller cannot discover a resource it can access.
+		// In-memory map lookups; still one page-wide membership check.
+		for _, op := range objectOps {
+			if eff[op] {
+				continue
+			}
+			allowed, oerr := d.deps.Overlay.ActorAllows(ctx, caller, row.ID, op)
+			if oerr != nil {
+				return ListPage{}, oerr
+			}
+			if allowed {
+				eff[op] = true
+			}
+		}
 		ops := opSetFromEffective(eff)
 		if len(ops) == 0 {
 			continue // any-grant projection: zero rights on this row = invisible
