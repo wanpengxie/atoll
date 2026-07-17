@@ -301,6 +301,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.forkReceipts = map[forkReceiptKey]forkReceipt{}
 	h.usedForkIDs = map[actor.ActorID]struct{}{}
 	h.systemPen = systemPen
+	h.systemEnd = lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}}
 	h.reviveLogAt = map[actor.ActorID]time.Time{}
 	h.reviveBackoff = map[actor.ActorID]reviveBackoffEntry{}
 	h.pokeCh = make(chan struct{}, 1)
@@ -348,6 +349,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	links, err := link.NewAcceptor(link.Config{
 		Minter:             minter,
 		Access:             cs.Access,
+		StateHandles:       stateHandles,
 		Schedule:           schedMinter,
 		Runtime:            rt,
 		Authority:          cs.Authority,

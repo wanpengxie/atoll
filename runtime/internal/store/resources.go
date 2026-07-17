@@ -90,15 +90,14 @@ func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) 
 // Create is op=create's atomic birth event for the IMMEDIATE-landing path
 // (kv, and content-less file creates). See createResourceTx for the shared
 // atomic-insert half CommitReservation also drives.
-func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, births ...resourcespec.ResourceBirthPlan) error {
+func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, birth resourcespec.ResourceBirthPlan) error {
 	if id == "" {
 		return errors.New("store: resource create: empty id")
 	}
 	if creator == "" {
 		return errors.New("store: resource create: empty creator")
 	}
-	birth, err := normalizeBirthPlan(births)
-	if err != nil {
+	if !birth.Valid() {
 		return errors.New("store: resource create: invalid birth authority")
 	}
 
@@ -184,16 +183,15 @@ func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id 
 // ReserveCreate is create-outbox's server-side write-ahead half (§1.7): a
 // fresh reservation_id per call (uuid, so no collision to arbitrate — unlike
 // resource_id, reservation identity is never client-proposed).
-func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, births ...resourcespec.ResourceBirthPlan) (string, error) {
+func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, birth resourcespec.ResourceBirthPlan) (string, error) {
 	if id == "" {
 		return "", errors.New("store: resource reserve-create: empty id")
 	}
 	if creator == "" {
 		return "", errors.New("store: resource reserve-create: empty creator")
 	}
-	birth, err := normalizeBirthPlan(births)
-	if err != nil {
-		return "", err
+	if !birth.Valid() {
+		return "", errors.New("store: resource reserve-create: invalid birth authority")
 	}
 	birthValue, err := encodeBirthAuthority(birth)
 	if err != nil {
@@ -215,28 +213,16 @@ func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.Resour
 	return reservationID, nil
 }
 
-func normalizeBirthPlan(plans []resourcespec.ResourceBirthPlan) (resourcespec.ResourceBirthPlan, error) {
-	if len(plans) == 0 {
-		// Internal store callers predating the plan are durable-fixture helpers;
-		// production accessdoor always supplies the closed operand explicitly.
-		return resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}, nil
-	}
-	if len(plans) != 1 || !plans[0].Valid() {
-		return resourcespec.ResourceBirthPlan{}, errors.New("store: invalid resource birth plan")
-	}
-	return plans[0], nil
-}
-
 // CommitReservation is create-outbox's landing half (§1.7). See the
 // resourcespec.Registry doc for the found/err contract.
-func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID string) (bool, error) {
+func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID string) (resourcespec.LandedResource, bool, error) {
 	if reservationID == "" {
-		return false, errors.New("store: commit reservation: empty reservation id")
+		return resourcespec.LandedResource{}, false, errors.New("store: commit reservation: empty reservation id")
 	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return false, fmt.Errorf("store: commit reservation begin: %w", err)
+		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
@@ -252,24 +238,24 @@ func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID 
 		// existed: Committed is level-triggered and MUST be replay-safe — a
 		// clean no-op, not an error.
 		if cerr := tx.Commit(); cerr != nil {
-			return false, fmt.Errorf("store: commit reservation no-op commit: %w", cerr)
+			return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation no-op commit: %w", cerr)
 		}
-		return false, nil
+		return resourcespec.LandedResource{}, false, nil
 	}
 	if err != nil {
-		return false, fmt.Errorf("store: commit reservation lookup %q: %w", reservationID, err)
+		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation lookup %q: %w", reservationID, err)
 	}
 
 	birth, err := decodeBirthAuthority(birthValue)
 	if err != nil {
-		return false, fmt.Errorf("store: commit reservation birth authority %q: %w", reservationID, err)
+		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation birth authority %q: %w", reservationID, err)
 	}
 	createErr := r.createResourceTx(ctx, tx,
 		resource.ResourceID(resourceID), resourcespec.ResourceKind(kind), actor.ActorID(createdBy),
 		placementDaemonID, placementCoord, nil, isDir, birth,
 	)
 	if createErr != nil && !errors.Is(createErr, resourcespec.ErrAlreadyExists) {
-		return false, fmt.Errorf("store: commit reservation create %q: %w", resourceID, createErr)
+		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation create %q: %w", resourceID, createErr)
 	}
 
 	// Either way (won or lost the race) THIS reservation is consumed — delete
@@ -277,17 +263,17 @@ func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID 
 	// losing side of a same-resource_id race deletes too, never left
 	// dangling (§1.7's three-triggers account, trigger ①/②).
 	if _, err := tx.ExecContext(ctx, `DELETE FROM resource_reservations WHERE reservation_id=?`, reservationID); err != nil {
-		return false, fmt.Errorf("store: commit reservation delete %q: %w", reservationID, err)
+		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation delete %q: %w", reservationID, err)
 	}
 
 	if err := tx.Commit(); err != nil {
-		return false, fmt.Errorf("store: commit reservation commit: %w", err)
+		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation commit: %w", err)
 	}
 
 	if errors.Is(createErr, resourcespec.ErrAlreadyExists) {
-		return true, resourcespec.ErrReservationLost
+		return resourcespec.LandedResource{}, true, resourcespec.ErrReservationLost
 	}
-	return true, nil
+	return resourcespec.LandedResource{ID: resource.ResourceID(resourceID), CreatedBy: actor.ActorID(createdBy), Birth: birth}, true, nil
 }
 
 func encodeBirthAuthority(plan resourcespec.ResourceBirthPlan) (string, error) {

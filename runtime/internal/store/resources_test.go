@@ -18,6 +18,8 @@ import (
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
 
+var creatorBirthPlan = resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}
+
 // openResourceReg opens a fresh temp-dir channel sqlite with the full DDL
 // (resources + resource_grants + resource_reservations + resource_tombstones
 // present, foreign_keys=ON) and returns a registry over it, registering
@@ -38,7 +40,7 @@ func kvOf(r *resourceRegistry) *kvDriver { return newKVDriver(r.db) }
 // createKV is the day-1 kv shape: no external placement (empty daemon/coord).
 func createKV(t *testing.T, reg *resourceRegistry, id resource.ResourceID, creator actor.ActorID, initial []byte) {
 	t.Helper()
-	if err := reg.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", initial); err != nil {
+	if err := reg.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", initial, creatorBirthPlan); err != nil {
 		t.Fatalf("Create %q: %v", id, err)
 	}
 }
@@ -49,7 +51,7 @@ func TestResource_CreateWritesRowGrantBytes(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	if err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:a", "", "", []byte("hello")); err != nil {
+	if err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:a", "", "", []byte("hello"), creatorBirthPlan); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 
@@ -118,7 +120,7 @@ func TestResource_ReservationPersistsBirthPlanAndCommitDoesNotReclassify(t *test
 	if stored != "channel_owned" {
 		t.Fatalf("birth_authority=%q", stored)
 	}
-	found, err := reg.CommitReservation(ctx, rid)
+	_, found, err := reg.CommitReservation(ctx, rid)
 	if err != nil || !found {
 		t.Fatalf("CommitReservation found=%v err=%v", found, err)
 	}
@@ -161,7 +163,7 @@ func TestResource_CreateFilePersistsRoute(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", nil); err != nil {
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", nil, creatorBirthPlan); err != nil {
 		t.Fatalf("Create file: %v", err)
 	}
 
@@ -191,7 +193,7 @@ func TestResource_CreateCollisionSentinel(t *testing.T) {
 	reg := openResourceReg(t)
 
 	createKV(t, reg, "kv:doc", "actor:a", []byte("v1"))
-	err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:b", "", "", []byte("v2"))
+	err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:b", "", "", []byte("v2"), creatorBirthPlan)
 	if err == nil {
 		t.Fatal("second Create on same id must collide")
 	}
@@ -211,11 +213,14 @@ func TestResource_CreateCollisionSentinel(t *testing.T) {
 func TestResource_CreateGuardsEmptyInputs(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
-	if err := reg.Create(ctx, "", resourcespec.KindKV, "actor:a", "", "", nil); err == nil {
+	if err := reg.Create(ctx, "", resourcespec.KindKV, "actor:a", "", "", nil, creatorBirthPlan); err == nil {
 		t.Error("Create with empty id must error")
 	}
-	if err := reg.Create(ctx, "kv:x", resourcespec.KindKV, "", "", "", nil); err == nil {
+	if err := reg.Create(ctx, "kv:x", resourcespec.KindKV, "", "", "", nil, creatorBirthPlan); err == nil {
 		t.Error("Create with empty creator must error")
+	}
+	if err := reg.Create(ctx, "kv:missing-plan", resourcespec.KindKV, "actor:a", "", "", nil, resourcespec.ResourceBirthPlan{}); err == nil {
+		t.Error("Create with an absent birth plan must fail closed")
 	}
 }
 
@@ -225,7 +230,7 @@ func TestResource_ReserveCreateAndCommitLandsRow(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	rid, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false)
+	rid, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate: %v", err)
 	}
@@ -238,7 +243,7 @@ func TestResource_ReserveCreateAndCommitLandsRow(t *testing.T) {
 		t.Fatal("resource must not be visible before CommitReservation")
 	}
 
-	found, err := reg.CommitReservation(ctx, rid)
+	_, found, err := reg.CommitReservation(ctx, rid)
 	if err != nil {
 		t.Fatalf("CommitReservation: %v", err)
 	}
@@ -273,11 +278,11 @@ func TestResource_ReserveCreateDirSurvivesOutbox(t *testing.T) {
 	reg := openResourceReg(t)
 
 	// Regular file: Dir stays false end-to-end.
-	ridFile, err := reg.ReserveCreate(ctx, "file:blob", resourcespec.KindFile, "actor:a", "daemon-1", "coord-blob", false)
+	ridFile, err := reg.ReserveCreate(ctx, "file:blob", resourcespec.KindFile, "actor:a", "daemon-1", "coord-blob", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate(file): %v", err)
 	}
-	if _, err := reg.CommitReservation(ctx, ridFile); err != nil {
+	if _, _, err := reg.CommitReservation(ctx, ridFile); err != nil {
 		t.Fatalf("CommitReservation(file): %v", err)
 	}
 	if meta, ok, _ := reg.Resolve(ctx, "file:blob"); !ok || meta.Dir {
@@ -285,11 +290,11 @@ func TestResource_ReserveCreateDirSurvivesOutbox(t *testing.T) {
 	}
 
 	// Directory-shaped workspace: Dir must survive to the landed row.
-	ridDir, err := reg.ReserveCreate(ctx, "file:ws", resourcespec.KindFile, "actor:a", "daemon-1", "coord-ws", true)
+	ridDir, err := reg.ReserveCreate(ctx, "file:ws", resourcespec.KindFile, "actor:a", "daemon-1", "coord-ws", true, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate(dir): %v", err)
 	}
-	if _, err := reg.CommitReservation(ctx, ridDir); err != nil {
+	if _, _, err := reg.CommitReservation(ctx, ridDir); err != nil {
 		t.Fatalf("CommitReservation(dir): %v", err)
 	}
 	meta, ok, err := reg.Resolve(ctx, "file:ws")
@@ -307,15 +312,15 @@ func TestResource_CommitReservation_ReplayAfterLandingIsNoop(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	rid, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false)
+	rid, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate: %v", err)
 	}
-	if _, err := reg.CommitReservation(ctx, rid); err != nil {
+	if _, _, err := reg.CommitReservation(ctx, rid); err != nil {
 		t.Fatalf("first CommitReservation: %v", err)
 	}
 
-	found, err := reg.CommitReservation(ctx, rid)
+	_, found, err := reg.CommitReservation(ctx, rid)
 	if err != nil {
 		t.Fatalf("replay CommitReservation must not error: %v", err)
 	}
@@ -328,7 +333,7 @@ func TestResource_CommitReservation_ReplayAfterLandingIsNoop(t *testing.T) {
 func TestResource_CommitReservation_UnknownIsNoop(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
-	found, err := reg.CommitReservation(ctx, "no-such-reservation")
+	_, found, err := reg.CommitReservation(ctx, "no-such-reservation")
 	if err != nil {
 		t.Fatalf("unknown reservation must not error: %v", err)
 	}
@@ -344,20 +349,20 @@ func TestResource_CommitReservation_LosingRaceDeletesLoserReservation(t *testing
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	rid1, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false)
+	rid1, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate 1: %v", err)
 	}
-	rid2, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:b", "daemon-2", "coord-2", false)
+	rid2, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:b", "daemon-2", "coord-2", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate 2: %v", err)
 	}
 
-	if found, err := reg.CommitReservation(ctx, rid1); err != nil || !found {
+	if _, found, err := reg.CommitReservation(ctx, rid1); err != nil || !found {
 		t.Fatalf("winner CommitReservation found=%v err=%v", found, err)
 	}
 
-	found, err := reg.CommitReservation(ctx, rid2)
+	_, found, err := reg.CommitReservation(ctx, rid2)
 	if !found {
 		t.Errorf("loser CommitReservation found=%v want true (the reservation DID exist)", found)
 	}
@@ -376,7 +381,7 @@ func TestResource_CommitReservation_LosingRaceDeletesLoserReservation(t *testing
 
 	// The loser's reservation is gone (a second commit attempt on rid2 is a
 	// clean no-op, not a repeat "lost" — proves it was actually deleted).
-	found2, err2 := reg.CommitReservation(ctx, rid2)
+	_, found2, err2 := reg.CommitReservation(ctx, rid2)
 	if err2 != nil {
 		t.Fatalf("repeat commit of the already-deleted loser reservation must not error: %v", err2)
 	}
@@ -399,7 +404,7 @@ func TestResource_ReservationDaemon(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	rid, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false)
+	rid, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate: %v", err)
 	}
@@ -415,7 +420,7 @@ func TestResource_ReservationDaemon(t *testing.T) {
 	// After commit the reservation is gone — ReservationDaemon reports a
 	// clean not-found, never an error (the same replay-safety contract
 	// CommitReservation itself draws).
-	if _, err := reg.CommitReservation(ctx, rid); err != nil {
+	if _, _, err := reg.CommitReservation(ctx, rid); err != nil {
 		t.Fatalf("CommitReservation: %v", err)
 	}
 	if _, found, err := reg.ReservationDaemon(ctx, rid); err != nil || found {
@@ -437,13 +442,13 @@ func TestResource_ListReservationsByDaemonFiltersPerDaemon(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	if _, err := reg.ReserveCreate(ctx, "file:a", resourcespec.KindFile, "actor:a", "daemon-1", "coord-a", false); err != nil {
+	if _, err := reg.ReserveCreate(ctx, "file:a", resourcespec.KindFile, "actor:a", "daemon-1", "coord-a", false, creatorBirthPlan); err != nil {
 		t.Fatalf("ReserveCreate a: %v", err)
 	}
-	if _, err := reg.ReserveCreate(ctx, "file:b", resourcespec.KindFile, "actor:a", "daemon-1", "coord-b", false); err != nil {
+	if _, err := reg.ReserveCreate(ctx, "file:b", resourcespec.KindFile, "actor:a", "daemon-1", "coord-b", false, creatorBirthPlan); err != nil {
 		t.Fatalf("ReserveCreate b: %v", err)
 	}
-	if _, err := reg.ReserveCreate(ctx, "file:c", resourcespec.KindFile, "actor:a", "daemon-2", "coord-c", false); err != nil {
+	if _, err := reg.ReserveCreate(ctx, "file:c", resourcespec.KindFile, "actor:a", "daemon-2", "coord-c", false, creatorBirthPlan); err != nil {
 		t.Fatalf("ReserveCreate c: %v", err)
 	}
 
@@ -479,17 +484,17 @@ func TestResource_SweepExpiredReservations(t *testing.T) {
 	reg := openResourceReg(t)
 
 	reg.nowMs = func() int64 { return 1000 }
-	oldID, err := reg.ReserveCreate(ctx, "file:old", resourcespec.KindFile, "actor:a", "daemon-1", "coord-old", false)
+	oldID, err := reg.ReserveCreate(ctx, "file:old", resourcespec.KindFile, "actor:a", "daemon-1", "coord-old", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate old: %v", err)
 	}
-	oldOtherDaemonID, err := reg.ReserveCreate(ctx, "file:old-other", resourcespec.KindFile, "actor:a", "daemon-2", "coord-old-other", false)
+	oldOtherDaemonID, err := reg.ReserveCreate(ctx, "file:old-other", resourcespec.KindFile, "actor:a", "daemon-2", "coord-old-other", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate old-other-daemon: %v", err)
 	}
 
 	reg.nowMs = func() int64 { return 5000 }
-	freshID, err := reg.ReserveCreate(ctx, "file:fresh", resourcespec.KindFile, "actor:a", "daemon-1", "coord-fresh", false)
+	freshID, err := reg.ReserveCreate(ctx, "file:fresh", resourcespec.KindFile, "actor:a", "daemon-1", "coord-fresh", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate fresh: %v", err)
 	}
@@ -544,11 +549,11 @@ func TestResource_TouchReservationsByCoordsSurvivesShortSweepCutoff(t *testing.T
 	reg := openResourceReg(t)
 
 	reg.nowMs = func() int64 { return 1000 }
-	activeID, err := reg.ReserveCreate(ctx, "file:active", resourcespec.KindFile, "actor:a", "daemon-1", "coord-active", false)
+	activeID, err := reg.ReserveCreate(ctx, "file:active", resourcespec.KindFile, "actor:a", "daemon-1", "coord-active", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate active: %v", err)
 	}
-	abandonedID, err := reg.ReserveCreate(ctx, "file:abandoned", resourcespec.KindFile, "actor:a", "daemon-1", "coord-abandoned", false)
+	abandonedID, err := reg.ReserveCreate(ctx, "file:abandoned", resourcespec.KindFile, "actor:a", "daemon-1", "coord-abandoned", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate abandoned: %v", err)
 	}
@@ -591,7 +596,7 @@ func TestResource_TouchReservationsByCoordsIsNoopForUnrelatedDaemon(t *testing.T
 	reg := openResourceReg(t)
 
 	reg.nowMs = func() int64 { return 1000 }
-	otherID, err := reg.ReserveCreate(ctx, "file:other", resourcespec.KindFile, "actor:a", "daemon-2", "coord-other", false)
+	otherID, err := reg.ReserveCreate(ctx, "file:other", resourcespec.KindFile, "actor:a", "daemon-2", "coord-other", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate: %v", err)
 	}
@@ -623,7 +628,7 @@ func TestResource_TouchReservationsByCoordsEmptyCoordsTouchesNothing(t *testing.
 	reg := openResourceReg(t)
 
 	reg.nowMs = func() int64 { return 1000 }
-	abandonedID, err := reg.ReserveCreate(ctx, "file:abandoned", resourcespec.KindFile, "actor:a", "daemon-1", "coord-abandoned", false)
+	abandonedID, err := reg.ReserveCreate(ctx, "file:abandoned", resourcespec.KindFile, "actor:a", "daemon-1", "coord-abandoned", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate: %v", err)
 	}
@@ -650,7 +655,7 @@ func TestResource_TouchReservationsByCoordsEmptyCoordsTouchesNothing(t *testing.
 func TestResource_TombstoneDaemon(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
-	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", nil); err != nil {
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", nil, creatorBirthPlan); err != nil {
 		t.Fatalf("Create file: %v", err)
 	}
 	if err := reg.Delete(ctx, "file:doc"); err != nil {
@@ -683,7 +688,7 @@ func TestResource_ListTombstonesByDaemonFiltersPerDaemon(t *testing.T) {
 		{"file:b", "daemon-1", "coord-b"},
 		{"file:c", "daemon-2", "coord-c"},
 	} {
-		if err := reg.Create(ctx, resource.ResourceID(tc.id), resourcespec.KindFile, "actor:a", tc.daemon, tc.coord, nil); err != nil {
+		if err := reg.Create(ctx, resource.ResourceID(tc.id), resourcespec.KindFile, "actor:a", tc.daemon, tc.coord, nil, creatorBirthPlan); err != nil {
 			t.Fatalf("Create %s: %v", tc.id, err)
 		}
 		if err := reg.Delete(ctx, resource.ResourceID(tc.id)); err != nil {
@@ -711,10 +716,10 @@ func TestResource_ListByPlacementDaemonFiltersPerDaemonAndExcludesKV(t *testing.
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	if err := reg.Create(ctx, "file:a", resourcespec.KindFile, "actor:a", "daemon-1", "coord-a", nil); err != nil {
+	if err := reg.Create(ctx, "file:a", resourcespec.KindFile, "actor:a", "daemon-1", "coord-a", nil, creatorBirthPlan); err != nil {
 		t.Fatalf("Create file a: %v", err)
 	}
-	if err := reg.Create(ctx, "file:b", resourcespec.KindFile, "actor:a", "daemon-2", "coord-b", nil); err != nil {
+	if err := reg.Create(ctx, "file:b", resourcespec.KindFile, "actor:a", "daemon-2", "coord-b", nil, creatorBirthPlan); err != nil {
 		t.Fatalf("Create file b: %v", err)
 	}
 	createKV(t, reg, "kv:c", "actor:a", []byte("v"))
@@ -840,7 +845,7 @@ func TestResource_DeleteKVWritesNoTombstone(t *testing.T) {
 func TestResource_DeleteFileWritesTombstoneThenClearTombstone(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
-	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", nil); err != nil {
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", nil, creatorBirthPlan); err != nil {
 		t.Fatalf("Create file: %v", err)
 	}
 
@@ -894,13 +899,13 @@ func TestResource_DeleteRecreateDeleteLeavesTwoTombstones(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 
-	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", nil); err != nil {
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-1", nil, creatorBirthPlan); err != nil {
 		t.Fatalf("Create 1: %v", err)
 	}
 	if err := reg.Delete(ctx, "file:doc"); err != nil {
 		t.Fatalf("Delete 1: %v", err)
 	}
-	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-2", nil); err != nil {
+	if err := reg.Create(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-2", nil, creatorBirthPlan); err != nil {
 		t.Fatalf("Create 2 (recreate): %v", err)
 	}
 	if err := reg.Delete(ctx, "file:doc"); err != nil {
@@ -1143,7 +1148,7 @@ func TestKVDriver_DeleteIsNoop(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 	kv := kvOf(reg)
-	if err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:a", "", "", []byte("keep")); err != nil {
+	if err := reg.Create(ctx, "kv:doc", resourcespec.KindKV, "actor:a", "", "", []byte("keep"), creatorBirthPlan); err != nil {
 		t.Fatalf("Create: %v", err)
 	}
 	if err := kv.Delete(ctx, "kv:doc"); err != nil {
@@ -1253,11 +1258,11 @@ func TestResource_SweepHasNoLandedPhaseImmunity(t *testing.T) {
 	reg := openResourceReg(t)
 
 	reg.nowMs = func() int64 { return 1000 }
-	_, err := reg.ReserveCreate(ctx, "file:landed", resourcespec.KindFile, "actor:a", "daemon-1", "coord-landed", false)
+	_, err := reg.ReserveCreate(ctx, "file:landed", resourcespec.KindFile, "actor:a", "daemon-1", "coord-landed", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate landed: %v", err)
 	}
-	reservedID, err := reg.ReserveCreate(ctx, "file:reserved", resourcespec.KindFile, "actor:a", "daemon-1", "coord-reserved", false)
+	reservedID, err := reg.ReserveCreate(ctx, "file:reserved", resourcespec.KindFile, "actor:a", "daemon-1", "coord-reserved", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate reserved: %v", err)
 	}
@@ -1279,7 +1284,7 @@ func TestResource_StaleReservationSweep(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 	reg.nowMs = func() int64 { return 1000 }
-	id, err := reg.ReserveCreate(ctx, "file:x", resourcespec.KindFile, "actor:a", "daemon-1", "coord-x", false)
+	id, err := reg.ReserveCreate(ctx, "file:x", resourcespec.KindFile, "actor:a", "daemon-1", "coord-x", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate: %v", err)
 	}
@@ -1303,16 +1308,16 @@ func TestResource_DeleteSupersedesPendingReservations(t *testing.T) {
 	reg := openResourceReg(t)
 
 	// The winner reserves + lands "file:doc" (coord-win).
-	winID, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-win", false)
+	winID, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:a", "daemon-1", "coord-win", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate win: %v", err)
 	}
-	if _, err := reg.CommitReservation(ctx, winID); err != nil {
+	if _, _, err := reg.CommitReservation(ctx, winID); err != nil {
 		t.Fatalf("CommitReservation win: %v", err)
 	}
 	// A straggler had ALSO reserved the same id (before the winner landed) and
 	// is still holding its write open — coord-strag.
-	stragID, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:b", "daemon-1", "coord-strag", false)
+	stragID, err := reg.ReserveCreate(ctx, "file:doc", resourcespec.KindFile, "actor:b", "daemon-1", "coord-strag", false, creatorBirthPlan)
 	if err != nil {
 		t.Fatalf("ReserveCreate straggler: %v", err)
 	}
@@ -1341,7 +1346,7 @@ func TestResource_DeleteSupersedesPendingReservations(t *testing.T) {
 		t.Fatalf("tombstone coords = %v, want both coord-win and coord-strag", coords)
 	}
 	// The straggler's later Committed lands NOTHING — no resurrection.
-	found, err := reg.CommitReservation(ctx, stragID)
+	_, found, err := reg.CommitReservation(ctx, stragID)
 	if err != nil {
 		t.Fatalf("CommitReservation straggler after supersede: %v", err)
 	}

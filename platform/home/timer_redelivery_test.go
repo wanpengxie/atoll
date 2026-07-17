@@ -44,9 +44,6 @@ func (r *timerCrashResolver) BuildClass(channel.ID, actor.ActorID, string, json.
 				if r.attempts.Add(1) == 1 {
 					panic("crash before timer Ack")
 				}
-				if err := sys.AckTimer(msg); err != nil {
-					return err
-				}
 				r.once.Do(func() { close(r.acked) })
 			}
 		}, nil

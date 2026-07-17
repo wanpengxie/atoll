@@ -60,3 +60,9 @@ func (o *actorGrantOverlay) EndBatch(ids []actor.ActorID) {
 	}
 	o.mu.Unlock()
 }
+
+func (o *actorGrantOverlay) DeleteResource(id resource.ResourceID) {
+	o.mu.Lock()
+	delete(o.byResource, id)
+	o.mu.Unlock()
+}

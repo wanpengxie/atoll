@@ -29,12 +29,12 @@ func TestLivenessTicketAndDeliveryTransitions(t *testing.T) {
 	}
 	event := &message.Envelope{Kind: message.KindEvent}
 	_, _ = l.AcceptDelivery("a", event)
-	if s, _ := l.snapshot("a"); s.dirty {
+	if s, _ := l.stateForTest("a"); s.dirty {
 		t.Fatal("dormant event set dirty")
 	}
 	req := &message.Envelope{Kind: message.KindRequest}
 	_, _ = l.AcceptDelivery("a", req)
-	if s, _ := l.snapshot("a"); !s.dirty {
+	if s, _ := l.stateForTest("a"); !s.dirty {
 		t.Fatal("dormant request did not set dirty")
 	}
 	ticket, _ := l.BeginEnsure("a", 1)
@@ -48,7 +48,7 @@ func TestLivenessTicketAndDeliveryTransitions(t *testing.T) {
 	if l.PublishLocal("a", ticket, q) != transitionApplied {
 		t.Fatal("publish")
 	}
-	if s, _ := l.snapshot("a"); s.dirty || s.restart || s.occ != occRunning {
+	if s, _ := l.stateForTest("a"); s.dirty || s.restart || s.occ != occRunning {
 		t.Fatalf("state=%+v", s)
 	}
 	_, err := l.AcceptDelivery("a", req)
@@ -104,7 +104,7 @@ func TestConcurrentBeginEnsureMintsExactlyOneTicket(t *testing.T) {
 	if applied != 1 {
 		t.Fatalf("transitionApplied count = %d, want exactly 1", applied)
 	}
-	state, ok := l.snapshot("a")
+	state, ok := l.stateForTest("a")
 	if !ok || state.ticket != ticket || state.occ != occStarting {
 		t.Fatalf("final state = %+v, ok=%v", state, ok)
 	}
@@ -120,7 +120,7 @@ func TestLivenessFullDoesNotBufferOrDirty(t *testing.T) {
 	if err == nil {
 		t.Fatal("full not surfaced")
 	}
-	if s, _ := l.snapshot("a"); s.dirty || s.occ != occRunning {
+	if s, _ := l.stateForTest("a"); s.dirty || s.occ != occRunning {
 		t.Fatalf("full mutated ledger: %+v", s)
 	}
 }
@@ -136,11 +136,11 @@ func TestFiredTimerIsTheOnlyEventThatCreatesDormantWakeDebt(t *testing.T) {
 	l.Bootstrap([]actor.ActorID{"a"})
 	env := &message.Envelope{Kind: message.KindEvent}
 	_, _ = l.AcceptDelivery("a", env)
-	if state, _ := l.snapshot("a"); state.dirty {
+	if state, _ := l.stateForTest("a"); state.dirty {
 		t.Fatal("ordinary dormant event created wake debt")
 	}
 	_, _ = l.AcceptFiredDelivery("a", env)
-	if state, _ := l.snapshot("a"); !state.dirty {
+	if state, _ := l.stateForTest("a"); !state.dirty {
 		t.Fatal("fired timer did not create wake debt")
 	}
 	mu.Lock()
@@ -162,7 +162,7 @@ func TestLivenessIdleDeliveryRaceSerializes(t *testing.T) {
 		go func() { defer wg.Done(); l.ApproveIdle("a") }()
 		go func() { defer wg.Done(); _, _ = l.AcceptDelivery("a", &message.Envelope{Kind: message.KindRequest}) }()
 		wg.Wait()
-		s, _ := l.snapshot("a")
+		s, _ := l.stateForTest("a")
 		q.mu.Lock()
 		queued := len(q.envs)
 		q.mu.Unlock()
@@ -178,7 +178,7 @@ func TestDaemonIdleDownRebindAndLeaseEndpointTransitions(t *testing.T) {
 	q := &testCarrier{}
 
 	idleTicket, _ := l.BeginEnsure("idle", 1)
-	if l.Attach("idle", idleTicket, q) != transitionApplied {
+	if l.Attach("idle", idleTicket, 1, q) != transitionApplied {
 		t.Fatal("attach idle actor")
 	}
 	if _, verdict := l.ApproveIdle("idle"); verdict != transitionApplied {
@@ -190,21 +190,21 @@ func TestDaemonIdleDownRebindAndLeaseEndpointTransitions(t *testing.T) {
 	if _, verdict := l.Retire("idle", true); verdict != transitionApplied {
 		t.Fatalf("late lease endpoint after idle=%v", verdict)
 	}
-	if state, _ := l.snapshot("idle"); state.occ != occNone || state.restart || state.ticket != "" {
+	if state, _ := l.stateForTest("idle"); state.occ != occNone || state.restart || state.ticket != "" {
 		t.Fatalf("idle resource-tail edges changed L: %+v", state)
 	}
 
 	ticket, _ := l.BeginEnsure("rebind", 1)
-	if l.Attach("rebind", ticket, q) != transitionApplied {
+	if l.Attach("rebind", ticket, 1, q) != transitionApplied {
 		t.Fatal("attach rebind actor")
 	}
 	if l.ObserveDown("rebind", true, false) != transitionApplied {
 		t.Fatal("ordinary port down")
 	}
-	if state, _ := l.snapshot("rebind"); state.occ != occDetached || state.ticket != ticket || state.restart {
+	if state, _ := l.stateForTest("rebind"); state.occ != occDetached || state.ticket != ticket || state.restart {
 		t.Fatalf("ordinary down state=%+v", state)
 	}
-	if l.Attach("rebind", ticket, q) != transitionApplied {
+	if l.Attach("rebind", ticket, 1, q) != transitionApplied {
 		t.Fatal("same-ticket rebind")
 	}
 	if l.ObserveDown("rebind", true, false) != transitionApplied {
@@ -213,10 +213,65 @@ func TestDaemonIdleDownRebindAndLeaseEndpointTransitions(t *testing.T) {
 	if _, verdict := l.Retire("rebind", true); verdict != transitionApplied {
 		t.Fatalf("lease endpoint=%v", verdict)
 	}
-	if state, _ := l.snapshot("rebind"); state.occ != occNone || !state.restart || state.ticket != "" {
+	if state, _ := l.stateForTest("rebind"); state.occ != occNone || !state.restart || state.ticket != "" {
 		t.Fatalf("lease endpoint state=%+v", state)
 	}
-	if got := l.Attach("rebind", ticket, q); got != transitionStaleTicket {
+	if got := l.Attach("rebind", ticket, 1, q); got != transitionStaleTicket {
 		t.Fatalf("expired ticket reattached=%v", got)
 	}
+}
+
+func TestAttachmentFenceInvalidatesBeforeIntentDestruction(t *testing.T) {
+	makeFence := func(t *testing.T) (*livenessLedger, attachmentFence, EnsureTicket) {
+		t.Helper()
+		l := newLivenessLedger()
+		l.Bootstrap([]actor.ActorID{"a"})
+		ticket, verdict := l.BeginEnsure("a", 1)
+		if verdict != transitionApplied {
+			t.Fatalf("BeginEnsure=%v", verdict)
+		}
+		fence, verdict := l.prepareAttachmentFence("a", ticket, 1)
+		if verdict != transitionApplied || !fence.Valid() {
+			t.Fatalf("prepare fence=(%v,%v)", verdict, fence.Valid())
+		}
+		return l, fence, ticket
+	}
+
+	t.Run("retire", func(t *testing.T) {
+		l, fence, _ := makeFence(t)
+		_, _ = l.Retire("a", true)
+		if fence.Valid() {
+			t.Fatal("retired intent left in-flight attachment fence valid")
+		}
+	})
+	t.Run("end", func(t *testing.T) {
+		l, fence, _ := makeFence(t)
+		_, _ = l.EndIdentity("a")
+		if fence.Valid() {
+			t.Fatal("ended identity left in-flight attachment fence valid")
+		}
+	})
+	t.Run("bootstrap", func(t *testing.T) {
+		l, fence, _ := makeFence(t)
+		_ = l.Bootstrap([]actor.ActorID{"a"})
+		if fence.Valid() {
+			t.Fatal("bootstrap row replacement revived an old fence generation")
+		}
+	})
+	t.Run("close", func(t *testing.T) {
+		l, fence, _ := makeFence(t)
+		_ = l.Close()
+		if fence.Valid() {
+			t.Fatal("closed ledger left in-flight attachment fence valid")
+		}
+	})
+	t.Run("version", func(t *testing.T) {
+		l, fence, _ := makeFence(t)
+		if _, retired := l.RetireIfVersionSkew("a", 2); !retired {
+			t.Fatal("version skew did not retire old attempt")
+		}
+		if fence.Valid() {
+			t.Fatal("version migration left old version fence valid")
+		}
+	})
 }

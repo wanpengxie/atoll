@@ -41,16 +41,23 @@ func Serve(routes map[string]Handler) Proc {
 // loop so it is a pure, directly testable unit against a fake Sys (spec S1's
 // deliverable: "Serve 的路由分发逻辑可测").
 func dispatch(sys Sys, msg Msg, routes map[string]Handler) {
+	settle := func(handled bool) {
+		if s, ok := sys.(interface{ settleTimer(Msg, bool) }); ok {
+			s.settleTimer(msg, handled)
+		}
+	}
 	h, ok := routes[msg.Type]
 	if !ok {
 		_, _ = sys.Fail(msg, "type_unsupported", fmt.Sprintf("no route for type %q", msg.Type))
+		settle(false)
 		return
 	}
 	v, err := h(msg.Ctx(), msg)
 	if err != nil {
 		_, _ = sys.Fail(msg, "internal_error", err.Error())
+		settle(false)
 		return
 	}
-	_ = sys.AckTimer(msg)
+	settle(true)
 	_, _ = sys.Reply(msg, v)
 }

@@ -517,52 +517,30 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 		return progress
 	}
 	e.noteStoreRecovered(time.Now(), "due_query_failed")
-	blockedAuthor := make(map[actor.ActorID]bool)
 	for _, row := range rows {
-		if blockedAuthor[row.AuthorID] {
-			continue
-		}
-		// Wake-first ordering, welded: the identity family's
-		// "no live actor" case is the NORMAL restart path, not an edge case
-		// — reviving before appending is what keeps the wake from being
-		// lost into a mailbox nobody is hosting yet.
-		callCtx, cancel := context.WithTimeout(ctx, perFireTimeout)
-		reviveErr := e.deps.Revive.EnsureLive(callCtx, row.AuthorID)
-		cancel()
-		if reviveErr != nil {
-			err := reviveErr
-			if isReviveRejected(err) {
-				// Deterministic — this row can NEVER fire (its author is
-				// permanently unrevivable). Dispose it, same arm
-				// as a FireRejected poison row: left in place it would
-				// retry hot forever and repeatedly consume this author's
-				// per-author due window ahead of later legitimate rows.
-				reason, detail := rejectionDetails(err)
-				if _, evicted, derr := e.deps.Store.MoveToDead(ctx, row.ID, timerspec.DeathReviveRejected, reason, detail, now); derr != nil {
-					e.noteStoreErr(time.Now(), "poison_row_delete_failed", derr, "timer_id", string(row.ID))
-					continue
-				} else {
-					e.noteStoreRecovered(time.Now(), "poison_row_delete_failed")
-					if evicted > 0 {
-						e.deps.Logger.Warn("schedule.timer_dead_evicted", "count", evicted)
-					}
-				}
-				progress = true
-				e.loudLog(row.ID, row.AuthorID, err)
-				e.clearTransient("revive", string(row.AuthorID))
-				continue
-			}
-			blockedAuthor[row.AuthorID] = true
-			e.noteTransient("revive", string(row.AuthorID), row.ID, row.AuthorID, err)
-			continue // transient — leave the row, retry next tick.
-		}
-		e.clearTransient("revive", string(row.AuthorID))
+		// Durable truth wins before every accelerator. Once Fire commits the
+		// pending→fired transition, Home's level-triggered fired sweep owns
+		// delivery and wake debt; revival can only reduce latency and can never
+		// gate or roll back the committed fire.
 		env := buildFireEnvelope(row.ID, row.AuthorID, row.Type, row.Payload, message.ID(row.CorrelationID), nowTime)
-		callCtx, cancel = context.WithTimeout(ctx, perFireTimeout)
+		callCtx, cancel := context.WithTimeout(ctx, perFireTimeout)
 		outcome, err := e.deps.DurableFire.Fire(callCtx, row, env)
 		cancel()
 		switch {
-		case err == nil && (outcome == timerspec.FireCommitted || outcome == timerspec.FireAlreadyFired || outcome == timerspec.FireCancelled):
+		case err == nil && (outcome == timerspec.FireCommitted || outcome == timerspec.FireAlreadyFired):
+			progress = true
+			e.clearTransient("identity_fire", string(row.ID))
+			callCtx, cancel = context.WithTimeout(ctx, perFireTimeout)
+			reviveErr := e.deps.Revive.EnsureLive(callCtx, row.AuthorID)
+			cancel()
+			if reviveErr != nil {
+				e.noteTransient("revive", string(row.AuthorID), row.ID, row.AuthorID, reviveErr)
+			} else {
+				e.clearTransient("revive", string(row.AuthorID))
+			}
+		case err == nil && outcome == timerspec.FireCancelled:
+			// Cancel won the store CAS. No fired truth exists, therefore no
+			// wake debt, revive, or poke is authorized.
 			progress = true
 			e.clearTransient("identity_fire", string(row.ID))
 		case isFireRejected(err):

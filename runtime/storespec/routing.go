@@ -12,5 +12,6 @@ type ChannelRouting interface {
 }
 
 type RestartJournal interface {
+	ClaimRestartAttempt(context.Context, int64, actor.ActorID, string, int64) (expectedTicket string, alreadyApplied bool, err error)
 	MarkRestartApplied(context.Context, int64, actor.ActorID, int64) (bool, error)
 }

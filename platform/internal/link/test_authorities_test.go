@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -26,11 +27,26 @@ type testPortEntry struct {
 	inc   actorrt.Incarnation
 }
 
+type testStateHandles struct{ access accessdoor.AccessMinter }
+
+func (h testStateHandles) AdmitRun(actor.ActorID) error { return nil }
+func (h testStateHandles) EndBatch([]actor.ActorID)     {}
+func (h testStateHandles) Resolve(_ context.Context, id actor.ActorID) (accessdoor.AccessHandle, error) {
+	if h.access == nil {
+		return nil, accessdoor.ErrStateHandleUnavailable
+	}
+	return h.access.MintState(storespec.AuthorStamp{ID: id, BirthVersion: 1}), nil
+}
+
 type blockingPortIndex struct {
 	link.PortIndex
 	entered chan<- struct{}
 	release <-chan struct{}
 }
+
+type validAttachmentFence struct{}
+
+func (validAttachmentFence) Valid() bool { return true }
 
 type blockingSecondDaemonValidation struct {
 	inner   link.DaemonAuthority
@@ -56,10 +72,10 @@ func (x *blockingSecondDaemonValidation) LockAndValidate(ctx context.Context, da
 	return x.inner.LockAndValidate(ctx, daemonID, chID)
 }
 
-func (x blockingPortIndex) Register(owner link.PortOwner, inc actorrt.Incarnation) {
+func (x blockingPortIndex) Register(owner link.PortOwner, inc actorrt.Incarnation, ticket string, version int64) bool {
 	close(x.entered)
 	<-x.release
-	x.PortIndex.Register(owner, inc)
+	return x.PortIndex.Register(owner, inc, ticket, version)
 }
 
 func newTestAuthorities() *testAuthorities {
@@ -87,6 +103,10 @@ func (a *testAuthorities) ValidateAttachment(_ context.Context, _ link.PortOwner
 	}
 	a.rows = nextRows
 	return out, nil
+}
+
+func (*testAuthorities) PrepareAttachmentFence(context.Context, actor.ActorID, string, int64) (link.AttachmentFence, error) {
+	return validAttachmentFence{}, nil
 }
 
 func (a *testAuthorities) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
@@ -126,10 +146,11 @@ func (*testAuthorities) LockAndValidate(context.Context, string, channel.ID) (fu
 	return func() {}, nil
 }
 
-func (a *testAuthorities) Register(owner link.PortOwner, inc actorrt.Incarnation) {
+func (a *testAuthorities) Register(owner link.PortOwner, inc actorrt.Incarnation, _ string, _ int64) bool {
 	a.mu.Lock()
 	a.ports[inc.ID()] = testPortEntry{owner: owner, inc: inc}
 	a.mu.Unlock()
+	return true
 }
 
 func (a *testAuthorities) Remove(owner link.PortOwner, inc actorrt.Incarnation) {
@@ -183,6 +204,9 @@ func newTestAcceptor(t *testing.T, cfg link.Config) *link.Acceptor {
 	}
 	if cfg.PortIndex == nil {
 		cfg.PortIndex = auth
+	}
+	if cfg.StateHandles == nil {
+		cfg.StateHandles = testStateHandles{access: cfg.Access}
 	}
 	acc, err := link.NewAcceptor(cfg)
 	if err != nil {

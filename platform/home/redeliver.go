@@ -22,19 +22,21 @@ func (h *Home) sweepFired(ctx context.Context) {
 		return
 	}
 	for _, timer := range page.Rows {
-		if err := (homeReviver{h: h}).EnsureLive(ctx, timer.AuthorID); err != nil {
-			h.logger.Warn("timer fired revive", "timer", string(timer.ID), "author", string(timer.AuthorID), "err", err)
-			continue
-		}
 		env, ok, err := h.cs.Requests.FindByID(ctx, message.ID("timer:"+string(timer.ID)))
 		if err != nil || !ok {
 			h.logger.Error("timer fired truth lookup", "timer", string(timer.ID), "found", ok, "err", err)
 			continue
 		}
+		// Accept durable truth before attempting revival. With no carrier this
+		// records wake debt; with a carrier it delivers exactly once this pass.
+		// Revival is only an accelerator and may not suppress that transition.
 		verdict, err := h.liveness.AcceptFiredDelivery(timer.AuthorID, env)
 		if err != nil || verdict != transitionApplied {
 			h.logger.Warn("timer fired redeliver", "timer", string(timer.ID), "err", err)
 			continue
+		}
+		if err := (homeReviver{h: h}).EnsureLive(ctx, timer.AuthorID); err != nil {
+			h.logger.Warn("timer fired revive", "timer", string(timer.ID), "author", string(timer.AuthorID), "err", err)
 		}
 		h.pokeReconcile()
 	}

@@ -53,6 +53,7 @@ type zombie struct {
 	since  time.Time
 	flavor deathFlavor
 	body   embodiment
+	reason string
 	// leaked is set once by the escort when grace elapses before the body
 	// exits. Guarded by r.mu (written under markLeaked, read under Zombies).
 	leaked bool
@@ -75,11 +76,11 @@ type ZombieInfo struct {
 // existing entry and NEVER downgrades its flavor. The caller launches the escort
 // only for a NEW entry, and only AFTER releasing r.mu (the signal half is never
 // under the lock).
-func (r *Runtime) enrollLocked(body embodiment, id actor.ActorID, flavor deathFlavor) (*zombie, bool) {
+func (r *Runtime) enrollLocked(body embodiment, id actor.ActorID, flavor deathFlavor, reason string) (*zombie, bool) {
 	if z, ok := r.zombies[body]; ok {
 		return z, false
 	}
-	z := &zombie{id: id, since: r.clock(), flavor: flavor, body: body}
+	z := &zombie{id: id, since: r.clock(), flavor: flavor, body: body, reason: reason}
 	r.zombies[body] = z
 	return z, true
 }
@@ -93,8 +94,8 @@ func (r *Runtime) enrollLocked(body embodiment, id actor.ActorID, flavor deathFl
 // edge in the window between judge-dead and the escort's first scheduling. Only
 // the two genuinely-blocking / async parts are deferred to the escort: a port's
 // KindDespawn frame write (blocking codec write) and the bounded exit join.
-func (r *Runtime) retireLocked(body embodiment, id actor.ActorID, flavor deathFlavor) func() {
-	z, isNew := r.enrollLocked(body, id, flavor)
+func (r *Runtime) retireLocked(body embodiment, id actor.ActorID, flavor deathFlavor, reason string) func() {
+	z, isNew := r.enrollLocked(body, id, flavor, reason)
 	if !isNew {
 		return func() {}
 	}
@@ -132,7 +133,7 @@ func (r *Runtime) escort(z *zombie) {
 	dl, cancel := context.WithTimeout(context.Background(), r.grace)
 	defer cancel()
 	if z.flavor == flavorDespawn {
-		z.body.signalDespawn(dl)
+		z.body.signalDespawn(dl, z.reason)
 	}
 	select {
 	case <-z.body.doneCh():

@@ -756,7 +756,7 @@ func (p *port) beginTeardown() {
 // EOF), so the write goroutine can never leak. Best-effort + un-acked: a live
 // remote flushes it before the buffered conn closes, a dead one degrades to an EOF
 // death. No join — the escort watches doneCh bounded by the same grace.
-func (p *port) signalDespawn(dl context.Context) {
+func (p *port) signalDespawn(dl context.Context, reason string) {
 	p.stopOnce.Do(func() {
 		p.live.Store(false)
 		p.mu.Lock()
@@ -766,7 +766,10 @@ func (p *port) signalDespawn(dl context.Context) {
 		frameDone := make(chan struct{})
 		go func() {
 			defer close(frameDone)
-			if payload, err := json.Marshal(ipc.DownPayload{Reason: "despawn"}); err == nil {
+			if reason == "" {
+				reason = "despawn"
+			}
+			if payload, err := json.Marshal(ipc.DownPayload{Reason: reason}); err == nil {
 				if err := p.codec.Write(ipc.Frame{Kind: ipc.KindDespawn, Payload: payload}); err != nil {
 					p.logger.Error("actorrt.port.despawn_frame_write_failed", "actor", string(p.id), "error", err)
 				}

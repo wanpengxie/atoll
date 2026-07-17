@@ -15,25 +15,15 @@ type homePortEntry struct {
 
 type homePortIndex struct{ h *Home }
 
-func (x homePortIndex) Register(owner link.PortOwner, inc actorrt.Incarnation) {
+func (x homePortIndex) Register(owner link.PortOwner, inc actorrt.Incarnation, ticket string, birthVersion int64) bool {
+	if x.h.liveness == nil || x.h.liveness.Attach(inc.ID(), EnsureTicket(ticket), birthVersion, runtimeDeliveryCarrier{id: inc.ID(), deliverer: x.h.channel.Deliverer()}) != transitionApplied {
+		return false
+	}
 	x.h.indexMu.Lock()
 	x.h.portIndex[inc.ID()] = homePortEntry{owner: owner, inc: inc}
 	x.h.indexMu.Unlock()
-	if x.h.liveness != nil {
-		if s, ok := x.h.liveness.snapshot(inc.ID()); ok && s.occ == occRunning && s.carrier.kind != carrierPort {
-			_, _ = x.h.liveness.Retire(inc.ID(), false)
-		}
-		row, active, _ := x.h.controlIndex.LookupActive(context.Background(), inc.ID())
-		if !active {
-			return
-		}
-		ticket, verdict := x.h.liveness.BeginEnsure(inc.ID(), row.CurrentDeclVersion)
-		if verdict == transitionApplied || verdict == transitionInFlight {
-			if x.h.liveness.Attach(inc.ID(), ticket, runtimeDeliveryCarrier{id: inc.ID(), deliverer: x.h.channel.Deliverer()}) == transitionApplied {
-				x.h.redeliverOpenRequests(context.Background(), inc.ID())
-			}
-		}
-	}
+	x.h.redeliverOpenRequests(context.Background(), inc.ID())
+	return true
 }
 
 func (x homePortIndex) Remove(owner link.PortOwner, inc actorrt.Incarnation) {

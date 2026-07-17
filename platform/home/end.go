@@ -24,18 +24,30 @@ type EndPlan struct {
 	Principals []string
 }
 
-// EndIdentity is the sole lifecycle termination entry. It freezes the complete
-// sponsor subtree under monotonic actor gates, classifies world before any
-// deletion, commits the durable cascade once, then publishes one batch removal.
-func (h *Home) EndIdentity(ctx context.Context, author storespec.AuthorStamp, target actor.ActorID, reason string) error {
-	tail, err := h.prepareEndIdentity(ctx, author, target, reason)
-	if err != nil {
-		return err
-	}
-	if tail != nil {
+// lifecycleEndHandle welds the authenticated author at its mint point. End
+// callers can choose a target and reason, but cannot self-report authority.
+type lifecycleEndHandle struct {
+	home   *Home
+	author storespec.AuthorStamp
+}
+
+func (x lifecycleEndHandle) End(ctx context.Context, target actor.ActorID, reason string) error {
+	tail, err := x.prepare(ctx, target, reason)
+	if err == nil && tail != nil {
 		tail()
 	}
-	return nil
+	return err
+}
+
+func (x lifecycleEndHandle) prepare(ctx context.Context, target actor.ActorID, reason string) (func(), error) {
+	return x.home.prepareEndIdentity(ctx, x.author, target, reason)
+}
+
+func (h *Home) systemEndHandle() lifecycleEndHandle {
+	if h.systemEnd.home != nil {
+		return h.systemEnd
+	}
+	return lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}}
 }
 
 // prepareEndIdentity commits and publishes the identity transition, returning
@@ -126,7 +138,7 @@ func (h *Home) prepareEndIdentity(ctx context.Context, author storespec.AuthorSt
 		}
 	}
 
-	plan, err := h.buildEndPlan(ctx, target, reason)
+	plan, err := h.buildEndPlan(ctx, target, reason, author.ID)
 	if err != nil || len(plan.AllIDs) == 0 {
 		return nil, err
 	}
@@ -160,7 +172,7 @@ func (h *Home) prepareEndIdentity(ctx context.Context, author storespec.AuthorSt
 	}, nil
 }
 
-func (h *Home) buildEndPlan(ctx context.Context, root actor.ActorID, reason string) (EndPlan, error) {
+func (h *Home) buildEndPlan(ctx context.Context, root actor.ActorID, reason string, endedBy actor.ActorID) (EndPlan, error) {
 	rows, err := h.controlIndex.ListActive(ctx)
 	if err != nil {
 		return EndPlan{}, err
@@ -187,7 +199,7 @@ func (h *Home) buildEndPlan(ctx context.Context, root actor.ActorID, reason stri
 			continue
 		}
 		plan.AllIDs = append(plan.AllIDs, id)
-		plan.Envelopes = append(plan.Envelopes, storespec.CascadeEnvelope{Target: id, Reason: reason})
+		plan.Envelopes = append(plan.Envelopes, storespec.CascadeEnvelope{Target: id, Reason: reason, EndedBy: endedBy})
 		if row.Principal != "" {
 			plan.Principals = append(plan.Principals, row.Principal)
 		}

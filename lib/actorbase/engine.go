@@ -67,6 +67,10 @@ type engine struct {
 	rejectStop chan struct{}
 	rejectDone chan struct{}
 	stopOnce   sync.Once
+
+	// Worker-confined completion candidate. Raw Proc completes it by reaching
+	// the next Recv (or returning nil); Serve settles it at handler return.
+	pendingTimer message.ID
 }
 
 // occupantState is the occupant arc (spec §1.4's Draining note): Starting →
@@ -163,6 +167,9 @@ func (e *engine) Start(ctx context.Context, self actorrt.ActorContext) error {
 func (e *engine) runWorker(proc Proc) {
 	defer close(e.workerDone)
 	err := e.runProc(proc)
+	if err == nil {
+		e.completePendingTimer()
+	}
 	// F6: flip to Draining BEFORE announcing death, so a request arriving
 	// after the death announcement is rejected with an overloaded terminal
 	// rather than admitted into a work queue no one will ever drain. The
@@ -366,6 +373,7 @@ const (
 	ObsRejectLaneOverflow actorrt.ObsKind = "actorbase.reject_lane_overflow"
 	ObsClosureFault       actorrt.ObsKind = "actorbase.closure_fault"
 	ObsStaleDelivery      actorrt.ObsKind = "actorbase.stale_delivery"
+	ObsTimerAckFault      actorrt.ObsKind = "actorbase.timer_ack_fault"
 	// ObsUnmatchedResponse is the response-side mirror of ObsStaleDelivery: a
 	// KindResponse envelope whose ParentID resolves to no InFlight call ledger
 	// entry (already matched, timed out, or cancelled) — response-side
@@ -650,23 +658,14 @@ func (r resourceAdapter) List(q accessdoor.ListQuery) (accessdoor.ListPage, erro
 	return r.h.List(r.ctx(), q)
 }
 
-// Open/CreateFile are file kind's own byte-access verbs (期11 spec §5/
-// §3.9') — see ResourceHandle's doc. Both type-assert r.h against
-// accessdoor.FileOpener (a SEPARATE, optional capability from the pinned
-// four-method ResourceAccessHandle, §3.1) rather than calling it directly:
-// only a daemon-hosted avatar (platform/internal/link's remoteResourceHandle)
-// implements it day-1 — a home-hosted caller (boundHandle/liveResourceAccess)
-// does not, and answers ErrUnsupported here rather than a nil-pointer panic,
-// the SAME nil-arm discipline the r.h==nil check above already applies.
+// Open/CreateFile are file kind's own byte-access verbs. File access is part of
+// the unified ResourceAccessHandle surface, so local and remote handles follow
+// the same call path; only the nil arm remains unsupported.
 func (r resourceAdapter) Open(id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
 	if r.h == nil {
 		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrUnsupported
 	}
-	fo, ok := r.h.(accessdoor.FileOpener)
-	if !ok {
-		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrUnsupported
-	}
-	return fo.Open(r.ctx(), id, mode)
+	return r.h.Open(r.ctx(), id, mode)
 }
 
 func (r resourceAdapter) CreateFile(id resource.ResourceID, dir bool, withContent bool) (accessdoor.FileAccess, accessdoor.Outcome, error) {
@@ -677,11 +676,7 @@ func (r resourceAdapter) CreateFile(id resource.ResourceID, dir bool, withConten
 	if err != nil || !withContent || !out.Accepted() || out.Route == nil {
 		return accessdoor.FileAccess{}, out, err
 	}
-	fo, ok := r.h.(accessdoor.FileOpener)
-	if !ok {
-		return accessdoor.FileAccess{}, out, ErrUnsupported
-	}
-	fa, rerr := fo.Redeem(r.ctx(), *out.Route)
+	fa, rerr := r.h.Redeem(r.ctx(), *out.Route)
 	return fa, out, rerr
 }
 
@@ -753,7 +748,7 @@ func (e *engine) CancelTimer(id schedule.TimerID) error {
 	return e.sched.Cancel(e.lifeCtx, id)
 }
 
-func (e *engine) AckTimer(msg Msg) error {
+func (e *engine) ackTimer(msg Msg) error {
 	if e.sched == nil {
 		return ErrUnsupported
 	}
@@ -820,6 +815,9 @@ func (e *engine) Self() actor.ActorID {
 // priority over returning ErrRecvDone, so a Draining occupant still finishes
 // everything already handed to it (spec's "worker 排空至 return").
 func (e *engine) Recv() (Msg, error) {
+	// A raw Proc asking for its next delivery has completed the previous one.
+	// Serve explicitly settles before looping back here.
+	e.completePendingTimer()
 	for {
 		// Drain the deque with priority over ErrRecvDone: a Draining occupant still
 		// finishes everything already handed to it (spec's "worker 排空至 return").
@@ -828,6 +826,7 @@ func (e *engine) Recv() (Msg, error) {
 				return Msg{}, ErrIdleExit
 			}
 			if msg, ok := e.projectWork(env); ok {
+				e.trackTimer(msg)
 				return msg, nil
 			}
 			continue
@@ -854,17 +853,59 @@ func (e *engine) Recv() (Msg, error) {
 			// signalling the loop to end.
 			if env, ok := e.workQ.pop(); ok {
 				if msg, ok := e.projectWork(env); ok {
+					e.trackTimer(msg)
 					return msg, nil
 				}
 				continue
 			}
 			return Msg{}, ErrRecvDone
 		case <-idle:
-			approved, _ := e.options.IdleArbiter.RequestIdle(e.lifeCtx)
-			if approved {
-				e.IdleApproved()
-			}
+			_ = e.options.IdleArbiter.RequestIdle(e.lifeCtx)
 		}
+	}
+}
+
+func timerMessage(msg Msg) bool {
+	const prefix = "timer:"
+	id := string(msg.ID)
+	return strings.HasPrefix(id, prefix) && len(id) > len(prefix)
+}
+
+func (e *engine) trackTimer(msg Msg) {
+	if timerMessage(msg) {
+		e.pendingTimer = msg.ID
+	}
+}
+
+// settleTimer is Serve's per-handler completion hook. A failed or unrouted
+// handler leaves durable fired truth intact for level-triggered redelivery.
+func (e *engine) settleTimer(msg Msg, handled bool) {
+	if e.pendingTimer != msg.ID || !timerMessage(msg) {
+		return
+	}
+	e.pendingTimer = ""
+	if handled {
+		e.ackTimerObserved(msg)
+	}
+}
+
+func (e *engine) completePendingTimer() {
+	if e.pendingTimer == "" {
+		return
+	}
+	id := e.pendingTimer
+	e.pendingTimer = ""
+	var msg Msg
+	msg.ID = id
+	e.ackTimerObserved(msg)
+}
+
+func (e *engine) ackTimerObserved(msg Msg) {
+	if err := e.ackTimer(msg); err != nil && !errors.Is(err, ErrNotTimerMessage) && e.actorCtx != nil {
+		val, _ := json.Marshal(map[string]any{
+			"timer_id": string(msg.ID), "error": err.Error(),
+		})
+		e.actorCtx.PublishObs(ObsTimerAckFault, val)
 	}
 }
 

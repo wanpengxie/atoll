@@ -87,11 +87,6 @@ func (r *flagshipResolver) BuildClass(_ channel.ID, _ actor.ActorID, class strin
 					if msg.Type != "flagship.start" && msg.Type != "flagship.next" {
 						continue
 					}
-					if msg.Type == "flagship.next" {
-						if err := sys.AckTimer(msg); err != nil {
-							return err
-						}
-					}
 					round, err := flagshipCurrentRound(sys)
 					if err != nil {
 						return err

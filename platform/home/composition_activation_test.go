@@ -206,7 +206,7 @@ func TestStaleFactoryShellIsAbortedAndCurrentVersionRebuilt(t *testing.T) {
 	resolver.onResolve = nil
 	deadline := time.Now().Add(2 * time.Second)
 	for {
-		state, _ := h.liveness.snapshot(record.ID)
+		state, _ := h.liveness.stateForTest(record.ID)
 		if state.occ == occRunning && state.version == 2 {
 			break
 		}
@@ -216,7 +216,7 @@ func TestStaleFactoryShellIsAbortedAndCurrentVersionRebuilt(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	state, ok := h.liveness.snapshot(record.ID)
+	state, ok := h.liveness.stateForTest(record.ID)
 	if !ok || state.occ != occRunning || state.version != 2 {
 		t.Fatalf("rebuilt liveness=%+v present=%v", state, ok)
 	}
@@ -358,7 +358,7 @@ func TestInvoluntaryBodyCrashBacksOffThenAutomaticallyRebuilds(t *testing.T) {
 		t.Fatalf("trigger=(%+v,%v)", write, err)
 	}
 	waitHomeCondition(t, func() bool {
-		state, _ := h.liveness.snapshot(result.Row.ID)
+		state, _ := h.liveness.stateForTest(result.Row.ID)
 		h.reviveMu.Lock()
 		entry, held := h.reviveBackoff[result.Row.ID]
 		h.reviveMu.Unlock()

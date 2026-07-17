@@ -549,24 +549,24 @@ func (d *Dialer) OpenStream(ctx context.Context, id actor.ActorID, version int64
 // RequestIdle submits an idle request and returns immediately. Approval is an
 // ordered IdleAck command handled by the stream read loop, never this call's
 // return value.
-func (d *Dialer) RequestIdle(ctx context.Context, id actor.ActorID) (bool, error) {
+func (d *Dialer) RequestIdle(ctx context.Context, id actor.ActorID) error {
 	d.mu.Lock()
 	as := d.streams[id]
 	d.mu.Unlock()
 	if as == nil {
-		return false, errRelayClosed
+		return errRelayClosed
 	}
 	raw, err := json.Marshal(ipc.IdlePayload{})
 	if err != nil {
-		return false, err
+		return err
 	}
 	if err := ctx.Err(); err != nil {
-		return false, err
+		return err
 	}
 	if err := as.codec.Write(ipc.Frame{Kind: ipc.KindIdle, Payload: raw}); err != nil {
-		return false, err
+		return err
 	}
-	return false, nil
+	return nil
 }
 
 // claimTerminal is the sole terminal writer for an actor stream. The first

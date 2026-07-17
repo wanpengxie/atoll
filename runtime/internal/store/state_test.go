@@ -207,7 +207,7 @@ func TestState_CreateRejectsInactiveOwnerWithoutResidue(t *testing.T) {
 	}
 
 	mustInsertActor(t, f.reg, "actor:gone")
-	if err := f.reg.Deregister(ctx, "actor:gone", 2); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:gone", 2); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
 	if err := f.state.Create(ctx, "actor:gone", "cursor", []byte("x")); !errors.Is(err, resourcespec.ErrOwnerInactive) {
@@ -259,7 +259,7 @@ func TestState_CascadeClearedOnDeregister(t *testing.T) {
 		t.Fatalf("Create b: %v", err)
 	}
 
-	if err := f.reg.Deregister(ctx, "actor:a", 1000); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 1000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
 
@@ -288,7 +288,7 @@ func TestState_NoCascadeOnNoOpDeregister(t *testing.T) {
 	}
 
 	// Deregister a DIFFERENT, non-existent actor — a no-op that must not clear a.
-	if err := f.reg.Deregister(ctx, "actor:ghost", 1); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:ghost", 1); err != nil {
 		t.Fatalf("Deregister ghost must be no-op: %v", err)
 	}
 	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); !exists {
@@ -297,13 +297,13 @@ func TestState_NoCascadeOnNoOpDeregister(t *testing.T) {
 
 	// First real deregister clears a; the second (already-deregistered) is a
 	// no-op and must not error.
-	if err := f.reg.Deregister(ctx, "actor:a", 2); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 2); err != nil {
 		t.Fatalf("Deregister a: %v", err)
 	}
 	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
 		t.Error("owner:a state must be cleared by real deregister")
 	}
-	if err := f.reg.Deregister(ctx, "actor:a", 3); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 3); err != nil {
 		t.Fatalf("repeat Deregister must be a no-op, got: %v", err)
 	}
 }
@@ -322,7 +322,7 @@ func TestState_CascadeClearedOnMemberRemove(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := f.reg.Deregister(ctx, "actor:a", 200); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 200); err != nil {
 		t.Fatalf("remove member: %v", err)
 	}
 	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
@@ -330,7 +330,7 @@ func TestState_CascadeClearedOnMemberRemove(t *testing.T) {
 	}
 
 	// A repeated remove (already-deregistered) is a no-op and must not error.
-	if err := f.reg.Deregister(ctx, "actor:a", 300); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 300); err != nil {
 		t.Fatalf("repeat remove must be no-op: %v", err)
 	}
 }
@@ -350,11 +350,11 @@ func TestState_ChannelScopedResourcesSurviveDeregister(t *testing.T) {
 	if err := f.state.Create(ctx, "actor:a", "cursor", []byte("state")); err != nil {
 		t.Fatalf("Create state: %v", err)
 	}
-	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", []byte("resource")); err != nil {
+	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", []byte("resource"), resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}); err != nil {
 		t.Fatalf("Create resource: %v", err)
 	}
 
-	if err := f.reg.Deregister(ctx, "actor:a", 1000); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 1000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
 

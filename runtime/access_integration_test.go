@@ -183,7 +183,8 @@ func (testGrantOverlay) ActorAllows(context.Context, actor.ActorID, resource.Res
 func (testGrantOverlay) SetGrant(context.Context, resource.ResourceID, access.Grant) error {
 	return nil
 }
-func (testGrantOverlay) EndBatch([]actor.ActorID) {}
+func (testGrantOverlay) EndBatch([]actor.ActorID)           {}
+func (testGrantOverlay) DeleteResource(resource.ResourceID) {}
 
 func (a testAccessAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
 	rec, ok, err := a.declared.LookupDeclaredActive(ctx, id)

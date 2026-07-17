@@ -408,7 +408,7 @@ func scheduleIdentityDue(t *testing.T, engine *Engine, author actor.ActorID, clo
 // Revive seam.
 // ---------------------------------------------------------------------
 
-func TestReviveGatesIdentityFire(t *testing.T) {
+func TestReviveFailureDoesNotGateIdentityFire(t *testing.T) {
 	store := newFakeStore()
 	sink := &fakeFireSink{}
 	revive := &fakeReviver{err: errors.New("no builder registered yet")}
@@ -428,23 +428,9 @@ func TestReviveGatesIdentityFire(t *testing.T) {
 		t.Fatalf("Schedule: %v", err)
 	}
 
-	// EnsureLive fails: fire never attempted, row stays (EnsureLive must run
-	// before append, in that fixed order).
+	// Durable fire commits before the accelerator. A revive failure must not
+	// roll back or retain the pending row.
 	waitFor(t, 2*time.Second, func() bool { return revive.callCount() >= 1 })
-	time.Sleep(20 * time.Millisecond)
-	if sink.callCount() != 0 {
-		t.Fatalf("Append called %d times before EnsureLive succeeded, want 0 (revive gates append)", sink.callCount())
-	}
-	if !store.hasRow(id) {
-		t.Fatal("row deleted despite a failing Revive, want retained (at-least-once)")
-	}
-
-	// EnsureLive recovers: the very next tick fires exactly once.
-	revive.mu.Lock()
-	revive.err = nil
-	revive.mu.Unlock()
-	clock.Advance(backoffDuration)
-
 	waitFor(t, 2*time.Second, func() bool { return sink.callCount() == 1 })
 	waitFor(t, time.Second, func() bool { return !store.hasRow(id) })
 }
@@ -881,12 +867,10 @@ func TestEngineCloseBoundsFireIgnoringContext(t *testing.T) {
 // Reviver two-class error contract (mirrors the FireSink tri-state).
 // ---------------------------------------------------------------------
 
-// ReviveRejected = permanently unrevivable author → the row is a poison row,
-// disposed (deleted, never fired, loud log) — left in place it
-// would retry hot forever and starve later-due rows once such rows fill a
-// due page. A plain error stays transient: the row survives for the next tick.
+// Revive is post-fire acceleration. Neither deterministic nor transient revive
+// failures may undo durable fire truth.
 func TestReviveTwoClassOutcomes(t *testing.T) {
-	t.Run("ReviveRejected disposes the row without firing", func(t *testing.T) {
+	t.Run("ReviveRejected cannot undo committed fire", func(t *testing.T) {
 		store := newFakeStore()
 		sink := &fakeFireSink{}
 		clock := newFakeClock(time.UnixMilli(1_000_000))
@@ -897,12 +881,12 @@ func TestReviveTwoClassOutcomes(t *testing.T) {
 
 		id := scheduleIdentityDue(t, engine, "author-1", clock)
 		waitFor(t, 2*time.Second, func() bool { return !store.hasRow(id) })
-		if n := sink.callCount(); n != 0 {
-			t.Fatalf("fire sink called %d times, want 0 (unrevivable row must never fire)", n)
+		if n := sink.callCount(); n != 1 {
+			t.Fatalf("fire sink called %d times, want 1", n)
 		}
 	})
 
-	t.Run("plain error is transient: the row survives", func(t *testing.T) {
+	t.Run("plain error cannot undo committed fire", func(t *testing.T) {
 		store := newFakeStore()
 		sink := &fakeFireSink{}
 		clock := newFakeClock(time.UnixMilli(1_000_000))
@@ -912,12 +896,10 @@ func TestReviveTwoClassOutcomes(t *testing.T) {
 		defer engine.Close()
 
 		id := scheduleIdentityDue(t, engine, "author-1", clock)
-		waitFor(t, 2*time.Second, func() bool { return reviver.callCount() >= 2 }) // retried across ticks
-		if !store.hasRow(id) {
-			t.Fatal("transient revive failure must leave the row for retry")
-		}
-		if n := sink.callCount(); n != 0 {
-			t.Fatalf("fire sink called %d times, want 0 (never revived)", n)
+		waitFor(t, 2*time.Second, func() bool { return reviver.callCount() >= 1 })
+		waitFor(t, 2*time.Second, func() bool { return !store.hasRow(id) })
+		if n := sink.callCount(); n != 1 {
+			t.Fatalf("fire sink called %d times, want 1", n)
 		}
 	})
 }

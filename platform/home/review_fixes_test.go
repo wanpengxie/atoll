@@ -82,6 +82,14 @@ func TestDeclarationEditApplyPublishesCurrentAndKeepsLatestDistinct(t *testing.T
 	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}}) {
 		t.Fatal("publish admitted row")
 	}
+	if h.liveness.AdmitIdentity(id) != transitionApplied {
+		t.Fatal("publish parent liveness")
+	}
+	child, err := h.forkAdmission(ctx, id, 1, actorrt.ForkSpec{Kind: actor.KindAgent, Class: "version-gated-child"}, "version-gated-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldEnd := lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: id, BirthVersion: 1}}
 	edited, err := h.EditDeclaration(ctx, storespec.DeclEditBundle{
 		ActorID: id, Class: "agent.v2", Config: nil, Placement: storespec.NewServerPlacement(),
 		SourceDeclID: "source-v2", CreatedAt: 2,
@@ -102,6 +110,12 @@ func TestDeclarationEditApplyPublishesCurrentAndKeepsLatestDistinct(t *testing.T
 	}
 	if verdict, err := h.controlIndex.CheckAuthor(ctx, storespec.AuthorStamp{ID: id, BirthVersion: 2}); err != nil || verdict != storespec.AuthorOK {
 		t.Fatalf("apply was not immediately published: verdict=%v err=%v", verdict, err)
+	}
+	if err := oldEnd.End(ctx, child, "stale-parent"); !errors.Is(err, ErrEndVersionStale) {
+		t.Fatalf("old lifecycle handle crossed apply gate: %v", err)
+	}
+	if _, active, err := h.controlIndex.LookupActive(ctx, child); err != nil || !active {
+		t.Fatalf("stale lifecycle handle ended child: active=%v err=%v", active, err)
 	}
 	if _, err := h.ApplyDeclaration(ctx, id, 1); !errors.Is(err, ErrApplyVersionRegress) {
 		t.Fatalf("regress err=%v", err)
@@ -191,7 +205,7 @@ func TestRealPensFenceAppliedAndEndedDeclaredAndRunIdentities(t *testing.T) {
 	if res := writeEvent(runPen, "run-v1-before-end"); !res.Accepted() {
 		t.Fatalf("run pen rejected: %+v", res)
 	}
-	if err := h.endForkChild(ctx, parent, child, "pen-gate-end"); err != nil {
+	if err := (lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: parent, BirthVersion: 1}}).End(ctx, child, "pen-gate-end"); err != nil {
 		t.Fatal(err)
 	}
 	if res := writeEvent(runPen, "run-v1-after-end"); res.RejectReason != harness.HarnessAuthorNotMember {

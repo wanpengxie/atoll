@@ -30,7 +30,6 @@ type ChannelStores struct {
 	// reader never receives any membership write). Each face a consumer needs
 	// is its own explicit field over the one concrete actorRegistry; nothing
 	// downstream may type-assert one face back into another.
-	Registry       storespec.Registry          // membership READS only (Lookup/Exists/ListActive)
 	Principals     storespec.PrincipalRegistry // principal-axis read (LookupActivePrincipal, admission path)
 	DurableHistory storespec.DurableHistory
 	Declared       storespec.DeclaredControlReader
@@ -100,7 +99,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Query:          msgs,
 		Expiry:         msgs,
 		Requests:       newRequestLookup(msgs),
-		Registry:       reg,
 		Principals:     reg,
 		DurableHistory: reg,
 		Declared:       reg,

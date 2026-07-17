@@ -19,6 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
@@ -484,11 +485,11 @@ func TestTimer_CascadeClearedOnDeregister(t *testing.T) {
 
 	// A channel-scoped resource owned by a is a control for the OTHER locus:
 	// resources are non-lossy and must survive the creator's deregister.
-	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", []byte("resource")); err != nil {
+	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", []byte("resource"), resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}); err != nil {
 		t.Fatalf("Create resource: %v", err)
 	}
 
-	if err := f.reg.Deregister(ctx, "actor:a", 1000); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 1000); err != nil {
 		t.Fatalf("Deregister: %v", err)
 	}
 
@@ -513,21 +514,21 @@ func TestTimer_NoCascadeOnNoOpDeregister(t *testing.T) {
 	mustInsertActor(t, f.reg, "actor:a")
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
 
-	if err := f.reg.Deregister(ctx, "actor:ghost", 1); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:ghost", 1); err != nil {
 		t.Fatalf("Deregister ghost must be no-op: %v", err)
 	}
 	if due, _ := f.timers.Due(ctx, 999999); len(due) != 1 {
 		t.Errorf("no-op deregister must not clear another actor's timers, got %+v", due)
 	}
 
-	if err := f.reg.Deregister(ctx, "actor:a", 2); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 2); err != nil {
 		t.Fatalf("Deregister a: %v", err)
 	}
 	if due, _ := f.timers.Due(ctx, 999999); len(due) != 0 {
 		t.Errorf("real deregister must clear timers, got %+v", due)
 	}
 	// A repeat is a no-op and must not error.
-	if err := f.reg.Deregister(ctx, "actor:a", 3); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 3); err != nil {
 		t.Fatalf("repeat Deregister must be a no-op, got: %v", err)
 	}
 }
@@ -543,7 +544,7 @@ func TestTimer_CascadeClearedOnMemberRemove(t *testing.T) {
 	}
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
 
-	if err := f.reg.Deregister(ctx, "actor:a", 200); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 200); err != nil {
 		t.Fatalf("remove member: %v", err)
 	}
 	if due, _ := f.timers.Due(ctx, 999999); len(due) != 0 {
@@ -551,7 +552,7 @@ func TestTimer_CascadeClearedOnMemberRemove(t *testing.T) {
 	}
 
 	// A repeated remove (already-deregistered) is a no-op and must not error.
-	if err := f.reg.Deregister(ctx, "actor:a", 300); err != nil {
+	if err := endActorForTest(ctx, f.reg, "actor:a", 300); err != nil {
 		t.Fatalf("repeat remove must be no-op: %v", err)
 	}
 }

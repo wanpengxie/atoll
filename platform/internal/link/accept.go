@@ -62,6 +62,7 @@ const attachRejectDrain = 25 * time.Millisecond
 type Acceptor struct {
 	minter       harness.Minter
 	access       accessdoor.AccessMinter
+	stateHandles accessdoor.StateHandleResolver
 	sched        schedule.Minter
 	runtime      *actorrt.Runtime
 	authority    storespec.ActorAuthority
@@ -237,6 +238,7 @@ type Config struct {
 	// so a daemon-hosted cell's off-log / timer capability is behaviourally
 	// identical to a local one (transport neutrality).
 	Access       accessdoor.AccessMinter
+	StateHandles accessdoor.StateHandleResolver
 	Schedule     schedule.Minter
 	Runtime      *actorrt.Runtime
 	Authority    storespec.ActorAuthority
@@ -276,6 +278,14 @@ type PlanProvider interface {
 // declarations that may be published to the link snapshot.
 type DeclarationCoordinator interface {
 	ValidateAttachment(context.Context, PortOwner, string, []storespec.ComputeDeclaration) ([]storespec.ComputeDeclaration, error)
+	PrepareAttachmentFence(context.Context, actor.ActorID, string, int64) (AttachmentFence, error)
+}
+
+// AttachmentFence is a lock-free publication guard acquired while Home still
+// holds the actor lifecycle gate. Commit rechecks it immediately before the
+// runtime publishes the new incarnation.
+type AttachmentFence interface {
+	Valid() bool
 }
 
 // DaemonAuthority holds the app-owned per-daemon keyed lock while it freshly
@@ -290,7 +300,7 @@ type PortOwner uint64
 // is pointer-conditional and performs only an index pointer swap while holding
 // its own leaf lock.
 type PortIndex interface {
-	Register(PortOwner, actorrt.Incarnation)
+	Register(PortOwner, actorrt.Incarnation, string, int64) bool
 	Remove(PortOwner, actorrt.Incarnation)
 	Take(PortOwner, actor.ActorID) (actorrt.Incarnation, bool)
 	TakeOwner(PortOwner) []actorrt.Incarnation
@@ -306,6 +316,8 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 		return nil, errors.New("link: declaration coordinator is required")
 	case cfg.Authority == nil:
 		return nil, errors.New("link: actor authority is required")
+	case cfg.StateHandles == nil:
+		return nil, errors.New("link: state handle resolver is required")
 	case cfg.DaemonAuthority == nil:
 		return nil, errors.New("link: daemon authority is required")
 	case cfg.ActorLock == nil:
@@ -321,6 +333,7 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 	return &Acceptor{
 		minter:          cfg.Minter,
 		access:          cfg.Access,
+		stateHandles:    cfg.StateHandles,
 		sched:           cfg.Schedule,
 		runtime:         cfg.Runtime,
 		authority:       cfg.Authority,
@@ -774,6 +787,8 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				writerPin        *incumbentPin
 				authorityRelease func()
 				actorRelease     func()
+				attachmentFence  AttachmentFence
+				ensureTicket     string
 			)
 			releaseOuter := func() {
 				if actorRelease != nil {
@@ -810,6 +825,12 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 					releaseOuter()
 					return "", err
 				}
+				attachmentFence, err = a.declarations.PrepareAttachmentFence(reqCtx, id, meta.EnsureTicket, meta.Version)
+				if err != nil {
+					releaseOuter()
+					return "", err
+				}
+				ensureTicket = meta.EnsureTicket
 				birthVersion = meta.Version
 				return id, nil
 			}
@@ -825,7 +846,9 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			}
 			defer releaseOuter()
 			portMu.Lock()
-			inc, err := prepared.Commit(writerPin.valid)
+			inc, err := prepared.Commit(func() bool {
+				return writerPin.valid() && attachmentFence != nil && attachmentFence.Valid()
+			})
 			if err != nil {
 				portMu.Unlock()
 				a.logger.Info("link.attach_stream_failed", "err", err)
@@ -834,7 +857,11 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			// Commit and Home-index publication are one ordered barrier. Close/Kick
 			// takes the same barrier before its snapshot, so a live port is never
 			// outside the only ownership index it can snapshot.
-			a.portIndex.Register(portOwner, inc)
+			if !a.portIndex.Register(portOwner, inc, ensureTicket, birthVersion) {
+				a.runtime.Despawn(inc)
+				portMu.Unlock()
+				return
+			}
 			portMu.Unlock()
 			if !a.runtime.IsLive(inc) {
 				removePort(inc)
@@ -1526,7 +1553,11 @@ func (a *Acceptor) accessInvocation(ctx context.Context, inc actorrt.Incarnation
 	case accessScopeChannel:
 		raw = a.access.Mint(stamp)
 	case accessScopeState:
-		raw = a.access.MintState(stamp)
+		var err error
+		raw, err = a.stateHandles.Resolve(ctx, stamp.ID)
+		if err != nil {
+			return nil, err
+		}
 	default:
 		return nil, fmt.Errorf("link: access unknown scope %q", req.Scope)
 	}

@@ -83,7 +83,7 @@ func BenchmarkActorStorm(b *testing.B) {
 				}
 				sponsor = child
 			}
-			if err := h.EndIdentity(ctx, storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}, root, "storm"); err != nil {
+			if err := h.systemEndHandle().End(ctx, root, "storm"); err != nil {
 				b.Fatal(err)
 			}
 		}

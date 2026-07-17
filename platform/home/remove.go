@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // ErrRemoveAnchor rejects Remove against the intrinsic system actor — the
@@ -41,7 +40,7 @@ func (h *Home) Restart(ctx context.Context, id actor.ActorID) error {
 	if h.liveness != nil {
 		_, _ = h.liveness.Retire(id, true)
 	}
-	h.channel.Cells().DespawnID(id)
+	h.channel.Cells().DespawnIDReason(id, "restart")
 	h.pokeReconcile()
 	return nil
 }
@@ -69,7 +68,7 @@ func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
 	if id == actor.SystemActorID {
 		return ErrRemoveAnchor
 	}
-	err := h.EndIdentity(ctx, storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}, id, "removed")
+	err := h.systemEndHandle().End(ctx, id, "removed")
 	if err == nil {
 		h.logger.Info("platform.member.removed", "channel", string(h.channelID), "actor", string(id))
 	}

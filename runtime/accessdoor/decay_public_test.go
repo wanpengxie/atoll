@@ -22,7 +22,7 @@ func TestPublicSetArmDayOneMatrix(t *testing.T) {
 	m, err := New(Deps{
 		Registry:  cs.Resources,
 		Drivers:   DriverTable{resourcespec.KindKV: cs.KVDriver},
-		Authority: decayMembership{registry: cs.Registry},
+		Authority: decayMembership{registry: cs.Declared},
 		Overlay:   &fakeGrantOverlay{},
 		State:     cs.State,
 	})

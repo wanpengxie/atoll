@@ -68,6 +68,7 @@ type AccessHandle interface {
 // slice the red line forbids outright (no ErrUnsupported intermediate state).
 type ResourceAccessHandle interface {
 	AccessHandle
+	FileOpener
 
 	// Create is the SOLE create entry point (§3.1's "create 单入口"): the
 	// resource face's Invoke no longer accepts a bare OpCreate at all (see
@@ -87,6 +88,14 @@ type ResourceAccessHandle interface {
 	// absence IS the scope law (no kind column, no cross-owner enumeration
 	// makes sense there), so List belongs on this interface alone.
 	List(ctx context.Context, q ListQuery) (ListPage, error)
+}
+
+func (h boundHandle) Open(context.Context, resource.ResourceID, access.Operation) (FileAccess, Outcome, error) {
+	return FileAccess{}, Outcome{}, ErrFileCapabilityUnavailable
+}
+
+func (h boundHandle) Redeem(context.Context, FileRoute) (FileAccess, error) {
+	return FileAccess{}, ErrFileCapabilityUnavailable
 }
 
 // boundHandle is a ResourceAccessHandle welded to one caller (the cell
@@ -214,11 +223,19 @@ func (m *minter) MintState(owner storespec.AuthorStamp) AccessHandle {
 // day-1 KindKV driver must be present (op=create hardcodes KindKV, so a missing
 // one would otherwise surface only when someone first creates).
 func New(deps Deps) (AccessMinter, error) {
+	minter, _, err := NewAssembly(deps)
+	return minter, err
+}
+
+// NewAssembly constructs the caller-facing minter and the asynchronous
+// completion face over the same door and therefore the same resource gate.
+func NewAssembly(deps Deps) (AccessMinter, ResourceCompletion, error) {
 	if deps.Registry == nil || deps.Drivers == nil || deps.Authority == nil || deps.Overlay == nil || deps.State == nil {
-		return nil, errors.New("accessdoor: Deps incomplete")
+		return nil, nil, errors.New("accessdoor: Deps incomplete")
 	}
 	if deps.Drivers[resourcespec.KindKV] == nil {
-		return nil, errors.New("accessdoor: KindKV driver missing")
+		return nil, nil, errors.New("accessdoor: KindKV driver missing")
 	}
-	return &minter{door: &door{deps: deps}}, nil
+	d := &door{deps: deps}
+	return &minter{door: d}, resourceCompletion{door: d}, nil
 }

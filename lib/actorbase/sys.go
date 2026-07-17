@@ -75,7 +75,6 @@ type Sys interface {
 	// self-authored message after d.
 	After(d time.Duration, msgType string, payload any) (schedule.TimerID, error)
 	CancelTimer(id schedule.TimerID) error
-	AckTimer(msg Msg) error
 
 	// --- Spawn arm --------------------------------------------------
 	// Fork mints a child owned by this incarnation, returning the child's

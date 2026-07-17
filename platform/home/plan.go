@@ -22,9 +22,8 @@ func (h *Home) PlanForDaemon(ctx context.Context, daemonID string) ([]platform.P
 		if row.Placement.Kind != storespec.PlacementDaemon || row.Placement.Host != daemonID {
 			continue
 		}
-		state, ok := h.liveness.snapshot(row.ID)
-		if !ok || state.ticket == "" || state.version != row.CurrentDeclVersion ||
-			(state.occ != occStarting && state.occ != occDetached && state.occ != occRunning) {
+		intent := h.liveness.AttachmentIntent(row.ID)
+		if !intent.Present || intent.Version != row.CurrentDeclVersion {
 			continue
 		}
 		config := append([]byte(nil), row.Config...)
@@ -37,7 +36,7 @@ func (h *Home) PlanForDaemon(ctx context.Context, daemonID string) ([]platform.P
 		out = append(out, platform.PlanActor{
 			InstanceID: row.ID, Class: row.Class, Config: config,
 			Kind: row.Kind, Binding: actor.BindingRuntimeInboundViaRelay, Version: row.CurrentDeclVersion,
-			TIdleMs: row.TIdle.Milliseconds(), EnsureTicket: string(state.ticket),
+			TIdleMs: row.TIdle.Milliseconds(), EnsureTicket: string(intent.Ticket),
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].InstanceID < out[j].InstanceID })
@@ -54,16 +53,14 @@ func (h *Home) reconcileDaemonIntent(ctx context.Context) {
 		if row.Placement.Kind != storespec.PlacementDaemon {
 			continue
 		}
-		state, ok := h.liveness.snapshot(row.ID)
+		if _, retired := h.liveness.RetireIfVersionSkew(row.ID, row.CurrentDeclVersion); retired {
+			h.channel.Cells().DespawnID(row.ID)
+		}
+		state, ok := h.liveness.WakeStanding(row.ID)
 		if !ok {
 			continue
 		}
-		if state.version != 0 && state.version != row.CurrentDeclVersion && state.occ != occNone {
-			_, _ = h.liveness.Retire(row.ID, true)
-			h.channel.Cells().DespawnID(row.ID)
-			state, _ = h.liveness.snapshot(row.ID)
-		}
-		if state.occ == occNone && (row.TIdle == 0 || state.dirty || state.restart) {
+		if state.Occ == occNone && (row.TIdle == 0 || state.Dirty || state.Restart) {
 			_, _ = h.liveness.BeginEnsure(row.ID, row.CurrentDeclVersion)
 		}
 	}

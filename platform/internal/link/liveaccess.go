@@ -79,31 +79,12 @@ type liveResourceAccess struct {
 // handle — no incarnation gate — for the same reason NewLivePen/NewLiveAccess
 // skip anchors.
 //
-// FileOpener pass-through (found+fixed during 期11 S6's platform-level walk
-// verification — a REAL bug, not a spec-authored requirement): raw is a
-// boundHandle for a home-hosted caller (which does NOT implement
-// accessdoor.FileOpener — Open/CreateFile correctly answer ErrUnsupported
-// there, §5's own documented scope) but a remoteResourceHandle for a
-// daemon-hosted caller (which DOES implement it — this is the ONE avatar
-// §5 built Open/Redeem for in the first place, dial.go's own doc). This
-// wrapper used to ALWAYS return the plain liveResourceAccess value — which
-// has no Open/Redeem methods — so lib/actorbase's own type-assertion
-// (`r.h.(accessdoor.FileOpener)`) failed for EVERY caller, daemon-hosted
-// included, silently defeating §5's entire Open/CreateFile build (S5's own
-// handoff claimed "ready for a consumer"; the first actual actorbase-level
-// caller — this section's walk tests — is what surfaced it, since S4/S5's
-// own tests drove remoteResourceHandle directly, never through this
-// membrane). Fixed by returning a DIFFERENT concrete type when raw itself
-// implements FileOpener — never by making liveResourceAccess unconditionally
-// claim the interface (which would have to fabricate a NEW "unsupported"
-// error identity for the home-hosted case, changing existing behavior
-// instead of just completing it).
+// ResourceAccessHandle has one uniform file call face on every host. The raw
+// home handle answers capability_unavailable; the daemon proxy forwards to its
+// byte plane. This membrane always forwards that same face after its liveness
+// check, so host placement never changes the method set visible to actorbase.
 func NewLiveResourceAccess(raw accessdoor.ResourceAccessHandle, inc actorrt.Incarnation, host *actorrt.Runtime) accessdoor.ResourceAccessHandle {
-	base := liveResourceAccess{raw: raw, inc: inc, host: host}
-	if fo, ok := raw.(accessdoor.FileOpener); ok {
-		return liveResourceAccessFileOpener{liveResourceAccess: base, fo: fo}
-	}
-	return base
+	return liveResourceAccess{raw: raw, inc: inc, host: host}
 }
 
 func (a liveResourceAccess) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
@@ -134,30 +115,18 @@ func (a liveResourceAccess) List(ctx context.Context, q accessdoor.ListQuery) (a
 	return a.raw.List(ctx, q)
 }
 
-// liveResourceAccessFileOpener is liveResourceAccess PLUS the
-// accessdoor.FileOpener forwarding pair (Open/Redeem) — minted by
-// NewLiveResourceAccess only when raw itself implements FileOpener (see its
-// doc). Embedding liveResourceAccess gives it the same Invoke/Create/Stat/
-// List + liveness-fence behavior for free; Open/Redeem apply the IDENTICAL
-// fence before forwarding to fo (never to a.raw directly — fo IS a.raw,
-// captured pre-asserted so this type never re-asserts per call).
-type liveResourceAccessFileOpener struct {
-	liveResourceAccess
-	fo accessdoor.FileOpener
-}
-
-func (a liveResourceAccessFileOpener) Open(ctx context.Context, id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+func (a liveResourceAccess) Open(ctx context.Context, id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
 	if !a.host.IsLive(a.inc) {
 		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrAccessNotLive
 	}
-	return a.fo.Open(ctx, id, mode)
+	return a.raw.Open(ctx, id, mode)
 }
 
-func (a liveResourceAccessFileOpener) Redeem(ctx context.Context, route accessdoor.FileRoute) (accessdoor.FileAccess, error) {
+func (a liveResourceAccess) Redeem(ctx context.Context, route accessdoor.FileRoute) (accessdoor.FileAccess, error) {
 	if !a.host.IsLive(a.inc) {
 		return accessdoor.FileAccess{}, ErrAccessNotLive
 	}
-	return a.fo.Redeem(ctx, route)
+	return a.raw.Redeem(ctx, route)
 }
 
-var _ accessdoor.FileOpener = liveResourceAccessFileOpener{}
+var _ accessdoor.FileOpener = liveResourceAccess{}

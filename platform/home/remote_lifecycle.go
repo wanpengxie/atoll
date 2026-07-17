@@ -27,5 +27,5 @@ func (h *Home) handleRemoteEnd(ctx context.Context, inc actorrt.Incarnation, bir
 	if reason == "" {
 		reason = "ended"
 	}
-	return h.prepareEndIdentity(ctx, storespec.AuthorStamp{ID: inc.ID(), BirthVersion: birthVersion}, target, reason)
+	return (lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: inc.ID(), BirthVersion: birthVersion}}).prepare(ctx, target, reason)
 }

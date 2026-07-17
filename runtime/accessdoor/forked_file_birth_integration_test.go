@@ -60,15 +60,46 @@ func (a *fileBirthAuthority) end(id actor.ActorID) {
 	a.mu.Unlock()
 }
 
-type fileBirthOverlay struct{}
-
-func (fileBirthOverlay) ActorAllows(context.Context, actor.ActorID, resource.ResourceID, access.Operation) (bool, error) {
-	return false, nil
+type fileBirthOverlay struct {
+	mu     sync.Mutex
+	grants map[resource.ResourceID]map[actor.ActorID]map[access.Operation]bool
 }
-func (fileBirthOverlay) SetGrant(context.Context, resource.ResourceID, access.Grant) error {
+
+func (o *fileBirthOverlay) ActorAllows(_ context.Context, id actor.ActorID, rid resource.ResourceID, op access.Operation) (bool, error) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.grants[rid][id][op], nil
+}
+func (o *fileBirthOverlay) SetGrant(_ context.Context, rid resource.ResourceID, grant access.Grant) error {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if o.grants[rid] == nil {
+		o.grants[rid] = make(map[actor.ActorID]map[access.Operation]bool)
+	}
+	ops := make(map[access.Operation]bool)
+	for _, op := range grant.Ops {
+		ops[op] = true
+	}
+	o.grants[rid][grant.Grantee] = ops
 	return nil
 }
-func (fileBirthOverlay) EndBatch([]actor.ActorID) {}
+func (o *fileBirthOverlay) EndBatch(ids []actor.ActorID) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	for rid, actors := range o.grants {
+		for _, id := range ids {
+			delete(actors, id)
+		}
+		if len(actors) == 0 {
+			delete(o.grants, rid)
+		}
+	}
+}
+func (o *fileBirthOverlay) DeleteResource(id resource.ResourceID) {
+	o.mu.Lock()
+	delete(o.grants, id)
+	o.mu.Unlock()
+}
 
 type fileBirthMount struct{}
 
@@ -111,9 +142,10 @@ func TestForkedFileCreateLandsChannelOwnedAndSurvivesCreatorEnd(t *testing.T) {
 		},
 		worlds: map[actor.ActorID]storespec.ActorWorld{child: storespec.WorldRun, member: storespec.WorldDurable},
 	}
+	overlay := &fileBirthOverlay{grants: make(map[resource.ResourceID]map[actor.ActorID]map[access.Operation]bool)}
 	minter, err := accessdoor.New(accessdoor.Deps{
 		Registry: cs.Resources, Drivers: accessdoor.DriverTable{accessdoor.KindKV: cs.KVDriver},
-		Authority: authority, Overlay: fileBirthOverlay{}, State: cs.State,
+		Authority: authority, Overlay: overlay, State: cs.State,
 		ChannelID: "forked-file-birth", StorageMounts: fileBirthMount{},
 		StorageControl: fileBirthStorageControl{}, LaneControl: fileBirthLane{},
 	})
@@ -138,11 +170,20 @@ func TestForkedFileCreateLandsChannelOwnedAndSurvivesCreatorEnd(t *testing.T) {
 			t.Fatalf("members %s=(%v,%v)", op, allowed, err)
 		}
 	}
+	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete} {
+		if allowed, err := overlay.ActorAllows(ctx, child, rid, op); err != nil || !allowed {
+			t.Fatalf("creator overlay %s=(%v,%v)", op, allowed, err)
+		}
+	}
 
 	// Creator End removes every run-only authority fact. The resource's closed
 	// birth plan was committed in the same transaction, so a durable identity can
 	// still obtain both file routes without consulting or reclassifying creator.
 	authority.end(child)
+	overlay.EndBatch([]actor.ActorID{child})
+	if allowed, _ := overlay.ActorAllows(ctx, child, rid, access.OpDelete); allowed {
+		t.Fatal("creator overlay survived creator End")
+	}
 	memberHandle := minter.Mint(storespec.AuthorStamp{ID: member, BirthVersion: 1})
 	for _, op := range []access.Operation{access.OpRead, access.OpWrite} {
 		got, err := memberHandle.Invoke(ctx, op, rid, nil, nil)

@@ -215,7 +215,7 @@ func TestStateLifetimeSplitsDurableIdentityFromHomeSessionRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h1.endForkChild(ctx, declared, ended, "state-test"); err != nil {
+	if err := (lifecycleEndHandle{home: h1, author: storespec.AuthorStamp{ID: declared, BirthVersion: 1}}).End(ctx, ended, "state-test"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := h1.stateHandles.Resolve(ctx, ended); !errors.Is(err, accessdoor.ErrStateHandleUnavailable) {
@@ -322,10 +322,10 @@ func TestEnsureTicketFromPriorHomeSessionCannotAttach(t *testing.T) {
 		t.Fatalf("new plan=%+v old=%q err=%v", newPlan, oldTicket, err)
 	}
 	carrier := &testCarrier{}
-	if got := h2.liveness.Attach(decl.Row.ID, oldTicket, carrier); got != transitionStaleTicket {
+	if got := h2.liveness.Attach(decl.Row.ID, oldTicket, 1, carrier); got != transitionStaleTicket {
 		t.Fatalf("old-session attach=%v, want stale ticket", got)
 	}
-	if got := h2.liveness.Attach(decl.Row.ID, EnsureTicket(newPlan[0].EnsureTicket), carrier); got != transitionApplied {
+	if got := h2.liveness.Attach(decl.Row.ID, EnsureTicket(newPlan[0].EnsureTicket), 1, carrier); got != transitionApplied {
 		t.Fatalf("current-session attach=%v", got)
 	}
 }
@@ -377,19 +377,23 @@ func TestBootConvergesDurableDeclarationCommittedBeforeMemoryPublication(t *test
 func TestForkWakeConvergesOnLevelSweepWithoutInlineBuildOrPoke(t *testing.T) {
 	ctx := context.Background()
 	resolver := &acceptanceResolver{}
-	h := openAcceptanceHome(t, filepath.Join(t.TempDir(), "channel.sqlite"), "accelerators-off", resolver, time.Hour)
+	h := openAcceptanceHome(t, filepath.Join(t.TempDir(), "channel.sqlite"), "accelerators-off", resolver, 10*time.Millisecond)
 	t.Cleanup(func() { _ = h.Close() })
-	// Disable both asynchronous accelerators. The remaining explicit sweep models
-	// the periodic level backstop and must be sufficient on its own.
-	h.reconcileStop()
-	<-h.reconcileDone
+	h.disablePoke.Store(true)
+	h.disableForkInlineActivation.Store(true)
 	parent, err := h.Admit(ctx, actor.KindHuman, "accelerator-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
-	child, err := h.forkAdmission(ctx, parent, 1, actorrt.ForkSpec{
+	waitHomeCondition(t, func() bool {
+		_, live := h.channel.Cells().CurrentIncarnation(parent)
+		return live
+	})
+	parentInc, _ := h.channel.Cells().CurrentIncarnation(parent)
+	lifecycle := newSpawnHandle(h, parentInc, 1, h.channel.Cells())
+	child, err := lifecycle.Fork(ctx, actorrt.ForkSpec{
 		Kind: actor.KindAgent, Class: "accelerator-child",
-	}, "accelerator-child")
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -407,14 +411,7 @@ func TestForkWakeConvergesOnLevelSweepWithoutInlineBuildOrPoke(t *testing.T) {
 		t.Fatalf("request=(%+v,%v)", res, err)
 	}
 	waitHomeCondition(t, func() bool {
-		state, _ := h.liveness.snapshot(child)
-		return state.dirty
+		_, live := h.channel.Cells().CurrentIncarnation(child)
+		return live
 	})
-	if _, live := h.channel.Cells().CurrentIncarnation(child); live {
-		t.Fatal("disabled poke unexpectedly built child")
-	}
-	h.reconcileSweep(ctx)
-	if _, live := h.channel.Cells().CurrentIncarnation(child); !live {
-		t.Fatal("level sweep did not converge dirty fork child")
-	}
 }

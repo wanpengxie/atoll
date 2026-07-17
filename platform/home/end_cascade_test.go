@@ -2,14 +2,15 @@ package home
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"sync"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 func TestMixedDurableRunCascadeClearsRoutingAndPublishesOneClosedWorld(t *testing.T) {
@@ -30,7 +31,7 @@ func TestMixedDurableRunCascadeClearsRoutingAndPublishesOneClosedWorld(t *testin
 	if err := h.SetDefaultAgent(ctx, parent); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.EndIdentity(ctx, storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}, parent, "cascade"); err != nil {
+	if err := h.systemEndHandle().End(ctx, parent, "cascade"); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []actor.ActorID{parent, child, grandchild} {
@@ -43,6 +44,24 @@ func TestMixedDurableRunCascadeClearsRoutingAndPublishesOneClosedWorld(t *testin
 	}
 	if durable, err := h.cs.DurableHistory.ExistsEver(ctx, parent); err != nil || !durable {
 		t.Fatalf("durable parent history=(%v,%v)", durable, err)
+	}
+	rows, err := h.cs.Query.ReadAfterSeq(ctx, 0, 1024)
+	var ended *message.Envelope
+	for _, row := range rows {
+		if row.Envelope.ID == message.ID("actor-ended:"+string(parent)) {
+			env := row.Envelope
+			ended = &env
+			break
+		}
+	}
+	if err != nil || ended == nil {
+		t.Fatalf("ended event found=%v err=%v", ended != nil, err)
+	}
+	var payload struct {
+		EndedBy actor.ActorID `json:"ended_by"`
+	}
+	if err := json.Unmarshal(ended.Payload, &payload); err != nil || payload.EndedBy != actor.SystemActorID {
+		t.Fatalf("ended payload=%s decoded=%+v err=%v", ended.Payload, payload, err)
 	}
 	for _, id := range []actor.ActorID{child, grandchild} {
 		if durable, err := h.cs.DurableHistory.ExistsEver(ctx, id); err != nil || durable {
@@ -76,7 +95,7 @@ func TestEndCascadeContainsConcurrentForkOrRejectsIt(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			endErr = h.EndIdentity(ctx, storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}, parent, "race")
+			endErr = h.systemEndHandle().End(ctx, parent, "race")
 		}()
 		wg.Wait()
 		if endErr != nil {

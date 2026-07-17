@@ -22,8 +22,8 @@ func (r *actorRegistry) EndCascade(ctx context.Context, in storespec.CascadeBund
 	}
 	reasons := make(map[actor.ActorID]string, len(in.Envelopes))
 	for _, e := range in.Envelopes {
-		if e.Target == "" || e.Target == actor.SystemActorID {
-			return storespec.CascadeResult{}, errors.New("store: end cascade empty target")
+		if e.Target == "" || e.Target == actor.SystemActorID || e.EndedBy == "" {
+			return storespec.CascadeResult{}, errors.New("store: invalid end cascade envelope")
 		}
 		reasons[e.Target] = e.Reason
 	}
@@ -70,7 +70,7 @@ func (r *actorRegistry) EndCascade(ctx context.Context, in storespec.CascadeBund
 		if exists != 0 {
 			continue
 		}
-		payload, _ := json.Marshal(map[string]any{"target_id": id, "reason": reasons[id], "ended_at": in.EndedAt})
+		payload, _ := json.Marshal(map[string]any{"target_id": id, "reason": reasons[id], "ended_at": in.EndedAt, "ended_by": ended.EndedBy})
 		env := &message.Envelope{
 			ID: message.ID(fmt.Sprintf("actor-ended:%s", id)), TS: in.EndedAt, TSReceived: in.EndedAt,
 			ChannelID: r.channelID, Sender: message.Sender{ID: actor.SystemActorID, Kind: actor.KindSystem},

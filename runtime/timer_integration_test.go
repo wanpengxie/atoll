@@ -1146,7 +1146,7 @@ func TestTimerSlice7_DeregCascadeClear(t *testing.T) {
 // SpawnIfAbsent-backed activation, retry-on-failure, exactly-once truth.
 // ---------------------------------------------------------------------
 
-func TestTimerSlice8_ReviveSeamWakeFirstOrdering(t *testing.T) {
+func TestTimerSlice8_DurableFireDoesNotDependOnRevive(t *testing.T) {
 	ctx := context.Background()
 	cs := openScheduleChannel(t)
 	sink := newRealFireSink(t, cs)
@@ -1179,29 +1179,18 @@ func TestTimerSlice8_ReviveSeamWakeFirstOrdering(t *testing.T) {
 		t.Fatalf("Schedule: %v", err)
 	}
 
-	// While Revive keeps failing, append must NEVER be attempted (wake-first
-	// ordering) and the row stays.
+	// Fire is durable first. Revive is only a best-effort accelerator and a
+	// failure cannot suppress or roll back the committed timer truth.
 	waitFor(t, 2*time.Second, func() bool { return revive.callCount() >= 1 })
-	time.Sleep(30 * time.Millisecond)
-	if sink.callCount() != 0 {
-		t.Fatalf("Append called %d times before EnsureLive ever succeeded, want 0 (revive gates append)", sink.callCount())
-	}
-	if storeRowCount(t, cs) != 1 {
-		t.Fatal("row deleted despite a failing Revive, want retained (at-least-once)")
-	}
-
-	// Revive is allowed to succeed — a REAL live embodiment is minted via
-	// SpawnIfAbsent, THEN (and only then) fire lands, exactly once. A
-	// comfortably-large Advance clears whatever real backoff the engine
-	// armed, regardless of its exact value.
-	revive.allowSucceedFor(author)
-	clock.Advance(5 * time.Second)
 	waitFor(t, 2*time.Second, func() bool {
 		_, ok := findByID(readAllTruth(t, cs), fireMsgID(id))
 		return ok
 	})
-	if _, live := rt.Stat(author); !live {
-		t.Fatal("author not live after a successful Revive — the SpawnIfAbsent seam did not activate an embodiment")
+	if _, live := rt.Stat(author); live {
+		t.Fatal("failing Revive unexpectedly activated an embodiment")
+	}
+	if sink.callCount() != 0 {
+		t.Fatalf("legacy Append called %d times for durable fire", sink.callCount())
 	}
 	count := 0
 	for _, r := range readAllTruth(t, cs) {

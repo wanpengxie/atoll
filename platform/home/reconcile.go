@@ -227,7 +227,7 @@ func (h *Home) activateOne(ctx context.Context, control storespec.ActorControlRo
 	if control.Placement.Kind != storespec.PlacementServer {
 		return activationVerdict{kind: actNotMember}
 	}
-	if state, ok := h.liveness.snapshot(id); ok && state.occ == occRunning && state.carrier.queue != nil {
+	if state, ok := h.liveness.WakeStanding(id); ok && state.Occ == occRunning && state.HasCarrier {
 		if _, live := h.channel.Cells().CurrentIncarnation(id); live {
 			return activationVerdict{kind: actAlreadyLive}
 		}
@@ -330,34 +330,32 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		state, ok := h.liveness.snapshot(row.ID)
+		if _, retired := h.liveness.RetireIfVersionSkew(row.ID, row.CurrentDeclVersion); retired {
+			rt.DespawnID(row.ID)
+		}
+		state, ok := h.liveness.WakeStanding(row.ID)
 		if !ok {
 			continue
 		}
-		if state.occ != occNone && state.version != 0 && state.version != row.CurrentDeclVersion {
-			_, _ = h.liveness.Retire(row.ID, true)
-			rt.DespawnID(row.ID)
-			state, _ = h.liveness.snapshot(row.ID)
-		}
-		if row.Placement.Kind == storespec.PlacementServer && state.occ == occRunning {
+		if row.Placement.Kind == storespec.PlacementServer && state.Occ == occRunning {
 			if _, live := rt.CurrentIncarnation(row.ID); !live {
 				// Quiet teardown has no down edge. Repair the stale carrier level
 				// before evaluating shouldRun so the ensure arm can rebuild it.
 				_ = h.liveness.ObserveDown(row.ID, false, false)
-				state, _ = h.liveness.snapshot(row.ID)
+				state, _ = h.liveness.WakeStanding(row.ID)
 			}
 		}
-		shouldRun := row.TIdle == 0 || state.dirty || state.restart || state.occ != occNone
+		shouldRun := row.TIdle == 0 || state.Dirty || state.Restart || state.Occ != occNone
 		if !shouldRun {
 			continue
 		}
 		if row.Placement.Kind == storespec.PlacementDaemon {
-			if state.occ == occNone {
+			if state.Occ == occNone {
 				_, _ = h.liveness.BeginEnsure(row.ID, row.CurrentDeclVersion)
 			}
 			continue
 		}
-		if row.Placement.Kind != storespec.PlacementServer || state.occ == occRunning {
+		if row.Placement.Kind != storespec.PlacementServer || state.Occ == occRunning {
 			continue
 		}
 		switch v := h.activateOne(ctx, row); v.kind {
@@ -480,7 +478,7 @@ func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, selectedVe
 // full buffer already carries the pending edge). No-op if the ticker goroutine
 // has not launched yet (genesis is covered by the synchronous startup sweep).
 func (h *Home) pokeReconcile() {
-	if h.pokeCh == nil {
+	if h.pokeCh == nil || h.disablePoke.Load() {
 		return
 	}
 	select {

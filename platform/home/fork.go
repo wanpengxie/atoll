@@ -178,15 +178,3 @@ func (h *Home) forkAdmission(ctx context.Context, parent actor.ActorID, birthVer
 	h.forkMu.Unlock()
 	return childID, nil
 }
-
-func (h *Home) endForkChild(ctx context.Context, parent, child actor.ActorID, reason string) error {
-	row, ok, err := h.controlIndex.LookupActive(ctx, parent)
-	if err != nil || !ok {
-		return actorrt.ErrNotOwner
-	}
-	err = h.EndIdentity(ctx, storespec.AuthorStamp{ID: parent, BirthVersion: row.CurrentDeclVersion}, child, reason)
-	if errors.Is(err, ErrEndNotSponsor) || errors.Is(err, ErrEndNotMember) {
-		return actorrt.ErrNotOwner
-	}
-	return err
-}

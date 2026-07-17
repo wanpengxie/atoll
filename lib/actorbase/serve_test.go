@@ -92,7 +92,6 @@ func (f *fakeSys) Recv() (Msg, error) {
 }
 
 func (f *fakeSys) Life() context.Context { return context.Background() }
-func (f *fakeSys) AckTimer(Msg) error    { return ErrNotTimerMessage }
 
 // Identity-dimension variants (gateway 期 S1): dispatch/Serve never reach them.
 func (f *fakeSys) SubmitEnvelope(behavior.SubjectWriteSpec) (message.ID, int64, error) {

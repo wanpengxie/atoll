@@ -41,19 +41,21 @@ func newDecayStore(t *testing.T) *store.ChannelStores {
 	return cs
 }
 
-// decayMembership adapts cs.Registry the same way runtime.OpenChannel's
+// decayMembership adapts the declared-control read face the same way runtime.OpenChannel's
 // (unexported) channelMembershipCheck does: Lookup + Record.IsActive, NOT
 // Exists — a deregistered actor still has a row. Duplicated here rather than
 // imported because that type lives unexported in package runtime (assembly
 // stays confined to the root package).
-type decayMembership struct{ registry storespec.Registry }
+type decayMembership struct {
+	registry storespec.DeclaredControlReader
+}
 
 func (m decayMembership) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
-	rec, ok, err := m.registry.Lookup(ctx, id)
+	_, ok, err := m.registry.LookupDeclaredActive(ctx, id)
 	if err != nil {
 		return storespec.ActorControlRow{}, false, err
 	}
-	if !ok || !rec.IsActive() {
+	if !ok {
 		return storespec.ActorControlRow{}, false, nil
 	}
 	p := storespec.NewServerPlacement()
@@ -89,7 +91,7 @@ func newDecayDoor(cs *store.ChannelStores) *door {
 	return &door{deps: Deps{
 		Registry:  cs.Resources,
 		Drivers:   DriverTable{resourcespec.KindKV: cs.KVDriver},
-		Authority: decayMembership{registry: cs.Registry},
+		Authority: decayMembership{registry: cs.Declared},
 		Overlay:   &fakeGrantOverlay{},
 		State:     cs.State,
 	}}
@@ -99,7 +101,7 @@ func newDecayDoor(cs *store.ChannelStores) *door {
 // (resourcespec.Registry.Create's own contract — not hand-seeded).
 func seedResource(t *testing.T, cs *store.ChannelStores, id resource.ResourceID, creator actor.ActorID) {
 	t.Helper()
-	if err := cs.Resources.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", nil); err != nil {
+	if err := cs.Resources.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", nil, resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}); err != nil {
 		t.Fatalf("seed resource %q: %v", id, err)
 	}
 }

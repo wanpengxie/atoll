@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -39,11 +40,11 @@ type recordingIdleArbiter struct {
 	calls int
 }
 
-func (a *recordingIdleArbiter) RequestIdle(context.Context) (bool, error) {
+func (a *recordingIdleArbiter) RequestIdle(context.Context) error {
 	a.mu.Lock()
 	a.calls++
 	a.mu.Unlock()
-	return false, nil
+	return nil
 }
 
 func (a *recordingIdleArbiter) count() int {
@@ -101,6 +102,12 @@ func (fakeAccess) Stat(_ context.Context, id resource.ResourceID) (accessdoor.St
 func (fakeAccess) List(_ context.Context, q accessdoor.ListQuery) (accessdoor.ListPage, error) {
 	return accessdoor.ListPage{}, nil
 }
+func (fakeAccess) Open(context.Context, resource.ResourceID, access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+	return accessdoor.FileAccess{}, accessdoor.Outcome{}, accessdoor.ErrFileCapabilityUnavailable
+}
+func (fakeAccess) Redeem(context.Context, accessdoor.FileRoute) (accessdoor.FileAccess, error) {
+	return accessdoor.FileAccess{}, accessdoor.ErrFileCapabilityUnavailable
+}
 
 func TestServerResourceFaceRejectsUnavailableFileByteCapability(t *testing.T) {
 	// A server-hosted actor still receives the uniform ResourceHandle surface,
@@ -108,8 +115,8 @@ func TestServerResourceFaceRejectsUnavailableFileByteCapability(t *testing.T) {
 	// The call must fail honestly at the capability boundary, not disappear
 	// from the API or panic through a nil arm.
 	adapter := resourceAdapter{h: fakeAccess{}, ctx: context.Background}
-	if _, _, err := adapter.Open("file:remote-only", access.OpRead); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("server file Open err=%v, want ErrUnsupported", err)
+	if _, _, err := adapter.Open("file:remote-only", access.OpRead); !errors.Is(err, accessdoor.ErrFileCapabilityUnavailable) {
+		t.Fatalf("server file Open err=%v, want capability unavailable", err)
 	}
 }
 
@@ -123,6 +130,23 @@ func (fakeSchedule) Schedule(_ context.Context, _ schedule.ScheduleReq) (schedul
 }
 func (fakeSchedule) Cancel(_ context.Context, _ schedule.TimerID) error { return nil }
 func (fakeSchedule) Ack(_ context.Context, _ schedule.TimerID) error    { return nil }
+
+type failingAckSchedule struct {
+	mu    sync.Mutex
+	calls []schedule.TimerID
+	err   error
+}
+
+func (*failingAckSchedule) Schedule(context.Context, schedule.ScheduleReq) (schedule.TimerID, error) {
+	return "", nil
+}
+func (*failingAckSchedule) Cancel(context.Context, schedule.TimerID) error { return nil }
+func (s *failingAckSchedule) Ack(_ context.Context, id schedule.TimerID) error {
+	s.mu.Lock()
+	s.calls = append(s.calls, id)
+	s.mu.Unlock()
+	return s.err
+}
 
 // fakeSpawn is an actorrt.SpawnHandle double.
 type fakeSpawn struct{}
@@ -202,6 +226,25 @@ func newRequestEnv(id message.ID, expiresInMs int64) *message.Envelope {
 		env.ExpiresAt = &exp
 	}
 	return env
+}
+
+func TestAutomaticTimerAckFailureIsObservedAndLeftRetryable(t *testing.T) {
+	e := newTestEngine(t, &fakePen{self: "actor:test"}, Hooks{}, 8, 8)
+	sched := &failingAckSchedule{err: errors.New("transient ack failure")}
+	actx := &fakeActorContext{self: "actor:test"}
+	e.sched = sched
+	e.actorCtx = actx
+	e.pendingTimer = "timer:durable-1"
+	e.completePendingTimer()
+	sched.mu.Lock()
+	calls := append([]schedule.TimerID(nil), sched.calls...)
+	sched.mu.Unlock()
+	if !reflect.DeepEqual(calls, []schedule.TimerID{"durable-1"}) {
+		t.Fatalf("Ack calls=%v", calls)
+	}
+	if got := actx.obsKindCounts()[ObsTimerAckFault]; got != 1 {
+		t.Fatalf("timer ack fault obs=%d", got)
+	}
 }
 
 // --- serve ledger: deadline-close and late-write judgement -----------------

@@ -482,6 +482,32 @@ func TestPortStopIsNotDeath(t *testing.T) {
 	}
 }
 
+func TestPortDespawnReasonIsCarriedOnWire(t *testing.T) {
+	rt, _ := New(Config{Parent: context.Background()})
+	id, remote := dialPort(t, rt, "l", nopEmit, staticResolve("remote-restart"), nil)
+	defer remote.conn.Close()
+	frames := make(chan ipc.Frame, 1)
+	go func() {
+		frame, _ := remote.codec.Read()
+		frames <- frame
+	}()
+	if !rt.DespawnIDReason(id, "restart") {
+		t.Fatal("restart despawn did not find live port")
+	}
+	select {
+	case frame := <-frames:
+		if frame.Kind != ipc.KindDespawn {
+			t.Fatalf("frame kind=%q", frame.Kind)
+		}
+		var payload ipc.DownPayload
+		if err := json.Unmarshal(frame.Payload, &payload); err != nil || payload.Reason != "restart" {
+			t.Fatalf("payload=%s decoded=%+v err=%v", frame.Payload, payload, err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no restart despawn frame")
+	}
+}
+
 // TestPortDeliverAfterStop: once a port is torn down, Deliver reports Stopped
 // (a hosted-but-tearing-down embodiment is not Delivered, not NotHosted).
 func TestPortDeliverAfterStop(t *testing.T) {

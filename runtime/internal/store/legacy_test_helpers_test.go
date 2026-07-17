@@ -19,14 +19,7 @@ func (r *actorRegistry) insertFixedID(ctx context.Context, rec storespec.Record)
 	return err
 }
 
-func (r *actorRegistry) Admit(ctx context.Context, kind actor.Kind, principal string, at int64) (actor.ActorID, error) {
-	result, err := r.AdmitDeclared(ctx, storespec.AdmitBundle{
-		Kind: kind, Principal: principal, Class: string(kind), Placement: storespec.NewServerPlacement(), CreatedAt: at,
-	})
-	return result.ID, err
-}
-
-func (r *actorRegistry) Deregister(ctx context.Context, id actor.ActorID, at int64) error {
-	_, err := r.EndCascade(ctx, storespec.CascadeBundle{IDs: []actor.ActorID{id}, EndedAt: at})
+func endActorForTest(ctx context.Context, r *actorRegistry, id actor.ActorID, at int64) error {
+	_, err := r.EndCascade(ctx, storespec.CascadeBundle{IDs: []actor.ActorID{id}, EndedAt: at, Envelopes: []storespec.CascadeEnvelope{{Target: id, EndedBy: actor.SystemActorID}}})
 	return err
 }

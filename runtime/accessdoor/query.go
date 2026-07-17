@@ -210,6 +210,9 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, "", "", initial, birth); err != nil {
 			return createVerdict(ctx, err)
 		}
+		if err := d.installCreatorOverlay(ctx, resourcespec.LandedResource{ID: id, CreatedBy: caller, Birth: birth}); err != nil {
+			return Outcome{}, err
+		}
 		return Outcome{}, nil
 
 	case resourcespec.KindFile:
@@ -269,11 +272,7 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 			// side, by reserved_at) reclaims it. Nothing to undo here.
 			return Outcome{}, aerr
 		}
-		completion, completionErr := NewResourceCompletion(d.deps.Registry)
-		if completionErr != nil {
-			return Outcome{}, completionErr
-		}
-		found, cerr := completion.CommitReservation(ctx, reservationID)
+		_, found, cerr := d.commitReservationLocked(ctx, reservationID)
 		if cerr != nil {
 			if errors.Is(cerr, resourcespec.ErrReservationLost) {
 				// This create lost the same-resource_id race (期11 S2,
@@ -336,6 +335,8 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 // Zero rights masquerades as not_found (§3.6/design doc B1) — a deliberate,
 // documented choice, not a bug to "fix" back to access_denied.
 func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.ResourceID) (StatResult, error) {
+	d.resourceGate.Lock()
+	defer d.resourceGate.Unlock()
 	meta, exists, err := d.deps.Registry.Resolve(ctx, id)
 	if err != nil {
 		return StatResult{}, err
@@ -371,6 +372,8 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 // resources costs ONE membership check total, never N×(ActorAllows+
 // MembersAllow) round trips (期11 spec §1.9'⑤/§3.7).
 func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (ListPage, error) {
+	d.resourceGate.Lock()
+	defer d.resourceGate.Unlock()
 	limit := normalizeListLimit(q.Limit)
 
 	registryCursor, ok := decodeQueryCursor(q.Prefix, q.Cursor)

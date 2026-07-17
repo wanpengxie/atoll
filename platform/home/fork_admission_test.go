@@ -81,7 +81,7 @@ func TestForkAdmissionRejectsInvalidSpecAndEndClearsRunAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.endForkChild(ctx, parent, child, "test"); err != nil {
+	if err := (lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: parent, BirthVersion: 1}}).End(ctx, child, "test"); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok, _ := h.cs.Authority.LookupActive(ctx, child); ok {
@@ -97,7 +97,7 @@ func TestForkAdmissionRejectsInvalidSpecAndEndClearsRunAccounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.endForkChild(ctx, parent, replayed, "ended-before-ack-retry"); err != nil {
+	if err := (lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: parent, BirthVersion: 1}}).End(ctx, replayed, "ended-before-ack-retry"); err != nil {
 		t.Fatal(err)
 	}
 	again, err := h.forkAdmission(ctx, parent, 1, actorrt.ForkSpec{Kind: actor.KindAgent, Class: "agent.test"}, "ended-child-receipt")

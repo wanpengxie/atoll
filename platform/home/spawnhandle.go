@@ -3,6 +3,7 @@ package home
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 
 	"github.com/google/uuid"
@@ -63,6 +64,7 @@ type spawnHandle struct {
 	home         *Home
 	inc          actorrt.Incarnation
 	birthVersion int64
+	end          lifecycleEndHandle
 	rt           *actorrt.Runtime
 	logger       *slog.Logger
 }
@@ -80,13 +82,13 @@ func newSpawnHandle(home *Home, inc actorrt.Incarnation, birthVersion int64, rt 
 	if lg == nil {
 		lg = slog.New(slog.DiscardHandler)
 	}
-	return spawnHandle{home: home, inc: inc, birthVersion: birthVersion, rt: rt, logger: lg}
+	return spawnHandle{home: home, inc: inc, birthVersion: birthVersion, end: lifecycleEndHandle{
+		home: home, author: storespec.AuthorStamp{ID: inc.ID(), BirthVersion: birthVersion},
+	}, rt: rt, logger: lg}
 }
 
 func (h spawnHandle) EndSelf(ctx context.Context) error {
-	return h.home.EndIdentity(ctx, storespec.AuthorStamp{
-		ID: h.inc.ID(), BirthVersion: h.birthVersion,
-	}, h.inc.ID(), "self_end")
+	return h.end.End(ctx, h.inc.ID(), "self_end")
 }
 
 // Fork admits first, then makes one best-effort same-server activation attempt.
@@ -98,6 +100,9 @@ func (h spawnHandle) Fork(ctx context.Context, spec actorrt.ForkSpec) (actor.Act
 		return "", err
 	}
 	h.logger.Info("actorrt.fork.admitted", "parent", string(h.inc.ID()), "child", string(childID))
+	if h.home.disableForkInlineActivation.Load() {
+		return childID, nil
+	}
 	row, active, lookupErr := h.home.controlIndex.LookupActive(ctx, childID)
 	if lookupErr == nil && active && row.Placement.Kind == storespec.PlacementServer {
 		verdict := h.home.activateOne(ctx, row)
@@ -124,8 +129,11 @@ func (h spawnHandle) DespawnChild(ctx context.Context, childID actor.ActorID, re
 	if !h.rt.IsLive(h.inc) {
 		return actorrt.ErrParentNotLive
 	}
-	err := h.home.endForkChild(ctx, h.inc.ID(), childID, reason)
+	err := h.end.End(ctx, childID, reason)
 	if err != nil {
+		if errors.Is(err, ErrEndNotSponsor) || errors.Is(err, ErrEndNotMember) {
+			err = actorrt.ErrNotOwner
+		}
 		h.logger.Warn("actorrt.despawn.rejected", "parent", string(h.inc.ID()),
 			"child", string(childID), "error", err)
 		return err

@@ -67,6 +67,7 @@ func TestChannelLocalTables_Set(t *testing.T) {
 		"actor_decl_versions":   true,
 		"channel_routing":       true,
 		"restart_applied":       true,
+		"restart_attempts":      true,
 		"resources":             true,
 		"resource_grants":       true,
 		"resource_reservations": true,

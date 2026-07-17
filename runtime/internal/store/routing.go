@@ -58,6 +58,32 @@ func (r *actorRegistry) MarkRestartApplied(ctx context.Context, jobID int64, id 
 	return n == 1, err
 }
 
+func (r *actorRegistry) ClaimRestartAttempt(ctx context.Context, jobID int64, id actor.ActorID, ticket string, at int64) (string, bool, error) {
+	if jobID <= 0 || id == "" || at <= 0 {
+		return "", false, errors.New("store: invalid restart attempt")
+	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO restart_attempts(job_id,instance_id,expected_ticket,claimed_at) VALUES(?,?,?,?)`, jobID, string(id), ticket, at); err != nil {
+		return "", false, err
+	}
+	var expected string
+	if err := tx.QueryRowContext(ctx, `SELECT expected_ticket FROM restart_attempts WHERE job_id=? AND instance_id=?`, jobID, string(id)).Scan(&expected); err != nil {
+		return "", false, err
+	}
+	var applied int
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM restart_applied WHERE job_id=? AND instance_id=?)`, jobID, string(id)).Scan(&applied); err != nil {
+		return "", false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", false, err
+	}
+	return expected, applied != 0, nil
+}
+
 var (
 	_ storespec.ChannelRouting = (*actorRegistry)(nil)
 	_ storespec.RestartJournal = (*actorRegistry)(nil)

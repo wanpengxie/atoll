@@ -69,7 +69,7 @@ func (r *parityRegistry) Resolve(_ context.Context, id resource.ResourceID) (res
 	return meta, ok, nil
 }
 
-func (r *parityRegistry) Create(_ context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID, placementCoord string, initial []byte, _ ...resourcespec.ResourceBirthPlan) error {
+func (r *parityRegistry) Create(_ context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID, placementCoord string, initial []byte, _ resourcespec.ResourceBirthPlan) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.rows[id]; exists {
@@ -90,11 +90,11 @@ func (r *parityRegistry) Create(_ context.Context, id resource.ResourceID, kind 
 	return nil
 }
 
-func (r *parityRegistry) ReserveCreate(context.Context, resource.ResourceID, resourcespec.ResourceKind, actor.ActorID, string, string, bool, ...resourcespec.ResourceBirthPlan) (string, error) {
+func (r *parityRegistry) ReserveCreate(context.Context, resource.ResourceID, resourcespec.ResourceKind, actor.ActorID, string, string, bool, resourcespec.ResourceBirthPlan) (string, error) {
 	return "", errors.New("parityRegistry: ReserveCreate not exercised by this rig (kv-only)")
 }
-func (r *parityRegistry) CommitReservation(context.Context, string) (bool, error) {
-	return false, errors.New("parityRegistry: CommitReservation not exercised by this rig (kv-only)")
+func (r *parityRegistry) CommitReservation(context.Context, string) (resourcespec.LandedResource, bool, error) {
+	return resourcespec.LandedResource{}, false, errors.New("parityRegistry: CommitReservation not exercised by this rig (kv-only)")
 }
 func (r *parityRegistry) ClearTombstone(context.Context, string) (bool, error) {
 	return false, errors.New("parityRegistry: ClearTombstone not exercised by this rig (kv-only)")
@@ -251,6 +251,7 @@ func (parityOverlay) ActorAllows(context.Context, actor.ActorID, resource.Resour
 }
 func (parityOverlay) SetGrant(context.Context, resource.ResourceID, access.Grant) error { return nil }
 func (parityOverlay) EndBatch([]actor.ActorID)                                          {}
+func (parityOverlay) DeleteResource(resource.ResourceID)                                {}
 
 // parityState is a StateStore no-op stub (Deps requires one; this rig never
 // exercises the actor-scoped locus).

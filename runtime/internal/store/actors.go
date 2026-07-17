@@ -159,7 +159,6 @@ func actorRegisteredEnvelope(channelID channel.ID, id actor.ActorID, kind actor.
 }
 
 var (
-	_ storespec.Registry          = (*actorRegistry)(nil)
 	_ storespec.PrincipalRegistry = (*actorRegistry)(nil)
 	_ storespec.DurableHistory    = (*actorRegistry)(nil)
 )

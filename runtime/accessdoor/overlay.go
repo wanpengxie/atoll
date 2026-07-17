@@ -9,12 +9,14 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type GrantOverlay interface {
 	ActorAllows(context.Context, actor.ActorID, resource.ResourceID, access.Operation) (bool, error)
 	SetGrant(context.Context, resource.ResourceID, access.Grant) error
 	EndBatch([]actor.ActorID)
+	DeleteResource(resource.ResourceID)
 }
 
 var (
@@ -75,19 +77,50 @@ func (s *GrantOverlaySlot) EndBatch(ids []actor.ActorID) {
 	}
 }
 
-type ResourceCompletion interface {
-	CommitReservation(context.Context, string) (bool, error)
-}
-
-type resourceCompletion struct{ registry resourcespec.Registry }
-
-func NewResourceCompletion(registry resourcespec.Registry) (ResourceCompletion, error) {
-	if registry == nil {
-		return nil, errors.New("accessdoor: nil resource registry")
+func (s *GrantOverlaySlot) DeleteResource(id resource.ResourceID) {
+	o, err := s.get()
+	if err == nil {
+		o.DeleteResource(id)
 	}
-	return resourceCompletion{registry: registry}, nil
 }
 
-func (c resourceCompletion) CommitReservation(ctx context.Context, id string) (bool, error) {
-	return c.registry.CommitReservation(ctx, id)
+type ResourceCompletion interface {
+	CommitReservation(context.Context, string) (resourcespec.LandedResource, bool, error)
+}
+
+type resourceCompletion struct{ door *door }
+
+func (c resourceCompletion) CommitReservation(ctx context.Context, id string) (resourcespec.LandedResource, bool, error) {
+	c.door.resourceGate.Lock()
+	defer c.door.resourceGate.Unlock()
+	return c.door.commitReservationLocked(ctx, id)
+}
+
+func (d *door) commitReservationLocked(ctx context.Context, id string) (resourcespec.LandedResource, bool, error) {
+	landed, found, err := d.deps.Registry.CommitReservation(ctx, id)
+	if err != nil || !found {
+		return landed, found, err
+	}
+	if err := d.installCreatorOverlay(ctx, landed); err != nil {
+		return landed, true, err
+	}
+	return landed, true, nil
+}
+
+func (d *door) installCreatorOverlay(ctx context.Context, landed resourcespec.LandedResource) error {
+	if landed.Birth.Authority != resourcespec.BirthChannelOwned {
+		return nil
+	}
+	world, active, err := d.deps.Authority.WorldOf(ctx, landed.CreatedBy)
+	if err != nil {
+		return err
+	}
+	if !active || world != storespec.WorldRun {
+		return nil
+	}
+	return d.deps.Overlay.SetGrant(ctx, landed.ID, access.Grant{
+		GranteeKind: access.GranteeActor,
+		Grantee:     landed.CreatedBy,
+		Ops:         []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete},
+	})
 }

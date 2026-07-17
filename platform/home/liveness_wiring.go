@@ -17,19 +17,19 @@ type localIdleArbiter struct {
 	id actor.ActorID
 }
 
-func (a localIdleArbiter) RequestIdle(_ context.Context) (bool, error) {
+func (a localIdleArbiter) RequestIdle(_ context.Context) error {
 	_, verdict := a.h.liveness.ApproveIdle(a.id)
 	if verdict != transitionApplied {
-		return false, nil
+		return nil
 	}
 	if err := a.h.channel.Cells().ApproveIdle(a.id); err != nil {
 		// The ledger has already made the actor dormant. A failed command is a
 		// resource-tail fault; the next request creates dirty wake debt.
 		a.h.logger.Warn("platform.idle.command_failed", "actor", a.id, "err", err)
-		return false, err
+		return err
 	}
 	a.h.pokeReconcile()
-	return false, nil
+	return nil
 }
 
 func (h *Home) approveRemoteIdle(_ context.Context, inc actorrt.Incarnation) (bool, error) {

@@ -42,19 +42,21 @@ func testDeps(t *testing.T, cs *store.ChannelStores) Deps {
 	return Deps{
 		ChannelID: testChannelID,
 		Log:       cs.Log,
-		Authority: testAuthority{durableRows: cs.Registry},
+		Authority: testAuthority{durableRows: cs.Declared},
 		NowMs:     func() int64 { return fixedNowMs },
 	}
 }
 
-type testAuthority struct{ durableRows storespec.Registry }
+type testAuthority struct {
+	durableRows storespec.DeclaredControlReader
+}
 
 func (a testAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
 	if a.durableRows == nil {
 		return storespec.ActorControlRow{ID: id, Kind: actor.KindAgent, CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement()}, true, nil
 	}
-	rec, ok, err := a.durableRows.Lookup(ctx, id)
-	if err != nil || !ok || !rec.IsActive() {
+	rec, ok, err := a.durableRows.LookupDeclaredActive(ctx, id)
+	if err != nil || !ok {
 		return storespec.ActorControlRow{}, false, err
 	}
 	return storespec.ActorControlRow{ID: rec.ID, Kind: rec.Kind, CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement()}, true, nil
@@ -63,7 +65,7 @@ func (a testAuthority) ListActive(ctx context.Context) ([]storespec.ActorControl
 	if a.durableRows == nil {
 		return nil, nil
 	}
-	rows, err := a.durableRows.ListActive(ctx)
+	rows, err := a.durableRows.ListDeclaredActive(ctx)
 	if err != nil {
 		return nil, err
 	}

@@ -85,7 +85,7 @@ type resourceOutbox struct {
 	completion accessdoor.ResourceCompletion
 }
 
-func (o resourceOutbox) CommitReservation(ctx context.Context, id string) (bool, error) {
+func (o resourceOutbox) CommitReservation(ctx context.Context, id string) (resourcespec.LandedResource, bool, error) {
 	return o.completion.CommitReservation(ctx, id)
 }
 
@@ -170,7 +170,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	// seam wraps the same channel's actor registry. New fail-fasts on an
 	// incomplete assembly (missing KindKV driver), so a mis-wired open fails at
 	// open, not at first Invoke.
-	access, err := accessdoor.New(accessdoor.Deps{
+	access, completion, err := accessdoor.NewAssembly(accessdoor.Deps{
 		Registry:       cs.Resources,
 		Drivers:        accessdoor.DriverTable{resourcespec.KindKV: cs.KVDriver},
 		Authority:      authoritySlot,
@@ -185,12 +185,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		_ = cs.Close()
 		return nil, err
 	}
-	completion, err := accessdoor.NewResourceCompletion(cs.Resources)
-	if err != nil {
-		_ = cs.Close()
-		return nil, err
-	}
-
 	return &ChannelStores{
 		channelID:      channelID,
 		Log:            cs.Log,

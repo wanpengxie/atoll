@@ -172,6 +172,7 @@ type Home struct {
 	// expiry reaper (sweepExpired) writes its unanswered_timeout terminals
 	// through it (义务归位 D3: system-authored, never mint-as-caller).
 	systemPen harness.Pen
+	systemEnd lifecycleEndHandle
 	// expiryCursor is the reaper's keyset position across ticks (batch
 	// fairness only — correctness is the level-scan's; restart-from-zero is
 	// harmless). Touched only on the reconcile goroutine, no lock.
@@ -213,6 +214,10 @@ type Home struct {
 	// ticker goroutine launches is dropped (the synchronous startup sweep already
 	// covers genesis).
 	pokeCh chan struct{}
+	// Test seams turn off edge accelerators while leaving the natural level
+	// tick running; correctness must not depend on either switch.
+	disablePoke                 atomic.Bool
+	disableForkInlineActivation atomic.Bool
 
 	// reviveMu guards BOTH per-author revive accounts below: reviveLogAt (the
 	// attached-host revive-skip log throttle) and reviveBackoff (the transient

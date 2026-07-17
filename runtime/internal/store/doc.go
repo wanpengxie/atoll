@@ -28,7 +28,7 @@
 //   - channel.go           — OpenChannel assembly of every seam over one db.
 //   - messages.go          — storespec.MessageLog impl.
 //   - request_lookup.go    — storespec.RequestLookup impl.
-//   - actors.go            — storespec.Registry + membership control plane.
+//   - actors.go            — segregated declaration/principal/history read faces + membership control plane.
 //   - resources.go         — resourcespec.Registry + KindKV driver impl.
 //   - state.go             — resourcespec.StateStore impl (actor-scoped locus).
 //   - timers.go            — timerspec.TimerStore impl.

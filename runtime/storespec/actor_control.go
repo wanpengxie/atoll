@@ -172,8 +172,9 @@ type CascadeBundle struct {
 // CascadeEnvelope keeps the store contract independent of harness internals
 // while retaining a strongly typed control-plane operation.
 type CascadeEnvelope struct {
-	Target actor.ActorID
-	Reason string
+	Target  actor.ActorID
+	Reason  string
+	EndedBy actor.ActorID
 }
 
 type CascadeResult struct {

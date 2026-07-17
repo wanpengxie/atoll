@@ -3,6 +3,7 @@ package home
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -42,6 +43,25 @@ type carrier struct {
 	queue deliveryCarrier
 }
 
+type attachmentFenceWord struct {
+	ticket  EnsureTicket
+	version int64
+	alive   bool
+}
+
+type attachmentFenceCell struct {
+	current atomic.Pointer[attachmentFenceWord]
+}
+
+type attachmentFence struct {
+	cell     *attachmentFenceCell
+	expected *attachmentFenceWord
+}
+
+func (f attachmentFence) Valid() bool {
+	return f.cell != nil && f.expected != nil && f.cell.current.Load() == f.expected
+}
+
 type deliveryDropReason string
 
 const (
@@ -58,6 +78,21 @@ type lstate struct {
 	restart bool
 	ticket  EnsureTicket
 	version int64
+	fence   *attachmentFenceCell
+}
+
+type attachmentIntent struct {
+	Ticket  EnsureTicket
+	Version int64
+	Present bool
+}
+
+type wakeStanding struct {
+	Occ        occupancy
+	Dirty      bool
+	Restart    bool
+	HasCarrier bool
+	Port       bool
 }
 
 type livenessLedger struct {
@@ -77,18 +112,39 @@ func newLivenessLedger(observers ...deliveryDropObserver) *livenessLedger {
 	return l
 }
 
+func newDormantState() lstate {
+	cell := new(attachmentFenceCell)
+	cell.current.Store(&attachmentFenceWord{})
+	return lstate{occ: occNone, fence: cell}
+}
+
+func publishFence(s *lstate, ticket EnsureTicket, version int64, alive bool) {
+	if s.fence == nil {
+		s.fence = new(attachmentFenceCell)
+	}
+	s.fence.current.Store(&attachmentFenceWord{ticket: ticket, version: version, alive: alive})
+}
+
+func invalidateFence(s *lstate) { publishFence(s, "", 0, false) }
+
 func (l *livenessLedger) Bootstrap(ids []actor.ActorID) transitionVerdict {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.closed {
 		return transitionInvalid
 	}
-	next := make(map[actor.ActorID]lstate, len(ids))
 	for _, id := range ids {
 		if id == "" {
 			return transitionInvalid
 		}
-		next[id] = lstate{occ: occNone}
+	}
+	for id, s := range l.rows {
+		invalidateFence(&s)
+		l.rows[id] = s
+	}
+	next := make(map[actor.ActorID]lstate, len(ids))
+	for _, id := range ids {
+		next[id] = newDormantState()
 	}
 	l.rows = next
 	return transitionApplied
@@ -109,7 +165,7 @@ func (l *livenessLedger) AdmitIdentity(id actor.ActorID) transitionVerdict {
 	if _, exists := l.rows[id]; exists {
 		return transitionApplied
 	}
-	l.rows[id] = lstate{occ: occNone}
+	l.rows[id] = newDormantState()
 	return transitionApplied
 }
 
@@ -122,6 +178,7 @@ func (l *livenessLedger) EndIdentity(id actor.ActorID) (carrier, transitionVerdi
 	if !ok {
 		return carrier{}, transitionApplied
 	}
+	invalidateFence(&s)
 	delete(l.rows, id)
 	return s.carrier, transitionApplied
 }
@@ -178,23 +235,6 @@ func (l *livenessLedger) acceptDelivery(id actor.ActorID, env *message.Envelope,
 	return transitionApplied, err
 }
 
-// MarkFiredWake records wake debt before a due durable timer can be committed
-// for a daemon-placed dormant identity. It does not create an envelope buffer;
-// the durable timer row remains the sole retry source.
-func (l *livenessLedger) MarkFiredWake(id actor.ActorID) transitionVerdict {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	s, ok := l.rows[id]
-	if !ok || l.closed {
-		return transitionInvalid
-	}
-	if s.occ != occRunning || s.carrier.queue == nil {
-		s.dirty = true
-		l.rows[id] = s
-	}
-	return transitionApplied
-}
-
 func (l *livenessLedger) ApproveIdle(id actor.ActorID) (carrier, transitionVerdict) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -203,6 +243,7 @@ func (l *livenessLedger) ApproveIdle(id actor.ActorID) (carrier, transitionVerdi
 		return carrier{}, transitionInvalid
 	}
 	old := s.carrier
+	invalidateFence(&s)
 	s.occ, s.carrier, s.ticket = occNone, carrier{}, ""
 	l.rows[id] = s
 	return old, transitionApplied
@@ -219,6 +260,7 @@ func (l *livenessLedger) ObserveDown(id actor.ActorID, port bool, voluntary bool
 	if port {
 		s.occ = occDetached
 	} else {
+		invalidateFence(&s)
 		s.occ = occNone
 		s.ticket = ""
 		s.restart = !voluntary
@@ -238,6 +280,7 @@ func (l *livenessLedger) Retire(id actor.ActorID, restartIntent bool) (carrier, 
 		return carrier{}, transitionApplied
 	}
 	old := s.carrier
+	invalidateFence(&s)
 	s.occ, s.carrier, s.ticket = occNone, carrier{}, ""
 	s.restart = restartIntent
 	l.rows[id] = s
@@ -261,6 +304,7 @@ func (l *livenessLedger) BeginEnsure(id actor.ActorID, version int64) (EnsureTic
 		return "", transitionInvalid
 	}
 	s.ticket, s.occ, s.version = EnsureTicket(uuid.NewString()), occStarting, version
+	publishFence(&s, s.ticket, version, true)
 	l.rows[id] = s
 	return s.ticket, transitionApplied
 }
@@ -290,8 +334,22 @@ func (l *livenessLedger) publish(id actor.ActorID, ticket EnsureTicket, c carrie
 func (l *livenessLedger) PublishLocal(id actor.ActorID, ticket EnsureTicket, q deliveryCarrier) transitionVerdict {
 	return l.publish(id, ticket, carrier{kind: carrierLocal, queue: q}, false)
 }
-func (l *livenessLedger) Attach(id actor.ActorID, ticket EnsureTicket, q deliveryCarrier) transitionVerdict {
-	return l.publish(id, ticket, carrier{kind: carrierPort, queue: q}, true)
+func (l *livenessLedger) Attach(id actor.ActorID, ticket EnsureTicket, birthVersion int64, q deliveryCarrier) transitionVerdict {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, ok := l.rows[id]
+	if !ok || q == nil || birthVersion <= 0 {
+		return transitionInvalid
+	}
+	if s.ticket != ticket || ticket == "" || s.version != birthVersion {
+		return transitionStaleTicket
+	}
+	if s.occ != occStarting && s.occ != occDetached && s.occ != occRunning {
+		return transitionInvalid
+	}
+	s.occ, s.carrier, s.dirty, s.restart = occRunning, carrier{kind: carrierPort, queue: q}, false, false
+	l.rows[id] = s
+	return transitionApplied
 }
 
 func (l *livenessLedger) AbortEnsure(id actor.ActorID, ticket EnsureTicket) transitionVerdict {
@@ -307,6 +365,7 @@ func (l *livenessLedger) AbortEnsure(id actor.ActorID, ticket EnsureTicket) tran
 	if s.occ != occStarting {
 		return transitionInvalid
 	}
+	invalidateFence(&s)
 	s.occ, s.ticket = occNone, ""
 	l.rows[id] = s
 	return transitionApplied
@@ -320,15 +379,83 @@ func (l *livenessLedger) Close() transitionVerdict {
 	}
 	l.closed = true
 	for id, s := range l.rows {
+		invalidateFence(&s)
 		s.occ, s.carrier, s.ticket = occNone, carrier{}, ""
 		l.rows[id] = s
 	}
 	return transitionApplied
 }
 
-func (l *livenessLedger) snapshot(id actor.ActorID) (lstate, bool) {
+func (l *livenessLedger) AttachmentIntent(id actor.ActorID) attachmentIntent {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s, ok := l.rows[id]
-	return s, ok
+	if !ok {
+		return attachmentIntent{}
+	}
+	present := s.ticket != "" && (s.occ == occStarting || s.occ == occRunning || s.occ == occDetached)
+	return attachmentIntent{Ticket: s.ticket, Version: s.version, Present: present}
+}
+
+func (l *livenessLedger) WakeStanding(id actor.ActorID) (wakeStanding, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, ok := l.rows[id]
+	if !ok {
+		return wakeStanding{}, false
+	}
+	return wakeStanding{
+		Occ: s.occ, Dirty: s.dirty, Restart: s.restart,
+		HasCarrier: s.carrier.queue != nil, Port: s.carrier.kind == carrierPort,
+	}, true
+}
+
+func (l *livenessLedger) prepareAttachmentFence(id actor.ActorID, ticket EnsureTicket, birthVersion int64) (attachmentFence, transitionVerdict) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, ok := l.rows[id]
+	if !ok || l.closed || s.fence == nil || ticket == "" || birthVersion <= 0 {
+		return attachmentFence{}, transitionInvalid
+	}
+	word := s.fence.current.Load()
+	if word == nil || !word.alive || word.ticket != ticket || word.version != birthVersion ||
+		s.ticket != ticket || s.version != birthVersion {
+		return attachmentFence{}, transitionStaleTicket
+	}
+	return attachmentFence{cell: s.fence, expected: word}, transitionApplied
+}
+
+// RetireIfVersionSkew closes the read→retire race: the version comparison and
+// retirement happen under the same ledger lock.
+func (l *livenessLedger) RetireIfVersionSkew(id actor.ActorID, declVersion int64) (carrier, bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, ok := l.rows[id]
+	if !ok || declVersion <= 0 || s.occ == occNone || s.version == 0 || s.version == declVersion {
+		return carrier{}, false
+	}
+	old := s.carrier
+	invalidateFence(&s)
+	s.occ, s.carrier, s.ticket = occNone, carrier{}, ""
+	s.restart = true
+	l.rows[id] = s
+	return old, true
+}
+
+func (l *livenessLedger) RetireIfTicketMatches(id actor.ActorID, expected EnsureTicket, restartIntent bool) (carrier, bool) {
+	if expected == "" {
+		return carrier{}, false
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	s, ok := l.rows[id]
+	if !ok || s.ticket != expected {
+		return carrier{}, false
+	}
+	old := s.carrier
+	invalidateFence(&s)
+	s.occ, s.carrier, s.ticket = occNone, carrier{}, ""
+	s.restart = restartIntent
+	l.rows[id] = s
+	return old, true
 }

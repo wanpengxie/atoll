@@ -91,6 +91,8 @@ func (d *door) driver(kind resourcespec.ResourceKind) (resourcespec.Driver, erro
 //     (driver_error). Folding EXECUTE failures into Go errors would leave
 //     driver_error unproducible — the bug v1 shipped.
 func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
+	d.resourceGate.Lock()
+	defer d.resourceGate.Unlock()
 	meta, exists, err := d.deps.Registry.Resolve(ctx, id)
 	if err != nil {
 		return Outcome{}, err // store broken = infrastructure-level, Go error
@@ -240,6 +242,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 			if derr := d.deps.Registry.Delete(ctx, id); derr != nil {
 				return executeFailure(ctx, derr)
 			}
+			d.deps.Overlay.DeleteResource(id)
 			if d.deps.Logger != nil {
 				d.deps.Logger.Info("resource deleted", "id", string(id), "kind", string(meta.Kind), "tombstoned", true)
 			}
@@ -259,6 +262,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		if derr := d.deps.Registry.Delete(ctx, id); derr != nil {
 			return executeFailure(ctx, derr)
 		}
+		d.deps.Overlay.DeleteResource(id)
 		if d.deps.Logger != nil {
 			d.deps.Logger.Info("resource deleted", "id", string(id), "kind", string(meta.Kind), "tombstoned", false)
 		}

@@ -494,10 +494,10 @@ type remoteIdleArbiter struct {
 	id   actor.ActorID
 }
 
-func (a remoteIdleArbiter) RequestIdle(ctx context.Context) (bool, error) {
+func (a remoteIdleArbiter) RequestIdle(ctx context.Context) error {
 	d := a.ring.dialer.Load()
 	if d == nil {
-		return false, errors.New("compute: idle request while disconnected")
+		return errors.New("compute: idle request while disconnected")
 	}
 	return d.RequestIdle(ctx, a.id)
 }

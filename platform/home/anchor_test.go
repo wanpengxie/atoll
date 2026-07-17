@@ -143,7 +143,7 @@ func TestCarrierFullLeavesRequestOpenAndNextHandoffRedeliversOnlyRequest(t *test
 		defer full.mu.Unlock()
 		return len(full.envs) == 2
 	})
-	state, _ := h.liveness.snapshot(child)
+	state, _ := h.liveness.stateForTest(child)
 	if state.occ != occRunning || state.dirty {
 		t.Fatalf("carrier rejection mutated liveness: %+v", state)
 	}

@@ -41,7 +41,7 @@ func TestDaemonPlanProjectsLivenessIntentAndStableEnsureTicket(t *testing.T) {
 	}
 
 	q := &testCarrier{}
-	if got := h.liveness.Attach(child, EnsureTicket(ticket), q); got != transitionApplied {
+	if got := h.liveness.Attach(child, EnsureTicket(ticket), 1, q); got != transitionApplied {
 		t.Fatalf("attach=%v", got)
 	}
 	if _, verdict := h.liveness.ApproveIdle(child); verdict != transitionApplied {
@@ -60,7 +60,7 @@ func TestDaemonPlanProjectsLivenessIntentAndStableEnsureTicket(t *testing.T) {
 		t.Fatalf("new attempt=%+v oldTicket=%q", rebuilt, ticket)
 	}
 	newTicket := EnsureTicket(rebuilt[0].EnsureTicket)
-	if h.liveness.Attach(child, newTicket, q) != transitionApplied {
+	if h.liveness.Attach(child, newTicket, 1, q) != transitionApplied {
 		t.Fatal("new attempt attach")
 	}
 	if h.liveness.ObserveDown(child, true, false) != transitionApplied {
@@ -70,7 +70,7 @@ func TestDaemonPlanProjectsLivenessIntentAndStableEnsureTicket(t *testing.T) {
 	if len(detached) != 1 || detached[0].EnsureTicket != string(newTicket) {
 		t.Fatalf("detached plan=%+v", detached)
 	}
-	if h.liveness.Attach(child, newTicket, q) != transitionApplied {
+	if h.liveness.Attach(child, newTicket, 1, q) != transitionApplied {
 		t.Fatal("same-ticket rebind rejected")
 	}
 

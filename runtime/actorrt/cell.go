@@ -517,4 +517,4 @@ func (c *cell) beginTeardown() {
 // (no frame write to bound). The distinction exists only so the by-name
 // termination entries reach a port's wire signal; a cell collapses it. Non-joining
 // — the escort watches doneCh bounded by grace, no goroutine ever self-joins.
-func (c *cell) signalDespawn(_ context.Context) { c.initiateStop() }
+func (c *cell) signalDespawn(_ context.Context, _ string) { c.initiateStop() }

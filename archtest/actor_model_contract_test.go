@@ -152,3 +152,105 @@ func exprSelectorNames(root ast.Node) map[string]bool {
 	})
 	return out
 }
+
+func TestActorModelDataFlowChokepoints(t *testing.T) {
+	var mintState, fireAndMark, ackTimer, snapshot []string
+	var views []string
+	var fenceDecls []string
+	walkProductionGo(t, func(path string, f *ast.File, fset *token.FileSet) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.CallExpr:
+				if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
+					at := fset.Position(x.Pos()).String()
+					switch sel.Sel.Name {
+					case "MintState":
+						if path != "../runtime/accessdoor/memstate.go" {
+							mintState = append(mintState, at)
+						}
+					case "FireAndMark":
+						if path != "../runtime/schedule/firepen.go" {
+							fireAndMark = append(fireAndMark, at)
+						}
+					case "AckTimer":
+						ackTimer = append(ackTimer, at)
+					}
+				}
+			case *ast.Ident:
+				if path == "../platform/home/liveness.go" && x.Name == "snapshot" {
+					snapshot = append(snapshot, fset.Position(x.Pos()).String())
+				}
+			case *ast.FuncDecl:
+				if path != "../platform/home/liveness.go" || x.Recv == nil {
+					break
+				}
+				switch x.Name.Name {
+				case "AttachmentIntent", "WakeStanding":
+					views = append(views, x.Name.Name)
+				case "prepareAttachmentFence":
+					fenceDecls = append(fenceDecls, x.Name.Name)
+					if x.Type.Results == nil || len(x.Type.Results.List) == 0 {
+						fenceDecls = append(fenceDecls, "missing-result")
+					} else if id, ok := x.Type.Results.List[0].Type.(*ast.Ident); !ok || id.Name != "attachmentFence" {
+						fenceDecls = append(fenceDecls, "state-bearing-result")
+					}
+				}
+			}
+			return true
+		})
+	})
+	if len(mintState)+len(fireAndMark)+len(ackTimer)+len(snapshot) != 0 ||
+		!sameStrings(views, []string{"AttachmentIntent", "WakeStanding"}) ||
+		!sameStrings(fenceDecls, []string{"prepareAttachmentFence"}) {
+		t.Fatalf("actor-model data-flow drift: MintState=%v FireAndMark=%v AckTimer=%v snapshot=%v views=%v fences=%v",
+			mintState, fireAndMark, ackTimer, snapshot, views, fenceDecls)
+	}
+}
+
+func sameStrings(got, want []string) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	seen := make(map[string]int, len(got))
+	for _, s := range got {
+		seen[s]++
+	}
+	for _, s := range want {
+		seen[s]--
+	}
+	for _, n := range seen {
+		if n != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+func TestActorModelEndAuthorityIsWeldedAtMintPoints(t *testing.T) {
+	allowedAuthorStamp := map[string]bool{
+		"../platform/home/caps.go": true, "../platform/home/end.go": true,
+		"../platform/home/fork.go": true, "../platform/home/open.go": true,
+		"../platform/home/remote_lifecycle.go": true, "../platform/home/spawnhandle.go": true,
+		"../platform/home/sysanchorcaps.go": true,
+	}
+	var exportedHomeEnd, authorLiterals []string
+	walkProductionGo(t, func(path string, f *ast.File, fset *token.FileSet) {
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch x := n.(type) {
+			case *ast.FuncDecl:
+				if path == "../platform/home/end.go" && x.Name.Name == "EndIdentity" {
+					exportedHomeEnd = append(exportedHomeEnd, fset.Position(x.Pos()).String())
+				}
+			case *ast.CompositeLit:
+				sel, ok := x.Type.(*ast.SelectorExpr)
+				if ok && sel.Sel.Name == "AuthorStamp" && strings.HasPrefix(path, "../platform/home/") && !allowedAuthorStamp[path] {
+					authorLiterals = append(authorLiterals, fset.Position(x.Pos()).String())
+				}
+			}
+			return true
+		})
+	})
+	if len(exportedHomeEnd)+len(authorLiterals) != 0 {
+		t.Fatalf("end-authority drift: exported EndIdentity=%v AuthorStamp literals=%v", exportedHomeEnd, authorLiterals)
+	}
+}

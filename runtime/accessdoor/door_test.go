@@ -3,12 +3,78 @@ package accessdoor
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+type blockingReadDriver struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d blockingReadDriver) Read(context.Context, resource.ResourceID) ([]byte, bool, error) {
+	close(d.entered)
+	<-d.release
+	return []byte("old"), true, nil
+}
+func (blockingReadDriver) Write(context.Context, resource.ResourceID, []byte) error { return nil }
+func (blockingReadDriver) Delete(context.Context, resource.ResourceID) error        { return nil }
+
+func TestResourceGateSpansAuthorizeThroughExecute(t *testing.T) {
+	reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
+	drv := blockingReadDriver{entered: make(chan struct{}), release: make(chan struct{})}
+	d := newDoor(reg, nil, &fakeMembership{isMember: true})
+	d.deps.Drivers[resourcespec.KindKV] = drv
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		_, _ = d.invoke(context.Background(), "old-grantee", access.OpRead, "r1", nil, nil)
+	}()
+	<-drv.entered
+	createDone := make(chan struct{})
+	go func() {
+		defer close(createDone)
+		_, _ = d.create(context.Background(), "creator", "r1", resourcespec.CreateSpec{Kind: resourcespec.KindKV}, nil)
+	}()
+	select {
+	case <-createDone:
+		t.Fatal("create crossed resource gate while an authorized read was executing")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(drv.release)
+	<-readDone
+	<-createDone
+}
+
+func TestAsyncCompletionInstallsForkedCreatorOverlay(t *testing.T) {
+	landed := resourcespec.LandedResource{
+		ID: "file:async", CreatedBy: "run:child",
+		Birth: resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthChannelOwned},
+	}
+	reg := &fakeRegistry{commitReservationFound: true, commitReservationLanded: landed}
+	overlay := &fakeGrantOverlay{}
+	_, completion, err := NewAssembly(Deps{
+		Registry: reg, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}},
+		Authority: &fakeMembership{isMember: true, world: storespec.WorldRun},
+		Overlay:   overlay, State: &fakeStateStore{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := completion.CommitReservation(t.Context(), "reservation-async")
+	if err != nil || !found || got != landed {
+		t.Fatalf("completion=(%+v,%v,%v)", got, found, err)
+	}
+	if len(overlay.grants) != 1 || overlay.grants[0].Grantee != landed.CreatedBy {
+		t.Fatalf("async creator overlay=%+v", overlay.grants)
+	}
+}
 
 // --- create branch (期11 §3.1: create is its own method, door.create — no
 //     longer reachable through invoke at all) ---
@@ -60,6 +126,10 @@ func TestDoorCreate(t *testing.T) {
 		mustAccept(t, out, err)
 		if got := reg.createCalls[0].birth.Authority; got != resourcespec.BirthChannelOwned {
 			t.Fatalf("birth=%v, want channel owned", got)
+		}
+		overlay := d.deps.Overlay.(*fakeGrantOverlay)
+		if len(overlay.grants) != 1 || overlay.grants[0].Grantee != "child" || !reflect.DeepEqual(overlay.grants[0].Ops, []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete}) {
+			t.Fatalf("forked creator overlay grants=%+v", overlay.grants)
 		}
 	})
 
@@ -589,6 +659,9 @@ func TestInvokeFileDeleteRowFirstBytesLast(t *testing.T) {
 	}
 	if len(reg.deleteCalls) != 1 {
 		t.Fatalf("expected one Registry.Delete call, got %d", len(reg.deleteCalls))
+	}
+	if got := d.deps.Overlay.(*fakeGrantOverlay).deleted; !reflect.DeepEqual(got, []resource.ResourceID{"r1"}) {
+		t.Fatalf("overlay resource cleanup=%v", got)
 	}
 }
 

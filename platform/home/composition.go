@@ -93,7 +93,7 @@ func (h *Home) RemoveInstance(ctx context.Context, id actor.ActorID) error {
 	if id == actor.SystemActorID {
 		return ErrRemoveAnchor
 	}
-	if err := h.EndIdentity(ctx, storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}, id, "removed"); err != nil {
+	if err := h.systemEndHandle().End(ctx, id, "removed"); err != nil {
 		return err
 	}
 	h.pokeReconcile()
@@ -124,15 +124,11 @@ func (h *Home) RestartInstanceDirect(ctx context.Context, id actor.ActorID) (int
 	if !active {
 		return 0, storespec.ErrActorNotFound
 	}
-	state, present := h.liveness.snapshot(id)
-	if !present || state.occ == occNone {
-		return row.CurrentDeclVersion, nil
-	}
 	_, verdict := h.liveness.Retire(id, true)
 	if verdict != transitionApplied {
 		return 0, errors.New("platform: invalid restart transition")
 	}
-	h.channel.Cells().DespawnID(id)
+	h.channel.Cells().DespawnIDReason(id, "restart")
 	h.pokeReconcile()
 	return row.CurrentDeclVersion, nil
 }
@@ -141,19 +137,42 @@ func (h *Home) ApplyRestartTarget(ctx context.Context, jobID int64, id actor.Act
 	if h.closed.Load() {
 		return 0, false, ErrClosed
 	}
-	applied, err := h.cs.RestartJournal.MarkRestartApplied(ctx, jobID, id, h.nowMs())
+	if id == actor.SystemActorID {
+		return 0, false, ErrRestartAnchor
+	}
+	unlock := h.actorGates.lock(id)
+	defer unlock()
+	if h.closed.Load() {
+		return 0, false, ErrClosed
+	}
+	row, active, err := h.controlIndex.LookupActive(ctx, id)
 	if err != nil {
 		return 0, false, err
 	}
-	if applied {
-		version, restartErr := h.RestartInstanceDirect(ctx, id)
-		return version, true, restartErr
+	if !active {
+		return 0, false, storespec.ErrActorNotFound
 	}
-	row, ok, err := h.controlIndex.LookupActive(ctx, id)
-	if err != nil || !ok {
+	intent := h.liveness.AttachmentIntent(id)
+	currentTicket := ""
+	if intent.Present && intent.Version == row.CurrentDeclVersion {
+		currentTicket = string(intent.Ticket)
+	}
+	expected, alreadyApplied, err := h.cs.RestartJournal.ClaimRestartAttempt(ctx, jobID, id, currentTicket, h.nowMs())
+	if err != nil {
 		return 0, false, err
 	}
-	return row.CurrentDeclVersion, false, nil
+	if alreadyApplied {
+		return row.CurrentDeclVersion, false, nil
+	}
+	if _, retired := h.liveness.RetireIfTicketMatches(id, EnsureTicket(expected), true); retired {
+		h.channel.Cells().DespawnIDReason(id, "restart")
+		h.pokeReconcile()
+	}
+	marked, err := h.cs.RestartJournal.MarkRestartApplied(ctx, jobID, id, h.nowMs())
+	if err != nil {
+		return row.CurrentDeclVersion, false, err
+	}
+	return row.CurrentDeclVersion, marked, nil
 }
 
 func (h *Home) RevokeDaemonTarget(ctx context.Context, daemonID string) error {
@@ -168,7 +187,7 @@ func (h *Home) RevokeDaemonTarget(ctx context.Context, daemonID string) error {
 		if row.Placement.Kind != storespec.PlacementDaemon || row.Placement.Host != daemonID {
 			continue
 		}
-		if err := h.EndIdentity(ctx, storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}, row.ID, "daemon_revoked"); err != nil {
+		if err := h.systemEndHandle().End(ctx, row.ID, "daemon_revoked"); err != nil {
 			return err
 		}
 	}
@@ -180,13 +199,23 @@ func (h *Home) RevokeDaemonTarget(ctx context.Context, daemonID string) error {
 // liveness intent. It never inserts, removes, or re-homes an identity.
 type homeDeclarationCoordinator struct{ h *Home }
 
+func (c homeDeclarationCoordinator) PrepareAttachmentFence(_ context.Context, id actor.ActorID, ticket string, birthVersion int64) (link.AttachmentFence, error) {
+	fence, verdict := c.h.liveness.prepareAttachmentFence(id, EnsureTicket(ticket), birthVersion)
+	if verdict != transitionApplied {
+		return nil, errors.New("platform: stale attachment intent")
+	}
+	return fence, nil
+}
+
 func (c homeDeclarationCoordinator) ValidateAttachment(ctx context.Context, owner link.PortOwner, daemonID string, declared []storespec.ComputeDeclaration) ([]storespec.ComputeDeclaration, error) {
 	h := c.h
 	if h.closed.Load() {
 		return nil, ErrClosed
 	}
+	declaredIDs := make(map[actor.ActorID]struct{}, len(declared))
 	ids := make(map[actor.ActorID]struct{}, len(declared))
 	for _, d := range declared {
+		declaredIDs[d.ActorID] = struct{}{}
 		ids[d.ActorID] = struct{}{}
 	}
 	indexed := h.indexedPortIDs(owner)
@@ -212,8 +241,9 @@ func (c homeDeclarationCoordinator) ValidateAttachment(ctx context.Context, owne
 	}
 
 	for _, id := range indexed {
-		if _, present := ids[id]; !present {
+		if _, present := declaredIDs[id]; !present {
 			if inc, ok := (homePortIndex{h: h}).Take(owner, id); ok {
+				_ = h.liveness.ObserveDown(id, true, false)
 				h.channel.Cells().Despawn(inc)
 			}
 		}
@@ -224,11 +254,10 @@ func (c homeDeclarationCoordinator) ValidateAttachment(ctx context.Context, owne
 		if err != nil {
 			return nil, err
 		}
-		state, live := h.liveness.snapshot(d.ActorID)
-		if !ok || !live || row.Kind != d.Kind || row.CurrentDeclVersion != d.Version ||
+		intent := h.liveness.AttachmentIntent(d.ActorID)
+		if !ok || !intent.Present || row.Kind != d.Kind || row.CurrentDeclVersion != d.Version ||
 			row.Placement.Kind != storespec.PlacementDaemon || row.Placement.Host != daemonID ||
-			d.Binding != actor.BindingRuntimeInboundViaRelay || state.ticket == "" || string(state.ticket) != d.EnsureTicket ||
-			state.version != d.Version || (state.occ != occStarting && state.occ != occDetached && state.occ != occRunning) {
+			d.Binding != actor.BindingRuntimeInboundViaRelay || string(intent.Ticket) != d.EnsureTicket || intent.Version != d.Version {
 			h.logger.Warn("home.compute_declaration_rejected", "daemon", daemonID, "actor", string(d.ActorID))
 			continue
 		}

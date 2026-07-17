@@ -23,14 +23,15 @@ type fakeRegistry struct {
 	createErr   error
 	createCalls []createCall
 
-	reserveCreateID        string
-	reserveCreateErr       error
-	reserveCreateCalls     []createCall
-	commitReservationFound bool
-	commitReservationErr   error
-	commitReservationCalls []string
-	clearTombstoneFound    bool
-	clearTombstoneErr      error
+	reserveCreateID         string
+	reserveCreateErr        error
+	reserveCreateCalls      []createCall
+	commitReservationFound  bool
+	commitReservationLanded resourcespec.LandedResource
+	commitReservationErr    error
+	commitReservationCalls  []string
+	clearTombstoneFound     bool
+	clearTombstoneErr       error
 
 	actorAllows    bool
 	actorAllowsErr error
@@ -79,12 +80,12 @@ func (r *fakeRegistry) Resolve(ctx context.Context, id resource.ResourceID) (res
 	return r.resolveMeta, r.resolveExists, r.resolveErr
 }
 
-func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, birth ...resourcespec.ResourceBirthPlan) error {
+func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, birth resourcespec.ResourceBirthPlan) error {
 	r.calls++
 	r.createCalls = append(r.createCalls, createCall{
 		id: id, kind: kind, creator: creator,
 		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
-		initial: initial, birth: firstBirth(birth),
+		initial: initial, birth: birth,
 	})
 	return r.createErr
 }
@@ -93,11 +94,11 @@ func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind 
 // routing (door.create's file-kind branch, query.go) — canned per-call so a
 // test can drive the reservation/commit sequence a content-less file create
 // runs through.
-func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, birth ...resourcespec.ResourceBirthPlan) (string, error) {
+func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, birth resourcespec.ResourceBirthPlan) (string, error) {
 	r.calls++
 	r.reserveCreateCalls = append(r.reserveCreateCalls, createCall{
 		id: id, kind: kind, creator: creator,
-		placementDaemonID: placementDaemonID, placementCoord: placementCoord, birth: firstBirth(birth),
+		placementDaemonID: placementDaemonID, placementCoord: placementCoord, birth: birth,
 	})
 	if r.reserveCreateErr != nil {
 		return "", r.reserveCreateErr
@@ -109,10 +110,10 @@ func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID
 	return id2, nil
 }
 
-func (r *fakeRegistry) CommitReservation(ctx context.Context, reservationID string) (bool, error) {
+func (r *fakeRegistry) CommitReservation(ctx context.Context, reservationID string) (resourcespec.LandedResource, bool, error) {
 	r.calls++
 	r.commitReservationCalls = append(r.commitReservationCalls, reservationID)
-	return r.commitReservationFound, r.commitReservationErr
+	return r.commitReservationLanded, r.commitReservationFound, r.commitReservationErr
 }
 
 func (r *fakeRegistry) ClearTombstone(ctx context.Context, tombstoneID string) (bool, error) {
@@ -218,7 +219,7 @@ func (d *fakeDriver) Delete(ctx context.Context, id resource.ResourceID) error {
 	return d.deleteErr
 }
 
-// fakeMembership is a configurable MembershipCheck stub. calls counts every
+// fakeMembership is a configurable ActorAuthority stub. calls counts every
 // invocation — the actor-scoped negative assertion ("the collapsed branch checks
 // no membership") asserts it stays zero.
 type fakeMembership struct {
@@ -238,9 +239,10 @@ type fakeMembership struct {
 }
 
 type fakeGrantOverlay struct {
-	allows bool
-	err    error
-	grants []access.Grant
+	allows  bool
+	err     error
+	grants  []access.Grant
+	deleted []resource.ResourceID
 }
 
 func (o *fakeGrantOverlay) ActorAllows(context.Context, actor.ActorID, resource.ResourceID, access.Operation) (bool, error) {
@@ -250,7 +252,8 @@ func (o *fakeGrantOverlay) SetGrant(_ context.Context, _ resource.ResourceID, gr
 	o.grants = append(o.grants, grant)
 	return o.err
 }
-func (o *fakeGrantOverlay) EndBatch([]actor.ActorID) {}
+func (o *fakeGrantOverlay) EndBatch([]actor.ActorID)              {}
+func (o *fakeGrantOverlay) DeleteResource(id resource.ResourceID) { o.deleted = append(o.deleted, id) }
 
 func (m *fakeMembership) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
 	m.calls++

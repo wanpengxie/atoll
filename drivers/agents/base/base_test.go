@@ -103,7 +103,6 @@ func (s *fakeSys) After(time.Duration, string, any) (schedule.TimerID, error) {
 	return "", nil
 }
 func (s *fakeSys) CancelTimer(schedule.TimerID) error { return nil }
-func (s *fakeSys) AckTimer(actorbase.Msg) error       { return nil }
 func (s *fakeSys) Fork(actorrt.ForkSpec) (actor.ActorID, error) {
 	return "", nil
 }

@@ -86,7 +86,7 @@ type embodiment interface {
 	// signalDespawn collapses to initiateStop for it. This is the sole difference
 	// from the quiet teardown (replace / channel-teardown, which sends no frame —
 	// the remote learns via EOF).
-	signalDespawn(dl context.Context)
+	signalDespawn(dl context.Context, reason string)
 }
 
 // ErrNotHosted is returned when no embodiment is hosted for the addressed id.
@@ -628,7 +628,7 @@ func (p *PreparedAttach) Commit(valid func() bool) (Incarnation, error) {
 		// in the SAME critical section as the authoritative map swap. The only
 		// difference from the old sequence is timing: this happens after ACK, so
 		// an ACK failure leaves the predecessor fully intact.
-		retirement = r.retireCurrentLocked(port.id, old, flavorQuiet)
+		retirement = r.retireCurrentLocked(port.id, old, flavorQuiet, "")
 	}
 	r.embodiments[port.id] = port
 	port.prepared.Store(false)
@@ -690,7 +690,7 @@ func (r *Runtime) removeIf(id actor.ActorID, self embodiment) {
 	// body no external entry ever named. Idempotent — if an external entry already
 	// enrolled it (flavorQuiet/flavorDespawn), this neither re-enrols nor launches
 	// a second escort (its flavor is not downgraded to natural).
-	launch := r.retireLocked(self, id, flavorNatural)
+	launch := r.retireLocked(self, id, flavorNatural, "")
 	r.mu.Unlock()
 	// This embodiment is dying — flip its liveness atomic so any capability welded
 	// to it (livePen) fails the WHEN gate from here on. Idempotent.
@@ -713,11 +713,11 @@ type retirementWork struct {
 	launch func()
 }
 
-func (r *Runtime) retireCurrentLocked(id actor.ActorID, body embodiment, flavor deathFlavor) retirementWork {
+func (r *Runtime) retireCurrentLocked(id actor.ActorID, body embodiment, flavor deathFlavor, reason string) retirementWork {
 	delete(r.embodiments, id)
 	body.markDead()
 	body.beginTeardown()
-	return retirementWork{launch: r.retireLocked(body, id, flavor)}
+	return retirementWork{launch: r.retireLocked(body, id, flavor, reason)}
 }
 
 func runRetirement(work retirementWork) {
@@ -735,6 +735,11 @@ func runRetirement(work retirementWork) {
 // edge would only fire on abnormal exit; closure is geometry (the level scan),
 // not a despawn-caller convention.
 func (r *Runtime) Despawn(inc Incarnation) {
+	r.DespawnReason(inc, "despawn")
+}
+
+// DespawnReason is Despawn with an explicit wire reason for remote ports.
+func (r *Runtime) DespawnReason(inc Incarnation, reason string) {
 	r.mu.Lock()
 	cur, ok := r.embodiments[inc.id]
 	matched := ok && cur == inc.p
@@ -747,7 +752,7 @@ func (r *Runtime) Despawn(inc Incarnation) {
 		// re-enters r.mu, so it is deadlock-safe in-lock. Enrol as a zombie in the
 		// SAME critical section (P0-1); the escort drives the despawn teardown +
 		// bounded join, so Despawn returns in O(judge-dead) not O(goroutine-exit).
-		retirement = r.retireCurrentLocked(inc.id, inc.p, flavorDespawn)
+		retirement = r.retireCurrentLocked(inc.id, inc.p, flavorDespawn, reason)
 		candidate = r.takePreparedLocked(inc.id)
 	}
 	r.mu.Unlock()
@@ -777,7 +782,7 @@ func (r *Runtime) DespawnQuiet(inc Incarnation) {
 		// Quiet flavour: no KindDespawn frame (a graceful host teardown is a link
 		// drop the remote can redial, not a by-name arm termination). Enrol in-lock
 		// (P0-1); the escort fires the quiet teardown + bounded join.
-		retirement = r.retireCurrentLocked(inc.id, inc.p, flavorQuiet)
+		retirement = r.retireCurrentLocked(inc.id, inc.p, flavorQuiet, "")
 		candidate = r.takePreparedLocked(inc.id)
 	}
 	r.mu.Unlock()
@@ -801,6 +806,11 @@ func (r *Runtime) DespawnQuiet(inc Incarnation) {
 // scoped deactivation diff can legitimately name an id that already died on
 // its own between two ticks).
 func (r *Runtime) DespawnID(id actor.ActorID) bool {
+	return r.DespawnIDReason(id, "despawn")
+}
+
+// DespawnIDReason is DespawnID with an explicit wire reason for remote ports.
+func (r *Runtime) DespawnIDReason(id actor.ActorID, reason string) bool {
 	r.mu.Lock()
 	p, ok := r.embodiments[id]
 	var retirement retirementWork
@@ -809,7 +819,7 @@ func (r *Runtime) DespawnID(id actor.ActorID) bool {
 		// the map delete (idempotent atomic, no r.mu re-entry) — no live-but-unmapped
 		// window for a stale welded cap to slip through IsLive. Enrol in-lock (P0-1);
 		// the escort drives the despawn teardown + bounded join.
-		retirement = r.retireCurrentLocked(id, p, flavorDespawn)
+		retirement = r.retireCurrentLocked(id, p, flavorDespawn, reason)
 	}
 	candidate := r.takePreparedLocked(id)
 	r.mu.Unlock()
@@ -826,7 +836,8 @@ func (r *Runtime) DespawnID(id actor.ActorID) bool {
 // deliver routes env to every audience embodiment hosted by this Runtime by
 // enqueueing into each mailbox, returning the per-audience Outcome. An audience
 // member with no local embodiment is reported NotHosted (not silently skipped) —
-// the substrate reports truthfully what it did so the seam can fast-fail. error
+// the substrate reports truthfully what it did so higher-level closure can
+// reconcile from durable facts. error
 // is reserved for a true exception (nil envelope), not for delivery conditions.
 //
 // Unexported: the enqueue is reachable ONLY through the Deliverer capability New
@@ -883,7 +894,7 @@ func (r *Runtime) StopAll() {
 		// for a stale welded cap. markDead is an idempotent atomic and never re-enters
 		// r.mu — deadlock-safe in-lock. Enrol each in-lock (P0-1) with the quiet
 		// flavour (channel teardown sends no KindDespawn — the remote learns via EOF).
-		retirements = append(retirements, r.retireCurrentLocked(id, p, flavorQuiet))
+		retirements = append(retirements, r.retireCurrentLocked(id, p, flavorQuiet, ""))
 	}
 	candidates := make([]*port, 0, len(r.prepared))
 	for id, p := range r.prepared {

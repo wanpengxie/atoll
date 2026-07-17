@@ -235,7 +235,6 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		// identity — the SAME wake fires normally once the port installs
 		// (already-live fast path above) or the author detaches back home.
 		h.logReviveAttached(id, v.host)
-		_ = h.liveness.MarkFiredWake(id)
 		h.pokeReconcile()
 		return fmt.Errorf("platform: revive %s: attached to host %q", id, v.host) // transient
 	case actBackoffHeld:

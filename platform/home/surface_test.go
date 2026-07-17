@@ -20,7 +20,7 @@ import (
 // Home no longer hands out a bare write gate; it Mints a welded Pen internally at
 // each admission point (the Minter never escapes). Remove (期8 S1) is the
 // identity-level termination paved path — a composition over DespawnID +
-// EndIdentity/EndCascade, never a bare runtime/store accessor. KickDaemon
+// welded lifecycle handles/EndCascade, never a bare runtime/store accessor. KickDaemon
 // (期8 S3) is the revocation paved path — a thin wrapper over the link
 // Acceptor's per-compute handle table, never a bare Acceptor accessor. This is
 // the mechanical guard against the organ-bag regression — any added accessor
@@ -37,7 +37,7 @@ func TestHomePublicSurface(t *testing.T) {
 	// *subjectgate.Slot capability handle, never the bare registry object).
 	// ResolvePrincipal/PrincipalOf are the principal↔actor-id resolution the
 	// gateway + operate shim use to reach a subject's slot (no door handle).
-	want := []string{"ActiveActor", "ActiveActors", "Admit", "ApplyDeclaration", "ApplyRestartTarget", "CancelRequest", "Close", "DeclarationVersions", "Declare", "DeclaredByPrincipal", "DeclaredBySource", "DefaultAgent", "EditDeclaration", "EndIdentity", "EnsureSubjectSlot", "KickDaemon", "PlanForDaemon", "PresenceSweptCount", "PrincipalOf", "Remove", "RemoveInstance", "RemoveSubjectSlot", "ResolvePrincipal", "Restart", "RestartInstanceDirect", "RevokeDaemonTarget", "ServeAttach", "SetDefaultAgent", "SubjectSlotFor", "Subscribe", "View"}
+	want := []string{"ActiveActor", "ActiveActors", "Admit", "ApplyDeclaration", "ApplyRestartTarget", "CancelRequest", "Close", "DeclarationVersions", "Declare", "DeclaredByPrincipal", "DeclaredBySource", "DefaultAgent", "EditDeclaration", "EnsureSubjectSlot", "KickDaemon", "PlanForDaemon", "PresenceSweptCount", "PrincipalOf", "Remove", "RemoveInstance", "RemoveSubjectSlot", "ResolvePrincipal", "Restart", "RestartInstanceDirect", "RevokeDaemonTarget", "ServeAttach", "SetDefaultAgent", "SubjectSlotFor", "Subscribe", "View"}
 
 	typ := reflect.TypeOf((*home.Home)(nil))
 	var got []string

@@ -48,6 +48,14 @@ type fakeAccessMinter struct {
 	calls []fakeAccessCall
 }
 
+type fakeStateResolver struct{ minter *fakeAccessMinter }
+
+func (r fakeStateResolver) AdmitRun(actor.ActorID) error { return nil }
+func (r fakeStateResolver) EndBatch([]actor.ActorID)     {}
+func (r fakeStateResolver) Resolve(_ context.Context, id actor.ActorID) (accessdoor.AccessHandle, error) {
+	return &fakeAccessHandle{m: r.minter, caller: id, scope: "resolved-state"}, nil
+}
+
 func (m *fakeAccessMinter) Mint(caller storespec.AuthorStamp) accessdoor.ResourceAccessHandle {
 	return &fakeAccessHandle{m: m, caller: caller.ID, scope: "channel"}
 }
@@ -101,6 +109,12 @@ func (h *fakeAccessHandle) Stat(_ context.Context, id resource.ResourceID) (acce
 func (h *fakeAccessHandle) List(_ context.Context, q accessdoor.ListQuery) (accessdoor.ListPage, error) {
 	h.m.record(fakeAccessCall{caller: h.caller, scope: h.scope})
 	return accessdoor.ListPage{}, nil
+}
+func (h *fakeAccessHandle) Open(context.Context, resource.ResourceID, access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+	return accessdoor.FileAccess{}, accessdoor.Outcome{}, accessdoor.ErrFileCapabilityUnavailable
+}
+func (h *fakeAccessHandle) Redeem(context.Context, accessdoor.FileRoute) (accessdoor.FileAccess, error) {
+	return accessdoor.FileAccess{}, accessdoor.ErrFileCapabilityUnavailable
 }
 
 // --- fake time axis ---
@@ -156,6 +170,7 @@ func (h *fakeScheduleHandle) Ack(_ context.Context, id schedule.TimerID) error {
 
 type capsRig struct {
 	access *fakeAccessMinter
+	state  *fakeAccessMinter
 	sched  *fakeScheduleMinter
 	acc    *link.Acceptor
 	srv    *httptest.Server
@@ -164,15 +179,16 @@ type capsRig struct {
 func newCapsRig(t *testing.T) *capsRig {
 	t.Helper()
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	r := &capsRig{access: &fakeAccessMinter{}, sched: &fakeScheduleMinter{}}
+	r := &capsRig{access: &fakeAccessMinter{}, state: &fakeAccessMinter{}, sched: &fakeScheduleMinter{}}
 	r.acc = newTestAcceptor(t, link.Config{
-		Minter:    &stubMinter{},
-		Access:    r.access,
-		Schedule:  r.sched,
-		Runtime:   rt,
-		ChannelID: testChannelID,
-		LeasePing: 5 * time.Second,
-		LeaseTTL:  30 * time.Second,
+		Minter:       &stubMinter{},
+		Access:       r.access,
+		StateHandles: fakeStateResolver{minter: r.state},
+		Schedule:     r.sched,
+		Runtime:      rt,
+		ChannelID:    testChannelID,
+		LeasePing:    5 * time.Second,
+		LeaseTTL:     30 * time.Second,
 	})
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.acc.Serve(w, req, "daemon-1")
@@ -251,8 +267,11 @@ func TestStateArmRoutesToActorScope(t *testing.T) {
 	if _, err := arms.State.Invoke(context.Background(), access.OpWrite, "own-state", []byte("v"), nil); err != nil {
 		t.Fatalf("state invoke: %v", err)
 	}
-	if got := r.access.last(); got.caller != toolID || got.scope != "state" {
-		t.Fatalf("state call = %+v, want caller=%q scope=state (MintState branch)", got, toolID)
+	if got := r.state.last(); got.caller != toolID || got.scope != "resolved-state" {
+		t.Fatalf("state call = %+v, want caller=%q through StateHandleResolver", got, toolID)
+	}
+	if len(r.access.calls) != 0 {
+		t.Fatalf("state relay bypassed resolver through raw access minter: %+v", r.access.calls)
 	}
 }
 
@@ -448,6 +467,14 @@ func (h *blockingAccessHandle) Stat(ctx context.Context, _ resource.ResourceID) 
 func (h *blockingAccessHandle) List(ctx context.Context, _ accessdoor.ListQuery) (accessdoor.ListPage, error) {
 	h.block(ctx)
 	return accessdoor.ListPage{}, nil
+}
+func (h *blockingAccessHandle) Open(ctx context.Context, _ resource.ResourceID, _ access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+	h.block(ctx)
+	return accessdoor.FileAccess{}, accessdoor.Outcome{}, nil
+}
+func (h *blockingAccessHandle) Redeem(ctx context.Context, _ accessdoor.FileRoute) (accessdoor.FileAccess, error) {
+	h.block(ctx)
+	return accessdoor.FileAccess{}, nil
 }
 
 type blockingScheduleMinter struct {
