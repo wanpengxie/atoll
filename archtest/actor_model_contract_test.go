@@ -109,7 +109,7 @@ func TestActorModelBundleCallsitesAreClosed(t *testing.T) {
 	// Call-site keys (DoD 32): file AND enclosing function — a sibling
 	// function in the same file gets no free pass.
 	allowedAdmit := map[string]bool{
-		"../platform/home/census.go:Admit":           true,
+		"../platform/home/census.go:admitHuman":      true,
 		"../platform/home/declaration_api.go:Declare": true,
 		"../platform/home/open.go:Open":               true,
 	}
