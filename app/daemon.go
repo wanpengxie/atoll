@@ -198,18 +198,6 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 	}
 
 	targetSet := map[string]struct{}{}
-	rows, err := a.db.QueryContext(ctx, `SELECT channel_id FROM daemon_channels WHERE daemon_id=?`, daemonID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
-	for rows.Next() {
-		var ch string
-		if err := rows.Scan(&ch); err == nil {
-			targetSet[ch] = struct{}{}
-		}
-	}
-	_ = rows.Close()
 	a.mu.RLock()
 	homes := make(map[channel.ID]*home.Home, len(a.homes))
 	for id, h := range a.homes {
@@ -228,6 +216,35 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 			}
 		}
 	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
+	rows, err := tx.QueryContext(ctx, `DELETE FROM daemon_channels WHERE daemon_id=? RETURNING channel_id`, daemonID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	for rows.Next() {
+		var ch string
+		if err := rows.Scan(&ch); err != nil {
+			_ = rows.Close()
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+			return
+		}
+		targetSet[ch] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	if err := rows.Close(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
 	var targetIDs []string
 	for id := range targetSet {
 		targetIDs = append(targetIDs, id)
@@ -238,17 +255,6 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 		targets = append(targets, daemonFanoutTarget{ChannelID: id})
 	}
 	targetsJSON, _ := json.Marshal(targets)
-
-	tx, err := a.db.BeginTx(ctx, nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
-	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
-	if _, err := tx.ExecContext(ctx, `DELETE FROM daemon_channels WHERE daemon_id=?`, daemonID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM daemons WHERE id = ? AND owner_id = ?`, daemonID, userID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})

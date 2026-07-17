@@ -32,11 +32,11 @@ var objectOps = []access.Operation{access.OpRead, access.OpWrite, access.OpSet, 
 // ("actor 移出频道后 members 权利立即不再计入，三处同断言") is really a
 // demand that there be exactly one formula, not three copies of it.
 //
-// IsMember is resolved AT MOST ONCE per call (lazily, only if some op's
-// MembersAllow comes back true) — membership doesn't change between the four
-// per-op checks within one effectiveOps call, so there is nothing to gain by
-// re-resolving it, mirroring the door's existing single-op union block
-// (door.go's authorize step) which does the same lazy-single-resolve.
+// The caller's registry row is resolved EXACTLY ONCE per call, eagerly at
+// entry: the owner-role check needs it before any per-op work (owner ⇒ full
+// ops, short-circuit), and the same lookup then serves the IsMember leg of
+// the members-arm — membership doesn't change between the per-op checks
+// within one effectiveOps call, so a single resolve covers both judgments.
 func (d *door) effectiveOps(ctx context.Context, caller actor.ActorID, id resource.ResourceID) (map[access.Operation]bool, error) {
 	eff := make(map[access.Operation]bool, len(objectOps))
 	row, isMember, err := d.deps.Authority.LookupActive(ctx, caller)
