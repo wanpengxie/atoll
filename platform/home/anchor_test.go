@@ -116,7 +116,7 @@ func TestCarrierFullLeavesRequestOpenAndNextHandoffRedeliversOnlyRequest(t *test
 	}
 	full := &testCarrier{err: actorrt.ErrMailboxFull}
 	ticket, verdict := h.liveness.BeginEnsure(child, 1)
-	if verdict != transitionApplied || h.liveness.PublishLocal(child, ticket, full) != transitionApplied {
+	if verdict != transitionApplied || h.liveness.PublishLocal(child, ticket, noInc, full) != transitionApplied {
 		t.Fatalf("publish full carrier: ticket=%q verdict=%v", ticket, verdict)
 	}
 
@@ -157,7 +157,7 @@ func TestCarrierFullLeavesRequestOpenAndNextHandoffRedeliversOnlyRequest(t *test
 	}
 	nextTicket, verdict := h.liveness.BeginEnsure(child, 1)
 	next := &testCarrier{}
-	if verdict != transitionApplied || h.liveness.PublishLocal(child, nextTicket, next) != transitionApplied {
+	if verdict != transitionApplied || h.liveness.PublishLocal(child, nextTicket, noInc, next) != transitionApplied {
 		t.Fatalf("publish successor: ticket=%q verdict=%v", nextTicket, verdict)
 	}
 	h.redeliverOpenRequests(ctx, child)

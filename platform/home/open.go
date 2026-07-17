@@ -391,8 +391,12 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if err := channel.Start(); err != nil {
 		return nil, fmt.Errorf("platform: start channel: %w", err)
 	}
+	sysInc, sysLive := channel.Cells().CurrentIncarnation(actor.SystemActorID)
+	if !sysLive {
+		return nil, errors.New("platform: system cell not live at publish")
+	}
 	if ticket, verdict := h.liveness.BeginEnsure(actor.SystemActorID, 1); verdict != transitionApplied ||
-		h.liveness.PublishLocal(actor.SystemActorID, ticket, runtimeDeliveryCarrier{id: actor.SystemActorID, deliverer: channel.Deliverer()}) != transitionApplied {
+		h.liveness.PublishLocal(actor.SystemActorID, ticket, sysInc, runtimeDeliveryCarrier{id: actor.SystemActorID, deliverer: channel.Deliverer()}) != transitionApplied {
 		return nil, errors.New("platform: publish system liveness")
 	}
 	h.redeliverOpenRequests(ctx, actor.SystemActorID)

@@ -322,10 +322,10 @@ func TestEnsureTicketFromPriorHomeSessionCannotAttach(t *testing.T) {
 		t.Fatalf("new plan=%+v old=%q err=%v", newPlan, oldTicket, err)
 	}
 	carrier := &testCarrier{}
-	if got := h2.liveness.Attach(decl.Row.ID, oldTicket, 1, carrier); got != transitionStaleTicket {
+	if got := h2.liveness.Attach(decl.Row.ID, oldTicket, 1, noInc, carrier); got != transitionStaleTicket {
 		t.Fatalf("old-session attach=%v, want stale ticket", got)
 	}
-	if got := h2.liveness.Attach(decl.Row.ID, EnsureTicket(newPlan[0].EnsureTicket), 1, carrier); got != transitionApplied {
+	if got := h2.liveness.Attach(decl.Row.ID, EnsureTicket(newPlan[0].EnsureTicket), 1, noInc, carrier); got != transitionApplied {
 		t.Fatalf("current-session attach=%v", got)
 	}
 }

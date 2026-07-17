@@ -243,7 +243,7 @@ func (c homeDeclarationCoordinator) ValidateAttachment(ctx context.Context, owne
 	for _, id := range indexed {
 		if _, present := declaredIDs[id]; !present {
 			if inc, ok := (homePortIndex{h: h}).Take(owner, id); ok {
-				_ = h.liveness.ObserveDown(id, true, false)
+				_ = h.liveness.ObserveDown(id, inc, true, false)
 				h.channel.Cells().Despawn(inc)
 			}
 		}

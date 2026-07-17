@@ -64,7 +64,7 @@ func TestValidateAttachmentShrinkRetiresRemovedPort(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if verdict := h.liveness.Attach(id, intent.Ticket, intent.Version, runtimeDeliveryCarrier{id: id, deliverer: h.channel.Deliverer()}); verdict != transitionApplied {
+	if verdict := h.liveness.Attach(id, intent.Ticket, intent.Version, inc, runtimeDeliveryCarrier{id: id, deliverer: h.channel.Deliverer()}); verdict != transitionApplied {
 		t.Fatalf("attach=%v", verdict)
 	}
 	const owner = link.PortOwner(9)

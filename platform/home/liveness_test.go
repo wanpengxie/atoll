@@ -7,7 +7,14 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
+
+// noInc is the zero incarnation token ledger-level tests publish and observe
+// with — matching publish/down tokens keep the write self-validation neutral
+// here; the stale-token rejection itself is covered with REAL incarnations in
+// TestLateDownEdgeFromReplacedBodyCannotWipeSuccessor.
+var noInc = actorrt.Incarnation{}
 
 type testCarrier struct {
 	mu   sync.Mutex
@@ -42,10 +49,10 @@ func TestLivenessTicketAndDeliveryTransitions(t *testing.T) {
 		t.Fatal("ensure changed live ticket")
 	}
 	q := &testCarrier{}
-	if l.PublishLocal("a", EnsureTicket("stale"), q) != transitionStaleTicket {
+	if l.PublishLocal("a", EnsureTicket("stale"), noInc, q) != transitionStaleTicket {
 		t.Fatal("stale publish accepted")
 	}
-	if l.PublishLocal("a", ticket, q) != transitionApplied {
+	if l.PublishLocal("a", ticket, noInc, q) != transitionApplied {
 		t.Fatal("publish")
 	}
 	if s, _ := l.stateForTest("a"); s.dirty || s.restart || s.occ != occRunning {
@@ -115,7 +122,7 @@ func TestLivenessFullDoesNotBufferOrDirty(t *testing.T) {
 	l.Bootstrap([]actor.ActorID{"a"})
 	ticket, _ := l.BeginEnsure("a", 1)
 	q := &testCarrier{err: errors.New("full")}
-	l.PublishLocal("a", ticket, q)
+	l.PublishLocal("a", ticket, noInc, q)
 	_, err := l.AcceptDelivery("a", &message.Envelope{Kind: message.KindRequest})
 	if err == nil {
 		t.Fatal("full not surfaced")
@@ -156,7 +163,7 @@ func TestLivenessIdleDeliveryRaceSerializes(t *testing.T) {
 		l.Bootstrap([]actor.ActorID{"a"})
 		q := &testCarrier{}
 		ticket, _ := l.BeginEnsure("a", 1)
-		l.PublishLocal("a", ticket, q)
+		l.PublishLocal("a", ticket, noInc, q)
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); l.ApproveIdle("a") }()
@@ -178,13 +185,13 @@ func TestDaemonIdleDownRebindAndLeaseEndpointTransitions(t *testing.T) {
 	q := &testCarrier{}
 
 	idleTicket, _ := l.BeginEnsure("idle", 1)
-	if l.Attach("idle", idleTicket, 1, q) != transitionApplied {
+	if l.Attach("idle", idleTicket, 1, noInc, q) != transitionApplied {
 		t.Fatal("attach idle actor")
 	}
 	if _, verdict := l.ApproveIdle("idle"); verdict != transitionApplied {
 		t.Fatalf("approve idle=%v", verdict)
 	}
-	if verdict := l.ObserveDown("idle", true, false); verdict != transitionInvalid {
+	if verdict := l.ObserveDown("idle", noInc, true, false); verdict != transitionInvalid {
 		t.Fatalf("late port down after idle=%v", verdict)
 	}
 	if _, verdict := l.Retire("idle", true); verdict != transitionApplied {
@@ -195,19 +202,19 @@ func TestDaemonIdleDownRebindAndLeaseEndpointTransitions(t *testing.T) {
 	}
 
 	ticket, _ := l.BeginEnsure("rebind", 1)
-	if l.Attach("rebind", ticket, 1, q) != transitionApplied {
+	if l.Attach("rebind", ticket, 1, noInc, q) != transitionApplied {
 		t.Fatal("attach rebind actor")
 	}
-	if l.ObserveDown("rebind", true, false) != transitionApplied {
+	if l.ObserveDown("rebind", noInc, true, false) != transitionApplied {
 		t.Fatal("ordinary port down")
 	}
 	if state, _ := l.stateForTest("rebind"); state.occ != occDetached || state.ticket != ticket || state.restart {
 		t.Fatalf("ordinary down state=%+v", state)
 	}
-	if l.Attach("rebind", ticket, 1, q) != transitionApplied {
+	if l.Attach("rebind", ticket, 1, noInc, q) != transitionApplied {
 		t.Fatal("same-ticket rebind")
 	}
-	if l.ObserveDown("rebind", true, false) != transitionApplied {
+	if l.ObserveDown("rebind", noInc, true, false) != transitionApplied {
 		t.Fatal("second ordinary port down")
 	}
 	if _, verdict := l.Retire("rebind", true); verdict != transitionApplied {
@@ -216,7 +223,7 @@ func TestDaemonIdleDownRebindAndLeaseEndpointTransitions(t *testing.T) {
 	if state, _ := l.stateForTest("rebind"); state.occ != occNone || !state.restart || state.ticket != "" {
 		t.Fatalf("lease endpoint state=%+v", state)
 	}
-	if got := l.Attach("rebind", ticket, 1, q); got != transitionStaleTicket {
+	if got := l.Attach("rebind", ticket, 1, noInc, q); got != transitionStaleTicket {
 		t.Fatalf("expired ticket reattached=%v", got)
 	}
 }
@@ -280,7 +287,7 @@ func TestAttachmentFenceInvalidatesBeforeIntentDestruction(t *testing.T) {
 	t.Run("approve_idle", func(t *testing.T) {
 		l, fence, ticket := makeFence(t)
 		q := &testCarrier{}
-		if l.PublishLocal("a", ticket, q) != transitionApplied {
+		if l.PublishLocal("a", ticket, noInc, q) != transitionApplied {
 			t.Fatal("publish local before idle")
 		}
 		if !fence.Valid() {
@@ -296,13 +303,13 @@ func TestAttachmentFenceInvalidatesBeforeIntentDestruction(t *testing.T) {
 	t.Run("observe_down_local", func(t *testing.T) {
 		l, fence, ticket := makeFence(t)
 		q := &testCarrier{}
-		if l.PublishLocal("a", ticket, q) != transitionApplied {
+		if l.PublishLocal("a", ticket, noInc, q) != transitionApplied {
 			t.Fatal("publish local before local down")
 		}
 		if !fence.Valid() {
 			t.Fatal("publishing under the SAME ticket must not invalidate the captured fence")
 		}
-		if l.ObserveDown("a", false, false) != transitionApplied {
+		if l.ObserveDown("a", noInc, false, false) != transitionApplied {
 			t.Fatal("local (non-port) down")
 		}
 		if fence.Valid() {
@@ -316,10 +323,10 @@ func TestAttachmentFenceInvalidatesBeforeIntentDestruction(t *testing.T) {
 		// SAME ticket, so the fence must survive it (§2.6 occDetached semantics).
 		l, fence, ticket := makeFence(t)
 		q := &testCarrier{}
-		if l.PublishLocal("a", ticket, q) != transitionApplied {
+		if l.PublishLocal("a", ticket, noInc, q) != transitionApplied {
 			t.Fatal("publish local before port down")
 		}
-		if l.ObserveDown("a", true, false) != transitionApplied {
+		if l.ObserveDown("a", noInc, true, false) != transitionApplied {
 			t.Fatal("port down")
 		}
 		if !fence.Valid() {
