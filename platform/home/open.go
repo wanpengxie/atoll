@@ -218,7 +218,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 				Pen:    systemPen,
 				Access: cs.Access.Mint(storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}),
 				State: func() accessdoor.AccessHandle {
-					handle, resolveErr := h.stateHandles.Resolve(context.Background(), actor.SystemActorID)
+					handle, resolveErr := h.stateHandles.Resolve(context.Background(), storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1})
 					if resolveErr != nil {
 						panic(resolveErr)
 					}
@@ -390,6 +390,24 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// file-kind placement decision from this instant on can actually route an
 	// AllocRequest / see attached daemons as storage-mount candidates.
 	lateAcc.bind(links)
+
+	// 12b. Boot wake-debt rebuild (S6 write-path ⑥, the open-request predicate
+	//     half): boot loads every declared identity dormant with dirty=false,
+	//     so an open request that predates this process must re-create its
+	//     receiver's wake debt here — without this a finite-idle receiver is
+	//     never re-activated to finish pre-restart work until its caller's
+	//     deadline. One truth-derived scan per receiver, same anchor machinery
+	//     the handoff path uses; the system anchor already ran above.
+	if receivers, rerr := cs.Query.DistinctOpenRequestReceivers(ctx); rerr != nil {
+		logger.Warn("platform.boot.open_request_scan_failed", "err", rerr)
+	} else {
+		for _, id := range receivers {
+			if id == actor.SystemActorID {
+				continue
+			}
+			h.redeliverOpenRequests(ctx, id)
+		}
+	}
 
 	// 13. Reconcilers (level backstops). Run one sweep of EACH at startup —
 	//     activation re-mints the always-on desired set; closure closes orphan open

@@ -40,7 +40,7 @@ import (
 // unexported test fakes (package-private, unusable from here) — the point is
 // exercising the REAL door logic (query.go/door.go), not a second echo.
 
-// --- minimal in-memory resourcespec.Registry / Driver / MembershipCheck / StateStore ---
+// --- minimal in-memory resourcespec.Registry / Driver / storespec.ActorAuthority / StateStore ---
 
 type parityRegistry struct {
 	mu     sync.Mutex
@@ -220,16 +220,10 @@ func (d *parityDriver) Delete(_ context.Context, id resource.ResourceID) error {
 
 // parityMembership treats every id as a channel member — this rig's tests
 // are about resource-face parity, not membership decay (accessdoor's own
-// decay_test.go owns that matrix over a real store).
+// decay_test.go owns that matrix over a real store). It implements
+// storespec.ActorAuthority (§2.2's single read+judge-authority interface),
+// not a "MembershipCheck"-shaped seam — that interface is retired.
 type parityMembership struct{}
-
-func (parityMembership) IsMember(context.Context, actor.ActorID) (bool, error) { return true, nil }
-
-// Lookup is not exercised by this kv-only parity rig (file-kind placement
-// routing, §4.3).
-func (parityMembership) Lookup(context.Context, actor.ActorID) (string, bool, error) {
-	return "", false, nil
-}
 
 func (parityMembership) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
 	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement()}, true, nil

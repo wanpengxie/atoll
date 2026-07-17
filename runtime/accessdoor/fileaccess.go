@@ -131,15 +131,20 @@ type FileAccess struct {
 // SEPARATE from ResourceAccessHandle's pinned four methods (期11 spec §3.1:
 // "Open…" is 词表层糖名, not a fifth resource-face method; growing the four-
 // method table would violate §3.1's own closed-set pin and the three-avatar-
-// parity red line those four specifically bind). Only avatars that can
-// actually redeem a FileRoute into live bytes implement it — day-1 that is
-// the daemon-hosted wire proxy (platform/internal/link's remoteResourceHandle)
-// alone: a home-hosted caller (boundHandle/liveResourceAccess, i.e. human/
-// sysactor day-1) has no daemon-local redemption path of its own and is
-// explicitly deferred alongside the rest of the human resource face (债②,
-// §3.9 item 9) — lib/actorbase's Open sugar type-asserts for this interface
-// and answers ErrUnsupported when the underlying avatar lacks it, the same
-// nil-arm discipline the engine already applies elsewhere.
+// parity red line those four specifically bind), but EMBEDDED into
+// ResourceAccessHandle unconditionally (see that interface, above) — every
+// avatar structurally implements it, day-1 included. There is no optional
+// type-assertion double-wrap (a "does this avatar have a file face" runtime
+// check) anywhere on the call path: S10's "能力随放置、调用面无条件统一"
+// decision made the FACE universal and pushed the day-1 gap onto CAPABILITY
+// instead — boundHandle (a home-hosted caller: human/sysactor day-1, no
+// daemon-local redemption path) implements both methods honestly by
+// returning ErrFileCapabilityUnavailable (below boundHandle.Open/Redeem in
+// handle.go), while the daemon-hosted wire proxy
+// (platform/internal/link's remoteResourceHandle) actually redeems bytes.
+// lib/actorbase's Open/CreateFile sugar therefore calls straight through
+// (no assertion, no nil-arm dance beyond "is there a resource handle at
+// all") — see lib/actorbase/engine.go's resourceAdapter.Open/CreateFile.
 type FileOpener interface {
 	// Open runs OpRead/OpWrite(file) via Invoke and redeems the resulting
 	// accepted Outcome's Route into a live FileAccess in one call — the

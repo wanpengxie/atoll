@@ -52,8 +52,8 @@ type fakeStateResolver struct{ minter *fakeAccessMinter }
 
 func (r fakeStateResolver) AdmitRun(actor.ActorID) error { return nil }
 func (r fakeStateResolver) EndBatch([]actor.ActorID)     {}
-func (r fakeStateResolver) Resolve(_ context.Context, id actor.ActorID) (accessdoor.AccessHandle, error) {
-	return &fakeAccessHandle{m: r.minter, caller: id, scope: "resolved-state"}, nil
+func (r fakeStateResolver) Resolve(_ context.Context, stamp storespec.AuthorStamp) (accessdoor.AccessHandle, error) {
+	return &fakeAccessHandle{m: r.minter, caller: stamp.ID, scope: "resolved-state"}, nil
 }
 
 func (m *fakeAccessMinter) Mint(caller storespec.AuthorStamp) accessdoor.ResourceAccessHandle {

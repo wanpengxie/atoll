@@ -175,3 +175,79 @@ func TestFiredTimerFullAttemptIsReleasedAndRetriedOnNextSweep(t *testing.T) {
 		t.Fatalf("successor fired deliveries=%+v", next.envs)
 	}
 }
+
+// TestFiredSweepTransientTargetSetsDirtyOnceWithoutDoubleAccept is S8/DoD 4's
+// "attached daemon fired 行: EnsureLive transient 时 dirty 仍已置、一拍内不
+// 二次入队" case: a fired row whose target has NEVER been embodied (no
+// SpawnIfAbsent, no carrier publish — the same "no local carrier yet" shape
+// an attached daemon target has before its wire attaches) must, after
+// exactly ONE sweepFired pass, (a) have its liveness wake-debt bit (dirty)
+// set by AcceptFiredDelivery, and (b) still show exactly the one fired row,
+// untouched (Accept never Acks) — proving the level-triggered loop attempted
+// this row exactly once this pass rather than looping/duplicating it.
+func TestFiredSweepTransientTargetSetsDirtyOnceWithoutDoubleAccept(t *testing.T) {
+	h, err := Open(Config{
+		ChannelID: "timer-transient-dirty", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{},
+		ReconcileInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	h.reconcileStop()
+	<-h.reconcileDone
+
+	ctx := context.Background()
+	result, err := h.Declare(ctx, DeclareRequest{
+		SourceDeclID: "decl:timer-transient", Principal: "timer-transient", Kind: actor.KindAgent,
+		Class: "timer-transient", Placement: storespec.NewServerPlacement(),
+		TIdle: int64(time.Hour / time.Millisecond), CreatedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := result.Row.ID
+
+	// Declare alone admits a dormant liveness row (no embodiment, no carrier)
+	// — the target stays transient throughout this test.
+	if ws, ok := h.liveness.WakeStanding(id); !ok || ws.Dirty || ws.HasCarrier {
+		t.Fatalf("wake standing before sweep = (%+v, %v), want dormant/no-carrier/dirty=false", ws, ok)
+	}
+
+	handle := h.schedMinter.Mint(storespec.AuthorStamp{ID: id, BirthVersion: 1})
+	timerID, err := handle.Schedule(ctx, schedule.ScheduleReq{
+		Bind: schedule.BindIdentity, FireAt: time.Now().Add(-time.Millisecond).UnixMilli(), Type: "timer.transient-dirty",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitHomeCondition(t, func() bool {
+		page, readErr := h.cs.FiredTimers.ListFired(ctx, runtime.FiredTimerCursor{}, 16)
+		return readErr == nil && len(page.Rows) == 1 && page.Rows[0].ID == timerID
+	})
+
+	// One reconcile-beat sweep, driven by hand (background reconcile is
+	// stopped): sweepFired's own loop body must run AcceptFiredDelivery
+	// exactly once for this row within this single call.
+	h.sweepFired(ctx)
+
+	ws, ok := h.liveness.WakeStanding(id)
+	if !ok || !ws.Dirty {
+		t.Fatalf("wake standing after one sweep = (%+v, %v), want dirty=true (fired row created wake debt)", ws, ok)
+	}
+	if ws.HasCarrier {
+		t.Fatalf("wake standing after one sweep = %+v, want still no carrier (target never embodied)", ws)
+	}
+
+	// AcceptFiredDelivery never Acks — the row must still be there, exactly
+	// once, not duplicated and not silently consumed by a buggy re-attempt
+	// within the same pass.
+	page, err := h.cs.FiredTimers.ListFired(ctx, runtime.FiredTimerCursor{}, 16)
+	if err != nil {
+		t.Fatalf("ListFired after sweep: %v", err)
+	}
+	if len(page.Rows) != 1 || page.Rows[0].ID != timerID {
+		t.Fatalf("fired rows after one sweepFired pass = %+v, want exactly [%s] untouched", page.Rows, timerID)
+	}
+}

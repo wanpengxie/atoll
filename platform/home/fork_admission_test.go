@@ -46,7 +46,7 @@ func TestForkAdmissionPublishesEventRunRowStateAndReceipt(t *testing.T) {
 	if durable, err := h.cs.DurableHistory.ExistsEver(ctx, child); err != nil || durable {
 		t.Fatalf("fork durable history = (%v,%v)", durable, err)
 	}
-	if _, err := h.stateHandles.Resolve(ctx, child); err != nil {
+	if _, err := h.stateHandles.Resolve(ctx, storespec.AuthorStamp{ID: child, BirthVersion: 1}); err != nil {
 		t.Fatalf("run State missing at publication: %v", err)
 	}
 
@@ -87,7 +87,7 @@ func TestForkAdmissionRejectsInvalidSpecAndEndClearsRunAccounts(t *testing.T) {
 	if _, ok, _ := h.cs.Authority.LookupActive(ctx, child); ok {
 		t.Fatal("ended fork remains in authority")
 	}
-	if _, err := h.stateHandles.Resolve(ctx, child); !errors.Is(err, accessdoor.ErrStateHandleUnavailable) {
+	if _, err := h.stateHandles.Resolve(ctx, storespec.AuthorStamp{ID: child, BirthVersion: 1}); !errors.Is(err, accessdoor.ErrStateHandleUnavailable) {
 		t.Fatalf("ended fork State resolve = %v", err)
 	}
 	// A lost spawn_ack may be retried after the committed child has already

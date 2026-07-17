@@ -119,7 +119,7 @@ type unusedStateHandles struct{}
 
 func (unusedStateHandles) AdmitRun(actor.ActorID) error { return nil }
 func (unusedStateHandles) EndBatch([]actor.ActorID)     {}
-func (unusedStateHandles) Resolve(context.Context, actor.ActorID) (accessdoor.AccessHandle, error) {
+func (unusedStateHandles) Resolve(context.Context, storespec.AuthorStamp) (accessdoor.AccessHandle, error) {
 	return nil, accessdoor.ErrStateHandleUnavailable
 }
 

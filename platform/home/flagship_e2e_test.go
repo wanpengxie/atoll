@@ -227,7 +227,7 @@ func TestFlagshipMasterForkCallStateTimerAndHomeRestart(t *testing.T) {
 	if masterBirths < 2 {
 		t.Fatalf("master births=%d, want one on each Home session", masterBirths)
 	}
-	state, err := h2.stateHandles.Resolve(ctx, master.Row.ID)
+	state, err := h2.stateHandles.Resolve(ctx, storespec.AuthorStamp{ID: master.Row.ID, BirthVersion: master.Row.CurrentDeclVersion})
 	if err != nil {
 		t.Fatal(err)
 	}

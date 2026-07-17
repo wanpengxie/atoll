@@ -62,11 +62,12 @@ type ResourceHandle interface {
 	// bytes attached (§8.1: file content never rides Outcome.Value) —
 	// Open is the actual entry point a Proc author calls for file bytes,
 	// redeeming that Route into a live FileAccess (a local os.Root-scoped
-	// handle or a lane byte-stream) in one call. Day-1: only available when
-	// the underlying avatar implements accessdoor.FileOpener (a
-	// daemon-hosted actor's wire proxy) — a home-hosted caller (human/
-	// sysactor) answers ErrUnsupported, deferred alongside the rest of the
-	// human resource face (债②).
+	// handle or a lane byte-stream) in one call. The call face is
+	// unconditionally present regardless of placement (FileOpener is
+	// embedded in ResourceAccessHandle, no type assertion): a daemon-hosted
+	// caller has a real byte lane; a home-hosted caller gets an honest
+	// capability_unavailable outcome — mechanism complete, capability
+	// deferred.
 	Open(id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error)
 
 	// CreateFile is file kind's own create verb (期11 spec §1.5): dir=true

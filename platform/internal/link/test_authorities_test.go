@@ -31,11 +31,11 @@ type testStateHandles struct{ access accessdoor.AccessMinter }
 
 func (h testStateHandles) AdmitRun(actor.ActorID) error { return nil }
 func (h testStateHandles) EndBatch([]actor.ActorID)     {}
-func (h testStateHandles) Resolve(_ context.Context, id actor.ActorID) (accessdoor.AccessHandle, error) {
+func (h testStateHandles) Resolve(_ context.Context, stamp storespec.AuthorStamp) (accessdoor.AccessHandle, error) {
 	if h.access == nil {
 		return nil, accessdoor.ErrStateHandleUnavailable
 	}
-	return h.access.MintState(storespec.AuthorStamp{ID: id, BirthVersion: 1}), nil
+	return h.access.MintState(stamp), nil
 }
 
 type blockingPortIndex struct {

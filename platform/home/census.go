@@ -40,11 +40,14 @@ func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (ac
 		}
 		return "", fmt.Errorf("platform: publish admitted actor %s: %w", id, err)
 	}
-	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}}) {
-		return "", fmt.Errorf("platform: publish admitted actor %s: invalid control row", id)
-	}
+	// Assembly order (装配序): liveness row BEFORE authority publish — same
+	// rule as fork/declared admission (a delivery racing the publish must
+	// find the L row and record wake debt, never be silently skipped).
 	if h.liveness.AdmitIdentity(id) != transitionApplied {
 		return "", fmt.Errorf("platform: publish admitted actor %s: liveness rejected", id)
+	}
+	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}}) {
+		return "", fmt.Errorf("platform: publish admitted actor %s: invalid control row", id)
 	}
 	// 装配链 step② (gateway 期 v0.4.1 勘误): a human's slot (在场与递交接头盒)生死随户籍级联 — ensure
 	// it at准入 (before the reconcile poke, so it strictly precedes any gateway attach

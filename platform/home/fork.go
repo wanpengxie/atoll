@@ -159,19 +159,32 @@ func (h *Home) forkAdmission(ctx context.Context, parent actor.ActorID, birthVer
 	if !result.Accepted() {
 		return "", fmt.Errorf("platform: fork birth rejected: %s", result.RejectReason)
 	}
+	// Binding mirrors the declared-admission rule (declaration_api.go): a
+	// daemon-placed child is reachable only via relay, and the attach
+	// handshake's fresh-check rejects a row whose Binding is not canonical —
+	// without this a daemon-placed forked child can never complete a real
+	// wire attach.
+	binding := actor.Binding("")
+	if placement.Kind == storespec.PlacementDaemon {
+		binding = actor.BindingRuntimeInboundViaRelay
+	}
 	row := storespec.ActorControlRow{
 		ID: childID, Kind: spec.Kind, CreatedAt: now, CurrentDeclVersion: 1,
 		Sponsor: parent, Class: spec.Class, Config: append([]byte(nil), spec.Config...),
-		TIdle: defaultForkIdle, Placement: placement,
+		TIdle: defaultForkIdle, Placement: placement, Binding: binding,
 	}
 	if err := h.stateHandles.AdmitRun(childID); err != nil {
 		return "", err
 	}
-	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldRun}}) {
-		return "", errors.New("platform: invalid fork control row")
-	}
+	// Assembly order (装配序): the liveness row is installed BEFORE the
+	// authority row is published — a delivery racing the publish finds the L
+	// row and records wake debt instead of being silently skipped by the
+	// pump. A dormant L row for a not-yet-published identity is harmless.
 	if h.liveness.AdmitIdentity(childID) != transitionApplied {
 		return "", errors.New("platform: invalid fork liveness row")
+	}
+	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldRun}}) {
+		return "", errors.New("platform: invalid fork control row")
 	}
 	h.forkMu.Lock()
 	h.forkReceipts[key] = forkReceipt{digest: digest, childID: childID, committed: true}

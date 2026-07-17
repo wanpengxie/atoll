@@ -1553,8 +1553,11 @@ func (a *Acceptor) accessInvocation(ctx context.Context, inc actorrt.Incarnation
 	case accessScopeChannel:
 		raw = a.access.Mint(stamp)
 	case accessScopeState:
+		// Full stamp, not bare id: the relay must carry the attach-authenticated
+		// birth version through to the resolver's version gate — resolving by id
+		// alone re-certifies a stale-generation port at the current version.
 		var err error
-		raw, err = a.stateHandles.Resolve(ctx, stamp.ID)
+		raw, err = a.stateHandles.Resolve(ctx, stamp)
 		if err != nil {
 			return nil, err
 		}

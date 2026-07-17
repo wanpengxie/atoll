@@ -26,7 +26,13 @@ func (a resolverAuthority) WorldOf(_ context.Context, id actor.ActorID) (storesp
 	w, ok := a.worlds[id]
 	return w, ok, nil
 }
-func (a resolverAuthority) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+func (a resolverAuthority) CheckAuthor(_ context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	if _, ok := a.worlds[stamp.ID]; !ok {
+		return storespec.AuthorNotMember, nil
+	}
+	if stamp.BirthVersion != 1 {
+		return storespec.AuthorVersionStale, nil
+	}
 	return storespec.AuthorOK, nil
 }
 
@@ -50,7 +56,7 @@ func TestStateHandleResolverDispatchAndRunLifetime(t *testing.T) {
 	if err := resolver.AdmitRun("forked"); err != nil {
 		t.Fatal(err)
 	}
-	first, err := resolver.Resolve(ctx, "forked")
+	first, err := resolver.Resolve(ctx, storespec.AuthorStamp{ID: "forked", BirthVersion: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -59,7 +65,7 @@ func TestStateHandleResolverDispatchAndRunLifetime(t *testing.T) {
 	}
 	// A later embodiment resolves the same completed handle and sees the run
 	// state written by its predecessor.
-	second, err := resolver.Resolve(ctx, "forked")
+	second, err := resolver.Resolve(ctx, storespec.AuthorStamp{ID: "forked", BirthVersion: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,13 +74,19 @@ func TestStateHandleResolverDispatchAndRunLifetime(t *testing.T) {
 		t.Fatalf("successor read = (%+v,%v)", out, err)
 	}
 	resolver.EndBatch([]actor.ActorID{"forked"})
-	if _, err := resolver.Resolve(ctx, "forked"); !errors.Is(err, ErrStateHandleUnavailable) {
+	if _, err := resolver.Resolve(ctx, storespec.AuthorStamp{ID: "forked", BirthVersion: 1}); !errors.Is(err, ErrStateHandleUnavailable) {
 		t.Fatalf("Resolve after End = %v", err)
 	}
-	if _, err := resolver.Resolve(ctx, "missing"); !errors.Is(err, ErrStateHandleUnavailable) {
+	if _, err := resolver.Resolve(ctx, storespec.AuthorStamp{ID: "missing", BirthVersion: 1}); !errors.Is(err, ErrStateHandleUnavailable) {
 		t.Fatalf("Resolve missing = %v", err)
 	}
-	if _, err := resolver.Resolve(ctx, "declared"); err != nil {
+	if _, err := resolver.Resolve(ctx, storespec.AuthorStamp{ID: "declared", BirthVersion: 1}); err != nil {
 		t.Fatalf("Resolve durable = %v", err)
+	}
+	// Version gate: a stamp whose welded birth version does not match the
+	// current declaration version fails closed instead of being re-minted at
+	// the current version (the stale-zombie-port case).
+	if _, err := resolver.Resolve(ctx, storespec.AuthorStamp{ID: "declared", BirthVersion: 2}); !errors.Is(err, ErrStateHandleUnavailable) {
+		t.Fatalf("Resolve stale-version durable = %v, want ErrStateHandleUnavailable", err)
 	}
 }

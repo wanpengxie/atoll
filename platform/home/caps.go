@@ -29,7 +29,7 @@ import (
 // admission (the system cell does not pass through buildCaps).
 func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, birthVersion int64, inc actorrt.Incarnation) actorcaps.Caps {
 	rt := h.channel.Cells()
-	state, err := h.stateHandles.Resolve(context.Background(), id)
+	state, err := h.stateHandles.Resolve(context.Background(), storespec.AuthorStamp{ID: id, BirthVersion: birthVersion})
 	if err != nil {
 		panic(err)
 	}

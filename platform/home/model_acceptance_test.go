@@ -188,7 +188,7 @@ func TestStateLifetimeSplitsDurableIdentityFromHomeSessionRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	durable, err := h1.stateHandles.Resolve(ctx, declared)
+	durable, err := h1.stateHandles.Resolve(ctx, storespec.AuthorStamp{ID: declared, BirthVersion: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +199,7 @@ func TestStateLifetimeSplitsDurableIdentityFromHomeSessionRun(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	run, err := h1.stateHandles.Resolve(ctx, child)
+	run, err := h1.stateHandles.Resolve(ctx, storespec.AuthorStamp{ID: child, BirthVersion: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +207,7 @@ func TestStateLifetimeSplitsDurableIdentityFromHomeSessionRun(t *testing.T) {
 		t.Fatalf("run create=(%+v,%v)", out, err)
 	}
 	// Resolving for a successor embodiment returns the same Home-session run handle.
-	runSuccessor, _ := h1.stateHandles.Resolve(ctx, child)
+	runSuccessor, _ := h1.stateHandles.Resolve(ctx, storespec.AuthorStamp{ID: child, BirthVersion: 1})
 	if out, err := runSuccessor.Invoke(ctx, access.OpRead, resource.ResourceID("value"), nil, nil); err != nil || string(out.Value) != "run" {
 		t.Fatalf("run successor read=(%+v,%v)", out, err)
 	}
@@ -218,7 +218,7 @@ func TestStateLifetimeSplitsDurableIdentityFromHomeSessionRun(t *testing.T) {
 	if err := (lifecycleEndHandle{home: h1, author: storespec.AuthorStamp{ID: declared, BirthVersion: 1}}).End(ctx, ended, "state-test"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h1.stateHandles.Resolve(ctx, ended); !errors.Is(err, accessdoor.ErrStateHandleUnavailable) {
+	if _, err := h1.stateHandles.Resolve(ctx, storespec.AuthorStamp{ID: ended, BirthVersion: 1}); !errors.Is(err, accessdoor.ErrStateHandleUnavailable) {
 		t.Fatalf("ended run State=%v", err)
 	}
 	if err := h1.Close(); err != nil {
@@ -227,14 +227,14 @@ func TestStateLifetimeSplitsDurableIdentityFromHomeSessionRun(t *testing.T) {
 
 	h2 := openAcceptanceHome(t, dbPath, "state-two-layers", resolver, time.Hour)
 	t.Cleanup(func() { _ = h2.Close() })
-	durable2, err := h2.stateHandles.Resolve(ctx, declared)
+	durable2, err := h2.stateHandles.Resolve(ctx, storespec.AuthorStamp{ID: declared, BirthVersion: 1})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if out, err := durable2.Invoke(ctx, access.OpRead, resource.ResourceID("value"), nil, nil); err != nil || string(out.Value) != "durable" {
 		t.Fatalf("durable restart read=(%+v,%v)", out, err)
 	}
-	if _, err := h2.stateHandles.Resolve(ctx, child); !errors.Is(err, accessdoor.ErrStateHandleUnavailable) {
+	if _, err := h2.stateHandles.Resolve(ctx, storespec.AuthorStamp{ID: child, BirthVersion: 1}); !errors.Is(err, accessdoor.ErrStateHandleUnavailable) {
 		t.Fatalf("run State crossed Home restart: %v", err)
 	}
 }
