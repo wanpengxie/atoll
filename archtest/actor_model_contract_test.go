@@ -58,6 +58,18 @@ func walkProductionGo(t *testing.T, fn func(path string, f *ast.File, fset *toke
 	}
 }
 
+// enclosingFunc names the FuncDecl containing pos — the call-site key DoD 32
+// requires ("调用位点级白名单，不许文件级放行"): a raw call added to a SIBLING
+// function in an allowed file must trip the wall, never ride the file grant.
+func enclosingFunc(f *ast.File, pos token.Pos) string {
+	for _, d := range f.Decls {
+		if fd, ok := d.(*ast.FuncDecl); ok && fd.Pos() <= pos && pos <= fd.End() {
+			return fd.Name.Name
+		}
+	}
+	return ""
+}
+
 func TestActorModelUniqueMutationAndConstructionChokepoints(t *testing.T) {
 	forbiddenTypes := map[string]bool{"MembershipWriter": true, "MembershipControlPlane": true}
 	forbiddenCalls := map[string]bool{
@@ -78,7 +90,8 @@ func TestActorModelUniqueMutationAndConstructionChokepoints(t *testing.T) {
 				}
 			case *ast.CompositeLit:
 				sel, ok := x.Type.(*ast.SelectorExpr)
-				if ok && sel.Sel.Name == "PlanActor" && path != "../platform/home/plan.go" {
+				if ok && sel.Sel.Name == "PlanActor" &&
+					!(path == "../platform/home/plan.go" && enclosingFunc(f, x.Pos()) == "PlanForDaemon") {
 					violations = append(violations, fmt.Sprintf("%s constructs PlanActor outside PlanForDaemon", fset.Position(x.Pos())))
 				}
 			}
@@ -91,9 +104,12 @@ func TestActorModelUniqueMutationAndConstructionChokepoints(t *testing.T) {
 }
 
 func TestActorModelBundleCallsitesAreClosed(t *testing.T) {
+	// Call-site keys (DoD 32): file AND enclosing function — a sibling
+	// function in the same file gets no free pass.
 	allowedAdmit := map[string]bool{
-		"../platform/home/census.go": true, "../platform/home/declaration_api.go": true,
-		"../platform/home/open.go": true,
+		"../platform/home/census.go:Admit":           true,
+		"../platform/home/declaration_api.go:Declare": true,
+		"../platform/home/open.go:Open":               true,
 	}
 	var admit, endCascade, rawCommit []string
 	walkProductionGo(t, func(path string, f *ast.File, fset *token.FileSet) {
@@ -123,11 +139,11 @@ func TestActorModelBundleCallsitesAreClosed(t *testing.T) {
 				at := fset.Position(call.Pos()).String()
 				switch sel.Sel.Name {
 				case "AdmitDeclared":
-					if !allowedAdmit[path] {
+					if !allowedAdmit[path+":"+fn.Name.Name] {
 						admit = append(admit, at)
 					}
 				case "EndCascade":
-					if path != "../platform/home/end.go" {
+					if path != "../platform/home/end.go" || fn.Name.Name != "prepareEndIdentity" {
 						endCascade = append(endCascade, at)
 					}
 				case "CommitReservation":
@@ -168,7 +184,10 @@ func TestActorModelAuthorityAndLivenessHaveNoFallbackMechanism(t *testing.T) {
 					withL = append(withL, fset.Position(x.Pos()).String())
 				}
 			case *ast.BinaryExpr:
-				if path == "../platform/home/readface.go" {
+				// The ONE legal inline author-version comparison is CheckAuthor's
+				// own implementation — not the whole of readface.go (call-site
+				// grant, DoD 32).
+				if path == "../platform/home/readface.go" && enclosingFunc(f, x.Pos()) == "CheckAuthor" {
 					return true
 				}
 				text := exprSelectorNames(x)
@@ -207,11 +226,11 @@ func TestActorModelDataFlowChokepoints(t *testing.T) {
 					at := fset.Position(x.Pos()).String()
 					switch sel.Sel.Name {
 					case "MintState":
-						if path != "../runtime/accessdoor/memstate.go" {
+						if !(path == "../runtime/accessdoor/memstate.go" && enclosingFunc(f, x.Pos()) == "Resolve") {
 							mintState = append(mintState, at)
 						}
 					case "FireAndMark":
-						if path != "../runtime/schedule/firepen.go" {
+						if !(path == "../runtime/schedule/firepen.go" && enclosingFunc(f, x.Pos()) == "Fire") {
 							fireAndMark = append(fireAndMark, at)
 						}
 					case "AckTimer":

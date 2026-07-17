@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 type EnsureTicket string
@@ -39,7 +40,13 @@ const (
 )
 
 type carrier struct {
-	kind  carrierKind
+	kind carrierKind
+	// inc is the published body's identity token — the write-side
+	// self-validation key for down edges (值范式: a late down edge from a
+	// replaced predecessor carries a token that no longer matches and is
+	// REJECTED instead of wiping the successor's account). It is a comparable
+	// identity value, never a capability: nothing can be enqueued through it.
+	inc   actorrt.Incarnation
 	queue deliveryCarrier
 }
 
@@ -93,6 +100,10 @@ type wakeStanding struct {
 	Restart    bool
 	HasCarrier bool
 	Port       bool
+	// CarrierInc is the published body's identity token — exposed so the
+	// reconcile repair path can hand ObserveDown the token of the exact
+	// carrier it observed absent (identity value only, not a capability).
+	CarrierInc actorrt.Incarnation
 }
 
 type livenessLedger struct {
@@ -249,11 +260,20 @@ func (l *livenessLedger) ApproveIdle(id actor.ActorID) (carrier, transitionVerdi
 	return old, transitionApplied
 }
 
-func (l *livenessLedger) ObserveDown(id actor.ActorID, port bool, voluntary bool) transitionVerdict {
+// ObserveDown is write-side self-validating (§2.6 组装纪律): the down edge
+// must carry the incarnation token of the body it reports dead. A late edge
+// from a predecessor that has already been replaced by a published successor
+// carries a stale token and is rejected — it must never wipe the successor's
+// carrier/ticket or charge it a spurious restart/backoff. (The local half of
+// the same discipline the attach fence gives the port half.)
+func (l *livenessLedger) ObserveDown(id actor.ActorID, inc actorrt.Incarnation, port bool, voluntary bool) transitionVerdict {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s, ok := l.rows[id]
 	if !ok || s.occ != occRunning {
+		return transitionInvalid
+	}
+	if s.carrier.inc != inc {
 		return transitionInvalid
 	}
 	s.carrier = carrier{}
@@ -331,10 +351,10 @@ func (l *livenessLedger) publish(id actor.ActorID, ticket EnsureTicket, c carrie
 	return transitionApplied
 }
 
-func (l *livenessLedger) PublishLocal(id actor.ActorID, ticket EnsureTicket, q deliveryCarrier) transitionVerdict {
-	return l.publish(id, ticket, carrier{kind: carrierLocal, queue: q}, false)
+func (l *livenessLedger) PublishLocal(id actor.ActorID, ticket EnsureTicket, inc actorrt.Incarnation, q deliveryCarrier) transitionVerdict {
+	return l.publish(id, ticket, carrier{kind: carrierLocal, inc: inc, queue: q}, false)
 }
-func (l *livenessLedger) Attach(id actor.ActorID, ticket EnsureTicket, birthVersion int64, q deliveryCarrier) transitionVerdict {
+func (l *livenessLedger) Attach(id actor.ActorID, ticket EnsureTicket, birthVersion int64, inc actorrt.Incarnation, q deliveryCarrier) transitionVerdict {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s, ok := l.rows[id]
@@ -347,7 +367,7 @@ func (l *livenessLedger) Attach(id actor.ActorID, ticket EnsureTicket, birthVers
 	if s.occ != occStarting && s.occ != occDetached && s.occ != occRunning {
 		return transitionInvalid
 	}
-	s.occ, s.carrier, s.dirty, s.restart = occRunning, carrier{kind: carrierPort, queue: q}, false, false
+	s.occ, s.carrier, s.dirty, s.restart = occRunning, carrier{kind: carrierPort, inc: inc, queue: q}, false, false
 	l.rows[id] = s
 	return transitionApplied
 }
@@ -407,6 +427,7 @@ func (l *livenessLedger) WakeStanding(id actor.ActorID) (wakeStanding, bool) {
 	return wakeStanding{
 		Occ: s.occ, Dirty: s.dirty, Restart: s.restart,
 		HasCarrier: s.carrier.queue != nil, Port: s.carrier.kind == carrierPort,
+		CarrierInc: s.carrier.inc,
 	}, true
 }
 

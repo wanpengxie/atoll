@@ -233,7 +233,10 @@ func (h *Home) activateOne(ctx context.Context, control storespec.ActorControlRo
 		}
 		// Quiet substrate teardown has no down edge. Reconciliation is the level
 		// backstop that repairs the stale carrier value before ensuring again.
-		_ = h.liveness.ObserveDown(id, false, false)
+		// The repair hands ObserveDown the token of the exact carrier it read —
+		// if a successor was published in between, the write self-validation
+		// rejects the repair and the next tick re-reads (值范式).
+		_ = h.liveness.ObserveDown(id, state.CarrierInc, false, false)
 	}
 	now := time.UnixMilli(h.nowMs())
 	// ③backoffGate: a prior BuildFailure not yet elapsed skips the build this
@@ -290,8 +293,13 @@ func (h *Home) activateOne(ctx context.Context, control storespec.ActorControlRo
 		return activationVerdict{kind: actBuildFailed, err: buildErr}
 	}
 	if !built {
-		if h.liveness.PublishLocal(id, ticket, runtimeDeliveryCarrier{id: id, deliverer: h.channel.Deliverer()}) == transitionApplied {
-			h.redeliverOpenRequests(ctx, id)
+		// SpawnIfAbsent returns a zero Incarnation when it lost the race — the
+		// incumbent's token comes from the runtime map (if it died in between,
+		// skip; the next tick republishes).
+		if cur, live := h.channel.Cells().CurrentIncarnation(id); live {
+			if h.liveness.PublishLocal(id, ticket, cur, runtimeDeliveryCarrier{id: id, deliverer: h.channel.Deliverer()}) == transitionApplied {
+				h.redeliverOpenRequests(ctx, id)
+			}
 		}
 		return activationVerdict{kind: actAlreadyLive}
 	}
@@ -309,7 +317,7 @@ func (h *Home) activateOne(ctx context.Context, control storespec.ActorControlRo
 		abortEnsure()
 		return activationVerdict{kind: actRecheckFault, err: verr}
 	default: // recheckOK
-		if h.liveness.PublishLocal(id, ticket, runtimeDeliveryCarrier{id: id, deliverer: h.channel.Deliverer()}) != transitionApplied {
+		if h.liveness.PublishLocal(id, ticket, inc, runtimeDeliveryCarrier{id: id, deliverer: h.channel.Deliverer()}) != transitionApplied {
 			h.channel.Cells().Despawn(inc)
 			abortEnsure()
 			return activationVerdict{kind: actBuildFailed, err: errors.New("platform: liveness publish rejected")}
@@ -341,7 +349,9 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 			if _, live := rt.CurrentIncarnation(row.ID); !live {
 				// Quiet teardown has no down edge. Repair the stale carrier level
 				// before evaluating shouldRun so the ensure arm can rebuild it.
-				_ = h.liveness.ObserveDown(row.ID, false, false)
+				// Token-guarded: a successor published between the read and this
+				// repair makes the token stale and the repair a rejected no-op.
+				_ = h.liveness.ObserveDown(row.ID, state.CarrierInc, false, false)
 				state, _ = h.liveness.WakeStanding(row.ID)
 			}
 		}

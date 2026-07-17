@@ -54,7 +54,7 @@ func (w livenessDownWatcher) OnDown(_ context.Context, id actor.ActorID, inc act
 	}
 	port := h.isIndexedPort(id, inc)
 	voluntary := cause == nil || errors.Is(cause, actorbase.ErrIdleExit)
-	if h.liveness.ObserveDown(id, port, voluntary) == transitionApplied {
+	if h.liveness.ObserveDown(id, inc, port, voluntary) == transitionApplied {
 		if !port && !voluntary {
 			h.recordBuildFailure(id, time.UnixMilli(h.nowMs()))
 		}

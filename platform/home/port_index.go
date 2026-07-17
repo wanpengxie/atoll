@@ -16,7 +16,7 @@ type homePortEntry struct {
 type homePortIndex struct{ h *Home }
 
 func (x homePortIndex) Register(owner link.PortOwner, inc actorrt.Incarnation, ticket string, birthVersion int64) bool {
-	if x.h.liveness == nil || x.h.liveness.Attach(inc.ID(), EnsureTicket(ticket), birthVersion, runtimeDeliveryCarrier{id: inc.ID(), deliverer: x.h.channel.Deliverer()}) != transitionApplied {
+	if x.h.liveness == nil || x.h.liveness.Attach(inc.ID(), EnsureTicket(ticket), birthVersion, inc, runtimeDeliveryCarrier{id: inc.ID(), deliverer: x.h.channel.Deliverer()}) != transitionApplied {
 		return false
 	}
 	x.h.indexMu.Lock()
@@ -31,7 +31,7 @@ func (x homePortIndex) Remove(owner link.PortOwner, inc actorrt.Incarnation) {
 	if cur, ok := x.h.portIndex[inc.ID()]; ok && cur.owner == owner && cur.inc == inc {
 		delete(x.h.portIndex, inc.ID())
 		if x.h.liveness != nil {
-			_ = x.h.liveness.ObserveDown(inc.ID(), true, false)
+			_ = x.h.liveness.ObserveDown(inc.ID(), inc, true, false)
 		}
 	}
 	x.h.indexMu.Unlock()

@@ -27,7 +27,7 @@ func TestRestartJournalRetryCannotRetireSuccessorTicket(t *testing.T) {
 	if verdict != transitionApplied {
 		t.Fatalf("old BeginEnsure=%v", verdict)
 	}
-	if verdict := h.liveness.PublishLocal(id, oldTicket, &testCarrier{}); verdict != transitionApplied {
+	if verdict := h.liveness.PublishLocal(id, oldTicket, noInc, &testCarrier{}); verdict != transitionApplied {
 		t.Fatalf("old publish=%v", verdict)
 	}
 
@@ -44,7 +44,7 @@ func TestRestartJournalRetryCannotRetireSuccessorTicket(t *testing.T) {
 	if verdict != transitionApplied || newTicket == oldTicket {
 		t.Fatalf("successor BeginEnsure=(%q,%v)", newTicket, verdict)
 	}
-	if verdict := h.liveness.PublishLocal(id, newTicket, &testCarrier{}); verdict != transitionApplied {
+	if verdict := h.liveness.PublishLocal(id, newTicket, noInc, &testCarrier{}); verdict != transitionApplied {
 		t.Fatalf("successor publish=%v", verdict)
 	}
 	unlock()

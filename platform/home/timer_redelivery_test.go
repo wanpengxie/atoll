@@ -132,7 +132,7 @@ func TestFiredTimerFullAttemptIsReleasedAndRetriedOnNextSweep(t *testing.T) {
 	}
 	full := &testCarrier{err: actorrt.ErrMailboxFull}
 	ticket, verdict := h.liveness.BeginEnsure(result.Row.ID, 1)
-	if verdict != transitionApplied || h.liveness.PublishLocal(result.Row.ID, ticket, full) != transitionApplied {
+	if verdict != transitionApplied || h.liveness.PublishLocal(result.Row.ID, ticket, noInc, full) != transitionApplied {
 		t.Fatalf("publish full carrier: ticket=%q verdict=%v", ticket, verdict)
 	}
 	handle := h.schedMinter.Mint(storespec.AuthorStamp{ID: result.Row.ID, BirthVersion: 1})
@@ -165,7 +165,7 @@ func TestFiredTimerFullAttemptIsReleasedAndRetriedOnNextSweep(t *testing.T) {
 	}
 	nextTicket, verdict := h.liveness.BeginEnsure(result.Row.ID, 1)
 	next := &testCarrier{}
-	if verdict != transitionApplied || h.liveness.PublishLocal(result.Row.ID, nextTicket, next) != transitionApplied {
+	if verdict != transitionApplied || h.liveness.PublishLocal(result.Row.ID, nextTicket, noInc, next) != transitionApplied {
 		t.Fatalf("publish successor: ticket=%q verdict=%v", nextTicket, verdict)
 	}
 	h.sweepFired(ctx)
