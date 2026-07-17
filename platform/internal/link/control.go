@@ -14,10 +14,11 @@ import (
 // home-side). Type/catalog is domain, not link wire (type non-first-class):
 // link carries only the structural triple the registry needs.
 type Declaration struct {
-	ActorID actor.ActorID `json:"actor_id"`
-	Kind    actor.Kind    `json:"kind"`
-	Binding actor.Binding `json:"binding"`
-	Epoch   int64         `json:"epoch"`
+	ActorID      actor.ActorID `json:"actor_id"`
+	Kind         actor.Kind    `json:"kind"`
+	Binding      actor.Binding `json:"binding"`
+	Version      int64         `json:"version"`
+	EnsureTicket string        `json:"ensure_ticket"`
 }
 
 // AttachRequest is the stream-0 control message a daemon sends to join a

@@ -21,28 +21,34 @@ type fakeRegistry struct {
 	err  error
 }
 
-func (r *fakeRegistry) Lookup(_ context.Context, id actor.ActorID) (storespec.Record, bool, error) {
+func (r *fakeRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
 	if r.err != nil {
-		return storespec.Record{}, false, r.err
+		return storespec.ActorControlRow{}, false, r.err
 	}
 	row, ok := r.rows[id]
-	return row, ok, nil
+	return storespec.ActorControlRow{ID: row.ID, Kind: row.Kind, Principal: row.Principal, Binding: row.Binding, CreatedAt: row.CreatedAt, CurrentDeclVersion: 1}, ok && row.IsActive(), nil
 }
-func (r *fakeRegistry) Exists(ctx context.Context, id actor.ActorID) (bool, error) {
-	_, ok, err := r.Lookup(ctx, id)
-	return ok, err
-}
-func (r *fakeRegistry) ListActive(context.Context) ([]storespec.Record, error) {
+func (r *fakeRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	rows := make([]storespec.Record, 0, len(r.rows))
+	rows := make([]storespec.ActorControlRow, 0, len(r.rows))
 	for _, row := range r.rows {
 		if row.IsActive() {
-			rows = append(rows, row)
+			rows = append(rows, storespec.ActorControlRow{ID: row.ID, Kind: row.Kind, CurrentDeclVersion: 1})
 		}
 	}
 	return rows, nil
+}
+func (r *fakeRegistry) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	return storespec.WorldDurable, true, r.err
+}
+func (r *fakeRegistry) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	_, ok, err := r.LookupActive(ctx, stamp.ID)
+	if !ok {
+		return storespec.AuthorNotMember, err
+	}
+	return storespec.AuthorOK, err
 }
 
 func spawn(t *testing.T, rt *actorrt.Runtime, id actor.ActorID) actorrt.Incarnation {

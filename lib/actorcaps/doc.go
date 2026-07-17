@@ -8,7 +8,7 @@
 //
 //   - Caps is pure composition over runtime capability VOCABULARY
 //     (harness.Pen / accessdoor.AccessHandle / schedule.ScheduleHandle /
-//     actorrt.SpawnHandle). It carries no platform-assembly machinery (no link,
+//     actorrt.LifecycleHandle). It carries no platform-assembly machinery (no link,
 //     no tap, no WS transport, no sysactor). An actor implementation must be
 //     able to NAME its birth capabilities without importing the heavy platform
 //     assembly root — so this type does not live in package platform.

@@ -11,6 +11,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/internal/store"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // testChannelID is the channel every harness test binds its Deps to.
@@ -41,19 +42,69 @@ func testDeps(t *testing.T, cs *store.ChannelStores) Deps {
 	return Deps{
 		ChannelID: testChannelID,
 		Log:       cs.Log,
+		Authority: testAuthority{durableRows: cs.Declared},
 		NowMs:     func() int64 { return fixedNowMs },
 	}
+}
+
+type testAuthority struct {
+	durableRows storespec.DeclaredControlReader
+}
+
+func (a testAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	if a.durableRows == nil {
+		return storespec.ActorControlRow{ID: id, Kind: actor.KindAgent, CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement()}, true, nil
+	}
+	rec, ok, err := a.durableRows.LookupDeclaredActive(ctx, id)
+	if err != nil || !ok {
+		return storespec.ActorControlRow{}, false, err
+	}
+	return storespec.ActorControlRow{ID: rec.ID, Kind: rec.Kind, CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement()}, true, nil
+}
+func (a testAuthority) ListActive(ctx context.Context) ([]storespec.ActorControlRow, error) {
+	if a.durableRows == nil {
+		return nil, nil
+	}
+	rows, err := a.durableRows.ListDeclaredActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]storespec.ActorControlRow, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, storespec.ActorControlRow{ID: row.ID, Kind: row.Kind, CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement()})
+	}
+	return out, nil
+}
+func (a testAuthority) WorldOf(ctx context.Context, id actor.ActorID) (storespec.ActorWorld, bool, error) {
+	_, ok, err := a.LookupActive(ctx, id)
+	return storespec.WorldDurable, ok, err
+}
+func (a testAuthority) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	row, ok, err := a.LookupActive(ctx, stamp.ID)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return storespec.AuthorNotMember, nil
+	}
+	if row.CurrentDeclVersion != stamp.BirthVersion {
+		return storespec.AuthorVersionStale, nil
+	}
+	return storespec.AuthorOK, nil
 }
 
 // registerActor seeds an active actor into the registry so sender/audience
 // checks resolve it.
 func registerActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID, kind actor.Kind) actor.ActorID {
 	t.Helper()
-	minted, err := cs.Membership.Admit(context.Background(), kind, strings.ReplaceAll(string(id), ":", "-"), fixedNowMs)
+	result, err := cs.DeclAdmission.AdmitDeclared(context.Background(), storespec.AdmitBundle{
+		Kind: kind, Principal: strings.ReplaceAll(string(id), ":", "-"), Class: string(kind),
+		Placement: storespec.NewServerPlacement(), CreatedAt: fixedNowMs,
+	})
 	if err != nil {
 		t.Fatalf("register actor %q: %v", id, err)
 	}
-	return minted
+	return result.ID
 }
 
 // ctxCaller returns a context carrying a caller bound to the test channel.
@@ -61,8 +112,9 @@ func registerActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID, kind
 // caller via the package-internal ctxWithCaller rather than minting a pen.
 func ctxCaller(id actor.ActorID) context.Context {
 	return ctxWithCaller(context.Background(), caller{
-		actorID: id,
-		chID:    testChannelID,
+		actorID:      id,
+		birthVersion: 1,
+		chID:         testChannelID,
 	})
 }
 
@@ -73,9 +125,10 @@ func ctxCaller(id actor.ActorID) context.Context {
 // registry).
 func ctxCallerKind(id actor.ActorID, kind actor.Kind) context.Context {
 	return ctxWithCaller(context.Background(), caller{
-		actorID: id,
-		kind:    kind,
-		chID:    testChannelID,
+		actorID:      id,
+		kind:         kind,
+		birthVersion: 1,
+		chID:         testChannelID,
 	})
 }
 

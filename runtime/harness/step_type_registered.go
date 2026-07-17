@@ -17,6 +17,8 @@ import (
 var reservedBootstrapTypeSet = map[string]struct{}{
 	actor.ReservedSystemActorRegistered:   {},
 	actor.ReservedSystemActorDeregistered: {},
+	actor.ReservedSystemActorForked:       {},
+	actor.ReservedSystemActorEnded:        {},
 }
 
 // stepTypeRegistered enforces the substrate's RESERVED-NAMESPACE AUTHORITY for

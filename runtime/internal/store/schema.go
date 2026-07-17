@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS actor_registry (
   actor_kind         TEXT NOT NULL,
   principal          TEXT NOT NULL DEFAULT '', -- opaque continuing-subject anchor; actor_id remains an instance id
   actor_binding      TEXT,
-  host               TEXT NOT NULL DEFAULT '',  -- placement locus: '' = home process, compute id = hosting daemon
+	current_decl_version INTEGER NOT NULL DEFAULT 1,
   created_at         INTEGER NOT NULL,
   deregistered_at    INTEGER
 );
@@ -79,29 +79,38 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_principal
   ON actor_registry(actor_kind, principal)
   WHERE deregistered_at IS NULL AND principal <> '';
 
--- =============================================================
--- 3b) channel composition  (channel-local desired truth)
--- =============================================================
-CREATE TABLE IF NOT EXISTS channel_composition (
-  instance_id   TEXT PRIMARY KEY,
-  decl_id       TEXT NOT NULL,
-  principal     TEXT NOT NULL,
-  class         TEXT NOT NULL,
-  config_json   TEXT,
-  placement     TEXT NOT NULL CHECK(placement IN ('server','daemon')),
-  desired_host  TEXT NOT NULL DEFAULT ''
-                CHECK(placement='daemon' OR desired_host=''),
-  is_default    INTEGER NOT NULL DEFAULT 0 CHECK(is_default IN (0,1)),
-  restart_epoch INTEGER NOT NULL DEFAULT 0,
-  UNIQUE(principal)
+-- Versioned desired declaration for durable actors. Forked actors never land
+-- here; their complete control row lives only in Home's session authority.
+CREATE TABLE IF NOT EXISTS actor_decl_versions (
+  actor_id       TEXT NOT NULL,
+  version        INTEGER NOT NULL,
+  class          TEXT NOT NULL,
+  config_json    TEXT,
+  placement      TEXT NOT NULL CHECK(placement IN ('server','daemon')),
+  desired_host   TEXT NOT NULL DEFAULT '' CHECK(placement='daemon' OR desired_host=''),
+  t_idle_ms      INTEGER NOT NULL DEFAULT 0,
+  source_decl_id TEXT NOT NULL DEFAULT '',
+  created_at     INTEGER NOT NULL,
+  PRIMARY KEY (actor_id, version)
 );
-CREATE UNIQUE INDEX IF NOT EXISTS ux_channel_composition_one_default
-  ON channel_composition(is_default) WHERE is_default=1;
+
+CREATE TABLE IF NOT EXISTS channel_routing (
+  id            INTEGER PRIMARY KEY CHECK (id = 1),
+  default_agent TEXT
+);
 
 CREATE TABLE IF NOT EXISTS restart_applied (
   job_id      INTEGER NOT NULL,
   instance_id TEXT NOT NULL,
   applied_at  INTEGER NOT NULL,
+  PRIMARY KEY(job_id, instance_id)
+);
+
+CREATE TABLE IF NOT EXISTS restart_attempts (
+  job_id          INTEGER NOT NULL,
+  instance_id     TEXT NOT NULL,
+  expected_ticket TEXT NOT NULL,
+  claimed_at      INTEGER NOT NULL,
   PRIMARY KEY(job_id, instance_id)
 );
 
@@ -174,6 +183,8 @@ CREATE TABLE IF NOT EXISTS resource_reservations (
   placement_daemon_id  TEXT NOT NULL DEFAULT '',
   placement_coord      TEXT NOT NULL DEFAULT '',
   created_by           TEXT NOT NULL,           -- door-authenticated creator (never daemon-reported)
+	birth_authority      TEXT NOT NULL
+	                     CHECK (birth_authority IN ('creator_identity','channel_owned')),
   reserved_at          INTEGER NOT NULL,
   is_dir               INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)), -- carried write-ahead so CommitReservation lands the resources row with the correct byte-shape bit (a content-less dir create's shape must survive the ReserveCreate→AllocRequest→Committed round trip; daemon reports no truth, §1.3)
   last_progress_at     INTEGER NOT NULL DEFAULT 0 -- most-recent activity stamp for the in-flight transfer
@@ -243,7 +254,8 @@ CREATE TABLE IF NOT EXISTS timers (
   type           TEXT NOT NULL,
   payload        BLOB,
   correlation_id TEXT,              -- captured at schedule time; inherited by the fire envelope
-  created_at     INTEGER NOT NULL
+  created_at     INTEGER NOT NULL,
+  state          TEXT NOT NULL DEFAULT 'pending' CHECK(state IN ('pending','fired'))
 );
 CREATE INDEX IF NOT EXISTS ix_timers_fire_at ON timers(fire_at);
 CREATE INDEX IF NOT EXISTS ix_timers_author  ON timers(author_id);
@@ -273,8 +285,10 @@ CREATE TABLE IF NOT EXISTS timer_dead (
 var ChannelLocalTables = []string{
 	"messages",
 	"actor_registry",
-	"channel_composition",
+	"actor_decl_versions",
+	"channel_routing",
 	"restart_applied",
+	"restart_attempts",
 	"resources",
 	"resource_grants",
 	"resource_reservations",

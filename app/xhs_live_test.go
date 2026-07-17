@@ -115,7 +115,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	}})
 	go func() {
 		runErr <- compute.Run(ctx,
-			compute.Config{ServerWS: serverWS, Logger: logger, PlanSource: plan},
+			compute.Config{ServerWS: serverWS, Logger: logger, PlanSource: plan, Poll: 20 * time.Millisecond},
 		)
 	}()
 	t.Cleanup(func() {
@@ -193,26 +193,12 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	}
 }
 
-// waitForActor polls the canonical Home registry until the given actor id appears
-// as a member. This IS the daemon-attach verification point: the actor
-// only registers once the daemon's /compute link handshake declared its cells.
+// waitForActor waits for the actual daemon port embodiment. Identity admission
+// precedes attachment, so registry presence alone is not an attachment proof.
 func waitForActor(t *testing.T, env *testEnv, s setupResult, id string, timeout time.Duration) {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		actors, err := env.app.ActorsForTest(channel.ID(s.chID))
-		if err != nil {
-			t.Fatal(err)
-		}
-		for _, rec := range actors {
-			if rec.ID == actor.ActorID(id) {
-				return
-			}
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("actor %q never registered as channel member within %s", id, timeout)
-		}
-		time.Sleep(25 * time.Millisecond)
+	if !env.app.WaitLiveForTest(s.chID, actor.ActorID(id), timeout) {
+		t.Fatalf("actor %q never attached a live embodiment within %s", id, timeout)
 	}
 }
 
@@ -323,7 +309,7 @@ func TestXHSLiveActorStatus(t *testing.T) {
 	}})
 	go func() {
 		runErr <- compute.Run(ctx,
-			compute.Config{ServerWS: serverWS, Logger: logger, PlanSource: plan},
+			compute.Config{ServerWS: serverWS, Logger: logger, PlanSource: plan, Poll: 20 * time.Millisecond},
 		)
 	}()
 	t.Cleanup(func() {

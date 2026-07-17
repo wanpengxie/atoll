@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -78,11 +79,15 @@ func TestBlockedDeliverUnblocksOnClose(t *testing.T) {
 	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 
 	const principal = "gwen"
-	h, id := openHome(t, channel.ID("c"), principal)
+	h, _ := openHome(t, channel.ID("c"), principal)
+	// This barrier test needs exactly one interpreter consumer. Use a dedicated
+	// slot with no human cell behind it; real human-cell and test interpreters
+	// share the slot's job channel and would otherwise race to consume the job.
+	id := actor.ActorID("human:blocked-delivery")
+	slot := h.EnsureSubjectSlot(id)
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
 	s, _ := g.Attach(principal, nil)
 	s.reconcile() // establish eligibility (member route for c)
-	slot, _ := h.SubjectSlotFor(id)
 
 	got := make(chan struct{}, 1)
 	release := make(chan struct{})

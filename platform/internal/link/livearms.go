@@ -26,14 +26,15 @@ import (
 // parity gap: every arm refuses every call until inc goes live, exactly like
 // home's buildCaps.
 //
-// Spawn is deliberately left zero — the fork/despawn arm does not cross the
-// wire this period (期6 拍); compute.Run's factory is only ever handed the
-// four wire-flap arms.
+// Lifecycle is the fifth flap arm. It is wrapped by the same incarnation gate
+// as Pen, Access, State, and Schedule, so fork/end calls made during factory
+// construction or after replacement fail closed.
 func NewLiveArms(rb *RebindableArms, inc actorrt.Incarnation, host *actorrt.Runtime) actorcaps.Caps {
 	return actorcaps.Caps{
-		Pen:      NewLivePen(rb.Pen(), inc, host),
-		Access:   NewLiveResourceAccess(rb.Access(), inc, host),
-		State:    NewLiveAccess(rb.State(), inc, host),
-		Schedule: NewLiveSchedule(rb.Schedule(), inc, host),
+		Pen:       NewLivePen(rb.Pen(), inc, host),
+		Access:    NewLiveResourceAccess(rb.Access(), inc, host),
+		State:     NewLiveAccess(rb.State(), inc, host),
+		Schedule:  NewLiveSchedule(rb.Schedule(), inc, host),
+		Lifecycle: NewLiveLifecycle(rb.Lifecycle(), inc, host),
 	}
 }

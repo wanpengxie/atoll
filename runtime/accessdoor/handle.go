@@ -6,9 +6,9 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/access"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // CreateSpec is a type alias re-exporting resourcespec.CreateSpec at the
@@ -68,6 +68,7 @@ type AccessHandle interface {
 // slice the red line forbids outright (no ErrUnsupported intermediate state).
 type ResourceAccessHandle interface {
 	AccessHandle
+	FileOpener
 
 	// Create is the SOLE create entry point (§3.1's "create 单入口"): the
 	// resource face's Invoke no longer accepts a bare OpCreate at all (see
@@ -89,12 +90,33 @@ type ResourceAccessHandle interface {
 	List(ctx context.Context, q ListQuery) (ListPage, error)
 }
 
+func (h boundHandle) Open(context.Context, resource.ResourceID, access.Operation) (FileAccess, Outcome, error) {
+	return FileAccess{}, Outcome{}, ErrFileCapabilityUnavailable
+}
+
+func (h boundHandle) Redeem(context.Context, FileRoute) (FileAccess, error) {
+	return FileAccess{}, ErrFileCapabilityUnavailable
+}
+
 // boundHandle is a ResourceAccessHandle welded to one caller (the cell
 // implementation, channel-scoped). The caller is a struct field, not a wire
 // field — structurally there is nowhere to self-report it.
 type boundHandle struct {
 	door   *door
-	caller actor.ActorID
+	caller storespec.AuthorStamp
+}
+
+var ErrAuthorInactive = errors.New("accessdoor: author inactive or stale")
+
+func (h boundHandle) authorize(ctx context.Context) error {
+	verdict, err := h.door.deps.Authority.CheckAuthor(ctx, h.caller)
+	if err != nil {
+		return err
+	}
+	if verdict != storespec.AuthorOK {
+		return ErrAuthorInactive
+	}
+	return nil
 }
 
 // ErrCreateViaInvoke is the resource face's "create 单入口" enforcement
@@ -114,6 +136,9 @@ var ErrCreateViaInvoke = fmt.Errorf("%w: op=create must use the Create method, n
 // a structural fault is a Go error before anything resolves; overreach is a
 // verdict.
 func (h boundHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
+	if err := h.authorize(ctx); err != nil {
+		return Outcome{RejectReason: access.OwnerInactive}, nil
+	}
 	if err := ingress(op, id, args, grant); err != nil {
 		return Outcome{}, err
 	}
@@ -123,29 +148,38 @@ func (h boundHandle) Invoke(ctx context.Context, op access.Operation, id resourc
 	if over, ok := day1OpsOverreach(op, grant); ok && over {
 		return Outcome{RejectReason: access.AccessDenied}, nil
 	}
-	return h.door.invoke(ctx, h.caller, op, id, args, grant)
+	return h.door.invoke(ctx, h.caller.ID, op, id, args, grant)
 }
 
 // Create runs the create-specific ingress (structure → ErrMalformed), then
 // the create decision tree under the welded caller.
 func (h boundHandle) Create(ctx context.Context, id resource.ResourceID, spec resourcespec.CreateSpec, initial []byte) (Outcome, error) {
+	if err := h.authorize(ctx); err != nil {
+		return Outcome{RejectReason: access.OwnerInactive}, nil
+	}
 	if err := ingressCreate(id, spec, initial); err != nil {
 		return Outcome{}, err
 	}
-	return h.door.create(ctx, h.caller, id, spec, initial)
+	return h.door.create(ctx, h.caller.ID, id, spec, initial)
 }
 
 // Stat runs the read-face projection under the welded caller.
 func (h boundHandle) Stat(ctx context.Context, id resource.ResourceID) (StatResult, error) {
+	if err := h.authorize(ctx); err != nil {
+		return StatResult{Reject: QueryNotFound}, nil
+	}
 	if err := checkResourceID(id); err != nil {
 		return StatResult{}, err
 	}
-	return h.door.stat(ctx, h.caller, id)
+	return h.door.stat(ctx, h.caller.ID, id)
 }
 
 // List runs the read-face pagination under the welded caller.
 func (h boundHandle) List(ctx context.Context, q ListQuery) (ListPage, error) {
-	return h.door.list(ctx, h.caller, q)
+	if err := h.authorize(ctx); err != nil {
+		return ListPage{}, ErrAuthorInactive
+	}
+	return h.door.list(ctx, h.caller.ID, q)
 }
 
 // AccessMinter is the door's ONE outward face (mirroring harness.Minter's
@@ -165,22 +199,22 @@ func (h boundHandle) List(ctx context.Context, q ListQuery) (ListPage, error) {
 //     Create/Stat/List to mean anything, so the interface does not offer them
 //     (§3.2's "不实现空方法" red line).
 type AccessMinter interface {
-	Mint(caller actor.ActorID) ResourceAccessHandle
-	MintState(owner actor.ActorID) AccessHandle
+	Mint(caller storespec.AuthorStamp) ResourceAccessHandle
+	MintState(owner storespec.AuthorStamp) AccessHandle
 }
 
 type minter struct{ door *door }
 
 // Mint welds caller onto the door and returns a resource-face handle.
 // Deterministic and cheap; admission points may Mint per-caller freely.
-func (m *minter) Mint(caller actor.ActorID) ResourceAccessHandle {
+func (m *minter) Mint(caller storespec.AuthorStamp) ResourceAccessHandle {
 	return boundHandle{door: m.door, caller: caller}
 }
 
 // MintState welds owner onto the door and returns an actor-scoped handle. Same
 // door, same AccessHandle contract as Mint — the owner is the namespace coordinate
 // (non-ambient: welded here, never read off the wire).
-func (m *minter) MintState(owner actor.ActorID) AccessHandle {
+func (m *minter) MintState(owner storespec.AuthorStamp) AccessHandle {
 	return boundStateHandle{door: m.door, owner: owner}
 }
 
@@ -189,11 +223,19 @@ func (m *minter) MintState(owner actor.ActorID) AccessHandle {
 // day-1 KindKV driver must be present (op=create hardcodes KindKV, so a missing
 // one would otherwise surface only when someone first creates).
 func New(deps Deps) (AccessMinter, error) {
-	if deps.Registry == nil || deps.Drivers == nil || deps.Membership == nil || deps.State == nil {
-		return nil, errors.New("accessdoor: Deps incomplete")
+	minter, _, err := NewAssembly(deps)
+	return minter, err
+}
+
+// NewAssembly constructs the caller-facing minter and the asynchronous
+// completion face over the same door and therefore the same resource gate.
+func NewAssembly(deps Deps) (AccessMinter, ResourceCompletion, error) {
+	if deps.Registry == nil || deps.Drivers == nil || deps.Authority == nil || deps.Overlay == nil || deps.State == nil {
+		return nil, nil, errors.New("accessdoor: Deps incomplete")
 	}
 	if deps.Drivers[resourcespec.KindKV] == nil {
-		return nil, errors.New("accessdoor: KindKV driver missing")
+		return nil, nil, errors.New("accessdoor: KindKV driver missing")
 	}
-	return &minter{door: &door{deps: deps}}, nil
+	d := &door{deps: deps}
+	return &minter{door: d}, resourceCompletion{door: d}, nil
 }

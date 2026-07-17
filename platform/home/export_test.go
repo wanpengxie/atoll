@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -37,9 +38,9 @@ func ReconcileClosureForTest(h *Home) {
 
 func SpawnForTest(h *Home, fixtureID actor.ActorID, kind actor.Kind, def platform.ActorFactory) (actor.ActorID, error) {
 	id := fixtureID
-	if rec, ok, err := h.cs.Registry.Lookup(context.Background(), fixtureID); err != nil {
+	if _, ok, err := h.cs.Authority.LookupActive(context.Background(), fixtureID); err != nil {
 		return "", err
-	} else if !ok || !rec.IsActive() {
+	} else if !ok {
 		id, err = AdmitForTest(h, strings.ReplaceAll(string(fixtureID), ":", "-"), kind)
 		if err != nil {
 			return "", err
@@ -48,7 +49,7 @@ func SpawnForTest(h *Home, fixtureID actor.ActorID, kind actor.Kind, def platfor
 	unlock := h.actorGates.lock(id)
 	defer unlock()
 	_, built, err := h.channel.Cells().SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-		return hostcommon.Build(h.buildCaps(id, kind, inc), h.hooks(), def)
+		return hostcommon.Build(h.buildCaps(id, kind, 1, inc), h.hooks(), def, actorbase.Options{})
 	})
 	if err != nil {
 		return "", err
@@ -56,6 +57,5 @@ func SpawnForTest(h *Home, fixtureID actor.ActorID, kind actor.Kind, def platfor
 	if !built {
 		return "", fmt.Errorf("test spawn %q already occupied", id)
 	}
-	h.builtEpoch[id] = 0
 	return id, nil
 }

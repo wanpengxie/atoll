@@ -6,6 +6,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/schedule"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // The system anchor's Schedule and Spawn caps arms are LATE-BOUND (S6 Q5). The
@@ -30,11 +31,15 @@ import (
 type systemScheduleHandle struct{ home func() *Home }
 
 func (s systemScheduleHandle) Schedule(ctx context.Context, req schedule.ScheduleReq) (schedule.TimerID, error) {
-	return s.home().schedMinter.Mint(actor.SystemActorID).Schedule(ctx, req)
+	return s.home().schedMinter.Mint(storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}).Schedule(ctx, req)
 }
 
 func (s systemScheduleHandle) Cancel(ctx context.Context, id schedule.TimerID) error {
-	return s.home().schedMinter.Mint(actor.SystemActorID).Cancel(ctx, id)
+	return s.home().schedMinter.Mint(storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}).Cancel(ctx, id)
+}
+
+func (s systemScheduleHandle) Ack(ctx context.Context, id schedule.TimerID) error {
+	return s.home().schedMinter.Mint(storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}).Ack(ctx, id)
 }
 
 // systemSpawnHandle is the anchor's late-bound Spawn arm: it resolves the shared
@@ -46,15 +51,17 @@ type systemSpawnHandle struct {
 	home func() *Home
 }
 
-func (s systemSpawnHandle) resolve() actorrt.SpawnHandle {
+func (s systemSpawnHandle) resolve() actorrt.LifecycleHandle {
 	h := s.home()
-	return newSpawnHandle(s.inc, h.channel.Cells(), h.factories, h.buildChildCaps, h.hooks())
+	return newSpawnHandle(h, s.inc, 1, h.channel.Cells())
 }
 
-func (s systemSpawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
-	return s.resolve().Fork(spec)
+func (s systemSpawnHandle) Fork(ctx context.Context, spec actorrt.ForkSpec) (actor.ActorID, error) {
+	return s.resolve().Fork(ctx, spec)
 }
 
-func (s systemSpawnHandle) Despawn(childID actor.ActorID) error {
-	return s.resolve().Despawn(childID)
+func (s systemSpawnHandle) DespawnChild(ctx context.Context, childID actor.ActorID, reason string) error {
+	return s.resolve().DespawnChild(ctx, childID, reason)
 }
+
+func (s systemSpawnHandle) EndSelf(context.Context) error { return ErrEndSystemForbidden }

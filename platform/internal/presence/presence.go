@@ -172,13 +172,13 @@ func (f *Fold) copy(id actor.ActorID) map[actorrt.ObsKind]entry {
 }
 
 type View struct {
-	fold     *Fold
-	runtime  *actorrt.Runtime
-	registry storespec.Registry
+	fold      *Fold
+	runtime   *actorrt.Runtime
+	authority storespec.ActorAuthority
 }
 
-func NewView(fold *Fold, runtime *actorrt.Runtime, registry storespec.Registry) View {
-	return View{fold: fold, runtime: runtime, registry: registry}
+func NewView(fold *Fold, runtime *actorrt.Runtime, authority storespec.ActorAuthority) View {
+	return View{fold: fold, runtime: runtime, authority: authority}
 }
 
 // Snapshot physically copies fold state before reading runtime and registry.
@@ -188,11 +188,10 @@ func (v View) Snapshot(ctx context.Context, id actor.ActorID) (Snapshot, error) 
 	rows := v.fold.copy(id)
 	stat, present := v.runtime.Stat(id)
 	gen, hasGen := v.runtime.CurrentIncarnation(id)
-	rec, member, err := v.registry.Lookup(ctx, id)
+	_, member, err := v.authority.LookupActive(ctx, id)
 	if err != nil {
 		return Snapshot{}, err
 	}
-	member = member && rec.IsActive()
 	out := Snapshot{Member: member, L1Present: present, L3: map[actorrt.ObsKind]Testimony{}}
 	if present {
 		out.L1StartedAt = stat.StartedAt

@@ -284,15 +284,16 @@ func TestActorScopedNeverConsultsChannelPlane(t *testing.T) {
 func TestMintStateWeldsOwner(t *testing.T) {
 	st := &fakeStateStore{}
 	m, err := New(Deps{
-		Registry:   &fakeRegistry{},
-		Drivers:    DriverTable{resourcespec.KindKV: &fakeDriver{}},
-		Membership: &fakeMembership{},
-		State:      st,
+		Registry:  &fakeRegistry{},
+		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}},
+		Authority: &fakeMembership{},
+		Overlay:   &fakeGrantOverlay{},
+		State:     st,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	h := m.MintState("owner-a")
+	h := m.MintState(accessStamp("owner-a"))
 
 	// set on an actor-scoped handle → ErrOpNotInScope, StateStore never touched.
 	if _, err := h.Invoke(t.Context(), access.OpSet, "k", nil,

@@ -18,11 +18,8 @@ func closedChannel(t *testing.T) *storeHandles {
 	t.Helper()
 	cs := openTestChannel(t)
 	h := &storeHandles{
-		Log:        cs.Log,
-		Query:      cs.Query,
-		Requests:   cs.Requests,
-		Registry:   cs.Registry,
-		Membership: cs.Membership,
+		Log: cs.Log, Query: cs.Query, Requests: cs.Requests, Declared: cs.Declared,
+		Admission: cs.DeclAdmission, Cascade: cs.Cascade,
 	}
 	if err := cs.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
@@ -31,42 +28,39 @@ func closedChannel(t *testing.T) *storeHandles {
 }
 
 type storeHandles struct {
-	Log        storespec.MessageLog
-	Query      storespec.MessageQuery
-	Requests   storespec.RequestLookup
-	Registry   storespec.Registry
-	Membership storespec.MembershipControlPlane
+	Log       storespec.MessageLog
+	Query     storespec.MessageQuery
+	Requests  storespec.RequestLookup
+	Declared  storespec.DeclaredControlReader
+	Admission storespec.DeclAdmissionStore
+	Cascade   storespec.CascadeStore
 }
 
 // Every read/write surface must propagate the DB error rather than swallow it.
-func TestClosedDB_RegistryReadsError(t *testing.T) {
+func TestClosedDB_DeclaredReadsError(t *testing.T) {
 	ctx := context.Background()
 	h := closedChannel(t)
 
-	if _, _, err := h.Registry.Lookup(ctx, "x"); err == nil {
+	if _, _, err := h.Declared.LookupDeclaredActive(ctx, "x"); err == nil {
 		t.Error("Lookup on closed DB must error")
 	}
-	if _, err := h.Registry.Exists(ctx, "x"); err == nil {
-		t.Error("Exists on closed DB must error")
-	}
-	if _, err := h.Registry.ListActive(ctx); err == nil {
+	if _, err := h.Declared.ListDeclaredActive(ctx); err == nil {
 		t.Error("ListActive on closed DB must error")
 	}
 }
 
-func TestClosedDB_MembershipWritesError(t *testing.T) {
+func TestClosedDB_IdentityBundlesError(t *testing.T) {
 	ctx := context.Background()
 	h := closedChannel(t)
 
-	if _, err := h.Membership.Admit(ctx, actor.KindAgent, "a", 1); err == nil {
-		t.Error("Admit on closed DB must error")
+	if _, err := h.Admission.AdmitDeclared(ctx, storespec.AdmitBundle{
+		Kind: actor.KindAgent, Principal: "a", Class: "agent",
+		Placement: storespec.NewServerPlacement(), CreatedAt: 1,
+	}); err == nil {
+		t.Error("AdmitDeclared on closed DB must error")
 	}
-	if err := h.Membership.Deregister(ctx, "a", 1); err == nil {
-		t.Error("Deregister on closed DB must error")
-	}
-	if err := h.Membership.ApplyMemberTransitions(ctx,
-		[]storespec.MemberActorAdd{{ID: "a", Kind: actor.KindAgent, At: 1}}, nil); err == nil {
-		t.Error("ApplyMemberTransitions on closed DB must error (BeginTx fails)")
+	if _, err := h.Cascade.EndCascade(ctx, storespec.CascadeBundle{IDs: []actor.ActorID{"a"}, EndedAt: 1}); err == nil {
+		t.Error("EndCascade on closed DB must error")
 	}
 }
 

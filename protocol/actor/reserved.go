@@ -35,6 +35,8 @@ package actor
 const (
 	ReservedSystemActorRegistered   = "system.actor.registered"
 	ReservedSystemActorDeregistered = "system.actor.deregistered"
+	ReservedSystemActorForked       = "system.actor.forked"
+	ReservedSystemActorEnded        = "system.actor.ended"
 )
 
 // "system.channel.created" was retired from the reserved vocabulary with zero

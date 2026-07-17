@@ -22,10 +22,10 @@ type minter struct {
 // stepSenderConsistent reads the welded kind, so Mint is the single source of
 // truth for both id and kind. Mint is deterministic and cheap (no per-pen state
 // beyond the welded principal), so admission points may Mint per-emit freely.
-func (m *minter) Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID) Pen {
+func (m *minter) Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID, birthVersion int64) Pen {
 	return &boundPen{
 		chain:     m.chain,
-		principal: caller{actorID: actorID, kind: kind, chID: chID},
+		principal: caller{actorID: actorID, kind: kind, chID: chID, birthVersion: birthVersion},
 	}
 }
 

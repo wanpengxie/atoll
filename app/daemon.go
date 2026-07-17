@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -210,21 +211,19 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 	}
 	_ = rows.Close()
 	a.mu.RLock()
-	homes := make(map[channel.ID]interface {
-		Composition(context.Context) ([]storespec.CompositionRecord, error)
-	}, len(a.homes))
+	homes := make(map[channel.ID]*home.Home, len(a.homes))
 	for id, h := range a.homes {
 		homes[id] = h
 	}
 	a.mu.RUnlock()
 	for id, h := range homes {
-		composition, err := h.Composition(ctx)
+		actors, err := h.ActiveActors(ctx)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 			return
 		}
-		for _, row := range composition {
-			if row.DesiredHost == daemonID {
+		for _, row := range actors {
+			if row.Placement.Kind == storespec.PlacementDaemon && row.Placement.Host == daemonID {
 				targetSet[string(id)] = struct{}{}
 			}
 		}

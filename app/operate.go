@@ -106,6 +106,20 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 		placement = placementDaemon
 	}
 	desiredHost := strings.TrimSpace(p.DesiredHost)
+	hostMissing := false
+	if placement == placementDaemon && desiredHost == "" {
+		// Tagged daemon placement must name its host. The product-level default
+		// policy resolves an omitted host deterministically from the channel's
+		// bound daemon set; no host-less daemon intent enters substrate truth.
+		if err := x.a.db.QueryRowContext(ctx,
+			`SELECT daemon_id FROM daemon_channels WHERE channel_id=? ORDER BY daemon_id LIMIT 1`,
+			string(req.ChannelID)).Scan(&desiredHost); err != nil {
+			if !errors.Is(err, sql.ErrNoRows) {
+				return nil, err
+			}
+			hostMissing = true
+		}
+	}
 
 	// A present config must be a JSON object (persona/knobs) — same guard the
 	// agent-config API applies. Absent (missing / null) leaves the field untouched;
@@ -123,14 +137,21 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 	// global order, then re-read under the declaration lock. A concurrent create/
 	// revoke that changed the candidate makes us release and retry; we never chase
 	// a second daemon lock while holding the declaration lock.
+	readExisting := func() (storespec.ActorControlRow, bool, error) {
+		rows, err := home.DeclaredBySource(ctx, declID)
+		if err != nil || len(rows) == 0 {
+			return storespec.ActorControlRow{}, false, err
+		}
+		return rows[0], true, nil
+	}
 	readDaemonTarget := func() (string, error) {
-		record, exists, err := home.CompositionByPrincipal(ctx, declID)
+		record, exists, err := readExisting()
 		if err != nil {
 			return "", err
 		}
 		if exists {
-			if record.Placement == storespec.PlacementDaemon {
-				return record.DesiredHost, nil
+			if record.Placement.Kind == storespec.PlacementDaemon {
+				return record.Placement.Host, nil
 			}
 			return "", nil
 		}
@@ -142,7 +163,7 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 	var (
 		releaseDaemon func()
 		releaseDecl   func()
-		existing      storespec.CompositionRecord
+		existing      storespec.ActorControlRow
 		exists        bool
 	)
 	for {
@@ -171,7 +192,7 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 			}
 		}
 		releaseDecl = x.a.declLocks.lock(declID)
-		existing, exists, err = home.CompositionByPrincipal(ctx, declID)
+		existing, exists, err = readExisting()
 		if err != nil {
 			releaseDecl()
 			if releaseDaemon != nil {
@@ -181,8 +202,8 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 		}
 		actualHost := ""
 		if exists {
-			if existing.Placement == storespec.PlacementDaemon {
-				actualHost = existing.DesiredHost
+			if existing.Placement.Kind == storespec.PlacementDaemon {
+				actualHost = existing.Placement.Host
 			}
 		} else if placement == placementDaemon {
 			actualHost = desiredHost
@@ -239,8 +260,8 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 
 	if exists {
 		engine = existing.Class
-		placement = string(existing.Placement)
-		desiredHost = existing.DesiredHost
+		placement = string(existing.Placement.Kind)
+		desiredHost = existing.Placement.Host
 	} else {
 		if placement != placementServer && placement != placementDaemon {
 			return nil, &platformhome.OperateError{Code: "invalid_placement", Detail: placement}
@@ -253,22 +274,33 @@ func (x *operateExecutor) Introduce(ctx context.Context, req platformhome.Operat
 	if !ok {
 		return nil, &platformhome.OperateError{Code: "unknown_class", Detail: engine}
 	}
-	var cfg *string
+	if !exists && placement == placementDaemon && hostMissing {
+		return nil, &platformhome.OperateError{Code: "invalid_desired_host", Detail: "daemon placement requires a bound host"}
+	}
+	var cfg *json.RawMessage
 	if hasConfig {
-		value := string(p.Config)
+		value := append(json.RawMessage(nil), p.Config...)
 		cfg = &value
 	}
-	record, created, configChanged, err := home.IntroduceComposition(ctx, storespec.CompositionIntroduce{
-		DeclID: declID, Principal: declID, Class: engine, ConfigJSON: cfg,
-		Placement: storespec.Placement(placement), DesiredHost: desiredHost,
-		MakeDefault: p.MakeDefault, Kind: kind, At: time.Now().UnixMilli(),
+	var declaredPlacement storespec.Placement
+	if placement == placementServer {
+		declaredPlacement = storespec.NewServerPlacement()
+	} else {
+		declaredPlacement, err = storespec.NewDaemonPlacement(desiredHost)
+		if err != nil {
+			return nil, &platformhome.OperateError{Code: "invalid_placement", Detail: err.Error()}
+		}
+	}
+	result, err := home.Declare(ctx, platformhome.DeclareRequest{
+		SourceDeclID: declID, Principal: declID, Class: engine, Config: cfg,
+		Placement: declaredPlacement, MakeDefault: p.MakeDefault, Kind: kind, CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"instance_id": string(record.InstanceID), "class": record.Class, "placement": string(record.Placement),
-		"created": created, "config_updated": configChanged,
+		"instance_id": string(result.Row.ID), "class": result.Row.Class, "placement": string(result.Row.Placement.Kind),
+		"created": result.Created, "config_updated": result.ConfigUpdated,
 	}, nil
 }
 
@@ -295,16 +327,7 @@ func (x *operateExecutor) Remove(ctx context.Context, req platformhome.OperateRe
 		return nil, &platformhome.OperateError{Code: "protected_actor", Detail: "boost cannot be removed"}
 	}
 	id := actor.ActorID(inst)
-	composed, err := home.HasComposition(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if composed {
-		err = home.RemoveInstance(ctx, id)
-	} else {
-		err = home.Remove(ctx, id)
-	}
-	if err != nil {
+	if err := home.Remove(ctx, id); err != nil {
 		return nil, err
 	}
 	return map[string]any{"removed": inst}, nil
@@ -325,7 +348,7 @@ func (x *operateExecutor) Restart(ctx context.Context, req platformhome.OperateR
 	if home == nil {
 		return nil, channelUnavailable()
 	}
-	has, err := home.HasComposition(ctx, actor.ActorID(inst))
+	_, has, err := home.ActiveActor(ctx, actor.ActorID(inst))
 	if err != nil {
 		return nil, err
 	}
@@ -352,7 +375,7 @@ func (x *operateExecutor) SetDefaultAgent(ctx context.Context, req platformhome.
 		return nil, channelUnavailable()
 	}
 	if err := home.SetDefaultAgent(ctx, actor.ActorID(inst)); err != nil {
-		if errors.Is(err, storespec.ErrCompositionNotFound) {
+		if errors.Is(err, storespec.ErrActorNotFound) {
 			return nil, &platformhome.OperateError{Code: "not_in_composition", Detail: inst}
 		}
 		return nil, err

@@ -162,8 +162,13 @@ func TestUpstreamNoOccupantUnavailable(t *testing.T) {
 	res := newResolver()
 	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "kim"
-	h, id := openHome(t, channel.ID("c"), principal)
-	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	h, _ := openHome(t, channel.ID("c"), principal)
+	// Admit now legitimately lets Home's level ring embody the human. Use a
+	// dedicated, authority-owned test slot so this assertion cannot race that real
+	// interpreter: the slot exists, but no interpreter has ever occupied it.
+	noOccupant := actor.ActorID("actor:gateway-no-occupant")
+	h.EnsureSubjectSlot(noOccupant)
+	res.set(principal, []Route{memberRoute("c", h, noOccupant, clk.now())}, nil, nil)
 	s, _ := g.Attach(principal, nil)
 	defer s.Close()
 	s.reconcile() // establish eligibility; no interpreter is ever attached to the slot
@@ -185,8 +190,14 @@ func TestRevocationInFlightThenRefused(t *testing.T) {
 	// openHomeWired (六轮终审 P1-5, barrier authenticity): a REAL membership-change poke
 	// wire, so this test's revocation drives the actual Remove→poke edge — not a
 	// hand-called s.reconcile() standing in for it.
-	h, id := openHomeWired(t, channel.ID("c"), principal, g)
-	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
+	h, id := openDormantDeclaredHomeWired(t, channel.ID("c"), principal, g)
+	// Keep the delivery barrier independent from the real human cell that Home may
+	// embody asynchronously. The eligibility route is still backed by the admitted
+	// member, while this dedicated slot gives the test sole ownership of its frame
+	// lane and therefore a deterministic in-flight linearization point.
+	deliveryID := actor.ActorID("actor:gateway-inflight")
+	slot := h.EnsureSubjectSlot(deliveryID)
+	res.set(principal, []Route{memberRoute("c", h, deliveryID, clk.now())}, nil, nil)
 	s, _ := g.Attach(principal, nil)
 	// Home's TempDir cleanup must not race the session pump's deferred subscription
 	// cancel. Use the owning Gateway.Close join (not Session.Close's async signal), then
@@ -197,8 +208,6 @@ func TestRevocationInFlightThenRefused(t *testing.T) {
 		_ = h.Close()
 	}()
 	s.StartFeed() // real running pump (StartFeed's synchronous first reconcile resolves "c")
-	slot, _ := h.SubjectSlotFor(id)
-
 	got := make(chan struct{}, 1)
 	release := make(chan struct{})
 	stop := blockingInterpreter(slot, got, release)

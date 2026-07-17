@@ -2,14 +2,9 @@ package app
 
 import (
 	"context"
-	"fmt"
-	"strings"
 
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type appPlanProvider struct{ app *App }
@@ -34,33 +29,5 @@ func (a *App) daemonComposition(ctx context.Context, chID channel.ID, daemonID s
 	if h == nil {
 		return nil, channelUnavailable()
 	}
-	rows, err := h.Composition(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]platform.PlanActor, 0, len(rows))
-	for _, r := range rows {
-		if r.Placement != storespec.PlacementDaemon || r.DesiredHost != daemonID {
-			continue
-		}
-		global := ""
-		if !strings.HasPrefix(r.DeclID, "sys:") {
-			if err := a.db.QueryRowContext(ctx, `SELECT COALESCE(config_json,'') FROM actor_decls WHERE id=? AND deleted_at IS NULL`, r.DeclID).Scan(&global); err != nil {
-				return nil, fmt.Errorf("app: plan instance %s resolve declaration %q: %w", r.InstanceID, r.DeclID, err)
-			}
-		}
-		kind, ok := registry.ClassKind(r.Class)
-		if !ok {
-			return nil, fmt.Errorf("app: plan instance %s has unknown class %q", r.InstanceID, r.Class)
-		}
-		out = append(out, platform.PlanActor{
-			InstanceID: r.InstanceID,
-			Class:      r.Class,
-			Config:     mergeConfig(global, r.ConfigJSON),
-			Kind:       kind,
-			Binding:    actor.BindingRuntimeInboundViaRelay,
-			Epoch:      r.Epoch,
-		})
-	}
-	return out, nil
+	return h.PlanForDaemon(ctx, daemonID)
 }

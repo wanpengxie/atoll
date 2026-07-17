@@ -11,7 +11,6 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/channelkit"
 	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
@@ -21,6 +20,7 @@ import (
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -109,7 +109,63 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 	h.cs = cs
 
-	// 3. Build the harness Minter (the substrate mint machine). New returns a Minter, never a
+	// 3. Durable genesis and authority boot. Every durable identity, including
+	// the intrinsic system actor, enters through the same registry+decl+event
+	// transaction. The complete durable image is then swapped into the Home
+	// index and the one shared authority slot is bound exactly once. No effect
+	// consumer or goroutine exists yet, so no query can race the bind.
+	systemAdmission, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
+		ID:        actor.SystemActorID,
+		Kind:      actor.KindSystem,
+		Class:     "system",
+		Placement: storespec.NewServerPlacement(),
+		CreatedAt: nowMs(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("platform: admit system actor: %w", err)
+	}
+	bootRows, err := cs.Declared.ListDeclaredActive(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("platform: load actor authority: %w", err)
+	}
+	bootEntries := make([]controlEntry, 0, len(bootRows))
+	bootIDs := make([]actor.ActorID, 0, len(bootRows))
+	for _, row := range bootRows {
+		bootEntries = append(bootEntries, controlEntry{Row: row, World: storespec.WorldDurable})
+		bootIDs = append(bootIDs, row.ID)
+	}
+	controlIndex := newActorControlIndex()
+	if !controlIndex.ReplaceAll(bootEntries) {
+		return nil, errors.New("platform: invalid actor authority boot image")
+	}
+	if err := cs.BindActorAuthority(controlIndex); err != nil {
+		return nil, fmt.Errorf("platform: bind actor authority: %w", err)
+	}
+	grantOverlay := newActorGrantOverlay()
+	if err := cs.BindGrantOverlay(grantOverlay); err != nil {
+		return nil, fmt.Errorf("platform: bind actor grant overlay: %w", err)
+	}
+	h.controlIndex = controlIndex
+	h.liveness = newLivenessLedger(func(id actor.ActorID, env *message.Envelope, reason deliveryDropReason, err error) {
+		logger.Warn("platform.delivery.dropped",
+			"channel", string(cfg.ChannelID), "actor", string(id), "envelope", string(env.ID),
+			"kind", string(env.Kind), "reason", string(reason), "err", err)
+	})
+	if h.liveness.Bootstrap(bootIDs) != transitionApplied {
+		return nil, errors.New("platform: invalid liveness boot image")
+	}
+	h.grantOverlay = grantOverlay
+	stateHandles, err := accessdoor.NewStateHandleResolver(cs.Authority, cs.Access)
+	if err != nil {
+		return nil, fmt.Errorf("platform: build state handle resolver: %w", err)
+	}
+	h.stateHandles = stateHandles
+	if systemAdmission.Created {
+		logger.Info("platform.member.admitted", "channel", string(cfg.ChannelID),
+			"actor", string(actor.SystemActorID), "kind", string(actor.KindSystem), "principal", "")
+	}
+
+	// 4. Build the harness Minter (the substrate mint machine). New returns a Minter, never a
 	//    bare chain — the bare writer's visibility is compile-time capped inside the
 	//    harness package. Every admission point (Spawn / attach / system closure)
 	//    Mints a Pen welded to (actorID, chID); the welded identity is unforgeable
@@ -118,6 +174,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	minter, err := harness.New(harness.Deps{
 		ChannelID: cfg.ChannelID,
 		Log:       cs.Log,
+		Authority: cs.Authority,
 		Logger:    logger,
 	})
 	if err != nil {
@@ -127,26 +184,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// channelkit's author#3 closure terminals) commits through this welded pen, so
 	// sender==SystemActorID rides each write by construction — no caller stamping
 	// at the call sites.
-	systemPen := minter.Mint(actor.SystemActorID, actor.KindSystem, cfg.ChannelID)
-
-	// 4. Bootstrap: register the intrinsic system actor so its substrate-death
-	//    terminals pass harness sender validation. Idempotent SEED: on a home
-	//    restart over a persistent channel DB the row already exists, and a raw
-	//    re-Insert would PK-conflict (actor_id is the table key) — failing Open
-	//    before the restart-recovery reconciler below can even run. Insert itself
-	//    stays strict (a duplicate is an error, locked by the store's
-	//    coverage test); the idempotent seed lives here at the genesis call site
-	//    (guard the idempotency at the platform bootstrap call site — do not relax substrate).
-	// The genesis seed is the system member's ONE admission — put it on the
-	// record through the same telemetry point Admit uses (census parity: every
-	// membership entry leaves a trace). The idempotent re-ensure of every later
-	// Open reports seeded=false and stays silent.
-	if seeded, err := cs.Membership.EnsureSystemActor(ctx, nowMs()); err != nil {
-		return nil, fmt.Errorf("platform: register system actor: %w", err)
-	} else if seeded {
-		logger.Info("platform.member.admitted", "channel", string(cfg.ChannelID),
-			"actor", string(actor.SystemActorID), "kind", string(actor.KindSystem), "principal", "")
-	}
+	systemPen := minter.Mint(actor.SystemActorID, actor.KindSystem, cfg.ChannelID, 1)
 
 	// 5. Presence fold: mechanism-only latest-value cache. The level-kind set is
 	// an assembly concern; non-level diagnostics are not accumulated here.
@@ -177,11 +215,17 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			// Hooks.Canceller uses.
 			homeOf := func() *Home { return h }
 			caps := actorcaps.Caps{
-				Pen:      systemPen,
-				Access:   cs.Access.Mint(actor.SystemActorID),
-				State:    cs.Access.MintState(actor.SystemActorID),
-				Schedule: systemScheduleHandle{home: homeOf},
-				Spawn:    systemSpawnHandle{inc: inc, home: homeOf},
+				Pen:    systemPen,
+				Access: cs.Access.Mint(storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}),
+				State: func() accessdoor.AccessHandle {
+					handle, resolveErr := h.stateHandles.Resolve(context.Background(), actor.SystemActorID)
+					if resolveErr != nil {
+						panic(resolveErr)
+					}
+					return handle
+				}(),
+				Schedule:  systemScheduleHandle{home: homeOf},
+				Lifecycle: systemSpawnHandle{inc: inc, home: homeOf},
 			}
 			hooks := actorbase.Hooks{
 				Canceller: func(target actor.ActorID, requestID message.ID) {
@@ -191,11 +235,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 				},
 			}
 			return actorbase.New(caps, hooks, sysactor.Def(sysactor.Deps{
-				Registry: cs.Registry,
-				Clock:    clock,
-				Presence: presence.NewView(presenceFold, rt, cs.Registry),
-				Logger:   logger,
-				Operate:  cfg.Operate,
+				Authority: cs.Authority,
+				Clock:     clock,
+				Presence:  presence.NewView(presenceFold, rt, cs.Authority),
+				Logger:    logger,
+				Operate:   cfg.Operate,
 			}))
 		},
 		SystemPen:    systemPen,
@@ -208,11 +252,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		// here and is left to the expiry reaper (its callers wait for the request
 		// deadline) — no liveness snapshot is ever a terminal-write dependency.
 		ClosedForever: func(ctx context.Context, id actor.ActorID) (bool, error) {
-			rec, ok, err := cs.Registry.Lookup(ctx, id)
+			_, ok, err := cs.Authority.LookupActive(ctx, id)
 			if err != nil {
 				return false, err // transient: skip this round, the reconciler retries next tick.
 			}
-			return !ok || !rec.IsActive(), nil
+			return !ok, nil
 		},
 		Clock:  clock,
 		Logger: logger,
@@ -229,8 +273,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("platform: read max seq: %w", err)
 	}
-	deliver := deliveryHandle(channel.Deliverer(), cfg.ChannelID, logger)
-
 	// 8. Register the device-presence fold once for the runtime population. Every
 	//    actor's obs wire naturally feeds this single fanout subscription; attach
 	//    churn therefore needs no per-actor watcher bookkeeping.
@@ -254,12 +296,12 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.nowMs = nowMs
 	view := &compositionView{h: h, resolver: cfg.CompositionResolver}
 	h.factories = view
-	h.desired = view
-	h.prevEagerDesired = map[actor.ActorID]desiredIncarnation{}
 	h.noFactoryWarned = map[actor.ActorID]struct{}{}
-	h.builtEpoch = map[actor.ActorID]int64{}
 	h.portIndex = map[actor.ActorID]homePortEntry{}
+	h.forkReceipts = map[forkReceiptKey]forkReceipt{}
+	h.usedForkIDs = map[actor.ActorID]struct{}{}
 	h.systemPen = systemPen
+	h.systemEnd = lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}}
 	h.reviveLogAt = map[actor.ActorID]time.Time{}
 	h.reviveBackoff = map[actor.ActorID]reviveBackoffEntry{}
 	h.pokeCh = make(chan struct{}, 1)
@@ -268,6 +310,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// construction path (human cells are born at the reconcile sweep below), so
 	// the factory's step③ slot lookup never races an absent registry.
 	h.subjectgate = subjectgate.NewRegistry()
+	channel.Cells().WatchDown(livenessDownWatcher{h: h})
 
 	// 10. Time axis (OpenScheduler). FireSink mints a pen per fire (author-welded);
 	//     Reviver activates an absent identity-timer author via SpawnIfAbsent. The
@@ -279,7 +322,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	//     from the first instant.
 	rt := channel.Cells()
 	schedMinter, engine, err := runtime.OpenScheduler(cs, schedule.AssemblyDeps{
-		Fire:   fireSink{minter: minter, registry: cs.Registry, rt: rt, chID: cfg.ChannelID},
+		Fire:   fireSink{minter: minter, authority: cs.Authority, rt: rt, chID: cfg.ChannelID},
 		Host:   rt,
 		Revive: homeReviver{h: h},
 		Clock:  cfg.Clock,
@@ -306,10 +349,10 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	links, err := link.NewAcceptor(link.Config{
 		Minter:             minter,
 		Access:             cs.Access,
+		StateHandles:       stateHandles,
 		Schedule:           schedMinter,
 		Runtime:            rt,
-		Registry:           cs.Registry,
-		Composition:        cs.Composition,
+		Authority:          cs.Authority,
 		Declarations:       homeDeclarationCoordinator{h: h},
 		ChannelID:          cfg.ChannelID,
 		Logger:             logger,
@@ -319,6 +362,9 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		DaemonAuthority:    daemonAuthorityAdapter{inner: cfg.DaemonAuthority},
 		ActorLock:          h.actorGates.lock,
 		PortIndex:          homePortIndex{h: h},
+		IdleRequest:        h.approveRemoteIdle,
+		SpawnRequest:       h.handleRemoteSpawn,
+		EndRequest:         h.handleRemoteEnd,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct link acceptor: %w", err)
@@ -331,7 +377,13 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if err := channel.Start(); err != nil {
 		return nil, fmt.Errorf("platform: start channel: %w", err)
 	}
+	if ticket, verdict := h.liveness.BeginEnsure(actor.SystemActorID, 1); verdict != transitionApplied ||
+		h.liveness.PublishLocal(actor.SystemActorID, ticket, runtimeDeliveryCarrier{id: actor.SystemActorID, deliverer: channel.Deliverer()}) != transitionApplied {
+		return nil, errors.New("platform: publish system liveness")
+	}
+	h.redeliverOpenRequests(ctx, actor.SystemActorID)
 	engine.Start()
+	deliver := deliveryHandle(h, cfg.ChannelID, logger)
 	h.delivery = tap.OpenPump(signal, cs.Query, from, deliver, logger)
 
 	// Close the late-binding window (see step 2's lateAcc note): every
@@ -382,22 +434,41 @@ func Open(cfg Config) (_ *Home, retErr error) {
 // Stopped are logged, never silently dropped). It is best-effort (push-mailbox
 // semantics): a not-hosted / full mailbox is observed, not retried, so the
 // handle always returns nil and the pump cursor always advances.
-func deliveryHandle(d actorrt.Deliverer, chID channelpkg.ID, logger *slog.Logger) func(storespec.StoredRow) error {
+type runtimeDeliveryCarrier struct {
+	id        actor.ActorID
+	deliverer actorrt.Deliverer
+}
+
+func (c runtimeDeliveryCarrier) Enqueue(env *message.Envelope) error {
+	res, err := c.deliverer.Deliver([]actor.ActorID{c.id}, env)
+	if err != nil {
+		return err
+	}
+	switch res.Per[c.id] {
+	case actorrt.Delivered:
+		return nil
+	case actorrt.MailboxFull:
+		return actorrt.ErrMailboxFull
+	case actorrt.Stopped:
+		return actorrt.ErrCellStopped
+	default:
+		return actorrt.ErrNotHosted
+	}
+}
+
+func deliveryHandle(h *Home, chID channelpkg.ID, logger *slog.Logger) func(storespec.StoredRow) error {
 	return func(row storespec.StoredRow) error {
 		env := row.Envelope
-		res, err := d.Deliver(env.Audience, &env)
-		if err != nil {
-			logger.Error("platform.delivery.error",
-				"channel", string(chID), "seq", row.Seq, "envelope", string(env.ID), "err", err)
-			return nil
-		}
-		for id, outcome := range res.Per {
-			if outcome == actorrt.Delivered {
-				continue
+		for _, id := range env.Audience {
+			verdict, err := h.liveness.AcceptDelivery(id, &env)
+			if err != nil || verdict != transitionApplied {
+				logger.Warn("platform.delivery.outcome",
+					"channel", string(chID), "seq", row.Seq, "envelope", string(env.ID),
+					"audience", string(id), "outcome", "not_accepted", "err", err)
 			}
-			logger.Warn("platform.delivery.outcome",
-				"channel", string(chID), "seq", row.Seq, "envelope", string(env.ID),
-				"audience", string(id), "outcome", hostcommon.OutcomeString(outcome))
+			if env.Kind == message.KindRequest {
+				h.pokeReconcile()
+			}
 		}
 		return nil
 	}

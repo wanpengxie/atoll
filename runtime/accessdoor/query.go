@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // QueryReject is the runtime QUERY-layer verdict closed set for Stat/List —
@@ -171,10 +172,11 @@ func ingressCreate(id resource.ResourceID, spec resourcespec.CreateSpec, initial
 
 // create runs the create decision tree under caller: kv lands immediately
 // (unchanged from the pre-§3 Invoke(OpCreate) branch, now living on its own
-// method); file kind requires placement routing (§4.3's StorageMounts policy
-// chain + Membership.Lookup Host extension) that is NOT yet wired onto Deps
-// — S4's job — so it fails honestly rather than fabricating a placement.
+// method); file kind uses the fully-wired StorageMounts plus ActorAuthority
+// placement chain and fails honestly if no unambiguous target is available.
 func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.ResourceID, spec resourcespec.CreateSpec, initial []byte) (Outcome, error) {
+	d.resourceGate.Lock()
+	defer d.resourceGate.Unlock()
 	_, exists, err := d.deps.Registry.Resolve(ctx, id)
 	if err != nil {
 		return Outcome{}, err
@@ -182,18 +184,34 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 	if exists {
 		return Outcome{RejectReason: access.AlreadyExists}, nil
 	}
-	member, err := d.deps.Membership.IsMember(ctx, caller)
+	_, member, err := d.deps.Authority.LookupActive(ctx, caller)
 	if err != nil {
 		return Outcome{}, err
 	}
 	if !member {
 		return Outcome{RejectReason: access.AccessDenied}, nil
 	}
+	world, found, err := d.deps.Authority.WorldOf(ctx, caller)
+	if err != nil {
+		return Outcome{}, err
+	}
+	if !found {
+		return Outcome{RejectReason: access.AccessDenied}, nil
+	}
+	birth := resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}
+	if world == storespec.WorldRun {
+		birth.Authority = resourcespec.BirthChannelOwned
+	} else if world != storespec.WorldDurable {
+		return Outcome{}, fmt.Errorf("accessdoor: invalid actor world %d", world)
+	}
 
 	switch spec.Kind {
 	case resourcespec.KindKV:
-		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, "", "", initial); err != nil {
+		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, "", "", initial, birth); err != nil {
 			return createVerdict(ctx, err)
+		}
+		if err := d.installCreatorOverlay(ctx, resourcespec.LandedResource{ID: id, CreatedBy: caller, Birth: birth}); err != nil {
+			return Outcome{}, err
 		}
 		return Outcome{}, nil
 
@@ -211,7 +229,7 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 		if cerr != nil {
 			return Outcome{}, cerr
 		}
-		reservationID, rerr := d.deps.Registry.ReserveCreate(ctx, id, resourcespec.KindFile, caller, daemonID, coord, spec.Dir)
+		reservationID, rerr := d.deps.Registry.ReserveCreate(ctx, id, resourcespec.KindFile, caller, daemonID, coord, spec.Dir, birth)
 		if rerr != nil {
 			return Outcome{}, rerr
 		}
@@ -254,7 +272,7 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 			// side, by reserved_at) reclaims it. Nothing to undo here.
 			return Outcome{}, aerr
 		}
-		found, cerr := d.deps.Registry.CommitReservation(ctx, reservationID)
+		_, found, cerr := d.commitReservationLocked(ctx, reservationID)
 		if cerr != nil {
 			if errors.Is(cerr, resourcespec.ErrReservationLost) {
 				// This create lost the same-resource_id race (期11 S2,
@@ -317,6 +335,8 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 // Zero rights masquerades as not_found (§3.6/design doc B1) — a deliberate,
 // documented choice, not a bug to "fix" back to access_denied.
 func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.ResourceID) (StatResult, error) {
+	d.resourceGate.Lock()
+	defer d.resourceGate.Unlock()
 	meta, exists, err := d.deps.Registry.Resolve(ctx, id)
 	if err != nil {
 		return StatResult{}, err
@@ -352,6 +372,8 @@ func (d *door) stat(ctx context.Context, caller actor.ActorID, id resource.Resou
 // resources costs ONE membership check total, never N×(ActorAllows+
 // MembersAllow) round trips (期11 spec §1.9'⑤/§3.7).
 func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (ListPage, error) {
+	d.resourceGate.Lock()
+	defer d.resourceGate.Unlock()
 	limit := normalizeListLimit(q.Limit)
 
 	registryCursor, ok := decodeQueryCursor(q.Prefix, q.Cursor)
@@ -367,7 +389,7 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 		return ListPage{}, err
 	}
 
-	isMember, err := d.deps.Membership.IsMember(ctx, caller)
+	_, isMember, err := d.deps.Authority.LookupActive(ctx, caller)
 	if err != nil {
 		return ListPage{}, err
 	}

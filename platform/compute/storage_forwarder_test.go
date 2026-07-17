@@ -19,41 +19,47 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type forwarderAuthorities struct{}
 
-func (forwarderAuthorities) ApplyComputeDeclaration(context.Context, link.PortOwner, string, []storespec.ComputeDeclaration) ([]storespec.ComputeDeclaration, error) {
+func (forwarderAuthorities) ValidateAttachment(context.Context, link.PortOwner, string, []storespec.ComputeDeclaration) ([]storespec.ComputeDeclaration, error) {
 	return nil, nil
 }
-func (forwarderAuthorities) LookupComposition(context.Context, actor.ActorID) (storespec.CompositionRecord, bool, error) {
-	return storespec.CompositionRecord{}, false, nil
+func (forwarderAuthorities) PrepareAttachmentFence(context.Context, actor.ActorID, string, int64) (link.AttachmentFence, error) {
+	return forwarderAttachmentFence{}, nil
 }
-func (forwarderAuthorities) LookupCompositionPrincipal(context.Context, string) (storespec.CompositionRecord, bool, error) {
-	return storespec.CompositionRecord{}, false, nil
+
+type forwarderAttachmentFence struct{}
+
+func (forwarderAttachmentFence) Valid() bool { return true }
+func (forwarderAuthorities) LookupActive(context.Context, actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	return storespec.ActorControlRow{}, false, nil
 }
-func (forwarderAuthorities) ListComposition(context.Context) ([]storespec.CompositionRecord, error) {
+func (forwarderAuthorities) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, nil
 }
-func (forwarderAuthorities) DefaultComposition(context.Context) (actor.ActorID, bool, error) {
-	return "", false, nil
+func (forwarderAuthorities) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	return 0, false, nil
 }
-func (forwarderAuthorities) Lookup(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-	return storespec.Record{}, false, nil
+func (forwarderAuthorities) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	return storespec.AuthorNotMember, nil
 }
-func (forwarderAuthorities) Exists(context.Context, actor.ActorID) (bool, error)    { return false, nil }
-func (forwarderAuthorities) ListActive(context.Context) ([]storespec.Record, error) { return nil, nil }
 func (forwarderAuthorities) LockAndValidate(context.Context, string, channel.ID) (func(), error) {
 	return func() {}, nil
 }
-func (forwarderAuthorities) Register(link.PortOwner, actorrt.Incarnation) {}
-func (forwarderAuthorities) Remove(link.PortOwner, actorrt.Incarnation)   {}
+func (forwarderAuthorities) Register(link.PortOwner, actorrt.Incarnation, string, int64) bool {
+	return true
+}
+func (forwarderAuthorities) Remove(link.PortOwner, actorrt.Incarnation) {}
 func (forwarderAuthorities) Take(link.PortOwner, actor.ActorID) (actorrt.Incarnation, bool) {
 	return actorrt.Incarnation{}, false
 }
 func (forwarderAuthorities) TakeOwner(link.PortOwner) []actorrt.Incarnation { return nil }
+func (forwarderAuthorities) ExpireOwner(link.PortOwner)                     {}
 
 // forwarderTestStorageHostControl is a minimal link.StorageHostControl stub:
 // ReconcilePull answers either a canned reject (err != nil, surfaced by the
@@ -109,6 +115,14 @@ func (h *forwarderTestStorageHost) reconciled() int {
 
 var _ StorageHost = (*forwarderTestStorageHost)(nil)
 
+type unusedStateHandles struct{}
+
+func (unusedStateHandles) AdmitRun(actor.ActorID) error { return nil }
+func (unusedStateHandles) EndBatch([]actor.ActorID)     {}
+func (unusedStateHandles) Resolve(context.Context, actor.ActorID) (accessdoor.AccessHandle, error) {
+	return nil, accessdoor.ErrStateHandleUnavailable
+}
+
 // dialForwarderRig wires a real Acceptor+Dialer pair (over httptest) with the
 // given StorageHostControl, and returns the Dialer already Rebind'd onto the
 // forwarder under test.
@@ -121,8 +135,8 @@ func dialForwarderRig(t *testing.T, shc link.StorageHostControl) *link.Dialer {
 		ChannelID:          channel.ID("test-channel"),
 		StorageHostControl: shc,
 		Declarations:       auth,
-		Composition:        auth,
-		Registry:           auth,
+		Authority:          auth,
+		StateHandles:       unusedStateHandles{},
 		DaemonAuthority:    auth,
 		ActorLock:          func(actor.ActorID) func() { return func() {} },
 		PortIndex:          auth,

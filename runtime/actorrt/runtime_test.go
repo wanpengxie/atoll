@@ -290,4 +290,3 @@ func TestCurrentIncarnationReplaceIsPointerLevel(t *testing.T) {
 		t.Fatal("successor handle reads IsLive=false right after go-live")
 	}
 }
-

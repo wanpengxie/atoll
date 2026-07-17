@@ -9,7 +9,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // kvSpec (the channel-scoped Create's CreateSpec) is declared once, in
@@ -41,8 +40,8 @@ func TestStateSlice1_PrivacyByStructure(t *testing.T) {
 
 	A := seedMember(t, cs, actor.ActorID("A"))
 	B := seedMember(t, cs, actor.ActorID("B"))
-	hA := cs.Access.MintState(A)
-	hB := cs.Access.MintState(B)
+	hA := cs.Access.MintState(scheduleStamp(A))
+	hB := cs.Access.MintState(scheduleStamp(B))
 
 	const id = resource.ResourceID("cursor")
 	v := []byte("A's private bytes")
@@ -79,7 +78,7 @@ func TestStateSlice2_FourStepOrderAndOpDistinctions(t *testing.T) {
 	cs := openAccessChannel(t)
 
 	A := seedMember(t, cs, actor.ActorID("A"))
-	hA := cs.Access.MintState(A)
+	hA := cs.Access.MintState(scheduleStamp(A))
 	const id = resource.ResourceID("k")
 
 	// set never exists on this locus, regardless of grant shape → ErrOpNotInScope
@@ -139,7 +138,7 @@ func TestStateSlice2b_EmptyBytes(t *testing.T) {
 	cs := openAccessChannel(t)
 
 	A := seedMember(t, cs, actor.ActorID("A"))
-	hA := cs.Access.MintState(A)
+	hA := cs.Access.MintState(scheduleStamp(A))
 
 	// create(nil) → existing row, NULL bytes → read: accepted, Found:false, Value:nil.
 	const nullID = resource.ResourceID("null-bytes")
@@ -197,12 +196,12 @@ func TestStateSlice3_WhichDataIsIdentity(t *testing.T) {
 	const id = resource.ResourceID("checkpoint")
 	v := []byte("continuity across incarnations")
 
-	h1 := cs.Access.MintState(A)
+	h1 := cs.Access.MintState(scheduleStamp(A))
 	acc(t, "gen-1 create checkpoint")(h1.Invoke(ctx, access.OpCreate, id, v, nil))
 
 	// A fresh MintState for the same owner (a later "incarnation"'s handle) reads
 	// back the earlier handle's bytes: DATA is welded to identity.
-	h2 := cs.Access.MintState(A)
+	h2 := cs.Access.MintState(scheduleStamp(A))
 	out, err := h2.Invoke(ctx, access.OpRead, id, nil, nil)
 	expectAccepted(t, "gen-2 read checkpoint", out, err)
 	expectBytes(t, "gen-2 checkpoint value", out, v)
@@ -213,9 +212,8 @@ func TestStateSlice3_WhichDataIsIdentity(t *testing.T) {
 // TestStateSlice4_CascadeClearVsNonLossy: owner deregister cascades the
 // actor-scoped locus (state dies with its owner) in the SAME tx that flips
 // the registry, while the channel-scoped plane is NON-LOSSY — a resource the actor
-// created (its row AND its R grant) survives the dereg. Both dereg entry points —
-// the single-actor Deregister and the batch ApplyMemberTransitions(removes) — run
-// the same clearActorScopedTx, so both are asserted.
+// created (its row AND its R grant) survives the end. Both single and batch
+// cascade entry shapes run the same clearActorScopedTx, so both are asserted.
 func TestStateSlice4_CascadeClearVsNonLossy(t *testing.T) {
 	ctx := context.Background()
 
@@ -225,8 +223,8 @@ func TestStateSlice4_CascadeClearVsNonLossy(t *testing.T) {
 		cs := openAccessChannel(t)
 		A := seedMember(t, cs, actor.ActorID("A"))
 
-		hState := cs.Access.MintState(A)
-		hChan := cs.Access.Mint(A)
+		hState := cs.Access.MintState(scheduleStamp(A))
+		hChan := cs.Access.Mint(scheduleStamp(A))
 
 		const stateID = resource.ResourceID("s")
 		const kvID = resource.ResourceID("kv:doc")
@@ -239,27 +237,26 @@ func TestStateSlice4_CascadeClearVsNonLossy(t *testing.T) {
 
 		// Cascade: the actor_state row is gone (same tx as the registry flip).
 		out, err := hState.Invoke(ctx, access.OpRead, stateID, nil, nil)
-		expectReason(t, "state read after dereg (cascaded)", out, err, access.ResourceNotFound)
+		expectReason(t, "state read after dereg (cascaded)", out, err, access.OwnerInactive)
 
 		// The channel-scoped resource survives, while the removed actor's direct
 		// grant is cascaded on the grantee axis.
 		out, err = hChan.Invoke(ctx, access.OpRead, kvID, nil, nil)
-		expectReason(t, "channel-scoped kv read after dereg", out, err, access.AccessDenied)
+		expectReason(t, "channel-scoped kv read after dereg", out, err, access.OwnerInactive)
 	}
 
 	t.Run("Deregister path", func(t *testing.T) {
 		assertClears(t, func(t *testing.T, cs *ChannelStores, id actor.ActorID) {
-			if err := cs.Membership.Deregister(ctx, id, 100); err != nil {
+			if err := endDeclaredTest(ctx, cs, id, 100); err != nil {
 				t.Fatalf("Deregister: %v", err)
 			}
 		})
 	})
 
-	t.Run("ApplyMemberTransitions removes path", func(t *testing.T) {
+	t.Run("batch EndCascade path", func(t *testing.T) {
 		assertClears(t, func(t *testing.T, cs *ChannelStores, id actor.ActorID) {
-			if err := cs.Membership.ApplyMemberTransitions(ctx, nil,
-				[]storespec.MemberActorRemove{{ID: id, At: 100}}); err != nil {
-				t.Fatalf("ApplyMemberTransitions: %v", err)
+			if err := endDeclaredTest(ctx, cs, id, 100); err != nil {
+				t.Fatalf("EndCascade: %v", err)
 			}
 		})
 	})
@@ -278,8 +275,8 @@ func TestStateSlice5_TwoLociMutuallyInvisible(t *testing.T) {
 
 	A := seedMember(t, cs, actor.ActorID("A")) // member: needed to create a channel-scoped resource
 
-	hChan := cs.Access.Mint(A)
-	hState := cs.Access.MintState(A)
+	hChan := cs.Access.Mint(scheduleStamp(A))
+	hState := cs.Access.MintState(scheduleStamp(A))
 
 	const stateOnly = resource.ResourceID("state-only")
 	const chanOnly = resource.ResourceID("chan-only")

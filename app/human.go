@@ -89,11 +89,11 @@ func (a *App) resolveRouting(ctx context.Context, chID channel.ID, kind message.
 		return []actor.ActorID{actor.ActorID(da)}, message.KindRequest, nil
 	}
 
-	boost, hasBoost, err := home.CompositionByPrincipal(ctx, defaultAgentPrincipal)
+	boost, hasBoost, err := home.DeclaredByPrincipal(ctx, defaultAgentPrincipal)
 	if err != nil {
 		return nil, kind, err
 	}
-	boostID := string(boost.InstanceID)
+	boostID := string(boost.ID)
 	_, boostLive := view.Stat(actor.ActorID(boostID))
 	switch {
 	case hasBoost && boostLive:

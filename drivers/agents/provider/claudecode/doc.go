@@ -16,6 +16,6 @@
 // incarnation.
 //
 // The claude SDK stays quarantined here; the registry never imports it. The
-// agent core dispatches to THIS engine when channel_composition.class is
+// agent core dispatches to THIS engine when the actor declaration class is
 // "claude"; this package self-registers via init().
 package claudecode

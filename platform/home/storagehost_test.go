@@ -56,9 +56,9 @@ type touchCall struct {
 	atMs     int64
 }
 
-func (f *fakeOutbox) CommitReservation(ctx context.Context, reservationID string) (bool, error) {
+func (f *fakeOutbox) CommitReservation(ctx context.Context, reservationID string) (resourcespec.LandedResource, bool, error) {
 	f.commitCalls = append(f.commitCalls, reservationID)
-	return f.commitFound, f.commitErr
+	return resourcespec.LandedResource{}, f.commitFound, f.commitErr
 }
 func (f *fakeOutbox) ClearTombstone(ctx context.Context, tombstoneID string) (bool, error) {
 	f.clearCalls = append(f.clearCalls, tombstoneID)

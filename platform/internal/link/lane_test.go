@@ -19,6 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // lane_test.go is 期11 spec §5's own DoD proof (§9 item 5'): a REAL door
@@ -43,6 +44,24 @@ func (m laneMembership) Lookup(_ context.Context, id actor.ActorID) (string, boo
 		return "", false, nil
 	}
 	return host, true, nil
+}
+
+func (m laneMembership) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	host := m.hosts[id]
+	p := storespec.NewServerPlacement()
+	if host != "" {
+		p, _ = storespec.NewDaemonPlacement(host)
+	}
+	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1, Placement: p}, true, nil
+}
+func (laneMembership) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+	return nil, nil
+}
+func (laneMembership) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	return storespec.WorldDurable, true, nil
+}
+func (laneMembership) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	return storespec.AuthorOK, nil
 }
 
 // laneLocalFile is an in-memory link.LocalFileOpener — the daemon-side
@@ -141,7 +160,8 @@ func newLaneDoor(t *testing.T, ref *lateAccRef, hosts map[actor.ActorID]string) 
 	m, err := accessdoor.New(accessdoor.Deps{
 		Registry:    reg,
 		Drivers:     accessdoor.DriverTable{accessdoor.KindKV: newParityDriver(reg)},
-		Membership:  laneMembership{hosts: hosts},
+		Authority:   laneMembership{hosts: hosts},
+		Overlay:     parityOverlay{},
 		State:       parityState{},
 		LaneControl: ref,
 	})
@@ -162,7 +182,7 @@ func dialLaneDaemon(t *testing.T, srv *httptest.Server, daemonID string, actorID
 		t.Fatalf("Dial(%s): %v", daemonID, err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
-	arms, err := d.OpenStream(context.Background(), actorID, 0, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), actorID, 0, "", func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream(%s): %v", daemonID, err)
 	}
@@ -175,7 +195,7 @@ func dialLaneDaemon(t *testing.T, srv *httptest.Server, daemonID string, actorID
 }
 
 // TestLaneSameDaemonLocalRoute is §5's Local-route DoD proof: a caller
-// whose Membership.Lookup Host matches the file's PlacementDaemonID gets
+// whose ActorAuthority Placement.Host matches the file's PlacementDaemonID gets
 // Route.Local=true and redeems it via ONE ResolveCoord control-RPC (never
 // the lane byte-hop) — reading back the exact bytes the daemon's
 // LocalFileOpener holds, and writing new bytes through the same route.
@@ -208,7 +228,7 @@ func TestLaneSameDaemonLocalRoute(t *testing.T) {
 	// query_test.go already cover it) with PlacementDaemonID == daemonID so
 	// the door's resolveFileRoute picks Local.
 	ctx := context.Background()
-	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerID, daemonID, coord, nil); err != nil {
+	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerID, daemonID, coord, nil, resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}); err != nil {
 		t.Fatalf("seed file row: %v", err)
 	}
 
@@ -299,7 +319,7 @@ func TestLaneCrossDaemonStreamRoute(t *testing.T) {
 	_, armsB := dialLaneDaemonAt(t, srv, daemonB, readerB, nil)
 
 	ctx := context.Background()
-	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerB, daemonA, coord, nil); err != nil {
+	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerB, daemonA, coord, nil, resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}); err != nil {
 		t.Fatalf("seed file row: %v", err)
 	}
 
@@ -407,7 +427,7 @@ func TestLaneCrossDaemonLargeTransfer(t *testing.T) {
 	_, armsB := dialLaneDaemonAt(t, srv, daemonB, readerB, nil)
 
 	ctx := context.Background()
-	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerB, daemonA, coord, nil); err != nil {
+	if err := reg.Create(ctx, rid, resourcespec.KindFile, readerB, daemonA, coord, nil, resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}); err != nil {
 		t.Fatalf("seed file row: %v", err)
 	}
 
@@ -440,7 +460,7 @@ func dialLaneDaemonAt(t *testing.T, srv *httptest.Server, daemonID string, actor
 		t.Fatalf("Dial(%s): %v", daemonID, err)
 	}
 	t.Cleanup(func() { _ = d.Close() })
-	arms, err := d.OpenStream(context.Background(), actorID, 0, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), actorID, 0, "", func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream(%s): %v", daemonID, err)
 	}

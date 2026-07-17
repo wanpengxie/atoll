@@ -143,6 +143,30 @@ type ResourceRow struct {
 	Grants []access.Grant
 }
 
+// BirthAuthorityKind is the closed authorization shape consumed by a resource
+// birth transaction. It deliberately cannot carry arbitrary grants or a
+// callback: the store executes one of two audited, atomic grant recipes.
+type BirthAuthorityKind uint8
+
+const (
+	BirthCreatorIdentity BirthAuthorityKind = iota + 1
+	BirthChannelOwned
+)
+
+type ResourceBirthPlan struct {
+	Authority BirthAuthorityKind
+}
+
+type LandedResource struct {
+	ID        resource.ResourceID
+	CreatedBy actor.ActorID
+	Birth     ResourceBirthPlan
+}
+
+func (p ResourceBirthPlan) Valid() bool {
+	return p.Authority == BirthCreatorIdentity || p.Authority == BirthChannelOwned
+}
+
 // Registry is the R (authorization relation) + resource-existence contract —
 // the object-lifecycle truth the door consults and mutates. One per channel
 // (access is channel-scoped). Implemented by runtime/internal/store.
@@ -171,7 +195,7 @@ type Registry interface {
 	// kv's inline value; always nil for file (its bytes never ride this
 	// param — a with-content file create lands via ReserveCreate +
 	// CommitReservation instead, never this method).
-	Create(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte) error
+	Create(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, birth ResourceBirthPlan) error
 
 	// ReserveCreate is the create-outbox's SERVER-side write-ahead half
 	// (§1.3/§1.7, for a with-content file create ONLY — kv and
@@ -189,7 +213,7 @@ type Registry interface {
 	// so the landed resources row carries it (the door's later Open routing
 	// reads it, §丁12). Always false for a with-content create (dir+with_content
 	// is an ingress-rejected combination — a directory carries no byte stream).
-	ReserveCreate(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool) (reservationID string, err error)
+	ReserveCreate(ctx context.Context, id resource.ResourceID, kind ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, birth ResourceBirthPlan) (reservationID string, err error)
 
 	// CommitReservation is create-outbox's landing half (driven by the
 	// daemon's Committed(reservation_id) RPC, §4.7): looks up reservationID,
@@ -208,7 +232,7 @@ type Registry interface {
 	// deleted, but ANOTHER reservation already landed the same resource_id
 	// first (§1.7's "并发败者") — the caller (§4) signals the daemon to
 	// clean its staged bytes, never retries the write.
-	CommitReservation(ctx context.Context, reservationID string) (found bool, err error)
+	CommitReservation(ctx context.Context, reservationID string) (landed LandedResource, found bool, err error)
 
 	// ActorAllows is the actor-entry half of R.allows for OBJECT ops: whether
 	// caller's direct actor entry grants op. members late-binding is NOT here —
@@ -369,7 +393,7 @@ type Registry interface {
 // automatically (Go structural typing) — runtime/storeopen.go re-exports the
 // SAME value under this narrower type, never a second implementation.
 type ResourceOutbox interface {
-	CommitReservation(ctx context.Context, reservationID string) (found bool, err error)
+	CommitReservation(ctx context.Context, reservationID string) (landed LandedResource, found bool, err error)
 	ClearTombstone(ctx context.Context, tombstoneID string) (found bool, err error)
 	ReservationDaemon(ctx context.Context, reservationID string) (daemonID string, found bool, err error)
 	TombstoneDaemon(ctx context.Context, tombstoneID string) (daemonID string, found bool, err error)

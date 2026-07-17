@@ -17,16 +17,10 @@ import (
 // compute state, readiness is application business state. Neither is substrate
 // membership.
 type Record struct {
-	ID        actor.ActorID
-	Kind      actor.Kind
-	Principal string
-	Binding   actor.Binding // empty for human / system
-	// Host is the placement locus of the actor's embodiment — "" = the server's
-	// own home process, a compute id = the daemon that hosts the cell. It is a
-	// durable membership fact (which node is responsible for this actor) so the
-	// server can reconcile the attached set of a specific compute against its
-	// declarations. Empty is the home default and the zero value.
-	Host           string
+	ID             actor.ActorID
+	Kind           actor.Kind
+	Principal      string
+	Binding        actor.Binding // empty for human / system
 	CreatedAt      int64
 	DeregisteredAt int64 // 0 = active
 }
@@ -34,29 +28,6 @@ type Record struct {
 // IsActive reports whether the actor is still active.
 func (r Record) IsActive() bool { return r.DeregisteredAt == 0 }
 
-// Registry is the channel-local actor membership READ contract —
-// deliberately SEGREGATED from the membership-write surface so a read-only
-// consumer never receives membership mutation methods.
-// Membership mutation lives on MembershipWriter / MembershipControlPlane (a
-// control-plane write that is NOT a query). Derived from the reader's
-// role, not from any one consumer. Concrete sqlite backend lives in
-// runtime/store (actorRegistry, which satisfies all three interfaces).
-type Registry interface {
-	Lookup(ctx context.Context, id actor.ActorID) (Record, bool, error)
-	Exists(ctx context.Context, id actor.ActorID) (bool, error)
-	ListActive(ctx context.Context) ([]Record, error)
-}
-
 type PrincipalRegistry interface {
 	LookupActivePrincipal(ctx context.Context, kind actor.Kind, principal string) (Record, bool, error)
-}
-
-// MembershipWriter is the single-actor membership-write surface. It is
-// SEGREGATED from the read-only Registry: Deregister soft-removes one. These are
-// control-plane writes, not queries, so a read-only caller cannot reach them.
-// The log-emitting batch transition lives on MembershipControlPlane; this is
-// the imperative single-actor teardown path. Concrete impl in
-// runtime/store (actorRegistry).
-type MembershipWriter interface {
-	Deregister(ctx context.Context, id actor.ActorID, at int64) error
 }

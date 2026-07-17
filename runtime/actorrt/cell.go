@@ -31,7 +31,7 @@ type cell struct {
 	id       actor.ActorID
 	mintKind actor.Kind
 	impl     Actor
-	inbox    chan *message.Envelope
+	inbox    chan cellInput
 
 	// started is the substrate-stamped bind instant — the obs `uptime` fact's
 	// authoritative source (uptime = now - started, derived by the consumer).
@@ -98,6 +98,16 @@ type cell struct {
 	cancelOverflow atomic.Uint64
 }
 
+type cellInput struct {
+	env          *message.Envelope
+	idleApproved bool
+}
+
+// IdleCommandReceiver is the optional occupant command arm used by the
+// liveness supervisor. The command is injected through the cell's same ordered
+// inbox as deliveries, never through a side channel.
+type IdleCommandReceiver interface{ IdleApproved() }
+
 // cancelSetCap bounds a cell's pending-cancel set. Sized to the serve ledger's
 // own capacity (actorbase engine.go: newServeLedger(…, 256)) — the account of
 // in-flight requests a cell can be serving is the natural ceiling on how many
@@ -132,7 +142,7 @@ func allocShell(parent context.Context, id actor.ActorID, kind actor.Kind, mailb
 	return &cell{
 		id:            id,
 		mintKind:      kind,
-		inbox:         make(chan *message.Envelope, mailbox),
+		inbox:         make(chan cellInput, mailbox),
 		started:       started,
 		ctx:           ctx,
 		cancel:        cancel,
@@ -190,10 +200,29 @@ func (c *cell) Deliver(env *message.Envelope) error {
 	c.mu.Unlock()
 
 	select {
-	case c.inbox <- env:
+	case c.inbox <- cellInput{env: env}:
 		return nil
 	default:
 		return ErrMailboxFull
+	}
+}
+
+func (c *cell) approveIdle() error {
+	c.mu.Lock()
+	if c.closed {
+		c.mu.Unlock()
+		return ErrCellStopped
+	}
+	c.mu.Unlock()
+	// Idle approval is a control command, never data overflow. Home has already
+	// removed this carrier from L before calling us, so no new deliveries can
+	// enter behind it; waiting for existing inbox work to drain is bounded by
+	// that work and preserves FIFO RetireAfterDrain semantics.
+	select {
+	case c.inbox <- cellInput{idleApproved: true}:
+		return nil
+	case <-c.ctx.Done():
+		return ErrCellStopped
 	}
 }
 
@@ -295,8 +324,14 @@ func (c *cell) start() {
 			case err := <-dying:
 				deathCause = err
 				return
-			case env := <-c.inbox:
-				c.safeReceive(env)
+			case input := <-c.inbox:
+				if input.idleApproved {
+					if receiver, ok := c.impl.(IdleCommandReceiver); ok {
+						receiver.IdleApproved()
+					}
+					continue
+				}
+				c.safeReceive(input.env)
 			}
 		}
 	}()
@@ -482,4 +517,4 @@ func (c *cell) beginTeardown() {
 // (no frame write to bound). The distinction exists only so the by-name
 // termination entries reach a port's wire signal; a cell collapses it. Non-joining
 // — the escort watches doneCh bounded by grace, no goroutine ever self-joins.
-func (c *cell) signalDespawn(_ context.Context) { c.initiateStop() }
+func (c *cell) signalDespawn(_ context.Context, _ string) { c.initiateStop() }

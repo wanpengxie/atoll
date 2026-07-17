@@ -19,12 +19,17 @@ import (
 // synthesize" posture as an unrouted type, never a bogus empty directory).
 type errRegistry struct{ err error }
 
-func (e errRegistry) Lookup(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-	return storespec.Record{}, false, nil
+func (e errRegistry) LookupActive(context.Context, actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	return storespec.ActorControlRow{}, false, nil
 }
-func (e errRegistry) Exists(context.Context, actor.ActorID) (bool, error) { return false, nil }
-func (e errRegistry) ListActive(context.Context) ([]storespec.Record, error) {
+func (e errRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, e.err
+}
+func (e errRegistry) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	return 0, false, e.err
+}
+func (e errRegistry) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	return 0, e.err
 }
 
 func newDescribeReq() actorbase.Msg {
@@ -37,7 +42,7 @@ func newDescribeReq() actorbase.Msg {
 func TestRespondDescribe(t *testing.T) {
 	req := newDescribeReq()
 	sys := &fakeSys{}
-	s := New(Deps{Registry: fakeRegistry{}})
+	s := New(Deps{Authority: fakeRegistry{}})
 
 	s.handle(sys, req)
 	if len(sys.replies) != 1 {
@@ -65,7 +70,7 @@ func TestRespondDescribe(t *testing.T) {
 func TestRespondDescribe_TypeSelector(t *testing.T) {
 	req := requestMsg("q-desc", introspect.QueryDescribe, []byte(`{"type":"actor.list"}`))
 	sys := &fakeSys{}
-	s := New(Deps{Registry: fakeRegistry{}})
+	s := New(Deps{Authority: fakeRegistry{}})
 
 	s.handle(sys, req)
 	if len(sys.replies) != 1 {
@@ -89,7 +94,7 @@ func TestRespondDescribe_TypeSelector(t *testing.T) {
 func TestRespondDescribe_UnknownSelector(t *testing.T) {
 	req := requestMsg("q-desc", introspect.QueryDescribe, []byte(`{"type":"nope"}`))
 	sys := &fakeSys{}
-	s := New(Deps{Registry: fakeRegistry{}})
+	s := New(Deps{Authority: fakeRegistry{}})
 
 	s.handle(sys, req)
 	if len(sys.replies) != 0 {
@@ -111,7 +116,7 @@ func TestReceive_NonRequestIgnored(t *testing.T) {
 	}
 	for _, c := range cases {
 		sys := &fakeSys{}
-		s := New(Deps{Registry: fakeRegistry{}})
+		s := New(Deps{Authority: fakeRegistry{}})
 		msg := actorbase.NewMsg(context.Background(), message.Envelope{ID: "e1", Kind: c.kind, Type: c.typ})
 		s.handle(sys, msg)
 		if len(sys.replies) != 0 {
@@ -125,7 +130,7 @@ func TestReceive_NonRequestIgnored(t *testing.T) {
 func TestRespondList_RegistryError(t *testing.T) {
 	listReq := requestMsg("q1", introspect.QueryList, nil)
 	sys := &fakeSys{}
-	s := New(Deps{Registry: errRegistry{err: errors.New("registry down")}})
+	s := New(Deps{Authority: errRegistry{err: errors.New("registry down")}})
 
 	s.handle(sys, listReq)
 	if len(sys.replies) != 0 {
@@ -142,7 +147,7 @@ func TestObs_NilStat(t *testing.T) {
 	listReq := requestMsg("q1", introspect.QueryList, nil)
 	sys := &fakeSys{}
 	// Stat left nil → everyone absent.
-	s := New(Deps{Registry: reg})
+	s := New(Deps{Authority: reg})
 
 	s.handle(sys, listReq)
 	raw, err := json.Marshal(sys.replies[0].v)
@@ -172,9 +177,9 @@ func TestObs_PresentZeroStartedAt(t *testing.T) {
 	sys := &fakeSys{}
 	// present=true but started=zero time → uptime guarded to 0.
 	s := New(Deps{
-		Registry: reg,
-		Presence: fakeStat{present: map[actor.ActorID]bool{"actor:a": true}},
-		Clock:    func() time.Time { return time.Unix(1000, 0) },
+		Authority: reg,
+		Presence:  fakeStat{present: map[actor.ActorID]bool{"actor:a": true}},
+		Clock:     func() time.Time { return time.Unix(1000, 0) },
 	})
 
 	s.handle(sys, listReq)

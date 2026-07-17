@@ -62,6 +62,7 @@ func New(deps Deps) (Minter, error) {
 		newStepTypeRegistered(deps),
 		newStepKindAndAudience(deps),
 		newStepResponsePairing(deps),
+		newStepAuthorGate(deps),
 		// StepEngineAppend (step 9) is fused into chain.write so the Step
 		// interface can stay pure (no side-effects beyond envelope
 		// mutation). Keeping engine append out of the Step slice also
@@ -194,6 +195,8 @@ func stepName(step stepID) string {
 		return "kind_and_audience"
 	case StepResponsePairing:
 		return "response_pairing"
+	case StepAuthorGate:
+		return "author_gate"
 	case StepEngineAppend:
 		return "engine_append"
 	default:

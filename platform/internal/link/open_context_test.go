@@ -87,14 +87,14 @@ func TestOpenStream_CancelAfterOpenIssuedKillsLink(t *testing.T) {
 	d := &Dialer{lc: ls, streams: map[actor.ActorID]*actorStream{}}
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
-	_, err := d.OpenStream(ctx, actor.ActorID("tool-a"), 17, func(*message.Envelope) error { return nil }, nil)
+	_, err := d.OpenStream(ctx, actor.ActorID("tool-a"), 17, "", func(*message.Envelope) error { return nil }, nil)
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("OpenStream error = %v, want context deadline", err)
 	}
 	select {
 	case hp := <-handshakeSeen:
-		if hp.LeaseID != "tool-a" || hp.Epoch != 17 {
-			t.Fatalf("handshake = %+v, want lease tool-a epoch 17", hp)
+		if hp.LeaseID != "tool-a" || hp.Version != 17 {
+			t.Fatalf("handshake = %+v, want lease tool-a version 17", hp)
 		}
 	case <-time.After(time.Second):
 		t.Fatal("peer did not receive handshake before cancellation")

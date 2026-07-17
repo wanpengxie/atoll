@@ -18,6 +18,6 @@ func TestActivationContractShapes(t *testing.T) {
 	var _ func(DesiredSource, context.Context) ([]DesiredMember, error) = DesiredSource.Members
 
 	// DesiredMember carries identity, protocol classification and incarnation
-	// epoch — the desired-state row the reconcile diff reads.
-	_ = DesiredMember{ID: actor.ActorID("a"), Kind: actor.KindAgent, Epoch: 1}
+	// declaration version — the desired-state row the reconcile diff reads.
+	_ = DesiredMember{ID: actor.ActorID("a"), Kind: actor.KindAgent, Version: 1}
 }

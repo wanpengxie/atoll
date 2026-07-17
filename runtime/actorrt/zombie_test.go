@@ -105,27 +105,6 @@ func TestG0_TerminationEntriesNonBlocking(t *testing.T) {
 			_, _, _ = rt.SpawnIfAbsent("a", actor.KindAgent, static(newRecordActor()))
 		})
 	})
-	t.Run("DespawnChild", func(t *testing.T) {
-		t.Parallel()
-		rt, _ := New(Config{Parent: context.Background(), ZombieGrace: time.Second})
-		parent, _, _ := rt.SpawnIfAbsent("p", actor.KindAgent, static(newRecordActor()))
-		child := newBlockActor(false)
-		childID := actor.ActorID("p/c")
-		if _, err := rt.Fork(parent, childID, actor.KindAgent, static(child)); err != nil {
-			t.Fatalf("Fork: %v", err)
-		}
-		mustDeliver(t, rt, childID, env("x"))
-		select {
-		case <-child.entered:
-		case <-time.After(2 * time.Second):
-			t.Fatal("child worker never entered Receive")
-		}
-		mustReturnFast(t, "DespawnChild", func() {
-			if err := rt.DespawnChild(parent, childID); err != nil {
-				t.Fatalf("DespawnChild: %v", err)
-			}
-		})
-	})
 }
 
 // TestG0_AccountEqualsResidue (DoD③): a judged-dead body appears on the ledger;

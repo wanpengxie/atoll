@@ -188,7 +188,7 @@ func (h homeStorageHostControl) Committed(ctx context.Context, senderDaemonID, r
 	if placementDaemonID != senderDaemonID {
 		return false, false, fmt.Errorf("%w: reservation %q belongs to %q, sender is %q", errSenderDaemonMismatch, reservationID, placementDaemonID, senderDaemonID)
 	}
-	landed, cerr := h.outbox.CommitReservation(ctx, reservationID)
+	_, landed, cerr := h.outbox.CommitReservation(ctx, reservationID)
 	if cerr != nil {
 		if errors.Is(cerr, accessdoor.ErrReservationLost) {
 			return landed, true, nil

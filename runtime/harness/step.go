@@ -28,7 +28,8 @@ const (
 	StepTypeRegistered   stepID = 5
 	StepKindAndAudience  stepID = 7
 	StepResponsePairing  stepID = 8
-	StepEngineAppend     stepID = 9
+	StepAuthorGate       stepID = 9
+	StepEngineAppend     stepID = 10
 )
 
 // outcome describes the result of running one step against an envelope.
@@ -87,5 +88,5 @@ type Pen interface {
 // is the highest capability in the system, so archtest confines harness.Minter
 // type references to the platform tree.
 type Minter interface {
-	Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID) Pen
+	Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID, birthVersion int64) Pen
 }

@@ -213,12 +213,12 @@ func (w *fanoutWorker) apply(job fanoutJob) error {
 			}
 			id := actor.ActorID(target.InstanceID)
 			if job.op == "delete" {
-				if err := h.RemoveInstance(w.ctx, id); err != nil && !errors.Is(err, storespec.ErrCompositionNotFound) {
+				if err := h.RemoveInstance(w.ctx, id); err != nil && !errors.Is(err, storespec.ErrActorNotFound) {
 					return err
 				}
 			} else {
 				_, _, err := h.ApplyRestartTarget(w.ctx, job.id, id)
-				if err != nil && !errors.Is(err, storespec.ErrCompositionNotFound) {
+				if err != nil && !errors.Is(err, storespec.ErrActorNotFound) {
 					return err
 				}
 			}

@@ -276,16 +276,16 @@ func TestDeliverStoppedOutcome(t *testing.T) {
 // the substrate refuses to report Delivered for any non-nil enqueue error).
 type fakeErrEmbodiment struct{ started time.Time }
 
-func (fakeErrEmbodiment) Deliver(*message.Envelope) error { return errors.New("weird enqueue error") }
-func (p fakeErrEmbodiment) startedAt() time.Time          { return p.started }
-func (fakeErrEmbodiment) cancelRequest(message.ID)        {}
-func (fakeErrEmbodiment) initiateStop()                   {}
-func (fakeErrEmbodiment) beginTeardown()                  {}
-func (fakeErrEmbodiment) signalDespawn(context.Context)   {}
-func (fakeErrEmbodiment) doneCh() <-chan struct{}         { return nil }
-func (fakeErrEmbodiment) isLive() bool                    { return false }
-func (fakeErrEmbodiment) markDead()                       {}
-func (fakeErrEmbodiment) kind() actor.Kind                { return "" }
+func (fakeErrEmbodiment) Deliver(*message.Envelope) error       { return errors.New("weird enqueue error") }
+func (p fakeErrEmbodiment) startedAt() time.Time                { return p.started }
+func (fakeErrEmbodiment) cancelRequest(message.ID)              {}
+func (fakeErrEmbodiment) initiateStop()                         {}
+func (fakeErrEmbodiment) beginTeardown()                        {}
+func (fakeErrEmbodiment) signalDespawn(context.Context, string) {}
+func (fakeErrEmbodiment) doneCh() <-chan struct{}               { return nil }
+func (fakeErrEmbodiment) isLive() bool                          { return false }
+func (fakeErrEmbodiment) markDead()                             {}
+func (fakeErrEmbodiment) kind() actor.Kind                      { return "" }
 
 // TestDeliverDefaultArmMapsToStopped: an enqueue error that is neither
 // ErrMailboxFull nor ErrCellStopped maps to Stopped (deliver's default switch
@@ -563,6 +563,32 @@ func TestAttachAckFailurePreservesIncumbent(t *testing.T) {
 		t.Fatalf("deliver after failed replacement = %v, want Delivered", got)
 	}
 	waitZombiesZero(t, rt, time.Second)
+}
+
+func TestPreparedAttachFenceFailurePreservesIncumbent(t *testing.T) {
+	rt, _ := New(Config{Parent: context.Background()})
+	_, remote := dialPort(t, rt, "old", nopEmit, staticResolve("remote-fenced"), nil)
+	defer remote.conn.Close()
+	defer rt.StopAll()
+	old, _ := rt.CurrentIncarnation("remote-fenced")
+	hostConn, remoteConn := net.Pipe()
+	go func() {
+		codec := ipc.NewCodec(remoteConn, remoteConn)
+		payload, _ := json.Marshal(ipc.HandshakePayload{LeaseID: "stale-ticket"})
+		_ = codec.Write(ipc.Frame{Kind: ipc.KindHandshake, Payload: payload})
+		_ = remoteConn.Close()
+	}()
+	prepared, err := rt.PrepareHandshake(context.Background(), hostConn, Sinks{Emit: nopEmit}, staticResolve("remote-fenced"), nil, nil, func(Incarnation) {})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := prepared.Commit(func() bool { return false }); err == nil {
+		t.Fatal("stale attachment fence unexpectedly committed")
+	}
+	current, ok := rt.CurrentIncarnation("remote-fenced")
+	if !ok || current != old || !rt.IsLive(old) {
+		t.Fatalf("fence failure displaced incumbent: current=%v old=%v live=%v", current, old, rt.IsLive(old))
+	}
 }
 
 // TestNewPortNilLoggerDefaulted: newPort defaults a nil logger to discard (the

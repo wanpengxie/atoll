@@ -67,11 +67,11 @@ func TestOpenScheduler_AssembledMintWorks(t *testing.T) {
 	t.Cleanup(engine.Close)
 	engine.Start()
 
-	author, err := cs.Membership.Admit(ctx, actor.KindAgent, "timer-owner", 1)
+	author, err := admitDeclaredTest(ctx, cs, actor.KindAgent, "timer-owner", 1)
 	if err != nil {
 		t.Fatalf("Admit timer owner: %v", err)
 	}
-	handle := minter.Mint(author)
+	handle := minter.Mint(scheduleStamp(author))
 
 	id, err := handle.Schedule(ctx, schedule.ScheduleReq{
 		Bind:   schedule.BindIdentity,

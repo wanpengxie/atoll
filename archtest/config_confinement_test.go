@@ -21,7 +21,7 @@ func TestConfigNotInCaps(t *testing.T) {
 	rawMessage := reflect.TypeOf(json.RawMessage(nil))
 	capsT := reflect.TypeOf(actorcaps.Caps{})
 
-	want := map[string]bool{"Pen": true, "Access": true, "State": true, "Schedule": true, "Spawn": true}
+	want := map[string]bool{"Pen": true, "Access": true, "State": true, "Schedule": true, "Lifecycle": true}
 
 	got := map[string]bool{}
 	for i := 0; i < capsT.NumField(); i++ {

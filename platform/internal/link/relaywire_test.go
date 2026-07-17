@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // The §1.7 capability-parity contract: an out-of-process (port) actor's plane-2
@@ -47,12 +48,20 @@ type fakeAccessMinter struct {
 	calls []fakeAccessCall
 }
 
-func (m *fakeAccessMinter) Mint(caller actor.ActorID) accessdoor.ResourceAccessHandle {
-	return &fakeAccessHandle{m: m, caller: caller, scope: "channel"}
+type fakeStateResolver struct{ minter *fakeAccessMinter }
+
+func (r fakeStateResolver) AdmitRun(actor.ActorID) error { return nil }
+func (r fakeStateResolver) EndBatch([]actor.ActorID)     {}
+func (r fakeStateResolver) Resolve(_ context.Context, id actor.ActorID) (accessdoor.AccessHandle, error) {
+	return &fakeAccessHandle{m: r.minter, caller: id, scope: "resolved-state"}, nil
 }
 
-func (m *fakeAccessMinter) MintState(owner actor.ActorID) accessdoor.AccessHandle {
-	return &fakeAccessHandle{m: m, caller: owner, scope: "state"}
+func (m *fakeAccessMinter) Mint(caller storespec.AuthorStamp) accessdoor.ResourceAccessHandle {
+	return &fakeAccessHandle{m: m, caller: caller.ID, scope: "channel"}
+}
+
+func (m *fakeAccessMinter) MintState(owner storespec.AuthorStamp) accessdoor.AccessHandle {
+	return &fakeAccessHandle{m: m, caller: owner.ID, scope: "state"}
 }
 
 func (m *fakeAccessMinter) record(c fakeAccessCall) {
@@ -101,6 +110,12 @@ func (h *fakeAccessHandle) List(_ context.Context, q accessdoor.ListQuery) (acce
 	h.m.record(fakeAccessCall{caller: h.caller, scope: h.scope})
 	return accessdoor.ListPage{}, nil
 }
+func (h *fakeAccessHandle) Open(context.Context, resource.ResourceID, access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+	return accessdoor.FileAccess{}, accessdoor.Outcome{}, accessdoor.ErrFileCapabilityUnavailable
+}
+func (h *fakeAccessHandle) Redeem(context.Context, accessdoor.FileRoute) (accessdoor.FileAccess, error) {
+	return accessdoor.FileAccess{}, accessdoor.ErrFileCapabilityUnavailable
+}
 
 // --- fake time axis ---
 
@@ -115,8 +130,8 @@ type fakeScheduleMinter struct {
 	calls []fakeScheduleCall
 }
 
-func (m *fakeScheduleMinter) Mint(author actor.ActorID) schedule.ScheduleHandle {
-	return &fakeScheduleHandle{m: m, author: author}
+func (m *fakeScheduleMinter) Mint(author storespec.AuthorStamp) schedule.ScheduleHandle {
+	return &fakeScheduleHandle{m: m, author: author.ID}
 }
 
 func (m *fakeScheduleMinter) record(c fakeScheduleCall) {
@@ -146,10 +161,16 @@ func (h *fakeScheduleHandle) Cancel(_ context.Context, id schedule.TimerID) erro
 	return nil
 }
 
+func (h *fakeScheduleHandle) Ack(_ context.Context, id schedule.TimerID) error {
+	h.m.record(fakeScheduleCall{author: h.author, canceled: id})
+	return nil
+}
+
 // --- capability rig: a home wired with the plane-2 + time-axis minters ---
 
 type capsRig struct {
 	access *fakeAccessMinter
+	state  *fakeAccessMinter
 	sched  *fakeScheduleMinter
 	acc    *link.Acceptor
 	srv    *httptest.Server
@@ -158,15 +179,16 @@ type capsRig struct {
 func newCapsRig(t *testing.T) *capsRig {
 	t.Helper()
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	r := &capsRig{access: &fakeAccessMinter{}, sched: &fakeScheduleMinter{}}
+	r := &capsRig{access: &fakeAccessMinter{}, state: &fakeAccessMinter{}, sched: &fakeScheduleMinter{}}
 	r.acc = newTestAcceptor(t, link.Config{
-		Minter:    &stubMinter{},
-		Access:    r.access,
-		Schedule:  r.sched,
-		Runtime:   rt,
-		ChannelID: testChannelID,
-		LeasePing: 5 * time.Second,
-		LeaseTTL:  30 * time.Second,
+		Minter:       &stubMinter{},
+		Access:       r.access,
+		StateHandles: fakeStateResolver{minter: r.state},
+		Schedule:     r.sched,
+		Runtime:      rt,
+		ChannelID:    testChannelID,
+		LeasePing:    5 * time.Second,
+		LeaseTTL:     30 * time.Second,
 	})
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.acc.Serve(w, req, "daemon-1")
@@ -185,7 +207,7 @@ func dialArms(t *testing.T, r *capsRig, id actor.ActorID) (link.CellArms, *link.
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	arms, err := d.OpenStream(context.Background(), id, 0, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), id, 0, "", func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -204,7 +226,7 @@ func TestAccessArmCellPortParity(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	ctx := context.Background()
-	cell := r.access.Mint(toolID) // the in-proc twin: same door, welded directly
+	cell := r.access.Mint(storespec.AuthorStamp{ID: toolID, BirthVersion: 1}) // the in-proc twin
 
 	cases := []struct {
 		name string
@@ -245,8 +267,11 @@ func TestStateArmRoutesToActorScope(t *testing.T) {
 	if _, err := arms.State.Invoke(context.Background(), access.OpWrite, "own-state", []byte("v"), nil); err != nil {
 		t.Fatalf("state invoke: %v", err)
 	}
-	if got := r.access.last(); got.caller != toolID || got.scope != "state" {
-		t.Fatalf("state call = %+v, want caller=%q scope=state (MintState branch)", got, toolID)
+	if got := r.state.last(); got.caller != toolID || got.scope != "resolved-state" {
+		t.Fatalf("state call = %+v, want caller=%q through StateHandleResolver", got, toolID)
+	}
+	if len(r.access.calls) != 0 {
+		t.Fatalf("state relay bypassed resolver through raw access minter: %+v", r.access.calls)
 	}
 }
 
@@ -267,7 +292,7 @@ func TestAccessArmPreSendCancelIsDefiniteError(t *testing.T) {
 	cancel()
 
 	// Cell path: synchronous, the cancelled ctx does not manufacture an unknown.
-	cellOut, cellErr := r.access.Mint(toolID).Invoke(cancelled, access.OpRead, "r", []byte("x"), nil)
+	cellOut, cellErr := r.access.Mint(storespec.AuthorStamp{ID: toolID, BirthVersion: 1}).Invoke(cancelled, access.OpRead, "r", []byte("x"), nil)
 	if cellErr != nil || cellOut.RejectReason == access.OutcomeUnknown {
 		t.Fatalf("cell path produced outcome_unknown (err=%v out=%+v) — only the wire may", cellErr, cellOut)
 	}
@@ -330,7 +355,7 @@ func TestScheduleArmCellPortParity(t *testing.T) {
 	ctx := context.Background()
 	req := schedule.ScheduleReq{Bind: schedule.BindIdentity, FireAt: 123, Type: "wake", CorrelationID: "corr-xyz"}
 
-	cellTID, cellErr := r.sched.Mint(toolID).Schedule(ctx, req)
+	cellTID, cellErr := r.sched.Mint(storespec.AuthorStamp{ID: toolID, BirthVersion: 1}).Schedule(ctx, req)
 	if cellErr != nil {
 		t.Fatalf("cell schedule: %v", cellErr)
 	}
@@ -386,7 +411,7 @@ func dialArmsWithMinters(t *testing.T, access accessdoor.AccessMinter, sched sch
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	arms, err := d.OpenStream(context.Background(), id, 0, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), id, 0, "", func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -403,10 +428,10 @@ type blockingAccessMinter struct {
 	once    sync.Once
 }
 
-func (m *blockingAccessMinter) Mint(actor.ActorID) accessdoor.ResourceAccessHandle {
+func (m *blockingAccessMinter) Mint(storespec.AuthorStamp) accessdoor.ResourceAccessHandle {
 	return &blockingAccessHandle{m: m}
 }
-func (m *blockingAccessMinter) MintState(actor.ActorID) accessdoor.AccessHandle {
+func (m *blockingAccessMinter) MintState(storespec.AuthorStamp) accessdoor.AccessHandle {
 	return &blockingAccessHandle{m: m}
 }
 
@@ -443,6 +468,14 @@ func (h *blockingAccessHandle) List(ctx context.Context, _ accessdoor.ListQuery)
 	h.block(ctx)
 	return accessdoor.ListPage{}, nil
 }
+func (h *blockingAccessHandle) Open(ctx context.Context, _ resource.ResourceID, _ access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+	h.block(ctx)
+	return accessdoor.FileAccess{}, accessdoor.Outcome{}, nil
+}
+func (h *blockingAccessHandle) Redeem(ctx context.Context, _ accessdoor.FileRoute) (accessdoor.FileAccess, error) {
+	h.block(ctx)
+	return accessdoor.FileAccess{}, nil
+}
 
 type blockingScheduleMinter struct {
 	entered chan struct{}
@@ -450,7 +483,7 @@ type blockingScheduleMinter struct {
 	once    sync.Once
 }
 
-func (m *blockingScheduleMinter) Mint(actor.ActorID) schedule.ScheduleHandle {
+func (m *blockingScheduleMinter) Mint(storespec.AuthorStamp) schedule.ScheduleHandle {
 	return &blockingScheduleHandle{m: m}
 }
 
@@ -466,6 +499,7 @@ func (h *blockingScheduleHandle) Schedule(ctx context.Context, _ schedule.Schedu
 }
 
 func (h *blockingScheduleHandle) Cancel(context.Context, schedule.TimerID) error { return nil }
+func (h *blockingScheduleHandle) Ack(context.Context, schedule.TimerID) error    { return nil }
 
 // TestAccessArmOutcomeUnknownOnTransportDeath exercises outcome_unknown through the
 // PRIMARY real-world producer: the transport dying with an access invoke in flight

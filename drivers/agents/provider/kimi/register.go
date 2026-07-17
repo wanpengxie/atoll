@@ -17,7 +17,7 @@ import (
 // workspace, a server-embedded build does not).
 //
 // Config layers env DEFAULTS under the per-instance spec.Config overlay
-// (channel_composition.config_json). It builds the agent as a base.Def (a Proc over
+// (the applied declaration config). It builds the agent as a base.Def (a Proc over
 // agent/base's skeleton), NOT a raw actorrt.Actor (期10 S5: the mailbox loop /
 // turn queue / response分拣 live in the base). A missing channel / id / creds is
 // a hard error.

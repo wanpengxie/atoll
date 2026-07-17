@@ -55,6 +55,12 @@ func (a *recordAccess) List(context.Context, accessdoor.ListQuery) (accessdoor.L
 	a.mu.Unlock()
 	return accessdoor.ListPage{}, nil
 }
+func (a *recordAccess) Open(context.Context, resource.ResourceID, access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+	return accessdoor.FileAccess{}, accessdoor.Outcome{}, accessdoor.ErrFileCapabilityUnavailable
+}
+func (a *recordAccess) Redeem(context.Context, accessdoor.FileRoute) (accessdoor.FileAccess, error) {
+	return accessdoor.FileAccess{}, accessdoor.ErrFileCapabilityUnavailable
+}
 
 func (a *recordAccess) count() int {
 	a.mu.Lock()
@@ -126,6 +132,8 @@ func (s *recordSchedule) Cancel(context.Context, schedule.TimerID) error {
 	s.mu.Unlock()
 	return nil
 }
+
+func (s *recordSchedule) Ack(context.Context, schedule.TimerID) error { return nil }
 
 func (s *recordSchedule) counts() (int, int) {
 	s.mu.Lock()

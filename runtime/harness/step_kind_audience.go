@@ -26,8 +26,8 @@ const defaultRequestTTLMs int64 = 24 * 60 * 60 * 1000
 // property of the writer (a write harness validates truth about the SENDER), it
 // is racy at write time (TOCTOU), and its only authority is actorrt's live
 // embodiments — which this engine is structurally decoupled from. It is
-// resolved at the delivery seam (Deliver→NotHosted→closure materialises
-// receiver_unavailable) instead of at write time.
+// reported at the delivery seam as a structured outcome; terminal closure is
+// derived separately from irreversible membership truth and expiry.
 //
 // Business types carry NO substrate kind / handler constraint: their kind is a
 // kernel closed-set value (validated at envelope-shape), and which kind is
@@ -79,7 +79,8 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 	// (4) request — exactly-one concrete receiver (STRUCTURE only). The caller
 	//     addressed the actor it resolved (no type→handler routing). Whether that
 	//     receiver is reachable/live is NOT asserted here — that is the delivery
-	//     seam's job (Deliver→NotHosted→closure materialises receiver_unavailable),
+	//     delivery seam's job (NotHosted is an observation; durable closure and
+	//     caller deadline own terminal materialisation),
 	//     not the writer's. Do not re-add a registry liveness lookup.
 	if len(env.Audience) != 1 || env.Audience[0] == "" {
 		return outcome{RejectReason: HarnessRequestAudienceInvalid, Detail: "kind=request requires audience=[<concrete-actor>]"}, nil

@@ -27,6 +27,7 @@ func (r *recordingSchedule) Schedule(_ context.Context, req schedule.ScheduleReq
 	return schedule.TimerID("t-1"), nil
 }
 func (r *recordingSchedule) Cancel(_ context.Context, _ schedule.TimerID) error { return nil }
+func (r *recordingSchedule) Ack(_ context.Context, _ schedule.TimerID) error    { return nil }
 
 // runningEngine marks the occupant Running with a live ctx — the whitebox
 // stand-in for Start() having completed (its lifeCtx-then-Store order is the
@@ -34,13 +35,13 @@ func (r *recordingSchedule) Cancel(_ context.Context, _ schedule.TimerID) error 
 func runningEngine(t *testing.T, pen harness.Pen) *engine {
 	t.Helper()
 	e := &engine{
-		pen:      pen,
-		access:   fakeAccess{},
-		state:    fakeAccess{},
-		sched:    fakeSchedule{},
-		spawn:    fakeSpawn{},
-		clockFn:  time.Now,
-		queueCap: 8,
+		pen:       pen,
+		access:    fakeAccess{},
+		state:     fakeAccess{},
+		sched:     fakeSchedule{},
+		lifecycle: fakeSpawn{},
+		clockFn:   time.Now,
+		queueCap:  8,
 	}
 	e.serve = newServeLedger(e.life, 8)
 	e.call = newCallLedger(e.life, e.pen, e.clockFn, Hooks{}, e.closureFault)

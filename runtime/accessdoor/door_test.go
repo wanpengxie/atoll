@@ -3,11 +3,78 @@ package accessdoor
 import (
 	"context"
 	"errors"
+	"reflect"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+type blockingReadDriver struct {
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (d blockingReadDriver) Read(context.Context, resource.ResourceID) ([]byte, bool, error) {
+	close(d.entered)
+	<-d.release
+	return []byte("old"), true, nil
+}
+func (blockingReadDriver) Write(context.Context, resource.ResourceID, []byte) error { return nil }
+func (blockingReadDriver) Delete(context.Context, resource.ResourceID) error        { return nil }
+
+func TestResourceGateSpansAuthorizeThroughExecute(t *testing.T) {
+	reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
+	drv := blockingReadDriver{entered: make(chan struct{}), release: make(chan struct{})}
+	d := newDoor(reg, nil, &fakeMembership{isMember: true})
+	d.deps.Drivers[resourcespec.KindKV] = drv
+	readDone := make(chan struct{})
+	go func() {
+		defer close(readDone)
+		_, _ = d.invoke(context.Background(), "old-grantee", access.OpRead, "r1", nil, nil)
+	}()
+	<-drv.entered
+	createDone := make(chan struct{})
+	go func() {
+		defer close(createDone)
+		_, _ = d.create(context.Background(), "creator", "r1", resourcespec.CreateSpec{Kind: resourcespec.KindKV}, nil)
+	}()
+	select {
+	case <-createDone:
+		t.Fatal("create crossed resource gate while an authorized read was executing")
+	case <-time.After(30 * time.Millisecond):
+	}
+	close(drv.release)
+	<-readDone
+	<-createDone
+}
+
+func TestAsyncCompletionInstallsForkedCreatorOverlay(t *testing.T) {
+	landed := resourcespec.LandedResource{
+		ID: "file:async", CreatedBy: "run:child",
+		Birth: resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthChannelOwned},
+	}
+	reg := &fakeRegistry{commitReservationFound: true, commitReservationLanded: landed}
+	overlay := &fakeGrantOverlay{}
+	_, completion, err := NewAssembly(Deps{
+		Registry: reg, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}},
+		Authority: &fakeMembership{isMember: true, world: storespec.WorldRun},
+		Overlay:   overlay, State: &fakeStateStore{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, found, err := completion.CommitReservation(t.Context(), "reservation-async")
+	if err != nil || !found || got != landed {
+		t.Fatalf("completion=(%+v,%v,%v)", got, found, err)
+	}
+	if len(overlay.grants) != 1 || overlay.grants[0].Grantee != landed.CreatedBy {
+		t.Fatalf("async creator overlay=%+v", overlay.grants)
+	}
+}
 
 // --- create branch (期11 §3.1: create is its own method, door.create — no
 //     longer reachable through invoke at all) ---
@@ -46,6 +113,23 @@ func TestDoorCreate(t *testing.T) {
 		got := reg.createCalls[0]
 		if got.kind != resourcespec.KindKV || got.creator != "a" || string(got.initial) != "hi" {
 			t.Fatalf("Create args = %+v", got)
+		}
+		if got.birth.Authority != resourcespec.BirthCreatorIdentity {
+			t.Fatalf("birth=%v, want creator identity", got.birth.Authority)
+		}
+	})
+
+	t.Run("run-world creator selects channel-owned birth", func(t *testing.T) {
+		reg := &fakeRegistry{}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true, world: storespec.WorldRun})
+		out, err := d.create(t.Context(), "child", "r1", kvSpec, nil)
+		mustAccept(t, out, err)
+		if got := reg.createCalls[0].birth.Authority; got != resourcespec.BirthChannelOwned {
+			t.Fatalf("birth=%v, want channel owned", got)
+		}
+		overlay := d.deps.Overlay.(*fakeGrantOverlay)
+		if len(overlay.grants) != 1 || overlay.grants[0].Grantee != "child" || !reflect.DeepEqual(overlay.grants[0].Ops, []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete}) {
+			t.Fatalf("forked creator overlay grants=%+v", overlay.grants)
 		}
 	})
 
@@ -460,9 +544,10 @@ func TestInvokeMissingDriverIsGoError(t *testing.T) {
 	const bogusKind = resourcespec.ResourceKind("bogus-inline-kind")
 	reg := &fakeRegistry{resolveExists: true, resolveMeta: resourcespec.ResourceMeta{Kind: bogusKind}, actorAllows: true}
 	d := &door{deps: Deps{
-		Registry:   reg,
-		Drivers:    DriverTable{resourcespec.KindKV: &fakeDriver{}}, // KindKV present, bogusKind absent
-		Membership: &fakeMembership{},
+		Registry:  reg,
+		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}}, // KindKV present, bogusKind absent
+		Authority: &fakeMembership{},
+		Overlay:   &fakeGrantOverlay{},
 	}}
 	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpDelete} {
 		_, err := d.invoke(context.Background(), "a", op, "r1", nil, nil)
@@ -477,7 +562,7 @@ func TestInvokeMissingDriverIsGoError(t *testing.T) {
 // structurally has none — its bytes are realized by the daemon-side
 // Allocator/Streamer, §4) and never carries bytes on Outcome.Value (§8.1) —
 // an accepted outcome carries a FileRoute instead, Local when the caller's
-// Membership.Lookup Host matches the resource's placement daemon, a minted
+// ActorAuthority Placement.Host matches the resource's placement daemon, a minted
 // lane Token otherwise.
 func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 	meta := resourcespec.ResourceMeta{Kind: resourcespec.KindFile, PlacementDaemonID: "daemon-1", PlacementCoord: "coord-1"}
@@ -533,7 +618,7 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 		}
 	})
 
-	t.Run("no Membership.Lookup host (home-hosted caller) is honestly non-Local", func(t *testing.T) {
+	t.Run("server placement (home-hosted caller) is honestly non-Local", func(t *testing.T) {
 		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
 		mem := &fakeMembership{} // lookupFound: false
 		lane := &fakeLaneControl{}
@@ -574,6 +659,9 @@ func TestInvokeFileDeleteRowFirstBytesLast(t *testing.T) {
 	}
 	if len(reg.deleteCalls) != 1 {
 		t.Fatalf("expected one Registry.Delete call, got %d", len(reg.deleteCalls))
+	}
+	if got := d.deps.Overlay.(*fakeGrantOverlay).deleted; !reflect.DeepEqual(got, []resource.ResourceID{"r1"}) {
+		t.Fatalf("overlay resource cleanup=%v", got)
 	}
 }
 

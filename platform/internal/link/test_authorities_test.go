@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -16,10 +17,9 @@ import (
 // tests. It deliberately drives the same coordinator -> composition/registry
 // revalidation path as production; it is not a constructor fallback.
 type testAuthorities struct {
-	mu      sync.Mutex
-	rows    map[actor.ActorID]storespec.CompositionRecord
-	records map[actor.ActorID]storespec.Record
-	ports   map[actor.ActorID]testPortEntry
+	mu    sync.Mutex
+	rows  map[actor.ActorID]storespec.ActorControlRow
+	ports map[actor.ActorID]testPortEntry
 }
 
 type testPortEntry struct {
@@ -27,11 +27,26 @@ type testPortEntry struct {
 	inc   actorrt.Incarnation
 }
 
+type testStateHandles struct{ access accessdoor.AccessMinter }
+
+func (h testStateHandles) AdmitRun(actor.ActorID) error { return nil }
+func (h testStateHandles) EndBatch([]actor.ActorID)     {}
+func (h testStateHandles) Resolve(_ context.Context, id actor.ActorID) (accessdoor.AccessHandle, error) {
+	if h.access == nil {
+		return nil, accessdoor.ErrStateHandleUnavailable
+	}
+	return h.access.MintState(storespec.AuthorStamp{ID: id, BirthVersion: 1}), nil
+}
+
 type blockingPortIndex struct {
 	link.PortIndex
 	entered chan<- struct{}
 	release <-chan struct{}
 }
+
+type validAttachmentFence struct{}
+
+func (validAttachmentFence) Valid() bool { return true }
 
 type blockingSecondDaemonValidation struct {
 	inner   link.DaemonAuthority
@@ -57,98 +72,85 @@ func (x *blockingSecondDaemonValidation) LockAndValidate(ctx context.Context, da
 	return x.inner.LockAndValidate(ctx, daemonID, chID)
 }
 
-func (x blockingPortIndex) Register(owner link.PortOwner, inc actorrt.Incarnation) {
+func (x blockingPortIndex) Register(owner link.PortOwner, inc actorrt.Incarnation, ticket string, version int64) bool {
 	close(x.entered)
 	<-x.release
-	x.PortIndex.Register(owner, inc)
+	return x.PortIndex.Register(owner, inc, ticket, version)
 }
 
 func newTestAuthorities() *testAuthorities {
 	return &testAuthorities{
-		rows:    map[actor.ActorID]storespec.CompositionRecord{},
-		records: map[actor.ActorID]storespec.Record{},
-		ports:   map[actor.ActorID]testPortEntry{},
+		rows:  map[actor.ActorID]storespec.ActorControlRow{},
+		ports: map[actor.ActorID]testPortEntry{},
 	}
 }
 
-func (a *testAuthorities) ApplyComputeDeclaration(_ context.Context, _ link.PortOwner, daemonID string, in []storespec.ComputeDeclaration) ([]storespec.ComputeDeclaration, error) {
+func (a *testAuthorities) ValidateAttachment(_ context.Context, _ link.PortOwner, daemonID string, in []storespec.ComputeDeclaration) ([]storespec.ComputeDeclaration, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	nextRows := make(map[actor.ActorID]storespec.CompositionRecord, len(in))
-	nextRecords := make(map[actor.ActorID]storespec.Record, len(in))
+	nextRows := make(map[actor.ActorID]storespec.ActorControlRow, len(in))
 	out := make([]storespec.ComputeDeclaration, 0, len(in))
 	for _, d := range in {
 		if d.Binding == "" {
 			d.Binding = actor.BindingRuntimeInboundViaRelay
 		}
-		nextRows[d.ActorID] = storespec.CompositionRecord{
-			InstanceID: d.ActorID, Placement: storespec.PlacementDaemon,
-			DesiredHost: daemonID, Epoch: d.Epoch,
-		}
-		nextRecords[d.ActorID] = storespec.Record{
-			ID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Host: daemonID,
+		nextRows[d.ActorID] = storespec.ActorControlRow{
+			ID: d.ActorID, Kind: d.Kind, Binding: d.Binding,
+			CurrentDeclVersion: d.Version,
+			Placement:          storespec.Placement{Kind: storespec.PlacementDaemon, Host: daemonID},
 		}
 		out = append(out, d)
 	}
-	a.rows, a.records = nextRows, nextRecords
+	a.rows = nextRows
 	return out, nil
 }
 
-func (a *testAuthorities) LookupComposition(_ context.Context, id actor.ActorID) (storespec.CompositionRecord, bool, error) {
+func (*testAuthorities) PrepareAttachmentFence(context.Context, actor.ActorID, string, int64) (link.AttachmentFence, error) {
+	return validAttachmentFence{}, nil
+}
+
+func (a *testAuthorities) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	r, ok := a.rows[id]
 	return r, ok, nil
 }
 
-func (a *testAuthorities) LookupCompositionPrincipal(context.Context, string) (storespec.CompositionRecord, bool, error) {
-	return storespec.CompositionRecord{}, false, nil
-}
-
-func (a *testAuthorities) ListComposition(context.Context) ([]storespec.CompositionRecord, error) {
+func (a *testAuthorities) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	out := make([]storespec.CompositionRecord, 0, len(a.rows))
+	out := make([]storespec.ActorControlRow, 0, len(a.rows))
 	for _, row := range a.rows {
 		out = append(out, row)
 	}
 	return out, nil
 }
 
-func (a *testAuthorities) DefaultComposition(context.Context) (actor.ActorID, bool, error) {
-	return "", false, nil
+func (a *testAuthorities) WorldOf(ctx context.Context, id actor.ActorID) (storespec.ActorWorld, bool, error) {
+	_, ok, err := a.LookupActive(ctx, id)
+	return storespec.WorldDurable, ok, err
 }
 
-func (a *testAuthorities) Lookup(_ context.Context, id actor.ActorID) (storespec.Record, bool, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	r, ok := a.records[id]
-	return r, ok, nil
-}
-
-func (a *testAuthorities) Exists(ctx context.Context, id actor.ActorID) (bool, error) {
-	_, ok, err := a.Lookup(ctx, id)
-	return ok, err
-}
-
-func (a *testAuthorities) ListActive(context.Context) ([]storespec.Record, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	out := make([]storespec.Record, 0, len(a.records))
-	for _, rec := range a.records {
-		out = append(out, rec)
+func (a *testAuthorities) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	row, ok, err := a.LookupActive(ctx, stamp.ID)
+	if err != nil || !ok {
+		return storespec.AuthorNotMember, err
 	}
-	return out, nil
+	if row.CurrentDeclVersion != stamp.BirthVersion {
+		return storespec.AuthorVersionStale, nil
+	}
+	return storespec.AuthorOK, nil
 }
 
 func (*testAuthorities) LockAndValidate(context.Context, string, channel.ID) (func(), error) {
 	return func() {}, nil
 }
 
-func (a *testAuthorities) Register(owner link.PortOwner, inc actorrt.Incarnation) {
+func (a *testAuthorities) Register(owner link.PortOwner, inc actorrt.Incarnation, _ string, _ int64) bool {
 	a.mu.Lock()
 	a.ports[inc.ID()] = testPortEntry{owner: owner, inc: inc}
 	a.mu.Unlock()
+	return true
 }
 
 func (a *testAuthorities) Remove(owner link.PortOwner, inc actorrt.Incarnation) {
@@ -183,17 +185,16 @@ func (a *testAuthorities) TakeOwner(owner link.PortOwner) []actorrt.Incarnation 
 	return out
 }
 
+func (a *testAuthorities) ExpireOwner(link.PortOwner) {}
+
 func newTestAcceptor(t *testing.T, cfg link.Config) *link.Acceptor {
 	t.Helper()
 	auth := newTestAuthorities()
 	if cfg.Declarations == nil {
 		cfg.Declarations = auth
 	}
-	if cfg.Composition == nil {
-		cfg.Composition = auth
-	}
-	if cfg.Registry == nil {
-		cfg.Registry = auth
+	if cfg.Authority == nil {
+		cfg.Authority = auth
 	}
 	if cfg.DaemonAuthority == nil {
 		cfg.DaemonAuthority = auth
@@ -203,6 +204,9 @@ func newTestAcceptor(t *testing.T, cfg link.Config) *link.Acceptor {
 	}
 	if cfg.PortIndex == nil {
 		cfg.PortIndex = auth
+	}
+	if cfg.StateHandles == nil {
+		cfg.StateHandles = testStateHandles{access: cfg.Access}
 	}
 	acc, err := link.NewAcceptor(cfg)
 	if err != nil {

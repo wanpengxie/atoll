@@ -1,21 +1,17 @@
 package home
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
 
-	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
-
-// ErrClassNotFound is returned by spawnHandle.Fork when the resolver has no
-// factory registered under spec.Class — a structural reject, not silent.
-var ErrClassNotFound = errors.New("platform: fork class not found")
 
 // ActorFactoryResolver is the platform-layer factory table for the two mint
 // triggers that resolve a factory AFTER the original admission closure is gone —
@@ -44,7 +40,7 @@ type ActorFactoryResolver interface {
 	// instance (a provider constructor rejects an empty ID) — the platform only
 	// passes them through, it never touches the registry.
 	LookupByClass(childID actor.ActorID, class string, config json.RawMessage) (def platform.ActorFactory, ok bool)
-	// Lookup resolves a durable member id to its ActorFactory — activation's
+	// Lookup resolves an active identity id to its ActorFactory — activation's
 	// entry (the reconcile ring's eager revival + the schedule engine's identity-
 	// timer Reviver both hold only an id, since the original admission factory died
 	// with the previous incarnation). Kind is NOT re-answered here either (it is
@@ -53,13 +49,6 @@ type ActorFactoryResolver interface {
 	// underlying table LookupByClass reads.
 	Lookup(id actor.ActorID) (def platform.ActorFactory, ok bool)
 }
-
-// capsAssembler is the platform's single caps seam assembler (Home.buildCaps):
-// it welds the whole five-capability bundle to (id, kind, inc) — minting the
-// handle and wrapping the live membranes happen in the same step. Injected into
-// spawnHandle so a fork child is assembled through the EXACT same seam as a
-// top-level admission (recursive assembly).
-type capsAssembler func(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnation) actorcaps.Caps
 
 // spawnHandle is the platform-side concrete implementation of
 // actorrt.SpawnHandle (fork.go declares the vocabulary; the concrete impl must
@@ -72,12 +61,12 @@ type capsAssembler func(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnati
 // against it inside the substrate (childID's owner must equal inc). The child's
 // truth-handle never leaves substrate — Fork returns only the child's NAME.
 type spawnHandle struct {
-	inc       actorrt.Incarnation
-	rt        *actorrt.Runtime
-	factories ActorFactoryResolver
-	assemble  capsAssembler   // the shared caps seam assembler (Home.buildCaps); never nil.
-	hooks     actorbase.Hooks // the actorbase engine's per-host wiring (spec §3); a fork child inherits its parent home's hooks.
-	logger    *slog.Logger    // oplog seam (nil-safe: falls back to discard); the second admit/remove-shaped lifecycle链路 (spec telemetry C8).
+	home         *Home
+	inc          actorrt.Incarnation
+	birthVersion int64
+	end          lifecycleEndHandle
+	rt           *actorrt.Runtime
+	logger       *slog.Logger
 }
 
 // newSpawnHandle welds a SpawnHandle to parent incarnation inc. rt/assemble are
@@ -85,7 +74,7 @@ type spawnHandle struct {
 // nil-safe (falls back to a discard logger) so every EXISTING call site
 // (caps.go/sysanchorcaps.go, out of this cluster's file scope) keeps compiling
 // unchanged with no oplog wired yet; a future caller opts in by passing one.
-func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, factories ActorFactoryResolver, assemble capsAssembler, hooks actorbase.Hooks, logger ...*slog.Logger) actorrt.SpawnHandle {
+func newSpawnHandle(home *Home, inc actorrt.Incarnation, birthVersion int64, rt *actorrt.Runtime, logger ...*slog.Logger) actorrt.LifecycleHandle {
 	var lg *slog.Logger
 	if len(logger) > 0 {
 		lg = logger[0]
@@ -93,45 +82,41 @@ func newSpawnHandle(inc actorrt.Incarnation, rt *actorrt.Runtime, factories Acto
 	if lg == nil {
 		lg = slog.New(slog.DiscardHandler)
 	}
-	return spawnHandle{inc: inc, rt: rt, factories: factories, assemble: assemble, hooks: hooks, logger: lg}
+	return spawnHandle{home: home, inc: inc, birthVersion: birthVersion, end: lifecycleEndHandle{
+		home: home, author: storespec.AuthorStamp{ID: inc.ID(), BirthVersion: birthVersion},
+	}, rt: rt, logger: lg}
 }
 
-// Fork mints a child owned by this handle's parent incarnation.
-//
-// The child's caps seam is woven at the SAME platform assembler as a top-level
-// admission (h.assemble = Home.buildCaps): Fork resolves the raw caps-taking
-// factory from the builder table, then wraps it in a build closure that runs the
-// assembler against the CHILD's incarnation, so the child is born with its own
-// livePen/liveAccess/liveState membranes welded to itself — recursive assembly,
-// not a raw closure handed straight through. This handle derives the child name
-// and drives the substrate fork primitive.
-func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
-	// childID = parentID + "/" + NameHint (namespace derivation — no substrate id
-	// allocator). Derived BEFORE the builder lookup: the domain's Build needs the
-	// child's id to construct the instance (InstanceSpec{ID} — a provider
-	// constructor rejects an empty ID), so the class→factory resolve is id-aware.
-	childID := h.inc.ID() + "/" + actor.ActorID(spec.NameHint)
-	factory, ok := h.factories.LookupByClass(childID, spec.Class, spec.Config)
-	if !ok {
-		h.logger.Warn("actorrt.fork.rejected", "parent", string(h.inc.ID()),
-			"child", string(childID), "class", spec.Class, "kind", string(spec.Kind),
-			"error", ErrClassNotFound)
-		return "", ErrClassNotFound
-	}
-	// Weld the child's caps seam at the platform assembler (same seam as
-	// admission): the build closure runs INSIDE rt.Fork (pre-go-live,
-	// IsLive(childInc)==false), so a construction-time write is fenced exactly as
-	// for a top-level Spawn.
-	buildChild := func(childInc actorrt.Incarnation) actorrt.Actor {
-		return hostcommon.Build(h.assemble(childID, spec.Kind, childInc), h.hooks, factory)
-	}
-	if _, err := h.rt.Fork(h.inc, childID, spec.Kind, buildChild); err != nil {
-		h.logger.Warn("actorrt.fork.rejected", "parent", string(h.inc.ID()),
-			"child", string(childID), "class", spec.Class, "kind", string(spec.Kind), "error", err)
+func (h spawnHandle) EndSelf(ctx context.Context) error {
+	return h.end.End(ctx, h.inc.ID(), "self_end")
+}
+
+// Fork admits first, then makes one best-effort same-server activation attempt.
+// Admission is the result contract: every accelerator miss is observation-only
+// and the first normal request still drives the level reconcile path.
+func (h spawnHandle) Fork(ctx context.Context, spec actorrt.ForkSpec) (actor.ActorID, error) {
+	childID, err := h.home.forkAdmission(ctx, h.inc.ID(), h.birthVersion, spec, uuid.NewString())
+	if err != nil {
 		return "", err
 	}
-	h.logger.Info("actorrt.fork.admitted", "parent", string(h.inc.ID()),
-		"child", string(childID), "class", spec.Class, "kind", string(spec.Kind))
+	h.logger.Info("actorrt.fork.admitted", "parent", string(h.inc.ID()), "child", string(childID))
+	if h.home.disableForkInlineActivation.Load() {
+		return childID, nil
+	}
+	row, active, lookupErr := h.home.controlIndex.LookupActive(ctx, childID)
+	if lookupErr == nil && active && row.Placement.Kind == storespec.PlacementServer {
+		verdict := h.home.activateOne(ctx, row)
+		switch verdict.kind {
+		case actEmbodied, actAlreadyLive:
+			h.home.clearReviveBackoff(childID)
+		default:
+			h.logger.Warn("fork_accelerator_miss", "parent", string(h.inc.ID()), "child", string(childID),
+				"outcome", int(verdict.kind), "err", verdict.err)
+		}
+	} else if lookupErr != nil || !active {
+		h.logger.Warn("fork_accelerator_miss", "parent", string(h.inc.ID()), "child", string(childID),
+			"outcome", "authority_lookup", "err", lookupErr)
+	}
 	return childID, nil
 }
 
@@ -139,10 +124,16 @@ func (h spawnHandle) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 // The by-id authority-check (childID's owner incarnation == h.inc) is performed
 // inside the substrate (DespawnChild), so the caller never holds a bare kill —
 // the handle itself never leaves the substrate.
-func (h spawnHandle) Despawn(childID actor.ActorID) error {
+func (h spawnHandle) DespawnChild(ctx context.Context, childID actor.ActorID, reason string) error {
 	h.logger.Info("actorrt.despawn.requested", "parent", string(h.inc.ID()), "child", string(childID))
-	err := h.rt.DespawnChild(h.inc, childID)
+	if !h.rt.IsLive(h.inc) {
+		return actorrt.ErrParentNotLive
+	}
+	err := h.end.End(ctx, childID, reason)
 	if err != nil {
+		if errors.Is(err, ErrEndNotSponsor) || errors.Is(err, ErrEndNotMember) {
+			err = actorrt.ErrNotOwner
+		}
 		h.logger.Warn("actorrt.despawn.rejected", "parent", string(h.inc.ID()),
 			"child", string(childID), "error", err)
 		return err

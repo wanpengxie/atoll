@@ -64,8 +64,10 @@ func TestChannelLocalTables_Set(t *testing.T) {
 	want := map[string]bool{
 		"messages":              true,
 		"actor_registry":        true,
-		"channel_composition":   true,
+		"actor_decl_versions":   true,
+		"channel_routing":       true,
 		"restart_applied":       true,
+		"restart_attempts":      true,
 		"resources":             true,
 		"resource_grants":       true,
 		"resource_reservations": true,
@@ -107,11 +109,8 @@ func TestOpenChannel_FreshSchemaReopensWithoutMutation(t *testing.T) {
 	}
 	defer raw.Close()
 	var rows int
-	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_composition`).Scan(&rows); err != nil {
-		t.Fatalf("composition count: %v", err)
-	}
-	if rows != 0 {
-		t.Fatalf("fresh/reopen mutated composition data: rows=%d", rows)
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_decl_versions`).Scan(&rows); err != nil {
+		t.Fatalf("declaration count: %v", err)
 	}
 }
 

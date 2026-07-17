@@ -53,6 +53,17 @@ type EmitSink func(ctx context.Context, inc Incarnation, env *message.Envelope) 
 // (the plane-2 / time-axis twin of the port death-write gate).
 type RelaySink func(ctx context.Context, inc Incarnation, payload []byte) ([]byte, error)
 
+// IdleSink commits the Home-owned idle decision for this exact port
+// incarnation. Approval is returned through the port's ordered egress queue,
+// never written directly by the read loop.
+type IdleSink func(ctx context.Context, inc Incarnation) (approved bool, err error)
+
+type SpawnSink func(ctx context.Context, inc Incarnation, request ipc.SpawnPayload) ipc.SpawnAckPayload
+
+// EndSink returns a post-ack resource tail. The port runs it only after the
+// end_ack has been written by the ordered egress writer.
+type EndSink func(ctx context.Context, inc Incarnation, request ipc.EndPayload) (ipc.EndAckPayload, func())
+
 // Sinks is the full set of upward relay callbacks a port's incarnation carries —
 // one per plane an in-process cell's Caps expose. Emit is the message plane (its
 // type is welded to the envelope, as before); Access and Schedule are the plane-2
@@ -65,6 +76,9 @@ type Sinks struct {
 	Emit     EmitSink
 	Access   RelaySink
 	Schedule RelaySink
+	Idle     IdleSink
+	Spawn    SpawnSink
+	End      EndSink
 }
 
 // ResolveFunc is the connect-in auth seam: it validates the complete handshake
@@ -158,7 +172,7 @@ type port struct {
 	prepared atomic.Bool
 	doneOnce sync.Once
 
-	sendq chan *message.Envelope
+	sendq chan portOutput
 	wg    sync.WaitGroup
 	done  chan struct{}
 
@@ -169,6 +183,12 @@ type port struct {
 	mu       sync.Mutex
 	closed   bool
 	stopping bool
+}
+
+type portOutput struct {
+	envelope *message.Envelope
+	frame    *ipc.Frame
+	after    func()
 }
 
 // newPort parses the connect-in handshake on conn (read KindHandshake →
@@ -249,7 +269,7 @@ func newPort(parent context.Context, hsCtx context.Context, conn io.ReadWriteClo
 		onExit:          onExit,
 		onReap:          onReap,
 		logger:          logger,
-		sendq:           make(chan *message.Envelope, portSendQueue),
+		sendq:           make(chan portOutput, portSendQueue),
 		done:            make(chan struct{}),
 	}, nil
 }
@@ -333,10 +353,31 @@ func (p *port) Deliver(env *message.Envelope) error {
 	}
 	p.mu.Unlock()
 	select {
-	case p.sendq <- env:
+	case p.sendq <- portOutput{envelope: env}:
 		return nil
 	default:
 		return ErrMailboxFull
+	}
+}
+
+// approveIdle places the receipt on the SAME FIFO as Deliver. Because Home
+// changes L to dormant before calling this method, every delivery accepted
+// before that decision is already ahead of this command and every later one is
+// rejected into wake debt. The command is not dropped when the queue is full.
+func (p *port) approveIdle() error {
+	if !p.live.Load() {
+		return ErrCellStopped
+	}
+	raw, err := json.Marshal(ipc.IdleAckPayload{Approved: true})
+	if err != nil {
+		return err
+	}
+	frame := ipc.Frame{Kind: ipc.KindIdleAck, Payload: raw}
+	select {
+	case p.sendq <- portOutput{frame: &frame}:
+		return nil
+	case <-p.ctx.Done():
+		return ErrCellStopped
 	}
 }
 
@@ -411,16 +452,25 @@ func (p *port) writeLoop() {
 			// die(cause) from a loop error, never this arm.
 			p.die(nil)
 			return
-		case env := <-p.sendq:
-			payload, err := json.Marshal(ipc.DeliverPayload{Envelope: *env})
-			if err != nil {
-				// A malformed envelope is dropped (not a transport death) —
-				// the log is truth; closure belongs to the sender.
+		case out := <-p.sendq:
+			frame := out.frame
+			if frame == nil && out.envelope != nil {
+				payload, err := json.Marshal(ipc.DeliverPayload{Envelope: *out.envelope})
+				if err != nil {
+					continue
+				}
+				f := ipc.Frame{Kind: ipc.KindDeliver, Payload: payload}
+				frame = &f
+			}
+			if frame == nil {
 				continue
 			}
-			if err := p.codec.Write(ipc.Frame{Kind: ipc.KindDeliver, Payload: payload}); err != nil {
+			if err := p.codec.Write(*frame); err != nil {
 				p.die(fmt.Errorf("actorrt: port %s deliver write: %w", p.id, err))
 				return
+			}
+			if out.after != nil {
+				go out.after()
 			}
 		}
 	}
@@ -485,6 +535,48 @@ func (p *port) readLoop() {
 		case ipc.KindSchedule:
 			// Time-axis capability invocation — same shape as KindAccess.
 			if !p.relayAck(ipc.KindScheduleAck, p.sinks.Schedule, frame.Payload, "schedule") {
+				return
+			}
+		case ipc.KindIdle:
+			var request ipc.IdlePayload
+			if err := json.Unmarshal(frame.Payload, &request); err != nil {
+				p.die(fmt.Errorf("actorrt: port %s idle decode: %w", p.id, err))
+				return
+			}
+			if p.sinks.Idle == nil {
+				p.die(fmt.Errorf("actorrt: port %s received idle frame but no idle sink is wired", p.id))
+				return
+			}
+			approved, idleErr := p.sinks.Idle(p.ctx, Incarnation{id: p.id, p: p})
+			if idleErr != nil {
+				p.logger.Warn("actorrt.port.idle_rejected", "actor", p.id, "error", idleErr)
+			}
+			if approved {
+				if err := p.approveIdle(); err != nil {
+					p.die(fmt.Errorf("actorrt: port %s idle ack enqueue: %w", p.id, err))
+					return
+				}
+			}
+		case ipc.KindSpawn:
+			var request ipc.SpawnPayload
+			if err := json.Unmarshal(frame.Payload, &request); err != nil || p.sinks.Spawn == nil {
+				p.die(fmt.Errorf("actorrt: port %s invalid spawn frame", p.id))
+				return
+			}
+			ack := p.sinks.Spawn(p.ctx, Incarnation{id: p.id, p: p}, request)
+			if err := p.enqueueControl(ipc.KindSpawnAck, ack, nil); err != nil {
+				p.die(fmt.Errorf("actorrt: port %s spawn ack enqueue: %w", p.id, err))
+				return
+			}
+		case ipc.KindEnd:
+			var request ipc.EndPayload
+			if err := json.Unmarshal(frame.Payload, &request); err != nil || p.sinks.End == nil {
+				p.die(fmt.Errorf("actorrt: port %s invalid end frame", p.id))
+				return
+			}
+			ack, after := p.sinks.End(p.ctx, Incarnation{id: p.id, p: p}, request)
+			if err := p.enqueueControl(ipc.KindEndAck, ack, after); err != nil {
+				p.die(fmt.Errorf("actorrt: port %s end ack enqueue: %w", p.id, err))
 				return
 			}
 		case ipc.KindObs:
@@ -554,6 +646,20 @@ func (p *port) readLoop() {
 			p.die(fmt.Errorf("actorrt: port %s unknown frame kind %q", p.id, frame.Kind))
 			return
 		}
+	}
+}
+
+func (p *port) enqueueControl(kind ipc.Kind, payload any, after func()) error {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	frame := ipc.Frame{Kind: kind, Payload: raw}
+	select {
+	case p.sendq <- portOutput{frame: &frame, after: after}:
+		return nil
+	case <-p.ctx.Done():
+		return ErrCellStopped
 	}
 }
 
@@ -650,7 +756,7 @@ func (p *port) beginTeardown() {
 // EOF), so the write goroutine can never leak. Best-effort + un-acked: a live
 // remote flushes it before the buffered conn closes, a dead one degrades to an EOF
 // death. No join — the escort watches doneCh bounded by the same grace.
-func (p *port) signalDespawn(dl context.Context) {
+func (p *port) signalDespawn(dl context.Context, reason string) {
 	p.stopOnce.Do(func() {
 		p.live.Store(false)
 		p.mu.Lock()
@@ -660,7 +766,10 @@ func (p *port) signalDespawn(dl context.Context) {
 		frameDone := make(chan struct{})
 		go func() {
 			defer close(frameDone)
-			if payload, err := json.Marshal(ipc.DownPayload{Reason: "despawn"}); err == nil {
+			if reason == "" {
+				reason = "despawn"
+			}
+			if payload, err := json.Marshal(ipc.DownPayload{Reason: reason}); err == nil {
 				if err := p.codec.Write(ipc.Frame{Kind: ipc.KindDespawn, Payload: payload}); err != nil {
 					p.logger.Error("actorrt.port.despawn_frame_write_failed", "actor", string(p.id), "error", err)
 				}

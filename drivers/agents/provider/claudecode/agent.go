@@ -17,7 +17,7 @@ import (
 // Env keys. The claude CLI carries its OWN auth (ANTHROPIC_API_KEY / `claude
 // login`), so atoll passes no key — only a model default. ATOLL_CHANNEL_TYPE /
 // ATOLL_DOMAIN_PROMPT are GONE (A3 / Q7): the per-channel domain prompt now
-// rides InstanceSpec.Config (channel_composition.config_json), the ONE config
+// rides InstanceSpec.Config (the applied actor declaration version), the one config
 // 承载, never a process-wide env.
 const (
 	EnvKeyModel = "ATOLL_CLAUDE_MODEL"
@@ -36,7 +36,7 @@ type Config struct {
 	FastPathWindow time.Duration
 }
 
-// specOverlay is the per-instance config (channel_composition.config_json) the looper
+// specOverlay is the per-instance applied declaration config the looper
 // self-parses: a model override plus the channel's domain prompt facts (A3/Q7 —
 // what ATOLL_CHANNEL_TYPE / ATOLL_DOMAIN_PROMPT once carried, now per-instance).
 type specOverlay struct {

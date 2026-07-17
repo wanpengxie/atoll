@@ -47,13 +47,19 @@ func (d *door) effectiveOps(ctx context.Context, caller actor.ActorID, id resour
 			return nil, err
 		}
 		if !allowed {
+			allowed, err = d.deps.Overlay.ActorAllows(ctx, caller, id, op)
+			if err != nil {
+				return nil, err
+			}
+		}
+		if !allowed {
 			mAllow, err := d.deps.Registry.MembersAllow(ctx, id, op)
 			if err != nil {
 				return nil, err
 			}
 			if mAllow {
 				if !isMemberResolved {
-					isM, err := d.deps.Membership.IsMember(ctx, caller)
+					_, isM, err := d.deps.Authority.LookupActive(ctx, caller)
 					if err != nil {
 						return nil, err
 					}

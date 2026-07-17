@@ -69,11 +69,12 @@ func (f *fakeSys) After(d time.Duration, msgType string, payload any) (schedule.
 
 func (f *fakeSys) CancelTimer(id schedule.TimerID) error { panic("not implemented") }
 
-func (f *fakeSys) Fork(class, nameHint string, config json.RawMessage) (actor.ActorID, error) {
+func (f *fakeSys) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 	panic("not implemented")
 }
 
 func (f *fakeSys) DespawnChild(id actor.ActorID) error { panic("not implemented") }
+func (f *fakeSys) End() error                          { panic("not implemented") }
 
 func (f *fakeSys) PublishObs(kind actorrt.ObsKind, val actorrt.ObsValue) error {
 	panic("not implemented")

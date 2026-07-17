@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -63,6 +64,23 @@ func (a *App) OperateFaceForTest() platformhome.OperateExecutor {
 	return a.operateFace()
 }
 
+func (a *App) StageDeclarationEditForTest(chID channel.ID, sourceID string, config json.RawMessage) (actor.ActorID, int64, error) {
+	h := a.getHome(chID)
+	if h == nil {
+		return "", 0, errTestChannelNotLoaded
+	}
+	rows, err := h.DeclaredBySource(context.Background(), sourceID)
+	if err != nil || len(rows) == 0 {
+		return "", 0, err
+	}
+	row := rows[0]
+	edited, err := h.EditDeclaration(context.Background(), storespec.DeclEditBundle{
+		ActorID: row.ID, Class: row.Class, Config: config, Placement: row.Placement,
+		TIdle: row.TIdle, SourceDeclID: row.SourceDeclID, CreatedAt: time.Now().UnixMilli(),
+	})
+	return row.ID, edited.CurrentDeclVersion, err
+}
+
 // LockDaemonForTest / LockDeclForTest expose only the keyed-lock barriers needed
 // to prove composite acquisition order. They return the production lock's
 // idempotent release closure and exist only in the test build.
@@ -114,7 +132,7 @@ func (a *App) DropHomeForTest(chID channel.ID) {
 	}
 }
 
-// AdmitForTest admits id as a durable member of chID's home (the pure-membership
+// AdmitForTest admits id as a durable declared identity in chID's Home
 // primitive an introduce door writes). Since the membrane law (v1.8 问①) stopped
 // daemon attach from minting membership, a daemon-hosted actor must be admitted
 // BEFORE its daemon declares it — this test seam stands in for the introduce door
@@ -136,12 +154,15 @@ func (a *App) ComposeDaemonForTest(chID, principal, class, daemonID string, kind
 	if h == nil {
 		return "", errTestChannelNotLoaded
 	}
-	rec, _, _, err := h.IntroduceComposition(context.Background(), storespec.CompositionIntroduce{
-		DeclID: "sys:test:" + principal, Principal: principal, Class: class,
-		Placement: storespec.PlacementDaemon, DesiredHost: daemonID,
-		Kind: kind, At: time.Now().UnixMilli(),
+	placement, err := storespec.NewDaemonPlacement(daemonID)
+	if err != nil {
+		return "", err
+	}
+	result, err := h.Declare(context.Background(), platformhome.DeclareRequest{
+		SourceDeclID: "sys:test:" + principal, Principal: principal, Class: class,
+		Placement: placement, Kind: kind, CreatedAt: time.Now().UnixMilli(),
 	})
-	return rec.InstanceID, err
+	return result.Row.ID, err
 }
 
 func (a *App) ResolvePrincipalForTest(chID string, kind actor.Kind, principal string) (actor.ActorID, error) {

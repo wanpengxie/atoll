@@ -21,8 +21,8 @@
 //
 // Deliver reports a structured, per-audience Outcome (Delivered/NotHosted/
 // MailboxFull/Stopped): the substrate knows whether it hosts an addressed actor
-// and reports that truthfully so the seam can fast-fail rather than wait for a
-// timeout.
+// and reports that truthfully so the caller can account for delivery without
+// guessing from reachability.
 //
 // closure is NOT in this package: the closure timer/pending-set lives in the
 // sender actor (caller-scoped), and the only substrate obligation on closure is

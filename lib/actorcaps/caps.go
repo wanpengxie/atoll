@@ -38,7 +38,7 @@ type Caps struct {
 	// Schedule is the time-axis capability (self-targeted timers). Wrapped in
 	// the liveSchedule membrane.
 	Schedule schedule.ScheduleHandle
-	// Spawn is the fork/despawn capability over THIS incarnation's own children.
-	// Fork returns only a child's name, never a handle.
-	Spawn actorrt.SpawnHandle
+	// Lifecycle is the closed fork/despawn/end-self capability welded to this
+	// incarnation. Fork returns only a child's name, never a live handle.
+	Lifecycle actorrt.LifecycleHandle
 }

@@ -70,6 +70,9 @@ func openScheduleChannel(t *testing.T) *ChannelStores {
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}
+	if err := cs.BindActorAuthority(timerTestAuthority{declared: cs.Declared}); err != nil {
+		t.Fatalf("BindActorAuthority: %v", err)
+	}
 	t.Cleanup(func() { _ = cs.Close() })
 	return cs
 }
@@ -107,9 +110,41 @@ type realFireSink struct {
 	calls int
 }
 
+type timerTestAuthority struct {
+	declared storespec.DeclaredControlReader
+}
+
+func (a timerTestAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	rec, ok, err := a.declared.LookupDeclaredActive(ctx, id)
+	if err != nil || !ok {
+		return storespec.ActorControlRow{}, false, err
+	}
+	return rec, true, nil
+}
+func (a timerTestAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+	return nil, nil
+}
+func (a timerTestAuthority) WorldOf(ctx context.Context, id actor.ActorID) (storespec.ActorWorld, bool, error) {
+	_, ok, err := a.LookupActive(ctx, id)
+	return storespec.WorldDurable, ok, err
+}
+func (a timerTestAuthority) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	_, ok, err := a.LookupActive(ctx, stamp.ID)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return storespec.AuthorNotMember, nil
+	}
+	if stamp.BirthVersion != 1 {
+		return storespec.AuthorVersionStale, nil
+	}
+	return storespec.AuthorOK, nil
+}
+
 func newRealFireSink(t *testing.T, cs *ChannelStores) *realFireSink {
 	t.Helper()
-	minter, err := harness.New(harness.Deps{ChannelID: scheduleTestChannelID, Log: cs.Log})
+	minter, err := harness.New(harness.Deps{ChannelID: scheduleTestChannelID, Log: cs.Log, Authority: timerTestAuthority{declared: cs.Declared}})
 	if err != nil {
 		t.Fatalf("harness.New: %v", err)
 	}
@@ -126,7 +161,7 @@ func (s *realFireSink) Append(ctx context.Context, author actor.ActorID, env *me
 	s.calls++
 	s.mu.Unlock()
 
-	pen := s.minter.Mint(author, actor.KindAgent, s.chID)
+	pen := s.minter.Mint(author, actor.KindAgent, s.chID, 1)
 	res, err := pen.Write(ctx, env)
 	if err != nil {
 		return err // transient: a genuine Go error, engine leaves the row for retry.
@@ -425,6 +460,15 @@ func storeRowCount(t *testing.T, cs *ChannelStores) int {
 	return len(rows)
 }
 
+func firedRowCount(t *testing.T, cs *ChannelStores) int {
+	t.Helper()
+	page, err := cs.timers.ListFired(context.Background(), timerspec.FiredCursor{}, 10000)
+	if err != nil {
+		t.Fatalf("timers.ListFired: %v", err)
+	}
+	return len(page.Rows)
+}
+
 func readAllTruth(t *testing.T, cs *ChannelStores) []storespec.StoredRow {
 	t.Helper()
 	rows, err := cs.Query.ReadAfterSeq(context.Background(), 0, 10000)
@@ -504,7 +548,7 @@ func waitStable(t *testing.T, val func() int, quiet time.Duration) int {
 
 func admitTimerAuthor(t *testing.T, cs *ChannelStores, principal string) actor.ActorID {
 	t.Helper()
-	id, err := cs.Membership.Admit(context.Background(), actor.KindAgent, principal, time.Now().UnixMilli())
+	id, err := admitDeclaredTest(context.Background(), cs, actor.KindAgent, principal, time.Now().UnixMilli())
 	if err != nil {
 		t.Fatalf("Admit timer author %q: %v", principal, err)
 	}
@@ -532,7 +576,7 @@ func TestTimerSlice1_BasicFireTruthFields(t *testing.T) {
 	t.Cleanup(engine.Close)
 
 	author := admitTimerAuthor(t, cs, "timer-author-1")
-	handle := minter.Mint(author)
+	handle := minter.Mint(scheduleStamp(author))
 
 	fireAt := clock.Now().Add(time.Hour).UnixMilli()
 	id, err := handle.Schedule(ctx, schedule.ScheduleReq{
@@ -619,8 +663,8 @@ func TestTimerSlice2_SelfTargetedStructural(t *testing.T) {
 
 	authorA := admitTimerAuthor(t, cs, "author-a")
 	authorB := admitTimerAuthor(t, cs, "author-b")
-	hA := minter.Mint(authorA)
-	hB := minter.Mint(authorB)
+	hA := minter.Mint(scheduleStamp(authorA))
+	hB := minter.Mint(scheduleStamp(authorB))
 
 	fireAt := clock.Now().Add(time.Minute).UnixMilli()
 	idA, err := hA.Schedule(ctx, schedule.ScheduleReq{Bind: schedule.BindIdentity, FireAt: fireAt, Type: "t"})
@@ -662,7 +706,8 @@ func TestTimerSlice3_IncarnationDropsOnDeathEvenWithLiveSuccessor(t *testing.T) 
 	cs := openScheduleChannel(t)
 	sink := newRealFireSink(t, cs)
 	rt := newScheduleRuntime(t)
-	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	author := admitTimerAuthor(t, cs, "author-1")
+	_, _, _ = rt.SpawnIfAbsent(author, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	revive := newTestReviver(rt)
 
@@ -673,7 +718,7 @@ func TestTimerSlice3_IncarnationDropsOnDeathEvenWithLiveSuccessor(t *testing.T) 
 	engine.Start()
 	t.Cleanup(engine.Close)
 
-	handle := minter.Mint("author-1")
+	handle := minter.Mint(scheduleStamp(author))
 	fireAt := clock.Now().Add(time.Hour).UnixMilli()
 	id, err := handle.Schedule(ctx, schedule.ScheduleReq{Bind: schedule.BindIncarnation, FireAt: fireAt, Type: "demo.retry"})
 	if err != nil {
@@ -689,8 +734,8 @@ func TestTimerSlice3_IncarnationDropsOnDeathEvenWithLiveSuccessor(t *testing.T) 
 	// Predecessor dies, a SAME-ID successor takes over (respawn) — the
 	// successor being live must NOT rescue the predecessor's timer (pointer
 	// identity, not id identity, is the drop check).
-	rt.DespawnID("author-1")
-	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	rt.DespawnID(author)
+	_, _, _ = rt.SpawnIfAbsent(author, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 
 	clock.Advance(time.Hour)
 	// Bounded real-time window for the (non-)fire to settle, then assert it
@@ -710,6 +755,7 @@ func TestTimerSlice3b_AttachNoLiveEmbodiment(t *testing.T) {
 	cs := openScheduleChannel(t)
 	sink := newRealFireSink(t, cs)
 	rt := newScheduleRuntime(t)
+	ghost := admitTimerAuthor(t, cs, "ghost")
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	revive := newTestReviver(rt)
 
@@ -720,7 +766,7 @@ func TestTimerSlice3b_AttachNoLiveEmbodiment(t *testing.T) {
 	engine.Start()
 	t.Cleanup(engine.Close)
 
-	handle := minter.Mint("ghost")
+	handle := minter.Mint(scheduleStamp(ghost))
 	_, err = handle.Schedule(ctx, schedule.ScheduleReq{Bind: schedule.BindIncarnation, FireAt: clock.Now().Add(time.Hour).UnixMilli(), Type: "t"})
 	if !errors.Is(err, schedule.ErrBadSchedule) {
 		t.Fatalf("Schedule(incarnation, no live embodiment): err=%v, want ErrBadSchedule", err)
@@ -742,7 +788,8 @@ func TestTimerSlice4_RestartBatchDropVsIdentitySurvive(t *testing.T) {
 
 	// --- pre-restart process ---
 	rt1 := newScheduleRuntime(t)
-	_, _, _ = rt1.SpawnIfAbsent("author-inc", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
+	authorInc := admitTimerAuthor(t, cs, "author-inc")
+	_, _, _ = rt1.SpawnIfAbsent(authorInc, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubTimerActor{} })
 	sink1 := newRealFireSink(t, cs)
 	revive1 := newTestReviver(rt1)
 
@@ -753,13 +800,13 @@ func TestTimerSlice4_RestartBatchDropVsIdentitySurvive(t *testing.T) {
 	engine1.Start()
 
 	authorIdentity := admitTimerAuthor(t, cs, "author-identity")
-	idIdentity, err := minter1.Mint(authorIdentity).Schedule(ctx, schedule.ScheduleReq{
+	idIdentity, err := minter1.Mint(scheduleStamp(authorIdentity)).Schedule(ctx, schedule.ScheduleReq{
 		Bind: schedule.BindIdentity, FireAt: fireAt, Type: "demo.identity",
 	})
 	if err != nil {
 		t.Fatalf("Schedule identity: %v", err)
 	}
-	idIncarnation, err := minter1.Mint("author-inc").Schedule(ctx, schedule.ScheduleReq{
+	idIncarnation, err := minter1.Mint(scheduleStamp(authorInc)).Schedule(ctx, schedule.ScheduleReq{
 		Bind: schedule.BindIncarnation, FireAt: fireAt, Type: "demo.inc",
 	})
 	if err != nil {
@@ -797,7 +844,7 @@ func TestTimerSlice4_RestartBatchDropVsIdentitySurvive(t *testing.T) {
 		t.Fatal("an incarnation-bind timer scheduled BEFORE restart fired AFTER restart — it should have vanished with the old process (v1.1 历史校准)")
 	}
 	if n := storeRowCount(t, cs); n != 0 {
-		t.Fatalf("durable row count post-fire = %d, want 0 (identity row deleted on fire)", n)
+		t.Fatalf("durable row count after fire consumption = %d, want 0", n)
 	}
 }
 
@@ -812,7 +859,7 @@ func TestTimerSlice5_CrashIdempotencyAndFireSinkTriState(t *testing.T) {
 		ctx := context.Background()
 		cs := openScheduleChannel(t)
 		sink := newRealFireSink(t, cs)
-		const author = actor.ActorID("author-dup")
+		author := admitTimerAuthor(t, cs, "author-dup")
 
 		mkEnv := func() *message.Envelope {
 			return &message.Envelope{
@@ -899,7 +946,7 @@ func TestTimerSlice5_CrashIdempotencyAndFireSinkTriState(t *testing.T) {
 		}
 	})
 
-	t.Run("transient_error_leaves_row_for_retry", func(t *testing.T) {
+	t.Run("durable_fire_uses_transactional_pen_not_legacy_sink", func(t *testing.T) {
 		ctx := context.Background()
 		cs := openScheduleChannel(t)
 		flaky := &flakyFireSink{inner: newRealFireSink(t, cs), alwaysFail: true}
@@ -914,7 +961,7 @@ func TestTimerSlice5_CrashIdempotencyAndFireSinkTriState(t *testing.T) {
 		engine.Start()
 		t.Cleanup(engine.Close)
 
-		handle := minter.Mint(admitTimerAuthor(t, cs, "transient-author"))
+		handle := minter.Mint(scheduleStamp(admitTimerAuthor(t, cs, "transient-author")))
 		id, err := handle.Schedule(ctx, schedule.ScheduleReq{
 			Bind: schedule.BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.due",
 		})
@@ -922,24 +969,22 @@ func TestTimerSlice5_CrashIdempotencyAndFireSinkTriState(t *testing.T) {
 			t.Fatalf("Schedule: %v", err)
 		}
 
-		// alwaysFail holds through this whole window: whichever retry the
-		// engine attempts (the fresh wake, a stray coalesced-wake slip, or a
-		// backoff alarm) is GUARANTEED to fail, so there is no race in which
-		// the row could already be gone by the time this checks it.
-		waitFor(t, 2*time.Second, func() bool { return flaky.callCount() >= 1 })
-		time.Sleep(30 * time.Millisecond)
-		if n := storeRowCount(t, cs); n != 1 {
-			t.Fatalf("row count after a transient failure = %d, want 1 (at-least-once retention)", n)
-		}
-
-		// Let the retry succeed against the REAL sink, then advance the clock
-		// past whatever real backoff was armed.
-		flaky.setAlwaysFail(false)
-		clock.Advance(5 * time.Second)
 		waitFor(t, 2*time.Second, func() bool {
 			_, ok := findByID(readAllTruth(t, cs), fireMsgID(id))
 			return ok
 		})
+		if n := firedRowCount(t, cs); n != 1 {
+			t.Fatalf("fired row count = %d, want 1 until Ack", n)
+		}
+		if flaky.callCount() != 0 {
+			t.Fatal("identity fire used legacy append sink")
+		}
+		if err := handle.Ack(ctx, id); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+		if n := firedRowCount(t, cs); n != 0 {
+			t.Fatalf("rows after Ack=%d", n)
+		}
 	})
 }
 
@@ -966,8 +1011,9 @@ func TestTimerSlice6_CancelTriState(t *testing.T) {
 	engine.Start()
 	t.Cleanup(engine.Close)
 
-	h1 := minter.Mint(author1)
-	h2 := minter.Mint("author-2")
+	h1 := minter.Mint(scheduleStamp(author1))
+	author2 := admitTimerAuthor(t, cs, "cancel-author-2")
+	h2 := minter.Mint(scheduleStamp(author2))
 
 	// Pending identity timer: cancel prevents the fire.
 	idIdentity, err := h1.Schedule(ctx, schedule.ScheduleReq{Bind: schedule.BindIdentity, FireAt: clock.Now().Add(time.Hour).UnixMilli(), Type: "t"})
@@ -1021,8 +1067,11 @@ func TestTimerSlice6_CancelTriState(t *testing.T) {
 	// Nothing left pending should ever fire from the cancelled entries.
 	clock.Advance(2 * time.Hour)
 	time.Sleep(30 * time.Millisecond)
-	if sink.callCount() != 1 {
-		t.Fatalf("sink.callCount() = %d after cancels, want 1 (only idFired)", sink.callCount())
+	if sink.callCount() != 0 {
+		t.Fatalf("legacy sink called %d times for durable fire", sink.callCount())
+	}
+	if err := h1.Ack(ctx, idFired); err != nil {
+		t.Fatalf("Ack fired: %v", err)
 	}
 }
 
@@ -1049,7 +1098,7 @@ func TestTimerSlice7_DeregCascadeClear(t *testing.T) {
 		t.Cleanup(engine.Close)
 
 		author := seedMember(t, cs, actor.ActorID("A"))
-		handle := minter.Mint(author)
+		handle := minter.Mint(scheduleStamp(author))
 
 		id, err := handle.Schedule(ctx, schedule.ScheduleReq{
 			Bind: schedule.BindIdentity, FireAt: clock.Now().Add(time.Hour).UnixMilli(), Type: "t",
@@ -1077,17 +1126,16 @@ func TestTimerSlice7_DeregCascadeClear(t *testing.T) {
 
 	t.Run("Deregister path", func(t *testing.T) {
 		run(t, func(t *testing.T, cs *ChannelStores, id actor.ActorID) {
-			if err := cs.Membership.Deregister(ctx, id, 100); err != nil {
+			if err := endDeclaredTest(ctx, cs, id, 100); err != nil {
 				t.Fatalf("Deregister: %v", err)
 			}
 		})
 	})
 
-	t.Run("ApplyMemberTransitions removes path", func(t *testing.T) {
+	t.Run("batch EndCascade path", func(t *testing.T) {
 		run(t, func(t *testing.T, cs *ChannelStores, id actor.ActorID) {
-			if err := cs.Membership.ApplyMemberTransitions(ctx, nil,
-				[]storespec.MemberActorRemove{{ID: id, At: 100}}); err != nil {
-				t.Fatalf("ApplyMemberTransitions: %v", err)
+			if err := endDeclaredTest(ctx, cs, id, 100); err != nil {
+				t.Fatalf("EndCascade: %v", err)
 			}
 		})
 	})
@@ -1098,7 +1146,7 @@ func TestTimerSlice7_DeregCascadeClear(t *testing.T) {
 // SpawnIfAbsent-backed activation, retry-on-failure, exactly-once truth.
 // ---------------------------------------------------------------------
 
-func TestTimerSlice8_ReviveSeamWakeFirstOrdering(t *testing.T) {
+func TestTimerSlice8_DurableFireDoesNotDependOnRevive(t *testing.T) {
 	ctx := context.Background()
 	cs := openScheduleChannel(t)
 	sink := newRealFireSink(t, cs)
@@ -1125,35 +1173,24 @@ func TestTimerSlice8_ReviveSeamWakeFirstOrdering(t *testing.T) {
 		t.Fatal("author already live before Schedule — test precondition broken")
 	}
 
-	handle := minter.Mint(author)
+	handle := minter.Mint(scheduleStamp(author))
 	id, err := handle.Schedule(ctx, schedule.ScheduleReq{Bind: schedule.BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.wake"})
 	if err != nil {
 		t.Fatalf("Schedule: %v", err)
 	}
 
-	// While Revive keeps failing, append must NEVER be attempted (wake-first
-	// ordering) and the row stays.
+	// Fire is durable first. Revive is only a best-effort accelerator and a
+	// failure cannot suppress or roll back the committed timer truth.
 	waitFor(t, 2*time.Second, func() bool { return revive.callCount() >= 1 })
-	time.Sleep(30 * time.Millisecond)
-	if sink.callCount() != 0 {
-		t.Fatalf("Append called %d times before EnsureLive ever succeeded, want 0 (revive gates append)", sink.callCount())
-	}
-	if storeRowCount(t, cs) != 1 {
-		t.Fatal("row deleted despite a failing Revive, want retained (at-least-once)")
-	}
-
-	// Revive is allowed to succeed — a REAL live embodiment is minted via
-	// SpawnIfAbsent, THEN (and only then) fire lands, exactly once. A
-	// comfortably-large Advance clears whatever real backoff the engine
-	// armed, regardless of its exact value.
-	revive.allowSucceedFor(author)
-	clock.Advance(5 * time.Second)
 	waitFor(t, 2*time.Second, func() bool {
 		_, ok := findByID(readAllTruth(t, cs), fireMsgID(id))
 		return ok
 	})
-	if _, live := rt.Stat(author); !live {
-		t.Fatal("author not live after a successful Revive — the SpawnIfAbsent seam did not activate an embodiment")
+	if _, live := rt.Stat(author); live {
+		t.Fatal("failing Revive unexpectedly activated an embodiment")
+	}
+	if sink.callCount() != 0 {
+		t.Fatalf("legacy Append called %d times for durable fire", sink.callCount())
 	}
 	count := 0
 	for _, r := range readAllTruth(t, cs) {
@@ -1188,7 +1225,7 @@ func TestTimerSlice9_ErrBadScheduleMatrix(t *testing.T) {
 	}
 	engine.Start()
 	t.Cleanup(engine.Close)
-	handle := minter.Mint(admitTimerAuthor(t, cs, "matrix-author"))
+	handle := minter.Mint(scheduleStamp(admitTimerAuthor(t, cs, "matrix-author")))
 
 	cases := []struct {
 		name    string
@@ -1246,7 +1283,7 @@ func TestTimerSlice11_ConcurrentScheduleCancelRace(t *testing.T) {
 	}
 	engine.Start()
 	t.Cleanup(engine.Close)
-	handle := minter.Mint(admitTimerAuthor(t, cs, "race-author"))
+	handle := minter.Mint(scheduleStamp(admitTimerAuthor(t, cs, "race-author")))
 
 	// A keeper timer EARLIER than every churn timer, never cancelled: the
 	// semantic half of this slice — under concurrent Schedule/Cancel churn
@@ -1312,7 +1349,7 @@ func TestTimerSlice12_TimerIDNeverReused(t *testing.T) {
 	}
 	engine.Start()
 	t.Cleanup(engine.Close)
-	handle := minter.Mint(admitTimerAuthor(t, cs, "reuse-author"))
+	handle := minter.Mint(scheduleStamp(admitTimerAuthor(t, cs, "reuse-author")))
 
 	req := schedule.ScheduleReq{Bind: schedule.BindIdentity, FireAt: clock.Now().Add(time.Hour).UnixMilli(), Type: "t"}
 	id1, err := handle.Schedule(ctx, req)
@@ -1358,37 +1395,22 @@ func TestTimerSlice13_BackoffBounded(t *testing.T) {
 	engine.Start()
 	t.Cleanup(engine.Close)
 
-	_, err = minter.Mint(admitTimerAuthor(t, cs, "backoff-author")).Schedule(ctx, schedule.ScheduleReq{
+	h := minter.Mint(scheduleStamp(admitTimerAuthor(t, cs, "backoff-author")))
+	id, err := h.Schedule(ctx, schedule.ScheduleReq{
 		Bind: schedule.BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.due",
 	})
 	if err != nil {
 		t.Fatalf("Schedule: %v", err)
 	}
 
-	// A freshly-Scheduled already-due item races its OWN wake token against
-	// the run loop's discovery of it: the coalesced wake channel may still
-	// hold that one token by the time the first failed attempt arms its
-	// backoff alarm, letting one extra attempt slip through before the
-	// backoff genuinely holds — a bounded, single-token artifact, never an
-	// unbounded spin. Settle past that race before asserting no-busy-loop.
-	settled := waitStable(t, flaky.callCount, 100*time.Millisecond)
-	if settled < 1 {
-		t.Fatalf("flaky.callCount() settled at %d, want >= 1", settled)
+	waitFor(t, 2*time.Second, func() bool { _, ok := findByID(readAllTruth(t, cs), fireMsgID(id)); return ok })
+	if flaky.callCount() != 0 {
+		t.Fatal("durable fire must bypass legacy append sink")
 	}
-
-	// No wake source remains (settled means the race above is over): a
-	// bounded real-time window MUST see zero further attempts if the loop is
-	// correctly blocked on the alarm rather than spinning.
-	time.Sleep(30 * time.Millisecond)
-	if flaky.callCount() != settled {
-		t.Fatalf("flaky.callCount() = %d after settling at %d, want unchanged (engine must not busy-spin)", flaky.callCount(), settled)
+	if n := firedRowCount(t, cs); n != 1 {
+		t.Fatalf("row count before Ack = %d, want 1", n)
 	}
-
-	// Advancing the clock past whatever real backoff duration was armed
-	// unblocks exactly one more attempt.
-	clock.Advance(10 * time.Second)
-	waitFor(t, 2*time.Second, func() bool { return flaky.callCount() == settled+1 })
-	if n := storeRowCount(t, cs); n != 1 {
-		t.Fatalf("row count after repeated transient failures = %d, want 1 (at-least-once, still pending)", n)
+	if err := h.Ack(ctx, id); err != nil {
+		t.Fatalf("Ack: %v", err)
 	}
 }

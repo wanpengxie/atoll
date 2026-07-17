@@ -2,6 +2,7 @@ package accessdoor
 
 import (
 	"context"
+	"errors"
 	"io"
 	"os"
 
@@ -150,6 +151,10 @@ type FileOpener interface {
 	// Open itself is exactly Invoke(mode) followed by Redeem(outcome.Route).
 	Redeem(ctx context.Context, route FileRoute) (FileAccess, error)
 }
+
+// ErrFileCapabilityUnavailable means the file call face exists on this host,
+// but no byte-plane implementation is installed there.
+var ErrFileCapabilityUnavailable = errors.New("accessdoor: capability_unavailable")
 
 // LaneControl is the door's file-byte-route minting Dep (期11 spec §5 item
 // 0's "门单方裁决产物"): having decided a file OpRead/OpWrite or
