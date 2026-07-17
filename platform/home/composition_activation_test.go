@@ -100,6 +100,7 @@ func openBuildWindowHome(t *testing.T, name string, resolver *buildWindowResolve
 		CompositionResolver: resolver,
 		DaemonAuthority:     allowTestDaemonAuthority{},
 		ReconcileInterval:   time.Hour,
+		Bootstrap:           true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -230,6 +231,7 @@ func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {
 		CompositionResolver: resolver,
 		DaemonAuthority:     allowTestDaemonAuthority{},
 		ReconcileInterval:   10 * time.Millisecond,
+		Bootstrap:           true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -286,6 +288,7 @@ func TestCompositionConfigChangeAdvancesVersionAndRebuildsFromOneCommit(t *testi
 		CompositionResolver: resolver,
 		DaemonAuthority:     allowTestDaemonAuthority{},
 		ReconcileInterval:   10 * time.Millisecond,
+		Bootstrap:           true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -329,7 +332,7 @@ func TestInvoluntaryBodyCrashBacksOffThenAutomaticallyRebuilds(t *testing.T) {
 	h, err := Open(Config{
 		ChannelID: "crash-backoff", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
 		CompositionResolver: resolver, DaemonAuthority: allowTestDaemonAuthority{},
-		ReconcileInterval: time.Hour,
+		ReconcileInterval: time.Hour, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)

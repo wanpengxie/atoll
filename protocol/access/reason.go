@@ -32,7 +32,7 @@ const (
 	OwnerInactive FailureReason = "owner_inactive"
 
 	// AccessDenied — AUTHORIZE stage: the caller is not authorized — for object ops
-	// (read/write/set/delete) R.allows(caller, resource, op) is false; for create the caller is
+	// (read/write/set/delete) owner-root ∪ R.allows(caller, resource, op) is false; for create the caller is
 	// not a member of the container channel (two loci). Day-1 the object check is the
 	// by-identity R lookup; a presented-token path reuses the same verdict. Door-
 	// authoritative. = EACCES.

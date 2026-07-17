@@ -275,6 +275,7 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 	// itself was just deleted) — distinct from "home closing" (platform.home's
 	// own bulk teardown) as a source of the same links dying.
 	a.logger.Info("app: daemon delete kicking live links", "daemon", daemonID, "channels", targetIDs)
+	a.logDaemonObligations(ctx, daemonID, targetIDs)
 	for _, ch := range targetIDs {
 		a.kickDaemonConverge(channel.ID(ch), daemonID)
 	}
@@ -403,11 +404,46 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 	// detach request) — same distinguishing purpose as handleDeleteDaemon's
 	// own kick-start marker.
 	a.logger.Info("app: daemon detach kicking live link", "channel", string(chID), "daemon", daemonID)
+	a.logDaemonObligations(ctx, daemonID, []string{chID})
 	a.kickDaemonConverge(channel.ID(chID), daemonID)
 	if a.fanout != nil {
 		a.fanout.notify()
 	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// logDaemonObligations observes each affected channel only after the revocation
+// transaction commits. Unknown counts are operationally visible but never flow
+// back into the already-decided HTTP result.
+func (a *App) logDaemonObligations(ctx context.Context, daemonID string, channelIDs []string) {
+	for _, chID := range channelIDs {
+		h := a.getHome(channel.ID(chID))
+		if h == nil {
+			a.logger.Warn("app.daemon.retired.counts_unknown",
+				"daemon", daemonID, "channel", chID, "reason", "channel_not_open")
+			continue
+		}
+		a.logOneDaemonObligation(ctx, daemonID, chID, h)
+	}
+}
+
+type daemonObligationCounter interface {
+	DaemonObligationCounts(context.Context, string) (resources, reservations, tombstones int, err error)
+}
+
+func (a *App) logOneDaemonObligation(ctx context.Context, daemonID, chID string, counter daemonObligationCounter) {
+	resources, reservations, tombstones, err := counter.DaemonObligationCounts(ctx, daemonID)
+	if err != nil {
+		a.logger.Warn("app.daemon.retired.counts_unknown",
+			"daemon", daemonID, "channel", chID, "err", err)
+		return
+	}
+	if resources+reservations+tombstones == 0 {
+		return
+	}
+	a.logger.Warn("app.daemon.retired.counts",
+		"daemon", daemonID, "channel", chID,
+		"resources", resources, "reservations", reservations, "tombstones", tombstones)
 }
 
 // ---------------------------------------------------------------------------

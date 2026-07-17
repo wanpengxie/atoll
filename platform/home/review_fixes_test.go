@@ -28,13 +28,56 @@ func openWhiteboxHome(t *testing.T) *Home {
 	t.Helper()
 	h, err := Open(Config{CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{},
 		ChannelID: channelpkg.ID("test-review-fixes"),
-		DBPath:    filepath.Join(t.TempDir(), "home.sqlite"),
+		DBPath:    filepath.Join(t.TempDir(), "home.sqlite"), Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	t.Cleanup(func() { _ = h.Close() })
 	return h
+}
+
+func TestChannelOwnerGenesisIdempotencyAndProtection(t *testing.T) {
+	t.Run("neutral principal cannot be upgraded", func(t *testing.T) {
+		h := openWhiteboxHome(t)
+		neutral, err := h.Admit(context.Background(), actor.KindHuman, "same-principal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := h.AdmitChannelOwner(context.Background(), "same-principal"); err == nil {
+			t.Fatal("owner admission accepted a pre-existing neutral row")
+		}
+		row, ok, err := h.ActiveActor(context.Background(), neutral)
+		if err != nil || !ok || row.Role != storespec.RoleNone {
+			t.Fatalf("neutral row changed = (%+v,%v,%v)", row, ok, err)
+		}
+	})
+
+	t.Run("owner retry and ordinary admit preserve owner", func(t *testing.T) {
+		h := openWhiteboxHome(t)
+		owner, err := h.AdmitChannelOwner(context.Background(), "owner-principal")
+		if err != nil {
+			t.Fatal(err)
+		}
+		retry, err := h.AdmitChannelOwner(context.Background(), "owner-principal")
+		if err != nil || retry != owner {
+			t.Fatalf("owner retry = (%q,%v)", retry, err)
+		}
+		ordinary, err := h.Admit(context.Background(), actor.KindHuman, "owner-principal")
+		if err != nil || ordinary != owner {
+			t.Fatalf("ordinary retry = (%q,%v)", ordinary, err)
+		}
+		row, _, _ := h.ActiveActor(context.Background(), owner)
+		if row.Role != storespec.RoleOwner {
+			t.Fatalf("ordinary retry downgraded role to %q", row.Role)
+		}
+		if err := h.Remove(context.Background(), owner); !errors.Is(err, storespec.ErrChannelOwnerProtected) {
+			t.Fatalf("Remove owner err=%v, want protected sentinel", err)
+		}
+		if _, ok, _ := h.ActiveActor(context.Background(), owner); !ok {
+			t.Fatal("protected owner disappeared")
+		}
+	})
 }
 
 func TestAdmitIsHumanOnlyAndIdempotentlyPublishesAuthority(t *testing.T) {

@@ -224,6 +224,7 @@ func (d *fakeDriver) Delete(ctx context.Context, id resource.ResourceID) error {
 // no membership") asserts it stays zero.
 type fakeMembership struct {
 	isMember bool
+	role     storespec.ActorRole
 	world    storespec.ActorWorld
 	err      error
 	calls    int
@@ -271,7 +272,7 @@ func (m *fakeMembership) LookupActive(ctx context.Context, id actor.ActorID) (st
 	if m.lookupHost != "" {
 		p, _ = storespec.NewDaemonPlacement(m.lookupHost)
 	}
-	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1, Placement: p}, true, nil
+	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1, Placement: p, Role: m.role}, true, nil
 }
 
 func (m *fakeMembership) ListActive(context.Context) ([]storespec.ActorControlRow, error) {

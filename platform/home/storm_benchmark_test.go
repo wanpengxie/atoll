@@ -28,7 +28,7 @@ func openStormHome(b *testing.B) *Home {
 	h, err := Open(Config{
 		ChannelID: "actor-storm", DBPath: filepath.Join(b.TempDir(), "channel.sqlite"),
 		CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{},
-		ReconcileInterval: time.Hour,
+		ReconcileInterval: time.Hour, Bootstrap: true,
 	})
 	if err != nil {
 		b.Fatal(err)

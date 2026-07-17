@@ -26,6 +26,7 @@ func lifecycleConfig(t *testing.T, name string) Config {
 		DaemonAuthority:     allowTestDaemonAuthority{},
 		ChannelID:           channel.ID("lifecycle-" + name),
 		DBPath:              filepath.Join(t.TempDir(), name+".sqlite"),
+		Bootstrap:           true,
 	}
 }
 
@@ -75,10 +76,36 @@ func TestHomeOpenMissingRequiredDBRollsBack(t *testing.T) {
 	defer goleak.VerifyNone(t, goleak.IgnoreCurrent())
 	cfg := lifecycleConfig(t, "missing-db")
 	cfg.MustExistDB = true
+	cfg.Bootstrap = false
 	h, err := Open(cfg)
 	if h != nil || err == nil {
 		t.Fatalf("Open = (%v, %v), want nil home and an error", h, err)
 	}
+}
+
+func TestHomeOpenOwnerBootstrapModes(t *testing.T) {
+	t.Run("bootstrap and must-exist are mutually exclusive", func(t *testing.T) {
+		cfg := lifecycleConfig(t, "invalid-bootstrap-mode")
+		cfg.MustExistDB = true
+		if h, err := Open(cfg); h != nil || err == nil {
+			t.Fatalf("Open = (%v,%v), want structural rejection", h, err)
+		}
+	})
+	t.Run("normal open rejects zero owner", func(t *testing.T) {
+		cfg := lifecycleConfig(t, "zero-owner")
+		bootstrap, err := Open(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := bootstrap.Close(); err != nil {
+			t.Fatal(err)
+		}
+		cfg.Bootstrap = false
+		cfg.MustExistDB = true
+		if h, err := Open(cfg); h != nil || err == nil {
+			t.Fatalf("Open = (%v,%v), want exactly-one rejection", h, err)
+		}
+	})
 }
 
 func TestHomeLateOpenPanicRollsBackAndPreservesOriginal(t *testing.T) {
@@ -130,6 +157,7 @@ func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
 		ChannelID:           channel.ID("lifecycle-close-window"),
 		DBPath:              db,
 		Clock:               clock,
+		Bootstrap:           true,
 		Logger:              slog.New(handler),
 		ReconcileInterval:   time.Hour,
 	}
@@ -137,7 +165,7 @@ func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := h.Admit(context.Background(), actor.KindHuman, "close-window-user")
+	id, err := h.AdmitChannelOwner(context.Background(), "close-window-user")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -190,6 +218,8 @@ func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
 	// A sealed rejection is transient: the durable timer remains and fires after
 	// the station is reopened.
 	cfg.Logger = nil
+	cfg.Bootstrap = false
+	cfg.MustExistDB = true
 	h2, err := Open(cfg)
 	if err != nil {
 		t.Fatal(err)

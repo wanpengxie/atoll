@@ -60,7 +60,7 @@ func openAcceptanceHome(t *testing.T, dbPath string, chID channel.ID, resolver C
 	t.Helper()
 	h, err := Open(Config{
 		ChannelID: chID, DBPath: dbPath, CompositionResolver: resolver,
-		DaemonAuthority: allowTestDaemonAuthority{}, ReconcileInterval: interval,
+		DaemonAuthority: allowTestDaemonAuthority{}, ReconcileInterval: interval, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)

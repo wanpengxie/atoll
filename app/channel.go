@@ -37,7 +37,7 @@ func (a *App) rollbackOpenedChannel(ctx context.Context, chID channel.ID, dbPath
 // Home and owns rollback on failure. It has no injectable callback: tests exercise
 // failure by closing the Home, which is the same failure surface production handles.
 func (a *App) seedOpenedChannel(ctx context.Context, h *home.Home, chID channel.ID, dbPath, userID string, at int64) (actor.ActorID, actor.ActorID, error) {
-	creatorID, err := h.Admit(ctx, actor.KindHuman, userID)
+	creatorID, err := h.AdmitChannelOwner(ctx, userID)
 	if err != nil {
 		a.rollbackOpenedChannel(ctx, chID, dbPath)
 		return "", "", err
@@ -140,8 +140,8 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 	}
 
-	// Membrane law: the creator is a member. Admit is the pure-membership动词 —
-	// the creating user's not→member edge (§4.6). No cell here (the human is
+	// Membrane law: the creator is the unique channel owner. Genesis uses the
+	// dedicated owner admission; ordinary membership remains role-neutral. No cell here (the human is
 	// embodied by the ring / subjectgate, never welded at this call site).
 	creatorID, boostID, mErr := a.seedOpenedChannel(c.Request.Context(), home, channel.ID(chID), dbPath, userID, now)
 	if mErr != nil {

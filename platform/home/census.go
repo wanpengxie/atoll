@@ -25,10 +25,29 @@ func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (ac
 	if kind != actor.KindHuman {
 		return "", ErrAdmitKind
 	}
-	result, err := h.cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
+	return h.admitHuman(ctx, storespec.AdmitBundle{
 		Kind: actor.KindHuman, Principal: principal, Class: "human",
 		Placement: storespec.NewServerPlacement(), CreatedAt: h.nowMs(),
 	})
+}
+
+// AdmitChannelOwner performs the sole non-neutral durable admission. A
+// principal collision converges in the store, so the post-commit read must
+// prove the existing row is already the owner; admission never upgrades an
+// ordinary member in place.
+func (h *Home) AdmitChannelOwner(ctx context.Context, principal string) (actor.ActorID, error) {
+	if h.closed.Load() {
+		return "", ErrClosed
+	}
+	return h.admitHuman(ctx, storespec.AdmitBundle{
+		Kind: actor.KindHuman, Principal: principal, Class: "human",
+		Role:      storespec.RoleOwner,
+		Placement: storespec.NewServerPlacement(), CreatedAt: h.nowMs(),
+	})
+}
+
+func (h *Home) admitHuman(ctx context.Context, in storespec.AdmitBundle) (actor.ActorID, error) {
+	result, err := h.cs.DeclAdmission.AdmitDeclared(ctx, in)
 	if err != nil {
 		return "", fmt.Errorf("platform: Admit declared actor: %w", err)
 	}
@@ -39,6 +58,9 @@ func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (ac
 			err = errors.New("committed actor missing from declared read face")
 		}
 		return "", fmt.Errorf("platform: publish admitted actor %s: %w", id, err)
+	}
+	if in.Role == storespec.RoleOwner && row.Role != storespec.RoleOwner {
+		return "", fmt.Errorf("platform: admitted actor %s role mismatch: got %q want %q", id, row.Role, in.Role)
 	}
 	// Assembly order (装配序): liveness row BEFORE authority publish — same
 	// rule as fork/declared admission (a delivery racing the publish must
@@ -60,11 +82,11 @@ func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (ac
 	// subscriptions/presence on the next immediate loop rather than waiting a sweep.
 	// Pure及时性 (a lost poke only delays convergence); the principal is right here.
 	if h.onMembershipChange != nil {
-		h.onMembershipChange(principal)
+		h.onMembershipChange(in.Principal)
 	}
 	if result.Created {
 		h.logger.Info("platform.member.admitted", "channel", string(h.channelID),
-			"actor", string(id), "kind", string(kind), "principal", principal)
+			"actor", string(id), "kind", string(actor.KindHuman), "principal", in.Principal, "role", string(in.Role))
 	}
 	return id, nil
 }

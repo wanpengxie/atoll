@@ -15,6 +15,11 @@ import (
 // the door never resolves-then-creates in two steps.
 var ErrAlreadyExists = errors.New("resourcespec: resource already exists")
 
+// ErrResourceNotFound is SetGrant's same-transaction existence sentinel. It
+// applies equally to replace and revoke, so a dead resource never turns into a
+// foreign-key/driver error or a misleading successful no-op.
+var ErrResourceNotFound = errors.New("resourcespec: resource not found")
+
 // ErrOwnerInactive means an actor-scoped resource could not be born because
 // its owning actor was missing or already deregistered. StateStore.Create
 // decides this in the same transaction as its conditional insert, so callers
@@ -74,11 +79,10 @@ type ResourceMeta struct {
 	PlacementCoord string
 
 	// CreatedBy is the durable creator identity — a PURE AUDIT column, not
-	// an authorization predicate: the creator's authority is the full-rights
-	// grant Create writes into R (an actor entry via SetGrant's shape), and
-	// that grant — never a read of this field — is what "out-lives kind
-	// checks" as the ownership predicate (the design doc's "出生满权 grant
-	// 才是所有权谓词" — birth-time full grant is the ownership predicate).
+	// an authorization predicate: ordinary creator authority is the full-rights
+	// grant Create writes into R (an actor entry via SetGrant's shape), while
+	// the channel owner root is independently authoritative. Neither path reads
+	// this audit field.
 	CreatedBy actor.ActorID
 
 	// Dir is the file BYTE-SHAPE bit (the inode's S_IFDIR analogue, 期11 丁12):
@@ -252,7 +256,8 @@ type Registry interface {
 	// already passed the door's ingress ValidateGrant, so the Registry trusts
 	// the caller and only stores (mirrors storespec's store-not-validate
 	// discipline). The entry key is (id, g.GranteeKind, g.Grantee) — the sum
-	// form persisted in full.
+	// form persisted in full. If id is absent, including on revoke, SetGrant
+	// returns ErrResourceNotFound.
 	SetGrant(ctx context.Context, id resource.ResourceID, g access.Grant) error
 
 	// Delete removes the resource row + ALL its grants in one transaction.
@@ -273,9 +278,9 @@ type Registry interface {
 	//     daemon-side Reclaimer (§4, a later addition) consumes the
 	//     tombstone asynchronously and only then removes the bytes,
 	//     confirming via ReclaimAck (§4.7) so the caller can ClearTombstone.
-	//     The invariant "a visible row always points at valid bytes" holds
-	//     throughout: the row goes invisible FIRST, so a stranded byte is
-	//     always invisible-but-present, never the reverse.
+	//     In the normal domain, "a visible row always points at valid bytes"
+	//     holds: the row goes invisible FIRST. A retired-daemon stranded row is
+	//     the explicit exception and remains owner-visible for manual deletion.
 	Delete(ctx context.Context, id resource.ResourceID) error
 
 	// ClearTombstone deletes one resource_tombstones row after the
@@ -287,7 +292,7 @@ type Registry interface {
 
 	// List enumerates channel-scoped resources in stable (created_at,
 	// resource_id) order — a RAW range scan: it projects rows, it does NOT
-	// grant-filter (§3.7's any-grant projection is the door's job, one layer
+	// grant-filter (§3.7's owner-root-or-any-grant projection is the door's job, one layer
 	// up). prefix is a plain string prefix over resource_id (no glob
 	// semantics); limit bounds the number of rows SCANNED (not the number
 	// returned after any later filtering — there is none here, so scanned ==

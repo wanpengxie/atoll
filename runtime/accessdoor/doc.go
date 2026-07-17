@@ -14,9 +14,10 @@
 //     reason.go deliberately omits a "malformed" value.
 //   - the decision tree (door.invoke / door.create / door.stat / door.list) —
 //     RESOLVE, then the two-locus authorization (create via channel
-//     membership; object ops via R, unioning the actor entry with a members
-//     entry gated by a check-time membership lookup; Stat/List via the SAME
-//     union as an any-grant visibility projection), then EXECUTE. One tree,
+//     membership; object ops via the channel-owner root or R, unioning the
+//     actor entry with a members entry gated by a check-time membership lookup;
+//     Stat/List via the SAME union plus the owner root as a visibility
+//     projection), then EXECUTE. One tree,
 //     several entry methods — the scope split below is a vocabulary split,
 //     not a second tree (期11 spec §3.1).
 //   - the welded-caller capability, split into TWO faces along the scope axis

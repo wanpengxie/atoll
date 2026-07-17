@@ -9,7 +9,7 @@ import (
 // object with operands. Off-log and transient: NO id/ts/seq (not truth), NO channel_id
 // (connection/door-scoped), NO audience/visibility (one object, one subject), NO
 // parent_id/correlation (single-shot, no closure). Authorization is two-locus: object ops
-// (read/write/set/delete) via R.allows(caller, resource, op), create via channel
+// (read/write/set/delete) via channel-owner root ∪ R.allows(caller, resource, op), create via channel
 // membership (no object/R exists yet) — by-identity day-1; NO presented-cap field
 // (deferred).
 type Invocation struct {

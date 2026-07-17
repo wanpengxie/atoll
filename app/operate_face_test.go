@@ -56,6 +56,22 @@ func TestOperate_IntroduceUserForm_Admits(t *testing.T) {
 	}
 }
 
+func TestOperateRemoveChannelOwnerMapsProtectedActor(t *testing.T) {
+	env := setupTestApp(t)
+	s := fullSetup(t, env)
+	payload, _ := json.Marshal(map[string]any{"instance_id": string(s.actorID)})
+	_, err := env.app.OperateFaceForTest().Remove(context.Background(), home.OperateRequest{
+		ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: payload,
+	})
+	var oe *home.OperateError
+	if !errors.As(err, &oe) || oe.Code != "protected_actor" {
+		t.Fatalf("owner remove err=%v, want protected_actor", err)
+	}
+	if !actorPresent(t, env, s.cookies, s.chID, string(s.actorID)) {
+		t.Fatal("owner disappeared after protected remove")
+	}
+}
+
 // TestOperate_IntroducePrivateAgent_Forbidden proves the world-layer二型律: a
 // private agent may only be introduced by its owner — a non-owner principal is
 // refused with error_code=forbidden, and no intent/户籍 row lands.

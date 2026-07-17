@@ -36,9 +36,26 @@ func cloneControlEntry(in controlEntry) controlEntry {
 }
 
 func validControlEntry(e controlEntry) bool {
+	if _, ok := storespec.ParseActorRole(string(e.Row.Role)); !ok {
+		return false
+	}
+	if e.Row.Role == storespec.RoleOwner && (e.World != storespec.WorldDurable ||
+		e.Row.Kind != actor.KindHuman || e.Row.Sponsor != actor.SystemActorID) {
+		return false
+	}
 	return e.Row.ID != "" && e.Row.CurrentDeclVersion > 0 &&
 		(e.World == storespec.WorldDurable || e.World == storespec.WorldRun) &&
 		e.Row.Placement.Validate() == nil
+}
+
+func hasAtMostOneOwner(entries map[actor.ActorID]controlEntry) bool {
+	owners := 0
+	for _, entry := range entries {
+		if entry.Row.Role == storespec.RoleOwner {
+			owners++
+		}
+	}
+	return owners <= 1
 }
 
 // ReplaceAll validates and clones the complete boot image before swapping it,
@@ -53,6 +70,9 @@ func (i *actorControlIndex) ReplaceAll(entries []controlEntry) bool {
 			return false
 		}
 		next[entry.Row.ID] = cloneControlEntry(entry)
+	}
+	if !hasAtMostOneOwner(next) {
+		return false
 	}
 	i.mu.Lock()
 	i.rows = next
@@ -70,6 +90,21 @@ func (i *actorControlIndex) UpsertBatch(entries []controlEntry) bool {
 		cloned[n] = cloneControlEntry(entry)
 	}
 	i.mu.Lock()
+	next := make(map[actor.ActorID]controlEntry, len(i.rows)+len(cloned))
+	for id, entry := range i.rows {
+		next[id] = entry
+	}
+	for _, entry := range cloned {
+		if current, ok := i.rows[entry.Row.ID]; ok && current.Row.Role != entry.Row.Role {
+			i.mu.Unlock()
+			return false
+		}
+		next[entry.Row.ID] = entry
+	}
+	if !hasAtMostOneOwner(next) {
+		i.mu.Unlock()
+		return false
+	}
 	for _, entry := range cloned {
 		i.rows[entry.Row.ID] = entry
 	}

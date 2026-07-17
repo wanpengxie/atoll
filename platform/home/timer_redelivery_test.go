@@ -55,7 +55,7 @@ func TestFiredTimerSurvivesHandlerPanicAndRedeliversUntilAck(t *testing.T) {
 	h, err := Open(Config{
 		ChannelID: "timer-redelivery", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
 		CompositionResolver: resolver, DaemonAuthority: allowTestDaemonAuthority{},
-		ReconcileInterval: 10 * time.Millisecond,
+		ReconcileInterval: 10 * time.Millisecond, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -107,7 +107,7 @@ func TestFiredTimerFullAttemptIsReleasedAndRetriedOnNextSweep(t *testing.T) {
 	h, err := Open(Config{
 		ChannelID: "timer-full-retry", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
 		CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{},
-		ReconcileInterval: time.Hour,
+		ReconcileInterval: time.Hour, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -189,7 +189,7 @@ func TestFiredSweepTransientTargetSetsDirtyOnceWithoutDoubleAccept(t *testing.T)
 	h, err := Open(Config{
 		ChannelID: "timer-transient-dirty", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
 		CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{},
-		ReconcileInterval: time.Hour,
+		ReconcileInterval: time.Hour, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)

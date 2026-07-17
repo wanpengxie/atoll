@@ -307,6 +307,7 @@ func (a *App) openHome(chID channel.ID, dbPath string, mustExist bool) (*home.Ho
 		ChannelID:   chID,
 		DBPath:      dbPath,
 		MustExistDB: mustExist,
+		Bootstrap:   !mustExist,
 		Logger:      a.logger,
 		// Fill the two eager-activation injection points with the组合域 supply:
 		// Desired = server-placed intent (the reconcile ring's desired half),

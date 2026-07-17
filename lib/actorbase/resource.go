@@ -49,10 +49,10 @@ type ResourceHandle interface {
 	// container channel's current membership (late-bound at check time).
 	ShareMembers(id resource.ResourceID, ops []access.Operation) (accessdoor.Outcome, error)
 
-	// Stat projects id's any-grant-visible metadata + caller's effective ops.
+	// Stat projects id's owner-root-or-any-grant-visible metadata + caller's effective ops.
 	Stat(id resource.ResourceID) (accessdoor.StatResult, error)
-	// List enumerates channel-scoped resources this caller can see (any-grant
-	// projection), paginated.
+	// List enumerates channel-scoped resources this caller can see (owner root
+	// or any-grant projection), paginated.
 	List(q accessdoor.ListQuery) (accessdoor.ListPage, error)
 
 	// Open is file kind's own byte-access verb (期11 spec §3.9': "file 读/写

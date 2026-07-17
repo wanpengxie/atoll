@@ -109,9 +109,17 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 	if !exists {
 		return Outcome{RejectReason: access.ResourceNotFound}, nil
 	}
+	callerRow, callerActive, err := d.deps.Authority.LookupActive(ctx, caller)
+	if err != nil {
+		return Outcome{}, err
+	}
+	isOwner := callerActive && callerRow.Role == storespec.RoleOwner
 
-	// ---- A8 two halves unioned: actor entry ∪ (members entry ∧ current member) ----
-	allowed, err := d.deps.Registry.ActorAllows(ctx, caller, id, op)
+	// ---- owner root ∪ A8: actor entry ∪ (members entry ∧ current member) ----
+	allowed := isOwner
+	if !allowed {
+		allowed, err = d.deps.Registry.ActorAllows(ctx, caller, id, op)
+	}
 	if err != nil {
 		return Outcome{}, err
 	}
@@ -127,11 +135,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 			return Outcome{}, err
 		}
 		if mAllow {
-			_, isM, err := d.deps.Authority.LookupActive(ctx, caller)
-			if err != nil {
-				return Outcome{}, err
-			}
-			allowed = isM
+			allowed = callerActive
 		}
 	}
 	if !allowed {
@@ -224,6 +228,9 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 			serr = d.deps.Registry.SetGrant(ctx, id, *grant)
 		}
 		if serr != nil {
+			if errors.Is(serr, resourcespec.ErrResourceNotFound) {
+				return Outcome{RejectReason: access.ResourceNotFound}, nil
+			}
 			return executeFailure(ctx, serr) // executor-authored (reason.go)
 		}
 		return Outcome{}, nil

@@ -328,6 +328,9 @@ func (x *operateExecutor) Remove(ctx context.Context, req platformhome.OperateRe
 	}
 	id := actor.ActorID(inst)
 	if err := home.Remove(ctx, id); err != nil {
+		if errors.Is(err, storespec.ErrChannelOwnerProtected) {
+			return nil, &platformhome.OperateError{Code: "protected_actor", Detail: "channel owner cannot be removed"}
+		}
 		return nil, err
 	}
 	return map[string]any{"removed": inst}, nil

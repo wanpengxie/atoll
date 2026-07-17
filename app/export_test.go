@@ -202,6 +202,16 @@ func (a *App) WaitLiveForTest(chID string, id actor.ActorID, timeout time.Durati
 	}
 }
 
+// CloseHomeForTest leaves the closed handle published in the app map so a
+// post-commit daemon-obligation read deterministically returns ErrClosed.
+func (a *App) CloseHomeForTest(chID channel.ID) error {
+	h := a.getHome(chID)
+	if h == nil {
+		return errTestChannelNotLoaded
+	}
+	return h.Close()
+}
+
 // KillCellForTest kills id's live embodiment on chID's home (despawn + dereg) —
 // the "brain went dead" event resolveRouting must answer with 503 when id is the
 // channel's default agent. Test-only.

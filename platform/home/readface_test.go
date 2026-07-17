@@ -63,3 +63,44 @@ func TestActorControlIndexBatchPublicationAndValidation(t *testing.T) {
 		t.Fatalf("DeleteBatch left %d rows", len(rows))
 	}
 }
+
+func TestActorControlIndexRejectsInvalidAndDuplicateOwnersAtomically(t *testing.T) {
+	owner := func(id actor.ActorID) controlEntry {
+		entry := testControlEntry(id, storespec.WorldDurable, nil)
+		entry.Row.Kind = actor.KindHuman
+		entry.Row.Sponsor = actor.SystemActorID
+		entry.Row.Role = storespec.RoleOwner
+		return entry
+	}
+	invalid := []controlEntry{
+		func() controlEntry { e := owner("run-owner"); e.World = storespec.WorldRun; return e }(),
+		func() controlEntry { e := owner("agent-owner"); e.Row.Kind = actor.KindAgent; return e }(),
+		func() controlEntry { e := owner("foreign-owner"); e.Row.Sponsor = "human:sponsor"; return e }(),
+	}
+	for _, entry := range invalid {
+		idx := newActorControlIndex()
+		if idx.ReplaceAll([]controlEntry{entry}) || idx.UpsertBatch([]controlEntry{entry}) {
+			t.Fatalf("accepted invalid owner %+v", entry)
+		}
+	}
+
+	idx := newActorControlIndex()
+	first := owner("owner-a")
+	if !idx.ReplaceAll([]controlEntry{first}) {
+		t.Fatal("first owner rejected")
+	}
+	if idx.UpsertBatch([]controlEntry{owner("owner-b")}) {
+		t.Fatal("second owner accepted")
+	}
+	if _, ok, _ := idx.LookupActive(context.Background(), first.Row.ID); !ok {
+		t.Fatal("failed upsert mutated the old image")
+	}
+	if _, ok, _ := idx.LookupActive(context.Background(), "owner-b"); ok {
+		t.Fatal("failed upsert partially published second owner")
+	}
+	downgrade := first
+	downgrade.Row.Role = storespec.RoleNone
+	if idx.UpsertBatch([]controlEntry{downgrade}) {
+		t.Fatal("owner role downgrade accepted")
+	}
+}

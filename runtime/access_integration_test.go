@@ -151,6 +151,66 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	expectBytes(t, "E read value", out, v1)
 }
 
+func TestChannelOwnerRecoversStrandedDaemonResource(t *testing.T) {
+	ctx := context.Background()
+	cs := openAccessChannel(t)
+	admitted, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
+		Kind: actor.KindHuman, Principal: "channel-owner", Role: storespec.RoleOwner,
+		Class: "human", Placement: storespec.NewServerPlacement(), CreatedAt: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner := cs.Access.Mint(scheduleStamp(admitted.ID))
+	const rid resource.ResourceID = "file:stranded"
+	if err := csResourcesCreateForTest(cs, rid, "retired-daemon", "orphan-coord"); err != nil {
+		t.Fatal(err)
+	}
+	// Model a stranded row: the daemon has retired and its ordinary members
+	// grant has been revoked, leaving no grant entry that can recover it.
+	registry := rawResourceRegistryForTest(cs)
+	if err := registry.SetGrant(ctx, rid, access.Grant{GranteeKind: access.GranteeMembers}); err != nil {
+		t.Fatal(err)
+	}
+	page, err := owner.List(ctx, accessdoor.ListQuery{})
+	if err != nil || len(page.Entries) != 1 || page.Entries[0].ID != rid {
+		t.Fatalf("owner List stranded = (%+v,%v)", page, err)
+	}
+	grant := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "peer", Ops: []access.Operation{access.OpRead, access.OpWrite}}
+	out, err := owner.Invoke(ctx, access.OpSet, rid, nil, grant)
+	expectAccepted(t, "owner grants read/write", out, err)
+	grant.Ops = []access.Operation{access.OpRead, access.OpDelete}
+	out, err = owner.Invoke(ctx, access.OpSet, rid, nil, grant)
+	expectReason(t, "owner remains under day-1 grant ceiling", out, err, access.AccessDenied)
+	// Restore the zero-grant stranded shape before manual recovery.
+	if err := registry.SetGrant(ctx, rid, access.Grant{GranteeKind: access.GranteeActor, Grantee: "peer"}); err != nil {
+		t.Fatal(err)
+	}
+	out, err = owner.Invoke(ctx, access.OpDelete, rid, nil, nil)
+	expectAccepted(t, "owner deletes stranded resource", out, err)
+	page, err = owner.List(ctx, accessdoor.ListQuery{})
+	if err != nil || len(page.Entries) != 0 {
+		t.Fatalf("owner List after recovery = (%+v,%v)", page, err)
+	}
+	tombstones, err := cs.Outbox.ListTombstonesByDaemon(ctx, "retired-daemon")
+	if err != nil || len(tombstones) != 1 {
+		t.Fatalf("tombstones = (%+v,%v)", tombstones, err)
+	}
+	// The inert tombstone is an outbox obligation, not a namespace lock.
+	if err := csResourcesCreateForTest(cs, rid, "retired-daemon", "replacement-coord"); err != nil {
+		t.Fatalf("inert tombstone blocked fresh birth: %v", err)
+	}
+}
+
+func csResourcesCreateForTest(cs *ChannelStores, id resource.ResourceID, daemonID, coord string) error {
+	return rawResourceRegistryForTest(cs).Create(context.Background(), id, resourcespec.KindFile, actor.SystemActorID, daemonID, coord, nil,
+		resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthChannelOwned})
+}
+
+func rawResourceRegistryForTest(cs *ChannelStores) resourcespec.Registry {
+	return cs.Outbox.(resourceOutbox).ResourceOutbox.(resourcespec.Registry)
+}
+
 // ---- helpers ----
 
 func openAccessChannel(t *testing.T) *ChannelStores {

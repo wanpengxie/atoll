@@ -11,11 +11,20 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/ipc"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // --- Stat ---
 
 func TestDoorStat(t *testing.T) {
+	t.Run("owner sees full ops without grants", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true, role: storespec.RoleOwner})
+		res, err := d.stat(context.Background(), "owner", "r1")
+		if err != nil || res.Reject != "" || len(res.Ops) != len(objectOps) {
+			t.Fatalf("owner stat = (%+v,%v), want full ops", res, err)
+		}
+	})
 	t.Run("not found", func(t *testing.T) {
 		reg := &fakeRegistry{resolveExists: false}
 		d := newDoor(reg, &fakeDriver{}, &fakeMembership{})
@@ -99,6 +108,14 @@ func rowWithActorGrant(id resource.ResourceID, kind resourcespec.ResourceKind, c
 }
 
 func TestDoorList(t *testing.T) {
+	t.Run("owner sees zero-grant rows with full ops", func(t *testing.T) {
+		reg := &fakeRegistry{listRows: []resourcespec.ResourceRow{{ID: "orphan", Meta: metaKV()}}}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true, role: storespec.RoleOwner})
+		page, err := d.list(context.Background(), "owner", ListQuery{})
+		if err != nil || len(page.Entries) != 1 || page.Entries[0].ID != "orphan" || len(page.Entries[0].Ops) != len(objectOps) {
+			t.Fatalf("owner list = (%+v,%v), want orphan with full ops", page, err)
+		}
+	})
 	t.Run("filters rows the caller has zero rights on", func(t *testing.T) {
 		reg := &fakeRegistry{
 			listRows: []resourcespec.ResourceRow{

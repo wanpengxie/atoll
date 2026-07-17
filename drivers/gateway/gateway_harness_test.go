@@ -244,6 +244,7 @@ func openHome(t *testing.T, chID channel.ID, principal string) (*home.Home, acto
 	h, err := home.Open(home.Config{
 		ChannelID:           chID,
 		DBPath:              dbPath,
+		Bootstrap:           true,
 		ReconcileInterval:   time.Hour,
 		CompositionResolver: gatewayTestCompositionResolver{},
 		DaemonAuthority:     gatewayTestDaemonAuthority{},
@@ -270,6 +271,7 @@ func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) 
 	h, err := home.Open(home.Config{
 		ChannelID:           chID,
 		DBPath:              dbPath,
+		Bootstrap:           true,
 		ReconcileInterval:   time.Hour,
 		CompositionResolver: gatewayTestCompositionResolver{},
 		DaemonAuthority:     gatewayTestDaemonAuthority{},
@@ -297,6 +299,7 @@ func openDormantDeclaredHomeWired(t *testing.T, chID channel.ID, principal strin
 	h, err := home.Open(home.Config{
 		ChannelID:           chID,
 		DBPath:              dbPath,
+		Bootstrap:           true,
 		ReconcileInterval:   time.Hour,
 		CompositionResolver: gatewayTestCompositionResolver{},
 		DaemonAuthority:     gatewayTestDaemonAuthority{},

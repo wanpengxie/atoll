@@ -10,9 +10,29 @@ import (
 )
 
 var (
-	ErrActorNotFound  = errors.New("storespec: actor not found")
-	ErrMemberInactive = errors.New("storespec: member missing or ended")
+	ErrActorNotFound         = errors.New("storespec: actor not found")
+	ErrMemberInactive        = errors.New("storespec: member missing or ended")
+	ErrChannelOwnerProtected = errors.New("storespec: channel owner is protected")
 )
+
+// ActorRole is the closed authority role carried by durable control rows.
+// RoleNone is the ordinary membership state; RoleOwner is the unique channel
+// root and is valid only for a durable human sponsored by the system actor.
+type ActorRole string
+
+const (
+	RoleNone  ActorRole = ""
+	RoleOwner ActorRole = "owner"
+)
+
+func ParseActorRole(raw string) (ActorRole, bool) {
+	switch ActorRole(raw) {
+	case RoleNone, RoleOwner:
+		return ActorRole(raw), true
+	default:
+		return RoleNone, false
+	}
+}
 
 // PlacementKind is the closed placement vocabulary. Placement itself is a
 // tagged value so an invalid server/host or daemon/no-host combination cannot
@@ -62,6 +82,7 @@ type ActorControlRow struct {
 	ID                 actor.ActorID
 	Kind               actor.Kind
 	Principal          string
+	Role               ActorRole
 	Binding            actor.Binding
 	CreatedAt          int64
 	CurrentDeclVersion int64
@@ -110,6 +131,7 @@ type AdmitBundle struct {
 	ID           actor.ActorID
 	Kind         actor.Kind
 	Principal    string
+	Role         ActorRole
 	Binding      actor.Binding
 	Class        string
 	Config       json.RawMessage

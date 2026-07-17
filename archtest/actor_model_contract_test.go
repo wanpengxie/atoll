@@ -7,6 +7,8 @@ import (
 	"go/token"
 	"io/fs"
 	"path/filepath"
+	"reflect"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -155,6 +157,58 @@ func TestActorModelBundleCallsitesAreClosed(t *testing.T) {
 	})
 	if len(admit)+len(endCascade)+len(rawCommit) != 0 {
 		t.Fatalf("bundle callsite drift: AdmitDeclared=%v EndCascade=%v CommitReservation(raw)=%v", admit, endCascade, rawCommit)
+	}
+}
+
+func TestChannelOwnerProductionChokepointsAreClosed(t *testing.T) {
+	var roleAssignments, protectedReturns, bootstrapAssignments []string
+	walkProductionGo(t, func(path string, f *ast.File, fset *token.FileSet) {
+		for _, decl := range f.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.CompositeLit:
+					for _, elt := range x.Elts {
+						kv, ok := elt.(*ast.KeyValueExpr)
+						if !ok {
+							continue
+						}
+						key, ok := kv.Key.(*ast.Ident)
+						if !ok {
+							continue
+						}
+						switch key.Name {
+						case "Role":
+							roleAssignments = append(roleAssignments, fmt.Sprintf("%s:%s", path, fn.Name.Name))
+						case "Bootstrap":
+							bootstrapAssignments = append(bootstrapAssignments, fmt.Sprintf("%s:%s", path, fn.Name.Name))
+						}
+					}
+				case *ast.ReturnStmt:
+					for _, result := range x.Results {
+						sel, ok := result.(*ast.SelectorExpr)
+						if ok && sel.Sel.Name == "ErrChannelOwnerProtected" {
+							protectedReturns = append(protectedReturns, fmt.Sprintf("%s:%s", path, fn.Name.Name))
+						}
+					}
+				}
+				return true
+			})
+		}
+	})
+	wantRole := []string{"../platform/home/census.go:AdmitChannelOwner"}
+	wantProtected := []string{"../platform/home/end.go:prepareEndIdentity", "../runtime/internal/store/cascade.go:EndCascade"}
+	wantBootstrap := []string{"../app/app.go:openHome"}
+	sort.Strings(roleAssignments)
+	sort.Strings(protectedReturns)
+	sort.Strings(bootstrapAssignments)
+	sort.Strings(wantProtected)
+	if !reflect.DeepEqual(roleAssignments, wantRole) || !reflect.DeepEqual(protectedReturns, wantProtected) || !reflect.DeepEqual(bootstrapAssignments, wantBootstrap) {
+		t.Fatalf("channel-owner chokepoint drift: Role=%v want %v; protected returns=%v want %v; Bootstrap=%v want %v",
+			roleAssignments, wantRole, protectedReturns, wantProtected, bootstrapAssignments, wantBootstrap)
 	}
 }
 

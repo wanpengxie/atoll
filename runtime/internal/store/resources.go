@@ -606,6 +606,12 @@ func (r *resourceRegistry) SetGrant(ctx context.Context, id resource.ResourceID,
 		return fmt.Errorf("store: resource set-grant begin: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	var exists int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM resources WHERE resource_id=?`, string(id)).Scan(&exists); errors.Is(err, sql.ErrNoRows) {
+		return resourcespec.ErrResourceNotFound
+	} else if err != nil {
+		return fmt.Errorf("store: resource set-grant existence %q: %w", id, err)
+	}
 
 	if len(g.Ops) == 0 {
 		if _, err := tx.ExecContext(ctx,
@@ -646,8 +652,10 @@ func (r *resourceRegistry) SetGrant(ctx context.Context, id resource.ResourceID,
 //     inside the SAME transaction, writes a resource_tombstones
 //     row from those values, then deletes the resource row + grants. The
 //     daemon-side Reclaimer (§4, a later addition) collects the bytes
-//     asynchronously afterward. The invariant "a visible row always points
-//     at valid bytes" holds throughout: the row disappears FIRST.
+//     asynchronously afterward. In the normal domain, "a visible row always
+//     points at valid bytes" holds: the row disappears FIRST. A retired-daemon
+//     stranded row is the explicit exception and remains owner-visible for
+//     manual deletion.
 //
 // supersedePendingReservationsTx is Delete's #C helper: inside the caller's
 // transaction, for every still-pending reservation on id, write a

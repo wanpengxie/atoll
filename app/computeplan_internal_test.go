@@ -31,6 +31,7 @@ func TestAppPlanProvider_UsesHomeIntentAndRejectsMissingSource(t *testing.T) {
 	h, err := home.Open(home.Config{
 		ChannelID: chID, DBPath: filepath.Join(dir, "channel.sqlite"),
 		CompositionResolver: compositionResolver{app: a}, DaemonAuthority: appDaemonAuthority{app: a},
+		Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)

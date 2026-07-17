@@ -77,14 +77,14 @@ type ResourceAccessHandle interface {
 	// moment CreateSpec existed.
 	Create(ctx context.Context, id resource.ResourceID, spec resourcespec.CreateSpec, initial []byte) (Outcome, error)
 
-	// Stat projects id's any-grant-visible metadata + caller's effective ops
+	// Stat projects id's owner-root-or-any-grant-visible metadata + caller's effective ops
 	// (§3.6). Never Operation-gated (Stat is a Query method, not a grantable
 	// verb) and never carries PlacementCoord (StatMeta is a separate,
 	// coord-less projection type — see query.go).
 	Stat(ctx context.Context, id resource.ResourceID) (StatResult, error)
 
-	// List enumerates channel-scoped resources this caller can see (any-grant
-	// projection), paginated (§3.7). The actor-scoped locus has NO List — that
+	// List enumerates channel-scoped resources this caller can see (owner root
+	// or any-grant projection), paginated (§3.7). The actor-scoped locus has NO List — that
 	// absence IS the scope law (no kind column, no cross-owner enumeration
 	// makes sense there), so List belongs on this interface alone.
 	List(ctx context.Context, q ListQuery) (ListPage, error)

@@ -63,7 +63,11 @@ type Config struct {
 	// directory. The store then refuses to create a missing file or repair an
 	// incomplete schema. New-channel creation leaves it false.
 	MustExistDB bool
-	Logger      *slog.Logger
+	// Bootstrap permits the one new-channel 0→1 owner transition. It is
+	// mutually exclusive with MustExistDB; every normal reopen requires exactly
+	// one active owner before any authority/effect consumer is bound.
+	Bootstrap bool
+	Logger    *slog.Logger
 	// ReconcileInterval tunes the closure reconciler's level safety-net sweep
 	// period (the backstop for lost death edges). <=0 → the default. The death
 	// edge closes the common case immediately; this sweep is a rare backstop.

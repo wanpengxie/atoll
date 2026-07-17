@@ -53,6 +53,9 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if cfg.DaemonAuthority == nil {
 		return nil, fmt.Errorf("platform: DaemonAuthority required")
 	}
+	if cfg.Bootstrap && cfg.MustExistDB {
+		return nil, errors.New("platform: Bootstrap and MustExistDB are mutually exclusive")
+	}
 	h := &Home{channelID: cfg.ChannelID, logger: logger, closeDone: make(chan struct{})}
 	defer func() {
 		if p := recover(); p != nil {
@@ -127,6 +130,17 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	bootRows, err := cs.Declared.ListDeclaredActive(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("platform: load actor authority: %w", err)
+	}
+	if !cfg.Bootstrap {
+		owners := 0
+		for _, row := range bootRows {
+			if row.Role == storespec.RoleOwner {
+				owners++
+			}
+		}
+		if owners != 1 {
+			return nil, fmt.Errorf("platform: normal open requires exactly one active channel owner (got %d)", owners)
+		}
 	}
 	bootEntries := make([]controlEntry, 0, len(bootRows))
 	bootIDs := make([]actor.ActorID, 0, len(bootRows))

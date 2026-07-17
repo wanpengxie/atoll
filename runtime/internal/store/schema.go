@@ -19,7 +19,9 @@ package store
 // frozen vocabulary: extending a pre-launch closed set (e.g. a new sender_kind)
 // would make every existing channel sqlite reject inserts AND forbid recreation
 // against the old file. The set is closed by the Go ADT; the DDL must not
-// foreclose its evolution. is_terminal KEEPS its CHECK (0,1) — that is a
+// foreclose its evolution. actor_registry.role is the deliberate exception:
+// it is a structural authority bit whose closed set and owner=>human relation
+// must survive every writer, including direct SQL. is_terminal KEEPS its CHECK (0,1) — that is a
 // structural boolean integrity constraint, not an evolving vocabulary.
 const ChannelLocalDDL = `
 -- =============================================================
@@ -66,6 +68,7 @@ CREATE TABLE IF NOT EXISTS actor_registry (
   actor_id           TEXT PRIMARY KEY,
   actor_kind         TEXT NOT NULL,
   principal          TEXT NOT NULL DEFAULT '', -- opaque continuing-subject anchor; actor_id remains an instance id
+  role               TEXT NOT NULL DEFAULT '' CHECK (role IN ('', 'owner')) CHECK (role='' OR actor_kind='human'),
   actor_binding      TEXT,
 	current_decl_version INTEGER NOT NULL DEFAULT 1,
   created_at         INTEGER NOT NULL,
@@ -78,6 +81,9 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_principal
   ON actor_registry(actor_kind, principal)
   WHERE deregistered_at IS NULL AND principal <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_owner
+  ON actor_registry(role)
+  WHERE role='owner' AND deregistered_at IS NULL;
 
 -- Versioned desired declaration for durable actors. Forked actors never land
 -- here; their complete control row lives only in Home's session authority.
@@ -149,7 +155,7 @@ CREATE TABLE IF NOT EXISTS resources (
   bytes                 BLOB,                     -- KindKV driver's inline bytes; NULL for kv = resolved-but-empty, ALWAYS NULL for file (its bytes live at placement_coord, never inline)
   placement_daemon_id   TEXT NOT NULL DEFAULT '', -- explicit routing column: which daemon's Streamer holds the bytes; '' for kv
   placement_coord       TEXT NOT NULL DEFAULT '', -- opaque storage handle, server-registry-generated (§1.6); '' for kv; NEVER crosses Stat/List to a caller (§3.6 red line, enforced one layer up)
-  created_by            TEXT NOT NULL DEFAULT '', -- durable creator actor id; PURE AUDIT column, not the authorization predicate (the creator's full-rights grant in resource_grants is)
+  created_by            TEXT NOT NULL DEFAULT '', -- durable creator actor id; PURE AUDIT column, not the authorization predicate (authorization = channel owner root OR grants in resource_grants)
   created_at            INTEGER NOT NULL,
   is_dir                INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)) -- file BYTE-SHAPE bit (the inode's S_IFDIR analogue): 1 = directory-shaped file resource (workspace, bytes = a whole tree委托真fs, Open→os.Root lease句柄), 0 = regular blob (Open→single-file staging句柄) / kv (always 0). Structural boolean integrity, KEEPS its CHECK (same discipline as is_terminal); this is the door's Open ROUTING truth, read at resolve, never a leaf the daemon re-derives from disk
 );

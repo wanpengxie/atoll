@@ -32,6 +32,22 @@ func (r *actorRegistry) EndCascade(ctx context.Context, in storespec.CascadeBund
 		return storespec.CascadeResult{}, err
 	}
 	defer tx.Rollback()
+	protectedTargets := make(map[actor.ActorID]struct{}, len(in.IDs)+len(in.Envelopes))
+	for _, id := range in.IDs {
+		protectedTargets[id] = struct{}{}
+	}
+	for _, envelope := range in.Envelopes {
+		protectedTargets[envelope.Target] = struct{}{}
+	}
+	for id := range protectedTargets {
+		var owner int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND role='owner' AND deregistered_at IS NULL`, string(id)).Scan(&owner); err != nil {
+			return storespec.CascadeResult{}, err
+		}
+		if owner != 0 {
+			return storespec.CascadeResult{}, storespec.ErrChannelOwnerProtected
+		}
+	}
 
 	result := storespec.CascadeResult{}
 	for _, id := range in.IDs {

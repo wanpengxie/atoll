@@ -11,7 +11,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-const declaredControlColumns = `r.actor_id, r.actor_kind, r.principal,
+const declaredControlColumns = `r.actor_id, r.actor_kind, r.principal, r.role,
 	COALESCE(r.actor_binding,''), r.created_at, r.current_decl_version,
 	d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
 	d.source_decl_id`
@@ -20,10 +20,10 @@ type controlScanner interface{ Scan(...any) error }
 
 func scanDeclaredControl(s controlScanner) (storespec.ActorControlRow, error) {
 	var row storespec.ActorControlRow
-	var rawKind, rawBinding, placement string
+	var rawKind, rawRole, rawBinding, placement string
 	var config []byte
 	var idleMS int64
-	if err := s.Scan(&row.ID, &rawKind, &row.Principal, &rawBinding,
+	if err := s.Scan(&row.ID, &rawKind, &row.Principal, &rawRole, &rawBinding,
 		&row.CreatedAt, &row.CurrentDeclVersion, &row.Class, &config, &idleMS,
 		&placement, &row.Placement.Host, &row.SourceDeclID); err != nil {
 		return storespec.ActorControlRow{}, err
@@ -33,6 +33,11 @@ func scanDeclaredControl(s controlScanner) (storespec.ActorControlRow, error) {
 		return storespec.ActorControlRow{}, fmt.Errorf("store: actor %q invalid kind %q", row.ID, rawKind)
 	}
 	row.Kind = kind
+	role, ok := storespec.ParseActorRole(rawRole)
+	if !ok {
+		return storespec.ActorControlRow{}, fmt.Errorf("store: actor %q invalid role %q", row.ID, rawRole)
+	}
+	row.Role = role
 	if rawBinding != "" {
 		binding, ok := actor.ParseBinding(rawBinding)
 		if !ok {
@@ -95,7 +100,7 @@ func (r *actorRegistry) ListDeclaredActive(ctx context.Context) ([]storespec.Act
 }
 
 func (r *actorRegistry) LookupDeclaredVersion(ctx context.Context, id actor.ActorID, version int64) (storespec.ActorControlRow, bool, error) {
-	const q = `SELECT r.actor_id, r.actor_kind, r.principal,
+	const q = `SELECT r.actor_id, r.actor_kind, r.principal, r.role,
 		COALESCE(r.actor_binding,''), r.created_at, d.version,
 		d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
 		d.source_decl_id
@@ -112,7 +117,7 @@ func (r *actorRegistry) LookupDeclaredVersion(ctx context.Context, id actor.Acto
 }
 
 func (r *actorRegistry) LatestDeclaredVersion(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
-	const q = `SELECT r.actor_id, r.actor_kind, r.principal,
+	const q = `SELECT r.actor_id, r.actor_kind, r.principal, r.role,
 		COALESCE(r.actor_binding,''), r.created_at, d.version,
 		d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
 		d.source_decl_id
@@ -143,6 +148,9 @@ func validateAdmitBundle(in storespec.AdmitBundle) error {
 	}
 	if in.ID == actor.SystemActorID && in.Kind != actor.KindSystem {
 		return errors.New("store: system id requires system kind")
+	}
+	if role, ok := storespec.ParseActorRole(string(in.Role)); !ok || role == storespec.RoleOwner && in.Kind != actor.KindHuman {
+		return errors.New("store: invalid declared actor role")
 	}
 	return validateMemberIdentity(in.ID, in.Kind, in.Binding)
 }
@@ -221,8 +229,8 @@ func (r *actorRegistry) AdmitDeclared(ctx context.Context, in storespec.AdmitBun
 	}
 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO actor_registry
-		(actor_id, actor_kind, principal, actor_binding, created_at, current_decl_version, deregistered_at)
-		VALUES (?,?,?,?,?,1,NULL)`, string(in.ID), string(in.Kind), in.Principal,
+		(actor_id, actor_kind, principal, role, actor_binding, created_at, current_decl_version, deregistered_at)
+		VALUES (?,?,?,?,?,?,1,NULL)`, string(in.ID), string(in.Kind), in.Principal, string(in.Role),
 		nullableBinding(in.Binding), in.CreatedAt); err != nil {
 		return storespec.AdmitResult{}, fmt.Errorf("store: declared actor insert %q: %w", in.ID, err)
 	}
@@ -281,7 +289,7 @@ func (r *actorRegistry) EditDeclared(ctx context.Context, in storespec.DeclEditB
 		VALUES (?,?,?,?,?,?,?,?,?)`, string(in.ActorID), version, in.Class, config, string(in.Placement.Kind), in.Placement.Host, in.TIdle.Milliseconds(), in.SourceDeclID, in.CreatedAt); err != nil {
 		return storespec.ActorControlRow{}, err
 	}
-	row, err := scanDeclaredControl(tx.QueryRowContext(ctx, `SELECT r.actor_id,r.actor_kind,r.principal,COALESCE(r.actor_binding,''),r.created_at,d.version,d.class,d.config_json,d.t_idle_ms,d.placement,d.desired_host,d.source_decl_id FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id WHERE r.actor_id=? AND d.version=?`, string(in.ActorID), version))
+	row, err := scanDeclaredControl(tx.QueryRowContext(ctx, `SELECT r.actor_id,r.actor_kind,r.principal,r.role,COALESCE(r.actor_binding,''),r.created_at,d.version,d.class,d.config_json,d.t_idle_ms,d.placement,d.desired_host,d.source_decl_id FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id WHERE r.actor_id=? AND d.version=?`, string(in.ActorID), version))
 	if err != nil {
 		return storespec.ActorControlRow{}, err
 	}

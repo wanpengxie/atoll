@@ -6,6 +6,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // objectOps is the closed set of R-governed object verbs — the ops any
@@ -15,8 +16,8 @@ import (
 var objectOps = []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete}
 
 // effectiveOps computes caller's UNION of grantable rights on an EXISTING
-// resource — the A8 formula (期11 spec §2 item 2): for each object op,
-// ActorAllows(caller) ∪ (MembersAllow ∧ IsMember(caller)). Door-internal only:
+// resource — the owner-root extension of the A8 formula: for each object op,
+// IsOwner(caller) ∪ ActorAllows(caller) ∪ (MembersAllow ∧ IsMember(caller)). Door-internal only:
 // it never crosses the wire and never appears in a public signature. THREE
 // loci share this ONE formula (期11 spec §2 item 2 — all three wired):
 //   - the set arm's escalation check (door.go): set(X, ops) requires
@@ -38,8 +39,16 @@ var objectOps = []access.Operation{access.OpRead, access.OpWrite, access.OpSet, 
 // (door.go's authorize step) which does the same lazy-single-resolve.
 func (d *door) effectiveOps(ctx context.Context, caller actor.ActorID, id resource.ResourceID) (map[access.Operation]bool, error) {
 	eff := make(map[access.Operation]bool, len(objectOps))
-	var isMember bool
-	var isMemberResolved bool
+	row, isMember, err := d.deps.Authority.LookupActive(ctx, caller)
+	if err != nil {
+		return nil, err
+	}
+	if isMember && row.Role == storespec.RoleOwner {
+		for _, op := range objectOps {
+			eff[op] = true
+		}
+		return eff, nil
+	}
 
 	for _, op := range objectOps {
 		allowed, err := d.deps.Registry.ActorAllows(ctx, caller, id, op)
@@ -58,14 +67,6 @@ func (d *door) effectiveOps(ctx context.Context, caller actor.ActorID, id resour
 				return nil, err
 			}
 			if mAllow {
-				if !isMemberResolved {
-					_, isM, err := d.deps.Authority.LookupActive(ctx, caller)
-					if err != nil {
-						return nil, err
-					}
-					isMember = isM
-					isMemberResolved = true
-				}
 				allowed = isMember
 			}
 		}

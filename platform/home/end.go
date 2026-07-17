@@ -101,6 +101,9 @@ func (h *Home) prepareEndIdentity(ctx context.Context, author storespec.AuthorSt
 	if !ok {
 		return nil, nil // idempotent end
 	}
+	if targetRow.Role == storespec.RoleOwner {
+		return nil, storespec.ErrChannelOwnerProtected
+	}
 	if author.ID != actor.SystemActorID && author.ID != target && targetRow.Sponsor != author.ID {
 		return nil, ErrEndNotSponsor
 	}

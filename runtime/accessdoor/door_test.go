@@ -169,6 +169,29 @@ func TestDoorCreate(t *testing.T) {
 	})
 }
 
+func TestChannelOwnerRootAuthorizesEveryObjectOperation(t *testing.T) {
+	owner := &fakeMembership{isMember: true, role: storespec.RoleOwner}
+	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete} {
+		t.Run(string(op), func(t *testing.T) {
+			reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}
+			drv := &fakeDriver{readFound: true}
+			var grant *access.Grant
+			if op == access.OpSet {
+				grant = &access.Grant{GranteeKind: access.GranteeActor, Grantee: "peer", Ops: []access.Operation{access.OpRead, access.OpWrite}}
+			}
+			out, err := newDoor(reg, drv, owner).invoke(t.Context(), "owner", op, "r1", []byte("v"), grant)
+			mustAccept(t, out, err)
+		})
+	}
+
+	t.Run("set missing resource sentinel maps to not_found verdict", func(t *testing.T) {
+		reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), setGrantErr: resourcespec.ErrResourceNotFound}
+		grant := &access.Grant{GranteeKind: access.GranteeActor, Grantee: "peer"}
+		out, err := newDoor(reg, &fakeDriver{}, owner).invoke(t.Context(), "owner", access.OpSet, "gone", nil, grant)
+		mustVerdict(t, out, err, access.ResourceNotFound)
+	})
+}
+
 // --- file-kind create: placement chain wiring (期11 §4) ---
 
 func TestDoorCreateFileKindPlacement(t *testing.T) {

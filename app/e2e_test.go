@@ -569,6 +569,21 @@ func TestE2E_DaemonCreateAttachDetach(t *testing.T) {
 	}
 }
 
+func TestDetachDaemonCountFailureDoesNotChangeHTTPResult(t *testing.T) {
+	env := setupTestApp(t)
+	s := fullSetup(t, env)
+	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID), map[string]any{
+		"name": "count-failure-daemon",
+	}, s.cookies)
+	assertStatus(t, w, http.StatusCreated)
+	daemonID := respJSON(t, w)["id"].(string)
+	if err := env.app.CloseHomeForTest(channel.ID(s.chID)); err != nil {
+		t.Fatal(err)
+	}
+	w = env.do(t, "DELETE", fmt.Sprintf("/api/channels/%s/daemons/%s/attach", s.chID, daemonID), nil, s.cookies)
+	assertStatus(t, w, http.StatusOK)
+}
+
 // ---------------------------------------------------------------------------
 // Test4: Daemon attach + message send (simplified -- HTTP API layer only)
 //
