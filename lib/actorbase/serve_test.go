@@ -69,11 +69,12 @@ func (f *fakeSys) After(d time.Duration, msgType string, payload any) (schedule.
 
 func (f *fakeSys) CancelTimer(id schedule.TimerID) error { panic("not implemented") }
 
-func (f *fakeSys) Fork(class, nameHint string, config json.RawMessage) (actor.ActorID, error) {
+func (f *fakeSys) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
 	panic("not implemented")
 }
 
 func (f *fakeSys) DespawnChild(id actor.ActorID) error { panic("not implemented") }
+func (f *fakeSys) End() error                          { panic("not implemented") }
 
 func (f *fakeSys) PublishObs(kind actorrt.ObsKind, val actorrt.ObsValue) error {
 	panic("not implemented")
@@ -91,6 +92,7 @@ func (f *fakeSys) Recv() (Msg, error) {
 }
 
 func (f *fakeSys) Life() context.Context { return context.Background() }
+func (f *fakeSys) AckTimer(Msg) error    { return ErrNotTimerMessage }
 
 // Identity-dimension variants (gateway 期 S1): dispatch/Serve never reach them.
 func (f *fakeSys) SubmitEnvelope(behavior.SubjectWriteSpec) (message.ID, int64, error) {

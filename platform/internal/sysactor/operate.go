@@ -124,15 +124,12 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 // member is a legitimate delegate). A registry error is surfaced (internal_error),
 // not silently read as unauthorized.
 func (s *SystemActor) senderIsActiveMember(msg actorbase.Msg) (bool, error) {
-	if s.registry == nil {
+	if s.authority == nil {
 		return false, nil
 	}
-	rec, ok, err := s.registry.Lookup(msg.Ctx(), msg.Sender.ID)
+	_, ok, err := s.authority.LookupActive(msg.Ctx(), msg.Sender.ID)
 	if err != nil {
 		return false, err
 	}
-	if !ok {
-		return false, nil
-	}
-	return rec.IsActive(), nil
+	return ok, nil
 }

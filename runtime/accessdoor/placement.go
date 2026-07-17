@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // ErrNoStoragePlacement is placement chain ④'s zero-candidate honest reject
@@ -35,9 +36,6 @@ func (d *door) choosePlacement(ctx context.Context, caller actor.ActorID) (strin
 	if d.deps.StorageMounts == nil {
 		return "", fmt.Errorf("accessdoor: file kind placement routing not wired (Deps.StorageMounts is nil)")
 	}
-	if d.deps.Membership == nil {
-		return "", fmt.Errorf("accessdoor: file kind placement routing not wired (Deps.Membership is nil)")
-	}
 
 	mounts, err := d.deps.StorageMounts.ListStorageDaemons(ctx, d.deps.ChannelID)
 	if err != nil {
@@ -48,9 +46,13 @@ func (d *door) choosePlacement(ctx context.Context, caller actor.ActorID) (strin
 	// that SAME daemon is a live (online) storage mount for this channel — the
 	// creator's own workspace is the natural place for its own file bytes to
 	// land (§4.3's "创建者daemon-hosted→落其宿主daemon").
-	host, found, err := d.deps.Membership.Lookup(ctx, caller)
+	row, found, err := d.deps.Authority.LookupActive(ctx, caller)
 	if err != nil {
 		return "", err
+	}
+	host := ""
+	if found && row.Placement.Kind == storespec.PlacementDaemon {
+		host = row.Placement.Host
 	}
 	if found && host != "" {
 		for _, m := range mounts {

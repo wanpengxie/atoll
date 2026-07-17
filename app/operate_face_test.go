@@ -104,7 +104,6 @@ func TestOperate_IntroduceUnknownClass_Rejected(t *testing.T) {
 	var ag map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &ag)
 	agentID := ag["id"].(string)
-
 	face := env.app.OperateFaceForTest()
 	payload, _ := json.Marshal(map[string]any{"decl_id": agentID})
 	_, err := face.Introduce(context.Background(), home.OperateRequest{
@@ -120,7 +119,7 @@ func TestOperate_IntroduceUnknownClass_Rejected(t *testing.T) {
 
 // TestOperate_IntroduceInvalidPlacement_Rejected proves the placement闭集 guard (#5):
 // an explicit garbage placement is fail-closed (error_code=invalid_placement) — the
-// same posture as unknown_class — and NO channel_composition row lands (rejected before the
+// same posture as unknown_class — and no actor declaration instance lands (rejected before the
 // INSERT). Empty placement still defaults to daemon (unaffected).
 func TestOperate_IntroduceInvalidPlacement_Rejected(t *testing.T) {
 	env := setupTestApp(t)
@@ -154,7 +153,7 @@ func TestOperate_IntroduceInvalidPlacement_Rejected(t *testing.T) {
 // TestOperate_ConfigChange_DaemonPlacedTakesEffect is the config-effect arm's
 // placement-neutrality regression guard (F-2, P2-2). A config change on an
 // already-composed row takes effect through operateExecutor.Introduce's
-// store transition, which atomically updates config and restart_epoch for a
+// store transition, which atomically publishes config under a new declaration version for a
 // daemon-placed row exactly as it would for a server one. (Driven on the operate
 // executor directly, as the sysactor gate would after authorising the sender —
 // the HTTP introduce垫片 does not forward config, so the config-effect arm is only
@@ -165,7 +164,7 @@ func TestOperate_IntroduceInvalidPlacement_Rejected(t *testing.T) {
 // (a placement-gated / rebuild_failed Restart would surface as *home.OperateError),
 // created=false, placement=daemon, config_updated=true.
 //
-// Guard boundary: the platform reconcile loop owns observing the advanced epoch
+// Guard boundary: the platform reconcile loop owns observing the advanced version
 // and rebuilding across the wire. This test guards that the atomic config intent
 // transition is not gated on placement.
 func TestOperate_ConfigChange_DaemonPlacedTakesEffect(t *testing.T) {
@@ -178,11 +177,14 @@ func TestOperate_ConfigChange_DaemonPlacedTakesEffect(t *testing.T) {
 	var ag map[string]any
 	_ = json.Unmarshal(w.Body.Bytes(), &ag)
 	agentID := ag["id"].(string)
+	daemonResp := env.do(t, "POST", "/api/channels/"+s.chID+"/daemons", map[string]any{"name": "cfg-host"}, s.cookies)
+	assertStatus(t, daemonResp, http.StatusCreated)
+	daemonID := respJSON(t, daemonResp)["id"].(string)
 
 	face := env.app.OperateFaceForTest()
 
 	// First introduce: NO placement → default policy = daemon, WITH an initial config.
-	p1, _ := json.Marshal(map[string]any{"decl_id": agentID, "config": map[string]any{"tone": "calm"}})
+	p1, _ := json.Marshal(map[string]any{"decl_id": agentID, "placement": "daemon", "desired_host": daemonID, "config": map[string]any{"tone": "calm"}})
 	got1, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: p1,
 	})
@@ -195,7 +197,7 @@ func TestOperate_ConfigChange_DaemonPlacedTakesEffect(t *testing.T) {
 	}
 
 	// Re-introduce the SAME row with a CHANGED config → one atomic UPDATE of
-	// config_json + restart_epoch for the daemon row.
+	// config under a new declaration version for the daemon row.
 	p2, _ := json.Marshal(map[string]any{"decl_id": agentID, "config": map[string]any{"tone": "brisk"}})
 	got2, err := face.Introduce(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: p2,

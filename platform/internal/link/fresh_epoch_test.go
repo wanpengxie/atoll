@@ -9,59 +9,54 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-type freshComposition struct{ row storespec.CompositionRecord }
+type freshAuthority struct{ row storespec.ActorControlRow }
 
-func (f freshComposition) LookupComposition(context.Context, actor.ActorID) (storespec.CompositionRecord, bool, error) {
+func (f freshAuthority) LookupActive(context.Context, actor.ActorID) (storespec.ActorControlRow, bool, error) {
 	return f.row, true, nil
 }
-func (freshComposition) LookupCompositionPrincipal(context.Context, string) (storespec.CompositionRecord, bool, error) {
-	return storespec.CompositionRecord{}, false, nil
-}
-func (freshComposition) ListComposition(context.Context) ([]storespec.CompositionRecord, error) {
+func (freshAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, nil
 }
-func (freshComposition) DefaultComposition(context.Context) (actor.ActorID, bool, error) {
-	return "", false, nil
+func (freshAuthority) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	return storespec.WorldDurable, true, nil
+}
+func (f freshAuthority) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	return storespec.AuthorOK, nil
 }
 
-type freshRegistry struct{ rec storespec.Record }
-
-func (f freshRegistry) Lookup(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-	return f.rec, true, nil
-}
-func (freshRegistry) Exists(context.Context, actor.ActorID) (bool, error)    { return true, nil }
-func (freshRegistry) ListActive(context.Context) ([]storespec.Record, error) { return nil, nil }
-
-func TestFreshHandshakeRequiresCompositionDeclarationAndWireEpochEquality(t *testing.T) {
+func TestFreshHandshakeRequiresAuthorityAndWireVersionEquality(t *testing.T) {
 	id := actor.ActorID("tool:a")
-	row := storespec.CompositionRecord{InstanceID: id, Placement: storespec.PlacementDaemon, DesiredHost: "daemon-a", Epoch: 4}
-	rec := storespec.Record{ID: id, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay, Host: "daemon-a"}
-	a := &Acceptor{composition: freshComposition{row: row}, registry: freshRegistry{rec: rec}}
-	meta := declarationSnapshotEntry{Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay, Epoch: 4, DaemonID: "daemon-a"}
-	if got, err := a.resolveFreshHandshake(context.Background(), ipc.HandshakePayload{LeaseID: string(id), Epoch: 4}, meta); err != nil || got != id {
-		t.Fatalf("matching triple rejected: id=%q err=%v", got, err)
+	row := storespec.ActorControlRow{
+		ID: id, Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay,
+		CurrentDeclVersion: 4,
+		Placement:          storespec.Placement{Kind: storespec.PlacementDaemon, Host: "daemon-a"},
 	}
-	for name, mutate := range map[string]func(*ipc.HandshakePayload, *declarationSnapshotEntry, *storespec.CompositionRecord, *storespec.Record){
-		"wire epoch": func(h *ipc.HandshakePayload, _ *declarationSnapshotEntry, _ *storespec.CompositionRecord, _ *storespec.Record) {
-			h.Epoch++
+	meta := declarationSnapshotEntry{Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay, Version: 4, DaemonID: "daemon-a"}
+	a := &Acceptor{authority: freshAuthority{row: row}}
+	if got, err := a.resolveFreshHandshake(context.Background(), ipc.HandshakePayload{LeaseID: string(id), Version: 4}, meta); err != nil || got != id {
+		t.Fatalf("matching tuple rejected: id=%q err=%v", got, err)
+	}
+	for name, mutate := range map[string]func(*ipc.HandshakePayload, *declarationSnapshotEntry, *storespec.ActorControlRow){
+		"wire version": func(h *ipc.HandshakePayload, _ *declarationSnapshotEntry, _ *storespec.ActorControlRow) {
+			h.Version++
 		},
-		"declaration epoch": func(_ *ipc.HandshakePayload, m *declarationSnapshotEntry, _ *storespec.CompositionRecord, _ *storespec.Record) {
-			m.Epoch++
+		"declaration version": func(_ *ipc.HandshakePayload, m *declarationSnapshotEntry, _ *storespec.ActorControlRow) {
+			m.Version++
 		},
-		"composition epoch": func(_ *ipc.HandshakePayload, _ *declarationSnapshotEntry, r *storespec.CompositionRecord, _ *storespec.Record) {
-			r.Epoch++
+		"authority version": func(_ *ipc.HandshakePayload, _ *declarationSnapshotEntry, r *storespec.ActorControlRow) {
+			r.CurrentDeclVersion++
 		},
-		"desired host": func(_ *ipc.HandshakePayload, _ *declarationSnapshotEntry, r *storespec.CompositionRecord, _ *storespec.Record) {
-			r.DesiredHost = "daemon-b"
+		"authority host": func(_ *ipc.HandshakePayload, _ *declarationSnapshotEntry, r *storespec.ActorControlRow) {
+			r.Placement.Host = "daemon-b"
 		},
-		"registry host": func(_ *ipc.HandshakePayload, _ *declarationSnapshotEntry, _ *storespec.CompositionRecord, r *storespec.Record) {
-			r.Host = "daemon-b"
+		"authority binding": func(_ *ipc.HandshakePayload, _ *declarationSnapshotEntry, r *storespec.ActorControlRow) {
+			r.Binding = actor.BindingRuntimeOutbound
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
-			hp, m, cr, rr := ipc.HandshakePayload{LeaseID: string(id), Epoch: 4}, meta, row, rec
-			mutate(&hp, &m, &cr, &rr)
-			acc := &Acceptor{composition: freshComposition{row: cr}, registry: freshRegistry{rec: rr}}
+			hp, m, control := ipc.HandshakePayload{LeaseID: string(id), Version: 4}, meta, row
+			mutate(&hp, &m, &control)
+			acc := &Acceptor{authority: freshAuthority{row: control}}
 			if _, err := acc.resolveFreshHandshake(context.Background(), hp, m); err == nil {
 				t.Fatal("stale tuple accepted")
 			}

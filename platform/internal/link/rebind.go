@@ -5,10 +5,13 @@ import (
 	"errors"
 	"sync/atomic"
 
+	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
@@ -39,10 +42,11 @@ import (
 // precisely because every arm's stale side already fails closed — no
 // transaction is required to prevent a false success).
 type RebindableArms struct {
-	pen      atomic.Pointer[harness.Pen]
-	access   atomic.Pointer[accessdoor.ResourceAccessHandle]
-	state    atomic.Pointer[accessdoor.AccessHandle]
-	schedule atomic.Pointer[schedule.ScheduleHandle]
+	pen       atomic.Pointer[harness.Pen]
+	access    atomic.Pointer[accessdoor.ResourceAccessHandle]
+	state     atomic.Pointer[accessdoor.AccessHandle]
+	schedule  atomic.Pointer[schedule.ScheduleHandle]
+	lifecycle atomic.Pointer[actorrt.LifecycleHandle]
 }
 
 // NewRebindableArms builds the membrane already bound to arms' four capability
@@ -60,11 +64,14 @@ func NewRebindableArms(arms CellArms) *RebindableArms {
 // on the caller's per-id down-handler map, which already keys it by actor id
 // and needs no atomics of its own.
 func (r *RebindableArms) Rebind(arms CellArms) {
-	pen, access, state, sched := arms.Pen, arms.Access, arms.State, arms.Schedule
+	pen, access, state, sched, lifecycle := arms.Pen, arms.Access, arms.State, arms.Schedule, arms.Lifecycle
 	r.pen.Store(&pen)
 	r.access.Store(&access)
 	r.state.Store(&state)
 	r.schedule.Store(&sched)
+	if lifecycle != nil {
+		r.lifecycle.Store(&lifecycle)
+	}
 }
 
 // Pen returns the stable facade to inject into the cell's Caps once at build
@@ -88,6 +95,8 @@ func (r *RebindableArms) State() accessdoor.AccessHandle {
 // Schedule returns the stable facade to inject into the cell's Caps once at
 // build time — it reads the CURRENT schedule arm on every call.
 func (r *RebindableArms) Schedule() schedule.ScheduleHandle { return rebindSchedule{r} }
+
+func (r *RebindableArms) Lifecycle() actorrt.LifecycleHandle { return rebindLifecycle{r: r} }
 
 // rebindPen is the Caps-injected Pen facade: every Write reads the CURRENT arm
 // off the membrane, so a reconnect never requires rebuilding the cell.
@@ -169,12 +178,51 @@ func (a rebindResourceAccess) Redeem(ctx context.Context, route accessdoor.FileR
 // rebindSchedule is the Caps-injected ScheduleHandle facade.
 type rebindSchedule struct{ r *RebindableArms }
 
+type rebindLifecycle struct{ r *RebindableArms }
+
+func (h rebindLifecycle) load() actorrt.LifecycleHandle {
+	p := h.r.lifecycle.Load()
+	if p == nil {
+		return nil
+	}
+	return *p
+}
+
+func (h rebindLifecycle) Fork(ctx context.Context, spec actorrt.ForkSpec) (child actor.ActorID, err error) {
+	nonce := uuid.NewString()
+	err = retryLifecycle(ctx, func(raw actorrt.LifecycleHandle) error {
+		if arm, ok := raw.(interface {
+			forkWithNonce(context.Context, actorrt.ForkSpec, string) (actor.ActorID, error)
+		}); ok {
+			child, err = arm.forkWithNonce(ctx, spec, nonce)
+			return err
+		}
+		child, err = raw.Fork(ctx, spec)
+		return err
+	}, h.load)
+	return child, err
+}
+
+func (h rebindLifecycle) DespawnChild(ctx context.Context, id actor.ActorID, reason string) error {
+	return retryLifecycle(ctx, func(raw actorrt.LifecycleHandle) error {
+		return raw.DespawnChild(ctx, id, reason)
+	}, h.load)
+}
+
+func (h rebindLifecycle) EndSelf(ctx context.Context) error {
+	return retryLifecycle(ctx, func(raw actorrt.LifecycleHandle) error { return raw.EndSelf(ctx) }, h.load)
+}
+
 func (s rebindSchedule) Schedule(ctx context.Context, req schedule.ScheduleReq) (schedule.TimerID, error) {
 	return (*s.r.schedule.Load()).Schedule(ctx, req)
 }
 
 func (s rebindSchedule) Cancel(ctx context.Context, id schedule.TimerID) error {
 	return (*s.r.schedule.Load()).Cancel(ctx, id)
+}
+
+func (s rebindSchedule) Ack(ctx context.Context, id schedule.TimerID) error {
+	return (*s.r.schedule.Load()).Ack(ctx, id)
 }
 
 // Compile-time proof the facades satisfy the substrate capability contracts —
@@ -185,4 +233,5 @@ var (
 	_ accessdoor.ResourceAccessHandle = rebindResourceAccess{}
 	_ accessdoor.FileOpener           = rebindResourceAccess{}
 	_ schedule.ScheduleHandle         = rebindSchedule{}
+	_ actorrt.LifecycleHandle         = rebindLifecycle{}
 )

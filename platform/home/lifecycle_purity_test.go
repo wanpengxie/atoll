@@ -151,7 +151,7 @@ func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
 		}
 		time.Sleep(time.Millisecond)
 	}
-	if _, err := h.schedMinter.Mint(id).Schedule(context.Background(), schedule.ScheduleReq{
+	if _, err := h.schedMinter.Mint(storespec.AuthorStamp{ID: id, BirthVersion: 1}).Schedule(context.Background(), schedule.ScheduleReq{
 		Bind: schedule.BindIdentity, FireAt: clock.Now().Add(time.Second).UnixMilli(),
 		Type: "test.close-window.wake", Payload: []byte(`{}`),
 	}); err != nil {
@@ -344,21 +344,14 @@ func TestHomeClosePublishesMutationFenceBeforeTeardown(t *testing.T) {
 	go func() { closed <- h.Close() }()
 	<-handler.entered
 
-	if _, _, _, err := h.IntroduceComposition(context.Background(), storespec.CompositionIntroduce{}); !errors.Is(err, ErrClosed) {
-		t.Fatalf("IntroduceComposition during Close = %v, want ErrClosed", err)
+	if _, err := h.Declare(context.Background(), DeclareRequest{}); !errors.Is(err, ErrClosed) {
+		t.Fatalf("Declare during Close = %v, want ErrClosed", err)
 	}
 	if err := h.Restart(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Restart during Close = %v, want ErrClosed", err)
 	}
 	if err := h.Remove(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Remove during Close = %v, want ErrClosed", err)
-	}
-	rows, err := h.cs.Composition.ListComposition(context.Background())
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(rows) != 0 {
-		t.Fatalf("close-window mutations persisted rows: %+v", rows)
 	}
 	close(release)
 	if err := <-closed; err != nil {

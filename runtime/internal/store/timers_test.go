@@ -18,6 +18,7 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
@@ -59,6 +60,70 @@ func mustInsertTimer(t *testing.T, s *timerStore, row timerspec.TimerRow) {
 	if err := s.Insert(context.Background(), row); err != nil {
 		t.Fatalf("Insert %q: %v", row.ID, err)
 	}
+}
+
+func timerFireEnvelope(id timerspec.TimerID, author actor.ActorID) *message.Envelope {
+	return &message.Envelope{
+		ID: message.ID("timer:" + string(id)), TS: 10, TSReceived: 10,
+		ChannelID: timersTestChannelID,
+		Sender:    message.Sender{Kind: actor.KindAgent, ID: author},
+		Kind:      message.KindEvent, Type: "test.timer", Payload: []byte(`{}`),
+		Visibility: message.VisibilityPublic, Audience: message.Audience{author},
+	}
+}
+
+func TestTimerFireAndMarkCancelOrdersAndAck(t *testing.T) {
+	ctx := context.Background()
+	t.Run("cancel wins", func(t *testing.T) {
+		f := openTimersFixture(t)
+		row := timerspec.TimerRow{ID: "cancel-first", AuthorID: "actor:a", FireAt: 2, Type: "test.timer", CreatedAt: 1}
+		mustInsertTimer(t, f.timers, row)
+		if existed, err := f.timers.CancelOwned(ctx, row.ID, row.AuthorID); err != nil || !existed {
+			t.Fatalf("CancelOwned = (%v,%v)", existed, err)
+		}
+		outcome, err := f.timers.FireAndMark(ctx, row.ID, timerFireEnvelope(row.ID, row.AuthorID))
+		if err != nil || outcome != timerspec.FireCancelled {
+			t.Fatalf("FireAndMark = (%v,%v), want Cancelled", outcome, err)
+		}
+		var count int
+		if err := f.timers.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id=?`, "timer:"+string(row.ID)).Scan(&count); err != nil || count != 0 {
+			t.Fatalf("cancel-won fire rows=%d err=%v", count, err)
+		}
+	})
+
+	t.Run("fire wins and ack closes", func(t *testing.T) {
+		f := openTimersFixture(t)
+		row := timerspec.TimerRow{ID: "fire-first", AuthorID: "actor:a", FireAt: 2, Type: "test.timer", CreatedAt: 1}
+		mustInsertTimer(t, f.timers, row)
+		env := timerFireEnvelope(row.ID, row.AuthorID)
+		outcome, err := f.timers.FireAndMark(ctx, row.ID, env)
+		if err != nil || outcome != timerspec.FireCommitted {
+			t.Fatalf("first FireAndMark = (%v,%v)", outcome, err)
+		}
+		if existed, err := f.timers.CancelOwned(ctx, row.ID, row.AuthorID); err != nil || existed {
+			t.Fatalf("Cancel after fire = (%v,%v)", existed, err)
+		}
+		outcome, err = f.timers.FireAndMark(ctx, row.ID, env)
+		if err != nil || outcome != timerspec.FireAlreadyFired {
+			t.Fatalf("retry FireAndMark = (%v,%v)", outcome, err)
+		}
+		if due, err := f.timers.Due(ctx, 100); err != nil || len(due) != 0 {
+			t.Fatalf("Due includes fired row: %+v err=%v", due, err)
+		}
+		page, err := f.timers.ListFired(ctx, timerspec.FiredCursor{}, 10)
+		if err != nil || len(page.Rows) != 1 || page.Rows[0].ID != row.ID {
+			t.Fatalf("ListFired = (%+v,%v)", page, err)
+		}
+		if acked, err := f.timers.AckOwned(ctx, row.ID, "actor:other"); err != nil || acked {
+			t.Fatalf("foreign Ack = (%v,%v)", acked, err)
+		}
+		if acked, err := f.timers.AckOwned(ctx, row.ID, row.AuthorID); err != nil || !acked {
+			t.Fatalf("owner Ack = (%v,%v)", acked, err)
+		}
+		if page, err := f.timers.ListFired(ctx, timerspec.FiredCursor{}, 10); err != nil || len(page.Rows) != 0 {
+			t.Fatalf("fired rows after Ack = (%+v,%v)", page, err)
+		}
+	})
 }
 
 // --- Insert + Due --------------------------------------------------------
@@ -478,8 +543,7 @@ func TestTimer_CascadeClearedOnMemberRemove(t *testing.T) {
 	}
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
 
-	if err := f.reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: "actor:a", At: 200}}); err != nil {
+	if err := f.reg.Deregister(ctx, "actor:a", 200); err != nil {
 		t.Fatalf("remove member: %v", err)
 	}
 	if due, _ := f.timers.Due(ctx, 999999); len(due) != 0 {
@@ -487,8 +551,7 @@ func TestTimer_CascadeClearedOnMemberRemove(t *testing.T) {
 	}
 
 	// A repeated remove (already-deregistered) is a no-op and must not error.
-	if err := f.reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: "actor:a", At: 300}}); err != nil {
+	if err := f.reg.Deregister(ctx, "actor:a", 300); err != nil {
 		t.Fatalf("repeat remove must be no-op: %v", err)
 	}
 }
@@ -503,70 +566,29 @@ func TestTimer_CascadeClearedOnMemberRemove(t *testing.T) {
 // AND its cascaded loci (state, identity timers) survive intact. The unguarded
 // (product-level) remove semantics are untouched: a remove guarded on the
 // CURRENT host — or carrying no guard at all — still deregisters and cascades.
-func TestMemberRemove_ExpectedHostGuard_MigrationWindowNoOp(t *testing.T) {
+func TestActorRegistrySchemaHasNoHostColumn(t *testing.T) {
 	ctx := context.Background()
-	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "hostguard.sqlite"), OpenOptions{}, ChannelLocalDDL)
+	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "nohost.sqlite"), OpenOptions{}, ChannelLocalDDL)
 	if err != nil {
-		t.Fatalf("openSqlite: %v", err)
+		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = db.Close() })
-	reg := newActorRegistry(db, timersTestChannelID, nil)
-	timers := newTimerStore(db)
-	state := newStateStore(db)
-
-	const id = actor.ActorID("tool:migrant")
-	// Registered on daemon A, with actor-scoped state and an identity timer.
-	if err := reg.insertFixedID(ctx, storespec.Record{ID: id, Kind: actor.KindTool, Host: "daemon-a", CreatedAt: 100}); err != nil {
-		t.Fatalf("add on daemon-a: %v", err)
+	defer db.Close()
+	rows, err := db.QueryContext(ctx, `PRAGMA table_info(actor_registry)`)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if err := state.Create(ctx, id, "cursor", []byte("v1")); err != nil {
-		t.Fatalf("Create state: %v", err)
-	}
-	mustInsertTimer(t, timers, timerspec.TimerRow{ID: "t1", AuthorID: id, FireAt: 1000, Type: "wake", CreatedAt: 1})
-
-	// Migration: the row re-homes to daemon B before A's reconcile applies.
-	if err := reg.ApplyMemberTransitions(ctx,
-		[]storespec.MemberActorAdd{{ID: id, Kind: actor.KindTool, Host: "daemon-b", At: 200}}, nil); err != nil {
-		t.Fatalf("re-home to daemon-b: %v", err)
-	}
-
-	// Daemon A's stale reconcile remove, guarded on its own host: MUST no-op.
-	if err := reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: id, ExpectedHost: "daemon-a", At: 300}}); err != nil {
-		t.Fatalf("stale guarded remove must not error: %v", err)
-	}
-	rec, ok, err := reg.Lookup(ctx, id)
-	if err != nil || !ok {
-		t.Fatalf("Lookup after stale remove ok=%v err=%v", ok, err)
-	}
-	if !rec.IsActive() || rec.Host != "daemon-b" {
-		t.Fatalf("B's row damaged by A's stale remove: active=%v host=%q, want active on daemon-b", rec.IsActive(), rec.Host)
-	}
-	if _, exists, _ := state.Read(ctx, id, "cursor"); !exists {
-		t.Error("actor state was cascade-cleared by a no-op guarded remove")
-	}
-	if due, _ := timers.Due(ctx, 999999); len(due) != 1 || due[0].ID != "t1" {
-		t.Errorf("identity timers were cascade-cleared by a no-op guarded remove: %+v", due)
-	}
-
-	// A remove guarded on the row's CURRENT host still deregisters + cascades
-	// (B's own later reconcile) — the guard narrows, it never disables.
-	if err := reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: id, ExpectedHost: "daemon-b", At: 400}}); err != nil {
-		t.Fatalf("matching guarded remove: %v", err)
-	}
-	rec, ok, err = reg.Lookup(ctx, id)
-	if err != nil || !ok {
-		t.Fatalf("Lookup after matching remove ok=%v err=%v", ok, err)
-	}
-	if rec.IsActive() {
-		t.Fatal("matching guarded remove did not deregister the row")
-	}
-	if _, exists, _ := state.Read(ctx, id, "cursor"); exists {
-		t.Error("matching guarded remove did not cascade-clear state")
-	}
-	if due, _ := timers.Due(ctx, 999999); len(due) != 0 {
-		t.Errorf("matching guarded remove did not cascade-clear timers: %+v", due)
+	defer rows.Close()
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &defaultValue, &pk); err != nil {
+			t.Fatal(err)
+		}
+		if name == "host" {
+			t.Fatal("actor_registry.host must not exist")
+		}
 	}
 }
 

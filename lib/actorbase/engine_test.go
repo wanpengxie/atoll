@@ -34,6 +34,24 @@ type fakePen struct {
 	reject  harness.HarnessRejectReason // when set, every Write is rejected with this reason
 }
 
+type recordingIdleArbiter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (a *recordingIdleArbiter) RequestIdle(context.Context) (bool, error) {
+	a.mu.Lock()
+	a.calls++
+	a.mu.Unlock()
+	return false, nil
+}
+
+func (a *recordingIdleArbiter) count() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.calls
+}
+
 func (p *fakePen) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -84,6 +102,17 @@ func (fakeAccess) List(_ context.Context, q accessdoor.ListQuery) (accessdoor.Li
 	return accessdoor.ListPage{}, nil
 }
 
+func TestServerResourceFaceRejectsUnavailableFileByteCapability(t *testing.T) {
+	// A server-hosted actor still receives the uniform ResourceHandle surface,
+	// but its local bound handle intentionally has no FileOpener capability.
+	// The call must fail honestly at the capability boundary, not disappear
+	// from the API or panic through a nil arm.
+	adapter := resourceAdapter{h: fakeAccess{}, ctx: context.Background}
+	if _, _, err := adapter.Open("file:remote-only", access.OpRead); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("server file Open err=%v, want ErrUnsupported", err)
+	}
+}
+
 // fakeSchedule is a schedule.ScheduleHandle double: Schedule/Cancel are
 // recorded, never actually fired (the engine's own timers are what these
 // tests exercise, not the schedule arm).
@@ -93,14 +122,16 @@ func (fakeSchedule) Schedule(_ context.Context, _ schedule.ScheduleReq) (schedul
 	return "timer-1", nil
 }
 func (fakeSchedule) Cancel(_ context.Context, _ schedule.TimerID) error { return nil }
+func (fakeSchedule) Ack(_ context.Context, _ schedule.TimerID) error    { return nil }
 
 // fakeSpawn is an actorrt.SpawnHandle double.
 type fakeSpawn struct{}
 
-func (fakeSpawn) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
+func (fakeSpawn) Fork(_ context.Context, spec actorrt.ForkSpec) (actor.ActorID, error) {
 	return actor.ActorID("child/" + spec.NameHint), nil
 }
-func (fakeSpawn) Despawn(actor.ActorID) error { return nil }
+func (fakeSpawn) DespawnChild(context.Context, actor.ActorID, string) error { return nil }
+func (fakeSpawn) EndSelf(context.Context) error                             { return nil }
 
 // fakeActorContext is an actorrt.ActorContext double.
 type fakeActorContext struct {
@@ -147,14 +178,14 @@ func (f *fakeActorContext) obsKindCounts() map[actorrt.ObsKind]int {
 func newTestEngine(t *testing.T, pen *fakePen, hooks Hooks, serveCap, queueCap int) *engine {
 	t.Helper()
 	e := &engine{
-		pen:      pen,
-		access:   fakeAccess{},
-		state:    fakeAccess{},
-		sched:    fakeSchedule{},
-		spawn:    fakeSpawn{},
-		hooks:    hooks,
-		clockFn:  time.Now,
-		queueCap: queueCap,
+		pen:       pen,
+		access:    fakeAccess{},
+		state:     fakeAccess{},
+		sched:     fakeSchedule{},
+		lifecycle: fakeSpawn{},
+		hooks:     hooks,
+		clockFn:   time.Now,
+		queueCap:  queueCap,
 	}
 	e.serve = newServeLedger(e.life, serveCap)
 	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks, e.closureFault)
@@ -606,11 +637,11 @@ func TestEngine_DyingReportsLoudOnErrorReturn(t *testing.T) {
 func TestNew_WeldsCapsIntoALiveActor(t *testing.T) {
 	pen := &fakePen{self: "actor:test"}
 	caps := actorcaps.Caps{
-		Pen:      pen,
-		Access:   fakeAccess{},
-		State:    fakeAccess{},
-		Schedule: fakeSchedule{},
-		Spawn:    fakeSpawn{},
+		Pen:       pen,
+		Access:    fakeAccess{},
+		State:     fakeAccess{},
+		Schedule:  fakeSchedule{},
+		Lifecycle: fakeSpawn{},
 	}
 	done := make(chan struct{})
 	a := New(caps, Hooks{}, Def{New: func() (Proc, error) {
@@ -666,17 +697,67 @@ func TestEngine_StopDrainsWorkerBeforeReturning(t *testing.T) {
 	}
 }
 
-// TestEngine_ForkAndDespawnChildReturnErrUnsupportedWhenSpawnNil is spec §3's
-// out-generation matrix known gap made mechanical (§1.2 doc: "daemon 宿主返
-// ErrUnsupported"): link.NewLiveArms leaves Caps.Spawn zero for a daemon-
-// hosted incarnation, so the engine must answer ErrUnsupported — not
-// nil-pointer-panic on the nil actorrt.SpawnHandle.
-func TestEngine_ForkAndDespawnChildReturnErrUnsupportedWhenSpawnNil(t *testing.T) {
+func TestEngine_LongComputationOutsideRecvDoesNotRequestIdle(t *testing.T) {
+	pen := &fakePen{self: "actor:test"}
+	e := newTestEngine(t, pen, Hooks{}, 8, 8)
+	arbiter := &recordingIdleArbiter{}
+	e.options = Options{IdleTimeout: 5 * time.Millisecond, IdleArbiter: arbiter}
+
+	computed := make(chan struct{})
+	e.def = Def{New: func() (Proc, error) {
+		return func(Sys) error {
+			time.Sleep(40 * time.Millisecond)
+			close(computed)
+			return nil
+		}, nil
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := e.Start(ctx, &fakeActorContext{self: "actor:test"}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	select {
+	case <-computed:
+	case <-time.After(time.Second):
+		t.Fatal("long computation did not finish")
+	}
+	if got := arbiter.count(); got != 0 {
+		t.Fatalf("long computation requested idle %d times; idle is only measured while Recv is waiting", got)
+	}
+	cancel()
+	if err := e.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestEngine_IdleApprovalRetiresOnlyAfterAcceptedWork(t *testing.T) {
+	e := newTestEngine(t, &fakePen{self: "actor:test"}, Hooks{}, 8, 8)
+	e.lifeCtx = context.Background()
+	e.occupant.Store(int32(occupantRunning))
+	env := &message.Envelope{ID: "event-before-idle", Kind: message.KindEvent, Type: "work"}
+	if err := e.Receive(context.Background(), env); err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	e.IdleApproved()
+
+	msg, err := e.Recv()
+	if err != nil || msg.Envelope.ID != env.ID {
+		t.Fatalf("first Recv = (%+v, %v), want accepted work", msg.Envelope, err)
+	}
+	if _, err := e.Recv(); !errors.Is(err, ErrIdleExit) {
+		t.Fatalf("second Recv err = %v, want ErrIdleExit", err)
+	}
+}
+
+// TestEngine_ForkAndDespawnChildReturnErrUnsupportedWhenLifecycleNil pins the
+// defensive capability-absence contract: a deliberately incomplete host must
+// answer ErrUnsupported, never panic on a nil lifecycle handle.
+func TestEngine_ForkAndDespawnChildReturnErrUnsupportedWhenLifecycleNil(t *testing.T) {
 	pen := &fakePen{self: "actor:daemon-hosted"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
-	e.spawn = nil // the daemon out-generation path's known gap (spec §3)
+	e.lifecycle = nil
 
-	if _, err := e.Fork("worker", "hint", nil); !errors.Is(err, ErrUnsupported) {
+	if _, err := e.Fork(actorrt.ForkSpec{Kind: actor.KindTool, Class: "worker", NameHint: "hint"}); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("Fork with nil Spawn arm err = %v, want ErrUnsupported", err)
 	}
 	if err := e.DespawnChild("actor:child"); !errors.Is(err, ErrUnsupported) {

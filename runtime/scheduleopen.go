@@ -36,11 +36,13 @@ func OpenScheduler(cs *ChannelStores, deps schedule.AssemblyDeps) (schedule.Mint
 		clock = schedule.NewSystemClock()
 	}
 	return schedule.New(schedule.Deps{
-		Store:  cs.timers,
-		Fire:   deps.Fire,
-		Host:   deps.Host,
-		Revive: deps.Revive,
-		Clock:  clock,
-		Logger: deps.Logger,
+		Store:       cs.timers,
+		Fire:        deps.Fire,
+		DurableFire: schedule.NewTimerFirePen(cs.timers, cs.Authority, cs.channelID),
+		Host:        deps.Host,
+		Revive:      deps.Revive,
+		Clock:       clock,
+		Authority:   cs.Authority,
+		Logger:      deps.Logger,
 	})
 }

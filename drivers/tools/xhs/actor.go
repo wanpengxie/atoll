@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -164,6 +165,11 @@ func (a *Actor) run(sys actorbase.Sys) error {
 			}
 		default:
 			a.handle(msg)
+		}
+		if strings.HasPrefix(string(msg.ID), "timer:") {
+			if err := sys.AckTimer(msg); err != nil {
+				return fmt.Errorf("xhs: timer ack: %w", err)
+			}
 		}
 	}
 }

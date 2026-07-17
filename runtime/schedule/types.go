@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
@@ -21,8 +22,9 @@ import (
 type TimerID = timerspec.TimerID
 
 var (
-	ErrAuthorInactive = errors.New("schedule: author inactive")
-	ErrScheduleQuota  = errors.New("schedule: schedule quota exceeded")
+	ErrAuthorInactive           = errors.New("schedule: author inactive")
+	ErrScheduleQuota            = errors.New("schedule: schedule quota exceeded")
+	ErrDurableScheduleForbidden = errors.New("schedule: durable schedule forbidden for run identity")
 )
 
 // Bind is the closed set of lifecycle levels a timer's PRODUCT belongs to
@@ -87,6 +89,7 @@ type ScheduleHandle interface {
 	// engine.cancel doc), so "Cancel returned nil" is never a promise that
 	// the timer will not ring.
 	Cancel(ctx context.Context, id TimerID) error
+	Ack(ctx context.Context, id TimerID) error
 }
 
 // Minter is the engine's caps-injection mint surface (same pattern as
@@ -95,7 +98,7 @@ type ScheduleHandle interface {
 // cheap (no per-handle state beyond the welded author), so admission points
 // may Mint per-caller freely.
 type Minter interface {
-	Mint(author actor.ActorID) ScheduleHandle
+	Mint(author storespec.AuthorStamp) ScheduleHandle
 }
 
 // FireSink is the injection-point contract for fire's single action: append
@@ -120,6 +123,10 @@ type Minter interface {
 //     (transient — the engine leaves the row/entry in place and retries).
 type FireSink interface {
 	Append(ctx context.Context, author actor.ActorID, env *message.Envelope) error
+}
+
+type TimerFirePen interface {
+	Fire(context.Context, timerspec.TimerRow, *message.Envelope) (timerspec.FireOutcome, error)
 }
 
 // ErrDuplicateFire is the crash-replay idempotency signal: this timer's fire
@@ -210,11 +217,13 @@ func (e ReviveRejected) Error() string {
 // the runtime-root assembly seam, is the ONLY place that defaults a nil Clock
 // to the real one).
 type Deps struct {
-	Store  timerspec.TimerStore
-	Fire   FireSink
-	Host   LivenessProbe
-	Revive Reviver
-	Clock  Clock
+	Store       timerspec.TimerStore
+	Fire        FireSink
+	DurableFire TimerFirePen
+	Host        LivenessProbe
+	Revive      Reviver
+	Clock       Clock
+	Authority   storespec.ActorAuthority
 	// Logger receives obs-plane diagnostics — most notably the loud disposal
 	// log for a poison row/entry. nil → discard (same shape as
 	// harness.Deps.Logger — the substrate does not invent its own logging

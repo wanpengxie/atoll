@@ -55,7 +55,7 @@
 //     deferred alongside the rest of the human resource face, 债②). Invoke's
 //     file read/write branch and Create's with_content=true branch both
 //     funnel through door.resolveFileRoute (door.go) — the ONE decision
-//     point (same-daemon vs cross-host, via Membership.Lookup) both share.
+//     point (same-daemon vs cross-host, via ActorAuthority placement) both share.
 //     No file BYTE ever touches this package — Deps.LaneControl mints an
 //     opaque per-connection Token, never a coord, never a live handle.
 package accessdoor

@@ -1,11 +1,12 @@
 package home
 
 import (
+	"context"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // buildCaps assembles the caps bundle — the five-capability bundle welded to (id,
@@ -26,32 +27,20 @@ import (
 // liveSchedule membrane the other caps wear — self-targeted timers gated on this
 // incarnation still being live. schedMinter is always set before any participant
 // admission (the system cell does not pass through buildCaps).
-func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnation) actorcaps.Caps {
+func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, birthVersion int64, inc actorrt.Incarnation) actorcaps.Caps {
 	rt := h.channel.Cells()
-	return actorcaps.Caps{
-		Pen:      link.NewLivePen(h.minter.Mint(id, kind, h.channelID), inc, rt),
-		Access:   link.NewLiveResourceAccess(h.cs.Access.Mint(id), inc, rt),
-		State:    link.NewLiveAccess(h.cs.Access.MintState(id), inc, rt),
-		Schedule: link.NewLiveSchedule(h.schedMinter.Mint(id), inc, rt),
-		// The child assembler is buildChildCaps, NOT buildCaps: every fork
-		// descendant is an incarnation-level citizen (spec §4.1), so its private
-		// state must be per-incarnation memory, not this durable MintState arm. Any
-		// actor's fork children — top-level or itself a child — take that path.
-		Spawn: newSpawnHandle(inc, rt, h.factories, h.buildChildCaps, h.hooks()),
+	state, err := h.stateHandles.Resolve(context.Background(), id)
+	if err != nil {
+		panic(err)
 	}
-}
-
-// buildChildCaps is the FORK-CHILD caps assembler (spec §4.1 户籍轴): identical to
-// buildCaps except the State arm is a per-incarnation in-memory backend instead of
-// the durable actor_state MintState. substrate-本质: a fork child holds no durable
-// name分, so it holds no durable state — a fresh empty memStateStore is minted per
-// Fork and welded to THIS incarnation, so it evaporates with the incarnation and a
-// same-named reincarnation inherits nothing (EH2 root-cure, spec P1-2). The other
-// four arms (Pen / Access / Schedule / Spawn) are byte-for-byte buildCaps's — a
-// child writes truth, reads/writes父授 workspace resources, arms incarnation timers,
-// and forks its own (memory-state) children exactly like any actor.
-func (h *Home) buildChildCaps(id actor.ActorID, kind actor.Kind, inc actorrt.Incarnation) actorcaps.Caps {
-	caps := h.buildCaps(id, kind, inc)
-	caps.State = link.NewLiveAccess(accessdoor.NewMemoryStateHandle(id), inc, h.channel.Cells())
-	return caps
+	return actorcaps.Caps{
+		Pen:      link.NewLivePen(h.minter.Mint(id, kind, h.channelID, birthVersion), inc, rt),
+		Access:   link.NewLiveResourceAccess(h.cs.Access.Mint(storespec.AuthorStamp{ID: id, BirthVersion: birthVersion}), inc, rt),
+		State:    link.NewLiveAccess(state, inc, rt),
+		Schedule: link.NewLiveSchedule(h.schedMinter.Mint(storespec.AuthorStamp{ID: id, BirthVersion: birthVersion}), inc, rt),
+		// Lifecycle admission recurses through this same assembler. State resolution
+		// is world-aware: declared identities receive the durable var layer, forked
+		// identities the Home-session run layer, both behind the same handle shape.
+		Lifecycle: newSpawnHandle(h, inc, birthVersion, rt),
+	}
 }

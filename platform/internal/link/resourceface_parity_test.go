@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // This file is 期11 spec §3.2's three-avatar parity DoD item (§9.4: "三化身
@@ -68,7 +69,7 @@ func (r *parityRegistry) Resolve(_ context.Context, id resource.ResourceID) (res
 	return meta, ok, nil
 }
 
-func (r *parityRegistry) Create(_ context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID, placementCoord string, initial []byte) error {
+func (r *parityRegistry) Create(_ context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID, placementCoord string, initial []byte, _ ...resourcespec.ResourceBirthPlan) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if _, exists := r.rows[id]; exists {
@@ -89,7 +90,7 @@ func (r *parityRegistry) Create(_ context.Context, id resource.ResourceID, kind 
 	return nil
 }
 
-func (r *parityRegistry) ReserveCreate(context.Context, resource.ResourceID, resourcespec.ResourceKind, actor.ActorID, string, string, bool) (string, error) {
+func (r *parityRegistry) ReserveCreate(context.Context, resource.ResourceID, resourcespec.ResourceKind, actor.ActorID, string, string, bool, ...resourcespec.ResourceBirthPlan) (string, error) {
 	return "", errors.New("parityRegistry: ReserveCreate not exercised by this rig (kv-only)")
 }
 func (r *parityRegistry) CommitReservation(context.Context, string) (bool, error) {
@@ -230,6 +231,27 @@ func (parityMembership) Lookup(context.Context, actor.ActorID) (string, bool, er
 	return "", false, nil
 }
 
+func (parityMembership) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement()}, true, nil
+}
+func (parityMembership) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+	return nil, nil
+}
+func (parityMembership) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	return storespec.WorldDurable, true, nil
+}
+func (parityMembership) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	return storespec.AuthorOK, nil
+}
+
+type parityOverlay struct{}
+
+func (parityOverlay) ActorAllows(context.Context, actor.ActorID, resource.ResourceID, access.Operation) (bool, error) {
+	return false, nil
+}
+func (parityOverlay) SetGrant(context.Context, resource.ResourceID, access.Grant) error { return nil }
+func (parityOverlay) EndBatch([]actor.ActorID)                                          {}
+
 // parityState is a StateStore no-op stub (Deps requires one; this rig never
 // exercises the actor-scoped locus).
 type parityState struct{}
@@ -253,10 +275,11 @@ func newParityDoor(t *testing.T) accessdoor.AccessMinter {
 	t.Helper()
 	reg := newParityRegistry()
 	m, err := accessdoor.New(accessdoor.Deps{
-		Registry:   reg,
-		Drivers:    accessdoor.DriverTable{accessdoor.KindKV: newParityDriver(reg)},
-		Membership: parityMembership{},
-		State:      parityState{},
+		Registry:  reg,
+		Drivers:   accessdoor.DriverTable{accessdoor.KindKV: newParityDriver(reg)},
+		Authority: parityMembership{},
+		Overlay:   parityOverlay{},
+		State:     parityState{},
 	})
 	if err != nil {
 		t.Fatalf("accessdoor.New: %v", err)
@@ -295,14 +318,14 @@ func TestResourceFaceThreeAvatarParity(t *testing.T) {
 		t.Fatalf("Dial: %v", err)
 	}
 	defer func() { _ = d.Close() }()
-	arms, err := d.OpenStream(context.Background(), callerID, 0, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), callerID, 0, "", func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
 	d.Start()
 
 	ctx := context.Background()
-	local := realMinter.Mint(callerID) // the LOCAL avatar: boundHandle direct, no membrane, no wire
+	local := realMinter.Mint(storespec.AuthorStamp{ID: callerID, BirthVersion: 1}) // LOCAL avatar
 	spec := resourcespec.CreateSpec{Kind: resourcespec.KindKV}
 
 	t.Run("create local, read via wire (port avatar sees local avatar's write)", func(t *testing.T) {
@@ -374,7 +397,7 @@ func TestResourceFaceThreeAvatarParity(t *testing.T) {
 	t.Run("zero-rights Stat masquerades as not_found identically on both avatars", func(t *testing.T) {
 		// A caller with no grant on either resource — mint under a different
 		// identity that never created anything and holds no share.
-		otherLocal := realMinter.Mint(actor.ActorID("tool:parity-stranger"))
+		otherLocal := realMinter.Mint(storespec.AuthorStamp{ID: actor.ActorID("tool:parity-stranger"), BirthVersion: 1})
 		res, err := otherLocal.Stat(ctx, "r-from-local")
 		if err != nil {
 			t.Fatalf("stranger local stat: %v", err)

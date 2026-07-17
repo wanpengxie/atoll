@@ -12,9 +12,9 @@ import (
 	"github.com/wanpengxie/atoll/runtime/ipc"
 )
 
-func TestSealRejectsSpawnAndForkWithoutRunningBuilders(t *testing.T) {
+func TestSealRejectsSpawnWithoutRunningBuilder(t *testing.T) {
 	rt, _ := New(Config{})
-	parent, _, err := rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
+	_, _, err := rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,25 +32,12 @@ func TestSealRejectsSpawnAndForkWithoutRunningBuilders(t *testing.T) {
 		t.Fatal("sealed SpawnIfAbsent ran builder")
 	}
 
-	forkBuilt := false
-	if _, err := rt.Fork(parent, "child", actor.KindAgent, func(Incarnation) Actor {
-		forkBuilt = true
-		return newRecordActor()
-	}); !errors.Is(err, ErrRuntimeSealed) {
-		t.Fatalf("Fork after Seal err = %v", err)
-	}
-	if forkBuilt {
-		t.Fatal("sealed Fork ran builder")
-	}
 	if _, ok := rt.Stat("new"); ok {
 		t.Fatal("sealed spawn entered population")
 	}
-	if _, ok := rt.Stat("child"); ok {
-		t.Fatal("sealed fork entered population")
-	}
 }
 
-func TestSealWinsSpawnAndForkBuildStraddles(t *testing.T) {
+func TestSealWinsSpawnBuildStraddle(t *testing.T) {
 	t.Run("SpawnIfAbsent", func(t *testing.T) {
 		rt, _ := New(Config{})
 		entered, release := make(chan struct{}), make(chan struct{})
@@ -71,29 +58,6 @@ func TestSealWinsSpawnAndForkBuildStraddles(t *testing.T) {
 		}
 		if _, ok := rt.Stat("new"); ok {
 			t.Fatal("straddling spawn entered sealed runtime")
-		}
-	})
-	t.Run("Fork", func(t *testing.T) {
-		rt, _ := New(Config{})
-		parent, _, _ := rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
-		entered, release := make(chan struct{}), make(chan struct{})
-		result := make(chan error, 1)
-		go func() {
-			_, err := rt.Fork(parent, "child", actor.KindAgent, func(Incarnation) Actor {
-				close(entered)
-				<-release
-				return newRecordActor()
-			})
-			result <- err
-		}()
-		<-entered
-		rt.Seal()
-		close(release)
-		if err := <-result; !errors.Is(err, ErrRuntimeSealed) {
-			t.Fatalf("err = %v", err)
-		}
-		if _, ok := rt.Stat("child"); ok {
-			t.Fatal("straddling fork entered sealed runtime")
 		}
 	})
 }

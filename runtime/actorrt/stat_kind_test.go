@@ -21,25 +21,13 @@ func TestStat_KindAcrossEmbodimentForms(t *testing.T) {
 	rt, _ := New(Config{Parent: context.Background()})
 	defer rt.StopAll()
 
-	parentInc, _, _ := rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
+	_, _, _ = rt.SpawnIfAbsent("parent", actor.KindAgent, static(newRecordActor()))
 	st, ok := rt.Stat("parent")
 	if !ok {
 		t.Fatal("cell not hosted after Spawn")
 	}
 	if st.Kind != actor.KindAgent {
 		t.Fatalf("cell UnitStat.Kind = %q, want %q", st.Kind, actor.KindAgent)
-	}
-
-	childInc, err := rt.Fork(parentInc, "parent/child", actor.KindTool, static(newRecordActor()))
-	if err != nil {
-		t.Fatalf("Fork: %v", err)
-	}
-	st, ok = rt.Stat(childInc.ID())
-	if !ok {
-		t.Fatal("fork child not hosted after Fork")
-	}
-	if st.Kind != actor.KindTool {
-		t.Fatalf("fork child UnitStat.Kind = %q, want %q", st.Kind, actor.KindTool)
 	}
 
 	kindOf := func(id actor.ActorID) (actor.Kind, bool) {

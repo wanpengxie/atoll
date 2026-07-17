@@ -19,6 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/ipc"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -63,6 +64,8 @@ type Dialer struct {
 	// Start (so it is set before any read loop runs). nil → a KindDespawn only
 	// closes the stream (no local cell to end, e.g. a test dialer).
 	despawnLocal func(actor.ActorID)
+	idleApproved func(actor.ActorID)
+	planChanged  func()
 
 	// allocHandler answers an inbound AllocRequest (home→daemon, §4.7's first
 	// frame): the daemon storage host's Allocator does the real mkdir/touch
@@ -118,6 +121,7 @@ type actorStream struct {
 	writer      *RemoteWriter
 	access      *relayClient // KindAccess FIFO round-trip (backs Access + State faces)
 	sched       *relayClient // KindSchedule FIFO round-trip
+	lifecycle   *remoteLifecycleArm
 	dispatch    func(env *message.Envelope) error
 	cancel      func(requestID message.ID)
 	loopStarted bool
@@ -158,15 +162,21 @@ const terminalJoinGrace = 10 * time.Second
 // Access is the WIDE resource face (Invoke+Create+Stat+List, 期11 spec §3.1);
 // State stays the narrow (Invoke-only) face — the scope law itself.
 type CellArms struct {
-	Pen      harness.Pen
-	Access   accessdoor.ResourceAccessHandle
-	State    accessdoor.AccessHandle
-	Schedule schedule.ScheduleHandle
-	Down     func(cause string)
+	Pen       harness.Pen
+	Access    accessdoor.ResourceAccessHandle
+	State     accessdoor.AccessHandle
+	Schedule  schedule.ScheduleHandle
+	Lifecycle actorrt.LifecycleHandle
+	Down      func(cause string)
 }
 
 type DialConfig struct {
-	DespawnLocal    func(actor.ActorID)
+	DespawnLocal func(actor.ActorID)
+	IdleApproved func(actor.ActorID)
+	// PlanChanged is a non-blocking edge notification after lifecycle/idle
+	// receipts that can change this daemon's plan. The plan remains a pulled
+	// level snapshot; this callback only advances convergence latency.
+	PlanChanged     func()
 	AllocHandler    func(AllocRequest) AllocReply
 	LocalFileOpener LocalFileOpener
 }
@@ -194,6 +204,8 @@ func Dial(ctx context.Context, serverURL string, decls []Declaration, cfg DialCo
 		pendingPlan:         newPendingReplies[PlanReply](),
 		done:                make(chan struct{}),
 		despawnLocal:        cfg.DespawnLocal,
+		idleApproved:        cfg.IdleApproved,
+		planChanged:         cfg.PlanChanged,
 		allocHandler:        cfg.AllocHandler,
 		localFileOpener:     cfg.LocalFileOpener,
 	}
@@ -465,7 +477,7 @@ func (d *Dialer) Reattach(ctx context.Context, decls []Declaration) error {
 // StartStream (start the read loop). It never starts the read loop itself, so a
 // deliver can never race a not-yet-spawned cell — true for the initial batch and
 // for a post-Start open the ring adds mid-life.
-func (d *Dialer) OpenStream(ctx context.Context, id actor.ActorID, epoch int64, dispatch func(env *message.Envelope) error, cancel func(requestID message.ID)) (CellArms, error) {
+func (d *Dialer) OpenStream(ctx context.Context, id actor.ActorID, version int64, ensureTicket string, dispatch func(env *message.Envelope) error, cancel func(requestID message.ID)) (CellArms, error) {
 	// yamux assigns the substream id itself (the retired mux's nextID
 	// hand-numbering is gone); openStream tags the substream tag=actor so the
 	// home's accept loop routes it through runtime port preparation and commit.
@@ -478,7 +490,7 @@ func (d *Dialer) OpenStream(ctx context.Context, id actor.ActorID, epoch int64, 
 
 	// Native ipc handshake on the stream: present the lease credential (actor
 	// id), read the home's bound-actor ack.
-	hsPayload, err := json.Marshal(ipc.HandshakePayload{LeaseID: string(id), Epoch: epoch})
+	hsPayload, err := json.Marshal(ipc.HandshakePayload{LeaseID: string(id), Version: version, EnsureTicket: ensureTicket})
 	if err != nil {
 		_ = s.Close()
 		return CellArms{}, err
@@ -510,7 +522,8 @@ func (d *Dialer) OpenStream(ctx context.Context, id actor.ActorID, epoch int64, 
 	rw := NewRemoteWriter(codec)
 	accessRelay := newRelayClient(codec, ipc.KindAccess)
 	schedRelay := newRelayClient(codec, ipc.KindSchedule)
-	as := &actorStream{id: id, stream: s, codec: codec, writer: rw, access: accessRelay, sched: schedRelay, dispatch: dispatch, cancel: cancel}
+	lifecycle := newRemoteLifecycleArm(codec)
+	as := &actorStream{id: id, stream: s, codec: codec, writer: rw, access: accessRelay, sched: schedRelay, lifecycle: lifecycle, dispatch: dispatch, cancel: cancel}
 	d.mu.Lock()
 	d.streams[id] = as
 	d.mu.Unlock()
@@ -524,12 +537,36 @@ func (d *Dialer) OpenStream(ctx context.Context, id actor.ActorID, epoch int64, 
 
 	downHandler := func(cause string) { d.claimTerminal(as, terminalDown, cause) }
 	return CellArms{
-		Pen:      rw,
-		Access:   &remoteResourceHandle{relay: accessRelay, dialer: d},
-		State:    &remoteAccessHandle{relay: accessRelay, scope: accessScopeState},
-		Schedule: &remoteScheduleHandle{relay: schedRelay},
-		Down:     downHandler,
+		Pen:       rw,
+		Access:    &remoteResourceHandle{relay: accessRelay, dialer: d},
+		State:     &remoteAccessHandle{relay: accessRelay, scope: accessScopeState},
+		Schedule:  &remoteScheduleHandle{relay: schedRelay},
+		Lifecycle: lifecycle,
+		Down:      downHandler,
 	}, nil
+}
+
+// RequestIdle submits an idle request and returns immediately. Approval is an
+// ordered IdleAck command handled by the stream read loop, never this call's
+// return value.
+func (d *Dialer) RequestIdle(ctx context.Context, id actor.ActorID) (bool, error) {
+	d.mu.Lock()
+	as := d.streams[id]
+	d.mu.Unlock()
+	if as == nil {
+		return false, errRelayClosed
+	}
+	raw, err := json.Marshal(ipc.IdlePayload{})
+	if err != nil {
+		return false, err
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if err := as.codec.Write(ipc.Frame{Kind: ipc.KindIdle, Payload: raw}); err != nil {
+		return false, err
+	}
+	return false, nil
 }
 
 // claimTerminal is the sole terminal writer for an actor stream. The first
@@ -602,6 +639,9 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 		as.writer.Close()
 		as.access.close()
 		as.sched.close()
+		if as.lifecycle != nil {
+			as.lifecycle.close()
+		}
 		// Pointer-guarded removal: delete the table entry only if it is still
 		// THIS stream. A reconnect/rebuild may have already registered a NEW
 		// stream under the same actor id (OpenStream overwrites d.streams[id]);
@@ -663,6 +703,37 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 				return
 			}
 			as.sched.deliverAck(ap)
+		case ipc.KindIdleAck:
+			var ap ipc.IdleAckPayload
+			if err := json.Unmarshal(frame.Payload, &ap); err != nil {
+				d.claimTerminal(as, terminalSilent, "idle_ack_decode")
+				return
+			}
+			if ap.Approved {
+				d.mu.Lock()
+				approved := d.idleApproved
+				d.mu.Unlock()
+				if approved != nil {
+					approved(as.id)
+				}
+				d.signalPlanChanged()
+			}
+		case ipc.KindSpawnAck:
+			var ap ipc.SpawnAckPayload
+			if err := json.Unmarshal(frame.Payload, &ap); err != nil {
+				d.claimTerminal(as, terminalSilent, "spawn_ack_decode")
+				return
+			}
+			as.lifecycle.spawn.deliverAck(ap)
+			d.signalPlanChanged()
+		case ipc.KindEndAck:
+			var ap ipc.EndAckPayload
+			if err := json.Unmarshal(frame.Payload, &ap); err != nil {
+				d.claimTerminal(as, terminalSilent, "end_ack_decode")
+				return
+			}
+			as.lifecycle.end.deliverAck(ap)
+			d.signalPlanChanged()
 		case ipc.KindDespawn:
 			// Host→remote: end this actor's execution arm (§10.5). Despawn the local
 			// cell (the injected hook → rt.DespawnID) and reply KindDetach before
@@ -679,6 +750,7 @@ func (d *Dialer) streamReadLoop(as *actorStream, dispatch func(env *message.Enve
 			if despawn != nil {
 				despawn(as.id)
 			}
+			d.signalPlanChanged()
 			return
 		case ipc.KindCancel:
 			var cp ipc.CancelPayload
@@ -1256,6 +1328,15 @@ func (d *Dialer) DetachStream(id actor.ActorID) {
 		return
 	}
 	d.claimTerminal(as, terminalDetach, "detach")
+}
+
+func (d *Dialer) signalPlanChanged() {
+	d.mu.Lock()
+	changed := d.planChanged
+	d.mu.Unlock()
+	if changed != nil {
+		changed()
+	}
 }
 
 func (d *Dialer) snapshotStreams() []*actorStream {

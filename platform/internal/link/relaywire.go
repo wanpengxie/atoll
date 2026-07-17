@@ -147,6 +147,7 @@ type scheduleMethod string
 const (
 	scheduleMethodSchedule scheduleMethod = "schedule"
 	scheduleMethodCancel   scheduleMethod = "cancel"
+	scheduleMethodAck      scheduleMethod = "ack"
 )
 
 // scheduleRequest is the daemon→home KindSchedule payload. The whole ScheduleReq
@@ -426,6 +427,18 @@ func (h *remoteScheduleHandle) Schedule(ctx context.Context, req schedule.Schedu
 // Cancel satisfies schedule.ScheduleHandle over the wire.
 func (h *remoteScheduleHandle) Cancel(ctx context.Context, id schedule.TimerID) error {
 	payload, err := json.Marshal(scheduleRequest{Method: scheduleMethodCancel, ID: id})
+	if err != nil {
+		return err
+	}
+	_, ackErr, txErr := h.relay.roundTrip(ctx, payload)
+	if txErr != nil {
+		return txErr
+	}
+	return ackErr
+}
+
+func (h *remoteScheduleHandle) Ack(ctx context.Context, id schedule.TimerID) error {
+	payload, err := json.Marshal(scheduleRequest{Method: scheduleMethodAck, ID: id})
 	if err != nil {
 		return err
 	}

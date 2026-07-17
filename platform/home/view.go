@@ -19,12 +19,12 @@ import (
 // (ReadAfterSeq), head cursor (MaxSeq), and active actor roster (ListActors). It
 // holds only read interfaces — there is no write path through a View.
 type View struct {
-	query    storespec.MessageQuery
-	registry storespec.Registry
-	links    *link.Acceptor
-	presence presence.View
-	rt       *actorrt.Runtime
-	nowMs    func() int64
+	query     storespec.MessageQuery
+	authority storespec.ActorAuthority
+	links     *link.Acceptor
+	presence  presence.View
+	rt        *actorrt.Runtime
+	nowMs     func() int64
 }
 
 // View returns the read-only observation set (ReadAfterSeq / MaxSeq /
@@ -34,12 +34,12 @@ type View struct {
 // actors instead ask the system actor by message (that path is logged).
 func (h *Home) View() View {
 	return View{
-		query:    h.cs.Query,
-		registry: h.cs.Registry,
-		links:    h.links,
-		presence: presence.NewView(h.presenceFold, h.channel.Cells(), h.cs.Registry),
-		rt:       h.channel.Cells(),
-		nowMs:    h.nowMs,
+		query:     h.cs.Query,
+		authority: h.cs.Authority,
+		links:     h.links,
+		presence:  presence.NewView(h.presenceFold, h.channel.Cells(), h.cs.Authority),
+		rt:        h.channel.Cells(),
+		nowMs:     h.nowMs,
 	}
 }
 
@@ -97,7 +97,20 @@ func (v View) MaxSeq(ctx context.Context) (int64, error) {
 	return v.query.MaxSeq(ctx)
 }
 
-// ListActors returns all active actors from the membership registry.
+// ListActors returns the compatibility membership projection of every active
+// identity. The source is ActorAuthority; durable registry history is not a
+// live control-plane read path.
 func (v View) ListActors(ctx context.Context) ([]storespec.Record, error) {
-	return v.registry.ListActive(ctx)
+	rows, err := v.authority.ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]storespec.Record, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, storespec.Record{
+			ID: row.ID, Kind: row.Kind, Principal: row.Principal,
+			Binding: row.Binding, CreatedAt: row.CreatedAt,
+		})
+	}
+	return out, nil
 }

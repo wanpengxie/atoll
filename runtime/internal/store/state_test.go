@@ -314,7 +314,7 @@ func TestState_CascadeClearedOnMemberRemove(t *testing.T) {
 	ctx := context.Background()
 	f := openStateFixture(t)
 
-	// Add the member, give it state, then remove it via ApplyMemberTransitions.
+	// Add the identity, give it state, then end it through the cascade path.
 	if err := f.reg.insertFixedID(ctx, storespec.Record{ID: "actor:a", Kind: actor.KindTool, CreatedAt: 100}); err != nil {
 		t.Fatalf("add member: %v", err)
 	}
@@ -322,8 +322,7 @@ func TestState_CascadeClearedOnMemberRemove(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	if err := f.reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: "actor:a", At: 200}}); err != nil {
+	if err := f.reg.Deregister(ctx, "actor:a", 200); err != nil {
 		t.Fatalf("remove member: %v", err)
 	}
 	if _, exists, _ := f.state.Read(ctx, "actor:a", "cursor"); exists {
@@ -331,8 +330,7 @@ func TestState_CascadeClearedOnMemberRemove(t *testing.T) {
 	}
 
 	// A repeated remove (already-deregistered) is a no-op and must not error.
-	if err := f.reg.ApplyMemberTransitions(ctx, nil,
-		[]storespec.MemberActorRemove{{ID: "actor:a", At: 300}}); err != nil {
+	if err := f.reg.Deregister(ctx, "actor:a", 300); err != nil {
 		t.Fatalf("repeat remove must be no-op: %v", err)
 	}
 }

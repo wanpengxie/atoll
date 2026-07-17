@@ -20,9 +20,9 @@ type PresenceStat interface {
 }
 
 // SystemActor holds one incarnation's process state: it answers channel-wide
-// directory queries (actor.list) by composing durable membership (Registry)
-// with volatile liveness (the injected seam). It is channel-agnostic at the
-// base — the composition root injects channel-scoped services (registry,
+// directory queries (actor.list) by composing the unified active-identity
+// authority with volatile liveness (the injected seam). It is channel-agnostic
+// at the base — the composition root injects channel-scoped services (authority,
 // liveness/device seams), so this actor holds no channel id of its own.
 //
 // It is an actorbase Proc (lib/actorbase, actorbase-spec-v1 §3's out-generation
@@ -31,19 +31,19 @@ type PresenceStat interface {
 // actorbase.New seam every other actor does). Def mints a fresh SystemActor per
 // incarnation; run(sys) is the process body.
 type SystemActor struct {
-	registry storespec.Registry
-	clock    func() time.Time
-	presence PresenceStat
-	operate  OperateExecutor
-	logger   *slog.Logger
+	authority storespec.ActorAuthority
+	clock     func() time.Time
+	presence  PresenceStat
+	operate   OperateExecutor
+	logger    *slog.Logger
 }
 
 // Deps bundles the channel services the system actor needs.
 type Deps struct {
-	Registry storespec.Registry
-	Clock    func() time.Time
-	Presence PresenceStat
-	Logger   *slog.Logger
+	Authority storespec.ActorAuthority
+	Clock     func() time.Time
+	Presence  PresenceStat
+	Logger    *slog.Logger
 	// Operate is the injected channel-operate executor (the in-gate control plane's
 	// implementation half; the gate here does permission + routing). Nil → the four
 	// control types are inert (no synthesis) — the injection point is unfilled.
@@ -63,11 +63,11 @@ func New(deps Deps) *SystemActor {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	return &SystemActor{
-		registry: deps.Registry,
-		clock:    clock,
-		presence: deps.Presence,
-		operate:  deps.Operate,
-		logger:   logger,
+		authority: deps.Authority,
+		clock:     clock,
+		presence:  deps.Presence,
+		operate:   deps.Operate,
+		logger:    logger,
 	}
 }
 
@@ -132,7 +132,7 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 // Readiness is deliberately absent: it is not a substrate axis — whether an actor can service a request
 // is the OUTCOME of send→terminal, never a stored field here.
 func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
-	rows, err := s.registry.ListActive(msg.Ctx())
+	rows, err := s.authority.ListActive(msg.Ctx())
 	if err != nil {
 		return
 	}
@@ -144,9 +144,8 @@ func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 		present, uptimeMs := s.liveness(snapshot)
 		catalog.Actors = append(catalog.Actors, introspect.CatalogEntry{
-			ID:       string(r.ID),
-			Kind:     string(r.Kind),
-			Binding:  string(r.Binding),
+			ID: string(r.ID), Kind: string(r.Kind), Binding: string(r.Binding),
+			Sponsor:  string(r.Sponsor),
 			Present:  present,
 			UptimeMs: uptimeMs,
 			Device:   deviceTestimony(snapshot),
@@ -164,7 +163,7 @@ func systemDescribe() introspect.Describe {
 		ActorID:     string(actor.SystemActorID),
 		Description: "Channel system actor: answers the reserved actor directory and presence queries.",
 		SkillDoc: "# system\n\nReserved channel directory.\n\n## Tool surface\n\n" +
-			"- `actor.list` — channel-wide actor directory: durable membership composed with presence.\n" +
+			"- `actor.list` — channel-wide active-identity directory composed with presence.\n" +
 			"- `actor.status` — read-time presence view for one actor id.\n",
 		Types: map[string]introspect.TypeMeta{
 			introspect.QueryList: {

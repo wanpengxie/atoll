@@ -10,7 +10,7 @@ import (
 )
 
 // ErrRemoveAnchor rejects Remove against the intrinsic system actor — the
-// channel's structural anchor, never a member id ApplyMemberTransitions was
+// channel's structural anchor, never a tenant identity subject to End
 // ever meant to deregister. The daemon relay anchor needs no parallel guard
 // here: it is a compute id, never a member id Remove's caller could pass.
 var ErrRemoveAnchor = errors.New("platform: cannot remove the system anchor actor")
@@ -31,12 +31,15 @@ func (h *Home) Restart(ctx context.Context, id actor.ActorID) error {
 	if h.closed.Load() {
 		return ErrClosed
 	}
-	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
+	_, ok, err := h.controlIndex.LookupActive(ctx, id)
 	if err != nil {
 		return fmt.Errorf("platform: Restart membership lookup: %w", err)
 	}
-	if !ok || !rec.IsActive() {
+	if !ok {
 		return fmt.Errorf("platform: Restart requires an active member: %s", id)
+	}
+	if h.liveness != nil {
+		_, _ = h.liveness.Retire(id, true)
 	}
 	h.channel.Cells().DespawnID(id)
 	h.pokeReconcile()
@@ -45,7 +48,7 @@ func (h *Home) Restart(ctx context.Context, id actor.ActorID) error {
 
 // Remove is identity-level termination's paved path: despawn-first + dereg
 // cascade + double-tap. This is a COMPOSITION over already-built primitives
-// (DespawnID, ApplyMemberTransitions) — NOT a single atomic operation spanning
+// (carrier retirement, EndCascade) — not a single atomic operation spanning
 // runtime and store: the schedule engine's Reviver can activate id between
 // steps ① and ② (a Due snapshot already in flight when Remove starts), so the
 // trailing double-tap at ③ closes that window. The Reviver's own post-build
@@ -66,60 +69,9 @@ func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
 	if id == actor.SystemActorID {
 		return ErrRemoveAnchor
 	}
-	unlock := h.actorGates.lock(id)
-	defer unlock()
-	if h.closed.Load() {
-		return ErrClosed
+	err := h.EndIdentity(ctx, storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}, id, "removed")
+	if err == nil {
+		h.logger.Info("platform.member.removed", "channel", string(h.channelID), "actor", string(id))
 	}
-	// Capture the principal for the membership-change poke BEFORE the dereg cascade
-	// (连接模型勘误期 §3.2 表②: ② ApplyMemberTransitions deregisters the registry row,
-	// so PrincipalOf would fail after). best-effort: an already-gone id yields "" and
-	// the poke is skipped (the resolver sweep is the正门).
-	principal, _, _ := h.PrincipalOf(ctx, id)
-	// ① despawn-first: kill any live embodiment (cell or attached port,
-	// transport-neutral) before the dereg cascade below. false = no live
-	// embodiment right now — not an error, dereg proceeds regardless.
-	h.channel.Cells().DespawnID(id)
-	// ② dereg cascade: state + timers + mirror event, one tx (actors.go). An
-	// already-deregistered id is an idempotent no-op — no repeat mirror, nil err.
-	if err := h.cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{
-		{ID: id, At: h.nowMs()},
-	}); err != nil {
-		return fmt.Errorf("platform: Remove dereg %s: %w", id, err)
-	}
-	// Symmetric to Admit's platform.member.admitted (census.go); fires on every
-	// successful call, including idempotent retries, matching admitted's own
-	// precedent. The durable deregistered mirror records the truth transition;
-	// this line is the local operational edge.
-	h.logger.Info("platform.member.removed", "channel", string(h.channelID), "actor", string(id))
-	// ③ double-tap: kill whatever the Reviver may have spawned in the window
-	// between ① and ②'s commit (see the doc comment above).
-	h.channel.Cells().DespawnID(id)
-	// Presence归一清账 (gateway 期 S4, design §5.4 "Forget 证词账清洁边"): the
-	// ring's削 is a quiet teardown with no down edge, so without this the removed
-	// member's device presence would fold "online" forever. Two owner-side清账:
-	// 级联删槽 (RemoveSubjectSlot — drop the slot from the registry and
-	// revoke its layer-3 testimony to any observer) + Forget the presence fold row
-	// (unknown 恒 = 无行). Attribution honesty: RemoveSubjectSlot/Forget are not
-	// serialized against a concurrent re-Admit, but 身份不可复活 mints a FRESH id on
-	// re-Admit, so this targets the dead id only; a residual race is at worst a
-	// false-unknown (advisory-safe, never a false-online — 解绑永不训练 offline).
-	// Timer rows are already cleared by the dereg cascade (clearTimersTx); the
-	// scheduler's EnsureLive户籍拒 is the second line.
-	h.RemoveSubjectSlot(id)
-	h.presenceFold.Forget(id)
-	h.reviveMu.Lock()
-	delete(h.reviveLogAt, id)
-	delete(h.reviveBackoff, id)
-	h.reviveMu.Unlock()
-	// Membership-change poke emit point (连接模型勘误期 §3.2 表②): the dereg cascade has
-	// committed, so the subject that just lost membership must have their gateway
-	// session re-resolve (drop the subscription + stop the stream). The assembly root
-	// bridges this directly into Gateway.Poke(principal); the read-side
-	//每批 recheck is the correctness正门, this poke is pure及时性. nil sink / empty
-	// principal → no-op.
-	if h.onMembershipChange != nil && principal != "" {
-		h.onMembershipChange(principal)
-	}
-	return nil
+	return err
 }

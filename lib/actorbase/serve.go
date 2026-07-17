@@ -51,5 +51,6 @@ func dispatch(sys Sys, msg Msg, routes map[string]Handler) {
 		_, _ = sys.Fail(msg, "internal_error", err.Error())
 		return
 	}
+	_ = sys.AckTimer(msg)
 	_, _ = sys.Reply(msg, v)
 }

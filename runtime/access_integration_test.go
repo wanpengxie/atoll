@@ -13,6 +13,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // kvSpec is the day-1 CreateSpec every integration test in this file creates
@@ -43,10 +44,10 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	B = seedMember(t, cs, B)
 	C = seedMember(t, cs, C)
 
-	hA := cs.Access.Mint(A)
-	hB := cs.Access.Mint(B)
-	hC := cs.Access.Mint(C)
-	hX := cs.Access.Mint(X)
+	hA := cs.Access.Mint(scheduleStamp(A))
+	hB := cs.Access.Mint(scheduleStamp(B))
+	hC := cs.Access.Mint(scheduleStamp(C))
+	hX := cs.Access.Mint(scheduleStamp(X))
 
 	const rid = resource.ResourceID("kv:doc")
 	const ridX = resource.ResourceID("kv:docX")
@@ -58,7 +59,7 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	expectAccepted(t, "A create", out, err)
 
 	out, err = hX.Create(ctx, ridX, kvSpec, nil)
-	expectReason(t, "non-member X create", out, err, access.AccessDenied)
+	expectReason(t, "non-member X create", out, err, access.OwnerInactive)
 
 	out, err = hA.Create(ctx, rid, kvSpec, v1)
 	expectReason(t, "A re-create same id", out, err, access.AlreadyExists)
@@ -137,14 +138,14 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
 	expectAccepted(t, "C read before deregister", out, err)
 
-	if err := cs.Membership.Deregister(ctx, C, 100); err != nil {
+	if err := endDeclaredTest(ctx, cs, C, 100); err != nil {
 		t.Fatalf("deregister C: %v", err)
 	}
 	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectReason(t, "C read after deregister (exit loses access)", out, err, access.AccessDenied)
+	expectReason(t, "C read after deregister (exit loses access)", out, err, access.OwnerInactive)
 
 	E = seedMember(t, cs, E)
-	hE := cs.Access.Mint(E)
+	hE := cs.Access.Mint(scheduleStamp(E))
 	out, err = hE.Invoke(ctx, access.OpRead, rid, nil, nil)
 	expectAccepted(t, "E read after joining (late join gains access)", out, err)
 	expectBytes(t, "E read value", out, v1)
@@ -160,13 +161,64 @@ func openAccessChannel(t *testing.T) *ChannelStores {
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}
+	if err := cs.BindActorAuthority(testAccessAuthority{declared: cs.Declared}); err != nil {
+		t.Fatalf("BindActorAuthority: %v", err)
+	}
+	if err := cs.BindGrantOverlay(testGrantOverlay{}); err != nil {
+		t.Fatalf("BindGrantOverlay: %v", err)
+	}
 	t.Cleanup(func() { _ = cs.Close() })
 	return cs
 }
 
+type testAccessAuthority struct {
+	declared storespec.DeclaredControlReader
+}
+
+type testGrantOverlay struct{}
+
+func (testGrantOverlay) ActorAllows(context.Context, actor.ActorID, resource.ResourceID, access.Operation) (bool, error) {
+	return false, nil
+}
+func (testGrantOverlay) SetGrant(context.Context, resource.ResourceID, access.Grant) error {
+	return nil
+}
+func (testGrantOverlay) EndBatch([]actor.ActorID) {}
+
+func (a testAccessAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	rec, ok, err := a.declared.LookupDeclaredActive(ctx, id)
+	if err != nil || !ok {
+		return storespec.ActorControlRow{}, false, err
+	}
+	return rec, true, nil
+}
+
+func (a testAccessAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+	return nil, nil
+}
+
+func (a testAccessAuthority) WorldOf(ctx context.Context, id actor.ActorID) (storespec.ActorWorld, bool, error) {
+	_, ok, err := a.LookupActive(ctx, id)
+	return storespec.WorldDurable, ok, err
+}
+
+func (a testAccessAuthority) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	_, ok, err := a.LookupActive(ctx, stamp.ID)
+	if err != nil {
+		return 0, err
+	}
+	if !ok {
+		return storespec.AuthorNotMember, nil
+	}
+	if stamp.BirthVersion != 1 {
+		return storespec.AuthorVersionStale, nil
+	}
+	return storespec.AuthorOK, nil
+}
+
 func seedMember(t *testing.T, cs *ChannelStores, id actor.ActorID) actor.ActorID {
 	t.Helper()
-	minted, err := cs.Membership.Admit(context.Background(), actor.KindAgent, string(id), 1)
+	minted, err := admitDeclaredTest(context.Background(), cs, actor.KindAgent, string(id), 1)
 	if err != nil {
 		t.Fatalf("seed member %s: %v", id, err)
 	}

@@ -22,7 +22,7 @@
 //     helpers live in platform/internal/hostcommon (T5a); the root only
 //     re-exports the name downstream code imports.
 //   - PlanActor (plan.go) — the authenticated link-plan DTO shared by the home
-//     provider and compute sink, including the restart epoch and canonical
+//     provider and compute sink, including the declaration version and canonical
 //     declaration metadata both hosts compare.
 //
 // # Root-file topology

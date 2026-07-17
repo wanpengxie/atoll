@@ -320,6 +320,30 @@ func TestLinkHandleConcurrentGracefulCloseSharesOneOrderedPipeline(t *testing.T)
 	}
 }
 
+func TestLinkHandleLeaseExpiryPublishesRestartBeforeCarrierClose(t *testing.T) {
+	gate := &actorGate{}
+	var stages []string
+	h := &linkHandle{
+		gate:         gate,
+		invalidate:   func() { stages = append(stages, "invalidate") },
+		waitWorkers:  func() { stages = append(stages, "wait") },
+		expirePorts:  func() { stages = append(stages, "expire") },
+		takePorts:    func() []actorrt.Incarnation { stages = append(stages, "snapshot"); return nil },
+		quietPort:    func(actorrt.Incarnation) { stages = append(stages, "quiet") },
+		closeCarrier: func() { stages = append(stages, "carrier") },
+	}
+	h.closeExpired()
+	h.closeQuietly()
+	want := []string{"invalidate", "wait", "expire", "carrier"}
+	if !reflect.DeepEqual(stages, want) {
+		t.Fatalf("lease-expiry stages=%v want %v", stages, want)
+	}
+	if gate.admit() {
+		gate.done()
+		t.Fatal("lease-expiry close left actor admission open")
+	}
+}
+
 func TestHardKillDoesNotWaitForConcurrentGracefulClose(t *testing.T) {
 	ls, controlPeer, _ := newControlKillRig(t, func([]byte) {})
 	defer controlPeer.Close()

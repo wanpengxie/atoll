@@ -138,6 +138,15 @@ const (
 	// closure already owns its own terminal. So it never rides the ack'd on-loop
 	// path.
 	KindCancelRequest Kind = "cancel_request"
+	// Lifecycle control is carried on the actor stream. These six kinds are a
+	// closed request/receipt family; actor identity is implicit in the bound
+	// stream and FIFO receipt order supplies correlation.
+	KindSpawn    Kind = "spawn"
+	KindSpawnAck Kind = "spawn_ack"
+	KindEnd      Kind = "end"
+	KindEndAck   Kind = "end_ack"
+	KindIdle     Kind = "idle"
+	KindIdleAck  Kind = "idle_ack"
 )
 
 // MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.
@@ -154,13 +163,46 @@ type Frame struct {
 
 // HandshakePayload is sent remote → host on connect.
 type HandshakePayload struct {
-	LeaseID string `json:"lease_id"`
-	Epoch   int64  `json:"epoch"`
+	LeaseID      string `json:"lease_id"`
+	Version      int64  `json:"version"`
+	EnsureTicket string `json:"ensure_ticket"`
 }
 
 // HandshakeAckPayload is the host's reply: the bound actor identity.
 type HandshakeAckPayload struct {
 	Actor actor.ActorID `json:"actor"`
+}
+
+type SpawnPayload struct {
+	Nonce         string          `json:"nonce"`
+	Kind          actor.Kind      `json:"kind"`
+	Class         string          `json:"class"`
+	NameHint      string          `json:"name_hint,omitempty"`
+	Config        json.RawMessage `json:"config,omitempty"`
+	PlacementKind string          `json:"placement_kind,omitempty"`
+	PlacementHost string          `json:"placement_host,omitempty"`
+}
+
+type SpawnAckPayload struct {
+	ChildID      actor.ActorID `json:"child_id,omitempty"`
+	ErrorCode    string        `json:"error_code,omitempty"`
+	ErrorMessage string        `json:"error_message,omitempty"`
+}
+
+type EndPayload struct {
+	Target actor.ActorID `json:"target,omitempty"`
+	Reason string        `json:"reason,omitempty"`
+}
+
+type EndAckPayload struct {
+	ErrorCode    string `json:"error_code,omitempty"`
+	ErrorMessage string `json:"error_message,omitempty"`
+}
+
+type IdlePayload struct{}
+
+type IdleAckPayload struct {
+	Approved bool `json:"approved"`
 }
 
 // DeliverPayload carries one envelope into the bound actor's mailbox.

@@ -2,6 +2,7 @@ package schedule
 
 import (
 	"context"
+	"errors"
 	"sort"
 	"sync"
 	"testing"
@@ -10,8 +11,34 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
+
+type allowScheduleAuthority struct{ world storespec.ActorWorld }
+
+func (allowScheduleAuthority) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1}, true, nil
+}
+func (allowScheduleAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+	return nil, nil
+}
+func (a allowScheduleAuthority) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	if a.world == 0 {
+		return storespec.WorldDurable, true, nil
+	}
+	return a.world, true, nil
+}
+func (allowScheduleAuthority) CheckAuthor(_ context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	if stamp.BirthVersion != 1 {
+		return storespec.AuthorVersionStale, nil
+	}
+	return storespec.AuthorOK, nil
+}
+
+func testStamp(id actor.ActorID) storespec.AuthorStamp {
+	return storespec.AuthorStamp{ID: id, BirthVersion: 1}
+}
 
 // ---------------------------------------------------------------------
 // fakeStore: an in-memory timerspec.TimerStore stub. Every method may be
@@ -21,8 +48,9 @@ import (
 // ---------------------------------------------------------------------
 
 type fakeStore struct {
-	mu   sync.Mutex
-	rows map[timerspec.TimerID]timerspec.TimerRow
+	mu    sync.Mutex
+	rows  map[timerspec.TimerID]timerspec.TimerRow
+	fired map[timerspec.TimerID]timerspec.TimerRow
 
 	insertErr error
 	deleteErr error
@@ -32,7 +60,7 @@ type fakeStore struct {
 }
 
 func newFakeStore() *fakeStore {
-	return &fakeStore{rows: make(map[timerspec.TimerID]timerspec.TimerRow)}
+	return &fakeStore{rows: make(map[timerspec.TimerID]timerspec.TimerRow), fired: make(map[timerspec.TimerID]timerspec.TimerRow)}
 }
 
 func (s *fakeStore) Insert(ctx context.Context, row timerspec.TimerRow) error {
@@ -107,6 +135,42 @@ func (s *fakeStore) CancelOwned(ctx context.Context, id timerspec.TimerID, autho
 	return true, nil
 }
 
+func (s *fakeStore) FireAndMark(_ context.Context, id timerspec.TimerID, _ *message.Envelope) (timerspec.FireOutcome, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, ok := s.fired[id]; ok {
+		return timerspec.FireAlreadyFired, nil
+	}
+	row, ok := s.rows[id]
+	if !ok {
+		return timerspec.FireCancelled, nil
+	}
+	delete(s.rows, id)
+	s.fired[id] = row
+	return timerspec.FireCommitted, nil
+}
+
+func (s *fakeStore) AckOwned(_ context.Context, id timerspec.TimerID, author actor.ActorID) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	row, ok := s.fired[id]
+	if !ok || row.AuthorID != author {
+		return false, nil
+	}
+	delete(s.fired, id)
+	return true, nil
+}
+
+func (s *fakeStore) ListFired(context.Context, timerspec.FiredCursor, int) (timerspec.FiredPage, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows := make([]timerspec.TimerRow, 0, len(s.fired))
+	for _, row := range s.fired {
+		rows = append(rows, row)
+	}
+	return timerspec.FiredPage{Rows: rows, Done: true}, nil
+}
+
 func (s *fakeStore) rowCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -162,6 +226,20 @@ func (f *fakeFireSink) lastCall() fireCall {
 }
 
 var _ FireSink = (*fakeFireSink)(nil)
+
+type fakeDurableFire struct {
+	store timerspec.TimerStore
+	sink  FireSink
+}
+
+func (f fakeDurableFire) Fire(ctx context.Context, row timerspec.TimerRow, env *message.Envelope) (timerspec.FireOutcome, error) {
+	if err := f.sink.Append(ctx, row.AuthorID, env); err != nil {
+		if !errors.Is(err, ErrDuplicateFire) {
+			return 0, err
+		}
+	}
+	return f.store.FireAndMark(ctx, row.ID, env)
+}
 
 // ---------------------------------------------------------------------
 // fakeReviver: records EnsureLive calls, answers with a scriptable error.

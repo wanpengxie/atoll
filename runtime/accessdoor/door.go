@@ -3,33 +3,39 @@ package accessdoor
 import (
 	"context"
 	"errors"
+	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // door is the bare invoker — sealed inside the package (New hands out only a
 // Minter, mirroring harness never handing out the bare chain). It holds Deps and
 // runs the decision tree; the welded caller arrives as a parameter, never read
 // off the wire.
-type door struct{ deps Deps }
+type door struct {
+	deps         Deps
+	resourceGate sync.Mutex
+}
 
 // resolveFileRoute computes OpRead/OpWrite(file)'s (and, via query.go's
 // create, a with_content create's write) byte-access authorization product
-// (期11 spec §3.4/§5 item 0): same-daemon (caller's Membership.Lookup Host
+// (期11 spec §3.4/§5 item 0): same-daemon (caller's authoritative Placement.Host
 // equals placementDaemonID) → Local; else → mint a lane Token via
 // Deps.LaneControl. reservationID is "" for a plain OpRead/OpWrite (§3.5:
 // no outbox involvement — OpWrite never fires Committed) and the
 // just-reserved id for a with-content create's write route (§1.7).
 func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, placementDaemonID, coord string, mode access.Operation, reservationID string, dir bool) (*FileRoute, error) {
-	if d.deps.Membership == nil {
-		return nil, errors.New("accessdoor: file byte route needs Deps.Membership (Lookup)")
-	}
-	host, found, err := d.deps.Membership.Lookup(ctx, caller)
+	row, found, err := d.deps.Authority.LookupActive(ctx, caller)
 	if err != nil {
 		return nil, err
+	}
+	host := ""
+	if found && row.Placement.Kind == storespec.PlacementDaemon {
+		host = row.Placement.Host
 	}
 	// Same-daemon (Local) resolves coord itself via the daemon-side
 	// control-RPC ResolveCoord step (platform/internal/link) — never a lane
@@ -108,12 +114,18 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		return Outcome{}, err
 	}
 	if !allowed {
+		allowed, err = d.deps.Overlay.ActorAllows(ctx, caller, id, op)
+		if err != nil {
+			return Outcome{}, err
+		}
+	}
+	if !allowed {
 		mAllow, err := d.deps.Registry.MembersAllow(ctx, id, op)
 		if err != nil {
 			return Outcome{}, err
 		}
 		if mAllow {
-			isM, err := d.deps.Membership.IsMember(ctx, caller) // late-binding: resolved at check time
+			_, isM, err := d.deps.Authority.LookupActive(ctx, caller)
 			if err != nil {
 				return Outcome{}, err
 			}
@@ -199,7 +211,17 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 				}
 			}
 		}
-		if serr := d.deps.Registry.SetGrant(ctx, id, *grant); serr != nil {
+		world, found, werr := d.deps.Authority.WorldOf(ctx, grant.Grantee)
+		if werr != nil {
+			return Outcome{}, werr
+		}
+		var serr error
+		if grant.GranteeKind == access.GranteeActor && found && world == storespec.WorldRun {
+			serr = d.deps.Overlay.SetGrant(ctx, id, *grant)
+		} else {
+			serr = d.deps.Registry.SetGrant(ctx, id, *grant)
+		}
+		if serr != nil {
 			return executeFailure(ctx, serr) // executor-authored (reason.go)
 		}
 		return Outcome{}, nil

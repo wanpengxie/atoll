@@ -9,6 +9,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // fakeRegistry is a configurable resourcespec.Registry stub. Every method reads a
@@ -70,6 +71,7 @@ type createCall struct {
 	creator                           actor.ActorID
 	placementDaemonID, placementCoord string
 	initial                           []byte
+	birth                             resourcespec.ResourceBirthPlan
 }
 
 func (r *fakeRegistry) Resolve(ctx context.Context, id resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
@@ -77,12 +79,12 @@ func (r *fakeRegistry) Resolve(ctx context.Context, id resource.ResourceID) (res
 	return r.resolveMeta, r.resolveExists, r.resolveErr
 }
 
-func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte) error {
+func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, birth ...resourcespec.ResourceBirthPlan) error {
 	r.calls++
 	r.createCalls = append(r.createCalls, createCall{
 		id: id, kind: kind, creator: creator,
 		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
-		initial: initial,
+		initial: initial, birth: firstBirth(birth),
 	})
 	return r.createErr
 }
@@ -91,11 +93,11 @@ func (r *fakeRegistry) Create(ctx context.Context, id resource.ResourceID, kind 
 // routing (door.create's file-kind branch, query.go) — canned per-call so a
 // test can drive the reservation/commit sequence a content-less file create
 // runs through.
-func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool) (string, error) {
+func (r *fakeRegistry) ReserveCreate(ctx context.Context, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, dir bool, birth ...resourcespec.ResourceBirthPlan) (string, error) {
 	r.calls++
 	r.reserveCreateCalls = append(r.reserveCreateCalls, createCall{
 		id: id, kind: kind, creator: creator,
-		placementDaemonID: placementDaemonID, placementCoord: placementCoord,
+		placementDaemonID: placementDaemonID, placementCoord: placementCoord, birth: firstBirth(birth),
 	})
 	if r.reserveCreateErr != nil {
 		return "", r.reserveCreateErr
@@ -221,16 +223,86 @@ func (d *fakeDriver) Delete(ctx context.Context, id resource.ResourceID) error {
 // no membership") asserts it stays zero.
 type fakeMembership struct {
 	isMember bool
+	world    storespec.ActorWorld
 	err      error
 	calls    int
 
 	// lookupHost/lookupFound/lookupErr back Lookup (§4.3 placement chain ①'s
 	// creator-affinity read). lookupCalls records every caller id Lookup was
 	// asked about.
-	lookupHost  string
-	lookupFound bool
-	lookupErr   error
-	lookupCalls []actor.ActorID
+	lookupHost    string
+	lookupFound   bool
+	lookupErr     error
+	lookupCalls   []actor.ActorID
+	authorVerdict storespec.AuthorVerdict
+}
+
+type fakeGrantOverlay struct {
+	allows bool
+	err    error
+	grants []access.Grant
+}
+
+func (o *fakeGrantOverlay) ActorAllows(context.Context, actor.ActorID, resource.ResourceID, access.Operation) (bool, error) {
+	return o.allows, o.err
+}
+func (o *fakeGrantOverlay) SetGrant(_ context.Context, _ resource.ResourceID, grant access.Grant) error {
+	o.grants = append(o.grants, grant)
+	return o.err
+}
+func (o *fakeGrantOverlay) EndBatch([]actor.ActorID) {}
+
+func (m *fakeMembership) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	m.calls++
+	m.lookupCalls = append(m.lookupCalls, id)
+	if m.err != nil {
+		return storespec.ActorControlRow{}, false, m.err
+	}
+	if m.lookupErr != nil {
+		return storespec.ActorControlRow{}, false, m.lookupErr
+	}
+	if !m.isMember && !m.lookupFound {
+		return storespec.ActorControlRow{}, false, nil
+	}
+	p := storespec.NewServerPlacement()
+	if m.lookupHost != "" {
+		p, _ = storespec.NewDaemonPlacement(m.lookupHost)
+	}
+	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1, Placement: p}, true, nil
+}
+
+func (m *fakeMembership) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+	return nil, nil
+}
+func (m *fakeMembership) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	if m.err != nil {
+		return 0, false, m.err
+	}
+	if !m.isMember && !m.lookupFound {
+		return 0, false, nil
+	}
+	world := m.world
+	if world == 0 {
+		world = storespec.WorldDurable
+	}
+	return world, true, nil
+}
+func (m *fakeMembership) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	if m.authorVerdict != 0 {
+		return m.authorVerdict, nil
+	}
+	return storespec.AuthorOK, nil
+}
+
+func accessStamp(id actor.ActorID) storespec.AuthorStamp {
+	return storespec.AuthorStamp{ID: id, BirthVersion: 1}
+}
+
+func firstBirth(plans []resourcespec.ResourceBirthPlan) resourcespec.ResourceBirthPlan {
+	if len(plans) == 0 {
+		return resourcespec.ResourceBirthPlan{}
+	}
+	return plans[0]
 }
 
 func (m *fakeMembership) IsMember(ctx context.Context, id actor.ActorID) (bool, error) {
@@ -374,10 +446,11 @@ func metaKV() resourcespec.ResourceMeta {
 // KindKV, the day-1 kind Resolve returns.
 func newDoor(reg *fakeRegistry, drv *fakeDriver, mem *fakeMembership) *door {
 	return &door{deps: Deps{
-		Registry:   reg,
-		Drivers:    DriverTable{resourcespec.KindKV: drv},
-		Membership: mem,
-		State:      &fakeStateStore{},
+		Registry:  reg,
+		Drivers:   DriverTable{resourcespec.KindKV: drv},
+		Authority: mem,
+		Overlay:   &fakeGrantOverlay{},
+		State:     &fakeStateStore{},
 	}}
 }
 
@@ -399,9 +472,10 @@ func newFileDoor(reg *fakeRegistry, drv *fakeDriver, mem *fakeMembership, mounts
 // collaborator is the point of the assertion.
 func newStateDoor(st *fakeStateStore, reg *fakeRegistry, mem *fakeMembership) *door {
 	return &door{deps: Deps{
-		Registry:   reg,
-		Drivers:    DriverTable{resourcespec.KindKV: &fakeDriver{}},
-		Membership: mem,
-		State:      st,
+		Registry:  reg,
+		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}},
+		Authority: mem,
+		Overlay:   &fakeGrantOverlay{},
+		State:     st,
 	}}
 }

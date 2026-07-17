@@ -2,12 +2,14 @@ package home
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -43,10 +45,9 @@ func (h *Home) backoffGate(id actor.ActorID, now time.Time) (until time.Time, he
 	return time.Time{}, false
 }
 
-// recordBuildFailure advances id's build-failure backoff one step: exponential from
-// reviveBuildBackoffBase, capped at reviveBuildBackoffMax. Only a deterministic
-// BuildFailure feeds it — a sealed runtime or a transient fault is not a build
-// verdict and leaves the ladder untouched (the caller filters before calling).
+// recordBuildFailure advances id's activation-failure backoff one step:
+// deterministic factory failures and involuntary local-body deaths share the
+// same exponential ladder. A successful carrier publication clears it.
 func (h *Home) recordBuildFailure(id actor.ActorID, now time.Time) {
 	h.reviveMu.Lock()
 	entry := h.reviveBackoff[id]
@@ -58,6 +59,28 @@ func (h *Home) recordBuildFailure(id actor.ActorID, now time.Time) {
 	entry.next = now.Add(delay)
 	h.reviveBackoff[id] = entry
 	h.reviveMu.Unlock()
+	h.pokeReconcileAfter(delay)
+}
+
+func (h *Home) pokeReconcileAfter(delay time.Duration) {
+	if delay <= 0 {
+		h.pokeReconcile()
+		return
+	}
+	go func() {
+		timer := time.NewTimer(delay)
+		defer timer.Stop()
+		if h.closeDone == nil {
+			<-timer.C
+			h.pokeReconcile()
+			return
+		}
+		select {
+		case <-timer.C:
+			h.pokeReconcile()
+		case <-h.closeDone:
+		}
+	}()
 }
 
 // fireSink is the platform realisation of schedule.FireSink: the time engine's
@@ -70,10 +93,10 @@ func (h *Home) recordBuildFailure(id actor.ActorID, now time.Time) {
 // still a member); the kind rides the minted pen exactly as at admission, so a
 // sender-kind consumer sees the same value a live cell's own write would carry.
 type fireSink struct {
-	minter   harness.Minter
-	registry storespec.Registry
-	rt       *actorrt.Runtime
-	chID     channelpkg.ID
+	minter    harness.Minter
+	authority storespec.ActorAuthority
+	rt        *actorrt.Runtime
+	chID      channelpkg.ID
 }
 
 // Append translates harness.WriteResult into the FireSink tri-state contract: a
@@ -86,7 +109,7 @@ type fireSink struct {
 // oracle (the durable registry, G10-guarded by IsActive) only if no live
 // embodiment answers. This order is not arbitrary: an incarnation-bind fire's
 // author is IsLive-checked by the caller immediately before Append runs (a
-// fork child is NEVER a durable member — it has no registry row at all), while
+// fork child is run-world only — it has no durable identity row), while
 // an identity-bind fire's author was just revived-or-already-live by the
 // engine's wake-first Reviver step, so it too is normally live by the time
 // Append runs. Either way, a live embodiment's own kind is the freshest,
@@ -101,14 +124,14 @@ func (s fireSink) Append(ctx context.Context, author actor.ActorID, env *message
 	if stat, ok := s.rt.Stat(author); ok {
 		kind = stat.Kind
 	} else {
-		rec, ok, err := s.registry.Lookup(ctx, author)
+		rec, ok, err := s.authority.LookupActive(ctx, author)
 		if err != nil {
 			return err // transient: the engine leaves the row for the next tick.
 		}
-		if !ok || !rec.IsActive() {
-			// The author is not a LIVE durable member — its kind must not be welded.
+		if !ok {
+			// The author is not a live identity — its kind must not be welded.
 			//   !ok: a poison row whose author never existed (includes a fork child:
-			//   it is never a durable member, so a dead fork child falls straight
+			//   it is never durable, so a dead fork child falls straight
 			//   through to here — the quiet, deterministic drop G11's death-race
 			//   guard relies on).
 			//   !IsActive: the author was deregistered AFTER the engine snapshotted
@@ -124,7 +147,14 @@ func (s fireSink) Append(ctx context.Context, author actor.ActorID, env *message
 		}
 		kind = rec.Kind
 	}
-	pen := s.minter.Mint(author, kind, s.chID)
+	row, ok, authorityErr := s.authority.LookupActive(ctx, author)
+	if authorityErr != nil {
+		return authorityErr
+	}
+	if !ok {
+		return schedule.FireRejected{Reason: "author_not_member", Detail: string(author)}
+	}
+	pen := s.minter.Mint(author, kind, s.chID, row.CurrentDeclVersion)
 	res, err := pen.Write(ctx, env)
 	if err != nil {
 		return err // transient Go error (store/transport fault): retain and retry.
@@ -153,7 +183,7 @@ type homeReviver struct{ h *Home }
 
 // EnsureLive activates id if absent. The two-class error contract mirrors
 // FireSink: a structurally unrevivable author (no builder wired, class not in the
-// table, id not a durable member) is a ReviveRejected poison row the engine
+// table, id no longer active) is a ReviveRejected poison row the engine
 // disposes of; a transient registry fault is a plain error the engine retries.
 // Everything from the placement filter through the post-build straddle recheck
 // runs inside the shared activateOne core (§1.1); this is its reviver 翻译器
@@ -181,14 +211,14 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 	// activateOne, whose own ①IsActive 防御复判 is this path's REAL (not merely
 	// defensive) not-a-member detector — DoD §4.2's 3-site IsActive() closure
 	// counts on EnsureLive itself making no separate IsActive() call.
-	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
+	row, ok, err := h.controlIndex.LookupActive(ctx, id)
 	if err != nil {
 		return fmt.Errorf("platform: revive lookup %s: %w", id, err) // transient
 	}
 	if !ok {
 		return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
 	}
-	switch v := h.activateOne(ctx, rec); v.kind {
+	switch v := h.activateOne(ctx, row); v.kind {
 	case actEmbodied:
 		h.clearReviveBackoff(id)
 		return nil
@@ -205,6 +235,8 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		// identity — the SAME wake fires normally once the port installs
 		// (already-live fast path above) or the author detaches back home.
 		h.logReviveAttached(id, v.host)
+		_ = h.liveness.MarkFiredWake(id)
+		h.pokeReconcile()
 		return fmt.Errorf("platform: revive %s: attached to host %q", id, v.host) // transient
 	case actBackoffHeld:
 		return fmt.Errorf("platform: revive %s: build backoff until %s", id, v.until)
@@ -214,6 +246,12 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		h.logger.Info("platform.revive.runtime_sealed", "channel", string(h.channelID), "actor", string(id))
 		return v.err // transient
 	case actBuildFailed:
+		var buildFailure *actorrt.BuildFailure
+		if errors.As(v.err, &buildFailure) {
+			if panicErr, ok := buildFailure.PanicValue.(error); ok && errors.Is(panicErr, accessdoor.ErrStateHandleUnavailable) {
+				return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
+			}
+		}
 		h.logger.Error("platform.revive.build_failed", "channel", string(h.channelID), "actor", string(id), "error", v.err)
 		return v.err // transient
 	case actCancelled:
@@ -233,6 +271,8 @@ func (r homeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
 		// race, closed by Attach's own replace semantics, never by this recheck
 		// (see verifyPostBuild's doc).
 		return schedule.ReviveRejected{Reason: "not_a_member", Detail: string(id)}
+	case actRecheckStale:
+		return fmt.Errorf("platform: revive %s: declaration changed during build", id)
 	}
 	return nil // unreachable: the switch above is exhaustive over activationOutcome
 }

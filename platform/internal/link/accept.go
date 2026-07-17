@@ -32,10 +32,11 @@ import (
 var errUndeclaredActor = errors.New("link: actor not in attach declarations")
 
 type declarationSnapshotEntry struct {
-	Kind     actor.Kind
-	Binding  actor.Binding
-	Epoch    int64
-	DaemonID string
+	Kind         actor.Kind
+	Binding      actor.Binding
+	Version      int64
+	EnsureTicket string
+	DaemonID     string
 }
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -63,8 +64,7 @@ type Acceptor struct {
 	access       accessdoor.AccessMinter
 	sched        schedule.Minter
 	runtime      *actorrt.Runtime
-	registry     storespec.Registry
-	composition  storespec.CompositionReader
+	authority    storespec.ActorAuthority
 	declarations DeclarationCoordinator
 	channelID    channel.ID
 	logger       *slog.Logger
@@ -104,6 +104,9 @@ type Acceptor struct {
 	daemonAuthority DaemonAuthority
 	actorLock       func(actor.ActorID) func()
 	portIndex       PortIndex
+	idleRequest     func(context.Context, actorrt.Incarnation) (bool, error)
+	spawnRequest    func(context.Context, actorrt.Incarnation, int64, string, actorrt.ForkSpec) (actor.ActorID, error)
+	endRequest      func(context.Context, actorrt.Incarnation, int64, actor.ActorID, string) (func(), error)
 	nextPortOwner   atomic.Uint64
 
 	// pendingAlloc correlates AllocRequest (home→daemon) with its AllocReply —
@@ -174,6 +177,7 @@ type linkHandle struct {
 	invalidate   func()
 	waitWorkers  func()
 	takePorts    func() []actorrt.Incarnation
+	expirePorts  func()
 	quietPort    func(actorrt.Incarnation)
 	closeCarrier func()
 	sendControl  func([]byte) error
@@ -196,6 +200,25 @@ func (h *linkHandle) closeQuietly() {
 	})
 }
 
+func (h *linkHandle) closeExpired() {
+	if h == nil {
+		return
+	}
+	h.closeOnce.Do(func() {
+		// A lease verdict is stronger than an ordinary transport EOF. Seal and
+		// join actor-stream admissions first so every port owned by this link is
+		// visible to ExpireOwner, then publish restart intent before the carrier
+		// close produces its late per-port down edges.
+		h.gate.seal()
+		h.invalidate()
+		h.waitWorkers()
+		if h.expirePorts != nil {
+			h.expirePorts()
+		}
+		h.closeCarrier()
+	})
+}
+
 func (h *linkHandle) send(raw []byte) error {
 	if h == nil || h.sendControl == nil {
 		return errors.New("link: connection is closed")
@@ -213,13 +236,10 @@ type Config struct {
 	// Same source the cell path draws from (cs.Access, the schedule engine Minter),
 	// so a daemon-hosted cell's off-log / timer capability is behaviourally
 	// identical to a local one (transport neutrality).
-	Access   accessdoor.AccessMinter
-	Schedule schedule.Minter
-	Runtime  *actorrt.Runtime
-	// Registry and Composition are required read authorities used to revalidate
-	// every actor handshake against the just-committed declaration snapshot.
-	Registry     storespec.Registry
-	Composition  storespec.CompositionReader
+	Access       accessdoor.AccessMinter
+	Schedule     schedule.Minter
+	Runtime      *actorrt.Runtime
+	Authority    storespec.ActorAuthority
 	Declarations DeclarationCoordinator
 	ChannelID    channel.ID
 	Logger       *slog.Logger
@@ -242,6 +262,9 @@ type Config struct {
 	DaemonAuthority    DaemonAuthority
 	ActorLock          func(actor.ActorID) func()
 	PortIndex          PortIndex
+	IdleRequest        func(context.Context, actorrt.Incarnation) (bool, error)
+	SpawnRequest       func(context.Context, actorrt.Incarnation, int64, string, actorrt.ForkSpec) (actor.ActorID, error)
+	EndRequest         func(context.Context, actorrt.Incarnation, int64, actor.ActorID, string) (func(), error)
 }
 
 type PlanProvider interface {
@@ -252,7 +275,7 @@ type PlanProvider interface {
 // transaction and body actions with actor lifecycle gates, returning only the
 // declarations that may be published to the link snapshot.
 type DeclarationCoordinator interface {
-	ApplyComputeDeclaration(context.Context, PortOwner, string, []storespec.ComputeDeclaration) ([]storespec.ComputeDeclaration, error)
+	ValidateAttachment(context.Context, PortOwner, string, []storespec.ComputeDeclaration) ([]storespec.ComputeDeclaration, error)
 }
 
 // DaemonAuthority holds the app-owned per-daemon keyed lock while it freshly
@@ -271,6 +294,7 @@ type PortIndex interface {
 	Remove(PortOwner, actorrt.Incarnation)
 	Take(PortOwner, actor.ActorID) (actorrt.Incarnation, bool)
 	TakeOwner(PortOwner) []actorrt.Incarnation
+	ExpireOwner(PortOwner)
 }
 
 // NewAcceptor builds an Acceptor only from a complete authority set.
@@ -280,10 +304,8 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 		return nil, errors.New("link: runtime is required")
 	case cfg.Declarations == nil:
 		return nil, errors.New("link: declaration coordinator is required")
-	case cfg.Composition == nil:
-		return nil, errors.New("link: composition reader is required")
-	case cfg.Registry == nil:
-		return nil, errors.New("link: registry is required")
+	case cfg.Authority == nil:
+		return nil, errors.New("link: actor authority is required")
 	case cfg.DaemonAuthority == nil:
 		return nil, errors.New("link: daemon authority is required")
 	case cfg.ActorLock == nil:
@@ -301,8 +323,7 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 		access:          cfg.Access,
 		sched:           cfg.Schedule,
 		runtime:         cfg.Runtime,
-		registry:        cfg.Registry,
-		composition:     cfg.Composition,
+		authority:       cfg.Authority,
 		declarations:    cfg.Declarations,
 		channelID:       cfg.ChannelID,
 		logger:          logger,
@@ -318,6 +339,9 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 		daemonAuthority: cfg.DaemonAuthority,
 		actorLock:       cfg.ActorLock,
 		portIndex:       cfg.PortIndex,
+		idleRequest:     cfg.IdleRequest,
+		spawnRequest:    cfg.SpawnRequest,
+		endRequest:      cfg.EndRequest,
 		pendingAlloc:    newPendingReplies[AllocReply](),
 		pendingReclaim:  newPendingReplies[ReclaimReply](),
 		lane:            newLaneState(),
@@ -624,7 +648,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 
 	// One pointer-shaped declaration snapshot carries every freshness field. Each
 	// successful declaration transaction publishes it wholesale; readers can
-	// never combine allowed from one generation with kind/epoch from another.
+	// never combine allowed from one generation with kind/version from another.
 	var (
 		mu       sync.Mutex
 		declared = map[actor.ActorID]declarationSnapshotEntry{}
@@ -707,10 +731,44 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			defer cancel()
 			// Attach (substrate) owns the conn from here: on failure it closes the
 			// stream itself (single owner), so we never double-close here.
+			var birthVersion int64
 			sinks := actorrt.Sinks{
-				Emit:     a.emitSink(kindOf),
-				Access:   a.accessSink(),
-				Schedule: a.scheduleSink(),
+				Emit:     a.emitSink(kindOf, func() int64 { return birthVersion }),
+				Access:   a.accessSink(func() int64 { return birthVersion }),
+				Schedule: a.scheduleSink(func() int64 { return birthVersion }),
+				Idle:     a.idleRequest,
+				Spawn: func(ctx context.Context, inc actorrt.Incarnation, request ipc.SpawnPayload) ipc.SpawnAckPayload {
+					if a.spawnRequest == nil {
+						code, msg := ipc.EncodeError(errors.New("link: lifecycle spawn unavailable"))
+						return ipc.SpawnAckPayload{ErrorCode: code, ErrorMessage: msg}
+					}
+					var placement *storespec.Placement
+					if request.PlacementKind != "" || request.PlacementHost != "" {
+						p := storespec.Placement{Kind: storespec.PlacementKind(request.PlacementKind), Host: request.PlacementHost}
+						placement = &p
+					}
+					child, err := a.spawnRequest(ctx, inc, birthVersion, request.Nonce, actorrt.ForkSpec{
+						Kind: request.Kind, Class: request.Class, NameHint: request.NameHint,
+						Config: append([]byte(nil), request.Config...), Placement: placement,
+					})
+					if err != nil {
+						code, msg := ipc.EncodeError(err)
+						return ipc.SpawnAckPayload{ErrorCode: code, ErrorMessage: msg}
+					}
+					return ipc.SpawnAckPayload{ChildID: child}
+				},
+				End: func(ctx context.Context, inc actorrt.Incarnation, request ipc.EndPayload) (ipc.EndAckPayload, func()) {
+					if a.endRequest == nil {
+						code, msg := ipc.EncodeError(errors.New("link: lifecycle end unavailable"))
+						return ipc.EndAckPayload{ErrorCode: code, ErrorMessage: msg}, nil
+					}
+					after, err := a.endRequest(ctx, inc, birthVersion, request.Target, request.Reason)
+					if err != nil {
+						code, msg := ipc.EncodeError(err)
+						return ipc.EndAckPayload{ErrorCode: code, ErrorMessage: msg}, nil
+					}
+					return ipc.EndAckPayload{}, after
+				},
 			}
 			var (
 				writerPin        *incumbentPin
@@ -752,6 +810,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 					releaseOuter()
 					return "", err
 				}
+				birthVersion = meta.Version
 				return id, nil
 			}
 			// Parse and authenticate before taking portMu. This is the ordering seam
@@ -922,6 +981,11 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			defer portMu.Unlock()
 			return a.portIndex.TakeOwner(portOwner)
 		},
+		expirePorts: func() {
+			portMu.Lock()
+			defer portMu.Unlock()
+			a.portIndex.ExpireOwner(portOwner)
+		},
 		quietPort: a.runtime.DespawnQuiet,
 		closeCarrier: func() {
 			_ = lc.Close()
@@ -950,7 +1014,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	done := make(chan struct{})
 	go lease.Watch(done, func() {
 		a.logger.Info("link.lease_expired", "channel", string(a.channelID))
-		lc.kill("lease_expired", nil)
+		handle.closeExpired()
 	})
 
 	// Acceptor Close tears the link down; quiet-stop this link's ports FIRST so the
@@ -995,21 +1059,15 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 
 func (a *Acceptor) resolveFreshHandshake(ctx context.Context, hp ipc.HandshakePayload, meta declarationSnapshotEntry) (actor.ActorID, error) {
 	id := actor.ActorID(hp.LeaseID)
-	if hp.Epoch != meta.Epoch {
-		return "", fmt.Errorf("link: stale handshake epoch: handshake=%d declaration=%d", hp.Epoch, meta.Epoch)
-	}
-	row, found, err := a.composition.LookupComposition(ctx, id)
-	if err != nil {
-		return "", fmt.Errorf("link: composition lookup: %w", err)
+	if hp.Version != meta.Version || hp.EnsureTicket != meta.EnsureTicket {
+		return "", fmt.Errorf("link: stale handshake version: handshake=%d declaration=%d", hp.Version, meta.Version)
 	}
 	canonical := actor.BindingRuntimeInboundViaRelay
-	if !found || row.Placement != storespec.PlacementDaemon || row.DesiredHost != meta.DaemonID ||
-		row.Epoch != meta.Epoch || meta.Binding != canonical {
-		return "", errors.New("link: declaration/handshake no longer matches composition")
-	}
-	rec, found, err := a.registry.Lookup(ctx, id)
-	if err != nil || !found || !rec.IsActive() || rec.Host != meta.DaemonID || rec.Kind != meta.Kind || rec.Binding != canonical {
-		return "", errors.New("link: declaration/handshake no longer matches active registry")
+	row, found, err := a.authority.LookupActive(ctx, id)
+	if err != nil || !found || row.Kind != meta.Kind || row.CurrentDeclVersion != meta.Version ||
+		row.Placement.Kind != storespec.PlacementDaemon || row.Placement.Host != meta.DaemonID ||
+		row.Binding != canonical || meta.Binding != canonical {
+		return "", errors.New("link: declaration/handshake no longer matches actor authority")
 	}
 	return id, nil
 }
@@ -1057,16 +1115,16 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 
 	input := make([]storespec.ComputeDeclaration, 0, len(att.Declarations))
 	for _, d := range att.Declarations {
-		input = append(input, storespec.ComputeDeclaration{ActorID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Epoch: d.Epoch})
+		input = append(input, storespec.ComputeDeclaration{ActorID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Version: d.Version, EnsureTicket: d.EnsureTicket})
 	}
-	allowed, err := a.declarations.ApplyComputeDeclaration(ctx, portOwner, computeID, input)
+	allowed, err := a.declarations.ValidateAttachment(ctx, portOwner, computeID, input)
 	if err != nil {
 		a.sendReply(lc, requestID, AttachReply{Accepted: false, Reason: "apply_declaration: " + err.Error()})
 		return "", false
 	}
 	admitted := make([]Declaration, 0, len(allowed))
 	for _, d := range allowed {
-		admitted = append(admitted, Declaration{ActorID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Epoch: d.Epoch})
+		admitted = append(admitted, Declaration{ActorID: d.ActorID, Kind: d.Kind, Binding: d.Binding, Version: d.Version, EnsureTicket: d.EnsureTicket})
 	}
 
 	// Build the FULL admitted set fresh, then swap it in under mu in one step — a
@@ -1076,7 +1134,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 	// dropped above, so they never enter the allow-set (the 问① OpenStream gate).
 	newDeclared := make(map[actor.ActorID]declarationSnapshotEntry, len(admitted))
 	for _, d := range admitted {
-		newDeclared[d.ActorID] = declarationSnapshotEntry{Kind: d.Kind, Binding: d.Binding, Epoch: d.Epoch, DaemonID: computeID}
+		newDeclared[d.ActorID] = declarationSnapshotEntry{Kind: d.Kind, Binding: d.Binding, Version: d.Version, EnsureTicket: d.EnsureTicket, DaemonID: computeID}
 	}
 	mu.Lock()
 	*declared = newDeclared
@@ -1111,7 +1169,7 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 
 // validateAttachEnvelope is the parse-level gate: it runs before writer
 // admission and before any registry/store action. Duplicate ids make the whole
-// declaration ambiguous (kind/binding/epoch would otherwise be last-wins), so
+// declaration ambiguous (kind/binding/version would otherwise be last-wins), so
 // the frame is rejected atomically rather than partially normalized.
 func validateAttachEnvelope(att *AttachRequest) string {
 	if att == nil || att.Proto < 2 {
@@ -1384,7 +1442,7 @@ type StorageHostControl interface {
 // message-plane parity with the cell path, so a replaced/torn-down port's
 // in-flight emit is fenced with ErrWriterNotLive instead of authoring truth on a
 // dead incarnation's behalf.
-func (a *Acceptor) emitSink(kindOf func(actor.ActorID) (actor.Kind, bool)) actorrt.EmitSink {
+func (a *Acceptor) emitSink(kindOf func(actor.ActorID) (actor.Kind, bool), birthVersion func() int64) actorrt.EmitSink {
 	return func(ctx context.Context, inc actorrt.Incarnation, env *message.Envelope) (ipc.EmitResult, error) {
 		id := inc.ID()
 		kind, ok := kindOf(id)
@@ -1396,7 +1454,7 @@ func (a *Acceptor) emitSink(kindOf func(actor.ActorID) (actor.Kind, bool)) actor
 			// the harness sender gate); the error relays back as the emit ack's Err.
 			return ipc.EmitResult{}, fmt.Errorf("link: emit from %q has no cached declaration kind (attach missing)", id)
 		}
-		res, err := NewLivePen(a.minter.Mint(id, kind, a.channelID), inc, a.runtime).Write(ctx, env)
+		res, err := NewLivePen(a.minter.Mint(id, kind, a.channelID, birthVersion()), inc, a.runtime).Write(ctx, env)
 		// Mirror EVERY verdict field of the harness WriteResult onto the wire — the
 		// writer contract must not downgrade across the link (a remote cell's
 		// Respond observes the same verdict a local cell's would).
@@ -1427,7 +1485,7 @@ func (a *Acceptor) emitSink(kindOf func(actor.ActorID) (actor.Kind, bool)) actor
 // only, Stat or List by QueryKind). All three share this ONE ipc KindAccess
 // frame kind — the sum lives inside the payload, the frame closed set is
 // untouched.
-func (a *Acceptor) accessSink() actorrt.RelaySink {
+func (a *Acceptor) accessSink(birthVersion func() int64) actorrt.RelaySink {
 	return func(ctx context.Context, inc actorrt.Incarnation, payload []byte) ([]byte, error) {
 		if a.access == nil {
 			return nil, errors.New("link: access plane not wired on this home")
@@ -1437,14 +1495,15 @@ func (a *Acceptor) accessSink() actorrt.RelaySink {
 			return nil, fmt.Errorf("link: access payload decode: %w", err)
 		}
 		id := inc.ID()
+		stamp := storespec.AuthorStamp{ID: id, BirthVersion: birthVersion()}
 
 		switch req.Kind {
 		case accessKindInvocation:
-			return a.accessInvocation(ctx, inc, id, req)
+			return a.accessInvocation(ctx, inc, stamp, req)
 		case accessKindCreate:
-			return a.accessCreate(ctx, inc, id, req)
+			return a.accessCreate(ctx, inc, stamp, req)
 		case accessKindQuery:
-			return a.accessQuery(ctx, inc, id, req)
+			return a.accessQuery(ctx, inc, stamp, req)
 		default:
 			return nil, fmt.Errorf("link: access unknown request kind %q", req.Kind)
 		}
@@ -1453,7 +1512,7 @@ func (a *Acceptor) accessSink() actorrt.RelaySink {
 
 // accessInvocation handles the pre-existing Invoke arm — state OR
 // channel-scoped, selected by Scope.
-func (a *Acceptor) accessInvocation(ctx context.Context, inc actorrt.Incarnation, id actor.ActorID, req accessRequest) ([]byte, error) {
+func (a *Acceptor) accessInvocation(ctx context.Context, inc actorrt.Incarnation, stamp storespec.AuthorStamp, req accessRequest) ([]byte, error) {
 	if req.Inv == nil {
 		return nil, errors.New("link: access invocation request missing its inv payload")
 	}
@@ -1465,9 +1524,9 @@ func (a *Acceptor) accessInvocation(ctx context.Context, inc actorrt.Incarnation
 	var raw accessdoor.AccessHandle
 	switch req.Scope {
 	case accessScopeChannel:
-		raw = a.access.Mint(id)
+		raw = a.access.Mint(stamp)
 	case accessScopeState:
-		raw = a.access.MintState(id)
+		raw = a.access.MintState(stamp)
 	default:
 		return nil, fmt.Errorf("link: access unknown scope %q", req.Scope)
 	}
@@ -1481,11 +1540,11 @@ func (a *Acceptor) accessInvocation(ctx context.Context, inc actorrt.Incarnation
 // accessCreate handles the Create arm — structurally channel-scoped only
 // (期11 spec §3.3: "Create/Query 天然只属资源面"), so it always Mints (never
 // MintState) and carries no self-reportable caller field at all.
-func (a *Acceptor) accessCreate(ctx context.Context, inc actorrt.Incarnation, id actor.ActorID, req accessRequest) ([]byte, error) {
+func (a *Acceptor) accessCreate(ctx context.Context, inc actorrt.Incarnation, stamp storespec.AuthorStamp, req accessRequest) ([]byte, error) {
 	if req.Create == nil {
 		return nil, errors.New("link: access create request missing its create payload")
 	}
-	rh := NewLiveResourceAccess(a.access.Mint(id), inc, a.runtime)
+	rh := NewLiveResourceAccess(a.access.Mint(stamp), inc, a.runtime)
 	outcome, err := rh.Create(ctx, req.Create.Resource, req.Create.Spec, req.Create.Initial)
 	if err != nil {
 		return nil, err
@@ -1495,11 +1554,11 @@ func (a *Acceptor) accessCreate(ctx context.Context, inc actorrt.Incarnation, id
 
 // accessQuery handles the Query arm (Stat or List, by QueryKind) — same
 // channel-scoped-only structural rule as Create.
-func (a *Acceptor) accessQuery(ctx context.Context, inc actorrt.Incarnation, id actor.ActorID, req accessRequest) ([]byte, error) {
+func (a *Acceptor) accessQuery(ctx context.Context, inc actorrt.Incarnation, stamp storespec.AuthorStamp, req accessRequest) ([]byte, error) {
 	if req.Query == nil {
 		return nil, errors.New("link: access query request missing its query payload")
 	}
-	rh := NewLiveResourceAccess(a.access.Mint(id), inc, a.runtime)
+	rh := NewLiveResourceAccess(a.access.Mint(stamp), inc, a.runtime)
 	switch req.Query.QueryKind {
 	case accessQueryStat:
 		res, err := rh.Stat(ctx, req.Query.Resource)
@@ -1526,7 +1585,7 @@ func (a *Acceptor) accessQuery(ctx context.Context, inc actorrt.Incarnation, id 
 // binds inc.ID() as author — the wire never self-reports it) and wrapped in a
 // liveSchedule over the port's OWN Incarnation (the time-plane port death gate).
 // The CorrelationID inside ScheduleReq crosses the wire intact.
-func (a *Acceptor) scheduleSink() actorrt.RelaySink {
+func (a *Acceptor) scheduleSink(birthVersion func() int64) actorrt.RelaySink {
 	return func(ctx context.Context, inc actorrt.Incarnation, payload []byte) ([]byte, error) {
 		if a.sched == nil {
 			return nil, errors.New("link: schedule plane not wired on this home")
@@ -1535,7 +1594,7 @@ func (a *Acceptor) scheduleSink() actorrt.RelaySink {
 		if err := json.Unmarshal(payload, &req); err != nil {
 			return nil, fmt.Errorf("link: schedule payload decode: %w", err)
 		}
-		h := NewLiveSchedule(a.sched.Mint(inc.ID()), inc, a.runtime)
+		h := NewLiveSchedule(a.sched.Mint(storespec.AuthorStamp{ID: inc.ID(), BirthVersion: birthVersion()}), inc, a.runtime)
 		switch req.Method {
 		case scheduleMethodSchedule:
 			tid, err := h.Schedule(ctx, req.Req)
@@ -1545,6 +1604,8 @@ func (a *Acceptor) scheduleSink() actorrt.RelaySink {
 			return json.Marshal(scheduleResponse{ID: tid})
 		case scheduleMethodCancel:
 			return nil, h.Cancel(ctx, req.ID)
+		case scheduleMethodAck:
+			return nil, h.Ack(ctx, req.ID)
 		default:
 			return nil, fmt.Errorf("link: schedule unknown method %q", req.Method)
 		}

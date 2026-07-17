@@ -127,6 +127,8 @@ func (s *recordSchedule) Cancel(context.Context, schedule.TimerID) error {
 	return nil
 }
 
+func (s *recordSchedule) Ack(context.Context, schedule.TimerID) error { return nil }
+
 func (s *recordSchedule) counts() (int, int) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

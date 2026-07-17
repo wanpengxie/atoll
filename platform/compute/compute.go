@@ -210,16 +210,20 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 	}()
 
 	ring := &computeRing{
-		rt:          rt,
-		del:         del,
-		watcher:     watcher,
-		obsFwd:      obsFwd,
-		cancelFwd:   cancelFwd,
-		source:      cfg.PlanSource,
-		logger:      logger,
-		prevCurrent: map[actor.ActorID]desiredIncarnation{},
-		builtEpoch:  map[actor.ActorID]int64{},
-		arms:        map[actor.ActorID]*link.RebindableArms{},
+		rt:           rt,
+		del:          del,
+		watcher:      watcher,
+		obsFwd:       obsFwd,
+		cancelFwd:    cancelFwd,
+		source:       cfg.PlanSource,
+		logger:       logger,
+		prevCurrent:  map[actor.ActorID]desiredIncarnation{},
+		builtAttempt: map[actor.ActorID]builtAttempt{},
+		arms:         map[actor.ActorID]*link.RebindableArms{},
+		streamDown:   map[actor.ActorID]func(string){},
+		crashes:      map[actor.ActorID]cellCrashState{},
+		crashWake:    make(chan cellCrashEvent, 64),
+		planWake:     make(chan struct{}, 1),
 	}
 
 	backoff := redialInitialBackoff
@@ -227,7 +231,17 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 		// Dial declares NOTHING yet: every actor this compute hosts is declared by
 		// the ring's own Reattach (the full-set declaration idiom, §S-P8) inside
 		// the first reconcile pass below.
-		dialCfg := link.DialConfig{DespawnLocal: func(id actor.ActorID) { rt.DespawnID(id) }, LocalFileOpener: cfg.LocalFileOpener}
+		dialCfg := link.DialConfig{
+			DespawnLocal: func(id actor.ActorID) { rt.DespawnID(id) },
+			IdleApproved: func(id actor.ActorID) { _ = rt.ApproveIdle(id) },
+			PlanChanged: func() {
+				select {
+				case ring.planWake <- struct{}{}:
+				default:
+				}
+			},
+			LocalFileOpener: cfg.LocalFileOpener,
+		}
 		if cfg.StorageHost != nil {
 			dialCfg.AllocHandler = storageFwd.handleAlloc
 		}

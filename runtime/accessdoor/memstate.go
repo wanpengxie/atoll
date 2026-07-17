@@ -2,31 +2,94 @@ package accessdoor
 
 import (
 	"context"
+	"errors"
 	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// NewMemoryStateHandle welds owner onto a FRESH, standalone in-memory StateStore
-// and returns an actor-scoped AccessHandle. It is the ephemeral dual of the
-// durable actor_state-backed handle: substrate-本质, the actor-scoped locus is
-// defined SOLELY by (owner, StateStore) — no Registry / membership / DriverTable
-// (that absence IS the scope law) — so a memory backend slots into the identical
-// collapsed branch, byte-for-byte the same handle shape, only its bytes live in a
-// map instead of a table.
-//
-// Each call mints a NEW empty store: the intended holder is an incarnation-level
-// owner (a fork child, spec §4.1) whose private state must die with its
-// incarnation and NOT survive into a same-named转世. The store is not keyed by any
-// global — it IS the instance — so evaporation is structural (zero cleanup义务,
-// zero global table) and a reincarnation inherits nothing (EH2 root-cure). The
-// downstream (platform) receives only the finished AccessHandle, never the raw
-// StateStore, keeping the resourcespec contract kernel-confined.
-func NewMemoryStateHandle(owner actor.ActorID) AccessHandle {
-	return boundStateHandle{door: &door{deps: Deps{State: newMemStateStore()}}, owner: owner}
+func newMemoryStateHandle(owner storespec.AuthorStamp, authority storespec.ActorAuthority) AccessHandle {
+	return boundStateHandle{door: &door{deps: Deps{State: newMemStateStore(), Authority: authority}}, owner: owner}
 }
+
+var ErrStateHandleUnavailable = errors.New("accessdoor: state handle unavailable")
+
+// StateHandleResolver is the sole world-sensitive State resolution seam.
+// Callers never receive a raw in-memory backend or implement their own world
+// switch.
+type StateHandleResolver interface {
+	AdmitRun(actor.ActorID) error
+	Resolve(context.Context, actor.ActorID) (AccessHandle, error)
+	EndBatch([]actor.ActorID)
+}
+
+type actorStateHandles struct {
+	mu        sync.RWMutex
+	authority storespec.ActorAuthority
+	durable   AccessMinter
+	run       map[actor.ActorID]AccessHandle
+}
+
+func NewStateHandleResolver(authority storespec.ActorAuthority, durable AccessMinter) (StateHandleResolver, error) {
+	if authority == nil || durable == nil {
+		return nil, errors.New("accessdoor: state handle resolver dependencies incomplete")
+	}
+	return &actorStateHandles{authority: authority, durable: durable, run: make(map[actor.ActorID]AccessHandle)}, nil
+}
+
+func (h *actorStateHandles) AdmitRun(id actor.ActorID) error {
+	if id == "" {
+		return ErrStateHandleUnavailable
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if _, exists := h.run[id]; exists {
+		return nil
+	}
+	h.run[id] = newMemoryStateHandle(storespec.AuthorStamp{ID: id, BirthVersion: 1}, h.authority)
+	return nil
+}
+
+func (h *actorStateHandles) Resolve(ctx context.Context, id actor.ActorID) (AccessHandle, error) {
+	world, ok, err := h.authority.WorldOf(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrStateHandleUnavailable
+	}
+	switch world {
+	case storespec.WorldDurable:
+		row, active, err := h.authority.LookupActive(ctx, id)
+		if err != nil || !active {
+			return nil, ErrStateHandleUnavailable
+		}
+		return h.durable.MintState(storespec.AuthorStamp{ID: id, BirthVersion: row.CurrentDeclVersion}), nil
+	case storespec.WorldRun:
+		h.mu.RLock()
+		handle := h.run[id]
+		h.mu.RUnlock()
+		if handle == nil {
+			return nil, ErrStateHandleUnavailable
+		}
+		return handle, nil
+	default:
+		return nil, ErrStateHandleUnavailable
+	}
+}
+
+func (h *actorStateHandles) EndBatch(ids []actor.ActorID) {
+	h.mu.Lock()
+	for _, id := range ids {
+		delete(h.run, id)
+	}
+	h.mu.Unlock()
+}
+
+var _ StateHandleResolver = (*actorStateHandles)(nil)
 
 // memStateStore is the in-memory realizer of resourcespec.StateStore — the same
 // contract the durable actor_state store realizes, so it drives the identical

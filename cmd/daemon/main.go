@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
 	"github.com/wanpengxie/atoll/platform"
@@ -98,7 +99,8 @@ func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 		if !ok {
 			return fmt.Errorf("daemon: plan instance %s has unknown class %q", asg.InstanceID, asg.Class)
 		}
-		desired = append(desired, actorrt.DesiredMember{ID: id, Kind: kind, Epoch: asg.Epoch})
+		desired = append(desired, actorrt.DesiredMember{ID: id, Kind: kind, Version: asg.Version,
+			IdleTimeout: time.Duration(asg.TIdleMs) * time.Millisecond, EnsureTicket: asg.EnsureTicket})
 		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
 			ID:     id,
 			Config: asg.Config,

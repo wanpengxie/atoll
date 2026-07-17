@@ -1,21 +1,24 @@
 package accessdoor
 
 import (
+	"context"
 	"errors"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // TestNewFailFast: assembly-time validation rejects an incomplete Deps and a
 // missing day-1 KindKV driver — never deferring the failure to first op.
 func TestNewFailFast(t *testing.T) {
 	full := Deps{
-		Registry:   &fakeRegistry{},
-		Drivers:    DriverTable{resourcespec.KindKV: &fakeDriver{}},
-		Membership: &fakeMembership{},
-		State:      &fakeStateStore{},
+		Registry:  &fakeRegistry{},
+		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}},
+		Authority: &fakeMembership{},
+		Overlay:   &fakeGrantOverlay{},
+		State:     &fakeStateStore{},
 	}
 
 	t.Run("complete Deps assembles", func(t *testing.T) {
@@ -32,9 +35,9 @@ func TestNewFailFast(t *testing.T) {
 		}
 	})
 
-	t.Run("missing Membership", func(t *testing.T) {
+	t.Run("missing Authority", func(t *testing.T) {
 		d := full
-		d.Membership = nil
+		d.Authority = nil
 		if _, err := New(d); err == nil {
 			t.Fatalf("expected error for nil Membership")
 		}
@@ -65,17 +68,30 @@ func TestNewFailFast(t *testing.T) {
 	})
 }
 
+func TestAccessAuthorVersionGate(t *testing.T) {
+	reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
+	authority := &fakeMembership{isMember: true, authorVerdict: storespec.AuthorVersionStale}
+	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}}, Authority: authority, Overlay: &fakeGrantOverlay{}, State: &fakeStateStore{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	out, err := m.Mint(accessStamp("a")).Invoke(context.Background(), access.OpRead, "r", nil, nil)
+	if err != nil || out.RejectReason != access.OwnerInactive {
+		t.Fatalf("stale author outcome=(%+v,%v)", out, err)
+	}
+}
+
 // TestMintedHandleRunsFullPath: a handle from the sealed Minter runs ingress +
 // overreach + tree, and welds its caller into the create/authorization checks.
 func TestMintedHandleRunsFullPath(t *testing.T) {
 	reg := &fakeRegistry{}
 	drv := &fakeDriver{}
 	mem := &fakeMembership{isMember: true}
-	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: drv}, Membership: mem, State: &fakeStateStore{}})
+	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: drv}, Authority: mem, Overlay: &fakeGrantOverlay{}, State: &fakeStateStore{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	h := m.Mint("a")
+	h := m.Mint(accessStamp("a"))
 
 	// malformed (set without grant) → Go error, tree never reached.
 	if _, err := h.Invoke(t.Context(), access.OpSet, "r1", nil, nil); err == nil {

@@ -18,12 +18,35 @@ import (
 // fakeRegistry serves a fixed membership set (the durable axis).
 type fakeRegistry struct{ rows []storespec.Record }
 
-func (f fakeRegistry) Lookup(context.Context, actor.ActorID) (storespec.Record, bool, error) {
-	return storespec.Record{}, false, nil
+func (f fakeRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	for _, row := range f.rows {
+		if row.ID == id && row.IsActive() {
+			return controlRow(row), true, nil
+		}
+	}
+	return storespec.ActorControlRow{}, false, nil
 }
-func (f fakeRegistry) Exists(context.Context, actor.ActorID) (bool, error) { return false, nil }
-func (f fakeRegistry) ListActive(context.Context) ([]storespec.Record, error) {
-	return f.rows, nil
+func (f fakeRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+	rows := make([]storespec.ActorControlRow, 0, len(f.rows))
+	for _, row := range f.rows {
+		if row.IsActive() {
+			rows = append(rows, controlRow(row))
+		}
+	}
+	return rows, nil
+}
+func (f fakeRegistry) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	return storespec.WorldDurable, true, nil
+}
+func (f fakeRegistry) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	_, ok, err := f.LookupActive(ctx, stamp.ID)
+	if !ok {
+		return storespec.AuthorNotMember, err
+	}
+	return storespec.AuthorOK, err
+}
+func controlRow(row storespec.Record) storespec.ActorControlRow {
+	return storespec.ActorControlRow{ID: row.ID, Kind: row.Kind, Principal: row.Principal, Binding: row.Binding, CreatedAt: row.CreatedAt, CurrentDeclVersion: 1}
 }
 
 // fakeStat is the injected obs-read seam (substrate pull-stat stand-in); it reports the
@@ -152,8 +175,8 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	// Liveness authority reports actor:a present, actor:b absent — read via the
 	// injected seam when composing actor.list (never a message, never truth).
 	s := New(Deps{
-		Registry: reg,
-		Presence: fakeStat{present: map[actor.ActorID]bool{"actor:a": true}, started: time.Now()},
+		Authority: reg,
+		Presence:  fakeStat{present: map[actor.ActorID]bool{"actor:a": true}, started: time.Now()},
 	})
 
 	s.handle(sys, listReq)
@@ -187,4 +210,45 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	if byID["actor:b"]["present"] != false {
 		t.Fatalf("actor:b present=%v, want false (no lease)", byID["actor:b"]["present"])
 	}
+}
+
+type sponsorAuthority struct{ rows []storespec.ActorControlRow }
+
+func (a sponsorAuthority) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	for _, row := range a.rows {
+		if row.ID == id {
+			return row, true, nil
+		}
+	}
+	return storespec.ActorControlRow{}, false, nil
+}
+func (a sponsorAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+	return append([]storespec.ActorControlRow(nil), a.rows...), nil
+}
+func (a sponsorAuthority) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	return storespec.WorldRun, true, nil
+}
+func (a sponsorAuthority) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	return storespec.AuthorOK, nil
+}
+
+func TestActorListProjectsSponsorForParentRecovery(t *testing.T) {
+	parent := actor.ActorID("agent:master")
+	child := actor.ActorID("agent:master/worker-1")
+	s := New(Deps{Authority: sponsorAuthority{rows: []storespec.ActorControlRow{
+		{ID: parent, Kind: actor.KindAgent, CurrentDeclVersion: 1},
+		{ID: child, Kind: actor.KindAgent, Sponsor: parent, CurrentDeclVersion: 1},
+	}}})
+	sys := &fakeSys{}
+	s.handle(sys, requestMsg("sponsors", introspect.QueryList, nil))
+	catalog := sys.replies[0].v.(introspect.Catalog)
+	for _, row := range catalog.Actors {
+		if row.ID == string(child) {
+			if row.Sponsor != string(parent) {
+				t.Fatalf("child sponsor=%q", row.Sponsor)
+			}
+			return
+		}
+	}
+	t.Fatalf("child absent from catalog: %+v", catalog)
 }

@@ -78,6 +78,16 @@ func (q *workDeque) push(env *message.Envelope) (dropped *message.Envelope) {
 	return env
 }
 
+// pushControl appends one supervisor command behind all already accepted work.
+// It may occupy one slot beyond the data cap: approval is terminal control and
+// cannot be dropped behind a full queue of admitted requests.
+func (q *workDeque) pushControl(env *message.Envelope) {
+	q.mu.Lock()
+	q.items = append(q.items, env)
+	q.mu.Unlock()
+	q.wake()
+}
+
 // pop removes and returns the oldest item (FIFO front), or ok=false if empty.
 func (q *workDeque) pop() (*message.Envelope, bool) {
 	q.mu.Lock()

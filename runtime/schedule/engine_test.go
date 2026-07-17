@@ -10,18 +10,23 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
 // baseDeps builds a fully-wired Deps (every field non-nil) so a fail-fast
 // table test can zero exactly one field per case.
 func baseDeps() Deps {
+	store := newFakeStore()
+	sink := &fakeFireSink{}
 	return Deps{
-		Store:  newFakeStore(),
-		Fire:   &fakeFireSink{},
-		Host:   newTestRuntimeUnstarted(),
-		Revive: &fakeReviver{},
-		Clock:  newFakeClock(time.UnixMilli(1_000_000)),
+		Store:       store,
+		Fire:        sink,
+		DurableFire: fakeDurableFire{store: store, sink: sink},
+		Host:        newTestRuntimeUnstarted(),
+		Revive:      &fakeReviver{},
+		Clock:       newFakeClock(time.UnixMilli(1_000_000)),
+		Authority:   allowScheduleAuthority{},
 	}
 }
 
@@ -40,9 +45,11 @@ func TestNewFailFast(t *testing.T) {
 	}{
 		{"Store", func(d *Deps) { d.Store = nil }},
 		{"Fire", func(d *Deps) { d.Fire = nil }},
+		{"DurableFire", func(d *Deps) { d.DurableFire = nil }},
 		{"Host", func(d *Deps) { d.Host = nil }},
 		{"Revive", func(d *Deps) { d.Revive = nil }},
 		{"Clock", func(d *Deps) { d.Clock = nil }},
+		{"Authority", func(d *Deps) { d.Authority = nil }},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -71,6 +78,22 @@ func TestNewSucceedsWithNilLogger(t *testing.T) {
 	}
 }
 
+func TestRunIdentityRejectsDurableSchedule(t *testing.T) {
+	deps := baseDeps()
+	deps.Authority = allowScheduleAuthority{world: storespec.WorldRun}
+	minter, engine, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Close()
+	_, err = minter.Mint(testStamp("forked")).Schedule(context.Background(), ScheduleReq{
+		Bind: BindIdentity, FireAt: 2_000_000, Type: "wake",
+	})
+	if !errors.Is(err, ErrDurableScheduleForbidden) {
+		t.Fatalf("durable schedule error=%v", err)
+	}
+}
+
 // ---------------------------------------------------------------------
 // Schedule validation matrix.
 // ---------------------------------------------------------------------
@@ -79,16 +102,17 @@ func TestScheduleValidationMatrix(t *testing.T) {
 	rt := newTestRuntime(t)
 	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
+	store, sink := newFakeStore(), &fakeFireSink{}
 	minter, engine, err := New(Deps{
-		Store: newFakeStore(), Fire: &fakeFireSink{}, Host: rt,
-		Revive: &fakeReviver{}, Clock: newFakeClock(time.UnixMilli(1_000_000)),
+		Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: rt,
+		Revive: &fakeReviver{}, Clock: newFakeClock(time.UnixMilli(1_000_000)), Authority: allowScheduleAuthority{},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	engine.Start()
 	defer engine.Close()
-	handle := minter.Mint("author-1")
+	handle := minter.Mint(testStamp("author-1"))
 
 	cases := []struct {
 		name    string
@@ -121,9 +145,10 @@ func TestScheduleValidationMatrix(t *testing.T) {
 // incarnation-bind entry to.
 func TestScheduleIncarnationNoLiveEmbodiment(t *testing.T) {
 	rt := newTestRuntime(t)
+	store, sink := newFakeStore(), &fakeFireSink{}
 	minter, engine, err := New(Deps{
-		Store: newFakeStore(), Fire: &fakeFireSink{}, Host: rt,
-		Revive: &fakeReviver{}, Clock: newFakeClock(time.UnixMilli(1_000_000)),
+		Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: rt,
+		Revive: &fakeReviver{}, Clock: newFakeClock(time.UnixMilli(1_000_000)), Authority: allowScheduleAuthority{},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -131,7 +156,7 @@ func TestScheduleIncarnationNoLiveEmbodiment(t *testing.T) {
 	engine.Start()
 	defer engine.Close()
 
-	handle := minter.Mint("ghost")
+	handle := minter.Mint(testStamp("ghost"))
 	_, err = handle.Schedule(context.Background(), ScheduleReq{Bind: BindIncarnation, FireAt: 2_000_000, Type: "t"})
 	if !errors.Is(err, ErrBadSchedule) {
 		t.Fatalf("Schedule(incarnation, no live embodiment): err=%v, want ErrBadSchedule", err)
@@ -149,14 +174,14 @@ func TestBindIdentityRoutesToStoreAndFires(t *testing.T) {
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	rt := newTestRuntime(t)
 
-	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
+	minter, engine, err := New(Deps{Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: rt, Revive: &fakeReviver{}, Clock: clock, Authority: allowScheduleAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	engine.Start()
 	defer engine.Close()
 
-	handle := minter.Mint("author-1")
+	handle := minter.Mint(testStamp("author-1"))
 	fireAt := clock.Now().Add(time.Hour).UnixMilli()
 	id, err := handle.Schedule(context.Background(), ScheduleReq{
 		Bind: BindIdentity, FireAt: fireAt, Type: "demo.tick", CorrelationID: "corr-1",
@@ -218,14 +243,14 @@ func TestBindIncarnationRoutesToMemoryOnly(t *testing.T) {
 	rt := newTestRuntime(t)
 	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
-	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
+	minter, engine, err := New(Deps{Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: rt, Revive: &fakeReviver{}, Clock: clock, Authority: allowScheduleAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	engine.Start()
 	defer engine.Close()
 
-	handle := minter.Mint("author-1")
+	handle := minter.Mint(testStamp("author-1"))
 	fireAt := clock.Now().Add(time.Hour).UnixMilli()
 	id, err := handle.Schedule(context.Background(), ScheduleReq{Bind: BindIncarnation, FireAt: fireAt, Type: "demo.retry"})
 	if err != nil {
@@ -258,14 +283,14 @@ func TestIncarnationBindDropsOnDeathEvenWithLiveSuccessor(t *testing.T) {
 	rt := newTestRuntime(t)
 	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
-	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
+	minter, engine, err := New(Deps{Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: rt, Revive: &fakeReviver{}, Clock: clock, Authority: allowScheduleAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	engine.Start()
 	defer engine.Close()
 
-	handle := minter.Mint("author-1")
+	handle := minter.Mint(testStamp("author-1"))
 	fireAt := clock.Now().Add(time.Hour).UnixMilli()
 	if _, err := handle.Schedule(context.Background(), ScheduleReq{Bind: BindIncarnation, FireAt: fireAt, Type: "demo.retry"}); err != nil {
 		t.Fatalf("Schedule: %v", err)
@@ -358,7 +383,7 @@ func TestFireTriStateOutcomes(t *testing.T) {
 // for identity-family tests, which never consult liveness.
 func mustNewEngine(t *testing.T, store timerspec.TimerStore, sink FireSink, revive Reviver, clock Clock) *Engine {
 	t.Helper()
-	_, engine, err := New(Deps{Store: store, Fire: sink, Host: newTestRuntime(t), Revive: revive, Clock: clock})
+	_, engine, err := New(Deps{Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: newTestRuntime(t), Revive: revive, Clock: clock, Authority: allowScheduleAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -390,14 +415,14 @@ func TestReviveGatesIdentityFire(t *testing.T) {
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	rt := newTestRuntime(t)
 
-	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: revive, Clock: clock})
+	minter, engine, err := New(Deps{Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: rt, Revive: revive, Clock: clock, Authority: allowScheduleAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	engine.Start()
 	defer engine.Close()
 
-	handle := minter.Mint("author-1")
+	handle := minter.Mint(testStamp("author-1"))
 	id, err := handle.Schedule(context.Background(), ScheduleReq{Bind: BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.wake"})
 	if err != nil {
 		t.Fatalf("Schedule: %v", err)
@@ -436,15 +461,15 @@ func TestCancelTriState(t *testing.T) {
 	_, _, _ = rt.SpawnIfAbsent("author-1", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 	_, _, _ = rt.SpawnIfAbsent("author-2", actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
 
-	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
+	minter, engine, err := New(Deps{Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: rt, Revive: &fakeReviver{}, Clock: clock, Authority: allowScheduleAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	engine.Start()
 	defer engine.Close()
 
-	h1 := minter.Mint("author-1")
-	h2 := minter.Mint("author-2")
+	h1 := minter.Mint(testStamp("author-1"))
+	h2 := minter.Mint(testStamp("author-2"))
 
 	// Pending identity timer: cancel prevents the fire.
 	idIdentity, err := h1.Schedule(context.Background(), ScheduleReq{Bind: BindIdentity, FireAt: clock.Now().Add(time.Hour).UnixMilli(), Type: "t"})
@@ -511,13 +536,13 @@ func TestTimerIDNeverReused(t *testing.T) {
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	rt := newTestRuntime(t)
 
-	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
+	minter, engine, err := New(Deps{Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: rt, Revive: &fakeReviver{}, Clock: clock, Authority: allowScheduleAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	engine.Start()
 	defer engine.Close()
-	handle := minter.Mint("author-1")
+	handle := minter.Mint(testStamp("author-1"))
 
 	req := ScheduleReq{Bind: BindIdentity, FireAt: clock.Now().Add(time.Hour).UnixMilli(), Type: "t"}
 	id1, err := handle.Schedule(context.Background(), req)
@@ -607,13 +632,13 @@ func TestConcurrentScheduleCancelRace(t *testing.T) {
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	rt := newTestRuntime(t)
 
-	minter, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
+	minter, engine, err := New(Deps{Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: rt, Revive: &fakeReviver{}, Clock: clock, Authority: allowScheduleAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	engine.Start()
 	defer engine.Close()
-	handle := minter.Mint("author-1")
+	handle := minter.Mint(testStamp("author-1"))
 
 	const n = 50
 	done := make(chan struct{})
@@ -649,7 +674,7 @@ func TestNextFireAtStoreFaultDegradesToBackoffRetry(t *testing.T) {
 	store := newFakeStore()
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000_000))
-	deps := Deps{Store: store, Fire: sink, Host: newTestRuntimeUnstarted(), Revive: &fakeReviver{}, Clock: clock}
+	deps := Deps{Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: newTestRuntimeUnstarted(), Revive: &fakeReviver{}, Clock: clock, Authority: allowScheduleAuthority{}}
 
 	// A durable row ALREADY DUE, and a store whose NextFireAt is faulting from
 	// the engine's very first tick (set before Start — no race).
@@ -705,7 +730,7 @@ func TestScheduleMemQuota(t *testing.T) {
 
 	// Not started: schedule() populates mem synchronously with no run loop
 	// racing the map, so the quota boundary is deterministic.
-	_, engine, err := New(Deps{Store: store, Fire: sink, Host: rt, Revive: &fakeReviver{}, Clock: clock})
+	_, engine, err := New(Deps{Store: store, Fire: sink, DurableFire: fakeDurableFire{store: store, sink: sink}, Host: rt, Revive: &fakeReviver{}, Clock: clock, Authority: allowScheduleAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

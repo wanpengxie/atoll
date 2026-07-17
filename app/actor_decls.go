@@ -3,6 +3,7 @@ package app
 import (
 	"encoding/json"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -90,7 +91,6 @@ func (a *App) handleListDecls(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	defer rows.Close()
 	out := []gin.H{}
 	for rows.Next() {
 		var id, name, class string
@@ -99,6 +99,46 @@ func (a *App) handleListDecls(c *gin.Context) {
 			continue
 		}
 		out = append(out, gin.H{"id": id, "name": name, "class": class, "created_at": ca, "updated_at": ua})
+	}
+	_ = rows.Close()
+
+	// Project both declaration pointers for every channel instance sourced from
+	// each world declaration. latest_version may lead current_version while an
+	// edit is staged; collapsing the two would make the control API lie about
+	// which factory snapshot is actually authoritative.
+	a.mu.RLock()
+	homes := make(map[channel.ID]*home.Home, len(a.homes))
+	for id, h := range a.homes {
+		homes[id] = h
+	}
+	a.mu.RUnlock()
+	for _, decl := range out {
+		declID := decl["id"].(string)
+		instances := make([]gin.H, 0)
+		for chID, h := range homes {
+			declared, err := h.DeclaredBySource(c.Request.Context(), declID)
+			if err != nil {
+				continue
+			}
+			for _, row := range declared {
+				current, latest, err := h.DeclarationVersions(c.Request.Context(), row.ID)
+				if err != nil {
+					continue
+				}
+				instances = append(instances, gin.H{
+					"channel_id": string(chID), "instance_id": string(row.ID),
+					"current_version": current.CurrentDeclVersion,
+					"latest_version":  latest.CurrentDeclVersion,
+				})
+			}
+		}
+		sort.Slice(instances, func(i, j int) bool {
+			if instances[i]["channel_id"].(string) != instances[j]["channel_id"].(string) {
+				return instances[i]["channel_id"].(string) < instances[j]["channel_id"].(string)
+			}
+			return instances[i]["instance_id"].(string) < instances[j]["instance_id"].(string)
+		})
+		decl["instances"] = instances
 	}
 	c.JSON(http.StatusOK, gin.H{"decls": out})
 }
@@ -167,15 +207,13 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 	a.mu.RUnlock()
 	var targets []declFanoutTarget
 	for id, h := range homes {
-		rows, err := h.Composition(ctx)
+		rows, err := h.DeclaredBySource(ctx, declID)
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "channel composition unavailable"})
 			return
 		}
 		for _, row := range rows {
-			if row.DeclID == declID {
-				targets = append(targets, declFanoutTarget{ChannelID: string(id), InstanceID: string(row.InstanceID)})
-			}
+			targets = append(targets, declFanoutTarget{ChannelID: string(id), InstanceID: string(row.ID)})
 		}
 	}
 	targetsJSON, err := json.Marshal(targets)

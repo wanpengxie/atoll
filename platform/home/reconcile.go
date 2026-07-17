@@ -5,6 +5,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -15,11 +16,6 @@ import (
 // reviveLogThrottle bounds the attached-host revive-skip log (see
 // Home.reviveLogAt).
 const reviveLogThrottle = 30 * time.Second
-
-type desiredIncarnation struct {
-	Kind  actor.Kind
-	Epoch int64
-}
 
 // clearNoFactoryWarned drops this Home's no_factory edge marker once a factory
 // becomes available or the id is no longer this ring's to manage. The map is
@@ -52,7 +48,15 @@ func (h *Home) firstNoFactoryWarning(id actor.ActorID) bool {
 // "not-yet-minted cell mis-scanned as a corpse" hazard; activation is kept first
 // as the natural order — re-mint the always-on desired set before the backstops.
 func (h *Home) reconcileSweep(ctx context.Context) {
+	h.reconcileDaemonIntent(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 	h.reconcileActivation(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	h.sweepFired(ctx)
 	if ctx.Err() != nil {
 		return
 	}
@@ -71,7 +75,7 @@ func (h *Home) reconcileSweep(ctx context.Context) {
 // A failed registry read skips the whole pass: treating failure as an empty set
 // would erase every member's last testimony.
 func (h *Home) sweepPresence(ctx context.Context) {
-	rows, err := h.cs.Registry.ListActive(ctx)
+	rows, err := h.controlIndex.ListActive(ctx)
 	if err != nil {
 		h.logger.Warn("platform.presence.sweep_registry_failed", "error", err)
 		return
@@ -120,26 +124,20 @@ func (h *Home) logReviveAttached(id actor.ActorID, host string) {
 // (the reconcile ring骨架 lives here in platform, not the actorrt kernel), driven
 // by the same ticker as the closure backstop.
 //
-// desired = 两源之并 (union of two intent sources), read to completion BEFORE any
-// mint/despawn: 组合域 — the channel-local composition DesiredSource (intent
-// rows); user域 — platform-internal, derived from THIS channel's own registry (the
-// per-channel human members, Kind==human && Host==""). The user域 authority lives
-// only inside the channel truth born within Open, so the app cannot enumerate it
-// (chicken-egg) — the ring derives it itself. Union 原子性: either source read
-// failing aborts the WHOLE tick — no arm runs and prevEagerDesired is NOT updated,
-// so 削臂 can never diff against a truncated current and evict live cells wholesale.
+// Desired is projected entirely from Home's unified control index. The same
+// snapshot includes declared and run-world identities; liveness is the sole
+// activation predicate owner, and a read failure aborts the whole sweep.
 //
 // 补 (revive): for every desired member absent from the live set, resolve its
 // factory through factoryFor (human → the platform's own built-in cell factory;
 // others → the app-injected组合域 builder), weld caps at the platform seam, and
 // SpawnIfAbsent it (the CAS discards the shell if some other path won the race —
-// admission or a concurrent Reviver fire). Kind comes from the MEMBERSHIP record
+// admission or a concurrent Reviver fire). Kind comes from the control row
 // (rec.Kind, the authority), never re-answered by the builder.
 //
-// 交集红线: desired = intent ∩ durable membership. A组合域 intent row whose Admit
-// never landed (crash between the two non-atomic writes) is not in the membership
-// snapshot, so it is skipped BEFORE current[id]=true — a非成员 must never enter the
-// 削臂 management set.
+// Admission publishes durable truth before the control row; fork admission
+// publishes its event before the run row. Consequently every row considered here
+// has already crossed its world's own admission boundary.
 //
 // 削 (deactivate, 反误杀): the diff is prevEagerDesired − currentDesired, NEVER
 // actual − desired. LiveIDs() mixes in system / fork-child / daemon-attach
@@ -149,11 +147,8 @@ func (h *Home) logReviveAttached(id actor.ActorID, host string) {
 // membership-gone = true death). The 削 set is every id that was desired in the
 // prior tick and is no longer desired.
 //
-// placement filter (§10.13 推导2/7, S6): both arms consult the membership Host
-// column BEFORE embodying/evicting — an id currently placed on a daemon (Host != "")
-// is this ring's business in neither direction: 补 must not double-embody an
-// already-attached identity locally, and 削 must not evict an embodiment that is
-// legitimately live elsewhere.
+// Placement is declaration intent: server rows are embodied locally, daemon rows
+// are projected into daemon plans only when liveness has an ensure attempt.
 // activationOutcome is the 11-word closed set every eager-activation attempt
 // resolves to (spec §1.3, purity v3 B1) — the single vocabulary activateOne
 // speaks; reconcileActivation's 环翻译器 (§1.6) and homeReviver.EnsureLive's
@@ -175,6 +170,7 @@ const (
 	actCancelled                             // ctx cancelled right after SpawnIfAbsent (built cell already despawned)
 	actRecheckFault                          // ⑥verifyPostBuild's own ctx/registry fault: err payload
 	actRecheckGone                           // ⑥verifyPostBuild found the id no longer an active member
+	actRecheckStale                          // ⑥version/placement changed while the shell was built
 )
 
 // activationVerdict pairs an activationOutcome word with its payload (§1.3:
@@ -190,7 +186,7 @@ type activationVerdict struct {
 }
 
 // activateOne is the single eager-activation core shared by reconcileActivation
-// (环补臂) and homeReviver.EnsureLive (spec §1.1): given a durable member record
+// (环补臂) and homeReviver.EnsureLive (spec §1.1): given an active control row
 // the CALLER has already resolved (event-read stays outside the core — §1.8,
 // the batch ListActive snapshot vs the single-point Lookup and its transient
 // semantics belong to each caller's own translator), it runs the six-gate
@@ -207,7 +203,7 @@ type activationVerdict struct {
 // have. Current test fixtures are safe (ReconcileInterval=1h, no cross-driving
 // wake), but this is the risk surface to check first if a new hook-driven test
 // misbehaves.
-func (h *Home) activateOne(ctx context.Context, rec storespec.Record) activationVerdict {
+func (h *Home) activateOne(ctx context.Context, control storespec.ActorControlRow) activationVerdict {
 	// ①IsActive 防御复判: for the ring this is pure defense-in-depth (环选择器
 	// already filters !rec.IsActive() before setting current[id] true and
 	// calling here — rec is a value copy, so this branch can never observe a
@@ -218,17 +214,27 @@ func (h *Home) activateOne(ctx context.Context, rec storespec.Record) activation
 	// straight here, so a genuinely deregistered-between-Lookup-and-here member
 	// is caught by THIS check (DoD §4.2's 3-site IsActive() closure: 环选择器 /
 	// here / verifyPostBuild — EnsureLive itself makes no separate call).
-	if !rec.IsActive() {
+	id := control.ID
+	kind := control.Kind
+	current, active, err := h.controlIndex.LookupActive(ctx, id)
+	if err != nil || !active || current.CurrentDeclVersion != control.CurrentDeclVersion {
+		return activationVerdict{kind: actNotMember, err: err}
+	}
+	// Placement is declaration truth; actual attachment remains in liveness/ports.
+	if control.Placement.Kind == storespec.PlacementDaemon {
+		return activationVerdict{kind: actAttached, host: control.Placement.Host}
+	}
+	if control.Placement.Kind != storespec.PlacementServer {
 		return activationVerdict{kind: actNotMember}
 	}
-	// ②Host 判 (placement filter, §10.13 推导2/7, S6): an id currently placed on
-	// a daemon is this seam's business in neither direction — 补 must not
-	// double-embody an already-attached identity locally.
-	if rec.Host != "" {
-		return activationVerdict{kind: actAttached, host: rec.Host}
+	if state, ok := h.liveness.snapshot(id); ok && state.occ == occRunning && state.carrier.queue != nil {
+		if _, live := h.channel.Cells().CurrentIncarnation(id); live {
+			return activationVerdict{kind: actAlreadyLive}
+		}
+		// Quiet substrate teardown has no down edge. Reconciliation is the level
+		// backstop that repairs the stale carrier value before ensuring again.
+		_ = h.liveness.ObserveDown(id, false, false)
 	}
-	id := rec.ID
-	kind := rec.Kind
 	now := time.UnixMilli(h.nowMs())
 	// ③backoffGate: a prior BuildFailure not yet elapsed skips the build this
 	// tick/wake — the SAME account both callers maintain in lockstep.
@@ -237,14 +243,28 @@ func (h *Home) activateOne(ctx context.Context, rec storespec.Record) activation
 	}
 	// ④factoryFor: the single activation-dispatch point (human → platform's
 	// own built-in factory; other kinds → the required composition resolver).
-	factory, ok := h.factoryFor(rec)
+	factory, ok := h.factoryFor(control)
 	if !ok {
 		return activationVerdict{kind: actNoFactory, reason: "class_not_found"}
 	}
+	ticket, ticketVerdict := h.liveness.BeginEnsure(id, control.CurrentDeclVersion)
+	if ticketVerdict == transitionInFlight {
+		return activationVerdict{kind: actBackoffHeld, until: now}
+	}
+	if ticketVerdict != transitionApplied {
+		if _, active, lookupErr := h.controlIndex.LookupActive(ctx, id); lookupErr == nil && !active {
+			return activationVerdict{kind: actNotMember}
+		}
+		return activationVerdict{kind: actBuildFailed, err: errors.New("platform: liveness ensure rejected")}
+	}
+	abortEnsure := func() { _ = h.liveness.AbortEnsure(id, ticket) }
 	// ⑤SpawnIfAbsent: the atomic placement CAS — discards the shell if some
 	// other path (admission, a concurrent revive) already won the race.
 	inc, built, buildErr := h.channel.Cells().SpawnIfAbsent(id, kind, func(inc actorrt.Incarnation) actorrt.Actor {
-		return hostcommon.Build(h.buildCaps(id, kind, inc), h.hooks(), factory)
+		return hostcommon.Build(h.buildCaps(id, kind, control.CurrentDeclVersion, inc), h.hooks(), factory, actorbase.Options{
+			IdleTimeout: control.TIdle,
+			IdleArbiter: localIdleArbiter{h: h, id: id},
+		})
 	})
 	// ctx 闸 (P1-C): checked BEFORE buildErr classification and BEFORE the
 	// !built branch — a cancel landing here wins over either. Distinct from
@@ -255,9 +275,11 @@ func (h *Home) activateOne(ctx context.Context, rec storespec.Record) activation
 		if built {
 			h.channel.Cells().Despawn(inc)
 		}
+		abortEnsure()
 		return activationVerdict{kind: actCancelled}
 	}
 	if buildErr != nil {
+		abortEnsure()
 		if errors.Is(buildErr, actorrt.ErrRuntimeSealed) {
 			return activationVerdict{kind: actSealed, err: buildErr}
 		}
@@ -268,172 +290,105 @@ func (h *Home) activateOne(ctx context.Context, rec storespec.Record) activation
 		return activationVerdict{kind: actBuildFailed, err: buildErr}
 	}
 	if !built {
+		if h.liveness.PublishLocal(id, ticket, runtimeDeliveryCarrier{id: id, deliverer: h.channel.Deliverer()}) == transitionApplied {
+			h.redeliverOpenRequests(ctx, id)
+		}
 		return activationVerdict{kind: actAlreadyLive}
 	}
 	// ⑥verifyPostBuild: the shared straddle-window closure (its own internal
 	// ctx gate is left untouched inside it, P1-B).
-	_, res, verr := h.verifyPostBuild(ctx, id, inc)
+	res, verr := h.verifyPostBuild(ctx, id, control.CurrentDeclVersion, inc)
 	switch res {
 	case recheckGone:
+		abortEnsure()
 		return activationVerdict{kind: actRecheckGone}
+	case recheckStale:
+		abortEnsure()
+		return activationVerdict{kind: actRecheckStale}
 	case recheckFault:
+		abortEnsure()
 		return activationVerdict{kind: actRecheckFault, err: verr}
 	default: // recheckOK
+		if h.liveness.PublishLocal(id, ticket, runtimeDeliveryCarrier{id: id, deliverer: h.channel.Deliverer()}) != transitionApplied {
+			h.channel.Cells().Despawn(inc)
+			abortEnsure()
+			return activationVerdict{kind: actBuildFailed, err: errors.New("platform: liveness publish rejected")}
+		}
+		h.redeliverOpenRequests(ctx, id)
 		return activationVerdict{kind: actEmbodied, inc: inc}
 	}
 }
 
 func (h *Home) reconcileActivation(ctx context.Context) {
-	composed, err := h.desired.Members(ctx)
+	rows, err := h.controlIndex.ListActive(ctx)
 	if err != nil {
-		h.logger.Error("platform.reconcile.desired_failed", "channel", string(h.channelID), "err", err)
+		h.logger.Error("platform.reconcile.authority_failed", "channel", string(h.channelID), "err", err)
 		return
 	}
-	if ctx.Err() != nil {
-		return
-	}
-	actives, err := h.cs.Registry.ListActive(ctx)
-	if err != nil {
-		h.logger.Error("platform.reconcile.registry_failed", "channel", string(h.channelID), "err", err)
-		return
-	}
-	if ctx.Err() != nil {
-		return
-	}
-	// The active-membership snapshot serves BOTH roles, read once for atomicity: it
-	// is the user域 source AND the 交集红线 membership filter (+ the placement Host
-	// read the two arms consult).
-	member := make(map[actor.ActorID]storespec.Record, len(actives))
-	for _, rec := range actives {
-		member[rec.ID] = rec
-	}
-	desiredIDs := make(map[actor.ActorID]desiredIncarnation, len(composed)+len(actives))
-	for _, m := range composed {
-		desiredIDs[m.ID] = desiredIncarnation{Kind: m.Kind, Epoch: m.Epoch}
-	}
-	for _, rec := range actives {
-		if rec.Kind == actor.KindHuman && rec.Host == "" {
-			desiredIDs[rec.ID] = desiredIncarnation{Kind: rec.Kind}
-		}
-	}
-
 	rt := h.channel.Cells()
-	actual := make(map[actor.ActorID]bool)
-	for _, id := range rt.LiveIDs() {
-		actual[id] = true
-	}
-	current := make(map[actor.ActorID]desiredIncarnation)
-	for id, want := range desiredIDs {
+	for _, row := range rows {
 		if ctx.Err() != nil {
 			return
 		}
-		rec, ok := member[id]
-		if !ok || !rec.IsActive() {
-			continue // 交集红线: desired-but-not-a-durable-member — skip BEFORE current
-		}
-		current[id] = want
-		if rec.Host != "" {
-			// A daemon-hosted incarnation is not this ring's build account. Drop
-			// any stale local epoch so a later return home cannot inherit it.
-			delete(h.builtEpoch, id)
-			if actual[id] {
-				h.clearReviveBackoff(id)
-				continue
-			}
-		}
-		if actual[id] {
-			got, recorded := h.builtEpoch[id]
-			if recorded && got == want.Epoch {
-				h.clearReviveBackoff(id)
-				continue
-			}
-			if rec.Host == "" {
-				// Either epoch changed or another activation arm produced an
-				// unaccounted body. Only a build completed by this ring may register
-				// builtEpoch, so replace first and retry from a clean absence.
-				rt.DespawnID(id)
-				delete(actual, id)
-				delete(h.builtEpoch, id)
-			}
-		}
-		// 补: resolve activateOne's 11-word verdict (§1.6 环翻译器) — the core
-		// covers everything from here through the post-build straddle recheck
-		// (a concurrent Home.Remove landing BETWEEN the Lookup that admitted id
-		// into current above and the build is the window verifyPostBuild
-		// closes; the placement-attach race is a DIFFERENT window, closed by
-		// Attach's own replace semantics rather than a post-build recheck —
-		// #24, see verifyPostBuild's doc).
-		switch v := h.activateOne(ctx, rec); v.kind {
-		case actEmbodied:
-			h.builtEpoch[id] = want.Epoch
-			h.clearNoFactoryWarned(id)
-		case actAlreadyLive, actAttached:
-			// current stays true (already set above); no log; no account write
-			// (环翻译器 never clears the backoff account — §1.4 现状, CAS-loser
-			// included: reserved to the fast-path arm above and to 削 below).
-			h.clearNoFactoryWarned(id) // left no_factory (a factory now resolves) — B3 edge reset
-		case actNotMember:
-			// Defensive-only (①防御复判): unreachable given the selector's own
-			// pre-filter two lines up, on the SAME rec — treated conservatively
-			// like BackoffHeld/BuildFailed rather than left counted as managed.
-			delete(current, id)
-		case actBackoffHeld:
-			delete(current, id)
-		case actNoFactory:
-			// B3: edge-only — warn once per id on first no_factory sighting,
-			// silent through steady-state repeats (soak observed 74x/pass without
-			// this dedup). clearNoFactoryWarned resets the marker once the id
-			// leaves this state (factory resolves, or the ring stops managing it).
-			if h.firstNoFactoryWarning(id) {
-				h.logger.Warn("platform.reconcile.no_factory", "channel", string(h.channelID), "actor", string(id))
-			}
-		case actSealed:
-			h.logger.Info("platform.reconcile.runtime_sealed", "channel", string(h.channelID), "actor", string(id))
-			return // whole tick aborts — prevEagerDesired stays exactly the pre-tick baseline
-		case actBuildFailed:
-			h.logger.Error("platform.reconcile.build_failed", "channel", string(h.channelID), "actor", string(id), "error", v.err)
-			delete(current, id)
-		case actCancelled:
-			return // whole tick aborts; the built cell (if any) was despawned inside the core
-		case actRecheckFault, actRecheckGone:
-			delete(current, id)
-		}
-	}
-	for id := range h.prevEagerDesired {
-		if ctx.Err() != nil {
-			return
-		}
-		if _, ok := current[id]; ok {
+		state, ok := h.liveness.snapshot(row.ID)
+		if !ok {
 			continue
 		}
-		if rec, ok := member[id]; ok && rec.Host != "" {
-			continue // attached elsewhere — not gone, not this ring's to evict (反误杀)
+		if state.occ != occNone && state.version != 0 && state.version != row.CurrentDeclVersion {
+			_, _ = h.liveness.Retire(row.ID, true)
+			rt.DespawnID(row.ID)
+			state, _ = h.liveness.snapshot(row.ID)
 		}
-		rt.DespawnID(id)
-		delete(h.builtEpoch, id)
-		// The削 arm's own account cleanup, mirroring Remove's teardown (remove.go):
-		// an id this ring stops managing must not leave a permanently stale revive-
-		// backoff/log-throttle entry behind (e.g. intent withdrawn for a build-
-		// failing member — its backoff account would otherwise never be cleared).
-		h.clearReviveBackoff(id)
-		h.reviveMu.Lock()
-		delete(h.reviveLogAt, id)
-		h.reviveMu.Unlock()
-		h.clearNoFactoryWarned(id) // ring stopped managing id — B3 edge reset
+		if row.Placement.Kind == storespec.PlacementServer && state.occ == occRunning {
+			if _, live := rt.CurrentIncarnation(row.ID); !live {
+				// Quiet teardown has no down edge. Repair the stale carrier level
+				// before evaluating shouldRun so the ensure arm can rebuild it.
+				_ = h.liveness.ObserveDown(row.ID, false, false)
+				state, _ = h.liveness.snapshot(row.ID)
+			}
+		}
+		shouldRun := row.TIdle == 0 || state.dirty || state.restart || state.occ != occNone
+		if !shouldRun {
+			continue
+		}
+		if row.Placement.Kind == storespec.PlacementDaemon {
+			if state.occ == occNone {
+				_, _ = h.liveness.BeginEnsure(row.ID, row.CurrentDeclVersion)
+			}
+			continue
+		}
+		if row.Placement.Kind != storespec.PlacementServer || state.occ == occRunning {
+			continue
+		}
+		switch v := h.activateOne(ctx, row); v.kind {
+		case actEmbodied, actAlreadyLive:
+			h.clearReviveBackoff(row.ID)
+			h.clearNoFactoryWarned(row.ID)
+		case actAttached:
+			h.clearNoFactoryWarned(row.ID)
+		case actNoFactory:
+			if h.firstNoFactoryWarning(row.ID) {
+				h.logger.Warn("platform.reconcile.no_factory", "channel", string(h.channelID), "actor", string(row.ID))
+			}
+		case actSealed:
+			return
+		case actBuildFailed:
+			h.logger.Error("platform.reconcile.build_failed", "channel", string(h.channelID), "actor", string(row.ID), "error", v.err)
+		case actCancelled:
+			return
+		}
 	}
-	h.prevEagerDesired = current
 }
 
 // factoryFor is the single activation-dispatch point shared by the reconcile
-// ring's 补臂 and homeReviver.EnsureLive: it maps a durable member record to the
+// ring's 补臂 and homeReviver.EnsureLive: it maps an active control row to the
 // ActorFactory that embodies it. A human member (Kind==KindHuman) resolves to the
-// platform's OWN built-in human cell factory — user域 supply is platform internal
-// 政 (the per-channel human member's authority lives only in this channel's
-// registry, unreachable by the app), so the composition resolver is never asked
+// platform's OWN built-in human cell factory — user-domain supply is platform
+// internal, so the composition resolver is never asked
 // for it. Every other kind resolves through the required composition view.
 // Kind is caller-held (rec.Kind), never re-answered.
-func (h *Home) factoryFor(rec storespec.Record) (platform.ActorFactory, bool) {
-	if rec.Kind == actor.KindHuman {
+func (h *Home) factoryFor(row storespec.ActorControlRow) (platform.ActorFactory, bool) {
+	if row.Kind == actor.KindHuman {
 		// 装配链 step② (gateway 期 v0.4.1 勘误: 槽随户籍准入 ensure): the per-identity
 		// slot (在场与递交接头盒) is ensured HERE — the platform-authoritative membership→
 		// embodiment dispatch (shared by the reconcile 补臂 and homeReviver.EnsureLive),
@@ -441,10 +396,18 @@ func (h *Home) factoryFor(rec storespec.Record) (platform.ActorFactory, bool) {
 		// read from the store with no Admit call this run). This runs BEFORE the cell is
 		// built, so the cell/factory step③ is a pure lookup — never a construction-path
 		// self-ensure (装配授权走私). Idempotent; nil registry is a defensive no-op.
-		h.EnsureSubjectSlot(rec.ID)
-		return humanCellFactory(h, rec.ID), true
+		h.EnsureSubjectSlot(row.ID)
+		return humanCellFactory(h, row.ID), true
 	}
-	return h.factories.Lookup(rec.ID)
+	config := row.Config
+	var err error
+	if view, ok := h.factories.(*compositionView); ok {
+		config, err = view.resolveConfig(context.Background(), row.SourceDeclID, row.Config)
+		if err != nil {
+			return platform.ActorFactory{}, false
+		}
+	}
+	return h.factories.LookupByClass(row.ID, row.Class, config)
 }
 
 // recheckResult classifies a post-build straddle recheck (verifyPostBuild).
@@ -452,14 +415,15 @@ type recheckResult int
 
 const (
 	recheckOK    recheckResult = iota // still an active member — keep the build
-	recheckGone                       // Remove'd / not a durable member — build undone
+	recheckGone                       // Ended / no longer active — build undone
+	recheckStale                      // selected version/placement changed — retry from current
 	recheckFault                      // registry lookup fault — build undone
 )
 
 // verifyPostBuild is the shared straddle-window closure for every eager LOCAL birth
 // (the reconcile ring's 补臂 and homeReviver.EnsureLive, via activateOne): after
-// SpawnIfAbsent mints inc, re-read the registry NOW and confirm id is still an
-// active member. The window it closes: a concurrent Home.Remove (dereg) landing
+// SpawnIfAbsent mints inc, re-read the authority NOW and confirm id is still an
+// active identity. The window it closes: a concurrent End landing
 // BETWEEN the pre-build Lookup and this build's landing. On a non-OK outcome it
 // UNDOES the build — Despawn is pointer-guarded (evicts IFF the runtime map still
 // points to THIS inc, so a legitimate successor that already re-admitted the id is
@@ -480,17 +444,17 @@ const (
 // under the same id, so "was active, now inactive" is the only fact worth
 // re-reading. See TestReviver_AttachRace_ReplaceSemanticsSelfResolve (formerly
 // AttachStraddle) for the pinned behavior this account describes.
-func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, inc actorrt.Incarnation) (rec storespec.Record, res recheckResult, err error) {
-	rec2, ok2, lerr := h.cs.Registry.Lookup(ctx, id)
+func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, selectedVersion int64, inc actorrt.Incarnation) (recheckResult, error) {
+	row, ok, lerr := h.controlIndex.LookupActive(ctx, id)
 	if ctx.Err() != nil {
 		h.channel.Cells().Despawn(inc)
-		return storespec.Record{}, recheckFault, ctx.Err()
+		return recheckFault, ctx.Err()
 	}
 	if lerr != nil {
 		h.channel.Cells().Despawn(inc)
-		return storespec.Record{}, recheckFault, lerr
+		return recheckFault, lerr
 	}
-	if !ok2 || !rec2.IsActive() {
+	if !ok {
 		h.channel.Cells().Despawn(inc)
 		// 死 ID 槽级联清 (gateway 期 P1, mirror remove.go §级联删槽): factoryFor embodies a
 		// human by EnsureSubjectSlot BEFORE this build (装配链 step②). A stale-rec 补臂/
@@ -503,9 +467,13 @@ func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, inc actorr
 		// Remove already cleaned it.
 		h.RemoveSubjectSlot(id)
 		h.presenceFold.Forget(id)
-		return storespec.Record{}, recheckGone, nil
+		return recheckGone, nil
 	}
-	return rec2, recheckOK, nil
+	if row.CurrentDeclVersion != selectedVersion || row.Placement.Kind != storespec.PlacementServer {
+		h.channel.Cells().Despawn(inc)
+		return recheckStale, nil
+	}
+	return recheckOK, nil
 }
 
 // pokeReconcile posts a coalesced wake to the reconcile ring (non-blocking: a

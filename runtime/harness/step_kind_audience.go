@@ -79,7 +79,8 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 	// (4) request — exactly-one concrete receiver (STRUCTURE only). The caller
 	//     addressed the actor it resolved (no type→handler routing). Whether that
 	//     receiver is reachable/live is NOT asserted here — that is the delivery
-	//     seam's job (Deliver→NotHosted→closure materialises receiver_unavailable),
+	//     delivery seam's job (NotHosted is an observation; durable closure and
+	//     caller deadline own terminal materialisation),
 	//     not the writer's. Do not re-add a registry liveness lookup.
 	if len(env.Audience) != 1 || env.Audience[0] == "" {
 		return outcome{RejectReason: HarnessRequestAudienceInvalid, Detail: "kind=request requires audience=[<concrete-actor>]"}, nil

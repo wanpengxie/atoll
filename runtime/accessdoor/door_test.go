@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // --- create branch (期11 §3.1: create is its own method, door.create — no
@@ -46,6 +47,19 @@ func TestDoorCreate(t *testing.T) {
 		got := reg.createCalls[0]
 		if got.kind != resourcespec.KindKV || got.creator != "a" || string(got.initial) != "hi" {
 			t.Fatalf("Create args = %+v", got)
+		}
+		if got.birth.Authority != resourcespec.BirthCreatorIdentity {
+			t.Fatalf("birth=%v, want creator identity", got.birth.Authority)
+		}
+	})
+
+	t.Run("run-world creator selects channel-owned birth", func(t *testing.T) {
+		reg := &fakeRegistry{}
+		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true, world: storespec.WorldRun})
+		out, err := d.create(t.Context(), "child", "r1", kvSpec, nil)
+		mustAccept(t, out, err)
+		if got := reg.createCalls[0].birth.Authority; got != resourcespec.BirthChannelOwned {
+			t.Fatalf("birth=%v, want channel owned", got)
 		}
 	})
 
@@ -460,9 +474,10 @@ func TestInvokeMissingDriverIsGoError(t *testing.T) {
 	const bogusKind = resourcespec.ResourceKind("bogus-inline-kind")
 	reg := &fakeRegistry{resolveExists: true, resolveMeta: resourcespec.ResourceMeta{Kind: bogusKind}, actorAllows: true}
 	d := &door{deps: Deps{
-		Registry:   reg,
-		Drivers:    DriverTable{resourcespec.KindKV: &fakeDriver{}}, // KindKV present, bogusKind absent
-		Membership: &fakeMembership{},
+		Registry:  reg,
+		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}}, // KindKV present, bogusKind absent
+		Authority: &fakeMembership{},
+		Overlay:   &fakeGrantOverlay{},
 	}}
 	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpDelete} {
 		_, err := d.invoke(context.Background(), "a", op, "r1", nil, nil)
@@ -477,7 +492,7 @@ func TestInvokeMissingDriverIsGoError(t *testing.T) {
 // structurally has none — its bytes are realized by the daemon-side
 // Allocator/Streamer, §4) and never carries bytes on Outcome.Value (§8.1) —
 // an accepted outcome carries a FileRoute instead, Local when the caller's
-// Membership.Lookup Host matches the resource's placement daemon, a minted
+// ActorAuthority Placement.Host matches the resource's placement daemon, a minted
 // lane Token otherwise.
 func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 	meta := resourcespec.ResourceMeta{Kind: resourcespec.KindFile, PlacementDaemonID: "daemon-1", PlacementCoord: "coord-1"}
@@ -533,7 +548,7 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 		}
 	})
 
-	t.Run("no Membership.Lookup host (home-hosted caller) is honestly non-Local", func(t *testing.T) {
+	t.Run("server placement (home-hosted caller) is honestly non-Local", func(t *testing.T) {
 		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
 		mem := &fakeMembership{} // lookupFound: false
 		lane := &fakeLaneControl{}

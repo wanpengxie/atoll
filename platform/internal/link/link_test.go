@@ -28,14 +28,17 @@ const testChannelID = channel.ID("test-channel")
 
 type memberPresenceRegistry struct{}
 
-func (memberPresenceRegistry) Lookup(_ context.Context, id actor.ActorID) (storespec.Record, bool, error) {
-	return storespec.Record{ID: id}, true, nil
+func (memberPresenceRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1}, true, nil
 }
-func (memberPresenceRegistry) Exists(context.Context, actor.ActorID) (bool, error) {
-	return true, nil
-}
-func (memberPresenceRegistry) ListActive(context.Context) ([]storespec.Record, error) {
+func (memberPresenceRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, nil
+}
+func (memberPresenceRegistry) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	return storespec.WorldDurable, true, nil
+}
+func (memberPresenceRegistry) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	return storespec.AuthorOK, nil
 }
 
 // --- stubs ---
@@ -52,7 +55,7 @@ type stubMinter struct {
 	nextSeq int64
 }
 
-func (s *stubMinter) Mint(id actor.ActorID, kind actor.Kind, chID channel.ID) harness.Pen {
+func (s *stubMinter) Mint(id actor.ActorID, kind actor.Kind, chID channel.ID, _ int64) harness.Pen {
 	return &stubPen{minter: s, id: id, kind: kind, chID: chID}
 }
 
@@ -94,31 +97,6 @@ func (p *stubPen) Write(_ context.Context, env *message.Envelope) (harness.Write
 	env.Sender.Kind = p.kind
 	env.ChannelID = p.chID
 	return p.minter.record(env), nil
-}
-
-type stubMembership struct {
-	mu   sync.Mutex
-	adds []storespec.MemberActorAdd
-}
-
-func (s *stubMembership) Deregister(context.Context, actor.ActorID, int64) error { return nil }
-func (s *stubMembership) Admit(context.Context, actor.Kind, string, int64) (actor.ActorID, error) {
-	return "", nil
-}
-func (s *stubMembership) EnsureSystemActor(context.Context, int64) (bool, error) { return false, nil }
-func (s *stubMembership) ApplyMemberTransitions(_ context.Context, adds []storespec.MemberActorAdd, _ []storespec.MemberActorRemove) error {
-	s.mu.Lock()
-	s.adds = append(s.adds, adds...)
-	s.mu.Unlock()
-	return nil
-}
-
-func (s *stubMembership) getAdds() []storespec.MemberActorAdd {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	cp := make([]storespec.MemberActorAdd, len(s.adds))
-	copy(cp, s.adds)
-	return cp
 }
 
 // echoCell responds to each request via its injected pen. It leaves
@@ -236,12 +214,11 @@ func (h *daemonHost) Stop() { h.rt.StopAll() }
 // --- home rig ---
 
 type homeRig struct {
-	acc        *link.Acceptor
-	rt         *actorrt.Runtime
-	deliver    actorrt.Deliverer
-	minter     *stubMinter
-	membership *stubMembership
-	srv        *httptest.Server
+	acc     *link.Acceptor
+	rt      *actorrt.Runtime
+	deliver actorrt.Deliverer
+	minter  *stubMinter
+	srv     *httptest.Server
 
 	mu         sync.Mutex
 	downActors []actor.ActorID
@@ -268,10 +245,9 @@ func newHomeRigWithAuthorities(t *testing.T, leasePing, leaseTTL time.Duration, 
 		daemonAuthority = decorateDaemon(daemonAuthority)
 	}
 	r := &homeRig{
-		rt:         rt,
-		deliver:    del,
-		minter:     &stubMinter{},
-		membership: &stubMembership{},
+		rt:      rt,
+		deliver: del,
+		minter:  &stubMinter{},
 	}
 	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, _ error) {
 		r.mu.Lock()
@@ -285,8 +261,7 @@ func newHomeRigWithAuthorities(t *testing.T, leasePing, leaseTTL time.Duration, 
 		LeasePing:       leasePing,
 		LeaseTTL:        leaseTTL,
 		Declarations:    authorities,
-		Composition:     authorities,
-		Registry:        authorities,
+		Authority:       authorities,
 		DaemonAuthority: daemonAuthority,
 		ActorLock:       func(actor.ActorID) func() { return func() {} },
 		PortIndex:       portIndex,
@@ -322,7 +297,7 @@ func (f planProviderFunc) Plan(ctx context.Context, id string) ([]platform.PlanA
 
 // --- tests ---
 
-func TestPlanPull_UsesAcceptedBoundIdentityAndCarriesEpoch(t *testing.T) {
+func TestPlanPull_UsesAcceptedBoundIdentityAndCarriesVersion(t *testing.T) {
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
 	acc := newTestAcceptor(t, link.Config{
 		Minter: &stubMinter{}, Runtime: rt, ChannelID: testChannelID,
@@ -331,7 +306,7 @@ func TestPlanPull_UsesAcceptedBoundIdentityAndCarriesEpoch(t *testing.T) {
 				t.Fatalf("provider daemon = %q", daemonID)
 			}
 			return []platform.PlanActor{{InstanceID: "tool:a", Class: "echo", Kind: actor.KindTool,
-				Binding: actor.BindingRuntimeInboundViaRelay, Epoch: 9}}, nil
+				Binding: actor.BindingRuntimeInboundViaRelay, Version: 9}}, nil
 		}),
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
@@ -347,7 +322,7 @@ func TestPlanPull_UsesAcceptedBoundIdentityAndCarriesEpoch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(plan) != 1 || plan[0].InstanceID != "tool:a" || plan[0].Epoch != 9 || plan[0].Binding != actor.BindingRuntimeInboundViaRelay {
+	if len(plan) != 1 || plan[0].InstanceID != "tool:a" || plan[0].Version != 9 || plan[0].Binding != actor.BindingRuntimeInboundViaRelay {
 		t.Fatalf("plan = %+v", plan)
 	}
 }
@@ -370,7 +345,7 @@ func TestEndToEnd_AttachDispatchEmit(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -429,7 +404,7 @@ func TestHomeCloseQuietTeardown_NoDownEdge(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -499,7 +474,7 @@ func testQuietCloseDuringPortPublication(t *testing.T, quietClose func(*homeRig)
 	defer releaseHook()
 	openDone := make(chan error, 1)
 	go func() {
-		_, openErr := d.OpenStream(context.Background(), toolID, 0, func(*message.Envelope) error { return nil }, func(message.ID) {})
+		_, openErr := d.OpenStream(context.Background(), toolID, 0, "", func(*message.Envelope) error { return nil }, func(message.ID) {})
 		openDone <- openErr
 	}()
 	<-entered
@@ -560,7 +535,7 @@ func testQuietCloseBeforePortCommit(t *testing.T, quietClose func(*homeRig) erro
 	defer releaseHook()
 	openDone := make(chan error, 1)
 	go func() {
-		_, openErr := d.OpenStream(context.Background(), toolID, 0, func(*message.Envelope) error { return nil }, func(message.ID) {})
+		_, openErr := d.OpenStream(context.Background(), toolID, 0, "", func(*message.Envelope) error { return nil }, func(message.ID) {})
 		openDone <- openErr
 	}()
 	<-entered
@@ -605,7 +580,7 @@ func TestHomeCloseActorHandshakeTimeoutRemainsQuietAndCountsOnce(t *testing.T) {
 	defer func() { _ = d.Close() }()
 	openDone := make(chan error, 1)
 	go func() {
-		_, openErr := d.OpenStream(context.Background(), toolID, 0, func(*message.Envelope) error { return nil }, func(message.ID) {})
+		_, openErr := d.OpenStream(context.Background(), toolID, 0, "", func(*message.Envelope) error { return nil }, func(message.ID) {})
 		openDone <- openErr
 	}()
 	<-entered
@@ -656,7 +631,7 @@ func TestDispatchInOpenStreamWindow_NotDropped(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -727,7 +702,7 @@ func TestPostStartOpenStream_StartStreamDrives(t *testing.T) {
 	defer h.Stop()
 
 	// Initial batch: open + spawn the first actor, then Start launches its loop.
-	armsInit, err := d.OpenStream(context.Background(), initID, 0, func(env *message.Envelope) error {
+	armsInit, err := d.OpenStream(context.Background(), initID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(initID, env)
 	}, func(requestID message.ID) { h.CancelRequest(initID, requestID) })
 	if err != nil {
@@ -738,7 +713,7 @@ func TestPostStartOpenStream_StartStreamDrives(t *testing.T) {
 
 	// Post-Start open: the second actor's stream comes up AFTER Start, so Start's
 	// batch snapshot never covered it — its loop is the ring's to launch.
-	armsLate, err := d.OpenStream(context.Background(), lateID, 0, func(env *message.Envelope) error {
+	armsLate, err := d.OpenStream(context.Background(), lateID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(lateID, env)
 	}, func(requestID message.ID) { h.CancelRequest(lateID, requestID) })
 	if err != nil {
@@ -798,7 +773,7 @@ func TestEndToEnd_CellDeath_ClosesStreamToOnDown(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -843,7 +818,7 @@ func TestLease_NoTraffic_ExpiresToDown(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -897,7 +872,7 @@ func TestEndToEnd_CancelRequest_CrossWire(t *testing.T) {
 	defer h.Stop()
 
 	cell := &blockingCell{started: make(chan struct{}), cancelled: make(chan struct{})}
-	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -964,7 +939,7 @@ func TestReattach_FullSetReplace(t *testing.T) {
 	noopDispatch := func(*message.Envelope) error { return nil }
 
 	// toolB was never declared: its stream must not open.
-	if _, err := d.OpenStream(context.Background(), toolB, 0, noopDispatch, nil); err == nil {
+	if _, err := d.OpenStream(context.Background(), toolB, 0, "", noopDispatch, nil); err == nil {
 		t.Fatal("OpenStream(toolB) succeeded before any declaration — want rejected")
 	}
 
@@ -975,7 +950,7 @@ func TestReattach_FullSetReplace(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Reattach (add): %v", err)
 	}
-	if _, err := d.OpenStream(context.Background(), toolB, 0, noopDispatch, nil); err != nil {
+	if _, err := d.OpenStream(context.Background(), toolB, 0, "", noopDispatch, nil); err != nil {
 		t.Fatalf("OpenStream(toolB) after Reattach: %v", err)
 	}
 
@@ -986,7 +961,7 @@ func TestReattach_FullSetReplace(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Reattach (shrink): %v", err)
 	}
-	if _, err := d.OpenStream(context.Background(), toolA, 0, noopDispatch, nil); err == nil {
+	if _, err := d.OpenStream(context.Background(), toolA, 0, "", noopDispatch, nil); err == nil {
 		t.Fatal("OpenStream(toolA) succeeded after it fell out of the Reattach set — want rejected")
 	}
 }
@@ -1038,10 +1013,9 @@ func TestReattach_TerminalRejectKillsLink(t *testing.T) {
 func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 	rt, del := actorrt.New(actorrt.Config{Parent: context.Background()})
 	r := &homeRig{
-		rt:         rt,
-		deliver:    del,
-		minter:     &stubMinter{},
-		membership: &stubMembership{},
+		rt:      rt,
+		deliver: del,
+		minter:  &stubMinter{},
 	}
 	rt.WatchDown(watcherFunc(func(_ context.Context, id actor.ActorID, _ actorrt.Incarnation, _ error) {
 		r.mu.Lock()
@@ -1089,7 +1063,7 @@ func TestHardLinkDrop_DownEdgeDecaysDevicePresence(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -1182,7 +1156,7 @@ func TestEndToEnd_DespawnID_CrossWireKill(t *testing.T) {
 	// The daemon's own kill wiring: a host KindDespawn frame despawns the local
 	// cell in the daemon's runtime (exactly platform/compute/ring.go's compute.Run).
 
-	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -1260,7 +1234,7 @@ func TestKickDaemon_ClosesAllLinksIncludingHalfAttached(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {
@@ -1369,7 +1343,7 @@ func TestControlDeath_LeavesNoZombieOnlineAccount(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms, err := d.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms, err := d.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, func(requestID message.ID) { h.CancelRequest(toolID, requestID) })
 	if err != nil {

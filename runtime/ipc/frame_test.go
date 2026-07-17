@@ -17,7 +17,7 @@ import (
 
 // --- closed Kind set ------------------------------------------------------
 
-// The port-wire Kind set is closed at exactly 16 members with fixed wire
+// The port-wire Kind set is closed at exactly 22 members with fixed wire
 // spellings. Every kind has a real producer + state transition; the dead
 // frames (fence / shutdown / heartbeat / control) are gone. KindCancel is the
 // request-scope of cancel(scope) crossing the wire (host→remote); KindCancelRequest
@@ -48,14 +48,20 @@ func TestKindClosedSet(t *testing.T) {
 		KindDespawn:       "despawn",
 		KindDeliverResult: "deliver_result",
 		KindCancelRequest: "cancel_request",
+		KindSpawn:         "spawn",
+		KindSpawnAck:      "spawn_ack",
+		KindEnd:           "end",
+		KindEndAck:        "end_ack",
+		KindIdle:          "idle",
+		KindIdleAck:       "idle_ack",
 	}
 	for k, wire := range want {
 		if string(k) != wire {
 			t.Errorf("Kind %q wire form = %q, want %q", k, string(k), wire)
 		}
 	}
-	if len(want) != 16 {
-		t.Fatalf("expected exactly 16 kinds, guard lists %d", len(want))
+	if len(want) != 22 {
+		t.Fatalf("expected exactly 22 kinds, guard lists %d", len(want))
 	}
 }
 
@@ -175,6 +181,24 @@ func TestWriteOmitsEmptyPayload(t *testing.T) {
 	body := buf.Bytes()[4:]
 	if strings.Contains(string(body), "payload") {
 		t.Fatalf("empty-payload frame emitted payload field: %s", body)
+	}
+}
+
+func TestSpawnPayloadPreservesTaggedPlacementHost(t *testing.T) {
+	want := SpawnPayload{
+		Nonce: "nonce-1", Kind: actor.KindAgent, Class: "worker", NameHint: "child",
+		Config: json.RawMessage(`{"x":1}`), PlacementKind: "daemon", PlacementHost: "daemon-target",
+	}
+	raw := mustMarshal(t, want)
+	var got SpawnPayload
+	mustUnmarshal(t, raw, &got)
+	if got.Nonce != want.Nonce || got.Kind != want.Kind || got.Class != want.Class ||
+		got.NameHint != want.NameHint || string(got.Config) != string(want.Config) ||
+		got.PlacementKind != want.PlacementKind || got.PlacementHost != want.PlacementHost {
+		t.Fatalf("spawn payload=%+v want=%+v", got, want)
+	}
+	if bytes.Contains(raw, []byte(`"placement":`)) {
+		t.Fatalf("legacy kind-only placement field returned: %s", raw)
 	}
 }
 

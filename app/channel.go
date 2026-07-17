@@ -42,16 +42,16 @@ func (a *App) seedOpenedChannel(ctx context.Context, h *home.Home, chID channel.
 		a.rollbackOpenedChannel(ctx, chID, dbPath)
 		return "", "", err
 	}
-	boost, _, _, err := h.IntroduceComposition(ctx, storespec.CompositionIntroduce{
-		DeclID: "sys:boost", Principal: defaultAgentPrincipal, Class: defaultBoostClass,
-		Placement: storespec.PlacementServer, MakeDefault: true,
-		Kind: actor.KindAgent, At: at,
+	boost, err := h.Declare(ctx, home.DeclareRequest{
+		SourceDeclID: "sys:boost", Principal: defaultAgentPrincipal, Class: defaultBoostClass,
+		Placement: storespec.NewServerPlacement(), MakeDefault: true,
+		Kind: actor.KindAgent, CreatedAt: at,
 	})
 	if err != nil {
 		a.rollbackOpenedChannel(ctx, chID, dbPath)
 		return "", "", err
 	}
-	return creatorID, boost.InstanceID, nil
+	return creatorID, boost.Row.ID, nil
 }
 
 func (a *App) handleListChannels(c *gin.Context) {

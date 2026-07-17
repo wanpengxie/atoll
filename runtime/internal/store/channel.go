@@ -30,10 +30,15 @@ type ChannelStores struct {
 	// reader never receives any membership write). Each face a consumer needs
 	// is its own explicit field over the one concrete actorRegistry; nothing
 	// downstream may type-assert one face back into another.
-	Registry    storespec.Registry               // membership READS only (Lookup/Exists/ListActive)
-	Principals  storespec.PrincipalRegistry      // principal-axis read (LookupActivePrincipal, admission path)
-	Membership  storespec.MembershipControlPlane // membership writes: Admit/Deregister + ApplyMemberTransitions
-	Composition storespec.CompositionControlPlane
+	Registry       storespec.Registry          // membership READS only (Lookup/Exists/ListActive)
+	Principals     storespec.PrincipalRegistry // principal-axis read (LookupActivePrincipal, admission path)
+	DurableHistory storespec.DurableHistory
+	Declared       storespec.DeclaredControlReader
+	DeclAdmission  storespec.DeclAdmissionStore
+	DeclVersions   storespec.DeclVersionStore
+	Cascade        storespec.CascadeStore
+	Routing        storespec.ChannelRouting
+	RestartJournal storespec.RestartJournal
 
 	// Plane-2 (access/resource) implementations over the SAME channel db. These
 	// are the door's collaborators, handed up as resourcespec CONTRACTS (never
@@ -90,19 +95,24 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	msgs := newMessages(db, onCommit)
 	reg := newActorRegistry(db, channelID, onCommit)
 	cs := &ChannelStores{
-		db:          db,
-		Log:         msgs,
-		Query:       msgs,
-		Expiry:      msgs,
-		Requests:    newRequestLookup(msgs),
-		Registry:    reg,
-		Principals:  reg,
-		Membership:  reg,
-		Composition: newCompositionStore(db, reg),
-		Resources:   newResourceRegistry(db),
-		KVDriver:    newKVDriver(db),
-		State:       newStateStore(db),
-		timers:      newTimerStore(db),
+		db:             db,
+		Log:            msgs,
+		Query:          msgs,
+		Expiry:         msgs,
+		Requests:       newRequestLookup(msgs),
+		Registry:       reg,
+		Principals:     reg,
+		DurableHistory: reg,
+		Declared:       reg,
+		DeclAdmission:  reg,
+		DeclVersions:   reg,
+		Cascade:        reg,
+		Routing:        reg,
+		RestartJournal: reg,
+		Resources:      newResourceRegistry(db),
+		KVDriver:       newKVDriver(db),
+		State:          newStateStore(db),
+		timers:         newTimerStore(db, onCommit),
 	}
 	return cs, nil
 }

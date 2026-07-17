@@ -11,7 +11,9 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -35,45 +37,170 @@ func openWhiteboxHome(t *testing.T) *Home {
 	return h
 }
 
-// TestAdmit_ReAdmitPreservesHost pins the Admit no-op fix (#3): a re-Admit of an
-// ALREADY-active member (an idempotent introduce retry) must NOT reset a
-// daemon-stamped Host back to "" — placement authority is the attach/plan path's,
-// never Admit's. Before the fix, Admit unconditionally applied a Host="" row, and
-// applyMemberAddTx's host-diff UPDATE clobbered the live placement.
-func TestAdmit_ReAdmitPreservesHost(t *testing.T) {
+func TestAdmitIsHumanOnlyAndIdempotentlyPublishesAuthority(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
 	principal := "rev"
-
-	// Genesis Admit → active row, Host="".
-	id, err := h.Admit(ctx, actor.KindAgent, principal)
+	if _, err := h.Admit(ctx, actor.KindAgent, principal); !errors.Is(err, ErrAdmitKind) {
+		t.Fatalf("non-human Admit err=%v, want ErrAdmitKind", err)
+	}
+	id, err := h.Admit(ctx, actor.KindHuman, principal)
 	if err != nil {
 		t.Fatalf("Admit genesis: %v", err)
 	}
-	// Stamp a daemon Host (what an attach does): active row + host-diff → UPDATE host.
-	if err := h.cs.Membership.ApplyMemberTransitions(ctx, []storespec.MemberActorAdd{{
-		ID: id, Kind: actor.KindAgent, Host: "daemon-1", At: h.nowMs(),
-	}}, nil); err != nil {
-		t.Fatalf("stamp host: %v", err)
-	}
-	if rec, ok, _ := h.cs.Registry.Lookup(ctx, id); !ok || rec.Host != "daemon-1" {
-		t.Fatalf("precondition: Host not stamped, rec=%+v ok=%v", rec, ok)
-	}
-
-	// Idempotent re-Admit — must be a pure no-op, Host untouched.
-	reAdmitted, err := h.Admit(ctx, actor.KindAgent, principal)
+	reAdmitted, err := h.Admit(ctx, actor.KindHuman, principal)
 	if err != nil {
 		t.Fatalf("re-Admit: %v", err)
 	}
 	if reAdmitted != id {
 		t.Fatalf("idempotent re-Admit id=%q want %q", reAdmitted, id)
 	}
-	rec, ok, err := h.cs.Registry.Lookup(ctx, id)
+	rec, ok, err := h.cs.Authority.LookupActive(ctx, id)
 	if err != nil || !ok {
 		t.Fatalf("Lookup after re-Admit: ok=%v err=%v", ok, err)
 	}
-	if rec.Host != "daemon-1" {
-		t.Fatalf("re-Admit clobbered Host to %q, want daemon-1 preserved (#3)", rec.Host)
+	if rec.Class != "human" || rec.CurrentDeclVersion != 1 || rec.Placement != storespec.NewServerPlacement() {
+		t.Fatalf("authority row = %+v", rec)
+	}
+}
+
+func TestDeclarationEditApplyPublishesCurrentAndKeepsLatestDistinct(t *testing.T) {
+	h := openWhiteboxHome(t)
+	ctx := context.Background()
+	id := actor.ActorID("agent:decl-verbs:1")
+	in := storespec.AdmitBundle{
+		ID: id, Kind: actor.KindAgent, Principal: "decl-verbs", Binding: actor.BindingRuntimeInboundViaRelay,
+		Class: "agent.v1", Placement: storespec.NewServerPlacement(), SourceDeclID: "source-v1", CreatedAt: 1,
+	}
+	if _, err := h.cs.DeclAdmission.AdmitDeclared(ctx, in); err != nil {
+		t.Fatal(err)
+	}
+	row, ok, err := h.cs.Declared.LookupDeclaredActive(ctx, id)
+	if err != nil || !ok {
+		t.Fatalf("lookup admitted: ok=%v err=%v", ok, err)
+	}
+	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}}) {
+		t.Fatal("publish admitted row")
+	}
+	edited, err := h.EditDeclaration(ctx, storespec.DeclEditBundle{
+		ActorID: id, Class: "agent.v2", Config: nil, Placement: storespec.NewServerPlacement(),
+		SourceDeclID: "source-v2", CreatedAt: 2,
+	})
+	if err != nil || edited.CurrentDeclVersion != 2 || edited.Config != nil {
+		t.Fatalf("edit = %+v err=%v", edited, err)
+	}
+	current, latest, err := h.DeclarationVersions(ctx, id)
+	if err != nil || current.CurrentDeclVersion != 1 || latest.CurrentDeclVersion != 2 {
+		t.Fatalf("versions before apply current=%+v latest=%+v err=%v", current, latest, err)
+	}
+	if verdict, err := h.controlIndex.CheckAuthor(ctx, storespec.AuthorStamp{ID: id, BirthVersion: 2}); err != nil || verdict != storespec.AuthorVersionStale {
+		t.Fatalf("edited version acquired authority before apply: verdict=%v err=%v", verdict, err)
+	}
+	applied, err := h.ApplyDeclaration(ctx, id, 2)
+	if err != nil || applied.CurrentDeclVersion != 2 {
+		t.Fatalf("apply = %+v err=%v", applied, err)
+	}
+	if verdict, err := h.controlIndex.CheckAuthor(ctx, storespec.AuthorStamp{ID: id, BirthVersion: 2}); err != nil || verdict != storespec.AuthorOK {
+		t.Fatalf("apply was not immediately published: verdict=%v err=%v", verdict, err)
+	}
+	if _, err := h.ApplyDeclaration(ctx, id, 1); !errors.Is(err, ErrApplyVersionRegress) {
+		t.Fatalf("regress err=%v", err)
+	}
+	if _, err := h.ApplyDeclaration(ctx, id, 3); !errors.Is(err, ErrApplyVersionNotFound) {
+		t.Fatalf("missing err=%v", err)
+	}
+	if err := h.Remove(ctx, id); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.ApplyDeclaration(ctx, id, 2); !errors.Is(err, ErrApplyActorEnded) {
+		t.Fatalf("ended err=%v", err)
+	}
+}
+
+func TestSystemDeclarationApplyIsForbidden(t *testing.T) {
+	h := openWhiteboxHome(t)
+	if _, err := h.ApplyDeclaration(context.Background(), actor.SystemActorID, 2); !errors.Is(err, ErrApplySystemForbidden) {
+		t.Fatalf("system apply err=%v", err)
+	}
+}
+
+func TestRealPensFenceAppliedAndEndedDeclaredAndRunIdentities(t *testing.T) {
+	h := openWhiteboxHome(t)
+	ctx := context.Background()
+	declared, err := h.Declare(ctx, DeclareRequest{
+		SourceDeclID: "source:pen-gate", Principal: "pen-gate-declared", Kind: actor.KindAgent,
+		Class: "pen-gate", Placement: storespec.NewServerPlacement(), TIdle: int64((time.Hour) / time.Millisecond),
+		CreatedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeEvent := func(pen harness.Pen, id string) harness.WriteResult {
+		t.Helper()
+		now := time.Now().UnixMilli()
+		res, writeErr := pen.Write(ctx, &message.Envelope{
+			ID: message.ID(id), Kind: message.KindEvent, Type: "gate.probe",
+			Audience: message.Audience{actor.SystemActorID}, Visibility: message.VisibilitySystem,
+			TS: now, TSReceived: now,
+		})
+		if writeErr != nil {
+			t.Fatalf("write %s: %v", id, writeErr)
+		}
+		return res
+	}
+
+	v1 := h.minter.Mint(declared.Row.ID, declared.Row.Kind, h.channelID, 1)
+	if res := writeEvent(v1, "declared-v1-before-apply"); !res.Accepted() {
+		t.Fatalf("v1 before apply rejected: %+v", res)
+	}
+	edited, err := h.EditDeclaration(ctx, storespec.DeclEditBundle{
+		ActorID: declared.Row.ID, Class: declared.Row.Class, Placement: declared.Row.Placement,
+		TIdle: declared.Row.TIdle, SourceDeclID: declared.Row.SourceDeclID, CreatedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.ApplyDeclaration(ctx, declared.Row.ID, edited.CurrentDeclVersion); err != nil {
+		t.Fatal(err)
+	}
+	if res := writeEvent(v1, "declared-v1-after-apply"); res.RejectReason != harness.HarnessAuthorVersionStale {
+		t.Fatalf("old declared pen after apply=%+v", res)
+	}
+	v2 := h.minter.Mint(declared.Row.ID, declared.Row.Kind, h.channelID, edited.CurrentDeclVersion)
+	if res := writeEvent(v2, "declared-v2-before-end"); !res.Accepted() {
+		t.Fatalf("current declared pen rejected: %+v", res)
+	}
+	if err := h.Remove(ctx, declared.Row.ID); err != nil {
+		t.Fatal(err)
+	}
+	if res := writeEvent(v2, "declared-v2-after-end"); res.RejectReason != harness.HarnessAuthorNotMember {
+		t.Fatalf("ended declared pen=%+v", res)
+	}
+
+	parent, err := h.Admit(ctx, actor.KindHuman, "pen-gate-parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := h.forkAdmission(ctx, parent, 1, actorrt.ForkSpec{
+		Kind: actor.KindAgent, Class: "pen-gate-child",
+	}, "pen-gate-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runPen := h.minter.Mint(child, actor.KindAgent, h.channelID, 1)
+	if res := writeEvent(runPen, "run-v1-before-end"); !res.Accepted() {
+		t.Fatalf("run pen rejected: %+v", res)
+	}
+	if err := h.endForkChild(ctx, parent, child, "pen-gate-end"); err != nil {
+		t.Fatal(err)
+	}
+	if res := writeEvent(runPen, "run-v1-after-end"); res.RejectReason != harness.HarnessAuthorNotMember {
+		t.Fatalf("ended run pen=%+v", res)
+	}
+
+	// Unrelated declaration churn must never stale the system anchor's welded v1.
+	if res := writeEvent(h.systemPen, "system-v1-after-declaration-churn"); !res.Accepted() {
+		t.Fatalf("system pen lost v1 authority: %+v", res)
 	}
 }
 
@@ -100,41 +227,12 @@ func TestNoFactoryWarningStateIsPerHome(t *testing.T) {
 	}
 }
 
-// TestPresenceSweep_ClearsBypassDeregOrphan covers the reconciliation backstop
-// used after declaration reconciliation deregisters membership without calling Home.Remove.
-func TestPresenceSweep_ClearsBypassDeregOrphan(t *testing.T) {
-	h := openWhiteboxHome(t)
-	ctx := context.Background()
-	now := time.Unix(100, 0)
-	installControlledPresenceFold(h, &now)
-	id, err := h.Admit(ctx, actor.KindTool, "sweep-orphan")
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.presenceFold.OnObs(ctx, id, actorrt.Incarnation{}, actorrt.ObsKind(introspect.ObsDevicePresence), introspect.MarshalDevicePresence(true))
-	if got := h.PresenceSweptCount(); got != 0 {
-		t.Fatalf("initial swept count = %d", got)
-	}
-	if err := h.cs.Membership.ApplyMemberTransitions(ctx, nil, []storespec.MemberActorRemove{{ID: id, At: now.UnixMilli()}}); err != nil {
-		t.Fatalf("bypass dereg: %v", err)
-	}
-	now = now.Add(2 * time.Second)
-	h.sweepPresence(ctx)
-	if got := h.PresenceSweptCount(); got == 0 {
-		t.Fatal("successful sweep did not expose a non-zero clear count")
-	}
-	snapshot, err := h.View().Snapshot(ctx, id)
-	if err != nil || len(snapshot.L3) != 0 {
-		t.Fatalf("orphan after sweep: snapshot=%+v err=%v", snapshot, err)
-	}
-}
-
 func TestRemoveSnapshotAndReadmitHaveNoPriorTestimony(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
 	now := time.Unix(100, 0)
 	installControlledPresenceFold(h, &now)
-	id, err := h.Admit(ctx, actor.KindAgent, "presence-life")
+	id, err := h.Admit(ctx, actor.KindHuman, "presence-life")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,7 +244,7 @@ func TestRemoveSnapshotAndReadmitHaveNoPriorTestimony(t *testing.T) {
 	if err != nil || snapshot.Member || snapshot.L1Present || len(snapshot.L3) != 0 {
 		t.Fatalf("snapshot after Remove = %+v err=%v", snapshot, err)
 	}
-	readmittedID, err := h.Admit(ctx, actor.KindAgent, "presence-life")
+	readmittedID, err := h.Admit(ctx, actor.KindHuman, "presence-life")
 	if err != nil {
 		t.Fatalf("re-Admit: %v", err)
 	}
@@ -158,38 +256,6 @@ func TestRemoveSnapshotAndReadmitHaveNoPriorTestimony(t *testing.T) {
 	snapshot, err = h.View().Snapshot(ctx, readmittedID)
 	if err != nil || !snapshot.Member || snapshot.L1Present || len(snapshot.L3) != 0 {
 		t.Fatalf("snapshot after same-principal re-Admit = %+v err=%v", snapshot, err)
-	}
-}
-
-type listFailRegistry struct {
-	storespec.Registry
-}
-
-func (listFailRegistry) ListActive(context.Context) ([]storespec.Record, error) {
-	return nil, errors.New("forced ListActive failure")
-}
-
-func TestSweepPresence_ListActiveFailureSkipsWholePass(t *testing.T) {
-	h := openWhiteboxHome(t)
-	ctx := context.Background()
-	now := time.Unix(100, 0)
-	installControlledPresenceFold(h, &now)
-	id, err := h.Admit(ctx, actor.KindAgent, "list-fail-orphan")
-	if err != nil {
-		t.Fatal(err)
-	}
-	h.presenceFold.OnObs(ctx, id, actorrt.Incarnation{}, actorrt.ObsKind(introspect.ObsDevicePresence), introspect.MarshalDevicePresence(true))
-	now = now.Add(2 * time.Second)
-	original := h.cs.Registry
-	h.cs.Registry = listFailRegistry{Registry: original}
-	h.sweepPresence(ctx)
-	if got := h.PresenceSweptCount(); got != 0 {
-		t.Fatalf("failed pass changed swept count to %d", got)
-	}
-	h.cs.Registry = original
-	snapshot, err := h.View().Snapshot(ctx, id)
-	if err != nil || len(snapshot.L3) != 1 {
-		t.Fatalf("failed pass did not preserve testimony: snapshot=%+v err=%v", snapshot, err)
 	}
 }
 

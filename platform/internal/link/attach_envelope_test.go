@@ -15,8 +15,8 @@ func TestValidateAttachEnvelopeProtocolAndDuplicateGates(t *testing.T) {
 		{name: "nil", want: "protocol_too_old"},
 		{name: "old", req: &AttachRequest{Proto: 1}, want: "protocol_too_old"},
 		{name: "duplicate", req: &AttachRequest{Proto: 2, Declarations: []Declaration{
-			{ActorID: "tool:a", Kind: actor.KindTool, Epoch: 1},
-			{ActorID: "tool:a", Kind: actor.KindAgent, Epoch: 2},
+			{ActorID: "tool:a", Kind: actor.KindTool, Version: 1},
+			{ActorID: "tool:a", Kind: actor.KindAgent, Version: 2},
 		}}, want: "duplicate_declaration"},
 		{name: "distinct", req: &AttachRequest{Proto: 2, Declarations: []Declaration{
 			{ActorID: "tool:a", Kind: actor.KindTool},

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -40,15 +41,16 @@ import (
 //   - the REJECT LANE is a third goroutine writing the overloaded terminal
 //     for requests the serve ledger had no room to Admit.
 type engine struct {
-	pen      harness.Pen
-	access   accessdoor.ResourceAccessHandle
-	state    accessdoor.AccessHandle
-	sched    schedule.ScheduleHandle
-	spawn    actorrt.SpawnHandle
-	hooks    Hooks
-	def      Def
-	clockFn  func() time.Time
-	queueCap int
+	pen       harness.Pen
+	access    accessdoor.ResourceAccessHandle
+	state     accessdoor.AccessHandle
+	sched     schedule.ScheduleHandle
+	lifecycle actorrt.LifecycleHandle
+	hooks     Hooks
+	def       Def
+	clockFn   func() time.Time
+	queueCap  int
+	options   Options
 
 	serve *serveLedger
 	call  *callLedger
@@ -81,20 +83,16 @@ const (
 	occupantDead
 )
 
-// forkKind is the Kind a Sys.Fork-minted child is welded with. Sys.Fork's
-// verb table shape (spec §1.2: `sys.Fork(class,nameHint)`) carries no Kind
-// parameter — ForkSpec.Kind is caller-held by design everywhere else in the
-// spawn vocabulary (actorrt.ForkSpec doc), yet Sys itself never learns its
-// OWN Kind (Caps carries no Kind field; New's signature has none either).
-// KindTool is the honest default for "a Proc forked a worker of itself" —
-// documented here as a known v1 scope boundary, not a silent guess: a Proc
-// that needs a different child Kind cannot get one through this verb yet.
-const forkKind = actor.KindTool
-
 // ErrRecvDone is Sys.Recv()'s loop-termination signal (spec §1.2): the
 // occupant is being torn down (Start's lifeCtx is Done) and no further
 // delivery will ever be handed to this Proc.
 var ErrRecvDone = errors.New("actorbase: recv done")
+
+// ErrIdleExit is the stable voluntary-exit cause produced only after an idle
+// approval command reaches the worker in mailbox order.
+var ErrIdleExit = errors.New("actorbase: idle exit")
+
+const idleApprovedType = "\x00actorbase.idle-approved"
 
 // New assembles a live Sys/actorrt.Actor over one incarnation's five-
 // capability bundle (spec §3's out-generation matrix; this IS the "caps→Sys
@@ -103,16 +101,21 @@ var ErrRecvDone = errors.New("actorbase: recv done")
 // Start (spec §1.6: one Proc per incarnation, minted at go-live, not at
 // registration).
 func New(caps actorcaps.Caps, hooks Hooks, def Def) actorrt.Actor {
+	return NewWithOptions(caps, hooks, def, Options{})
+}
+
+func NewWithOptions(caps actorcaps.Caps, hooks Hooks, def Def, options Options) actorrt.Actor {
 	e := &engine{
-		pen:      caps.Pen,
-		access:   caps.Access,
-		state:    caps.State,
-		sched:    caps.Schedule,
-		spawn:    caps.Spawn,
-		hooks:    hooks,
-		def:      def,
-		clockFn:  time.Now,
-		queueCap: 256,
+		pen:       caps.Pen,
+		access:    caps.Access,
+		state:     caps.State,
+		sched:     caps.Schedule,
+		lifecycle: caps.Lifecycle,
+		hooks:     hooks,
+		def:       def,
+		clockFn:   time.Now,
+		queueCap:  256,
+		options:   options,
 	}
 	e.serve = newServeLedger(e.life, e.queueCap)
 	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks, e.closureFault)
@@ -294,8 +297,18 @@ func (e *engine) Receive(_ context.Context, env *message.Envelope) error {
 		}
 		return nil
 	case message.KindRequest:
-		if occupantState(e.occupant.Load()) != occupantRunning || !e.serve.admit(env) {
+		if occupantState(e.occupant.Load()) != occupantRunning {
 			e.offerReject(env)
+			return nil
+		}
+		admitted, existed := e.serve.admitOnce(env)
+		if !admitted {
+			e.offerReject(env)
+			return nil
+		}
+		if existed {
+			// Anchor/boot redelivery of an already-admitted request is an
+			// account no-op, not a second handler invocation.
 			return nil
 		}
 		// Admitted: seat the delivery. The work deque never evicts a seated
@@ -740,24 +753,46 @@ func (e *engine) CancelTimer(id schedule.TimerID) error {
 	return e.sched.Cancel(e.lifeCtx, id)
 }
 
+func (e *engine) AckTimer(msg Msg) error {
+	if e.sched == nil {
+		return ErrUnsupported
+	}
+	const prefix = "timer:"
+	id := string(msg.ID)
+	if !strings.HasPrefix(id, prefix) || len(id) == len(prefix) {
+		return ErrNotTimerMessage
+	}
+	return e.sched.Ack(e.lifeCtx, schedule.TimerID(strings.TrimPrefix(id, prefix)))
+}
+
 // --- Sys: Spawn arm --------------------------------------------------------
 
-func (e *engine) Fork(class, nameHint string, config json.RawMessage) (actor.ActorID, error) {
-	// A daemon-hosted incarnation is minted via link.NewLiveArms, which
-	// leaves Spawn zero (spec §3's known gap: fork does not cross the wire
-	// this period) — a nil e.spawn means "this host has no Spawn arm", which
-	// must answer ErrUnsupported (spec §1.2/§5 DoD④), not nil-pointer-panic.
-	if e.spawn == nil {
+func (e *engine) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
+	// A nil lifecycle arm is an honest capability absence and must answer
+	// ErrUnsupported rather than nil-pointer-panic. Production server and daemon
+	// incarnations both receive a lifecycle arm; the latter relays over the wire.
+	if e.lifecycle == nil {
 		return "", ErrUnsupported
 	}
-	return e.spawn.Fork(actorrt.ForkSpec{Kind: forkKind, Class: class, NameHint: nameHint, Config: config})
+	return e.lifecycle.Fork(e.lifeCtx, spec)
 }
 
 func (e *engine) DespawnChild(id actor.ActorID) error {
-	if e.spawn == nil {
+	if e.lifecycle == nil {
 		return ErrUnsupported
 	}
-	return e.spawn.Despawn(id)
+	return e.lifecycle.DespawnChild(e.lifeCtx, id, "parent_despawn")
+}
+
+func (e *engine) End() error {
+	if e.lifecycle == nil {
+		return ErrUnsupported
+	}
+	err := e.lifecycle.EndSelf(e.lifeCtx)
+	if err == nil && e.lifeCtx != nil {
+		e.occupant.Store(int32(occupantDraining))
+	}
+	return err
 }
 
 // --- Sys: ActorContext -----------------------------------------------------
@@ -789,17 +824,32 @@ func (e *engine) Recv() (Msg, error) {
 		// Drain the deque with priority over ErrRecvDone: a Draining occupant still
 		// finishes everything already handed to it (spec's "worker 排空至 return").
 		if env, ok := e.workQ.pop(); ok {
+			if env.Kind == "" && env.Type == idleApprovedType {
+				return Msg{}, ErrIdleExit
+			}
 			if msg, ok := e.projectWork(env); ok {
 				return msg, nil
 			}
 			continue
 		}
+		var idle <-chan time.Time
+		var timer *time.Timer
+		if e.options.IdleTimeout > 0 && e.options.IdleArbiter != nil && e.serve.len() == 0 {
+			timer = time.NewTimer(e.options.IdleTimeout)
+			idle = timer.C
+		}
 		select {
 		case <-e.workQ.sig:
+			if timer != nil {
+				timer.Stop()
+			}
 			// A push woke us — loop back to pop. (Coalesced: one wake may cover
 			// several pushes; the pop loop drains them all.)
 			continue
 		case <-e.lifeCtx.Done():
+			if timer != nil {
+				timer.Stop()
+			}
 			// Teardown: one last drain attempt (a push may have raced Done) before
 			// signalling the loop to end.
 			if env, ok := e.workQ.pop(); ok {
@@ -809,8 +859,21 @@ func (e *engine) Recv() (Msg, error) {
 				continue
 			}
 			return Msg{}, ErrRecvDone
+		case <-idle:
+			approved, _ := e.options.IdleArbiter.RequestIdle(e.lifeCtx)
+			if approved {
+				e.IdleApproved()
+			}
 		}
 	}
+}
+
+// IdleApproved implements actorrt.IdleCommandReceiver. The sentinel is queued
+// behind all accepted work and is never subject to data overflow eviction.
+func (e *engine) IdleApproved() {
+	env := new(message.Envelope)
+	env.Type = idleApprovedType
+	e.workQ.pushControl(env)
 }
 
 func (e *engine) projectWork(env *message.Envelope) (Msg, bool) {

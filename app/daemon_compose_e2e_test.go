@@ -62,7 +62,10 @@ func (p *e2eLinkPlan) ApplyPlan(rows []platform.PlanActor) error {
 		if err != nil {
 			return err
 		}
-		desired = append(desired, actorrt.DesiredMember{ID: row.InstanceID, Kind: row.Kind, Epoch: row.Epoch})
+		desired = append(desired, actorrt.DesiredMember{
+			ID: row.InstanceID, Kind: row.Kind, Version: row.Version,
+			IdleTimeout: time.Duration(row.TIdleMs) * time.Millisecond, EnsureTicket: row.EnsureTicket,
+		})
 		builders[row.InstanceID] = decl.Factory
 	}
 	p.mu.Lock()
@@ -171,7 +174,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 		}
 	})
 
-	// Durable membership exists as soon as the intent is introduced, so it is
+	// Durable identity truth exists as soon as the intent is introduced, so it is
 	// not a liveness oracle. Wait for the daemon's applied snapshot and actual
 	// factory construction before taking the membership identity baseline.
 	buildDeadline := time.Now().Add(3 * time.Second)
@@ -203,9 +206,9 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	if memberBeforeRestart.ID == "" {
 		t.Fatalf("built daemon actor %s has no canonical membership row", instID)
 	}
-	if memberBeforeRestart.Host != daemonID {
-		t.Fatalf("initial member host = %q, want %q", memberBeforeRestart.Host, daemonID)
-	}
+	// Placement is actor-control authority, not legacy registry metadata. The
+	// accepted daemon-scoped Plan above is the observable projection of that
+	// authority; registry membership intentionally carries no host assignment.
 
 	// An unchanged periodic full-set resync must re-apply/redeclare the same
 	// snapshot without replacing the already-live daemon body.
@@ -217,8 +220,8 @@ func TestDaemonComposition_E2E(t *testing.T) {
 		t.Fatalf("unchanged resync rebuilt actor: build count = %d, want 1", got)
 	}
 
-	// Restart is an epoch transition of the same desired/member identity. The
-	// next resync must expose epoch+1 and replace the daemon body exactly once.
+	// Restart replaces the carrier without mutating declaration truth. The next
+	// plan keeps the version and carries a fresh EnsureTicket.
 	restartPayload, _ := json.Marshal(map[string]any{"instance_id": instID})
 	if _, err := env.app.OperateFaceForTest().Restart(context.Background(), home.OperateRequest{
 		ChannelID: channel.ID(chID), Sender: sender, Payload: restartPayload,
@@ -227,8 +230,9 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	}
 	waitDaemonComposition(t, func() bool {
 		rows, _ := plan.snapshot()
-		return len(rows) == 1 && rows[0].Epoch == planBeforeRestart[0].Epoch+1 && buildCount(actor.ActorID(instID)) == 2
-	}, "epoch restart did not replace the daemon body")
+		return len(rows) == 1 && rows[0].Version == planBeforeRestart[0].Version &&
+			rows[0].EnsureTicket != planBeforeRestart[0].EnsureTicket && buildCount(actor.ActorID(instID)) == 2
+	}, "version restart did not replace the daemon body")
 	actorsAfterRestart, err := env.app.ActorsForTest(channel.ID(chID))
 	if err != nil {
 		t.Fatal(err)
@@ -241,7 +245,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 		}
 	}
 	if !reflect.DeepEqual(memberAfterRestart, memberBeforeRestart) {
-		t.Fatalf("epoch restart changed membership identity:\n before: %#v\n  after: %#v", memberBeforeRestart, memberAfterRestart)
+		t.Fatalf("version restart changed membership identity:\n before: %#v\n  after: %#v", memberBeforeRestart, memberAfterRestart)
 	}
 
 	removePayload, _ := json.Marshal(map[string]any{"instance_id": instID})

@@ -159,7 +159,7 @@ func TestCellMailboxFull(t *testing.T) {
 
 // TestDeliverNotHosted: the substrate reports NotHosted (not a silent
 // nil-success) for an audience member it does not host, so the seam can
-// fast-fail receiver_unavailable. (B4)
+// return a delivery observation; durable closure remains outside the cell. (B4)
 func TestDeliverNotHosted(t *testing.T) {
 	t.Parallel()
 	rt, _ := New(Config{Parent: context.Background()})

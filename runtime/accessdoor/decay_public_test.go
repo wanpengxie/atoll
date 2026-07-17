@@ -20,10 +20,11 @@ import (
 func TestPublicSetArmDayOneMatrix(t *testing.T) {
 	cs := newDecayStore(t)
 	m, err := New(Deps{
-		Registry:   cs.Resources,
-		Drivers:    DriverTable{resourcespec.KindKV: cs.KVDriver},
-		Membership: decayMembership{registry: cs.Registry},
-		State:      cs.State,
+		Registry:  cs.Resources,
+		Drivers:   DriverTable{resourcespec.KindKV: cs.KVDriver},
+		Authority: decayMembership{registry: cs.Registry},
+		Overlay:   &fakeGrantOverlay{},
+		State:     cs.State,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -35,7 +36,7 @@ func TestPublicSetArmDayOneMatrix(t *testing.T) {
 
 	// alice creates r1 — day-1 reachable birth: creator's full-rights grant is
 	// what every day-1 set/revoke below rides.
-	alice := m.Mint(aliceID)
+	alice := m.Mint(accessStamp(aliceID))
 	out, err := alice.Create(context.Background(), "r1", resourcespec.CreateSpec{Kind: resourcespec.KindKV}, []byte("v"))
 	mustAccept(t, out, err)
 
@@ -66,7 +67,7 @@ func TestPublicSetArmDayOneMatrix(t *testing.T) {
 		// read. She can invoke set (she holds set-right) but the escalation
 		// check must deny granting an op she does not herself hold.
 		seedActorGrant(t, cs, "r1", carolID, access.OpWrite, access.OpSet)
-		carolH := m.Mint(carolID)
+		carolH := m.Mint(accessStamp(carolID))
 
 		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: daveID, Ops: []access.Operation{access.OpRead}}
 		out, err := carolH.Invoke(context.Background(), access.OpSet, "r1", nil, g)

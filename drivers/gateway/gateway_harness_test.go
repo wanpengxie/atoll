@@ -30,9 +30,6 @@ import (
 
 type gatewayTestCompositionResolver struct{}
 
-func (gatewayTestCompositionResolver) ResolveComposition(context.Context, channel.ID, storespec.CompositionRecord) (platform.ActorDecl, bool, error) {
-	return platform.ActorDecl{}, false, nil
-}
 func (gatewayTestCompositionResolver) BuildClass(channel.ID, actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool) {
 	return platform.ActorFactory{}, false
 }
@@ -289,6 +286,40 @@ func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) 
 	return h, id
 }
 
+// openDormantDeclaredHomeWired is the no-body variant used by delivery-lane
+// linearization tests. It installs a real durable principal and real
+// Remove→OnMembershipChange wire, but deliberately declares an unresolved class,
+// so Home cannot race the test-owned subject slot with a built-in human
+// interpreter.
+func openDormantDeclaredHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*home.Home, actor.ActorID) {
+	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), string(chID)+".sqlite")
+	h, err := home.Open(home.Config{
+		ChannelID:           chID,
+		DBPath:              dbPath,
+		ReconcileInterval:   time.Hour,
+		CompositionResolver: gatewayTestCompositionResolver{},
+		DaemonAuthority:     gatewayTestDaemonAuthority{},
+		OnMembershipChange:  g.Poke,
+	})
+	if err != nil {
+		t.Fatalf("home.Open(%s): %v", chID, err)
+	}
+	t.Cleanup(func() { _ = h.Close() })
+	declared, err := h.Declare(context.Background(), home.DeclareRequest{
+		SourceDeclID: "gateway-test:" + principal,
+		Principal:    principal,
+		Kind:         actor.KindAgent,
+		Class:        "gateway-test-unresolved",
+		Placement:    storespec.NewServerPlacement(),
+		CreatedAt:    time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("Declare(%s): %v", principal, err)
+	}
+	return h, declared.Row.ID
+}
+
 var testRouting Routing = func(context.Context, channel.ID, message.Kind) ([]actor.ActorID, message.Kind, string, error) {
 	return []actor.ActorID{"test-agent"}, message.KindRequest, "", nil
 }
@@ -384,7 +415,9 @@ func waitFor(t *testing.T, cond func() bool, msg string) {
 func blockingInterpreter(slot *subjectgate.Slot, got chan<- struct{}, release <-chan struct{}) func() {
 	ch, _, rel := slot.AttachInterpreter()
 	stop := make(chan struct{})
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		for {
 			select {
 			case job := <-ch:
@@ -404,7 +437,11 @@ func blockingInterpreter(slot *subjectgate.Slot, got chan<- struct{}, release <-
 			}
 		}
 	}()
-	return func() { close(stop); rel() }
+	return func() {
+		close(stop)
+		rel()
+		<-done
+	}
 }
 
 // admitRows admits n extra humans into h to append n log rows (each Admit = one

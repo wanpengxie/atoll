@@ -31,9 +31,10 @@ import (
 // four wire-flap arms.
 func NewLiveArms(rb *RebindableArms, inc actorrt.Incarnation, host *actorrt.Runtime) actorcaps.Caps {
 	return actorcaps.Caps{
-		Pen:      NewLivePen(rb.Pen(), inc, host),
-		Access:   NewLiveResourceAccess(rb.Access(), inc, host),
-		State:    NewLiveAccess(rb.State(), inc, host),
-		Schedule: NewLiveSchedule(rb.Schedule(), inc, host),
+		Pen:       NewLivePen(rb.Pen(), inc, host),
+		Access:    NewLiveResourceAccess(rb.Access(), inc, host),
+		State:     NewLiveAccess(rb.State(), inc, host),
+		Schedule:  NewLiveSchedule(rb.Schedule(), inc, host),
+		Lifecycle: NewLiveLifecycle(rb.Lifecycle(), inc, host),
 	}
 }

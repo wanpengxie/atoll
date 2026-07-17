@@ -118,12 +118,16 @@ func New(deps Deps) (Minter, *Engine, error) {
 		return nil, nil, errors.New("schedule: Deps.Store required")
 	case deps.Fire == nil:
 		return nil, nil, errors.New("schedule: Deps.Fire required")
+	case deps.DurableFire == nil:
+		return nil, nil, errors.New("schedule: Deps.DurableFire required")
 	case deps.Host == nil:
 		return nil, nil, errors.New("schedule: Deps.Host required")
 	case deps.Revive == nil:
 		return nil, nil, errors.New("schedule: Deps.Revive required")
 	case deps.Clock == nil:
 		return nil, nil, errors.New("schedule: Deps.Clock required")
+	case deps.Authority == nil:
+		return nil, nil, errors.New("schedule: Deps.Authority required")
 	}
 	if deps.Logger == nil {
 		deps.Logger = slog.New(slog.DiscardHandler)
@@ -138,7 +142,7 @@ func New(deps Deps) (Minter, *Engine, error) {
 		transient: make(map[transientKey]struct{}),
 	}
 	e.ctx, e.cancelRun = context.WithCancel(context.Background())
-	return &minter{engine: e}, e, nil
+	return &minter{engine: e, authority: deps.Authority}, e, nil
 }
 
 // Start launches the run-loop goroutine. It does not block; Close joins it.
@@ -555,15 +559,10 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 		e.clearTransient("revive", string(row.AuthorID))
 		env := buildFireEnvelope(row.ID, row.AuthorID, row.Type, row.Payload, message.ID(row.CorrelationID), nowTime)
 		callCtx, cancel = context.WithTimeout(ctx, perFireTimeout)
-		err := e.deps.Fire.Append(callCtx, row.AuthorID, env)
+		outcome, err := e.deps.DurableFire.Fire(callCtx, row, env)
 		cancel()
 		switch {
-		case err == nil || errors.Is(err, ErrDuplicateFire):
-			if _, derr := e.deps.Store.Delete(ctx, row.ID); derr != nil {
-				e.noteStoreErr(time.Now(), "completed_row_delete_failed", derr, "timer_id", string(row.ID))
-				continue
-			}
-			e.noteStoreRecovered(time.Now(), "completed_row_delete_failed")
+		case err == nil && (outcome == timerspec.FireCommitted || outcome == timerspec.FireAlreadyFired || outcome == timerspec.FireCancelled):
 			progress = true
 			e.clearTransient("identity_fire", string(row.ID))
 		case isFireRejected(err):

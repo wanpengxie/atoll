@@ -60,7 +60,7 @@ func TestRebindableArms_FlapContinuity(t *testing.T) {
 	h := newDaemonHost()
 	defer h.Stop()
 
-	arms1, err := d1.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms1, err := d1.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, nil)
 	if err != nil {
@@ -117,7 +117,7 @@ func TestRebindableArms_FlapContinuity(t *testing.T) {
 	}
 	defer func() { _ = d2.Close() }()
 
-	arms2, err := d2.OpenStream(context.Background(), toolID, 0, func(env *message.Envelope) error {
+	arms2, err := d2.OpenStream(context.Background(), toolID, 0, "", func(env *message.Envelope) error {
 		return h.Dispatch(toolID, env)
 	}, nil)
 	if err != nil {
@@ -161,7 +161,7 @@ func TestRuntimeSealRejectsActorArmWithoutKillingWholeLink(t *testing.T) {
 	// embodiments, so this is a live embodiment + live stream the seal below
 	// must not be able to touch. It is the "other actor on the same link"
 	// witness for the no-team-kill assertion at the bottom.
-	siblingArms, err := d.OpenStream(context.Background(), siblingID, 0, func(*message.Envelope) error { return nil }, nil)
+	siblingArms, err := d.OpenStream(context.Background(), siblingID, 0, "", func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream sibling: %v", err)
 	}
@@ -190,7 +190,7 @@ func TestRuntimeSealRejectsActorArmWithoutKillingWholeLink(t *testing.T) {
 	r.rt.Seal()
 
 	open := func() error {
-		arms, err := d.OpenStream(context.Background(), id, 0, func(*message.Envelope) error { return nil }, nil)
+		arms, err := d.OpenStream(context.Background(), id, 0, "", func(*message.Envelope) error { return nil }, nil)
 		if err != nil {
 			return err
 		}

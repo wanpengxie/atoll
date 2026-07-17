@@ -99,6 +99,9 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 			}
 			rt := h.channel.Cells()
 			if rt != nil {
+				if h.liveness != nil {
+					h.liveness.Close()
+				}
 				rt.StopAll()
 				if leaked := rt.DrainZombies(0); len(leaked) > 0 {
 					h.logger.Warn("home.close.zombies_leaked", "channel", h.channelID, "count", len(leaked), "actors", leaked)

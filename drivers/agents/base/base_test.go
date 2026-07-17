@@ -97,22 +97,24 @@ func (s *fakeSys) Emit(msgType string, payload any, audience ...actor.ActorID) (
 	return "emit", nil
 }
 func (s *fakeSys) Call(actor.ActorID, string, any) (actorbase.Pending, error) { return nil, nil }
-func (s *fakeSys) State() actorbase.StateHandle                              { return s.state }
-func (s *fakeSys) Resource() actorbase.ResourceHandle                        { return nil }
+func (s *fakeSys) State() actorbase.StateHandle                               { return s.state }
+func (s *fakeSys) Resource() actorbase.ResourceHandle                         { return nil }
 func (s *fakeSys) After(time.Duration, string, any) (schedule.TimerID, error) {
 	return "", nil
 }
-func (s *fakeSys) CancelTimer(schedule.TimerID) error               { return nil }
-func (s *fakeSys) Fork(string, string, json.RawMessage) (actor.ActorID, error) {
+func (s *fakeSys) CancelTimer(schedule.TimerID) error { return nil }
+func (s *fakeSys) AckTimer(actorbase.Msg) error       { return nil }
+func (s *fakeSys) Fork(actorrt.ForkSpec) (actor.ActorID, error) {
 	return "", nil
 }
-func (s *fakeSys) DespawnChild(actor.ActorID) error                 { return nil }
+func (s *fakeSys) DespawnChild(actor.ActorID) error { return nil }
+func (s *fakeSys) End() error                       { return nil }
 func (s *fakeSys) PublishObs(kind actorrt.ObsKind, _ actorrt.ObsValue) error {
 	s.obs = append(s.obs, kind)
 	return nil
 }
-func (s *fakeSys) Self() actor.ActorID                              { return s.self }
-func (s *fakeSys) Life() context.Context                           { return s.life }
+func (s *fakeSys) Self() actor.ActorID   { return s.self }
+func (s *fakeSys) Life() context.Context { return s.life }
 func (s *fakeSys) Recv() (actorbase.Msg, error) {
 	msg, ok := <-s.inbox
 	if !ok {
@@ -131,8 +133,8 @@ func (s *fakeSys) RespondEnvelope(*message.Envelope, behavior.ResponseSpec) (mes
 func (s *fakeSys) AfterIdentity(time.Duration, string, json.RawMessage) (schedule.TimerID, error) {
 	return "", actorbase.ErrUnsupported
 }
-func (s *fakeSys) CancelTimerIdentity(schedule.TimerID) error         { return actorbase.ErrUnsupported }
-func (s *fakeSys) ResourceIdentity() actorbase.ResourceHandle         { return nil }
+func (s *fakeSys) CancelTimerIdentity(schedule.TimerID) error { return actorbase.ErrUnsupported }
+func (s *fakeSys) ResourceIdentity() actorbase.ResourceHandle { return nil }
 
 var _ actorbase.Sys = (*fakeSys)(nil)
 

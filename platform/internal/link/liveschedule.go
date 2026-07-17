@@ -61,3 +61,10 @@ func (s liveSchedule) Cancel(ctx context.Context, id schedule.TimerID) error {
 	}
 	return s.raw.Cancel(ctx, id)
 }
+
+func (s liveSchedule) Ack(ctx context.Context, id schedule.TimerID) error {
+	if !s.host.IsLive(s.inc) {
+		return ErrScheduleNotLive
+	}
+	return s.raw.Ack(ctx, id)
+}

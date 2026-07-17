@@ -15,12 +15,12 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// TestMembershipCannotAdmitCallerSelectedID pins the type-level boundary: the
-// public membership write contract has no fixed-id insertion operation.
-func TestMembershipCannotAdmitCallerSelectedID(t *testing.T) {
-	typ := reflect.TypeOf((*storespec.MembershipControlPlane)(nil)).Elem()
-	if _, ok := typ.MethodByName("Insert"); ok {
-		t.Fatal("caller-selected membership IDs must be unrepresentable")
+// TestDeclaredAdmissionIsTheOnlyDurableBirthVerb pins the narrowed public
+// durable birth contract after the generic membership writer was removed.
+func TestDeclaredAdmissionIsTheOnlyDurableBirthVerb(t *testing.T) {
+	typ := reflect.TypeOf((*storespec.DeclAdmissionStore)(nil)).Elem()
+	if typ.NumMethod() != 1 || typ.Method(0).Name != "AdmitDeclared" {
+		t.Fatalf("DeclAdmissionStore methods changed: %v", typ)
 	}
 }
 

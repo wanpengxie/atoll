@@ -3,7 +3,6 @@ package runtime
 import (
 	"context"
 
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/internal/store"
@@ -16,11 +15,22 @@ import (
 // storespec interfaces. The raw *sql.DB is confined inside runtime/internal/store;
 // this public type re-exports only the interface handles.
 type ChannelStores struct {
-	Log      storespec.MessageLog
-	Query    storespec.MessageQuery
-	Expiry   storespec.ExpiryQuery
-	Requests storespec.RequestLookup
-	Registry storespec.Registry
+	channelID      channel.ID
+	Log            storespec.MessageLog
+	Query          storespec.MessageQuery
+	Expiry         storespec.ExpiryQuery
+	Requests       storespec.RequestLookup
+	Authority      storespec.ActorAuthority
+	DurableHistory storespec.DurableHistory
+	Declared       storespec.DeclaredControlReader
+	DeclAdmission  storespec.DeclAdmissionStore
+	DeclVersions   storespec.DeclVersionStore
+	Cascade        storespec.CascadeStore
+	Routing        storespec.ChannelRouting
+	RestartJournal storespec.RestartJournal
+	FiredTimers    FiredTimerReader
+	authoritySlot  *actorAuthoritySlot
+	grantOverlay   *accessdoor.GrantOverlaySlot
 
 	// Principals is the principal-axis read face (LookupActivePrincipal — the
 	// admission path's "which active instance embodies this subject" query),
@@ -31,9 +41,6 @@ type ChannelStores struct {
 	// (that assertion is a bypass valve: it voids the interface segregation
 	// for every ChannelStores holder at once — 反旁路结构墙).
 	Principals storespec.PrincipalRegistry
-
-	Membership  storespec.MembershipControlPlane
-	Composition storespec.CompositionControlPlane
 
 	// Access is the plane-2 door's single outward face — the welded AccessMinter.
 	// The resourcespec.Registry / Driver behind it are deliberately NOT re-exported:
@@ -64,38 +71,22 @@ type ChannelStores struct {
 	closer func() error
 }
 
-// channelMembershipCheck adapts the channel's actor-membership registry to the
-// door's MembershipCheck seam (create's container locus + members-grant late
-// binding). It wraps Lookup + Record.IsActive rather than Exists: a deregistered
-// actor still has a row (Exists=true) but is NOT a current member, so member
-// grants must stop resolving for it the moment it deregisters (late binding, R
-// left untouched).
-type channelMembershipCheck struct {
-	registry storespec.Registry
+type (
+	FiredTimerCursor = timerspec.FiredCursor
+	FiredTimerPage   = timerspec.FiredPage
+)
+
+type FiredTimerReader interface {
+	ListFired(context.Context, FiredTimerCursor, int) (FiredTimerPage, error)
 }
 
-func (c channelMembershipCheck) IsMember(ctx context.Context, id actor.ActorID) (bool, error) {
-	rec, ok, err := c.registry.Lookup(ctx, id)
-	if err != nil {
-		return false, err
-	}
-	return ok && rec.IsActive(), nil
+type resourceOutbox struct {
+	resourcespec.ResourceOutbox
+	completion accessdoor.ResourceCompletion
 }
 
-// Lookup adapts storespec.Registry.Lookup to accessdoor.MembershipCheck's
-// placement-routing seam (期11 spec §4.3's policy chain ①): Host only, "not
-// found" collapsed to found=false regardless of whether the row is merely
-// absent or present-but-deregistered (IsActive, mirroring IsMember above —
-// a deregistered actor is not a valid creator-affinity source either).
-func (c channelMembershipCheck) Lookup(ctx context.Context, id actor.ActorID) (string, bool, error) {
-	rec, ok, err := c.registry.Lookup(ctx, id)
-	if err != nil {
-		return "", false, err
-	}
-	if !ok || !rec.IsActive() {
-		return "", false, nil
-	}
-	return rec.Host, true, nil
+func (o resourceOutbox) CommitReservation(ctx context.Context, id string) (bool, error) {
+	return o.completion.CommitReservation(ctx, id)
 }
 
 // Close releases the underlying store resources.
@@ -104,6 +95,17 @@ func (c *ChannelStores) Close() error {
 		return c.closer()
 	}
 	return nil
+}
+
+// BindActorAuthority completes the single Home-owned late binding. All
+// consumers receive Authority before this call and therefore fail closed,
+// never falling back to durable registry state.
+func (c *ChannelStores) BindActorAuthority(authority storespec.ActorAuthority) error {
+	return c.authoritySlot.Bind(authority)
+}
+
+func (c *ChannelStores) BindGrantOverlay(overlay accessdoor.GrantOverlay) error {
+	return c.grantOverlay.Bind(overlay)
 }
 
 // OpenChannelOptions tunes the store open.
@@ -160,6 +162,9 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		return nil, err
 	}
 
+	authoritySlot := newActorAuthoritySlot()
+	grantOverlay := accessdoor.NewGrantOverlaySlot()
+
 	// Assemble the whole plane-2 door here: this is the dependency confluence
 	// point — the R + byte implementations come up from the store, the membership
 	// seam wraps the same channel's actor registry. New fail-fasts on an
@@ -168,7 +173,8 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	access, err := accessdoor.New(accessdoor.Deps{
 		Registry:       cs.Resources,
 		Drivers:        accessdoor.DriverTable{resourcespec.KindKV: cs.KVDriver},
-		Membership:     channelMembershipCheck{registry: cs.Registry},
+		Authority:      authoritySlot,
+		Overlay:        grantOverlay,
 		State:          cs.State,
 		ChannelID:      channelID,
 		StorageMounts:  opts.StorageMounts,
@@ -179,19 +185,33 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		_ = cs.Close()
 		return nil, err
 	}
+	completion, err := accessdoor.NewResourceCompletion(cs.Resources)
+	if err != nil {
+		_ = cs.Close()
+		return nil, err
+	}
 
 	return &ChannelStores{
-		Log:         cs.Log,
-		Query:       cs.Query,
-		Expiry:      cs.Expiry,
-		Requests:    cs.Requests,
-		Registry:    cs.Registry,
-		Principals:  cs.Principals,
-		Membership:  cs.Membership,
-		Composition: cs.Composition,
-		Access:      access,
-		Outbox:      cs.Resources,
-		timers:      cs.Timers(),
-		closer:      cs.Close,
+		channelID:      channelID,
+		Log:            cs.Log,
+		Query:          cs.Query,
+		Expiry:         cs.Expiry,
+		Requests:       cs.Requests,
+		Authority:      authoritySlot,
+		DurableHistory: cs.DurableHistory,
+		Declared:       cs.Declared,
+		DeclAdmission:  cs.DeclAdmission,
+		DeclVersions:   cs.DeclVersions,
+		Cascade:        cs.Cascade,
+		Routing:        cs.Routing,
+		RestartJournal: cs.RestartJournal,
+		FiredTimers:    cs.Timers(),
+		authoritySlot:  authoritySlot,
+		grantOverlay:   grantOverlay,
+		Principals:     cs.Principals,
+		Access:         access,
+		Outbox:         resourceOutbox{ResourceOutbox: cs.Resources, completion: completion},
+		timers:         cs.Timers(),
+		closer:         cs.Close,
 	}, nil
 }

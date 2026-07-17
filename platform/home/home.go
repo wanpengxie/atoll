@@ -18,7 +18,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -132,6 +132,13 @@ type Home struct {
 	minter        harness.Minter
 	channel       *channelkit.Channel
 	cs            *runtime.ChannelStores
+	controlIndex  *actorControlIndex
+	liveness      *livenessLedger
+	stateHandles  accessdoor.StateHandleResolver
+	grantOverlay  *actorGrantOverlay
+	forkMu        sync.Mutex
+	forkReceipts  map[forkReceiptKey]forkReceipt
+	usedForkIDs   map[actor.ActorID]struct{}
 	signal        *tap.Signal
 	delivery      *tap.Pump
 	links         *link.Acceptor
@@ -169,6 +176,7 @@ type Home struct {
 	// fairness only — correctness is the level-scan's; restart-from-zero is
 	// harmless). Touched only on the reconcile goroutine, no lock.
 	expiryCursor storespec.ExpiryCursor
+	firedCursor  runtime.FiredTimerCursor
 
 	// factories is the required platform-layer class/id → actor definition
 	// resolver used by fork and activation. The caps weld happens at the platform assembler
@@ -184,26 +192,13 @@ type Home struct {
 	schedMinter schedule.Minter
 	engine      *schedule.Engine
 
-	// desired is the eager-activation reconcile ring's intent source (nil → no
-	// eager activation). prevEagerDesired is the AlwaysOn set the LAST reconcile
-	// tick managed — the deactivation diff is prevEagerDesired − currentDesired,
-	// NEVER actual − desired (actual mixes in system/human/fork-child/daemon-attach
-	// embodiments this ring must never evict). Touched only by the reconcile ticker
-	// goroutine (and the one synchronous startup sweep before that goroutine
-	// launches), so it needs no lock.
-	desired          actorrt.DesiredSource
-	prevEagerDesired map[actor.ActorID]desiredIncarnation
 	// noFactoryWarned is this Home's edge-only log state: one warning per
 	// continuously unresolved actor, cleared when resolution succeeds or the
 	// actor leaves the reconcile set. It is not shared across channel homes.
 	noFactoryWarned map[actor.ActorID]struct{}
-	// builtEpoch is an incarnation account, not desired truth. It is updated
-	// only after this ring successfully builds a body; missing or mismatched
-	// entries force a quiet replace on the next sweep.
-	builtEpoch map[actor.ActorID]int64
-	actorGates actorLifecycleGate
-	indexMu    sync.Mutex
-	portIndex  map[actor.ActorID]homePortEntry
+	actorGates      actorLifecycleGate
+	indexMu         sync.Mutex
+	portIndex       map[actor.ActorID]homePortEntry
 
 	// reconcileStop tears down the closure reconciler ticker (level backstop).
 	reconcileStop   context.CancelFunc

@@ -18,18 +18,23 @@ type memberRegistry struct {
 	lookupErr error
 }
 
-func (m memberRegistry) Lookup(_ context.Context, id actor.ActorID) (storespec.Record, bool, error) {
+func (m memberRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
 	if m.lookupErr != nil {
-		return storespec.Record{}, false, m.lookupErr
+		return storespec.ActorControlRow{}, false, m.lookupErr
 	}
 	if !m.active[id] {
-		return storespec.Record{}, false, nil
+		return storespec.ActorControlRow{}, false, nil
 	}
-	return storespec.Record{ID: id, Kind: actor.KindAgent, DeregisteredAt: 0}, true, nil
+	return storespec.ActorControlRow{ID: id, Kind: actor.KindAgent, CurrentDeclVersion: 1}, true, nil
 }
-func (m memberRegistry) Exists(context.Context, actor.ActorID) (bool, error) { return false, nil }
-func (m memberRegistry) ListActive(context.Context) ([]storespec.Record, error) {
+func (m memberRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, nil
+}
+func (m memberRegistry) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
+	return storespec.WorldDurable, true, m.lookupErr
+}
+func (m memberRegistry) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+	return storespec.AuthorOK, m.lookupErr
 }
 
 // failSys extends the reply-recording double with Fail capture — the operate gate
@@ -95,8 +100,8 @@ func operateMsg(typ string, sender actor.ActorID) actorbase.Msg {
 func TestOperate_MemberAllowed(t *testing.T) {
 	ex := &stubExecutor{result: map[string]string{"ok": "true"}}
 	s := New(Deps{
-		Registry: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
-		Operate:  ex,
+		Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
+		Operate:   ex,
 	})
 	sys := &failSys{}
 	s.handle(sys, operateMsg(TypeRemoveActor, "user:alice"))
@@ -113,8 +118,8 @@ func TestOperate_MemberAllowed(t *testing.T) {
 func TestOperate_NonMemberRejected(t *testing.T) {
 	ex := &stubExecutor{}
 	s := New(Deps{
-		Registry: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
-		Operate:  ex,
+		Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
+		Operate:   ex,
 	})
 	sys := &failSys{}
 	s.handle(sys, operateMsg(TypeIntroduceActor, "user:mallory"))
@@ -130,8 +135,8 @@ func TestOperate_NonMemberRejected(t *testing.T) {
 func TestOperate_ExecutorErrorCoded(t *testing.T) {
 	ex := &stubExecutor{err: &OperateError{Code: "unknown_class", Detail: "no such class"}}
 	s := New(Deps{
-		Registry: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
-		Operate:  ex,
+		Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
+		Operate:   ex,
 	})
 	sys := &failSys{}
 	s.handle(sys, operateMsg(TypeIntroduceActor, "user:alice"))
@@ -143,7 +148,7 @@ func TestOperate_ExecutorErrorCoded(t *testing.T) {
 // TestOperate_NilExecutorInert proves an unfilled injection point synthesizes
 // nothing (no reply, no fail) — the caller's closure reaps it.
 func TestOperate_NilExecutorInert(t *testing.T) {
-	s := New(Deps{Registry: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}}})
+	s := New(Deps{Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}}})
 	sys := &failSys{}
 	s.handle(sys, operateMsg(TypeRestartActor, "user:alice"))
 	if len(sys.replies) != 0 || len(sys.fails) != 0 {

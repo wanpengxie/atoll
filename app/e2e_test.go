@@ -52,7 +52,10 @@ func (p *testPlanSource) ApplyPlan(rows []platform.PlanActor) error {
 		if !ok {
 			continue
 		}
-		members = append(members, actorrt.DesiredMember{ID: row.InstanceID, Kind: row.Kind, Epoch: row.Epoch})
+		members = append(members, actorrt.DesiredMember{
+			ID: row.InstanceID, Kind: row.Kind, Version: row.Version,
+			IdleTimeout: time.Duration(row.TIdleMs) * time.Millisecond, EnsureTicket: row.EnsureTicket,
+		})
 		builds[row.InstanceID] = f
 	}
 	p.members, p.builds = members, builds

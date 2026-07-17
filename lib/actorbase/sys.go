@@ -75,6 +75,7 @@ type Sys interface {
 	// self-authored message after d.
 	After(d time.Duration, msgType string, payload any) (schedule.TimerID, error)
 	CancelTimer(id schedule.TimerID) error
+	AckTimer(msg Msg) error
 
 	// --- Spawn arm --------------------------------------------------
 	// Fork mints a child owned by this incarnation, returning the child's
@@ -82,10 +83,12 @@ type Sys interface {
 	// config is the parent's opaque per-instance委托 for the child (the fork
 	// counterpart of admission's InstanceSpec.Config — the argv/Args a parent
 	// hands its child); substrate passes it through verbatim to the domain's
-	// build table, never interpreting it. A daemon-hosted incarnation returns
-	// ErrUnsupported (spec §3's known gap: fork is a cell-only capability in v1).
-	Fork(class, nameHint string, config json.RawMessage) (actor.ActorID, error)
+	// build table, never interpreting it. Server and daemon incarnations use the
+	// same lifecycle contract; the daemon arm relays this full spec over its port.
+	Fork(spec actorrt.ForkSpec) (actor.ActorID, error)
 	DespawnChild(id actor.ActorID) error
+	// End commits this identity's lifecycle end and fences subsequent effects.
+	End() error
 
 	// --- ActorContext -----------------------------------------------
 	// PublishObs pushes one opaque obs snapshot on the actor-source push
@@ -135,13 +138,14 @@ type Sys interface {
 	ResourceIdentity() ResourceHandle
 }
 
-// ErrUnsupported is returned by a Sys verb that a given host cannot honour —
-// today only daemon-hosted Fork (spec §3's out-generation matrix: the daemon
-// host mints via NewLiveArms, which has no local Runtime.Fork to call
-// through). Not a typed-error constructor family (spec red line: zero typed
-// error constructors) — one sentinel for "this host does not have this verb",
-// tested with errors.Is.
-var ErrUnsupported = errors.New("actorbase: verb unsupported on this host")
+// ErrUnsupported is returned by a Sys verb whose concrete host lacks the
+// required capability (for example, server-hosted file-byte redemption). It is
+// one sentinel rather than a typed-error constructor family and is tested with
+// errors.Is.
+var (
+	ErrUnsupported     = errors.New("actorbase: verb unsupported on this host")
+	ErrNotTimerMessage = errors.New("actorbase: message is not a timer fire")
+)
 
 // ErrSelfCall is submit's fail-fast verdict for a Call/Submit addressed to the
 // caller's OWN id (spec §1.3: "自 Call 自 = 在写请求/登记之前 fail-fast 返错,

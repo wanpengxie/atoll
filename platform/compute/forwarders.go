@@ -2,31 +2,33 @@ package compute
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
-// cellDownWatcher is the daemon's DownWatcher: when a hosted cell dies
-// abnormally, OnDown fires that actor's downHandler (close its stream UP the
-// link). The daemon holds no truth, so it cannot write receiver_unavailable
-// itself — the home port reads EOF and the home's closure author#3 closes
-// in-flight requests.
+// cellDownWatcher is the daemon's DownWatcher. An approved idle exit closes the
+// stream so Home observes the voluntary detach. Every unexpected local death
+// stays daemon-local and enters the supervisor; the stream remains attached and
+// Home's liveness value does not change while the body is rebuilt in place.
 type cellDownWatcher struct {
 	mu   sync.Mutex
 	down map[actor.ActorID]cellDownEntry
 }
 
 type cellDownEntry struct {
-	inc     actorrt.Incarnation
-	handler func(cause string)
+	inc      actorrt.Incarnation
+	wireDown func(cause string)
+	crashed  func(error)
 }
 
 // OnDown implements actorrt.DownWatcher.
@@ -34,18 +36,24 @@ func (w *cellDownWatcher) OnDown(_ context.Context, id actor.ActorID, inc actorr
 	w.mu.Lock()
 	entry, ok := w.down[id]
 	w.mu.Unlock()
-	if ok && entry.inc == inc && entry.handler != nil {
+	if ok && entry.inc == inc {
 		msg := ""
 		if cause != nil {
 			msg = cause.Error()
 		}
-		entry.handler(msg)
+		if errors.Is(cause, actorbase.ErrIdleExit) {
+			if entry.wireDown != nil {
+				entry.wireDown(msg)
+			}
+		} else if entry.crashed != nil {
+			entry.crashed(cause)
+		}
 	}
 }
 
-func (w *cellDownWatcher) install(id actor.ActorID, inc actorrt.Incarnation, handler func(string)) {
+func (w *cellDownWatcher) install(id actor.ActorID, inc actorrt.Incarnation, wireDown func(string), crashed func(error)) {
 	w.mu.Lock()
-	w.down[id] = cellDownEntry{inc: inc, handler: handler}
+	w.down[id] = cellDownEntry{inc: inc, wireDown: wireDown, crashed: crashed}
 	w.mu.Unlock()
 }
 

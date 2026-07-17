@@ -3,15 +3,16 @@ package app_test
 import (
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// TestRouting_DeadDefaultAgentIs503 (S3, DoD): no-audience routing judges the
-// default agent by PRESENCE (View.Stat), not membership (ListActors). A live
-// default routes (201); once its cell is killed the same send is 503 — never the
-// old silent 201 into a black hole.
-func TestRouting_DeadDefaultAgentIs503(t *testing.T) {
+// TestRouting_DefaultAgentRecoversAfterCarrierCrash pins the new liveness
+// contract: an always-on declared identity that loses its local carrier is
+// restarted by the Home supervisor and routing resumes without changing the
+// durable default target.
+func TestRouting_DefaultAgentRecoversAfterCarrierCrash(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
@@ -34,10 +35,15 @@ func TestRouting_DeadDefaultAgentIs503(t *testing.T) {
 		t.Fatalf("kill cell: %v", err)
 	}
 
-	// Brain-dead default AND dead boost floor → the same send is now an error frame
-	// (the ws twin of the 503), not the old silent black hole (ListActors→Stat fix).
-	ack2 := c.sendMessage(map[string]any{"msg_type": "chat.text", "payload": map[string]any{"text": "hi again"}})
-	if ack2["type"] != "error" || ack2["error"] != "unavailable" {
-		t.Fatalf("dead default: want error unavailable, got %v", ack2)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		ack2 := c.sendMessage(map[string]any{"msg_type": "chat.text", "payload": map[string]any{"text": "hi again"}})
+		if ack2["type"] == "ack" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("default did not recover, last frame %v", ack2)
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
 }

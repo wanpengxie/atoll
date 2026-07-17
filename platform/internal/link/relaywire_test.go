@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // The §1.7 capability-parity contract: an out-of-process (port) actor's plane-2
@@ -47,12 +48,12 @@ type fakeAccessMinter struct {
 	calls []fakeAccessCall
 }
 
-func (m *fakeAccessMinter) Mint(caller actor.ActorID) accessdoor.ResourceAccessHandle {
-	return &fakeAccessHandle{m: m, caller: caller, scope: "channel"}
+func (m *fakeAccessMinter) Mint(caller storespec.AuthorStamp) accessdoor.ResourceAccessHandle {
+	return &fakeAccessHandle{m: m, caller: caller.ID, scope: "channel"}
 }
 
-func (m *fakeAccessMinter) MintState(owner actor.ActorID) accessdoor.AccessHandle {
-	return &fakeAccessHandle{m: m, caller: owner, scope: "state"}
+func (m *fakeAccessMinter) MintState(owner storespec.AuthorStamp) accessdoor.AccessHandle {
+	return &fakeAccessHandle{m: m, caller: owner.ID, scope: "state"}
 }
 
 func (m *fakeAccessMinter) record(c fakeAccessCall) {
@@ -115,8 +116,8 @@ type fakeScheduleMinter struct {
 	calls []fakeScheduleCall
 }
 
-func (m *fakeScheduleMinter) Mint(author actor.ActorID) schedule.ScheduleHandle {
-	return &fakeScheduleHandle{m: m, author: author}
+func (m *fakeScheduleMinter) Mint(author storespec.AuthorStamp) schedule.ScheduleHandle {
+	return &fakeScheduleHandle{m: m, author: author.ID}
 }
 
 func (m *fakeScheduleMinter) record(c fakeScheduleCall) {
@@ -142,6 +143,11 @@ func (h *fakeScheduleHandle) Schedule(_ context.Context, req schedule.ScheduleRe
 }
 
 func (h *fakeScheduleHandle) Cancel(_ context.Context, id schedule.TimerID) error {
+	h.m.record(fakeScheduleCall{author: h.author, canceled: id})
+	return nil
+}
+
+func (h *fakeScheduleHandle) Ack(_ context.Context, id schedule.TimerID) error {
 	h.m.record(fakeScheduleCall{author: h.author, canceled: id})
 	return nil
 }
@@ -185,7 +191,7 @@ func dialArms(t *testing.T, r *capsRig, id actor.ActorID) (link.CellArms, *link.
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	arms, err := d.OpenStream(context.Background(), id, 0, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), id, 0, "", func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -204,7 +210,7 @@ func TestAccessArmCellPortParity(t *testing.T) {
 	defer func() { _ = d.Close() }()
 
 	ctx := context.Background()
-	cell := r.access.Mint(toolID) // the in-proc twin: same door, welded directly
+	cell := r.access.Mint(storespec.AuthorStamp{ID: toolID, BirthVersion: 1}) // the in-proc twin
 
 	cases := []struct {
 		name string
@@ -267,7 +273,7 @@ func TestAccessArmPreSendCancelIsDefiniteError(t *testing.T) {
 	cancel()
 
 	// Cell path: synchronous, the cancelled ctx does not manufacture an unknown.
-	cellOut, cellErr := r.access.Mint(toolID).Invoke(cancelled, access.OpRead, "r", []byte("x"), nil)
+	cellOut, cellErr := r.access.Mint(storespec.AuthorStamp{ID: toolID, BirthVersion: 1}).Invoke(cancelled, access.OpRead, "r", []byte("x"), nil)
 	if cellErr != nil || cellOut.RejectReason == access.OutcomeUnknown {
 		t.Fatalf("cell path produced outcome_unknown (err=%v out=%+v) — only the wire may", cellErr, cellOut)
 	}
@@ -330,7 +336,7 @@ func TestScheduleArmCellPortParity(t *testing.T) {
 	ctx := context.Background()
 	req := schedule.ScheduleReq{Bind: schedule.BindIdentity, FireAt: 123, Type: "wake", CorrelationID: "corr-xyz"}
 
-	cellTID, cellErr := r.sched.Mint(toolID).Schedule(ctx, req)
+	cellTID, cellErr := r.sched.Mint(storespec.AuthorStamp{ID: toolID, BirthVersion: 1}).Schedule(ctx, req)
 	if cellErr != nil {
 		t.Fatalf("cell schedule: %v", cellErr)
 	}
@@ -386,7 +392,7 @@ func dialArmsWithMinters(t *testing.T, access accessdoor.AccessMinter, sched sch
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
-	arms, err := d.OpenStream(context.Background(), id, 0, func(*message.Envelope) error { return nil }, nil)
+	arms, err := d.OpenStream(context.Background(), id, 0, "", func(*message.Envelope) error { return nil }, nil)
 	if err != nil {
 		t.Fatalf("OpenStream: %v", err)
 	}
@@ -403,10 +409,10 @@ type blockingAccessMinter struct {
 	once    sync.Once
 }
 
-func (m *blockingAccessMinter) Mint(actor.ActorID) accessdoor.ResourceAccessHandle {
+func (m *blockingAccessMinter) Mint(storespec.AuthorStamp) accessdoor.ResourceAccessHandle {
 	return &blockingAccessHandle{m: m}
 }
-func (m *blockingAccessMinter) MintState(actor.ActorID) accessdoor.AccessHandle {
+func (m *blockingAccessMinter) MintState(storespec.AuthorStamp) accessdoor.AccessHandle {
 	return &blockingAccessHandle{m: m}
 }
 
@@ -450,7 +456,7 @@ type blockingScheduleMinter struct {
 	once    sync.Once
 }
 
-func (m *blockingScheduleMinter) Mint(actor.ActorID) schedule.ScheduleHandle {
+func (m *blockingScheduleMinter) Mint(storespec.AuthorStamp) schedule.ScheduleHandle {
 	return &blockingScheduleHandle{m: m}
 }
 
@@ -466,6 +472,7 @@ func (h *blockingScheduleHandle) Schedule(ctx context.Context, _ schedule.Schedu
 }
 
 func (h *blockingScheduleHandle) Cancel(context.Context, schedule.TimerID) error { return nil }
+func (h *blockingScheduleHandle) Ack(context.Context, schedule.TimerID) error    { return nil }
 
 // TestAccessArmOutcomeUnknownOnTransportDeath exercises outcome_unknown through the
 // PRIMARY real-world producer: the transport dying with an access invoke in flight
