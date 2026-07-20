@@ -53,6 +53,10 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
   ON messages(parent_id)
   WHERE kind = 'response' AND is_terminal = 1;
 
+CREATE UNIQUE INDEX IF NOT EXISTS ux_sysop_completed_correlation
+  ON messages(correlation_id)
+  WHERE kind = 'event' AND type = 'sysop_completed';
+
 -- (v2: actor_cursors table removed. A per-actor durable consumption offset is
 -- NOT substrate truth: only a log-PULL consumer that must resume gap-free needs
 -- one, and that offset is the consumer's own bookkeeping (it knows where it left
@@ -96,8 +100,26 @@ CREATE TABLE IF NOT EXISTS actor_decl_versions (
   desired_host   TEXT NOT NULL DEFAULT '' CHECK(placement='daemon' OR desired_host=''),
   t_idle_ms      INTEGER NOT NULL DEFAULT 0,
   source_decl_id TEXT NOT NULL DEFAULT '',
+	 render_seq     INTEGER NOT NULL DEFAULT 0,
   created_at     INTEGER NOT NULL,
   PRIMARY KEY (actor_id, version)
+);
+
+-- Immutable self-truth written exactly once during ChannelHost provisioning.
+CREATE TABLE IF NOT EXISTS channel_genesis (
+  channel_id         TEXT PRIMARY KEY,
+  type               TEXT NOT NULL,
+  owner_principal    TEXT NOT NULL,
+  parent_channel_id  TEXT,
+  initiator_principal TEXT,
+  created_at         INTEGER NOT NULL
+);
+
+-- Channel-local daemon binding truth. Live link attachment is deliberately a
+-- separate observation maintained by the link acceptor.
+CREATE TABLE IF NOT EXISTS channel_daemon_bindings (
+  daemon_id   TEXT PRIMARY KEY,
+  attached_at INTEGER NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS channel_routing (
@@ -156,6 +178,8 @@ CREATE TABLE IF NOT EXISTS resources (
   placement_daemon_id   TEXT NOT NULL DEFAULT '', -- explicit routing column: which daemon's Streamer holds the bytes; '' for kv
   placement_coord       TEXT NOT NULL DEFAULT '', -- opaque storage handle, server-registry-generated (§1.6); '' for kv; NEVER crosses Stat/List to a caller (§3.6 red line, enforced one layer up)
   created_by            TEXT NOT NULL DEFAULT '', -- durable creator actor id; PURE AUDIT column, not the authorization predicate (authorization = channel owner root OR grants in resource_grants)
+  source_channel_id     TEXT,
+  source_resource_id    TEXT,
   created_at            INTEGER NOT NULL,
   is_dir                INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)) -- file BYTE-SHAPE bit (the inode's S_IFDIR analogue): 1 = directory-shaped file resource (workspace, bytes = a whole tree委托真fs, Open→os.Root lease句柄), 0 = regular blob (Open→single-file staging句柄) / kv (always 0). Structural boolean integrity, KEEPS its CHECK (same discipline as is_terminal); this is the door's Open ROUTING truth, read at resolve, never a leaf the daemon re-derives from disk
 );
@@ -292,6 +316,8 @@ var ChannelLocalTables = []string{
 	"messages",
 	"actor_registry",
 	"actor_decl_versions",
+	"channel_genesis",
+	"channel_daemon_bindings",
 	"channel_routing",
 	"restart_applied",
 	"restart_attempts",

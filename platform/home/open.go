@@ -111,6 +111,22 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: open channel store: %w", err)
 	}
 	h.cs = cs
+	if cfg.Bootstrap && cfg.Genesis != nil {
+		if err := cs.Genesis.CreateGenesis(ctx, *cfg.Genesis); err != nil {
+			return nil, fmt.Errorf("platform: write channel genesis: %w", err)
+		}
+	}
+	var storedGenesis *storespec.ChannelGenesis
+	if cfg.ExpectedGenesis != nil {
+		got, found, err := cs.Genesis.ReadGenesis(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("platform: read channel genesis: %w", err)
+		}
+		if !found || got.ChannelID != cfg.ExpectedGenesis.ChannelID || got.Type != cfg.ExpectedGenesis.Type {
+			return nil, fmt.Errorf("platform: schema incompatible: channel genesis mismatch")
+		}
+		storedGenesis = &got
+	}
 
 	// 3. Durable genesis and authority boot. Every durable identity, including
 	// the intrinsic system actor, enters through the same registry+decl+event
@@ -133,13 +149,18 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 	if !cfg.Bootstrap {
 		owners := 0
+		ownerPrincipal := ""
 		for _, row := range bootRows {
 			if row.Role == storespec.RoleOwner {
 				owners++
+				ownerPrincipal = row.Principal
 			}
 		}
 		if owners != 1 {
 			return nil, fmt.Errorf("platform: normal open requires exactly one active channel owner (got %d)", owners)
+		}
+		if storedGenesis != nil && ownerPrincipal != storedGenesis.OwnerPrincipal {
+			return nil, fmt.Errorf("platform: owner invariant: registry owner does not match genesis")
 		}
 	}
 	bootEntries := make([]controlEntry, 0, len(bootRows))

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
@@ -38,6 +39,7 @@ type ChannelStores struct {
 	Cascade        storespec.CascadeStore
 	Routing        storespec.ChannelRouting
 	RestartJournal storespec.RestartJournal
+	Genesis        storespec.GenesisStore
 
 	// Plane-2 (access/resource) implementations over the SAME channel db. These
 	// are the door's collaborators, handed up as resourcespec CONTRACTS (never
@@ -107,6 +109,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Cascade:        reg,
 		Routing:        reg,
 		RestartJournal: reg,
+		Genesis:        genesisStore{db: db},
 		Resources:      newResourceRegistry(db),
 		KVDriver:       newKVDriver(db),
 		State:          newStateStore(db),
@@ -116,7 +119,10 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 }
 
 // Close releases the owned *sql.DB. After Close the assembly is unusable.
-func (c *ChannelStores) Close() error { return c.db.Close() }
+func (c *ChannelStores) Close() error {
+	_, checkpointErr := c.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
+	return errors.Join(checkpointErr, c.db.Close())
+}
 
 // Timers exposes the raw timerspec.TimerStore for the one intended reader
 // within the runtime tree — runtime.OpenScheduler (the schedule engine's

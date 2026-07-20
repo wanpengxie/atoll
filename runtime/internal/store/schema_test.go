@@ -62,19 +62,21 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 // actor_cursors are deleted).
 func TestChannelLocalTables_Set(t *testing.T) {
 	want := map[string]bool{
-		"messages":              true,
-		"actor_registry":        true,
-		"actor_decl_versions":   true,
-		"channel_routing":       true,
-		"restart_applied":       true,
-		"restart_attempts":      true,
-		"resources":             true,
-		"resource_grants":       true,
-		"resource_reservations": true,
-		"resource_tombstones":   true,
-		"actor_state":           true,
-		"timers":                true,
-		"timer_dead":            true,
+		"messages":                true,
+		"actor_registry":          true,
+		"actor_decl_versions":     true,
+		"channel_genesis":         true,
+		"channel_daemon_bindings": true,
+		"channel_routing":         true,
+		"restart_applied":         true,
+		"restart_attempts":        true,
+		"resources":               true,
+		"resource_grants":         true,
+		"resource_reservations":   true,
+		"resource_tombstones":     true,
+		"actor_state":             true,
+		"timers":                  true,
+		"timer_dead":              true,
 	}
 	if len(store.ChannelLocalTables) != len(want) {
 		t.Fatalf("ChannelLocalTables=%v want exactly %v", store.ChannelLocalTables, want)

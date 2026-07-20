@@ -59,6 +59,10 @@ var ErrClosed = errors.New("platform: channel home is closed")
 type Config struct {
 	ChannelID channelpkg.ID
 	DBPath    string
+	// Genesis is written exactly once during a bootstrap open. ExpectedGenesis
+	// is the strict self-identity asserted by ChannelHost on a normal open.
+	Genesis         *storespec.ChannelGenesis
+	ExpectedGenesis *storespec.ChannelGenesis
 	// MustExistDB is set when reopening a channel already present in the app
 	// directory. The store then refuses to create a missing file or repair an
 	// incomplete schema. New-channel creation leaves it false.

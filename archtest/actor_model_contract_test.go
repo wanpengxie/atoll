@@ -109,7 +109,7 @@ func TestActorModelBundleCallsitesAreClosed(t *testing.T) {
 	// Call-site keys (DoD 32): file AND enclosing function — a sibling
 	// function in the same file gets no free pass.
 	allowedAdmit := map[string]bool{
-		"../platform/home/census.go:admitHuman":      true,
+		"../platform/home/census.go:admitHuman":       true,
 		"../platform/home/declaration_api.go:Declare": true,
 		"../platform/home/open.go:Open":               true,
 	}
@@ -217,7 +217,10 @@ func TestChannelOwnerProductionChokepointsAreClosed(t *testing.T) {
 	})
 	wantRole := []string{"../platform/home/census.go:AdmitChannelOwner"}
 	wantProtected := []string{"../platform/home/end.go:prepareEndIdentity", "../runtime/internal/store/cascade.go:EndCascade"}
-	wantBootstrap := []string{"../app/app.go:openHome"}
+	// During the host cutover the legacy app assembler and ChannelHost are the
+	// two registered bootstrap constructors. The lifecycle phase removes the
+	// former and tightens this set to ChannelHost alone.
+	wantBootstrap := []string{"../app/app.go:openHome", "../platform/channelhost/channelhost.go:openHome"}
 	sort.Strings(roleAssignments)
 	sort.Strings(protectedReturns)
 	sort.Strings(bootstrapAssignments)
