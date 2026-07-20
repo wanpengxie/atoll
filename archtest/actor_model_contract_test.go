@@ -217,10 +217,7 @@ func TestChannelOwnerProductionChokepointsAreClosed(t *testing.T) {
 	})
 	wantRole := []string{"../platform/home/census.go:AdmitChannelOwner"}
 	wantProtected := []string{"../platform/home/end.go:prepareEndIdentity", "../runtime/internal/store/cascade.go:EndCascade"}
-	// During the host cutover the legacy app assembler and ChannelHost are the
-	// two registered bootstrap constructors. The lifecycle phase removes the
-	// former and tightens this set to ChannelHost alone.
-	wantBootstrap := []string{"../app/app.go:openHome", "../platform/channelhost/channelhost.go:openHome"}
+	wantBootstrap := []string{"../platform/channelhost/channelhost.go:openHome"}
 	sort.Strings(roleAssignments)
 	sort.Strings(protectedReturns)
 	sort.Strings(bootstrapAssignments)

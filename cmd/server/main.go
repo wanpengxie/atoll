@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/cmd/internal/dotenv"
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/channel"
 
 	// Composition root wires the catalog: the BINARY pins which classes are
@@ -116,7 +117,10 @@ func main() {
 		DB:           appDB,
 		Logger:       logger,
 		ChannelDBDir: *channelDBDir,
-		UIDist:       *uiDist,
+		HostFactory: func(deps channelhost.HomeDeps) (channelhost.LocalHost, error) {
+			return channelhost.New(*channelDBDir, deps)
+		},
+		UIDist: *uiDist,
 	})
 	if err != nil {
 		log.Fatalf("server: %v", err)

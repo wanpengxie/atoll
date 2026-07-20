@@ -1,37 +1,43 @@
 package app
 
 import (
-	"fmt"
-	"path/filepath"
+	"context"
 
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// loadChannels reopens channels already present in the app directory. There is
-// no legacy composition source or startup data migration: every directory row
-// must point at an existing channel DB carrying the current schema. One failure
-// closes all homes opened by this pass and aborts startup.
+// loadChannels is a level reconciliation pass. One corrupt/unavailable channel
+// is isolated and remains honestly 503; it never prevents the realm from
+// starting or the next pass from retrying it.
 func (a *App) loadChannels() error {
-	rows, err := a.db.Query(`SELECT id FROM channels`)
+	rows, err := a.db.Query(`SELECT id,type FROM channels ORDER BY id`)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			a.closeLoadedHomes()
+		var raw, typ string
+		if err := rows.Scan(&raw, &typ); err != nil {
 			return err
 		}
-		dbPath := filepath.Join(a.channelDBDir, id+".db")
-		if _, err := a.openExistingHome(channel.ID(id), dbPath); err != nil {
-			a.closeLoadedHomes()
-			return fmt.Errorf("channel %s: %w", id, err)
+		id := channel.ID(raw)
+		if err := a.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: id, ExpectedType: typ}); err != nil {
+			a.logger.Warn("channel open reconcile failed", "channel", raw, "err", err)
 		}
 	}
 	if err := rows.Err(); err != nil {
-		a.closeLoadedHomes()
 		return err
+	}
+	entries, err := a.host.Census(context.Background())
+	if err != nil {
+		a.logger.Warn("channel census failed", "err", err)
+		return nil
+	}
+	for _, entry := range entries {
+		if !a.channelExists(context.Background(), string(entry.ChannelID)) {
+			a.logger.Warn("orphan channel image", "channel", entry.ChannelID, "state", entry.State)
+		}
 	}
 	return nil
 }

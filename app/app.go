@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/lib/jsondepth"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -40,11 +40,9 @@ type App struct {
 	engine *gin.Engine
 	srv    *http.Server // set by Run; drained by Shutdown
 
-	mu    sync.RWMutex
-	homes map[channel.ID]*home.Home
-
-	channelDBDir string
-	uiDist       string
+	mu     sync.RWMutex
+	host   channelhost.LocalHost
+	uiDist string
 
 	// wsGateway is the injected human-ingress connector (gateway 期 S3); membershipPoke
 	// is the injected direct Gateway.Poke callback that the platform emission
@@ -54,16 +52,21 @@ type App struct {
 	wsGateway      WSGateway
 	membershipPoke func(principal string)
 
-	daemonLocks *keyedLockSet
-	declLocks   *keyedLockSet
-	fanout      *fanoutWorker
+	daemonLocks  *keyedLockSet
+	declLocks    *keyedLockSet
+	channelLocks *keyedLockSet
+	fanout       *fanoutWorker
+	lifecycle    *lifecycleWorker
 }
+
+type HostFactory func(channelhost.HomeDeps) (channelhost.LocalHost, error)
 
 // Config configures the App.
 type Config struct {
 	DB           *sql.DB
 	Logger       *slog.Logger
 	ChannelDBDir string // e.g. "/tmp/atoll-dev/channels"
+	HostFactory  HostFactory
 
 	// UIDist is the on-disk path of the built web UI (the atoll-web repo's
 	// dist/ — the UI lives in its own repository since the open-source split).
@@ -78,19 +81,35 @@ func New(cfg Config) (*App, error) {
 		logger = slog.New(slog.DiscardHandler)
 	}
 
-	if err := os.MkdirAll(cfg.ChannelDBDir, 0o755); err != nil {
-		return nil, fmt.Errorf("app: mkdir channel db dir: %w", err)
-	}
-
 	a := &App{
-		db:           cfg.DB,
-		logger:       logger,
-		homes:        make(map[channel.ID]*home.Home),
-		channelDBDir: cfg.ChannelDBDir,
-		uiDist:       cfg.UIDist,
-		daemonLocks:  newKeyedLockSet(),
-		declLocks:    newKeyedLockSet(),
+		db: cfg.DB, logger: logger, uiDist: cfg.UIDist,
+		daemonLocks: newKeyedLockSet(), declLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet(),
 	}
+	factory := cfg.HostFactory
+	if factory == nil {
+		// Transitional default for existing embedders; cmd/server supplies the
+		// factory explicitly and Phase 5 removes this fallback.
+		factory = func(deps channelhost.HomeDeps) (channelhost.LocalHost, error) {
+			return channelhost.New(cfg.ChannelDBDir, deps)
+		}
+	}
+	host, err := factory(channelhost.HomeDeps{
+		CompositionResolver: compositionResolver{app: a},
+		PlanProvider:        appPlanProvider{app: a}, DaemonAuthority: appDaemonAuthority{app: a},
+		Operate: a.operateFace(), Logger: logger,
+		OnMembershipChange: func(chID channel.ID, affected []string) {
+			for _, principal := range affected {
+				a.reconcilePrincipalChannel(context.Background(), chID, principal)
+				if a.membershipPoke != nil {
+					a.membershipPoke(principal)
+				}
+			}
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("app: construct ChannelHost: %w", err)
+	}
+	a.host = host
 
 	gin.SetMode(gin.ReleaseMode)
 	engine := gin.New()
@@ -106,6 +125,8 @@ func New(cfg Config) (*App, error) {
 	}
 	a.fanout = newFanoutWorker(a)
 	a.fanout.start()
+	a.lifecycle = newLifecycleWorker(a)
+	a.lifecycle.start()
 
 	return a, nil
 }
@@ -154,17 +175,13 @@ func (a *App) Shutdown(ctx context.Context) error {
 // under a.mu would block every concurrent getHome (a.mu.RLock), and the entitlement
 // resolver's bounded read (T_read) cannot cancel a lock wait.
 func (a *App) Close() error {
+	if a.lifecycle != nil {
+		a.lifecycle.close()
+	}
 	if a.fanout != nil {
 		a.fanout.close()
 	}
-	homes := a.detachAllHomes()
-	var firstErr error
-	for _, h := range homes {
-		if err := h.Close(); err != nil && firstErr == nil {
-			firstErr = err
-		}
-	}
-	return firstErr
+	return a.host.Close()
 }
 
 // ---------------------------------------------------------------------------
@@ -194,6 +211,7 @@ func (a *App) registerRoutes() {
 		api.GET("/channels/:chID", a.handleGetChannel)
 		api.DELETE("/channels/:chID", a.handleDeleteChannel)
 		api.GET("/channels/:chID/candidates", a.handleListCandidates)
+		api.GET("/operations/:ref", a.handleGetOperation)
 		// A user's actor-instance declarations (world layer, kind-neutral).
 		api.GET("/actor-decls", a.handleListDecls)
 		api.POST("/actor-decls", a.handleCreateDecl)
@@ -242,29 +260,27 @@ func (a *App) registerRoutes() {
 // ---------------------------------------------------------------------------
 
 func (a *App) getHome(chID channel.ID) *home.Home {
-	a.mu.RLock()
-	defer a.mu.RUnlock()
-	return a.homes[chID]
-}
-
-// detachHome removes one Home handle while holding a.mu and returns it for teardown
-// outside the lock. Callers must never call Home.Close while holding a.mu.
-func (a *App) detachHome(chID channel.ID) *home.Home {
-	a.mu.Lock()
-	h := a.homes[chID]
-	delete(a.homes, chID)
-	a.mu.Unlock()
+	h, _ := a.host.Borrow(chID)
 	return h
 }
 
-// detachAllHomes atomically empties the Home registry and returns the detached
-// handles. Teardown is deliberately left to the caller after the lock is released.
-func (a *App) detachAllHomes() map[channel.ID]*home.Home {
-	a.mu.Lock()
-	homes := a.homes
-	a.homes = make(map[channel.ID]*home.Home)
-	a.mu.Unlock()
-	return homes
+func (a *App) snapshotHomes(ctx context.Context) map[channel.ID]*home.Home {
+	out := make(map[channel.ID]*home.Home)
+	rows, err := a.db.QueryContext(ctx, `SELECT id FROM channels`)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if rows.Scan(&raw) == nil {
+			id := channel.ID(raw)
+			if h := a.getHome(id); h != nil {
+				out[id] = h
+			}
+		}
+	}
+	return out
 }
 
 // homeOrError resolves the open Home for chID, or writes the honest two-state
@@ -288,58 +304,6 @@ func (a *App) homeOrError(c *gin.Context, chID channel.ID) *home.Home {
 		"channel", string(chID))
 	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 	return nil
-}
-
-func (a *App) createHome(chID channel.ID, dbPath string) (*home.Home, error) {
-	return a.openHome(chID, dbPath, false)
-}
-
-func (a *App) openExistingHome(chID channel.ID, dbPath string) (*home.Home, error) {
-	return a.openHome(chID, dbPath, true)
-}
-
-func (a *App) openHome(chID channel.ID, dbPath string, mustExist bool) (*home.Home, error) {
-	home, err := home.Open(home.Config{
-		ChannelID:   chID,
-		DBPath:      dbPath,
-		MustExistDB: mustExist,
-		Bootstrap:   !mustExist,
-		Logger:      a.logger,
-		// Fill the two eager-activation injection points with the组合域 supply:
-		// Desired = server-placed intent (the reconcile ring's desired half),
-		// Builder = the id→ActorFactory table (activation/reviver resolve). The
-		// user域 (per-channel human members) is derived by the platform ring itself
-		// (see Home.reconcileActivation) — the app cannot enumerate it. Both non-nil
-		// (double-nil灭: a nil pair leaves the ring inert).
-		CompositionResolver: compositionResolver{app: a},
-		PlanProvider:        appPlanProvider{app: a},
-		DaemonAuthority:     appDaemonAuthority{app: a},
-		// Fill the operate-face injection point: the in-gate control plane's
-		// executor half (intent write + Home call). One instance, channel-resolved.
-		Operate: a.operateFace(),
-		// Membership-change poke emit point (连接模型勘误期 §3.2 表②): Home.Admit (入籍)
-		// and Home.Remove (注销, principal captured before the dereg cascade) fire this;
-		// the app forwards the principal into the injected poke fan-in so the gateway
-		// re-resolves that principal's channel set (subscriptions + presence). Channel is
-		// no longer part of the address — the resolver enumerates the whole set.
-		OnMembershipChange: func(principal string) {
-			a.reconcilePrincipalChannel(context.Background(), chID, principal)
-			if a.membershipPoke != nil {
-				a.membershipPoke(principal)
-			}
-		},
-	})
-	if err != nil {
-		return nil, err
-	}
-	a.mu.Lock()
-	a.homes[chID] = home
-	a.mu.Unlock()
-
-	// Composition embodiment is the reconcile ring's job now (compositionDesired ∩
-	// membership → SpawnIfAbsent), run by Open's synchronous startup sweep — the app
-	// no longer hand-spawns at open time (spawnComposition retired, A-P1=A′).
-	return home, nil
 }
 
 const (
@@ -397,10 +361,4 @@ func mergeConfig(global, perChannel string) json.RawMessage {
 		return json.RawMessage(gl)
 	}
 	return nil
-}
-
-func (a *App) closeLoadedHomes() {
-	for _, h := range a.detachAllHomes() {
-		_ = h.Close()
-	}
 }

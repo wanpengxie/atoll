@@ -11,8 +11,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/platform/home"
-	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // actor_decls.go is the create-and-control face: a direct API over the
@@ -106,12 +104,7 @@ func (a *App) handleListDecls(c *gin.Context) {
 	// each world declaration. latest_version may lead current_version while an
 	// edit is staged; collapsing the two would make the control API lie about
 	// which factory snapshot is actually authoritative.
-	a.mu.RLock()
-	homes := make(map[channel.ID]*home.Home, len(a.homes))
-	for id, h := range a.homes {
-		homes[id] = h
-	}
-	a.mu.RUnlock()
+	homes := a.snapshotHomes(c.Request.Context())
 	for _, decl := range out {
 		declID := decl["id"].(string)
 		instances := make([]gin.H, 0)
@@ -199,12 +192,7 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 	release := a.declLocks.lock(declID)
 	defer release()
 
-	a.mu.RLock()
-	homes := make(map[channel.ID]*home.Home, len(a.homes))
-	for id, h := range a.homes {
-		homes[id] = h
-	}
-	a.mu.RUnlock()
+	homes := a.snapshotHomes(ctx)
 	var targets []declFanoutTarget
 	for id, h := range homes {
 		rows, err := h.DeclaredBySource(ctx, declID)

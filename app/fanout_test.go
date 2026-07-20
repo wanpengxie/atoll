@@ -2,23 +2,13 @@ package app
 
 import (
 	"context"
-	"log/slog"
-	"path/filepath"
 	"testing"
 	"time"
-
-	"github.com/wanpengxie/atoll/platform/home"
-	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 func fanoutTestApp(t *testing.T) *App {
 	t.Helper()
-	db, err := openTestAppDB(t, filepath.Join(t.TempDir(), "app.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-	return &App{db: db, logger: slog.New(slog.DiscardHandler), homes: map[channel.ID]*home.Home{}, daemonLocks: newKeyedLockSet(), declLocks: newKeyedLockSet()}
+	return newBareAppForTest(t)
 }
 
 func TestFanoutClaimCrashReplayCountsAttempt(t *testing.T) {

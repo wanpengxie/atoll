@@ -64,3 +64,27 @@ func TestRetiredContainerRoutesAreAbsent(t *testing.T) {
 		assertStatus(t, resp, http.StatusNotFound)
 	}
 }
+
+func TestLifecycleOperationProjectionOwnerOnly(t *testing.T) {
+	env := setupTestApp(t)
+	owner, cookies := register(t, env, "operation-owner@example.com", "secret123", "Owner")
+	created := env.do(t, "POST", "/api/channels", map[string]any{"name": "operation-channel"}, cookies)
+	assertStatus(t, created, http.StatusCreated)
+	ch := respJSON(t, created)
+	var ref string
+	if err := env.db.QueryRow(`SELECT operation_id FROM channel_provision_jobs WHERE channel_id=?`, ch["id"]).Scan(&ref); err != nil {
+		t.Fatal(err)
+	}
+	view := env.do(t, "GET", "/api/operations/"+ref, nil, cookies)
+	assertStatus(t, view, http.StatusOK)
+	body := respJSON(t, view)
+	if body["family"] != "lifecycle" || body["status"] != "done" {
+		t.Fatalf("operation=%v", body)
+	}
+	_, other := register(t, env, "operation-other@example.com", "secret123", "Other")
+	denied := env.do(t, "GET", "/api/operations/"+ref, nil, other)
+	assertStatus(t, denied, http.StatusForbidden)
+	if owner["id"] == "" {
+		t.Fatal("owner missing")
+	}
+}

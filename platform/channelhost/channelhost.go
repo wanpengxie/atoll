@@ -46,6 +46,9 @@ type Service interface {
 type LocalHost interface {
 	Service
 	Acquire(channel.ID) (Bundle, bool)
+	// Borrow is the lifecycle-cutover scaffold used only until every app read
+	// consumer has moved to Bundle. It is deleted in the contract phase.
+	Borrow(channel.ID) (*home.Home, bool)
 }
 
 type OpenSpec struct {
@@ -59,20 +62,20 @@ type Origin struct {
 }
 
 type GenesisDeclaration struct {
-	DeclID    string
-	Principal string
-	Kind      actor.Kind
-	Rendered  channel.RenderedSnapshot
+	DeclID    string                   `json:"decl_id"`
+	Principal string                   `json:"principal"`
+	Kind      actor.Kind               `json:"kind"`
+	Rendered  channel.RenderedSnapshot `json:"rendered_snapshot"`
 }
 
 type ProvisionSpec struct {
-	ChannelID           channel.ID
-	Type                string
-	OwnerPrincipal      string
-	GenesisDeclarations []GenesisDeclaration
-	DefaultSourceDeclID string
-	CreatedAt           int64
-	Origin              *Origin
+	ChannelID           channel.ID           `json:"channel_id"`
+	Type                string               `json:"type"`
+	OwnerPrincipal      string               `json:"owner_principal"`
+	GenesisDeclarations []GenesisDeclaration `json:"genesis_declarations"`
+	DefaultSourceDeclID string               `json:"default_source_decl_id"`
+	CreatedAt           int64                `json:"created_at"`
+	Origin              *Origin              `json:"origin,omitempty"`
 }
 
 type ProvisionReceipt struct {
@@ -369,6 +372,16 @@ func (h *ChannelHost) Acquire(id channel.ID) (Bundle, bool) {
 	return &bundle{home: entry.home, generation: entry.generation}, true
 }
 
+func (h *ChannelHost) Borrow(id channel.ID) (*home.Home, bool) {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	entry := h.entries[id]
+	if h.closed || entry == nil || entry.state != stateServing || entry.home == nil {
+		return nil, false
+	}
+	return entry.home, true
+}
+
 func (h *ChannelHost) Destroy(_ context.Context, id channel.ID) error {
 	lock := h.idLock(id)
 	lock.Lock()
@@ -409,6 +422,9 @@ func (h *ChannelHost) Destroy(_ context.Context, id channel.ID) error {
 		if exists(main+"-wal") || exists(main+"-shm") {
 			return errors.New("channelhost: main database missing with live sidecar")
 		}
+		h.mu.Lock()
+		delete(h.entries, id)
+		h.mu.Unlock()
 		return nil
 	}
 	if err := renameNoReplace(main, tombstone); err != nil {

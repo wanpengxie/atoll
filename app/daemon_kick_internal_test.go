@@ -36,10 +36,7 @@ func TestKickDaemonConvergeKicksRegisteredLinkBeforeAttachedPublication(t *testi
 	t.Cleanup(func() { _ = a.Close() })
 
 	chID := channel.ID("kick-before-attached-publication")
-	h, err := a.createHome(chID, filepath.Join(dir, "kick-channel.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
+	h := openTestChannelForTest(t, a, chID, nil)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.ServeAttach(w, r, "daemon-1")
 	}))

@@ -15,7 +15,6 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -198,12 +197,7 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 	}
 
 	targetSet := map[string]struct{}{}
-	a.mu.RLock()
-	homes := make(map[channel.ID]*home.Home, len(a.homes))
-	for id, h := range a.homes {
-		homes[id] = h
-	}
-	a.mu.RUnlock()
+	homes := a.snapshotHomes(ctx)
 	for id, h := range homes {
 		actors, err := h.ActiveActors(ctx)
 		if err != nil {

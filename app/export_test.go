@@ -120,12 +120,10 @@ func (a *App) Handler() http.Handler {
 	return a.engine
 }
 
-// DropHomeForTest removes chID's open Home from the app's home map WITHOUT
-// deleting its channels-table directory row — reproducing the "present in the
-// directory but its universe is not open" state (getHome==nil) that homeOrError
-// answers with 503 (A-P8). Test-only.
+// DropHomeForTest closes the borrowed serving handle while retaining the realm
+// directory row, reproducing a channel-unavailable image.
 func (a *App) DropHomeForTest(chID channel.ID) {
-	h := a.detachHome(chID)
+	h := a.getHome(chID)
 	if h != nil {
 		_ = h.Close()
 	}
@@ -222,26 +220,19 @@ func (a *App) KillCellForTest(chID channel.ID, id actor.ActorID) error {
 	return home.Remove(context.Background(), id)
 }
 
-// CreateHalfBuiltChannelForTest creates a directory row and fresh channel DB but
-// deliberately skips creator/boost admission. The result is a valid
-// directory entry over an EMPTY channel-db membership (only the intrinsic system
-// actor Open seeds). Returns the new channel id. Test-only — proves half-built
-// channels stay deletable and open with clear errors, never a panic. Test-only.
+// CreateHalfBuiltChannelForTest creates a published directory row plus its
+// provision intent but no local image, modelling a crash window.
 func (a *App) CreateHalfBuiltChannelForTest(ownerPrincipal, name string) (string, error) {
 	chID := uuid.NewString()
-	dbPath := a.channelDBPath(channel.ID(chID))
 	now := time.Now().UnixMilli()
 	if _, err := a.db.ExecContext(context.Background(),
 		`INSERT INTO channels (id,name,type,created_at,parent_id) VALUES (?,?,?,?,NULL)`,
 		chID, name, "group", now); err != nil {
 		return "", err
 	}
-	if _, err := a.db.ExecContext(context.Background(),
-		`INSERT INTO principal_channels(principal,channel_id,actor_id,updated_at) VALUES (?,?,?,?)`,
-		ownerPrincipal, chID, "", now); err != nil {
-		return "", err
-	}
-	if _, err := a.createHome(channel.ID(chID), dbPath); err != nil {
+	if _, err := a.db.ExecContext(context.Background(), `INSERT INTO channel_provision_jobs
+		(operation_id,channel_id,requested_by,name,type,owner_principal,spec_json,published_at,created_at)
+		VALUES (?,?,?,?,?,?,?,?,?)`, "lc:test:"+chID, chID, ownerPrincipal, name, "group", ownerPrincipal, `{}`, now, now); err != nil {
 		return "", err
 	}
 	return chID, nil

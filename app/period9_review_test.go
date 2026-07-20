@@ -108,10 +108,9 @@ func TestHalfBuiltChannel_OpenClearError(t *testing.T) {
 	if g := env.do(t, "GET", "/api/channels/"+chID, nil, s.cookies); g.Code != http.StatusOK {
 		t.Fatalf("GET half-built channel: want 200, got %d (%s)", g.Code, g.Body.String())
 	}
-	// The canonical Home registry reads cleanly too (the intrinsic system actor
-	// is always present; no panic on empty user membership).
-	if _, err := env.app.ActorsForTest(channel.ID(chID)); err != nil {
-		t.Fatalf("list actors on half-built channel: %v", err)
+	// The absent local image is reported honestly rather than fabricated.
+	if _, err := env.app.ActorsForTest(channel.ID(chID)); err == nil {
+		t.Fatal("half-built channel unexpectedly exposed a local registry")
 	}
 
 	// Opening the ws: a non-channel-member (no Admit ever landed) may tail but a

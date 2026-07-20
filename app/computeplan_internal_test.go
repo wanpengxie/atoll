@@ -2,15 +2,14 @@ package app
 
 import (
 	"context"
-	"path/filepath"
+	"encoding/json"
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform/home"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 const planValidClass = "test-plan-valid-class"
@@ -19,36 +18,20 @@ func init() { registry.Register(planValidClass, registry.ClassDecl{Kind: actor.K
 
 func TestAppPlanProvider_UsesHomeIntentAndRejectsMissingSource(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
-	db, err := openTestAppDB(t, filepath.Join(dir, "app.sqlite"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = db.Close() })
-
 	chID := channel.ID("plan-channel")
-	a := &App{db: db, homes: map[channel.ID]*home.Home{}}
-	h, err := home.Open(home.Config{
-		ChannelID: chID, DBPath: filepath.Join(dir, "channel.sqlite"),
-		CompositionResolver: compositionResolver{app: a}, DaemonAuthority: appDaemonAuthority{app: a},
-		Bootstrap: true,
-	})
+	a := newBareAppForTest(t)
+	snapshot, err := (channel.RenderedSnapshot{Class: planValidClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementDaemon, DesiredHost: "daemon-1"}, RenderSeq: 1}).Seal()
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = h.Close() })
-	placement, _ := storespec.NewDaemonPlacement("daemon-1")
-	result, err := h.Declare(ctx, home.DeclareRequest{
-		SourceDeclID: "missing", Principal: "principal", Class: planValidClass,
-		Placement: placement, Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
-	})
-	if err != nil {
-		t.Fatal(err)
+	h := openTestChannelForTest(t, a, chID, []channelhost.GenesisDeclaration{{DeclID: "missing", Principal: "principal", Kind: actor.KindAgent, Rendered: snapshot}})
+	declared, err := h.DeclaredBySource(ctx, "missing")
+	if err != nil || len(declared) != 1 {
+		t.Fatalf("declared=%v err=%v", declared, err)
 	}
 	// Always-on daemon declarations become an intent on reconcile; plan
 	// construction must still resolve the source configuration atomically.
-	_, _ = h.RestartInstanceDirect(ctx, result.Row.ID) // harmless poke if already starting
-	a.homes[chID] = h
+	_, _ = h.RestartInstanceDirect(ctx, declared[0].ID) // harmless poke if already starting
 	deadline := time.Now().Add(time.Second)
 	for {
 		plans, planErr := (appPlanProvider{app: a}).Plan(ctx, chID, "daemon-1")

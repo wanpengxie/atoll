@@ -236,7 +236,7 @@ func TestGatewayOwnersHaveNoProductionTestHooks(t *testing.T) {
 	}
 }
 
-func TestAppHomeTeardownUsesDetachPrimitives(t *testing.T) {
+func TestChannelHostOwnsHomeRegistryAndClose(t *testing.T) {
 	fset := token.NewFileSet()
 	pkgs, err := parser.ParseDir(fset, "../app", func(info fs.FileInfo) bool {
 		return !strings.HasSuffix(info.Name(), "_test.go")
@@ -244,46 +244,15 @@ func TestAppHomeTeardownUsesDetachPrimitives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	wantDetach := map[string]string{
-		"Close":                 "detachAllHomes",
-		"rollbackOpenedChannel": "detachHome",
-		"handleDeleteChannel":   "detachHome",
-	}
-	found := make(map[string]bool)
 	for _, pkg := range pkgs {
 		for path, file := range pkg.Files {
-			for _, decl := range file.Decls {
-				fn, ok := decl.(*ast.FuncDecl)
-				if !ok || fn.Body == nil || fn.Recv == nil || receiverName(fn.Recv.List[0].Type) != "App" {
-					continue
+			ast.Inspect(file, func(n ast.Node) bool {
+				sel, ok := n.(*ast.SelectorExpr)
+				if ok && sel.Sel.Name == "homes" {
+					t.Errorf("%s still reaches a Home registry", path)
 				}
-				if fn.Name.Name == "closeDetachedHome" {
-					t.Errorf("%s recreates retired close helper", path)
-				}
-				ast.Inspect(fn.Body, func(n ast.Node) bool {
-					call, ok := n.(*ast.CallExpr)
-					if !ok {
-						return true
-					}
-					if _, target := wantDetach[fn.Name.Name]; target && isAppMuCall(call) {
-						t.Errorf("%s:%s manually holds a.mu instead of using its detach primitive", path, fn.Name.Name)
-					}
-					if id, ok := call.Fun.(*ast.Ident); ok && id.Name == "delete" && len(call.Args) > 0 && isAppHomes(call.Args[0]) && fn.Name.Name != "detachHome" {
-						t.Errorf("%s:%s deletes a.homes outside detachHome", path, fn.Name.Name)
-					}
-					if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
-						if helper := wantDetach[fn.Name.Name]; helper != "" && isReceiverCall(sel, "a", helper) {
-							found[fn.Name.Name] = true
-						}
-					}
-					return true
-				})
-			}
-		}
-	}
-	for fn, helper := range wantDetach {
-		if !found[fn] {
-			t.Errorf("app.%s does not obtain Home handles through %s", fn, helper)
+				return true
+			})
 		}
 	}
 }

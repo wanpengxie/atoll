@@ -1,12 +1,11 @@
 package app
 
 import (
-	"os"
 	"path/filepath"
 	"testing"
 )
 
-func TestNew_ExistingChannelDirectoryRowRequiresExistingDB(t *testing.T) {
+func TestNew_IsolatesMissingChannelImage(t *testing.T) {
 	dir := t.TempDir()
 	db, err := openTestAppDB(t, filepath.Join(dir, "app.sqlite"))
 	if err != nil {
@@ -22,10 +21,12 @@ func TestNew_ExistingChannelDirectoryRowRequiresExistingDB(t *testing.T) {
 		}
 	}
 
-	if _, err := New(Config{DB: db, ChannelDBDir: dir}); err == nil {
-		t.Fatal("New succeeded with a directory row pointing at a missing channel DB")
+	a, err := New(Config{DB: db, ChannelDBDir: dir})
+	if err != nil {
+		t.Fatalf("one missing image blocked realm startup: %v", err)
 	}
-	if _, err := os.Stat(filepath.Join(dir, "c.db")); !os.IsNotExist(err) {
-		t.Fatalf("startup created replacement channel path: stat err=%v", err)
+	t.Cleanup(func() { _ = a.Close() })
+	if _, ok := a.host.Acquire("c"); ok {
+		t.Fatal("missing image was fabricated/opened")
 	}
 }

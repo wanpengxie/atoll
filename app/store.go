@@ -80,6 +80,57 @@ var appSchema = []schemaObject{
 	)`},
 	{"index", "ix_principal_channels_channel", `CREATE INDEX ix_principal_channels_channel
 		ON principal_channels(channel_id)`},
+	{"table", "channel_provision_jobs", `CREATE TABLE channel_provision_jobs (
+		job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		operation_id TEXT NOT NULL UNIQUE,
+		channel_id TEXT NOT NULL UNIQUE,
+		requested_by TEXT NOT NULL,
+		name TEXT NOT NULL,
+		type TEXT NOT NULL,
+		owner_principal TEXT NOT NULL,
+		spec_json TEXT NOT NULL,
+		receipt_json TEXT,
+		published_at INTEGER,
+		compensation_job_id INTEGER,
+		attempt INTEGER NOT NULL DEFAULT 0,
+		error_code TEXT,
+		last_error TEXT,
+		next_attempt_at INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		done_at INTEGER,
+		dead_at INTEGER
+	)`},
+	{"index", "ux_provision_active_name", `CREATE UNIQUE INDEX ux_provision_active_name
+		ON channel_provision_jobs(name) WHERE done_at IS NULL AND dead_at IS NULL`},
+	{"index", "ix_provision_pending", `CREATE INDEX ix_provision_pending
+		ON channel_provision_jobs(next_attempt_at,job_id) WHERE done_at IS NULL AND dead_at IS NULL AND compensation_job_id IS NULL`},
+	{"table", "channel_destroy_jobs", `CREATE TABLE channel_destroy_jobs (
+		job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		operation_id TEXT NOT NULL UNIQUE,
+		channel_id TEXT NOT NULL UNIQUE,
+		requested_by TEXT NOT NULL,
+		attempt INTEGER NOT NULL DEFAULT 0,
+		error_code TEXT,
+		last_error TEXT,
+		next_attempt_at INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		done_at INTEGER,
+		dead_at INTEGER
+	)`},
+	{"index", "ix_destroy_pending", `CREATE INDEX ix_destroy_pending
+		ON channel_destroy_jobs(next_attempt_at,job_id) WHERE done_at IS NULL AND dead_at IS NULL`},
+	{"table", "channel_finalize_deliveries", `CREATE TABLE channel_finalize_deliveries (
+		operation_id TEXT NOT NULL,
+		decl_id TEXT NOT NULL,
+		action TEXT NOT NULL CHECK(action IN ('apply','revoke')),
+		ref TEXT NOT NULL UNIQUE,
+		request_digest TEXT NOT NULL,
+		payload_json TEXT NOT NULL,
+		render_seq INTEGER,
+		acked_at INTEGER,
+		error_code TEXT,
+		PRIMARY KEY (operation_id, decl_id)
+	)`},
 	{"table", "daemons", `CREATE TABLE daemons (
 		id TEXT PRIMARY KEY,
 		owner_id TEXT NOT NULL REFERENCES users(id),
