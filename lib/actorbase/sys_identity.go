@@ -104,9 +104,6 @@ func (e *engine) SubmitEnvelope(spec behavior.SubjectWriteSpec) (message.ID, int
 	if vis != message.VisibilityPublic && vis != message.VisibilityPrivate {
 		return "", 0, fmt.Errorf("actorbase: submit envelope visibility must be public or private; got %q", spec.Visibility)
 	}
-	if spec.Kind == message.KindRequest && len(spec.Audience) == 0 {
-		return "", 0, fmt.Errorf("actorbase: submit envelope request audience required")
-	}
 	spec.Visibility = vis
 	env, err := behavior.BuildSubjectWrite(e.clockFn, spec)
 	if err != nil {

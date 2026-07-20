@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
@@ -20,6 +21,9 @@ import (
 type compositionResolver struct{ app *App }
 
 func (r compositionResolver) BuildClass(chID channel.ID, childID actor.ActorID, class string, config json.RawMessage) (platform.ActorFactory, bool) {
+	if class == realmToolClass {
+		return platform.ActorFactory{Proc: realmtool.Def(realmOps{app: r.app})}, true
+	}
 	decl, err := registry.Build(class, registry.InstanceSpec{ID: childID, Config: config}, registry.Deps{ChannelID: chID, Logger: r.app.logger})
 	if err != nil {
 		return platform.ActorFactory{}, false
@@ -79,6 +83,9 @@ func (r compositionResolver) ResolveDeclaration(ctx context.Context, chID channe
 }
 
 func (r compositionResolver) ClassKind(_ context.Context, class string) (actor.Kind, error) {
+	if class == realmToolClass {
+		return actor.KindTool, nil
+	}
 	kind, ok := registry.ClassKind(class)
 	if !ok {
 		return "", fmt.Errorf("unknown class %q", class)

@@ -14,7 +14,7 @@ func TestLinkSeamRetiredSymbolsAbsent(t *testing.T) {
 		"func OpenDB(", "CompositionResolver != nil", "cfg.Desired", "cfg.Builder",
 		"submitControlThroughDoor", "controlRequestTimeout", "handleListActors",
 		"handleActorStatus", "handleChannelPresenceDrops", "handleCursor",
-		"handleListMessages", "handleRestartDecl",
+		"handleRestartDecl",
 		"handleRemoveActor", "handleSetDefaultAgent", "type daemonAssignment struct",
 		`"/actor-decls/:declID/restart"`,
 	}

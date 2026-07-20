@@ -15,7 +15,7 @@ var (
 	ErrApplySystemForbidden = errors.New("apply_system_forbidden")
 )
 
-func (h *Home) EditDeclaration(ctx context.Context, in storespec.DeclEditBundle) (storespec.ActorControlRow, error) {
+func (h *Home) editDeclaration(ctx context.Context, in storespec.DeclEditBundle) (storespec.ActorControlRow, error) {
 	if h.closed.Load() {
 		return storespec.ActorControlRow{}, ErrClosed
 	}
@@ -41,7 +41,7 @@ func (h *Home) EditDeclaration(ctx context.Context, in storespec.DeclEditBundle)
 	return h.cs.DeclVersions.EditDeclared(ctx, in)
 }
 
-func (h *Home) ApplyDeclaration(ctx context.Context, id actor.ActorID, version int64) (storespec.ActorControlRow, error) {
+func (h *Home) applyDeclaration(ctx context.Context, id actor.ActorID, version int64) (storespec.ActorControlRow, error) {
 	if h.closed.Load() {
 		return storespec.ActorControlRow{}, ErrClosed
 	}
@@ -83,7 +83,7 @@ func (h *Home) ApplyDeclaration(ctx context.Context, id actor.ActorID, version i
 	return row, nil
 }
 
-func (h *Home) DeclarationVersions(ctx context.Context, id actor.ActorID) (current, latest storespec.ActorControlRow, err error) {
+func (h *Home) declarationVersions(ctx context.Context, id actor.ActorID) (current, latest storespec.ActorControlRow, err error) {
 	current, ok, err := h.cs.Declared.LookupDeclaredActive(ctx, id)
 	if err != nil {
 		return current, latest, err

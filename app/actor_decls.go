@@ -104,17 +104,17 @@ func (a *App) handleListDecls(c *gin.Context) {
 	// each world declaration. latest_version may lead current_version while an
 	// edit is staged; collapsing the two would make the control API lie about
 	// which factory snapshot is actually authoritative.
-	homes := a.snapshotHomes(c.Request.Context())
+	bundles := a.snapshotBundles(c.Request.Context())
 	for _, decl := range out {
 		declID := decl["id"].(string)
 		instances := make([]gin.H, 0)
-		for chID, h := range homes {
-			declared, err := h.DeclaredBySource(c.Request.Context(), declID)
+		for chID, bundle := range bundles {
+			declared, err := bundle.View().DeclaredBySource(c.Request.Context(), declID)
 			if err != nil {
 				continue
 			}
 			for _, row := range declared {
-				current, latest, err := h.DeclarationVersions(c.Request.Context(), row.ID)
+				current, latest, err := bundle.View().DeclarationVersions(c.Request.Context(), row.ID)
 				if err != nil {
 					continue
 				}

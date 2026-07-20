@@ -1,17 +1,22 @@
 package home
 
 import (
+	"bytes"
 	"context"
+	"errors"
+	"io"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-func (h *Home) IsBound(ctx context.Context, daemonID string) (bool, error) {
+func (h *Home) isBound(ctx context.Context, daemonID string) (bool, error) {
 	if h.closed.Load() {
 		return false, ErrClosed
 	}
@@ -26,12 +31,19 @@ func (h *Home) IsBound(ctx context.Context, daemonID string) (bool, error) {
 // (ReadAfterSeq), head cursor (MaxSeq), and active actor roster (ListActors). It
 // holds only read interfaces — there is no write path through a View.
 type View struct {
-	query     storespec.MessageQuery
-	authority storespec.ActorAuthority
-	links     *link.Acceptor
-	presence  presence.View
-	rt        *actorrt.Runtime
-	nowMs     func() int64
+	query      storespec.MessageQuery
+	visible    storespec.VisibleMessageQuery
+	authority  storespec.ActorAuthority
+	links      *link.Acceptor
+	presence   presence.View
+	rt         *actorrt.Runtime
+	nowMs      func() int64
+	resources  storespec.ResourceReadStore
+	control    *actorControlIndex
+	declared   storespec.DeclaredControlReader
+	routing    storespec.ChannelRouting
+	principals storespec.PrincipalRegistry
+	bindings   storespec.DaemonBindingReader
 }
 
 // View returns the read-only observation set (ReadAfterSeq / MaxSeq /
@@ -41,13 +53,84 @@ type View struct {
 // actors instead ask the system actor by message (that path is logged).
 func (h *Home) View() View {
 	return View{
-		query:     h.cs.Query,
-		authority: h.cs.Authority,
-		links:     h.links,
-		presence:  presence.NewView(h.presenceFold, h.channel.Cells(), h.cs.Authority),
-		rt:        h.channel.Cells(),
-		nowMs:     h.nowMs,
+		query:      h.cs.Query,
+		visible:    h.cs.Visible,
+		authority:  h.cs.Authority,
+		links:      h.links,
+		presence:   presence.NewView(h.presenceFold, h.channel.Cells(), h.cs.Authority),
+		rt:         h.channel.Cells(),
+		nowMs:      h.nowMs,
+		resources:  h.cs.ResourceRead,
+		control:    h.controlIndex,
+		declared:   h.cs.Declared,
+		routing:    h.cs.Routing,
+		principals: h.cs.Principals,
+		bindings:   h.cs.Bindings,
 	}
+}
+
+type ResourceView struct {
+	store     storespec.ResourceReadStore
+	authority storespec.ActorAuthority
+}
+
+func (v View) Resources() ResourceView {
+	return ResourceView{store: v.resources, authority: v.authority}
+}
+
+func validateReader(ctx context.Context, authority storespec.ActorAuthority, as channel.Reader) error {
+	if !as.Valid() {
+		return &channel.RealmError{Code: channel.RealmForbidden}
+	}
+	if as.Mode != channel.ReaderMember {
+		return nil
+	}
+	row, found, err := authority.LookupActive(ctx, as.ActorID)
+	if err != nil {
+		return err
+	}
+	if !found || row.Principal != as.Principal {
+		return &channel.RealmError{Code: channel.RealmForbidden}
+	}
+	return nil
+}
+
+func (v ResourceView) List(ctx context.Context, as channel.Reader, q channel.ResourceListQuery) (channel.ResourcePage, error) {
+	if err := validateReader(ctx, v.authority, as); err != nil {
+		return channel.ResourcePage{}, err
+	}
+	return v.store.ListReadable(ctx, q)
+}
+
+func (v ResourceView) Stat(ctx context.Context, as channel.Reader, id resource.ResourceID) (channel.ResourceMeta, error) {
+	if err := validateReader(ctx, v.authority, as); err != nil {
+		return channel.ResourceMeta{}, err
+	}
+	meta, found, err := v.store.StatReadable(ctx, id)
+	if err != nil {
+		return channel.ResourceMeta{}, err
+	}
+	if !found {
+		return channel.ResourceMeta{}, &channel.RealmError{Code: channel.RealmResourceNotFound}
+	}
+	return meta, nil
+}
+
+func (v ResourceView) Fetch(ctx context.Context, as channel.Reader, id resource.ResourceID) (channel.ResourceFetch, error) {
+	if err := validateReader(ctx, v.authority, as); err != nil {
+		return channel.ResourceFetch{}, err
+	}
+	meta, value, found, err := v.store.FetchReadable(ctx, id)
+	if errors.Is(err, storespec.ErrResourceCapabilityUnavailable) {
+		return channel.ResourceFetch{}, &channel.RealmError{Code: channel.RealmCapabilityUnavailable}
+	}
+	if err != nil {
+		return channel.ResourceFetch{}, err
+	}
+	if !found {
+		return channel.ResourceFetch{}, &channel.RealmError{Code: channel.RealmResourceNotFound}
+	}
+	return channel.ResourceFetch{Meta: meta, Body: io.NopCloser(bytes.NewReader(value))}, nil
 }
 
 // Snapshot composes membership, embodiment and testimony at read time. The
@@ -94,9 +177,85 @@ func (v View) IsAttached(daemonID string) bool {
 	return v.links.IsAttached(daemonID)
 }
 
-// ReadAfterSeq returns committed envelopes with seq > afterSeq (client tail).
-func (v View) ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]storespec.StoredRow, error) {
-	return v.query.ReadAfterSeq(ctx, afterSeq, limit)
+func (v View) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reader, afterSeq int64, limit int) ([]storespec.StoredRow, int64, error) {
+	if err := validateReader(ctx, v.authority, reader); err != nil {
+		return nil, afterSeq, err
+	}
+	return v.visible.ReadVisibleAfterSeq(ctx, reader, afterSeq, limit)
+}
+
+func (v View) ActorFacts(ctx context.Context, id actor.ActorID) (channel.ActorFacts, bool, error) {
+	row, found, err := v.authority.LookupActive(ctx, id)
+	if err != nil || !found {
+		return channel.ActorFacts{}, found, err
+	}
+	return channel.ActorFacts{Principal: row.Principal, Kind: row.Kind, Active: true}, true, nil
+}
+
+func (v View) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
+	return v.routing.DefaultAgent(ctx)
+}
+
+func (v View) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {
+	record, found, err := v.principals.LookupActivePrincipal(ctx, kind, principal)
+	return record.ID, found, err
+}
+
+func (v View) ActiveActors(ctx context.Context) ([]storespec.ActorControlRow, error) {
+	return v.control.ListActive(ctx)
+}
+
+func (v View) DeclaredBySource(ctx context.Context, source string) ([]storespec.ActorControlRow, error) {
+	rows, err := v.control.ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]storespec.ActorControlRow, 0)
+	for _, row := range rows {
+		world, ok, worldErr := v.control.WorldOf(ctx, row.ID)
+		if worldErr != nil {
+			return nil, worldErr
+		}
+		if ok && world == storespec.WorldDurable && row.SourceDeclID == source {
+			out = append(out, row)
+		}
+	}
+	return out, nil
+}
+
+func (v View) DeclaredByPrincipal(ctx context.Context, principal string) (storespec.ActorControlRow, bool, error) {
+	rows, err := v.control.ListActive(ctx)
+	if err != nil {
+		return storespec.ActorControlRow{}, false, err
+	}
+	for _, row := range rows {
+		if row.Principal == principal {
+			return row, true, nil
+		}
+	}
+	return storespec.ActorControlRow{}, false, nil
+}
+
+func (v View) DeclarationVersions(ctx context.Context, id actor.ActorID) (current, latest storespec.ActorControlRow, err error) {
+	current, ok, err := v.declared.LookupDeclaredActive(ctx, id)
+	if err != nil {
+		return current, latest, err
+	}
+	if !ok {
+		return current, latest, ErrApplyActorEnded
+	}
+	latest, ok, err = v.declared.LatestDeclaredVersion(ctx, id)
+	if err != nil {
+		return current, latest, err
+	}
+	if !ok {
+		return current, latest, ErrApplyVersionNotFound
+	}
+	return current, latest, nil
+}
+
+func (v View) IsBound(ctx context.Context, daemonID string) (bool, error) {
+	return v.bindings.IsBound(ctx, storespec.DaemonID(daemonID))
 }
 
 // MaxSeq returns the channel's current head seq (client cursor anchor).

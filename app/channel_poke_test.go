@@ -20,6 +20,7 @@ import (
 	"github.com/wanpengxie/atoll/app"
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -35,14 +36,15 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenDB: %v", err)
 	}
-	a, err := app.New(app.Config{DB: db, ChannelDBDir: chDBDir})
+	a, err := app.New(app.Config{DB: db, HostFactory: func(deps channelhost.HomeDeps) (channelhost.LocalHost, error) {
+		return channelhost.New(chDBDir, deps)
+	}})
 	if err != nil {
 		db.Close()
 		t.Fatalf("app.New: %v", err)
 	}
 
 	gw, err := gateway.New(gateway.Config{
-		Routing:  a.ResolveRoutingForGateway,
 		Resolver: testGatewayResolver(a),
 	})
 	if err != nil {

@@ -96,7 +96,7 @@ func TestHomeOpenOwnerBootstrapModes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := bootstrap.Close(); err != nil {
+		if err := bootstrap.closeInternal("test"); err != nil {
 			t.Fatal(err)
 		}
 		cfg.Bootstrap = false
@@ -136,7 +136,7 @@ func TestHomeLateOpenPanicRollsBackAndPreservesOriginal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after rollback: %v", err)
 	}
-	if err := h.Close(); err != nil {
+	if err := h.closeInternal("test"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -163,7 +163,7 @@ func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	id, err := h.AdmitChannelOwner(context.Background(), "close-window-user")
+	id, err := h.admitChannelOwner(context.Background(), "close-window-user")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -188,7 +188,7 @@ func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
 	}
 
 	closeErr := make(chan error, 1)
-	go func() { closeErr <- h.Close() }()
+	go func() { closeErr <- h.closeInternal("test") }()
 	select {
 	case <-handler.entered:
 	case <-time.After(time.Second):
@@ -222,7 +222,7 @@ func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h2.Close()
+	defer h2.closeInternal("test")
 	deadline = time.Now().Add(2 * time.Second)
 	for {
 		rows, err := h2.cs.Query.ReadAfterSeq(context.Background(), 0, 1000)
@@ -255,10 +255,10 @@ func TestHomeConcurrentCloseWaitsForOneTeardown(t *testing.T) {
 	}
 	const callers = 8
 	results := make(chan error, callers)
-	go func() { results <- h.Close() }()
+	go func() { results <- h.closeInternal("test") }()
 	<-handler.entered
 	for range callers - 1 {
-		go func() { results <- h.Close() }()
+		go func() { results <- h.closeInternal("test") }()
 	}
 	select {
 	case err := <-results:
@@ -294,11 +294,11 @@ func TestHomeClosePanicDoesNotWedgeWaiters(t *testing.T) {
 	first := make(chan any, 1)
 	go func() {
 		defer func() { first <- recover() }()
-		_ = h.Close()
+		_ = h.closeInternal("test")
 	}()
 	<-handler.entered
 	waiter := make(chan error, 1)
-	go func() { waiter <- h.Close() }()
+	go func() { waiter <- h.closeInternal("test") }()
 	close(release)
 	if got := <-first; got != "teardown-panic" {
 		t.Fatalf("panic = %v", got)
@@ -323,26 +323,26 @@ func TestHomeCloseUnpublishesEveryEntryPoint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.Close(); err != nil {
+	if err := h.closeInternal("test"); err != nil {
 		t.Fatal(err)
 	}
-	if got := h.KickDaemon("none"); got != 0 {
+	if got := h.kickDaemon("none"); got != 0 {
 		t.Fatalf("KickDaemon after Close = %d", got)
 	}
-	if _, _, err := h.PrincipalOf(context.Background(), "issued-human"); err == nil {
+	if _, _, err := h.principalOf(context.Background(), "issued-human"); err == nil {
 		t.Fatal("read after stores close did not surface an error")
 	}
 	ctx := context.Background()
-	if _, err := h.Admit(ctx, actor.KindHuman, "late-admit"); !errors.Is(err, ErrClosed) {
+	if _, err := h.admit(ctx, actor.KindHuman, "late-admit"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Admit after Close = %v, want ErrClosed", err)
 	}
-	if err := h.Remove(ctx, "issued-human"); !errors.Is(err, ErrClosed) {
+	if err := h.remove(ctx, "issued-human"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Remove after Close = %v, want ErrClosed", err)
 	}
-	if err := h.Restart(ctx, "issued-human"); !errors.Is(err, ErrClosed) {
+	if err := h.restart(ctx, "issued-human"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Restart after Close = %v, want ErrClosed", err)
 	}
-	sub, cancelSub := h.Subscribe()
+	sub, cancelSub := h.subscribe()
 	select {
 	case <-sub:
 	default:
@@ -350,7 +350,7 @@ func TestHomeCloseUnpublishesEveryEntryPoint(t *testing.T) {
 	}
 	cancelSub()
 	rec := httptest.NewRecorder()
-	h.ServeAttach(rec, httptest.NewRequest(http.MethodGet, "/attach", nil), "daemon-late")
+	h.serveAttach(rec, httptest.NewRequest(http.MethodGet, "/attach", nil), "daemon-late")
 	if rec.Code != http.StatusServiceUnavailable {
 		t.Fatalf("ServeAttach after Close = %d, want 503", rec.Code)
 	}
@@ -369,16 +369,16 @@ func TestHomeClosePublishesMutationFenceBeforeTeardown(t *testing.T) {
 		t.Fatal(err)
 	}
 	closed := make(chan error, 1)
-	go func() { closed <- h.Close() }()
+	go func() { closed <- h.closeInternal("test") }()
 	<-handler.entered
 
-	if _, err := h.Declare(context.Background(), DeclareRequest{}); !errors.Is(err, ErrClosed) {
+	if _, err := h.declare(context.Background(), DeclareRequest{}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Declare during Close = %v, want ErrClosed", err)
 	}
-	if err := h.Restart(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
+	if err := h.restart(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Restart during Close = %v, want ErrClosed", err)
 	}
-	if err := h.Remove(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
+	if err := h.remove(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Remove during Close = %v, want ErrClosed", err)
 	}
 	close(release)

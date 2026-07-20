@@ -109,14 +109,14 @@ func openBuildWindowHome(t *testing.T, name string, resolver *buildWindowResolve
 	// cannot race the hand-driven activation or consume the selected resolve call.
 	h.reconcileStop()
 	<-h.reconcileDone
-	t.Cleanup(func() { _ = h.Close() })
+	t.Cleanup(func() { _ = h.closeInternal("test") })
 	return h
 }
 
 func introduceBuildWindowComposition(t *testing.T, h *Home, principal string) storespec.ActorControlRow {
 	t.Helper()
 	at := time.Now().UnixMilli()
-	result, err := h.Declare(context.Background(), DeclareRequest{
+	result, err := h.declare(context.Background(), DeclareRequest{
 		SourceDeclID: "decl:build-window", Principal: principal, Class: "build-window",
 		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, TIdle: 60_000, CreatedAt: at,
 	})
@@ -136,7 +136,7 @@ func TestHomeReviverBuildWindowRemoveSelfUndoes(t *testing.T) {
 	}
 
 	var removeErr error
-	resolver.onResolve = func() { removeErr = h.Remove(ctx, record.ID) }
+	resolver.onResolve = func() { removeErr = h.remove(ctx, record.ID) }
 	err := (homeReviver{h: h}).EnsureLive(ctx, record.ID)
 	if removeErr != nil {
 		t.Fatalf("Remove inside build window: %v", removeErr)
@@ -165,7 +165,7 @@ func TestReconcileActivationBuildWindowRemoveSelfUndoes(t *testing.T) {
 		t.Fatalf("mark request dirty: verdict=%v err=%v", verdict, err)
 	}
 	var removeErr error
-	resolver.onResolve = func() { removeErr = h.Remove(ctx, record.ID) }
+	resolver.onResolve = func() { removeErr = h.remove(ctx, record.ID) }
 	h.reconcileActivation(ctx)
 	if removeErr != nil {
 		t.Fatalf("Remove inside build window: %v", removeErr)
@@ -183,7 +183,7 @@ func TestStaleFactoryShellIsAbortedAndCurrentVersionRebuilt(t *testing.T) {
 	resolver := &buildWindowResolver{resolveAt: 1}
 	h := openBuildWindowHome(t, "stale-factory-version", resolver)
 	record := introduceBuildWindowComposition(t, h, "stale-factory-version")
-	edited, err := h.EditDeclaration(ctx, storespec.DeclEditBundle{
+	edited, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
 		ActorID: record.ID, Class: record.Class, Config: json.RawMessage(`{"version":2}`),
 		Placement: record.Placement, TIdle: record.TIdle, SourceDeclID: record.SourceDeclID,
 		CreatedAt: time.Now().UnixMilli(),
@@ -192,7 +192,7 @@ func TestStaleFactoryShellIsAbortedAndCurrentVersionRebuilt(t *testing.T) {
 		t.Fatalf("edit=%+v err=%v", edited, err)
 	}
 	resolver.onResolve = func() {
-		if _, applyErr := h.ApplyDeclaration(ctx, record.ID, 2); applyErr != nil {
+		if _, applyErr := h.applyDeclaration(ctx, record.ID, 2); applyErr != nil {
 			t.Errorf("apply inside build window: %v", applyErr)
 		}
 	}
@@ -234,9 +234,9 @@ func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = h.Close() })
+	t.Cleanup(func() { _ = h.closeInternal("test") })
 
-	result, err := h.Declare(context.Background(), DeclareRequest{
+	result, err := h.declare(context.Background(), DeclareRequest{
 		SourceDeclID: "decl:probe", Principal: "probe", Class: "probe",
 		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
 	})
@@ -260,7 +260,7 @@ func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {
 	}
 
 	resolver.fail.Store(false)
-	if _, err := h.RestartInstanceDirect(context.Background(), record.ID); err != nil {
+	if _, err := h.restartInstanceDirect(context.Background(), record.ID); err != nil {
 		t.Fatal(err)
 	}
 	waitHomeCondition(t, func() bool { return resolver.builds.Load() == 2 })
@@ -269,7 +269,7 @@ func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {
 		t.Fatal("version restart did not replace the composition incarnation")
 	}
 
-	if err := h.RemoveInstance(context.Background(), record.ID); err != nil {
+	if err := h.removeInstance(context.Background(), record.ID); err != nil {
 		t.Fatal(err)
 	}
 	waitHomeCondition(t, func() bool {
@@ -290,9 +290,9 @@ func TestCompositionConfigChangeAdvancesVersionAndRebuildsFromOneCommit(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = h.Close() })
+	t.Cleanup(func() { _ = h.closeInternal("test") })
 
-	result, err := h.Declare(context.Background(), DeclareRequest{
+	result, err := h.declare(context.Background(), DeclareRequest{
 		SourceDeclID: "decl:probe", Principal: "probe", Class: "probe",
 		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
 	})
@@ -307,7 +307,7 @@ func TestCompositionConfigChangeAdvancesVersionAndRebuildsFromOneCommit(t *testi
 	}
 
 	cfg := json.RawMessage(`{"tone":"brisk"}`)
-	updated, err := h.Declare(context.Background(), DeclareRequest{
+	updated, err := h.declare(context.Background(), DeclareRequest{
 		SourceDeclID: "decl:probe", Principal: "probe", Class: "probe", Config: &cfg,
 		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
 	})
@@ -334,9 +334,9 @@ func TestInvoluntaryBodyCrashBacksOffThenAutomaticallyRebuilds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = h.Close() })
+	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
-	result, err := h.Declare(ctx, DeclareRequest{
+	result, err := h.declare(ctx, DeclareRequest{
 		SourceDeclID: "decl:crash-backoff", Principal: "crash-backoff", Kind: actor.KindAgent,
 		Class: "crash-backoff", Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})

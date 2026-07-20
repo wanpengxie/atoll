@@ -49,7 +49,7 @@ func TestValidateAttachmentShrinkRetiresRemovedPort(t *testing.T) {
 	h.disablePoke.Store(true)
 	ctx := context.Background()
 	placement, _ := storespec.NewDaemonPlacement("daemon-shrink")
-	declared, err := h.Declare(ctx, DeclareRequest{
+	declared, err := h.declare(ctx, DeclareRequest{
 		SourceDeclID: "decl:shrink", Principal: "shrink", Kind: actor.KindTool,
 		Class: "shrink", Placement: placement, CreatedAt: time.Now().UnixMilli(),
 	})

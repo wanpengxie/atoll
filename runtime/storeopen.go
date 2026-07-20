@@ -18,6 +18,7 @@ type ChannelStores struct {
 	channelID      channel.ID
 	Log            storespec.MessageLog
 	Query          storespec.MessageQuery
+	Visible        storespec.VisibleMessageQuery
 	Expiry         storespec.ExpiryQuery
 	Requests       storespec.RequestLookup
 	Authority      storespec.ActorAuthority
@@ -30,6 +31,7 @@ type ChannelStores struct {
 	Genesis        storespec.GenesisStore
 	SysOps         storespec.SysOpAdmission
 	Bindings       storespec.DaemonBindingReader
+	ResourceRead   storespec.ResourceReadStore
 	FiredTimers    FiredTimerReader
 	authoritySlot  *actorAuthoritySlot
 	grantOverlay   *accessdoor.GrantOverlaySlot
@@ -191,6 +193,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		channelID:      channelID,
 		Log:            cs.Log,
 		Query:          cs.Query,
+		Visible:        cs.Visible,
 		Expiry:         cs.Expiry,
 		Requests:       cs.Requests,
 		Authority:      authoritySlot,
@@ -203,6 +206,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Genesis:        cs.Genesis,
 		SysOps:         cs.SysOps,
 		Bindings:       cs.Bindings,
+		ResourceRead:   cs.ResourceRead,
 		FiredTimers:    cs.Timers(),
 		authoritySlot:  authoritySlot,
 		grantOverlay:   grantOverlay,

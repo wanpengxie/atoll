@@ -93,8 +93,8 @@ func TestActorModelUniqueMutationAndConstructionChokepoints(t *testing.T) {
 			case *ast.CompositeLit:
 				sel, ok := x.Type.(*ast.SelectorExpr)
 				if ok && sel.Sel.Name == "PlanActor" &&
-					!(path == "../platform/home/plan.go" && enclosingFunc(f, x.Pos()) == "PlanForDaemon") {
-					violations = append(violations, fmt.Sprintf("%s constructs PlanActor outside PlanForDaemon", fset.Position(x.Pos())))
+					!(path == "../platform/home/plan.go" && enclosingFunc(f, x.Pos()) == "planForDaemon") {
+					violations = append(violations, fmt.Sprintf("%s constructs PlanActor outside planForDaemon", fset.Position(x.Pos())))
 				}
 			}
 			return true
@@ -110,7 +110,7 @@ func TestActorModelBundleCallsitesAreClosed(t *testing.T) {
 	// function in the same file gets no free pass.
 	allowedAdmit := map[string]bool{
 		"../platform/home/census.go:admitHuman":       true,
-		"../platform/home/declaration_api.go:Declare": true,
+		"../platform/home/declaration_api.go:declare": true,
 		"../platform/home/open.go:Open":               true,
 	}
 	var admit, endCascade, rawCommit []string
@@ -215,7 +215,7 @@ func TestChannelOwnerProductionChokepointsAreClosed(t *testing.T) {
 			})
 		}
 	})
-	wantRole := []string{"../platform/home/census.go:AdmitChannelOwner"}
+	wantRole := []string{"../platform/home/census.go:admitChannelOwner"}
 	wantProtected := []string{"../platform/home/end.go:prepareEndIdentity", "../runtime/internal/store/cascade.go:EndCascade"}
 	wantBootstrap := []string{"../platform/channelhost/channelhost.go:openHome"}
 	sort.Strings(roleAssignments)

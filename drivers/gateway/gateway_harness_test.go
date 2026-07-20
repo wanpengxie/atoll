@@ -12,20 +12,16 @@ package gateway
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"log/slog"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/home"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type gatewayTestCompositionResolver struct{}
@@ -228,101 +224,126 @@ func (c *fakeClock) lastDeadline() time.Time {
 	return c.arms[len(c.arms)-1]
 }
 
-// openHome opens a real channel Home and admits `principal` as a human member, whose
-// per-identity slot Admit ensures synchronously (so a member Route resolves a real
-// slot). Returns the Home and the channel-scoped subject id. The long reconcile
-// interval keeps the Home's own background ticker from racing the test.
-func openHome(t *testing.T, chID channel.ID, principal string) (*home.Home, actor.ActorID) {
+type testChannel struct {
+	channelhost.Bundle
+	host      *channelhost.ChannelHost
+	channelID channel.ID
+	principal string
+	memberID  actor.ActorID
+	extras    *subjectgate.Registry
+	sources   map[actor.ActorID]string
+}
+
+type testGatewayHitch struct {
+	base   channelhost.GatewayHitch
+	extras *subjectgate.Registry
+}
+
+func (h testGatewayHitch) SubjectSlotFor(id actor.ActorID) (*subjectgate.Slot, bool) {
+	if slot, ok := h.extras.Slot(id); ok {
+		return slot, true
+	}
+	return h.base.SubjectSlotFor(id)
+}
+
+func (h testGatewayHitch) Subscribe() (<-chan struct{}, func()) { return h.base.Subscribe() }
+
+func (h *testChannel) Gateway() channelhost.GatewayHitch {
+	return testGatewayHitch{base: h.Bundle.Gateway(), extras: h.extras}
+}
+
+func (h *testChannel) Close() error { return h.host.Close() }
+
+func (h *testChannel) EnsureSubjectSlot(id actor.ActorID) *subjectgate.Slot {
+	return h.extras.EnsureSlot(id)
+}
+
+func (h *testChannel) SubjectSlotFor(id actor.ActorID) (*subjectgate.Slot, bool) {
+	return h.Gateway().SubjectSlotFor(id)
+}
+
+func (h *testChannel) View() channelhost.View { return h.Bundle.View() }
+
+func (h *testChannel) Admit(ctx context.Context, _ actor.Kind, principal string) (actor.ActorID, error) {
+	result, err := h.SysOp().Admit(ctx, channel.AdmitRequest{Ref: "gateway-test:admit:" + principal, Principal: principal})
+	return result.ActorID, err
+}
+
+func (h *testChannel) Remove(ctx context.Context, id actor.ActorID) error {
+	source := h.sources[id]
+	if source == "" {
+		return context.Canceled
+	}
+	_, err := h.SysOp().RevokeDeclTargets(ctx, channel.RevokeDeclRequest{Ref: "gateway-test:revoke:" + source, DeclID: source})
+	if err == nil {
+		h.extras.Remove(id)
+	}
+	return err
+}
+
+func openTestChannel(t *testing.T, chID channel.ID, owner, member string, memberKind actor.Kind, wired *Gateway) (*testChannel, actor.ActorID) {
 	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), string(chID)+".sqlite")
-	h, err := home.Open(home.Config{
-		ChannelID:           chID,
-		DBPath:              dbPath,
-		Bootstrap:           true,
-		ReconcileInterval:   time.Hour,
-		CompositionResolver: gatewayTestCompositionResolver{},
-	})
+	deps := channelhost.HomeDeps{CompositionResolver: gatewayTestCompositionResolver{}}
+	if wired != nil {
+		deps.OnMembershipChange = func(_ channel.ID, principals []string) {
+			for _, principal := range principals {
+				wired.Poke(principal)
+			}
+		}
+	}
+	host, err := channelhost.New(t.TempDir(), deps)
 	if err != nil {
-		t.Fatalf("home.Open(%s): %v", chID, err)
+		t.Fatal(err)
+	}
+	spec := channelhost.ProvisionSpec{ChannelID: chID, Type: "group", OwnerPrincipal: owner, CreatedAt: time.Now().UnixMilli()}
+	source := ""
+	if memberKind == actor.KindAgent {
+		source = "gateway-test:" + member
+		rendered, sealErr := (channel.RenderedSnapshot{
+			Class: "gateway-test-unresolved", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+		}).Seal()
+		if sealErr != nil {
+			t.Fatal(sealErr)
+		}
+		spec.GenesisDeclarations = []channelhost.GenesisDeclaration{{DeclID: source, Principal: member, Kind: actor.KindAgent, Rendered: rendered}}
+	}
+	if _, err := host.Provision(context.Background(), spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Open(context.Background(), channelhost.OpenSpec{ChannelID: chID, ExpectedType: "group"}); err != nil {
+		t.Fatal(err)
+	}
+	bundle, ok := host.Acquire(chID)
+	if !ok {
+		t.Fatal("channel bundle unavailable")
+	}
+	id, found, err := bundle.View().ResolvePrincipal(context.Background(), memberKind, member)
+	if err != nil || !found {
+		t.Fatalf("ResolvePrincipal(%s)=(%s,%v,%v)", member, id, found, err)
+	}
+	h := &testChannel{Bundle: bundle, host: host, channelID: chID, principal: member, memberID: id, extras: subjectgate.NewRegistry(), sources: map[actor.ActorID]string{}}
+	if source != "" {
+		h.sources[id] = source
+		h.EnsureSubjectSlot(id)
 	}
 	t.Cleanup(func() { _ = h.Close() })
-	id, err := h.Admit(context.Background(), actor.KindHuman, principal)
-	if err != nil {
-		t.Fatalf("Admit(%s): %v", principal, err)
-	}
 	return h, id
 }
 
-// openHomeWired is openHome plus a REAL membership-change poke wire (spec §3.2 表②):
-// Home.Admit/Home.Remove fire g.Poke(principal) exactly as the assembly root bridges
-// App → Gateway.Poke in production (app.go/cmd/server main.go). Tests that must
-// exercise a genuine Remove→poke edge (not a hand-called s.reconcile()/g.Poke) use this
-// instead of openHome (六轮终审 P1-5: barrier authenticity).
-func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*home.Home, actor.ActorID) {
-	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), string(chID)+".sqlite")
-	h, err := home.Open(home.Config{
-		ChannelID:           chID,
-		DBPath:              dbPath,
-		Bootstrap:           true,
-		ReconcileInterval:   time.Hour,
-		CompositionResolver: gatewayTestCompositionResolver{},
-		OnMembershipChange:  g.Poke,
-	})
-	if err != nil {
-		t.Fatalf("home.Open(%s): %v", chID, err)
-	}
-	t.Cleanup(func() { _ = h.Close() })
-	id, err := h.Admit(context.Background(), actor.KindHuman, principal)
-	if err != nil {
-		t.Fatalf("Admit(%s): %v", principal, err)
-	}
-	return h, id
+func openHome(t *testing.T, chID channel.ID, principal string) (*testChannel, actor.ActorID) {
+	return openTestChannel(t, chID, principal, principal, actor.KindHuman, nil)
 }
 
-// openDormantDeclaredHomeWired is the no-body variant used by delivery-lane
-// linearization tests. It installs a real durable principal and real
-// Remove→OnMembershipChange wire, but deliberately declares an unresolved class,
-// so Home cannot race the test-owned subject slot with a built-in human
-// interpreter.
-func openDormantDeclaredHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*home.Home, actor.ActorID) {
-	t.Helper()
-	dbPath := filepath.Join(t.TempDir(), string(chID)+".sqlite")
-	h, err := home.Open(home.Config{
-		ChannelID:           chID,
-		DBPath:              dbPath,
-		Bootstrap:           true,
-		ReconcileInterval:   time.Hour,
-		CompositionResolver: gatewayTestCompositionResolver{},
-		OnMembershipChange:  g.Poke,
-	})
-	if err != nil {
-		t.Fatalf("home.Open(%s): %v", chID, err)
-	}
-	t.Cleanup(func() { _ = h.Close() })
-	declared, err := h.Declare(context.Background(), home.DeclareRequest{
-		SourceDeclID: "gateway-test:" + principal,
-		Principal:    principal,
-		Kind:         actor.KindAgent,
-		Class:        "gateway-test-unresolved",
-		Placement:    storespec.NewServerPlacement(),
-		CreatedAt:    time.Now().UnixMilli(),
-	})
-	if err != nil {
-		t.Fatalf("Declare(%s): %v", principal, err)
-	}
-	return h, declared.Row.ID
+func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*testChannel, actor.ActorID) {
+	return openTestChannel(t, chID, principal, principal, actor.KindHuman, g)
 }
 
-var testRouting Routing = func(context.Context, channel.ID, message.Kind) ([]actor.ActorID, message.Kind, string, error) {
-	return []actor.ActorID{"test-agent"}, message.KindRequest, "", nil
+func openDormantDeclaredHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) (*testChannel, actor.ActorID) {
+	return openTestChannel(t, chID, "gateway-owner:"+principal, principal, actor.KindAgent, g)
 }
 
 func newTestGateway(t testing.TB, cfg Config, set settings) *Gateway {
 	t.Helper()
-	if cfg.Routing == nil {
-		cfg.Routing = testRouting
-	}
 	g, err := newGateway(cfg, set)
 	if err != nil {
 		t.Fatalf("newGateway: %v", err)
@@ -330,9 +351,9 @@ func newTestGateway(t testing.TB, cfg Config, set settings) *Gateway {
 	return g
 }
 
-// memberRoute builds a member Route to a Home's admitted subject.
-func memberRoute(chID channel.ID, h *home.Home, subj actor.ActorID, now time.Time) Route {
-	return Route{Channel: chID, Home: h, Access: AccessMember, SubjectID: subj}
+// memberRoute builds a member Route to a channel bundle's admitted subject.
+func memberRoute(chID channel.ID, h *testChannel, subj actor.ActorID, now time.Time) Route {
+	return Route{Channel: chID, Bundle: h, Access: AccessMember, SubjectID: subj}
 }
 
 // mkBusiness builds a business frame of type typ carrying channel_id=cid (empty cid →
@@ -438,13 +459,31 @@ func blockingInterpreter(slot *subjectgate.Slot, got chan<- struct{}, release <-
 	}
 }
 
-// admitRows admits n extra humans into h to append n log rows (each Admit = one
-// membership-mirror row, verified by probe) — a cheap way to seed a feed backlog.
-func admitRows(t *testing.T, h *home.Home, n int) {
+// admitRows submits n public events through the real member slot to seed a
+// visible feed backlog without reaching around the Bundle boundary.
+func admitRows(t *testing.T, h *testChannel, n int) {
 	t.Helper()
+	slot, ok := h.SubjectSlotFor(h.memberID)
+	if !ok {
+		t.Fatal("member slot unavailable")
+	}
 	for i := 0; i < n; i++ {
-		if _, err := h.Admit(context.Background(), actor.KindHuman, fmt.Sprintf("row-%d", i)); err != nil {
-			t.Fatalf("Admit row %d: %v", i, err)
+		frame, err := subjectgate.NewFrame(subjectgate.FrameSubmit, "row", subjectgate.SubmitPayload{
+			ChannelID: string(h.channelID), MsgType: "gateway.test.row", Kind: "event", Visibility: "public", Audience: []string{string(h.memberID)},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		deadline := time.Now().Add(2 * time.Second)
+		for {
+			result, deliverErr := slot.Deliver(context.Background(), frame)
+			if deliverErr == nil && result.Frame.Type == subjectgate.FrameReceipt {
+				break
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("submit row %d: result=%+v err=%v", i, result, deliverErr)
+			}
+			time.Sleep(time.Millisecond)
 		}
 	}
 }
@@ -463,6 +502,12 @@ func (o *feedObserver) lastSeq(ch channel.ID) int64 {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	return o.last[ch]
+}
+
+func (o *feedObserver) delivered(ch channel.ID) int {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.count[ch]
 }
 
 func (o *feedObserver) sequences(ch channel.ID) []int64 {

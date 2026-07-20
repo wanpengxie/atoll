@@ -73,12 +73,12 @@ func TestBootPublishesHumanSystemAndCompositionRowsInOneControlShape(t *testing.
 	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
 	resolver := &acceptanceResolver{}
 	h1 := openAcceptanceHome(t, dbPath, "three-births", resolver, time.Hour)
-	humanID, err := h1.Admit(ctx, actor.KindHuman, "three-birth-human")
+	humanID, err := h1.admit(ctx, actor.KindHuman, "three-birth-human")
 	if err != nil {
 		t.Fatal(err)
 	}
 	config := json.RawMessage(`{"shape":"complete"}`)
-	decl, err := h1.Declare(ctx, DeclareRequest{
+	decl, err := h1.declare(ctx, DeclareRequest{
 		SourceDeclID: "decl:three-births", Principal: "composition-agent",
 		Kind: actor.KindAgent, Class: "composition-probe", Config: &config,
 		Placement: storespec.NewServerPlacement(), TIdle: 321, CreatedAt: time.Now().UnixMilli(),
@@ -86,12 +86,12 @@ func TestBootPublishesHumanSystemAndCompositionRowsInOneControlShape(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h1.Close(); err != nil {
+	if err := h1.closeInternal("test"); err != nil {
 		t.Fatal(err)
 	}
 
 	h2 := openAcceptanceHome(t, dbPath, "three-births", resolver, time.Hour)
-	t.Cleanup(func() { _ = h2.Close() })
+	t.Cleanup(func() { _ = h2.closeInternal("test") })
 	cases := []struct {
 		id        actor.ActorID
 		kind      actor.Kind
@@ -126,7 +126,7 @@ func TestEmptyConfigSurvivesAdmissionEditBootAndForkFactoryBuild(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
 	resolver := &acceptanceResolver{}
 	h1 := openAcceptanceHome(t, dbPath, "empty-config-chain", resolver, 5*time.Millisecond)
-	decl, err := h1.Declare(ctx, DeclareRequest{
+	decl, err := h1.declare(ctx, DeclareRequest{
 		SourceDeclID: "decl:empty", Principal: "empty-config", Kind: actor.KindAgent,
 		Class: "declared-empty", Config: nil, Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})
@@ -134,19 +134,19 @@ func TestEmptyConfigSurvivesAdmissionEditBootAndForkFactoryBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitHomeCondition(t, func() bool { return resolver.count(decl.Row.ID, "declared-empty", true) >= 1 })
-	edited, err := h1.EditDeclaration(ctx, storespec.DeclEditBundle{
+	edited, err := h1.editDeclaration(ctx, storespec.DeclEditBundle{
 		ActorID: decl.Row.ID, Class: "declared-empty", Config: nil,
 		Placement: storespec.NewServerPlacement(), SourceDeclID: "decl:empty", CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil || edited.Config != nil || edited.CurrentDeclVersion != 2 {
 		t.Fatalf("empty edit=%+v err=%v", edited, err)
 	}
-	if _, err := h1.ApplyDeclaration(ctx, decl.Row.ID, 2); err != nil {
+	if _, err := h1.applyDeclaration(ctx, decl.Row.ID, 2); err != nil {
 		t.Fatal(err)
 	}
 	waitHomeCondition(t, func() bool { return resolver.count(decl.Row.ID, "declared-empty", true) >= 2 })
 
-	parent, err := h1.Admit(ctx, actor.KindHuman, "empty-fork-parent")
+	parent, err := h1.admit(ctx, actor.KindHuman, "empty-fork-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -166,12 +166,12 @@ func TestEmptyConfigSurvivesAdmissionEditBootAndForkFactoryBuild(t *testing.T) {
 	if !ok || row.Config != nil {
 		t.Fatalf("fork row config=%q ok=%v", row.Config, ok)
 	}
-	if err := h1.Close(); err != nil {
+	if err := h1.closeInternal("test"); err != nil {
 		t.Fatal(err)
 	}
 
 	h2 := openAcceptanceHome(t, dbPath, "empty-config-chain", resolver, 5*time.Millisecond)
-	t.Cleanup(func() { _ = h2.Close() })
+	t.Cleanup(func() { _ = h2.closeInternal("test") })
 	row, ok, err = h2.controlIndex.LookupActive(ctx, decl.Row.ID)
 	if err != nil || !ok || row.Config != nil || row.CurrentDeclVersion != 2 {
 		t.Fatalf("boot empty config=(%+v,%v,%v)", row, ok, err)
@@ -184,7 +184,7 @@ func TestStateLifetimeSplitsDurableIdentityFromHomeSessionRun(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
 	resolver := &acceptanceResolver{}
 	h1 := openAcceptanceHome(t, dbPath, "state-two-layers", resolver, time.Hour)
-	declared, err := h1.Admit(ctx, actor.KindHuman, "state-durable")
+	declared, err := h1.admit(ctx, actor.KindHuman, "state-durable")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,12 +221,12 @@ func TestStateLifetimeSplitsDurableIdentityFromHomeSessionRun(t *testing.T) {
 	if _, err := h1.stateHandles.Resolve(ctx, storespec.AuthorStamp{ID: ended, BirthVersion: 1}); !errors.Is(err, accessdoor.ErrStateHandleUnavailable) {
 		t.Fatalf("ended run State=%v", err)
 	}
-	if err := h1.Close(); err != nil {
+	if err := h1.closeInternal("test"); err != nil {
 		t.Fatal(err)
 	}
 
 	h2 := openAcceptanceHome(t, dbPath, "state-two-layers", resolver, time.Hour)
-	t.Cleanup(func() { _ = h2.Close() })
+	t.Cleanup(func() { _ = h2.closeInternal("test") })
 	durable2, err := h2.stateHandles.Resolve(ctx, storespec.AuthorStamp{ID: declared, BirthVersion: 1})
 	if err != nil {
 		t.Fatal(err)
@@ -244,7 +244,7 @@ func TestBootDropsRunIdentityAndClosesItsOpenRequestOnlyAfterRestart(t *testing.
 	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
 	resolver := &acceptanceResolver{}
 	h1 := openAcceptanceHome(t, dbPath, "boot-run-closure", resolver, 5*time.Millisecond)
-	parent, err := h1.Admit(ctx, actor.KindHuman, "boot-parent")
+	parent, err := h1.admit(ctx, actor.KindHuman, "boot-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -271,12 +271,12 @@ func TestBootDropsRunIdentityAndClosesItsOpenRequestOnlyAfterRestart(t *testing.
 	if rows, err := h1.cs.Query.OpenRequestsForActor(ctx, child); err != nil || len(rows) != 1 {
 		t.Fatalf("live fork request was closed: rows=%d err=%v", len(rows), err)
 	}
-	if err := h1.Close(); err != nil {
+	if err := h1.closeInternal("test"); err != nil {
 		t.Fatal(err)
 	}
 
 	h2 := openAcceptanceHome(t, dbPath, "boot-run-closure", resolver, 5*time.Millisecond)
-	t.Cleanup(func() { _ = h2.Close() })
+	t.Cleanup(func() { _ = h2.closeInternal("test") })
 	if _, ok, _ := h2.controlIndex.LookupActive(ctx, child); ok {
 		t.Fatal("previous Home run identity survived boot")
 	}
@@ -295,7 +295,7 @@ func TestEnsureTicketFromPriorHomeSessionCannotAttach(t *testing.T) {
 	resolver := &acceptanceResolver{}
 	placement, _ := storespec.NewDaemonPlacement("daemon-ticket")
 	h1 := openAcceptanceHome(t, dbPath, "ticket-restart", resolver, time.Hour)
-	decl, err := h1.Declare(ctx, DeclareRequest{
+	decl, err := h1.declare(ctx, DeclareRequest{
 		SourceDeclID: "decl:ticket", Principal: "ticketed", Kind: actor.KindAgent,
 		Class: "ticket-worker", Placement: placement, CreatedAt: time.Now().UnixMilli(),
 	})
@@ -304,20 +304,20 @@ func TestEnsureTicketFromPriorHomeSessionCannotAttach(t *testing.T) {
 	}
 	_, _ = h1.liveness.AcceptDelivery(decl.Row.ID, &message.Envelope{Kind: message.KindRequest})
 	h1.reconcileDaemonIntent(ctx)
-	oldPlan, err := h1.PlanForDaemon(ctx, "daemon-ticket")
+	oldPlan, err := h1.planForDaemon(ctx, "daemon-ticket")
 	if err != nil || len(oldPlan) != 1 || oldPlan[0].EnsureTicket == "" {
 		t.Fatalf("old plan=%+v err=%v", oldPlan, err)
 	}
 	oldTicket := EnsureTicket(oldPlan[0].EnsureTicket)
-	if err := h1.Close(); err != nil {
+	if err := h1.closeInternal("test"); err != nil {
 		t.Fatal(err)
 	}
 
 	h2 := openAcceptanceHome(t, dbPath, "ticket-restart", resolver, time.Hour)
-	t.Cleanup(func() { _ = h2.Close() })
+	t.Cleanup(func() { _ = h2.closeInternal("test") })
 	_, _ = h2.liveness.AcceptDelivery(decl.Row.ID, &message.Envelope{Kind: message.KindRequest})
 	h2.reconcileDaemonIntent(ctx)
-	newPlan, err := h2.PlanForDaemon(ctx, "daemon-ticket")
+	newPlan, err := h2.planForDaemon(ctx, "daemon-ticket")
 	if err != nil || len(newPlan) != 1 || newPlan[0].EnsureTicket == "" || newPlan[0].EnsureTicket == string(oldTicket) {
 		t.Fatalf("new plan=%+v old=%q err=%v", newPlan, oldTicket, err)
 	}
@@ -359,12 +359,12 @@ func TestBootConvergesDurableDeclarationCommittedBeforeMemoryPublication(t *test
 	if _, applied, err := h1.cs.DeclVersions.ApplyDeclaredVersion(ctx, admitted.ID, edited.CurrentDeclVersion); err != nil || !applied {
 		t.Fatalf("durable apply=(%v,%v)", applied, err)
 	}
-	if err := h1.Close(); err != nil {
+	if err := h1.closeInternal("test"); err != nil {
 		t.Fatal(err)
 	}
 
 	h2 := openAcceptanceHome(t, dbPath, "commit-before-publish", resolver, time.Hour)
-	t.Cleanup(func() { _ = h2.Close() })
+	t.Cleanup(func() { _ = h2.closeInternal("test") })
 	row, visible, err := h2.controlIndex.LookupActive(ctx, admitted.ID)
 	if err != nil || !visible || row.CurrentDeclVersion != 2 || row.Class != "crash-window-v2" || row.Config != nil {
 		t.Fatalf("boot convergence=(%+v,%v,%v)", row, visible, err)
@@ -378,10 +378,10 @@ func TestForkWakeConvergesOnLevelSweepWithoutInlineBuildOrPoke(t *testing.T) {
 	ctx := context.Background()
 	resolver := &acceptanceResolver{}
 	h := openAcceptanceHome(t, filepath.Join(t.TempDir(), "channel.sqlite"), "accelerators-off", resolver, 10*time.Millisecond)
-	t.Cleanup(func() { _ = h.Close() })
+	t.Cleanup(func() { _ = h.closeInternal("test") })
 	h.disablePoke.Store(true)
 	h.disableForkInlineActivation.Store(true)
-	parent, err := h.Admit(ctx, actor.KindHuman, "accelerator-parent")
+	parent, err := h.admit(ctx, actor.KindHuman, "accelerator-parent")
 	if err != nil {
 		t.Fatal(err)
 	}

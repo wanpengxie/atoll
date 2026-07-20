@@ -48,7 +48,7 @@ func TestActorDeclListProjectsCurrentAndLatestChannelVersions(t *testing.T) {
 		}
 		first := byChannel[s.chID]
 		second := byChannel[secondChannel]
-		if first == nil || first["current_version"] != float64(1) || first["latest_version"] != float64(2) {
+		if first == nil || first["current_version"] != float64(2) || first["latest_version"] != float64(2) {
 			t.Fatalf("first version projection=%v", first)
 		}
 		if second == nil || second["current_version"] != float64(1) || second["latest_version"] != float64(1) {

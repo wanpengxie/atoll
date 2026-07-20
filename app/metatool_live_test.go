@@ -45,6 +45,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/lib/metatool"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -149,8 +150,10 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 	}
 
 	a, err := app.New(app.Config{
-		DB:           db,
-		ChannelDBDir: chDBDir,
+		DB: db,
+		HostFactory: func(deps channelhost.HomeDeps) (channelhost.LocalHost, error) {
+			return channelhost.New(chDBDir, deps)
+		},
 	})
 	if err != nil {
 		db.Close()

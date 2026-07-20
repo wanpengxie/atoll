@@ -208,7 +208,7 @@ type SubjectWriteSpec struct {
 func BuildSubjectWrite(clock func() time.Time, spec SubjectWriteSpec) (*message.Envelope, error) {
 	switch spec.Kind {
 	case message.KindRequest:
-		return BuildRequest(clock, RequestSpec{
+		return buildRequest(clock, RequestSpec{
 			ID:         spec.ID,
 			Type:       spec.Type,
 			Payload:    spec.Payload,
@@ -216,7 +216,7 @@ func BuildSubjectWrite(clock func() time.Time, spec SubjectWriteSpec) (*message.
 			Visibility: spec.Visibility,
 			ParentID:   spec.ParentID,
 			ExpiresAt:  spec.ExpiresAt,
-		})
+		}, false)
 	case message.KindEvent:
 		return BuildEvent(clock, EventSpec{
 			ID:         spec.ID,

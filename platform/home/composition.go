@@ -37,14 +37,14 @@ func (v *compositionView) LookupByClass(id actor.ActorID, class string, config j
 	return v.resolver.BuildClass(v.h.channelID, id, class, config)
 }
 
-func (h *Home) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
+func (h *Home) defaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
 	if h.closed.Load() {
 		return "", false, ErrClosed
 	}
 	return h.cs.Routing.DefaultAgent(ctx)
 }
 
-func (h *Home) SetDefaultAgent(ctx context.Context, id actor.ActorID) error {
+func (h *Home) setDefaultAgent(ctx context.Context, id actor.ActorID) error {
 	if h.closed.Load() {
 		return ErrClosed
 	}
@@ -59,7 +59,7 @@ func (h *Home) SetDefaultAgent(ctx context.Context, id actor.ActorID) error {
 // RemoveInstance is composition-level termination: desired deletion and
 // registry deregistration/cascades share one transaction, bracketed by quiet
 // body removal to close both in-flight build windows.
-func (h *Home) RemoveInstance(ctx context.Context, id actor.ActorID) error {
+func (h *Home) removeInstance(ctx context.Context, id actor.ActorID) error {
 	if h.closed.Load() {
 		return ErrClosed
 	}
@@ -78,7 +78,7 @@ func (h *Home) RemoveInstance(ctx context.Context, id actor.ActorID) error {
 // activate it from the current declaration. A running daemon carrier is cut by
 // the same Despawn primitive as End; the fresh EnsureTicket in the next plan is
 // what distinguishes the replacement attempt.
-func (h *Home) RestartInstanceDirect(ctx context.Context, id actor.ActorID) (int64, error) {
+func (h *Home) restartInstanceDirect(ctx context.Context, id actor.ActorID) (int64, error) {
 	if h.closed.Load() {
 		return 0, ErrClosed
 	}

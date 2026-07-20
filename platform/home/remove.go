@@ -18,7 +18,7 @@ var ErrRestartAnchor = errors.New("platform: cannot restart the system anchor ac
 
 // Restart accepts a reconcile-driven restart: desired membership remains
 // untouched, the current embodiment is killed, and the ring is poked to rebuild.
-func (h *Home) Restart(ctx context.Context, id actor.ActorID) error {
+func (h *Home) restart(ctx context.Context, id actor.ActorID) error {
 	if h.closed.Load() {
 		return ErrClosed
 	}
@@ -61,7 +61,7 @@ func (h *Home) Restart(ctx context.Context, id actor.ActorID) error {
 // CORRECT reconcile behaviour (same as killing a pod without deleting its
 // Deployment) — the caller's obligation is to remove intent FIRST, then call
 // Remove (asserted at the app call site, period 9).
-func (h *Home) Remove(ctx context.Context, id actor.ActorID) error {
+func (h *Home) remove(ctx context.Context, id actor.ActorID) error {
 	if h.closed.Load() {
 		return ErrClosed
 	}

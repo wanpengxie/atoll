@@ -152,6 +152,9 @@ func ingressCreate(id resource.ResourceID, spec resourcespec.CreateSpec, initial
 	if !resourcespec.ValidKind(spec.Kind) {
 		return fmt.Errorf("%w: create kind %q not in the closed set", ErrMalformed, spec.Kind)
 	}
+	if (spec.SourceChannelID == "") != (spec.SourceResourceID == "") {
+		return fmt.Errorf("%w: create source must include both channel_id and resource_id", ErrMalformed)
+	}
 	if spec.Dir && spec.WithContent {
 		// A directory carries no content — the combination is a conflicting
 		// declaration, not silently resolved either way (期11 spec §1.5:
@@ -198,7 +201,7 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 	if !found {
 		return Outcome{RejectReason: access.AccessDenied}, nil
 	}
-	birth := resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}
+	birth := resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity, SourceChannelID: spec.SourceChannelID, SourceResourceID: spec.SourceResourceID}
 	if world == storespec.WorldRun {
 		birth.Authority = resourcespec.BirthChannelOwned
 	} else if world != storespec.WorldDurable {

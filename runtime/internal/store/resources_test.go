@@ -9,13 +9,16 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"path/filepath"
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 var creatorBirthPlan = resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}
@@ -80,6 +83,34 @@ func TestResource_CreateWritesRowGrantBytes(t *testing.T) {
 	}
 	if string(val) != "hello" {
 		t.Errorf("bytes=%q want hello", val)
+	}
+}
+
+func TestResourceReadableProjectionPreservesSourceProvenance(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	plan := resourcespec.ResourceBirthPlan{
+		Authority:       resourcespec.BirthCreatorIdentity,
+		SourceChannelID: "source-channel", SourceResourceID: "kv:source",
+	}
+	if err := reg.Create(ctx, "kv:copy", resourcespec.KindKV, "tool:realm", "", "", []byte("artifact"), plan); err != nil {
+		t.Fatal(err)
+	}
+	page, err := reg.ListReadable(ctx, channel.ResourceListQuery{Limit: 10})
+	if err != nil || len(page.Items) != 1 {
+		t.Fatalf("ListReadable page=%+v err=%v", page, err)
+	}
+	meta := page.Items[0]
+	if meta.SourceChannelID != "source-channel" || meta.SourceResourceID != "kv:source" {
+		t.Fatalf("list provenance=%+v", meta)
+	}
+	stat, found, err := reg.StatReadable(ctx, "kv:copy")
+	if err != nil || !found || stat.SourceChannelID != meta.SourceChannelID || stat.SourceResourceID != meta.SourceResourceID {
+		t.Fatalf("stat=%+v found=%v err=%v", stat, found, err)
+	}
+	fetched, body, found, err := reg.FetchReadable(ctx, "kv:copy")
+	if err != nil || !found || string(body) != "artifact" || fetched.SourceChannelID != meta.SourceChannelID || fetched.SourceResourceID != meta.SourceResourceID {
+		t.Fatalf("fetch meta=%+v body=%q found=%v err=%v", fetched, body, found, err)
 	}
 }
 
@@ -185,6 +216,22 @@ func TestResource_CreateFilePersistsRoute(t *testing.T) {
 	// later addition, §4), but the row's own bytes column must stay NULL.
 	if val, found, err := kvOf(reg).Read(ctx, "file:doc"); err != nil || found || val != nil {
 		t.Errorf("file row bytes column: found=%v val=%q err=%v, want found=false nil (bytes live at placement_coord, never inline)", found, val, err)
+	}
+}
+
+func TestResource_FetchDaemonHostedFileReportsCapabilityUnavailable(t *testing.T) {
+	ctx := context.Background()
+	reg := openResourceReg(t)
+	if err := reg.Create(ctx, "file:remote", resourcespec.KindFile, "actor:a", "daemon-1", "coord-xyz", nil, creatorBirthPlan); err != nil {
+		t.Fatalf("Create file: %v", err)
+	}
+
+	meta, body, found, err := reg.FetchReadable(ctx, "file:remote")
+	if !found || meta.ID != "file:remote" || meta.Kind != string(resourcespec.KindFile) {
+		t.Fatalf("FetchReadable metadata=%+v found=%v", meta, found)
+	}
+	if body != nil || !errors.Is(err, storespec.ErrResourceCapabilityUnavailable) {
+		t.Fatalf("FetchReadable body=%q err=%v, want typed capability unavailable", body, err)
 	}
 }
 

@@ -33,21 +33,21 @@ func openWhiteboxHome(t *testing.T) *Home {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { _ = h.Close() })
+	t.Cleanup(func() { _ = h.closeInternal("test") })
 	return h
 }
 
 func TestChannelOwnerGenesisIdempotencyAndProtection(t *testing.T) {
 	t.Run("neutral principal cannot be upgraded", func(t *testing.T) {
 		h := openWhiteboxHome(t)
-		neutral, err := h.Admit(context.Background(), actor.KindHuman, "same-principal")
+		neutral, err := h.admit(context.Background(), actor.KindHuman, "same-principal")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := h.AdmitChannelOwner(context.Background(), "same-principal"); err == nil {
+		if _, err := h.admitChannelOwner(context.Background(), "same-principal"); err == nil {
 			t.Fatal("owner admission accepted a pre-existing neutral row")
 		}
-		row, ok, err := h.ActiveActor(context.Background(), neutral)
+		row, ok, err := h.activeActor(context.Background(), neutral)
 		if err != nil || !ok || row.Role != storespec.RoleNone {
 			t.Fatalf("neutral row changed = (%+v,%v,%v)", row, ok, err)
 		}
@@ -55,26 +55,26 @@ func TestChannelOwnerGenesisIdempotencyAndProtection(t *testing.T) {
 
 	t.Run("owner retry and ordinary admit preserve owner", func(t *testing.T) {
 		h := openWhiteboxHome(t)
-		owner, err := h.AdmitChannelOwner(context.Background(), "owner-principal")
+		owner, err := h.admitChannelOwner(context.Background(), "owner-principal")
 		if err != nil {
 			t.Fatal(err)
 		}
-		retry, err := h.AdmitChannelOwner(context.Background(), "owner-principal")
+		retry, err := h.admitChannelOwner(context.Background(), "owner-principal")
 		if err != nil || retry != owner {
 			t.Fatalf("owner retry = (%q,%v)", retry, err)
 		}
-		ordinary, err := h.Admit(context.Background(), actor.KindHuman, "owner-principal")
+		ordinary, err := h.admit(context.Background(), actor.KindHuman, "owner-principal")
 		if err != nil || ordinary != owner {
 			t.Fatalf("ordinary retry = (%q,%v)", ordinary, err)
 		}
-		row, _, _ := h.ActiveActor(context.Background(), owner)
+		row, _, _ := h.activeActor(context.Background(), owner)
 		if row.Role != storespec.RoleOwner {
 			t.Fatalf("ordinary retry downgraded role to %q", row.Role)
 		}
-		if err := h.Remove(context.Background(), owner); !errors.Is(err, storespec.ErrChannelOwnerProtected) {
+		if err := h.remove(context.Background(), owner); !errors.Is(err, storespec.ErrChannelOwnerProtected) {
 			t.Fatalf("Remove owner err=%v, want protected sentinel", err)
 		}
-		if _, ok, _ := h.ActiveActor(context.Background(), owner); !ok {
+		if _, ok, _ := h.activeActor(context.Background(), owner); !ok {
 			t.Fatal("protected owner disappeared")
 		}
 	})
@@ -84,14 +84,14 @@ func TestAdmitIsHumanOnlyAndIdempotentlyPublishesAuthority(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
 	principal := "rev"
-	if _, err := h.Admit(ctx, actor.KindAgent, principal); !errors.Is(err, ErrAdmitKind) {
+	if _, err := h.admit(ctx, actor.KindAgent, principal); !errors.Is(err, ErrAdmitKind) {
 		t.Fatalf("non-human Admit err=%v, want ErrAdmitKind", err)
 	}
-	id, err := h.Admit(ctx, actor.KindHuman, principal)
+	id, err := h.admit(ctx, actor.KindHuman, principal)
 	if err != nil {
 		t.Fatalf("Admit genesis: %v", err)
 	}
-	reAdmitted, err := h.Admit(ctx, actor.KindHuman, principal)
+	reAdmitted, err := h.admit(ctx, actor.KindHuman, principal)
 	if err != nil {
 		t.Fatalf("re-Admit: %v", err)
 	}
@@ -133,21 +133,21 @@ func TestDeclarationEditApplyPublishesCurrentAndKeepsLatestDistinct(t *testing.T
 		t.Fatal(err)
 	}
 	oldEnd := lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: id, BirthVersion: 1}}
-	edited, err := h.EditDeclaration(ctx, storespec.DeclEditBundle{
+	edited, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
 		ActorID: id, Class: "agent.v2", Config: nil, Placement: storespec.NewServerPlacement(),
 		SourceDeclID: "source-v2", CreatedAt: 2,
 	})
 	if err != nil || edited.CurrentDeclVersion != 2 || edited.Config != nil {
 		t.Fatalf("edit = %+v err=%v", edited, err)
 	}
-	current, latest, err := h.DeclarationVersions(ctx, id)
+	current, latest, err := h.View().DeclarationVersions(ctx, id)
 	if err != nil || current.CurrentDeclVersion != 1 || latest.CurrentDeclVersion != 2 {
 		t.Fatalf("versions before apply current=%+v latest=%+v err=%v", current, latest, err)
 	}
 	if verdict, err := h.controlIndex.CheckAuthor(ctx, storespec.AuthorStamp{ID: id, BirthVersion: 2}); err != nil || verdict != storespec.AuthorVersionStale {
 		t.Fatalf("edited version acquired authority before apply: verdict=%v err=%v", verdict, err)
 	}
-	applied, err := h.ApplyDeclaration(ctx, id, 2)
+	applied, err := h.applyDeclaration(ctx, id, 2)
 	if err != nil || applied.CurrentDeclVersion != 2 {
 		t.Fatalf("apply = %+v err=%v", applied, err)
 	}
@@ -160,23 +160,23 @@ func TestDeclarationEditApplyPublishesCurrentAndKeepsLatestDistinct(t *testing.T
 	if _, active, err := h.controlIndex.LookupActive(ctx, child); err != nil || !active {
 		t.Fatalf("stale lifecycle handle ended child: active=%v err=%v", active, err)
 	}
-	if _, err := h.ApplyDeclaration(ctx, id, 1); !errors.Is(err, ErrApplyVersionRegress) {
+	if _, err := h.applyDeclaration(ctx, id, 1); !errors.Is(err, ErrApplyVersionRegress) {
 		t.Fatalf("regress err=%v", err)
 	}
-	if _, err := h.ApplyDeclaration(ctx, id, 3); !errors.Is(err, ErrApplyVersionNotFound) {
+	if _, err := h.applyDeclaration(ctx, id, 3); !errors.Is(err, ErrApplyVersionNotFound) {
 		t.Fatalf("missing err=%v", err)
 	}
-	if err := h.Remove(ctx, id); err != nil {
+	if err := h.remove(ctx, id); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.ApplyDeclaration(ctx, id, 2); !errors.Is(err, ErrApplyActorEnded) {
+	if _, err := h.applyDeclaration(ctx, id, 2); !errors.Is(err, ErrApplyActorEnded) {
 		t.Fatalf("ended err=%v", err)
 	}
 }
 
 func TestSystemDeclarationApplyIsForbidden(t *testing.T) {
 	h := openWhiteboxHome(t)
-	if _, err := h.ApplyDeclaration(context.Background(), actor.SystemActorID, 2); !errors.Is(err, ErrApplySystemForbidden) {
+	if _, err := h.applyDeclaration(context.Background(), actor.SystemActorID, 2); !errors.Is(err, ErrApplySystemForbidden) {
 		t.Fatalf("system apply err=%v", err)
 	}
 }
@@ -184,7 +184,7 @@ func TestSystemDeclarationApplyIsForbidden(t *testing.T) {
 func TestRealPensFenceAppliedAndEndedDeclaredAndRunIdentities(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	declared, err := h.Declare(ctx, DeclareRequest{
+	declared, err := h.declare(ctx, DeclareRequest{
 		SourceDeclID: "source:pen-gate", Principal: "pen-gate-declared", Kind: actor.KindAgent,
 		Class: "pen-gate", Placement: storespec.NewServerPlacement(), TIdle: int64((time.Hour) / time.Millisecond),
 		CreatedAt: time.Now().UnixMilli(),
@@ -210,14 +210,14 @@ func TestRealPensFenceAppliedAndEndedDeclaredAndRunIdentities(t *testing.T) {
 	if res := writeEvent(v1, "declared-v1-before-apply"); !res.Accepted() {
 		t.Fatalf("v1 before apply rejected: %+v", res)
 	}
-	edited, err := h.EditDeclaration(ctx, storespec.DeclEditBundle{
+	edited, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
 		ActorID: declared.Row.ID, Class: declared.Row.Class, Placement: declared.Row.Placement,
 		TIdle: declared.Row.TIdle, SourceDeclID: declared.Row.SourceDeclID, CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := h.ApplyDeclaration(ctx, declared.Row.ID, edited.CurrentDeclVersion); err != nil {
+	if _, err := h.applyDeclaration(ctx, declared.Row.ID, edited.CurrentDeclVersion); err != nil {
 		t.Fatal(err)
 	}
 	if res := writeEvent(v1, "declared-v1-after-apply"); res.RejectReason != harness.HarnessAuthorVersionStale {
@@ -227,14 +227,14 @@ func TestRealPensFenceAppliedAndEndedDeclaredAndRunIdentities(t *testing.T) {
 	if res := writeEvent(v2, "declared-v2-before-end"); !res.Accepted() {
 		t.Fatalf("current declared pen rejected: %+v", res)
 	}
-	if err := h.Remove(ctx, declared.Row.ID); err != nil {
+	if err := h.remove(ctx, declared.Row.ID); err != nil {
 		t.Fatal(err)
 	}
 	if res := writeEvent(v2, "declared-v2-after-end"); res.RejectReason != harness.HarnessAuthorNotMember {
 		t.Fatalf("ended declared pen=%+v", res)
 	}
 
-	parent, err := h.Admit(ctx, actor.KindHuman, "pen-gate-parent")
+	parent, err := h.admit(ctx, actor.KindHuman, "pen-gate-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,19 +289,19 @@ func TestRemoveSnapshotAndReadmitHaveNoPriorTestimony(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(100, 0)
 	installControlledPresenceFold(h, &now)
-	id, err := h.Admit(ctx, actor.KindHuman, "presence-life")
+	id, err := h.admit(ctx, actor.KindHuman, "presence-life")
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.presenceFold.OnObs(ctx, id, actorrt.Incarnation{}, actorrt.ObsKind(introspect.ObsDevicePresence), introspect.MarshalDevicePresence(true))
-	if err := h.Remove(ctx, id); err != nil {
+	if err := h.remove(ctx, id); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := h.View().Snapshot(ctx, id)
 	if err != nil || snapshot.Member || snapshot.L1Present || len(snapshot.L3) != 0 {
 		t.Fatalf("snapshot after Remove = %+v err=%v", snapshot, err)
 	}
-	readmittedID, err := h.Admit(ctx, actor.KindHuman, "presence-life")
+	readmittedID, err := h.admit(ctx, actor.KindHuman, "presence-life")
 	if err != nil {
 		t.Fatalf("re-Admit: %v", err)
 	}

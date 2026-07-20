@@ -4,7 +4,7 @@ import (
 	"context"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform/home"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -13,7 +13,7 @@ import (
 // the per-channel SSE/HTTP read plane and never appears in the gateway route set.
 type EntitlementRoute struct {
 	Channel   channel.ID
-	Home      *home.Home // migrated to channelhost.GatewayHitch in S4
+	Bundle    channelhost.Bundle
 	Access    string
 	SubjectID actor.ActorID
 }
@@ -25,11 +25,11 @@ func (a *App) reconcilePrincipalChannel(ctx context.Context, chID channel.ID, pr
 	if !a.channelExists(ctx, string(chID)) {
 		return
 	}
-	h := a.getHome(chID)
-	if h == nil {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
 		return
 	}
-	id, found, err := h.ResolvePrincipal(ctx, actor.KindHuman, principal)
+	id, found, err := bundle.View().ResolvePrincipal(ctx, actor.KindHuman, principal)
 	if err != nil {
 		a.logger.Warn("membership projection reconcile failed", "channel", chID, "principal", principal, "err", err)
 		return
@@ -72,12 +72,12 @@ func (a *App) EntitlementSnapshot(ctx context.Context, principal string) ([]Enti
 	routes := make([]EntitlementRoute, 0, len(memberships))
 	var failed []channel.ID
 	for _, membership := range memberships {
-		h := a.getHome(membership.channel)
-		if h == nil {
+		bundle, ok := a.host.Acquire(membership.channel)
+		if !ok {
 			failed = append(failed, membership.channel)
 			continue
 		}
-		id, found, err := h.ResolvePrincipal(ctx, actor.KindHuman, principal)
+		id, found, err := bundle.View().ResolvePrincipal(ctx, actor.KindHuman, principal)
 		if err != nil {
 			failed = append(failed, membership.channel)
 			continue
@@ -87,7 +87,7 @@ func (a *App) EntitlementSnapshot(ctx context.Context, principal string) ([]Enti
 			a.reconcilePrincipalChannel(ctx, membership.channel, principal)
 			continue
 		}
-		routes = append(routes, EntitlementRoute{Channel: membership.channel, Home: h, Access: "member", SubjectID: id})
+		routes = append(routes, EntitlementRoute{Channel: membership.channel, Bundle: bundle, Access: "member", SubjectID: id})
 	}
 	return routes, failed, nil
 }

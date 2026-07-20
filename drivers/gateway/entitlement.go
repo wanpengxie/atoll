@@ -3,7 +3,7 @@ package gateway
 import (
 	"context"
 
-	"github.com/wanpengxie/atoll/platform/home"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
@@ -23,7 +23,7 @@ const (
 // observer). The gateway anchors leases when resolution completes on its own clock.
 type Route struct {
 	Channel   channel.ID
-	Home      *home.Home
+	Bundle    channelhost.Bundle
 	Access    AccessClass
 	SubjectID actor.ActorID // member only; zero value for observer
 }

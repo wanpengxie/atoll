@@ -453,6 +453,43 @@ func (a *App) runDestroyJobLocked(ctx context.Context, id int64) error {
 	return tx.Commit()
 }
 
+// loadChannels is the lifecycle level-reconciliation arm. One corrupt or
+// unavailable channel is isolated and remains honestly unavailable; it never
+// prevents the realm from starting or the next pass from retrying it. Keeping
+// Open beside Provision/Destroy makes channelhost's production lifecycle
+// calling surface mechanically closed to this file.
+func (a *App) loadChannels() error {
+	rows, err := a.db.Query(`SELECT id,type FROM channels ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw, typ string
+		if err := rows.Scan(&raw, &typ); err != nil {
+			return err
+		}
+		id := channel.ID(raw)
+		if err := a.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: id, ExpectedType: typ}); err != nil {
+			a.logger.Warn("channel open reconcile failed", "channel", raw, "err", err)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	entries, err := a.host.Census(context.Background())
+	if err != nil {
+		a.logger.Warn("channel census failed", "err", err)
+		return nil
+	}
+	for _, entry := range entries {
+		if !a.channelExists(context.Background(), string(entry.ChannelID)) {
+			a.logger.Warn("orphan channel image", "channel", entry.ChannelID, "state", entry.State)
+		}
+	}
+	return nil
+}
+
 func backoff(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1

@@ -14,8 +14,12 @@ import (
 )
 
 func AdmitForTest(h *Home, principal string, kind actor.Kind) (actor.ActorID, error) {
-	return h.Admit(context.Background(), kind, principal)
+	return h.admit(context.Background(), kind, principal)
 }
+
+func RemoveForTest(h *Home, id actor.ActorID) error { return h.remove(context.Background(), id) }
+
+func SubscribeForTest(h *Home) (<-chan struct{}, func()) { return h.subscribe() }
 
 func HandleCancelUpstreamForTest(h *Home, id actor.ActorID, requestID message.ID) {
 	h.handleCancelUpstream(id, requestID)

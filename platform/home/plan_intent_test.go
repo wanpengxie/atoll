@@ -14,7 +14,7 @@ import (
 func TestDaemonPlanProjectsLivenessIntentAndStableEnsureTicket(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	parent, err := h.Admit(ctx, actor.KindHuman, "plan-parent")
+	parent, err := h.admit(ctx, actor.KindHuman, "plan-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -25,17 +25,17 @@ func TestDaemonPlanProjectsLivenessIntentAndStableEnsureTicket(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plan, err := h.PlanForDaemon(ctx, "daemon-a"); err != nil || len(plan) != 0 {
+	if plan, err := h.planForDaemon(ctx, "daemon-a"); err != nil || len(plan) != 0 {
 		t.Fatalf("dormant plan=%v err=%v", plan, err)
 	}
 	_, _ = h.liveness.AcceptDelivery(child, &message.Envelope{Kind: message.KindRequest})
 	h.reconcileDaemonIntent(ctx)
-	plan, err := h.PlanForDaemon(ctx, "daemon-a")
+	plan, err := h.planForDaemon(ctx, "daemon-a")
 	if err != nil || len(plan) != 1 || plan[0].InstanceID != child || plan[0].EnsureTicket == "" || plan[0].TIdleMs != defaultForkIdle.Milliseconds() {
 		t.Fatalf("dirty plan=%+v err=%v", plan, err)
 	}
 	ticket := plan[0].EnsureTicket
-	again, _ := h.PlanForDaemon(ctx, "daemon-a")
+	again, _ := h.planForDaemon(ctx, "daemon-a")
 	if len(again) != 1 || again[0].EnsureTicket != ticket {
 		t.Fatalf("repeated plan changed ticket: first=%+v again=%+v", plan, again)
 	}
@@ -47,7 +47,7 @@ func TestDaemonPlanProjectsLivenessIntentAndStableEnsureTicket(t *testing.T) {
 	if _, verdict := h.liveness.ApproveIdle(child); verdict != transitionApplied {
 		t.Fatalf("idle=%v", verdict)
 	}
-	if plan, _ := h.PlanForDaemon(ctx, "daemon-a"); len(plan) != 0 {
+	if plan, _ := h.planForDaemon(ctx, "daemon-a"); len(plan) != 0 {
 		t.Fatalf("idle actor remains in plan: %+v", plan)
 	}
 
@@ -55,7 +55,7 @@ func TestDaemonPlanProjectsLivenessIntentAndStableEnsureTicket(t *testing.T) {
 	// in detached state so the same-version rebind is accepted.
 	_, _ = h.liveness.AcceptDelivery(child, &message.Envelope{Kind: message.KindRequest})
 	h.reconcileDaemonIntent(ctx)
-	rebuilt, _ := h.PlanForDaemon(ctx, "daemon-a")
+	rebuilt, _ := h.planForDaemon(ctx, "daemon-a")
 	if len(rebuilt) != 1 || rebuilt[0].EnsureTicket == ticket {
 		t.Fatalf("new attempt=%+v oldTicket=%q", rebuilt, ticket)
 	}
@@ -66,7 +66,7 @@ func TestDaemonPlanProjectsLivenessIntentAndStableEnsureTicket(t *testing.T) {
 	if h.liveness.ObserveDown(child, noInc, true, false) != transitionApplied {
 		t.Fatal("port down did not detach")
 	}
-	detached, _ := h.PlanForDaemon(ctx, "daemon-a")
+	detached, _ := h.planForDaemon(ctx, "daemon-a")
 	if len(detached) != 1 || detached[0].EnsureTicket != string(newTicket) {
 		t.Fatalf("detached plan=%+v", detached)
 	}
@@ -77,11 +77,11 @@ func TestDaemonPlanProjectsLivenessIntentAndStableEnsureTicket(t *testing.T) {
 	// Manual restart of a present daemon carrier retires it and produces a fresh
 	// ticket at the same declaration version. Dormant restart above remained a
 	// no-op by construction.
-	if _, err := h.RestartInstanceDirect(ctx, child); err != nil {
+	if _, err := h.restartInstanceDirect(ctx, child); err != nil {
 		t.Fatal(err)
 	}
 	h.reconcileDaemonIntent(ctx)
-	restarted, _ := h.PlanForDaemon(ctx, "daemon-a")
+	restarted, _ := h.planForDaemon(ctx, "daemon-a")
 	if len(restarted) != 1 || restarted[0].Version != 1 || restarted[0].EnsureTicket == string(newTicket) {
 		t.Fatalf("manual restart plan=%+v", restarted)
 	}

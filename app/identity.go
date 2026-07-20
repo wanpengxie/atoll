@@ -49,12 +49,12 @@ func (a *App) requireChannelMember(c *gin.Context) (string, bool) {
 	if !ok {
 		return "", false
 	}
-	h := a.getHome(channel.ID(chID))
-	if h == nil {
+	bundle, ok := a.host.Acquire(channel.ID(chID))
+	if !ok {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 		return "", false
 	}
-	_, found, err := h.ResolvePrincipal(c.Request.Context(), actor.KindHuman, middleware.UserID(c))
+	_, found, err := bundle.View().ResolvePrincipal(c.Request.Context(), actor.KindHuman, middleware.UserID(c))
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 		return "", false

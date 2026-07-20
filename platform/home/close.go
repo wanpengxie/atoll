@@ -26,8 +26,6 @@ import (
 // insert into mem + post a wake, never join the run loop), and engine.Close only
 // joins its own run goroutine (fireDue's Append/Revive never block on the
 // already-stopped cells).
-func (h *Home) Close() error { return h.closeInternal("normal") }
-
 func (h *Home) closeInternal(reason string) error {
 	return h.closeInternalWithin(reason, 5*time.Second)
 }

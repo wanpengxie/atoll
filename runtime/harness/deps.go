@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -69,6 +70,10 @@ type Deps struct {
 	// engine append calls Log.Append. (v2: no fencing — single writer.)
 	Log       storespec.MessageLog
 	Authority storespec.ActorAuthority
+	// ResolveAudience is the channel-membrane routing evaluator. It is invoked
+	// only for request/event envelopes whose audience is empty, after sender
+	// identity has been welded and before structural audience validation.
+	ResolveAudience func(context.Context, *message.Envelope) error
 
 	// NowMs returns unix-ms (engine ts_received write source). Defaults
 	// to time.Now when nil.

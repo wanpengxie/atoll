@@ -35,9 +35,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/subjectgate"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // errGatewayClosed refuses an Attach/StartFeed after Close has begun (关站序:
@@ -73,8 +71,6 @@ const (
 // condition (no reachable brain) comes back as a non-empty retryable detail → the
 // gateway maps it to an unavailable error frame (never written as truth). err is a
 // genuine internal failure.
-type Routing func(ctx context.Context, chID channel.ID, kindIn message.Kind) (audience []actor.ActorID, kind message.Kind, retryable string, err error)
-
 // clockSource is the gateway's single injected time source. Now anchors leases and
 // telemetry; NewTimer arms the actual reconcile loops at an ABSOLUTE deadline. The
 // absolute form is load-bearing: a scheduler pause between computing a remaining
@@ -106,8 +102,6 @@ func (t systemTimer) Stop() bool          { return t.timer.Stop() }
 
 // Config configures the Gateway (assembly-root injected).
 type Config struct {
-	// Routing is the required app-domain routing resolver (see Routing).
-	Routing Routing
 	// Resolver is the required app-domain entitlement面 (principal → 合法频道集).
 	Resolver EntitlementResolver
 	Logger   *slog.Logger
@@ -143,7 +137,6 @@ type covEntry struct {
 // presence reconcile loop.
 type Gateway struct {
 	epoch    int64
-	routing  Routing
 	resolver EntitlementResolver
 	clock    clockSource
 	logger   *slog.Logger
@@ -209,9 +202,6 @@ type userEntry struct {
 func New(cfg Config) (*Gateway, error) { return newGateway(cfg, settings{}) }
 
 func newGateway(cfg Config, set settings) (*Gateway, error) {
-	if cfg.Routing == nil {
-		return nil, errors.New("gateway: routing is required")
-	}
 	if cfg.Resolver == nil {
 		return nil, errors.New("gateway: resolver is required")
 	}
@@ -236,7 +226,6 @@ func newGateway(cfg Config, set settings) (*Gateway, error) {
 	}
 	g := &Gateway{
 		epoch:           epoch,
-		routing:         cfg.Routing,
 		resolver:        cfg.Resolver,
 		clock:           clock,
 		logger:          logger,
@@ -495,7 +484,7 @@ func (g *Gateway) presenceReconcile() {
 			if r.Access != AccessMember {
 				continue // observers get no presence testimony (no槽)
 			}
-			slot, ok := r.Home.SubjectSlotFor(r.SubjectID)
+			slot, ok := r.Bundle.Gateway().SubjectSlotFor(r.SubjectID)
 			if !ok {
 				continue // embodiment lag — no slot yet, next圈
 			}

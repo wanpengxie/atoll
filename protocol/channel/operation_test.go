@@ -83,3 +83,23 @@ func TestOperationErrorClosedSet(t *testing.T) {
 		t.Fatalf("operate error closed set has %d entries", len(AllOperationErrorCodes))
 	}
 }
+
+func TestRealmErrorCodeClosedSet(t *testing.T) {
+	want := map[RealmErrorCode]bool{
+		RealmForbidden: true, RealmDeclNotFound: true, RealmResourceNotFound: true,
+		RealmCapabilityUnavailable: true, RealmChannelUnavailable: true,
+		RealmUnavailable: true, RealmInvalidRequest: true, RealmConflict: true,
+	}
+	if len(AllRealmErrorCodes) != len(want) {
+		t.Fatalf("realm error closed set has %d entries, want %d", len(AllRealmErrorCodes), len(want))
+	}
+	for _, code := range AllRealmErrorCodes {
+		if !want[code] {
+			t.Fatalf("unexpected realm error code %q", code)
+		}
+		delete(want, code)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing realm error codes %v", want)
+	}
+}

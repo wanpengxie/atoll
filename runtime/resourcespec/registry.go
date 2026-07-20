@@ -6,6 +6,7 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
@@ -95,7 +96,9 @@ type ResourceMeta struct {
 	// hands out the single-file staging→rename write句柄 (§3.9'). Declared by
 	// the creator at birth (CreateSpec.Dir), stored here, read at Resolve —
 	// NEVER re-derived by the daemon statting the disk (daemon holds no truth).
-	Dir bool
+	Dir              bool
+	SourceChannelID  channel.ID
+	SourceResourceID resource.ResourceID
 }
 
 // ReservationRow is one create-outbox reservation (期11 spec §1.3's
@@ -158,7 +161,9 @@ const (
 )
 
 type ResourceBirthPlan struct {
-	Authority BirthAuthorityKind
+	Authority        BirthAuthorityKind
+	SourceChannelID  channel.ID
+	SourceResourceID resource.ResourceID
 }
 
 type LandedResource struct {

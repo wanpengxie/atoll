@@ -28,11 +28,11 @@ func TestApplyDeclarationConcurrentRacersRecheckFreshStateNotSlidingSnapshot(t *
 	for n := 0; n < 20; n++ {
 		h := openWhiteboxHome(t)
 		ctx := context.Background()
-		id, err := h.Admit(ctx, actor.KindHuman, "apply-race")
+		id, err := h.admit(ctx, actor.KindHuman, "apply-race")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := h.EditDeclaration(ctx, storespec.DeclEditBundle{
+		if _, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
 			ActorID: id, Class: "human.v2", Placement: storespec.NewServerPlacement(), CreatedAt: 2,
 		}); err != nil {
 			t.Fatal(err)
@@ -47,7 +47,7 @@ func TestApplyDeclarationConcurrentRacersRecheckFreshStateNotSlidingSnapshot(t *
 			go func() {
 				defer wg.Done()
 				<-start
-				_, results[i] = h.ApplyDeclaration(ctx, id, 2)
+				_, results[i] = h.applyDeclaration(ctx, id, 2)
 			}()
 		}
 		close(start)
@@ -71,7 +71,7 @@ func TestApplyDeclarationConcurrentRacersRecheckFreshStateNotSlidingSnapshot(t *
 		if err != nil || !ok || row.CurrentDeclVersion != 2 {
 			t.Fatalf("iteration %d final row=%+v ok=%v err=%v", n, row, ok, err)
 		}
-		_ = h.Close()
+		_ = h.closeInternal("test")
 	}
 }
 
@@ -92,11 +92,11 @@ func TestEndConcurrentWithAuthorVersionAdvanceNeverSlidesOnStaleAuthority(t *tes
 	for n := 0; n < 20; n++ {
 		h := openWhiteboxHome(t)
 		ctx := context.Background()
-		parent, err := h.Admit(ctx, actor.KindHuman, "end-vs-apply-race")
+		parent, err := h.admit(ctx, actor.KindHuman, "end-vs-apply-race")
 		if err != nil {
 			t.Fatal(err)
 		}
-		if _, err := h.EditDeclaration(ctx, storespec.DeclEditBundle{
+		if _, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
 			ActorID: parent, Class: "human.v2", Placement: storespec.NewServerPlacement(), CreatedAt: 2,
 		}); err != nil {
 			t.Fatal(err)
@@ -114,7 +114,7 @@ func TestEndConcurrentWithAuthorVersionAdvanceNeverSlidesOnStaleAuthority(t *tes
 		go func() {
 			defer wg.Done()
 			<-start
-			_, applyErr = h.ApplyDeclaration(ctx, parent, 2)
+			_, applyErr = h.applyDeclaration(ctx, parent, 2)
 		}()
 		go func() {
 			defer wg.Done()
@@ -148,6 +148,6 @@ func TestEndConcurrentWithAuthorVersionAdvanceNeverSlidesOnStaleAuthority(t *tes
 		default:
 			t.Fatalf("iteration %d unexpected end error: %v", n, endErr)
 		}
-		_ = h.Close()
+		_ = h.closeInternal("test")
 	}
 }

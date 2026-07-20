@@ -52,7 +52,7 @@ var driversAllowedImportPrefixes = []string{
 
 // driversAllowedExactPlatform is fence A's precise platform-export-face
 // admission (platform-topology 批 裁决8): exactly the platform root package,
-// the platform/subjectgate export subpackage, and the platform/home host
+// the platform/subjectgate export subpackage, and the platform/channelhost
 // package — nothing under platform/internal/* is named here, so this
 // allowlist plus Go's internal/ rule is a REAL double lock, not a prefix
 // that silently also admits platform/internal/*. platform/compute is
@@ -62,7 +62,7 @@ var driversAllowedImportPrefixes = []string{
 var driversAllowedExactPlatform = map[string]bool{
 	"platform":             true,
 	"platform/subjectgate": true,
-	"platform/home":        true,
+	"platform/channelhost": true,
 }
 
 func driversImportAllowed(sub string) bool {
@@ -92,7 +92,7 @@ func TestDriversImportConfinement(t *testing.T) {
 			return
 		}
 		v = append(v, fmt.Sprintf(
-			"%s imports %q — drivers/* may name only lib/protocol/runtime + platform export face (platform, platform/subjectgate, platform/home) + registry; drivers→app is forbidden (routing/membership reach the gateway through injected seams the assembly root wires)",
+			"%s imports %q — drivers/* may name only lib/protocol/runtime + platform export face (platform, platform/subjectgate, platform/channelhost) + registry; drivers→app is forbidden",
 			slash, imp))
 	})
 	failViolations(t, "drivers/* import confinement (lib/protocol/runtime + platform + registry only)", v)

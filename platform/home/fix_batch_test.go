@@ -19,7 +19,7 @@ import (
 func TestDaemonPlacedForkedChildCarriesRelayBinding(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	parent, err := h.Admit(ctx, actor.KindHuman, "binding-parent")
+	parent, err := h.admit(ctx, actor.KindHuman, "binding-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -64,7 +64,7 @@ func TestBootRebuildsWakeDebtFromDurableOpenRequest(t *testing.T) {
 	resolver := &acceptanceResolver{}
 	placement, _ := storespec.NewDaemonPlacement("daemon-wake")
 	h1 := openAcceptanceHome(t, dbPath, "boot-wake-debt", resolver, time.Hour)
-	decl, err := h1.Declare(ctx, DeclareRequest{
+	decl, err := h1.declare(ctx, DeclareRequest{
 		SourceDeclID: "decl:wake", Principal: "waker", Kind: actor.KindAgent,
 		Class: "wake-worker", Placement: placement, TIdle: 60_000,
 		CreatedAt: time.Now().UnixMilli(),
@@ -87,12 +87,12 @@ func TestBootRebuildsWakeDebtFromDurableOpenRequest(t *testing.T) {
 		rows, qerr := h1.cs.Query.OpenRequestsForActor(ctx, id)
 		return qerr == nil && len(rows) == 1
 	})
-	if err := h1.Close(); err != nil {
+	if err := h1.closeInternal("test"); err != nil {
 		t.Fatal(err)
 	}
 
 	h2 := openAcceptanceHome(t, dbPath, "boot-wake-debt", resolver, time.Hour)
-	t.Cleanup(func() { _ = h2.Close() })
+	t.Cleanup(func() { _ = h2.closeInternal("test") })
 	standing, ok := h2.liveness.WakeStanding(id)
 	if !ok || !standing.Dirty {
 		t.Fatalf("boot wake standing=(%+v,%v), want dirty=true rebuilt from the durable open request", standing, ok)
@@ -100,7 +100,7 @@ func TestBootRebuildsWakeDebtFromDurableOpenRequest(t *testing.T) {
 	// The rebuilt debt must actually drive attachment intent: the daemon plan
 	// picks the receiver up on the next intent pass without any new input.
 	h2.reconcileDaemonIntent(ctx)
-	plan, err := h2.PlanForDaemon(ctx, "daemon-wake")
+	plan, err := h2.planForDaemon(ctx, "daemon-wake")
 	if err != nil || len(plan) != 1 || plan[0].InstanceID != id {
 		t.Fatalf("post-boot plan=%+v err=%v, want the woken receiver", plan, err)
 	}

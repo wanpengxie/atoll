@@ -5,6 +5,8 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+
+	"github.com/wanpengxie/atoll/platform/channelhost"
 )
 
 func TestEntitlementSnapshotHonorsCanceledContext(t *testing.T) {
@@ -13,7 +15,9 @@ func TestEntitlementSnapshotHonorsCanceledContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a, err := New(Config{DB: db, ChannelDBDir: filepath.Join(dir, "channels")})
+	a, err := New(Config{DB: db, HostFactory: func(deps channelhost.HomeDeps) (channelhost.LocalHost, error) {
+		return channelhost.New(filepath.Join(dir, "channels"), deps)
+	}})
 	if err != nil {
 		t.Fatal(err)
 	}

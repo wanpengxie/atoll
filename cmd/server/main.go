@@ -78,7 +78,7 @@ func gatewayResolver(a *app.App) gateway.EntitlementResolver {
 			}
 			gr = append(gr, gateway.Route{
 				Channel:   r.Channel,
-				Home:      r.Home,
+				Bundle:    r.Bundle,
 				Access:    access,
 				SubjectID: r.SubjectID,
 			})
@@ -114,9 +114,8 @@ func main() {
 	appDB := processDB.DB
 
 	a, err := app.New(app.Config{
-		DB:           appDB,
-		Logger:       logger,
-		ChannelDBDir: *channelDBDir,
+		DB:     appDB,
+		Logger: logger,
 		HostFactory: func(deps channelhost.HomeDeps) (channelhost.LocalHost, error) {
 			return channelhost.New(*channelDBDir, deps)
 		},
@@ -133,7 +132,6 @@ func main() {
 	// directly; the entitlement resolver bridges the app's own DTO into gateway.Route
 	// (app → drivers is fenced, so the assembly root does the DTO→DTO map here).
 	gw, err := gateway.New(gateway.Config{
-		Routing:  a.ResolveRoutingForGateway,
 		Resolver: gatewayResolver(a),
 		Logger:   logger,
 	})

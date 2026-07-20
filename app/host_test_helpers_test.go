@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/channelhost"
-	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -29,7 +28,7 @@ func newBareAppForTest(t *testing.T) *App {
 	return a
 }
 
-func openTestChannelForTest(t *testing.T, a *App, id channel.ID, declarations []channelhost.GenesisDeclaration) *home.Home {
+func openTestChannelForTest(t *testing.T, a *App, id channel.ID, declarations []channelhost.GenesisDeclaration) channelhost.Bundle {
 	t.Helper()
 	spec := channelhost.ProvisionSpec{ChannelID: id, Type: "group", OwnerPrincipal: "owner", GenesisDeclarations: declarations, CreatedAt: time.Now().UnixMilli()}
 	if _, err := a.host.Provision(context.Background(), spec); err != nil {
@@ -38,9 +37,9 @@ func openTestChannelForTest(t *testing.T, a *App, id channel.ID, declarations []
 	if err := a.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: id, ExpectedType: "group"}); err != nil {
 		t.Fatal(err)
 	}
-	h, ok := a.host.Borrow(id)
+	bundle, ok := a.host.Acquire(id)
 	if !ok {
-		t.Fatal("borrow failed")
+		t.Fatal("acquire failed")
 	}
-	return h
+	return bundle
 }

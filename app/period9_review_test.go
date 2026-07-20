@@ -91,8 +91,8 @@ func TestHalfBuiltChannel_DeleteSucceeds(t *testing.T) {
 }
 
 // TestHalfBuiltChannel_OpenClearError pins #3 ②: opening a半成品 channel must give a
-// clear, non-panic response. A realm principal may read public directory metadata,
-// while a non-member write is refused without panicking on the empty image.
+// clear, non-panic response. Cross-membrane reads require the channel's
+// realm-tool capability, which a half-built image cannot provide.
 func TestHalfBuiltChannel_OpenClearError(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
@@ -104,9 +104,9 @@ func TestHalfBuiltChannel_OpenClearError(t *testing.T) {
 		t.Fatalf("CreateHalfBuiltChannelForTest: %v", err)
 	}
 
-	// Directory metadata reads cleanly (200), no panic.
-	if g := env.do(t, "GET", "/api/channels/"+chID, nil, s.cookies); g.Code != http.StatusOK {
-		t.Fatalf("GET half-built channel: want 200, got %d (%s)", g.Code, g.Body.String())
+	// The missing membrane capability is reported honestly (503), no panic.
+	if g := env.do(t, "GET", "/api/channels/"+chID, nil, s.cookies); g.Code != http.StatusServiceUnavailable {
+		t.Fatalf("GET half-built channel: want 503, got %d (%s)", g.Code, g.Body.String())
 	}
 	// The absent local image is reported honestly rather than fabricated.
 	if _, err := env.app.ActorsForTest(channel.ID(chID)); err == nil {

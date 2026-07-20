@@ -17,7 +17,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -82,7 +81,7 @@ func TestPumpFairness(t *testing.T) {
 	var coldOnce sync.Once
 	feed, stop = observeFeed(s, func(ch channel.ID, _ int) {
 		if ch == "cold" && feed.lastSeq("cold") >= coldHead {
-			coldOnce.Do(func() { coldReached <- feed.lastSeq("hot") })
+			coldOnce.Do(func() { coldReached <- int64(feed.delivered("hot")) })
 		}
 	})
 	s.StartFeed()
@@ -96,26 +95,28 @@ func TestPumpFairness(t *testing.T) {
 	// At the exact wire boundary where cold reaches its head, hot may have emitted at
 	// most its one batch for that round. An implementation that drains hot completely
 	// before visiting cold therefore fails instead of passing on eventual delivery.
-	if hotAtCold > feedBatch || hotAtCold >= hotHead {
+	if hotAtCold > feedBatch || hotAtCold >= int64(len(sourceSeqs(t, hot))) {
 		t.Fatalf("cold arrived only after hot overran its one-batch turn: hot=%d head=%d batch=%d", hotAtCold, hotHead, feedBatch)
 	}
 	s.Close()
 	stop()
 }
 
-func sourceSeqs(t *testing.T, h *home.Home) []int64 {
+func sourceSeqs(t *testing.T, h *testChannel) []int64 {
 	t.Helper()
 	var seqs []int64
 	after := int64(0)
 	for {
-		rows, err := h.View().ReadAfterSeq(context.Background(), after, feedBatch)
+		rows, scanned, err := h.View().ReadVisibleAfterSeq(context.Background(), channel.Reader{
+			Principal: h.principal, ActorID: h.memberID, Mode: channel.ReaderMember,
+		}, after, feedBatch)
 		if err != nil {
 			t.Fatalf("ReadAfterSeq(%d): %v", after, err)
 		}
 		for _, row := range rows {
 			seqs = append(seqs, row.Seq)
-			after = row.Seq
 		}
+		after = scanned
 		if len(rows) < feedBatch {
 			break
 		}
@@ -211,8 +212,10 @@ func TestAdmitWithoutPokeConvergesOnSweep(t *testing.T) {
 	// Admit after the pump is waiting. openHome has no membership callback, so this
 	// truth change cannot reach the gateway except through the periodic sweep.
 	h, id := openHome(t, channel.ID("late"), principal)
+	admitRows(t, h, 1)
 	res.set(principal, []Route{memberRoute("late", h, id, clk.now())}, nil, nil)
-	head, _ := h.View().MaxSeq(context.Background())
+	want := sourceSeqs(t, h)
+	head := want[len(want)-1]
 	clk.advance(sweep)
 	waitFor(t, func() bool { return feed.lastSeq("late") >= head },
 		"no-poke Admit did not converge through the real sweep timer")
@@ -231,6 +234,7 @@ func TestAdmitPokeEntersStream(t *testing.T) {
 	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "tom"
 	h, id := openHome(t, channel.ID("c"), principal)
+	admitRows(t, h, 1)
 	// Start with NO eligibility for tom.
 	res.set(principal, nil, nil, nil)
 
@@ -244,7 +248,8 @@ func TestAdmitPokeEntersStream(t *testing.T) {
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
 	g.Poke(principal)
 
-	head, _ := h.View().MaxSeq(context.Background())
+	want := sourceSeqs(t, h)
+	head := want[len(want)-1]
 	waitFor(t, func() bool { return feed.lastSeq("c") >= head },
 		"Admit poke did not bring the channel into the stream (≤下一泵轮 broken)")
 	s.Close()

@@ -55,8 +55,8 @@ func (a *App) handleListDaemons(c *gin.Context) {
 // Read-time from each channel-home's View — derived, never a stored column.
 func (a *App) daemonOnline(ctx context.Context, only channel.ID, daemonID string) bool {
 	check := func(chID channel.ID) bool {
-		h := a.getHome(chID)
-		return h != nil && h.View().IsAttached(daemonID)
+		bundle, ok := a.host.Acquire(chID)
+		return ok && bundle.View().IsAttached(daemonID)
 	}
 	if only != "" {
 		return check(only)
@@ -255,13 +255,13 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 // back into the already-decided HTTP result.
 func (a *App) logDaemonObligations(ctx context.Context, daemonID string, channelIDs []string) {
 	for _, chID := range channelIDs {
-		h := a.getHome(channel.ID(chID))
-		if h == nil {
+		bundle, ok := a.host.Acquire(channel.ID(chID))
+		if !ok {
 			a.logger.Warn("app.daemon.retired.counts_unknown",
 				"daemon", daemonID, "channel", chID, "reason", "channel_not_open")
 			continue
 		}
-		a.logOneDaemonObligation(ctx, daemonID, chID, h)
+		a.logOneDaemonObligation(ctx, daemonID, chID, bundle.View())
 	}
 }
 

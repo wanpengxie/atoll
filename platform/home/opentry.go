@@ -300,7 +300,7 @@ func (e *opEntry) publishActor(ctx context.Context, id actor.ActorID) error {
 		return fmt.Errorf("platform: publish sysop actor %s: control index rejected", id)
 	}
 	if row.Kind == actor.KindHuman {
-		e.home.EnsureSubjectSlot(id)
+		e.home.ensureSubjectSlot(id)
 	}
 	e.home.pokeReconcile()
 	return nil
@@ -314,7 +314,7 @@ func (e *opEntry) applyEffects(ctx context.Context, effects storespec.PostCommit
 		} else if err == nil {
 			e.home.controlIndex.DeleteBatch([]actor.ActorID{id})
 			_, _ = e.home.liveness.EndIdentity(id)
-			e.home.RemoveSubjectSlot(id)
+			e.home.removeSubjectSlot(id)
 			e.home.presenceFold.Forget(id)
 		}
 		e.home.channel.Cells().DespawnIDReason(id, "sysop")
@@ -394,7 +394,7 @@ func (e *opEntry) executeMemberRestart(ctx context.Context, req sysactor.Operate
 	if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
 		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: "instance_id required"}
 	}
-	if _, err := e.home.RestartInstanceDirect(ctx, payload.InstanceID); err != nil {
+	if _, err := e.home.restartInstanceDirect(ctx, payload.InstanceID); err != nil {
 		return nil, asOperateError(err)
 	}
 	return map[string]any{"restarted": payload.InstanceID}, nil
@@ -407,7 +407,7 @@ func (e *opEntry) executeMemberSetDefault(ctx context.Context, req sysactor.Oper
 	if err := json.Unmarshal(req.Payload, &payload); err != nil {
 		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: err.Error()}
 	}
-	if err := e.home.SetDefaultAgent(ctx, payload.InstanceID); err != nil {
+	if err := e.home.setDefaultAgent(ctx, payload.InstanceID); err != nil {
 		return nil, asOperateError(err)
 	}
 	return map[string]any{"default_agent": payload.InstanceID}, nil

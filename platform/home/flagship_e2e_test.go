@@ -190,7 +190,7 @@ func TestFlagshipMasterForkCallStateTimerAndHomeRestart(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
 	resolver := &flagshipResolver{rounds: map[int]flagshipRound{}, roundDone: make(chan int, 8)}
 	h1 := openAcceptanceHome(t, dbPath, "flagship-workflow", resolver, 5*time.Millisecond)
-	master, err := h1.Declare(ctx, DeclareRequest{
+	master, err := h1.declare(ctx, DeclareRequest{
 		SourceDeclID: "decl:flagship-master", Principal: "flagship-master",
 		Kind: actor.KindAgent, Class: "flagship.master", Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})
@@ -213,14 +213,14 @@ func TestFlagshipMasterForkCallStateTimerAndHomeRestart(t *testing.T) {
 	}
 	round1 := waitFlagshipRound(t, resolver, 1)
 	assertFlagshipAttribution(t, 1, round1)
-	if err := h1.Close(); err != nil {
+	if err := h1.closeInternal("test"); err != nil {
 		t.Fatal(err)
 	}
 
 	// No request is injected after restart. The durable identity-bound timer is
 	// the sole driver of the second fork+Call round.
 	h2 := openAcceptanceHome(t, dbPath, "flagship-workflow", resolver, 5*time.Millisecond)
-	t.Cleanup(func() { _ = h2.Close() })
+	t.Cleanup(func() { _ = h2.closeInternal("test") })
 	round2 := waitFlagshipRound(t, resolver, 2)
 	assertFlagshipAttribution(t, 2, round2)
 	_, _, masterBirths := resolver.snapshot(2)

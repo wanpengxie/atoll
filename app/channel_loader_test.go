@@ -3,6 +3,8 @@ package app
 import (
 	"path/filepath"
 	"testing"
+
+	"github.com/wanpengxie/atoll/platform/channelhost"
 )
 
 func TestNew_IsolatesMissingChannelImage(t *testing.T) {
@@ -21,7 +23,9 @@ func TestNew_IsolatesMissingChannelImage(t *testing.T) {
 		}
 	}
 
-	a, err := New(Config{DB: db, ChannelDBDir: dir})
+	a, err := New(Config{DB: db, HostFactory: func(deps channelhost.HomeDeps) (channelhost.LocalHost, error) {
+		return channelhost.New(dir, deps)
+	}})
 	if err != nil {
 		t.Fatalf("one missing image blocked realm startup: %v", err)
 	}

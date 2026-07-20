@@ -23,7 +23,6 @@ func TestGatewayPublicContractIsSinglePath(t *testing.T) {
 	var fields []string
 	type signature struct{ in, out []string }
 	sigs := make(map[string]signature)
-	var routingInputs []string
 	var entitlementSnapshot signature
 	for _, pkg := range pkgs {
 		for _, file := range pkg.Files {
@@ -42,9 +41,6 @@ func TestGatewayPublicContractIsSinglePath(t *testing.T) {
 									fields = append(fields, name.Name)
 								}
 							}
-						}
-						if ts.Name.Name == "Routing" {
-							routingInputs = fieldTypes(fset, ts.Type.(*ast.FuncType).Params)
 						}
 						if ts.Name.Name == "EntitlementResolver" {
 							iface := ts.Type.(*ast.InterfaceType)
@@ -68,7 +64,7 @@ func TestGatewayPublicContractIsSinglePath(t *testing.T) {
 		}
 	}
 	sort.Strings(fields)
-	wantFields := []string{"Logger", "Resolver", "Routing"}
+	wantFields := []string{"Logger", "Resolver"}
 	if strings.Join(fields, ",") != strings.Join(wantFields, ",") {
 		t.Fatalf("gateway.Config fields = %v, want %v", fields, wantFields)
 	}
@@ -84,9 +80,6 @@ func TestGatewayPublicContractIsSinglePath(t *testing.T) {
 		if !ok || strings.Join(got.in, ",") != strings.Join(expected.in, ",") || strings.Join(got.out, ",") != strings.Join(expected.out, ",") {
 			t.Errorf("%s shape = %v, want %v", name, got, expected)
 		}
-	}
-	if got, want := strings.Join(routingInputs, ","), "context.Context,channel.ID,message.Kind"; got != want {
-		t.Errorf("Routing inputs = %s, want %s", got, want)
 	}
 	wantSnapshot := signature{
 		in:  []string{"context.Context", "string"},

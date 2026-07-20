@@ -26,6 +26,7 @@ const (
 	StepNormalize        stepID = 3
 	StepSenderConsistent stepID = 4
 	StepTypeRegistered   stepID = 5
+	StepAudienceResolve  stepID = 6
 	StepKindAndAudience  stepID = 7
 	StepResponsePairing  stepID = 8
 	StepAuthorGate       stepID = 9

@@ -35,7 +35,7 @@ func openStormHome(b *testing.B) *Home {
 	}
 	h.reconcileStop()
 	<-h.reconcileDone
-	b.Cleanup(func() { _ = h.Close() })
+	b.Cleanup(func() { _ = h.closeInternal("test") })
 	return h
 }
 
@@ -43,7 +43,7 @@ func BenchmarkActorStorm(b *testing.B) {
 	b.Run("ForkAdmission", func(b *testing.B) {
 		h := openStormHome(b)
 		ctx := context.Background()
-		parent, err := h.Admit(ctx, actor.KindHuman, "storm-fork-parent")
+		parent, err := h.admit(ctx, actor.KindHuman, "storm-fork-parent")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -61,7 +61,7 @@ func BenchmarkActorStorm(b *testing.B) {
 	b.Run("DeepSubtreeRemove", func(b *testing.B) {
 		h := openStormHome(b)
 		ctx := context.Background()
-		parent, err := h.Admit(ctx, actor.KindHuman, "storm-remove-parent")
+		parent, err := h.admit(ctx, actor.KindHuman, "storm-remove-parent")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -92,7 +92,7 @@ func BenchmarkActorStorm(b *testing.B) {
 	b.Run("AuthorGateRead", func(b *testing.B) {
 		h := openStormHome(b)
 		ctx := context.Background()
-		id, err := h.Admit(ctx, actor.KindHuman, "storm-gate-author")
+		id, err := h.admit(ctx, actor.KindHuman, "storm-gate-author")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -111,7 +111,7 @@ func BenchmarkActorStorm(b *testing.B) {
 	b.Run("DeclarationApply", func(b *testing.B) {
 		h := openStormHome(b)
 		ctx := context.Background()
-		declared, err := h.Declare(ctx, DeclareRequest{
+		declared, err := h.declare(ctx, DeclareRequest{
 			SourceDeclID: "storm:apply", Principal: "storm-apply", Kind: actor.KindAgent,
 			Class: "storm-v1", Placement: storespec.NewServerPlacement(),
 			TIdle: int64(time.Hour / time.Millisecond), CreatedAt: time.Now().UnixMilli(),
@@ -122,7 +122,7 @@ func BenchmarkActorStorm(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			edited, editErr := h.EditDeclaration(ctx, storespec.DeclEditBundle{
+			edited, editErr := h.editDeclaration(ctx, storespec.DeclEditBundle{
 				ActorID: declared.Row.ID, Class: fmt.Sprintf("storm-v%d", i+2),
 				Placement: declared.Row.Placement, TIdle: declared.Row.TIdle,
 				SourceDeclID: declared.Row.SourceDeclID, CreatedAt: int64(i + 2),
@@ -130,7 +130,7 @@ func BenchmarkActorStorm(b *testing.B) {
 			if editErr != nil {
 				b.Fatal(editErr)
 			}
-			if _, err := h.ApplyDeclaration(ctx, declared.Row.ID, edited.CurrentDeclVersion); err != nil {
+			if _, err := h.applyDeclaration(ctx, declared.Row.ID, edited.CurrentDeclVersion); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -139,7 +139,7 @@ func BenchmarkActorStorm(b *testing.B) {
 	b.Run("AnchorRedelivery", func(b *testing.B) {
 		h := openStormHome(b)
 		ctx := context.Background()
-		parent, err := h.Admit(ctx, actor.KindHuman, "storm-anchor-parent")
+		parent, err := h.admit(ctx, actor.KindHuman, "storm-anchor-parent")
 		if err != nil {
 			b.Fatal(err)
 		}

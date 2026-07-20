@@ -5,7 +5,7 @@ import "context"
 // DaemonObligationCounts returns the durable resource obligations still named
 // after daemonID. It is an observation-only retirement aid: callers use it for
 // edge logging after world-layer revocation, never to decide or roll it back.
-func (h *Home) DaemonObligationCounts(ctx context.Context, daemonID string) (resources, reservations, tombstones int, err error) {
+func (h *Home) daemonObligationCounts(ctx context.Context, daemonID string) (resources, reservations, tombstones int, err error) {
 	if h.closed.Load() {
 		return 0, 0, 0, ErrClosed
 	}

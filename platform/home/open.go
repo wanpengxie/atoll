@@ -208,7 +208,10 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		ChannelID: cfg.ChannelID,
 		Log:       cs.Log,
 		Authority: cs.Authority,
-		Logger:    logger,
+		ResolveAudience: func(ctx context.Context, env *message.Envelope) error {
+			return h.resolveAudience(ctx, env)
+		},
+		Logger: logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: build harness: %w", err)
@@ -231,7 +234,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	//    h is predeclared (nil) here and assigned below (step 9): sysactor is a
 	//    ring0 special Proc (spec §3's out-generation matrix) that still enters
 	//    through actorbase.New like every other actor, so its Hooks.Canceller
-	//    wants Home.CancelRequest — but the system cell's factory is registered
+	//    wants the home cancellation hook — but the system cell's factory is registered
 	//    at channelkit.New (and the cell birthed at channel.Start), before Home
 	//    is assigned. The closure captures the h VARIABLE (not its zero value);
 	//    by the time a cancel actually fires (long after Open returns), h has
@@ -263,7 +266,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			hooks := actorbase.Hooks{
 				Canceller: func(target actor.ActorID, requestID message.ID) {
 					if h != nil {
-						h.CancelRequest(target, requestID)
+						h.cancelRequest(target, requestID)
 					}
 				},
 			}
@@ -391,7 +394,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		Logger:             logger,
 		CancelRequest:      h.handleCancelUpstream,
 		StorageHostControl: homeStorageHostControl{outbox: cs.Outbox, timeout: cfg.ReservationTimeout, logger: logger},
-		Plan:               h.PlanForDaemon,
+		Plan:               h.planForDaemon,
 		CanAttach: func(ctx context.Context, daemonID string) error {
 			bound, err := cs.Bindings.IsBound(ctx, storespec.DaemonID(daemonID))
 			if err != nil {
@@ -524,6 +527,9 @@ func deliveryHandle(h *Home, chID channelpkg.ID, logger *slog.Logger) func(store
 	return func(row storespec.StoredRow) error {
 		env := row.Envelope
 		for _, id := range env.Audience {
+			if !message.ShouldDeliver(id, &env) {
+				continue
+			}
 			verdict, err := h.liveness.AcceptDelivery(id, &env)
 			if err != nil || verdict != transitionApplied {
 				logger.Warn("platform.delivery.outcome",

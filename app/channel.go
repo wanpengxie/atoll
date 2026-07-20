@@ -86,8 +86,16 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 		c.JSON(500, gin.H{"error": "internal error"})
 		return
 	}
+	realmSnapshot, err := (channel.RenderedSnapshot{Class: realmToolClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1}).Seal()
+	if err != nil {
+		c.JSON(500, gin.H{"error": "internal error"})
+		return
+	}
 	spec := channelhost.ProvisionSpec{ChannelID: chID, Type: req.Type, OwnerPrincipal: caller, CreatedAt: now,
-		GenesisDeclarations: []channelhost.GenesisDeclaration{{DeclID: "sys:boost", Principal: defaultAgentPrincipal, Kind: actor.KindAgent, Rendered: snapshot}}, DefaultSourceDeclID: "sys:boost"}
+		GenesisDeclarations: []channelhost.GenesisDeclaration{
+			{DeclID: "sys:boost", Principal: defaultAgentPrincipal, Kind: actor.KindAgent, Rendered: snapshot},
+			{DeclID: realmToolDeclID, Principal: realmToolDeclID, Kind: actor.KindTool, Rendered: realmSnapshot},
+		}, DefaultSourceDeclID: "sys:boost"}
 	if req.ParentID != nil {
 		spec.Origin = &channelhost.Origin{ParentChannelID: channel.ID(*req.ParentID), InitiatorPrincipal: caller}
 	}
@@ -172,8 +180,10 @@ func (a *App) respondCreatedChannel(c *gin.Context, id string) {
 }
 
 func (a *App) handleGetChannel(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
-	if !ok {
+	chID := c.Param("chID")
+	_, _, reason, gateErr := a.readSubject(c.Request.Context(), channel.ID(chID), middleware.UserID(c))
+	if reason != observeAllowed || gateErr != nil {
+		writeReadFailure(c, reason, gateErr)
 		return
 	}
 	var id, name, typ string

@@ -30,7 +30,7 @@ type DeclareResult struct {
 	ConfigUpdated bool
 }
 
-func (h *Home) Declare(ctx context.Context, in DeclareRequest) (DeclareResult, error) {
+func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, error) {
 	if h.closed.Load() {
 		return DeclareResult{}, ErrClosed
 	}
@@ -69,7 +69,7 @@ func (h *Home) Declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 	}
 	updated := false
 	if !admitted.Created && in.Config != nil && !bytes.Equal(row.Config, config) {
-		edited, editErr := h.EditDeclaration(ctx, storespec.DeclEditBundle{
+		edited, editErr := h.editDeclaration(ctx, storespec.DeclEditBundle{
 			ActorID: row.ID, Class: row.Class, Config: config, Placement: row.Placement,
 			TIdle: row.TIdle, SourceDeclID: row.SourceDeclID, CreatedAt: in.CreatedAt,
 			RenderSeq: in.RenderSeq,
@@ -77,7 +77,7 @@ func (h *Home) Declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 		if editErr != nil {
 			return DeclareResult{}, editErr
 		}
-		row, err = h.ApplyDeclaration(ctx, row.ID, edited.CurrentDeclVersion)
+		row, err = h.applyDeclaration(ctx, row.ID, edited.CurrentDeclVersion)
 		if err != nil {
 			return DeclareResult{}, err
 		}
@@ -94,21 +94,21 @@ func (h *Home) Declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 
 func durationMillis(ms int64) time.Duration { return time.Duration(ms) * time.Millisecond }
 
-func (h *Home) ActiveActors(ctx context.Context) ([]storespec.ActorControlRow, error) {
+func (h *Home) activeActors(ctx context.Context) ([]storespec.ActorControlRow, error) {
 	if h.closed.Load() {
 		return nil, ErrClosed
 	}
 	return h.controlIndex.ListActive(ctx)
 }
 
-func (h *Home) ActiveActor(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+func (h *Home) activeActor(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
 	if h.closed.Load() {
 		return storespec.ActorControlRow{}, false, ErrClosed
 	}
 	return h.controlIndex.LookupActive(ctx, id)
 }
 
-func (h *Home) DeclaredBySource(ctx context.Context, source string) ([]storespec.ActorControlRow, error) {
+func (h *Home) declaredBySource(ctx context.Context, source string) ([]storespec.ActorControlRow, error) {
 	rows, err := h.controlIndex.ListActive(ctx)
 	if err != nil {
 		return nil, err
@@ -126,7 +126,7 @@ func (h *Home) DeclaredBySource(ctx context.Context, source string) ([]storespec
 	return out, nil
 }
 
-func (h *Home) DeclaredByPrincipal(ctx context.Context, principal string) (storespec.ActorControlRow, bool, error) {
+func (h *Home) declaredByPrincipal(ctx context.Context, principal string) (storespec.ActorControlRow, bool, error) {
 	rows, err := h.controlIndex.ListActive(ctx)
 	if err != nil {
 		return storespec.ActorControlRow{}, false, err

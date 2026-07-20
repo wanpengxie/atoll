@@ -60,8 +60,8 @@ func TestFiredTimerSurvivesHandlerPanicAndRedeliversUntilAck(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = h.Close() })
-	result, err := h.Declare(context.Background(), DeclareRequest{
+	t.Cleanup(func() { _ = h.closeInternal("test") })
+	result, err := h.declare(context.Background(), DeclareRequest{
 		SourceDeclID: "decl:timer-crasher", Principal: "timer-crasher", Kind: actor.KindAgent,
 		Class: "timer-crasher", Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})
@@ -112,12 +112,12 @@ func TestFiredTimerFullAttemptIsReleasedAndRetriedOnNextSweep(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = h.Close() })
+	t.Cleanup(func() { _ = h.closeInternal("test") })
 	h.reconcileStop()
 	<-h.reconcileDone
 
 	ctx := context.Background()
-	result, err := h.Declare(ctx, DeclareRequest{
+	result, err := h.declare(ctx, DeclareRequest{
 		SourceDeclID: "decl:timer-full", Principal: "timer-full", Kind: actor.KindAgent,
 		Class: "timer-full", Placement: storespec.NewServerPlacement(),
 		TIdle: int64(time.Hour / time.Millisecond), CreatedAt: time.Now().UnixMilli(),
@@ -194,12 +194,12 @@ func TestFiredSweepTransientTargetSetsDirtyOnceWithoutDoubleAccept(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = h.Close() })
+	t.Cleanup(func() { _ = h.closeInternal("test") })
 	h.reconcileStop()
 	<-h.reconcileDone
 
 	ctx := context.Background()
-	result, err := h.Declare(ctx, DeclareRequest{
+	result, err := h.declare(ctx, DeclareRequest{
 		SourceDeclID: "decl:timer-transient", Principal: "timer-transient", Kind: actor.KindAgent,
 		Class: "timer-transient", Placement: storespec.NewServerPlacement(),
 		TIdle: int64(time.Hour / time.Millisecond), CreatedAt: time.Now().UnixMilli(),

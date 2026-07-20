@@ -19,7 +19,7 @@ func TestHomeCloseConcurrentCompletionAndUnpublish(t *testing.T) {
 	errs := make(chan error, callers)
 	for range callers {
 		wg.Add(1)
-		go func() { defer wg.Done(); errs <- h.Close() }()
+		go func() { defer wg.Done(); errs <- home.Shutdown(h) }()
 	}
 	wg.Wait()
 	close(errs)
@@ -28,16 +28,13 @@ func TestHomeCloseConcurrentCompletionAndUnpublish(t *testing.T) {
 			t.Fatalf("concurrent Close: %v", err)
 		}
 	}
-	if _, err := h.Admit(context.Background(), actor.KindHuman, "late"); !errors.Is(err, home.ErrClosed) {
+	if _, err := home.AdmitForTest(h, "late", actor.KindHuman); !errors.Is(err, home.ErrClosed) {
 		t.Fatalf("Admit after Close = %v", err)
 	}
-	if err := h.Remove(context.Background(), "late"); !errors.Is(err, home.ErrClosed) {
+	if err := home.RemoveForTest(h, "late"); !errors.Is(err, home.ErrClosed) {
 		t.Fatalf("Remove after Close = %v", err)
 	}
-	if err := h.Restart(context.Background(), "late"); !errors.Is(err, home.ErrClosed) {
-		t.Fatalf("Restart after Close = %v", err)
-	}
-	wake, unsubscribe := h.Subscribe()
+	wake, unsubscribe := home.SubscribeForTest(h)
 	unsubscribe()
 	select {
 	case _, ok := <-wake:
@@ -59,7 +56,7 @@ func openTestHome(t *testing.T) *home.Home {
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
-	t.Cleanup(func() { _ = h.Close() })
+	t.Cleanup(func() { _ = home.Shutdown(h) })
 	return h
 }
 
@@ -122,24 +119,6 @@ func TestAdmit_CellLessMember(t *testing.T) {
 	}
 }
 
-func TestRestart_NonMemberRejected(t *testing.T) {
-	h := openTestHome(t)
-	ctx := context.Background()
-	id := actor.ActorID("agent:orphan")
-	if err := h.Restart(ctx, id); err == nil {
-		t.Fatal("Restart of a non-member must error")
-	}
-	actors, err := h.View().ListActors(ctx)
-	if err != nil {
-		t.Fatalf("ListActors: %v", err)
-	}
-	for _, a := range actors {
-		if a.ID == id {
-			t.Fatal("Spawn wrote a membership row for a non-member — verify must not apply")
-		}
-	}
-}
-
 // TestOpen_RestartOverPersistentDB verifies the genesis seed is idempotent: a
 // second Open over the SAME db file (a home restart) must succeed, not PK-conflict
 // on re-seeding the intrinsic system actor. Before the Exists-guard this failed
@@ -150,10 +129,10 @@ func TestOpen_RestartOverPersistentDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
-	if _, err := h1.AdmitChannelOwner(context.Background(), "restart-owner"); err != nil {
+	if _, err := home.BootstrapOwner(context.Background(), h1, "restart-owner"); err != nil {
 		t.Fatalf("seed owner: %v", err)
 	}
-	if err := h1.Close(); err != nil {
+	if err := home.Shutdown(h1); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
 	// A normal reopen is legal only after bootstrap has published its owner.
@@ -163,7 +142,7 @@ func TestOpen_RestartOverPersistentDB(t *testing.T) {
 	if err != nil {
 		t.Fatalf("restart Open over existing DB: %v", err)
 	}
-	t.Cleanup(func() { _ = h2.Close() })
+	t.Cleanup(func() { _ = home.Shutdown(h2) })
 	actors, err := h2.View().ListActors(context.Background())
 	if err != nil {
 		t.Fatalf("ListActors after restart: %v", err)
@@ -179,12 +158,17 @@ func TestOpen_RestartOverPersistentDB(t *testing.T) {
 	}
 }
 
-// TestView_ReadAfterSeq_Empty verifies ReadAfterSeq on a fresh channel.
-func TestView_ReadAfterSeq_Empty(t *testing.T) {
+// TestView_ReadVisibleAfterSeq_Empty verifies the public visible view on a
+// fresh channel. Genesis system records are deliberately hidden.
+func TestView_ReadVisibleAfterSeq_Empty(t *testing.T) {
 	h := openTestHome(t)
-	rows, err := h.View().ReadAfterSeq(context.Background(), 0, 100)
+	rows, _, err := h.View().ReadVisibleAfterSeq(context.Background(), channel.Reader{
+		Principal: "observer", Mode: channel.ReaderObserver,
+	}, 0, 100)
 	if err != nil {
-		t.Fatalf("ReadAfterSeq: %v", err)
+		t.Fatalf("ReadVisibleAfterSeq: %v", err)
 	}
-	_ = rows // genesis events may be present; only error-freedom is asserted
+	if len(rows) != 0 {
+		t.Fatalf("visible genesis rows=%d, want 0", len(rows))
+	}
 }

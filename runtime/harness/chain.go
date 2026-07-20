@@ -60,6 +60,7 @@ func New(deps Deps) (Minter, error) {
 		newStepNormalize(deps),
 		newStepSenderConsistent(deps),
 		newStepTypeRegistered(deps),
+		newStepAudienceResolve(deps),
 		newStepKindAndAudience(deps),
 		newStepResponsePairing(deps),
 		newStepAuthorGate(deps),
@@ -193,6 +194,8 @@ func stepName(step stepID) string {
 		return "type_registered"
 	case StepKindAndAudience:
 		return "kind_and_audience"
+	case StepAudienceResolve:
+		return "audience_resolve"
 	case StepResponsePairing:
 		return "response_pairing"
 	case StepAuthorGate:

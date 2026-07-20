@@ -3,6 +3,7 @@ package actorbase
 import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
@@ -31,6 +32,7 @@ type ResourceHandle interface {
 	// Create allocates a NEW resource id with initial bytes — birth is
 	// ownership (access.OpCreate, day-1 kv only).
 	Create(id resource.ResourceID, args []byte) (accessdoor.Outcome, error)
+	CreateFrom(id resource.ResourceID, args []byte, source channel.ResourceRef) (accessdoor.Outcome, error)
 	// Read returns the resource's current bytes (access.OpRead).
 	Read(id resource.ResourceID) (accessdoor.Outcome, error)
 	// Write mutates an EXISTING resource's bytes (access.OpWrite); a

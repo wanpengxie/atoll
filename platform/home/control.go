@@ -11,22 +11,22 @@ import (
 
 // hooks is the actorbase engine's per-host wiring for every Proc-shaped def
 // this Home builds (spec §3's out-generation matrix, row 1): a cell host always
-// has a live CancelRequest reach, so Hooks.Canceller is never nil here. The
+// has a live cancellation reach, so Hooks.Canceller is never nil here. The
 // daemon host wires its own Canceller too — computeRing's cellCancelForwarder
 // sends the caller-side cancel-upstream frame (platform/compute/forwarders.go),
 // which handleCancelUpstream below receives.
 func (h *Home) hooks() actorbase.Hooks {
-	return actorbase.Hooks{Canceller: h.CancelRequest}
+	return actorbase.Hooks{Canceller: h.cancelRequest}
 }
 
-// CancelRequest reaches the request-scope of cancel(scope) for one in-flight
+// cancelRequest reaches the request-scope of cancel(scope) for one in-flight
 // request `target` is running under `requestID`. Home holds the runtime
-// directly (cell/port hosting is transport-neutral inside it — CancelRequest
+// directly (cell/port hosting is transport-neutral inside it — cancellation
 // reaches a daemon-hosted port the same way it reaches a local cell) so this
 // is a direct call, no Acceptor indirection needed. No-op if the request
 // already closed or `target` has no live embodiment — cancel is a
 // best-effort hint, the caller's closure owns the terminal.
-func (h *Home) CancelRequest(target actor.ActorID, requestID message.ID) {
+func (h *Home) cancelRequest(target actor.ActorID, requestID message.ID) {
 	h.channel.Cells().CancelRequest(target, requestID)
 }
 
@@ -42,7 +42,7 @@ func (h *Home) CancelRequest(target actor.ActorID, requestID message.ID) {
 // mismatch — all silently drop + log (best-effort no-ack semantics: an upstream
 // cancel is a hint, never a verdict; the caller's own closure already owns the
 // terminal and the request's deadline still collapses its reqCtx). On the happy
-// path it fires Home.CancelRequest(target, requestID) — the exact same reach a
+// path it fires the home cancellation hook — the exact same reach a
 // local cell's Hooks.Canceller takes.
 func (h *Home) handleCancelUpstream(boundID actor.ActorID, requestID message.ID) {
 	req, ok, err := h.cs.Requests.FindByID(context.Background(), requestID)
@@ -62,7 +62,7 @@ func (h *Home) handleCancelUpstream(boundID actor.ActorID, requestID message.ID)
 		h.logger.Info("platform.home.cancel_upstream.sender_mismatch", "request", string(requestID), "sender", string(boundID), "authored_by", string(req.Sender.ID))
 		return
 	}
-	h.CancelRequest(req.Audience[0], requestID)
+	h.cancelRequest(req.Audience[0], requestID)
 }
 
 // KickDaemon closes every link this compute currently holds (the substrate
@@ -74,14 +74,14 @@ func (h *Home) handleCancelUpstream(boundID actor.ActorID, requestID message.ID)
 // a kick is a voluntary revocation, not an observed death. The link.kick_daemon
 // Info (computeID + closed count) is logged by the wrapped link.Acceptor
 // itself, not duplicated at this pass-through — see accept.go's KickDaemon.
-func (h *Home) KickDaemon(computeID string) int {
+func (h *Home) kickDaemon(computeID string) int {
 	return h.links.KickDaemon(computeID)
 }
 
 // ServeAttach is the attach admission surface: the app hands an upgraded WS request here so a
 // daemon can attach its actor streams. Home keeps the internal link acceptor and
 // only exposes this capability — the acceptor object never escapes.
-func (h *Home) ServeAttach(w http.ResponseWriter, r *http.Request, daemonID string) {
+func (h *Home) serveAttach(w http.ResponseWriter, r *http.Request, daemonID string) {
 	if h.closed.Load() || h.links == nil {
 		http.Error(w, "home closed", http.StatusServiceUnavailable)
 		return
@@ -92,7 +92,7 @@ func (h *Home) ServeAttach(w http.ResponseWriter, r *http.Request, daemonID stri
 // Subscribe is the subscription registration surface (client push): a client stream subscribes to
 // the commit Signal and reads forward from its own seq cursor. It returns the
 // wake channel and the unsubscribe func — the internal Signal never escapes.
-func (h *Home) Subscribe() (<-chan struct{}, func()) {
+func (h *Home) subscribe() (<-chan struct{}, func()) {
 	if h.closed.Load() {
 		ch := make(chan struct{})
 		close(ch)

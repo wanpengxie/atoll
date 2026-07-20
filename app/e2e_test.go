@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/drivers/gateway"
 	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -123,7 +124,7 @@ func testGatewayResolver(a *app.App) gateway.EntitlementResolver {
 				access = gateway.AccessMember
 			}
 			gr = append(gr, gateway.Route{
-				Channel: r.Channel, Home: r.Home, Access: access,
+				Channel: r.Channel, Bundle: r.Bundle, Access: access,
 				SubjectID: r.SubjectID,
 			})
 		}
@@ -150,8 +151,10 @@ func setupTestApp(t *testing.T) *testEnv {
 	}
 
 	a, err := app.New(app.Config{
-		DB:           db,
-		ChannelDBDir: chDBDir,
+		DB: db,
+		HostFactory: func(deps channelhost.HomeDeps) (channelhost.LocalHost, error) {
+			return channelhost.New(chDBDir, deps)
+		},
 	})
 	if err != nil {
 		db.Close()
@@ -164,7 +167,6 @@ func setupTestApp(t *testing.T) *testEnv {
 	// fenced — so the assembly-root wiring is reproduced here; e2e_test.go is a named
 	// Fence-B allowlist importer).
 	gw, err := gateway.New(gateway.Config{
-		Routing:  a.ResolveRoutingForGateway,
 		Resolver: testGatewayResolver(a),
 	})
 	if err != nil {

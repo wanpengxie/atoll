@@ -11,7 +11,6 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // defaultEpoch mints the production process-lifetime gateway epoch.
@@ -412,7 +411,7 @@ func (s *Session) reconcile() {
 		switch {
 		case sub == nil:
 			s.subscribe(ch, r, now)
-		case sub.route.Home != r.Home:
+		case sub.route.Bundle.Generation() != r.Bundle.Generation():
 			// Home 换代 (频道删后重开): 退旧订新 (do not assume the old notify chan closes).
 			sub.cancel()
 			s.subscribe(ch, r, now)
@@ -457,7 +456,7 @@ func (s *Session) leaseOrPause(sub *subscription, now time.Time) {
 // subscribe registers a Home commit subscription for ch and records the sub. Backfill
 // happens in the pump loop (cursor at ch, default 0).
 func (s *Session) subscribe(ch channel.ID, r Route, now time.Time) {
-	notify, cancel := r.Home.Subscribe()
+	notify, cancel := r.Bundle.Gateway().Subscribe()
 	s.subs[ch] = &subscription{route: r, notify: notify, cancel: cancel, lastOK: now}
 }
 
@@ -487,8 +486,8 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	defer cancel()
 	at := s.lane.cursor.at(ch)
-	rows, err := sub.route.Home.View().ReadAfterSeq(rctx, at, feedBatch)
-	if err != nil || len(rows) == 0 {
+	rows, scanned, err := sub.route.Bundle.View().ReadVisibleAfterSeq(rctx, channel.Reader{Principal: s.principal, ActorID: sub.route.SubjectID, Mode: channel.ReaderMember}, at, feedBatch)
+	if err != nil || (len(rows) == 0 && scanned == at) {
 		return false, true
 	}
 	for _, r := range rows {
@@ -512,6 +511,9 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 			return false, false // Session/lane closed
 		}
 		s.lane.cursor.advance(ch, r.Seq)
+	}
+	if scanned > at {
+		s.lane.cursor.advance(ch, scanned)
 	}
 	return len(rows) == feedBatch, true
 }
@@ -571,14 +573,7 @@ func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 		}
 		defer s.endDeliver()
 
-		if f.Type == subjectgate.FrameSubmit {
-			routed, rerr := s.applyRouting(cid, f)
-			if rerr != nil {
-				return *rerr
-			}
-			f = routed
-		}
-		slot, ok := r.Home.SubjectSlotFor(r.SubjectID)
+		slot, ok := r.Bundle.Gateway().SubjectSlotFor(r.SubjectID)
 		if !ok {
 			return errFrame(subjectgate.CodeUnavailable, "subject cell unavailable — retry")
 		}
@@ -611,41 +606,4 @@ func channelIDOf(f subjectgate.Frame) (string, error) {
 		return "", err
 	}
 	return p.ChannelID, nil
-}
-
-// applyRouting resolves an empty-audience submit through the injected app routing面
-// and rewrites the payload with the concrete audience + kind (design §5.3: routing
-// 政策留 app). An explicit audience is honoured as-is. A per-request routing condition
-// (no reachable brain) → unavailable
-// (never写黑洞). channel_id is preserved through the rewrite.
-func (s *Session) applyRouting(cid channel.ID, f subjectgate.Frame) (subjectgate.Frame, *subjectgate.Frame) {
-	var p subjectgate.SubmitPayload
-	if err := f.DecodePayload(&p); err != nil {
-		fr, _ := subjectgate.NewFrame(subjectgate.FrameError, f.Ref, subjectgate.ErrorPayload{
-			Frame: string(f.Type), Code: subjectgate.CodeBadPayload, Detail: err.Error(),
-		})
-		return f, &fr
-	}
-	if len(p.Audience) > 0 {
-		return f, nil
-	}
-	aud, kind, retryable, err := s.gw.routing(s.ctx, cid, message.Kind(p.Kind))
-	if retryable != "" || err != nil {
-		detail := retryable
-		if detail == "" {
-			s.gw.logger.Error("gateway.routing", "channel", string(cid), "err", err)
-			detail = "routing unavailable"
-		}
-		fr, _ := subjectgate.NewFrame(subjectgate.FrameError, f.Ref, subjectgate.ErrorPayload{
-			Frame: string(f.Type), Code: subjectgate.CodeUnavailable, Detail: detail,
-		})
-		return f, &fr
-	}
-	p.Audience = p.Audience[:0]
-	for _, a := range aud {
-		p.Audience = append(p.Audience, string(a))
-	}
-	p.Kind = string(kind)
-	routed, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, f.Ref, p)
-	return routed, nil
 }

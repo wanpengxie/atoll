@@ -6,8 +6,7 @@
 //	Open(cfg) → *Home
 //	View()  View              — read-only observation set (ReadAfterSeq/MaxSeq/ListActors/Stat/Snapshot/IsAttached)
 //	Admit(ctx,kind,principal) — mint/idempotently resolve active membership
-//	EnsureSubjectSlot(id) / SubjectSlotFor(id) / RemoveSubjectSlot(id) — the per-identity subjectgate slot seam (在场与递交接头盒) the gateway drives (a subject's own Submit/Resolve/Cancel/After actions arrive as wire frames onto their cell through the slot; welded pen stays in the wall)
-//	Restart(ctx,id)           — accepted-unconfirmed embodiment replacement request
+//	Bundle Gateway            — the per-identity subjectgate slot seam
 //	ServeAttach(w,r,daemonID) — attach acceptance surface (app hands an upgraded WS here)
 //	Subscribe() (<-chan struct{}, func()) — subscription registration surface (client push)
 //	Close() error
@@ -25,7 +24,7 @@
 //
 // home.go (types), open.go (Open), reconcile.go (activation
 // reconcile ring + sweep), census.go (Admit/PrincipalOf/ResolvePrincipal),
-// control.go (CancelRequest/KickDaemon/ServeAttach/Subscribe), close.go
+// control.go (cancellation/KickDaemon/ServeAttach/Subscribe), close.go
 // (Close), view.go (View), remove.go (Remove), expiry.go (deadline-closure
 // reaper), scheduler.go (revive backoff + fire sink + reviver),
 // storagehost.go (home-side routing half of the daemon storage host),

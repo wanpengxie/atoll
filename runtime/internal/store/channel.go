@@ -24,7 +24,8 @@ type ChannelStores struct {
 
 	Log      storespec.MessageLog   // harness write port (Append + terminal-uniqueness reads)
 	Query    storespec.MessageQuery // tail reads (no Append)
-	Expiry   storespec.ExpiryQuery  // expiry reaper's level-scan feed (期12 S3, own narrow role)
+	Visible  storespec.VisibleMessageQuery
+	Expiry   storespec.ExpiryQuery // expiry reaper's level-scan feed (期12 S3, own narrow role)
 	Requests storespec.RequestLookup
 
 	// Actor registry exposed via SEGREGATED interfaces (derived from role — a
@@ -41,6 +42,7 @@ type ChannelStores struct {
 	Genesis        storespec.GenesisStore
 	SysOps         storespec.SysOpAdmission
 	Bindings       storespec.DaemonBindingReader
+	ResourceRead   storespec.ResourceReadStore
 
 	// Plane-2 (access/resource) implementations over the SAME channel db. These
 	// are the door's collaborators, handed up as resourcespec CONTRACTS (never
@@ -101,6 +103,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		db:             db,
 		Log:            msgs,
 		Query:          msgs,
+		Visible:        msgs,
 		Expiry:         msgs,
 		Requests:       newRequestLookup(msgs),
 		Principals:     reg,
@@ -118,6 +121,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		State:          newStateStore(db),
 		timers:         newTimerStore(db, onCommit),
 	}
+	cs.ResourceRead = cs.Resources.(*resourceRegistry)
 	return cs, nil
 }
 

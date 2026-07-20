@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -105,9 +106,8 @@ func TestCrossChannelPresenceIsolated(t *testing.T) {
 	}
 }
 
-// TestT6RealRemoveCascadeIsolated (DoD-2/T6 消融钉锚, 六轮终审 P1-6): the canonical T6
-// anchor driven through a REAL Home.Remove (not a fake-resolver route drop standing in
-// for it) — Remove's own cascade (户籍级联, platform/home/remove.go) must have actually
+// TestT6RealRemoveCascadeIsolated (DoD-2/T6 消融钉锚): the canonical T6
+// anchor driven through the Bundle SysOp revoke path — the channel's cascade must
 // torn c1's slot down (RemoveSubjectSlot: a later SubjectSlotFor lookup on the SAME id
 // misses), and c2's slot/presence account must be UNTOUCHED — proving the T6-era bug
 // ("一人两频道共享同一 per-identity 槽") cannot recur: a c1 removal's cascade has no
@@ -119,8 +119,8 @@ func TestT6RealRemoveCascadeIsolated(t *testing.T) {
 	res := newResolver()
 	g := newTestGateway(t, Config{Resolver: res}, settings{clock: clk})
 	const principal = "wren"
-	h1, id1 := openHomeWired(t, channel.ID("c1"), principal, g)
-	h2, id2 := openHomeWired(t, channel.ID("c2"), principal, g)
+	h1, id1 := openDormantDeclaredHomeWired(t, channel.ID("c1"), principal, g)
+	h2, id2 := openDormantDeclaredHomeWired(t, channel.ID("c2"), principal, g)
 	res.set(principal, []Route{
 		memberRoute("c1", h1, id1, clk.now()),
 		memberRoute("c2", h2, id2, clk.now()),
@@ -289,11 +289,9 @@ func TestPresenceTickConvergesWithoutPoke(t *testing.T) {
 	}, "PresenceTick did not drive the no-poke online convergence")
 }
 
-// TestPresenceRebindNewSlot (DoD-7⑧, Remove→秒 re-Admit 换值差集): Home.Remove and
-// Home.Admit fire genuine membership pokes through production wiring; a public timely
-// hint after the resolver snapshot changes then drives the real presence loop. One of
-// its circles must withdraw the old slot and publish the new one. No production
-// failpoint or hand-called presenceReconcile repairs the result.
+// TestPresenceRebindNewSlot (DoD-7⑧) changes the resolver's Bundle-scoped
+// subject binding and verifies one reconcile withdraws the old testimony and
+// publishes the new one.
 func TestPresenceRebindNewSlot(t *testing.T) {
 	clk := newClock()
 	res := newResolver()
@@ -315,24 +313,15 @@ func TestPresenceRebindNewSlot(t *testing.T) {
 		return set && lvl == subjectgate.LevelOnline
 	}, "old slot never became online before rebind")
 
-	// Both real membership callbacks fire through Home's production wiring.
-	if err := h1.Remove(context.Background(), id1); err != nil {
-		t.Fatalf("Remove: %v", err)
-	}
-	id2, err := h1.Admit(context.Background(), "human", principal)
-	if err != nil {
-		t.Fatalf("re-admit: %v", err)
-	}
-	slotNew, _ := h1.SubjectSlotFor(id2)
+	id2 := actor.ActorID("gateway-rebound-subject")
+	slotNew := h1.EnsureSubjectSlot(id2)
 	if slotNew == slotOld {
 		t.Fatal("a fresh admit must mint a distinct slot")
 	}
 	obsNew := &slotObs{}
 	slotNew.RegisterObserver("new", obsNew.fn)
 	res.set(principal, []Route{memberRoute("c", h1, id2, clk.now())}, nil, nil)
-	// The re-admit callback may race the resolver update above, so issue the same public
-	// timely hint the app uses after its directory commit. Correctness still rests on the
-	// resolver + reconcile loop, not a production test seam.
+	// Issue the public timely hint used after a directory/membership commit.
 	g.Poke(principal)
 	waitFor(t, func() bool {
 		lvl, _, _, set := slotNew.Snapshot()

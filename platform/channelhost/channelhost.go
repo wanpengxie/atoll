@@ -46,9 +46,6 @@ type Service interface {
 type LocalHost interface {
 	Service
 	Acquire(channel.ID) (Bundle, bool)
-	// Borrow is the lifecycle-cutover scaffold used only until every app read
-	// consumer has moved to Bundle. It is deleted in the contract phase.
-	Borrow(channel.ID) (*home.Home, bool)
 }
 
 type OpenSpec struct {
@@ -235,10 +232,10 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 	succeeded := false
 	defer func() {
 		if !succeeded {
-			_ = homeInstance.Close()
+			_ = home.Shutdown(homeInstance)
 		}
 	}()
-	if _, err := homeInstance.AdmitChannelOwner(ctx, spec.OwnerPrincipal); err != nil {
+	if _, err := home.BootstrapOwner(ctx, homeInstance, spec.OwnerPrincipal); err != nil {
 		return ProvisionReceipt{}, fmt.Errorf("channelhost: admit owner: %w", err)
 	}
 	for _, declaration := range spec.GenesisDeclarations {
@@ -250,7 +247,7 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 			return ProvisionReceipt{}, err
 		}
 		config := json.RawMessage(append([]byte(nil), declaration.Rendered.Config...))
-		if _, err := homeInstance.Declare(ctx, home.DeclareRequest{
+		if _, err := home.BootstrapDeclaration(ctx, homeInstance, home.DeclareRequest{
 			SourceDeclID: declaration.DeclID, Principal: declaration.Principal, Kind: declaration.Kind,
 			Class: declaration.Rendered.Class, Config: &config, Placement: placement,
 			TIdle: declaration.Rendered.TIdleMS, MakeDefault: declaration.DeclID == spec.DefaultSourceDeclID,
@@ -258,12 +255,12 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 		}); err != nil {
 			return ProvisionReceipt{}, fmt.Errorf("channelhost: declare genesis %q: %w", declaration.DeclID, err)
 		}
-		rows, err := homeInstance.DeclaredBySource(ctx, declaration.DeclID)
+		rows, err := homeInstance.View().DeclaredBySource(ctx, declaration.DeclID)
 		if err != nil || len(rows) != 1 || rows[0].Class != declaration.Rendered.Class {
 			return ProvisionReceipt{}, fmt.Errorf("channelhost: genesis declaration %q failed readback", declaration.DeclID)
 		}
 	}
-	if err := homeInstance.Close(); err != nil {
+	if err := home.Shutdown(homeInstance); err != nil {
 		return ProvisionReceipt{}, fmt.Errorf("channelhost: close bootstrap home: %w", err)
 	}
 	succeeded = true
@@ -325,12 +322,12 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	h.mu.Lock()
 	if h.closed {
 		h.mu.Unlock()
-		_ = homeInstance.Close()
+		_ = home.Shutdown(homeInstance)
 		return ErrClosed
 	}
 	if existing := h.entries[spec.ChannelID]; existing != nil && existing.state == stateServing {
 		h.mu.Unlock()
-		_ = homeInstance.Close()
+		_ = home.Shutdown(homeInstance)
 		return nil
 	}
 	h.entries[spec.ChannelID] = &entry{home: homeInstance, sysOp: home.SystemOps(homeInstance), generation: generation, state: stateServing}
@@ -368,16 +365,6 @@ func (h *ChannelHost) Acquire(id channel.ID) (Bundle, bool) {
 	return &bundle{home: entry.home, sysOp: entry.sysOp, generation: entry.generation}, true
 }
 
-func (h *ChannelHost) Borrow(id channel.ID) (*home.Home, bool) {
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	entry := h.entries[id]
-	if h.closed || entry == nil || entry.state != stateServing || entry.home == nil {
-		return nil, false
-	}
-	return entry.home, true
-}
-
 func (h *ChannelHost) Destroy(_ context.Context, id channel.ID) error {
 	lock := h.idLock(id)
 	lock.Lock()
@@ -396,7 +383,7 @@ func (h *ChannelHost) Destroy(_ context.Context, id channel.ID) error {
 	}
 	h.mu.Unlock()
 	if current != nil && !current.closed {
-		if err := current.home.Close(); err != nil {
+		if err := home.Shutdown(current.home); err != nil {
 			return fmt.Errorf("channelhost: close before seal: %w", err)
 		}
 		current.closed = true
@@ -510,7 +497,7 @@ func (h *ChannelHost) Close() error {
 	var errs []error
 	for id, entry := range entries {
 		if entry.home != nil {
-			if err := entry.home.Close(); err != nil {
+			if err := home.Shutdown(entry.home); err != nil {
 				errs = append(errs, fmt.Errorf("channelhost: close %s: %w", id, err))
 			}
 		}

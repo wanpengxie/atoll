@@ -74,11 +74,11 @@ func (a *App) handleCompute(c *gin.Context) {
 		return
 	}
 
-	home := a.homeOrError(c, chID)
-	if home == nil {
+	bundle := a.bundleOrError(c, chID)
+	if bundle == nil {
 		return
 	}
 
 	// Delegate to the link acceptor with the pre-authenticated daemonID.
-	home.ServeAttach(c.Writer, c.Request, daemonID)
+	bundle.Daemon().ServeAttach(c.Writer, c.Request, daemonID)
 }

@@ -18,7 +18,7 @@ var ErrAdmitKind = errors.New("platform: Home.Admit accepts only human actors")
 // embodiment lands on the next immediate sweep rather than waiting a full tick.
 // Idempotent for an already-active (kind, principal): the registry returns the
 // existing minted instance id and the extra reconcile poke is harmless.
-func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, error) {
+func (h *Home) admit(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, error) {
 	if h.closed.Load() {
 		return "", ErrClosed
 	}
@@ -35,7 +35,7 @@ func (h *Home) Admit(ctx context.Context, kind actor.Kind, principal string) (ac
 // principal collision converges in the store, so the post-commit read must
 // prove the existing row is already the owner; admission never upgrades an
 // ordinary member in place.
-func (h *Home) AdmitChannelOwner(ctx context.Context, principal string) (actor.ActorID, error) {
+func (h *Home) admitChannelOwner(ctx context.Context, principal string) (actor.ActorID, error) {
 	if h.closed.Load() {
 		return "", ErrClosed
 	}
@@ -75,7 +75,7 @@ func (h *Home) admitHuman(ctx context.Context, in storespec.AdmitBundle) (actor.
 	// it at准入 (before the reconcile poke, so it strictly precedes any gateway attach
 	// that could look it up), synchronously so a client that attaches right after Admit
 	// never races an absent slot. Idempotent with factoryFor's ensure (restart path).
-	h.EnsureSubjectSlot(id)
+	h.ensureSubjectSlot(id)
 	h.pokeReconcile()
 	// Membership-change poke emit point (连接模型勘误期 §3.2 表②, Admit 侧新增): the
 	// person gained a channel — poke so their gateway session re-resolves its
@@ -92,7 +92,7 @@ func (h *Home) admitHuman(ctx context.Context, in storespec.AdmitBundle) (actor.
 }
 
 // PrincipalOf returns the opaque principal recorded for an actor instance.
-func (h *Home) PrincipalOf(ctx context.Context, id actor.ActorID) (string, bool, error) {
+func (h *Home) principalOf(ctx context.Context, id actor.ActorID) (string, bool, error) {
 	if h.closed.Load() {
 		return "", false, ErrClosed
 	}
@@ -103,7 +103,7 @@ func (h *Home) PrincipalOf(ctx context.Context, id actor.ActorID) (string, bool,
 	return rec.Principal, true, nil
 }
 
-func (h *Home) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {
+func (h *Home) resolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {
 	// Principals is its own assembly-declared face (ChannelStores.Principals);
 	// the old type-assertion that recovered it from the narrow Registry field
 	// was a bypass valve (it voided the read-face segregation for every

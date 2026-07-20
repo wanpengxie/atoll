@@ -13,7 +13,6 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform"
-	platformhome "github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -24,27 +23,43 @@ import (
 var errTestChannelNotLoaded = errors.New("app: channel not loaded")
 
 func (a *App) ActorsForTest(chID channel.ID) ([]storespec.Record, error) {
-	h := a.getHome(chID)
-	if h == nil {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
 		return nil, errTestChannelNotLoaded
 	}
-	return h.View().ListActors(context.Background())
+	return bundle.View().ListActors(context.Background())
 }
 
 func (a *App) MessagesForTest(chID channel.ID) ([]storespec.StoredRow, error) {
-	h := a.getHome(chID)
-	if h == nil {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
 		return nil, errTestChannelNotLoaded
 	}
-	return h.View().ReadAfterSeq(context.Background(), 0, 1000)
+	actors, err := bundle.View().ActiveActors(context.Background())
+	if err != nil {
+		return nil, err
+	}
+	for _, row := range actors {
+		facts, found, err := bundle.View().ActorFacts(context.Background(), row.ID)
+		if err != nil {
+			return nil, err
+		}
+		if found && facts.Kind == actor.KindHuman {
+			rows, _, err := bundle.View().ReadVisibleAfterSeq(context.Background(), channel.Reader{
+				Principal: facts.Principal, ActorID: row.ID, Mode: channel.ReaderMember,
+			}, 0, 1000)
+			return rows, err
+		}
+	}
+	return nil, errors.New("app: test channel has no active human reader")
 }
 
 func (a *App) PresenceForTest(chID channel.ID, id actor.ActorID) (member, known, online bool, err error) {
-	h := a.getHome(chID)
-	if h == nil {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
 		return false, false, false, errTestChannelNotLoaded
 	}
-	snapshot, err := h.View().Snapshot(context.Background(), id)
+	snapshot, err := bundle.View().Snapshot(context.Background(), id)
 	if err != nil {
 		return false, false, false, err
 	}
@@ -65,20 +80,25 @@ func (a *App) PlanForDaemonForTest(chID channel.ID, daemonID string) ([]platform
 }
 
 func (a *App) StageDeclarationEditForTest(chID channel.ID, sourceID string, config json.RawMessage) (actor.ActorID, int64, error) {
-	h := a.getHome(chID)
-	if h == nil {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
 		return "", 0, errTestChannelNotLoaded
 	}
-	rows, err := h.DeclaredBySource(context.Background(), sourceID)
+	rows, err := bundle.View().DeclaredBySource(context.Background(), sourceID)
 	if err != nil || len(rows) == 0 {
 		return "", 0, err
 	}
 	row := rows[0]
-	edited, err := h.EditDeclaration(context.Background(), storespec.DeclEditBundle{
-		ActorID: row.ID, Class: row.Class, Config: config, Placement: row.Placement,
-		TIdle: row.TIdle, SourceDeclID: row.SourceDeclID, CreatedAt: time.Now().UnixMilli(),
-	})
-	return row.ID, edited.CurrentDeclVersion, err
+	owner, _, err := bundle.View().OwnerPrincipal(context.Background())
+	if err != nil {
+		return "", 0, err
+	}
+	record, err := a.admission.submitEdit(context.Background(), chID, string(row.ID), owner, config, "test-edit:"+uuid.NewString())
+	if err != nil || record.Status != "done" {
+		return row.ID, 0, err
+	}
+	_, latest, err := bundle.View().DeclarationVersions(context.Background(), row.ID)
+	return row.ID, latest.CurrentDeclVersion, err
 }
 
 // Handler exposes the assembled gin engine as an http.Handler so black-box
@@ -94,10 +114,7 @@ func (a *App) Handler() http.Handler {
 // DropHomeForTest closes the borrowed serving handle while retaining the realm
 // directory row, reproducing a channel-unavailable image.
 func (a *App) DropHomeForTest(chID channel.ID) {
-	h := a.getHome(chID)
-	if h != nil {
-		_ = h.Close()
-	}
+	_ = a.host.Destroy(context.Background(), chID)
 }
 
 // AdmitForTest admits id as a durable declared identity in chID's Home
@@ -106,39 +123,53 @@ func (a *App) DropHomeForTest(chID channel.ID) {
 // BEFORE its daemon declares it — this test seam stands in for the introduce door
 // the daemon-attach live tests bypass. Test-only.
 func (a *App) AdmitForTest(chID string, id actor.ActorID, kind actor.Kind) (actor.ActorID, error) {
-	home := a.getHome(channel.ID(chID))
-	if home == nil {
+	bundle, ok := a.host.Acquire(channel.ID(chID))
+	if !ok {
 		return "", errTestChannelNotLoaded
 	}
 	principal := string(id)
 	if i := strings.IndexByte(principal, ':'); i >= 0 {
 		principal = principal[i+1:]
 	}
-	return home.Admit(context.Background(), kind, principal)
+	if kind != actor.KindHuman {
+		return "", fmt.Errorf("test admission supports human identities only")
+	}
+	result, err := bundle.SysOp().Admit(context.Background(), channel.AdmitRequest{Ref: "test-admit:" + uuid.NewString(), Principal: principal})
+	return result.ActorID, err
 }
 
 func (a *App) ComposeDaemonForTest(chID, principal, class, daemonID string, kind actor.Kind) (actor.ActorID, error) {
-	h := a.getHome(channel.ID(chID))
-	if h == nil {
+	bundle, ok := a.host.Acquire(channel.ID(chID))
+	if !ok {
 		return "", errTestChannelNotLoaded
 	}
-	placement, err := storespec.NewDaemonPlacement(daemonID)
+	owner, found, err := bundle.View().OwnerPrincipal(context.Background())
+	if err != nil || !found {
+		return "", err
+	}
+	now := time.Now().UnixMilli()
+	_, err = a.db.ExecContext(context.Background(), `INSERT OR IGNORE INTO actor_decls(id,name,owner,default_class,created_at,updated_at,visibility) VALUES (?,?,?,?,?,?,?)`, principal, principal, owner, class, now, now, "public")
 	if err != nil {
 		return "", err
 	}
-	result, err := h.Declare(context.Background(), platformhome.DeclareRequest{
-		SourceDeclID: "sys:test:" + principal, Principal: principal, Class: class,
-		Placement: placement, Kind: kind, CreatedAt: time.Now().UnixMilli(),
+	result, err := bundle.SysOp().Introduce(context.Background(), channel.IntroduceRequest{
+		Ref: "test-introduce:" + uuid.NewString(), DeclID: principal, InitiatorPrincipal: owner,
 	})
-	return result.Row.ID, err
+	if err == nil {
+		facts, found, factsErr := bundle.View().ActorFacts(context.Background(), result.ActorID)
+		if factsErr != nil || !found || facts.Kind != kind {
+			return "", fmt.Errorf("introduced kind mismatch: facts=%+v found=%v err=%v", facts, found, factsErr)
+		}
+	}
+	return result.ActorID, err
 }
 
 func (a *App) ResolvePrincipalForTest(chID string, kind actor.Kind, principal string) (actor.ActorID, error) {
-	home := a.getHome(channel.ID(chID))
-	if home == nil {
+	bundle, ok := a.host.Acquire(channel.ID(chID))
+	if !ok {
 		return "", errTestChannelNotLoaded
 	}
-	id, ok, err := home.ResolvePrincipal(context.Background(), kind, principal)
+	id, ok, err := bundle.View().ResolvePrincipal(context.Background(), kind, principal)
 	if err != nil {
 		return "", err
 	}
@@ -154,13 +185,13 @@ func (a *App) ResolvePrincipalForTest(chID string, kind actor.Kind, principal st
 // a test that needs a live default floor before sending must wait for the sweep.
 // Test-only.
 func (a *App) WaitLiveForTest(chID string, id actor.ActorID, timeout time.Duration) bool {
-	home := a.getHome(channel.ID(chID))
-	if home == nil {
+	bundle, ok := a.host.Acquire(channel.ID(chID))
+	if !ok {
 		return false
 	}
 	deadline := time.Now().Add(timeout)
 	for {
-		if _, live := home.View().Stat(id); live {
+		if _, live := bundle.View().Stat(id); live {
 			return true
 		}
 		if time.Now().After(deadline) {
@@ -173,24 +204,26 @@ func (a *App) WaitLiveForTest(chID string, id actor.ActorID, timeout time.Durati
 // CloseHomeForTest leaves the closed handle published in the app map so a
 // post-commit daemon-obligation read deterministically returns ErrClosed.
 func (a *App) CloseHomeForTest(chID channel.ID) error {
-	h := a.getHome(chID)
-	if h == nil {
+	if _, ok := a.host.Acquire(chID); !ok {
 		return errTestChannelNotLoaded
 	}
-	return h.Close()
+	return a.host.Destroy(context.Background(), chID)
+}
+
+func (a *App) RevokeRealmToolForTest(chID channel.ID) error {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return errTestChannelNotLoaded
+	}
+	_, err := bundle.SysOp().RevokeDeclTargets(context.Background(), channel.RevokeDeclRequest{
+		Ref: "test-revoke-realm-tool:" + uuid.NewString(), DeclID: realmToolDeclID,
+	})
+	return err
 }
 
 // KillCellForTest kills id's live embodiment on chID's home (despawn + dereg) —
 // the "brain went dead" event resolveRouting must answer with 503 when id is the
 // channel's default agent. Test-only.
-func (a *App) KillCellForTest(chID channel.ID, id actor.ActorID) error {
-	home := a.getHome(chID)
-	if home == nil {
-		return errTestChannelNotLoaded
-	}
-	return home.Remove(context.Background(), id)
-}
-
 // CreateHalfBuiltChannelForTest creates a published directory row plus its
 // provision intent but no local image, modelling a crash window.
 func (a *App) CreateHalfBuiltChannelForTest(ownerPrincipal, name string) (string, error) {
@@ -213,11 +246,11 @@ func (a *App) CreateHalfBuiltChannelForTest(ownerPrincipal, name string) (string
 // presence must stay orthogonal to (层2 link来去不碰层1: startedAt stable across a
 // ws reconnect, live throughout). Test-only.
 func (a *App) StatForTest(chID channel.ID, id actor.ActorID) (startedAt time.Time, live bool) {
-	home := a.getHome(chID)
-	if home == nil {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
 		return time.Time{}, false
 	}
-	return home.View().Stat(id)
+	return bundle.View().Stat(id)
 }
 
 // SetBcryptCostForTest drops the password work factor for test fixtures —

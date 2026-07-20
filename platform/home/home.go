@@ -11,7 +11,6 @@ import (
 	"github.com/wanpengxie/atoll/lib/channelkit"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
-	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/platform/internal/tap"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -23,33 +22,8 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// OperateExecutor / OperateRequest / OperateError re-export the sysactor operate
-// face's injection-point contract at the platform boundary, so the app assembly
-// implements it WITHOUT importing platform/internal/sysactor (the internal door
-// stays sealed; the contract is the only thing that crosses). The gate does
-// permission + routing; the app-supplied executor does the intent write + Home
-// call (§2.7-后半 scope 判据: channel-internal control归门内政).
-type (
-	OperateExecutor = sysactor.OperateExecutor
-	OperateRequest  = sysactor.OperateRequest
-	OperateError    = sysactor.OperateError
-)
-
-// The four channel-operate message types re-exported at the platform boundary so
-// the app's HTTP shims can submit them through the subjectgate frame path
-// (audience=[system]) WITHOUT importing platform/internal/sysactor. They are the
-// door's wire vocabulary — the shim must speak the exact strings the gate
-// dispatches on, so a single home avoids drift (same posture as the contract
-// type re-exports above; white-list ⑤).
-const (
-	TypeIntroduceActor  = sysactor.TypeIntroduceActor
-	TypeRemoveActor     = sysactor.TypeRemoveActor
-	TypeRestartActor    = sysactor.TypeRestartActor
-	TypeSetDefaultAgent = sysactor.TypeSetDefaultAgent
-)
-
-// ErrClosed is the refusal every mutating Home entry point (Admit / Remove /
-// Restart / subjectgate slot verbs) returns once Home.Close has begun. Checked
+// ErrClosed is the refusal every mutating Home entry point returns once
+// Home.Close has begun. Checked
 // BEFORE any store read so a verb racing teardown never touches a closing
 // store. The app maps it to 503.
 var ErrClosed = errors.New("platform: channel home is closed")

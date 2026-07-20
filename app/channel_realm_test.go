@@ -22,6 +22,12 @@ func TestRealmChannelDirectoryNameParentAndOwnerPolicy(t *testing.T) {
 	if child["parent_id"] != parentID {
 		t.Fatalf("child parent_id=%v want %s", child["parent_id"], parentID)
 	}
+	invalidParent := env.do(t, "POST", "/api/channels", map[string]any{"name": "orphan-attempt", "parent_id": "missing-parent"}, ownerCookies)
+	assertStatus(t, invalidParent, http.StatusBadRequest)
+	var invalidJobs int
+	if err := env.db.QueryRow(`SELECT COUNT(*) FROM channel_provision_jobs WHERE name='orphan-attempt'`).Scan(&invalidJobs); err != nil || invalidJobs != 0 {
+		t.Fatalf("invalid parent jobs=%d err=%v", invalidJobs, err)
+	}
 
 	duplicate := env.do(t, "POST", "/api/channels", map[string]any{"name": "child"}, ownerCookies)
 	assertStatus(t, duplicate, http.StatusConflict)
@@ -54,6 +60,13 @@ func TestRealmChannelDirectoryNameParentAndOwnerPolicy(t *testing.T) {
 	if len(children) != 1 || children[0].(map[string]any)["id"] != child["id"] {
 		t.Fatalf("dead-parent lineage query=%v", children)
 	}
+	assertStatus(t, env.do(t, "GET", "/api/channels/"+parentID, nil, ownerCookies), http.StatusNotFound)
+	childDetail := env.do(t, "GET", "/api/channels/"+child["id"].(string), nil, ownerCookies)
+	assertStatus(t, childDetail, http.StatusOK)
+	if respJSON(t, childDetail)["parent_id"] != parentID {
+		t.Fatalf("child lost historical parent after retirement: %s", childDetail.Body.String())
+	}
+	assertStatus(t, env.do(t, "GET", "/api/channels/"+child["id"].(string)+"/messages", nil, ownerCookies), http.StatusOK)
 }
 
 func TestRetiredContainerRoutesAreAbsent(t *testing.T) {

@@ -1,0 +1,45 @@
+package home
+
+import (
+	"context"
+	"net/http"
+
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
+	"github.com/wanpengxie/atoll/protocol/actor"
+)
+
+// The functions in this file are the package-to-package assembly bridge used
+// by ChannelHost. They deliberately do not turn Home back into a public organ
+// bag: callers receive only the exact operation result, while Bundle exposes
+// the stable Gateway/Daemon/View capabilities above this bridge.
+
+func BootstrapOwner(ctx context.Context, h *Home, principal string) (actor.ActorID, error) {
+	return h.admitChannelOwner(ctx, principal)
+}
+
+func BootstrapDeclaration(ctx context.Context, h *Home, in DeclareRequest) (DeclareResult, error) {
+	return h.declare(ctx, in)
+}
+
+func Shutdown(h *Home) error { return h.closeInternal("normal") }
+
+func GatewaySlot(h *Home, id actor.ActorID) (*subjectgate.Slot, bool) {
+	return h.subjectSlotFor(id)
+}
+
+func GatewaySubscribe(h *Home) (<-chan struct{}, func()) { return h.subscribe() }
+
+func LinkServe(h *Home, w http.ResponseWriter, r *http.Request, daemonID string) {
+	h.serveAttach(w, r, daemonID)
+}
+
+func LinkPlan(h *Home, ctx context.Context, daemonID string) ([]platform.PlanActor, error) {
+	return h.planForDaemon(ctx, daemonID)
+}
+
+func LinkKick(h *Home, daemonID string) int { return h.kickDaemon(daemonID) }
+
+func ObligationCounts(h *Home, ctx context.Context, daemonID string) (int, int, int, error) {
+	return h.daemonObligationCounts(ctx, daemonID)
+}

@@ -214,12 +214,12 @@ func TestDaemonObligationCounts(t *testing.T) {
 		tombstoneRows:   []resourcespec.TombstoneRow{{TombstoneID: "dead"}},
 	}
 	h := &Home{cs: &runtime.ChannelStores{Outbox: outbox}}
-	resources, reservations, tombstones, err := h.DaemonObligationCounts(context.Background(), "daemon-a")
+	resources, reservations, tombstones, err := h.daemonObligationCounts(context.Background(), "daemon-a")
 	if err != nil || resources != 1 || reservations != 1 || tombstones != 1 {
 		t.Fatalf("counts = (%d,%d,%d,%v)", resources, reservations, tombstones, err)
 	}
 	outbox.reservationsErr = errors.New("count failed")
-	if _, _, _, err := h.DaemonObligationCounts(context.Background(), "daemon-a"); err == nil {
+	if _, _, _, err := h.daemonObligationCounts(context.Background(), "daemon-a"); err == nil {
 		t.Fatal("count error was swallowed")
 	}
 }

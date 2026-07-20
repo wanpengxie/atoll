@@ -64,8 +64,8 @@ func TestOpEntryIntroduceApplyAndDetachUseOneDurableChain(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h.Close()
-	if _, err := h.AdmitChannelOwner(ctx, "owner"); err != nil {
+	defer h.closeInternal("test")
+	if _, err := h.admitChannelOwner(ctx, "owner"); err != nil {
 		t.Fatal(err)
 	}
 	ops := SystemOps(h)
@@ -80,7 +80,7 @@ func TestOpEntryIntroduceApplyAndDetachUseOneDurableChain(t *testing.T) {
 	if err != nil || replayed != introduced {
 		t.Fatalf("replay=(%+v,%v), want %+v", replayed, err, introduced)
 	}
-	rows, err := h.DeclaredBySource(ctx, "decl-a")
+	rows, err := h.View().DeclaredBySource(ctx, "decl-a")
 	if err != nil || len(rows) != 1 || rows[0].RenderSeq != 1 || rows[0].Placement.Host != "daemon-a" {
 		t.Fatalf("introduced rows=%+v err=%v", rows, err)
 	}
@@ -94,7 +94,7 @@ func TestOpEntryIntroduceApplyAndDetachUseOneDurableChain(t *testing.T) {
 	if err != nil || applied.Status != channel.ApplyApplied || applied.Version != 2 {
 		t.Fatalf("apply=(%+v,%v)", applied, err)
 	}
-	rows, _ = h.DeclaredBySource(ctx, "decl-a")
+	rows, _ = h.View().DeclaredBySource(ctx, "decl-a")
 	if len(rows) != 1 || rows[0].RenderSeq != 2 || string(rows[0].Config) != `{"version":2}` {
 		t.Fatalf("applied rows=%+v", rows)
 	}
@@ -112,7 +112,7 @@ func TestOpEntryIntroduceApplyAndDetachUseOneDurableChain(t *testing.T) {
 	if err != nil || detached.Bound || len(detached.ClearedInstances) != 1 || detached.ClearedInstances[0] != introduced.ActorID {
 		t.Fatalf("detach=(%+v,%v)", detached, err)
 	}
-	rows, err = h.DeclaredBySource(ctx, "decl-a")
+	rows, err = h.View().DeclaredBySource(ctx, "decl-a")
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("revoked rows=%+v err=%v", rows, err)
 	}
@@ -128,8 +128,8 @@ func TestOpEntryPermanentResolverRefusalReplaysWithoutResolver(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h.Close()
-	if _, err := h.AdmitChannelOwner(ctx, "owner"); err != nil {
+	defer h.closeInternal("test")
+	if _, err := h.admitChannelOwner(ctx, "owner"); err != nil {
 		t.Fatal(err)
 	}
 	req := channel.IntroduceRequest{Ref: "adm:missing", DeclID: "missing", InitiatorPrincipal: "owner"}
@@ -144,7 +144,7 @@ func TestOpEntryPermanentResolverRefusalReplaysWithoutResolver(t *testing.T) {
 	if resolver.calls != 1 {
 		t.Fatalf("resolver calls=%d, terminal replay must not re-resolve", resolver.calls)
 	}
-	rows, err := h.View().ReadAfterSeq(ctx, 0, 1000)
+	rows, err := h.cs.Query.ReadAfterSeq(ctx, 0, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -182,8 +182,8 @@ func TestOpEntryTransientResolverFailureLeavesNoPairAndSameRefRetries(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h.Close()
-	if _, err := h.AdmitChannelOwner(ctx, "owner"); err != nil {
+	defer h.closeInternal("test")
+	if _, err := h.admitChannelOwner(ctx, "owner"); err != nil {
 		t.Fatal(err)
 	}
 	req := channel.IntroduceRequest{Ref: "adm:retry", DeclID: "decl", InitiatorPrincipal: "owner"}
@@ -192,7 +192,7 @@ func TestOpEntryTransientResolverFailureLeavesNoPairAndSameRefRetries(t *testing
 	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeAuthorityUnavailable || !operationErr.Retryable {
 		t.Fatalf("transient error=%v", err)
 	}
-	rows, err := h.View().ReadAfterSeq(ctx, 0, 1000)
+	rows, err := h.cs.Query.ReadAfterSeq(ctx, 0, 1000)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -223,18 +223,18 @@ func TestDaemonBindingAndLiveAttachmentRemainIndependentAxes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer h.Close()
+	defer h.closeInternal("test")
 	ops := SystemOps(h)
 	if _, err := ops.AttachDaemon(ctx, channel.DaemonRequest{Ref: "axis:attach", DaemonID: "daemon-a"}); err != nil {
 		t.Fatal(err)
 	}
-	bound, err := h.IsBound(ctx, "daemon-a")
+	bound, err := h.View().IsBound(ctx, "daemon-a")
 	if err != nil || !bound || h.View().IsAttached("daemon-a") {
 		t.Fatalf("bound-offline axes=(bound=%v attached=%v err=%v)", bound, h.View().IsAttached("daemon-a"), err)
 	}
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
-		h.ServeAttach(w, req, "daemon-a")
+		h.serveAttach(w, req, "daemon-a")
 	}))
 	defer srv.Close()
 	dialer, err := link.Dial(ctx, "ws"+srv.URL[4:], nil, link.DialConfig{}, nil)
@@ -262,7 +262,7 @@ func TestDaemonBindingAndLiveAttachmentRemainIndependentAxes(t *testing.T) {
 	if err != nil || result.Effects.KickDaemon == nil {
 		t.Fatalf("detach store result=(%+v,%v)", result, err)
 	}
-	bound, err = h.IsBound(ctx, "daemon-a")
+	bound, err = h.View().IsBound(ctx, "daemon-a")
 	if err != nil || bound || !h.View().IsAttached("daemon-a") {
 		t.Fatalf("unbound-online axes=(bound=%v attached=%v err=%v)", bound, h.View().IsAttached("daemon-a"), err)
 	}

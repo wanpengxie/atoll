@@ -12,7 +12,7 @@ import (
 // PlanForDaemon is the sole PlanActor constructor. It projects attachment
 // intent already established by Home reconciliation; it never independently
 // decides whether a dormant actor should run.
-func (h *Home) PlanForDaemon(ctx context.Context, daemonID string) ([]platform.PlanActor, error) {
+func (h *Home) planForDaemon(ctx context.Context, daemonID string) ([]platform.PlanActor, error) {
 	rows, err := h.controlIndex.ListActive(ctx)
 	if err != nil {
 		return nil, err

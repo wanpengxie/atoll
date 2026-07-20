@@ -15,6 +15,7 @@ import (
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
@@ -608,6 +609,12 @@ func (r resourceAdapter) Create(id resource.ResourceID, args []byte) (accessdoor
 		return accessdoor.Outcome{}, ErrUnsupported
 	}
 	return r.h.Create(r.ctx(), id, accessdoor.CreateSpec{Kind: accessdoor.KindKV}, args)
+}
+func (r resourceAdapter) CreateFrom(id resource.ResourceID, args []byte, source channel.ResourceRef) (accessdoor.Outcome, error) {
+	if r.h == nil {
+		return accessdoor.Outcome{}, ErrUnsupported
+	}
+	return r.h.Create(r.ctx(), id, accessdoor.CreateSpec{Kind: accessdoor.KindKV, SourceChannelID: source.ChannelID, SourceResourceID: source.ResourceID}, args)
 }
 func (r resourceAdapter) Read(id resource.ResourceID) (accessdoor.Outcome, error) {
 	if r.h == nil {

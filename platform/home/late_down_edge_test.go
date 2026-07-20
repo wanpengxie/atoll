@@ -19,7 +19,7 @@ import (
 func TestLateDownEdgeFromReplacedBodyCannotWipeSuccessor(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	id, err := h.Admit(ctx, actor.KindHuman, "late-down-human")
+	id, err := h.admit(ctx, actor.KindHuman, "late-down-human")
 	if err != nil {
 		t.Fatal(err)
 	}

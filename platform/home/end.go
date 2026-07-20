@@ -155,7 +155,7 @@ func (h *Home) prepareEndIdentity(ctx context.Context, author storespec.AuthorSt
 	h.grantOverlay.EndBatch(plan.RunIDs)
 	for _, id := range plan.AllIDs {
 		_, _ = h.liveness.EndIdentity(id)
-		h.RemoveSubjectSlot(id)
+		h.removeSubjectSlot(id)
 		h.presenceFold.Forget(id)
 		h.reviveMu.Lock()
 		delete(h.reviveLogAt, id)

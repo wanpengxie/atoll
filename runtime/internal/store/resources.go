@@ -15,8 +15,10 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // resourceRegistry implements resourcespec.Registry over the channel-local
@@ -62,13 +64,13 @@ func placementKindFor(kind resourcespec.ResourceKind) resourcespec.PlacementKind
 // whether a kind resolves to a registered driver is the door's question, not
 // a poison-row guard here.
 func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) (resourcespec.ResourceMeta, bool, error) {
-	const q = `SELECT kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir
+	const q = `SELECT kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir, COALESCE(source_channel_id,''), COALESCE(source_resource_id,'')
 	             FROM resources WHERE resource_id=?`
-	var kind, placementDaemonID, placementCoord, createdBy string
+	var kind, placementDaemonID, placementCoord, createdBy, sourceChannelID, sourceResourceID string
 	var createdAt int64
 	var isDir bool
 	err := r.db.QueryRowContext(ctx, q, string(id)).Scan(
-		&kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt, &isDir,
+		&kind, &placementDaemonID, &placementCoord, &createdBy, &createdAt, &isDir, &sourceChannelID, &sourceResourceID,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return resourcespec.ResourceMeta{}, false, nil
@@ -84,6 +86,8 @@ func (r *resourceRegistry) Resolve(ctx context.Context, id resource.ResourceID) 
 		PlacementCoord:    placementCoord,
 		CreatedBy:         actor.ActorID(createdBy),
 		Dir:               isDir,
+		SourceChannelID:   channel.ID(sourceChannelID),
+		SourceResourceID:  resource.ResourceID(sourceResourceID),
 	}, true, nil
 }
 
@@ -151,10 +155,10 @@ func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id 
 	}
 
 	res, err := tx.ExecContext(ctx,
-		`INSERT INTO resources (resource_id, kind, bytes, placement_daemon_id, placement_coord, created_by, created_at, is_dir)
-		   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		`INSERT INTO resources (resource_id, kind, bytes, placement_daemon_id, placement_coord, created_by, source_channel_id, source_resource_id, created_at, is_dir)
+		   VALUES (?, ?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,''), ?, ?)
 		 ON CONFLICT(resource_id) DO NOTHING`,
-		string(id), string(kind), initial, placementDaemonID, placementCoord, string(creator), r.nowMs(), dir,
+		string(id), string(kind), initial, placementDaemonID, placementCoord, string(creator), string(birth.SourceChannelID), string(birth.SourceResourceID), r.nowMs(), dir,
 	)
 	if err != nil {
 		return fmt.Errorf("store: resource create insert %q: %w", id, err)
@@ -807,7 +811,8 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 		}
 	}
 
-	q := `SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, created_at
+	q := `SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, created_at, is_dir,
+	             COALESCE(source_channel_id,''), COALESCE(source_resource_id,'')
 	        FROM resources
 	       WHERE (created_at > ? OR (created_at = ? AND resource_id > ?))`
 	args := []any{afterCreatedAt, afterCreatedAt, afterID}
@@ -831,13 +836,15 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 	type baseRow struct {
 		id                                                 resource.ResourceID
 		kind, placementDaemonID, placementCoord, createdBy string
+		sourceChannelID, sourceResourceID                  string
 		createdAt                                          int64
+		dir                                                bool
 	}
 	var base []baseRow
 	for rows.Next() {
 		var b baseRow
 		var id string
-		if err := rows.Scan(&id, &b.kind, &b.placementDaemonID, &b.placementCoord, &b.createdBy, &b.createdAt); err != nil {
+		if err := rows.Scan(&id, &b.kind, &b.placementDaemonID, &b.placementCoord, &b.createdBy, &b.createdAt, &b.dir, &b.sourceChannelID, &b.sourceResourceID); err != nil {
 			_ = rows.Close()
 			return nil, "", fmt.Errorf("store: resource list scan: %w", err)
 		}
@@ -870,6 +877,9 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 				PlacementDaemonID: b.placementDaemonID,
 				PlacementCoord:    b.placementCoord,
 				CreatedBy:         actor.ActorID(b.createdBy),
+				Dir:               b.dir,
+				SourceChannelID:   channel.ID(b.sourceChannelID),
+				SourceResourceID:  resource.ResourceID(b.sourceResourceID),
 			},
 			Grants: grants,
 		})
@@ -886,6 +896,50 @@ func (r *resourceRegistry) List(ctx context.Context, prefix string, limit int, c
 		nextCursor = encodeListCursor(lastCreatedAt, lastID)
 	}
 	return out, nextCursor, nil
+}
+
+func publicResourceMeta(id resource.ResourceID, meta resourcespec.ResourceMeta) channel.ResourceMeta {
+	return channel.ResourceMeta{
+		ID: id, Kind: string(meta.Kind), CreatedBy: meta.CreatedBy, CreatedAt: meta.CreatedAt,
+		PlacementKind: string(meta.PlacementKind), PlacementDaemonID: meta.PlacementDaemonID, Dir: meta.Dir,
+		SourceChannelID: meta.SourceChannelID, SourceResourceID: meta.SourceResourceID,
+	}
+}
+
+func (r *resourceRegistry) ListReadable(ctx context.Context, q channel.ResourceListQuery) (channel.ResourcePage, error) {
+	limit := q.Limit
+	if limit <= 0 || limit > 200 {
+		limit = 100
+	}
+	rows, next, err := r.List(ctx, q.Prefix, limit, q.Cursor)
+	if err != nil {
+		return channel.ResourcePage{}, err
+	}
+	out := channel.ResourcePage{Items: make([]channel.ResourceMeta, 0, len(rows)), Next: next}
+	for _, row := range rows {
+		out.Items = append(out.Items, publicResourceMeta(row.ID, row.Meta))
+	}
+	return out, nil
+}
+
+func (r *resourceRegistry) StatReadable(ctx context.Context, id resource.ResourceID) (channel.ResourceMeta, bool, error) {
+	meta, found, err := r.Resolve(ctx, id)
+	if err != nil || !found {
+		return channel.ResourceMeta{}, found, err
+	}
+	return publicResourceMeta(id, meta), true, nil
+}
+
+func (r *resourceRegistry) FetchReadable(ctx context.Context, id resource.ResourceID) (channel.ResourceMeta, []byte, bool, error) {
+	meta, found, err := r.Resolve(ctx, id)
+	if err != nil || !found {
+		return channel.ResourceMeta{}, nil, found, err
+	}
+	if meta.Kind != resourcespec.KindKV {
+		return publicResourceMeta(id, meta), nil, true, storespec.ErrResourceCapabilityUnavailable
+	}
+	value, _, err := newKVDriver(r.db).Read(ctx, id)
+	return publicResourceMeta(id, meta), value, true, err
 }
 
 // grantsFor fetches the FULL grant projection for one resource id — every

@@ -97,9 +97,9 @@ func (h *Home) sweepPresence(ctx context.Context) {
 	}
 }
 
-// PresenceSweptCount reports how many testimony rows the reconciliation
+// presenceSweptCount reports how many testimony rows the reconciliation
 // backstop has cleared over this Home's lifetime.
-func (h *Home) PresenceSweptCount() int64 {
+func (h *Home) presenceSweptCount() int64 {
 	return h.presenceSwept.Load()
 }
 
@@ -404,7 +404,7 @@ func (h *Home) factoryFor(row storespec.ActorControlRow) (platform.ActorFactory,
 		// read from the store with no Admit call this run). This runs BEFORE the cell is
 		// built, so the cell/factory step③ is a pure lookup — never a construction-path
 		// self-ensure (装配授权走私). Idempotent; nil registry is a defensive no-op.
-		h.EnsureSubjectSlot(row.ID)
+		h.ensureSubjectSlot(row.ID)
 		return humanCellFactory(h, row.ID), true
 	}
 	return h.factories.LookupByClass(row.ID, row.Class, row.Config)
@@ -457,15 +457,15 @@ func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, selectedVe
 	if !ok {
 		h.channel.Cells().Despawn(inc)
 		// 死 ID 槽级联清 (gateway 期 P1, mirror remove.go §级联删槽): factoryFor embodies a
-		// human by EnsureSubjectSlot BEFORE this build (装配链 step②). A stale-rec 补臂/
+		// human by the slot ensure step BEFORE this build (装配链 step②). A stale-rec 补臂/
 		// EnsureLive whose Lookup predated a concurrent Home.Remove can therefore RE-create
-		// the slot AFTER Remove's RemoveSubjectSlot ran — resurrecting a dead id's
+		// the slot AFTER Remove's slot removal ran — resurrecting a dead id's
 		// slot. Despawn alone (above)只 evicts the cell, not the slot, so close the笔 here
 		// with the SAME idempotent cascade Remove uses (id is confirmed dead — 身份不可复活
 		// mints a fresh id on any re-Admit, so this only ever targets THIS dead id, never a
 		// live successor). A no-op for a non-human (no slot was ever ensured) and when
 		// Remove already cleaned it.
-		h.RemoveSubjectSlot(id)
+		h.removeSubjectSlot(id)
 		h.presenceFold.Forget(id)
 		return recheckGone, nil
 	}

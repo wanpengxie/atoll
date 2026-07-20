@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"strings"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -283,6 +284,11 @@ func initializeSchema(db *sql.DB) error {
 		if _, err := tx.Exec(object.sql); err != nil {
 			return fmt.Errorf("create %s %s: %w", object.typ, object.name, err)
 		}
+	}
+	now := time.Now().UnixMilli()
+	if _, err := tx.Exec(`INSERT INTO actor_decls(id,name,owner,default_class,config_json,created_at,updated_at,visibility)
+		VALUES (?,?,?,?,?,?,?,'public')`, realmToolDeclID, "Realm Tool", "system", realmToolClass, `{}`, now, now); err != nil {
+		return fmt.Errorf("seed realm tool declaration: %w", err)
 	}
 	return tx.Commit()
 }

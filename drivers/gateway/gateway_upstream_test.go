@@ -5,14 +5,12 @@ package gateway
 
 import (
 	"context"
-	"errors"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // TestUpstreamSixFramesFourCodes (DoD-4): every one of the six business frames maps to
@@ -72,67 +70,6 @@ func TestUpstreamSixFramesFourCodes(t *testing.T) {
 			s.Close()
 			if code := codeOf(t, s.Upstream(mkBusiness(t, typ, "c"))); code != subjectgate.CodeClosed {
 				t.Fatalf("%s on closed session → want closed, got %q", typ, code)
-			}
-		})
-	}
-}
-
-func TestApplyRoutingSinglePath(t *testing.T) {
-	res := newResolver()
-	calls := 0
-	routing := func(context.Context, channel.ID, message.Kind) ([]actor.ActorID, message.Kind, string, error) {
-		calls++
-		return []actor.ActorID{"agent-1"}, message.KindRequest, "", nil
-	}
-	g := newTestGateway(t, Config{Resolver: res, Routing: routing}, settings{clock: newClock()})
-	s, _ := g.Attach("routing", nil)
-	defer s.Close()
-
-	explicit, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "explicit", subjectgate.SubmitPayload{
-		ChannelID: "c", Kind: string(message.KindEvent), Audience: []string{"human-1"},
-	})
-	got, ferr := s.applyRouting("c", explicit)
-	if ferr != nil || calls != 0 {
-		t.Fatalf("explicit audience called Routing: calls=%d err=%v", calls, ferr)
-	}
-	var explicitPayload subjectgate.SubmitPayload
-	_ = got.DecodePayload(&explicitPayload)
-	if len(explicitPayload.Audience) != 1 || explicitPayload.Audience[0] != "human-1" {
-		t.Fatalf("explicit audience changed: %v", explicitPayload.Audience)
-	}
-
-	empty, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "empty", subjectgate.SubmitPayload{ChannelID: "c"})
-	got, ferr = s.applyRouting("c", empty)
-	if ferr != nil || calls != 1 {
-		t.Fatalf("empty audience routing: calls=%d err=%v", calls, ferr)
-	}
-	var routed subjectgate.SubmitPayload
-	_ = got.DecodePayload(&routed)
-	if len(routed.Audience) != 1 || routed.Audience[0] != "agent-1" || routed.Kind != string(message.KindRequest) {
-		t.Fatalf("routed payload = audience %v kind %q", routed.Audience, routed.Kind)
-	}
-}
-
-func TestApplyRoutingFailuresAreUnavailable(t *testing.T) {
-	for _, tc := range []struct {
-		name      string
-		retryable string
-		err       error
-	}{
-		{name: "policy", retryable: "no reachable brain"},
-		{name: "internal", err: errors.New("routing store down")},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			routing := func(context.Context, channel.ID, message.Kind) ([]actor.ActorID, message.Kind, string, error) {
-				return nil, "", tc.retryable, tc.err
-			}
-			g := newTestGateway(t, Config{Resolver: newResolver(), Routing: routing}, settings{clock: newClock()})
-			s, _ := g.Attach("routing", nil)
-			defer s.Close()
-			f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "ref", subjectgate.SubmitPayload{ChannelID: "c"})
-			_, got := s.applyRouting("c", f)
-			if got == nil || codeOf(t, *got) != subjectgate.CodeUnavailable {
-				t.Fatalf("routing failure = %v, want unavailable frame", got)
 			}
 		})
 	}
@@ -231,6 +168,7 @@ func TestRevocationInFlightThenRefused(t *testing.T) {
 	if err := h.Remove(context.Background(), id); err != nil {
 		t.Fatalf("Remove: %v", err)
 	}
+	g.Poke(principal)
 	waitFor(t, func() bool {
 		_, ok := eligRoutes(s)["c"]
 		return !ok

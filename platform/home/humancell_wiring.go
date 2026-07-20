@@ -19,8 +19,7 @@ import (
 // lives in platform/internal/humancell (platform 拓扑批 T2 — 受养驱动 domain
 // 件,住膜内因受养特权).
 //
-// subjectgate_seam.go 的 gateway 期 S3 公共缝三方法（EnsureSubjectSlot/
-// SubjectSlotFor/RemoveSubjectSlot）也收进本文件: the drivers/gateway伞包
+// The subjectgate seam's ensure/lookup/remove methods also live in this file.
 // drives a subject's per-identity slot through these Home methods. The slot
 // itself is *subjectgate.Slot — the在场与递交接头盒; its exported methods
 // (PublishLevel/PublishCurrent/ForgetEpoch/Forget/Deliver) are the gateway's
@@ -88,7 +87,7 @@ func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
 			Self:       id,
 			Requests:   h.cs.Requests,
 			OpenCheck:  h.isRequestOpen,
-			CancelHint: h.CancelRequest,
+			CancelHint: h.cancelRequest,
 		}
 		token := humancell.WirePresenceSelfReport(sys, slot)
 		frames, incarnation, release := slot.AttachInterpreter()
@@ -140,11 +139,11 @@ func (h *Home) isRequestOpen(ctx context.Context, receiver actor.ActorID, reqID 
 	return false, nil
 }
 
-// EnsureSubjectSlot returns id's slot (在场与递交接头盒), creating it on first call
+// ensureSubjectSlot returns id's slot (在场与递交接头盒), creating it on first call
 // (idempotent). The gateway calls this at attach (装配链 step②) BEFORE the human
 // cell's factory looks the slot up (step③), so the factory never races an absent
 // slot. A nil registry (never assembled) is defensive — every Open builds one.
-func (h *Home) EnsureSubjectSlot(id actor.ActorID) *subjectgate.Slot {
+func (h *Home) ensureSubjectSlot(id actor.ActorID) *subjectgate.Slot {
 	if h.subjectgate == nil {
 		return nil
 	}
@@ -153,16 +152,16 @@ func (h *Home) EnsureSubjectSlot(id actor.ActorID) *subjectgate.Slot {
 
 // SubjectSlotFor returns id's slot IFF one exists (no create) — the gateway's
 // lookup for an already-attached subject.
-func (h *Home) SubjectSlotFor(id actor.ActorID) (*subjectgate.Slot, bool) {
+func (h *Home) subjectSlotFor(id actor.ActorID) (*subjectgate.Slot, bool) {
 	if h.subjectgate == nil {
 		return nil, false
 	}
 	return h.subjectgate.Slot(id)
 }
 
-// RemoveSubjectSlot drops id's slot and Forgets its testimony (户籍级联). Called
+// removeSubjectSlot drops id's slot and Forgets its testimony (户籍级联). Called
 // by the revocation/teardown path when a subject is removed.
-func (h *Home) RemoveSubjectSlot(id actor.ActorID) {
+func (h *Home) removeSubjectSlot(id actor.ActorID) {
 	if h.subjectgate == nil {
 		return
 	}

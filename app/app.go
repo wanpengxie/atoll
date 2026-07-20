@@ -6,6 +6,7 @@ package app
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,7 +18,6 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/platform/channelhost"
-	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -61,10 +61,9 @@ type HostFactory func(channelhost.HomeDeps) (channelhost.LocalHost, error)
 
 // Config configures the App.
 type Config struct {
-	DB           *sql.DB
-	Logger       *slog.Logger
-	ChannelDBDir string // e.g. "/tmp/atoll-dev/channels"
-	HostFactory  HostFactory
+	DB          *sql.DB
+	Logger      *slog.Logger
+	HostFactory HostFactory
 
 	// UIDist is the on-disk path of the built web UI (the atoll-web repo's
 	// dist/ — the UI lives in its own repository since the open-source split).
@@ -83,15 +82,10 @@ func New(cfg Config) (*App, error) {
 		db: cfg.DB, logger: logger, uiDist: cfg.UIDist,
 		daemonLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet(),
 	}
-	factory := cfg.HostFactory
-	if factory == nil {
-		// Transitional default for existing embedders; cmd/server supplies the
-		// factory explicitly and Phase 5 removes this fallback.
-		factory = func(deps channelhost.HomeDeps) (channelhost.LocalHost, error) {
-			return channelhost.New(cfg.ChannelDBDir, deps)
-		}
+	if cfg.HostFactory == nil {
+		return nil, errors.New("app: HostFactory required")
 	}
-	host, err := factory(channelhost.HomeDeps{
+	host, err := cfg.HostFactory(channelhost.HomeDeps{
 		CompositionResolver:  compositionResolver{app: a},
 		IntroductionResolver: compositionResolver{app: a},
 		Logger:               logger,
@@ -212,6 +206,11 @@ func (a *App) registerRoutes() {
 		api.GET("/channels", a.handleListChannels)
 		api.POST("/channels", a.handleCreateChannel)
 		api.GET("/channels/:chID", a.handleGetChannel)
+		api.GET("/channels/:chID/observe", a.handleObserveChannel)
+		api.GET("/channels/:chID/messages", a.handleListMessages)
+		api.GET("/channels/:chID/resources", a.handleListResources)
+		api.GET("/channels/:chID/resources/:rid", a.handleStatResource)
+		api.GET("/channels/:chID/resources/:rid/bytes", a.handleFetchResource)
 		api.DELETE("/channels/:chID", a.handleDeleteChannel)
 		api.POST("/channels/:chID/join", a.handleJoinChannel)
 		api.POST("/channels/:chID/actors", a.handleIntroduceActor)
@@ -264,13 +263,23 @@ func (a *App) registerRoutes() {
 // Channel home management
 // ---------------------------------------------------------------------------
 
-func (a *App) getHome(chID channel.ID) *home.Home {
-	h, _ := a.host.Borrow(chID)
-	return h
+var (
+	errChannelNotFound    = errors.New("app: channel not found")
+	errChannelUnavailable = errors.New("app: channel unavailable")
+)
+
+func (a *App) acquireBundle(chID channel.ID) (channelhost.Bundle, error) {
+	if bundle, ok := a.host.Acquire(chID); ok {
+		return bundle, nil
+	}
+	if !a.channelExists(context.Background(), string(chID)) {
+		return nil, errChannelNotFound
+	}
+	return nil, errChannelUnavailable
 }
 
-func (a *App) snapshotHomes(ctx context.Context) map[channel.ID]*home.Home {
-	out := make(map[channel.ID]*home.Home)
+func (a *App) snapshotBundles(ctx context.Context) map[channel.ID]channelhost.Bundle {
+	out := make(map[channel.ID]channelhost.Bundle)
 	rows, err := a.db.QueryContext(ctx, `SELECT id FROM channels`)
 	if err != nil {
 		return out
@@ -280,15 +289,15 @@ func (a *App) snapshotHomes(ctx context.Context) map[channel.ID]*home.Home {
 		var raw string
 		if rows.Scan(&raw) == nil {
 			id := channel.ID(raw)
-			if h := a.getHome(id); h != nil {
-				out[id] = h
+			if bundle, ok := a.host.Acquire(id); ok {
+				out[id] = bundle
 			}
 		}
 	}
 	return out
 }
 
-// homeOrError resolves the open Home for chID, or writes the honest two-state
+// bundleOrError resolves the open Bundle for chID, or writes the honest two-state
 // error to c and returns nil (A-P8):
 //   - the directory (channels table) has NO such channel → 404 (permanent).
 //   - the directory HAS it but its universe is not open (getHome==nil) → 503
@@ -297,9 +306,9 @@ func (a *App) snapshotHomes(ctx context.Context) map[channel.ID]*home.Home {
 //
 // The two states must not collapse: a caller retrying a 503 is right to; a caller
 // retrying a 404 is not. Every handler that needs a live Home routes through here.
-func (a *App) homeOrError(c *gin.Context, chID channel.ID) *home.Home {
-	if home := a.getHome(chID); home != nil {
-		return home
+func (a *App) bundleOrError(c *gin.Context, chID channel.ID) channelhost.Bundle {
+	if bundle, ok := a.host.Acquire(chID); ok {
+		return bundle
 	}
 	if !a.channelExists(c.Request.Context(), string(chID)) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})

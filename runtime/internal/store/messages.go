@@ -9,6 +9,7 @@ import (
 	"strings"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -222,6 +223,65 @@ func (m *messages) ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) 
 		out = append(out, env)
 	}
 	return out, rows.Err()
+}
+
+func (m *messages) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reader, afterSeq int64, limit int) ([]storespec.StoredRow, int64, error) {
+	if !reader.Valid() {
+		return nil, afterSeq, errors.New("store: invalid visible reader")
+	}
+	if limit <= 0 {
+		limit = 256
+	}
+	tx, err := m.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, afterSeq, fmt.Errorf("store: visible read begin: %w", err)
+	}
+	defer tx.Rollback()
+	var head int64
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(seq),0) FROM messages`).Scan(&head); err != nil {
+		return nil, afterSeq, fmt.Errorf("store: visible read head: %w", err)
+	}
+	const q = `SELECT id, ts, ts_received, channel_id,
+                  sender_kind, sender_id,
+                  kind, type, payload,
+                  COALESCE(parent_id,''), COALESCE(correlation_id,''),
+                  visibility, audience,
+                  expires_at,
+                  is_terminal, seq
+             FROM messages m
+             WHERE m.seq > ? AND m.seq <= ? AND m.visibility <> 'system'
+               AND (m.visibility = 'public'
+                 OR (m.visibility = 'private' AND (
+                       m.sender_id = ?
+                    OR EXISTS (SELECT 1 FROM json_each(m.audience) WHERE value = ?)
+                    OR (? = 'observer' AND EXISTS (
+                         SELECT 1 FROM actor_registry ar
+                          WHERE ar.actor_id=m.sender_id AND ar.principal=?)))) )
+             ORDER BY m.seq ASC LIMIT ?`
+	rows, err := tx.QueryContext(ctx, q, afterSeq, head, string(reader.ActorID), string(reader.ActorID), string(reader.Mode), reader.Principal, limit)
+	if err != nil {
+		return nil, afterSeq, fmt.Errorf("store: visible read: %w", err)
+	}
+	defer rows.Close()
+	var out []storespec.StoredRow
+	for rows.Next() {
+		row, err := scanEnvelopeRows(rows)
+		if err != nil {
+			return nil, afterSeq, fmt.Errorf("store: visible read scan: %w", err)
+		}
+		out = append(out, row)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, afterSeq, err
+	}
+	scanned := head
+	if len(out) == limit {
+		scanned = out[len(out)-1].Seq
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, afterSeq, err
+	}
+	return out, scanned, nil
 }
 
 // OpenRequestsForActor returns ALL open request rows whose first audience

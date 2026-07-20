@@ -5,6 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/resource"
 )
 
 // CreateSpec is the CLIENT-DECLARED shape of one create call — the operand
@@ -41,7 +44,9 @@ type CreateSpec struct {
 	// Initial, never a byte stream). Dir && WithContent is a malformed
 	// combination — a directory carries no content — the door's ingress
 	// rejects outright, never silently resolved.
-	WithContent bool
+	WithContent      bool
+	SourceChannelID  channel.ID
+	SourceResourceID resource.ResourceID
 }
 
 // PlacementKind names the door-back storage locus mechanism projected for a

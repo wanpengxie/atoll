@@ -19,7 +19,7 @@ import (
 func TestForkAdmissionPublishesEventRunRowStateAndReceipt(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	parent, err := h.Admit(ctx, actor.KindHuman, "fork-parent")
+	parent, err := h.admit(ctx, actor.KindHuman, "fork-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestForkAdmissionPublishesEventRunRowStateAndReceipt(t *testing.T) {
 func TestForkAdmissionRejectsInvalidSpecAndEndClearsRunAccounts(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	parent, err := h.Admit(ctx, actor.KindHuman, "fork-parent-invalid")
+	parent, err := h.admit(ctx, actor.KindHuman, "fork-parent-invalid")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestForkAdmissionRejectsInvalidSpecAndEndClearsRunAccounts(t *testing.T) {
 func TestParentSuccessorRecoversSponsoredChildAndDespawnsIt(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	parent, err := h.Admit(ctx, actor.KindHuman, "recovering-parent")
+	parent, err := h.admit(ctx, actor.KindHuman, "recovering-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,9 +164,9 @@ func TestForkAcceleratorMissStillReturnsChildAndLevelRingBuildsIt(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = h.Close() })
+	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
-	parent, err := h.Admit(ctx, actor.KindHuman, "accelerator-miss-parent")
+	parent, err := h.admit(ctx, actor.KindHuman, "accelerator-miss-parent")
 	if err != nil {
 		t.Fatal(err)
 	}

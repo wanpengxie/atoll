@@ -2,6 +2,7 @@ package app
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"net/http"
 
@@ -23,7 +24,7 @@ func (a *App) handleGetOperation(c *gin.Context) {
 		}
 		view := gin.H{"ref": ref, "family": "admission", "status": admission.Status, "op": admission.Op, "created_at": admission.CreatedAt}
 		if admission.ResultJSON.Valid {
-			view["result_json"] = admission.ResultJSON.String
+			view["result_json"] = json.RawMessage(admission.ResultJSON.String)
 		}
 		if admission.ErrorCode.Valid {
 			view["error_code"] = admission.ErrorCode.String
@@ -61,7 +62,7 @@ func (a *App) handleGetOperation(c *gin.Context) {
 		}
 		view := gin.H{"ref": ref, "family": "lifecycle", "status": status, "created_at": created}
 		if result.Valid {
-			view["result_json"] = result.String
+			view["result_json"] = json.RawMessage(result.String)
 		}
 		if code.Valid {
 			view["error_code"] = code.String
