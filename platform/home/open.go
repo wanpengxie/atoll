@@ -350,7 +350,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 
 	// 10. Time axis (OpenScheduler). FireSink mints a pen per fire (author-welded);
 	//     Reviver activates an absent identity-timer author via SpawnIfAbsent. The
-	//     engine is Started here and Closed in Home.Close (minting a handle without
+	//     engine is Started here and closed during Home shutdown (minting a handle without
 	//     Start would be a cast-but-unwired half-piece). BOOT-ORDER红线: the Reviver
 	//     is wired and the engine is Started BEFORE the first reconcile sweep below,
 	//     because an overdue fire on Start can precede the eager ring re-minting the

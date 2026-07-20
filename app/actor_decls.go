@@ -27,8 +27,9 @@ type createDeclReq struct {
 	// Class = the declaration's DEFAULT engine class (stored as
 	// actor_decls.default_class); a per-channel engine may override it at
 	// introduce time.
-	Class  string          `json:"class"`
-	Config json.RawMessage `json:"config"`
+	Class      string          `json:"class"`
+	Config     json.RawMessage `json:"config"`
+	Visibility string          `json:"visibility"`
 }
 
 // isJSONObject reports whether raw is a JSON object — the only shape a declared
@@ -56,6 +57,14 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 	if class == "" {
 		class = "go-kimi"
 	}
+	visibility := strings.TrimSpace(req.Visibility)
+	if visibility == "" {
+		visibility = "private"
+	}
+	if visibility != "public" && visibility != "private" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "visibility must be public or private"})
+		return
+	}
 	id := uuid.NewString()
 	now := time.Now().UnixMilli()
 	cfg := ""
@@ -67,23 +76,25 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 		cfg = string(req.Config)
 	}
 	if _, err := a.db.ExecContext(c.Request.Context(),
-		`INSERT INTO actor_decls (id, name, owner, default_class, config_json, created_at, updated_at) VALUES (?,?,?,?,?,?,?)`,
-		id, strings.TrimSpace(req.Name), userID, class, cfg, now, now); err != nil {
+		`INSERT INTO actor_decls (id, name, owner, default_class, config_json, created_at, updated_at, visibility) VALUES (?,?,?,?,?,?,?,?)`,
+		id, strings.TrimSpace(req.Name), userID, class, cfg, now, now, visibility); err != nil {
 		a.logger.Error("create decl", "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{
 		"id": id, "name": strings.TrimSpace(req.Name), "class": class,
-		"owner": userID, "created_at": now,
+		"owner": userID, "visibility": visibility, "created_at": now,
 	})
 }
 
-// handleListDecls lists the current user's (non-deleted) declarations.
+// handleListDecls lists every public declaration plus the current principal's
+// private declarations. Visibility is a realm roster policy; ownership is not a
+// prerequisite for inspecting a public declaration.
 func (a *App) handleListDecls(c *gin.Context) {
 	userID := middleware.UserID(c)
 	rows, err := a.db.QueryContext(c.Request.Context(),
-		`SELECT id, name, default_class, created_at, updated_at FROM actor_decls WHERE owner = ? AND deleted_at IS NULL ORDER BY created_at`,
+		`SELECT id, name, owner, default_class, visibility, created_at, updated_at FROM actor_decls WHERE (visibility = 'public' OR owner = ?) AND deleted_at IS NULL ORDER BY created_at`,
 		userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
@@ -91,12 +102,12 @@ func (a *App) handleListDecls(c *gin.Context) {
 	}
 	out := []gin.H{}
 	for rows.Next() {
-		var id, name, class string
+		var id, name, owner, class, visibility string
 		var ca, ua int64
-		if err := rows.Scan(&id, &name, &class, &ca, &ua); err != nil {
+		if err := rows.Scan(&id, &name, &owner, &class, &visibility, &ca, &ua); err != nil {
 			continue
 		}
-		out = append(out, gin.H{"id": id, "name": name, "class": class, "created_at": ca, "updated_at": ua})
+		out = append(out, gin.H{"id": id, "name": name, "owner": owner, "class": class, "visibility": visibility, "created_at": ca, "updated_at": ua})
 	}
 	_ = rows.Close()
 
@@ -137,8 +148,9 @@ func (a *App) handleListDecls(c *gin.Context) {
 }
 
 type updateDeclReq struct {
-	Name   *string         `json:"name"`
-	Config json.RawMessage `json:"config"`
+	Name       *string         `json:"name"`
+	Config     json.RawMessage `json:"config"`
+	Visibility *string         `json:"visibility"`
 }
 
 // handleUpdateDecl edits a declaration's name / global config (declaration data).
@@ -167,6 +179,19 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 		if _, err := tx.ExecContext(c.Request.Context(),
 			`UPDATE actor_decls SET name = ?, updated_at = ? WHERE id = ? AND owner = ?`,
 			strings.TrimSpace(*req.Name), now, declID, userID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+	}
+	if req.Visibility != nil {
+		visibility := strings.TrimSpace(*req.Visibility)
+		if visibility != "public" && visibility != "private" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "visibility must be public or private"})
+			return
+		}
+		if _, err := tx.ExecContext(c.Request.Context(),
+			`UPDATE actor_decls SET visibility = ?, updated_at = ? WHERE id = ? AND owner = ?`,
+			visibility, now, declID, userID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			return
 		}
@@ -204,10 +229,10 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 // actor_decls declaration (the world-layer fact), then (2) projects that fact into
 // every channel the instance was in — the world→channel cascade. The per-channel
 // removal is NOT an orphan table DELETE that leaves the live cell a zombie (病灶
-// #6): it goes through the Home control-plane machine seam (Home.Remove = despawn
-// → dereg cascade → system-authored mirror), so the live cell dies + membership
-// clears + a system-authored removal lands in the channel log. Order (红线 3):
-// intent row first (the ring won't re-mint), then Home.Remove.
+// #6): the fanout sender submits RevokeDeclTargets through each channel's SysOp,
+// so the membrane commits deregistration + system audit before post-commit runtime
+// retirement. Order (红线 3): authoritative soft delete and durable job first,
+// then per-channel delivery with retry.
 func (a *App) handleDeleteDecl(c *gin.Context) {
 	userID := middleware.UserID(c)
 	declID := c.Param("declID")

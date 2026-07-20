@@ -53,16 +53,21 @@ func TestDaemonBinaryCanonicalControl(t *testing.T) {
 	}, http.StatusCreated)
 	channelRow := api.must("POST", "/api/channels", map[string]any{"name": "home"}, http.StatusCreated)
 	channelID, _ := channelRow["id"].(string)
-	daemonRow := api.must("POST", "/api/channels/"+channelID+"/daemons", map[string]any{"name": "canonical-box"}, http.StatusCreated)
+	// Daemon identity is realm truth; its channel binding is a separate SysOp
+	// committed inside the channel membrane.
+	daemonRow := api.must("POST", "/api/daemons", map[string]any{"name": "canonical-box"}, http.StatusCreated)
 	daemonID, _ := daemonRow["id"].(string)
 	apiKey, _ := daemonRow["api_key"].(string)
 	if channelID == "" || daemonID == "" || apiKey == "" {
 		t.Fatalf("incomplete channel/daemon identity: channel=%q daemon=%q key=%t", channelID, daemonID, apiKey != "")
 	}
+	api.must("POST", "/api/channels/"+channelID+"/daemons", map[string]any{"daemon_id": daemonID}, http.StatusOK)
 
 	ws := dialWS(t, base, api.cookieHeader(), channelID, 0)
 	defer ws.close()
-	echoDecl := api.must("POST", "/api/actor-decls", map[string]any{"name": "echo-tool", "class": "echo"}, http.StatusCreated)
+	echoDecl := api.must("POST", "/api/actor-decls", map[string]any{
+		"name": "echo-tool", "class": "echo", "visibility": "public",
+	}, http.StatusCreated)
 	echoDeclID, _ := echoDecl["id"].(string)
 	echoResult := canonicalControl(t, ws, "channel.introduce_actor", map[string]any{
 		"decl_id": echoDeclID, "placement": "server",
@@ -73,7 +78,8 @@ func TestDaemonBinaryCanonicalControl(t *testing.T) {
 	}
 
 	assistantDecl := api.must("POST", "/api/actor-decls", map[string]any{
-		"name": "assistant", "class": "script", "config": map[string]any{"tool_id": echoID},
+		"name": "assistant", "class": "script", "visibility": "public",
+		"config": map[string]any{"tool_id": echoID},
 	}, http.StatusCreated)
 	assistantDeclID, _ := assistantDecl["id"].(string)
 	assistantResult := canonicalControl(t, ws, "channel.introduce_actor", map[string]any{

@@ -9,7 +9,8 @@ import (
 )
 
 // AccessClass is a principal's access to one channel (连接模型勘误期 §3.2 解析面):
-// a member writes + reads + emits presence; an observer (workspace 观众) only reads.
+// a member writes + reads + emits presence; an observer has a revocable, per-channel
+// realm read capability and never inherits write or presence rights.
 type AccessClass string
 
 const (

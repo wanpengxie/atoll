@@ -336,7 +336,10 @@ func TestPresenceRebindNewSlot(t *testing.T) {
 	if lvl, _, _, set := slotNew.Snapshot(); !set || lvl != subjectgate.LevelOnline {
 		t.Fatalf("换值 must补 the new slot online, got set=%v lvl=%v", set, lvl)
 	}
-	// coverage tracks the new slotRef.
+	// coverage is loop-private. Join the loop before white-box inspection so the
+	// assertion preserves that production ownership rule under -race.
+	g.presenceCancel()
+	g.presenceWG.Wait()
 	ce := g.coverage[covKey{principal: principal, channel: "c"}]
 	if ce == nil || ce.slot != slotNew {
 		t.Fatalf("coverage value must track the new slotRef")

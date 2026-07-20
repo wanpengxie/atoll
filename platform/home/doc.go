@@ -1,40 +1,20 @@
-// Package home is the channel-home assembly: it puts the position-blind
-// logical world (substrate) into the positioned physical world for ONE
-// channel. Home is the assembly root — it owns truth and embodiment wiring
-// for one channel and delivers a narrow capability set (not an organ bag):
+// Package home assembles the complete membrane for one channel. It owns the
+// channel-local store, admission harness, actor runtime, reconciliation rings,
+// subject and daemon links, and the private structural operation executor.
 //
-//	Open(cfg) → *Home
-//	View()  View              — read-only observation set (ReadAfterSeq/MaxSeq/ListActors/Stat/Snapshot/IsAttached)
-//	Admit(ctx,kind,principal) — mint/idempotently resolve active membership
-//	Bundle Gateway            — the per-identity subjectgate slot seam
-//	ServeAttach(w,r,daemonID) — attach acceptance surface (app hands an upgraded WS here)
-//	Subscribe() (<-chan struct{}, func()) — subscription registration surface (client push)
-//	Close() error
+// Home is intentionally not a realm-facing service. Its only exported method is
+// View; platform/channelhost is the sole package-to-package owner and projects a
+// generation-fenced Bundle with four narrow faces: Gateway, Daemon, SysOp, and
+// View. Bootstrap and shutdown are package bridges used only by channelhost.
 //
-// Everything else (runtime, deliverer, membership, registry, the harness Minter)
-// is internal wiring — Home holds the Minter and Mints a welded Pen at each
-// admission point (activation / attach / system closure); a bare writer and the Minter
-// itself never escape Home. Post-commit effects are tap subscribers, not inline
-// writer steps: cell delivery
-// is a Pump over the commit Signal (backed by the Deliverer, DeliverResult observed here),
-// client push is the Signal directly. Centralised multi-tenant is a factory over Open, not a
-// second Home shape.
+// Serving-time structural changes converge through the private opEntry. Both
+// member operate frames and channelhost SysOp calls are adapters to that one
+// component. It commits idempotency anchor, system audit event pair, and durable
+// structure in one SQLite transaction; runtime effects are post-commit hints and
+// reconciliation remains the correctness backstop.
 //
-// # File map
-//
-// home.go (types), open.go (Open), reconcile.go (activation
-// reconcile ring + sweep), census.go (Admit/PrincipalOf/ResolvePrincipal),
-// control.go (cancellation/KickDaemon/ServeAttach/Subscribe), close.go
-// (Close), view.go (View), remove.go (Remove), expiry.go (deadline-closure
-// reaper), scheduler.go (revive backoff + fire sink + reviver),
-// storagehost.go (home-side routing half of the daemon storage host),
-// humancell_wiring.go (home-side wiring shell for human embodiment — factory
-// + Proc seam over platform/internal/humancell), testing.go (black-box
-// fixture seam over Admit), caps.go (buildCaps — the single home-side
-// five-capability assembler), sysanchorcaps.go (the system anchor's
-// late-bound Schedule/Spawn arms), spawnhandle.go (spawnHandle —
-// Fork/Despawn woven over the caps assembler). ActorFactory (the def shape
-// buildCaps assembles against) is platform.ActorFactory (platform-topology
-// 批 T5b: home consumes the cross-host membrane's word, never defines its
-// own).
+// The package also resolves empty audiences after a write crosses the membrane,
+// pumps committed messages according to Audience, and exposes reader-scoped
+// visible history and resource projections through View. Realm policy and storage
+// shape never enter its requirement interfaces.
 package home

@@ -453,12 +453,12 @@ func (a *App) runDestroyJobLocked(ctx context.Context, id int64) error {
 	return tx.Commit()
 }
 
-// loadChannels is the lifecycle level-reconciliation arm. One corrupt or
+// reconcileServingChannels is the lifecycle level-reconciliation arm. One corrupt or
 // unavailable channel is isolated and remains honestly unavailable; it never
 // prevents the realm from starting or the next pass from retrying it. Keeping
 // Open beside Provision/Destroy makes channelhost's production lifecycle
 // calling surface mechanically closed to this file.
-func (a *App) loadChannels() error {
+func (a *App) reconcileServingChannels() error {
 	rows, err := a.db.Query(`SELECT id,type FROM channels ORDER BY id`)
 	if err != nil {
 		return err

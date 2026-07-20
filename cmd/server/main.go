@@ -45,15 +45,16 @@ type appShutdowner interface {
 // gracefulShutdown runs the ordered teardown — the order IS the semantics: ①
 // drain the HTTP entry (stop accepting, finish in-flight), ② silence the gateway
 // (关站全序: 停在场圈 → close every session → join read pumps → 等已获准递交归零 —
-// gateway先静默 before Home, 连接模型勘误期 §3.2 / DoD-9), ③ close channel homes (the
-// substrate behind the entry), ④ close the app db. Each step logs before it runs so
+// gateway先静默 before ChannelHost, 连接模型勘误期 §3.2 / DoD-9), ③ close realm
+// workers and ChannelHost (the substrate behind the entry), ④ close the app db.
+// Each step logs before it runs so
 // the order is assertable. All run even if an earlier one errors; errors are joined.
 func gracefulShutdown(ctx context.Context, logger *slog.Logger, a appShutdowner, gw io.Closer, db io.Closer) error {
 	logger.Info("server: shutdown step 1/4: draining http")
 	e1 := a.Shutdown(ctx)
 	logger.Info("server: shutdown step 2/4: silencing gateway")
 	e2 := gw.Close()
-	logger.Info("server: shutdown step 3/4: closing channel homes")
+	logger.Info("server: shutdown step 3/4: closing realm workers and channel host")
 	e3 := a.Close()
 	logger.Info("server: shutdown step 4/4: closing app db")
 	e4 := db.Close()
@@ -127,8 +128,8 @@ func main() {
 
 	// Human-ingress gateway (gateway 期 S3, 连接模型勘误期): constructed AFTER the app so
 	// it can hold the app's routing + entitlement面, then injected back (the construction
-	// cycle is broken by the setters). The platform membership-change emit points
-	// (home.Home.Admit/Remove via home.Config.OnMembershipChange) call Gateway.Poke
+	// cycle is broken by the setters). ChannelHost wires membrane membership-change
+	// emit points through HomeDeps.OnMembershipChange to Gateway.Poke
 	// directly; the entitlement resolver bridges the app's own DTO into gateway.Route
 	// (app → drivers is fenced, so the assembly root does the DTO→DTO map here).
 	gw, err := gateway.New(gateway.Config{

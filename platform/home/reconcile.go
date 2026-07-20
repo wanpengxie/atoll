@@ -458,7 +458,7 @@ func (h *Home) verifyPostBuild(ctx context.Context, id actor.ActorID, selectedVe
 		h.channel.Cells().Despawn(inc)
 		// 死 ID 槽级联清 (gateway 期 P1, mirror remove.go §级联删槽): factoryFor embodies a
 		// human by the slot ensure step BEFORE this build (装配链 step②). A stale-rec 补臂/
-		// EnsureLive whose Lookup predated a concurrent Home.Remove can therefore RE-create
+		// EnsureLive whose Lookup predated a concurrent membership removal can therefore RE-create
 		// the slot AFTER Remove's slot removal ran — resurrecting a dead id's
 		// slot. Despawn alone (above)只 evicts the cell, not the slot, so close the笔 here
 		// with the SAME idempotent cascade Remove uses (id is confirmed dead — 身份不可复活

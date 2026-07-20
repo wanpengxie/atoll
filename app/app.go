@@ -44,7 +44,7 @@ type App struct {
 
 	// wsGateway is the injected human-ingress connector (gateway 期 S3); membershipPoke
 	// is the injected direct Gateway.Poke callback that the platform emission
-	// points (home.Config.OnMembershipChange, wired in createHome — Admit/Remove) feed.
+	// points (home.Config.OnMembershipChange, wired by ChannelHost) feed.
 	// Both are set by the assembly root via SetGateway/SetMembershipPoke after New (the
 	// gateway needs the app's routing/entitlement面, breaking the構造 cycle).
 	wsGateway      WSGateway
@@ -111,8 +111,8 @@ func New(cfg Config) (*App, error) {
 	a.engine = engine
 	a.registerRoutes()
 
-	// Load existing channels from DB.
-	if err := a.loadChannels(); err != nil {
+	// Reconcile the directory with ChannelHost serving state.
+	if err := a.reconcileServingChannels(); err != nil {
 		return nil, fmt.Errorf("app: load channels: %w", err)
 	}
 	a.fanout = newFanoutWorker(a)
@@ -131,8 +131,8 @@ func New(cfg Config) (*App, error) {
 // it is set.
 func (a *App) SetGateway(g WSGateway) { a.wsGateway = g }
 
-// SetMembershipPoke injects Gateway.Poke directly. createHome
-// forwards it into each home's home.Config.OnMembershipChange (Admit/Remove emit points).
+// SetMembershipPoke injects Gateway.Poke directly. ChannelHost forwards membership
+// changes from every channel through the HomeDeps callback.
 // nil → no live poke (reconnect re-auth + the resolver's每批 recheck / sweep remain the
 // correctness正门 — a lost poke only delays convergence).
 func (a *App) SetMembershipPoke(fn func(principal string)) { a.membershipPoke = fn }
@@ -153,7 +153,7 @@ func (a *App) Run(addr string) error {
 
 // Shutdown stops accepting new connections and drains in-flight requests within
 // ctx's deadline. It is step ① of the graceful teardown (before Close): stop the
-// entry before dismantling the homes behind it.
+// entry before dismantling the serving bundles behind it.
 func (a *App) Shutdown(ctx context.Context) error {
 	a.mu.RLock()
 	srv := a.srv
@@ -164,10 +164,8 @@ func (a *App) Shutdown(ctx context.Context) error {
 	return srv.Shutdown(ctx)
 }
 
-// Close tears down all channel homes. 锁纪律 (连接模型勘误期 §3.2 P1-6): snapshot +
-// clear the map UNDER a.mu, then Close each home OUTSIDE the lock — a home.Close held
-// under a.mu would block every concurrent getHome (a.mu.RLock), and the entitlement
-// resolver's bounded read (T_read) cannot cancel a lock wait.
+// Close joins realm workers before transferring process teardown to ChannelHost,
+// the sole owner of serving Home instances and their physical stores.
 func (a *App) Close() error {
 	if a.lifecycle != nil {
 		a.lifecycle.close()

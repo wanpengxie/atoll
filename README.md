@@ -89,7 +89,8 @@ platform/    cross-host membrane (ActorDecl + ActorFactory, the shared word tabl
              home/ (server-side channel-home assembly, ChannelHome), compute/
              (daemon-side attached-compute assembly, Run), subjectgate/ +
              internal/ subpackages
-app/         HTTP API surface (identity, workspace, channel, daemon, WS)
+app/         reference realm (identity, channel directory/lifecycle, declarations,
+             daemon registry, admission/fanout jobs, HTTP/WS)
 drivers/     external-world drivers: tools/ (echo, device, kimi, xhs), agents/ (LLM engine providers: claudecode, kimi), gateway/ (human ingress)
 registry/    actor class registry (config → running actor)
 cmd/         binaries (server, daemon, cli)
@@ -150,7 +151,8 @@ func construct(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl,
 Atoll is **v0.01 — a working minimal kernel, pre-release**. The five elements and
 both planes are in place and enforced; the developer shell around them (one-command
 setup, coding-agent connectors, scaffolding) is being built next. Known, deliberate
-boundaries at this stage: single trust domain per deployment, no read-path ACL yet,
+boundaries at this stage: single trust domain per deployment; observer read access is
+a revocable per-channel realm capability, while members retain intrinsic read access.
 APIs still move without deprecation cycles. Kernel first, polish second — watch the
 repo if you want to see the rest arrive.
 

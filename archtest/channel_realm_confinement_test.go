@@ -294,6 +294,38 @@ func TestChannelRealmW6SingleJobRunners(t *testing.T) {
 			t.Errorf("%s definitions=%d, want 1", name, count)
 		}
 	}
+
+	// Tracked governance ledger: every realm runner names both its implementation
+	// owner and durable anchors. Keeping this in archtest makes a clean clone carry
+	// the wall even though the project-management corpus itself is workspace-local.
+	runners := []struct {
+		name    string
+		source  string
+		typ     string
+		anchors []string
+	}{
+		{"channel lifecycle worker", "../app/channel_lifecycle.go", "type lifecycleWorker struct", []string{"channel_provision_jobs", "channel_destroy_jobs"}},
+		{"admission service", "../app/admission.go", "type admissionService struct", []string{"channel_admission_operations", "channel_finalize_deliveries"}},
+		{"fanout sender", "../app/fanout.go", "type fanoutWorker struct", []string{"decl_fanout_jobs", "daemon_revoke_jobs", "decl_fanout_deliveries"}},
+	}
+	schema, err := os.ReadFile("../app/store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, runner := range runners {
+		body, err := os.ReadFile(runner.source)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(body), runner.typ) {
+			t.Errorf("registered %s implementation %q is absent", runner.name, runner.typ)
+		}
+		for _, anchor := range runner.anchors {
+			if !strings.Contains(string(schema), `"table", "`+anchor+`"`) {
+				t.Errorf("registered %s durable anchor %q is absent from strict schema", runner.name, anchor)
+			}
+		}
+	}
 }
 
 // W7: Bundle.SysOp is consumed only by admissionService and the convergence sender.

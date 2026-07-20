@@ -9,7 +9,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-var ErrAdmitKind = errors.New("platform: Home.Admit accepts only human actors")
+var ErrAdmitKind = errors.New("platform: membership admission accepts only human actors")
 
 // Admit creates one durable human identity through the declared-admission
 // transaction. It does not Mint a pen or place a cell; the control row declares

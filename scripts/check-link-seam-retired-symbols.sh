@@ -45,8 +45,8 @@ patterns=(
 	'func[[:space:]]*\(r[[:space:]]+\*Runtime\)[[:space:]]+Attach\b|PrepareHandshakeObserved|CommitWhile'
 	'func[[:space:]]+OpenDB[[:space:]]*\('
 	'migration generation|pre-epoch|repairs inactive|half-written.*repaired|old daemon build|historical.*migration'
-	'submitControlThroughDoor|controlRequestTimeout|handle(ListActors|ActorStatus|ChannelPresenceDrops|Cursor|ListMessages|IntroduceActor|RestartDecl|RemoveActor|SetDefaultAgent)'
-	'"/channels/:chID/(actors|presence-drops|cursor|messages|default_agent)|"/actor-decls/:declID/restart'
+	'submitControlThroughDoor|controlRequestTimeout|handle(ListActors|ActorStatus|ChannelPresenceDrops|Cursor|RestartDecl|RemoveActor|SetDefaultAgent)'
+	'"/channels/:chID/(presence-drops|cursor|default_agent)|"/actor-decls/:declID/restart'
 	'type[[:space:]]+daemonAssignment[[:space:]]+struct'
 )
 
@@ -68,7 +68,7 @@ samples=(
 	'func OpenDB(path string) {}'
 	'const mode = "pre-epoch"'
 	'func submitControlThroughDoor() {}'
-	'router.GET("/channels/:chID/actors", handler)'
+	'router.GET("/channels/:chID/presence-drops", handler)'
 	'type daemonAssignment struct{}'
 )
 
