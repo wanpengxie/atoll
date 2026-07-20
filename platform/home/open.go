@@ -50,9 +50,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if cfg.CompositionResolver == nil {
 		return nil, fmt.Errorf("platform: CompositionResolver required")
 	}
-	if cfg.DaemonAuthority == nil {
-		return nil, fmt.Errorf("platform: DaemonAuthority required")
-	}
 	if cfg.Bootstrap && cfg.MustExistDB {
 		return nil, errors.New("platform: Bootstrap and MustExistDB are mutually exclusive")
 	}
@@ -195,6 +192,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: build state handle resolver: %w", err)
 	}
 	h.stateHandles = stateHandles
+	h.opEntry = &opEntry{home: h, resolver: cfg.IntroductionResolver, admission: cs.SysOps}
 	if systemAdmission.Created {
 		logger.Info("platform.member.admitted", "channel", string(cfg.ChannelID),
 			"actor", string(actor.SystemActorID), "kind", string(actor.KindSystem), "principal", "")
@@ -274,7 +272,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 				Clock:     clock,
 				Presence:  presence.NewView(presenceFold, rt, cs.Authority),
 				Logger:    logger,
-				Operate:   cfg.Operate,
+				Operate:   h.opEntry,
 			}))
 		},
 		SystemPen:    systemPen,
@@ -393,13 +391,22 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		Logger:             logger,
 		CancelRequest:      h.handleCancelUpstream,
 		StorageHostControl: homeStorageHostControl{outbox: cs.Outbox, timeout: cfg.ReservationTimeout, logger: logger},
-		PlanProvider:       boundPlanProvider{channelID: cfg.ChannelID, provider: cfg.PlanProvider},
-		DaemonAuthority:    daemonAuthorityAdapter{inner: cfg.DaemonAuthority},
-		ActorLock:          h.actorGates.lock,
-		PortIndex:          homePortIndex{h: h},
-		IdleRequest:        h.approveRemoteIdle,
-		SpawnRequest:       h.handleRemoteSpawn,
-		EndRequest:         h.handleRemoteEnd,
+		Plan:               h.PlanForDaemon,
+		CanAttach: func(ctx context.Context, daemonID string) error {
+			bound, err := cs.Bindings.IsBound(ctx, storespec.DaemonID(daemonID))
+			if err != nil {
+				return err
+			}
+			if !bound {
+				return errors.New("link: daemon_binding_stale")
+			}
+			return nil
+		},
+		ActorLock:    h.actorGates.lock,
+		PortIndex:    homePortIndex{h: h},
+		IdleRequest:  h.approveRemoteIdle,
+		SpawnRequest: h.handleRemoteSpawn,
+		EndRequest:   h.handleRemoteEnd,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct link acceptor: %w", err)

@@ -37,7 +37,7 @@ func TestHomePublicSurface(t *testing.T) {
 	// *subjectgate.Slot capability handle, never the bare registry object).
 	// ResolvePrincipal/PrincipalOf are the principal↔actor-id resolution the
 	// gateway + operate shim use to reach a subject's slot (no door handle).
-	want := []string{"ActiveActor", "ActiveActors", "Admit", "AdmitChannelOwner", "ApplyDeclaration", "ApplyRestartTarget", "CancelRequest", "Close", "DaemonObligationCounts", "DeclarationVersions", "Declare", "DeclaredByPrincipal", "DeclaredBySource", "DefaultAgent", "EditDeclaration", "EnsureSubjectSlot", "KickDaemon", "PlanForDaemon", "PresenceSweptCount", "PrincipalOf", "Remove", "RemoveInstance", "RemoveSubjectSlot", "ResolvePrincipal", "Restart", "RestartInstanceDirect", "RevokeDaemonTarget", "ServeAttach", "SetDefaultAgent", "SubjectSlotFor", "Subscribe", "View"}
+	want := []string{"ActiveActor", "ActiveActors", "Admit", "AdmitChannelOwner", "ApplyDeclaration", "CancelRequest", "Close", "DaemonObligationCounts", "DeclarationVersions", "Declare", "DeclaredByPrincipal", "DeclaredBySource", "DefaultAgent", "EditDeclaration", "EnsureSubjectSlot", "IsBound", "KickDaemon", "PlanForDaemon", "PresenceSweptCount", "PrincipalOf", "Remove", "RemoveInstance", "RemoveSubjectSlot", "ResolvePrincipal", "Restart", "RestartInstanceDirect", "ServeAttach", "SetDefaultAgent", "SubjectSlotFor", "Subscribe", "View"}
 
 	typ := reflect.TypeOf((*home.Home)(nil))
 	var got []string

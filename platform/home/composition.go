@@ -20,18 +20,9 @@ type CompositionResolver interface {
 	BuildClass(channelpkg.ID, actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool)
 }
 
-type sourceConfigResolver interface {
-	ResolveSourceConfig(context.Context, string, json.RawMessage) (json.RawMessage, error)
-}
-
 type compositionView struct {
 	h        *Home
 	resolver CompositionResolver
-}
-
-type boundPlanProvider struct {
-	channelID channelpkg.ID
-	provider  PlanProvider
 }
 
 func (v *compositionView) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
@@ -39,29 +30,11 @@ func (v *compositionView) Lookup(id actor.ActorID) (platform.ActorFactory, bool)
 	if err != nil || !ok {
 		return platform.ActorFactory{}, false
 	}
-	config, err := v.resolveConfig(context.Background(), row.SourceDeclID, row.Config)
-	if err != nil {
-		return platform.ActorFactory{}, false
-	}
-	return v.resolver.BuildClass(v.h.channelID, id, row.Class, config)
-}
-
-func (p boundPlanProvider) Plan(ctx context.Context, daemonID string) ([]platform.PlanActor, error) {
-	if p.provider == nil {
-		return nil, errors.New("platform: no plan provider")
-	}
-	return p.provider.Plan(ctx, p.channelID, daemonID)
+	return v.resolver.BuildClass(v.h.channelID, id, row.Class, row.Config)
 }
 
 func (v *compositionView) LookupByClass(id actor.ActorID, class string, config json.RawMessage) (platform.ActorFactory, bool) {
 	return v.resolver.BuildClass(v.h.channelID, id, class, config)
-}
-
-func (v *compositionView) resolveConfig(ctx context.Context, sourceID string, config json.RawMessage) (json.RawMessage, error) {
-	if r, ok := v.resolver.(sourceConfigResolver); ok {
-		return r.ResolveSourceConfig(ctx, sourceID, config)
-	}
-	return append(json.RawMessage(nil), config...), nil
 }
 
 func (h *Home) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
@@ -131,68 +104,6 @@ func (h *Home) RestartInstanceDirect(ctx context.Context, id actor.ActorID) (int
 	h.channel.Cells().DespawnIDReason(id, "restart")
 	h.pokeReconcile()
 	return row.CurrentDeclVersion, nil
-}
-
-func (h *Home) ApplyRestartTarget(ctx context.Context, jobID int64, id actor.ActorID) (int64, bool, error) {
-	if h.closed.Load() {
-		return 0, false, ErrClosed
-	}
-	if id == actor.SystemActorID {
-		return 0, false, ErrRestartAnchor
-	}
-	unlock := h.actorGates.lock(id)
-	defer unlock()
-	if h.closed.Load() {
-		return 0, false, ErrClosed
-	}
-	row, active, err := h.controlIndex.LookupActive(ctx, id)
-	if err != nil {
-		return 0, false, err
-	}
-	if !active {
-		return 0, false, storespec.ErrActorNotFound
-	}
-	intent := h.liveness.AttachmentIntent(id)
-	currentTicket := ""
-	if intent.Present && intent.Version == row.CurrentDeclVersion {
-		currentTicket = string(intent.Ticket)
-	}
-	expected, alreadyApplied, err := h.cs.RestartJournal.ClaimRestartAttempt(ctx, jobID, id, currentTicket, h.nowMs())
-	if err != nil {
-		return 0, false, err
-	}
-	if alreadyApplied {
-		return row.CurrentDeclVersion, false, nil
-	}
-	if _, retired := h.liveness.RetireIfTicketMatches(id, EnsureTicket(expected), true); retired {
-		h.channel.Cells().DespawnIDReason(id, "restart")
-		h.pokeReconcile()
-	}
-	marked, err := h.cs.RestartJournal.MarkRestartApplied(ctx, jobID, id, h.nowMs())
-	if err != nil {
-		return row.CurrentDeclVersion, false, err
-	}
-	return row.CurrentDeclVersion, marked, nil
-}
-
-func (h *Home) RevokeDaemonTarget(ctx context.Context, daemonID string) error {
-	if h.closed.Load() {
-		return ErrClosed
-	}
-	rows, err := h.controlIndex.ListActive(ctx)
-	if err != nil {
-		return err
-	}
-	for _, row := range rows {
-		if row.Placement.Kind != storespec.PlacementDaemon || row.Placement.Host != daemonID {
-			continue
-		}
-		if err := h.systemEndHandle().End(ctx, row.ID, "daemon_revoked"); err != nil {
-			return err
-		}
-	}
-	h.pokeReconcile()
-	return nil
 }
 
 // ValidateAttachment is a pure Home-side decision over declared authority and

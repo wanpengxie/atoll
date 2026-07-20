@@ -38,8 +38,9 @@ type ChannelStores struct {
 	DeclVersions   storespec.DeclVersionStore
 	Cascade        storespec.CascadeStore
 	Routing        storespec.ChannelRouting
-	RestartJournal storespec.RestartJournal
 	Genesis        storespec.GenesisStore
+	SysOps         storespec.SysOpAdmission
+	Bindings       storespec.DaemonBindingReader
 
 	// Plane-2 (access/resource) implementations over the SAME channel db. These
 	// are the door's collaborators, handed up as resourcespec CONTRACTS (never
@@ -95,6 +96,7 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	}
 	msgs := newMessages(db, onCommit)
 	reg := newActorRegistry(db, channelID, onCommit)
+	sysOps := newSysOpStore(db, channelID, onCommit)
 	cs := &ChannelStores{
 		db:             db,
 		Log:            msgs,
@@ -108,8 +110,9 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		DeclVersions:   reg,
 		Cascade:        reg,
 		Routing:        reg,
-		RestartJournal: reg,
 		Genesis:        genesisStore{db: db},
+		SysOps:         sysOps,
+		Bindings:       sysOps,
 		Resources:      newResourceRegistry(db),
 		KVDriver:       newKVDriver(db),
 		State:          newStateStore(db),

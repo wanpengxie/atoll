@@ -26,15 +26,8 @@ func (h *Home) PlanForDaemon(ctx context.Context, daemonID string) ([]platform.P
 		if !intent.Present || intent.Version != row.CurrentDeclVersion {
 			continue
 		}
-		config := append([]byte(nil), row.Config...)
-		if view, ok := h.factories.(*compositionView); ok {
-			config, err = view.resolveConfig(ctx, row.SourceDeclID, row.Config)
-			if err != nil {
-				return nil, err
-			}
-		}
 		out = append(out, platform.PlanActor{
-			InstanceID: row.ID, Class: row.Class, Config: config,
+			InstanceID: row.ID, Class: row.Class, Config: append([]byte(nil), row.Config...),
 			Kind: row.Kind, Binding: actor.BindingRuntimeInboundViaRelay, Version: row.CurrentDeclVersion,
 			TIdleMs: row.TIdle.Milliseconds(), EnsureTicket: string(intent.Ticket),
 		})

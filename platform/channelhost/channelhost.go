@@ -95,15 +95,13 @@ type CensusEntry struct {
 	State     CensusState
 }
 
-// HomeDeps is the assembly input while the existing Home seams are being moved
-// behind the bundle. Plan/authority/operate are removed in the OpEntry phase.
+// HomeDeps contains only realm-owned resolution and notification seams. Channel
+// execution, binding admission, and planning stay behind the membrane.
 type HomeDeps struct {
-	CompositionResolver home.CompositionResolver
-	PlanProvider        home.PlanProvider
-	DaemonAuthority     home.DaemonAuthority
-	Operate             home.OperateExecutor
-	OnMembershipChange  func(channel.ID, []string)
-	Logger              *slog.Logger
+	CompositionResolver  home.CompositionResolver
+	IntroductionResolver home.IntroductionResolver
+	OnMembershipChange   func(channel.ID, []string)
+	Logger               *slog.Logger
 }
 
 type entryState uint8
@@ -116,6 +114,7 @@ const (
 
 type entry struct {
 	home       *home.Home
+	sysOp      SysOp
 	generation uint64
 	state      entryState
 	closed     bool
@@ -141,9 +140,6 @@ func New(root string, deps HomeDeps) (*ChannelHost, error) {
 	}
 	if deps.CompositionResolver == nil {
 		return nil, errors.New("channelhost: CompositionResolver required")
-	}
-	if deps.DaemonAuthority == nil {
-		return nil, errors.New("channelhost: DaemonAuthority required")
 	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("channelhost: create root: %w", err)
@@ -258,7 +254,7 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 			SourceDeclID: declaration.DeclID, Principal: declaration.Principal, Kind: declaration.Kind,
 			Class: declaration.Rendered.Class, Config: &config, Placement: placement,
 			TIdle: declaration.Rendered.TIdleMS, MakeDefault: declaration.DeclID == spec.DefaultSourceDeclID,
-			CreatedAt: spec.CreatedAt,
+			CreatedAt: spec.CreatedAt, RenderSeq: declaration.Rendered.RenderSeq,
 		}); err != nil {
 			return ProvisionReceipt{}, fmt.Errorf("channelhost: declare genesis %q: %w", declaration.DeclID, err)
 		}
@@ -337,7 +333,7 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 		_ = homeInstance.Close()
 		return nil
 	}
-	h.entries[spec.ChannelID] = &entry{home: homeInstance, generation: generation, state: stateServing}
+	h.entries[spec.ChannelID] = &entry{home: homeInstance, sysOp: home.SystemOps(homeInstance), generation: generation, state: stateServing}
 	h.mu.Unlock()
 	return nil
 }
@@ -345,8 +341,8 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 func (h *ChannelHost) openHome(id channel.ID, path string, bootstrap bool, genesis *storespec.ChannelGenesis) (*home.Home, error) {
 	config := home.Config{
 		ChannelID: id, DBPath: path, Bootstrap: bootstrap, MustExistDB: !bootstrap,
-		CompositionResolver: h.deps.CompositionResolver, PlanProvider: h.deps.PlanProvider,
-		DaemonAuthority: h.deps.DaemonAuthority, Operate: h.deps.Operate, Logger: h.logger,
+		CompositionResolver: h.deps.CompositionResolver, IntroductionResolver: h.deps.IntroductionResolver,
+		Logger: h.logger,
 	}
 	if bootstrap {
 		config.Genesis = genesis
@@ -369,7 +365,7 @@ func (h *ChannelHost) Acquire(id channel.ID) (Bundle, bool) {
 	if entry == nil || entry.state != stateServing || entry.home == nil {
 		return nil, false
 	}
-	return &bundle{home: entry.home, generation: entry.generation}, true
+	return &bundle{home: entry.home, sysOp: entry.sysOp, generation: entry.generation}, true
 }
 
 func (h *ChannelHost) Borrow(id channel.ID) (*home.Home, bool) {

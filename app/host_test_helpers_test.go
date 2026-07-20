@@ -19,8 +19,8 @@ func newBareAppForTest(t *testing.T) *App {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &App{db: db, logger: slog.New(slog.DiscardHandler), daemonLocks: newKeyedLockSet(), declLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet()}
-	host, err := channelhost.New(filepath.Join(root, "channels"), channelhost.HomeDeps{CompositionResolver: compositionResolver{app: a}, PlanProvider: appPlanProvider{app: a}, DaemonAuthority: appDaemonAuthority{app: a}, Operate: a.operateFace(), Logger: a.logger})
+	a := &App{db: db, logger: slog.New(slog.DiscardHandler), daemonLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet()}
+	host, err := channelhost.New(filepath.Join(root, "channels"), channelhost.HomeDeps{CompositionResolver: compositionResolver{app: a}, IntroductionResolver: compositionResolver{app: a}, Logger: a.logger})
 	if err != nil {
 		t.Fatal(err)
 	}

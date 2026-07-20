@@ -51,7 +51,7 @@ func (l *lateAcceptor) get() *link.Acceptor { return l.p.Load() }
 // on this channel's Acceptor is a storage-mount candidate, Online=true by
 // construction (an entry only exists while attached). This intentionally
 // never imports app: attach state is a
-// platform/link-native fact, not an app daemon_channels projection — day-1's
+// platform/link-native fact, not an app-side binding projection — day-1's
 // policy chain (①③④) needs nothing else (§4.3's ② — the ONLY chain step that
 // would need daemon ownership — is deferred whole).
 type lateStorageMounts struct{ acc *lateAcceptor }

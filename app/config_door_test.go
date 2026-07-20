@@ -1,7 +1,6 @@
 package app_test
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"sync"
@@ -10,7 +9,6 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
@@ -110,32 +108,38 @@ func TestConfigDoor_ProcEndToEnd(t *testing.T) {
 		t.Fatalf("decode declaration: %v", err)
 	}
 	declID := declaration["id"].(string)
+	daemonID := createAndBindDaemon(t, env, s.chID, "config-host", s.cookies)["id"].(string)
 
-	payload, _ := json.Marshal(map[string]any{"decl_id": declID, "placement": "server"})
-	introduced, err := env.app.OperateFaceForTest().Introduce(context.Background(), home.OperateRequest{
-		ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: payload,
-	})
-	if err != nil {
-		t.Fatalf("introduce v1: %v", err)
-	}
-	instanceID := actor.ActorID(introduced.(map[string]any)["instance_id"].(string))
-	if !env.app.WaitLiveForTest(s.chID, instanceID, 2*time.Second) {
-		t.Fatalf("instance %s never embodied after introduce", instanceID)
-	}
-	waitConfig(t, instanceID, "v1", 2*time.Second)
+	introducedResp := env.do(t, "POST", "/api/channels/"+s.chID+"/actors", map[string]any{"decl_id": declID}, s.cookies)
+	assertStatus(t, introducedResp, http.StatusCreated)
+	introduced := respJSON(t, introducedResp)
+	instanceID := actor.ActorID(introduced["actor_id"].(string))
+	waitPlanConfig(t, env, channel.ID(s.chID), daemonID, instanceID, "v1")
 
-	payload, _ = json.Marshal(map[string]any{"decl_id": declID, "config": map[string]any{"model": "v2"}})
-	updated, err := env.app.OperateFaceForTest().Introduce(context.Background(), home.OperateRequest{
-		ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: payload,
-	})
-	if err != nil {
-		t.Fatalf("introduce v2: %v", err)
+	updated := env.do(t, "PATCH", "/api/actor-decls/"+declID, map[string]any{"config": map[string]any{"model": "v2"}}, s.cookies)
+	assertStatus(t, updated, http.StatusOK)
+	waitPlanConfig(t, env, channel.ID(s.chID), daemonID, instanceID, "v2")
+}
+
+func waitPlanConfig(t *testing.T, env *testEnv, chID channel.ID, daemonID string, instanceID actor.ActorID, want string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		rows, err := env.app.PlanForDaemonForTest(chID, daemonID)
+		if err == nil {
+			for _, row := range rows {
+				if row.InstanceID != instanceID {
+					continue
+				}
+				var config map[string]any
+				if json.Unmarshal(row.Config, &config) == nil && config["model"] == want {
+					return
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	result := updated.(map[string]any)
-	if result["created"] == true || result["config_updated"] != true {
-		t.Fatalf("config update result=%v", result)
-	}
-	waitConfig(t, instanceID, "v2", 2*time.Second)
+	t.Fatalf("plan for %s did not converge to model %q", instanceID, want)
 }
 
 // TestConfigSnapshot_ProcForm proves the Proc form reads the snapshot too: a Proc

@@ -127,21 +127,6 @@ CREATE TABLE IF NOT EXISTS channel_routing (
   default_agent TEXT
 );
 
-CREATE TABLE IF NOT EXISTS restart_applied (
-  job_id      INTEGER NOT NULL,
-  instance_id TEXT NOT NULL,
-  applied_at  INTEGER NOT NULL,
-  PRIMARY KEY(job_id, instance_id)
-);
-
-CREATE TABLE IF NOT EXISTS restart_attempts (
-  job_id          INTEGER NOT NULL,
-  instance_id     TEXT NOT NULL,
-  expected_ticket TEXT NOT NULL,
-  claimed_at      INTEGER NOT NULL,
-  PRIMARY KEY(job_id, instance_id)
-);
-
 -- (v2: worker_locks table removed. channel-sqlite is append-only truth;
 -- write-path exclusivity is a structural invariant of the single write path,
 -- not a per-row lease.)
@@ -319,8 +304,6 @@ var ChannelLocalTables = []string{
 	"channel_genesis",
 	"channel_daemon_bindings",
 	"channel_routing",
-	"restart_applied",
-	"restart_attempts",
 	"resources",
 	"resource_grants",
 	"resource_reservations",

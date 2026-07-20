@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"testing"
@@ -83,10 +82,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	s := fullSetup(t, env)
 
 	// --- create + attach a daemon, grab its one-time api key ----------------
-	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID),
-		map[string]any{"name": "xhs-daemon"}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	daemonBody := respJSON(t, w)
+	daemonBody := createAndBindDaemon(t, env, s.chID, "xhs-daemon", s.cookies)
 	apiKey := daemonBody["api_key"].(string)
 	daemonID := daemonBody["id"].(string)
 	if apiKey == "" {
@@ -279,10 +275,7 @@ func TestXHSLiveActorStatus(t *testing.T) {
 
 	s := fullSetup(t, env)
 
-	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID),
-		map[string]any{"name": "xhs-status-daemon"}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	daemonBody := respJSON(t, w)
+	daemonBody := createAndBindDaemon(t, env, s.chID, "xhs-status-daemon", s.cookies)
 	apiKey := daemonBody["api_key"].(string)
 	daemonID := daemonBody["id"].(string)
 	if apiKey == "" {

@@ -23,7 +23,7 @@ func TestDaemonLifecycleForkCrossesWireWithFullSpecAndTicksPlan(t *testing.T) {
 	got := make(chan actorrt.ForkSpec, 1)
 	acc := newTestAcceptor(t, link.Config{
 		Minter: &stubMinter{}, Runtime: rt, ChannelID: testChannelID,
-		Declarations: auth, Authority: auth, DaemonAuthority: auth, PortIndex: auth,
+		Declarations: auth, Authority: auth, CanAttach: func(context.Context, string) error { return nil }, PortIndex: auth,
 		ActorLock: func(actor.ActorID) func() { return func() {} },
 		SpawnRequest: func(_ context.Context, inc actorrt.Incarnation, version int64, nonce string, spec actorrt.ForkSpec) (actor.ActorID, error) {
 			wantPlacement, _ := storespec.NewDaemonPlacement("daemon-target")

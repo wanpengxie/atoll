@@ -407,15 +407,7 @@ func (h *Home) factoryFor(row storespec.ActorControlRow) (platform.ActorFactory,
 		h.EnsureSubjectSlot(row.ID)
 		return humanCellFactory(h, row.ID), true
 	}
-	config := row.Config
-	var err error
-	if view, ok := h.factories.(*compositionView); ok {
-		config, err = view.resolveConfig(context.Background(), row.SourceDeclID, row.Config)
-		if err != nil {
-			return platform.ActorFactory{}, false
-		}
-	}
-	return h.factories.LookupByClass(row.ID, row.Class, config)
+	return h.factories.LookupByClass(row.ID, row.Class, row.Config)
 }
 
 // recheckResult classifies a post-build straddle recheck (verifyPostBuild).

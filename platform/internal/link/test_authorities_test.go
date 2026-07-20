@@ -7,7 +7,6 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -49,14 +48,14 @@ type validAttachmentFence struct{}
 func (validAttachmentFence) Valid() bool { return true }
 
 type blockingSecondDaemonValidation struct {
-	inner   link.DaemonAuthority
+	inner   func(context.Context, string) error
 	entered chan<- struct{}
 	release <-chan struct{}
 	mu      sync.Mutex
 	calls   int
 }
 
-func (x *blockingSecondDaemonValidation) LockAndValidate(ctx context.Context, daemonID string, chID channel.ID) (func(), error) {
+func (x *blockingSecondDaemonValidation) Validate(ctx context.Context, daemonID string) error {
 	x.mu.Lock()
 	x.calls++
 	call := x.calls
@@ -66,10 +65,10 @@ func (x *blockingSecondDaemonValidation) LockAndValidate(ctx context.Context, da
 		select {
 		case <-x.release:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 		}
 	}
-	return x.inner.LockAndValidate(ctx, daemonID, chID)
+	return x.inner(ctx, daemonID)
 }
 
 func (x blockingPortIndex) Register(owner link.PortOwner, inc actorrt.Incarnation, ticket string, version int64) bool {
@@ -142,10 +141,6 @@ func (a *testAuthorities) CheckAuthor(ctx context.Context, stamp storespec.Autho
 	return storespec.AuthorOK, nil
 }
 
-func (*testAuthorities) LockAndValidate(context.Context, string, channel.ID) (func(), error) {
-	return func() {}, nil
-}
-
 func (a *testAuthorities) Register(owner link.PortOwner, inc actorrt.Incarnation, _ string, _ int64) bool {
 	a.mu.Lock()
 	a.ports[inc.ID()] = testPortEntry{owner: owner, inc: inc}
@@ -196,8 +191,8 @@ func newTestAcceptor(t *testing.T, cfg link.Config) *link.Acceptor {
 	if cfg.Authority == nil {
 		cfg.Authority = auth
 	}
-	if cfg.DaemonAuthority == nil {
-		cfg.DaemonAuthority = auth
+	if cfg.CanAttach == nil {
+		cfg.CanAttach = func(context.Context, string) error { return nil }
 	}
 	if cfg.ActorLock == nil {
 		cfg.ActorLock = func(actor.ActorID) func() { return func() {} }

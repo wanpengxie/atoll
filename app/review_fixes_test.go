@@ -1,113 +1,9 @@
 package app_test
 
 import (
-	"context"
-	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
-
-	"github.com/wanpengxie/atoll/platform/home"
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 )
-
-// actorKind returns the Home registry kind for id, or "".
-func actorKind(t *testing.T, env *testEnv, cookies []*http.Cookie, chID, id string) string {
-	t.Helper()
-	_ = cookies
-	actors, err := env.app.ActorsForTest(channel.ID(chID))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, a := range actors {
-		if a.ID == actor.ActorID(id) {
-			return string(a.Kind)
-		}
-	}
-	return ""
-}
-
-// TestOperate_IntroduceNewRow_UnknownEngineRejected pins the other side of #6: the
-// CREATE branch still rejects an unknown class (the validation moved, it did not
-// disappear) — no unbuildable row is ever persisted.
-func TestOperate_IntroduceNewRow_UnknownEngineRejected(t *testing.T) {
-	env := setupTestApp(t)
-	s := fullSetup(t, env)
-
-	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "rev3", "class": "claude"}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	agentID := respJSON(t, w)["id"].(string)
-
-	face := env.app.OperateFaceForTest()
-	payload, _ := json.Marshal(map[string]any{"decl_id": agentID, "class": "totally-unknown-engine-xyz"})
-	_, err := face.Introduce(context.Background(), home.OperateRequest{
-		ChannelID: channel.ID(s.chID),
-		Sender:    s.actorID,
-		Payload:   payload,
-	})
-	if err == nil {
-		t.Fatal("Introduce of a NEW row with an unknown engine must be rejected (create-branch class check)")
-	}
-	oe, ok := err.(*home.OperateError)
-	if !ok || oe.Code != "unknown_class" {
-		t.Fatalf("want unknown_class OperateError, got %v", err)
-	}
-}
-
-// TestOperateIntroduceAcquiresDaemonBeforeDeclaration is a barrier proof of the
-// global keyed-lock order. Once Introduce is observed waiting behind a held
-// daemon lock, the declaration lock must still be free; the retired reverse
-// order held declaration while waiting for daemon and deadlocked this crossing.
-func TestOperateIntroduceAcquiresDaemonBeforeDeclaration(t *testing.T) {
-	env := setupTestApp(t)
-	s := fullSetup(t, env)
-
-	w := env.do(t, "POST", "/api/daemons", map[string]any{"name": "lock-order"}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	daemonID := respJSON(t, w)["id"].(string)
-	w = env.do(t, "POST", "/api/channels/"+s.chID+"/daemons/attach",
-		map[string]any{"daemon_ids": []string{daemonID}}, s.cookies)
-	assertStatus(t, w, http.StatusOK)
-	w = env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "ordered", "class": "claude"}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	declID := respJSON(t, w)["id"].(string)
-
-	releaseDaemon := env.app.LockDaemonForTest(daemonID)
-	payload, _ := json.Marshal(map[string]any{
-		"decl_id": declID, "placement": "daemon", "desired_host": daemonID,
-	})
-	introduced := make(chan error, 1)
-	go func() {
-		_, err := env.app.OperateFaceForTest().Introduce(context.Background(), home.OperateRequest{
-			ChannelID: channel.ID(s.chID), Sender: s.actorID, Payload: payload,
-		})
-		introduced <- err
-	}()
-	if !env.app.WaitDaemonLockRefsForTest(daemonID, 2, time.Second) {
-		releaseDaemon()
-		t.Fatal("Introduce never reached the daemon lock")
-	}
-
-	declLock := make(chan func(), 1)
-	go func() { declLock <- env.app.LockDeclForTest(declID) }()
-	select {
-	case releaseDecl := <-declLock:
-		releaseDecl()
-	case <-time.After(time.Second):
-		releaseDaemon()
-		if err := <-introduced; err != nil {
-			t.Fatalf("Introduce after releasing deadlock rig: %v", err)
-		}
-		releaseDecl := <-declLock
-		releaseDecl()
-		t.Fatal("Introduce held declaration lock while waiting for daemon lock")
-	}
-	releaseDaemon()
-	if err := <-introduced; err != nil {
-		t.Fatalf("Introduce: %v", err)
-	}
-}
 
 // TestDeleteDaemon_RevokePersistFails_Returns5xx pins the daemon-delete fix: if the
 // revocation cannot reach durable storage, the handler must return 5xx (not a false
@@ -121,14 +17,14 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 	assertStatus(t, w, http.StatusCreated)
 	daemonID := respJSON(t, w)["id"].(string)
 
-	// Create a channel and bind the daemon so there is a daemon_channels row the tx
-	// deletes FIRST — proving the whole tx rolls back, not just the later writes.
+	// Create a channel and bind the daemon. A failed realm revocation transaction
+	// must leave both the daemon and its independently authoritative channel binding.
 	cookies2 := cookies
 	chBody := env.do(t, "POST", "/api/channels", map[string]any{"name": "c"}, cookies2)
 	assertStatus(t, chBody, http.StatusCreated)
 	chID := respJSON(t, chBody)["id"].(string)
-	w = env.do(t, "POST", "/api/channels/"+chID+"/daemons/attach",
-		map[string]any{"daemon_ids": []string{daemonID}}, cookies2)
+	w = env.do(t, "POST", "/api/channels/"+chID+"/daemons",
+		map[string]any{"daemon_id": daemonID}, cookies2)
 	assertStatus(t, w, http.StatusOK)
 
 	// A normal schema trigger (not TEMP/connection-local) fails the third write after
@@ -167,7 +63,7 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 		}
 	}
 	if !bindingSurvived {
-		t.Fatal("daemon_channels binding was deleted despite the revocation tx rolling back (half-applied)")
+		t.Fatal("channel binding was deleted despite the realm revocation transaction rolling back")
 	}
 	var pending int
 	if err := env.db.QueryRow(`SELECT COUNT(*) FROM daemon_revoke_jobs WHERE daemon_id=?`, daemonID).Scan(&pending); err != nil {
@@ -178,10 +74,8 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 	}
 }
 
-// TestDeleteDaemon_HappyPath_RemovesBindings pins the kick-set fix (#3): the channels
-// to kick are collected IN-TX via DELETE ... RETURNING channel_id (the rows this
-// delete actually removed), not a separate pre-tx read a concurrent attach could
-// race. A successful delete removes the binding, drops the daemon, and reports ok.
+// TestDeleteDaemon_HappyPath_RemovesBindings proves the realm revocation job
+// eventually enumerates live channels and removes their channel-local bindings.
 func TestDeleteDaemon_HappyPath_RemovesBindings(t *testing.T) {
 	env := setupTestApp(t)
 	_, cookies := register(t, env, "kick@example.com", "secret123", "Owner")
@@ -194,11 +88,11 @@ func TestDeleteDaemon_HappyPath_RemovesBindings(t *testing.T) {
 	chBody := env.do(t, "POST", "/api/channels", map[string]any{"name": "c"}, cookies2)
 	assertStatus(t, chBody, http.StatusCreated)
 	chID := respJSON(t, chBody)["id"].(string)
-	w = env.do(t, "POST", "/api/channels/"+chID+"/daemons/attach",
-		map[string]any{"daemon_ids": []string{daemonID}}, cookies2)
+	w = env.do(t, "POST", "/api/channels/"+chID+"/daemons",
+		map[string]any{"daemon_id": daemonID}, cookies2)
 	assertStatus(t, w, http.StatusOK)
 
-	// Delete: the in-tx RETURNING collects [chID] as the kick set, commits, then kicks.
+	// Delete commits the daemon revocation and durable fanout obligation.
 	w = env.do(t, "DELETE", "/api/daemons/"+daemonID, nil, cookies2)
 	assertStatus(t, w, http.StatusOK)
 
@@ -211,13 +105,13 @@ func TestDeleteDaemon_HappyPath_RemovesBindings(t *testing.T) {
 			t.Fatalf("daemon still present after delete")
 		}
 	}
-	// Binding gone (the RETURNING delete committed, not rolled back).
+	// Binding gone after fanout convergence.
 	w = env.do(t, "GET", "/api/channels/"+chID+"/daemons", nil, cookies2)
 	assertStatus(t, w, http.StatusOK)
 	cds, _ := respJSON(t, w)["daemons"].([]any)
 	for _, d := range cds {
 		if d.(map[string]any)["id"] == daemonID {
-			t.Fatalf("daemon_channels binding survived delete")
+			t.Fatalf("channel binding survived daemon revocation fanout")
 		}
 	}
 }

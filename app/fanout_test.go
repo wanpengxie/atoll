@@ -4,6 +4,8 @@ import (
 	"context"
 	"testing"
 	"time"
+
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 func fanoutTestApp(t *testing.T) *App {
@@ -13,7 +15,7 @@ func fanoutTestApp(t *testing.T) *App {
 
 func TestFanoutClaimCrashReplayCountsAttempt(t *testing.T) {
 	a := fanoutTestApp(t)
-	if _, err := a.db.Exec(`INSERT INTO decl_fanout_jobs(decl_id,op,initiator,targets_json,created_at) VALUES ('d','restart','u','[]',1)`); err != nil {
+	if _, err := a.db.Exec(`INSERT INTO decl_fanout_jobs(base_ref,decl_id,op,initiator,created_at) VALUES ('fo:claim','d','restart','u',1)`); err != nil {
 		t.Fatal(err)
 	}
 	w1 := newFanoutWorker(a)
@@ -32,9 +34,11 @@ func TestFanoutClaimCrashReplayCountsAttempt(t *testing.T) {
 
 func TestFanoutDeadLetterDoesNotStarveEitherTable(t *testing.T) {
 	a := fanoutTestApp(t)
-	_, _ = a.db.Exec(`INSERT INTO decl_fanout_jobs(decl_id,op,initiator,targets_json,created_at) VALUES ('bad','restart','u','{',1)`)
-	_, _ = a.db.Exec(`INSERT INTO decl_fanout_jobs(decl_id,op,initiator,targets_json,created_at) VALUES ('good','restart','u','[]',2)`)
-	_, _ = a.db.Exec(`INSERT INTO daemon_revoke_jobs(daemon_id,op,targets_json,created_at) VALUES ('box','delete','[]',1)`)
+	_, _ = a.db.Exec(`PRAGMA ignore_check_constraints=ON`)
+	_, _ = a.db.Exec(`INSERT INTO decl_fanout_jobs(base_ref,decl_id,op,initiator,created_at) VALUES ('fo:bad','bad','invalid','u',1)`)
+	_, _ = a.db.Exec(`PRAGMA ignore_check_constraints=OFF`)
+	_, _ = a.db.Exec(`INSERT INTO decl_fanout_jobs(base_ref,decl_id,op,initiator,created_at) VALUES ('fo:good','good','restart','u',2)`)
+	_, _ = a.db.Exec(`INSERT INTO daemon_revoke_jobs(base_ref,daemon_id,initiator,created_at) VALUES ('fo:box','box','u',1)`)
 	w := newFanoutWorker(a)
 	w.drain()
 
@@ -63,7 +67,7 @@ func TestFanoutTransientFailureWaitsForNextAttempt(t *testing.T) {
 	for _, stmt := range []string{
 		`INSERT INTO users(id,email,password,created_at) VALUES ('u','u@example.test','x',1)`,
 		`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES ('c','c','group',1,NULL)`,
-		`INSERT INTO decl_fanout_jobs(decl_id,op,initiator,targets_json,created_at) VALUES ('retry','restart','u','[{"channel_id":"c","instance_id":"agent:x"}]',1)`,
+		`INSERT INTO decl_fanout_jobs(base_ref,decl_id,op,initiator,created_at) VALUES ('fo:retry','retry','restart','u',1)`,
 	} {
 		if _, err := a.db.Exec(stmt); err != nil {
 			t.Fatal(err)
@@ -102,5 +106,70 @@ func TestFanoutRetryDelaySchedule(t *testing.T) {
 		if got := fanoutRetryDelay(int64(i + 1)); got != d {
 			t.Fatalf("attempt %d delay=%v want %v", i+1, got, d)
 		}
+	}
+}
+
+func TestFanoutUnavailableChannelDoesNotBlockLaterChannelAndReplayIsExact(t *testing.T) {
+	a := fanoutTestApp(t)
+	ctx := context.Background()
+	goodID := channel.ID("b-good")
+	badID := channel.ID("a-bad")
+	openTestChannelForTest(t, a, goodID, nil)
+	for _, stmt := range []string{
+		`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES ('a-bad','bad','group',1,NULL)`,
+		`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES ('b-good','good','group',1,NULL)`,
+		`INSERT INTO decl_fanout_jobs(base_ref,decl_id,op,initiator,created_at) VALUES ('fo:aggregate','decl-gone','delete','owner',1)`,
+	} {
+		if _, err := a.db.ExecContext(ctx, stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	w := newFanoutWorker(a)
+	w.drain()
+	var done any
+	var attempt int
+	if err := a.db.QueryRowContext(ctx, `SELECT attempt,done_at FROM decl_fanout_jobs WHERE base_ref='fo:aggregate'`).Scan(&attempt, &done); err != nil {
+		t.Fatal(err)
+	}
+	if attempt != 1 || done != nil {
+		t.Fatalf("first pass attempt=%d done=%v, want pending after unavailable channel", attempt, done)
+	}
+	completedCount := func() int {
+		t.Helper()
+		bundle, ok := a.host.Acquire(goodID)
+		if !ok {
+			t.Fatal("good channel unavailable")
+		}
+		rows, err := bundle.View().ReadAfterSeq(ctx, 0, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		anchor := channel.RefCorrelation(channel.DerivedFanoutRef("fo:aggregate", goodID))
+		count := 0
+		for _, row := range rows {
+			if row.Envelope.Type == "sysop_completed" && string(row.Envelope.CorrelationID) == anchor {
+				count++
+			}
+		}
+		return count
+	}
+	if got := completedCount(); got != 1 {
+		t.Fatalf("good channel completed events after first pass=%d, want 1", got)
+	}
+
+	openTestChannelForTest(t, a, badID, nil)
+	if _, err := a.db.ExecContext(ctx, `UPDATE decl_fanout_jobs SET next_attempt_at=0 WHERE base_ref='fo:aggregate'`); err != nil {
+		t.Fatal(err)
+	}
+	w.drain()
+	if err := a.db.QueryRowContext(ctx, `SELECT attempt,done_at FROM decl_fanout_jobs WHERE base_ref='fo:aggregate'`).Scan(&attempt, &done); err != nil {
+		t.Fatal(err)
+	}
+	if attempt != 2 || done == nil {
+		t.Fatalf("replay attempt=%d done=%v, want completed on second pass", attempt, done)
+	}
+	if got := completedCount(); got != 1 {
+		t.Fatalf("good channel completed events after replay=%d, want exactly 1", got)
 	}
 }

@@ -43,8 +43,8 @@ func TestCarrierHandoffAnchorRedeliveryIsOncePerIncarnation(t *testing.T) {
 	resolver := &anchorResolver{}
 	h, err := Open(Config{
 		ChannelID: "anchor-redelivery", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: resolver, DaemonAuthority: allowTestDaemonAuthority{},
-		ReconcileInterval: 10 * time.Millisecond, Bootstrap: true,
+		CompositionResolver: resolver,
+		ReconcileInterval:   10 * time.Millisecond, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -93,8 +93,8 @@ func TestCarrierHandoffAnchorRedeliveryIsOncePerIncarnation(t *testing.T) {
 func TestCarrierFullLeavesRequestOpenAndNextHandoffRedeliversOnlyRequest(t *testing.T) {
 	h, err := Open(Config{
 		ChannelID: "anchor-full-handoff", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{},
-		ReconcileInterval: time.Hour, Bootstrap: true,
+		CompositionResolver: emptyCompositionResolver{},
+		ReconcileInterval:   time.Hour, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)

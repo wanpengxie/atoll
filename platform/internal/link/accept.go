@@ -100,15 +100,15 @@ type Acceptor struct {
 	// wired on this channel yet), never a silent drop (§4.7's own frames are
 	// request/response; a daemon retrying forever against a home that just
 	// swallows the frame would be a worse failure mode than an explicit nak).
-	storageControl  StorageHostControl
-	planProvider    PlanProvider
-	daemonAuthority DaemonAuthority
-	actorLock       func(actor.ActorID) func()
-	portIndex       PortIndex
-	idleRequest     func(context.Context, actorrt.Incarnation) (bool, error)
-	spawnRequest    func(context.Context, actorrt.Incarnation, int64, string, actorrt.ForkSpec) (actor.ActorID, error)
-	endRequest      func(context.Context, actorrt.Incarnation, int64, actor.ActorID, string) (func(), error)
-	nextPortOwner   atomic.Uint64
+	storageControl StorageHostControl
+	plan           func(context.Context, string) ([]platform.PlanActor, error)
+	canAttach      func(context.Context, string) error
+	actorLock      func(actor.ActorID) func()
+	portIndex      PortIndex
+	idleRequest    func(context.Context, actorrt.Incarnation) (bool, error)
+	spawnRequest   func(context.Context, actorrt.Incarnation, int64, string, actorrt.ForkSpec) (actor.ActorID, error)
+	endRequest     func(context.Context, actorrt.Incarnation, int64, actor.ActorID, string) (func(), error)
+	nextPortOwner  atomic.Uint64
 
 	// pendingAlloc correlates AllocRequest (home→daemon) with its AllocReply —
 	// a home-initiated leg of the control-RPC plane (the daemon-initiated
@@ -260,17 +260,13 @@ type Config struct {
 	// §4.7 storage control-RPC plane (Committed/ReclaimAck/ReconcilePull).
 	// nil → those three frames get an honest error reply.
 	StorageHostControl StorageHostControl
-	PlanProvider       PlanProvider
-	DaemonAuthority    DaemonAuthority
+	Plan               func(context.Context, string) ([]platform.PlanActor, error)
+	CanAttach          func(context.Context, string) error
 	ActorLock          func(actor.ActorID) func()
 	PortIndex          PortIndex
 	IdleRequest        func(context.Context, actorrt.Incarnation) (bool, error)
 	SpawnRequest       func(context.Context, actorrt.Incarnation, int64, string, actorrt.ForkSpec) (actor.ActorID, error)
 	EndRequest         func(context.Context, actorrt.Incarnation, int64, actor.ActorID, string) (func(), error)
-}
-
-type PlanProvider interface {
-	Plan(context.Context, string) ([]platform.PlanActor, error)
 }
 
 // DeclarationCoordinator is the Home-owned S2 seam. It brackets the channel
@@ -286,12 +282,6 @@ type DeclarationCoordinator interface {
 // runtime publishes the new incarnation.
 type AttachmentFence interface {
 	Valid() bool
-}
-
-// DaemonAuthority holds the app-owned per-daemon keyed lock while it freshly
-// validates the daemon and its binding to this channel.
-type DaemonAuthority interface {
-	LockAndValidate(context.Context, string, channel.ID) (release func(), err error)
 }
 
 type PortOwner uint64
@@ -318,8 +308,8 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 		return nil, errors.New("link: actor authority is required")
 	case cfg.StateHandles == nil:
 		return nil, errors.New("link: state handle resolver is required")
-	case cfg.DaemonAuthority == nil:
-		return nil, errors.New("link: daemon authority is required")
+	case cfg.CanAttach == nil:
+		return nil, errors.New("link: attach admission is required")
 	case cfg.ActorLock == nil:
 		return nil, errors.New("link: actor lock is required")
 	case cfg.PortIndex == nil:
@@ -331,35 +321,35 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Acceptor{
-		minter:          cfg.Minter,
-		access:          cfg.Access,
-		stateHandles:    cfg.StateHandles,
-		sched:           cfg.Schedule,
-		runtime:         cfg.Runtime,
-		authority:       cfg.Authority,
-		declarations:    cfg.Declarations,
-		channelID:       cfg.ChannelID,
-		logger:          logger,
-		leasePing:       cfg.LeasePing,
-		leaseTTL:        cfg.LeaseTTL,
-		ctx:             ctx,
-		cancel:          cancel,
-		closeDone:       make(chan struct{}),
-		attached:        map[string]int{},
-		cancelReq:       cfg.CancelRequest,
-		storageControl:  cfg.StorageHostControl,
-		planProvider:    cfg.PlanProvider,
-		daemonAuthority: cfg.DaemonAuthority,
-		actorLock:       cfg.ActorLock,
-		portIndex:       cfg.PortIndex,
-		idleRequest:     cfg.IdleRequest,
-		spawnRequest:    cfg.SpawnRequest,
-		endRequest:      cfg.EndRequest,
-		pendingAlloc:    newPendingReplies[AllocReply](),
-		pendingReclaim:  newPendingReplies[ReclaimReply](),
-		lane:            newLaneState(),
-		links:           map[string][]*linkHandle{},
-		slots:           map[string]*incumbentSlot{},
+		minter:         cfg.Minter,
+		access:         cfg.Access,
+		stateHandles:   cfg.StateHandles,
+		sched:          cfg.Schedule,
+		runtime:        cfg.Runtime,
+		authority:      cfg.Authority,
+		declarations:   cfg.Declarations,
+		channelID:      cfg.ChannelID,
+		logger:         logger,
+		leasePing:      cfg.LeasePing,
+		leaseTTL:       cfg.LeaseTTL,
+		ctx:            ctx,
+		cancel:         cancel,
+		closeDone:      make(chan struct{}),
+		attached:       map[string]int{},
+		cancelReq:      cfg.CancelRequest,
+		storageControl: cfg.StorageHostControl,
+		plan:           cfg.Plan,
+		canAttach:      cfg.CanAttach,
+		actorLock:      cfg.ActorLock,
+		portIndex:      cfg.PortIndex,
+		idleRequest:    cfg.IdleRequest,
+		spawnRequest:   cfg.SpawnRequest,
+		endRequest:     cfg.EndRequest,
+		pendingAlloc:   newPendingReplies[AllocReply](),
+		pendingReclaim: newPendingReplies[ReclaimReply](),
+		lane:           newLaneState(),
+		links:          map[string][]*linkHandle{},
+		slots:          map[string]*incumbentSlot{},
 	}, nil
 }
 
@@ -784,11 +774,10 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				},
 			}
 			var (
-				writerPin        *incumbentPin
-				authorityRelease func()
-				actorRelease     func()
-				attachmentFence  AttachmentFence
-				ensureTicket     string
+				writerPin       *incumbentPin
+				actorRelease    func()
+				attachmentFence AttachmentFence
+				ensureTicket    string
 			)
 			releaseOuter := func() {
 				if actorRelease != nil {
@@ -799,18 +788,13 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 					writerPin.finish(true)
 					writerPin = nil
 				}
-				if authorityRelease != nil {
-					authorityRelease()
-					authorityRelease = nil
-				}
 			}
 			resolve := func(hp ipc.HandshakePayload) (actor.ActorID, error) {
 				id, meta, err := lookupDeclared(hp)
 				if err != nil {
 					return "", err
 				}
-				authorityRelease, err = a.daemonAuthority.LockAndValidate(reqCtx, meta.DaemonID, a.channelID)
-				if err != nil {
+				if err = a.canAttach(reqCtx, meta.DaemonID); err != nil {
 					return "", err
 				}
 				pin, err := a.enterPortWriter(meta.DaemonID, lc)
@@ -965,10 +949,10 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			switch {
 			case confirmed == "":
 				reply.Error = "link: plan pull before accepted attach"
-			case a.planProvider == nil:
+			case a.plan == nil:
 				reply.Error = "link: no plan provider"
 			default:
-				reply.Actors, err = a.planProvider.Plan(reqCtx, confirmed)
+				reply.Actors, err = a.plan(reqCtx, confirmed)
 				if err != nil {
 					reply.Error = err.Error()
 				}
@@ -1121,12 +1105,10 @@ func (a *Acceptor) handleAttach(ctx context.Context, lc *linkSession, requestID 
 			return "", false
 		}
 	}
-	authorityRelease, err := a.daemonAuthority.LockAndValidate(ctx, computeID, a.channelID)
-	if err != nil {
+	if err := a.canAttach(ctx, computeID); err != nil {
 		a.rejectAttach(lc, requestID, "daemon_binding_stale", "attach_daemon_binding_stale", err)
 		return "", false
 	}
-	defer authorityRelease()
 
 	pin, reason := a.enterDeclarationWriter(computeID, lc)
 	if reason != "" {

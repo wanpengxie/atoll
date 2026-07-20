@@ -92,6 +92,7 @@ type ActorControlRow struct {
 	TIdle              time.Duration
 	Placement          Placement
 	SourceDeclID       string
+	RenderSeq          int64
 }
 
 type ActorWorld uint8
@@ -138,10 +139,11 @@ type AdmitBundle struct {
 	Placement    Placement
 	TIdle        time.Duration
 	SourceDeclID string
+	RenderSeq    int64
 	CreatedAt    int64
 }
 
-type AdmitResult struct {
+type DeclAdmissionResult struct {
 	ID      actor.ActorID
 	Created bool
 }
@@ -158,7 +160,7 @@ type ComputeDeclaration struct {
 }
 
 type DeclAdmissionStore interface {
-	AdmitDeclared(context.Context, AdmitBundle) (AdmitResult, error)
+	AdmitDeclared(context.Context, AdmitBundle) (DeclAdmissionResult, error)
 }
 
 type DeclEditBundle struct {
@@ -168,6 +170,7 @@ type DeclEditBundle struct {
 	Placement    Placement
 	TIdle        time.Duration
 	SourceDeclID string
+	RenderSeq    int64
 	CreatedAt    int64
 }
 

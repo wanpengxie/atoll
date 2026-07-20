@@ -14,7 +14,7 @@ import (
 const declaredControlColumns = `r.actor_id, r.actor_kind, r.principal, r.role,
 	COALESCE(r.actor_binding,''), r.created_at, r.current_decl_version,
 	d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
-	d.source_decl_id`
+	d.source_decl_id, d.render_seq`
 
 type controlScanner interface{ Scan(...any) error }
 
@@ -25,7 +25,7 @@ func scanDeclaredControl(s controlScanner) (storespec.ActorControlRow, error) {
 	var idleMS int64
 	if err := s.Scan(&row.ID, &rawKind, &row.Principal, &rawRole, &rawBinding,
 		&row.CreatedAt, &row.CurrentDeclVersion, &row.Class, &config, &idleMS,
-		&placement, &row.Placement.Host, &row.SourceDeclID); err != nil {
+		&placement, &row.Placement.Host, &row.SourceDeclID, &row.RenderSeq); err != nil {
 		return storespec.ActorControlRow{}, err
 	}
 	kind, ok := actor.ParseKind(rawKind)
@@ -103,7 +103,7 @@ func (r *actorRegistry) LookupDeclaredVersion(ctx context.Context, id actor.Acto
 	const q = `SELECT r.actor_id, r.actor_kind, r.principal, r.role,
 		COALESCE(r.actor_binding,''), r.created_at, d.version,
 		d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
-		d.source_decl_id
+		d.source_decl_id, d.render_seq
 		FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id
 		WHERE r.actor_id=? AND d.version=?`
 	row, err := scanDeclaredControl(r.db.QueryRowContext(ctx, q, string(id), version))
@@ -120,7 +120,7 @@ func (r *actorRegistry) LatestDeclaredVersion(ctx context.Context, id actor.Acto
 	const q = `SELECT r.actor_id, r.actor_kind, r.principal, r.role,
 		COALESCE(r.actor_binding,''), r.created_at, d.version,
 		d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
-		d.source_decl_id
+		d.source_decl_id, d.render_seq
 		FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id
 		WHERE r.actor_id=? ORDER BY d.version DESC LIMIT 1`
 	row, err := scanDeclaredControl(r.db.QueryRowContext(ctx, q, string(id)))
@@ -158,7 +158,7 @@ func validateAdmitBundle(in storespec.AdmitBundle) error {
 // AdmitDeclared atomically creates the durable identity row, decl@v1, and
 // registration mirror. Existing active (kind,principal) admissions converge
 // only when their decl row is complete; a half row fails loudly.
-func (r *actorRegistry) AdmitDeclared(ctx context.Context, in storespec.AdmitBundle) (storespec.AdmitResult, error) {
+func (r *actorRegistry) AdmitDeclared(ctx context.Context, in storespec.AdmitBundle) (storespec.DeclAdmissionResult, error) {
 	mintID := in.ID == ""
 	if mintID {
 		// Temporary non-empty value lets the shared closed-set validator run;
@@ -166,11 +166,11 @@ func (r *actorRegistry) AdmitDeclared(ctx context.Context, in storespec.AdmitBun
 		in.ID = actor.ActorID("pending")
 	}
 	if err := validateAdmitBundle(in); err != nil {
-		return storespec.AdmitResult{}, err
+		return storespec.DeclAdmissionResult{}, err
 	}
 	tx, err := r.db.BeginTx(ctx, nil)
 	if err != nil {
-		return storespec.AdmitResult{}, fmt.Errorf("store: declared admission begin: %w", err)
+		return storespec.DeclAdmissionResult{}, fmt.Errorf("store: declared admission begin: %w", err)
 	}
 	defer tx.Rollback()
 
@@ -181,15 +181,15 @@ func (r *actorRegistry) AdmitDeclared(ctx context.Context, in storespec.AdmitBun
 		if err == nil {
 			var count int
 			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_decl_versions WHERE actor_id=? AND version=1`, string(existing)).Scan(&count); err != nil {
-				return storespec.AdmitResult{}, err
+				return storespec.DeclAdmissionResult{}, err
 			}
 			if count != 1 {
-				return storespec.AdmitResult{}, fmt.Errorf("store: active actor %q missing decl@v1", existing)
+				return storespec.DeclAdmissionResult{}, fmt.Errorf("store: active actor %q missing decl@v1", existing)
 			}
-			return storespec.AdmitResult{ID: existing}, nil
+			return storespec.DeclAdmissionResult{ID: existing}, nil
 		}
 		if !errors.Is(err, sql.ErrNoRows) {
-			return storespec.AdmitResult{}, err
+			return storespec.DeclAdmissionResult{}, err
 		}
 	}
 	if mintID {
@@ -198,7 +198,7 @@ func (r *actorRegistry) AdmitDeclared(ctx context.Context, in storespec.AdmitBun
 			candidate := actor.ActorID(fmt.Sprintf("%s:%s:%d", in.Kind, in.Principal, in.CreatedAt+attempt))
 			var count int
 			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry WHERE actor_id=?`, string(candidate)).Scan(&count); err != nil {
-				return storespec.AdmitResult{}, err
+				return storespec.DeclAdmissionResult{}, err
 			}
 			if count == 0 {
 				in.ID = candidate
@@ -206,54 +206,54 @@ func (r *actorRegistry) AdmitDeclared(ctx context.Context, in storespec.AdmitBun
 			}
 		}
 		if in.ID == "" {
-			return storespec.AdmitResult{}, errors.New("store: unable to mint unique actor id")
+			return storespec.DeclAdmissionResult{}, errors.New("store: unable to mint unique actor id")
 		}
 	}
 
 	var exists, active int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*), COALESCE(SUM(deregistered_at IS NULL),0) FROM actor_registry WHERE actor_id=?`, string(in.ID)).Scan(&exists, &active); err != nil {
-		return storespec.AdmitResult{}, err
+		return storespec.DeclAdmissionResult{}, err
 	}
 	if exists != 0 {
 		if active == 0 {
-			return storespec.AdmitResult{}, fmt.Errorf("store: actor id %q was already ended", in.ID)
+			return storespec.DeclAdmissionResult{}, fmt.Errorf("store: actor id %q was already ended", in.ID)
 		}
 		var count int
 		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_decl_versions WHERE actor_id=? AND version=1`, string(in.ID)).Scan(&count); err != nil {
-			return storespec.AdmitResult{}, err
+			return storespec.DeclAdmissionResult{}, err
 		}
 		if count != 1 {
-			return storespec.AdmitResult{}, fmt.Errorf("store: active actor %q missing decl@v1", in.ID)
+			return storespec.DeclAdmissionResult{}, fmt.Errorf("store: active actor %q missing decl@v1", in.ID)
 		}
-		return storespec.AdmitResult{ID: in.ID}, nil
+		return storespec.DeclAdmissionResult{ID: in.ID}, nil
 	}
 
 	if _, err := tx.ExecContext(ctx, `INSERT INTO actor_registry
 		(actor_id, actor_kind, principal, role, actor_binding, created_at, current_decl_version, deregistered_at)
 		VALUES (?,?,?,?,?,?,1,NULL)`, string(in.ID), string(in.Kind), in.Principal, string(in.Role),
 		nullableBinding(in.Binding), in.CreatedAt); err != nil {
-		return storespec.AdmitResult{}, fmt.Errorf("store: declared actor insert %q: %w", in.ID, err)
+		return storespec.DeclAdmissionResult{}, fmt.Errorf("store: declared actor insert %q: %w", in.ID, err)
 	}
 	var config any
 	if in.Config != nil {
 		config = string(in.Config)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO actor_decl_versions
-		(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,source_decl_id,created_at)
-		VALUES (?,1,?,?,?,?,?,?,?)`, string(in.ID), in.Class, config, string(in.Placement.Kind),
-		in.Placement.Host, in.TIdle.Milliseconds(), in.SourceDeclID, in.CreatedAt); err != nil {
-		return storespec.AdmitResult{}, fmt.Errorf("store: declared actor decl insert %q: %w", in.ID, err)
+		(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,source_decl_id,render_seq,created_at)
+		VALUES (?,1,?,?,?,?,?,?,?,?)`, string(in.ID), in.Class, config, string(in.Placement.Kind),
+		in.Placement.Host, in.TIdle.Milliseconds(), in.SourceDeclID, in.RenderSeq, in.CreatedAt); err != nil {
+		return storespec.DeclAdmissionResult{}, fmt.Errorf("store: declared actor decl insert %q: %w", in.ID, err)
 	}
 	if _, err := appendTx(ctx, tx, actorRegisteredEnvelope(r.channelID, in.ID, in.Kind, in.Binding, in.CreatedAt), false); err != nil {
-		return storespec.AdmitResult{}, fmt.Errorf("store: declared actor mirror %q: %w", in.ID, err)
+		return storespec.DeclAdmissionResult{}, fmt.Errorf("store: declared actor mirror %q: %w", in.ID, err)
 	}
 	if err := tx.Commit(); err != nil {
-		return storespec.AdmitResult{}, fmt.Errorf("store: declared admission commit: %w", err)
+		return storespec.DeclAdmissionResult{}, fmt.Errorf("store: declared admission commit: %w", err)
 	}
 	if r.onCommit != nil {
 		r.onCommit()
 	}
-	return storespec.AdmitResult{ID: in.ID, Created: true}, nil
+	return storespec.DeclAdmissionResult{ID: in.ID, Created: true}, nil
 }
 
 func (r *actorRegistry) ExistsEver(ctx context.Context, id actor.ActorID) (bool, error) {
@@ -285,11 +285,11 @@ func (r *actorRegistry) EditDeclared(ctx context.Context, in storespec.DeclEditB
 		config = string(in.Config)
 	}
 	if _, err := tx.ExecContext(ctx, `INSERT INTO actor_decl_versions
-		(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,source_decl_id,created_at)
-		VALUES (?,?,?,?,?,?,?,?,?)`, string(in.ActorID), version, in.Class, config, string(in.Placement.Kind), in.Placement.Host, in.TIdle.Milliseconds(), in.SourceDeclID, in.CreatedAt); err != nil {
+		(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,source_decl_id,render_seq,created_at)
+		VALUES (?,?,?,?,?,?,?,?,?,?)`, string(in.ActorID), version, in.Class, config, string(in.Placement.Kind), in.Placement.Host, in.TIdle.Milliseconds(), in.SourceDeclID, in.RenderSeq, in.CreatedAt); err != nil {
 		return storespec.ActorControlRow{}, err
 	}
-	row, err := scanDeclaredControl(tx.QueryRowContext(ctx, `SELECT r.actor_id,r.actor_kind,r.principal,r.role,COALESCE(r.actor_binding,''),r.created_at,d.version,d.class,d.config_json,d.t_idle_ms,d.placement,d.desired_host,d.source_decl_id FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id WHERE r.actor_id=? AND d.version=?`, string(in.ActorID), version))
+	row, err := scanDeclaredControl(tx.QueryRowContext(ctx, `SELECT r.actor_id,r.actor_kind,r.principal,r.role,COALESCE(r.actor_binding,''),r.created_at,d.version,d.class,d.config_json,d.t_idle_ms,d.placement,d.desired_host,d.source_decl_id,d.render_seq FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id WHERE r.actor_id=? AND d.version=?`, string(in.ActorID), version))
 	if err != nil {
 		return storespec.ActorControlRow{}, err
 	}

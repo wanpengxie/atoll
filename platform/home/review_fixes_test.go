@@ -26,7 +26,7 @@ import (
 // placement facts no public verb exposes.
 func openWhiteboxHome(t *testing.T) *Home {
 	t.Helper()
-	h, err := Open(Config{CompositionResolver: emptyCompositionResolver{}, DaemonAuthority: allowTestDaemonAuthority{},
+	h, err := Open(Config{CompositionResolver: emptyCompositionResolver{},
 		ChannelID: channelpkg.ID("test-review-fixes"),
 		DBPath:    filepath.Join(t.TempDir(), "home.sqlite"), Bootstrap: true,
 	})

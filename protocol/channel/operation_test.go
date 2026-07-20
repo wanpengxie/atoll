@@ -22,6 +22,27 @@ func TestCanonicalJSONAndDigest(t *testing.T) {
 	}
 }
 
+func TestCanonicalJSONRFC8785Vectors(t *testing.T) {
+	input := json.RawMessage(`{"numbers":[333333333.33333329,1E30,4.50,2e-3,0.000000000000000000000000001],"string":"€$\u000f\nA'B\"\\\\\"/"}`)
+	got, err := CanonicalJSON(input)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const want = `{"numbers":[333333333.3333333,1e+30,4.5,0.002,1e-27],"string":"€$\u000f\nA'B\"\\\\\"/"}`
+	if string(got) != want {
+		t.Fatalf("RFC 8785 vector:\n got %s\nwant %s", got, want)
+	}
+
+	// Property names sort as UTF-16 code units, and U+2028 is emitted literally.
+	got, err = CanonicalJSON(map[string]any{"\ue000": 1, "😀": "\u2028"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "{\"😀\":\"\u2028\",\"\":1}" {
+		t.Fatalf("UTF-16/string canonicalization=%q", got)
+	}
+}
+
 func TestRenderedSnapshotDigestExcludesSequence(t *testing.T) {
 	one, err := (RenderedSnapshot{Class: "agent", Config: json.RawMessage(`{"x":1}`), Placement: Placement{Kind: PlacementServer}, RenderSeq: 1}).Seal()
 	if err != nil {
@@ -46,6 +67,14 @@ func TestDerivedRefsAreDomainSeparatedAndChannelScoped(t *testing.T) {
 	}
 	if !strings.HasPrefix(a, "adm:rt:v1:") || !strings.HasPrefix(DerivedFanoutRef("base", "a"), "fo:v1:") || !strings.HasPrefix(DerivedFinalizeRef("op", "decl"), "ifin:v1:") {
 		t.Fatal("reference family/version prefix missing")
+	}
+}
+
+func TestOperationCorrelationDomainsCannotCollide(t *testing.T) {
+	ref := RefCorrelation("same-client-value")
+	msg := MessageCorrelation("same-client-value")
+	if ref == msg || !strings.HasPrefix(ref, "op:ref:v1:") || !strings.HasPrefix(msg, "op:msg:v1:") {
+		t.Fatalf("correlations are not domain separated: ref=%q msg=%q", ref, msg)
 	}
 }
 

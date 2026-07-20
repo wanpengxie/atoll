@@ -5,10 +5,9 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"net/http"
-	"sort"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,41 +15,7 @@ import (
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
-
-// kickDaemonConverge drives the substrate half of a daemon revocation to
-// convergence on ONE channel home: KickDaemon (close every link the home holds
-// for computeID) is a hint, so it is executed at least once and then retried a
-// bounded number of times until View.IsAttached reports the daemon gone. The
-// unconditional first write matters because links register before attach
-// publication: IsAttached is a convergence observation, never permission to
-// skip the revocation command. A still-attached daemon after the budget is
-// logged (not an error — the link teardown is best-effort). No-op if the home
-// is not open in this process.
-func (a *App) kickDaemonConverge(chID channel.ID, daemonID string) {
-	home := a.getHome(chID)
-	if home == nil {
-		return
-	}
-	attempts := 0
-	for attempts < 3 {
-		home.KickDaemon(daemonID)
-		attempts++
-		if !home.View().IsAttached(daemonID) {
-			break
-		}
-	}
-	if home.View().IsAttached(daemonID) {
-		a.logger.Warn("app: daemon kick did not converge", "channel", string(chID), "daemon", daemonID)
-		return
-	}
-	// Convergence succeeded — the common case, previously silent. Without this
-	// an explicit revocation ("who kicked which daemon off which channel and
-	// when") is unreconstructable from slog; only the rare non-convergence
-	// path had a trace.
-	a.logger.Info("app: daemon kick converged", "channel", string(chID), "daemon", daemonID, "attempts", attempts)
-}
 
 // ---------------------------------------------------------------------------
 // Daemon handlers
@@ -74,14 +39,9 @@ func (a *App) handleListDaemons(c *gin.Context) {
 		if err := rows.Scan(&id, &name, &createdAt); err != nil {
 			continue
 		}
-		chans := a.daemonAttachedChannels(c.Request.Context(), id)
 		result = append(result, gin.H{
 			"id": id, "name": name, "created_at": createdAt,
-			"attached_channels": chans,
-			// online = L1 link attachment: a live attach on ANY bound channel right
-			// now, read-time from the platform View (out-of-band, no truth-log
-			// write — UI polling must not pollute the log).
-			"online": a.daemonOnline(channel.ID(""), chans, id),
+			"online": a.daemonOnline(c.Request.Context(), "", id),
 		})
 	}
 	if result == nil {
@@ -93,7 +53,7 @@ func (a *App) handleListDaemons(c *gin.Context) {
 // daemonOnline reports whether daemon id has a live link attach right now. It is
 // online iff attached on any of its bound channels (or `only`, when non-empty).
 // Read-time from each channel-home's View — derived, never a stored column.
-func (a *App) daemonOnline(only channel.ID, boundChannels []string, daemonID string) bool {
+func (a *App) daemonOnline(ctx context.Context, only channel.ID, daemonID string) bool {
 	check := func(chID channel.ID) bool {
 		h := a.getHome(chID)
 		return h != nil && h.View().IsAttached(daemonID)
@@ -101,33 +61,13 @@ func (a *App) daemonOnline(only channel.ID, boundChannels []string, daemonID str
 	if only != "" {
 		return check(only)
 	}
-	for _, ch := range boundChannels {
-		if check(channel.ID(ch)) {
+	ids, _ := a.directoryChannelIDs(ctx)
+	for _, ch := range ids {
+		if check(ch) {
 			return true
 		}
 	}
 	return false
-}
-
-func (a *App) daemonAttachedChannels(ctx context.Context, daemonID string) []string {
-	rows, err := a.db.QueryContext(ctx,
-		`SELECT channel_id FROM daemon_channels WHERE daemon_id = ?`, daemonID,
-	)
-	if err != nil {
-		return []string{}
-	}
-	defer rows.Close()
-	var chans []string
-	for rows.Next() {
-		var chID string
-		if err := rows.Scan(&chID); err == nil {
-			chans = append(chans, chID)
-		}
-	}
-	if chans == nil {
-		chans = []string{}
-	}
-	return chans
 }
 
 func (a *App) handleCreateDaemon(c *gin.Context) {
@@ -163,16 +103,9 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 	})
 }
 
-// handleDeleteDaemon revokes a daemon (world-layer scope: the daemon key + its
-// cross-channel identity, HTTP-legitimate). Full teardown, in order: delete the
-// daemon_channels bindings (intent) INSIDE the tx with RETURNING channel_id — the
-// kick set is the rows actually deleted, not a separate pre-tx read (a concurrent
-// attach landing between a pre-read and the delete would else leave a residual port
-// this delete never sees) → clear desired_host on every composition row placed on
-// this daemon, keeping the pool row with placement UNCHANGED (a rehome is a separate
-// 指派, never a migration) → delete the daemons row (revocation persisted) → run the
-// KickDaemon convergence loop on each channel whose binding was just deleted so live
-// links fall silent.
+// handleDeleteDaemon commits the realm-side daemon revocation and its fanout
+// obligation atomically. Channel bindings and placed instances are channel-local
+// truth; the fanout worker subsequently converges each live directory channel.
 func (a *App) handleDeleteDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
 	release := a.daemonLocks.lock(daemonID)
@@ -196,65 +129,18 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 		return
 	}
 
-	targetSet := map[string]struct{}{}
-	homes := a.snapshotHomes(ctx)
-	for id, h := range homes {
-		actors, err := h.ActiveActors(ctx)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-			return
-		}
-		for _, row := range actors {
-			if row.Placement.Kind == storespec.PlacementDaemon && row.Placement.Host == daemonID {
-				targetSet[string(id)] = struct{}{}
-			}
-		}
-	}
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
-	defer func() { _ = tx.Rollback() }() // no-op after a successful Commit
-	rows, err := tx.QueryContext(ctx, `DELETE FROM daemon_channels WHERE daemon_id=? RETURNING channel_id`, daemonID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
-	for rows.Next() {
-		var ch string
-		if err := rows.Scan(&ch); err != nil {
-			_ = rows.Close()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-			return
-		}
-		targetSet[ch] = struct{}{}
-	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
-	if err := rows.Close(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
-	var targetIDs []string
-	for id := range targetSet {
-		targetIDs = append(targetIDs, id)
-	}
-	sort.Strings(targetIDs)
-	targets := make([]daemonFanoutTarget, 0, len(targetIDs))
-	for _, id := range targetIDs {
-		targets = append(targets, daemonFanoutTarget{ChannelID: id})
-	}
-	targetsJSON, _ := json.Marshal(targets)
+	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM daemons WHERE id = ? AND owner_id = ?`, daemonID, userID); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO daemon_revoke_jobs(daemon_id,op,targets_json,created_at) VALUES (?,?,?,?)`, daemonID, "delete", string(targetsJSON), time.Now().UnixMilli()); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO daemon_revoke_jobs(base_ref,daemon_id,initiator,created_at) VALUES (?,?,?,?)`, "fo:v1:"+uuid.NewString(), daemonID, userID, time.Now().UnixMilli()); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
@@ -262,23 +148,8 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
-	// The durable authority decision is complete. Do not hold the daemon
-	// authority lock while Kick seals and joins admitted actor handshakes: an
-	// already-admitted handshake may itself be waiting to revalidate under this
-	// lock. Releasing here lets it observe the deleted binding and fail before
-	// publication, while the voluntary link teardown remains quiet.
 	release()
 	locked = false
-
-	// Only now that the revocation is durable do we Kick the live links to silence.
-	// Info marks this as an explicit, deliberate revocation (the daemon's key
-	// itself was just deleted) — distinct from "home closing" (platform.home's
-	// own bulk teardown) as a source of the same links dying.
-	a.logger.Info("app: daemon delete kicking live links", "daemon", daemonID, "channels", targetIDs)
-	a.logDaemonObligations(ctx, daemonID, targetIDs)
-	for _, ch := range targetIDs {
-		a.kickDaemonConverge(channel.ID(ch), daemonID)
-	}
 	if a.fanout != nil {
 		a.fanout.notify()
 	}
@@ -290,12 +161,12 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 	if !ok {
 		return
 	}
-	rows, err := a.db.QueryContext(c.Request.Context(),
-		`SELECT d.id, d.name, d.created_at
-		 FROM daemons d
-		 JOIN daemon_channels dc ON d.id = dc.daemon_id
-		 WHERE dc.channel_id = ?`, chID,
-	)
+	bundle, available := a.host.Acquire(channel.ID(chID))
+	if !available {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
+		return
+	}
+	rows, err := a.db.QueryContext(c.Request.Context(), `SELECT id,name,created_at FROM daemons WHERE owner_id=? ORDER BY id`, middleware.UserID(c))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -309,10 +180,13 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 		if err := rows.Scan(&id, &name, &createdAt); err != nil {
 			continue
 		}
+		bound, err := bundle.View().IsBound(c.Request.Context(), id)
+		if err != nil || !bound {
+			continue
+		}
 		result = append(result, gin.H{
 			"id": id, "name": name, "created_at": createdAt,
-			// online = L1 link attachment on THIS channel, read-time from View.
-			"online": a.daemonOnline(channel.ID(chID), nil, id),
+			"online": a.daemonOnline(c.Request.Context(), channel.ID(chID), id),
 		})
 	}
 	if result == nil {
@@ -321,95 +195,59 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"daemons": result})
 }
 
-func (a *App) handleAttachDaemons(c *gin.Context) {
-	chID, ok := a.requireChannelMember(c)
+func (a *App) handleAttachDaemon(c *gin.Context) {
+	chID, ok := a.requireChannelAccess(c)
 	if !ok {
 		return
 	}
 	var req struct {
-		DaemonIDs []string `json:"daemon_ids"`
+		DaemonID string `json:"daemon_id"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || len(req.DaemonIDs) == 0 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "daemon_ids required"})
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.DaemonID) == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "daemon_id required"})
 		return
 	}
-
+	req.DaemonID = strings.TrimSpace(req.DaemonID)
 	userID := middleware.UserID(c)
-	for _, did := range req.DaemonIDs {
-		release := a.daemonLocks.lock(did)
-		var ownerID string
-		err := a.db.QueryRowContext(c.Request.Context(),
-			`SELECT owner_id FROM daemons WHERE id = ?`, did,
-		).Scan(&ownerID)
-		if err != nil || ownerID != userID {
-			release()
-			c.JSON(http.StatusForbidden, gin.H{"error": "daemon not found or not owned by you"})
-			return
-		}
-		_, _ = a.db.ExecContext(c.Request.Context(),
-			`INSERT OR IGNORE INTO daemon_channels (daemon_id, channel_id) VALUES (?,?)`,
-			did, chID,
-		)
-		release()
+	var ownerID string
+	err := a.db.QueryRowContext(c.Request.Context(), `SELECT owner_id FROM daemons WHERE id = ?`, req.DaemonID).Scan(&ownerID)
+	if err != nil || ownerID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "daemon not found or not owned by you"})
+		return
 	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	intent := struct {
+		DaemonID string `json:"daemon_id"`
+	}{req.DaemonID}
+	record, _, err := a.admission.submit(c.Request.Context(), admissionCommand{
+		ChannelID: channel.ID(chID), Op: "attach", RequestedBy: userID, IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
+		BuildRequest: func(ref string) any { return channel.DaemonRequest{Ref: ref, DaemonID: req.DaemonID} },
+	})
+	respondAdmissionRecord(c, record, err, http.StatusOK)
 }
 
-// handleDetachDaemon unbinds ONE daemon from ONE channel.收口 order: delete the
-// binding (intent) → run the KickDaemon convergence loop on this channel's home so
-// the live link drops (not left to natural link death) → clear desired_host on this
-// channel's rows placed on the daemon, keeping the pool row with placement
-// UNCHANGED (rehome = a later指派, never a migration here).
+// handleDetachDaemon records one exact channel operation. The membrane commits
+// binding removal and instance cleanup together, then kicks any live link as a
+// post-commit convergence hint.
 func (a *App) handleDetachDaemon(c *gin.Context) {
-	chID, ok := a.requireChannelMember(c)
+	chID, ok := a.requireChannelAccess(c)
 	if !ok {
 		return
 	}
 	daemonID := c.Param("id")
-	release := a.daemonLocks.lock(daemonID)
-	locked := true
-	defer func() {
-		if locked {
-			release()
-		}
-	}()
 	ctx := c.Request.Context()
-
-	targetsJSON, _ := json.Marshal([]daemonFanoutTarget{{ChannelID: chID}})
-	tx, err := a.db.BeginTx(ctx, nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "detach failed"})
+	var owner string
+	if err := a.db.QueryRowContext(ctx, `SELECT owner_id FROM daemons WHERE id=?`, daemonID).Scan(&owner); err != nil || owner != middleware.UserID(c) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "daemon not found or not owned by you"})
 		return
 	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM daemon_channels WHERE daemon_id = ? AND channel_id = ?`,
-		daemonID, chID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "detach failed"})
-		return
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO daemon_revoke_jobs(daemon_id,op,targets_json,created_at) VALUES (?,?,?,?)`, daemonID, "detach", string(targetsJSON), time.Now().UnixMilli()); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "detach failed"})
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "detach failed"})
-		return
-	}
-	// Binding deletion is now authoritative. Release before Kick for the same
-	// daemon-lock -> admitted-handshake join ordering used by full revocation.
-	release()
-	locked = false
-	// Info marks this as an explicit, deliberate revocation (a single-channel
-	// detach request) — same distinguishing purpose as handleDeleteDaemon's
-	// own kick-start marker.
-	a.logger.Info("app: daemon detach kicking live link", "channel", string(chID), "daemon", daemonID)
-	a.logDaemonObligations(ctx, daemonID, []string{chID})
-	a.kickDaemonConverge(channel.ID(chID), daemonID)
-	if a.fanout != nil {
-		a.fanout.notify()
-	}
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	intent := struct {
+		DaemonID string `json:"daemon_id"`
+	}{daemonID}
+	record, _, err := a.admission.submit(ctx, admissionCommand{
+		ChannelID: channel.ID(chID), Op: "detach", RequestedBy: owner, IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
+		BuildRequest: func(ref string) any { return channel.DaemonRequest{Ref: ref, DaemonID: daemonID} },
+	})
+	respondAdmissionRecord(c, record, err, http.StatusOK)
 }
 
 // logDaemonObligations observes each affected channel only after the revocation
@@ -463,58 +301,16 @@ func (a *App) authAndResolve(apiKey string, chID channel.ID) (string, error) {
 		return "", fmt.Errorf("invalid api key")
 	}
 
-	// Verify daemon-channel binding.
-	var count int
-	err = a.db.QueryRow(
-		`SELECT COUNT(*) FROM daemon_channels WHERE daemon_id = ? AND channel_id = ?`,
-		daemonID, string(chID),
-	).Scan(&count)
-	if err != nil || count == 0 {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return "", fmt.Errorf("channel unavailable")
+	}
+	bound, err := bundle.View().IsBound(context.Background(), daemonID)
+	if err != nil || !bound {
 		return "", fmt.Errorf("daemon not bound to channel")
 	}
 
 	return daemonID, nil
-}
-
-func (a *App) handleCreateAndAttachDaemon(c *gin.Context) {
-	chID, ok := a.requireChannelMember(c)
-	if !ok {
-		return
-	}
-	userID := middleware.UserID(c)
-	var req struct {
-		Name string `json:"name"`
-	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
-		return
-	}
-
-	daemonID := uuid.NewString()
-	release := a.daemonLocks.lock(daemonID)
-	defer release()
-	apiKey := uuid.NewString()
-	keyHash := hashAPIKey(apiKey)
-	now := time.Now().UnixMilli()
-
-	_, err := a.db.ExecContext(c.Request.Context(),
-		`INSERT INTO daemons (id, owner_id, name, api_key_hash, created_at) VALUES (?,?,?,?,?)`,
-		daemonID, userID, req.Name, keyHash, now,
-	)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "create daemon failed"})
-		return
-	}
-	_, _ = a.db.ExecContext(c.Request.Context(),
-		`INSERT OR IGNORE INTO daemon_channels (daemon_id, channel_id) VALUES (?,?)`,
-		daemonID, string(chID),
-	)
-
-	c.JSON(http.StatusCreated, gin.H{
-		"id":      daemonID,
-		"name":    req.Name,
-		"api_key": apiKey,
-	})
 }
 
 func hashAPIKey(key string) string {

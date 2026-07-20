@@ -42,6 +42,7 @@ const (
 type OperateRequest struct {
 	ChannelID channel.ID
 	Sender    actor.ActorID
+	Anchor    string
 	Payload   json.RawMessage
 }
 
@@ -62,10 +63,7 @@ func (e *OperateError) Error() string { return e.Code + ": " + e.Detail }
 // to pick the code, else mapped to internal_error). nil executor = the injection
 // point is unfilled; the gate does not synthesize (caller's closure reaps it).
 type OperateExecutor interface {
-	Introduce(ctx context.Context, req OperateRequest) (any, error)
-	Remove(ctx context.Context, req OperateRequest) (any, error)
-	Restart(ctx context.Context, req OperateRequest) (any, error)
-	SetDefaultAgent(ctx context.Context, req OperateRequest) (any, error)
+	Execute(ctx context.Context, operation string, req OperateRequest) (any, error)
 }
 
 // handleOperate is the gate: permission (NP-2=a — sender is an active member,
@@ -87,20 +85,8 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 		_, _ = sys.Fail(msg, "unauthorized_sender", "sender is not an active channel member")
 		return
 	}
-	req := OperateRequest{ChannelID: msg.ChannelID, Sender: msg.Sender.ID, Payload: msg.Payload}
-	var result any
-	switch msg.Type {
-	case TypeIntroduceActor:
-		result, err = s.operate.Introduce(msg.Ctx(), req)
-	case TypeRemoveActor:
-		result, err = s.operate.Remove(msg.Ctx(), req)
-	case TypeRestartActor:
-		result, err = s.operate.Restart(msg.Ctx(), req)
-	case TypeSetDefaultAgent:
-		result, err = s.operate.SetDefaultAgent(msg.Ctx(), req)
-	default:
-		return
-	}
+	req := OperateRequest{ChannelID: msg.ChannelID, Sender: msg.Sender.ID, Anchor: string(msg.ID), Payload: msg.Payload}
+	result, err := s.operate.Execute(msg.Ctx(), msg.Type, req)
 	if err != nil {
 		var oe *OperateError
 		if errors.As(err, &oe) {

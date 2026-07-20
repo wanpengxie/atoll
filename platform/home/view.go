@@ -11,6 +11,13 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
+func (h *Home) IsBound(ctx context.Context, daemonID string) (bool, error) {
+	if h.closed.Load() {
+		return false, ErrClosed
+	}
+	return h.cs.Bindings.IsBound(ctx, storespec.DaemonID(daemonID))
+}
+
 // ---------------------------------------------------------------------------
 // View -- the read-only observation capability
 // ---------------------------------------------------------------------------

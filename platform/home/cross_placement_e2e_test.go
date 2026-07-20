@@ -10,6 +10,7 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -20,8 +21,8 @@ func TestCrossPlacementForkBothDirectionsWithRealLifecycleArms(t *testing.T) {
 	resolver := &acceptanceResolver{}
 	h, err := Open(Config{
 		ChannelID: "cross-placement", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: resolver, DaemonAuthority: allowTestDaemonAuthority{},
-		ReconcileInterval: 5 * time.Millisecond, Bootstrap: true,
+		CompositionResolver: resolver,
+		ReconcileInterval:   5 * time.Millisecond, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +70,9 @@ func TestCrossPlacementForkBothDirectionsWithRealLifecycleArms(t *testing.T) {
 	// invoke its remote Lifecycle arm. The spawn frame crosses the actual wire,
 	// Home admits the run row, and the server reconcile builds its local body.
 	daemonPlacement, _ := storespec.NewDaemonPlacement("daemon-source")
+	if _, err := SystemOps(h).AttachDaemon(ctx, channelpkg.DaemonRequest{Ref: "cross-placement-bind", DaemonID: "daemon-source"}); err != nil {
+		t.Fatal(err)
+	}
 	daemonParent, err := h.Declare(ctx, DeclareRequest{
 		SourceDeclID: "decl:daemon-parent", Principal: "daemon-parent", Kind: actor.KindAgent,
 		Class: "cross.daemon-parent", Placement: daemonPlacement, CreatedAt: time.Now().UnixMilli(),

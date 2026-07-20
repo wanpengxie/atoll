@@ -34,12 +34,6 @@ func (gatewayTestCompositionResolver) BuildClass(channel.ID, actor.ActorID, stri
 	return platform.ActorFactory{}, false
 }
 
-type gatewayTestDaemonAuthority struct{}
-
-func (gatewayTestDaemonAuthority) LockAndValidate(context.Context, string, channel.ID) (func(), error) {
-	return func() {}, nil
-}
-
 // logCapture is a slog.Handler that records every emitted message (for telemetry
 // assertions — e.g. gateway.entitlement.paused/resumed, DoD-8).
 type logCapture struct {
@@ -247,7 +241,6 @@ func openHome(t *testing.T, chID channel.ID, principal string) (*home.Home, acto
 		Bootstrap:           true,
 		ReconcileInterval:   time.Hour,
 		CompositionResolver: gatewayTestCompositionResolver{},
-		DaemonAuthority:     gatewayTestDaemonAuthority{},
 	})
 	if err != nil {
 		t.Fatalf("home.Open(%s): %v", chID, err)
@@ -274,7 +267,6 @@ func openHomeWired(t *testing.T, chID channel.ID, principal string, g *Gateway) 
 		Bootstrap:           true,
 		ReconcileInterval:   time.Hour,
 		CompositionResolver: gatewayTestCompositionResolver{},
-		DaemonAuthority:     gatewayTestDaemonAuthority{},
 		OnMembershipChange:  g.Poke,
 	})
 	if err != nil {
@@ -302,7 +294,6 @@ func openDormantDeclaredHomeWired(t *testing.T, chID channel.ID, principal strin
 		Bootstrap:           true,
 		ReconcileInterval:   time.Hour,
 		CompositionResolver: gatewayTestCompositionResolver{},
-		DaemonAuthority:     gatewayTestDaemonAuthority{},
 		OnMembershipChange:  g.Poke,
 	})
 	if err != nil {

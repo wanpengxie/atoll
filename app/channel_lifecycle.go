@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -244,11 +245,18 @@ func (a *App) runProvisionJob(ctx context.Context, id int64) error {
 		}
 		return a.retryProvision(ctx, id, "open_failed", err)
 	}
-	h, ok := a.host.Borrow(channel.ID(job.ChannelID))
+	bundle, ok := a.host.Acquire(channel.ID(job.ChannelID))
 	if !ok {
 		return a.retryProvision(ctx, id, "open_failed", errors.New("opened channel unavailable"))
 	}
-	actorID, found, err := h.ResolvePrincipal(ctx, "human", job.Owner)
+	if err := a.finalizeProvision(ctx, job, spec, bundle); err != nil {
+		var integrity finalizeIntegrityError
+		if errors.As(err, &integrity) {
+			return a.deadProvision(ctx, id, "invalid_job", err)
+		}
+		return a.retryProvision(ctx, id, "open_failed", err)
+	}
+	actorID, found, err := bundle.View().ResolvePrincipal(ctx, actor.KindHuman, job.Owner)
 	if err != nil || !found {
 		return a.retryProvision(ctx, id, "open_failed", errors.New("owner projection unavailable"))
 	}
@@ -271,6 +279,120 @@ func (a *App) runProvisionJob(ctx context.Context, id int64) error {
 		a.membershipPoke(job.Owner)
 	}
 	return nil
+}
+
+type finalizeIntegrityError struct{ error }
+
+func (a *App) finalizeProvision(ctx context.Context, job provisionJob, spec channelhost.ProvisionSpec, bundle channelhost.Bundle) error {
+	for _, genesis := range spec.GenesisDeclarations {
+		action, payload, acked, found, err := a.loadFinalizeDelivery(ctx, job.OperationID, genesis.DeclID)
+		if err != nil {
+			return err
+		}
+		if !found {
+			action, payload, found, err = a.createFinalizeDelivery(ctx, job, genesis)
+			if err != nil {
+				return err
+			}
+		}
+		if !found || acked {
+			continue
+		}
+		if err := a.admission.deliverFinalize(ctx, bundle, action, payload); err != nil {
+			var operationErr *channel.OperationError
+			if errors.As(err, &operationErr) && !operationErr.Retryable {
+				_, writeErr := a.db.ExecContext(ctx, `UPDATE channel_finalize_deliveries SET acked_at=?,error_code=? WHERE operation_id=? AND decl_id=?`, time.Now().UnixMilli(), string(operationErr.Code), job.OperationID, genesis.DeclID)
+				return finalizeIntegrityError{errors.Join(err, writeErr)}
+			}
+			return err
+		}
+		if _, err := a.db.ExecContext(ctx, `UPDATE channel_finalize_deliveries SET acked_at=?,error_code=NULL WHERE operation_id=? AND decl_id=?`, time.Now().UnixMilli(), job.OperationID, genesis.DeclID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (a *App) loadFinalizeDelivery(ctx context.Context, operationID, declID string) (action string, payload json.RawMessage, acked bool, found bool, err error) {
+	var raw string
+	var ack sql.NullInt64
+	err = a.db.QueryRowContext(ctx, `SELECT action,payload_json,acked_at FROM channel_finalize_deliveries WHERE operation_id=? AND decl_id=?`, operationID, declID).Scan(&action, &raw, &ack)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil, false, false, nil
+	}
+	if err != nil {
+		return "", nil, false, false, err
+	}
+	return action, json.RawMessage(raw), ack.Valid, true, nil
+}
+
+func (a *App) createFinalizeDelivery(ctx context.Context, job provisionJob, genesis channelhost.GenesisDeclaration) (string, json.RawMessage, bool, error) {
+	facts, err := (compositionResolver{app: a}).ResolveDeclaration(ctx, channel.ID(job.ChannelID), genesis.DeclID)
+	action := "apply"
+	if errors.Is(err, channel.ErrDeclarationNotFound) {
+		if strings.HasPrefix(genesis.DeclID, "sys:") {
+			return "", nil, false, nil
+		}
+		action = "revoke"
+	} else if err != nil {
+		return "", nil, false, err
+	} else {
+		facts.Rendered.Placement = genesis.Rendered.Placement
+		facts.Rendered, err = facts.Rendered.Seal()
+		if err != nil {
+			return "", nil, false, err
+		}
+		if facts.Rendered.Digest == genesis.Rendered.Digest {
+			return "", nil, false, nil
+		}
+	}
+	tx, err := a.db.BeginTx(ctx, nil)
+	if err != nil {
+		return "", nil, false, err
+	}
+	defer tx.Rollback()
+	ref := channel.DerivedFinalizeRef(job.OperationID, genesis.DeclID)
+	var request any
+	var renderSeq any
+	if action == "revoke" {
+		request = channel.RevokeDeclRequest{Ref: ref, DeclID: genesis.DeclID}
+	} else {
+		// Realm declarations do not own channel placement. Finalize re-renders
+		// the value fields while retaining the placement frozen into genesis.
+		if _, err := tx.ExecContext(ctx, `INSERT INTO decl_render_state(channel_id,decl_id,render_seq) VALUES (?,?,?) ON CONFLICT(channel_id,decl_id) DO UPDATE SET render_seq=MAX(render_seq,excluded.render_seq)`, job.ChannelID, genesis.DeclID, genesis.Rendered.RenderSeq); err != nil {
+			return "", nil, false, err
+		}
+		var seq int64
+		if err := tx.QueryRowContext(ctx, `UPDATE decl_render_state SET render_seq=render_seq+1 WHERE channel_id=? AND decl_id=? RETURNING render_seq`, job.ChannelID, genesis.DeclID).Scan(&seq); err != nil {
+			return "", nil, false, err
+		}
+		facts.Rendered.RenderSeq = seq
+		facts.Rendered, err = facts.Rendered.Seal()
+		if err != nil {
+			return "", nil, false, err
+		}
+		renderSeq = seq
+		request = channel.ApplyDeclVersionRequest{Ref: ref, DeclID: genesis.DeclID, Rendered: facts.Rendered, Authority: channel.AuthorityRealm}
+	}
+	payload, err := json.Marshal(request)
+	if err != nil {
+		return "", nil, false, err
+	}
+	digest, err := channel.Digest(request)
+	if err != nil {
+		return "", nil, false, err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO channel_finalize_deliveries(operation_id,decl_id,action,ref,request_digest,payload_json,render_seq) VALUES (?,?,?,?,?,?,?)`, job.OperationID, genesis.DeclID, action, ref, digest, string(payload), renderSeq); err != nil {
+		return "", nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", nil, false, err
+	}
+	action, payload, _, found, err := a.loadFinalizeDelivery(ctx, job.OperationID, genesis.DeclID)
+	if err == nil && !found {
+		return "", nil, false, finalizeIntegrityError{fmt.Errorf("finalize ref collision for operation %s declaration %s", job.OperationID, genesis.DeclID)}
+	}
+	return action, payload, found, err
 }
 
 func (a *App) retryProvision(ctx context.Context, id int64, code string, cause error) error {

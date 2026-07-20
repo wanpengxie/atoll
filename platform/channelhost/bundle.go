@@ -2,7 +2,6 @@ package channelhost
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"time"
 
@@ -57,17 +56,19 @@ type View interface {
 	ListActors(context.Context) ([]storespec.Record, error)
 	Stat(actor.ActorID) (time.Time, bool)
 	IsAttached(string) bool
+	IsBound(context.Context, string) (bool, error)
 }
 
 type bundle struct {
 	home       *home.Home
+	sysOp      SysOp
 	generation uint64
 }
 
 func (b *bundle) Generation() uint64    { return b.generation }
 func (b *bundle) Gateway() GatewayHitch { return gatewayAdapter{b.home} }
 func (b *bundle) Daemon() DaemonLink    { return daemonAdapter{b.home} }
-func (b *bundle) SysOp() SysOp          { return unavailableSysOp{} }
+func (b *bundle) SysOp() SysOp          { return b.sysOp }
 func (b *bundle) View() View            { return viewAdapter{b.home} }
 
 type gatewayAdapter struct{ home *home.Home }
@@ -122,29 +123,6 @@ func (a viewAdapter) ListActors(ctx context.Context) ([]storespec.Record, error)
 }
 func (a viewAdapter) Stat(id actor.ActorID) (time.Time, bool) { return a.home.View().Stat(id) }
 func (a viewAdapter) IsAttached(id string) bool               { return a.home.View().IsAttached(id) }
-
-var errSysOpUnavailable = errors.New("channelhost: sysop not assembled")
-
-type unavailableSysOp struct{}
-
-func (unavailableSysOp) Admit(context.Context, channel.AdmitRequest) (channel.AdmitResult, error) {
-	return channel.AdmitResult{}, errSysOpUnavailable
-}
-func (unavailableSysOp) Introduce(context.Context, channel.IntroduceRequest) (channel.IntroduceResult, error) {
-	return channel.IntroduceResult{}, errSysOpUnavailable
-}
-func (unavailableSysOp) AttachDaemon(context.Context, channel.DaemonRequest) (channel.BindingResult, error) {
-	return channel.BindingResult{}, errSysOpUnavailable
-}
-func (unavailableSysOp) DetachDaemon(context.Context, channel.DaemonRequest) (channel.BindingResult, error) {
-	return channel.BindingResult{}, errSysOpUnavailable
-}
-func (unavailableSysOp) ApplyDeclVersion(context.Context, channel.ApplyDeclVersionRequest) (channel.ApplyDeclVersionResult, error) {
-	return channel.ApplyDeclVersionResult{}, errSysOpUnavailable
-}
-func (unavailableSysOp) RevokeDeclTargets(context.Context, channel.RevokeDeclRequest) (channel.RevokeResult, error) {
-	return channel.RevokeResult{}, errSysOpUnavailable
-}
-func (unavailableSysOp) RevokeDaemon(context.Context, channel.DaemonRequest) (channel.RevokeResult, error) {
-	return channel.RevokeResult{}, errSysOpUnavailable
+func (a viewAdapter) IsBound(ctx context.Context, id string) (bool, error) {
+	return a.home.IsBound(ctx, id)
 }

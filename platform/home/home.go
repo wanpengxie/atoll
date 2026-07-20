@@ -9,7 +9,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/channelkit"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
@@ -79,14 +78,8 @@ type Config struct {
 	// CompositionResolver supplies the world-declaration half for the app-owned
 	// assembly. Home then reads channel composition from its own channel store
 	// and derives both Desired and Builder from that authoritative source.
-	CompositionResolver CompositionResolver
-	PlanProvider        PlanProvider
-	DaemonAuthority     DaemonAuthority
-	// Operate is the channel-operate executor injected into the system actor's
-	// in-gate control plane (NP-1=c). nil → the four control types are inert (the
-	// injection point is unfilled) — the app assembly fills it (executor = intent
-	// write + Home-face call; the gate does permission + routing). White-list ⑤.
-	Operate OperateExecutor
+	CompositionResolver  CompositionResolver
+	IntroductionResolver IntroductionResolver
 	// Clock is the schedule engine's time source, forwarded to
 	// schedule.AssemblyDeps unchanged. nil → OpenScheduler's own default (the
 	// real wall clock). Pulled forward from period 8 (G16) because a fake
@@ -115,22 +108,6 @@ type Config struct {
 	OnMembershipChange func(principal string)
 }
 
-type PlanProvider interface {
-	Plan(context.Context, channelpkg.ID, string) ([]platform.PlanActor, error)
-}
-
-// DaemonAuthority is the app-owned directory lease used by link admission.
-// The returned release function relinquishes the per-daemon keyed lock.
-type DaemonAuthority interface {
-	LockAndValidate(context.Context, string, channelpkg.ID) (release func(), err error)
-}
-
-type daemonAuthorityAdapter struct{ inner DaemonAuthority }
-
-func (a daemonAuthorityAdapter) LockAndValidate(ctx context.Context, daemonID string, channelID channelpkg.ID) (func(), error) {
-	return a.inner.LockAndValidate(ctx, daemonID, channelID)
-}
-
 // Home is the assembled channel-home. Its public surface is the capability set in
 // the package doc — the bare Runtime/Deliverer/Membership/Registry never escape
 // it; assembly only hands out capabilities. The app layer owns HTTP/transport;
@@ -154,6 +131,7 @@ type Home struct {
 	presenceSwept atomic.Int64
 	logger        *slog.Logger
 	nowMs         func() int64
+	opEntry       *opEntry
 
 	// (No per-user caller index (期12): a subject's own requests are closed
 	// by the substrate expiry reaper — 义务归位 D3; the subject drives its

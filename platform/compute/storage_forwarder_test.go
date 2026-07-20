@@ -137,7 +137,7 @@ func dialForwarderRig(t *testing.T, shc link.StorageHostControl) *link.Dialer {
 		Declarations:       auth,
 		Authority:          auth,
 		StateHandles:       unusedStateHandles{},
-		DaemonAuthority:    auth,
+		CanAttach:          func(context.Context, string) error { return nil },
 		ActorLock:          func(actor.ActorID) func() { return func() {} },
 		PortIndex:          auth,
 	})

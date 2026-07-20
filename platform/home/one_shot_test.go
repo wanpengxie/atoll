@@ -88,8 +88,8 @@ func TestOneShotCompletionStateTerminalAndEndSurviveBothCrashCuts(t *testing.T) 
 	resolver := &oneShotResolver{stats: map[actor.ActorID]oneShotStat{}}
 	h, err := Open(Config{
 		ChannelID: "one-shot-cuts", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: resolver, DaemonAuthority: allowTestDaemonAuthority{},
-		ReconcileInterval: 5 * time.Millisecond, Bootstrap: true,
+		CompositionResolver: resolver,
+		ReconcileInterval:   5 * time.Millisecond, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -232,7 +232,7 @@ func newHomeRigWithPortIndex(t *testing.T, leasePing, leaseTTL time.Duration, de
 	return newHomeRigWithAuthorities(t, leasePing, leaseTTL, decorate, nil)
 }
 
-func newHomeRigWithAuthorities(t *testing.T, leasePing, leaseTTL time.Duration, decoratePort func(link.PortIndex) link.PortIndex, decorateDaemon func(link.DaemonAuthority) link.DaemonAuthority) *homeRig {
+func newHomeRigWithAuthorities(t *testing.T, leasePing, leaseTTL time.Duration, decoratePort func(link.PortIndex) link.PortIndex, decorateAttach func(func(context.Context, string) error) func(context.Context, string) error) *homeRig {
 	t.Helper()
 	rt, del := actorrt.New(actorrt.Config{Parent: context.Background()})
 	authorities := newTestAuthorities()
@@ -240,9 +240,9 @@ func newHomeRigWithAuthorities(t *testing.T, leasePing, leaseTTL time.Duration, 
 	if decoratePort != nil {
 		portIndex = decoratePort(portIndex)
 	}
-	var daemonAuthority link.DaemonAuthority = authorities
-	if decorateDaemon != nil {
-		daemonAuthority = decorateDaemon(daemonAuthority)
+	canAttach := func(context.Context, string) error { return nil }
+	if decorateAttach != nil {
+		canAttach = decorateAttach(canAttach)
 	}
 	r := &homeRig{
 		rt:      rt,
@@ -255,16 +255,16 @@ func newHomeRigWithAuthorities(t *testing.T, leasePing, leaseTTL time.Duration, 
 		r.mu.Unlock()
 	}))
 	r.acc = newTestAcceptor(t, link.Config{
-		Minter:          r.minter,
-		Runtime:         rt,
-		ChannelID:       testChannelID,
-		LeasePing:       leasePing,
-		LeaseTTL:        leaseTTL,
-		Declarations:    authorities,
-		Authority:       authorities,
-		DaemonAuthority: daemonAuthority,
-		ActorLock:       func(actor.ActorID) func() { return func() {} },
-		PortIndex:       portIndex,
+		Minter:       r.minter,
+		Runtime:      rt,
+		ChannelID:    testChannelID,
+		LeasePing:    leasePing,
+		LeaseTTL:     leaseTTL,
+		Declarations: authorities,
+		Authority:    authorities,
+		CanAttach:    canAttach,
+		ActorLock:    func(actor.ActorID) func() { return func() {} },
+		PortIndex:    portIndex,
 	})
 	r.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		r.acc.Serve(w, req, "daemon-1")
@@ -289,25 +289,19 @@ func (f watcherFunc) OnDown(ctx context.Context, id actor.ActorID, incarnation a
 	f(ctx, id, incarnation, cause)
 }
 
-type planProviderFunc func(context.Context, string) ([]platform.PlanActor, error)
-
-func (f planProviderFunc) Plan(ctx context.Context, id string) ([]platform.PlanActor, error) {
-	return f(ctx, id)
-}
-
 // --- tests ---
 
 func TestPlanPull_UsesAcceptedBoundIdentityAndCarriesVersion(t *testing.T) {
 	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
 	acc := newTestAcceptor(t, link.Config{
 		Minter: &stubMinter{}, Runtime: rt, ChannelID: testChannelID,
-		PlanProvider: planProviderFunc(func(_ context.Context, daemonID string) ([]platform.PlanActor, error) {
+		Plan: func(_ context.Context, daemonID string) ([]platform.PlanActor, error) {
 			if daemonID != "daemon-authoritative" {
 				t.Fatalf("provider daemon = %q", daemonID)
 			}
 			return []platform.PlanActor{{InstanceID: "tool:a", Class: "echo", Kind: actor.KindTool,
 				Binding: actor.BindingRuntimeInboundViaRelay, Version: 9}}, nil
-		}),
+		},
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
 		acc.Serve(w, req, "daemon-authoritative")
@@ -518,8 +512,9 @@ func TestKickDaemonBeforePortCommitIsQuiet(t *testing.T) {
 func testQuietCloseBeforePortCommit(t *testing.T, quietClose func(*homeRig) error) {
 	t.Helper()
 	entered, release := make(chan struct{}), make(chan struct{})
-	r := newHomeRigWithAuthorities(t, 5*time.Second, 30*time.Second, nil, func(authority link.DaemonAuthority) link.DaemonAuthority {
-		return &blockingSecondDaemonValidation{inner: authority, entered: entered, release: release}
+	r := newHomeRigWithAuthorities(t, 5*time.Second, 30*time.Second, nil, func(admit func(context.Context, string) error) func(context.Context, string) error {
+		block := &blockingSecondDaemonValidation{inner: admit, entered: entered, release: release}
+		return block.Validate
 	})
 
 	const toolID = actor.ActorID("tool:precommit-window")
@@ -568,8 +563,9 @@ func testQuietCloseBeforePortCommit(t *testing.T, quietClose func(*homeRig) erro
 
 func TestHomeCloseActorHandshakeTimeoutRemainsQuietAndCountsOnce(t *testing.T) {
 	entered, release := make(chan struct{}), make(chan struct{})
-	r := newHomeRigWithAuthorities(t, 5*time.Second, 30*time.Second, nil, func(authority link.DaemonAuthority) link.DaemonAuthority {
-		return &blockingSecondDaemonValidation{inner: authority, entered: entered, release: release}
+	r := newHomeRigWithAuthorities(t, 5*time.Second, 30*time.Second, nil, func(admit func(context.Context, string) error) func(context.Context, string) error {
+		block := &blockingSecondDaemonValidation{inner: admit, entered: entered, release: release}
+		return block.Validate
 	})
 	const toolID = actor.ActorID("tool:timeout-window")
 	d, err := link.Dial(context.Background(), r.wsURL(),

@@ -27,8 +27,9 @@ type ChannelStores struct {
 	DeclVersions   storespec.DeclVersionStore
 	Cascade        storespec.CascadeStore
 	Routing        storespec.ChannelRouting
-	RestartJournal storespec.RestartJournal
 	Genesis        storespec.GenesisStore
+	SysOps         storespec.SysOpAdmission
+	Bindings       storespec.DaemonBindingReader
 	FiredTimers    FiredTimerReader
 	authoritySlot  *actorAuthoritySlot
 	grantOverlay   *accessdoor.GrantOverlaySlot
@@ -199,8 +200,9 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		DeclVersions:   cs.DeclVersions,
 		Cascade:        cs.Cascade,
 		Routing:        cs.Routing,
-		RestartJournal: cs.RestartJournal,
 		Genesis:        cs.Genesis,
+		SysOps:         cs.SysOps,
+		Bindings:       cs.Bindings,
 		FiredTimers:    cs.Timers(),
 		authoritySlot:  authoritySlot,
 		grantOverlay:   grantOverlay,

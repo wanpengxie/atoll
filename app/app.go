@@ -6,7 +6,6 @@ package app
 import (
 	"context"
 	"database/sql"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -17,7 +16,6 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
-	"github.com/wanpengxie/atoll/lib/jsondepth"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -53,10 +51,10 @@ type App struct {
 	membershipPoke func(principal string)
 
 	daemonLocks  *keyedLockSet
-	declLocks    *keyedLockSet
 	channelLocks *keyedLockSet
 	fanout       *fanoutWorker
 	lifecycle    *lifecycleWorker
+	admission    *admissionService
 }
 
 type HostFactory func(channelhost.HomeDeps) (channelhost.LocalHost, error)
@@ -83,7 +81,7 @@ func New(cfg Config) (*App, error) {
 
 	a := &App{
 		db: cfg.DB, logger: logger, uiDist: cfg.UIDist,
-		daemonLocks: newKeyedLockSet(), declLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet(),
+		daemonLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet(),
 	}
 	factory := cfg.HostFactory
 	if factory == nil {
@@ -94,9 +92,9 @@ func New(cfg Config) (*App, error) {
 		}
 	}
 	host, err := factory(channelhost.HomeDeps{
-		CompositionResolver: compositionResolver{app: a},
-		PlanProvider:        appPlanProvider{app: a}, DaemonAuthority: appDaemonAuthority{app: a},
-		Operate: a.operateFace(), Logger: logger,
+		CompositionResolver:  compositionResolver{app: a},
+		IntroductionResolver: compositionResolver{app: a},
+		Logger:               logger,
 		OnMembershipChange: func(chID channel.ID, affected []string) {
 			for _, principal := range affected {
 				a.reconcilePrincipalChannel(context.Background(), chID, principal)
@@ -125,6 +123,8 @@ func New(cfg Config) (*App, error) {
 	}
 	a.fanout = newFanoutWorker(a)
 	a.fanout.start()
+	a.admission = newAdmissionService(a)
+	a.admission.start()
 	a.lifecycle = newLifecycleWorker(a)
 	a.lifecycle.start()
 
@@ -178,6 +178,9 @@ func (a *App) Close() error {
 	if a.lifecycle != nil {
 		a.lifecycle.close()
 	}
+	if a.admission != nil {
+		a.admission.close()
+	}
 	if a.fanout != nil {
 		a.fanout.close()
 	}
@@ -210,6 +213,9 @@ func (a *App) registerRoutes() {
 		api.POST("/channels", a.handleCreateChannel)
 		api.GET("/channels/:chID", a.handleGetChannel)
 		api.DELETE("/channels/:chID", a.handleDeleteChannel)
+		api.POST("/channels/:chID/join", a.handleJoinChannel)
+		api.POST("/channels/:chID/actors", a.handleIntroduceActor)
+		api.PUT("/channels/:chID/actors/:actorID/config", a.handleEditActorConfig)
 		api.GET("/channels/:chID/candidates", a.handleListCandidates)
 		api.GET("/operations/:ref", a.handleGetOperation)
 		// A user's actor-instance declarations (world layer, kind-neutral).
@@ -223,9 +229,8 @@ func (a *App) registerRoutes() {
 		api.DELETE("/daemons/:id", a.handleDeleteDaemon)
 
 		api.GET("/channels/:chID/daemons", a.handleListChannelDaemons)
-		api.POST("/channels/:chID/daemons", a.handleCreateAndAttachDaemon)
-		api.POST("/channels/:chID/daemons/attach", a.handleAttachDaemons)
-		api.DELETE("/channels/:chID/daemons/:id/attach", a.handleDetachDaemon)
+		api.POST("/channels/:chID/daemons", a.handleAttachDaemon)
+		api.DELETE("/channels/:chID/daemons/:id", a.handleDetachDaemon)
 	}
 
 	// Health check (no auth).
@@ -323,42 +328,3 @@ const (
 	// builds them with its LOCAL creds.
 	placementDaemon = "daemon"
 )
-
-// mergeConfig layers the per-channel config_json OVER the global actor_decls
-// config (one config, two layers). Shallow object merge — channel keys
-// win. Empty / non-object inputs degrade gracefully (a raw per-channel blob is
-// preserved as-is so a non-agent class still gets its config_json).
-func mergeConfig(global, perChannel string) json.RawMessage {
-	gl := strings.TrimSpace(global)
-	pc := strings.TrimSpace(perChannel)
-	g := map[string]any{}
-	c := map[string]any{}
-	// Bounded-depth pre-check on BOTH layers before the map[string]any Unmarshal:
-	// a poison config persists in world declarations/channel composition and is re-hit on
-	// EVERY startup (loadChannels → reconcile build → mergeConfig), so a deeply-
-	// nested blob would fatally overflow the stack every boot. An over-deep layer is
-	// treated as NOT an object (skips the merge); the raw bytes are never recursed
-	// into here — a two-poison case falls through to the verbatim raw return below,
-	// where the looper self-parses opaquely in its own subprocess.
-	gObj := gl != "" && jsondepth.Bounded([]byte(gl)) == nil && json.Unmarshal([]byte(gl), &g) == nil
-	cObj := pc != "" && jsondepth.Bounded([]byte(pc)) == nil && json.Unmarshal([]byte(pc), &c) == nil
-	// Two-layer shallow merge ONLY when both are JSON objects (channel keys win).
-	if gObj && cObj {
-		for k, v := range c {
-			g[k] = v
-		}
-		if out, err := json.Marshal(g); err == nil {
-			return out
-		}
-	}
-	// Otherwise the per-channel blob is the more-specific layer — preserve it
-	// verbatim (never silently drop a non-object per-channel config); fall back
-	// to the global blob.
-	if pc != "" {
-		return json.RawMessage(pc)
-	}
-	if gl != "" {
-		return json.RawMessage(gl)
-	}
-	return nil
-}

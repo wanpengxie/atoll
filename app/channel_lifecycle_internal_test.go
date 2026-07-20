@@ -51,8 +51,8 @@ func newLifecycleTestApp(t *testing.T, failDestroys int) (*App, *countedHost) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	a := &App{db: db, logger: testLogger(), daemonLocks: newKeyedLockSet(), declLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet()}
-	real, err := channelhost.New(filepath.Join(root, "channels"), channelhost.HomeDeps{CompositionResolver: compositionResolver{app: a}, PlanProvider: appPlanProvider{app: a}, DaemonAuthority: appDaemonAuthority{app: a}, Operate: a.operateFace(), Logger: a.logger})
+	a := &App{db: db, logger: testLogger(), daemonLocks: newKeyedLockSet(), channelLocks: newKeyedLockSet()}
+	real, err := channelhost.New(filepath.Join(root, "channels"), channelhost.HomeDeps{CompositionResolver: compositionResolver{app: a}, IntroductionResolver: compositionResolver{app: a}, Logger: a.logger})
 	if err != nil {
 		t.Fatal(err)
 	}

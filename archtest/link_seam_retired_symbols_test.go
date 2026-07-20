@@ -14,9 +14,9 @@ func TestLinkSeamRetiredSymbolsAbsent(t *testing.T) {
 		"func OpenDB(", "CompositionResolver != nil", "cfg.Desired", "cfg.Builder",
 		"submitControlThroughDoor", "controlRequestTimeout", "handleListActors",
 		"handleActorStatus", "handleChannelPresenceDrops", "handleCursor",
-		"handleListMessages", "handleIntroduceActor", "handleRestartDecl",
+		"handleListMessages", "handleRestartDecl",
 		"handleRemoveActor", "handleSetDefaultAgent", "type daemonAssignment struct",
-		`"/channels/:chID/actors"`, `"/actor-decls/:declID/restart"`,
+		`"/actor-decls/:declID/restart"`,
 	}
 	for _, root := range []string{"../app", "../cmd", "../platform", "../runtime"} {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
@@ -67,7 +67,6 @@ func TestLinkSeamRetiredSymbolGuardFixtures(t *testing.T) {
 		{"controlRequestTimeout", "app.controlRequestTimeout"},
 		{"handleListActors", "app.handleListActors(ctx)"},
 		{"type daemonAssignment struct", "type daemonAssignment struct{}"},
-		{`"/channels/:chID/actors"`, `router.GET("/channels/:chID/actors", handler)`},
 		{`"/actor-decls/:declID/restart"`, `router.POST("/actor-decls/:declID/restart", handler)`},
 	}
 	for _, tc := range retired {

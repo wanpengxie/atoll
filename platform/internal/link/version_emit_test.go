@@ -71,7 +71,7 @@ func TestDaemonEmitKeepsHandshakeBirthVersionAcrossDeclarationUpgrade(t *testing
 	minter := &versionGateMinter{current: 1}
 	acc := newTestAcceptor(t, link.Config{
 		Minter: minter, Runtime: rt, ChannelID: testChannelID,
-		Declarations: auth, Authority: auth, DaemonAuthority: auth, PortIndex: auth,
+		Declarations: auth, Authority: auth, CanAttach: func(context.Context, string) error { return nil }, PortIndex: auth,
 		ActorLock: func(actor.ActorID) func() { return func() {} },
 	})
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {

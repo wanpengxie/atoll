@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/lib/introspect"
+	"github.com/wanpengxie/atoll/platform"
 	platformhome "github.com/wanpengxie/atoll/platform/home"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -55,12 +56,12 @@ func (a *App) PresenceForTest(chID channel.ID, id actor.ActorID) (member, known,
 	return snapshot.Member, ok, ok && p.Online, nil
 }
 
-// OperateFaceForTest exposes the app's channel-operate executor so black-box
-// tests can drive the four control verbs directly (as the sysactor gate would
-// after authorising the sender), without the not-yet-built message senders
-// (S5b/HTTP adapters). Test-only.
-func (a *App) OperateFaceForTest() platformhome.OperateExecutor {
-	return a.operateFace()
+func (a *App) PlanForDaemonForTest(chID channel.ID, daemonID string) ([]platform.PlanActor, error) {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return nil, errTestChannelNotLoaded
+	}
+	return bundle.Daemon().PlanForDaemon(context.Background(), daemonID)
 }
 
 func (a *App) StageDeclarationEditForTest(chID channel.ID, sourceID string, config json.RawMessage) (actor.ActorID, int64, error) {
@@ -78,36 +79,6 @@ func (a *App) StageDeclarationEditForTest(chID channel.ID, sourceID string, conf
 		TIdle: row.TIdle, SourceDeclID: row.SourceDeclID, CreatedAt: time.Now().UnixMilli(),
 	})
 	return row.ID, edited.CurrentDeclVersion, err
-}
-
-// LockDaemonForTest / LockDeclForTest expose only the keyed-lock barriers needed
-// to prove composite acquisition order. They return the production lock's
-// idempotent release closure and exist only in the test build.
-func (a *App) LockDaemonForTest(id string) func() { return a.daemonLocks.lock(id) }
-func (a *App) LockDeclForTest(id string) func()   { return a.declLocks.lock(id) }
-
-// WaitDaemonLockRefsForTest waits until refs contenders (holder included) have
-// registered for id. keyedLockSet increments refs before blocking on the entry,
-// making this a deterministic barrier rather than a timeout-based lock-order
-// guess.
-func (a *App) WaitDaemonLockRefsForTest(id string, refs int, timeout time.Duration) bool {
-	deadline := time.Now().Add(timeout)
-	for {
-		a.daemonLocks.mu.Lock()
-		entry := a.daemonLocks.m[id]
-		got := 0
-		if entry != nil {
-			got = entry.refs
-		}
-		a.daemonLocks.mu.Unlock()
-		if got >= refs {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(time.Millisecond)
-	}
 }
 
 // Handler exposes the assembled gin engine as an http.Handler so black-box

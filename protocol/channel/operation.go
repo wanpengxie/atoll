@@ -11,9 +11,20 @@ import (
 	"math"
 	"strconv"
 	"strings"
+	"unicode/utf16"
+	"unicode/utf8"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
+
+var ErrDeclarationNotFound = errors.New("channel: declaration not found")
+
+type DeclarationFacts struct {
+	OwnerPrincipal string
+	Visibility     string
+	DefaultClass   string
+	Rendered       RenderedSnapshot
+}
 
 // PlacementKind is the wire-level placement discriminator carried by a rendered
 // declaration snapshot. DesiredHost is meaningful only for daemon placement.
@@ -138,7 +149,9 @@ func appendCanonical(out *bytes.Buffer, value any) error {
 			out.WriteString("false")
 		}
 	case string:
-		appendJSONString(out, v)
+		if err := appendJSONString(out, v); err != nil {
+			return err
+		}
 	case json.Number:
 		f, err := strconv.ParseFloat(string(v), 64)
 		if err != nil || math.IsInf(f, 0) || math.IsNaN(f) {
@@ -167,7 +180,9 @@ func appendCanonical(out *bytes.Buffer, value any) error {
 			if i > 0 {
 				out.WriteByte(',')
 			}
-			appendJSONString(out, key)
+			if err := appendJSONString(out, key); err != nil {
+				return err
+			}
 			out.WriteByte(':')
 			if err := appendCanonical(out, v[key]); err != nil {
 				return err
@@ -182,19 +197,35 @@ func appendCanonical(out *bytes.Buffer, value any) error {
 
 func slicesSort(values []string) {
 	for i := 1; i < len(values); i++ {
-		for j := i; j > 0 && values[j] < values[j-1]; j-- {
+		for j := i; j > 0 && jcsStringLess(values[j], values[j-1]); j-- {
 			values[j], values[j-1] = values[j-1], values[j]
 		}
 	}
 }
 
-func appendJSONString(out *bytes.Buffer, value string) {
+func jcsStringLess(a, b string) bool {
+	aa := utf16.Encode([]rune(a))
+	bb := utf16.Encode([]rune(b))
+	for i := 0; i < len(aa) && i < len(bb); i++ {
+		if aa[i] != bb[i] {
+			return aa[i] < bb[i]
+		}
+	}
+	return len(aa) < len(bb)
+}
+
+func appendJSONString(out *bytes.Buffer, value string) error {
+	if !utf8.ValidString(value) {
+		return ErrInvalidRequest
+	}
 	var encoded bytes.Buffer
 	enc := json.NewEncoder(&encoded)
 	enc.SetEscapeHTML(false)
 	_ = enc.Encode(value)
-	b := encoded.Bytes()
+	b := bytes.ReplaceAll(encoded.Bytes(), []byte(`\u2028`), []byte("\u2028"))
+	b = bytes.ReplaceAll(b, []byte(`\u2029`), []byte("\u2029"))
 	out.Write(b[:len(b)-1]) // trim Encoder's newline
+	return nil
 }
 
 func formatJCSNumber(value float64) string {
@@ -209,17 +240,16 @@ func formatJCSNumber(value float64) string {
 	}
 	if i := strings.IndexByte(s, 'e'); i >= 0 {
 		exp := s[i+1:]
-		if !strings.HasPrefix(exp, "-") && !strings.HasPrefix(exp, "+") {
-			exp = "+" + exp
+		sign := "+"
+		if strings.HasPrefix(exp, "-") {
+			sign = "-"
 		}
-		exp = strings.TrimPrefix(exp, "+0")
-		exp = strings.TrimPrefix(exp, "-0")
-		if strings.HasPrefix(s[i+1:], "-") {
-			exp = "-" + strings.TrimPrefix(exp, "+")
-		} else if !strings.HasPrefix(exp, "+") {
-			exp = "+" + exp
+		exp = strings.TrimPrefix(strings.TrimPrefix(exp, "+"), "-")
+		exp = strings.TrimLeft(exp, "0")
+		if exp == "" {
+			exp = "0"
 		}
-		s = s[:i] + "e" + exp
+		s = s[:i] + "e" + sign + exp
 	}
 	return s
 }
@@ -250,6 +280,16 @@ func DerivedRealmToolRef(channelID ID, requestID string) string {
 	payload = appendLengthPrefixed(payload, requestID)
 	sum := sha256.Sum256(payload)
 	return "adm:rt:v1:" + hex.EncodeToString(sum[:])
+}
+
+func RefCorrelation(ref string) string {
+	sum := sha256.Sum256([]byte(ref))
+	return "op:ref:v1:" + hex.EncodeToString(sum[:])
+}
+
+func MessageCorrelation(id string) string {
+	sum := sha256.Sum256([]byte(id))
+	return "op:msg:v1:" + hex.EncodeToString(sum[:])
 }
 
 type OperationErrorCode string

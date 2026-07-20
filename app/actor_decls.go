@@ -151,29 +151,52 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "bad request"})
 		return
 	}
+	now := time.Now().UnixMilli()
+	tx, err := a.db.BeginTx(c.Request.Context(), nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	defer tx.Rollback()
 	var count int
-	if err := a.db.QueryRowContext(c.Request.Context(),
-		`SELECT COUNT(*) FROM actor_decls WHERE id = ? AND owner = ? AND deleted_at IS NULL`,
-		declID, userID).Scan(&count); err != nil || count == 0 {
+	if err := tx.QueryRowContext(c.Request.Context(), `SELECT COUNT(*) FROM actor_decls WHERE id=? AND owner=? AND deleted_at IS NULL`, declID, userID).Scan(&count); err != nil || count == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
 		return
 	}
-	now := time.Now().UnixMilli()
 	if req.Name != nil {
-		_, _ = a.db.ExecContext(c.Request.Context(),
+		if _, err := tx.ExecContext(c.Request.Context(),
 			`UPDATE actor_decls SET name = ?, updated_at = ? WHERE id = ? AND owner = ?`,
-			strings.TrimSpace(*req.Name), now, declID, userID)
+			strings.TrimSpace(*req.Name), now, declID, userID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
 	}
+	queued := false
 	if len(req.Config) > 0 {
 		if !isJSONObject(req.Config) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "config must be a JSON object"})
 			return
 		}
-		_, _ = a.db.ExecContext(c.Request.Context(),
+		if _, err := tx.ExecContext(c.Request.Context(),
 			`UPDATE actor_decls SET config_json = ?, updated_at = ? WHERE id = ? AND owner = ?`,
-			string(req.Config), now, declID, userID)
+			string(req.Config), now, declID, userID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		if _, err := tx.ExecContext(c.Request.Context(), `INSERT INTO decl_fanout_jobs(base_ref,decl_id,op,initiator,created_at) VALUES (?,?,?,?,?)`, "fo:v1:"+uuid.NewString(), declID, "restart", userID, now); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
+		queued = true
 	}
-	c.JSON(http.StatusOK, gin.H{"updated": declID, "note": "takes effect on restart"})
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	if queued && a.fanout != nil {
+		a.fanout.notify()
+	}
+	c.JSON(http.StatusOK, gin.H{"updated": declID, "queued": queued})
 }
 
 // handleDeleteDecl is the WORLD-LAYER half of a declared instance's death (C6): a
@@ -189,26 +212,6 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 	userID := middleware.UserID(c)
 	declID := c.Param("declID")
 	ctx := c.Request.Context()
-	release := a.declLocks.lock(declID)
-	defer release()
-
-	homes := a.snapshotHomes(ctx)
-	var targets []declFanoutTarget
-	for id, h := range homes {
-		rows, err := h.DeclaredBySource(ctx, declID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "channel composition unavailable"})
-			return
-		}
-		for _, row := range rows {
-			targets = append(targets, declFanoutTarget{ChannelID: string(id), InstanceID: string(row.ID)})
-		}
-	}
-	targetsJSON, err := json.Marshal(targets)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-		return
-	}
 	now := time.Now().UnixMilli()
 	tx, err := a.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -227,7 +230,7 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
 		return
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO decl_fanout_jobs(decl_id,op,initiator,targets_json,created_at) VALUES (?,?,?,?,?)`, declID, "delete", userID, string(targetsJSON), now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO decl_fanout_jobs(base_ref,decl_id,op,initiator,created_at) VALUES (?,?,?,?,?)`, "fo:v1:"+uuid.NewString(), declID, "delete", userID, now); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
@@ -238,5 +241,5 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 	if a.fanout != nil {
 		a.fanout.notify()
 	}
-	c.JSON(http.StatusOK, gin.H{"deleted": declID, "queued": len(targets)})
+	c.JSON(http.StatusOK, gin.H{"deleted": declID, "queued": true})
 }

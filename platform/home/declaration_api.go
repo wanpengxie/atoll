@@ -21,6 +21,7 @@ type DeclareRequest struct {
 	TIdle        int64 // milliseconds; zero means no idle retirement
 	MakeDefault  bool
 	CreatedAt    int64
+	RenderSeq    int64
 }
 
 type DeclareResult struct {
@@ -47,7 +48,7 @@ func (h *Home) Declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 	admitted, err := h.cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
 		Kind: in.Kind, Principal: in.Principal, Binding: binding, Class: in.Class, Config: config,
 		Placement: in.Placement, TIdle: durationMillis(in.TIdle), SourceDeclID: in.SourceDeclID,
-		CreatedAt: in.CreatedAt,
+		CreatedAt: in.CreatedAt, RenderSeq: in.RenderSeq,
 	})
 	if err != nil {
 		return DeclareResult{}, err
@@ -71,6 +72,7 @@ func (h *Home) Declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 		edited, editErr := h.EditDeclaration(ctx, storespec.DeclEditBundle{
 			ActorID: row.ID, Class: row.Class, Config: config, Placement: row.Placement,
 			TIdle: row.TIdle, SourceDeclID: row.SourceDeclID, CreatedAt: in.CreatedAt,
+			RenderSeq: in.RenderSeq,
 		})
 		if editErr != nil {
 			return DeclareResult{}, editErr

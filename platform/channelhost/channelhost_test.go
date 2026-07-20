@@ -22,15 +22,9 @@ func (testResolver) BuildClass(channel.ID, actor.ActorID, string, json.RawMessag
 	return platform.ActorFactory{}, false
 }
 
-type testDaemonAuthority struct{}
-
-func (testDaemonAuthority) LockAndValidate(context.Context, string, channel.ID) (func(), error) {
-	return func() {}, nil
-}
-
 func newTestHost(t *testing.T) *ChannelHost {
 	t.Helper()
-	host, err := New(t.TempDir(), HomeDeps{CompositionResolver: testResolver{}, DaemonAuthority: testDaemonAuthority{}})
+	host, err := New(t.TempDir(), HomeDeps{CompositionResolver: testResolver{}})
 	if err != nil {
 		t.Fatal(err)
 	}

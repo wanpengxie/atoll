@@ -131,6 +131,54 @@ var appSchema = []schemaObject{
 		error_code TEXT,
 		PRIMARY KEY (operation_id, decl_id)
 	)`},
+	{"table", "channel_admission_operations", `CREATE TABLE channel_admission_operations (
+		operation_id TEXT PRIMARY KEY,
+		idempotency_key TEXT,
+		channel_id TEXT NOT NULL,
+		op TEXT NOT NULL CHECK(op IN ('join','introduce','attach','detach','edit')),
+		requested_by TEXT NOT NULL,
+		request_json TEXT NOT NULL,
+		request_digest TEXT NOT NULL,
+		status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','done','rejected','unresolved')),
+		result_json TEXT,
+		error_code TEXT,
+		attempt INTEGER NOT NULL DEFAULT 0,
+		next_attempt_at INTEGER NOT NULL DEFAULT 0,
+		created_at INTEGER NOT NULL,
+		done_at INTEGER
+	)`},
+	{"index", "ux_admission_idem", `CREATE UNIQUE INDEX ux_admission_idem
+		ON channel_admission_operations(requested_by,idempotency_key) WHERE idempotency_key IS NOT NULL`},
+	{"index", "ix_admission_pending", `CREATE INDEX ix_admission_pending
+		ON channel_admission_operations(status) WHERE status='pending'`},
+	{"table", "channel_decl_overlays", `CREATE TABLE channel_decl_overlays (
+		channel_id TEXT NOT NULL,
+		decl_id TEXT NOT NULL,
+		config_json TEXT,
+		pending_config_json TEXT,
+		pending_ref TEXT,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (channel_id, decl_id)
+	)`},
+	{"table", "decl_render_state", `CREATE TABLE decl_render_state (
+		channel_id TEXT NOT NULL,
+		decl_id TEXT NOT NULL,
+		render_seq INTEGER NOT NULL,
+		PRIMARY KEY (channel_id, decl_id)
+	)`},
+	{"table", "decl_fanout_deliveries", `CREATE TABLE decl_fanout_deliveries (
+		job_id INTEGER NOT NULL,
+		channel_id TEXT NOT NULL,
+		ref TEXT NOT NULL UNIQUE,
+		render_seq INTEGER NOT NULL,
+		digest TEXT NOT NULL,
+		payload_json TEXT NOT NULL,
+		acked_at INTEGER,
+		error_code TEXT,
+		PRIMARY KEY (job_id, channel_id)
+	)`},
+	{"index", "ix_decl_fanout_deliveries_pending", `CREATE INDEX ix_decl_fanout_deliveries_pending
+		ON decl_fanout_deliveries(job_id,channel_id) WHERE acked_at IS NULL`},
 	{"table", "daemons", `CREATE TABLE daemons (
 		id TEXT PRIMARY KEY,
 		owner_id TEXT NOT NULL REFERENCES users(id),
@@ -138,17 +186,12 @@ var appSchema = []schemaObject{
 		api_key_hash TEXT NOT NULL,
 		created_at INTEGER NOT NULL
 	)`},
-	{"table", "daemon_channels", `CREATE TABLE daemon_channels (
-		daemon_id TEXT NOT NULL REFERENCES daemons(id) ON DELETE CASCADE,
-		channel_id TEXT NOT NULL REFERENCES channels(id) ON DELETE CASCADE,
-		PRIMARY KEY(daemon_id, channel_id)
-	)`},
 	{"table", "decl_fanout_jobs", `CREATE TABLE decl_fanout_jobs (
 		job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		base_ref TEXT NOT NULL UNIQUE,
 		decl_id TEXT NOT NULL,
 		op TEXT NOT NULL CHECK(op IN ('delete','restart')),
 		initiator TEXT NOT NULL,
-		targets_json TEXT NOT NULL,
 		attempt INTEGER NOT NULL DEFAULT 0,
 		last_error TEXT,
 		next_attempt_at INTEGER NOT NULL DEFAULT 0,
@@ -156,15 +199,13 @@ var appSchema = []schemaObject{
 		done_at INTEGER,
 		dead_at INTEGER
 	)`},
-	{"index", "ux_decl_jobs_dedup", `CREATE UNIQUE INDEX ux_decl_jobs_dedup
-		ON decl_fanout_jobs(decl_id, op) WHERE done_at IS NULL AND dead_at IS NULL AND op='delete'`},
-	{"index", "ix_decl_jobs_pending", `CREATE INDEX ix_decl_jobs_pending
+	{"index", "ix_fanout_pending", `CREATE INDEX ix_fanout_pending
 		ON decl_fanout_jobs(next_attempt_at, job_id) WHERE done_at IS NULL AND dead_at IS NULL`},
 	{"table", "daemon_revoke_jobs", `CREATE TABLE daemon_revoke_jobs (
 		job_id INTEGER PRIMARY KEY AUTOINCREMENT,
+		base_ref TEXT NOT NULL UNIQUE,
 		daemon_id TEXT NOT NULL,
-		op TEXT NOT NULL CHECK(op IN ('delete','detach')),
-		targets_json TEXT NOT NULL,
+		initiator TEXT NOT NULL,
 		attempt INTEGER NOT NULL DEFAULT 0,
 		last_error TEXT,
 		next_attempt_at INTEGER NOT NULL DEFAULT 0,
@@ -172,12 +213,12 @@ var appSchema = []schemaObject{
 		done_at INTEGER,
 		dead_at INTEGER
 	)`},
-	{"index", "ix_daemon_jobs_pending", `CREATE INDEX ix_daemon_jobs_pending
+	{"index", "ix_drevoke_pending", `CREATE INDEX ix_drevoke_pending
 		ON daemon_revoke_jobs(next_attempt_at, job_id) WHERE done_at IS NULL AND dead_at IS NULL`},
 	{"table", "actor_decls", `CREATE TABLE actor_decls (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,
-		owner TEXT NOT NULL REFERENCES users(id),
+		owner TEXT NOT NULL,
 		default_class TEXT NOT NULL,
 		config_json TEXT,
 		deleted_at INTEGER,

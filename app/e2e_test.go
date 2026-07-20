@@ -196,6 +196,10 @@ func setupTestApp(t *testing.T) *testEnv {
 // do performs an HTTP request against the in-process handler and returns the
 // recorder. It attaches cookies from prior responses so session tracking works.
 func (e *testEnv) do(t *testing.T, method, path string, body any, cookies []*http.Cookie) *httptest.ResponseRecorder {
+	return e.doHeaders(t, method, path, body, cookies, nil)
+}
+
+func (e *testEnv) doHeaders(t *testing.T, method, path string, body any, cookies []*http.Cookie, headers map[string]string) *httptest.ResponseRecorder {
 	t.Helper()
 
 	var bodyReader *bytes.Reader
@@ -211,6 +215,9 @@ func (e *testEnv) do(t *testing.T, method, path string, body any, cookies []*htt
 
 	req := httptest.NewRequest(method, path, bodyReader)
 	req.Header.Set("Content-Type", "application/json")
+	for key, value := range headers {
+		req.Header.Set(key, value)
+	}
 	for _, c := range cookies {
 		req.AddCookie(c)
 	}
@@ -218,6 +225,16 @@ func (e *testEnv) do(t *testing.T, method, path string, body any, cookies []*htt
 	w := httptest.NewRecorder()
 	e.handler.ServeHTTP(w, req)
 	return w
+}
+
+func createAndBindDaemon(t *testing.T, env *testEnv, chID, name string, cookies []*http.Cookie) map[string]any {
+	t.Helper()
+	created := env.do(t, http.MethodPost, "/api/daemons", map[string]any{"name": name}, cookies)
+	assertStatus(t, created, http.StatusCreated)
+	body := respJSON(t, created)
+	bound := env.do(t, http.MethodPost, "/api/channels/"+chID+"/daemons", map[string]any{"daemon_id": body["id"]}, cookies)
+	assertStatus(t, bound, http.StatusOK)
+	return body
 }
 
 // respJSON decodes recorder body into map[string]any.
@@ -482,12 +499,7 @@ func TestE2E_DaemonCreateAttachDetach(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 
-	// Create and attach daemon in one call.
-	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID), map[string]any{
-		"name": "test-daemon",
-	}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	daemonBody := respJSON(t, w)
+	daemonBody := createAndBindDaemon(t, env, s.chID, "test-daemon", s.cookies)
 	daemonID := daemonBody["id"].(string)
 	if daemonID == "" {
 		t.Fatal("daemon id empty")
@@ -498,7 +510,7 @@ func TestE2E_DaemonCreateAttachDetach(t *testing.T) {
 	}
 
 	// List channel daemons -- should contain the one we just created.
-	w = env.do(t, "GET", fmt.Sprintf("/api/channels/%s/daemons", s.chID), nil, s.cookies)
+	w := env.do(t, "GET", fmt.Sprintf("/api/channels/%s/daemons", s.chID), nil, s.cookies)
 	assertStatus(t, w, http.StatusOK)
 	listBody := respJSON(t, w)
 	daemons := listBody["daemons"].([]any)
@@ -515,7 +527,7 @@ func TestE2E_DaemonCreateAttachDetach(t *testing.T) {
 	}
 
 	// Detach daemon from channel.
-	w = env.do(t, "DELETE", fmt.Sprintf("/api/channels/%s/daemons/%s/attach", s.chID, daemonID), nil, s.cookies)
+	w = env.do(t, "DELETE", fmt.Sprintf("/api/channels/%s/daemons/%s", s.chID, daemonID), nil, s.cookies)
 	assertStatus(t, w, http.StatusOK)
 
 	// List channel daemons again -- should NOT contain the detached daemon.
@@ -534,16 +546,12 @@ func TestE2E_DaemonCreateAttachDetach(t *testing.T) {
 func TestDetachDaemonUnavailableChannelIsExplicit(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
-	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID), map[string]any{
-		"name": "count-failure-daemon",
-	}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	daemonID := respJSON(t, w)["id"].(string)
+	daemonID := createAndBindDaemon(t, env, s.chID, "count-failure-daemon", s.cookies)["id"].(string)
 	if err := env.app.CloseHomeForTest(channel.ID(s.chID)); err != nil {
 		t.Fatal(err)
 	}
-	w = env.do(t, "DELETE", fmt.Sprintf("/api/channels/%s/daemons/%s/attach", s.chID, daemonID), nil, s.cookies)
-	assertStatus(t, w, http.StatusServiceUnavailable)
+	w := env.do(t, "DELETE", fmt.Sprintf("/api/channels/%s/daemons/%s", s.chID, daemonID), nil, s.cookies)
+	assertStatus(t, w, http.StatusAccepted)
 }
 
 // ---------------------------------------------------------------------------
@@ -561,11 +569,7 @@ func TestE2E_DaemonAttachAndMessageFlow(t *testing.T) {
 	s := fullSetup(t, env)
 
 	// Create and attach a daemon.
-	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID), map[string]any{
-		"name": "echo-daemon",
-	}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	daemonBody := respJSON(t, w)
+	daemonBody := createAndBindDaemon(t, env, s.chID, "echo-daemon", s.cookies)
 	daemonID := daemonBody["id"].(string)
 	_ = daemonID
 

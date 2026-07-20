@@ -23,7 +23,6 @@ func lifecycleConfig(t *testing.T, name string) Config {
 	t.Helper()
 	return Config{
 		CompositionResolver: emptyCompositionResolver{},
-		DaemonAuthority:     allowTestDaemonAuthority{},
 		ChannelID:           channel.ID("lifecycle-" + name),
 		DBPath:              filepath.Join(t.TempDir(), name+".sqlite"),
 		Bootstrap:           true,
@@ -153,7 +152,6 @@ func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
 	handler.release = release
 	cfg := Config{
 		CompositionResolver: emptyCompositionResolver{},
-		DaemonAuthority:     allowTestDaemonAuthority{},
 		ChannelID:           channel.ID("lifecycle-close-window"),
 		DBPath:              db,
 		Clock:               clock,

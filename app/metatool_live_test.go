@@ -28,7 +28,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
@@ -173,10 +172,7 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Server, logger *slog.Logger) (actor.ActorID, actor.ActorID) {
 	t.Helper()
 
-	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID),
-		map[string]any{"name": "tool-daemon"}, s.cookies)
-	assertStatus(t, w, http.StatusCreated)
-	daemonBody := respJSON(t, w)
+	daemonBody := createAndBindDaemon(t, env, s.chID, "tool-daemon", s.cookies)
 	apiKey := daemonBody["api_key"].(string)
 	daemonID := daemonBody["id"].(string)
 	if apiKey == "" {
