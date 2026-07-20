@@ -206,7 +206,7 @@ func (w *fanoutWorker) apply(job fanoutJob) error {
 		for _, target := range targets {
 			h := w.app.getHome(channel.ID(target.ChannelID))
 			if h == nil {
-				if _, exists := w.app.channelWorkspaceID(w.ctx, target.ChannelID); exists {
+				if w.app.channelExists(w.ctx, target.ChannelID) {
 					return fmt.Errorf("channel %s home unavailable", target.ChannelID)
 				}
 				continue
@@ -257,7 +257,7 @@ func (w *fanoutWorker) apply(job fanoutJob) error {
 			}
 			h := w.app.getHome(channel.ID(target.ChannelID))
 			if h == nil {
-				if _, exists := w.app.channelWorkspaceID(w.ctx, target.ChannelID); exists {
+				if w.app.channelExists(w.ctx, target.ChannelID) {
 					return fmt.Errorf("channel %s home unavailable", target.ChannelID)
 				}
 				continue

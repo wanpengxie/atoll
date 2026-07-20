@@ -123,9 +123,8 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 
 	// Create a channel and bind the daemon so there is a daemon_channels row the tx
 	// deletes FIRST — proving the whole tx rolls back, not just the later writes.
-	wsBody, cookies2 := createWorkspace(t, env, cookies, "WS-rev")
-	wsID := wsBody["id"].(string)
-	chBody := env.do(t, "POST", "/api/workspaces/"+wsID+"/channels", map[string]any{"name": "c"}, cookies2)
+	cookies2 := cookies
+	chBody := env.do(t, "POST", "/api/channels", map[string]any{"name": "c"}, cookies2)
 	assertStatus(t, chBody, http.StatusCreated)
 	chID := respJSON(t, chBody)["id"].(string)
 	w = env.do(t, "POST", "/api/channels/"+chID+"/daemons/attach",
@@ -191,9 +190,8 @@ func TestDeleteDaemon_HappyPath_RemovesBindings(t *testing.T) {
 	assertStatus(t, w, http.StatusCreated)
 	daemonID := respJSON(t, w)["id"].(string)
 
-	wsBody, cookies2 := createWorkspace(t, env, cookies, "WS-kick")
-	wsID := wsBody["id"].(string)
-	chBody := env.do(t, "POST", "/api/workspaces/"+wsID+"/channels", map[string]any{"name": "c"}, cookies2)
+	cookies2 := cookies
+	chBody := env.do(t, "POST", "/api/channels", map[string]any{"name": "c"}, cookies2)
 	assertStatus(t, chBody, http.StatusCreated)
 	chID := respJSON(t, chBody)["id"].(string)
 	w = env.do(t, "POST", "/api/channels/"+chID+"/daemons/attach",

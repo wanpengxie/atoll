@@ -116,9 +116,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 
 	user, cookies := register(t, env, "e2e@example.com", "secret123", "Owner")
 	userID := user["id"].(string)
-	wsBody, cookies := createWorkspace(t, env, cookies, "WS")
-	wsID := wsBody["id"].(string)
-	chBody, cookies := createChannel(t, env, cookies, wsID, "CH")
+	chBody, cookies := createChannel(t, env, cookies, "CH")
 	chID := chBody["id"].(string)
 
 	// claude agent.
@@ -288,8 +286,7 @@ func TestDetachReleasesDaemonAuthorityBeforeHandshakeJoin(t *testing.T) {
 
 	user, cookies := register(t, env, "detach-order@example.com", "secret123", "Owner")
 	userID := user["id"].(string)
-	workspace, cookies := createWorkspace(t, env, cookies, "WS")
-	channelRow, cookies := createChannel(t, env, cookies, workspace["id"].(string), "CH")
+	channelRow, cookies := createChannel(t, env, cookies, "CH")
 	channelID := channelRow["id"].(string)
 	declResp := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "blocked", "class": "claude"}, cookies)
 	assertStatus(t, declResp, http.StatusCreated)

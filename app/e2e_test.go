@@ -278,7 +278,6 @@ func assertStatus(t *testing.T, w *httptest.ResponseRecorder, want int) {
 type setupResult struct {
 	cookies []*http.Cookie
 	userID  string
-	wsID    string
 	chID    string
 	actorID actor.ActorID
 	boostID actor.ActorID
@@ -305,18 +304,9 @@ func login(t *testing.T, env *testEnv, email, password string) (map[string]any, 
 	return respJSON(t, w), extractCookies(w)
 }
 
-func createWorkspace(t *testing.T, env *testEnv, cookies []*http.Cookie, name string) (map[string]any, []*http.Cookie) {
+func createChannel(t *testing.T, env *testEnv, cookies []*http.Cookie, name string) (map[string]any, []*http.Cookie) {
 	t.Helper()
-	w := env.do(t, "POST", "/api/workspaces", map[string]any{
-		"name": name,
-	}, cookies)
-	assertStatus(t, w, http.StatusCreated)
-	return respJSON(t, w), mergeCookies(cookies, extractCookies(w))
-}
-
-func createChannel(t *testing.T, env *testEnv, cookies []*http.Cookie, wsID, name string) (map[string]any, []*http.Cookie) {
-	t.Helper()
-	w := env.do(t, "POST", fmt.Sprintf("/api/workspaces/%s/channels", wsID), map[string]any{
+	w := env.do(t, "POST", "/api/channels", map[string]any{
 		"name": name,
 	}, cookies)
 	assertStatus(t, w, http.StatusCreated)
@@ -332,7 +322,7 @@ func createChannel(t *testing.T, env *testEnv, cookies []*http.Cookie, wsID, nam
 	return body, mergeCookies(cookies, extractCookies(w))
 }
 
-// fullSetup does register + login + create workspace + create channel, returns
+// fullSetup does register + login + create channel, returning
 // all IDs and the cookie jar.
 func fullSetup(t *testing.T, env *testEnv) setupResult {
 	t.Helper()
@@ -344,10 +334,7 @@ func fullSetup(t *testing.T, env *testEnv) setupResult {
 	_, loginCookies := login(t, env, "test@example.com", "secret123")
 	cookies = mergeCookies(cookies, loginCookies)
 
-	wsBody, cookies := createWorkspace(t, env, cookies, "TestWS")
-	wsID := wsBody["id"].(string)
-
-	chBody, cookies := createChannel(t, env, cookies, wsID, "general")
+	chBody, cookies := createChannel(t, env, cookies, "general")
 	chID := chBody["id"].(string)
 	actorID, _ := env.app.ResolvePrincipalForTest(chID, actor.KindHuman, userID)
 	boostID, _ := env.app.ResolvePrincipalForTest(chID, actor.KindAgent, "boost")
@@ -355,7 +342,6 @@ func fullSetup(t *testing.T, env *testEnv) setupResult {
 	return setupResult{
 		cookies: cookies,
 		userID:  userID,
-		wsID:    wsID,
 		chID:    chID,
 		actorID: actorID,
 		boostID: boostID,
@@ -366,7 +352,7 @@ func fullSetup(t *testing.T, env *testEnv) setupResult {
 // Test1: Register -> Login -> Workspace -> Channel
 // ---------------------------------------------------------------------------
 
-func TestE2E_RegisterLoginWorkspaceChannel(t *testing.T) {
+func TestE2E_RegisterLoginRealmChannel(t *testing.T) {
 	env := setupTestApp(t)
 
 	// 1. Register
@@ -397,43 +383,19 @@ func TestE2E_RegisterLoginWorkspaceChannel(t *testing.T) {
 		t.Fatalf("me email mismatch: %v", meBody["email"])
 	}
 
-	// 4. Create workspace
-	wsBody, cookies := createWorkspace(t, env, cookies, "MyWorkspace")
-	wsID := wsBody["id"].(string)
-	if wsID == "" {
-		t.Fatal("workspace id empty")
-	}
-
-	// 5. List workspaces
-	w = env.do(t, "GET", "/api/workspaces", nil, cookies)
-	assertStatus(t, w, http.StatusOK)
-	wsListBody := respJSON(t, w)
-	wsList := wsListBody["workspaces"].([]any)
-	found := false
-	for _, ws := range wsList {
-		m := ws.(map[string]any)
-		if m["id"] == wsID {
-			found = true
-			break
-		}
-	}
-	if !found {
-		t.Fatalf("workspace %s not found in list: %v", wsID, wsList)
-	}
-
-	// 6. Create channel
-	chBody, cookies := createChannel(t, env, cookies, wsID, "general")
+	// 4. Create channel directly in the realm directory.
+	chBody, cookies := createChannel(t, env, cookies, "general")
 	chID := chBody["id"].(string)
 	if chID == "" {
 		t.Fatal("channel id empty")
 	}
 
-	// 7. List channels
-	w = env.do(t, "GET", fmt.Sprintf("/api/workspaces/%s/channels", wsID), nil, cookies)
+	// 5. List realm channels.
+	w = env.do(t, "GET", "/api/channels", nil, cookies)
 	assertStatus(t, w, http.StatusOK)
 	chListBody := respJSON(t, w)
 	chList := chListBody["channels"].([]any)
-	found = false
+	found := false
 	for _, ch := range chList {
 		m := ch.(map[string]any)
 		if m["id"] == chID {
@@ -569,7 +531,7 @@ func TestE2E_DaemonCreateAttachDetach(t *testing.T) {
 	}
 }
 
-func TestDetachDaemonCountFailureDoesNotChangeHTTPResult(t *testing.T) {
+func TestDetachDaemonUnavailableChannelIsExplicit(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 	w := env.do(t, "POST", fmt.Sprintf("/api/channels/%s/daemons", s.chID), map[string]any{
@@ -581,7 +543,7 @@ func TestDetachDaemonCountFailureDoesNotChangeHTTPResult(t *testing.T) {
 		t.Fatal(err)
 	}
 	w = env.do(t, "DELETE", fmt.Sprintf("/api/channels/%s/daemons/%s/attach", s.chID, daemonID), nil, s.cookies)
-	assertStatus(t, w, http.StatusOK)
+	assertStatus(t, w, http.StatusServiceUnavailable)
 }
 
 // ---------------------------------------------------------------------------

@@ -72,8 +72,7 @@ func TestFanoutTransientFailureWaitsForNextAttempt(t *testing.T) {
 	now := time.Now().UnixMilli()
 	for _, stmt := range []string{
 		`INSERT INTO users(id,email,password,created_at) VALUES ('u','u@example.test','x',1)`,
-		`INSERT INTO workspaces(id,owner_id,name,created_at) VALUES ('w','u','w',1)`,
-		`INSERT INTO channels(id,workspace_id,name,db_path,created_at) VALUES ('c','w','c','/missing/c.sqlite',1)`,
+		`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES ('c','c','group',1,NULL)`,
 		`INSERT INTO decl_fanout_jobs(decl_id,op,initiator,targets_json,created_at) VALUES ('retry','restart','u','[{"channel_id":"c","instance_id":"agent:x"}]',1)`,
 	} {
 		if _, err := a.db.Exec(stmt); err != nil {

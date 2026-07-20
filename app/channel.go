@@ -2,10 +2,11 @@ package app
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -19,27 +20,28 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// ---------------------------------------------------------------------------
-// Channel handlers
-// ---------------------------------------------------------------------------
+func (a *App) channelDBPath(chID channel.ID) string {
+	return filepath.Join(a.channelDBDir, string(chID)+".db")
+}
 
-// rollbackOpenedChannel removes every artifact owned by an opened-but-incomplete
-// channel. The Home handle is detached under a.mu and closed after the lock is gone.
-func (a *App) rollbackOpenedChannel(ctx context.Context, chID channel.ID, dbPath string) {
+// rollbackOpenedChannel is the pre-publication cleanup path. Published channel
+// destruction is replaced by ChannelHost tombstoning in S2; this helper is only
+// allowed to remove a never-published half-built database.
+func (a *App) rollbackOpenedChannel(ctx context.Context, chID channel.ID) {
 	if h := a.detachHome(chID); h != nil {
 		_ = h.Close()
 	}
-	_, _ = a.db.ExecContext(context.WithoutCancel(ctx), `DELETE FROM channels WHERE id = ?`, string(chID))
-	_ = os.Remove(dbPath)
+	_, _ = a.db.ExecContext(context.WithoutCancel(ctx), `DELETE FROM channels WHERE id=?`, string(chID))
+	path := a.channelDBPath(chID)
+	_ = os.Remove(path)
+	_ = os.Remove(path + "-wal")
+	_ = os.Remove(path + "-shm")
 }
 
-// seedOpenedChannel performs the required post-open genesis writes against the real
-// Home and owns rollback on failure. It has no injectable callback: tests exercise
-// failure by closing the Home, which is the same failure surface production handles.
-func (a *App) seedOpenedChannel(ctx context.Context, h *home.Home, chID channel.ID, dbPath, userID string, at int64) (actor.ActorID, actor.ActorID, error) {
+func (a *App) seedOpenedChannel(ctx context.Context, h *home.Home, chID channel.ID, _ string, userID string, at int64) (actor.ActorID, actor.ActorID, error) {
 	creatorID, err := h.AdmitChannelOwner(ctx, userID)
 	if err != nil {
-		a.rollbackOpenedChannel(ctx, chID, dbPath)
+		a.rollbackOpenedChannel(ctx, chID)
 		return "", "", err
 	}
 	boost, err := h.Declare(ctx, home.DeclareRequest{
@@ -48,144 +50,144 @@ func (a *App) seedOpenedChannel(ctx context.Context, h *home.Home, chID channel.
 		Kind: actor.KindAgent, CreatedAt: at,
 	})
 	if err != nil {
-		a.rollbackOpenedChannel(ctx, chID, dbPath)
+		a.rollbackOpenedChannel(ctx, chID)
 		return "", "", err
 	}
 	return creatorID, boost.Row.ID, nil
 }
 
 func (a *App) handleListChannels(c *gin.Context) {
-	wsID := c.Param("wsID")
-	userID := middleware.UserID(c)
-	if !a.isWorkspaceMember(c.Request.Context(), wsID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "not a workspace member"})
-		return
+	query := `SELECT id,name,type,created_at,parent_id FROM channels`
+	args := []any{}
+	if parent, ok := c.GetQuery("parent_id"); ok {
+		query += ` WHERE parent_id=?`
+		args = append(args, parent)
 	}
-	rows, err := a.db.QueryContext(c.Request.Context(),
-		`SELECT id, workspace_id, name, type, created_at FROM channels WHERE workspace_id = ?`, wsID,
-	)
+	query += ` ORDER BY created_at,id`
+	rows, err := a.db.QueryContext(c.Request.Context(), query, args...)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
 	defer rows.Close()
-
-	var result []gin.H
+	result := make([]gin.H, 0)
 	for rows.Next() {
-		var id, workspaceID, name, chType string
+		var id, name, channelType string
 		var createdAt int64
-		if err := rows.Scan(&id, &workspaceID, &name, &chType, &createdAt); err != nil {
-			continue
+		var parent sql.NullString
+		if err := rows.Scan(&id, &name, &channelType, &createdAt, &parent); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
 		}
-		result = append(result, gin.H{
-			"id": id, "workspace_id": workspaceID, "name": name,
-			"type": chType, "created_at": createdAt,
-		})
+		result = append(result, channelJSON(id, name, channelType, createdAt, parent))
 	}
-	if result == nil {
-		result = []gin.H{}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
 	}
 	c.JSON(http.StatusOK, gin.H{"channels": result})
 }
 
+func channelJSON(id, name, channelType string, createdAt int64, parent sql.NullString) gin.H {
+	row := gin.H{"id": id, "name": name, "type": channelType, "created_at": createdAt}
+	if parent.Valid {
+		row["parent_id"] = parent.String
+	} else {
+		row["parent_id"] = nil
+	}
+	return row
+}
+
 func (a *App) handleCreateChannel(c *gin.Context) {
-	wsID := c.Param("wsID")
 	userID := middleware.UserID(c)
-	if !a.isWorkspaceMember(c.Request.Context(), wsID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "not a workspace member"})
-		return
-	}
 	var req struct {
-		Name string `json:"name"`
-		Type string `json:"type"`
+		Name     string  `json:"name"`
+		Type     string  `json:"type"`
+		ParentID *string `json:"parent_id"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.Name == "" {
+	if err := c.ShouldBindJSON(&req); err != nil || strings.TrimSpace(req.Name) == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "name required"})
 		return
 	}
+	req.Name = strings.TrimSpace(req.Name)
 	if req.Type == "" {
 		req.Type = "group"
 	}
-	validTypes := map[string]bool{"group": true}
-	if !validTypes[req.Type] {
+	if req.Type != "group" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel type"})
 		return
 	}
+	if req.ParentID != nil && !a.channelExists(c.Request.Context(), *req.ParentID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "parent channel not found"})
+		return
+	}
+	var duplicate bool
+	if err := a.db.QueryRowContext(c.Request.Context(), `SELECT EXISTS(SELECT 1 FROM channels WHERE name=?)`, req.Name).Scan(&duplicate); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	if duplicate {
+		c.JSON(http.StatusConflict, gin.H{"error": "channel name already exists"})
+		return
+	}
 
-	chID := uuid.NewString()
-	dbPath := filepath.Join(a.channelDBDir, chID+".db")
+	chID := channel.ID(uuid.NewString())
 	now := time.Now().UnixMilli()
-
-	// Open the substrate first so both genesis principals can be admitted and
-	// yield their authoritative minted ids before app desired truth is written.
-	home, err := a.createHome(channel.ID(chID), dbPath)
+	h, err := a.createHome(chID, a.channelDBPath(chID))
 	if err != nil {
 		a.logger.Error("create channel: init home", "channel", chID, "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-
-	// The two seeding Admits are REQUIRED stages of the create transaction, not
-	// best-effort: a channel whose creator is not a member, or whose seeded boost
-	// intent row has no matching membership (filtered to a never-embodied dead row
-	// under desired=intent∩membership), is a half-built channel. On either failure,
-	// tear the whole thing down — close the home and roll back the channel row —
-	// and return 5xx, so the caller sees a clean failure it can retry, never a
-	// silent 201 over a broken channel.
-	rollback := func(stage string, err error) {
-		// 锁纪律 (连接模型勘误期 §3.2 P1-6): 摘把手 under a.mu, Close OUTSIDE it — a
-		// home.Close held under a.mu blocks every concurrent getHome / resolver read.
-		a.rollbackOpenedChannel(c.Request.Context(), channel.ID(chID), dbPath)
-		a.logger.Error("create channel: "+stage, "channel", chID, "err", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-	}
-
-	// Membrane law: the creator is the unique channel owner. Genesis uses the
-	// dedicated owner admission; ordinary membership remains role-neutral. No cell here (the human is
-	// embodied by the ring / subjectgate, never welded at this call site).
-	creatorID, boostID, mErr := a.seedOpenedChannel(c.Request.Context(), home, channel.ID(chID), dbPath, userID, now)
-	if mErr != nil {
-		a.logger.Error("create channel: genesis seed", "channel", chID, "err", mErr)
+	creatorID, boostID, err := a.seedOpenedChannel(c.Request.Context(), h, chID, a.channelDBPath(chID), userID, now)
+	if err != nil {
+		a.logger.Error("create channel: genesis", "channel", chID, "err", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 
-	// Write directory, desired composition, and default pointer once with the
-	// minted id. No placeholder/repair window exists.
 	tx, err := a.db.BeginTx(c.Request.Context(), nil)
 	if err != nil {
-		rollback("begin tx", err)
+		a.rollbackOpenedChannel(c.Request.Context(), chID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	_, err = tx.ExecContext(c.Request.Context(),
-		`INSERT INTO channels (id, workspace_id, name, type, db_path, created_at) VALUES (?,?,?,?,?,?)`,
-		chID, wsID, req.Name, req.Type, dbPath, now)
+	defer tx.Rollback()
+	var parent any
+	if req.ParentID != nil {
+		parent = *req.ParentID
+	}
+	_, err = tx.ExecContext(c.Request.Context(), `INSERT INTO channels(id,name,type,created_at,parent_id) VALUES (?,?,?,?,?)`,
+		string(chID), req.Name, req.Type, now, parent)
+	if err == nil {
+		_, err = tx.ExecContext(c.Request.Context(), `INSERT INTO principal_channels(principal,channel_id,actor_id,updated_at) VALUES (?,?,?,?)`,
+			userID, string(chID), string(creatorID), now)
+	}
 	if err != nil {
-		_ = tx.Rollback()
-		rollback("seed", err)
+		a.rollbackOpenedChannel(c.Request.Context(), chID)
+		if strings.Contains(strings.ToLower(err.Error()), "unique") {
+			c.JSON(http.StatusConflict, gin.H{"error": "channel name already exists"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		}
 		return
 	}
 	if err := tx.Commit(); err != nil {
-		rollback("commit", err)
+		a.rollbackOpenedChannel(c.Request.Context(), chID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	// 目录行提交后补一次 poke (连接模型勘误期 P1-4, 六轮终审): the two Admits above
-	// (creator + boost) each fired a membership-change poke SYNCHRONOUSLY, inside
-	// home.Admit, BEFORE this transaction committed — at that instant the resolver
-	// (EntitlementSnapshot enumerates the `channels` directory table) could not
-	// possibly see this channel yet, so a session poked at that moment re-resolves
-	// into the SAME stale answer it already had. Poke again now that the directory
-	// row is actually visible, so the creator's live session (if any) subscribes
-	// within ≤下一泵轮 instead of waiting the T_sweep 30s backstop.
 	if a.membershipPoke != nil {
 		a.membershipPoke(userID)
 	}
-
-	c.JSON(http.StatusCreated, gin.H{
-		"id": chID, "workspace_id": wsID, "name": req.Name,
-		"type": req.Type, "created_at": now, "default_agent": string(boostID),
-		"creator_actor_id": string(creatorID),
-	})
+	parentValue := sql.NullString{}
+	if req.ParentID != nil {
+		parentValue = sql.NullString{String: *req.ParentID, Valid: true}
+	}
+	result := channelJSON(string(chID), req.Name, req.Type, now, parentValue)
+	result["default_agent"] = string(boostID)
+	result["creator_actor_id"] = string(creatorID)
+	c.JSON(http.StatusCreated, result)
 }
 
 func (a *App) handleGetChannel(c *gin.Context) {
@@ -193,181 +195,112 @@ func (a *App) handleGetChannel(c *gin.Context) {
 	if !ok {
 		return
 	}
-	var id, workspaceID, name, chType string
+	var id, name, channelType string
 	var createdAt int64
-	err := a.db.QueryRowContext(c.Request.Context(),
-		`SELECT id, workspace_id, name, type, created_at FROM channels WHERE id = ?`, chID,
-	).Scan(&id, &workspaceID, &name, &chType, &createdAt)
-	if err != nil {
+	var parent sql.NullString
+	err := a.db.QueryRowContext(c.Request.Context(), `SELECT id,name,type,created_at,parent_id FROM channels WHERE id=?`, chID).
+		Scan(&id, &name, &channelType, &createdAt, &parent)
+	if errors.Is(err, sql.ErrNoRows) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 		return
 	}
-	defaultAgent := ""
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
+	}
+	result := channelJSON(id, name, channelType, createdAt, parent)
 	if h := a.getHome(channel.ID(chID)); h != nil {
-		if value, ok, derr := h.DefaultAgent(c.Request.Context()); derr == nil && ok {
-			defaultAgent = string(value)
+		if value, found, err := h.DefaultAgent(c.Request.Context()); err == nil && found {
+			result["default_agent"] = string(value)
 		}
 	}
-	c.JSON(http.StatusOK, gin.H{
-		"id": id, "workspace_id": workspaceID, "name": name,
-		"type": chType, "default_agent": defaultAgent, "created_at": createdAt,
-	})
+	c.JSON(http.StatusOK, result)
 }
 
-// handleDeleteChannel tears a channel down. The authority is WORLD-LAYER: a
-// workspace member (requireChannelAccess) may delete it, judged entirely from the
-// app-db directory — it NEVER consults channel-internal membership or requires a
-// live/complete home. This is deliberate: a半成品 channel (a crash between
-// createChannel's app-db commit and the creator's Admit left the app row + an empty
-// channel-db membership, so the channel has NO members at all) must stay deletable.
-// The home Close below is a no-op when the home is absent from the map, and the row/
-// file deletes proceed regardless of whether membership was ever admitted.
 func (a *App) handleDeleteChannel(c *gin.Context) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {
 		return
 	}
-
-	var dbPath string
-	err := a.db.QueryRowContext(c.Request.Context(),
-		`SELECT db_path FROM channels WHERE id = ?`, string(chID),
-	).Scan(&dbPath)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+	h := a.getHome(channel.ID(chID))
+	if h == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
+		return
+	}
+	owner, found, err := h.View().OwnerPrincipal(c.Request.Context())
+	if err != nil || !found {
+		// S1 bridge for a pre-publication crash image: the creator projection is
+		// the only row. S3 replaces this with the provision-job owner snapshot.
+		err = a.db.QueryRowContext(c.Request.Context(), `SELECT principal FROM principal_channels WHERE channel_id=? ORDER BY updated_at LIMIT 1`, chID).Scan(&owner)
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
+			return
+		}
+	}
+	caller := middleware.UserID(c)
+	if owner != caller {
+		a.logger.Warn("channel delete denied", "channel", chID, "requested_by", caller, "owner", owner)
+		c.JSON(http.StatusForbidden, gin.H{"error": "channel owner required"})
 		return
 	}
 
-	// Stabilize the affected per-daemon lock set, then acquire SQLite's writer
-	// reservation before the in-transaction recheck. An attach-daemon writer for
-	// a previously unseen daemon cannot slip a new binding between recheck and
-	// delete: its INSERT waits behind this transaction and then observes no channel.
-	ctx := c.Request.Context()
-	for {
-		rows, qerr := a.db.QueryContext(ctx, `SELECT daemon_id FROM daemon_channels WHERE channel_id=? ORDER BY daemon_id`, string(chID))
-		if qerr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-			return
-		}
-		var ids []string
-		for rows.Next() {
-			var id string
-			if err := rows.Scan(&id); err == nil {
-				ids = append(ids, id)
-			}
-		}
-		_ = rows.Close()
-		sort.Strings(ids)
-		var releases []func()
-		for _, id := range ids {
-			releases = append(releases, a.daemonLocks.lock(id))
-		}
-		releaseAll := func() {
-			for i := len(releases) - 1; i >= 0; i-- {
-				releases[i]()
-			}
-		}
-
-		tx, err := a.db.BeginTx(ctx, nil)
-		if err != nil {
-			releaseAll()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-			return
-		}
-		// Force the deferred SQLite transaction into its write phase before the
-		// lock-set recheck.
-		if _, err := tx.ExecContext(ctx, `UPDATE channels SET created_at=created_at WHERE id=?`, string(chID)); err != nil {
-			_ = tx.Rollback()
-			releaseAll()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-			return
-		}
-		checkRows, err := tx.QueryContext(ctx, `SELECT daemon_id FROM daemon_channels WHERE channel_id=? ORDER BY daemon_id`, string(chID))
-		if err != nil {
-			_ = tx.Rollback()
-			releaseAll()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-			return
-		}
-		var check []string
-		for checkRows.Next() {
-			var id string
-			if err := checkRows.Scan(&id); err == nil {
-				check = append(check, id)
-			}
-		}
-		_ = checkRows.Close()
-		sort.Strings(check)
-		if strings.Join(ids, "\x00") != strings.Join(check, "\x00") {
-			_ = tx.Rollback()
-			releaseAll()
-			continue
-		}
-		_, writeErr := tx.ExecContext(ctx, `DELETE FROM daemon_channels WHERE channel_id=?`, string(chID))
-		if writeErr == nil {
-			_, writeErr = tx.ExecContext(ctx, `DELETE FROM channels WHERE id=?`, string(chID))
-		}
-		if writeErr != nil || tx.Commit() != nil {
-			_ = tx.Rollback()
-			releaseAll()
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-			return
-		}
-		releaseAll()
-		break
+	rows, err := a.db.QueryContext(c.Request.Context(), `SELECT principal FROM principal_channels WHERE channel_id=?`, chID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
 	}
-
-	// Directory intent is gone; now detach and close the in-memory universe
-	// outside a.mu.
-	if h := a.detachHome(channel.ID(chID)); h != nil {
-		_ = h.Close()
+	var affected []string
+	for rows.Next() {
+		var principal string
+		if err := rows.Scan(&principal); err == nil {
+			affected = append(affected, principal)
+		}
 	}
-
-	// Remove the per-channel sqlite file.
-	_ = os.Remove(dbPath)
-
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	_ = rows.Close()
+	tx, err := a.db.BeginTx(c.Request.Context(), nil)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	if _, err = tx.ExecContext(c.Request.Context(), `DELETE FROM principal_channels WHERE channel_id=?`, chID); err == nil {
+		_, err = tx.ExecContext(c.Request.Context(), `DELETE FROM channels WHERE id=?`, chID)
+	}
+	if err != nil || tx.Commit() != nil {
+		_ = tx.Rollback()
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+		return
+	}
+	if detached := a.detachHome(channel.ID(chID)); detached != nil {
+		_ = detached.Close()
+	}
+	_ = os.Remove(a.channelDBPath(channel.ID(chID))) // replaced by tombstone in S2
+	for _, principal := range affected {
+		if a.membershipPoke != nil {
+			a.membershipPoke(principal)
+		}
+	}
+	c.JSON(http.StatusAccepted, gin.H{"ok": true})
 }
 
-// handleListWorkspaceMembers lists the WORKSPACE roster reachable through this
-// channel (workspace_members JOIN users) — a world-layer / subject-domain
-// projection (HTTP legitimate), NOT the channel's actor census. Named honestly:
-// "who is in the workspace", not "who is in the channel". Channel actor truth
-// is available only through the canonical in-gate subject protocol; the two
-// questions must not be conflated (A11).
-func (a *App) handleListWorkspaceMembers(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
-	if !ok {
+func (a *App) handleListCandidates(c *gin.Context) {
+	if _, ok := a.requireChannelAccess(c); !ok {
 		return
 	}
-	var wsID string
-	_ = a.db.QueryRowContext(c.Request.Context(),
-		`SELECT workspace_id FROM channels WHERE id = ?`, chID,
-	).Scan(&wsID)
-
-	rows, err := a.db.QueryContext(c.Request.Context(),
-		`SELECT wm.user_id, wm.role, u.email, u.display_name
-		 FROM workspace_members wm
-		 JOIN users u ON u.id = wm.user_id
-		 WHERE wm.workspace_id = ?`, wsID,
-	)
+	rows, err := a.db.QueryContext(c.Request.Context(), `SELECT id,email,display_name FROM users ORDER BY created_at,id`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
 	}
 	defer rows.Close()
-
-	var result []gin.H
+	result := make([]gin.H, 0)
 	for rows.Next() {
-		var userID, role, email, displayName string
-		if err := rows.Scan(&userID, &role, &email, &displayName); err != nil {
-			continue
+		var id, email string
+		var display sql.NullString
+		if err := rows.Scan(&id, &email, &display); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
 		}
-		result = append(result, gin.H{
-			"user_id": userID, "role": role, "email": email, "display_name": displayName,
-		})
+		result = append(result, gin.H{"user_id": id, "email": email, "display_name": display.String})
 	}
-	if result == nil {
-		result = []gin.H{}
-	}
-	c.JSON(http.StatusOK, gin.H{"members": result})
+	c.JSON(http.StatusOK, gin.H{"candidates": result})
 }

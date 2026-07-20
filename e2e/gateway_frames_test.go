@@ -49,12 +49,8 @@ func makeDirs(t *testing.T, root string, names ...string) map[string]string {
 //
 // The four composition controls (introduce / remove / restart / set_default_agent)
 // ride the same subjectgate submit-frame path and are exercised end-to-end by
-// TestDaemonBinaryCanonicalControl with the real daemon binary. 非成员 tail-only (a workspace
-// member who is not a channel member gets a read-only session whose business
-// frames are refused not_member) is NOT reachable through today's HTTP surface —
-// there is no endpoint to add a second workspace member, and a channel's creator is
-// auto-admitted as a member — so it is covered at the gateway Session unit layer,
-// not here (申报, S6 return).
+// TestDaemonBinaryCanonicalControl with the real daemon binary. Non-member reads
+// use the per-channel observer plane rather than a gateway session.
 func TestGatewayFrames(t *testing.T) {
 	binDir := requireE2EBin(t)
 	serverBin := filepath.Join(binDir, "atoll-server")
@@ -104,9 +100,7 @@ func TestGatewayFrames(t *testing.T) {
 		map[string]any{"email": "gw@example.com", "password": "secret123", "display_name": "GW"},
 		http.StatusCreated)
 	userID, _ := reg["id"].(string)
-	ws1 := api.must("POST", "/api/workspaces", map[string]any{"name": "gw-ws"}, http.StatusCreated)
-	wsID, _ := ws1["id"].(string)
-	ch := api.must("POST", "/api/workspaces/"+wsID+"/channels", map[string]any{"name": "home"}, http.StatusCreated)
+	ch := api.must("POST", "/api/channels", map[string]any{"name": "home"}, http.StatusCreated)
 	chID, _ := ch["id"].(string)
 
 	// Channel creation returns the creator's admitted subject identity. Channel

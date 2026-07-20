@@ -22,7 +22,7 @@ func TestActorDeclListProjectsCurrentAndLatestChannelVersions(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("introduce: %v", err)
 	}
-	secondBody, cookies := createChannel(t, env, s.cookies, s.wsID, "versioned-second")
+	secondBody, cookies := createChannel(t, env, s.cookies, "versioned-second")
 	s.cookies = cookies
 	secondChannel := secondBody["id"].(string)
 	secondSender, err := env.app.ResolvePrincipalForTest(secondChannel, "human", s.userID)

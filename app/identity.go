@@ -9,6 +9,8 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -25,33 +27,40 @@ const sessionDuration = 30 * 24 * time.Hour
 // time sink (34 tests × ~1.7s). Nothing outside export_test may write it.
 var bcryptCost = bcrypt.DefaultCost
 
-func (a *App) isWorkspaceMember(ctx context.Context, wsID, userID string) bool {
-	var count int
+func (a *App) channelExists(ctx context.Context, chID string) bool {
+	var exists bool
 	err := a.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM workspace_members WHERE workspace_id = ? AND user_id = ?`,
-		wsID, userID,
-	).Scan(&count)
-	return err == nil && count > 0
-}
-
-func (a *App) channelWorkspaceID(ctx context.Context, chID string) (string, bool) {
-	var wsID string
-	err := a.db.QueryRowContext(ctx,
-		`SELECT workspace_id FROM channels WHERE id = ?`, chID,
-	).Scan(&wsID)
-	return wsID, err == nil
+		`SELECT EXISTS(SELECT 1 FROM channels WHERE id = ?)`, chID,
+	).Scan(&exists)
+	return err == nil && exists
 }
 
 func (a *App) requireChannelAccess(c *gin.Context) (string, bool) {
 	chID := c.Param("chID")
-	userID := middleware.UserID(c)
-	wsID, ok := a.channelWorkspaceID(c.Request.Context(), chID)
-	if !ok {
+	if !a.channelExists(c.Request.Context(), chID) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 		return "", false
 	}
-	if !a.isWorkspaceMember(c.Request.Context(), wsID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "not a workspace member"})
+	return chID, true
+}
+
+func (a *App) requireChannelMember(c *gin.Context) (string, bool) {
+	chID, ok := a.requireChannelAccess(c)
+	if !ok {
+		return "", false
+	}
+	h := a.getHome(channel.ID(chID))
+	if h == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
+		return "", false
+	}
+	_, found, err := h.ResolvePrincipal(c.Request.Context(), actor.KindHuman, middleware.UserID(c))
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
+		return "", false
+	}
+	if !found {
+		c.JSON(http.StatusForbidden, gin.H{"error": "active channel membership required"})
 		return "", false
 	}
 	return chID, true

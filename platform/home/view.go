@@ -114,3 +114,18 @@ func (v View) ListActors(ctx context.Context) ([]storespec.Record, error) {
 	}
 	return out, nil
 }
+
+// OwnerPrincipal returns the unique active channel owner from the channel-local
+// authority. It is the owner-only realm delete policy's trusted read source.
+func (v View) OwnerPrincipal(ctx context.Context) (string, bool, error) {
+	rows, err := v.authority.ListActive(ctx)
+	if err != nil {
+		return "", false, err
+	}
+	for _, row := range rows {
+		if row.Role == storespec.RoleOwner {
+			return row.Principal, true, nil
+		}
+	}
+	return "", false, nil
+}

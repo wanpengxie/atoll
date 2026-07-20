@@ -228,16 +228,13 @@ func (c *wsClient) waitTail(pred func(env map[string]any) bool, timeout time.Dur
 
 func (c *wsClient) close() { _ = c.conn.Close() }
 
-// addSecondMember registers a fresh user, joins it to A's workspace, admits it to
-// the channel as a human member, and waits for its cell to embody — a second live
+// addSecondMember registers a fresh user, admits it to the channel as a human
+// member, and waits for its cell to embody — a second live
 // subject the cross-sender door assertions need.
 func addSecondMember(t *testing.T, env *testEnv, s setupResult, email string) ([]*http.Cookie, actor.ActorID) {
 	t.Helper()
 	regBody, cookies := register(t, env, email, "secret123", "Second")
 	uid := regBody["id"].(string)
-	if err := env.app.AddWorkspaceMemberForTest(s.wsID, uid); err != nil {
-		t.Fatalf("add workspace member: %v", err)
-	}
 	aid := actor.ActorID("user:" + uid)
 	aid, err := env.app.AdmitForTest(s.chID, aid, actor.KindHuman)
 	if err != nil {
@@ -309,18 +306,15 @@ func TestWS_MessageFrameEndToEnd(t *testing.T) {
 	}
 }
 
-// TestWS_NonMemberWriteRejected: a workspace member who is NOT a channel member may
-// tail but a submit frame is refused (膜律 看得见≠在里面).
+// TestWS_NonMemberWriteRejected: a realm principal who is not a channel member
+// cannot submit a frame (膜律 看得见≠在里面).
 func TestWS_NonMemberWriteRejected(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
-	regBody, cookies := register(t, env, "outsider@test.com", "secret123", "Outsider")
-	if err := env.app.AddWorkspaceMemberForTest(s.wsID, regBody["id"].(string)); err != nil {
-		t.Fatalf("add workspace member: %v", err)
-	}
+	_, cookies := register(t, env, "outsider@test.com", "secret123", "Outsider")
 
 	c := dialWS(t, srv, cookies, s.chID, 0)
 	defer c.close()
@@ -574,10 +568,7 @@ func TestWS_AfterFrameNonMember(t *testing.T) {
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
-	regBody, cookies2 := register(t, env, "visitor@example.com", "secret123", "Visitor")
-	if err := env.app.AddWorkspaceMemberForTest(s.wsID, regBody["id"].(string)); err != nil {
-		t.Fatalf("add workspace member: %v", err)
-	}
+	_, cookies2 := register(t, env, "visitor@example.com", "secret123", "Visitor")
 	c := dialWS(t, srv, cookies2, s.chID, 0)
 	defer c.close()
 

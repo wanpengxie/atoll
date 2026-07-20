@@ -67,22 +67,22 @@ func TestWS_OversizedFrameClosesConn(t *testing.T) {
 
 // TestHalfBuiltChannel_DeleteSucceeds pins #3 ①: a半成品 channel (app-db row + empty
 // channel-db membership, the createChannel crash window) must stay deletable. Delete
-// authority is WORLD-LAYER (workspace member), judged from the directory alone — it
-// must NOT depend on channel-internal membership or a complete home.
+// authority is realm-side owner policy and must remain recoverable when the
+// channel-local image is incomplete.
 func TestHalfBuiltChannel_DeleteSucceeds(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
-	chID, err := env.app.CreateHalfBuiltChannelForTest(s.wsID, "half-built")
+	chID, err := env.app.CreateHalfBuiltChannelForTest(s.userID, "half-built")
 	if err != nil {
 		t.Fatalf("CreateHalfBuiltChannelForTest: %v", err)
 	}
 
 	w := env.do(t, "DELETE", "/api/channels/"+chID, nil, s.cookies)
-	if w.Code != http.StatusOK {
-		t.Fatalf("delete half-built channel: want 200, got %d (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("delete half-built channel: want 202, got %d (%s)", w.Code, w.Body.String())
 	}
 	// Gone from the directory now.
 	if g := env.do(t, "GET", "/api/channels/"+chID, nil, s.cookies); g.Code != http.StatusNotFound {
@@ -91,17 +91,15 @@ func TestHalfBuiltChannel_DeleteSucceeds(t *testing.T) {
 }
 
 // TestHalfBuiltChannel_OpenClearError pins #3 ②: opening a半成品 channel must give a
-// clear, non-panic response. A workspace member who is NOT a channel member (the
-// creator whose Admit never landed, or any onlooker) may read directory metadata and
-// tail, but a ws WRITE frame is refused with an explicit not_member error — never a
-// panic on the empty-membership channel.
+// clear, non-panic response. A realm principal may read public directory metadata,
+// while a non-member write is refused without panicking on the empty image.
 func TestHalfBuiltChannel_OpenClearError(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
 
-	chID, err := env.app.CreateHalfBuiltChannelForTest(s.wsID, "half-built-open")
+	chID, err := env.app.CreateHalfBuiltChannelForTest(s.userID, "half-built-open")
 	if err != nil {
 		t.Fatalf("CreateHalfBuiltChannelForTest: %v", err)
 	}

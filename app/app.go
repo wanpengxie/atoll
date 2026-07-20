@@ -1,6 +1,6 @@
-// Package app is the product application layer: identity, workspace, channel
-// lifecycle, daemon management, and HTTP API. It sits above platform (which
-// owns per-channel truth) and below cmd (which wires concrete config).
+// Package app is the reference realm: principal identity, channel directory and
+// lifecycle, daemon registry, and HTTP API. Per-channel truth belongs to the
+// platform membrane.
 package app
 
 import (
@@ -189,15 +189,11 @@ func (a *App) registerRoutes() {
 	api := a.engine.Group("/api")
 	api.Use(middleware.Auth(a.db))
 	{
-		api.GET("/workspaces", a.handleListWorkspaces)
-		api.POST("/workspaces", a.handleCreateWorkspace)
-
-		api.GET("/workspaces/:wsID/channels", a.handleListChannels)
-		api.POST("/workspaces/:wsID/channels", a.handleCreateChannel)
-
+		api.GET("/channels", a.handleListChannels)
+		api.POST("/channels", a.handleCreateChannel)
 		api.GET("/channels/:chID", a.handleGetChannel)
 		api.DELETE("/channels/:chID", a.handleDeleteChannel)
-		api.GET("/channels/:chID/workspace-members", a.handleListWorkspaceMembers)
+		api.GET("/channels/:chID/candidates", a.handleListCandidates)
 		// A user's actor-instance declarations (world layer, kind-neutral).
 		api.GET("/actor-decls", a.handleListDecls)
 		api.POST("/actor-decls", a.handleCreateDecl)
@@ -284,7 +280,7 @@ func (a *App) homeOrError(c *gin.Context, chID channel.ID) *home.Home {
 	if home := a.getHome(chID); home != nil {
 		return home
 	}
-	if _, ok := a.channelWorkspaceID(c.Request.Context(), string(chID)); !ok {
+	if !a.channelExists(c.Request.Context(), string(chID)) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 		return nil
 	}
@@ -327,6 +323,7 @@ func (a *App) openHome(chID channel.ID, dbPath string, mustExist bool) (*home.Ho
 		// re-resolves that principal's channel set (subscriptions + presence). Channel is
 		// no longer part of the address — the resolver enumerates the whole set.
 		OnMembershipChange: func(principal string) {
+			a.reconcilePrincipalChannel(context.Background(), chID, principal)
 			if a.membershipPoke != nil {
 				a.membershipPoke(principal)
 			}

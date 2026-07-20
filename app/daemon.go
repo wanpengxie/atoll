@@ -328,7 +328,7 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 }
 
 func (a *App) handleAttachDaemons(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
+	chID, ok := a.requireChannelMember(c)
 	if !ok {
 		return
 	}
@@ -367,7 +367,7 @@ func (a *App) handleAttachDaemons(c *gin.Context) {
 // channel's rows placed on the daemon, keeping the pool row with placement
 // UNCHANGED (rehome = a later指派, never a migration here).
 func (a *App) handleDetachDaemon(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
+	chID, ok := a.requireChannelMember(c)
 	if !ok {
 		return
 	}
@@ -483,7 +483,7 @@ func (a *App) authAndResolve(apiKey string, chID channel.ID) (string, error) {
 }
 
 func (a *App) handleCreateAndAttachDaemon(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
+	chID, ok := a.requireChannelMember(c)
 	if !ok {
 		return
 	}

@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -228,29 +227,24 @@ func (a *App) KillCellForTest(chID channel.ID, id actor.ActorID) error {
 // directory entry over an EMPTY channel-db membership (only the intrinsic system
 // actor Open seeds). Returns the new channel id. Test-only — proves half-built
 // channels stay deletable and open with clear errors, never a panic. Test-only.
-func (a *App) CreateHalfBuiltChannelForTest(wsID, name string) (string, error) {
+func (a *App) CreateHalfBuiltChannelForTest(ownerPrincipal, name string) (string, error) {
 	chID := uuid.NewString()
-	dbPath := filepath.Join(a.channelDBDir, chID+".db")
+	dbPath := a.channelDBPath(channel.ID(chID))
 	now := time.Now().UnixMilli()
 	if _, err := a.db.ExecContext(context.Background(),
-		`INSERT INTO channels (id, workspace_id, name, type, db_path, created_at) VALUES (?,?,?,?,?,?)`,
-		chID, wsID, name, "group", dbPath, now); err != nil {
+		`INSERT INTO channels (id,name,type,created_at,parent_id) VALUES (?,?,?,?,NULL)`,
+		chID, name, "group", now); err != nil {
+		return "", err
+	}
+	if _, err := a.db.ExecContext(context.Background(),
+		`INSERT INTO principal_channels(principal,channel_id,actor_id,updated_at) VALUES (?,?,?,?)`,
+		ownerPrincipal, chID, "", now); err != nil {
 		return "", err
 	}
 	if _, err := a.createHome(channel.ID(chID), dbPath); err != nil {
 		return "", err
 	}
 	return chID, nil
-}
-
-// AddWorkspaceMemberForTest inserts userID into wsID's workspace roster so a
-// second registered user can pass the ws/REST channel-access ACL (which gates on
-// workspace membership). Test-only — the production join path is the invite flow.
-func (a *App) AddWorkspaceMemberForTest(wsID, userID string) error {
-	_, err := a.db.ExecContext(context.Background(),
-		`INSERT OR IGNORE INTO workspace_members (workspace_id, user_id, role) VALUES (?,?,?)`,
-		wsID, userID, "member")
-	return err
 }
 
 // StatForTest reads id's L1 embodiment (View.Stat) on chID's home — the axis

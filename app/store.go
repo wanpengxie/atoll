@@ -12,7 +12,7 @@ import (
 func openDB(path string, initialize bool) (*sql.DB, error) {
 	// modernc.org/sqlite reads pragmas via the _pragma= DSN form (applied per
 	// connection, so they hold across the database/sql pool). foreign_keys(1) is
-	// required for the ON DELETE CASCADE on daemon_channels and other app tables to
+	// required for the ON DELETE CASCADE on app projection tables to
 	// actually fire — SQLite leaves FK enforcement OFF by default.
 	dsn := (&url.URL{Scheme: "file", Path: path}).String()
 	if !initialize {
@@ -64,26 +64,22 @@ var appSchema = []schemaObject{
 		created_at INTEGER NOT NULL,
 		expires_at INTEGER NOT NULL
 	)`},
-	{"table", "workspaces", `CREATE TABLE workspaces (
-		id TEXT PRIMARY KEY,
-		owner_id TEXT NOT NULL REFERENCES users(id),
-		name TEXT NOT NULL,
-		created_at INTEGER NOT NULL
-	)`},
-	{"table", "workspace_members", `CREATE TABLE workspace_members (
-		workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-		user_id TEXT NOT NULL REFERENCES users(id),
-		role TEXT NOT NULL DEFAULT 'member',
-		PRIMARY KEY(workspace_id, user_id)
-	)`},
 	{"table", "channels", `CREATE TABLE channels (
 		id TEXT PRIMARY KEY,
-		workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-		name TEXT NOT NULL,
-		type TEXT NOT NULL DEFAULT 'group',
-		db_path TEXT NOT NULL,
-		created_at INTEGER NOT NULL
+		name TEXT NOT NULL UNIQUE,
+		type TEXT NOT NULL,
+		created_at INTEGER NOT NULL,
+		parent_id TEXT
 	)`},
+	{"table", "principal_channels", `CREATE TABLE principal_channels (
+		principal TEXT NOT NULL,
+		channel_id TEXT NOT NULL,
+		actor_id TEXT NOT NULL,
+		updated_at INTEGER NOT NULL,
+		PRIMARY KEY (principal, channel_id)
+	)`},
+	{"index", "ix_principal_channels_channel", `CREATE INDEX ix_principal_channels_channel
+		ON principal_channels(channel_id)`},
 	{"table", "daemons", `CREATE TABLE daemons (
 		id TEXT PRIMARY KEY,
 		owner_id TEXT NOT NULL REFERENCES users(id),

@@ -64,8 +64,6 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 	if userID == "" {
 		t.Fatal("register returned empty user id")
 	}
-	wsBody, cookies := createWorkspace(t, env, cookies, "poke-ws")
-	wsID, _ := wsBody["id"].(string)
 	_ = cookies
 
 	// Attach the creator's gateway session BEFORE the channel exists — its first
@@ -80,7 +78,7 @@ func TestCreateChannelPokeAfterDirectoryCommit(t *testing.T) {
 
 	// Create the channel over REAL HTTP (the actual write order under test: two Admit
 	// pokes pre-commit, then handleCreateChannel's post-commit poke).
-	w := env.do(t, "POST", "/api/workspaces/"+wsID+"/channels", map[string]any{"name": "fresh"}, cookies)
+	w := env.do(t, "POST", "/api/channels", map[string]any{"name": "fresh"}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	chBody := respJSON(t, w)
 	chID, _ := chBody["id"].(string)

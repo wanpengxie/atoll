@@ -51,9 +51,7 @@ func TestDaemonBinaryCanonicalControl(t *testing.T) {
 	api.must("POST", "/api/identity/register", map[string]any{
 		"email": "canonical@example.com", "password": "secret123", "display_name": "Canonical",
 	}, http.StatusCreated)
-	workspace := api.must("POST", "/api/workspaces", map[string]any{"name": "canonical-ws"}, http.StatusCreated)
-	workspaceID, _ := workspace["id"].(string)
-	channelRow := api.must("POST", "/api/workspaces/"+workspaceID+"/channels", map[string]any{"name": "home"}, http.StatusCreated)
+	channelRow := api.must("POST", "/api/channels", map[string]any{"name": "home"}, http.StatusCreated)
 	channelID, _ := channelRow["id"].(string)
 	daemonRow := api.must("POST", "/api/channels/"+channelID+"/daemons", map[string]any{"name": "canonical-box"}, http.StatusCreated)
 	daemonID, _ := daemonRow["id"].(string)

@@ -13,7 +13,7 @@ func TestDaemonBindingsCascadeOnDelete(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Seed a valid FK chain: user → workspace → channel/daemon → binding.
+	// Seed a valid FK chain: user + channel/daemon → binding.
 	mustExec := func(q string, args ...any) {
 		t.Helper()
 		if _, err := db.Exec(q, args...); err != nil {
@@ -21,9 +21,7 @@ func TestDaemonBindingsCascadeOnDelete(t *testing.T) {
 		}
 	}
 	mustExec(`INSERT INTO users (id, email, password, created_at) VALUES ('u1','a@b.c','x',0)`)
-	mustExec(`INSERT INTO workspaces (id, owner_id, name, created_at) VALUES ('w1','u1','ws',0)`)
-	mustExec(`INSERT INTO channels (id, workspace_id, name, type, db_path, created_at)
-		VALUES ('c1','w1','ch','group','/tmp/x.db',0)`)
+	mustExec(`INSERT INTO channels (id,name,type,created_at,parent_id) VALUES ('c1','ch','group',0,NULL)`)
 	mustExec(`INSERT INTO daemons (id,owner_id,name,api_key_hash,created_at) VALUES ('d1','u1','box','k',0)`)
 	mustExec(`INSERT INTO daemon_channels (daemon_id,channel_id) VALUES ('d1','c1')`)
 
