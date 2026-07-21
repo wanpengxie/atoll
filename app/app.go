@@ -212,6 +212,7 @@ func (a *App) registerRoutes() {
 		api.DELETE("/channels/:chID", a.handleDeleteChannel)
 		api.POST("/channels/:chID/join", a.handleJoinChannel)
 		api.POST("/channels/:chID/actors", a.handleIntroduceActor)
+		api.DELETE("/channels/:chID/actors/:actorID", a.handleRemoveChannelActor)
 		api.PUT("/channels/:chID/actors/:actorID/config", a.handleEditActorConfig)
 		api.GET("/channels/:chID/candidates", a.handleListCandidates)
 		api.GET("/operations/:ref", a.handleGetOperation)

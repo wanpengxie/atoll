@@ -8,16 +8,17 @@ import (
 	"testing"
 )
 
-// TestSysOpMethodSetIsClosedAtSevenValueOperations pins the two-family split
+// TestSysOpMethodSetIsClosedAtMigrationValueOperations pins the two-family split
 // on the realm-facing bundle: SysOp is the VALUE-OPERATION face and stays a
 // closed set of exactly the seven typed words — observations (reads) belong to
 // View and must never widen SysOp (the R5-P2 drift: a serialized read landed
 // on SysOp because it wanted the operation lock; locking is an implementation
 // privacy, not a family membership).
-func TestSysOpMethodSetIsClosedAtSevenValueOperations(t *testing.T) {
+func TestSysOpMethodSetIsClosedAtMigrationValueOperations(t *testing.T) {
 	want := map[string]bool{
 		"Admit":             true,
 		"Introduce":         true,
+		"Remove":            true,
 		"AttachDaemon":      true,
 		"DetachDaemon":      true,
 		"ApplyDeclVersion":  true,
@@ -48,7 +49,7 @@ func TestSysOpMethodSetIsClosedAtSevenValueOperations(t *testing.T) {
 		}
 		for name := range got {
 			if !want[name] {
-				t.Errorf("SysOp gained method %q outside the frozen seven-word value set", name)
+				t.Errorf("SysOp gained method %q outside the migration value set", name)
 			}
 		}
 		for name := range want {

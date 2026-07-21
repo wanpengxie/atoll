@@ -351,13 +351,23 @@ type AdmitResult struct {
 }
 
 type IntroduceRequest struct {
-	Ref                string            `json:"ref"`
-	DeclID             string            `json:"decl_id"`
-	InitiatorPrincipal string            `json:"initiator_principal"`
-	Rendered           *RenderedSnapshot `json:"rendered_snapshot,omitempty"`
+	Ref              string            `json:"ref"`
+	DeclID           string            `json:"decl_id"`
+	InitiatorActorID actor.ActorID     `json:"initiator_actor_id"`
+	Rendered         *RenderedSnapshot `json:"rendered_snapshot,omitempty"`
 }
 
 type IntroduceResult = AdmitResult
+
+type RemoveRequest struct {
+	Ref              string        `json:"ref"`
+	Target           actor.ActorID `json:"target"`
+	InitiatorActorID actor.ActorID `json:"initiator_actor_id"`
+}
+
+type RemoveResult struct {
+	Removed []actor.ActorID `json:"removed"`
+}
 
 type DaemonRequest struct {
 	Ref      string `json:"ref"`

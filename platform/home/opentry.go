@@ -58,8 +58,6 @@ func memberMeta(anchor string, sender actor.ActorID, request any) (storespec.Sys
 	return storespec.SysOpMeta{Anchor: channel.MessageCorrelation(anchor), RequestDigest: digest, Source: storespec.SysOpSourceMember, Sender: sender}, nil
 }
 
-
-
 func (e *opEntry) Admit(ctx context.Context, req channel.AdmitRequest) (channel.AdmitResult, error) {
 	if err := e.available(); err != nil {
 		return channel.AdmitResult{}, err
@@ -89,14 +87,14 @@ func (e *opEntry) Introduce(ctx context.Context, req channel.IntroduceRequest) (
 	if err != nil {
 		return channel.IntroduceResult{}, err
 	}
-	result, err := e.introduce(ctx, meta, req.DeclID, req.InitiatorPrincipal, req.Rendered)
+	result, err := e.introduce(ctx, meta, req.DeclID, req.InitiatorActorID, req.Rendered)
 	if err != nil {
 		return channel.IntroduceResult{}, err
 	}
 	return channel.IntroduceResult{ActorID: result.ActorID, Created: result.Created}, nil
 }
 
-func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declID, initiator string, supplied *channel.RenderedSnapshot) (storespec.IntroduceResult, error) {
+func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declID string, initiator actor.ActorID, supplied *channel.RenderedSnapshot) (storespec.IntroduceResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Completed-anchor lookup deliberately precedes the external resolver. A
@@ -115,7 +113,7 @@ func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declI
 		return result, nil
 	}
 	if meta.DecisiveError != nil {
-		_, err := e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta, DeclID: declID, InitiatorPrincipal: initiator})
+		_, err := e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta, DeclID: declID, InitiatorActorID: initiator})
 		return storespec.IntroduceResult{}, err
 	}
 	if e.resolver == nil {
@@ -135,7 +133,7 @@ func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declI
 			return storespec.IntroduceResult{}, opErr
 		}
 		meta.DecisiveError = opErr
-		_, recordErr := e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta, DeclID: declID, InitiatorPrincipal: initiator})
+		_, recordErr := e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta, DeclID: declID, InitiatorActorID: initiator})
 		return storespec.IntroduceResult{}, recordErr
 	}
 	rendered := facts.Rendered
@@ -155,11 +153,27 @@ func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declI
 	}
 	if !found {
 		meta.DecisiveError = &channel.OperationError{Code: channel.ErrCodeUnknownClass, Detail: "unknown class " + rendered.Class}
-		_, recordErr := e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta, DeclID: declID, InitiatorPrincipal: initiator})
+		_, recordErr := e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta, DeclID: declID, InitiatorActorID: initiator})
+		return storespec.IntroduceResult{}, recordErr
+	}
+	if initiator == "" {
+		meta.DecisiveError = &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "initiator_actor_id required"}
+		_, recordErr := e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta, DeclID: declID})
+		return storespec.IntroduceResult{}, recordErr
+	}
+	releaseInitiator := e.home.actorGates.lock(initiator)
+	defer releaseInitiator()
+	initiatorRow, active, lookupErr := e.home.controlIndex.LookupActive(ctx, initiator)
+	if lookupErr != nil {
+		return storespec.IntroduceResult{}, lookupErr
+	}
+	if !active {
+		meta.DecisiveError = &channel.OperationError{Code: channel.ErrCodeMemberInactive, Detail: "initiator is not an active member"}
+		_, recordErr := e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta, DeclID: declID, InitiatorActorID: initiator})
 		return storespec.IntroduceResult{}, recordErr
 	}
 	result, err := e.admission.Introduce(ctx, storespec.IntroduceTx{
-		SysOpMeta: meta, DeclID: declID, InitiatorPrincipal: initiator,
+		SysOpMeta: meta, DeclID: declID, InitiatorActorID: initiator, InitiatorPrincipal: initiatorRow.Principal,
 		OwnerPrincipal: facts.OwnerPrincipal, Visibility: facts.Visibility,
 		Kind: kind, Rendered: rendered,
 	})
@@ -170,6 +184,85 @@ func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declI
 		return storespec.IntroduceResult{}, err
 	}
 	e.applyEffects(ctx, result.Effects)
+	return result, nil
+}
+
+func (e *opEntry) Remove(ctx context.Context, req channel.RemoveRequest) (channel.RemoveResult, error) {
+	if err := e.available(); err != nil {
+		return channel.RemoveResult{}, err
+	}
+	meta, err := systemMeta(req.Ref, req)
+	if err != nil {
+		return channel.RemoveResult{}, err
+	}
+	result, err := e.remove(ctx, meta, req.Target, req.InitiatorActorID, "system_remove")
+	if err != nil {
+		return channel.RemoveResult{}, err
+	}
+	return channel.RemoveResult{Removed: result.Removed}, nil
+}
+
+func (e *opEntry) remove(ctx context.Context, meta storespec.SysOpMeta, target, initiator actor.ActorID, reason string) (storespec.RemoveResult, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if completed, found, err := e.admission.LookupCompleted(ctx, meta.Anchor, meta.RequestDigest); err != nil {
+		return storespec.RemoveResult{}, err
+	} else if found {
+		if completed.ErrorCode != "" {
+			return storespec.RemoveResult{}, &channel.OperationError{Code: completed.ErrorCode, Detail: completed.ErrorDetail}
+		}
+		var result storespec.RemoveResult
+		if err := json.Unmarshal(completed.Result, &result); err != nil {
+			return storespec.RemoveResult{}, err
+		}
+		return result, nil
+	}
+	if target == "" || initiator == "" {
+		meta.DecisiveError = &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "target and initiator_actor_id required"}
+		return e.admission.RemoveActor(ctx, storespec.RemoveTx{SysOpMeta: meta, Target: target, InitiatorActorID: initiator, Reason: reason})
+	}
+	h := e.home
+	if h.closed.Load() {
+		return storespec.RemoveResult{}, ErrClosed
+	}
+	locked := map[actor.ActorID]bool{}
+	releases := []func(){}
+	lockOne := func(id actor.ActorID) {
+		if id == "" || locked[id] {
+			return
+		}
+		releases = append(releases, h.actorGates.lock(id))
+		locked[id] = true
+	}
+	lockOne(initiator)
+	lockOne(target)
+	defer func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}()
+	if _, active, err := h.controlIndex.LookupActive(ctx, initiator); err != nil {
+		return storespec.RemoveResult{}, err
+	} else if !active {
+		meta.DecisiveError = &channel.OperationError{Code: channel.ErrCodeMemberInactive, Detail: "initiator is not an active member"}
+		return e.admission.RemoveActor(ctx, storespec.RemoveTx{SysOpMeta: meta, Target: target, InitiatorActorID: initiator, Reason: reason})
+	}
+	if err := h.lockClosure(ctx, target, locked, lockOne); err != nil {
+		return storespec.RemoveResult{}, err
+	}
+	plan, err := h.buildEndPlan(ctx, target, reason, actor.SystemActorID)
+	if err != nil {
+		return storespec.RemoveResult{}, err
+	}
+	result, err := e.admission.RemoveActor(ctx, storespec.RemoveTx{
+		SysOpMeta: meta, Target: target, InitiatorActorID: initiator, Reason: reason,
+		DurableIDs: plan.DurableIDs, Envelopes: plan.Envelopes,
+	})
+	if err != nil {
+		return storespec.RemoveResult{}, err
+	}
+	h.finishEndTeardown(plan)()
+	h.pokeReconcile()
 	return result, nil
 }
 
@@ -380,18 +473,7 @@ func (e *opEntry) executeMemberIntroduce(ctx context.Context, req sysactor.Opera
 	if err != nil {
 		return nil, err
 	}
-	// The gate already judged the sender active against the unified authority
-	// (durable ∪ run-world); this read only fetches the principal. The window
-	// between here and the store commit is the system's standard in-flight
-	// tolerance (same doctrine as message-vs-incarnation).
-	row, found, err := e.home.controlIndex.LookupActive(ctx, req.Sender)
-	if err != nil {
-		return nil, asOperateError(err)
-	}
-	if !found {
-		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeUnauthorizedSender), Detail: "sender is not an active channel member"}
-	}
-	result, err := e.introduce(ctx, meta, payload.DeclID, row.Principal, nil)
+	result, err := e.introduce(ctx, meta, payload.DeclID, req.Sender, nil)
 	if err != nil {
 		return nil, asOperateError(err)
 	}
@@ -418,45 +500,10 @@ func (e *opEntry) executeMemberRemove(ctx context.Context, req sysactor.OperateR
 	if err != nil {
 		return nil, err
 	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	h := e.home
-	if h.closed.Load() {
-		return nil, asOperateError(ErrClosed)
-	}
-	const reason = "member_remove"
-	locked := map[actor.ActorID]bool{}
-	releases := []func(){}
-	lockOne := func(id actor.ActorID) {
-		if id == "" || locked[id] {
-			return
-		}
-		releases = append(releases, h.actorGates.lock(id))
-		locked[id] = true
-	}
-	lockOne(payload.InstanceID)
-	defer func() {
-		for i := len(releases) - 1; i >= 0; i-- {
-			releases[i]()
-		}
-	}()
-	if err := h.lockClosure(ctx, payload.InstanceID, locked, lockOne); err != nil {
-		return nil, asOperateError(err)
-	}
-	plan, err := h.buildEndPlan(ctx, payload.InstanceID, reason, actor.SystemActorID)
+	res, err := e.remove(ctx, meta, payload.InstanceID, req.Sender, "member_remove")
 	if err != nil {
 		return nil, asOperateError(err)
 	}
-	res, err := e.admission.RemoveActor(ctx, storespec.RemoveTx{
-		SysOpMeta: meta, Target: payload.InstanceID, Reason: reason,
-		DurableIDs: plan.DurableIDs, Envelopes: plan.Envelopes,
-	})
-	if err != nil {
-		return nil, asOperateError(err)
-	}
-	tail := h.finishEndTeardown(plan)
-	tail()
-	h.pokeReconcile()
 	return map[string]any{"removed": res.Removed}, nil
 }
 
@@ -511,7 +558,6 @@ func (e *opEntry) executeMemberSetDefault(ctx context.Context, req sysactor.Oper
 	e.applyEffects(ctx, res.Effects)
 	return map[string]any{"default_agent": payload.InstanceID}, nil
 }
-
 
 func asOperateError(err error) error {
 	var operationErr *channel.OperationError

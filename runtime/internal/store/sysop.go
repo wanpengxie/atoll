@@ -266,15 +266,12 @@ func (s *sysOpStore) Admit(ctx context.Context, in storespec.AdmitTx) (storespec
 
 func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (storespec.IntroduceResult, error) {
 	raw, effects, err := s.run(ctx, in.SysOpMeta, "introduce", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
-		// Member-source sender qualification lives at the sysactor gate (unified
-		// authority, durable ∪ run-world) — the store never re-judges identity: a
-		// registry-only re-check is structurally blind to run-world senders
-		// (forked agents carry no realm principal), and any future policy about
-		// who may introduce belongs to the acceptance table, not this
-		// transaction. System-source introduce still requires the
-		// realm-authenticated initiator for the account.
-		if in.DeclID == "" || (in.Source != storespec.SysOpSourceMember && in.InitiatorPrincipal == "") {
-			return decisive(channel.ErrCodeBadPayload, "decl_id and initiator_principal required"), nil
+		// Initiator qualification lives in Home's unified authority gate. The
+		// durable store cannot re-judge run-world fork actors, so it receives the
+		// actor coordinate plus the login principal (when the active actor has
+		// one) solely for private-declaration ownership comparison.
+		if in.DeclID == "" || in.InitiatorActorID == "" {
+			return decisive(channel.ErrCodeBadPayload, "decl_id and initiator_actor_id required"), nil
 		}
 		if _, ok := actor.ParseKind(string(in.Kind)); !ok || in.Kind == actor.KindHuman || in.Kind == actor.KindSystem {
 			return decisive(channel.ErrCodeUnknownClass, in.Rendered.Class), nil
@@ -287,13 +284,6 @@ func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (s
 		}
 		if in.Visibility != "public" && in.InitiatorPrincipal != in.OwnerPrincipal {
 			return decisive(channel.ErrCodeForbidden, "declaration is private"), nil
-		}
-		if in.Source != storespec.SysOpSourceMember {
-			if active, err := principalActiveTx(ctx, tx, in.InitiatorPrincipal); err != nil {
-				return sysOpOutcome{}, err
-			} else if !active {
-				return decisive(channel.ErrCodeMemberInactive, "initiator is not an active member"), nil
-			}
 		}
 		var existing actor.ActorID
 		err := tx.QueryRowContext(ctx, `SELECT actor_id FROM actor_registry WHERE source_decl_id=? AND deregistered_at IS NULL`, in.DeclID).Scan(&existing)
@@ -495,11 +485,11 @@ func (s *sysOpStore) RevokeDaemon(ctx context.Context, in storespec.RevokeDaemon
 
 func (s *sysOpStore) RemoveActor(ctx context.Context, in storespec.RemoveTx) (storespec.RemoveResult, error) {
 	raw, effects, err := s.run(ctx, in.SysOpMeta, "remove_actor", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
-		if in.Source != storespec.SysOpSourceMember {
-			return decisive(channel.ErrCodeNotAcceptedSource, "remove_actor accepts only the member source"), nil
+		if in.Source != storespec.SysOpSourceMember && in.Source != storespec.SysOpSourceSystem {
+			return decisive(channel.ErrCodeNotAcceptedSource, "remove_actor accepts member or system source"), nil
 		}
-		if in.Target == "" {
-			return decisive(channel.ErrCodeBadPayload, "instance_id required"), nil
+		if in.Target == "" || in.InitiatorActorID == "" {
+			return decisive(channel.ErrCodeBadPayload, "target and initiator_actor_id required"), nil
 		}
 		if in.Target == actor.SystemActorID {
 			return decisive(channel.ErrCodeProtectedActor, "the system anchor actor cannot be removed"), nil

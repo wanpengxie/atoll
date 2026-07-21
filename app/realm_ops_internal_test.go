@@ -66,6 +66,67 @@ func TestRealmOpsAgentCannotWriteDeclarationRegistry(t *testing.T) {
 	}
 }
 
+func TestRealmOpsAgentWithEmptyPrincipalOwnsIntroduceByActorCoordinate(t *testing.T) {
+	a := newBareAppForTest(t)
+	a.admission = newAdmissionService(a)
+	a.admission.start()
+	t.Cleanup(a.admission.close)
+	requesterSnapshot, err := (channel.RenderedSnapshot{
+		Class: "dormant-requester", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bundle := openTestChannelForTest(t, a, "agent-owned-operation", []channelhost.GenesisDeclaration{{
+		DeclID: "requester-decl", Kind: actor.KindAgent, Rendered: requesterSnapshot,
+	}})
+	requester, found, err := bundle.View().DeclaredBySourceOne(context.Background(), "requester-decl")
+	if err != nil || !found || requester.Principal != "" {
+		t.Fatalf("requester=%+v found=%v err=%v", requester, found, err)
+	}
+	if _, err := bundle.SysOp().AttachDaemon(context.Background(), channel.DaemonRequest{Ref: "attach-agent-owner", DaemonID: "daemon-a"}); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := a.db.Exec(`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES ('agent-owned-operation','agent-owned-operation','group',?,NULL)`, now); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO actor_decls(id,name,owner,default_class,created_at,updated_at,visibility) VALUES ('public-target','public-target','owner',?,?,?,'public')`, realmFetchSeederClass, now, now); err != nil {
+		t.Fatal(err)
+	}
+	result, err := (realmOps{app: a}).Introduce(context.Background(), channel.Requester{
+		ActorID: requester.ID, ChannelID: "agent-owned-operation", RequestID: "agent-introduce",
+	}, "public-target", channel.IntroduceOpts{})
+	if err != nil || !result.Created || result.ActorID == "" {
+		t.Fatalf("agent introduce=(%+v,%v)", result, err)
+	}
+	var principal, actorOwner string
+	if err := a.db.QueryRow(`SELECT COALESCE(requested_by_principal,''),COALESCE(requested_by_actor_id,'') FROM channel_admission_operations WHERE operation_id=?`,
+		channel.DerivedRealmToolRef("agent-owned-operation", "agent-introduce")).Scan(&principal, &actorOwner); err != nil {
+		t.Fatal(err)
+	}
+	if principal != "" || actorOwner != string(requester.ID) {
+		t.Fatalf("owner=(%q,%q), want actor %q", principal, actorOwner, requester.ID)
+	}
+	view, err := (realmOps{app: a}).OperationStatus(context.Background(), channel.Requester{
+		ActorID: requester.ID, ChannelID: "agent-owned-operation", RequestID: "status",
+	}, channel.DerivedRealmToolRef("agent-owned-operation", "agent-introduce"))
+	if err != nil || view.Status != "done" {
+		t.Fatalf("agent operation status=(%+v,%v)", view, err)
+	}
+	ownerActor, found, err := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, "owner")
+	if err != nil || !found {
+		t.Fatalf("owner actor=(%q,%v,%v)", ownerActor, found, err)
+	}
+	_, err = (realmOps{app: a}).OperationStatus(context.Background(), channel.Requester{
+		ActorID: ownerActor, ChannelID: "agent-owned-operation", RequestID: "foreign-status",
+	}, channel.DerivedRealmToolRef("agent-owned-operation", "agent-introduce"))
+	var realmErr *channel.RealmError
+	if !errors.As(err, &realmErr) || realmErr.Code != channel.RealmForbidden {
+		t.Fatalf("foreign actor operation status err=%v", err)
+	}
+}
+
 func TestRealmToolDerivedRefIsChannelScoped(t *testing.T) {
 	one := channel.DerivedRealmToolRef("channel-a", "same-request")
 	two := channel.DerivedRealmToolRef("channel-b", "same-request")

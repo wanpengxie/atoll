@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -21,6 +22,7 @@ const (
 	TypeEditDeclaration    = "realm.declarations.edit"
 	TypeRevokeDeclaration  = "realm.declarations.revoke"
 	TypeIntroduce          = "realm.introduce"
+	TypeRemove             = "realm.remove"
 	TypeOperationStatus    = "realm.operation_status"
 	TypeListResources      = "realm.resources.list"
 	TypeFetchResource      = "realm.resources.fetch"
@@ -33,6 +35,7 @@ type RealmOps interface {
 	EditDeclaration(context.Context, channel.Requester, string, channel.DeclSpec) (channel.DeclDetail, error)
 	RevokeDeclaration(context.Context, channel.Requester, string) error
 	Introduce(context.Context, channel.Requester, string, channel.IntroduceOpts) (channel.IntroduceResult, error)
+	Remove(context.Context, channel.Requester, actor.ActorID) (channel.RemoveResult, error)
 	OperationStatus(context.Context, channel.Requester, string) (channel.OperationView, error)
 	ListResources(context.Context, channel.Requester, channel.ID, channel.ResourceListQuery) (channel.ResourcePage, error)
 	FetchResource(context.Context, channel.Requester, channel.ID, resource.ResourceID) (channel.ResourceFetch, error)
@@ -140,6 +143,13 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 		}
 		if err = decode(msg, &p); err == nil {
 			result, err = ops.Introduce(msg.Ctx(), req, p.DeclID, channel.IntroduceOpts{})
+		}
+	case TypeRemove:
+		var p struct {
+			Target actor.ActorID `json:"target"`
+		}
+		if err = decode(msg, &p); err == nil {
+			result, err = ops.Remove(msg.Ctx(), req, p.Target)
 		}
 	case TypeOperationStatus:
 		var p struct {

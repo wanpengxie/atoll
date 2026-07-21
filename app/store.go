@@ -136,8 +136,9 @@ var appSchema = []schemaObject{
 		operation_id TEXT PRIMARY KEY,
 		idempotency_key TEXT,
 		channel_id TEXT NOT NULL,
-		op TEXT NOT NULL CHECK(op IN ('join','introduce','attach','detach','edit')),
-		requested_by TEXT NOT NULL,
+		op TEXT NOT NULL CHECK(op IN ('join','introduce','attach','detach','edit','remove')),
+		requested_by_principal TEXT,
+		requested_by_actor_id TEXT,
 		request_json TEXT NOT NULL,
 		request_digest TEXT NOT NULL,
 		status TEXT NOT NULL DEFAULT 'pending' CHECK(status IN ('pending','done','rejected','unresolved')),
@@ -146,10 +147,15 @@ var appSchema = []schemaObject{
 		attempt INTEGER NOT NULL DEFAULT 0,
 		next_attempt_at INTEGER NOT NULL DEFAULT 0,
 		created_at INTEGER NOT NULL,
-		done_at INTEGER
+		done_at INTEGER,
+		CHECK ((NULLIF(requested_by_principal,'') IS NOT NULL) != (NULLIF(requested_by_actor_id,'') IS NOT NULL))
 	)`},
-	{"index", "ux_admission_idem", `CREATE UNIQUE INDEX ux_admission_idem
-		ON channel_admission_operations(requested_by,idempotency_key) WHERE idempotency_key IS NOT NULL`},
+	{"index", "ux_admission_principal_idem", `CREATE UNIQUE INDEX ux_admission_principal_idem
+		ON channel_admission_operations(requested_by_principal,idempotency_key)
+		WHERE requested_by_principal IS NOT NULL AND requested_by_principal<>'' AND idempotency_key IS NOT NULL`},
+	{"index", "ux_admission_actor_idem", `CREATE UNIQUE INDEX ux_admission_actor_idem
+		ON channel_admission_operations(channel_id,requested_by_actor_id,idempotency_key)
+		WHERE requested_by_actor_id IS NOT NULL AND requested_by_actor_id<>'' AND idempotency_key IS NOT NULL`},
 	{"index", "ix_admission_pending", `CREATE INDEX ix_admission_pending
 		ON channel_admission_operations(status) WHERE status='pending'`},
 	{"table", "channel_decl_overlays", `CREATE TABLE channel_decl_overlays (

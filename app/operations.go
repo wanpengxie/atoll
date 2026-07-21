@@ -15,10 +15,10 @@ func (a *App) handleGetOperation(c *gin.Context) {
 	ref := c.Param("ref")
 	caller := middleware.UserID(c)
 	var admission admissionRecord
-	err := a.db.QueryRowContext(c.Request.Context(), `SELECT operation_id,channel_id,op,requested_by,request_json,request_digest,status,result_json,error_code,created_at,done_at FROM channel_admission_operations WHERE operation_id=?`, ref).
-		Scan(&admission.OperationID, &admission.ChannelID, &admission.Op, &admission.RequestedBy, &admission.RequestJSON, &admission.RequestDigest, &admission.Status, &admission.ResultJSON, &admission.ErrorCode, &admission.CreatedAt, &admission.DoneAt)
+	err := a.db.QueryRowContext(c.Request.Context(), `SELECT operation_id,channel_id,op,COALESCE(requested_by_principal,''),COALESCE(requested_by_actor_id,''),request_json,request_digest,status,result_json,error_code,created_at,done_at FROM channel_admission_operations WHERE operation_id=?`, ref).
+		Scan(&admission.OperationID, &admission.ChannelID, &admission.Op, &admission.RequestedByPrincipal, &admission.RequestedByActorID, &admission.RequestJSON, &admission.RequestDigest, &admission.Status, &admission.ResultJSON, &admission.ErrorCode, &admission.CreatedAt, &admission.DoneAt)
 	if err == nil {
-		if admission.RequestedBy != caller {
+		if admission.RequestedByPrincipal != caller {
 			c.JSON(http.StatusForbidden, gin.H{"error": "operation owner required"})
 			return
 		}

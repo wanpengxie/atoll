@@ -202,7 +202,7 @@ func (o realmOps) RevokeDeclaration(ctx context.Context, req channel.Requester, 
 }
 
 func (o realmOps) Introduce(ctx context.Context, req channel.Requester, declID string, _ channel.IntroduceOpts) (channel.IntroduceResult, error) {
-	facts, err := o.requesterFacts(ctx, req)
+	_, err := o.requesterFacts(ctx, req)
 	if err != nil {
 		return channel.IntroduceResult{}, err
 	}
@@ -217,12 +217,12 @@ func (o realmOps) Introduce(ctx context.Context, req channel.Requester, declID s
 	}
 	ref := channel.DerivedRealmToolRef(req.ChannelID, req.RequestID)
 	record, _, err := o.app.admission.submit(ctx, admissionCommand{
-		ChannelID: req.ChannelID, Op: "introduce", RequestedBy: facts.Principal,
+		ChannelID: req.ChannelID, Op: "introduce", Owner: actorAdmissionOwner(req.ActorID),
 		OperationID: ref, Intent: struct {
 			DeclID string `json:"decl_id"`
 		}{declID},
 		BuildRequest: func(string) any {
-			return channel.IntroduceRequest{Ref: ref, DeclID: declID, InitiatorPrincipal: facts.Principal}
+			return channel.IntroduceRequest{Ref: ref, DeclID: declID, InitiatorActorID: req.ActorID}
 		},
 	})
 	if err != nil {
@@ -236,7 +236,7 @@ func (o realmOps) Introduce(ctx context.Context, req channel.Requester, declID s
 		}
 		return result, nil
 	case "rejected":
-		return channel.IntroduceResult{}, &channel.RealmError{Code: introduceRealmErrorCode(record.ErrorCode.String), Detail: record.ErrorCode.String}
+		return channel.IntroduceResult{}, &channel.RealmError{Code: admissionRealmErrorCode(record.ErrorCode.String), Detail: record.ErrorCode.String}
 	default:
 		return channel.IntroduceResult{}, &channel.ErrResultUnknown{Ref: ref}
 	}
@@ -249,7 +249,7 @@ func (o realmOps) Introduce(ctx context.Context, req channel.Requester, declID s
 // grouping follows the same semantic classes admissionErrorHTTP uses. Codes with
 // no closed-set counterpart keep RealmForbidden; the original operate code always
 // rides along in Detail (both here and at the callsite), so nothing is lost.
-func introduceRealmErrorCode(code string) channel.RealmErrorCode {
+func admissionRealmErrorCode(code string) channel.RealmErrorCode {
 	switch channel.OperationErrorCode(code) {
 	case channel.ErrCodeDeclNotFound:
 		return channel.RealmDeclNotFound
@@ -266,8 +266,42 @@ func introduceRealmErrorCode(code string) channel.RealmErrorCode {
 	}
 }
 
+func (o realmOps) Remove(ctx context.Context, req channel.Requester, target actor.ActorID) (channel.RemoveResult, error) {
+	if _, err := o.requesterFacts(ctx, req); err != nil {
+		return channel.RemoveResult{}, err
+	}
+	if target == "" {
+		return channel.RemoveResult{}, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "target required"}
+	}
+	ref := channel.DerivedRealmToolRef(req.ChannelID, req.RequestID)
+	record, _, err := o.app.admission.submit(ctx, admissionCommand{
+		ChannelID: req.ChannelID, Op: "remove", Owner: actorAdmissionOwner(req.ActorID), OperationID: ref,
+		Intent: struct {
+			Target actor.ActorID `json:"target"`
+		}{target},
+		BuildRequest: func(string) any {
+			return channel.RemoveRequest{Ref: ref, Target: target, InitiatorActorID: req.ActorID}
+		},
+	})
+	if err != nil {
+		return channel.RemoveResult{}, err
+	}
+	switch record.Status {
+	case "done":
+		var result channel.RemoveResult
+		if err := json.Unmarshal([]byte(record.ResultJSON.String), &result); err != nil {
+			return result, err
+		}
+		return result, nil
+	case "rejected":
+		return channel.RemoveResult{}, &channel.RealmError{Code: admissionRealmErrorCode(record.ErrorCode.String), Detail: record.ErrorCode.String}
+	default:
+		return channel.RemoveResult{}, &channel.ErrResultUnknown{Ref: ref}
+	}
+}
+
 func (o realmOps) OperationStatus(ctx context.Context, req channel.Requester, ref string) (channel.OperationView, error) {
-	facts, err := o.requesterFacts(ctx, req)
+	_, err := o.requesterFacts(ctx, req)
 	if err != nil {
 		return channel.OperationView{}, err
 	}
@@ -278,7 +312,7 @@ func (o realmOps) OperationStatus(ctx context.Context, req channel.Requester, re
 	if !found {
 		return channel.OperationView{}, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "operation not found"}
 	}
-	if record.RequestedBy != facts.Principal {
+	if record.ChannelID != string(req.ChannelID) || record.RequestedByActorID != string(req.ActorID) {
 		return channel.OperationView{}, &channel.RealmError{Code: channel.RealmForbidden}
 	}
 	view := channel.OperationView{Ref: ref, Family: "admission", Status: record.Status, Op: record.Op, CreatedAt: record.CreatedAt}

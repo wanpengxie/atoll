@@ -67,18 +67,19 @@ func TestOpEntryIntroduceApplyAndDetachUseOneDurableChain(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.closeInternal("test")
-	if _, err := h.admitChannelOwner(ctx, "owner"); err != nil {
+	ownerActor, err := h.admitChannelOwner(ctx, "owner")
+	if err != nil {
 		t.Fatal(err)
 	}
 	ops := SystemOps(h)
 	if _, err := ops.AttachDaemon(ctx, channel.DaemonRequest{Ref: "adm:attach", DaemonID: "daemon-a"}); err != nil {
 		t.Fatal(err)
 	}
-	introduced, err := ops.Introduce(ctx, channel.IntroduceRequest{Ref: "adm:introduce", DeclID: "decl-a", InitiatorPrincipal: "owner", Rendered: &v1})
+	introduced, err := ops.Introduce(ctx, channel.IntroduceRequest{Ref: "adm:introduce", DeclID: "decl-a", InitiatorActorID: ownerActor, Rendered: &v1})
 	if err != nil || !introduced.Created || introduced.ActorID == "" {
 		t.Fatalf("introduce=(%+v,%v)", introduced, err)
 	}
-	replayed, err := ops.Introduce(ctx, channel.IntroduceRequest{Ref: "adm:introduce", DeclID: "decl-a", InitiatorPrincipal: "owner", Rendered: &v1})
+	replayed, err := ops.Introduce(ctx, channel.IntroduceRequest{Ref: "adm:introduce", DeclID: "decl-a", InitiatorActorID: ownerActor, Rendered: &v1})
 	if err != nil || replayed != introduced {
 		t.Fatalf("replay=(%+v,%v), want %+v", replayed, err, introduced)
 	}
@@ -131,10 +132,11 @@ func TestOpEntryPermanentResolverRefusalReplaysWithoutResolver(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.closeInternal("test")
-	if _, err := h.admitChannelOwner(ctx, "owner"); err != nil {
+	ownerActor, err := h.admitChannelOwner(ctx, "owner")
+	if err != nil {
 		t.Fatal(err)
 	}
-	req := channel.IntroduceRequest{Ref: "adm:missing", DeclID: "missing", InitiatorPrincipal: "owner"}
+	req := channel.IntroduceRequest{Ref: "adm:missing", DeclID: "missing", InitiatorActorID: ownerActor}
 	for i := 0; i < 2; i++ {
 		_, err := SystemOps(h).Introduce(ctx, req)
 		var operationErr *channel.OperationError
@@ -185,10 +187,11 @@ func TestOpEntryTransientResolverFailureLeavesNoPairAndSameRefRetries(t *testing
 		t.Fatal(err)
 	}
 	defer h.closeInternal("test")
-	if _, err := h.admitChannelOwner(ctx, "owner"); err != nil {
+	ownerActor, err := h.admitChannelOwner(ctx, "owner")
+	if err != nil {
 		t.Fatal(err)
 	}
-	req := channel.IntroduceRequest{Ref: "adm:retry", DeclID: "decl", InitiatorPrincipal: "owner"}
+	req := channel.IntroduceRequest{Ref: "adm:retry", DeclID: "decl", InitiatorActorID: ownerActor}
 	_, err = SystemOps(h).Introduce(ctx, req)
 	var operationErr *channel.OperationError
 	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeAuthorityUnavailable || !operationErr.Retryable {
@@ -241,10 +244,11 @@ func TestClassKindFaultIsRetryableOnlyAbsenceIsDecisive(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer h.closeInternal("test")
-	if _, err := h.admitChannelOwner(ctx, "owner"); err != nil {
+	ownerActor, err := h.admitChannelOwner(ctx, "owner")
+	if err != nil {
 		t.Fatal(err)
 	}
-	req := channel.IntroduceRequest{Ref: "adm:classkind", DeclID: "decl", InitiatorPrincipal: "owner"}
+	req := channel.IntroduceRequest{Ref: "adm:classkind", DeclID: "decl", InitiatorActorID: ownerActor}
 	_, err = SystemOps(h).Introduce(ctx, req)
 	var operationErr *channel.OperationError
 	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeAuthorityUnavailable || !operationErr.Retryable {
@@ -269,7 +273,7 @@ func TestClassKindFaultIsRetryableOnlyAbsenceIsDecisive(t *testing.T) {
 	// The definitive absence answer, by contrast, is decisive: a fresh ref
 	// lands a completed terminal carrying unknown_class.
 	resolver.kindMissing = true
-	missingReq := channel.IntroduceRequest{Ref: "adm:classkind-missing", DeclID: "decl", InitiatorPrincipal: "owner"}
+	missingReq := channel.IntroduceRequest{Ref: "adm:classkind-missing", DeclID: "decl", InitiatorActorID: ownerActor}
 	_, err = SystemOps(h).Introduce(ctx, missingReq)
 	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeUnknownClass || operationErr.Retryable {
 		t.Fatalf("ClassKind absence=%v, want decisive unknown_class", err)

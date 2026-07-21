@@ -29,7 +29,7 @@ func TestEditFinishPromotesOnlyApplied(t *testing.T) {
 			chID, "decl:x", `{"v":"local"}`, opID, now); err != nil {
 			t.Fatal(err)
 		}
-		if _, err := a.db.Exec(`INSERT INTO channel_admission_operations(operation_id,channel_id,op,requested_by,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?)`,
+		if _, err := a.db.Exec(`INSERT INTO channel_admission_operations(operation_id,channel_id,op,requested_by_principal,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?)`,
 			opID, chID, "edit", "alice", `{}`, "d:"+applyStatus, now); err != nil {
 			t.Fatal(err)
 		}

@@ -8,6 +8,44 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
+func TestHTTPRemoveUsesPrincipalAccountAndActorInitiator(t *testing.T) {
+	env := setupTestApp(t)
+	setup := fullSetup(t, env)
+	createAndBindDaemon(t, env, setup.chID, "remove-host", setup.cookies)
+	decl := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
+		"name": "removable", "class": "go-kimi", "visibility": "public",
+	}, setup.cookies)
+	assertStatus(t, decl, http.StatusCreated)
+	declID := respJSON(t, decl)["id"].(string)
+	introduced := env.do(t, http.MethodPost, "/api/channels/"+setup.chID+"/actors", map[string]any{"decl_id": declID}, setup.cookies)
+	assertStatus(t, introduced, http.StatusCreated)
+	target := respJSON(t, introduced)["actor_id"].(string)
+
+	_, outsiderCookies := register(t, env, "remove-outsider@example.com", "secret123", "Outsider")
+	denied := env.do(t, http.MethodDelete, "/api/channels/"+setup.chID+"/actors/"+target, nil, outsiderCookies)
+	assertStatus(t, denied, http.StatusForbidden)
+
+	removed := env.doHeaders(t, http.MethodDelete, "/api/channels/"+setup.chID+"/actors/"+target, nil, setup.cookies,
+		map[string]string{"Idempotency-Key": "remove-once"})
+	assertStatus(t, removed, http.StatusOK)
+	body := respJSON(t, removed)
+	ref := body["operation_id"].(string)
+	if ref == "" || body["status"] != "done" {
+		t.Fatalf("remove response=%v", body)
+	}
+	status := env.do(t, http.MethodGet, "/api/operations/"+ref, nil, setup.cookies)
+	assertStatus(t, status, http.StatusOK)
+	if got := respJSON(t, status); got["op"] != "remove" || got["status"] != "done" {
+		t.Fatalf("remove operation=%v", got)
+	}
+	if _, err := env.app.ResolveSourceForTest(setup.chID, declID); err == nil {
+		t.Fatal("removed declaration actor remained active")
+	}
+
+	protected := env.do(t, http.MethodDelete, "/api/channels/"+setup.chID+"/actors/"+string(setup.actorID), nil, setup.cookies)
+	assertStatus(t, protected, http.StatusConflict)
+}
+
 func TestAdmissionJoinIdempotencyAndOperationProjection(t *testing.T) {
 	env := setupTestApp(t)
 	_, ownerCookies := register(t, env, "admission-owner@example.com", "secret123", "Owner")

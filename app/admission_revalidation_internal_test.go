@@ -44,7 +44,7 @@ func TestPendingAttachRejectsRevokedDaemon(t *testing.T) {
 	insertAttach := func(opID string) {
 		t.Helper()
 		request, _ := json.Marshal(channel.DaemonRequest{Ref: opID, DaemonID: "d1"})
-		if _, err := a.db.Exec(`INSERT INTO channel_admission_operations(operation_id,channel_id,op,requested_by,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?)`,
+		if _, err := a.db.Exec(`INSERT INTO channel_admission_operations(operation_id,channel_id,op,requested_by_principal,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?)`,
 			opID, string(id), "attach", "alice", string(request), "digest:"+opID, now); err != nil {
 			t.Fatal(err)
 		}
@@ -87,7 +87,7 @@ func TestPendingAttachRejectsRevokedDaemon(t *testing.T) {
 		t.Fatal(err)
 	}
 	request, _ := json.Marshal(channel.DaemonRequest{Ref: "adm:v1:reval-locked", DaemonID: "d2"})
-	if _, err := a.db.Exec(`INSERT INTO channel_admission_operations(operation_id,channel_id,op,requested_by,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?)`,
+	if _, err := a.db.Exec(`INSERT INTO channel_admission_operations(operation_id,channel_id,op,requested_by_principal,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?)`,
 		"adm:v1:reval-locked", string(id), "attach", "alice", string(request), "digest:locked", now); err != nil {
 		t.Fatal(err)
 	}

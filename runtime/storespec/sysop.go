@@ -60,6 +60,7 @@ type AdmitResult struct {
 type IntroduceTx struct {
 	SysOpMeta
 	DeclID             string
+	InitiatorActorID   actor.ActorID
 	InitiatorPrincipal string
 	OwnerPrincipal     string
 	Visibility         string
@@ -128,10 +129,11 @@ type RevokeResult struct {
 // from durable rows alone.
 type RemoveTx struct {
 	SysOpMeta
-	Target     actor.ActorID
-	Reason     string
-	DurableIDs []actor.ActorID
-	Envelopes  []CascadeEnvelope
+	Target           actor.ActorID
+	InitiatorActorID actor.ActorID
+	Reason           string
+	DurableIDs       []actor.ActorID
+	Envelopes        []CascadeEnvelope
 }
 
 // RemoveResult carries no PostCommitEffects: the member-remove session teardown

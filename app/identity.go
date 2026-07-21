@@ -45,25 +45,30 @@ func (a *App) requireChannelAccess(c *gin.Context) (string, bool) {
 }
 
 func (a *App) requireChannelMember(c *gin.Context) (string, bool) {
+	chID, _, ok := a.requireChannelMemberActor(c)
+	return chID, ok
+}
+
+func (a *App) requireChannelMemberActor(c *gin.Context) (string, actor.ActorID, bool) {
 	chID, ok := a.requireChannelAccess(c)
 	if !ok {
-		return "", false
+		return "", "", false
 	}
 	bundle, ok := a.host.Acquire(channel.ID(chID))
 	if !ok {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
-		return "", false
+		return "", "", false
 	}
-	_, found, err := bundle.View().ResolvePrincipal(c.Request.Context(), actor.KindHuman, middleware.UserID(c))
+	id, found, err := bundle.View().ResolvePrincipal(c.Request.Context(), actor.KindHuman, middleware.UserID(c))
 	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
-		return "", false
+		return "", "", false
 	}
 	if !found {
 		c.JSON(http.StatusForbidden, gin.H{"error": "active channel membership required"})
-		return "", false
+		return "", "", false
 	}
-	return chID, true
+	return chID, id, true
 }
 
 // ---------------------------------------------------------------------------

@@ -13,6 +13,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/platform/channelhost"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -27,18 +28,47 @@ var errIdempotencyConflict = errors.New("admission: idempotency key reused with 
 type admissionCommand struct {
 	ChannelID      channel.ID
 	Op             string
-	RequestedBy    string
+	Owner          admissionOwner
 	OperationID    string
 	IdempotencyKey string
 	Intent         any
 	BuildRequest   func(string) any
 }
 
+type admissionOwner struct {
+	Principal string
+	ActorID   actor.ActorID
+}
+
+func principalAdmissionOwner(principal string) admissionOwner {
+	return admissionOwner{Principal: principal}
+}
+
+func actorAdmissionOwner(id actor.ActorID) admissionOwner { return admissionOwner{ActorID: id} }
+
+func (o admissionOwner) valid() bool { return (o.Principal != "") != (o.ActorID != "") }
+
+func (o admissionOwner) matches(principal, actorID string) bool {
+	return o.Principal == principal && string(o.ActorID) == actorID
+}
+
+func (o admissionOwner) values() (any, any) {
+	var principal, actorID any
+	if o.Principal != "" {
+		principal = o.Principal
+	}
+	if o.ActorID != "" {
+		actorID = string(o.ActorID)
+	}
+	return principal, actorID
+}
+
 type admissionRecord struct {
-	OperationID, ChannelID, Op, RequestedBy, RequestJSON, RequestDigest, Status string
-	ResultJSON, ErrorCode                                                       sql.NullString
-	CreatedAt                                                                   int64
-	DoneAt                                                                      sql.NullInt64
+	OperationID, ChannelID, Op, RequestedByPrincipal, RequestedByActorID string
+	RequestJSON, RequestDigest, Status                                   string
+	ResultJSON, ErrorCode                                                sql.NullString
+	CreatedAt                                                            int64
+	DoneAt                                                               sql.NullInt64
 }
 
 type admissionService struct {
@@ -85,7 +115,7 @@ func (s *admissionService) notify() {
 func (s *admissionService) close() { s.once.Do(func() { s.cancel(); <-s.done }) }
 
 func (s *admissionService) submit(ctx context.Context, command admissionCommand) (admissionRecord, bool, error) {
-	if command.ChannelID == "" || command.RequestedBy == "" || command.BuildRequest == nil {
+	if command.ChannelID == "" || !command.Owner.valid() || command.BuildRequest == nil {
 		return admissionRecord{}, false, errors.New("admission: incomplete command")
 	}
 	digest, err := channel.Digest(command.Intent)
@@ -98,11 +128,11 @@ func (s *admissionService) submit(ctx context.Context, command admissionCommand)
 	}
 	defer tx.Rollback()
 	if command.OperationID != "" {
-		var existingDigest, existingChannel, existingOp, existingRequester string
-		err := tx.QueryRowContext(ctx, `SELECT request_digest,channel_id,op,requested_by FROM channel_admission_operations WHERE operation_id=?`, command.OperationID).
-			Scan(&existingDigest, &existingChannel, &existingOp, &existingRequester)
+		var existingDigest, existingChannel, existingOp, existingPrincipal, existingActor string
+		err := tx.QueryRowContext(ctx, `SELECT request_digest,channel_id,op,COALESCE(requested_by_principal,''),COALESCE(requested_by_actor_id,'') FROM channel_admission_operations WHERE operation_id=?`, command.OperationID).
+			Scan(&existingDigest, &existingChannel, &existingOp, &existingPrincipal, &existingActor)
 		if err == nil {
-			if existingDigest != digest || existingChannel != string(command.ChannelID) || existingOp != command.Op || existingRequester != command.RequestedBy {
+			if existingDigest != digest || existingChannel != string(command.ChannelID) || existingOp != command.Op || !command.Owner.matches(existingPrincipal, existingActor) {
 				return admissionRecord{}, true, errIdempotencyConflict
 			}
 			_ = tx.Rollback()
@@ -114,7 +144,8 @@ func (s *admissionService) submit(ctx context.Context, command admissionCommand)
 	}
 	if command.IdempotencyKey != "" {
 		var existing, existingDigest, existingChannel, existingOp string
-		err := tx.QueryRowContext(ctx, `SELECT operation_id,request_digest,channel_id,op FROM channel_admission_operations WHERE requested_by=? AND idempotency_key=?`, command.RequestedBy, command.IdempotencyKey).Scan(&existing, &existingDigest, &existingChannel, &existingOp)
+		query, args := admissionIdempotencyLookup(command.Owner, command.ChannelID, command.IdempotencyKey)
+		err := tx.QueryRowContext(ctx, query, args...).Scan(&existing, &existingDigest, &existingChannel, &existingOp)
 		if err == nil {
 			if existingDigest != digest || existingChannel != string(command.ChannelID) || existingOp != command.Op {
 				return admissionRecord{}, true, errIdempotencyConflict
@@ -140,21 +171,22 @@ func (s *admissionService) submit(ctx context.Context, command admissionCommand)
 	if command.IdempotencyKey != "" {
 		idem = command.IdempotencyKey
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_admission_operations(operation_id,idempotency_key,channel_id,op,requested_by,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?,?)`, operationID, idem, string(command.ChannelID), command.Op, command.RequestedBy, string(raw), digest, now); err != nil {
+	principal, actorID := command.Owner.values()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_admission_operations(operation_id,idempotency_key,channel_id,op,requested_by_principal,requested_by_actor_id,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?,?,?)`, operationID, idem, string(command.ChannelID), command.Op, principal, actorID, string(raw), digest, now); err != nil {
 		if command.OperationID != "" {
 			_ = tx.Rollback()
 			record, found, loadErr := s.load(ctx, command.OperationID)
 			if loadErr != nil || !found {
 				return admissionRecord{}, false, errors.Join(err, loadErr)
 			}
-			if record.RequestDigest != digest || record.ChannelID != string(command.ChannelID) || record.Op != command.Op || record.RequestedBy != command.RequestedBy {
+			if record.RequestDigest != digest || record.ChannelID != string(command.ChannelID) || record.Op != command.Op || !command.Owner.matches(record.RequestedByPrincipal, record.RequestedByActorID) {
 				return admissionRecord{}, true, errIdempotencyConflict
 			}
 			return record, true, nil
 		}
 		if command.IdempotencyKey != "" {
 			_ = tx.Rollback()
-			return s.loadIdempotent(ctx, command.RequestedBy, command.IdempotencyKey, digest, string(command.ChannelID), command.Op)
+			return s.loadIdempotent(ctx, command.Owner, command.IdempotencyKey, digest, command.ChannelID, command.Op)
 		}
 		return admissionRecord{}, false, err
 	}
@@ -173,13 +205,21 @@ func (s *admissionService) submit(ctx context.Context, command admissionCommand)
 	return record, false, err
 }
 
-func (s *admissionService) loadIdempotent(ctx context.Context, requestedBy, key, digest, channelID, op string) (admissionRecord, bool, error) {
+func admissionIdempotencyLookup(owner admissionOwner, channelID channel.ID, key string) (string, []any) {
+	if owner.Principal != "" {
+		return `SELECT operation_id,request_digest,channel_id,op FROM channel_admission_operations WHERE requested_by_principal=? AND idempotency_key=?`, []any{owner.Principal, key}
+	}
+	return `SELECT operation_id,request_digest,channel_id,op FROM channel_admission_operations WHERE channel_id=? AND requested_by_actor_id=? AND idempotency_key=?`, []any{string(channelID), string(owner.ActorID), key}
+}
+
+func (s *admissionService) loadIdempotent(ctx context.Context, owner admissionOwner, key, digest string, channelID channel.ID, op string) (admissionRecord, bool, error) {
 	var operationID, existingDigest, existingChannel, existingOp string
-	err := s.app.db.QueryRowContext(ctx, `SELECT operation_id,request_digest,channel_id,op FROM channel_admission_operations WHERE requested_by=? AND idempotency_key=?`, requestedBy, key).Scan(&operationID, &existingDigest, &existingChannel, &existingOp)
+	query, args := admissionIdempotencyLookup(owner, channelID, key)
+	err := s.app.db.QueryRowContext(ctx, query, args...).Scan(&operationID, &existingDigest, &existingChannel, &existingOp)
 	if err != nil {
 		return admissionRecord{}, false, err
 	}
-	if existingDigest != digest || existingChannel != channelID || existingOp != op {
+	if existingDigest != digest || existingChannel != string(channelID) || existingOp != op {
 		return admissionRecord{}, true, errIdempotencyConflict
 	}
 	return s.load(ctx, operationID)
@@ -237,7 +277,7 @@ func (s *admissionService) submitEdit(ctx context.Context, chID channel.ID, rawA
 	defer tx.Rollback()
 	if idemKey != "" {
 		var existing, existingDigest, existingChannel, existingOp string
-		err := tx.QueryRowContext(ctx, `SELECT operation_id,request_digest,channel_id,op FROM channel_admission_operations WHERE requested_by=? AND idempotency_key=?`, caller, idemKey).Scan(&existing, &existingDigest, &existingChannel, &existingOp)
+		err := tx.QueryRowContext(ctx, `SELECT operation_id,request_digest,channel_id,op FROM channel_admission_operations WHERE requested_by_principal=? AND idempotency_key=?`, caller, idemKey).Scan(&existing, &existingDigest, &existingChannel, &existingOp)
 		if err == nil {
 			if existingDigest != digest || existingChannel != string(chID) || existingOp != "edit" {
 				return admissionRecord{}, errIdempotencyConflict
@@ -282,7 +322,7 @@ func (s *admissionService) submitEdit(ctx context.Context, chID channel.ID, rawA
 	if idemKey != "" {
 		idem = idemKey
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_admission_operations(operation_id,idempotency_key,channel_id,op,requested_by,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?,?)`, operationID, idem, string(chID), "edit", caller, string(raw), digest, now); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_admission_operations(operation_id,idempotency_key,channel_id,op,requested_by_principal,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?,?)`, operationID, idem, string(chID), "edit", caller, string(raw), digest, now); err != nil {
 		return admissionRecord{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -302,8 +342,8 @@ func (s *admissionService) submitEdit(ctx context.Context, chID channel.ID, rawA
 
 func (s *admissionService) load(ctx context.Context, operationID string) (admissionRecord, bool, error) {
 	var record admissionRecord
-	err := s.app.db.QueryRowContext(ctx, `SELECT operation_id,channel_id,op,requested_by,request_json,request_digest,status,result_json,error_code,created_at,done_at FROM channel_admission_operations WHERE operation_id=?`, operationID).
-		Scan(&record.OperationID, &record.ChannelID, &record.Op, &record.RequestedBy, &record.RequestJSON, &record.RequestDigest, &record.Status, &record.ResultJSON, &record.ErrorCode, &record.CreatedAt, &record.DoneAt)
+	err := s.app.db.QueryRowContext(ctx, `SELECT operation_id,channel_id,op,COALESCE(requested_by_principal,''),COALESCE(requested_by_actor_id,''),request_json,request_digest,status,result_json,error_code,created_at,done_at FROM channel_admission_operations WHERE operation_id=?`, operationID).
+		Scan(&record.OperationID, &record.ChannelID, &record.Op, &record.RequestedByPrincipal, &record.RequestedByActorID, &record.RequestJSON, &record.RequestDigest, &record.Status, &record.ResultJSON, &record.ErrorCode, &record.CreatedAt, &record.DoneAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return admissionRecord{}, false, nil
 	}
@@ -406,6 +446,12 @@ func (s *admissionService) deliver(ctx context.Context, bundle channelhost.Bundl
 			return nil, &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: err.Error()}
 		}
 		return bundle.SysOp().Introduce(ctx, request)
+	case "remove":
+		var request channel.RemoveRequest
+		if err := json.Unmarshal([]byte(record.RequestJSON), &request); err != nil {
+			return nil, &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: err.Error()}
+		}
+		return bundle.SysOp().Remove(ctx, request)
 	case "attach":
 		var request channel.DaemonRequest
 		if err := json.Unmarshal([]byte(record.RequestJSON), &request); err != nil {

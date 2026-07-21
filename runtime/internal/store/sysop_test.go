@@ -44,11 +44,12 @@ func TestSysOpRemoveActorEndsClosureWithEventPairAndReplays(t *testing.T) {
 	ctx := context.Background()
 	target := admitDurableAgent(t, cs, "decl:worker")
 	tx := storespec.RemoveTx{
-		SysOpMeta:  memberMetaFor("op:msg:remove:1", "d1"),
-		Target:     target,
-		Reason:     "member_remove",
-		DurableIDs: []actor.ActorID{target},
-		Envelopes:  []storespec.CascadeEnvelope{{Target: target, Reason: "member_remove", EndedBy: actor.SystemActorID}},
+		SysOpMeta:        memberMetaFor("op:msg:remove:1", "d1"),
+		Target:           target,
+		InitiatorActorID: "human:alice",
+		Reason:           "member_remove",
+		DurableIDs:       []actor.ActorID{target},
+		Envelopes:        []storespec.CascadeEnvelope{{Target: target, Reason: "member_remove", EndedBy: actor.SystemActorID}},
 	}
 	res, err := cs.SysOps.RemoveActor(ctx, tx)
 	if err != nil {
@@ -92,8 +93,8 @@ func TestSysOpRemoveActorAlreadyGoneReturnsSuccessEmptySet(t *testing.T) {
 	// success with an empty removed set, event pair still committed.
 	res, err := cs.SysOps.RemoveActor(ctx, storespec.RemoveTx{
 		SysOpMeta: memberMetaFor("op:msg:remove:gone", "dg"),
-		Target:    "agent:vanished:1",
-		Reason:    "member_remove",
+		Target:    "agent:vanished:1", InitiatorActorID: "human:alice",
+		Reason: "member_remove",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -186,9 +187,7 @@ func TestSysOpMemberWordsRejectSystemSource(t *testing.T) {
 		}
 		assertEventPair(t, cs, anchor)
 	}
-	_, err := cs.SysOps.RemoveActor(ctx, storespec.RemoveTx{SysOpMeta: sysMeta("op:ref:src:remove", "sr1"), Target: target})
-	assertSourceRejected("op:ref:src:remove", err)
-	_, err = cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: sysMeta("op:ref:src:restart", "sr2"), Target: target})
+	_, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: sysMeta("op:ref:src:restart", "sr2"), Target: target})
 	assertSourceRejected("op:ref:src:restart", err)
 	_, err = cs.SysOps.SetDefaultAgent(ctx, storespec.SetDefaultTx{SysOpMeta: sysMeta("op:ref:src:default", "sr3"), Target: target})
 	assertSourceRejected("op:ref:src:default", err)
@@ -261,7 +260,7 @@ func TestSysOpMemberIntroduceAcceptsRunWorldSender(t *testing.T) {
 			Anchor: "op:msg:v1:forkintro", RequestDigest: "d1",
 			Source: storespec.SysOpSourceMember, Sender: "agent:fork-child",
 		},
-		DeclID: "decl:tool", InitiatorPrincipal: "",
+		DeclID: "decl:tool", InitiatorActorID: "agent:fork-child",
 		OwnerPrincipal: "alice", Visibility: "public",
 		Kind: actor.KindAgent, Rendered: rendered,
 	}

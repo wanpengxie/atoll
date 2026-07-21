@@ -50,6 +50,59 @@ func TestOpenDB_InstallsFreshSchemaAndReopens(t *testing.T) {
 	assertColumnAbsent(t, db, "actor_decls", "default_looper")
 }
 
+func TestAdmissionOwnerSchemaEnforcesTaggedIdentityAndScopedIdempotency(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "app.db")
+	process, err := OpenProcessDB(path, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = process.Close() })
+	db := process.DB
+	insert := func(id, ch, principal, actorID, key string) error {
+		var p, a, k any
+		if principal != "<null>" {
+			p = principal
+		}
+		if actorID != "<null>" {
+			a = actorID
+		}
+		if key != "<null>" {
+			k = key
+		}
+		_, err := db.Exec(`INSERT INTO channel_admission_operations
+			(operation_id,idempotency_key,channel_id,op,requested_by_principal,requested_by_actor_id,request_json,request_digest,created_at)
+			VALUES (?,?,?,?,?,?,?,?,?)`, id, k, ch, "join", p, a, `{}`, "digest:"+id, 1)
+		return err
+	}
+	if err := insert("principal", "c1", "login", "<null>", "p-key"); err != nil {
+		t.Fatalf("principal-only owner rejected: %v", err)
+	}
+	if err := insert("actor", "c1", "<null>", "actor:one", "shared"); err != nil {
+		t.Fatalf("actor-only owner rejected: %v", err)
+	}
+	if err := insert("neither", "c1", "<null>", "<null>", "<null>"); err == nil {
+		t.Fatal("owner XOR accepted two NULL coordinates")
+	}
+	if err := insert("empty", "c1", "", "<null>", "<null>"); err == nil {
+		t.Fatal("owner XOR accepted an empty principal")
+	}
+	if err := insert("both", "c1", "login-2", "actor:two", "<null>"); err == nil {
+		t.Fatal("owner XOR accepted both coordinates")
+	}
+	if err := insert("actor-other", "c1", "<null>", "actor:two", "shared"); err != nil {
+		t.Fatalf("different actor collided on idempotency key: %v", err)
+	}
+	if err := insert("actor-other-channel", "c2", "<null>", "actor:one", "shared"); err != nil {
+		t.Fatalf("same actor spelling in another channel collided: %v", err)
+	}
+	if err := insert("actor-duplicate", "c1", "<null>", "actor:one", "shared"); err == nil {
+		t.Fatal("same channel actor reused idempotency key")
+	}
+	if err := insert("principal-cross-channel", "c2", "login", "<null>", "p-key"); err == nil {
+		t.Fatal("principal idempotency key unexpectedly became channel-scoped")
+	}
+}
+
 func TestOpenProcessDB_StrictReopenRejectsMalformedSchemaWithoutMutation(t *testing.T) {
 	tests := []struct {
 		name  string

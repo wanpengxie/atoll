@@ -8,6 +8,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
@@ -22,7 +23,7 @@ func (a *App) handleJoinChannel(c *gin.Context) {
 		Principal string `json:"principal"`
 	}{caller}
 	record, _, err := a.admission.submit(c.Request.Context(), admissionCommand{
-		ChannelID: chID, Op: "join", RequestedBy: caller, IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
+		ChannelID: chID, Op: "join", Owner: principalAdmissionOwner(caller), IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
 		BuildRequest: func(ref string) any { return channel.AdmitRequest{Ref: ref, Principal: caller} },
 	})
 	if err != nil || record.Status != "done" {
@@ -42,11 +43,11 @@ func (a *App) handleJoinChannel(c *gin.Context) {
 }
 
 func (a *App) handleIntroduceActor(c *gin.Context) {
-	chID := channel.ID(c.Param("chID"))
-	if !a.channelExists(c.Request.Context(), string(chID)) {
-		c.JSON(404, gin.H{"error": "channel not found"})
+	rawChID, initiator, ok := a.requireChannelMemberActor(c)
+	if !ok {
 		return
 	}
+	chID := channel.ID(rawChID)
 	var input struct {
 		DeclID string `json:"decl_id"`
 	}
@@ -60,9 +61,9 @@ func (a *App) handleIntroduceActor(c *gin.Context) {
 		DeclID string `json:"decl_id"`
 	}{input.DeclID}
 	record, _, err := a.admission.submit(c.Request.Context(), admissionCommand{
-		ChannelID: chID, Op: "introduce", RequestedBy: caller, IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
+		ChannelID: chID, Op: "introduce", Owner: principalAdmissionOwner(caller), IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
 		BuildRequest: func(ref string) any {
-			return channel.IntroduceRequest{Ref: ref, DeclID: input.DeclID, InitiatorPrincipal: caller}
+			return channel.IntroduceRequest{Ref: ref, DeclID: input.DeclID, InitiatorActorID: initiator}
 		},
 	})
 	if err != nil || record.Status != "done" {
@@ -75,6 +76,30 @@ func (a *App) handleIntroduceActor(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusCreated, gin.H{"operation_id": record.OperationID, "status": "done", "actor_id": result.ActorID, "created": result.Created})
+}
+
+func (a *App) handleRemoveChannelActor(c *gin.Context) {
+	rawChID, initiator, ok := a.requireChannelMemberActor(c)
+	if !ok {
+		return
+	}
+	target := actor.ActorID(strings.TrimSpace(c.Param("actorID")))
+	if target == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "actor_id required"})
+		return
+	}
+	caller := middleware.UserID(c)
+	intent := struct {
+		Target actor.ActorID `json:"target"`
+	}{target}
+	record, _, err := a.admission.submit(c.Request.Context(), admissionCommand{
+		ChannelID: channel.ID(rawChID), Op: "remove", Owner: principalAdmissionOwner(caller),
+		IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
+		BuildRequest: func(ref string) any {
+			return channel.RemoveRequest{Ref: ref, Target: target, InitiatorActorID: initiator}
+		},
+	})
+	respondAdmissionRecord(c, record, err, http.StatusOK)
 }
 
 func (a *App) handleEditActorConfig(c *gin.Context) {

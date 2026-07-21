@@ -215,7 +215,7 @@ func (a *App) handleAttachDaemon(c *gin.Context) {
 		DaemonID string `json:"daemon_id"`
 	}{req.DaemonID}
 	record, _, err := a.admission.submit(c.Request.Context(), admissionCommand{
-		ChannelID: channel.ID(chID), Op: "attach", RequestedBy: userID, IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
+		ChannelID: channel.ID(chID), Op: "attach", Owner: principalAdmissionOwner(userID), IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
 		BuildRequest: func(ref string) any { return channel.DaemonRequest{Ref: ref, DaemonID: req.DaemonID} },
 	})
 	respondAdmissionRecord(c, record, err, http.StatusOK)
@@ -240,7 +240,7 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 		DaemonID string `json:"daemon_id"`
 	}{daemonID}
 	record, _, err := a.admission.submit(ctx, admissionCommand{
-		ChannelID: channel.ID(chID), Op: "detach", RequestedBy: owner, IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
+		ChannelID: channel.ID(chID), Op: "detach", Owner: principalAdmissionOwner(owner), IdempotencyKey: c.GetHeader("Idempotency-Key"), Intent: intent,
 		BuildRequest: func(ref string) any { return channel.DaemonRequest{Ref: ref, DaemonID: daemonID} },
 	})
 	respondAdmissionRecord(c, record, err, http.StatusOK)

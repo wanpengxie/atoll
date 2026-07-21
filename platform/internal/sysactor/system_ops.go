@@ -12,6 +12,7 @@ import (
 type SystemOps interface {
 	Admit(context.Context, channel.AdmitRequest) (channel.AdmitResult, error)
 	Introduce(context.Context, channel.IntroduceRequest) (channel.IntroduceResult, error)
+	Remove(context.Context, channel.RemoveRequest) (channel.RemoveResult, error)
 	AttachDaemon(context.Context, channel.DaemonRequest) (channel.BindingResult, error)
 	DetachDaemon(context.Context, channel.DaemonRequest) (channel.BindingResult, error)
 	ApplyDeclVersion(context.Context, channel.ApplyDeclVersionRequest) (channel.ApplyDeclVersionResult, error)

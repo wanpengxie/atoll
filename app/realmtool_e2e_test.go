@@ -83,6 +83,52 @@ func TestRealmToolBuiltInListCreateAndInspect(t *testing.T) {
 	}
 }
 
+func TestRealmToolActorOwnedIntroduceAndRemove(t *testing.T) {
+	env := setupTestApp(t)
+	setup := fullSetup(t, env)
+	createAndBindDaemon(t, env, setup.chID, "actor-owned-host", setup.cookies)
+	toolID, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !env.app.WaitLiveForTest(setup.chID, toolID, 2*time.Second) {
+		t.Fatal("realm tool did not become live")
+	}
+	srv := httptest.NewServer(env.app.Handler())
+	defer srv.Close()
+	client := dialWS(t, srv, setup.cookies, setup.chID, 0)
+	defer client.close()
+	decl := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
+		"name": "actor-owned", "class": "go-kimi", "visibility": "public",
+	}, setup.cookies)
+	assertStatus(t, decl, http.StatusCreated)
+	declID := respJSON(t, decl)["id"].(string)
+
+	introduced := realmToolRequest(t, env, setup, client, toolID, realmtool.TypeIntroduce, map[string]any{"decl_id": declID})
+	var target actor.ActorID
+	if err := json.Unmarshal(introduced["actor_id"], &target); err != nil || target == "" {
+		t.Fatalf("actor-owned introduce=%v target=%q err=%v", introduced, target, err)
+	}
+	var principal, ownerActor string
+	if err := env.db.QueryRow(`SELECT COALESCE(requested_by_principal,''),COALESCE(requested_by_actor_id,'')
+		FROM channel_admission_operations WHERE channel_id=? AND op='introduce' ORDER BY created_at DESC LIMIT 1`, setup.chID).
+		Scan(&principal, &ownerActor); err != nil {
+		t.Fatal(err)
+	}
+	if principal != "" || ownerActor != string(setup.actorID) {
+		t.Fatalf("operation owner=(principal=%q actor=%q), want sender actor %q", principal, ownerActor, setup.actorID)
+	}
+
+	removed := realmToolRequest(t, env, setup, client, toolID, realmtool.TypeRemove, map[string]any{"target": target})
+	var removedIDs []actor.ActorID
+	if err := json.Unmarshal(removed["removed"], &removedIDs); err != nil || len(removedIDs) != 1 || removedIDs[0] != target {
+		t.Fatalf("actor-owned remove=%v ids=%v err=%v", removed, removedIDs, err)
+	}
+	if _, err := env.app.ResolveSourceForTest(setup.chID, declID); err == nil {
+		t.Fatal("realm-tool remove left target active")
+	}
+}
+
 func TestRealmToolFetchCopiesCrossChannelResourceWithProvenance(t *testing.T) {
 	env := setupTestApp(t)
 	target := fullSetup(t, env)

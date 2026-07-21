@@ -152,8 +152,12 @@ func (a *App) ComposeDaemonForTest(chID, principal, class, daemonID string, kind
 	if err != nil {
 		return "", err
 	}
+	initiator, found, err := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, owner)
+	if err != nil || !found {
+		return "", fmt.Errorf("resolve owner actor: found=%v err=%v", found, err)
+	}
 	result, err := bundle.SysOp().Introduce(context.Background(), channel.IntroduceRequest{
-		Ref: "test-introduce:" + uuid.NewString(), DeclID: principal, InitiatorPrincipal: owner,
+		Ref: "test-introduce:" + uuid.NewString(), DeclID: principal, InitiatorActorID: initiator,
 	})
 	if err == nil {
 		facts, found, factsErr := bundle.View().ActorFacts(context.Background(), result.ActorID)
