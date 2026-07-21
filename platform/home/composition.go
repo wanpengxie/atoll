@@ -44,68 +44,6 @@ func (h *Home) defaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
 	return h.cs.Routing.DefaultAgent(ctx)
 }
 
-func (h *Home) setDefaultAgent(ctx context.Context, id actor.ActorID) error {
-	if h.closed.Load() {
-		return ErrClosed
-	}
-	unlock := h.actorGates.lock(id)
-	defer unlock()
-	if h.closed.Load() {
-		return ErrClosed
-	}
-	return h.cs.Routing.SetDefaultAgent(ctx, id)
-}
-
-// RemoveInstance is composition-level termination: desired deletion and
-// registry deregistration/cascades share one transaction, bracketed by quiet
-// body removal to close both in-flight build windows.
-func (h *Home) removeInstance(ctx context.Context, id actor.ActorID) error {
-	if h.closed.Load() {
-		return ErrClosed
-	}
-	if id == actor.SystemActorID {
-		return ErrRemoveAnchor
-	}
-	if err := h.systemEndHandle().End(ctx, id, "removed"); err != nil {
-		return err
-	}
-	h.pokeReconcile()
-	return nil
-}
-
-// RestartInstanceDirect retires a present carrier without changing declaration
-// truth. A dormant identity is deliberately a no-op: the next real request will
-// activate it from the current declaration. A running daemon carrier is cut by
-// the same Despawn primitive as End; the fresh EnsureTicket in the next plan is
-// what distinguishes the replacement attempt.
-func (h *Home) restartInstanceDirect(ctx context.Context, id actor.ActorID) (int64, error) {
-	if h.closed.Load() {
-		return 0, ErrClosed
-	}
-	if id == actor.SystemActorID {
-		return 0, ErrRestartAnchor
-	}
-	unlock := h.actorGates.lock(id)
-	defer unlock()
-	if h.closed.Load() {
-		return 0, ErrClosed
-	}
-	row, active, err := h.controlIndex.LookupActive(ctx, id)
-	if err != nil {
-		return 0, err
-	}
-	if !active {
-		return 0, storespec.ErrActorNotFound
-	}
-	_, verdict := h.liveness.Retire(id, true)
-	if verdict != transitionApplied {
-		return 0, errors.New("platform: invalid restart transition")
-	}
-	h.channel.Cells().DespawnIDReason(id, "restart")
-	h.pokeReconcile()
-	return row.CurrentDeclVersion, nil
-}
-
 // ValidateAttachment is a pure Home-side decision over declared authority and
 // liveness intent. It never inserts, removes, or re-homes an identity.
 type homeDeclarationCoordinator struct{ h *Home }

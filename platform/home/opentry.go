@@ -374,42 +374,113 @@ func (e *opEntry) executeMemberIntroduce(ctx context.Context, req sysactor.Opera
 	return map[string]any{"instance_id": result.ActorID, "created": result.Created}, nil
 }
 
+// executeMemberRemove folds the remove word into the value paradigm: the
+// closure is computed under Home's Fork-race lock discipline (the sole holder of
+// the run-world sponsor graph), then RemoveActor commits the cascade value rows
+// with the anchor + started/completed event pair in ONE transaction. No
+// execution handle (systemEndHandle) is touched; despawn is a reconcile private
+// matter carried out here as the post-commit teardown.
 func (e *opEntry) executeMemberRemove(ctx context.Context, req sysactor.OperateRequest) (any, error) {
+	if err := e.available(); err != nil {
+		return nil, asOperateError(err)
+	}
 	var payload struct {
 		InstanceID actor.ActorID `json:"instance_id"`
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
 		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: "instance_id required"}
 	}
-	if err := e.home.systemEndHandle().End(ctx, payload.InstanceID, "member_remove"); err != nil {
+	meta, err := memberMeta(req.Anchor, req.Sender, payload)
+	if err != nil {
+		return nil, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	h := e.home
+	if h.closed.Load() {
+		return nil, asOperateError(ErrClosed)
+	}
+	const reason = "member_remove"
+	locked := map[actor.ActorID]bool{}
+	releases := []func(){}
+	lockOne := func(id actor.ActorID) {
+		if id == "" || locked[id] {
+			return
+		}
+		releases = append(releases, h.actorGates.lock(id))
+		locked[id] = true
+	}
+	lockOne(payload.InstanceID)
+	defer func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}()
+	if err := h.lockClosure(ctx, payload.InstanceID, locked, lockOne); err != nil {
 		return nil, asOperateError(err)
 	}
-	return map[string]any{"removed": payload.InstanceID}, nil
+	plan, err := h.buildEndPlan(ctx, payload.InstanceID, reason, actor.SystemActorID)
+	if err != nil {
+		return nil, asOperateError(err)
+	}
+	res, err := e.admission.RemoveActor(ctx, storespec.RemoveTx{
+		SysOpMeta: meta, Target: payload.InstanceID, Reason: reason,
+		DurableIDs: plan.DurableIDs, Envelopes: plan.Envelopes,
+	})
+	if err != nil {
+		return nil, asOperateError(err)
+	}
+	tail := h.finishEndTeardown(plan)
+	tail()
+	h.pokeReconcile()
+	return map[string]any{"removed": res.Removed}, nil
 }
 
 func (e *opEntry) executeMemberRestart(ctx context.Context, req sysactor.OperateRequest) (any, error) {
+	if err := e.available(); err != nil {
+		return nil, asOperateError(err)
+	}
 	var payload struct {
 		InstanceID actor.ActorID `json:"instance_id"`
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
 		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: "instance_id required"}
 	}
-	if _, err := e.home.restartInstanceDirect(ctx, payload.InstanceID); err != nil {
+	meta, err := memberMeta(req.Anchor, req.Sender, payload)
+	if err != nil {
+		return nil, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	res, err := e.admission.RestartActor(ctx, storespec.RestartTx{SysOpMeta: meta, Target: payload.InstanceID})
+	if err != nil {
 		return nil, asOperateError(err)
 	}
-	return map[string]any{"restarted": payload.InstanceID}, nil
+	e.applyEffects(ctx, res.Effects)
+	return map[string]any{"restarted": payload.InstanceID, "epoch": res.Epoch}, nil
 }
 
 func (e *opEntry) executeMemberSetDefault(ctx context.Context, req sysactor.OperateRequest) (any, error) {
+	if err := e.available(); err != nil {
+		return nil, asOperateError(err)
+	}
 	var payload struct {
 		InstanceID actor.ActorID `json:"instance_id"`
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil {
 		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: err.Error()}
 	}
-	if err := e.home.setDefaultAgent(ctx, payload.InstanceID); err != nil {
+	meta, err := memberMeta(req.Anchor, req.Sender, payload)
+	if err != nil {
+		return nil, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	res, err := e.admission.SetDefaultAgent(ctx, storespec.SetDefaultTx{SysOpMeta: meta, Target: payload.InstanceID})
+	if err != nil {
 		return nil, asOperateError(err)
 	}
+	e.applyEffects(ctx, res.Effects)
 	return map[string]any{"default_agent": payload.InstanceID}, nil
 }
 

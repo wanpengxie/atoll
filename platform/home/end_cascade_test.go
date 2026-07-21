@@ -29,7 +29,7 @@ func TestMixedDurableRunCascadeClearsRoutingAndPublishesOneClosedWorld(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := h.setDefaultAgent(ctx, parent); err != nil {
+	if err := h.cs.Routing.SetDefaultAgent(ctx, parent); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.systemEndHandle().End(ctx, parent, "cascade"); err != nil {

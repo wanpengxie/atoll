@@ -108,12 +108,33 @@ func (h *Home) prepareEndIdentity(ctx context.Context, author storespec.AuthorSt
 		return nil, ErrEndNotSponsor
 	}
 
-	// Incremental prefix/sponsor closure: once every discovered node is locked,
-	// no concurrent Fork can inject another child because Fork locks its parent.
+	if err := h.lockClosure(ctx, target, locked, lockOne); err != nil {
+		return nil, err
+	}
+
+	plan, err := h.buildEndPlan(ctx, target, reason, author.ID)
+	if err != nil || len(plan.AllIDs) == 0 {
+		return nil, err
+	}
+	if _, err := h.cs.Cascade.EndCascade(ctx, storespec.CascadeBundle{
+		IDs: plan.DurableIDs, EndedAt: h.nowMs(), Envelopes: plan.Envelopes,
+	}); err != nil {
+		return nil, err
+	}
+	return h.finishEndTeardown(plan), nil
+}
+
+// lockClosure incrementally locks the full sponsor closure rooted at target,
+// using the caller's lock bookkeeping. Once it returns, no concurrent Fork can
+// inject another descendant: Fork locks its parent, and every discovered node
+// is already locked here. Shared by the self-end path (prepareEndIdentity) and
+// the member-word remove (removeMember) so the one Fork-race discipline is not
+// re-implemented.
+func (h *Home) lockClosure(ctx context.Context, target actor.ActorID, locked map[actor.ActorID]bool, lockOne func(actor.ActorID)) error {
 	for {
 		rows, err := h.controlIndex.ListActive(ctx)
 		if err != nil {
-			return nil, err
+			return err
 		}
 		inTree := map[actor.ActorID]bool{target: true}
 		changed := true
@@ -140,16 +161,16 @@ func (h *Home) prepareEndIdentity(ctx context.Context, author storespec.AuthorSt
 			lockOne(id)
 		}
 	}
+	return nil
+}
 
-	plan, err := h.buildEndPlan(ctx, target, reason, author.ID)
-	if err != nil || len(plan.AllIDs) == 0 {
-		return nil, err
-	}
-	if _, err := h.cs.Cascade.EndCascade(ctx, storespec.CascadeBundle{
-		IDs: plan.DurableIDs, EndedAt: h.nowMs(), Envelopes: plan.Envelopes,
-	}); err != nil {
-		return nil, err
-	}
+// finishEndTeardown runs the post-commit session cleanup for an ended closure
+// and returns the resource-tail despawn the caller runs after any egress
+// ordering. Shared by the self-end path and the member-word remove: the durable
+// truth was already committed (EndCascade or RemoveActor), and the run-world
+// in-memory teardown (session state / grants that no durable cascade can reach)
+// is identical for both.
+func (h *Home) finishEndTeardown(plan EndPlan) func() {
 	h.controlIndex.DeleteBatch(plan.AllIDs)
 	h.stateHandles.EndBatch(plan.RunIDs)
 	h.grantOverlay.EndBatch(plan.RunIDs)
@@ -172,7 +193,7 @@ func (h *Home) prepareEndIdentity(ctx context.Context, author storespec.AuthorSt
 		for _, id := range plan.AllIDs {
 			h.channel.Cells().DespawnID(id)
 		}
-	}, nil
+	}
 }
 
 func (h *Home) buildEndPlan(ctx context.Context, root actor.ActorID, reason string, endedBy actor.ActorID) (EndPlan, error) {

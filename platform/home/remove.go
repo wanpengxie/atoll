@@ -3,7 +3,6 @@ package home
 import (
 	"context"
 	"errors"
-	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
@@ -13,37 +12,6 @@ import (
 // ever meant to deregister. The daemon relay anchor needs no parallel guard
 // here: it is a compute id, never a member id Remove's caller could pass.
 var ErrRemoveAnchor = errors.New("platform: cannot remove the system anchor actor")
-
-var ErrRestartAnchor = errors.New("platform: cannot restart the system anchor actor")
-
-// Restart accepts a reconcile-driven restart: desired membership remains
-// untouched, the current embodiment is killed, and the ring is poked to rebuild.
-func (h *Home) restart(ctx context.Context, id actor.ActorID) error {
-	if h.closed.Load() {
-		return ErrClosed
-	}
-	if id == actor.SystemActorID {
-		return ErrRestartAnchor
-	}
-	unlock := h.actorGates.lock(id)
-	defer unlock()
-	if h.closed.Load() {
-		return ErrClosed
-	}
-	_, ok, err := h.controlIndex.LookupActive(ctx, id)
-	if err != nil {
-		return fmt.Errorf("platform: Restart membership lookup: %w", err)
-	}
-	if !ok {
-		return fmt.Errorf("platform: Restart requires an active member: %s", id)
-	}
-	if h.liveness != nil {
-		_, _ = h.liveness.Retire(id, true)
-	}
-	h.channel.Cells().DespawnIDReason(id, "restart")
-	h.pokeReconcile()
-	return nil
-}
 
 // Remove is identity-level termination's paved path: despawn-first + dereg
 // cascade + double-tap. This is a COMPOSITION over already-built primitives

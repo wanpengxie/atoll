@@ -74,12 +74,14 @@ func TestDaemonPlanProjectsLivenessIntentAndStableEnsureTicket(t *testing.T) {
 		t.Fatal("same-ticket rebind rejected")
 	}
 
-	// Manual restart of a present daemon carrier retires it and produces a fresh
-	// ticket at the same declaration version. Dormant restart above remained a
-	// no-op by construction.
-	if _, err := h.restartInstanceDirect(ctx, child); err != nil {
-		t.Fatal(err)
+	// Retiring the present daemon carrier (the reconcile-private bounce a
+	// restart's effect drives) and re-reconciling produces a fresh ticket at the
+	// same declaration version. A run-world fork child is not a durable
+	// composition member, so this is the carrier bounce itself, not the word.
+	if _, verdict := h.liveness.Retire(child, true); verdict != transitionApplied {
+		t.Fatalf("retire=%v", verdict)
 	}
+	h.channel.Cells().DespawnIDReason(child, "restart")
 	h.reconcileDaemonIntent(ctx)
 	restarted, _ := h.planForDaemon(ctx, "daemon-a")
 	if len(restarted) != 1 || restarted[0].Version != 1 || restarted[0].EnsureTicket == string(newTicket) {

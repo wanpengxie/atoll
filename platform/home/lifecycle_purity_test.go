@@ -339,9 +339,6 @@ func TestHomeCloseUnpublishesEveryEntryPoint(t *testing.T) {
 	if err := h.remove(ctx, "issued-human"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Remove after Close = %v, want ErrClosed", err)
 	}
-	if err := h.restart(ctx, "issued-human"); !errors.Is(err, ErrClosed) {
-		t.Fatalf("Restart after Close = %v, want ErrClosed", err)
-	}
 	sub, cancelSub := h.subscribe()
 	select {
 	case <-sub:
@@ -374,9 +371,6 @@ func TestHomeClosePublishesMutationFenceBeforeTeardown(t *testing.T) {
 
 	if _, err := h.declare(context.Background(), DeclareRequest{}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Declare during Close = %v, want ErrClosed", err)
-	}
-	if err := h.restart(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
-		t.Fatalf("Restart during Close = %v, want ErrClosed", err)
 	}
 	if err := h.remove(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Remove during Close = %v, want ErrClosed", err)

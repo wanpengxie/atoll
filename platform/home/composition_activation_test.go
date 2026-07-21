@@ -11,6 +11,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -260,7 +261,9 @@ func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {
 	}
 
 	resolver.fail.Store(false)
-	if _, err := h.restartInstanceDirect(context.Background(), record.ID); err != nil {
+	restartPayload, _ := json.Marshal(map[string]actor.ActorID{"instance_id": record.ID})
+	if _, err := h.opEntry.Execute(context.Background(), sysactor.TypeRestartActor,
+		sysactor.OperateRequest{ChannelID: h.channelID, Sender: record.ID, Anchor: "op:msg:restart:1", Payload: restartPayload}); err != nil {
 		t.Fatal(err)
 	}
 	waitHomeCondition(t, func() bool { return resolver.builds.Load() == 2 })
@@ -269,7 +272,7 @@ func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {
 		t.Fatal("version restart did not replace the composition incarnation")
 	}
 
-	if err := h.removeInstance(context.Background(), record.ID); err != nil {
+	if err := h.remove(context.Background(), record.ID); err != nil {
 		t.Fatal(err)
 	}
 	waitHomeCondition(t, func() bool {
@@ -378,6 +381,68 @@ func TestInvoluntaryBodyCrashBacksOffThenAutomaticallyRebuilds(t *testing.T) {
 		h.reviveMu.Unlock()
 		return !retained
 	})
+}
+
+// TestReconcileRespawnsOnRestartGenerationSkewWithoutEffects proves the
+// power-loss backstop: after the durable restart generation is bumped but the
+// restart EFFECTS (despawn/retire) never run — only the authority is re-read
+// from truth, as on a boot — reconcile bounces the stale live carrier on
+// generation skew alone and re-pulls a fresh embodiment.
+func TestReconcileRespawnsOnRestartGenerationSkewWithoutEffects(t *testing.T) {
+	resolver := &compositionActivationResolver{}
+	h, err := Open(Config{
+		ChannelID:           "restart-epoch-skew",
+		DBPath:              filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver: resolver,
+		ReconcileInterval:   10 * time.Millisecond,
+		Bootstrap:           true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.closeInternal("test") })
+	ctx := context.Background()
+	result, err := h.declare(ctx, DeclareRequest{
+		SourceDeclID: "decl:svc", Principal: "svc-probe", Class: "probe",
+		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := result.Row.ID
+	waitHomeCondition(t, func() bool { return resolver.builds.Load() == 1 })
+	first, ok := h.channel.Cells().CurrentIncarnation(id)
+	if !ok {
+		t.Fatal("composition member was not embodied")
+	}
+
+	// Commit the durable generation bump WITHOUT running its effects.
+	if _, err := h.cs.SysOps.RestartActor(ctx, storespec.RestartTx{
+		SysOpMeta: storespec.SysOpMeta{Anchor: "op:msg:restart:skew", RequestDigest: "rs", Source: storespec.SysOpSourceMember, Sender: id},
+		Target:    id,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Re-read the authority from durable truth (the boot-time refresh), leaving
+	// the stale live carrier for reconcile to find behind the account.
+	row, active, err := h.cs.Declared.LookupDeclaredActive(ctx, id)
+	if err != nil || !active {
+		t.Fatalf("reload row: active=%v err=%v", active, err)
+	}
+	if row.RestartEpoch != 1 {
+		t.Fatalf("durable restart_epoch=%d want 1", row.RestartEpoch)
+	}
+	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}}) {
+		t.Fatal("authority refresh rejected")
+	}
+
+	waitHomeCondition(t, func() bool {
+		cur, live := h.channel.Cells().CurrentIncarnation(id)
+		return live && cur != first
+	})
+	if resolver.builds.Load() < 2 {
+		t.Fatalf("generation skew did not drive a rebuild: builds=%d", resolver.builds.Load())
+	}
 }
 
 func waitHomeCondition(t *testing.T, condition func() bool) {
