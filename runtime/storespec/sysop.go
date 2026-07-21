@@ -134,9 +134,11 @@ type RemoveTx struct {
 	Envelopes  []CascadeEnvelope
 }
 
+// RemoveResult carries no PostCommitEffects: the member-remove session teardown
+// (including run-world state/grants that no PostCommitEffects can name) is driven
+// from Home's plan under the same Fork-race locks, not replayed from the store.
 type RemoveResult struct {
-	Removed []actor.ActorID   `json:"removed"`
-	Effects PostCommitEffects `json:"-"`
+	Removed []actor.ActorID `json:"removed"`
 }
 
 // RestartTx bumps the durable restart generation of one composition member.

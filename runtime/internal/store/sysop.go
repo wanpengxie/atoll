@@ -208,8 +208,6 @@ func decodeResult[T any](raw json.RawMessage, effects storespec.PostCommitEffect
 		value.Effects = effects
 	case *storespec.RevokeResult:
 		value.Effects = effects
-	case *storespec.RemoveResult:
-		value.Effects = effects
 	case *storespec.RestartResult:
 		value.Effects = effects
 	case *storespec.SetDefaultResult:
@@ -500,14 +498,9 @@ func (s *sysOpStore) RemoveActor(ctx context.Context, in storespec.RemoveTx) (st
 		if err != nil {
 			return sysOpOutcome{}, err
 		}
-		despawn := make([]actor.ActorID, 0, len(in.Envelopes))
-		for _, e := range in.Envelopes {
-			despawn = append(despawn, e.Target)
-		}
-		return sysOpOutcome{
-			result:  storespec.RemoveResult{Removed: newlyEnded},
-			effects: storespec.PostCommitEffects{Poke: true, Despawn: despawn},
-		}, nil
+		// No PostCommitEffects: the caller drives the whole session teardown
+		// (durable + run-world) from its own plan under the Fork-race locks.
+		return sysOpOutcome{result: storespec.RemoveResult{Removed: newlyEnded}}, nil
 	})
 	return decodeResult[storespec.RemoveResult](raw, effects, err)
 }
