@@ -381,13 +381,19 @@ func (h *ChannelHost) Destroy(_ context.Context, id channel.ID) error {
 	if current != nil {
 		current.state = stateSealing
 	}
+	alreadyClosed := current != nil && current.closed
 	h.mu.Unlock()
-	if current != nil && !current.closed {
+	if current != nil && !alreadyClosed {
+		// home.Shutdown is a slow IO operation and stays outside h.mu, but the
+		// entry state flip is a mutated field Acquire reads under h.mu.RLock, so
+		// the flip is always performed under h.mu.
 		if err := home.Shutdown(current.home); err != nil {
 			return fmt.Errorf("channelhost: close before seal: %w", err)
 		}
+		h.mu.Lock()
 		current.closed = true
 		current.state = stateSealed
+		h.mu.Unlock()
 	}
 	if exists(tombstone) {
 		if exists(main) {
@@ -496,11 +502,27 @@ func (h *ChannelHost) Close() error {
 	h.mu.Unlock()
 	var errs []error
 	for id, entry := range entries {
-		if entry.home != nil {
+		// Share the per-ID lock with the three lifecycle verbs so an in-flight
+		// Destroy on the same channel cannot rename a database file whose Home
+		// this Close is still shutting down, and neither double-shuts the Home.
+		// Whoever wins the per-ID lock runs to completion before the other
+		// observes `closed`; a Destroy that only wins after Close set h.closed
+		// bails at its checkOpen.
+		lock := h.idLock(id)
+		lock.Lock()
+		h.mu.Lock()
+		skip := entry.home == nil || entry.closed
+		h.mu.Unlock()
+		if !skip {
 			if err := home.Shutdown(entry.home); err != nil {
 				errs = append(errs, fmt.Errorf("channelhost: close %s: %w", id, err))
 			}
+			h.mu.Lock()
+			entry.closed = true
+			entry.state = stateSealed
+			h.mu.Unlock()
 		}
+		lock.Unlock()
 	}
 	return errors.Join(errs...)
 }
