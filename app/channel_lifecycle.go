@@ -20,6 +20,10 @@ import (
 const (
 	lifecycleTick  = 250 * time.Millisecond
 	lifecycleDrain = 16
+	// membershipSweepInterval paces the projection's third maintenance layer;
+	// the boot pass in reconcileServingChannels covers the window before the
+	// first tick fires.
+	membershipSweepInterval = 5 * time.Minute
 )
 
 type lifecycleWorker struct {
@@ -50,12 +54,17 @@ func (w *lifecycleWorker) start() {
 		defer close(w.done)
 		ticker := time.NewTicker(lifecycleTick)
 		defer ticker.Stop()
+		lastSweep := time.Now()
 		for {
 			select {
 			case <-w.ctx.Done():
 				return
 			case <-ticker.C:
 				w.drain()
+				if time.Since(lastSweep) >= membershipSweepInterval {
+					lastSweep = time.Now()
+					w.app.sweepMembershipProjection(w.ctx)
+				}
 			case <-w.wake:
 				w.drain()
 			}
@@ -487,6 +496,7 @@ func (a *App) reconcileServingChannels() error {
 			a.logger.Warn("orphan channel image", "channel", entry.ChannelID, "state", entry.State)
 		}
 	}
+	a.sweepMembershipProjection(context.Background())
 	return nil
 }
 

@@ -46,6 +46,107 @@ func (a *App) reconcilePrincipalChannel(ctx context.Context, chID channel.ID, pr
 	}
 }
 
+// sweepMembershipProjection is the projection's low-frequency third maintenance
+// layer (after same-transaction writes and targeted pokes): orphan rows whose
+// channel left the directory are dropped, then every serving channel's
+// KindHuman roster is two-way diffed against principal_channels. It repairs
+// drift no event will revisit — a poke that fired while the channel was
+// unavailable, or a member row nothing has listed since. Closed channels
+// cannot change membership, so serving channels plus the boot pass are
+// complete coverage; the boot pass doubles as the rebuild path.
+func (a *App) sweepMembershipProjection(ctx context.Context) {
+	if _, err := a.db.ExecContext(ctx, `DELETE FROM principal_channels WHERE channel_id NOT IN (SELECT id FROM channels)`); err != nil {
+		a.logger.Warn("membership sweep orphan cleanup failed", "err", err)
+	}
+	rows, err := a.db.QueryContext(ctx, `SELECT id FROM channels ORDER BY id`)
+	if err != nil {
+		a.logger.Warn("membership sweep directory read failed", "err", err)
+		return
+	}
+	var ids []string
+	for rows.Next() {
+		var id string
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			a.logger.Warn("membership sweep directory read failed", "err", err)
+			return
+		}
+		ids = append(ids, id)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		a.logger.Warn("membership sweep directory read failed", "err", err)
+		return
+	}
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return
+		}
+		a.sweepChannelMembership(ctx, channel.ID(id))
+	}
+}
+
+// sweepChannelMembership serializes with admission-driven membership writes via
+// the per-channel lock, so a join committing mid-diff cannot be deleted as stale.
+func (a *App) sweepChannelMembership(ctx context.Context, chID channel.ID) {
+	release := a.channelLocks.lock(string(chID))
+	defer release()
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return
+	}
+	actors, err := bundle.View().ActiveActors(ctx)
+	if err != nil {
+		a.logger.Warn("membership sweep roster read failed", "channel", chID, "err", err)
+		return
+	}
+	truth := make(map[string]string)
+	for _, row := range actors {
+		if row.Kind == actor.KindHuman && row.Principal != "" {
+			truth[row.Principal] = string(row.ID)
+		}
+	}
+	projRows, err := a.db.QueryContext(ctx, `SELECT principal,actor_id FROM principal_channels WHERE channel_id=?`, string(chID))
+	if err != nil {
+		a.logger.Warn("membership sweep projection read failed", "channel", chID, "err", err)
+		return
+	}
+	projected := make(map[string]string)
+	for projRows.Next() {
+		var principal, actorID string
+		if err := projRows.Scan(&principal, &actorID); err != nil {
+			projRows.Close()
+			a.logger.Warn("membership sweep projection read failed", "channel", chID, "err", err)
+			return
+		}
+		projected[principal] = actorID
+	}
+	projRows.Close()
+	if err := projRows.Err(); err != nil {
+		a.logger.Warn("membership sweep projection read failed", "channel", chID, "err", err)
+		return
+	}
+	now := time.Now().UnixMilli()
+	for principal, actorID := range truth {
+		if projected[principal] == actorID {
+			continue
+		}
+		if _, err := a.db.ExecContext(ctx, `INSERT INTO principal_channels(principal,channel_id,actor_id,updated_at)
+			VALUES (?,?,?,?) ON CONFLICT(principal,channel_id) DO UPDATE SET actor_id=excluded.actor_id,updated_at=excluded.updated_at`,
+			principal, string(chID), actorID, now); err != nil {
+			a.logger.Warn("membership sweep write failed", "channel", chID, "principal", principal, "err", err)
+		}
+	}
+	for principal := range projected {
+		if _, live := truth[principal]; live {
+			continue
+		}
+		if _, err := a.db.ExecContext(ctx, `DELETE FROM principal_channels WHERE principal=? AND channel_id=?`, principal, string(chID)); err != nil {
+			a.logger.Warn("membership sweep delete failed", "channel", chID, "principal", principal, "err", err)
+		}
+	}
+}
+
 func (a *App) EntitlementSnapshot(ctx context.Context, principal string) ([]EntitlementRoute, []channel.ID, error) {
 	rows, err := a.db.QueryContext(ctx, `SELECT pc.channel_id,pc.actor_id
 		FROM principal_channels pc JOIN channels c ON c.id=pc.channel_id
