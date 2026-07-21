@@ -59,10 +59,9 @@ type Origin struct {
 }
 
 type GenesisDeclaration struct {
-	DeclID    string                   `json:"decl_id"`
-	Principal string                   `json:"principal"`
-	Kind      actor.Kind               `json:"kind"`
-	Rendered  channel.RenderedSnapshot `json:"rendered_snapshot"`
+	DeclID   string                   `json:"decl_id"`
+	Kind     actor.Kind               `json:"kind"`
+	Rendered channel.RenderedSnapshot `json:"rendered_snapshot"`
 }
 
 type ProvisionSpec struct {
@@ -256,7 +255,7 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 		}
 		config := json.RawMessage(append([]byte(nil), declaration.Rendered.Config...))
 		if _, err := home.BootstrapDeclaration(ctx, homeInstance, home.DeclareRequest{
-			SourceDeclID: declaration.DeclID, Principal: declaration.Principal, Kind: declaration.Kind,
+			SourceDeclID: declaration.DeclID, Kind: declaration.Kind,
 			Class: declaration.Rendered.Class, Config: &config, Placement: placement,
 			TIdle: declaration.Rendered.TIdleMS, MakeDefault: declaration.DeclID == spec.DefaultSourceDeclID,
 			CreatedAt: spec.CreatedAt, RenderSeq: declaration.Rendered.RenderSeq,

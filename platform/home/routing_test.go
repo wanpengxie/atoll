@@ -47,7 +47,7 @@ func openRoutingHome(t *testing.T, name string) *Home {
 func routingAgent(t *testing.T, h *Home, source, principal, class string, makeDefault bool) storespec.ActorControlRow {
 	t.Helper()
 	result, err := h.declare(context.Background(), DeclareRequest{
-		SourceDeclID: source, Principal: principal, Kind: actor.KindAgent, Class: class,
+		SourceDeclID: source, Kind: actor.KindAgent, Class: class,
 		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(), MakeDefault: makeDefault,
 	})
 	if err != nil {
@@ -92,7 +92,7 @@ func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 	t.Run("boost fallback", func(t *testing.T) {
 		h := openRoutingHome(t, "routing-boost")
 		source := routingAgent(t, h, "source", "source", "missing", false)
-		boost := routingAgent(t, h, "boost", defaultRoutingAgentPrincipal, "routing-live", false)
+		boost := routingAgent(t, h, defaultRoutingAgentSource, "boost", "routing-live", false)
 		waitRoutingLive(t, h, boost.ID)
 		env, result, err := writeUnaddressed(t, h, source, "route-boost")
 		if err != nil || !result.Accepted() || env.Kind != message.KindRequest || len(env.Audience) != 1 || env.Audience[0] != boost.ID {
@@ -129,7 +129,7 @@ func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 		source := routingAgent(t, h, "source", "source", "missing", false)
 		_ = routingAgent(t, h, "default", "default", "missing", true)
 		// Even a live boost must not override an explicitly configured default.
-		boost := routingAgent(t, h, "boost", defaultRoutingAgentPrincipal, "routing-live", false)
+		boost := routingAgent(t, h, defaultRoutingAgentSource, "boost", "routing-live", false)
 		waitRoutingLive(t, h, boost.ID)
 		before, err := h.View().MaxSeq(context.Background())
 		if err != nil {

@@ -319,7 +319,6 @@ func (a *App) bundleOrError(c *gin.Context, chID channel.ID) channelhost.Bundle 
 }
 
 const (
-	defaultAgentPrincipal = "boost"
 	// defaultBoostClass is the engine CLASS the always-there boost floor runs.
 	// An agent's engine IS its actor class — claude/go-kimi are flat registry
 	// classes (kind=agent), there is NO umbrella "agent" class. boost has no

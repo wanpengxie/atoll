@@ -17,7 +17,7 @@ func TestActorRoleSQLConstraintsAndReadBoundaryFailClosed(t *testing.T) {
 	}
 	defer cs.Close()
 	admitted, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		Kind: actor.KindAgent, Principal: "agent", Class: "agent",
+		Kind: actor.KindAgent, SourceDeclID: "agent", Class: "agent",
 		Placement: storespec.NewServerPlacement(), CreatedAt: 1,
 	})
 	if err != nil {

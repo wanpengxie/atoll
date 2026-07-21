@@ -32,7 +32,7 @@ func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 	ctx := context.Background()
 
 	declared, err := h.declare(ctx, DeclareRequest{
-		SourceDeclID: "decl:probe", Principal: "probe", Class: "probe",
+		SourceDeclID: "decl:probe", Class: "probe",
 		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
@@ -82,5 +82,3 @@ func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 	}
 	assertNoTerminal("op-msg-absent", parsedDigest)
 }
-
-

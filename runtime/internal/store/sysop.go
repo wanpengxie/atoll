@@ -248,7 +248,7 @@ func (s *sysOpStore) Admit(ctx context.Context, in storespec.AdmitTx) (storespec
 		if err != nil {
 			return sysOpOutcome{}, err
 		}
-		if err := insertDeclaredTx(ctx, tx, id, actor.KindHuman, in.Principal, "human", nil, channel.RenderedSnapshot{
+		if err := insertDeclaredTx(ctx, tx, id, actor.KindHuman, in.Principal, "", nil, channel.RenderedSnapshot{
 			Class: "human", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
 		}, storespec.RoleNone, now); err != nil {
 			return sysOpOutcome{}, err
@@ -296,7 +296,7 @@ func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (s
 			}
 		}
 		var existing actor.ActorID
-		err := tx.QueryRowContext(ctx, `SELECT actor_id FROM actor_registry WHERE actor_kind=? AND principal=? AND deregistered_at IS NULL`, string(in.Kind), in.DeclID).Scan(&existing)
+		err := tx.QueryRowContext(ctx, `SELECT actor_id FROM actor_registry WHERE source_decl_id=? AND deregistered_at IS NULL`, in.DeclID).Scan(&existing)
 		if err == nil {
 			return sysOpOutcome{result: storespec.IntroduceResult{ActorID: existing}}, nil
 		}
@@ -331,7 +331,7 @@ func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (s
 		if err != nil {
 			return sysOpOutcome{}, err
 		}
-		if err := insertDeclaredTx(ctx, tx, id, in.Kind, in.DeclID, in.DeclID, rendered.Config, rendered, storespec.RoleNone, now); err != nil {
+		if err := insertDeclaredTx(ctx, tx, id, in.Kind, "", in.DeclID, rendered.Config, rendered, storespec.RoleNone, now); err != nil {
 			return sysOpOutcome{}, err
 		}
 		binding := actor.Binding("")
@@ -419,7 +419,7 @@ func (s *sysOpStore) ApplyDeclVersion(ctx context.Context, in storespec.ApplyTx)
 		}
 		var id actor.ActorID
 		var version, renderSeq int64
-		err := tx.QueryRowContext(ctx, `SELECT r.actor_id,r.current_decl_version,d.render_seq FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id AND d.version=r.current_decl_version WHERE r.principal=? AND r.deregistered_at IS NULL`, in.DeclID).Scan(&id, &version, &renderSeq)
+		err := tx.QueryRowContext(ctx, `SELECT r.actor_id,r.current_decl_version,d.render_seq FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id AND d.version=r.current_decl_version WHERE r.source_decl_id=? AND r.deregistered_at IS NULL`, in.DeclID).Scan(&id, &version, &renderSeq)
 		if errors.Is(err, sql.ErrNoRows) {
 			return sysOpOutcome{result: storespec.ApplyResult{Status: channel.ApplyAbsent}}, nil
 		}
@@ -430,7 +430,7 @@ func (s *sysOpStore) ApplyDeclVersion(ctx context.Context, in storespec.ApplyTx)
 			return sysOpOutcome{result: storespec.ApplyResult{Status: channel.ApplyStale, Version: version}}, nil
 		}
 		version++
-		if err := insertDeclVersionTx(ctx, tx, id, version, in.DeclID, in.Rendered, now); err != nil {
+		if err := insertDeclVersionTx(ctx, tx, id, version, in.Rendered, now); err != nil {
 			return sysOpOutcome{}, err
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE actor_registry SET current_decl_version=? WHERE actor_id=? AND deregistered_at IS NULL`, version, string(id)); err != nil {
@@ -452,7 +452,7 @@ func (s *sysOpStore) RevokeDeclTargets(ctx context.Context, in storespec.RevokeD
 		if in.DeclID == "" {
 			return decisive(channel.ErrCodeBadPayload, "decl_id required"), nil
 		}
-		ended, err := endMatchingInstancesTx(ctx, tx, s.channelID, `d.source_decl_id=?`, []any{in.DeclID}, now)
+		ended, err := endMatchingInstancesTx(ctx, tx, s.channelID, `r.source_decl_id=?`, []any{in.DeclID}, now)
 		if err != nil {
 			return sysOpOutcome{}, err
 		}
@@ -614,18 +614,18 @@ func insertDeclaredTx(ctx context.Context, tx *sql.Tx, id actor.ActorID, kind ac
 	if rendered.Placement.Kind == channel.PlacementDaemon {
 		binding = actor.BindingRuntimeInboundViaRelay
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO actor_registry(actor_id,actor_kind,principal,role,actor_binding,current_decl_version,created_at,deregistered_at) VALUES (?,?,?,?,?,1,?,NULL)`, string(id), string(kind), principal, string(role), nullableBinding(binding), at); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO actor_registry(actor_id,actor_kind,principal,source_decl_id,role,actor_binding,current_decl_version,created_at,deregistered_at) VALUES (?,?,?,?,?,?,1,?,NULL)`, string(id), string(kind), principal, source, string(role), nullableBinding(binding), at); err != nil {
 		return err
 	}
-	return insertDeclVersionTx(ctx, tx, id, 1, source, rendered, at)
+	return insertDeclVersionTx(ctx, tx, id, 1, rendered, at)
 }
 
-func insertDeclVersionTx(ctx context.Context, tx *sql.Tx, id actor.ActorID, version int64, source string, rendered channel.RenderedSnapshot, at int64) error {
+func insertDeclVersionTx(ctx context.Context, tx *sql.Tx, id actor.ActorID, version int64, rendered channel.RenderedSnapshot, at int64) error {
 	var config any
 	if rendered.Config != nil {
 		config = string(rendered.Config)
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO actor_decl_versions(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,source_decl_id,render_seq,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)`, string(id), version, rendered.Class, config, string(rendered.Placement.Kind), rendered.Placement.DesiredHost, rendered.TIdleMS, source, rendered.RenderSeq, at)
+	_, err := tx.ExecContext(ctx, `INSERT INTO actor_decl_versions(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,render_seq,created_at) VALUES (?,?,?,?,?,?,?,?,?)`, string(id), version, rendered.Class, config, string(rendered.Placement.Kind), rendered.Placement.DesiredHost, rendered.TIdleMS, rendered.RenderSeq, at)
 	return err
 }
 

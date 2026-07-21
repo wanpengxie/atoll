@@ -29,7 +29,7 @@ func TestFinalizeDeliveryPersistsBytesAndSurvivesLostReceipt(t *testing.T) {
 	chID := channel.ID("finalize-channel")
 	spec := channelhost.ProvisionSpec{
 		ChannelID: chID, Type: "group", OwnerPrincipal: "owner", CreatedAt: time.Now().UnixMilli(),
-		GenesisDeclarations: []channelhost.GenesisDeclaration{{DeclID: declID, Principal: declID, Kind: actor.KindAgent, Rendered: v1}},
+		GenesisDeclarations: []channelhost.GenesisDeclaration{{DeclID: declID, Kind: actor.KindAgent, Rendered: v1}},
 	}
 	openTestChannelForTest(t, a, chID, spec.GenesisDeclarations)
 	bundle, ok := a.host.Acquire(chID)

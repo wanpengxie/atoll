@@ -486,7 +486,7 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 	rctx, cancel := context.WithTimeout(s.ctx, s.gw.tRead)
 	defer cancel()
 	at := s.lane.cursor.at(ch)
-	rows, scanned, err := sub.route.Bundle.View().ReadVisibleAfterSeq(rctx, channel.Reader{Principal: s.principal, ActorID: sub.route.SubjectID, Mode: channel.ReaderMember}, at, feedBatch)
+	rows, scanned, err := sub.route.Bundle.View().ReadVisibleAfterSeq(rctx, channel.Reader{ActorID: sub.route.SubjectID, Mode: channel.ReaderMember}, at, feedBatch)
 	if err != nil || (len(rows) == 0 && scanned == at) {
 		return false, true
 	}

@@ -112,7 +112,7 @@ func BenchmarkActorStorm(b *testing.B) {
 		h := openStormHome(b)
 		ctx := context.Background()
 		declared, err := h.declare(ctx, DeclareRequest{
-			SourceDeclID: "storm:apply", Principal: "storm-apply", Kind: actor.KindAgent,
+			SourceDeclID: "storm:apply", Kind: actor.KindAgent,
 			Class: "storm-v1", Placement: storespec.NewServerPlacement(),
 			TIdle: int64(time.Hour / time.Millisecond), CreatedAt: time.Now().UnixMilli(),
 		})
@@ -125,7 +125,7 @@ func BenchmarkActorStorm(b *testing.B) {
 			edited, editErr := h.editDeclaration(ctx, storespec.DeclEditBundle{
 				ActorID: declared.Row.ID, Class: fmt.Sprintf("storm-v%d", i+2),
 				Placement: declared.Row.Placement, TIdle: declared.Row.TIdle,
-				SourceDeclID: declared.Row.SourceDeclID, CreatedAt: int64(i + 2),
+				CreatedAt: int64(i + 2),
 			})
 			if editErr != nil {
 				b.Fatal(editErr)

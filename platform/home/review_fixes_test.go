@@ -112,7 +112,7 @@ func TestDeclarationEditApplyPublishesCurrentAndKeepsLatestDistinct(t *testing.T
 	ctx := context.Background()
 	id := actor.ActorID("agent:decl-verbs:1")
 	in := storespec.AdmitBundle{
-		ID: id, Kind: actor.KindAgent, Principal: "decl-verbs", Binding: actor.BindingRuntimeInboundViaRelay,
+		ID: id, Kind: actor.KindAgent, Binding: actor.BindingRuntimeInboundViaRelay,
 		Class: "agent.v1", Placement: storespec.NewServerPlacement(), SourceDeclID: "source-v1", CreatedAt: 1,
 	}
 	if _, err := h.cs.DeclAdmission.AdmitDeclared(ctx, in); err != nil {
@@ -135,7 +135,7 @@ func TestDeclarationEditApplyPublishesCurrentAndKeepsLatestDistinct(t *testing.T
 	oldEnd := lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: id, BirthVersion: 1}}
 	edited, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
 		ActorID: id, Class: "agent.v2", Config: nil, Placement: storespec.NewServerPlacement(),
-		SourceDeclID: "source-v2", CreatedAt: 2,
+		CreatedAt: 2,
 	})
 	if err != nil || edited.CurrentDeclVersion != 2 || edited.Config != nil {
 		t.Fatalf("edit = %+v err=%v", edited, err)
@@ -185,7 +185,7 @@ func TestRealPensFenceAppliedAndEndedDeclaredAndRunIdentities(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
 	declared, err := h.declare(ctx, DeclareRequest{
-		SourceDeclID: "source:pen-gate", Principal: "pen-gate-declared", Kind: actor.KindAgent,
+		SourceDeclID: "source:pen-gate", Kind: actor.KindAgent,
 		Class: "pen-gate", Placement: storespec.NewServerPlacement(), TIdle: int64((time.Hour) / time.Millisecond),
 		CreatedAt: time.Now().UnixMilli(),
 	})
@@ -212,7 +212,7 @@ func TestRealPensFenceAppliedAndEndedDeclaredAndRunIdentities(t *testing.T) {
 	}
 	edited, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
 		ActorID: declared.Row.ID, Class: declared.Row.Class, Placement: declared.Row.Placement,
-		TIdle: declared.Row.TIdle, SourceDeclID: declared.Row.SourceDeclID, CreatedAt: time.Now().UnixMilli(),
+		TIdle: declared.Row.TIdle, CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
 		t.Fatal(err)

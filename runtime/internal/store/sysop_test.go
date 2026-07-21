@@ -15,7 +15,7 @@ import (
 func admitDurableAgent(t *testing.T, cs *ChannelStores, principal string) actor.ActorID {
 	t.Helper()
 	res, err := cs.DeclAdmission.AdmitDeclared(context.Background(), storespec.AdmitBundle{
-		Kind: actor.KindAgent, Principal: principal, Class: "agent",
+		Kind: actor.KindAgent, SourceDeclID: principal, Class: "agent",
 		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {

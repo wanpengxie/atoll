@@ -32,7 +32,7 @@ func realmToolRequest(t *testing.T, env *testEnv, setup setupResult, client *wsC
 func TestRealmToolBuiltInListCreateAndInspect(t *testing.T) {
 	env := setupTestApp(t)
 	setup := fullSetup(t, env)
-	toolID, err := env.app.ResolvePrincipalForTest(setup.chID, actor.KindTool, "realm-tool")
+	toolID, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestRealmToolFetchCopiesCrossChannelResourceWithProvenance(t *testing.T) {
 		t.Fatalf("source resource create=%v", ack)
 	}
 
-	toolID, err := env.app.ResolvePrincipalForTest(target.chID, actor.KindTool, "realm-tool")
+	toolID, err := env.app.ResolveSourceForTest(target.chID, "realm-tool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestRealmToolPrivateIntroductionAndSovereigntySwitch(t *testing.T) {
 	env := setupTestApp(t)
 	setup := fullSetup(t, env)
 	createAndBindDaemon(t, env, setup.chID, "realm-tool-introduce-host", setup.cookies)
-	toolID, err := env.app.ResolvePrincipalForTest(setup.chID, actor.KindTool, "realm-tool")
+	toolID, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -187,7 +187,7 @@ func TestRealmToolPrivateIntroductionAndSovereigntySwitch(t *testing.T) {
 	if err := env.app.RevokeRealmToolForTest(channel.ID(setup.chID)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := env.app.ResolvePrincipalForTest(setup.chID, actor.KindTool, "realm-tool"); err == nil {
+	if _, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool"); err == nil {
 		t.Fatal("realm tool remained in the channel after sovereignty switch")
 	}
 	ack := client.sendMessage(map[string]any{

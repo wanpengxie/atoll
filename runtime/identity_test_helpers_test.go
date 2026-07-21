@@ -12,10 +12,16 @@ func admitDeclaredTest(ctx context.Context, cs *ChannelStores, kind actor.Kind, 
 	if at <= 0 {
 		at = time.Now().UnixMilli()
 	}
-	result, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		Kind: kind, Principal: principal, Class: string(kind),
+	bundle := storespec.AdmitBundle{
+		Kind: kind, Class: string(kind),
 		Placement: storespec.NewServerPlacement(), CreatedAt: at,
-	})
+	}
+	if kind == actor.KindHuman {
+		bundle.Principal = principal
+	} else if kind == actor.KindAgent || kind == actor.KindTool {
+		bundle.SourceDeclID = principal
+	}
+	result, err := cs.DeclAdmission.AdmitDeclared(ctx, bundle)
 	return result.ID, err
 }
 

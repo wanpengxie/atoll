@@ -21,7 +21,7 @@ func (h *Home) editDeclaration(ctx context.Context, in storespec.DeclEditBundle)
 	}
 	release := h.actorGates.lock(in.ActorID)
 	defer release()
-	row, ok, err := h.controlIndex.LookupActive(ctx, in.ActorID)
+	_, ok, err := h.controlIndex.LookupActive(ctx, in.ActorID)
 	if err != nil {
 		return storespec.ActorControlRow{}, err
 	}
@@ -34,9 +34,6 @@ func (h *Home) editDeclaration(ctx context.Context, in storespec.DeclEditBundle)
 	}
 	if world != storespec.WorldDurable {
 		return storespec.ActorControlRow{}, ErrApplyVersionNotFound
-	}
-	if in.SourceDeclID == "" {
-		in.SourceDeclID = row.SourceDeclID
 	}
 	return h.cs.DeclVersions.EditDeclared(ctx, in)
 }

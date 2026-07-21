@@ -79,8 +79,7 @@ func TestBootPublishesHumanSystemAndCompositionRowsInOneControlShape(t *testing.
 	}
 	config := json.RawMessage(`{"shape":"complete"}`)
 	decl, err := h1.declare(ctx, DeclareRequest{
-		SourceDeclID: "decl:three-births", Principal: "composition-agent",
-		Kind: actor.KindAgent, Class: "composition-probe", Config: &config,
+		SourceDeclID: "decl:three-births", Kind: actor.KindAgent, Class: "composition-probe", Config: &config,
 		Placement: storespec.NewServerPlacement(), TIdle: 321, CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
@@ -103,7 +102,7 @@ func TestBootPublishesHumanSystemAndCompositionRowsInOneControlShape(t *testing.
 	}{
 		{actor.SystemActorID, actor.KindSystem, "system", 0, "", "", ""},
 		{humanID, actor.KindHuman, "human", 0, "", "", "three-birth-human"},
-		{decl.Row.ID, actor.KindAgent, "composition-probe", 321 * time.Millisecond, "decl:three-births", string(config), "composition-agent"},
+		{decl.Row.ID, actor.KindAgent, "composition-probe", 321 * time.Millisecond, "decl:three-births", string(config), ""},
 	}
 	for _, tc := range cases {
 		row, ok, err := h2.controlIndex.LookupActive(ctx, tc.id)
@@ -127,7 +126,7 @@ func TestEmptyConfigSurvivesAdmissionEditBootAndForkFactoryBuild(t *testing.T) {
 	resolver := &acceptanceResolver{}
 	h1 := openAcceptanceHome(t, dbPath, "empty-config-chain", resolver, 5*time.Millisecond)
 	decl, err := h1.declare(ctx, DeclareRequest{
-		SourceDeclID: "decl:empty", Principal: "empty-config", Kind: actor.KindAgent,
+		SourceDeclID: "decl:empty", Kind: actor.KindAgent,
 		Class: "declared-empty", Config: nil, Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
@@ -136,7 +135,7 @@ func TestEmptyConfigSurvivesAdmissionEditBootAndForkFactoryBuild(t *testing.T) {
 	waitHomeCondition(t, func() bool { return resolver.count(decl.Row.ID, "declared-empty", true) >= 1 })
 	edited, err := h1.editDeclaration(ctx, storespec.DeclEditBundle{
 		ActorID: decl.Row.ID, Class: "declared-empty", Config: nil,
-		Placement: storespec.NewServerPlacement(), SourceDeclID: "decl:empty", CreatedAt: time.Now().UnixMilli(),
+		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil || edited.Config != nil || edited.CurrentDeclVersion != 2 {
 		t.Fatalf("empty edit=%+v err=%v", edited, err)
@@ -296,7 +295,7 @@ func TestEnsureTicketFromPriorHomeSessionCannotAttach(t *testing.T) {
 	placement, _ := storespec.NewDaemonPlacement("daemon-ticket")
 	h1 := openAcceptanceHome(t, dbPath, "ticket-restart", resolver, time.Hour)
 	decl, err := h1.declare(ctx, DeclareRequest{
-		SourceDeclID: "decl:ticket", Principal: "ticketed", Kind: actor.KindAgent,
+		SourceDeclID: "decl:ticket", Kind: actor.KindAgent,
 		Class: "ticket-worker", Placement: placement, CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
@@ -336,7 +335,7 @@ func TestBootConvergesDurableDeclarationCommittedBeforeMemoryPublication(t *test
 	resolver := &acceptanceResolver{}
 	h1 := openAcceptanceHome(t, dbPath, "commit-before-publish", resolver, time.Hour)
 	admitted, err := h1.cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		ID: "agent:crash-window", Kind: actor.KindAgent, Principal: "crash-window",
+		ID: "agent:crash-window", Kind: actor.KindAgent,
 		Class: "crash-window-v1", Placement: storespec.NewServerPlacement(),
 		SourceDeclID: "decl:crash-window", CreatedAt: time.Now().UnixMilli(),
 	})
@@ -350,8 +349,7 @@ func TestBootConvergesDurableDeclarationCommittedBeforeMemoryPublication(t *test
 	// publish the applied row as well.
 	edited, err := h1.cs.DeclVersions.EditDeclared(ctx, storespec.DeclEditBundle{
 		ActorID: admitted.ID, Class: "crash-window-v2", Config: nil,
-		Placement: storespec.NewServerPlacement(), SourceDeclID: "decl:crash-window",
-		CreatedAt: time.Now().UnixMilli(),
+		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
 		t.Fatal(err)

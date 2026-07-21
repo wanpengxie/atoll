@@ -54,7 +54,7 @@ func TestClosedDB_IdentityBundlesError(t *testing.T) {
 	h := closedChannel(t)
 
 	if _, err := h.Admission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		Kind: actor.KindAgent, Principal: "a", Class: "agent",
+		Kind: actor.KindAgent, SourceDeclID: "decl:a", Class: "agent",
 		Placement: storespec.NewServerPlacement(), CreatedAt: 1,
 	}); err == nil {
 		t.Error("AdmitDeclared on closed DB must error")

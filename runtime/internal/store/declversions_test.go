@@ -17,7 +17,7 @@ func TestAdmitDeclaredWritesJoinedControlRowAtomically(t *testing.T) {
 		t.Fatal(err)
 	}
 	in := storespec.AdmitBundle{
-		ID: "agent:a:1", Kind: actor.KindAgent, Principal: "a",
+		ID: "agent:a:1", Kind: actor.KindAgent,
 		Binding: actor.BindingRuntimeInboundViaRelay, Class: "agent.test",
 		Config: []byte(`{"model":"x"}`), Placement: placement,
 		TIdle: 3 * time.Second, SourceDeclID: "decl-a", CreatedAt: 100,
@@ -48,6 +48,36 @@ func TestAdmitDeclaredWritesJoinedControlRowAtomically(t *testing.T) {
 	}
 }
 
+func TestDeclarationSourceIsImmutableUniqueAmongActiveActors(t *testing.T) {
+	cs := openTestChannel(t)
+	ctx := context.Background()
+	admit := func(id actor.ActorID, at int64) (storespec.DeclAdmissionResult, error) {
+		return cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
+			ID: id, Kind: actor.KindAgent, SourceDeclID: "decl:stable",
+			Class: "agent", Placement: storespec.NewServerPlacement(), CreatedAt: at,
+		})
+	}
+	first, err := admit("agent:first", 1)
+	if err != nil || !first.Created {
+		t.Fatalf("first admission = (%+v,%v)", first, err)
+	}
+	duplicate, err := admit("agent:second", 2)
+	if err != nil || duplicate.Created || duplicate.ID != first.ID {
+		t.Fatalf("active-source idempotency = (%+v,%v), want existing %q", duplicate, err, first.ID)
+	}
+	if _, err := cs.Cascade.EndCascade(ctx, storespec.CascadeBundle{IDs: []actor.ActorID{first.ID}, EndedAt: 3}); err != nil {
+		t.Fatal(err)
+	}
+	reintroduced, err := admit("agent:second", 4)
+	if err != nil || !reintroduced.Created || reintroduced.ID == first.ID {
+		t.Fatalf("reintroduction = (%+v,%v)", reintroduced, err)
+	}
+	row, ok, err := cs.Declared.LookupDeclaredActive(ctx, reintroduced.ID)
+	if err != nil || !ok || row.SourceDeclID != "decl:stable" || row.Principal != "" {
+		t.Fatalf("reintroduced row = (%+v,%v,%v)", row, ok, err)
+	}
+}
+
 func TestAdmitDeclaredNilConfigSurvivesReadPath(t *testing.T) {
 	cs := openTestChannel(t)
 	ctx := context.Background()
@@ -74,19 +104,19 @@ func TestEditDeclaredMintsLatestWithoutMovingCurrent(t *testing.T) {
 	ctx := context.Background()
 	id := actor.ActorID("agent:edit:1")
 	if _, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		ID: id, Kind: actor.KindAgent, Principal: "edit", Binding: actor.BindingRuntimeInboundViaRelay,
+		ID: id, Kind: actor.KindAgent, SourceDeclID: "decl-edit", Binding: actor.BindingRuntimeInboundViaRelay,
 		Class: "agent.v1", Placement: storespec.NewServerPlacement(), CreatedAt: 1,
 	}); err != nil {
 		t.Fatal(err)
 	}
 	latest, err := cs.DeclVersions.EditDeclared(ctx, storespec.DeclEditBundle{
 		ActorID: id, Class: "agent.v2", Config: nil, Placement: storespec.NewServerPlacement(),
-		SourceDeclID: "source-v2", CreatedAt: 2,
+		CreatedAt: 2,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest.CurrentDeclVersion != 2 || latest.Config != nil || latest.SourceDeclID != "source-v2" {
+	if latest.CurrentDeclVersion != 2 || latest.Config != nil || latest.SourceDeclID != "decl-edit" {
 		t.Fatalf("edited row = %+v", latest)
 	}
 	current, ok, err := cs.Declared.LookupDeclaredActive(ctx, id)

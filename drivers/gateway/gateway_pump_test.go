@@ -108,7 +108,7 @@ func sourceSeqs(t *testing.T, h *testChannel) []int64 {
 	after := int64(0)
 	for {
 		rows, scanned, err := h.View().ReadVisibleAfterSeq(context.Background(), channel.Reader{
-			Principal: h.principal, ActorID: h.memberID, Mode: channel.ReaderMember,
+			ActorID: h.memberID, Mode: channel.ReaderMember,
 		}, after, feedBatch)
 		if err != nil {
 			t.Fatalf("ReadAfterSeq(%d): %v", after, err)

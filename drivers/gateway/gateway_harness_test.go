@@ -22,6 +22,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type gatewayTestCompositionResolver struct{}
@@ -305,7 +306,7 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 		if sealErr != nil {
 			t.Fatal(sealErr)
 		}
-		spec.GenesisDeclarations = []channelhost.GenesisDeclaration{{DeclID: source, Principal: member, Kind: actor.KindAgent, Rendered: rendered}}
+		spec.GenesisDeclarations = []channelhost.GenesisDeclaration{{DeclID: source, Kind: actor.KindAgent, Rendered: rendered}}
 	}
 	if _, err := host.Provision(context.Background(), spec); err != nil {
 		t.Fatal(err)
@@ -317,7 +318,15 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	if !ok {
 		t.Fatal("channel bundle unavailable")
 	}
-	id, found, err := bundle.View().ResolvePrincipal(context.Background(), memberKind, member)
+	var id actor.ActorID
+	var found bool
+	if memberKind == actor.KindAgent {
+		var row storespec.ActorControlRow
+		row, found, err = bundle.View().DeclaredBySourceOne(context.Background(), source)
+		id = row.ID
+	} else {
+		id, found, err = bundle.View().ResolvePrincipal(context.Background(), memberKind, member)
+	}
 	if err != nil || !found {
 		t.Fatalf("ResolvePrincipal(%s)=(%s,%v,%v)", member, id, found, err)
 	}

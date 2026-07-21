@@ -97,10 +97,17 @@ func (a testAuthority) CheckAuthor(ctx context.Context, stamp storespec.AuthorSt
 // checks resolve it.
 func registerActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID, kind actor.Kind) actor.ActorID {
 	t.Helper()
-	result, err := cs.DeclAdmission.AdmitDeclared(context.Background(), storespec.AdmitBundle{
-		Kind: kind, Principal: strings.ReplaceAll(string(id), ":", "-"), Class: string(kind),
+	bundle := storespec.AdmitBundle{
+		Kind: kind, Class: string(kind),
 		Placement: storespec.NewServerPlacement(), CreatedAt: fixedNowMs,
-	})
+	}
+	identity := strings.ReplaceAll(string(id), ":", "-")
+	if kind == actor.KindHuman {
+		bundle.Principal = identity
+	} else if kind == actor.KindAgent || kind == actor.KindTool {
+		bundle.SourceDeclID = identity
+	}
+	result, err := cs.DeclAdmission.AdmitDeclared(context.Background(), bundle)
 	if err != nil {
 		t.Fatalf("register actor %q: %v", id, err)
 	}

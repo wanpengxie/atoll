@@ -43,7 +43,7 @@ func genesisChannel(t *testing.T, a *App, chID channel.ID, declID, config string
 	}
 	directoryRow(t, a, chID)
 	return openTestChannelForTest(t, a, chID, []channelhost.GenesisDeclaration{
-		{DeclID: declID, Principal: declID, Kind: actor.KindAgent, Rendered: rendered},
+		{DeclID: declID, Kind: actor.KindAgent, Rendered: rendered},
 	})
 }
 

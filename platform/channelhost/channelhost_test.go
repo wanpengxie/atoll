@@ -159,7 +159,7 @@ func TestGenesisOriginAndRenderedDeclaration(t *testing.T) {
 	}
 	spec := provisionSpec("child")
 	spec.Origin = &Origin{ParentChannelID: "parent", InitiatorPrincipal: "owner"}
-	spec.GenesisDeclarations = []GenesisDeclaration{{DeclID: "decl", Principal: "agent-decl", Kind: actor.KindAgent, Rendered: snapshot}}
+	spec.GenesisDeclarations = []GenesisDeclaration{{DeclID: "decl", Kind: actor.KindAgent, Rendered: snapshot}}
 	if _, err := host.Provision(ctx, spec); err != nil {
 		t.Fatal(err)
 	}
@@ -175,6 +175,20 @@ func TestGenesisOriginAndRenderedDeclaration(t *testing.T) {
 	}
 	if parent != "parent" || initiator != "owner" {
 		t.Fatalf("origin=(%q,%q)", parent, initiator)
+	}
+}
+
+func TestGenesisDeclarationWireShapeHasNoPrincipal(t *testing.T) {
+	raw, err := json.Marshal(GenesisDeclaration{DeclID: "decl", Kind: actor.KindAgent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &shape); err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := shape["principal"]; exists {
+		t.Fatalf("declaration provenance leaked a login principal: %s", raw)
 	}
 }
 

@@ -164,14 +164,13 @@ type DeclAdmissionStore interface {
 }
 
 type DeclEditBundle struct {
-	ActorID      actor.ActorID
-	Class        string
-	Config       json.RawMessage
-	Placement    Placement
-	TIdle        time.Duration
-	SourceDeclID string
-	RenderSeq    int64
-	CreatedAt    int64
+	ActorID   actor.ActorID
+	Class     string
+	Config    json.RawMessage
+	Placement Placement
+	TIdle     time.Duration
+	RenderSeq int64
+	CreatedAt int64
 }
 
 type DeclVersionStore interface {

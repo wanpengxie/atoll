@@ -8,7 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-const defaultRoutingAgentPrincipal = "boost"
+const defaultRoutingAgentSource = "sys:boost"
 
 var ErrRoutingUnavailable = errors.New("channel routing unavailable")
 
@@ -31,7 +31,7 @@ func (h *Home) resolveAudience(ctx context.Context, env *message.Envelope) error
 	if hasDefault {
 		return ErrRoutingUnavailable
 	}
-	boost, hasBoost, err := h.View().DeclaredByPrincipal(ctx, defaultRoutingAgentPrincipal)
+	boost, hasBoost, err := h.View().DeclaredBySourceOne(ctx, defaultRoutingAgentSource)
 	if err != nil {
 		return err
 	}

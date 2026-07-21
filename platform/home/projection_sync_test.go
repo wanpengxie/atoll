@@ -30,7 +30,7 @@ func TestProjectionSyncRepairsMissedRefreshBothWays(t *testing.T) {
 	ctx := context.Background()
 
 	declared, err := h.declare(ctx, DeclareRequest{
-		SourceDeclID: "decl:sync", Principal: "sync-probe", Class: "probe",
+		SourceDeclID: "decl:sync", Class: "probe",
 		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {

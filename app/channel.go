@@ -93,8 +93,8 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	}
 	spec := channelhost.ProvisionSpec{ChannelID: chID, Type: req.Type, OwnerPrincipal: caller, CreatedAt: now,
 		GenesisDeclarations: []channelhost.GenesisDeclaration{
-			{DeclID: "sys:boost", Principal: defaultAgentPrincipal, Kind: actor.KindAgent, Rendered: snapshot},
-			{DeclID: realmToolDeclID, Principal: realmToolDeclID, Kind: actor.KindTool, Rendered: realmSnapshot},
+			{DeclID: "sys:boost", Kind: actor.KindAgent, Rendered: snapshot},
+			{DeclID: realmToolDeclID, Kind: actor.KindTool, Rendered: realmSnapshot},
 		}, DefaultSourceDeclID: "sys:boost"}
 	if req.ParentID != nil {
 		spec.Origin = &channelhost.Origin{ParentChannelID: channel.ID(*req.ParentID), InitiatorPrincipal: caller}

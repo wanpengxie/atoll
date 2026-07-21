@@ -19,7 +19,7 @@ const (
 // Member readers carry their active channel actor; observer readers carry the
 // realm-authenticated principal whose perspective is being represented.
 type Reader struct {
-	Principal string        `json:"principal"`
+	Principal string        `json:"principal,omitempty"`
 	ActorID   actor.ActorID `json:"actor_id,omitempty"`
 	Mode      ReaderMode    `json:"mode"`
 }
@@ -27,7 +27,7 @@ type Reader struct {
 func (r Reader) Valid() bool {
 	switch r.Mode {
 	case ReaderMember:
-		return r.Principal != "" && r.ActorID != ""
+		return r.Principal == "" && r.ActorID != ""
 	case ReaderObserver:
 		return r.Principal != "" && r.ActorID == ""
 	default:

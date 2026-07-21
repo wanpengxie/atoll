@@ -74,7 +74,7 @@ func (a *App) readSubject(ctx context.Context, chID channel.ID, principal string
 		return nil, channel.Reader{}, observeUnavailable, err
 	}
 	if found {
-		return bundle, channel.Reader{Principal: principal, ActorID: memberID, Mode: channel.ReaderMember}, observeAllowed, nil
+		return bundle, channel.Reader{ActorID: memberID, Mode: channel.ReaderMember}, observeAllowed, nil
 	}
 	return a.canObserve(ctx, chID, principal)
 }

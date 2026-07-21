@@ -118,7 +118,7 @@ func introduceBuildWindowComposition(t *testing.T, h *Home, principal string) st
 	t.Helper()
 	at := time.Now().UnixMilli()
 	result, err := h.declare(context.Background(), DeclareRequest{
-		SourceDeclID: "decl:build-window", Principal: principal, Class: "build-window",
+		SourceDeclID: "decl:build-window", Class: "build-window",
 		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, TIdle: 60_000, CreatedAt: at,
 	})
 	if err != nil {
@@ -186,7 +186,7 @@ func TestStaleFactoryShellIsAbortedAndCurrentVersionRebuilt(t *testing.T) {
 	record := introduceBuildWindowComposition(t, h, "stale-factory-version")
 	edited, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
 		ActorID: record.ID, Class: record.Class, Config: json.RawMessage(`{"version":2}`),
-		Placement: record.Placement, TIdle: record.TIdle, SourceDeclID: record.SourceDeclID,
+		Placement: record.Placement, TIdle: record.TIdle,
 		CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil || edited.CurrentDeclVersion != 2 {
@@ -238,7 +238,7 @@ func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 
 	result, err := h.declare(context.Background(), DeclareRequest{
-		SourceDeclID: "decl:probe", Principal: "probe", Class: "probe",
+		SourceDeclID: "decl:probe", Class: "probe",
 		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
@@ -296,7 +296,7 @@ func TestCompositionConfigChangeAdvancesVersionAndRebuildsFromOneCommit(t *testi
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 
 	result, err := h.declare(context.Background(), DeclareRequest{
-		SourceDeclID: "decl:probe", Principal: "probe", Class: "probe",
+		SourceDeclID: "decl:probe", Class: "probe",
 		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
@@ -311,7 +311,7 @@ func TestCompositionConfigChangeAdvancesVersionAndRebuildsFromOneCommit(t *testi
 
 	cfg := json.RawMessage(`{"tone":"brisk"}`)
 	updated, err := h.declare(context.Background(), DeclareRequest{
-		SourceDeclID: "decl:probe", Principal: "probe", Class: "probe", Config: &cfg,
+		SourceDeclID: "decl:probe", Class: "probe", Config: &cfg,
 		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil || updated.Created || !updated.ConfigUpdated {
@@ -340,7 +340,7 @@ func TestInvoluntaryBodyCrashBacksOffThenAutomaticallyRebuilds(t *testing.T) {
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
 	result, err := h.declare(ctx, DeclareRequest{
-		SourceDeclID: "decl:crash-backoff", Principal: "crash-backoff", Kind: actor.KindAgent,
+		SourceDeclID: "decl:crash-backoff", Kind: actor.KindAgent,
 		Class: "crash-backoff", Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {

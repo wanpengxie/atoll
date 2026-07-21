@@ -9,12 +9,13 @@ import (
 
 func (r *actorRegistry) insertFixedID(ctx context.Context, rec storespec.Record) error {
 	principal := rec.Principal
-	if principal == "" && rec.Kind != actor.KindSystem {
-		principal = string(rec.ID)
+	source := ""
+	if rec.Kind == actor.KindAgent || rec.Kind == actor.KindTool {
+		source = "test:" + string(rec.ID)
 	}
 	_, err := r.AdmitDeclared(ctx, storespec.AdmitBundle{
 		ID: rec.ID, Kind: rec.Kind, Principal: principal, Binding: rec.Binding,
-		Class: string(rec.Kind), Placement: storespec.NewServerPlacement(), CreatedAt: rec.CreatedAt,
+		Class: string(rec.Kind), SourceDeclID: source, Placement: storespec.NewServerPlacement(), CreatedAt: rec.CreatedAt,
 	})
 	return err
 }

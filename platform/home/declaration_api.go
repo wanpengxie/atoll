@@ -1,19 +1,18 @@
 package home
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type DeclareRequest struct {
 	SourceDeclID string
-	Principal    string
 	Kind         actor.Kind
 	Class        string
 	Config       *json.RawMessage
@@ -46,7 +45,7 @@ func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 		binding = actor.BindingRuntimeInboundViaRelay
 	}
 	admitted, err := h.cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		Kind: in.Kind, Principal: in.Principal, Binding: binding, Class: in.Class, Config: config,
+		Kind: in.Kind, Binding: binding, Class: in.Class, Config: config,
 		Placement: in.Placement, TIdle: durationMillis(in.TIdle), SourceDeclID: in.SourceDeclID,
 		CreatedAt: in.CreatedAt, RenderSeq: in.RenderSeq,
 	})
@@ -68,10 +67,18 @@ func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 		return DeclareResult{}, errors.New("platform: invalid declared control row")
 	}
 	updated := false
-	if !admitted.Created && in.Config != nil && !bytes.Equal(row.Config, config) {
+	currentDigest, digestErr := declarationContentDigest(row, row.Config)
+	if digestErr != nil {
+		return DeclareResult{}, digestErr
+	}
+	candidateDigest, digestErr := declarationContentDigest(row, config)
+	if digestErr != nil {
+		return DeclareResult{}, digestErr
+	}
+	if !admitted.Created && in.Config != nil && currentDigest != candidateDigest {
 		edited, editErr := h.editDeclaration(ctx, storespec.DeclEditBundle{
 			ActorID: row.ID, Class: row.Class, Config: config, Placement: row.Placement,
-			TIdle: row.TIdle, SourceDeclID: row.SourceDeclID, CreatedAt: in.CreatedAt,
+			TIdle: row.TIdle, CreatedAt: in.CreatedAt,
 			RenderSeq: in.RenderSeq,
 		})
 		if editErr != nil {
@@ -93,6 +100,19 @@ func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 }
 
 func durationMillis(ms int64) time.Duration { return time.Duration(ms) * time.Millisecond }
+
+func declarationContentDigest(row storespec.ActorControlRow, config json.RawMessage) (string, error) {
+	return (channel.RenderedSnapshot{
+		Class:  row.Class,
+		Config: config,
+		Placement: channel.Placement{
+			Kind:        channel.PlacementKind(row.Placement.Kind),
+			DesiredHost: row.Placement.Host,
+		},
+		TIdleMS:   row.TIdle.Milliseconds(),
+		RenderSeq: max(row.RenderSeq, 1),
+	}).ContentDigest()
+}
 
 func (h *Home) activeActors(ctx context.Context) ([]storespec.ActorControlRow, error) {
 	if h.closed.Load() {
@@ -124,17 +144,4 @@ func (h *Home) declaredBySource(ctx context.Context, source string) ([]storespec
 		}
 	}
 	return out, nil
-}
-
-func (h *Home) declaredByPrincipal(ctx context.Context, principal string) (storespec.ActorControlRow, bool, error) {
-	rows, err := h.controlIndex.ListActive(ctx)
-	if err != nil {
-		return storespec.ActorControlRow{}, false, err
-	}
-	for _, row := range rows {
-		if row.Principal == principal {
-			return row, true, nil
-		}
-	}
-	return storespec.ActorControlRow{}, false, nil
 }

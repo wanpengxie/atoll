@@ -46,7 +46,7 @@ func (a *App) MessagesForTest(chID channel.ID) ([]storespec.StoredRow, error) {
 		}
 		if found && facts.Kind == actor.KindHuman {
 			rows, _, err := bundle.View().ReadVisibleAfterSeq(context.Background(), channel.Reader{
-				Principal: facts.Principal, ActorID: row.ID, Mode: channel.ReaderMember,
+				ActorID: row.ID, Mode: channel.ReaderMember,
 			}, 0, 1000)
 			return rows, err
 		}
@@ -177,6 +177,21 @@ func (a *App) ResolvePrincipalForTest(chID string, kind actor.Kind, principal st
 		return id, nil
 	}
 	return "", fmt.Errorf("principal not found")
+}
+
+func (a *App) ResolveSourceForTest(chID, source string) (actor.ActorID, error) {
+	bundle, ok := a.host.Acquire(channel.ID(chID))
+	if !ok {
+		return "", errTestChannelNotLoaded
+	}
+	row, found, err := bundle.View().DeclaredBySourceOne(context.Background(), source)
+	if err != nil {
+		return "", err
+	}
+	if found {
+		return row.ID, nil
+	}
+	return "", fmt.Errorf("declaration source not found")
 }
 
 // WaitLiveForTest polls chID's home until id has a live embodiment (View.Stat) or

@@ -71,7 +71,8 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_sysop_completed_correlation
 CREATE TABLE IF NOT EXISTS actor_registry (
   actor_id           TEXT PRIMARY KEY,
   actor_kind         TEXT NOT NULL,
-  principal          TEXT NOT NULL DEFAULT '', -- opaque continuing-subject anchor; actor_id remains an instance id
+  principal          TEXT NOT NULL DEFAULT '', -- login identity only; declaration-backed actors normally leave it empty
+  source_decl_id     TEXT NOT NULL DEFAULT '', -- immutable declaration provenance; never an operation identity
   role               TEXT NOT NULL DEFAULT '' CHECK (role IN ('', 'owner')) CHECK (role='' OR actor_kind='human'),
   actor_binding      TEXT,
 	current_decl_version INTEGER NOT NULL DEFAULT 1,
@@ -85,6 +86,9 @@ CREATE INDEX IF NOT EXISTS ix_actor_registry_active
 CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_principal
   ON actor_registry(actor_kind, principal)
   WHERE deregistered_at IS NULL AND principal <> '';
+CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_source_decl
+  ON actor_registry(source_decl_id)
+  WHERE deregistered_at IS NULL AND source_decl_id <> '';
 CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_owner
   ON actor_registry(role)
   WHERE role='owner' AND deregistered_at IS NULL;
@@ -99,7 +103,6 @@ CREATE TABLE IF NOT EXISTS actor_decl_versions (
   placement      TEXT NOT NULL CHECK(placement IN ('server','daemon')),
   desired_host   TEXT NOT NULL DEFAULT '' CHECK(placement='daemon' OR desired_host=''),
   t_idle_ms      INTEGER NOT NULL DEFAULT 0,
-  source_decl_id TEXT NOT NULL DEFAULT '',
 	 render_seq     INTEGER NOT NULL DEFAULT 0,
   created_at     INTEGER NOT NULL,
   PRIMARY KEY (actor_id, version)

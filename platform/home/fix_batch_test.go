@@ -65,7 +65,7 @@ func TestBootRebuildsWakeDebtFromDurableOpenRequest(t *testing.T) {
 	placement, _ := storespec.NewDaemonPlacement("daemon-wake")
 	h1 := openAcceptanceHome(t, dbPath, "boot-wake-debt", resolver, time.Hour)
 	decl, err := h1.declare(ctx, DeclareRequest{
-		SourceDeclID: "decl:wake", Principal: "waker", Kind: actor.KindAgent,
+		SourceDeclID: "decl:wake", Kind: actor.KindAgent,
 		Class: "wake-worker", Placement: placement, TIdle: 60_000,
 		CreatedAt: time.Now().UnixMilli(),
 	})

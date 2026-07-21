@@ -128,7 +128,7 @@ func seedMembersGrant(t *testing.T, cs *store.ChannelStores, id resource.Resourc
 func seedMember(t *testing.T, cs *store.ChannelStores, id actor.ActorID) actor.ActorID {
 	t.Helper()
 	result, err := cs.DeclAdmission.AdmitDeclared(context.Background(), storespec.AdmitBundle{
-		Kind: actor.KindAgent, Principal: string(id), Class: "agent",
+		Kind: actor.KindAgent, SourceDeclID: string(id), Class: "agent",
 		Placement: storespec.NewServerPlacement(), CreatedAt: 1,
 	})
 	if err != nil {

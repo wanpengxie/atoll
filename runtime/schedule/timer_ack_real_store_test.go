@@ -65,7 +65,7 @@ func openRealTimerFixture(t *testing.T) (timerspec.TimerStore, actor.ActorID) {
 	}
 	t.Cleanup(func() { _ = cs.Close() })
 	result, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		Kind: actor.KindAgent, Principal: "timer-ack-author", Class: "timer-ack-author",
+		Kind: actor.KindAgent, SourceDeclID: "timer-ack-author", Class: "timer-ack-author",
 		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {

@@ -74,7 +74,7 @@ func TestCrossPlacementForkBothDirectionsWithRealLifecycleArms(t *testing.T) {
 		t.Fatal(err)
 	}
 	daemonParent, err := h.declare(ctx, DeclareRequest{
-		SourceDeclID: "decl:daemon-parent", Principal: "daemon-parent", Kind: actor.KindAgent,
+		SourceDeclID: "decl:daemon-parent", Kind: actor.KindAgent,
 		Class: "cross.daemon-parent", Placement: daemonPlacement, CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {

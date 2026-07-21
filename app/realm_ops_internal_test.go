@@ -44,14 +44,14 @@ func TestRealmOpsAgentCannotWriteDeclarationRegistry(t *testing.T) {
 		t.Fatal(err)
 	}
 	bundle := openTestChannelForTest(t, a, "agent-realm-ops", []channelhost.GenesisDeclaration{{
-		DeclID: "requester-decl", Principal: "agent-principal", Kind: actor.KindAgent, Rendered: snapshot,
+		DeclID: "requester-decl", Kind: actor.KindAgent, Rendered: snapshot,
 	}})
-	agentID, found, err := bundle.View().ResolvePrincipal(context.Background(), actor.KindAgent, "agent-principal")
+	agent, found, err := bundle.View().DeclaredBySourceOne(context.Background(), "requester-decl")
 	if err != nil || !found {
-		t.Fatalf("resolve requester=(%s,%v,%v)", agentID, found, err)
+		t.Fatalf("resolve requester=(%s,%v,%v)", agent.ID, found, err)
 	}
 	_, err = (realmOps{app: a}).CreateDeclaration(context.Background(), channel.Requester{
-		ActorID: agentID, ChannelID: "agent-realm-ops", RequestID: "agent-create-request",
+		ActorID: agent.ID, ChannelID: "agent-realm-ops", RequestID: "agent-create-request",
 	}, channel.DeclSpec{Name: "must not persist", Class: "go-kimi", Visibility: "public", Config: json.RawMessage(`{}`)})
 	var realmErr *channel.RealmError
 	if !errors.As(err, &realmErr) || realmErr.Code != channel.RealmForbidden {
@@ -86,7 +86,7 @@ func TestObserverResourceStreamStopsAtChunkBoundaryAfterRealmToolRemoval(t *test
 		t.Fatal(err)
 	}
 	bundle := openTestChannelForTest(t, a, "stream-source", []channelhost.GenesisDeclaration{{
-		DeclID: realmToolDeclID, Principal: realmToolDeclID, Kind: actor.KindTool, Rendered: snapshot,
+		DeclID: realmToolDeclID, Kind: actor.KindTool, Rendered: snapshot,
 	}})
 	if _, err := a.db.Exec(`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES ('stream-source','stream-source','group',?,NULL)`, time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
@@ -126,13 +126,11 @@ func TestRealmOpsFetchAllowsAgentWithZeroSourceMembership(t *testing.T) {
 		return snapshot
 	}
 	source := openTestChannelForTest(t, a, "agent-fetch-source", []channelhost.GenesisDeclaration{
-		{DeclID: realmToolDeclID, Principal: realmToolDeclID, Kind: actor.KindTool, Rendered: seal(realmToolClass)},
-		{DeclID: "fetch-seeder", Principal: "fetch-seeder", Kind: actor.KindAgent, Rendered: seal(realmFetchSeederClass)},
+		{DeclID: realmToolDeclID, Kind: actor.KindTool, Rendered: seal(realmToolClass)},
+		{DeclID: "fetch-seeder", Kind: actor.KindAgent, Rendered: seal(realmFetchSeederClass)},
+		{DeclID: "fetch-requester", Kind: actor.KindAgent, Rendered: seal("dormant-fetch-requester")},
 	})
-	target := openTestChannelForTest(t, a, "agent-fetch-target", []channelhost.GenesisDeclaration{
-		{DeclID: "fetch-requester", Principal: "fetch-requester", Kind: actor.KindAgent, Rendered: seal("dormant-fetch-requester")},
-	})
-	for _, row := range []struct{ id, name string }{{"agent-fetch-source", "agent-fetch-source"}, {"agent-fetch-target", "agent-fetch-target"}} {
+	for _, row := range []struct{ id, name string }{{"agent-fetch-source", "agent-fetch-source"}} {
 		if _, err := a.db.Exec(`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES (?,?, 'group',?,NULL)`, row.id, row.name, time.Now().UnixMilli()); err != nil {
 			t.Fatal(err)
 		}
@@ -144,7 +142,7 @@ func TestRealmOpsFetchAllowsAgentWithZeroSourceMembership(t *testing.T) {
 	deadline := time.Now().Add(2 * time.Second)
 	for {
 		_, err = source.View().Resources().Stat(context.Background(), channel.Reader{
-			Principal: "owner", ActorID: sourceOwner, Mode: channel.ReaderMember,
+			ActorID: sourceOwner, Mode: channel.ReaderMember,
 		}, "kv:agent-source")
 		if err == nil {
 			break
@@ -154,15 +152,12 @@ func TestRealmOpsFetchAllowsAgentWithZeroSourceMembership(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	requester, found, err := target.View().ResolvePrincipal(context.Background(), actor.KindAgent, "fetch-requester")
+	requesterRow, found, err := source.View().DeclaredBySourceOne(context.Background(), "fetch-requester")
 	if err != nil || !found {
-		t.Fatalf("target requester=(%s,%v,%v)", requester, found, err)
-	}
-	if _, found, err := source.View().ResolvePrincipal(context.Background(), actor.KindAgent, "fetch-requester"); err != nil || found {
-		t.Fatalf("agent unexpectedly belongs to source: found=%v err=%v", found, err)
+		t.Fatalf("source requester=(%s,%v,%v)", requesterRow.ID, found, err)
 	}
 	fetched, err := (realmOps{app: a}).FetchResource(context.Background(), channel.Requester{
-		ActorID: requester, ChannelID: "agent-fetch-target", RequestID: "fetch-as-agent",
+		ActorID: requesterRow.ID, ChannelID: "agent-fetch-source", RequestID: "fetch-as-agent",
 	}, "agent-fetch-source", resource.ResourceID("kv:agent-source"))
 	if err != nil {
 		t.Fatal(err)

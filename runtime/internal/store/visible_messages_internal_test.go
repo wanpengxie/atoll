@@ -57,7 +57,7 @@ func TestReadVisibleAfterSeqFiltersBeforeLimitAndHonorsPerspectives(t *testing.T
 		t.Fatal(err)
 	}
 
-	bob := channel.Reader{Principal: "principal-b", ActorID: "bob", Mode: channel.ReaderMember}
+	bob := channel.Reader{ActorID: "bob", Mode: channel.ReaderMember}
 	rows, scanned, err := messages.ReadVisibleAfterSeq(ctx, bob, 0, batch)
 	if err != nil {
 		t.Fatal(err)
@@ -66,7 +66,7 @@ func TestReadVisibleAfterSeqFiltersBeforeLimitAndHonorsPerspectives(t *testing.T
 		t.Fatalf("bob rows=%v scanned=%d", rowSeqs(rows), scanned)
 	}
 
-	carol := channel.Reader{Principal: "principal-c", ActorID: "carol", Mode: channel.ReaderMember}
+	carol := channel.Reader{ActorID: "carol", Mode: channel.ReaderMember}
 	rows, _, err = messages.ReadVisibleAfterSeq(ctx, carol, 0, batch)
 	if err != nil || len(rows) != 1 || rows[0].Envelope.ID != "public" {
 		t.Fatalf("carol rows=%v err=%v", rowSeqs(rows), err)
@@ -89,7 +89,7 @@ func TestReadVisibleAfterSeqSnapshotCursorDoesNotSkipLaterInsert(t *testing.T) {
 	ctx := context.Background()
 	messages, register := openVisibleMessages(t)
 	register("alice", "principal-a")
-	reader := channel.Reader{Principal: "principal-a", ActorID: "alice", Mode: channel.ReaderMember}
+	reader := channel.Reader{ActorID: "alice", Mode: channel.ReaderMember}
 	if _, err := messages.Append(ctx, visibleEnvelope("first", "alice", message.VisibilityPublic), false); err != nil {
 		t.Fatal(err)
 	}

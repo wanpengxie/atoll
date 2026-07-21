@@ -85,11 +85,11 @@ func validateReader(ctx context.Context, authority storespec.ActorAuthority, as 
 	if as.Mode != channel.ReaderMember {
 		return nil
 	}
-	row, found, err := authority.LookupActive(ctx, as.ActorID)
+	_, found, err := authority.LookupActive(ctx, as.ActorID)
 	if err != nil {
 		return err
 	}
-	if !found || row.Principal != as.Principal {
+	if !found {
 		return &channel.RealmError{Code: channel.RealmForbidden}
 	}
 	return nil
@@ -223,13 +223,13 @@ func (v View) DeclaredBySource(ctx context.Context, source string) ([]storespec.
 	return out, nil
 }
 
-func (v View) DeclaredByPrincipal(ctx context.Context, principal string) (storespec.ActorControlRow, bool, error) {
+func (v View) DeclaredBySourceOne(ctx context.Context, source string) (storespec.ActorControlRow, bool, error) {
 	rows, err := v.control.ListActive(ctx)
 	if err != nil {
 		return storespec.ActorControlRow{}, false, err
 	}
 	for _, row := range rows {
-		if row.Principal == principal {
+		if row.SourceDeclID == source {
 			return row, true, nil
 		}
 	}

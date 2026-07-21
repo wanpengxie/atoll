@@ -191,8 +191,7 @@ func TestFlagshipMasterForkCallStateTimerAndHomeRestart(t *testing.T) {
 	resolver := &flagshipResolver{rounds: map[int]flagshipRound{}, roundDone: make(chan int, 8)}
 	h1 := openAcceptanceHome(t, dbPath, "flagship-workflow", resolver, 5*time.Millisecond)
 	master, err := h1.declare(ctx, DeclareRequest{
-		SourceDeclID: "decl:flagship-master", Principal: "flagship-master",
-		Kind: actor.KindAgent, Class: "flagship.master", Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
+		SourceDeclID: "decl:flagship-master", Kind: actor.KindAgent, Class: "flagship.master", Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
 		t.Fatal(err)

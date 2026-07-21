@@ -312,12 +312,12 @@ func (o realmOps) crossReader(ctx context.Context, req channel.Requester, source
 		return channel.Reader{}, &channel.RealmError{Code: channel.RealmCapabilityUnavailable, Detail: "source realm tool absent"}
 	}
 	if source == req.ChannelID {
-		return channel.Reader{Principal: facts.Principal, ActorID: req.ActorID, Mode: channel.ReaderMember}, nil
+		return channel.Reader{ActorID: req.ActorID, Mode: channel.ReaderMember}, nil
 	}
 	if id, found, err := bundle.View().ResolvePrincipal(ctx, actor.KindHuman, facts.Principal); err != nil {
 		return channel.Reader{}, err
 	} else if found {
-		return channel.Reader{Principal: facts.Principal, ActorID: id, Mode: channel.ReaderMember}, nil
+		return channel.Reader{ActorID: id, Mode: channel.ReaderMember}, nil
 	}
 	_, reader, reason, err := o.app.canObserve(ctx, source, facts.Principal)
 	if err != nil {
