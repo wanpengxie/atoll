@@ -19,6 +19,7 @@ import (
 )
 
 const realmFetchSeederClass = "test-realm-fetch-seeder"
+const realmCrossKindToolClass = "test-realm-cross-kind-tool"
 
 func init() {
 	registry.Register(realmFetchSeederClass, registry.ClassDecl{Kind: actor.KindAgent, New: func(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
@@ -33,6 +34,33 @@ func init() {
 			}, nil
 		}}}}, nil
 	}})
+	registry.Register(realmCrossKindToolClass, registry.ClassDecl{Kind: actor.KindTool, New: func(spec registry.InstanceSpec, _ registry.Deps) (platform.ActorDecl, error) {
+		return platform.ActorDecl{ID: spec.ID, Kind: actor.KindTool}, nil
+	}})
+}
+
+func TestRealmOpsEditDeclarationRejectsCrossKind(t *testing.T) {
+	a := newBareAppForTest(t)
+	bundle := openTestChannelForTest(t, a, "realm-edit-kind", nil)
+	owner, found, err := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, "owner")
+	if err != nil || !found {
+		t.Fatalf("owner=(%s,%v,%v)", owner, found, err)
+	}
+	now := time.Now().UnixMilli()
+	if _, err := a.db.Exec(`INSERT INTO actor_decls(id,name,owner,default_class,config_json,created_at,updated_at,visibility) VALUES ('kind-pinned','kind-pinned','owner',?,'{}',?,?,'private')`, realmFetchSeederClass, now, now); err != nil {
+		t.Fatal(err)
+	}
+	_, err = (realmOps{app: a}).EditDeclaration(context.Background(), channel.Requester{
+		ActorID: owner, ChannelID: "realm-edit-kind", RequestID: "cross-kind-edit",
+	}, "kind-pinned", channel.DeclSpec{Name: "kind-pinned", Class: realmCrossKindToolClass, Visibility: "private", Config: json.RawMessage(`{}`)})
+	var realmErr *channel.RealmError
+	if !errors.As(err, &realmErr) || realmErr.Code != channel.RealmInvalidRequest {
+		t.Fatalf("cross-kind edit err=%v", err)
+	}
+	var class string
+	if err := a.db.QueryRow(`SELECT default_class FROM actor_decls WHERE id='kind-pinned'`).Scan(&class); err != nil || class != realmFetchSeederClass {
+		t.Fatalf("cross-kind edit persisted class=%q err=%v", class, err)
+	}
 }
 
 func TestRealmOpsAgentCannotWriteDeclarationRegistry(t *testing.T) {

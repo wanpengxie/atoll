@@ -1,11 +1,9 @@
 package app_test
 
 import (
-	"encoding/json"
 	"net/http"
 	"testing"
-
-	"github.com/wanpengxie/atoll/protocol/channel"
+	"time"
 )
 
 func TestActorDeclListProjectsCurrentAndLatestChannelVersions(t *testing.T) {
@@ -23,10 +21,9 @@ func TestActorDeclListProjectsCurrentAndLatestChannelVersions(t *testing.T) {
 	createAndBindDaemon(t, env, secondChannel, "version-host-b", s.cookies)
 	introduced = env.do(t, "POST", "/api/channels/"+secondChannel+"/actors", map[string]any{"decl_id": declID}, s.cookies)
 	assertStatus(t, introduced, http.StatusCreated)
-	_, latest, err := env.app.SetDeclarationOverlayForTest(channel.ID(s.chID), declID, json.RawMessage(`{"model":"v2"}`))
-	if err != nil || latest != 2 {
-		t.Fatalf("stage edit latest=%d err=%v", latest, err)
-	}
+	updated := env.do(t, http.MethodPut, "/api/channels/"+s.chID+"/decls/"+declID+"/config", map[string]any{"config": map[string]any{"model": "v2"}}, s.cookies)
+	assertStatus(t, updated, http.StatusOK)
+	waitDeclarationInstanceVersion(t, env, s.cookies, declID, s.chID, 2)
 
 	w = env.do(t, "GET", "/api/actor-decls", nil, s.cookies)
 	assertStatus(t, w, http.StatusOK)
@@ -57,6 +54,30 @@ func TestActorDeclListProjectsCurrentAndLatestChannelVersions(t *testing.T) {
 		return
 	}
 	t.Fatalf("declaration %s absent from response: %v", declID, body)
+}
+
+func waitDeclarationInstanceVersion(t *testing.T, env *testEnv, cookies []*http.Cookie, declID, chID string, want float64) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		w := env.do(t, http.MethodGet, "/api/actor-decls", nil, cookies)
+		if w.Code == http.StatusOK {
+			for _, raw := range respJSON(t, w)["decls"].([]any) {
+				decl := raw.(map[string]any)
+				if decl["id"] != declID {
+					continue
+				}
+				for _, rawInstance := range decl["instances"].([]any) {
+					instance := rawInstance.(map[string]any)
+					if instance["channel_id"] == chID && instance["current_version"] == want && instance["latest_version"] == want {
+						return
+					}
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("declaration %s in channel %s did not reach version %.0f", declID, chID, want)
 }
 
 func TestActorDeclListIncludesPublicAndOwnPrivateOnly(t *testing.T) {

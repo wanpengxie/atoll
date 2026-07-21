@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -77,42 +76,6 @@ func (a *App) PlanForDaemonForTest(chID channel.ID, daemonID string) ([]platform
 		return nil, errTestChannelNotLoaded
 	}
 	return bundle.Daemon().PlanForDaemon(context.Background(), daemonID)
-}
-
-func (a *App) SetDeclarationOverlayForTest(chID channel.ID, sourceID string, config json.RawMessage) (actor.ActorID, int64, error) {
-	bundle, ok := a.host.Acquire(chID)
-	if !ok {
-		return "", 0, errTestChannelNotLoaded
-	}
-	rows, err := bundle.View().DeclaredBySource(context.Background(), sourceID)
-	if err != nil || len(rows) == 0 {
-		return "", 0, err
-	}
-	row := rows[0]
-	canonical, err := channel.CanonicalJSON(config)
-	if err != nil {
-		return row.ID, 0, err
-	}
-	if _, err := a.db.Exec(`INSERT INTO channel_decl_overlays(channel_id,decl_id,config_json,updated_at)
-		VALUES(?,?,?,?) ON CONFLICT(channel_id,decl_id) DO UPDATE SET config_json=excluded.config_json,updated_at=excluded.updated_at`,
-		string(chID), sourceID, string(canonical), time.Now().UnixMilli()); err != nil {
-		return row.ID, 0, err
-	}
-	a.host.Poke(chID)
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		_, latest, err := bundle.View().DeclarationVersions(context.Background(), row.ID)
-		if err != nil {
-			return row.ID, 0, err
-		}
-		if string(latest.Config) == string(canonical) {
-			return row.ID, latest.CurrentDeclVersion, nil
-		}
-		if time.Now().After(deadline) {
-			return row.ID, latest.CurrentDeclVersion, errors.New("declaration overlay did not converge")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
 }
 
 // Handler exposes the assembled gin engine as an http.Handler so black-box

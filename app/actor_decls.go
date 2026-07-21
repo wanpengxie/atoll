@@ -1,6 +1,7 @@
 package app
 
 import (
+	"database/sql"
 	"encoding/json"
 	"net/http"
 	"sort"
@@ -11,6 +12,7 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/wanpengxie/atoll/app/internal/middleware"
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // actor_decls.go is the create-and-control face: a direct API over the
@@ -158,12 +160,13 @@ func (a *App) handleListDecls(c *gin.Context) {
 
 type updateDeclReq struct {
 	Name       *string         `json:"name"`
+	Class      *string         `json:"class"`
 	Config     json.RawMessage `json:"config"`
 	Visibility *string         `json:"visibility"`
 }
 
-// handleUpdateDecl edits a declaration's name / global config (declaration data).
-// It does NOT hot-update a live cell — the new config is read on the next restart.
+// handleUpdateDecl writes the global declaration value. Channel Homes pull the
+// new class/config after commit; class changes must remain within one actor kind.
 func (a *App) handleUpdateDecl(c *gin.Context) {
 	userID := middleware.UserID(c)
 	declID := c.Param("declID")
@@ -179,10 +182,32 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 		return
 	}
 	defer tx.Rollback()
-	var count int
-	if err := tx.QueryRowContext(c.Request.Context(), `SELECT COUNT(*) FROM actor_decls WHERE id=? AND owner=? AND deleted_at IS NULL`, declID, userID).Scan(&count); err != nil || count == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
+	var currentClass string
+	if err := tx.QueryRowContext(c.Request.Context(), `SELECT default_class FROM actor_decls WHERE id=? AND owner=? AND deleted_at IS NULL`, declID, userID).Scan(&currentClass); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		}
 		return
+	}
+	if req.Class != nil {
+		class := strings.TrimSpace(*req.Class)
+		oldKind, oldFound, oldErr := (compositionResolver{app: a}).ClassKind(c.Request.Context(), currentClass)
+		newKind, newFound, newErr := (compositionResolver{app: a}).ClassKind(c.Request.Context(), class)
+		if oldErr != nil || newErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "class registry unavailable"})
+			return
+		}
+		if class == realmToolClass || !oldFound || !newFound || oldKind != newKind {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "class must remain within the declaration kind"})
+			return
+		}
+		if _, err := tx.ExecContext(c.Request.Context(),
+			`UPDATE actor_decls SET default_class=?,updated_at=? WHERE id=? AND owner=?`, class, now, declID, userID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
+		}
 	}
 	if req.Name != nil {
 		if _, err := tx.ExecContext(c.Request.Context(),
@@ -210,9 +235,14 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "config must be a JSON object"})
 			return
 		}
+		canonical, err := channel.CanonicalJSON(req.Config)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid config"})
+			return
+		}
 		if _, err := tx.ExecContext(c.Request.Context(),
 			`UPDATE actor_decls SET config_json = ?, updated_at = ? WHERE id = ? AND owner = ?`,
-			string(req.Config), now, declID, userID); err != nil {
+			string(canonical), now, declID, userID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			return
 		}

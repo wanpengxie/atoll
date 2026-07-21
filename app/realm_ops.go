@@ -154,6 +154,24 @@ func (o realmOps) EditDeclaration(ctx context.Context, req channel.Requester, de
 		return channel.DeclDetail{}, err
 	}
 	defer tx.Rollback()
+	var currentClass string
+	if err := tx.QueryRowContext(ctx, `SELECT default_class FROM actor_decls WHERE id=? AND owner=? AND deleted_at IS NULL`, declID, facts.Principal).Scan(&currentClass); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return channel.DeclDetail{}, &channel.RealmError{Code: channel.RealmDeclNotFound}
+		}
+		return channel.DeclDetail{}, err
+	}
+	oldKind, oldFound, err := (compositionResolver{app: o.app}).ClassKind(ctx, currentClass)
+	if err != nil {
+		return channel.DeclDetail{}, err
+	}
+	newKind, newFound, err := (compositionResolver{app: o.app}).ClassKind(ctx, spec.Class)
+	if err != nil {
+		return channel.DeclDetail{}, err
+	}
+	if !oldFound || !newFound || oldKind != newKind {
+		return channel.DeclDetail{}, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "class must remain within the declaration kind"}
+	}
 	now := time.Now().UnixMilli()
 	res, err := tx.ExecContext(ctx, `UPDATE actor_decls SET name=?,default_class=?,config_json=?,visibility=?,updated_at=? WHERE id=? AND owner=? AND deleted_at IS NULL`, spec.Name, spec.Class, string(spec.Config), spec.Visibility, now, declID, facts.Principal)
 	if err != nil {
@@ -165,6 +183,7 @@ func (o realmOps) EditDeclaration(ctx context.Context, req channel.Requester, de
 	if err := tx.Commit(); err != nil {
 		return channel.DeclDetail{}, err
 	}
+	o.app.pokeAllChannels(ctx)
 	return channel.DeclDetail{DeclSummary: channel.DeclSummary{ID: declID, Name: spec.Name, Owner: facts.Principal, Visibility: spec.Visibility, Class: spec.Class}, Config: spec.Config}, nil
 }
 
