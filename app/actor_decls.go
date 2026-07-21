@@ -15,14 +15,13 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// actor_decls.go is the create-and-control face: a direct API over the
-// `actor_decls` declaration table + channel-local composition — the front-end
-// UI's CRUD for a user's declared actor instances (create / introduce-to-channel
-// / edit config / restart / soft-delete). The declaration layer is kind-neutral:
+// actor_decls.go is the declaration registry's global-value face: the front-end
+// CRUD for a user's blueprints (create / inspect / edit / soft-delete). Channel
+// introduction and removal are structural operations; channel-local config lives
+// in the declaration-keyed overlay API. The declaration layer is kind-neutral:
 // one row = identity + class + config + owner + visibility, for agents and tools
-// alike. It writes the tables directly (declaration data, NOT actor messages);
-// changes take effect when the cell is (re)built, never via live hot update
-// (Restart requests a fresh incarnation).
+// alike. It writes realm current values directly, then pokes serving channels;
+// each Home pulls and applies the resolved snapshot during reconcile.
 
 type createDeclReq struct {
 	Name string `json:"name"`

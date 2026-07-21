@@ -391,3 +391,81 @@ func TestDeclarationSyncAppliesByActorAndEqualIsZeroWrite(t *testing.T) {
 	}
 	assertEventPair(t, cs, applied.Anchor)
 }
+
+func TestDeclarationSyncFreshRefsAreLevelIdempotentAndABASafe(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	first := admitDurableAgent(t, cs, "decl-aba")
+	apply := func(anchor string, id actor.ActorID) storespec.DeclarationSyncResult {
+		t.Helper()
+		result, err := cs.DeclarationSync.ApplyResolvedDeclaration(ctx, storespec.DeclarationSyncTx{
+			SysOpMeta: sysMeta(anchor, "digest:"+anchor), ActorID: id, DeclID: "decl-aba", Class: "agent", Config: []byte(`{"value":"b"}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+	if got := apply("ifin:v1:first", first); got.Status != storespec.DeclarationApplied || got.Version != 2 {
+		t.Fatalf("first apply=%+v", got)
+	}
+	if got := apply("ifin:v1:equal-fresh", first); got.Status != storespec.DeclarationEqual || got.Version != 2 {
+		t.Fatalf("fresh equal=%+v", got)
+	}
+	var equalEvents int
+	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE correlation_id='ifin:v1:equal-fresh'`).Scan(&equalEvents); err != nil || equalEvents != 0 {
+		t.Fatalf("fresh equal events=%d err=%v", equalEvents, err)
+	}
+	if _, err := cs.Cascade.EndCascade(ctx, storespec.CascadeBundle{IDs: []actor.ActorID{first}, EndedAt: time.Now().UnixMilli()}); err != nil {
+		t.Fatal(err)
+	}
+	second := admitDurableAgent(t, cs, "decl-aba")
+	if second == first {
+		t.Fatal("reintroduction reused ActorID")
+	}
+	if got := apply("ifin:v1:new-lifetime", second); got.Status != storespec.DeclarationApplied || got.Version != 2 {
+		t.Fatalf("old completed row replayed into new lifetime: %+v", got)
+	}
+	oldAttempt, err := cs.DeclarationSync.ApplyResolvedDeclaration(ctx, storespec.DeclarationSyncTx{
+		SysOpMeta: sysMeta("ifin:v1:old-actor", "old-actor"), ActorID: first, DeclID: "decl-aba", Class: "agent", Config: []byte(`{"value":"c"}`),
+	})
+	if err != nil || oldAttempt.Status != storespec.DeclarationAbsent {
+		t.Fatalf("old actor attempt=(%+v,%v)", oldAttempt, err)
+	}
+	row, found, err := cs.Declared.LookupDeclaredActive(ctx, second)
+	if err != nil || !found || row.CurrentDeclVersion != 2 || string(row.Config) != `{"value":"b"}` {
+		t.Fatalf("old attempt touched new actor: row=%+v found=%v err=%v", row, found, err)
+	}
+}
+
+func TestDeclarationSyncFailureBeforeCommitLeavesNoTraceAndFreshRefRetriesOnce(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	id := admitDurableAgent(t, cs, "decl-retry")
+	if _, err := cs.db.Exec(`CREATE TRIGGER fail_decl_sync BEFORE INSERT ON actor_decl_versions WHEN NEW.version=2 BEGIN SELECT RAISE(ABORT,'injected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	failed := storespec.DeclarationSyncTx{
+		SysOpMeta: sysMeta("ifin:v1:failed", "failed"), ActorID: id, DeclID: "decl-retry", Class: "agent", Config: []byte(`{"value":"b"}`),
+	}
+	if _, err := cs.DeclarationSync.ApplyResolvedDeclaration(ctx, failed); err == nil {
+		t.Fatal("injected pre-commit failure succeeded")
+	}
+	var version, events int
+	if err := cs.db.QueryRow(`SELECT current_decl_version FROM actor_registry WHERE actor_id=?`, id).Scan(&version); err != nil || version != 1 {
+		t.Fatalf("failed transaction version=%d err=%v", version, err)
+	}
+	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE correlation_id=?`, failed.Anchor).Scan(&events); err != nil || events != 0 {
+		t.Fatalf("failed transaction events=%d err=%v", events, err)
+	}
+	if _, err := cs.db.Exec(`DROP TRIGGER fail_decl_sync`); err != nil {
+		t.Fatal(err)
+	}
+	retry := failed
+	retry.Anchor, retry.RequestDigest = "ifin:v1:retry", "retry"
+	result, err := cs.DeclarationSync.ApplyResolvedDeclaration(ctx, retry)
+	if err != nil || result.Status != storespec.DeclarationApplied || result.Version != 2 {
+		t.Fatalf("fresh retry=(%+v,%v)", result, err)
+	}
+	assertEventPair(t, cs, retry.Anchor)
+}

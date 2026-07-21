@@ -8,13 +8,13 @@ import (
 	"testing"
 )
 
-// TestSysOpMethodSetIsClosedAtMigrationValueOperations pins the two-family split
-// on the realm-facing bundle: SysOp is the VALUE-OPERATION face and stays a
+// TestSysOpMethodSetIsClosedAtFiveStructuralOperations pins the two-family split
+// on the realm-facing bundle: SysOp is the structural-operation face and stays a
 // closed set of exactly five typed words — observations (reads) belong to
 // View and must never widen SysOp (the R5-P2 drift: a serialized read landed
 // on SysOp because it wanted the operation lock; locking is an implementation
 // privacy, not a family membership).
-func TestSysOpMethodSetIsClosedAtMigrationValueOperations(t *testing.T) {
+func TestSysOpMethodSetIsClosedAtFiveStructuralOperations(t *testing.T) {
 	want := map[string]bool{
 		"Admit":        true,
 		"Introduce":    true,

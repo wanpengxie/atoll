@@ -16,16 +16,79 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-type testResolver struct{ daemonDeleted bool }
+type testResolver struct {
+	daemonDeleted   bool
+	declaration     channel.DeclarationFacts
+	declarationLive bool
+}
 
 func (testResolver) BuildClass(channel.ID, actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool) {
 	return platform.ActorFactory{}, false
 }
 
-func (testResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
-	return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+func (r testResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
+	if !r.declarationLive {
+		return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+	}
+	return r.declaration, nil
 }
-func (testResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
+
+func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	liveResolver := testResolver{declarationLive: true, declaration: channel.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`)}}
+	host, err := New(root, HomeDeps{CompositionResolver: liveResolver, IntroductionResolver: liveResolver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := (channel.RenderedSnapshot{
+		Class: "test-agent", Config: json.RawMessage(`{"value":"a"}`), Placement: channel.Placement{Kind: channel.PlacementServer},
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := provisionSpec("offline-declaration")
+	spec.GenesisDeclarations = []GenesisDeclaration{{DeclID: "decl-a", Kind: actor.KindAgent, Rendered: snapshot}}
+	if _, err := host.Provision(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ExpectedType: spec.Type}); err != nil {
+		t.Fatal(err)
+	}
+	initial, ok := host.Acquire(spec.ChannelID)
+	if !ok {
+		t.Fatal("provisioned channel not serving")
+	}
+	initialRow, found, err := initial.View().DeclaredBySourceOne(ctx, "decl-a")
+	if err != nil || !found || initialRow.CurrentDeclVersion != 1 {
+		t.Fatalf("equal first sweep double-wrote genesis: row=%+v found=%v err=%v", initialRow, found, err)
+	}
+	if err := host.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	latestResolver := testResolver{declarationLive: true, declaration: channel.DeclarationFacts{Class: "test-agent", Config: json.RawMessage(`{"value":"b"}`)}}
+	reopened, err := New(root, HomeDeps{CompositionResolver: latestResolver, IntroductionResolver: latestResolver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ExpectedType: spec.Type}); err != nil {
+		t.Fatal(err)
+	}
+	bundle, ok := reopened.Acquire(spec.ChannelID)
+	if !ok {
+		t.Fatal("reopened channel not serving")
+	}
+	row, found, err := bundle.View().DeclaredBySourceOne(ctx, "decl-a")
+	if err != nil || !found || row.CurrentDeclVersion != 2 || string(row.Config) != `{"value":"b"}` {
+		t.Fatalf("first-sweep declaration=(%+v,%v,%v)", row, found, err)
+	}
+}
+func (testResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
+	if class == "test-agent" {
+		return actor.KindAgent, true, nil
+	}
 	return "", false, nil
 }
 func (r testResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
