@@ -154,6 +154,9 @@ func New(root string, deps HomeDeps) (*ChannelHost, error) {
 	if deps.CompositionResolver == nil {
 		return nil, errors.New("channelhost: CompositionResolver required")
 	}
+	if deps.IntroductionResolver == nil {
+		return nil, errors.New("channelhost: IntroductionResolver required")
+	}
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("channelhost: create root: %w", err)
 	}

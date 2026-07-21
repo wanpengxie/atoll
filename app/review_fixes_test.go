@@ -29,10 +29,10 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 
 	// A normal schema trigger (not TEMP/connection-local) fails the authority
-	// DELETE itself — under the convergence-patrol model that single write IS
+	// tombstone UPDATE itself — that single value write IS
 	// the whole revocation publish.
 	if _, err := env.db.Exec(`CREATE TRIGGER fail_daemon_revoke_job
-		BEFORE DELETE ON daemons
+		BEFORE UPDATE OF deleted_at ON daemons WHEN NEW.deleted_at IS NOT NULL
 		BEGIN SELECT RAISE(ABORT, 'forced revoke failure'); END`); err != nil {
 		t.Fatalf("install revoke trigger: %v", err)
 	}
@@ -88,6 +88,8 @@ func TestDeleteDaemon_HappyPath_RemovesBindings(t *testing.T) {
 	assertStatus(t, w, http.StatusOK)
 
 	// Delete commits the daemon revocation and durable fanout obligation.
+	w = env.do(t, "DELETE", "/api/daemons/"+daemonID, nil, cookies2)
+	assertStatus(t, w, http.StatusOK)
 	w = env.do(t, "DELETE", "/api/daemons/"+daemonID, nil, cookies2)
 	assertStatus(t, w, http.StatusOK)
 

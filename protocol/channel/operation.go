@@ -19,6 +19,10 @@ import (
 
 var ErrDeclarationNotFound = errors.New("channel: declaration not found")
 
+type DaemonFacts struct {
+	Deleted bool
+}
+
 type DeclarationFacts struct {
 	OwnerPrincipal string
 	Visibility     string

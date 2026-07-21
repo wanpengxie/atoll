@@ -31,6 +31,16 @@ func (gatewayTestCompositionResolver) BuildClass(channel.ID, actor.ActorID, stri
 	return platform.ActorFactory{}, false
 }
 
+func (gatewayTestCompositionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
+	return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+}
+func (gatewayTestCompositionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
+	return "", false, nil
+}
+func (gatewayTestCompositionResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
+	return channel.DaemonFacts{}, nil
+}
+
 // logCapture is a slog.Handler that records every emitted message (for telemetry
 // assertions — e.g. gateway.entitlement.paused/resumed, DoD-8).
 type logCapture struct {
@@ -284,7 +294,7 @@ func (h *testChannel) Remove(ctx context.Context, id actor.ActorID) error {
 
 func openTestChannel(t *testing.T, chID channel.ID, owner, member string, memberKind actor.Kind, wired *Gateway) (*testChannel, actor.ActorID) {
 	t.Helper()
-	deps := channelhost.HomeDeps{CompositionResolver: gatewayTestCompositionResolver{}}
+	deps := channelhost.HomeDeps{CompositionResolver: gatewayTestCompositionResolver{}, IntroductionResolver: gatewayTestCompositionResolver{}}
 	if wired != nil {
 		deps.OnMembershipChange = func(_ channel.ID, principals []string) {
 			for _, principal := range principals {

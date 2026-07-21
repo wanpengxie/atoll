@@ -461,7 +461,7 @@ func TestChannelRealmW9StrictSchemaSeats(t *testing.T) {
 		"CREATE TABLE channels", "parent_id TEXT", "compensation_job_id INTEGER",
 		"CREATE TABLE channel_admission_operations", "attempt INTEGER", "next_attempt_at INTEGER",
 		"CREATE TABLE channel_decl_overlays", "config_json TEXT",
-		"CREATE TABLE principal_channels",
+		"CREATE TABLE principal_channels", "CREATE TABLE daemons", "deleted_at INTEGER",
 	} {
 		if !strings.Contains(appText, required) {
 			t.Errorf("app schema missing %q", required)

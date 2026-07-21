@@ -158,6 +158,7 @@ var appSchema = []schemaObject{
 		owner_id TEXT NOT NULL REFERENCES users(id),
 		name TEXT NOT NULL,
 		api_key_hash TEXT NOT NULL,
+		deleted_at INTEGER,
 		created_at INTEGER NOT NULL
 	)`},
 	{"table", "actor_decls", `CREATE TABLE actor_decls (

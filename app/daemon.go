@@ -24,7 +24,7 @@ import (
 func (a *App) handleListDaemons(c *gin.Context) {
 	userID := middleware.UserID(c)
 	rows, err := a.db.QueryContext(c.Request.Context(),
-		`SELECT id, name, created_at FROM daemons WHERE owner_id = ?`, userID,
+		`SELECT id, name, created_at FROM daemons WHERE owner_id = ? AND deleted_at IS NULL`, userID,
 	)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
@@ -120,8 +120,9 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 	})
 }
 
-// handleDeleteDaemon removes the realm-side daemon record. Channel-local
-// convergence is handled by Home reconciliation.
+// handleDeleteDaemon commits a permanent realm tombstone. Channel Homes pull
+// that value and detach their own bindings; this handler only observes serving
+// channels for a bounded convenience response.
 func (a *App) handleDeleteDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
 	release := a.daemonLocks.lock(daemonID)
@@ -135,7 +136,8 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	var owner string
-	err := a.db.QueryRowContext(ctx, `SELECT owner_id FROM daemons WHERE id = ?`, daemonID).Scan(&owner)
+	var deletedAt sql.NullInt64
+	err := a.db.QueryRowContext(ctx, `SELECT owner_id,deleted_at FROM daemons WHERE id = ?`, daemonID).Scan(&owner, &deletedAt)
 	if err == sql.ErrNoRows || (err == nil && owner != userID) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "daemon not found"})
 		return
@@ -145,24 +147,47 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 		return
 	}
 
-	tx, err := a.db.BeginTx(ctx, nil)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx,
-		`DELETE FROM daemons WHERE id = ? AND owner_id = ?`, daemonID, userID); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
+	if !deletedAt.Valid {
+		if _, err := a.db.ExecContext(ctx,
+			`UPDATE daemons SET deleted_at=? WHERE id=? AND owner_id=? AND deleted_at IS NULL`, time.Now().UnixMilli(), daemonID, userID); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
+			return
+		}
 	}
 	release()
 	locked = false
-	c.JSON(http.StatusOK, gin.H{"ok": true})
+	a.pokeAllChannels(ctx)
+	convergence := "convergence_pending"
+	deadline := time.Now().Add(time.Second)
+	for {
+		if a.daemonConvergenceObservedClear(ctx, daemonID) {
+			convergence = "observed_clear"
+			break
+		}
+		if time.Now().After(deadline) || ctx.Err() != nil {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true, "authority_committed": true, "convergence": convergence})
+}
+
+func (a *App) daemonConvergenceObservedClear(ctx context.Context, daemonID string) bool {
+	ids, err := a.directoryChannelIDs(ctx)
+	if err != nil {
+		return false
+	}
+	for _, chID := range ids {
+		bundle, serving := a.host.Acquire(chID)
+		if !serving {
+			continue
+		}
+		bound, err := bundle.View().IsBound(ctx, daemonID)
+		if err != nil || bound || bundle.View().IsAttached(daemonID) {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *App) handleListChannelDaemons(c *gin.Context) {
@@ -175,7 +200,7 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 		return
 	}
-	rows, err := a.db.QueryContext(c.Request.Context(), `SELECT id,name,created_at FROM daemons WHERE owner_id=? ORDER BY id`, middleware.UserID(c))
+	rows, err := a.db.QueryContext(c.Request.Context(), `SELECT id,name,created_at FROM daemons WHERE owner_id=? AND deleted_at IS NULL ORDER BY id`, middleware.UserID(c))
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -219,7 +244,7 @@ func (a *App) handleAttachDaemon(c *gin.Context) {
 	req.DaemonID = strings.TrimSpace(req.DaemonID)
 	userID := middleware.UserID(c)
 	var ownerID string
-	err := a.db.QueryRowContext(c.Request.Context(), `SELECT owner_id FROM daemons WHERE id = ?`, req.DaemonID).Scan(&ownerID)
+	err := a.db.QueryRowContext(c.Request.Context(), `SELECT owner_id FROM daemons WHERE id = ? AND deleted_at IS NULL`, req.DaemonID).Scan(&ownerID)
 	if err != nil || ownerID != userID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "daemon not found or not owned by you"})
 		return
@@ -304,7 +329,7 @@ func (a *App) authAndResolve(apiKey string, chID channel.ID) (string, error) {
 	keyHash := hashAPIKey(apiKey)
 	var daemonID string
 	err := a.db.QueryRow(
-		`SELECT id FROM daemons WHERE api_key_hash = ?`, keyHash,
+		`SELECT id FROM daemons WHERE api_key_hash = ? AND deleted_at IS NULL`, keyHash,
 	).Scan(&daemonID)
 	if err != nil {
 		return "", fmt.Errorf("invalid api key")

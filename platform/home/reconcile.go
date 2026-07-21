@@ -5,6 +5,8 @@ import (
 	"errors"
 	"time"
 
+	"github.com/google/uuid"
+
 	"github.com/wanpengxie/atoll/lib/actorbase"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
@@ -57,6 +59,10 @@ func (h *Home) reconcileSweep(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	h.reconcileDaemonTombstones(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 	h.reconcileDaemonIntent(ctx)
 	if ctx.Err() != nil {
 		return
@@ -78,6 +84,43 @@ func (h *Home) reconcileSweep(ctx context.Context) {
 		return
 	}
 	h.sweepPresence(ctx)
+}
+
+func (h *Home) reconcileDaemonTombstones(ctx context.Context) {
+	if h.opEntry == nil || h.opEntry.resolver == nil {
+		return
+	}
+	ids, err := h.cs.Bindings.ListBound(ctx)
+	if err != nil {
+		h.logger.Warn("platform.daemon_pull.list_failed", "error", err)
+		return
+	}
+	for _, id := range ids {
+		if ctx.Err() != nil {
+			return
+		}
+		resolveCtx, cancel := context.WithTimeout(ctx, introductionResolveTimeout)
+		facts, resolveErr := h.opEntry.resolver.DaemonFacts(resolveCtx, string(id))
+		cancel()
+		if resolveErr != nil {
+			h.logger.Warn("platform.daemon_pull.resolve_failed", "daemon", string(id), "error", resolveErr)
+			continue
+		}
+		if !facts.Deleted {
+			continue
+		}
+		request := struct {
+			DaemonID string `json:"daemon_id"`
+		}{DaemonID: string(id)}
+		meta, err := systemMeta("daemon-pull:v1:"+uuid.NewString(), request)
+		if err != nil {
+			h.logger.Warn("platform.daemon_pull.meta_failed", "daemon", string(id), "error", err)
+			continue
+		}
+		if _, err := h.opEntry.detachDaemon(ctx, meta, string(id)); err != nil {
+			h.logger.Warn("platform.daemon_pull.detach_failed", "daemon", string(id), "error", err)
+		}
+	}
 }
 
 // reconcileDeclarations pulls realm-owned class/config for every durable

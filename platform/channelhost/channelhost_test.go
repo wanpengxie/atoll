@@ -16,15 +16,79 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-type testResolver struct{}
+type testResolver struct{ daemonDeleted bool }
 
 func (testResolver) BuildClass(channel.ID, actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool) {
 	return platform.ActorFactory{}, false
 }
 
+func (testResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
+	return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+}
+func (testResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
+	return "", false, nil
+}
+func (r testResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
+	return channel.DaemonFacts{Deleted: r.daemonDeleted}, nil
+}
+
+func TestOpenFirstSweepDetachesPersistedTombstonedDaemon(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	liveResolver := testResolver{}
+	host, err := New(root, HomeDeps{CompositionResolver: liveResolver, IntroductionResolver: liveResolver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := (channel.RenderedSnapshot{
+		Class: "test-agent", Placement: channel.Placement{Kind: channel.PlacementDaemon, DesiredHost: "daemon-a"},
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	spec := provisionSpec("offline-daemon")
+	spec.GenesisDeclarations = []GenesisDeclaration{{DeclID: "decl-a", Kind: actor.KindAgent, Rendered: snapshot}}
+	if _, err := host.Provision(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ExpectedType: spec.Type}); err != nil {
+		t.Fatal(err)
+	}
+	bundle, ok := host.Acquire(spec.ChannelID)
+	if !ok {
+		t.Fatal("initial channel not serving")
+	}
+	if _, err := bundle.SysOp().AttachDaemon(ctx, channel.DaemonRequest{Ref: "offline:attach", DaemonID: "daemon-a"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	deletedResolver := testResolver{daemonDeleted: true}
+	reopened, err := New(root, HomeDeps{CompositionResolver: deletedResolver, IntroductionResolver: deletedResolver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reopened.Close()
+	if err := reopened.Open(ctx, OpenSpec{ChannelID: spec.ChannelID, ExpectedType: spec.Type}); err != nil {
+		t.Fatal(err)
+	}
+	bundle, ok = reopened.Acquire(spec.ChannelID)
+	if !ok {
+		t.Fatal("reopened channel not serving")
+	}
+	if bound, err := bundle.View().IsBound(ctx, "daemon-a"); err != nil || bound {
+		t.Fatalf("first sweep binding=(%v,%v), want detached", bound, err)
+	}
+	if _, found, err := bundle.View().DeclaredBySourceOne(ctx, "decl-a"); err != nil || found {
+		t.Fatalf("daemon-placed actor survived first sweep: found=%v err=%v", found, err)
+	}
+}
+
 func newTestHost(t *testing.T) *ChannelHost {
 	t.Helper()
-	host, err := New(t.TempDir(), HomeDeps{CompositionResolver: testResolver{}})
+	host, err := New(t.TempDir(), HomeDeps{CompositionResolver: testResolver{}, IntroductionResolver: testResolver{}})
 	if err != nil {
 		t.Fatal(err)
 	}

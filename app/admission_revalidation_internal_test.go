@@ -69,7 +69,7 @@ func TestPendingAttachRejectsRevokedDaemon(t *testing.T) {
 
 	// The daemon is revoked while the second attach waits.
 	insertAttach("adm:v1:reval-stale")
-	if _, err := a.db.Exec(`DELETE FROM daemons WHERE id='d1'`); err != nil {
+	if _, err := a.db.Exec(`UPDATE daemons SET deleted_at=? WHERE id='d1'`, time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 	_ = svc.runOperation(ctx, "adm:v1:reval-stale")
@@ -98,7 +98,7 @@ func TestPendingAttachRejectsRevokedDaemon(t *testing.T) {
 		_ = svc.runOperation(context.Background(), "adm:v1:reval-locked")
 	}()
 	time.Sleep(50 * time.Millisecond) // let the delivery park on the channel lock
-	if _, err := a.db.Exec(`DELETE FROM daemons WHERE id='d2'`); err != nil {
+	if _, err := a.db.Exec(`UPDATE daemons SET deleted_at=? WHERE id='d2'`, time.Now().UnixMilli()); err != nil {
 		t.Fatal(err)
 	}
 	release()

@@ -274,9 +274,7 @@ func (s *admissionService) runOperation(ctx context.Context, operationID string)
 }
 
 // runOperationLocked is runOperation's body for a caller already inside the
-// channel critical section — the local-edit path holds the lock across its
-// seq-mint transaction AND this delivery, so a fanout arm can never mint a
-// later seq between the two halves.
+// channel critical section.
 func (s *admissionService) runOperationLocked(ctx context.Context, operationID string) error {
 	record, found, err := s.load(ctx, operationID)
 	if err != nil || !found || record.Status != "pending" {
@@ -344,13 +342,12 @@ func (s *admissionService) deliver(ctx context.Context, bundle channelhost.Bundl
 		// Delivery acts on present realm state, never on the state remembered
 		// at submission: attach establishes a reference, so its referent must
 		// be currently registered — a pending attach must not revive a daemon
-		// revoked while it waited. Detach stays unchecked (removing a
+		// tombstoned while it waited. Detach stays unchecked (removing a
 		// reference to a dead referent is always legal). The channel lock held
-		// by runOperation serializes this check with the revoke fanout arm, so
-		// either the binding exists when revocation sweeps, or the registry
-		// row is already gone when this check runs.
+		// A concurrent tombstone after this check is harmless: the Home pull
+		// arm observes it and removes any binding that slipped through.
 		var present bool
-		if err := s.app.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM daemons WHERE id=?)`, request.DaemonID).Scan(&present); err != nil {
+		if err := s.app.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM daemons WHERE id=? AND deleted_at IS NULL)`, request.DaemonID).Scan(&present); err != nil {
 			return nil, &channel.OperationError{Code: channel.ErrCodeInternal, Detail: err.Error(), Retryable: true}
 		}
 		if !present {

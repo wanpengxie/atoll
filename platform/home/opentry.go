@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -297,13 +298,66 @@ func (e *opEntry) DetachDaemon(ctx context.Context, req channel.DaemonRequest) (
 	if err != nil {
 		return channel.BindingResult{}, err
 	}
+	return e.detachDaemon(ctx, meta, req.DaemonID)
+}
+
+func (e *opEntry) detachDaemon(ctx context.Context, meta storespec.SysOpMeta, daemonID string) (channel.BindingResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	result, err := e.admission.DetachDaemon(ctx, storespec.DetachTx{SysOpMeta: meta, DaemonID: storespec.DaemonID(req.DaemonID)})
+	h := e.home
+	rows, err := h.controlIndex.ListActive(ctx)
 	if err != nil {
 		return channel.BindingResult{}, err
 	}
+	var roots []actor.ActorID
+	for _, row := range rows {
+		if row.Role == storespec.RoleOwner || row.ID == actor.SystemActorID || row.Placement.Kind != storespec.PlacementDaemon || row.Placement.Host != daemonID {
+			continue
+		}
+		roots = append(roots, row.ID)
+	}
+	sort.Slice(roots, func(i, j int) bool { return roots[i] < roots[j] })
+	locked := map[actor.ActorID]bool{}
+	releases := []func(){}
+	lockOne := func(id actor.ActorID) {
+		if id == "" || locked[id] {
+			return
+		}
+		releases = append(releases, h.actorGates.lock(id))
+		locked[id] = true
+	}
+	for _, root := range roots {
+		lockOne(root)
+	}
+	defer func() {
+		for i := len(releases) - 1; i >= 0; i-- {
+			releases[i]()
+		}
+	}()
+	for _, root := range roots {
+		if err := h.lockClosure(ctx, root, locked, lockOne); err != nil {
+			return channel.BindingResult{}, err
+		}
+	}
+	plan, err := h.buildDaemonDetachPlan(ctx, roots, daemonID)
+	if err != nil {
+		return channel.BindingResult{}, err
+	}
+	result, err := e.admission.DetachDaemon(ctx, storespec.DetachTx{
+		SysOpMeta: meta, DaemonID: storespec.DaemonID(daemonID), DurableIDs: plan.DurableIDs,
+		AllIDs: plan.AllIDs, Envelopes: plan.Envelopes,
+	})
+	if err != nil {
+		return channel.BindingResult{}, err
+	}
+	var tail func()
+	if len(plan.AllIDs) > 0 {
+		tail = h.finishEndTeardown(plan)
+	}
 	e.applyEffects(ctx, result.Effects)
+	if tail != nil {
+		tail()
+	}
 	return channel.BindingResult{Bound: result.Bound, ClearedInstances: result.ClearedInstances}, nil
 }
 

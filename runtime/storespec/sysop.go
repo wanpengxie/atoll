@@ -79,7 +79,13 @@ type AttachTx struct {
 	DaemonID DaemonID
 }
 
-type DetachTx = AttachTx
+type DetachTx struct {
+	SysOpMeta
+	DaemonID   DaemonID
+	DurableIDs []actor.ActorID
+	AllIDs     []actor.ActorID
+	Envelopes  []CascadeEnvelope
+}
 
 type BindingResult struct {
 	Bound            bool              `json:"bound"`

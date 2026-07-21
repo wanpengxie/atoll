@@ -246,3 +246,52 @@ func (h *Home) buildEndPlan(ctx context.Context, root actor.ActorID, reason stri
 	sort.Slice(plan.Envelopes, func(i, j int) bool { return plan.Envelopes[i].Target < plan.Envelopes[j].Target })
 	return plan, nil
 }
+
+func (h *Home) buildDaemonDetachPlan(ctx context.Context, roots []actor.ActorID, daemonID string) (EndPlan, error) {
+	merged := EndPlan{}
+	seenAll := map[actor.ActorID]bool{}
+	seenDurable := map[actor.ActorID]bool{}
+	seenRun := map[actor.ActorID]bool{}
+	seenPrincipal := map[string]bool{}
+	for _, root := range roots {
+		if seenAll[root] {
+			continue
+		}
+		plan, err := h.buildEndPlan(ctx, root, "daemon_detach:"+daemonID, actor.SystemActorID)
+		if err != nil {
+			return EndPlan{}, err
+		}
+		for i, id := range plan.AllIDs {
+			if seenAll[id] {
+				continue
+			}
+			seenAll[id] = true
+			merged.AllIDs = append(merged.AllIDs, id)
+			merged.Envelopes = append(merged.Envelopes, plan.Envelopes[i])
+		}
+		for _, id := range plan.DurableIDs {
+			if !seenDurable[id] {
+				seenDurable[id] = true
+				merged.DurableIDs = append(merged.DurableIDs, id)
+			}
+		}
+		for _, id := range plan.RunIDs {
+			if !seenRun[id] {
+				seenRun[id] = true
+				merged.RunIDs = append(merged.RunIDs, id)
+			}
+		}
+		for _, principal := range plan.Principals {
+			if principal != "" && !seenPrincipal[principal] {
+				seenPrincipal[principal] = true
+				merged.Principals = append(merged.Principals, principal)
+			}
+		}
+	}
+	sort.Slice(merged.AllIDs, func(i, j int) bool { return merged.AllIDs[i] < merged.AllIDs[j] })
+	sort.Slice(merged.DurableIDs, func(i, j int) bool { return merged.DurableIDs[i] < merged.DurableIDs[j] })
+	sort.Slice(merged.RunIDs, func(i, j int) bool { return merged.RunIDs[i] < merged.RunIDs[j] })
+	sort.Strings(merged.Principals)
+	sort.Slice(merged.Envelopes, func(i, j int) bool { return merged.Envelopes[i].Target < merged.Envelopes[j].Target })
+	return merged, nil
+}

@@ -4,15 +4,18 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -28,6 +31,8 @@ type mutableIntroductionResolver struct {
 	kindErr     error
 	kindMissing bool
 	calls       int
+	daemonFacts channel.DaemonFacts
+	daemonErr   error
 }
 
 func (r *mutableIntroductionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
@@ -39,12 +44,145 @@ func (r *mutableIntroductionResolver) ClassKind(context.Context, string) (actor.
 	return r.kind, !r.kindMissing, r.kindErr
 }
 
+func (r *mutableIntroductionResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
+	return r.daemonFacts, r.daemonErr
+}
+
+func TestDaemonTombstonePullDetachesDurableRootAndForkClosure(t *testing.T) {
+	ctx := context.Background()
+	resolver := &mutableIntroductionResolver{kind: actor.KindAgent, facts: channel.DeclarationFacts{
+		OwnerPrincipal: "owner", Visibility: "private", Class: "test-agent",
+	}}
+	h, err := Open(Config{
+		ChannelID: "daemon-tombstone-pull", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"), Bootstrap: true,
+		CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: resolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.closeInternal("test")
+	owner, err := h.admitChannelOwner(ctx, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := SystemOps(h)
+	if _, err := ops.AttachDaemon(ctx, channel.DaemonRequest{Ref: "tombstone:attach", DaemonID: "daemon-a"}); err != nil {
+		t.Fatal(err)
+	}
+	introduced, err := ops.Introduce(ctx, channel.IntroduceRequest{Ref: "tombstone:introduce", DeclID: "decl-a", InitiatorActorID: owner})
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := h.forkAdmission(ctx, introduced.ActorID, 1, actorrt.ForkSpec{Kind: actor.KindAgent, Class: "fork-child"}, "daemon-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver.daemonFacts.Deleted = true
+	h.reconcileDaemonTombstones(ctx)
+	if bound, err := h.View().IsBound(ctx, "daemon-a"); err != nil || bound {
+		t.Fatalf("binding after tombstone=(%v,%v)", bound, err)
+	}
+	for _, id := range []actor.ActorID{introduced.ActorID, child} {
+		if _, active, err := h.controlIndex.LookupActive(ctx, id); err != nil || active {
+			t.Fatalf("actor %s survived daemon closure: active=%v err=%v", id, active, err)
+		}
+	}
+}
+
+func TestDaemonFactsFailureDoesNotDetach(t *testing.T) {
+	ctx := context.Background()
+	resolver := &mutableIntroductionResolver{kind: actor.KindAgent, daemonErr: errors.New("realm unavailable"), facts: channel.DeclarationFacts{
+		OwnerPrincipal: "owner", Visibility: "private", Class: "test-agent",
+	}}
+	h, err := Open(Config{
+		ChannelID: "daemon-facts-failure", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"), Bootstrap: true,
+		CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: resolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.closeInternal("test")
+	if _, err := SystemOps(h).AttachDaemon(ctx, channel.DaemonRequest{Ref: "failure:attach", DaemonID: "daemon-a"}); err != nil {
+		t.Fatal(err)
+	}
+	h.reconcileDaemonTombstones(ctx)
+	if bound, err := h.View().IsBound(ctx, "daemon-a"); err != nil || !bound {
+		t.Fatalf("resolver fault detached binding: bound=%v err=%v", bound, err)
+	}
+}
+
+func TestDetachDaemonRacingForkLeavesNoOrphan(t *testing.T) {
+	ctx := context.Background()
+	resolver := &mutableIntroductionResolver{kind: actor.KindAgent, facts: channel.DeclarationFacts{
+		OwnerPrincipal: "owner", Visibility: "private", Class: "test-agent",
+	}}
+	h, err := Open(Config{
+		ChannelID: "detach-fork-race", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"), Bootstrap: true,
+		CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: resolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.closeInternal("test")
+	owner, err := h.admitChannelOwner(ctx, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := SystemOps(h)
+	for i := 0; i < 12; i++ {
+		if _, err := ops.AttachDaemon(ctx, channel.DaemonRequest{Ref: fmt.Sprintf("race:attach:%d", i), DaemonID: "daemon-a"}); err != nil {
+			t.Fatal(err)
+		}
+		parent, err := ops.Introduce(ctx, channel.IntroduceRequest{
+			Ref: fmt.Sprintf("race:introduce:%d", i), DeclID: fmt.Sprintf("decl-%d", i), InitiatorActorID: owner,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		start := make(chan struct{})
+		var child actor.ActorID
+		var forkErr, detachErr error
+		var wg sync.WaitGroup
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			<-start
+			child, forkErr = h.forkAdmission(ctx, parent.ActorID, 1, actorrt.ForkSpec{Kind: actor.KindAgent, Class: "fork-child"}, fmt.Sprintf("race-child-%d", i))
+		}()
+		go func() {
+			defer wg.Done()
+			<-start
+			_, detachErr = ops.DetachDaemon(ctx, channel.DaemonRequest{Ref: fmt.Sprintf("race:detach:%d", i), DaemonID: "daemon-a"})
+		}()
+		close(start)
+		wg.Wait()
+		if detachErr != nil {
+			t.Fatalf("iteration %d detach: %v", i, detachErr)
+		}
+		if forkErr != nil && !errors.Is(forkErr, ErrForkParentGone) && !errors.Is(forkErr, ErrEndNotMember) {
+			t.Fatalf("iteration %d fork: %v", i, forkErr)
+		}
+		for _, id := range []actor.ActorID{parent.ActorID, child} {
+			if id == "" {
+				continue
+			}
+			if _, active, err := h.controlIndex.LookupActive(ctx, id); err != nil || active {
+				t.Fatalf("iteration %d orphan %s: active=%v err=%v", i, id, active, err)
+			}
+		}
+	}
+}
+
 func (r fixedIntroductionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
 	return r.facts, nil
 }
 
 func (r fixedIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
 	return r.kind, true, nil
+}
+
+func (r fixedIntroductionResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
+	return channel.DaemonFacts{}, nil
 }
 
 func TestOpEntryIntroducePullAndDetachUseOneDurableChain(t *testing.T) {

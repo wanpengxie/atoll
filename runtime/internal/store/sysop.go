@@ -361,14 +361,14 @@ func (s *sysOpStore) DetachDaemon(ctx context.Context, in storespec.DetachTx) (s
 		if _, err := tx.ExecContext(ctx, `DELETE FROM channel_daemon_bindings WHERE daemon_id=?`, string(in.DaemonID)); err != nil {
 			return sysOpOutcome{}, err
 		}
-		ended, err := endDaemonInstancesTx(ctx, tx, s.channelID, string(in.DaemonID), now)
+		_, _, err := cascadeWriteTx(ctx, tx, s.channelID, in.DurableIDs, in.Envelopes, now)
 		if err != nil {
 			return sysOpOutcome{}, err
 		}
 		daemon := in.DaemonID
 		return sysOpOutcome{
-			result:  storespec.BindingResult{Bound: false, ClearedInstances: ended},
-			effects: storespec.PostCommitEffects{Poke: true, Despawn: ended, KickDaemon: &daemon},
+			result:  storespec.BindingResult{Bound: false, ClearedInstances: in.AllIDs},
+			effects: storespec.PostCommitEffects{Poke: true, KickDaemon: &daemon},
 		}, nil
 	})
 	return decodeResult[storespec.DetachResult](raw, effects, err)
@@ -618,56 +618,6 @@ func insertDeclVersionTx(ctx context.Context, tx *sql.Tx, id actor.ActorID, vers
 	}
 	_, err := tx.ExecContext(ctx, `INSERT INTO actor_decl_versions(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,created_at) VALUES (?,?,?,?,?,?,?,?)`, string(id), version, rendered.Class, config, string(rendered.Placement.Kind), rendered.Placement.DesiredHost, rendered.TIdleMS, at)
 	return err
-}
-
-func endDaemonInstancesTx(ctx context.Context, tx *sql.Tx, channelID channel.ID, daemon string, at int64) ([]actor.ActorID, error) {
-	return endMatchingInstancesTx(ctx, tx, channelID, `d.placement='daemon' AND d.desired_host=?`, []any{daemon}, at)
-}
-
-func endMatchingInstancesTx(ctx context.Context, tx *sql.Tx, channelID channel.ID, predicate string, args []any, at int64) ([]actor.ActorID, error) {
-	rows, err := tx.QueryContext(ctx, `SELECT r.actor_id FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id AND d.version=r.current_decl_version WHERE r.deregistered_at IS NULL AND r.role='' AND r.actor_id<>'system' AND `+predicate+` ORDER BY r.actor_id`, args...)
-	if err != nil {
-		return nil, err
-	}
-	var ids []actor.ActorID
-	for rows.Next() {
-		var id actor.ActorID
-		if err := rows.Scan(&id); err != nil {
-			_ = rows.Close()
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	for _, id := range ids {
-		if _, err := tx.ExecContext(ctx, `UPDATE actor_registry SET deregistered_at=? WHERE actor_id=? AND deregistered_at IS NULL`, at, string(id)); err != nil {
-			return nil, err
-		}
-		if err := clearActorScopedTx(ctx, tx, id); err != nil {
-			return nil, err
-		}
-		if err := clearTimersTx(ctx, tx, id); err != nil {
-			return nil, err
-		}
-		if err := clearActorGrantsTx(ctx, tx, id); err != nil {
-			return nil, err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE channel_routing SET default_agent=NULL WHERE default_agent=?`, string(id)); err != nil {
-			return nil, err
-		}
-		payload, _ := json.Marshal(map[string]any{"target_id": id, "reason": "sysop_revoke", "ended_at": at, "ended_by": actor.SystemActorID})
-		if _, err := appendTx(ctx, tx, &message.Envelope{
-			ID: message.ID("actor-ended:" + string(id)), TS: at, TSReceived: at, ChannelID: channelID,
-			Sender: message.Sender{Kind: actor.KindSystem, ID: actor.SystemActorID},
-			Kind:   message.KindEvent, Type: actor.ReservedSystemActorEnded, Payload: payload,
-			Visibility: message.VisibilitySystem, Audience: message.Audience{actor.SystemActorID},
-		}, false); err != nil {
-			return nil, err
-		}
-	}
-	return ids, nil
 }
 
 var _ storespec.SysOpAdmission = (*sysOpStore)(nil)

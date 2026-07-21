@@ -69,3 +69,11 @@ func (r compositionResolver) ClassKind(_ context.Context, class string) (actor.K
 	}
 	return kind, true, nil
 }
+
+func (r compositionResolver) DaemonFacts(ctx context.Context, daemonID string) (channel.DaemonFacts, error) {
+	var deleted sql.NullInt64
+	if err := r.app.db.QueryRowContext(ctx, `SELECT deleted_at FROM daemons WHERE id=?`, daemonID).Scan(&deleted); err != nil {
+		return channel.DaemonFacts{}, err
+	}
+	return channel.DaemonFacts{Deleted: deleted.Valid}, nil
+}

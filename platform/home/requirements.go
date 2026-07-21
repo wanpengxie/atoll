@@ -12,6 +12,7 @@ import (
 // before the channel-store serial section and fails closed on any uncertainty.
 type IntroductionResolver interface {
 	ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error)
+	DaemonFacts(context.Context, string) (channel.DaemonFacts, error)
 	// ClassKind separates the two ways a lookup can end: found=false is the
 	// DEFINITIVE "no such class" answer (a decisive unknown_class terminal for
 	// the word that asked), while a non-nil error is an infrastructure fault —
