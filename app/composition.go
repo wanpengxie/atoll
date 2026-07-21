@@ -15,7 +15,7 @@ import (
 
 // compositionResolver is the world half injected into Home. Channel-local
 // intent is supplied by Home from its own database; this resolver performs only
-// the actor_decls lookup/config overlay and registry construction.
+// realm-current declaration/overlay/daemon reads and registry construction.
 type compositionResolver struct{ app *App }
 
 func (r compositionResolver) BuildClass(chID channel.ID, childID actor.ActorID, class string, config json.RawMessage) (platform.ActorFactory, bool) {

@@ -7,9 +7,10 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// IntroductionResolver is the exact-admission requirement port. Implementors
-// must not call back into the same channel while resolving: OpEntry invokes it
-// before the channel-store serial section and fails closed on any uncertainty.
+// IntroductionResolver is the realm-current-facts read port shared by exact
+// introduction and level reconciliation. Implementors must not call back into
+// the same channel or mutate realm state while resolving; callers read before
+// the channel serial section and fail closed on any uncertainty.
 type IntroductionResolver interface {
 	ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error)
 	DaemonFacts(context.Context, string) (channel.DaemonFacts, error)

@@ -10,6 +10,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -62,6 +63,30 @@ func TestForkAdmissionPublishesEventRunRowStateAndReceipt(t *testing.T) {
 	second, err := h.forkAdmission(ctx, parent, 1, spec, "nonce-2")
 	if err != nil || second == child {
 		t.Fatalf("second logical fork = (%q,%v)", second, err)
+	}
+}
+
+func TestForkMemberReaderUsesActorIdentityWithoutPrincipal(t *testing.T) {
+	h := openWhiteboxHome(t)
+	ctx := context.Background()
+	parent, err := h.admit(ctx, actor.KindHuman, "fork-reader-parent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	child, err := h.forkAdmission(ctx, parent, 1, actorrt.ForkSpec{Kind: actor.KindAgent, Class: "agent.test"}, "reader-child")
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, active, err := h.controlIndex.LookupActive(ctx, child)
+	if err != nil || !active || row.Principal != "" || row.SourceDeclID != "" {
+		t.Fatalf("fork identity row=%+v active=%v err=%v", row, active, err)
+	}
+	reader := channel.Reader{ActorID: child, Mode: channel.ReaderMember}
+	if _, _, err := h.View().ReadVisibleAfterSeq(ctx, reader, 0, 10); err != nil {
+		t.Fatalf("fork member message read rejected: %v", err)
+	}
+	if _, err := h.View().Resources().List(ctx, reader, channel.ResourceListQuery{Limit: 10}); err != nil {
+		t.Fatalf("fork member resource read rejected: %v", err)
 	}
 }
 
