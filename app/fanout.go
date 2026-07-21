@@ -176,29 +176,7 @@ func (w *fanoutWorker) apply(job fanoutJob) error {
 	var transient []error
 	var permanent []error
 	for _, chID := range channelIDs {
-		bundle, ok := w.app.host.Acquire(chID)
-		if !ok {
-			transient = append(transient, fmt.Errorf("channel %s unavailable", chID))
-			continue
-		}
-		ref := channel.DerivedFanoutRef(job.baseRef, chID)
-		switch job.table {
-		case "decl_fanout_jobs":
-			switch job.op {
-			case "delete":
-				_, err = bundle.SysOp().RevokeDeclTargets(w.ctx, channel.RevokeDeclRequest{Ref: ref, DeclID: job.key})
-			case "restart":
-				err = w.applyVersionDelivery(job, chID, bundle)
-			default:
-				permanent = append(permanent, fmt.Errorf("unknown declaration fanout op %q", job.op))
-				continue
-			}
-		case "daemon_revoke_jobs":
-			_, err = bundle.SysOp().RevokeDaemon(w.ctx, channel.DaemonRequest{Ref: ref, DaemonID: job.key})
-		default:
-			permanent = append(permanent, fmt.Errorf("unknown fanout table %q", job.table))
-			continue
-		}
+		err := w.deliverToChannel(job, chID)
 		if err != nil {
 			var operationErr *channel.OperationError
 			if errors.As(err, &operationErr) && !operationErr.Retryable {
@@ -215,6 +193,39 @@ func (w *fanoutWorker) apply(job fanoutJob) error {
 		return errors.Join(transient...)
 	}
 	return nil
+}
+
+// deliverToChannel delivers one fanout job to one channel inside that channel's
+// critical section — the same per-channel lock admission delivery holds. This
+// is the serialization the delivery-currency rule rests on: an attach's
+// present-state daemon check and its membrane commit can never interleave with
+// a revoke arm's sweep of the same channel, so either the binding exists when
+// revocation sweeps, or the registry row is already gone when attach re-checks.
+func (w *fanoutWorker) deliverToChannel(job fanoutJob, chID channel.ID) error {
+	release := w.app.channelLocks.lock(string(chID))
+	defer release()
+	bundle, ok := w.app.host.Acquire(chID)
+	if !ok {
+		return fmt.Errorf("channel unavailable")
+	}
+	ref := channel.DerivedFanoutRef(job.baseRef, chID)
+	switch job.table {
+	case "decl_fanout_jobs":
+		switch job.op {
+		case "delete":
+			_, err := bundle.SysOp().RevokeDeclTargets(w.ctx, channel.RevokeDeclRequest{Ref: ref, DeclID: job.key})
+			return err
+		case "restart":
+			return w.applyVersionDelivery(job, chID, bundle)
+		default:
+			return &channel.OperationError{Code: channel.ErrCodeInternal, Detail: fmt.Sprintf("unknown declaration fanout op %q", job.op)}
+		}
+	case "daemon_revoke_jobs":
+		_, err := bundle.SysOp().RevokeDaemon(w.ctx, channel.DaemonRequest{Ref: ref, DaemonID: job.key})
+		return err
+	default:
+		return &channel.OperationError{Code: channel.ErrCodeInternal, Detail: fmt.Sprintf("unknown fanout table %q", job.table)}
+	}
 }
 
 func (a *App) directoryChannelIDs(ctx context.Context) ([]channel.ID, error) {

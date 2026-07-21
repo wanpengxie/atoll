@@ -77,4 +77,34 @@ func TestPendingAttachRejectsRevokedDaemon(t *testing.T) {
 	if status != "rejected" || code != string(admissionCodeDaemonNotFound) {
 		t.Fatalf("stale attach status=%s code=%s, want rejected/daemon_not_found", status, code)
 	}
+
+	// Interleave shape: the present-state check runs INSIDE the channel critical
+	// section. A revocation landing while the delivery is parked on the channel
+	// lock is always observed — the check cannot act on an answer read before
+	// the lock. (Whichever side wins the lock, the outcome converges: binding
+	// swept by the revoke arm, or attach rejected on the current registry.)
+	if _, err := a.db.Exec(`INSERT INTO daemons(id,owner_id,name,api_key_hash,created_at) VALUES ('d2','alice','desk','x',?)`, now); err != nil {
+		t.Fatal(err)
+	}
+	request, _ := json.Marshal(channel.DaemonRequest{Ref: "adm:v1:reval-locked", DaemonID: "d2"})
+	if _, err := a.db.Exec(`INSERT INTO channel_admission_operations(operation_id,channel_id,op,requested_by,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?)`,
+		"adm:v1:reval-locked", string(id), "attach", "alice", string(request), "digest:locked", now); err != nil {
+		t.Fatal(err)
+	}
+	release := a.channelLocks.lock(string(id))
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = svc.runOperation(context.Background(), "adm:v1:reval-locked")
+	}()
+	time.Sleep(50 * time.Millisecond) // let the delivery park on the channel lock
+	if _, err := a.db.Exec(`DELETE FROM daemons WHERE id='d2'`); err != nil {
+		t.Fatal(err)
+	}
+	release()
+	<-done
+	status, code = opStatus("adm:v1:reval-locked")
+	if status != "rejected" || code != string(admissionCodeDaemonNotFound) {
+		t.Fatalf("locked interleave status=%s code=%s, want rejected/daemon_not_found", status, code)
+	}
 }
