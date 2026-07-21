@@ -121,10 +121,8 @@ func (a *App) handleListDecls(c *gin.Context) {
 	}
 	_ = rows.Close()
 
-	// Project both declaration pointers for every channel instance sourced from
-	// each world declaration. latest_version may lead current_version while an
-	// edit is staged; collapsing the two would make the control API lie about
-	// which factory snapshot is actually authoritative.
+	// Project instance identity only. A channel's declaration version is a local
+	// history/order fence, not realm value identity and not part of this API DTO.
 	bundles := a.snapshotBundles(c.Request.Context())
 	for _, decl := range out {
 		declID := decl["id"].(string)
@@ -135,14 +133,8 @@ func (a *App) handleListDecls(c *gin.Context) {
 				continue
 			}
 			for _, row := range declared {
-				current, latest, err := bundle.View().DeclarationVersions(c.Request.Context(), row.ID)
-				if err != nil {
-					continue
-				}
 				instances = append(instances, gin.H{
 					"channel_id": string(chID), "instance_id": string(row.ID),
-					"current_version": current.CurrentDeclVersion,
-					"latest_version":  latest.CurrentDeclVersion,
 				})
 			}
 		}

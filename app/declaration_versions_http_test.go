@@ -3,18 +3,21 @@ package app_test
 import (
 	"net/http"
 	"testing"
-	"time"
+
+	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-func TestActorDeclListProjectsCurrentAndLatestChannelVersions(t *testing.T) {
+func TestActorDeclListProjectsInstancesWithoutChannelLocalVersions(t *testing.T) {
 	env := setupTestApp(t)
 	s := fullSetup(t, env)
 	w := env.do(t, "POST", "/api/actor-decls", map[string]any{"name": "versioned", "class": "go-kimi"}, s.cookies)
 	assertStatus(t, w, http.StatusCreated)
 	declID := respJSON(t, w)["id"].(string)
-	createAndBindDaemon(t, env, s.chID, "version-host-a", s.cookies)
+	firstDaemon := createAndBindDaemon(t, env, s.chID, "version-host-a", s.cookies)["id"].(string)
 	introduced := env.do(t, "POST", "/api/channels/"+s.chID+"/actors", map[string]any{"decl_id": declID}, s.cookies)
 	assertStatus(t, introduced, http.StatusCreated)
+	firstActor := actor.ActorID(respJSON(t, introduced)["actor_id"].(string))
 	secondBody, cookies := createChannel(t, env, s.cookies, "versioned-second")
 	s.cookies = cookies
 	secondChannel := secondBody["id"].(string)
@@ -23,7 +26,7 @@ func TestActorDeclListProjectsCurrentAndLatestChannelVersions(t *testing.T) {
 	assertStatus(t, introduced, http.StatusCreated)
 	updated := env.do(t, http.MethodPut, "/api/channels/"+s.chID+"/decls/"+declID+"/config", map[string]any{"config": map[string]any{"model": "v2"}}, s.cookies)
 	assertStatus(t, updated, http.StatusOK)
-	waitDeclarationInstanceVersion(t, env, s.cookies, declID, s.chID, 2)
+	waitPlanConfig(t, env, channel.ID(s.chID), firstDaemon, firstActor, "v2")
 
 	w = env.do(t, "GET", "/api/actor-decls", nil, s.cookies)
 	assertStatus(t, w, http.StatusOK)
@@ -43,41 +46,21 @@ func TestActorDeclListProjectsCurrentAndLatestChannelVersions(t *testing.T) {
 			instance := rawInstance.(map[string]any)
 			byChannel[instance["channel_id"].(string)] = instance
 		}
-		first := byChannel[s.chID]
-		second := byChannel[secondChannel]
-		if first == nil || first["current_version"] != float64(2) || first["latest_version"] != float64(2) {
-			t.Fatalf("first version projection=%v", first)
+		first, second := byChannel[s.chID], byChannel[secondChannel]
+		if first == nil || second == nil {
+			t.Fatalf("instance projection first=%v second=%v", first, second)
 		}
-		if second == nil || second["current_version"] != float64(1) || second["latest_version"] != float64(1) {
-			t.Fatalf("second version projection=%v", second)
+		for _, instance := range []map[string]any{first, second} {
+			if _, leaked := instance["current_version"]; leaked {
+				t.Fatalf("channel-local current_version leaked into realm DTO: %v", instance)
+			}
+			if _, leaked := instance["latest_version"]; leaked {
+				t.Fatalf("channel-local latest_version leaked into realm DTO: %v", instance)
+			}
 		}
 		return
 	}
 	t.Fatalf("declaration %s absent from response: %v", declID, body)
-}
-
-func waitDeclarationInstanceVersion(t *testing.T, env *testEnv, cookies []*http.Cookie, declID, chID string, want float64) {
-	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		w := env.do(t, http.MethodGet, "/api/actor-decls", nil, cookies)
-		if w.Code == http.StatusOK {
-			for _, raw := range respJSON(t, w)["decls"].([]any) {
-				decl := raw.(map[string]any)
-				if decl["id"] != declID {
-					continue
-				}
-				for _, rawInstance := range decl["instances"].([]any) {
-					instance := rawInstance.(map[string]any)
-					if instance["channel_id"] == chID && instance["current_version"] == want && instance["latest_version"] == want {
-						return
-					}
-				}
-			}
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("declaration %s in channel %s did not reach version %.0f", declID, chID, want)
 }
 
 func TestActorDeclListIncludesPublicAndOwnPrivateOnly(t *testing.T) {

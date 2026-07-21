@@ -136,4 +136,13 @@ func TestFanoutLiteLegacyMechanismsCannotReturn(t *testing.T) {
 	if strings.Contains(string(schema), "'edit'") {
 		t.Error("admission operation schema retains retired edit operation")
 	}
+	declarations, err := os.ReadFile("../app/actor_decls.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, localOnly := range []string{`"current_version"`, `"latest_version"`} {
+		if strings.Contains(string(declarations), localOnly) {
+			t.Errorf("realm declaration API leaks channel-local fence %s", localOnly)
+		}
+	}
 }
