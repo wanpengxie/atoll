@@ -368,7 +368,7 @@ func fullSetup(t *testing.T, env *testEnv) setupResult {
 }
 
 // ---------------------------------------------------------------------------
-// Test1: Register -> Login -> Workspace -> Channel
+// Test1: Register -> Login -> Realm -> Channel
 // ---------------------------------------------------------------------------
 
 func TestE2E_RegisterLoginRealmChannel(t *testing.T) {

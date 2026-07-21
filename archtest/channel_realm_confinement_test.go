@@ -22,7 +22,10 @@ func phaseAProductionFiles(t *testing.T, root string) []string {
 			return err
 		}
 		if d.IsDir() {
-			if d.Name() == ".git" || d.Name() == "node_modules" || d.Name() == "vendor" {
+			// .claude/worktrees holds sibling agent checkouts (other branches) that
+			// are not this tree's production source; walking them pollutes every
+			// repo-root ("..") wall with foreign copies.
+			if d.Name() == ".git" || d.Name() == "node_modules" || d.Name() == "vendor" || d.Name() == ".claude" {
 				return filepath.SkipDir
 			}
 			return nil
@@ -110,6 +113,63 @@ func TestChannelRealmW2OperationEntryConfinement(t *testing.T) {
 	}
 	if entryDecls != 1 {
 		t.Fatalf("opEntry declarations=%d, want 1", entryDecls)
+	}
+
+	// Second wall sentence — "sysactor is the only inter-package caller": the
+	// serving-time operate execution crosses the package boundary through exactly
+	// two seats. Home binds the sysactor operate contract in one file only
+	// (opentry.go implements OperateExecutor), and ChannelHost is the sole
+	// assembly point that bridges Home's private opEntry out as SystemOps. Pinning
+	// this closed set turns CI red the moment a new caller appears.
+	operateContractRefs := map[string]int{}
+	for _, path := range phaseAProductionFiles(t, "..") {
+		if strings.HasPrefix(path, "../platform/internal/sysactor/") {
+			continue // sysactor owns the contract and is its sole invoker.
+		}
+		_, f := phaseAParse(t, path)
+		ast.Inspect(f, func(n ast.Node) bool {
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			x, ok := sel.X.(*ast.Ident)
+			if !ok || x.Name != "sysactor" || sel.Sel.Name != "OperateExecutor" {
+				return true
+			}
+			operateContractRefs[path]++
+			if path != "../platform/home/opentry.go" {
+				t.Errorf("%s references sysactor.OperateExecutor outside Home's sole binding", path)
+			}
+			return true
+		})
+	}
+	if operateContractRefs["../platform/home/opentry.go"] == 0 {
+		t.Error("Home no longer binds sysactor.OperateExecutor in opentry.go")
+	}
+
+	systemOpsCallers := map[string]int{}
+	for _, path := range phaseAProductionFiles(t, "..") {
+		_, f := phaseAParse(t, path)
+		ast.Inspect(f, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			sel, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if x, ok := sel.X.(*ast.Ident); ok && x.Name == "home" && sel.Sel.Name == "SystemOps" {
+				systemOpsCallers[path]++
+				if path != "../platform/channelhost/channelhost.go" {
+					t.Errorf("%s bridges home.SystemOps outside the ChannelHost assembly point", path)
+				}
+			}
+			return true
+		})
+	}
+	if systemOpsCallers["../platform/channelhost/channelhost.go"] != 1 {
+		t.Errorf("home.SystemOps assembly-point call sites in channelhost=%d, want 1", systemOpsCallers["../platform/channelhost/channelhost.go"])
 	}
 }
 

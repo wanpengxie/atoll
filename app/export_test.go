@@ -221,9 +221,6 @@ func (a *App) RevokeRealmToolForTest(chID channel.ID) error {
 	return err
 }
 
-// KillCellForTest kills id's live embodiment on chID's home (despawn + dereg) —
-// the "brain went dead" event resolveRouting must answer with 503 when id is the
-// channel's default agent. Test-only.
 // CreateHalfBuiltChannelForTest creates a published directory row plus its
 // provision intent but no local image, modelling a crash window.
 func (a *App) CreateHalfBuiltChannelForTest(ownerPrincipal, name string) (string, error) {

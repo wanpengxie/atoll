@@ -242,13 +242,33 @@ func (o realmOps) Introduce(ctx context.Context, req channel.Requester, declID s
 		}
 		return result, nil
 	case "rejected":
-		code := channel.RealmForbidden
-		if record.ErrorCode.String == string(channel.ErrCodeDeclNotFound) {
-			code = channel.RealmDeclNotFound
-		}
-		return channel.IntroduceResult{}, &channel.RealmError{Code: code, Detail: record.ErrorCode.String}
+		return channel.IntroduceResult{}, &channel.RealmError{Code: introduceRealmErrorCode(record.ErrorCode.String), Detail: record.ErrorCode.String}
 	default:
 		return channel.IntroduceResult{}, &channel.ErrResultUnknown{Ref: ref}
+	}
+}
+
+// introduceRealmErrorCode maps a rejected admission operation's operate error
+// code onto the frozen RealmOps error closed set (spec S4-9:
+// forbidden / decl_not_found / resource_not_found / capability_unavailable /
+// channel_unavailable / realm_unavailable / invalid_request / conflict). The
+// grouping follows the same semantic classes admissionErrorHTTP uses. Codes with
+// no closed-set counterpart keep RealmForbidden; the original operate code always
+// rides along in Detail (both here and at the callsite), so nothing is lost.
+func introduceRealmErrorCode(code string) channel.RealmErrorCode {
+	switch channel.OperationErrorCode(code) {
+	case channel.ErrCodeDeclNotFound:
+		return channel.RealmDeclNotFound
+	case channel.ErrCodeBadPayload, channel.ErrCodeInvalidPlacement, channel.ErrCodeUnknownClass, channel.ErrCodeInvalidDesiredHost:
+		return channel.RealmInvalidRequest
+	case channel.ErrCodeChannelUnavailable:
+		return channel.RealmChannelUnavailable
+	case channel.ErrCodeProtectedActor, channel.ErrCodeNotInComposition, channel.ErrCodeMemberInactive, channel.ErrCodeRefConflict:
+		return channel.RealmConflict
+	default:
+		// forbidden / unauthorized_sender / not_accepted_source and any transient
+		// code that has no RealmOps closed-set counterpart stay RealmForbidden.
+		return channel.RealmForbidden
 	}
 }
 

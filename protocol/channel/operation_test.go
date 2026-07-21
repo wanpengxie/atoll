@@ -79,8 +79,31 @@ func TestOperationCorrelationDomainsCannotCollide(t *testing.T) {
 }
 
 func TestOperationErrorClosedSet(t *testing.T) {
-	if len(AllOperationErrorCodes) != 15 {
-		t.Fatalf("operate error closed set has %d entries", len(AllOperationErrorCodes))
+	want := map[OperationErrorCode]bool{
+		ErrCodeBadPayload: true, ErrCodeChannelUnavailable: true, ErrCodeInvalidDesiredHost: true,
+		ErrCodeDeclNotFound: true, ErrCodeForbidden: true, ErrCodeInvalidPlacement: true,
+		ErrCodeUnknownClass: true, ErrCodeProtectedActor: true, ErrCodeNotInComposition: true,
+		ErrCodeRebuildFailed: true, ErrCodeUnauthorizedSender: true, ErrCodeInternal: true,
+		ErrCodeNotAcceptedSource: true, ErrCodeMemberInactive: true, ErrCodeAuthorityUnavailable: true,
+	}
+	if len(AllOperationErrorCodes) != len(want) {
+		t.Fatalf("operate error closed set has %d entries, want %d", len(AllOperationErrorCodes), len(want))
+	}
+	for _, code := range AllOperationErrorCodes {
+		if !want[code] {
+			t.Fatalf("unexpected operate error code %q", code)
+		}
+		delete(want, code)
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing operate error codes %v", want)
+	}
+	// ref_conflict is an A2 contract code (OpEntry typed error), NOT an operate
+	// frame code — spec pins it out of this closed set. Nail that decision down.
+	for _, code := range AllOperationErrorCodes {
+		if code == ErrCodeRefConflict {
+			t.Fatal("ref_conflict must not be in the operate error closed set")
+		}
 	}
 }
 
