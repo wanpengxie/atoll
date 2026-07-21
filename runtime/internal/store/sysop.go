@@ -131,13 +131,28 @@ func (s *sysOpStore) run(ctx context.Context, meta storespec.SysOpMeta, operatio
 	if err := s.appendEvent(ctx, tx, sysOpStarted, meta.Anchor, started, now); err != nil {
 		return nil, storespec.PostCommitEffects{}, err
 	}
+	// Member-source permission is judged HERE, inside the value transaction —
+	// the sender-active fact and the value write read the same SQLite snapshot,
+	// so no revocation or admission can interleave between judgement and commit
+	// (the admission section's 锚查→判权→事件对→执行 is one transaction).
+	memberInactive := false
+	if meta.Source == storespec.SysOpSourceMember {
+		var active bool
+		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL)`, string(meta.Sender)).Scan(&active); err != nil {
+			return nil, storespec.PostCommitEffects{}, err
+		}
+		memberInactive = !active
+	}
 	var outcome sysOpOutcome
-	if meta.DecisiveError != nil {
+	switch {
+	case memberInactive:
+		outcome = decisive(channel.ErrCodeUnauthorizedSender, "sender is not an active channel member")
+	case meta.DecisiveError != nil:
 		if meta.DecisiveError.Retryable {
 			return nil, storespec.PostCommitEffects{}, meta.DecisiveError
 		}
 		outcome = decisive(meta.DecisiveError.Code, meta.DecisiveError.Detail)
-	} else {
+	default:
 		outcome, err = execute(tx, now)
 	}
 	if err != nil {
@@ -254,8 +269,24 @@ func (s *sysOpStore) Admit(ctx context.Context, in storespec.AdmitTx) (storespec
 
 func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (storespec.IntroduceResult, error) {
 	raw, effects, err := s.run(ctx, in.SysOpMeta, "introduce", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
-		if in.DeclID == "" || in.InitiatorPrincipal == "" {
-			return decisive(channel.ErrCodeBadPayload, "decl_id and initiator_principal required"), nil
+		if in.DeclID == "" {
+			return decisive(channel.ErrCodeBadPayload, "decl_id required"), nil
+		}
+		initiator := in.InitiatorPrincipal
+		if in.Source == storespec.SysOpSourceMember {
+			// Member-source initiator identity is derived in-transaction from
+			// the sender row: judgement (run's sender-active check) and identity
+			// read the same snapshot, so an outside pre-read can never feed a
+			// stale principal into the value write.
+			if err := tx.QueryRowContext(ctx, `SELECT principal FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(in.Sender)).Scan(&initiator); err != nil {
+				if errors.Is(err, sql.ErrNoRows) {
+					return decisive(channel.ErrCodeUnauthorizedSender, "sender is not an active channel member"), nil
+				}
+				return sysOpOutcome{}, err
+			}
+		}
+		if initiator == "" {
+			return decisive(channel.ErrCodeBadPayload, "initiator_principal required"), nil
 		}
 		if _, ok := actor.ParseKind(string(in.Kind)); !ok || in.Kind == actor.KindHuman || in.Kind == actor.KindSystem {
 			return decisive(channel.ErrCodeUnknownClass, in.Rendered.Class), nil
@@ -266,10 +297,10 @@ func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (s
 		if in.Source == storespec.SysOpSourceMember && in.Visibility != "public" {
 			return decisive(channel.ErrCodeForbidden, "member introduction is limited to public declarations"), nil
 		}
-		if in.Visibility != "public" && in.InitiatorPrincipal != in.OwnerPrincipal {
+		if in.Visibility != "public" && initiator != in.OwnerPrincipal {
 			return decisive(channel.ErrCodeForbidden, "declaration is private"), nil
 		}
-		if active, err := principalActiveTx(ctx, tx, in.InitiatorPrincipal); err != nil {
+		if active, err := principalActiveTx(ctx, tx, initiator); err != nil {
 			return sysOpOutcome{}, err
 		} else if !active {
 			return decisive(channel.ErrCodeMemberInactive, "initiator is not an active member"), nil
@@ -534,12 +565,13 @@ func (s *sysOpStore) RestartActor(ctx context.Context, in storespec.RestartTx) (
 		if err := tx.QueryRowContext(ctx, `SELECT restart_epoch FROM actor_registry WHERE actor_id=?`, string(in.Target)).Scan(&epoch); err != nil {
 			return sysOpOutcome{}, err
 		}
-		// Despawn+Poke merely ACCELERATE the bounce; correctness rests on the
-		// generation skew reconcile observes (live carrier's recorded epoch <
-		// account epoch), so a lost effect still converges on the next tick.
+		// Pure value operation: the word path never kills a cell. Poke wakes
+		// reconcile immediately, which observes the generation skew (live
+		// carrier's recorded epoch < account epoch) and bounces the target —
+		// same acceleration as a kill hint, zero execution in the word path.
 		return sysOpOutcome{
 			result:  storespec.RestartResult{Epoch: epoch},
-			effects: storespec.PostCommitEffects{Poke: true, Despawn: []actor.ActorID{in.Target}},
+			effects: storespec.PostCommitEffects{Poke: true},
 		}, nil
 	})
 	return decodeResult[storespec.RestartResult](raw, effects, err)

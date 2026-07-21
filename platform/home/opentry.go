@@ -88,19 +88,6 @@ func (e *opEntry) memberDecisive(ctx context.Context, req sysactor.OperateReques
 	return asOperateError(err)
 }
 
-// requireActiveSender is the member words' admission-side permission judgement
-// (the transport gate only translates and replies): an inactive sender is a
-// decisive unauthorized_sender terminal recorded through the word's event pair.
-func (e *opEntry) requireActiveSender(ctx context.Context, req sysactor.OperateRequest, word string, request any) error {
-	_, found, err := e.home.controlIndex.LookupActive(ctx, req.Sender)
-	if err != nil {
-		return asOperateError(err)
-	}
-	if found {
-		return nil
-	}
-	return e.memberDecisive(ctx, req, word, request, &channel.OperationError{Code: channel.ErrCodeUnauthorizedSender, Detail: "sender is not an active channel member"})
-}
 
 func (e *opEntry) Admit(ctx context.Context, req channel.AdmitRequest) (channel.AdmitResult, error) {
 	if err := e.available(); err != nil {
@@ -405,13 +392,10 @@ func (e *opEntry) executeMemberIntroduce(ctx context.Context, req sysactor.Opera
 	if err != nil {
 		return nil, err
 	}
-	row, found, err := e.home.controlIndex.LookupActive(ctx, req.Sender)
-	if err != nil || !found {
-		meta.DecisiveError = &channel.OperationError{Code: channel.ErrCodeUnauthorizedSender, Detail: "sender is not active"}
-		_, decisionErr := e.introduce(ctx, meta, payload.DeclID, "", nil)
-		return nil, asOperateError(decisionErr)
-	}
-	result, err := e.introduce(ctx, meta, payload.DeclID, row.Principal, nil)
+	// Sender permission and initiator identity are both judged inside the store
+	// transaction (run's member sender-active check + in-tx principal
+	// derivation) — no pre-read here can go stale against the value write.
+	result, err := e.introduce(ctx, meta, payload.DeclID, "", nil)
 	if err != nil {
 		return nil, asOperateError(err)
 	}
@@ -433,9 +417,6 @@ func (e *opEntry) executeMemberRemove(ctx context.Context, req sysactor.OperateR
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
 		return nil, e.memberDecisive(ctx, req, "remove_actor", string(req.Payload), &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "instance_id required"})
-	}
-	if err := e.requireActiveSender(ctx, req, "remove_actor", payload); err != nil {
-		return nil, err
 	}
 	meta, err := memberMeta(req.Anchor, req.Sender, payload)
 	if err != nil {
@@ -493,9 +474,6 @@ func (e *opEntry) executeMemberRestart(ctx context.Context, req sysactor.Operate
 	if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
 		return nil, e.memberDecisive(ctx, req, "restart_actor", string(req.Payload), &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "instance_id required"})
 	}
-	if err := e.requireActiveSender(ctx, req, "restart_actor", payload); err != nil {
-		return nil, err
-	}
 	meta, err := memberMeta(req.Anchor, req.Sender, payload)
 	if err != nil {
 		return nil, err
@@ -505,6 +483,13 @@ func (e *opEntry) executeMemberRestart(ctx context.Context, req sysactor.Operate
 	res, err := e.admission.RestartActor(ctx, storespec.RestartTx{SysOpMeta: meta, Target: payload.InstanceID})
 	if err != nil {
 		return nil, asOperateError(err)
+	}
+	// Post-commit projection refresh (observation, not execution): the account's
+	// new epoch must reach the in-memory control index reconcile reads, or the
+	// generation skew stays invisible until an unrelated refresh. The bounce
+	// itself remains entirely reconcile's job (poked below).
+	if row, active, err := e.home.cs.Declared.LookupDeclaredActive(ctx, payload.InstanceID); err == nil && active {
+		_ = e.home.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}})
 	}
 	e.applyEffects(ctx, res.Effects)
 	return map[string]any{"restarted": payload.InstanceID, "epoch": res.Epoch}, nil
@@ -519,9 +504,6 @@ func (e *opEntry) executeMemberSetDefault(ctx context.Context, req sysactor.Oper
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil {
 		return nil, e.memberDecisive(ctx, req, "set_default_agent", string(req.Payload), &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: err.Error()})
-	}
-	if err := e.requireActiveSender(ctx, req, "set_default_agent", payload); err != nil {
-		return nil, err
 	}
 	meta, err := memberMeta(req.Anchor, req.Sender, payload)
 	if err != nil {

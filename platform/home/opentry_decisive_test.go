@@ -8,7 +8,9 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // Decisive rejections are account truth: malformed payloads and inactive
@@ -40,10 +42,22 @@ func TestMemberWordDecisiveRejectionsCommitEventPairs(t *testing.T) {
 		}
 	}
 
+	// An active member sender for the malformed-payload case: the in-transaction
+	// sender judgement precedes the payload verdict, so bad_payload is only
+	// reachable for a live member.
+	declared, err := h.declare(ctx, DeclareRequest{
+		SourceDeclID: "decl:probe", Principal: "probe", Class: "probe",
+		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sender := declared.Row.ID
+
 	// Malformed payload → bad_payload pair keyed by the raw-bytes digest.
 	raw := json.RawMessage(`{"instance_id":""}`)
 	if _, err := h.opEntry.Execute(ctx, sysactor.TypeRestartActor,
-		sysactor.OperateRequest{ChannelID: h.channelID, Sender: "member:someone:1", Anchor: "op-msg-bad", Payload: raw}); err == nil {
+		sysactor.OperateRequest{ChannelID: h.channelID, Sender: sender, Anchor: "op-msg-bad", Payload: raw}); err == nil {
 		t.Fatal("malformed restart unexpectedly succeeded")
 	}
 	rawDigest, err := channel.Digest(string(raw))
@@ -53,7 +67,7 @@ func TestMemberWordDecisiveRejectionsCommitEventPairs(t *testing.T) {
 	assertCompleted("op-msg-bad", rawDigest, channel.ErrCodeBadPayload)
 	// Replay of the same malformed request lands on the same terminal.
 	if _, err := h.opEntry.Execute(ctx, sysactor.TypeRestartActor,
-		sysactor.OperateRequest{ChannelID: h.channelID, Sender: "member:someone:1", Anchor: "op-msg-bad", Payload: raw}); err == nil {
+		sysactor.OperateRequest{ChannelID: h.channelID, Sender: sender, Anchor: "op-msg-bad", Payload: raw}); err == nil {
 		t.Fatal("malformed restart replay unexpectedly succeeded")
 	}
 	assertCompleted("op-msg-bad", rawDigest, channel.ErrCodeBadPayload)

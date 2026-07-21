@@ -188,6 +188,29 @@ func TestSysOpRestartTransientFailureRollsBackPairLeavingNoResidue(t *testing.T)
 	}
 }
 
+// Member-source permission is judged inside the value transaction: an unknown
+// or deregistered sender is a decisive unauthorized_sender terminal with its
+// event pair — no outside pre-read can go stale against the value write.
+func TestSysOpMemberWordsJudgeSenderInTransaction(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	target := admitDurableAgent(t, cs, "decl:tx-judged")
+	ghost := storespec.SysOpMeta{Anchor: "op:msg:ghost:restart", RequestDigest: "g1", Source: storespec.SysOpSourceMember, Sender: "human:ghost"}
+	_, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: ghost, Target: target})
+	var operationErr *channel.OperationError
+	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeUnauthorizedSender || operationErr.Retryable {
+		t.Fatalf("ghost-sender restart error=%v, want decisive unauthorized_sender", err)
+	}
+	assertEventPair(t, cs, "op:msg:ghost:restart")
+	var epoch int64
+	if err := cs.db.QueryRow(`SELECT restart_epoch FROM actor_registry WHERE actor_id=?`, string(target)).Scan(&epoch); err != nil {
+		t.Fatal(err)
+	}
+	if epoch != 0 {
+		t.Fatalf("ghost-sender restart mutated the value row (epoch=%d)", epoch)
+	}
+}
+
 // The member words execute the operation×source admission table inside the
 // transaction: a system-source frame is a decisive not_accepted_source terminal
 // with its event pair, never a structural write.
@@ -225,6 +248,14 @@ func openSysOpTestStore(t *testing.T) *ChannelStores {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
+	// Member-source permission is judged in-transaction against the sender row,
+	// so the fixture registers memberMetaFor's sender as an active member.
+	if _, err := cs.DeclAdmission.AdmitDeclared(context.Background(), storespec.AdmitBundle{
+		ID: "human:alice", Kind: actor.KindHuman, Principal: "alice-op", Class: "human",
+		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
+	}); err != nil {
+		t.Fatalf("seed member sender: %v", err)
+	}
 	return cs
 }
 

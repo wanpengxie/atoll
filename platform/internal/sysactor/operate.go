@@ -96,4 +96,3 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	_, _ = sys.Reply(msg, result)
 }
-
