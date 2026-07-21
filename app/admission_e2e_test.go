@@ -55,6 +55,23 @@ func TestAdmissionJoinIdempotencyAndOperationProjection(t *testing.T) {
 	}
 }
 
+func TestAdmissionIdempotencyKeyRejectsCrossChannelReuse(t *testing.T) {
+	env := setupTestApp(t)
+	_, ownerCookies := register(t, env, "xchan-owner@example.com", "secret123", "Owner")
+	channelA, ownerCookies := createChannel(t, env, ownerCookies, "xchan-a")
+	channelB, _ := createChannel(t, env, ownerCookies, "xchan-b")
+	_, joinerCookies := register(t, env, "xchan-joiner@example.com", "secret123", "Joiner")
+
+	headers := map[string]string{"Idempotency-Key": "shared-key"}
+	first := env.doHeaders(t, http.MethodPost, "/api/channels/"+channelA["id"].(string)+"/join", nil, joinerCookies, headers)
+	assertStatus(t, first, http.StatusCreated)
+
+	// Same requester + same idempotency key, different channel: the reused key
+	// must conflict, never silently return channel A's operation for channel B.
+	cross := env.doHeaders(t, http.MethodPost, "/api/channels/"+channelB["id"].(string)+"/join", nil, joinerCookies, headers)
+	assertStatus(t, cross, http.StatusConflict)
+}
+
 func TestAdmissionPendingBecomesUnresolvedWhenChannelRetires(t *testing.T) {
 	env := setupTestApp(t)
 	_, ownerCookies := register(t, env, "unknown-owner@example.com", "secret123", "Owner")

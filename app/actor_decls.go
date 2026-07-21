@@ -57,6 +57,15 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 	if class == "" {
 		class = "go-kimi"
 	}
+	// Same gate as realmOps.CreateDeclaration (realm_ops.go): an unknown class is
+	// rejected, and realm-tool is reserved — composition.go builds a real realm
+	// boundary tool for class=="realm-tool", so a forged realm-tool declaration
+	// would smuggle a membrane entry past the "remove realm-tool = close it"
+	// sovereignty switch. The default "go-kimi" is a registered class and passes.
+	if _, err := (compositionResolver{app: a}).ClassKind(c.Request.Context(), class); err != nil || class == realmToolClass {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or reserved class"})
+		return
+	}
 	visibility := strings.TrimSpace(req.Visibility)
 	if visibility == "" {
 		visibility = "private"

@@ -113,10 +113,10 @@ func (s *admissionService) submit(ctx context.Context, command admissionCommand)
 		}
 	}
 	if command.IdempotencyKey != "" {
-		var existing, existingDigest string
-		err := tx.QueryRowContext(ctx, `SELECT operation_id,request_digest FROM channel_admission_operations WHERE requested_by=? AND idempotency_key=?`, command.RequestedBy, command.IdempotencyKey).Scan(&existing, &existingDigest)
+		var existing, existingDigest, existingChannel, existingOp string
+		err := tx.QueryRowContext(ctx, `SELECT operation_id,request_digest,channel_id,op FROM channel_admission_operations WHERE requested_by=? AND idempotency_key=?`, command.RequestedBy, command.IdempotencyKey).Scan(&existing, &existingDigest, &existingChannel, &existingOp)
 		if err == nil {
-			if existingDigest != digest {
+			if existingDigest != digest || existingChannel != string(command.ChannelID) || existingOp != command.Op {
 				return admissionRecord{}, true, errIdempotencyConflict
 			}
 			_ = tx.Rollback()
@@ -154,7 +154,7 @@ func (s *admissionService) submit(ctx context.Context, command admissionCommand)
 		}
 		if command.IdempotencyKey != "" {
 			_ = tx.Rollback()
-			return s.loadIdempotent(ctx, command.RequestedBy, command.IdempotencyKey, digest)
+			return s.loadIdempotent(ctx, command.RequestedBy, command.IdempotencyKey, digest, string(command.ChannelID), command.Op)
 		}
 		return admissionRecord{}, false, err
 	}
@@ -173,13 +173,13 @@ func (s *admissionService) submit(ctx context.Context, command admissionCommand)
 	return record, false, err
 }
 
-func (s *admissionService) loadIdempotent(ctx context.Context, requestedBy, key, digest string) (admissionRecord, bool, error) {
-	var operationID, existingDigest string
-	err := s.app.db.QueryRowContext(ctx, `SELECT operation_id,request_digest FROM channel_admission_operations WHERE requested_by=? AND idempotency_key=?`, requestedBy, key).Scan(&operationID, &existingDigest)
+func (s *admissionService) loadIdempotent(ctx context.Context, requestedBy, key, digest, channelID, op string) (admissionRecord, bool, error) {
+	var operationID, existingDigest, existingChannel, existingOp string
+	err := s.app.db.QueryRowContext(ctx, `SELECT operation_id,request_digest,channel_id,op FROM channel_admission_operations WHERE requested_by=? AND idempotency_key=?`, requestedBy, key).Scan(&operationID, &existingDigest, &existingChannel, &existingOp)
 	if err != nil {
 		return admissionRecord{}, false, err
 	}
-	if existingDigest != digest {
+	if existingDigest != digest || existingChannel != channelID || existingOp != op {
 		return admissionRecord{}, true, errIdempotencyConflict
 	}
 	return s.load(ctx, operationID)
@@ -227,10 +227,10 @@ func (s *admissionService) submitEdit(ctx context.Context, chID channel.ID, rawA
 	}
 	defer tx.Rollback()
 	if idemKey != "" {
-		var existing, existingDigest string
-		err := tx.QueryRowContext(ctx, `SELECT operation_id,request_digest FROM channel_admission_operations WHERE requested_by=? AND idempotency_key=?`, caller, idemKey).Scan(&existing, &existingDigest)
+		var existing, existingDigest, existingChannel, existingOp string
+		err := tx.QueryRowContext(ctx, `SELECT operation_id,request_digest,channel_id,op FROM channel_admission_operations WHERE requested_by=? AND idempotency_key=?`, caller, idemKey).Scan(&existing, &existingDigest, &existingChannel, &existingOp)
 		if err == nil {
-			if existingDigest != digest {
+			if existingDigest != digest || existingChannel != string(chID) || existingOp != "edit" {
 				return admissionRecord{}, errIdempotencyConflict
 			}
 			_ = tx.Rollback()
