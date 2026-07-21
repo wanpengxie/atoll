@@ -2,6 +2,7 @@ package home
 
 import (
 	"errors"
+	"fmt"
 	"time"
 )
 
@@ -112,10 +113,22 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 				h.engine.Close()
 			}
 		})
+		// First store-close attempt stays in teardown order (and still runs on
+		// the panic path below), but its error is NOT folded into the cached
+		// closeErr — a transient failure must stay retryable via the post-Once
+		// section. Freezing it here would freeze a destroy forever.
 		step("close.stores", func() {
-			if h.cs != nil {
-				addErr(h.cs.Close())
+			if h.cs == nil {
+				h.storeCloseDone.Store(true)
+				return
 			}
+			h.storeCloseMu.Lock()
+			defer h.storeCloseMu.Unlock()
+			if err := h.cs.Close(); err != nil {
+				h.logger.Error("home.close.stores_failed", "channel", h.channelID, "error", err)
+				return
+			}
+			h.storeCloseDone.Store(true)
 		})
 		h.closeErr = errors.Join(errs...)
 		leaked := h.reconcileLeaked.Load()
@@ -146,5 +159,18 @@ func (h *Home) closeInternalWithin(reason string, reconcileTimeout time.Duration
 		}
 	})
 	<-h.closeDone
+	// Store close runs AFTER the one-shot runtime teardown and is retried on
+	// every subsequent close call until it succeeds: a first-attempt error is
+	// returned, never cached, so a sealed Destroy can retry to completion.
+	if h.cs != nil && !h.storeCloseDone.Load() {
+		h.storeCloseMu.Lock()
+		defer h.storeCloseMu.Unlock()
+		if !h.storeCloseDone.Load() {
+			if err := h.cs.Close(); err != nil {
+				return errors.Join(h.closeErr, fmt.Errorf("platform: close stores: %w", err))
+			}
+			h.storeCloseDone.Store(true)
+		}
+	}
 	return h.closeErr
 }

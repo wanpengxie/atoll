@@ -115,6 +115,10 @@ type entry struct {
 	generation uint64
 	state      entryState
 	closed     bool
+	// genesisType is the channel type Open verified against genesis; the
+	// serving fast path re-checks ExpectedType against it instead of skipping
+	// the strict validation.
+	genesisType string
 }
 
 type ChannelHost struct {
@@ -179,6 +183,10 @@ func (h *ChannelHost) paths(id channel.ID) (main, tombstone string, err error) {
 	return main, main + ".tombstone", nil
 }
 
+// KNOWN, deliberately unhandled at this stage: the per-ID lock table only
+// grows — every channel ID ever touched keeps its mutex until process exit.
+// Bounded by lifetime channel count; revisit with a refcounted keyed lock if a
+// long-lived realm's churn ever makes this measurable.
 func (h *ChannelHost) idLock(id channel.ID) *sync.Mutex {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -299,6 +307,9 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	current := h.entries[spec.ChannelID]
 	h.mu.RUnlock()
 	if current != nil && current.state == stateServing {
+		if current.genesisType != spec.ExpectedType {
+			return errors.Join(ErrSchemaIncompatible, fmt.Errorf("channelhost: serving channel is type %q, directory expects %q", current.genesisType, spec.ExpectedType))
+		}
 		return nil
 	}
 	if current != nil {
@@ -330,7 +341,7 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 		_ = home.Shutdown(homeInstance)
 		return nil
 	}
-	h.entries[spec.ChannelID] = &entry{home: homeInstance, sysOp: home.SystemOps(homeInstance), generation: generation, state: stateServing}
+	h.entries[spec.ChannelID] = &entry{home: homeInstance, sysOp: home.SystemOps(homeInstance), generation: generation, state: stateServing, genesisType: spec.ExpectedType}
 	h.mu.Unlock()
 	return nil
 }
@@ -510,13 +521,17 @@ func (h *ChannelHost) Close() error {
 		skip := entry.home == nil || entry.closed
 		h.mu.Unlock()
 		if !skip {
+			// Only a clean shutdown marks the entry closed: a failed Home close
+			// stays honestly un-closed (Home's own store-close retry is the
+			// recovery path; never fake the terminal state on an error).
 			if err := home.Shutdown(entry.home); err != nil {
 				errs = append(errs, fmt.Errorf("channelhost: close %s: %w", id, err))
+			} else {
+				h.mu.Lock()
+				entry.closed = true
+				entry.state = stateSealed
+				h.mu.Unlock()
 			}
-			h.mu.Lock()
-			entry.closed = true
-			entry.state = stateSealed
-			h.mu.Unlock()
 		}
 		lock.Unlock()
 	}

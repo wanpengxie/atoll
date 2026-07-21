@@ -203,6 +203,11 @@ type Home struct {
 	// cells stop. atomic (lock-free read on the hot path).
 	closed    atomic.Bool
 	closeOnce sync.Once
+	// storeCloseDone/storeCloseMu make the store half of close retryable: the
+	// runtime teardown is one-shot, but a failed store close is re-attempted on
+	// every close call (a sealed Destroy retries through here to completion).
+	storeCloseDone atomic.Bool
+	storeCloseMu   sync.Mutex
 	closeDone chan struct{}
 	closeErr  error
 }

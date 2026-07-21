@@ -142,7 +142,16 @@ func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declI
 	if supplied != nil && supplied.RenderSeq > rendered.RenderSeq {
 		rendered = *supplied
 	}
-	kind, err := e.resolver.ClassKind(ctx, rendered.Class)
+	// ClassKind is a resolver call like ResolveDeclaration: fail-closed on its
+	// own bounded window, and only a definitive answer is decisive — an expired
+	// or infrastructure error is retryable authority_unavailable, never a
+	// permanent unknown_class terminal.
+	kindCtx, cancelKind := context.WithTimeout(ctx, introductionResolveTimeout)
+	kind, err := e.resolver.ClassKind(kindCtx, rendered.Class)
+	cancelKind()
+	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		return storespec.IntroduceResult{}, &channel.OperationError{Code: channel.ErrCodeAuthorityUnavailable, Detail: err.Error(), Retryable: true}
+	}
 	if err != nil {
 		meta.DecisiveError = &channel.OperationError{Code: channel.ErrCodeUnknownClass, Detail: err.Error()}
 		_, recordErr := e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta, DeclID: declID, InitiatorPrincipal: initiator})
