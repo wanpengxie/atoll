@@ -152,7 +152,7 @@ func TestGenesisOriginAndRenderedDeclaration(t *testing.T) {
 	host := newTestHost(t)
 	snapshot, err := (channel.RenderedSnapshot{
 		Class: "test-agent", Config: json.RawMessage(`{"v":1}`),
-		Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+		Placement: channel.Placement{Kind: channel.PlacementServer},
 	}).Seal()
 	if err != nil {
 		t.Fatal(err)

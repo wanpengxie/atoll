@@ -216,10 +216,6 @@ func decodeResult[T any](raw json.RawMessage, effects storespec.PostCommitEffect
 		value.Effects = effects
 	case *storespec.BindingResult:
 		value.Effects = effects
-	case *storespec.ApplyResult:
-		value.Effects = effects
-	case *storespec.RevokeResult:
-		value.Effects = effects
 	case *storespec.RestartResult:
 		value.Effects = effects
 	case *storespec.SetDefaultResult:
@@ -249,7 +245,7 @@ func (s *sysOpStore) Admit(ctx context.Context, in storespec.AdmitTx) (storespec
 			return sysOpOutcome{}, err
 		}
 		if err := insertDeclaredTx(ctx, tx, id, actor.KindHuman, in.Principal, "", nil, channel.RenderedSnapshot{
-			Class: "human", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+			Class: "human", Placement: channel.Placement{Kind: channel.PlacementServer},
 		}, storespec.RoleNone, now); err != nil {
 			return sysOpOutcome{}, err
 		}
@@ -378,109 +374,114 @@ func (s *sysOpStore) DetachDaemon(ctx context.Context, in storespec.DetachTx) (s
 	return decodeResult[storespec.DetachResult](raw, effects, err)
 }
 
-func (s *sysOpStore) ApplyDeclVersion(ctx context.Context, in storespec.ApplyTx) (storespec.ApplyResult, error) {
-	raw, effects, err := s.run(ctx, in.SysOpMeta, "apply_decl_version", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
-		if in.Source != storespec.SysOpSourceSystem {
-			return decisive(channel.ErrCodeNotAcceptedSource, "apply_decl_version accepts only the system source"), nil
-		}
-		if in.DeclID == "" || in.Rendered.Validate() != nil {
-			return decisive(channel.ErrCodeBadPayload, "valid declaration snapshot required"), nil
-		}
-		if in.Rendered.Placement.Kind == channel.PlacementDaemon && in.Rendered.Placement.DesiredHost == "" {
-			return decisive(channel.ErrCodeInvalidDesiredHost, "applied daemon placement requires desired_host"), nil
-		}
-		if in.Authority != channel.AuthorityRealm && in.Authority != channel.AuthorityDelegate {
-			return decisive(channel.ErrCodeBadPayload, "invalid apply authority"), nil
-		}
-		if in.Authority == channel.AuthorityDelegate {
-			if in.InitiatorPrincipal == "" {
-				return decisive(channel.ErrCodeBadPayload, "initiator required"), nil
-			}
-			active, err := principalActiveTx(ctx, tx, in.InitiatorPrincipal)
-			if err != nil {
-				return sysOpOutcome{}, err
-			}
-			if !active {
-				return decisive(channel.ErrCodeMemberInactive, "initiator is not active"), nil
-			}
-			if in.Visibility != "public" && in.InitiatorPrincipal != in.OwnerPrincipal {
-				return decisive(channel.ErrCodeForbidden, "initiator cannot edit declaration"), nil
-			}
-		}
-		var id actor.ActorID
-		var version, renderSeq int64
-		err := tx.QueryRowContext(ctx, `SELECT r.actor_id,r.current_decl_version,d.render_seq FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id AND d.version=r.current_decl_version WHERE r.source_decl_id=? AND r.deregistered_at IS NULL`, in.DeclID).Scan(&id, &version, &renderSeq)
-		if errors.Is(err, sql.ErrNoRows) {
-			return sysOpOutcome{result: storespec.ApplyResult{Status: channel.ApplyAbsent}}, nil
-		}
-		if err != nil {
-			return sysOpOutcome{}, err
-		}
-		if in.Rendered.RenderSeq <= renderSeq {
-			return sysOpOutcome{result: storespec.ApplyResult{Status: channel.ApplyStale, Version: version}}, nil
-		}
-		version++
-		if err := insertDeclVersionTx(ctx, tx, id, version, in.Rendered, now); err != nil {
-			return sysOpOutcome{}, err
-		}
-		if _, err := tx.ExecContext(ctx, `UPDATE actor_registry SET current_decl_version=? WHERE actor_id=? AND deregistered_at IS NULL`, version, string(id)); err != nil {
-			return sysOpOutcome{}, err
-		}
-		return sysOpOutcome{
-			result:  storespec.ApplyResult{Status: channel.ApplyApplied, Version: version},
-			effects: storespec.PostCommitEffects{Poke: true, Despawn: []actor.ActorID{id}},
-		}, nil
-	})
-	return decodeResult[storespec.ApplyResult](raw, effects, err)
-}
+// ApplyResolvedDeclaration is deliberately separate from SysOpAdmission: it
+// is Home's private level-reconcile store port, not a realm-facing word. Equal
+// content returns before either sysop event is appended, making repeated pokes
+// genuine zero-write observations.
+func (s *sysOpStore) ApplyResolvedDeclaration(ctx context.Context, in storespec.DeclarationSyncTx) (storespec.DeclarationSyncResult, error) {
+	if in.Anchor == "" || in.RequestDigest == "" || in.Source != storespec.SysOpSourceSystem {
+		return storespec.DeclarationSyncResult{}, errors.New("store: declaration sync requires a system anchor and digest")
+	}
+	if in.ActorID == "" || in.DeclID == "" || in.Class == "" {
+		return storespec.DeclarationSyncResult{}, errors.New("store: declaration sync requires actor, declaration, and class")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	defer tx.Rollback()
 
-func (s *sysOpStore) RevokeDeclTargets(ctx context.Context, in storespec.RevokeDeclTx) (storespec.RevokeResult, error) {
-	raw, effects, err := s.run(ctx, in.SysOpMeta, "revoke_decl_targets", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
-		if in.Source != storespec.SysOpSourceSystem {
-			return decisive(channel.ErrCodeNotAcceptedSource, "revoke_decl_targets accepts only the system source"), nil
+	completed, found, err := lookupCompleted(ctx, tx, in.Anchor, in.RequestDigest)
+	if err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	if found {
+		if completed.Operation != "sync_declaration" {
+			return storespec.DeclarationSyncResult{}, &channel.OperationError{Code: channel.ErrCodeRefConflict, Detail: "anchor reused for another operation"}
 		}
-		if in.DeclID == "" {
-			return decisive(channel.ErrCodeBadPayload, "decl_id required"), nil
+		var replay storespec.DeclarationSyncResult
+		if err := json.Unmarshal(completed.Result, &replay); err != nil {
+			return storespec.DeclarationSyncResult{}, err
 		}
-		ended, err := endMatchingInstancesTx(ctx, tx, s.channelID, `r.source_decl_id=?`, []any{in.DeclID}, now)
-		if err != nil {
-			return sysOpOutcome{}, err
-		}
-		outcomes := make([]channel.InstanceOutcome, 0, len(ended))
-		for _, id := range ended {
-			outcomes = append(outcomes, channel.InstanceOutcome{ActorID: id})
-		}
-		return sysOpOutcome{result: storespec.RevokeResult{PerInstance: outcomes}, effects: storespec.PostCommitEffects{Poke: true, Despawn: ended}}, nil
-	})
-	return decodeResult[storespec.RevokeResult](raw, effects, err)
-}
+		return replay, nil
+	}
 
-func (s *sysOpStore) RevokeDaemon(ctx context.Context, in storespec.RevokeDaemonTx) (storespec.RevokeResult, error) {
-	raw, effects, err := s.run(ctx, in.SysOpMeta, "revoke_daemon", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
-		if in.Source != storespec.SysOpSourceSystem {
-			return decisive(channel.ErrCodeNotAcceptedSource, "revoke_daemon accepts only the system source"), nil
-		}
-		if in.DaemonID == "" {
-			return decisive(channel.ErrCodeBadPayload, "daemon_id required"), nil
-		}
-		if _, err := tx.ExecContext(ctx, `DELETE FROM channel_daemon_bindings WHERE daemon_id=?`, string(in.DaemonID)); err != nil {
-			return sysOpOutcome{}, err
-		}
-		ended, err := endDaemonInstancesTx(ctx, tx, s.channelID, string(in.DaemonID), now)
-		if err != nil {
-			return sysOpOutcome{}, err
-		}
-		outcomes := make([]channel.InstanceOutcome, 0, len(ended))
-		for _, id := range ended {
-			outcomes = append(outcomes, channel.InstanceOutcome{ActorID: id})
-		}
-		daemon := in.DaemonID
-		return sysOpOutcome{
-			result:  storespec.RevokeResult{PerInstance: outcomes},
-			effects: storespec.PostCommitEffects{Poke: true, Despawn: ended, KickDaemon: &daemon},
-		}, nil
+	var version int64
+	var class, placement, host string
+	var config []byte
+	var idleMS int64
+	err = tx.QueryRowContext(ctx, `SELECT r.current_decl_version,d.class,d.config_json,d.placement,d.desired_host,d.t_idle_ms
+		FROM actor_registry r JOIN actor_decl_versions d
+		  ON d.actor_id=r.actor_id AND d.version=r.current_decl_version
+		WHERE r.actor_id=? AND r.source_decl_id=? AND r.deregistered_at IS NULL`, string(in.ActorID), in.DeclID).
+		Scan(&version, &class, &config, &placement, &host, &idleMS)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storespec.DeclarationSyncResult{Status: storespec.DeclarationAbsent}, nil
+	}
+	if err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	current, err := (channel.RenderedSnapshot{
+		Class: class, Config: append(json.RawMessage(nil), config...),
+		Placement: channel.Placement{Kind: channel.PlacementKind(placement), DesiredHost: host}, TIdleMS: idleMS,
+	}).Seal()
+	if err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	candidate, err := (channel.RenderedSnapshot{
+		Class: in.Class, Config: append(json.RawMessage(nil), in.Config...),
+		Placement: current.Placement, TIdleMS: current.TIdleMS,
+	}).Seal()
+	if err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	if current.Digest == candidate.Digest {
+		return storespec.DeclarationSyncResult{Status: storespec.DeclarationEqual, Version: version}, nil
+	}
+
+	now := time.Now().UnixMilli()
+	started, _ := json.Marshal(map[string]any{
+		"operation": "sync_declaration", "source": in.Source, "sender": in.Sender,
+		"request_digest": in.RequestDigest,
 	})
-	return decodeResult[storespec.RevokeResult](raw, effects, err)
+	if err := s.appendEvent(ctx, tx, sysOpStarted, in.Anchor, started, now); err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0)+1 FROM actor_decl_versions WHERE actor_id=?`, string(in.ActorID)).Scan(&version); err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	if err := insertDeclVersionTx(ctx, tx, in.ActorID, version, candidate, now); err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	res, err := tx.ExecContext(ctx, `UPDATE actor_registry SET current_decl_version=? WHERE actor_id=? AND source_decl_id=? AND deregistered_at IS NULL`, version, string(in.ActorID), in.DeclID)
+	if err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	if n, err := res.RowsAffected(); err != nil || n != 1 {
+		if err != nil {
+			return storespec.DeclarationSyncResult{}, err
+		}
+		return storespec.DeclarationSyncResult{}, errors.New("store: declaration sync actor disappeared inside transaction")
+	}
+	result := storespec.DeclarationSyncResult{
+		Status: storespec.DeclarationApplied, Version: version,
+		Effects: storespec.PostCommitEffects{Poke: true, Despawn: []actor.ActorID{in.ActorID}},
+	}
+	raw, err := json.Marshal(result)
+	if err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	completedRaw, _ := json.Marshal(completedPayload{Operation: "sync_declaration", RequestDigest: in.RequestDigest, Result: raw})
+	if err := s.appendEvent(ctx, tx, sysOpCompleted, in.Anchor, completedRaw, now); err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	if s.onCommit != nil {
+		s.onCommit()
+	}
+	return result, nil
 }
 
 func (s *sysOpStore) RemoveActor(ctx context.Context, in storespec.RemoveTx) (storespec.RemoveResult, error) {
@@ -615,7 +616,7 @@ func insertDeclVersionTx(ctx context.Context, tx *sql.Tx, id actor.ActorID, vers
 	if rendered.Config != nil {
 		config = string(rendered.Config)
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO actor_decl_versions(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,render_seq,created_at) VALUES (?,?,?,?,?,?,?,?,?)`, string(id), version, rendered.Class, config, string(rendered.Placement.Kind), rendered.Placement.DesiredHost, rendered.TIdleMS, rendered.RenderSeq, at)
+	_, err := tx.ExecContext(ctx, `INSERT INTO actor_decl_versions(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,created_at) VALUES (?,?,?,?,?,?,?,?)`, string(id), version, rendered.Class, config, string(rendered.Placement.Kind), rendered.Placement.DesiredHost, rendered.TIdleMS, at)
 	return err
 }
 

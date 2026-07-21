@@ -20,7 +20,6 @@ type DeclareRequest struct {
 	TIdle        int64 // milliseconds; zero means no idle retirement
 	MakeDefault  bool
 	CreatedAt    int64
-	RenderSeq    int64
 }
 
 type DeclareResult struct {
@@ -47,7 +46,7 @@ func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 	admitted, err := h.cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
 		Kind: in.Kind, Binding: binding, Class: in.Class, Config: config,
 		Placement: in.Placement, TIdle: durationMillis(in.TIdle), SourceDeclID: in.SourceDeclID,
-		CreatedAt: in.CreatedAt, RenderSeq: in.RenderSeq,
+		CreatedAt: in.CreatedAt,
 	})
 	if err != nil {
 		return DeclareResult{}, err
@@ -79,7 +78,6 @@ func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 		edited, editErr := h.editDeclaration(ctx, storespec.DeclEditBundle{
 			ActorID: row.ID, Class: row.Class, Config: config, Placement: row.Placement,
 			TIdle: row.TIdle, CreatedAt: in.CreatedAt,
-			RenderSeq: in.RenderSeq,
 		})
 		if editErr != nil {
 			return DeclareResult{}, editErr
@@ -109,8 +107,7 @@ func declarationContentDigest(row storespec.ActorControlRow, config json.RawMess
 			Kind:        channel.PlacementKind(row.Placement.Kind),
 			DesiredHost: row.Placement.Host,
 		},
-		TIdleMS:   row.TIdle.Milliseconds(),
-		RenderSeq: max(row.RenderSeq, 1),
+		TIdleMS: row.TIdle.Milliseconds(),
 	}).ContentDigest()
 }
 

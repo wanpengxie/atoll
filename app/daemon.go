@@ -70,6 +70,23 @@ func (a *App) daemonOnline(ctx context.Context, only channel.ID, daemonID string
 	return false
 }
 
+func (a *App) directoryChannelIDs(ctx context.Context) ([]channel.ID, error) {
+	rows, err := a.db.QueryContext(ctx, `SELECT id FROM channels ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []channel.ID
+	for rows.Next() {
+		var id channel.ID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		out = append(out, id)
+	}
+	return out, rows.Err()
+}
+
 func (a *App) handleCreateDaemon(c *gin.Context) {
 	userID := middleware.UserID(c)
 	var req struct {
@@ -103,9 +120,8 @@ func (a *App) handleCreateDaemon(c *gin.Context) {
 	})
 }
 
-// handleDeleteDaemon commits the realm-side daemon revocation and its fanout
-// obligation atomically. Channel bindings and placed instances are channel-local
-// truth; the fanout worker subsequently converges each live directory channel.
+// handleDeleteDaemon removes the realm-side daemon record. Channel-local
+// convergence is handled by Home reconciliation.
 func (a *App) handleDeleteDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
 	release := a.daemonLocks.lock(daemonID)
@@ -146,9 +162,6 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 	}
 	release()
 	locked = false
-	if a.fanout != nil {
-		a.fanout.notify()
-	}
 	c.JSON(http.StatusOK, gin.H{"ok": true})
 }
 

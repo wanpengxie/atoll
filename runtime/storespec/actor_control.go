@@ -92,7 +92,6 @@ type ActorControlRow struct {
 	TIdle              time.Duration
 	Placement          Placement
 	SourceDeclID       string
-	RenderSeq          int64
 }
 
 type ActorWorld uint8
@@ -139,7 +138,6 @@ type AdmitBundle struct {
 	Placement    Placement
 	TIdle        time.Duration
 	SourceDeclID string
-	RenderSeq    int64
 	CreatedAt    int64
 }
 
@@ -169,7 +167,6 @@ type DeclEditBundle struct {
 	Config    json.RawMessage
 	Placement Placement
 	TIdle     time.Duration
-	RenderSeq int64
 	CreatedAt int64
 }
 

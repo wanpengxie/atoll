@@ -23,7 +23,7 @@ func TestActorDeclListProjectsCurrentAndLatestChannelVersions(t *testing.T) {
 	createAndBindDaemon(t, env, secondChannel, "version-host-b", s.cookies)
 	introduced = env.do(t, "POST", "/api/channels/"+secondChannel+"/actors", map[string]any{"decl_id": declID}, s.cookies)
 	assertStatus(t, introduced, http.StatusCreated)
-	_, latest, err := env.app.StageDeclarationEditForTest(channel.ID(s.chID), declID, json.RawMessage(`{"model":"v2"}`))
+	_, latest, err := env.app.SetDeclarationOverlayForTest(channel.ID(s.chID), declID, json.RawMessage(`{"model":"v2"}`))
 	if err != nil || latest != 2 {
 		t.Fatalf("stage edit latest=%d err=%v", latest, err)
 	}

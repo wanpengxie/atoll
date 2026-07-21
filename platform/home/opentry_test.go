@@ -47,21 +47,15 @@ func (r fixedIntroductionResolver) ClassKind(context.Context, string) (actor.Kin
 	return r.kind, true, nil
 }
 
-func TestOpEntryIntroduceApplyAndDetachUseOneDurableChain(t *testing.T) {
+func TestOpEntryIntroducePullAndDetachUseOneDurableChain(t *testing.T) {
 	ctx := context.Background()
-	v1, err := (channel.RenderedSnapshot{
-		Class: "test-agent", Config: json.RawMessage(`{"version":1}`),
-		Placement: channel.Placement{Kind: channel.PlacementDaemon}, RenderSeq: 1,
-	}).Seal()
-	if err != nil {
-		t.Fatal(err)
-	}
+	resolver := &mutableIntroductionResolver{kind: actor.KindAgent, facts: channel.DeclarationFacts{
+		OwnerPrincipal: "owner", Visibility: "private", Class: "test-agent", Config: json.RawMessage(`{"version":1}`),
+	}}
 	h, err := Open(Config{
 		ChannelID: "opentry", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"), Bootstrap: true,
-		CompositionResolver: emptyCompositionResolver{},
-		IntroductionResolver: fixedIntroductionResolver{kind: actor.KindAgent, facts: channel.DeclarationFacts{
-			OwnerPrincipal: "owner", Visibility: "private", DefaultClass: v1.Class, Rendered: v1,
-		}},
+		CompositionResolver:  emptyCompositionResolver{},
+		IntroductionResolver: resolver,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -75,41 +69,32 @@ func TestOpEntryIntroduceApplyAndDetachUseOneDurableChain(t *testing.T) {
 	if _, err := ops.AttachDaemon(ctx, channel.DaemonRequest{Ref: "adm:attach", DaemonID: "daemon-a"}); err != nil {
 		t.Fatal(err)
 	}
-	introduced, err := ops.Introduce(ctx, channel.IntroduceRequest{Ref: "adm:introduce", DeclID: "decl-a", InitiatorActorID: ownerActor, Rendered: &v1})
+	introduced, err := ops.Introduce(ctx, channel.IntroduceRequest{Ref: "adm:introduce", DeclID: "decl-a", InitiatorActorID: ownerActor})
 	if err != nil || !introduced.Created || introduced.ActorID == "" {
 		t.Fatalf("introduce=(%+v,%v)", introduced, err)
 	}
-	replayed, err := ops.Introduce(ctx, channel.IntroduceRequest{Ref: "adm:introduce", DeclID: "decl-a", InitiatorActorID: ownerActor, Rendered: &v1})
+	replayed, err := ops.Introduce(ctx, channel.IntroduceRequest{Ref: "adm:introduce", DeclID: "decl-a", InitiatorActorID: ownerActor})
 	if err != nil || replayed != introduced {
 		t.Fatalf("replay=(%+v,%v), want %+v", replayed, err, introduced)
 	}
 	rows, err := h.View().DeclaredBySource(ctx, "decl-a")
-	if err != nil || len(rows) != 1 || rows[0].RenderSeq != 1 || rows[0].Placement.Host != "daemon-a" {
+	if err != nil || len(rows) != 1 || rows[0].Placement.Host != "daemon-a" {
 		t.Fatalf("introduced rows=%+v err=%v", rows, err)
 	}
-	v2, _ := (channel.RenderedSnapshot{
-		Class: "test-agent", Config: json.RawMessage(`{"version":2}`),
-		Placement: channel.Placement{Kind: channel.PlacementDaemon, DesiredHost: "daemon-a"}, RenderSeq: 2,
-	}).Seal()
-	applied, err := ops.ApplyDeclVersion(ctx, channel.ApplyDeclVersionRequest{
-		Ref: "fo:apply-v2", DeclID: "decl-a", Rendered: v2, Authority: channel.AuthorityRealm,
-	})
-	if err != nil || applied.Status != channel.ApplyApplied || applied.Version != 2 {
-		t.Fatalf("apply=(%+v,%v)", applied, err)
-	}
+	resolver.facts.Config = json.RawMessage(`{"version":2}`)
+	h.reconcileDeclarations(ctx)
 	rows, _ = h.View().DeclaredBySource(ctx, "decl-a")
-	if len(rows) != 1 || rows[0].RenderSeq != 2 || string(rows[0].Config) != `{"version":2}` {
+	if len(rows) != 1 || string(rows[0].Config) != `{"version":2}` || rows[0].Placement.Host != "daemon-a" {
 		t.Fatalf("applied rows=%+v", rows)
 	}
-	resolvedV1, _ := (channel.RenderedSnapshot{
-		Class: "test-agent", Config: json.RawMessage(`{"version":1}`),
-		Placement: channel.Placement{Kind: channel.PlacementDaemon, DesiredHost: "daemon-a"}, RenderSeq: 1,
-	}).Seal()
-	stale, err := ops.ApplyDeclVersion(ctx, channel.ApplyDeclVersionRequest{
-		Ref: "fo:stale-v1", DeclID: "decl-a", Rendered: resolvedV1, Authority: channel.AuthorityRealm,
-	})
-	if err != nil || stale.Status != channel.ApplyStale || stale.Version != 2 {
-		t.Fatalf("stale=(%+v,%v)", stale, err)
+	_, before, err := h.View().DeclarationVersions(ctx, introduced.ActorID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.reconcileDeclarations(ctx)
+	_, after, err := h.View().DeclarationVersions(ctx, introduced.ActorID)
+	if err != nil || after.CurrentDeclVersion != before.CurrentDeclVersion {
+		t.Fatalf("equal pull wrote history: before=%+v after=%+v err=%v", before, after, err)
 	}
 	detached, err := ops.DetachDaemon(ctx, channel.DaemonRequest{Ref: "adm:detach", DaemonID: "daemon-a"})
 	if err != nil || detached.Bound || len(detached.ClearedInstances) != 1 || detached.ClearedInstances[0] != introduced.ActorID {
@@ -172,12 +157,6 @@ func TestOpEntryPermanentResolverRefusalReplaysWithoutResolver(t *testing.T) {
 
 func TestOpEntryTransientResolverFailureLeavesNoPairAndSameRefRetries(t *testing.T) {
 	ctx := context.Background()
-	rendered, err := (channel.RenderedSnapshot{
-		Class: "test-agent", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
-	}).Seal()
-	if err != nil {
-		t.Fatal(err)
-	}
 	resolver := &mutableIntroductionResolver{err: errors.New("temporary outage")}
 	h, err := Open(Config{
 		ChannelID: "opentry-transient", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"), Bootstrap: true,
@@ -189,6 +168,9 @@ func TestOpEntryTransientResolverFailureLeavesNoPairAndSameRefRetries(t *testing
 	defer h.closeInternal("test")
 	ownerActor, err := h.admitChannelOwner(ctx, "owner")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SystemOps(h).AttachDaemon(ctx, channel.DaemonRequest{Ref: "attach-retry", DaemonID: "daemon-a"}); err != nil {
 		t.Fatal(err)
 	}
 	req := channel.IntroduceRequest{Ref: "adm:retry", DeclID: "decl", InitiatorActorID: ownerActor}
@@ -209,7 +191,7 @@ func TestOpEntryTransientResolverFailureLeavesNoPairAndSameRefRetries(t *testing
 	}
 	resolver.err = nil
 	resolver.kind = actor.KindAgent
-	resolver.facts = channel.DeclarationFacts{OwnerPrincipal: "owner", Visibility: "private", DefaultClass: rendered.Class, Rendered: rendered}
+	resolver.facts = channel.DeclarationFacts{OwnerPrincipal: "owner", Visibility: "private", Class: "test-agent"}
 	result, err := SystemOps(h).Introduce(ctx, req)
 	if err != nil || !result.Created || result.ActorID == "" {
 		t.Fatalf("same-ref retry=(%+v,%v)", result, err)
@@ -226,14 +208,8 @@ func TestOpEntryTransientResolverFailureLeavesNoPairAndSameRefRetries(t *testing
 // found=false answer is the decisive unknown_class terminal.
 func TestClassKindFaultIsRetryableOnlyAbsenceIsDecisive(t *testing.T) {
 	ctx := context.Background()
-	rendered, err := (channel.RenderedSnapshot{
-		Class: "test-agent", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
-	}).Seal()
-	if err != nil {
-		t.Fatal(err)
-	}
 	resolver := &mutableIntroductionResolver{
-		facts:   channel.DeclarationFacts{OwnerPrincipal: "owner", Visibility: "private", DefaultClass: rendered.Class, Rendered: rendered},
+		facts:   channel.DeclarationFacts{OwnerPrincipal: "owner", Visibility: "private", Class: "test-agent"},
 		kindErr: errors.New("registry io fault"),
 	}
 	h, err := Open(Config{
@@ -246,6 +222,9 @@ func TestClassKindFaultIsRetryableOnlyAbsenceIsDecisive(t *testing.T) {
 	defer h.closeInternal("test")
 	ownerActor, err := h.admitChannelOwner(ctx, "owner")
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SystemOps(h).AttachDaemon(ctx, channel.DaemonRequest{Ref: "attach-classkind", DaemonID: "daemon-a"}); err != nil {
 		t.Fatal(err)
 	}
 	req := channel.IntroduceRequest{Ref: "adm:classkind", DeclID: "decl", InitiatorActorID: ownerActor}

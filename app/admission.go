@@ -15,7 +15,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 const (
@@ -225,121 +224,6 @@ func (s *admissionService) loadIdempotent(ctx context.Context, owner admissionOw
 	return s.load(ctx, operationID)
 }
 
-func (s *admissionService) submitEdit(ctx context.Context, chID channel.ID, rawActorID, caller string, config json.RawMessage, idemKey string) (admissionRecord, error) {
-	bundle, ok := s.app.host.Acquire(chID)
-	if !ok {
-		return admissionRecord{}, errors.New("admission: channel unavailable")
-	}
-	intent := struct {
-		ActorID string          `json:"actor_id"`
-		Config  json.RawMessage `json:"config"`
-	}{rawActorID, config}
-	digest, err := channel.Digest(intent)
-	if err != nil {
-		return admissionRecord{}, err
-	}
-	// The whole judge→mint→deliver sequence runs inside the channel critical
-	// section (判断段与落账段恒同区，整段原子): the target read below feeds the
-	// minted snapshot its class/placement/TIdle, so reading it outside the lock
-	// would let a concurrent fanout apply a newer version between judge and
-	// mint — this edit would then write those stale fields back at a HIGHER
-	// seq. No global runMu here: the drain worker keeps its own single-flight,
-	// and deliveries are idempotent (status-guarded finish + OpEntry anchor),
-	// so holding runMu would only couple this channel's fate to every other
-	// channel's admission.
-	releaseChannel := s.app.channelLocks.lock(string(chID))
-	defer releaseChannel()
-	actors, err := bundle.View().ActiveActors(ctx)
-	if err != nil {
-		return admissionRecord{}, err
-	}
-	var target storespec.ActorControlRow
-	for _, row := range actors {
-		if string(row.ID) == rawActorID {
-			target = row
-			break
-		}
-	}
-	if target.ID == "" || target.SourceDeclID == "" {
-		return admissionRecord{}, &channel.OperationError{Code: channel.ErrCodeNotInComposition, Detail: rawActorID}
-	}
-	facts, err := (compositionResolver{app: s.app}).ResolveDeclaration(ctx, chID, target.SourceDeclID)
-	if err != nil {
-		return admissionRecord{}, err
-	}
-	if facts.Visibility != "public" && facts.OwnerPrincipal != caller {
-		return admissionRecord{}, &channel.OperationError{Code: channel.ErrCodeForbidden, Detail: "declaration is private"}
-	}
-	tx, err := s.app.db.BeginTx(ctx, nil)
-	if err != nil {
-		return admissionRecord{}, err
-	}
-	defer tx.Rollback()
-	if idemKey != "" {
-		var existing, existingDigest, existingChannel, existingOp string
-		err := tx.QueryRowContext(ctx, `SELECT operation_id,request_digest,channel_id,op FROM channel_admission_operations WHERE requested_by_principal=? AND idempotency_key=?`, caller, idemKey).Scan(&existing, &existingDigest, &existingChannel, &existingOp)
-		if err == nil {
-			if existingDigest != digest || existingChannel != string(chID) || existingOp != "edit" {
-				return admissionRecord{}, errIdempotencyConflict
-			}
-			_ = tx.Rollback()
-			record, _, err := s.load(ctx, existing)
-			return record, err
-		}
-		if !errors.Is(err, sql.ErrNoRows) {
-			return admissionRecord{}, err
-		}
-	}
-	operationID := "adm:v1:" + uuid.NewString()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO decl_render_state(channel_id,decl_id,render_seq) VALUES (?,?,?) ON CONFLICT(channel_id,decl_id) DO UPDATE SET render_seq=MAX(render_seq,excluded.render_seq)`, string(chID), target.SourceDeclID, target.RenderSeq); err != nil {
-		return admissionRecord{}, err
-	}
-	var seq int64
-	if err := tx.QueryRowContext(ctx, `UPDATE decl_render_state SET render_seq=render_seq+1 WHERE channel_id=? AND decl_id=? RETURNING render_seq`, string(chID), target.SourceDeclID).Scan(&seq); err != nil {
-		return admissionRecord{}, err
-	}
-	now := time.Now().UnixMilli()
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_decl_overlays(channel_id,decl_id,pending_config_json,pending_ref,updated_at) VALUES (?,?,?,?,?) ON CONFLICT(channel_id,decl_id) DO UPDATE SET pending_config_json=excluded.pending_config_json,pending_ref=excluded.pending_ref,updated_at=excluded.updated_at`, string(chID), target.SourceDeclID, string(config), operationID, now); err != nil {
-		return admissionRecord{}, err
-	}
-	snapshot, err := (channel.RenderedSnapshot{
-		Class: target.Class, Config: append(json.RawMessage(nil), config...),
-		Placement: channel.Placement{Kind: channel.PlacementKind(target.Placement.Kind), DesiredHost: target.Placement.Host},
-		TIdleMS:   target.TIdle.Milliseconds(), RenderSeq: seq,
-	}).Seal()
-	if err != nil {
-		return admissionRecord{}, err
-	}
-	request := channel.ApplyDeclVersionRequest{
-		Ref: operationID, DeclID: target.SourceDeclID, Rendered: snapshot,
-		Authority: channel.AuthorityDelegate, InitiatorPrincipal: caller,
-	}
-	raw, err := json.Marshal(request)
-	if err != nil {
-		return admissionRecord{}, err
-	}
-	var idem any
-	if idemKey != "" {
-		idem = idemKey
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_admission_operations(operation_id,idempotency_key,channel_id,op,requested_by_principal,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?,?)`, operationID, idem, string(chID), "edit", caller, string(raw), digest, now); err != nil {
-		return admissionRecord{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return admissionRecord{}, err
-	}
-	deliverCtx, cancel := context.WithTimeout(s.ctx, admissionSyncWindow)
-	_ = s.runOperationLocked(deliverCtx, operationID)
-	cancel()
-	s.notify()
-	loadCtx := ctx
-	if ctx.Err() != nil {
-		loadCtx = context.Background()
-	}
-	record, _, err := s.load(loadCtx, operationID)
-	return record, err
-}
-
 func (s *admissionService) load(ctx context.Context, operationID string) (admissionRecord, bool, error) {
 	var record admissionRecord
 	err := s.app.db.QueryRowContext(ctx, `SELECT operation_id,channel_id,op,COALESCE(requested_by_principal,''),COALESCE(requested_by_actor_id,''),request_json,request_digest,status,result_json,error_code,created_at,done_at FROM channel_admission_operations WHERE operation_id=?`, operationID).
@@ -479,12 +363,6 @@ func (s *admissionService) deliver(ctx context.Context, bundle channelhost.Bundl
 			return nil, &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: err.Error()}
 		}
 		return bundle.SysOp().DetachDaemon(ctx, request)
-	case "edit":
-		var request channel.ApplyDeclVersionRequest
-		if err := json.Unmarshal([]byte(record.RequestJSON), &request); err != nil {
-			return nil, &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: err.Error()}
-		}
-		return bundle.SysOp().ApplyDeclVersion(ctx, request)
 	default:
 		return nil, &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: fmt.Sprintf("unknown op %q", record.Op)}
 	}
@@ -521,23 +399,6 @@ func (s *admissionService) finish(ctx context.Context, record admissionRecord, s
 	if err != nil || changed == 0 {
 		return err
 	}
-	promote := status == "done"
-	if promote && record.Op == "edit" {
-		// A done edit promotes its pending overlay ONLY when the frame actually
-		// took effect. A stale (superseded by a later seq) or absent outcome
-		// means the channel never ran this value — promoting it would fork the
-		// realm's effective overlay from channel reality.
-		var applied struct {
-			Status string `json:"status"`
-		}
-		if err := json.Unmarshal(result, &applied); err != nil {
-			return err
-		}
-		promote = applied.Status == string(channel.ApplyApplied)
-	}
-	if err := s.finishOverlayTx(ctx, tx, record, promote); err != nil {
-		return err
-	}
 	projectionPrincipal := ""
 	if status == "done" && record.Op == "join" && result != nil {
 		var request channel.AdmitRequest
@@ -560,40 +421,6 @@ func (s *admissionService) finish(ctx context.Context, record admissionRecord, s
 		s.app.membershipPoke(projectionPrincipal)
 	}
 	return nil
-}
-
-func (s *admissionService) finishOverlayTx(ctx context.Context, tx *sql.Tx, record admissionRecord, success bool) error {
-	if record.Op != "edit" {
-		return nil
-	}
-	if success {
-		_, err := tx.ExecContext(ctx, `UPDATE channel_decl_overlays SET config_json=pending_config_json,pending_config_json=NULL,pending_ref=NULL WHERE channel_id=? AND pending_ref=?`, record.ChannelID, record.OperationID)
-		return err
-	} else {
-		_, err := tx.ExecContext(ctx, `UPDATE channel_decl_overlays SET pending_config_json=NULL,pending_ref=NULL WHERE channel_id=? AND pending_ref=?`, record.ChannelID, record.OperationID)
-		return err
-	}
-}
-
-func (s *admissionService) deliverFinalize(ctx context.Context, bundle channelhost.Bundle, action string, payload json.RawMessage) error {
-	switch action {
-	case "apply":
-		var request channel.ApplyDeclVersionRequest
-		if err := json.Unmarshal(payload, &request); err != nil {
-			return err
-		}
-		_, err := bundle.SysOp().ApplyDeclVersion(ctx, request)
-		return err
-	case "revoke":
-		var request channel.RevokeDeclRequest
-		if err := json.Unmarshal(payload, &request); err != nil {
-			return err
-		}
-		_, err := bundle.SysOp().RevokeDeclTargets(ctx, request)
-		return err
-	default:
-		return fmt.Errorf("unknown finalize action %q", action)
-	}
 }
 
 // admissionCodeDaemonNotFound is realm-side admission vocabulary (the account's

@@ -231,6 +231,7 @@ type testChannel struct {
 	channelID channel.ID
 	principal string
 	memberID  actor.ActorID
+	ownerID   actor.ActorID
 	extras    *subjectgate.Registry
 	sources   map[actor.ActorID]string
 }
@@ -271,11 +272,10 @@ func (h *testChannel) Admit(ctx context.Context, _ actor.Kind, principal string)
 }
 
 func (h *testChannel) Remove(ctx context.Context, id actor.ActorID) error {
-	source := h.sources[id]
-	if source == "" {
+	if h.ownerID == "" {
 		return context.Canceled
 	}
-	_, err := h.SysOp().RevokeDeclTargets(ctx, channel.RevokeDeclRequest{Ref: "gateway-test:revoke:" + source, DeclID: source})
+	_, err := h.SysOp().Remove(ctx, channel.RemoveRequest{Ref: "gateway-test:remove:" + string(id), Target: id, InitiatorActorID: h.ownerID})
 	if err == nil {
 		h.extras.Remove(id)
 	}
@@ -301,7 +301,7 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	if memberKind == actor.KindAgent {
 		source = "gateway-test:" + member
 		rendered, sealErr := (channel.RenderedSnapshot{
-			Class: "gateway-test-unresolved", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+			Class: "gateway-test-unresolved", Placement: channel.Placement{Kind: channel.PlacementServer},
 		}).Seal()
 		if sealErr != nil {
 			t.Fatal(sealErr)
@@ -330,7 +330,11 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	if err != nil || !found {
 		t.Fatalf("ResolvePrincipal(%s)=(%s,%v,%v)", member, id, found, err)
 	}
-	h := &testChannel{Bundle: bundle, host: host, channelID: chID, principal: member, memberID: id, extras: subjectgate.NewRegistry(), sources: map[actor.ActorID]string{}}
+	ownerID, ownerFound, ownerErr := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, owner)
+	if ownerErr != nil || !ownerFound {
+		t.Fatalf("ResolvePrincipal(owner %s)=(%s,%v,%v)", owner, ownerID, ownerFound, ownerErr)
+	}
+	h := &testChannel{Bundle: bundle, host: host, channelID: chID, principal: member, memberID: id, ownerID: ownerID, extras: subjectgate.NewRegistry(), sources: map[actor.ActorID]string{}}
 	if source != "" {
 		h.sources[id] = source
 		h.EnsureSubjectSlot(id)

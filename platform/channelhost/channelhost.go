@@ -46,6 +46,7 @@ type Service interface {
 type LocalHost interface {
 	Service
 	Acquire(channel.ID) (Bundle, bool)
+	Poke(channel.ID) bool
 }
 
 type OpenSpec struct {
@@ -133,6 +134,18 @@ type ChannelHost struct {
 }
 
 var _ LocalHost = (*ChannelHost)(nil)
+
+func (h *ChannelHost) Poke(id channel.ID) bool {
+	h.mu.RLock()
+	entry := h.entries[id]
+	if entry == nil || entry.home == nil || entry.state != stateServing || entry.closed {
+		h.mu.RUnlock()
+		return false
+	}
+	home.Poke(entry.home)
+	h.mu.RUnlock()
+	return true
+}
 
 func New(root string, deps HomeDeps) (*ChannelHost, error) {
 	if strings.TrimSpace(root) == "" {
@@ -258,7 +271,7 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 			SourceDeclID: declaration.DeclID, Kind: declaration.Kind,
 			Class: declaration.Rendered.Class, Config: &config, Placement: placement,
 			TIdle: declaration.Rendered.TIdleMS, MakeDefault: declaration.DeclID == spec.DefaultSourceDeclID,
-			CreatedAt: spec.CreatedAt, RenderSeq: declaration.Rendered.RenderSeq,
+			CreatedAt: spec.CreatedAt,
 		}); err != nil {
 			return ProvisionReceipt{}, fmt.Errorf("channelhost: declare genesis %q: %w", declaration.DeclID, err)
 		}

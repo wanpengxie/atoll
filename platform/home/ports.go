@@ -30,6 +30,10 @@ func GatewaySlot(h *Home, id actor.ActorID) (*subjectgate.Slot, bool) {
 
 func GatewaySubscribe(h *Home) (<-chan struct{}, func()) { return h.subscribe() }
 
+// Poke posts a lossy wake to the level reconciler. Correctness never depends
+// on delivery: the periodic sweep is the backstop.
+func Poke(h *Home) { h.pokeReconcile() }
+
 func LinkServe(h *Home, w http.ResponseWriter, r *http.Request, daemonID string) {
 	h.serveAttach(w, r, daemonID)
 }

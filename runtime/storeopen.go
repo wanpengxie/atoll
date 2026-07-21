@@ -15,26 +15,27 @@ import (
 // storespec interfaces. The raw *sql.DB is confined inside runtime/internal/store;
 // this public type re-exports only the interface handles.
 type ChannelStores struct {
-	channelID      channel.ID
-	Log            storespec.MessageLog
-	Query          storespec.MessageQuery
-	Visible        storespec.VisibleMessageQuery
-	Expiry         storespec.ExpiryQuery
-	Requests       storespec.RequestLookup
-	Authority      storespec.ActorAuthority
-	DurableHistory storespec.DurableHistory
-	Declared       storespec.DeclaredControlReader
-	DeclAdmission  storespec.DeclAdmissionStore
-	DeclVersions   storespec.DeclVersionStore
-	Cascade        storespec.CascadeStore
-	Routing        storespec.ChannelRouting
-	Genesis        storespec.GenesisStore
-	SysOps         storespec.SysOpAdmission
-	Bindings       storespec.DaemonBindingReader
-	ResourceRead   storespec.ResourceReadStore
-	FiredTimers    FiredTimerReader
-	authoritySlot  *actorAuthoritySlot
-	grantOverlay   *accessdoor.GrantOverlaySlot
+	channelID       channel.ID
+	Log             storespec.MessageLog
+	Query           storespec.MessageQuery
+	Visible         storespec.VisibleMessageQuery
+	Expiry          storespec.ExpiryQuery
+	Requests        storespec.RequestLookup
+	Authority       storespec.ActorAuthority
+	DurableHistory  storespec.DurableHistory
+	Declared        storespec.DeclaredControlReader
+	DeclAdmission   storespec.DeclAdmissionStore
+	DeclVersions    storespec.DeclVersionStore
+	Cascade         storespec.CascadeStore
+	Routing         storespec.ChannelRouting
+	Genesis         storespec.GenesisStore
+	SysOps          storespec.SysOpAdmission
+	DeclarationSync storespec.DeclarationSyncStore
+	Bindings        storespec.DaemonBindingReader
+	ResourceRead    storespec.ResourceReadStore
+	FiredTimers     FiredTimerReader
+	authoritySlot   *actorAuthoritySlot
+	grantOverlay    *accessdoor.GrantOverlaySlot
 
 	// Principals is the principal-axis read face (LookupActivePrincipal — the
 	// admission path's "which active instance embodies this subject" query),
@@ -190,30 +191,31 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		return nil, err
 	}
 	return &ChannelStores{
-		channelID:      channelID,
-		Log:            cs.Log,
-		Query:          cs.Query,
-		Visible:        cs.Visible,
-		Expiry:         cs.Expiry,
-		Requests:       cs.Requests,
-		Authority:      authoritySlot,
-		DurableHistory: cs.DurableHistory,
-		Declared:       cs.Declared,
-		DeclAdmission:  cs.DeclAdmission,
-		DeclVersions:   cs.DeclVersions,
-		Cascade:        cs.Cascade,
-		Routing:        cs.Routing,
-		Genesis:        cs.Genesis,
-		SysOps:         cs.SysOps,
-		Bindings:       cs.Bindings,
-		ResourceRead:   cs.ResourceRead,
-		FiredTimers:    cs.Timers(),
-		authoritySlot:  authoritySlot,
-		grantOverlay:   grantOverlay,
-		Principals:     cs.Principals,
-		Access:         access,
-		Outbox:         resourceOutbox{ResourceOutbox: cs.Resources, completion: completion},
-		timers:         cs.Timers(),
-		closer:         cs.Close,
+		channelID:       channelID,
+		Log:             cs.Log,
+		Query:           cs.Query,
+		Visible:         cs.Visible,
+		Expiry:          cs.Expiry,
+		Requests:        cs.Requests,
+		Authority:       authoritySlot,
+		DurableHistory:  cs.DurableHistory,
+		Declared:        cs.Declared,
+		DeclAdmission:   cs.DeclAdmission,
+		DeclVersions:    cs.DeclVersions,
+		Cascade:         cs.Cascade,
+		Routing:         cs.Routing,
+		Genesis:         cs.Genesis,
+		SysOps:          cs.SysOps,
+		DeclarationSync: cs.DeclarationSync,
+		Bindings:        cs.Bindings,
+		ResourceRead:    cs.ResourceRead,
+		FiredTimers:     cs.Timers(),
+		authoritySlot:   authoritySlot,
+		grantOverlay:    grantOverlay,
+		Principals:      cs.Principals,
+		Access:          access,
+		Outbox:          resourceOutbox{ResourceOutbox: cs.Resources, completion: completion},
+		timers:          cs.Timers(),
+		closer:          cs.Close,
 	}, nil
 }

@@ -101,19 +101,3 @@ func (a *App) handleRemoveChannelActor(c *gin.Context) {
 	})
 	respondAdmissionRecord(c, record, err, http.StatusOK)
 }
-
-func (a *App) handleEditActorConfig(c *gin.Context) {
-	chID, ok := a.requireChannelMember(c)
-	if !ok {
-		return
-	}
-	var input struct {
-		Config json.RawMessage `json:"config"`
-	}
-	if err := c.ShouldBindJSON(&input); err != nil || !isJSONObject(input.Config) {
-		c.JSON(400, gin.H{"error": "config must be a JSON object"})
-		return
-	}
-	record, err := a.admission.submitEdit(c.Request.Context(), channel.ID(chID), c.Param("actorID"), middleware.UserID(c), input.Config, c.GetHeader("Idempotency-Key"))
-	respondAdmissionRecord(c, record, err, http.StatusOK)
-}

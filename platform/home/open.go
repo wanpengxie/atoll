@@ -192,7 +192,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: build state handle resolver: %w", err)
 	}
 	h.stateHandles = stateHandles
-	h.opEntry = &opEntry{home: h, resolver: cfg.IntroductionResolver, admission: cs.SysOps}
+	h.opEntry = &opEntry{home: h, resolver: cfg.IntroductionResolver, admission: cs.SysOps, sync: cs.DeclarationSync}
 	if systemAdmission.Created {
 		logger.Info("platform.member.admitted", "channel", string(cfg.ChannelID),
 			"actor", string(actor.SystemActorID), "kind", string(actor.KindSystem), "principal", "")

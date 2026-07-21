@@ -37,17 +37,18 @@ type ChannelStores struct {
 	// reader never receives any membership write). Each face a consumer needs
 	// is its own explicit field over the one concrete actorRegistry; nothing
 	// downstream may type-assert one face back into another.
-	Principals     storespec.PrincipalRegistry // principal-axis read (LookupActivePrincipal, admission path)
-	DurableHistory storespec.DurableHistory
-	Declared       storespec.DeclaredControlReader
-	DeclAdmission  storespec.DeclAdmissionStore
-	DeclVersions   storespec.DeclVersionStore
-	Cascade        storespec.CascadeStore
-	Routing        storespec.ChannelRouting
-	Genesis        storespec.GenesisStore
-	SysOps         storespec.SysOpAdmission
-	Bindings       storespec.DaemonBindingReader
-	ResourceRead   storespec.ResourceReadStore
+	Principals      storespec.PrincipalRegistry // principal-axis read (LookupActivePrincipal, admission path)
+	DurableHistory  storespec.DurableHistory
+	Declared        storespec.DeclaredControlReader
+	DeclAdmission   storespec.DeclAdmissionStore
+	DeclVersions    storespec.DeclVersionStore
+	Cascade         storespec.CascadeStore
+	Routing         storespec.ChannelRouting
+	Genesis         storespec.GenesisStore
+	SysOps          storespec.SysOpAdmission
+	DeclarationSync storespec.DeclarationSyncStore
+	Bindings        storespec.DaemonBindingReader
+	ResourceRead    storespec.ResourceReadStore
 
 	// Plane-2 (access/resource) implementations over the SAME channel db. These
 	// are the door's collaborators, handed up as resourcespec CONTRACTS (never
@@ -105,26 +106,27 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	reg := newActorRegistry(db, channelID, onCommit)
 	sysOps := newSysOpStore(db, channelID, onCommit)
 	cs := &ChannelStores{
-		db:             db,
-		Log:            msgs,
-		Query:          msgs,
-		Visible:        msgs,
-		Expiry:         msgs,
-		Requests:       newRequestLookup(msgs),
-		Principals:     reg,
-		DurableHistory: reg,
-		Declared:       reg,
-		DeclAdmission:  reg,
-		DeclVersions:   reg,
-		Cascade:        reg,
-		Routing:        reg,
-		Genesis:        genesisStore{db: db},
-		SysOps:         sysOps,
-		Bindings:       sysOps,
-		Resources:      newResourceRegistry(db),
-		KVDriver:       newKVDriver(db),
-		State:          newStateStore(db),
-		timers:         newTimerStore(db, onCommit),
+		db:              db,
+		Log:             msgs,
+		Query:           msgs,
+		Visible:         msgs,
+		Expiry:          msgs,
+		Requests:        newRequestLookup(msgs),
+		Principals:      reg,
+		DurableHistory:  reg,
+		Declared:        reg,
+		DeclAdmission:   reg,
+		DeclVersions:    reg,
+		Cascade:         reg,
+		Routing:         reg,
+		Genesis:         genesisStore{db: db},
+		SysOps:          sysOps,
+		DeclarationSync: sysOps,
+		Bindings:        sysOps,
+		Resources:       newResourceRegistry(db),
+		KVDriver:        newKVDriver(db),
+		State:           newStateStore(db),
+		timers:          newTimerStore(db, onCommit),
 	}
 	cs.ResourceRead = cs.Resources.(*resourceRegistry)
 	return cs, nil

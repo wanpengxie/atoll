@@ -9,6 +9,7 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -52,6 +53,10 @@ func (h *Home) reconcileSweep(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
+	h.reconcileDeclarations(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 	h.reconcileDaemonIntent(ctx)
 	if ctx.Err() != nil {
 		return
@@ -73,6 +78,57 @@ func (h *Home) reconcileSweep(ctx context.Context) {
 		return
 	}
 	h.sweepPresence(ctx)
+}
+
+// reconcileDeclarations pulls realm-owned class/config for every durable
+// declaration-backed actor. Absence and read faults are both zero-action: a
+// declaration tombstone stops future supply but never commands actor removal.
+// The lock-free digest comparison is only a cheap prefilter; the private
+// opEntry path re-reads identity, placement, idle, kind and content under the
+// actor gate before it can write.
+func (h *Home) reconcileDeclarations(ctx context.Context) {
+	if h.opEntry == nil || h.opEntry.resolver == nil {
+		return
+	}
+	rows, err := h.controlIndex.ListActive(ctx)
+	if err != nil {
+		h.logger.Warn("platform.declaration_pull.list_failed", "error", err)
+		return
+	}
+	for _, row := range rows {
+		if ctx.Err() != nil {
+			return
+		}
+		if row.SourceDeclID == "" || (row.Kind != actor.KindAgent && row.Kind != actor.KindTool) {
+			continue
+		}
+		resolveCtx, cancel := context.WithTimeout(ctx, introductionResolveTimeout)
+		facts, resolveErr := h.opEntry.resolver.ResolveDeclaration(resolveCtx, h.channelID, row.SourceDeclID)
+		cancel()
+		if resolveErr != nil {
+			if !errors.Is(resolveErr, channel.ErrDeclarationNotFound) {
+				h.logger.Warn("platform.declaration_pull.resolve_failed", "actor", string(row.ID), "declaration", row.SourceDeclID, "error", resolveErr)
+			}
+			continue
+		}
+		placement := channel.Placement{Kind: channel.PlacementKind(row.Placement.Kind), DesiredHost: row.Placement.Host}
+		current, currentErr := (channel.RenderedSnapshot{
+			Class: row.Class, Config: row.Config, Placement: placement, TIdleMS: row.TIdle.Milliseconds(),
+		}).Seal()
+		candidate, candidateErr := (channel.RenderedSnapshot{
+			Class: facts.Class, Config: facts.Config, Placement: placement, TIdleMS: row.TIdle.Milliseconds(),
+		}).Seal()
+		if currentErr != nil || candidateErr != nil {
+			h.logger.Warn("platform.declaration_pull.digest_failed", "actor", string(row.ID), "error", errors.Join(currentErr, candidateErr))
+			continue
+		}
+		if current.Digest == candidate.Digest {
+			continue
+		}
+		if _, err := h.opEntry.applyResolvedDeclaration(ctx, row.ID, row.SourceDeclID, facts.Class, facts.Config); err != nil {
+			h.logger.Warn("platform.declaration_pull.apply_failed", "actor", string(row.ID), "declaration", row.SourceDeclID, "error", err)
+		}
+	}
 }
 
 // projectionSyncInterval paces syncDeclaredProjection (owner 拍 30s): frequent

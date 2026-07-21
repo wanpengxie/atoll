@@ -120,23 +120,11 @@ var appSchema = []schemaObject{
 	)`},
 	{"index", "ix_destroy_pending", `CREATE INDEX ix_destroy_pending
 		ON channel_destroy_jobs(next_attempt_at,job_id) WHERE done_at IS NULL AND dead_at IS NULL`},
-	{"table", "channel_finalize_deliveries", `CREATE TABLE channel_finalize_deliveries (
-		operation_id TEXT NOT NULL,
-		decl_id TEXT NOT NULL,
-		action TEXT NOT NULL CHECK(action IN ('apply','revoke')),
-		ref TEXT NOT NULL UNIQUE,
-		request_digest TEXT NOT NULL,
-		payload_json TEXT NOT NULL,
-		render_seq INTEGER,
-		acked_at INTEGER,
-		error_code TEXT,
-		PRIMARY KEY (operation_id, decl_id)
-	)`},
 	{"table", "channel_admission_operations", `CREATE TABLE channel_admission_operations (
 		operation_id TEXT PRIMARY KEY,
 		idempotency_key TEXT,
 		channel_id TEXT NOT NULL,
-		op TEXT NOT NULL CHECK(op IN ('join','introduce','attach','detach','edit','remove')),
+		op TEXT NOT NULL CHECK(op IN ('join','introduce','attach','detach','remove')),
 		requested_by_principal TEXT,
 		requested_by_actor_id TEXT,
 		request_json TEXT NOT NULL,
@@ -162,15 +150,7 @@ var appSchema = []schemaObject{
 		channel_id TEXT NOT NULL,
 		decl_id TEXT NOT NULL,
 		config_json TEXT,
-		pending_config_json TEXT,
-		pending_ref TEXT,
 		updated_at INTEGER NOT NULL,
-		PRIMARY KEY (channel_id, decl_id)
-	)`},
-	{"table", "decl_render_state", `CREATE TABLE decl_render_state (
-		channel_id TEXT NOT NULL,
-		decl_id TEXT NOT NULL,
-		render_seq INTEGER NOT NULL,
 		PRIMARY KEY (channel_id, decl_id)
 	)`},
 	{"table", "daemons", `CREATE TABLE daemons (

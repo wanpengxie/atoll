@@ -90,35 +90,33 @@ type BindingResult struct {
 type AttachResult = BindingResult
 type DetachResult = BindingResult
 
-type ApplyTx struct {
+type DeclarationSyncStatus string
+
+const (
+	DeclarationAbsent  DeclarationSyncStatus = "absent"
+	DeclarationEqual   DeclarationSyncStatus = "equal"
+	DeclarationApplied DeclarationSyncStatus = "applied"
+)
+
+// DeclarationSyncTx is the Home-private declaration publication input. Realm
+// supplies only class/config; placement and idle are re-read from channel truth
+// by the store in the same transaction that compares and advances the version.
+type DeclarationSyncTx struct {
 	SysOpMeta
-	DeclID             string
-	Rendered           channel.RenderedSnapshot
-	Authority          channel.ApplyAuthority
-	InitiatorPrincipal string
-	OwnerPrincipal     string
-	Visibility         string
+	ActorID actor.ActorID
+	DeclID  string
+	Class   string
+	Config  json.RawMessage
 }
 
-type ApplyResult struct {
-	Status  channel.ApplyStatus `json:"status"`
-	Version int64               `json:"version,omitempty"`
-	Effects PostCommitEffects   `json:"-"`
+type DeclarationSyncResult struct {
+	Status  DeclarationSyncStatus `json:"status"`
+	Version int64                 `json:"version,omitempty"`
+	Effects PostCommitEffects     `json:"-"`
 }
 
-type RevokeDeclTx struct {
-	SysOpMeta
-	DeclID string
-}
-
-type RevokeDaemonTx struct {
-	SysOpMeta
-	DaemonID DaemonID
-}
-
-type RevokeResult struct {
-	PerInstance []channel.InstanceOutcome `json:"per_instance"`
-	Effects     PostCommitEffects         `json:"-"`
+type DeclarationSyncStore interface {
+	ApplyResolvedDeclaration(context.Context, DeclarationSyncTx) (DeclarationSyncResult, error)
 }
 
 // RemoveTx removes a composition member and its sponsor closure. The closure
@@ -179,9 +177,6 @@ type SysOpAdmission interface {
 	Introduce(context.Context, IntroduceTx) (IntroduceResult, error)
 	AttachDaemon(context.Context, AttachTx) (AttachResult, error)
 	DetachDaemon(context.Context, DetachTx) (DetachResult, error)
-	ApplyDeclVersion(context.Context, ApplyTx) (ApplyResult, error)
-	RevokeDeclTargets(context.Context, RevokeDeclTx) (RevokeResult, error)
-	RevokeDaemon(context.Context, RevokeDaemonTx) (RevokeResult, error)
 	RemoveActor(context.Context, RemoveTx) (RemoveResult, error)
 	RestartActor(context.Context, RestartTx) (RestartResult, error)
 	SetDefaultAgent(context.Context, SetDefaultTx) (SetDefaultResult, error)

@@ -79,7 +79,7 @@ func (a *App) PlanForDaemonForTest(chID channel.ID, daemonID string) ([]platform
 	return bundle.Daemon().PlanForDaemon(context.Background(), daemonID)
 }
 
-func (a *App) StageDeclarationEditForTest(chID channel.ID, sourceID string, config json.RawMessage) (actor.ActorID, int64, error) {
+func (a *App) SetDeclarationOverlayForTest(chID channel.ID, sourceID string, config json.RawMessage) (actor.ActorID, int64, error) {
 	bundle, ok := a.host.Acquire(chID)
 	if !ok {
 		return "", 0, errTestChannelNotLoaded
@@ -89,16 +89,30 @@ func (a *App) StageDeclarationEditForTest(chID channel.ID, sourceID string, conf
 		return "", 0, err
 	}
 	row := rows[0]
-	owner, _, err := bundle.View().OwnerPrincipal(context.Background())
+	canonical, err := channel.CanonicalJSON(config)
 	if err != nil {
-		return "", 0, err
-	}
-	record, err := a.admission.submitEdit(context.Background(), chID, string(row.ID), owner, config, "test-edit:"+uuid.NewString())
-	if err != nil || record.Status != "done" {
 		return row.ID, 0, err
 	}
-	_, latest, err := bundle.View().DeclarationVersions(context.Background(), row.ID)
-	return row.ID, latest.CurrentDeclVersion, err
+	if _, err := a.db.Exec(`INSERT INTO channel_decl_overlays(channel_id,decl_id,config_json,updated_at)
+		VALUES(?,?,?,?) ON CONFLICT(channel_id,decl_id) DO UPDATE SET config_json=excluded.config_json,updated_at=excluded.updated_at`,
+		string(chID), sourceID, string(canonical), time.Now().UnixMilli()); err != nil {
+		return row.ID, 0, err
+	}
+	a.host.Poke(chID)
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, latest, err := bundle.View().DeclarationVersions(context.Background(), row.ID)
+		if err != nil {
+			return row.ID, 0, err
+		}
+		if string(latest.Config) == string(canonical) {
+			return row.ID, latest.CurrentDeclVersion, nil
+		}
+		if time.Now().After(deadline) {
+			return row.ID, latest.CurrentDeclVersion, errors.New("declaration overlay did not converge")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 }
 
 // Handler exposes the assembled gin engine as an http.Handler so black-box
@@ -229,13 +243,25 @@ func (a *App) CloseHomeForTest(chID channel.ID) error {
 	return a.host.Destroy(context.Background(), chID)
 }
 
-func (a *App) RevokeRealmToolForTest(chID channel.ID) error {
+func (a *App) RemoveRealmToolForTest(chID channel.ID) error {
 	bundle, ok := a.host.Acquire(chID)
 	if !ok {
 		return errTestChannelNotLoaded
 	}
-	_, err := bundle.SysOp().RevokeDeclTargets(context.Background(), channel.RevokeDeclRequest{
-		Ref: "test-revoke-realm-tool:" + uuid.NewString(), DeclID: realmToolDeclID,
+	row, found, err := bundle.View().DeclaredBySourceOne(context.Background(), realmToolDeclID)
+	if err != nil || !found {
+		return err
+	}
+	owner, found, err := bundle.View().OwnerPrincipal(context.Background())
+	if err != nil || !found {
+		return err
+	}
+	initiator, found, err := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, owner)
+	if err != nil || !found {
+		return err
+	}
+	_, err = bundle.SysOp().Remove(context.Background(), channel.RemoveRequest{
+		Ref: "test-remove-realm-tool:" + uuid.NewString(), Target: row.ID, InitiatorActorID: initiator,
 	})
 	return err
 }

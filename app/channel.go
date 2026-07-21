@@ -81,12 +81,12 @@ func (a *App) handleCreateChannel(c *gin.Context) {
 	now := time.Now().UnixMilli()
 	chID := channel.ID(uuid.NewString())
 	operationID := "lc:" + uuid.NewString()
-	snapshot, err := (channel.RenderedSnapshot{Class: defaultBoostClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1}).Seal()
+	snapshot, err := (channel.RenderedSnapshot{Class: defaultBoostClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
 	if err != nil {
 		c.JSON(500, gin.H{"error": "internal error"})
 		return
 	}
-	realmSnapshot, err := (channel.RenderedSnapshot{Class: realmToolClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1}).Seal()
+	realmSnapshot, err := (channel.RenderedSnapshot{Class: realmToolClass, Config: json.RawMessage(`{}`), Placement: channel.Placement{Kind: channel.PlacementServer}}).Seal()
 	if err != nil {
 		c.JSON(500, gin.H{"error": "internal error"})
 		return

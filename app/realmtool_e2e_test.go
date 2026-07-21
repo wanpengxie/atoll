@@ -230,7 +230,7 @@ func TestRealmToolPrivateIntroductionAndSovereigntySwitch(t *testing.T) {
 	}, setup.cookies)
 	assertStatus(t, publicDecl, http.StatusCreated)
 	publicID := respJSON(t, publicDecl)["id"].(string)
-	if err := env.app.RevokeRealmToolForTest(channel.ID(setup.chID)); err != nil {
+	if err := env.app.RemoveRealmToolForTest(channel.ID(setup.chID)); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool"); err == nil {

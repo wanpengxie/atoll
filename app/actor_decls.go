@@ -205,7 +205,6 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 			return
 		}
 	}
-	queued := false
 	if len(req.Config) > 0 {
 		if !isJSONObject(req.Config) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "config must be a JSON object"})
@@ -217,27 +216,17 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			return
 		}
-		queued = true
 	}
 	if err := tx.Commit(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	if queued && a.fanout != nil {
-		a.fanout.notify()
-	}
-	c.JSON(http.StatusOK, gin.H{"updated": declID, "queued": queued})
+	a.pokeAllChannels(c.Request.Context())
+	c.JSON(http.StatusOK, gin.H{"updated": declID})
 }
 
-// handleDeleteDecl is the WORLD-LAYER half of a declared instance's death (C6): a
-// cross-channel identity de-registration, HTTP-legitimate. It (1) soft-deletes the
-// actor_decls declaration (the world-layer fact), then (2) projects that fact into
-// every channel the instance was in — the world→channel cascade. The per-channel
-// removal is NOT an orphan table DELETE that leaves the live cell a zombie (病灶
-// #6): the fanout sender submits RevokeDeclTargets through each channel's SysOp,
-// so the membrane commits deregistration + system audit before post-commit runtime
-// retirement. Order (红线 3): authoritative soft delete and durable job first,
-// then per-channel delivery with retry.
+// handleDeleteDecl marks supply stopped. Existing channel instances retain
+// their last local snapshot until an explicit Remove operation ends them.
 func (a *App) handleDeleteDecl(c *gin.Context) {
 	userID := middleware.UserID(c)
 	declID := c.Param("declID")
@@ -264,8 +253,5 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
-	if a.fanout != nil {
-		a.fanout.notify()
-	}
-	c.JSON(http.StatusOK, gin.H{"deleted": declID, "queued": true})
+	c.JSON(http.StatusOK, gin.H{"deleted": declID})
 }

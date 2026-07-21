@@ -103,7 +103,6 @@ CREATE TABLE IF NOT EXISTS actor_decl_versions (
   placement      TEXT NOT NULL CHECK(placement IN ('server','daemon')),
   desired_host   TEXT NOT NULL DEFAULT '' CHECK(placement='daemon' OR desired_host=''),
   t_idle_ms      INTEGER NOT NULL DEFAULT 0,
-	 render_seq     INTEGER NOT NULL DEFAULT 0,
   created_at     INTEGER NOT NULL,
   PRIMARY KEY (actor_id, version)
 );

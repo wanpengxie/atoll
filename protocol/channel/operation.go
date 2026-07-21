@@ -22,8 +22,8 @@ var ErrDeclarationNotFound = errors.New("channel: declaration not found")
 type DeclarationFacts struct {
 	OwnerPrincipal string
 	Visibility     string
-	DefaultClass   string
-	Rendered       RenderedSnapshot
+	Class          string
+	Config         json.RawMessage
 }
 
 // PlacementKind is the wire-level placement discriminator carried by a rendered
@@ -62,12 +62,11 @@ type RenderedSnapshot struct {
 	Config    json.RawMessage `json:"config,omitempty"`
 	Placement Placement       `json:"placement"`
 	TIdleMS   int64           `json:"t_idle_ms"`
-	RenderSeq int64           `json:"render_seq"`
 	Digest    string          `json:"digest"`
 }
 
 func (s RenderedSnapshot) Validate() error {
-	if strings.TrimSpace(s.Class) == "" || s.RenderSeq <= 0 {
+	if strings.TrimSpace(s.Class) == "" {
 		return ErrInvalidRequest
 	}
 	if err := s.Placement.Validate(); err != nil {
@@ -83,8 +82,8 @@ func (s RenderedSnapshot) Validate() error {
 	return nil
 }
 
-// ContentDigest covers the rendered value only. RenderSeq and Digest are
-// deliberately excluded so equal values can be detected across render epochs.
+// ContentDigest covers the rendered value only. Digest is deliberately
+// excluded so equal values can be detected across local declaration versions.
 func (s RenderedSnapshot) ContentDigest() (string, error) {
 	payload := struct {
 		Class     string          `json:"class"`
@@ -261,20 +260,6 @@ func appendLengthPrefixed(dst []byte, value string) []byte {
 	return append(dst, value...)
 }
 
-func DerivedFanoutRef(baseRef string, channelID ID) string {
-	payload := appendLengthPrefixed(nil, baseRef)
-	payload = appendLengthPrefixed(payload, string(channelID))
-	sum := sha256.Sum256(payload)
-	return "fo:v1:" + hex.EncodeToString(sum[:])
-}
-
-func DerivedFinalizeRef(operationID, declID string) string {
-	payload := appendLengthPrefixed(nil, operationID)
-	payload = appendLengthPrefixed(payload, declID)
-	sum := sha256.Sum256(payload)
-	return "ifin:v1:" + hex.EncodeToString(sum[:])
-}
-
 func DerivedRealmToolRef(channelID ID, requestID string) string {
 	payload := appendLengthPrefixed(nil, string(channelID))
 	payload = appendLengthPrefixed(payload, requestID)
@@ -351,10 +336,9 @@ type AdmitResult struct {
 }
 
 type IntroduceRequest struct {
-	Ref              string            `json:"ref"`
-	DeclID           string            `json:"decl_id"`
-	InitiatorActorID actor.ActorID     `json:"initiator_actor_id"`
-	Rendered         *RenderedSnapshot `json:"rendered_snapshot,omitempty"`
+	Ref              string        `json:"ref"`
+	DeclID           string        `json:"decl_id"`
+	InitiatorActorID actor.ActorID `json:"initiator_actor_id"`
 }
 
 type IntroduceResult = AdmitResult
@@ -377,46 +361,4 @@ type DaemonRequest struct {
 type BindingResult struct {
 	Bound            bool            `json:"bound"`
 	ClearedInstances []actor.ActorID `json:"cleared_instances,omitempty"`
-}
-
-type ApplyAuthority string
-
-const (
-	AuthorityRealm    ApplyAuthority = "realm_authority"
-	AuthorityDelegate ApplyAuthority = "delegated_member"
-)
-
-type ApplyDeclVersionRequest struct {
-	Ref                string           `json:"ref"`
-	DeclID             string           `json:"decl_id"`
-	Rendered           RenderedSnapshot `json:"rendered_snapshot"`
-	Authority          ApplyAuthority   `json:"authority"`
-	InitiatorPrincipal string           `json:"initiator_principal,omitempty"`
-}
-
-type ApplyStatus string
-
-const (
-	ApplyApplied ApplyStatus = "applied"
-	ApplyStale   ApplyStatus = "stale"
-	ApplyAbsent  ApplyStatus = "absent"
-)
-
-type ApplyDeclVersionResult struct {
-	Status  ApplyStatus `json:"status"`
-	Version int64       `json:"version,omitempty"`
-}
-
-type RevokeDeclRequest struct {
-	Ref    string `json:"ref"`
-	DeclID string `json:"decl_id"`
-}
-
-type InstanceOutcome struct {
-	ActorID actor.ActorID      `json:"actor_id"`
-	Code    OperationErrorCode `json:"code,omitempty"`
-}
-
-type RevokeResult struct {
-	PerInstance []InstanceOutcome `json:"per_instance"`
 }

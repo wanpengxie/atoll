@@ -43,19 +43,19 @@ func TestCanonicalJSONRFC8785Vectors(t *testing.T) {
 	}
 }
 
-func TestRenderedSnapshotDigestExcludesSequence(t *testing.T) {
-	one, err := (RenderedSnapshot{Class: "agent", Config: json.RawMessage(`{"x":1}`), Placement: Placement{Kind: PlacementServer}, RenderSeq: 1}).Seal()
+func TestRenderedSnapshotDigestIsCanonicalContentIdentity(t *testing.T) {
+	one, err := (RenderedSnapshot{Class: "agent", Config: json.RawMessage(`{"x":1}`), Placement: Placement{Kind: PlacementServer}}).Seal()
 	if err != nil {
 		t.Fatal(err)
 	}
 	two := one
-	two.RenderSeq = 2
+	two.Config = json.RawMessage(` { "x" : 1.0 } `)
 	got, err := two.ContentDigest()
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != one.Digest {
-		t.Fatalf("sequence changed content digest: %s != %s", got, one.Digest)
+		t.Fatalf("canonical-equivalent content changed digest: %s != %s", got, one.Digest)
 	}
 }
 
@@ -65,7 +65,7 @@ func TestDerivedRefsAreDomainSeparatedAndChannelScoped(t *testing.T) {
 	if a == b {
 		t.Fatal("same request id collided across channels")
 	}
-	if !strings.HasPrefix(a, "adm:rt:v1:") || !strings.HasPrefix(DerivedFanoutRef("base", "a"), "fo:v1:") || !strings.HasPrefix(DerivedFinalizeRef("op", "decl"), "ifin:v1:") {
+	if !strings.HasPrefix(a, "adm:rt:v1:") {
 		t.Fatal("reference family/version prefix missing")
 	}
 }

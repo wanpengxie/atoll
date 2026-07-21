@@ -52,7 +52,6 @@ type App struct {
 
 	daemonLocks  *keyedLockSet
 	channelLocks *keyedLockSet
-	fanout       *fanoutWorker
 	lifecycle    *lifecycleWorker
 	admission    *admissionService
 }
@@ -115,8 +114,6 @@ func New(cfg Config) (*App, error) {
 	if err := a.reconcileServingChannels(); err != nil {
 		return nil, fmt.Errorf("app: load channels: %w", err)
 	}
-	a.fanout = newFanoutWorker(a)
-	a.fanout.start()
 	a.admission = newAdmissionService(a)
 	a.admission.start()
 	a.lifecycle = newLifecycleWorker(a)
@@ -173,9 +170,6 @@ func (a *App) Close() error {
 	if a.admission != nil {
 		a.admission.close()
 	}
-	if a.fanout != nil {
-		a.fanout.close()
-	}
 	return a.host.Close()
 }
 
@@ -213,7 +207,8 @@ func (a *App) registerRoutes() {
 		api.POST("/channels/:chID/join", a.handleJoinChannel)
 		api.POST("/channels/:chID/actors", a.handleIntroduceActor)
 		api.DELETE("/channels/:chID/actors/:actorID", a.handleRemoveChannelActor)
-		api.PUT("/channels/:chID/actors/:actorID/config", a.handleEditActorConfig)
+		api.PUT("/channels/:chID/decls/:declID/config", a.handlePutDeclarationOverlay)
+		api.DELETE("/channels/:chID/decls/:declID/config", a.handleDeleteDeclarationOverlay)
 		api.GET("/channels/:chID/candidates", a.handleListCandidates)
 		api.GET("/operations/:ref", a.handleGetOperation)
 		// A user's actor-instance declarations (world layer, kind-neutral).

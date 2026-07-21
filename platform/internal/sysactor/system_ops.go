@@ -15,7 +15,4 @@ type SystemOps interface {
 	Remove(context.Context, channel.RemoveRequest) (channel.RemoveResult, error)
 	AttachDaemon(context.Context, channel.DaemonRequest) (channel.BindingResult, error)
 	DetachDaemon(context.Context, channel.DaemonRequest) (channel.BindingResult, error)
-	ApplyDeclVersion(context.Context, channel.ApplyDeclVersionRequest) (channel.ApplyDeclVersionResult, error)
-	RevokeDeclTargets(context.Context, channel.RevokeDeclRequest) (channel.RevokeResult, error)
-	RevokeDaemon(context.Context, channel.DaemonRequest) (channel.RevokeResult, error)
 }

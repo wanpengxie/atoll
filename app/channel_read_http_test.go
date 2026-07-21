@@ -25,7 +25,7 @@ func TestObserverHTTPRequiresRealmToolWhileMemberReadDoesNot(t *testing.T) {
 	} {
 		assertStatus(t, env.do(t, http.MethodGet, path, nil, outsiderCookies), http.StatusOK)
 	}
-	if err := env.app.RevokeRealmToolForTest(channel.ID(owner.chID)); err != nil {
+	if err := env.app.RemoveRealmToolForTest(channel.ID(owner.chID)); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{
@@ -89,7 +89,7 @@ func TestObserverSSETerminatesOnCapabilityRemovalAndJoin(t *testing.T) {
 		srv := httptest.NewServer(env.app.Handler())
 		defer srv.Close()
 		_, scanner := openObserverStream(t, srv, owner.chID, observer)
-		if err := env.app.RevokeRealmToolForTest(channel.ID(owner.chID)); err != nil {
+		if err := env.app.RemoveRealmToolForTest(channel.ID(owner.chID)); err != nil {
 			t.Fatal(err)
 		}
 		waitSSETerminal(t, scanner, "capability_unavailable")

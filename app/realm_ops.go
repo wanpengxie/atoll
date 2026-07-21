@@ -165,9 +165,6 @@ func (o realmOps) EditDeclaration(ctx context.Context, req channel.Requester, de
 	if err := tx.Commit(); err != nil {
 		return channel.DeclDetail{}, err
 	}
-	if o.app.fanout != nil {
-		o.app.fanout.notify()
-	}
 	return channel.DeclDetail{DeclSummary: channel.DeclSummary{ID: declID, Name: spec.Name, Owner: facts.Principal, Visibility: spec.Visibility, Class: spec.Class}, Config: spec.Config}, nil
 }
 
@@ -194,9 +191,6 @@ func (o realmOps) RevokeDeclaration(ctx context.Context, req channel.Requester, 
 	}
 	if err := tx.Commit(); err != nil {
 		return err
-	}
-	if o.app.fanout != nil {
-		o.app.fanout.notify()
 	}
 	return nil
 }

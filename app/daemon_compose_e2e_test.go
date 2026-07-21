@@ -198,9 +198,10 @@ func TestDaemonComposition_E2E(t *testing.T) {
 		t.Fatalf("unchanged resync rebuilt actor: build count = %d, want 1", got)
 	}
 
-	// Restart replaces the carrier without mutating declaration truth. The next
+	// A channel overlay update replaces the carrier without mutating membership
+	// identity. The next
 	// plan keeps the version and carries a fresh EnsureTicket.
-	restart := env.do(t, "PUT", "/api/channels/"+chID+"/actors/"+instID+"/config", map[string]any{"config": map[string]any{}}, cookies)
+	restart := env.do(t, "PUT", "/api/channels/"+chID+"/decls/"+agentID+"/config", map[string]any{"config": map[string]any{}}, cookies)
 	assertStatus(t, restart, http.StatusOK)
 	waitDaemonComposition(t, func() bool {
 		rows, _ := plan.snapshot()
@@ -223,6 +224,13 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	}
 
 	removed := env.do(t, "DELETE", "/api/actor-decls/"+agentID, nil, cookies)
+	assertStatus(t, removed, http.StatusOK)
+	// Soft deletion stops future supply only; the existing instance keeps its
+	// last channel snapshot until the explicit remove word ends membership.
+	if rows, _ := plan.snapshot(); len(rows) != 1 || rows[0].InstanceID != actor.ActorID(instID) {
+		t.Fatalf("soft delete changed existing plan: %#v", rows)
+	}
+	removed = env.do(t, "DELETE", "/api/channels/"+chID+"/actors/"+instID, nil, cookies)
 	assertStatus(t, removed, http.StatusOK)
 	deadline := time.Now().Add(3 * time.Second)
 	for {

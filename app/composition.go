@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"strings"
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/realmtool"
@@ -53,32 +52,11 @@ func (r compositionResolver) ResolveDeclaration(ctx context.Context, chID channe
 	if err == nil && overlay.Valid {
 		config = overlay.String
 	}
-	tx, err := r.app.db.BeginTx(ctx, nil)
-	if err != nil {
-		return channel.DeclarationFacts{}, err
-	}
-	defer tx.Rollback()
-	if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO decl_render_state(channel_id,decl_id,render_seq) VALUES (?,?,1)`, string(chID), declID); err != nil {
-		return channel.DeclarationFacts{}, err
-	}
-	var seq int64
-	if err := tx.QueryRowContext(ctx, `SELECT render_seq FROM decl_render_state WHERE channel_id=? AND decl_id=?`, string(chID), declID).Scan(&seq); err != nil {
-		return channel.DeclarationFacts{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return channel.DeclarationFacts{}, err
-	}
 	var raw json.RawMessage
-	if strings.TrimSpace(config) != "" {
+	if config != "" {
 		raw = json.RawMessage(config)
 	}
-	snapshot, err := (channel.RenderedSnapshot{
-		Class: class, Config: raw, Placement: channel.Placement{Kind: channel.PlacementDaemon}, RenderSeq: seq,
-	}).Seal()
-	if err != nil {
-		return channel.DeclarationFacts{}, err
-	}
-	return channel.DeclarationFacts{OwnerPrincipal: owner, Visibility: visibility, DefaultClass: class, Rendered: snapshot}, nil
+	return channel.DeclarationFacts{OwnerPrincipal: owner, Visibility: visibility, Class: class, Config: raw}, nil
 }
 
 func (r compositionResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {

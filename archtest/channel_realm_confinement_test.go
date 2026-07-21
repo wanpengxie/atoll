@@ -379,11 +379,7 @@ func TestChannelRealmW6SingleJobRunners(t *testing.T) {
 		anchors []string
 	}{
 		{"channel lifecycle worker", "../app/channel_lifecycle.go", "type lifecycleWorker struct", []string{"channel_provision_jobs", "channel_destroy_jobs"}},
-		{"admission service", "../app/admission.go", "type admissionService struct", []string{"channel_admission_operations", "channel_finalize_deliveries"}},
-		// The convergence patrol (fanout 轻形化) carries NO durable job anchors:
-		// the realm registry itself is its only durable input, and its output is
-		// observed channel truth — anchors list only the shared seq authority.
-		{"fanout convergence patrol", "../app/fanout.go", "type fanoutWorker struct", []string{"decl_render_state"}},
+		{"admission service", "../app/admission.go", "type admissionService struct", []string{"channel_admission_operations"}},
 	}
 	schema, err := os.ReadFile("../app/store.go")
 	if err != nil {
@@ -405,9 +401,10 @@ func TestChannelRealmW6SingleJobRunners(t *testing.T) {
 	}
 }
 
-// W7: Bundle.SysOp is consumed only by admissionService and the convergence sender.
+// W7: Bundle.SysOp is consumed only by admissionService. Declaration
+// convergence is Home-owned and uses a private store port.
 func TestChannelRealmW7SysOpConsumptionClosed(t *testing.T) {
-	allowed := map[string]bool{"../app/admission.go": true, "../app/fanout.go": true}
+	allowed := map[string]bool{"../app/admission.go": true}
 	for _, path := range phaseAProductionFiles(t, "../app") {
 		fset, f := phaseAParse(t, path)
 		ast.Inspect(f, func(n ast.Node) bool {
@@ -417,7 +414,7 @@ func TestChannelRealmW7SysOpConsumptionClosed(t *testing.T) {
 			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
 			if ok && sel.Sel.Name == "SysOp" && !allowed[path] {
-				t.Errorf("%s consumes Bundle.SysOp outside admission/fanout", path)
+				t.Errorf("%s consumes Bundle.SysOp outside admission", path)
 			}
 			_ = fset
 			return true
@@ -463,16 +460,16 @@ func TestChannelRealmW9StrictSchemaSeats(t *testing.T) {
 	for _, required := range []string{
 		"CREATE TABLE channels", "parent_id TEXT", "compensation_job_id INTEGER",
 		"CREATE TABLE channel_admission_operations", "attempt INTEGER", "next_attempt_at INTEGER",
-		"CREATE TABLE channel_decl_overlays", "pending_config_json TEXT", "pending_ref TEXT",
-		"CREATE TABLE decl_render_state",
-		"CREATE TABLE principal_channels", "CREATE TABLE channel_finalize_deliveries",
+		"CREATE TABLE channel_decl_overlays", "config_json TEXT",
+		"CREATE TABLE principal_channels",
 	} {
 		if !strings.Contains(appText, required) {
 			t.Errorf("app schema missing %q", required)
 		}
 	}
 	for _, forbidden := range []string{"CREATE TABLE workspaces", "CREATE TABLE workspace_members", "targets_json",
-		"CREATE TABLE decl_fanout_jobs", "CREATE TABLE daemon_revoke_jobs", "CREATE TABLE decl_fanout_deliveries"} {
+		"CREATE TABLE decl_fanout_jobs", "CREATE TABLE daemon_revoke_jobs", "CREATE TABLE decl_fanout_deliveries",
+		"CREATE TABLE channel_finalize_deliveries", "CREATE TABLE decl_render_state", "pending_config_json", "pending_ref"} {
 		if strings.Contains(appText, forbidden) {
 			t.Errorf("app schema retains %q", forbidden)
 		}
@@ -484,13 +481,13 @@ func TestChannelRealmW9StrictSchemaSeats(t *testing.T) {
 	localText := string(localSchema)
 	for _, required := range []string{
 		"channel_genesis", "channel_daemon_bindings", "ux_sysop_completed_correlation",
-		"render_seq", "source_channel_id", "source_resource_id",
+		"source_channel_id", "source_resource_id",
 	} {
 		if !strings.Contains(localText, required) {
 			t.Errorf("channel schema missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"restart_applied", "restart_attempts"} {
+	for _, forbidden := range []string{"restart_applied", "restart_attempts", "render_seq"} {
 		if strings.Contains(localText, forbidden) {
 			t.Errorf("channel schema retains %q", forbidden)
 		}

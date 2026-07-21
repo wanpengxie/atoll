@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -22,6 +23,7 @@ type opEntry struct {
 	home      *Home
 	resolver  IntroductionResolver
 	admission storespec.SysOpAdmission
+	sync      storespec.DeclarationSyncStore
 	mu        sync.Mutex
 }
 
@@ -87,14 +89,14 @@ func (e *opEntry) Introduce(ctx context.Context, req channel.IntroduceRequest) (
 	if err != nil {
 		return channel.IntroduceResult{}, err
 	}
-	result, err := e.introduce(ctx, meta, req.DeclID, req.InitiatorActorID, req.Rendered)
+	result, err := e.introduce(ctx, meta, req.DeclID, req.InitiatorActorID)
 	if err != nil {
 		return channel.IntroduceResult{}, err
 	}
 	return channel.IntroduceResult{ActorID: result.ActorID, Created: result.Created}, nil
 }
 
-func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declID string, initiator actor.ActorID, supplied *channel.RenderedSnapshot) (storespec.IntroduceResult, error) {
+func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declID string, initiator actor.ActorID) (storespec.IntroduceResult, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	// Completed-anchor lookup deliberately precedes the external resolver. A
@@ -136,9 +138,12 @@ func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declI
 		_, recordErr := e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta, DeclID: declID, InitiatorActorID: initiator})
 		return storespec.IntroduceResult{}, recordErr
 	}
-	rendered := facts.Rendered
-	if supplied != nil && supplied.RenderSeq > rendered.RenderSeq {
-		rendered = *supplied
+	rendered, err := (channel.RenderedSnapshot{
+		Class: facts.Class, Config: append(json.RawMessage(nil), facts.Config...),
+		Placement: channel.Placement{Kind: channel.PlacementDaemon},
+	}).Seal()
+	if err != nil {
+		return storespec.IntroduceResult{}, &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: err.Error()}
 	}
 	// ClassKind is a resolver call like ResolveDeclaration: fail-closed on its
 	// own bounded window, and only the definitive "no such class" answer
@@ -302,90 +307,53 @@ func (e *opEntry) DetachDaemon(ctx context.Context, req channel.DaemonRequest) (
 	return channel.BindingResult{Bound: result.Bound, ClearedInstances: result.ClearedInstances}, nil
 }
 
-func (e *opEntry) ApplyDeclVersion(ctx context.Context, req channel.ApplyDeclVersionRequest) (channel.ApplyDeclVersionResult, error) {
+// applyResolvedDeclaration is the private, ActorID-exact write half of the
+// declaration pull arm. ResolveDeclaration is always called by the caller
+// before entering this serial section; inside it we re-read identity and every
+// channel-owned field before the store performs its same-transaction hash
+// comparison and version advance.
+func (e *opEntry) applyResolvedDeclaration(ctx context.Context, id actor.ActorID, declID, class string, config json.RawMessage) (storespec.DeclarationSyncResult, error) {
 	if err := e.available(); err != nil {
-		return channel.ApplyDeclVersionResult{}, err
-	}
-	meta, err := systemMeta(req.Ref, req)
-	if err != nil {
-		return channel.ApplyDeclVersionResult{}, err
+		return storespec.DeclarationSyncResult{}, err
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	if completed, found, lookupErr := e.admission.LookupCompleted(ctx, meta.Anchor, meta.RequestDigest); lookupErr != nil {
-		return channel.ApplyDeclVersionResult{}, lookupErr
-	} else if found {
-		if completed.ErrorCode != "" {
-			return channel.ApplyDeclVersionResult{}, &channel.OperationError{Code: completed.ErrorCode, Detail: completed.ErrorDetail}
-		}
-		var replay channel.ApplyDeclVersionResult
-		if err := json.Unmarshal(completed.Result, &replay); err != nil {
-			return channel.ApplyDeclVersionResult{}, err
-		}
-		return replay, nil
+	release := e.home.actorGates.lock(id)
+	defer release()
+	current, active, err := e.home.controlIndex.LookupActive(ctx, id)
+	if err != nil || !active || current.SourceDeclID != declID {
+		return storespec.DeclarationSyncResult{}, err
 	}
-	var facts channel.DeclarationFacts
-	if req.Authority == channel.AuthorityDelegate {
-		if e.resolver == nil {
-			return channel.ApplyDeclVersionResult{}, &channel.OperationError{Code: channel.ErrCodeAuthorityUnavailable, Detail: "introduction resolver unavailable", Retryable: true}
-		}
-		resolveCtx, cancel := context.WithTimeout(ctx, introductionResolveTimeout)
-		facts, err = e.resolver.ResolveDeclaration(resolveCtx, e.home.channelID, req.DeclID)
-		cancel()
-		if err != nil {
-			if errors.Is(err, channel.ErrDeclarationNotFound) {
-				meta.DecisiveError = &channel.OperationError{Code: channel.ErrCodeDeclNotFound, Detail: err.Error()}
-				_, recordErr := e.admission.ApplyDeclVersion(ctx, storespec.ApplyTx{SysOpMeta: meta, DeclID: req.DeclID})
-				return channel.ApplyDeclVersionResult{}, recordErr
-			}
-			return channel.ApplyDeclVersionResult{}, &channel.OperationError{Code: channel.ErrCodeAuthorityUnavailable, Detail: err.Error(), Retryable: true}
-		}
+	if current.Kind != actor.KindAgent && current.Kind != actor.KindTool {
+		return storespec.DeclarationSyncResult{}, nil
 	}
-	result, err := e.admission.ApplyDeclVersion(ctx, storespec.ApplyTx{
-		SysOpMeta: meta, DeclID: req.DeclID, Rendered: req.Rendered, Authority: req.Authority,
-		InitiatorPrincipal: req.InitiatorPrincipal, OwnerPrincipal: facts.OwnerPrincipal, Visibility: facts.Visibility,
+	kindCtx, cancel := context.WithTimeout(ctx, introductionResolveTimeout)
+	kind, found, err := e.resolver.ClassKind(kindCtx, class)
+	cancel()
+	if err != nil || !found || kind != current.Kind {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	request := struct {
+		ActorID actor.ActorID   `json:"actor_id"`
+		DeclID  string          `json:"decl_id"`
+		Class   string          `json:"class"`
+		Config  json.RawMessage `json:"config,omitempty"`
+	}{id, declID, class, config}
+	meta, err := systemMeta("ifin:v1:"+uuid.NewString(), request)
+	if err != nil {
+		return storespec.DeclarationSyncResult{}, err
+	}
+	result, err := e.sync.ApplyResolvedDeclaration(ctx, storespec.DeclarationSyncTx{
+		SysOpMeta: meta, ActorID: id, DeclID: declID, Class: class,
+		Config: append(json.RawMessage(nil), config...),
 	})
 	if err != nil {
-		return channel.ApplyDeclVersionResult{}, err
+		return storespec.DeclarationSyncResult{}, err
 	}
-	e.applyEffects(ctx, result.Effects)
-	return channel.ApplyDeclVersionResult{Status: result.Status, Version: result.Version}, nil
-}
-
-func (e *opEntry) RevokeDeclTargets(ctx context.Context, req channel.RevokeDeclRequest) (channel.RevokeResult, error) {
-	if err := e.available(); err != nil {
-		return channel.RevokeResult{}, err
+	if result.Status == storespec.DeclarationApplied {
+		e.applyEffects(ctx, result.Effects)
 	}
-	meta, err := systemMeta(req.Ref, req)
-	if err != nil {
-		return channel.RevokeResult{}, err
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	result, err := e.admission.RevokeDeclTargets(ctx, storespec.RevokeDeclTx{SysOpMeta: meta, DeclID: req.DeclID})
-	if err != nil {
-		return channel.RevokeResult{}, err
-	}
-	e.applyEffects(ctx, result.Effects)
-	return channel.RevokeResult{PerInstance: result.PerInstance}, nil
-}
-
-func (e *opEntry) RevokeDaemon(ctx context.Context, req channel.DaemonRequest) (channel.RevokeResult, error) {
-	if err := e.available(); err != nil {
-		return channel.RevokeResult{}, err
-	}
-	meta, err := systemMeta(req.Ref, req)
-	if err != nil {
-		return channel.RevokeResult{}, err
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	result, err := e.admission.RevokeDaemon(ctx, storespec.RevokeDaemonTx{SysOpMeta: meta, DaemonID: storespec.DaemonID(req.DaemonID)})
-	if err != nil {
-		return channel.RevokeResult{}, err
-	}
-	e.applyEffects(ctx, result.Effects)
-	return channel.RevokeResult{PerInstance: result.PerInstance}, nil
+	return result, nil
 }
 
 func (e *opEntry) publishActor(ctx context.Context, id actor.ActorID) error {
@@ -473,7 +441,7 @@ func (e *opEntry) executeMemberIntroduce(ctx context.Context, req sysactor.Opera
 	if err != nil {
 		return nil, err
 	}
-	result, err := e.introduce(ctx, meta, payload.DeclID, req.Sender, nil)
+	result, err := e.introduce(ctx, meta, payload.DeclID, req.Sender)
 	if err != nil {
 		return nil, asOperateError(err)
 	}

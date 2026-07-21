@@ -38,7 +38,7 @@ func init() {
 func TestRealmOpsAgentCannotWriteDeclarationRegistry(t *testing.T) {
 	a := newBareAppForTest(t)
 	snapshot, err := (channel.RenderedSnapshot{
-		Class: "dormant-agent", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+		Class: "dormant-agent", Placement: channel.Placement{Kind: channel.PlacementServer},
 	}).Seal()
 	if err != nil {
 		t.Fatal(err)
@@ -72,7 +72,7 @@ func TestRealmOpsAgentWithEmptyPrincipalOwnsIntroduceByActorCoordinate(t *testin
 	a.admission.start()
 	t.Cleanup(a.admission.close)
 	requesterSnapshot, err := (channel.RenderedSnapshot{
-		Class: "dormant-requester", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+		Class: "dormant-requester", Placement: channel.Placement{Kind: channel.PlacementServer},
 	}).Seal()
 	if err != nil {
 		t.Fatal(err)
@@ -141,7 +141,7 @@ func TestRealmToolDerivedRefIsChannelScoped(t *testing.T) {
 func TestObserverResourceStreamStopsAtChunkBoundaryAfterRealmToolRemoval(t *testing.T) {
 	a := newBareAppForTest(t)
 	snapshot, err := (channel.RenderedSnapshot{
-		Class: realmToolClass, Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+		Class: realmToolClass, Placement: channel.Placement{Kind: channel.PlacementServer},
 	}).Seal()
 	if err != nil {
 		t.Fatal(err)
@@ -162,8 +162,16 @@ func TestObserverResourceStreamStopsAtChunkBoundaryAfterRealmToolRemoval(t *test
 	if err != nil || n != 32*1024 {
 		t.Fatalf("first chunk n=%d err=%v", n, err)
 	}
-	if _, err := bundle.SysOp().RevokeDeclTargets(context.Background(), channel.RevokeDeclRequest{
-		Ref: "stream-revoke", DeclID: realmToolDeclID,
+	target, found, err := bundle.View().DeclaredBySourceOne(context.Background(), realmToolDeclID)
+	if err != nil || !found {
+		t.Fatalf("resolve realm tool target=(%+v,%v,%v)", target, found, err)
+	}
+	initiator, found, err := bundle.View().ResolvePrincipal(context.Background(), actor.KindHuman, "owner")
+	if err != nil || !found {
+		t.Fatalf("resolve owner=(%s,%v,%v)", initiator, found, err)
+	}
+	if _, err := bundle.SysOp().Remove(context.Background(), channel.RemoveRequest{
+		Ref: "stream-remove", Target: target.ID, InitiatorActorID: initiator,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -179,7 +187,7 @@ func TestRealmOpsFetchAllowsAgentWithZeroSourceMembership(t *testing.T) {
 	seal := func(class string) channel.RenderedSnapshot {
 		t.Helper()
 		snapshot, err := (channel.RenderedSnapshot{
-			Class: class, Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+			Class: class, Placement: channel.Placement{Kind: channel.PlacementServer},
 		}).Seal()
 		if err != nil {
 			t.Fatal(err)

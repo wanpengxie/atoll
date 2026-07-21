@@ -250,7 +250,7 @@ func TestSysOpMemberIntroduceAcceptsRunWorldSender(t *testing.T) {
 	cs := openSysOpTestStore(t)
 	ctx := context.Background()
 	rendered, err := (channel.RenderedSnapshot{
-		Class: "agent", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+		Class: "agent", Placement: channel.Placement{Kind: channel.PlacementServer},
 	}).Seal()
 	if err != nil {
 		t.Fatal(err)
@@ -367,28 +367,27 @@ func TestSysOpAuditEventsAreSystemAuthoredAndHidden(t *testing.T) {
 	}
 }
 
-func TestSysOpApplyRejectsUnresolvedDaemonPlacement(t *testing.T) {
+func TestDeclarationSyncAppliesByActorAndEqualIsZeroWrite(t *testing.T) {
 	cs := openSysOpTestStore(t)
-	rendered, err := (channel.RenderedSnapshot{
-		Class: "agent", Placement: channel.Placement{Kind: channel.PlacementDaemon}, RenderSeq: 1,
-	}).Seal()
-	if err != nil {
-		t.Fatal(err)
+	id := admitDurableAgent(t, cs, "decl")
+	equal := storespec.DeclarationSyncTx{
+		SysOpMeta: sysMeta("ifin:v1:equal", "v1:equal"), ActorID: id, DeclID: "decl", Class: "agent",
 	}
-	in := storespec.ApplyTx{
-		SysOpMeta: sysMeta("op:ref:v1:invalid-host", "v1:invalid-host"),
-		DeclID:    "decl", Rendered: rendered, Authority: channel.AuthorityRealm,
+	res, err := cs.DeclarationSync.ApplyResolvedDeclaration(context.Background(), equal)
+	if err != nil || res.Status != storespec.DeclarationEqual || res.Version != 1 {
+		t.Fatalf("equal sync=(%+v,%v)", res, err)
 	}
-	_, err = cs.SysOps.ApplyDeclVersion(context.Background(), in)
-	var operationErr *channel.OperationError
-	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeInvalidDesiredHost || operationErr.Retryable {
-		t.Fatalf("apply error=%v", err)
+	var events int
+	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE correlation_id=?`, equal.Anchor).Scan(&events); err != nil || events != 0 {
+		t.Fatalf("equal sync events=%d err=%v, want zero", events, err)
 	}
-	var started, completed int
-	if err := cs.db.QueryRow(`SELECT SUM(type='sysop_started'),SUM(type='sysop_completed') FROM messages WHERE correlation_id=?`, in.Anchor).Scan(&started, &completed); err != nil {
-		t.Fatal(err)
+	applied := storespec.DeclarationSyncTx{
+		SysOpMeta: sysMeta("ifin:v1:applied", "v1:applied"), ActorID: id, DeclID: "decl", Class: "agent",
+		Config: []byte(`{"version":2}`),
 	}
-	if started != 1 || completed != 1 {
-		t.Fatalf("event pair=(%d,%d), want (1,1)", started, completed)
+	res, err = cs.DeclarationSync.ApplyResolvedDeclaration(context.Background(), applied)
+	if err != nil || res.Status != storespec.DeclarationApplied || res.Version != 2 {
+		t.Fatalf("applied sync=(%+v,%v)", res, err)
 	}
+	assertEventPair(t, cs, applied.Anchor)
 }
