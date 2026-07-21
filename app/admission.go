@@ -221,6 +221,12 @@ func (s *admissionService) submitEdit(ctx context.Context, chID channel.ID, rawA
 	if err != nil {
 		return admissionRecord{}, err
 	}
+	// The whole judge→mint→deliver sequence runs inside the channel critical
+	// section: the seq counter must not accept an out-of-queue writer, and the
+	// minted frame must reach the membrane before any fanout arm can mint a
+	// later seq (判断段与落账段恒同区，整段原子).
+	releaseChannel := s.app.channelLocks.lock(string(chID))
+	defer releaseChannel()
 	tx, err := s.app.db.BeginTx(ctx, nil)
 	if err != nil {
 		return admissionRecord{}, err
@@ -280,7 +286,7 @@ func (s *admissionService) submitEdit(ctx context.Context, chID channel.ID, rawA
 		return admissionRecord{}, err
 	}
 	deliverCtx, cancel := context.WithTimeout(s.ctx, admissionSyncWindow)
-	_ = s.runOperation(deliverCtx, operationID)
+	_ = s.runOperationLocked(deliverCtx, operationID)
 	cancel()
 	s.notify()
 	loadCtx := ctx
@@ -337,7 +343,15 @@ func (s *admissionService) runOperation(ctx context.Context, operationID string)
 	}
 	release := s.app.channelLocks.lock(record.ChannelID)
 	defer release()
-	record, found, err = s.load(ctx, operationID)
+	return s.runOperationLocked(ctx, operationID)
+}
+
+// runOperationLocked is runOperation's body for a caller already inside the
+// channel critical section — the local-edit path holds the lock across its
+// seq-mint transaction AND this delivery, so a fanout arm can never mint a
+// later seq between the two halves.
+func (s *admissionService) runOperationLocked(ctx context.Context, operationID string) error {
+	record, found, err := s.load(ctx, operationID)
 	if err != nil || !found || record.Status != "pending" {
 		return err
 	}
@@ -458,7 +472,21 @@ func (s *admissionService) finish(ctx context.Context, record admissionRecord, s
 	if err != nil || changed == 0 {
 		return err
 	}
-	if err := s.finishOverlayTx(ctx, tx, record, status == "done"); err != nil {
+	promote := status == "done"
+	if promote && record.Op == "edit" {
+		// A done edit promotes its pending overlay ONLY when the frame actually
+		// took effect. A stale (superseded by a later seq) or absent outcome
+		// means the channel never ran this value — promoting it would fork the
+		// realm's effective overlay from channel reality.
+		var applied struct {
+			Status string `json:"status"`
+		}
+		if err := json.Unmarshal(result, &applied); err != nil {
+			return err
+		}
+		promote = applied.Status == string(channel.ApplyApplied)
+	}
+	if err := s.finishOverlayTx(ctx, tx, record, promote); err != nil {
 		return err
 	}
 	projectionPrincipal := ""

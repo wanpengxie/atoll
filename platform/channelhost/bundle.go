@@ -41,6 +41,7 @@ type SysOp interface {
 	ApplyDeclVersion(context.Context, channel.ApplyDeclVersionRequest) (channel.ApplyDeclVersionResult, error)
 	RevokeDeclTargets(context.Context, channel.RevokeDeclRequest) (channel.RevokeResult, error)
 	RevokeDaemon(context.Context, channel.DaemonRequest) (channel.RevokeResult, error)
+	DeclaredBySourceSerialized(context.Context, string) ([]storespec.ActorControlRow, error)
 }
 
 type View interface {

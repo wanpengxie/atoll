@@ -287,7 +287,7 @@ func (w *fanoutWorker) loadFanoutDelivery(jobID int64, chID channel.ID) (channel
 }
 
 func (w *fanoutWorker) createFanoutDelivery(job fanoutJob, chID channel.ID, bundle channelhost.Bundle) (channel.ApplyDeclVersionRequest, bool, error) {
-	rows, err := bundle.View().DeclaredBySource(w.ctx, job.key)
+	rows, err := bundle.SysOp().DeclaredBySourceSerialized(w.ctx, job.key)
 	if err != nil {
 		return channel.ApplyDeclVersionRequest{}, false, err
 	}
