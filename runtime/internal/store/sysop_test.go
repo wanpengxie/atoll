@@ -188,6 +188,36 @@ func TestSysOpRestartTransientFailureRollsBackPairLeavingNoResidue(t *testing.T)
 	}
 }
 
+// The member words execute the operation×source admission table inside the
+// transaction: a system-source frame is a decisive not_accepted_source terminal
+// with its event pair, never a structural write.
+func TestSysOpMemberWordsRejectSystemSource(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	target := admitDurableAgent(t, cs, "decl:member-only")
+	assertSourceRejected := func(anchor string, err error) {
+		t.Helper()
+		var operationErr *channel.OperationError
+		if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeNotAcceptedSource || operationErr.Retryable {
+			t.Fatalf("system-source member word error=%v, want decisive not_accepted_source", err)
+		}
+		assertEventPair(t, cs, anchor)
+	}
+	_, err := cs.SysOps.RemoveActor(ctx, storespec.RemoveTx{SysOpMeta: sysMeta("op:ref:src:remove", "sr1"), Target: target})
+	assertSourceRejected("op:ref:src:remove", err)
+	_, err = cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: sysMeta("op:ref:src:restart", "sr2"), Target: target})
+	assertSourceRejected("op:ref:src:restart", err)
+	_, err = cs.SysOps.SetDefaultAgent(ctx, storespec.SetDefaultTx{SysOpMeta: sysMeta("op:ref:src:default", "sr3"), Target: target})
+	assertSourceRejected("op:ref:src:default", err)
+	var epoch int64
+	if err := cs.db.QueryRow(`SELECT restart_epoch FROM actor_registry WHERE actor_id=?`, string(target)).Scan(&epoch); err != nil {
+		t.Fatal(err)
+	}
+	if epoch != 0 {
+		t.Fatalf("system-source restart mutated the value row (epoch=%d)", epoch)
+	}
+}
+
 func openSysOpTestStore(t *testing.T) *ChannelStores {
 	t.Helper()
 	cs, err := OpenChannel(context.Background(), "sysop-test", filepath.Join(t.TempDir(), "channel.sqlite"), OpenOptions{}, nil)

@@ -474,6 +474,9 @@ func (s *sysOpStore) RevokeDaemon(ctx context.Context, in storespec.RevokeDaemon
 
 func (s *sysOpStore) RemoveActor(ctx context.Context, in storespec.RemoveTx) (storespec.RemoveResult, error) {
 	raw, effects, err := s.run(ctx, in.SysOpMeta, "remove_actor", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
+		if in.Source != storespec.SysOpSourceMember {
+			return decisive(channel.ErrCodeNotAcceptedSource, "remove_actor accepts only the member source"), nil
+		}
 		if in.Target == "" {
 			return decisive(channel.ErrCodeBadPayload, "instance_id required"), nil
 		}
@@ -507,6 +510,9 @@ func (s *sysOpStore) RemoveActor(ctx context.Context, in storespec.RemoveTx) (st
 
 func (s *sysOpStore) RestartActor(ctx context.Context, in storespec.RestartTx) (storespec.RestartResult, error) {
 	raw, effects, err := s.run(ctx, in.SysOpMeta, "restart_actor", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
+		if in.Source != storespec.SysOpSourceMember {
+			return decisive(channel.ErrCodeNotAcceptedSource, "restart_actor accepts only the member source"), nil
+		}
 		if in.Target == "" {
 			return decisive(channel.ErrCodeBadPayload, "instance_id required"), nil
 		}
@@ -541,6 +547,9 @@ func (s *sysOpStore) RestartActor(ctx context.Context, in storespec.RestartTx) (
 
 func (s *sysOpStore) SetDefaultAgent(ctx context.Context, in storespec.SetDefaultTx) (storespec.SetDefaultResult, error) {
 	raw, effects, err := s.run(ctx, in.SysOpMeta, "set_default_agent", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
+		if in.Source != storespec.SysOpSourceMember {
+			return decisive(channel.ErrCodeNotAcceptedSource, "set_default_agent accepts only the member source"), nil
+		}
 		if in.Target != "" {
 			var active int
 			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(in.Target)).Scan(&active); err != nil {

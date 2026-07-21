@@ -58,6 +58,50 @@ func memberMeta(anchor string, sender actor.ActorID, request any) (storespec.Sys
 	return storespec.SysOpMeta{Anchor: channel.MessageCorrelation(anchor), RequestDigest: digest, Source: storespec.SysOpSourceMember, Sender: sender}, nil
 }
 
+// memberDecisive routes a pre-parse/pre-admission decisive verdict (malformed
+// payload, inactive sender) through the word's own value-op transaction, so the
+// anchored started/completed pair commits and a replay of the same request
+// lands on the same terminal. Transport adapters stay judgement-free — every
+// decisive result, including rejections, is account truth. Malformed payloads
+// digest the raw bytes (the only stable identity a request that failed to parse
+// has); each path digests deterministically, so per-path replays converge.
+func (e *opEntry) memberDecisive(ctx context.Context, req sysactor.OperateRequest, word string, request any, verdict *channel.OperationError) error {
+	meta, err := memberMeta(req.Anchor, req.Sender, request)
+	if err != nil {
+		return err
+	}
+	meta.DecisiveError = verdict
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	switch word {
+	case "introduce":
+		_, err = e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta})
+	case "remove_actor":
+		_, err = e.admission.RemoveActor(ctx, storespec.RemoveTx{SysOpMeta: meta})
+	case "restart_actor":
+		_, err = e.admission.RestartActor(ctx, storespec.RestartTx{SysOpMeta: meta})
+	case "set_default_agent":
+		_, err = e.admission.SetDefaultAgent(ctx, storespec.SetDefaultTx{SysOpMeta: meta})
+	default:
+		err = verdict
+	}
+	return asOperateError(err)
+}
+
+// requireActiveSender is the member words' admission-side permission judgement
+// (the transport gate only translates and replies): an inactive sender is a
+// decisive unauthorized_sender terminal recorded through the word's event pair.
+func (e *opEntry) requireActiveSender(ctx context.Context, req sysactor.OperateRequest, word string, request any) error {
+	_, found, err := e.home.controlIndex.LookupActive(ctx, req.Sender)
+	if err != nil {
+		return asOperateError(err)
+	}
+	if found {
+		return nil
+	}
+	return e.memberDecisive(ctx, req, word, request, &channel.OperationError{Code: channel.ErrCodeUnauthorizedSender, Detail: "sender is not an active channel member"})
+}
+
 func (e *opEntry) Admit(ctx context.Context, req channel.AdmitRequest) (channel.AdmitResult, error) {
 	if err := e.available(); err != nil {
 		return channel.AdmitResult{}, err
@@ -355,7 +399,7 @@ func (e *opEntry) executeMemberIntroduce(ctx context.Context, req sysactor.Opera
 		DeclID string `json:"decl_id"`
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.DeclID == "" {
-		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: "decl_id required"}
+		return nil, e.memberDecisive(ctx, req, "introduce", string(req.Payload), &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "decl_id required"})
 	}
 	meta, err := memberMeta(req.Anchor, req.Sender, payload)
 	if err != nil {
@@ -388,7 +432,10 @@ func (e *opEntry) executeMemberRemove(ctx context.Context, req sysactor.OperateR
 		InstanceID actor.ActorID `json:"instance_id"`
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
-		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: "instance_id required"}
+		return nil, e.memberDecisive(ctx, req, "remove_actor", string(req.Payload), &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "instance_id required"})
+	}
+	if err := e.requireActiveSender(ctx, req, "remove_actor", payload); err != nil {
+		return nil, err
 	}
 	meta, err := memberMeta(req.Anchor, req.Sender, payload)
 	if err != nil {
@@ -444,7 +491,10 @@ func (e *opEntry) executeMemberRestart(ctx context.Context, req sysactor.Operate
 		InstanceID actor.ActorID `json:"instance_id"`
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
-		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: "instance_id required"}
+		return nil, e.memberDecisive(ctx, req, "restart_actor", string(req.Payload), &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "instance_id required"})
+	}
+	if err := e.requireActiveSender(ctx, req, "restart_actor", payload); err != nil {
+		return nil, err
 	}
 	meta, err := memberMeta(req.Anchor, req.Sender, payload)
 	if err != nil {
@@ -468,7 +518,10 @@ func (e *opEntry) executeMemberSetDefault(ctx context.Context, req sysactor.Oper
 		InstanceID actor.ActorID `json:"instance_id"`
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil {
-		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: err.Error()}
+		return nil, e.memberDecisive(ctx, req, "set_default_agent", string(req.Payload), &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: err.Error()})
+	}
+	if err := e.requireActiveSender(ctx, req, "set_default_agent", payload); err != nil {
+		return nil, err
 	}
 	meta, err := memberMeta(req.Anchor, req.Sender, payload)
 	if err != nil {

@@ -129,21 +129,23 @@ func TestOperate_MemberAllowed(t *testing.T) {
 	}
 }
 
-// TestOperate_NonMemberRejected proves a sender with no active membership is
-// refused at the gate (unauthorized_sender), never reaching the executor.
-func TestOperate_NonMemberRejected(t *testing.T) {
-	ex := &stubExecutor{}
+// TestOperate_GateNeverPreJudges pins the transport-adapter contract: the gate
+// routes every operate request to the executor regardless of membership — the
+// permission verdict (and its anchored event pair) is the executor's admission
+// section's job, so no decisive refusal can bypass the account.
+func TestOperate_GateNeverPreJudges(t *testing.T) {
+	ex := &stubExecutor{err: &OperateError{Code: "unauthorized_sender", Detail: "sender is not an active channel member"}}
 	s := New(Deps{
 		Authority: memberRegistry{active: map[actor.ActorID]bool{"user:alice": true}},
 		Operate:   ex,
 	})
 	sys := &failSys{}
 	s.handle(sys, operateMsg(TypeIntroduceActor, "user:mallory"))
-	if ex.introduced != 0 {
-		t.Fatalf("executor.Introduce reached for non-member (called %d)", ex.introduced)
+	if ex.introduced != 1 {
+		t.Fatalf("executor.Introduce called %d times, want 1 (gate must not pre-judge)", ex.introduced)
 	}
 	if len(sys.fails) != 1 || sys.fails[0].code != "unauthorized_sender" {
-		t.Fatalf("want 1 unauthorized_sender fail, got %+v", sys.fails)
+		t.Fatalf("want 1 unauthorized_sender fail relayed from the executor, got %+v", sys.fails)
 	}
 }
 

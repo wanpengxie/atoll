@@ -66,23 +66,15 @@ type OperateExecutor interface {
 	Execute(ctx context.Context, operation string, req OperateRequest) (any, error)
 }
 
-// handleOperate is the gate: permission (NP-2=a — sender is an active member,
-// kind-blind, so an agent member may be delegated channel management) then route
-// to the injected executor, mapping its decision to Reply/Fail. Unfilled
-// executor = no synthesis (same posture as an unrouted type).
+// handleOperate is the gate as pure channel adaptation: carrier translation in,
+// reply/fail out. Permission (NP-2=a — sender is an active member, kind-blind,
+// so an agent member may be delegated channel management) is judged INSIDE the
+// executor's admission section, where a decisive refusal commits an anchored
+// started/completed event pair — the adapter never pre-judges, so no decisive
+// verdict can bypass the account. Unfilled executor = no synthesis (same
+// posture as an unrouted type).
 func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	if s.operate == nil {
-		return
-	}
-	authed, err := s.senderIsActiveMember(msg)
-	if err != nil {
-		_, _ = sys.Fail(msg, "internal_error", err.Error())
-		return
-	}
-	if !authed {
-		s.logger.Info("sysactor.operate.refused", "type", msg.Type,
-			"sender", string(msg.Sender.ID), "code", "unauthorized_sender")
-		_, _ = sys.Fail(msg, "unauthorized_sender", "sender is not an active channel member")
 		return
 	}
 	req := OperateRequest{ChannelID: msg.ChannelID, Sender: msg.Sender.ID, Anchor: string(msg.ID), Payload: msg.Payload}
@@ -105,17 +97,3 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	_, _ = sys.Reply(msg, result)
 }
 
-// senderIsActiveMember is the gate's permission predicate (NP-2=a): the request
-// sender must be an active membership row of this channel. kind-blind (an agent
-// member is a legitimate delegate). A registry error is surfaced (internal_error),
-// not silently read as unauthorized.
-func (s *SystemActor) senderIsActiveMember(msg actorbase.Msg) (bool, error) {
-	if s.authority == nil {
-		return false, nil
-	}
-	_, ok, err := s.authority.LookupActive(msg.Ctx(), msg.Sender.ID)
-	if err != nil {
-		return false, err
-	}
-	return ok, nil
-}
