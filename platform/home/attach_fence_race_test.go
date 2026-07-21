@@ -141,10 +141,10 @@ func TestAttachRaceWindowRejectsStaleCandidateAndPreservesIncumbent(t *testing.T
 
 		candidatePrep := dialAttach(t, rt, "stale-shell-restart", id)
 
-		// INSERT the concurrent restart here — a manual/lease-endpoint restart
-		// claims THIS exact in-flight ticket and retires it mid-window (the
-		// real restart journal path, composition.go ApplyRestartTarget, drives
-		// this same ledger method with restartIntent=true).
+		// INSERT the concurrent restart here — a concurrent restart claims THIS
+		// exact in-flight ticket and retires it mid-window (the real restart
+		// path — the restart word's post-commit effect in opentry applyEffects —
+		// drives this same ledger method with restartIntent=true).
 		if _, retired := l.RetireIfTicketMatches(id, ticket, true); !retired {
 			t.Fatal("concurrent restart (ticket exchange) did not retire the matching in-flight attempt")
 		}

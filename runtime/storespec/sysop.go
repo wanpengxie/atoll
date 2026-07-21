@@ -141,9 +141,12 @@ type RemoveResult struct {
 	Removed []actor.ActorID `json:"removed"`
 }
 
-// RestartTx bumps the durable restart generation of one composition member.
-// Execution (bouncing the live carrier) is a reconcile private matter driven by
-// the generation skew, never a store-issued kill from this word.
+// RestartTx restarts one composition member's live incarnation. The word is an
+// incarnation-axis operation: the transaction commits ONLY the event pair —
+// identity truth (actor_registry) is never touched — and the bounce itself is
+// a post-commit advisory effect (liveness retire with restart intent +
+// despawn/poke). A crashed effect means the whole process died, which killed
+// every incarnation anyway; reboot re-embodies from identity truth.
 type RestartTx struct {
 	SysOpMeta
 	Target actor.ActorID

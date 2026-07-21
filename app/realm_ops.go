@@ -118,7 +118,7 @@ func (o realmOps) CreateDeclaration(ctx context.Context, req channel.Requester, 
 	if err != nil {
 		return channel.DeclDetail{}, err
 	}
-	if _, err := (compositionResolver{app: o.app}).ClassKind(ctx, spec.Class); err != nil || spec.Class == realmToolClass {
+	if _, ok, err := (compositionResolver{app: o.app}).ClassKind(ctx, spec.Class); err != nil || !ok || spec.Class == realmToolClass {
 		return channel.DeclDetail{}, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "unknown or reserved class"}
 	}
 	id := uuid.NewString()
@@ -146,7 +146,7 @@ func (o realmOps) EditDeclaration(ctx context.Context, req channel.Requester, de
 	if err != nil {
 		return channel.DeclDetail{}, err
 	}
-	if _, err := (compositionResolver{app: o.app}).ClassKind(ctx, spec.Class); err != nil || spec.Class == realmToolClass {
+	if _, ok, err := (compositionResolver{app: o.app}).ClassKind(ctx, spec.Class); err != nil || !ok || spec.Class == realmToolClass {
 		return channel.DeclDetail{}, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "unknown or reserved class"}
 	}
 	tx, err := o.app.db.BeginTx(ctx, nil)

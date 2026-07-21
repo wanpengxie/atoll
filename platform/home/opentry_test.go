@@ -22,10 +22,12 @@ type fixedIntroductionResolver struct {
 }
 
 type mutableIntroductionResolver struct {
-	facts channel.DeclarationFacts
-	kind  actor.Kind
-	err   error
-	calls int
+	facts       channel.DeclarationFacts
+	kind        actor.Kind
+	err         error
+	kindErr     error
+	kindMissing bool
+	calls       int
 }
 
 func (r *mutableIntroductionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
@@ -33,16 +35,16 @@ func (r *mutableIntroductionResolver) ResolveDeclaration(context.Context, channe
 	return r.facts, r.err
 }
 
-func (r *mutableIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, error) {
-	return r.kind, nil
+func (r *mutableIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
+	return r.kind, !r.kindMissing, r.kindErr
 }
 
 func (r fixedIntroductionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
 	return r.facts, nil
 }
 
-func (r fixedIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, error) {
-	return r.kind, nil
+func (r fixedIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
+	return r.kind, true, nil
 }
 
 func TestOpEntryIntroduceApplyAndDetachUseOneDurableChain(t *testing.T) {
@@ -211,6 +213,79 @@ func TestOpEntryTransientResolverFailureLeavesNoPairAndSameRefRetries(t *testing
 	}
 	if resolver.calls != 2 {
 		t.Fatalf("resolver calls=%d, want 2", resolver.calls)
+	}
+}
+
+// TestClassKindFaultIsRetryableOnlyAbsenceIsDecisive pins the resolver
+// contract split: a ClassKind infrastructure error must come back as a
+// retryable authority_unavailable with ZERO ledger rows (the dependency may
+// recover and the same ref must then succeed), while the definitive
+// found=false answer is the decisive unknown_class terminal.
+func TestClassKindFaultIsRetryableOnlyAbsenceIsDecisive(t *testing.T) {
+	ctx := context.Background()
+	rendered, err := (channel.RenderedSnapshot{
+		Class: "test-agent", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolver := &mutableIntroductionResolver{
+		facts:   channel.DeclarationFacts{OwnerPrincipal: "owner", Visibility: "private", DefaultClass: rendered.Class, Rendered: rendered},
+		kindErr: errors.New("registry io fault"),
+	}
+	h, err := Open(Config{
+		ChannelID: "opentry-classkind", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"), Bootstrap: true,
+		CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: resolver,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.closeInternal("test")
+	if _, err := h.admitChannelOwner(ctx, "owner"); err != nil {
+		t.Fatal(err)
+	}
+	req := channel.IntroduceRequest{Ref: "adm:classkind", DeclID: "decl", InitiatorPrincipal: "owner"}
+	_, err = SystemOps(h).Introduce(ctx, req)
+	var operationErr *channel.OperationError
+	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeAuthorityUnavailable || !operationErr.Retryable {
+		t.Fatalf("ClassKind infra error=%v, want retryable authority_unavailable", err)
+	}
+	rows, err := h.cs.Query.ReadAfterSeq(ctx, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	anchor := channel.RefCorrelation(req.Ref)
+	for _, row := range rows {
+		if string(row.Envelope.CorrelationID) == anchor {
+			t.Fatalf("ClassKind infra error left event %q", row.Envelope.Type)
+		}
+	}
+	resolver.kindErr = nil
+	resolver.kind = actor.KindAgent
+	result, err := SystemOps(h).Introduce(ctx, req)
+	if err != nil || !result.Created || result.ActorID == "" {
+		t.Fatalf("same-ref retry after fault=(%+v,%v)", result, err)
+	}
+	// The definitive absence answer, by contrast, is decisive: a fresh ref
+	// lands a completed terminal carrying unknown_class.
+	resolver.kindMissing = true
+	missingReq := channel.IntroduceRequest{Ref: "adm:classkind-missing", DeclID: "decl", InitiatorPrincipal: "owner"}
+	_, err = SystemOps(h).Introduce(ctx, missingReq)
+	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeUnknownClass || operationErr.Retryable {
+		t.Fatalf("ClassKind absence=%v, want decisive unknown_class", err)
+	}
+	rows, err = h.cs.Query.ReadAfterSeq(ctx, 0, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := 0
+	for _, row := range rows {
+		if string(row.Envelope.CorrelationID) == channel.RefCorrelation(missingReq.Ref) && row.Envelope.Type == "sysop_completed" {
+			completed++
+		}
+	}
+	if completed != 1 {
+		t.Fatalf("unknown_class terminal count=%d, want 1", completed)
 	}
 }
 

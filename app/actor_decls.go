@@ -62,7 +62,7 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 	// boundary tool for class=="realm-tool", so a forged realm-tool declaration
 	// would smuggle a membrane entry past the "remove realm-tool = close it"
 	// sovereignty switch. The default "go-kimi" is a registered class and passes.
-	if _, err := (compositionResolver{app: a}).ClassKind(c.Request.Context(), class); err != nil || class == realmToolClass {
+	if _, ok, err := (compositionResolver{app: a}).ClassKind(c.Request.Context(), class); err != nil || !ok || class == realmToolClass {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or reserved class"})
 		return
 	}

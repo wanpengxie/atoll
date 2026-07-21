@@ -499,13 +499,11 @@ func (h *ChannelHost) checkOpen() error {
 
 func (h *ChannelHost) Close() error {
 	h.mu.Lock()
-	if h.closed {
-		h.mu.Unlock()
-		return nil
-	}
 	h.closed = true
-	entries := h.entries
-	h.entries = make(map[channel.ID]*entry)
+	entries := make(map[channel.ID]*entry, len(h.entries))
+	for id, e := range h.entries {
+		entries[id] = e
+	}
 	h.mu.Unlock()
 	var errs []error
 	for id, entry := range entries {
@@ -520,11 +518,13 @@ func (h *ChannelHost) Close() error {
 		h.mu.Lock()
 		skip := entry.home == nil || entry.closed
 		h.mu.Unlock()
+		failed := false
 		if !skip {
 			// Only a clean shutdown marks the entry closed: a failed Home close
 			// stays honestly un-closed (Home's own store-close retry is the
 			// recovery path; never fake the terminal state on an error).
 			if err := home.Shutdown(entry.home); err != nil {
+				failed = true
 				errs = append(errs, fmt.Errorf("channelhost: close %s: %w", id, err))
 			} else {
 				h.mu.Lock()
@@ -532,6 +532,15 @@ func (h *ChannelHost) Close() error {
 				entry.state = stateSealed
 				h.mu.Unlock()
 			}
+		}
+		if !failed {
+			// Only a cleanly closed (or already-dead) entry leaves the registry:
+			// a failed Home close stays registered so a repeat Close retries it —
+			// dropping it here would turn the next Close into a fake nil success
+			// while the store handle stays live.
+			h.mu.Lock()
+			delete(h.entries, id)
+			h.mu.Unlock()
 		}
 		lock.Unlock()
 	}

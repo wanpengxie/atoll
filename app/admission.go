@@ -186,12 +186,29 @@ func (s *admissionService) loadIdempotent(ctx context.Context, requestedBy, key,
 }
 
 func (s *admissionService) submitEdit(ctx context.Context, chID channel.ID, rawActorID, caller string, config json.RawMessage, idemKey string) (admissionRecord, error) {
-	s.runMu.Lock()
-	defer s.runMu.Unlock()
 	bundle, ok := s.app.host.Acquire(chID)
 	if !ok {
 		return admissionRecord{}, errors.New("admission: channel unavailable")
 	}
+	intent := struct {
+		ActorID string          `json:"actor_id"`
+		Config  json.RawMessage `json:"config"`
+	}{rawActorID, config}
+	digest, err := channel.Digest(intent)
+	if err != nil {
+		return admissionRecord{}, err
+	}
+	// The whole judge→mint→deliver sequence runs inside the channel critical
+	// section (判断段与落账段恒同区，整段原子): the target read below feeds the
+	// minted snapshot its class/placement/TIdle, so reading it outside the lock
+	// would let a concurrent fanout apply a newer version between judge and
+	// mint — this edit would then write those stale fields back at a HIGHER
+	// seq. No global runMu here: the drain worker keeps its own single-flight,
+	// and deliveries are idempotent (status-guarded finish + OpEntry anchor),
+	// so holding runMu would only couple this channel's fate to every other
+	// channel's admission.
+	releaseChannel := s.app.channelLocks.lock(string(chID))
+	defer releaseChannel()
 	actors, err := bundle.View().ActiveActors(ctx)
 	if err != nil {
 		return admissionRecord{}, err
@@ -213,20 +230,6 @@ func (s *admissionService) submitEdit(ctx context.Context, chID channel.ID, rawA
 	if facts.Visibility != "public" && facts.OwnerPrincipal != caller {
 		return admissionRecord{}, &channel.OperationError{Code: channel.ErrCodeForbidden, Detail: "declaration is private"}
 	}
-	intent := struct {
-		ActorID string          `json:"actor_id"`
-		Config  json.RawMessage `json:"config"`
-	}{rawActorID, config}
-	digest, err := channel.Digest(intent)
-	if err != nil {
-		return admissionRecord{}, err
-	}
-	// The whole judge→mint→deliver sequence runs inside the channel critical
-	// section: the seq counter must not accept an out-of-queue writer, and the
-	// minted frame must reach the membrane before any fanout arm can mint a
-	// later seq (判断段与落账段恒同区，整段原子).
-	releaseChannel := s.app.channelLocks.lock(string(chID))
-	defer releaseChannel()
 	tx, err := s.app.db.BeginTx(ctx, nil)
 	if err != nil {
 		return admissionRecord{}, err

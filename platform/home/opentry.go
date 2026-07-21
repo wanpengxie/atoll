@@ -143,17 +143,18 @@ func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declI
 		rendered = *supplied
 	}
 	// ClassKind is a resolver call like ResolveDeclaration: fail-closed on its
-	// own bounded window, and only a definitive answer is decisive — an expired
-	// or infrastructure error is retryable authority_unavailable, never a
-	// permanent unknown_class terminal.
+	// own bounded window, and only the definitive "no such class" answer
+	// (found=false) is decisive — ANY resolver error (timeout, I/O, registry
+	// fault) is retryable authority_unavailable, never a permanent
+	// unknown_class terminal.
 	kindCtx, cancelKind := context.WithTimeout(ctx, introductionResolveTimeout)
-	kind, err := e.resolver.ClassKind(kindCtx, rendered.Class)
+	kind, found, err := e.resolver.ClassKind(kindCtx, rendered.Class)
 	cancelKind()
-	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+	if err != nil {
 		return storespec.IntroduceResult{}, &channel.OperationError{Code: channel.ErrCodeAuthorityUnavailable, Detail: err.Error(), Retryable: true}
 	}
-	if err != nil {
-		meta.DecisiveError = &channel.OperationError{Code: channel.ErrCodeUnknownClass, Detail: err.Error()}
+	if !found {
+		meta.DecisiveError = &channel.OperationError{Code: channel.ErrCodeUnknownClass, Detail: "unknown class " + rendered.Class}
 		_, recordErr := e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta, DeclID: declID, InitiatorPrincipal: initiator})
 		return storespec.IntroduceResult{}, recordErr
 	}

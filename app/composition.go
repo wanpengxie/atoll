@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"strings"
 
 	"github.com/wanpengxie/atoll/platform"
@@ -82,13 +81,13 @@ func (r compositionResolver) ResolveDeclaration(ctx context.Context, chID channe
 	return channel.DeclarationFacts{OwnerPrincipal: owner, Visibility: visibility, DefaultClass: class, Rendered: snapshot}, nil
 }
 
-func (r compositionResolver) ClassKind(_ context.Context, class string) (actor.Kind, error) {
+func (r compositionResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
 	if class == realmToolClass {
-		return actor.KindTool, nil
+		return actor.KindTool, true, nil
 	}
 	kind, ok := registry.ClassKind(class)
 	if !ok {
-		return "", fmt.Errorf("unknown class %q", class)
+		return "", false, nil
 	}
-	return kind, nil
+	return kind, true, nil
 }

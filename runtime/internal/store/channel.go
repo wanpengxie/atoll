@@ -3,7 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
-	"errors"
+	"sync"
 
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
@@ -21,6 +21,11 @@ import (
 // so a reader can never obtain the harness-bypass Append (ISP/CQRS role-split).
 type ChannelStores struct {
 	db *sql.DB
+	// closeMu/closeDone make Close retryable: sql.DB.Close marks the handle
+	// closed even when it returns an error, so the checkpoint half must never
+	// run against a handle a previous attempt already killed.
+	closeMu   sync.Mutex
+	closeDone bool
 
 	Log      storespec.MessageLog   // harness write port (Append + terminal-uniqueness reads)
 	Query    storespec.MessageQuery // tail reads (no Append)
@@ -125,10 +130,23 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	return cs, nil
 }
 
-// Close releases the owned *sql.DB. After Close the assembly is unusable.
+// Close checkpoints the WAL and releases the owned *sql.DB. It is retryable
+// in two phases: a failed checkpoint returns the error with the handle still
+// OPEN (a later Close attempts the whole sequence again — a sealed Destroy
+// retries through here to completion), while the driver Close is irreversible
+// (sql.DB.Close marks the handle closed even on error), so once it runs the
+// assembly is terminally closed and further Close calls are nil no-ops.
 func (c *ChannelStores) Close() error {
-	_, checkpointErr := c.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`)
-	return errors.Join(checkpointErr, c.db.Close())
+	c.closeMu.Lock()
+	defer c.closeMu.Unlock()
+	if c.closeDone {
+		return nil
+	}
+	if _, err := c.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		return err
+	}
+	c.closeDone = true
+	return c.db.Close()
 }
 
 // Timers exposes the raw timerspec.TimerStore for the one intended reader
