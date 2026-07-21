@@ -38,8 +38,6 @@ func LinkPlan(h *Home, ctx context.Context, daemonID string) ([]platform.PlanAct
 	return h.planForDaemon(ctx, daemonID)
 }
 
-func LinkKick(h *Home, daemonID string) int { return h.kickDaemon(daemonID) }
-
 func ObligationCounts(h *Home, ctx context.Context, daemonID string) (int, int, int, error) {
 	return h.daemonObligationCounts(ctx, daemonID)
 }

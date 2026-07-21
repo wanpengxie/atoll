@@ -31,7 +31,6 @@ type GatewayHitch interface {
 type DaemonLink interface {
 	ServeAttach(http.ResponseWriter, *http.Request, string)
 	PlanForDaemon(context.Context, string) ([]platform.PlanActor, error)
-	KickDaemon(string) int
 }
 
 type SysOp interface {
@@ -97,7 +96,6 @@ func (a daemonAdapter) ServeAttach(w http.ResponseWriter, r *http.Request, daemo
 func (a daemonAdapter) PlanForDaemon(ctx context.Context, daemon string) ([]platform.PlanActor, error) {
 	return home.LinkPlan(a.home, ctx, daemon)
 }
-func (a daemonAdapter) KickDaemon(daemon string) int { return home.LinkKick(a.home, daemon) }
 
 type viewAdapter struct{ home *home.Home }
 

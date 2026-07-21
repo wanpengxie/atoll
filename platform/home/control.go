@@ -65,18 +65,6 @@ func (h *Home) handleCancelUpstream(boundID actor.ActorID, requestID message.ID)
 	h.cancelRequest(req.Audience[0], requestID)
 }
 
-// KickDaemon closes every link this compute currently holds (the substrate
-// half of a revocation, §8.3) and returns the count closed. It is a write
-// handle (unlike View, a read-only face) — revoking access is a write. The
-// authority to decide WHEN to kick (a daemon's credential was just revoked)
-// lives entirely in the app layer; this method only executes the mechanical
-// teardown. Kicked ports fall silent (quiet-stop, no receiver_unavailable) —
-// a kick is a voluntary revocation, not an observed death. The link.kick_daemon
-// Info (computeID + closed count) is logged by the wrapped link.Acceptor
-// itself, not duplicated at this pass-through — see accept.go's KickDaemon.
-func (h *Home) kickDaemon(computeID string) int {
-	return h.links.KickDaemon(computeID)
-}
 
 // ServeAttach is the attach admission surface: the app hands an upgraded WS request here so a
 // daemon can attach its actor streams. Home keeps the internal link acceptor and
