@@ -13,13 +13,13 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// Decisive rejections are account truth: malformed payloads and inactive
-// senders must commit an anchored started/completed event pair through the
-// word's value-op transaction, and a replay of the same request must land on
-// the same terminal. The transport gate no longer pre-judges anything.
-func TestMemberWordDecisiveRejectionsCommitEventPairs(t *testing.T) {
+// Member-source rejections are noise: they terminate as the request's failed
+// reply and leave ZERO rows in the operation ledger — repeating the same
+// garbage grows nothing (no rejection-DDOS through the kernel serial section).
+// Only operations that mutate values commit anchored event pairs.
+func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 	h, err := Open(Config{
-		ChannelID:           "member-decisive",
+		ChannelID:           "member-noise",
 		DBPath:              filepath.Join(t.TempDir(), "channel.sqlite"),
 		CompositionResolver: &compositionActivationResolver{},
 		ReconcileInterval:   time.Hour,
@@ -31,20 +31,6 @@ func TestMemberWordDecisiveRejectionsCommitEventPairs(t *testing.T) {
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
 
-	assertCompleted := func(anchor, digest string, code channel.OperationErrorCode) {
-		t.Helper()
-		completed, found, err := h.opEntry.admission.LookupCompleted(ctx, channel.MessageCorrelation(anchor), digest)
-		if err != nil || !found {
-			t.Fatalf("decisive rejection left no completed terminal (found=%v err=%v)", found, err)
-		}
-		if completed.ErrorCode != code {
-			t.Fatalf("completed code=%s want %s", completed.ErrorCode, code)
-		}
-	}
-
-	// An active member sender for the malformed-payload case: the in-transaction
-	// sender judgement precedes the payload verdict, so bad_payload is only
-	// reachable for a live member.
 	declared, err := h.declare(ctx, DeclareRequest{
 		SourceDeclID: "decl:probe", Principal: "probe", Class: "probe",
 		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
@@ -54,34 +40,45 @@ func TestMemberWordDecisiveRejectionsCommitEventPairs(t *testing.T) {
 	}
 	sender := declared.Row.ID
 
-	// Malformed payload → bad_payload pair keyed by the raw-bytes digest.
+	// A single-transaction rollback leaves neither half of the pair; absence of
+	// the completed terminal (the replay key) proves zero ledger footprint.
+	assertNoTerminal := func(anchor, digest string) {
+		t.Helper()
+		_, found, err := h.opEntry.admission.LookupCompleted(ctx, channel.MessageCorrelation(anchor), digest)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if found {
+			t.Fatalf("rejection for %q left a completed terminal", anchor)
+		}
+	}
+
+	// Malformed payload: rejected in the entrance, zero ledger rows, repeats grow nothing.
 	raw := json.RawMessage(`{"instance_id":""}`)
-	if _, err := h.opEntry.Execute(ctx, sysactor.TypeRestartActor,
-		sysactor.OperateRequest{ChannelID: h.channelID, Sender: sender, Anchor: "op-msg-bad", Payload: raw}); err == nil {
-		t.Fatal("malformed restart unexpectedly succeeded")
+	for range 3 {
+		if _, err := h.opEntry.Execute(ctx, sysactor.TypeRestartActor,
+			sysactor.OperateRequest{ChannelID: h.channelID, Sender: sender, Anchor: "op-msg-bad", Payload: raw}); err == nil {
+			t.Fatal("malformed restart unexpectedly succeeded")
+		}
 	}
 	rawDigest, err := channel.Digest(string(raw))
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertCompleted("op-msg-bad", rawDigest, channel.ErrCodeBadPayload)
-	// Replay of the same malformed request lands on the same terminal.
-	if _, err := h.opEntry.Execute(ctx, sysactor.TypeRestartActor,
-		sysactor.OperateRequest{ChannelID: h.channelID, Sender: sender, Anchor: "op-msg-bad", Payload: raw}); err == nil {
-		t.Fatal("malformed restart replay unexpectedly succeeded")
-	}
-	assertCompleted("op-msg-bad", rawDigest, channel.ErrCodeBadPayload)
+	assertNoTerminal("op-msg-bad", rawDigest)
 
-	// Inactive sender → unauthorized_sender pair keyed by the parsed digest.
-	payload := map[string]string{"instance_id": "agent:ghost-target:1"}
+	// Decisive in-store rejection (absent target): transaction rolls back whole.
+	payload := map[string]string{"instance_id": "agent:absent:1"}
 	encoded, _ := json.Marshal(payload)
-	if _, err := h.opEntry.Execute(ctx, sysactor.TypeRestartActor,
-		sysactor.OperateRequest{ChannelID: h.channelID, Sender: "member:ghost:1", Anchor: "op-msg-ghost", Payload: encoded}); err == nil {
-		t.Fatal("inactive-sender restart unexpectedly succeeded")
+	for range 3 {
+		if _, err := h.opEntry.Execute(ctx, sysactor.TypeRestartActor,
+			sysactor.OperateRequest{ChannelID: h.channelID, Sender: sender, Anchor: "op-msg-absent", Payload: encoded}); err == nil {
+			t.Fatal("absent-target restart unexpectedly succeeded")
+		}
 	}
 	parsedDigest, err := channel.Digest(payload)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertCompleted("op-msg-ghost", parsedDigest, channel.ErrCodeUnauthorizedSender)
+	assertNoTerminal("op-msg-absent", parsedDigest)
 }

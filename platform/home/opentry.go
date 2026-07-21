@@ -58,35 +58,6 @@ func memberMeta(anchor string, sender actor.ActorID, request any) (storespec.Sys
 	return storespec.SysOpMeta{Anchor: channel.MessageCorrelation(anchor), RequestDigest: digest, Source: storespec.SysOpSourceMember, Sender: sender}, nil
 }
 
-// memberDecisive routes a pre-parse/pre-admission decisive verdict (malformed
-// payload, inactive sender) through the word's own value-op transaction, so the
-// anchored started/completed pair commits and a replay of the same request
-// lands on the same terminal. Transport adapters stay judgement-free — every
-// decisive result, including rejections, is account truth. Malformed payloads
-// digest the raw bytes (the only stable identity a request that failed to parse
-// has); each path digests deterministically, so per-path replays converge.
-func (e *opEntry) memberDecisive(ctx context.Context, req sysactor.OperateRequest, word string, request any, verdict *channel.OperationError) error {
-	meta, err := memberMeta(req.Anchor, req.Sender, request)
-	if err != nil {
-		return err
-	}
-	meta.DecisiveError = verdict
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	switch word {
-	case "introduce":
-		_, err = e.admission.Introduce(ctx, storespec.IntroduceTx{SysOpMeta: meta})
-	case "remove_actor":
-		_, err = e.admission.RemoveActor(ctx, storespec.RemoveTx{SysOpMeta: meta})
-	case "restart_actor":
-		_, err = e.admission.RestartActor(ctx, storespec.RestartTx{SysOpMeta: meta})
-	case "set_default_agent":
-		_, err = e.admission.SetDefaultAgent(ctx, storespec.SetDefaultTx{SysOpMeta: meta})
-	default:
-		err = verdict
-	}
-	return asOperateError(err)
-}
 
 
 func (e *opEntry) Admit(ctx context.Context, req channel.AdmitRequest) (channel.AdmitResult, error) {
@@ -386,16 +357,24 @@ func (e *opEntry) executeMemberIntroduce(ctx context.Context, req sysactor.Opera
 		DeclID string `json:"decl_id"`
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.DeclID == "" {
-		return nil, e.memberDecisive(ctx, req, "introduce", string(req.Payload), &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "decl_id required"})
+		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: "decl_id required"}
 	}
 	meta, err := memberMeta(req.Anchor, req.Sender, payload)
 	if err != nil {
 		return nil, err
 	}
-	// Sender permission and initiator identity are both judged inside the store
-	// transaction (run's member sender-active check + in-tx principal
-	// derivation) — no pre-read here can go stale against the value write.
-	result, err := e.introduce(ctx, meta, payload.DeclID, "", nil)
+	// The gate already judged the sender active against the unified authority
+	// (durable ∪ run-world); this read only fetches the principal. The window
+	// between here and the store commit is the system's standard in-flight
+	// tolerance (same doctrine as message-vs-incarnation).
+	row, found, err := e.home.controlIndex.LookupActive(ctx, req.Sender)
+	if err != nil {
+		return nil, asOperateError(err)
+	}
+	if !found {
+		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeUnauthorizedSender), Detail: "sender is not an active channel member"}
+	}
+	result, err := e.introduce(ctx, meta, payload.DeclID, row.Principal, nil)
 	if err != nil {
 		return nil, asOperateError(err)
 	}
@@ -416,7 +395,7 @@ func (e *opEntry) executeMemberRemove(ctx context.Context, req sysactor.OperateR
 		InstanceID actor.ActorID `json:"instance_id"`
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
-		return nil, e.memberDecisive(ctx, req, "remove_actor", string(req.Payload), &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "instance_id required"})
+		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: "instance_id required"}
 	}
 	meta, err := memberMeta(req.Anchor, req.Sender, payload)
 	if err != nil {
@@ -472,7 +451,7 @@ func (e *opEntry) executeMemberRestart(ctx context.Context, req sysactor.Operate
 		InstanceID actor.ActorID `json:"instance_id"`
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil || payload.InstanceID == "" {
-		return nil, e.memberDecisive(ctx, req, "restart_actor", string(req.Payload), &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "instance_id required"})
+		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: "instance_id required"}
 	}
 	meta, err := memberMeta(req.Anchor, req.Sender, payload)
 	if err != nil {
@@ -486,11 +465,21 @@ func (e *opEntry) executeMemberRestart(ctx context.Context, req sysactor.Operate
 	}
 	// Post-commit projection refresh (observation, not execution): the account's
 	// new epoch must reach the in-memory control index reconcile reads, or the
-	// generation skew stays invisible until an unrelated refresh. The bounce
-	// itself remains entirely reconcile's job (poked below).
-	if row, active, err := e.home.cs.Declared.LookupDeclaredActive(ctx, payload.InstanceID); err == nil && active {
-		_ = e.home.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}})
-	}
+	// generation skew stays invisible until an unrelated refresh. The target's
+	// actor gate serializes this publication with identity lifecycle (a self-end
+	// between read and upsert can no longer be resurrected by a stale row), and
+	// a failed refresh is loud — the restart is committed truth either way.
+	func() {
+		unlock := e.home.actorGates.lock(payload.InstanceID)
+		defer unlock()
+		row, active, err := e.home.cs.Declared.LookupDeclaredActive(ctx, payload.InstanceID)
+		switch {
+		case err != nil:
+			e.home.logger.Error("opentry.restart.projection_refresh_failed", "actor", string(payload.InstanceID), "err", err)
+		case active:
+			_ = e.home.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}})
+		}
+	}()
 	e.applyEffects(ctx, res.Effects)
 	return map[string]any{"restarted": payload.InstanceID, "epoch": res.Epoch}, nil
 }
@@ -503,7 +492,7 @@ func (e *opEntry) executeMemberSetDefault(ctx context.Context, req sysactor.Oper
 		InstanceID actor.ActorID `json:"instance_id"`
 	}
 	if err := json.Unmarshal(req.Payload, &payload); err != nil {
-		return nil, e.memberDecisive(ctx, req, "set_default_agent", string(req.Payload), &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: err.Error()})
+		return nil, &sysactor.OperateError{Code: string(channel.ErrCodeBadPayload), Detail: err.Error()}
 	}
 	meta, err := memberMeta(req.Anchor, req.Sender, payload)
 	if err != nil {

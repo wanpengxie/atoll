@@ -131,34 +131,31 @@ func (s *sysOpStore) run(ctx context.Context, meta storespec.SysOpMeta, operatio
 	if err := s.appendEvent(ctx, tx, sysOpStarted, meta.Anchor, started, now); err != nil {
 		return nil, storespec.PostCommitEffects{}, err
 	}
-	// Member-source permission is judged HERE, inside the value transaction —
-	// the sender-active fact and the value write read the same SQLite snapshot,
-	// so no revocation or admission can interleave between judgement and commit
-	// (the admission section's 锚查→判权→事件对→执行 is one transaction).
-	memberInactive := false
-	if meta.Source == storespec.SysOpSourceMember {
-		var active bool
-		if err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL)`, string(meta.Sender)).Scan(&active); err != nil {
-			return nil, storespec.PostCommitEffects{}, err
-		}
-		memberInactive = !active
-	}
 	var outcome sysOpOutcome
-	switch {
-	case memberInactive:
-		outcome = decisive(channel.ErrCodeUnauthorizedSender, "sender is not an active channel member")
-	case meta.DecisiveError != nil:
+	if meta.DecisiveError != nil {
 		if meta.DecisiveError.Retryable {
 			return nil, storespec.PostCommitEffects{}, meta.DecisiveError
 		}
 		outcome = decisive(meta.DecisiveError.Code, meta.DecisiveError.Detail)
-	default:
+	} else {
 		outcome, err = execute(tx, now)
 	}
 	if err != nil {
 		return nil, storespec.PostCommitEffects{}, err
 	}
 	if outcome.opErr != nil && outcome.opErr.Retryable {
+		return nil, storespec.PostCommitEffects{}, outcome.opErr
+	}
+	// Member-source rejections are noise, not truth: the whole transaction
+	// (started event included) rolls back and only the typed reply leaves the
+	// component. Anything else would let a rejected sender grow the channel
+	// ledger by repeating garbage — a rejection-DDOS through the kernel's
+	// serial section. Redelivery re-judges against current state, which is
+	// freshness, not a defect: a rejection never published anything to replay.
+	// System-source decisive rejections still commit their pair — the realm's
+	// same-ref retry machinery needs a terminal to stop on, and ref_conflict
+	// protection needs the digest row.
+	if outcome.opErr != nil && meta.Source == storespec.SysOpSourceMember {
 		return nil, storespec.PostCommitEffects{}, outcome.opErr
 	}
 	var raw json.RawMessage
@@ -269,24 +266,8 @@ func (s *sysOpStore) Admit(ctx context.Context, in storespec.AdmitTx) (storespec
 
 func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (storespec.IntroduceResult, error) {
 	raw, effects, err := s.run(ctx, in.SysOpMeta, "introduce", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
-		if in.DeclID == "" {
-			return decisive(channel.ErrCodeBadPayload, "decl_id required"), nil
-		}
-		initiator := in.InitiatorPrincipal
-		if in.Source == storespec.SysOpSourceMember {
-			// Member-source initiator identity is derived in-transaction from
-			// the sender row: judgement (run's sender-active check) and identity
-			// read the same snapshot, so an outside pre-read can never feed a
-			// stale principal into the value write.
-			if err := tx.QueryRowContext(ctx, `SELECT principal FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(in.Sender)).Scan(&initiator); err != nil {
-				if errors.Is(err, sql.ErrNoRows) {
-					return decisive(channel.ErrCodeUnauthorizedSender, "sender is not an active channel member"), nil
-				}
-				return sysOpOutcome{}, err
-			}
-		}
-		if initiator == "" {
-			return decisive(channel.ErrCodeBadPayload, "initiator_principal required"), nil
+		if in.DeclID == "" || in.InitiatorPrincipal == "" {
+			return decisive(channel.ErrCodeBadPayload, "decl_id and initiator_principal required"), nil
 		}
 		if _, ok := actor.ParseKind(string(in.Kind)); !ok || in.Kind == actor.KindHuman || in.Kind == actor.KindSystem {
 			return decisive(channel.ErrCodeUnknownClass, in.Rendered.Class), nil
@@ -297,10 +278,10 @@ func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (s
 		if in.Source == storespec.SysOpSourceMember && in.Visibility != "public" {
 			return decisive(channel.ErrCodeForbidden, "member introduction is limited to public declarations"), nil
 		}
-		if in.Visibility != "public" && initiator != in.OwnerPrincipal {
+		if in.Visibility != "public" && in.InitiatorPrincipal != in.OwnerPrincipal {
 			return decisive(channel.ErrCodeForbidden, "declaration is private"), nil
 		}
-		if active, err := principalActiveTx(ctx, tx, initiator); err != nil {
+		if active, err := principalActiveTx(ctx, tx, in.InitiatorPrincipal); err != nil {
 			return sysOpOutcome{}, err
 		} else if !active {
 			return decisive(channel.ErrCodeMemberInactive, "initiator is not an active member"), nil

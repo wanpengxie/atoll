@@ -132,16 +132,6 @@ func TestSysOpRestartActorBumpsEpochMonotonicallyWithEventPair(t *testing.T) {
 	}
 }
 
-func TestSysOpRestartActorMissingTargetIsDecisive(t *testing.T) {
-	cs := openSysOpTestStore(t)
-	_, err := cs.SysOps.RestartActor(context.Background(), storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:absent", "ra"), Target: "agent:absent:1"})
-	var operationErr *channel.OperationError
-	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeNotInComposition || operationErr.Retryable {
-		t.Fatalf("absent restart error=%v", err)
-	}
-	assertEventPair(t, cs, "op:msg:restart:absent")
-}
-
 func TestSysOpSetDefaultAgentWritesValueRowWithEventPair(t *testing.T) {
 	cs := openSysOpTestStore(t)
 	ctx := context.Background()
@@ -188,26 +178,25 @@ func TestSysOpRestartTransientFailureRollsBackPairLeavingNoResidue(t *testing.T)
 	}
 }
 
-// Member-source permission is judged inside the value transaction: an unknown
-// or deregistered sender is a decisive unauthorized_sender terminal with its
-// event pair — no outside pre-read can go stale against the value write.
-func TestSysOpMemberWordsJudgeSenderInTransaction(t *testing.T) {
+// Member-source rejections are noise, not truth: the transaction rolls back
+// whole (started included), only the typed error leaves, and repeating the
+// same garbage grows nothing — a rejected sender cannot DDOS the ledger.
+func TestSysOpMemberRejectionsLeaveNoLedgerRows(t *testing.T) {
 	cs := openSysOpTestStore(t)
 	ctx := context.Background()
-	target := admitDurableAgent(t, cs, "decl:tx-judged")
-	ghost := storespec.SysOpMeta{Anchor: "op:msg:ghost:restart", RequestDigest: "g1", Source: storespec.SysOpSourceMember, Sender: "human:ghost"}
-	_, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: ghost, Target: target})
-	var operationErr *channel.OperationError
-	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeUnauthorizedSender || operationErr.Retryable {
-		t.Fatalf("ghost-sender restart error=%v, want decisive unauthorized_sender", err)
+	for range 3 {
+		_, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:noise:restart", "n1"), Target: "agent:absent:1"})
+		var operationErr *channel.OperationError
+		if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeNotInComposition || operationErr.Retryable {
+			t.Fatalf("absent-target restart error=%v, want decisive not_in_composition", err)
+		}
 	}
-	assertEventPair(t, cs, "op:msg:ghost:restart")
-	var epoch int64
-	if err := cs.db.QueryRow(`SELECT restart_epoch FROM actor_registry WHERE actor_id=?`, string(target)).Scan(&epoch); err != nil {
+	var rows int
+	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE correlation_id=?`, "op:msg:noise:restart").Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
-	if epoch != 0 {
-		t.Fatalf("ghost-sender restart mutated the value row (epoch=%d)", epoch)
+	if rows != 0 {
+		t.Fatalf("member rejection left %d ledger rows, want 0", rows)
 	}
 }
 
@@ -248,14 +237,6 @@ func openSysOpTestStore(t *testing.T) *ChannelStores {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
-	// Member-source permission is judged in-transaction against the sender row,
-	// so the fixture registers memberMetaFor's sender as an active member.
-	if _, err := cs.DeclAdmission.AdmitDeclared(context.Background(), storespec.AdmitBundle{
-		ID: "human:alice", Kind: actor.KindHuman, Principal: "alice-op", Class: "human",
-		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
-	}); err != nil {
-		t.Fatalf("seed member sender: %v", err)
-	}
 	return cs
 }
 
@@ -301,12 +282,13 @@ func TestSysOpDecisiveRefusalIsTerminalAndReplayable(t *testing.T) {
 			t.Fatalf("refusal=%v", err)
 		}
 	}
-	var started, completed int
-	if err := cs.db.QueryRow(`SELECT SUM(type='sysop_started'),SUM(type='sysop_completed') FROM messages WHERE correlation_id=?`, in.Anchor).Scan(&started, &completed); err != nil {
+	// Member-source rejection: noise, zero ledger rows, replay re-judges.
+	var rows int
+	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE correlation_id=?`, in.Anchor).Scan(&rows); err != nil {
 		t.Fatal(err)
 	}
-	if started != 1 || completed != 1 {
-		t.Fatalf("event pair=(%d,%d), want (1,1)", started, completed)
+	if rows != 0 {
+		t.Fatalf("member-source refusal left %d ledger rows, want 0", rows)
 	}
 }
 
