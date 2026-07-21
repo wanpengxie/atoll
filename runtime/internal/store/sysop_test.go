@@ -104,32 +104,30 @@ func TestSysOpRemoveActorAlreadyGoneReturnsSuccessEmptySet(t *testing.T) {
 	assertEventPair(t, cs, "op:msg:remove:gone")
 }
 
-func TestSysOpRestartActorBumpsEpochMonotonicallyWithEventPair(t *testing.T) {
+// Restart is an incarnation-axis operation: identity truth is untouched, the
+// durable trace is the event pair alone, and the bounce rides PostCommitEffects
+// (despawn with restart intent) — a same-anchor replay returns the cached
+// terminal without a second bounce hint.
+func TestSysOpRestartActorCommitsPairWithoutTouchingIdentity(t *testing.T) {
 	cs := openSysOpTestStore(t)
 	ctx := context.Background()
 	target := admitDurableAgent(t, cs, "decl:restartable")
 	first, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:1", "r1"), Target: target})
-	if err != nil || first.Epoch != 1 {
-		t.Fatalf("first restart=(%+v,%v) want epoch 1", first, err)
+	if err != nil {
+		t.Fatalf("first restart: %v", err)
+	}
+	if len(first.Effects.Despawn) != 1 || first.Effects.Despawn[0] != target || !first.Effects.Poke {
+		t.Fatalf("restart effects=%+v, want despawn target + poke", first.Effects)
 	}
 	assertEventPair(t, cs, "op:msg:restart:1")
-	second, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:2", "r2"), Target: target})
-	if err != nil || second.Epoch != 2 {
-		t.Fatalf("second restart=(%+v,%v) want epoch 2", second, err)
+	replay, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:1", "r1"), Target: target})
+	if err != nil {
+		t.Fatalf("replay restart: %v", err)
 	}
-	// Same-anchor replay returns the cached epoch, no further bump, one completed.
-	replay, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:2", "r2"), Target: target})
-	if err != nil || replay.Epoch != 2 {
-		t.Fatalf("replay restart=(%+v,%v) want cached epoch 2", replay, err)
+	if len(replay.Effects.Despawn) != 0 {
+		t.Fatalf("replay carried a second bounce hint: %+v", replay.Effects)
 	}
-	assertEventPair(t, cs, "op:msg:restart:2")
-	var epoch int64
-	if err := cs.db.QueryRow(`SELECT restart_epoch FROM actor_registry WHERE actor_id=?`, string(target)).Scan(&epoch); err != nil {
-		t.Fatal(err)
-	}
-	if epoch != 2 {
-		t.Fatalf("durable restart_epoch=%d want 2", epoch)
-	}
+	assertEventPair(t, cs, "op:msg:restart:1")
 }
 
 func TestSysOpSetDefaultAgentWritesValueRowWithEventPair(t *testing.T) {
@@ -149,33 +147,6 @@ func TestSysOpSetDefaultAgentWritesValueRowWithEventPair(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertEventPair(t, cs, "op:msg:default:1")
-}
-
-func TestSysOpRestartTransientFailureRollsBackPairLeavingNoResidue(t *testing.T) {
-	cs := openSysOpTestStore(t)
-	ctx := context.Background()
-	target := admitDurableAgent(t, cs, "decl:transient")
-	if _, err := cs.db.Exec(`CREATE TRIGGER fail_restart BEFORE UPDATE ON actor_registry WHEN NEW.restart_epoch>0 BEGIN SELECT RAISE(ABORT,'injected'); END`); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:transient", "rt"), Target: target}); err == nil {
-		t.Fatal("injected restart failure unexpectedly succeeded")
-	}
-	var events int
-	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE correlation_id=?`, "op:msg:restart:transient").Scan(&events); err != nil {
-		t.Fatal(err)
-	}
-	if events != 0 {
-		t.Fatalf("transient restart failure left %d event rows (started not rolled back)", events)
-	}
-	if _, err := cs.db.Exec(`DROP TRIGGER fail_restart`); err != nil {
-		t.Fatal(err)
-	}
-	// Same anchor retries cleanly to a durable bump after the fault clears.
-	res, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:transient", "rt"), Target: target})
-	if err != nil || res.Epoch != 1 {
-		t.Fatalf("retry restart=(%+v,%v)", res, err)
-	}
 }
 
 // Member-source rejections are noise, not truth: the transaction rolls back
@@ -221,12 +192,13 @@ func TestSysOpMemberWordsRejectSystemSource(t *testing.T) {
 	assertSourceRejected("op:ref:src:restart", err)
 	_, err = cs.SysOps.SetDefaultAgent(ctx, storespec.SetDefaultTx{SysOpMeta: sysMeta("op:ref:src:default", "sr3"), Target: target})
 	assertSourceRejected("op:ref:src:default", err)
-	var epoch int64
-	if err := cs.db.QueryRow(`SELECT restart_epoch FROM actor_registry WHERE actor_id=?`, string(target)).Scan(&epoch); err != nil {
+	// No structural write happened: the target row is untouched and active.
+	var active int
+	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(target)).Scan(&active); err != nil {
 		t.Fatal(err)
 	}
-	if epoch != 0 {
-		t.Fatalf("system-source restart mutated the value row (epoch=%d)", epoch)
+	if active != 1 {
+		t.Fatalf("system-source member word mutated the registry (active=%d)", active)
 	}
 }
 

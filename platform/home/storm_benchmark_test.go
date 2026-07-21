@@ -150,7 +150,7 @@ func BenchmarkActorStorm(b *testing.B) {
 			b.Fatal(err)
 		}
 		var accepted atomic.Uint64
-		ticket, verdict := h.liveness.BeginEnsure(child, 1, 0)
+		ticket, verdict := h.liveness.BeginEnsure(child, 1)
 		if verdict != transitionApplied || h.liveness.PublishLocal(child, ticket, noInc, stormCarrier{accepted: &accepted}) != transitionApplied {
 			b.Fatalf("publish anchor carrier: ticket=%q verdict=%v", ticket, verdict)
 		}

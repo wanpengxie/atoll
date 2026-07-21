@@ -48,6 +48,10 @@ func (h *Home) firstNoFactoryWarning(id actor.ActorID) bool {
 // "not-yet-minted cell mis-scanned as a corpse" hazard; activation is kept first
 // as the natural order — re-mint the always-on desired set before the backstops.
 func (h *Home) reconcileSweep(ctx context.Context) {
+	h.syncDeclaredProjection(ctx)
+	if ctx.Err() != nil {
+		return
+	}
 	h.reconcileDaemonIntent(ctx)
 	if ctx.Err() != nil {
 		return
@@ -69,6 +73,64 @@ func (h *Home) reconcileSweep(ctx context.Context) {
 		return
 	}
 	h.sweepPresence(ctx)
+}
+
+// projectionSyncInterval paces syncDeclaredProjection (owner 拍 30s): frequent
+// enough that control-index staleness is a bounded latency, cheap enough that
+// the per-channel SELECT stays negligible.
+const projectionSyncInterval = 30 * time.Second
+
+// syncDeclaredProjection is the identity-projection level backstop. The control
+// index is a bounded-staleness CACHE of actor_registry — never a correctness
+// precondition — so whatever caused a post-commit refresh to be missed (an
+// expired caller context, a same-ref replay returning cached results without
+// effects, a future word forgetting to refresh), this arm re-aligns the durable
+// half of the index with the account within one interval. Run-world entries are
+// never touched: their truth IS this index.
+func (h *Home) syncDeclaredProjection(ctx context.Context) {
+	if time.Since(time.Unix(0, h.lastProjectionSyncNs.Load())) < projectionSyncInterval {
+		return
+	}
+	h.lastProjectionSyncNs.Store(time.Now().UnixNano())
+	rows, err := h.cs.Declared.ListDeclaredActive(ctx)
+	if err != nil {
+		// A read fault is never an empty set: skip the whole arm.
+		h.logger.Warn("platform.projection_sync.read_failed", "error", err)
+		return
+	}
+	durable := make(map[actor.ActorID]struct{}, len(rows))
+	entries := make([]controlEntry, 0, len(rows))
+	for _, row := range rows {
+		durable[row.ID] = struct{}{}
+		entries = append(entries, controlEntry{Row: row, World: storespec.WorldDurable})
+	}
+	if len(entries) > 0 && !h.controlIndex.UpsertBatch(entries) {
+		h.logger.Warn("platform.projection_sync.upsert_rejected")
+	}
+	for id, world := range h.controlIndex.snapshotWorlds() {
+		if world != storespec.WorldDurable {
+			continue
+		}
+		if _, present := durable[id]; present {
+			continue
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		// End-of-life confirm before delete: re-read the single row so an admit
+		// that raced this arm's snapshot is never swept away.
+		if _, active, err := h.cs.Declared.LookupDeclaredActive(ctx, id); err != nil {
+			h.logger.Warn("platform.projection_sync.recheck_failed", "actor", string(id), "error", err)
+			continue
+		} else if active {
+			continue
+		}
+		h.controlIndex.DeleteBatch([]actor.ActorID{id})
+		_, _ = h.liveness.EndIdentity(id)
+		h.removeSubjectSlot(id)
+		h.presenceFold.Forget(id)
+		h.channel.Cells().DespawnIDReason(id, "projection_sync")
+	}
 }
 
 // sweepPresence enforces fold rows ⊆ (live embodiments ∪ active membership).
@@ -250,7 +312,7 @@ func (h *Home) activateOne(ctx context.Context, control storespec.ActorControlRo
 	if !ok {
 		return activationVerdict{kind: actNoFactory, reason: "class_not_found"}
 	}
-	ticket, ticketVerdict := h.liveness.BeginEnsure(id, control.CurrentDeclVersion, control.RestartEpoch)
+	ticket, ticketVerdict := h.liveness.BeginEnsure(id, control.CurrentDeclVersion)
 	if ticketVerdict == transitionInFlight {
 		return activationVerdict{kind: actBackoffHeld, until: now}
 	}
@@ -338,7 +400,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if _, retired := h.liveness.RetireIfVersionSkew(row.ID, row.CurrentDeclVersion, row.RestartEpoch); retired {
+		if _, retired := h.liveness.RetireIfVersionSkew(row.ID, row.CurrentDeclVersion); retired {
 			rt.DespawnID(row.ID)
 		}
 		state, ok := h.liveness.WakeStanding(row.ID)
@@ -361,7 +423,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		}
 		if row.Placement.Kind == storespec.PlacementDaemon {
 			if state.Occ == occNone {
-				_, _ = h.liveness.BeginEnsure(row.ID, row.CurrentDeclVersion, row.RestartEpoch)
+				_, _ = h.liveness.BeginEnsure(row.ID, row.CurrentDeclVersion)
 			}
 			continue
 		}

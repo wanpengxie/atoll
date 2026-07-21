@@ -75,7 +75,6 @@ CREATE TABLE IF NOT EXISTS actor_registry (
   role               TEXT NOT NULL DEFAULT '' CHECK (role IN ('', 'owner')) CHECK (role='' OR actor_kind='human'),
   actor_binding      TEXT,
 	current_decl_version INTEGER NOT NULL DEFAULT 1,
-	restart_epoch      INTEGER NOT NULL DEFAULT 0, -- durable restart generation; member-word restart bumps it, reconcile bounces a stale live carrier
   created_at         INTEGER NOT NULL,
   deregistered_at    INTEGER
 );

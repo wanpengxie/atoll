@@ -93,10 +93,6 @@ type ActorControlRow struct {
 	Placement          Placement
 	SourceDeclID       string
 	RenderSeq          int64
-	// RestartEpoch is the durable restart generation of the composition member.
-	// A member-word restart bumps it; reconcile bounces a live carrier whose
-	// recorded generation is behind the account's, then re-pulls from truth.
-	RestartEpoch       int64
 }
 
 type ActorWorld uint8

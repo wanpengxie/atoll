@@ -44,8 +44,8 @@ func TestLivenessTicketAndDeliveryTransitions(t *testing.T) {
 	if s, _ := l.stateForTest("a"); !s.dirty {
 		t.Fatal("dormant request did not set dirty")
 	}
-	ticket, _ := l.BeginEnsure("a", 1, 0)
-	if again, _ := l.BeginEnsure("a", 1, 0); again != ticket {
+	ticket, _ := l.BeginEnsure("a", 1)
+	if again, _ := l.BeginEnsure("a", 1); again != ticket {
 		t.Fatal("ensure changed live ticket")
 	}
 	q := &testCarrier{}
@@ -64,31 +64,6 @@ func TestLivenessTicketAndDeliveryTransitions(t *testing.T) {
 	}
 }
 
-func TestRetireIfVersionSkewBouncesOnRestartGeneration(t *testing.T) {
-	l := newLivenessLedger()
-	l.Bootstrap([]actor.ActorID{"a"})
-	ticket, _ := l.BeginEnsure("a", 1, 3) // welded to restart generation 3
-	q := &testCarrier{}
-	if l.PublishLocal("a", ticket, noInc, q) != transitionApplied {
-		t.Fatal("publish")
-	}
-	// Same version, same generation: no bounce.
-	if _, retired := l.RetireIfVersionSkew("a", 1, 3); retired {
-		t.Fatal("bounced without any skew")
-	}
-	// Same version, an OLDER account generation: never go backwards.
-	if _, retired := l.RetireIfVersionSkew("a", 1, 2); retired {
-		t.Fatal("bounced on a stale (behind) account generation")
-	}
-	// Account generation ahead of the live carrier: bounce and re-pull.
-	if _, retired := l.RetireIfVersionSkew("a", 1, 4); !retired {
-		t.Fatal("restart generation skew did not bounce the live carrier")
-	}
-	if s, _ := l.stateForTest("a"); s.occ != occNone {
-		t.Fatalf("carrier not retired after generation skew: %+v", s)
-	}
-}
-
 func TestConcurrentBeginEnsureMintsExactlyOneTicket(t *testing.T) {
 	l := newLivenessLedger()
 	if l.Bootstrap([]actor.ActorID{"a"}) != transitionApplied {
@@ -103,7 +78,7 @@ func TestConcurrentBeginEnsureMintsExactlyOneTicket(t *testing.T) {
 	for range callers {
 		go func() {
 			defer wg.Done()
-			ticket, verdict := l.BeginEnsure("a", 1, 0)
+			ticket, verdict := l.BeginEnsure("a", 1)
 			tickets <- ticket
 			verdicts <- verdict
 		}()
@@ -145,7 +120,7 @@ func TestConcurrentBeginEnsureMintsExactlyOneTicket(t *testing.T) {
 func TestLivenessFullDoesNotBufferOrDirty(t *testing.T) {
 	l := newLivenessLedger()
 	l.Bootstrap([]actor.ActorID{"a"})
-	ticket, _ := l.BeginEnsure("a", 1, 0)
+	ticket, _ := l.BeginEnsure("a", 1)
 	q := &testCarrier{err: errors.New("full")}
 	l.PublishLocal("a", ticket, noInc, q)
 	_, err := l.AcceptDelivery("a", &message.Envelope{Kind: message.KindRequest})
@@ -187,7 +162,7 @@ func TestLivenessIdleDeliveryRaceSerializes(t *testing.T) {
 		l := newLivenessLedger()
 		l.Bootstrap([]actor.ActorID{"a"})
 		q := &testCarrier{}
-		ticket, _ := l.BeginEnsure("a", 1, 0)
+		ticket, _ := l.BeginEnsure("a", 1)
 		l.PublishLocal("a", ticket, noInc, q)
 		var wg sync.WaitGroup
 		wg.Add(2)
@@ -209,7 +184,7 @@ func TestDaemonIdleDownRebindAndLeaseEndpointTransitions(t *testing.T) {
 	l.Bootstrap([]actor.ActorID{"idle", "rebind"})
 	q := &testCarrier{}
 
-	idleTicket, _ := l.BeginEnsure("idle", 1, 0)
+	idleTicket, _ := l.BeginEnsure("idle", 1)
 	if l.Attach("idle", idleTicket, 1, noInc, q) != transitionApplied {
 		t.Fatal("attach idle actor")
 	}
@@ -226,7 +201,7 @@ func TestDaemonIdleDownRebindAndLeaseEndpointTransitions(t *testing.T) {
 		t.Fatalf("idle resource-tail edges changed L: %+v", state)
 	}
 
-	ticket, _ := l.BeginEnsure("rebind", 1, 0)
+	ticket, _ := l.BeginEnsure("rebind", 1)
 	if l.Attach("rebind", ticket, 1, noInc, q) != transitionApplied {
 		t.Fatal("attach rebind actor")
 	}
@@ -258,7 +233,7 @@ func TestAttachmentFenceInvalidatesBeforeIntentDestruction(t *testing.T) {
 		t.Helper()
 		l := newLivenessLedger()
 		l.Bootstrap([]actor.ActorID{"a"})
-		ticket, verdict := l.BeginEnsure("a", 1, 0)
+		ticket, verdict := l.BeginEnsure("a", 1)
 		if verdict != transitionApplied {
 			t.Fatalf("BeginEnsure=%v", verdict)
 		}
@@ -299,7 +274,7 @@ func TestAttachmentFenceInvalidatesBeforeIntentDestruction(t *testing.T) {
 	})
 	t.Run("version", func(t *testing.T) {
 		l, fence, _ := makeFence(t)
-		if _, retired := l.RetireIfVersionSkew("a", 2, 0); !retired {
+		if _, retired := l.RetireIfVersionSkew("a", 2); !retired {
 			t.Fatal("version skew did not retire old attempt")
 		}
 		if fence.Valid() {

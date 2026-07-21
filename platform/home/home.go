@@ -106,6 +106,9 @@ type Home struct {
 	logger        *slog.Logger
 	nowMs         func() int64
 	opEntry       *opEntry
+	// lastProjectionSyncNs paces the identity-projection sync arm (unix nanos;
+	// atomic so tests may reset it off the ring goroutine).
+	lastProjectionSyncNs atomic.Int64
 
 	// (No per-user caller index (期12): a subject's own requests are closed
 	// by the substrate expiry reaper — 义务归位 D3; the subject drives its

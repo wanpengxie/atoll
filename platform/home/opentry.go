@@ -309,8 +309,15 @@ func (e *opEntry) publishActor(ctx context.Context, id actor.ActorID) error {
 }
 
 func (e *opEntry) applyEffects(ctx context.Context, effects storespec.PostCommitEffects) {
+	// The control-index refresh is the substrate's own bookkeeping, not part of
+	// the caller's wait: it runs on an internal bounded context so a caller
+	// deadline expiring right after commit cannot skip the projection update.
+	// (The periodic identity-projection sync arm is the level backstop for any
+	// refresh that still fails.)
+	refreshCtx, cancelRefresh := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelRefresh()
 	for _, id := range effects.Despawn {
-		if row, active, err := e.home.cs.Declared.LookupDeclaredActive(ctx, id); err == nil && active {
+		if row, active, err := e.home.cs.Declared.LookupDeclaredActive(refreshCtx, id); err == nil && active {
 			_ = e.home.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}})
 			_, _ = e.home.liveness.Retire(id, true)
 		} else if err == nil {
@@ -463,25 +470,12 @@ func (e *opEntry) executeMemberRestart(ctx context.Context, req sysactor.Operate
 	if err != nil {
 		return nil, asOperateError(err)
 	}
-	// Post-commit projection refresh (observation, not execution): the account's
-	// new epoch must reach the in-memory control index reconcile reads, or the
-	// generation skew stays invisible until an unrelated refresh. The target's
-	// actor gate serializes this publication with identity lifecycle (a self-end
-	// between read and upsert can no longer be resurrected by a stale row), and
-	// a failed refresh is loud — the restart is committed truth either way.
-	func() {
-		unlock := e.home.actorGates.lock(payload.InstanceID)
-		defer unlock()
-		row, active, err := e.home.cs.Declared.LookupDeclaredActive(ctx, payload.InstanceID)
-		switch {
-		case err != nil:
-			e.home.logger.Error("opentry.restart.projection_refresh_failed", "actor", string(payload.InstanceID), "err", err)
-		case active:
-			_ = e.home.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}})
-		}
-	}()
+	// Restart is an incarnation-axis effect: applyEffects retires the current
+	// body with restart intent in the liveness ledger and reconcile mints the
+	// next one. Identity truth and the control index are untouched — restart
+	// has no identity-axis value to publish.
 	e.applyEffects(ctx, res.Effects)
-	return map[string]any{"restarted": payload.InstanceID, "epoch": res.Epoch}, nil
+	return map[string]any{"restarted": payload.InstanceID}, nil
 }
 
 func (e *opEntry) executeMemberSetDefault(ctx context.Context, req sysactor.OperateRequest) (any, error) {

@@ -150,7 +150,6 @@ type RestartTx struct {
 }
 
 type RestartResult struct {
-	Epoch   int64             `json:"epoch"`
 	Effects PostCommitEffects `json:"-"`
 }
 

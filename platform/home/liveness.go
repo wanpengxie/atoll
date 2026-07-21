@@ -85,11 +85,6 @@ type lstate struct {
 	restart bool
 	ticket  EnsureTicket
 	version int64
-	// epoch is the restart generation this attempt was welded to at BeginEnsure
-	// (the account's restart_epoch at that instant). Reconcile bounces a live
-	// carrier whose epoch is behind the account — the field-cell restart backstop
-	// symmetric to version skew.
-	epoch   int64
 	fence   *attachmentFenceCell
 }
 
@@ -312,7 +307,7 @@ func (l *livenessLedger) Retire(id actor.ActorID, restartIntent bool) (carrier, 
 	return old, transitionApplied
 }
 
-func (l *livenessLedger) BeginEnsure(id actor.ActorID, version, epoch int64) (EnsureTicket, transitionVerdict) {
+func (l *livenessLedger) BeginEnsure(id actor.ActorID, version int64) (EnsureTicket, transitionVerdict) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s, ok := l.rows[id]
@@ -328,7 +323,7 @@ func (l *livenessLedger) BeginEnsure(id actor.ActorID, version, epoch int64) (En
 	if s.occ != occNone {
 		return "", transitionInvalid
 	}
-	s.ticket, s.occ, s.version, s.epoch = EnsureTicket(uuid.NewString()), occStarting, version, epoch
+	s.ticket, s.occ, s.version = EnsureTicket(uuid.NewString()), occStarting, version
 	publishFence(&s, s.ticket, version, true)
 	l.rows[id] = s
 	return s.ticket, transitionApplied
@@ -451,20 +446,18 @@ func (l *livenessLedger) prepareAttachmentFence(id actor.ActorID, ticket EnsureT
 	return attachmentFence{cell: s.fence, expected: word}, transitionApplied
 }
 
-// RetireIfVersionSkew closes the read→retire race: the version/generation
-// comparison and retirement happen under the same ledger lock. A live attempt
-// is retired when the account's declaration version has migrated away from the
-// one this attempt welded OR the account's restart generation is ahead of the
-// attempt's (declEpoch > the recorded epoch) — the member-word restart backstop:
-// the field carrier's generation is behind truth, so bounce and re-pull.
-func (l *livenessLedger) RetireIfVersionSkew(id actor.ActorID, declVersion, declEpoch int64) (carrier, bool) {
+// RetireIfVersionSkew closes the read→retire race: the version comparison and
+// retirement happen under the same ledger lock. A live attempt is retired when
+// the account's declaration version has migrated away from the one this
+// attempt welded.
+func (l *livenessLedger) RetireIfVersionSkew(id actor.ActorID, declVersion int64) (carrier, bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	s, ok := l.rows[id]
 	if !ok || declVersion <= 0 || s.occ == occNone || s.version == 0 {
 		return carrier{}, false
 	}
-	if s.version == declVersion && declEpoch <= s.epoch {
+	if s.version == declVersion {
 		return carrier{}, false
 	}
 	old := s.carrier

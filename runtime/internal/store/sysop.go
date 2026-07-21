@@ -531,28 +531,24 @@ func (s *sysOpStore) RestartActor(ctx context.Context, in storespec.RestartTx) (
 		if in.Target == actor.SystemActorID {
 			return decisive(channel.ErrCodeProtectedActor, "the system anchor actor cannot be restarted"), nil
 		}
-		res, err := tx.ExecContext(ctx, `UPDATE actor_registry SET restart_epoch=restart_epoch+1 WHERE actor_id=? AND deregistered_at IS NULL`, string(in.Target))
-		if err != nil {
+		// Restart is an INCARNATION-axis operation: identity truth (who is a
+		// member, which version they run) does not change, so no actor_registry
+		// row is touched. The durable trace is the event pair alone; the
+		// post-commit effect retires the current body with restart intent in
+		// the in-memory liveness ledger — the designated home of incarnation
+		// coordination (two-ledger law) — and reconcile mints the next body.
+		// A crash that loses the effect kills every body anyway; reboot
+		// re-embodies from identity truth, which IS the requested restart.
+		var active int
+		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(in.Target)).Scan(&active); err != nil {
 			return sysOpOutcome{}, err
 		}
-		n, err := res.RowsAffected()
-		if err != nil {
-			return sysOpOutcome{}, err
-		}
-		if n == 0 {
+		if active == 0 {
 			return decisive(channel.ErrCodeNotInComposition, "target is not an active composition member"), nil
 		}
-		var epoch int64
-		if err := tx.QueryRowContext(ctx, `SELECT restart_epoch FROM actor_registry WHERE actor_id=?`, string(in.Target)).Scan(&epoch); err != nil {
-			return sysOpOutcome{}, err
-		}
-		// Pure value operation: the word path never kills a cell. Poke wakes
-		// reconcile immediately, which observes the generation skew (live
-		// carrier's recorded epoch < account epoch) and bounces the target —
-		// same acceleration as a kill hint, zero execution in the word path.
 		return sysOpOutcome{
-			result:  storespec.RestartResult{Epoch: epoch},
-			effects: storespec.PostCommitEffects{Poke: true},
+			result:  storespec.RestartResult{},
+			effects: storespec.PostCommitEffects{Poke: true, Despawn: []actor.ActorID{in.Target}},
 		}, nil
 	})
 	return decodeResult[storespec.RestartResult](raw, effects, err)
