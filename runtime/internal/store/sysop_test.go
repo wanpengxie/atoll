@@ -5,10 +5,188 @@ import (
 	"errors"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+func admitDurableAgent(t *testing.T, cs *ChannelStores, principal string) actor.ActorID {
+	t.Helper()
+	res, err := cs.DeclAdmission.AdmitDeclared(context.Background(), storespec.AdmitBundle{
+		Kind: actor.KindAgent, Principal: principal, Class: "agent",
+		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatalf("admit durable agent %q: %v", principal, err)
+	}
+	return res.ID
+}
+
+func assertEventPair(t *testing.T, cs *ChannelStores, anchor string) {
+	t.Helper()
+	var started, completed int
+	if err := cs.db.QueryRow(`SELECT SUM(type='sysop_started'),SUM(type='sysop_completed') FROM messages WHERE correlation_id=?`, anchor).Scan(&started, &completed); err != nil {
+		t.Fatal(err)
+	}
+	if started != 1 || completed != 1 {
+		t.Fatalf("event pair for %q=(%d,%d), want (1,1)", anchor, started, completed)
+	}
+}
+
+func memberMetaFor(anchor, digest string) storespec.SysOpMeta {
+	return storespec.SysOpMeta{Anchor: anchor, RequestDigest: digest, Source: storespec.SysOpSourceMember, Sender: "human:alice"}
+}
+
+func TestSysOpRemoveActorEndsClosureWithEventPairAndReplays(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	target := admitDurableAgent(t, cs, "decl:worker")
+	tx := storespec.RemoveTx{
+		SysOpMeta:  memberMetaFor("op:msg:remove:1", "d1"),
+		Target:     target,
+		Reason:     "member_remove",
+		DurableIDs: []actor.ActorID{target},
+		Envelopes:  []storespec.CascadeEnvelope{{Target: target, Reason: "member_remove", EndedBy: actor.SystemActorID}},
+	}
+	res, err := cs.SysOps.RemoveActor(ctx, tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Removed) != 1 || res.Removed[0] != target {
+		t.Fatalf("removed=%v want [%s]", res.Removed, target)
+	}
+	// Cascade death row + ended event + the operation event pair all in one tx.
+	var active, ended int
+	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(target)).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 0 {
+		t.Fatal("target still active after remove")
+	}
+	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id=?`, "actor-ended:"+string(target)).Scan(&ended); err != nil {
+		t.Fatal(err)
+	}
+	if ended != 1 {
+		t.Fatalf("ended events=%d want 1", ended)
+	}
+	assertEventPair(t, cs, tx.Anchor)
+
+	// Same-anchor replay is idempotent: no second execution, still exactly one
+	// completed terminal, cached result returned.
+	replay, err := cs.SysOps.RemoveActor(ctx, tx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(replay.Removed) != 1 || replay.Removed[0] != target {
+		t.Fatalf("replay removed=%v", replay.Removed)
+	}
+	assertEventPair(t, cs, tx.Anchor)
+}
+
+func TestSysOpRemoveActorAlreadyGoneReturnsSuccessEmptySet(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	// Fresh anchor, empty closure (Home found nothing to end): idempotent
+	// success with an empty removed set, event pair still committed.
+	res, err := cs.SysOps.RemoveActor(ctx, storespec.RemoveTx{
+		SysOpMeta: memberMetaFor("op:msg:remove:gone", "dg"),
+		Target:    "agent:vanished:1",
+		Reason:    "member_remove",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Removed) != 0 {
+		t.Fatalf("removed=%v want empty", res.Removed)
+	}
+	assertEventPair(t, cs, "op:msg:remove:gone")
+}
+
+func TestSysOpRestartActorBumpsEpochMonotonicallyWithEventPair(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	target := admitDurableAgent(t, cs, "decl:restartable")
+	first, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:1", "r1"), Target: target})
+	if err != nil || first.Epoch != 1 {
+		t.Fatalf("first restart=(%+v,%v) want epoch 1", first, err)
+	}
+	assertEventPair(t, cs, "op:msg:restart:1")
+	second, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:2", "r2"), Target: target})
+	if err != nil || second.Epoch != 2 {
+		t.Fatalf("second restart=(%+v,%v) want epoch 2", second, err)
+	}
+	// Same-anchor replay returns the cached epoch, no further bump, one completed.
+	replay, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:2", "r2"), Target: target})
+	if err != nil || replay.Epoch != 2 {
+		t.Fatalf("replay restart=(%+v,%v) want cached epoch 2", replay, err)
+	}
+	assertEventPair(t, cs, "op:msg:restart:2")
+	var epoch int64
+	if err := cs.db.QueryRow(`SELECT restart_epoch FROM actor_registry WHERE actor_id=?`, string(target)).Scan(&epoch); err != nil {
+		t.Fatal(err)
+	}
+	if epoch != 2 {
+		t.Fatalf("durable restart_epoch=%d want 2", epoch)
+	}
+}
+
+func TestSysOpRestartActorMissingTargetIsDecisive(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	_, err := cs.SysOps.RestartActor(context.Background(), storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:absent", "ra"), Target: "agent:absent:1"})
+	var operationErr *channel.OperationError
+	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeNotInComposition || operationErr.Retryable {
+		t.Fatalf("absent restart error=%v", err)
+	}
+	assertEventPair(t, cs, "op:msg:restart:absent")
+}
+
+func TestSysOpSetDefaultAgentWritesValueRowWithEventPair(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	target := admitDurableAgent(t, cs, "decl:router")
+	if _, err := cs.SysOps.SetDefaultAgent(ctx, storespec.SetDefaultTx{SysOpMeta: memberMetaFor("op:msg:default:1", "sd1"), Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok, err := cs.Routing.DefaultAgent(ctx)
+	if err != nil || !ok || got != target {
+		t.Fatalf("default agent=(%q,%v,%v) want %s", got, ok, err, target)
+	}
+	assertEventPair(t, cs, "op:msg:default:1")
+	// Same-anchor replay: idempotent, one completed.
+	if _, err := cs.SysOps.SetDefaultAgent(ctx, storespec.SetDefaultTx{SysOpMeta: memberMetaFor("op:msg:default:1", "sd1"), Target: target}); err != nil {
+		t.Fatal(err)
+	}
+	assertEventPair(t, cs, "op:msg:default:1")
+}
+
+func TestSysOpRestartTransientFailureRollsBackPairLeavingNoResidue(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	target := admitDurableAgent(t, cs, "decl:transient")
+	if _, err := cs.db.Exec(`CREATE TRIGGER fail_restart BEFORE UPDATE ON actor_registry WHEN NEW.restart_epoch>0 BEGIN SELECT RAISE(ABORT,'injected'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:transient", "rt"), Target: target}); err == nil {
+		t.Fatal("injected restart failure unexpectedly succeeded")
+	}
+	var events int
+	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE correlation_id=?`, "op:msg:restart:transient").Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 0 {
+		t.Fatalf("transient restart failure left %d event rows (started not rolled back)", events)
+	}
+	if _, err := cs.db.Exec(`DROP TRIGGER fail_restart`); err != nil {
+		t.Fatal(err)
+	}
+	// Same anchor retries cleanly to a durable bump after the fault clears.
+	res, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:transient", "rt"), Target: target})
+	if err != nil || res.Epoch != 1 {
+		t.Fatalf("retry restart=(%+v,%v)", res, err)
+	}
+}
 
 func openSysOpTestStore(t *testing.T) *ChannelStores {
 	t.Helper()

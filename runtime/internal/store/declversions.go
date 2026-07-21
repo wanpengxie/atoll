@@ -14,7 +14,7 @@ import (
 const declaredControlColumns = `r.actor_id, r.actor_kind, r.principal, r.role,
 	COALESCE(r.actor_binding,''), r.created_at, r.current_decl_version,
 	d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
-	d.source_decl_id, d.render_seq`
+	d.source_decl_id, d.render_seq, r.restart_epoch`
 
 type controlScanner interface{ Scan(...any) error }
 
@@ -25,7 +25,7 @@ func scanDeclaredControl(s controlScanner) (storespec.ActorControlRow, error) {
 	var idleMS int64
 	if err := s.Scan(&row.ID, &rawKind, &row.Principal, &rawRole, &rawBinding,
 		&row.CreatedAt, &row.CurrentDeclVersion, &row.Class, &config, &idleMS,
-		&placement, &row.Placement.Host, &row.SourceDeclID, &row.RenderSeq); err != nil {
+		&placement, &row.Placement.Host, &row.SourceDeclID, &row.RenderSeq, &row.RestartEpoch); err != nil {
 		return storespec.ActorControlRow{}, err
 	}
 	kind, ok := actor.ParseKind(rawKind)
@@ -103,7 +103,7 @@ func (r *actorRegistry) LookupDeclaredVersion(ctx context.Context, id actor.Acto
 	const q = `SELECT r.actor_id, r.actor_kind, r.principal, r.role,
 		COALESCE(r.actor_binding,''), r.created_at, d.version,
 		d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
-		d.source_decl_id, d.render_seq
+		d.source_decl_id, d.render_seq, r.restart_epoch
 		FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id
 		WHERE r.actor_id=? AND d.version=?`
 	row, err := scanDeclaredControl(r.db.QueryRowContext(ctx, q, string(id), version))
@@ -120,7 +120,7 @@ func (r *actorRegistry) LatestDeclaredVersion(ctx context.Context, id actor.Acto
 	const q = `SELECT r.actor_id, r.actor_kind, r.principal, r.role,
 		COALESCE(r.actor_binding,''), r.created_at, d.version,
 		d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
-		d.source_decl_id, d.render_seq
+		d.source_decl_id, d.render_seq, r.restart_epoch
 		FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id
 		WHERE r.actor_id=? ORDER BY d.version DESC LIMIT 1`
 	row, err := scanDeclaredControl(r.db.QueryRowContext(ctx, q, string(id)))
@@ -289,7 +289,7 @@ func (r *actorRegistry) EditDeclared(ctx context.Context, in storespec.DeclEditB
 		VALUES (?,?,?,?,?,?,?,?,?,?)`, string(in.ActorID), version, in.Class, config, string(in.Placement.Kind), in.Placement.Host, in.TIdle.Milliseconds(), in.SourceDeclID, in.RenderSeq, in.CreatedAt); err != nil {
 		return storespec.ActorControlRow{}, err
 	}
-	row, err := scanDeclaredControl(tx.QueryRowContext(ctx, `SELECT r.actor_id,r.actor_kind,r.principal,r.role,COALESCE(r.actor_binding,''),r.created_at,d.version,d.class,d.config_json,d.t_idle_ms,d.placement,d.desired_host,d.source_decl_id,d.render_seq FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id WHERE r.actor_id=? AND d.version=?`, string(in.ActorID), version))
+	row, err := scanDeclaredControl(tx.QueryRowContext(ctx, `SELECT r.actor_id,r.actor_kind,r.principal,r.role,COALESCE(r.actor_binding,''),r.created_at,d.version,d.class,d.config_json,d.t_idle_ms,d.placement,d.desired_host,d.source_decl_id,d.render_seq,r.restart_epoch FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id WHERE r.actor_id=? AND d.version=?`, string(in.ActorID), version))
 	if err != nil {
 		return storespec.ActorControlRow{}, err
 	}

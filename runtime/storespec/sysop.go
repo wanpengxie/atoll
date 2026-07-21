@@ -120,6 +120,50 @@ type RevokeResult struct {
 	Effects     PostCommitEffects         `json:"-"`
 }
 
+// RemoveTx removes a composition member and its sponsor closure. The closure
+// (durable rows to deregister + the whole-tree ended-event set) is computed by
+// the sole holder of the run-world session authority (Home) and handed in; the
+// store commits the anchor+event pair together with the cascade value rows in
+// one transaction. See RemoveActor for why the closure cannot be re-derived
+// from durable rows alone.
+type RemoveTx struct {
+	SysOpMeta
+	Target     actor.ActorID
+	Reason     string
+	DurableIDs []actor.ActorID
+	Envelopes  []CascadeEnvelope
+}
+
+type RemoveResult struct {
+	Removed []actor.ActorID   `json:"removed"`
+	Effects PostCommitEffects `json:"-"`
+}
+
+// RestartTx bumps the durable restart generation of one composition member.
+// Execution (bouncing the live carrier) is a reconcile private matter driven by
+// the generation skew, never a store-issued kill from this word.
+type RestartTx struct {
+	SysOpMeta
+	Target actor.ActorID
+}
+
+type RestartResult struct {
+	Epoch   int64             `json:"epoch"`
+	Effects PostCommitEffects `json:"-"`
+}
+
+// SetDefaultTx writes the channel default-agent routing field. An empty target
+// clears it. The value row is committed in the same transaction as the event
+// pair.
+type SetDefaultTx struct {
+	SysOpMeta
+	Target actor.ActorID
+}
+
+type SetDefaultResult struct {
+	Effects PostCommitEffects `json:"-"`
+}
+
 // SysOpAdmission is the only channel-store port allowed to atomically combine
 // a sysop event pair with structural truth. It deliberately exposes neither a
 // transaction nor a callback escape hatch.
@@ -132,6 +176,9 @@ type SysOpAdmission interface {
 	ApplyDeclVersion(context.Context, ApplyTx) (ApplyResult, error)
 	RevokeDeclTargets(context.Context, RevokeDeclTx) (RevokeResult, error)
 	RevokeDaemon(context.Context, RevokeDaemonTx) (RevokeResult, error)
+	RemoveActor(context.Context, RemoveTx) (RemoveResult, error)
+	RestartActor(context.Context, RestartTx) (RestartResult, error)
+	SetDefaultAgent(context.Context, SetDefaultTx) (SetDefaultResult, error)
 }
 
 type DaemonBindingReader interface {

@@ -208,6 +208,12 @@ func decodeResult[T any](raw json.RawMessage, effects storespec.PostCommitEffect
 		value.Effects = effects
 	case *storespec.RevokeResult:
 		value.Effects = effects
+	case *storespec.RemoveResult:
+		value.Effects = effects
+	case *storespec.RestartResult:
+		value.Effects = effects
+	case *storespec.SetDefaultResult:
+		value.Effects = effects
 	}
 	return result, nil
 }
@@ -466,6 +472,101 @@ func (s *sysOpStore) RevokeDaemon(ctx context.Context, in storespec.RevokeDaemon
 		}, nil
 	})
 	return decodeResult[storespec.RevokeResult](raw, effects, err)
+}
+
+func (s *sysOpStore) RemoveActor(ctx context.Context, in storespec.RemoveTx) (storespec.RemoveResult, error) {
+	raw, effects, err := s.run(ctx, in.SysOpMeta, "remove_actor", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
+		if in.Target == "" {
+			return decisive(channel.ErrCodeBadPayload, "instance_id required"), nil
+		}
+		if in.Target == actor.SystemActorID {
+			return decisive(channel.ErrCodeProtectedActor, "the system anchor actor cannot be removed"), nil
+		}
+		// The channel owner root is protected. It is checked here (durable role
+		// truth) as a decisive verdict rather than the EndCascade sentinel — the
+		// member word must leave a replayable protected_actor terminal.
+		var role string
+		err := tx.QueryRowContext(ctx, `SELECT role FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(in.Target)).Scan(&role)
+		if err == nil && role == string(storespec.RoleOwner) {
+			return decisive(channel.ErrCodeProtectedActor, "channel owner is protected"), nil
+		}
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			return sysOpOutcome{}, err
+		}
+		// Idempotent no-op: an already-gone target yields an empty envelope set
+		// (Home's closure found nothing to end). The event pair still commits, so
+		// the completed terminal replays success with an empty removed set.
+		_, newlyEnded, err := cascadeWriteTx(ctx, tx, s.channelID, in.DurableIDs, in.Envelopes, now)
+		if err != nil {
+			return sysOpOutcome{}, err
+		}
+		despawn := make([]actor.ActorID, 0, len(in.Envelopes))
+		for _, e := range in.Envelopes {
+			despawn = append(despawn, e.Target)
+		}
+		return sysOpOutcome{
+			result:  storespec.RemoveResult{Removed: newlyEnded},
+			effects: storespec.PostCommitEffects{Poke: true, Despawn: despawn},
+		}, nil
+	})
+	return decodeResult[storespec.RemoveResult](raw, effects, err)
+}
+
+func (s *sysOpStore) RestartActor(ctx context.Context, in storespec.RestartTx) (storespec.RestartResult, error) {
+	raw, effects, err := s.run(ctx, in.SysOpMeta, "restart_actor", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
+		if in.Target == "" {
+			return decisive(channel.ErrCodeBadPayload, "instance_id required"), nil
+		}
+		if in.Target == actor.SystemActorID {
+			return decisive(channel.ErrCodeProtectedActor, "the system anchor actor cannot be restarted"), nil
+		}
+		res, err := tx.ExecContext(ctx, `UPDATE actor_registry SET restart_epoch=restart_epoch+1 WHERE actor_id=? AND deregistered_at IS NULL`, string(in.Target))
+		if err != nil {
+			return sysOpOutcome{}, err
+		}
+		n, err := res.RowsAffected()
+		if err != nil {
+			return sysOpOutcome{}, err
+		}
+		if n == 0 {
+			return decisive(channel.ErrCodeNotInComposition, "target is not an active composition member"), nil
+		}
+		var epoch int64
+		if err := tx.QueryRowContext(ctx, `SELECT restart_epoch FROM actor_registry WHERE actor_id=?`, string(in.Target)).Scan(&epoch); err != nil {
+			return sysOpOutcome{}, err
+		}
+		// Despawn+Poke merely ACCELERATE the bounce; correctness rests on the
+		// generation skew reconcile observes (live carrier's recorded epoch <
+		// account epoch), so a lost effect still converges on the next tick.
+		return sysOpOutcome{
+			result:  storespec.RestartResult{Epoch: epoch},
+			effects: storespec.PostCommitEffects{Poke: true, Despawn: []actor.ActorID{in.Target}},
+		}, nil
+	})
+	return decodeResult[storespec.RestartResult](raw, effects, err)
+}
+
+func (s *sysOpStore) SetDefaultAgent(ctx context.Context, in storespec.SetDefaultTx) (storespec.SetDefaultResult, error) {
+	raw, effects, err := s.run(ctx, in.SysOpMeta, "set_default_agent", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
+		if in.Target != "" {
+			var active int
+			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(in.Target)).Scan(&active); err != nil {
+				return sysOpOutcome{}, err
+			}
+			if active != 1 {
+				return decisive(channel.ErrCodeMemberInactive, "target is not an active member"), nil
+			}
+		}
+		var value any
+		if in.Target != "" {
+			value = string(in.Target)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO channel_routing(id,default_agent) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET default_agent=excluded.default_agent`, value); err != nil {
+			return sysOpOutcome{}, err
+		}
+		return sysOpOutcome{result: storespec.SetDefaultResult{}}, nil
+	})
+	return decodeResult[storespec.SetDefaultResult](raw, effects, err)
 }
 
 func principalActiveTx(ctx context.Context, tx *sql.Tx, principal string) (bool, error) {
