@@ -394,6 +394,21 @@ func (s *admissionService) deliver(ctx context.Context, bundle channelhost.Bundl
 		if err := json.Unmarshal([]byte(record.RequestJSON), &request); err != nil {
 			return nil, &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: err.Error()}
 		}
+		// Delivery acts on present realm state, never on the state remembered
+		// at submission: attach establishes a reference, so its referent must
+		// be currently registered — a pending attach must not revive a daemon
+		// revoked while it waited. Detach stays unchecked (removing a
+		// reference to a dead referent is always legal). The channel lock held
+		// by runOperation serializes this check with the revoke fanout arm, so
+		// either the binding exists when revocation sweeps, or the registry
+		// row is already gone when this check runs.
+		var present bool
+		if err := s.app.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM daemons WHERE id=?)`, request.DaemonID).Scan(&present); err != nil {
+			return nil, &channel.OperationError{Code: channel.ErrCodeInternal, Detail: err.Error(), Retryable: true}
+		}
+		if !present {
+			return nil, &channel.OperationError{Code: admissionCodeDaemonNotFound, Detail: request.DaemonID}
+		}
 		return bundle.SysOp().AttachDaemon(ctx, request)
 	case "detach":
 		var request channel.DaemonRequest
@@ -504,8 +519,15 @@ func (s *admissionService) deliverFinalize(ctx context.Context, bundle channelho
 	}
 }
 
+// admissionCodeDaemonNotFound is realm-side admission vocabulary (the account's
+// error_code column), not a membrane operate-frame code — the frame closed set
+// does not grow for a rejection decided before any frame is minted.
+const admissionCodeDaemonNotFound channel.OperationErrorCode = "daemon_not_found"
+
 func admissionErrorHTTP(code string) int {
 	switch channel.OperationErrorCode(code) {
+	case admissionCodeDaemonNotFound:
+		return 404
 	case channel.ErrCodeBadPayload, channel.ErrCodeInvalidPlacement, channel.ErrCodeUnknownClass, channel.ErrCodeInvalidDesiredHost:
 		return 400
 	case channel.ErrCodeForbidden, channel.ErrCodeUnauthorizedSender, channel.ErrCodeNotAcceptedSource:
