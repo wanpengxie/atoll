@@ -241,6 +241,53 @@ func TestSysOpAdmitReplayAndRefConflict(t *testing.T) {
 	}
 }
 
+// TestSysOpMemberIntroduceAcceptsRunWorldSender pins the G ruling: a member-
+// source introduce carries NO initiator principal (a forked sender is a
+// run-world actor with no realm principal) and the store must NOT re-judge the
+// sender — qualification lives at the sysactor gate, and a registry-only
+// re-check is structurally blind to run-world members. The word commits the
+// event pair and mints the durable instance like any member introduce.
+func TestSysOpMemberIntroduceAcceptsRunWorldSender(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	rendered, err := (channel.RenderedSnapshot{
+		Class: "agent", Placement: channel.Placement{Kind: channel.PlacementServer}, RenderSeq: 1,
+	}).Seal()
+	if err != nil {
+		t.Fatal(err)
+	}
+	in := storespec.IntroduceTx{
+		SysOpMeta: storespec.SysOpMeta{
+			Anchor: "op:msg:v1:forkintro", RequestDigest: "d1",
+			Source: storespec.SysOpSourceMember, Sender: "agent:fork-child",
+		},
+		DeclID: "decl:tool", InitiatorPrincipal: "",
+		OwnerPrincipal: "alice", Visibility: "public",
+		Kind: actor.KindAgent, Rendered: rendered,
+	}
+	res, err := cs.SysOps.Introduce(ctx, in)
+	if err != nil || !res.Created || res.ActorID == "" {
+		t.Fatalf("fork-sender introduce=(%+v,%v), want created", res, err)
+	}
+	var active int
+	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(res.ActorID)).Scan(&active); err != nil {
+		t.Fatal(err)
+	}
+	if active != 1 {
+		t.Fatalf("introduced instance rows=%d, want 1", active)
+	}
+	assertEventPair(t, cs, in.Anchor)
+	// The member word's public-only wall stays: a private declaration from a
+	// member source is still a decisive refusal (zero ledger per A案).
+	private := in
+	private.Anchor, private.Visibility = "op:msg:v1:forkintro-priv", "private"
+	_, err = cs.SysOps.Introduce(ctx, private)
+	var operationErr *channel.OperationError
+	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeForbidden {
+		t.Fatalf("private member introduce=%v, want forbidden", err)
+	}
+}
+
 func TestSysOpDecisiveRefusalIsTerminalAndReplayable(t *testing.T) {
 	cs := openSysOpTestStore(t)
 	ctx := context.Background()

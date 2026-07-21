@@ -266,7 +266,14 @@ func (s *sysOpStore) Admit(ctx context.Context, in storespec.AdmitTx) (storespec
 
 func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (storespec.IntroduceResult, error) {
 	raw, effects, err := s.run(ctx, in.SysOpMeta, "introduce", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
-		if in.DeclID == "" || in.InitiatorPrincipal == "" {
+		// Member-source sender qualification lives at the sysactor gate (unified
+		// authority, durable ∪ run-world) — the store never re-judges identity: a
+		// registry-only re-check is structurally blind to run-world senders
+		// (forked agents carry no realm principal), and any future policy about
+		// who may introduce belongs to the acceptance table, not this
+		// transaction. System-source introduce still requires the
+		// realm-authenticated initiator for the account.
+		if in.DeclID == "" || (in.Source != storespec.SysOpSourceMember && in.InitiatorPrincipal == "") {
 			return decisive(channel.ErrCodeBadPayload, "decl_id and initiator_principal required"), nil
 		}
 		if _, ok := actor.ParseKind(string(in.Kind)); !ok || in.Kind == actor.KindHuman || in.Kind == actor.KindSystem {
@@ -281,10 +288,12 @@ func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (s
 		if in.Visibility != "public" && in.InitiatorPrincipal != in.OwnerPrincipal {
 			return decisive(channel.ErrCodeForbidden, "declaration is private"), nil
 		}
-		if active, err := principalActiveTx(ctx, tx, in.InitiatorPrincipal); err != nil {
-			return sysOpOutcome{}, err
-		} else if !active {
-			return decisive(channel.ErrCodeMemberInactive, "initiator is not an active member"), nil
+		if in.Source != storespec.SysOpSourceMember {
+			if active, err := principalActiveTx(ctx, tx, in.InitiatorPrincipal); err != nil {
+				return sysOpOutcome{}, err
+			} else if !active {
+				return decisive(channel.ErrCodeMemberInactive, "initiator is not an active member"), nil
+			}
 		}
 		var existing actor.ActorID
 		err := tx.QueryRowContext(ctx, `SELECT actor_id FROM actor_registry WHERE actor_kind=? AND principal=? AND deregistered_at IS NULL`, string(in.Kind), in.DeclID).Scan(&existing)
