@@ -326,7 +326,7 @@ func TestHomeCloseUnpublishesEveryEntryPoint(t *testing.T) {
 	if err := h.closeInternal("test"); err != nil {
 		t.Fatal(err)
 	}
-	if got := h.kickDaemon("none"); got != 0 {
+	if got := h.links.KickDaemon("none"); got != 0 {
 		t.Fatalf("KickDaemon after Close = %d", got)
 	}
 	if _, _, err := h.principalOf(context.Background(), "issued-human"); err == nil {

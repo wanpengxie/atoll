@@ -276,8 +276,22 @@ func TestChannelRealmW4NoPhysicalDestroy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "unix.RENAME_NOREPLACE") {
-		t.Fatal("channelhost tombstone path is not no-replace")
+	if !strings.Contains(string(body), "renameNoReplace(") {
+		t.Fatal("channelhost tombstone path does not go through renameNoReplace")
+	}
+	// The no-replace guarantee lives in per-platform files: each platform in the
+	// closed set must implement renameNoReplace with its exclusive-rename flag.
+	for _, platform := range []struct{ file, flag string }{
+		{"rename_linux.go", "unix.RENAME_NOREPLACE"},
+		{"rename_darwin.go", "unix.RENAME_EXCL"},
+	} {
+		impl, err := os.ReadFile("../platform/channelhost/" + platform.file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !strings.Contains(string(impl), platform.flag) {
+			t.Fatalf("%s tombstone rename is not no-replace (%s missing)", platform.file, platform.flag)
+		}
 	}
 	for _, path := range phaseAProductionFiles(t, "../app") {
 		body, err := os.ReadFile(path)
