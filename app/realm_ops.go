@@ -162,9 +162,6 @@ func (o realmOps) EditDeclaration(ctx context.Context, req channel.Requester, de
 	if n, _ := res.RowsAffected(); n == 0 {
 		return channel.DeclDetail{}, &channel.RealmError{Code: channel.RealmDeclNotFound}
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO decl_fanout_jobs(base_ref,decl_id,op,initiator,created_at) VALUES (?,?,?,?,?)`, "fo:v1:"+uuid.NewString(), declID, "restart", facts.Principal, now); err != nil {
-		return channel.DeclDetail{}, err
-	}
 	if err := tx.Commit(); err != nil {
 		return channel.DeclDetail{}, err
 	}
@@ -194,9 +191,6 @@ func (o realmOps) RevokeDeclaration(ctx context.Context, req channel.Requester, 
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		return &channel.RealmError{Code: channel.RealmDeclNotFound}
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO decl_fanout_jobs(base_ref,decl_id,op,initiator,created_at) VALUES (?,?,?,?,?)`, "fo:v1:"+uuid.NewString(), declID, "delete", facts.Principal, now); err != nil {
-		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err

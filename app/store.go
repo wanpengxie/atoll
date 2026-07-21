@@ -167,19 +167,6 @@ var appSchema = []schemaObject{
 		render_seq INTEGER NOT NULL,
 		PRIMARY KEY (channel_id, decl_id)
 	)`},
-	{"table", "decl_fanout_deliveries", `CREATE TABLE decl_fanout_deliveries (
-		job_id INTEGER NOT NULL,
-		channel_id TEXT NOT NULL,
-		ref TEXT NOT NULL UNIQUE,
-		render_seq INTEGER NOT NULL,
-		digest TEXT NOT NULL,
-		payload_json TEXT NOT NULL,
-		acked_at INTEGER,
-		error_code TEXT,
-		PRIMARY KEY (job_id, channel_id)
-	)`},
-	{"index", "ix_decl_fanout_deliveries_pending", `CREATE INDEX ix_decl_fanout_deliveries_pending
-		ON decl_fanout_deliveries(job_id,channel_id) WHERE acked_at IS NULL`},
 	{"table", "daemons", `CREATE TABLE daemons (
 		id TEXT PRIMARY KEY,
 		owner_id TEXT NOT NULL REFERENCES users(id),
@@ -187,35 +174,6 @@ var appSchema = []schemaObject{
 		api_key_hash TEXT NOT NULL,
 		created_at INTEGER NOT NULL
 	)`},
-	{"table", "decl_fanout_jobs", `CREATE TABLE decl_fanout_jobs (
-		job_id INTEGER PRIMARY KEY AUTOINCREMENT,
-		base_ref TEXT NOT NULL UNIQUE,
-		decl_id TEXT NOT NULL,
-		op TEXT NOT NULL CHECK(op IN ('delete','restart')),
-		initiator TEXT NOT NULL,
-		attempt INTEGER NOT NULL DEFAULT 0,
-		last_error TEXT,
-		next_attempt_at INTEGER NOT NULL DEFAULT 0,
-		created_at INTEGER NOT NULL,
-		done_at INTEGER,
-		dead_at INTEGER
-	)`},
-	{"index", "ix_fanout_pending", `CREATE INDEX ix_fanout_pending
-		ON decl_fanout_jobs(next_attempt_at, job_id) WHERE done_at IS NULL AND dead_at IS NULL`},
-	{"table", "daemon_revoke_jobs", `CREATE TABLE daemon_revoke_jobs (
-		job_id INTEGER PRIMARY KEY AUTOINCREMENT,
-		base_ref TEXT NOT NULL UNIQUE,
-		daemon_id TEXT NOT NULL,
-		initiator TEXT NOT NULL,
-		attempt INTEGER NOT NULL DEFAULT 0,
-		last_error TEXT,
-		next_attempt_at INTEGER NOT NULL DEFAULT 0,
-		created_at INTEGER NOT NULL,
-		done_at INTEGER,
-		dead_at INTEGER
-	)`},
-	{"index", "ix_drevoke_pending", `CREATE INDEX ix_drevoke_pending
-		ON daemon_revoke_jobs(next_attempt_at, job_id) WHERE done_at IS NULL AND dead_at IS NULL`},
 	{"table", "actor_decls", `CREATE TABLE actor_decls (
 		id TEXT PRIMARY KEY,
 		name TEXT NOT NULL,

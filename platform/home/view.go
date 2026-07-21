@@ -258,6 +258,21 @@ func (v View) IsBound(ctx context.Context, daemonID string) (bool, error) {
 	return v.bindings.IsBound(ctx, storespec.DaemonID(daemonID))
 }
 
+// ListBound enumerates the channel's currently bound daemon IDs (persistent
+// binding truth). The realm convergence patrol compares this set against its
+// own daemon registry to find bindings whose daemon no longer exists.
+func (v View) ListBound(ctx context.Context) ([]string, error) {
+	ids, err := v.bindings.ListBound(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = string(id)
+	}
+	return out, nil
+}
+
 // MaxSeq returns the channel's current head seq (client cursor anchor).
 func (v View) MaxSeq(ctx context.Context) (int64, error) {
 	return v.query.MaxSeq(ctx)

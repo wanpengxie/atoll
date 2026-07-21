@@ -41,7 +41,6 @@ type SysOp interface {
 	ApplyDeclVersion(context.Context, channel.ApplyDeclVersionRequest) (channel.ApplyDeclVersionResult, error)
 	RevokeDeclTargets(context.Context, channel.RevokeDeclRequest) (channel.RevokeResult, error)
 	RevokeDaemon(context.Context, channel.DaemonRequest) (channel.RevokeResult, error)
-	DeclaredBySourceSerialized(context.Context, string) ([]storespec.ActorControlRow, error)
 }
 
 type View interface {
@@ -61,6 +60,7 @@ type View interface {
 	Stat(actor.ActorID) (time.Time, bool)
 	IsAttached(string) bool
 	IsBound(context.Context, string) (bool, error)
+	ListBound(context.Context) ([]string, error)
 	Resources() ResourceReadView
 }
 
@@ -142,6 +142,9 @@ func (a viewAdapter) Stat(id actor.ActorID) (time.Time, bool) { return a.home.Vi
 func (a viewAdapter) IsAttached(id string) bool               { return a.home.View().IsAttached(id) }
 func (a viewAdapter) IsBound(ctx context.Context, id string) (bool, error) {
 	return a.home.View().IsBound(ctx, id)
+}
+func (a viewAdapter) ListBound(ctx context.Context) ([]string, error) {
+	return a.home.View().ListBound(ctx)
 }
 func (a viewAdapter) Resources() ResourceReadView {
 	return resourceViewAdapter{a.home.View().Resources()}

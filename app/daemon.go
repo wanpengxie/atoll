@@ -140,10 +140,6 @@ func (a *App) handleDeleteDaemon(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO daemon_revoke_jobs(base_ref,daemon_id,initiator,created_at) VALUES (?,?,?,?)`, "fo:v1:"+uuid.NewString(), daemonID, userID, time.Now().UnixMilli()); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
-		return
-	}
 	if err := tx.Commit(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "delete failed"})
 		return

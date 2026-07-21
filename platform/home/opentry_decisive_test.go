@@ -83,36 +83,4 @@ func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 	assertNoTerminal("op-msg-absent", parsedDigest)
 }
 
-// The fanout absent judge shares the operation serial section: while a member
-// word section is in flight, DeclaredBySourceSerialized waits — the judge can
-// never act on a world that a mid-section introduce is about to change.
-func TestDeclaredBySourceSerializedWaitsForTheSerialSection(t *testing.T) {
-	h, err := Open(Config{
-		ChannelID:           "serialized-absent",
-		DBPath:              filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: &compositionActivationResolver{},
-		ReconcileInterval:   time.Hour,
-		Bootstrap:           true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = h.closeInternal("test") })
-	h.opEntry.mu.Lock()
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		_, _ = h.opEntry.DeclaredBySourceSerialized(context.Background(), "decl:x")
-	}()
-	select {
-	case <-done:
-		t.Fatal("absent judge ran outside the serial section")
-	case <-time.After(50 * time.Millisecond):
-	}
-	h.opEntry.mu.Unlock()
-	select {
-	case <-done:
-	case <-time.After(2 * time.Second):
-		t.Fatal("absent judge did not proceed after the section closed")
-	}
-}
+

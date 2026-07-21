@@ -217,10 +217,6 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			return
 		}
-		if _, err := tx.ExecContext(c.Request.Context(), `INSERT INTO decl_fanout_jobs(base_ref,decl_id,op,initiator,created_at) VALUES (?,?,?,?,?)`, "fo:v1:"+uuid.NewString(), declID, "restart", userID, now); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
-			return
-		}
 		queued = true
 	}
 	if err := tx.Commit(); err != nil {
@@ -262,10 +258,6 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
-		return
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO decl_fanout_jobs(base_ref,decl_id,op,initiator,created_at) VALUES (?,?,?,?,?)`, "fo:v1:"+uuid.NewString(), declID, "delete", userID, now); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
 	if err := tx.Commit(); err != nil {

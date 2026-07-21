@@ -6,41 +6,35 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-const fanoutDrain = 32
+// convergeTick paces the level backstop. Promptness comes from notify(): every
+// realm authority write (decl edit/revoke, daemon delete) pokes the patrol
+// after commit, so serving channels converge within milliseconds of a change.
+// The tick only bounds how long a MISSED poke (crash between commit and
+// notify, a channel that opened between passes) can stay stale.
+const convergeTick = 30 * time.Second
 
-type fanoutJob struct {
-	table, key, op, initiator, baseRef string
-	id, attempt                        int64
-}
-
-type permanentFanoutError struct{ cause error }
-
-func (e permanentFanoutError) Error() string { return e.cause.Error() }
-func (e permanentFanoutError) Unwrap() error { return e.cause }
-func permanentFanout(cause error) error      { return permanentFanoutError{cause: cause} }
-
-func fanoutRetryDelay(attempt int64) time.Duration {
-	switch attempt {
-	case 1:
-		return 250 * time.Millisecond
-	case 2:
-		return time.Second
-	case 3:
-		return 4 * time.Second
-	case 4:
-		return 16 * time.Second
-	default:
-		return time.Minute
-	}
-}
-
+// fanoutWorker is the realm's convergence patrol (fanout 轻形化终形): the realm
+// registry is the single desired-state truth, publishing is ONE authority
+// write + a poke, and this patrol walks every serving channel comparing what
+// the channel runs against what the registry says it should run — delivering
+// an apply/revoke frame only where they differ. There is no per-channel
+// delivery ledger, no all-ack job terminal, and no "propagation complete"
+// state: convergence is observed by reading channel truth, never proven by
+// collecting receipts. Exactly-once rests on the observation gate (a converged
+// channel produces zero deliveries) plus the channel's own anchor idempotency
+// and render_seq stale guard — each delivery attempt mints a fresh ref; a
+// result-unknown attempt is resolved by re-OBSERVING next pass, not by
+// re-asking an old ref.
 type fanoutWorker struct {
 	app    *App
 	ctx    context.Context
@@ -48,8 +42,6 @@ type fanoutWorker struct {
 	done   chan struct{}
 	wake   chan struct{}
 	once   sync.Once
-	cursor [2]int64
-	next   int
 }
 
 func newFanoutWorker(a *App) *fanoutWorker {
@@ -79,152 +71,58 @@ func (w *fanoutWorker) close() {
 
 func (w *fanoutWorker) run() {
 	defer close(w.done)
-	ticker := time.NewTicker(250 * time.Millisecond)
+	// Startup pass: a poke lost to a crash (authority committed, notify never
+	// fired) is recovered here before the first tick.
+	w.converge()
+	ticker := time.NewTicker(convergeTick)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-w.ctx.Done():
 			return
 		case <-w.wake:
-			w.drain()
+			w.converge()
 		case <-ticker.C:
-			w.drain()
+			w.converge()
 		}
 	}
 }
 
-func (w *fanoutWorker) drain() {
-	for processed := 0; processed < fanoutDrain; processed++ {
-		var job fanoutJob
-		found := false
-		for range 2 {
-			which := w.next
-			w.next = 1 - w.next
-			candidate, ok, err := w.claim(which)
-			if err != nil {
-				w.app.logger.Error("fanout.claim_failed", "queue", which, "err", err)
-				return
-			}
-			if ok {
-				job, found = candidate, true
-				break
-			}
-		}
-		if !found {
-			return
-		}
-		if err := w.apply(job); err != nil {
-			w.fail(job, err)
-		} else {
-			w.complete(job)
-		}
-		select {
-		case <-w.ctx.Done():
-			return
-		default:
-		}
-	}
-}
+// visitDeadline bounds ONE channel's in-visit work (View reads, realm reads,
+// SysOp deliveries) so a stuck channel cannot starve the rest of the pass.
+// The keyed channel-lock wait itself is not ctx-aware (known, R6-P2) — the
+// deadline starts once the visit holds the lock.
+const visitDeadline = 10 * time.Second
 
-func (w *fanoutWorker) claim(which int) (fanoutJob, bool, error) {
-	table := "decl_fanout_jobs"
-	query := `SELECT job_id,base_ref,op,decl_id,initiator,attempt FROM decl_fanout_jobs
-		WHERE done_at IS NULL AND dead_at IS NULL AND next_attempt_at<=? AND job_id>?
-		ORDER BY next_attempt_at,job_id LIMIT 1`
-	if which == 1 {
-		table = "daemon_revoke_jobs"
-		query = `SELECT job_id,base_ref,'revoke',daemon_id,initiator,attempt FROM daemon_revoke_jobs
-			WHERE done_at IS NULL AND dead_at IS NULL AND next_attempt_at<=? AND job_id>?
-			ORDER BY next_attempt_at,job_id LIMIT 1`
-	}
-	now := time.Now().UnixMilli()
-	var job fanoutJob
-	job.table = table
-	scan := func(cursor int64) error {
-		return w.app.db.QueryRowContext(w.ctx, query, now, cursor).Scan(&job.id, &job.baseRef, &job.op, &job.key, &job.initiator, &job.attempt)
-	}
-	err := scan(w.cursor[which])
-	if errors.Is(err, sql.ErrNoRows) && w.cursor[which] != 0 {
-		w.cursor[which] = 0
-		err = scan(0)
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		return fanoutJob{}, false, nil
-	}
-	if err != nil {
-		return fanoutJob{}, false, err
-	}
-	if _, err := w.app.db.ExecContext(w.ctx, `UPDATE `+table+` SET attempt=attempt+1 WHERE job_id=?`, job.id); err != nil {
-		return fanoutJob{}, false, err
-	}
-	job.attempt++
-	w.cursor[which] = job.id
-	return job, true, nil
-}
-
-func (w *fanoutWorker) apply(job fanoutJob) error {
-	if job.table == "decl_fanout_jobs" && job.op != "delete" && job.op != "restart" {
-		return permanentFanout(fmt.Errorf("unknown declaration fanout op %q", job.op))
-	}
-	if job.table != "decl_fanout_jobs" && job.table != "daemon_revoke_jobs" {
-		return permanentFanout(fmt.Errorf("unknown fanout table %q", job.table))
-	}
+// converge is one full patrol pass. A channel that fails to converge is logged
+// and left for the next pass — level semantics need no retry bookkeeping. The
+// pass summary is a transient observation (log-borne), never a receipt.
+func (w *fanoutWorker) converge() {
+	started := time.Now()
 	channelIDs, err := w.app.directoryChannelIDs(w.ctx)
 	if err != nil {
-		return err
+		if !errors.Is(err, context.Canceled) {
+			w.app.logger.Error("fanout.directory_read_failed", "err", err)
+		}
+		return
 	}
-	var transient []error
-	var permanent []error
+	visited, failed := 0, 0
+	corrections := 0
 	for _, chID := range channelIDs {
-		err := w.deliverToChannel(job, chID)
-		if err != nil {
-			var operationErr *channel.OperationError
-			if errors.As(err, &operationErr) && !operationErr.Retryable {
-				permanent = append(permanent, fmt.Errorf("channel %s: %w", chID, err))
-				continue
-			}
-			transient = append(transient, fmt.Errorf("channel %s: %w", chID, err))
+		if w.ctx.Err() != nil {
+			return
+		}
+		visited++
+		n, err := w.convergeChannel(chID)
+		corrections += n
+		if err != nil && !errors.Is(err, context.Canceled) {
+			failed++
+			w.app.logger.Warn("fanout.converge_channel", "channel", chID, "err", err)
 		}
 	}
-	if len(permanent) > 0 {
-		return permanentFanout(errors.Join(permanent...))
-	}
-	if len(transient) > 0 {
-		return errors.Join(transient...)
-	}
-	return nil
-}
-
-// deliverToChannel delivers one fanout job to one channel inside that channel's
-// critical section — the same per-channel lock admission delivery holds. This
-// is the serialization the delivery-currency rule rests on: an attach's
-// present-state daemon check and its membrane commit can never interleave with
-// a revoke arm's sweep of the same channel, so either the binding exists when
-// revocation sweeps, or the registry row is already gone when attach re-checks.
-func (w *fanoutWorker) deliverToChannel(job fanoutJob, chID channel.ID) error {
-	release := w.app.channelLocks.lock(string(chID))
-	defer release()
-	bundle, ok := w.app.host.Acquire(chID)
-	if !ok {
-		return fmt.Errorf("channel unavailable")
-	}
-	ref := channel.DerivedFanoutRef(job.baseRef, chID)
-	switch job.table {
-	case "decl_fanout_jobs":
-		switch job.op {
-		case "delete":
-			_, err := bundle.SysOp().RevokeDeclTargets(w.ctx, channel.RevokeDeclRequest{Ref: ref, DeclID: job.key})
-			return err
-		case "restart":
-			return w.applyVersionDelivery(job, chID, bundle)
-		default:
-			return &channel.OperationError{Code: channel.ErrCodeInternal, Detail: fmt.Sprintf("unknown declaration fanout op %q", job.op)}
-		}
-	case "daemon_revoke_jobs":
-		_, err := bundle.SysOp().RevokeDaemon(w.ctx, channel.DaemonRequest{Ref: ref, DaemonID: job.key})
-		return err
-	default:
-		return &channel.OperationError{Code: channel.ErrCodeInternal, Detail: fmt.Sprintf("unknown fanout table %q", job.table)}
+	if corrections > 0 || failed > 0 {
+		w.app.logger.Info("fanout.pass", "channels", visited, "corrections", corrections,
+			"failed", failed, "duration", time.Since(started))
 	}
 }
 
@@ -245,82 +143,89 @@ func (a *App) directoryChannelIDs(ctx context.Context) ([]channel.ID, error) {
 	return out, rows.Err()
 }
 
-func (w *fanoutWorker) applyVersionDelivery(job fanoutJob, chID channel.ID, bundle channelhost.Bundle) error {
-	request, found, err := w.loadFanoutDelivery(job.id, chID)
-	if err != nil {
-		return err
+// convergeChannel converges one channel inside its critical section — the same
+// per-channel lock admission delivery and local edit hold, so a patrol
+// delivery can never interleave with a local edit's judge→mint→deliver
+// sequence (判断段与落账段恒同区). Returns the number of corrective deliveries
+// attempted (the pass's transient mismatch count).
+func (w *fanoutWorker) convergeChannel(chID channel.ID) (int, error) {
+	release := w.app.channelLocks.lock(string(chID))
+	defer release()
+	visitCtx, cancel := context.WithTimeout(w.ctx, visitDeadline)
+	defer cancel()
+	bundle, ok := w.app.host.Acquire(chID)
+	if !ok {
+		// Not serving = zero delivery obligation. The channel converges when it
+		// opens: the boot/open path lands it in the directory and the next pass
+		// (or poke) walks it.
+		return 0, nil
 	}
-	if !found {
-		request, found, err = w.createFanoutDelivery(job, chID, bundle)
-		if err != nil || !found {
-			return err
+	rows, err := bundle.View().ActiveActors(visitCtx)
+	if err != nil {
+		return 0, err
+	}
+	corrections := 0
+	var errs []error
+	seen := map[string]bool{}
+	for _, row := range rows {
+		if row.SourceDeclID == "" || seen[row.SourceDeclID] {
+			continue
+		}
+		seen[row.SourceDeclID] = true
+		n, err := w.convergeInstance(visitCtx, chID, bundle, row)
+		corrections += n
+		if err != nil {
+			errs = append(errs, fmt.Errorf("decl %s: %w", row.SourceDeclID, err))
 		}
 	}
-	_, err = bundle.SysOp().ApplyDeclVersion(w.ctx, request)
+	n, err := w.convergeDaemons(visitCtx, chID, bundle)
+	corrections += n
 	if err != nil {
-		var operationErr *channel.OperationError
-		if errors.As(err, &operationErr) && operationErr.Code == channel.ErrCodeRefConflict {
-			_, writeErr := w.app.db.ExecContext(w.ctx, `UPDATE decl_fanout_deliveries SET acked_at=?,error_code=? WHERE job_id=? AND channel_id=?`, time.Now().UnixMilli(), string(operationErr.Code), job.id, string(chID))
-			w.app.logger.Error("fanout.ref_conflict", "job", job.id, "channel", chID, "err", err)
-			return writeErr
-		}
-		return err
+		errs = append(errs, err)
 	}
-	_, err = w.app.db.ExecContext(w.ctx, `UPDATE decl_fanout_deliveries SET acked_at=?,error_code=NULL WHERE job_id=? AND channel_id=?`, time.Now().UnixMilli(), job.id, string(chID))
-	return err
+	return corrections, errors.Join(errs...)
 }
 
-func (w *fanoutWorker) loadFanoutDelivery(jobID int64, chID channel.ID) (channel.ApplyDeclVersionRequest, bool, error) {
-	var raw string
-	err := w.app.db.QueryRowContext(w.ctx, `SELECT payload_json FROM decl_fanout_deliveries WHERE job_id=? AND channel_id=?`, jobID, string(chID)).Scan(&raw)
-	if errors.Is(err, sql.ErrNoRows) {
-		return channel.ApplyDeclVersionRequest{}, false, nil
-	}
-	if err != nil {
-		return channel.ApplyDeclVersionRequest{}, false, err
-	}
-	var request channel.ApplyDeclVersionRequest
-	if err := json.Unmarshal([]byte(raw), &request); err != nil {
-		return channel.ApplyDeclVersionRequest{}, false, permanentFanout(fmt.Errorf("decode delivery: %w", err))
-	}
-	return request, true, nil
-}
-
-func (w *fanoutWorker) createFanoutDelivery(job fanoutJob, chID channel.ID, bundle channelhost.Bundle) (channel.ApplyDeclVersionRequest, bool, error) {
-	rows, err := bundle.SysOp().DeclaredBySourceSerialized(w.ctx, job.key)
-	if err != nil {
-		return channel.ApplyDeclVersionRequest{}, false, err
-	}
-	if len(rows) == 0 {
-		return channel.ApplyDeclVersionRequest{}, false, nil
-	}
-	current := rows[0]
-	tx, err := w.app.db.BeginTx(w.ctx, nil)
-	if err != nil {
-		return channel.ApplyDeclVersionRequest{}, false, err
-	}
-	defer tx.Rollback()
+// convergeInstance compares one instance's running snapshot against the realm
+// registry's desired rendering and delivers the difference: a definitively
+// absent/soft-deleted declaration revokes the instance, a changed value
+// applies a new version, and an equal digest is the observation gate — zero
+// deliveries. Fail-closed: ANY realm read or render error skips this instance
+// for the pass (never folded into "absent" — a control-plane fault must not
+// amplify into a mass revoke).
+func (w *fanoutWorker) convergeInstance(ctx context.Context, chID channel.ID, bundle channelhost.Bundle, current storespec.ActorControlRow) (int, error) {
+	declID := current.SourceDeclID
 	var class string
 	var global sql.NullString
 	var deleted sql.NullInt64
-	if err := tx.QueryRowContext(w.ctx, `SELECT default_class,config_json,deleted_at FROM actor_decls WHERE id=?`, job.key).Scan(&class, &global, &deleted); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return channel.ApplyDeclVersionRequest{}, false, nil
+	err := w.app.db.QueryRowContext(ctx, `SELECT default_class,config_json,deleted_at FROM actor_decls WHERE id=?`, declID).Scan(&class, &global, &deleted)
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && deleted.Valid) {
+		// Definitive absence only: ErrNoRows / a read soft-delete row are the
+		// authority's own answers. Built-in protection mirrors finalize: a
+		// sys:-prefixed declaration missing from the registry is never revoked.
+		if strings.HasPrefix(declID, "sys:") {
+			return 0, nil
 		}
-		return channel.ApplyDeclVersionRequest{}, false, err
+		_, err := bundle.SysOp().RevokeDeclTargets(ctx, channel.RevokeDeclRequest{Ref: convergeRef(chID), DeclID: declID})
+		return 1, err
 	}
-	if deleted.Valid {
-		return channel.ApplyDeclVersionRequest{}, false, nil
+	if err != nil {
+		return 0, err
 	}
 	config := global.String
 	var overlay sql.NullString
-	err = tx.QueryRowContext(w.ctx, `SELECT config_json FROM channel_decl_overlays WHERE channel_id=? AND decl_id=?`, string(chID), job.key).Scan(&overlay)
+	err = w.app.db.QueryRowContext(ctx, `SELECT config_json FROM channel_decl_overlays WHERE channel_id=? AND decl_id=?`, string(chID), declID).Scan(&overlay)
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return channel.ApplyDeclVersionRequest{}, false, err
+		return 0, err
 	}
 	if err == nil && overlay.Valid {
+		// Whole-value masking: a channel-local customization shadows the
+		// global value for this channel.
 		config = overlay.String
 	}
+	// Realm declarations do not own channel placement or idle policy: desired
+	// re-renders the value half (class/config) while retaining the channel's
+	// current placement and TIdle.
 	placement := channel.Placement{Kind: channel.PlacementKind(current.Placement.Kind), DesiredHost: current.Placement.Host}
 	var rawConfig json.RawMessage
 	if config != "" {
@@ -328,57 +233,86 @@ func (w *fanoutWorker) createFanoutDelivery(job fanoutJob, chID channel.ID, bund
 	}
 	candidate, err := (channel.RenderedSnapshot{Class: class, Config: rawConfig, Placement: placement, TIdleMS: current.TIdle.Milliseconds(), RenderSeq: 1}).Seal()
 	if err != nil {
-		return channel.ApplyDeclVersionRequest{}, false, err
+		return 0, err
 	}
 	currentSnapshot, err := (channel.RenderedSnapshot{Class: current.Class, Config: current.Config, Placement: placement, TIdleMS: current.TIdle.Milliseconds(), RenderSeq: current.RenderSeq}).Seal()
 	if err != nil {
-		return channel.ApplyDeclVersionRequest{}, false, err
+		return 0, err
 	}
 	if candidate.Digest == currentSnapshot.Digest {
-		return channel.ApplyDeclVersionRequest{}, false, nil
+		return 0, nil
 	}
-	if _, err := tx.ExecContext(w.ctx, `INSERT INTO decl_render_state(channel_id,decl_id,render_seq) VALUES (?,?,?) ON CONFLICT(channel_id,decl_id) DO UPDATE SET render_seq=MAX(render_seq,excluded.render_seq)`, string(chID), job.key, current.RenderSeq); err != nil {
-		return channel.ApplyDeclVersionRequest{}, false, err
-	}
-	var seq int64
-	if err := tx.QueryRowContext(w.ctx, `UPDATE decl_render_state SET render_seq=render_seq+1 WHERE channel_id=? AND decl_id=? RETURNING render_seq`, string(chID), job.key).Scan(&seq); err != nil {
-		return channel.ApplyDeclVersionRequest{}, false, err
+	seq, err := w.mintRenderSeq(ctx, chID, declID, current.RenderSeq)
+	if err != nil {
+		return 0, err
 	}
 	candidate.RenderSeq = seq
-	request := channel.ApplyDeclVersionRequest{
-		Ref: channel.DerivedFanoutRef(job.baseRef, chID), DeclID: job.key,
-		Rendered: candidate, Authority: channel.AuthorityRealm,
-	}
-	raw, err := json.Marshal(request)
+	_, err = bundle.SysOp().ApplyDeclVersion(ctx, channel.ApplyDeclVersionRequest{
+		Ref: convergeRef(chID), DeclID: declID, Rendered: candidate, Authority: channel.AuthorityRealm,
+	})
 	if err != nil {
-		return channel.ApplyDeclVersionRequest{}, false, err
+		var operationErr *channel.OperationError
+		if errors.As(err, &operationErr) && operationErr.Code == channel.ErrCodeRefConflict {
+			// Structurally unreachable with fresh refs — a hit is a caller bug
+			// signal, kept loud and re-raised every pass until fixed.
+			w.app.logger.Error("fanout.ref_conflict", "channel", chID, "decl", declID, "err", err)
+			return 1, nil
+		}
 	}
-	if _, err := tx.ExecContext(w.ctx, `INSERT INTO decl_fanout_deliveries(job_id,channel_id,ref,render_seq,digest,payload_json) VALUES (?,?,?,?,?,?)`, job.id, string(chID), request.Ref, seq, candidate.Digest, string(raw)); err != nil {
-		return channel.ApplyDeclVersionRequest{}, false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return channel.ApplyDeclVersionRequest{}, false, err
-	}
-	return request, true, nil
+	return 1, err
 }
 
-func (w *fanoutWorker) complete(job fanoutJob) {
-	_, err := w.app.db.ExecContext(w.ctx, `UPDATE `+job.table+` SET done_at=?,last_error=NULL WHERE job_id=? AND done_at IS NULL`, time.Now().UnixMilli(), job.id)
-	if err != nil && !errors.Is(err, context.Canceled) {
-		w.app.logger.Error("fanout.complete_failed", "table", job.table, "job", job.id, "err", err)
+// convergeDaemons revokes channel bindings whose daemon no longer exists in
+// the realm registry (the daemon-delete authority write is the publish; this
+// is its convergence half). Fail-closed like convergeInstance: a registry read
+// error skips that binding for the pass.
+func (w *fanoutWorker) convergeDaemons(ctx context.Context, chID channel.ID, bundle channelhost.Bundle) (int, error) {
+	bound, err := bundle.View().ListBound(ctx)
+	if err != nil {
+		return 0, err
 	}
+	corrections := 0
+	var errs []error
+	for _, daemonID := range bound {
+		var exists bool
+		if err := w.app.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM daemons WHERE id=?)`, daemonID).Scan(&exists); err != nil {
+			errs = append(errs, err)
+			continue
+		}
+		if exists {
+			continue
+		}
+		corrections++
+		if _, err := bundle.SysOp().RevokeDaemon(ctx, channel.DaemonRequest{Ref: convergeRef(chID), DaemonID: daemonID}); err != nil {
+			errs = append(errs, fmt.Errorf("daemon %s: %w", daemonID, err))
+		}
+	}
+	return corrections, errors.Join(errs...)
 }
 
-func (w *fanoutWorker) fail(job fanoutJob, cause error) {
-	if errors.Is(cause, context.Canceled) {
-		return
+// mintRenderSeq claims the next per-channel render seq above the instance's
+// current one. Minted-but-undelivered seqs (a transient delivery failure) are
+// harmless gaps in a monotonic counter.
+func (w *fanoutWorker) mintRenderSeq(ctx context.Context, chID channel.ID, declID string, baseline int64) (int64, error) {
+	tx, err := w.app.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
 	}
-	var permanent permanentFanoutError
-	if errors.As(cause, &permanent) {
-		_, _ = w.app.db.ExecContext(context.Background(), `UPDATE `+job.table+` SET dead_at=?,last_error=?,next_attempt_at=0 WHERE job_id=? AND done_at IS NULL AND dead_at IS NULL`, time.Now().UnixMilli(), permanent.Error(), job.id)
-		w.app.logger.Error("fanout.dead_letter", "table", job.table, "job", job.id, "err", permanent)
-		return
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO decl_render_state(channel_id,decl_id,render_seq) VALUES (?,?,?) ON CONFLICT(channel_id,decl_id) DO UPDATE SET render_seq=MAX(render_seq,excluded.render_seq)`, string(chID), declID, baseline); err != nil {
+		return 0, err
 	}
-	next := time.Now().Add(fanoutRetryDelay(job.attempt)).UnixMilli()
-	_, _ = w.app.db.ExecContext(context.Background(), `UPDATE `+job.table+` SET last_error=?,next_attempt_at=? WHERE job_id=? AND done_at IS NULL AND dead_at IS NULL`, cause.Error(), next, job.id)
+	var seq int64
+	if err := tx.QueryRowContext(ctx, `UPDATE decl_render_state SET render_seq=render_seq+1 WHERE channel_id=? AND decl_id=? RETURNING render_seq`, string(chID), declID).Scan(&seq); err != nil {
+		return 0, err
+	}
+	return seq, tx.Commit()
+}
+
+// convergeRef mints a fresh anchored ref for ONE delivery attempt. The
+// patrol's exactly-once story is the observation gate before each delivery,
+// not ref reuse: re-asking an old ref after an unknown result is replaced by
+// re-observing channel truth on the next pass.
+func convergeRef(chID channel.ID) string {
+	return channel.DerivedFanoutRef("fo:v1:"+uuid.NewString(), chID)
 }

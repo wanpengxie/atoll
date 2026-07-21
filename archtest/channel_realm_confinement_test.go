@@ -380,7 +380,10 @@ func TestChannelRealmW6SingleJobRunners(t *testing.T) {
 	}{
 		{"channel lifecycle worker", "../app/channel_lifecycle.go", "type lifecycleWorker struct", []string{"channel_provision_jobs", "channel_destroy_jobs"}},
 		{"admission service", "../app/admission.go", "type admissionService struct", []string{"channel_admission_operations", "channel_finalize_deliveries"}},
-		{"fanout sender", "../app/fanout.go", "type fanoutWorker struct", []string{"decl_fanout_jobs", "daemon_revoke_jobs", "decl_fanout_deliveries"}},
+		// The convergence patrol (fanout 轻形化) carries NO durable job anchors:
+		// the realm registry itself is its only durable input, and its output is
+		// observed channel truth — anchors list only the shared seq authority.
+		{"fanout convergence patrol", "../app/fanout.go", "type fanoutWorker struct", []string{"decl_render_state"}},
 	}
 	schema, err := os.ReadFile("../app/store.go")
 	if err != nil {
@@ -461,14 +464,15 @@ func TestChannelRealmW9StrictSchemaSeats(t *testing.T) {
 		"CREATE TABLE channels", "parent_id TEXT", "compensation_job_id INTEGER",
 		"CREATE TABLE channel_admission_operations", "attempt INTEGER", "next_attempt_at INTEGER",
 		"CREATE TABLE channel_decl_overlays", "pending_config_json TEXT", "pending_ref TEXT",
-		"CREATE TABLE decl_render_state", "CREATE TABLE decl_fanout_deliveries", "error_code TEXT",
+		"CREATE TABLE decl_render_state",
 		"CREATE TABLE principal_channels", "CREATE TABLE channel_finalize_deliveries",
 	} {
 		if !strings.Contains(appText, required) {
 			t.Errorf("app schema missing %q", required)
 		}
 	}
-	for _, forbidden := range []string{"CREATE TABLE workspaces", "CREATE TABLE workspace_members", "targets_json"} {
+	for _, forbidden := range []string{"CREATE TABLE workspaces", "CREATE TABLE workspace_members", "targets_json",
+		"CREATE TABLE decl_fanout_jobs", "CREATE TABLE daemon_revoke_jobs", "CREATE TABLE decl_fanout_deliveries"} {
 		if strings.Contains(appText, forbidden) {
 			t.Errorf("app schema retains %q", forbidden)
 		}

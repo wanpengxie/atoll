@@ -129,8 +129,8 @@ func TestOpenProcessDB_StrictReopenRejectsMalformedSchemaWithoutMutation(t *test
 			build: func(t *testing.T, path string) {
 				db := openRawSQLite(t, path)
 				initializeSchemaVariant(t, db, func(object schemaObject) string {
-					if object.name == "ix_fanout_pending" {
-						return `CREATE INDEX ix_fanout_pending ON decl_fanout_jobs(job_id)`
+					if object.name == "ix_admission_pending" {
+						return `CREATE INDEX ix_admission_pending ON channel_admission_operations(operation_id)`
 					}
 					return object.sql
 				})

@@ -512,18 +512,6 @@ func (e *opEntry) executeMemberSetDefault(ctx context.Context, req sysactor.Oper
 	return map[string]any{"default_agent": payload.InstanceID}, nil
 }
 
-// DeclaredBySourceSerialized is the fanout arm's absent judge: the read takes
-// the operation serial section, so an absent verdict can never interleave with
-// an in-flight member introduce that holds a pre-edit resolver answer — the
-// judge and the birth share one queue.
-func (e *opEntry) DeclaredBySourceSerialized(ctx context.Context, declID string) ([]storespec.ActorControlRow, error) {
-	if err := e.available(); err != nil {
-		return nil, err
-	}
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	return e.home.View().DeclaredBySource(ctx, declID)
-}
 
 func asOperateError(err error) error {
 	var operationErr *channel.OperationError

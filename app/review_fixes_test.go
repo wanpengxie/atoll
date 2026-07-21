@@ -3,6 +3,7 @@ package app_test
 import (
 	"net/http"
 	"testing"
+	"time"
 )
 
 // TestDeleteDaemon_RevokePersistFails_Returns5xx pins the daemon-delete fix: if the
@@ -27,10 +28,11 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 		map[string]any{"daemon_id": daemonID}, cookies2)
 	assertStatus(t, w, http.StatusOK)
 
-	// A normal schema trigger (not TEMP/connection-local) fails the third write after
-	// both DELETEs have executed inside the handler transaction.
+	// A normal schema trigger (not TEMP/connection-local) fails the authority
+	// DELETE itself — under the convergence-patrol model that single write IS
+	// the whole revocation publish.
 	if _, err := env.db.Exec(`CREATE TRIGGER fail_daemon_revoke_job
-		BEFORE INSERT ON daemon_revoke_jobs
+		BEFORE DELETE ON daemons
 		BEGIN SELECT RAISE(ABORT, 'forced revoke failure'); END`); err != nil {
 		t.Fatalf("install revoke trigger: %v", err)
 	}
@@ -65,13 +67,6 @@ func TestDeleteDaemon_RevokePersistFails_Returns5xx(t *testing.T) {
 	if !bindingSurvived {
 		t.Fatal("channel binding was deleted despite the realm revocation transaction rolling back")
 	}
-	var pending int
-	if err := env.db.QueryRow(`SELECT COUNT(*) FROM daemon_revoke_jobs WHERE daemon_id=?`, daemonID).Scan(&pending); err != nil {
-		t.Fatal(err)
-	}
-	if pending != 0 {
-		t.Fatalf("failed revocation left %d pending jobs, want 0", pending)
-	}
 }
 
 // TestDeleteDaemon_HappyPath_RemovesBindings proves the realm revocation job
@@ -105,13 +100,25 @@ func TestDeleteDaemon_HappyPath_RemovesBindings(t *testing.T) {
 			t.Fatalf("daemon still present after delete")
 		}
 	}
-	// Binding gone after fanout convergence.
-	w = env.do(t, "GET", "/api/channels/"+chID+"/daemons", nil, cookies2)
-	assertStatus(t, w, http.StatusOK)
-	cds, _ := respJSON(t, w)["daemons"].([]any)
-	for _, d := range cds {
-		if d.(map[string]any)["id"] == daemonID {
-			t.Fatalf("channel binding survived daemon revocation fanout")
+	// Binding gone after the convergence patrol's next visit (poked by the
+	// delete handler; level semantics — poll, don't assume synchronous).
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		w = env.do(t, "GET", "/api/channels/"+chID+"/daemons", nil, cookies2)
+		assertStatus(t, w, http.StatusOK)
+		cds, _ := respJSON(t, w)["daemons"].([]any)
+		survived := false
+		for _, d := range cds {
+			if d.(map[string]any)["id"] == daemonID {
+				survived = true
+			}
 		}
+		if !survived {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("channel binding survived daemon revocation convergence")
+		}
+		time.Sleep(20 * time.Millisecond)
 	}
 }
