@@ -250,7 +250,7 @@ func (h *Home) activateOne(ctx context.Context, control storespec.ActorControlRo
 	if !ok {
 		return activationVerdict{kind: actNoFactory, reason: "class_not_found"}
 	}
-	ticket, ticketVerdict := h.liveness.BeginEnsure(id, control.CurrentDeclVersion)
+	ticket, ticketVerdict := h.liveness.BeginEnsure(id, control.CurrentDeclVersion, control.RestartEpoch)
 	if ticketVerdict == transitionInFlight {
 		return activationVerdict{kind: actBackoffHeld, until: now}
 	}
@@ -338,7 +338,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		if _, retired := h.liveness.RetireIfVersionSkew(row.ID, row.CurrentDeclVersion); retired {
+		if _, retired := h.liveness.RetireIfVersionSkew(row.ID, row.CurrentDeclVersion, row.RestartEpoch); retired {
 			rt.DespawnID(row.ID)
 		}
 		state, ok := h.liveness.WakeStanding(row.ID)
@@ -361,7 +361,7 @@ func (h *Home) reconcileActivation(ctx context.Context) {
 		}
 		if row.Placement.Kind == storespec.PlacementDaemon {
 			if state.Occ == occNone {
-				_, _ = h.liveness.BeginEnsure(row.ID, row.CurrentDeclVersion)
+				_, _ = h.liveness.BeginEnsure(row.ID, row.CurrentDeclVersion, row.RestartEpoch)
 			}
 			continue
 		}

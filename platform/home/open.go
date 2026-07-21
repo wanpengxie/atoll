@@ -426,7 +426,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if !sysLive {
 		return nil, errors.New("platform: system cell not live at publish")
 	}
-	if ticket, verdict := h.liveness.BeginEnsure(actor.SystemActorID, 1); verdict != transitionApplied ||
+	if ticket, verdict := h.liveness.BeginEnsure(actor.SystemActorID, 1, 0); verdict != transitionApplied ||
 		h.liveness.PublishLocal(actor.SystemActorID, ticket, sysInc, runtimeDeliveryCarrier{id: actor.SystemActorID, deliverer: channel.Deliverer()}) != transitionApplied {
 		return nil, errors.New("platform: publish system liveness")
 	}

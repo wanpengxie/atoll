@@ -46,7 +46,7 @@ func (h *Home) reconcileDaemonIntent(ctx context.Context) {
 		if row.Placement.Kind != storespec.PlacementDaemon {
 			continue
 		}
-		if _, retired := h.liveness.RetireIfVersionSkew(row.ID, row.CurrentDeclVersion); retired {
+		if _, retired := h.liveness.RetireIfVersionSkew(row.ID, row.CurrentDeclVersion, row.RestartEpoch); retired {
 			h.channel.Cells().DespawnID(row.ID)
 		}
 		state, ok := h.liveness.WakeStanding(row.ID)
@@ -54,7 +54,7 @@ func (h *Home) reconcileDaemonIntent(ctx context.Context) {
 			continue
 		}
 		if state.Occ == occNone && (row.TIdle == 0 || state.Dirty || state.Restart) {
-			_, _ = h.liveness.BeginEnsure(row.ID, row.CurrentDeclVersion)
+			_, _ = h.liveness.BeginEnsure(row.ID, row.CurrentDeclVersion, row.RestartEpoch)
 		}
 	}
 }

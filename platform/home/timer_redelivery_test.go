@@ -131,7 +131,7 @@ func TestFiredTimerFullAttemptIsReleasedAndRetriedOnNextSweep(t *testing.T) {
 		t.Fatalf("spawn inert embodiment=(%v,%v)", built, err)
 	}
 	full := &testCarrier{err: actorrt.ErrMailboxFull}
-	ticket, verdict := h.liveness.BeginEnsure(result.Row.ID, 1)
+	ticket, verdict := h.liveness.BeginEnsure(result.Row.ID, 1, 0)
 	if verdict != transitionApplied || h.liveness.PublishLocal(result.Row.ID, ticket, noInc, full) != transitionApplied {
 		t.Fatalf("publish full carrier: ticket=%q verdict=%v", ticket, verdict)
 	}
@@ -163,7 +163,7 @@ func TestFiredTimerFullAttemptIsReleasedAndRetriedOnNextSweep(t *testing.T) {
 	if _, verdict := h.liveness.Retire(result.Row.ID, false); verdict != transitionApplied {
 		t.Fatalf("retire full carrier=%v", verdict)
 	}
-	nextTicket, verdict := h.liveness.BeginEnsure(result.Row.ID, 1)
+	nextTicket, verdict := h.liveness.BeginEnsure(result.Row.ID, 1, 0)
 	next := &testCarrier{}
 	if verdict != transitionApplied || h.liveness.PublishLocal(result.Row.ID, nextTicket, noInc, next) != transitionApplied {
 		t.Fatalf("publish successor: ticket=%q verdict=%v", nextTicket, verdict)

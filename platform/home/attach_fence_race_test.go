@@ -74,7 +74,7 @@ func TestAttachRaceWindowRejectsStaleCandidateAndPreservesIncumbent(t *testing.T
 		// captured HERE, before the physical live-flip.
 		l := newLivenessLedger()
 		l.Bootstrap([]actor.ActorID{id})
-		ticket, verdict := l.BeginEnsure(id, 1)
+		ticket, verdict := l.BeginEnsure(id, 1, 0)
 		if verdict != transitionApplied {
 			t.Fatalf("BeginEnsure=%v", verdict)
 		}
@@ -94,7 +94,7 @@ func TestAttachRaceWindowRejectsStaleCandidateAndPreservesIncumbent(t *testing.T
 		// advancing the actor's current version to 2, which retires the
 		// in-flight attempt via RetireIfVersionSkew (the real apply path,
 		// composition.go, drives this same ledger method).
-		if _, retired := l.RetireIfVersionSkew(id, 2); !retired {
+		if _, retired := l.RetireIfVersionSkew(id, 2, 0); !retired {
 			t.Fatal("concurrent apply (version skew) did not retire the in-flight attempt")
 		}
 		if fence.Valid() {
@@ -130,7 +130,7 @@ func TestAttachRaceWindowRejectsStaleCandidateAndPreservesIncumbent(t *testing.T
 
 		l := newLivenessLedger()
 		l.Bootstrap([]actor.ActorID{id})
-		ticket, verdict := l.BeginEnsure(id, 1)
+		ticket, verdict := l.BeginEnsure(id, 1, 0)
 		if verdict != transitionApplied {
 			t.Fatalf("BeginEnsure=%v", verdict)
 		}
