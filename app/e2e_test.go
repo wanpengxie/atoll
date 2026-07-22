@@ -330,14 +330,6 @@ func createChannel(t *testing.T, env *testEnv, cookies []*http.Cookie, name stri
 	}, cookies)
 	assertStatus(t, w, http.StatusCreated)
 	body := respJSON(t, w)
-	// Composition embodiment is async now (reconcile ring, not a synchronous spawn):
-	// wait for the boost default floor to come up so tests that immediately send a
-	// message find a live default agent (matches the old synchronous readiness).
-	if chID, ok := body["id"].(string); ok {
-		if boost, ok := body["default_agent"].(string); ok {
-			env.app.WaitLiveForTest(chID, actor.ActorID(boost), 2*time.Second)
-		}
-	}
 	return body, mergeCookies(cookies, extractCookies(w))
 }
 

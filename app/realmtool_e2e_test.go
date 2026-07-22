@@ -43,9 +43,6 @@ func TestRealmToolBuiltInListCreateAndInspect(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !env.app.WaitLiveForTest(setup.chID, toolID, 2*time.Second) {
-		t.Fatal("realm tool did not become live")
-	}
 	srv := httptest.NewServer(env.app.Handler())
 	defer srv.Close()
 	client := dialWS(t, srv, setup.cookies, setup.chID, 0)
@@ -98,9 +95,6 @@ func TestRealmToolActorOwnedIntroduceAndRemove(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !env.app.WaitLiveForTest(setup.chID, toolID, 2*time.Second) {
-		t.Fatal("realm tool did not become live")
-	}
 	srv := httptest.NewServer(env.app.Handler())
 	defer srv.Close()
 	client := dialWS(t, srv, setup.cookies, setup.chID, 0)
@@ -141,7 +135,7 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 	setup := fullSetup(t, env)
 	daemon := createAndBindDaemon(t, env, setup.chID, "fork-realm-host", setup.cookies)
 	toolID, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool")
-	if err != nil || !env.app.WaitLiveForTest(setup.chID, toolID, 2*time.Second) {
+	if err != nil {
 		t.Fatalf("realm tool unavailable: id=%q err=%v", toolID, err)
 	}
 	srv := httptest.NewServer(env.app.Handler())
@@ -344,9 +338,6 @@ func TestRealmToolFetchCopiesCrossChannelResourceWithProvenance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !env.app.WaitLiveForTest(target.chID, toolID, 2*time.Second) {
-		t.Fatal("target realm tool did not become live")
-	}
 	targetClient := dialWS(t, srv, target.cookies, target.chID, 0)
 	defer targetClient.close()
 	fetched := realmToolRequest(t, env, target, targetClient, toolID, realmtool.TypeFetchResource, channel.ResourceRef{
@@ -395,9 +386,6 @@ func TestRealmToolPrivateIntroductionAndSovereigntySwitch(t *testing.T) {
 	toolID, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool")
 	if err != nil {
 		t.Fatal(err)
-	}
-	if !env.app.WaitLiveForTest(setup.chID, toolID, 2*time.Second) {
-		t.Fatal("realm tool did not become live")
 	}
 	srv := httptest.NewServer(env.app.Handler())
 	defer srv.Close()

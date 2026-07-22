@@ -4,7 +4,6 @@ import (
 	"context"
 	"net/http"
 
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
@@ -36,8 +35,4 @@ func Poke(h *Home) { h.pokeReconcile() }
 
 func LinkServe(h *Home, w http.ResponseWriter, r *http.Request, daemonID string) {
 	h.serveAttach(w, r, daemonID)
-}
-
-func LinkPlan(h *Home, ctx context.Context, daemonID string) ([]platform.PlanActor, error) {
-	return h.planForDaemon(ctx, daemonID)
 }

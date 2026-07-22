@@ -10,12 +10,9 @@ import (
 
 	"github.com/google/uuid"
 
-	"github.com/wanpengxie/atoll/lib/introspect"
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -30,12 +27,12 @@ func declaredBySourceOneForTest(ctx context.Context, view channelhost.View, sour
 	return rows[0], true, nil
 }
 
-func (a *App) ActorsForTest(chID channel.ID) ([]storespec.Record, error) {
+func (a *App) ActorsForTest(chID channel.ID) ([]storespec.ActorControlRow, error) {
 	bundle, ok := a.host.Acquire(chID)
 	if !ok {
 		return nil, errTestChannelNotLoaded
 	}
-	return bundle.View().ListActors(context.Background())
+	return bundle.View().ActiveActors(context.Background())
 }
 
 func (a *App) MessagesForTest(chID channel.ID) ([]storespec.StoredRow, error) {
@@ -60,31 +57,6 @@ func (a *App) MessagesForTest(chID channel.ID) ([]storespec.StoredRow, error) {
 		}
 	}
 	return nil, errors.New("app: test channel has no active human reader")
-}
-
-func (a *App) PresenceForTest(chID channel.ID, id actor.ActorID) (member, known, online bool, err error) {
-	bundle, ok := a.host.Acquire(chID)
-	if !ok {
-		return false, false, false, errTestChannelNotLoaded
-	}
-	snapshot, err := bundle.View().Snapshot(context.Background(), id)
-	if err != nil {
-		return false, false, false, err
-	}
-	testimony, known := snapshot.L3[actorrt.ObsKind(introspect.ObsDevicePresence)]
-	if !known {
-		return snapshot.Member, false, false, nil
-	}
-	p, ok := introspect.ParseDevicePresence(testimony.Val)
-	return snapshot.Member, ok, ok && p.Online, nil
-}
-
-func (a *App) PlanForDaemonForTest(chID channel.ID, daemonID string) ([]platform.PlanActor, error) {
-	bundle, ok := a.host.Acquire(chID)
-	if !ok {
-		return nil, errTestChannelNotLoaded
-	}
-	return bundle.Daemon().PlanForDaemon(context.Background(), daemonID)
 }
 
 // Handler exposes the assembled gin engine as an http.Handler so black-box
@@ -184,28 +156,6 @@ func (a *App) ResolveSourceForTest(chID, source string) (actor.ActorID, error) {
 	return "", fmt.Errorf("declaration source not found")
 }
 
-// WaitLiveForTest polls chID's home until id has a live embodiment (View.Stat) or
-// the timeout elapses — the async-embodiment counterpart of the old synchronous
-// spawn: since composition is embodied by the reconcile ring (Admit + poke → sweep),
-// a test that needs a live default floor before sending must wait for the sweep.
-// Test-only.
-func (a *App) WaitLiveForTest(chID string, id actor.ActorID, timeout time.Duration) bool {
-	bundle, ok := a.host.Acquire(channel.ID(chID))
-	if !ok {
-		return false
-	}
-	deadline := time.Now().Add(timeout)
-	for {
-		if _, live := bundle.View().Stat(id); live {
-			return true
-		}
-		if time.Now().After(deadline) {
-			return false
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-}
-
 // CloseHomeForTest leaves the closed handle published in the app map so a
 // post-commit daemon-obligation read deterministically returns ErrClosed.
 func (a *App) CloseHomeForTest(chID channel.ID) error {
@@ -254,17 +204,6 @@ func (a *App) CreateHalfBuiltChannelForTest(ownerPrincipal, name string) (string
 		return "", err
 	}
 	return chID, nil
-}
-
-// StatForTest reads id's L1 embodiment (View.Stat) on chID's home — the axis
-// presence must stay orthogonal to (层2 link来去不碰层1: startedAt stable across a
-// ws reconnect, live throughout). Test-only.
-func (a *App) StatForTest(chID channel.ID, id actor.ActorID) (startedAt time.Time, live bool) {
-	bundle, ok := a.host.Acquire(chID)
-	if !ok {
-		return time.Time{}, false
-	}
-	return bundle.View().Stat(id)
 }
 
 // SetBcryptCostForTest drops the password work factor for test fixtures —

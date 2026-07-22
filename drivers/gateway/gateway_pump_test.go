@@ -72,8 +72,10 @@ func TestPumpFairness(t *testing.T) {
 		memberRoute("cold", cold, coldID, clk.now()),
 	}, nil, nil)
 
-	coldHead, _ := cold.View().MaxSeq(context.Background())
-	hotHead, _ := hot.View().MaxSeq(context.Background())
+	coldSeqs := sourceSeqs(t, cold)
+	hotSeqs := sourceSeqs(t, hot)
+	coldHead := coldSeqs[len(coldSeqs)-1]
+	hotHead := hotSeqs[len(hotSeqs)-1]
 	s, _ := g.Attach(principal, nil)
 	var feed *feedObserver
 	var stop func()
@@ -146,10 +148,8 @@ func TestBusyLoopObservesSweepUnderSustainedBacklog(t *testing.T) {
 	admitRows(t, h, 3*feedBatch) // deep backlog: every batch read is a full feedBatch.
 	res.set(principal, []Route{memberRoute("c", h, id, clk.now())}, nil, nil)
 
-	head, err := h.View().MaxSeq(context.Background())
-	if err != nil {
-		t.Fatalf("MaxSeq: %v", err)
-	}
+	seqs := sourceSeqs(t, h)
+	head := seqs[len(seqs)-1]
 	revoked := make(chan struct{})
 	var revokeOnce sync.Once
 	s, _ := g.Attach(principal, nil)

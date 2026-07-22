@@ -220,7 +220,7 @@ func TestFanoutLiteReadInterfacesStayClosed(t *testing.T) {
 	})
 	assertInterfaceMethods("../platform/channelhost/bundle.go", "View", []string{
 		"DefaultAgent", "DeclaredBySource", "ActiveActors", "ResolvePrincipal",
-		"OwnerPrincipal", "ReadVisibleAfterSeq", "ActorFacts", "Snapshot", "MaxSeq", "ListActors",
-		"Stat", "IsAttached", "IsBound", "Resources",
+		"OwnerPrincipal", "ReadVisibleAfterSeq", "ActorFacts", "IsAttached", "IsBound", "Resources",
 	})
+	assertInterfaceMethods("../platform/channelhost/bundle.go", "DaemonLink", []string{"ServeAttach"})
 }

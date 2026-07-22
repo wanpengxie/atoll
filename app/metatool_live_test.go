@@ -40,6 +40,8 @@ import (
 
 	"github.com/wanpengxie/atoll/app"
 	"github.com/wanpengxie/atoll/drivers/agents/base"
+	"github.com/wanpengxie/atoll/drivers/gateway"
+	"github.com/wanpengxie/atoll/drivers/gateway/connector/web"
 	"github.com/wanpengxie/atoll/drivers/tools/kimi"
 	"github.com/wanpengxie/atoll/drivers/tools/xhs"
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -159,9 +161,19 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 		db.Close()
 		t.Fatalf("app.New: %v", err)
 	}
+	gw, err := gateway.New(gateway.Config{Resolver: testGatewayResolver(a)})
+	if err != nil {
+		a.Close()
+		db.Close()
+		t.Fatalf("gateway.New: %v", err)
+	}
+	gw.Start()
+	a.SetGateway(web.New(gw))
+	a.SetMembershipPoke(gw.Poke)
 	testAgentBuilder = factory
 	t.Cleanup(func() {
 		testAgentBuilder = nil
+		gw.Close()
 		a.Close()
 		db.Close()
 	})
@@ -170,8 +182,8 @@ func setupShellAgentApp(t *testing.T, agentSink func(*shellAgent)) *testEnv {
 }
 
 // startToolDaemon runs a single daemon (compute.Run) hosting BOTH the
-// tool:xhs and tool:kimi cells over one real /compute link. Returns once started
-// (caller waits for the actors to register via waitForActor).
+// tool:xhs and tool:kimi cells over one real /compute link. Device dialing is
+// the readiness proof for each membrane-internal plan consumer.
 func startToolDaemon(t *testing.T, env *testEnv, s setupResult, srv *httptest.Server, logger *slog.Logger) (actor.ActorID, actor.ActorID) {
 	t.Helper()
 
@@ -332,6 +344,8 @@ func TestMetatoolLiveCallActor(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	s := fullSetup(t, env)
+	control := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer control.close()
 
 	// The channel agent cell (our shellAgent) is spawned when the channel home is
 	// created in fullSetup. Grab the published handle.
@@ -347,8 +361,6 @@ func TestMetatoolLiveCallActor(t *testing.T) {
 
 	// One daemon hosting both tool cells.
 	xhsID, kimiID := startToolDaemon(t, env, s, srv, logger)
-	waitForActor(t, env, s, string(xhsID), 5*time.Second)
-	waitForActor(t, env, s, string(kimiID), 5*time.Second)
 
 	// Connect a mock device to each adapter's private /device WS.
 	xhsDev := startMockDevice(t, metatoolXHSDeviceAddr, xhsCannedUp)
@@ -397,9 +409,9 @@ func TestMetatoolLiveCallActor(t *testing.T) {
 	t.Run("device_offline", func(t *testing.T) {
 		xhsDev.close()
 		// Wait for the adapter to observe the closed socket (its readLoop flips
-		// device-absent shortly after the close). Poll via the status route so the
+		// device-absent shortly after the close). Poll via actor.status so the
 		// next call_actor is guaranteed to hit the offline path, not a race.
-		waitDeviceOnline(t, env, s, string(xhsID), false, 5*time.Second)
+		pollPresence(t, env, s, control, xhsID, true, false, 5*time.Second)
 
 		rv := callActorAsync(t, sa, ctx, string(xhsID), "xhs.search",
 			map[string]any{"keyword": "go"}, 8*time.Second)

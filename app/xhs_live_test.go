@@ -123,10 +123,7 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 		}
 	})
 
-	// --- STAGE 1: daemon attach → tool:xhs registers as a channel member ----
-	waitForActor(t, env, s, string(xhsID), 5*time.Second)
-
-	// --- STAGE 2: real device connects to the cell's private /device WS -----
+	// --- STAGE 1: real device connects once the daemon-hosted cell is ready ---
 	devURL := fmt.Sprintf("ws://%s/device", xhsDeviceAddr)
 	conn := dialDeviceWithRetry(t, devURL, 3*time.Second)
 	t.Cleanup(func() { _ = conn.Close() })
@@ -189,15 +186,6 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 	}
 }
 
-// waitForActor waits for the actual daemon port embodiment. Identity admission
-// precedes attachment, so registry presence alone is not an attachment proof.
-func waitForActor(t *testing.T, env *testEnv, s setupResult, id string, timeout time.Duration) {
-	t.Helper()
-	if !env.app.WaitLiveForTest(s.chID, actor.ActorID(id), timeout) {
-		t.Fatalf("actor %q never attached a live embodiment within %s", id, timeout)
-	}
-}
-
 // waitForResponse polls the channel message log for a kind=response whose
 // parent_id is the request message id, returning its raw payload.
 func waitForResponse(t *testing.T, env *testEnv, s setupResult, parentID string, timeout time.Duration) json.RawMessage {
@@ -256,24 +244,26 @@ func dialDeviceWithRetry(t *testing.T, url string, timeout time.Duration) *webso
 // tests never collide on the port).
 const xhsStatusDeviceAddr = "127.0.0.1:18091"
 
-// TestXHSLiveActorStatus is the green gate for the app status route under REAL
-// live conditions: a real server + real daemon hosting the tool:xhs cell + a real
+// TestXHSLiveActorStatus is the green gate for the in-universe actor.status read
+// under REAL live conditions: a real server + real daemon hosting the tool:xhs cell + a real
 // mock device over the cell's private /device WS.
 //
-//  1. device connected → GET /actors/tool:xhs/status reports known:true, online:true
+//  1. device connected → actor.status reports known:true, online:true
 //  2. device disconnects → the same read reports known:true, online:false
 //
 // This proves the FULL L3 obs-PUSH chain end-to-end: the adapter publishes a
 // device-presence edge (PublishObs) → the daemon's population forwarder sends it UP
 // the link as a KindObs frame → the home port relays it into publishObs → the
-// home presence fold materialises the level → View.Snapshot → /status reads
-// it OUT-OF-BAND (no probe, no truth-log write — the retired anti-pattern).
+// home presence fold materialises the level → the system actor projects it via
+// actor.status. The realm never receives a raw Snapshot capability.
 func TestXHSLiveActorStatus(t *testing.T) {
 	env := setupTestApp(t)
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 
 	s := fullSetup(t, env)
+	control := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer control.close()
 
 	daemonBody := createAndBindDaemon(t, env, s.chID, "xhs-status-daemon", s.cookies)
 	apiKey := daemonBody["api_key"].(string)
@@ -314,50 +304,15 @@ func TestXHSLiveActorStatus(t *testing.T) {
 		}
 	})
 
-	// Daemon attach → tool:xhs registers as a channel member.
-	waitForActor(t, env, s, string(xhsID), 5*time.Second)
-
 	// --- STAGE 1: device connected → status reports device_online:true --------
 	devURL := fmt.Sprintf("ws://%s/device", xhsStatusDeviceAddr)
 	conn := dialDeviceWithRetry(t, devURL, 3*time.Second)
 
-	waitDeviceOnline(t, env, s, string(xhsID), true, 5*time.Second)
+	pollPresence(t, env, s, control, xhsID, true, true, 5*time.Second)
 
 	// --- STAGE 2: device disconnects → status reports device_online:false -----
 	_ = conn.Close()
-	waitDeviceOnline(t, env, s, string(xhsID), false, 5*time.Second)
-}
-
-// waitDeviceOnline polls the canonical Home presence fold until the device
-// status matches want. It deliberately does NOT accept live:false as proof of
-// offline: live:false means the actor was unreachable (it never answered), which
-// would let a never-answering actor pass the offline assertion vacuously. The
-// offline proof must be a real answer carrying device_online:false — that is what
-// shows the status route reflects the dropped device. It tolerates transient
-// mismatch (the readLoop's offline flip lags the socket close by a poll or two)
-// by retrying until the deadline.
-func waitDeviceOnline(t *testing.T, env *testEnv, s setupResult, id string, want bool, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		_, known, online, err := env.app.PresenceForTest(channel.ID(s.chID), actor.ActorID(id))
-		if err != nil {
-			t.Fatal(err)
-		}
-		// Only a KNOWN device presence (the adapter
-		// actually published a device-presence edge that the obs chain folded at the
-		// home) proves the want — known:false (unknown) must never satisfy either
-		// assertion vacuously. This exercises the full L3 obs push chain end-to-end:
-		// adapter PublishObs → daemon population forward → KindObs wire → home port →
-		// publishObs → fold → View.Snapshot → /status.
-		if known && online == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("status online never became %v (via a known device presence) within %s (known=%v online=%v)", want, timeout, known, online)
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	pollPresence(t, env, s, control, xhsID, true, false, 5*time.Second)
 }
 
 // NOTE (期7 review 修复 P2b): the former TestXHSLiveDeviceUnknownOnDaemonDeath

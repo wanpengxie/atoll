@@ -12,8 +12,8 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // ---------------------------------------------------------------------------
@@ -240,29 +240,56 @@ func addSecondMember(t *testing.T, env *testEnv, s setupResult, email string) ([
 	if err != nil {
 		t.Fatalf("admit second member: %v", err)
 	}
-	if !env.app.WaitLiveForTest(s.chID, aid, 2*time.Second) {
-		t.Fatal("second member cell did not embody")
-	}
 	return cookies, aid
 }
 
-// pollPresence polls the canonical Home presence fold until (known, online)
-// matches. When wantKnown is false only known is checked.
-func pollPresence(t *testing.T, env *testEnv, s setupResult, actorID string, wantKnown, wantOnline bool, timeout time.Duration) {
+func queryActorStatus(t *testing.T, env *testEnv, s setupResult, client *wsClient, actorID actor.ActorID) introspect.Status {
+	t.Helper()
+	ack := client.sendMessage(map[string]any{
+		"channel_id": s.chID, "msg_type": introspect.QueryStatus, "kind": "request",
+		"audience": []string{string(actor.SystemActorID)}, "payload": map[string]any{"actor_id": actorID},
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("actor.status submit=%v", ack)
+	}
+	raw := waitForResponse(t, env, s, ack["message_id"].(string), 3*time.Second)
+	var status introspect.Status
+	if err := json.Unmarshal(raw, &status); err != nil {
+		t.Fatalf("decode actor.status %s: %v", raw, err)
+	}
+	return status
+}
+
+func waitActorStatus(t *testing.T, env *testEnv, s setupResult, client *wsClient, actorID actor.ActorID, timeout time.Duration, accept func(introspect.Status) bool) introspect.Status {
 	t.Helper()
 	deadline := time.Now().Add(timeout)
 	for {
-		_, known, online, err := env.app.PresenceForTest(channel.ID(s.chID), actor.ActorID(actorID))
-		if err == nil && known == wantKnown {
-			if !wantKnown || online == wantOnline {
-				return
-			}
+		status := queryActorStatus(t, env, s, client, actorID)
+		if accept(status) {
+			return status
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("presence %s: want known=%v online=%v; got known=%v online=%v err=%v", actorID, wantKnown, wantOnline, known, online, err)
+			t.Fatalf("actor.status %s did not converge: %+v", actorID, status)
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+// pollPresence observes the canonical product read path: a member asks the
+// system actor for actor.status, which projects the membrane-internal presence
+// fold. No realm-side raw Snapshot capability is involved.
+func pollPresence(t *testing.T, env *testEnv, s setupResult, client *wsClient, actorID actor.ActorID, wantKnown, wantOnline bool, timeout time.Duration) introspect.Status {
+	t.Helper()
+	return waitActorStatus(t, env, s, client, actorID, timeout, func(status introspect.Status) bool {
+		testimony, known := status.L3[introspect.ObsDevicePresence]
+		if known != wantKnown {
+			return false
+		}
+		if !wantKnown {
+			return true
+		}
+		return testimony.Device != nil && testimony.Device.Online == wantOnline
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -429,30 +456,25 @@ func TestWS_Presence(t *testing.T) {
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
-	uid := s.actorID
+	targetCookies, uid := addSecondMember(t, env, s, "presence-target@example.com")
+	control := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer control.close()
+	initial := waitActorStatus(t, env, s, control, uid, 2*time.Second, func(status introspect.Status) bool { return status.Present })
 
-	startedAt0, live0 := env.app.StatForTest(channel.ID(s.chID), uid)
-	if !live0 {
-		t.Fatal("member cell should be live before any connection (常驻)")
-	}
-
-	c := dialWS(t, srv, s.cookies, s.chID, 0)
-	pollPresence(t, env, s, string(uid), true, true, 2*time.Second)
-
-	startedAt1, live1 := env.app.StatForTest(channel.ID(s.chID), uid)
-	if !live1 || !startedAt1.Equal(startedAt0) {
-		t.Fatalf("Stat moved on connect: live=%v startedAt %v→%v (presence must not touch L1)", live1, startedAt0, startedAt1)
+	c := dialWS(t, srv, targetCookies, s.chID, 0)
+	connected := pollPresence(t, env, s, control, uid, true, true, 2*time.Second)
+	if !connected.Present || connected.UptimeMs < initial.UptimeMs {
+		t.Fatalf("connect restarted L1: before=%+v after=%+v", initial, connected)
 	}
 
 	c.close()
-	pollPresence(t, env, s, string(uid), true, false, 2*time.Second)
+	pollPresence(t, env, s, control, uid, true, false, 2*time.Second)
 
-	c2 := dialWS(t, srv, s.cookies, s.chID, 0)
+	c2 := dialWS(t, srv, targetCookies, s.chID, 0)
 	defer c2.close()
-	pollPresence(t, env, s, string(uid), true, true, 2*time.Second)
-	startedAt2, live2 := env.app.StatForTest(channel.ID(s.chID), uid)
-	if !live2 || !startedAt2.Equal(startedAt0) {
-		t.Fatalf("reconnect changed the cell: live=%v startedAt %v→%v", live2, startedAt0, startedAt2)
+	reconnected := pollPresence(t, env, s, control, uid, true, true, 2*time.Second)
+	if !reconnected.Present || reconnected.UptimeMs < initial.UptimeMs {
+		t.Fatalf("reconnect restarted L1: before=%+v after=%+v", initial, reconnected)
 	}
 }
 
@@ -463,21 +485,25 @@ func TestWS_PresenceMultiTab(t *testing.T) {
 	srv := httptest.NewServer(env.app.Handler())
 	t.Cleanup(srv.Close)
 	s := fullSetup(t, env)
-	uid := s.actorID
+	targetCookies, uid := addSecondMember(t, env, s, "multitab-target@example.com")
+	control := dialWS(t, srv, s.cookies, s.chID, 0)
+	defer control.close()
+	waitActorStatus(t, env, s, control, uid, 2*time.Second, func(status introspect.Status) bool { return status.Present })
 
-	tab1 := dialWS(t, srv, s.cookies, s.chID, 0)
-	tab2 := dialWS(t, srv, s.cookies, s.chID, 0)
-	pollPresence(t, env, s, string(uid), true, true, 2*time.Second)
+	tab1 := dialWS(t, srv, targetCookies, s.chID, 0)
+	tab2 := dialWS(t, srv, targetCookies, s.chID, 0)
+	pollPresence(t, env, s, control, uid, true, true, 2*time.Second)
 
 	tab1.close()
 	time.Sleep(200 * time.Millisecond)
-	_, known, online, err := env.app.PresenceForTest(channel.ID(s.chID), uid)
-	if err != nil || !known || !online {
-		t.Fatalf("after one tab closed the other is still open: known=%v online=%v err=%v", known, online, err)
+	status := queryActorStatus(t, env, s, control, uid)
+	testimony, known := status.L3[introspect.ObsDevicePresence]
+	if !known || testimony.Device == nil || !testimony.Device.Online {
+		t.Fatalf("after one tab closed the other is still open: status=%+v", status)
 	}
 
 	tab2.close()
-	pollPresence(t, env, s, string(uid), true, false, 2*time.Second)
+	pollPresence(t, env, s, control, uid, true, false, 2*time.Second)
 }
 
 // ---------------------------------------------------------------------------

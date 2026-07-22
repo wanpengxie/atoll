@@ -95,17 +95,17 @@ func TestDeclarationOverlayMasksGlobalThenDeleteFallsBack(t *testing.T) {
 	introduced := env.do(t, http.MethodPost, "/api/channels/"+s.chID+"/actors", map[string]any{"decl_id": declID}, s.cookies)
 	assertStatus(t, introduced, http.StatusCreated)
 	actorID := actor.ActorID(respJSON(t, introduced)["actor_id"].(string))
-	waitPlanConfig(t, env, channel.ID(s.chID), daemonID, actorID, "global-v1")
+	waitActorConfig(t, env, channel.ID(s.chID), daemonID, actorID, "global-v1")
 
 	put := env.do(t, http.MethodPut, "/api/channels/"+s.chID+"/decls/"+declID+"/config", map[string]any{"config": map[string]any{"model": "overlay-v2"}}, s.cookies)
 	assertStatus(t, put, http.StatusOK)
-	waitPlanConfig(t, env, channel.ID(s.chID), daemonID, actorID, "overlay-v2")
+	waitActorConfig(t, env, channel.ID(s.chID), daemonID, actorID, "overlay-v2")
 	global := env.do(t, http.MethodPatch, "/api/actor-decls/"+declID, map[string]any{"config": map[string]any{"model": "global-v3"}}, s.cookies)
 	assertStatus(t, global, http.StatusOK)
-	assertPlanConfigStays(t, env, channel.ID(s.chID), daemonID, actorID, "overlay-v2", 250*time.Millisecond)
+	assertActorConfigStays(t, env, channel.ID(s.chID), daemonID, actorID, "overlay-v2", 250*time.Millisecond)
 	clear := env.do(t, http.MethodDelete, "/api/channels/"+s.chID+"/decls/"+declID+"/config", nil, s.cookies)
 	assertStatus(t, clear, http.StatusOK)
-	waitPlanConfig(t, env, channel.ID(s.chID), daemonID, actorID, "global-v3")
+	waitActorConfig(t, env, channel.ID(s.chID), daemonID, actorID, "global-v3")
 
 	legacy := env.do(t, http.MethodPut, "/api/channels/"+s.chID+"/actors/"+string(actorID)+"/config", map[string]any{"config": map[string]any{}}, s.cookies)
 	assertStatus(t, legacy, http.StatusNotFound)
@@ -125,17 +125,17 @@ func TestDeclarationClassCannotCrossKind(t *testing.T) {
 	}
 }
 
-func assertPlanConfigStays(t *testing.T, env *testEnv, chID channel.ID, daemonID string, instanceID actor.ActorID, want string, duration time.Duration) {
+func assertActorConfigStays(t *testing.T, env *testEnv, chID channel.ID, daemonID string, instanceID actor.ActorID, want string, duration time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(duration)
 	for time.Now().Before(deadline) {
-		rows, err := env.app.PlanForDaemonForTest(chID, daemonID)
+		rows, err := env.app.ActorsForTest(chID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		found := false
 		for _, row := range rows {
-			if row.InstanceID != instanceID {
+			if row.ID != instanceID || row.Placement.Host != daemonID {
 				continue
 			}
 			found = true
@@ -144,7 +144,7 @@ func assertPlanConfigStays(t *testing.T, env *testEnv, chID channel.ID, daemonID
 			}
 		}
 		if !found {
-			t.Fatalf("instance %s absent from daemon plan", instanceID)
+			t.Fatalf("instance %s absent from active actor projection", instanceID)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

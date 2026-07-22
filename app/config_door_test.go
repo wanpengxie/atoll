@@ -114,21 +114,21 @@ func TestConfigDoor_ProcEndToEnd(t *testing.T) {
 	assertStatus(t, introducedResp, http.StatusCreated)
 	introduced := respJSON(t, introducedResp)
 	instanceID := actor.ActorID(introduced["actor_id"].(string))
-	waitPlanConfig(t, env, channel.ID(s.chID), daemonID, instanceID, "v1")
+	waitActorConfig(t, env, channel.ID(s.chID), daemonID, instanceID, "v1")
 
 	updated := env.do(t, "PATCH", "/api/actor-decls/"+declID, map[string]any{"config": map[string]any{"model": "v2"}}, s.cookies)
 	assertStatus(t, updated, http.StatusOK)
-	waitPlanConfig(t, env, channel.ID(s.chID), daemonID, instanceID, "v2")
+	waitActorConfig(t, env, channel.ID(s.chID), daemonID, instanceID, "v2")
 }
 
-func waitPlanConfig(t *testing.T, env *testEnv, chID channel.ID, daemonID string, instanceID actor.ActorID, want string) {
+func waitActorConfig(t *testing.T, env *testEnv, chID channel.ID, daemonID string, instanceID actor.ActorID, want string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		rows, err := env.app.PlanForDaemonForTest(chID, daemonID)
+		rows, err := env.app.ActorsForTest(chID)
 		if err == nil {
 			for _, row := range rows {
-				if row.InstanceID != instanceID {
+				if row.ID != instanceID || row.Placement.Host != daemonID {
 					continue
 				}
 				var config map[string]any
@@ -139,7 +139,7 @@ func waitPlanConfig(t *testing.T, env *testEnv, chID channel.ID, daemonID string
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("plan for %s did not converge to model %q", instanceID, want)
+	t.Fatalf("actor %s did not converge to model %q", instanceID, want)
 }
 
 // TestConfigSnapshot_ProcForm proves the Proc form reads the snapshot too: a Proc

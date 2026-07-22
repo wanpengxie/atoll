@@ -3,11 +3,8 @@ package channelhost
 import (
 	"context"
 	"net/http"
-	"time"
 
-	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/home"
-	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -30,7 +27,6 @@ type GatewayHitch interface {
 
 type DaemonLink interface {
 	ServeAttach(http.ResponseWriter, *http.Request, string)
-	PlanForDaemon(context.Context, string) ([]platform.PlanActor, error)
 }
 
 type SysOp interface {
@@ -49,10 +45,6 @@ type View interface {
 	OwnerPrincipal(context.Context) (string, bool, error)
 	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]storespec.StoredRow, int64, error)
 	ActorFacts(context.Context, actor.ActorID) (channel.ActorFacts, bool, error)
-	Snapshot(context.Context, actor.ActorID) (presence.Snapshot, error)
-	MaxSeq(context.Context) (int64, error)
-	ListActors(context.Context) ([]storespec.Record, error)
-	Stat(actor.ActorID) (time.Time, bool)
 	IsAttached(string) bool
 	IsBound(context.Context, string) (bool, error)
 	Resources() ResourceReadView
@@ -88,9 +80,6 @@ type daemonAdapter struct{ home *home.Home }
 func (a daemonAdapter) ServeAttach(w http.ResponseWriter, r *http.Request, daemon string) {
 	home.LinkServe(a.home, w, r, daemon)
 }
-func (a daemonAdapter) PlanForDaemon(ctx context.Context, daemon string) ([]platform.PlanActor, error) {
-	return home.LinkPlan(a.home, ctx, daemon)
-}
 
 type viewAdapter struct{ home *home.Home }
 
@@ -116,15 +105,7 @@ func (a viewAdapter) ActorFacts(ctx context.Context, id actor.ActorID) (channel.
 	return a.home.View().ActorFacts(ctx, id)
 }
 
-func (a viewAdapter) Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error) {
-	return a.home.View().Snapshot(ctx, id)
-}
-func (a viewAdapter) MaxSeq(ctx context.Context) (int64, error) { return a.home.View().MaxSeq(ctx) }
-func (a viewAdapter) ListActors(ctx context.Context) ([]storespec.Record, error) {
-	return a.home.View().ListActors(ctx)
-}
-func (a viewAdapter) Stat(id actor.ActorID) (time.Time, bool) { return a.home.View().Stat(id) }
-func (a viewAdapter) IsAttached(id string) bool               { return a.home.View().IsAttached(id) }
+func (a viewAdapter) IsAttached(id string) bool { return a.home.View().IsAttached(id) }
 func (a viewAdapter) IsBound(ctx context.Context, id string) (bool, error) {
 	return a.home.View().IsBound(ctx, id)
 }
