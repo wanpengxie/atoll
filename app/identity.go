@@ -28,17 +28,22 @@ const sessionDuration = 30 * 24 * time.Hour
 // time sink (34 tests × ~1.7s). Nothing outside export_test may write it.
 var bcryptCost = bcrypt.DefaultCost
 
-func (a *App) channelExists(ctx context.Context, chID string) bool {
+func (a *App) channelExists(ctx context.Context, chID string) (bool, error) {
 	var exists bool
 	err := a.db.QueryRowContext(ctx,
 		`SELECT EXISTS(SELECT 1 FROM channels WHERE id = ?)`, chID,
 	).Scan(&exists)
-	return err == nil && exists
+	return exists, err
 }
 
 func (a *App) requireChannelAccess(c *gin.Context) (string, bool) {
 	chID := c.Param("chID")
-	if !a.channelExists(c.Request.Context(), chID) {
+	exists, err := a.channelExists(c.Request.Context(), chID)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel directory unavailable"})
+		return "", false
+	}
+	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 		return "", false
 	}

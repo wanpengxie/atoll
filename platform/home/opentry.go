@@ -112,7 +112,9 @@ func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declI
 		if err := json.Unmarshal(completed.Result, &result); err != nil {
 			return storespec.IntroduceResult{}, err
 		}
-		_ = e.publishActor(ctx, result.ActorID)
+		if err := e.publishActor(ctx, result.ActorID); err != nil {
+			return storespec.IntroduceResult{}, err
+		}
 		return result, nil
 	}
 	if meta.DecisiveError != nil {

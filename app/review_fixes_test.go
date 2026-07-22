@@ -169,6 +169,18 @@ func TestChannelDaemonListIncludesBindingsOwnedByOtherMembers(t *testing.T) {
 	t.Fatalf("channel daemon list hid member-owned binding %s", daemonID)
 }
 
+func TestChannelDaemonListRejectsNonMember(t *testing.T) {
+	env := setupTestApp(t)
+	_, ownerCookies := register(t, env, "roster-owner@example.com", "secret123", "Owner")
+	created := env.do(t, http.MethodPost, "/api/channels", map[string]any{"name": "private-roster"}, ownerCookies)
+	assertStatus(t, created, http.StatusCreated)
+	channelID := respJSON(t, created)["id"].(string)
+
+	_, outsiderCookies := register(t, env, "roster-outsider@example.com", "secret123", "Outsider")
+	listed := env.do(t, http.MethodGet, "/api/channels/"+channelID+"/daemons", nil, outsiderCookies)
+	assertStatus(t, listed, http.StatusForbidden)
+}
+
 func TestActorDeclListFailsWhenChannelProjectionIsUnavailable(t *testing.T) {
 	env := setupTestApp(t)
 	setup := fullSetup(t, env)

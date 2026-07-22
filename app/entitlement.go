@@ -22,7 +22,12 @@ type EntitlementRoute struct {
 // projection from membrane truth. A missing directory row suppresses the
 // pre-publication genesis poke; publish writes the owner projection atomically.
 func (a *App) reconcilePrincipalChannel(ctx context.Context, chID channel.ID, principal string) {
-	if !a.channelExists(ctx, string(chID)) {
+	exists, err := a.channelExists(ctx, string(chID))
+	if err != nil {
+		a.logger.Warn("membership projection directory read failed", "channel", chID, "principal", principal, "err", err)
+		return
+	}
+	if !exists {
 		return
 	}
 	bundle, ok := a.host.Acquire(chID)

@@ -274,7 +274,11 @@ var (
 // The two states must not collapse: a caller retrying a 503 is right to; a
 // caller retrying a 404 is not. Every HTTP path maps exactly these two errors.
 func (a *App) acquireBundle(ctx context.Context, chID channel.ID) (channelhost.Bundle, error) {
-	if !a.channelExists(ctx, string(chID)) {
+	exists, err := a.channelExists(ctx, string(chID))
+	if err != nil {
+		return nil, errors.Join(errChannelUnavailable, err)
+	}
+	if !exists {
 		return nil, errChannelNotFound
 	}
 	if bundle, ok := a.host.Acquire(chID); ok {

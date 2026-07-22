@@ -211,7 +211,7 @@ func (a *App) daemonConvergenceObservedClear(ctx context.Context, daemonID strin
 }
 
 func (a *App) handleListChannelDaemons(c *gin.Context) {
-	chID, ok := a.requireChannelAccess(c)
+	chID, ok := a.requireChannelMember(c)
 	if !ok {
 		return
 	}

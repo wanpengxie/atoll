@@ -25,6 +25,15 @@ type fixedIntroductionResolver struct {
 	kind  actor.Kind
 }
 
+type failingDeclaredLookup struct {
+	storespec.DeclaredControlReader
+	err error
+}
+
+func (r failingDeclaredLookup) LookupDeclaredActive(context.Context, actor.ActorID) (storespec.ActorControlRow, bool, error) {
+	return storespec.ActorControlRow{}, false, r.err
+}
+
 type mutableIntroductionResolver struct {
 	mu          sync.Mutex
 	facts       channel.DeclarationFacts
@@ -239,6 +248,44 @@ func TestPostCommitActorPublicationIgnoresExpiredRequestContext(t *testing.T) {
 	}
 	if _, found, err := h.controlIndex.LookupActive(context.Background(), committed.ActorID); err != nil || !found {
 		t.Fatalf("committed actor not published: found=%v err=%v", found, err)
+	}
+}
+
+func TestIntroduceTerminalReplayRetriesFailedPublication(t *testing.T) {
+	ctx := context.Background()
+	resolver := fixedIntroductionResolver{kind: actor.KindAgent, facts: channel.DeclarationFacts{
+		OwnerPrincipal: "owner", Visibility: "private", Class: "test-agent",
+	}}
+	h, err := Open(Config{
+		ChannelID: "introduce-terminal-publication", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"), Bootstrap: true,
+		CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: resolver, ReconcileInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.closeInternal("test")
+	owner, err := h.admitChannelOwner(ctx, "owner")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ops := SystemOps(h)
+	if _, err := ops.AttachDaemon(ctx, channel.DaemonRequest{Ref: "terminal:attach", DaemonID: "daemon-a"}); err != nil {
+		t.Fatal(err)
+	}
+	req := channel.IntroduceRequest{Ref: "terminal:introduce", DeclID: "decl-a", InitiatorActorID: owner}
+	introduced, err := ops.Introduce(ctx, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.controlIndex.DeleteBatch([]actor.ActorID{introduced.ActorID})
+
+	publishErr := errors.New("declared projection unavailable")
+	h.cs.Declared = failingDeclaredLookup{DeclaredControlReader: h.cs.Declared, err: publishErr}
+	if _, err := ops.Introduce(ctx, req); !errors.Is(err, publishErr) {
+		t.Fatalf("terminal replay publication error = %v, want %v", err, publishErr)
+	}
+	if _, active, err := h.controlIndex.LookupActive(ctx, introduced.ActorID); err != nil || active {
+		t.Fatalf("failed publication unexpectedly restored actor: active=%v err=%v", active, err)
 	}
 }
 

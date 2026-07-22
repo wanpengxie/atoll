@@ -389,7 +389,12 @@ func (a *App) reconcileServingChannels(ctx context.Context) error {
 		return nil
 	}
 	for _, entry := range entries {
-		if !a.channelExists(ctx, string(entry.ChannelID)) {
+		exists, err := a.channelExists(ctx, string(entry.ChannelID))
+		if err != nil {
+			a.logger.Warn("channel directory check failed", "channel", entry.ChannelID, "err", err)
+			continue
+		}
+		if !exists {
 			a.logger.Warn("orphan channel image", "channel", entry.ChannelID, "state", entry.State)
 		}
 	}

@@ -14,7 +14,12 @@ import (
 
 func (a *App) handleJoinChannel(c *gin.Context) {
 	chID := channel.ID(c.Param("chID"))
-	if !a.channelExists(c.Request.Context(), string(chID)) {
+	exists, err := a.channelExists(c.Request.Context(), string(chID))
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel directory unavailable"})
+		return
+	}
+	if !exists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 		return
 	}
