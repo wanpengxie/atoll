@@ -74,7 +74,7 @@ func TestRealmOpsAgentCannotWriteDeclarationRegistry(t *testing.T) {
 	bundle := openTestChannelForTest(t, a, "agent-realm-ops", []channelhost.GenesisDeclaration{{
 		DeclID: "requester-decl", Kind: actor.KindAgent, Rendered: snapshot,
 	}})
-	agent, found, err := bundle.View().DeclaredBySourceOne(context.Background(), "requester-decl")
+	agent, found, err := declaredBySourceOneForTest(context.Background(), bundle.View(), "requester-decl")
 	if err != nil || !found {
 		t.Fatalf("resolve requester=(%s,%v,%v)", agent.ID, found, err)
 	}
@@ -108,7 +108,7 @@ func TestRealmOpsAgentWithEmptyPrincipalOwnsIntroduceByActorCoordinate(t *testin
 	bundle := openTestChannelForTest(t, a, "agent-owned-operation", []channelhost.GenesisDeclaration{{
 		DeclID: "requester-decl", Kind: actor.KindAgent, Rendered: requesterSnapshot,
 	}})
-	requester, found, err := bundle.View().DeclaredBySourceOne(context.Background(), "requester-decl")
+	requester, found, err := declaredBySourceOneForTest(context.Background(), bundle.View(), "requester-decl")
 	if err != nil || !found || requester.Principal != "" {
 		t.Fatalf("requester=%+v found=%v err=%v", requester, found, err)
 	}
@@ -190,7 +190,7 @@ func TestObserverResourceStreamStopsAtChunkBoundaryAfterRealmToolRemoval(t *test
 	if err != nil || n != 32*1024 {
 		t.Fatalf("first chunk n=%d err=%v", n, err)
 	}
-	target, found, err := bundle.View().DeclaredBySourceOne(context.Background(), realmToolDeclID)
+	target, found, err := declaredBySourceOneForTest(context.Background(), bundle.View(), realmToolDeclID)
 	if err != nil || !found {
 		t.Fatalf("resolve realm tool target=(%+v,%v,%v)", target, found, err)
 	}
@@ -249,7 +249,7 @@ func TestRealmOpsFetchAllowsAgentWithZeroSourceMembership(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	requesterRow, found, err := source.View().DeclaredBySourceOne(context.Background(), "fetch-requester")
+	requesterRow, found, err := declaredBySourceOneForTest(context.Background(), source.View(), "fetch-requester")
 	if err != nil || !found {
 		t.Fatalf("source requester=(%s,%v,%v)", requesterRow.ID, found, err)
 	}
@@ -263,5 +263,22 @@ func TestRealmOpsFetchAllowsAgentWithZeroSourceMembership(t *testing.T) {
 	body, err := io.ReadAll(fetched.Body)
 	if err != nil || string(body) != "agent-visible-artifact" {
 		t.Fatalf("agent fetch body=%q err=%v", body, err)
+	}
+}
+
+func TestRealmCopyLimitIsEnforcedByRealmStream(t *testing.T) {
+	body := newRealmCopyPolicyBody(io.NopCloser(bytes.NewReader([]byte("12345"))), 4)
+	defer body.Close()
+	_, err := io.ReadAll(body)
+	var realmErr *channel.RealmError
+	if !errors.As(err, &realmErr) || realmErr.Code != channel.RealmInvalidRequest {
+		t.Fatalf("oversized realm stream err=%v, want invalid_request", err)
+	}
+
+	exact := newRealmCopyPolicyBody(io.NopCloser(bytes.NewReader([]byte("1234"))), 4)
+	defer exact.Close()
+	got, err := io.ReadAll(exact)
+	if err != nil || string(got) != "1234" {
+		t.Fatalf("exact-limit realm stream=%q err=%v", got, err)
 	}
 }

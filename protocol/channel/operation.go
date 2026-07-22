@@ -289,12 +289,9 @@ const (
 	ErrCodeInvalidDesiredHost   OperationErrorCode = "invalid_desired_host"
 	ErrCodeDeclNotFound         OperationErrorCode = "decl_not_found"
 	ErrCodeForbidden            OperationErrorCode = "forbidden"
-	ErrCodeInvalidPlacement     OperationErrorCode = "invalid_placement"
 	ErrCodeUnknownClass         OperationErrorCode = "unknown_class"
 	ErrCodeProtectedActor       OperationErrorCode = "protected_actor"
 	ErrCodeNotInComposition     OperationErrorCode = "not_in_composition"
-	ErrCodeRebuildFailed        OperationErrorCode = "rebuild_failed"
-	ErrCodeUnauthorizedSender   OperationErrorCode = "unauthorized_sender"
 	ErrCodeInternal             OperationErrorCode = "internal_error"
 	ErrCodeNotAcceptedSource    OperationErrorCode = "not_accepted_source"
 	ErrCodeMemberInactive       OperationErrorCode = "member_inactive"
@@ -302,11 +299,11 @@ const (
 	ErrCodeRefConflict          OperationErrorCode = "ref_conflict"
 )
 
-var AllOperationErrorCodes = []OperationErrorCode{
+var operationErrorCodes = [...]OperationErrorCode{
 	ErrCodeBadPayload, ErrCodeChannelUnavailable, ErrCodeInvalidDesiredHost,
-	ErrCodeDeclNotFound, ErrCodeForbidden, ErrCodeInvalidPlacement,
+	ErrCodeDeclNotFound, ErrCodeForbidden,
 	ErrCodeUnknownClass, ErrCodeProtectedActor, ErrCodeNotInComposition,
-	ErrCodeRebuildFailed, ErrCodeUnauthorizedSender, ErrCodeInternal,
+	ErrCodeInternal,
 	ErrCodeNotAcceptedSource, ErrCodeMemberInactive, ErrCodeAuthorityUnavailable,
 }
 

@@ -89,7 +89,7 @@ func TestBootPublishesHumanSystemAndCompositionRowsInOneControlShape(t *testing.
 	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
 	resolver := &acceptanceResolver{}
 	h1 := openAcceptanceHome(t, dbPath, "three-births", resolver, time.Hour)
-	humanID, err := h1.admit(ctx, actor.KindHuman, "three-birth-human")
+	humanID, err := admitThroughSysOp(h1, ctx, actor.KindHuman, "three-birth-human")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -155,7 +155,7 @@ func TestEmptyConfigSurvivesAdmissionEditBootAndForkFactoryBuild(t *testing.T) {
 	}
 	waitHomeCondition(t, func() bool { return resolver.count(decl.Row.ID, "declared-empty-v2", true) >= 1 })
 
-	parent, err := h1.admit(ctx, actor.KindHuman, "empty-fork-parent")
+	parent, err := admitThroughSysOp(h1, ctx, actor.KindHuman, "empty-fork-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -193,7 +193,7 @@ func TestStateLifetimeSplitsDurableIdentityFromHomeSessionRun(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
 	resolver := &acceptanceResolver{}
 	h1 := openAcceptanceHome(t, dbPath, "state-two-layers", resolver, time.Hour)
-	declared, err := h1.admit(ctx, actor.KindHuman, "state-durable")
+	declared, err := admitThroughSysOp(h1, ctx, actor.KindHuman, "state-durable")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestBootDropsRunIdentityAndClosesItsOpenRequestOnlyAfterRestart(t *testing.
 	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
 	resolver := &acceptanceResolver{}
 	h1 := openAcceptanceHome(t, dbPath, "boot-run-closure", resolver, 5*time.Millisecond)
-	parent, err := h1.admit(ctx, actor.KindHuman, "boot-parent")
+	parent, err := admitThroughSysOp(h1, ctx, actor.KindHuman, "boot-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -389,7 +389,7 @@ func TestForkWakeConvergesOnLevelSweepWithoutInlineBuildOrPoke(t *testing.T) {
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	h.disablePoke.Store(true)
 	h.disableForkInlineActivation.Store(true)
-	parent, err := h.admit(ctx, actor.KindHuman, "accelerator-parent")
+	parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "accelerator-parent")
 	if err != nil {
 		t.Fatal(err)
 	}

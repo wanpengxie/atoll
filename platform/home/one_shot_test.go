@@ -96,7 +96,7 @@ func TestOneShotCompletionStateTerminalAndEndSurviveBothCrashCuts(t *testing.T) 
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = h.closeInternal("test") })
-	parent, err := h.admit(ctx, actor.KindHuman, "one-shot-parent")
+	parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "one-shot-parent")
 	if err != nil {
 		t.Fatal(err)
 	}

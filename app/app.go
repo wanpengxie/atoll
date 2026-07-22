@@ -262,49 +262,56 @@ var (
 	errChannelUnavailable = errors.New("app: channel unavailable")
 )
 
-func (a *App) acquireBundle(chID channel.ID) (channelhost.Bundle, error) {
+func (a *App) acquireBundle(ctx context.Context, chID channel.ID) (channelhost.Bundle, error) {
 	if bundle, ok := a.host.Acquire(chID); ok {
 		return bundle, nil
 	}
-	if !a.channelExists(context.Background(), string(chID)) {
+	if !a.channelExists(ctx, string(chID)) {
 		return nil, errChannelNotFound
 	}
 	return nil, errChannelUnavailable
 }
 
-func (a *App) snapshotBundles(ctx context.Context) map[channel.ID]channelhost.Bundle {
+func (a *App) snapshotBundles(ctx context.Context) (map[channel.ID]channelhost.Bundle, error) {
 	out := make(map[channel.ID]channelhost.Bundle)
 	rows, err := a.db.QueryContext(ctx, `SELECT id FROM channels`)
 	if err != nil {
-		return out
+		return nil, err
 	}
 	defer rows.Close()
 	for rows.Next() {
 		var raw string
-		if rows.Scan(&raw) == nil {
-			id := channel.ID(raw)
-			if bundle, ok := a.host.Acquire(id); ok {
-				out[id] = bundle
-			}
+		if err := rows.Scan(&raw); err != nil {
+			return nil, err
+		}
+		id := channel.ID(raw)
+		if bundle, ok := a.host.Acquire(id); ok {
+			out[id] = bundle
+		} else {
+			return nil, fmt.Errorf("%w: %s", errChannelUnavailable, id)
 		}
 	}
-	return out
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
 
 // bundleOrError resolves the open Bundle for chID, or writes the honest two-state
 // error to c and returns nil (A-P8):
 //   - the directory (channels table) has NO such channel → 404 (permanent).
-//   - the directory HAS it but its universe is not open (getHome==nil) → 503
+//   - the directory HAS it but ChannelHost cannot acquire a serving Bundle → 503
 //     "channel unavailable" (retryable, logged) — never the misleading 404 that
 //     conflated "gone" with "not up yet".
 //
 // The two states must not collapse: a caller retrying a 503 is right to; a caller
-// retrying a 404 is not. Every handler that needs a live Home routes through here.
+// retrying a 404 is not. Every handler that uses this HTTP helper gets the same split.
 func (a *App) bundleOrError(c *gin.Context, chID channel.ID) channelhost.Bundle {
-	if bundle, ok := a.host.Acquire(chID); ok {
+	bundle, err := a.acquireBundle(c.Request.Context(), chID)
+	if err == nil {
 		return bundle
 	}
-	if !a.channelExists(c.Request.Context(), string(chID)) {
+	if errors.Is(err, errChannelNotFound) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 		return nil
 	}

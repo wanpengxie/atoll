@@ -37,12 +37,22 @@ func (a *App) handleListDaemons(c *gin.Context) {
 		var id, name string
 		var createdAt int64
 		if err := rows.Scan(&id, &name, &createdAt); err != nil {
-			continue
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
+		}
+		online, err := a.daemonOnline(c.Request.Context(), "", id)
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "daemon status unavailable"})
+			return
 		}
 		result = append(result, gin.H{
 			"id": id, "name": name, "created_at": createdAt,
-			"online": a.daemonOnline(c.Request.Context(), "", id),
+			"online": online,
 		})
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
 	}
 	if result == nil {
 		result = []gin.H{}
@@ -53,21 +63,31 @@ func (a *App) handleListDaemons(c *gin.Context) {
 // daemonOnline reports whether daemon id has a live link attach right now. It is
 // online iff attached on any of its bound channels (or `only`, when non-empty).
 // Read-time from each channel-home's View — derived, never a stored column.
-func (a *App) daemonOnline(ctx context.Context, only channel.ID, daemonID string) bool {
-	check := func(chID channel.ID) bool {
+func (a *App) daemonOnline(ctx context.Context, only channel.ID, daemonID string) (bool, error) {
+	check := func(chID channel.ID) (bool, error) {
 		bundle, ok := a.host.Acquire(chID)
-		return ok && bundle.View().IsAttached(daemonID)
+		if !ok {
+			return false, fmt.Errorf("%w: %s", errChannelUnavailable, chID)
+		}
+		return bundle.View().IsAttached(daemonID), nil
 	}
 	if only != "" {
 		return check(only)
 	}
-	ids, _ := a.directoryChannelIDs(ctx)
+	ids, err := a.directoryChannelIDs(ctx)
+	if err != nil {
+		return false, err
+	}
 	for _, ch := range ids {
-		if check(ch) {
-			return true
+		online, err := check(ch)
+		if err != nil {
+			return false, err
+		}
+		if online {
+			return true, nil
 		}
 	}
-	return false
+	return false, nil
 }
 
 func (a *App) directoryChannelIDs(ctx context.Context) ([]channel.ID, error) {
@@ -200,7 +220,10 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 		return
 	}
-	rows, err := a.db.QueryContext(c.Request.Context(), `SELECT id,name,created_at FROM daemons WHERE owner_id=? AND deleted_at IS NULL ORDER BY id`, middleware.UserID(c))
+	// A channel roster is channel-scoped, not viewer-owned. Any member who can
+	// read the channel sees every daemon currently bound to it, regardless of
+	// which member registered that daemon in the realm.
+	rows, err := a.db.QueryContext(c.Request.Context(), `SELECT id,name,created_at FROM daemons WHERE deleted_at IS NULL ORDER BY id`)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
 		return
@@ -212,16 +235,25 @@ func (a *App) handleListChannelDaemons(c *gin.Context) {
 		var id, name string
 		var createdAt int64
 		if err := rows.Scan(&id, &name, &createdAt); err != nil {
-			continue
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+			return
 		}
 		bound, err := bundle.View().IsBound(c.Request.Context(), id)
-		if err != nil || !bound {
+		if err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel bindings unavailable"})
+			return
+		}
+		if !bound {
 			continue
 		}
 		result = append(result, gin.H{
 			"id": id, "name": name, "created_at": createdAt,
-			"online": a.daemonOnline(c.Request.Context(), channel.ID(chID), id),
+			"online": bundle.View().IsAttached(id),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "query failed"})
+		return
 	}
 	if result == nil {
 		result = []gin.H{}

@@ -207,6 +207,41 @@ func (r fixedIntroductionResolver) DaemonFacts(context.Context, string) (channel
 	return channel.DaemonFacts{}, nil
 }
 
+func TestPostCommitActorPublicationIgnoresExpiredRequestContext(t *testing.T) {
+	h, err := Open(Config{
+		ChannelID: "postcommit-publication", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"), Bootstrap: true,
+		CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: inertIntroductionResolver{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer h.closeInternal("test")
+
+	request := channel.AdmitRequest{Ref: "postcommit:admit", Principal: "late-request"}
+	meta, err := systemMeta(request.Ref, request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed, err := h.opEntry.admission.Admit(context.Background(), storespec.AdmitTx{
+		SysOpMeta: meta, Principal: request.Principal,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := h.controlIndex.LookupActive(context.Background(), committed.ActorID); found {
+		t.Fatal("fixture unexpectedly published the directly committed actor")
+	}
+
+	expired, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := h.opEntry.publishActor(expired, committed.ActorID); err != nil {
+		t.Fatalf("post-commit publication inherited request cancellation: %v", err)
+	}
+	if _, found, err := h.controlIndex.LookupActive(context.Background(), committed.ActorID); err != nil || !found {
+		t.Fatalf("committed actor not published: found=%v err=%v", found, err)
+	}
+}
+
 func TestOpEntryIntroducePullAndDetachUseOneDurableChain(t *testing.T) {
 	ctx := context.Background()
 	resolver := &mutableIntroductionResolver{kind: actor.KindAgent, facts: channel.DeclarationFacts{

@@ -44,15 +44,10 @@ func ParseKind(raw string) (Kind, bool) {
 //     progress bubbles, placement notices, bootstrap events), intended to be
 //     suppressed from the default UI view (still persisted as audit trail).
 //
-// NB: enforcement is NOT yet wired. The read seam (storespec queries / view
-// fanout) does NOT filter on visibility today — every committed message is
-// currently readable by any reader regardless of this field. So visibility is
-// presently ADVISORY: the value is recorded faithfully, but "private = only
-// sender+audience may see" / "system = suppressed from view" are the INTENDED
-// semantics, not current behaviour. Read-side enforcement (a query-see
-// chokepoint filtering by visibility ∧ audience) is deferred and will be added
-// additively when a real privacy / multi-tenant driver lands. Do NOT claim
-// enforcement in code or UX until that seam exists.
+// ReadVisibleAfterSeq enforces this value before LIMIT: public is channel-wide,
+// private is sender-or-audience, and system is absent from ordinary views.
+// Delivery remains a separate question and follows explicit audience through
+// ShouldDeliver, including for system requests.
 type Visibility string
 
 // Visibility enum — closed set.

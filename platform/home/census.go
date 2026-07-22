@@ -9,28 +9,6 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-var ErrAdmitKind = errors.New("platform: membership admission accepts only human actors")
-
-// Admit creates one durable human identity through the declared-admission
-// transaction. It does not Mint a pen or place a cell; the control row declares
-// server placement and the reconcile ring owns embodiment. After publication it
-// pokes the ring so the
-// embodiment lands on the next immediate sweep rather than waiting a full tick.
-// Idempotent for an already-active (kind, principal): the registry returns the
-// existing minted instance id and the extra reconcile poke is harmless.
-func (h *Home) admit(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, error) {
-	if h.closed.Load() {
-		return "", ErrClosed
-	}
-	if kind != actor.KindHuman {
-		return "", ErrAdmitKind
-	}
-	return h.admitHuman(ctx, storespec.AdmitBundle{
-		Kind: actor.KindHuman, Principal: principal, Class: "human",
-		Placement: storespec.NewServerPlacement(), CreatedAt: h.nowMs(),
-	})
-}
-
 // AdmitChannelOwner performs the sole non-neutral durable admission. A
 // principal collision converges in the store, so the post-commit read must
 // prove the existing row is already the owner; admission never upgrades an
@@ -89,25 +67,4 @@ func (h *Home) admitHuman(ctx context.Context, in storespec.AdmitBundle) (actor.
 			"actor", string(id), "kind", string(actor.KindHuman), "principal", in.Principal, "role", string(in.Role))
 	}
 	return id, nil
-}
-
-// PrincipalOf returns the opaque principal recorded for an actor instance.
-func (h *Home) principalOf(ctx context.Context, id actor.ActorID) (string, bool, error) {
-	if h.closed.Load() {
-		return "", false, ErrClosed
-	}
-	rec, ok, err := h.cs.Authority.LookupActive(ctx, id)
-	if err != nil || !ok {
-		return "", ok, err
-	}
-	return rec.Principal, true, nil
-}
-
-func (h *Home) resolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {
-	// Principals is its own assembly-declared face (ChannelStores.Principals);
-	// the old type-assertion that recovered it from the narrow Registry field
-	// was a bypass valve (it voided the read-face segregation for every
-	// ChannelStores holder at once) and is gone — purity 手动档, 反旁路结构墙.
-	rec, found, err := h.cs.Principals.LookupActivePrincipal(ctx, kind, principal)
-	return rec.ID, found, err
 }

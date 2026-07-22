@@ -45,7 +45,7 @@ func BenchmarkActorStorm(b *testing.B) {
 	b.Run("ForkAdmission", func(b *testing.B) {
 		h := openStormHome(b)
 		ctx := context.Background()
-		parent, err := h.admit(ctx, actor.KindHuman, "storm-fork-parent")
+		parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "storm-fork-parent")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -63,7 +63,7 @@ func BenchmarkActorStorm(b *testing.B) {
 	b.Run("DeepSubtreeRemove", func(b *testing.B) {
 		h := openStormHome(b)
 		ctx := context.Background()
-		parent, err := h.admit(ctx, actor.KindHuman, "storm-remove-parent")
+		parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "storm-remove-parent")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -85,7 +85,7 @@ func BenchmarkActorStorm(b *testing.B) {
 				}
 				sponsor = child
 			}
-			if err := h.systemEndHandle().End(ctx, root, "storm"); err != nil {
+			if err := systemEndForTest(h).End(ctx, root, "storm"); err != nil {
 				b.Fatal(err)
 			}
 		}
@@ -94,7 +94,7 @@ func BenchmarkActorStorm(b *testing.B) {
 	b.Run("AuthorGateRead", func(b *testing.B) {
 		h := openStormHome(b)
 		ctx := context.Background()
-		id, err := h.admit(ctx, actor.KindHuman, "storm-gate-author")
+		id, err := admitThroughSysOp(h, ctx, actor.KindHuman, "storm-gate-author")
 		if err != nil {
 			b.Fatal(err)
 		}
@@ -135,7 +135,7 @@ func BenchmarkActorStorm(b *testing.B) {
 	b.Run("AnchorRedelivery", func(b *testing.B) {
 		h := openStormHome(b)
 		ctx := context.Background()
-		parent, err := h.admit(ctx, actor.KindHuman, "storm-anchor-parent")
+		parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "storm-anchor-parent")
 		if err != nil {
 			b.Fatal(err)
 		}

@@ -19,7 +19,7 @@ import (
 func TestDaemonPlacedForkedChildCarriesRelayBinding(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	parent, err := h.admit(ctx, actor.KindHuman, "binding-parent")
+	parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "binding-parent")
 	if err != nil {
 		t.Fatal(err)
 	}

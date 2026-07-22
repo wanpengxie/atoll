@@ -150,7 +150,7 @@ func TestHomeReviverBuildWindowRemoveSelfUndoes(t *testing.T) {
 	}
 
 	var removeErr error
-	resolver.onResolve = func() { removeErr = h.remove(ctx, record.ID) }
+	resolver.onResolve = func() { removeErr = removeThroughSysOp(h, ctx, record.ID) }
 	err := (homeReviver{h: h}).EnsureLive(ctx, record.ID)
 	if removeErr != nil {
 		t.Fatalf("Remove inside build window: %v", removeErr)
@@ -179,7 +179,7 @@ func TestReconcileActivationBuildWindowRemoveSelfUndoes(t *testing.T) {
 		t.Fatalf("mark request dirty: verdict=%v err=%v", verdict, err)
 	}
 	var removeErr error
-	resolver.onResolve = func() { removeErr = h.remove(ctx, record.ID) }
+	resolver.onResolve = func() { removeErr = removeThroughSysOp(h, ctx, record.ID) }
 	h.reconcileActivation(ctx)
 	if removeErr != nil {
 		t.Fatalf("Remove inside build window: %v", removeErr)
@@ -279,7 +279,7 @@ func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {
 		t.Fatal("version restart did not replace the composition incarnation")
 	}
 
-	if err := h.remove(context.Background(), record.ID); err != nil {
+	if err := removeThroughSysOp(h, context.Background(), record.ID); err != nil {
 		t.Fatal(err)
 	}
 	waitHomeCondition(t, func() bool {

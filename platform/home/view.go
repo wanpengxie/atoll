@@ -16,19 +16,12 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-func (h *Home) isBound(ctx context.Context, daemonID string) (bool, error) {
-	if h.closed.Load() {
-		return false, ErrClosed
-	}
-	return h.cs.Bindings.IsBound(ctx, storespec.DaemonID(daemonID))
-}
-
 // ---------------------------------------------------------------------------
 // View -- the read-only observation capability
 // ---------------------------------------------------------------------------
 
-// View is the channel-home's read-only observation set: committed message tail
-// (ReadAfterSeq), head cursor (MaxSeq), and active actor roster (ListActors). It
+// View is the channel-home's read-only observation set: reader-filtered message
+// tail, head cursor (MaxSeq), and active actor roster (ListActors). It
 // holds only read interfaces — there is no write path through a View.
 type View struct {
 	query      storespec.MessageQuery
@@ -45,7 +38,7 @@ type View struct {
 	bindings   storespec.DaemonBindingReader
 }
 
-// View returns the read-only observation set (ReadAfterSeq / MaxSeq /
+// View returns the read-only observation set (ReadVisibleAfterSeq / MaxSeq /
 // ListActors / daemon attachment). It carries no write capability — observation
 // only. The host (app) reads these projections OUT-OF-BAND (no message, no
 // truth-log write) — UI status polling must not pollute the log; in-universe

@@ -92,35 +92,3 @@ func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 }
 
 func durationMillis(ms int64) time.Duration { return time.Duration(ms) * time.Millisecond }
-
-func (h *Home) activeActors(ctx context.Context) ([]storespec.ActorControlRow, error) {
-	if h.closed.Load() {
-		return nil, ErrClosed
-	}
-	return h.controlIndex.ListActive(ctx)
-}
-
-func (h *Home) activeActor(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
-	if h.closed.Load() {
-		return storespec.ActorControlRow{}, false, ErrClosed
-	}
-	return h.controlIndex.LookupActive(ctx, id)
-}
-
-func (h *Home) declaredBySource(ctx context.Context, source string) ([]storespec.ActorControlRow, error) {
-	rows, err := h.controlIndex.ListActive(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]storespec.ActorControlRow, 0)
-	for _, row := range rows {
-		world, ok, werr := h.controlIndex.WorldOf(ctx, row.ID)
-		if werr != nil {
-			return nil, werr
-		}
-		if ok && world == storespec.WorldDurable && row.SourceDeclID == source {
-			out = append(out, row)
-		}
-	}
-	return out, nil
-}

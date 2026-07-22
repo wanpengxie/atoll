@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"testing"
 	"time"
+
+	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // TestDeleteDaemonTombstonePersistFailureReturns5xx pins the daemon-delete fix: if the
@@ -132,4 +134,41 @@ func TestDeleteDaemonTombstonePullRemovesBindings(t *testing.T) {
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+}
+
+func TestChannelDaemonListIncludesBindingsOwnedByOtherMembers(t *testing.T) {
+	env := setupTestApp(t)
+	_, ownerCookies := register(t, env, "channel-owner@example.com", "secret123", "Owner")
+	created := env.do(t, http.MethodPost, "/api/channels", map[string]any{"name": "shared"}, ownerCookies)
+	assertStatus(t, created, http.StatusCreated)
+	channelID := respJSON(t, created)["id"].(string)
+
+	_, memberCookies := register(t, env, "daemon-owner@example.com", "secret123", "Member")
+	joined := env.do(t, http.MethodPost, "/api/channels/"+channelID+"/join", nil, memberCookies)
+	if joined.Code != http.StatusCreated && joined.Code != http.StatusOK {
+		t.Fatalf("join status=%d body=%s", joined.Code, joined.Body.String())
+	}
+	daemon := env.do(t, http.MethodPost, "/api/daemons", map[string]any{"name": "member-box"}, memberCookies)
+	assertStatus(t, daemon, http.StatusCreated)
+	daemonID := respJSON(t, daemon)["id"].(string)
+	bound := env.do(t, http.MethodPost, "/api/channels/"+channelID+"/daemons", map[string]any{"daemon_id": daemonID}, memberCookies)
+	assertStatus(t, bound, http.StatusOK)
+
+	listed := env.do(t, http.MethodGet, "/api/channels/"+channelID+"/daemons", nil, ownerCookies)
+	assertStatus(t, listed, http.StatusOK)
+	for _, raw := range respJSON(t, listed)["daemons"].([]any) {
+		if raw.(map[string]any)["id"] == daemonID {
+			return
+		}
+	}
+	t.Fatalf("channel daemon list hid member-owned binding %s", daemonID)
+}
+
+func TestActorDeclListFailsWhenChannelProjectionIsUnavailable(t *testing.T) {
+	env := setupTestApp(t)
+	setup := fullSetup(t, env)
+	env.app.DropHomeForTest(channel.ID(setup.chID))
+
+	listed := env.do(t, http.MethodGet, "/api/actor-decls", nil, setup.cookies)
+	assertStatus(t, listed, http.StatusServiceUnavailable)
 }

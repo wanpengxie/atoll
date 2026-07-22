@@ -37,13 +37,6 @@ func (v *compositionView) LookupByClass(id actor.ActorID, class string, config j
 	return v.resolver.BuildClass(v.h.channelID, id, class, config)
 }
 
-func (h *Home) defaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
-	if h.closed.Load() {
-		return "", false, ErrClosed
-	}
-	return h.cs.Routing.DefaultAgent(ctx)
-}
-
 // ValidateAttachment is a pure Home-side decision over declared authority and
 // liveness intent. It never inserts, removes, or re-homes an identity.
 type homeDeclarationCoordinator struct{ h *Home }

@@ -429,9 +429,9 @@ func admissionErrorHTTP(code string) int {
 	switch channel.OperationErrorCode(code) {
 	case admissionCodeDaemonNotFound:
 		return 404
-	case channel.ErrCodeBadPayload, channel.ErrCodeInvalidPlacement, channel.ErrCodeUnknownClass, channel.ErrCodeInvalidDesiredHost:
+	case channel.ErrCodeBadPayload, channel.ErrCodeUnknownClass, channel.ErrCodeInvalidDesiredHost:
 		return 400
-	case channel.ErrCodeForbidden, channel.ErrCodeUnauthorizedSender, channel.ErrCodeNotAcceptedSource:
+	case channel.ErrCodeForbidden, channel.ErrCodeNotAcceptedSource:
 		return 403
 	case channel.ErrCodeDeclNotFound:
 		return 404

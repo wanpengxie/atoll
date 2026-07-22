@@ -87,28 +87,24 @@ type Config struct {
 // it; assembly only hands out capabilities. The app layer owns HTTP/transport;
 // Home is pure Go.
 type Home struct {
-	channelID     channelpkg.ID
-	minter        harness.Minter
-	channel       *channelkit.Channel
-	cs            *runtime.ChannelStores
-	controlIndex  *actorControlIndex
-	liveness      *livenessLedger
-	stateHandles  accessdoor.StateHandleResolver
-	grantOverlay  *actorGrantOverlay
-	forkMu        sync.Mutex
-	forkReceipts  map[forkReceiptKey]forkReceipt
-	usedForkIDs   map[actor.ActorID]struct{}
-	signal        *tap.Signal
-	delivery      *tap.Pump
-	links         *link.Acceptor
-	presenceFold  *presence.Fold
-	presenceSwept atomic.Int64
-	logger        *slog.Logger
-	nowMs         func() int64
-	opEntry       *opEntry
-	// lastProjectionSyncNs paces the identity-projection sync arm (unix nanos;
-	// atomic so tests may reset it off the ring goroutine).
-	lastProjectionSyncNs atomic.Int64
+	channelID    channelpkg.ID
+	minter       harness.Minter
+	channel      *channelkit.Channel
+	cs           *runtime.ChannelStores
+	controlIndex *actorControlIndex
+	liveness     *livenessLedger
+	stateHandles accessdoor.StateHandleResolver
+	grantOverlay *actorGrantOverlay
+	forkMu       sync.Mutex
+	forkReceipts map[forkReceiptKey]forkReceipt
+	usedForkIDs  map[actor.ActorID]struct{}
+	signal       *tap.Signal
+	delivery     *tap.Pump
+	links        *link.Acceptor
+	presenceFold *presence.Fold
+	logger       *slog.Logger
+	nowMs        func() int64
+	opEntry      *opEntry
 
 	// (No per-user caller index (期12): a subject's own requests are closed
 	// by the substrate expiry reaper — 义务归位 D3; the subject drives its
@@ -135,7 +131,6 @@ type Home struct {
 	// expiry reaper (sweepExpired) writes its unanswered_timeout terminals
 	// through it (义务归位 D3: system-authored, never mint-as-caller).
 	systemPen harness.Pen
-	systemEnd lifecycleEndHandle
 	// expiryCursor is the reaper's keyset position across ticks (batch
 	// fairness only — correctness is the level-scan's; restart-from-zero is
 	// harmless). Touched only on the reconcile goroutine, no lock.
@@ -208,6 +203,6 @@ type Home struct {
 	// every close call (a sealed Destroy retries through here to completion).
 	storeCloseDone atomic.Bool
 	storeCloseMu   sync.Mutex
-	closeDone chan struct{}
-	closeErr  error
+	closeDone      chan struct{}
+	closeErr       error
 }

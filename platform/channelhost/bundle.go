@@ -43,7 +43,6 @@ type SysOp interface {
 
 type View interface {
 	DefaultAgent(context.Context) (actor.ActorID, bool, error)
-	DeclaredBySourceOne(context.Context, string) (storespec.ActorControlRow, bool, error)
 	DeclaredBySource(context.Context, string) ([]storespec.ActorControlRow, error)
 	ActiveActors(context.Context) ([]storespec.ActorControlRow, error)
 	ResolvePrincipal(context.Context, actor.Kind, string) (actor.ActorID, bool, error)
@@ -97,9 +96,6 @@ type viewAdapter struct{ home *home.Home }
 
 func (a viewAdapter) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
 	return a.home.View().DefaultAgent(ctx)
-}
-func (a viewAdapter) DeclaredBySourceOne(ctx context.Context, source string) (storespec.ActorControlRow, bool, error) {
-	return a.home.View().DeclaredBySourceOne(ctx, source)
 }
 func (a viewAdapter) DeclaredBySource(ctx context.Context, d string) ([]storespec.ActorControlRow, error) {
 	return a.home.View().DeclaredBySource(ctx, d)

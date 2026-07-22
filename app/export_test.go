@@ -12,6 +12,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -20,6 +21,14 @@ import (
 
 // errTestChannelNotLoaded stands in for a torn-down home in the test seams below.
 var errTestChannelNotLoaded = errors.New("app: channel not loaded")
+
+func declaredBySourceOneForTest(ctx context.Context, view channelhost.View, source string) (storespec.ActorControlRow, bool, error) {
+	rows, err := view.DeclaredBySource(ctx, source)
+	if err != nil || len(rows) == 0 {
+		return storespec.ActorControlRow{}, false, err
+	}
+	return rows[0], true, nil
+}
 
 func (a *App) ActorsForTest(chID channel.ID) ([]storespec.Record, error) {
 	bundle, ok := a.host.Acquire(chID)
@@ -165,7 +174,7 @@ func (a *App) ResolveSourceForTest(chID, source string) (actor.ActorID, error) {
 	if !ok {
 		return "", errTestChannelNotLoaded
 	}
-	row, found, err := bundle.View().DeclaredBySourceOne(context.Background(), source)
+	row, found, err := declaredBySourceOneForTest(context.Background(), bundle.View(), source)
 	if err != nil {
 		return "", err
 	}
@@ -211,7 +220,7 @@ func (a *App) RemoveRealmToolForTest(chID channel.ID) error {
 	if !ok {
 		return errTestChannelNotLoaded
 	}
-	row, found, err := bundle.View().DeclaredBySourceOne(context.Background(), realmToolDeclID)
+	row, found, err := declaredBySourceOneForTest(context.Background(), bundle.View(), realmToolDeclID)
 	if err != nil || !found {
 		return err
 	}

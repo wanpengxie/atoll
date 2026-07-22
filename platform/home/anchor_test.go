@@ -52,7 +52,7 @@ func TestCarrierHandoffAnchorRedeliveryIsOncePerIncarnation(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
-	parent, err := h.admit(ctx, actor.KindHuman, "anchor-parent")
+	parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "anchor-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestCarrierFullLeavesRequestOpenAndNextHandoffRedeliversOnlyRequest(t *test
 	<-h.reconcileDone
 
 	ctx := context.Background()
-	parent, err := h.admit(ctx, actor.KindHuman, "anchor-full-parent")
+	parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "anchor-full-parent")
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -14,7 +14,7 @@ import (
 func TestDaemonPlanProjectsLivenessIntentAndStableEnsureTicket(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	parent, err := h.admit(ctx, actor.KindHuman, "plan-parent")
+	parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "plan-parent")
 	if err != nil {
 		t.Fatal(err)
 	}

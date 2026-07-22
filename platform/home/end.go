@@ -43,13 +43,6 @@ func (x lifecycleEndHandle) prepare(ctx context.Context, target actor.ActorID, r
 	return x.home.prepareEndIdentity(ctx, x.author, target, reason)
 }
 
-func (h *Home) systemEndHandle() lifecycleEndHandle {
-	if h.systemEnd.home != nil {
-		return h.systemEnd
-	}
-	return lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}}
-}
-
 // prepareEndIdentity commits and publishes the identity transition, returning
 // only the resource-tail teardown. The port path places its end_ack on the
 // ordered egress queue before running this tail; every other caller runs it

@@ -179,12 +179,22 @@ func TestChannelRealmW3DeadPortsAndInjectionClosed(t *testing.T) {
 		"Restart": true, "PresenceSweptCount": true, "CancelRequest": true,
 		"EditDeclaration": true, "ApplyDeclaration": true,
 		"EnsureSubjectSlot": true, "RemoveSubjectSlot": true,
+		"admit": true, "remove": true, "systemEndHandle": true,
+		"principalOf": true, "resolvePrincipal": true,
 	}
 	for _, path := range phaseAProductionFiles(t, "../platform/home") {
 		_, f := phaseAParse(t, path)
 		for _, decl := range f.Decls {
 			fn, ok := decl.(*ast.FuncDecl)
-			if ok && fn.Recv != nil && retiredMethods[fn.Name.Name] {
+			if !ok || fn.Recv == nil || len(fn.Recv.List) == 0 {
+				continue
+			}
+			receiver := fn.Recv.List[0].Type
+			if star, ok := receiver.(*ast.StarExpr); ok {
+				receiver = star.X
+			}
+			id, isHome := receiver.(*ast.Ident)
+			if isHome && id.Name == "Home" && retiredMethods[fn.Name.Name] {
 				t.Errorf("%s retains retired Home method %s", path, fn.Name)
 			}
 		}

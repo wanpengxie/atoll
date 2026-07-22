@@ -59,9 +59,9 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	if !ok {
 		t.Fatal("provisioned channel not serving")
 	}
-	initialRow, found, err := initial.View().DeclaredBySourceOne(ctx, "decl-a")
-	if err != nil || !found || initialRow.CurrentDeclVersion != 1 {
-		t.Fatalf("equal first sweep double-wrote genesis: row=%+v found=%v err=%v", initialRow, found, err)
+	initialRows, err := initial.View().DeclaredBySource(ctx, "decl-a")
+	if err != nil || len(initialRows) != 1 || initialRows[0].CurrentDeclVersion != 1 {
+		t.Fatalf("equal first sweep double-wrote genesis: rows=%+v err=%v", initialRows, err)
 	}
 	if err := host.Close(); err != nil {
 		t.Fatal(err)
@@ -80,9 +80,9 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	if !ok {
 		t.Fatal("reopened channel not serving")
 	}
-	row, found, err := bundle.View().DeclaredBySourceOne(ctx, "decl-a")
-	if err != nil || !found || row.CurrentDeclVersion != 2 || string(row.Config) != `{"value":"b"}` {
-		t.Fatalf("first-sweep declaration=(%+v,%v,%v)", row, found, err)
+	rows, err := bundle.View().DeclaredBySource(ctx, "decl-a")
+	if err != nil || len(rows) != 1 || rows[0].CurrentDeclVersion != 2 || string(rows[0].Config) != `{"value":"b"}` {
+		t.Fatalf("first-sweep declaration=(%+v,%v)", rows, err)
 	}
 }
 func (testResolver) ClassKind(_ context.Context, class string) (actor.Kind, bool, error) {
@@ -144,8 +144,8 @@ func TestOpenFirstSweepDetachesPersistedTombstonedDaemon(t *testing.T) {
 	if bound, err := bundle.View().IsBound(ctx, "daemon-a"); err != nil || bound {
 		t.Fatalf("first sweep binding=(%v,%v), want detached", bound, err)
 	}
-	if _, found, err := bundle.View().DeclaredBySourceOne(ctx, "decl-a"); err != nil || found {
-		t.Fatalf("daemon-placed actor survived first sweep: found=%v err=%v", found, err)
+	if rows, err := bundle.View().DeclaredBySource(ctx, "decl-a"); err != nil || len(rows) != 0 {
+		t.Fatalf("daemon-placed actor survived first sweep: rows=%v err=%v", rows, err)
 	}
 }
 

@@ -341,15 +341,12 @@ func TestHomeCloseUnpublishesEveryEntryPoint(t *testing.T) {
 	if got := h.links.KickDaemon("none"); got != 0 {
 		t.Fatalf("KickDaemon after Close = %d", got)
 	}
-	if _, _, err := h.principalOf(context.Background(), "issued-human"); err == nil {
-		t.Fatal("read after stores close did not surface an error")
-	}
 	ctx := context.Background()
-	if _, err := h.admit(ctx, actor.KindHuman, "late-admit"); !errors.Is(err, ErrClosed) {
-		t.Fatalf("Admit after Close = %v, want ErrClosed", err)
+	if _, err := admitThroughSysOp(h, ctx, actor.KindHuman, "late-admit"); !isChannelUnavailableForTest(err) {
+		t.Fatalf("Admit after Close = %v, want channel_unavailable", err)
 	}
-	if err := h.remove(ctx, "issued-human"); !errors.Is(err, ErrClosed) {
-		t.Fatalf("Remove after Close = %v, want ErrClosed", err)
+	if err := removeThroughSysOp(h, ctx, "issued-human"); !isChannelUnavailableForTest(err) {
+		t.Fatalf("Remove after Close = %v, want channel_unavailable", err)
 	}
 	sub, cancelSub := h.subscribe()
 	select {
@@ -384,8 +381,8 @@ func TestHomeClosePublishesMutationFenceBeforeTeardown(t *testing.T) {
 	if _, err := h.declare(context.Background(), DeclareRequest{}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Declare during Close = %v, want ErrClosed", err)
 	}
-	if err := h.remove(context.Background(), "agent:closing"); !errors.Is(err, ErrClosed) {
-		t.Fatalf("Remove during Close = %v, want ErrClosed", err)
+	if err := removeThroughSysOp(h, context.Background(), "agent:closing"); !isChannelUnavailableForTest(err) {
+		t.Fatalf("Remove during Close = %v, want channel_unavailable", err)
 	}
 	close(release)
 	if err := <-closed; err != nil {

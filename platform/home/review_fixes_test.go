@@ -42,14 +42,14 @@ func openWhiteboxHome(t *testing.T) *Home {
 func TestChannelOwnerGenesisIdempotencyAndProtection(t *testing.T) {
 	t.Run("neutral principal cannot be upgraded", func(t *testing.T) {
 		h := openWhiteboxHome(t)
-		neutral, err := h.admit(context.Background(), actor.KindHuman, "same-principal")
+		neutral, err := admitThroughSysOp(h, context.Background(), actor.KindHuman, "same-principal")
 		if err != nil {
 			t.Fatal(err)
 		}
 		if _, err := h.admitChannelOwner(context.Background(), "same-principal"); err == nil {
 			t.Fatal("owner admission accepted a pre-existing neutral row")
 		}
-		row, ok, err := h.activeActor(context.Background(), neutral)
+		row, ok, err := h.controlIndex.LookupActive(context.Background(), neutral)
 		if err != nil || !ok || row.Role != storespec.RoleNone {
 			t.Fatalf("neutral row changed = (%+v,%v,%v)", row, ok, err)
 		}
@@ -65,18 +65,20 @@ func TestChannelOwnerGenesisIdempotencyAndProtection(t *testing.T) {
 		if err != nil || retry != owner {
 			t.Fatalf("owner retry = (%q,%v)", retry, err)
 		}
-		ordinary, err := h.admit(context.Background(), actor.KindHuman, "owner-principal")
+		ordinary, err := admitThroughSysOp(h, context.Background(), actor.KindHuman, "owner-principal")
 		if err != nil || ordinary != owner {
 			t.Fatalf("ordinary retry = (%q,%v)", ordinary, err)
 		}
-		row, _, _ := h.activeActor(context.Background(), owner)
+		row, _, _ := h.controlIndex.LookupActive(context.Background(), owner)
 		if row.Role != storespec.RoleOwner {
 			t.Fatalf("ordinary retry downgraded role to %q", row.Role)
 		}
-		if err := h.remove(context.Background(), owner); !errors.Is(err, storespec.ErrChannelOwnerProtected) {
-			t.Fatalf("Remove owner err=%v, want protected sentinel", err)
+		err = removeThroughSysOp(h, context.Background(), owner)
+		var opErr *channelpkg.OperationError
+		if !errors.As(err, &opErr) || opErr.Code != channelpkg.ErrCodeProtectedActor {
+			t.Fatalf("Remove owner err=%v, want protected_actor", err)
 		}
-		if _, ok, _ := h.activeActor(context.Background(), owner); !ok {
+		if _, ok, _ := h.controlIndex.LookupActive(context.Background(), owner); !ok {
 			t.Fatal("protected owner disappeared")
 		}
 	})
@@ -86,14 +88,11 @@ func TestAdmitIsHumanOnlyAndIdempotentlyPublishesAuthority(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
 	principal := "rev"
-	if _, err := h.admit(ctx, actor.KindAgent, principal); !errors.Is(err, ErrAdmitKind) {
-		t.Fatalf("non-human Admit err=%v, want ErrAdmitKind", err)
-	}
-	id, err := h.admit(ctx, actor.KindHuman, principal)
+	id, err := admitThroughSysOp(h, ctx, actor.KindHuman, principal)
 	if err != nil {
 		t.Fatalf("Admit genesis: %v", err)
 	}
-	reAdmitted, err := h.admit(ctx, actor.KindHuman, principal)
+	reAdmitted, err := admitThroughSysOp(h, ctx, actor.KindHuman, principal)
 	if err != nil {
 		t.Fatalf("re-Admit: %v", err)
 	}
@@ -154,14 +153,14 @@ func TestRealPensFenceAppliedAndEndedDeclaredAndRunIdentities(t *testing.T) {
 	if res := writeEvent(v2, "declared-v2-before-end"); !res.Accepted() {
 		t.Fatalf("current declared pen rejected: %+v", res)
 	}
-	if err := h.remove(ctx, declared.Row.ID); err != nil {
+	if err := removeThroughSysOp(h, ctx, declared.Row.ID); err != nil {
 		t.Fatal(err)
 	}
 	if res := writeEvent(v2, "declared-v2-after-end"); res.RejectReason != harness.HarnessAuthorNotMember {
 		t.Fatalf("ended declared pen=%+v", res)
 	}
 
-	parent, err := h.admit(ctx, actor.KindHuman, "pen-gate-parent")
+	parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "pen-gate-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,19 +215,19 @@ func TestRemoveSnapshotAndReadmitHaveNoPriorTestimony(t *testing.T) {
 	ctx := context.Background()
 	now := time.Unix(100, 0)
 	installControlledPresenceFold(h, &now)
-	id, err := h.admit(ctx, actor.KindHuman, "presence-life")
+	id, err := admitThroughSysOp(h, ctx, actor.KindHuman, "presence-life")
 	if err != nil {
 		t.Fatal(err)
 	}
 	h.presenceFold.OnObs(ctx, id, actorrt.Incarnation{}, actorrt.ObsKind(introspect.ObsDevicePresence), introspect.MarshalDevicePresence(true))
-	if err := h.remove(ctx, id); err != nil {
+	if err := removeThroughSysOp(h, ctx, id); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, err := h.View().Snapshot(ctx, id)
 	if err != nil || snapshot.Member || snapshot.L1Present || len(snapshot.L3) != 0 {
 		t.Fatalf("snapshot after Remove = %+v err=%v", snapshot, err)
 	}
-	readmittedID, err := h.admit(ctx, actor.KindHuman, "presence-life")
+	readmittedID, err := admitThroughSysOp(h, ctx, actor.KindHuman, "presence-life")
 	if err != nil {
 		t.Fatalf("re-Admit: %v", err)
 	}

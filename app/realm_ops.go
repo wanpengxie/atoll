@@ -18,6 +18,11 @@ import (
 
 type realmOps struct{ app *App }
 
+// realmResourceCopyLimitBytes is reference-realm policy. The membrane and its
+// realm-tool cell do not invent transport limits; they consume the stream and
+// propagate this realm-owned rejection unchanged.
+const realmResourceCopyLimitBytes int64 = 32 << 20
+
 func (o realmOps) requesterFacts(ctx context.Context, req channel.Requester) (channel.ActorFacts, error) {
 	if req.ActorID == "" || req.ChannelID == "" || req.RequestID == "" {
 		return channel.ActorFacts{}, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "incomplete requester"}
@@ -266,14 +271,14 @@ func admissionRealmErrorCode(code string) channel.RealmErrorCode {
 	switch channel.OperationErrorCode(code) {
 	case channel.ErrCodeDeclNotFound:
 		return channel.RealmDeclNotFound
-	case channel.ErrCodeBadPayload, channel.ErrCodeInvalidPlacement, channel.ErrCodeUnknownClass, channel.ErrCodeInvalidDesiredHost:
+	case channel.ErrCodeBadPayload, channel.ErrCodeUnknownClass, channel.ErrCodeInvalidDesiredHost:
 		return channel.RealmInvalidRequest
 	case channel.ErrCodeChannelUnavailable:
 		return channel.RealmChannelUnavailable
 	case channel.ErrCodeProtectedActor, channel.ErrCodeNotInComposition, channel.ErrCodeMemberInactive, channel.ErrCodeRefConflict:
 		return channel.RealmConflict
 	default:
-		// forbidden / unauthorized_sender / not_accepted_source and any transient
+		// forbidden / not_accepted_source and any transient
 		// code that has no RealmOps closed-set counterpart stay RealmForbidden.
 		return channel.RealmForbidden
 	}
@@ -410,8 +415,46 @@ func (o realmOps) FetchResource(ctx context.Context, req channel.Requester, sour
 			ctx: ctx, app: o.app, source: source, principal: reader.Principal, body: fetched.Body,
 		}
 	}
+	fetched.Body = newRealmCopyPolicyBody(fetched.Body, realmResourceCopyLimitBytes)
 	return fetched, nil
 }
+
+type realmCopyPolicyBody struct {
+	body      io.ReadCloser
+	remaining int64
+}
+
+func newRealmCopyPolicyBody(body io.ReadCloser, limit int64) io.ReadCloser {
+	return &realmCopyPolicyBody{body: body, remaining: limit}
+}
+
+func (r *realmCopyPolicyBody) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	if r.remaining < 0 {
+		return 0, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "resource exceeds realm copy policy"}
+	}
+	if r.remaining == 0 {
+		var probe [1]byte
+		n, err := r.body.Read(probe[:])
+		if n > 0 {
+			return 0, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "resource exceeds realm copy policy"}
+		}
+		return 0, err
+	}
+	if int64(len(p)) > r.remaining+1 {
+		p = p[:r.remaining+1]
+	}
+	n, err := r.body.Read(p)
+	r.remaining -= int64(n)
+	if r.remaining < 0 {
+		return n, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "resource exceeds realm copy policy"}
+	}
+	return n, err
+}
+
+func (r *realmCopyPolicyBody) Close() error { return r.body.Close() }
 
 // observerResourceBody binds a cross-membrane byte stream to its realm gate.
 // Each bounded chunk rechecks the source sovereignty switch; revocation may let

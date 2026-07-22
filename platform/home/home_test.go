@@ -28,10 +28,10 @@ func TestHomeCloseConcurrentCompletionAndUnpublish(t *testing.T) {
 			t.Fatalf("concurrent Close: %v", err)
 		}
 	}
-	if _, err := home.AdmitForTest(h, "late", actor.KindHuman); !errors.Is(err, home.ErrClosed) {
+	if _, err := home.AdmitForTest(h, "late", actor.KindHuman); !isUnavailable(err) {
 		t.Fatalf("Admit after Close = %v", err)
 	}
-	if err := home.RemoveForTest(h, "late"); !errors.Is(err, home.ErrClosed) {
+	if err := home.RemoveForTest(h, "late"); !isUnavailable(err) {
 		t.Fatalf("Remove after Close = %v", err)
 	}
 	wake, unsubscribe := home.SubscribeForTest(h)
@@ -44,6 +44,11 @@ func TestHomeCloseConcurrentCompletionAndUnpublish(t *testing.T) {
 	default:
 		t.Fatal("Subscribe after Close did not return an already-closed wake")
 	}
+}
+
+func isUnavailable(err error) bool {
+	var opErr *channel.OperationError
+	return errors.As(err, &opErr) && opErr.Code == channel.ErrCodeChannelUnavailable
 }
 
 const testChannelID = channel.ID("test-home")

@@ -52,7 +52,7 @@ const (
 	// defaultSweep is the entitlement reconcile's periodic backstop (poke 为主, sweep
 	// 兜底).
 	defaultSweep = 30 * time.Second
-	// defaultRead bounds every resolver / ReadAfterSeq call (no unbounded lock waits).
+	// defaultRead bounds every resolver / visible-read call (no unbounded lock waits).
 	defaultRead = 5 * time.Second
 	// defaultPresence is the presence reconcile loop's periodic backstop.
 	defaultPresence = 5 * time.Second

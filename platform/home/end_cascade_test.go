@@ -17,7 +17,7 @@ import (
 func TestMixedDurableRunCascadeClearsRoutingAndPublishesOneClosedWorld(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	parent, err := h.admit(ctx, actor.KindHuman, "cascade-parent")
+	parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "cascade-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestMixedDurableRunCascadeClearsRoutingAndPublishesOneClosedWorld(t *testin
 	if err := h.cs.Routing.SetDefaultAgent(ctx, parent); err != nil {
 		t.Fatal(err)
 	}
-	if err := h.systemEndHandle().End(ctx, parent, "cascade"); err != nil {
+	if err := systemEndForTest(h).End(ctx, parent, "cascade"); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []actor.ActorID{parent, child, grandchild} {
@@ -109,11 +109,11 @@ func readEndedPayload(t *testing.T, h *Home, target actor.ActorID) actor.ActorID
 // payload contract (spec §S9 "End 事件署名 = payload 口径"): when an actor ends
 // itself via Sys.End (spawnHandle.EndSelf), the cascade envelope's ended_by
 // equals the actor's own id — the existing end_cascade_test.go coverage only
-// exercised the system/管理 direction (h.systemEndHandle()), never self.
+// exercised the system/管理 direction, never self.
 func TestEndedBySelfWhenActorEndsItself(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	parent, err := h.admit(ctx, actor.KindHuman, "self-end-parent")
+	parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "self-end-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -141,7 +141,7 @@ func TestEndedBySelfWhenActorEndsItself(t *testing.T) {
 func TestEndedByParentWhenParentDespawnsChild(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
-	parent, err := h.admit(ctx, actor.KindHuman, "despawn-child-parent")
+	parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "despawn-child-parent")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestEndCascadeContainsConcurrentForkOrRejectsIt(t *testing.T) {
 	for n := 0; n < 25; n++ {
 		h := openWhiteboxHome(t)
 		ctx := context.Background()
-		parent, err := h.admit(ctx, actor.KindHuman, "cascade-race-"+string(rune('a'+n)))
+		parent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "cascade-race-"+string(rune('a'+n)))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -188,7 +188,7 @@ func TestEndCascadeContainsConcurrentForkOrRejectsIt(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			endErr = h.systemEndHandle().End(ctx, parent, "race")
+			endErr = systemEndForTest(h).End(ctx, parent, "race")
 		}()
 		wg.Wait()
 		if endErr != nil {

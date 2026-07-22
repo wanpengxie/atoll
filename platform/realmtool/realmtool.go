@@ -174,10 +174,7 @@ func handle(sys actorbase.Sys, ops RealmOps, msg actorbase.Msg) {
 			if err == nil {
 				defer fetched.Body.Close()
 				var body []byte
-				body, err = io.ReadAll(io.LimitReader(fetched.Body, (32<<20)+1))
-				if err == nil && len(body) > 32<<20 {
-					err = &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "resource exceeds realm copy limit"}
-				}
+				body, err = io.ReadAll(fetched.Body)
 				if err == nil {
 					newID := resource.ResourceID("realm-copy:" + uuid.NewString())
 					out, createErr := sys.Resource().CreateFrom(newID, body, p)

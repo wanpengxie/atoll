@@ -78,7 +78,7 @@ func (e *opEntry) Admit(ctx context.Context, req channel.AdmitRequest) (channel.
 	if err := e.publishActor(ctx, result.ActorID); err != nil {
 		return channel.AdmitResult{}, err
 	}
-	e.applyEffects(ctx, result.Effects)
+	e.applyEffects(result.Effects)
 	return channel.AdmitResult{ActorID: result.ActorID, Created: result.Created}, nil
 }
 
@@ -189,7 +189,7 @@ func (e *opEntry) introduce(ctx context.Context, meta storespec.SysOpMeta, declI
 	if err := e.publishActor(ctx, result.ActorID); err != nil {
 		return storespec.IntroduceResult{}, err
 	}
-	e.applyEffects(ctx, result.Effects)
+	e.applyEffects(result.Effects)
 	return result, nil
 }
 
@@ -286,7 +286,7 @@ func (e *opEntry) AttachDaemon(ctx context.Context, req channel.DaemonRequest) (
 	if err != nil {
 		return channel.BindingResult{}, err
 	}
-	e.applyEffects(ctx, result.Effects)
+	e.applyEffects(result.Effects)
 	return channel.BindingResult{Bound: result.Bound, ClearedInstances: result.ClearedInstances}, nil
 }
 
@@ -354,7 +354,7 @@ func (e *opEntry) detachDaemon(ctx context.Context, meta storespec.SysOpMeta, da
 	if len(plan.AllIDs) > 0 {
 		tail = h.finishEndTeardown(plan)
 	}
-	e.applyEffects(ctx, result.Effects)
+	e.applyEffects(result.Effects)
 	if tail != nil {
 		tail()
 	}
@@ -404,21 +404,38 @@ func (e *opEntry) applyResolvedDeclaration(ctx context.Context, id actor.ActorID
 	if err != nil {
 		return storespec.DeclarationSyncResult{}, err
 	}
+	if result.Status == storespec.DeclarationApplied || result.Status == storespec.DeclarationEqual {
+		// The pull arm already holds the exact actor gate and knows the value the
+		// store compared. Publish it here. Publishing Equal as well heals the
+		// narrow commit-before-publication crash window on the next ordinary pull,
+		// without a second full-registry repair mechanism.
+		current.Class = class
+		current.Config = append(json.RawMessage(nil), config...)
+		current.CurrentDeclVersion = result.Version
+		if !e.home.controlIndex.UpsertBatch([]controlEntry{{Row: current, World: storespec.WorldDurable}}) {
+			return storespec.DeclarationSyncResult{}, fmt.Errorf("platform: publish declaration sync actor %s", id)
+		}
+	}
 	if result.Status == storespec.DeclarationApplied {
-		e.applyEffects(ctx, result.Effects)
+		e.applyEffects(result.Effects)
 	}
 	return result, nil
 }
 
-func (e *opEntry) publishActor(ctx context.Context, id actor.ActorID) error {
-	row, found, err := e.home.cs.Declared.LookupDeclaredActive(ctx, id)
+func (e *opEntry) publishActor(_ context.Context, id actor.ActorID) error {
+	// The identity transaction has already committed. Publication is substrate
+	// bookkeeping and must not be skipped merely because the request deadline
+	// expired in the commit-to-return window.
+	publishCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	row, found, err := e.home.cs.Declared.LookupDeclaredActive(publishCtx, id)
 	if err != nil || !found {
 		if err == nil {
 			err = errors.New("committed actor missing from declared view")
 		}
 		return err
 	}
-	if _, already, _ := e.home.controlIndex.LookupActive(ctx, id); !already {
+	if _, already, _ := e.home.controlIndex.LookupActive(publishCtx, id); !already {
 		if e.home.liveness.AdmitIdentity(id) != transitionApplied {
 			return fmt.Errorf("platform: publish sysop actor %s: liveness rejected", id)
 		}
@@ -433,24 +450,11 @@ func (e *opEntry) publishActor(ctx context.Context, id actor.ActorID) error {
 	return nil
 }
 
-func (e *opEntry) applyEffects(ctx context.Context, effects storespec.PostCommitEffects) {
-	// The control-index refresh is the substrate's own bookkeeping, not part of
-	// the caller's wait: it runs on an internal bounded context so a caller
-	// deadline expiring right after commit cannot skip the projection update.
-	// (The periodic identity-projection sync arm is the level backstop for any
-	// refresh that still fails.)
-	refreshCtx, cancelRefresh := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancelRefresh()
+func (e *opEntry) applyEffects(effects storespec.PostCommitEffects) {
 	for _, id := range effects.Despawn {
-		if row, active, err := e.home.cs.Declared.LookupDeclaredActive(refreshCtx, id); err == nil && active {
-			_ = e.home.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}})
-			_, _ = e.home.liveness.Retire(id, true)
-		} else if err == nil {
-			e.home.controlIndex.DeleteBatch([]actor.ActorID{id})
-			_, _ = e.home.liveness.EndIdentity(id)
-			e.home.removeSubjectSlot(id)
-			e.home.presenceFold.Forget(id)
-		}
+		// Identity mutations publish their cache value at the owning call site;
+		// this shared effect is incarnation-only.
+		_, _ = e.home.liveness.Retire(id, true)
 		e.home.channel.Cells().DespawnIDReason(id, "sysop")
 	}
 	if effects.KickDaemon != nil && e.home.links != nil {
@@ -506,7 +510,7 @@ func (e *opEntry) executeMemberIntroduce(ctx context.Context, req sysactor.Opera
 // closure is computed under Home's Fork-race lock discipline (the sole holder of
 // the run-world sponsor graph), then RemoveActor commits the cascade value rows
 // with the anchor + started/completed event pair in ONE transaction. No
-// execution handle (systemEndHandle) is touched; despawn is a reconcile private
+// execution path is touched; despawn is a reconcile private
 // matter carried out here as the post-commit teardown.
 func (e *opEntry) executeMemberRemove(ctx context.Context, req sysactor.OperateRequest) (any, error) {
 	if err := e.available(); err != nil {
@@ -553,7 +557,7 @@ func (e *opEntry) executeMemberRestart(ctx context.Context, req sysactor.Operate
 	// body with restart intent in the liveness ledger and reconcile mints the
 	// next one. Identity truth and the control index are untouched — restart
 	// has no identity-axis value to publish.
-	e.applyEffects(ctx, res.Effects)
+	e.applyEffects(res.Effects)
 	return map[string]any{"restarted": payload.InstanceID}, nil
 }
 
@@ -577,7 +581,7 @@ func (e *opEntry) executeMemberSetDefault(ctx context.Context, req sysactor.Oper
 	if err != nil {
 		return nil, asOperateError(err)
 	}
-	e.applyEffects(ctx, res.Effects)
+	e.applyEffects(res.Effects)
 	return map[string]any{"default_agent": payload.InstanceID}, nil
 }
 

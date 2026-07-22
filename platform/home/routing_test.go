@@ -104,11 +104,11 @@ func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 	t.Run("human broadcast", func(t *testing.T) {
 		h := openRoutingHome(t, "routing-broadcast")
 		source := routingAgent(t, h, "source", "source", "missing", false)
-		alice, err := h.admit(context.Background(), actor.KindHuman, "alice")
+		alice, err := admitThroughSysOp(h, context.Background(), actor.KindHuman, "alice")
 		if err != nil {
 			t.Fatal(err)
 		}
-		bob, err := h.admit(context.Background(), actor.KindHuman, "bob")
+		bob, err := admitThroughSysOp(h, context.Background(), actor.KindHuman, "bob")
 		if err != nil {
 			t.Fatal(err)
 		}

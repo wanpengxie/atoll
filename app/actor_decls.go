@@ -3,6 +3,7 @@ package app
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
 	"strings"
@@ -110,27 +111,45 @@ func (a *App) handleListDecls(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 		return
 	}
+	defer rows.Close()
 	out := []gin.H{}
 	for rows.Next() {
 		var id, name, owner, class, visibility string
 		var ca, ua int64
 		if err := rows.Scan(&id, &name, &owner, &class, &visibility, &ca, &ua); err != nil {
-			continue
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+			return
 		}
 		out = append(out, gin.H{"id": id, "name": name, "owner": owner, "class": class, "visibility": visibility, "created_at": ca, "updated_at": ua})
 	}
-	_ = rows.Close()
+	if err := rows.Err(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
+	if err := rows.Close(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
+		return
+	}
 
 	// Project instance identity only. A channel's declaration version is a local
 	// history/order fence, not realm value identity and not part of this API DTO.
-	bundles := a.snapshotBundles(c.Request.Context())
+	bundles, err := a.snapshotBundles(c.Request.Context())
+	if err != nil {
+		status := http.StatusInternalServerError
+		if errors.Is(err, errChannelUnavailable) {
+			status = http.StatusServiceUnavailable
+		}
+		c.JSON(status, gin.H{"error": "declaration instances unavailable"})
+		return
+	}
 	for _, decl := range out {
 		declID := decl["id"].(string)
 		instances := make([]gin.H, 0)
 		for chID, bundle := range bundles {
 			declared, err := bundle.View().DeclaredBySource(c.Request.Context(), declID)
 			if err != nil {
-				continue
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "declaration instances unavailable"})
+				return
 			}
 			for _, row := range declared {
 				instances = append(instances, gin.H{

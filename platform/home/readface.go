@@ -140,19 +140,6 @@ func (i *actorControlIndex) ListActive(context.Context) ([]storespec.ActorContro
 	return out, nil
 }
 
-// snapshotWorlds returns id→world for every published entry — the projection
-// sync arm's working set. Snapshot semantics only; callers re-confirm per id
-// before acting.
-func (i *actorControlIndex) snapshotWorlds() map[actor.ActorID]storespec.ActorWorld {
-	i.mu.RLock()
-	out := make(map[actor.ActorID]storespec.ActorWorld, len(i.rows))
-	for id, entry := range i.rows {
-		out[id] = entry.World
-	}
-	i.mu.RUnlock()
-	return out
-}
-
 func (i *actorControlIndex) WorldOf(_ context.Context, id actor.ActorID) (storespec.ActorWorld, bool, error) {
 	i.mu.RLock()
 	entry, ok := i.rows[id]

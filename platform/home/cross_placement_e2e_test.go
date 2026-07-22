@@ -33,7 +33,7 @@ func TestCrossPlacementForkBothDirectionsWithRealLifecycleArms(t *testing.T) {
 	// server → explicitly named daemon: drive the same incarnation-welded
 	// LifecycleHandle a local actor receives, then prove only the target daemon's
 	// plan projects the dirty child.
-	serverParent, err := h.admit(ctx, actor.KindHuman, "server-placement-parent")
+	serverParent, err := admitThroughSysOp(h, ctx, actor.KindHuman, "server-placement-parent")
 	if err != nil {
 		t.Fatal(err)
 	}

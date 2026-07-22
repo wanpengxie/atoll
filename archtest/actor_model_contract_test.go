@@ -341,8 +341,8 @@ func sameStrings(got, want []string) bool {
 	return true
 }
 
-// lifecycleAuthorMintPoints is the S9 closed set of three minting loci
-// (actor/system/wire 三道) that may weld a fresh AuthorStamp into a
+// lifecycleAuthorMintPoints is the S9 closed set of two production minting loci
+// (actor/wire 两道) that may weld a fresh AuthorStamp into a
 // lifecycleEndHandle{...} literal — the "生死动词作者一律铸造时焊死" red
 // line. It is call-site (function) precise, not file-level: a sibling
 // function sharing the same file (e.g. any future helper added to
@@ -351,17 +351,10 @@ func sameStrings(got, want []string) bool {
 // function/method that may construct the literal.
 //   - spawnhandle.go/newSpawnHandle: actor 道 — welds a live incarnation's
 //     own identity as its Fork/DespawnChild/EndSelf author.
-//   - end.go/systemEndHandle: system 道 — the lazy self-heal re-mint of the
-//     fixed system author (mirrors open.go's genesis mint below; both exist
-//     because Home.systemEnd is populated once at Open but re-derivable if
-//     ever unset, never a THIRD independent system identity).
-//   - open.go/Open: system 道 genesis mint (h.systemEnd assembly).
 //   - remote_lifecycle.go/handleRemoteEnd: wire 道 — welds the wire
 //     attach-authenticated incarnation's identity for a remote End frame.
 var lifecycleAuthorMintPoints = map[[2]string]bool{
 	{"../platform/home/spawnhandle.go", "newSpawnHandle"}:       true,
-	{"../platform/home/end.go", "systemEndHandle"}:              true,
-	{"../platform/home/open.go", "Open"}:                        true,
 	{"../platform/home/remote_lifecycle.go", "handleRemoteEnd"}: true,
 }
 

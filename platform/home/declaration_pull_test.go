@@ -132,6 +132,42 @@ func TestDeclarationPullConvergesAndPreservesChannelFields(t *testing.T) {
 	}
 }
 
+func TestDeclarationPullEqualRepublishesCommittedValue(t *testing.T) {
+	ctx := context.Background()
+	resolver := &pullTestResolver{facts: channel.DeclarationFacts{Class: "pull-agent", Config: json.RawMessage(`{"value":"b"}`)}}
+	h := openPullTestHome(t, resolver)
+	row := declarePullActor(t, h, "decl-republish", `{"value":"a"}`, storespec.NewServerPlacement(), 0, 10)
+
+	request := struct {
+		ActorID actor.ActorID   `json:"actor_id"`
+		DeclID  string          `json:"decl_id"`
+		Class   string          `json:"class"`
+		Config  json.RawMessage `json:"config"`
+	}{row.ID, "decl-republish", "pull-agent", json.RawMessage(`{"value":"b"}`)}
+	meta, err := systemMeta("test:committed-before-publish", request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	committed, err := h.opEntry.sync.ApplyResolvedDeclaration(ctx, storespec.DeclarationSyncTx{
+		SysOpMeta: meta, ActorID: row.ID, DeclID: request.DeclID, Class: request.Class, Config: request.Config,
+	})
+	if err != nil || committed.Status != storespec.DeclarationApplied {
+		t.Fatalf("direct commit=(%+v,%v)", committed, err)
+	}
+	if stale, _, _ := h.controlIndex.LookupActive(ctx, row.ID); stale.CurrentDeclVersion != 1 {
+		t.Fatalf("test did not preserve missed-publication image: %+v", stale)
+	}
+
+	equal, err := h.opEntry.applyResolvedDeclaration(ctx, row.ID, request.DeclID, request.Class, request.Config)
+	if err != nil || equal.Status != storespec.DeclarationEqual {
+		t.Fatalf("equal pull=(%+v,%v)", equal, err)
+	}
+	got, active, err := h.controlIndex.LookupActive(ctx, row.ID)
+	if err != nil || !active || got.CurrentDeclVersion != 2 || string(got.Config) != `{"value":"b"}` {
+		t.Fatalf("equal pull did not republish: row=%+v active=%v err=%v", got, active, err)
+	}
+}
+
 func TestDeclarationPullSkipsResolverFailureAbsenceAndKindMismatch(t *testing.T) {
 	ctx := context.Background()
 	resolver := &pullTestResolver{facts: channel.DeclarationFacts{Class: "pull-agent", Config: json.RawMessage(`{"value":"a"}`)}}
@@ -167,7 +203,7 @@ func TestDeclarationPullAttemptCannotCrossActorLifetime(t *testing.T) {
 		close(done)
 	}()
 	<-entered
-	if err := h.systemEndHandle().End(ctx, first.ID, "test_remove"); err != nil {
+	if err := systemEndForTest(h).End(ctx, first.ID, "test_remove"); err != nil {
 		t.Fatal(err)
 	}
 	second := declarePullActor(t, h, "decl-aba", `{"value":"a"}`, storespec.NewServerPlacement(), 0, 20)

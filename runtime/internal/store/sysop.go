@@ -580,12 +580,6 @@ func (s *sysOpStore) SetDefaultAgent(ctx context.Context, in storespec.SetDefaul
 	return decodeResult[storespec.SetDefaultResult](raw, effects, err)
 }
 
-func principalActiveTx(ctx context.Context, tx *sql.Tx, principal string) (bool, error) {
-	var active bool
-	err := tx.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM actor_registry WHERE principal=? AND deregistered_at IS NULL)`, principal).Scan(&active)
-	return active, err
-}
-
 func mintActorIDTx(ctx context.Context, tx *sql.Tx, kind actor.Kind, principal string, at int64) (actor.ActorID, error) {
 	for attempt := int64(0); attempt < 1000; attempt++ {
 		candidate := actor.ActorID(fmt.Sprintf("%s:%s:%d", kind, principal, at+attempt))

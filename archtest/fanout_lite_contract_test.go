@@ -219,7 +219,7 @@ func TestFanoutLiteReadInterfacesStayClosed(t *testing.T) {
 		"IsBound", "ListBoundDaemons",
 	})
 	assertInterfaceMethods("../platform/channelhost/bundle.go", "View", []string{
-		"DefaultAgent", "DeclaredBySourceOne", "DeclaredBySource", "ActiveActors", "ResolvePrincipal",
+		"DefaultAgent", "DeclaredBySource", "ActiveActors", "ResolvePrincipal",
 		"OwnerPrincipal", "ReadVisibleAfterSeq", "ActorFacts", "Snapshot", "MaxSeq", "ListActors",
 		"Stat", "IsAttached", "IsBound", "Resources",
 	})

@@ -126,7 +126,7 @@ const (
 	RealmConflict              RealmErrorCode = "conflict"
 )
 
-var AllRealmErrorCodes = []RealmErrorCode{
+var realmErrorCodes = [...]RealmErrorCode{
 	RealmForbidden, RealmDeclNotFound, RealmResourceNotFound,
 	RealmCapabilityUnavailable, RealmChannelUnavailable, RealmUnavailable,
 	RealmInvalidRequest, RealmConflict,
