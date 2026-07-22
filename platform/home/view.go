@@ -20,9 +20,10 @@ import (
 // View -- the read-only observation capability
 // ---------------------------------------------------------------------------
 
-// View is the channel-home's read-only observation set: reader-filtered message
-// tail, head cursor (MaxSeq), and active actor roster (ListActors). It
-// holds only read interfaces — there is no write path through a View.
+// View is channel-home's read-only observation set. Some methods are private
+// substrate projections used by Home itself; channelhost deliberately exports
+// only the smaller policy-safe View interface at the membrane boundary. There
+// is no write path through either surface.
 type View struct {
 	query      storespec.MessageQuery
 	visible    storespec.VisibleMessageQuery
@@ -38,11 +39,10 @@ type View struct {
 	bindings   storespec.DaemonBindingReader
 }
 
-// View returns the read-only observation set (ReadVisibleAfterSeq / MaxSeq /
-// ListActors / daemon attachment). It carries no write capability — observation
-// only. The host (app) reads these projections OUT-OF-BAND (no message, no
-// truth-log write) — UI status polling must not pollute the log; in-universe
-// actors instead ask the system actor by message (that path is logged).
+// View returns the full substrate observation set. It carries no write
+// capability. channelhost adapters select the narrower cross-membrane subset;
+// in-universe actors ask the system actor by message so their reads remain in
+// the channel interaction model.
 func (h *Home) View() View {
 	return View{
 		query:      h.cs.Query,
