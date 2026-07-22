@@ -526,7 +526,8 @@ func TestChannelRealmW10RequirementNeutrality(t *testing.T) {
 	}
 }
 
-// W11: observer Reader minting is centralized in canObserve; member Readers are out of scope.
+// W11: observer Reader minting is centralized in the channel read policy layer;
+// member Readers are out of scope.
 func TestChannelRealmW11ObserverReadClosure(t *testing.T) {
 	constructors := 0
 	for _, path := range phaseAProductionFiles(t, "..") {
@@ -557,7 +558,43 @@ func TestChannelRealmW11ObserverReadClosure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "func (a *App) canObserve") || !strings.Contains(string(body), "DeclaredBySource") {
-		t.Fatal("canObserve is not the realm-tool-backed observer gate")
+	if !strings.Contains(string(body), "func (a *App) readerForPrincipal") || !strings.Contains(string(body), "DeclaredBySource") {
+		t.Fatal("readerForPrincipal is not the realm-tool-backed observer gate")
+	}
+}
+
+// W12: hard HTTP authorization paths share exactly one directory/serving
+// acquisition base. Optional projections, scans, workers, and delete fallback
+// intentionally retain their distinct failure contracts and are out of scope.
+func TestChannelRealmW12HardAcquireBaseIsSingular(t *testing.T) {
+	for _, path := range []string{"../app/identity.go", "../app/channel_read.go", "../app/ws.go"} {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), "host.Acquire(") {
+			t.Errorf("%s bypasses acquireBundle with a hard host.Acquire", path)
+		}
+	}
+	identity, err := os.ReadFile("../app/identity.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(identity), "a.acquireBundle(") {
+		t.Fatal("member authorization does not use acquireBundle")
+	}
+	read, err := os.ReadFile("../app/channel_read.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(read), "a.channelExists(") || strings.Count(string(read), "a.acquireBundle(") != 2 {
+		t.Fatal("member/observer read paths do not share the singular acquireBundle base")
+	}
+	ws, err := os.ReadFile("../app/ws.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(ws), "a.bundleOrError(") {
+		t.Fatal("compute websocket does not layer HTTP mapping over acquireBundle")
 	}
 }

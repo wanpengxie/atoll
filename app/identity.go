@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strings"
 	"time"
@@ -50,12 +51,13 @@ func (a *App) requireChannelMember(c *gin.Context) (string, bool) {
 }
 
 func (a *App) requireChannelMemberActor(c *gin.Context) (string, actor.ActorID, bool) {
-	chID, ok := a.requireChannelAccess(c)
-	if !ok {
+	chID := c.Param("chID")
+	bundle, err := a.acquireBundle(c.Request.Context(), channel.ID(chID))
+	if errors.Is(err, errChannelNotFound) {
+		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
 		return "", "", false
 	}
-	bundle, ok := a.host.Acquire(channel.ID(chID))
-	if !ok {
+	if err != nil {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 		return "", "", false
 	}

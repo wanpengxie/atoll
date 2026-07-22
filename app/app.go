@@ -263,11 +263,11 @@ var (
 )
 
 func (a *App) acquireBundle(ctx context.Context, chID channel.ID) (channelhost.Bundle, error) {
-	if bundle, ok := a.host.Acquire(chID); ok {
-		return bundle, nil
-	}
 	if !a.channelExists(ctx, string(chID)) {
 		return nil, errChannelNotFound
+	}
+	if bundle, ok := a.host.Acquire(chID); ok {
+		return bundle, nil
 	}
 	return nil, errChannelUnavailable
 }

@@ -39,44 +39,55 @@ func (a *App) canObserve(ctx context.Context, chID channel.ID, principal string)
 	if principal == "" {
 		return nil, channel.Reader{}, observeUnavailable, nil
 	}
-	if !a.channelExists(ctx, string(chID)) {
-		return nil, channel.Reader{}, observeChannelAbsent, nil
-	}
-	bundle, ok := a.host.Acquire(chID)
-	if !ok {
-		return nil, channel.Reader{}, observeHostUnavailable, nil
-	}
-	if _, found, err := bundle.View().ResolvePrincipal(ctx, actor.KindHuman, principal); err != nil {
-		return nil, channel.Reader{}, observeUnavailable, err
-	} else if found {
-		return bundle, channel.Reader{}, observeNowMember, nil
-	}
-	toolRows, err := bundle.View().DeclaredBySource(ctx, realmToolDeclID)
+	bundle, err := a.acquireBundle(ctx, chID)
 	if err != nil {
-		return nil, channel.Reader{}, observeUnavailable, err
+		return nil, channel.Reader{}, observeReasonForBundleError(err), nil
 	}
-	if len(toolRows) == 0 {
-		return bundle, channel.Reader{}, observeUnavailable, nil
-	}
-	return bundle, channel.Reader{Principal: principal, Mode: channel.ReaderObserver}, observeAllowed, nil
+	reader, reason, err := a.readerForPrincipal(ctx, bundle, principal, false)
+	return bundle, reader, reason, err
 }
 
 func (a *App) readSubject(ctx context.Context, chID channel.ID, principal string) (channelhost.Bundle, channel.Reader, observeReason, error) {
-	if !a.channelExists(ctx, string(chID)) {
-		return nil, channel.Reader{}, observeChannelAbsent, nil
+	bundle, err := a.acquireBundle(ctx, chID)
+	if err != nil {
+		return nil, channel.Reader{}, observeReasonForBundleError(err), nil
 	}
-	bundle, ok := a.host.Acquire(chID)
-	if !ok {
-		return nil, channel.Reader{}, observeHostUnavailable, nil
+	reader, reason, err := a.readerForPrincipal(ctx, bundle, principal, true)
+	return bundle, reader, reason, err
+}
+
+func observeReasonForBundleError(err error) observeReason {
+	if errors.Is(err, errChannelNotFound) {
+		return observeChannelAbsent
+	}
+	return observeHostUnavailable
+}
+
+// readerForPrincipal layers read authorization on one already-acquired Bundle.
+// Acquisition and directory/serving classification belong exclusively to
+// acquireBundle; this function decides only member-vs-observer policy.
+func (a *App) readerForPrincipal(ctx context.Context, bundle channelhost.Bundle, principal string, membersAllowed bool) (channel.Reader, observeReason, error) {
+	if principal == "" {
+		return channel.Reader{}, observeUnavailable, nil
 	}
 	memberID, found, err := bundle.View().ResolvePrincipal(ctx, actor.KindHuman, principal)
 	if err != nil {
-		return nil, channel.Reader{}, observeUnavailable, err
+		return channel.Reader{}, observeUnavailable, err
 	}
 	if found {
-		return bundle, channel.Reader{ActorID: memberID, Mode: channel.ReaderMember}, observeAllowed, nil
+		if membersAllowed {
+			return channel.Reader{ActorID: memberID, Mode: channel.ReaderMember}, observeAllowed, nil
+		}
+		return channel.Reader{}, observeNowMember, nil
 	}
-	return a.canObserve(ctx, chID, principal)
+	toolRows, err := bundle.View().DeclaredBySource(ctx, realmToolDeclID)
+	if err != nil {
+		return channel.Reader{}, observeUnavailable, err
+	}
+	if len(toolRows) == 0 {
+		return channel.Reader{}, observeUnavailable, nil
+	}
+	return channel.Reader{Principal: principal, Mode: channel.ReaderObserver}, observeAllowed, nil
 }
 
 func writeReadFailure(c *gin.Context, reason observeReason, err error) {
