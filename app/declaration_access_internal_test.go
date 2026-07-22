@@ -60,6 +60,12 @@ func TestAdmissionErrorClassificationAdapters(t *testing.T) {
 	if got := admissionErrorHTTP(string(admissionCodeDaemonNotFound)); got != 404 {
 		t.Fatalf("daemon_not_found HTTP=%d", got)
 	}
+	// RealmOps has no daemon attach operation, and daemon identities are not the
+	// resource family addressed by RealmResourceNotFound. If malformed persisted
+	// input ever crosses this adapter, fail honestly as a realm-level outage.
+	if got := admissionRealmErrorCode(string(admissionCodeDaemonNotFound)); got != channel.RealmUnavailable {
+		t.Fatalf("daemon_not_found Realm=%q", got)
+	}
 	if got := classifyAdmissionError(string(channel.ErrCodeChannelUnavailable)); got != admissionUnavailable {
 		t.Fatalf("channel_unavailable class=%v", got)
 	}

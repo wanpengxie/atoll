@@ -39,13 +39,14 @@ type lifecycleWorker struct {
 	nextKind      string
 	provisionLast int64
 	destroyLast   int64
+	servingEvery  time.Duration
 }
 
 func newLifecycleWorker(app *App) *lifecycleWorker {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &lifecycleWorker{
 		app: app, ctx: ctx, cancel: cancel, wake: make(chan struct{}, 1), done: make(chan struct{}),
-		nextKind: "provision",
+		nextKind: "provision", servingEvery: servingReconcileInterval,
 	}
 }
 
@@ -54,7 +55,11 @@ func (w *lifecycleWorker) start() {
 		defer close(w.done)
 		ticker := time.NewTicker(lifecycleTick)
 		defer ticker.Stop()
-		servingTicker := time.NewTicker(servingReconcileInterval)
+		servingEvery := w.servingEvery
+		if servingEvery <= 0 {
+			servingEvery = servingReconcileInterval
+		}
+		servingTicker := time.NewTicker(servingEvery)
 		defer servingTicker.Stop()
 		lastSweep := time.Now()
 		for {

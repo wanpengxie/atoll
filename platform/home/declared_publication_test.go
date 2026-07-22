@@ -1,6 +1,7 @@
 package home
 
 import (
+	"context"
 	"os"
 	"strings"
 	"testing"
@@ -8,6 +9,21 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+type publicationAwareRouting struct {
+	storespec.ChannelRouting
+	home      *Home
+	published bool
+	err       error
+}
+
+func (r *publicationAwareRouting) SetDefaultAgent(ctx context.Context, id actor.ActorID) error {
+	_, live := r.home.liveness.stateForTest(id)
+	_, active, err := r.home.controlIndex.LookupActive(ctx, id)
+	r.err = err
+	r.published = live && active && err == nil
+	return r.ChannelRouting.SetDefaultAgent(ctx, id)
+}
 
 func TestPublishDeclaredActorAssemblyOrder(t *testing.T) {
 	source, err := os.ReadFile("declared_publication.go")
@@ -22,6 +38,22 @@ func TestPublishDeclaredActorAssemblyOrder(t *testing.T) {
 			t.Fatalf("publication assembly order violated at %s", token)
 		}
 		last = next
+	}
+}
+
+func TestDeclarePublishesIdentityBeforeDefaultRouting(t *testing.T) {
+	h := openWhiteboxHome(t)
+	probe := &publicationAwareRouting{ChannelRouting: h.cs.Routing, home: h}
+	h.cs.Routing = probe
+	result, err := h.declare(context.Background(), DeclareRequest{
+		SourceDeclID: "decl:default-order", Kind: actor.KindAgent, Class: "default-order-agent",
+		Placement: storespec.NewServerPlacement(), MakeDefault: true, CreatedAt: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if probe.err != nil || !probe.published {
+		t.Fatalf("default routing observed unpublished actor %s: published=%v err=%v", result.Row.ID, probe.published, probe.err)
 	}
 }
 

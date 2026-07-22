@@ -76,14 +76,14 @@ func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 			}
 		}
 	}
+	row, err = h.publishDeclaredActor(ctx, admitted.ID, storespec.RoleNone)
+	if err != nil {
+		return DeclareResult{}, fmt.Errorf("platform: publish declared actor %s: %w", admitted.ID, err)
+	}
 	if in.MakeDefault {
 		if err := h.cs.Routing.SetDefaultAgent(ctx, row.ID); err != nil {
 			return DeclareResult{}, err
 		}
-	}
-	row, err = h.publishDeclaredActor(ctx, admitted.ID, storespec.RoleNone)
-	if err != nil {
-		return DeclareResult{}, fmt.Errorf("platform: publish declared actor %s: %w", admitted.ID, err)
 	}
 	return DeclareResult{Row: row, Created: admitted.Created, ConfigUpdated: updated}, nil
 }

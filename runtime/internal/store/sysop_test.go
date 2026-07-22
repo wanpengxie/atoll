@@ -224,6 +224,10 @@ func TestSysOpAdmitReplayAndRefConflict(t *testing.T) {
 	if err != nil || !first.Created || first.ActorID == "" {
 		t.Fatalf("first admit=(%+v,%v)", first, err)
 	}
+	row, found, err := cs.Declared.LookupDeclaredActive(ctx, first.ActorID)
+	if err != nil || !found || row.Kind != actor.KindHuman {
+		t.Fatalf("admit kind=(%q,%v,%v), want human", row.Kind, found, err)
+	}
 	replay, err := cs.SysOps.Admit(ctx, storespec.AdmitTx{SysOpMeta: sysMeta("op:ref:v1:one", "v1:a"), Principal: "alice"})
 	if err != nil || replay.ActorID != first.ActorID || replay.Created != first.Created {
 		t.Fatalf("replay=(%+v,%v), first=%+v", replay, err, first)

@@ -32,7 +32,7 @@ func TestMixedDurableRunCascadeClearsRoutingAndPublishesOneClosedWorld(t *testin
 	if err := h.cs.Routing.SetDefaultAgent(ctx, parent); err != nil {
 		t.Fatal(err)
 	}
-	if err := systemEndForTest(h).End(ctx, parent, "cascade"); err != nil {
+	if err := removeThroughSysOp(h, ctx, parent); err != nil {
 		t.Fatal(err)
 	}
 	for _, id := range []actor.ActorID{parent, child, grandchild} {
@@ -188,7 +188,7 @@ func TestEndCascadeContainsConcurrentForkOrRejectsIt(t *testing.T) {
 		}()
 		go func() {
 			defer wg.Done()
-			endErr = systemEndForTest(h).End(ctx, parent, "race")
+			endErr = removeThroughSysOp(h, ctx, parent)
 		}()
 		wg.Wait()
 		if endErr != nil {

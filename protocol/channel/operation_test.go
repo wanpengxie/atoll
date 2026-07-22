@@ -85,7 +85,6 @@ func TestOperationErrorClosedSet(t *testing.T) {
 		ErrCodeUnknownClass: true, ErrCodeProtectedActor: true, ErrCodeNotInComposition: true,
 		ErrCodeInternal:          true,
 		ErrCodeNotAcceptedSource: true, ErrCodeMemberInactive: true, ErrCodeAuthorityUnavailable: true,
-		ErrCodeUnauthorizedSender: true,
 	}
 	if len(operationErrorCodes) != len(want) {
 		t.Fatalf("operate error closed set has %d entries, want %d", len(operationErrorCodes), len(want))
@@ -104,6 +103,9 @@ func TestOperationErrorClosedSet(t *testing.T) {
 	for _, code := range operationErrorCodes {
 		if code == ErrCodeRefConflict {
 			t.Fatal("ref_conflict must not be in the operate error closed set")
+		}
+		if string(code) == "unauthorized_sender" {
+			t.Fatal("unauthorized_sender is a transport-gate refusal, not an operate error code")
 		}
 	}
 }

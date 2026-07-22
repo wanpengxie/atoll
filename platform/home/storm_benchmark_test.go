@@ -85,7 +85,7 @@ func BenchmarkActorStorm(b *testing.B) {
 				}
 				sponsor = child
 			}
-			if err := systemEndForTest(h).End(ctx, root, "storm"); err != nil {
+			if err := removeThroughSysOp(h, ctx, root); err != nil {
 				b.Fatal(err)
 			}
 		}

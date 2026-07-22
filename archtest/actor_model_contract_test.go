@@ -424,6 +424,62 @@ func TestActorModelEndAuthorityIsWeldedAtMintPoints(t *testing.T) {
 	}
 }
 
+// System-owned lifecycle removal must exercise the same SysOp entry used in
+// production. Tests may still construct actor/wire lifecycle handles to test
+// those mechanisms, but may not mint a synthetic system-author handle that no
+// production assembly point exposes.
+func TestActorModelTestsDoNotMintSystemLifecycleHandle(t *testing.T) {
+	fset := token.NewFileSet()
+	err := filepath.WalkDir("../platform/home", func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, "_test.go") {
+			return nil
+		}
+		f, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			return err
+		}
+		ast.Inspect(f, func(n ast.Node) bool {
+			literal, ok := n.(*ast.CompositeLit)
+			if !ok {
+				return true
+			}
+			ident, ok := literal.Type.(*ast.Ident)
+			if !ok || ident.Name != "lifecycleEndHandle" {
+				return true
+			}
+			for _, elt := range literal.Elts {
+				field, ok := elt.(*ast.KeyValueExpr)
+				if !ok {
+					continue
+				}
+				key, ok := field.Key.(*ast.Ident)
+				if !ok || key.Name != "author" {
+					continue
+				}
+				ast.Inspect(field.Value, func(n ast.Node) bool {
+					sel, ok := n.(*ast.SelectorExpr)
+					if !ok {
+						return true
+					}
+					pkg, pkgOK := sel.X.(*ast.Ident)
+					if pkgOK && pkg.Name == "actor" && sel.Sel.Name == "SystemActorID" {
+						t.Errorf("%s mints a test-only system lifecycle handle; use SystemOps.Remove", fset.Position(sel.Pos()))
+					}
+					return true
+				})
+			}
+			return true
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // TestActorModelLivenessReadFaceIsClosedToTwoViews enforces §2.6's "读面 =
 // 两个目的视图" red line as an EXPORTED-METHOD-ENUMERATION closed set, not
 // merely an existence check (the pre-v1.4 shape: "does AttachmentIntent

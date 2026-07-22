@@ -203,7 +203,7 @@ func TestDeclarationPullAttemptCannotCrossActorLifetime(t *testing.T) {
 		close(done)
 	}()
 	<-entered
-	if err := systemEndForTest(h).End(ctx, first.ID, "test_remove"); err != nil {
+	if err := removeThroughSysOp(h, ctx, first.ID); err != nil {
 		t.Fatal(err)
 	}
 	second := declarePullActor(t, h, "decl-aba", `{"value":"a"}`, storespec.NewServerPlacement(), 0, 20)

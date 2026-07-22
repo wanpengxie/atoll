@@ -234,7 +234,7 @@ func TestProvisionReceiptPublishesAtomicallyAndRetryRebuilds(t *testing.T) {
 	}
 }
 
-func TestServingReconcileRetriesDirectoryChannelAfterOpenFailure(t *testing.T) {
+func TestServingTickerRetriesDirectoryChannelAfterOpenFailure(t *testing.T) {
 	a, host := newLifecycleTestApp(t, 0)
 	ctx := context.Background()
 	now := time.Now().UnixMilli()
@@ -249,17 +249,26 @@ func TestServingReconcileRetriesDirectoryChannelAfterOpenFailure(t *testing.T) {
 	host.mu.Lock()
 	host.failOpens = 1
 	host.mu.Unlock()
-	if err := a.reconcileServingChannels(ctx); err != nil {
-		t.Fatal(err)
+	w := newLifecycleWorker(a)
+	w.servingEvery = 10 * time.Millisecond
+	w.start()
+	defer w.close()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, ok := host.Acquire(id); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("serving ticker did not recover channel after injected Open failure")
+		}
+		time.Sleep(5 * time.Millisecond)
 	}
-	if _, ok := host.Acquire(id); ok {
-		t.Fatal("channel served after injected Open failure")
-	}
-	if err := a.reconcileServingChannels(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := host.Acquire(id); !ok {
-		t.Fatal("next serving reconcile did not recover channel")
+	host.mu.Lock()
+	opens := host.opens
+	host.mu.Unlock()
+	if opens < 2 {
+		t.Fatalf("Open calls=%d want at least 2 periodic attempts", opens)
 	}
 }
 

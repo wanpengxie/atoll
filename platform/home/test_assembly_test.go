@@ -9,7 +9,6 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type inertIntroductionResolver struct{}
@@ -56,10 +55,6 @@ func removeThroughSysOp(h *Home, ctx context.Context, target actor.ActorID) erro
 		Ref: "test:remove:" + uuid.NewString(), Target: target, InitiatorActorID: target,
 	})
 	return err
-}
-
-func systemEndForTest(h *Home) lifecycleEndHandle {
-	return lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}}
 }
 
 func isChannelUnavailableForTest(err error) bool {

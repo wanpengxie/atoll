@@ -10,6 +10,10 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
+// unauthorizedSenderCode belongs to the sysactor transport gate. It is not an
+// OperationErrorCode: rejected senders create no value-operation account.
+const unauthorizedSenderCode = "unauthorized_sender"
+
 // The channel operate face — the in-gate control plane (owner 2026-07-05 拍
 // NP-1=c). Channel-scoped control actions (remove/restart/set-default/introduce
 // a composition member) enter as a member's request (audience=[system]) rather
@@ -85,8 +89,8 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	if !authed {
 		s.logger.Info("sysactor.operate.refused", "type", msg.Type,
-			"sender", string(msg.Sender.ID), "code", string(channel.ErrCodeUnauthorizedSender))
-		_, _ = sys.Fail(msg, string(channel.ErrCodeUnauthorizedSender), "sender is not an active channel member")
+			"sender", string(msg.Sender.ID), "code", unauthorizedSenderCode)
+		_, _ = sys.Fail(msg, unauthorizedSenderCode, "sender is not an active channel member")
 		return
 	}
 	req := OperateRequest{ChannelID: msg.ChannelID, Sender: msg.Sender.ID, Anchor: string(msg.ID), Payload: msg.Payload}
