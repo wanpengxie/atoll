@@ -68,7 +68,7 @@ func (a *App) writeDeclarationOverlay(c *gin.Context, config json.RawMessage, cl
 		c.JSON(http.StatusConflict, gin.H{"error": "declaration is deleted"})
 		return
 	}
-	if visibility != "public" && owner != principal {
+	if !declarationVisibleTo(visibility, owner, principal) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "declaration owner required"})
 		return
 	}

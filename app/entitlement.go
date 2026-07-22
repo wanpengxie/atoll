@@ -58,23 +58,8 @@ func (a *App) sweepMembershipProjection(ctx context.Context) {
 	if _, err := a.db.ExecContext(ctx, `DELETE FROM principal_channels WHERE channel_id NOT IN (SELECT id FROM channels)`); err != nil {
 		a.logger.Warn("membership sweep orphan cleanup failed", "err", err)
 	}
-	rows, err := a.db.QueryContext(ctx, `SELECT id FROM channels ORDER BY id`)
+	ids, err := a.directoryChannelIDs(ctx)
 	if err != nil {
-		a.logger.Warn("membership sweep directory read failed", "err", err)
-		return
-	}
-	var ids []string
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			rows.Close()
-			a.logger.Warn("membership sweep directory read failed", "err", err)
-			return
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-	if err := rows.Err(); err != nil {
 		a.logger.Warn("membership sweep directory read failed", "err", err)
 		return
 	}
@@ -82,7 +67,7 @@ func (a *App) sweepMembershipProjection(ctx context.Context) {
 		if ctx.Err() != nil {
 			return
 		}
-		a.sweepChannelMembership(ctx, channel.ID(id))
+		a.sweepChannelMembership(ctx, id)
 	}
 }
 

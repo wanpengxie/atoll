@@ -64,7 +64,7 @@ func (a *App) handleCreateDecl(c *gin.Context) {
 	// boundary tool for class=="realm-tool", so a forged realm-tool declaration
 	// would smuggle a membrane entry past the "remove realm-tool = close it"
 	// sovereignty switch. The default "go-kimi" is a registered class and passes.
-	if _, ok, err := (compositionResolver{app: a}).ClassKind(c.Request.Context(), class); err != nil || !ok || class == realmToolClass {
+	if _, ok, err := a.declarationClassKind(c.Request.Context(), class); err != nil || !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "unknown or reserved class"})
 		return
 	}
@@ -193,7 +193,7 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 	}
 	defer tx.Rollback()
 	var currentClass string
-	if err := tx.QueryRowContext(c.Request.Context(), `SELECT default_class FROM actor_decls WHERE id=? AND owner=? AND deleted_at IS NULL`, declID, userID).Scan(&currentClass); err != nil {
+	if err := tx.QueryRowContext(c.Request.Context(), `SELECT default_class FROM actor_decls WHERE `+ownedDeclarationWhere+` AND deleted_at IS NULL`, declID, userID).Scan(&currentClass); err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "decl not found"})
 		} else {
@@ -203,25 +203,24 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 	}
 	if req.Class != nil {
 		class := strings.TrimSpace(*req.Class)
-		oldKind, oldFound, oldErr := (compositionResolver{app: a}).ClassKind(c.Request.Context(), currentClass)
-		newKind, newFound, newErr := (compositionResolver{app: a}).ClassKind(c.Request.Context(), class)
-		if oldErr != nil || newErr != nil {
+		sameKind, classErr := a.declarationClassTransition(c.Request.Context(), currentClass, class)
+		if classErr != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "class registry unavailable"})
 			return
 		}
-		if class == realmToolClass || !oldFound || !newFound || oldKind != newKind {
+		if !sameKind {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "class must remain within the declaration kind"})
 			return
 		}
 		if _, err := tx.ExecContext(c.Request.Context(),
-			`UPDATE actor_decls SET default_class=?,updated_at=? WHERE id=? AND owner=?`, class, now, declID, userID); err != nil {
+			`UPDATE actor_decls SET default_class=?,updated_at=? WHERE `+ownedDeclarationWhere, class, now, declID, userID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			return
 		}
 	}
 	if req.Name != nil {
 		if _, err := tx.ExecContext(c.Request.Context(),
-			`UPDATE actor_decls SET name = ?, updated_at = ? WHERE id = ? AND owner = ?`,
+			`UPDATE actor_decls SET name = ?, updated_at = ? WHERE `+ownedDeclarationWhere,
 			strings.TrimSpace(*req.Name), now, declID, userID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			return
@@ -234,7 +233,7 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 			return
 		}
 		if _, err := tx.ExecContext(c.Request.Context(),
-			`UPDATE actor_decls SET visibility = ?, updated_at = ? WHERE id = ? AND owner = ?`,
+			`UPDATE actor_decls SET visibility = ?, updated_at = ? WHERE `+ownedDeclarationWhere,
 			visibility, now, declID, userID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			return
@@ -251,7 +250,7 @@ func (a *App) handleUpdateDecl(c *gin.Context) {
 			return
 		}
 		if _, err := tx.ExecContext(c.Request.Context(),
-			`UPDATE actor_decls SET config_json = ?, updated_at = ? WHERE id = ? AND owner = ?`,
+			`UPDATE actor_decls SET config_json = ?, updated_at = ? WHERE `+ownedDeclarationWhere,
 			string(canonical), now, declID, userID); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})
 			return
@@ -279,7 +278,7 @@ func (a *App) handleDeleteDecl(c *gin.Context) {
 	}
 	defer tx.Rollback()
 	res, err := tx.ExecContext(ctx,
-		`UPDATE actor_decls SET deleted_at = ?, updated_at = ? WHERE id = ? AND owner = ? AND deleted_at IS NULL`,
+		`UPDATE actor_decls SET deleted_at = ?, updated_at = ? WHERE `+ownedDeclarationWhere+` AND deleted_at IS NULL`,
 		now, now, declID, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal error"})

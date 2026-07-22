@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
@@ -87,7 +88,7 @@ func (o realmOps) InspectDeclaration(ctx context.Context, req channel.Requester,
 	if err != nil {
 		return channel.DeclDetail{}, err
 	}
-	if d.Visibility != "public" && d.Owner != facts.Principal {
+	if !declarationVisibleTo(d.Visibility, d.Owner, facts.Principal) {
 		return channel.DeclDetail{}, &channel.RealmError{Code: channel.RealmForbidden}
 	}
 	return d, nil
@@ -123,7 +124,7 @@ func (o realmOps) CreateDeclaration(ctx context.Context, req channel.Requester, 
 	if err != nil {
 		return channel.DeclDetail{}, err
 	}
-	if _, ok, err := (compositionResolver{app: o.app}).ClassKind(ctx, spec.Class); err != nil || !ok || spec.Class == realmToolClass {
+	if _, ok, err := o.app.declarationClassKind(ctx, spec.Class); err != nil || !ok {
 		return channel.DeclDetail{}, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "unknown or reserved class"}
 	}
 	id := uuid.NewString()
@@ -151,7 +152,7 @@ func (o realmOps) EditDeclaration(ctx context.Context, req channel.Requester, de
 	if err != nil {
 		return channel.DeclDetail{}, err
 	}
-	if _, ok, err := (compositionResolver{app: o.app}).ClassKind(ctx, spec.Class); err != nil || !ok || spec.Class == realmToolClass {
+	if _, ok, err := o.app.declarationClassKind(ctx, spec.Class); err != nil || !ok {
 		return channel.DeclDetail{}, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "unknown or reserved class"}
 	}
 	tx, err := o.app.db.BeginTx(ctx, nil)
@@ -160,25 +161,21 @@ func (o realmOps) EditDeclaration(ctx context.Context, req channel.Requester, de
 	}
 	defer tx.Rollback()
 	var currentClass string
-	if err := tx.QueryRowContext(ctx, `SELECT default_class FROM actor_decls WHERE id=? AND owner=? AND deleted_at IS NULL`, declID, facts.Principal).Scan(&currentClass); err != nil {
+	if err := tx.QueryRowContext(ctx, `SELECT default_class FROM actor_decls WHERE `+ownedDeclarationWhere+` AND deleted_at IS NULL`, declID, facts.Principal).Scan(&currentClass); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return channel.DeclDetail{}, &channel.RealmError{Code: channel.RealmDeclNotFound}
 		}
 		return channel.DeclDetail{}, err
 	}
-	oldKind, oldFound, err := (compositionResolver{app: o.app}).ClassKind(ctx, currentClass)
+	sameKind, err := o.app.declarationClassTransition(ctx, currentClass, spec.Class)
 	if err != nil {
 		return channel.DeclDetail{}, err
 	}
-	newKind, newFound, err := (compositionResolver{app: o.app}).ClassKind(ctx, spec.Class)
-	if err != nil {
-		return channel.DeclDetail{}, err
-	}
-	if !oldFound || !newFound || oldKind != newKind {
+	if !sameKind {
 		return channel.DeclDetail{}, &channel.RealmError{Code: channel.RealmInvalidRequest, Detail: "class must remain within the declaration kind"}
 	}
 	now := time.Now().UnixMilli()
-	res, err := tx.ExecContext(ctx, `UPDATE actor_decls SET name=?,default_class=?,config_json=?,visibility=?,updated_at=? WHERE id=? AND owner=? AND deleted_at IS NULL`, spec.Name, spec.Class, string(spec.Config), spec.Visibility, now, declID, facts.Principal)
+	res, err := tx.ExecContext(ctx, `UPDATE actor_decls SET name=?,default_class=?,config_json=?,visibility=?,updated_at=? WHERE `+ownedDeclarationWhere+` AND deleted_at IS NULL`, spec.Name, spec.Class, string(spec.Config), spec.Visibility, now, declID, facts.Principal)
 	if err != nil {
 		return channel.DeclDetail{}, err
 	}
@@ -206,7 +203,7 @@ func (o realmOps) RevokeDeclaration(ctx context.Context, req channel.Requester, 
 	}
 	defer tx.Rollback()
 	now := time.Now().UnixMilli()
-	res, err := tx.ExecContext(ctx, `UPDATE actor_decls SET deleted_at=?,updated_at=? WHERE id=? AND owner=? AND deleted_at IS NULL`, now, now, declID, facts.Principal)
+	res, err := tx.ExecContext(ctx, `UPDATE actor_decls SET deleted_at=?,updated_at=? WHERE `+ownedDeclarationWhere+` AND deleted_at IS NULL`, now, now, declID, facts.Principal)
 	if err != nil {
 		return err
 	}
@@ -264,23 +261,30 @@ func (o realmOps) Introduce(ctx context.Context, req channel.Requester, declID s
 // code onto the frozen RealmOps error closed set (spec S4-9:
 // forbidden / decl_not_found / resource_not_found / capability_unavailable /
 // channel_unavailable / realm_unavailable / invalid_request / conflict). The
-// grouping follows the same semantic classes admissionErrorHTTP uses. Codes with
-// no closed-set counterpart keep RealmForbidden; the original operate code always
-// rides along in Detail (both here and at the callsite), so nothing is lost.
+// grouping follows the same semantic classes admissionErrorHTTP uses. The
+// original operate code always rides along in Detail, while unavailable keeps
+// the RealmOps closed vocabulary honest without growing transport-specific words.
 func admissionRealmErrorCode(code string) channel.RealmErrorCode {
-	switch channel.OperationErrorCode(code) {
-	case channel.ErrCodeDeclNotFound:
-		return channel.RealmDeclNotFound
-	case channel.ErrCodeBadPayload, channel.ErrCodeUnknownClass, channel.ErrCodeInvalidDesiredHost:
+	switch classifyAdmissionError(code) {
+	case admissionBadRequest:
 		return channel.RealmInvalidRequest
-	case channel.ErrCodeChannelUnavailable:
-		return channel.RealmChannelUnavailable
-	case channel.ErrCodeProtectedActor, channel.ErrCodeNotInComposition, channel.ErrCodeMemberInactive, channel.ErrCodeRefConflict:
+	case admissionForbidden:
+		return channel.RealmForbidden
+	case admissionNotFound:
+		if channel.OperationErrorCode(code) == channel.ErrCodeDeclNotFound {
+			return channel.RealmDeclNotFound
+		}
+		// daemon_not_found is produced only by the daemon HTTP family and has
+		// no honest word in RealmOps' frozen closed set. Do not mislabel it as
+		// a missing declaration if malformed persisted input ever reaches here.
+		return channel.RealmUnavailable
+	case admissionConflict:
 		return channel.RealmConflict
 	default:
-		// forbidden / not_accepted_source and any transient
-		// code that has no RealmOps closed-set counterpart stay RealmForbidden.
-		return channel.RealmForbidden
+		if channel.OperationErrorCode(code) == channel.ErrCodeChannelUnavailable {
+			return channel.RealmChannelUnavailable
+		}
+		return channel.RealmUnavailable
 	}
 }
 
@@ -347,64 +351,47 @@ func (o realmOps) OperationStatus(ctx context.Context, req channel.Requester, re
 	return view, nil
 }
 
-func (o realmOps) crossReader(ctx context.Context, req channel.Requester, source channel.ID) (channel.Reader, error) {
+func (o realmOps) crossReader(ctx context.Context, req channel.Requester, source channel.ID) (channelhost.Bundle, channel.Reader, error) {
 	facts, err := o.requesterFacts(ctx, req)
 	if err != nil {
-		return channel.Reader{}, err
+		return nil, channel.Reader{}, err
 	}
-	bundle, ok := o.app.host.Acquire(source)
-	if !ok {
-		return channel.Reader{}, &channel.RealmError{Code: channel.RealmChannelUnavailable}
+	bundle, err := o.app.acquireBundle(ctx, source)
+	if err != nil {
+		return nil, channel.Reader{}, &channel.RealmError{Code: channel.RealmChannelUnavailable}
 	}
 	toolRows, err := bundle.View().DeclaredBySource(ctx, realmToolDeclID)
 	if err != nil {
-		return channel.Reader{}, err
+		return nil, channel.Reader{}, err
 	}
 	if len(toolRows) == 0 {
-		return channel.Reader{}, &channel.RealmError{Code: channel.RealmCapabilityUnavailable, Detail: "source realm tool absent"}
+		return nil, channel.Reader{}, &channel.RealmError{Code: channel.RealmCapabilityUnavailable, Detail: "source realm tool absent"}
 	}
 	if source == req.ChannelID {
-		return channel.Reader{ActorID: req.ActorID, Mode: channel.ReaderMember}, nil
+		return bundle, channel.Reader{ActorID: req.ActorID, Mode: channel.ReaderMember}, nil
 	}
-	if id, found, err := bundle.View().ResolvePrincipal(ctx, actor.KindHuman, facts.Principal); err != nil {
-		return channel.Reader{}, err
-	} else if found {
-		return channel.Reader{ActorID: id, Mode: channel.ReaderMember}, nil
-	}
-	_, reader, reason, err := o.app.canObserve(ctx, source, facts.Principal)
+	reader, reason, err := o.app.readerForPrincipal(ctx, bundle, facts.Principal, true)
 	if err != nil {
-		return channel.Reader{}, err
+		return nil, channel.Reader{}, err
 	}
 	if reason != observeAllowed {
-		code := channel.RealmCapabilityUnavailable
-		if reason == observeChannelAbsent {
-			code = channel.RealmChannelUnavailable
-		}
-		return channel.Reader{}, &channel.RealmError{Code: code, Detail: string(reason)}
+		return nil, channel.Reader{}, &channel.RealmError{Code: channel.RealmCapabilityUnavailable, Detail: string(reason)}
 	}
-	return reader, nil
+	return bundle, reader, nil
 }
 
 func (o realmOps) ListResources(ctx context.Context, req channel.Requester, source channel.ID, q channel.ResourceListQuery) (channel.ResourcePage, error) {
-	reader, err := o.crossReader(ctx, req, source)
+	bundle, reader, err := o.crossReader(ctx, req, source)
 	if err != nil {
 		return channel.ResourcePage{}, err
-	}
-	bundle, ok := o.app.host.Acquire(source)
-	if !ok {
-		return channel.ResourcePage{}, &channel.RealmError{Code: channel.RealmChannelUnavailable}
 	}
 	return bundle.View().Resources().List(ctx, reader, q)
 }
 
 func (o realmOps) FetchResource(ctx context.Context, req channel.Requester, source channel.ID, id resource.ResourceID) (channel.ResourceFetch, error) {
-	reader, err := o.crossReader(ctx, req, source)
+	bundle, reader, err := o.crossReader(ctx, req, source)
 	if err != nil {
 		return channel.ResourceFetch{}, err
-	}
-	bundle, ok := o.app.host.Acquire(source)
-	if !ok {
-		return channel.ResourceFetch{}, &channel.RealmError{Code: channel.RealmChannelUnavailable}
 	}
 	fetched, err := bundle.View().Resources().Fetch(ctx, reader, id)
 	if err != nil {

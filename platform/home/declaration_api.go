@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -51,18 +52,11 @@ func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 		return DeclareResult{}, err
 	}
 	row, ok, err := h.cs.Declared.LookupDeclaredActive(ctx, admitted.ID)
-	if err != nil || !ok {
+	if err != nil {
 		return DeclareResult{}, err
 	}
-	// Assembly order (装配序): liveness row BEFORE authority publish — same
-	// rule as fork admission. Publishing authority first opens a window where
-	// a delivery finds no L row, returns invalid, and the pump advances past
-	// the request with no wake debt recorded.
-	if admitted.Created && h.liveness.AdmitIdentity(admitted.ID) != transitionApplied {
-		return DeclareResult{}, errors.New("platform: invalid declared liveness row")
-	}
-	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}}) {
-		return DeclareResult{}, errors.New("platform: invalid declared control row")
+	if !ok {
+		return DeclareResult{}, errors.New("platform: committed declaration missing from declared view")
 	}
 	updated := false
 	if !admitted.Created && in.Config != nil {
@@ -87,7 +81,10 @@ func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 			return DeclareResult{}, err
 		}
 	}
-	h.pokeReconcile()
+	row, err = h.publishDeclaredActor(ctx, admitted.ID, storespec.RoleNone)
+	if err != nil {
+		return DeclareResult{}, fmt.Errorf("platform: publish declared actor %s: %w", admitted.ID, err)
+	}
 	return DeclareResult{Row: row, Created: admitted.Created, ConfigUpdated: updated}, nil
 }
 

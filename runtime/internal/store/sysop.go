@@ -244,7 +244,7 @@ func (s *sysOpStore) Admit(ctx context.Context, in storespec.AdmitTx) (storespec
 		if err != nil {
 			return sysOpOutcome{}, err
 		}
-		if err := insertDeclaredTx(ctx, tx, id, actor.KindHuman, in.Principal, "", nil, channel.RenderedSnapshot{
+		if err := insertDeclaredTx(ctx, tx, id, actor.KindHuman, in.Principal, "", "", channel.RenderedSnapshot{
 			Class: "human", Placement: channel.Placement{Kind: channel.PlacementServer},
 		}, storespec.RoleNone, now); err != nil {
 			return sysOpOutcome{}, err
@@ -317,12 +317,12 @@ func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (s
 		if err != nil {
 			return sysOpOutcome{}, err
 		}
-		if err := insertDeclaredTx(ctx, tx, id, in.Kind, "", in.DeclID, rendered.Config, rendered, storespec.RoleNone, now); err != nil {
-			return sysOpOutcome{}, err
-		}
 		binding := actor.Binding("")
 		if rendered.Placement.Kind == channel.PlacementDaemon {
 			binding = actor.BindingRuntimeInboundViaRelay
+		}
+		if err := insertDeclaredTx(ctx, tx, id, in.Kind, "", in.DeclID, binding, rendered, storespec.RoleNone, now); err != nil {
+			return sysOpOutcome{}, err
 		}
 		if _, err := appendTx(ctx, tx, actorRegisteredEnvelope(s.channelID, id, in.Kind, binding, now), false); err != nil {
 			return sysOpOutcome{}, err
@@ -594,11 +594,7 @@ func mintActorIDTx(ctx context.Context, tx *sql.Tx, kind actor.Kind, principal s
 	return "", errors.New("store: cannot mint actor id")
 }
 
-func insertDeclaredTx(ctx context.Context, tx *sql.Tx, id actor.ActorID, kind actor.Kind, principal, source string, config json.RawMessage, rendered channel.RenderedSnapshot, role storespec.ActorRole, at int64) error {
-	binding := actor.Binding("")
-	if rendered.Placement.Kind == channel.PlacementDaemon {
-		binding = actor.BindingRuntimeInboundViaRelay
-	}
+func insertDeclaredTx(ctx context.Context, tx *sql.Tx, id actor.ActorID, kind actor.Kind, principal, source string, binding actor.Binding, rendered channel.RenderedSnapshot, role storespec.ActorRole, at int64) error {
 	if _, err := tx.ExecContext(ctx, `INSERT INTO actor_registry(actor_id,actor_kind,principal,source_decl_id,role,actor_binding,current_decl_version,created_at,deregistered_at) VALUES (?,?,?,?,?,?,1,?,NULL)`, string(id), string(kind), principal, source, string(role), nullableBinding(binding), at); err != nil {
 		return err
 	}

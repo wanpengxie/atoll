@@ -428,26 +428,8 @@ func (e *opEntry) publishActor(_ context.Context, id actor.ActorID) error {
 	// expired in the commit-to-return window.
 	publishCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	row, found, err := e.home.cs.Declared.LookupDeclaredActive(publishCtx, id)
-	if err != nil || !found {
-		if err == nil {
-			err = errors.New("committed actor missing from declared view")
-		}
-		return err
-	}
-	if _, already, _ := e.home.controlIndex.LookupActive(publishCtx, id); !already {
-		if e.home.liveness.AdmitIdentity(id) != transitionApplied {
-			return fmt.Errorf("platform: publish sysop actor %s: liveness rejected", id)
-		}
-	}
-	if !e.home.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}}) {
-		return fmt.Errorf("platform: publish sysop actor %s: control index rejected", id)
-	}
-	if row.Kind == actor.KindHuman {
-		e.home.ensureSubjectSlot(id)
-	}
-	e.home.pokeReconcile()
-	return nil
+	_, err := e.home.publishDeclaredActor(publishCtx, id, storespec.RoleNone)
+	return err
 }
 
 func (e *opEntry) applyEffects(effects storespec.PostCommitEffects) {

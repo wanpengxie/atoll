@@ -141,6 +141,13 @@ func NewFrame(t FrameType, ref string, v any) (Frame, error) {
 	return f, nil
 }
 
+// NewErrorFrame is the single constructor for the flat error-frame contract.
+// ErrorPayload contains strings only, so its JSON encoding cannot fail.
+func NewErrorFrame(ref, frame, code, detail string) Frame {
+	raw, _ := json.Marshal(ErrorPayload{Frame: frame, Code: code, Detail: detail})
+	return Frame{V: FrameVersion, Type: FrameError, Ref: ref, Payload: raw}
+}
+
 // Marshal serializes a frame, enforcing the size cap.
 func (f Frame) Marshal() ([]byte, error) {
 	b, err := json.Marshal(f)

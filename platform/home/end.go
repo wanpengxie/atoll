@@ -129,17 +129,7 @@ func (h *Home) lockClosure(ctx context.Context, target actor.ActorID, locked map
 		if err != nil {
 			return err
 		}
-		inTree := map[actor.ActorID]bool{target: true}
-		changed := true
-		for changed {
-			changed = false
-			for _, row := range rows {
-				if !inTree[row.ID] && inTree[row.Sponsor] {
-					inTree[row.ID] = true
-					changed = true
-				}
-			}
-		}
+		inTree := descendantClosure(rows, target)
 		var next []actor.ActorID
 		for id := range inTree {
 			if !locked[id] {
@@ -155,6 +145,23 @@ func (h *Home) lockClosure(ctx context.Context, target actor.ActorID, locked map
 		}
 	}
 	return nil
+}
+
+// descendantClosure is the one sponsor-graph traversal used by both the lock
+// fence and the commit plan. Rows may arrive in any order, hence the fixed
+// point rather than an order-sensitive single pass.
+func descendantClosure(rows []storespec.ActorControlRow, root actor.ActorID) map[actor.ActorID]bool {
+	inTree := map[actor.ActorID]bool{root: true}
+	for changed := true; changed; {
+		changed = false
+		for _, row := range rows {
+			if !inTree[row.ID] && inTree[row.Sponsor] {
+				inTree[row.ID] = true
+				changed = true
+			}
+		}
+	}
+	return inTree
 }
 
 // finishEndTeardown runs the post-commit session cleanup for an ended closure
@@ -195,20 +202,10 @@ func (h *Home) buildEndPlan(ctx context.Context, root actor.ActorID, reason stri
 		return EndPlan{}, err
 	}
 	byID := make(map[actor.ActorID]storespec.ActorControlRow, len(rows))
-	inTree := map[actor.ActorID]bool{root: true}
 	for _, row := range rows {
 		byID[row.ID] = row
 	}
-	changed := true
-	for changed {
-		changed = false
-		for _, row := range rows {
-			if !inTree[row.ID] && inTree[row.Sponsor] {
-				inTree[row.ID] = true
-				changed = true
-			}
-		}
-	}
+	inTree := descendantClosure(rows, root)
 	plan := EndPlan{}
 	for id := range inTree {
 		row, ok := byID[id]

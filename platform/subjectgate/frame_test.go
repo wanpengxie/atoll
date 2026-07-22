@@ -41,6 +41,20 @@ func TestFrameCarriesNoIdentity(t *testing.T) {
 	}
 }
 
+func TestNewErrorFrameCarriesFlatContract(t *testing.T) {
+	f := NewErrorFrame("ref-7", string(FrameSubmit), CodeForbidden, "denied")
+	if f.V != FrameVersion || f.Type != FrameError || f.Ref != "ref-7" {
+		t.Fatalf("bad envelope: %#v", f)
+	}
+	var payload ErrorPayload
+	if err := f.DecodePayload(&payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Frame != string(FrameSubmit) || payload.Code != CodeForbidden || payload.Detail != "denied" {
+		t.Fatalf("bad payload: %#v", payload)
+	}
+}
+
 // TestFrameRoundTrip round-trips every frame type through Marshal/ParseFrame,
 // asserts the version bit rides, and that an unknown frame_type is refused.
 func TestFrameRoundTrip(t *testing.T) {

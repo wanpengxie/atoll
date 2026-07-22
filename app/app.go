@@ -275,25 +275,16 @@ func (a *App) acquireBundle(ctx context.Context, chID channel.ID) (channelhost.B
 
 func (a *App) snapshotBundles(ctx context.Context) (map[channel.ID]channelhost.Bundle, error) {
 	out := make(map[channel.ID]channelhost.Bundle)
-	rows, err := a.db.QueryContext(ctx, `SELECT id FROM channels`)
+	ids, err := a.directoryChannelIDs(ctx)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return nil, err
-		}
-		id := channel.ID(raw)
+	for _, id := range ids {
 		if bundle, ok := a.host.Acquire(id); ok {
 			out[id] = bundle
 		} else {
 			return nil, fmt.Errorf("%w: %s", errChannelUnavailable, id)
 		}
-	}
-	if err := rows.Err(); err != nil {
-		return nil, err
 	}
 	return out, nil
 }

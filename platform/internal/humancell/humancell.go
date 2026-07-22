@@ -188,10 +188,7 @@ func interpretFrame(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectga
 
 // errFrame builds an error frame for f (裁决8 平面词).
 func errFrame(f subjectgate.Frame, code, detail string) subjectgate.Frame {
-	fr, _ := subjectgate.NewFrame(subjectgate.FrameError, f.Ref, subjectgate.ErrorPayload{
-		Frame: string(f.Type), Code: code, Detail: detail,
-	})
-	return fr
+	return subjectgate.NewErrorFrame(f.Ref, string(f.Type), code, detail)
 }
 
 func receipt(f subjectgate.Frame, load any) subjectgate.Frame {

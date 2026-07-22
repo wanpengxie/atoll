@@ -526,10 +526,7 @@ func (s *Session) pumpChannel(ch channel.ID, sub *subscription) (full, ok bool) 
 // slot现场. The detach frame is整删 (no case). Error mapping照表①.
 func (s *Session) Upstream(f subjectgate.Frame) subjectgate.Frame {
 	errFrame := func(code, detail string) subjectgate.Frame {
-		fr, _ := subjectgate.NewFrame(subjectgate.FrameError, f.Ref, subjectgate.ErrorPayload{
-			Frame: string(f.Type), Code: code, Detail: detail,
-		})
-		return fr
+		return subjectgate.NewErrorFrame(f.Ref, string(f.Type), code, detail)
 	}
 	switch f.Type {
 	case subjectgate.FrameAttach:

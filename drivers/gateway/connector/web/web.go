@@ -172,8 +172,7 @@ func parseSince(ap subjectgate.AttachPayload) map[channel.ID]int64 {
 }
 
 func errFrame(frameType, code, detail string) subjectgate.Frame {
-	f, _ := subjectgate.NewFrame(subjectgate.FrameError, "", subjectgate.ErrorPayload{Frame: frameType, Code: code, Detail: detail})
-	return f
+	return subjectgate.NewErrorFrame("", frameType, code, detail)
 }
 
 // writeErr writes one error frame directly to the ws (pre-session teardown paths).

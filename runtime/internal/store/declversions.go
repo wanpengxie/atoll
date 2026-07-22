@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -188,24 +189,13 @@ func (r *actorRegistry) AdmitDeclared(ctx context.Context, in storespec.AdmitBun
 		}
 	}
 	if mintID {
-		in.ID = ""
-		for attempt := int64(0); attempt < 1000; attempt++ {
-			seed := in.Principal
-			if seed == "" {
-				seed = in.SourceDeclID
-			}
-			candidate := actor.ActorID(fmt.Sprintf("%s:%s:%d", in.Kind, seed, in.CreatedAt+attempt))
-			var count int
-			if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry WHERE actor_id=?`, string(candidate)).Scan(&count); err != nil {
-				return storespec.DeclAdmissionResult{}, err
-			}
-			if count == 0 {
-				in.ID = candidate
-				break
-			}
+		seed := in.Principal
+		if seed == "" {
+			seed = in.SourceDeclID
 		}
-		if in.ID == "" {
-			return storespec.DeclAdmissionResult{}, errors.New("store: unable to mint unique actor id")
+		in.ID, err = mintActorIDTx(ctx, tx, in.Kind, seed, in.CreatedAt)
+		if err != nil {
+			return storespec.DeclAdmissionResult{}, err
 		}
 	}
 
@@ -227,21 +217,12 @@ func (r *actorRegistry) AdmitDeclared(ctx context.Context, in storespec.AdmitBun
 		return storespec.DeclAdmissionResult{ID: in.ID}, nil
 	}
 
-	if _, err := tx.ExecContext(ctx, `INSERT INTO actor_registry
-		(actor_id, actor_kind, principal, source_decl_id, role, actor_binding, created_at, current_decl_version, deregistered_at)
-		VALUES (?,?,?,?,?,?,?,1,NULL)`, string(in.ID), string(in.Kind), in.Principal, in.SourceDeclID, string(in.Role),
-		nullableBinding(in.Binding), in.CreatedAt); err != nil {
+	rendered := channel.RenderedSnapshot{
+		Class: in.Class, Config: in.Config, TIdleMS: in.TIdle.Milliseconds(),
+		Placement: channel.Placement{Kind: channel.PlacementKind(in.Placement.Kind), DesiredHost: in.Placement.Host},
+	}
+	if err := insertDeclaredTx(ctx, tx, in.ID, in.Kind, in.Principal, in.SourceDeclID, in.Binding, rendered, in.Role, in.CreatedAt); err != nil {
 		return storespec.DeclAdmissionResult{}, fmt.Errorf("store: declared actor insert %q: %w", in.ID, err)
-	}
-	var config any
-	if in.Config != nil {
-		config = string(in.Config)
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO actor_decl_versions
-		(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,created_at)
-		VALUES (?,1,?,?,?,?,?,?)`, string(in.ID), in.Class, config, string(in.Placement.Kind),
-		in.Placement.Host, in.TIdle.Milliseconds(), in.CreatedAt); err != nil {
-		return storespec.DeclAdmissionResult{}, fmt.Errorf("store: declared actor decl insert %q: %w", in.ID, err)
 	}
 	if _, err := appendTx(ctx, tx, actorRegisteredEnvelope(r.channelID, in.ID, in.Kind, in.Binding, in.CreatedAt), false); err != nil {
 		return storespec.DeclAdmissionResult{}, fmt.Errorf("store: declared actor mirror %q: %w", in.ID, err)

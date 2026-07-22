@@ -429,17 +429,40 @@ func (s *admissionService) finish(ctx context.Context, record admissionRecord, s
 // does not grow for a rejection decided before any frame is minted.
 const admissionCodeDaemonNotFound channel.OperationErrorCode = "daemon_not_found"
 
-func admissionErrorHTTP(code string) int {
+type admissionErrorClass uint8
+
+const (
+	admissionBadRequest admissionErrorClass = iota
+	admissionForbidden
+	admissionNotFound
+	admissionConflict
+	admissionUnavailable
+)
+
+func classifyAdmissionError(code string) admissionErrorClass {
 	switch channel.OperationErrorCode(code) {
-	case admissionCodeDaemonNotFound:
-		return 404
 	case channel.ErrCodeBadPayload, channel.ErrCodeUnknownClass, channel.ErrCodeInvalidDesiredHost:
-		return 400
+		return admissionBadRequest
 	case channel.ErrCodeForbidden, channel.ErrCodeNotAcceptedSource:
-		return 403
-	case channel.ErrCodeDeclNotFound:
-		return 404
+		return admissionForbidden
+	case channel.ErrCodeDeclNotFound, admissionCodeDaemonNotFound:
+		return admissionNotFound
 	case channel.ErrCodeMemberInactive, channel.ErrCodeNotInComposition, channel.ErrCodeProtectedActor, channel.ErrCodeRefConflict:
+		return admissionConflict
+	default:
+		return admissionUnavailable
+	}
+}
+
+func admissionErrorHTTP(code string) int {
+	switch classifyAdmissionError(code) {
+	case admissionBadRequest:
+		return 400
+	case admissionForbidden:
+		return 403
+	case admissionNotFound:
+		return 404
+	case admissionConflict:
 		return 409
 	default:
 		return 503

@@ -2,7 +2,6 @@ package home
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -30,31 +29,9 @@ func (h *Home) admitHuman(ctx context.Context, in storespec.AdmitBundle) (actor.
 		return "", fmt.Errorf("platform: Admit declared actor: %w", err)
 	}
 	id := result.ID
-	row, ok, err := h.cs.Declared.LookupDeclaredActive(ctx, id)
-	if err != nil || !ok {
-		if err == nil {
-			err = errors.New("committed actor missing from declared read face")
-		}
+	if _, err := h.publishDeclaredActor(ctx, id, in.Role); err != nil {
 		return "", fmt.Errorf("platform: publish admitted actor %s: %w", id, err)
 	}
-	if in.Role == storespec.RoleOwner && row.Role != storespec.RoleOwner {
-		return "", fmt.Errorf("platform: admitted actor %s role mismatch: got %q want %q", id, row.Role, in.Role)
-	}
-	// Assembly order (装配序): liveness row BEFORE authority publish — same
-	// rule as fork/declared admission (a delivery racing the publish must
-	// find the L row and record wake debt, never be silently skipped).
-	if h.liveness.AdmitIdentity(id) != transitionApplied {
-		return "", fmt.Errorf("platform: publish admitted actor %s: liveness rejected", id)
-	}
-	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}}) {
-		return "", fmt.Errorf("platform: publish admitted actor %s: invalid control row", id)
-	}
-	// 装配链 step② (gateway 期 v0.4.1 勘误): a human's slot (在场与递交接头盒)生死随户籍级联 — ensure
-	// it at准入 (before the reconcile poke, so it strictly precedes any gateway attach
-	// that could look it up), synchronously so a client that attaches right after Admit
-	// never races an absent slot. Idempotent with factoryFor's ensure (restart path).
-	h.ensureSubjectSlot(id)
-	h.pokeReconcile()
 	// Membership-change poke emit point (连接模型勘误期 §3.2 表②, Admit 侧新增): the
 	// person gained a channel — poke so their gateway session re-resolves its
 	// subscriptions/presence on the next immediate loop rather than waiting a sweep.
