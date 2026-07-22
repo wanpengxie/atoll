@@ -81,8 +81,8 @@ func TestHalfBuiltChannel_DeleteSucceeds(t *testing.T) {
 	}
 
 	w := env.do(t, "DELETE", "/api/channels/"+chID, nil, s.cookies)
-	if w.Code != http.StatusAccepted {
-		t.Fatalf("delete half-built channel: want 202, got %d (%s)", w.Code, w.Body.String())
+	if w.Code != http.StatusOK {
+		t.Fatalf("delete half-built channel: want 200, got %d (%s)", w.Code, w.Body.String())
 	}
 	// Gone from the directory now.
 	if g := env.do(t, "GET", "/api/channels/"+chID, nil, s.cookies); g.Code != http.StatusNotFound {

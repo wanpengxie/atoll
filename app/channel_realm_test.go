@@ -50,7 +50,7 @@ func TestRealmChannelDirectoryNameParentAndOwnerPolicy(t *testing.T) {
 	assertStatus(t, denied, http.StatusForbidden)
 
 	deleted := env.do(t, "DELETE", "/api/channels/"+parentID, nil, ownerCookies)
-	assertStatus(t, deleted, http.StatusAccepted)
+	assertStatus(t, deleted, http.StatusOK)
 	if owner["id"] == "" {
 		t.Fatal("owner identity missing")
 	}

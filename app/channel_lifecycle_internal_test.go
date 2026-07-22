@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,8 @@ type countedHost struct {
 	provisions   int
 	destroys     int
 	failDestroys int
+	opens        int
+	failOpens    int
 }
 
 func (h *countedHost) Provision(ctx context.Context, spec channelhost.ProvisionSpec) (channelhost.ProvisionReceipt, error) {
@@ -42,6 +45,17 @@ func (h *countedHost) Destroy(ctx context.Context, id channel.ID) error {
 	}
 	h.mu.Unlock()
 	return h.LocalHost.Destroy(ctx, id)
+}
+func (h *countedHost) Open(ctx context.Context, spec channelhost.OpenSpec) error {
+	h.mu.Lock()
+	h.opens++
+	if h.failOpens > 0 {
+		h.failOpens--
+		h.mu.Unlock()
+		return errors.New("injected open failure")
+	}
+	h.mu.Unlock()
+	return h.LocalHost.Open(ctx, spec)
 }
 
 func newLifecycleTestApp(t *testing.T, failDestroys int) (*App, *countedHost) {
@@ -168,5 +182,104 @@ func TestLifecycleClaimExcludesCompensatingProvision(t *testing.T) {
 	kind, id, ok := w.next()
 	if !ok || kind != "destroy" || id != 1 {
 		t.Fatalf("claim=(%q,%d,%v), want destroy compensation", kind, id, ok)
+	}
+}
+
+func TestProvisionReceiptPublishesAtomicallyAndRetryRebuilds(t *testing.T) {
+	a, host := newLifecycleTestApp(t, 0)
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+	id := channel.ID(uuid.NewString())
+	spec := channelhost.ProvisionSpec{ChannelID: id, Type: "group", OwnerPrincipal: "owner", CreatedAt: now}
+	raw, _ := json.Marshal(spec)
+	res, err := a.db.Exec(`INSERT INTO channel_provision_jobs(operation_id,channel_id,requested_by,name,type,owner_principal,spec_json,created_at) VALUES (?,?,?,?,?,?,?,?)`, "lc:atomic", id, "owner", "atomic", "group", "owner", string(raw), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, _ := res.LastInsertId()
+	if _, err := a.db.Exec(`CREATE TRIGGER fail_channel_publish BEFORE INSERT ON channels BEGIN SELECT RAISE(FAIL, 'injected publish failure'); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.runProvisionJob(ctx, jobID); err == nil {
+		t.Fatal("injected publish failure unexpectedly succeeded")
+	}
+	var receipt sql.NullString
+	var published sql.NullInt64
+	if err := a.db.QueryRow(`SELECT receipt_json,published_at FROM channel_provision_jobs WHERE job_id=?`, jobID).Scan(&receipt, &published); err != nil {
+		t.Fatal(err)
+	}
+	if receipt.Valid || published.Valid {
+		t.Fatalf("partial publish escaped transaction: receipt=%v published=%v", receipt, published)
+	}
+	if _, err := a.db.Exec(`DROP TRIGGER fail_channel_publish`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`UPDATE channel_provision_jobs SET next_attempt_at=0 WHERE job_id=?`, jobID); err != nil {
+		t.Fatal(err)
+	}
+	if err := a.runProvisionJob(ctx, jobID); err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	provisions := host.provisions
+	host.mu.Unlock()
+	if provisions != 2 {
+		t.Fatalf("Provision calls=%d want 2 (retry must rebuild)", provisions)
+	}
+	if err := a.db.QueryRow(`SELECT receipt_json,published_at FROM channel_provision_jobs WHERE job_id=?`, jobID).Scan(&receipt, &published); err != nil {
+		t.Fatal(err)
+	}
+	if !receipt.Valid || !published.Valid {
+		t.Fatalf("publish pair not committed together: receipt=%v published=%v", receipt, published)
+	}
+}
+
+func TestServingReconcileRetriesDirectoryChannelAfterOpenFailure(t *testing.T) {
+	a, host := newLifecycleTestApp(t, 0)
+	ctx := context.Background()
+	now := time.Now().UnixMilli()
+	id := channel.ID(uuid.NewString())
+	spec := channelhost.ProvisionSpec{ChannelID: id, Type: "group", OwnerPrincipal: "owner", CreatedAt: now}
+	if _, err := host.Provision(ctx, spec); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.db.Exec(`INSERT INTO channels(id,name,type,created_at,parent_id) VALUES (?,?,?,?,NULL)`, id, "open-retry", "group", now); err != nil {
+		t.Fatal(err)
+	}
+	host.mu.Lock()
+	host.failOpens = 1
+	host.mu.Unlock()
+	if err := a.reconcileServingChannels(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := host.Acquire(id); ok {
+		t.Fatal("channel served after injected Open failure")
+	}
+	if err := a.reconcileServingChannels(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := host.Acquire(id); !ok {
+		t.Fatal("next serving reconcile did not recover channel")
+	}
+}
+
+func TestDestroyInvalidChannelIDIsPermanent(t *testing.T) {
+	a, _ := newLifecycleTestApp(t, 0)
+	now := time.Now().UnixMilli()
+	res, err := a.db.Exec(`INSERT INTO channel_destroy_jobs(operation_id,channel_id,requested_by,created_at) VALUES (?,?,?,?)`, "lc:bad-destroy", "", "owner", now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, _ := res.LastInsertId()
+	if err := a.runDestroyJobLocked(context.Background(), jobID); !errors.Is(err, channelhost.ErrInvalidChannelID) {
+		t.Fatalf("destroy error=%v want invalid channel id", err)
+	}
+	var code string
+	var dead int64
+	if err := a.db.QueryRow(`SELECT error_code,dead_at FROM channel_destroy_jobs WHERE job_id=?`, jobID).Scan(&code, &dead); err != nil {
+		t.Fatal(err)
+	}
+	if code != "invalid_channel_id" || dead == 0 {
+		t.Fatalf("destroy terminal=(%q,%d)", code, dead)
 	}
 }

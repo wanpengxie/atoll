@@ -363,7 +363,7 @@ func TestRealmToolFetchCopiesCrossChannelResourceWithProvenance(t *testing.T) {
 	// The copy is self-contained: retiring the source makes a new fetch fail,
 	// while the already-copied target resource remains complete and readable.
 	destroy := env.do(t, http.MethodDelete, "/api/channels/"+sourceID, nil, sourceCookies)
-	if destroy.Code != http.StatusAccepted && destroy.Code != http.StatusNoContent {
+	if destroy.Code != http.StatusOK {
 		t.Fatalf("destroy source status=%d body=%s", destroy.Code, destroy.Body.String())
 	}
 	failed := realmToolRequest(t, env, target, targetClient, toolID, realmtool.TypeFetchResource, channel.ResourceRef{

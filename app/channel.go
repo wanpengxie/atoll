@@ -277,6 +277,16 @@ func (a *App) handleDeleteChannel(c *gin.Context) {
 		}
 	}
 	_ = a.runDestroyJobLocked(c.Request.Context(), jobID)
+	var done sql.NullInt64
+	if err := a.db.QueryRowContext(c.Request.Context(), `SELECT done_at FROM channel_destroy_jobs WHERE job_id=?`, jobID).Scan(&done); err != nil {
+		// The logical delete is already committed. Preserve the lifecycle rule:
+		// never turn a durable pending intent into a post-commit 500.
+		a.logger.Warn("channel destroy status read failed", "operation", op, "channel", chID, "err", err)
+	}
+	if done.Valid {
+		c.JSON(http.StatusOK, gin.H{"operation_id": op, "status": "done"})
+		return
+	}
 	a.lifecycle.notify()
 	c.JSON(http.StatusAccepted, gin.H{"operation_id": op, "status": "destroying"})
 }

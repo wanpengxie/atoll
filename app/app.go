@@ -111,9 +111,10 @@ func New(cfg Config) (*App, error) {
 	a.registerRoutes()
 
 	// Reconcile the directory with ChannelHost serving state.
-	if err := a.reconcileServingChannels(); err != nil {
+	if err := a.reconcileServingChannels(context.Background()); err != nil {
 		return nil, fmt.Errorf("app: load channels: %w", err)
 	}
+	a.sweepMembershipProjection(context.Background())
 	a.admission = newAdmissionService(a)
 	a.admission.start()
 	a.lifecycle = newLifecycleWorker(a)

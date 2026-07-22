@@ -18,11 +18,11 @@ import (
 )
 
 const (
-	lifecycleTick  = 250 * time.Millisecond
-	lifecycleDrain = 16
+	lifecycleTick            = 250 * time.Millisecond
+	lifecycleDrain           = 16
+	servingReconcileInterval = 30 * time.Second
 	// membershipSweepInterval paces the projection's third maintenance layer;
-	// the boot pass in reconcileServingChannels covers the window before the
-	// first tick fires.
+	// App.New runs the boot pass before the first tick fires.
 	membershipSweepInterval = 5 * time.Minute
 )
 
@@ -54,6 +54,8 @@ func (w *lifecycleWorker) start() {
 		defer close(w.done)
 		ticker := time.NewTicker(lifecycleTick)
 		defer ticker.Stop()
+		servingTicker := time.NewTicker(servingReconcileInterval)
+		defer servingTicker.Stop()
 		lastSweep := time.Now()
 		for {
 			select {
@@ -67,6 +69,10 @@ func (w *lifecycleWorker) start() {
 				}
 			case <-w.wake:
 				w.drain()
+			case <-servingTicker.C:
+				if err := w.app.reconcileServingChannels(w.ctx); err != nil {
+					w.app.logger.Warn("channel serving reconcile failed", "err", err)
+				}
 			}
 		}
 	}()
@@ -189,7 +195,7 @@ func (a *App) runProvisionJob(ctx context.Context, id int64) error {
 	if err := json.Unmarshal([]byte(job.SpecJSON), &spec); err != nil || spec.ChannelID == "" {
 		return a.deadProvision(ctx, id, "invalid_job", fmt.Errorf("decode provision spec: %w", err))
 	}
-	if !job.Receipt.Valid && !job.Published.Valid {
+	if !job.Published.Valid {
 		receipt, err := a.host.Provision(ctx, spec)
 		if err != nil {
 			if errors.Is(err, channelhost.ErrInvalidChannelID) || errors.Is(err, channelhost.ErrChannelRetired) {
@@ -201,13 +207,10 @@ func (a *App) runProvisionJob(ctx context.Context, id int64) error {
 			}
 			return a.retryProvision(ctx, id, "storage_unavailable", err)
 		}
-		raw, _ := json.Marshal(receipt)
-		if _, err := a.db.ExecContext(ctx, `UPDATE channel_provision_jobs SET receipt_json=?,attempt=attempt+1,last_error=NULL,error_code=NULL WHERE job_id=?`, string(raw), id); err != nil {
-			return err
+		raw, err := json.Marshal(receipt)
+		if err != nil {
+			return a.deadProvision(ctx, id, "invalid_job", fmt.Errorf("encode provision receipt: %w", err))
 		}
-		job.Receipt = sql.NullString{String: string(raw), Valid: true}
-	}
-	if !job.Published.Valid {
 		tx, err := a.db.BeginTx(ctx, nil)
 		if err != nil {
 			return err
@@ -234,15 +237,17 @@ func (a *App) runProvisionJob(ctx context.Context, id int64) error {
 			return a.runDestroyJobLocked(ctx, compID)
 		}
 		if err != nil {
+			_ = tx.Rollback()
 			return a.retryProvision(ctx, id, "storage_unavailable", err)
 		}
 		now := time.Now().UnixMilli()
-		if _, err := tx.ExecContext(ctx, `UPDATE channel_provision_jobs SET published_at=? WHERE job_id=?`, now, id); err != nil {
+		if _, err := tx.ExecContext(ctx, `UPDATE channel_provision_jobs SET receipt_json=?,published_at=?,attempt=attempt+1,last_error=NULL,error_code=NULL WHERE job_id=?`, string(raw), now, id); err != nil {
 			return err
 		}
 		if err := tx.Commit(); err != nil {
 			return err
 		}
+		job.Receipt = sql.NullString{String: string(raw), Valid: true}
 		job.Published = sql.NullInt64{Int64: now, Valid: true}
 	}
 	if err := a.host.Open(ctx, channelhost.OpenSpec{ChannelID: channel.ID(job.ChannelID), ExpectedType: job.Type}); err != nil {
@@ -321,6 +326,9 @@ func (a *App) runDestroyJobLocked(ctx context.Context, id int64) error {
 		return nil
 	}
 	if err := a.host.Destroy(ctx, channel.ID(channelID)); err != nil {
+		if errors.Is(err, channelhost.ErrInvalidChannelID) {
+			return a.deadDestroy(ctx, id, "invalid_channel_id", err)
+		}
 		next := time.Now().Add(backoff(attempt + 1)).UnixMilli()
 		_, writeErr := a.db.ExecContext(ctx, `UPDATE channel_destroy_jobs SET attempt=attempt+1,error_code='destroy_failed',last_error=?,next_attempt_at=? WHERE job_id=?`, err.Error(), next, id)
 		return errors.Join(err, writeErr)
@@ -345,13 +353,19 @@ func (a *App) runDestroyJobLocked(ctx context.Context, id int64) error {
 	return tx.Commit()
 }
 
+func (a *App) deadDestroy(ctx context.Context, id int64, code string, cause error) error {
+	_, err := a.db.ExecContext(ctx, `UPDATE channel_destroy_jobs SET attempt=attempt+1,error_code=?,last_error=?,dead_at=? WHERE job_id=?`, code, cause.Error(), time.Now().UnixMilli(), id)
+	a.logger.Error("channel destroy job permanently failed", "job_id", id, "code", code, "err", cause)
+	return errors.Join(cause, err)
+}
+
 // reconcileServingChannels is the lifecycle level-reconciliation arm. One corrupt or
 // unavailable channel is isolated and remains honestly unavailable; it never
 // prevents the realm from starting or the next pass from retrying it. Keeping
 // Open beside Provision/Destroy makes channelhost's production lifecycle
 // calling surface mechanically closed to this file.
-func (a *App) reconcileServingChannels() error {
-	rows, err := a.db.Query(`SELECT id,type FROM channels ORDER BY id`)
+func (a *App) reconcileServingChannels(ctx context.Context) error {
+	rows, err := a.db.QueryContext(ctx, `SELECT id,type FROM channels ORDER BY id`)
 	if err != nil {
 		return err
 	}
@@ -362,24 +376,23 @@ func (a *App) reconcileServingChannels() error {
 			return err
 		}
 		id := channel.ID(raw)
-		if err := a.host.Open(context.Background(), channelhost.OpenSpec{ChannelID: id, ExpectedType: typ}); err != nil {
+		if err := a.host.Open(ctx, channelhost.OpenSpec{ChannelID: id, ExpectedType: typ}); err != nil {
 			a.logger.Warn("channel open reconcile failed", "channel", raw, "err", err)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		return err
 	}
-	entries, err := a.host.Census(context.Background())
+	entries, err := a.host.Census(ctx)
 	if err != nil {
 		a.logger.Warn("channel census failed", "err", err)
 		return nil
 	}
 	for _, entry := range entries {
-		if !a.channelExists(context.Background(), string(entry.ChannelID)) {
+		if !a.channelExists(ctx, string(entry.ChannelID)) {
 			a.logger.Warn("orphan channel image", "channel", entry.ChannelID, "state", entry.State)
 		}
 	}
-	a.sweepMembershipProjection(context.Background())
 	return nil
 }
 
