@@ -302,6 +302,10 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 	daemonID := c.Param("id")
 	ctx := c.Request.Context()
 	var owner string
+	// Deliberately include tombstoned daemons. Detach removes a reference, so
+	// ownership remains provable from historical realm truth and cleanup stays
+	// legal after the referent has retired; attach is the path that requires
+	// deleted_at IS NULL.
 	if err := a.db.QueryRowContext(ctx, `SELECT owner_id FROM daemons WHERE id=?`, daemonID).Scan(&owner); err != nil || owner != middleware.UserID(c) {
 		c.JSON(http.StatusForbidden, gin.H{"error": "daemon not found or not owned by you"})
 		return

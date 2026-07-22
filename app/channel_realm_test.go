@@ -96,7 +96,7 @@ func TestLifecycleOperationProjectionOwnerOnly(t *testing.T) {
 	}
 	_, other := register(t, env, "operation-other@example.com", "secret123", "Other")
 	denied := env.do(t, "GET", "/api/operations/"+ref, nil, other)
-	assertStatus(t, denied, http.StatusForbidden)
+	assertStatus(t, denied, http.StatusNotFound)
 	if owner["id"] == "" {
 		t.Fatal("owner missing")
 	}

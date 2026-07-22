@@ -393,8 +393,12 @@ func (s *admissionService) finish(ctx context.Context, record admissionRecord, s
 		return err
 	}
 	changed, err := res.RowsAffected()
-	if err != nil || changed == 0 {
+	if err != nil {
 		return err
+	}
+	if changed == 0 {
+		s.app.logger.Warn("admission finish lost pending state", "operation", record.OperationID, "target_status", status)
+		return nil
 	}
 	projectionPrincipal := ""
 	if status == "done" && record.Op == "join" && result != nil {

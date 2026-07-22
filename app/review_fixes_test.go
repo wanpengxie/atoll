@@ -127,6 +127,11 @@ func TestDeleteDaemonTombstonePullRemovesBindings(t *testing.T) {
 			}
 		}
 		if !survived {
+			// Removing a reference remains legal after the daemon referent has
+			// retired. The handler authenticates against the tombstoned owner row
+			// and the membrane operation is idempotent.
+			detached := env.do(t, http.MethodDelete, "/api/channels/"+chID+"/daemons/"+daemonID, nil, cookies2)
+			assertStatus(t, detached, http.StatusOK)
 			return
 		}
 		if time.Now().After(deadline) {

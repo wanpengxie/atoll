@@ -515,3 +515,20 @@ func TestDeclarationSyncFailureBeforeCommitLeavesNoTraceAndFreshRefRetriesOnce(t
 	}
 	assertEventPair(t, cs, retry.Anchor)
 }
+
+func TestDeclarationSyncContractErrorsAreTyped(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	for name, input := range map[string]storespec.DeclarationSyncTx{
+		"missing meta":     {},
+		"missing identity": {SysOpMeta: sysMeta("ifin:v1:typed", "typed")},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := cs.DeclarationSync.ApplyResolvedDeclaration(ctx, input)
+			var operationErr *channel.OperationError
+			if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeBadPayload || operationErr.Retryable {
+				t.Fatalf("error=%v want non-retryable bad_payload", err)
+			}
+		})
+	}
+}

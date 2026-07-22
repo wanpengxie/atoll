@@ -77,7 +77,7 @@ func TestAdmissionJoinIdempotencyAndOperationProjection(t *testing.T) {
 		t.Fatalf("operation projection=%v", statusBody)
 	}
 	forbidden := env.do(t, http.MethodGet, "/api/operations/"+ref, nil, ownerCookies)
-	assertStatus(t, forbidden, http.StatusForbidden)
+	assertStatus(t, forbidden, http.StatusNotFound)
 	decl := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{"name": "different-request", "class": "go-kimi"}, joinerCookies)
 	assertStatus(t, decl, http.StatusCreated)
 	conflict := env.doHeaders(t, http.MethodPost, "/api/channels/"+channelID+"/actors", map[string]any{"decl_id": respJSON(t, decl)["id"]}, joinerCookies, headers)
@@ -91,6 +91,17 @@ func TestAdmissionJoinIdempotencyAndOperationProjection(t *testing.T) {
 	if secondBody["actor_id"] != actorID || secondBody["created"] != false {
 		t.Fatalf("business replay=%v", secondBody)
 	}
+}
+
+func TestActorOwnedOperationRefIsOpaqueToHTTPPrincipals(t *testing.T) {
+	env := setupTestApp(t)
+	_, cookies := register(t, env, "actor-operation-reader@example.com", "secret123", "Reader")
+	if _, err := env.db.Exec(`INSERT INTO channel_admission_operations(operation_id,channel_id,op,requested_by_actor_id,request_json,request_digest,created_at) VALUES (?,?,?,?,?,?,?)`,
+		"adm:v1:actor-owned", "channel", "join", "actor", `{}`, "digest", time.Now().UnixMilli()); err != nil {
+		t.Fatal(err)
+	}
+	response := env.do(t, http.MethodGet, "/api/operations/adm:v1:actor-owned", nil, cookies)
+	assertStatus(t, response, http.StatusNotFound)
 }
 
 func TestAdmissionIdempotencyKeyRejectsCrossChannelReuse(t *testing.T) {

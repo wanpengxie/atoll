@@ -19,7 +19,7 @@ func (a *App) handleGetOperation(c *gin.Context) {
 		Scan(&admission.OperationID, &admission.ChannelID, &admission.Op, &admission.RequestedByPrincipal, &admission.RequestedByActorID, &admission.RequestJSON, &admission.RequestDigest, &admission.Status, &admission.ResultJSON, &admission.ErrorCode, &admission.CreatedAt, &admission.DoneAt)
 	if err == nil {
 		if admission.RequestedByPrincipal != caller {
-			c.JSON(http.StatusForbidden, gin.H{"error": "operation owner required"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "operation not found"})
 			return
 		}
 		view := gin.H{"ref": ref, "family": "admission", "status": admission.Status, "op": admission.Op, "created_at": admission.CreatedAt}
@@ -47,7 +47,7 @@ func (a *App) handleGetOperation(c *gin.Context) {
 		Scan(&requested, &result, &code, &created, &done, &dead, &published)
 	if err == nil {
 		if requested != caller {
-			c.JSON(http.StatusForbidden, gin.H{"error": "operation owner required"})
+			c.JSON(http.StatusNotFound, gin.H{"error": "operation not found"})
 			return
 		}
 		status = "provisioning"
@@ -94,7 +94,7 @@ func (a *App) handleGetOperation(c *gin.Context) {
 		return
 	}
 	if requested != caller {
-		c.JSON(403, gin.H{"error": "operation owner required"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "operation not found"})
 		return
 	}
 	status = "destroying"

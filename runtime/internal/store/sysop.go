@@ -380,10 +380,10 @@ func (s *sysOpStore) DetachDaemon(ctx context.Context, in storespec.DetachTx) (s
 // genuine zero-write observations.
 func (s *sysOpStore) ApplyResolvedDeclaration(ctx context.Context, in storespec.DeclarationSyncTx) (storespec.DeclarationSyncResult, error) {
 	if in.Anchor == "" || in.RequestDigest == "" || in.Source != storespec.SysOpSourceSystem {
-		return storespec.DeclarationSyncResult{}, errors.New("store: declaration sync requires a system anchor and digest")
+		return storespec.DeclarationSyncResult{}, &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "declaration sync requires a system anchor and digest"}
 	}
 	if in.ActorID == "" || in.DeclID == "" || in.Class == "" {
-		return storespec.DeclarationSyncResult{}, errors.New("store: declaration sync requires actor, declaration, and class")
+		return storespec.DeclarationSyncResult{}, &channel.OperationError{Code: channel.ErrCodeBadPayload, Detail: "declaration sync requires actor, declaration, and class"}
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -461,7 +461,7 @@ func (s *sysOpStore) ApplyResolvedDeclaration(ctx context.Context, in storespec.
 		if err != nil {
 			return storespec.DeclarationSyncResult{}, err
 		}
-		return storespec.DeclarationSyncResult{}, errors.New("store: declaration sync actor disappeared inside transaction")
+		return storespec.DeclarationSyncResult{}, &channel.OperationError{Code: channel.ErrCodeInternal, Detail: "declaration sync actor disappeared inside transaction", Retryable: true}
 	}
 	result := storespec.DeclarationSyncResult{
 		Status: storespec.DeclarationApplied, Version: version,
