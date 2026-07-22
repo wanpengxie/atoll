@@ -36,6 +36,7 @@ func openRoutingHome(t *testing.T, name string) *Home {
 	h, err := Open(Config{
 		ChannelID: channel.ID(name), DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
 		CompositionResolver: routingResolver{}, ReconcileInterval: 10 * time.Millisecond, Bootstrap: true,
+		IntroductionResolver: inertIntroductionResolver{},
 	})
 	if err != nil {
 		t.Fatal(err)

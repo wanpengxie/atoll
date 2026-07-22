@@ -17,11 +17,12 @@ import (
 // end-of-life re-read guarding against racing admits).
 func TestProjectionSyncRepairsMissedRefreshBothWays(t *testing.T) {
 	h, err := Open(Config{
-		ChannelID:           "projection-sync",
-		DBPath:              filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: &compositionActivationResolver{},
-		ReconcileInterval:   time.Hour,
-		Bootstrap:           true,
+		ChannelID:            "projection-sync",
+		DBPath:               filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver:  &compositionActivationResolver{},
+		IntroductionResolver: inertIntroductionResolver{},
+		ReconcileInterval:    time.Hour,
+		Bootstrap:            true,
 	})
 	if err != nil {
 		t.Fatal(err)

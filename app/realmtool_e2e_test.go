@@ -1,15 +1,22 @@
 package app_test
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/platform"
+	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorrt"
 )
 
 func realmToolRequest(t *testing.T, env *testEnv, setup setupResult, client *wsClient, tool actor.ActorID, typ string, payload any) map[string]json.RawMessage {
@@ -126,6 +133,190 @@ func TestRealmToolActorOwnedIntroduceAndRemove(t *testing.T) {
 	}
 	if _, err := env.app.ResolveSourceForTest(setup.chID, declID); err == nil {
 		t.Fatal("realm-tool remove left target active")
+	}
+}
+
+func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testing.T) {
+	env := setupTestApp(t)
+	setup := fullSetup(t, env)
+	daemon := createAndBindDaemon(t, env, setup.chID, "fork-realm-host", setup.cookies)
+	toolID, err := env.app.ResolveSourceForTest(setup.chID, "realm-tool")
+	if err != nil || !env.app.WaitLiveForTest(setup.chID, toolID, 2*time.Second) {
+		t.Fatalf("realm tool unavailable: id=%q err=%v", toolID, err)
+	}
+	srv := httptest.NewServer(env.app.Handler())
+	defer srv.Close()
+	client := dialWS(t, srv, setup.cookies, setup.chID, 0)
+	defer client.close()
+	client.send(map[string]any{
+		"type": "resource", "ref": "fork-source", "channel_id": setup.chID,
+		"op": "create", "resource_id": "artifact:fork-source", "args": map[string]any{"from": "fork-test"},
+	})
+	if ack := client.nextAck(3 * time.Second); ack["type"] != "ack" || ack["status"] != "ok" {
+		t.Fatalf("seed resource=%v", ack)
+	}
+	targetResp := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
+		"name": "fork-introduced", "class": "go-kimi", "visibility": "public",
+	}, setup.cookies)
+	assertStatus(t, targetResp, http.StatusCreated)
+	targetDecl := respJSON(t, targetResp)["id"].(string)
+
+	type outcome struct {
+		child      actor.ActorID
+		introduced actor.ActorID
+		statusRef  string
+		listed     bool
+		fetched    string
+		err        error
+	}
+	done := make(chan outcome, 1)
+	baseBuilder := testAgentBuilder
+	var builds atomic.Int32
+	testAgentBuilder = func(chID channel.ID, id actor.ActorID) (actorbase.Proc, error) {
+		switch builds.Add(1) {
+		case 1:
+			return func(sys actorbase.Sys) error {
+				child, err := sys.Fork(actorrt.ForkSpec{Kind: actor.KindAgent, Class: "go-kimi", NameHint: "realm-requester"})
+				if err != nil {
+					done <- outcome{err: err}
+					return err
+				}
+				if _, err := sys.Call(child, "realm.run", map[string]any{}); err != nil {
+					done <- outcome{child: child, err: err}
+					return err
+				}
+				<-sys.Life().Done()
+				return sys.Life().Err()
+			}, nil
+		case 2:
+			return func(sys actorbase.Sys) error {
+				result := outcome{child: sys.Self()}
+				call := func(typ string, payload any) (actorbase.Msg, error) {
+					pending, err := sys.Call(toolID, typ, payload)
+					if err != nil {
+						return actorbase.Msg{}, err
+					}
+					return pending.Wait(sys.Life(), 3*time.Second)
+				}
+				introduced, err := call(realmtool.TypeIntroduce, map[string]any{"decl_id": targetDecl})
+				if err == nil {
+					var body channel.IntroduceResult
+					err = json.Unmarshal(introduced.Payload, &body)
+					result.introduced = body.ActorID
+					result.statusRef = channel.DerivedRealmToolRef(channel.ID(setup.chID), string(introduced.ParentID))
+				}
+				if err == nil {
+					status, statusErr := call(realmtool.TypeOperationStatus, map[string]any{"ref": result.statusRef})
+					err = statusErr
+					if err == nil {
+						var view channel.OperationView
+						err = json.Unmarshal(status.Payload, &view)
+						if err == nil && (view.Ref != result.statusRef || view.Status != "completed") {
+							err = fmt.Errorf("operation status=%+v", view)
+						}
+					}
+				}
+				if err == nil {
+					listed, listErr := call(realmtool.TypeListResources, map[string]any{
+						"channel_id": setup.chID, "query": map[string]any{"limit": 100},
+					})
+					err = listErr
+					if err == nil {
+						var page channel.ResourcePage
+						err = json.Unmarshal(listed.Payload, &page)
+						for _, item := range page.Items {
+							if item.ID == "artifact:fork-source" {
+								result.listed = true
+							}
+						}
+					}
+				}
+				if err == nil {
+					fetched, fetchErr := call(realmtool.TypeFetchResource, channel.ResourceRef{
+						ChannelID: channel.ID(setup.chID), ResourceID: "artifact:fork-source",
+					})
+					err = fetchErr
+					if err == nil {
+						var body struct {
+							ResourceID string `json:"resource_id"`
+						}
+						err = json.Unmarshal(fetched.Payload, &body)
+						result.fetched = body.ResourceID
+					}
+				}
+				result.err = err
+				done <- result
+				<-sys.Life().Done()
+				return sys.Life().Err()
+			}, nil
+		default:
+			return baseBuilder(chID, id)
+		}
+	}
+	t.Cleanup(func() { testAgentBuilder = baseBuilder })
+	computeCtx, cancelCompute := context.WithCancel(context.Background())
+	computeErr := make(chan error, 1)
+	plan := &e2eLinkPlan{chID: channel.ID(setup.chID), builders: map[actor.ActorID]platform.ActorFactory{}}
+	go func() {
+		computeErr <- compute.Run(computeCtx, compute.Config{
+			ServerWS:   fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), setup.chID, daemon["api_key"].(string)),
+			PlanSource: plan, Poll: 20 * time.Millisecond, Resync: 50 * time.Millisecond,
+		})
+	}()
+	t.Cleanup(func() {
+		cancelCompute()
+		select {
+		case <-computeErr:
+		case <-time.After(3 * time.Second):
+		}
+	})
+	requesterResp := env.do(t, http.MethodPost, "/api/actor-decls", map[string]any{
+		"name": "fork-parent", "class": "go-kimi", "visibility": "public",
+	}, setup.cookies)
+	assertStatus(t, requesterResp, http.StatusCreated)
+	requesterDecl := respJSON(t, requesterResp)["id"].(string)
+	introducedParent := env.do(t, http.MethodPost, "/api/channels/"+setup.chID+"/actors", map[string]any{"decl_id": requesterDecl}, setup.cookies)
+	assertStatus(t, introducedParent, http.StatusCreated)
+	parentID := respJSON(t, introducedParent)["actor_id"].(string)
+	wake := client.sendMessage(map[string]any{
+		"channel_id": setup.chID, "msg_type": "fork.start", "kind": "request",
+		"audience": []string{parentID}, "payload": map[string]any{},
+	})
+	if wake["type"] != "ack" {
+		t.Fatalf("wake fork parent=%v", wake)
+	}
+
+	select {
+	case got := <-done:
+		if got.err != nil || got.child == "" || got.introduced == "" || got.statusRef == "" || !got.listed || got.fetched == "" {
+			t.Fatalf("fork realm combination=%+v err=%v", got, got.err)
+		}
+		actors, err := env.app.ActorsForTest(channel.ID(setup.chID))
+		if err != nil {
+			t.Fatal(err)
+		}
+		foundFork := false
+		for _, row := range actors {
+			if row.ID == got.child {
+				foundFork = true
+				if row.Principal != "" {
+					t.Fatalf("fork principal=%q, want empty", row.Principal)
+				}
+			}
+		}
+		if !foundFork {
+			t.Fatalf("fork %q absent from active view", got.child)
+		}
+		var ownerPrincipal, ownerActor string
+		if err := env.db.QueryRow(`SELECT COALESCE(requested_by_principal,''),COALESCE(requested_by_actor_id,'') FROM channel_admission_operations WHERE operation_id=?`, got.statusRef).Scan(&ownerPrincipal, &ownerActor); err != nil {
+			t.Fatal(err)
+		}
+		if ownerPrincipal != "" || ownerActor != string(got.child) {
+			t.Fatalf("operation owner=(%q,%q), want fork %q", ownerPrincipal, ownerActor, got.child)
+		}
+	case <-time.After(8 * time.Second):
+		rows, applies := plan.snapshot()
+		t.Fatalf("fork requester did not finish realm operation/resource combination: builds=%d plan=%v applies=%d", builds.Load(), rows, applies)
 	}
 }
 

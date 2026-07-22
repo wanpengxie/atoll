@@ -2,6 +2,7 @@ package home
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -64,16 +65,24 @@ func (r *pullTestResolver) blockNext() (<-chan struct{}, chan<- struct{}) {
 }
 
 func openPullTestHome(t *testing.T, resolver *pullTestResolver) *Home {
+	h, _ := openPullTestHomeAt(t, resolver)
+	return h
+}
+
+func openPullTestHomeAt(t *testing.T, resolver *pullTestResolver) (*Home, string) {
 	t.Helper()
+	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
 	h, err := Open(Config{
-		ChannelID: "declaration-pull", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"), Bootstrap: true,
+		ChannelID: "declaration-pull", DBPath: dbPath, Bootstrap: true,
 		CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: resolver, ReconcileInterval: time.Hour,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
+	h.reconcileStop()
+	<-h.reconcileDone
 	t.Cleanup(func() { _ = h.closeInternal("test") })
-	return h
+	return h, dbPath
 }
 
 func declarePullActor(t *testing.T, h *Home, source string, config string, placement storespec.Placement, idle time.Duration, createdAt int64) storespec.ActorControlRow {
@@ -181,7 +190,7 @@ func TestDeclarationPullAttemptCannotCrossActorLifetime(t *testing.T) {
 func TestDeclarationPullRecomposesLatestPlacementAndIdleInsideGate(t *testing.T) {
 	ctx := context.Background()
 	resolver := &pullTestResolver{facts: channel.DeclarationFacts{Class: "pull-agent", Config: json.RawMessage(`{"value":"a"}`)}}
-	h := openPullTestHome(t, resolver)
+	h, dbPath := openPullTestHomeAt(t, resolver)
 	placementA, _ := storespec.NewDaemonPlacement("daemon-a")
 	row := declarePullActor(t, h, "decl-fields", `{"value":"a"}`, placementA, time.Second, 10)
 	resolver.set(channel.DeclarationFacts{Class: "pull-agent", Config: json.RawMessage(`{"value":"b"}`)}, nil)
@@ -193,14 +202,35 @@ func TestDeclarationPullRecomposesLatestPlacementAndIdleInsideGate(t *testing.T)
 	}()
 	<-entered
 	placementB, _ := storespec.NewDaemonPlacement("daemon-b")
-	latest, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
-		ActorID: row.ID, Class: row.Class, Config: row.Config, Placement: placementB, TIdle: 9 * time.Second, CreatedAt: 20,
-	})
-	if err == nil {
-		_, err = h.applyDeclaration(ctx, row.ID, latest.CurrentDeclVersion)
-	}
+	// Simulate an independent channel-owned placement/idle transaction while
+	// realm resolution is in flight. The pull arm must re-read this current row
+	// inside its gate and compose only class/config over it.
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=rw&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_pragma=busy_timeout(5000)")
 	if err != nil {
 		t.Fatal(err)
+	}
+	tx, err := db.BeginTx(ctx, nil)
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `INSERT INTO actor_decl_versions
+			(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,created_at)
+			SELECT actor_id,2,class,config_json,?,?,?,20 FROM actor_decl_versions
+			WHERE actor_id=? AND version=1`, string(placementB.Kind), placementB.Host, int64(9000), string(row.ID))
+	}
+	if err == nil {
+		_, err = tx.ExecContext(ctx, `UPDATE actor_registry SET current_decl_version=2 WHERE actor_id=?`, string(row.ID))
+	}
+	if err == nil {
+		err = tx.Commit()
+	} else if tx != nil {
+		_ = tx.Rollback()
+	}
+	_ = db.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	channelRow, active, err := h.cs.Declared.LookupDeclaredActive(ctx, row.ID)
+	if err != nil || !active || !h.controlIndex.UpsertBatch([]controlEntry{{Row: channelRow, World: storespec.WorldDurable}}) {
+		t.Fatalf("publish concurrent channel fields: row=%+v active=%v err=%v", channelRow, active, err)
 	}
 	close(release)
 	<-done

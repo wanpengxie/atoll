@@ -25,7 +25,6 @@ type ChannelStores struct {
 	DurableHistory  storespec.DurableHistory
 	Declared        storespec.DeclaredControlReader
 	DeclAdmission   storespec.DeclAdmissionStore
-	DeclVersions    storespec.DeclVersionStore
 	Cascade         storespec.CascadeStore
 	Routing         storespec.ChannelRouting
 	Genesis         storespec.GenesisStore
@@ -201,7 +200,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		DurableHistory:  cs.DurableHistory,
 		Declared:        cs.Declared,
 		DeclAdmission:   cs.DeclAdmission,
-		DeclVersions:    cs.DeclVersions,
 		Cascade:         cs.Cascade,
 		Routing:         cs.Routing,
 		Genesis:         cs.Genesis,

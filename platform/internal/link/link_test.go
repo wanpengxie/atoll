@@ -2,6 +2,7 @@ package link_test
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -507,6 +508,75 @@ func TestKickDaemonBeforePortCommitIsQuiet(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func TestDaemonTombstoneFencesHalfHandshakeLateHandshakeAndFreshReconnect(t *testing.T) {
+	entered, release := make(chan struct{}), make(chan struct{})
+	var mu sync.Mutex
+	calls := 0
+	deleted := false
+	r := newHomeRigWithAuthorities(t, 5*time.Second, 30*time.Second, nil, func(inner func(context.Context, string) error) func(context.Context, string) error {
+		return func(ctx context.Context, daemonID string) error {
+			mu.Lock()
+			calls++
+			call, tombstoned := calls, deleted
+			mu.Unlock()
+			if call == 2 {
+				close(entered)
+				select {
+				case <-release:
+				case <-ctx.Done():
+					return ctx.Err()
+				}
+				mu.Lock()
+				tombstoned = deleted
+				mu.Unlock()
+			}
+			if tombstoned {
+				return errors.New("daemon tombstoned")
+			}
+			return inner(ctx, daemonID)
+		}
+	})
+	decls := []link.Declaration{{ActorID: "tool:tombstone-composite", Kind: actor.KindTool, Binding: actor.BindingRuntimeInboundViaRelay}}
+	d, err := link.Dial(context.Background(), r.wsURL(), decls, link.DialConfig{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer d.Close()
+	openDone := make(chan error, 1)
+	go func() {
+		_, openErr := d.OpenStream(context.Background(), decls[0].ActorID, 0, "", func(*message.Envelope) error { return nil }, func(message.ID) {})
+		openDone <- openErr
+	}()
+	<-entered
+	mu.Lock()
+	deleted = true
+	mu.Unlock()
+	kickDone := make(chan int, 1)
+	go func() { kickDone <- r.acc.KickDaemon("daemon-1") }()
+	select {
+	case <-kickDone:
+		t.Fatal("tombstone kick returned before the admitted half-handshake settled")
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-openDone; err == nil {
+		t.Fatal("half-handshake committed after the daemon tombstone")
+	}
+	if kicked := <-kickDone; kicked != 1 {
+		t.Fatalf("tombstone kick closed %d links, want the incumbent", kicked)
+	}
+	if _, live := r.rt.Stat(decls[0].ActorID); live {
+		t.Fatal("tombstoned half-handshake published a live port")
+	}
+	if err := d.Reattach(context.Background(), decls); err == nil {
+		t.Fatal("late handshake on the retired incumbent was accepted")
+	}
+	if fresh, err := link.Dial(context.Background(), r.wsURL(), decls, link.DialConfig{}, nil); err == nil {
+		_ = fresh.Close()
+		t.Fatal("fresh reconnect after the daemon tombstone was accepted")
+	}
 }
 
 func testQuietCloseBeforePortCommit(t *testing.T, quietClose func(*homeRig) error) {

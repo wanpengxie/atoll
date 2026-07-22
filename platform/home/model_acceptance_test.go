@@ -32,6 +32,18 @@ type acceptanceResolver struct {
 	builds []acceptanceBuild
 }
 
+func (r *acceptanceResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
+	return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+}
+
+func (r *acceptanceResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
+	return actor.KindAgent, true, nil
+}
+
+func (r *acceptanceResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
+	return channel.DaemonFacts{}, nil
+}
+
 func (r *acceptanceResolver) BuildClass(_ channel.ID, id actor.ActorID, class string, config json.RawMessage) (platform.ActorFactory, bool) {
 	r.mu.Lock()
 	r.builds = append(r.builds, acceptanceBuild{id: id, class: class, config: append(json.RawMessage(nil), config...)})
@@ -58,8 +70,12 @@ func (r *acceptanceResolver) count(id actor.ActorID, class string, nilConfig boo
 
 func openAcceptanceHome(t *testing.T, dbPath string, chID channel.ID, resolver CompositionResolver, interval time.Duration) *Home {
 	t.Helper()
+	introduction, ok := resolver.(IntroductionResolver)
+	if !ok {
+		introduction = fixedIntroductionResolver{kind: actor.KindAgent}
+	}
 	h, err := Open(Config{
-		ChannelID: chID, DBPath: dbPath, CompositionResolver: resolver,
+		ChannelID: chID, DBPath: dbPath, CompositionResolver: resolver, IntroductionResolver: introduction,
 		ReconcileInterval: interval, Bootstrap: true,
 	})
 	if err != nil {
@@ -133,17 +149,11 @@ func TestEmptyConfigSurvivesAdmissionEditBootAndForkFactoryBuild(t *testing.T) {
 		t.Fatal(err)
 	}
 	waitHomeCondition(t, func() bool { return resolver.count(decl.Row.ID, "declared-empty", true) >= 1 })
-	edited, err := h1.editDeclaration(ctx, storespec.DeclEditBundle{
-		ActorID: decl.Row.ID, Class: "declared-empty", Config: nil,
-		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
-	})
-	if err != nil || edited.Config != nil || edited.CurrentDeclVersion != 2 {
-		t.Fatalf("empty edit=%+v err=%v", edited, err)
+	synced, err := h1.opEntry.applyResolvedDeclaration(ctx, decl.Row.ID, decl.Row.SourceDeclID, "declared-empty-v2", nil)
+	if err != nil || synced.Status != storespec.DeclarationApplied || synced.Version != 2 {
+		t.Fatalf("empty atomic sync=%+v err=%v", synced, err)
 	}
-	if _, err := h1.applyDeclaration(ctx, decl.Row.ID, 2); err != nil {
-		t.Fatal(err)
-	}
-	waitHomeCondition(t, func() bool { return resolver.count(decl.Row.ID, "declared-empty", true) >= 2 })
+	waitHomeCondition(t, func() bool { return resolver.count(decl.Row.ID, "declared-empty-v2", true) >= 1 })
 
 	parent, err := h1.admit(ctx, actor.KindHuman, "empty-fork-parent")
 	if err != nil {
@@ -172,10 +182,10 @@ func TestEmptyConfigSurvivesAdmissionEditBootAndForkFactoryBuild(t *testing.T) {
 	h2 := openAcceptanceHome(t, dbPath, "empty-config-chain", resolver, 5*time.Millisecond)
 	t.Cleanup(func() { _ = h2.closeInternal("test") })
 	row, ok, err = h2.controlIndex.LookupActive(ctx, decl.Row.ID)
-	if err != nil || !ok || row.Config != nil || row.CurrentDeclVersion != 2 {
+	if err != nil || !ok || row.Config != nil || row.CurrentDeclVersion != 2 || row.Class != "declared-empty-v2" {
 		t.Fatalf("boot empty config=(%+v,%v,%v)", row, ok, err)
 	}
-	waitHomeCondition(t, func() bool { return resolver.count(decl.Row.ID, "declared-empty", true) >= 3 })
+	waitHomeCondition(t, func() bool { return resolver.count(decl.Row.ID, "declared-empty-v2", true) >= 2 })
 }
 
 func TestStateLifetimeSplitsDurableIdentityFromHomeSessionRun(t *testing.T) {
@@ -345,17 +355,17 @@ func TestBootConvergesDurableDeclarationCommittedBeforeMemoryPublication(t *test
 	if _, visible, _ := h1.controlIndex.LookupActive(ctx, admitted.ID); visible {
 		t.Fatal("test precondition: direct durable bundle unexpectedly published in memory")
 	}
-	// Model a crash after a second durable bundle commits but before Home can
-	// publish the applied row as well.
-	edited, err := h1.cs.DeclVersions.EditDeclared(ctx, storespec.DeclEditBundle{
-		ActorID: admitted.ID, Class: "crash-window-v2", Config: nil,
-		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
-	})
+	// Model a crash after the atomic current+history transaction commits but
+	// before Home can consume its advisory effects and publish the projection.
+	meta, err := systemMeta("ifin:v1:crash-window", struct{ Class string }{"crash-window-v2"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, applied, err := h1.cs.DeclVersions.ApplyDeclaredVersion(ctx, admitted.ID, edited.CurrentDeclVersion); err != nil || !applied {
-		t.Fatalf("durable apply=(%v,%v)", applied, err)
+	synced, err := h1.cs.DeclarationSync.ApplyResolvedDeclaration(ctx, storespec.DeclarationSyncTx{
+		SysOpMeta: meta, ActorID: admitted.ID, DeclID: "decl:crash-window", Class: "crash-window-v2",
+	})
+	if err != nil || synced.Status != storespec.DeclarationApplied || synced.Version != 2 {
+		t.Fatalf("durable atomic sync=(%+v,%v)", synced, err)
 	}
 	if err := h1.closeInternal("test"); err != nil {
 		t.Fatal(err)

@@ -51,7 +51,7 @@ func (s *sysOpStore) IsBound(ctx context.Context, id storespec.DaemonID) (bool, 
 	return bound, err
 }
 
-func (s *sysOpStore) ListBound(ctx context.Context) ([]storespec.DaemonID, error) {
+func (s *sysOpStore) ListBoundDaemons(ctx context.Context) ([]storespec.DaemonID, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT daemon_id FROM channel_daemon_bindings ORDER BY daemon_id`)
 	if err != nil {
 		return nil, err

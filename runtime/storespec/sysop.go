@@ -190,5 +190,5 @@ type SysOpAdmission interface {
 
 type DaemonBindingReader interface {
 	IsBound(context.Context, DaemonID) (bool, error)
-	ListBound(context.Context) ([]DaemonID, error)
+	ListBoundDaemons(context.Context) ([]DaemonID, error)
 }

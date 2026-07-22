@@ -74,6 +74,18 @@ type buildWindowResolver struct {
 	resolves  atomic.Int32
 }
 
+func (r *buildWindowResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
+	return channel.DeclarationFacts{}, channel.ErrDeclarationNotFound
+}
+
+func (r *buildWindowResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
+	return actor.KindAgent, true, nil
+}
+
+func (r *buildWindowResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
+	return channel.DaemonFacts{}, nil
+}
+
 func (r *buildWindowResolver) factory() platform.ActorFactory {
 	return platform.ActorFactory{Proc: actorbase.Def{New: func() (actorbase.Proc, error) {
 		return func(sys actorbase.Sys) error {
@@ -96,11 +108,12 @@ func (r *buildWindowResolver) BuildClass(_ channel.ID, _ actor.ActorID, class st
 func openBuildWindowHome(t *testing.T, name string, resolver *buildWindowResolver) *Home {
 	t.Helper()
 	h, err := Open(Config{
-		ChannelID:           channel.ID(name),
-		DBPath:              filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: resolver,
-		ReconcileInterval:   time.Hour,
-		Bootstrap:           true,
+		ChannelID:            channel.ID(name),
+		DBPath:               filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver:  resolver,
+		IntroductionResolver: resolver,
+		ReconcileInterval:    time.Hour,
+		Bootstrap:            true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -184,17 +197,10 @@ func TestStaleFactoryShellIsAbortedAndCurrentVersionRebuilt(t *testing.T) {
 	resolver := &buildWindowResolver{resolveAt: 1}
 	h := openBuildWindowHome(t, "stale-factory-version", resolver)
 	record := introduceBuildWindowComposition(t, h, "stale-factory-version")
-	edited, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
-		ActorID: record.ID, Class: record.Class, Config: json.RawMessage(`{"version":2}`),
-		Placement: record.Placement, TIdle: record.TIdle,
-		CreatedAt: time.Now().UnixMilli(),
-	})
-	if err != nil || edited.CurrentDeclVersion != 2 {
-		t.Fatalf("edit=%+v err=%v", edited, err)
-	}
 	resolver.onResolve = func() {
-		if _, applyErr := h.applyDeclaration(ctx, record.ID, 2); applyErr != nil {
-			t.Errorf("apply inside build window: %v", applyErr)
+		result, syncErr := h.opEntry.applyResolvedDeclaration(ctx, record.ID, record.SourceDeclID, record.Class, json.RawMessage(`{"version":2}`))
+		if syncErr != nil || result.Status != storespec.DeclarationApplied {
+			t.Errorf("atomic sync inside build window: result=%+v err=%v", result, syncErr)
 		}
 	}
 
@@ -226,11 +232,12 @@ func TestStaleFactoryShellIsAbortedAndCurrentVersionRebuilt(t *testing.T) {
 func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {
 	resolver := &compositionActivationResolver{}
 	h, err := Open(Config{
-		ChannelID:           "composition-activation",
-		DBPath:              filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: resolver,
-		ReconcileInterval:   10 * time.Millisecond,
-		Bootstrap:           true,
+		ChannelID:            "composition-activation",
+		DBPath:               filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver:  resolver,
+		IntroductionResolver: inertIntroductionResolver{},
+		ReconcileInterval:    10 * time.Millisecond,
+		Bootstrap:            true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -284,11 +291,12 @@ func TestCompositionActivationUsesCurrentResolverSnapshot(t *testing.T) {
 func TestCompositionConfigChangeAdvancesVersionAndRebuildsFromOneCommit(t *testing.T) {
 	resolver := &compositionActivationResolver{}
 	h, err := Open(Config{
-		ChannelID:           "composition-config-rebuild",
-		DBPath:              filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: resolver,
-		ReconcileInterval:   10 * time.Millisecond,
-		Bootstrap:           true,
+		ChannelID:            "composition-config-rebuild",
+		DBPath:               filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver:  resolver,
+		IntroductionResolver: fixedIntroductionResolver{kind: actor.KindAgent},
+		ReconcileInterval:    10 * time.Millisecond,
+		Bootstrap:            true,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -331,8 +339,9 @@ func TestInvoluntaryBodyCrashBacksOffThenAutomaticallyRebuilds(t *testing.T) {
 	resolver := &crashBackoffResolver{}
 	h, err := Open(Config{
 		ChannelID: "crash-backoff", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: resolver,
-		ReconcileInterval:   time.Hour, Bootstrap: true,
+		CompositionResolver:  resolver,
+		IntroductionResolver: inertIntroductionResolver{},
+		ReconcileInterval:    time.Hour, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)

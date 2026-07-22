@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -435,6 +437,50 @@ func TestDeclarationSyncFreshRefsAreLevelIdempotentAndABASafe(t *testing.T) {
 	row, found, err := cs.Declared.LookupDeclaredActive(ctx, second)
 	if err != nil || !found || row.CurrentDeclVersion != 2 || string(row.Config) != `{"value":"b"}` {
 		t.Fatalf("old attempt touched new actor: row=%+v found=%v err=%v", row, found, err)
+	}
+}
+
+func TestDeclarationSyncConcurrentFreshRefsCreateAtMostOneHistoryRow(t *testing.T) {
+	cs := openSysOpTestStore(t)
+	ctx := context.Background()
+	id := admitDurableAgent(t, cs, "decl-concurrent")
+	start := make(chan struct{})
+	results := make([]storespec.DeclarationSyncResult, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range results {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			results[i], errs[i] = cs.DeclarationSync.ApplyResolvedDeclaration(ctx, storespec.DeclarationSyncTx{
+				SysOpMeta: sysMeta(fmt.Sprintf("ifin:v1:concurrent-%d", i), fmt.Sprintf("concurrent-%d", i)),
+				ActorID:   id, DeclID: "decl-concurrent", Class: "agent", Config: []byte(`{"value":"b"}`),
+			})
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	applied, equal := 0, 0
+	for i := range results {
+		if errs[i] != nil {
+			t.Fatalf("attempt %d: %v", i, errs[i])
+		}
+		switch results[i].Status {
+		case storespec.DeclarationApplied:
+			applied++
+		case storespec.DeclarationEqual:
+			equal++
+		default:
+			t.Fatalf("attempt %d status=%q", i, results[i].Status)
+		}
+	}
+	if applied != 1 || equal != 1 {
+		t.Fatalf("results=%+v, want one applied and one equal", results)
+	}
+	var versions int
+	if err := cs.db.QueryRow(`SELECT COUNT(*) FROM actor_decl_versions WHERE actor_id=?`, string(id)).Scan(&versions); err != nil || versions != 2 {
+		t.Fatalf("history rows=%d err=%v, want admission+one sync", versions, err)
 	}
 }
 

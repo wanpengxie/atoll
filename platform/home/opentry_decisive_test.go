@@ -19,11 +19,12 @@ import (
 // Only operations that mutate values commit anchored event pairs.
 func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 	h, err := Open(Config{
-		ChannelID:           "member-noise",
-		DBPath:              filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: &compositionActivationResolver{},
-		ReconcileInterval:   time.Hour,
-		Bootstrap:           true,
+		ChannelID:            "member-noise",
+		DBPath:               filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver:  &compositionActivationResolver{},
+		IntroductionResolver: inertIntroductionResolver{},
+		ReconcileInterval:    time.Hour,
+		Bootstrap:            true,
 	})
 	if err != nil {
 		t.Fatal(err)

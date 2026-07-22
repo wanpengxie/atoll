@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -66,27 +65,22 @@ func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 		return DeclareResult{}, errors.New("platform: invalid declared control row")
 	}
 	updated := false
-	currentDigest, digestErr := declarationContentDigest(row, row.Config)
-	if digestErr != nil {
-		return DeclareResult{}, digestErr
-	}
-	candidateDigest, digestErr := declarationContentDigest(row, config)
-	if digestErr != nil {
-		return DeclareResult{}, digestErr
-	}
-	if !admitted.Created && in.Config != nil && currentDigest != candidateDigest {
-		edited, editErr := h.editDeclaration(ctx, storespec.DeclEditBundle{
-			ActorID: row.ID, Class: row.Class, Config: config, Placement: row.Placement,
-			TIdle: row.TIdle, CreatedAt: in.CreatedAt,
-		})
-		if editErr != nil {
-			return DeclareResult{}, editErr
+	if !admitted.Created && in.Config != nil {
+		synced, syncErr := h.opEntry.applyResolvedDeclaration(ctx, row.ID, row.SourceDeclID, row.Class, config)
+		if syncErr != nil {
+			return DeclareResult{}, syncErr
 		}
-		row, err = h.applyDeclaration(ctx, row.ID, edited.CurrentDeclVersion)
-		if err != nil {
-			return DeclareResult{}, err
+		updated = synced.Status == storespec.DeclarationApplied
+		if updated {
+			var active bool
+			row, active, err = h.controlIndex.LookupActive(ctx, row.ID)
+			if err != nil {
+				return DeclareResult{}, err
+			}
+			if !active {
+				return DeclareResult{}, errors.New("platform: applied declaration missing from control index")
+			}
 		}
-		updated = true
 	}
 	if in.MakeDefault {
 		if err := h.cs.Routing.SetDefaultAgent(ctx, row.ID); err != nil {
@@ -98,18 +92,6 @@ func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, e
 }
 
 func durationMillis(ms int64) time.Duration { return time.Duration(ms) * time.Millisecond }
-
-func declarationContentDigest(row storespec.ActorControlRow, config json.RawMessage) (string, error) {
-	return (channel.RenderedSnapshot{
-		Class:  row.Class,
-		Config: config,
-		Placement: channel.Placement{
-			Kind:        channel.PlacementKind(row.Placement.Kind),
-			DesiredHost: row.Placement.Host,
-		},
-		TIdleMS: row.TIdle.Milliseconds(),
-	}).ContentDigest()
-}
 
 func (h *Home) activeActors(ctx context.Context) ([]storespec.ActorControlRow, error) {
 	if h.closed.Load() {

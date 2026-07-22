@@ -98,37 +98,3 @@ func TestAdmitDeclaredNilConfigSurvivesReadPath(t *testing.T) {
 		t.Fatalf("read mutation escaped into store row: %q", row2.Config)
 	}
 }
-
-func TestEditDeclaredMintsLatestWithoutMovingCurrent(t *testing.T) {
-	cs := openTestChannel(t)
-	ctx := context.Background()
-	id := actor.ActorID("agent:edit:1")
-	if _, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		ID: id, Kind: actor.KindAgent, SourceDeclID: "decl-edit", Binding: actor.BindingRuntimeInboundViaRelay,
-		Class: "agent.v1", Placement: storespec.NewServerPlacement(), CreatedAt: 1,
-	}); err != nil {
-		t.Fatal(err)
-	}
-	latest, err := cs.DeclVersions.EditDeclared(ctx, storespec.DeclEditBundle{
-		ActorID: id, Class: "agent.v2", Config: nil, Placement: storespec.NewServerPlacement(),
-		CreatedAt: 2,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if latest.CurrentDeclVersion != 2 || latest.Config != nil || latest.SourceDeclID != "decl-edit" {
-		t.Fatalf("edited row = %+v", latest)
-	}
-	current, ok, err := cs.Declared.LookupDeclaredActive(ctx, id)
-	if err != nil || !ok || current.CurrentDeclVersion != 1 || current.Class != "agent.v1" {
-		t.Fatalf("current moved during edit: row=%+v ok=%v err=%v", current, ok, err)
-	}
-	gotLatest, ok, err := cs.Declared.LatestDeclaredVersion(ctx, id)
-	if err != nil || !ok || gotLatest.CurrentDeclVersion != 2 || gotLatest.Class != "agent.v2" {
-		t.Fatalf("latest = %+v ok=%v err=%v", gotLatest, ok, err)
-	}
-	applied, ok, err := cs.DeclVersions.ApplyDeclaredVersion(ctx, id, 2)
-	if err != nil || !ok || applied.CurrentDeclVersion != 2 || applied.Config != nil {
-		t.Fatalf("apply = %+v ok=%v err=%v", applied, ok, err)
-	}
-}

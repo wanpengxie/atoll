@@ -183,8 +183,9 @@ func TestForkAcceleratorMissStillReturnsChildAndLevelRingBuildsIt(t *testing.T) 
 	resolver.fail.Store(true)
 	h, err := Open(Config{
 		ChannelID: "fork-accelerator-miss", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: resolver,
-		ReconcileInterval:   10 * time.Millisecond, Bootstrap: true,
+		CompositionResolver:  resolver,
+		IntroductionResolver: inertIntroductionResolver{},
+		ReconcileInterval:    10 * time.Millisecond, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)

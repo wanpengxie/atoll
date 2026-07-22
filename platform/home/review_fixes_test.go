@@ -2,6 +2,7 @@ package home
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -29,6 +30,7 @@ func openWhiteboxHome(t *testing.T) *Home {
 	h, err := Open(Config{CompositionResolver: emptyCompositionResolver{},
 		ChannelID: channelpkg.ID("test-review-fixes"),
 		DBPath:    filepath.Join(t.TempDir(), "home.sqlite"), Bootstrap: true,
+		IntroductionResolver: fixedIntroductionResolver{kind: actor.KindAgent},
 	})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -107,80 +109,6 @@ func TestAdmitIsHumanOnlyAndIdempotentlyPublishesAuthority(t *testing.T) {
 	}
 }
 
-func TestDeclarationEditApplyPublishesCurrentAndKeepsLatestDistinct(t *testing.T) {
-	h := openWhiteboxHome(t)
-	ctx := context.Background()
-	id := actor.ActorID("agent:decl-verbs:1")
-	in := storespec.AdmitBundle{
-		ID: id, Kind: actor.KindAgent, Binding: actor.BindingRuntimeInboundViaRelay,
-		Class: "agent.v1", Placement: storespec.NewServerPlacement(), SourceDeclID: "source-v1", CreatedAt: 1,
-	}
-	if _, err := h.cs.DeclAdmission.AdmitDeclared(ctx, in); err != nil {
-		t.Fatal(err)
-	}
-	row, ok, err := h.cs.Declared.LookupDeclaredActive(ctx, id)
-	if err != nil || !ok {
-		t.Fatalf("lookup admitted: ok=%v err=%v", ok, err)
-	}
-	if !h.controlIndex.UpsertBatch([]controlEntry{{Row: row, World: storespec.WorldDurable}}) {
-		t.Fatal("publish admitted row")
-	}
-	if h.liveness.AdmitIdentity(id) != transitionApplied {
-		t.Fatal("publish parent liveness")
-	}
-	child, err := h.forkAdmission(ctx, id, 1, actorrt.ForkSpec{Kind: actor.KindAgent, Class: "version-gated-child"}, "version-gated-child")
-	if err != nil {
-		t.Fatal(err)
-	}
-	oldEnd := lifecycleEndHandle{home: h, author: storespec.AuthorStamp{ID: id, BirthVersion: 1}}
-	edited, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
-		ActorID: id, Class: "agent.v2", Config: nil, Placement: storespec.NewServerPlacement(),
-		CreatedAt: 2,
-	})
-	if err != nil || edited.CurrentDeclVersion != 2 || edited.Config != nil {
-		t.Fatalf("edit = %+v err=%v", edited, err)
-	}
-	current, latest, err := h.View().DeclarationVersions(ctx, id)
-	if err != nil || current.CurrentDeclVersion != 1 || latest.CurrentDeclVersion != 2 {
-		t.Fatalf("versions before apply current=%+v latest=%+v err=%v", current, latest, err)
-	}
-	if verdict, err := h.controlIndex.CheckAuthor(ctx, storespec.AuthorStamp{ID: id, BirthVersion: 2}); err != nil || verdict != storespec.AuthorVersionStale {
-		t.Fatalf("edited version acquired authority before apply: verdict=%v err=%v", verdict, err)
-	}
-	applied, err := h.applyDeclaration(ctx, id, 2)
-	if err != nil || applied.CurrentDeclVersion != 2 {
-		t.Fatalf("apply = %+v err=%v", applied, err)
-	}
-	if verdict, err := h.controlIndex.CheckAuthor(ctx, storespec.AuthorStamp{ID: id, BirthVersion: 2}); err != nil || verdict != storespec.AuthorOK {
-		t.Fatalf("apply was not immediately published: verdict=%v err=%v", verdict, err)
-	}
-	if err := oldEnd.End(ctx, child, "stale-parent"); !errors.Is(err, ErrEndVersionStale) {
-		t.Fatalf("old lifecycle handle crossed apply gate: %v", err)
-	}
-	if _, active, err := h.controlIndex.LookupActive(ctx, child); err != nil || !active {
-		t.Fatalf("stale lifecycle handle ended child: active=%v err=%v", active, err)
-	}
-	if _, err := h.applyDeclaration(ctx, id, 1); !errors.Is(err, ErrApplyVersionRegress) {
-		t.Fatalf("regress err=%v", err)
-	}
-	if _, err := h.applyDeclaration(ctx, id, 3); !errors.Is(err, ErrApplyVersionNotFound) {
-		t.Fatalf("missing err=%v", err)
-	}
-	if err := h.remove(ctx, id); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.applyDeclaration(ctx, id, 2); !errors.Is(err, ErrApplyActorEnded) {
-		t.Fatalf("ended err=%v", err)
-	}
-}
-
-func TestSystemDeclarationApplyIsForbidden(t *testing.T) {
-	h := openWhiteboxHome(t)
-	if _, err := h.applyDeclaration(context.Background(), actor.SystemActorID, 2); !errors.Is(err, ErrApplySystemForbidden) {
-		t.Fatalf("system apply err=%v", err)
-	}
-}
-
 func TestRealPensFenceAppliedAndEndedDeclaredAndRunIdentities(t *testing.T) {
 	h := openWhiteboxHome(t)
 	ctx := context.Background()
@@ -210,20 +138,19 @@ func TestRealPensFenceAppliedAndEndedDeclaredAndRunIdentities(t *testing.T) {
 	if res := writeEvent(v1, "declared-v1-before-apply"); !res.Accepted() {
 		t.Fatalf("v1 before apply rejected: %+v", res)
 	}
-	edited, err := h.editDeclaration(ctx, storespec.DeclEditBundle{
-		ActorID: declared.Row.ID, Class: declared.Row.Class, Placement: declared.Row.Placement,
-		TIdle: declared.Row.TIdle, CreatedAt: time.Now().UnixMilli(),
+	configV2 := json.RawMessage(`{"version":2}`)
+	updated, err := h.declare(ctx, DeclareRequest{
+		SourceDeclID: declared.Row.SourceDeclID, Kind: declared.Row.Kind, Class: declared.Row.Class,
+		Config: &configV2, Placement: declared.Row.Placement, TIdle: declared.Row.TIdle.Milliseconds(),
+		CreatedAt: time.Now().UnixMilli(),
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := h.applyDeclaration(ctx, declared.Row.ID, edited.CurrentDeclVersion); err != nil {
-		t.Fatal(err)
+	if err != nil || !updated.ConfigUpdated || updated.Row.CurrentDeclVersion != 2 {
+		t.Fatalf("atomic declaration sync = %+v err=%v", updated, err)
 	}
 	if res := writeEvent(v1, "declared-v1-after-apply"); res.RejectReason != harness.HarnessAuthorVersionStale {
 		t.Fatalf("old declared pen after apply=%+v", res)
 	}
-	v2 := h.minter.Mint(declared.Row.ID, declared.Row.Kind, h.channelID, edited.CurrentDeclVersion)
+	v2 := h.minter.Mint(declared.Row.ID, declared.Row.Kind, h.channelID, updated.Row.CurrentDeclVersion)
 	if res := writeEvent(v2, "declared-v2-before-end"); !res.Accepted() {
 		t.Fatalf("current declared pen rejected: %+v", res)
 	}

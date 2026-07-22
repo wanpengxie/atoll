@@ -104,6 +104,19 @@ func TestFanoutLiteLegacyMechanismsCannotReturn(t *testing.T) {
 		"deliverFinalize",
 		"finalizeProvision",
 		"fanoutWorker",
+		"editDeclaration",
+		"applyDeclaration",
+		"DeclEditBundle",
+		"DeclVersionStore",
+		"EditDeclared",
+		"ApplyDeclaredVersion",
+		"DeclarationVersions",
+		"LookupDeclaredVersion",
+		"LatestDeclaredVersion",
+		"DaemonObligationCounts",
+		"daemonObligationCounts",
+		"logDaemonObligations",
+		"logOneDaemonObligation",
 	}
 	for _, path := range phaseAProductionFiles(t, "..") {
 		body, err := os.ReadFile(path)
@@ -115,6 +128,17 @@ func TestFanoutLiteLegacyMechanismsCannotReturn(t *testing.T) {
 				t.Errorf("%s retains retired fanout-lite symbol %q", filepath.Clean(path), symbol)
 			}
 		}
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, body, 0)
+		if err != nil {
+			t.Fatalf("parse %s: %v", path, err)
+		}
+		ast.Inspect(file, func(n ast.Node) bool {
+			if ident, ok := n.(*ast.Ident); ok && ident.Name == "ListBound" {
+				t.Errorf("%s retains retired fanout-lite identifier ListBound", filepath.Clean(path))
+			}
+			return true
+		})
 	}
 
 	routes, err := os.ReadFile("../app/app.go")
@@ -145,4 +169,58 @@ func TestFanoutLiteLegacyMechanismsCannotReturn(t *testing.T) {
 			t.Errorf("realm declaration API leaks channel-local fence %s", localOnly)
 		}
 	}
+	opEntry, err := os.ReadFile("../platform/home/opentry.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(opEntry), `systemMeta("ifin:v1:"+uuid.NewString(), request)`) {
+		t.Error("declaration sync no longer mints a fresh UUID ref at the real operation entry")
+	}
+}
+
+func TestFanoutLiteReadInterfacesStayClosed(t *testing.T) {
+	assertInterfaceMethods := func(path, typeName string, want []string) {
+		t.Helper()
+		fset := token.NewFileSet()
+		file, err := parser.ParseFile(fset, path, nil, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := make(map[string]bool)
+		ast.Inspect(file, func(n ast.Node) bool {
+			spec, ok := n.(*ast.TypeSpec)
+			if !ok || spec.Name.Name != typeName {
+				return true
+			}
+			iface, ok := spec.Type.(*ast.InterfaceType)
+			if !ok {
+				t.Fatalf("%s.%s is not an interface", path, typeName)
+			}
+			for _, field := range iface.Methods.List {
+				for _, name := range field.Names {
+					got[name.Name] = true
+				}
+			}
+			return false
+		})
+		if len(got) != len(want) {
+			t.Errorf("%s.%s methods=%v, want closed set %v", path, typeName, got, want)
+		}
+		for _, name := range want {
+			if !got[name] {
+				t.Errorf("%s.%s missing %s", path, typeName, name)
+			}
+		}
+	}
+	assertInterfaceMethods("../runtime/storespec/actor_control.go", "DeclaredControlReader", []string{
+		"LookupDeclaredActive", "ListDeclaredActive",
+	})
+	assertInterfaceMethods("../runtime/storespec/sysop.go", "DaemonBindingReader", []string{
+		"IsBound", "ListBoundDaemons",
+	})
+	assertInterfaceMethods("../platform/channelhost/bundle.go", "View", []string{
+		"DefaultAgent", "DeclaredBySourceOne", "DeclaredBySource", "ActiveActors", "ResolvePrincipal",
+		"OwnerPrincipal", "ReadVisibleAfterSeq", "ActorFacts", "Snapshot", "MaxSeq", "ListActors",
+		"Stat", "IsAttached", "IsBound", "Resources",
+	})
 }

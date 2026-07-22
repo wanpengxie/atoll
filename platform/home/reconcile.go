@@ -90,7 +90,7 @@ func (h *Home) reconcileDaemonTombstones(ctx context.Context) {
 	if h.opEntry == nil || h.opEntry.resolver == nil {
 		return
 	}
-	ids, err := h.cs.Bindings.ListBound(ctx)
+	ids, err := h.cs.Bindings.ListBoundDaemons(ctx)
 	if err != nil {
 		h.logger.Warn("platform.daemon_pull.list_failed", "error", err)
 		return

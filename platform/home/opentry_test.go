@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -25,6 +26,7 @@ type fixedIntroductionResolver struct {
 }
 
 type mutableIntroductionResolver struct {
+	mu          sync.Mutex
 	facts       channel.DeclarationFacts
 	kind        actor.Kind
 	err         error
@@ -36,16 +38,36 @@ type mutableIntroductionResolver struct {
 }
 
 func (r *mutableIntroductionResolver) ResolveDeclaration(context.Context, channel.ID, string) (channel.DeclarationFacts, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	r.calls++
-	return r.facts, r.err
+	facts := r.facts
+	facts.Config = append(json.RawMessage(nil), facts.Config...)
+	return facts, r.err
 }
 
 func (r *mutableIntroductionResolver) ClassKind(context.Context, string) (actor.Kind, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.kind, !r.kindMissing, r.kindErr
 }
 
 func (r *mutableIntroductionResolver) DaemonFacts(context.Context, string) (channel.DaemonFacts, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
 	return r.daemonFacts, r.daemonErr
+}
+
+func (r *mutableIntroductionResolver) update(fn func(*mutableIntroductionResolver)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	fn(r)
+}
+
+func (r *mutableIntroductionResolver) callCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls
 }
 
 func TestDaemonTombstonePullDetachesDurableRootAndForkClosure(t *testing.T) {
@@ -77,7 +99,7 @@ func TestDaemonTombstonePullDetachesDurableRootAndForkClosure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolver.daemonFacts.Deleted = true
+	resolver.update(func(r *mutableIntroductionResolver) { r.daemonFacts.Deleted = true })
 	h.reconcileDaemonTombstones(ctx)
 	if bound, err := h.View().IsBound(ctx, "daemon-a"); err != nil || bound {
 		t.Fatalf("binding after tombstone=(%v,%v)", bound, err)
@@ -219,19 +241,19 @@ func TestOpEntryIntroducePullAndDetachUseOneDurableChain(t *testing.T) {
 	if err != nil || len(rows) != 1 || rows[0].Placement.Host != "daemon-a" {
 		t.Fatalf("introduced rows=%+v err=%v", rows, err)
 	}
-	resolver.facts.Config = json.RawMessage(`{"version":2}`)
+	resolver.update(func(r *mutableIntroductionResolver) { r.facts.Config = json.RawMessage(`{"version":2}`) })
 	h.reconcileDeclarations(ctx)
 	rows, _ = h.View().DeclaredBySource(ctx, "decl-a")
 	if len(rows) != 1 || string(rows[0].Config) != `{"version":2}` || rows[0].Placement.Host != "daemon-a" {
 		t.Fatalf("applied rows=%+v", rows)
 	}
-	_, before, err := h.View().DeclarationVersions(ctx, introduced.ActorID)
-	if err != nil {
+	before, active, err := h.controlIndex.LookupActive(ctx, introduced.ActorID)
+	if err != nil || !active {
 		t.Fatal(err)
 	}
 	h.reconcileDeclarations(ctx)
-	_, after, err := h.View().DeclarationVersions(ctx, introduced.ActorID)
-	if err != nil || after.CurrentDeclVersion != before.CurrentDeclVersion {
+	after, active, err := h.controlIndex.LookupActive(ctx, introduced.ActorID)
+	if err != nil || !active || after.CurrentDeclVersion != before.CurrentDeclVersion {
 		t.Fatalf("equal pull wrote history: before=%+v after=%+v err=%v", before, after, err)
 	}
 	detached, err := ops.DetachDaemon(ctx, channel.DaemonRequest{Ref: "adm:detach", DaemonID: "daemon-a"})
@@ -241,6 +263,49 @@ func TestOpEntryIntroducePullAndDetachUseOneDurableChain(t *testing.T) {
 	rows, err = h.View().DeclaredBySource(ctx, "decl-a")
 	if err != nil || len(rows) != 0 {
 		t.Fatalf("revoked rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestDeclarationSyncRealOperationEntryMintsFreshUUIDPerChangedAttempt(t *testing.T) {
+	ctx := context.Background()
+	resolver := &mutableIntroductionResolver{kind: actor.KindAgent}
+	h, err := Open(Config{
+		ChannelID: "declaration-sync-uuid", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"), Bootstrap: true,
+		CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: resolver, ReconcileInterval: time.Hour,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = h.closeInternal("test") })
+	initial := json.RawMessage(`{"version":1}`)
+	declared, err := h.declare(ctx, DeclareRequest{
+		SourceDeclID: "decl:uuid", Kind: actor.KindAgent, Class: "uuid-agent", Config: &initial,
+		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for version := 2; version <= 3; version++ {
+		config := json.RawMessage(fmt.Sprintf(`{"version":%d}`, version))
+		result, err := h.opEntry.applyResolvedDeclaration(ctx, declared.Row.ID, declared.Row.SourceDeclID, declared.Row.Class, config)
+		if err != nil || result.Status != storespec.DeclarationApplied {
+			t.Fatalf("attempt %d=(%+v,%v)", version, result, err)
+		}
+	}
+	rows, err := h.cs.Query.ReadAfterSeq(ctx, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	refs := make(map[string]struct{})
+	seen := make([]string, 0, len(rows))
+	for _, row := range rows {
+		seen = append(seen, row.Envelope.Type+":"+string(row.Envelope.CorrelationID))
+		if row.Envelope.Type == "sysop_started" && strings.HasPrefix(string(row.Envelope.CorrelationID), "op:ref:v1:") {
+			refs[string(row.Envelope.CorrelationID)] = struct{}{}
+		}
+	}
+	if len(refs) != 2 {
+		t.Fatalf("changed attempts refs=%v rows=%v, want two distinct UUID-derived refs", refs, seen)
 	}
 }
 
@@ -266,10 +331,10 @@ func TestOpEntryPermanentResolverRefusalReplaysWithoutResolver(t *testing.T) {
 		if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeDeclNotFound || operationErr.Retryable {
 			t.Fatalf("attempt %d error=%v", i+1, err)
 		}
-		resolver.err = errors.New("resolver is now unavailable")
+		resolver.update(func(r *mutableIntroductionResolver) { r.err = errors.New("resolver is now unavailable") })
 	}
-	if resolver.calls != 1 {
-		t.Fatalf("resolver calls=%d, terminal replay must not re-resolve", resolver.calls)
+	if resolver.callCount() != 1 {
+		t.Fatalf("resolver calls=%d, terminal replay must not re-resolve", resolver.callCount())
 	}
 	rows, err := h.cs.Query.ReadAfterSeq(ctx, 0, 1000)
 	if err != nil {
@@ -327,15 +392,17 @@ func TestOpEntryTransientResolverFailureLeavesNoPairAndSameRefRetries(t *testing
 			t.Fatalf("transient resolver failure left event %q", row.Envelope.Type)
 		}
 	}
-	resolver.err = nil
-	resolver.kind = actor.KindAgent
-	resolver.facts = channel.DeclarationFacts{OwnerPrincipal: "owner", Visibility: "private", Class: "test-agent"}
+	resolver.update(func(r *mutableIntroductionResolver) {
+		r.err = nil
+		r.kind = actor.KindAgent
+		r.facts = channel.DeclarationFacts{OwnerPrincipal: "owner", Visibility: "private", Class: "test-agent"}
+	})
 	result, err := SystemOps(h).Introduce(ctx, req)
 	if err != nil || !result.Created || result.ActorID == "" {
 		t.Fatalf("same-ref retry=(%+v,%v)", result, err)
 	}
-	if resolver.calls != 2 {
-		t.Fatalf("resolver calls=%d, want 2", resolver.calls)
+	if resolver.callCount() != 2 {
+		t.Fatalf("resolver calls=%d, want 2", resolver.callCount())
 	}
 }
 
@@ -381,15 +448,17 @@ func TestClassKindFaultIsRetryableOnlyAbsenceIsDecisive(t *testing.T) {
 			t.Fatalf("ClassKind infra error left event %q", row.Envelope.Type)
 		}
 	}
-	resolver.kindErr = nil
-	resolver.kind = actor.KindAgent
+	resolver.update(func(r *mutableIntroductionResolver) {
+		r.kindErr = nil
+		r.kind = actor.KindAgent
+	})
 	result, err := SystemOps(h).Introduce(ctx, req)
 	if err != nil || !result.Created || result.ActorID == "" {
 		t.Fatalf("same-ref retry after fault=(%+v,%v)", result, err)
 	}
 	// The definitive absence answer, by contrast, is decisive: a fresh ref
 	// lands a completed terminal carrying unknown_class.
-	resolver.kindMissing = true
+	resolver.update(func(r *mutableIntroductionResolver) { r.kindMissing = true })
 	missingReq := channel.IntroduceRequest{Ref: "adm:classkind-missing", DeclID: "decl", InitiatorActorID: ownerActor}
 	_, err = SystemOps(h).Introduce(ctx, missingReq)
 	if !errors.As(err, &operationErr) || operationErr.Code != channel.ErrCodeUnknownClass || operationErr.Retryable {

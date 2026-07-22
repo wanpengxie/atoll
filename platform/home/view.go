@@ -40,7 +40,6 @@ type View struct {
 	nowMs      func() int64
 	resources  storespec.ResourceReadStore
 	control    *actorControlIndex
-	declared   storespec.DeclaredControlReader
 	routing    storespec.ChannelRouting
 	principals storespec.PrincipalRegistry
 	bindings   storespec.DaemonBindingReader
@@ -62,7 +61,6 @@ func (h *Home) View() View {
 		nowMs:      h.nowMs,
 		resources:  h.cs.ResourceRead,
 		control:    h.controlIndex,
-		declared:   h.cs.Declared,
 		routing:    h.cs.Routing,
 		principals: h.cs.Principals,
 		bindings:   h.cs.Bindings,
@@ -234,24 +232,6 @@ func (v View) DeclaredBySourceOne(ctx context.Context, source string) (storespec
 		}
 	}
 	return storespec.ActorControlRow{}, false, nil
-}
-
-func (v View) DeclarationVersions(ctx context.Context, id actor.ActorID) (current, latest storespec.ActorControlRow, err error) {
-	current, ok, err := v.declared.LookupDeclaredActive(ctx, id)
-	if err != nil {
-		return current, latest, err
-	}
-	if !ok {
-		return current, latest, ErrApplyActorEnded
-	}
-	latest, ok, err = v.declared.LatestDeclaredVersion(ctx, id)
-	if err != nil {
-		return current, latest, err
-	}
-	if !ok {
-		return current, latest, ErrApplyVersionNotFound
-	}
-	return current, latest, nil
 }
 
 func (v View) IsBound(ctx context.Context, daemonID string) (bool, error) {

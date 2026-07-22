@@ -161,27 +161,11 @@ type DeclAdmissionStore interface {
 	AdmitDeclared(context.Context, AdmitBundle) (DeclAdmissionResult, error)
 }
 
-type DeclEditBundle struct {
-	ActorID   actor.ActorID
-	Class     string
-	Config    json.RawMessage
-	Placement Placement
-	TIdle     time.Duration
-	CreatedAt int64
-}
-
-type DeclVersionStore interface {
-	EditDeclared(context.Context, DeclEditBundle) (ActorControlRow, error)
-	ApplyDeclaredVersion(context.Context, actor.ActorID, int64) (ActorControlRow, bool, error)
-}
-
-// DeclaredControlReader is the durable boot/edit read face. It returns the
+// DeclaredControlReader is the durable boot read face. It returns the
 // joined registry+current-declaration row, never a forked identity.
 type DeclaredControlReader interface {
 	LookupDeclaredActive(context.Context, actor.ActorID) (ActorControlRow, bool, error)
 	ListDeclaredActive(context.Context) ([]ActorControlRow, error)
-	LookupDeclaredVersion(context.Context, actor.ActorID, int64) (ActorControlRow, bool, error)
-	LatestDeclaredVersion(context.Context, actor.ActorID) (ActorControlRow, bool, error)
 }
 
 type CascadeBundle struct {

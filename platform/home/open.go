@@ -50,6 +50,9 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if cfg.CompositionResolver == nil {
 		return nil, fmt.Errorf("platform: CompositionResolver required")
 	}
+	if cfg.IntroductionResolver == nil {
+		return nil, fmt.Errorf("platform: IntroductionResolver required")
+	}
 	if cfg.Bootstrap && cfg.MustExistDB {
 		return nil, errors.New("platform: Bootstrap and MustExistDB are mutually exclusive")
 	}

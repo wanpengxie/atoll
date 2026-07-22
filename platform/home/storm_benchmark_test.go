@@ -2,6 +2,7 @@ package home
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"path/filepath"
 	"sync/atomic"
@@ -27,8 +28,9 @@ func openStormHome(b *testing.B) *Home {
 	b.Helper()
 	h, err := Open(Config{
 		ChannelID: "actor-storm", DBPath: filepath.Join(b.TempDir(), "channel.sqlite"),
-		CompositionResolver: emptyCompositionResolver{},
-		ReconcileInterval:   time.Hour, Bootstrap: true,
+		CompositionResolver:  emptyCompositionResolver{},
+		IntroductionResolver: fixedIntroductionResolver{kind: actor.KindAgent},
+		ReconcileInterval:    time.Hour, Bootstrap: true,
 	})
 	if err != nil {
 		b.Fatal(err)
@@ -122,15 +124,9 @@ func BenchmarkActorStorm(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
-			edited, editErr := h.editDeclaration(ctx, storespec.DeclEditBundle{
-				ActorID: declared.Row.ID, Class: fmt.Sprintf("storm-v%d", i+2),
-				Placement: declared.Row.Placement, TIdle: declared.Row.TIdle,
-				CreatedAt: int64(i + 2),
-			})
-			if editErr != nil {
-				b.Fatal(editErr)
-			}
-			if _, err := h.applyDeclaration(ctx, declared.Row.ID, edited.CurrentDeclVersion); err != nil {
+			config := json.RawMessage(fmt.Sprintf(`{"version":%d}`, i+2))
+			result, err := h.opEntry.applyResolvedDeclaration(ctx, declared.Row.ID, declared.Row.SourceDeclID, declared.Row.Class, config)
+			if err != nil || result.Status != storespec.DeclarationApplied {
 				b.Fatal(err)
 			}
 		}

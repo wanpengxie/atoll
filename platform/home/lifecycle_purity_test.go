@@ -22,10 +22,21 @@ import (
 func lifecycleConfig(t *testing.T, name string) Config {
 	t.Helper()
 	return Config{
-		CompositionResolver: emptyCompositionResolver{},
-		ChannelID:           channel.ID("lifecycle-" + name),
-		DBPath:              filepath.Join(t.TempDir(), name+".sqlite"),
-		Bootstrap:           true,
+		CompositionResolver:  emptyCompositionResolver{},
+		IntroductionResolver: inertIntroductionResolver{},
+		ChannelID:            channel.ID("lifecycle-" + name),
+		DBPath:               filepath.Join(t.TempDir(), name+".sqlite"),
+		Bootstrap:            true,
+	}
+}
+
+func TestHomeOpenRequiresIntroductionResolver(t *testing.T) {
+	h, err := Open(Config{
+		ChannelID: "missing-introduction-resolver", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
+		CompositionResolver: emptyCompositionResolver{}, Bootstrap: true,
+	})
+	if h != nil || err == nil || err.Error() != "platform: IntroductionResolver required" {
+		t.Fatalf("Open = (%v,%v), want direct resolver rejection", h, err)
 	}
 }
 
@@ -151,13 +162,14 @@ func TestCloseWindowDueTimerNeitherRevivesNorPoisons(t *testing.T) {
 	handler.entered = make(chan struct{})
 	handler.release = release
 	cfg := Config{
-		CompositionResolver: emptyCompositionResolver{},
-		ChannelID:           channel.ID("lifecycle-close-window"),
-		DBPath:              db,
-		Clock:               clock,
-		Bootstrap:           true,
-		Logger:              slog.New(handler),
-		ReconcileInterval:   time.Hour,
+		CompositionResolver:  emptyCompositionResolver{},
+		IntroductionResolver: inertIntroductionResolver{},
+		ChannelID:            channel.ID("lifecycle-close-window"),
+		DBPath:               db,
+		Clock:                clock,
+		Bootstrap:            true,
+		Logger:               slog.New(handler),
+		ReconcileInterval:    time.Hour,
 	}
 	h, err := Open(cfg)
 	if err != nil {

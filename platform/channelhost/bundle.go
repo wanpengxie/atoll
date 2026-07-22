@@ -45,10 +45,8 @@ type View interface {
 	DefaultAgent(context.Context) (actor.ActorID, bool, error)
 	DeclaredBySourceOne(context.Context, string) (storespec.ActorControlRow, bool, error)
 	DeclaredBySource(context.Context, string) ([]storespec.ActorControlRow, error)
-	DeclarationVersions(context.Context, actor.ActorID) (storespec.ActorControlRow, storespec.ActorControlRow, error)
 	ActiveActors(context.Context) ([]storespec.ActorControlRow, error)
 	ResolvePrincipal(context.Context, actor.Kind, string) (actor.ActorID, bool, error)
-	DaemonObligationCounts(context.Context, string) (int, int, int, error)
 	OwnerPrincipal(context.Context) (string, bool, error)
 	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]storespec.StoredRow, int64, error)
 	ActorFacts(context.Context, actor.ActorID) (channel.ActorFacts, bool, error)
@@ -106,17 +104,11 @@ func (a viewAdapter) DeclaredBySourceOne(ctx context.Context, source string) (st
 func (a viewAdapter) DeclaredBySource(ctx context.Context, d string) ([]storespec.ActorControlRow, error) {
 	return a.home.View().DeclaredBySource(ctx, d)
 }
-func (a viewAdapter) DeclarationVersions(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, storespec.ActorControlRow, error) {
-	return a.home.View().DeclarationVersions(ctx, id)
-}
 func (a viewAdapter) ActiveActors(ctx context.Context) ([]storespec.ActorControlRow, error) {
 	return a.home.View().ActiveActors(ctx)
 }
 func (a viewAdapter) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {
 	return a.home.View().ResolvePrincipal(ctx, kind, principal)
-}
-func (a viewAdapter) DaemonObligationCounts(ctx context.Context, daemon string) (int, int, int, error) {
-	return home.ObligationCounts(a.home, ctx, daemon)
 }
 func (a viewAdapter) OwnerPrincipal(ctx context.Context) (string, bool, error) {
 	return a.home.View().OwnerPrincipal(ctx)

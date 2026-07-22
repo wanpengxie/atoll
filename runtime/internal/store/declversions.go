@@ -99,40 +99,6 @@ func (r *actorRegistry) ListDeclaredActive(ctx context.Context) ([]storespec.Act
 	return out, nil
 }
 
-func (r *actorRegistry) LookupDeclaredVersion(ctx context.Context, id actor.ActorID, version int64) (storespec.ActorControlRow, bool, error) {
-	const q = `SELECT r.actor_id, r.actor_kind, r.principal, r.role,
-		COALESCE(r.actor_binding,''), r.created_at, d.version,
-		d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
-		r.source_decl_id
-		FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id
-		WHERE r.actor_id=? AND d.version=?`
-	row, err := scanDeclaredControl(r.db.QueryRowContext(ctx, q, string(id), version))
-	if errors.Is(err, sql.ErrNoRows) {
-		return storespec.ActorControlRow{}, false, nil
-	}
-	if err != nil {
-		return storespec.ActorControlRow{}, false, fmt.Errorf("store: lookup actor %q decl v%d: %w", id, version, err)
-	}
-	return row, true, nil
-}
-
-func (r *actorRegistry) LatestDeclaredVersion(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
-	const q = `SELECT r.actor_id, r.actor_kind, r.principal, r.role,
-		COALESCE(r.actor_binding,''), r.created_at, d.version,
-		d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
-		r.source_decl_id
-		FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id
-		WHERE r.actor_id=? ORDER BY d.version DESC LIMIT 1`
-	row, err := scanDeclaredControl(r.db.QueryRowContext(ctx, q, string(id)))
-	if errors.Is(err, sql.ErrNoRows) {
-		return storespec.ActorControlRow{}, false, nil
-	}
-	if err != nil {
-		return storespec.ActorControlRow{}, false, fmt.Errorf("store: latest actor %q decl: %w", id, err)
-	}
-	return row, true, nil
-}
-
 func validateAdmitBundle(in storespec.AdmitBundle) error {
 	if _, ok := actor.ParseKind(string(in.Kind)); !ok {
 		return fmt.Errorf("store: invalid actor kind %q", in.Kind)
@@ -293,75 +259,8 @@ func (r *actorRegistry) ExistsEver(ctx context.Context, id actor.ActorID) (bool,
 	return r.Exists(ctx, id)
 }
 
-func (r *actorRegistry) EditDeclared(ctx context.Context, in storespec.DeclEditBundle) (storespec.ActorControlRow, error) {
-	if in.ActorID == "" || in.Class == "" || in.CreatedAt <= 0 || in.TIdle < 0 || in.Placement.Validate() != nil {
-		return storespec.ActorControlRow{}, errors.New("store: invalid declaration edit")
-	}
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return storespec.ActorControlRow{}, err
-	}
-	defer tx.Rollback()
-	var active int
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(in.ActorID)).Scan(&active); err != nil {
-		return storespec.ActorControlRow{}, err
-	}
-	if active != 1 {
-		return storespec.ActorControlRow{}, storespec.ErrMemberInactive
-	}
-	var version int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(version),0)+1 FROM actor_decl_versions WHERE actor_id=?`, string(in.ActorID)).Scan(&version); err != nil {
-		return storespec.ActorControlRow{}, err
-	}
-	var config any
-	if in.Config != nil {
-		config = string(in.Config)
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO actor_decl_versions
-		(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,created_at)
-		VALUES (?,?,?,?,?,?,?,?)`, string(in.ActorID), version, in.Class, config, string(in.Placement.Kind), in.Placement.Host, in.TIdle.Milliseconds(), in.CreatedAt); err != nil {
-		return storespec.ActorControlRow{}, err
-	}
-	row, err := scanDeclaredControl(tx.QueryRowContext(ctx, `SELECT r.actor_id,r.actor_kind,r.principal,r.role,COALESCE(r.actor_binding,''),r.created_at,d.version,d.class,d.config_json,d.t_idle_ms,d.placement,d.desired_host,r.source_decl_id FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id WHERE r.actor_id=? AND d.version=?`, string(in.ActorID), version))
-	if err != nil {
-		return storespec.ActorControlRow{}, err
-	}
-	if err := tx.Commit(); err != nil {
-		return storespec.ActorControlRow{}, err
-	}
-	return row, nil
-}
-
-func (r *actorRegistry) ApplyDeclaredVersion(ctx context.Context, id actor.ActorID, version int64) (storespec.ActorControlRow, bool, error) {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return storespec.ActorControlRow{}, false, err
-	}
-	defer tx.Rollback()
-	res, err := tx.ExecContext(ctx, `UPDATE actor_registry SET current_decl_version=? WHERE actor_id=? AND deregistered_at IS NULL AND EXISTS (SELECT 1 FROM actor_decl_versions WHERE actor_id=? AND version=?)`, version, string(id), string(id), version)
-	if err != nil {
-		return storespec.ActorControlRow{}, false, err
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return storespec.ActorControlRow{}, false, err
-	}
-	if n == 0 {
-		return storespec.ActorControlRow{}, false, nil
-	}
-	row, err := scanDeclaredControl(tx.QueryRowContext(ctx, `SELECT `+declaredControlColumns+` FROM actor_registry r JOIN actor_decl_versions d ON d.actor_id=r.actor_id AND d.version=r.current_decl_version WHERE r.actor_id=?`, string(id)))
-	if err != nil {
-		return storespec.ActorControlRow{}, false, err
-	}
-	if err := tx.Commit(); err != nil {
-		return storespec.ActorControlRow{}, false, err
-	}
-	return row, true, nil
-}
-
 var (
 	_ storespec.DeclAdmissionStore    = (*actorRegistry)(nil)
 	_ storespec.DeclaredControlReader = (*actorRegistry)(nil)
 	_ storespec.DurableHistory        = (*actorRegistry)(nil)
-	_ storespec.DeclVersionStore      = (*actorRegistry)(nil)
 )

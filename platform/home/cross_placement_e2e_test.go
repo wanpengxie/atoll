@@ -21,8 +21,9 @@ func TestCrossPlacementForkBothDirectionsWithRealLifecycleArms(t *testing.T) {
 	resolver := &acceptanceResolver{}
 	h, err := Open(Config{
 		ChannelID: "cross-placement", DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver: resolver,
-		ReconcileInterval:   5 * time.Millisecond, Bootstrap: true,
+		CompositionResolver:  resolver,
+		IntroductionResolver: inertIntroductionResolver{},
+		ReconcileInterval:    5 * time.Millisecond, Bootstrap: true,
 	})
 	if err != nil {
 		t.Fatal(err)

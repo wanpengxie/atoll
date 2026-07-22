@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/platform/internal/link"
-	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
@@ -204,23 +203,6 @@ func TestHomeStorageHostControl_ReconcilePull_SweepsExpiredReservationsFirst(t *
 	wantCutoff := fixedNow().Add(-30 * time.Second).UnixMilli()
 	if call.cutoffMs != wantCutoff {
 		t.Fatalf("sweep cutoffMs = %d, want %d", call.cutoffMs, wantCutoff)
-	}
-}
-
-func TestDaemonObligationCounts(t *testing.T) {
-	outbox := &fakeOutbox{
-		byPlacementRows: []resourcespec.ResourceRow{{ID: "landed"}},
-		reservationRows: []resourcespec.ReservationRow{{ReservationID: "pending"}},
-		tombstoneRows:   []resourcespec.TombstoneRow{{TombstoneID: "dead"}},
-	}
-	h := &Home{cs: &runtime.ChannelStores{Outbox: outbox}}
-	resources, reservations, tombstones, err := h.daemonObligationCounts(context.Background(), "daemon-a")
-	if err != nil || resources != 1 || reservations != 1 || tombstones != 1 {
-		t.Fatalf("counts = (%d,%d,%d,%v)", resources, reservations, tombstones, err)
-	}
-	outbox.reservationsErr = errors.New("count failed")
-	if _, _, _, err := h.daemonObligationCounts(context.Background(), "daemon-a"); err == nil {
-		t.Fatal("count error was swallowed")
 	}
 }
 

@@ -52,7 +52,7 @@ const testChannelID = channel.ID("test-home")
 func openTestHome(t *testing.T) *home.Home {
 	t.Helper()
 	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
-	h, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true})
+	h, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: emptyIntroductionResolver{}, ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true})
 	if err != nil {
 		t.Fatalf("Open: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestAdmit_CellLessMember(t *testing.T) {
 // at bootstrap, taking down the whole restart-recovery path.
 func TestOpen_RestartOverPersistentDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
-	h1, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true})
+	h1, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: emptyIntroductionResolver{}, ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true})
 	if err != nil {
 		t.Fatalf("first Open: %v", err)
 	}
@@ -138,7 +138,7 @@ func TestOpen_RestartOverPersistentDB(t *testing.T) {
 	// A normal reopen is legal only after bootstrap has published its owner.
 	// Restart: re-open the same persistent channel DB — the system actor row
 	// already exists, so the seed must no-op instead of failing.
-	h2, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, ChannelID: testChannelID, DBPath: dbPath, MustExistDB: true})
+	h2, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: emptyIntroductionResolver{}, ChannelID: testChannelID, DBPath: dbPath, MustExistDB: true})
 	if err != nil {
 		t.Fatalf("restart Open over existing DB: %v", err)
 	}

@@ -41,7 +41,3 @@ func LinkServe(h *Home, w http.ResponseWriter, r *http.Request, daemonID string)
 func LinkPlan(h *Home, ctx context.Context, daemonID string) ([]platform.PlanActor, error) {
 	return h.planForDaemon(ctx, daemonID)
 }
-
-func ObligationCounts(h *Home, ctx context.Context, daemonID string) (int, int, int, error) {
-	return h.daemonObligationCounts(ctx, daemonID)
-}

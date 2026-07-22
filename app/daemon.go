@@ -284,40 +284,6 @@ func (a *App) handleDetachDaemon(c *gin.Context) {
 	respondAdmissionRecord(c, record, err, http.StatusOK)
 }
 
-// logDaemonObligations observes each affected channel only after the revocation
-// transaction commits. Unknown counts are operationally visible but never flow
-// back into the already-decided HTTP result.
-func (a *App) logDaemonObligations(ctx context.Context, daemonID string, channelIDs []string) {
-	for _, chID := range channelIDs {
-		bundle, ok := a.host.Acquire(channel.ID(chID))
-		if !ok {
-			a.logger.Warn("app.daemon.retired.counts_unknown",
-				"daemon", daemonID, "channel", chID, "reason", "channel_not_open")
-			continue
-		}
-		a.logOneDaemonObligation(ctx, daemonID, chID, bundle.View())
-	}
-}
-
-type daemonObligationCounter interface {
-	DaemonObligationCounts(context.Context, string) (resources, reservations, tombstones int, err error)
-}
-
-func (a *App) logOneDaemonObligation(ctx context.Context, daemonID, chID string, counter daemonObligationCounter) {
-	resources, reservations, tombstones, err := counter.DaemonObligationCounts(ctx, daemonID)
-	if err != nil {
-		a.logger.Warn("app.daemon.retired.counts_unknown",
-			"daemon", daemonID, "channel", chID, "err", err)
-		return
-	}
-	if resources+reservations+tombstones == 0 {
-		return
-	}
-	a.logger.Warn("app.daemon.retired.counts",
-		"daemon", daemonID, "channel", chID,
-		"resources", resources, "reservations", reservations, "tombstones", tombstones)
-}
-
 // ---------------------------------------------------------------------------
 // Auth helper: single path for compute connections
 // ---------------------------------------------------------------------------
