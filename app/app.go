@@ -263,6 +263,16 @@ var (
 	errChannelUnavailable = errors.New("app: channel unavailable")
 )
 
+// acquireBundle resolves the open Bundle for chID with the honest two-state
+// failure split (A-P8):
+//   - the directory (channels table) has NO such channel → errChannelNotFound
+//     (HTTP 404, permanent).
+//   - the directory HAS it but ChannelHost cannot acquire a serving Bundle →
+//     errChannelUnavailable (HTTP 503, retryable) — never the misleading 404
+//     that conflated "gone" with "not up yet".
+//
+// The two states must not collapse: a caller retrying a 503 is right to; a
+// caller retrying a 404 is not. Every HTTP path maps exactly these two errors.
 func (a *App) acquireBundle(ctx context.Context, chID channel.ID) (channelhost.Bundle, error) {
 	if !a.channelExists(ctx, string(chID)) {
 		return nil, errChannelNotFound
@@ -287,30 +297,6 @@ func (a *App) snapshotBundles(ctx context.Context) (map[channel.ID]channelhost.B
 		}
 	}
 	return out, nil
-}
-
-// bundleOrError resolves the open Bundle for chID, or writes the honest two-state
-// error to c and returns nil (A-P8):
-//   - the directory (channels table) has NO such channel → 404 (permanent).
-//   - the directory HAS it but ChannelHost cannot acquire a serving Bundle → 503
-//     "channel unavailable" (retryable, logged) — never the misleading 404 that
-//     conflated "gone" with "not up yet".
-//
-// The two states must not collapse: a caller retrying a 503 is right to; a caller
-// retrying a 404 is not. Every handler that uses this HTTP helper gets the same split.
-func (a *App) bundleOrError(c *gin.Context, chID channel.ID) channelhost.Bundle {
-	bundle, err := a.acquireBundle(c.Request.Context(), chID)
-	if err == nil {
-		return bundle
-	}
-	if errors.Is(err, errChannelNotFound) {
-		c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
-		return nil
-	}
-	a.logger.Warn("channel unavailable: directory has channel but its home is not open",
-		"channel", string(chID))
-	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
-	return nil
 }
 
 const (

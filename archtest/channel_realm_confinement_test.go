@@ -594,7 +594,7 @@ func TestChannelRealmW12HardAcquireBaseIsSingular(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(ws), "a.bundleOrError(") {
-		t.Fatal("compute websocket does not layer HTTP mapping over acquireBundle")
+	if !strings.Contains(string(ws), "a.acquireBundle(") || strings.Contains(string(ws), "a.host.Acquire(") {
+		t.Fatal("compute websocket must resolve its bundle through the singular acquireBundle base")
 	}
 }

@@ -85,8 +85,8 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 	}
 	if !authed {
 		s.logger.Info("sysactor.operate.refused", "type", msg.Type,
-			"sender", string(msg.Sender.ID), "code", "unauthorized_sender")
-		_, _ = sys.Fail(msg, "unauthorized_sender", "sender is not an active channel member")
+			"sender", string(msg.Sender.ID), "code", string(channel.ErrCodeUnauthorizedSender))
+		_, _ = sys.Fail(msg, string(channel.ErrCodeUnauthorizedSender), "sender is not an active channel member")
 		return
 	}
 	req := OperateRequest{ChannelID: msg.ChannelID, Sender: msg.Sender.ID, Anchor: string(msg.ID), Payload: msg.Payload}

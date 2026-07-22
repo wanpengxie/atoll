@@ -85,6 +85,7 @@ func TestOperationErrorClosedSet(t *testing.T) {
 		ErrCodeUnknownClass: true, ErrCodeProtectedActor: true, ErrCodeNotInComposition: true,
 		ErrCodeInternal:          true,
 		ErrCodeNotAcceptedSource: true, ErrCodeMemberInactive: true, ErrCodeAuthorityUnavailable: true,
+		ErrCodeUnauthorizedSender: true,
 	}
 	if len(operationErrorCodes) != len(want) {
 		t.Fatalf("operate error closed set has %d entries, want %d", len(operationErrorCodes), len(want))

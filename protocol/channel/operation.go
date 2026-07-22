@@ -296,6 +296,11 @@ const (
 	ErrCodeNotAcceptedSource    OperationErrorCode = "not_accepted_source"
 	ErrCodeMemberInactive       OperationErrorCode = "member_inactive"
 	ErrCodeAuthorityUnavailable OperationErrorCode = "authority_unavailable"
+	// ErrCodeUnauthorizedSender is the operate-word refusal for a frame whose
+	// sender is not an active channel member. Same wire string as the
+	// subjectgate cancel-guard code, but the two families keep their own
+	// constants (帧码分族两本): this one lives in the operate closed set.
+	ErrCodeUnauthorizedSender OperationErrorCode = "unauthorized_sender"
 	ErrCodeRefConflict          OperationErrorCode = "ref_conflict"
 )
 
@@ -305,6 +310,7 @@ var operationErrorCodes = [...]OperationErrorCode{
 	ErrCodeUnknownClass, ErrCodeProtectedActor, ErrCodeNotInComposition,
 	ErrCodeInternal,
 	ErrCodeNotAcceptedSource, ErrCodeMemberInactive, ErrCodeAuthorityUnavailable,
+	ErrCodeUnauthorizedSender,
 }
 
 type OperationError struct {

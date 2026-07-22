@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"net/http"
 
 	"github.com/gin-gonic/gin"
@@ -74,8 +75,15 @@ func (a *App) handleCompute(c *gin.Context) {
 		return
 	}
 
-	bundle := a.bundleOrError(c, chID)
-	if bundle == nil {
+	bundle, err := a.acquireBundle(c.Request.Context(), chID)
+	if err != nil {
+		if errors.Is(err, errChannelNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "channel not found"})
+			return
+		}
+		a.logger.Warn("channel unavailable: directory has channel but its home is not open",
+			"channel", string(chID))
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "channel unavailable"})
 		return
 	}
 
