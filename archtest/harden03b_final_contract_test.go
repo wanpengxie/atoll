@@ -453,6 +453,43 @@ func TestHarden03BNoExportedLifecycleBinder(t *testing.T) {
 	}
 }
 
+// TestHarden03BServerManagedCapsGateOwnedByActorctl pins the value-ledger gate
+// collection: the Server managed Caps (and its physical-current membrane) are
+// constructed ONLY inside runtime/actorctl, so platform/home holds no
+// ActualCurrent reference and no managed-current facade of its own.
+func TestHarden03BServerManagedCapsGateOwnedByActorctl(t *testing.T) {
+	homeFiles, err := productionFiles("../platform/home")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range homeFiles {
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(string(body), "ActualCurrent") {
+			t.Errorf("%s references actorhost.ActualCurrent — the physical-current fence lives only in runtime/actorctl now", filepath.ToSlash(path))
+		}
+		if strings.Contains(string(body), "buildManagedCaps") {
+			t.Errorf("%s still constructs managed Caps — actorctl is the sole Server managed Caps constructor", filepath.ToSlash(path))
+		}
+	}
+
+	caps, err := os.ReadFile("../runtime/actorctl/caps.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{
+		"type managedInvocation struct {",
+		"func (g *managedInvocation) admit() error",
+		"func (a *ChannelActors) buildManagedCaps(",
+	} {
+		if !strings.Contains(string(caps), required) {
+			t.Errorf("runtime/actorctl/caps.go missing value-ledger gate anchor %q", required)
+		}
+	}
+}
+
 func TestHarden03BSubjectSlotDeleteOwnerIsLevelReconcile(t *testing.T) {
 	body, err := os.ReadFile("../platform/home/reconcile.go")
 	if err != nil {

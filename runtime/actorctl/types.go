@@ -316,19 +316,42 @@ func (nopEffects) RunActorBorn(actor.ActorID) error { return nil }
 func (nopEffects) RunActorsEnded([]actor.ActorID)   {}
 func (nopEffects) Fatal(error)                      {}
 
+// ManagedBodyInput is the narrow, execution-identity-free view of one managed
+// body the Platform business builder is allowed to see. It deliberately omits
+// Self (Incarnation), AttemptKey and ActualCurrent: those are runtime execution
+// coordinates: leaving any of them in the business face is the seed of the next
+// bypass. The business builder finds its factory by ActorID/ExecutionSpec and
+// constructs the actor with the already-gated Caps — it never sees, and cannot
+// reconstruct, the physical current fence.
+type ManagedBodyInput struct {
+	ActorID       actor.ActorID
+	ExecutionSpec actorhost.ExecutionSpec
+}
+
 // ManagedBodyBuilder is the composition callback for a Server-hosted managed
-// body. ChannelActors mints the welded lifecycle capability before invoking
-// it; callers can assemble business caps but cannot mint another handle.
+// body. ChannelActors is the sole final constructor of the managed Caps — it
+// welds the value-ledger gate onto all five arms and hands the finished bundle
+// here. The business builder assembles the actor implementation; it cannot mint
+// a capability or a second gate.
 type ManagedBodyBuilder func(
-	actorhost.BodyBuildInput,
-	actorcaps.LifecycleHandle,
+	ManagedBodyInput,
+	actorcaps.Caps,
 ) actorrt.Actor
 
 type Config struct {
-	Store            Store
-	Effects          Effects
-	ServerDomain     actorhost.ExecutionDomain
-	ServerHost       actorhost.Config
+	Store        Store
+	Effects      Effects
+	ServerDomain actorhost.ExecutionDomain
+	ServerHost   actorhost.Config
+	// ChannelID and the four runtime minters/resolver are the runtime-owned
+	// atomic dependencies actorctl draws each managed body's raw arms from. The
+	// Platform assembly root injects its welded minters here; actorctl performs
+	// the final gated Caps construction (buildManagedCaps).
+	ChannelID        channel.ID
+	PenMinter        PenMinter
+	AccessMinter     AccessMinter
+	StateResolver    StateResolver
+	ScheduleMinter   ScheduleMinter
 	BuildManagedBody ManagedBodyBuilder
 	Now              func() time.Time
 }

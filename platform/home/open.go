@@ -157,15 +157,19 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		ServerHost: actorhost.Config{
 			Logger: logger, Events: homeHostEvents{home: h},
 		},
+		// The runtime owns the final managed Caps construction: the platform
+		// injects its welded minters/resolver, actorctl welds the value-ledger
+		// gate onto all five arms, and this builder only maps the safe input to
+		// a business factory and constructs the actor with the finished Caps.
+		ChannelID:      cfg.ChannelID,
+		PenMinter:      h.minter,
+		AccessMinter:   cs.Access,
+		StateResolver:  h.stateHandles,
+		ScheduleMinter: h.schedMinter,
 		BuildManagedBody: func(
-			input actorhost.BodyBuildInput,
-			lifecycle actorcaps.LifecycleHandle,
+			input actorctl.ManagedBodyInput,
+			caps actorcaps.Caps,
 		) actorrt.Actor {
-			caps, capErr := h.buildManagedCaps(input, lifecycle)
-			if capErr != nil {
-				logger.Warn("platform.actor_caps_failed", "actor", input.ActorID, "err", capErr)
-				return nil
-			}
 			def, ok := h.factories.Lookup(input.ActorID)
 			if input.ExecutionSpec.Kind == actor.KindHuman {
 				// Controller publication is already authoritative at this

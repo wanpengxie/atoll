@@ -10,19 +10,21 @@ import (
 )
 
 // managedLifecycle is minted only by the ChannelActors-owned Host builder. It
-// welds logical and physical current checks to the actor-facing capability.
+// shares the one value-ledger gate welded to the other four managed arms, so a
+// lifecycle call clears the exact same logical-then-physical admission as a Pen
+// / Access / State / Schedule call.
 type managedLifecycle struct {
-	actors  *ChannelActors
-	id      actor.ActorID
-	key     actorhost.AttemptKey
-	current actorhost.ActualCurrent
+	actors *ChannelActors
+	id     actor.ActorID
+	key    actorhost.AttemptKey
+	gate   *managedInvocation
 }
 
 func (h managedLifecycle) admitInvocation() error {
-	if h.actors == nil || !h.current.IsCurrent() {
+	if h.actors == nil || h.gate == nil {
 		return ErrStaleAttempt
 	}
-	return h.actors.controller.isCurrent(h.id, h.key)
+	return h.gate.admit()
 }
 
 func (h managedLifecycle) Fork(

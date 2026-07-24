@@ -250,8 +250,8 @@ func prepareSystemWithActor(t *testing.T, impl actorrt.Actor) *actorrt.Unit {
 func newActors(t *testing.T, store *fakeStore, effects Effects) *ChannelActors {
 	t.Helper()
 	return newActorsWithBuilder(t, store, effects, func(
-		actorhost.BodyBuildInput,
-		actorcaps.LifecycleHandle,
+		ManagedBodyInput,
+		actorcaps.Caps,
 	) actorrt.Actor {
 		return inertActor{}
 	})
@@ -336,8 +336,8 @@ func TestServerDesiredTickerFreshReadsControllerAndHealsStaleLKG(t *testing.T) {
 			PollInterval: 50 * time.Millisecond,
 		},
 		BuildManagedBody: func(
-			actorhost.BodyBuildInput,
-			actorcaps.LifecycleHandle,
+			ManagedBodyInput,
+			actorcaps.Caps,
 		) actorrt.Actor {
 			return inertActor{}
 		},
@@ -774,8 +774,8 @@ func TestReplacementDoesNotReplayCollaborationMessage(t *testing.T) {
 	var builtMu sync.Mutex
 	var built []*countingActor
 	actors := newActorsWithBuilder(t, store, nil, func(
-		actorhost.BodyBuildInput,
-		actorcaps.LifecycleHandle,
+		ManagedBodyInput,
+		actorcaps.Caps,
 	) actorrt.Actor {
 		body := &countingActor{}
 		builtMu.Lock()
@@ -841,8 +841,8 @@ func TestSystemKernelValidationDoubleStartAndCloseLast(t *testing.T) {
 		ServerDomain: "server",
 		ServerHost:   actorhost.Config{PollInterval: time.Millisecond},
 		BuildManagedBody: func(
-			actorhost.BodyBuildInput,
-			actorcaps.LifecycleHandle,
+			ManagedBodyInput,
+			actorcaps.Caps,
 		) actorrt.Actor {
 			return &stopOrderActor{label: "managed", mu: &orderMu, order: &order}
 		},

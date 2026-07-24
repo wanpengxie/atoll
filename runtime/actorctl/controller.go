@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
@@ -257,6 +258,12 @@ type ChannelActors struct {
 	now          func() time.Time
 	logger       *slog.Logger
 
+	channelID      channel.ID
+	penMinter      PenMinter
+	accessMinter   AccessMinter
+	stateResolver  StateResolver
+	scheduleMinter ScheduleMinter
+
 	serverDesiredCtx    context.Context
 	serverDesiredCancel context.CancelFunc
 	serverDesiredWake   chan struct{}
@@ -288,18 +295,21 @@ func NewChannelActors(cfg Config) (*ChannelActors, error) {
 	}
 	var actorsFromBuilder atomic.Pointer[ChannelActors]
 	hostCfg.BodyBuilder = func(input actorhost.BodyBuildInput) actorrt.Actor {
-		handle := managedLifecycle{
-			id:      input.ActorID,
-			key:     input.AttemptKey,
-			current: input.Current,
-		}
 		// The owner is filled after Host construction and before any desired
 		// snapshot can schedule this builder.
-		handle.actors = actorsFromBuilder.Load()
-		if handle.actors == nil {
+		self := actorsFromBuilder.Load()
+		if self == nil {
 			return nil
 		}
-		return cfg.BuildManagedBody(input, handle)
+		caps, err := self.buildManagedCaps(input)
+		if err != nil {
+			logger.Warn("actorctl.managed_caps_failed", "actor", input.ActorID, "err", err)
+			return nil
+		}
+		return cfg.BuildManagedBody(ManagedBodyInput{
+			ActorID:       input.ActorID,
+			ExecutionSpec: input.ExecutionSpec,
+		}, caps)
 	}
 	host, err := actorhost.New(hostCfg)
 	if err != nil {
@@ -322,6 +332,11 @@ func NewChannelActors(cfg Config) (*ChannelActors, error) {
 		controller:          newController(),
 		now:                 now,
 		logger:              logger,
+		channelID:           cfg.ChannelID,
+		penMinter:           cfg.PenMinter,
+		accessMinter:        cfg.AccessMinter,
+		stateResolver:       cfg.StateResolver,
+		scheduleMinter:      cfg.ScheduleMinter,
 		serverDesiredCtx:    serverDesiredCtx,
 		serverDesiredCancel: serverDesiredCancel,
 		serverDesiredWake:   make(chan struct{}, 1),

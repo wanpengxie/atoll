@@ -26,11 +26,18 @@ const actorcapsPkg = platformModulePrefix + "lib/actorcaps"
 // actorcapsAllowedPrefix is the repo-wide allowlist for naming the whole Caps
 // bundle. Importing actorcaps vocabulary such as ForkSpec or LifecycleHandle
 // is intentionally broader; only Caps itself is the private assembly seam.
-var actorcapsAllowedPrefix = []string{"../platform/", "../lib/actorbase/", "../lib/actorcaps/", "../archtest/"}
+//
+// runtime/actorctl joined the allowlist when the Server managed Caps final
+// construction moved into it (harden03B value-ledger gate收口): actorctl is now
+// the SOLE constructor of the Server managed body's five-arm Caps — it welds the
+// value-ledger gate onto each arm and hands the finished bundle to a narrow
+// business builder. Naming actorcaps.Caps there is that construction locus, not
+// a downstream leak; the platform assembly root now only injects minters.
+var actorcapsAllowedPrefix = []string{"../platform/", "../lib/actorbase/", "../lib/actorcaps/", "../archtest/", "../runtime/actorctl/"}
 
 // TestActorcapsConfinedToPlatformAndActorbase checks the actual Caps selector,
-// not the package import. actorctl legitimately owns lifecycle vocabulary and
-// must be allowed to import actorcaps without gaining the whole bundle.
+// not the package import. Only the platform assembly root, lib/actorbase, and
+// the runtime/actorctl managed-Caps constructor may name the whole Caps bundle.
 func TestActorcapsConfinedToPlatformAndActorbase(t *testing.T) {
 	var v []string
 	for _, root := range []string{"../app", "../cmd", "../drivers", "../lib", "../platform", "../registry", "../runtime"} {
