@@ -28,13 +28,17 @@ func TestHomeCloseConcurrentCompletionAndUnpublish(t *testing.T) {
 			t.Fatalf("concurrent Close: %v", err)
 		}
 	}
-	if _, err := home.AdmitForTest(h, "late", actor.KindHuman); !isUnavailable(err) {
+	if _, err := home.SystemOps(h).Admit(context.Background(), channel.AdmitRequest{
+		Ref: "late-admit", Principal: "late",
+	}); !isUnavailable(err) {
 		t.Fatalf("Admit after Close = %v", err)
 	}
-	if err := home.RemoveForTest(h, "late"); !isUnavailable(err) {
+	if _, err := home.SystemOps(h).Remove(context.Background(), channel.RemoveRequest{
+		Ref: "late-remove", Target: "late", InitiatorActorID: "late",
+	}); !isUnavailable(err) {
 		t.Fatalf("Remove after Close = %v", err)
 	}
-	wake, unsubscribe := home.SubscribeForTest(h)
+	wake, unsubscribe := home.GatewaySubscribe(h)
 	unsubscribe()
 	select {
 	case _, ok := <-wake:
@@ -65,25 +69,13 @@ func openTestHome(t *testing.T) *home.Home {
 	return h
 }
 
-// TestView_MaxSeq_EmptyChannel verifies MaxSeq on a fresh channel is non-negative.
-func TestView_MaxSeq_EmptyChannel(t *testing.T) {
-	h := openTestHome(t)
-	seq, err := h.View().MaxSeq(context.Background())
-	if err != nil {
-		t.Fatalf("MaxSeq: %v", err)
-	}
-	if seq < 0 {
-		t.Errorf("MaxSeq = %d, want >= 0", seq)
-	}
-}
-
-// TestView_ListActors_IncludesSystem verifies the intrinsic system actor is
+// TestView_ActiveActors_IncludesSystem verifies the intrinsic system actor is
 // registered by Open (genesis).
-func TestView_ListActors_IncludesSystem(t *testing.T) {
+func TestView_ActiveActors_IncludesSystem(t *testing.T) {
 	h := openTestHome(t)
-	actors, err := h.View().ListActors(context.Background())
+	actors, err := h.View().ActiveActors(context.Background())
 	if err != nil {
-		t.Fatalf("ListActors: %v", err)
+		t.Fatalf("ActiveActors: %v", err)
 	}
 	found := false
 	for _, a := range actors {
@@ -101,11 +93,14 @@ func TestView_ListActors_IncludesSystem(t *testing.T) {
 func TestAdmit_CellLessMember(t *testing.T) {
 	h := openTestHome(t)
 	ctx := context.Background()
-	id, err := home.AdmitForTest(h, "alice", actor.KindHuman)
+	result, err := home.SystemOps(h).Admit(ctx, channel.AdmitRequest{
+		Ref: "admit-alice", Principal: "alice",
+	})
 	if err != nil {
 		t.Fatalf("Admit: %v", err)
 	}
-	actors, err := h.View().ListActors(ctx)
+	id := result.ActorID
+	actors, err := h.View().ActiveActors(ctx)
 	if err != nil {
 		t.Fatalf("ListActors: %v", err)
 	}
@@ -148,7 +143,7 @@ func TestOpen_RestartOverPersistentDB(t *testing.T) {
 		t.Fatalf("restart Open over existing DB: %v", err)
 	}
 	t.Cleanup(func() { _ = home.Shutdown(h2) })
-	actors, err := h2.View().ListActors(context.Background())
+	actors, err := h2.View().ActiveActors(context.Background())
 	if err != nil {
 		t.Fatalf("ListActors after restart: %v", err)
 	}

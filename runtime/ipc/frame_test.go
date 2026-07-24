@@ -17,7 +17,7 @@ import (
 
 // --- closed Kind set ------------------------------------------------------
 
-// The port-wire Kind set is closed at exactly 22 members with fixed wire
+// The actor-wire Kind set is closed at exactly 19 members with fixed wire
 // spellings. Every kind has a real producer + state transition; the dead
 // frames (fence / shutdown / heartbeat / control) are gone. KindCancel is the
 // request-scope of cancel(scope) crossing the wire (host→remote); KindCancelRequest
@@ -25,15 +25,13 @@ import (
 // own outbound requests); KindAccess/
 // KindSchedule + their acks are the plane-2 and time-axis capability arms (an
 // out-of-process actor's incarnation carries every plane a local cell's Caps do);
-// KindDetach/KindDespawn are the two lifecycle-termination arms (remote→host
-// graceful detach vs host→remote by-name despawn) and KindDeliverResult is the
+// KindDetach is the optional exact-route close and KindDeliverResult is the
 // remote host's delivery observation relayed home. If a wire spelling drifts or a
 // kind is added/removed, this trips — the two endpoints must agree on the exact
 // bytes.
 func TestKindClosedSet(t *testing.T) {
 	want := map[Kind]string{
 		KindHandshake:     "handshake",
-		KindHandshakeAck:  "handshake_ack",
 		KindDeliver:       "deliver",
 		KindEmit:          "emit",
 		KindEmitAck:       "emit_ack",
@@ -45,7 +43,6 @@ func TestKindClosedSet(t *testing.T) {
 		KindSchedule:      "schedule",
 		KindScheduleAck:   "schedule_ack",
 		KindDetach:        "detach",
-		KindDespawn:       "despawn",
 		KindDeliverResult: "deliver_result",
 		KindCancelRequest: "cancel_request",
 		KindSpawn:         "spawn",
@@ -53,23 +50,20 @@ func TestKindClosedSet(t *testing.T) {
 		KindEnd:           "end",
 		KindEndAck:        "end_ack",
 		KindIdle:          "idle",
-		KindIdleAck:       "idle_ack",
 	}
 	for k, wire := range want {
 		if string(k) != wire {
 			t.Errorf("Kind %q wire form = %q, want %q", k, string(k), wire)
 		}
 	}
-	if len(want) != 22 {
-		t.Fatalf("expected exactly 22 kinds, guard lists %d", len(want))
+	if len(want) != 19 {
+		t.Fatalf("expected exactly 19 kinds, guard lists %d", len(want))
 	}
 }
 
-// The three lifecycle frames (detach / despawn / deliver_result) survive
+// The route-close and delivery-observation frames survive
 // Write→Read across a real net.Pipe (two independent endpoints, not one buffer):
-// what one end writes, the peer reads identically. detach/despawn reuse
-// DownPayload{Reason}; deliver_result carries its own DeliverResultPayload. This
-// pins the on-wire contract for the frames S1 added.
+// what one end writes, the peer reads identically.
 func TestNewLifecycleFramesRoundTripOverPipe(t *testing.T) {
 	server, client := net.Pipe()
 	defer server.Close()
@@ -77,7 +71,6 @@ func TestNewLifecycleFramesRoundTripOverPipe(t *testing.T) {
 
 	frames := []Frame{
 		{Kind: KindDetach, Payload: mustMarshal(t, DownPayload{Reason: "ctx cancelled"})},
-		{Kind: KindDespawn, Payload: mustMarshal(t, DownPayload{Reason: "despawn"})},
 		{Kind: KindDeliverResult, Payload: mustMarshal(t, DeliverResultPayload{
 			EnvelopeID: message.ID("m-9"), Outcome: "not_hosted", Detail: "no cell",
 		})},
@@ -109,26 +102,13 @@ func TestNewLifecycleFramesRoundTripOverPipe(t *testing.T) {
 
 	d1, err := rc.Read()
 	if err != nil {
-		t.Fatalf("read despawn: %v", err)
-	}
-	if d1.Kind != KindDespawn {
-		t.Fatalf("frame 1 kind = %q, want despawn", d1.Kind)
-	}
-	var dp1 DownPayload
-	mustUnmarshal(t, d1.Payload, &dp1)
-	if dp1.Reason != "despawn" {
-		t.Fatalf("despawn reason = %q, want despawn", dp1.Reason)
-	}
-
-	d2, err := rc.Read()
-	if err != nil {
 		t.Fatalf("read deliver_result: %v", err)
 	}
-	if d2.Kind != KindDeliverResult {
-		t.Fatalf("frame 2 kind = %q, want deliver_result", d2.Kind)
+	if d1.Kind != KindDeliverResult {
+		t.Fatalf("frame 1 kind = %q, want deliver_result", d1.Kind)
 	}
 	var drp DeliverResultPayload
-	mustUnmarshal(t, d2.Payload, &drp)
+	mustUnmarshal(t, d1.Payload, &drp)
 	if drp.EnvelopeID != message.ID("m-9") || drp.Outcome != "not_hosted" || drp.Detail != "no cell" {
 		t.Fatalf("deliver_result payload = %+v, want {m-9, not_hosted, no cell}", drp)
 	}
@@ -186,13 +166,13 @@ func TestWriteOmitsEmptyPayload(t *testing.T) {
 
 func TestSpawnPayloadPreservesTaggedPlacementHost(t *testing.T) {
 	want := SpawnPayload{
-		Nonce: "nonce-1", Kind: actor.KindAgent, Class: "worker", NameHint: "child",
+		RequestID: message.ID("fork-1"), Kind: actor.KindAgent, Class: "worker", NameHint: "child",
 		Config: json.RawMessage(`{"x":1}`), PlacementKind: "daemon", PlacementHost: "daemon-target",
 	}
 	raw := mustMarshal(t, want)
 	var got SpawnPayload
 	mustUnmarshal(t, raw, &got)
-	if got.Nonce != want.Nonce || got.Kind != want.Kind || got.Class != want.Class ||
+	if got.RequestID != want.RequestID || got.Kind != want.Kind || got.Class != want.Class ||
 		got.NameHint != want.NameHint || string(got.Config) != string(want.Config) ||
 		got.PlacementKind != want.PlacementKind || got.PlacementHost != want.PlacementHost {
 		t.Fatalf("spawn payload=%+v want=%+v", got, want)
@@ -238,17 +218,6 @@ func TestRoundTripPerKind(t *testing.T) {
 				mustUnmarshal(t, got.Payload, &p)
 				if p.LeaseID != "lease-42" {
 					t.Errorf("lease_id = %q, want lease-42", p.LeaseID)
-				}
-			},
-		},
-		{
-			name:  "handshake_ack",
-			frame: Frame{Kind: KindHandshakeAck, Payload: mustMarshal(t, HandshakeAckPayload{Actor: actor.ActorID("agent:writer")})},
-			check: func(t *testing.T, got Frame) {
-				var p HandshakeAckPayload
-				mustUnmarshal(t, got.Payload, &p)
-				if p.Actor != actor.ActorID("agent:writer") {
-					t.Errorf("actor = %q, want agent:writer", p.Actor)
 				}
 			},
 		},

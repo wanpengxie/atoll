@@ -8,7 +8,7 @@
 //
 //   - Caps is pure composition over runtime capability VOCABULARY
 //     (harness.Pen / accessdoor.AccessHandle / schedule.ScheduleHandle /
-//     actorrt.LifecycleHandle). It carries no platform-assembly machinery (no link,
+//     actorcaps.LifecycleHandle). It carries no platform-assembly machinery (no link,
 //     no tap, no WS transport, no sysactor). An actor implementation must be
 //     able to NAME its birth capabilities without importing the heavy platform
 //     assembly root — so this type does not live in package platform.
@@ -17,8 +17,6 @@
 //     those may reach across to the others). Caps sits ABOVE all four, which is
 //     a downstream (lib) concern, not a runtime one — placed here rather than
 //     inventing a new runtime package.
-//   - As a lib leaf it is importable by BOTH the platform assembly root and by
-//     channelkit (which cannot import platform — platform imports channelkit,
-//     so a Caps in platform root would be a cycle the moment channelkit needs
-//     to name a participant factory).
+//   - As a lib leaf it is importable by both the platform assembly root and actor
+//     implementations without either side importing the other's assembly code.
 package actorcaps

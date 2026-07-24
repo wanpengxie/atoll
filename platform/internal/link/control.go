@@ -3,38 +3,24 @@ package link
 import (
 	"encoding/json"
 	"fmt"
+	"sync"
+	"time"
 
 	"github.com/wanpengxie/atoll/platform"
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
-// Declaration is the actor identity a daemon ships on attach so the home can
-// register it into membership (the daemon holds NO truth — registration is
-// home-side). Type/catalog is domain, not link wire (type non-first-class):
-// link carries only the structural triple the registry needs.
-type Declaration struct {
-	ActorID      actor.ActorID `json:"actor_id"`
-	Kind         actor.Kind    `json:"kind"`
-	Binding      actor.Binding `json:"binding"`
-	Version      int64         `json:"version"`
-	EnsureTicket string        `json:"ensure_ticket"`
-}
-
 // AttachRequest is the stream-0 control message a daemon sends to join a
-// channel home: the party identity + the actor streams it will open. The FIRST
-// send joins the link; a daemon whose desired set changes may send it again
-// (Reattach, §S-P8) — each send carries the FULL current declared set, never an
-// increment, so the home's re-diff is idempotent and self-correcting (a dropped
-// declaration simply is not in the next send). It carries NO credential —
+// channel home. Actor intent is pulled separately as one full Plan snapshot;
+// attach carries no actor declarations or incremental lifecycle state. It
+// carries NO credential —
 // authentication is an app-layer concern resolved on the WS upgrade (the URL's
 // ?key= query) before the connection ever reaches the Acceptor; the link layer
 // is auth-agnostic (it does not care who the peer is, only its ResolveFunc
 // differs). A credential field here would be a dead leak of an app concern into
 // the wire vocabulary.
 type AttachRequest struct {
-	Proto        int           `json:"proto"`
-	Declarations []Declaration `json:"declarations"`
+	Proto int `json:"proto"`
 }
 
 // AttachReply is the home's stream-0 response: the assigned channel and the
@@ -60,6 +46,7 @@ const (
 	ctrlAttachReply controlKind = "attach_reply"
 	ctrlPlanPull    controlKind = "plan_pull"
 	ctrlPlanReply   controlKind = "plan_reply"
+	ctrlPlanPoke    controlKind = "plan_poke"
 )
 
 type PlanPull struct{}
@@ -67,6 +54,22 @@ type PlanPull struct{}
 type PlanReply struct {
 	Actors []platform.PlanActor `json:"actors"`
 	Error  string               `json:"error,omitempty"`
+}
+
+// encodePlanPoke emits the deliberately empty, sole-key level-wake frame.
+func encodePlanPoke() []byte { return []byte(`{"kind":"plan_poke"}`) }
+
+func validPlanPoke(raw []byte) bool {
+	var value map[string]json.RawMessage
+	if json.Unmarshal(raw, &value) != nil || len(value) != 1 {
+		return false
+	}
+	kind, ok := value["kind"]
+	if !ok {
+		return false
+	}
+	var decoded controlKind
+	return json.Unmarshal(kind, &decoded) == nil && decoded == ctrlPlanPoke
 }
 
 // controlFrame is the stream-0 envelope: one kind, one optional payload each.
@@ -87,4 +90,26 @@ func decodeControl(b []byte) (controlFrame, error) {
 		return controlFrame{}, fmt.Errorf("link: decode control: %w", err)
 	}
 	return f, nil
+}
+
+func peekControlKind(raw []byte) controlKind {
+	var head struct {
+		Kind controlKind `json:"kind"`
+	}
+	_ = json.Unmarshal(raw, &head)
+	return head.Kind
+}
+
+func waitGroupWithin(group *sync.WaitGroup, timeout time.Duration) bool {
+	done := make(chan struct{})
+	go func() {
+		group.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true
+	case <-time.After(timeout):
+		return false
+	}
 }

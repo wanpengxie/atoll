@@ -21,10 +21,15 @@ func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 	h, err := Open(Config{
 		ChannelID:            "member-noise",
 		DBPath:               filepath.Join(t.TempDir(), "channel.sqlite"),
-		CompositionResolver:  &compositionActivationResolver{},
+		CompositionResolver:  routingResolver{},
 		IntroductionResolver: inertIntroductionResolver{},
 		ReconcileInterval:    time.Hour,
 		Bootstrap:            true,
+		BootstrapDeclarations: []DeclareRequest{{
+			SourceDeclID: "decl:probe", Class: "routing-live",
+			Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent,
+			CreatedAt: time.Now().UnixMilli(),
+		}},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -32,20 +37,20 @@ func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
 
-	declared, err := h.declare(ctx, DeclareRequest{
-		SourceDeclID: "decl:probe", Class: "probe",
-		Placement: storespec.NewServerPlacement(), Kind: actor.KindAgent, CreatedAt: time.Now().UnixMilli(),
-	})
+	declared, found, err := h.View().DeclaredBySourceOne(ctx, "decl:probe")
 	if err != nil {
 		t.Fatal(err)
 	}
-	sender := declared.Row.ID
+	if !found {
+		t.Fatal("bootstrap actor missing")
+	}
+	sender := declared.ID
 
 	// A single-transaction rollback leaves neither half of the pair; absence of
 	// the completed terminal (the replay key) proves zero ledger footprint.
 	assertNoTerminal := func(anchor, digest string) {
 		t.Helper()
-		_, found, err := h.opEntry.admission.LookupCompleted(ctx, channel.MessageCorrelation(anchor), digest)
+		_, found, err := h.cs.SysOps.LookupCompleted(ctx, channel.MessageCorrelation(anchor), digest)
 		if err != nil {
 			t.Fatal(err)
 		}

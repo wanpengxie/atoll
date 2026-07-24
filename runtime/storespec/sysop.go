@@ -158,6 +158,18 @@ type RestartTx struct {
 	Target actor.ActorID
 }
 
+// ForkTx records the durable operation anchor for a run-world child. The child
+// definition is an operation result, not a durable actor_registry row; restart
+// therefore preserves the anchor while intentionally not restoring the child.
+type ForkTx struct {
+	SysOpMeta
+	Child ActorControlRow
+}
+
+type ForkResult struct {
+	Child ActorControlRow `json:"child"`
+}
+
 type RestartResult struct {
 	Effects PostCommitEffects `json:"-"`
 }
@@ -185,6 +197,7 @@ type SysOpAdmission interface {
 	DetachDaemon(context.Context, DetachTx) (DetachResult, error)
 	RemoveActor(context.Context, RemoveTx) (RemoveResult, error)
 	RestartActor(context.Context, RestartTx) (RestartResult, error)
+	ForkActor(context.Context, ForkTx) (ForkResult, error)
 	SetDefaultAgent(context.Context, SetDefaultTx) (SetDefaultResult, error)
 }
 

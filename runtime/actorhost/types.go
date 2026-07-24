@@ -26,8 +26,7 @@ var (
 	ErrAttachRetryable   = errors.New("actorhost: attach retryable")
 	ErrStaleBinding      = errors.New("actorhost: stale binding")
 
-	// ErrNotHosted deliberately preserves the existing local endpoint verdict.
-	ErrNotHosted = actorrt.ErrNotHosted
+	ErrNotHosted = errors.New("actorhost: actor not hosted")
 )
 
 // AttemptKey identifies one process-local logical Run. It is opaque outside
@@ -337,12 +336,13 @@ const (
 
 // Snapshot is an immutable diagnostic view used by status and tests.
 type Snapshot struct {
-	Desired  DesiredProjection
-	Actual   ActualKind
-	Attempt  AttemptKey
-	Unit     *actorrt.Unit
-	Binding  Binding
-	Building bool
-	Retiring int
-	Retrying bool
+	Desired   DesiredProjection
+	Actual    ActualKind
+	Attempt   AttemptKey
+	Unit      *actorrt.Unit
+	Binding   Binding
+	StartedAt time.Time
+	Building  bool
+	Retiring  int
+	Retrying  bool
 }

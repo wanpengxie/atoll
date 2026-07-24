@@ -10,7 +10,6 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
@@ -239,51 +238,6 @@ func (f fakeDurableFire) Fire(ctx context.Context, row timerspec.TimerRow, env *
 		}
 	}
 	return f.store.FireAndMark(ctx, row.ID, env)
-}
-
-// ---------------------------------------------------------------------
-// fakeReviver: records EnsureLive calls, answers with a scriptable error.
-// ---------------------------------------------------------------------
-
-type fakeReviver struct {
-	mu    sync.Mutex
-	calls []actor.ActorID
-	err   error
-}
-
-func (r *fakeReviver) EnsureLive(ctx context.Context, id actor.ActorID) error {
-	r.mu.Lock()
-	r.calls = append(r.calls, id)
-	err := r.err
-	r.mu.Unlock()
-	return err
-}
-
-func (r *fakeReviver) callCount() int {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return len(r.calls)
-}
-
-var _ Reviver = (*fakeReviver)(nil)
-
-// stubActor is a minimal actorrt.Actor — never actually receives anything in
-// these tests (the engine never talks to the mailbox), it exists only
-// so a real *actorrt.Runtime has something live to weld an Incarnation to.
-type stubActor struct{}
-
-func (stubActor) Receive(ctx context.Context, env *message.Envelope) error { return nil }
-
-// newTestRuntime spins up a real *actorrt.Runtime as the engine's
-// LivenessProbe. actorrt.Incarnation's fields are unexported (by design —
-// pidfd-analogue, never externally constructible), so a real Runtime is the
-// only legitimate way to produce one outside actorrt itself; *actorrt.Runtime
-// already satisfies LivenessProbe (CurrentIncarnation + IsLive) directly.
-func newTestRuntime(t *testing.T) *actorrt.Runtime {
-	t.Helper()
-	rt, _ := actorrt.New(actorrt.Config{Parent: context.Background()})
-	t.Cleanup(rt.StopAll)
-	return rt
 }
 
 // ---------------------------------------------------------------------

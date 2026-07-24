@@ -39,8 +39,6 @@ func OpenScheduler(cs *ChannelStores, deps schedule.AssemblyDeps) (schedule.Mint
 		Store:       cs.timers,
 		Fire:        deps.Fire,
 		DurableFire: schedule.NewTimerFirePen(cs.timers, cs.Authority, cs.channelID),
-		Host:        deps.Host,
-		Revive:      deps.Revive,
 		Clock:       clock,
 		Authority:   cs.Authority,
 		Logger:      deps.Logger,

@@ -12,7 +12,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -25,15 +25,13 @@ import (
 // only the smaller policy-safe View interface at the membrane boundary. There
 // is no write path through either surface.
 type View struct {
-	query      storespec.MessageQuery
 	visible    storespec.VisibleMessageQuery
 	authority  storespec.ActorAuthority
 	links      *link.Acceptor
 	presence   presence.View
-	rt         *actorrt.Runtime
+	actors     *actorctl.ChannelActors
 	nowMs      func() int64
 	resources  storespec.ResourceReadStore
-	control    *actorControlIndex
 	routing    storespec.ChannelRouting
 	principals storespec.PrincipalRegistry
 	bindings   storespec.DaemonBindingReader
@@ -45,15 +43,13 @@ type View struct {
 // the channel interaction model.
 func (h *Home) View() View {
 	return View{
-		query:      h.cs.Query,
 		visible:    h.cs.Visible,
 		authority:  h.cs.Authority,
 		links:      h.links,
-		presence:   presence.NewView(h.presenceFold, h.channel.Cells(), h.cs.Authority),
-		rt:         h.channel.Cells(),
+		presence:   presence.NewView(h.presenceFold, h.actors, h.cs.Authority),
+		actors:     h.actors,
 		nowMs:      h.nowMs,
 		resources:  h.cs.ResourceRead,
-		control:    h.controlIndex,
 		routing:    h.cs.Routing,
 		principals: h.cs.Principals,
 		bindings:   h.cs.Bindings,
@@ -149,10 +145,10 @@ func (v View) TestimonyAgeMs(receivedAt int64) int64 {
 // asked of the actor, never advisory. The two axes answer different
 // questions and must not be conflated.
 func (v View) Stat(id actor.ActorID) (startedAt time.Time, live bool) {
-	if v.rt == nil {
+	if v.actors == nil {
 		return time.Time{}, false
 	}
-	stat, ok := v.rt.Stat(id)
+	stat, ok := v.actors.Stat(id)
 	if !ok {
 		return time.Time{}, false
 	}
@@ -193,17 +189,17 @@ func (v View) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal s
 }
 
 func (v View) ActiveActors(ctx context.Context) ([]storespec.ActorControlRow, error) {
-	return v.control.ListActive(ctx)
+	return v.authority.ListActive(ctx)
 }
 
 func (v View) DeclaredBySource(ctx context.Context, source string) ([]storespec.ActorControlRow, error) {
-	rows, err := v.control.ListActive(ctx)
+	rows, err := v.authority.ListActive(ctx)
 	if err != nil {
 		return nil, err
 	}
 	out := make([]storespec.ActorControlRow, 0)
 	for _, row := range rows {
-		world, ok, worldErr := v.control.WorldOf(ctx, row.ID)
+		world, ok, worldErr := v.authority.WorldOf(ctx, row.ID)
 		if worldErr != nil {
 			return nil, worldErr
 		}
@@ -215,12 +211,16 @@ func (v View) DeclaredBySource(ctx context.Context, source string) ([]storespec.
 }
 
 func (v View) DeclaredBySourceOne(ctx context.Context, source string) (storespec.ActorControlRow, bool, error) {
-	rows, err := v.control.ListActive(ctx)
+	rows, err := v.authority.ListActive(ctx)
 	if err != nil {
 		return storespec.ActorControlRow{}, false, err
 	}
 	for _, row := range rows {
-		if row.SourceDeclID == source {
+		world, ok, worldErr := v.authority.WorldOf(ctx, row.ID)
+		if worldErr != nil {
+			return storespec.ActorControlRow{}, false, worldErr
+		}
+		if ok && world == storespec.WorldDurable && row.SourceDeclID == source {
 			return row, true, nil
 		}
 	}
@@ -229,29 +229,6 @@ func (v View) DeclaredBySourceOne(ctx context.Context, source string) (storespec
 
 func (v View) IsBound(ctx context.Context, daemonID string) (bool, error) {
 	return v.bindings.IsBound(ctx, storespec.DaemonID(daemonID))
-}
-
-// MaxSeq returns the channel's current head seq (client cursor anchor).
-func (v View) MaxSeq(ctx context.Context) (int64, error) {
-	return v.query.MaxSeq(ctx)
-}
-
-// ListActors returns the compatibility membership projection of every active
-// identity. The source is ActorAuthority; durable registry history is not a
-// live control-plane read path.
-func (v View) ListActors(ctx context.Context) ([]storespec.Record, error) {
-	rows, err := v.authority.ListActive(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]storespec.Record, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, storespec.Record{
-			ID: row.ID, Kind: row.Kind, Principal: row.Principal,
-			Binding: row.Binding, CreatedAt: row.CreatedAt,
-		})
-	}
-	return out, nil
 }
 
 // OwnerPrincipal returns the unique active channel owner from the channel-local

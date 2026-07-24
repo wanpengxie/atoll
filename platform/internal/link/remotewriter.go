@@ -123,6 +123,22 @@ func (w *RemoteWriter) DeliverAck(ack ipc.EmitAckPayload) {
 	})
 }
 
+func (w *RemoteWriter) sendCancel(requestID message.ID) error {
+	raw, err := json.Marshal(ipc.CancelPayload{RequestID: requestID})
+	if err != nil {
+		return err
+	}
+	return w.core.writeOneWay(ipc.KindCancelRequest, raw)
+}
+
+func (w *RemoteWriter) publishObs(kind string, value []byte) error {
+	raw, err := json.Marshal(ipc.ObsPayload{Kind: kind, Value: append([]byte(nil), value...)})
+	if err != nil {
+		return err
+	}
+	return w.core.writeOneWay(ipc.KindObs, raw)
+}
+
 // Close fails every pending waiter with errRemoteWriterClosed and rejects
 // subsequent Writes. The connection died with emits in flight: those cells must
 // see a transport error, not block forever.

@@ -17,7 +17,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
 const testChannelID = channel.ID("ch-test")
@@ -44,11 +43,9 @@ type failRec struct {
 // fakeSys is a minimal actorbase.Sys double: it embeds the (nil) interface so
 // every verb this actor never touches stays unimplemented (a call would nil-
 // panic, failing the test loudly), and overrides only the verbs the kimi actor
-// actually calls: Recv, Reply, Fail, PublishObs, Self, Life, After. Recv blocks
-// on a channel (not a pre-built queue) because the actor's device goroutines
-// close requests asynchronously while the worker goroutine is parked in Recv.
-// After is real — the reaper + bind-retry are now sys.After self-wakes
-// (spec §3), so the double must actually schedule delivery of the timer event.
+// actually calls: Recv, Reply, Fail, PublishObs, Self, and Life. Recv blocks on
+// a channel because the actor's device goroutines close requests asynchronously
+// while the worker goroutine is parked in Recv.
 type fakeSys struct {
 	actorbase.Sys
 
@@ -56,10 +53,8 @@ type fakeSys struct {
 	recvCh chan actorbase.Msg
 	quit   chan struct{}
 	once   sync.Once
-
-	// afterErr, when set, makes After fail without scheduling — the injected
-	// scheduler-arm failure the self-wake死-loud path is tested against.
-	afterErr error
+	life   context.Context
+	cancel context.CancelFunc
 
 	mu      sync.Mutex
 	replies []replyRec
@@ -67,7 +62,14 @@ type fakeSys struct {
 }
 
 func newFakeSys(selfID actor.ActorID) *fakeSys {
-	return &fakeSys{selfID: selfID, recvCh: make(chan actorbase.Msg, 16), quit: make(chan struct{})}
+	life, cancel := context.WithCancel(context.Background())
+	return &fakeSys{
+		selfID: selfID,
+		recvCh: make(chan actorbase.Msg, 16),
+		quit:   make(chan struct{}),
+		life:   life,
+		cancel: cancel,
+	}
 }
 
 // push enqueues one delivery for the worker's Recv loop to pick up (dropping it
@@ -80,9 +82,14 @@ func (f *fakeSys) push(msg actorbase.Msg) {
 	}
 }
 
-// stop closes the quit channel — Recv returns errFakeSysStopped, ending run()'s
-// loop (its death) so the deferred device teardown runs.
-func (f *fakeSys) stop() { f.once.Do(func() { close(f.quit) }) }
+// stop cancels the process life and closes delivery so both actor-owned
+// goroutines join.
+func (f *fakeSys) stop() {
+	f.once.Do(func() {
+		f.cancel()
+		close(f.quit)
+	})
+}
 
 func (f *fakeSys) Recv() (actorbase.Msg, error) {
 	select {
@@ -91,27 +98,6 @@ func (f *fakeSys) Recv() (actorbase.Msg, error) {
 	case <-f.quit:
 		return actorbase.Msg{}, errFakeSysStopped
 	}
-}
-
-// After schedules a self-authored KindEvent delivery after d — the substrate's
-// self-wake, modelled with a real timer. It quits cleanly if the test stops.
-func (f *fakeSys) After(d time.Duration, msgType string, payload any) (schedule.TimerID, error) {
-	if f.afterErr != nil {
-		return "", f.afterErr
-	}
-	raw, _ := json.Marshal(payload)
-	go func() {
-		timer := time.NewTimer(d)
-		defer timer.Stop()
-		select {
-		case <-timer.C:
-			f.push(actorbase.NewMsg(context.Background(), message.Envelope{
-				Kind: message.KindEvent, Type: msgType, Payload: raw,
-			}))
-		case <-f.quit:
-		}
-	}()
-	return schedule.TimerID("fake-timer"), nil
 }
 
 func (f *fakeSys) Reply(msg actorbase.Msg, v any) (message.ID, error) {
@@ -132,7 +118,7 @@ func (f *fakeSys) PublishObs(actorrt.ObsKind, actorrt.ObsValue) error { return n
 
 func (f *fakeSys) Self() actor.ActorID { return f.selfID }
 
-func (f *fakeSys) Life() context.Context { return context.Background() }
+func (f *fakeSys) Life() context.Context { return f.life }
 
 var _ actorbase.Sys = (*fakeSys)(nil)
 
@@ -539,28 +525,14 @@ func TestFixedPortReplacementRetriesUntilBound(t *testing.T) {
 	}
 }
 
-// P2-1 (期10 review): if the reaper self-wake cannot be ARMED (sys.After fails),
-// the actor must die loud rather than silently ossify (sweeps would stop, stale
-// sessions never reaped — a static half-alive actor is worse than death; the ring
-// re-forges a healthy incarnation). (Pre-fix: `_, _ = a.sys.After(...)` swallowed
-// the arm error and run() carried on with a dead self-wake chain.)
-func TestReaperArmFailureDiesLoud(t *testing.T) {
-	a := NewActor(Config{
+func TestDeviceMaintenanceDoesNotDependOnScheduleCapability(t *testing.T) {
+	a, sys := startActor(t, Config{
 		ListenAddr:        "127.0.0.1:0",
 		ReaperInterval:    20 * time.Millisecond,
 		BindRetryInterval: 20 * time.Millisecond,
 	})
-	sys := newFakeSys(DefaultActorID)
-	sys.afterErr = errors.New("scheduler down") // every arm fails
-	done := make(chan error, 1)
-	go func() { done <- a.run(sys) }()
-	select {
-	case err := <-done:
-		if err == nil {
-			t.Fatal("expected a loud death when the reaper self-wake cannot be armed")
-		}
-	case <-time.After(2 * time.Second):
-		sys.stop()
-		t.Fatal("actor did not die on a failed After arm (silent ossification)")
+	if a.ListenAddr() == "" {
+		t.Fatal("local device maintenance did not bind without Schedule")
 	}
+	sys.stop()
 }

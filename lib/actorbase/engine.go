@@ -46,7 +46,7 @@ type engine struct {
 	access    accessdoor.ResourceAccessHandle
 	state     accessdoor.AccessHandle
 	sched     schedule.ScheduleHandle
-	lifecycle actorrt.LifecycleHandle
+	lifecycle actorcaps.LifecycleHandle
 	hooks     Hooks
 	def       Def
 	clockFn   func() time.Time
@@ -92,12 +92,6 @@ const (
 // occupant is being torn down (Start's lifeCtx is Done) and no further
 // delivery will ever be handed to this Proc.
 var ErrRecvDone = errors.New("actorbase: recv done")
-
-// ErrIdleExit is the stable voluntary-exit cause produced only after an idle
-// approval command reaches the worker in mailbox order.
-var ErrIdleExit = errors.New("actorbase: idle exit")
-
-const idleApprovedType = "\x00actorbase.idle-approved"
 
 // New assembles a live Sys/actorrt.Actor over one incarnation's five-
 // capability bundle (spec §3's out-generation matrix; this IS the "caps→Sys
@@ -769,28 +763,28 @@ func (e *engine) ackTimer(msg Msg) error {
 
 // --- Sys: Spawn arm --------------------------------------------------------
 
-func (e *engine) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
+func (e *engine) Fork(requestID message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error) {
 	// A nil lifecycle arm is an honest capability absence and must answer
 	// ErrUnsupported rather than nil-pointer-panic. Production server and daemon
 	// incarnations both receive a lifecycle arm; the latter relays over the wire.
 	if e.lifecycle == nil {
 		return "", ErrUnsupported
 	}
-	return e.lifecycle.Fork(e.lifeCtx, spec)
+	return e.lifecycle.Fork(e.lifeCtx, requestID, spec)
 }
 
-func (e *engine) DespawnChild(id actor.ActorID) error {
+func (e *engine) RequestIdle() error {
 	if e.lifecycle == nil {
 		return ErrUnsupported
 	}
-	return e.lifecycle.DespawnChild(e.lifeCtx, id, "parent_despawn")
+	return e.lifecycle.RequestIdle(e.lifeCtx)
 }
 
 func (e *engine) End() error {
 	if e.lifecycle == nil {
 		return ErrUnsupported
 	}
-	err := e.lifecycle.EndSelf(e.lifeCtx)
+	err := e.lifecycle.EndSelf(e.lifeCtx, actorcaps.EndSelfRequest{})
 	if err == nil && e.lifeCtx != nil {
 		e.occupant.Store(int32(occupantDraining))
 	}
@@ -829,9 +823,6 @@ func (e *engine) Recv() (Msg, error) {
 		// Drain the deque with priority over ErrRecvDone: a Draining occupant still
 		// finishes everything already handed to it (spec's "worker 排空至 return").
 		if env, ok := e.workQ.pop(); ok {
-			if env.Kind == "" && env.Type == idleApprovedType {
-				return Msg{}, ErrIdleExit
-			}
 			if msg, ok := e.projectWork(env); ok {
 				e.trackTimer(msg)
 				return msg, nil
@@ -840,7 +831,7 @@ func (e *engine) Recv() (Msg, error) {
 		}
 		var idle <-chan time.Time
 		var timer *time.Timer
-		if e.options.IdleTimeout > 0 && e.options.IdleArbiter != nil && e.serve.len() == 0 {
+		if e.options.IdleTimeout > 0 && e.lifecycle != nil && e.serve.len() == 0 {
 			timer = time.NewTimer(e.options.IdleTimeout)
 			idle = timer.C
 		}
@@ -867,7 +858,7 @@ func (e *engine) Recv() (Msg, error) {
 			}
 			return Msg{}, ErrRecvDone
 		case <-idle:
-			_ = e.options.IdleArbiter.RequestIdle(e.lifeCtx)
+			_ = e.lifecycle.RequestIdle(e.lifeCtx)
 		}
 	}
 }
@@ -914,14 +905,6 @@ func (e *engine) ackTimerObserved(msg Msg) {
 		})
 		e.actorCtx.PublishObs(ObsTimerAckFault, val)
 	}
-}
-
-// IdleApproved implements actorrt.IdleCommandReceiver. The sentinel is queued
-// behind all accepted work and is never subject to data overflow eviction.
-func (e *engine) IdleApproved() {
-	env := new(message.Envelope)
-	env.Type = idleApprovedType
-	e.workQ.pushControl(env)
 }
 
 func (e *engine) projectWork(env *message.Envelope) (Msg, bool) {

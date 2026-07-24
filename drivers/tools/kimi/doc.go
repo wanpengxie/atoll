@@ -32,16 +32,15 @@
 // in-hand). Because Sys is concurrency-safe and Msg is immutable (spec §1.2
 // fan-out), the device's read-loop goroutine calls sys.Reply/sys.Fail directly
 // to close a request; an internal mutex guards the conn + in-flight table (the
-// one cross-goroutine state device.go itself owns). The reaper is not a
-// goroutine: it sweeps on the worker off a sys.After self-wake (期10 S3).
+// one cross-goroutine state device.go itself owns). A small actor-owned local
+// maintenance goroutine performs bind retry and reaping without depending on
+// daemon↔Server Schedule availability.
 //
 // Fault posture (let-it-crash): a single request that times out or hits an
 // offline device fails as a business response (the actor digests it). The
-// reaper sweep (armed by sys.After self-wake, run on the worker) collects
-// past-deadline requests (single 60s budget — browser actions are sub-second to
-// a few seconds, no minutes-long operation). A dropped conn flips the adapter offline and waits for a fresh
-// connection — it does NOT panic; only an untrustworthy internal state would
-// (positive death, i.e. run() returning a non-nil error).
+// local reaper collects past-deadline requests (single 60s budget — browser
+// actions are sub-second to a few seconds, no minutes-long operation). A
+// dropped conn flips the adapter offline and waits for a fresh connection.
 //
 // Domain note: screenshot and save_as_pdf return a LOCAL file path — the device
 // writes the bytes to disk and the wire carries only the path, not the payload.

@@ -10,7 +10,6 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/internal/store"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
@@ -77,7 +76,7 @@ func openRealTimerFixture(t *testing.T) (timerspec.TimerStore, actor.ActorID) {
 // TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt is the real-sqlite
 // counterpart to lib/actorbase's TestAutomaticTimerAckFailureIsObservedAndLeftRetryable
 // (which only exercises an in-memory fake ScheduleHandle). DoD 4: "销账失败→
-// fired 行保持不变→下拍重投收敛" — a genuine store error on the FIRST AckOwned
+// fired 行保持不变→显式 Ack 重试收敛" — a genuine store error on the FIRST AckOwned
 // must leave the fired row durably in place (provable against real sqlite,
 // not an in-memory map), and a SECOND attempt (standing in for the next
 // redeliver pass) must both succeed and actually delete the row.
@@ -86,15 +85,10 @@ func TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt(t *testing.T) {
 	wrapped := &ackFailOnceStore{TimerStore: real}
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000_000))
-	rt := newTestRuntime(t)
-	_, _, _ = rt.SpawnIfAbsent(author, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return stubActor{} })
-
 	minter, engine, err := New(Deps{
 		Store:       wrapped,
 		Fire:        sink,
 		DurableFire: NewTimerFirePen(wrapped, allowScheduleAuthority{}, channel.ID("timer-ack-real-store")),
-		Host:        rt,
-		Revive:      &fakeReviver{},
 		Clock:       clock,
 		Authority:   allowScheduleAuthority{},
 	})
@@ -145,7 +139,7 @@ func TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt(t *testing.T) {
 		t.Fatalf("fired row %s vanished despite a failed Ack — 销账失败必须保持 fired truth", id)
 	}
 
-	// Second Ack (standing in for the next redeliver pass' retry): must both
+	// Second explicit Ack retry must both
 	// succeed and actually clear the fired row from real durable storage.
 	if err := handle.Ack(context.Background(), id); err != nil {
 		t.Fatalf("second (retry) Ack: %v", err)

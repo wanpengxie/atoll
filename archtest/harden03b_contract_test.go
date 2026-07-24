@@ -66,16 +66,16 @@ func TestHarden03BPhaseBDependencyWalls(t *testing.T) {
 	}
 }
 
-func TestHarden03BPhaseBoundaryDoesNotHalfSwitchProductionCaps(t *testing.T) {
+func TestHarden03BPhaseCLifecycleCutoverIsAtomic(t *testing.T) {
 	caps, err := readFile("../lib/actorcaps/caps.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(caps), "Lifecycle actorrt.LifecycleHandle") {
-		t.Fatal("Phase A/B must leave the serving Caps.Lifecycle static type untouched")
+	if !strings.Contains(string(caps), "Lifecycle LifecycleHandle") {
+		t.Fatal("Phase C must publish the terminal actorcaps LifecycleHandle")
 	}
-	if strings.Contains(string(caps), "Lifecycle LifecycleHandle") {
-		t.Fatal("Phase A/B half-switched Caps.Lifecycle to the terminal method set")
+	if strings.Contains(string(caps), "actorrt.LifecycleHandle") {
+		t.Fatal("Phase C left the pre-cutover actorrt lifecycle type in production Caps")
 	}
 
 	physical, err := readFile("../platform/internal/link/physical.go")
@@ -83,9 +83,9 @@ func TestHarden03BPhaseBoundaryDoesNotHalfSwitchProductionCaps(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(string(physical), "Lifecycle actorcaps.LifecycleHandle") {
-		t.Fatal("new Phase-B physical seam must exercise the terminal lifecycle facade")
+		t.Fatal("Phase C link wire must expose the terminal lifecycle facade")
 	}
 	if strings.Contains(string(physical), "actorrt.LifecycleHandle") {
-		t.Fatal("new Phase-B physical seam adapted the old lifecycle contract")
+		t.Fatal("Phase C link wire adapted the old lifecycle contract")
 	}
 }

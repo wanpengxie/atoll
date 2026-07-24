@@ -43,7 +43,7 @@ func (h *Home) resolveAudience(ctx context.Context, env *message.Envelope) error
 		}
 		return ErrRoutingUnavailable
 	}
-	rows, err := h.View().ListActors(ctx)
+	rows, err := h.View().ActiveActors(ctx)
 	if err != nil {
 		return err
 	}

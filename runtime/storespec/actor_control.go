@@ -146,17 +146,6 @@ type DeclAdmissionResult struct {
 	Created bool
 }
 
-// ComputeDeclaration is the untrusted attachment claim presented by one
-// daemon. Home validates it against ActorAuthority and liveness intent; it is
-// never a durable identity mutation.
-type ComputeDeclaration struct {
-	ActorID      actor.ActorID
-	Kind         actor.Kind
-	Binding      actor.Binding
-	Version      int64
-	EnsureTicket string
-}
-
 type DeclAdmissionStore interface {
 	AdmitDeclared(context.Context, AdmitBundle) (DeclAdmissionResult, error)
 }

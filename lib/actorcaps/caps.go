@@ -2,7 +2,6 @@ package actorcaps
 
 import (
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
@@ -40,5 +39,5 @@ type Caps struct {
 	Schedule schedule.ScheduleHandle
 	// Lifecycle is the closed fork/despawn/end-self capability welded to this
 	// incarnation. Fork returns only a child's name, never a live handle.
-	Lifecycle actorrt.LifecycleHandle
+	Lifecycle LifecycleHandle
 }

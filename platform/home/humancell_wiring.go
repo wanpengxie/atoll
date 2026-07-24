@@ -158,12 +158,3 @@ func (h *Home) subjectSlotFor(id actor.ActorID) (*subjectgate.Slot, bool) {
 	}
 	return h.subjectgate.Slot(id)
 }
-
-// removeSubjectSlot drops id's slot and Forgets its testimony (户籍级联). Called
-// by the revocation/teardown path when a subject is removed.
-func (h *Home) removeSubjectSlot(id actor.ActorID) {
-	if h.subjectgate == nil {
-		return
-	}
-	h.subjectgate.Remove(id)
-}

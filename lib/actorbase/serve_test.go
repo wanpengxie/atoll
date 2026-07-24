@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -87,12 +88,12 @@ func (f *fakeSys) After(d time.Duration, msgType string, payload any) (schedule.
 
 func (f *fakeSys) CancelTimer(id schedule.TimerID) error { panic("not implemented") }
 
-func (f *fakeSys) Fork(spec actorrt.ForkSpec) (actor.ActorID, error) {
+func (f *fakeSys) Fork(message.ID, actorcaps.ForkSpec) (actor.ActorID, error) {
 	panic("not implemented")
 }
 
-func (f *fakeSys) DespawnChild(id actor.ActorID) error { panic("not implemented") }
-func (f *fakeSys) End() error                          { panic("not implemented") }
+func (f *fakeSys) RequestIdle() error { panic("not implemented") }
+func (f *fakeSys) End() error         { panic("not implemented") }
 
 func (f *fakeSys) PublishObs(kind actorrt.ObsKind, val actorrt.ObsValue) error {
 	panic("not implemented")

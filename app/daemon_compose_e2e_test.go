@@ -17,13 +17,11 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type e2eLinkPlan struct {
 	mu       sync.Mutex
-	desired  []actorrt.DesiredMember
 	builders map[actor.ActorID]platform.ActorFactory
 	chID     channel.ID
 	rows     []platform.PlanActor
@@ -33,12 +31,6 @@ type e2eLinkPlan struct {
 	lookupEntered chan struct{}
 	lookupRelease chan struct{}
 	lookupOnce    sync.Once
-}
-
-func (p *e2eLinkPlan) Members(context.Context) ([]actorrt.DesiredMember, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]actorrt.DesiredMember(nil), p.desired...), nil
 }
 
 func (p *e2eLinkPlan) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
@@ -53,21 +45,19 @@ func (p *e2eLinkPlan) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
 }
 
 func (p *e2eLinkPlan) ApplyPlan(rows []platform.PlanActor) error {
-	desired := make([]actorrt.DesiredMember, 0, len(rows))
 	builders := make(map[actor.ActorID]platform.ActorFactory, len(rows))
 	for _, row := range rows {
-		decl, err := registry.Build(row.Class, registry.InstanceSpec{ID: row.InstanceID, Config: row.Config}, registry.Deps{ChannelID: p.chID})
+		decl, err := registry.Build(row.Class, registry.InstanceSpec{ID: row.ActorID, Config: row.Config}, registry.Deps{ChannelID: p.chID})
 		if err != nil {
 			return err
 		}
-		desired = append(desired, actorrt.DesiredMember{
-			ID: row.InstanceID, Kind: row.Kind, Version: row.Version,
-			IdleTimeout: time.Duration(row.TIdleMs) * time.Millisecond, EnsureTicket: row.EnsureTicket,
-		})
-		builders[row.InstanceID] = decl.Factory
+		if decl.ID != row.ActorID {
+			return fmt.Errorf("plan actor %s built mismatched id %s", row.ActorID, decl.ID)
+		}
+		builders[row.ActorID] = decl.Factory
 	}
 	p.mu.Lock()
-	p.desired, p.builders = desired, builders
+	p.builders = builders
 	p.rows = append([]platform.PlanActor(nil), rows...)
 	p.applies++
 	p.mu.Unlock()
@@ -141,7 +131,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	go func() {
 		runErr <- compute.Run(ctx, compute.Config{
 			ServerWS: serverWS, PlanSource: plan,
-			Poll: time.Hour, Resync: 100 * time.Millisecond,
+			Poll: 100 * time.Millisecond,
 		})
 	}()
 	t.Cleanup(func() {
@@ -158,7 +148,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	buildDeadline := time.Now().Add(3 * time.Second)
 	for {
 		rows, applies := plan.snapshot()
-		if len(rows) == 1 && rows[0].InstanceID == actor.ActorID(instID) && buildCount(actor.ActorID(instID)) >= 1 {
+		if len(rows) == 1 && rows[0].ActorID == actor.ActorID(instID) && buildCount(actor.ActorID(instID)) >= 1 {
 			break
 		}
 		if time.Now().After(buildDeadline) {
@@ -167,7 +157,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 		time.Sleep(10 * time.Millisecond)
 	}
 	planBeforeRestart, applyBaseline := plan.snapshot()
-	if len(planBeforeRestart) != 1 || planBeforeRestart[0].InstanceID != actor.ActorID(instID) {
+	if len(planBeforeRestart) != 1 || planBeforeRestart[0].ActorID != actor.ActorID(instID) {
 		t.Fatalf("initial applied plan = %#v, want exactly %s", planBeforeRestart, instID)
 	}
 	actorsBeforeRestart, err := env.app.ActorsForTest(channel.ID(chID))
@@ -200,13 +190,13 @@ func TestDaemonComposition_E2E(t *testing.T) {
 
 	// A channel overlay update replaces the carrier without mutating membership
 	// identity. The next
-	// plan keeps the version and carries a fresh EnsureTicket.
+	// plan keeps the actor identity and carries a fresh AttemptKey.
 	restart := env.do(t, "PUT", "/api/channels/"+chID+"/decls/"+agentID+"/config", map[string]any{"config": map[string]any{}}, cookies)
 	assertStatus(t, restart, http.StatusOK)
 	waitDaemonComposition(t, func() bool {
 		rows, _ := plan.snapshot()
-		return len(rows) == 1 && rows[0].Version == planBeforeRestart[0].Version+1 &&
-			rows[0].EnsureTicket != planBeforeRestart[0].EnsureTicket && buildCount(actor.ActorID(instID)) == 2
+		return len(rows) == 1 && rows[0].ActorID == planBeforeRestart[0].ActorID &&
+			rows[0].AttemptKey != planBeforeRestart[0].AttemptKey && buildCount(actor.ActorID(instID)) == 2
 	}, "version restart did not replace the daemon body")
 	actorsAfterRestart, err := env.app.ActorsForTest(channel.ID(chID))
 	if err != nil {
@@ -231,23 +221,17 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	assertStatus(t, removed, http.StatusOK)
 	// Soft deletion stops future supply only; the existing instance keeps its
 	// last channel snapshot until the explicit remove word ends membership.
-	if rows, _ := plan.snapshot(); len(rows) != 1 || rows[0].InstanceID != actor.ActorID(instID) {
+	if rows, _ := plan.snapshot(); len(rows) != 1 || rows[0].ActorID != actor.ActorID(instID) {
 		t.Fatalf("soft delete changed existing plan: %#v", rows)
 	}
 	removed = env.do(t, "DELETE", "/api/channels/"+chID+"/actors/"+instID, nil, cookies)
 	assertStatus(t, removed, http.StatusOK)
 	deadline := time.Now().Add(3 * time.Second)
 	for {
-		members, err := plan.Members(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
-		if len(members) == 0 {
+		rows, _ := plan.snapshot()
+		if len(rows) == 0 {
 			if _, ok := plan.Lookup(actor.ActorID(instID)); ok {
 				t.Fatal("shrunk plan retained the removed factory")
-			}
-			if rows, _ := plan.snapshot(); len(rows) != 0 {
-				t.Fatalf("shrunk applied plan retained rows: %#v", rows)
 			}
 			break
 		}

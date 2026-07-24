@@ -2,26 +2,15 @@ package link
 
 import "errors"
 
-type codedSentinel struct{ code, message string }
-
-func (e codedSentinel) Error() string     { return e.message }
-func (e codedSentinel) ErrorCode() string { return e.code }
-
+// decodeAckError reconstructs the definite error text returned by the peer.
+// Domain-specific sentinel mapping deliberately lives at the owning boundary;
+// the transport does not invent lifecycle or liveness policy.
 func decodeAckError(code, message string) error {
 	if code == "" && message == "" {
 		return nil
 	}
-	switch code {
-	case "writer_not_live":
-		return ErrWriterNotLive
-	case "access_not_live":
-		return ErrAccessNotLive
-	case "schedule_not_live":
-		return ErrScheduleNotLive
-	default:
-		if message == "" {
-			message = code
-		}
-		return errors.New(message)
+	if message == "" {
+		message = code
 	}
+	return errors.New(message)
 }

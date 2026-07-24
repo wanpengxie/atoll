@@ -23,10 +23,10 @@ import (
 // table, and the read loop. This is the adapter's own closed transport —
 // inlined here, NOT a shared framework piece.
 //
-// Concurrency: the worker goroutine (Actor.handle) calls dispatch and runs the
-// reaper sweep (driven by sys.After self-wake, spec §3); the read loop runs on
-// its own goroutine. The mutex guards ONLY the in-flight table + the current
-// conn pointer + the stopped flag — never a blocking wire write. dispatch
+// Concurrency: the worker goroutine calls dispatch, the actor-owned local
+// maintenance goroutine runs the reaper, and the read loop has its own
+// goroutine. The mutex guards ONLY the in-flight table + the current conn
+// pointer + the stopped flag — never a blocking wire write. dispatch
 // registers under the lock, then writes the frame OUTSIDE the lock with a write
 // deadline, so a stuck peer can never freeze the mutex (which sweep, stop, and
 // accept all share). Terminal writes (sys.Reply/sys.Fail) run straight off
@@ -125,9 +125,8 @@ func (d *device) bound() bool {
 }
 
 // start binds the WS endpoint and boots the serve goroutine. A bind failure is
-// returned so the caller (tryBind) can retry — the exclusive loopback port may
-// still be held by a predecessor incarnation (Q8=B). The reaper is NOT a
-// goroutine here: it is swept on the worker via sys.After self-wake (spec §3).
+// returned so the actor-local maintenance loop can retry — the exclusive
+// loopback port may still be held by a predecessor incarnation (Q8=B).
 func (d *device) start() error {
 	ln, err := net.Listen("tcp", d.addrCfg)
 	if err != nil {
@@ -339,7 +338,7 @@ func (d *device) dropConn(conn *websocket.Conn) {
 
 // sweep fails every past-deadline in-flight request with timeout. It is the one
 // timeout authority — the read loop never times out, sweep never matches
-// replies. Called on the worker goroutine off the reaper self-wake (spec §3).
+// replies. Called by the actor-owned local maintenance goroutine.
 func (d *device) sweep() {
 	now := d.clock()
 	var expired []*pending

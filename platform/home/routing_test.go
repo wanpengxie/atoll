@@ -31,12 +31,13 @@ func (routingResolver) BuildClass(_ channel.ID, _ actor.ActorID, class string, _
 	}}}, true
 }
 
-func openRoutingHome(t *testing.T, name string) *Home {
+func openRoutingHome(t *testing.T, name string, declarations ...DeclareRequest) *Home {
 	t.Helper()
 	h, err := Open(Config{
 		ChannelID: channel.ID(name), DBPath: filepath.Join(t.TempDir(), "channel.sqlite"),
 		CompositionResolver: routingResolver{}, ReconcileInterval: 10 * time.Millisecond, Bootstrap: true,
-		IntroductionResolver: inertIntroductionResolver{},
+		IntroductionResolver:  inertIntroductionResolver{},
+		BootstrapDeclarations: declarations,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -47,14 +48,32 @@ func openRoutingHome(t *testing.T, name string) *Home {
 
 func routingAgent(t *testing.T, h *Home, source, principal, class string, makeDefault bool) storespec.ActorControlRow {
 	t.Helper()
-	result, err := h.declare(context.Background(), DeclareRequest{
-		SourceDeclID: source, Kind: actor.KindAgent, Class: class,
-		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(), MakeDefault: makeDefault,
-	})
+	result, ok, err := h.View().DeclaredBySourceOne(context.Background(), source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return result.Row
+	if !ok {
+		t.Fatalf("bootstrap declaration %q missing", source)
+	}
+	return result
+}
+
+func routingDeclaration(source, class string, makeDefault bool) DeclareRequest {
+	return DeclareRequest{
+		SourceDeclID: source, Kind: actor.KindAgent, Class: class,
+		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(), MakeDefault: makeDefault,
+	}
+}
+
+func visibleWatermark(t *testing.T, h *Home) int64 {
+	t.Helper()
+	_, watermark, err := h.View().ReadVisibleAfterSeq(context.Background(), channel.Reader{
+		Principal: "observer", Mode: channel.ReaderObserver,
+	}, 0, 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return watermark
 }
 
 func waitRoutingLive(t *testing.T, h *Home, id actor.ActorID) {
@@ -80,7 +99,10 @@ func writeUnaddressed(t *testing.T, h *Home, source storespec.ActorControlRow, i
 
 func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 	t.Run("live default", func(t *testing.T) {
-		h := openRoutingHome(t, "routing-default")
+		h := openRoutingHome(t, "routing-default",
+			routingDeclaration("source", "missing", false),
+			routingDeclaration("default", "routing-live", true),
+		)
 		source := routingAgent(t, h, "source", "source", "missing", false)
 		target := routingAgent(t, h, "default", "default", "routing-live", true)
 		waitRoutingLive(t, h, target.ID)
@@ -91,7 +113,10 @@ func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 	})
 
 	t.Run("boost fallback", func(t *testing.T) {
-		h := openRoutingHome(t, "routing-boost")
+		h := openRoutingHome(t, "routing-boost",
+			routingDeclaration("source", "missing", false),
+			routingDeclaration(defaultRoutingAgentSource, "routing-live", false),
+		)
 		source := routingAgent(t, h, "source", "source", "missing", false)
 		boost := routingAgent(t, h, defaultRoutingAgentSource, "boost", "routing-live", false)
 		waitRoutingLive(t, h, boost.ID)
@@ -102,7 +127,9 @@ func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 	})
 
 	t.Run("human broadcast", func(t *testing.T) {
-		h := openRoutingHome(t, "routing-broadcast")
+		h := openRoutingHome(t, "routing-broadcast",
+			routingDeclaration("source", "missing", false),
+		)
 		source := routingAgent(t, h, "source", "source", "missing", false)
 		alice, err := admitThroughSysOp(h, context.Background(), actor.KindHuman, "alice")
 		if err != nil {
@@ -126,24 +153,22 @@ func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 	})
 
 	t.Run("configured default unavailable does not append", func(t *testing.T) {
-		h := openRoutingHome(t, "routing-unavailable")
+		h := openRoutingHome(t, "routing-unavailable",
+			routingDeclaration("source", "missing", false),
+			routingDeclaration("default", "missing", true),
+			routingDeclaration(defaultRoutingAgentSource, "routing-live", false),
+		)
 		source := routingAgent(t, h, "source", "source", "missing", false)
 		_ = routingAgent(t, h, "default", "default", "missing", true)
 		// Even a live boost must not override an explicitly configured default.
 		boost := routingAgent(t, h, defaultRoutingAgentSource, "boost", "routing-live", false)
 		waitRoutingLive(t, h, boost.ID)
-		before, err := h.View().MaxSeq(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
+		before := visibleWatermark(t, h)
 		_, result, writeErr := writeUnaddressed(t, h, source, "route-unavailable")
 		if !errors.Is(writeErr, ErrRoutingUnavailable) || result.MessageID != "" || result.Seq != 0 {
 			t.Fatalf("unavailable result=%+v err=%v", result, writeErr)
 		}
-		after, err := h.View().MaxSeq(context.Background())
-		if err != nil {
-			t.Fatal(err)
-		}
+		after := visibleWatermark(t, h)
 		if after != before {
 			t.Fatalf("unavailable request appended: before=%d after=%d", before, after)
 		}

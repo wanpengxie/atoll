@@ -6,7 +6,6 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -25,23 +24,9 @@ func (stubFireSink) Append(ctx context.Context, author actor.ActorID, env *messa
 	return nil
 }
 
-type stubLivenessProbe struct{}
-
-func (stubLivenessProbe) CurrentIncarnation(id actor.ActorID) (actorrt.Incarnation, bool) {
-	return actorrt.Incarnation{}, false
-}
-
-func (stubLivenessProbe) IsLive(inc actorrt.Incarnation) bool { return false }
-
-type stubReviver struct{}
-
-func (stubReviver) EnsureLive(ctx context.Context, id actor.ActorID) error { return nil }
-
 func validAssemblyDeps() schedule.AssemblyDeps {
 	return schedule.AssemblyDeps{
-		Fire:   stubFireSink{},
-		Host:   stubLivenessProbe{},
-		Revive: stubReviver{},
+		Fire: stubFireSink{},
 		// Clock left nil deliberately — OpenScheduler must default it to the
 		// real wall clock (New itself stays fail-fast on nil).
 	}
@@ -101,7 +86,7 @@ func TestOpenScheduler_AssembledMintWorks(t *testing.T) {
 	_ = ok
 }
 
-// TestOpenScheduler_NilRequiredDepFailsFast: a nil Fire/Host/Revive is
+// TestOpenScheduler_NilRequiredDepFailsFast: a nil Fire is
 // rejected at assembly (forwarded into schedule.Deps and caught by New's
 // existing fail-fast checks — OpenScheduler adds no separate validation).
 func TestOpenScheduler_NilRequiredDepFailsFast(t *testing.T) {
@@ -109,9 +94,7 @@ func TestOpenScheduler_NilRequiredDepFailsFast(t *testing.T) {
 		name string
 		deps schedule.AssemblyDeps
 	}{
-		{"nil Fire", schedule.AssemblyDeps{Fire: nil, Host: stubLivenessProbe{}, Revive: stubReviver{}}},
-		{"nil Host", schedule.AssemblyDeps{Fire: stubFireSink{}, Host: nil, Revive: stubReviver{}}},
-		{"nil Revive", schedule.AssemblyDeps{Fire: stubFireSink{}, Host: stubLivenessProbe{}, Revive: nil}},
+		{"nil Fire", schedule.AssemblyDeps{Fire: nil}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

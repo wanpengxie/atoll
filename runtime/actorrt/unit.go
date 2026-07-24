@@ -16,7 +16,12 @@ import (
 var (
 	ErrInvalidUnitConfig = errors.New("actorrt: invalid unit config")
 	ErrUnitNotPrepared   = errors.New("actorrt: unit is not prepared")
+	ErrUnitSinkInstalled = errors.New("actorrt: unit event sink already installed")
+	ErrMailboxFull       = errors.New("actorrt: mailbox full")
+	ErrCellStopped       = errors.New("actorrt: unit stopped")
 )
+
+const cancelSetCap = 256
 
 // UnitState reports one exact Unit's physical lifecycle.
 type UnitState uint8
@@ -244,6 +249,25 @@ func (u *Unit) Self() Incarnation {
 	return u.self
 }
 
+// InstallEventSink transfers the sole event-consumer slot while the Unit is
+// still Prepared. It exists for one-shot composition adoption (SystemKernel);
+// running Units cannot retarget their event owner.
+func (u *Unit) InstallEventSink(sink UnitEventSink) error {
+	if u == nil || sink == nil {
+		return ErrUnitNotPrepared
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.state != UnitPrepared {
+		return ErrUnitNotPrepared
+	}
+	if u.sink != nil {
+		return ErrUnitSinkInstalled
+	}
+	u.sink = sink
+	return nil
+}
+
 // Stat returns substrate-owned facts for this exact Unit.
 func (u *Unit) Stat() UnitStat {
 	if u == nil {
@@ -325,6 +349,18 @@ func (u *Unit) run() {
 				u.logger.Debug("actorrt.unit.receive_failed", "actor", string(u.id), "err", err)
 			}
 		}
+	}
+}
+
+func drainDying(dying <-chan error) (err error, ok bool) {
+	if dying == nil {
+		return nil, false
+	}
+	select {
+	case err = <-dying:
+		return err, true
+	default:
+		return nil, false
 	}
 }
 

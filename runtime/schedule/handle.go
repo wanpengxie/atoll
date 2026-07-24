@@ -12,9 +12,10 @@ import (
 // a wire/request field — structurally there is nowhere for a caller to
 // self-report a different one (mirrors accessdoor.boundHandle).
 type boundScheduleHandle struct {
-	engine *Engine
-	author storespec.AuthorStamp
-	auth   storespec.ActorAuthority
+	engine  *Engine
+	author  storespec.AuthorStamp
+	auth    storespec.ActorAuthority
+	current func() bool
 }
 
 func (h boundScheduleHandle) authorize(ctx context.Context) error {
@@ -44,7 +45,7 @@ func (h boundScheduleHandle) Schedule(ctx context.Context, req ScheduleReq) (Tim
 			return "", ErrDurableScheduleForbidden
 		}
 	}
-	return h.engine.schedule(ctx, h.author.ID, req)
+	return h.engine.schedule(ctx, h.author.ID, h.current, req)
 }
 
 func (h boundScheduleHandle) Cancel(ctx context.Context, id TimerID) error {
@@ -74,10 +75,19 @@ type minter struct {
 // cheap (no per-handle state beyond the welded author), so admission points
 // may Mint per-caller freely.
 func (m *minter) Mint(author storespec.AuthorStamp) ScheduleHandle {
+	return m.MintCurrent(author, func() bool { return true })
+}
+
+func (m *minter) MintCurrent(author storespec.AuthorStamp, current func() bool) ScheduleHandle {
 	if author.ID == "" || author.BirthVersion <= 0 {
 		return rejectedScheduleHandle{err: errors.New("schedule: invalid author stamp")}
 	}
-	return boundScheduleHandle{engine: m.engine, author: author, auth: m.authority}
+	if current == nil {
+		return rejectedScheduleHandle{err: ErrBadSchedule}
+	}
+	return boundScheduleHandle{
+		engine: m.engine, author: author, auth: m.authority, current: current,
+	}
 }
 
 type rejectedScheduleHandle struct{ err error }

@@ -6,10 +6,9 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
-// WithStopFirst wraps one Actor so before runs exactly at the beginning of its
-// Stop hook. The wrapper preserves optional Start, DownReporter, and
-// RequestCanceller behavior. It is an atomic execution adapter, not an actor
-// manager: it owns no identity, collection, or lifecycle decision.
+// WithStopFirst wraps one Actor so before runs at the beginning of its Stop
+// hook. This is a per-Unit execution adapter: it owns no ActorID registry,
+// replacement decision, or collection lifecycle.
 func WithStopFirst(impl Actor, before func()) Actor {
 	if impl == nil {
 		return nil

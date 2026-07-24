@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/wanpengxie/atoll/app"
 	"github.com/wanpengxie/atoll/drivers/gateway"
@@ -20,7 +19,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -39,34 +37,22 @@ func authenticatedTestPlan(decls []platform.ActorDecl) *testPlanSource {
 type testPlanSource struct {
 	mu        sync.Mutex
 	factories map[actor.ActorID]platform.ActorFactory
-	members   []actorrt.DesiredMember
 	builds    map[actor.ActorID]platform.ActorFactory
 }
 
 func (p *testPlanSource) ApplyPlan(rows []platform.PlanActor) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	members := make([]actorrt.DesiredMember, 0, len(rows))
 	builds := make(map[actor.ActorID]platform.ActorFactory, len(rows))
 	for _, row := range rows {
-		f, ok := p.factories[row.InstanceID]
+		f, ok := p.factories[row.ActorID]
 		if !ok {
 			continue
 		}
-		members = append(members, actorrt.DesiredMember{
-			ID: row.InstanceID, Kind: row.Kind, Version: row.Version,
-			IdleTimeout: time.Duration(row.TIdleMs) * time.Millisecond, EnsureTicket: row.EnsureTicket,
-		})
-		builds[row.InstanceID] = f
+		builds[row.ActorID] = f
 	}
-	p.members, p.builds = members, builds
+	p.builds = builds
 	return nil
-}
-
-func (p *testPlanSource) Members(context.Context) ([]actorrt.DesiredMember, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	return append([]actorrt.DesiredMember(nil), p.members...), nil
 }
 
 func (p *testPlanSource) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {

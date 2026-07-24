@@ -2,18 +2,12 @@ package link
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"io"
 	"net"
 	"testing"
 	"time"
 
 	"github.com/hashicorp/yamux"
-
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/ipc"
 )
 
 func openContextSessionPair(t *testing.T) (*linkSession, *yamux.Session) {
@@ -55,53 +49,4 @@ func TestOpenAdmission_CanceledWaiterDoesNotIssueOrKill(t *testing.T) {
 	default:
 	}
 	<-ls.openGate
-}
-
-func TestOpenStream_CancelAfterOpenIssuedKillsLink(t *testing.T) {
-	ls, server := openContextSessionPair(t)
-	handshakeSeen := make(chan ipc.HandshakePayload, 1)
-	go func() {
-		conn, err := server.Accept()
-		if err != nil {
-			return
-		}
-		defer conn.Close()
-		var hdr streamHeader
-		if err := readLaneJSON(conn, &hdr); err != nil || hdr.Kind != streamActor {
-			return
-		}
-		codec := ipc.NewCodec(conn, io.Discard)
-		frame, err := codec.Read()
-		if err != nil || frame.Kind != ipc.KindHandshake {
-			return
-		}
-		var hp ipc.HandshakePayload
-		if json.Unmarshal(frame.Payload, &hp) == nil {
-			handshakeSeen <- hp
-		}
-		// Deliberately never send handshake_ack. The caller's context must tear
-		// down the whole link, which unblocks this stream.
-		<-ls.closed()
-	}()
-
-	d := &Dialer{lc: ls, streams: map[actor.ActorID]*actorStream{}}
-	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
-	defer cancel()
-	_, err := d.OpenStream(ctx, actor.ActorID("tool-a"), 17, "", func(*message.Envelope) error { return nil }, nil)
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("OpenStream error = %v, want context deadline", err)
-	}
-	select {
-	case hp := <-handshakeSeen:
-		if hp.LeaseID != "tool-a" || hp.Version != 17 {
-			t.Fatalf("handshake = %+v, want lease tool-a version 17", hp)
-		}
-	case <-time.After(time.Second):
-		t.Fatal("peer did not receive handshake before cancellation")
-	}
-	select {
-	case <-ls.closed():
-	case <-time.After(time.Second):
-		t.Fatal("cancellation after Open was issued did not kill the link")
-	}
 }

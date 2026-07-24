@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -15,6 +16,31 @@ type inertActor struct{}
 
 func (inertActor) Start(context.Context, actorrt.ActorContext) error { return nil }
 func (inertActor) Receive(context.Context, *message.Envelope) error  { return nil }
+
+type fakeExecution struct {
+	units map[actor.ActorID]*actorrt.Unit
+	clock func() time.Time
+}
+
+func (f *fakeExecution) Stat(id actor.ActorID) (actorrt.UnitStat, bool) {
+	unit := f.units[id]
+	if unit == nil || !unit.IsAlive() {
+		return actorrt.UnitStat{}, false
+	}
+	return unit.Stat(), true
+}
+
+func (f *fakeExecution) Incarnation(id actor.ActorID) (actorrt.Incarnation, bool) {
+	unit := f.units[id]
+	if unit == nil || !unit.IsAlive() {
+		return actorrt.Incarnation{}, false
+	}
+	return unit.Self(), true
+}
+
+func (*fakeExecution) Attempt(actor.ActorID) (actorhost.AttemptKey, bool) {
+	return "", false
+}
 
 type fakeRegistry struct {
 	rows map[actor.ActorID]storespec.Record
@@ -51,32 +77,38 @@ func (r *fakeRegistry) CheckAuthor(ctx context.Context, stamp storespec.AuthorSt
 	return storespec.AuthorOK, err
 }
 
-func spawn(t *testing.T, rt *actorrt.Runtime, id actor.ActorID) actorrt.Incarnation {
+func spawn(t *testing.T, execution *fakeExecution, id actor.ActorID) actorrt.Incarnation {
 	t.Helper()
-	inc, _, err := rt.SpawnIfAbsent(id, actor.KindAgent, func(actorrt.Incarnation) actorrt.Actor { return inertActor{} })
+	unit, err := actorrt.Prepare(actorrt.UnitConfig{
+		ActorID: id, Kind: actor.KindAgent, Clock: execution.clock,
+	}, func(actorrt.Incarnation) actorrt.Actor { return inertActor{} }, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return inc
+	if err := unit.Start(); err != nil {
+		t.Fatal(err)
+	}
+	execution.units[id] = unit
+	t.Cleanup(func() { unit.Stop(); <-unit.Done() })
+	return unit.Self()
 }
 
 func TestSnapshotFourCellStateSpace(t *testing.T) {
 	now := time.Unix(100, 0)
 	fold := New(nil, func() time.Time { return now }, []actorrt.ObsKind{"level"}, time.Second)
-	rt, _ := actorrt.New(actorrt.Config{Clock: func() time.Time { return now }})
-	t.Cleanup(rt.StopAll)
+	execution := &fakeExecution{units: map[actor.ActorID]*actorrt.Unit{}, clock: func() time.Time { return now }}
 	reg := &fakeRegistry{rows: map[actor.ActorID]storespec.Record{
 		"member-live":   {ID: "member-live"},
 		"member-absent": {ID: "member-absent"},
 	}}
-	liveGen := spawn(t, rt, "member-live")
-	ephGen := spawn(t, rt, "ephemeral")
+	liveGen := spawn(t, execution, "member-live")
+	ephGen := spawn(t, execution, "ephemeral")
 	fold.OnObs(context.Background(), "member-live", liveGen, "level", []byte("a"))
 	fold.OnObs(context.Background(), "member-absent", liveGen, "level", []byte("b"))
 	fold.OnObs(context.Background(), "ephemeral", ephGen, "level", []byte("c"))
 	fold.OnObs(context.Background(), "neither", actorrt.Incarnation{}, "level", []byte("must-not-leak"))
 
-	view := NewView(fold, rt, reg)
+	view := NewView(fold, execution, reg)
 	tests := []struct {
 		id              actor.ActorID
 		member, present bool
@@ -105,13 +137,13 @@ func TestSnapshotFourCellStateSpace(t *testing.T) {
 func TestBrokerGenerationRules(t *testing.T) {
 	now := time.Unix(100, 0)
 	fold := New(nil, func() time.Time { return now }, []actorrt.ObsKind{"broker"}, time.Second)
-	rt, _ := actorrt.New(actorrt.Config{})
-	t.Cleanup(rt.StopAll)
-	old := spawn(t, rt, "a")
+	execution := &fakeExecution{units: map[actor.ActorID]*actorrt.Unit{}}
+	old := spawn(t, execution, "a")
 	fold.OnObs(context.Background(), "a", old, "broker", []byte("old"))
-	rt.Despawn(old)
-	current := spawn(t, rt, "a")
-	view := NewView(fold, rt, &fakeRegistry{rows: map[actor.ActorID]storespec.Record{"a": {ID: "a"}}})
+	execution.units["a"].Stop()
+	<-execution.units["a"].Done()
+	current := spawn(t, execution, "a")
+	view := NewView(fold, execution, &fakeRegistry{rows: map[actor.ActorID]storespec.Record{"a": {ID: "a"}}})
 	snap, err := view.Snapshot(context.Background(), "a")
 	if err != nil {
 		t.Fatal(err)

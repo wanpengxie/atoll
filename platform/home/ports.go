@@ -17,10 +17,6 @@ func BootstrapOwner(ctx context.Context, h *Home, principal string) (actor.Actor
 	return h.admitChannelOwner(ctx, principal)
 }
 
-func BootstrapDeclaration(ctx context.Context, h *Home, in DeclareRequest) (DeclareResult, error) {
-	return h.declare(ctx, in)
-}
-
 func Shutdown(h *Home) error { return h.closeInternal("normal") }
 
 func GatewaySlot(h *Home, id actor.ActorID) (*subjectgate.Slot, bool) {

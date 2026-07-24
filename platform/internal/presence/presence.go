@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -14,7 +15,8 @@ import (
 type entry struct {
 	val        []byte
 	receivedAt int64
-	gen        actorrt.Incarnation
+	local      actorrt.Incarnation
+	remote     actorhost.AttemptKey
 }
 
 // Testimony is the latest level testimony for one kind. It is advisory: an
@@ -78,10 +80,29 @@ func (f *Fold) OnObs(_ context.Context, id actor.ActorID, gen actorrt.Incarnatio
 		})
 		return
 	}
-	f.put(id, kind, val, gen)
+	f.put(id, kind, val, gen, "")
 }
 
-func (f *Fold) put(id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue, gen actorrt.Incarnation) {
+// OnRemoteObs records testimony from one exact daemon Body attempt.
+func (f *Fold) OnRemoteObs(
+	id actor.ActorID,
+	key actorhost.AttemptKey,
+	kind actorrt.ObsKind,
+	val actorrt.ObsValue,
+) {
+	if !f.isLevel(kind) {
+		return
+	}
+	f.put(id, kind, val, actorrt.Incarnation{}, key)
+}
+
+func (f *Fold) put(
+	id actor.ActorID,
+	kind actorrt.ObsKind,
+	val actorrt.ObsValue,
+	local actorrt.Incarnation,
+	remote actorhost.AttemptKey,
+) {
 	f.mu.Lock()
 	byKind := f.latest[id]
 	if byKind == nil {
@@ -89,7 +110,10 @@ func (f *Fold) put(id actor.ActorID, kind actorrt.ObsKind, val actorrt.ObsValue,
 		f.latest[id] = byKind
 	}
 	_, existed := byKind[kind]
-	byKind[kind] = entry{val: append([]byte(nil), val...), receivedAt: f.clock().UnixMilli(), gen: gen}
+	byKind[kind] = entry{
+		val: append([]byte(nil), val...), receivedAt: f.clock().UnixMilli(),
+		local: local, remote: remote,
+	}
 	f.mu.Unlock()
 	if !existed {
 		// edge-only: this (actor,kind) row went absent→present (online). Not a
@@ -118,7 +142,7 @@ func (f *Fold) OnDown(_ context.Context, id actor.ActorID, gen actorrt.Incarnati
 	var offlineKinds []actorrt.ObsKind
 	f.mu.Lock()
 	for kind, row := range f.latest[id] {
-		if row.gen == gen {
+		if row.remote == "" && row.local == gen {
 			delete(f.latest[id], kind)
 			offlineKinds = append(offlineKinds, kind)
 		}
@@ -130,6 +154,26 @@ func (f *Fold) OnDown(_ context.Context, id actor.ActorID, gen actorrt.Incarnati
 	// edge-only: each removed row is a present→absent (offline) edge, not the
 	// per-tick down path itself (that already logs elsewhere) — this is the
 	// oplog fact that presence testimony went offline for this actor/kind.
+	for _, kind := range offlineKinds {
+		f.logger.Info("platform.presence.edge", "actor", string(id), "kind", string(kind), "edge", "offline")
+	}
+}
+
+// OnRemoteDown removes only testimony published by the exact route attempt
+// that went down; a stale G1 close cannot erase G2 testimony.
+func (f *Fold) OnRemoteDown(id actor.ActorID, key actorhost.AttemptKey) {
+	var offlineKinds []actorrt.ObsKind
+	f.mu.Lock()
+	for kind, row := range f.latest[id] {
+		if row.remote == key {
+			delete(f.latest[id], kind)
+			offlineKinds = append(offlineKinds, kind)
+		}
+	}
+	if len(f.latest[id]) == 0 {
+		delete(f.latest, id)
+	}
+	f.mu.Unlock()
 	for _, kind := range offlineKinds {
 		f.logger.Info("platform.presence.edge", "actor", string(id), "kind", string(kind), "edge", "offline")
 	}
@@ -173,11 +217,20 @@ func (f *Fold) copy(id actor.ActorID) map[actorrt.ObsKind]entry {
 
 type View struct {
 	fold      *Fold
-	runtime   *actorrt.Runtime
+	runtime   ExecutionView
 	authority storespec.ActorAuthority
 }
 
-func NewView(fold *Fold, runtime *actorrt.Runtime, authority storespec.ActorAuthority) View {
+// ExecutionView is the narrow local-observation surface presence needs. It is
+// intentionally implemented by actorctl.ChannelActors, not by an execution
+// owner or registry.
+type ExecutionView interface {
+	Stat(actor.ActorID) (actorrt.UnitStat, bool)
+	Incarnation(actor.ActorID) (actorrt.Incarnation, bool)
+	Attempt(actor.ActorID) (actorhost.AttemptKey, bool)
+}
+
+func NewView(fold *Fold, runtime ExecutionView, authority storespec.ActorAuthority) View {
 	return View{fold: fold, runtime: runtime, authority: authority}
 }
 
@@ -187,7 +240,8 @@ func NewView(fold *Fold, runtime *actorrt.Runtime, authority storespec.ActorAuth
 func (v View) Snapshot(ctx context.Context, id actor.ActorID) (Snapshot, error) {
 	rows := v.fold.copy(id)
 	stat, present := v.runtime.Stat(id)
-	gen, hasGen := v.runtime.CurrentIncarnation(id)
+	gen, hasGen := v.runtime.Incarnation(id)
+	attempt, hasAttempt := v.runtime.Attempt(id)
 	_, member, err := v.authority.LookupActive(ctx, id)
 	if err != nil {
 		return Snapshot{}, err
@@ -200,7 +254,8 @@ func (v View) Snapshot(ctx context.Context, id actor.ActorID) (Snapshot, error) 
 		return out, nil
 	}
 	for kind, row := range rows {
-		stale := hasGen && row.gen != gen
+		stale := (row.remote == "" && hasGen && row.local != gen) ||
+			(row.remote != "" && hasAttempt && row.remote != attempt)
 		out.L3[kind] = Testimony{Val: row.val, ReceivedAt: row.receivedAt, StaleFromPriorLife: stale}
 	}
 	return out, nil

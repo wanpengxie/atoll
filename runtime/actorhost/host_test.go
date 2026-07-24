@@ -409,6 +409,11 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 	if string(low) > string(high) {
 		low, high = high, low
 	}
+	if err := host.AcceptFullDesired([]DesiredProjection{CarrierDesired{
+		ActorID: id, AttemptKey: low, PeerDomain: "daemon",
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	b1 := newTestBinding()
 	if err := host.Attach(id, low, b1); err != nil {
 		t.Fatal(err)
@@ -423,6 +428,11 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 		t.Fatal("same-attempt predecessor was not signaled closed")
 	}
 	b3 := newTestBinding()
+	if err := host.AcceptFullDesired([]DesiredProjection{CarrierDesired{
+		ActorID: id, AttemptKey: high, PeerDomain: "daemon",
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	if err := host.Attach(id, high, b3); err != nil {
 		t.Fatal(err)
 	}
@@ -505,6 +515,11 @@ func TestEndpointInvocationUsesOneSlidingWindowSnapshot(t *testing.T) {
 	id := actor.ActorID("agent:window")
 	key := testAttempt(t)
 
+	if err := host.AcceptFullDesired([]DesiredProjection{CarrierDesired{
+		ActorID: id, AttemptKey: key, PeerDomain: "daemon",
+	}}); err != nil {
+		t.Fatal(err)
+	}
 	b1 := newTestBinding()
 	b1.block = make(chan struct{})
 	if err := host.Attach(id, key, b1); err != nil {
@@ -641,6 +656,39 @@ func TestHighChurnRetiringSetReturnsToZero(t *testing.T) {
 		snapshot, ok := host.Inspect(id)
 		return ok && snapshot.Retiring == 0
 	})
+}
+
+func TestCloseDoesNotReportAlreadyDoneRetiringUnit(t *testing.T) {
+	t.Parallel()
+	host, err := New(Config{
+		Domain:       "server",
+		PollInterval: time.Millisecond,
+		BodyBuilder:  func(BodyBuildInput) actorrt.Actor { return newHostTestActor() },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := actor.ActorID("agent:done-before-close")
+	key := testAttempt(t)
+	if err := host.AcceptFullDesired([]DesiredProjection{bodyDesiredFor(t, id, key)}); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool {
+		snapshot, ok := host.Inspect(id)
+		return ok && snapshot.Actual == ActualBody
+	})
+	if err := host.AcceptFullDesired(nil); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, func() bool {
+		_, ok := host.Inspect(id)
+		return !ok
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := host.Close(ctx); err != nil {
+		t.Fatalf("Close reported an already-Done retiring unit: %v", err)
+	}
 }
 
 func TestHostCoreConformanceOnServerAndDaemonDomains(t *testing.T) {

@@ -47,6 +47,14 @@ func (a *recordingIdleArbiter) RequestIdle(context.Context) error {
 	return nil
 }
 
+func (*recordingIdleArbiter) Fork(context.Context, message.ID, actorcaps.ForkSpec) (actor.ActorID, error) {
+	return "", errors.New("unexpected fork")
+}
+
+func (*recordingIdleArbiter) EndSelf(context.Context, actorcaps.EndSelfRequest) error {
+	return errors.New("unexpected end")
+}
+
 func (a *recordingIdleArbiter) count() int {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -148,14 +156,16 @@ func (s *failingAckSchedule) Ack(_ context.Context, id schedule.TimerID) error {
 	return s.err
 }
 
-// fakeSpawn is an actorrt.SpawnHandle double.
+// fakeSpawn is an actorcaps.LifecycleHandle double.
 type fakeSpawn struct{}
 
-func (fakeSpawn) Fork(_ context.Context, spec actorrt.ForkSpec) (actor.ActorID, error) {
+func (fakeSpawn) Fork(_ context.Context, _ message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error) {
 	return actor.ActorID("child/" + spec.NameHint), nil
 }
-func (fakeSpawn) DespawnChild(context.Context, actor.ActorID, string) error { return nil }
-func (fakeSpawn) EndSelf(context.Context) error                             { return nil }
+func (fakeSpawn) RequestIdle(context.Context) error { return nil }
+func (fakeSpawn) EndSelf(context.Context, actorcaps.EndSelfRequest) error {
+	return nil
+}
 
 // fakeActorContext is an actorrt.ActorContext double.
 type fakeActorContext struct {
@@ -802,7 +812,8 @@ func TestEngine_LongComputationOutsideRecvDoesNotRequestIdle(t *testing.T) {
 	pen := &fakePen{self: "actor:test"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	arbiter := &recordingIdleArbiter{}
-	e.options = Options{IdleTimeout: 5 * time.Millisecond, IdleArbiter: arbiter}
+	e.lifecycle = arbiter
+	e.options = Options{IdleTimeout: 5 * time.Millisecond}
 
 	computed := make(chan struct{})
 	e.def = Def{New: func() (Proc, error) {
@@ -831,38 +842,24 @@ func TestEngine_LongComputationOutsideRecvDoesNotRequestIdle(t *testing.T) {
 	}
 }
 
-func TestEngine_IdleApprovalRetiresOnlyAfterAcceptedWork(t *testing.T) {
-	e := newTestEngine(t, &fakePen{self: "actor:test"}, Hooks{}, 8, 8)
-	e.lifeCtx = context.Background()
-	e.occupant.Store(int32(occupantRunning))
-	env := &message.Envelope{ID: "event-before-idle", Kind: message.KindEvent, Type: "work"}
-	if err := e.Receive(context.Background(), env); err != nil {
-		t.Fatalf("Receive: %v", err)
-	}
-	e.IdleApproved()
-
-	msg, err := e.Recv()
-	if err != nil || msg.Envelope.ID != env.ID {
-		t.Fatalf("first Recv = (%+v, %v), want accepted work", msg.Envelope, err)
-	}
-	if _, err := e.Recv(); !errors.Is(err, ErrIdleExit) {
-		t.Fatalf("second Recv err = %v, want ErrIdleExit", err)
-	}
-}
-
-// TestEngine_ForkAndDespawnChildReturnErrUnsupportedWhenLifecycleNil pins the
+// TestEngine_LifecycleMethodsReturnErrUnsupportedWhenLifecycleNil pins the
 // defensive capability-absence contract: a deliberately incomplete host must
 // answer ErrUnsupported, never panic on a nil lifecycle handle.
-func TestEngine_ForkAndDespawnChildReturnErrUnsupportedWhenLifecycleNil(t *testing.T) {
+func TestEngine_LifecycleMethodsReturnErrUnsupportedWhenLifecycleNil(t *testing.T) {
 	pen := &fakePen{self: "actor:daemon-hosted"}
 	e := newTestEngine(t, pen, Hooks{}, 8, 8)
 	e.lifecycle = nil
 
-	if _, err := e.Fork(actorrt.ForkSpec{Kind: actor.KindTool, Class: "worker", NameHint: "hint"}); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("Fork with nil Spawn arm err = %v, want ErrUnsupported", err)
+	if _, err := e.Fork("fork-1", actorcaps.ForkSpec{
+		Kind: actor.KindTool, Class: "worker", NameHint: "hint",
+	}); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("Fork with nil lifecycle err = %v, want ErrUnsupported", err)
 	}
-	if err := e.DespawnChild("actor:child"); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("DespawnChild with nil Spawn arm err = %v, want ErrUnsupported", err)
+	if err := e.RequestIdle(); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("RequestIdle with nil lifecycle err = %v, want ErrUnsupported", err)
+	}
+	if err := e.End(); !errors.Is(err, ErrUnsupported) {
+		t.Fatalf("End with nil lifecycle err = %v, want ErrUnsupported", err)
 	}
 }
 

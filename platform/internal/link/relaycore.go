@@ -80,6 +80,22 @@ func newRelayCore[Ack any](codec *ipc.Codec, requestKind ipc.Kind, closedErr err
 	return &relayCore[Ack]{codec: codec, requestKind: requestKind, closedErr: closedErr}
 }
 
+// writeOneWay serializes an unacknowledged frame with this core's request
+// writes while preserving the FIFO correlation queue. It is used only by the
+// actor stream's existing observation/cancel side channels; it adds no retry,
+// waiter, or delivery state.
+func (c *relayCore[Ack]) writeOneWay(kind ipc.Kind, payload []byte) error {
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	c.mu.Lock()
+	closed := c.closed
+	c.mu.Unlock()
+	if closed {
+		return c.closedErr
+	}
+	return c.codec.Write(ipc.Frame{Kind: kind, Payload: json.RawMessage(payload)})
+}
+
 // roundTrip sends payload as a frame of requestKind and blocks for the FIFO head
 // ack. It reports three DISJOINT outcomes (axiom 6's pre/post-send split + axiom 5):
 //   - definiteErr != nil: the ctx was ALREADY cancelled before the frame left, so

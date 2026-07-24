@@ -55,9 +55,11 @@ func nilInterface(value any) bool {
 // AuthenticatedLinkSession. Close must be non-blocking; Done is the physical
 // join handle. When Done is nil, Close itself is the complete teardown.
 type ActorStreamResource struct {
-	Arms  RawActorArms
-	Close func() error
-	Done  <-chan struct{}
+	Arms          RawActorArms
+	Close         func() error
+	Done          <-chan struct{}
+	CancelRequest func(message.ID) error
+	PublishObs    func(string, []byte) error
 }
 
 // ActorStreamOpener opens one fresh physical actor stream. It performs no
@@ -99,7 +101,7 @@ type AuthenticatedLinkSession struct {
 // NewAuthenticatedLinkSession constructs a physical owner. It does not imply
 // that any actor route is present.
 func NewAuthenticatedLinkSession(cfg AuthenticatedLinkSessionConfig) (*AuthenticatedLinkSession, error) {
-	if cfg.Peer == "" || cfg.OpenActorStream == nil {
+	if cfg.Peer == "" {
 		return nil, ErrInvalidPhysicalChild
 	}
 	session := &AuthenticatedLinkSession{
@@ -161,6 +163,9 @@ func (s *AuthenticatedLinkSession) OpenActorStream(
 ) (*ActorStream, error) {
 	if s == nil || id == "" {
 		return nil, ErrPhysicalSessionClosed
+	}
+	if s.opener == nil {
+		return nil, ErrInvalidPhysicalChild
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -460,6 +465,20 @@ func (s *ActorStream) Arms() RawActorArms {
 		return RawActorArms{}
 	}
 	return s.resource.Arms
+}
+
+func (s *ActorStream) SendCancelRequest(id message.ID) error {
+	if s == nil || s.resource.CancelRequest == nil {
+		return ErrPhysicalSessionClosed
+	}
+	return s.resource.CancelRequest(id)
+}
+
+func (s *ActorStream) PublishObs(kind string, value []byte) error {
+	if s == nil || s.resource.PublishObs == nil {
+		return ErrPhysicalSessionClosed
+	}
+	return s.resource.PublishObs(kind, value)
 }
 
 // Close only signals teardown; the session remains the physical join owner.

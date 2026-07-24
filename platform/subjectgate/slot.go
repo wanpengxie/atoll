@@ -209,7 +209,7 @@ func (s *Slot) Snapshot() (level Level, epoch, edgeSeq int64, ok bool) {
 // 出生握手 (§3.2, 六轮 P0-2): the current value (if any) is delivered as fn's
 // FIRST PresenceUpdate, UNDER the slot lock — so it shares one totally-ordered
 // delivery channel with every subsequent update (a newer update can never
-//逆序 ahead of this snapshot: both go through the same lock-held notify path).
+// 逆序 ahead of this snapshot: both go through the same lock-held notify path).
 // This replaces the prior "read Snapshot out-of-lock then subscribe" form whose
 // return-value snapshot could be consumed AFTER a newer value had already been
 // delivered (permanent错序 after dedup).
@@ -341,6 +341,18 @@ func (r *Registry) Slot(id actor.ActorID) (*Slot, bool) {
 	defer r.mu.Unlock()
 	s, ok := r.slots[id]
 	return s, ok
+}
+
+// IDs returns a point-in-time slot-key snapshot for the composition root's
+// membership-derived reconcile. It exposes no Slot objects.
+func (r *Registry) IDs() []actor.ActorID {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	ids := make([]actor.ActorID, 0, len(r.slots))
+	for id := range r.slots {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // Remove drops id's slot (户籍级联, S4 consumes). Forgets its testimony first so

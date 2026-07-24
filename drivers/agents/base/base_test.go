@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/access"
@@ -103,11 +104,11 @@ func (s *fakeSys) After(time.Duration, string, any) (schedule.TimerID, error) {
 	return "", nil
 }
 func (s *fakeSys) CancelTimer(schedule.TimerID) error { return nil }
-func (s *fakeSys) Fork(actorrt.ForkSpec) (actor.ActorID, error) {
+func (s *fakeSys) Fork(message.ID, actorcaps.ForkSpec) (actor.ActorID, error) {
 	return "", nil
 }
-func (s *fakeSys) DespawnChild(actor.ActorID) error { return nil }
-func (s *fakeSys) End() error                       { return nil }
+func (s *fakeSys) RequestIdle() error { return nil }
+func (s *fakeSys) End() error         { return nil }
 func (s *fakeSys) PublishObs(kind actorrt.ObsKind, _ actorrt.ObsValue) error {
 	s.obs = append(s.obs, kind)
 	return nil

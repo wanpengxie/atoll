@@ -151,6 +151,29 @@ func (d *DaemonOutbound) Wake() {
 	}
 }
 
+func (d *DaemonOutbound) publishObs(
+	id actor.ActorID,
+	key actorhost.AttemptKey,
+	kind actorrt.ObsKind,
+	value actorrt.ObsValue,
+) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	var target *OutboundSlot
+	for slot := range d.slots {
+		if slot.id == id && slot.key == key && !slot.closed.Load() {
+			target = slot
+			break
+		}
+	}
+	d.mu.Unlock()
+	if target != nil {
+		_ = target.PublishObs(kind, value)
+	}
+}
+
 // Prepare registers one exact disconnected slot before its Unit can be
 // published.
 func (d *DaemonOutbound) Prepare(
@@ -435,6 +458,25 @@ func (s *OutboundSlot) Coordinate() (actor.ActorID, actorhost.AttemptKey) {
 		return "", ""
 	}
 	return s.id, s.key
+}
+
+// CancelRequest and PublishObs are actorbase/actorrt host hooks, not actor
+// capabilities. They use the same exact slot and one-load/one-call discipline
+// as the five capability facades and never buffer or retry across disconnects.
+func (s *OutboundSlot) CancelRequest(id message.ID) error {
+	bundle, err := s.load()
+	if err != nil {
+		return err
+	}
+	return bundle.Stream.SendCancelRequest(id)
+}
+
+func (s *OutboundSlot) PublishObs(kind actorrt.ObsKind, value actorrt.ObsValue) error {
+	bundle, err := s.load()
+	if err != nil {
+		return err
+	}
+	return bundle.Stream.PublishObs(string(kind), value)
 }
 
 // Close seals slot/session admission and joins only DaemonOutbound-owned

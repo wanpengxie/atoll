@@ -1,23 +1,24 @@
 package home
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
+// DeclareRequest is bootstrap input only. Serving-time declaration changes
+// enter actorctl.ApplyDeclaration/Introduce and never mutate the store behind
+// Controller's back.
 type DeclareRequest struct {
 	SourceDeclID string
 	Kind         actor.Kind
 	Class        string
 	Config       *json.RawMessage
 	Placement    storespec.Placement
-	TIdle        int64 // milliseconds; zero means no idle retirement
+	TIdle        int64
 	MakeDefault  bool
 	CreatedAt    int64
 }
@@ -28,64 +29,12 @@ type DeclareResult struct {
 	ConfigUpdated bool
 }
 
-func (h *Home) declare(ctx context.Context, in DeclareRequest) (DeclareResult, error) {
-	if h.closed.Load() {
-		return DeclareResult{}, ErrClosed
+func validateDeclareRequest(in DeclareRequest) error {
+	if in.SourceDeclID == "" || in.Class == "" || in.CreatedAt <= 0 ||
+		in.TIdle < 0 || in.Placement.Validate() != nil {
+		return errors.New("platform: invalid declaration request")
 	}
-	if in.SourceDeclID == "" || in.Class == "" || in.CreatedAt <= 0 || in.TIdle < 0 || in.Placement.Validate() != nil {
-		return DeclareResult{}, errors.New("platform: invalid declaration request")
-	}
-	var config json.RawMessage
-	if in.Config != nil {
-		config = append([]byte(nil), (*in.Config)...)
-	}
-	binding := actor.Binding("")
-	if in.Placement.Kind == storespec.PlacementDaemon {
-		binding = actor.BindingRuntimeInboundViaRelay
-	}
-	admitted, err := h.cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		Kind: in.Kind, Binding: binding, Class: in.Class, Config: config,
-		Placement: in.Placement, TIdle: durationMillis(in.TIdle), SourceDeclID: in.SourceDeclID,
-		CreatedAt: in.CreatedAt,
-	})
-	if err != nil {
-		return DeclareResult{}, err
-	}
-	row, ok, err := h.cs.Declared.LookupDeclaredActive(ctx, admitted.ID)
-	if err != nil {
-		return DeclareResult{}, err
-	}
-	if !ok {
-		return DeclareResult{}, errors.New("platform: committed declaration missing from declared view")
-	}
-	updated := false
-	if !admitted.Created && in.Config != nil {
-		synced, syncErr := h.opEntry.applyResolvedDeclaration(ctx, row.ID, row.SourceDeclID, row.Class, config)
-		if syncErr != nil {
-			return DeclareResult{}, syncErr
-		}
-		updated = synced.Status == storespec.DeclarationApplied
-		if updated {
-			var active bool
-			row, active, err = h.controlIndex.LookupActive(ctx, row.ID)
-			if err != nil {
-				return DeclareResult{}, err
-			}
-			if !active {
-				return DeclareResult{}, errors.New("platform: applied declaration missing from control index")
-			}
-		}
-	}
-	row, err = h.publishDeclaredActor(ctx, admitted.ID, storespec.RoleNone)
-	if err != nil {
-		return DeclareResult{}, fmt.Errorf("platform: publish declared actor %s: %w", admitted.ID, err)
-	}
-	if in.MakeDefault {
-		if err := h.cs.Routing.SetDefaultAgent(ctx, row.ID); err != nil {
-			return DeclareResult{}, err
-		}
-	}
-	return DeclareResult{Row: row, Created: admitted.Created, ConfigUpdated: updated}, nil
+	return nil
 }
 
 func durationMillis(ms int64) time.Duration { return time.Duration(ms) * time.Millisecond }

@@ -248,19 +248,7 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 		genesis.ParentChannelID = string(spec.Origin.ParentChannelID)
 		genesis.InitiatorPrincipal = spec.Origin.InitiatorPrincipal
 	}
-	homeInstance, err := h.openHome(spec.ChannelID, main, true, &genesis)
-	if err != nil {
-		return ProvisionReceipt{}, err
-	}
-	succeeded := false
-	defer func() {
-		if !succeeded {
-			_ = home.Shutdown(homeInstance)
-		}
-	}()
-	if _, err := home.BootstrapOwner(ctx, homeInstance, spec.OwnerPrincipal); err != nil {
-		return ProvisionReceipt{}, fmt.Errorf("channelhost: admit owner: %w", err)
-	}
+	bootstrapDeclarations := make([]home.DeclareRequest, 0, len(spec.GenesisDeclarations))
 	for _, declaration := range spec.GenesisDeclarations {
 		if err := declaration.Rendered.Validate(); err != nil {
 			return ProvisionReceipt{}, fmt.Errorf("channelhost: invalid genesis declaration %q: %w", declaration.DeclID, err)
@@ -270,14 +258,27 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 			return ProvisionReceipt{}, err
 		}
 		config := json.RawMessage(append([]byte(nil), declaration.Rendered.Config...))
-		if _, err := home.BootstrapDeclaration(ctx, homeInstance, home.DeclareRequest{
+		bootstrapDeclarations = append(bootstrapDeclarations, home.DeclareRequest{
 			SourceDeclID: declaration.DeclID, Kind: declaration.Kind,
 			Class: declaration.Rendered.Class, Config: &config, Placement: placement,
 			TIdle: declaration.Rendered.TIdleMS, MakeDefault: declaration.DeclID == spec.DefaultSourceDeclID,
 			CreatedAt: spec.CreatedAt,
-		}); err != nil {
-			return ProvisionReceipt{}, fmt.Errorf("channelhost: declare genesis %q: %w", declaration.DeclID, err)
+		})
+	}
+	homeInstance, err := h.openHome(
+		spec.ChannelID, main, true, &genesis,
+		spec.OwnerPrincipal, bootstrapDeclarations,
+	)
+	if err != nil {
+		return ProvisionReceipt{}, err
+	}
+	succeeded := false
+	defer func() {
+		if !succeeded {
+			_ = home.Shutdown(homeInstance)
 		}
+	}()
+	for _, declaration := range spec.GenesisDeclarations {
 		rows, err := homeInstance.View().DeclaredBySource(ctx, declaration.DeclID)
 		if err != nil || len(rows) != 1 || rows[0].Class != declaration.Rendered.Class {
 			return ProvisionReceipt{}, fmt.Errorf("channelhost: genesis declaration %q failed readback", declaration.DeclID)
@@ -334,7 +335,7 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	// Read the owner from genesis first through a narrow store-only pass would
 	// duplicate assembly. Home validates ID/type, then ChannelHost reads the
 	// trusted owner from the resulting View and compares it to stored genesis.
-	homeInstance, err := h.openHome(spec.ChannelID, main, false, &genesis)
+	homeInstance, err := h.openHome(spec.ChannelID, main, false, &genesis, "", nil)
 	if err != nil {
 		if strings.Contains(err.Error(), "owner invariant") {
 			return errors.Join(ErrOwnerInvariant, err)
@@ -361,11 +362,19 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 	return nil
 }
 
-func (h *ChannelHost) openHome(id channel.ID, path string, bootstrap bool, genesis *storespec.ChannelGenesis) (*home.Home, error) {
+func (h *ChannelHost) openHome(
+	id channel.ID,
+	path string,
+	bootstrap bool,
+	genesis *storespec.ChannelGenesis,
+	bootstrapOwner string,
+	bootstrapDeclarations []home.DeclareRequest,
+) (*home.Home, error) {
 	config := home.Config{
 		ChannelID: id, DBPath: path, Bootstrap: bootstrap, MustExistDB: !bootstrap,
 		CompositionResolver: h.deps.CompositionResolver, IntroductionResolver: h.deps.IntroductionResolver,
-		Logger: h.logger,
+		Logger: h.logger, BootstrapOwnerPrincipal: bootstrapOwner,
+		BootstrapDeclarations: bootstrapDeclarations,
 	}
 	if bootstrap {
 		config.Genesis = genesis

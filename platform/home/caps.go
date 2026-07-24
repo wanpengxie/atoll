@@ -2,45 +2,184 @@ package home
 
 import (
 	"context"
+	"errors"
+
 	"github.com/wanpengxie/atoll/lib/actorcaps"
-	"github.com/wanpengxie/atoll/platform/internal/link"
-	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
+	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// buildCaps assembles the caps bundle — the five-capability bundle welded to (id,
-// inc). Handing out the handle and wrapping the live membrane happen in the same
-// step (invariant: no bare handle escapes). It is the SINGLE
-// caps assembler, shared by activation and by fork (spawnHandle.Fork
-// holds this method value as its capsAssembler and re-runs it against each child's
-// incarnation) — so a fork child is born with the IDENTICAL membrane set as a
-// top-level admission (recursive assembly), never a raw un-membraned closure.
-//
-// Wired this period: Pen (livePen over the harness pen), Access + State
-// (liveAccess over the channel-scoped Mint and actor-scoped MintState handles —
-// cs.Access is already assembled by storeopen, drawn directly), Spawn (the
-// by-incarnation fork/despawn handle; builder may be nil → Fork fail-fasts).
-//
-// Schedule is welded over the schedule engine's per-author ScheduleHandle
-// (h.schedMinter, assembled by OpenScheduler at Open step 10) inside the same
-// liveSchedule membrane the other caps wear — self-targeted timers gated on this
-// incarnation still being live. schedMinter is always set before any participant
-// admission (the system cell does not pass through buildCaps).
-func (h *Home) buildCaps(id actor.ActorID, kind actor.Kind, birthVersion int64, inc actorrt.Incarnation) actorcaps.Caps {
-	rt := h.channel.Cells()
-	state, err := h.stateHandles.Resolve(context.Background(), storespec.AuthorStamp{ID: id, BirthVersion: birthVersion})
+var ErrActorNotCurrent = errors.New("platform: actor is not current")
+
+type currentPen struct {
+	raw     harness.Pen
+	current actorhost.ActualCurrent
+}
+
+func (p currentPen) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
+	if !p.current.IsCurrent() {
+		return harness.WriteResult{}, ErrActorNotCurrent
+	}
+	return p.raw.Write(ctx, env)
+}
+
+type currentAccess struct {
+	raw     accessdoor.AccessHandle
+	current actorhost.ActualCurrent
+}
+
+func (a currentAccess) Invoke(
+	ctx context.Context,
+	op access.Operation,
+	id resource.ResourceID,
+	args []byte,
+	grant *access.Grant,
+) (accessdoor.Outcome, error) {
+	if !a.current.IsCurrent() {
+		return accessdoor.Outcome{}, ErrActorNotCurrent
+	}
+	return a.raw.Invoke(ctx, op, id, args, grant)
+}
+
+type currentResourceAccess struct {
+	raw     accessdoor.ResourceAccessHandle
+	current actorhost.ActualCurrent
+}
+
+func (a currentResourceAccess) Invoke(
+	ctx context.Context,
+	op access.Operation,
+	id resource.ResourceID,
+	args []byte,
+	grant *access.Grant,
+) (accessdoor.Outcome, error) {
+	if !a.current.IsCurrent() {
+		return accessdoor.Outcome{}, ErrActorNotCurrent
+	}
+	return a.raw.Invoke(ctx, op, id, args, grant)
+}
+
+func (a currentResourceAccess) Create(
+	ctx context.Context,
+	id resource.ResourceID,
+	spec accessdoor.CreateSpec,
+	initial []byte,
+) (accessdoor.Outcome, error) {
+	if !a.current.IsCurrent() {
+		return accessdoor.Outcome{}, ErrActorNotCurrent
+	}
+	return a.raw.Create(ctx, id, spec, initial)
+}
+
+func (a currentResourceAccess) Stat(
+	ctx context.Context,
+	id resource.ResourceID,
+) (accessdoor.StatResult, error) {
+	if !a.current.IsCurrent() {
+		return accessdoor.StatResult{}, ErrActorNotCurrent
+	}
+	return a.raw.Stat(ctx, id)
+}
+
+func (a currentResourceAccess) List(
+	ctx context.Context,
+	query accessdoor.ListQuery,
+) (accessdoor.ListPage, error) {
+	if !a.current.IsCurrent() {
+		return accessdoor.ListPage{}, ErrActorNotCurrent
+	}
+	return a.raw.List(ctx, query)
+}
+
+func (a currentResourceAccess) Open(
+	ctx context.Context,
+	id resource.ResourceID,
+	op access.Operation,
+) (accessdoor.FileAccess, accessdoor.Outcome, error) {
+	if !a.current.IsCurrent() {
+		return accessdoor.FileAccess{}, accessdoor.Outcome{}, ErrActorNotCurrent
+	}
+	return a.raw.Open(ctx, id, op)
+}
+
+func (a currentResourceAccess) Redeem(
+	ctx context.Context,
+	route accessdoor.FileRoute,
+) (accessdoor.FileAccess, error) {
+	if !a.current.IsCurrent() {
+		return accessdoor.FileAccess{}, ErrActorNotCurrent
+	}
+	return a.raw.Redeem(ctx, route)
+}
+
+type currentSchedule struct {
+	raw     schedule.ScheduleHandle
+	current actorhost.ActualCurrent
+}
+
+func (s currentSchedule) Schedule(ctx context.Context, request schedule.ScheduleReq) (schedule.TimerID, error) {
+	if !s.current.IsCurrent() {
+		return "", ErrActorNotCurrent
+	}
+	return s.raw.Schedule(ctx, request)
+}
+
+func (s currentSchedule) Cancel(ctx context.Context, id schedule.TimerID) error {
+	if !s.current.IsCurrent() {
+		return ErrActorNotCurrent
+	}
+	return s.raw.Cancel(ctx, id)
+}
+
+func (s currentSchedule) Ack(ctx context.Context, id schedule.TimerID) error {
+	if !s.current.IsCurrent() {
+		return ErrActorNotCurrent
+	}
+	return s.raw.Ack(ctx, id)
+}
+
+// buildManagedCaps is the Server production assembly for one exact Body. The
+// business actor receives only actor-facing capabilities; ActualCurrent stays
+// inside these facades and the direct lifecycle handle.
+func (h *Home) buildManagedCaps(
+	input actorhost.BodyBuildInput,
+	lifecycle actorcaps.LifecycleHandle,
+) (actorcaps.Caps, error) {
+	row, ok, err := h.actors.Lookup(input.ActorID)
 	if err != nil {
-		panic(err)
+		return actorcaps.Caps{}, err
+	}
+	if !ok {
+		return actorcaps.Caps{}, ErrEndNotMember
+	}
+	author := storespec.AuthorStamp{
+		ID: input.ActorID, BirthVersion: row.CurrentDeclVersion,
+	}
+	state, err := h.stateHandles.Resolve(context.Background(), author)
+	if err != nil {
+		return actorcaps.Caps{}, err
 	}
 	return actorcaps.Caps{
-		Pen:      link.NewLivePen(h.minter.Mint(id, kind, h.channelID, birthVersion), inc, rt),
-		Access:   link.NewLiveResourceAccess(h.cs.Access.Mint(storespec.AuthorStamp{ID: id, BirthVersion: birthVersion}), inc, rt),
-		State:    link.NewLiveAccess(state, inc, rt),
-		Schedule: link.NewLiveSchedule(h.schedMinter.Mint(storespec.AuthorStamp{ID: id, BirthVersion: birthVersion}), inc, rt),
-		// Lifecycle admission recurses through this same assembler. State resolution
-		// is world-aware: declared identities receive the durable var layer, forked
-		// identities the Home-session run layer, both behind the same handle shape.
-		Lifecycle: newSpawnHandle(h, inc, birthVersion, rt),
-	}
+		Pen: currentPen{
+			raw:     h.minter.Mint(input.ActorID, row.Kind, h.channelID, row.CurrentDeclVersion),
+			current: input.Current,
+		},
+		Access: currentResourceAccess{
+			raw: h.cs.Access.Mint(author), current: input.Current,
+		},
+		State: currentAccess{
+			raw: state, current: input.Current,
+		},
+		Schedule: currentSchedule{
+			raw:     h.schedMinter.MintCurrent(author, input.Current.IsCurrent),
+			current: input.Current,
+		},
+		Lifecycle: lifecycle,
+	}, nil
 }

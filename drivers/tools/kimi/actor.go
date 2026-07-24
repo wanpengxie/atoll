@@ -54,15 +54,6 @@ const defaultReaperInterval = time.Second
 // within its death grace, so a sub-second retry lands the successor promptly.
 const defaultBindRetryInterval = 500 * time.Millisecond
 
-// Internal self-authored wake types (spec §3: reaper migrated from a private
-// ticker goroutine to sys.After self-wake, swept on the worker goroutine). They
-// are KindEvent messages the incarnation sends to itself; run()'s loop
-// intercepts them before dispatch, so they never reach the business handler.
-const (
-	reaperTickType = "kimi.internal.reaper_tick"
-	bindRetryType  = "kimi.internal.bind_retry"
-)
-
 // Actor is the kimi (Kimi WebBridge) adapter's process state. The inward
 // (channel) face is run()'s dispatch off sys.Recv(); the outward (device) face
 // is the embedded *device, which owns the WS endpoint, the connection, the
@@ -70,10 +61,9 @@ const (
 //
 // sys is bound once, at run()'s first line (birth) — before that this Actor is
 // a half-built value NewActor produced, never handed a Proc's identity. The
-// worker goroutine calls Recv/dispatch serially; the device's read-loop +
-// reaper goroutines close requests by calling sys.Reply/Fail directly (legal
-// fan-out — spec §1.2: Sys is concurrency-safe, Msg is immutable), guarded by
-// *device's own mutex for the in-flight table they share.
+// worker goroutine calls Recv/dispatch serially; the device read-loop and local
+// maintenance goroutine close or reap requests through the concurrency-safe
+// Sys and device table.
 //
 // Domain face (vs xhs): kimi serves a SINGLE request type, kimi.command, whose
 // device verb is the payload's `action` (one of 13 browser primitives) and whose
@@ -143,61 +133,57 @@ func (a *Actor) run(sys actorbase.Sys) error {
 	if !isLoopbackAddr(a.dev.addrCfg) {
 		return fmt.Errorf("kimi: device endpoint is keyless and trusts localhost; refusing non-loopback bind %q (use 127.0.0.1)", a.dev.addrCfg)
 	}
-	defer func() { _ = a.dev.stop(context.Background()) }()
 	// Initial L3 edge: a connection-bearing adapter KNOWS it starts disconnected —
 	// publish offline so the home shows a definite state, not unknown.
 	a.publishDevicePresence(false)
-	if err := a.tryBind(); err != nil {
-		return err
-	}
+	maintenanceDone := make(chan struct{})
+	go func() {
+		defer close(maintenanceDone)
+		a.maintainDevice(sys.Life())
+	}()
+	defer func() {
+		<-maintenanceDone
+		_ = a.dev.stop(context.Background())
+	}()
 
 	for {
 		msg, err := sys.Recv()
 		if err != nil {
 			return err
 		}
-		switch msg.Type {
-		case bindRetryType:
-			if err := a.tryBind(); err != nil {
-				return err
-			}
-		case reaperTickType:
-			a.dev.sweep()
-			// A dropped reaper self-wake silently ossifies this incarnation (sweeps
-			// stop, stale sessions never reaped) — a static half-alive actor is worse
-			// than death. Die loud so the ring re-forges a healthy incarnation.
-			if _, err := a.sys.After(a.reaperInterval, reaperTickType, nil); err != nil {
-				return fmt.Errorf("kimi: reaper re-arm failed, dying to re-forge: %w", err)
-			}
-		default:
-			a.handle(msg)
-		}
+		a.handle(msg)
 	}
 }
 
-// tryBind attempts to listen on the exclusive loopback port. On success it arms
-// the reaper self-wake; on failure (the port is still held by a predecessor
-// incarnation — Q8=B) it schedules a retry and returns without dying. The
-// listener is a bound-once resource, so an already-bound device short-circuits.
-// An arm FAILURE (bind-retry or reaper) breaks the self-wake chain — silent
-// ossification is worse than横死, so it returns a loud error and lets the ring
-// re-forge a healthy incarnation.
-func (a *Actor) tryBind() error {
-	if a.dev.bound() {
-		return nil
-	}
-	if err := a.dev.start(); err != nil {
-		a.logger.Warn("kimi.device.bind_retry", "addr", a.dev.addrCfg, "err", err.Error())
-		if _, aerr := a.sys.After(a.bindRetryInterval, bindRetryType, nil); aerr != nil {
-			return fmt.Errorf("kimi: bind-retry re-arm failed, dying to re-forge: %w", aerr)
+// maintainDevice owns only this adapter's local physical resources. It does
+// not use Schedule: a daemon↔Server disconnect may make channel capabilities
+// fail-closed, but it must not kill or rebuild an otherwise-live incarnation.
+func (a *Actor) maintainDevice(ctx context.Context) {
+	for {
+		if err := a.dev.start(); err == nil {
+			break
+		} else {
+			a.logger.Warn("kimi.device.bind_retry", "addr", a.dev.addrCfg, "err", err.Error())
 		}
-		return nil
+		timer := time.NewTimer(a.bindRetryInterval)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return
+		case <-timer.C:
+		}
 	}
-	// Bound: arm the first reaper tick; each tick re-arms the next in run().
-	if _, err := a.sys.After(a.reaperInterval, reaperTickType, nil); err != nil {
-		return fmt.Errorf("kimi: reaper arm failed, dying to re-forge: %w", err)
+
+	ticker := time.NewTicker(a.reaperInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			a.dev.sweep()
+		}
 	}
-	return nil
 }
 
 // publishDevicePresence pushes a device-presence edge (L3) on the actor-source obs axis.

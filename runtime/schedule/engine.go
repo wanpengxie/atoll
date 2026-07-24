@@ -12,7 +12,6 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
@@ -40,7 +39,7 @@ const (
 type memTimer struct {
 	id            TimerID
 	author        actor.ActorID
-	inc           actorrt.Incarnation
+	current       func() bool
 	fireAt        int64
 	typ           string
 	payload       []byte
@@ -120,10 +119,6 @@ func New(deps Deps) (Minter, *Engine, error) {
 		return nil, nil, errors.New("schedule: Deps.Fire required")
 	case deps.DurableFire == nil:
 		return nil, nil, errors.New("schedule: Deps.DurableFire required")
-	case deps.Host == nil:
-		return nil, nil, errors.New("schedule: Deps.Host required")
-	case deps.Revive == nil:
-		return nil, nil, errors.New("schedule: Deps.Revive required")
 	case deps.Clock == nil:
 		return nil, nil, errors.New("schedule: Deps.Clock required")
 	case deps.Authority == nil:
@@ -210,7 +205,12 @@ func mintTimerID() TimerID { return TimerID(uuid.NewString()) }
 // the one seam future per-author enforcement (liveSchedule membrane, storm
 // quotas, principal checks) attaches to — an exported free-author method
 // would be a standing structural bypass of that seam.
-func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req ScheduleReq) (TimerID, error) {
+func (e *Engine) schedule(
+	ctx context.Context,
+	author actor.ActorID,
+	current func() bool,
+	req ScheduleReq,
+) (TimerID, error) {
 	if err := validateScheduleReq(req); err != nil {
 		return "", err
 	}
@@ -239,15 +239,7 @@ func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req Schedul
 			return "", err
 		}
 	case BindIncarnation:
-		// Attach: self-read whichever embodiment is live for
-		// author RIGHT NOW. No live embodiment → nothing to weld to, and an
-		// incarnation-bind timer with no incarnation is a contradiction —
-		// ErrBadSchedule (this only guards "no embodiment at all"; a racing
-		// caller's stale mental model of WHICH embodiment is live is fenced
-		// downstream at the platform link layer, actorrt.CurrentIncarnation
-		// doc).
-		inc, ok := e.deps.Host.CurrentIncarnation(author)
-		if !ok {
+		if current == nil || !current() {
 			return "", ErrBadSchedule
 		}
 		e.mu.Lock()
@@ -264,7 +256,7 @@ func (e *Engine) schedule(ctx context.Context, author actor.ActorID, req Schedul
 		e.mem[id] = memTimer{
 			id:            id,
 			author:        author,
-			inc:           inc,
+			current:       current,
 			fireAt:        req.FireAt,
 			typ:           req.Type,
 			payload:       req.Payload,
@@ -476,7 +468,7 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 	e.mu.Unlock()
 
 	for _, t := range due {
-		if !e.deps.Host.IsLive(t.inc) {
+		if t.current == nil || !t.current() {
 			// Dead (die'd or replaced) — drop, never fire. A same-id
 			// successor being live does not rescue this entry (pointer-level
 			// ABA guard).
@@ -530,14 +522,6 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 		case err == nil && (outcome == timerspec.FireCommitted || outcome == timerspec.FireAlreadyFired):
 			progress = true
 			e.clearTransient("identity_fire", string(row.ID))
-			callCtx, cancel = context.WithTimeout(ctx, perFireTimeout)
-			reviveErr := e.deps.Revive.EnsureLive(callCtx, row.AuthorID)
-			cancel()
-			if reviveErr != nil {
-				e.noteTransient("revive", string(row.AuthorID), row.ID, row.AuthorID, reviveErr)
-			} else {
-				e.clearTransient("revive", string(row.AuthorID))
-			}
 		case err == nil && outcome == timerspec.FireCancelled:
 			// Cancel won the store CAS. No fired truth exists, therefore no
 			// wake debt, revive, or poke is authorized.
@@ -570,10 +554,6 @@ func rejectionDetails(err error) (string, string) {
 	if errors.As(err, &fire) {
 		return fire.Reason, fire.Detail
 	}
-	var revive ReviveRejected
-	if errors.As(err, &revive) {
-		return revive.Reason, revive.Detail
-	}
 	return "rejected", err.Error()
 }
 
@@ -581,13 +561,6 @@ func rejectionDetails(err error) (string, string) {
 // deterministic-reject class disposed as a poison row/entry.
 func isFireRejected(err error) bool {
 	var rejected FireRejected
-	return errors.As(err, &rejected)
-}
-
-// isReviveRejected reports whether err is (or wraps) a ReviveRejected — the
-// permanently-unrevivable class, disposed via the same poison-row arm.
-func isReviveRejected(err error) bool {
-	var rejected ReviveRejected
 	return errors.As(err, &rejected)
 }
 

@@ -7,7 +7,6 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
@@ -99,6 +98,10 @@ type ScheduleHandle interface {
 // may Mint per-caller freely.
 type Minter interface {
 	Mint(author storespec.AuthorStamp) ScheduleHandle
+	// MintCurrent welds incarnation-local timers to the exact physical current
+	// predicate supplied by the composition root. The predicate is process-local
+	// and never persisted or sent over the collaboration protocol.
+	MintCurrent(author storespec.AuthorStamp, current func() bool) ScheduleHandle
 }
 
 // FireSink is the injection-point contract for fire's single action: append
@@ -158,58 +161,6 @@ func (e FireRejected) Error() string {
 	return "schedule: fire rejected by harness: " + e.Reason + " (" + e.Detail + ")"
 }
 
-// LivenessProbe is the engine's read-only window into actorrt's addressing
-// map — it serves the incarnation-bind home TWICE, at two different times,
-// for two different questions:
-//
-//   - CurrentIncarnation, at Schedule time: the ATTACH — weld the new
-//     in-memory entry to whichever embodiment is live for author RIGHT NOW
-//     (authority self-read — an incarnation is never caller-reported, never
-//     serialised). *actorrt.Runtime satisfies this directly.
-//   - IsLive, at fire time: the DROP check — a since-replaced or since-dead
-//     embodiment reads false by POINTER identity (ABA-safe), and the engine
-//     drops the entry instead of firing (a same-id successor being live does
-//     NOT rescue a predecessor's timer).
-type LivenessProbe interface {
-	CurrentIncarnation(id actor.ActorID) (actorrt.Incarnation, bool)
-	IsLive(inc actorrt.Incarnation) bool
-}
-
-// Reviver is the identity-fire activation seam: a wake with no live actor is
-// the NORMAL restart path (overdue fires run before the eager reconcile ring
-// re-mints the always-on set), and append has no backfill, so firing without
-// reviving first would silently lose the wake. EnsureLive MUST be idempotent
-// for an already-live author (SpawnIfAbsent semantics — the platform
-// implementation wraps actorrt.Runtime.SpawnIfAbsent + a builder factory, not
-// this package's concern).
-//
-// TWO-CLASS error contract (mirrors FireSink's tri-state, same rationale —
-// "a deterministic failure retried forever is a hot loop, not
-// at-least-once"). An implementation MUST distinguish:
-//   - permanently unrevivable (the author's class is gone from the Builder
-//     table, the id can never resolve to a build closure, …) →
-//     ReviveRejected{Reason, Detail} — the engine disposes the row (delete +
-//     loud log), because a row that can never revive is a poison row: left in
-//     place it retries hot forever and consumes the author's bounded due
-//     window ahead of later legitimate rows.
-//   - transient (host busy, momentary spawn failure, …) → any other error —
-//     the row stays, retried next tick (at-least-once, current semantics).
-type Reviver interface {
-	EnsureLive(ctx context.Context, id actor.ActorID) error
-}
-
-// ReviveRejected is the deterministic-failure class a Reviver surfaces from
-// EnsureLive: retrying can NEVER succeed. Typed error: test with errors.As.
-// Same shape as FireRejected.
-type ReviveRejected struct {
-	Reason string
-	Detail string
-}
-
-func (e ReviveRejected) Error() string {
-	return "schedule: revive rejected: " + e.Reason + " (" + e.Detail + ")"
-}
-
 // Deps bundles every collaborator the engine needs. New fail-fasts on any
 // missing (Store/Fire/Host/Revive/Clock ALL required — Revive is not an
 // increment, it is the reason a timer exists at all; Clock is required here
@@ -220,8 +171,6 @@ type Deps struct {
 	Store       timerspec.TimerStore
 	Fire        FireSink
 	DurableFire TimerFirePen
-	Host        LivenessProbe
-	Revive      Reviver
 	Clock       Clock
 	Authority   storespec.ActorAuthority
 	// Logger receives obs-plane diagnostics — most notably the loud disposal
@@ -245,8 +194,6 @@ type Deps struct {
 // is simply forwarded.
 type AssemblyDeps struct {
 	Fire   FireSink
-	Host   LivenessProbe
-	Revive Reviver
 	Clock  Clock
 	Logger *slog.Logger
 }

@@ -25,10 +25,10 @@
 //
 // Fault posture (let-it-crash): a single request that times out or hits an
 // offline device fails as a business response (the actor digests it). The
-// reaper sweep (armed by sys.After self-wake, run on the worker — 期10 S3)
-// collects past-deadline requests. A dropped conn flips the adapter offline and
-// waits for a fresh connection — it does NOT panic; only an untrustworthy
-// internal state would (positive death).
+// actor-owned local maintenance loop collects past-deadline requests. It does
+// not depend on the daemon↔Server Schedule arm, so link loss cannot kill the
+// incarnation. A dropped conn flips the adapter offline and waits for a fresh
+// connection.
 //
 // v1 scope (additive hardening deferred until the pain is concrete):
 //
@@ -44,8 +44,8 @@
 //
 // File layout (one concern per file):
 //
-//   - actor.go    Actor struct + NewActor/Def + run Proc loop (bind retry +
-//     reaper self-wake + dispatch) + describe dispatch.
+//   - actor.go    Actor struct + NewActor/Def + run Proc loop, local device
+//     maintenance, and describe dispatch.
 //   - device.go   WS listener + accept + read loop + in-flight table + sweep +
 //     downstream send (write-deadline bounded).
 //   - wire.go     the minimal device frame structs.

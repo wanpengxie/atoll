@@ -46,6 +46,7 @@ type bodyActual struct {
 type routeActual struct {
 	key     AttemptKey
 	binding Binding
+	started time.Time
 }
 
 type retireEntry struct {
@@ -431,6 +432,7 @@ func (h *HostSupervisor) build(id actor.ActorID, job *buildJob) {
 	var retireTasks []retireTask
 	var closeBindings []Binding
 	winner := false
+	var startErr error
 	unlock := h.spans.lock(id)
 	h.mu.Lock()
 	state := h.states[id]
@@ -446,7 +448,20 @@ func (h *HostSupervisor) build(id actor.ActorID, job *buildJob) {
 			state.route = nil
 		}
 		state.body = &bodyActual{key: job.key, unit: unit}
-		winner = true
+		// Publication and Start are one Host critical section. A concurrent
+		// health pass must never mistake the deliberately Prepared publication
+		// window for an exited body and retire the candidate before Start.
+		// Start only flips Unit-local state and launches its goroutine; any
+		// actor callback that checks Current waits on this span and observes the
+		// fully-started publication after unlock.
+		startErr = unit.Start()
+		if startErr == nil {
+			winner = true
+		} else {
+			state.body = nil
+			retireTasks = appendRetire(retireTasks, h.retireLocked(id, state, unit))
+			state.retryAt = time.Now().Add(h.retryDelay)
+		}
 	} else {
 		if state == nil {
 			state = &hostState{}
@@ -464,10 +479,12 @@ func (h *HostSupervisor) build(id actor.ActorID, job *buildJob) {
 	h.executeRetireTasks(retireTasks)
 	closeAll(closeBindings)
 	if !winner {
+		if startErr != nil {
+			h.logger.Error("actorhost.unit_start_failed",
+				"actor", string(id), "attempt", string(job.key), "err", startErr)
+			h.Wake()
+		}
 		return
-	}
-	if err := unit.Start(); err != nil {
-		h.logger.Error("actorhost.unit_start_failed", "actor", string(id), "attempt", string(job.key), "err", err)
 	}
 	h.Wake()
 }
@@ -516,18 +533,20 @@ func (h *HostSupervisor) Attach(id actor.ActorID, key AttemptKey, binding Bindin
 		return ErrAttachRetryable
 	}
 	state := h.states[id]
-	if state == nil {
-		state = &hostState{}
-		h.states[id] = state
-	}
-	if state.body != nil || state.build != nil {
+	if state != nil && (state.body != nil || state.build != nil) {
 		h.mu.Unlock()
 		unlock()
 		h.Wake()
 		return ErrAttachRetryable
 	}
+	if state == nil || state.desired == nil || state.desired.carrier == nil ||
+		state.desired.carrier.AttemptKey != key {
+		h.mu.Unlock()
+		unlock()
+		return ErrStaleBinding
+	}
 	if state.route == nil {
-		state.route = &routeActual{key: key, binding: binding}
+		state.route = &routeActual{key: key, binding: binding, started: time.Now()}
 		h.mu.Unlock()
 		unlock()
 		return nil
@@ -549,7 +568,13 @@ func (h *HostSupervisor) Attach(id actor.ActorID, key AttemptKey, binding Bindin
 		return ErrStaleBinding
 	}
 	predecessor = state.route.binding
-	state.route = &routeActual{key: key, binding: binding}
+	started := time.Now()
+	if state.route.key == key {
+		// A same-attempt rebind changes only the physical path; preserve the
+		// remote body's L1 start coordinate across network reconnects.
+		started = state.route.started
+	}
+	state.route = &routeActual{key: key, binding: binding, started: started}
 	h.mu.Unlock()
 	unlock()
 	if predecessor != nil {
@@ -755,10 +780,12 @@ func (h *HostSupervisor) Inspect(id actor.ActorID) (Snapshot, bool) {
 		out.Actual = ActualBody
 		out.Attempt = state.body.key
 		out.Unit = state.body.unit
+		out.StartedAt = state.body.unit.Stat().StartedAt
 	} else if state.route != nil {
 		out.Actual = ActualRoute
 		out.Attempt = state.route.key
 		out.Binding = state.route.binding
+		out.StartedAt = state.route.started
 	}
 	h.mu.RUnlock()
 	unlock()

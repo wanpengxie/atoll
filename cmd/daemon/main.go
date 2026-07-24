@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -28,7 +29,6 @@ import (
 	"strings"
 	"sync"
 	"syscall"
-	"time"
 
 	"github.com/wanpengxie/atoll/cmd/daemon/internal/storagehost"
 	"github.com/wanpengxie/atoll/platform"
@@ -36,7 +36,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
 
 	// Availability (NOT auto-run): blank-import every in-tree actor + engine so the
 	// daemon CAN build any class the server assigns. actors/all = tools/devices;
@@ -65,7 +65,7 @@ type planSource struct {
 	logger                   *slog.Logger
 
 	mu          sync.Mutex
-	lastDesired []actorrt.DesiredMember
+	lastDesired []actorhost.BodyDesired
 	builders    map[actor.ActorID]platform.ActorFactory
 	lastBuilt   int // -1 until the first successful fetch (to Info-log only on change)
 }
@@ -79,28 +79,33 @@ func newPlanSource(chID, wsRoot, deviceName string, logger *slog.Logger) *planSo
 	}
 }
 
-func (p *planSource) Members(context.Context) ([]actorrt.DesiredMember, error) {
+func (p *planSource) Members(context.Context) ([]actorhost.BodyDesired, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return append([]actorrt.DesiredMember(nil), p.lastDesired...), nil
+	return append([]actorhost.BodyDesired(nil), p.lastDesired...), nil
 }
 
 // ApplyPlan builds both desired and factory halves off-lock, then publishes one
 // atomic snapshot. Any invalid row rejects the whole candidate so the previous
 // last-known-good snapshot remains authoritative.
 func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
-	var desired []actorrt.DesiredMember
+	var desired []actorhost.BodyDesired
 	builders := map[actor.ActorID]platform.ActorFactory{}
 	for _, asg := range plan {
-		id := actor.ActorID(asg.InstanceID)
+		id := asg.ActorID
 		// Desired is generated from the plan row alone, but publication is atomic:
 		// unknown classes, build failures, and identity drift reject the full plan.
 		kind, ok := registry.ClassKind(asg.Class)
 		if !ok {
-			return fmt.Errorf("daemon: plan instance %s has unknown class %q", asg.InstanceID, asg.Class)
+			return fmt.Errorf("daemon: plan instance %s has unknown class %q", asg.ActorID, asg.Class)
 		}
-		desired = append(desired, actorrt.DesiredMember{ID: id, Kind: kind, Version: asg.Version,
-			IdleTimeout: time.Duration(asg.TIdleMs) * time.Millisecond, EnsureTicket: asg.EnsureTicket})
+		desired = append(desired, actorhost.BodyDesired{
+			ActorID: id, AttemptKey: asg.AttemptKey,
+			ExecutionSpec: actorhost.ExecutionSpec{
+				Kind: kind, Class: asg.Class, Config: append(json.RawMessage(nil), asg.Config...),
+				IdleTimeout: asg.Idle,
+			},
+		})
 		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
 			ID:     id,
 			Config: asg.Config,
@@ -111,7 +116,7 @@ func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 			Logger:       p.logger,
 		})
 		if berr != nil {
-			return fmt.Errorf("daemon: build plan instance %s class %q: %w", asg.InstanceID, asg.Class, berr)
+			return fmt.Errorf("daemon: build plan instance %s class %q: %w", asg.ActorID, asg.Class, berr)
 		}
 		// The builder table is keyed on the PLAN's InstanceID (what desired carries
 		// and what the ring Lookups), NOT decl.ID. A constructor that rewrites the id
@@ -121,7 +126,7 @@ func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 		// reported success. Treat an id drift as a full candidate failure so the
 		// prior LKG remains intact rather than publishing an unreachable builder.
 		if decl.ID != id {
-			return fmt.Errorf("daemon: plan instance %s class %q built mismatched id %s", asg.InstanceID, asg.Class, decl.ID)
+			return fmt.Errorf("daemon: plan instance %s class %q built mismatched id %s", asg.ActorID, asg.Class, decl.ID)
 		}
 		builders[id] = decl.Factory
 	}

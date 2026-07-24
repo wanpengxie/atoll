@@ -56,18 +56,18 @@ func TestPlanSource_InvalidCandidatePreservesLastKnownGood(t *testing.T) {
 		name string
 		bad  platform.PlanActor
 	}{
-		{name: "unknown class", bad: platform.PlanActor{InstanceID: "agent:bad", Class: "not-registered"}},
-		{name: "build failure", bad: platform.PlanActor{InstanceID: "agent:bad", Class: "test-fail-daemon"}},
-		{name: "id rewrite", bad: platform.PlanActor{InstanceID: "agent:bad", Class: "test-rewrite-id-daemon"}},
+		{name: "unknown class", bad: platform.PlanActor{ActorID: "agent:bad", Class: "not-registered"}},
+		{name: "build failure", bad: platform.PlanActor{ActorID: "agent:bad", Class: "test-fail-daemon"}},
+		{name: "id rewrite", bad: platform.PlanActor{ActorID: "agent:bad", Class: "test-rewrite-id-daemon"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newPlanSource("c", "", "dev", slog.New(slog.NewTextHandler(io.Discard, nil)))
-			if err := p.ApplyPlan([]platform.PlanActor{{InstanceID: "agent:stable", Class: "test-ok-daemon"}}); err != nil {
+			if err := p.ApplyPlan([]platform.PlanActor{{ActorID: "agent:stable", Class: "test-ok-daemon"}}); err != nil {
 				t.Fatalf("seed LKG: %v", err)
 			}
 			if err := p.ApplyPlan([]platform.PlanActor{
-				{InstanceID: "agent:new", Class: "test-ok-daemon"}, tc.bad,
+				{ActorID: "agent:new", Class: "test-ok-daemon"}, tc.bad,
 			}); err == nil {
 				t.Fatal("invalid candidate plan unexpectedly published")
 			}
@@ -76,7 +76,7 @@ func TestPlanSource_InvalidCandidatePreservesLastKnownGood(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if len(desired) != 1 || desired[0].ID != "agent:stable" {
+			if len(desired) != 1 || desired[0].ActorID != "agent:stable" {
 				t.Fatalf("LKG desired changed after rejected plan: %+v", desired)
 			}
 			if _, ok := p.Lookup("agent:stable"); !ok {

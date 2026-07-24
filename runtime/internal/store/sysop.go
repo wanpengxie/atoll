@@ -224,6 +224,30 @@ func decodeResult[T any](raw json.RawMessage, effects storespec.PostCommitEffect
 	return result, nil
 }
 
+func (s *sysOpStore) ForkActor(
+	ctx context.Context,
+	in storespec.ForkTx,
+) (storespec.ForkResult, error) {
+	raw, effects, err := s.run(ctx, in.SysOpMeta, "fork_actor", func(_ *sql.Tx, _ int64) (sysOpOutcome, error) {
+		row := in.Child
+		if in.Source != storespec.SysOpSourceMember || in.Sender == "" ||
+			row.ID == "" || row.ID == actor.SystemActorID || row.Sponsor != in.Sender {
+			return decisive(channel.ErrCodeBadPayload, "invalid fork operation"), nil
+		}
+		if _, ok := actor.ParseKind(string(row.Kind)); !ok || row.Kind == actor.KindSystem {
+			return decisive(channel.ErrCodeBadPayload, "invalid fork kind"), nil
+		}
+		if err := row.Placement.Validate(); err != nil {
+			return decisive(channel.ErrCodeBadPayload, err.Error()), nil
+		}
+		return sysOpOutcome{
+			result:  storespec.ForkResult{Child: row},
+			effects: storespec.PostCommitEffects{Poke: true},
+		}, nil
+	})
+	return decodeResult[storespec.ForkResult](raw, effects, err)
+}
+
 func (s *sysOpStore) Admit(ctx context.Context, in storespec.AdmitTx) (storespec.AdmitResult, error) {
 	raw, effects, err := s.run(ctx, in.SysOpMeta, "admit", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
 		if in.Source != storespec.SysOpSourceSystem {

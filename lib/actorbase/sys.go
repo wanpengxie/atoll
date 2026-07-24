@@ -6,6 +6,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/behavior"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -84,8 +85,11 @@ type Sys interface {
 	// hands its child); substrate passes it through verbatim to the domain's
 	// build table, never interpreting it. Server and daemon incarnations use the
 	// same lifecycle contract; the daemon arm relays this full spec over its port.
-	Fork(spec actorrt.ForkSpec) (actor.ActorID, error)
-	DespawnChild(id actor.ActorID) error
+	Fork(requestID message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error)
+	// RequestIdle asks the control plane to make this actor dormant. A failed
+	// request leaves the actor running; a successful one causes Host convergence
+	// to stop this Unit without an approval/ACK protocol.
+	RequestIdle() error
 	// End commits this identity's lifecycle end and fences subsequent effects.
 	End() error
 

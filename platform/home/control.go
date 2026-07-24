@@ -27,7 +27,9 @@ func (h *Home) hooks() actorbase.Hooks {
 // already closed or `target` has no live embodiment — cancel is a
 // best-effort hint, the caller's closure owns the terminal.
 func (h *Home) cancelRequest(target actor.ActorID, requestID message.ID) {
-	h.channel.Cells().CancelRequest(target, requestID)
+	if h.actors != nil {
+		h.actors.CancelRequest(target, requestID)
+	}
 }
 
 // handleCancelUpstream is the home's disposition for one KindCancelRequest frame
@@ -64,7 +66,6 @@ func (h *Home) handleCancelUpstream(boundID actor.ActorID, requestID message.ID)
 	}
 	h.cancelRequest(req.Audience[0], requestID)
 }
-
 
 // ServeAttach is the attach admission surface: the app hands an upgraded WS request here so a
 // daemon can attach its actor streams. Home keeps the internal link acceptor and

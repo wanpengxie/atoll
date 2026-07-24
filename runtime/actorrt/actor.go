@@ -81,16 +81,6 @@ func buildActor(build func(Incarnation) Actor, inc Incarnation) (impl Actor, err
 	return impl, nil
 }
 
-// abortBuild releases a never-started shell. Stop is deliberately outside all
-// runtime locks and isolated because cleanup must not turn a CAS loss into a
-// process-wide failure.
-func abortBuild(c *cell) {
-	c.cancel()
-	if stopper, ok := c.impl.(Stopper); ok {
-		_ = safeStop(c.logger, c.id, stopper)
-	}
-}
-
 // RequestCanceller is the optional occupant hook for the request-cancel signal
 // (the "down" half of §1.4's three signal lines, cell-hosted twin of port's
 // wire-crossing cancelRequest). cell.cancelRequest hands the id off to it in

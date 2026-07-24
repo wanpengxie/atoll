@@ -11,12 +11,13 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/platform/realmtool"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 func realmToolRequest(t *testing.T, env *testEnv, setup setupResult, client *wsClient, tool actor.ActorID, typ string, payload any) map[string]json.RawMessage {
@@ -170,15 +171,35 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 		switch builds.Add(1) {
 		case 1:
 			return func(sys actorbase.Sys) error {
-				child, err := sys.Fork(actorrt.ForkSpec{Kind: actor.KindAgent, Class: "go-kimi", NameHint: "realm-requester"})
+				var child actor.ActorID
+				var err error
+				deadline := time.Now().Add(3 * time.Second)
+				for {
+					child, err = sys.Fork(message.ID("fork-realm-requester"), actorcaps.ForkSpec{
+						Kind: actor.KindAgent, Class: "go-kimi", NameHint: "realm-requester",
+					})
+					if err == nil || time.Now().After(deadline) {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
 				if err != nil {
 					done <- outcome{err: err}
 					return err
 				}
-				if _, err := sys.Call(child, "realm.run", map[string]any{}); err != nil {
+				var pending actorbase.Pending
+				for {
+					pending, err = sys.Call(child, "realm.run", map[string]any{})
+					if err == nil || time.Now().After(deadline) {
+						break
+					}
+					time.Sleep(10 * time.Millisecond)
+				}
+				if err != nil {
 					done <- outcome{child: child, err: err}
 					return err
 				}
+				_ = pending
 				<-sys.Life().Done()
 				return sys.Life().Err()
 			}, nil
@@ -186,11 +207,17 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 			return func(sys actorbase.Sys) error {
 				result := outcome{child: sys.Self()}
 				call := func(typ string, payload any) (actorbase.Msg, error) {
-					pending, err := sys.Call(toolID, typ, payload)
-					if err != nil {
-						return actorbase.Msg{}, err
+					deadline := time.Now().Add(3 * time.Second)
+					for {
+						pending, err := sys.Call(toolID, typ, payload)
+						if err == nil {
+							return pending.Wait(sys.Life(), 3*time.Second)
+						}
+						if time.Now().After(deadline) {
+							return actorbase.Msg{}, err
+						}
+						time.Sleep(10 * time.Millisecond)
 					}
-					return pending.Wait(sys.Life(), 3*time.Second)
 				}
 				introduced, err := call(realmtool.TypeIntroduce, map[string]any{"decl_id": targetDecl})
 				if err == nil {
@@ -254,7 +281,7 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 	go func() {
 		computeErr <- compute.Run(computeCtx, compute.Config{
 			ServerWS:   fmt.Sprintf("ws://%s/compute?channel=%s&key=%s", srv.Listener.Addr(), setup.chID, daemon["api_key"].(string)),
-			PlanSource: plan, Poll: 20 * time.Millisecond, Resync: 50 * time.Millisecond,
+			PlanSource: plan, Poll: 20 * time.Millisecond,
 		})
 	}()
 	t.Cleanup(func() {
