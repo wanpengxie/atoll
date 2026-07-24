@@ -363,6 +363,29 @@ type ActualCurrent struct {
 	self actorrt.Incarnation
 }
 
+// IdentityCurrent is an opaque accepted-level probe for one ActorID. It does
+// not inspect the current physical Unit or route.
+type IdentityCurrent struct {
+	host *HostSupervisor
+	id   actor.ActorID
+}
+
+func (c IdentityCurrent) IsCurrent() bool {
+	return c.host != nil && c.host.identityCurrent(c.id)
+}
+
+// AttemptCurrent is an opaque accepted-level probe for one logical A/G run.
+// It deliberately contains no physical Incarnation coordinate.
+type AttemptCurrent struct {
+	host *HostSupervisor
+	id   actor.ActorID
+	key  AttemptKey
+}
+
+func (c AttemptCurrent) IsCurrent() bool {
+	return c.host != nil && c.host.attemptCurrent(c.id, c.key)
+}
+
 func (c ActualCurrent) IsCurrent() bool {
 	return c.host != nil && c.host.isCurrent(c.id, c.key, c.self)
 }

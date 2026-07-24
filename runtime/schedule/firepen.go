@@ -31,13 +31,6 @@ func (p timerFirePen) Fire(ctx context.Context, row timerspec.TimerRow, env *mes
 	if !ok {
 		return 0, FireRejected{Reason: "author_not_member", Detail: string(row.AuthorID)}
 	}
-	verdict, err := p.authority.CheckAuthor(ctx, storespec.AuthorStamp{ID: row.AuthorID, BirthVersion: control.CurrentDeclVersion})
-	if err != nil {
-		return 0, err
-	}
-	if verdict != storespec.AuthorOK {
-		return 0, FireRejected{Reason: "author_not_member", Detail: string(row.AuthorID)}
-	}
 	welded := *env
 	welded.Sender = message.Sender{ID: row.AuthorID, Kind: control.Kind}
 	welded.ChannelID = p.channelID

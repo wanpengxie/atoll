@@ -56,9 +56,7 @@ func (h *Home) closeInternalWithin(reason string, timeout time.Duration) error {
 			h.engine.Close()
 		}
 		if h.actors != nil {
-			// ChannelActors closes managed Host, Controller, then the
-			// SystemKernel exact Unit last.
-			faults = appendIfError(faults, h.actors.Close(ctx))
+			faults = appendIfError(faults, h.actors.close(ctx))
 		}
 		h.closeErr = errors.Join(faults...)
 		h.logger.Info("platform.home.closed",

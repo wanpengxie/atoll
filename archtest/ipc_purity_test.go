@@ -30,7 +30,7 @@ import (
 // enforcement when review is also an agent.
 func TestIPCWireLeafPurity(t *testing.T) {
 	const protoPkg = platformModulePrefix + "protocol" // ".../atoll/protocol"
-	protoPrefix := protoPkg + "/"                       // ".../atoll/protocol/"
+	protoPrefix := protoPkg + "/"                      // ".../atoll/protocol/"
 	const ipcPkg = platformModulePrefix + "runtime/ipc"
 
 	fset := token.NewFileSet()

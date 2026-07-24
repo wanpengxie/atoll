@@ -2,10 +2,12 @@ package harness
 
 import (
 	"context"
+	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 )
 
 // minter is the mint machine: it holds the bare chain and welds an identity onto it on
@@ -29,12 +31,33 @@ func (m *minter) Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID, b
 	}
 }
 
+func (m *minter) MintAuthority(
+	authority capauth.Authority,
+	kind actor.Kind,
+	chID channel.ID,
+) Pen {
+	if authority == nil || authority.ActorID() == "" {
+		return rejectedPen{}
+	}
+	return &boundPen{
+		chain: m.chain,
+		principal: caller{
+			actorID:  authority.ActorID(),
+			kind:     kind,
+			chID:     chID,
+			admitted: true,
+		},
+		authority: authority,
+	}
+}
+
 // boundPen is a Pen welded to one identity. It is the substrate's outward write
 // capability: actors and the system closure hold one of these, never the bare
 // chain or the minter.
 type boundPen struct {
 	chain     *chain
 	principal caller
+	authority capauth.Authority
 }
 
 // Write injects the welded identity into the envelope and drives the chain.
@@ -52,6 +75,11 @@ type boundPen struct {
 // truth source as env.Sender.ID. The welded caller is set on the outermost ctx
 // layer (shadow-proof against any pre-stuffed value) before the chain runs.
 func (p *boundPen) Write(ctx context.Context, env *message.Envelope) (WriteResult, error) {
+	if p.authority != nil {
+		if err := p.authority.Admit(); err != nil {
+			return WriteResult{}, err
+		}
+	}
 	if env == nil {
 		// Defer the nil check to the chain so the error vocabulary stays in one
 		// place; the chain returns a hard error for a nil envelope.
@@ -69,4 +97,10 @@ func (p *boundPen) Write(ctx context.Context, env *message.Envelope) (WriteResul
 	env.ChannelID = p.principal.chID
 	ctx = ctxWithCaller(ctx, p.principal)
 	return p.chain.write(ctx, env)
+}
+
+type rejectedPen struct{}
+
+func (rejectedPen) Write(context.Context, *message.Envelope) (WriteResult, error) {
+	return WriteResult{}, errors.New("harness: invalid authority")
 }

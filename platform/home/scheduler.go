@@ -6,7 +6,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -19,7 +18,7 @@ import (
 type fireSink struct {
 	minter    harness.Minter
 	authority storespec.ActorAuthority
-	actors    func() *actorctl.ChannelActors
+	actors    func() *actorSystem
 	chID      channelpkg.ID
 }
 

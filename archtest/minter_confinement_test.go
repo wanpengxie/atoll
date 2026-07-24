@@ -100,7 +100,9 @@ func TestMinterTypeConfinement(t *testing.T) {
 			return nil
 		}
 		slash := filepath.ToSlash(path)
-		if isRuntimeRootFile(slash) || strings.HasPrefix(slash, platformPathPrefix) {
+		if isRuntimeRootFile(slash) ||
+			strings.HasPrefix(slash, platformPathPrefix) ||
+			strings.HasPrefix(slash, "../runtime/managedcaps/") {
 			return nil // the legitimate producer (runtime root) / assembler (platform)
 		}
 		file, perr := parser.ParseFile(fset, path, nil, 0)

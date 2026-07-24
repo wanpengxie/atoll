@@ -31,15 +31,11 @@ const (
 	storeErrLogPeriod = 30 * time.Second
 )
 
-// memTimer is one incarnation-bind entry in the engine's in-memory due-set —
-// NEVER a store row, NEVER serialised. inc is the
-// attach reference captured at Schedule time; the drop check at fire time
-// compares it by POINTER identity via LivenessProbe.IsLive (ABA-safe: a
-// same-id successor being live does not rescue a predecessor's timer).
+// memTimer is one timer in the current Channel/Scheduler instance's in-memory
+// due-set. It is ActorID-owned and is not welded to an actor incarnation.
 type memTimer struct {
 	id            TimerID
 	author        actor.ActorID
-	current       func() bool
 	fireAt        int64
 	typ           string
 	payload       []byte
@@ -206,7 +202,6 @@ func mintTimerID() TimerID { return TimerID(uuid.NewString()) }
 func (e *Engine) schedule(
 	ctx context.Context,
 	author actor.ActorID,
-	current func() bool,
 	req ScheduleReq,
 ) (TimerID, error) {
 	if err := validateScheduleReq(req); err != nil {
@@ -216,8 +211,8 @@ func (e *Engine) schedule(
 	id := mintTimerID()
 	now := e.deps.Clock.Now().UnixMilli()
 
-	switch req.Bind {
-	case BindIdentity:
+	switch req.Home {
+	case TimerHomeDurable:
 		row := timerspec.TimerRow{
 			ID:            id,
 			AuthorID:      author,
@@ -236,10 +231,7 @@ func (e *Engine) schedule(
 			}
 			return "", err
 		}
-	case BindIncarnation:
-		if current == nil || !current() {
-			return "", ErrBadSchedule
-		}
+	case TimerHomeMemory:
 		e.mu.Lock()
 		count := 0
 		for _, existing := range e.mem {
@@ -254,7 +246,6 @@ func (e *Engine) schedule(
 		e.mem[id] = memTimer{
 			id:            id,
 			author:        author,
-			current:       current,
 			fireAt:        req.FireAt,
 			typ:           req.Type,
 			payload:       req.Payload,
@@ -318,8 +309,8 @@ func (e *Engine) wakeUp() {
 // immediately; refusing it would make "a millisecond before vs after the
 // deadline" two different behaviours.
 func validateScheduleReq(req ScheduleReq) error {
-	switch req.Bind {
-	case BindIdentity, BindIncarnation:
+	switch req.Home {
+	case TimerHomeDurable, TimerHomeMemory:
 	default:
 		return ErrBadSchedule
 	}
@@ -466,17 +457,6 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 	e.mu.Unlock()
 
 	for _, t := range due {
-		if t.current == nil || !t.current() {
-			// Dead (die'd or replaced) — drop, never fire. A same-id
-			// successor being live does not rescue this entry (pointer-level
-			// ABA guard).
-			e.mu.Lock()
-			delete(e.mem, t.id)
-			e.mu.Unlock()
-			progress = true
-			e.clearTransient("mem_fire", string(t.id))
-			continue
-		}
 		env := buildFireEnvelope(t.id, t.author, t.typ, t.payload, message.ID(t.correlationID), nowTime)
 		callCtx, cancel := context.WithTimeout(ctx, perFireTimeout)
 		err := e.deps.Fire.Append(callCtx, t.author, env)

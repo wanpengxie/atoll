@@ -100,7 +100,7 @@ func TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt(t *testing.T) {
 
 	handle := minter.Mint(testStamp(author))
 	id, err := handle.Schedule(context.Background(), ScheduleReq{
-		Bind: BindIdentity, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.ack-real-store",
+		Home: TimerHomeDurable, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.ack-real-store",
 	})
 	if err != nil {
 		t.Fatalf("Schedule: %v", err)

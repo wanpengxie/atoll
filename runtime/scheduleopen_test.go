@@ -59,7 +59,7 @@ func TestOpenScheduler_AssembledMintWorks(t *testing.T) {
 	handle := minter.Mint(scheduleStamp(author))
 
 	id, err := handle.Schedule(ctx, schedule.ScheduleReq{
-		Bind:   schedule.BindIdentity,
+		Home:   schedule.TimerHomeDurable,
 		FireAt: 1, // already due — proves Store wiring without a fake clock
 		Type:   "test.tick",
 	})

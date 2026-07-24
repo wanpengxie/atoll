@@ -15,9 +15,12 @@ import (
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/managedcaps"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/systemkernel"
 )
 
 var ErrClosed = errors.New("platform: channel home is closed")
@@ -49,8 +52,13 @@ type Config struct {
 // narrow capability factories.
 type Home struct {
 	channelID  channelpkg.ID
-	actors     *actorctl.ChannelActors
+	actors     *actorSystem
 	actorStore *homeActorStore
+
+	controller   *actorctl.Controller
+	serverHost   *actorhost.HostSupervisor
+	systemKernel *systemkernel.Kernel
+	managedCaps  *managedcaps.Minter
 
 	cs           *runtime.ChannelStores
 	minter       harness.Minter

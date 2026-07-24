@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -92,6 +93,46 @@ func (h *actorStateHandles) Resolve(ctx context.Context, stamp storespec.AuthorS
 			return nil, ErrStateHandleUnavailable
 		}
 		return handle, nil
+	default:
+		return nil, ErrStateHandleUnavailable
+	}
+}
+
+func (h *actorStateHandles) ResolveAuthority(
+	ctx context.Context,
+	authority capauth.Authority,
+) (AccessHandle, error) {
+	if authority == nil || authority.ActorID() == "" {
+		return nil, ErrStateHandleUnavailable
+	}
+	id := authority.ActorID()
+	world, ok, err := h.authority.WorldOf(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if !ok {
+		return nil, ErrStateHandleUnavailable
+	}
+	switch world {
+	case storespec.WorldDurable:
+		minter, ok := h.durable.(interface {
+			MintStateAuthority(capauth.Authority) AccessHandle
+		})
+		if !ok {
+			return nil, ErrStateHandleUnavailable
+		}
+		return minter.MintStateAuthority(authority), nil
+	case storespec.WorldRun:
+		h.mu.RLock()
+		handle := h.run[id]
+		h.mu.RUnlock()
+		state, ok := handle.(boundStateHandle)
+		if !ok {
+			return nil, ErrStateHandleUnavailable
+		}
+		state.owner = storespec.AuthorStamp{ID: id}
+		state.authority = authority
+		return state, nil
 	default:
 		return nil, ErrStateHandleUnavailable
 	}

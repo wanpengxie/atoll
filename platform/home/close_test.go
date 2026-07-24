@@ -7,13 +7,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/systemkernel"
 )
 
 type closeTestActor struct{}
@@ -136,35 +136,33 @@ func (*closeTestStore) CommitTerminal(
 
 func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T) {
 	store := newCloseTestStore()
-	actors, err := actorctl.NewChannelActors(actorctl.Config{
-		Store: store, ServerDomain: "server",
-		ServerHost: actorhost.Config{PollInterval: time.Millisecond},
-		BuildManagedBody: func(actorctl.ManagedBodyInput, actorcaps.Caps) actorrt.Actor {
-			return closeTestActor{}
-		},
+	controller, err := actorctl.New(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := controller.Start(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	host, err := actorhost.New(actorhost.Config{
+		Domain:       "server",
+		PollInterval: time.Millisecond,
+		BodyBuilder:  func(actorhost.BodyBuildInput) actorrt.Actor { return closeTestActor{} },
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	kernel, err := actorrt.Prepare(actorrt.UnitConfig{
-		ActorID: actor.SystemActorID, Kind: actor.KindSystem,
-	}, func(actorrt.Incarnation) actorrt.Actor {
-		return closeTestActor{}
-	}, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := actors.Start(context.Background(), kernel); err != nil {
-		t.Fatal(err)
-	}
 	home := &Home{
-		actors: actors, closeDone: make(chan struct{}),
-		logger: slog.New(slog.DiscardHandler),
+		controller:   controller,
+		serverHost:   host,
+		systemKernel: systemkernel.New(),
+		closeDone:    make(chan struct{}),
+		logger:       slog.New(slog.DiscardHandler),
 	}
+	home.actors = newActorSystem(home, home.logger)
 
 	restarted := make(chan error, 1)
 	go func() {
-		restarted <- actors.Restart(
+		restarted <- home.actors.Restart(
 			context.Background(),
 			actorctl.RestartRequest{ActorID: "agent"},
 		)
@@ -179,7 +177,7 @@ func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T)
 		t.Fatal("Home consumed runtime teardown while command owner was not drained")
 	default:
 	}
-	if _, active, err := actors.Lookup("agent"); err != nil || !active {
+	if _, active, err := controller.Lookup("agent"); err != nil || !active {
 		t.Fatalf("Controller was torn down across failed Quiesce: active=%v err=%v", active, err)
 	}
 
@@ -195,7 +193,7 @@ func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T)
 	default:
 		t.Fatal("retry Close did not complete runtime teardown")
 	}
-	if _, _, err := actors.Lookup("agent"); !errors.Is(err, actorctl.ErrClosed) {
+	if _, _, err := controller.Lookup("agent"); !errors.Is(err, actorctl.ErrClosed) {
 		t.Fatalf("Controller remains live after retry Close: %v", err)
 	}
 }

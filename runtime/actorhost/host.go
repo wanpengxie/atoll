@@ -654,6 +654,43 @@ func (h *HostSupervisor) isCurrent(id actor.ActorID, key AttemptKey, self actorr
 	return ok
 }
 
+// IdentityProbe binds an accepted Desired-level A probe.
+func (h *HostSupervisor) IdentityProbe(id actor.ActorID) IdentityCurrent {
+	return IdentityCurrent{host: h, id: id}
+}
+
+// AttemptProbe binds an accepted Desired-level A/G probe.
+func (h *HostSupervisor) AttemptProbe(id actor.ActorID, key AttemptKey) AttemptCurrent {
+	return AttemptCurrent{host: h, id: id, key: key}
+}
+
+func (h *HostSupervisor) identityCurrent(id actor.ActorID) bool {
+	if h == nil || id == "" || id == actor.SystemActorID {
+		return false
+	}
+	unlock := h.spans.lock(id)
+	h.mu.RLock()
+	state := h.states[id]
+	ok := !h.sealed && state != nil && state.desired != nil
+	h.mu.RUnlock()
+	unlock()
+	return ok
+}
+
+func (h *HostSupervisor) attemptCurrent(id actor.ActorID, key AttemptKey) bool {
+	if h == nil || id == "" || id == actor.SystemActorID || !key.valid() {
+		return false
+	}
+	unlock := h.spans.lock(id)
+	h.mu.RLock()
+	state := h.states[id]
+	ok := !h.sealed && state != nil && state.desired != nil &&
+		state.desired.attemptKey() == key
+	h.mu.RUnlock()
+	unlock()
+	return ok
+}
+
 func (h *HostSupervisor) retireLocked(id actor.ActorID, state *hostState, unit *actorrt.Unit) *retireTask {
 	if unit == nil {
 		return nil

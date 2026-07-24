@@ -729,7 +729,7 @@ func (e *engine) After(d time.Duration, msgType string, payload any) (schedule.T
 		return "", err
 	}
 	return e.sched.Schedule(e.lifeCtx, schedule.ScheduleReq{
-		Bind:    schedule.BindIncarnation,
+		Home:    schedule.TimerHomeMemory,
 		FireAt:  e.clockFn().Add(d).UnixMilli(),
 		Type:    msgType,
 		Payload: raw,

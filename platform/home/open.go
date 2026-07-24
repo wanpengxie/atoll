@@ -25,8 +25,10 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
+	"github.com/wanpengxie/atoll/runtime/managedcaps"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/systemkernel"
 )
 
 const reconcileInterval = 30 * time.Second
@@ -136,13 +138,23 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	actorStore := newHomeActorStore(cfg.ChannelID, cs, cfg.IntroductionResolver, time.Now)
 	h.actorStore = actorStore
 	h.factories = &compositionView{h: h, resolver: cfg.CompositionResolver}
+	h.controller, err = actorctl.New(actorStore)
+	if err != nil {
+		return nil, fmt.Errorf("platform: construct actor controller: %w", err)
+	}
+	h.systemKernel = systemkernel.New()
+	h.actors = newActorSystem(h, logger)
+	actorStore.bindAuthority(h.actors)
+	if err := cs.BindActorAuthority(h.actors); err != nil {
+		return nil, fmt.Errorf("platform: bind actor authority: %w", err)
+	}
 
 	// Scheduler construction precedes System Unit construction, but its run
 	// loop starts only after ChannelActors is Running.
 	h.schedMinter, h.engine, err = runtime.OpenScheduler(cs, schedule.AssemblyDeps{
 		Fire: fireSink{
 			minter: h.minter, authority: cs.Authority,
-			actors: func() *actorctl.ChannelActors { return h.actors },
+			actors: func() *actorSystem { return h.actors },
 			chID:   cfg.ChannelID,
 		},
 		Clock: cfg.Clock, Logger: logger,
@@ -151,36 +163,42 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: open scheduler: %w", err)
 	}
 
-	actors, err := actorctl.NewChannelActors(actorctl.Config{
-		Store: actorStore, Effects: homeActorEffects{home: h},
-		ServerDomain: actorhost.ExecutionDomain("server"),
-		ServerHost: actorhost.Config{
-			Logger: logger, Events: homeHostEvents{home: h},
-		},
-		// The runtime owns the final managed Caps construction: the platform
-		// injects its welded minters/resolver, actorctl welds the value-ledger
-		// gate onto all five arms, and this builder only maps the safe input to
-		// a business factory and constructs the actor with the finished Caps.
-		ChannelID:      cfg.ChannelID,
-		PenMinter:      h.minter,
-		AccessMinter:   cs.Access,
-		StateResolver:  h.stateHandles,
-		ScheduleMinter: h.schedMinter,
-		BuildManagedBody: func(
-			input actorctl.ManagedBodyInput,
-			caps actorcaps.Caps,
-		) actorrt.Actor {
+	h.managedCaps, err = managedcaps.New(
+		cfg.ChannelID,
+		h.minter,
+		cs.Access,
+		h.stateHandles,
+		h.schedMinter,
+		h.actors,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("platform: construct managed caps minter: %w", err)
+	}
+	h.serverHost, err = actorhost.New(actorhost.Config{
+		Domain: actorhost.ExecutionDomain("server"),
+		Logger: logger,
+		Events: homeHostEvents{home: h},
+		BodyBuilder: func(input actorhost.BodyBuildInput) actorrt.Actor {
+			prepared, err := h.controller.PrepareRun(
+				input.ActorID,
+				input.AttemptKey,
+				input.ExecutionSpec,
+			)
+			if err != nil {
+				logger.Warn("platform.actor_prepare_run_failed", "actor", input.ActorID, "err", err)
+				return nil
+			}
+			caps, err := h.managedCaps.Mint(context.Background(), prepared)
+			if err != nil {
+				logger.Warn("platform.actor_caps_mint_failed", "actor", input.ActorID, "err", err)
+				return nil
+			}
 			def, ok := h.factories.LookupByClass(
 				input.ActorID,
 				input.ExecutionSpec.Class,
 				input.ExecutionSpec.Config,
 			)
 			if input.ExecutionSpec.Kind == actor.KindHuman {
-				// Controller publication is already authoritative at this
-				// composition seam. Ensure the stable subject slot before the
-				// actor goroutine can start, so an initial Host build cannot
-				// race the later maintenance sweep and become permanently
-				// mailbox-only.
 				h.ensureSubjectSlot(input.ActorID)
 				def, ok = humanCellFactory(h, input.ActorID), true
 			}
@@ -189,18 +207,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 					"actor", input.ActorID, "class", input.ExecutionSpec.Class)
 				return nil
 			}
-			return hostcommon.Build(
-				caps, h.hooks(), def,
-			)
+			return hostcommon.Build(caps, h.hooks(), def)
 		},
 	})
 	if err != nil {
-		return nil, fmt.Errorf("platform: construct actor control: %w", err)
-	}
-	h.actors = actors
-	actorStore.bindAuthority(actors)
-	if err := cs.BindActorAuthority(actors); err != nil {
-		return nil, fmt.Errorf("platform: bind actor authority: %w", err)
+		return nil, fmt.Errorf("platform: construct server actor host: %w", err)
 	}
 	h.opEntry = &opEntry{home: h}
 
@@ -216,28 +227,28 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			Lifecycle: nil,
 		}
 		return actorbase.New(caps, h.hooks(), sysactor.Def(sysactor.Deps{
-			Authority: actors, Clock: clock,
-			Presence: presence.NewView(h.presenceFold, actors, actors),
+			Authority: h.actors, Clock: clock,
+			Presence: presence.NewView(h.presenceFold, h.actors, h.actors),
 			Logger:   logger, Operate: h.opEntry,
 		}))
 	}, nil)
 	if err != nil {
 		return nil, fmt.Errorf("platform: prepare system unit: %w", err)
 	}
-	if err := actors.Start(ctx, systemUnit); err != nil {
+	if err := h.actors.start(ctx, systemUnit); err != nil {
 		return nil, fmt.Errorf("platform: start actor control: %w", err)
 	}
 	h.sweepSubjectSlots(ctx)
 
 	links, err := link.NewAcceptor(link.Config{
 		Minter: h.minter, Access: cs.Access, StateHandles: stateHandles,
-		Schedule: h.schedMinter, Authority: actors,
+		Schedule: h.schedMinter, Authority: h.actors,
 		ChannelID: cfg.ChannelID, Logger: logger,
-		AuthorizeAttach: actors.AuthorizeAttach,
-		AttachBinding:   actors.AttachBinding,
-		BindingDown:     actors.BindingDown,
-		Fork:            actors.RemoteFork,
-		EndSelf:         actors.RemoteEndSelf,
+		AuthorizeAttach: h.actors.AuthorizeAttach,
+		AttachBinding:   h.actors.AttachBinding,
+		BindingDown:     h.actors.BindingDown,
+		Fork:            h.actors.RemoteFork,
+		EndSelf:         h.actors.RemoteEndSelf,
 		Observe: func(
 			id actor.ActorID,
 			key actorhost.AttemptKey,

@@ -139,7 +139,8 @@ func TestHarnessConstructionConfinedToPlatform(t *testing.T) {
 			return nil
 		}
 		slash := filepath.ToSlash(path)
-		if strings.HasPrefix(slash, platformPathPrefix) {
+		if strings.HasPrefix(slash, platformPathPrefix) ||
+			strings.HasPrefix(slash, "../runtime/managedcaps/") {
 			return nil
 		}
 		file, perr := parser.ParseFile(fset, path, nil, 0)

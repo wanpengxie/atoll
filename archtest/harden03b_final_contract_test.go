@@ -177,9 +177,8 @@ func TestHarden03BControllerContainerAndGateOrderAreSingular(t *testing.T) {
 	for _, required := range []string{
 		"stateMu sync.RWMutex",
 		"actors  map[actor.ActorID]ActiveActor",
-		"store        Store",
-		"valueEffects controllerValueEffects",
-		"c.actors = maps.Clone(boot.managed)",
+		"store Store",
+		"c.actors = maps.Clone(managed)",
 		"return cloneActive(value), ok, nil",
 	} {
 		if !strings.Contains(string(controller), required) {
@@ -208,19 +207,8 @@ func TestHarden03BControllerContainerAndGateOrderAreSingular(t *testing.T) {
 				count++
 			}
 			spec, ok := node.(*ast.TypeSpec)
-			if !ok || spec.Name.Name != "ChannelActors" {
-				return true
-			}
-			structType, ok := spec.Type.(*ast.StructType)
-			if !ok {
-				return true
-			}
-			for _, field := range structType.Fields.List {
-				for _, name := range field.Names {
-					if name.Name == "store" {
-						t.Error("ChannelActors command facade retained Controller's Store port")
-					}
-				}
+			if ok && spec.Name.Name == "ChannelActors" {
+				t.Error("runtime/actorctl retained a Channel composition root")
 			}
 			return true
 		})
@@ -245,13 +233,13 @@ func TestHarden03BControllerContainerAndGateOrderAreSingular(t *testing.T) {
 		}
 	}
 	for _, required := range []string{
-		"a.controller.admit(ctx, request)",
-		"a.controller.introduce(ctx, request)",
-		"a.controller.fork(ctx, request)",
-		"a.controller.restart(ctx, request)",
-		"a.controller.applyDefinitionChange(ctx, change)",
-		"a.controller.attachDaemon(ctx, request)",
-		"a.controller.terminal(ctx, command)",
+		"return c.admit(ctx, request)",
+		"return c.introduce(ctx, request)",
+		"return c.fork(ctx, request)",
+		"return c.restart(ctx, request)",
+		"return c.applyDefinitionChange(ctx, change)",
+		"return c.attachDaemon(ctx, request)",
+		"return c.terminal(ctx, command)",
 	} {
 		if !strings.Contains(string(commands), required) {
 			t.Errorf("command facade does not delegate complete transition %q", required)
@@ -546,9 +534,14 @@ func TestHarden03BBodyConstructionUsesOnlyExactSnapshot(t *testing.T) {
 			forbidden: []string{"source.Lookup(input.ActorID)"},
 		},
 		{
-			path:      "../runtime/actorctl/caps.go",
-			required:  []string{"controller.definitionForAttempt(", "input.AttemptKey", "input.ExecutionSpec"},
-			forbidden: []string{"controller.lookup(input.ActorID)"},
+			path:      "../runtime/actorctl/authority.go",
+			required:  []string{"func (c *Controller) PrepareRun(", "value.Desired.AttemptKey != key", "!value.Definition.Execution.Equal(spec)"},
+			forbidden: []string{"ActualCurrent"},
+		},
+		{
+			path:      "../runtime/managedcaps/minter.go",
+			required:  []string{"func (m *Minter) Mint(", "prepared.Identity()", "prepared.Run()"},
+			forbidden: []string{"ActualCurrent", "managedInvocation"},
 		},
 	}
 	for _, tc := range cases {
@@ -654,11 +647,10 @@ func TestHarden03BNoExportedLifecycleBinder(t *testing.T) {
 	}
 }
 
-// TestHarden03BServerManagedCapsGateOwnedByActorctl pins the value-ledger gate
-// collection: the Server managed Caps (and its physical-current membrane) are
-// constructed ONLY inside runtime/actorctl, so platform/home holds no
-// ActualCurrent reference and no managed-current facade of its own.
-func TestHarden03BServerManagedCapsGateOwnedByActorctl(t *testing.T) {
+// TestHarden03BServerManagedCapsUseOneAuthorityBundleMinter pins the final
+// split: Platform invokes one bundle minter, while no business permission
+// depends on Host ActualCurrent.
+func TestHarden03BServerManagedCapsUseOneAuthorityBundleMinter(t *testing.T) {
 	homeFiles, err := productionFiles("../platform/home")
 	if err != nil {
 		t.Fatal(err)
@@ -669,24 +661,31 @@ func TestHarden03BServerManagedCapsGateOwnedByActorctl(t *testing.T) {
 			t.Fatal(err)
 		}
 		if strings.Contains(string(body), "ActualCurrent") {
-			t.Errorf("%s references actorhost.ActualCurrent — the physical-current fence lives only in runtime/actorctl now", filepath.ToSlash(path))
+			t.Errorf("%s references actorhost.ActualCurrent as capability authority", filepath.ToSlash(path))
 		}
 		if strings.Contains(string(body), "buildManagedCaps") {
-			t.Errorf("%s still constructs managed Caps — actorctl is the sole Server managed Caps constructor", filepath.ToSlash(path))
+			t.Errorf("%s retains the obsolete per-arm managed caps assembler", filepath.ToSlash(path))
 		}
 	}
 
-	caps, err := os.ReadFile("../runtime/actorctl/caps.go")
+	caps, err := os.ReadFile("../runtime/managedcaps/minter.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, required := range []string{
-		"type managedInvocation struct {",
-		"func (g *managedInvocation) admit() error",
-		"func (a *ChannelActors) buildManagedCaps(",
+		"func (m *Minter) Mint(",
+		"m.pen.MintAuthority(prepared.Run()",
+		"m.access.MintAuthority(prepared.Run())",
+		"m.state.ResolveAuthority(ctx, prepared.Identity())",
+		"m.schedule.MintAuthority(prepared.Identity())",
 	} {
 		if !strings.Contains(string(caps), required) {
-			t.Errorf("runtime/actorctl/caps.go missing value-ledger gate anchor %q", required)
+			t.Errorf("runtime/managedcaps/minter.go missing authority bundle anchor %q", required)
+		}
+	}
+	for _, forbidden := range []string{"managedInvocation", "ActualCurrent", "BirthVersion"} {
+		if strings.Contains(string(caps), forbidden) {
+			t.Errorf("runtime/managedcaps/minter.go retained obsolete authority %q", forbidden)
 		}
 	}
 }

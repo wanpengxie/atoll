@@ -7,6 +7,7 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -102,13 +103,17 @@ func (h boundHandle) Redeem(context.Context, FileRoute) (FileAccess, error) {
 // implementation, channel-scoped). The caller is a struct field, not a wire
 // field — structurally there is nowhere to self-report it.
 type boundHandle struct {
-	door   *door
-	caller storespec.AuthorStamp
+	door      *door
+	caller    storespec.AuthorStamp
+	authority capauth.Authority
 }
 
 var ErrAuthorInactive = errors.New("accessdoor: author inactive or stale")
 
 func (h boundHandle) authorize(ctx context.Context) error {
+	if h.authority != nil {
+		return h.authority.Admit()
+	}
 	verdict, err := h.door.deps.Authority.CheckAuthor(ctx, h.caller)
 	if err != nil {
 		return err
@@ -216,6 +221,61 @@ func (m *minter) Mint(caller storespec.AuthorStamp) ResourceAccessHandle {
 // (non-ambient: welded here, never read off the wire).
 func (m *minter) MintState(owner storespec.AuthorStamp) AccessHandle {
 	return boundStateHandle{door: m.door, owner: owner}
+}
+
+func (m *minter) MintAuthority(authority capauth.Authority) ResourceAccessHandle {
+	if authority == nil || authority.ActorID() == "" {
+		return rejectedResourceHandle{err: ErrAuthorInactive}
+	}
+	return boundHandle{
+		door:      m.door,
+		caller:    storespec.AuthorStamp{ID: authority.ActorID()},
+		authority: authority,
+	}
+}
+
+func (m *minter) MintStateAuthority(authority capauth.Authority) AccessHandle {
+	if authority == nil || authority.ActorID() == "" {
+		return rejectedStateHandle{err: ErrAuthorInactive}
+	}
+	return boundStateHandle{
+		door:      m.door,
+		owner:     storespec.AuthorStamp{ID: authority.ActorID()},
+		authority: authority,
+	}
+}
+
+type rejectedStateHandle struct{ err error }
+
+func (h rejectedStateHandle) Invoke(
+	context.Context,
+	access.Operation,
+	resource.ResourceID,
+	[]byte,
+	*access.Grant,
+) (Outcome, error) {
+	return Outcome{}, h.err
+}
+
+type rejectedResourceHandle struct{ err error }
+
+func (h rejectedResourceHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
+	return Outcome{}, h.err
+}
+func (h rejectedResourceHandle) Create(context.Context, resource.ResourceID, CreateSpec, []byte) (Outcome, error) {
+	return Outcome{}, h.err
+}
+func (h rejectedResourceHandle) Stat(context.Context, resource.ResourceID) (StatResult, error) {
+	return StatResult{}, h.err
+}
+func (h rejectedResourceHandle) List(context.Context, ListQuery) (ListPage, error) {
+	return ListPage{}, h.err
+}
+func (h rejectedResourceHandle) Open(context.Context, resource.ResourceID, access.Operation) (FileAccess, Outcome, error) {
+	return FileAccess{}, Outcome{}, h.err
+}
+func (h rejectedResourceHandle) Redeem(context.Context, FileRoute) (FileAccess, error) {
+	return FileAccess{}, h.err
 }
 
 // New assembles the door from Deps and returns a Minter — never the bare door.

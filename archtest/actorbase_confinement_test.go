@@ -33,7 +33,7 @@ const actorcapsPkg = platformModulePrefix + "lib/actorcaps"
 // value-ledger gate onto each arm and hands the finished bundle to a narrow
 // business builder. Naming actorcaps.Caps there is that construction locus, not
 // a downstream leak; the platform assembly root now only injects minters.
-var actorcapsAllowedPrefix = []string{"../platform/", "../lib/actorbase/", "../lib/actorcaps/", "../archtest/", "../runtime/actorctl/"}
+var actorcapsAllowedPrefix = []string{"../platform/", "../lib/actorbase/", "../lib/actorcaps/", "../archtest/", "../runtime/managedcaps/"}
 
 // TestActorcapsConfinedToPlatformAndActorbase checks the actual Caps selector,
 // not the package import. Only the platform assembly root, lib/actorbase, and

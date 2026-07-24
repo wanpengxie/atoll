@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -12,13 +13,16 @@ import (
 // a wire/request field — structurally there is nowhere for a caller to
 // self-report a different one (mirrors accessdoor.boundHandle).
 type boundScheduleHandle struct {
-	engine  *Engine
-	author  storespec.AuthorStamp
-	auth    storespec.ActorAuthority
-	current func() bool
+	engine    *Engine
+	author    storespec.AuthorStamp
+	auth      storespec.ActorAuthority
+	authority capauth.Authority
 }
 
 func (h boundScheduleHandle) authorize(ctx context.Context) error {
+	if h.authority != nil {
+		return h.authority.Admit()
+	}
 	verdict, err := h.auth.CheckAuthor(ctx, h.author)
 	if err != nil {
 		return err
@@ -33,7 +37,7 @@ func (h boundScheduleHandle) Schedule(ctx context.Context, req ScheduleReq) (Tim
 	if err := h.authorize(ctx); err != nil {
 		return "", err
 	}
-	if req.Bind == BindIdentity {
+	if req.Home == TimerHomeDurable {
 		world, ok, err := h.auth.WorldOf(ctx, h.author.ID)
 		if err != nil {
 			return "", err
@@ -45,7 +49,7 @@ func (h boundScheduleHandle) Schedule(ctx context.Context, req ScheduleReq) (Tim
 			return "", ErrDurableScheduleForbidden
 		}
 	}
-	return h.engine.schedule(ctx, h.author.ID, h.current, req)
+	return h.engine.schedule(ctx, h.author.ID, req)
 }
 
 func (h boundScheduleHandle) Cancel(ctx context.Context, id TimerID) error {
@@ -75,18 +79,23 @@ type minter struct {
 // cheap (no per-handle state beyond the welded author), so admission points
 // may Mint per-caller freely.
 func (m *minter) Mint(author storespec.AuthorStamp) ScheduleHandle {
-	return m.MintCurrent(author, func() bool { return true })
-}
-
-func (m *minter) MintCurrent(author storespec.AuthorStamp, current func() bool) ScheduleHandle {
 	if author.ID == "" || author.BirthVersion <= 0 {
 		return rejectedScheduleHandle{err: errors.New("schedule: invalid author stamp")}
 	}
-	if current == nil {
-		return rejectedScheduleHandle{err: ErrBadSchedule}
+	return boundScheduleHandle{
+		engine: m.engine, author: author, auth: m.authority,
+	}
+}
+
+func (m *minter) MintAuthority(authority capauth.Authority) ScheduleHandle {
+	if authority == nil || authority.ActorID() == "" {
+		return rejectedScheduleHandle{err: errors.New("schedule: invalid authority")}
 	}
 	return boundScheduleHandle{
-		engine: m.engine, author: author, auth: m.authority, current: current,
+		engine:    m.engine,
+		author:    storespec.AuthorStamp{ID: authority.ActorID()},
+		auth:      m.authority,
+		authority: authority,
 	}
 }
 

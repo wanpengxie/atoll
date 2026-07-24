@@ -26,24 +26,16 @@ var (
 	ErrDurableScheduleForbidden = errors.New("schedule: durable schedule forbidden for run identity")
 )
 
-// Bind is the closed set of lifecycle levels a timer's PRODUCT belongs to
-// (the routing question is: should this intent still exist after a crash
-// restart?). It is a ROUTING choice, not a persisted tag: identity routes to
-// the durable TimerStore row; incarnation routes to the engine's in-memory
-// due-set welded to the current incarnation. It names which level the intent
-// is welded to, NOT who scheduled it (author is always the welded handle's
-// identity — orthogonal).
-type Bind string
+// TimerHome chooses the Scheduler storage home. It is not an actor lifecycle
+// coordinate: both homes are owned by ActorID and cross actor replacements.
+type TimerHome string
 
 const (
-	// BindIdentity: the intent survives a restart, cleared only by explicit
-	// Cancel or by the author's deregister (cascading delete, same tx as the
-	// other actor-scoped loci).
-	BindIdentity Bind = "identity"
-	// BindIncarnation: the intent is welded to the CURRENT incarnation —
-	// it dies when that incarnation ends or the process restarts,
-	// never persisted.
-	BindIncarnation Bind = "incarnation"
+	// TimerHomeDurable stores the timer in Scheduler DB.
+	TimerHomeDurable TimerHome = "durable"
+	// TimerHomeMemory stores the timer in the current Channel/Scheduler
+	// instance's in-memory alarm set.
+	TimerHomeMemory TimerHome = "memory"
 )
 
 // reservedTypePrefix is the fire-time-poison-row guard's INGRESS half: a Type
@@ -62,7 +54,7 @@ const reservedTypePrefix = message.ReservedTypePrefix
 // welded): the only degrees of freedom are WHEN, WHICH lifecycle level, and
 // WHAT the self-message says.
 type ScheduleReq struct {
-	Bind    Bind
+	Home    TimerHome
 	FireAt  int64 // UnixMilli, absolute instant (delay→FireAt conversion lives downstream, lib)
 	Type    string
 	Payload []byte
@@ -98,10 +90,6 @@ type ScheduleHandle interface {
 // may Mint per-caller freely.
 type Minter interface {
 	Mint(author storespec.AuthorStamp) ScheduleHandle
-	// MintCurrent welds incarnation-local timers to the exact physical current
-	// predicate supplied by the composition root. The predicate is process-local
-	// and never persisted or sent over the collaboration protocol.
-	MintCurrent(author storespec.AuthorStamp, current func() bool) ScheduleHandle
 }
 
 // FireSink is the injection-point contract for fire's single action: append

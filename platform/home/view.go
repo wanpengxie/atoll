@@ -12,7 +12,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
-	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -29,7 +28,7 @@ type View struct {
 	authority  storespec.ActorAuthority
 	links      *link.Acceptor
 	presence   presence.View
-	actors     *actorctl.ChannelActors
+	actors     *actorSystem
 	nowMs      func() int64
 	resources  storespec.ResourceReadStore
 	routing    storespec.ChannelRouting

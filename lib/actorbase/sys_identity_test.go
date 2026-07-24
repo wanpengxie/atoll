@@ -14,7 +14,7 @@ import (
 )
 
 // recordingSchedule captures the ScheduleReq — the Bind-value assertion
-// (AfterIdentity=BindIdentity vs Sys.After=BindIncarnation) needs to see it.
+// (AfterIdentity=TimerHomeDurable vs Sys.After=TimerHomeMemory) needs to see it.
 type recordingSchedule struct {
 	mu   sync.Mutex
 	reqs []schedule.ScheduleReq
@@ -102,7 +102,7 @@ func TestRespondEnvelopeAcrossIncarnation(t *testing.T) {
 
 // TestAfterIdentityPayloadVerbatim guards裁决 6: the timer payload rides as
 // json.RawMessage byte-for-byte — NO []byte→base64 marshal that would corrupt
-// what the fired timer's recipient parses. Also pins the BindIdentity value
+// what the fired timer's recipient parses. Also pins the TimerHomeDurable value
 // (identity-bound durable timer, D7).
 func TestAfterIdentityPayloadVerbatim(t *testing.T) {
 	t.Parallel()
@@ -126,8 +126,8 @@ func TestAfterIdentityPayloadVerbatim(t *testing.T) {
 	if string(got.Payload) != string(payload) {
 		t.Fatalf("timer payload = %q, want verbatim %q (base64 回潮?)", string(got.Payload), string(payload))
 	}
-	if got.Bind != schedule.BindIdentity {
-		t.Fatalf("AfterIdentity Bind = %v, want BindIdentity", got.Bind)
+	if got.Home != schedule.TimerHomeDurable {
+		t.Fatalf("AfterIdentity Home = %v, want TimerHomeDurable", got.Home)
 	}
 	if got.Type != "reminder.note" {
 		t.Fatalf("timer type = %q, want reminder.note", got.Type)

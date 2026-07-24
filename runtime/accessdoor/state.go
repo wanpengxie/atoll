@@ -7,6 +7,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -32,8 +33,9 @@ var ErrOpNotInScope = errors.New("accessdoor: operation not in this handle's sco
 // no R query, no membership check, no DriverTable routing — the owner is the
 // namespace coordinate, welded at mint, never read off the wire.
 type boundStateHandle struct {
-	door  *door
-	owner storespec.AuthorStamp
+	door      *door
+	owner     storespec.AuthorStamp
+	authority capauth.Authority
 }
 
 // Invoke runs the actor-scoped ingress (structure → ErrMalformed / set →
@@ -41,12 +43,18 @@ type boundStateHandle struct {
 // There is no day1OpsOverreach step: that narrows an op=set grant, and set does
 // not exist in this locus (ingressState rejects it before the tree).
 func (h boundStateHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
-	verdict, err := h.door.deps.Authority.CheckAuthor(ctx, h.owner)
-	if err != nil {
-		return Outcome{}, err
-	}
-	if verdict != storespec.AuthorOK {
-		return Outcome{RejectReason: access.OwnerInactive}, nil
+	if h.authority != nil {
+		if err := h.authority.Admit(); err != nil {
+			return Outcome{RejectReason: access.OwnerInactive}, nil
+		}
+	} else {
+		verdict, err := h.door.deps.Authority.CheckAuthor(ctx, h.owner)
+		if err != nil {
+			return Outcome{}, err
+		}
+		if verdict != storespec.AuthorOK {
+			return Outcome{RejectReason: access.OwnerInactive}, nil
+		}
 	}
 	if err := ingressState(op, id, args, grant); err != nil {
 		return Outcome{}, err

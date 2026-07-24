@@ -140,9 +140,9 @@ func (e *engine) RespondEnvelope(req *message.Envelope, spec behavior.ResponseSp
 	return id, nil
 }
 
-// AfterIdentity arms an IDENTITY-bound durable timer (schedule.BindIdentity —
+// AfterIdentity arms an IDENTITY-bound durable timer (schedule.TimerHomeDurable —
 // an off-process subject's reminder is a promise that outlives incarnations).
-// The Bind value is the ONE difference from Sys.After's BindIncarnation; same
+// The storage Home is the ONE difference from Sys.After's TimerHomeMemory; same
 // schedule engine, same WithoutCancel ctx. payload is json.RawMessage carried
 // VERBATIM (裁决 6: never []byte→base64 through a marshal — a fired timer's
 // recipient parses the same bytes the subject wrote).
@@ -154,7 +154,7 @@ func (e *engine) AfterIdentity(d time.Duration, msgType string, payload json.Raw
 		return "", ErrUnsupported
 	}
 	return e.sched.Schedule(e.driveCtx(), schedule.ScheduleReq{
-		Bind:    schedule.BindIdentity,
+		Home:    schedule.TimerHomeDurable,
 		FireAt:  e.clockFn().Add(d).UnixMilli(),
 		Type:    msgType,
 		Payload: payload,

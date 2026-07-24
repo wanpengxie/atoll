@@ -42,6 +42,10 @@ type caller struct {
 	kind actor.Kind
 	// birthVersion is the declaration version this capability was minted for.
 	birthVersion int64
+	// admitted marks a caller whose opaque identity/run authority was already
+	// admitted once by the bound Pen entry. StepAuthorGate then performs only
+	// its independent receiver check.
+	admitted bool
 
 	// chID is the channel binding the caller is authenticated for.
 	// Step 0/1 rejects (harness_engine_acl_denied) when it differs from the

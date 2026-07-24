@@ -41,7 +41,7 @@ var forbiddenProtoStdlib = []string{"context", "database/sql", "net/http"}
 // is zero enforcement when review is also an agent.)
 func TestProtocolPurityAndDirection(t *testing.T) {
 	const protoPkg = platformModulePrefix + "protocol" // ".../atoll/protocol"
-	protoPrefix := protoPkg + "/"                       // ".../atoll/protocol/"
+	protoPrefix := protoPkg + "/"                      // ".../atoll/protocol/"
 
 	fset := token.NewFileSet()
 	var violations []string

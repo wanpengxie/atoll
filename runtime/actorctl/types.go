@@ -4,14 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
-	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -287,62 +285,4 @@ type ForkRequest struct {
 
 type ForkResult struct {
 	ChildActorID actor.ActorID
-}
-
-type Effects interface {
-	PlanPoke(actorhost.ExecutionDomain)
-	ApplyPostCommit(storespec.PostCommitEffects)
-	RunActorBorn(actor.ActorID) error
-	RunActorsEnded([]actor.ActorID)
-	Fatal(error)
-}
-
-type nopEffects struct{}
-
-func (nopEffects) PlanPoke(actorhost.ExecutionDomain) {}
-func (nopEffects) ApplyPostCommit(storespec.PostCommitEffects) {
-}
-func (nopEffects) RunActorBorn(actor.ActorID) error { return nil }
-func (nopEffects) RunActorsEnded([]actor.ActorID)   {}
-func (nopEffects) Fatal(error)                      {}
-
-// ManagedBodyInput is the narrow, execution-identity-free view of one managed
-// body the Platform business builder is allowed to see. It deliberately omits
-// Self (Incarnation), AttemptKey and ActualCurrent: those are runtime execution
-// coordinates: leaving any of them in the business face is the seed of the next
-// bypass. The business builder finds its factory only from the exact
-// ActorID/ExecutionSpec snapshot and
-// constructs the actor with the already-gated Caps — it never sees, and cannot
-// reconstruct, the physical current fence.
-type ManagedBodyInput struct {
-	ActorID       actor.ActorID
-	ExecutionSpec actorhost.ExecutionSpec
-}
-
-// ManagedBodyBuilder is the composition callback for a Server-hosted managed
-// body. ChannelActors is the sole final constructor of the managed Caps — it
-// welds the value-ledger gate onto all five arms and hands the finished bundle
-// here. The business builder assembles the actor implementation; it cannot mint
-// a capability or a second gate.
-type ManagedBodyBuilder func(
-	ManagedBodyInput,
-	actorcaps.Caps,
-) actorrt.Actor
-
-type Config struct {
-	Store        Store
-	Effects      Effects
-	ServerDomain actorhost.ExecutionDomain
-	ServerHost   actorhost.Config
-	// ChannelID and the four runtime minters/resolver are the runtime-owned
-	// atomic dependencies actorctl draws each managed body's raw arms from. The
-	// Platform assembly root injects its welded minters here; actorctl performs
-	// the final gated Caps construction (buildManagedCaps).
-	ChannelID        channel.ID
-	PenMinter        PenMinter
-	AccessMinter     AccessMinter
-	StateResolver    StateResolver
-	ScheduleMinter   ScheduleMinter
-	BuildManagedBody ManagedBodyBuilder
-	Now              func() time.Time
 }
