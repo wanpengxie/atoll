@@ -49,8 +49,8 @@ type Config struct {
 	BindingDown     func(actor.ActorID, actorhost.Binding)
 	Fork            func(context.Context, actor.ActorID, actorhost.AttemptKey, message.ID, actorcaps.ForkSpec) (actor.ActorID, error)
 	EndSelf         func(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error
-	Observe         func(actor.ActorID, actorhost.AttemptKey, actorrt.ObsKind, actorrt.ObsValue)
-	ObserveDown     func(actor.ActorID, actorhost.AttemptKey)
+	Observe         func(actor.ActorID, actorhost.AttemptKey, actorhost.Binding, actorrt.ObsKind, actorrt.ObsValue)
+	ObserveDown     func(actor.ActorID, actorhost.AttemptKey, actorhost.Binding)
 	CancelRequest   func(actor.ActorID, message.ID)
 
 	StorageHostControl StorageHostControl
@@ -75,8 +75,8 @@ type Acceptor struct {
 	bindingDown     func(actor.ActorID, actorhost.Binding)
 	fork            func(context.Context, actor.ActorID, actorhost.AttemptKey, message.ID, actorcaps.ForkSpec) (actor.ActorID, error)
 	endSelf         func(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error
-	observe         func(actor.ActorID, actorhost.AttemptKey, actorrt.ObsKind, actorrt.ObsValue)
-	observeDown     func(actor.ActorID, actorhost.AttemptKey)
+	observe         func(actor.ActorID, actorhost.AttemptKey, actorhost.Binding, actorrt.ObsKind, actorrt.ObsValue)
+	observeDown     func(actor.ActorID, actorhost.AttemptKey, actorhost.Binding)
 	cancelReq       func(actor.ActorID, message.ID)
 
 	storageControl StorageHostControl
@@ -207,7 +207,6 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		schedule:      a.relaySchedule,
 		fork:          a.fork,
 		endSelf:       a.endSelf,
-		obs:           a.observe,
 		cancelRequest: a.cancelReq,
 		deliverResult: func(id actor.ActorID, request message.ID, outcome, detail string) {
 			a.logger.Warn("platform.delivery.remote_outcome",
@@ -243,16 +242,31 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 				return
 			}
 			_ = conn.SetReadDeadline(time.Time{})
-			endpoint := newServerActorEndpoint(reqCtx, id, key, conn, codec, handlers)
+			routeHandlers := handlers
+			var hostBinding actorhost.Binding
+			routeHandlers.obs = func(
+				obsID actor.ActorID,
+				obsKey actorhost.AttemptKey,
+				kind actorrt.ObsKind,
+				value actorrt.ObsValue,
+			) {
+				if a.observe != nil {
+					a.observe(obsID, obsKey, hostBinding, kind, value)
+				}
+			}
+			endpoint := newServerActorEndpoint(reqCtx, id, key, conn, codec, routeHandlers)
 			var binding *Binding
 			binding, err = physical.NewBinding(BindingConfig{
 				Endpoint: endpoint,
 				Run:      endpoint.Run,
 				Close:    endpoint.Close,
+				BeforeStart: func(exact *Binding) {
+					hostBinding = exact.HostBinding()
+				},
 				OnDown: func(exact *Binding, runErr error) {
-					a.bindingDown(id, exact)
+					a.bindingDown(id, exact.HostBinding())
 					if a.observeDown != nil {
-						a.observeDown(id, key)
+						a.observeDown(id, key, exact.HostBinding())
 					}
 					if runErr != nil && !errors.Is(runErr, context.Canceled) {
 						a.logger.Debug("link.actor_binding_down", "actor", id, "err", runErr)
@@ -265,7 +279,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			}
 			// Fresh Controller authorization immediately precedes publication;
 			// a G1 stream paused after its first check cannot replace G2.
-			if err := a.attachBinding(id, key, peer, binding); err != nil {
+			if err := a.attachBinding(id, key, peer, binding.HostBinding()); err != nil {
 				_ = binding.Close()
 			}
 		}()

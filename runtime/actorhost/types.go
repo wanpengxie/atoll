@@ -262,25 +262,75 @@ type ActorEndpoint interface {
 	CancelRequest(message.ID)
 }
 
-// Binding is one exact remote route. Close only signals teardown and must not
-// wait for Done.
-type Binding interface {
+// BindingResource is the behavior behind one remote route. HostSupervisor
+// never stores or compares this open interface directly; NewBinding wraps it
+// in a pointer-backed, comparable Binding value first.
+type BindingResource interface {
 	ActorEndpoint
 	Close() error
 	Done() <-chan struct{}
 }
 
-func nilBinding(binding Binding) bool {
-	if binding == nil {
+type bindingRef struct {
+	resource BindingResource
+}
+
+// Binding is an opaque exact route identity. Its only comparable field is the
+// private ref pointer, so equality is total even when the wrapped resource has
+// a non-comparable dynamic implementation.
+type Binding struct {
+	ref *bindingRef
+}
+
+// NewBinding seals one route resource into an exact comparable handle.
+func NewBinding(resource BindingResource) (Binding, error) {
+	if nilBindingResource(resource) || resource.Done() == nil {
+		return Binding{}, fmt.Errorf("%w: nil binding", ErrInvalidDesired)
+	}
+	return Binding{ref: &bindingRef{resource: resource}}, nil
+}
+
+func nilBindingResource(resource BindingResource) bool {
+	if resource == nil {
 		return true
 	}
-	value := reflect.ValueOf(binding)
+	value := reflect.ValueOf(resource)
 	switch value.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		return value.IsNil()
 	default:
 		return false
 	}
+}
+
+// Valid reports whether the handle owns an exact route resource.
+func (b Binding) Valid() bool { return b.ref != nil && b.ref.resource != nil }
+
+func (b Binding) Deliver(env *message.Envelope) error {
+	if !b.Valid() {
+		return ErrNotHosted
+	}
+	return b.ref.resource.Deliver(env)
+}
+
+func (b Binding) CancelRequest(id message.ID) {
+	if b.Valid() {
+		b.ref.resource.CancelRequest(id)
+	}
+}
+
+func (b Binding) Close() error {
+	if !b.Valid() {
+		return nil
+	}
+	return b.ref.resource.Close()
+}
+
+func (b Binding) Done() <-chan struct{} {
+	if !b.Valid() {
+		return nil
+	}
+	return b.ref.resource.Done()
 }
 
 // BodyBuildInput is the complete immutable input to one body builder.

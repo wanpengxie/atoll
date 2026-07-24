@@ -17,6 +17,7 @@ type entry struct {
 	receivedAt int64
 	local      actorrt.Incarnation
 	remote     actorhost.AttemptKey
+	route      actorhost.Binding
 }
 
 // Testimony is the latest level testimony for one kind. It is advisory: an
@@ -80,20 +81,21 @@ func (f *Fold) OnObs(_ context.Context, id actor.ActorID, gen actorrt.Incarnatio
 		})
 		return
 	}
-	f.put(id, kind, val, gen, "")
+	f.put(id, kind, val, gen, "", actorhost.Binding{})
 }
 
 // OnRemoteObs records testimony from one exact daemon Body attempt.
 func (f *Fold) OnRemoteObs(
 	id actor.ActorID,
 	key actorhost.AttemptKey,
+	route actorhost.Binding,
 	kind actorrt.ObsKind,
 	val actorrt.ObsValue,
 ) {
 	if !f.isLevel(kind) {
 		return
 	}
-	f.put(id, kind, val, actorrt.Incarnation{}, key)
+	f.put(id, kind, val, actorrt.Incarnation{}, key, route)
 }
 
 func (f *Fold) put(
@@ -102,6 +104,7 @@ func (f *Fold) put(
 	val actorrt.ObsValue,
 	local actorrt.Incarnation,
 	remote actorhost.AttemptKey,
+	route actorhost.Binding,
 ) {
 	f.mu.Lock()
 	byKind := f.latest[id]
@@ -112,7 +115,7 @@ func (f *Fold) put(
 	_, existed := byKind[kind]
 	byKind[kind] = entry{
 		val: append([]byte(nil), val...), receivedAt: f.clock().UnixMilli(),
-		local: local, remote: remote,
+		local: local, remote: remote, route: route,
 	}
 	f.mu.Unlock()
 	if !existed {
@@ -161,11 +164,11 @@ func (f *Fold) OnDown(_ context.Context, id actor.ActorID, gen actorrt.Incarnati
 
 // OnRemoteDown removes only testimony published by the exact route attempt
 // that went down; a stale G1 close cannot erase G2 testimony.
-func (f *Fold) OnRemoteDown(id actor.ActorID, key actorhost.AttemptKey) {
+func (f *Fold) OnRemoteDown(id actor.ActorID, key actorhost.AttemptKey, route actorhost.Binding) {
 	var offlineKinds []actorrt.ObsKind
 	f.mu.Lock()
 	for kind, row := range f.latest[id] {
-		if row.remote == key {
+		if row.remote == key && row.route == route {
 			delete(f.latest[id], kind)
 			offlineKinds = append(offlineKinds, kind)
 		}

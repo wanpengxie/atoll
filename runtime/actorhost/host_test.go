@@ -77,6 +77,16 @@ type testBinding struct {
 	calls     atomic.Int64
 }
 
+type nonComparableBinding struct {
+	payload []byte
+	done    <-chan struct{}
+}
+
+func (nonComparableBinding) Deliver(*message.Envelope) error { return nil }
+func (nonComparableBinding) CancelRequest(message.ID)        {}
+func (nonComparableBinding) Close() error                    { return nil }
+func (b nonComparableBinding) Done() <-chan struct{}         { return b.done }
+
 func newTestBinding() *testBinding {
 	return &testBinding{
 		closed:  make(chan struct{}),
@@ -113,6 +123,15 @@ func (b *testBinding) finish() {
 	default:
 		close(b.done)
 	}
+}
+
+func exactTestBinding(t *testing.T, resource BindingResource) Binding {
+	t.Helper()
+	binding, err := NewBinding(resource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return binding
 }
 
 func testAttempt(t *testing.T) AttemptKey {
@@ -415,11 +434,13 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 		t.Fatal(err)
 	}
 	b1 := newTestBinding()
-	if err := host.Attach(id, low, b1); err != nil {
+	h1 := exactTestBinding(t, b1)
+	if err := host.Attach(id, low, h1); err != nil {
 		t.Fatal(err)
 	}
 	b2 := newTestBinding()
-	if err := host.Attach(id, low, b2); err != nil {
+	h2 := exactTestBinding(t, b2)
+	if err := host.Attach(id, low, h2); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -433,7 +454,8 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 	}}); err != nil {
 		t.Fatal(err)
 	}
-	if err := host.Attach(id, high, b3); err != nil {
+	h3 := exactTestBinding(t, b3)
+	if err := host.Attach(id, high, h3); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -442,7 +464,8 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 		t.Fatal("cross-attempt predecessor was not signaled closed")
 	}
 	stale := newTestBinding()
-	if err := host.Attach(id, low, stale); !errors.Is(err, ErrStaleBinding) {
+	staleHandle := exactTestBinding(t, stale)
+	if err := host.Attach(id, low, staleHandle); !errors.Is(err, ErrStaleBinding) {
 		t.Fatalf("stale attach error = %v", err)
 	}
 	select {
@@ -450,12 +473,12 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 		t.Fatal("Host took ownership of rejected incoming Binding")
 	default:
 	}
-	host.BindingDown(id, b2)
+	host.BindingDown(id, h2)
 	snapshot, _ := host.Inspect(id)
-	if snapshot.Binding != b3 {
+	if snapshot.Binding != h3 {
 		t.Fatal("stale BindingDown removed successor")
 	}
-	host.BindingDown(id, b3)
+	host.BindingDown(id, h3)
 	snapshot, ok := host.Inspect(id)
 	if ok && snapshot.Actual != ActualNone {
 		t.Fatalf("exact BindingDown left route: %#v", snapshot)
@@ -464,6 +487,37 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 	b1.finish()
 	b2.finish()
 	b3.finish()
+}
+
+func TestOpaqueBindingIdentityAcceptsNonComparableResource(t *testing.T) {
+	t.Parallel()
+	host, err := New(Config{
+		Domain:      "server",
+		BodyBuilder: func(BodyBuildInput) actorrt.Actor { return newHostTestActor() },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeHost(t, host)
+	id := actor.ActorID("agent:non-comparable-binding")
+	key := testAttempt(t)
+	if err := host.AcceptFullDesired([]Desired{CarrierDesired{
+		ActorID: id, AttemptKey: key, PeerDomain: "daemon",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	resource := nonComparableBinding{payload: []byte("slice makes this value non-comparable"), done: make(chan struct{})}
+	binding := exactTestBinding(t, resource)
+	if err := host.Attach(id, key, binding); err != nil {
+		t.Fatal(err)
+	}
+	if err := host.Attach(id, key, binding); err != nil {
+		t.Fatal(err)
+	}
+	host.BindingDown(id, binding)
+	if snapshot, ok := host.Inspect(id); ok && snapshot.Actual != ActualNone {
+		t.Fatalf("exact opaque BindingDown left route: %#v", snapshot)
+	}
 }
 
 func TestAttachDuringBodyBuildIsRetryableAndDoesNotOwnIncoming(t *testing.T) {
@@ -490,7 +544,8 @@ func TestAttachDuringBodyBuildIsRetryableAndDoesNotOwnIncoming(t *testing.T) {
 	}
 	<-started
 	binding := newTestBinding()
-	if err := host.Attach(id, key, binding); !errors.Is(err, ErrAttachRetryable) {
+	handle := exactTestBinding(t, binding)
+	if err := host.Attach(id, key, handle); !errors.Is(err, ErrAttachRetryable) {
 		t.Fatalf("Attach error = %v", err)
 	}
 	select {
@@ -522,7 +577,7 @@ func TestEndpointInvocationUsesOneSlidingWindowSnapshot(t *testing.T) {
 	}
 	b1 := newTestBinding()
 	b1.block = make(chan struct{})
-	if err := host.Attach(id, key, b1); err != nil {
+	if err := host.Attach(id, key, exactTestBinding(t, b1)); err != nil {
 		t.Fatal(err)
 	}
 	result := make(chan error, 1)
@@ -532,7 +587,7 @@ func TestEndpointInvocationUsesOneSlidingWindowSnapshot(t *testing.T) {
 	eventually(t, func() bool { return b1.calls.Load() == 1 })
 
 	b2 := newTestBinding()
-	if err := host.Attach(id, key, b2); err != nil {
+	if err := host.Attach(id, key, exactTestBinding(t, b2)); err != nil {
 		t.Fatal(err)
 	}
 	if err := host.Deliver(id, &message.Envelope{ID: "new"}); err != nil {
@@ -745,7 +800,7 @@ func TestSystemActorRejectedAtHostBoundaries(t *testing.T) {
 		t.Fatalf("desired error = %v", err)
 	}
 	binding := newTestBinding()
-	if err := host.Attach(actor.SystemActorID, key, binding); !errors.Is(err, ErrReservedSystem) {
+	if err := host.Attach(actor.SystemActorID, key, exactTestBinding(t, binding)); !errors.Is(err, ErrReservedSystem) {
 		t.Fatalf("attach error = %v", err)
 	}
 	binding.finish()

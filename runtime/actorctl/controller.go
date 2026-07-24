@@ -315,6 +315,7 @@ type ChannelActors struct {
 
 	startMu sync.Mutex
 	started bool
+	closed  bool
 }
 
 func NewChannelActors(cfg Config) (*ChannelActors, error) {
@@ -392,6 +393,9 @@ func NewChannelActors(cfg Config) (*ChannelActors, error) {
 func (a *ChannelActors) Start(ctx context.Context, unit *actorrt.Unit) error {
 	a.startMu.Lock()
 	defer a.startMu.Unlock()
+	if a.closed {
+		return ErrClosed
+	}
 	if a.started {
 		return ErrAlreadyStarted
 	}
@@ -406,31 +410,37 @@ func (a *ChannelActors) Start(ctx context.Context, unit *actorrt.Unit) error {
 	if err := unit.InstallEventSink(&a.kernel); err != nil {
 		return err
 	}
-	a.kernel.unit = unit
+	if err := a.kernel.adopt(unit); err != nil {
+		return err
+	}
 	if err := unit.Start(); err != nil {
 		unit.Stop()
 		<-unit.Done()
+		a.kernel.release(unit)
 		return err
 	}
 	if !unit.IsAlive() {
 		unit.Stop()
 		<-unit.Done()
+		a.kernel.release(unit)
 		return ErrInvalidKernel
 	}
 	if err := a.controller.publishBoot(boot); err != nil {
 		unit.Stop()
 		<-unit.Done()
+		a.kernel.release(unit)
 		return err
 	}
 	if err := a.readServerDesired(); err != nil {
 		a.controller.close()
 		unit.Stop()
 		<-unit.Done()
+		a.kernel.release(unit)
 		return err
 	}
 	a.serverDesiredWG.Add(1)
 	go a.runServerDesired()
-	a.kernel.startWatch()
+	a.kernel.startWatch(unit)
 	a.started = true
 	return nil
 }
@@ -526,7 +536,7 @@ func (a *ChannelActors) Stat(id actor.ActorID) (actorrt.UnitStat, bool) {
 	if snapshot.Actual == actorhost.ActualBody && snapshot.Unit != nil && snapshot.Unit.IsAlive() {
 		return snapshot.Unit.Stat(), true
 	}
-	if snapshot.Actual == actorhost.ActualRoute && snapshot.Binding != nil {
+	if snapshot.Actual == actorhost.ActualRoute && snapshot.Binding.Valid() {
 		value, found, err := a.controller.lookup(id)
 		if err == nil && found {
 			return actorrt.UnitStat{StartedAt: snapshot.StartedAt, Kind: value.Definition.Kind}, true
@@ -556,7 +566,7 @@ func (a *ChannelActors) Attempt(id actor.ActorID) (actorhost.AttemptKey, bool) {
 		return "", false
 	}
 	snapshot, ok := a.host.Inspect(id)
-	if !ok || snapshot.Actual != actorhost.ActualRoute || snapshot.Binding == nil {
+	if !ok || snapshot.Actual != actorhost.ActualRoute || !snapshot.Binding.Valid() {
 		return "", false
 	}
 	return snapshot.Attempt, true
@@ -622,6 +632,9 @@ func (a *ChannelActors) Quiesce(ctx context.Context) error {
 }
 
 func (a *ChannelActors) Close(ctx context.Context) error {
+	a.startMu.Lock()
+	a.closed = true
+	a.startMu.Unlock()
 	var faults []error
 	if err := a.Quiesce(ctx); err != nil {
 		return err

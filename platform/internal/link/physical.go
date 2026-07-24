@@ -219,6 +219,10 @@ type BindingConfig struct {
 	Run      func(context.Context) error
 	Close    func() error
 	OnDown   func(*Binding, error)
+	// BeforeStart runs synchronously after session registration and before the
+	// route goroutine starts. It lets the composition weld exact route identity
+	// into callbacks without a publication race.
+	BeforeStart func(*Binding)
 }
 
 // NewBinding registers an exact route before its reader starts.
@@ -235,6 +239,9 @@ func (s *AuthenticatedLinkSession) NewBinding(cfg BindingConfig) (*Binding, erro
 	}
 	s.bindings[binding] = struct{}{}
 	s.mu.Unlock()
+	if cfg.BeforeStart != nil {
+		cfg.BeforeStart(binding)
+	}
 	binding.start()
 	return binding, nil
 }
@@ -317,6 +324,7 @@ func (s *AuthenticatedLinkSession) ChildCounts() (bindings, streams int) {
 type Binding struct {
 	session  *AuthenticatedLinkSession
 	endpoint actorhost.ActorEndpoint
+	host     actorhost.Binding
 	run      func(context.Context) error
 	closeFn  func() error
 	onDown   func(*Binding, error)
@@ -334,7 +342,7 @@ type Binding struct {
 
 func newBinding(session *AuthenticatedLinkSession, cfg BindingConfig) *Binding {
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Binding{
+	binding := &Binding{
 		session:  session,
 		endpoint: cfg.Endpoint,
 		run:      cfg.Run,
@@ -344,6 +352,21 @@ func newBinding(session *AuthenticatedLinkSession, cfg BindingConfig) *Binding {
 		cancel:   cancel,
 		done:     make(chan struct{}),
 	}
+	host, err := actorhost.NewBinding(binding)
+	if err != nil {
+		panic("link: invalid internal binding: " + err.Error())
+	}
+	binding.host = host
+	return binding
+}
+
+// HostBinding returns the one opaque exact handle minted before the route
+// worker starts. Repeated calls preserve identity.
+func (b *Binding) HostBinding() actorhost.Binding {
+	if b == nil {
+		return actorhost.Binding{}
+	}
+	return b.host
 }
 
 func (b *Binding) start() {
@@ -516,5 +539,5 @@ func (s *ActorStream) Err() error {
 }
 
 var (
-	_ actorhost.Binding = (*Binding)(nil)
+	_ actorhost.BindingResource = (*Binding)(nil)
 )

@@ -237,10 +237,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		Observe: func(
 			id actor.ActorID,
 			key actorhost.AttemptKey,
+			route actorhost.Binding,
 			kind actorrt.ObsKind,
 			value actorrt.ObsValue,
 		) {
-			h.presenceFold.OnRemoteObs(id, key, kind, value)
+			h.presenceFold.OnRemoteObs(id, key, route, kind, value)
 		},
 		ObserveDown:   h.presenceFold.OnRemoteDown,
 		CancelRequest: h.handleCancelUpstream,

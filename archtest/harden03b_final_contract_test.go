@@ -327,6 +327,70 @@ func TestHarden03BPhysicalOwnersUseExactObjectIdentity(t *testing.T) {
 	}
 }
 
+func TestHarden03BP2OwnershipAndRetryWalls(t *testing.T) {
+	read := func(path string) string {
+		t.Helper()
+		body, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return string(body)
+	}
+
+	store := read("../platform/home/actor_store.go")
+	lookupStart := strings.Index(store, "func (s *homeActorStore) LookupFork(")
+	if lookupStart < 0 {
+		t.Fatal("LookupFork implementation not found")
+	}
+	lookupEnd := strings.Index(store[lookupStart:], "\n}\n")
+	if lookupEnd < 0 {
+		t.Fatal("LookupFork implementation is unterminated")
+	}
+	if strings.Contains(store[lookupStart:lookupStart+lookupEnd], "runRows") {
+		t.Fatal("Fork receipt read-back restores run-world state")
+	}
+
+	types := read("../runtime/actorhost/types.go")
+	for _, required := range []string{
+		"type BindingResource interface {",
+		"type Binding struct {\n\tref *bindingRef\n}",
+	} {
+		if !strings.Contains(types, required) {
+			t.Errorf("opaque Binding wall missing %q", required)
+		}
+	}
+
+	commands := read("../runtime/actorctl/commands.go")
+	if strings.Contains(commands, "c.valueEffects.RunActorsEnded") {
+		t.Fatal("terminal path invokes external ended tail while Controller gates may be held")
+	}
+
+	outbound := read("../platform/compute/outbound.go")
+	for _, required := range []string{
+		"retryAt   time.Time",
+		"func (d *DaemonOutbound) Seal(",
+		"func (d *DaemonOutbound) CloseResidual(",
+	} {
+		if !strings.Contains(outbound, required) {
+			t.Errorf("DaemonOutbound P2 wall missing %q", required)
+		}
+	}
+
+	compute := read("../platform/compute/compute.go")
+	seal := strings.Index(compute, "outbound.Seal(")
+	hostClose := strings.Index(compute, "host.Close(")
+	residual := strings.Index(compute, "outbound.CloseResidual(")
+	sessionClose := strings.Index(compute, "currentSession.Close(")
+	if seal < 0 || hostClose < seal || residual < hostClose || sessionClose < residual {
+		t.Fatal("daemon close DAG is not outbound seal → Host close → residual slots → session close")
+	}
+
+	presence := read("../platform/internal/presence/presence.go")
+	if !strings.Contains(presence, "row.remote == key && row.route == route") {
+		t.Fatal("remote presence down is not fenced by exact Binding")
+	}
+}
+
 func TestHarden03BCollaborationDTOsDoNotCarryExecutionIdentity(t *testing.T) {
 	forbiddenFields := map[string]bool{"AttemptKey": true, "Incarnation": true}
 	roots := []string{"../protocol/message"}

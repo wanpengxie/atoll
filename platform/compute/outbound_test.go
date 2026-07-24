@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -600,6 +601,147 @@ func TestDaemonOutboundCloseDoesNotOwnSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	<-session.Done()
+}
+
+func TestOutboundOpenFailureUsesBoundedRetryBackoff(t *testing.T) {
+	t.Parallel()
+	const retry = 80 * time.Millisecond
+	outbound := NewDaemonOutbound(DaemonOutboundConfig{
+		PollInterval: time.Millisecond,
+		RetryDelay:   retry,
+	})
+	builds := make(chan outboundBuild)
+	host := newOutboundHost(t, outbound, builds, false)
+	var opens atomic.Int64
+	session, err := link.NewAuthenticatedLinkSession(link.AuthenticatedLinkSessionConfig{
+		Peer: "server",
+		OpenActorStream: func(
+			context.Context,
+			actor.ActorID,
+			actorhost.AttemptKey,
+		) (link.ActorStreamResource, error) {
+			opens.Add(1)
+			return link.ActorStreamResource{}, errors.New("open failed")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOutboundFixture(t, host, outbound, session)
+
+	id := actor.ActorID("agent:open-backoff")
+	key := outboundAttempt(t)
+	if err := host.AcceptFullDesired([]actorhost.Desired{outboundDesired(t, id, key)}); err != nil {
+		t.Fatal(err)
+	}
+	build := <-builds
+	close(build.release)
+	eventuallyOutbound(t, build.input.Current.IsCurrent)
+	if err := outbound.SetSession(session); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyOutbound(t, func() bool { return opens.Load() == 1 })
+	time.Sleep(retry / 3)
+	if got := opens.Load(); got != 1 {
+		t.Fatalf("failed stream open hot-spun %d attempts inside retry delay", got)
+	}
+	eventuallyOutbound(t, func() bool { return opens.Load() >= 2 })
+}
+
+type panickingPlanSource struct {
+	called chan struct{}
+	once   sync.Once
+}
+
+func (*panickingPlanSource) ApplyPlan([]platform.PlanActor) error { return nil }
+func (s *panickingPlanSource) Lookup(actor.ActorID) (platform.ActorFactory, bool) {
+	s.once.Do(func() { close(s.called) })
+	panic("factory lookup panic")
+}
+
+func TestDaemonBodyBuildPanicClosesPreparedOutboundSlot(t *testing.T) {
+	t.Parallel()
+	outbound := NewDaemonOutbound(DaemonOutboundConfig{PollInterval: time.Millisecond})
+	source := &panickingPlanSource{called: make(chan struct{})}
+	host, err := actorhost.New(actorhost.Config{
+		Domain:       "daemon",
+		PollInterval: time.Millisecond,
+		RetryDelay:   time.Hour,
+		BodyBuilder:  daemonBodyBuilder(outbound, source),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeOutboundFixture(t, host, outbound)
+
+	id := actor.ActorID("agent:panic-after-slot")
+	if err := host.AcceptFullDesired([]actorhost.Desired{
+		outboundDesired(t, id, outboundAttempt(t)),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-source.called:
+	case <-time.After(time.Second):
+		t.Fatal("daemon body builder did not run")
+	}
+	eventuallyOutbound(t, func() bool {
+		outbound.mu.Lock()
+		defer outbound.mu.Unlock()
+		return len(outbound.slots) == 0
+	})
+}
+
+func TestDaemonShutdownSealsOutboundBeforeStoppingBodiesWithoutClosingTheirArms(t *testing.T) {
+	t.Parallel()
+	outbound := NewDaemonOutbound(DaemonOutboundConfig{PollInterval: time.Millisecond})
+	builds := make(chan outboundBuild)
+	host := newOutboundHost(t, outbound, builds, false)
+	probe := &outboundProbe{}
+	factory := &outboundStreamFactory{probes: []*outboundProbe{probe}}
+	session := newOutboundSession(t, "server", factory)
+
+	id := actor.ActorID("agent:shutdown-order")
+	key := outboundAttempt(t)
+	if err := host.AcceptFullDesired([]actorhost.Desired{outboundDesired(t, id, key)}); err != nil {
+		t.Fatal(err)
+	}
+	build := <-builds
+	close(build.release)
+	eventuallyOutbound(t, build.input.Current.IsCurrent)
+	if err := outbound.SetSession(session); err != nil {
+		t.Fatal(err)
+	}
+	eventuallyOutbound(t, func() bool {
+		bundle := build.prepared.Slot.arms.Load()
+		return bundle != nil && bundle.Stream != nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	if err := outbound.Seal(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := build.prepared.Pen.Write(ctx, &message.Envelope{ID: "after-seal"}); err != nil {
+		t.Fatalf("Seal invalidated a still-running body's arms: %v", err)
+	}
+	if err := host.Close(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if !build.prepared.Slot.closed.Load() {
+		t.Fatal("Host body Stop did not close its exact outbound slot")
+	}
+	if err := outbound.CloseResidual(); err != nil {
+		t.Fatal(err)
+	}
+	if err := session.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-session.Done():
+	case <-ctx.Done():
+		t.Fatal("session close timed out")
+	}
 }
 
 var _ accessdoor.ResourceAccessHandle = outboundProbeAccess{}

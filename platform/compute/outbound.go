@@ -27,12 +27,16 @@ var (
 	ErrOutboundNotCurrent   = errors.New("compute: actor incarnation is not current")
 )
 
-const defaultOutboundPoll = 100 * time.Millisecond
+const (
+	defaultOutboundPoll  = 100 * time.Millisecond
+	defaultOutboundRetry = 100 * time.Millisecond
+)
 
 // DaemonOutboundConfig configures the daemon-private physical-link organ.
 type DaemonOutboundConfig struct {
 	Parent       context.Context
 	PollInterval time.Duration
+	RetryDelay   time.Duration
 }
 
 // DaemonOutbound owns exact body slots and converges their future outbound
@@ -43,6 +47,7 @@ type DaemonOutbound struct {
 	cancel context.CancelFunc
 	wake   chan struct{}
 	poll   time.Duration
+	retry  time.Duration
 
 	mu       sync.Mutex
 	sealed   bool
@@ -54,6 +59,7 @@ type DaemonOutbound struct {
 	runnerWG sync.WaitGroup
 
 	closeMu   sync.Mutex
+	closing   bool
 	closeDone chan struct{}
 	closeErr  error
 }
@@ -85,6 +91,7 @@ type OutboundSlot struct {
 	closed    atomic.Bool
 	closeOnce sync.Once
 	opening   bool // owner.mu
+	retryAt   time.Time
 }
 
 // PreparedOutbound is the private Phase-B composition seam. It deliberately is
@@ -109,12 +116,17 @@ func NewDaemonOutbound(cfg DaemonOutboundConfig) *DaemonOutbound {
 	if poll <= 0 {
 		poll = defaultOutboundPoll
 	}
+	retry := cfg.RetryDelay
+	if retry <= 0 {
+		retry = defaultOutboundRetry
+	}
 	ctx, cancel := context.WithCancel(parent)
 	outbound := &DaemonOutbound{
 		ctx:       ctx,
 		cancel:    cancel,
 		wake:      make(chan struct{}, 1),
 		poll:      poll,
+		retry:     retry,
 		slots:     make(map[*OutboundSlot]struct{}),
 		watching:  make(map[*link.AuthenticatedLinkSession]struct{}),
 		closeDone: make(chan struct{}),
@@ -233,6 +245,7 @@ func (d *DaemonOutbound) SetSession(session *link.AuthenticatedLinkSession) erro
 	d.session = session
 	var oldStreams []*link.ActorStream
 	for slot := range d.slots {
+		slot.retryAt = time.Time{}
 		old := slot.arms.Swap(disconnectedOutboundBundle)
 		if old != nil && old.Stream != nil {
 			oldStreams = append(oldStreams, old.Stream)
@@ -331,6 +344,10 @@ func (d *DaemonOutbound) convergeSlot(slot *OutboundSlot) {
 		}
 		return
 	}
+	if !slot.retryAt.IsZero() && time.Now().Before(slot.retryAt) {
+		d.mu.Unlock()
+		return
+	}
 	if bundle != nil && bundle.Session == session && bundle.Stream != nil && !channelClosed(bundle.Stream.Done()) {
 		d.mu.Unlock()
 		return
@@ -384,9 +401,16 @@ func (d *DaemonOutbound) openSlot(slot *OutboundSlot, session *link.Authenticate
 		}
 		d.workerWG.Add(1)
 		go d.watchStream(slot, session, stream)
+		slot.retryAt = time.Time{}
 		published = true
-	} else if stream != nil {
-		loser = stream
+	} else {
+		if registered && !slot.closed.Load() && !d.sealed &&
+			d.session == session && stillCurrent {
+			slot.retryAt = time.Now().Add(d.retry)
+		}
+		if stream != nil {
+			loser = stream
+		}
 	}
 	d.mu.Unlock()
 	if predecessor != nil {
@@ -410,6 +434,13 @@ func (d *DaemonOutbound) watchStream(
 	case <-stream.Done():
 		// Exact completion is only a wake. convergeSlot rechecks session,
 		// slot, current, and bundle before changing anything.
+		d.mu.Lock()
+		bundle := slot.arms.Load()
+		if !d.sealed && !slot.closed.Load() && bundle != nil &&
+			bundle.Session == session && bundle.Stream == stream {
+			slot.retryAt = time.Now().Add(d.retry)
+		}
+		d.mu.Unlock()
 		d.Wake()
 	case <-d.ctx.Done():
 	}
@@ -479,16 +510,61 @@ func (s *OutboundSlot) PublishObs(kind actorrt.ObsKind, value actorrt.ObsValue) 
 	return bundle.Stream.PublishObs(string(kind), value)
 }
 
-// Close seals slot/session admission and joins only DaemonOutbound-owned
-// workers. It does not close the physical session.
-func (d *DaemonOutbound) Close(ctx context.Context) error {
+// Seal stops future slot/session admission and joins DaemonOutbound workers
+// without invalidating the arms held by still-running actor bodies.
+func (d *DaemonOutbound) Seal(ctx context.Context) error {
 	if d == nil {
 		return nil
 	}
 	d.mu.Lock()
-	if d.sealed {
+	if !d.sealed {
+		d.sealed = true
+		d.cancel()
+	}
+	d.mu.Unlock()
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if !waitOutboundGroup(ctx, &d.runnerWG) || !waitOutboundGroup(ctx, &d.workerWG) {
+		return errors.New("compute: daemon outbound worker leak")
+	}
+	return nil
+}
+
+// CloseResidual exact-closes slots left after Host has stopped every body.
+func (d *DaemonOutbound) CloseResidual() error {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	slots := make([]*OutboundSlot, 0, len(d.slots))
+	for slot := range d.slots {
+		slots = append(slots, slot)
+	}
+	d.mu.Unlock()
+	for _, slot := range slots {
+		_ = slot.Close()
+	}
+	d.mu.Lock()
+	var closeErr error
+	if len(d.slots) != 0 {
+		closeErr = errors.Join(closeErr, fmt.Errorf("compute: daemon outbound slot leak: %d", len(d.slots)))
+	}
+	d.mu.Unlock()
+	return closeErr
+}
+
+// Close is the standalone full close. The daemon composition root uses the
+// finer Seal → Host.Close → CloseResidual sequence so bodies lose their arms
+// only when their own Stop path runs.
+func (d *DaemonOutbound) Close(ctx context.Context) error {
+	if d == nil {
+		return nil
+	}
+	d.closeMu.Lock()
+	if d.closing {
 		done := d.closeDone
-		d.mu.Unlock()
+		d.closeMu.Unlock()
 		if ctx == nil {
 			ctx = context.Background()
 		}
@@ -502,28 +578,9 @@ func (d *DaemonOutbound) Close(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
-	d.sealed = true
-	slots := make([]*OutboundSlot, 0, len(d.slots))
-	for slot := range d.slots {
-		slots = append(slots, slot)
-	}
-	d.mu.Unlock()
-	d.cancel()
-	for _, slot := range slots {
-		_ = slot.Close()
-	}
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	var closeErr error
-	if !waitOutboundGroup(ctx, &d.runnerWG) || !waitOutboundGroup(ctx, &d.workerWG) {
-		closeErr = errors.New("compute: daemon outbound worker leak")
-	}
-	d.mu.Lock()
-	if len(d.slots) != 0 {
-		closeErr = errors.Join(closeErr, fmt.Errorf("compute: daemon outbound slot leak: %d", len(d.slots)))
-	}
-	d.mu.Unlock()
+	d.closing = true
+	d.closeMu.Unlock()
+	closeErr := errors.Join(d.Seal(ctx), d.CloseResidual())
 	d.closeMu.Lock()
 	d.closeErr = closeErr
 	close(d.closeDone)

@@ -20,6 +20,7 @@ func (a *ChannelActors) beginCommand() (func(), error) {
 type controllerTransition[T any] struct {
 	Result  T
 	Wake    []ActorDefinition
+	Ended   []actor.ActorID
 	Effects storespec.PostCommitEffects
 	Fatal   error
 }
@@ -34,6 +35,9 @@ func finishTransition[T any](
 	}
 	if err != nil {
 		return transition.Result, err
+	}
+	if len(transition.Ended) != 0 {
+		a.effects.RunActorsEnded(transition.Ended)
 	}
 	if len(transition.Wake) != 0 {
 		a.wakeAfter(transition.Wake...)
@@ -461,10 +465,9 @@ func (c *Controller) terminal(
 			}
 		}
 		c.delete(after.IDs)
-		c.valueEffects.RunActorsEnded(after.IDs)
 		unlock()
 		return controllerTransition[TerminalResult]{
-			Result: commit.Result, Wake: definitions, Effects: commit.Effects,
+			Result: commit.Result, Wake: definitions, Ended: after.IDs, Effects: commit.Effects,
 		}, nil
 	}
 }

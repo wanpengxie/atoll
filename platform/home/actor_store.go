@@ -308,11 +308,10 @@ func (s *homeActorStore) LookupFork(
 	if err := json.Unmarshal(completed.Result, &result); err != nil {
 		return "", true, err
 	}
-	s.runMu.Lock()
-	if _, exists := s.runRows[result.Child.ID]; !exists {
-		s.runRows[result.Child.ID] = cloneActorRow(result.Child)
-	}
-	s.runMu.Unlock()
+	// The durable operation anchor is only a RequestID→ChildActorID receipt.
+	// A run-world child belongs to the process that created it; replaying the
+	// receipt after restart must not restore that child's definition into the
+	// current in-memory run world.
 	return result.Child.ID, true, nil
 }
 

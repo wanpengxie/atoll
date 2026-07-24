@@ -521,7 +521,7 @@ func (h *HostSupervisor) Attach(id actor.ActorID, key AttemptKey, binding Bindin
 	if err := validateCoordinate(id, key); err != nil {
 		return err
 	}
-	if nilBinding(binding) || binding.Done() == nil {
+	if !binding.Valid() {
 		return fmt.Errorf("%w: nil binding", ErrInvalidDesired)
 	}
 	var predecessor Binding
@@ -577,7 +577,7 @@ func (h *HostSupervisor) Attach(id actor.ActorID, key AttemptKey, binding Bindin
 	state.route = &routeActual{key: key, binding: binding, started: started}
 	h.mu.Unlock()
 	unlock()
-	if predecessor != nil {
+	if predecessor.Valid() {
 		_ = predecessor.Close()
 	}
 	return nil
@@ -585,7 +585,7 @@ func (h *HostSupervisor) Attach(id actor.ActorID, key AttemptKey, binding Bindin
 
 // BindingDown removes only an exact current Binding. It never joins Done.
 func (h *HostSupervisor) BindingDown(id actor.ActorID, binding Binding) {
-	if h == nil || id == "" || nilBinding(binding) {
+	if h == nil || id == "" || !binding.Valid() {
 		return
 	}
 	unlock := h.spans.lock(id)
@@ -703,7 +703,7 @@ func (h *HostSupervisor) deleteIfEmptyLocked(id actor.ActorID, state *hostState)
 
 func closeAll(bindings []Binding) {
 	for _, binding := range bindings {
-		if !nilBinding(binding) {
+		if binding.Valid() {
 			_ = binding.Close()
 		}
 	}

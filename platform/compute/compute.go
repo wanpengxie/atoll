@@ -70,6 +70,42 @@ func (e *daemonHostEvents) OnBodyObs(
 	e.outbound.publishObs(id, key, kind, value)
 }
 
+func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.BodyBuilder {
+	return func(input actorhost.BodyBuildInput) actorrt.Actor {
+		prepared, prepareErr := outbound.Prepare(
+			input.ActorID,
+			input.AttemptKey,
+			input.Current,
+		)
+		if prepareErr != nil {
+			return nil
+		}
+		transferred := false
+		defer func() {
+			if !transferred {
+				_ = prepared.Slot.Close()
+			}
+		}()
+		factory, ok := source.Lookup(input.ActorID)
+		if !ok {
+			return nil
+		}
+		caps := actorcaps.Caps{
+			Pen: prepared.Pen, Access: prepared.Access, State: prepared.State,
+			Schedule: prepared.Schedule, Lifecycle: prepared.Lifecycle,
+		}
+		hooks := actorbase.Hooks{Canceller: func(_ actor.ActorID, requestID message.ID) {
+			_ = prepared.Slot.CancelRequest(requestID)
+		}}
+		body := hostcommon.Build(caps, hooks, factory)
+		wrapped := prepared.Wrap(body)
+		if wrapped != nil {
+			transferred = true
+		}
+		return wrapped
+	}
+}
+
 func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (retErr error) {
 	if cfg.PlanSource == nil {
 		return errors.New("compute: PlanSource required")
@@ -86,7 +122,11 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 		poll = defaultComputePoll
 	}
 
-	outbound := NewDaemonOutbound(DaemonOutboundConfig{Parent: ctx})
+	// Runtime organs use an explicit composition lifetime. The caller context
+	// stops link admission, but must not asynchronously tear down sessions or
+	// bodies ahead of the ordered close DAG below.
+	runtimeCtx, runtimeCancel := context.WithCancel(context.Background())
+	outbound := NewDaemonOutbound(DaemonOutboundConfig{Parent: runtimeCtx})
 	storage := newStorageHostForwarder(cfg.StorageHost, logger, cfg.ScrubberInterval)
 	var storageWG sync.WaitGroup
 	storageWG.Add(1)
@@ -105,16 +145,37 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 	}()
 
 	var host *actorhost.HostSupervisor
+	var currentSession *link.AuthenticatedLinkSession
 	closeRuntime := func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if err := outbound.Close(closeCtx); err != nil {
+		defer runtimeCancel()
+		sealCtx, sealCancel := context.WithTimeout(context.Background(), 10*time.Second)
+		if err := outbound.Seal(sealCtx); err != nil {
 			retErr = errors.Join(retErr, err)
 		}
+		sealCancel()
 		if host != nil {
-			if err := host.Close(closeCtx); err != nil {
+			hostCtx, hostCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			if err := host.Close(hostCtx); err != nil {
 				retErr = errors.Join(retErr, err)
 			}
+			hostCancel()
+		}
+		if err := outbound.CloseResidual(); err != nil {
+			retErr = errors.Join(retErr, err)
+		}
+		if currentSession != nil {
+			outbound.SessionDown(currentSession)
+			if err := currentSession.Close(); err != nil {
+				retErr = errors.Join(retErr, err)
+			}
+			sessionCtx, sessionCancel := context.WithTimeout(context.Background(), 10*time.Second)
+			select {
+			case <-currentSession.Done():
+			case <-sessionCtx.Done():
+				retErr = errors.Join(retErr, errors.New("compute: link session leak"))
+			}
+			sessionCancel()
+			currentSession = nil
 		}
 		timeout := 5 * time.Second
 		if hooks != nil && hooks.forwarderTimeout > 0 {
@@ -167,38 +228,11 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 		if host == nil {
 			domain := actorhost.ExecutionDomain(dialer.DaemonID())
 			host, err = actorhost.New(actorhost.Config{
-				Parent: ctx,
-				Domain: domain,
-				Logger: logger,
-				Events: &daemonHostEvents{outbound: outbound},
-				BodyBuilder: func(input actorhost.BodyBuildInput) actorrt.Actor {
-					prepared, prepareErr := outbound.Prepare(
-						input.ActorID,
-						input.AttemptKey,
-						input.Current,
-					)
-					if prepareErr != nil {
-						return nil
-					}
-					factory, ok := cfg.PlanSource.Lookup(input.ActorID)
-					if !ok {
-						_ = prepared.Slot.Close()
-						return nil
-					}
-					caps := actorcaps.Caps{
-						Pen: prepared.Pen, Access: prepared.Access, State: prepared.State,
-						Schedule: prepared.Schedule, Lifecycle: prepared.Lifecycle,
-					}
-					hooks := actorbase.Hooks{Canceller: func(_ actor.ActorID, requestID message.ID) {
-						_ = prepared.Slot.CancelRequest(requestID)
-					}}
-					body := hostcommon.Build(
-						caps,
-						hooks,
-						factory,
-					)
-					return prepared.Wrap(body)
-				},
+				Parent:      runtimeCtx,
+				Domain:      domain,
+				Logger:      logger,
+				Events:      &daemonHostEvents{outbound: outbound},
+				BodyBuilder: daemonBodyBuilder(outbound, cfg.PlanSource),
 			})
 			if err != nil {
 				_ = dialer.Close()
@@ -242,6 +276,7 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 			<-session.Done()
 			return err
 		}
+		currentSession = session
 		host.Wake()
 		outbound.Wake()
 		backoff = redialInitialBackoff
@@ -252,9 +287,6 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 			select {
 			case <-ctx.Done():
 				ticker.Stop()
-				outbound.SessionDown(session)
-				_ = session.Close()
-				<-session.Done()
 				return nil
 			case <-session.Done():
 				connected = false
@@ -269,6 +301,7 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 			}
 		}
 		ticker.Stop()
+		currentSession = nil
 		outbound.SessionDown(session)
 		_ = session.Close()
 		logger.Warn("platform.compute.link_down", "retry_in", backoff)

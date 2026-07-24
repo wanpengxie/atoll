@@ -17,6 +17,22 @@ type inertActor struct{}
 func (inertActor) Start(context.Context, actorrt.ActorContext) error { return nil }
 func (inertActor) Receive(context.Context, *message.Envelope) error  { return nil }
 
+type presenceRouteResource struct{ done chan struct{} }
+
+func (presenceRouteResource) Deliver(*message.Envelope) error { return nil }
+func (presenceRouteResource) CancelRequest(message.ID)        {}
+func (presenceRouteResource) Close() error                    { return nil }
+func (r presenceRouteResource) Done() <-chan struct{}         { return r.done }
+
+func presenceRoute(t *testing.T) actorhost.Binding {
+	t.Helper()
+	route, err := actorhost.NewBinding(presenceRouteResource{done: make(chan struct{})})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return route
+}
+
 type fakeExecution struct {
 	units map[actor.ActorID]*actorrt.Unit
 	clock func() time.Time
@@ -68,6 +84,28 @@ func (r *fakeRegistry) ListActive(context.Context) ([]storespec.ActorControlRow,
 }
 func (r *fakeRegistry) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
 	return storespec.WorldDurable, true, r.err
+}
+
+func TestRemoteDownMatchesExactBindingWithinSameAttempt(t *testing.T) {
+	t.Parallel()
+	key, err := actorhost.NewAttemptKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	b1 := presenceRoute(t)
+	b2 := presenceRoute(t)
+	fold := New(nil, nil, []actorrt.ObsKind{"status"}, time.Second)
+	id := actor.ActorID("agent:remote")
+
+	fold.OnRemoteObs(id, key, b2, "status", actorrt.ObsValue("online-via-b2"))
+	fold.OnRemoteDown(id, key, b1)
+	if got := fold.copy(id)["status"]; string(got.val) != "online-via-b2" {
+		t.Fatalf("late B1 down removed B2 testimony: %#v", got)
+	}
+	fold.OnRemoteDown(id, key, b2)
+	if _, exists := fold.copy(id)["status"]; exists {
+		t.Fatal("exact B2 down retained its own testimony")
+	}
 }
 func (r *fakeRegistry) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	_, ok, err := r.LookupActive(ctx, stamp.ID)

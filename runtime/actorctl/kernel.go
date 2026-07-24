@@ -19,13 +19,35 @@ type systemKernel struct {
 	fatal   sync.Once
 }
 
-func (k *systemKernel) startWatch() {
+func (k *systemKernel) adopt(unit *actorrt.Unit) error {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	if k.closing {
+		return ErrClosed
+	}
+	if k.unit != nil {
+		return ErrAlreadyStarted
+	}
+	k.unit = unit
+	return nil
+}
+
+func (k *systemKernel) release(unit *actorrt.Unit) {
+	k.mu.Lock()
+	if k.unit == unit && !k.closing {
+		k.unit = nil
+	}
+	k.mu.Unlock()
+}
+
+func (k *systemKernel) startWatch(unit *actorrt.Unit) {
 	go func() {
-		<-k.unit.Done()
+		<-unit.Done()
 		k.mu.Lock()
 		closing := k.closing
+		current := k.unit == unit
 		k.mu.Unlock()
-		if !closing {
+		if !closing && current {
 			k.fail(errors.New("actorctl: system kernel exited"))
 		}
 	}()
@@ -34,8 +56,9 @@ func (k *systemKernel) startWatch() {
 func (k *systemKernel) OnExited(event actorrt.ExitedEvent) {
 	k.mu.Lock()
 	closing := k.closing
+	current := event.Unit == k.unit
 	k.mu.Unlock()
-	if !closing && event.Unit == k.unit {
+	if !closing && current {
 		k.fail(errors.Join(errors.New("actorctl: system kernel exited"), event.Cause))
 	}
 }

@@ -39,6 +39,24 @@ func (f *fakeEffects) Fatal(err error) {
 	}
 }
 
+type reentrantEndEffects struct {
+	actors *ChannelActors
+	result chan error
+}
+
+func (*reentrantEndEffects) PlanPoke(actorhost.ExecutionDomain)          {}
+func (*reentrantEndEffects) ApplyPostCommit(storespec.PostCommitEffects) {}
+func (*reentrantEndEffects) RunActorBorn(actor.ActorID) error            { return nil }
+func (e *reentrantEndEffects) RunActorsEnded(ids []actor.ActorID) {
+	if len(ids) == 0 {
+		return
+	}
+	e.result <- e.actors.Restart(context.Background(), RestartRequest{
+		ActorID: ids[0], CallerActorID: actor.SystemActorID, RequestID: "reentrant-tail",
+	})
+}
+func (*reentrantEndEffects) Fatal(error) {}
+
 type fakeStore struct {
 	mu                sync.Mutex
 	rows              map[actor.ActorID]StoredActor
@@ -308,6 +326,39 @@ func waitUntil(t *testing.T, message string, condition func() bool) {
 			t.Fatal(message)
 		}
 		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestTerminalRunsEndedTailAfterReleasingControlGate(t *testing.T) {
+	store := newFakeStore("agent")
+	effects := &reentrantEndEffects{result: make(chan error, 1)}
+	actors := newActors(t, store, effects)
+	effects.actors = actors
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := actors.End(context.Background(), EndRequest{
+			CallerActorID: actor.SystemActorID,
+			Target:        "agent",
+			Reason:        "test",
+		})
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("terminal tail re-entered a still-held control gate")
+	}
+	select {
+	case err := <-effects.result:
+		if !errors.Is(err, ErrInactive) {
+			t.Fatalf("reentrant restart error = %v, want inactive", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("RunActorsEnded tail did not run")
 	}
 }
 
@@ -878,5 +929,52 @@ func TestSystemKernelValidationDoubleStartAndCloseLast(t *testing.T) {
 	defer orderMu.Unlock()
 	if !slices.Equal(order, []string{"managed", "kernel"}) {
 		t.Fatalf("stop order=%v, want managed then kernel", order)
+	}
+}
+
+func TestSystemKernelStartAndCloseShareLifecycleSerialization(t *testing.T) {
+	for i := 0; i < 16; i++ {
+		store := newFakeStore()
+		actors, err := NewChannelActors(Config{
+			Store:        store,
+			ServerDomain: "server",
+			ServerHost:   actorhost.Config{PollInterval: time.Millisecond},
+			BuildManagedBody: func(
+				ManagedBodyInput,
+				actorcaps.Caps,
+			) actorrt.Actor {
+				return inertActor{}
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		unit := prepareSystem(t)
+		start := make(chan struct{})
+		started := make(chan error, 1)
+		closed := make(chan error, 1)
+		go func() {
+			<-start
+			started <- actors.Start(context.Background(), unit)
+		}()
+		go func() {
+			<-start
+			ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			closed <- actors.Close(ctx)
+		}()
+		close(start)
+		startErr := <-started
+		closeErr := <-closed
+		if startErr != nil && !errors.Is(startErr, ErrClosed) {
+			t.Fatalf("iteration %d Start error = %v", i, startErr)
+		}
+		if closeErr != nil {
+			t.Fatalf("iteration %d Close error = %v", i, closeErr)
+		}
+		if errors.Is(startErr, ErrClosed) {
+			unit.Stop()
+			<-unit.Done()
+		}
 	}
 }
