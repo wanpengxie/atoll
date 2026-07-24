@@ -91,7 +91,7 @@ type Sys interface {
 
 	// --- ActorContext -----------------------------------------------
 	// PublishObs pushes one opaque obs snapshot on the actor-source push
-	// channel (actorrt.ObsWatcher's producer side). kind/val are opaque to
+	// channel. kind/val are opaque to
 	// the substrate by design (spec: "泛型签名不收窄") — the substrate
 	// forwards, it never interprets an actor's own operational vocabulary.
 	PublishObs(kind actorrt.ObsKind, val actorrt.ObsValue) error

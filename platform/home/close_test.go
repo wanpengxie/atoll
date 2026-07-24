@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
@@ -65,8 +66,8 @@ func (*closeTestStore) Admit(
 func (*closeTestStore) Introduce(
 	context.Context,
 	actorctl.IntroduceRequest,
-) (actorctl.ActorCommit[actorctl.IntroduceResult], error) {
-	return actorctl.ActorCommit[actorctl.IntroduceResult]{}, errors.New("unused")
+) (actorctl.ActorCommit[channel.IntroduceResult], error) {
+	return actorctl.ActorCommit[channel.IntroduceResult]{}, errors.New("unused")
 }
 
 func (*closeTestStore) LookupFork(
@@ -112,9 +113,9 @@ func (*closeTestStore) ApplyDeclaration(
 
 func (*closeTestStore) AttachDaemon(
 	context.Context,
-	actorctl.AttachDaemonRequest,
-) (actorctl.ValueCommit[actorctl.AttachDaemonResult], error) {
-	return actorctl.ValueCommit[actorctl.AttachDaemonResult]{}, errors.New("unused")
+	channel.DaemonRequest,
+) (actorctl.ValueCommit[channel.BindingResult], error) {
+	return actorctl.ValueCommit[channel.BindingResult]{}, errors.New("unused")
 }
 
 func (*closeTestStore) ResolveTerminal(

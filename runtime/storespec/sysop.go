@@ -31,7 +31,6 @@ type SysOpMeta struct {
 
 type PostCommitEffects struct {
 	Poke       bool
-	Despawn    []actor.ActorID
 	KickDaemon *DaemonID
 	Principals []string
 }

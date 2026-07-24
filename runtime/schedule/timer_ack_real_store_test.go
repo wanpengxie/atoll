@@ -29,6 +29,8 @@ type ackFailOnceStore struct {
 	timerspec.TimerStore
 	mu     sync.Mutex
 	failed bool
+	marked chan struct{}
+	once   sync.Once
 }
 
 var errInjectedAckFailure = errors.New("schedule: injected ack store failure")
@@ -42,6 +44,14 @@ func (s *ackFailOnceStore) AckOwned(ctx context.Context, id timerspec.TimerID, a
 	}
 	s.mu.Unlock()
 	return s.TimerStore.AckOwned(ctx, id, author)
+}
+
+func (s *ackFailOnceStore) MarkFired(ctx context.Context, id timerspec.TimerID) error {
+	if err := s.TimerStore.MarkFired(ctx, id); err != nil {
+		return err
+	}
+	s.once.Do(func() { close(s.marked) })
+	return nil
 }
 
 // openRealTimerFixture opens a real per-test sqlite channel db and admits one
@@ -82,7 +92,7 @@ func openRealTimerFixture(t *testing.T) (timerspec.TimerStore, actor.ActorID) {
 // redeliver pass) must both succeed and actually delete the row.
 func TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt(t *testing.T) {
 	real, author := openRealTimerFixture(t)
-	wrapped := &ackFailOnceStore{TimerStore: real}
+	wrapped := &ackFailOnceStore{TimerStore: real, marked: make(chan struct{})}
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	minter, engine, err := New(Deps{
@@ -104,18 +114,11 @@ func TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt(t *testing.T) {
 		t.Fatalf("Schedule: %v", err)
 	}
 
-	waitFor(t, 2*time.Second, func() bool {
-		page, err := real.ListFired(context.Background(), timerspec.FiredCursor{}, 16)
-		if err != nil {
-			return false
-		}
-		for _, row := range page.Rows {
-			if row.ID == id {
-				return true
-			}
-		}
-		return false
-	})
+	select {
+	case <-wrapped.marked:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timer was not marked fired")
+	}
 
 	// First Ack: the injected store failure must surface, and the fired row
 	// must still be durably present afterward (real sqlite read, not a fake's
@@ -123,32 +126,12 @@ func TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt(t *testing.T) {
 	if err := handle.Ack(context.Background(), id); !errors.Is(err, errInjectedAckFailure) {
 		t.Fatalf("first Ack err = %v, want errInjectedAckFailure", err)
 	}
-	page, err := real.ListFired(context.Background(), timerspec.FiredCursor{}, 16)
-	if err != nil {
-		t.Fatalf("ListFired after failed ack: %v", err)
-	}
-	found := false
-	for _, row := range page.Rows {
-		if row.ID == id {
-			found = true
-		}
-	}
-	if !found {
-		t.Fatalf("fired row %s vanished despite a failed Ack — 销账失败必须保持 fired truth", id)
-	}
-
 	// Second explicit Ack retry must both
 	// succeed and actually clear the fired row from real durable storage.
 	if err := handle.Ack(context.Background(), id); err != nil {
 		t.Fatalf("second (retry) Ack: %v", err)
 	}
-	page, err = real.ListFired(context.Background(), timerspec.FiredCursor{}, 16)
-	if err != nil {
-		t.Fatalf("ListFired after successful ack: %v", err)
-	}
-	for _, row := range page.Rows {
-		if row.ID == id {
-			t.Fatalf("fired row %s still present after a successful retry Ack", id)
-		}
+	if acked, err := real.AckOwned(context.Background(), id, author); err != nil || acked {
+		t.Fatalf("third Ack after successful deletion = (%v,%v)", acked, err)
 	}
 }

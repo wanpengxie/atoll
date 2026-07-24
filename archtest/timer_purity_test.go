@@ -85,8 +85,7 @@ func TestTimerspecImportedOnlyWithinRuntime(t *testing.T) {
 // TestScheduleImportContainment — the schedule engine package may not import
 // the concrete store or the platform assembly. It speaks the timerspec
 // contract only; a concrete-store edge would fuse it to sqlite, a platform
-// edge would let it back-flow into the layer that is meant to import it
-// (OpenScheduler assembles the engine, not the other way round).
+// edge would let it back-flow into the layer that is meant to assemble it.
 func TestScheduleImportContainment(t *testing.T) {
 	forbidden := map[string]string{
 		internalStorePkg: "the concrete store (the engine speaks the timerspec contract, never sqlite)",

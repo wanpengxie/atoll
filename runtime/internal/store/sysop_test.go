@@ -119,16 +119,13 @@ func TestSysOpRestartActorCommitsPairWithoutTouchingIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatalf("first restart: %v", err)
 	}
-	if len(first.Effects.Despawn) != 1 || first.Effects.Despawn[0] != target || !first.Effects.Poke {
-		t.Fatalf("restart effects=%+v, want despawn target + poke", first.Effects)
+	if !first.Effects.Poke {
+		t.Fatalf("restart effects=%+v, want poke", first.Effects)
 	}
 	assertEventPair(t, cs, "op:msg:restart:1")
-	replay, err := cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:1", "r1"), Target: target})
+	_, err = cs.SysOps.RestartActor(ctx, storespec.RestartTx{SysOpMeta: memberMetaFor("op:msg:restart:1", "r1"), Target: target})
 	if err != nil {
 		t.Fatalf("replay restart: %v", err)
-	}
-	if len(replay.Effects.Despawn) != 0 {
-		t.Fatalf("replay carried a second bounce hint: %+v", replay.Effects)
 	}
 	assertEventPair(t, cs, "op:msg:restart:1")
 }

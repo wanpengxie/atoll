@@ -46,7 +46,7 @@ type StorageAllocSpec struct {
 // ResourceOutbox / ReservationRow / TombstoneRow / ErrReservationLost
 // re-export resourcespec's create/delete-outbox completion contract for the
 // §4.7 daemon control-RPC handler platform assembly builds
-// (homeStorageHostControl over runtime.ChannelStores.Outbox) — the SAME
+// (homeStorageHostControl over the Platform-owned resource outbox) — the SAME
 // purity-wall pattern CreateSpec/KindKV already draw (handle.go): nothing
 // outside the runtime tree may import resourcespec directly
 // (archtest.TestResourcespecImportedOnlyWithinRuntime), so platform reaches

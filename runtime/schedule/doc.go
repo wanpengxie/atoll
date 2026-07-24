@@ -34,5 +34,5 @@
 // engine (Engine) that drives it; New returns both, never a bare handle to
 // the internal due-set. Assembly (wiring a real TimerStore/FireSink/
 // Authority/Clock, and the engine's Start/Close lifecycle) is the
-// runtime root's job (runtime.OpenScheduler) — not this package's.
+// Platform composition root's job — not this package's.
 package schedule

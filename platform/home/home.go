@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/managedcaps"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/systemcaps"
@@ -63,6 +64,8 @@ type Home struct {
 
 	cs           *runtime.ChannelStores
 	minter       harness.Minter
+	access       accessdoor.AccessMinter
+	outbox       resourcespec.ResourceOutbox
 	stateHandles accessdoor.StateHandleResolver
 	schedMinter  schedule.Minter
 	engine       *schedule.Engine

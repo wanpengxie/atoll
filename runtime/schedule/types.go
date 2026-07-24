@@ -151,9 +151,8 @@ func (e FireRejected) Error() string {
 
 // Deps bundles every collaborator the engine needs. New fail-fasts on every
 // required dependency; Clock is required here
-// so tests can never accidentally fall back to the wall clock — OpenScheduler,
-// the runtime-root assembly seam, is the ONLY place that defaults a nil Clock
-// to the real one).
+// so tests can never accidentally fall back to the wall clock. The Platform
+// composition root is the only place that supplies the real clock default.
 type Deps struct {
 	Store timerspec.TimerStore
 	Fire  FireSink
@@ -162,23 +161,5 @@ type Deps struct {
 	// log for a poison row/entry. nil → discard (same shape as
 	// harness.Deps.Logger — the substrate does not invent its own logging
 	// vocabulary).
-	Logger *slog.Logger
-}
-
-// AssemblyDeps is runtime.OpenScheduler's (the runtime-root assembly seam)
-// input — Deps minus Store: the durable TimerStore always comes from the
-// channel's own ChannelStores (an unexported field there), never from the
-// assembly-root caller (a raw TimerStore reachable downstream is a delayed
-// forged-author write path around the pen). Fire/Host/Revive are still
-// required (OpenScheduler forwards them into Deps unchanged and lets New's
-// existing fail-fast checks reject a nil one — no duplicate validation here).
-// Clock is the one field OpenScheduler DEFAULTS (nil → the real wall clock,
-// NewSystemClock()): New itself stays fail-fast on a nil Clock so a test that
-// constructs the engine directly (bypassing OpenScheduler) can never silently
-// fall back to real time. Logger nil→discard is already handled by New, so it
-// is simply forwarded.
-type AssemblyDeps struct {
-	Fire   FireSink
-	Clock  Clock
 	Logger *slog.Logger
 }

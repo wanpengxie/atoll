@@ -230,12 +230,7 @@ func (r *actorRegistry) AdmitDeclared(ctx context.Context, in storespec.AdmitBun
 	return storespec.DeclAdmissionResult{ID: in.ID, Created: true}, nil
 }
 
-func (r *actorRegistry) ExistsEver(ctx context.Context, id actor.ActorID) (bool, error) {
-	return r.Exists(ctx, id)
-}
-
 var (
 	_ storespec.DeclAdmissionStore    = (*actorRegistry)(nil)
 	_ storespec.DeclaredControlReader = (*actorRegistry)(nil)
-	_ storespec.DurableHistory        = (*actorRegistry)(nil)
 )

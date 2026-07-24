@@ -119,18 +119,14 @@ func TestTimerAppendThenMarkCancelOrdersAndAck(t *testing.T) {
 		if due, err := f.timers.Due(ctx, 100); err != nil || len(due) != 0 {
 			t.Fatalf("Due includes fired row: %+v err=%v", due, err)
 		}
-		page, err := f.timers.ListFired(ctx, timerspec.FiredCursor{}, 10)
-		if err != nil || len(page.Rows) != 1 || page.Rows[0].ID != row.ID {
-			t.Fatalf("ListFired = (%+v,%v)", page, err)
-		}
 		if acked, err := f.timers.AckOwned(ctx, row.ID, "actor:other"); err != nil || acked {
 			t.Fatalf("foreign Ack = (%v,%v)", acked, err)
 		}
 		if acked, err := f.timers.AckOwned(ctx, row.ID, row.AuthorID); err != nil || !acked {
 			t.Fatalf("owner Ack = (%v,%v)", acked, err)
 		}
-		if page, err := f.timers.ListFired(ctx, timerspec.FiredCursor{}, 10); err != nil || len(page.Rows) != 0 {
-			t.Fatalf("fired rows after Ack = (%+v,%v)", page, err)
+		if acked, err := f.timers.AckOwned(ctx, row.ID, row.AuthorID); err != nil || acked {
+			t.Fatalf("second Ack after deletion = (%v,%v)", acked, err)
 		}
 	})
 }

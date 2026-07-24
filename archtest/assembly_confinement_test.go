@@ -20,18 +20,17 @@ const platformPathPrefix = "../platform/"
 
 // TestRuntimeAssemblyConfinedToPlatform — PACKAGE-level lock.
 //
-// The runtime ROOT package (github.com/wanpengxie/atoll/runtime) is PURE
-// assembly: its entire export surface is ChannelStores / OpenChannelOptions /
-// OpenChannel / OpenScheduler. OpenChannel hands back a ChannelStores whose .Log is the raw
+// The runtime ROOT package (github.com/wanpengxie/atoll/runtime) is the public
+// Store-organ facade. OpenChannel hands back a ChannelStores whose .Log is the raw
 // MessageLog (Append writes the messages table directly) and whose .Membership
 // mutates the actor_registry projection — both bypass the harness write gate
-// and the actor composition root. Because the package is wholly assembly, the lock is at
+// and the actor composition root. Because the package exposes raw store ports, the lock is at
 // package granularity: nobody outside platform may import it at all. Everyone
 // else writes truth through harness.Pen (the seam), never cs.Log.Append.
 //
 // (Subpackages runtime/actorrt, runtime/harness, runtime/ipc, runtime/storespec
 // are NOT locked here — they carry legitimate downstream seams. Only the root
-// assembly facade is confined.)
+// store facade is confined.)
 func TestRuntimeAssemblyConfinedToPlatform(t *testing.T) {
 	const runtimeRoot = platformModulePrefix + "runtime"
 
@@ -51,8 +50,8 @@ func TestRuntimeAssemblyConfinedToPlatform(t *testing.T) {
 			return nil
 		}
 		slash := filepath.ToSlash(path)
-		if strings.HasPrefix(slash, platformPathPrefix) {
-			return nil // platform = the legitimate assembler
+		if strings.HasPrefix(slash, "../platform/home/") {
+			return nil // Home = the sole channel composition root
 		}
 		file, perr := parser.ParseFile(fset, path, nil, parser.ImportsOnly)
 		if perr != nil {
@@ -74,8 +73,40 @@ func TestRuntimeAssemblyConfinedToPlatform(t *testing.T) {
 		t.Fatalf("walk: %v", err)
 	}
 	if len(violations) > 0 {
-		t.Fatalf("runtime assembly confinement (only platform may import package runtime):\n  %s",
+		t.Fatalf("runtime store-facade confinement (only platform/home may import package runtime):\n  %s",
 			strings.Join(violations, "\n  "))
+	}
+}
+
+// TestRuntimeRootOpensStoreOnly prevents the Store facade from regrowing into
+// a second composition root. Access, Scheduler, actor control and execution
+// organs are assembled as peers by Platform/Home.
+func TestRuntimeRootOpensStoreOnly(t *testing.T) {
+	forbidden := map[string]bool{
+		platformModulePrefix + "runtime/accessdoor": true,
+		platformModulePrefix + "runtime/actorctl":   true,
+		platformModulePrefix + "runtime/actorhost":  true,
+		platformModulePrefix + "runtime/harness":    true,
+		platformModulePrefix + "runtime/schedule":   true,
+	}
+	fset := token.NewFileSet()
+	var violations []string
+	entries, err := filepath.Glob("../runtime/*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range entries {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		for _, imp := range importsOf(t, fset, path) {
+			if forbidden[imp] {
+				violations = append(violations, fmt.Sprintf("%s imports %q", path, imp))
+			}
+		}
+	}
+	if len(violations) != 0 {
+		t.Fatalf("runtime root assembled peer organs:\n  %s", strings.Join(violations, "\n  "))
 	}
 }
 

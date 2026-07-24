@@ -219,43 +219,6 @@ func (s *timerStore) AckOwned(ctx context.Context, id timerspec.TimerID, author 
 	return n == 1, nil
 }
 
-func (s *timerStore) ListFired(ctx context.Context, cursor timerspec.FiredCursor, limit int) (timerspec.FiredPage, error) {
-	if limit <= 0 {
-		limit = 256
-	}
-	if limit > 1024 {
-		limit = 1024
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT timer_id, author_id, fire_at, type, payload,
-		COALESCE(correlation_id,''), created_at FROM timers
-		WHERE state='fired' AND timer_id>? ORDER BY timer_id LIMIT ?`, string(cursor.After), limit+1)
-	if err != nil {
-		return timerspec.FiredPage{}, fmt.Errorf("store: list fired timers: %w", err)
-	}
-	defer rows.Close()
-	page := timerspec.FiredPage{Done: true}
-	for rows.Next() {
-		var row timerspec.TimerRow
-		var id, author string
-		if err := rows.Scan(&id, &author, &row.FireAt, &row.Type, &row.Payload, &row.CorrelationID, &row.CreatedAt); err != nil {
-			return timerspec.FiredPage{}, err
-		}
-		row.ID, row.AuthorID = timerspec.TimerID(id), actor.ActorID(author)
-		page.Rows = append(page.Rows, row)
-	}
-	if err := rows.Err(); err != nil {
-		return timerspec.FiredPage{}, err
-	}
-	if len(page.Rows) > limit {
-		page.Rows = page.Rows[:limit]
-		page.Done = false
-	}
-	if len(page.Rows) > 0 {
-		page.Next.After = page.Rows[len(page.Rows)-1].ID
-	}
-	return page, nil
-}
-
 // clearTimersTx cascades the identity-level pending-timer locus: it deletes
 // every timers row owned by author, inside the same transaction that
 // deregisters the actor (both dereg entry points in actors.go hang it

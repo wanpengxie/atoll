@@ -10,6 +10,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
@@ -149,7 +150,7 @@ func (a *actorSystem) Admit(ctx context.Context, request actorctl.AdmitRequest) 
 	return finishTransition(a, t, err)
 }
 
-func (a *actorSystem) Introduce(ctx context.Context, request actorctl.IntroduceRequest) (actorctl.IntroduceResult, error) {
+func (a *actorSystem) Introduce(ctx context.Context, request actorctl.IntroduceRequest) (channel.IntroduceResult, error) {
 	t, err := a.home.controller.Introduce(ctx, request)
 	return finishTransition(a, t, err)
 }
@@ -171,7 +172,7 @@ func (a *actorSystem) ApplyDeclaration(ctx context.Context, change actorctl.Decl
 	return err
 }
 
-func (a *actorSystem) AttachDaemon(ctx context.Context, request actorctl.AttachDaemonRequest) (actorctl.AttachDaemonResult, error) {
+func (a *actorSystem) AttachDaemon(ctx context.Context, request channel.DaemonRequest) (channel.BindingResult, error) {
 	t, err := a.home.controller.AttachDaemon(ctx, request)
 	result, err := finishTransition(a, t, err)
 	if err == nil {
@@ -185,12 +186,12 @@ func (a *actorSystem) End(ctx context.Context, request actorctl.EndRequest) (act
 	return finishTransition(a, t, err)
 }
 
-func (a *actorSystem) Remove(ctx context.Context, request actorctl.RemoveRequest) (actorctl.RemoveResult, error) {
+func (a *actorSystem) Remove(ctx context.Context, request actorctl.RemoveRequest) (channel.RemoveResult, error) {
 	t, err := a.home.controller.Remove(ctx, request)
 	return finishTransition(a, t, err)
 }
 
-func (a *actorSystem) DetachDaemon(ctx context.Context, request actorctl.DetachDaemonRequest) (actorctl.DetachDaemonResult, error) {
+func (a *actorSystem) DetachDaemon(ctx context.Context, request channel.DaemonRequest) (channel.BindingResult, error) {
 	t, err := a.home.controller.DetachDaemon(ctx, request)
 	result, err := finishTransition(a, t, err)
 	if err == nil {
@@ -390,5 +391,3 @@ func (a *actorSystem) close(ctx context.Context) error {
 
 var _ storespec.ChannelAuthority = (*actorSystem)(nil)
 var _ storespec.CollaborationAuthority = (*actorSystem)(nil)
-
-var _ actorctl.Commands = (*actorSystem)(nil)

@@ -25,6 +25,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/managedcaps"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/systemcaps"
@@ -81,9 +82,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	lateAcc := &lateAcceptor{}
 	cs, err := runtime.OpenChannel(ctx, cfg.ChannelID, cfg.DBPath, runtime.OpenChannelOptions{
 		MustExist: cfg.MustExistDB, OnCommit: h.signal.Notify,
-		StorageMounts:  lateStorageMounts{acc: lateAcc},
-		StorageControl: lateStorageControl{acc: lateAcc},
-		LaneControl:    lateLaneControl{acc: lateAcc},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: open channel store: %w", err)
@@ -114,13 +112,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, err
 	}
 
-	h.minter, err = harness.New(harness.Deps{
-		ChannelID: cfg.ChannelID, Log: cs.Log, Presence: cs.Authority,
-		ResolveAudience: h.resolveAudience, Logger: logger,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("platform: build harness: %w", err)
-	}
 	h.presenceFold = presence.New(logger, clock,
 		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, sweepEvery)
 
@@ -131,11 +122,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: construct actor identity store: %w", err)
 	}
 	h.actorStore = actorStore
-	stateHandles, err := accessdoor.NewStateHandleResolver(actorStore.identities, cs.Access)
-	if err != nil {
-		return nil, fmt.Errorf("platform: build state handle resolver: %w", err)
-	}
-	h.stateHandles = stateHandles
 	h.factories = &compositionView{h: h, resolver: cfg.CompositionResolver}
 	h.controller, err = actorctl.New(actorStore)
 	if err != nil {
@@ -144,18 +130,51 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.systemKernel = systemkernel.New()
 	h.actors = newActorSystem(h, logger)
 	actorStore.bindAuthority(h.actors)
-	if err := cs.BindActorAuthority(h.actors); err != nil {
-		return nil, fmt.Errorf("platform: bind actor authority: %w", err)
+
+	var completion accessdoor.ResourceCompletion
+	h.access, completion, err = accessdoor.NewAssembly(accessdoor.Deps{
+		Registry:       cs.Assembly.Resources,
+		Drivers:        accessdoor.DriverTable{resourcespec.KindKV: cs.Assembly.KV},
+		Authority:      h.actors,
+		State:          cs.Assembly.State,
+		ChannelID:      cfg.ChannelID,
+		StorageMounts:  lateStorageMounts{acc: lateAcc},
+		StorageControl: lateStorageControl{acc: lateAcc},
+		LaneControl:    lateLaneControl{acc: lateAcc},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("platform: build access door: %w", err)
 	}
+	h.outbox = resourceOutbox{
+		ResourceOutbox: cs.Assembly.Resources,
+		completion:     completion,
+	}
+	h.minter, err = harness.New(harness.Deps{
+		ChannelID: cfg.ChannelID, Log: cs.Log, Presence: h.actors,
+		ResolveAudience: h.resolveAudience, Logger: logger,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("platform: build harness: %w", err)
+	}
+	stateHandles, err := accessdoor.NewStateHandleResolver(actorStore.identities, h.access)
+	if err != nil {
+		return nil, fmt.Errorf("platform: build state handle resolver: %w", err)
+	}
+	h.stateHandles = stateHandles
 
 	// Scheduler construction precedes System Unit construction, but its run
 	// loop starts only after Controller is Running.
-	h.schedMinter, h.engine, err = runtime.OpenScheduler(cs, schedule.AssemblyDeps{
+	schedulerClock := cfg.Clock
+	if schedulerClock == nil {
+		schedulerClock = schedule.NewSystemClock()
+	}
+	h.schedMinter, h.engine, err = schedule.New(schedule.Deps{
+		Store: cs.Assembly.Timers,
 		Fire: fireSink{
 			minter: h.minter, authority: h.actors,
 			chID: cfg.ChannelID,
 		},
-		Clock: cfg.Clock, Logger: logger,
+		Clock: schedulerClock, Logger: logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: open scheduler: %w", err)
@@ -164,7 +183,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.managedCaps, err = managedcaps.New(
 		cfg.ChannelID,
 		h.minter,
-		cs.Access,
+		h.access,
 		h.stateHandles,
 		h.schedMinter,
 		h.actors,
@@ -175,7 +194,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.systemCaps, err = systemcaps.New(
 		cfg.ChannelID,
 		h.minter,
-		cs.Access,
+		h.access,
 		h.stateHandles,
 		h.schedMinter,
 	)
@@ -246,7 +265,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.sweepSubjectSlots(ctx)
 
 	links, err := link.NewAcceptor(link.Config{
-		Minter: h.minter, Access: cs.Access, StateHandles: stateHandles,
+		Minter: h.minter, Access: h.access, StateHandles: stateHandles,
 		Schedule: h.schedMinter, Authority: h.actors,
 		ChannelID: cfg.ChannelID, Logger: logger,
 		AuthorizeAttach: h.actors.AuthorizeAttach,
@@ -266,7 +285,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		ObserveDown:   h.presenceFold.OnRemoteDown,
 		CancelRequest: h.handleCancelUpstream,
 		StorageHostControl: homeStorageHostControl{
-			outbox: cs.Outbox, timeout: cfg.ReservationTimeout, logger: logger,
+			outbox: h.outbox, timeout: cfg.ReservationTimeout, logger: logger,
 		},
 		Plan: h.planForDaemon,
 		CanAttach: func(ctx context.Context, daemonID string) error {

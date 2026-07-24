@@ -23,8 +23,7 @@ var (
 	ErrSameAttemptDrift  = errors.New("actorhost: same attempt changed immutable desired")
 	ErrReservedSystem    = errors.New("actorhost: system actor is not managed")
 	ErrHostClosed        = errors.New("actorhost: host closed")
-	ErrAttachRetryable   = errors.New("actorhost: attach retryable")
-	ErrStaleBinding      = errors.New("actorhost: stale binding")
+	ErrAttachRejected    = errors.New("actorhost: attach rejected")
 
 	ErrNotHosted = errors.New("actorhost: actor not hosted")
 )
@@ -60,9 +59,9 @@ func (k AttemptKey) valid() bool {
 	return err == nil
 }
 
-// CompareAttemptKeys compares canonical UUIDv7 whole values. It is structural,
+// compareAttemptKeys compares canonical UUIDv7 whole values. It is structural,
 // not an authorization or cross-process epoch decision.
-func CompareAttemptKeys(left, right AttemptKey) (int, error) {
+func compareAttemptKeys(left, right AttemptKey) (int, error) {
 	if !left.valid() || !right.valid() {
 		return 0, ErrInvalidAttemptKey
 	}

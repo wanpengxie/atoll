@@ -9,6 +9,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -78,8 +79,8 @@ func (*fakeStore) Admit(context.Context, AdmitRequest) (ActorCommit[AdmitResult]
 	return ActorCommit[AdmitResult]{}, errors.New("unused")
 }
 
-func (*fakeStore) Introduce(context.Context, IntroduceRequest) (ActorCommit[IntroduceResult], error) {
-	return ActorCommit[IntroduceResult]{}, errors.New("unused")
+func (*fakeStore) Introduce(context.Context, IntroduceRequest) (ActorCommit[channel.IntroduceResult], error) {
+	return ActorCommit[channel.IntroduceResult]{}, errors.New("unused")
 }
 
 func forkKey(caller actor.ActorID, request message.ID) string {
@@ -145,8 +146,8 @@ func (*fakeStore) ApplyDeclaration(context.Context, DeclarationChange) (ActorCom
 	return ActorCommit[struct{}]{}, errors.New("unused")
 }
 
-func (*fakeStore) AttachDaemon(context.Context, AttachDaemonRequest) (ValueCommit[AttachDaemonResult], error) {
-	return ValueCommit[AttachDaemonResult]{}, errors.New("unused")
+func (*fakeStore) AttachDaemon(context.Context, channel.DaemonRequest) (ValueCommit[channel.BindingResult], error) {
+	return ValueCommit[channel.BindingResult]{}, errors.New("unused")
 }
 
 func (*fakeStore) ResolveTerminal(_ context.Context, command TerminalCommand, _ []storespec.ActorControlRow) (TerminalPlan, error) {

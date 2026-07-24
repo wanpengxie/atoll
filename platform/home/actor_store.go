@@ -147,7 +147,7 @@ func (s *homeActorStore) Admit(
 func (s *homeActorStore) Introduce(
 	ctx context.Context,
 	request actorctl.IntroduceRequest,
-) (actorctl.ActorCommit[actorctl.IntroduceResult], error) {
+) (actorctl.ActorCommit[channel.IntroduceResult], error) {
 	meta, err := actorCommandMeta(
 		request.Ref,
 		request.Member,
@@ -157,20 +157,20 @@ func (s *homeActorStore) Introduce(
 		}{request.DeclID, request.InitiatorActorID},
 	)
 	if err != nil {
-		return actorctl.ActorCommit[actorctl.IntroduceResult]{}, err
+		return actorctl.ActorCommit[channel.IntroduceResult]{}, err
 	}
 	result, err := s.introduce(ctx, meta, request.DeclID, request.InitiatorActorID)
 	if err != nil {
-		return actorctl.ActorCommit[actorctl.IntroduceResult]{}, err
+		return actorctl.ActorCommit[channel.IntroduceResult]{}, err
 	}
 	stored, ok, err := s.LookupActive(ctx, result.ActorID)
 	if err != nil {
-		return actorctl.ActorCommit[actorctl.IntroduceResult]{}, err
+		return actorctl.ActorCommit[channel.IntroduceResult]{}, err
 	}
 	if !ok {
-		return actorctl.ActorCommit[actorctl.IntroduceResult]{}, storespec.ErrActorNotFound
+		return actorctl.ActorCommit[channel.IntroduceResult]{}, storespec.ErrActorNotFound
 	}
-	return actorctl.ActorCommit[actorctl.IntroduceResult]{
+	return actorctl.ActorCommit[channel.IntroduceResult]{
 		Actor: stored,
 		Result: channel.IntroduceResult{
 			ActorID: result.ActorID,
@@ -452,20 +452,20 @@ func (s *homeActorStore) ApplyDeclaration(
 
 func (s *homeActorStore) AttachDaemon(
 	ctx context.Context,
-	request actorctl.AttachDaemonRequest,
-) (actorctl.ValueCommit[actorctl.AttachDaemonResult], error) {
+	request channel.DaemonRequest,
+) (actorctl.ValueCommit[channel.BindingResult], error) {
 	meta, err := systemMeta(request.Ref, request)
 	if err != nil {
-		return actorctl.ValueCommit[actorctl.AttachDaemonResult]{}, err
+		return actorctl.ValueCommit[channel.BindingResult]{}, err
 	}
 	result, err := s.cs.SysOps.AttachDaemon(ctx, storespec.AttachTx{
 		SysOpMeta: meta,
 		DaemonID:  storespec.DaemonID(request.DaemonID),
 	})
 	if err != nil {
-		return actorctl.ValueCommit[actorctl.AttachDaemonResult]{}, err
+		return actorctl.ValueCommit[channel.BindingResult]{}, err
 	}
-	return actorctl.ValueCommit[actorctl.AttachDaemonResult]{
+	return actorctl.ValueCommit[channel.BindingResult]{
 		Result: channel.BindingResult{
 			Bound: result.Bound, ClearedInstances: result.ClearedInstances,
 		},

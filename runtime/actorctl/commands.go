@@ -6,6 +6,7 @@ import (
 	"slices"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -90,10 +91,10 @@ func (c *Controller) admit(
 func (c *Controller) Introduce(
 	ctx context.Context,
 	request IntroduceRequest,
-) (Transition[IntroduceResult], error) {
+) (Transition[channel.IntroduceResult], error) {
 	done, err := c.beginCommand()
 	if err != nil {
-		return Transition[IntroduceResult]{}, err
+		return Transition[channel.IntroduceResult]{}, err
 	}
 	defer done()
 	return c.introduce(ctx, request)
@@ -102,12 +103,12 @@ func (c *Controller) Introduce(
 func (c *Controller) introduce(
 	ctx context.Context,
 	request IntroduceRequest,
-) (Transition[IntroduceResult], error) {
+) (Transition[channel.IntroduceResult], error) {
 	c.placementGate.Lock()
 	defer c.placementGate.Unlock()
 	commit, err := c.store.Introduce(ctx, request)
 	if err != nil {
-		return Transition[IntroduceResult]{}, err
+		return Transition[channel.IntroduceResult]{}, err
 	}
 	stored, result := commit.Actor, commit.Result
 	id := result.ActorID
@@ -116,9 +117,9 @@ func (c *Controller) introduce(
 	}
 	definition, changed, err := c.publishNew(ctx, id)
 	if err != nil {
-		return Transition[IntroduceResult]{Result: result}, err
+		return Transition[channel.IntroduceResult]{Result: result}, err
 	}
-	transition := Transition[IntroduceResult]{Result: result, Effects: commit.Effects}
+	transition := Transition[channel.IntroduceResult]{Result: result, Effects: commit.Effects}
 	if changed {
 		transition.Wake = []ActorDefinition{definition}
 	}
@@ -305,11 +306,11 @@ func (c *Controller) publishReplacementLocked(
 
 func (c *Controller) AttachDaemon(
 	ctx context.Context,
-	request AttachDaemonRequest,
-) (Transition[AttachDaemonResult], error) {
+	request channel.DaemonRequest,
+) (Transition[channel.BindingResult], error) {
 	done, err := c.beginCommand()
 	if err != nil {
-		return Transition[AttachDaemonResult]{}, err
+		return Transition[channel.BindingResult]{}, err
 	}
 	defer done()
 	return c.attachDaemon(ctx, request)
@@ -317,12 +318,12 @@ func (c *Controller) AttachDaemon(
 
 func (c *Controller) attachDaemon(
 	ctx context.Context,
-	request AttachDaemonRequest,
-) (Transition[AttachDaemonResult], error) {
+	request channel.DaemonRequest,
+) (Transition[channel.BindingResult], error) {
 	c.placementGate.Lock()
 	defer c.placementGate.Unlock()
 	commit, err := c.store.AttachDaemon(ctx, request)
-	return Transition[AttachDaemonResult]{
+	return Transition[channel.BindingResult]{
 		Result: commit.Result, Effects: commit.Effects,
 	}, err
 }
@@ -343,9 +344,9 @@ func (c *Controller) End(
 func (c *Controller) Remove(
 	ctx context.Context,
 	request RemoveRequest,
-) (Transition[RemoveResult], error) {
+) (Transition[channel.RemoveResult], error) {
 	transition, err := c.Terminal(ctx, TerminalCommand{Kind: TerminalRemove, Remove: request})
-	return Transition[RemoveResult]{
+	return Transition[channel.RemoveResult]{
 		Result:  transition.Result.Remove,
 		Wake:    transition.Wake,
 		Ended:   transition.Ended,
@@ -355,13 +356,13 @@ func (c *Controller) Remove(
 
 func (c *Controller) DetachDaemon(
 	ctx context.Context,
-	request DetachDaemonRequest,
-) (Transition[DetachDaemonResult], error) {
+	request channel.DaemonRequest,
+) (Transition[channel.BindingResult], error) {
 	transition, err := c.Terminal(
 		ctx,
 		TerminalCommand{Kind: TerminalDetachDaemon, Detach: request},
 	)
-	return Transition[DetachDaemonResult]{
+	return Transition[channel.BindingResult]{
 		Result:  transition.Result.Detach,
 		Wake:    transition.Wake,
 		Ended:   transition.Ended,

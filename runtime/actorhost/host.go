@@ -159,14 +159,6 @@ func New(cfg Config) (*HostSupervisor, error) {
 	return h, nil
 }
 
-// Domain reports the execution domain this Host owns.
-func (h *HostSupervisor) Domain() ExecutionDomain {
-	if h == nil {
-		return ""
-	}
-	return h.domain
-}
-
 // Wake coalesces a level-reconciliation hint.
 func (h *HostSupervisor) Wake() {
 	if h == nil {
@@ -532,20 +524,20 @@ func (h *HostSupervisor) Attach(id actor.ActorID, key AttemptKey, binding Bindin
 	if h.sealed {
 		h.mu.Unlock()
 		unlock()
-		return ErrAttachRetryable
+		return ErrAttachRejected
 	}
 	state := h.states[id]
 	if state != nil && (state.body != nil || state.build != nil) {
 		h.mu.Unlock()
 		unlock()
 		h.Wake()
-		return ErrAttachRetryable
+		return ErrAttachRejected
 	}
 	if state == nil || state.desired == nil || state.desired.carrier == nil ||
 		state.desired.carrier.AttemptKey != key {
 		h.mu.Unlock()
 		unlock()
-		return ErrStaleBinding
+		return ErrAttachRejected
 	}
 	if state.route == nil {
 		state.route = &routeActual{key: key, binding: binding, started: time.Now()}
@@ -558,7 +550,7 @@ func (h *HostSupervisor) Attach(id actor.ActorID, key AttemptKey, binding Bindin
 		unlock()
 		return nil
 	}
-	order, err := CompareAttemptKeys(key, state.route.key)
+	order, err := compareAttemptKeys(key, state.route.key)
 	if err != nil {
 		h.mu.Unlock()
 		unlock()
@@ -567,7 +559,7 @@ func (h *HostSupervisor) Attach(id actor.ActorID, key AttemptKey, binding Bindin
 	if order < 0 {
 		h.mu.Unlock()
 		unlock()
-		return ErrStaleBinding
+		return ErrAttachRejected
 	}
 	predecessor = state.route.binding
 	started := time.Now()

@@ -187,7 +187,7 @@ func TestAttemptKeyCanonicalUUIDv7AndWholeValueOrder(t *testing.T) {
 	if _, err := ParseAttemptKey("00000000-0000-4000-8000-000000000000"); !errors.Is(err, ErrInvalidAttemptKey) {
 		t.Fatalf("non-v7 error = %v", err)
 	}
-	got, err := CompareAttemptKeys(left, right)
+	got, err := compareAttemptKeys(left, right)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -539,7 +539,7 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 	}
 	stale := newTestBinding()
 	staleHandle := exactTestBinding(t, stale)
-	if err := host.Attach(id, low, staleHandle); !errors.Is(err, ErrStaleBinding) {
+	if err := host.Attach(id, low, staleHandle); !errors.Is(err, ErrAttachRejected) {
 		t.Fatalf("stale attach error = %v", err)
 	}
 	select {
@@ -619,7 +619,7 @@ func TestAttachDuringBodyBuildIsRetryableAndDoesNotOwnIncoming(t *testing.T) {
 	<-started
 	binding := newTestBinding()
 	handle := exactTestBinding(t, binding)
-	if err := host.Attach(id, key, handle); !errors.Is(err, ErrAttachRetryable) {
+	if err := host.Attach(id, key, handle); !errors.Is(err, ErrAttachRejected) {
 		t.Fatalf("Attach error = %v", err)
 	}
 	select {

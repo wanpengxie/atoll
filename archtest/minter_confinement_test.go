@@ -33,8 +33,8 @@ import (
 //     an assembly-root responsibility (synchronised with the channel's own
 //     open/close): a downstream *Engine could stop the channel's time axis.
 //
-// The VALUES are already confined — all three are born inside OpenChannel /
-// OpenScheduler, and package runtime is import-locked to platform
+// The VALUES are already confined — Platform/Home constructs and owns them,
+// and package runtime is import-locked to platform
 // (TestRuntimeAssemblyConfinedToPlatform). This wall adds the TYPE-reference
 // lock, one layer earlier: without it, a downstream field/param typed
 // accessdoor.AccessMinter compiles and passes CI, and one "convenient"
@@ -51,12 +51,10 @@ import (
 // New's fail-fast — so locking them would ban nothing dangerous (the deny
 // set equals the true-danger set, not one symbol more).
 //
-// Allowlist: the runtime ROOT package only (OpenChannel / OpenScheduler
-// produce these values, so their signatures name the types — no runtime
-// SIBLING package has any business holding a minter: harness/actorrt/
-// accessdoor/schedule reference their own symbols unqualified, which this
-// selector walk never matches) and the platform tree (the assembler that
-// receives and holds them). Same shadowing / dot-import caveat as the
+// Allowlist: the platform tree (the assembler that owns them), plus the two
+// capability-bundle organs that consume their narrow mint interfaces. Runtime
+// root opens Store only and must not hold these composition products. Same
+// shadowing / dot-import caveat as the
 // harness lock: a review-layer offence, not worth a go/types-grade pass
 // pre-launch.
 var minterConfinements = []struct {
@@ -100,11 +98,10 @@ func TestMinterTypeConfinement(t *testing.T) {
 			return nil
 		}
 		slash := filepath.ToSlash(path)
-		if isRuntimeRootFile(slash) ||
-			strings.HasPrefix(slash, platformPathPrefix) ||
+		if strings.HasPrefix(slash, platformPathPrefix) ||
 			strings.HasPrefix(slash, "../runtime/managedcaps/") ||
 			strings.HasPrefix(slash, "../runtime/systemcaps/") {
-			return nil // the legitimate producer (runtime root) / assembler (platform)
+			return nil // assembler or capability-bundle consumer
 		}
 		file, perr := parser.ParseFile(fset, path, nil, 0)
 		if perr != nil {

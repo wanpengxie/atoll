@@ -141,7 +141,7 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
 	expectAccepted(t, "C read before deregister", out, err)
 
-	if err := endDeclaredTest(ctx, cs, C, 100); err != nil {
+	if err := endDeclaredTest(ctx, cs.ChannelStores, C, 100); err != nil {
 		t.Fatalf("deregister C: %v", err)
 	}
 	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
@@ -205,18 +205,36 @@ func TestChannelOwnerRecoversStrandedDaemonResource(t *testing.T) {
 	}
 }
 
-func csResourcesCreateForTest(cs *ChannelStores, id resource.ResourceID, daemonID, coord string) error {
+func csResourcesCreateForTest(cs *testAccessChannel, id resource.ResourceID, daemonID, coord string) error {
 	return rawResourceRegistryForTest(cs).Create(context.Background(), id, resourcespec.KindFile, actor.SystemActorID, daemonID, coord, nil,
 		resourcespec.ResourceBirthPlan{})
 }
 
-func rawResourceRegistryForTest(cs *ChannelStores) resourcespec.Registry {
-	return cs.Outbox.(resourceOutbox).ResourceOutbox.(resourcespec.Registry)
+func rawResourceRegistryForTest(cs *testAccessChannel) resourcespec.Registry {
+	return cs.Assembly.Resources
 }
 
 // ---- helpers ----
 
-func openAccessChannel(t *testing.T) *ChannelStores {
+type testAccessChannel struct {
+	*ChannelStores
+	Access accessdoor.AccessMinter
+	Outbox resourcespec.ResourceOutbox
+}
+
+type testResourceOutbox struct {
+	resourcespec.ResourceOutbox
+	completion accessdoor.ResourceCompletion
+}
+
+func (o testResourceOutbox) CommitReservation(
+	ctx context.Context,
+	id string,
+) (resourcespec.LandedResource, bool, error) {
+	return o.completion.CommitReservation(ctx, id)
+}
+
+func openAccessChannel(t *testing.T) *testAccessChannel {
 	t.Helper()
 	dir := t.TempDir()
 	cs, err := OpenChannel(context.Background(), channel.ID("c-access"),
@@ -224,11 +242,26 @@ func openAccessChannel(t *testing.T) *ChannelStores {
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}
-	if err := cs.BindActorAuthority(testAccessAuthority{declared: cs.Declared}); err != nil {
-		t.Fatalf("BindActorAuthority: %v", err)
+	authority := testAccessAuthority{declared: cs.Declared}
+	access, completion, err := accessdoor.NewAssembly(accessdoor.Deps{
+		Registry:  cs.Assembly.Resources,
+		Drivers:   accessdoor.DriverTable{resourcespec.KindKV: cs.Assembly.KV},
+		Authority: authority,
+		State:     cs.Assembly.State,
+		ChannelID: "c-access",
+	})
+	if err != nil {
+		t.Fatalf("assemble access: %v", err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
-	return cs
+	return &testAccessChannel{
+		ChannelStores: cs,
+		Access:        access,
+		Outbox: testResourceOutbox{
+			ResourceOutbox: cs.Assembly.Resources,
+			completion:     completion,
+		},
+	}
 }
 
 type testAccessAuthority struct {
@@ -282,9 +315,9 @@ func (a testAccessAuthority) ResourceActorFacts(
 	}, nil
 }
 
-func seedMember(t *testing.T, cs *ChannelStores, id actor.ActorID) actor.ActorID {
+func seedMember(t *testing.T, cs *testAccessChannel, id actor.ActorID) actor.ActorID {
 	t.Helper()
-	minted, err := admitDeclaredTest(context.Background(), cs, actor.KindAgent, string(id), 1)
+	minted, err := admitDeclaredTest(context.Background(), cs.ChannelStores, actor.KindAgent, string(id), 1)
 	if err != nil {
 		t.Fatalf("seed member %s: %v", id, err)
 	}

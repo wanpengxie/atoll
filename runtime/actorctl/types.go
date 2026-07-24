@@ -125,12 +125,6 @@ func rowFromActive(id actor.ActorID, value ActiveActor) storespec.ActorControlRo
 	}
 }
 
-// BootstrapStore supplies only identities selected by the Store's physical
-// restore policy. Controller does not know which storage homes exist.
-type BootstrapStore interface {
-	RestoreActive(context.Context) ([]storespec.ActorControlRow, error)
-}
-
 type ForkCommitRequest struct {
 	CallerActorID actor.ActorID
 	RequestID     message.ID
@@ -182,20 +176,12 @@ type IntroduceRequest struct {
 	Member           *MemberOperation
 }
 
-type IntroduceResult = channel.IntroduceResult
-
 type RemoveRequest struct {
 	Ref              string
 	Target           actor.ActorID
 	InitiatorActorID actor.ActorID
 	Member           *MemberOperation
 }
-
-type RemoveResult = channel.RemoveResult
-type AttachDaemonRequest = channel.DaemonRequest
-type AttachDaemonResult = channel.BindingResult
-type DetachDaemonRequest = channel.DaemonRequest
-type DetachDaemonResult = channel.BindingResult
 
 type EndRequest struct {
 	CallerActorID actor.ActorID
@@ -220,7 +206,7 @@ type TerminalCommand struct {
 	Kind   TerminalKind
 	End    EndRequest
 	Remove RemoveRequest
-	Detach DetachDaemonRequest
+	Detach channel.DaemonRequest
 }
 
 type TerminalPlan struct {
@@ -230,36 +216,26 @@ type TerminalPlan struct {
 
 type TerminalResult struct {
 	Ended  []actor.ActorID
-	Remove RemoveResult
-	Detach DetachDaemonResult
+	Remove channel.RemoveResult
+	Detach channel.BindingResult
 }
 
 // Store is the typed persistence port. Each mutation returns authoritative
 // committed values; Controller never accepts a callback transaction escape.
 type Store interface {
-	BootstrapStore
+	// RestoreActive supplies identities selected by the Store's physical
+	// restore policy. Controller does not know which storage homes exist.
+	RestoreActive(context.Context) ([]storespec.ActorControlRow, error)
 	LookupActive(context.Context, actor.ActorID) (StoredActor, bool, error)
 	Admit(context.Context, AdmitRequest) (ActorCommit[AdmitResult], error)
-	Introduce(context.Context, IntroduceRequest) (ActorCommit[IntroduceResult], error)
+	Introduce(context.Context, IntroduceRequest) (ActorCommit[channel.IntroduceResult], error)
 	LookupFork(context.Context, actor.ActorID, message.ID) (actor.ActorID, bool, error)
 	CommitFork(context.Context, ForkCommitRequest) (ForkCommitResult, error)
 	Restart(context.Context, RestartRequest) (ActorCommit[struct{}], error)
 	ApplyDeclaration(context.Context, DeclarationChange) (ActorCommit[struct{}], error)
-	AttachDaemon(context.Context, AttachDaemonRequest) (ValueCommit[AttachDaemonResult], error)
+	AttachDaemon(context.Context, channel.DaemonRequest) (ValueCommit[channel.BindingResult], error)
 	ResolveTerminal(context.Context, TerminalCommand, []storespec.ActorControlRow) (TerminalPlan, error)
 	CommitTerminal(context.Context, TerminalCommand, TerminalPlan) (ValueCommit[TerminalResult], error)
-}
-
-type Commands interface {
-	Admit(context.Context, AdmitRequest) (AdmitResult, error)
-	Introduce(context.Context, IntroduceRequest) (IntroduceResult, error)
-	Fork(context.Context, ForkRequest) (ForkResult, error)
-	Restart(context.Context, RestartRequest) error
-	ApplyDeclaration(context.Context, DeclarationChange) error
-	AttachDaemon(context.Context, AttachDaemonRequest) (AttachDaemonResult, error)
-	End(context.Context, EndRequest) (EndResult, error)
-	Remove(context.Context, RemoveRequest) (RemoveResult, error)
-	DetachDaemon(context.Context, DetachDaemonRequest) (DetachDaemonResult, error)
 }
 
 type ForkRequest struct {

@@ -38,7 +38,6 @@ type ChannelStores struct {
 	// is its own explicit field over the one concrete actorRegistry; nothing
 	// downstream may type-assert one face back into another.
 	Principals      storespec.PrincipalRegistry // principal-axis read (LookupActivePrincipal, admission path)
-	DurableHistory  storespec.DurableHistory
 	Declared        storespec.DeclaredControlReader
 	DeclAdmission   storespec.DeclAdmissionStore
 	Cascade         storespec.CascadeStore
@@ -73,10 +72,8 @@ type ChannelStores struct {
 	// around the pen, so unlike the door's collapsed-branch stores (whose
 	// confinement is enforced by "only the welded minter is exposed
 	// downstream"), the timer store has no minter-shaped collaborator sitting
-	// between it and a caller yet — the schedule engine's assembly
-	// (OpenScheduler, in the runtime package's root assembly) is the only
-	// intended reader, and it reaches this field from within the runtime tree,
-	// never as a public ChannelStores member.
+	// between it and a caller yet. The runtime Store facade exports it only
+	// through its Platform-confined AssemblyPorts for one-time composition.
 	timers timerspec.TimerStore
 }
 
@@ -112,7 +109,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Expiry:          msgs,
 		Requests:        newRequestLookup(msgs),
 		Principals:      reg,
-		DurableHistory:  reg,
 		Declared:        reg,
 		DeclAdmission:   reg,
 		Cascade:         reg,
@@ -149,14 +145,9 @@ func (c *ChannelStores) Close() error {
 	return c.db.Close()
 }
 
-// Timers exposes the raw timerspec.TimerStore for the one intended reader
-// within the runtime tree — runtime.OpenScheduler (the schedule engine's
-// assembly seam). It is a METHOD, not a promoted exported field: the
+// Timers exposes the raw timerspec.TimerStore to the Platform-confined runtime
+// Store facade. It is a METHOD, not a promoted exported field: the
 // accessor itself is the confinement marker (an unexported field plus one
 // narrow reader), the same discipline the raw *sql.DB follows via
-// Close/Open rather than a public field. The runtime package (a different Go
-// package, even though it is the sole importer of this internal one) cannot
-// reach an unexported struct field directly — this is the seam that lets it
-// without promoting timers to a public ChannelStores member (no raw
-// TimerStore public surface).
+// Close/Open rather than a public field.
 func (c *ChannelStores) Timers() timerspec.TimerStore { return c.timers }

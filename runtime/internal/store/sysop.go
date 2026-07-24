@@ -488,7 +488,7 @@ func (s *sysOpStore) ApplyResolvedDeclaration(ctx context.Context, in storespec.
 	}
 	result := storespec.DeclarationSyncResult{
 		Status: storespec.DeclarationApplied, Version: version,
-		Effects: storespec.PostCommitEffects{Poke: true, Despawn: []actor.ActorID{in.ActorID}},
+		Effects: storespec.PostCommitEffects{Poke: true},
 	}
 	raw, err := json.Marshal(result)
 	if err != nil {
@@ -571,7 +571,7 @@ func (s *sysOpStore) RestartActor(ctx context.Context, in storespec.RestartTx) (
 		}
 		return sysOpOutcome{
 			result:  storespec.RestartResult{},
-			effects: storespec.PostCommitEffects{Poke: true, Despawn: []actor.ActorID{in.Target}},
+			effects: storespec.PostCommitEffects{Poke: true},
 		}, nil
 	})
 	return decodeResult[storespec.RestartResult](raw, effects, err)

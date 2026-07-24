@@ -219,7 +219,7 @@ func TestStateSlice4_CascadeClearVsNonLossy(t *testing.T) {
 
 	// The owner must be a channel MEMBER to create a channel-scoped resource (the
 	// non-lossy witness); the actor-scoped create needs no membership.
-	assertClears := func(t *testing.T, dereg func(t *testing.T, cs *ChannelStores, id actor.ActorID)) {
+	assertClears := func(t *testing.T, dereg func(t *testing.T, cs *testAccessChannel, id actor.ActorID)) {
 		cs := openAccessChannel(t)
 		A := seedMember(t, cs, actor.ActorID("A"))
 
@@ -246,16 +246,16 @@ func TestStateSlice4_CascadeClearVsNonLossy(t *testing.T) {
 	}
 
 	t.Run("Deregister path", func(t *testing.T) {
-		assertClears(t, func(t *testing.T, cs *ChannelStores, id actor.ActorID) {
-			if err := endDeclaredTest(ctx, cs, id, 100); err != nil {
+		assertClears(t, func(t *testing.T, cs *testAccessChannel, id actor.ActorID) {
+			if err := endDeclaredTest(ctx, cs.ChannelStores, id, 100); err != nil {
 				t.Fatalf("Deregister: %v", err)
 			}
 		})
 	})
 
 	t.Run("batch EndCascade path", func(t *testing.T) {
-		assertClears(t, func(t *testing.T, cs *ChannelStores, id actor.ActorID) {
-			if err := endDeclaredTest(ctx, cs, id, 100); err != nil {
+		assertClears(t, func(t *testing.T, cs *testAccessChannel, id actor.ActorID) {
+			if err := endDeclaredTest(ctx, cs.ChannelStores, id, 100); err != nil {
 				t.Fatalf("EndCascade: %v", err)
 			}
 		})

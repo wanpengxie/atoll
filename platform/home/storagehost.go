@@ -10,7 +10,7 @@ package home
 // daemon-runtime-only (§8.2's server-zero-storage red line); this file only
 // ROUTES already-authorized control-plane decisions to the right live
 // connection (via link.Acceptor) and completes already-authorized outbox
-// transactions (via runtime.ChannelStores.Outbox).
+// transactions (via the Platform-owned resource outbox).
 
 import (
 	"context"
@@ -24,7 +24,20 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 )
+
+type resourceOutbox struct {
+	resourcespec.ResourceOutbox
+	completion accessdoor.ResourceCompletion
+}
+
+func (o resourceOutbox) CommitReservation(
+	ctx context.Context,
+	id string,
+) (resourcespec.LandedResource, bool, error) {
+	return o.completion.CommitReservation(ctx, id)
+}
 
 // lateAcceptor is the late-binding seam §4.3's own text names ("若装配时机
 // 上门先于acceptor建，注入一个late-bound的StorageMounts"): Home.Open's step 2
@@ -114,7 +127,7 @@ func (c lateLaneControl) OpenTransfer(ctx context.Context, targetDaemonID, reque
 }
 
 // homeStorageHostControl implements link.StorageHostControl over
-// runtime.ChannelStores.Outbox (resourcespec.ResourceOutbox) — the home-side
+// the Platform-owned resourcespec.ResourceOutbox — the home-side
 // answer to the daemon-INITIATED half of §4.7's control-RPC plane
 // (Committed/ReclaimAck/ReconcilePull). Every method runs the §4.7
 // mechanical sender-auth assertion FIRST (senderDaemonID must equal the

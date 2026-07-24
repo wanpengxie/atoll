@@ -142,16 +142,6 @@ func (s *fakeStore) AckOwned(_ context.Context, id timerspec.TimerID, author act
 	return true, nil
 }
 
-func (s *fakeStore) ListFired(context.Context, timerspec.FiredCursor, int) (timerspec.FiredPage, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	rows := make([]timerspec.TimerRow, 0, len(s.fired))
-	for _, row := range s.fired {
-		rows = append(rows, row)
-	}
-	return timerspec.FiredPage{Rows: rows, Done: true}, nil
-}
-
 func (s *fakeStore) rowCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()

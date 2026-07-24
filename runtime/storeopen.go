@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/internal/store"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -15,14 +14,11 @@ import (
 // storespec interfaces. The raw *sql.DB is confined inside runtime/internal/store;
 // this public type re-exports only the interface handles.
 type ChannelStores struct {
-	channelID       channel.ID
 	Log             storespec.MessageLog
 	Query           storespec.MessageQuery
 	Visible         storespec.VisibleMessageQuery
 	Expiry          storespec.ExpiryQuery
 	Requests        storespec.RequestLookup
-	Authority       storespec.ChannelAuthority
-	DurableHistory  storespec.DurableHistory
 	Declared        storespec.DeclaredControlReader
 	DeclAdmission   storespec.DeclAdmissionStore
 	Cascade         storespec.CascadeStore
@@ -32,8 +28,6 @@ type ChannelStores struct {
 	DeclarationSync storespec.DeclarationSyncStore
 	Bindings        storespec.DaemonBindingReader
 	ResourceRead    storespec.ResourceReadStore
-	FiredTimers     FiredTimerReader
-	authoritySlot   *actorAuthoritySlot
 
 	// Principals is the principal-axis read face (LookupActivePrincipal — the
 	// admission path's "which active instance embodies this subject" query),
@@ -45,51 +39,19 @@ type ChannelStores struct {
 	// for every ChannelStores holder at once — 反旁路结构墙).
 	Principals storespec.PrincipalRegistry
 
-	// Access is the plane-2 door's single outward face — the welded AccessMinter.
-	// The resourcespec.Registry / Driver behind it are deliberately NOT re-exported:
-	// handing out the raw R + byte surfaces would be a bypass-the-door write path
-	// (the anti-bypass wall). Downstream mints a caller-welded AccessHandle from
-	// this and speaks only Invoke, exactly as it speaks harness.Pen for plane-1.
-	Access accessdoor.AccessMinter
-
-	// Outbox is the SAME underlying resource registry re-exported under the
-	// narrow resourcespec.ResourceOutbox slice (期11 spec §4.7): reservation/
-	// tombstone completion for the daemon control-RPC handlers platform
-	// assembly wires (Committed/ReclaimAck/ReconcilePull). The general R
-	// surface (ActorAllows/MembersAllow/SetGrant/Create/Delete/Resolve) stays
-	// confined behind the door alone — the SAME anti-bypass wall Access's own
-	// doc above names, drawn one field narrower here rather than widened.
-	Outbox resourcespec.ResourceOutbox
-
-	// timers is the identity-level durable pending-timer store. Unexported
-	// for the same reason Access is public but its R/byte collaborators are
-	// not: a raw TimerStore reachable downstream is a delayed forged-author
-	// write path around the pen. Its ONE intended reader is OpenScheduler
-	// (scheduleopen.go), which lives in this same package — no minter-shaped
-	// collaborator sits between it and this field yet because the schedule
-	// engine (unlike accessdoor) is the reader, not a caller-facing decision
-	// tree.
-	timers timerspec.TimerStore
+	// Assembly contains raw leaf-store ports used only by Platform, the
+	// channel composition root, to assemble peer Runtime organs. Runtime
+	// opens the store organ; it does not assemble Access or Scheduler.
+	Assembly AssemblyPorts
 
 	closer func() error
 }
 
-type (
-	FiredTimerCursor = timerspec.FiredCursor
-	FiredTimerPage   = timerspec.FiredPage
-)
-
-type FiredTimerReader interface {
-	ListFired(context.Context, FiredTimerCursor, int) (FiredTimerPage, error)
-}
-
-type resourceOutbox struct {
-	resourcespec.ResourceOutbox
-	completion accessdoor.ResourceCompletion
-}
-
-func (o resourceOutbox) CommitReservation(ctx context.Context, id string) (resourcespec.LandedResource, bool, error) {
-	return o.completion.CommitReservation(ctx, id)
+type AssemblyPorts struct {
+	Resources resourcespec.Registry
+	KV        resourcespec.Driver
+	State     resourcespec.StateStore
+	Timers    timerspec.TimerStore
 }
 
 // Close releases the underlying store resources.
@@ -98,13 +60,6 @@ func (c *ChannelStores) Close() error {
 		return c.closer()
 	}
 	return nil
-}
-
-// BindActorAuthority completes the single Home-owned late binding. All
-// consumers receive Authority before this call and therefore fail closed,
-// never falling back to durable registry state.
-func (c *ChannelStores) BindActorAuthority(authority storespec.ChannelAuthority) error {
-	return c.authoritySlot.Bind(authority)
 }
 
 // OpenChannelOptions tunes the store open.
@@ -120,27 +75,6 @@ type OpenChannelOptions struct {
 	// woken identically regardless of which write path advanced the log. nil =
 	// no subscriber. The callback must be non-blocking (a lossy fan-out wake).
 	OnCommit func()
-
-	// StorageMounts / StorageControl are file-kind placement's platform-filled
-	// injection points (期11 spec §4.3: "注入点契约 runtime 定,实现填充下游
-	// 做") — this package DEFINES the accessdoor.Deps shape they land in but
-	// never answers them itself (it has no notion of a link/wire or an
-	// attach-state table). nil is legal: a channel opened without them (e.g.
-	// a kv-only test rig, or before platform's link Acceptor exists —
-	// §4.3's own late-bound-injection escape hatch covers that ordering) can
-	// resolve authorization and complete kv/kv creates exactly as before;
-	// only a file-kind Create fails honestly (§4.3's own reject path).
-	StorageMounts accessdoor.StorageMounts
-	// StorageControl issues the door's own AllocRequest once placement is
-	// chosen (see accessdoor.StorageControl's doc for why this Dep exists
-	// beyond spec §4.3's literal placement-CHOICE list).
-	StorageControl accessdoor.StorageControl
-	// LaneControl mints §5's file byte-route Token — same late-bound,
-	// nil-safe injection-point discipline as StorageMounts/StorageControl
-	// above (platform fills it over the link Acceptor; nil leaves file
-	// OpRead/OpWrite/with_content-create honestly erroring rather than
-	// fabricating a route).
-	LaneControl accessdoor.LaneControl
 }
 
 // OpenChannel opens the per-channel sqlite at dbPath and returns the segregated
@@ -161,36 +95,12 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		return nil, err
 	}
 
-	authoritySlot := newActorAuthoritySlot()
-
-	// Assemble the whole plane-2 door here: this is the dependency confluence
-	// point — the R + byte implementations come up from the store, the membership
-	// seam wraps the same channel's actor registry. New fail-fasts on an
-	// incomplete assembly (missing KindKV driver), so a mis-wired open fails at
-	// open, not at first Invoke.
-	access, completion, err := accessdoor.NewAssembly(accessdoor.Deps{
-		Registry:       cs.Resources,
-		Drivers:        accessdoor.DriverTable{resourcespec.KindKV: cs.KVDriver},
-		Authority:      authoritySlot,
-		State:          cs.State,
-		ChannelID:      channelID,
-		StorageMounts:  opts.StorageMounts,
-		StorageControl: opts.StorageControl,
-		LaneControl:    opts.LaneControl,
-	})
-	if err != nil {
-		_ = cs.Close()
-		return nil, err
-	}
 	return &ChannelStores{
-		channelID:       channelID,
 		Log:             cs.Log,
 		Query:           cs.Query,
 		Visible:         cs.Visible,
 		Expiry:          cs.Expiry,
 		Requests:        cs.Requests,
-		Authority:       authoritySlot,
-		DurableHistory:  cs.DurableHistory,
 		Declared:        cs.Declared,
 		DeclAdmission:   cs.DeclAdmission,
 		Cascade:         cs.Cascade,
@@ -200,12 +110,13 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		DeclarationSync: cs.DeclarationSync,
 		Bindings:        cs.Bindings,
 		ResourceRead:    cs.ResourceRead,
-		FiredTimers:     cs.Timers(),
-		authoritySlot:   authoritySlot,
 		Principals:      cs.Principals,
-		Access:          access,
-		Outbox:          resourceOutbox{ResourceOutbox: cs.Resources, completion: completion},
-		timers:          cs.Timers(),
-		closer:          cs.Close,
+		Assembly: AssemblyPorts{
+			Resources: cs.Resources,
+			KV:        cs.KVDriver,
+			State:     cs.State,
+			Timers:    cs.Timers(),
+		},
+		closer: cs.Close,
 	}, nil
 }

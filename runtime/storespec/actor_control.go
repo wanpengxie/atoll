@@ -147,10 +147,6 @@ type ChannelAuthority interface {
 	ResourceActorAuthority
 }
 
-type DurableHistory interface {
-	ExistsEver(context.Context, actor.ActorID) (bool, error)
-}
-
 type AdmitBundle struct {
 	ID           actor.ActorID
 	Kind         actor.Kind

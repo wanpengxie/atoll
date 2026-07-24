@@ -42,12 +42,10 @@ const (
 )
 
 // TestResourcespecImportedOnlyWithinRuntime — resourcespec (the kernel-only R +
-// driver contract leaf) may be imported ONLY from inside the runtime tree. A
-// downstream importer could implement Driver / construct a Registry / build a
-// DriverTable, opening an out-of-kernel plane-2 extension point and a
-// door-bypass write surface. The closed driver set is thereby closed by the
-// compile layer: downstream sees only accessdoor.AccessHandle / Outcome and the
-// welded AccessMinter on ChannelStores.
+// driver contract leaf) may be imported by Runtime implementations and the
+// Platform/Home composition root only. Platform needs the raw leaf ports once,
+// to assemble peer Runtime organs; no other downstream package may receive
+// them or build a bypass around AccessDoor.
 func TestResourcespecImportedOnlyWithinRuntime(t *testing.T) {
 	fset := token.NewFileSet()
 	var violations []string
@@ -66,13 +64,14 @@ func TestResourcespecImportedOnlyWithinRuntime(t *testing.T) {
 			return nil
 		}
 		slash := filepath.ToSlash(path)
-		if strings.HasPrefix(slash, runtimeTreePrefix) {
-			return nil // within the runtime tree — the legitimate implementor
+		if strings.HasPrefix(slash, runtimeTreePrefix) ||
+			strings.HasPrefix(slash, "../platform/home/") {
+			return nil // implementation or the sole composition root
 		}
 		for _, imp := range importsOf(t, fset, path) {
 			if imp == resourcespecPkg || strings.HasPrefix(imp, resourcespecPkg+"/") {
 				violations = append(violations, fmt.Sprintf(
-					"%s imports %q — resourcespec is the kernel-only R + driver contract; only the runtime tree may import it (downstream speaks accessdoor.AccessHandle / the welded AccessMinter, never the raw Registry / Driver)", slash, imp))
+					"%s imports %q — resourcespec is confined to Runtime implementations and Platform/Home assembly", slash, imp))
 			}
 		}
 		return nil
@@ -81,7 +80,7 @@ func TestResourcespecImportedOnlyWithinRuntime(t *testing.T) {
 		t.Fatalf("walk: %v", err)
 	}
 	if len(violations) > 0 {
-		t.Fatalf("resourcespec import confinement (runtime tree only):\n  %s", strings.Join(violations, "\n  "))
+		t.Fatalf("resourcespec import confinement:\n  %s", strings.Join(violations, "\n  "))
 	}
 }
 

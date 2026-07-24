@@ -55,18 +55,6 @@ type TimerRow struct {
 	CreatedAt     int64
 }
 
-type FiredCursor struct{ After TimerID }
-
-type FiredPage struct {
-	Rows []TimerRow
-	Next FiredCursor
-	Done bool
-}
-
-type FiredReader interface {
-	ListFired(context.Context, FiredCursor, int) (FiredPage, error)
-}
-
 // TimerStore is the durable pending table. It trusts its caller (the schedule
 // engine welds author; mirrors storespec's store-not-validate discipline) and
 // is CONFINED to the runtime tree: a raw TimerStore reachable downstream would
@@ -95,5 +83,4 @@ type TimerStore interface {
 	// may leave the message committed before this marker is advanced.
 	MarkFired(context.Context, TimerID) error
 	AckOwned(context.Context, TimerID, actor.ActorID) (bool, error)
-	ListFired(context.Context, FiredCursor, int) (FiredPage, error)
 }

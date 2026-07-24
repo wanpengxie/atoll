@@ -40,7 +40,7 @@ type Timer interface {
 }
 
 // systemClock is the production Clock — a thin wrapper over the standard
-// library. OpenScheduler (the runtime-root assembly seam) fills this in
+// library. The Platform composition root fills this in
 // when the downstream-supplied AssemblyDeps.Clock is nil; the engine's own
 // New stays fail-fast on a nil Clock — each layer owns its own default.
 type systemClock struct{}

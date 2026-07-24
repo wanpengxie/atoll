@@ -43,9 +43,9 @@ type View struct {
 func (h *Home) View() View {
 	return View{
 		visible:    h.cs.Visible,
-		authority:  h.cs.Authority,
+		authority:  h.actors,
 		links:      h.links,
-		presence:   presence.NewView(h.presenceFold, h.actors, h.cs.Authority),
+		presence:   presence.NewView(h.presenceFold, h.actors, h.actors),
 		actors:     h.actors,
 		nowMs:      h.nowMs,
 		resources:  h.cs.ResourceRead,
