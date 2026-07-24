@@ -353,5 +353,11 @@ type Config struct {
 	StateResolver    StateResolver
 	ScheduleMinter   ScheduleMinter
 	BuildManagedBody ManagedBodyBuilder
-	Now              func() time.Time
+	// WakeGrace bounds the blind head start DeliverCommitted gives the
+	// asynchronous Host build after EnsureRun reports a real dormant→Run
+	// wake, before its single physical delivery attempt. It is a latency
+	// heuristic, never a readiness contract: no caller may depend on
+	// first-message delivery. Zero selects the 1s default.
+	WakeGrace time.Duration
+	Now       func() time.Time
 }

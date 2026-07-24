@@ -263,6 +263,7 @@ type ChannelActors struct {
 	accessMinter   AccessMinter
 	stateResolver  StateResolver
 	scheduleMinter ScheduleMinter
+	wakeGrace      time.Duration
 
 	serverDesiredCtx    context.Context
 	serverDesiredCancel context.CancelFunc
@@ -324,6 +325,10 @@ func NewChannelActors(cfg Config) (*ChannelActors, error) {
 	if serverDesiredPoll <= 0 {
 		serverDesiredPoll = 100 * time.Millisecond
 	}
+	wakeGrace := cfg.WakeGrace
+	if wakeGrace <= 0 {
+		wakeGrace = time.Second
+	}
 	actors := &ChannelActors{
 		store:               cfg.Store,
 		effects:             effects,
@@ -337,6 +342,7 @@ func NewChannelActors(cfg Config) (*ChannelActors, error) {
 		accessMinter:        cfg.AccessMinter,
 		stateResolver:       cfg.StateResolver,
 		scheduleMinter:      cfg.ScheduleMinter,
+		wakeGrace:           wakeGrace,
 		serverDesiredCtx:    serverDesiredCtx,
 		serverDesiredCancel: serverDesiredCancel,
 		serverDesiredWake:   make(chan struct{}, 1),
@@ -497,10 +503,15 @@ func (a *ChannelActors) Deliver(id actor.ActorID, env *message.Envelope) error {
 	return a.host.Deliver(id, env)
 }
 
-// DeliverCommitted activates a dormant receiver and waits only until its first
-// physical admission can be attempted. It never retries after Deliver succeeds
-// or returns a mailbox/I/O outcome, and it never scans or replays prior
-// requests. The wait bridges Controller publication to asynchronous Host build.
+// DeliverCommitted is the single compound delivery entry: it routes
+// SystemActorID to the kernel, ensures the value ledger says Run, and makes
+// exactly one physical delivery attempt. When EnsureRun reports a real
+// dormant→Run wake it first sleeps one bounded blind grace (wakeGrace) so the
+// asynchronous Host build gets a head start — without reading actual state or
+// claiming readiness (this is NOT the retired EnsureLive illusion). It never
+// retries, never waits for NotHosted to clear, and never replays prior rows:
+// an undeliverable envelope is the caller's deadline/resend concern, and the
+// pump cursor must advance regardless of the outcome.
 func (a *ChannelActors) DeliverCommitted(
 	ctx context.Context,
 	id actor.ActorID,
@@ -509,25 +520,18 @@ func (a *ChannelActors) DeliverCommitted(
 	if id == actor.SystemActorID {
 		return a.kernel.deliver(env)
 	}
-	if _, err := a.EnsureRun(id); err != nil {
+	changed, err := a.EnsureRun(id)
+	if err != nil {
 		return err
 	}
-	ticker := time.NewTicker(2 * time.Millisecond)
-	defer ticker.Stop()
-	for {
-		err := a.host.Deliver(id, env)
-		if !errors.Is(err, actorhost.ErrNotHosted) {
-			return err
-		}
-		if activeErr := a.controller.active(id); activeErr != nil {
-			return activeErr
-		}
+	if changed {
 		select {
+		case <-time.After(a.wakeGrace):
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-ticker.C:
 		}
 	}
+	return a.host.Deliver(id, env)
 }
 
 func (a *ChannelActors) CancelRequest(id actor.ActorID, requestID message.ID) {
