@@ -190,7 +190,7 @@ func TestChannelOwnerProductionChokepointsAreClosed(t *testing.T) {
 }
 
 func TestActorModelDataFlowChokepoints(t *testing.T) {
-	var mintState, fireAndMark, ackTimer []string
+	var mintState, fireAndMark, markFired, ackTimer []string
 	walkProductionGo(t, func(path string, file *ast.File, fset *token.FileSet) {
 		ast.Inspect(file, func(node ast.Node) bool {
 			call, ok := node.(*ast.CallExpr)
@@ -211,8 +211,10 @@ func TestActorModelDataFlowChokepoints(t *testing.T) {
 					mintState = append(mintState, at)
 				}
 			case "FireAndMark":
-				if !(path == "../runtime/schedule/firepen.go" && enclosingFunc(file, call.Pos()) == "Fire") {
-					fireAndMark = append(fireAndMark, at)
+				fireAndMark = append(fireAndMark, at)
+			case "MarkFired":
+				if !(path == "../runtime/schedule/engine.go" && enclosingFunc(file, call.Pos()) == "fireDue") {
+					markFired = append(markFired, at)
 				}
 			case "AckTimer":
 				ackTimer = append(ackTimer, at)
@@ -220,9 +222,9 @@ func TestActorModelDataFlowChokepoints(t *testing.T) {
 			return true
 		})
 	})
-	if len(mintState)+len(fireAndMark)+len(ackTimer) != 0 {
-		t.Fatalf("actor-model data-flow drift: MintState=%v FireAndMark=%v AckTimer=%v",
-			mintState, fireAndMark, ackTimer)
+	if len(mintState)+len(fireAndMark)+len(markFired)+len(ackTimer) != 0 {
+		t.Fatalf("actor-model data-flow drift: MintState=%v FireAndMark=%v MarkFired=%v AckTimer=%v",
+			mintState, fireAndMark, markFired, ackTimer)
 	}
 }
 

@@ -124,10 +124,6 @@ type FireSink interface {
 	Append(ctx context.Context, author actor.ActorID, env *message.Envelope) error
 }
 
-type TimerFirePen interface {
-	Fire(context.Context, timerspec.TimerRow, *message.Envelope) (timerspec.FireOutcome, error)
-}
-
 // ErrDuplicateFire is the crash-replay idempotency signal: this timer's fire
 // message is ALREADY in truth (a messages.id UNIQUE hit on the deterministic
 // fire-message id). The engine treats it exactly like a successful append —
@@ -161,11 +157,10 @@ func (e FireRejected) Error() string {
 // the runtime-root assembly seam, is the ONLY place that defaults a nil Clock
 // to the real one).
 type Deps struct {
-	Store       timerspec.TimerStore
-	Fire        FireSink
-	DurableFire TimerFirePen
-	Clock       Clock
-	Authority   storespec.ActorAuthority
+	Store     timerspec.TimerStore
+	Fire      FireSink
+	Clock     Clock
+	Authority storespec.ActorAuthority
 	// Logger receives obs-plane diagnostics — most notably the loud disposal
 	// log for a poison row/entry. nil → discard (same shape as
 	// harness.Deps.Logger — the substrate does not invent its own logging

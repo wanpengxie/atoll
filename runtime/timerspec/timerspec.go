@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 var (
@@ -56,29 +55,12 @@ type TimerRow struct {
 	CreatedAt     int64
 }
 
-type FireOutcome uint8
-
-const (
-	FireCommitted FireOutcome = iota + 1
-	FireAlreadyFired
-	FireCancelled
-)
-
 type FiredCursor struct{ After TimerID }
 
 type FiredPage struct {
 	Rows []TimerRow
 	Next FiredCursor
 	Done bool
-}
-
-// TimerFireStore is the narrow transactional fire/Ack/read face. The schedule
-// engine receives it through its TimerFirePen assembly; ordinary handles never
-// receive FireAndMark.
-type TimerFireStore interface {
-	FireAndMark(context.Context, TimerID, *message.Envelope) (FireOutcome, error)
-	AckOwned(context.Context, TimerID, actor.ActorID) (bool, error)
-	ListFired(context.Context, FiredCursor, int) (FiredPage, error)
 }
 
 type FiredReader interface {
@@ -107,7 +89,11 @@ type TimerStore interface {
 	// handle can only ever cancel its own timers; a foreign/absent id is the
 	// same existed=false, no existence leak).
 	CancelOwned(ctx context.Context, id TimerID, author actor.ActorID) (existed bool, err error)
-	FireAndMark(context.Context, TimerID, *message.Envelope) (FireOutcome, error)
+	// MarkFired closes one durable fire after the deterministic fire message
+	// has passed the ordinary Harness path. Missing/already-fired rows are
+	// idempotent success: Cancel may win after the due snapshot, and a crash
+	// may leave the message committed before this marker is advanced.
+	MarkFired(context.Context, TimerID) error
 	AckOwned(context.Context, TimerID, actor.ActorID) (bool, error)
 	ListFired(context.Context, FiredCursor, int) (FiredPage, error)
 }

@@ -111,8 +111,6 @@ func New(deps Deps) (Minter, *Engine, error) {
 		return nil, nil, errors.New("schedule: Deps.Store required")
 	case deps.Fire == nil:
 		return nil, nil, errors.New("schedule: Deps.Fire required")
-	case deps.DurableFire == nil:
-		return nil, nil, errors.New("schedule: Deps.DurableFire required")
 	case deps.Clock == nil:
 		return nil, nil, errors.New("schedule: Deps.Clock required")
 	case deps.Authority == nil:
@@ -485,23 +483,22 @@ func (e *Engine) fireDue(ctx context.Context, now int64, nowTime time.Time) bool
 	}
 	e.noteStoreRecovered(time.Now(), "due_query_failed")
 	for _, row := range rows {
-		// Durable truth wins before every accelerator. Once Fire commits the
-		// pending→fired transition, Home's level-triggered fired sweep owns
-		// delivery and wake debt; revival can only reduce latency and can never
-		// gate or roll back the committed fire.
 		env := buildFireEnvelope(row.ID, row.AuthorID, row.Type, row.Payload, message.ID(row.CorrelationID), nowTime)
 		callCtx, cancel := context.WithTimeout(ctx, perFireTimeout)
-		outcome, err := e.deps.DurableFire.Fire(callCtx, row, env)
+		err := e.deps.Fire.Append(callCtx, row.AuthorID, env)
 		cancel()
 		switch {
-		case err == nil && (outcome == timerspec.FireCommitted || outcome == timerspec.FireAlreadyFired):
+		case err == nil || errors.Is(err, ErrDuplicateFire):
+			if markErr := e.deps.Store.MarkFired(ctx, row.ID); markErr != nil {
+				// The deterministic message already exists. Leave the pending
+				// row so the next pass observes the duplicate and retries only
+				// this control-state marker.
+				e.noteTransient("identity_mark_fired", string(row.ID), row.ID, row.AuthorID, markErr)
+				continue
+			}
 			progress = true
 			e.clearTransient("identity_fire", string(row.ID))
-		case err == nil && outcome == timerspec.FireCancelled:
-			// Cancel won the store CAS. No fired truth exists, therefore no
-			// wake debt, revive, or poke is authorized.
-			progress = true
-			e.clearTransient("identity_fire", string(row.ID))
+			e.clearTransient("identity_mark_fired", string(row.ID))
 		case isFireRejected(err):
 			reason, detail := rejectionDetails(err)
 			if _, evicted, derr := e.deps.Store.MoveToDead(ctx, row.ID, timerspec.DeathFireRejected, reason, detail, now); derr != nil {

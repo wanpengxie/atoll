@@ -77,11 +77,10 @@ func TestAuthorityScheduleAdmitsOnceAndLetsAcceptedScheduleFinish(t *testing.T) 
 		allowScheduleAuthority: allowScheduleAuthority{},
 	}
 	minted, _, err := New(Deps{
-		Store:       store,
-		Fire:        sink,
-		DurableFire: fakeDurableFire{store: store, sink: sink},
-		Clock:       clock,
-		Authority:   backing,
+		Store:     store,
+		Fire:      sink,
+		Clock:     clock,
+		Authority: backing,
 	})
 	if err != nil {
 		t.Fatal(err)

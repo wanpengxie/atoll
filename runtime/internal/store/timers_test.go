@@ -73,7 +73,7 @@ func timerFireEnvelope(id timerspec.TimerID, author actor.ActorID) *message.Enve
 	}
 }
 
-func TestTimerFireAndMarkCancelOrdersAndAck(t *testing.T) {
+func TestTimerAppendThenMarkCancelOrdersAndAck(t *testing.T) {
 	ctx := context.Background()
 	t.Run("cancel wins", func(t *testing.T) {
 		f := openTimersFixture(t)
@@ -82,9 +82,8 @@ func TestTimerFireAndMarkCancelOrdersAndAck(t *testing.T) {
 		if existed, err := f.timers.CancelOwned(ctx, row.ID, row.AuthorID); err != nil || !existed {
 			t.Fatalf("CancelOwned = (%v,%v)", existed, err)
 		}
-		outcome, err := f.timers.FireAndMark(ctx, row.ID, timerFireEnvelope(row.ID, row.AuthorID))
-		if err != nil || outcome != timerspec.FireCancelled {
-			t.Fatalf("FireAndMark = (%v,%v), want Cancelled", outcome, err)
+		if err := f.timers.MarkFired(ctx, row.ID); err != nil {
+			t.Fatalf("MarkFired after cancel = %v", err)
 		}
 		var count int
 		if err := f.timers.db.QueryRow(`SELECT COUNT(*) FROM messages WHERE id=?`, "timer:"+string(row.ID)).Scan(&count); err != nil || count != 0 {
@@ -97,16 +96,25 @@ func TestTimerFireAndMarkCancelOrdersAndAck(t *testing.T) {
 		row := timerspec.TimerRow{ID: "fire-first", AuthorID: "actor:a", FireAt: 2, Type: "test.timer", CreatedAt: 1}
 		mustInsertTimer(t, f.timers, row)
 		env := timerFireEnvelope(row.ID, row.AuthorID)
-		outcome, err := f.timers.FireAndMark(ctx, row.ID, env)
-		if err != nil || outcome != timerspec.FireCommitted {
-			t.Fatalf("first FireAndMark = (%v,%v)", outcome, err)
+		tx, err := f.timers.db.BeginTx(ctx, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := appendTx(ctx, tx, env, false); err != nil {
+			_ = tx.Rollback()
+			t.Fatalf("append fire message: %v", err)
+		}
+		if err := tx.Commit(); err != nil {
+			t.Fatalf("commit fire message: %v", err)
+		}
+		if err := f.timers.MarkFired(ctx, row.ID); err != nil {
+			t.Fatalf("first MarkFired = %v", err)
 		}
 		if existed, err := f.timers.CancelOwned(ctx, row.ID, row.AuthorID); err != nil || existed {
 			t.Fatalf("Cancel after fire = (%v,%v)", existed, err)
 		}
-		outcome, err = f.timers.FireAndMark(ctx, row.ID, env)
-		if err != nil || outcome != timerspec.FireAlreadyFired {
-			t.Fatalf("retry FireAndMark = (%v,%v)", outcome, err)
+		if err := f.timers.MarkFired(ctx, row.ID); err != nil {
+			t.Fatalf("retry MarkFired = %v", err)
 		}
 		if due, err := f.timers.Due(ctx, 100); err != nil || len(due) != 0 {
 			t.Fatalf("Due includes fired row: %+v err=%v", due, err)

@@ -2,7 +2,6 @@ package schedule
 
 import (
 	"context"
-	"errors"
 	"sort"
 	"sync"
 	"testing"
@@ -47,6 +46,7 @@ type fakeStore struct {
 	dueErr    error
 	nextErr   error
 	cancelErr error
+	markErr   error
 }
 
 func newFakeStore() *fakeStore {
@@ -125,19 +125,22 @@ func (s *fakeStore) CancelOwned(ctx context.Context, id timerspec.TimerID, autho
 	return true, nil
 }
 
-func (s *fakeStore) FireAndMark(_ context.Context, id timerspec.TimerID, _ *message.Envelope) (timerspec.FireOutcome, error) {
+func (s *fakeStore) MarkFired(_ context.Context, id timerspec.TimerID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.markErr != nil {
+		return s.markErr
+	}
 	if _, ok := s.fired[id]; ok {
-		return timerspec.FireAlreadyFired, nil
+		return nil
 	}
 	row, ok := s.rows[id]
 	if !ok {
-		return timerspec.FireCancelled, nil
+		return nil
 	}
 	delete(s.rows, id)
 	s.fired[id] = row
-	return timerspec.FireCommitted, nil
+	return nil
 }
 
 func (s *fakeStore) AckOwned(_ context.Context, id timerspec.TimerID, author actor.ActorID) (bool, error) {
@@ -216,20 +219,6 @@ func (f *fakeFireSink) lastCall() fireCall {
 }
 
 var _ FireSink = (*fakeFireSink)(nil)
-
-type fakeDurableFire struct {
-	store timerspec.TimerStore
-	sink  FireSink
-}
-
-func (f fakeDurableFire) Fire(ctx context.Context, row timerspec.TimerRow, env *message.Envelope) (timerspec.FireOutcome, error) {
-	if err := f.sink.Append(ctx, row.AuthorID, env); err != nil {
-		if !errors.Is(err, ErrDuplicateFire) {
-			return 0, err
-		}
-	}
-	return f.store.FireAndMark(ctx, row.ID, env)
-}
 
 // ---------------------------------------------------------------------
 // fakeClock: a deterministic Clock — Now() reads a manually-advanced instant,

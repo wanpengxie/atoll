@@ -15,8 +15,7 @@ import (
 func testDeps(store timerspec.TimerStore, sink FireSink, clock Clock) Deps {
 	return Deps{
 		Store: store, Fire: sink,
-		DurableFire: fakeDurableFire{store: store, sink: sink},
-		Clock:       clock, Authority: allowScheduleAuthority{},
+		Clock: clock, Authority: allowScheduleAuthority{},
 	}
 }
 
@@ -50,7 +49,6 @@ func TestNewFailFast(t *testing.T) {
 	}{
 		{"store", func(d *Deps) { d.Store = nil }},
 		{"fire", func(d *Deps) { d.Fire = nil }},
-		{"durable fire", func(d *Deps) { d.DurableFire = nil }},
 		{"clock", func(d *Deps) { d.Clock = nil }},
 		{"authority", func(d *Deps) { d.Authority = nil }},
 	}
@@ -71,8 +69,7 @@ func TestScheduleValidationDoesNotCoupleTimerHomeToActorKind(t *testing.T) {
 	clock := newFakeClock(time.UnixMilli(1_000))
 	minter, engine, err := New(Deps{
 		Store: store, Fire: sink,
-		DurableFire: fakeDurableFire{store: store, sink: sink},
-		Clock:       clock, Authority: allowScheduleAuthority{},
+		Clock: clock, Authority: allowScheduleAuthority{},
 	})
 	if err != nil {
 		t.Fatal(err)

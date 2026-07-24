@@ -86,11 +86,10 @@ func TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	minter, engine, err := New(Deps{
-		Store:       wrapped,
-		Fire:        sink,
-		DurableFire: NewTimerFirePen(wrapped, allowScheduleAuthority{}, channel.ID("timer-ack-real-store")),
-		Clock:       clock,
-		Authority:   allowScheduleAuthority{},
+		Store:     wrapped,
+		Fire:      sink,
+		Clock:     clock,
+		Authority: allowScheduleAuthority{},
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)

@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
@@ -192,46 +191,20 @@ func (s *timerStore) CancelOwned(ctx context.Context, id timerspec.TimerID, auth
 	return n > 0, nil
 }
 
-// FireAndMark commits the fire truth and pending→fired transition together.
-// A missing row means Cancel won; an already-fired row is the idempotent retry
-// hit after a lost commit response.
-func (s *timerStore) FireAndMark(ctx context.Context, id timerspec.TimerID, env *message.Envelope) (timerspec.FireOutcome, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
+// MarkFired advances only timer control state. Message truth has already
+// passed the ordinary Harness and committed under its deterministic ID.
+func (s *timerStore) MarkFired(ctx context.Context, id timerspec.TimerID) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE timers SET state='fired' WHERE timer_id=? AND state='pending'`,
+		string(id),
+	)
 	if err != nil {
-		return 0, err
+		return fmt.Errorf("store: timer mark fired %q: %w", id, err)
 	}
-	defer tx.Rollback()
-	var state string
-	err = tx.QueryRowContext(ctx, `SELECT state FROM timers WHERE timer_id=?`, string(id)).Scan(&state)
-	if err == sql.ErrNoRows {
-		return timerspec.FireCancelled, nil
+	if _, err := res.RowsAffected(); err != nil {
+		return fmt.Errorf("store: timer mark fired rows %q: %w", id, err)
 	}
-	if err != nil {
-		return 0, fmt.Errorf("store: timer fire lookup %q: %w", id, err)
-	}
-	if state == "fired" {
-		return timerspec.FireAlreadyFired, nil
-	}
-	if state != "pending" {
-		return 0, fmt.Errorf("store: timer %q invalid state %q", id, state)
-	}
-	if _, err := appendTx(ctx, tx, env, false); err != nil {
-		return 0, fmt.Errorf("store: timer fire append %q: %w", id, err)
-	}
-	res, err := tx.ExecContext(ctx, `UPDATE timers SET state='fired' WHERE timer_id=? AND state='pending'`, string(id))
-	if err != nil {
-		return 0, fmt.Errorf("store: timer fire mark %q: %w", id, err)
-	}
-	if n, err := res.RowsAffected(); err != nil || n != 1 {
-		return 0, fmt.Errorf("store: timer fire mark %q affected %d: %w", id, n, err)
-	}
-	if err := tx.Commit(); err != nil {
-		return 0, err
-	}
-	if s.onCommit != nil {
-		s.onCommit()
-	}
-	return timerspec.FireCommitted, nil
+	return nil
 }
 
 func (s *timerStore) AckOwned(ctx context.Context, id timerspec.TimerID, author actor.ActorID) (bool, error) {
@@ -303,4 +276,3 @@ func clearTimersTx(ctx context.Context, tx *sql.Tx, author actor.ActorID) error 
 }
 
 var _ timerspec.TimerStore = (*timerStore)(nil)
-var _ timerspec.TimerFireStore = (*timerStore)(nil)
