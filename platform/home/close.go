@@ -12,19 +12,29 @@ func (h *Home) closeInternal(reason string) error {
 }
 
 func (h *Home) closeInternalWithin(reason string, timeout time.Duration) error {
+	h.closed.Store(true)
+	joinCtx, joinCancel := context.WithTimeout(context.Background(), timeout)
+	defer joinCancel()
+
+	// This is a safety barrier, not an advisory cleanup step. A timeout only
+	// means the caller stopped waiting; admitted commands still own Controller
+	// and Store until commandOwner reaches its permanent drained level. Do not
+	// consume closeOnce or tear down any dependency before that happens.
+	if h.actors != nil {
+		if err := h.actors.Quiesce(joinCtx); err != nil {
+			return err
+		}
+	}
+
 	h.closeOnce.Do(func() {
 		defer close(h.closeDone)
-		h.closed.Store(true)
+		// Draining commands and retiring physical resources are separate
+		// barriers. A command that used most of the join budget must not hand an
+		// already-expired context to Host/SystemKernel shutdown.
 		ctx, cancel := context.WithTimeout(context.Background(), timeout)
 		defer cancel()
 		var faults []error
 
-		// Command admission closes first. Every command admitted before this
-		// point retains ownership through Store commit and Controller
-		// publication before any Host is sealed.
-		if h.actors != nil {
-			faults = appendIfError(faults, h.actors.Quiesce(ctx))
-		}
 		if h.reconcileStop != nil {
 			h.reconcileStop()
 			if h.reconcileDone != nil {

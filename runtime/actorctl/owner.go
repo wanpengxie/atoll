@@ -6,9 +6,10 @@ import (
 )
 
 type commandOwner struct {
-	mu     sync.Mutex
-	sealed bool
-	wg     sync.WaitGroup
+	mu      sync.Mutex
+	sealed  bool
+	wg      sync.WaitGroup
+	drained chan struct{}
 }
 
 func (o *commandOwner) begin() (func(), error) {
@@ -25,17 +26,35 @@ func (o *commandOwner) begin() (func(), error) {
 
 func (o *commandOwner) quiesce(ctx context.Context) error {
 	o.mu.Lock()
-	o.sealed = true
+	if !o.sealed {
+		o.sealed = true
+		o.drained = make(chan struct{})
+		drained := o.drained
+		go func() {
+			o.wg.Wait()
+			close(drained)
+		}()
+	}
+	drained := o.drained
 	o.mu.Unlock()
-	done := make(chan struct{})
-	go func() {
-		o.wg.Wait()
-		close(done)
-	}()
+
+	// Once drained is true it remains true. Prefer that level over an already
+	// expired caller context so repeated Close/Quiesce calls cannot turn a
+	// completed owner join back into a timeout.
 	select {
-	case <-done:
+	case <-drained:
+		return nil
+	default:
+	}
+	select {
+	case <-drained:
 		return nil
 	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case <-drained:
+			return nil
+		default:
+			return ctx.Err()
+		}
 	}
 }

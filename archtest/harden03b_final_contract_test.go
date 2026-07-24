@@ -259,6 +259,31 @@ func TestHarden03BControllerContainerAndGateOrderAreSingular(t *testing.T) {
 	}
 }
 
+func TestHarden03BHomeCloseCannotCrossCommandOwnerBarrier(t *testing.T) {
+	body, err := os.ReadFile("../platform/home/close.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(body)
+	barrier := strings.Index(source, "if err := h.actors.Quiesce(joinCtx); err != nil {")
+	teardown := strings.Index(source, "h.closeOnce.Do(func()")
+	storeClose := strings.Index(source, "if h.cs != nil && !h.storeCloseDone.Load()")
+	if barrier < 0 || teardown < 0 || storeClose < 0 ||
+		!(barrier < teardown && teardown < storeClose) {
+		t.Fatalf(
+			"Home close order must be owner barrier → one-shot teardown → Store close; positions=%d/%d/%d",
+			barrier, teardown, storeClose,
+		)
+	}
+	barrierEnd := strings.Index(source[barrier:], "\n\t}")
+	if barrierEnd < 0 || !strings.Contains(source[barrier:barrier+barrierEnd], "return err") {
+		t.Fatal("Home treats command-owner timeout as advisory instead of stopping teardown")
+	}
+	if strings.Contains(source, "appendIfError(faults, h.actors.Quiesce(ctx))") {
+		t.Fatal("Home may aggregate a failed command-owner barrier and continue teardown")
+	}
+}
+
 func TestHarden03BPhysicalOwnersUseExactObjectIdentity(t *testing.T) {
 	outbound, err := os.ReadFile("../platform/compute/outbound.go")
 	if err != nil {

@@ -545,8 +545,8 @@ func (h *ChannelHost) Close() error {
 		failed := false
 		if !skip {
 			// Only a clean shutdown marks the entry closed: a failed Home close
-			// stays honestly un-closed (Home's own store-close retry is the
-			// recovery path; never fake the terminal state on an error).
+			// stays honestly un-closed (Home's owner-join/teardown/store close
+			// sequence is retryable; never fake terminal state on an error).
 			if err := home.Shutdown(entry.home); err != nil {
 				failed = true
 				errs = append(errs, fmt.Errorf("channelhost: close %s: %w", id, err))
