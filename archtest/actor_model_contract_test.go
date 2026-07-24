@@ -83,8 +83,13 @@ func TestActorModelBundleCallsitesAreClosed(t *testing.T) {
 				continue
 			}
 			key := path + ":" + fn.Name.Name
-			rawCommitAllowed := path == "../runtime/accessdoor/overlay.go" &&
-				recvBaseTypeName(fn) == "door" && fn.Name.Name == "commitReservationLocked"
+			rawCommitAllowed :=
+				(path == "../runtime/accessdoor/completion.go" &&
+					recvBaseTypeName(fn) == "resourceCompletion" &&
+					fn.Name.Name == "CommitReservation") ||
+					(path == "../runtime/accessdoor/query.go" &&
+						recvBaseTypeName(fn) == "door" &&
+						fn.Name.Name == "create")
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
 				call, ok := node.(*ast.CallExpr)
 				if !ok {

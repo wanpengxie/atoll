@@ -23,7 +23,6 @@ func TestPublicSetArmDayOneMatrix(t *testing.T) {
 		Registry:  cs.Resources,
 		Drivers:   DriverTable{resourcespec.KindKV: cs.KVDriver},
 		Authority: decayMembership{registry: cs.Declared},
-		Overlay:   &fakeGrantOverlay{},
 		State:     cs.State,
 	})
 	if err != nil {

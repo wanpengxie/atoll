@@ -56,12 +56,6 @@ func (d *door) effectiveOps(ctx context.Context, caller actor.ActorID, id resour
 			return nil, err
 		}
 		if !allowed {
-			allowed, err = d.deps.Overlay.ActorAllows(ctx, caller, id, op)
-			if err != nil {
-				return nil, err
-			}
-		}
-		if !allowed {
 			mAllow, err := d.deps.Registry.MembersAllow(ctx, id, op)
 			if err != nil {
 				return nil, err

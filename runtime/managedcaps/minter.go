@@ -14,7 +14,6 @@ import (
 	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 var ErrInvalidInput = errors.New("managedcaps: invalid mint input")
@@ -45,7 +44,7 @@ type authorityAccessMinter interface {
 }
 
 type authorityStateResolver interface {
-	ResolveAuthority(capauth.Authority, storespec.ActorWorld) (accessdoor.AccessHandle, error)
+	ResolveAuthority(context.Context, capauth.Authority) (accessdoor.AccessHandle, error)
 }
 
 type authorityScheduleMinter interface {
@@ -83,14 +82,14 @@ func New(
 
 // Mint is the only outward managed bundle-mint operation.
 func (m *Minter) Mint(
-	_ context.Context,
+	ctx context.Context,
 	prepared actorctl.PreparedRun,
 ) (actorcaps.Caps, error) {
 	if m == nil || prepared.ActorID() == "" || prepared.AttemptKey() == "" {
 		return actorcaps.Caps{}, ErrInvalidInput
 	}
 	def := prepared.Definition()
-	state, err := m.state.ResolveAuthority(prepared.Identity(), prepared.World())
+	state, err := m.state.ResolveAuthority(ctx, prepared.Identity())
 	if err != nil {
 		return actorcaps.Caps{}, err
 	}

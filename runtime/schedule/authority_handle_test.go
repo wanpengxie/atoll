@@ -74,7 +74,7 @@ func TestAuthorityScheduleAdmitsOnceAndLetsAcceptedScheduleFinish(t *testing.T) 
 		release: make(chan struct{}),
 	}
 	backing := &scheduleBackingAuthority{
-		allowScheduleAuthority: allowScheduleAuthority{world: storespec.WorldDurable},
+		allowScheduleAuthority: allowScheduleAuthority{},
 	}
 	minted, _, err := New(Deps{
 		Store:       store,

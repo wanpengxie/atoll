@@ -14,7 +14,6 @@ import (
 type Transition[T any] struct {
 	Result  T
 	Wake    []ActorDefinition
-	Born    []actor.ActorID
 	Ended   []actor.ActorID
 	Effects storespec.PostCommitEffects
 }
@@ -83,7 +82,6 @@ func (c *Controller) admit(
 	}
 	transition := Transition[AdmitResult]{Result: result, Effects: commit.Effects}
 	if changed {
-		transition.Born = []actor.ActorID{id}
 		transition.Wake = []ActorDefinition{definition}
 	}
 	return transition, nil
@@ -122,7 +120,6 @@ func (c *Controller) introduce(
 	}
 	transition := Transition[IntroduceResult]{Result: result, Effects: commit.Effects}
 	if changed {
-		transition.Born = []actor.ActorID{id}
 		transition.Wake = []ActorDefinition{definition}
 	}
 	return transition, nil
@@ -192,7 +189,6 @@ func (c *Controller) fork(
 		Result: ForkResult{ChildActorID: child}, Effects: committed.Effects,
 	}
 	if changed {
-		transition.Born = []actor.ActorID{child}
 		transition.Wake = []ActorDefinition{definition}
 	}
 	return transition, nil
@@ -339,7 +335,6 @@ func (c *Controller) End(
 	return Transition[EndResult]{
 		Result:  EndResult{Ended: transition.Result.Ended},
 		Wake:    transition.Wake,
-		Born:    transition.Born,
 		Ended:   transition.Ended,
 		Effects: transition.Effects,
 	}, err
@@ -353,7 +348,6 @@ func (c *Controller) Remove(
 	return Transition[RemoveResult]{
 		Result:  transition.Result.Remove,
 		Wake:    transition.Wake,
-		Born:    transition.Born,
 		Ended:   transition.Ended,
 		Effects: transition.Effects,
 	}, err
@@ -370,7 +364,6 @@ func (c *Controller) DetachDaemon(
 	return Transition[DetachDaemonResult]{
 		Result:  transition.Result.Detach,
 		Wake:    transition.Wake,
-		Born:    transition.Born,
 		Ended:   transition.Ended,
 		Effects: transition.Effects,
 	}, err

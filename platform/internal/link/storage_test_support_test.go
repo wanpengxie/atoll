@@ -95,14 +95,18 @@ func (testAccessMinter) MintStateAdmitted(storespec.IdentityAdmission) accessdoo
 
 type testStateResolver struct{}
 
-func (testStateResolver) AdmitRun(actor.ActorID) error { return nil }
-func (testStateResolver) Resolve(context.Context, storespec.AuthorStamp) (accessdoor.AccessHandle, error) {
-	return testStateHandle{}, nil
+type testStateBinding struct{}
+
+func (testStateBinding) MintAdmitted(storespec.IdentityAdmission) accessdoor.AccessHandle {
+	return testStateHandle{}
 }
-func (testStateResolver) ResolveAdmitted(storespec.IdentityAdmission) (accessdoor.AccessHandle, error) {
-	return testStateHandle{}, nil
+
+func (testStateResolver) ResolvePhysical(
+	context.Context,
+	actor.ActorID,
+) (accessdoor.AdmittedStateBinding, error) {
+	return testStateBinding{}, nil
 }
-func (testStateResolver) EndBatch([]actor.ActorID) {}
 
 type testScheduleHandle struct{}
 
@@ -129,9 +133,6 @@ func (testAuthority) LookupActive(_ context.Context, id actor.ActorID) (storespe
 func (testAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, nil
 }
-func (testAuthority) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
-	return storespec.WorldDurable, true, nil
-}
 func (testAuthority) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	return storespec.AuthorOK, nil
 }
@@ -144,7 +145,6 @@ func (testAuthority) AdmitIdentity(
 			ID: id, Kind: actor.KindAgent, CurrentDeclVersion: 1,
 			Placement: storespec.NewServerPlacement(),
 		},
-		World: storespec.WorldDurable,
 	}, true, nil
 }
 

@@ -18,7 +18,6 @@ func TestNewFailFast(t *testing.T) {
 		Registry:  &fakeRegistry{},
 		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}},
 		Authority: &fakeMembership{},
-		Overlay:   &fakeGrantOverlay{},
 		State:     &fakeStateStore{},
 	}
 
@@ -72,7 +71,7 @@ func TestNewFailFast(t *testing.T) {
 func TestAccessInactiveAuthorGate(t *testing.T) {
 	reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
 	authority := &fakeMembership{isMember: true, authorVerdict: storespec.AuthorNotMember}
-	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}}, Authority: authority, Overlay: &fakeGrantOverlay{}, State: &fakeStateStore{}})
+	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}}, Authority: authority, State: &fakeStateStore{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -88,7 +87,7 @@ func TestMintedHandleRunsFullPath(t *testing.T) {
 	reg := &fakeRegistry{}
 	drv := &fakeDriver{}
 	mem := &fakeMembership{isMember: true}
-	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: drv}, Authority: mem, Overlay: &fakeGrantOverlay{}, State: &fakeStateStore{}})
+	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: drv}, Authority: mem, State: &fakeStateStore{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}

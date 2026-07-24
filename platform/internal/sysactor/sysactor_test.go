@@ -35,9 +35,6 @@ func (f fakeRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, 
 	}
 	return rows, nil
 }
-func (f fakeRegistry) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
-	return storespec.WorldDurable, true, nil
-}
 func (f fakeRegistry) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	_, ok, err := f.LookupActive(ctx, stamp.ID)
 	if !ok {
@@ -224,9 +221,6 @@ func (a sponsorAuthority) LookupActive(_ context.Context, id actor.ActorID) (sto
 }
 func (a sponsorAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return append([]storespec.ActorControlRow(nil), a.rows...), nil
-}
-func (a sponsorAuthority) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
-	return storespec.WorldRun, true, nil
 }
 func (a sponsorAuthority) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	return storespec.AuthorOK, nil

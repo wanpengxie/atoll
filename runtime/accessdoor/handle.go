@@ -333,7 +333,7 @@ func New(deps Deps) (AccessMinter, error) {
 // NewAssembly constructs the caller-facing minter and the asynchronous
 // completion face over the same door and therefore the same resource gate.
 func NewAssembly(deps Deps) (AccessMinter, ResourceCompletion, error) {
-	if deps.Registry == nil || deps.Drivers == nil || deps.Authority == nil || deps.Overlay == nil || deps.State == nil {
+	if deps.Registry == nil || deps.Drivers == nil || deps.Authority == nil || deps.State == nil {
 		return nil, nil, errors.New("accessdoor: Deps incomplete")
 	}
 	if deps.Drivers[resourcespec.KindKV] == nil {

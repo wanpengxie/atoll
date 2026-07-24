@@ -133,30 +133,6 @@ func TestDoorList(t *testing.T) {
 		}
 	})
 
-	t.Run("overlay-only grants are projected — List matches Invoke/Stat authorization", func(t *testing.T) {
-		// The caller has ZERO durable grants on the row; its rights live only
-		// in the session overlay (a forked grantee / forked-creator
-		// convenience grant). List must surface the row, or an overlay-granted
-		// caller cannot discover a resource it can access.
-		reg := &fakeRegistry{
-			listRows: []resourcespec.ResourceRow{
-				rowWithActorGrant("r1", resourcespec.KindKV, 1, "someone-else", access.OpRead),
-			},
-		}
-		d := newDoor(reg, &fakeDriver{}, &fakeMembership{})
-		d.deps.Overlay = &fakeGrantOverlay{allows: true}
-		page, err := d.list(context.Background(), "a", ListQuery{})
-		if err != nil {
-			t.Fatalf("unexpected Go error: %v", err)
-		}
-		if len(page.Entries) != 1 || page.Entries[0].ID != "r1" {
-			t.Fatalf("entries = %+v, want r1 visible via overlay", page.Entries)
-		}
-		if len(page.Entries[0].Ops) == 0 {
-			t.Fatalf("overlay-granted ops missing from projection: %+v", page.Entries[0])
-		}
-	})
-
 	t.Run("empty Entries with non-empty Next when every scanned row is invisible", func(t *testing.T) {
 		reg := &fakeRegistry{
 			listRows: []resourcespec.ResourceRow{

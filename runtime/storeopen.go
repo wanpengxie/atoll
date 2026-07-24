@@ -34,7 +34,6 @@ type ChannelStores struct {
 	ResourceRead    storespec.ResourceReadStore
 	FiredTimers     FiredTimerReader
 	authoritySlot   *actorAuthoritySlot
-	grantOverlay    *accessdoor.GrantOverlaySlot
 
 	// Principals is the principal-axis read face (LookupActivePrincipal — the
 	// admission path's "which active instance embodies this subject" query),
@@ -108,10 +107,6 @@ func (c *ChannelStores) BindActorAuthority(authority storespec.ActorAuthority) e
 	return c.authoritySlot.Bind(authority)
 }
 
-func (c *ChannelStores) BindGrantOverlay(overlay accessdoor.GrantOverlay) error {
-	return c.grantOverlay.Bind(overlay)
-}
-
 // OpenChannelOptions tunes the store open.
 type OpenChannelOptions struct {
 	// ReadOnly / MustExist skip fresh-schema initialization while the
@@ -167,7 +162,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	}
 
 	authoritySlot := newActorAuthoritySlot()
-	grantOverlay := accessdoor.NewGrantOverlaySlot()
 
 	// Assemble the whole plane-2 door here: this is the dependency confluence
 	// point — the R + byte implementations come up from the store, the membership
@@ -178,7 +172,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Registry:       cs.Resources,
 		Drivers:        accessdoor.DriverTable{resourcespec.KindKV: cs.KVDriver},
 		Authority:      authoritySlot,
-		Overlay:        grantOverlay,
 		State:          cs.State,
 		ChannelID:      channelID,
 		StorageMounts:  opts.StorageMounts,
@@ -209,7 +202,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		ResourceRead:    cs.ResourceRead,
 		FiredTimers:     cs.Timers(),
 		authoritySlot:   authoritySlot,
-		grantOverlay:    grantOverlay,
 		Principals:      cs.Principals,
 		Access:          access,
 		Outbox:          resourceOutbox{ResourceOutbox: cs.Resources, completion: completion},

@@ -135,7 +135,7 @@ func TestActorAuthorityManagedBodyUsesOneBundleMint(t *testing.T) {
 	for _, required := range []string{
 		"m.pen.MintAuthority(prepared.Run()",
 		"m.access.MintAuthority(prepared.Run())",
-		"m.state.ResolveAuthority(prepared.Identity(), prepared.World())",
+		"m.state.ResolveAuthority(ctx, prepared.Identity())",
 		"m.schedule.MintAuthority(prepared.Identity())",
 		"attempt:    prepared.AttemptKey()",
 	} {
@@ -242,9 +242,9 @@ func TestActorAuthoritySchedulerHomeIsNotActorIncarnation(t *testing.T) {
 	}
 }
 
-func TestSchedulerDoesNotOwnActorWorldOrRegistryAuthority(t *testing.T) {
+func TestSchedulerDoesNotOwnIdentityHomeOrRegistryAuthority(t *testing.T) {
 	handle := readAuthorityContractFile(t, "../runtime/schedule/handle.go")
-	for _, forbidden := range []string{"WorldOf(", "WorldRun", "WorldDurable"} {
+	for _, forbidden := range []string{"IdentityHome", "HomeOf(", "HomeDurable", "HomeMemory"} {
 		if strings.Contains(handle, forbidden) {
 			t.Errorf("Schedule handle retains actor-world policy %q", forbidden)
 		}
@@ -252,6 +252,96 @@ func TestSchedulerDoesNotOwnActorWorldOrRegistryAuthority(t *testing.T) {
 	store := readAuthorityContractFile(t, "../runtime/internal/store/timers.go")
 	if strings.Contains(store, "actor_registry") {
 		t.Error("TimerStore re-authorizes welded ActorID through actor_registry")
+	}
+}
+
+func TestActorIdentityStorageHomeIsPhysicallyConfined(t *testing.T) {
+	allowedImports := map[string]bool{
+		"../platform/home/actor_store.go":   true,
+		"../runtime/accessdoor/memstate.go": true,
+	}
+	var escapedImports []string
+	walkProductionGo(t, func(path string, file *ast.File, fset *token.FileSet) {
+		for _, spec := range file.Imports {
+			importPath, err := strconv.Unquote(spec.Path.Value)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.HasSuffix(importPath, "/runtime/identitystore") &&
+				!allowedImports[path] {
+				escapedImports = append(
+					escapedImports, fset.Position(spec.Pos()).String(),
+				)
+			}
+		}
+	})
+	if len(escapedImports) != 0 {
+		t.Fatalf("identity storage home escaped physical owners: %v", escapedImports)
+	}
+
+	for _, root := range []string{"../app", "../lib", "../platform", "../runtime"} {
+		paths, err := productionFiles(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range paths {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, forbidden := range []string{
+				"ActorWorld",
+				"WorldRun",
+				"WorldDurable",
+				"GrantOverlay",
+				"BirthChannelOwned",
+				"BirthCreatorIdentity",
+			} {
+				if strings.Contains(string(body), forbidden) {
+					t.Errorf(
+						"%s retains actor-kind/storage-home policy %q",
+						filepath.ToSlash(path), forbidden,
+					)
+				}
+			}
+		}
+	}
+}
+
+func TestForkMemoryPublicationHasNoPostCommitFailureTail(t *testing.T) {
+	store := readAuthorityContractFile(t, "../platform/home/actor_store.go")
+	start := strings.Index(store, "func (s *homeActorStore) CommitFork(")
+	if start < 0 {
+		t.Fatal("homeActorStore.CommitFork missing")
+	}
+	body := store[start:]
+	prepare := strings.Index(body, "identitystore.PrepareMemory(row)")
+	commit := strings.Index(body, "s.cs.SysOps.ForkActor(")
+	publish := strings.Index(body, "s.identities.PublishMemory(prepared)")
+	if prepare < 0 || commit < 0 || publish < 0 ||
+		!(prepare < commit && commit < publish) {
+		t.Fatalf(
+			"Fork memory publication order invalid: prepare=%d commit=%d publish=%d",
+			prepare, commit, publish,
+		)
+	}
+
+	identityStore := readAuthorityContractFile(t, "../runtime/identitystore/store.go")
+	publishStart := strings.Index(
+		identityStore,
+		"func (s *Store) PublishMemory(prepared PreparedMemory) {",
+	)
+	if publishStart < 0 {
+		t.Fatal("IdentityStore.PublishMemory must be an infallible operation")
+	}
+	publishBody := identityStore[publishStart:]
+	if end := strings.Index(publishBody, "\n}"); end >= 0 {
+		publishBody = publishBody[:end]
+	}
+	for _, forbidden := range []string{"context.Context", "error", "s.durable."} {
+		if strings.Contains(publishBody, forbidden) {
+			t.Errorf("IdentityStore.PublishMemory contains failure tail %q", forbidden)
+		}
 	}
 }
 
@@ -263,9 +353,9 @@ func TestActorAuthorityCollaborationIngressUsesOneAdmittedSnapshot(t *testing.T)
 		{
 			path: "../platform/internal/link/accept.go",
 			required: []string{
+				"ResolvePhysical(ctx, id)",
 				"AdmitIdentity(ctx, id)",
 				"MintAdmitted(admission",
-				"ResolveAdmitted(admission)",
 			},
 		},
 		{

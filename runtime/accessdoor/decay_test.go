@@ -66,11 +66,6 @@ func (m decayMembership) ListActive(context.Context) ([]storespec.ActorControlRo
 	return nil, nil
 }
 
-func (m decayMembership) WorldOf(ctx context.Context, id actor.ActorID) (storespec.ActorWorld, bool, error) {
-	_, ok, err := m.LookupActive(ctx, id)
-	return storespec.WorldDurable, ok, err
-}
-
 func (m decayMembership) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	_, ok, err := m.LookupActive(ctx, stamp.ID)
 	if err != nil {
@@ -89,7 +84,6 @@ func newDecayDoor(cs *store.ChannelStores) *door {
 		Registry:  cs.Resources,
 		Drivers:   DriverTable{resourcespec.KindKV: cs.KVDriver},
 		Authority: decayMembership{registry: cs.Declared},
-		Overlay:   &fakeGrantOverlay{},
 		State:     cs.State,
 	}}
 }
@@ -98,7 +92,7 @@ func newDecayDoor(cs *store.ChannelStores) *door {
 // (resourcespec.Registry.Create's own contract — not hand-seeded).
 func seedResource(t *testing.T, cs *store.ChannelStores, id resource.ResourceID, creator actor.ActorID) {
 	t.Helper()
-	if err := cs.Resources.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", nil, resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}); err != nil {
+	if err := cs.Resources.Create(context.Background(), id, resourcespec.KindKV, creator, "", "", nil, resourcespec.ResourceBirthPlan{}); err != nil {
 		t.Fatalf("seed resource %q: %v", id, err)
 	}
 }

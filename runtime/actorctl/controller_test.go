@@ -15,10 +15,11 @@ import (
 )
 
 type fakeStore struct {
-	mu     sync.Mutex
-	rows   map[actor.ActorID]StoredActor
-	system storespec.ActorControlRow
-	forks  map[string]actor.ActorID
+	mu         sync.Mutex
+	rows       map[actor.ActorID]StoredActor
+	restorable map[actor.ActorID]bool
+	system     storespec.ActorControlRow
+	forks      map[string]actor.ActorID
 
 	restartEntered chan struct{}
 	restartResume  chan struct{}
@@ -28,8 +29,9 @@ type fakeStore struct {
 
 func newFakeStore(ids ...actor.ActorID) *fakeStore {
 	f := &fakeStore{
-		rows:  make(map[actor.ActorID]StoredActor),
-		forks: make(map[string]actor.ActorID),
+		rows:       make(map[actor.ActorID]StoredActor),
+		restorable: make(map[actor.ActorID]bool),
+		forks:      make(map[string]actor.ActorID),
 		system: storespec.ActorControlRow{
 			ID:                 actor.SystemActorID,
 			Kind:               actor.KindSystem,
@@ -40,7 +42,6 @@ func newFakeStore(ids ...actor.ActorID) *fakeStore {
 	}
 	for _, id := range ids {
 		f.rows[id] = StoredActor{
-			Origin: OriginDurable,
 			Row: storespec.ActorControlRow{
 				ID:                 id,
 				Kind:               actor.KindAgent,
@@ -49,16 +50,17 @@ func newFakeStore(ids ...actor.ActorID) *fakeStore {
 				Placement:          storespec.NewServerPlacement(),
 			},
 		}
+		f.restorable[id] = true
 	}
 	return f
 }
 
-func (f *fakeStore) ListDeclaredActive(context.Context) ([]storespec.ActorControlRow, error) {
+func (f *fakeStore) RestoreActive(context.Context) ([]storespec.ActorControlRow, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	out := []storespec.ActorControlRow{f.system}
-	for _, value := range f.rows {
-		if value.Origin == OriginDurable {
+	for id, value := range f.rows {
+		if f.restorable[id] {
 			out = append(out, value.Row)
 		}
 	}
@@ -108,7 +110,6 @@ func (f *fakeStore) CommitFork(ctx context.Context, request ForkCommitRequest) (
 		child = request.ChildActorID
 		f.forks[key] = child
 		f.rows[child] = StoredActor{
-			Origin: OriginRunWorld,
 			Row: storespec.ActorControlRow{
 				ID:                 child,
 				Kind:               request.Spec.Kind,
@@ -233,7 +234,7 @@ func TestIdentityAdmissionIsOneCoherentActorIDOnlySnapshot(t *testing.T) {
 	if err != nil || !ok || !before.Valid() {
 		t.Fatalf("initial admission=(%+v,%v,%v)", before, ok, err)
 	}
-	if before.Row.ID != "agent:a" || before.World != storespec.WorldDurable {
+	if before.Row.ID != "agent:a" {
 		t.Fatalf("initial admission=%+v", before)
 	}
 
@@ -244,7 +245,7 @@ func TestIdentityAdmissionIsOneCoherentActorIDOnlySnapshot(t *testing.T) {
 	if err != nil || !ok || !after.Valid() {
 		t.Fatalf("post-restart admission=(%+v,%v,%v)", after, ok, err)
 	}
-	if after.Row.ID != before.Row.ID || after.World != before.World {
+	if after.Row.ID != before.Row.ID {
 		t.Fatalf("ActorID admission changed across G replacement: before=%+v after=%+v", before, after)
 	}
 

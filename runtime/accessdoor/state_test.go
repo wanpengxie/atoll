@@ -287,7 +287,6 @@ func TestMintStateWeldsOwner(t *testing.T) {
 		Registry:  &fakeRegistry{},
 		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}},
 		Authority: &fakeMembership{},
-		Overlay:   &fakeGrantOverlay{},
 		State:     st,
 	})
 	if err != nil {

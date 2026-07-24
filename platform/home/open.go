@@ -114,16 +114,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, err
 	}
 
-	h.grantOverlay = newActorGrantOverlay()
-	if err := cs.BindGrantOverlay(h.grantOverlay); err != nil {
-		return nil, fmt.Errorf("platform: bind actor grant overlay: %w", err)
-	}
-	stateHandles, err := accessdoor.NewStateHandleResolver(cs.Authority, cs.Access)
-	if err != nil {
-		return nil, fmt.Errorf("platform: build state handle resolver: %w", err)
-	}
-	h.stateHandles = stateHandles
-
 	h.minter, err = harness.New(harness.Deps{
 		ChannelID: cfg.ChannelID, Log: cs.Log, Authority: cs.Authority,
 		ResolveAudience: h.resolveAudience, Logger: logger,
@@ -134,8 +124,20 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.presenceFold = presence.New(logger, clock,
 		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, sweepEvery)
 
-	actorStore := newHomeActorStore(cfg.ChannelID, cs, cfg.IntroductionResolver, time.Now)
+	actorStore, err := newHomeActorStore(
+		cfg.ChannelID, cs, cfg.IntroductionResolver, time.Now,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("platform: construct actor identity store: %w", err)
+	}
 	h.actorStore = actorStore
+	stateHandles, err := accessdoor.NewStateHandleResolver(
+		cs.Authority, actorStore.identities, cs.Access,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("platform: build state handle resolver: %w", err)
+	}
+	h.stateHandles = stateHandles
 	h.factories = &compositionView{h: h, resolver: cfg.CompositionResolver}
 	h.controller, err = actorctl.New(actorStore)
 	if err != nil {

@@ -3,7 +3,6 @@ package accessdoor
 import (
 	"context"
 	"errors"
-	"reflect"
 	"testing"
 	"time"
 
@@ -52,30 +51,6 @@ func TestResourceGateSpansAuthorizeThroughExecute(t *testing.T) {
 	<-createDone
 }
 
-func TestAsyncCompletionInstallsForkedCreatorOverlay(t *testing.T) {
-	landed := resourcespec.LandedResource{
-		ID: "file:async", CreatedBy: "run:child",
-		Birth: resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthChannelOwned},
-	}
-	reg := &fakeRegistry{commitReservationFound: true, commitReservationLanded: landed}
-	overlay := &fakeGrantOverlay{}
-	_, completion, err := NewAssembly(Deps{
-		Registry: reg, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}},
-		Authority: &fakeMembership{isMember: true, world: storespec.WorldRun},
-		Overlay:   overlay, State: &fakeStateStore{},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got, found, err := completion.CommitReservation(t.Context(), "reservation-async")
-	if err != nil || !found || got != landed {
-		t.Fatalf("completion=(%+v,%v,%v)", got, found, err)
-	}
-	if len(overlay.grants) != 1 || overlay.grants[0].Grantee != landed.CreatedBy {
-		t.Fatalf("async creator overlay=%+v", overlay.grants)
-	}
-}
-
 // --- create branch (期11 §3.1: create is its own method, door.create — no
 //     longer reachable through invoke at all) ---
 
@@ -113,23 +88,6 @@ func TestDoorCreate(t *testing.T) {
 		got := reg.createCalls[0]
 		if got.kind != resourcespec.KindKV || got.creator != "a" || string(got.initial) != "hi" {
 			t.Fatalf("Create args = %+v", got)
-		}
-		if got.birth.Authority != resourcespec.BirthCreatorIdentity {
-			t.Fatalf("birth=%v, want creator identity", got.birth.Authority)
-		}
-	})
-
-	t.Run("run-world creator selects channel-owned birth", func(t *testing.T) {
-		reg := &fakeRegistry{}
-		d := newDoor(reg, &fakeDriver{}, &fakeMembership{isMember: true, world: storespec.WorldRun})
-		out, err := d.create(t.Context(), "child", "r1", kvSpec, nil)
-		mustAccept(t, out, err)
-		if got := reg.createCalls[0].birth.Authority; got != resourcespec.BirthChannelOwned {
-			t.Fatalf("birth=%v, want channel owned", got)
-		}
-		overlay := d.deps.Overlay.(*fakeGrantOverlay)
-		if len(overlay.grants) != 1 || overlay.grants[0].Grantee != "child" || !reflect.DeepEqual(overlay.grants[0].Ops, []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete}) {
-			t.Fatalf("forked creator overlay grants=%+v", overlay.grants)
 		}
 	})
 
@@ -570,7 +528,6 @@ func TestInvokeMissingDriverIsGoError(t *testing.T) {
 		Registry:  reg,
 		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}}, // KindKV present, bogusKind absent
 		Authority: &fakeMembership{},
-		Overlay:   &fakeGrantOverlay{},
 	}}
 	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpDelete} {
 		_, err := d.invoke(context.Background(), "a", op, "r1", nil, nil)
@@ -682,9 +639,6 @@ func TestInvokeFileDeleteRowFirstBytesLast(t *testing.T) {
 	}
 	if len(reg.deleteCalls) != 1 {
 		t.Fatalf("expected one Registry.Delete call, got %d", len(reg.deleteCalls))
-	}
-	if got := d.deps.Overlay.(*fakeGrantOverlay).deleted; !reflect.DeepEqual(got, []resource.ResourceID{"r1"}) {
-		t.Fatalf("overlay resource cleanup=%v", got)
 	}
 }
 

@@ -71,8 +71,8 @@ type OperateExecutor interface {
 }
 
 // handleOperate is the gate: permission (NP-2=a — sender is an active member of
-// the UNIFIED authority, durable ∪ run-world, kind-blind so an agent member may
-// be delegated channel management) then route to the injected executor, mapping
+// the unified authority, storage-home blind, so an agent member may be
+// delegated channel management) then route to the injected executor, mapping
 // its decision to Reply/Fail. Rejections are noise, not truth: they terminate
 // as the request's failed reply and never touch the operation ledger — the
 // cheapest deny point, so a rejected sender cannot grow any durable account by
@@ -114,9 +114,9 @@ func (s *SystemActor) handleOperate(sys actorbase.Sys, msg actorbase.Msg) {
 }
 
 // senderIsActiveMember is the gate's permission predicate (NP-2=a) over the
-// unified authority (declared rows AND run-world forked identities — truth
-// location is unobservable, per the actor model's two-ledger law). A registry
-// error is surfaced (internal_error), not silently read as unauthorized. The
+// unified active-identity authority. Physical identity storage is unobservable
+// here. An authority error is surfaced (internal_error), not silently read as
+// unauthorized. The
 // window between this check and the value commit is the system's standard
 // in-flight tolerance (same doctrine as message delivery vs incarnation).
 func (s *SystemActor) senderIsActiveMember(msg actorbase.Msg) (bool, error) {

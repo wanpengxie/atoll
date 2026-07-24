@@ -199,8 +199,8 @@ CREATE TABLE IF NOT EXISTS resource_reservations (
   placement_daemon_id  TEXT NOT NULL DEFAULT '',
   placement_coord      TEXT NOT NULL DEFAULT '',
   created_by           TEXT NOT NULL,           -- door-authenticated creator (never daemon-reported)
-	birth_authority      TEXT NOT NULL
-	                     CHECK (birth_authority IN ('creator_identity','channel_owned')),
+  source_channel_id    TEXT,
+  source_resource_id   TEXT,
   reserved_at          INTEGER NOT NULL,
   is_dir               INTEGER NOT NULL DEFAULT 0 CHECK (is_dir IN (0,1)), -- carried write-ahead so CommitReservation lands the resources row with the correct byte-shape bit (a content-less dir create's shape must survive the ReserveCreate→AllocRequest→Committed round trip; daemon reports no truth, §1.3)
   last_progress_at     INTEGER NOT NULL DEFAULT 0 -- most-recent activity stamp for the in-flight transfer

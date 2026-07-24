@@ -102,7 +102,7 @@ func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, k
 		return errors.New("store: resource create: empty creator")
 	}
 	if !birth.Valid() {
-		return errors.New("store: resource create: invalid birth authority")
+		return errors.New("store: resource create: invalid source provenance")
 	}
 
 	tx, err := r.db.BeginTx(ctx, nil)
@@ -135,20 +135,9 @@ func (r *resourceRegistry) Create(ctx context.Context, id resource.ResourceID, k
 // resolve-then-create gap) — the caller decides what the collision means (a
 // plain failure for direct Create; "lost the race" for CommitReservation).
 func (r *resourceRegistry) createResourceTx(ctx context.Context, tx *sql.Tx, id resource.ResourceID, kind resourcespec.ResourceKind, creator actor.ActorID, placementDaemonID string, placementCoord string, initial []byte, dir bool, birth resourcespec.ResourceBirthPlan) error {
-	var granteeKind access.GranteeKind
-	var grantee string
-	var grantOps []access.Operation
-	switch birth.Authority {
-	case resourcespec.BirthCreatorIdentity:
-		granteeKind = access.GranteeActor
-		grantee = string(creator)
-		grantOps = []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete}
-	case resourcespec.BirthChannelOwned:
-		granteeKind = access.GranteeMembers
-		grantOps = []access.Operation{access.OpRead, access.OpWrite}
-	default:
-		return errors.New("store: resource birth: invalid birth authority")
-	}
+	granteeKind := access.GranteeActor
+	grantee := string(creator)
+	grantOps := []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete}
 	ops, err := json.Marshal(grantOps)
 	if err != nil {
 		return fmt.Errorf("store: resource create marshal ops: %w", err)
@@ -195,11 +184,7 @@ func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.Resour
 		return "", errors.New("store: resource reserve-create: empty creator")
 	}
 	if !birth.Valid() {
-		return "", errors.New("store: resource reserve-create: invalid birth authority")
-	}
-	birthValue, err := encodeBirthAuthority(birth)
-	if err != nil {
-		return "", err
+		return "", errors.New("store: resource reserve-create: invalid source provenance")
 	}
 	reservationID := uuid.NewString()
 	now := r.nowMs()
@@ -208,9 +193,9 @@ func (r *resourceRegistry) ReserveCreate(ctx context.Context, id resource.Resour
 	// to the pre-S1 reserved_at-only behavior until something bumps it —
 	// SweepExpiredReservations judging a never-touched row is unchanged.
 	if _, err := r.db.ExecContext(ctx,
-		`INSERT INTO resource_reservations (reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, birth_authority, reserved_at, is_dir, last_progress_at)
-		   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		reservationID, string(id), string(kind), placementDaemonID, placementCoord, string(creator), birthValue, now, dir, now,
+		`INSERT INTO resource_reservations (reservation_id, resource_id, kind, placement_daemon_id, placement_coord, created_by, source_channel_id, source_resource_id, reserved_at, is_dir, last_progress_at)
+		   VALUES (?, ?, ?, ?, ?, ?, NULLIF(?,''), NULLIF(?,''), ?, ?, ?)`,
+		reservationID, string(id), string(kind), placementDaemonID, placementCoord, string(creator), string(birth.SourceChannelID), string(birth.SourceResourceID), now, dir, now,
 	); err != nil {
 		return "", fmt.Errorf("store: resource reserve-create %q: %w", id, err)
 	}
@@ -230,13 +215,14 @@ func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID 
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var resourceID, kind, placementDaemonID, placementCoord, createdBy, birthValue string
+	var resourceID, kind, placementDaemonID, placementCoord, createdBy, sourceChannelID, sourceResourceID string
 	var isDir bool
 	err = tx.QueryRowContext(ctx,
-		`SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by, birth_authority, is_dir
+		`SELECT resource_id, kind, placement_daemon_id, placement_coord, created_by,
+		        COALESCE(source_channel_id,''), COALESCE(source_resource_id,''), is_dir
 		   FROM resource_reservations WHERE reservation_id=?`,
 		reservationID,
-	).Scan(&resourceID, &kind, &placementDaemonID, &placementCoord, &createdBy, &birthValue, &isDir)
+	).Scan(&resourceID, &kind, &placementDaemonID, &placementCoord, &createdBy, &sourceChannelID, &sourceResourceID, &isDir)
 	if errors.Is(err, sql.ErrNoRows) {
 		// Already committed (an earlier replay landed and deleted it) or never
 		// existed: Committed is level-triggered and MUST be replay-safe — a
@@ -250,9 +236,9 @@ func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID 
 		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation lookup %q: %w", reservationID, err)
 	}
 
-	birth, err := decodeBirthAuthority(birthValue)
-	if err != nil {
-		return resourcespec.LandedResource{}, false, fmt.Errorf("store: commit reservation birth authority %q: %w", reservationID, err)
+	birth := resourcespec.ResourceBirthPlan{
+		SourceChannelID:  channel.ID(sourceChannelID),
+		SourceResourceID: resource.ResourceID(sourceResourceID),
 	}
 	createErr := r.createResourceTx(ctx, tx,
 		resource.ResourceID(resourceID), resourcespec.ResourceKind(kind), actor.ActorID(createdBy),
@@ -277,29 +263,7 @@ func (r *resourceRegistry) CommitReservation(ctx context.Context, reservationID 
 	if errors.Is(createErr, resourcespec.ErrAlreadyExists) {
 		return resourcespec.LandedResource{}, true, resourcespec.ErrReservationLost
 	}
-	return resourcespec.LandedResource{ID: resource.ResourceID(resourceID), CreatedBy: actor.ActorID(createdBy), Birth: birth}, true, nil
-}
-
-func encodeBirthAuthority(plan resourcespec.ResourceBirthPlan) (string, error) {
-	switch plan.Authority {
-	case resourcespec.BirthCreatorIdentity:
-		return "creator_identity", nil
-	case resourcespec.BirthChannelOwned:
-		return "channel_owned", nil
-	default:
-		return "", errors.New("store: invalid resource birth authority")
-	}
-}
-
-func decodeBirthAuthority(value string) (resourcespec.ResourceBirthPlan, error) {
-	switch value {
-	case "creator_identity":
-		return resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}, nil
-	case "channel_owned":
-		return resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthChannelOwned}, nil
-	default:
-		return resourcespec.ResourceBirthPlan{}, fmt.Errorf("invalid value %q", value)
-	}
+	return resourcespec.LandedResource{ID: resource.ResourceID(resourceID), CreatedBy: actor.ActorID(createdBy)}, true, nil
 }
 
 // ReservationDaemon reads back one reservation's placement_daemon_id only —

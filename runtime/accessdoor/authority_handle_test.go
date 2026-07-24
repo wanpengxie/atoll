@@ -47,13 +47,6 @@ func (*accessBackingAuthority) ListActive(context.Context) ([]storespec.ActorCon
 	return nil, nil
 }
 
-func (*accessBackingAuthority) WorldOf(
-	context.Context,
-	actor.ActorID,
-) (storespec.ActorWorld, bool, error) {
-	return storespec.WorldDurable, true, nil
-}
-
 func (a *accessBackingAuthority) CheckAuthor(
 	context.Context,
 	storespec.AuthorStamp,
@@ -115,7 +108,6 @@ func TestAuthorityAccessAdmitsOnceAndLetsAcceptedInvokeFinish(t *testing.T) {
 		},
 		Drivers:   DriverTable{resourcespec.KindKV: driver},
 		Authority: backing,
-		Overlay:   &fakeGrantOverlay{},
 		State:     &fakeStateStore{},
 	})
 	if err != nil {
@@ -181,7 +173,6 @@ func TestAuthorityStateAdmitsOnceAndLetsAcceptedInvokeFinish(t *testing.T) {
 		Registry:  &fakeRegistry{},
 		Drivers:   DriverTable{resourcespec.KindKV: &fakeDriver{}},
 		Authority: backing,
-		Overlay:   &fakeGrantOverlay{},
 		State:     state,
 	})
 	if err != nil {

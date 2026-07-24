@@ -178,7 +178,7 @@ func TestTimerInsertTrustsWeldedAuthorWithoutRegistryProjection(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)
 	row := timerspec.TimerRow{
-		ID: "run-world", AuthorID: "actor:run-world",
+		ID: "memory-author", AuthorID: "actor:memory-author",
 		FireAt: 2_000, Type: "wake", CreatedAt: 1,
 	}
 	if err := f.timers.Insert(ctx, row); err != nil {
@@ -189,7 +189,7 @@ func TestTimerInsertTrustsWeldedAuthorWithoutRegistryProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(due) != 1 || due[0].ID != row.ID || due[0].AuthorID != row.AuthorID {
-		t.Fatalf("Due = %+v, want exact run-world timer", due)
+		t.Fatalf("Due = %+v, want exact timer", due)
 	}
 }
 
@@ -504,7 +504,7 @@ func TestTimer_CascadeClearedOnDeregister(t *testing.T) {
 
 	// A channel-scoped resource owned by a is a control for the OTHER locus:
 	// resources are non-lossy and must survive the creator's deregister.
-	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", []byte("resource"), resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}); err != nil {
+	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", []byte("resource"), resourcespec.ResourceBirthPlan{}); err != nil {
 		t.Fatalf("Create resource: %v", err)
 	}
 

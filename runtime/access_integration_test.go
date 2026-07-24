@@ -204,7 +204,7 @@ func TestChannelOwnerRecoversStrandedDaemonResource(t *testing.T) {
 
 func csResourcesCreateForTest(cs *ChannelStores, id resource.ResourceID, daemonID, coord string) error {
 	return rawResourceRegistryForTest(cs).Create(context.Background(), id, resourcespec.KindFile, actor.SystemActorID, daemonID, coord, nil,
-		resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthChannelOwned})
+		resourcespec.ResourceBirthPlan{})
 }
 
 func rawResourceRegistryForTest(cs *ChannelStores) resourcespec.Registry {
@@ -224,9 +224,6 @@ func openAccessChannel(t *testing.T) *ChannelStores {
 	if err := cs.BindActorAuthority(testAccessAuthority{declared: cs.Declared}); err != nil {
 		t.Fatalf("BindActorAuthority: %v", err)
 	}
-	if err := cs.BindGrantOverlay(testGrantOverlay{}); err != nil {
-		t.Fatalf("BindGrantOverlay: %v", err)
-	}
 	t.Cleanup(func() { _ = cs.Close() })
 	return cs
 }
@@ -234,17 +231,6 @@ func openAccessChannel(t *testing.T) *ChannelStores {
 type testAccessAuthority struct {
 	declared storespec.DeclaredControlReader
 }
-
-type testGrantOverlay struct{}
-
-func (testGrantOverlay) ActorAllows(context.Context, actor.ActorID, resource.ResourceID, access.Operation) (bool, error) {
-	return false, nil
-}
-func (testGrantOverlay) SetGrant(context.Context, resource.ResourceID, access.Grant) error {
-	return nil
-}
-func (testGrantOverlay) EndBatch([]actor.ActorID)           {}
-func (testGrantOverlay) DeleteResource(resource.ResourceID) {}
 
 func (a testAccessAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
 	rec, ok, err := a.declared.LookupDeclaredActive(ctx, id)
@@ -256,11 +242,6 @@ func (a testAccessAuthority) LookupActive(ctx context.Context, id actor.ActorID)
 
 func (a testAccessAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, nil
-}
-
-func (a testAccessAuthority) WorldOf(ctx context.Context, id actor.ActorID) (storespec.ActorWorld, bool, error) {
-	_, ok, err := a.LookupActive(ctx, id)
-	return storespec.WorldDurable, ok, err
 }
 
 func (a testAccessAuthority) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {

@@ -34,7 +34,6 @@ func newCloseTestStore() *closeTestStore {
 			CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement(),
 		},
 		agent: actorctl.StoredActor{
-			Origin: actorctl.OriginDurable,
 			Row: storespec.ActorControlRow{
 				ID: "agent", Kind: actor.KindAgent, Class: "test",
 				CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement(),
@@ -45,7 +44,7 @@ func newCloseTestStore() *closeTestStore {
 	}
 }
 
-func (s *closeTestStore) ListDeclaredActive(context.Context) ([]storespec.ActorControlRow, error) {
+func (s *closeTestStore) RestoreActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return []storespec.ActorControlRow{s.system, s.agent.Row}, nil
 }
 

@@ -150,18 +150,10 @@ type ResourceRow struct {
 	Grants []access.Grant
 }
 
-// BirthAuthorityKind is the closed authorization shape consumed by a resource
-// birth transaction. It deliberately cannot carry arbitrary grants or a
-// callback: the store executes one of two audited, atomic grant recipes.
-type BirthAuthorityKind uint8
-
-const (
-	BirthCreatorIdentity BirthAuthorityKind = iota + 1
-	BirthChannelOwned
-)
-
+// ResourceBirthPlan carries only stable resource provenance. Authorization has
+// one shape for every actor identity: birth atomically installs the creator's
+// full-rights grant. Actor storage home is deliberately absent.
 type ResourceBirthPlan struct {
-	Authority        BirthAuthorityKind
 	SourceChannelID  channel.ID
 	SourceResourceID resource.ResourceID
 }
@@ -169,11 +161,10 @@ type ResourceBirthPlan struct {
 type LandedResource struct {
 	ID        resource.ResourceID
 	CreatedBy actor.ActorID
-	Birth     ResourceBirthPlan
 }
 
 func (p ResourceBirthPlan) Valid() bool {
-	return p.Authority == BirthCreatorIdentity || p.Authority == BirthChannelOwned
+	return (p.SourceChannelID == "") == (p.SourceResourceID == "")
 }
 
 // Registry is the R (authorization relation) + resource-existence contract —

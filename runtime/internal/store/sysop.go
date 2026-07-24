@@ -287,7 +287,7 @@ func (s *sysOpStore) Admit(ctx context.Context, in storespec.AdmitTx) (storespec
 func (s *sysOpStore) Introduce(ctx context.Context, in storespec.IntroduceTx) (storespec.IntroduceResult, error) {
 	raw, effects, err := s.run(ctx, in.SysOpMeta, "introduce", func(tx *sql.Tx, now int64) (sysOpOutcome, error) {
 		// Initiator qualification lives in Home's unified authority gate. The
-		// durable store cannot re-judge run-world fork actors, so it receives the
+		// durable store cannot re-judge process-local active identities, so it receives the
 		// actor coordinate plus the login principal (when the active actor has
 		// one) solely for private-declaration ownership comparison.
 		if in.DeclID == "" || in.InitiatorActorID == "" {
@@ -537,7 +537,7 @@ func (s *sysOpStore) RemoveActor(ctx context.Context, in storespec.RemoveTx) (st
 			return sysOpOutcome{}, err
 		}
 		// No PostCommitEffects: the caller drives the whole session teardown
-		// (durable + run-world) from its own plan under the Fork-race locks.
+		// from its own plan under the Fork-race locks.
 		return sysOpOutcome{result: storespec.RemoveResult{Removed: newlyEnded}}, nil
 	})
 	return decodeResult[storespec.RemoveResult](raw, effects, err)

@@ -104,7 +104,6 @@ type Deps struct {
 	Registry  resourcespec.Registry
 	Drivers   DriverTable
 	Authority storespec.ActorAuthority
-	Overlay   GrantOverlay
 	State     resourcespec.StateStore
 
 	// ChannelID is this door's own channel scope (§4.3: "门缺...Deps增ChannelID

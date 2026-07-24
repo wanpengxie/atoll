@@ -13,10 +13,31 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
+	"github.com/wanpengxie/atoll/runtime/identitystore"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-func TestLookupForkReturnsReceiptWithoutRestoringRunWorldChild(t *testing.T) {
+type staticDeclaredRows map[actor.ActorID]storespec.ActorControlRow
+
+func (s staticDeclaredRows) LookupDeclaredActive(
+	_ context.Context,
+	id actor.ActorID,
+) (storespec.ActorControlRow, bool, error) {
+	row, ok := s[id]
+	return row, ok, nil
+}
+
+func (s staticDeclaredRows) ListDeclaredActive(
+	context.Context,
+) ([]storespec.ActorControlRow, error) {
+	rows := make([]storespec.ActorControlRow, 0, len(s))
+	for _, row := range s {
+		rows = append(rows, row)
+	}
+	return rows, nil
+}
+
+func TestLookupForkReturnsReceiptWithoutRestoringMemoryIdentity(t *testing.T) {
 	t.Parallel()
 	ctx := context.Background()
 	cs, err := runtime.OpenChannel(
@@ -50,13 +71,13 @@ func TestLookupForkReturnsReceiptWithoutRestoringRunWorldChild(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	store := newHomeActorStore(channel.ID("fork-receipt"), cs, nil, nil)
+	store, err := newHomeActorStore(channel.ID("fork-receipt"), cs, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	got, found, err := store.LookupFork(ctx, caller, request)
 	if err != nil || !found || got != child {
 		t.Fatalf("LookupFork = (%q,%v,%v), want (%q,true,nil)", got, found, err, child)
-	}
-	if len(store.runRows) != 0 {
-		t.Fatalf("durable receipt restored run-world rows: %#v", store.runRows)
 	}
 	if _, active, err := store.LookupActive(ctx, child); err != nil || active {
 		t.Fatalf("receipt child active after restart read-back: active=%v err=%v", active, err)
@@ -77,9 +98,19 @@ func TestCommitForkDoesNotCreateSponsorLifecycleEdge(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = cs.Close() })
 
-	store := newHomeActorStore(channel.ID("fork-independent"), cs, nil, nil)
+	store, err := newHomeActorStore(channel.ID("fork-independent"), cs, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
 	parent := actor.ActorID("agent:parent")
 	child := actor.ActorID("agent:child")
+	if _, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
+		ID: parent, Kind: actor.KindAgent, Class: "test",
+		SourceDeclID: "parent-declaration",
+		Placement:    storespec.NewServerPlacement(), CreatedAt: 1,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	commit, err := store.CommitFork(ctx, actorctl.ForkCommitRequest{
 		CallerActorID: parent,
 		RequestID:     message.ID("fork-independent-request"),
@@ -120,13 +151,20 @@ func TestCommitForkDoesNotCreateSponsorLifecycleEdge(t *testing.T) {
 
 func TestExplicitSponsorLifecycleEdgeStillApplies(t *testing.T) {
 	t.Parallel()
-	store := &homeActorStore{}
 	parent := actor.ActorID("agent:parent")
 	child := actor.ActorID("agent:explicit-child")
 	rows := []storespec.ActorControlRow{
 		{ID: parent, Kind: actor.KindAgent},
 		{ID: child, Kind: actor.KindAgent, Sponsor: parent},
 	}
+	identities, err := identitystore.New(staticDeclaredRows{
+		parent: rows[0],
+		child:  rows[1],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &homeActorStore{identities: identities}
 	plan, err := store.ResolveTerminal(context.Background(), actorctl.TerminalCommand{
 		Kind: actorctl.TerminalEnd,
 		End:  actorctl.EndRequest{CallerActorID: parent, Target: parent},

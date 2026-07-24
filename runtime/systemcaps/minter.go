@@ -11,7 +11,6 @@ import (
 	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 var ErrInvalidInput = errors.New("systemcaps: invalid mint input")
@@ -30,7 +29,7 @@ type accessMinter interface {
 }
 
 type stateResolver interface {
-	ResolveAuthority(capauth.Authority, storespec.ActorWorld) (accessdoor.AccessHandle, error)
+	ResolveAuthority(context.Context, capauth.Authority) (accessdoor.AccessHandle, error)
 }
 
 type scheduleMinter interface {
@@ -64,12 +63,12 @@ func New(
 }
 
 // Mint mints the SystemActor's whole kernel bundle once.
-func (m *Minter) Mint(context.Context) (actorcaps.Caps, error) {
+func (m *Minter) Mint(ctx context.Context) (actorcaps.Caps, error) {
 	if m == nil {
 		return actorcaps.Caps{}, ErrInvalidInput
 	}
 	authority := rootAuthority{}
-	state, err := m.state.ResolveAuthority(authority, storespec.WorldDurable)
+	state, err := m.state.ResolveAuthority(ctx, authority)
 	if err != nil {
 		return actorcaps.Caps{}, err
 	}

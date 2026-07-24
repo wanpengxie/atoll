@@ -63,14 +63,6 @@ func (s *actorAuthoritySlot) ListActive(ctx context.Context) ([]storespec.ActorC
 	return a.ListActive(ctx)
 }
 
-func (s *actorAuthoritySlot) WorldOf(ctx context.Context, id actor.ActorID) (storespec.ActorWorld, bool, error) {
-	a, err := s.get()
-	if err != nil {
-		return 0, false, err
-	}
-	return a.WorldOf(ctx, id)
-}
-
 func (s *actorAuthoritySlot) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	a, err := s.get()
 	if err != nil {

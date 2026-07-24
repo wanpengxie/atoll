@@ -194,27 +194,15 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 	if !member {
 		return Outcome{RejectReason: access.AccessDenied}, nil
 	}
-	world, found, err := d.deps.Authority.WorldOf(ctx, caller)
-	if err != nil {
-		return Outcome{}, err
-	}
-	if !found {
-		return Outcome{RejectReason: access.AccessDenied}, nil
-	}
-	birth := resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity, SourceChannelID: spec.SourceChannelID, SourceResourceID: spec.SourceResourceID}
-	if world == storespec.WorldRun {
-		birth.Authority = resourcespec.BirthChannelOwned
-	} else if world != storespec.WorldDurable {
-		return Outcome{}, fmt.Errorf("accessdoor: invalid actor world %d", world)
+	birth := resourcespec.ResourceBirthPlan{
+		SourceChannelID:  spec.SourceChannelID,
+		SourceResourceID: spec.SourceResourceID,
 	}
 
 	switch spec.Kind {
 	case resourcespec.KindKV:
 		if err := d.deps.Registry.Create(ctx, id, resourcespec.KindKV, caller, "", "", initial, birth); err != nil {
 			return createVerdict(ctx, err)
-		}
-		if err := d.installCreatorOverlay(ctx, resourcespec.LandedResource{ID: id, CreatedBy: caller, Birth: birth}); err != nil {
-			return Outcome{}, err
 		}
 		return Outcome{}, nil
 
@@ -275,7 +263,7 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 			// side, by reserved_at) reclaims it. Nothing to undo here.
 			return Outcome{}, aerr
 		}
-		_, found, cerr := d.commitReservationLocked(ctx, reservationID)
+		_, found, cerr := d.deps.Registry.CommitReservation(ctx, reservationID)
 		if cerr != nil {
 			if errors.Is(cerr, resourcespec.ErrReservationLost) {
 				// This create lost the same-resource_id race (期11 S2,
@@ -400,23 +388,6 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 	entries := make([]ListEntry, 0, len(rows))
 	for _, row := range rows {
 		eff := effectiveOpsFromGrants(caller, row.Grants, isMember, isMember && callerRow.Role == storespec.RoleOwner)
-		// Overlay half: session grants (forked grantees, forked-creator
-		// convenience) live only in the volatile overlay — Invoke/Stat merge
-		// them via effectiveOps, so List must project the same union or an
-		// overlay-granted caller cannot discover a resource it can access.
-		// In-memory map lookups; still one page-wide membership check.
-		for _, op := range objectOps {
-			if eff[op] {
-				continue
-			}
-			allowed, oerr := d.deps.Overlay.ActorAllows(ctx, caller, row.ID, op)
-			if oerr != nil {
-				return ListPage{}, oerr
-			}
-			if allowed {
-				eff[op] = true
-			}
-		}
 		ops := opSetFromEffective(eff)
 		if len(ops) == 0 {
 			continue // non-owner any-grant projection: zero rights on this row = invisible

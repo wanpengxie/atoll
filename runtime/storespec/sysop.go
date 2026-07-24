@@ -127,7 +127,7 @@ type DeclarationSyncStore interface {
 
 // RemoveTx removes a composition member and its sponsor closure. The closure
 // (durable rows to deregister + the whole-tree ended-event set) is computed by
-// the sole holder of the run-world session authority (Home) and handed in; the
+// the sole holder of the complete active-identity authority (Home) and handed in; the
 // store commits the anchor+event pair together with the cascade value rows in
 // one transaction. See RemoveActor for why the closure cannot be re-derived
 // from durable rows alone.
@@ -140,8 +140,8 @@ type RemoveTx struct {
 	Envelopes        []CascadeEnvelope
 }
 
-// RemoveResult carries no PostCommitEffects: the member-remove session teardown
-// (including run-world state/grants that no PostCommitEffects can name) is driven
+// RemoveResult carries no PostCommitEffects: process-local teardown that no
+// durable PostCommitEffects can name is driven
 // from Home's plan under the same Fork-race locks, not replayed from the store.
 type RemoveResult struct {
 	Removed []actor.ActorID `json:"removed"`
@@ -158,8 +158,8 @@ type RestartTx struct {
 	Target actor.ActorID
 }
 
-// ForkTx records the durable operation anchor for a run-world child. The child
-// definition is an operation result, not a durable actor_registry row; restart
+// ForkTx records the durable operation anchor for a fork child. The child
+// definition is an operation result, not an actor_registry row; restart
 // therefore preserves the anchor while intentionally not restoring the child.
 type ForkTx struct {
 	SysOpMeta

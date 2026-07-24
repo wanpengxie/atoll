@@ -25,9 +25,6 @@ func (e errRegistry) LookupActive(context.Context, actor.ActorID) (storespec.Act
 func (e errRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, e.err
 }
-func (e errRegistry) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
-	return 0, false, e.err
-}
 func (e errRegistry) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	return 0, e.err
 }

@@ -15,24 +15,22 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
+	"github.com/wanpengxie/atoll/runtime/identitystore"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // homeActorStore adapts the existing channel value stores to actorctl's typed
-// command port. Durable actor rows remain in the channel store. Run-world
-// children live only for this Home session; their operation result is durable
-// solely to make a Fork RequestID idempotent.
+// command port. Physical identity-home routing is delegated to identitystore;
+// actorctl receives one uniform identity namespace.
 type homeActorStore struct {
-	channelID channel.ID
-	cs        *runtime.ChannelStores
-	resolver  IntroductionResolver
-	now       func() time.Time
+	channelID  channel.ID
+	cs         *runtime.ChannelStores
+	resolver   IntroductionResolver
+	now        func() time.Time
+	identities *identitystore.Store
 
 	authorityMu sync.RWMutex
 	authority   storespec.ActorAuthority
-
-	runMu   sync.RWMutex
-	runRows map[actor.ActorID]storespec.ActorControlRow
 }
 
 func newHomeActorStore(
@@ -40,17 +38,21 @@ func newHomeActorStore(
 	cs *runtime.ChannelStores,
 	resolver IntroductionResolver,
 	now func() time.Time,
-) *homeActorStore {
+) (*homeActorStore, error) {
 	if now == nil {
 		now = time.Now
 	}
-	return &homeActorStore{
-		channelID: channelID,
-		cs:        cs,
-		resolver:  resolver,
-		now:       now,
-		runRows:   make(map[actor.ActorID]storespec.ActorControlRow),
+	identities, err := identitystore.New(cs.Declared)
+	if err != nil {
+		return nil, err
 	}
+	return &homeActorStore{
+		channelID:  channelID,
+		cs:         cs,
+		resolver:   resolver,
+		now:        now,
+		identities: identities,
+	}, nil
 }
 
 func (s *homeActorStore) bindAuthority(authority storespec.ActorAuthority) {
@@ -65,8 +67,8 @@ func (s *homeActorStore) activeAuthority() storespec.ActorAuthority {
 	return s.authority
 }
 
-func (s *homeActorStore) ListDeclaredActive(ctx context.Context) ([]storespec.ActorControlRow, error) {
-	return s.cs.Declared.ListDeclaredActive(ctx)
+func (s *homeActorStore) RestoreActive(ctx context.Context) ([]storespec.ActorControlRow, error) {
+	return s.identities.RestoreActive(ctx)
 }
 
 func cloneActorRow(row storespec.ActorControlRow) storespec.ActorControlRow {
@@ -78,14 +80,8 @@ func (s *homeActorStore) LookupActive(
 	ctx context.Context,
 	id actor.ActorID,
 ) (actorctl.StoredActor, bool, error) {
-	s.runMu.RLock()
-	run, ok := s.runRows[id]
-	s.runMu.RUnlock()
-	if ok {
-		return actorctl.StoredActor{Row: cloneActorRow(run), Origin: actorctl.OriginRunWorld}, true, nil
-	}
-	row, ok, err := s.cs.Declared.LookupDeclaredActive(ctx, id)
-	return actorctl.StoredActor{Row: cloneActorRow(row), Origin: actorctl.OriginDurable}, ok, err
+	row, ok, err := s.identities.LookupActive(ctx, id)
+	return actorctl.StoredActor{Row: cloneActorRow(row)}, ok, err
 }
 
 func (s *homeActorStore) Admit(
@@ -309,9 +305,8 @@ func (s *homeActorStore) LookupFork(
 		return "", true, err
 	}
 	// The durable operation anchor is only a RequestID→ChildActorID receipt.
-	// A run-world child belongs to the process that created it; replaying the
-	// receipt after restart must not restore that child's definition into the
-	// current in-memory run world.
+	// Replaying it after restart must not turn an operation result back into an
+	// active identity; only IdentityStore.RestoreActive owns restoration.
 	return result.Child.ID, true, nil
 }
 
@@ -352,20 +347,20 @@ func (s *homeActorStore) CommitFork(
 	if request.Placement.Kind == storespec.PlacementDaemon {
 		row.Binding = actor.BindingRuntimeInboundViaRelay
 	}
+	prepared, err := identitystore.PrepareMemory(row)
+	if err != nil {
+		return actorctl.ForkCommitResult{}, err
+	}
 	result, err := s.cs.SysOps.ForkActor(ctx, storespec.ForkTx{SysOpMeta: meta, Child: row})
 	if err != nil {
 		return actorctl.ForkCommitResult{}, err
 	}
 	row = cloneActorRow(result.Child)
-	s.runMu.Lock()
-	s.runRows[row.ID] = row
-	s.runMu.Unlock()
+	s.identities.PublishMemory(prepared)
 	return actorctl.ForkCommitResult{
 		ChildActorID: row.ID,
-		Actor: actorctl.StoredActor{
-			Row: row, Origin: actorctl.OriginRunWorld,
-		},
-		Effects: storespec.PostCommitEffects{Poke: true},
+		Actor:        actorctl.StoredActor{Row: row},
+		Effects:      storespec.PostCommitEffects{Poke: true},
 	}, nil
 }
 
@@ -481,13 +476,13 @@ func (s *homeActorStore) AttachDaemon(
 type terminalStorePlan struct {
 	all        []actor.ActorID
 	durable    []actor.ActorID
-	run        []actor.ActorID
+	memory     []actor.ActorID
 	envelopes  []storespec.CascadeEnvelope
 	principals []string
 }
 
 func (s *homeActorStore) ResolveTerminal(
-	_ context.Context,
+	ctx context.Context,
 	command actorctl.TerminalCommand,
 	rows []storespec.ActorControlRow,
 ) (actorctl.TerminalPlan, error) {
@@ -561,7 +556,6 @@ func (s *homeActorStore) ResolveTerminal(
 		}
 	}
 	plan := terminalStorePlan{}
-	s.runMu.RLock()
 	for id := range inTree {
 		row := byID[id]
 		plan.all = append(plan.all, id)
@@ -571,19 +565,19 @@ func (s *homeActorStore) ResolveTerminal(
 		if row.Principal != "" {
 			plan.principals = append(plan.principals, row.Principal)
 		}
-		if _, run := s.runRows[id]; run {
-			plan.run = append(plan.run, id)
-		} else {
-			plan.durable = append(plan.durable, id)
-		}
 	}
-	s.runMu.RUnlock()
+	durable, memory, err := s.identities.Partition(ctx, plan.all)
+	if err != nil {
+		return actorctl.TerminalPlan{}, err
+	}
+	plan.durable = append(plan.durable, durable...)
+	plan.memory = append(plan.memory, memory...)
 	sortActorIDs := func(ids []actor.ActorID) {
 		sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
 	}
 	sortActorIDs(plan.all)
 	sortActorIDs(plan.durable)
-	sortActorIDs(plan.run)
+	sortActorIDs(plan.memory)
 	sort.Strings(plan.principals)
 	sort.Slice(plan.envelopes, func(i, j int) bool {
 		return plan.envelopes[i].Target < plan.envelopes[j].Target
@@ -658,11 +652,7 @@ func (s *homeActorStore) CommitTerminal(
 	default:
 		return actorctl.ValueCommit[actorctl.TerminalResult]{}, actorctl.ErrInvalidMutation
 	}
-	s.runMu.Lock()
-	for _, id := range plan.run {
-		delete(s.runRows, id)
-	}
-	s.runMu.Unlock()
+	s.identities.DeleteMemory(plan.memory)
 	effects.Principals = append(effects.Principals, plan.principals...)
 	return actorctl.ValueCommit[actorctl.TerminalResult]{Result: result, Effects: effects}, nil
 }

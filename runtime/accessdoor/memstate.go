@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/capauth"
+	"github.com/wanpengxie/atoll/runtime/identitystore"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -18,151 +19,148 @@ func newMemoryStateHandle(owner storespec.AuthorStamp, authority storespec.Actor
 
 var ErrStateHandleUnavailable = errors.New("accessdoor: state handle unavailable")
 
-// StateHandleResolver is the sole world-sensitive State resolution seam.
-// Callers never receive a raw in-memory backend or implement their own world
-// switch. State ownership is ActorID-level and crosses actor
-// AttemptKey/Incarnation replacement.
+// StateHandleResolver is the sole physical State-backing resolution seam.
+// Identity storage home never enters actor authority or the returned handle.
 type StateHandleResolver interface {
 	AdmittedStateHandleResolver
-	AdmitRun(actor.ActorID) error
-	Resolve(context.Context, storespec.AuthorStamp) (AccessHandle, error)
+	ResolveAuthority(context.Context, capauth.Authority) (AccessHandle, error)
 	EndBatch([]actor.ActorID)
 }
 
 type AdmittedStateHandleResolver interface {
-	ResolveAdmitted(storespec.IdentityAdmission) (AccessHandle, error)
+	ResolvePhysical(context.Context, actor.ActorID) (AdmittedStateBinding, error)
+}
+
+// AdmittedStateBinding is a stable physical handle selected before the one
+// identity admission. End after admission cannot redirect it to another home.
+type AdmittedStateBinding interface {
+	MintAdmitted(storespec.IdentityAdmission) AccessHandle
 }
 
 type actorStateHandles struct {
 	mu        sync.RWMutex
 	authority storespec.ActorAuthority
+	homes     identitystore.HomeReader
 	durable   AccessMinter
-	run       map[actor.ActorID]AccessHandle
+	memory    map[actor.ActorID]boundStateHandle
 }
 
-func NewStateHandleResolver(authority storespec.ActorAuthority, durable AccessMinter) (StateHandleResolver, error) {
-	if authority == nil || durable == nil {
+func NewStateHandleResolver(
+	authority storespec.ActorAuthority,
+	homes identitystore.HomeReader,
+	durable AccessMinter,
+) (StateHandleResolver, error) {
+	if authority == nil || homes == nil || durable == nil {
 		return nil, errors.New("accessdoor: state handle resolver dependencies incomplete")
 	}
-	return &actorStateHandles{authority: authority, durable: durable, run: make(map[actor.ActorID]AccessHandle)}, nil
+	return &actorStateHandles{
+		authority: authority,
+		homes:     homes,
+		durable:   durable,
+		memory:    make(map[actor.ActorID]boundStateHandle),
+	}, nil
 }
 
-func (h *actorStateHandles) AdmitRun(id actor.ActorID) error {
+type resolvedStateBinding struct {
+	id      actor.ActorID
+	durable AdmittedMinter
+	memory  *boundStateHandle
+}
+
+func (b resolvedStateBinding) MintAdmitted(
+	admission storespec.IdentityAdmission,
+) AccessHandle {
+	if !admission.Valid() || admission.Row.ID != b.id {
+		return rejectedStateHandle{err: ErrAuthorInactive}
+	}
+	if b.memory != nil {
+		state := *b.memory
+		state.owner = storespec.AuthorStamp{ID: b.id}
+		state.authority = nil
+		state.admitted = true
+		return state
+	}
+	if b.durable != nil {
+		return b.durable.MintStateAdmitted(admission)
+	}
+	return rejectedStateHandle{err: ErrStateHandleUnavailable}
+}
+
+func (h *actorStateHandles) ResolvePhysical(
+	ctx context.Context,
+	id actor.ActorID,
+) (AdmittedStateBinding, error) {
 	if id == "" {
-		return ErrStateHandleUnavailable
+		return nil, ErrStateHandleUnavailable
 	}
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	if _, exists := h.run[id]; exists {
-		return nil
-	}
-	h.run[id] = newMemoryStateHandle(storespec.AuthorStamp{ID: id}, h.authority)
-	return nil
-}
-
-func (h *actorStateHandles) Resolve(ctx context.Context, stamp storespec.AuthorStamp) (AccessHandle, error) {
-	world, ok, err := h.authority.WorldOf(ctx, stamp.ID)
+	home, found, err := h.homes.HomeOf(ctx, id)
 	if err != nil {
 		return nil, err
 	}
-	if !ok {
+	if !found {
 		return nil, ErrStateHandleUnavailable
 	}
-	switch world {
-	case storespec.WorldDurable:
-		// Legacy/source-specific callers still pass through the ActorID-active
-		// authority before receiving a durable identity handle.
-		verdict, err := h.authority.CheckAuthor(ctx, stamp)
-		if err != nil {
-			return nil, err
-		}
-		if verdict != storespec.AuthorOK {
+	switch home {
+	case identitystore.HomeDurable:
+		minter, ok := h.durable.(AdmittedMinter)
+		if !ok {
 			return nil, ErrStateHandleUnavailable
 		}
-		return h.durable.MintState(stamp), nil
-	case storespec.WorldRun:
-		// Run-world state is also ActorID-owned; only its backing store is
-		// process-local.
-		h.mu.RLock()
-		handle := h.run[stamp.ID]
-		h.mu.RUnlock()
-		if handle == nil {
-			return nil, ErrStateHandleUnavailable
+		return resolvedStateBinding{id: id, durable: minter}, nil
+	case identitystore.HomeMemory:
+		h.mu.Lock()
+		state, ok := h.memory[id]
+		if !ok {
+			handle, valid := newMemoryStateHandle(
+				storespec.AuthorStamp{ID: id}, h.authority,
+			).(boundStateHandle)
+			if !valid {
+				h.mu.Unlock()
+				return nil, ErrStateHandleUnavailable
+			}
+			state = handle
+			h.memory[id] = state
 		}
-		return handle, nil
+		h.mu.Unlock()
+		return resolvedStateBinding{id: id, memory: &state}, nil
 	default:
 		return nil, ErrStateHandleUnavailable
 	}
 }
 
 func (h *actorStateHandles) ResolveAuthority(
+	ctx context.Context,
 	authority capauth.Authority,
-	world storespec.ActorWorld,
 ) (AccessHandle, error) {
 	if authority == nil || authority.ActorID() == "" {
 		return nil, ErrStateHandleUnavailable
 	}
-	id := authority.ActorID()
-	switch world {
-	case storespec.WorldDurable:
-		minter, ok := h.durable.(interface {
-			MintStateAuthority(capauth.Authority) AccessHandle
-		})
-		if !ok {
-			return nil, ErrStateHandleUnavailable
-		}
-		return minter.MintStateAuthority(authority), nil
-	case storespec.WorldRun:
-		h.mu.RLock()
-		handle := h.run[id]
-		h.mu.RUnlock()
-		state, ok := handle.(boundStateHandle)
-		if !ok {
-			return nil, ErrStateHandleUnavailable
-		}
-		state.owner = storespec.AuthorStamp{ID: id}
+	binding, err := h.ResolvePhysical(ctx, authority.ActorID())
+	if err != nil {
+		return nil, err
+	}
+	resolved, ok := binding.(resolvedStateBinding)
+	if !ok {
+		return nil, ErrStateHandleUnavailable
+	}
+	if resolved.memory != nil {
+		state := *resolved.memory
 		state.authority = authority
 		return state, nil
-	default:
+	}
+	minter, ok := h.durable.(interface {
+		MintStateAuthority(capauth.Authority) AccessHandle
+	})
+	if !ok {
 		return nil, ErrStateHandleUnavailable
 	}
-}
-
-func (h *actorStateHandles) ResolveAdmitted(
-	admission storespec.IdentityAdmission,
-) (AccessHandle, error) {
-	if !admission.Valid() {
-		return nil, ErrStateHandleUnavailable
-	}
-	id := admission.Row.ID
-	switch admission.World {
-	case storespec.WorldDurable:
-		minter, ok := h.durable.(AdmittedMinter)
-		if !ok {
-			return nil, ErrStateHandleUnavailable
-		}
-		return minter.MintStateAdmitted(admission), nil
-	case storespec.WorldRun:
-		h.mu.RLock()
-		handle := h.run[id]
-		h.mu.RUnlock()
-		state, ok := handle.(boundStateHandle)
-		if !ok {
-			return nil, ErrStateHandleUnavailable
-		}
-		state.owner = storespec.AuthorStamp{ID: id}
-		state.authority = nil
-		state.admitted = true
-		return state, nil
-	default:
-		return nil, ErrStateHandleUnavailable
-	}
+	return minter.MintStateAuthority(authority), nil
 }
 
 func (h *actorStateHandles) EndBatch(ids []actor.ActorID) {
 	h.mu.Lock()
 	for _, id := range ids {
-		delete(h.run, id)
+		delete(h.memory, id)
 	}
 	h.mu.Unlock()
 }

@@ -17,9 +17,6 @@ func (slotAuthority) LookupActive(context.Context, actor.ActorID) (storespec.Act
 func (slotAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, nil
 }
-func (slotAuthority) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
-	return storespec.WorldRun, true, nil
-}
 func (slotAuthority) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	return storespec.AuthorOK, nil
 }
@@ -36,7 +33,7 @@ func TestActorAuthoritySlotFailsClosedAndBindsOnce(t *testing.T) {
 	if err := slot.Bind(slotAuthority{}); !errors.Is(err, ErrActorAuthorityAlreadyBound) {
 		t.Fatalf("second Bind err = %v", err)
 	}
-	if world, ok, err := slot.WorldOf(ctx, "actor:a"); err != nil || !ok || world != storespec.WorldRun {
-		t.Fatalf("bound lookup = (%v,%v,%v)", world, ok, err)
+	if row, ok, err := slot.LookupActive(ctx, "actor:a"); err != nil || !ok || row.ID != "actor:a" {
+		t.Fatalf("bound lookup = (%+v,%v,%v)", row, ok, err)
 	}
 }

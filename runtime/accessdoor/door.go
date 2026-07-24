@@ -124,12 +124,6 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		return Outcome{}, err
 	}
 	if !allowed {
-		allowed, err = d.deps.Overlay.ActorAllows(ctx, caller, id, op)
-		if err != nil {
-			return Outcome{}, err
-		}
-	}
-	if !allowed {
 		mAllow, err := d.deps.Registry.MembersAllow(ctx, id, op)
 		if err != nil {
 			return Outcome{}, err
@@ -217,16 +211,7 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 				}
 			}
 		}
-		world, found, werr := d.deps.Authority.WorldOf(ctx, grant.Grantee)
-		if werr != nil {
-			return Outcome{}, werr
-		}
-		var serr error
-		if grant.GranteeKind == access.GranteeActor && found && world == storespec.WorldRun {
-			serr = d.deps.Overlay.SetGrant(ctx, id, *grant)
-		} else {
-			serr = d.deps.Registry.SetGrant(ctx, id, *grant)
-		}
+		serr := d.deps.Registry.SetGrant(ctx, id, *grant)
 		if serr != nil {
 			if errors.Is(serr, resourcespec.ErrResourceNotFound) {
 				return Outcome{RejectReason: access.ResourceNotFound}, nil
@@ -249,7 +234,6 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 			if derr := d.deps.Registry.Delete(ctx, id); derr != nil {
 				return executeFailure(ctx, derr)
 			}
-			d.deps.Overlay.DeleteResource(id)
 			if d.deps.Logger != nil {
 				d.deps.Logger.Info("resource deleted", "id", string(id), "kind", string(meta.Kind), "tombstoned", true)
 			}
@@ -269,7 +253,6 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 		if derr := d.deps.Registry.Delete(ctx, id); derr != nil {
 			return executeFailure(ctx, derr)
 		}
-		d.deps.Overlay.DeleteResource(id)
 		if d.deps.Logger != nil {
 			d.deps.Logger.Info("resource deleted", "id", string(id), "kind", string(meta.Kind), "tombstoned", false)
 		}

@@ -64,7 +64,6 @@ type Home struct {
 	cs           *runtime.ChannelStores
 	minter       harness.Minter
 	stateHandles accessdoor.StateHandleResolver
-	grantOverlay *actorGrantOverlay
 	schedMinter  schedule.Minter
 	engine       *schedule.Engine
 

@@ -75,10 +75,6 @@ func (a testAuthority) ListActive(ctx context.Context) ([]storespec.ActorControl
 	}
 	return out, nil
 }
-func (a testAuthority) WorldOf(ctx context.Context, id actor.ActorID) (storespec.ActorWorld, bool, error) {
-	_, ok, err := a.LookupActive(ctx, id)
-	return storespec.WorldDurable, ok, err
-}
 func (a testAuthority) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	_, ok, err := a.LookupActive(ctx, stamp.ID)
 	if err != nil {

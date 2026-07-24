@@ -194,11 +194,7 @@ func (v View) DeclaredBySource(ctx context.Context, source string) ([]storespec.
 	}
 	out := make([]storespec.ActorControlRow, 0)
 	for _, row := range rows {
-		world, ok, worldErr := v.authority.WorldOf(ctx, row.ID)
-		if worldErr != nil {
-			return nil, worldErr
-		}
-		if ok && world == storespec.WorldDurable && row.SourceDeclID == source {
+		if row.SourceDeclID == source {
 			out = append(out, row)
 		}
 	}
@@ -211,11 +207,7 @@ func (v View) DeclaredBySourceOne(ctx context.Context, source string) (storespec
 		return storespec.ActorControlRow{}, false, err
 	}
 	for _, row := range rows {
-		world, ok, worldErr := v.authority.WorldOf(ctx, row.ID)
-		if worldErr != nil {
-			return storespec.ActorControlRow{}, false, worldErr
-		}
-		if ok && world == storespec.WorldDurable && row.SourceDeclID == source {
+		if row.SourceDeclID == source {
 			return row, true, nil
 		}
 	}

@@ -38,13 +38,6 @@ func (e homeActorEffects) ApplyPostCommit(effects storespec.PostCommitEffects) {
 	}
 }
 
-func (e homeActorEffects) RunActorBorn(id actor.ActorID) error {
-	if e.home == nil || e.home.stateHandles == nil {
-		return nil
-	}
-	return e.home.stateHandles.AdmitRun(id)
-}
-
 func (e homeActorEffects) RunActorsEnded(ids []actor.ActorID) {
 	h := e.home
 	if h == nil {
@@ -52,9 +45,6 @@ func (e homeActorEffects) RunActorsEnded(ids []actor.ActorID) {
 	}
 	if h.stateHandles != nil {
 		h.stateHandles.EndBatch(ids)
-	}
-	if h.grantOverlay != nil {
-		h.grantOverlay.EndBatch(ids)
 	}
 	for _, id := range ids {
 		if h.presenceFold != nil {

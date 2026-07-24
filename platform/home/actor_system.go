@@ -131,12 +131,6 @@ func finishTransition[T any](
 		return transition.Result, err
 	}
 	effects := homeActorEffects{home: a.home}
-	for _, id := range transition.Born {
-		if err := effects.RunActorBorn(id); err != nil {
-			go func() { _ = a.home.closeInternal("actor_birth_projection_failed") }()
-			return transition.Result, err
-		}
-	}
 	if len(transition.Ended) != 0 {
 		effects.RunActorsEnded(transition.Ended)
 	}
@@ -328,8 +322,7 @@ func (a *actorSystem) AdmitIdentity(
 			return storespec.IdentityAdmission{}, false, actorctl.ErrClosed
 		}
 		return storespec.IdentityAdmission{
-			Row:   cloneSystemRow(a.systemRow),
-			World: storespec.WorldDurable,
+			Row: cloneSystemRow(a.systemRow),
 		}, true, nil
 	}
 	return a.home.controller.AdmitIdentity(ctx, id)
@@ -352,13 +345,6 @@ func (a *actorSystem) ListActive(ctx context.Context) ([]storespec.ActorControlR
 		}
 	})
 	return rows, nil
-}
-
-func (a *actorSystem) WorldOf(ctx context.Context, id actor.ActorID) (storespec.ActorWorld, bool, error) {
-	if id == actor.SystemActorID {
-		return storespec.WorldDurable, true, nil
-	}
-	return a.home.controller.WorldOf(ctx, id)
 }
 
 func (a *actorSystem) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {

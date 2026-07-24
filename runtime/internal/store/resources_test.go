@@ -21,7 +21,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-var creatorBirthPlan = resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthCreatorIdentity}
+var creatorBirthPlan = resourcespec.ResourceBirthPlan{}
 
 // openResourceReg opens a fresh temp-dir channel sqlite with the full DDL
 // (resources + resource_grants + resource_reservations + resource_tombstones
@@ -90,7 +90,6 @@ func TestResourceReadableProjectionPreservesSourceProvenance(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
 	plan := resourcespec.ResourceBirthPlan{
-		Authority:       resourcespec.BirthCreatorIdentity,
 		SourceChannelID: "source-channel", SourceResourceID: "kv:source",
 	}
 	if err := reg.Create(ctx, "kv:copy", resourcespec.KindKV, "tool:realm", "", "", []byte("artifact"), plan); err != nil {
@@ -114,52 +113,31 @@ func TestResourceReadableProjectionPreservesSourceProvenance(t *testing.T) {
 	}
 }
 
-func TestResource_ChannelOwnedBirthIsAtomicMembersReadWrite(t *testing.T) {
+func TestResource_ReservationPersistsSourceProvenance(t *testing.T) {
 	ctx := context.Background()
 	reg := openResourceReg(t)
-	plan := resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthChannelOwned}
-	if err := reg.Create(ctx, "kv:run", resourcespec.KindKV, "run:child", "", "", []byte("v"), plan); err != nil {
-		t.Fatalf("Create: %v", err)
+	plan := resourcespec.ResourceBirthPlan{
+		SourceChannelID: "source-channel", SourceResourceID: "file:source",
 	}
-	if allowActor(t, reg, "run:child", "kv:run", access.OpRead) {
-		t.Fatal("run creator must not leave a durable actor grant")
-	}
-	for _, op := range []access.Operation{access.OpRead, access.OpWrite} {
-		if !allowMembers(t, reg, "kv:run", op) {
-			t.Fatalf("members missing %s", op)
-		}
-	}
-	for _, op := range []access.Operation{access.OpSet, access.OpDelete} {
-		if allowMembers(t, reg, "kv:run", op) {
-			t.Fatalf("members unexpectedly hold %s", op)
-		}
-	}
-}
-
-func TestResource_ReservationPersistsBirthPlanAndCommitDoesNotReclassify(t *testing.T) {
-	ctx := context.Background()
-	reg := openResourceReg(t)
-	plan := resourcespec.ResourceBirthPlan{Authority: resourcespec.BirthChannelOwned}
 	rid, err := reg.ReserveCreate(ctx, "file:run", resourcespec.KindFile, "run:ended-before-commit", "d1", "c1", false, plan)
 	if err != nil {
 		t.Fatalf("ReserveCreate: %v", err)
-	}
-	var stored string
-	if err := reg.db.QueryRowContext(ctx, `SELECT birth_authority FROM resource_reservations WHERE reservation_id=?`, rid).Scan(&stored); err != nil {
-		t.Fatalf("read birth_authority: %v", err)
-	}
-	if stored != "channel_owned" {
-		t.Fatalf("birth_authority=%q", stored)
 	}
 	_, found, err := reg.CommitReservation(ctx, rid)
 	if err != nil || !found {
 		t.Fatalf("CommitReservation found=%v err=%v", found, err)
 	}
-	if !allowMembers(t, reg, "file:run", access.OpRead) || !allowMembers(t, reg, "file:run", access.OpWrite) {
-		t.Fatal("commit must consume persisted channel-owned plan")
+	meta, found, err := reg.Resolve(ctx, "file:run")
+	if err != nil || !found {
+		t.Fatalf("Resolve found=%v err=%v", found, err)
 	}
-	if allowActor(t, reg, "run:ended-before-commit", "file:run", access.OpRead) {
-		t.Fatal("commit must not reclassify the creator")
+	if meta.SourceChannelID != plan.SourceChannelID || meta.SourceResourceID != plan.SourceResourceID {
+		t.Fatalf("landed provenance=%+v, want %+v", meta, plan)
+	}
+	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete} {
+		if !allowActor(t, reg, "run:ended-before-commit", "file:run", op) {
+			t.Fatalf("creator missing %s after reservation landing", op)
+		}
 	}
 }
 
@@ -266,8 +244,8 @@ func TestResource_CreateGuardsEmptyInputs(t *testing.T) {
 	if err := reg.Create(ctx, "kv:x", resourcespec.KindKV, "", "", "", nil, creatorBirthPlan); err == nil {
 		t.Error("Create with empty creator must error")
 	}
-	if err := reg.Create(ctx, "kv:missing-plan", resourcespec.KindKV, "actor:a", "", "", nil, resourcespec.ResourceBirthPlan{}); err == nil {
-		t.Error("Create with an absent birth plan must fail closed")
+	if err := reg.Create(ctx, "kv:partial-source", resourcespec.KindKV, "actor:a", "", "", nil, resourcespec.ResourceBirthPlan{SourceChannelID: "source-only"}); err == nil {
+		t.Error("Create with partial source provenance must fail closed")
 	}
 }
 

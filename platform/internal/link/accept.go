@@ -536,13 +536,25 @@ func (a *Acceptor) relayAccess(
 	id actor.ActorID,
 	payload []byte,
 ) ([]byte, error) {
-	admission, err := a.admitIdentity(ctx, id)
-	if err != nil {
-		return nil, err
-	}
 	var request accessRequest
 	if err := json.Unmarshal(payload, &request); err != nil {
 		return nil, fmt.Errorf("link: access payload decode: %w", err)
+	}
+	var stateBinding accessdoor.AdmittedStateBinding
+	if request.Kind == accessKindInvocation &&
+		request.Scope == accessScopeState {
+		if request.Inv == nil || request.Inv.Caller != "" {
+			return nil, errors.New("link: invalid access invocation")
+		}
+		var err error
+		stateBinding, err = a.stateHandles.ResolvePhysical(ctx, id)
+		if err != nil {
+			return nil, err
+		}
+	}
+	admission, err := a.admitIdentity(ctx, id)
+	if err != nil {
+		return nil, err
 	}
 	switch request.Kind {
 	case accessKindInvocation:
@@ -554,10 +566,10 @@ func (a *Acceptor) relayAccess(
 		case accessScopeChannel:
 			handle = a.access.MintAdmitted(admission)
 		case accessScopeState:
-			handle, err = a.stateHandles.ResolveAdmitted(admission)
-			if err != nil {
-				return nil, err
+			if stateBinding == nil {
+				return nil, errors.New("link: state backing unavailable")
 			}
+			handle = stateBinding.MintAdmitted(admission)
 		default:
 			return nil, errors.New("link: invalid access scope")
 		}

@@ -53,7 +53,7 @@ func (c *Controller) Start(ctx context.Context) (Bootstrap, error) {
 	if c == nil {
 		return Bootstrap{}, ErrClosed
 	}
-	rows, err := c.store.ListDeclaredActive(ctx)
+	rows, err := c.store.RestoreActive(ctx)
 	if err != nil {
 		return Bootstrap{}, err
 	}
@@ -69,7 +69,7 @@ func (c *Controller) Start(ctx context.Context) (Bootstrap, error) {
 			systemCount++
 			continue
 		}
-		def, err := definitionFromStored(StoredActor{Row: row, Origin: OriginDurable})
+		def, err := definitionFromStored(StoredActor{Row: row})
 		if err != nil {
 			return Bootstrap{}, err
 		}

@@ -246,13 +246,10 @@ func TestSysOpAdmitReplayAndRefConflict(t *testing.T) {
 	}
 }
 
-// TestSysOpMemberIntroduceAcceptsRunWorldSender pins the G ruling: a member-
-// source introduce carries NO initiator principal (a forked sender is a
-// run-world actor with no realm principal) and the store must NOT re-judge the
-// sender — qualification lives at the sysactor gate, and a registry-only
-// re-check is structurally blind to run-world members. The word commits the
-// event pair and mints the durable instance like any member introduce.
-func TestSysOpMemberIntroduceAcceptsRunWorldSender(t *testing.T) {
+// TestSysOpMemberIntroduceAcceptsPreauthorizedSender pins that the store must
+// not re-judge a sender already admitted by Home's unified active-identity
+// authority. The word commits the event pair like any member introduce.
+func TestSysOpMemberIntroduceAcceptsPreauthorizedSender(t *testing.T) {
 	cs := openSysOpTestStore(t)
 	ctx := context.Background()
 	rendered, err := (channel.RenderedSnapshot{

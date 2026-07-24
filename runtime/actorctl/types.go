@@ -34,20 +34,12 @@ const (
 	Closed
 )
 
-type Origin uint8
-
-const (
-	OriginDurable Origin = iota + 1
-	OriginRunWorld
-)
-
 // ActorDefinition is the immutable managed identity/config projection.
 type ActorDefinition struct {
 	Kind         actor.Kind
 	Principal    string
 	Role         storespec.ActorRole
 	Sponsor      actor.ActorID
-	Origin       Origin
 	SourceDeclID string
 	CreatedAt    int64
 	// DefinitionVersion is durable declaration metadata. It is not an
@@ -69,8 +61,7 @@ type ActiveActor struct {
 // StoredActor is the authoritative value a typed Store operation returns for
 // Controller publication.
 type StoredActor struct {
-	Row    storespec.ActorControlRow
-	Origin Origin
+	Row storespec.ActorControlRow
 }
 
 type ActorCommit[T any] struct {
@@ -95,16 +86,11 @@ func definitionFromStored(stored StoredActor) (ActorDefinition, error) {
 	if err := row.Placement.Validate(); err != nil {
 		return ActorDefinition{}, err
 	}
-	origin := stored.Origin
-	if origin != OriginDurable && origin != OriginRunWorld {
-		return ActorDefinition{}, ErrInvalidMutation
-	}
 	return ActorDefinition{
 		Kind:              row.Kind,
 		Principal:         row.Principal,
 		Role:              row.Role,
 		Sponsor:           row.Sponsor,
-		Origin:            origin,
 		SourceDeclID:      row.SourceDeclID,
 		CreatedAt:         row.CreatedAt,
 		DefinitionVersion: row.CurrentDeclVersion,
@@ -139,10 +125,10 @@ func rowFromActive(id actor.ActorID, value ActiveActor) storespec.ActorControlRo
 	}
 }
 
-// BootstrapStore supplies only durable active rows. Run-world children are
-// intentionally not recovered after restart.
+// BootstrapStore supplies only identities selected by the Store's physical
+// restore policy. Controller does not know which storage homes exist.
 type BootstrapStore interface {
-	ListDeclaredActive(context.Context) ([]storespec.ActorControlRow, error)
+	RestoreActive(context.Context) ([]storespec.ActorControlRow, error)
 }
 
 type ForkCommitRequest struct {

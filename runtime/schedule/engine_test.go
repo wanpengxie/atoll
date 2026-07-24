@@ -9,7 +9,6 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
@@ -66,14 +65,14 @@ func TestNewFailFast(t *testing.T) {
 	}
 }
 
-func TestScheduleValidationDoesNotRestrictStorageHomeByActorWorld(t *testing.T) {
+func TestScheduleValidationDoesNotCoupleTimerHomeToActorKind(t *testing.T) {
 	store := newFakeStore()
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000))
 	minter, engine, err := New(Deps{
 		Store: store, Fire: sink,
 		DurableFire: fakeDurableFire{store: store, sink: sink},
-		Clock:       clock, Authority: allowScheduleAuthority{world: storespec.WorldRun},
+		Clock:       clock, Authority: allowScheduleAuthority{},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -94,7 +93,7 @@ func TestScheduleValidationDoesNotRestrictStorageHomeByActorWorld(t *testing.T) 
 	if _, err := handle.Schedule(context.Background(), ScheduleReq{
 		Home: TimerHomeDurable, FireAt: 2_000, Type: "durable",
 	}); err != nil {
-		t.Fatalf("run-world durable schedule err=%v", err)
+		t.Fatalf("durable schedule err=%v", err)
 	}
 }
 

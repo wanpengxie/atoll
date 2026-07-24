@@ -82,10 +82,6 @@ func (r *fakeRegistry) ListActive(context.Context) ([]storespec.ActorControlRow,
 	}
 	return rows, nil
 }
-func (r *fakeRegistry) WorldOf(context.Context, actor.ActorID) (storespec.ActorWorld, bool, error) {
-	return storespec.WorldDurable, true, r.err
-}
-
 func TestRemoteDownMatchesExactBindingWithinSameAttempt(t *testing.T) {
 	t.Parallel()
 	key, err := actorhost.NewAttemptKey()

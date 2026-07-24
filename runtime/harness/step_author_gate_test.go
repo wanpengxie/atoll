@@ -18,10 +18,6 @@ func (a gateAuthority) LookupActive(_ context.Context, id actor.ActorID) (stores
 func (a gateAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, nil
 }
-func (a gateAuthority) WorldOf(_ context.Context, id actor.ActorID) (storespec.ActorWorld, bool, error) {
-	_, ok := a.rows[id]
-	return storespec.WorldDurable, ok, nil
-}
 func (a gateAuthority) CheckAuthor(_ context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	_, ok := a.rows[stamp.ID]
 	if !ok {

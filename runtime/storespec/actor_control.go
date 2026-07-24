@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
@@ -91,13 +92,6 @@ type ActorControlRow struct {
 	SourceDeclID       string
 }
 
-type ActorWorld uint8
-
-const (
-	WorldDurable ActorWorld = iota + 1
-	WorldRun
-)
-
 type AuthorStamp struct {
 	ID actor.ActorID
 }
@@ -107,16 +101,13 @@ type AuthorStamp struct {
 // adapters may then execute exactly one already-admitted Harness/Access/State/
 // Schedule invocation without re-running the old AuthorStamp gate.
 //
-// It carries no AttemptKey or Incarnation. Row/World are the business
-// projection needed by the admitted invocation, not a managed-body capability.
+// It carries no AttemptKey, Incarnation or physical identity storage home.
 type IdentityAdmission struct {
-	Row   ActorControlRow
-	World ActorWorld
+	Row ActorControlRow
 }
 
 func (a IdentityAdmission) Valid() bool {
-	return a.Row.ID != "" &&
-		(a.World == WorldDurable || a.World == WorldRun)
+	return a.Row.ID != ""
 }
 
 type AuthorVerdict uint8
@@ -131,7 +122,6 @@ const (
 type ActorAuthority interface {
 	LookupActive(context.Context, actor.ActorID) (ActorControlRow, bool, error)
 	ListActive(context.Context) ([]ActorControlRow, error)
-	WorldOf(context.Context, actor.ActorID) (ActorWorld, bool, error)
 	CheckAuthor(context.Context, AuthorStamp) (AuthorVerdict, error)
 }
 
