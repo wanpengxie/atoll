@@ -25,7 +25,7 @@ func (h *Home) resolveAudience(ctx context.Context, env *message.Envelope) error
 		}
 	}
 	// A configured default is an explicit routing decision. If its current
-	// embodiment is unavailable, fail this request without silently changing
+	// actor endpoint is unavailable, fail this request without silently changing
 	// the destination to boost (or a human broadcast). Boost is only the
 	// fallback for channels that have no configured default.
 	if hasDefault {

@@ -11,10 +11,9 @@ import (
 
 // hooks is the actorbase engine's per-host wiring for every Proc-shaped def
 // this Home builds (spec §3's out-generation matrix, row 1): a cell host always
-// has a live cancellation reach, so Hooks.Canceller is never nil here. The
-// daemon host wires its own Canceller too — computeRing's cellCancelForwarder
-// sends the caller-side cancel-upstream frame (platform/compute/forwarders.go),
-// which handleCancelUpstream below receives.
+// has a live cancellation reach, so Hooks.Canceller is never nil here. A
+// daemon body obtains the equivalent reach through its current
+// DaemonOutbound bundle; handleCancelUpstream below receives that frame.
 func (h *Home) hooks() actorbase.Hooks {
 	return actorbase.Hooks{Canceller: h.cancelRequest}
 }
@@ -24,7 +23,7 @@ func (h *Home) hooks() actorbase.Hooks {
 // directly (cell/port hosting is transport-neutral inside it — cancellation
 // reaches a daemon-hosted port the same way it reaches a local cell) so this
 // is a direct call, no Acceptor indirection needed. No-op if the request
-// already closed or `target` has no live embodiment — cancel is a
+// already closed or `target` has no current endpoint — cancel is a
 // best-effort hint, the caller's closure owns the terminal.
 func (h *Home) cancelRequest(target actor.ActorID, requestID message.ID) {
 	if h.actors != nil {

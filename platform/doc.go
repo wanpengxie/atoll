@@ -38,7 +38,7 @@
 // # The four jurisdictions
 //
 // platform/home is the channel-home assembly root (server side — one
-// channel's truth and embodiment wiring: Open/View/Admit/Restart/
+// channel's truth and execution wiring: Open/View/Admit/Restart/
 // ServeAttach/Subscribe/Close + the subjectgate slot seam). platform/compute
 // is the attached-compute assembly root (daemon side — one attached
 // process's own reconcile ring: Run/Config, dialing in, reattaching,
@@ -47,6 +47,6 @@
 // actions speak through. platform/internal/* is everything neither host's
 // public capability set names — hostcommon (the shared Build/OutcomeString +
 // ActorFactory representation), link (the wire membrane), humancell (the
-// human embodiment's frame interpreter), and the other assembly-private
+// human actor's frame interpreter), and the other assembly-private
 // wiring no downstream package may reach around the two hosts' own faces.
 package platform

@@ -57,8 +57,8 @@ func (s *stepSenderConsistent) Run(ctx context.Context, env *message.Envelope) (
 	// Welded-kind closed-set gate: with the registry lookup gone, this is the
 	// ONE chokepoint every pen flows through before its kind is stamped into a
 	// durable row — the wire path is already guarded at attach (accept.go's
-	// ParseKind over declarations), but in-process pens (Home.SpawnIfAbsent's kind
-	// param, a registry Constructor's decl.Kind) reach here unvalidated, and
+	// ParseKind over declarations), but in-process pens (the Home body builder's
+	// kind and a registry Constructor's decl.Kind) reach here unvalidated, and
 	// the store's Append does not re-check kind (only the READ scan does), so
 	// without this gate an out-of-set kind would land as a poisoned row that
 	// only explodes on a later read. An out-of-set WELDED kind is an assembly/

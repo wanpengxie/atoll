@@ -120,7 +120,7 @@ func (v ResourceView) Fetch(ctx context.Context, as channel.Reader, id resource.
 	return channel.ResourceFetch{Meta: meta, Body: io.NopCloser(bytes.NewReader(value))}, nil
 }
 
-// Snapshot composes membership, embodiment and testimony at read time. The
+// Snapshot composes membership, current execution and testimony at read time. The
 // fields are advisory and intentionally not a linearizable transaction.
 func (v View) Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error) {
 	return v.presence.Snapshot(ctx, id)
@@ -136,14 +136,10 @@ func (v View) TestimonyAgeMs(receivedAt int64) int64 {
 	return age
 }
 
-// Stat reads the authoritative embodiment presence for id: live=true means id
-// has a live embodiment on THIS home right now (cell or attached port — the
-// `kill -0` read, actorrt.Runtime.Stat, transport-neutral). This is NOT the
-// device/L3 advisory axis (Snapshot above): that is a self-reported,
-// three-state, decays-to-unknown push signal from the actor's own client;
-// this is the substrate's own authoritative self-read of embodiment, never
-// asked of the actor, never advisory. The two axes answer different
-// questions and must not be conflated.
+// Stat reads authoritative current execution for id: live=true means the
+// Server Host currently has a local body or an attached remote route. This is
+// distinct from the device/L3 advisory axis (Snapshot above), which is a
+// self-reported, decays-to-unknown signal.
 func (v View) Stat(id actor.ActorID) (startedAt time.Time, live bool) {
 	if v.actors == nil {
 		return time.Time{}, false

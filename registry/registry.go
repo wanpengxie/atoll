@@ -42,9 +42,8 @@ type InstanceSpec struct {
 	// actorbase.Def's doc). Either way config rides the constructor, NOT the
 	// capability bundle: it is an independent PARAMETER, never welded into
 	// actorcaps.Caps (S-P16 红线; enforced by archtest.TestConfigNotInCaps).
-	// A config change is an intent write on the composition row (改配置门) that
-	// takes effect via reconcile-replace (削 → SpawnIfAbsent rebuild) — a fresh incarnation over a fresh snapshot;
-	// there is no live hot-read of Config.
+	// A config change replaces Controller desired and therefore builds a fresh
+	// incarnation over a fresh snapshot; there is no live hot-read of Config.
 	Config json.RawMessage
 }
 

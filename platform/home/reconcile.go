@@ -3,14 +3,17 @@ package home
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/lib/behavior"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // reconcileSweep contains only level-derived maintenance. Actor desired→actual
@@ -34,8 +37,11 @@ func (h *Home) reconcileSweep(ctx context.Context) {
 	if ctx.Err() != nil {
 		return
 	}
-	h.sweepSubjectSlots()
 	h.sweepPresence(ctx)
+	if ctx.Err() != nil {
+		return
+	}
+	h.sweepSubjectSlots(ctx)
 }
 
 func (h *Home) reconcileDeclarations(ctx context.Context) {
@@ -139,26 +145,58 @@ func (h *Home) reconcileClosure(ctx context.Context) {
 }
 
 // sweepSubjectSlots is the sole physical delete owner. Desired slots are the
-// current active human membership projection.
-func (h *Home) sweepSubjectSlots() {
+// current active human membership projection. A candidate is re-read at the
+// delete edge so a concurrent Admit after the list snapshot cannot lose its
+// newly ensured slot.
+func (h *Home) sweepSubjectSlots(ctx context.Context) {
 	if h.subjectgate == nil || h.actors == nil {
 		return
 	}
-	rows, err := h.actors.ListActive(context.Background())
+	sweepSubjectSlots(ctx, h.logger, h.actors, h.subjectgate)
+}
+
+type subjectSlotAuthority interface {
+	ListActive(context.Context) ([]storespec.ActorControlRow, error)
+	LookupActive(context.Context, actor.ActorID) (storespec.ActorControlRow, bool, error)
+}
+
+func sweepSubjectSlots(
+	ctx context.Context,
+	logger *slog.Logger,
+	authority subjectSlotAuthority,
+	slots *subjectgate.Registry,
+) {
+	rows, err := authority.ListActive(ctx)
 	if err != nil {
+		logger.Warn("platform.subject_slot.list_failed", "error", err)
 		return
 	}
 	desired := make(map[actor.ActorID]struct{})
 	for _, row := range rows {
 		if row.Kind == actor.KindHuman {
 			desired[row.ID] = struct{}{}
-			h.subjectgate.EnsureSlot(row.ID)
+			slots.EnsureSlot(row.ID)
 		}
 	}
-	for _, id := range h.subjectgate.IDs() {
-		if _, keep := desired[id]; !keep {
-			h.subjectgate.Remove(id)
+	keys := slots.Keys()
+	removed := 0
+	for _, id := range keys {
+		if _, keep := desired[id]; keep {
+			continue
 		}
+		row, active, lookupErr := authority.LookupActive(ctx, id)
+		if lookupErr != nil {
+			logger.Warn("platform.subject_slot.lookup_failed", "actor", id, "error", lookupErr)
+			continue
+		}
+		if active && row.Kind == actor.KindHuman {
+			continue
+		}
+		slots.Remove(id)
+		removed++
+	}
+	if removed > 0 {
+		logger.Debug("platform.subject_slot.swept", "rows", removed)
 	}
 }
 

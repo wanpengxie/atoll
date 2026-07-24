@@ -9,7 +9,7 @@ import (
 
 func TestLinkSeamRetiredSymbolsAbsent(t *testing.T) {
 	retired := []string{
-		"ComputeID", "BoundID", "PlanSink", "PrepareHandshakeObserved",
+		"ComputeID", "BoundID", "PlanSink", "Prepare" + "Handshake" + "Observed",
 		"CommitWhile", "Caps" + "Factory(", "full" + "Caps", "reconcile" + "Host",
 		"func OpenDB(", "CompositionResolver != nil", "cfg.Desired", "cfg.Builder",
 		"submitControlThroughDoor", "controlRequestTimeout", "handleListActors",
@@ -54,7 +54,7 @@ func TestLinkSeamRetiredSymbolGuardFixtures(t *testing.T) {
 		{"Compute" + "ID", "type request struct { ComputeID string }"},
 		{"Bound" + "ID", "type pull struct { BoundID string }"},
 		{"Plan" + "Sink", "var sink PlanSink"},
-		{"PrepareHandshake" + "Observed", "runtime.PrepareHandshakeObserved()"},
+		{"Prepare" + "Handshake" + "Observed", "runtime.Prepare" + "HandshakeObserved()"},
 		{"Commit" + "While", "prepared.CommitWhile()"},
 		{"Caps" + "Factory(", "CapsFactory(func() {})"},
 		{"full" + "Caps", "factory.fullCaps"},

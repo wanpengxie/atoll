@@ -308,7 +308,13 @@ func TestChannelRealmW4NoPhysicalDestroy(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		for _, forbidden := range []string{"home.Open(", "db_path", "map[channel.ID]*home.Home", "map[channel.ID] *home.Home"} {
+		for _, forbidden := range []string{
+			"home.Open(",
+			"db_path",
+			"map[channel.ID]*home.Home",
+			"map[channel.ID] *home.Home",
+			"os.Remove(",
+		} {
 			if strings.Contains(string(body), forbidden) {
 				t.Errorf("%s retains physical Home ownership token %q", path, forbidden)
 			}

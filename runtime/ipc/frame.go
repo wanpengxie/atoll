@@ -28,7 +28,7 @@ const (
 	// non-blocking enqueue).
 	KindDeliver Kind = "deliver"
 	// KindEmit (remote→host): the bound actor emitted an envelope upward. The
-	// host (port embodiment) relays it to the harness — the single channel-log
+	// host route relays it to the harness — the single channel-log
 	// writer.
 	KindEmit Kind = "emit"
 	// KindEmitAck (host→remote): the host's authoritative verdict for one

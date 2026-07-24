@@ -24,8 +24,8 @@ const platformPathPrefix = "../platform/"
 // assembly: its entire export surface is ChannelStores / OpenChannelOptions /
 // OpenChannel / OpenScheduler. OpenChannel hands back a ChannelStores whose .Log is the raw
 // MessageLog (Append writes the messages table directly) and whose .Membership
-// mutates the actor_registry projection — both BYPASS the harness 9-step write
-// gate and Home.SpawnIfAbsent. Because the package is wholly assembly, the lock is at
+// mutates the actor_registry projection — both bypass the harness write gate
+// and ChannelActors. Because the package is wholly assembly, the lock is at
 // package granularity: nobody outside platform may import it at all. Everyone
 // else writes truth through harness.Pen (the seam), never cs.Log.Append.
 //

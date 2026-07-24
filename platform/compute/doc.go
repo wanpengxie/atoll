@@ -1,9 +1,9 @@
 // Package compute is the attached-compute assembly: it puts the
 // position-blind logical world (substrate) into the positioned physical
 // world for ONE daemon process attached to a channel home over the wire. Run
-// is the assembly root — it dials in, runs the daemon's own reconcile ring
-// against a desired source + builder table, and hosts every AlwaysOn desired
-// member as a cell for as long as the process lives:
+// is the assembly root — it dials in, publishes full desired snapshots into a
+// HostSupervisor, and independently converges each body-owned DaemonOutbound
+// slot onto the current physical actor stream:
 //
 //	Run(ctx, cfg) error
 //
@@ -16,10 +16,10 @@
 //
 // # File map
 //
-// compute.go (Run/Config — the daemon assembly root: dial, redial loop,
-// forwarder lifecycle), ring.go (computeRing — dial/reattach/spawn/dispatch/
-// cancel + redial backoff), forwarders.go (cellDownWatcher + obs/cancel/
-// storage-host forwarders), decl.go (ActorFactorySource/LocalFileOpener/StorageHost +
+// compute.go (Run/Config — the daemon assembly root and redial loop),
+// outbound.go (DaemonOutbound stable facades and exact slots), forwarders.go
+// (obs/cancel/storage-host forwarders), decl.go
+// (ActorFactorySource/LocalFileOpener/StorageHost +
 // the storage mirror types — the decl-family words compute alone speaks; see
 // decl.go's own B′ header comment for why ActorDecl itself stays on the
 // platform root instead). ActorFactory (the def shape ActorFactorySource.Lookup

@@ -129,7 +129,7 @@ func (s *timerStore) Due(ctx context.Context, now int64) ([]timerspec.TimerRow, 
 }
 
 func (s *timerStore) MoveToDead(ctx context.Context, id timerspec.TimerID, class timerspec.DeathClass, reason, detail string, diedAt int64) (bool, int, error) {
-	if class != timerspec.DeathFireRejected && class != timerspec.DeathReviveRejected {
+	if class != timerspec.DeathFireRejected {
 		return false, 0, fmt.Errorf("store: invalid timer death class %q", class)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
@@ -301,7 +301,7 @@ func (s *timerStore) ListFired(ctx context.Context, cursor timerspec.FiredCursor
 //
 // Incarnation-bind timers need NO hook here — they are not rows (they live
 // in the schedule engine's in-memory due-set, welded to the live
-// embodiment). Deregister implies the embodiment already died, so those
+// incarnation). Deregister implies the actor identity already ended, so those
 // entries are reaped lazily at fire time via IsLive — zero coupling to this
 // cascade.
 func clearTimersTx(ctx context.Context, tx *sql.Tx, author actor.ActorID) error {

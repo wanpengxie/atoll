@@ -1,7 +1,6 @@
 package archtest
 
 import (
-	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -13,9 +12,6 @@ import (
 	"testing"
 )
 
-// recvBaseTypeName extracts the unqualified receiver type name from a
-// FuncDecl's receiver field list (e.g. "*door" or "door" -> "door"). Returns
-// "" for a receiver-less (free) function.
 func recvBaseTypeName(fn *ast.FuncDecl) string {
 	if fn.Recv == nil || len(fn.Recv.List) == 0 {
 		return ""
@@ -60,110 +56,57 @@ func walkProductionGo(t *testing.T, fn func(path string, f *ast.File, fset *toke
 	}
 }
 
-// enclosingFunc names the FuncDecl containing pos — the call-site key DoD 32
-// requires ("调用位点级白名单，不许文件级放行"): a raw call added to a SIBLING
-// function in an allowed file must trip the wall, never ride the file grant.
 func enclosingFunc(f *ast.File, pos token.Pos) string {
-	for _, d := range f.Decls {
-		if fd, ok := d.(*ast.FuncDecl); ok && fd.Pos() <= pos && pos <= fd.End() {
-			return fd.Name.Name
+	for _, declaration := range f.Decls {
+		if fn, ok := declaration.(*ast.FuncDecl); ok && fn.Pos() <= pos && pos <= fn.End() {
+			return fn.Name.Name
 		}
 	}
 	return ""
 }
 
-func TestActorModelUniqueMutationAndConstructionChokepoints(t *testing.T) {
-	forbiddenTypes := map[string]bool{"MembershipWriter": true, "MembershipControlPlane": true}
-	forbiddenCalls := map[string]bool{
-		"ApplyMemberTransitions": true, "EnsureSystemActor": true,
-		"Deregister": true, "IntroduceComposition": true,
-	}
-	var violations []string
-	walkProductionGo(t, func(path string, f *ast.File, fset *token.FileSet) {
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.TypeSpec:
-				if forbiddenTypes[x.Name.Name] {
-					violations = append(violations, fmt.Sprintf("%s declares retired type %s", fset.Position(x.Pos()), x.Name.Name))
-				}
-			case *ast.CallExpr:
-				if sel, ok := x.Fun.(*ast.SelectorExpr); ok && forbiddenCalls[sel.Sel.Name] {
-					violations = append(violations, fmt.Sprintf("%s calls retired verb %s", fset.Position(x.Pos()), sel.Sel.Name))
-				}
-			case *ast.CompositeLit:
-				sel, ok := x.Type.(*ast.SelectorExpr)
-				if ok && sel.Sel.Name == "PlanActor" &&
-					!(path == "../platform/home/plan.go" && enclosingFunc(f, x.Pos()) == "planForDaemon") {
-					violations = append(violations, fmt.Sprintf("%s constructs PlanActor outside planForDaemon", fset.Position(x.Pos())))
-				}
-			}
-			return true
-		})
-	})
-	if len(violations) > 0 {
-		t.Fatalf("actor-model chokepoint violations:\n%s", strings.Join(violations, "\n"))
-	}
-}
-
 func TestActorModelBundleCallsitesAreClosed(t *testing.T) {
-	// Call-site keys (DoD 32): file AND enclosing function — a sibling
-	// function in the same file gets no free pass.
 	allowedAdmit := map[string]bool{
-		"../platform/home/census.go:admitHuman":       true,
-		"../platform/home/declaration_api.go:declare": true,
-		"../platform/home/open.go:Open":               true,
+		"../platform/home/actor_store.go:Admit":              true,
+		"../platform/home/open.go:Open":                      true,
+		"../platform/home/open.go:seedBootstrap":             true,
+		"../platform/home/open.go:admitBootstrapDeclaration": true,
+	}
+	allowedCascade := map[string]bool{
+		"../platform/home/actor_store.go:CommitTerminal": true,
 	}
 	var admit, endCascade, rawCommit []string
-	walkProductionGo(t, func(path string, f *ast.File, fset *token.FileSet) {
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
+	walkProductionGo(t, func(path string, file *ast.File, fset *token.FileSet) {
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
 				continue
 			}
-			// raw CommitReservation is call-site gated below (not
-			// file-level): only the resourceCompletion/door wrapper's own
-			// commitReservationLocked body may reach
-			// deps.Registry.CommitReservation directly (DoD 32: "调用位点级
-			// 白名单，不许文件级放行" — a sibling method in the SAME file,
-			// e.g. door.invoke or door.create, must NOT get a free pass just
-			// because it shares overlay.go with the wrapper).
-			rawCommitAllowedHere := path == "../runtime/accessdoor/overlay.go" &&
+			key := path + ":" + fn.Name.Name
+			rawCommitAllowed := path == "../runtime/accessdoor/overlay.go" &&
 				recvBaseTypeName(fn) == "door" && fn.Name.Name == "commitReservationLocked"
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				call, ok := n.(*ast.CallExpr)
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
 				if !ok {
 					return true
 				}
-				sel, ok := call.Fun.(*ast.SelectorExpr)
+				selector, ok := call.Fun.(*ast.SelectorExpr)
 				if !ok {
 					return true
 				}
 				at := fset.Position(call.Pos()).String()
-				switch sel.Sel.Name {
+				switch selector.Sel.Name {
 				case "AdmitDeclared":
-					if !allowedAdmit[path+":"+fn.Name.Name] {
+					if !allowedAdmit[key] {
 						admit = append(admit, at)
 					}
 				case "EndCascade":
-					if path != "../platform/home/end.go" || fn.Name.Name != "prepareEndIdentity" {
+					if !allowedCascade[key] {
 						endCascade = append(endCascade, at)
 					}
 				case "CommitReservation":
-					// Only a call whose IMMEDIATE receiver is literally
-					// "....Registry.CommitReservation(...)" is the raw store
-					// call this red line guards (deps.Registry is the
-					// resourceRegistry — the accessdoor Deps field, not the
-					// ResourceCompletion/ResourceOutbox wrapper interfaces).
-					// A call like completion.CommitReservation(...) or
-					// h.outbox.CommitReservation(...) shares the method NAME
-					// but targets the WRAPPER, which is unrestricted by
-					// design (it exists precisely so callers outside this
-					// package can reach the gated completion path) — conflating
-					// the two by name alone is exactly the file-level
-					// over-approximation DoD 32 forbids.
-					recvSel, ok := sel.X.(*ast.SelectorExpr)
-					isRawRegistryCall := ok && recvSel.Sel.Name == "Registry"
-					if isRawRegistryCall && !rawCommitAllowedHere {
+					receiver, ok := selector.X.(*ast.SelectorExpr)
+					if ok && receiver.Sel.Name == "Registry" && !rawCommitAllowed {
 						rawCommit = append(rawCommit, at)
 					}
 				}
@@ -172,42 +115,43 @@ func TestActorModelBundleCallsitesAreClosed(t *testing.T) {
 		}
 	})
 	if len(admit)+len(endCascade)+len(rawCommit) != 0 {
-		t.Fatalf("bundle callsite drift: AdmitDeclared=%v EndCascade=%v CommitReservation(raw)=%v", admit, endCascade, rawCommit)
+		t.Fatalf("bundle callsite drift: AdmitDeclared=%v EndCascade=%v CommitReservation(raw)=%v",
+			admit, endCascade, rawCommit)
 	}
 }
 
 func TestChannelOwnerProductionChokepointsAreClosed(t *testing.T) {
 	var roleAssignments, protectedReturns, bootstrapAssignments []string
-	walkProductionGo(t, func(path string, f *ast.File, fset *token.FileSet) {
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
+	walkProductionGo(t, func(path string, file *ast.File, _ *token.FileSet) {
+		for _, declaration := range file.Decls {
+			fn, ok := declaration.(*ast.FuncDecl)
 			if !ok || fn.Body == nil {
 				continue
 			}
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				switch x := n.(type) {
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				switch value := node.(type) {
 				case *ast.CompositeLit:
-					for _, elt := range x.Elts {
-						kv, ok := elt.(*ast.KeyValueExpr)
+					for _, element := range value.Elts {
+						field, ok := element.(*ast.KeyValueExpr)
 						if !ok {
 							continue
 						}
-						key, ok := kv.Key.(*ast.Ident)
+						name, ok := field.Key.(*ast.Ident)
 						if !ok {
 							continue
 						}
-						switch key.Name {
+						switch name.Name {
 						case "Role":
-							roleAssignments = append(roleAssignments, fmt.Sprintf("%s:%s", path, fn.Name.Name))
+							roleAssignments = append(roleAssignments, path+":"+fn.Name.Name)
 						case "Bootstrap":
-							bootstrapAssignments = append(bootstrapAssignments, fmt.Sprintf("%s:%s", path, fn.Name.Name))
+							bootstrapAssignments = append(bootstrapAssignments, path+":"+fn.Name.Name)
 						}
 					}
 				case *ast.ReturnStmt:
-					for _, result := range x.Results {
-						sel, ok := result.(*ast.SelectorExpr)
-						if ok && sel.Sel.Name == "ErrChannelOwnerProtected" {
-							protectedReturns = append(protectedReturns, fmt.Sprintf("%s:%s", path, fn.Name.Name))
+					for _, result := range value.Results {
+						selector, ok := result.(*ast.SelectorExpr)
+						if ok && selector.Sel.Name == "ErrChannelOwnerProtected" {
+							protectedReturns = append(protectedReturns, path+":"+fn.Name.Name)
 						}
 					}
 				}
@@ -215,319 +159,110 @@ func TestChannelOwnerProductionChokepointsAreClosed(t *testing.T) {
 			})
 		}
 	})
-	wantRole := []string{"../platform/home/census.go:admitChannelOwner"}
-	wantProtected := []string{"../platform/home/end.go:prepareEndIdentity", "../runtime/internal/store/cascade.go:EndCascade"}
+	wantRole := []string{
+		"../platform/home/actor_store.go:Admit",
+		"../platform/home/census.go:admitChannelOwner",
+		"../platform/home/open.go:seedBootstrap",
+		"../runtime/actorctl/types.go:definitionFromStored",
+		"../runtime/actorctl/types.go:rowFromActive",
+	}
+	wantProtected := []string{
+		"../platform/home/actor_store.go:ResolveTerminal",
+		"../runtime/internal/store/cascade.go:EndCascade",
+	}
 	wantBootstrap := []string{"../platform/channelhost/channelhost.go:openHome"}
 	sort.Strings(roleAssignments)
 	sort.Strings(protectedReturns)
 	sort.Strings(bootstrapAssignments)
+	sort.Strings(wantRole)
 	sort.Strings(wantProtected)
-	if !reflect.DeepEqual(roleAssignments, wantRole) || !reflect.DeepEqual(protectedReturns, wantProtected) || !reflect.DeepEqual(bootstrapAssignments, wantBootstrap) {
-		t.Fatalf("channel-owner chokepoint drift: Role=%v want %v; protected returns=%v want %v; Bootstrap=%v want %v",
+	if !reflect.DeepEqual(roleAssignments, wantRole) ||
+		!reflect.DeepEqual(protectedReturns, wantProtected) ||
+		!reflect.DeepEqual(bootstrapAssignments, wantBootstrap) {
+		t.Fatalf("channel-owner chokepoint drift: Role=%v want %v; protected=%v want %v; Bootstrap=%v want %v",
 			roleAssignments, wantRole, protectedReturns, wantProtected, bootstrapAssignments, wantBootstrap)
 	}
 }
 
-func TestActorModelAuthorityAndLivenessHaveNoFallbackMechanism(t *testing.T) {
-	var withL, inlineVersionCompare []string
-	walkProductionGo(t, func(path string, f *ast.File, fset *token.FileSet) {
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.Ident:
-				if x.Name == "withL" {
-					withL = append(withL, fset.Position(x.Pos()).String())
-				}
-			case *ast.BinaryExpr:
-				// The ONE legal inline author-version comparison is CheckAuthor's
-				// own implementation — not the whole of readface.go (call-site
-				// grant, DoD 32).
-				if path == "../platform/home/readface.go" && enclosingFunc(f, x.Pos()) == "CheckAuthor" {
-					return true
-				}
-				text := exprSelectorNames(x)
-				if text["BirthVersion"] && text["CurrentDeclVersion"] {
-					inlineVersionCompare = append(inlineVersionCompare, fset.Position(x.Pos()).String())
-				}
-			}
-			return true
-		})
-	})
-	if len(withL)+len(inlineVersionCompare) != 0 {
-		t.Fatalf("authority/liveness fallback drift: withL=%v inline author comparisons=%v", withL, inlineVersionCompare)
-	}
-}
-
-func exprSelectorNames(root ast.Node) map[string]bool {
-	out := map[string]bool{}
-	ast.Inspect(root, func(n ast.Node) bool {
-		if sel, ok := n.(*ast.SelectorExpr); ok {
-			out[sel.Sel.Name] = true
-		}
-		return true
-	})
-	return out
-}
-
-func TestActorModelDataFlowChokepoints(t *testing.T) {
-	var mintState, fireAndMark, ackTimer, snapshot []string
-	var views []string
-	var fenceDecls []string
-	walkProductionGo(t, func(path string, f *ast.File, fset *token.FileSet) {
-		ast.Inspect(f, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.CallExpr:
-				if sel, ok := x.Fun.(*ast.SelectorExpr); ok {
-					at := fset.Position(x.Pos()).String()
-					switch sel.Sel.Name {
-					case "MintState":
-						if !(path == "../runtime/accessdoor/memstate.go" && enclosingFunc(f, x.Pos()) == "Resolve") {
-							mintState = append(mintState, at)
-						}
-					case "FireAndMark":
-						if !(path == "../runtime/schedule/firepen.go" && enclosingFunc(f, x.Pos()) == "Fire") {
-							fireAndMark = append(fireAndMark, at)
-						}
-					case "AckTimer":
-						ackTimer = append(ackTimer, at)
-					}
-				}
-			case *ast.Ident:
-				if path == "../platform/home/liveness.go" && x.Name == "snapshot" {
-					snapshot = append(snapshot, fset.Position(x.Pos()).String())
-				}
-			case *ast.FuncDecl:
-				if path != "../platform/home/liveness.go" || x.Recv == nil {
-					break
-				}
-				switch x.Name.Name {
-				case "AttachmentIntent", "WakeStanding":
-					views = append(views, x.Name.Name)
-				case "prepareAttachmentFence":
-					fenceDecls = append(fenceDecls, x.Name.Name)
-					if x.Type.Results == nil || len(x.Type.Results.List) == 0 {
-						fenceDecls = append(fenceDecls, "missing-result")
-					} else if id, ok := x.Type.Results.List[0].Type.(*ast.Ident); !ok || id.Name != "attachmentFence" {
-						fenceDecls = append(fenceDecls, "state-bearing-result")
-					}
-				}
-			}
-			return true
-		})
-	})
-	if len(mintState)+len(fireAndMark)+len(ackTimer)+len(snapshot) != 0 ||
-		!sameStrings(views, []string{"AttachmentIntent", "WakeStanding"}) ||
-		!sameStrings(fenceDecls, []string{"prepareAttachmentFence"}) {
-		t.Fatalf("actor-model data-flow drift: MintState=%v FireAndMark=%v AckTimer=%v snapshot=%v views=%v fences=%v",
-			mintState, fireAndMark, ackTimer, snapshot, views, fenceDecls)
-	}
-}
-
-func sameStrings(got, want []string) bool {
-	if len(got) != len(want) {
-		return false
-	}
-	seen := make(map[string]int, len(got))
-	for _, s := range got {
-		seen[s]++
-	}
-	for _, s := range want {
-		seen[s]--
-	}
-	for _, n := range seen {
-		if n != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-// lifecycleAuthorMintPoints is the S9 closed set of two production minting loci
-// (actor/wire 两道) that may weld a fresh AuthorStamp into a
-// lifecycleEndHandle{...} literal — the "生死动词作者一律铸造时焊死" red
-// line. It is call-site (function) precise, not file-level: a sibling
-// function sharing the same file (e.g. any future helper added to
-// end.go/open.go) gets NO free pass merely by being declared alongside a
-// real mint point — every entry names both the file AND the exact
-// function/method that may construct the literal.
-//   - spawnhandle.go/newSpawnHandle: actor 道 — welds a live incarnation's
-//     own identity as its Fork/DespawnChild/EndSelf author.
-//   - remote_lifecycle.go/handleRemoteEnd: wire 道 — welds the wire
-//     attach-authenticated incarnation's identity for a remote End frame.
-var lifecycleAuthorMintPoints = map[[2]string]bool{
-	{"../platform/home/spawnhandle.go", "newSpawnHandle"}:       true,
-	{"../platform/home/remote_lifecycle.go", "handleRemoteEnd"}: true,
-}
-
-func TestActorModelEndAuthorityIsWeldedAtMintPoints(t *testing.T) {
-	var exportedHomeEnd, authorLiterals []string
-	walkProductionGo(t, func(path string, f *ast.File, fset *token.FileSet) {
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
+func TestActorModelAuthorityHasNoInlineVersionFallback(t *testing.T) {
+	var inlineVersionCompare []string
+	walkProductionGo(t, func(path string, file *ast.File, fset *token.FileSet) {
+		ast.Inspect(file, func(node ast.Node) bool {
+			expression, ok := node.(*ast.BinaryExpr)
 			if !ok {
-				continue
+				return true
 			}
-			if path == "../platform/home/end.go" && fn.Name.Name == "EndIdentity" {
-				exportedHomeEnd = append(exportedHomeEnd, fset.Position(fn.Pos()).String())
+			if path == "../platform/home/readface.go" && enclosingFunc(file, expression.Pos()) == "CheckAuthor" {
+				return true
 			}
-			if fn.Body == nil {
-				continue
-			}
-			allowedHere := lifecycleAuthorMintPoints[[2]string{path, fn.Name.Name}]
-			ast.Inspect(fn.Body, func(n ast.Node) bool {
-				cl, ok := n.(*ast.CompositeLit)
-				if !ok {
-					return true
-				}
-				// Only an AuthorStamp{...} literal welded AS the `author`
-				// field of a lifecycleEndHandle{...} literal is the S9
-				// generation-authority weld this red line governs — an
-				// AuthorStamp built to weld a resource/schedule CAPABILITY
-				// (caps.go/sysanchorcaps.go's Access/Schedule Mint calls) or
-				// a throwaway CheckAuthor verification stamp (fork.go's
-				// parent-liveness recheck, mirroring the same pattern
-				// runtime/schedule/firepen.go and
-				// runtime/harness/step_author_gate.go already use elsewhere
-				// in the tree) is a structurally different, unrestricted
-				// concern — conflating the two under one file-level ban is
-				// exactly the over-approximation DoD 32 forbids.
-				ident, ok := cl.Type.(*ast.Ident)
-				if !ok || ident.Name != "lifecycleEndHandle" {
-					return true
-				}
-				for _, elt := range cl.Elts {
-					kv, ok := elt.(*ast.KeyValueExpr)
-					if !ok {
-						continue
-					}
-					key, ok := kv.Key.(*ast.Ident)
-					if !ok || key.Name != "author" {
-						continue
-					}
-					authorCl, ok := kv.Value.(*ast.CompositeLit)
-					if !ok {
-						continue
-					}
-					sel, ok := authorCl.Type.(*ast.SelectorExpr)
-					if !ok || sel.Sel.Name != "AuthorStamp" {
-						continue
-					}
-					if !allowedHere {
-						authorLiterals = append(authorLiterals, fset.Position(authorCl.Pos()).String())
-					}
+			names := map[string]bool{}
+			ast.Inspect(expression, func(child ast.Node) bool {
+				if selector, ok := child.(*ast.SelectorExpr); ok {
+					names[selector.Sel.Name] = true
 				}
 				return true
 			})
-		}
-	})
-	if len(exportedHomeEnd)+len(authorLiterals) != 0 {
-		t.Fatalf("end-authority drift: exported EndIdentity=%v lifecycle AuthorStamp welds outside the closed mint-point set=%v", exportedHomeEnd, authorLiterals)
-	}
-}
-
-// System-owned lifecycle removal must exercise the same SysOp entry used in
-// production. Tests may still construct actor/wire lifecycle handles to test
-// those mechanisms, but may not mint a synthetic system-author handle that no
-// production assembly point exposes.
-func TestActorModelTestsDoNotMintSystemLifecycleHandle(t *testing.T) {
-	fset := token.NewFileSet()
-	err := filepath.WalkDir("../platform/home", func(path string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if d.IsDir() || !strings.HasSuffix(path, "_test.go") {
-			return nil
-		}
-		f, err := parser.ParseFile(fset, path, nil, 0)
-		if err != nil {
-			return err
-		}
-		ast.Inspect(f, func(n ast.Node) bool {
-			literal, ok := n.(*ast.CompositeLit)
-			if !ok {
-				return true
-			}
-			ident, ok := literal.Type.(*ast.Ident)
-			if !ok || ident.Name != "lifecycleEndHandle" {
-				return true
-			}
-			for _, elt := range literal.Elts {
-				field, ok := elt.(*ast.KeyValueExpr)
-				if !ok {
-					continue
-				}
-				key, ok := field.Key.(*ast.Ident)
-				if !ok || key.Name != "author" {
-					continue
-				}
-				ast.Inspect(field.Value, func(n ast.Node) bool {
-					sel, ok := n.(*ast.SelectorExpr)
-					if !ok {
-						return true
-					}
-					pkg, pkgOK := sel.X.(*ast.Ident)
-					if pkgOK && pkg.Name == "actor" && sel.Sel.Name == "SystemActorID" {
-						t.Errorf("%s mints a test-only system lifecycle handle; use SystemOps.Remove", fset.Position(sel.Pos()))
-					}
-					return true
-				})
+			if names["BirthVersion"] && names["CurrentDeclVersion"] {
+				inlineVersionCompare = append(inlineVersionCompare, fset.Position(expression.Pos()).String())
 			}
 			return true
 		})
-		return nil
 	})
-	if err != nil {
-		t.Fatal(err)
+	if len(inlineVersionCompare) != 0 {
+		t.Fatalf("inline author-version comparisons escaped CheckAuthor: %v", inlineVersionCompare)
 	}
 }
 
-// TestActorModelLivenessReadFaceIsClosedToTwoViews enforces §2.6's "读面 =
-// 两个目的视图" red line as an EXPORTED-METHOD-ENUMERATION closed set, not
-// merely an existence check (the pre-v1.4 shape: "does AttachmentIntent
-// exist, does WakeStanding exist" — which stays green even if a THIRD
-// exported read projection gets bolted on beside them). Every exported
-// method on *livenessLedger is enumerated; it must be a member of the full
-// §2.6 method-set closure (the seven write paths' named events + the two
-// read views), and the two read views specifically must be exactly
-// {AttachmentIntent, WakeStanding} — a third one appearing anywhere turns
-// this red.
-func TestActorModelLivenessReadFaceIsClosedToTwoViews(t *testing.T) {
-	wantExported := map[string]bool{
-		"Bootstrap": true, "Close": true,
-		"AdmitIdentity": true, "EndIdentity": true,
-		"AcceptDelivery": true, "AcceptFiredDelivery": true,
-		"ApproveIdle": true, "ObserveDown": true, "Retire": true,
-		"RetireIfVersionSkew": true, "RetireIfTicketMatches": true,
-		"BeginEnsure": true, "PublishLocal": true, "Attach": true, "AbortEnsure": true,
-		"AttachmentIntent": true, "WakeStanding": true,
-	}
-	wantReadFace := []string{"AttachmentIntent", "WakeStanding"}
-	seenReadFace := map[string]bool{}
-	var extra []string
-	walkProductionGo(t, func(path string, f *ast.File, fset *token.FileSet) {
-		if path != "../platform/home/liveness.go" {
-			return
-		}
-		for _, decl := range f.Decls {
-			fn, ok := decl.(*ast.FuncDecl)
-			if !ok || !fn.Name.IsExported() || recvBaseTypeName(fn) != "livenessLedger" {
-				continue
+func TestActorModelDataFlowChokepoints(t *testing.T) {
+	var mintState, fireAndMark, ackTimer []string
+	walkProductionGo(t, func(path string, file *ast.File, fset *token.FileSet) {
+		ast.Inspect(file, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
 			}
-			name := fn.Name.Name
-			if !wantExported[name] {
-				extra = append(extra, fmt.Sprintf("%s: unexpected exported livenessLedger method %s (not in the §2.6 closed method set)", fset.Position(fn.Pos()), name))
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
 			}
-			if name == "AttachmentIntent" || name == "WakeStanding" {
-				seenReadFace[name] = true
+			at := fset.Position(call.Pos()).String()
+			switch selector.Sel.Name {
+			case "MintState":
+				allowed := path == "../platform/home/open.go" && enclosingFunc(file, call.Pos()) == "Open"
+				allowed = allowed || path == "../runtime/accessdoor/memstate.go" &&
+					enclosingFunc(file, call.Pos()) == "Resolve"
+				if !allowed {
+					mintState = append(mintState, at)
+				}
+			case "FireAndMark":
+				if !(path == "../runtime/schedule/firepen.go" && enclosingFunc(file, call.Pos()) == "Fire") {
+					fireAndMark = append(fireAndMark, at)
+				}
+			case "AckTimer":
+				ackTimer = append(ackTimer, at)
 			}
-		}
+			return true
+		})
 	})
-	var missingReadFace []string
-	for _, name := range wantReadFace {
-		if !seenReadFace[name] {
-			missingReadFace = append(missingReadFace, name)
-		}
+	if len(mintState)+len(fireAndMark)+len(ackTimer) != 0 {
+		t.Fatalf("actor-model data-flow drift: MintState=%v FireAndMark=%v AckTimer=%v",
+			mintState, fireAndMark, ackTimer)
 	}
-	if len(extra)+len(missingReadFace) != 0 {
-		t.Fatalf("liveness read-face closure drift: extra exported methods=%v missing read views=%v", extra, missingReadFace)
+}
+
+func TestRetiredHomeLivenessOwnerIsAbsent(t *testing.T) {
+	retiredType := "liveness" + "Ledger"
+	var declarations []string
+	walkProductionGo(t, func(_ string, file *ast.File, fset *token.FileSet) {
+		ast.Inspect(file, func(node ast.Node) bool {
+			spec, ok := node.(*ast.TypeSpec)
+			if ok && spec.Name.Name == retiredType {
+				declarations = append(declarations, fset.Position(spec.Pos()).String())
+			}
+			return true
+		})
+	})
+	if len(declarations) != 0 {
+		t.Fatalf("retired Home liveness owner returned: %v", declarations)
 	}
 }

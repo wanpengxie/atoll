@@ -259,7 +259,7 @@ CREATE TABLE IF NOT EXISTS actor_state (
 -- This table holds ONLY identity-bind timers — the bind is expressed by WHICH
 -- home the intent lives in, never by a column (same discipline as actor_state:
 -- scope is expressed by structure): incarnation-bind timers are engine MEMORY,
--- welded to the live embodiment, and vanish with the process (BEAM in-VM /
+-- welded to the live incarnation, and vanish with the process (BEAM in-VM /
 -- Orleans in-activation / POSIX on-task_struct — ephemeral intent never gets a
 -- durable account). So: no bind column, ever; incarnation NEVER persisted.
 -- No target column, ever (timers are always self-targeted). No recurrence

@@ -16,8 +16,7 @@ var (
 type DeathClass string
 
 const (
-	DeathFireRejected   DeathClass = "fire_rejected"
-	DeathReviveRejected DeathClass = "revive_rejected"
+	DeathFireRejected DeathClass = "fire_rejected"
 )
 
 // TimerID names one pending timer. It is a RUNTIME-level name (control-plane),
@@ -39,7 +38,7 @@ type TimerID string
 // truth. This store holds ONLY the durable half of the time axis: intent keyed
 // by a durable name (author identity), surviving restarts until deregister.
 // Incarnation-bind timers are NOT rows and never will be — they live in the
-// schedule engine's memory, welded to the live embodiment, and vanish with the
+// schedule engine's memory, welded to the exact incarnation, and vanish with the
 // process (compare BEAM in-VM timers / Orleans in-activation Timers / POSIX
 // timers on task_struct — ephemeral intent lives in ephemeral memory; a
 // durable account for a must-die thing is half a token).

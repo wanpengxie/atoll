@@ -111,10 +111,10 @@ func TestActorbaseSysIsSurjectiveOverCapabilityFace(t *testing.T) {
 		}
 	}
 
-	// --- Spawn arm -------------------------------------------------------------
-	for _, m := range []string{"Fork", "DespawnChild", "End"} {
+	// --- Lifecycle arm ---------------------------------------------------------
+	for _, m := range []string{"Fork", "RequestIdle", "End"} {
 		if !hasMethod(m) {
-			t.Errorf("Spawn atom has no Sys verb %s", m)
+			t.Errorf("Lifecycle atom has no Sys verb %s", m)
 		}
 	}
 

@@ -179,7 +179,7 @@ func (f *Fold) OnRemoteDown(id actor.ActorID, key actorhost.AttemptKey) {
 	}
 }
 
-// Sweep enforces fold rows ⊆ (live embodiments ∪ active membership). Fresh
+// Sweep enforces fold rows ⊆ (live incarnations ∪ active membership). Fresh
 // rows survive one reconciliation cadence to close the spawn/read race.
 func (f *Fold) Sweep(keep func(actor.ActorID) bool) int {
 	cutoff := f.clock().Add(-f.grace).UnixMilli()

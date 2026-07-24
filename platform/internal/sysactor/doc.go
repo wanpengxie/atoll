@@ -55,7 +55,7 @@
 // read. DEVICE PRESENCE is a third, separate axis: an ADVISORY three-state
 // signal (device_presence events → DevicePresence fold) about an external
 // device's own reachability, orthogonal to whether the actor itself has an
-// embodiment — it never gates liveness and liveness never answers it. readiness
+// incarnation — it never gates liveness and liveness never answers it. readiness
 // is NOT a fourth axis — whether an actor can service a request is the OUTCOME
 // of send→terminal, not a stored state the system actor projects or composes.
 package sysactor

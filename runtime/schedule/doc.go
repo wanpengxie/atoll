@@ -13,9 +13,9 @@
 //   - bind=identity: durable intent, keyed by author identity, stored in
 //     timerspec.TimerStore (runtime/internal/store's timers table) — survives
 //     restarts, cleared on deregister.
-//   - bind=incarnation: intent welded to the CURRENTLY LIVE embodiment, kept
+//   - bind=incarnation: intent welded to the CURRENT incarnation, kept
 //     ONLY in this engine's memory (never a store row, never serialised) —
-//     dies with the embodiment, vanishes with the process (matching the
+//     dies with that incarnation, vanishes with the process (matching the
 //     precedent of BEAM in-VM timers / Orleans in-activation Timers / POSIX
 //     timers on task_struct: ephemeral intent lives in ephemeral memory).
 //
@@ -32,6 +32,6 @@
 // The package exports the caps surface (ScheduleHandle, Minter) and the
 // engine (Engine) that drives it; New returns both, never a bare handle to
 // the internal due-set. Assembly (wiring a real TimerStore/FireSink/
-// LivenessProbe/Reviver/Clock, and the engine's Start/Close lifecycle) is the
+// Authority/Clock, and the engine's Start/Close lifecycle) is the
 // runtime root's job (runtime.OpenScheduler) — not this package's.
 package schedule

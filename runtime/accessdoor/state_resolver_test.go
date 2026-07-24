@@ -63,7 +63,7 @@ func TestStateHandleResolverDispatchAndRunLifetime(t *testing.T) {
 	if out, err := first.Invoke(ctx, access.OpCreate, resource.ResourceID("done"), []byte("yes"), nil); err != nil || !out.Accepted() {
 		t.Fatalf("create = (%+v,%v)", out, err)
 	}
-	// A later embodiment resolves the same completed handle and sees the run
+	// A later incarnation resolves the same completed handle and sees the run
 	// state written by its predecessor.
 	second, err := resolver.Resolve(ctx, storespec.AuthorStamp{ID: "forked", BirthVersion: 1})
 	if err != nil {

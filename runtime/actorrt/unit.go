@@ -18,7 +18,7 @@ var (
 	ErrUnitNotPrepared   = errors.New("actorrt: unit is not prepared")
 	ErrUnitSinkInstalled = errors.New("actorrt: unit event sink already installed")
 	ErrMailboxFull       = errors.New("actorrt: mailbox full")
-	ErrCellStopped       = errors.New("actorrt: unit stopped")
+	ErrUnitStopped       = errors.New("actorrt: unit stopped")
 )
 
 const cancelSetCap = 256
@@ -282,12 +282,12 @@ func (u *Unit) Stat() UnitStat {
 // Deliver is the bounded, non-blocking local endpoint.
 func (u *Unit) Deliver(env *message.Envelope) error {
 	if u == nil || env == nil {
-		return ErrCellStopped
+		return ErrUnitStopped
 	}
 	u.mu.Lock()
 	if !u.admissionOpen || !u.alive.Load() {
 		u.mu.Unlock()
-		return ErrCellStopped
+		return ErrUnitStopped
 	}
 	select {
 	case u.inbox <- env:

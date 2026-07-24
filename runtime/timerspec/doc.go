@@ -19,7 +19,7 @@
 // the durable half of the time axis: identity-bind pending intent, keyed by
 // a durable name (author identity). Incarnation-bind timers are NOT here and
 // never will be — they are the schedule engine's in-memory due-set, welded
-// to the live embodiment, vanishing with the process (matching the historical
+// to the live incarnation, vanishing with the process (matching the historical
 // precedent of BEAM in-VM timers / Orleans in-activation Timers / POSIX
 // timers on task_struct — ephemeral intent lives in ephemeral memory, never
 // gets a durable account). So this leaf has no Bind field and no Bind type

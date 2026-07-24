@@ -42,7 +42,7 @@ func makeDirs(t *testing.T, root string, names ...string) map[string]string {
 // human member drives ALL five business frames (submit / resolve / cancel / after /
 // cancel_timer) plus the opening attach control frame over the real /ws, and its
 // presence自报 is read back out-of-band through the status API. It is server-ONLY —
-// the human embodiment is home-side (the reconcile ring keeps the admitted member's
+// the human actor body is home-side (Host keeps the admitted member's
 // cell up), so no daemon is needed; keeping it daemon-free makes the frame contract
 // deterministic and fast. (detach is整删 in the连接模型勘误期 v2 — the client-visible
 // unbind verb has no ontology; a connection is an authenticated person + one pipe.)

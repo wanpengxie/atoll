@@ -1,6 +1,6 @@
-// Package link is the platform's cross-machine embodiment layer:
+// Package link is the platform's cross-machine physical-link layer:
 // ONE authenticated WS link carries N logical yamux substreams, each stream a
-// (channel, actor) embodiment running the NATIVE port-wire protocol (runtime/ipc)
+// (channel, actor) stream running the native actor wire protocol (runtime/ipc)
 // with a real handshake — stream-on-link is the SAME contract as a local pipe
 // (Erlang-distribution zero-translation discipline). The link control plane
 // (attach) rides its own dedicated substream. The home side (accept.go) judges

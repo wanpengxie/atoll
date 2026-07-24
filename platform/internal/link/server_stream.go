@@ -98,7 +98,7 @@ func (s *serverActorEndpoint) Close() error {
 
 func (s *serverActorEndpoint) Deliver(env *message.Envelope) error {
 	if s == nil || env == nil {
-		return actorrt.ErrCellStopped
+		return actorrt.ErrUnitStopped
 	}
 	raw, err := json.Marshal(ipc.DeliverPayload{Envelope: *env})
 	if err != nil {
@@ -106,7 +106,7 @@ func (s *serverActorEndpoint) Deliver(env *message.Envelope) error {
 	}
 	select {
 	case <-s.ctx.Done():
-		return actorrt.ErrCellStopped
+		return actorrt.ErrUnitStopped
 	default:
 	}
 	select {

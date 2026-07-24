@@ -17,7 +17,7 @@ import (
 // config_door_test.go is the S8 DoD (spec §7 DoD 10): ctx.Config is the read-only
 // per-instance snapshot that reaches an actor via registry.InstanceSpec.Config in
 // the Proc model, never through actorcaps.Caps (that half is the
-// TestConfigNotInCaps archtest), and 改配置 flows door → reconcile-replace (削 → SpawnIfAbsent rebuild) → a fresh
+// TestConfigNotInCaps archtest), and 改配置 flows door → Controller replacement → a fresh
 // incarnation over the new snapshot.
 
 // configSink records the "model" each incarnation of an id was BUILT with — the

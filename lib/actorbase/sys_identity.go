@@ -57,7 +57,7 @@ func (e *engine) driveCtx() context.Context {
 }
 
 // driveReady is the occupant-ready gate every identity verb runs first:
-// actorrt's go-live (embodiments entry + live=true) precedes impl.Start, and
+// actorrt's go-live publication precedes impl.Start, and
 // lifeCtx is only assigned inside Start — a verb call in that window would
 // pen.Write(nil)/WithoutCancel(nil) panic and race the lifeCtx write. The
 // atomic occupant load doubles as the happens-before edge for reading lifeCtx

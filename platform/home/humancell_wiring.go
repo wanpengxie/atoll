@@ -13,7 +13,7 @@ import (
 )
 
 // humancell_wiring.go is the platform assembly root's wiring shell for the
-// home-side human embodiment: it holds the *Home-bound seam (factory + Proc
+// home-side human body: it holds the *Home-bound seam (factory + Proc
 // shell + slot-access methods) that stitch platform/internal/humancell's
 // body onto a live admitted member. The interpreter/serve-loop body itself
 // lives in platform/internal/humancell (platform 拓扑批 T2 — 受养驱动 domain
@@ -27,7 +27,7 @@ import (
 // object — the organ-bag red line (surface_test) stays intact: these three are
 // capability methods, not bare-accessor leaks.
 
-// humanCellFactory is the platform's built-in home-side human embodiment. user域
+// humanCellFactory is the platform's built-in home-side human body. user域
 // supply is platform internal政 — a per-channel human member's authority lives
 // only in this channel's registry (the app cannot enumerate it), so the reconcile
 // ring keeps a live human cell up whenever the member is admitted, without any
@@ -50,7 +50,7 @@ import (
 // Match plumbing.
 func humanCellFactory(h *Home, id actor.ActorID) platform.ActorFactory {
 	return platform.ActorFactory{Proc: actorbase.Def{
-		Doc: "home-side human embodiment (subjectgate): callable; three-choice per-type closure (immediate human.message / deferred human.approve) + describe; the person drives own actions via wire frames through the slot",
+		Doc: "home-side human actor (subjectgate): callable; three-choice per-type closure (immediate human.message / deferred human.approve) + describe; the person drives own actions via wire frames through the slot",
 		New: func() (actorbase.Proc, error) {
 			return func(sys actorbase.Sys) error { return h.runHumanCell(id, sys) }, nil
 		},

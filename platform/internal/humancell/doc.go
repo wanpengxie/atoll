@@ -1,4 +1,4 @@
-// Package humancell is the home-side human embodiment's BODY (platform 拓扑批
+// Package humancell is the home-side human actor's body (platform 拓扑批
 // T2): the frame interpreter + mailbox serve loop that answers a human
 // subject's own requests and drives the person's own actions onto the cell's
 // welded caps.

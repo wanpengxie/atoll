@@ -169,12 +169,12 @@ func TestFanoutLiteLegacyMechanismsCannotReturn(t *testing.T) {
 			t.Errorf("realm declaration API leaks channel-local fence %s", localOnly)
 		}
 	}
-	opEntry, err := os.ReadFile("../platform/home/opentry.go")
+	actorStore, err := os.ReadFile("../platform/home/actor_store.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(opEntry), `systemMeta("ifin:v1:"+uuid.NewString(), request)`) {
-		t.Error("declaration sync no longer mints a fresh UUID ref at the real operation entry")
+	if !strings.Contains(string(actorStore), `ref = "ifin:v1:" + fmt.Sprint(s.now().UnixNano())`) {
+		t.Error("declaration sync no longer mints a fresh operation ref at the Store entry")
 	}
 }
 

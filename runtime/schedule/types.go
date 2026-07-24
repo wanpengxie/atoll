@@ -30,7 +30,7 @@ var (
 // (the routing question is: should this intent still exist after a crash
 // restart?). It is a ROUTING choice, not a persisted tag: identity routes to
 // the durable TimerStore row; incarnation routes to the engine's in-memory
-// due-set welded to the current embodiment. It names which level the intent
+// due-set welded to the current incarnation. It names which level the intent
 // is welded to, NOT who scheduled it (author is always the welded handle's
 // identity — orthogonal).
 type Bind string
@@ -40,8 +40,8 @@ const (
 	// Cancel or by the author's deregister (cascading delete, same tx as the
 	// other actor-scoped loci).
 	BindIdentity Bind = "identity"
-	// BindIncarnation: the intent is welded to the CURRENT live embodiment —
-	// it dies the instant that embodiment dies (Despawn or process restart),
+	// BindIncarnation: the intent is welded to the CURRENT incarnation —
+	// it dies when that incarnation ends or the process restarts,
 	// never persisted.
 	BindIncarnation Bind = "incarnation"
 )
@@ -140,7 +140,7 @@ var ErrDuplicateFire = errors.New("schedule: fire already appended")
 
 // ErrBadSchedule is returned by Schedule for a structurally invalid request:
 // Bind outside the closed set, FireAt<=0, an empty or reserved-prefixed
-// Type, or (bind=incarnation) an author with no live embodiment to weld to
+// Type, or (bind=incarnation) an author with no current incarnation to weld to
 // right now. A PAST FireAt is legal (it fires immediately — refusing it would
 // make "a millisecond before vs after the deadline" two different
 // behaviours).
@@ -161,9 +161,8 @@ func (e FireRejected) Error() string {
 	return "schedule: fire rejected by harness: " + e.Reason + " (" + e.Detail + ")"
 }
 
-// Deps bundles every collaborator the engine needs. New fail-fasts on any
-// missing (Store/Fire/Host/Revive/Clock ALL required — Revive is not an
-// increment, it is the reason a timer exists at all; Clock is required here
+// Deps bundles every collaborator the engine needs. New fail-fasts on every
+// required dependency; Clock is required here
 // so tests can never accidentally fall back to the wall clock — OpenScheduler,
 // the runtime-root assembly seam, is the ONLY place that defaults a nil Clock
 // to the real one).

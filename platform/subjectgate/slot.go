@@ -343,9 +343,9 @@ func (r *Registry) Slot(id actor.ActorID) (*Slot, bool) {
 	return s, ok
 }
 
-// IDs returns a point-in-time slot-key snapshot for the composition root's
+// Keys returns a point-in-time slot-key snapshot for the composition root's
 // membership-derived reconcile. It exposes no Slot objects.
-func (r *Registry) IDs() []actor.ActorID {
+func (r *Registry) Keys() []actor.ActorID {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	ids := make([]actor.ActorID, 0, len(r.slots))
@@ -355,8 +355,9 @@ func (r *Registry) IDs() []actor.ActorID {
 	return ids
 }
 
-// Remove drops id's slot (户籍级联, S4 consumes). Forgets its testimony first so
-// no observer keeps a stale value.
+// Remove drops id's slot. The Home subject-slot reconciler is its sole
+// production caller; membership edges only poke that level loop. Remove
+// forgets testimony first so no observer keeps a stale value.
 func (r *Registry) Remove(id actor.ActorID) {
 	r.mu.Lock()
 	s := r.slots[id]

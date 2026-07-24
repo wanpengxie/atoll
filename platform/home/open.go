@@ -220,7 +220,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if err := actors.Start(ctx, systemUnit); err != nil {
 		return nil, fmt.Errorf("platform: start actor control: %w", err)
 	}
-	h.sweepSubjectSlots()
+	h.sweepSubjectSlots(ctx)
 
 	links, err := link.NewAcceptor(link.Config{
 		Minter: h.minter, Access: cs.Access, StateHandles: stateHandles,

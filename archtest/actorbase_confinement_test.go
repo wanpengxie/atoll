@@ -23,32 +23,59 @@ import (
 
 const actorcapsPkg = platformModulePrefix + "lib/actorcaps"
 
-// actorcapsAllowedPrefix is ①'s repo-wide allowlist (spec: "允许范围仅
-// platform+lib/actorbase+archtest"): the assembly root that welds the caps
-// bundle (platform), the ONE package that consumes it to mint a live Sys
-// (lib/actorbase — engine.go's New), and this archtest package's own doubles.
+// actorcapsAllowedPrefix is the repo-wide allowlist for naming the whole Caps
+// bundle. Importing actorcaps vocabulary such as ForkSpec or LifecycleHandle
+// is intentionally broader; only Caps itself is the private assembly seam.
 var actorcapsAllowedPrefix = []string{"../platform/", "../lib/actorbase/", "../lib/actorcaps/", "../archtest/"}
 
-// TestActorcapsConfinedToPlatformAndActorbase — ① import confinement,
-// repo-wide, _test.go included (spec: "含 _test.go 扫描"). A downstream
-// package never names actorcaps.Caps: actorbase.Def is the only production
-// factory shape. Tests observe behavior through the same actorbase.Def shape.
+// TestActorcapsConfinedToPlatformAndActorbase checks the actual Caps selector,
+// not the package import. actorctl legitimately owns lifecycle vocabulary and
+// must be allowed to import actorcaps without gaining the whole bundle.
 func TestActorcapsConfinedToPlatformAndActorbase(t *testing.T) {
 	var v []string
-	walkImportsAll(t, func(slash, imp string) {
-		if imp != actorcapsPkg {
-			return
-		}
-		for _, p := range actorcapsAllowedPrefix {
-			if strings.HasPrefix(slash, p) {
-				return
+	for _, root := range []string{"../app", "../cmd", "../drivers", "../lib", "../platform", "../registry", "../runtime"} {
+		fset := token.NewFileSet()
+		err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+			if err != nil {
+				return err
 			}
+			if entry.IsDir() {
+				if skipDirs[entry.Name()] {
+					return filepath.SkipDir
+				}
+				return nil
+			}
+			if !strings.HasSuffix(path, ".go") {
+				return nil
+			}
+			slash := filepath.ToSlash(path)
+			for _, prefix := range actorcapsAllowedPrefix {
+				if strings.HasPrefix(slash, prefix) {
+					return nil
+				}
+			}
+			file, err := parser.ParseFile(fset, path, nil, 0)
+			if err != nil {
+				return err
+			}
+			ast.Inspect(file, func(node ast.Node) bool {
+				selector, ok := node.(*ast.SelectorExpr)
+				if !ok || selector.Sel.Name != "Caps" {
+					return true
+				}
+				pkg, ok := selector.X.(*ast.Ident)
+				if ok && pkg.Name == "actorcaps" {
+					v = append(v, fmt.Sprintf("%s names the private actorcaps.Caps assembly bundle", fset.Position(selector.Pos())))
+				}
+				return true
+			})
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
 		}
-		v = append(v, fmt.Sprintf(
-			"%s imports %q — actorcaps.Caps is confined to platform (the assembly seam) + lib/actorbase (the caps→Sys weld) + archtest; a consumer speaks platform.ActorFactory (harness.Pen / actorbase.Sys) instead",
-			slash, imp))
-	})
-	failViolations(t, "actorcaps.Caps import confinement (platform + lib/actorbase + archtest only)", v)
+	}
+	failViolations(t, "actorcaps.Caps confinement", v)
 }
 
 // pluginDirs are the domain-implementable actor packages (spec §2: "域层没人

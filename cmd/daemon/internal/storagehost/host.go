@@ -36,7 +36,7 @@ type Host struct {
 
 // Open opens (creating if necessary) this channel's resource root under
 // workspaceRoot and returns a ready Host. Call once per daemon process
-// (mirrors compute.Run's own actorrt.Runtime — built once, outlives any
+// (mirrors compute.Run's HostSupervisor — built once, outlives any
 // single link connection/reconnect).
 func Open(workspaceRoot, channelID string, logger *slog.Logger) (*Host, error) {
 	cr, err := openChannelRoot(workspaceRoot, channelID)

@@ -486,7 +486,7 @@ func (g *Gateway) presenceReconcile() {
 			}
 			slot, ok := r.Bundle.Gateway().SubjectSlotFor(r.SubjectID)
 			if !ok {
-				continue // embodiment lag — no slot yet, next圈
+				continue // actor-body lag — no slot yet, next圈
 			}
 			desired[covKey{principal: p, channel: r.Channel}] = slot
 		}

@@ -50,10 +50,10 @@ func TestHarden03BPhaseBDependencyWalls(t *testing.T) {
 			return err
 		}
 		for _, forbidden := range []string{
-			"actorrt.Runtime",
-			"RebindableArms",
-			"retryLifecycle",
-			"SpawnIfAbsent",
+			"actorrt." + "Runtime",
+			"Rebindable" + "Arms",
+			"retry" + "Lifecycle",
+			"Spawn" + "IfAbsent",
 		} {
 			if strings.Contains(string(source), forbidden) {
 				t.Errorf("%s references pre-cutover owner %q", filepath.ToSlash(path), forbidden)
@@ -74,7 +74,7 @@ func TestHarden03BPhaseCLifecycleCutoverIsAtomic(t *testing.T) {
 	if !strings.Contains(string(caps), "Lifecycle LifecycleHandle") {
 		t.Fatal("Phase C must publish the terminal actorcaps LifecycleHandle")
 	}
-	if strings.Contains(string(caps), "actorrt.LifecycleHandle") {
+	if strings.Contains(string(caps), "actorrt."+"LifecycleHandle") {
 		t.Fatal("Phase C left the pre-cutover actorrt lifecycle type in production Caps")
 	}
 
@@ -85,7 +85,7 @@ func TestHarden03BPhaseCLifecycleCutoverIsAtomic(t *testing.T) {
 	if !strings.Contains(string(physical), "Lifecycle actorcaps.LifecycleHandle") {
 		t.Fatal("Phase C link wire must expose the terminal lifecycle facade")
 	}
-	if strings.Contains(string(physical), "actorrt.LifecycleHandle") {
+	if strings.Contains(string(physical), "actorrt."+"LifecycleHandle") {
 		t.Fatal("Phase C link wire adapted the old lifecycle contract")
 	}
 }

@@ -346,8 +346,8 @@ func TestTimer_MoveToDead_RelocatesEveryColumnFaithfully(t *testing.T) {
 }
 
 // TestTimer_MoveToDead_RejectsZeroDeathClass: the death_class column is a typed
-// closed set {fire_rejected, revive_rejected}; a zero/unknown class is refused
-// at the store boundary (never written as a blank forensic record).
+// closed set containing fire_rejected; a zero/unknown class is refused at the
+// store boundary.
 func TestTimer_MoveToDead_RejectsZeroDeathClass(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)

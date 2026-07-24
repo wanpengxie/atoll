@@ -27,20 +27,20 @@ func TestIPCKindClosedSetExhaustive(t *testing.T) {
 	// without adding it here is the intended tripwire (keep this in lockstep with
 	// the in-package TestKindClosedSet wire-spelling map).
 	known := map[string]bool{
-		"KindHandshake": true, "KindHandshakeAck": true,
-		"KindDeliver": true,
-		"KindEmit":    true, "KindEmitAck": true,
+		"KindHandshake": true,
+		"KindDeliver":   true,
+		"KindEmit":      true, "KindEmitAck": true,
 		"KindDown":   true,
 		"KindCancel": true,
 		"KindObs":    true,
 		"KindAccess": true, "KindAccessAck": true,
 		"KindSchedule": true, "KindScheduleAck": true,
-		"KindDetach": true, "KindDespawn": true,
+		"KindDetach":        true,
 		"KindDeliverResult": true,
 		"KindCancelRequest": true,
 		"KindSpawn":         true, "KindSpawnAck": true,
 		"KindEnd": true, "KindEndAck": true,
-		"KindIdle": true, "KindIdleAck": true,
+		"KindIdle": true,
 	}
 
 	fset := token.NewFileSet()

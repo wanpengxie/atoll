@@ -96,10 +96,8 @@ type storeFault struct {
 	lastLoggedAt time.Time
 }
 
-// transientKey identifies one consecutive-transient-retry streak: kind
-// separates the three transient families (mem-family Fire.Append, Reviver
-// EnsureLive, identity-family Fire.Append) that would otherwise collide on a
-// shared id space; id is the timer or author id the streak is keyed to.
+// transientKey identifies one consecutive-transient-retry streak. kind
+// separates in-memory and identity-bound fire attempts that may share IDs.
 type transientKey struct {
 	kind string
 	id   string
@@ -623,8 +621,7 @@ func (e *Engine) noteStoreRecovered(now time.Time, kind string) {
 }
 
 // noteTransient records one consecutive-transient occurrence for (kind,
-// id) — the run loop's other P3 edge state, for the three FireSink/Reviver
-// branches that only ever leave a comment ("retry next tick") today: the
+// id) — the run loop's other P3 edge state for transient FireSink branches: the
 // first occurrence for an id logs Warn loud; every subsequent consecutive
 // occurrence for the same id is remembered silently (no count, no log) until
 // clearTransient resets it on recovery, reject-disposal, or removal from
