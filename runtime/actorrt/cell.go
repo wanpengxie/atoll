@@ -117,12 +117,6 @@ type IdleCommandReceiver interface{ IdleApproved() }
 // dropped one.
 const cancelSetCap = 256
 
-// stopBudget bounds the occupant Stop join on the cell's unwind path (owner
-// 拍 5s, 2026-07-13): a clean occupant drains in milliseconds, and a stuck
-// one is not saved by waiting longer — past the budget the join is abandoned,
-// the leak logged, and the unwind proceeds.
-const stopBudget = 5 * time.Second
-
 // allocShell allocates a cell SHELL (impl=nil, live=false) — phase 1 of the
 // two-phase Spawn. The returned pointer is the incarnation's stable p;
 // Spawn fills c.impl from the build closure (OUTSIDE the lock, while IsLive is
@@ -279,17 +273,11 @@ func (c *cell) start() {
 			if deathCause != nil && c.onDown != nil {
 				c.onDown(c.id, c, deathCause)
 			}
-			// (c) Best-effort resource release, on a BOUNDED budget (owner 拍
-			// 5s, purity 手动档): a stuck occupant must not pin this unwind
-			// goroutine forever. Stop abandons its join after the budget and
-			// reports; the leak is logged loudly HERE because this deferred
-			// path has no caller left to hand the error to.
+			// (c) Resource release through the package-wide panic boundary. The
+			// timeout is cooperative; an implementation that ignores ctx leaves
+			// done open and is accounted as a physical leak by the owner.
 			if st, ok := c.impl.(Stopper); ok {
-				stopCtx, stopCancel := context.WithTimeout(context.Background(), stopBudget)
-				if err := st.Stop(stopCtx); err != nil {
-					c.logger.Error("actorrt.cell.stop_abandoned", "actor", string(c.id), "err", err)
-				}
-				stopCancel()
+				_ = safeStop(c.logger, c.id, st)
 			}
 		}()
 

@@ -96,16 +96,18 @@ var ErrNotHosted = errors.New("actorrt: actor not hosted")
 // never admit another embodiment.
 var ErrRuntimeSealed = errors.New("actorrt: runtime sealed")
 
-// Incarnation is the opaque handle to ONE live embodiment of an ActorID — a
-// (id, embodiment-pointer) pair. Identity is single-level (one stable ActorID),
-// but a capability welded to a specific incarnation can outlive it (a goroutine
-// captured a pen, the cell died, a same-id successor took over): the handle
-// names WHICH embodiment, so the WHEN-validity gate (IsLive) is by POINTER, not
-// by id — defeating ABA. It is comparable (id + pointer) and is NEVER serialised
-// into an envelope/truth; it lives only in the volatile liveness plane.
+// Incarnation is the opaque handle to ONE physical body of an ActorID. Exact
+// pointer identity, never ActorID, distinguishes same-id predecessor and
+// successor. It is comparable and never serialized into collaboration truth.
+//
+// During the Phase A/B compile boundary p names the still-serving legacy
+// Runtime embodiment while unit names the terminal single Unit. New Unit code
+// only uses unit and never registers with or calls the legacy Runtime; Phase C
+// removes p together with that production island.
 type Incarnation struct {
-	id actor.ActorID
-	p  embodiment
+	id   actor.ActorID
+	p    embodiment // pre-cutover Runtime embodiment; removed with old Runtime
+	unit *Unit      // terminal single-Unit identity; never registered by ActorID
 }
 
 // ID is the read-only accessor for the incarnation's ActorID. The embodiment

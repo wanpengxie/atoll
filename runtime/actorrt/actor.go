@@ -87,10 +87,7 @@ func buildActor(build func(Incarnation) Actor, inc Incarnation) (impl Actor, err
 func abortBuild(c *cell) {
 	c.cancel()
 	if stopper, ok := c.impl.(Stopper); ok {
-		func() {
-			defer func() { _ = recover() }()
-			_ = stopper.Stop(context.Background())
-		}()
+		_ = safeStop(c.logger, c.id, stopper)
 	}
 }
 
