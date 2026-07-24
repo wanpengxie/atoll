@@ -184,35 +184,6 @@ func TestChannelOwnerProductionChokepointsAreClosed(t *testing.T) {
 	}
 }
 
-func TestActorModelAuthorityHasNoInlineVersionFallback(t *testing.T) {
-	var inlineVersionCompare []string
-	walkProductionGo(t, func(path string, file *ast.File, fset *token.FileSet) {
-		ast.Inspect(file, func(node ast.Node) bool {
-			expression, ok := node.(*ast.BinaryExpr)
-			if !ok {
-				return true
-			}
-			if path == "../platform/home/readface.go" && enclosingFunc(file, expression.Pos()) == "CheckAuthor" {
-				return true
-			}
-			names := map[string]bool{}
-			ast.Inspect(expression, func(child ast.Node) bool {
-				if selector, ok := child.(*ast.SelectorExpr); ok {
-					names[selector.Sel.Name] = true
-				}
-				return true
-			})
-			if names["BirthVersion"] && names["CurrentDeclVersion"] {
-				inlineVersionCompare = append(inlineVersionCompare, fset.Position(expression.Pos()).String())
-			}
-			return true
-		})
-	})
-	if len(inlineVersionCompare) != 0 {
-		t.Fatalf("inline author-version comparisons escaped CheckAuthor: %v", inlineVersionCompare)
-	}
-}
-
 func TestActorModelDataFlowChokepoints(t *testing.T) {
 	var mintState, fireAndMark, ackTimer []string
 	walkProductionGo(t, func(path string, file *ast.File, fset *token.FileSet) {

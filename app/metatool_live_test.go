@@ -45,6 +45,7 @@ import (
 	"github.com/wanpengxie/atoll/drivers/tools/kimi"
 	"github.com/wanpengxie/atoll/drivers/tools/xhs"
 	"github.com/wanpengxie/atoll/lib/actorbase"
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/lib/metatool"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/channelhost"
@@ -367,6 +368,20 @@ func TestMetatoolLiveCallActor(t *testing.T) {
 	t.Cleanup(xhsDev.close)
 	kimiDev := startMockDevice(t, metatoolKimiDeviceAddr, kimiCannedUp)
 	t.Cleanup(kimiDev.close)
+
+	// Device connectivity proves the adapter body is running, but it does not
+	// prove that the daemon's actor stream has been attached and published on
+	// the Server yet. The delivery pump is deliberately one-shot: it must not
+	// turn a lifecycle/binding race into a hidden retry machine. Wait on the
+	// canonical Server-visible L2 presence projection before committing the
+	// first request to either remote actor. L3 device testimony is an edge and
+	// may have been emitted before the first stream existed, so it is not a
+	// binding-readiness barrier.
+	for _, id := range []actor.ActorID{xhsID, kimiID} {
+		waitActorStatus(t, env, s, control, id, 5*time.Second, func(status introspect.Status) bool {
+			return status.Member && status.Present
+		})
+	}
 
 	ctx := context.Background()
 
