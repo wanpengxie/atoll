@@ -92,8 +92,7 @@ func (f *fakeSys) Fork(message.ID, actorcaps.ForkSpec) (actor.ActorID, error) {
 	panic("not implemented")
 }
 
-func (f *fakeSys) RequestIdle() error { panic("not implemented") }
-func (f *fakeSys) End() error         { panic("not implemented") }
+func (f *fakeSys) End() error { panic("not implemented") }
 
 func (f *fakeSys) PublishObs(kind actorrt.ObsKind, val actorrt.ObsValue) error {
 	panic("not implemented")

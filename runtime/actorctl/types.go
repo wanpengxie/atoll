@@ -59,15 +59,7 @@ type ActorDefinition struct {
 	Execution         actorhost.ExecutionSpec
 }
 
-type DesiredKind uint8
-
-const (
-	DesiredDormant DesiredKind = iota
-	DesiredRun
-)
-
 type DesiredState struct {
-	Kind       DesiredKind
 	AttemptKey actorhost.AttemptKey
 }
 
@@ -120,10 +112,9 @@ func definitionFromStored(stored StoredActor) (ActorDefinition, error) {
 		DefinitionVersion: row.CurrentDeclVersion,
 		Placement:         row.Placement,
 		Execution: actorhost.ExecutionSpec{
-			Kind:        row.Kind,
-			Class:       row.Class,
-			Config:      append(json.RawMessage(nil), row.Config...),
-			IdleTimeout: row.TIdle,
+			Kind:   row.Kind,
+			Class:  row.Class,
+			Config: append(json.RawMessage(nil), row.Config...),
 		},
 	}, nil
 }
@@ -145,7 +136,6 @@ func rowFromActive(id actor.ActorID, value ActiveActor) storespec.ActorControlRo
 		CurrentDeclVersion: def.DefinitionVersion,
 		Class:              def.Execution.Class,
 		Config:             append(json.RawMessage(nil), def.Execution.Config...),
-		TIdle:              def.Execution.IdleTimeout,
 		Placement:          def.Placement,
 		SourceDeclID:       def.SourceDeclID,
 	}
@@ -353,11 +343,5 @@ type Config struct {
 	StateResolver    StateResolver
 	ScheduleMinter   ScheduleMinter
 	BuildManagedBody ManagedBodyBuilder
-	// WakeGrace bounds the blind head start DeliverCommitted gives the
-	// asynchronous Host build after EnsureRun reports a real dormant→Run
-	// wake, before its single physical delivery attempt. It is a latency
-	// heuristic, never a readiness contract: no caller may depend on
-	// first-message delivery. Zero selects the 1s default.
-	WakeGrace time.Duration
-	Now       func() time.Time
+	Now              func() time.Time
 }

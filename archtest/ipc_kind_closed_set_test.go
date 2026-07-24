@@ -40,7 +40,6 @@ func TestIPCKindClosedSetExhaustive(t *testing.T) {
 		"KindCancelRequest": true,
 		"KindSpawn":         true, "KindSpawnAck": true,
 		"KindEnd": true, "KindEndAck": true,
-		"KindIdle": true,
 	}
 
 	fset := token.NewFileSet()

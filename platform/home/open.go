@@ -187,7 +187,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			}
 			return hostcommon.Build(
 				caps, h.hooks(), def,
-				actorbase.Options{IdleTimeout: input.ExecutionSpec.IdleTimeout},
 			)
 		},
 	})
@@ -234,7 +233,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		AttachBinding:   actors.AttachBinding,
 		BindingDown:     actors.BindingDown,
 		Fork:            actors.RemoteFork,
-		RequestIdle:     actors.RemoteRequestIdle,
 		EndSelf:         actors.RemoteEndSelf,
 		Observe: func(
 			id actor.ActorID,
@@ -272,7 +270,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: read max seq: %w", err)
 	}
 	h.engine.Start()
-	h.deliveryCtx, h.deliveryStop = context.WithCancel(context.Background())
 	h.delivery = tap.OpenPump(h.signal, cs.Query, from, deliveryHandle(h, cfg.ChannelID, logger), logger)
 
 	h.reconcileSweep(ctx)
@@ -357,7 +354,7 @@ func admitBootstrapDeclaration(
 	}
 	admitted, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
 		Kind: in.Kind, Binding: binding, Class: in.Class, Config: config,
-		Placement: in.Placement, TIdle: durationMillis(in.TIdle),
+		Placement:    in.Placement,
 		SourceDeclID: in.SourceDeclID, CreatedAt: in.CreatedAt,
 	})
 	if err != nil {
@@ -431,7 +428,7 @@ func deliveryHandle(
 			if !message.ShouldDeliver(id, &env) {
 				continue
 			}
-			err := h.actors.DeliverCommitted(h.deliveryCtx, id, &env)
+			err := h.actors.Deliver(id, &env)
 			if err != nil {
 				logger.Warn("platform.delivery.outcome",
 					"channel", chID, "seq", row.Seq, "envelope", env.ID,

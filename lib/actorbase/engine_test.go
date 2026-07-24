@@ -35,32 +35,6 @@ type fakePen struct {
 	reject  harness.HarnessRejectReason // when set, every Write is rejected with this reason
 }
 
-type recordingIdleArbiter struct {
-	mu    sync.Mutex
-	calls int
-}
-
-func (a *recordingIdleArbiter) RequestIdle(context.Context) error {
-	a.mu.Lock()
-	a.calls++
-	a.mu.Unlock()
-	return nil
-}
-
-func (*recordingIdleArbiter) Fork(context.Context, message.ID, actorcaps.ForkSpec) (actor.ActorID, error) {
-	return "", errors.New("unexpected fork")
-}
-
-func (*recordingIdleArbiter) EndSelf(context.Context, actorcaps.EndSelfRequest) error {
-	return errors.New("unexpected end")
-}
-
-func (a *recordingIdleArbiter) count() int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.calls
-}
-
 func (p *fakePen) Write(_ context.Context, env *message.Envelope) (harness.WriteResult, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -162,7 +136,6 @@ type fakeSpawn struct{}
 func (fakeSpawn) Fork(_ context.Context, _ message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error) {
 	return actor.ActorID("child/" + spec.NameHint), nil
 }
-func (fakeSpawn) RequestIdle(context.Context) error { return nil }
 func (fakeSpawn) EndSelf(context.Context, actorcaps.EndSelfRequest) error {
 	return nil
 }
@@ -808,40 +781,6 @@ func TestEngine_StopDrainsWorkerBeforeReturning(t *testing.T) {
 	}
 }
 
-func TestEngine_LongComputationOutsideRecvDoesNotRequestIdle(t *testing.T) {
-	pen := &fakePen{self: "actor:test"}
-	e := newTestEngine(t, pen, Hooks{}, 8, 8)
-	arbiter := &recordingIdleArbiter{}
-	e.lifecycle = arbiter
-	e.options = Options{IdleTimeout: 5 * time.Millisecond}
-
-	computed := make(chan struct{})
-	e.def = Def{New: func() (Proc, error) {
-		return func(Sys) error {
-			time.Sleep(40 * time.Millisecond)
-			close(computed)
-			return nil
-		}, nil
-	}}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	if err := e.Start(ctx, &fakeActorContext{self: "actor:test"}); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-	select {
-	case <-computed:
-	case <-time.After(time.Second):
-		t.Fatal("long computation did not finish")
-	}
-	if got := arbiter.count(); got != 0 {
-		t.Fatalf("long computation requested idle %d times; idle is only measured while Recv is waiting", got)
-	}
-	cancel()
-	if err := e.Stop(context.Background()); err != nil {
-		t.Fatalf("Stop: %v", err)
-	}
-}
-
 // TestEngine_LifecycleMethodsReturnErrUnsupportedWhenLifecycleNil pins the
 // defensive capability-absence contract: a deliberately incomplete host must
 // answer ErrUnsupported, never panic on a nil lifecycle handle.
@@ -854,9 +793,6 @@ func TestEngine_LifecycleMethodsReturnErrUnsupportedWhenLifecycleNil(t *testing.
 		Kind: actor.KindTool, Class: "worker", NameHint: "hint",
 	}); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("Fork with nil lifecycle err = %v, want ErrUnsupported", err)
-	}
-	if err := e.RequestIdle(); !errors.Is(err, ErrUnsupported) {
-		t.Fatalf("RequestIdle with nil lifecycle err = %v, want ErrUnsupported", err)
 	}
 	if err := e.End(); !errors.Is(err, ErrUnsupported) {
 		t.Fatalf("End with nil lifecycle err = %v, want ErrUnsupported", err)

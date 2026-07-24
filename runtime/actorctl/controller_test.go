@@ -298,35 +298,6 @@ func waitUntil(t *testing.T, message string, condition func() bool) {
 	}
 }
 
-func TestServerCommandsOnlyWakeSingleDesiredReader(t *testing.T) {
-	actors := newActors(t, newFakeStore("agent"), nil)
-	waitUntil(t, "initial Server desired was not accepted", func() bool {
-		snapshot, ok := actors.host.Inspect("agent")
-		return ok && snapshot.Desired != nil
-	})
-
-	// Stop the sole reader so this test can distinguish an empty wake from a
-	// command-side snapshot push.
-	actors.serverDesiredCancel()
-	actors.serverDesiredWG.Wait()
-
-	before, _, _ := actors.controller.lookup("agent")
-	if err := actors.requestIdle(
-		context.Background(), "agent", before.Desired.AttemptKey,
-	); err != nil {
-		t.Fatal(err)
-	}
-	current, _, _ := actors.controller.lookup("agent")
-	if current.Desired.Kind != DesiredDormant {
-		t.Fatalf("Controller desired=%#v, want dormant", current.Desired)
-	}
-	snapshot, ok := actors.host.Inspect("agent")
-	if !ok || snapshot.Desired == nil ||
-		snapshot.Desired.Attempt() != before.Desired.AttemptKey {
-		t.Fatal("command directly changed Host desired instead of emitting an empty wake")
-	}
-}
-
 func TestServerDesiredTickerFreshReadsControllerAndHealsStaleLKG(t *testing.T) {
 	store := newFakeStore("agent")
 	actors, err := NewChannelActors(Config{
@@ -432,25 +403,20 @@ func TestControllerSharedContainerDifferentIDRace(t *testing.T) {
 	}
 	actors := newActors(t, newFakeStore(ids...), nil)
 	var wg sync.WaitGroup
-	for i, id := range ids {
-		value, ok, err := actors.controller.lookup(id)
+	for _, id := range ids {
+		_, ok, err := actors.controller.lookup(id)
 		if err != nil || !ok {
 			t.Fatalf("lookup %s: %v %v", id, ok, err)
 		}
-		wg.Add(3)
-		go func(id actor.ActorID, key actorhost.AttemptKey) {
-			defer wg.Done()
-			_ = actors.requestIdle(context.Background(), id, key)
-		}(id, value.Desired.AttemptKey)
+		wg.Add(2)
 		go func(id actor.ActorID) {
 			defer wg.Done()
-			_, _ = actors.EnsureRun(id)
+			_ = actors.Restart(context.Background(), RestartRequest{ActorID: id})
 		}(id)
 		go func() {
 			defer wg.Done()
 			_, _ = actors.ListActive(context.Background())
 		}()
-		_ = i
 	}
 	wg.Wait()
 	if _, err := actors.ListActive(context.Background()); err != nil {
@@ -553,38 +519,6 @@ func TestUnexpectedSystemDoneFailsChannel(t *testing.T) {
 	}
 }
 
-func TestControllerDormantEnsureRunIsFreshAndIdempotent(t *testing.T) {
-	actors := newActors(t, newFakeStore("agent"), nil)
-	before, ok, err := actors.controller.lookup("agent")
-	if err != nil || !ok || before.Desired.Kind != DesiredRun {
-		t.Fatalf("initial row = %#v, %v, %v", before, ok, err)
-	}
-	if err := actors.requestIdle(context.Background(), "agent", before.Desired.AttemptKey); err != nil {
-		t.Fatal(err)
-	}
-	dormant, _, _ := actors.controller.lookup("agent")
-	if dormant.Desired.Kind != DesiredDormant || dormant.Desired.AttemptKey != "" {
-		t.Fatalf("idle desired = %#v", dormant.Desired)
-	}
-	changed, err := actors.EnsureRun("agent")
-	if err != nil || !changed {
-		t.Fatalf("first EnsureRun changed=%v err=%v", changed, err)
-	}
-	running, _, _ := actors.controller.lookup("agent")
-	if running.Desired.Kind != DesiredRun || running.Desired.AttemptKey == "" ||
-		running.Desired.AttemptKey == before.Desired.AttemptKey {
-		t.Fatalf("fresh run desired = %#v; predecessor=%q", running.Desired, before.Desired.AttemptKey)
-	}
-	changed, err = actors.EnsureRun("agent")
-	if err != nil || changed {
-		t.Fatalf("second EnsureRun changed=%v err=%v", changed, err)
-	}
-	again, _, _ := actors.controller.lookup("agent")
-	if again.Desired.AttemptKey != running.Desired.AttemptKey {
-		t.Fatal("idempotent EnsureRun replaced the current AttemptKey")
-	}
-}
-
 func TestStaleLifecycleRejectedAfterDirectReplacementButActorAuthorityRemains(t *testing.T) {
 	store := newFakeStore("agent")
 	actors := newActors(t, store, nil)
@@ -595,11 +529,6 @@ func TestStaleLifecycleRejectedAfterDirectReplacementButActorAuthorityRemains(t 
 	g2, _, _ := actors.controller.lookup("agent")
 	if g2.Desired.AttemptKey == g1.Desired.AttemptKey {
 		t.Fatal("Restart did not publish a direct successor")
-	}
-	if err := actors.RemoteRequestIdle(
-		context.Background(), "agent", g1.Desired.AttemptKey,
-	); !errors.Is(err, ErrStaleAttempt) {
-		t.Fatalf("stale G1 RequestIdle error=%v", err)
 	}
 	if _, err := actors.RemoteFork(
 		context.Background(), "agent", g1.Desired.AttemptKey, "stale-fork",
@@ -614,8 +543,7 @@ func TestStaleLifecycleRejectedAfterDirectReplacementButActorAuthorityRemains(t 
 		t.Fatalf("stale G1 EndSelf error=%v", err)
 	}
 	current, _, _ := actors.controller.lookup("agent")
-	if current.Desired.AttemptKey != g2.Desired.AttemptKey ||
-		current.Desired.Kind != DesiredRun {
+	if current.Desired.AttemptKey != g2.Desired.AttemptKey {
 		t.Fatalf("stale lifecycle changed successor: %#v", current.Desired)
 	}
 	if err := actors.AuthorActive("agent"); err != nil {

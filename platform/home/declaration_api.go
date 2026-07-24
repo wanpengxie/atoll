@@ -3,7 +3,6 @@ package home
 import (
 	"encoding/json"
 	"errors"
-	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -18,7 +17,6 @@ type DeclareRequest struct {
 	Class        string
 	Config       *json.RawMessage
 	Placement    storespec.Placement
-	TIdle        int64
 	MakeDefault  bool
 	CreatedAt    int64
 }
@@ -31,10 +29,8 @@ type DeclareResult struct {
 
 func validateDeclareRequest(in DeclareRequest) error {
 	if in.SourceDeclID == "" || in.Class == "" || in.CreatedAt <= 0 ||
-		in.TIdle < 0 || in.Placement.Validate() != nil {
+		in.Placement.Validate() != nil {
 		return errors.New("platform: invalid declaration request")
 	}
 	return nil
 }
-
-func durationMillis(ms int64) time.Duration { return time.Duration(ms) * time.Millisecond }

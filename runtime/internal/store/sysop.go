@@ -433,12 +433,11 @@ func (s *sysOpStore) ApplyResolvedDeclaration(ctx context.Context, in storespec.
 	var version int64
 	var class, placement, host string
 	var config []byte
-	var idleMS int64
-	err = tx.QueryRowContext(ctx, `SELECT r.current_decl_version,d.class,d.config_json,d.placement,d.desired_host,d.t_idle_ms
+	err = tx.QueryRowContext(ctx, `SELECT r.current_decl_version,d.class,d.config_json,d.placement,d.desired_host
 		FROM actor_registry r JOIN actor_decl_versions d
 		  ON d.actor_id=r.actor_id AND d.version=r.current_decl_version
 		WHERE r.actor_id=? AND r.source_decl_id=? AND r.deregistered_at IS NULL`, string(in.ActorID), in.DeclID).
-		Scan(&version, &class, &config, &placement, &host, &idleMS)
+		Scan(&version, &class, &config, &placement, &host)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storespec.DeclarationSyncResult{Status: storespec.DeclarationAbsent}, nil
 	}
@@ -447,14 +446,14 @@ func (s *sysOpStore) ApplyResolvedDeclaration(ctx context.Context, in storespec.
 	}
 	current, err := (channel.RenderedSnapshot{
 		Class: class, Config: append(json.RawMessage(nil), config...),
-		Placement: channel.Placement{Kind: channel.PlacementKind(placement), DesiredHost: host}, TIdleMS: idleMS,
+		Placement: channel.Placement{Kind: channel.PlacementKind(placement), DesiredHost: host},
 	}).Seal()
 	if err != nil {
 		return storespec.DeclarationSyncResult{}, err
 	}
 	candidate, err := (channel.RenderedSnapshot{
 		Class: in.Class, Config: append(json.RawMessage(nil), in.Config...),
-		Placement: current.Placement, TIdleMS: current.TIdleMS,
+		Placement: current.Placement,
 	}).Seal()
 	if err != nil {
 		return storespec.DeclarationSyncResult{}, err
@@ -630,7 +629,7 @@ func insertDeclVersionTx(ctx context.Context, tx *sql.Tx, id actor.ActorID, vers
 	if rendered.Config != nil {
 		config = string(rendered.Config)
 	}
-	_, err := tx.ExecContext(ctx, `INSERT INTO actor_decl_versions(actor_id,version,class,config_json,placement,desired_host,t_idle_ms,created_at) VALUES (?,?,?,?,?,?,?,?)`, string(id), version, rendered.Class, config, string(rendered.Placement.Kind), rendered.Placement.DesiredHost, rendered.TIdleMS, at)
+	_, err := tx.ExecContext(ctx, `INSERT INTO actor_decl_versions(actor_id,version,class,config_json,placement,desired_host,created_at) VALUES (?,?,?,?,?,?,?)`, string(id), version, rendered.Class, config, string(rendered.Placement.Kind), rendered.Placement.DesiredHost, at)
 	return err
 }
 

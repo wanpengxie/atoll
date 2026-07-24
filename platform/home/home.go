@@ -1,7 +1,6 @@
 package home
 
 import (
-	"context"
 	"errors"
 	"log/slog"
 	"sync"
@@ -62,8 +61,6 @@ type Home struct {
 
 	signal       *tap.Signal
 	delivery     *tap.Pump
-	deliveryCtx  context.Context
-	deliveryStop context.CancelFunc
 	links        *link.Acceptor
 	presenceFold *presence.Fold
 	subjectgate  *subjectgate.Registry

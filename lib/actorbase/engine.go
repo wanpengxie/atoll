@@ -51,7 +51,6 @@ type engine struct {
 	def       Def
 	clockFn   func() time.Time
 	queueCap  int
-	options   Options
 
 	serve *serveLedger
 	call  *callLedger
@@ -100,10 +99,6 @@ var ErrRecvDone = errors.New("actorbase: recv done")
 // Start (spec §1.6: one Proc per incarnation, minted at go-live, not at
 // registration).
 func New(caps actorcaps.Caps, hooks Hooks, def Def) actorrt.Actor {
-	return NewWithOptions(caps, hooks, def, Options{})
-}
-
-func NewWithOptions(caps actorcaps.Caps, hooks Hooks, def Def, options Options) actorrt.Actor {
 	e := &engine{
 		pen:       caps.Pen,
 		access:    caps.Access,
@@ -114,7 +109,6 @@ func NewWithOptions(caps actorcaps.Caps, hooks Hooks, def Def, options Options) 
 		def:       def,
 		clockFn:   time.Now,
 		queueCap:  256,
-		options:   options,
 	}
 	e.serve = newServeLedger(e.life, e.queueCap)
 	e.call = newCallLedger(e.life, e.pen, e.clockFn, hooks, e.closureFault)
@@ -773,13 +767,6 @@ func (e *engine) Fork(requestID message.ID, spec actorcaps.ForkSpec) (actor.Acto
 	return e.lifecycle.Fork(e.lifeCtx, requestID, spec)
 }
 
-func (e *engine) RequestIdle() error {
-	if e.lifecycle == nil {
-		return ErrUnsupported
-	}
-	return e.lifecycle.RequestIdle(e.lifeCtx)
-}
-
 func (e *engine) End() error {
 	if e.lifecycle == nil {
 		return ErrUnsupported
@@ -829,24 +816,12 @@ func (e *engine) Recv() (Msg, error) {
 			}
 			continue
 		}
-		var idle <-chan time.Time
-		var timer *time.Timer
-		if e.options.IdleTimeout > 0 && e.lifecycle != nil && e.serve.len() == 0 {
-			timer = time.NewTimer(e.options.IdleTimeout)
-			idle = timer.C
-		}
 		select {
 		case <-e.workQ.sig:
-			if timer != nil {
-				timer.Stop()
-			}
 			// A push woke us — loop back to pop. (Coalesced: one wake may cover
 			// several pushes; the pop loop drains them all.)
 			continue
 		case <-e.lifeCtx.Done():
-			if timer != nil {
-				timer.Stop()
-			}
 			// Teardown: one last drain attempt (a push may have raced Done) before
 			// signalling the loop to end.
 			if env, ok := e.workQ.pop(); ok {
@@ -857,8 +832,6 @@ func (e *engine) Recv() (Msg, error) {
 				continue
 			}
 			return Msg{}, ErrRecvDone
-		case <-idle:
-			_ = e.lifecycle.RequestIdle(e.lifeCtx)
 		}
 	}
 }

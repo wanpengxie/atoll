@@ -31,7 +31,6 @@ func (h *Home) planForDaemon(
 			Kind:       body.ExecutionSpec.Kind,
 			Class:      body.ExecutionSpec.Class,
 			Config:     append([]byte(nil), body.ExecutionSpec.Config...),
-			Idle:       body.ExecutionSpec.IdleTimeout,
 		})
 	}
 	sort.Slice(out, func(i, j int) bool { return out[i].ActorID < out[j].ActorID })

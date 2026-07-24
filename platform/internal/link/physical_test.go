@@ -62,7 +62,6 @@ type physicalLifecycle struct{}
 func (physicalLifecycle) Fork(context.Context, message.ID, actorcaps.ForkSpec) (actor.ActorID, error) {
 	return "agent:child", nil
 }
-func (physicalLifecycle) RequestIdle(context.Context) error { return nil }
 func (physicalLifecycle) EndSelf(context.Context, actorcaps.EndSelfRequest) error {
 	return nil
 }

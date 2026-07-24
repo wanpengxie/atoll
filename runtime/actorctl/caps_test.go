@@ -194,7 +194,7 @@ func publishNewAttempt(t *testing.T, actors *ChannelActors, id actor.ActorID) {
 	c := actors.controller
 	c.stateMu.Lock()
 	value := c.actors[id]
-	value.Desired = DesiredState{Kind: DesiredRun, AttemptKey: key}
+	value.Desired = DesiredState{AttemptKey: key}
 	c.actors[id] = value
 	c.stateMu.Unlock()
 }
@@ -229,7 +229,7 @@ func TestManagedGateRefusesStaleGenerationOnEveryArm(t *testing.T) {
 	if _, err := caps.Schedule.Schedule(ctx, schedule.ScheduleReq{}); err == nil {
 		t.Fatal("Schedule admitted a stale generation")
 	}
-	if err := caps.Lifecycle.RequestIdle(ctx); err == nil {
+	if err := caps.Lifecycle.EndSelf(ctx, actorcaps.EndSelfRequest{}); err == nil {
 		t.Fatal("Lifecycle admitted a stale generation")
 	}
 

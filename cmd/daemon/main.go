@@ -103,7 +103,6 @@ func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 			ActorID: id, AttemptKey: asg.AttemptKey,
 			ExecutionSpec: actorhost.ExecutionSpec{
 				Kind: kind, Class: asg.Class, Config: append(json.RawMessage(nil), asg.Config...),
-				IdleTimeout: asg.Idle,
 			},
 		})
 		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{

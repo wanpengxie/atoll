@@ -48,7 +48,6 @@ type Config struct {
 	AttachBinding   func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain, actorhost.Binding) error
 	BindingDown     func(actor.ActorID, actorhost.Binding)
 	Fork            func(context.Context, actor.ActorID, actorhost.AttemptKey, message.ID, actorcaps.ForkSpec) (actor.ActorID, error)
-	RequestIdle     func(context.Context, actor.ActorID, actorhost.AttemptKey) error
 	EndSelf         func(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error
 	Observe         func(actor.ActorID, actorhost.AttemptKey, actorrt.ObsKind, actorrt.ObsValue)
 	ObserveDown     func(actor.ActorID, actorhost.AttemptKey)
@@ -75,7 +74,6 @@ type Acceptor struct {
 	attachBinding   func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain, actorhost.Binding) error
 	bindingDown     func(actor.ActorID, actorhost.Binding)
 	fork            func(context.Context, actor.ActorID, actorhost.AttemptKey, message.ID, actorcaps.ForkSpec) (actor.ActorID, error)
-	requestIdle     func(context.Context, actor.ActorID, actorhost.AttemptKey) error
 	endSelf         func(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error
 	observe         func(actor.ActorID, actorhost.AttemptKey, actorrt.ObsKind, actorrt.ObsValue)
 	observeDown     func(actor.ActorID, actorhost.AttemptKey)
@@ -138,7 +136,7 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 		return nil, errors.New("link: actor authority is required")
 	case cfg.AuthorizeAttach == nil || cfg.AttachBinding == nil || cfg.BindingDown == nil:
 		return nil, errors.New("link: exact binding callbacks are required")
-	case cfg.Fork == nil || cfg.RequestIdle == nil || cfg.EndSelf == nil:
+	case cfg.Fork == nil || cfg.EndSelf == nil:
 		return nil, errors.New("link: lifecycle callbacks are required")
 	case cfg.Plan == nil || cfg.CanAttach == nil:
 		return nil, errors.New("link: daemon plan/admission callbacks are required")
@@ -154,7 +152,7 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 		logger:          logger,
 		authorizeAttach: cfg.AuthorizeAttach, attachBinding: cfg.AttachBinding,
 		bindingDown: cfg.BindingDown, fork: cfg.Fork,
-		requestIdle: cfg.RequestIdle, endSelf: cfg.EndSelf,
+		endSelf: cfg.EndSelf,
 		observe: cfg.Observe, observeDown: cfg.ObserveDown, cancelReq: cfg.CancelRequest,
 		storageControl: cfg.StorageHostControl, plan: cfg.Plan, canAttach: cfg.CanAttach,
 		ctx: ctx, cancel: cancel, closeDone: make(chan struct{}),
@@ -208,7 +206,6 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		access:        a.relayAccess,
 		schedule:      a.relaySchedule,
 		fork:          a.fork,
-		requestIdle:   a.requestIdle,
 		endSelf:       a.endSelf,
 		obs:           a.observe,
 		cancelRequest: a.cancelReq,

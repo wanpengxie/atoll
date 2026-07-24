@@ -65,7 +65,6 @@ type RenderedSnapshot struct {
 	Class     string          `json:"class"`
 	Config    json.RawMessage `json:"config,omitempty"`
 	Placement Placement       `json:"placement"`
-	TIdleMS   int64           `json:"t_idle_ms"`
 	Digest    string          `json:"digest"`
 }
 
@@ -93,8 +92,7 @@ func (s RenderedSnapshot) ContentDigest() (string, error) {
 		Class     string          `json:"class"`
 		Config    json.RawMessage `json:"config,omitempty"`
 		Placement Placement       `json:"placement"`
-		TIdleMS   int64           `json:"t_idle_ms"`
-	}{s.Class, s.Config, s.Placement, s.TIdleMS}
+	}{s.Class, s.Config, s.Placement}
 	return Digest(payload)
 }
 

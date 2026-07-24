@@ -105,7 +105,7 @@ const (
 )
 
 // DeclarationSyncTx is the Home-private declaration publication input. Realm
-// supplies only class/config; placement and idle are re-read from channel truth
+// supplies only class/config; placement is re-read from channel truth
 // by the store in the same transaction that compares and advances the version.
 type DeclarationSyncTx struct {
 	SysOpMeta

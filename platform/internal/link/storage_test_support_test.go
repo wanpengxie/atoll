@@ -188,7 +188,6 @@ func newStorageRig(t *testing.T) *storageRig {
 		) (actor.ActorID, error) {
 			return "agent:child", nil
 		},
-		RequestIdle:        func(context.Context, actor.ActorID, actorhost.AttemptKey) error { return nil },
 		EndSelf:            func(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error { return nil },
 		StorageHostControl: shc,
 		Plan:               func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },

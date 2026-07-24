@@ -44,13 +44,6 @@ func (h managedLifecycle) Fork(
 	return result.ChildActorID, err
 }
 
-func (h managedLifecycle) RequestIdle(ctx context.Context) error {
-	if err := h.admitInvocation(); err != nil {
-		return err
-	}
-	return h.actors.requestIdle(ctx, h.id, h.key)
-}
-
 func (h managedLifecycle) EndSelf(ctx context.Context, request actorcaps.EndSelfRequest) error {
 	if err := h.admitInvocation(); err != nil {
 		return err

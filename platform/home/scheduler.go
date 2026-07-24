@@ -14,8 +14,8 @@ import (
 
 // fireSink appends the already-durable timer message through the ordinary
 // author-welded harness path. It does not revive, redeliver, or otherwise
-// participate in actor lifecycle; the delivery adapter independently invokes
-// ensureRun when this committed message reaches its receiver.
+// participate in actor lifecycle; the delivery adapter independently attempts
+// the current actor endpoint when this committed message reaches its receiver.
 type fireSink struct {
 	minter    harness.Minter
 	authority storespec.ActorAuthority

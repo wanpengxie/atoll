@@ -261,8 +261,8 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 		bootstrapDeclarations = append(bootstrapDeclarations, home.DeclareRequest{
 			SourceDeclID: declaration.DeclID, Kind: declaration.Kind,
 			Class: declaration.Rendered.Class, Config: &config, Placement: placement,
-			TIdle: declaration.Rendered.TIdleMS, MakeDefault: declaration.DeclID == spec.DefaultSourceDeclID,
-			CreatedAt: spec.CreatedAt,
+			MakeDefault: declaration.DeclID == spec.DefaultSourceDeclID,
+			CreatedAt:   spec.CreatedAt,
 		})
 	}
 	homeInstance, err := h.openHome(

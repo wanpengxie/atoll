@@ -106,10 +106,6 @@ func (p outboundProbeLifecycle) Fork(context.Context, message.ID, actorcaps.Fork
 	p.probe.lifecycleCalls.Add(1)
 	return "agent:child", nil
 }
-func (p outboundProbeLifecycle) RequestIdle(context.Context) error {
-	p.probe.lifecycleCalls.Add(1)
-	return nil
-}
 func (p outboundProbeLifecycle) EndSelf(context.Context, actorcaps.EndSelfRequest) error {
 	p.probe.lifecycleCalls.Add(1)
 	return nil
@@ -350,7 +346,7 @@ func TestOutboundSlotStartsFailClosedThenPublishesFiveArmsAtomically(t *testing.
 	if _, err := build.prepared.Schedule.Schedule(t.Context(), schedule.ScheduleReq{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := build.prepared.Lifecycle.RequestIdle(t.Context()); err != nil {
+	if err := build.prepared.Lifecycle.EndSelf(t.Context(), actorcaps.EndSelfRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if probe.penCalls.Load() != 1 ||

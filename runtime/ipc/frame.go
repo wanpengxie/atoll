@@ -123,12 +123,11 @@ const (
 	// path.
 	KindCancelRequest Kind = "cancel_request"
 	// Lifecycle control is carried on the actor stream. Fork and End have
-	// operation results; Idle is a one-way optimization intent.
+	// operation results.
 	KindSpawn    Kind = "spawn"
 	KindSpawnAck Kind = "spawn_ack"
 	KindEnd      Kind = "end"
 	KindEndAck   Kind = "end_ack"
-	KindIdle     Kind = "idle"
 )
 
 // MaxFrameBytes caps one length-prefixed JSON frame at 16 MiB.
@@ -174,8 +173,6 @@ type EndAckPayload struct {
 	ErrorCode    string `json:"error_code,omitempty"`
 	ErrorMessage string `json:"error_message,omitempty"`
 }
-
-type IdlePayload struct{}
 
 // DeliverPayload carries one envelope into the bound actor's mailbox.
 type DeliverPayload struct {

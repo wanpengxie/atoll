@@ -73,14 +73,6 @@ func (a *ChannelActors) RemoteFork(
 	return result.ChildActorID, err
 }
 
-func (a *ChannelActors) RemoteRequestIdle(
-	ctx context.Context,
-	id actor.ActorID,
-	key actorhost.AttemptKey,
-) error {
-	return a.requestIdle(ctx, id, key)
-}
-
 func (a *ChannelActors) RemoteEndSelf(
 	ctx context.Context,
 	id actor.ActorID,

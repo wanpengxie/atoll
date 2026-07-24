@@ -24,7 +24,6 @@ type serverActorHandlers struct {
 	access        func(context.Context, actor.ActorID, []byte) ([]byte, error)
 	schedule      func(context.Context, actor.ActorID, []byte) ([]byte, error)
 	fork          func(context.Context, actor.ActorID, actorhost.AttemptKey, message.ID, actorcaps.ForkSpec) (actor.ActorID, error)
-	requestIdle   func(context.Context, actor.ActorID, actorhost.AttemptKey) error
 	endSelf       func(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error
 	obs           func(actor.ActorID, actorhost.AttemptKey, actorrt.ObsKind, actorrt.ObsValue)
 	cancelRequest func(actor.ActorID, message.ID)
@@ -169,13 +168,6 @@ func (s *serverActorEndpoint) readLoop() error {
 			}
 		case ipc.KindEnd:
 			if err := s.handleEnd(frame.Payload); err != nil {
-				return err
-			}
-		case ipc.KindIdle:
-			if s.handlers.requestIdle == nil {
-				return errors.New("link: idle handler unavailable")
-			}
-			if err := s.handlers.requestIdle(s.ctx, s.id, s.key); err != nil {
 				return err
 			}
 		case ipc.KindObs:

@@ -115,7 +115,7 @@ func (c *Controller) isCurrent(id actor.ActorID, key actorhost.AttemptKey) error
 	if !ok {
 		return ErrInactive
 	}
-	if value.Desired.Kind != DesiredRun || value.Desired.AttemptKey != key {
+	if value.Desired.AttemptKey != key {
 		return ErrStaleAttempt
 	}
 	return nil
@@ -140,36 +140,6 @@ func (c *Controller) active(id actor.ActorID) error {
 }
 
 func mintAttempt() (actorhost.AttemptKey, error) { return actorhost.NewAttemptKey() }
-
-func (c *Controller) ensureRun(id actor.ActorID) (bool, error) {
-	if id == actor.SystemActorID {
-		return false, ErrReservedSystem
-	}
-	unlock := c.gates.lock(id)
-	defer unlock()
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	switch c.phase {
-	case Bootstrapping:
-		return false, ErrBootstrapping
-	case Closed:
-		return false, ErrClosed
-	}
-	value, ok := c.actors[id]
-	if !ok {
-		return false, ErrInactive
-	}
-	if value.Desired.Kind == DesiredRun {
-		return false, nil
-	}
-	key, err := mintAttempt()
-	if err != nil {
-		return false, err
-	}
-	value.Desired = DesiredState{Kind: DesiredRun, AttemptKey: key}
-	c.actors[id] = value
-	return true, nil
-}
 
 func (c *Controller) upsert(stored StoredActor, desired DesiredState) error {
 	definition, err := definitionFromStored(stored)
@@ -218,9 +188,6 @@ func (c *Controller) desiredFor(domain, server actorhost.ExecutionDomain) ([]act
 	out := make([]actorhost.Desired, 0, len(ids))
 	for _, id := range ids {
 		value := actors[id]
-		if value.Desired.Kind != DesiredRun {
-			continue
-		}
 		def := value.Definition
 		switch def.Placement.Kind {
 		case storespec.PlacementServer:
@@ -258,13 +225,11 @@ type ChannelActors struct {
 	now          func() time.Time
 	logger       *slog.Logger
 
-	channelID      channel.ID
-	penMinter      PenMinter
-	accessMinter   AccessMinter
-	stateResolver  StateResolver
-	scheduleMinter ScheduleMinter
-	wakeGrace      time.Duration
-
+	channelID           channel.ID
+	penMinter           PenMinter
+	accessMinter        AccessMinter
+	stateResolver       StateResolver
+	scheduleMinter      ScheduleMinter
 	serverDesiredCtx    context.Context
 	serverDesiredCancel context.CancelFunc
 	serverDesiredWake   chan struct{}
@@ -325,10 +290,6 @@ func NewChannelActors(cfg Config) (*ChannelActors, error) {
 	if serverDesiredPoll <= 0 {
 		serverDesiredPoll = 100 * time.Millisecond
 	}
-	wakeGrace := cfg.WakeGrace
-	if wakeGrace <= 0 {
-		wakeGrace = time.Second
-	}
 	actors := &ChannelActors{
 		store:               cfg.Store,
 		effects:             effects,
@@ -342,7 +303,6 @@ func NewChannelActors(cfg Config) (*ChannelActors, error) {
 		accessMinter:        cfg.AccessMinter,
 		stateResolver:       cfg.StateResolver,
 		scheduleMinter:      cfg.ScheduleMinter,
-		wakeGrace:           wakeGrace,
 		serverDesiredCtx:    serverDesiredCtx,
 		serverDesiredCancel: serverDesiredCancel,
 		serverDesiredWake:   make(chan struct{}, 1),
@@ -389,7 +349,7 @@ func (a *ChannelActors) Start(ctx context.Context, unit *actorrt.Unit) error {
 		}
 		managed[row.ID] = ActiveActor{
 			Definition: def,
-			Desired:    DesiredState{Kind: DesiredRun, AttemptKey: key},
+			Desired:    DesiredState{AttemptKey: key},
 		}
 	}
 	if systemCount != 1 {
@@ -472,17 +432,6 @@ func (a *ChannelActors) wakeDefinition(def ActorDefinition) {
 	}
 }
 
-func (a *ChannelActors) EnsureRun(id actor.ActorID) (bool, error) {
-	changed, err := a.controller.ensureRun(id)
-	if err != nil || !changed {
-		return changed, err
-	}
-	value, _, _ := a.controller.lookup(id)
-	a.pokeServerDesired()
-	a.wakeDefinition(value.Definition)
-	return true, nil
-}
-
 func (a *ChannelActors) PlanFor(domain actorhost.ExecutionDomain) ([]actorhost.Desired, error) {
 	return a.controller.desiredFor(domain, a.serverDomain)
 }
@@ -499,37 +448,6 @@ func (a *ChannelActors) Deliver(id actor.ActorID, env *message.Envelope) error {
 	}
 	if id == actor.SystemActorID {
 		return a.kernel.deliver(env)
-	}
-	return a.host.Deliver(id, env)
-}
-
-// DeliverCommitted is the single compound delivery entry: it routes
-// SystemActorID to the kernel, ensures the value ledger says Run, and makes
-// exactly one physical delivery attempt. When EnsureRun reports a real
-// dormant→Run wake it first sleeps one bounded blind grace (wakeGrace) so the
-// asynchronous Host build gets a head start — without reading actual state or
-// claiming readiness (this is NOT the retired EnsureLive illusion). It never
-// retries, never waits for NotHosted to clear, and never replays prior rows:
-// an undeliverable envelope is the caller's deadline/resend concern, and the
-// pump cursor must advance regardless of the outcome.
-func (a *ChannelActors) DeliverCommitted(
-	ctx context.Context,
-	id actor.ActorID,
-	env *message.Envelope,
-) error {
-	if id == actor.SystemActorID {
-		return a.kernel.deliver(env)
-	}
-	changed, err := a.EnsureRun(id)
-	if err != nil {
-		return err
-	}
-	if changed {
-		select {
-		case <-time.After(a.wakeGrace):
-		case <-ctx.Done():
-			return ctx.Err()
-		}
 	}
 	return a.host.Deliver(id, env)
 }

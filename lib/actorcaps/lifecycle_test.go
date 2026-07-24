@@ -15,7 +15,6 @@ type lifecycleShape struct{}
 func (lifecycleShape) Fork(context.Context, message.ID, ForkSpec) (actor.ActorID, error) {
 	return "", nil
 }
-func (lifecycleShape) RequestIdle(context.Context) error { return nil }
 func (lifecycleShape) EndSelf(context.Context, EndSelfRequest) error {
 	return nil
 }

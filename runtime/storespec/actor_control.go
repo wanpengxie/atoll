@@ -4,8 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"time"
-
 	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
@@ -89,7 +87,6 @@ type ActorControlRow struct {
 	Sponsor            actor.ActorID
 	Class              string
 	Config             json.RawMessage
-	TIdle              time.Duration
 	Placement          Placement
 	SourceDeclID       string
 }
@@ -136,7 +133,6 @@ type AdmitBundle struct {
 	Class        string
 	Config       json.RawMessage
 	Placement    Placement
-	TIdle        time.Duration
 	SourceDeclID string
 	CreatedAt    int64
 }

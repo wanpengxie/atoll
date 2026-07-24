@@ -45,51 +45,9 @@ func (a *ChannelActors) publishNew(ctx context.Context, id actor.ActorID) (Actor
 	}
 	a.controller.actors[id] = ActiveActor{
 		Definition: definition,
-		Desired:    DesiredState{Kind: DesiredRun, AttemptKey: key},
+		Desired:    DesiredState{AttemptKey: key},
 	}
 	return definition, true, nil
-}
-
-func (a *ChannelActors) publishReplacement(
-	ctx context.Context,
-	id actor.ActorID,
-	forceRun bool,
-) (ActorDefinition, error) {
-	unlock := a.controller.gates.lock(id)
-	defer unlock()
-	stored, active, err := a.store.LookupActive(ctx, id)
-	if err != nil {
-		return ActorDefinition{}, err
-	}
-	if !active {
-		return ActorDefinition{}, ErrInactive
-	}
-	definition, err := definitionFromStored(stored)
-	if err != nil {
-		return ActorDefinition{}, err
-	}
-	a.controller.stateMu.Lock()
-	defer a.controller.stateMu.Unlock()
-	if a.controller.phase != Running {
-		if a.controller.phase == Bootstrapping {
-			return ActorDefinition{}, ErrBootstrapping
-		}
-		return ActorDefinition{}, ErrClosed
-	}
-	current, exists := a.controller.actors[id]
-	if !exists {
-		return ActorDefinition{}, ErrInactive
-	}
-	desired := current.Desired
-	if forceRun || desired.Kind == DesiredRun {
-		key, keyErr := mintAttempt()
-		if keyErr != nil {
-			return ActorDefinition{}, keyErr
-		}
-		desired = DesiredState{Kind: DesiredRun, AttemptKey: key}
-	}
-	a.controller.actors[id] = ActiveActor{Definition: definition, Desired: desired}
-	return definition, nil
 }
 
 func (a *ChannelActors) wakeAfter(definitions ...ActorDefinition) {
@@ -240,7 +198,7 @@ func (a *ChannelActors) Restart(ctx context.Context, request RestartRequest) err
 	unlock := a.controller.gates.lock(request.ActorID)
 	commit, err := a.store.Restart(ctx, request)
 	if err == nil {
-		err = a.publishReplacementLocked(ctx, request.ActorID, true)
+		err = a.publishReplacementLocked(ctx, request.ActorID)
 	}
 	unlock()
 	if err != nil {
@@ -266,7 +224,7 @@ func (a *ChannelActors) ApplyDeclaration(ctx context.Context, change Declaration
 	unlock := a.controller.gates.lock(change.ActorID)
 	commit, err := a.store.ApplyDeclaration(ctx, change)
 	if err == nil {
-		err = a.publishReplacementLocked(ctx, change.ActorID, false)
+		err = a.publishReplacementLocked(ctx, change.ActorID)
 	}
 	unlock()
 	if err != nil {
@@ -282,7 +240,6 @@ func (a *ChannelActors) ApplyDeclaration(ctx context.Context, change Declaration
 func (a *ChannelActors) publishReplacementLocked(
 	ctx context.Context,
 	id actor.ActorID,
-	forceRun bool,
 ) error {
 	stored, active, err := a.store.LookupActive(ctx, id)
 	if err != nil {
@@ -303,19 +260,18 @@ func (a *ChannelActors) publishReplacementLocked(
 		}
 		return ErrClosed
 	}
-	current, exists := a.controller.actors[id]
+	_, exists := a.controller.actors[id]
 	if !exists {
 		return ErrInactive
 	}
-	desired := current.Desired
-	if forceRun || desired.Kind == DesiredRun {
-		key, keyErr := mintAttempt()
-		if keyErr != nil {
-			return keyErr
-		}
-		desired = DesiredState{Kind: DesiredRun, AttemptKey: key}
+	key, keyErr := mintAttempt()
+	if keyErr != nil {
+		return keyErr
 	}
-	a.controller.actors[id] = ActiveActor{Definition: definition, Desired: desired}
+	a.controller.actors[id] = ActiveActor{
+		Definition: definition,
+		Desired:    DesiredState{AttemptKey: key},
+	}
 	return nil
 }
 
@@ -418,50 +374,6 @@ func (a *ChannelActors) terminal(ctx context.Context, command TerminalCommand) (
 		a.effects.ApplyPostCommit(commit.Effects)
 		return commit.Result, nil
 	}
-}
-
-func (a *ChannelActors) requestIdle(
-	ctx context.Context,
-	id actor.ActorID,
-	key actorhost.AttemptKey,
-) error {
-	done, err := a.beginCommand()
-	if err != nil {
-		return err
-	}
-	defer done()
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	default:
-	}
-	unlock := a.controller.gates.lock(id)
-	a.controller.stateMu.Lock()
-	if a.controller.phase != Running {
-		if a.controller.phase == Bootstrapping {
-			err = ErrBootstrapping
-		} else {
-			err = ErrClosed
-		}
-	} else {
-		current, exists := a.controller.actors[id]
-		switch {
-		case !exists:
-			err = ErrInactive
-		case current.Desired.Kind != DesiredRun || current.Desired.AttemptKey != key:
-			err = ErrStaleAttempt
-		default:
-			current.Desired = DesiredState{Kind: DesiredDormant}
-			a.controller.actors[id] = current
-		}
-	}
-	a.controller.stateMu.Unlock()
-	unlock()
-	if err != nil {
-		return err
-	}
-	a.pokeServerDesired()
-	return nil
 }
 
 // Keep errors.Is useful when adapters translate a closed command surface.

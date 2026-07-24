@@ -76,17 +76,13 @@ func (d ExecutionDomain) valid() bool { return strings.TrimSpace(string(d)) != "
 
 // ExecutionSpec is the immutable input used to construct a local body.
 type ExecutionSpec struct {
-	Kind        actor.Kind
-	Class       string
-	Config      json.RawMessage
-	IdleTimeout time.Duration
+	Kind   actor.Kind
+	Class  string
+	Config json.RawMessage
 }
 
 func (s ExecutionSpec) canonical() (ExecutionSpec, error) {
 	if _, ok := actor.ParseKind(string(s.Kind)); !ok {
-		return ExecutionSpec{}, ErrInvalidDesired
-	}
-	if s.IdleTimeout < 0 {
 		return ExecutionSpec{}, ErrInvalidDesired
 	}
 	out := s
@@ -118,7 +114,6 @@ func (s ExecutionSpec) canonical() (ExecutionSpec, error) {
 func executionSpecEqual(left, right ExecutionSpec) bool {
 	return left.Kind == right.Kind &&
 		left.Class == right.Class &&
-		left.IdleTimeout == right.IdleTimeout &&
 		bytes.Equal(left.Config, right.Config)
 }
 

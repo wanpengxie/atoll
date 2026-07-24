@@ -347,6 +347,15 @@ func TestHarden03BNoReplayOrLegacyExecutionOwnerInProduction(t *testing.T) {
 		"Spawn" + "IfAbsent",
 		"Stop" + "All",
 		"Drain" + "Zombies",
+		"Desired" + "Dormant",
+		"Request" + "Idle",
+		"Kind" + "Idle",
+		"Idle" + "Timeout",
+		"Wake" + "Grace",
+		"Ensure" + "Run",
+		"Deliver" + "Committed",
+		"T" + "Idle",
+		"t_" + "idle_ms",
 	}
 	for _, root := range []string{"../app", "../cmd", "../drivers", "../lib", "../platform", "../registry", "../runtime"} {
 		paths, err := productionFiles(root)

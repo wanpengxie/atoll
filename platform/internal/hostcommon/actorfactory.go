@@ -19,6 +19,6 @@ type ActorFactory struct {
 // incarnation's already-welded caps bundle. hooks configures the actorbase
 // engine (spec §3's out-generation matrix: Home wires its own CancelRequest,
 // while a daemon host wires its current DaemonOutbound capability bundle).
-func Build(caps actorcaps.Caps, hooks actorbase.Hooks, f ActorFactory, options actorbase.Options) actorrt.Actor {
-	return actorbase.NewWithOptions(caps, hooks, f.Proc, options)
+func Build(caps actorcaps.Caps, hooks actorbase.Hooks, f ActorFactory) actorrt.Actor {
+	return actorbase.New(caps, hooks, f.Proc)
 }

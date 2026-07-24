@@ -64,17 +64,6 @@ func (h *remoteActorLifecycle) Fork(
 	return ack.ChildID, nil
 }
 
-func (h *remoteActorLifecycle) RequestIdle(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	raw, err := json.Marshal(ipc.IdlePayload{})
-	if err != nil {
-		return err
-	}
-	return h.codec.Write(ipc.Frame{Kind: ipc.KindIdle, Payload: raw})
-}
-
 func (h *remoteActorLifecycle) EndSelf(
 	ctx context.Context,
 	request actorcaps.EndSelfRequest,

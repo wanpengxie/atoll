@@ -3,7 +3,6 @@ package store_test
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -20,7 +19,7 @@ func TestAdmitDeclaredWritesJoinedControlRowAtomically(t *testing.T) {
 		ID: "agent:a:1", Kind: actor.KindAgent,
 		Binding: actor.BindingRuntimeInboundViaRelay, Class: "agent.test",
 		Config: []byte(`{"model":"x"}`), Placement: placement,
-		TIdle: 3 * time.Second, SourceDeclID: "decl-a", CreatedAt: 100,
+		SourceDeclID: "decl-a", CreatedAt: 100,
 	}
 	got, err := cs.DeclAdmission.AdmitDeclared(ctx, in)
 	if err != nil || !got.Created || got.ID != in.ID {
@@ -31,7 +30,7 @@ func TestAdmitDeclaredWritesJoinedControlRowAtomically(t *testing.T) {
 		t.Fatalf("LookupDeclaredActive = (%+v,%v,%v)", row, ok, err)
 	}
 	if row.CurrentDeclVersion != 1 || row.Class != in.Class || string(row.Config) != string(in.Config) ||
-		row.Placement != placement || row.TIdle != in.TIdle || row.SourceDeclID != in.SourceDeclID || row.Sponsor != actor.SystemActorID {
+		row.Placement != placement || row.SourceDeclID != in.SourceDeclID || row.Sponsor != actor.SystemActorID {
 		t.Fatalf("joined row = %+v", row)
 	}
 	if rows, err := cs.Query.ReadAfterSeq(ctx, 0, 10); err != nil || len(rows) != 1 {

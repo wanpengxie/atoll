@@ -683,13 +683,6 @@ func (l outboundLifecycle) Fork(ctx context.Context, requestID message.ID, spec 
 	}
 	return bundle.Lifecycle.Fork(ctx, requestID, spec)
 }
-func (l outboundLifecycle) RequestIdle(ctx context.Context) error {
-	bundle, err := l.slot.load()
-	if err != nil {
-		return err
-	}
-	return bundle.Lifecycle.RequestIdle(ctx)
-}
 func (l outboundLifecycle) EndSelf(ctx context.Context, request actorcaps.EndSelfRequest) error {
 	bundle, err := l.slot.load()
 	if err != nil {

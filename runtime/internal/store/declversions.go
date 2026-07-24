@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
-	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -14,7 +13,7 @@ import (
 
 const declaredControlColumns = `r.actor_id, r.actor_kind, r.principal, r.role,
     COALESCE(r.actor_binding,''), r.created_at, r.current_decl_version,
-    d.class, d.config_json, d.t_idle_ms, d.placement, d.desired_host,
+    d.class, d.config_json, d.placement, d.desired_host,
     r.source_decl_id`
 
 type controlScanner interface{ Scan(...any) error }
@@ -23,9 +22,8 @@ func scanDeclaredControl(s controlScanner) (storespec.ActorControlRow, error) {
 	var row storespec.ActorControlRow
 	var rawKind, rawRole, rawBinding, placement string
 	var config []byte
-	var idleMS int64
 	if err := s.Scan(&row.ID, &rawKind, &row.Principal, &rawRole, &rawBinding,
-		&row.CreatedAt, &row.CurrentDeclVersion, &row.Class, &config, &idleMS,
+		&row.CreatedAt, &row.CurrentDeclVersion, &row.Class, &config,
 		&placement, &row.Placement.Host, &row.SourceDeclID); err != nil {
 		return storespec.ActorControlRow{}, err
 	}
@@ -46,10 +44,6 @@ func scanDeclaredControl(s controlScanner) (storespec.ActorControlRow, error) {
 		}
 		row.Binding = binding
 	}
-	if idleMS < 0 {
-		return storespec.ActorControlRow{}, fmt.Errorf("store: actor %q negative t_idle_ms", row.ID)
-	}
-	row.TIdle = time.Duration(idleMS) * time.Millisecond
 	row.Placement.Kind = storespec.PlacementKind(placement)
 	if err := row.Placement.Validate(); err != nil {
 		return storespec.ActorControlRow{}, fmt.Errorf("store: actor %q placement: %w", row.ID, err)
@@ -104,8 +98,8 @@ func validateAdmitBundle(in storespec.AdmitBundle) error {
 	if _, ok := actor.ParseKind(string(in.Kind)); !ok {
 		return fmt.Errorf("store: invalid actor kind %q", in.Kind)
 	}
-	if in.Class == "" || in.CreatedAt <= 0 || in.TIdle < 0 {
-		return errors.New("store: declared admission requires class, timestamp, and non-negative idle")
+	if in.Class == "" || in.CreatedAt <= 0 {
+		return errors.New("store: declared admission requires class and timestamp")
 	}
 	if err := in.Placement.Validate(); err != nil {
 		return err
@@ -218,7 +212,7 @@ func (r *actorRegistry) AdmitDeclared(ctx context.Context, in storespec.AdmitBun
 	}
 
 	rendered := channel.RenderedSnapshot{
-		Class: in.Class, Config: in.Config, TIdleMS: in.TIdle.Milliseconds(),
+		Class: in.Class, Config: in.Config,
 		Placement: channel.Placement{Kind: channel.PlacementKind(in.Placement.Kind), DesiredHost: in.Placement.Host},
 	}
 	if err := insertDeclaredTx(ctx, tx, in.ID, in.Kind, in.Principal, in.SourceDeclID, in.Binding, rendered, in.Role, in.CreatedAt); err != nil {

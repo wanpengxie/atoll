@@ -17,9 +17,8 @@ import (
 )
 
 // reconcileSweep contains only level-derived maintenance. Actor desired→actual
-// convergence belongs to HostSupervisor and message delivery invokes the sole
-// ensureRun transition directly; this loop never spawns, retries, or replays a
-// collaboration request.
+// convergence belongs to HostSupervisor; this loop never spawns, retries, or
+// replays a collaboration request.
 func (h *Home) reconcileSweep(ctx context.Context) {
 	h.reconcileDeclarations(ctx)
 	if ctx.Err() != nil {

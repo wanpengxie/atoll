@@ -196,7 +196,6 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 						caps,
 						hooks,
 						factory,
-						actorbase.Options{IdleTimeout: input.ExecutionSpec.IdleTimeout},
 					)
 					return prepared.Wrap(body)
 				},
@@ -299,7 +298,7 @@ func acceptDaemonPlan(
 			ActorID: row.ActorID, AttemptKey: row.AttemptKey,
 			ExecutionSpec: actorhost.ExecutionSpec{
 				Kind: row.Kind, Class: row.Class,
-				Config: append([]byte(nil), row.Config...), IdleTimeout: row.Idle,
+				Config: append([]byte(nil), row.Config...),
 			},
 		})
 	}

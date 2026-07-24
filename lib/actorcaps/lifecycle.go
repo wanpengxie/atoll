@@ -33,6 +33,5 @@ type EndSelfRequest struct {
 // physical delivery or incarnation identity.
 type LifecycleHandle interface {
 	Fork(context.Context, message.ID, ForkSpec) (actor.ActorID, error)
-	RequestIdle(context.Context) error
 	EndSelf(context.Context, EndSelfRequest) error
 }

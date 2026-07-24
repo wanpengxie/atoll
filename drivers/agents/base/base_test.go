@@ -107,8 +107,7 @@ func (s *fakeSys) CancelTimer(schedule.TimerID) error { return nil }
 func (s *fakeSys) Fork(message.ID, actorcaps.ForkSpec) (actor.ActorID, error) {
 	return "", nil
 }
-func (s *fakeSys) RequestIdle() error { return nil }
-func (s *fakeSys) End() error         { return nil }
+func (s *fakeSys) End() error { return nil }
 func (s *fakeSys) PublishObs(kind actorrt.ObsKind, _ actorrt.ObsValue) error {
 	s.obs = append(s.obs, kind)
 	return nil
