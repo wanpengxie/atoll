@@ -51,22 +51,20 @@ type StateResolver interface {
 // exact physical caller (Host actual == exact Body(ActorID, AttemptKey, Unit)).
 //
 // Lock discipline (hard): admit runs per-call on the arm hot path.
-// controller.isCurrent is an stateMu.RLock snapshot read — it NEVER takes the
+// invocationProbe.check is an stateMu.RLock snapshot read — it NEVER takes the
 // controlGate and NEVER reaches into the Host. actual.IsCurrent is the Host's
 // own exact-current primitive. The two reads are not atomic across each other:
 // the ledger may turn over between them (sliding-window semantics), and that is
 // intended — a pass followed by a G1→G2 turnover lets the in-flight call finish
 // naturally while the next G1 call is refused at the ledger.
 type managedInvocation struct {
-	controller *Controller
-	actorID    actor.ActorID
-	attempt    actorhost.AttemptKey
-	actual     actorhost.ActualCurrent
+	logical invocationProbe
+	actual  actorhost.ActualCurrent
 }
 
 func (g *managedInvocation) admit() error {
 	// Root authorisation on the linearised value ledger.
-	if err := g.controller.isCurrent(g.actorID, g.attempt); err != nil {
+	if err := g.logical.check(); err != nil {
 		return err
 	}
 	// Exact physical caller.
@@ -219,10 +217,8 @@ func (a *ChannelActors) buildManagedCaps(input actorhost.BodyBuildInput) (actorc
 	def := value.Definition
 	author := storespec.AuthorStamp{ID: input.ActorID, BirthVersion: def.DefinitionVersion}
 	gate := &managedInvocation{
-		controller: a.controller,
-		actorID:    input.ActorID,
-		attempt:    input.AttemptKey,
-		actual:     input.Current,
+		logical: a.controller.bindInvocation(input.ActorID, input.AttemptKey),
+		actual:  input.Current,
 	}
 	caps := actorcaps.Caps{
 		Lifecycle: managedLifecycle{

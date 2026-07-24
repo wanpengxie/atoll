@@ -22,6 +22,9 @@ import (
 )
 
 type Controller struct {
+	store        Store
+	valueEffects controllerValueEffects
+
 	stateMu sync.RWMutex
 	phase   ControllerPhase
 	actors  map[actor.ActorID]ActiveActor
@@ -31,8 +34,16 @@ type Controller struct {
 	placementGate sync.Mutex
 }
 
-func newController() *Controller {
-	return &Controller{phase: Bootstrapping, actors: make(map[actor.ActorID]ActiveActor)}
+type controllerValueEffects interface {
+	RunActorBorn(actor.ActorID) error
+	RunActorsEnded([]actor.ActorID)
+}
+
+func newController(store Store, effects controllerValueEffects) *Controller {
+	return &Controller{
+		store: store, valueEffects: effects,
+		phase: Bootstrapping, actors: make(map[actor.ActorID]ActiveActor),
+	}
 }
 
 func (c *Controller) phaseValue() ControllerPhase {
@@ -41,14 +52,55 @@ func (c *Controller) phaseValue() ControllerPhase {
 	return c.phase
 }
 
-func (c *Controller) publishBoot(system storespec.ActorControlRow, actors map[actor.ActorID]ActiveActor) error {
+type controllerBoot struct {
+	system  storespec.ActorControlRow
+	managed map[actor.ActorID]ActiveActor
+}
+
+func (c *Controller) prepareBoot(ctx context.Context) (controllerBoot, error) {
+	rows, err := c.store.ListDeclaredActive(ctx)
+	if err != nil {
+		return controllerBoot{}, err
+	}
+	var system storespec.ActorControlRow
+	systemCount := 0
+	managed := make(map[actor.ActorID]ActiveActor)
+	for _, row := range rows {
+		if row.ID == actor.SystemActorID {
+			if row.Kind != actor.KindSystem {
+				return controllerBoot{}, ErrInvalidKernel
+			}
+			system = cloneControlRow(row)
+			systemCount++
+			continue
+		}
+		def, err := definitionFromStored(StoredActor{Row: row, Origin: OriginDurable})
+		if err != nil {
+			return controllerBoot{}, err
+		}
+		key, err := mintAttempt()
+		if err != nil {
+			return controllerBoot{}, err
+		}
+		managed[row.ID] = ActiveActor{
+			Definition: def,
+			Desired:    DesiredState{AttemptKey: key},
+		}
+	}
+	if systemCount != 1 {
+		return controllerBoot{}, ErrInvalidKernel
+	}
+	return controllerBoot{system: system, managed: managed}, nil
+}
+
+func (c *Controller) publishBoot(boot controllerBoot) error {
 	c.stateMu.Lock()
 	defer c.stateMu.Unlock()
 	if c.phase != Bootstrapping {
 		return ErrAlreadyStarted
 	}
-	c.system = cloneControlRow(system)
-	c.actors = maps.Clone(actors)
+	c.system = cloneControlRow(boot.system)
+	c.actors = maps.Clone(boot.managed)
 	c.phase = Running
 	return nil
 }
@@ -99,7 +151,10 @@ func (c *Controller) list() (map[actor.ActorID]ActiveActor, storespec.ActorContr
 	return out, cloneControlRow(c.system), nil
 }
 
-func (c *Controller) isCurrent(id actor.ActorID, key actorhost.AttemptKey) error {
+// checkCurrentSnapshot is the Controller-internal sliding-window read used by
+// pre-bound invocation probes and by admission while the Controller already
+// owns the relevant control gate. It is not a mutation-admission API.
+func (c *Controller) checkCurrentSnapshot(id actor.ActorID, key actorhost.AttemptKey) error {
 	if id == actor.SystemActorID {
 		return ErrReservedSystem
 	}
@@ -119,6 +174,29 @@ func (c *Controller) isCurrent(id actor.ActorID, key actorhost.AttemptKey) error
 		return ErrStaleAttempt
 	}
 	return nil
+}
+
+// invocationProbe is the only current-check capability handed to a managed
+// body. Its coordinates are welded by Controller; callers cannot turn the
+// snapshot primitive into a lifecycle-mutation admission.
+type invocationProbe struct {
+	controller *Controller
+	actorID    actor.ActorID
+	attempt    actorhost.AttemptKey
+}
+
+func (p invocationProbe) check() error {
+	if p.controller == nil {
+		return ErrStaleAttempt
+	}
+	return p.controller.checkCurrentSnapshot(p.actorID, p.attempt)
+}
+
+func (c *Controller) bindInvocation(
+	id actor.ActorID,
+	key actorhost.AttemptKey,
+) invocationProbe {
+	return invocationProbe{controller: c, actorID: id, attempt: key}
 }
 
 func (c *Controller) active(id actor.ActorID) error {
@@ -215,7 +293,6 @@ func (c *Controller) desiredFor(domain, server actorhost.ExecutionDomain) ([]act
 }
 
 type ChannelActors struct {
-	store        Store
 	effects      Effects
 	serverDomain actorhost.ExecutionDomain
 	host         *actorhost.HostSupervisor
@@ -291,11 +368,10 @@ func NewChannelActors(cfg Config) (*ChannelActors, error) {
 		serverDesiredPoll = 100 * time.Millisecond
 	}
 	actors := &ChannelActors{
-		store:               cfg.Store,
 		effects:             effects,
 		serverDomain:        cfg.ServerDomain,
 		host:                host,
-		controller:          newController(),
+		controller:          newController(cfg.Store, effects),
 		now:                 now,
 		logger:              logger,
 		channelID:           cfg.ChannelID,
@@ -323,37 +399,9 @@ func (a *ChannelActors) Start(ctx context.Context, unit *actorrt.Unit) error {
 		unit.Stat().Kind != actor.KindSystem || unit.State() != actorrt.UnitPrepared {
 		return ErrInvalidKernel
 	}
-	rows, err := a.store.ListDeclaredActive(ctx)
+	boot, err := a.controller.prepareBoot(ctx)
 	if err != nil {
 		return err
-	}
-	var system storespec.ActorControlRow
-	systemCount := 0
-	managed := make(map[actor.ActorID]ActiveActor)
-	for _, row := range rows {
-		if row.ID == actor.SystemActorID {
-			if row.Kind != actor.KindSystem {
-				return ErrInvalidKernel
-			}
-			system = cloneControlRow(row)
-			systemCount++
-			continue
-		}
-		def, err := definitionFromStored(StoredActor{Row: row, Origin: OriginDurable})
-		if err != nil {
-			return err
-		}
-		key, err := mintAttempt()
-		if err != nil {
-			return err
-		}
-		managed[row.ID] = ActiveActor{
-			Definition: def,
-			Desired:    DesiredState{AttemptKey: key},
-		}
-	}
-	if systemCount != 1 {
-		return ErrInvalidKernel
 	}
 	if err := unit.InstallEventSink(&a.kernel); err != nil {
 		return err
@@ -369,7 +417,7 @@ func (a *ChannelActors) Start(ctx context.Context, unit *actorrt.Unit) error {
 		<-unit.Done()
 		return ErrInvalidKernel
 	}
-	if err := a.controller.publishBoot(system, managed); err != nil {
+	if err := a.controller.publishBoot(boot); err != nil {
 		unit.Stop()
 		<-unit.Done()
 		return err
@@ -544,7 +592,11 @@ func (a *ChannelActors) Lookup(id actor.ActorID) (storespec.ActorControlRow, boo
 }
 
 func (a *ChannelActors) listActiveRows() ([]storespec.ActorControlRow, error) {
-	values, system, err := a.controller.list()
+	return a.controller.activeRows()
+}
+
+func (c *Controller) activeRows() ([]storespec.ActorControlRow, error) {
+	values, system, err := c.list()
 	if err != nil {
 		return nil, err
 	}

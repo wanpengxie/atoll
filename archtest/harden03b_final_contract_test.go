@@ -177,7 +177,9 @@ func TestHarden03BControllerContainerAndGateOrderAreSingular(t *testing.T) {
 	for _, required := range []string{
 		"stateMu sync.RWMutex",
 		"actors  map[actor.ActorID]ActiveActor",
-		"c.actors = maps.Clone(actors)",
+		"store        Store",
+		"valueEffects controllerValueEffects",
+		"c.actors = maps.Clone(boot.managed)",
 		"return cloneActive(value), ok, nil",
 	} {
 		if !strings.Contains(string(controller), required) {
@@ -205,11 +207,55 @@ func TestHarden03BControllerContainerAndGateOrderAreSingular(t *testing.T) {
 			if ok && fn.Name.Name == "lockActorSet" {
 				count++
 			}
+			spec, ok := node.(*ast.TypeSpec)
+			if !ok || spec.Name.Name != "ChannelActors" {
+				return true
+			}
+			structType, ok := spec.Type.(*ast.StructType)
+			if !ok {
+				return true
+			}
+			for _, field := range structType.Fields.List {
+				for _, name := range field.Names {
+					if name.Name == "store" {
+						t.Error("ChannelActors command facade retained Controller's Store port")
+					}
+				}
+			}
 			return true
 		})
 	}
 	if count != 1 {
 		t.Fatalf("multi-control-gate acquisition implementations=%d, want 1", count)
+	}
+
+	commands, err := os.ReadFile("../runtime/actorctl/commands.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"a.store.",
+		"a.controller.gates",
+		"a.controller.placementGate",
+		"a.controller.stateMu",
+		"a.controller.actors",
+	} {
+		if strings.Contains(string(commands), forbidden) {
+			t.Errorf("command facade bypasses Controller transition owner with %q", forbidden)
+		}
+	}
+	for _, required := range []string{
+		"a.controller.admit(ctx, request)",
+		"a.controller.introduce(ctx, request)",
+		"a.controller.fork(ctx, request)",
+		"a.controller.restart(ctx, request)",
+		"a.controller.applyDefinitionChange(ctx, change)",
+		"a.controller.attachDaemon(ctx, request)",
+		"a.controller.terminal(ctx, command)",
+	} {
+		if !strings.Contains(string(commands), required) {
+			t.Errorf("command facade does not delegate complete transition %q", required)
+		}
 	}
 }
 

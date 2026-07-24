@@ -17,10 +17,18 @@ func (a *ChannelActors) AuthorizeAttach(
 	key actorhost.AttemptKey,
 	peer actorhost.ExecutionDomain,
 ) error {
-	if err := a.controller.isCurrent(id, key); err != nil {
+	return a.controller.authorizeAttach(id, key, peer)
+}
+
+func (c *Controller) authorizeAttach(
+	id actor.ActorID,
+	key actorhost.AttemptKey,
+	peer actorhost.ExecutionDomain,
+) error {
+	if err := c.checkCurrentSnapshot(id, key); err != nil {
 		return err
 	}
-	value, ok, err := a.controller.lookup(id)
+	value, ok, err := c.lookup(id)
 	if err != nil {
 		return err
 	}

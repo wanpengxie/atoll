@@ -48,6 +48,8 @@ type fakeStore struct {
 	forkResume        chan struct{}
 	forkCommitted     chan struct{}
 	forkPublishResume chan struct{}
+	restartCommitted  chan struct{}
+	restartResume     chan struct{}
 	resolveSequence   [][]actor.ActorID
 	resolveCalls      int
 	committedPlans    [][]actor.ActorID
@@ -160,14 +162,25 @@ func (f *fakeStore) CommitFork(
 }
 
 func (f *fakeStore) Restart(
-	_ context.Context,
+	ctx context.Context,
 	request RestartRequest,
 ) (ActorCommit[struct{}], error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	row, ok := f.rows[request.ActorID]
+	f.mu.Unlock()
 	if !ok {
 		return ActorCommit[struct{}]{}, ErrInactive
+	}
+	if f.restartCommitted != nil {
+		select {
+		case f.restartCommitted <- struct{}{}:
+		default:
+		}
+		select {
+		case <-f.restartResume:
+		case <-ctx.Done():
+			return ActorCommit[struct{}]{}, ctx.Err()
+		}
 	}
 	return ActorCommit[struct{}]{Actor: row}, nil
 }
@@ -548,6 +561,50 @@ func TestStaleLifecycleRejectedAfterDirectReplacementButActorAuthorityRemains(t 
 	}
 	if err := actors.AuthorActive("agent"); err != nil {
 		t.Fatalf("collaboration ActorID authority was incorrectly attempt-fenced: %v", err)
+	}
+}
+
+func TestEndSelfAdmissionWaitsForRestartTransitionAndRejectsStaleCaller(t *testing.T) {
+	store := newFakeStore("agent")
+	store.restartCommitted = make(chan struct{}, 1)
+	store.restartResume = make(chan struct{})
+	actors := newActors(t, store, nil)
+	g1, _, _ := actors.controller.lookup("agent")
+
+	restarted := make(chan error, 1)
+	go func() {
+		restarted <- actors.Restart(context.Background(), RestartRequest{ActorID: "agent"})
+	}()
+	<-store.restartCommitted
+
+	ended := make(chan error, 1)
+	go func() {
+		ended <- actors.RemoteEndSelf(
+			context.Background(),
+			"agent",
+			g1.Desired.AttemptKey,
+			actorcaps.EndSelfRequest{Reason: "stale-during-restart"},
+		)
+	}()
+	select {
+	case err := <-ended:
+		t.Fatalf("EndSelf crossed Controller's in-flight Restart transition: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	close(store.restartResume)
+	if err := <-restarted; err != nil {
+		t.Fatal(err)
+	}
+	if err := <-ended; !errors.Is(err, ErrStaleAttempt) {
+		t.Fatalf("stale G1 EndSelf error=%v", err)
+	}
+	g2, ok, err := actors.controller.lookup("agent")
+	if err != nil || !ok {
+		t.Fatalf("successor missing after stale EndSelf: ok=%v err=%v", ok, err)
+	}
+	if g2.Desired.AttemptKey == g1.Desired.AttemptKey {
+		t.Fatal("Restart did not publish a successor")
 	}
 }
 

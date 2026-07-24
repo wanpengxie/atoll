@@ -373,16 +373,21 @@ func TestManagedCapsShareOneGate(t *testing.T) {
 	}
 }
 
-// TestManagedGateAdmitTakesNoControlGate pins the lock discipline: admit() reads
-// the value ledger under stateMu only, so it completes while a lifecycle command
-// holds the per-actor controlGate — the arm hot path never queues behind
-// lifecycle commands.
+// TestManagedGateAdmitTakesNoControlGate pins the lock discipline without
+// reaching into Controller's private lock graph: a paused Restart owns the
+// actor's semantic transition, while the pre-bound invocation probe remains a
+// sliding-window snapshot read.
 func TestManagedGateAdmitTakesNoControlGate(t *testing.T) {
 	actors, caps, _ := newGatedActors(t, &recordingPen{})
 	gate := penOf(t, caps).gate
-
-	release := actors.controller.gates.lock("agent")
-	defer release()
+	store := actors.controller.store.(*fakeStore)
+	store.restartCommitted = make(chan struct{}, 1)
+	store.restartResume = make(chan struct{})
+	restarted := make(chan error, 1)
+	go func() {
+		restarted <- actors.Restart(context.Background(), RestartRequest{ActorID: "agent"})
+	}()
+	<-store.restartCommitted
 
 	done := make(chan error, 1)
 	go func() { done <- gate.admit() }()
@@ -393,5 +398,9 @@ func TestManagedGateAdmitTakesNoControlGate(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("admit blocked on the per-actor controlGate")
+	}
+	close(store.restartResume)
+	if err := <-restarted; err != nil {
+		t.Fatal(err)
 	}
 }
