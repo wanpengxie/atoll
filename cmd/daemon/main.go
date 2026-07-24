@@ -57,7 +57,7 @@ func channelFromServerURL(raw string) string {
 
 // planSource is the daemon's single applied compute-plan snapshot. The reconcile
 // ring pulls the authenticated plan through its link, calls ApplyPlan, then reads
-// Members and Lookup from this same atomically replaced desired/factory pair.
+// Members and LookupExact from this same atomically replaced desired/factory pair.
 // A pull or build failure leaves the last-known-good snapshot intact, so the
 // daemon stays connected and retries without introducing a second plan source.
 type planSource struct {
@@ -66,15 +66,20 @@ type planSource struct {
 
 	mu          sync.Mutex
 	lastDesired []actorhost.BodyDesired
-	builders    map[actor.ActorID]platform.ActorFactory
+	builders    map[actor.ActorID]plannedBody
 	lastBuilt   int // -1 until the first successful fetch (to Info-log only on change)
+}
+
+type plannedBody struct {
+	desired actorhost.BodyDesired
+	factory platform.ActorFactory
 }
 
 func newPlanSource(chID, wsRoot, deviceName string, logger *slog.Logger) *planSource {
 	return &planSource{
 		chID: chID, wsRoot: wsRoot, deviceName: deviceName,
 		logger:    logger,
-		builders:  map[actor.ActorID]platform.ActorFactory{},
+		builders:  map[actor.ActorID]plannedBody{},
 		lastBuilt: -1,
 	}
 }
@@ -82,7 +87,14 @@ func newPlanSource(chID, wsRoot, deviceName string, logger *slog.Logger) *planSo
 func (p *planSource) Members(context.Context) ([]actorhost.BodyDesired, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return append([]actorhost.BodyDesired(nil), p.lastDesired...), nil
+	out := append([]actorhost.BodyDesired(nil), p.lastDesired...)
+	for i := range out {
+		out[i].ExecutionSpec.Config = append(
+			json.RawMessage(nil),
+			out[i].ExecutionSpec.Config...,
+		)
+	}
+	return out, nil
 }
 
 // ApplyPlan builds both desired and factory halves off-lock, then publishes one
@@ -90,21 +102,25 @@ func (p *planSource) Members(context.Context) ([]actorhost.BodyDesired, error) {
 // last-known-good snapshot remains authoritative.
 func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 	var desired []actorhost.BodyDesired
-	builders := map[actor.ActorID]platform.ActorFactory{}
+	builders := map[actor.ActorID]plannedBody{}
 	for _, asg := range plan {
 		id := asg.ActorID
+		if _, duplicate := builders[id]; duplicate {
+			return fmt.Errorf("daemon: duplicate plan instance %s", id)
+		}
 		// Desired is generated from the plan row alone, but publication is atomic:
 		// unknown classes, build failures, and identity drift reject the full plan.
 		kind, ok := registry.ClassKind(asg.Class)
 		if !ok {
 			return fmt.Errorf("daemon: plan instance %s has unknown class %q", asg.ActorID, asg.Class)
 		}
-		desired = append(desired, actorhost.BodyDesired{
+		bodyDesired := actorhost.BodyDesired{
 			ActorID: id, AttemptKey: asg.AttemptKey,
 			ExecutionSpec: actorhost.ExecutionSpec{
 				Kind: kind, Class: asg.Class, Config: append(json.RawMessage(nil), asg.Config...),
 			},
-		})
+		}
+		desired = append(desired, bodyDesired)
 		decl, berr := registry.Build(asg.Class, registry.InstanceSpec{
 			ID:     id,
 			Config: asg.Config,
@@ -127,7 +143,7 @@ func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 		if decl.ID != id {
 			return fmt.Errorf("daemon: plan instance %s class %q built mismatched id %s", asg.ActorID, asg.Class, decl.ID)
 		}
-		builders[id] = decl.Factory
+		builders[id] = plannedBody{desired: bodyDesired, factory: decl.Factory}
 	}
 	p.mu.Lock()
 	p.lastDesired = desired
@@ -142,11 +158,20 @@ func (p *planSource) ApplyPlan(plan []platform.PlanActor) error {
 	return nil
 }
 
-func (p *planSource) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
+func (p *planSource) LookupExact(
+	id actor.ActorID,
+	attempt actorhost.AttemptKey,
+	spec actorhost.ExecutionSpec,
+) (platform.ActorFactory, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	f, ok := p.builders[id]
-	return f, ok
+	body, ok := p.builders[id]
+	if !ok ||
+		body.desired.AttemptKey != attempt ||
+		!body.desired.ExecutionSpec.Equal(spec) {
+		return platform.ActorFactory{}, false
+	}
+	return body.factory, true
 }
 
 func main() {

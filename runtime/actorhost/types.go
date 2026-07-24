@@ -117,6 +117,15 @@ func executionSpecEqual(left, right ExecutionSpec) bool {
 		bytes.Equal(left.Config, right.Config)
 }
 
+// Equal reports whether two construction inputs name the same canonical body
+// definition. It canonicalizes both values so composition sources can match an
+// exact Host build input without depending on JSON formatting.
+func (s ExecutionSpec) Equal(other ExecutionSpec) bool {
+	left, leftErr := s.canonical()
+	right, rightErr := other.canonical()
+	return leftErr == nil && rightErr == nil && executionSpecEqual(left, right)
+}
+
 // Desired is a strict tagged union. Only BodyDesired and CarrierDesired can
 // implement it.
 type Desired interface {

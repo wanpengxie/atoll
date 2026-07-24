@@ -202,19 +202,19 @@ func (s currentSchedule) Ack(ctx context.Context, id schedule.TimerID) error {
 }
 
 // buildManagedCaps is the sole final construction of the Server managed Caps for
-// one exact Body. It reads the Controller Definition, welds one AuthorStamp,
+// one exact Body. It reads the exact A/G Controller Definition, welds one AuthorStamp,
 // mints one shared value-ledger gate, draws each raw arm from the injected
 // runtime minters, and welds the SAME gate onto all five arms. The business
 // builder downstream receives only the finished, gated actorcaps.Caps.
 func (a *ChannelActors) buildManagedCaps(input actorhost.BodyBuildInput) (actorcaps.Caps, error) {
-	value, ok, err := a.controller.lookup(input.ActorID)
+	def, err := a.controller.definitionForAttempt(
+		input.ActorID,
+		input.AttemptKey,
+		input.ExecutionSpec,
+	)
 	if err != nil {
 		return actorcaps.Caps{}, err
 	}
-	if !ok {
-		return actorcaps.Caps{}, ErrInactive
-	}
-	def := value.Definition
 	author := storespec.AuthorStamp{ID: input.ActorID, BirthVersion: def.DefinitionVersion}
 	gate := &managedInvocation{
 		logical: a.controller.bindInvocation(input.ActorID, input.AttemptKey),

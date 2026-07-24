@@ -310,7 +310,8 @@ func (nopEffects) Fatal(error)                      {}
 // body the Platform business builder is allowed to see. It deliberately omits
 // Self (Incarnation), AttemptKey and ActualCurrent: those are runtime execution
 // coordinates: leaving any of them in the business face is the seed of the next
-// bypass. The business builder finds its factory by ActorID/ExecutionSpec and
+// bypass. The business builder finds its factory only from the exact
+// ActorID/ExecutionSpec snapshot and
 // constructs the actor with the already-gated Caps — it never sees, and cannot
 // reconstruct, the physical current fence.
 type ManagedBodyInput struct {

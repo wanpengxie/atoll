@@ -7,15 +7,18 @@ import (
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
 )
 
-// ActorFactorySource resolves a desired member's id to its ActorFactory — the
-// daemon-side counterpart of the reconcile ring's activation resolve (mirrors
-// Home's actor-factory resolver, but scoped to compute: a daemon never forks, so it
-// carries no LookupByClass entry). Kind is never re-answered here — it is
-// caller-held on the DesiredMember the reconcile loop already read.
+// ActorFactorySource resolves only the exact immutable plan generation that
+// created a Host build claim. ActorID-only lookup is intentionally absent: a
+// newer plan must never supply its factory to an older in-flight build.
 type ActorFactorySource interface {
-	Lookup(id actor.ActorID) (def platform.ActorFactory, ok bool)
+	LookupExact(
+		id actor.ActorID,
+		attempt actorhost.AttemptKey,
+		spec actorhost.ExecutionSpec,
+	) (def platform.ActorFactory, ok bool)
 }
 
 // LocalFileOpener mirrors platform/internal/link.LocalFileOpener's exact

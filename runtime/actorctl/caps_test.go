@@ -2,6 +2,7 @@ package actorctl
 
 import (
 	"context"
+	"errors"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -197,6 +198,42 @@ func publishNewAttempt(t *testing.T, actors *ChannelActors, id actor.ActorID) {
 	value.Desired = DesiredState{AttemptKey: key}
 	c.actors[id] = value
 	c.stateMu.Unlock()
+}
+
+func TestManagedCapsRejectStaleBuildInsteadOfMixingSuccessorDefinition(t *testing.T) {
+	actors, _, _ := newGatedActors(t, &recordingPen{})
+	stopDesiredReader(actors)
+
+	g1, ok, err := actors.controller.lookup("agent")
+	if err != nil || !ok {
+		t.Fatalf("lookup G1 = (%+v,%v,%v)", g1, ok, err)
+	}
+	oldInput := actorhost.BodyBuildInput{
+		ActorID:       "agent",
+		AttemptKey:    g1.Desired.AttemptKey,
+		ExecutionSpec: g1.Definition.Execution,
+	}
+	mismatchedInput := oldInput
+	mismatchedInput.ExecutionSpec.Config = []byte(`{"wrong":"same-attempt"}`)
+	if _, err := actors.buildManagedCaps(mismatchedInput); !errors.Is(err, ErrStaleAttempt) {
+		t.Fatalf("same-attempt mismatched caps build error=%v, want ErrStaleAttempt", err)
+	}
+
+	g2Key, err := actorhost.NewAttemptKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	actors.controller.stateMu.Lock()
+	g2 := actors.controller.actors["agent"]
+	g2.Desired.AttemptKey = g2Key
+	g2.Definition.Execution.Class = "successor-class"
+	g2.Definition.Execution.Config = []byte(`{"generation":2}`)
+	actors.controller.actors["agent"] = g2
+	actors.controller.stateMu.Unlock()
+
+	if _, err := actors.buildManagedCaps(oldInput); !errors.Is(err, ErrStaleAttempt) {
+		t.Fatalf("stale G1 caps build error=%v, want ErrStaleAttempt", err)
+	}
 }
 
 func penOf(t *testing.T, caps actorcaps.Caps) currentPen {

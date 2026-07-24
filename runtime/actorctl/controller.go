@@ -135,6 +135,36 @@ func (c *Controller) lookup(id actor.ActorID) (ActiveActor, bool, error) {
 	return cloneActive(value), ok, nil
 }
 
+// definitionForAttempt returns the one coherent Definition snapshot belonging
+// to an exact value-ledger generation. The attempt check and Definition copy
+// happen under the same state read lock, so a body builder can never combine a
+// stale AttemptKey with a successor's factory/capability inputs.
+func (c *Controller) definitionForAttempt(
+	id actor.ActorID,
+	key actorhost.AttemptKey,
+	spec actorhost.ExecutionSpec,
+) (ActorDefinition, error) {
+	if id == actor.SystemActorID {
+		return ActorDefinition{}, ErrReservedSystem
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	switch c.phase {
+	case Bootstrapping:
+		return ActorDefinition{}, ErrBootstrapping
+	case Closed:
+		return ActorDefinition{}, ErrClosed
+	}
+	value, ok := c.actors[id]
+	if !ok {
+		return ActorDefinition{}, ErrInactive
+	}
+	if value.Desired.AttemptKey != key || !value.Definition.Execution.Equal(spec) {
+		return ActorDefinition{}, ErrStaleAttempt
+	}
+	return cloneActive(value).Definition, nil
+}
+
 func (c *Controller) list() (map[actor.ActorID]ActiveActor, storespec.ActorControlRow, error) {
 	c.stateMu.RLock()
 	defer c.stateMu.RUnlock()

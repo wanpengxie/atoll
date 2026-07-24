@@ -19,6 +19,7 @@ import (
 	"github.com/wanpengxie/atoll/platform/channelhost"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"golang.org/x/crypto/bcrypt"
 )
 
@@ -38,28 +39,43 @@ type testPlanSource struct {
 	mu        sync.Mutex
 	factories map[actor.ActorID]platform.ActorFactory
 	builds    map[actor.ActorID]platform.ActorFactory
+	plans     map[actor.ActorID]platform.PlanActor
 }
 
 func (p *testPlanSource) ApplyPlan(rows []platform.PlanActor) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	builds := make(map[actor.ActorID]platform.ActorFactory, len(rows))
+	plans := make(map[actor.ActorID]platform.PlanActor, len(rows))
 	for _, row := range rows {
 		f, ok := p.factories[row.ActorID]
 		if !ok {
 			continue
 		}
 		builds[row.ActorID] = f
+		plans[row.ActorID] = row
 	}
 	p.builds = builds
+	p.plans = plans
 	return nil
 }
 
-func (p *testPlanSource) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
+func (p *testPlanSource) LookupExact(
+	id actor.ActorID,
+	attempt actorhost.AttemptKey,
+	spec actorhost.ExecutionSpec,
+) (platform.ActorFactory, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	f, ok := p.builds[id]
-	return f, ok
+	row, planned := p.plans[id]
+	if !ok || !planned || row.AttemptKey != attempt {
+		return platform.ActorFactory{}, false
+	}
+	rowSpec := actorhost.ExecutionSpec{
+		Kind: row.Kind, Class: row.Class, Config: row.Config,
+	}
+	return f, rowSpec.Equal(spec)
 }
 
 func truthRowsForTest(t *testing.T, env *testEnv, chID string) []any {

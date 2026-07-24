@@ -86,7 +86,11 @@ func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.Bo
 				_ = prepared.Slot.Close()
 			}
 		}()
-		factory, ok := source.Lookup(input.ActorID)
+		factory, ok := source.LookupExact(
+			input.ActorID,
+			input.AttemptKey,
+			input.ExecutionSpec,
+		)
 		if !ok {
 			return nil
 		}

@@ -654,7 +654,11 @@ type panickingPlanSource struct {
 }
 
 func (*panickingPlanSource) ApplyPlan([]platform.PlanActor) error { return nil }
-func (s *panickingPlanSource) Lookup(actor.ActorID) (platform.ActorFactory, bool) {
+func (s *panickingPlanSource) LookupExact(
+	actor.ActorID,
+	actorhost.AttemptKey,
+	actorhost.ExecutionSpec,
+) (platform.ActorFactory, bool) {
 	s.once.Do(func() { close(s.called) })
 	panic("factory lookup panic")
 }

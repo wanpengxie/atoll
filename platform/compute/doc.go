@@ -22,7 +22,7 @@
 // (ActorFactorySource/LocalFileOpener/StorageHost +
 // the storage mirror types — the decl-family words compute alone speaks; see
 // decl.go's own B′ header comment for why ActorDecl itself stays on the
-// platform root instead). ActorFactory (the def shape ActorFactorySource.Lookup
+// platform root instead). ActorFactory (the def shape ActorFactorySource.LookupExact
 // resolves to) is platform.ActorFactory (platform-topology 批 T5b: compute
 // consumes the cross-host membrane's word, never defines its own).
 package compute

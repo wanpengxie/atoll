@@ -17,6 +17,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -33,9 +34,25 @@ type e2eLinkPlan struct {
 	lookupOnce    sync.Once
 }
 
-func (p *e2eLinkPlan) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
+func (p *e2eLinkPlan) LookupExact(
+	id actor.ActorID,
+	attempt actorhost.AttemptKey,
+	spec actorhost.ExecutionSpec,
+) (platform.ActorFactory, bool) {
 	p.mu.Lock()
 	f, ok := p.builders[id]
+	if ok {
+		ok = false
+		for _, row := range p.rows {
+			rowSpec := actorhost.ExecutionSpec{
+				Kind: row.Kind, Class: row.Class, Config: row.Config,
+			}
+			if row.ActorID == id && row.AttemptKey == attempt && rowSpec.Equal(spec) {
+				ok = true
+				break
+			}
+		}
+	}
 	p.mu.Unlock()
 	if id == p.lookupBlockID && p.lookupEntered != nil && p.lookupRelease != nil {
 		p.lookupOnce.Do(func() { close(p.lookupEntered) })
@@ -230,7 +247,10 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	for {
 		rows, _ := plan.snapshot()
 		if len(rows) == 0 {
-			if _, ok := plan.Lookup(actor.ActorID(instID)); ok {
+			plan.mu.Lock()
+			_, ok := plan.builders[actor.ActorID(instID)]
+			plan.mu.Unlock()
+			if ok {
 				t.Fatal("shrunk plan retained the removed factory")
 			}
 			break

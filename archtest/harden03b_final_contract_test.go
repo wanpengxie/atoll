@@ -529,6 +529,63 @@ func TestHarden03BActorHostDependencyDirection(t *testing.T) {
 	}
 }
 
+func TestHarden03BBodyConstructionUsesOnlyExactSnapshot(t *testing.T) {
+	cases := []struct {
+		path      string
+		required  []string
+		forbidden []string
+	}{
+		{
+			path:      "../platform/home/open.go",
+			required:  []string{"factories.LookupByClass(", "input.ExecutionSpec.Class", "input.ExecutionSpec.Config"},
+			forbidden: []string{"factories.Lookup(input.ActorID)"},
+		},
+		{
+			path:      "../platform/compute/compute.go",
+			required:  []string{"source.LookupExact(", "input.AttemptKey", "input.ExecutionSpec"},
+			forbidden: []string{"source.Lookup(input.ActorID)"},
+		},
+		{
+			path:      "../runtime/actorctl/caps.go",
+			required:  []string{"controller.definitionForAttempt(", "input.AttemptKey", "input.ExecutionSpec"},
+			forbidden: []string{"controller.lookup(input.ActorID)"},
+		},
+	}
+	for _, tc := range cases {
+		body, err := os.ReadFile(tc.path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, required := range tc.required {
+			if !strings.Contains(string(body), required) {
+				t.Errorf("%s missing exact construction seam %q", tc.path, required)
+			}
+		}
+		for _, forbidden := range tc.forbidden {
+			if strings.Contains(string(body), forbidden) {
+				t.Errorf("%s retains ActorID-only construction lookup %q", tc.path, forbidden)
+			}
+		}
+	}
+}
+
+func TestHarden03BForkDoesNotCreateSponsorEdge(t *testing.T) {
+	home, err := os.ReadFile("../platform/home/actor_store.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store, err := os.ReadFile("../runtime/internal/store/sysop.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(home), "Sponsor:            request.CallerActorID") {
+		t.Fatal("Fork still writes CallerActorID into child Sponsor")
+	}
+	if strings.Contains(string(store), "row.Sponsor != in.Sender") {
+		t.Fatal("Fork sysop still requires caller→child sponsorship")
+	}
+}
+
 func TestHarden03BTerminalCommandSetIsClosed(t *testing.T) {
 	body, err := os.ReadFile("../runtime/actorctl/types.go")
 	if err != nil {

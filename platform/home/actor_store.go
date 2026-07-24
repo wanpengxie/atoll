@@ -343,7 +343,6 @@ func (s *homeActorStore) CommitFork(
 	row := storespec.ActorControlRow{
 		ID:                 request.ChildActorID,
 		Kind:               request.Spec.Kind,
-		Sponsor:            request.CallerActorID,
 		CreatedAt:          s.now().UnixMilli(),
 		CurrentDeclVersion: 1,
 		Class:              request.Spec.Class,

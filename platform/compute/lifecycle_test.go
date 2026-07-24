@@ -9,12 +9,17 @@ import (
 
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
 )
 
 type emptyComputePlan struct{}
 
 func (emptyComputePlan) ApplyPlan([]platform.PlanActor) error { return nil }
-func (emptyComputePlan) Lookup(actor.ActorID) (platform.ActorFactory, bool) {
+func (emptyComputePlan) LookupExact(
+	actor.ActorID,
+	actorhost.AttemptKey,
+	actorhost.ExecutionSpec,
+) (platform.ActorFactory, bool) {
 	return platform.ActorFactory{}, false
 }
 

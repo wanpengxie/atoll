@@ -231,7 +231,7 @@ func (s *sysOpStore) ForkActor(
 	raw, effects, err := s.run(ctx, in.SysOpMeta, "fork_actor", func(_ *sql.Tx, _ int64) (sysOpOutcome, error) {
 		row := in.Child
 		if in.Source != storespec.SysOpSourceMember || in.Sender == "" ||
-			row.ID == "" || row.ID == actor.SystemActorID || row.Sponsor != in.Sender {
+			row.ID == "" || row.ID == actor.SystemActorID || row.Sponsor != "" {
 			return decisive(channel.ErrCodeBadPayload, "invalid fork operation"), nil
 		}
 		if _, ok := actor.ParseKind(string(row.Kind)); !ok || row.Kind == actor.KindSystem {

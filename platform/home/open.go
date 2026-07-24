@@ -170,7 +170,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 			input actorctl.ManagedBodyInput,
 			caps actorcaps.Caps,
 		) actorrt.Actor {
-			def, ok := h.factories.Lookup(input.ActorID)
+			def, ok := h.factories.LookupByClass(
+				input.ActorID,
+				input.ExecutionSpec.Class,
+				input.ExecutionSpec.Config,
+			)
 			if input.ExecutionSpec.Kind == actor.KindHuman {
 				// Controller publication is already authoritative at this
 				// composition seam. Ensure the stable subject slot before the

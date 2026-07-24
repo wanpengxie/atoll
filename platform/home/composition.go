@@ -14,24 +14,16 @@ type CompositionResolver interface {
 	BuildClass(channelpkg.ID, actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool)
 }
 
-// ActorFactoryResolver is the one construction lookup consumed by the Server
-// Host builder.
+// ActorFactoryResolver resolves only an exact immutable construction input.
+// There is deliberately no ActorID-only lookup: a body build must not re-read
+// whichever Definition happens to be current after its claim was created.
 type ActorFactoryResolver interface {
-	Lookup(actor.ActorID) (platform.ActorFactory, bool)
 	LookupByClass(actor.ActorID, string, json.RawMessage) (platform.ActorFactory, bool)
 }
 
 type compositionView struct {
 	h        *Home
 	resolver CompositionResolver
-}
-
-func (v *compositionView) Lookup(id actor.ActorID) (platform.ActorFactory, bool) {
-	row, ok, err := v.h.actors.Lookup(id)
-	if err != nil || !ok {
-		return platform.ActorFactory{}, false
-	}
-	return v.resolver.BuildClass(v.h.channelID, id, row.Class, row.Config)
 }
 
 func (v *compositionView) LookupByClass(
