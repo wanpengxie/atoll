@@ -196,7 +196,7 @@ func (h *HostSupervisor) run() {
 
 // AcceptFullDesired validates a complete snapshot before changing any LKG
 // entry. Application is per-ID coherent; no cross-ID revision is invented.
-func (h *HostSupervisor) AcceptFullDesired(inputs []DesiredProjection) error {
+func (h *HostSupervisor) AcceptFullDesired(inputs []Desired) error {
 	if h == nil {
 		return ErrHostClosed
 	}

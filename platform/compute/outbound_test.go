@@ -313,7 +313,7 @@ func TestOutboundSlotStartsFailClosedThenPublishesFiveArmsAtomically(t *testing.
 
 	id := actor.ActorID("agent:arms")
 	key := outboundAttempt(t)
-	if err := host.AcceptFullDesired([]actorhost.DesiredProjection{outboundDesired(t, id, key)}); err != nil {
+	if err := host.AcceptFullDesired([]actorhost.Desired{outboundDesired(t, id, key)}); err != nil {
 		t.Fatal(err)
 	}
 	build := <-builds
@@ -390,7 +390,7 @@ func TestOutboundReconnectDoesNotRetryInflightOrRebuildUnit(t *testing.T) {
 
 	id := actor.ActorID("agent:reconnect")
 	key := outboundAttempt(t)
-	if err := host.AcceptFullDesired([]actorhost.DesiredProjection{outboundDesired(t, id, key)}); err != nil {
+	if err := host.AcceptFullDesired([]actorhost.Desired{outboundDesired(t, id, key)}); err != nil {
 		t.Fatal(err)
 	}
 	build := <-builds
@@ -461,7 +461,7 @@ func TestPausedOpenBecomesExactLoserAfterSessionChanges(t *testing.T) {
 
 	id := actor.ActorID("agent:paused-open")
 	key := outboundAttempt(t)
-	if err := host.AcceptFullDesired([]actorhost.DesiredProjection{outboundDesired(t, id, key)}); err != nil {
+	if err := host.AcceptFullDesired([]actorhost.Desired{outboundDesired(t, id, key)}); err != nil {
 		t.Fatal(err)
 	}
 	build := <-builds
@@ -504,7 +504,7 @@ func TestOutboundReopensOneActorStreamWithoutReplacingUnit(t *testing.T) {
 
 	id := actor.ActorID("agent:reopen")
 	key := outboundAttempt(t)
-	if err := host.AcceptFullDesired([]actorhost.DesiredProjection{outboundDesired(t, id, key)}); err != nil {
+	if err := host.AcceptFullDesired([]actorhost.Desired{outboundDesired(t, id, key)}); err != nil {
 		t.Fatal(err)
 	}
 	build := <-builds
@@ -547,7 +547,7 @@ func TestExactG1SlotCleanupCannotHarmG2(t *testing.T) {
 
 	id := actor.ActorID("agent:g1-g2")
 	g1 := outboundAttempt(t)
-	if err := host.AcceptFullDesired([]actorhost.DesiredProjection{outboundDesired(t, id, g1)}); err != nil {
+	if err := host.AcceptFullDesired([]actorhost.Desired{outboundDesired(t, id, g1)}); err != nil {
 		t.Fatal(err)
 	}
 	b1 := <-builds
@@ -558,7 +558,7 @@ func TestExactG1SlotCleanupCannotHarmG2(t *testing.T) {
 	})
 
 	g2 := outboundAttempt(t)
-	if err := host.AcceptFullDesired([]actorhost.DesiredProjection{outboundDesired(t, id, g2)}); err != nil {
+	if err := host.AcceptFullDesired([]actorhost.Desired{outboundDesired(t, id, g2)}); err != nil {
 		t.Fatal(err)
 	}
 	b2 := <-builds

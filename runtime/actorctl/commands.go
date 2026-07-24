@@ -92,14 +92,11 @@ func (a *ChannelActors) publishReplacement(
 	return definition, nil
 }
 
-func (a *ChannelActors) wakeAfter(definitions ...ActorDefinition) error {
-	if err := a.syncServerHost(); err != nil {
-		return err
-	}
+func (a *ChannelActors) wakeAfter(definitions ...ActorDefinition) {
+	a.pokeServerDesired()
 	for _, definition := range definitions {
 		a.wakeDefinition(definition)
 	}
-	return nil
 }
 
 func (a *ChannelActors) Admit(ctx context.Context, request AdmitRequest) (AdmitResult, error) {
@@ -122,10 +119,10 @@ func (a *ChannelActors) Admit(ctx context.Context, request AdmitRequest) (AdmitR
 		return AdmitResult{}, err
 	}
 	if changed {
-		err = a.wakeAfter(definition)
+		a.wakeAfter(definition)
 	}
 	a.effects.ApplyPostCommit(commit.Effects)
-	return result, err
+	return result, nil
 }
 
 func (a *ChannelActors) Introduce(ctx context.Context, request IntroduceRequest) (IntroduceResult, error) {
@@ -150,10 +147,10 @@ func (a *ChannelActors) Introduce(ctx context.Context, request IntroduceRequest)
 		return IntroduceResult{}, err
 	}
 	if changed {
-		err = a.wakeAfter(definition)
+		a.wakeAfter(definition)
 	}
 	a.effects.ApplyPostCommit(commit.Effects)
-	return result, err
+	return result, nil
 }
 
 func (a *ChannelActors) Fork(ctx context.Context, request ForkRequest) (ForkResult, error) {
@@ -225,10 +222,10 @@ func (a *ChannelActors) Fork(ctx context.Context, request ForkRequest) (ForkResu
 		return ForkResult{}, err
 	}
 	if changed {
-		err = a.wakeAfter(definition)
+		a.wakeAfter(definition)
 	}
 	a.effects.ApplyPostCommit(committed.Effects)
-	return ForkResult{ChildActorID: child}, err
+	return ForkResult{ChildActorID: child}, nil
 }
 
 func (a *ChannelActors) Restart(ctx context.Context, request RestartRequest) error {
@@ -250,9 +247,9 @@ func (a *ChannelActors) Restart(ctx context.Context, request RestartRequest) err
 		return err
 	}
 	value, _, _ := a.controller.lookup(request.ActorID)
-	err = a.wakeAfter(value.Definition)
+	a.wakeAfter(value.Definition)
 	a.effects.ApplyPostCommit(commit.Effects)
-	return err
+	return nil
 }
 
 func (a *ChannelActors) ApplyDeclaration(ctx context.Context, change DeclarationChange) error {
@@ -276,9 +273,9 @@ func (a *ChannelActors) ApplyDeclaration(ctx context.Context, change Declaration
 		return err
 	}
 	value, _, _ := a.controller.lookup(change.ActorID)
-	err = a.wakeAfter(value.Definition)
+	a.wakeAfter(value.Definition)
 	a.effects.ApplyPostCommit(commit.Effects)
-	return err
+	return nil
 }
 
 // publishReplacementLocked requires the corresponding control gate.
@@ -405,16 +402,16 @@ func (a *ChannelActors) terminal(ctx context.Context, command TerminalCommand) (
 			unlock()
 			return TerminalResult{}, err
 		}
+		definitions := make([]ActorDefinition, 0, len(after.IDs))
+		for _, id := range after.IDs {
+			if value, exists, lookupErr := a.controller.lookup(id); lookupErr == nil && exists {
+				definitions = append(definitions, value.Definition)
+			}
+		}
 		a.controller.delete(after.IDs)
 		a.effects.RunActorsEnded(after.IDs)
 		unlock()
-		if syncErr := a.syncServerHost(); syncErr != nil {
-			return commit.Result, syncErr
-		}
-		for _, id := range after.IDs {
-			a.effects.WakeDomain(a.serverDomain)
-			_ = id
-		}
+		a.wakeAfter(definitions...)
 		if command.Kind == TerminalDetachDaemon {
 			a.effects.PlanPoke(actorhost.ExecutionDomain(command.Detach.DaemonID))
 		}
@@ -463,7 +460,8 @@ func (a *ChannelActors) requestIdle(
 	if err != nil {
 		return err
 	}
-	return a.syncServerHost()
+	a.pokeServerDesired()
+	return nil
 }
 
 // Keep errors.Is useful when adapters translate a closed command surface.

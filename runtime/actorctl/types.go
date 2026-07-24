@@ -300,7 +300,6 @@ type ForkResult struct {
 }
 
 type Effects interface {
-	WakeDomain(actorhost.ExecutionDomain)
 	PlanPoke(actorhost.ExecutionDomain)
 	ApplyPostCommit(storespec.PostCommitEffects)
 	RunActorBorn(actor.ActorID) error
@@ -310,8 +309,7 @@ type Effects interface {
 
 type nopEffects struct{}
 
-func (nopEffects) WakeDomain(actorhost.ExecutionDomain) {}
-func (nopEffects) PlanPoke(actorhost.ExecutionDomain)   {}
+func (nopEffects) PlanPoke(actorhost.ExecutionDomain) {}
 func (nopEffects) ApplyPostCommit(storespec.PostCommitEffects) {
 }
 func (nopEffects) RunActorBorn(actor.ActorID) error { return nil }

@@ -293,7 +293,7 @@ func acceptDaemonPlan(
 	if err := source.ApplyPlan(plan); err != nil {
 		return err
 	}
-	desired := make([]actorhost.DesiredProjection, 0, len(plan))
+	desired := make([]actorhost.Desired, 0, len(plan))
 	for _, row := range plan {
 		desired = append(desired, actorhost.BodyDesired{
 			ActorID: row.ActorID, AttemptKey: row.AttemptKey,

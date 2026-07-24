@@ -27,8 +27,7 @@ type fakeEffects struct {
 	fatal chan error
 }
 
-func (f *fakeEffects) WakeDomain(actorhost.ExecutionDomain) {}
-func (f *fakeEffects) PlanPoke(actorhost.ExecutionDomain)   {}
+func (f *fakeEffects) PlanPoke(actorhost.ExecutionDomain) {}
 func (f *fakeEffects) ApplyPostCommit(storespec.PostCommitEffects) {
 }
 func (f *fakeEffects) RunActorBorn(actor.ActorID) error { return nil }
@@ -286,6 +285,143 @@ func newActorsWithBuilder(
 		_ = actors.Close(ctx)
 	})
 	return actors
+}
+
+func waitUntil(t *testing.T, message string, condition func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for !condition() {
+		if time.Now().After(deadline) {
+			t.Fatal(message)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+func TestServerCommandsOnlyWakeSingleDesiredReader(t *testing.T) {
+	actors := newActors(t, newFakeStore("agent"), nil)
+	waitUntil(t, "initial Server desired was not accepted", func() bool {
+		snapshot, ok := actors.host.Inspect("agent")
+		return ok && snapshot.Desired != nil
+	})
+
+	// Stop the sole reader so this test can distinguish an empty wake from a
+	// command-side snapshot push.
+	actors.serverDesiredCancel()
+	actors.serverDesiredWG.Wait()
+
+	before, _, _ := actors.controller.lookup("agent")
+	if err := actors.requestIdle(
+		context.Background(), "agent", before.Desired.AttemptKey,
+	); err != nil {
+		t.Fatal(err)
+	}
+	current, _, _ := actors.controller.lookup("agent")
+	if current.Desired.Kind != DesiredDormant {
+		t.Fatalf("Controller desired=%#v, want dormant", current.Desired)
+	}
+	snapshot, ok := actors.host.Inspect("agent")
+	if !ok || snapshot.Desired == nil ||
+		snapshot.Desired.Attempt() != before.Desired.AttemptKey {
+		t.Fatal("command directly changed Host desired instead of emitting an empty wake")
+	}
+}
+
+func TestServerDesiredTickerFreshReadsControllerAndHealsStaleLKG(t *testing.T) {
+	store := newFakeStore("agent")
+	actors, err := NewChannelActors(Config{
+		Store:        store,
+		ServerDomain: "server",
+		ServerHost: actorhost.Config{
+			PollInterval: 50 * time.Millisecond,
+		},
+		BuildManagedBody: func(
+			actorhost.BodyBuildInput,
+			actorcaps.LifecycleHandle,
+		) actorrt.Actor {
+			return inertActor{}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := actors.Start(context.Background(), prepareSystem(t)); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+		defer cancel()
+		_ = actors.Close(ctx)
+	})
+
+	stale, err := actors.controller.desiredFor("server", "server")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := actors.Remove(context.Background(), RemoveRequest{Target: "agent"}); err != nil {
+		t.Fatal(err)
+	}
+	waitUntil(t, "Server desired did not observe terminal Controller truth", func() bool {
+		snapshot, ok := actors.host.Inspect("agent")
+		return !ok || snapshot.Desired == nil
+	})
+
+	// Simulate an obsolete producer corrupting the Host LKG after terminal.
+	// No command wake follows this acceptance, so only the periodic fresh read
+	// can repair it.
+	if err := actors.host.AcceptFullDesired(stale); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, ok := actors.host.Inspect("agent")
+	if !ok || snapshot.Desired == nil {
+		t.Fatal("test failed to install the stale Host desired")
+	}
+	waitUntil(t, "periodic Server read did not remove stale terminal desired", func() bool {
+		snapshot, ok := actors.host.Inspect("agent")
+		return !ok || snapshot.Desired == nil
+	})
+}
+
+func TestConcurrentControllerCommandsConvergeServerDesiredToFreshLevel(t *testing.T) {
+	const count = 24
+	ids := make([]actor.ActorID, count)
+	for index := range ids {
+		ids[index] = actor.ActorID(fmt.Sprintf("runner-agent-%02d", index))
+	}
+	actors := newActors(t, newFakeStore(ids...), nil)
+
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		id := id
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 8 {
+				if err := actors.Restart(
+					context.Background(), RestartRequest{ActorID: id},
+				); err != nil {
+					t.Errorf("Restart(%s): %v", id, err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	waitUntil(t, "Server Host did not converge to the current Controller level", func() bool {
+		for _, id := range ids {
+			current, ok, err := actors.controller.lookup(id)
+			if err != nil || !ok {
+				return false
+			}
+			snapshot, ok := actors.host.Inspect(id)
+			if !ok || snapshot.Desired == nil ||
+				snapshot.Desired.Attempt() != current.Desired.AttemptKey {
+				return false
+			}
+		}
+		return true
+	})
 }
 
 func TestControllerSharedContainerDifferentIDRace(t *testing.T) {

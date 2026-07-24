@@ -11,8 +11,6 @@ import (
 // transitions. It never mutates Controller truth and never owns execution.
 type homeActorEffects struct{ home *Home }
 
-func (e homeActorEffects) WakeDomain(actorhost.ExecutionDomain) {}
-
 func (e homeActorEffects) PlanPoke(domain actorhost.ExecutionDomain) {
 	if e.home != nil {
 		e.home.pokeReconcile()

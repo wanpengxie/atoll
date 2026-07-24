@@ -19,7 +19,7 @@ import (
 var (
 	ErrInvalidAttemptKey = errors.New("actorhost: invalid attempt key")
 	ErrInvalidDomain     = errors.New("actorhost: invalid execution domain")
-	ErrInvalidDesired    = errors.New("actorhost: invalid desired projection")
+	ErrInvalidDesired    = errors.New("actorhost: invalid desired")
 	ErrSameAttemptDrift  = errors.New("actorhost: same attempt changed immutable desired")
 	ErrReservedSystem    = errors.New("actorhost: system actor is not managed")
 	ErrHostClosed        = errors.New("actorhost: host closed")
@@ -122,10 +122,10 @@ func executionSpecEqual(left, right ExecutionSpec) bool {
 		bytes.Equal(left.Config, right.Config)
 }
 
-// DesiredProjection is a strict tagged union. Only BodyDesired and
-// CarrierDesired can implement it.
-type DesiredProjection interface {
-	desiredProjection()
+// Desired is a strict tagged union. Only BodyDesired and CarrierDesired can
+// implement it.
+type Desired interface {
+	desired()
 	Actor() actor.ActorID
 	Attempt() AttemptKey
 }
@@ -137,7 +137,7 @@ type BodyDesired struct {
 	ExecutionSpec ExecutionSpec
 }
 
-func (BodyDesired) desiredProjection()     {}
+func (BodyDesired) desired()               {}
 func (d BodyDesired) Actor() actor.ActorID { return d.ActorID }
 func (d BodyDesired) Attempt() AttemptKey  { return d.AttemptKey }
 
@@ -149,7 +149,7 @@ type CarrierDesired struct {
 	PeerDomain ExecutionDomain
 }
 
-func (CarrierDesired) desiredProjection()     {}
+func (CarrierDesired) desired()               {}
 func (d CarrierDesired) Actor() actor.ActorID { return d.ActorID }
 func (d CarrierDesired) Attempt() AttemptKey  { return d.AttemptKey }
 
@@ -158,7 +158,7 @@ type desiredValue struct {
 	carrier *CarrierDesired
 }
 
-func normalizeDesired(input DesiredProjection) (desiredValue, error) {
+func normalizeDesired(input Desired) (desiredValue, error) {
 	switch d := input.(type) {
 	case BodyDesired:
 		return normalizeBody(d)
@@ -249,7 +249,7 @@ func (d desiredValue) equal(other desiredValue) bool {
 	}
 }
 
-func (d desiredValue) clonePublic() DesiredProjection {
+func (d desiredValue) clonePublic() Desired {
 	if d.body != nil {
 		out := *d.body
 		out.ExecutionSpec.Config = append(json.RawMessage(nil), out.ExecutionSpec.Config...)
@@ -336,7 +336,7 @@ const (
 
 // Snapshot is an immutable diagnostic view used by status and tests.
 type Snapshot struct {
-	Desired   DesiredProjection
+	Desired   Desired
 	Actual    ActualKind
 	Attempt   AttemptKey
 	Unit      *actorrt.Unit

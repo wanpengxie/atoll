@@ -197,7 +197,7 @@ func TestFullDesiredRejectRetainsLastKnownGood(t *testing.T) {
 	id := actor.ActorID("agent:lkg")
 	g1 := testAttempt(t)
 	initial := CarrierDesired{ActorID: id, AttemptKey: g1, PeerDomain: "daemon-1"}
-	if err := host.AcceptFullDesired([]DesiredProjection{initial}); err != nil {
+	if err := host.AcceptFullDesired([]Desired{initial}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot, ok := host.Inspect(id)
@@ -206,7 +206,7 @@ func TestFullDesiredRejectRetainsLastKnownGood(t *testing.T) {
 	}
 
 	drift := CarrierDesired{ActorID: id, AttemptKey: g1, PeerDomain: "daemon-2"}
-	if err := host.AcceptFullDesired([]DesiredProjection{drift}); !errors.Is(err, ErrSameAttemptDrift) {
+	if err := host.AcceptFullDesired([]Desired{drift}); !errors.Is(err, ErrSameAttemptDrift) {
 		t.Fatalf("drift error = %v", err)
 	}
 	snapshot, ok = host.Inspect(id)
@@ -216,7 +216,7 @@ func TestFullDesiredRejectRetainsLastKnownGood(t *testing.T) {
 
 	fresh := CarrierDesired{ActorID: id, AttemptKey: testAttempt(t), PeerDomain: "daemon-2"}
 	invalid := CarrierDesired{ActorID: "agent:bad", AttemptKey: "not-a-key", PeerDomain: "daemon-2"}
-	if err := host.AcceptFullDesired([]DesiredProjection{fresh, invalid}); !errors.Is(err, ErrInvalidAttemptKey) {
+	if err := host.AcceptFullDesired([]Desired{fresh, invalid}); !errors.Is(err, ErrInvalidAttemptKey) {
 		t.Fatalf("invalid error = %v", err)
 	}
 	snapshot, _ = host.Inspect(id)
@@ -245,7 +245,7 @@ func TestBodyBuildReceivesExactSelfAndCurrentWindow(t *testing.T) {
 
 	id := actor.ActorID("agent:body")
 	key := testAttempt(t)
-	if err := host.AcceptFullDesired([]DesiredProjection{bodyDesiredFor(t, id, key)}); err != nil {
+	if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, key)}); err != nil {
 		t.Fatal(err)
 	}
 	input := <-inputs
@@ -301,7 +301,7 @@ func TestDirectReplacementKeepsPredecessorUntilCandidatePublishes(t *testing.T) 
 
 	id := actor.ActorID("agent:replace")
 	g1 := testAttempt(t)
-	if err := host.AcceptFullDesired([]DesiredProjection{bodyDesiredFor(t, id, g1)}); err != nil {
+	if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, g1)}); err != nil {
 		t.Fatal(err)
 	}
 	in1 := <-inputs
@@ -314,7 +314,7 @@ func TestDirectReplacementKeepsPredecessorUntilCandidatePublishes(t *testing.T) 
 	first, _ := host.Inspect(id)
 
 	g2 := testAttempt(t)
-	if err := host.AcceptFullDesired([]DesiredProjection{bodyDesiredFor(t, id, g2)}); err != nil {
+	if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, g2)}); err != nil {
 		t.Fatal(err)
 	}
 	in2 := <-inputs
@@ -367,7 +367,7 @@ func TestNaturalExitRebuildsSameAttemptAndReapsRetiring(t *testing.T) {
 
 	id := actor.ActorID("agent:natural")
 	key := testAttempt(t)
-	if err := host.AcceptFullDesired([]DesiredProjection{bodyDesiredFor(t, id, key)}); err != nil {
+	if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, key)}); err != nil {
 		t.Fatal(err)
 	}
 	in1 := <-inputs
@@ -409,7 +409,7 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 	if string(low) > string(high) {
 		low, high = high, low
 	}
-	if err := host.AcceptFullDesired([]DesiredProjection{CarrierDesired{
+	if err := host.AcceptFullDesired([]Desired{CarrierDesired{
 		ActorID: id, AttemptKey: low, PeerDomain: "daemon",
 	}}); err != nil {
 		t.Fatal(err)
@@ -428,7 +428,7 @@ func TestAttachLastWinsStaleProtectionAndExactBindingDown(t *testing.T) {
 		t.Fatal("same-attempt predecessor was not signaled closed")
 	}
 	b3 := newTestBinding()
-	if err := host.AcceptFullDesired([]DesiredProjection{CarrierDesired{
+	if err := host.AcceptFullDesired([]Desired{CarrierDesired{
 		ActorID: id, AttemptKey: high, PeerDomain: "daemon",
 	}}); err != nil {
 		t.Fatal(err)
@@ -485,7 +485,7 @@ func TestAttachDuringBodyBuildIsRetryableAndDoesNotOwnIncoming(t *testing.T) {
 	defer closeHost(t, host)
 	id := actor.ActorID("agent:building")
 	key := testAttempt(t)
-	if err := host.AcceptFullDesired([]DesiredProjection{bodyDesiredFor(t, id, key)}); err != nil {
+	if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, key)}); err != nil {
 		t.Fatal(err)
 	}
 	<-started
@@ -515,7 +515,7 @@ func TestEndpointInvocationUsesOneSlidingWindowSnapshot(t *testing.T) {
 	id := actor.ActorID("agent:window")
 	key := testAttempt(t)
 
-	if err := host.AcceptFullDesired([]DesiredProjection{CarrierDesired{
+	if err := host.AcceptFullDesired([]Desired{CarrierDesired{
 		ActorID: id, AttemptKey: key, PeerDomain: "daemon",
 	}}); err != nil {
 		t.Fatal(err)
@@ -564,7 +564,7 @@ func TestDesiredRemovalRetiresBodyAndDeletesSparseRow(t *testing.T) {
 	}
 	defer closeHost(t, host)
 	id := actor.ActorID("agent:remove")
-	if err := host.AcceptFullDesired([]DesiredProjection{bodyDesiredFor(t, id, testAttempt(t))}); err != nil {
+	if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, testAttempt(t))}); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, func() bool {
@@ -599,12 +599,12 @@ func TestDesiredChangeDuringPrepareMakesExactBuildLoser(t *testing.T) {
 	defer closeHost(t, host)
 	id := actor.ActorID("agent:build-loser")
 	g1 := testAttempt(t)
-	if err := host.AcceptFullDesired([]DesiredProjection{bodyDesiredFor(t, id, g1)}); err != nil {
+	if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, g1)}); err != nil {
 		t.Fatal(err)
 	}
 	in1 := <-inputs
 	g2 := testAttempt(t)
-	if err := host.AcceptFullDesired([]DesiredProjection{
+	if err := host.AcceptFullDesired([]Desired{
 		CarrierDesired{ActorID: id, AttemptKey: g2, PeerDomain: "daemon"},
 	}); err != nil {
 		t.Fatal(err)
@@ -638,7 +638,7 @@ func TestHighChurnRetiringSetReturnsToZero(t *testing.T) {
 	var previous *actorrt.Unit
 	for i := 0; i < 40; i++ {
 		key := testAttempt(t)
-		if err := host.AcceptFullDesired([]DesiredProjection{bodyDesiredFor(t, id, key)}); err != nil {
+		if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, key)}); err != nil {
 			t.Fatal(err)
 		}
 		eventually(t, func() bool {
@@ -670,7 +670,7 @@ func TestCloseDoesNotReportAlreadyDoneRetiringUnit(t *testing.T) {
 	}
 	id := actor.ActorID("agent:done-before-close")
 	key := testAttempt(t)
-	if err := host.AcceptFullDesired([]DesiredProjection{bodyDesiredFor(t, id, key)}); err != nil {
+	if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, key)}); err != nil {
 		t.Fatal(err)
 	}
 	eventually(t, func() bool {
@@ -707,7 +707,7 @@ func TestHostCoreConformanceOnServerAndDaemonDomains(t *testing.T) {
 			defer closeHost(t, host)
 			id := actor.ActorID("agent:conformance-" + string(domain))
 			key := testAttempt(t)
-			if err := host.AcceptFullDesired([]DesiredProjection{bodyDesiredFor(t, id, key)}); err != nil {
+			if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, key)}); err != nil {
 				t.Fatal(err)
 			}
 			eventually(t, func() bool {
@@ -739,7 +739,7 @@ func TestSystemActorRejectedAtHostBoundaries(t *testing.T) {
 	}
 	defer closeHost(t, host)
 	key := testAttempt(t)
-	if err := host.AcceptFullDesired([]DesiredProjection{
+	if err := host.AcceptFullDesired([]Desired{
 		bodyDesiredFor(t, actor.SystemActorID, key),
 	}); !errors.Is(err, ErrReservedSystem) {
 		t.Fatalf("desired error = %v", err)

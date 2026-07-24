@@ -196,7 +196,7 @@ func (c *Controller) delete(ids []actor.ActorID) {
 	c.stateMu.Unlock()
 }
 
-func (c *Controller) projectDesired(domain, server actorhost.ExecutionDomain) ([]actorhost.DesiredProjection, error) {
+func (c *Controller) desiredFor(domain, server actorhost.ExecutionDomain) ([]actorhost.Desired, error) {
 	actors, _, err := c.list()
 	if err != nil {
 		return nil, err
@@ -214,7 +214,7 @@ func (c *Controller) projectDesired(domain, server actorhost.ExecutionDomain) ([
 		}
 		return 0
 	})
-	out := make([]actorhost.DesiredProjection, 0, len(ids))
+	out := make([]actorhost.Desired, 0, len(ids))
 	for _, id := range ids {
 		value := actors[id]
 		if value.Desired.Kind != DesiredRun {
@@ -257,6 +257,12 @@ type ChannelActors struct {
 	now          func() time.Time
 	logger       *slog.Logger
 
+	serverDesiredCtx    context.Context
+	serverDesiredCancel context.CancelFunc
+	serverDesiredWake   chan struct{}
+	serverDesiredPoll   time.Duration
+	serverDesiredWG     sync.WaitGroup
+
 	startMu sync.Mutex
 	started bool
 }
@@ -275,6 +281,11 @@ func NewChannelActors(cfg Config) (*ChannelActors, error) {
 	}
 	hostCfg := cfg.ServerHost
 	hostCfg.Domain = cfg.ServerDomain
+	logger := hostCfg.Logger
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+		hostCfg.Logger = logger
+	}
 	var actorsFromBuilder atomic.Pointer[ChannelActors]
 	hostCfg.BodyBuilder = func(input actorhost.BodyBuildInput) actorrt.Actor {
 		handle := managedLifecycle{
@@ -294,14 +305,27 @@ func NewChannelActors(cfg Config) (*ChannelActors, error) {
 	if err != nil {
 		return nil, err
 	}
+	serverDesiredParent := hostCfg.Parent
+	if serverDesiredParent == nil {
+		serverDesiredParent = context.Background()
+	}
+	serverDesiredCtx, serverDesiredCancel := context.WithCancel(serverDesiredParent)
+	serverDesiredPoll := hostCfg.PollInterval
+	if serverDesiredPoll <= 0 {
+		serverDesiredPoll = 100 * time.Millisecond
+	}
 	actors := &ChannelActors{
-		store:        cfg.Store,
-		effects:      effects,
-		serverDomain: cfg.ServerDomain,
-		host:         host,
-		controller:   newController(),
-		now:          now,
-		logger:       hostCfg.Logger,
+		store:               cfg.Store,
+		effects:             effects,
+		serverDomain:        cfg.ServerDomain,
+		host:                host,
+		controller:          newController(),
+		now:                 now,
+		logger:              logger,
+		serverDesiredCtx:    serverDesiredCtx,
+		serverDesiredCancel: serverDesiredCancel,
+		serverDesiredWake:   make(chan struct{}, 1),
+		serverDesiredPoll:   serverDesiredPoll,
 	}
 	actors.kernel.owner = actors
 	actorsFromBuilder.Store(actors)
@@ -369,36 +393,60 @@ func (a *ChannelActors) Start(ctx context.Context, unit *actorrt.Unit) error {
 		<-unit.Done()
 		return err
 	}
-	a.kernel.startWatch()
-	a.started = true
-	if err := a.syncServerHost(); err != nil {
+	if err := a.readServerDesired(); err != nil {
 		a.controller.close()
 		unit.Stop()
 		<-unit.Done()
 		return err
 	}
+	a.serverDesiredWG.Add(1)
+	go a.runServerDesired()
+	a.kernel.startWatch()
+	a.started = true
 	return nil
 }
 
-func (a *ChannelActors) syncServerHost() error {
-	desired, err := a.controller.projectDesired(a.serverDomain, a.serverDomain)
+// readServerDesired is the Server-side counterpart of daemon PullPlan: one
+// owner reads the current complete level from its source and offers it to the
+// Host. Commands never manufacture or carry Host snapshots.
+func (a *ChannelActors) readServerDesired() error {
+	desired, err := a.controller.desiredFor(a.serverDomain, a.serverDomain)
 	if err != nil {
 		return err
 	}
-	if err := a.host.AcceptFullDesired(desired); err != nil {
-		return err
+	return a.host.AcceptFullDesired(desired)
+}
+
+func (a *ChannelActors) runServerDesired() {
+	defer a.serverDesiredWG.Done()
+	ticker := time.NewTicker(a.serverDesiredPoll)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-a.serverDesiredCtx.Done():
+			return
+		case <-a.serverDesiredWake:
+		case <-ticker.C:
+		}
+		if err := a.readServerDesired(); err != nil &&
+			a.serverDesiredCtx.Err() == nil &&
+			!errors.Is(err, ErrClosed) &&
+			!errors.Is(err, actorhost.ErrHostClosed) {
+			a.logger.Warn("actorctl.server_desired_read_failed", "err", err)
+		}
 	}
-	a.effects.WakeDomain(a.serverDomain)
-	return nil
+}
+
+func (a *ChannelActors) pokeServerDesired() {
+	select {
+	case a.serverDesiredWake <- struct{}{}:
+	default:
+	}
 }
 
 func (a *ChannelActors) wakeDefinition(def ActorDefinition) {
-	switch def.Placement.Kind {
-	case storespec.PlacementServer:
-		a.effects.WakeDomain(a.serverDomain)
-	case storespec.PlacementDaemon:
+	if def.Placement.Kind == storespec.PlacementDaemon {
 		domain := actorhost.ExecutionDomain(def.Placement.Host)
-		a.effects.WakeDomain(domain)
 		a.effects.PlanPoke(domain)
 	}
 }
@@ -409,15 +457,13 @@ func (a *ChannelActors) EnsureRun(id actor.ActorID) (bool, error) {
 		return changed, err
 	}
 	value, _, _ := a.controller.lookup(id)
-	if err := a.syncServerHost(); err != nil {
-		return true, err
-	}
+	a.pokeServerDesired()
 	a.wakeDefinition(value.Definition)
 	return true, nil
 }
 
-func (a *ChannelActors) PlanFor(domain actorhost.ExecutionDomain) ([]actorhost.DesiredProjection, error) {
-	return a.controller.projectDesired(domain, a.serverDomain)
+func (a *ChannelActors) PlanFor(domain actorhost.ExecutionDomain) ([]actorhost.Desired, error) {
+	return a.controller.desiredFor(domain, a.serverDomain)
 }
 
 func (a *ChannelActors) AuthorActive(id actor.ActorID) error {
@@ -591,6 +637,8 @@ func (a *ChannelActors) Close(ctx context.Context) error {
 	if err := a.Quiesce(ctx); err != nil {
 		return err
 	}
+	a.serverDesiredCancel()
+	a.serverDesiredWG.Wait()
 	if err := a.host.Close(ctx); err != nil {
 		faults = append(faults, err)
 	}
@@ -602,6 +650,7 @@ func (a *ChannelActors) Close(ctx context.Context) error {
 }
 
 func (a *ChannelActors) failStop(cause error) {
+	a.serverDesiredCancel()
 	a.controller.close()
 	a.effects.Fatal(cause)
 	go func() {
