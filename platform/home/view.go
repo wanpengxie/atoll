@@ -25,7 +25,7 @@ import (
 // is no write path through either surface.
 type View struct {
 	visible    storespec.VisibleMessageQuery
-	authority  storespec.ActorAuthority
+	authority  storespec.ActorDirectory
 	links      *link.Acceptor
 	presence   presence.View
 	actors     *actorSystem
@@ -57,14 +57,14 @@ func (h *Home) View() View {
 
 type ResourceView struct {
 	store     storespec.ResourceReadStore
-	authority storespec.ActorAuthority
+	authority storespec.ActorDirectory
 }
 
 func (v View) Resources() ResourceView {
 	return ResourceView{store: v.resources, authority: v.authority}
 }
 
-func validateReader(ctx context.Context, authority storespec.ActorAuthority, as channel.Reader) error {
+func validateReader(ctx context.Context, authority storespec.ActorDirectory, as channel.Reader) error {
 	if !as.Valid() {
 		return &channel.RealmError{Code: channel.RealmForbidden}
 	}

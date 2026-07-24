@@ -19,12 +19,12 @@ var (
 // is monotonic and succeeds exactly once.
 type actorAuthoritySlot struct {
 	mu    sync.RWMutex
-	bound storespec.ActorAuthority
+	bound storespec.ChannelAuthority
 }
 
 func newActorAuthoritySlot() *actorAuthoritySlot { return &actorAuthoritySlot{} }
 
-func (s *actorAuthoritySlot) Bind(a storespec.ActorAuthority) error {
+func (s *actorAuthoritySlot) Bind(a storespec.ChannelAuthority) error {
 	if a == nil {
 		return errors.New("runtime: nil actor authority")
 	}
@@ -37,7 +37,7 @@ func (s *actorAuthoritySlot) Bind(a storespec.ActorAuthority) error {
 	return nil
 }
 
-func (s *actorAuthoritySlot) get() (storespec.ActorAuthority, error) {
+func (s *actorAuthoritySlot) get() (storespec.ChannelAuthority, error) {
 	s.mu.RLock()
 	a := s.bound
 	s.mu.RUnlock()
@@ -63,12 +63,34 @@ func (s *actorAuthoritySlot) ListActive(ctx context.Context) ([]storespec.ActorC
 	return a.ListActive(ctx)
 }
 
-func (s *actorAuthoritySlot) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
+func (s *actorAuthoritySlot) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
 	a, err := s.get()
 	if err != nil {
-		return 0, err
+		return false, err
 	}
-	return a.CheckAuthor(ctx, stamp)
+	return a.IsActive(ctx, id)
 }
 
-var _ storespec.ActorAuthority = (*actorAuthoritySlot)(nil)
+func (s *actorAuthoritySlot) AdmitIdentity(
+	ctx context.Context,
+	id actor.ActorID,
+) (storespec.IdentityAdmission, bool, error) {
+	a, err := s.get()
+	if err != nil {
+		return storespec.IdentityAdmission{}, false, err
+	}
+	return a.AdmitIdentity(ctx, id)
+}
+
+func (s *actorAuthoritySlot) ResourceActorFacts(
+	ctx context.Context,
+	id actor.ActorID,
+) (storespec.ResourceActorFacts, error) {
+	a, err := s.get()
+	if err != nil {
+		return storespec.ResourceActorFacts{}, err
+	}
+	return a.ResourceActorFacts(ctx, id)
+}
+
+var _ storespec.ChannelAuthority = (*actorAuthoritySlot)(nil)

@@ -6,7 +6,6 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // ErrNoStoragePlacement is placement chain ④'s zero-candidate honest reject
@@ -46,15 +45,12 @@ func (d *door) choosePlacement(ctx context.Context, caller actor.ActorID) (strin
 	// that SAME daemon is a live (online) storage mount for this channel — the
 	// creator's own workspace is the natural place for its own file bytes to
 	// land (§4.3's "创建者daemon-hosted→落其宿主daemon").
-	row, found, err := d.deps.Authority.LookupActive(ctx, caller)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return "", err
 	}
-	host := ""
-	if found && row.Placement.Kind == storespec.PlacementDaemon {
-		host = row.Placement.Host
-	}
-	if found && host != "" {
+	host := facts.PreferredStorageHost
+	if facts.Active && host != "" {
 		for _, m := range mounts {
 			if m.DaemonID == host && m.Online {
 				return host, nil

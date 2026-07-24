@@ -103,12 +103,9 @@ func TestRemoteDownMatchesExactBindingWithinSameAttempt(t *testing.T) {
 		t.Fatal("exact B2 down retained its own testimony")
 	}
 }
-func (r *fakeRegistry) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	_, ok, err := r.LookupActive(ctx, stamp.ID)
-	if !ok {
-		return storespec.AuthorNotMember, err
-	}
-	return storespec.AuthorOK, err
+func (r *fakeRegistry) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
+	_, ok, err := r.LookupActive(ctx, id)
+	return ok, err
 }
 
 func spawn(t *testing.T, execution *fakeExecution, id actor.ActorID) actorrt.Incarnation {

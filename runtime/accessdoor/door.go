@@ -9,7 +9,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // door is the bare invoker — sealed inside the package (New hands out only a
@@ -29,14 +28,11 @@ type door struct {
 // no outbox involvement — OpWrite never fires Committed) and the
 // just-reserved id for a with-content create's write route (§1.7).
 func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, placementDaemonID, coord string, mode access.Operation, reservationID string, dir bool) (*FileRoute, error) {
-	row, found, err := d.deps.Authority.LookupActive(ctx, caller)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
-	host := ""
-	if found && row.Placement.Kind == storespec.PlacementDaemon {
-		host = row.Placement.Host
-	}
+	host := facts.PreferredStorageHost
 	// Same-daemon (Local) resolves coord itself via the daemon-side
 	// control-RPC ResolveCoord step (platform/internal/link) — never a lane
 	// byte-hop (§5 item 0's "同daemon→daemon本地os.Root句柄...zerocopy").
@@ -46,7 +42,7 @@ func (d *door) resolveFileRoute(ctx context.Context, caller actor.ActorID, place
 	// (target daemon only) needs somewhere to look coord up by regardless
 	// of which redemption path the caller takes (see platform/internal/
 	// link's doc for the full walk).
-	local := found && host != "" && host == placementDaemonID
+	local := facts.Active && host != "" && host == placementDaemonID
 	if dir && !local {
 		// A directory lease is a whole-tree os.Root capability confined to one
 		// machine — it does NOT serialize onto the lane's single byte-pipe. A
@@ -109,11 +105,12 @@ func (d *door) invoke(ctx context.Context, caller actor.ActorID, op access.Opera
 	if !exists {
 		return Outcome{RejectReason: access.ResourceNotFound}, nil
 	}
-	callerRow, callerActive, err := d.deps.Authority.LookupActive(ctx, caller)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return Outcome{}, err
 	}
-	isOwner := callerActive && callerRow.Role == storespec.RoleOwner
+	callerActive := facts.Active
+	isOwner := facts.Active && facts.Owner
 
 	// ---- owner root ∪ A8: actor entry ∪ (members entry ∧ current member) ----
 	allowed := isOwner

@@ -322,7 +322,7 @@ func (a *actorSystem) AdmitIdentity(
 			return storespec.IdentityAdmission{}, false, actorctl.ErrClosed
 		}
 		return storespec.IdentityAdmission{
-			Row: cloneSystemRow(a.systemRow),
+			ID: actor.SystemActorID, Kind: actor.KindSystem,
 		}, true, nil
 	}
 	return a.home.controller.AdmitIdentity(ctx, id)
@@ -347,15 +347,27 @@ func (a *actorSystem) ListActive(ctx context.Context) ([]storespec.ActorControlR
 	return rows, nil
 }
 
-func (a *actorSystem) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	_, ok, err := a.LookupActive(ctx, stamp.ID)
-	if err != nil {
-		return storespec.AuthorNotMember, err
+func (a *actorSystem) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
+	_, ok, err := a.LookupActive(ctx, id)
+	return ok, err
+}
+
+func (a *actorSystem) ResourceActorFacts(
+	ctx context.Context,
+	id actor.ActorID,
+) (storespec.ResourceActorFacts, error) {
+	row, active, err := a.LookupActive(ctx, id)
+	if err != nil || !active {
+		return storespec.ResourceActorFacts{Active: active}, err
 	}
-	if !ok {
-		return storespec.AuthorNotMember, nil
+	facts := storespec.ResourceActorFacts{
+		Active: true,
+		Owner:  row.Role == storespec.RoleOwner,
 	}
-	return storespec.AuthorOK, nil
+	if row.Placement.Kind == storespec.PlacementDaemon {
+		facts.PreferredStorageHost = row.Placement.Host
+	}
+	return facts, nil
 }
 
 func (a *actorSystem) Quiesce(ctx context.Context) error {
@@ -376,8 +388,7 @@ func (a *actorSystem) close(ctx context.Context) error {
 	return errors.Join(faults...)
 }
 
-var _ storespec.ActorAuthority = (*actorSystem)(nil)
+var _ storespec.ChannelAuthority = (*actorSystem)(nil)
 var _ storespec.CollaborationAuthority = (*actorSystem)(nil)
 
 var _ actorctl.Commands = (*actorSystem)(nil)
-var _ storespec.ActorAuthority = (*actorSystem)(nil)

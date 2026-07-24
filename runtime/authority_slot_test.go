@@ -17,8 +17,20 @@ func (slotAuthority) LookupActive(context.Context, actor.ActorID) (storespec.Act
 func (slotAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, nil
 }
-func (slotAuthority) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	return storespec.AuthorOK, nil
+func (slotAuthority) IsActive(context.Context, actor.ActorID) (bool, error) {
+	return true, nil
+}
+func (slotAuthority) AdmitIdentity(
+	context.Context,
+	actor.ActorID,
+) (storespec.IdentityAdmission, bool, error) {
+	return storespec.IdentityAdmission{ID: "actor:a", Kind: actor.KindAgent}, true, nil
+}
+func (slotAuthority) ResourceActorFacts(
+	context.Context,
+	actor.ActorID,
+) (storespec.ResourceActorFacts, error) {
+	return storespec.ResourceActorFacts{Active: true}, nil
 }
 
 func TestActorAuthoritySlotFailsClosedAndBindsOnce(t *testing.T) {

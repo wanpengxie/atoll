@@ -47,7 +47,7 @@ func TestDeps_ValidateMissingFields(t *testing.T) {
 	// Fully wired → nil. (No ActorRegistry dep — the sender door trusts the
 	// pen weld.)
 	lg := stubLog{}
-	if err := (Deps{ChannelID: testChannelID, Log: lg, Authority: testAuthority{}}).Validate(); err != nil {
+	if err := (Deps{ChannelID: testChannelID, Log: lg, Presence: testAuthority{}}).Validate(); err != nil {
 		t.Fatalf("fully-wired Deps Validate = %v, want nil", err)
 	}
 }
@@ -62,7 +62,7 @@ func TestNew_FillsDefaults(t *testing.T) {
 		hasFinalFn: func(context.Context, message.ID) (bool, error) { return false, nil },
 	}
 	// NowMs / Logger nil → defaults filled.
-	m, err := New(Deps{ChannelID: testChannelID, Log: lg, Authority: testAuthority{}})
+	m, err := New(Deps{ChannelID: testChannelID, Log: lg, Presence: testAuthority{}})
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
@@ -106,7 +106,7 @@ func chainWith(t *testing.T, lg storespec.MessageLog) *chain {
 	m, err := New(Deps{
 		ChannelID: testChannelID,
 		Log:       lg,
-		Authority: testAuthority{},
+		Presence:  testAuthority{},
 		NowMs:     func() int64 { return fixedNowMs },
 	})
 	if err != nil {
@@ -294,7 +294,7 @@ func responsePairingDeps(parent *storespec.StoredRow, findErr error, hasFinal fu
 		},
 		hasFinalFn: hasFinal,
 	}
-	return Deps{ChannelID: testChannelID, Log: lg, Authority: testAuthority{}}
+	return Deps{ChannelID: testChannelID, Log: lg, Presence: testAuthority{}}
 }
 
 func makeResponse(payload string) *message.Envelope {

@@ -56,7 +56,7 @@ func TestOpenScheduler_AssembledMintWorks(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Admit timer owner: %v", err)
 	}
-	handle := minter.Mint(scheduleStamp(author))
+	handle := minter.MintAdmitted(identityAdmission(author))
 
 	id, err := handle.Schedule(ctx, schedule.ScheduleReq{
 		Home:   schedule.TimerHomeDurable,

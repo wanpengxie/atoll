@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -14,8 +15,7 @@ import (
 // self-report a different one (mirrors accessdoor.boundHandle).
 type boundScheduleHandle struct {
 	engine    *Engine
-	author    storespec.AuthorStamp
-	auth      storespec.ActorAuthority
+	author    actor.ActorID
 	authority capauth.Authority
 	admitted  bool
 }
@@ -27,35 +27,28 @@ func (h boundScheduleHandle) authorize(ctx context.Context) error {
 	if h.authority != nil {
 		return h.authority.Admit()
 	}
-	verdict, err := h.auth.CheckAuthor(ctx, h.author)
-	if err != nil {
-		return err
-	}
-	if verdict != storespec.AuthorOK {
-		return ErrAuthorInactive
-	}
-	return nil
+	return errors.New("schedule: incomplete author authority")
 }
 
 func (h boundScheduleHandle) Schedule(ctx context.Context, req ScheduleReq) (TimerID, error) {
 	if err := h.authorize(ctx); err != nil {
 		return "", err
 	}
-	return h.engine.schedule(ctx, h.author.ID, req)
+	return h.engine.schedule(ctx, h.author, req)
 }
 
 func (h boundScheduleHandle) Cancel(ctx context.Context, id TimerID) error {
 	if err := h.authorize(ctx); err != nil {
 		return err
 	}
-	return h.engine.cancel(ctx, h.author.ID, id)
+	return h.engine.cancel(ctx, h.author, id)
 }
 
 func (h boundScheduleHandle) Ack(ctx context.Context, id TimerID) error {
 	if err := h.authorize(ctx); err != nil {
 		return err
 	}
-	_, err := h.engine.deps.Store.AckOwned(ctx, id, h.author.ID)
+	_, err := h.engine.deps.Store.AckOwned(ctx, id, h.author)
 	return err
 }
 
@@ -63,20 +56,7 @@ func (h boundScheduleHandle) Ack(ctx context.Context, id TimerID) error {
 // hands out the interface only, never the concrete type (mirrors
 // harness.minter / accessdoor.minter).
 type minter struct {
-	engine    *Engine
-	authority storespec.ActorAuthority
-}
-
-// Mint welds author onto the engine and returns a handle. Deterministic and
-// cheap (no per-handle state beyond the welded author), so admission points
-// may Mint per-caller freely.
-func (m *minter) Mint(author storespec.AuthorStamp) ScheduleHandle {
-	if author.ID == "" {
-		return rejectedScheduleHandle{err: errors.New("schedule: invalid author stamp")}
-	}
-	return boundScheduleHandle{
-		engine: m.engine, author: author, auth: m.authority,
-	}
+	engine *Engine
 }
 
 func (m *minter) MintAdmitted(
@@ -86,8 +66,7 @@ func (m *minter) MintAdmitted(
 		return rejectedScheduleHandle{err: errors.New("schedule: invalid identity admission")}
 	}
 	return boundScheduleHandle{
-		engine: m.engine, author: storespec.AuthorStamp{ID: admission.Row.ID},
-		auth: m.authority, admitted: true,
+		engine: m.engine, author: admission.ID, admitted: true,
 	}
 }
 
@@ -97,8 +76,7 @@ func (m *minter) MintAuthority(authority capauth.Authority) ScheduleHandle {
 	}
 	return boundScheduleHandle{
 		engine:    m.engine,
-		author:    storespec.AuthorStamp{ID: authority.ActorID()},
-		auth:      m.authority,
+		author:    authority.ActorID(),
 		authority: authority,
 	}
 }

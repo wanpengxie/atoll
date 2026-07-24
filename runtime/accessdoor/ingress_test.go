@@ -107,7 +107,7 @@ func TestDay1OpsOverreach(t *testing.T) {
 func TestOverreachVerdict(t *testing.T) {
 	reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
 	d := newDoor(reg, &fakeDriver{}, &fakeMembership{})
-	h := boundHandle{door: d, caller: accessStamp("a")}
+	h := boundHandle{door: d, caller: "a", admitted: true}
 
 	out, err := h.Invoke(t.Context(), access.OpSet, "r1", nil,
 		&access.Grant{GranteeKind: access.GranteeActor, Grantee: "b", Ops: []access.Operation{access.OpRead, access.OpDelete}})

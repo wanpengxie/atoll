@@ -36,10 +36,9 @@ func OpenScheduler(cs *ChannelStores, deps schedule.AssemblyDeps) (schedule.Mint
 		clock = schedule.NewSystemClock()
 	}
 	return schedule.New(schedule.Deps{
-		Store:     cs.timers,
-		Fire:      deps.Fire,
-		Clock:     clock,
-		Authority: cs.Authority,
-		Logger:    deps.Logger,
+		Store:  cs.timers,
+		Fire:   deps.Fire,
+		Clock:  clock,
+		Logger: deps.Logger,
 	})
 }

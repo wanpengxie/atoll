@@ -92,43 +92,59 @@ type ActorControlRow struct {
 	SourceDeclID       string
 }
 
-type AuthorStamp struct {
-	ID actor.ActorID
-}
-
 // IdentityAdmission is one immutable ActorID-level collaboration snapshot.
 // The authority owner returns it after one active-identity admission; source
 // adapters may then execute exactly one already-admitted Harness/Access/State/
-// Schedule invocation without re-running the old AuthorStamp gate.
+// Schedule invocation without re-running identity admission.
 //
 // It carries no AttemptKey, Incarnation or physical identity storage home.
 type IdentityAdmission struct {
-	Row ActorControlRow
+	ID   actor.ActorID
+	Kind actor.Kind
 }
 
 func (a IdentityAdmission) Valid() bool {
-	return a.Row.ID != ""
+	_, validKind := actor.ParseKind(string(a.Kind))
+	return a.ID != "" && validKind
 }
 
-type AuthorVerdict uint8
-
-const (
-	AuthorOK AuthorVerdict = iota + 1
-	AuthorNotMember
-)
-
-// ActorAuthority is the sole active-identity authority used by every effect
-// membrane. Durable history is deliberately a separate contract below.
-type ActorAuthority interface {
+// ActorDirectory is the complete Platform-facing active identity projection.
+// Runtime capability organs must consume one of the narrower contracts below.
+type ActorDirectory interface {
 	LookupActive(context.Context, actor.ActorID) (ActorControlRow, bool, error)
 	ListActive(context.Context) ([]ActorControlRow, error)
-	CheckAuthor(context.Context, AuthorStamp) (AuthorVerdict, error)
+}
+
+// IdentityPresence answers only irreversible collaboration membership.
+type IdentityPresence interface {
+	IsActive(context.Context, actor.ActorID) (bool, error)
 }
 
 // CollaborationAuthority owns the one-shot ActorID-level admission used at
 // remote ingress and delayed-product fire boundaries.
 type CollaborationAuthority interface {
 	AdmitIdentity(context.Context, actor.ActorID) (IdentityAdmission, bool, error)
+}
+
+// ResourceActorFacts is the narrow resource-policy projection. It deliberately
+// exposes neither ActorControlRow nor raw Placement.
+type ResourceActorFacts struct {
+	Active               bool
+	Owner                bool
+	PreferredStorageHost string
+}
+
+type ResourceActorAuthority interface {
+	ResourceActorFacts(context.Context, actor.ActorID) (ResourceActorFacts, error)
+}
+
+// ChannelAuthority is the Platform composition face. Individual Runtime
+// organs receive only the narrow interface they actually consume.
+type ChannelAuthority interface {
+	ActorDirectory
+	IdentityPresence
+	CollaborationAuthority
+	ResourceActorAuthority
 }
 
 type DurableHistory interface {

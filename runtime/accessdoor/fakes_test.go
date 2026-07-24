@@ -219,9 +219,9 @@ func (d *fakeDriver) Delete(ctx context.Context, id resource.ResourceID) error {
 	return d.deleteErr
 }
 
-// fakeMembership is a configurable ActorAuthority stub. calls counts every
-// invocation — the actor-scoped negative assertion ("the collapsed branch checks
-// no membership") asserts it stays zero.
+// fakeMembership is a configurable resource-policy projection. calls counts
+// every invocation — the actor-scoped negative assertion ("the collapsed
+// branch checks no membership") asserts it stays zero.
 type fakeMembership struct {
 	isMember bool
 	role     storespec.ActorRole
@@ -231,11 +231,10 @@ type fakeMembership struct {
 	// lookupHost/lookupFound/lookupErr back Lookup (§4.3 placement chain ①'s
 	// creator-affinity read). lookupCalls records every caller id Lookup was
 	// asked about.
-	lookupHost    string
-	lookupFound   bool
-	lookupErr     error
-	lookupCalls   []actor.ActorID
-	authorVerdict storespec.AuthorVerdict
+	lookupHost  string
+	lookupFound bool
+	lookupErr   error
+	lookupCalls []actor.ActorID
 }
 
 func (m *fakeMembership) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
@@ -260,15 +259,31 @@ func (m *fakeMembership) LookupActive(ctx context.Context, id actor.ActorID) (st
 func (m *fakeMembership) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, nil
 }
-func (m *fakeMembership) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	if m.authorVerdict != 0 {
-		return m.authorVerdict, nil
+func (m *fakeMembership) ResourceActorFacts(
+	_ context.Context,
+	id actor.ActorID,
+) (storespec.ResourceActorFacts, error) {
+	m.calls++
+	m.lookupCalls = append(m.lookupCalls, id)
+	if m.err != nil {
+		return storespec.ResourceActorFacts{}, m.err
 	}
-	return storespec.AuthorOK, nil
+	if m.lookupErr != nil {
+		return storespec.ResourceActorFacts{}, m.lookupErr
+	}
+	host := ""
+	if m.lookupFound {
+		host = m.lookupHost
+	}
+	return storespec.ResourceActorFacts{
+		Active:               m.isMember || m.lookupFound,
+		Owner:                m.role == storespec.RoleOwner,
+		PreferredStorageHost: host,
+	}, nil
 }
 
-func accessStamp(id actor.ActorID) storespec.AuthorStamp {
-	return storespec.AuthorStamp{ID: id}
+func accessAdmission(id actor.ActorID) storespec.IdentityAdmission {
+	return storespec.IdentityAdmission{ID: id, Kind: actor.KindAgent}
 }
 
 func (m *fakeMembership) IsMember(ctx context.Context, id actor.ActorID) (bool, error) {

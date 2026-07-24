@@ -42,7 +42,7 @@ func testDeps(t *testing.T, cs *store.ChannelStores) Deps {
 	return Deps{
 		ChannelID: testChannelID,
 		Log:       cs.Log,
-		Authority: testAuthority{durableRows: cs.Declared},
+		Presence:  testAuthority{durableRows: cs.Declared},
 		NowMs:     func() int64 { return fixedNowMs },
 	}
 }
@@ -75,15 +75,9 @@ func (a testAuthority) ListActive(ctx context.Context) ([]storespec.ActorControl
 	}
 	return out, nil
 }
-func (a testAuthority) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	_, ok, err := a.LookupActive(ctx, stamp.ID)
-	if err != nil {
-		return 0, err
-	}
-	if !ok {
-		return storespec.AuthorNotMember, nil
-	}
-	return storespec.AuthorOK, nil
+func (a testAuthority) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
+	_, ok, err := a.LookupActive(ctx, id)
+	return ok, err
 }
 
 // registerActor seeds an active actor into the registry so sender/audience

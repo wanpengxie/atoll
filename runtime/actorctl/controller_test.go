@@ -234,7 +234,7 @@ func TestIdentityAdmissionIsOneCoherentActorIDOnlySnapshot(t *testing.T) {
 	if err != nil || !ok || !before.Valid() {
 		t.Fatalf("initial admission=(%+v,%v,%v)", before, ok, err)
 	}
-	if before.Row.ID != "agent:a" {
+	if before.ID != "agent:a" {
 		t.Fatalf("initial admission=%+v", before)
 	}
 
@@ -245,7 +245,7 @@ func TestIdentityAdmissionIsOneCoherentActorIDOnlySnapshot(t *testing.T) {
 	if err != nil || !ok || !after.Valid() {
 		t.Fatalf("post-restart admission=(%+v,%v,%v)", after, ok, err)
 	}
-	if after.Row.ID != before.Row.ID {
+	if after.ID != before.ID {
 		t.Fatalf("ActorID admission changed across G replacement: before=%+v after=%+v", before, after)
 	}
 

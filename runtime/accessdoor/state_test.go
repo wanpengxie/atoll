@@ -292,7 +292,7 @@ func TestMintStateWeldsOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	h := m.MintState(accessStamp("owner-a"))
+	h := m.MintStateAdmitted(accessAdmission("owner-a"))
 
 	// set on an actor-scoped handle → ErrOpNotInScope, StateStore never touched.
 	if _, err := h.Invoke(t.Context(), access.OpSet, "k", nil,

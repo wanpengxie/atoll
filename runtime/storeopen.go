@@ -21,7 +21,7 @@ type ChannelStores struct {
 	Visible         storespec.VisibleMessageQuery
 	Expiry          storespec.ExpiryQuery
 	Requests        storespec.RequestLookup
-	Authority       storespec.ActorAuthority
+	Authority       storespec.ChannelAuthority
 	DurableHistory  storespec.DurableHistory
 	Declared        storespec.DeclaredControlReader
 	DeclAdmission   storespec.DeclAdmissionStore
@@ -103,7 +103,7 @@ func (c *ChannelStores) Close() error {
 // BindActorAuthority completes the single Home-owned late binding. All
 // consumers receive Authority before this call and therefore fail closed,
 // never falling back to durable registry state.
-func (c *ChannelStores) BindActorAuthority(authority storespec.ActorAuthority) error {
+func (c *ChannelStores) BindActorAuthority(authority storespec.ChannelAuthority) error {
 	return c.authoritySlot.Bind(authority)
 }
 

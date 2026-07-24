@@ -66,15 +66,21 @@ func (m decayMembership) ListActive(context.Context) ([]storespec.ActorControlRo
 	return nil, nil
 }
 
-func (m decayMembership) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	_, ok, err := m.LookupActive(ctx, stamp.ID)
+func (m decayMembership) ResourceActorFacts(
+	ctx context.Context,
+	id actor.ActorID,
+) (storespec.ResourceActorFacts, error) {
+	row, ok, err := m.LookupActive(ctx, id)
 	if err != nil {
-		return 0, err
+		return storespec.ResourceActorFacts{}, err
 	}
 	if !ok {
-		return storespec.AuthorNotMember, nil
+		return storespec.ResourceActorFacts{}, nil
 	}
-	return storespec.AuthorOK, nil
+	return storespec.ResourceActorFacts{
+		Active: row.ID != "",
+		Owner:  row.Role == storespec.RoleOwner,
+	}, nil
 }
 
 // newDecayDoor builds a bare door directly over a real store (past-the-Minter,

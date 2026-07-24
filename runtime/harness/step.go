@@ -3,7 +3,6 @@ package harness
 import (
 	"context"
 
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -30,7 +29,7 @@ const (
 	StepAudienceResolve  stepID = 6
 	StepKindAndAudience  stepID = 7
 	StepResponsePairing  stepID = 8
-	StepAuthorGate       stepID = 9
+	StepReceiverGate     stepID = 9
 	StepEngineAppend     stepID = 10
 )
 
@@ -91,12 +90,11 @@ type Pen interface {
 // type references to the platform tree.
 type Minter interface {
 	AdmittedMinter
-	Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID) Pen
 }
 
 // AdmittedMinter consumes one already-completed ActorID collaboration
 // admission. It is used only at source boundaries such as daemon ingress and
-// timer fire; the returned Pen skips the obsolete second AuthorStamp gate.
+// timer fire; the returned Pen consumes the already-admitted identity snapshot.
 type AdmittedMinter interface {
 	MintAdmitted(storespec.IdentityAdmission, channel.ID) Pen
 }

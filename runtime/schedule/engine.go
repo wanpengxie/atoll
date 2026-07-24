@@ -113,8 +113,6 @@ func New(deps Deps) (Minter, *Engine, error) {
 		return nil, nil, errors.New("schedule: Deps.Fire required")
 	case deps.Clock == nil:
 		return nil, nil, errors.New("schedule: Deps.Clock required")
-	case deps.Authority == nil:
-		return nil, nil, errors.New("schedule: Deps.Authority required")
 	}
 	if deps.Logger == nil {
 		deps.Logger = slog.New(slog.DiscardHandler)
@@ -129,7 +127,7 @@ func New(deps Deps) (Minter, *Engine, error) {
 		transient: make(map[transientKey]struct{}),
 	}
 	e.ctx, e.cancelRun = context.WithCancel(context.Background())
-	return &minter{engine: e, authority: deps.Authority}, e, nil
+	return &minter{engine: e}, e, nil
 }
 
 // Start launches the run-loop goroutine. It does not block; Close joins it.
@@ -193,7 +191,7 @@ func mintTimerID() TimerID { return TimerID(uuid.NewString()) }
 // — the schedule-package twin of harness's bare chain, and it stays inside
 // the package for the same reason the chain does. Every consumption path
 // (caps-injected cell handle, host-side per-call mint at the port arm, the
-// platform's own system timers) closes over Minter.Mint(author), and Mint is
+// platform's own system timers) closes over Minter.MintAdmitted(author), which is
 // the one seam future per-author enforcement (liveSchedule membrane, storm
 // quotas, principal checks) attaches to — an exported free-author method
 // would be a standing structural bypass of that seam.

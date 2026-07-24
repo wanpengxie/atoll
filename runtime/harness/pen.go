@@ -18,20 +18,6 @@ type minter struct {
 	chain *chain
 }
 
-// Mint produces a Pen welded to (actorID, kind, chID). The returned pen commits
-// every write under that identity and the holder cannot change it — the
-// substrate's "actorID and write capability are welded inseparably" invariant.
-// kind is welded here too (not backfilled from a registry lookup mid-chain):
-// stepSenderConsistent reads the welded kind, so Mint is the single source of
-// truth for both id and kind. Mint is deterministic and cheap (no per-pen state
-// beyond the welded principal), so admission points may Mint per-emit freely.
-func (m *minter) Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID) Pen {
-	return &boundPen{
-		chain:     m.chain,
-		principal: caller{actorID: actorID, kind: kind, chID: chID},
-	}
-}
-
 func (m *minter) MintAdmitted(
 	admission storespec.IdentityAdmission,
 	chID channel.ID,
@@ -42,10 +28,9 @@ func (m *minter) MintAdmitted(
 	return &boundPen{
 		chain: m.chain,
 		principal: caller{
-			actorID:  admission.Row.ID,
-			kind:     admission.Row.Kind,
-			chID:     chID,
-			admitted: true,
+			actorID: admission.ID,
+			kind:    admission.Kind,
+			chID:    chID,
 		},
 	}
 }
@@ -61,10 +46,9 @@ func (m *minter) MintAuthority(
 	return &boundPen{
 		chain: m.chain,
 		principal: caller{
-			actorID:  authority.ActorID(),
-			kind:     kind,
-			chID:     chID,
-			admitted: true,
+			actorID: authority.ActorID(),
+			kind:    kind,
+			chID:    chID,
 		},
 		authority: authority,
 	}

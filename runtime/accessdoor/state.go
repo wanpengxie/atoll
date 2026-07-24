@@ -9,7 +9,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // ErrOpNotInScope is the CATEGORY-ERROR class: a well-formed op that
@@ -34,7 +33,7 @@ var ErrOpNotInScope = errors.New("accessdoor: operation not in this handle's sco
 // namespace coordinate, welded at mint, never read off the wire.
 type boundStateHandle struct {
 	door      *door
-	owner     storespec.AuthorStamp
+	owner     actor.ActorID
 	authority capauth.Authority
 	admitted  bool
 }
@@ -51,18 +50,12 @@ func (h boundStateHandle) Invoke(ctx context.Context, op access.Operation, id re
 			return Outcome{RejectReason: access.OwnerInactive}, nil
 		}
 	} else {
-		verdict, err := h.door.deps.Authority.CheckAuthor(ctx, h.owner)
-		if err != nil {
-			return Outcome{}, err
-		}
-		if verdict != storespec.AuthorOK {
-			return Outcome{RejectReason: access.OwnerInactive}, nil
-		}
+		return Outcome{RejectReason: access.OwnerInactive}, nil
 	}
 	if err := ingressState(op, id, args, grant); err != nil {
 		return Outcome{}, err
 	}
-	return h.door.invokeActorScoped(ctx, h.owner.ID, op, id, args)
+	return h.door.invokeActorScoped(ctx, h.owner, op, id, args)
 }
 
 // ingressState is the actor-scoped ingress — the four-step decision order,

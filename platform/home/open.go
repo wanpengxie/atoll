@@ -115,7 +115,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 
 	h.minter, err = harness.New(harness.Deps{
-		ChannelID: cfg.ChannelID, Log: cs.Log, Authority: cs.Authority,
+		ChannelID: cfg.ChannelID, Log: cs.Log, Presence: cs.Authority,
 		ResolveAudience: h.resolveAudience, Logger: logger,
 	})
 	if err != nil {
@@ -131,9 +131,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: construct actor identity store: %w", err)
 	}
 	h.actorStore = actorStore
-	stateHandles, err := accessdoor.NewStateHandleResolver(
-		cs.Authority, actorStore.identities, cs.Access,
-	)
+	stateHandles, err := accessdoor.NewStateHandleResolver(actorStore.identities, cs.Access)
 	if err != nil {
 		return nil, fmt.Errorf("platform: build state handle resolver: %w", err)
 	}

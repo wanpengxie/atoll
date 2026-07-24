@@ -21,8 +21,7 @@ import (
 type TimerID = timerspec.TimerID
 
 var (
-	ErrAuthorInactive = errors.New("schedule: author inactive")
-	ErrScheduleQuota  = errors.New("schedule: schedule quota exceeded")
+	ErrScheduleQuota = errors.New("schedule: schedule quota exceeded")
 )
 
 // TimerHome chooses the Scheduler storage home. It is not an actor lifecycle
@@ -90,7 +89,6 @@ type ScheduleHandle interface {
 // may Mint per-caller freely.
 type Minter interface {
 	AdmittedMinter
-	Mint(author storespec.AuthorStamp) ScheduleHandle
 }
 
 // AdmittedMinter consumes one completed ActorID collaboration admission.
@@ -157,10 +155,9 @@ func (e FireRejected) Error() string {
 // the runtime-root assembly seam, is the ONLY place that defaults a nil Clock
 // to the real one).
 type Deps struct {
-	Store     timerspec.TimerStore
-	Fire      FireSink
-	Clock     Clock
-	Authority storespec.ActorAuthority
+	Store timerspec.TimerStore
+	Fire  FireSink
+	Clock Clock
 	// Logger receives obs-plane diagnostics — most notably the loud disposal
 	// log for a poison row/entry. nil → discard (same shape as
 	// harness.Deps.Logger — the substrate does not invent its own logging

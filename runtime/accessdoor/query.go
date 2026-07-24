@@ -13,7 +13,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // QueryReject is the runtime QUERY-layer verdict closed set for Stat/List —
@@ -187,11 +186,11 @@ func (d *door) create(ctx context.Context, caller actor.ActorID, id resource.Res
 	if exists {
 		return Outcome{RejectReason: access.AlreadyExists}, nil
 	}
-	_, member, err := d.deps.Authority.LookupActive(ctx, caller)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return Outcome{}, err
 	}
-	if !member {
+	if !facts.Active {
 		return Outcome{RejectReason: access.AccessDenied}, nil
 	}
 	birth := resourcespec.ResourceBirthPlan{
@@ -380,14 +379,15 @@ func (d *door) list(ctx context.Context, caller actor.ActorID, q ListQuery) (Lis
 		return ListPage{}, err
 	}
 
-	callerRow, isMember, err := d.deps.Authority.LookupActive(ctx, caller)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return ListPage{}, err
 	}
+	isMember := facts.Active
 
 	entries := make([]ListEntry, 0, len(rows))
 	for _, row := range rows {
-		eff := effectiveOpsFromGrants(caller, row.Grants, isMember, isMember && callerRow.Role == storespec.RoleOwner)
+		eff := effectiveOpsFromGrants(caller, row.Grants, isMember, facts.Owner)
 		ops := opSetFromEffective(eff)
 		if len(ops) == 0 {
 			continue // non-owner any-grant projection: zero rights on this row = invisible

@@ -13,20 +13,8 @@ import (
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
-type allowScheduleAuthority struct{}
-
-func (allowScheduleAuthority) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
-	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1}, true, nil
-}
-func (allowScheduleAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
-	return nil, nil
-}
-func (allowScheduleAuthority) CheckAuthor(_ context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	return storespec.AuthorOK, nil
-}
-
-func testStamp(id actor.ActorID) storespec.AuthorStamp {
-	return storespec.AuthorStamp{ID: id}
+func testAdmission(id actor.ActorID) storespec.IdentityAdmission {
+	return storespec.IdentityAdmission{ID: id, Kind: actor.KindAgent}
 }
 
 // ---------------------------------------------------------------------

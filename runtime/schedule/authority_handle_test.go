@@ -1,7 +1,6 @@
 package schedule
 
 import (
-	"context"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -9,7 +8,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 var errScheduleIdentityInactive = errors.New("test: schedule identity inactive")
@@ -27,19 +25,6 @@ func (a *scheduleIdentityAuthority) Admit() error {
 		return errScheduleIdentityInactive
 	}
 	return nil
-}
-
-type scheduleBackingAuthority struct {
-	allowScheduleAuthority
-	checkCalls atomic.Int64
-}
-
-func (a *scheduleBackingAuthority) CheckAuthor(
-	_ context.Context,
-	_ storespec.AuthorStamp,
-) (storespec.AuthorVerdict, error) {
-	a.checkCalls.Add(1)
-	return storespec.AuthorNotMember, nil
 }
 
 type blockingNowClock struct {
@@ -73,14 +58,10 @@ func TestAuthorityScheduleAdmitsOnceAndLetsAcceptedScheduleFinish(t *testing.T) 
 		entered: make(chan struct{}),
 		release: make(chan struct{}),
 	}
-	backing := &scheduleBackingAuthority{
-		allowScheduleAuthority: allowScheduleAuthority{},
-	}
 	minted, _, err := New(Deps{
-		Store:     store,
-		Fire:      sink,
-		Clock:     clock,
-		Authority: backing,
+		Store: store,
+		Fire:  sink,
+		Clock: clock,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -99,8 +80,8 @@ func TestAuthorityScheduleAdmitsOnceAndLetsAcceptedScheduleFinish(t *testing.T) 
 	<-clock.entered
 
 	// Model replacement/end immediately after the identity admission. The
-	// accepted invocation must not be re-authorized by the old AuthorStamp
-	// path and may finish against its Scheduler home.
+	// The accepted invocation is not re-authorized and may finish against its
+	// Scheduler home.
 	authority.allowed.Store(false)
 	close(clock.release)
 	if err := <-done; err != nil {
@@ -109,10 +90,6 @@ func TestAuthorityScheduleAdmitsOnceAndLetsAcceptedScheduleFinish(t *testing.T) 
 	if got := authority.calls.Load(); got != 1 {
 		t.Fatalf("authority calls=%d, want one", got)
 	}
-	if got := backing.checkCalls.Load(); got != 0 {
-		t.Fatalf("legacy CheckAuthor calls=%d, want zero", got)
-	}
-
 	if _, err := handle.Schedule(t.Context(), ScheduleReq{
 		Home: TimerHomeMemory, FireAt: 3_000, Type: "authority.stale",
 	}); !errors.Is(err, errScheduleIdentityInactive) {

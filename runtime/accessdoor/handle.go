@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/wanpengxie/atoll/protocol/access"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
@@ -110,7 +111,7 @@ func (h boundHandle) Redeem(ctx context.Context, _ FileRoute) (FileAccess, error
 // field — structurally there is nowhere to self-report it.
 type boundHandle struct {
 	door      *door
-	caller    storespec.AuthorStamp
+	caller    actor.ActorID
 	authority capauth.Authority
 	admitted  bool
 }
@@ -124,14 +125,7 @@ func (h boundHandle) authorize(ctx context.Context) error {
 	if h.authority != nil {
 		return h.authority.Admit()
 	}
-	verdict, err := h.door.deps.Authority.CheckAuthor(ctx, h.caller)
-	if err != nil {
-		return err
-	}
-	if verdict != storespec.AuthorOK {
-		return ErrAuthorInactive
-	}
-	return nil
+	return ErrAuthorInactive
 }
 
 // ErrCreateViaInvoke is the resource face's "create 单入口" enforcement
@@ -163,7 +157,7 @@ func (h boundHandle) Invoke(ctx context.Context, op access.Operation, id resourc
 	if over, ok := day1OpsOverreach(op, grant); ok && over {
 		return Outcome{RejectReason: access.AccessDenied}, nil
 	}
-	return h.door.invoke(ctx, h.caller.ID, op, id, args, grant)
+	return h.door.invoke(ctx, h.caller, op, id, args, grant)
 }
 
 // Create runs the create-specific ingress (structure → ErrMalformed), then
@@ -175,7 +169,7 @@ func (h boundHandle) Create(ctx context.Context, id resource.ResourceID, spec re
 	if err := ingressCreate(id, spec, initial); err != nil {
 		return Outcome{}, err
 	}
-	return h.door.create(ctx, h.caller.ID, id, spec, initial)
+	return h.door.create(ctx, h.caller, id, spec, initial)
 }
 
 // Stat runs the read-face projection under the welded caller.
@@ -186,7 +180,7 @@ func (h boundHandle) Stat(ctx context.Context, id resource.ResourceID) (StatResu
 	if err := checkResourceID(id); err != nil {
 		return StatResult{}, err
 	}
-	return h.door.stat(ctx, h.caller.ID, id)
+	return h.door.stat(ctx, h.caller, id)
 }
 
 // List runs the read-face pagination under the welded caller.
@@ -194,7 +188,7 @@ func (h boundHandle) List(ctx context.Context, q ListQuery) (ListPage, error) {
 	if err := h.authorize(ctx); err != nil {
 		return ListPage{}, ErrAuthorInactive
 	}
-	return h.door.list(ctx, h.caller.ID, q)
+	return h.door.list(ctx, h.caller, q)
 }
 
 // AccessMinter is the door's ONE outward face (mirroring harness.Minter's
@@ -215,32 +209,16 @@ func (h boundHandle) List(ctx context.Context, q ListQuery) (ListPage, error) {
 //     (§3.2's "不实现空方法" red line).
 type AccessMinter interface {
 	AdmittedMinter
-	Mint(caller storespec.AuthorStamp) ResourceAccessHandle
-	MintState(owner storespec.AuthorStamp) AccessHandle
 }
 
-// AdmittedMinter consumes a one-shot ActorID collaboration admission. Its
-// handles skip only the old caller CheckAuthor gate; resource/grant/business
-// checks remain inside the door.
+// AdmittedMinter consumes a one-shot ActorID collaboration admission.
+// Resource/grant/business checks remain inside the door.
 type AdmittedMinter interface {
 	MintAdmitted(storespec.IdentityAdmission) ResourceAccessHandle
 	MintStateAdmitted(storespec.IdentityAdmission) AccessHandle
 }
 
 type minter struct{ door *door }
-
-// Mint welds caller onto the door and returns a resource-face handle.
-// Deterministic and cheap; admission points may Mint per-caller freely.
-func (m *minter) Mint(caller storespec.AuthorStamp) ResourceAccessHandle {
-	return boundHandle{door: m.door, caller: caller}
-}
-
-// MintState welds owner onto the door and returns an actor-scoped handle. Same
-// door, same AccessHandle contract as Mint — the owner is the namespace coordinate
-// (non-ambient: welded here, never read off the wire).
-func (m *minter) MintState(owner storespec.AuthorStamp) AccessHandle {
-	return boundStateHandle{door: m.door, owner: owner}
-}
 
 func (m *minter) MintAdmitted(
 	admission storespec.IdentityAdmission,
@@ -249,7 +227,7 @@ func (m *minter) MintAdmitted(
 		return rejectedResourceHandle{err: ErrAuthorInactive}
 	}
 	return boundHandle{
-		door: m.door, caller: storespec.AuthorStamp{ID: admission.Row.ID},
+		door: m.door, caller: admission.ID,
 		admitted: true,
 	}
 }
@@ -261,7 +239,7 @@ func (m *minter) MintStateAdmitted(
 		return rejectedStateHandle{err: ErrAuthorInactive}
 	}
 	return boundStateHandle{
-		door: m.door, owner: storespec.AuthorStamp{ID: admission.Row.ID},
+		door: m.door, owner: admission.ID,
 		admitted: true,
 	}
 }
@@ -272,7 +250,7 @@ func (m *minter) MintAuthority(authority capauth.Authority) ResourceAccessHandle
 	}
 	return boundHandle{
 		door:      m.door,
-		caller:    storespec.AuthorStamp{ID: authority.ActorID()},
+		caller:    authority.ActorID(),
 		authority: authority,
 	}
 }
@@ -283,7 +261,7 @@ func (m *minter) MintStateAuthority(authority capauth.Authority) AccessHandle {
 	}
 	return boundStateHandle{
 		door:      m.door,
-		owner:     storespec.AuthorStamp{ID: authority.ActorID()},
+		owner:     authority.ActorID(),
 		authority: authority,
 	}
 }

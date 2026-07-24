@@ -30,9 +30,7 @@ func (a *accessRunAuthority) Admit() error {
 	return nil
 }
 
-type accessBackingAuthority struct {
-	checkCalls atomic.Int64
-}
+type accessBackingAuthority struct{}
 
 func (*accessBackingAuthority) LookupActive(
 	_ context.Context,
@@ -47,12 +45,11 @@ func (*accessBackingAuthority) ListActive(context.Context) ([]storespec.ActorCon
 	return nil, nil
 }
 
-func (a *accessBackingAuthority) CheckAuthor(
+func (*accessBackingAuthority) ResourceActorFacts(
 	context.Context,
-	storespec.AuthorStamp,
-) (storespec.AuthorVerdict, error) {
-	a.checkCalls.Add(1)
-	return storespec.AuthorNotMember, nil
+	actor.ActorID,
+) (storespec.ResourceActorFacts, error) {
+	return storespec.ResourceActorFacts{Active: true}, nil
 }
 
 type authorityBlockingReadDriver struct {
@@ -140,10 +137,6 @@ func TestAuthorityAccessAdmitsOnceAndLetsAcceptedInvokeFinish(t *testing.T) {
 	if got := authority.calls.Load(); got != 1 {
 		t.Fatalf("authority calls=%d, want one", got)
 	}
-	if got := backing.checkCalls.Load(); got != 0 {
-		t.Fatalf("legacy CheckAuthor calls=%d, want zero", got)
-	}
-
 	out, err := handle.Invoke(
 		t.Context(), access.OpRead, "resource:authority", nil, nil,
 	)
@@ -205,10 +198,6 @@ func TestAuthorityStateAdmitsOnceAndLetsAcceptedInvokeFinish(t *testing.T) {
 	if got := authority.calls.Load(); got != 1 {
 		t.Fatalf("authority calls=%d, want one", got)
 	}
-	if got := backing.checkCalls.Load(); got != 0 {
-		t.Fatalf("legacy CheckAuthor calls=%d, want zero", got)
-	}
-
 	out, err := handle.Invoke(t.Context(), access.OpRead, "state:authority", nil, nil)
 	if err != nil || out.RejectReason != access.OwnerInactive {
 		t.Fatalf("next inactive State.Invoke=(%+v,%v)", out, err)

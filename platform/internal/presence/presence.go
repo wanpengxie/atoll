@@ -221,7 +221,7 @@ func (f *Fold) copy(id actor.ActorID) map[actorrt.ObsKind]entry {
 type View struct {
 	fold      *Fold
 	runtime   ExecutionView
-	authority storespec.ActorAuthority
+	authority storespec.IdentityPresence
 }
 
 // ExecutionView is the narrow local-observation surface presence needs. It is
@@ -233,7 +233,7 @@ type ExecutionView interface {
 	Attempt(actor.ActorID) (actorhost.AttemptKey, bool)
 }
 
-func NewView(fold *Fold, runtime ExecutionView, authority storespec.ActorAuthority) View {
+func NewView(fold *Fold, runtime ExecutionView, authority storespec.IdentityPresence) View {
 	return View{fold: fold, runtime: runtime, authority: authority}
 }
 
@@ -245,7 +245,7 @@ func (v View) Snapshot(ctx context.Context, id actor.ActorID) (Snapshot, error) 
 	stat, present := v.runtime.Stat(id)
 	gen, hasGen := v.runtime.Incarnation(id)
 	attempt, hasAttempt := v.runtime.Attempt(id)
-	_, member, err := v.authority.LookupActive(ctx, id)
+	member, err := v.authority.IsActive(ctx, id)
 	if err != nil {
 		return Snapshot{}, err
 	}

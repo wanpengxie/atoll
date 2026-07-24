@@ -31,9 +31,6 @@ func (m memberRegistry) LookupActive(_ context.Context, id actor.ActorID) (store
 func (m memberRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return nil, nil
 }
-func (m memberRegistry) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	return storespec.AuthorOK, m.lookupErr
-}
 
 // failSys extends the reply-recording double with Fail capture — the operate gate
 // exercises both terminals.

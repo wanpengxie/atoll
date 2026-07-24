@@ -31,7 +31,7 @@ type PresenceStat interface {
 // actorbase.New seam every other actor does). Def mints a fresh SystemActor per
 // incarnation; run(sys) is the process body.
 type SystemActor struct {
-	authority storespec.ActorAuthority
+	authority storespec.ActorDirectory
 	clock     func() time.Time
 	presence  PresenceStat
 	operate   OperateExecutor
@@ -40,7 +40,7 @@ type SystemActor struct {
 
 // Deps bundles the channel services the system actor needs.
 type Deps struct {
-	Authority storespec.ActorAuthority
+	Authority storespec.ActorDirectory
 	Clock     func() time.Time
 	Presence  PresenceStat
 	Logger    *slog.Logger

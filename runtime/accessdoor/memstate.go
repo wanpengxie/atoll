@@ -13,8 +13,8 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-func newMemoryStateHandle(owner storespec.AuthorStamp, authority storespec.ActorAuthority) AccessHandle {
-	return boundStateHandle{door: &door{deps: Deps{State: newMemStateStore(), Authority: authority}}, owner: owner}
+func newMemoryStateHandle(owner actor.ActorID) AccessHandle {
+	return boundStateHandle{door: &door{deps: Deps{State: newMemStateStore()}}, owner: owner}
 }
 
 var ErrStateHandleUnavailable = errors.New("accessdoor: state handle unavailable")
@@ -38,26 +38,23 @@ type AdmittedStateBinding interface {
 }
 
 type actorStateHandles struct {
-	mu        sync.RWMutex
-	authority storespec.ActorAuthority
-	homes     identitystore.HomeReader
-	durable   AccessMinter
-	memory    map[actor.ActorID]boundStateHandle
+	mu      sync.RWMutex
+	homes   identitystore.HomeReader
+	durable AccessMinter
+	memory  map[actor.ActorID]boundStateHandle
 }
 
 func NewStateHandleResolver(
-	authority storespec.ActorAuthority,
 	homes identitystore.HomeReader,
 	durable AccessMinter,
 ) (StateHandleResolver, error) {
-	if authority == nil || homes == nil || durable == nil {
+	if homes == nil || durable == nil {
 		return nil, errors.New("accessdoor: state handle resolver dependencies incomplete")
 	}
 	return &actorStateHandles{
-		authority: authority,
-		homes:     homes,
-		durable:   durable,
-		memory:    make(map[actor.ActorID]boundStateHandle),
+		homes:   homes,
+		durable: durable,
+		memory:  make(map[actor.ActorID]boundStateHandle),
 	}, nil
 }
 
@@ -70,12 +67,12 @@ type resolvedStateBinding struct {
 func (b resolvedStateBinding) MintAdmitted(
 	admission storespec.IdentityAdmission,
 ) AccessHandle {
-	if !admission.Valid() || admission.Row.ID != b.id {
+	if !admission.Valid() || admission.ID != b.id {
 		return rejectedStateHandle{err: ErrAuthorInactive}
 	}
 	if b.memory != nil {
 		state := *b.memory
-		state.owner = storespec.AuthorStamp{ID: b.id}
+		state.owner = b.id
 		state.authority = nil
 		state.admitted = true
 		return state
@@ -112,7 +109,7 @@ func (h *actorStateHandles) ResolvePhysical(
 		state, ok := h.memory[id]
 		if !ok {
 			handle, valid := newMemoryStateHandle(
-				storespec.AuthorStamp{ID: id}, h.authority,
+				id,
 			).(boundStateHandle)
 			if !valid {
 				h.mu.Unlock()

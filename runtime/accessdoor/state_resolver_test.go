@@ -12,24 +12,6 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-type resolverAuthority struct {
-	active map[actor.ActorID]bool
-}
-
-func (a resolverAuthority) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
-	ok := a.active[id]
-	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1}, ok, nil
-}
-func (a resolverAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
-	return nil, nil
-}
-func (a resolverAuthority) CheckAuthor(_ context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	if !a.active[stamp.ID] {
-		return storespec.AuthorNotMember, nil
-	}
-	return storespec.AuthorOK, nil
-}
-
 type resolverHomes map[actor.ActorID]identitystore.Home
 
 func (h resolverHomes) HomeOf(
@@ -40,36 +22,26 @@ func (h resolverHomes) HomeOf(
 	return home, ok, nil
 }
 
-type resolverMinter struct{ authority storespec.ActorAuthority }
+type resolverMinter struct{}
 
-func (resolverMinter) Mint(storespec.AuthorStamp) ResourceAccessHandle { return nil }
 func (resolverMinter) MintAdmitted(storespec.IdentityAdmission) ResourceAccessHandle {
 	return nil
 }
-func (m resolverMinter) MintState(stamp storespec.AuthorStamp) AccessHandle {
-	return newMemoryStateHandle(stamp, m.authority)
-}
-func (m resolverMinter) MintStateAdmitted(admission storespec.IdentityAdmission) AccessHandle {
-	handle := newMemoryStateHandle(
-		storespec.AuthorStamp{ID: admission.Row.ID},
-		m.authority,
-	).(boundStateHandle)
-	handle.admitted = true
-	return handle
+func (resolverMinter) MintStateAdmitted(admission storespec.IdentityAdmission) AccessHandle {
+	return boundStateHandle{
+		door:  &door{deps: Deps{State: newMemStateStore()}},
+		owner: admission.ID, admitted: true,
+	}
 }
 
 func TestStateHandleResolverConfinesHomeAndCrossesReplacement(t *testing.T) {
 	ctx := context.Background()
-	authority := resolverAuthority{active: map[actor.ActorID]bool{
-		"declared": true,
-		"forked":   true,
-	}}
 	homes := resolverHomes{
 		"declared": identitystore.HomeDurable,
 		"forked":   identitystore.HomeMemory,
 	}
 	resolver, err := NewStateHandleResolver(
-		authority, homes, resolverMinter{authority: authority},
+		homes, resolverMinter{},
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +51,7 @@ func TestStateHandleResolverConfinesHomeAndCrossesReplacement(t *testing.T) {
 		t.Fatal(err)
 	}
 	admission := storespec.IdentityAdmission{
-		Row: storespec.ActorControlRow{ID: "forked"},
+		ID: "forked", Kind: actor.KindAgent,
 	}
 	first := firstBinding.MintAdmitted(admission)
 	if out, err := first.Invoke(ctx, access.OpCreate, resource.ResourceID("done"), []byte("yes"), nil); err != nil || !out.Accepted() {
@@ -97,7 +69,6 @@ func TestStateHandleResolverConfinesHomeAndCrossesReplacement(t *testing.T) {
 		t.Fatalf("successor read = (%+v,%v)", out, err)
 	}
 	delete(homes, "forked")
-	delete(authority.active, "forked")
 	resolver.EndBatch([]actor.ActorID{"forked"})
 	// The call admitted before End remains attached to the stable physical
 	// handle it already selected; End cannot redirect it to durable storage or

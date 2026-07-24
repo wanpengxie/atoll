@@ -40,11 +40,6 @@ type caller struct {
 	// callerFromCtx) instead of querying the registry: kind is welded truth,
 	// not a name-list lookup.
 	kind actor.Kind
-	// admitted marks a caller whose opaque identity/run authority was already
-	// admitted once by the bound Pen entry. StepAuthorGate then performs only
-	// its independent receiver check.
-	admitted bool
-
 	// chID is the channel binding the caller is authenticated for.
 	// Step 0/1 rejects (harness_engine_acl_denied) when it differs from the
 	// harness-bound channel.
@@ -70,8 +65,8 @@ type Deps struct {
 
 	// Log is the channel-local messages-table sink. Required — step 9
 	// engine append calls Log.Append. (v2: no fencing — single writer.)
-	Log       storespec.MessageLog
-	Authority storespec.ActorAuthority
+	Log      storespec.MessageLog
+	Presence storespec.IdentityPresence
 	// ResolveAudience is the channel-membrane routing evaluator. It is invoked
 	// only for request/event envelopes whose audience is empty, after sender
 	// identity has been welded and before structural audience validation.
@@ -93,8 +88,8 @@ func (d Deps) Validate() error {
 	if d.Log == nil {
 		return errors.New("harness: Deps.Log required")
 	}
-	if d.Authority == nil {
-		return errors.New("harness: Deps.Authority required")
+	if d.Presence == nil {
+		return errors.New("harness: Deps.Presence required")
 	}
 	return nil
 }

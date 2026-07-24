@@ -68,15 +68,15 @@ func TestNewFailFast(t *testing.T) {
 	})
 }
 
-func TestAccessInactiveAuthorGate(t *testing.T) {
+func TestAccessRejectsInvalidAdmission(t *testing.T) {
 	reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
-	authority := &fakeMembership{isMember: true, authorVerdict: storespec.AuthorNotMember}
+	authority := &fakeMembership{isMember: true}
 	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}}, Authority: authority, State: &fakeStateStore{}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := m.Mint(accessStamp("a")).Invoke(context.Background(), access.OpRead, "r", nil, nil)
-	if err != nil || out.RejectReason != access.OwnerInactive {
+	out, err := m.MintAdmitted(storespec.IdentityAdmission{}).Invoke(context.Background(), access.OpRead, "r", nil, nil)
+	if !errors.Is(err, ErrAuthorInactive) {
 		t.Fatalf("inactive author outcome=(%+v,%v)", out, err)
 	}
 }
@@ -91,7 +91,7 @@ func TestMintedHandleRunsFullPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	h := m.Mint(accessStamp("a"))
+	h := m.MintAdmitted(accessAdmission("a"))
 
 	// malformed (set without grant) → Go error, tree never reached.
 	if _, err := h.Invoke(t.Context(), access.OpSet, "r1", nil, nil); err == nil {

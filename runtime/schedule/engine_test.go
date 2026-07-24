@@ -15,7 +15,7 @@ import (
 func testDeps(store timerspec.TimerStore, sink FireSink, clock Clock) Deps {
 	return Deps{
 		Store: store, Fire: sink,
-		Clock: clock, Authority: allowScheduleAuthority{},
+		Clock: clock,
 	}
 }
 
@@ -50,7 +50,6 @@ func TestNewFailFast(t *testing.T) {
 		{"store", func(d *Deps) { d.Store = nil }},
 		{"fire", func(d *Deps) { d.Fire = nil }},
 		{"clock", func(d *Deps) { d.Clock = nil }},
-		{"authority", func(d *Deps) { d.Authority = nil }},
 	}
 	for _, test := range cases {
 		t.Run(test.name, func(t *testing.T) {
@@ -69,14 +68,14 @@ func TestScheduleValidationDoesNotCoupleTimerHomeToActorKind(t *testing.T) {
 	clock := newFakeClock(time.UnixMilli(1_000))
 	minter, engine, err := New(Deps{
 		Store: store, Fire: sink,
-		Clock: clock, Authority: allowScheduleAuthority{},
+		Clock: clock,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	engine.Start()
 	t.Cleanup(engine.Close)
-	handle := minter.Mint(testStamp("agent:a"))
+	handle := minter.MintAdmitted(testAdmission("agent:a"))
 	for _, request := range []ScheduleReq{
 		{},
 		{Home: "unknown", FireAt: 2_000, Type: "ok"},
@@ -99,7 +98,7 @@ func TestIdentityTimerCommitsOneDeterministicFire(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000))
 	minter, _ := newTestEngine(t, store, sink, clock)
-	handle := minter.Mint(testStamp("agent:a"))
+	handle := minter.MintAdmitted(testAdmission("agent:a"))
 	id, err := handle.Schedule(context.Background(), ScheduleReq{
 		Home: TimerHomeDurable, FireAt: 2_000, Type: "timer.tick", Payload: []byte(`{"x":1}`),
 	})
@@ -124,7 +123,7 @@ func TestMemoryTimerBelongsToSchedulerHomeNotActorIncarnation(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000))
 	minter, _ := newTestEngine(t, store, sink, clock)
-	handle := minter.Mint(testStamp("agent:a"))
+	handle := minter.MintAdmitted(testAdmission("agent:a"))
 	if _, err := handle.Schedule(context.Background(), ScheduleReq{
 		Home: TimerHomeMemory, FireAt: 2_000, Type: "local.tick",
 	}); err != nil {
@@ -156,7 +155,7 @@ func TestFireFailureClasses(t *testing.T) {
 			}}
 			clock := newFakeClock(time.UnixMilli(1_000))
 			minter, _ := newTestEngine(t, store, sink, clock)
-			id, err := minter.Mint(testStamp("agent:a")).Schedule(context.Background(), ScheduleReq{
+			id, err := minter.MintAdmitted(testAdmission("agent:a")).Schedule(context.Background(), ScheduleReq{
 				Home: TimerHomeDurable, FireAt: 2_000, Type: "timer.tick",
 			})
 			if err != nil {
@@ -176,7 +175,7 @@ func TestCancelAndQuota(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000))
 	minter, engine := newTestEngine(t, store, sink, clock)
-	handle := minter.Mint(testStamp("agent:a"))
+	handle := minter.MintAdmitted(testAdmission("agent:a"))
 	id, err := handle.Schedule(context.Background(), ScheduleReq{
 		Home: TimerHomeMemory, FireAt: 2_000, Type: "timer.tick",
 	})

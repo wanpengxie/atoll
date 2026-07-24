@@ -6,7 +6,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // objectOps is the closed set of R-governed object verbs — the ops any
@@ -39,11 +38,12 @@ var objectOps = []access.Operation{access.OpRead, access.OpWrite, access.OpSet, 
 // within one effectiveOps call, so a single resolve covers both judgments.
 func (d *door) effectiveOps(ctx context.Context, caller actor.ActorID, id resource.ResourceID) (map[access.Operation]bool, error) {
 	eff := make(map[access.Operation]bool, len(objectOps))
-	row, isMember, err := d.deps.Authority.LookupActive(ctx, caller)
+	facts, err := d.deps.Authority.ResourceActorFacts(ctx, caller)
 	if err != nil {
 		return nil, err
 	}
-	if isMember && row.Role == storespec.RoleOwner {
+	isMember := facts.Active
+	if facts.Active && facts.Owner {
 		for _, op := range objectOps {
 			eff[op] = true
 		}

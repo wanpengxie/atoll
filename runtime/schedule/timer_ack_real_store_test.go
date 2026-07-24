@@ -86,10 +86,9 @@ func TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000_000))
 	minter, engine, err := New(Deps{
-		Store:     wrapped,
-		Fire:      sink,
-		Clock:     clock,
-		Authority: allowScheduleAuthority{},
+		Store: wrapped,
+		Fire:  sink,
+		Clock: clock,
 	})
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -97,7 +96,7 @@ func TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt(t *testing.T) {
 	engine.Start()
 	defer engine.Close()
 
-	handle := minter.Mint(testStamp(author))
+	handle := minter.MintAdmitted(testAdmission(author))
 	id, err := handle.Schedule(context.Background(), ScheduleReq{
 		Home: TimerHomeDurable, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.ack-real-store",
 	})

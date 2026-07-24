@@ -70,7 +70,7 @@ func TestAuthorityPenAdmitsOnceAndLetsAcceptedWriteFinish(t *testing.T) {
 	mint, err := New(Deps{
 		ChannelID: testChannelID,
 		Log:       barrier,
-		Authority: testAuthority{},
+		Presence:  testAuthority{},
 		NowMs:     func() int64 { return fixedNowMs },
 	})
 	if err != nil {

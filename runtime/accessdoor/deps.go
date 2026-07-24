@@ -103,7 +103,7 @@ type StorageControl interface {
 type Deps struct {
 	Registry  resourcespec.Registry
 	Drivers   DriverTable
-	Authority storespec.ActorAuthority
+	Authority storespec.ResourceActorAuthority
 	State     resourcespec.StateStore
 
 	// ChannelID is this door's own channel scope (§4.3: "门缺...Deps增ChannelID

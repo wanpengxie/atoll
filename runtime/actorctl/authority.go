@@ -129,7 +129,7 @@ func (c *Controller) AdmitIdentity(
 		return storespec.IdentityAdmission{}, false, nil
 	}
 	return storespec.IdentityAdmission{
-		Row: rowFromActive(id, cloneActive(value)),
+		ID: id, Kind: value.Definition.Kind,
 	}, true, nil
 }
 
@@ -137,21 +137,19 @@ func (c *Controller) ListActive(context.Context) ([]storespec.ActorControlRow, e
 	return c.ActiveRows()
 }
 
-// CheckAuthor is collaboration authority. Declaration metadata is not managed
-// execution permission.
-func (c *Controller) CheckAuthor(
-	ctx context.Context,
-	stamp storespec.AuthorStamp,
-) (storespec.AuthorVerdict, error) {
-	_, active, err := c.LookupActive(ctx, stamp.ID)
-	if err != nil {
-		return storespec.AuthorNotMember, err
+func (c *Controller) IsActive(_ context.Context, id actor.ActorID) (bool, error) {
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	if c.phase == Bootstrapping {
+		return false, ErrBootstrapping
 	}
-	if !active {
-		return storespec.AuthorNotMember, nil
+	if c.phase == Closed {
+		return false, ErrClosed
 	}
-	return storespec.AuthorOK, nil
+	_, ok := c.actors[id]
+	return ok, nil
 }
 
-var _ storespec.ActorAuthority = (*Controller)(nil)
+var _ storespec.ActorDirectory = (*Controller)(nil)
+var _ storespec.IdentityPresence = (*Controller)(nil)
 var _ storespec.CollaborationAuthority = (*Controller)(nil)

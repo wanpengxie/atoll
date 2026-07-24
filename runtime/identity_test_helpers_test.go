@@ -30,6 +30,6 @@ func endDeclaredTest(ctx context.Context, cs *ChannelStores, id actor.ActorID, a
 	return err
 }
 
-func scheduleStamp(id actor.ActorID) storespec.AuthorStamp {
-	return storespec.AuthorStamp{ID: id}
+func identityAdmission(id actor.ActorID) storespec.IdentityAdmission {
+	return storespec.IdentityAdmission{ID: id, Kind: actor.KindAgent}
 }

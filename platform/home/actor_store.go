@@ -30,7 +30,7 @@ type homeActorStore struct {
 	identities *identitystore.Store
 
 	authorityMu sync.RWMutex
-	authority   storespec.ActorAuthority
+	authority   storespec.ActorDirectory
 }
 
 func newHomeActorStore(
@@ -55,13 +55,13 @@ func newHomeActorStore(
 	}, nil
 }
 
-func (s *homeActorStore) bindAuthority(authority storespec.ActorAuthority) {
+func (s *homeActorStore) bindAuthority(authority storespec.ActorDirectory) {
 	s.authorityMu.Lock()
 	s.authority = authority
 	s.authorityMu.Unlock()
 }
 
-func (s *homeActorStore) activeAuthority() storespec.ActorAuthority {
+func (s *homeActorStore) activeAuthority() storespec.ActorDirectory {
 	s.authorityMu.RLock()
 	defer s.authorityMu.RUnlock()
 	return s.authority

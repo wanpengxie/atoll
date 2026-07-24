@@ -35,13 +35,6 @@ func (f fakeRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, 
 	}
 	return rows, nil
 }
-func (f fakeRegistry) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	_, ok, err := f.LookupActive(ctx, stamp.ID)
-	if !ok {
-		return storespec.AuthorNotMember, err
-	}
-	return storespec.AuthorOK, err
-}
 func controlRow(row storespec.Record) storespec.ActorControlRow {
 	return storespec.ActorControlRow{ID: row.ID, Kind: row.Kind, Principal: row.Principal, Binding: row.Binding, CreatedAt: row.CreatedAt, CurrentDeclVersion: 1}
 }
@@ -222,10 +215,6 @@ func (a sponsorAuthority) LookupActive(_ context.Context, id actor.ActorID) (sto
 func (a sponsorAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return append([]storespec.ActorControlRow(nil), a.rows...), nil
 }
-func (a sponsorAuthority) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	return storespec.AuthorOK, nil
-}
-
 func TestActorListProjectsSponsorForParentRecovery(t *testing.T) {
 	parent := actor.ActorID("agent:master")
 	child := actor.ActorID("agent:master/worker-1")

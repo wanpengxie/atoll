@@ -38,16 +38,17 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 		B = actor.ActorID("B")
 		C = actor.ActorID("C")
 		E = actor.ActorID("E")
-		X = actor.ActorID("X")
 	)
 	A = seedMember(t, cs, A)
 	B = seedMember(t, cs, B)
 	C = seedMember(t, cs, C)
 
-	hA := cs.Access.Mint(scheduleStamp(A))
-	hB := cs.Access.Mint(scheduleStamp(B))
-	hC := cs.Access.Mint(scheduleStamp(C))
-	hX := cs.Access.Mint(scheduleStamp(X))
+	hA := cs.Access.MintAdmitted(identityAdmission(A))
+	hB := cs.Access.MintAdmitted(identityAdmission(B))
+	hC := cs.Access.MintAdmitted(identityAdmission(C))
+	// Platform cannot obtain an admission for a non-member; model that failed
+	// source-boundary admission with the zero value.
+	hX := cs.Access.MintAdmitted(storespec.IdentityAdmission{})
 
 	const rid = resource.ResourceID("kv:doc")
 	const ridX = resource.ResourceID("kv:docX")
@@ -59,7 +60,9 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	expectAccepted(t, "A create", out, err)
 
 	out, err = hX.Create(ctx, ridX, kvSpec, nil)
-	expectReason(t, "non-member X create", out, err, access.OwnerInactive)
+	if !errors.Is(err, accessdoor.ErrAuthorInactive) {
+		t.Fatalf("non-member X create = (%+v,%v)", out, err)
+	}
 
 	out, err = hA.Create(ctx, rid, kvSpec, v1)
 	expectReason(t, "A re-create same id", out, err, access.AlreadyExists)
@@ -142,10 +145,10 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 		t.Fatalf("deregister C: %v", err)
 	}
 	out, err = hC.Invoke(ctx, access.OpRead, rid, nil, nil)
-	expectReason(t, "C read after deregister (exit loses access)", out, err, access.OwnerInactive)
+	expectReason(t, "C read after deregister (exit loses grant)", out, err, access.AccessDenied)
 
 	E = seedMember(t, cs, E)
-	hE := cs.Access.Mint(scheduleStamp(E))
+	hE := cs.Access.MintAdmitted(identityAdmission(E))
 	out, err = hE.Invoke(ctx, access.OpRead, rid, nil, nil)
 	expectAccepted(t, "E read after joining (late join gains access)", out, err)
 	expectBytes(t, "E read value", out, v1)
@@ -161,7 +164,7 @@ func TestChannelOwnerRecoversStrandedDaemonResource(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := cs.Access.Mint(scheduleStamp(admitted.ID))
+	owner := cs.Access.MintAdmitted(identityAdmission(admitted.ID))
 	const rid resource.ResourceID = "file:stranded"
 	if err := csResourcesCreateForTest(cs, rid, "retired-daemon", "orphan-coord"); err != nil {
 		t.Fatal(err)
@@ -244,15 +247,39 @@ func (a testAccessAuthority) ListActive(context.Context) ([]storespec.ActorContr
 	return nil, nil
 }
 
-func (a testAccessAuthority) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	_, ok, err := a.LookupActive(ctx, stamp.ID)
-	if err != nil {
-		return 0, err
+func (a testAccessAuthority) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
+	_, ok, err := a.LookupActive(ctx, id)
+	return ok, err
+}
+
+func (a testAccessAuthority) AdmitIdentity(
+	ctx context.Context,
+	id actor.ActorID,
+) (storespec.IdentityAdmission, bool, error) {
+	row, ok, err := a.LookupActive(ctx, id)
+	if err != nil || !ok {
+		return storespec.IdentityAdmission{}, false, err
 	}
-	if !ok {
-		return storespec.AuthorNotMember, nil
+	return storespec.IdentityAdmission{ID: row.ID, Kind: row.Kind}, true, nil
+}
+
+func (a testAccessAuthority) ResourceActorFacts(
+	ctx context.Context,
+	id actor.ActorID,
+) (storespec.ResourceActorFacts, error) {
+	row, ok, err := a.LookupActive(ctx, id)
+	if err != nil || !ok {
+		return storespec.ResourceActorFacts{}, err
 	}
-	return storespec.AuthorOK, nil
+	host := ""
+	if row.Placement.Kind == storespec.PlacementDaemon {
+		host = row.Placement.Host
+	}
+	return storespec.ResourceActorFacts{
+		Active:               true,
+		Owner:                row.Role == storespec.RoleOwner,
+		PreferredStorageHost: host,
+	}, nil
 }
 
 func seedMember(t *testing.T, cs *ChannelStores, id actor.ActorID) actor.ActorID {
