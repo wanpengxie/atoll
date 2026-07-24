@@ -66,7 +66,7 @@ func TestNewFailFast(t *testing.T) {
 	}
 }
 
-func TestScheduleValidationAndRunWorldDurableBoundary(t *testing.T) {
+func TestScheduleValidationDoesNotRestrictStorageHomeByActorWorld(t *testing.T) {
 	store := newFakeStore()
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000))
@@ -93,7 +93,7 @@ func TestScheduleValidationAndRunWorldDurableBoundary(t *testing.T) {
 	}
 	if _, err := handle.Schedule(context.Background(), ScheduleReq{
 		Home: TimerHomeDurable, FireAt: 2_000, Type: "durable",
-	}); !errors.Is(err, ErrDurableScheduleForbidden) {
+	}); err != nil {
 		t.Fatalf("run-world durable schedule err=%v", err)
 	}
 }

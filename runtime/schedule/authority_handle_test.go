@@ -93,7 +93,7 @@ func TestAuthorityScheduleAdmitsOnceAndLetsAcceptedScheduleFinish(t *testing.T) 
 	done := make(chan error, 1)
 	go func() {
 		_, err := handle.Schedule(t.Context(), ScheduleReq{
-			Home: TimerHomeMemory, FireAt: 2_000, Type: "authority.timer",
+			Home: TimerHomeDurable, FireAt: 2_000, Type: "authority.timer",
 		})
 		done <- err
 	}()

@@ -9,8 +9,7 @@ import (
 )
 
 var (
-	ErrAuthorInactive = errors.New("timerspec: author inactive")
-	ErrScheduleQuota  = errors.New("timerspec: schedule quota exceeded")
+	ErrScheduleQuota = errors.New("timerspec: schedule quota exceeded")
 )
 
 type DeathClass string
@@ -36,10 +35,11 @@ type TimerID string
 
 // TimerRow is one pending timer in the Durable Scheduler home — control-plane
 // intent, NEVER truth. It is keyed by author identity and survives Scheduler
-// process restarts until fire/cancel/identity removal. Memory-home timers are
-// kept only in the current Channel/Scheduler instance and therefore have no
-// row here. This storage distinction is unrelated to actor
-// AttemptKey/Incarnation.
+// process restarts until fire/cancel/rejection. An author may become inactive
+// while an admitted Schedule is in flight; that ordinary stale intent is
+// rejected and reaped at fire time. Memory-home timers are kept only in the
+// current Channel/Scheduler instance and therefore have no row here. This
+// storage distinction is unrelated to actor AttemptKey/Incarnation.
 //
 // author_id is the identity that scheduled it AND the welded author of the
 // fired message (self-targeted: there is no target field, structurally — a

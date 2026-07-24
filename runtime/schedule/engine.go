@@ -223,9 +223,6 @@ func (e *Engine) schedule(
 			CreatedAt:     now,
 		}
 		if err := e.deps.Store.Insert(ctx, row); err != nil {
-			if errors.Is(err, timerspec.ErrAuthorInactive) {
-				return "", ErrAuthorInactive
-			}
 			if errors.Is(err, timerspec.ErrScheduleQuota) {
 				return "", ErrScheduleQuota
 			}

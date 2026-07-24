@@ -250,8 +250,8 @@ CREATE TABLE IF NOT EXISTS actor_state (
 -- =============================================================
 -- 6) timers  (time axis)
 -- =============================================================
--- The IDENTITY-level pending-timer CONTROL PLANE: future intent keyed by a
--- durable name, mutable (cancellable), NEVER truth (pending in the
+-- The IDENTITY-level pending-timer CONTROL PLANE: future intent keyed by
+-- author ActorID, mutable (cancellable), NEVER truth (pending in the
 -- append-only log would be unretractable). Same channel sqlite as the
 -- messages/registry/state tables.
 --

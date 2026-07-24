@@ -242,6 +242,19 @@ func TestActorAuthoritySchedulerHomeIsNotActorIncarnation(t *testing.T) {
 	}
 }
 
+func TestSchedulerDoesNotOwnActorWorldOrRegistryAuthority(t *testing.T) {
+	handle := readAuthorityContractFile(t, "../runtime/schedule/handle.go")
+	for _, forbidden := range []string{"WorldOf(", "WorldRun", "WorldDurable"} {
+		if strings.Contains(handle, forbidden) {
+			t.Errorf("Schedule handle retains actor-world policy %q", forbidden)
+		}
+	}
+	store := readAuthorityContractFile(t, "../runtime/internal/store/timers.go")
+	if strings.Contains(store, "actor_registry") {
+		t.Error("TimerStore re-authorizes welded ActorID through actor_registry")
+	}
+}
+
 func TestActorAuthorityCollaborationIngressUsesOneAdmittedSnapshot(t *testing.T) {
 	cases := []struct {
 		path     string
@@ -289,5 +302,26 @@ func TestActorAuthoritySystemCapsUseIndependentRoot(t *testing.T) {
 		if strings.Contains(source, forbidden) {
 			t.Errorf("System root capability path contains managed coordinate %q", forbidden)
 		}
+	}
+}
+
+func TestActorSystemStartsKernelBeforePublishingHostDesired(t *testing.T) {
+	source := readAuthorityContractFile(t, "../platform/home/actor_system.go")
+	start := strings.Index(source, "func (a *actorSystem) start(")
+	if start < 0 {
+		t.Fatal("actorSystem.start function not found")
+	}
+	end := strings.Index(source[start:], "\nfunc ")
+	if end < 0 {
+		t.Fatal("actorSystem.start function end not found")
+	}
+	body := source[start : start+end]
+	kernel := strings.Index(body, "a.home.systemKernel.Start(systemUnit)")
+	desired := strings.Index(body, "a.readServerDesired()")
+	if kernel < 0 || desired < 0 {
+		t.Fatal("actorSystem.start lacks kernel start or desired publication")
+	}
+	if kernel > desired {
+		t.Fatal("ServerHost desired is published before SystemKernel is live")
 	}
 }

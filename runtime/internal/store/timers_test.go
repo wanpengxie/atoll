@@ -174,6 +174,25 @@ func TestTimer_InsertAndDue(t *testing.T) {
 	}
 }
 
+func TestTimerInsertTrustsWeldedAuthorWithoutRegistryProjection(t *testing.T) {
+	ctx := context.Background()
+	f := openTimersFixture(t)
+	row := timerspec.TimerRow{
+		ID: "run-world", AuthorID: "actor:run-world",
+		FireAt: 2_000, Type: "wake", CreatedAt: 1,
+	}
+	if err := f.timers.Insert(ctx, row); err != nil {
+		t.Fatalf("Insert without actor_registry projection: %v", err)
+	}
+	due, err := f.timers.Due(ctx, row.FireAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(due) != 1 || due[0].ID != row.ID || due[0].AuthorID != row.AuthorID {
+		t.Fatalf("Due = %+v, want exact run-world timer", due)
+	}
+}
+
 func TestTimer_DueIsFairAcrossAuthors(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)

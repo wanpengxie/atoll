@@ -156,27 +156,16 @@ func (c *Controller) fork(
 	c.placementGate.Lock()
 	defer c.placementGate.Unlock()
 
-	unlockCaller := c.gates.lock(request.CallerActorID)
-	defer unlockCaller()
-	if child, found, lookupErr := c.store.LookupFork(ctx, request.CallerActorID, request.RequestID); lookupErr != nil {
-		return Transition[ForkResult]{}, lookupErr
-	} else if found {
-		return Transition[ForkResult]{Result: ForkResult{ChildActorID: child}}, nil
-	}
-	if err := c.checkCurrentSnapshot(request.CallerActorID, request.CallerAttempt); err != nil {
-		return Transition[ForkResult]{}, err
-	}
-	parent, ok, err := c.Lookup(request.CallerActorID)
+	admission, err := c.admitFork(ctx, request)
 	if err != nil {
 		return Transition[ForkResult]{}, err
 	}
-	if !ok {
-		return Transition[ForkResult]{}, ErrInactive
+	if admission.found {
+		return Transition[ForkResult]{
+			Result: ForkResult{ChildActorID: admission.child},
+		}, nil
 	}
-	spec, placement, err := normalizeFork(request.Spec, parent.Definition)
-	if err != nil {
-		return Transition[ForkResult]{}, err
-	}
+	spec, placement := admission.spec, admission.placement
 	candidate := freshChildID(request.CallerActorID, spec.NameHint)
 	committed, err := c.store.CommitFork(ctx, ForkCommitRequest{
 		CallerActorID: request.CallerActorID,

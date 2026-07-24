@@ -296,7 +296,7 @@ func TestEndSelfAdmissionLinearizesInsideControllerGate(t *testing.T) {
 	}
 }
 
-func TestForkAdmissionOwnsCallerGateUntilCommit(t *testing.T) {
+func TestForkReleasesCallerGateAfterAdmission(t *testing.T) {
 	store := newFakeStore("agent:a")
 	store.forkEntered = make(chan struct{}, 1)
 	store.forkResume = make(chan struct{})
@@ -322,14 +322,14 @@ func TestForkAdmissionOwnsCallerGateUntilCommit(t *testing.T) {
 	}()
 	select {
 	case err := <-restartDone:
-		t.Fatalf("Restart crossed admitted Fork: %v", err)
-	case <-time.After(20 * time.Millisecond):
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Restart was blocked by an already-admitted Fork")
 	}
 	close(store.forkResume)
 	if err := <-forkDone; err != nil {
-		t.Fatal(err)
-	}
-	if err := <-restartDone; err != nil {
 		t.Fatal(err)
 	}
 }

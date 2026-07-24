@@ -11,13 +11,12 @@ import (
 )
 
 // timerStore implements timerspec.TimerStore over the channel-local `timers`
-// table — the durable identity-level half of the time axis: control-plane
-// pending intent, keyed by a durable name (author identity), NEVER truth.
-// Bound to one channel database, the same locus discipline every other
-// channel-local store follows. It trusts its caller (the schedule engine
-// welds author before Insert; store-not-validate, mirrors
-// resourceRegistry/stateStore) and is itself confined to package store — the
-// runtime tree assembles it behind ChannelStores' unexported field.
+// table — the durable half of the time axis: control-plane pending intent,
+// keyed by author ActorID, NEVER truth. Bound to one channel database, the same
+// locus discipline every other channel-local store follows. It trusts its
+// caller (the schedule capability admits and welds author before Insert;
+// store-not-validate) and is itself confined to package store — the runtime
+// tree assembles it behind ChannelStores' unexported field.
 type timerStore struct {
 	db       *sql.DB
 	onCommit func()
@@ -55,13 +54,7 @@ func (s *timerStore) Insert(ctx context.Context, row timerspec.TimerRow) error {
 		return err
 	}
 	defer func() { _ = tx.Rollback() }()
-	var active, pending int
-	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(row.AuthorID)).Scan(&active); err != nil {
-		return err
-	}
-	if active == 0 {
-		return timerspec.ErrAuthorInactive
-	}
+	var pending int
 	if err = tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM timers WHERE author_id=?`, string(row.AuthorID)).Scan(&pending); err != nil {
 		return err
 	}
@@ -70,10 +63,9 @@ func (s *timerStore) Insert(ctx context.Context, row timerspec.TimerRow) error {
 	}
 	_, err = tx.ExecContext(ctx,
 		`INSERT INTO timers (timer_id, author_id, fire_at, type, payload, correlation_id, created_at, state)
-		 SELECT ?, ?, ?, ?, ?, ?, ?, 'pending' WHERE EXISTS (
-		   SELECT 1 FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL)`,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, 'pending')`,
 		string(row.ID), string(row.AuthorID), row.FireAt, row.Type, row.Payload,
-		nullableString(row.CorrelationID), row.CreatedAt, string(row.AuthorID),
+		nullableString(row.CorrelationID), row.CreatedAt,
 	)
 	if err != nil {
 		return fmt.Errorf("store: timer insert %q: %w", row.ID, err)

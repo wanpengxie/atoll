@@ -18,7 +18,6 @@ type boundScheduleHandle struct {
 	auth      storespec.ActorAuthority
 	authority capauth.Authority
 	admitted  bool
-	world     storespec.ActorWorld
 }
 
 func (h boundScheduleHandle) authorize(ctx context.Context) error {
@@ -41,23 +40,6 @@ func (h boundScheduleHandle) authorize(ctx context.Context) error {
 func (h boundScheduleHandle) Schedule(ctx context.Context, req ScheduleReq) (TimerID, error) {
 	if err := h.authorize(ctx); err != nil {
 		return "", err
-	}
-	if req.Home == TimerHomeDurable {
-		world := h.world
-		if !h.admitted {
-			var ok bool
-			var err error
-			world, ok, err = h.auth.WorldOf(ctx, h.author.ID)
-			if err != nil {
-				return "", err
-			}
-			if !ok {
-				return "", ErrAuthorInactive
-			}
-		}
-		if world == storespec.WorldRun {
-			return "", ErrDurableScheduleForbidden
-		}
 	}
 	return h.engine.schedule(ctx, h.author.ID, req)
 }
@@ -105,7 +87,7 @@ func (m *minter) MintAdmitted(
 	}
 	return boundScheduleHandle{
 		engine: m.engine, author: storespec.AuthorStamp{ID: admission.Row.ID},
-		auth: m.authority, admitted: true, world: admission.World,
+		auth: m.authority, admitted: true,
 	}
 }
 

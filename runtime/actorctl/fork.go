@@ -1,6 +1,7 @@
 package actorctl
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -8,6 +9,52 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
+
+type forkAdmission struct {
+	child     actor.ActorID
+	found     bool
+	spec      actorcaps.ForkSpec
+	placement storespec.Placement
+}
+
+// admitFork confines the caller gate to the one logical admission verdict.
+// Accepted work leaves this function without any caller gate held; Store commit
+// and child publication are trusted continuations under their own owners.
+func (c *Controller) admitFork(
+	ctx context.Context,
+	request ForkRequest,
+) (forkAdmission, error) {
+	unlock := c.gates.lock(request.CallerActorID)
+	defer unlock()
+
+	if child, found, err := c.store.LookupFork(
+		ctx,
+		request.CallerActorID,
+		request.RequestID,
+	); err != nil {
+		return forkAdmission{}, err
+	} else if found {
+		return forkAdmission{child: child, found: true}, nil
+	}
+	if err := c.checkCurrentSnapshot(
+		request.CallerActorID,
+		request.CallerAttempt,
+	); err != nil {
+		return forkAdmission{}, err
+	}
+	parent, ok, err := c.Lookup(request.CallerActorID)
+	if err != nil {
+		return forkAdmission{}, err
+	}
+	if !ok {
+		return forkAdmission{}, ErrInactive
+	}
+	spec, placement, err := normalizeFork(request.Spec, parent.Definition)
+	if err != nil {
+		return forkAdmission{}, err
+	}
+	return forkAdmission{spec: spec, placement: placement}, nil
+}
 
 func freshChildID(parent actor.ActorID, hint string) actor.ActorID {
 	if hint == "" {

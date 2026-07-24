@@ -51,11 +51,11 @@ func (a *actorSystem) start(ctx context.Context, systemUnit *actorrt.Unit) error
 		return err
 	}
 	a.systemRow = cloneSystemRow(boot.System)
-	if err := a.readServerDesired(); err != nil {
+	if err := a.home.systemKernel.Start(systemUnit); err != nil {
 		a.home.controller.Close()
 		return err
 	}
-	if err := a.home.systemKernel.Start(systemUnit); err != nil {
+	if err := a.readServerDesired(); err != nil {
 		a.home.controller.Close()
 		return err
 	}

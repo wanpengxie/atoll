@@ -21,9 +21,8 @@ import (
 type TimerID = timerspec.TimerID
 
 var (
-	ErrAuthorInactive           = errors.New("schedule: author inactive")
-	ErrScheduleQuota            = errors.New("schedule: schedule quota exceeded")
-	ErrDurableScheduleForbidden = errors.New("schedule: durable schedule forbidden for run identity")
+	ErrAuthorInactive = errors.New("schedule: author inactive")
+	ErrScheduleQuota  = errors.New("schedule: schedule quota exceeded")
 )
 
 // TimerHome chooses the Scheduler storage home. It is not an actor lifecycle
