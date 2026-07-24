@@ -15,7 +15,7 @@ import (
 )
 
 // opEntry is a transport adapter. Actor lifecycle and identity mutations all
-// enter ChannelActors; this type owns no actor map, gate, or execution state.
+// enter Controller through actorSystem; this type owns no actor map, gate, or execution state.
 type opEntry struct {
 	home *Home
 }

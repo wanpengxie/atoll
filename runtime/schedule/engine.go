@@ -43,10 +43,10 @@ type memTimer struct {
 }
 
 // Engine is the time axis's single poll/wake loop + fire path, driving BOTH
-// lifecycle families (durable identity rows via Deps.Store, in-memory
-// incarnation entries via mem) through one run goroutine (tap.Pump
-// structural twin). Schedule/Cancel run on the CALLER's goroutine (a
-// ScheduleHandle may be held by any actor cell); mem is the only state they
+// Scheduler homes (durable rows via Deps.Store and in-memory alarms via mem)
+// through one run goroutine (tap.Pump structural twin). Both homes are
+// ActorID-owned and cross actor AttemptKey/Incarnation replacement.
+// Schedule/Cancel run on the caller's goroutine; mem is the only state they
 // share with run, guarded by mu in short critical sections.
 type Engine struct {
 	deps Deps
@@ -93,7 +93,7 @@ type storeFault struct {
 }
 
 // transientKey identifies one consecutive-transient-retry streak. kind
-// separates in-memory and identity-bound fire attempts that may share IDs.
+// separates Memory-home and Durable-home fire attempts that may share IDs.
 type transientKey struct {
 	kind string
 	id   string
@@ -188,8 +188,8 @@ func (e *Engine) Leaked() int64 { return e.leaked.Load() }
 func mintTimerID() TimerID { return TimerID(uuid.NewString()) }
 
 // schedule validates req, mints a TimerID, and routes the intent to its
-// bind's home. Runs on the caller's goroutine — a short critical section
-// for the incarnation path, no I/O under the lock.
+// Scheduler home. It runs on the caller's goroutine; the Memory path uses a
+// short critical section and performs no I/O under the lock.
 //
 // Unexported: author is a free parameter here, so this is the UN-WELDED face
 // — the schedule-package twin of harness's bare chain, and it stays inside
@@ -303,7 +303,7 @@ func (e *Engine) wakeUp() {
 }
 
 // validateScheduleReq is the Go-error ingress gate (protocol layer, not a
-// verdict — a timer is not a plane-2 concept): Bind outside the closed set,
+// verdict — a timer is not a plane-2 concept): Home outside the closed set,
 // FireAt<=0, or an empty/reserved-prefixed Type all reject before anything
 // is minted or stored. A PAST FireAt is legal — it fires
 // immediately; refusing it would make "a millisecond before vs after the

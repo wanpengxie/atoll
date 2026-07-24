@@ -36,11 +36,11 @@ const attachHandshakeTimeout = 10 * time.Second
 // sessions and exact Bindings only; logical actor truth and lifecycle commands
 // stay in actorctl behind these callbacks.
 type Config struct {
-	Minter       harness.Minter
-	Access       accessdoor.AccessMinter
-	StateHandles accessdoor.StateHandleResolver
-	Schedule     schedule.Minter
-	Authority    storespec.ActorAuthority
+	Minter       harness.AdmittedMinter
+	Access       accessdoor.AdmittedMinter
+	StateHandles accessdoor.AdmittedStateHandleResolver
+	Schedule     schedule.AdmittedMinter
+	Authority    storespec.CollaborationAuthority
 	ChannelID    channel.ID
 	Logger       *slog.Logger
 
@@ -62,11 +62,11 @@ type Config struct {
 // attachment/presence and exact Binding only; it never mutates actor desired
 // lifecycle or replaces an incarnation.
 type Acceptor struct {
-	minter       harness.Minter
-	access       accessdoor.AccessMinter
-	stateHandles accessdoor.StateHandleResolver
-	sched        schedule.Minter
-	authority    storespec.ActorAuthority
+	minter       harness.AdmittedMinter
+	access       accessdoor.AdmittedMinter
+	stateHandles accessdoor.AdmittedStateHandleResolver
+	sched        schedule.AdmittedMinter
+	authority    storespec.CollaborationAuthority
 	channelID    channel.ID
 	logger       *slog.Logger
 
@@ -501,18 +501,18 @@ func (a *Acceptor) AttachedDaemonIDs() []string {
 	return out
 }
 
-func (a *Acceptor) activeRow(
+func (a *Acceptor) admitIdentity(
 	ctx context.Context,
 	id actor.ActorID,
-) (storespec.ActorControlRow, error) {
-	row, ok, err := a.authority.LookupActive(ctx, id)
+) (storespec.IdentityAdmission, error) {
+	admission, ok, err := a.authority.AdmitIdentity(ctx, id)
 	if err != nil {
-		return storespec.ActorControlRow{}, err
+		return storespec.IdentityAdmission{}, err
 	}
-	if !ok {
-		return storespec.ActorControlRow{}, errors.New("link: actor inactive")
+	if !ok || !admission.Valid() {
+		return storespec.IdentityAdmission{}, errors.New("link: actor inactive")
 	}
-	return row, nil
+	return admission, nil
 }
 
 func (a *Acceptor) emit(
@@ -520,13 +520,11 @@ func (a *Acceptor) emit(
 	id actor.ActorID,
 	env *message.Envelope,
 ) (ipc.EmitResult, error) {
-	row, err := a.activeRow(ctx, id)
+	admission, err := a.admitIdentity(ctx, id)
 	if err != nil {
 		return ipc.EmitResult{}, err
 	}
-	result, err := a.minter.Mint(
-		id, row.Kind, a.channelID, row.CurrentDeclVersion,
-	).Write(ctx, env)
+	result, err := a.minter.MintAdmitted(admission, a.channelID).Write(ctx, env)
 	return ipc.EmitResult{
 		MessageID: result.MessageID, Seq: result.Seq,
 		RejectReason: string(result.RejectReason), RejectDetail: result.RejectDetail,
@@ -538,7 +536,7 @@ func (a *Acceptor) relayAccess(
 	id actor.ActorID,
 	payload []byte,
 ) ([]byte, error) {
-	row, err := a.activeRow(ctx, id)
+	admission, err := a.admitIdentity(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -546,7 +544,6 @@ func (a *Acceptor) relayAccess(
 	if err := json.Unmarshal(payload, &request); err != nil {
 		return nil, fmt.Errorf("link: access payload decode: %w", err)
 	}
-	stamp := storespec.AuthorStamp{ID: id, BirthVersion: row.CurrentDeclVersion}
 	switch request.Kind {
 	case accessKindInvocation:
 		if request.Inv == nil || request.Inv.Caller != "" {
@@ -555,9 +552,9 @@ func (a *Acceptor) relayAccess(
 		var handle accessdoor.AccessHandle
 		switch request.Scope {
 		case accessScopeChannel:
-			handle = a.access.Mint(stamp)
+			handle = a.access.MintAdmitted(admission)
 		case accessScopeState:
-			handle, err = a.stateHandles.Resolve(ctx, stamp)
+			handle, err = a.stateHandles.ResolveAdmitted(admission)
 			if err != nil {
 				return nil, err
 			}
@@ -579,7 +576,7 @@ func (a *Acceptor) relayAccess(
 		if request.Create == nil {
 			return nil, errors.New("link: missing access create")
 		}
-		outcome, err := a.access.Mint(stamp).Create(
+		outcome, err := a.access.MintAdmitted(admission).Create(
 			ctx, request.Create.Resource, request.Create.Spec, request.Create.Initial,
 		)
 		if err != nil {
@@ -593,7 +590,7 @@ func (a *Acceptor) relayAccess(
 		if request.Query == nil {
 			return nil, errors.New("link: missing access query")
 		}
-		handle := a.access.Mint(stamp)
+		handle := a.access.MintAdmitted(admission)
 		switch request.Query.QueryKind {
 		case accessQueryStat:
 			result, err := handle.Stat(ctx, request.Query.Resource)
@@ -637,7 +634,7 @@ func (a *Acceptor) relaySchedule(
 	id actor.ActorID,
 	payload []byte,
 ) ([]byte, error) {
-	row, err := a.activeRow(ctx, id)
+	admission, err := a.admitIdentity(ctx, id)
 	if err != nil {
 		return nil, err
 	}
@@ -645,9 +642,7 @@ func (a *Acceptor) relaySchedule(
 	if err := json.Unmarshal(payload, &request); err != nil {
 		return nil, fmt.Errorf("link: schedule payload decode: %w", err)
 	}
-	handle := a.sched.Mint(storespec.AuthorStamp{
-		ID: id, BirthVersion: row.CurrentDeclVersion,
-	})
+	handle := a.sched.MintAdmitted(admission)
 	switch request.Method {
 	case scheduleMethodSchedule:
 		timer, err := handle.Schedule(ctx, request.Req)

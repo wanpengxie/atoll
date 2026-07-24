@@ -255,12 +255,10 @@ CREATE TABLE IF NOT EXISTS actor_state (
 -- append-only log would be unretractable). Same channel sqlite as the
 -- messages/registry/state tables.
 --
--- This table holds ONLY identity-bind timers — the bind is expressed by WHICH
--- home the intent lives in, never by a column (same discipline as actor_state:
--- scope is expressed by structure): incarnation-bind timers are engine MEMORY,
--- welded to the live incarnation, and vanish with the process (BEAM in-VM /
--- Orleans in-activation / POSIX on-task_struct — ephemeral intent never gets a
--- durable account). So: no bind column, ever; incarnation NEVER persisted.
+-- This table is the Durable Scheduler home. Memory-home timers live only in
+-- the current Scheduler instance and vanish with it. Both homes are owned by
+-- ActorID and cross actor replacement; storage home is not an
+-- AttemptKey/Incarnation coordinate. So: no per-row home/generation column.
 -- No target column, ever (timers are always self-targeted). No recurrence
 -- column (one-shot is the complete primitive; recurrence is domain re-arm).
 CREATE TABLE IF NOT EXISTS timers (

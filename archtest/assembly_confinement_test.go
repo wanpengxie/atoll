@@ -25,7 +25,7 @@ const platformPathPrefix = "../platform/"
 // OpenChannel / OpenScheduler. OpenChannel hands back a ChannelStores whose .Log is the raw
 // MessageLog (Append writes the messages table directly) and whose .Membership
 // mutates the actor_registry projection — both bypass the harness write gate
-// and ChannelActors. Because the package is wholly assembly, the lock is at
+// and the actor composition root. Because the package is wholly assembly, the lock is at
 // package granularity: nobody outside platform may import it at all. Everyone
 // else writes truth through harness.Pen (the seam), never cs.Log.Append.
 //
@@ -140,7 +140,8 @@ func TestHarnessConstructionConfinedToPlatform(t *testing.T) {
 		}
 		slash := filepath.ToSlash(path)
 		if strings.HasPrefix(slash, platformPathPrefix) ||
-			strings.HasPrefix(slash, "../runtime/managedcaps/") {
+			strings.HasPrefix(slash, "../runtime/managedcaps/") ||
+			strings.HasPrefix(slash, "../runtime/systemcaps/") {
 			return nil
 		}
 		file, perr := parser.ParseFile(fset, path, nil, 0)

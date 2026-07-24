@@ -29,14 +29,11 @@ func (a allowScheduleAuthority) WorldOf(context.Context, actor.ActorID) (storesp
 	return a.world, true, nil
 }
 func (allowScheduleAuthority) CheckAuthor(_ context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	if stamp.BirthVersion != 1 {
-		return storespec.AuthorVersionStale, nil
-	}
 	return storespec.AuthorOK, nil
 }
 
 func testStamp(id actor.ActorID) storespec.AuthorStamp {
-	return storespec.AuthorStamp{ID: id, BirthVersion: 1}
+	return storespec.AuthorStamp{ID: id}
 }
 
 // ---------------------------------------------------------------------

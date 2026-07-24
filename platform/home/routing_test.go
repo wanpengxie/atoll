@@ -93,7 +93,7 @@ func waitRoutingLive(t *testing.T, h *Home, id actor.ActorID) {
 func writeUnaddressed(t *testing.T, h *Home, source storespec.ActorControlRow, id string) (*message.Envelope, harness.WriteResult, error) {
 	t.Helper()
 	env := &message.Envelope{ID: message.ID(id), TS: time.Now().UnixMilli(), Kind: message.KindRequest, Type: "routing.probe", Visibility: message.VisibilityPublic}
-	result, err := h.minter.Mint(source.ID, source.Kind, h.channelID, source.CurrentDeclVersion).Write(context.Background(), env)
+	result, err := h.minter.Mint(source.ID, source.Kind, h.channelID).Write(context.Background(), env)
 	return env, result, err
 }
 

@@ -91,11 +91,17 @@ type ResourceAccessHandle interface {
 	List(ctx context.Context, q ListQuery) (ListPage, error)
 }
 
-func (h boundHandle) Open(context.Context, resource.ResourceID, access.Operation) (FileAccess, Outcome, error) {
+func (h boundHandle) Open(ctx context.Context, _ resource.ResourceID, _ access.Operation) (FileAccess, Outcome, error) {
+	if err := h.authorize(ctx); err != nil {
+		return FileAccess{}, Outcome{RejectReason: access.OwnerInactive}, nil
+	}
 	return FileAccess{}, Outcome{}, ErrFileCapabilityUnavailable
 }
 
-func (h boundHandle) Redeem(context.Context, FileRoute) (FileAccess, error) {
+func (h boundHandle) Redeem(ctx context.Context, _ FileRoute) (FileAccess, error) {
+	if err := h.authorize(ctx); err != nil {
+		return FileAccess{}, ErrAuthorInactive
+	}
 	return FileAccess{}, ErrFileCapabilityUnavailable
 }
 
@@ -106,11 +112,15 @@ type boundHandle struct {
 	door      *door
 	caller    storespec.AuthorStamp
 	authority capauth.Authority
+	admitted  bool
 }
 
 var ErrAuthorInactive = errors.New("accessdoor: author inactive or stale")
 
 func (h boundHandle) authorize(ctx context.Context) error {
+	if h.admitted {
+		return nil
+	}
 	if h.authority != nil {
 		return h.authority.Admit()
 	}
@@ -204,8 +214,17 @@ func (h boundHandle) List(ctx context.Context, q ListQuery) (ListPage, error) {
 //     Create/Stat/List to mean anything, so the interface does not offer them
 //     (§3.2's "不实现空方法" red line).
 type AccessMinter interface {
+	AdmittedMinter
 	Mint(caller storespec.AuthorStamp) ResourceAccessHandle
 	MintState(owner storespec.AuthorStamp) AccessHandle
+}
+
+// AdmittedMinter consumes a one-shot ActorID collaboration admission. Its
+// handles skip only the old caller CheckAuthor gate; resource/grant/business
+// checks remain inside the door.
+type AdmittedMinter interface {
+	MintAdmitted(storespec.IdentityAdmission) ResourceAccessHandle
+	MintStateAdmitted(storespec.IdentityAdmission) AccessHandle
 }
 
 type minter struct{ door *door }
@@ -221,6 +240,30 @@ func (m *minter) Mint(caller storespec.AuthorStamp) ResourceAccessHandle {
 // (non-ambient: welded here, never read off the wire).
 func (m *minter) MintState(owner storespec.AuthorStamp) AccessHandle {
 	return boundStateHandle{door: m.door, owner: owner}
+}
+
+func (m *minter) MintAdmitted(
+	admission storespec.IdentityAdmission,
+) ResourceAccessHandle {
+	if !admission.Valid() {
+		return rejectedResourceHandle{err: ErrAuthorInactive}
+	}
+	return boundHandle{
+		door: m.door, caller: storespec.AuthorStamp{ID: admission.Row.ID},
+		admitted: true,
+	}
+}
+
+func (m *minter) MintStateAdmitted(
+	admission storespec.IdentityAdmission,
+) AccessHandle {
+	if !admission.Valid() {
+		return rejectedStateHandle{err: ErrAuthorInactive}
+	}
+	return boundStateHandle{
+		door: m.door, owner: storespec.AuthorStamp{ID: admission.Row.ID},
+		admitted: true,
+	}
 }
 
 func (m *minter) MintAuthority(authority capauth.Authority) ResourceAccessHandle {

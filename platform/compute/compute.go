@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/platform/internal/link"
@@ -75,6 +74,8 @@ func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.Bo
 		prepared, prepareErr := outbound.Prepare(
 			input.ActorID,
 			input.AttemptKey,
+			input.Identity,
+			input.Attempt,
 			input.Current,
 		)
 		if prepareErr != nil {
@@ -94,14 +95,10 @@ func daemonBodyBuilder(outbound *DaemonOutbound, source PlanSource) actorhost.Bo
 		if !ok {
 			return nil
 		}
-		caps := actorcaps.Caps{
-			Pen: prepared.Pen, Access: prepared.Access, State: prepared.State,
-			Schedule: prepared.Schedule, Lifecycle: prepared.Lifecycle,
-		}
 		hooks := actorbase.Hooks{Canceller: func(_ actor.ActorID, requestID message.ID) {
 			_ = prepared.Slot.CancelRequest(requestID)
 		}}
-		body := hostcommon.Build(caps, hooks, factory)
+		body := hostcommon.Build(prepared.Caps, hooks, factory)
 		wrapped := prepared.Wrap(body)
 		if wrapped != nil {
 			transferred = true

@@ -20,15 +20,17 @@ var ErrStateHandleUnavailable = errors.New("accessdoor: state handle unavailable
 
 // StateHandleResolver is the sole world-sensitive State resolution seam.
 // Callers never receive a raw in-memory backend or implement their own world
-// switch. Resolve takes the caller's full authenticated AuthorStamp — never a
-// bare id — so the incarnation's welded birth version rides through to the
-// minted handle: a stale-generation caller (its declaration has advanced past
-// the version it was born with) fails closed here instead of being silently
-// re-certified at the current version.
+// switch. State ownership is ActorID-level and crosses actor
+// AttemptKey/Incarnation replacement.
 type StateHandleResolver interface {
+	AdmittedStateHandleResolver
 	AdmitRun(actor.ActorID) error
 	Resolve(context.Context, storespec.AuthorStamp) (AccessHandle, error)
 	EndBatch([]actor.ActorID)
+}
+
+type AdmittedStateHandleResolver interface {
+	ResolveAdmitted(storespec.IdentityAdmission) (AccessHandle, error)
 }
 
 type actorStateHandles struct {
@@ -54,7 +56,7 @@ func (h *actorStateHandles) AdmitRun(id actor.ActorID) error {
 	if _, exists := h.run[id]; exists {
 		return nil
 	}
-	h.run[id] = newMemoryStateHandle(storespec.AuthorStamp{ID: id, BirthVersion: 1}, h.authority)
+	h.run[id] = newMemoryStateHandle(storespec.AuthorStamp{ID: id}, h.authority)
 	return nil
 }
 
@@ -68,13 +70,8 @@ func (h *actorStateHandles) Resolve(ctx context.Context, stamp storespec.AuthorS
 	}
 	switch world {
 	case storespec.WorldDurable:
-		// Version gate through the ONE authority verdict口 (never an inline
-		// version comparison — the archtest wall): the handle is minted at
-		// the caller's welded birth version, and only while that version is
-		// still the current one. A port born at v1 asking after apply v2
-		// lands here with a stale stamp and must NOT be re-certified at v2 —
-		// that would let a zombie incarnation write durable State
-		// concurrently with its successor.
+		// Legacy/source-specific callers still pass through the ActorID-active
+		// authority before receiving a durable identity handle.
 		verdict, err := h.authority.CheckAuthor(ctx, stamp)
 		if err != nil {
 			return nil, err
@@ -84,8 +81,8 @@ func (h *actorStateHandles) Resolve(ctx context.Context, stamp storespec.AuthorS
 		}
 		return h.durable.MintState(stamp), nil
 	case storespec.WorldRun:
-		// Run-world identities never version-advance (forked rows are pinned
-		// at birth version 1), so the welded handle itself is the gate.
+		// Run-world state is also ActorID-owned; only its backing store is
+		// process-local.
 		h.mu.RLock()
 		handle := h.run[stamp.ID]
 		h.mu.RUnlock()
@@ -99,20 +96,13 @@ func (h *actorStateHandles) Resolve(ctx context.Context, stamp storespec.AuthorS
 }
 
 func (h *actorStateHandles) ResolveAuthority(
-	ctx context.Context,
 	authority capauth.Authority,
+	world storespec.ActorWorld,
 ) (AccessHandle, error) {
 	if authority == nil || authority.ActorID() == "" {
 		return nil, ErrStateHandleUnavailable
 	}
 	id := authority.ActorID()
-	world, ok, err := h.authority.WorldOf(ctx, id)
-	if err != nil {
-		return nil, err
-	}
-	if !ok {
-		return nil, ErrStateHandleUnavailable
-	}
 	switch world {
 	case storespec.WorldDurable:
 		minter, ok := h.durable.(interface {
@@ -132,6 +122,37 @@ func (h *actorStateHandles) ResolveAuthority(
 		}
 		state.owner = storespec.AuthorStamp{ID: id}
 		state.authority = authority
+		return state, nil
+	default:
+		return nil, ErrStateHandleUnavailable
+	}
+}
+
+func (h *actorStateHandles) ResolveAdmitted(
+	admission storespec.IdentityAdmission,
+) (AccessHandle, error) {
+	if !admission.Valid() {
+		return nil, ErrStateHandleUnavailable
+	}
+	id := admission.Row.ID
+	switch admission.World {
+	case storespec.WorldDurable:
+		minter, ok := h.durable.(AdmittedMinter)
+		if !ok {
+			return nil, ErrStateHandleUnavailable
+		}
+		return minter.MintStateAdmitted(admission), nil
+	case storespec.WorldRun:
+		h.mu.RLock()
+		handle := h.run[id]
+		h.mu.RUnlock()
+		state, ok := handle.(boundStateHandle)
+		if !ok {
+			return nil, ErrStateHandleUnavailable
+		}
+		state.owner = storespec.AuthorStamp{ID: id}
+		state.authority = nil
+		state.admitted = true
 		return state, nil
 	default:
 		return nil, ErrStateHandleUnavailable

@@ -1,5 +1,5 @@
 // Package subjectgate holds the platform-internal machinery of the human
-//接入轴 (gateway 期 S2): the per-identity slot registry (在场与递交接头盒), and the
+// 接入轴 (gateway 期 S2): the per-identity slot registry (在场与递交接头盒), and the
 // wire frame contract the connector/gateway speak to a subject's home-side driver.
 //
 // It is platform内政 (the concrete lives here; platform re-exports the wire

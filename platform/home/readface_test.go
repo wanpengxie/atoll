@@ -37,8 +37,8 @@ func TestActorControlIndexPublishesWorldWithImmutableRows(t *testing.T) {
 	if err != nil || !ok || world != storespec.WorldDurable {
 		t.Fatalf("world = (%v,%v,%v)", world, ok, err)
 	}
-	if verdict, _ := idx.CheckAuthor(ctx, storespec.AuthorStamp{ID: "actor:a", BirthVersion: 2}); verdict != storespec.AuthorVersionStale {
-		t.Fatalf("stale verdict = %v", verdict)
+	if verdict, _ := idx.CheckAuthor(ctx, storespec.AuthorStamp{ID: "actor:a"}); verdict != storespec.AuthorOK {
+		t.Fatalf("active verdict = %v", verdict)
 	}
 }
 

@@ -676,7 +676,7 @@ func TestHarden03BServerManagedCapsUseOneAuthorityBundleMinter(t *testing.T) {
 		"func (m *Minter) Mint(",
 		"m.pen.MintAuthority(prepared.Run()",
 		"m.access.MintAuthority(prepared.Run())",
-		"m.state.ResolveAuthority(ctx, prepared.Identity())",
+		"m.state.ResolveAuthority(prepared.Identity(), prepared.World())",
 		"m.schedule.MintAuthority(prepared.Identity())",
 	} {
 		if !strings.Contains(string(caps), required) {

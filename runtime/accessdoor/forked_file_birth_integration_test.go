@@ -44,12 +44,9 @@ func (a *fileBirthAuthority) WorldOf(_ context.Context, id actor.ActorID) (store
 	return w, ok, nil
 }
 func (a *fileBirthAuthority) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	row, ok, err := a.LookupActive(ctx, stamp.ID)
+	_, ok, err := a.LookupActive(ctx, stamp.ID)
 	if err != nil || !ok {
 		return storespec.AuthorNotMember, err
-	}
-	if row.CurrentDeclVersion != stamp.BirthVersion {
-		return storespec.AuthorVersionStale, nil
 	}
 	return storespec.AuthorOK, nil
 }
@@ -153,7 +150,7 @@ func TestForkedFileCreateLandsChannelOwnedAndSurvivesCreatorEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	const rid resource.ResourceID = "file:forked-output"
-	childHandle := minter.Mint(storespec.AuthorStamp{ID: child, BirthVersion: 1})
+	childHandle := minter.Mint(storespec.AuthorStamp{ID: child})
 	out, err := childHandle.Create(ctx, rid, accessdoor.CreateSpec{Kind: accessdoor.KindFile}, nil)
 	if err != nil || !out.Accepted() {
 		t.Fatalf("forked file create=(%+v,%v)", out, err)
@@ -184,7 +181,7 @@ func TestForkedFileCreateLandsChannelOwnedAndSurvivesCreatorEnd(t *testing.T) {
 	if allowed, _ := overlay.ActorAllows(ctx, child, rid, access.OpDelete); allowed {
 		t.Fatal("creator overlay survived creator End")
 	}
-	memberHandle := minter.Mint(storespec.AuthorStamp{ID: member, BirthVersion: 1})
+	memberHandle := minter.Mint(storespec.AuthorStamp{ID: member})
 	for _, op := range []access.Operation{access.OpRead, access.OpWrite} {
 		got, err := memberHandle.Invoke(ctx, op, rid, nil, nil)
 		if err != nil || !got.Accepted() || got.Route == nil || got.Route.Token == "" || got.Route.Mode != op {

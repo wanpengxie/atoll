@@ -61,12 +61,9 @@ func (a *abaAuthority) WorldOf(_ context.Context, id actor.ActorID) (storespec.A
 	return w, ok, nil
 }
 func (a *abaAuthority) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	row, ok, err := a.LookupActive(ctx, stamp.ID)
+	_, ok, err := a.LookupActive(ctx, stamp.ID)
 	if err != nil || !ok {
 		return storespec.AuthorNotMember, err
-	}
-	if row.CurrentDeclVersion != stamp.BirthVersion {
-		return storespec.AuthorVersionStale, nil
 	}
 	return storespec.AuthorOK, nil
 }
@@ -204,7 +201,7 @@ func TestResourceDeleteRecreateSameIDDeniesStaleOverlayGrantee(t *testing.T) {
 	ctx := context.Background()
 	const rid resource.ResourceID = "kv:aba-recreate"
 
-	creator1Handle := minter.Mint(storespec.AuthorStamp{ID: creator1, BirthVersion: 1})
+	creator1Handle := minter.Mint(storespec.AuthorStamp{ID: creator1})
 	if out, err := creator1Handle.Create(ctx, rid, accessdoor.CreateSpec{Kind: accessdoor.KindKV}, []byte("v1")); err != nil || !out.Accepted() {
 		t.Fatalf("initial create=(%+v,%v)", out, err)
 	}
@@ -227,12 +224,12 @@ func TestResourceDeleteRecreateSameIDDeniesStaleOverlayGrantee(t *testing.T) {
 		t.Fatal("stale grantee2 overlay row survived Delete — ABA window open at the delete half")
 	}
 
-	creator3Handle := minter.Mint(storespec.AuthorStamp{ID: creator3, BirthVersion: 1})
+	creator3Handle := minter.Mint(storespec.AuthorStamp{ID: creator3})
 	if out, err := creator3Handle.Create(ctx, rid, accessdoor.CreateSpec{Kind: accessdoor.KindKV}, []byte("v2")); err != nil || !out.Accepted() {
 		t.Fatalf("recreate=(%+v,%v)", out, err)
 	}
 
-	grantee2Handle := minter.Mint(storespec.AuthorStamp{ID: grantee2, BirthVersion: 1})
+	grantee2Handle := minter.Mint(storespec.AuthorStamp{ID: grantee2})
 	if out, err := grantee2Handle.Invoke(ctx, access.OpRead, rid, nil, nil); err != nil {
 		t.Fatalf("stale grantee read after recreate errored: %v", err)
 	} else if out.Accepted() {
@@ -285,7 +282,7 @@ func TestDeleteAndAsyncCommitReservationCrossWindowNeverLandsStaleAuthority(t *t
 	ctx := context.Background()
 	const rid resource.ResourceID = "file:aba-cross-window"
 
-	creator1Handle := minter.Mint(storespec.AuthorStamp{ID: creator1, BirthVersion: 1})
+	creator1Handle := minter.Mint(storespec.AuthorStamp{ID: creator1})
 	out, err := creator1Handle.Create(ctx, rid, accessdoor.CreateSpec{Kind: accessdoor.KindFile, WithContent: true}, nil)
 	if err != nil || !out.Accepted() || out.Route == nil || out.Route.ReservationID == "" {
 		t.Fatalf("content-bearing reserve=(%+v,%v)", out, err)
@@ -300,7 +297,7 @@ func TestDeleteAndAsyncCommitReservationCrossWindowNeverLandsStaleAuthority(t *t
 
 	// An unrelated content-less create for the SAME id lands synchronously
 	// under a different creator while R1 is still outstanding.
-	creator2Handle := minter.Mint(storespec.AuthorStamp{ID: creator2, BirthVersion: 1})
+	creator2Handle := minter.Mint(storespec.AuthorStamp{ID: creator2})
 	interim, err := creator2Handle.Create(ctx, rid, accessdoor.CreateSpec{Kind: accessdoor.KindFile}, nil)
 	if err != nil || !interim.Accepted() {
 		t.Fatalf("interim create=(%+v,%v)", interim, err)
@@ -340,7 +337,7 @@ func TestDeleteAndAsyncCommitReservationCrossWindowNeverLandsStaleAuthority(t *t
 
 	// A fresh, unrelated creator can now legitimately land the same id with
 	// its own exclusive authority — no residue from either earlier actor.
-	creator3Handle := minter.Mint(storespec.AuthorStamp{ID: creator3, BirthVersion: 1})
+	creator3Handle := minter.Mint(storespec.AuthorStamp{ID: creator3})
 	final, err := creator3Handle.Create(ctx, rid, accessdoor.CreateSpec{Kind: accessdoor.KindFile}, nil)
 	if err != nil || !final.Accepted() {
 		t.Fatalf("final create=(%+v,%v)", final, err)
@@ -385,7 +382,7 @@ func TestForkedCreatorSelfCreatedKVThreeActionsMembersWriteOverlaySetOverlayDele
 	ctx := context.Background()
 	const rid resource.ResourceID = "kv:aba-three-actions"
 
-	creatorHandle := minter.Mint(storespec.AuthorStamp{ID: creator, BirthVersion: 1})
+	creatorHandle := minter.Mint(storespec.AuthorStamp{ID: creator})
 	if out, err := creatorHandle.Create(ctx, rid, accessdoor.CreateSpec{Kind: accessdoor.KindKV}, []byte("v0")); err != nil || !out.Accepted() {
 		t.Fatalf("create=(%+v,%v)", out, err)
 	}
@@ -398,7 +395,7 @@ func TestForkedCreatorSelfCreatedKVThreeActionsMembersWriteOverlaySetOverlayDele
 	}
 
 	// (1) Write — members half, exercised by an unrelated durable member.
-	otherHandle := minter.Mint(storespec.AuthorStamp{ID: otherMember, BirthVersion: 1})
+	otherHandle := minter.Mint(storespec.AuthorStamp{ID: otherMember})
 	if out, err := otherHandle.Invoke(ctx, access.OpWrite, rid, []byte("v1"), nil); err != nil || !out.Accepted() {
 		t.Fatalf("unrelated member write=(%+v,%v)", out, err)
 	}

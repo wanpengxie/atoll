@@ -68,10 +68,10 @@ func OpenPump(sig *Signal, reader storespec.MessageQuery, from int64,
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &Pump{
-		sig:    sig,
-		reader: reader,
-		handle: handle,
-		logger: logger,
+		sig:       sig,
+		reader:    reader,
+		handle:    handle,
+		logger:    logger,
 		cursor:    from,
 		done:      make(chan struct{}),
 		closeDone: make(chan struct{}),

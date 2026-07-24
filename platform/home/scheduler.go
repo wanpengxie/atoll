@@ -16,31 +16,20 @@ import (
 // participate in actor lifecycle; the delivery adapter independently attempts
 // the current actor endpoint when this committed message reaches its receiver.
 type fireSink struct {
-	minter    harness.Minter
-	authority storespec.ActorAuthority
-	actors    func() *actorSystem
+	minter    harness.AdmittedMinter
+	authority storespec.CollaborationAuthority
 	chID      channelpkg.ID
 }
 
 func (s fireSink) Append(ctx context.Context, author actor.ActorID, env *message.Envelope) error {
-	row, ok, err := s.authority.LookupActive(ctx, author)
+	admission, ok, err := s.authority.AdmitIdentity(ctx, author)
 	if err != nil {
 		return err
 	}
-	if !ok {
+	if !ok || !admission.Valid() {
 		return schedule.FireRejected{Reason: "author_not_member", Detail: string(author)}
 	}
-	kind := row.Kind
-	actors := s.actors()
-	if actors == nil {
-		return schedule.FireRejected{Reason: "actor_control_unavailable", Detail: string(author)}
-	}
-	if stat, live := actors.Stat(author); live {
-		kind = stat.Kind
-	}
-	result, err := s.minter.Mint(
-		author, kind, s.chID, row.CurrentDeclVersion,
-	).Write(ctx, env)
+	result, err := s.minter.MintAdmitted(admission, s.chID).Write(ctx, env)
 	if err != nil {
 		return err
 	}

@@ -271,9 +271,6 @@ func (a testAccessAuthority) CheckAuthor(ctx context.Context, stamp storespec.Au
 	if !ok {
 		return storespec.AuthorNotMember, nil
 	}
-	if stamp.BirthVersion != 1 {
-		return storespec.AuthorVersionStale, nil
-	}
 	return storespec.AuthorOK, nil
 }
 

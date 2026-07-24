@@ -226,6 +226,36 @@ func TestPreparedRunWeldsIdentityAndRunAuthorityAtDifferentLifetimes(t *testing.
 	}
 }
 
+func TestIdentityAdmissionIsOneCoherentActorIDOnlySnapshot(t *testing.T) {
+	store := newFakeStore("agent:a")
+	controller := startController(t, store)
+	before, ok, err := controller.AdmitIdentity(t.Context(), "agent:a")
+	if err != nil || !ok || !before.Valid() {
+		t.Fatalf("initial admission=(%+v,%v,%v)", before, ok, err)
+	}
+	if before.Row.ID != "agent:a" || before.World != storespec.WorldDurable {
+		t.Fatalf("initial admission=%+v", before)
+	}
+
+	if _, err := controller.Restart(t.Context(), RestartRequest{ActorID: "agent:a"}); err != nil {
+		t.Fatal(err)
+	}
+	after, ok, err := controller.AdmitIdentity(t.Context(), "agent:a")
+	if err != nil || !ok || !after.Valid() {
+		t.Fatalf("post-restart admission=(%+v,%v,%v)", after, ok, err)
+	}
+	if after.Row.ID != before.Row.ID || after.World != before.World {
+		t.Fatalf("ActorID admission changed across G replacement: before=%+v after=%+v", before, after)
+	}
+
+	if _, err := controller.End(t.Context(), EndRequest{Target: "agent:a"}); err != nil {
+		t.Fatal(err)
+	}
+	if admission, ok, err := controller.AdmitIdentity(t.Context(), "agent:a"); err != nil || ok || admission.Valid() {
+		t.Fatalf("ended admission=(%+v,%v,%v)", admission, ok, err)
+	}
+}
+
 func TestEndSelfAdmissionLinearizesInsideControllerGate(t *testing.T) {
 	store := newFakeStore("agent:a")
 	store.restartEntered = make(chan struct{}, 1)

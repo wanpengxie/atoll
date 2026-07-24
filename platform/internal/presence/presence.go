@@ -225,7 +225,7 @@ type View struct {
 }
 
 // ExecutionView is the narrow local-observation surface presence needs. It is
-// intentionally implemented by actorctl.ChannelActors, not by an execution
+// intentionally implemented by the Platform actor-system view, not by an execution
 // owner or registry.
 type ExecutionView interface {
 	Stat(actor.ActorID) (actorrt.UnitStat, bool)

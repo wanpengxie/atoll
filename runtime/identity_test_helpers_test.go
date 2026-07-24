@@ -31,5 +31,5 @@ func endDeclaredTest(ctx context.Context, cs *ChannelStores, id actor.ActorID, a
 }
 
 func scheduleStamp(id actor.ActorID) storespec.AuthorStamp {
-	return storespec.AuthorStamp{ID: id, BirthVersion: 1}
+	return storespec.AuthorStamp{ID: id}
 }

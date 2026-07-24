@@ -16,7 +16,7 @@ func (s stepAuthorGate) Run(ctx context.Context, env *message.Envelope) (outcome
 	principal := callerFromCtx(ctx)
 	if !principal.admitted {
 		verdict, err := s.authority.CheckAuthor(ctx, storespec.AuthorStamp{
-			ID: principal.actorID, BirthVersion: principal.birthVersion,
+			ID: principal.actorID,
 		})
 		if err != nil {
 			return outcome{}, err
@@ -24,8 +24,6 @@ func (s stepAuthorGate) Run(ctx context.Context, env *message.Envelope) (outcome
 		switch verdict {
 		case storespec.AuthorNotMember:
 			return outcome{RejectReason: HarnessAuthorNotMember, Detail: string(principal.actorID)}, nil
-		case storespec.AuthorVersionStale:
-			return outcome{RejectReason: HarnessAuthorVersionStale, Detail: string(principal.actorID)}, nil
 		case storespec.AuthorOK:
 		default:
 			return outcome{RejectReason: HarnessAuthorNotMember, Detail: string(principal.actorID)}, nil

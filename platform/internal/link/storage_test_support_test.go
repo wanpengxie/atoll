@@ -32,7 +32,10 @@ func (testPen) Write(context.Context, *message.Envelope) (harness.WriteResult, e
 
 type stubMinter struct{}
 
-func (*stubMinter) Mint(actor.ActorID, actor.Kind, channel.ID, int64) harness.Pen {
+func (*stubMinter) Mint(actor.ActorID, actor.Kind, channel.ID) harness.Pen {
+	return testPen{}
+}
+func (*stubMinter) MintAdmitted(storespec.IdentityAdmission, channel.ID) harness.Pen {
 	return testPen{}
 }
 
@@ -83,11 +86,20 @@ func (testAccessMinter) Mint(storespec.AuthorStamp) accessdoor.ResourceAccessHan
 func (testAccessMinter) MintState(storespec.AuthorStamp) accessdoor.AccessHandle {
 	return testStateHandle{}
 }
+func (testAccessMinter) MintAdmitted(storespec.IdentityAdmission) accessdoor.ResourceAccessHandle {
+	return testResourceHandle{}
+}
+func (testAccessMinter) MintStateAdmitted(storespec.IdentityAdmission) accessdoor.AccessHandle {
+	return testStateHandle{}
+}
 
 type testStateResolver struct{}
 
 func (testStateResolver) AdmitRun(actor.ActorID) error { return nil }
 func (testStateResolver) Resolve(context.Context, storespec.AuthorStamp) (accessdoor.AccessHandle, error) {
+	return testStateHandle{}, nil
+}
+func (testStateResolver) ResolveAdmitted(storespec.IdentityAdmission) (accessdoor.AccessHandle, error) {
 	return testStateHandle{}, nil
 }
 func (testStateResolver) EndBatch([]actor.ActorID) {}
@@ -105,7 +117,7 @@ type testScheduleMinter struct{}
 func (testScheduleMinter) Mint(storespec.AuthorStamp) schedule.ScheduleHandle {
 	return testScheduleHandle{}
 }
-func (testScheduleMinter) MintCurrent(storespec.AuthorStamp, func() bool) schedule.ScheduleHandle {
+func (testScheduleMinter) MintAdmitted(storespec.IdentityAdmission) schedule.ScheduleHandle {
 	return testScheduleHandle{}
 }
 
@@ -122,6 +134,18 @@ func (testAuthority) WorldOf(context.Context, actor.ActorID) (storespec.ActorWor
 }
 func (testAuthority) CheckAuthor(context.Context, storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	return storespec.AuthorOK, nil
+}
+func (testAuthority) AdmitIdentity(
+	_ context.Context,
+	id actor.ActorID,
+) (storespec.IdentityAdmission, bool, error) {
+	return storespec.IdentityAdmission{
+		Row: storespec.ActorControlRow{
+			ID: id, Kind: actor.KindAgent, CurrentDeclVersion: 1,
+			Placement: storespec.NewServerPlacement(),
+		},
+		World: storespec.WorldDurable,
+	}, true, nil
 }
 
 type fakeStorageHostControl struct {

@@ -20,6 +20,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/managedcaps"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/systemcaps"
 	"github.com/wanpengxie/atoll/runtime/systemkernel"
 )
 
@@ -33,7 +34,7 @@ type Config struct {
 	ExpectedGenesis *storespec.ChannelGenesis
 	MustExistDB     bool
 	Bootstrap       bool
-	// Bootstrap values are committed before ChannelActors.Start so the
+	// Bootstrap values are committed before Controller.Start so the
 	// Controller publishes one complete durable image.
 	BootstrapOwnerPrincipal string
 	BootstrapDeclarations   []DeclareRequest
@@ -47,9 +48,8 @@ type Config struct {
 	OnMembershipChange   func(principal string)
 }
 
-// Home is the channel composition root. ChannelActors is the sole managed
-// actor truth/lifecycle owner; the remaining fields are orthogonal organs or
-// narrow capability factories.
+// Home is the channel composition root. Runtime organs are held as peers;
+// actorSystem is only the Platform workflow facade over them.
 type Home struct {
 	channelID  channelpkg.ID
 	actors     *actorSystem
@@ -59,6 +59,7 @@ type Home struct {
 	serverHost   *actorhost.HostSupervisor
 	systemKernel *systemkernel.Kernel
 	managedCaps  *managedcaps.Minter
+	systemCaps   *systemcaps.Minter
 
 	cs           *runtime.ChannelStores
 	minter       harness.Minter

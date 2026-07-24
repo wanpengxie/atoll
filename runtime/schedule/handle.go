@@ -17,9 +17,14 @@ type boundScheduleHandle struct {
 	author    storespec.AuthorStamp
 	auth      storespec.ActorAuthority
 	authority capauth.Authority
+	admitted  bool
+	world     storespec.ActorWorld
 }
 
 func (h boundScheduleHandle) authorize(ctx context.Context) error {
+	if h.admitted {
+		return nil
+	}
 	if h.authority != nil {
 		return h.authority.Admit()
 	}
@@ -38,12 +43,17 @@ func (h boundScheduleHandle) Schedule(ctx context.Context, req ScheduleReq) (Tim
 		return "", err
 	}
 	if req.Home == TimerHomeDurable {
-		world, ok, err := h.auth.WorldOf(ctx, h.author.ID)
-		if err != nil {
-			return "", err
-		}
-		if !ok {
-			return "", ErrAuthorInactive
+		world := h.world
+		if !h.admitted {
+			var ok bool
+			var err error
+			world, ok, err = h.auth.WorldOf(ctx, h.author.ID)
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				return "", ErrAuthorInactive
+			}
 		}
 		if world == storespec.WorldRun {
 			return "", ErrDurableScheduleForbidden
@@ -79,11 +89,23 @@ type minter struct {
 // cheap (no per-handle state beyond the welded author), so admission points
 // may Mint per-caller freely.
 func (m *minter) Mint(author storespec.AuthorStamp) ScheduleHandle {
-	if author.ID == "" || author.BirthVersion <= 0 {
+	if author.ID == "" {
 		return rejectedScheduleHandle{err: errors.New("schedule: invalid author stamp")}
 	}
 	return boundScheduleHandle{
 		engine: m.engine, author: author, auth: m.authority,
+	}
+}
+
+func (m *minter) MintAdmitted(
+	admission storespec.IdentityAdmission,
+) ScheduleHandle {
+	if !admission.Valid() {
+		return rejectedScheduleHandle{err: errors.New("schedule: invalid identity admission")}
+	}
+	return boundScheduleHandle{
+		engine: m.engine, author: storespec.AuthorStamp{ID: admission.Row.ID},
+		auth: m.authority, admitted: true, world: admission.World,
 	}
 }
 

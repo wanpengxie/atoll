@@ -6,6 +6,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // stepID is the ordinal index inside the harness chain. Lower ids run
@@ -89,5 +90,13 @@ type Pen interface {
 // is the highest capability in the system, so archtest confines harness.Minter
 // type references to the platform tree.
 type Minter interface {
-	Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID, birthVersion int64) Pen
+	AdmittedMinter
+	Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID) Pen
+}
+
+// AdmittedMinter consumes one already-completed ActorID collaboration
+// admission. It is used only at source boundaries such as daemon ingress and
+// timer fire; the returned Pen skips the obsolete second AuthorStamp gate.
+type AdmittedMinter interface {
+	MintAdmitted(storespec.IdentityAdmission, channel.ID) Pen
 }

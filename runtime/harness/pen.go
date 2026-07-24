@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/capauth"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // minter is the mint machine: it holds the bare chain and welds an identity onto it on
@@ -24,10 +25,28 @@ type minter struct {
 // stepSenderConsistent reads the welded kind, so Mint is the single source of
 // truth for both id and kind. Mint is deterministic and cheap (no per-pen state
 // beyond the welded principal), so admission points may Mint per-emit freely.
-func (m *minter) Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID, birthVersion int64) Pen {
+func (m *minter) Mint(actorID actor.ActorID, kind actor.Kind, chID channel.ID) Pen {
 	return &boundPen{
 		chain:     m.chain,
-		principal: caller{actorID: actorID, kind: kind, chID: chID, birthVersion: birthVersion},
+		principal: caller{actorID: actorID, kind: kind, chID: chID},
+	}
+}
+
+func (m *minter) MintAdmitted(
+	admission storespec.IdentityAdmission,
+	chID channel.ID,
+) Pen {
+	if !admission.Valid() || chID == "" {
+		return rejectedPen{}
+	}
+	return &boundPen{
+		chain: m.chain,
+		principal: caller{
+			actorID:  admission.Row.ID,
+			kind:     admission.Row.Kind,
+			chID:     chID,
+			admitted: true,
+		},
 	}
 }
 

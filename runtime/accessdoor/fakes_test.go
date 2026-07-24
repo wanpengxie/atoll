@@ -299,7 +299,7 @@ func (m *fakeMembership) CheckAuthor(context.Context, storespec.AuthorStamp) (st
 }
 
 func accessStamp(id actor.ActorID) storespec.AuthorStamp {
-	return storespec.AuthorStamp{ID: id, BirthVersion: 1}
+	return storespec.AuthorStamp{ID: id}
 }
 
 func firstBirth(plans []resourcespec.ResourceBirthPlan) resourcespec.ResourceBirthPlan {

@@ -23,17 +23,14 @@ func (a gateAuthority) WorldOf(_ context.Context, id actor.ActorID) (storespec.A
 	return storespec.WorldDurable, ok, nil
 }
 func (a gateAuthority) CheckAuthor(_ context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	v, ok := a.rows[stamp.ID]
+	_, ok := a.rows[stamp.ID]
 	if !ok {
 		return storespec.AuthorNotMember, nil
-	}
-	if v != stamp.BirthVersion {
-		return storespec.AuthorVersionStale, nil
 	}
 	return storespec.AuthorOK, nil
 }
 
-func TestStepAuthorGateAuthorVersionAndReceiverClosure(t *testing.T) {
+func TestStepAuthorGateActiveAuthorAndReceiverClosure(t *testing.T) {
 	authority := gateAuthority{rows: map[actor.ActorID]int64{"author": 2, "receiver": 1}}
 	step := newStepAuthorGate(Deps{Authority: authority})
 	run := func(stamp caller, kind message.Kind, audience ...actor.ActorID) outcome {
@@ -43,25 +40,22 @@ func TestStepAuthorGateAuthorVersionAndReceiverClosure(t *testing.T) {
 		}
 		return out
 	}
-	if got := run(caller{actorID: "missing", birthVersion: 1}, message.KindEvent, "missing"); got.RejectReason != HarnessAuthorNotMember {
+	if got := run(caller{actorID: "missing"}, message.KindEvent, "missing"); got.RejectReason != HarnessAuthorNotMember {
 		t.Fatalf("missing author = %+v", got)
 	}
-	if got := run(caller{actorID: "author", birthVersion: 1}, message.KindEvent, "missing"); got.RejectReason != HarnessAuthorVersionStale {
-		t.Fatalf("stale author = %+v", got)
-	}
-	if got := run(caller{actorID: "author", birthVersion: 2}, message.KindRequest, "missing"); got.RejectReason != HarnessReceiverNotMember {
+	if got := run(caller{actorID: "author"}, message.KindRequest, "missing"); got.RejectReason != HarnessReceiverNotMember {
 		t.Fatalf("missing receiver = %+v", got)
 	}
-	if got := run(caller{actorID: "author", birthVersion: 2}, message.KindRequest, "receiver"); !got.Continue() {
+	if got := run(caller{actorID: "author"}, message.KindRequest, "receiver"); !got.Continue() {
 		t.Fatalf("active request = %+v", got)
 	}
 	// Responses are allowed to close an obligation after the receiver identity
 	// has ended; events are admitted once and inactive audience members are
 	// filtered by delivery rather than rejecting the truth write.
-	if got := run(caller{actorID: "author", birthVersion: 2}, message.KindResponse, "missing"); !got.Continue() {
+	if got := run(caller{actorID: "author"}, message.KindResponse, "missing"); !got.Continue() {
 		t.Fatalf("response exemption = %+v", got)
 	}
-	if got := run(caller{actorID: "author", birthVersion: 2}, message.KindEvent, "missing"); !got.Continue() {
+	if got := run(caller{actorID: "author"}, message.KindEvent, "missing"); !got.Continue() {
 		t.Fatalf("event audience filtering = %+v", got)
 	}
 }

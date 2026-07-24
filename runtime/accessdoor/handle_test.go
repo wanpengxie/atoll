@@ -69,16 +69,16 @@ func TestNewFailFast(t *testing.T) {
 	})
 }
 
-func TestAccessAuthorVersionGate(t *testing.T) {
+func TestAccessInactiveAuthorGate(t *testing.T) {
 	reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV(), actorAllows: true}
-	authority := &fakeMembership{isMember: true, authorVerdict: storespec.AuthorVersionStale}
+	authority := &fakeMembership{isMember: true, authorVerdict: storespec.AuthorNotMember}
 	m, err := New(Deps{Registry: reg, Drivers: DriverTable{resourcespec.KindKV: &fakeDriver{}}, Authority: authority, Overlay: &fakeGrantOverlay{}, State: &fakeStateStore{}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	out, err := m.Mint(accessStamp("a")).Invoke(context.Background(), access.OpRead, "r", nil, nil)
 	if err != nil || out.RejectReason != access.OwnerInactive {
-		t.Fatalf("stale author outcome=(%+v,%v)", out, err)
+		t.Fatalf("inactive author outcome=(%+v,%v)", out, err)
 	}
 }
 

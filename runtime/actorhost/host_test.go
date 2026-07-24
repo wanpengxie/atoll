@@ -295,6 +295,80 @@ func TestBodyBuildReceivesExactSelfAndCurrentWindow(t *testing.T) {
 	}
 }
 
+func TestAcceptedLevelProbesSeparateIdentityAttemptAndPhysicalCurrent(t *testing.T) {
+	t.Parallel()
+	inputs := make(chan BodyBuildInput, 2)
+	release := make(chan struct{})
+	host, err := New(Config{
+		Domain:       "daemon",
+		PollInterval: 5 * time.Millisecond,
+		BodyBuilder: func(input BodyBuildInput) actorrt.Actor {
+			inputs <- input
+			<-release
+			return newHostTestActor()
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeHost(t, host)
+
+	id := actor.ActorID("agent:probe-levels")
+	g1 := testAttempt(t)
+	if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, g1)}); err != nil {
+		t.Fatal(err)
+	}
+	in1 := <-inputs
+	if !in1.Identity.IsCurrent() {
+		t.Fatal("accepted A was not identity-current before body publication")
+	}
+	if !in1.Attempt.IsCurrent() {
+		t.Fatal("accepted A/G1 was not attempt-current before body publication")
+	}
+	if in1.Current.IsCurrent() {
+		t.Fatal("candidate C1 was physical-current before publication")
+	}
+
+	g2 := testAttempt(t)
+	if err := host.AcceptFullDesired([]Desired{bodyDesiredFor(t, id, g2)}); err != nil {
+		t.Fatal(err)
+	}
+	in2 := <-inputs
+	if !in1.Identity.IsCurrent() {
+		t.Fatal("A identity stopped being current across G1 to G2")
+	}
+	if in1.Attempt.IsCurrent() {
+		t.Fatal("stale A/G1 remained attempt-current after accepting G2")
+	}
+	if !in2.Identity.IsCurrent() || !in2.Attempt.IsCurrent() {
+		t.Fatal("accepted A/G2 probes were not current")
+	}
+	if in2.Current.IsCurrent() {
+		t.Fatal("candidate C2 was physical-current before publication")
+	}
+
+	close(release)
+	eventually(t, func() bool {
+		snapshot, ok := host.Inspect(id)
+		return ok && snapshot.Actual == ActualBody && snapshot.Attempt == g2 &&
+			snapshot.Unit != nil && snapshot.Unit.IsAlive()
+	})
+	if in1.Current.IsCurrent() {
+		t.Fatal("losing C1 became physical-current")
+	}
+	if !in2.Current.IsCurrent() {
+		t.Fatal("published C2 did not become physical-current")
+	}
+
+	if err := host.AcceptFullDesired(nil); err != nil {
+		t.Fatal(err)
+	}
+	if in1.Identity.IsCurrent() || in2.Identity.IsCurrent() ||
+		in1.Attempt.IsCurrent() || in2.Attempt.IsCurrent() {
+		t.Fatal("accepted-level probes survived desired removal")
+	}
+}
+
 func TestDirectReplacementKeepsPredecessorUntilCandidatePublishes(t *testing.T) {
 	t.Parallel()
 	inputs := make(chan BodyBuildInput, 4)

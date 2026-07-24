@@ -249,7 +249,13 @@ func newOutboundHost(
 		Domain:       "daemon",
 		PollInterval: 5 * time.Millisecond,
 		BodyBuilder: func(input actorhost.BodyBuildInput) actorrt.Actor {
-			prepared, err := outbound.Prepare(input.ActorID, input.AttemptKey, input.Current)
+			prepared, err := outbound.Prepare(
+				input.ActorID,
+				input.AttemptKey,
+				input.Identity,
+				input.Attempt,
+				input.Current,
+			)
 			if err != nil {
 				panic(err)
 			}
@@ -314,15 +320,15 @@ func TestOutboundSlotStartsFailClosedThenPublishesFiveArmsAtomically(t *testing.
 		t.Fatal(err)
 	}
 	build := <-builds
-	if _, err := build.prepared.Pen.Write(t.Context(), &message.Envelope{ID: "before"}); !errors.Is(err, ErrOutboundNotCurrent) {
+	if _, err := build.prepared.Caps.Pen.Write(t.Context(), &message.Envelope{ID: "before"}); !errors.Is(err, ErrOutboundDisconnected) {
 		t.Fatalf("pre-publication Write error = %v", err)
 	}
 	close(build.release)
 	eventuallyOutbound(t, build.input.Current.IsCurrent)
-	if _, err := build.prepared.Pen.Write(t.Context(), &message.Envelope{ID: "offline"}); !errors.Is(err, ErrOutboundDisconnected) {
+	if _, err := build.prepared.Caps.Pen.Write(t.Context(), &message.Envelope{ID: "offline"}); !errors.Is(err, ErrOutboundDisconnected) {
 		t.Fatalf("offline Write error = %v", err)
 	}
-	outcome, err := build.prepared.Access.Invoke(t.Context(), access.OpRead, "resource:x", nil, nil)
+	outcome, err := build.prepared.Caps.Access.Invoke(t.Context(), access.OpRead, "resource:x", nil, nil)
 	if err != nil || outcome.RejectReason != access.OutcomeUnknown {
 		t.Fatalf("offline access = %#v, %v", outcome, err)
 	}
@@ -335,19 +341,19 @@ func TestOutboundSlotStartsFailClosedThenPublishesFiveArmsAtomically(t *testing.
 		return bundle != nil && bundle.Session == session && bundle.Stream != nil
 	})
 	probe := factory.probes[0]
-	if _, err := build.prepared.Pen.Write(t.Context(), &message.Envelope{ID: "pen"}); err != nil {
+	if _, err := build.prepared.Caps.Pen.Write(t.Context(), &message.Envelope{ID: "pen"}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := build.prepared.Access.Invoke(t.Context(), access.OpRead, "resource:a", nil, nil); err != nil {
+	if _, err := build.prepared.Caps.Access.Invoke(t.Context(), access.OpRead, "resource:a", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := build.prepared.State.Invoke(t.Context(), access.OpRead, "resource:s", nil, nil); err != nil {
+	if _, err := build.prepared.Caps.State.Invoke(t.Context(), access.OpRead, "resource:s", nil, nil); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := build.prepared.Schedule.Schedule(t.Context(), schedule.ScheduleReq{}); err != nil {
+	if _, err := build.prepared.Caps.Schedule.Schedule(t.Context(), schedule.ScheduleReq{}); err != nil {
 		t.Fatal(err)
 	}
-	if err := build.prepared.Lifecycle.EndSelf(t.Context(), actorcaps.EndSelfRequest{}); err != nil {
+	if err := build.prepared.Caps.Lifecycle.EndSelf(t.Context(), actorcaps.EndSelfRequest{}); err != nil {
 		t.Fatal(err)
 	}
 	if probe.penCalls.Load() != 1 ||
@@ -403,7 +409,7 @@ func TestOutboundReconnectDoesNotRetryInflightOrRebuildUnit(t *testing.T) {
 
 	result := make(chan error, 1)
 	go func() {
-		_, err := build.prepared.Pen.Write(context.Background(), &message.Envelope{ID: "inflight"})
+		_, err := build.prepared.Caps.Pen.Write(context.Background(), &message.Envelope{ID: "inflight"})
 		result <- err
 	}()
 	<-p1.penStarted
@@ -420,7 +426,7 @@ func TestOutboundReconnectDoesNotRetryInflightOrRebuildUnit(t *testing.T) {
 	if p1.penCalls.Load() != 1 || p2.penCalls.Load() != 0 {
 		t.Fatalf("in-flight call retried: s1=%d s2=%d", p1.penCalls.Load(), p2.penCalls.Load())
 	}
-	if _, err := build.prepared.Pen.Write(t.Context(), &message.Envelope{ID: "future"}); err != nil {
+	if _, err := build.prepared.Caps.Pen.Write(t.Context(), &message.Envelope{ID: "future"}); err != nil {
 		t.Fatal(err)
 	}
 	if p2.penCalls.Load() != 1 {
@@ -518,7 +524,7 @@ func TestOutboundReopensOneActorStreamWithoutReplacingUnit(t *testing.T) {
 		bundle := build.prepared.Slot.arms.Load()
 		return factory.opens.Load() >= 2 && bundle.Stream != nil && bundle.Stream != firstBundle.Stream
 	})
-	if _, err := build.prepared.Pen.Write(t.Context(), &message.Envelope{ID: "after-reopen"}); err != nil {
+	if _, err := build.prepared.Caps.Pen.Write(t.Context(), &message.Envelope{ID: "after-reopen"}); err != nil {
 		t.Fatal(err)
 	}
 	if p1.penCalls.Load() != 0 || p2.penCalls.Load() != 1 {
@@ -568,7 +574,7 @@ func TestExactG1SlotCleanupCannotHarmG2(t *testing.T) {
 	if b2.prepared.Slot.closed.Load() {
 		t.Fatal("G1 close-first Stop closed G2 slot")
 	}
-	if _, err := b2.prepared.Pen.Write(t.Context(), &message.Envelope{ID: "g2"}); err != nil {
+	if _, err := b2.prepared.Caps.Pen.Write(t.Context(), &message.Envelope{ID: "g2"}); err != nil {
 		t.Fatal(err)
 	}
 	outbound.mu.Lock()
@@ -577,6 +583,62 @@ func TestExactG1SlotCleanupCannotHarmG2(t *testing.T) {
 	if slotCount != 1 {
 		t.Fatalf("slot registry count = %d, want exact G2 only", slotCount)
 	}
+}
+
+func TestAcceptedPlanReplacementFencesRunArmsButKeepsIdentityArms(t *testing.T) {
+	t.Parallel()
+	outbound := NewDaemonOutbound(DaemonOutboundConfig{PollInterval: 5 * time.Millisecond})
+	builds := make(chan outboundBuild)
+	host := newOutboundHost(t, outbound, builds, false)
+	probe := &outboundProbe{}
+	factory := &outboundStreamFactory{probes: []*outboundProbe{probe, &outboundProbe{}}}
+	session := newOutboundSession(t, "server", factory)
+	defer closeOutboundFixture(t, host, outbound, session)
+	if err := outbound.SetSession(session); err != nil {
+		t.Fatal(err)
+	}
+
+	id := actor.ActorID("agent:authority-levels")
+	g1 := outboundAttempt(t)
+	if err := host.AcceptFullDesired([]actorhost.Desired{outboundDesired(t, id, g1)}); err != nil {
+		t.Fatal(err)
+	}
+	b1 := <-builds
+	close(b1.release)
+	eventuallyOutbound(t, func() bool {
+		bundle := b1.prepared.Slot.arms.Load()
+		return b1.input.Current.IsCurrent() && bundle.Session == session
+	})
+
+	g2 := outboundAttempt(t)
+	if err := host.AcceptFullDesired([]actorhost.Desired{outboundDesired(t, id, g2)}); err != nil {
+		t.Fatal(err)
+	}
+	b2 := <-builds // keep G2 unpublished so the physical G1 slot remains open.
+
+	if _, err := b1.prepared.Caps.Pen.Write(t.Context(), &message.Envelope{ID: "stale-run"}); !errors.Is(err, ErrOutboundNotCurrent) {
+		t.Fatalf("G1 Pen after accepted G2 err=%v", err)
+	}
+	if _, err := b1.prepared.Caps.Access.Invoke(t.Context(), access.OpRead, "resource:stale-run", nil, nil); !errors.Is(err, ErrOutboundNotCurrent) {
+		t.Fatalf("G1 Access after accepted G2 err=%v", err)
+	}
+	if _, err := b1.prepared.Caps.State.Invoke(t.Context(), access.OpRead, "resource:identity", nil, nil); err != nil {
+		t.Fatalf("G1 State lost A-level authority across replacement: %v", err)
+	}
+	if _, err := b1.prepared.Caps.Schedule.Schedule(t.Context(), schedule.ScheduleReq{}); err != nil {
+		t.Fatalf("G1 Schedule lost A-level authority across replacement: %v", err)
+	}
+	if probe.penCalls.Load() != 0 || probe.accessCalls.Load() != 0 {
+		t.Fatalf("stale run arms reached transport: pen=%d access=%d",
+			probe.penCalls.Load(), probe.accessCalls.Load())
+	}
+	if probe.stateCalls.Load() != 1 || probe.scheduleCalls.Load() != 1 {
+		t.Fatalf("identity arms did not reach transport: state=%d schedule=%d",
+			probe.stateCalls.Load(), probe.scheduleCalls.Load())
+	}
+
+	close(b2.release)
+	eventuallyOutbound(t, b2.input.Current.IsCurrent)
 }
 
 func TestDaemonOutboundCloseDoesNotOwnSession(t *testing.T) {
@@ -726,7 +788,7 @@ func TestDaemonShutdownSealsOutboundBeforeStoppingBodiesWithoutClosingTheirArms(
 	if err := outbound.Seal(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := build.prepared.Pen.Write(ctx, &message.Envelope{ID: "after-seal"}); err != nil {
+	if _, err := build.prepared.Caps.Pen.Write(ctx, &message.Envelope{ID: "after-seal"}); err != nil {
 		t.Fatalf("Seal invalidated a still-running body's arms: %v", err)
 	}
 	if err := host.Close(ctx); err != nil {

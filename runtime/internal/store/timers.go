@@ -299,11 +299,10 @@ func (s *timerStore) ListFired(ctx context.Context, cursor timerspec.FiredCursor
 // finds its own cascade in its own file. Idempotent: a re-run over an
 // already-cleared author deletes zero rows.
 //
-// Incarnation-bind timers need NO hook here — they are not rows (they live
-// in the schedule engine's in-memory due-set, welded to the live
-// incarnation). Deregister implies the actor identity already ended, so those
-// entries are reaped lazily at fire time via IsLive — zero coupling to this
-// cascade.
+// Memory-home timers need no SQL hook here because they are not rows; they
+// live in the current Scheduler instance. Deregister makes subsequent fire
+// admission fail by ActorID, so those entries are reaped lazily at fire time.
+// This storage distinction is unrelated to actor Incarnation.
 func clearTimersTx(ctx context.Context, tx *sql.Tx, author actor.ActorID) error {
 	if _, err := tx.ExecContext(ctx, `DELETE FROM timers WHERE author_id=?`, string(author)); err != nil {
 		return fmt.Errorf("store: timers cascade clear %q: %w", author, err)

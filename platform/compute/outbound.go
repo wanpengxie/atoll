@@ -81,10 +81,12 @@ var disconnectedOutboundBundle = &OutboundArmsBundle{}
 // OutboundSlot is an exact body-lifetime membrane. G1 and G2 slots for the
 // same ActorID can coexist without overwriting one another.
 type OutboundSlot struct {
-	owner   *DaemonOutbound
-	id      actor.ActorID
-	key     actorhost.AttemptKey
-	current actorhost.ActualCurrent
+	owner    *DaemonOutbound
+	id       actor.ActorID
+	key      actorhost.AttemptKey
+	identity actorhost.IdentityCurrent
+	attempt  actorhost.AttemptCurrent
+	current  actorhost.ActualCurrent
 
 	arms atomic.Pointer[OutboundArmsBundle]
 
@@ -98,12 +100,8 @@ type OutboundSlot struct {
 // not actorcaps.Caps while the production Caps lifecycle field still has the
 // pre-cutover static type.
 type PreparedOutbound struct {
-	Slot      *OutboundSlot
-	Pen       harness.Pen
-	Access    accessdoor.ResourceAccessHandle
-	State     accessdoor.AccessHandle
-	Schedule  schedule.ScheduleHandle
-	Lifecycle actorcaps.LifecycleHandle
+	Slot *OutboundSlot
+	Caps actorcaps.Caps
 }
 
 // NewDaemonOutbound starts an outbound level converger.
@@ -191,6 +189,8 @@ func (d *DaemonOutbound) publishObs(
 func (d *DaemonOutbound) Prepare(
 	id actor.ActorID,
 	key actorhost.AttemptKey,
+	identity actorhost.IdentityCurrent,
+	attempt actorhost.AttemptCurrent,
 	current actorhost.ActualCurrent,
 ) (PreparedOutbound, error) {
 	if d == nil || id == "" {
@@ -203,10 +203,8 @@ func (d *DaemonOutbound) Prepare(
 		return PreparedOutbound{}, err
 	}
 	slot := &OutboundSlot{
-		owner:   d,
-		id:      id,
-		key:     key,
-		current: current,
+		owner: d, id: id, key: key,
+		identity: identity, attempt: attempt, current: current,
 	}
 	slot.arms.Store(disconnectedOutboundBundle)
 	d.mu.Lock()
@@ -218,12 +216,14 @@ func (d *DaemonOutbound) Prepare(
 	d.mu.Unlock()
 	d.Wake()
 	return PreparedOutbound{
-		Slot:      slot,
-		Pen:       outboundPen{slot: slot},
-		Access:    outboundResourceAccess{slot: slot},
-		State:     outboundState{slot: slot},
-		Schedule:  outboundSchedule{slot: slot},
-		Lifecycle: outboundLifecycle{slot: slot},
+		Slot: slot,
+		Caps: actorcaps.Caps{
+			Pen:       outboundPen{slot: slot},
+			Access:    outboundResourceAccess{slot: slot},
+			State:     outboundState{slot: slot},
+			Schedule:  outboundSchedule{slot: slot},
+			Lifecycle: outboundLifecycle{slot: slot},
+		},
 	}, nil
 }
 
@@ -495,7 +495,7 @@ func (s *OutboundSlot) Coordinate() (actor.ActorID, actorhost.AttemptKey) {
 // capabilities. They use the same exact slot and one-load/one-call discipline
 // as the five capability facades and never buffer or retry across disconnects.
 func (s *OutboundSlot) CancelRequest(id message.ID) error {
-	bundle, err := s.load()
+	bundle, err := s.loadPhysical()
 	if err != nil {
 		return err
 	}
@@ -503,7 +503,7 @@ func (s *OutboundSlot) CancelRequest(id message.ID) error {
 }
 
 func (s *OutboundSlot) PublishObs(kind actorrt.ObsKind, value actorrt.ObsValue) error {
-	bundle, err := s.load()
+	bundle, err := s.loadPhysical()
 	if err != nil {
 		return err
 	}
@@ -607,12 +607,9 @@ func waitOutboundGroup(ctx context.Context, group *sync.WaitGroup) bool {
 	}
 }
 
-func (s *OutboundSlot) load() (*OutboundArmsBundle, error) {
+func (s *OutboundSlot) loadConnected() (*OutboundArmsBundle, error) {
 	if s == nil || s.closed.Load() {
 		return nil, ErrOutboundClosed
-	}
-	if !s.current.IsCurrent() {
-		return nil, ErrOutboundNotCurrent
 	}
 	bundle := s.arms.Load()
 	if bundle == nil || bundle.Stream == nil || channelClosed(bundle.Stream.Done()) {
@@ -621,10 +618,31 @@ func (s *OutboundSlot) load() (*OutboundArmsBundle, error) {
 	return bundle, nil
 }
 
+func (s *OutboundSlot) loadIdentity() (*OutboundArmsBundle, error) {
+	if s == nil || !s.identity.IsCurrent() {
+		return nil, ErrOutboundNotCurrent
+	}
+	return s.loadConnected()
+}
+
+func (s *OutboundSlot) loadAttempt() (*OutboundArmsBundle, error) {
+	if s == nil || !s.attempt.IsCurrent() {
+		return nil, ErrOutboundNotCurrent
+	}
+	return s.loadConnected()
+}
+
+func (s *OutboundSlot) loadPhysical() (*OutboundArmsBundle, error) {
+	if s == nil || !s.current.IsCurrent() {
+		return nil, ErrOutboundNotCurrent
+	}
+	return s.loadConnected()
+}
+
 type outboundPen struct{ slot *OutboundSlot }
 
 func (p outboundPen) Write(ctx context.Context, env *message.Envelope) (harness.WriteResult, error) {
-	bundle, err := p.slot.load()
+	bundle, err := p.slot.loadAttempt()
 	if err != nil {
 		result := harness.WriteResult{}
 		if env != nil {
@@ -638,7 +656,7 @@ func (p outboundPen) Write(ctx context.Context, env *message.Envelope) (harness.
 type outboundState struct{ slot *OutboundSlot }
 
 func (a outboundState) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
-	bundle, err := a.slot.load()
+	bundle, err := a.slot.loadIdentity()
 	if errors.Is(err, ErrOutboundDisconnected) {
 		return accessdoor.Outcome{RejectReason: access.OutcomeUnknown}, nil
 	}
@@ -651,7 +669,7 @@ func (a outboundState) Invoke(ctx context.Context, op access.Operation, id resou
 type outboundResourceAccess struct{ slot *OutboundSlot }
 
 func (a outboundResourceAccess) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (accessdoor.Outcome, error) {
-	bundle, err := a.slot.load()
+	bundle, err := a.slot.loadAttempt()
 	if errors.Is(err, ErrOutboundDisconnected) {
 		return accessdoor.Outcome{RejectReason: access.OutcomeUnknown}, nil
 	}
@@ -662,7 +680,7 @@ func (a outboundResourceAccess) Invoke(ctx context.Context, op access.Operation,
 }
 
 func (a outboundResourceAccess) Create(ctx context.Context, id resource.ResourceID, spec accessdoor.CreateSpec, initial []byte) (accessdoor.Outcome, error) {
-	bundle, err := a.slot.load()
+	bundle, err := a.slot.loadAttempt()
 	if errors.Is(err, ErrOutboundDisconnected) {
 		return accessdoor.Outcome{RejectReason: access.OutcomeUnknown}, nil
 	}
@@ -673,7 +691,7 @@ func (a outboundResourceAccess) Create(ctx context.Context, id resource.Resource
 }
 
 func (a outboundResourceAccess) Stat(ctx context.Context, id resource.ResourceID) (accessdoor.StatResult, error) {
-	bundle, err := a.slot.load()
+	bundle, err := a.slot.loadAttempt()
 	if err != nil {
 		return accessdoor.StatResult{}, err
 	}
@@ -681,7 +699,7 @@ func (a outboundResourceAccess) Stat(ctx context.Context, id resource.ResourceID
 }
 
 func (a outboundResourceAccess) List(ctx context.Context, query accessdoor.ListQuery) (accessdoor.ListPage, error) {
-	bundle, err := a.slot.load()
+	bundle, err := a.slot.loadAttempt()
 	if err != nil {
 		return accessdoor.ListPage{}, err
 	}
@@ -689,7 +707,7 @@ func (a outboundResourceAccess) List(ctx context.Context, query accessdoor.ListQ
 }
 
 func (a outboundResourceAccess) Open(ctx context.Context, id resource.ResourceID, mode access.Operation) (accessdoor.FileAccess, accessdoor.Outcome, error) {
-	bundle, err := a.slot.load()
+	bundle, err := a.slot.loadAttempt()
 	if errors.Is(err, ErrOutboundDisconnected) {
 		return accessdoor.FileAccess{}, accessdoor.Outcome{RejectReason: access.OutcomeUnknown}, nil
 	}
@@ -700,7 +718,7 @@ func (a outboundResourceAccess) Open(ctx context.Context, id resource.ResourceID
 }
 
 func (a outboundResourceAccess) Redeem(ctx context.Context, route accessdoor.FileRoute) (accessdoor.FileAccess, error) {
-	bundle, err := a.slot.load()
+	bundle, err := a.slot.loadAttempt()
 	if err != nil {
 		return accessdoor.FileAccess{}, err
 	}
@@ -710,21 +728,21 @@ func (a outboundResourceAccess) Redeem(ctx context.Context, route accessdoor.Fil
 type outboundSchedule struct{ slot *OutboundSlot }
 
 func (s outboundSchedule) Schedule(ctx context.Context, request schedule.ScheduleReq) (schedule.TimerID, error) {
-	bundle, err := s.slot.load()
+	bundle, err := s.slot.loadIdentity()
 	if err != nil {
 		return "", err
 	}
 	return bundle.Schedule.Schedule(ctx, request)
 }
 func (s outboundSchedule) Cancel(ctx context.Context, id schedule.TimerID) error {
-	bundle, err := s.slot.load()
+	bundle, err := s.slot.loadIdentity()
 	if err != nil {
 		return err
 	}
 	return bundle.Schedule.Cancel(ctx, id)
 }
 func (s outboundSchedule) Ack(ctx context.Context, id schedule.TimerID) error {
-	bundle, err := s.slot.load()
+	bundle, err := s.slot.loadIdentity()
 	if err != nil {
 		return err
 	}
@@ -734,14 +752,14 @@ func (s outboundSchedule) Ack(ctx context.Context, id schedule.TimerID) error {
 type outboundLifecycle struct{ slot *OutboundSlot }
 
 func (l outboundLifecycle) Fork(ctx context.Context, requestID message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error) {
-	bundle, err := l.slot.load()
+	bundle, err := l.slot.loadConnected()
 	if err != nil {
 		return "", err
 	}
 	return bundle.Lifecycle.Fork(ctx, requestID, spec)
 }
 func (l outboundLifecycle) EndSelf(ctx context.Context, request actorcaps.EndSelfRequest) error {
-	bundle, err := l.slot.load()
+	bundle, err := l.slot.loadConnected()
 	if err != nil {
 		return err
 	}

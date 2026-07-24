@@ -51,8 +51,9 @@ const reservedTypePrefix = message.ReservedTypePrefix
 // No target (self-targeted — a timer can only ever produce a message
 // authored by the actor that scheduled it), no sender (welded by
 // ScheduleHandle at fire time), no fire-time choice of kind (kind=event is
-// welded): the only degrees of freedom are WHEN, WHICH lifecycle level, and
-// WHAT the self-message says.
+// welded): the only degrees of freedom are WHEN, WHICH Scheduler storage
+// home, and WHAT the self-message says. Home is unrelated to actor
+// AttemptKey or Incarnation.
 type ScheduleReq struct {
 	Home    TimerHome
 	FireAt  int64 // UnixMilli, absolute instant (delay→FireAt conversion lives downstream, lib)
@@ -89,7 +90,15 @@ type ScheduleHandle interface {
 // cheap (no per-handle state beyond the welded author), so admission points
 // may Mint per-caller freely.
 type Minter interface {
+	AdmittedMinter
 	Mint(author storespec.AuthorStamp) ScheduleHandle
+}
+
+// AdmittedMinter consumes one completed ActorID collaboration admission.
+// It is used by remote ingress; TimerHome remains only a Scheduler storage
+// choice.
+type AdmittedMinter interface {
+	MintAdmitted(storespec.IdentityAdmission) ScheduleHandle
 }
 
 // FireSink is the injection-point contract for fire's single action: append
@@ -127,11 +136,9 @@ type TimerFirePen interface {
 var ErrDuplicateFire = errors.New("schedule: fire already appended")
 
 // ErrBadSchedule is returned by Schedule for a structurally invalid request:
-// Bind outside the closed set, FireAt<=0, an empty or reserved-prefixed
-// Type, or (bind=incarnation) an author with no current incarnation to weld to
-// right now. A PAST FireAt is legal (it fires immediately — refusing it would
-// make "a millisecond before vs after the deadline" two different
-// behaviours).
+// Home outside the closed set, FireAt<=0, or an empty/reserved-prefixed Type.
+// A PAST FireAt is legal (it fires immediately — refusing it would make "a
+// millisecond before vs after the deadline" two different behaviours).
 var ErrBadSchedule = errors.New("schedule: invalid schedule request")
 
 // FireRejected is the deterministic-reject class surfaced by a FireSink

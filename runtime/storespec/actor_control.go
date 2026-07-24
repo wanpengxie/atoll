@@ -99,8 +99,24 @@ const (
 )
 
 type AuthorStamp struct {
-	ID           actor.ActorID
-	BirthVersion int64
+	ID actor.ActorID
+}
+
+// IdentityAdmission is one immutable ActorID-level collaboration snapshot.
+// The authority owner returns it after one active-identity admission; source
+// adapters may then execute exactly one already-admitted Harness/Access/State/
+// Schedule invocation without re-running the old AuthorStamp gate.
+//
+// It carries no AttemptKey or Incarnation. Row/World are the business
+// projection needed by the admitted invocation, not a managed-body capability.
+type IdentityAdmission struct {
+	Row   ActorControlRow
+	World ActorWorld
+}
+
+func (a IdentityAdmission) Valid() bool {
+	return a.Row.ID != "" &&
+		(a.World == WorldDurable || a.World == WorldRun)
 }
 
 type AuthorVerdict uint8
@@ -108,7 +124,6 @@ type AuthorVerdict uint8
 const (
 	AuthorOK AuthorVerdict = iota + 1
 	AuthorNotMember
-	AuthorVersionStale
 )
 
 // ActorAuthority is the sole active-identity authority used by every effect
@@ -118,6 +133,12 @@ type ActorAuthority interface {
 	ListActive(context.Context) ([]ActorControlRow, error)
 	WorldOf(context.Context, actor.ActorID) (ActorWorld, bool, error)
 	CheckAuthor(context.Context, AuthorStamp) (AuthorVerdict, error)
+}
+
+// CollaborationAuthority owns the one-shot ActorID-level admission used at
+// remote ingress and delayed-product fire boundaries.
+type CollaborationAuthority interface {
+	AdmitIdentity(context.Context, actor.ActorID) (IdentityAdmission, bool, error)
 }
 
 type DurableHistory interface {

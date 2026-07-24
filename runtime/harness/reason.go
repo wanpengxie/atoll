@@ -82,9 +82,8 @@ const (
 	HarnessResponseAudienceMismatch        HarnessRejectReason = "harness_response_audience_mismatch"
 	HarnessProvisionalAfterFinal           HarnessRejectReason = "harness_provisional_after_final"
 
-	HarnessAuthorNotMember    HarnessRejectReason = "harness_author_not_member"
-	HarnessAuthorVersionStale HarnessRejectReason = "harness_author_version_stale"
-	HarnessReceiverNotMember  HarnessRejectReason = "harness_receiver_not_member"
+	HarnessAuthorNotMember   HarnessRejectReason = "harness_author_not_member"
+	HarnessReceiverNotMember HarnessRejectReason = "harness_receiver_not_member"
 
 	// Step 10 — Engine Append (store-produced, lifted from the storespec
 	// contract leaf so driver and vocabulary share ONE symbol; see the type

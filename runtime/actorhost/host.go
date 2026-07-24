@@ -420,6 +420,8 @@ func (h *HostSupervisor) build(id actor.ActorID, job *buildJob) {
 			AttemptKey:    job.key,
 			ExecutionSpec: job.body.ExecutionSpec,
 			Self:          self,
+			Identity:      h.IdentityProbe(id),
+			Attempt:       h.AttemptProbe(id, job.key),
 			Current:       current,
 		}
 		return h.builder(input)

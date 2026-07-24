@@ -152,13 +152,10 @@ func (i *actorControlIndex) WorldOf(_ context.Context, id actor.ActorID) (stores
 
 func (i *actorControlIndex) CheckAuthor(_ context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
 	i.mu.RLock()
-	entry, ok := i.rows[stamp.ID]
+	_, ok := i.rows[stamp.ID]
 	i.mu.RUnlock()
 	if !ok {
 		return storespec.AuthorNotMember, nil
-	}
-	if entry.Row.CurrentDeclVersion != stamp.BirthVersion {
-		return storespec.AuthorVersionStale, nil
 	}
 	return storespec.AuthorOK, nil
 }

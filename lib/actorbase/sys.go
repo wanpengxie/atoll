@@ -72,8 +72,8 @@ type Sys interface {
 	Resource() ResourceHandle
 
 	// --- Schedule arm ---------------------------------------------------
-	// After arms a self-targeted timer that wakes this incarnation with a
-	// self-authored message after d.
+	// After arms a self-targeted timer in the current Channel/Scheduler
+	// instance's Memory home. It remains ActorID-owned across body replacement.
 	After(d time.Duration, msgType string, payload any) (schedule.TimerID, error)
 	CancelTimer(id schedule.TimerID) error
 
@@ -127,9 +127,9 @@ type Sys interface {
 	// may never have Recv'd (cross-incarnation response — the serve account is
 	// only a per-life projection: an entry closes if present, else zero action).
 	RespondEnvelope(req *message.Envelope, spec behavior.ResponseSpec) (message.ID, error)
-	// AfterIdentity arms an IDENTITY-bound durable timer (survives incarnations)
-	// — the Bind value is the ONE difference from After. payload is carried
-	// verbatim as RawMessage (never []byte→base64).
+	// AfterIdentity arms a self-targeted timer in the Durable Scheduler home.
+	// Storage home is the ONE difference from After; both are ActorID-owned.
+	// payload is carried verbatim as RawMessage (never []byte→base64).
 	AfterIdentity(d time.Duration, msgType string, payload json.RawMessage) (schedule.TimerID, error)
 	CancelTimerIdentity(id schedule.TimerID) error
 	// ResourceIdentity is Resource()'s WithoutCancel variant: the same access

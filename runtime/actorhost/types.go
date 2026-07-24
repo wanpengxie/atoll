@@ -348,6 +348,8 @@ type BodyBuildInput struct {
 	AttemptKey    AttemptKey
 	ExecutionSpec ExecutionSpec
 	Self          actorrt.Incarnation
+	Identity      IdentityCurrent
+	Attempt       AttemptCurrent
 	Current       ActualCurrent
 }
 

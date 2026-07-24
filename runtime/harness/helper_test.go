@@ -80,15 +80,12 @@ func (a testAuthority) WorldOf(ctx context.Context, id actor.ActorID) (storespec
 	return storespec.WorldDurable, ok, err
 }
 func (a testAuthority) CheckAuthor(ctx context.Context, stamp storespec.AuthorStamp) (storespec.AuthorVerdict, error) {
-	row, ok, err := a.LookupActive(ctx, stamp.ID)
+	_, ok, err := a.LookupActive(ctx, stamp.ID)
 	if err != nil {
 		return 0, err
 	}
 	if !ok {
 		return storespec.AuthorNotMember, nil
-	}
-	if row.CurrentDeclVersion != stamp.BirthVersion {
-		return storespec.AuthorVersionStale, nil
 	}
 	return storespec.AuthorOK, nil
 }
@@ -119,9 +116,8 @@ func registerActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID, kind
 // caller via the package-internal ctxWithCaller rather than minting a pen.
 func ctxCaller(id actor.ActorID) context.Context {
 	return ctxWithCaller(context.Background(), caller{
-		actorID:      id,
-		birthVersion: 1,
-		chID:         testChannelID,
+		actorID: id,
+		chID:    testChannelID,
 	})
 }
 
@@ -132,10 +128,9 @@ func ctxCaller(id actor.ActorID) context.Context {
 // registry).
 func ctxCallerKind(id actor.ActorID, kind actor.Kind) context.Context {
 	return ctxWithCaller(context.Background(), caller{
-		actorID:      id,
-		kind:         kind,
-		birthVersion: 1,
-		chID:         testChannelID,
+		actorID: id,
+		kind:    kind,
+		chID:    testChannelID,
 	})
 }
 

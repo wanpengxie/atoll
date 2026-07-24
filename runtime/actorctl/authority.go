@@ -58,6 +58,15 @@ func (p PreparedRun) AttemptKey() actorhost.AttemptKey { return p.attempt }
 func (p PreparedRun) Definition() ActorDefinition      { return cloneDefinition(p.definition) }
 func (p PreparedRun) Identity() IdentityAuthority      { return p.identity }
 func (p PreparedRun) Run() RunAuthority                { return p.run }
+func (p PreparedRun) World() storespec.ActorWorld {
+	if p.definition.Origin == OriginRunWorld {
+		return storespec.WorldRun
+	}
+	if p.definition.Origin == OriginDurable {
+		return storespec.WorldDurable
+	}
+	return 0
+}
 
 func cloneDefinition(def ActorDefinition) ActorDefinition {
 	def.Execution.Config = append([]byte(nil), def.Execution.Config...)
@@ -108,6 +117,37 @@ func (c *Controller) LookupActive(
 	return rowFromActive(id, value), true, nil
 }
 
+// AdmitIdentity returns one coherent ActorID-level collaboration snapshot.
+// It is intentionally independent of AttemptKey/Incarnation.
+func (c *Controller) AdmitIdentity(
+	_ context.Context,
+	id actor.ActorID,
+) (storespec.IdentityAdmission, bool, error) {
+	if id == actor.SystemActorID {
+		return storespec.IdentityAdmission{}, false, ErrReservedSystem
+	}
+	c.stateMu.RLock()
+	defer c.stateMu.RUnlock()
+	switch c.phase {
+	case Bootstrapping:
+		return storespec.IdentityAdmission{}, false, ErrBootstrapping
+	case Closed:
+		return storespec.IdentityAdmission{}, false, ErrClosed
+	}
+	value, ok := c.actors[id]
+	if !ok {
+		return storespec.IdentityAdmission{}, false, nil
+	}
+	world := storespec.WorldDurable
+	if value.Definition.Origin == OriginRunWorld {
+		world = storespec.WorldRun
+	}
+	return storespec.IdentityAdmission{
+		Row:   rowFromActive(id, cloneActive(value)),
+		World: world,
+	}, true, nil
+}
+
 func (c *Controller) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
 	return c.ActiveRows()
 }
@@ -126,8 +166,8 @@ func (c *Controller) WorldOf(
 	return storespec.WorldDurable, true, nil
 }
 
-// CheckAuthor is collaboration authority. BirthVersion is intentionally
-// ignored: declaration metadata is not managed execution permission.
+// CheckAuthor is collaboration authority. Declaration metadata is not managed
+// execution permission.
 func (c *Controller) CheckAuthor(
 	ctx context.Context,
 	stamp storespec.AuthorStamp,
@@ -143,3 +183,4 @@ func (c *Controller) CheckAuthor(
 }
 
 var _ storespec.ActorAuthority = (*Controller)(nil)
+var _ storespec.CollaborationAuthority = (*Controller)(nil)

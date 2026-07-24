@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform/internal/hostcommon"
 	"github.com/wanpengxie/atoll/platform/internal/link"
@@ -28,13 +27,14 @@ import (
 	"github.com/wanpengxie/atoll/runtime/managedcaps"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/systemcaps"
 	"github.com/wanpengxie/atoll/runtime/systemkernel"
 )
 
 const reconcileInterval = 30 * time.Second
 
 // Open assembles one channel in dependency order. Managed actor truth is
-// published exactly once by ChannelActors.Start; no old Runtime/control index
+// published exactly once by Controller.Start; no old Runtime/control index
 // is built or shadow-written.
 func Open(cfg Config) (_ *Home, retErr error) {
 	logger := cfg.Logger
@@ -131,7 +131,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("platform: build harness: %w", err)
 	}
-	h.systemPen = h.minter.Mint(actor.SystemActorID, actor.KindSystem, cfg.ChannelID, 1)
 	h.presenceFold = presence.New(logger, clock,
 		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, sweepEvery)
 
@@ -150,12 +149,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 
 	// Scheduler construction precedes System Unit construction, but its run
-	// loop starts only after ChannelActors is Running.
+	// loop starts only after Controller is Running.
 	h.schedMinter, h.engine, err = runtime.OpenScheduler(cs, schedule.AssemblyDeps{
 		Fire: fireSink{
-			minter: h.minter, authority: cs.Authority,
-			actors: func() *actorSystem { return h.actors },
-			chID:   cfg.ChannelID,
+			minter: h.minter, authority: h.actors,
+			chID: cfg.ChannelID,
 		},
 		Clock: cfg.Clock, Logger: logger,
 	})
@@ -173,6 +171,16 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct managed caps minter: %w", err)
+	}
+	h.systemCaps, err = systemcaps.New(
+		cfg.ChannelID,
+		h.minter,
+		cs.Access,
+		h.stateHandles,
+		h.schedMinter,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("platform: construct system caps minter: %w", err)
 	}
 	h.serverHost, err = actorhost.New(actorhost.Config{
 		Domain: actorhost.ExecutionDomain("server"),
@@ -215,18 +223,15 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 	h.opEntry = &opEntry{home: h}
 
-	systemAuthor := storespec.AuthorStamp{ID: actor.SystemActorID, BirthVersion: 1}
+	systemCaps, err := h.systemCaps.Mint(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("platform: mint system caps: %w", err)
+	}
+	h.systemPen = systemCaps.Pen
 	systemUnit, err := actorrt.Prepare(actorrt.UnitConfig{
 		ActorID: actor.SystemActorID, Kind: actor.KindSystem, Logger: logger,
 	}, func(actorrt.Incarnation) actorrt.Actor {
-		caps := actorcaps.Caps{
-			Pen:       h.systemPen,
-			Access:    cs.Access.Mint(systemAuthor),
-			State:     cs.Access.MintState(systemAuthor),
-			Schedule:  h.schedMinter.Mint(systemAuthor),
-			Lifecycle: nil,
-		}
-		return actorbase.New(caps, h.hooks(), sysactor.Def(sysactor.Deps{
+		return actorbase.New(systemCaps, h.hooks(), sysactor.Def(sysactor.Deps{
 			Authority: h.actors, Clock: clock,
 			Presence: presence.NewView(h.presenceFold, h.actors, h.actors),
 			Logger:   logger, Operate: h.opEntry,

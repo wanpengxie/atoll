@@ -10,7 +10,7 @@ import (
 )
 
 // admitChannelOwner is the bootstrap-only owner admission. It still enters
-// ChannelActors, so the committed identity and desired execution are published
+// Controller, so the committed identity and desired execution are published
 // through the same Controller path as every other managed actor.
 func (h *Home) admitChannelOwner(ctx context.Context, principal string) (actor.ActorID, error) {
 	if h.closed.Load() {

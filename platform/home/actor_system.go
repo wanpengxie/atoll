@@ -319,6 +319,22 @@ func (a *actorSystem) LookupActive(ctx context.Context, id actor.ActorID) (store
 	return a.home.controller.LookupActive(ctx, id)
 }
 
+func (a *actorSystem) AdmitIdentity(
+	ctx context.Context,
+	id actor.ActorID,
+) (storespec.IdentityAdmission, bool, error) {
+	if id == actor.SystemActorID {
+		if a.home.controller.Phase() != actorctl.Running {
+			return storespec.IdentityAdmission{}, false, actorctl.ErrClosed
+		}
+		return storespec.IdentityAdmission{
+			Row:   cloneSystemRow(a.systemRow),
+			World: storespec.WorldDurable,
+		}, true, nil
+	}
+	return a.home.controller.AdmitIdentity(ctx, id)
+}
+
 func (a *actorSystem) ListActive(ctx context.Context) ([]storespec.ActorControlRow, error) {
 	rows, err := a.home.controller.ListActive(ctx)
 	if err != nil {
@@ -373,6 +389,9 @@ func (a *actorSystem) close(ctx context.Context) error {
 	}
 	return errors.Join(faults...)
 }
+
+var _ storespec.ActorAuthority = (*actorSystem)(nil)
+var _ storespec.CollaborationAuthority = (*actorSystem)(nil)
 
 var _ actorctl.Commands = (*actorSystem)(nil)
 var _ storespec.ActorAuthority = (*actorSystem)(nil)
