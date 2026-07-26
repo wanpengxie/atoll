@@ -63,25 +63,6 @@ type fakeRegistry struct {
 	err  error
 }
 
-func (r *fakeRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
-	if r.err != nil {
-		return storespec.ActorRecord{}, false, r.err
-	}
-	row, ok := r.rows[id]
-	return storespec.ActorRecord{ID: row.ID, Kind: row.Kind, Principal: row.Principal, CreatedAt: row.CreatedAt}, ok && row.IsActive(), nil
-}
-func (r *fakeRegistry) ListActive(context.Context) ([]storespec.ActorRecord, error) {
-	if r.err != nil {
-		return nil, r.err
-	}
-	rows := make([]storespec.ActorRecord, 0, len(r.rows))
-	for _, row := range r.rows {
-		if row.IsActive() {
-			rows = append(rows, storespec.ActorRecord{ID: row.ID, Kind: row.Kind})
-		}
-	}
-	return rows, nil
-}
 func TestRemoteDownMatchesExactBindingWithinSameAttempt(t *testing.T) {
 	t.Parallel()
 	key, err := actorhost.NewAttemptKey()
@@ -103,9 +84,12 @@ func TestRemoteDownMatchesExactBindingWithinSameAttempt(t *testing.T) {
 		t.Fatal("exact B2 down retained its own testimony")
 	}
 }
-func (r *fakeRegistry) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
-	_, ok, err := r.LookupActive(ctx, id)
-	return ok, err
+func (r *fakeRegistry) IsActive(_ context.Context, id actor.ActorID) (bool, error) {
+	if r.err != nil {
+		return false, r.err
+	}
+	row, ok := r.rows[id]
+	return ok && row.IsActive(), nil
 }
 
 func spawn(t *testing.T, execution *fakeExecution, id actor.ActorID) actorrt.Incarnation {

@@ -123,9 +123,5 @@ func (s *SystemActor) senderIsActiveMember(msg actorbase.Msg) (bool, error) {
 	if s.authority == nil {
 		return false, nil
 	}
-	_, ok, err := s.authority.LookupActive(msg.Ctx(), msg.Sender.ID)
-	if err != nil {
-		return false, err
-	}
-	return ok, nil
+	return s.authority.IsActive(msg.Ctx(), msg.Sender.ID)
 }

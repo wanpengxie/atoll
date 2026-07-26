@@ -564,7 +564,7 @@ func TestChannelRealmW11ObserverReadClosure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(body), "func (a *App) readerForPrincipal") || !strings.Contains(string(body), "DeclaredBySource") {
+	if !strings.Contains(string(body), "func (a *App) readerForPrincipal") || !strings.Contains(string(body), "HasDeclaredInstance") {
 		t.Fatal("readerForPrincipal is not the realm-tool-backed observer gate")
 	}
 }

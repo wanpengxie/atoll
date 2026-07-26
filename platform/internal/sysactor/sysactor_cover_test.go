@@ -14,15 +14,16 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// errRegistry fails ListActive, exercising the registry-error early return in
-// respondList (a substrate read failure writes nothing — the same "does not
-// synthesize" posture as an unrouted type, never a bogus empty directory).
+// errRegistry fails the roster read, exercising the authority-error early
+// return in respondList (a substrate read failure writes nothing — the same
+// "does not synthesize" posture as an unrouted type, never a bogus empty
+// directory).
 type errRegistry struct{ err error }
 
-func (e errRegistry) LookupActive(context.Context, actor.ActorID) (storespec.ActorRecord, bool, error) {
-	return storespec.ActorRecord{}, false, nil
+func (e errRegistry) IsActive(context.Context, actor.ActorID) (bool, error) {
+	return false, nil
 }
-func (e errRegistry) ListActive(context.Context) ([]storespec.ActorRecord, error) {
+func (e errRegistry) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
 	return nil, e.err
 }
 func newDescribeReq() actorbase.Msg {
@@ -118,7 +119,7 @@ func TestReceive_NonRequestIgnored(t *testing.T) {
 	}
 }
 
-// TestRespondList_RegistryError proves a substrate read failure (ListActive)
+// TestRespondList_RegistryError proves a substrate read failure (the roster read)
 // writes no reply — never swallowed into a bogus empty directory.
 func TestRespondList_RegistryError(t *testing.T) {
 	listReq := requestMsg("q1", introspect.QueryList, nil)

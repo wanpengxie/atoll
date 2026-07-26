@@ -12,23 +12,20 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// memberRegistry answers Lookup from a fixed active/deregistered set (the gate's
-// permission axis) — the base fakeRegistry always answers not-found.
+// memberRegistry answers the membership boolean from a fixed active set (the
+// gate's permission axis) — the base fakeRegistry always answers not-found.
 type memberRegistry struct {
 	active    map[actor.ActorID]bool
 	lookupErr error
 }
 
-func (m memberRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
+func (m memberRegistry) IsActive(_ context.Context, id actor.ActorID) (bool, error) {
 	if m.lookupErr != nil {
-		return storespec.ActorRecord{}, false, m.lookupErr
+		return false, m.lookupErr
 	}
-	if !m.active[id] {
-		return storespec.ActorRecord{}, false, nil
-	}
-	return storespec.ActorRecord{ID: id, Kind: actor.KindAgent}, true, nil
+	return m.active[id], nil
 }
-func (m memberRegistry) ListActive(context.Context) ([]storespec.ActorRecord, error) {
+func (m memberRegistry) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
 	return nil, nil
 }
 

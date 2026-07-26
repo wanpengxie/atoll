@@ -70,18 +70,16 @@ func openTestHome(t *testing.T) *home.Home {
 }
 
 // The kernel is a constant, not a member: Open registers no system row, so the
-// membership projection never contains it. Its addressability is answered by
-// the routing organ instead.
-func TestView_ActiveActors_ExcludesKernel(t *testing.T) {
+// membership projection has no facts to hand out for it. Its addressability is
+// answered by the routing organ instead.
+func TestView_ActorFacts_KernelIsNotAMember(t *testing.T) {
 	h := openTestHome(t)
-	actors, err := h.View().ActiveActors(context.Background())
+	facts, found, err := h.View().ActorFacts(context.Background(), actor.SystemActorID)
 	if err != nil {
-		t.Fatalf("ActiveActors: %v", err)
+		t.Fatalf("ActorFacts: %v", err)
 	}
-	for _, a := range actors {
-		if a.ID == actor.SystemActorID {
-			t.Errorf("kernel appeared as a member row: %+v", a)
-		}
+	if found {
+		t.Errorf("kernel answered as a member: %+v", facts)
 	}
 }
 
@@ -99,21 +97,25 @@ func TestAdmit_CellLessMember(t *testing.T) {
 		t.Fatalf("Admit: %v", err)
 	}
 	id := result.ActorID
-	actors, err := h.View().ActiveActors(ctx)
+	roster, err := h.View().HumanRoster(ctx)
 	if err != nil {
-		t.Fatalf("ListActors: %v", err)
+		t.Fatalf("HumanRoster: %v", err)
 	}
 	var found bool
-	for _, a := range actors {
-		if a.ID == id {
+	for _, entry := range roster {
+		if entry.ActorID == id {
 			found = true
-			if a.Kind != actor.KindHuman || a.Principal != "alice" {
-				t.Errorf("admitted member = %+v", a)
+			if entry.Principal != "alice" {
+				t.Errorf("admitted member = %+v", entry)
 			}
 		}
 	}
 	if !found {
 		t.Fatalf("cell-less member %s not in roster", id)
+	}
+	facts, ok, err := h.View().ActorFacts(ctx, id)
+	if err != nil || !ok || facts.Kind != actor.KindHuman {
+		t.Fatalf("admitted member facts = %+v ok=%v err=%v", facts, ok, err)
 	}
 }
 
@@ -136,21 +138,21 @@ func TestOpen_RestartOverPersistentDB(t *testing.T) {
 		t.Fatalf("restart Open over existing DB: %v", err)
 	}
 	t.Cleanup(func() { _ = home.Shutdown(h2) })
-	actors, err := h2.View().ActiveActors(context.Background())
+	roster, err := h2.View().HumanRoster(context.Background())
 	if err != nil {
-		t.Fatalf("ListActors after restart: %v", err)
+		t.Fatalf("HumanRoster after restart: %v", err)
 	}
 	found := false
-	for _, a := range actors {
-		if a.Principal == "restart-owner" {
+	for _, entry := range roster {
+		if entry.Principal == "restart-owner" {
 			found = true
 		}
-		if a.ID == actor.SystemActorID {
-			t.Errorf("kernel restored as a member row: %+v", a)
+		if entry.ActorID == actor.SystemActorID {
+			t.Errorf("kernel restored as a member row: %+v", entry)
 		}
 	}
 	if !found {
-		t.Errorf("durable member missing after restart: %+v", actors)
+		t.Errorf("durable member missing after restart: %+v", roster)
 	}
 }
 

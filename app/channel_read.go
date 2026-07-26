@@ -80,11 +80,11 @@ func (a *App) readerForPrincipal(ctx context.Context, bundle channelhost.Bundle,
 		}
 		return channel.Reader{}, observeNowMember, nil
 	}
-	toolRows, err := bundle.View().DeclaredBySource(ctx, realmToolDeclID)
+	hasTool, err := bundle.View().HasDeclaredInstance(ctx, realmToolDeclID)
 	if err != nil {
 		return channel.Reader{}, observeUnavailable, err
 	}
-	if len(toolRows) == 0 {
+	if !hasTool {
 		return channel.Reader{}, observeUnavailable, nil
 	}
 	return channel.Reader{Principal: principal, Mode: channel.ReaderObserver}, observeAllowed, nil

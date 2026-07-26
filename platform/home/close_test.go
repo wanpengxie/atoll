@@ -132,7 +132,7 @@ func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T)
 	if err := <-applied; err != nil {
 		t.Fatal(err)
 	}
-	if _, active, err := controller.LookupActive(context.Background(), "agent"); err != nil || !active {
+	if active, err := controller.IsActive(context.Background(), "agent"); err != nil || !active {
 		t.Fatalf("Controller was torn down across failed Quiesce: active=%v err=%v", active, err)
 	}
 	if err := home.closeInternalWithin("retry-test", time.Second); err != nil {
@@ -143,7 +143,7 @@ func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T)
 	default:
 		t.Fatal("retry Close did not complete runtime teardown")
 	}
-	if _, _, err := controller.LookupActive(context.Background(), "agent"); !errors.Is(err, actorctl.ErrClosed) {
+	if _, err := controller.IsActive(context.Background(), "agent"); !errors.Is(err, actorctl.ErrClosed) {
 		t.Fatalf("Controller remains live after retry Close: %v", err)
 	}
 }

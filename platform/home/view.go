@@ -23,9 +23,19 @@ import (
 // substrate projections used by Home itself; channelhost deliberately exports
 // only the smaller policy-safe View interface at the membrane boundary. There
 // is no write path through either surface.
+// viewAuthority is the narrow actor-truth surface the business membrane asks.
+// Every method is question-shaped; there is no whole-record face here and no
+// way to obtain one.
+type viewAuthority interface {
+	storespec.IdentityPresence
+	storespec.ActorFactsAuthority
+	storespec.IdentityRoster
+	storespec.DeclaredInstanceReader
+}
+
 type View struct {
 	visible    storespec.VisibleMessageQuery
-	authority  storespec.ActorDirectory
+	authority  viewAuthority
 	links      *link.Acceptor
 	presence   presence.View
 	actors     *actorSystem
@@ -60,25 +70,27 @@ func (h *Home) View() View {
 
 type ResourceView struct {
 	store     storespec.ResourceReadStore
-	authority storespec.ActorDirectory
+	authority storespec.IdentityPresence
 }
 
 func (v View) Resources() ResourceView {
 	return ResourceView{store: v.resources, authority: v.authority}
 }
 
-func validateReader(ctx context.Context, authority storespec.ActorDirectory, as channel.Reader) error {
+// validateReader asks the one "is this legal right now" boolean question. A
+// reader gate needs existence, never a record.
+func validateReader(ctx context.Context, authority storespec.IdentityPresence, as channel.Reader) error {
 	if !as.Valid() {
 		return &channel.RealmError{Code: channel.RealmForbidden}
 	}
 	if as.Mode != channel.ReaderMember {
 		return nil
 	}
-	_, found, err := authority.LookupActive(ctx, as.ActorID)
+	active, err := authority.IsActive(ctx, as.ActorID)
 	if err != nil {
 		return err
 	}
-	if !found {
+	if !active {
 		return &channel.RealmError{Code: channel.RealmForbidden}
 	}
 	return nil
@@ -169,12 +181,16 @@ func (v View) ReadVisibleAfterSeq(ctx context.Context, reader channel.Reader, af
 	return v.visible.ReadVisibleAfterSeq(ctx, reader, afterSeq, limit)
 }
 
+// ActorFacts is the requester-authorization projection: who is behind this
+// actor and what kind it is.
 func (v View) ActorFacts(ctx context.Context, id actor.ActorID) (channel.ActorFacts, bool, error) {
-	row, found, err := v.authority.LookupActive(ctx, id)
+	facts, found, err := v.authority.ActorFacts(ctx, id)
 	if err != nil || !found {
 		return channel.ActorFacts{}, found, err
 	}
-	return channel.ActorFacts{Principal: row.Principal, Kind: row.Kind, Active: true}, true, nil
+	return channel.ActorFacts{
+		Principal: facts.Principal, Kind: facts.Kind, Active: true,
+	}, true, nil
 }
 
 func (v View) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
@@ -186,35 +202,46 @@ func (v View) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal s
 	return record.ID, found, err
 }
 
-func (v View) ActiveActors(ctx context.Context) ([]storespec.ActorRecord, error) {
-	return v.authority.ListActive(ctx)
-}
-
-func (v View) DeclaredBySource(ctx context.Context, source string) ([]storespec.ActorRecord, error) {
-	rows, err := v.authority.ListActive(ctx)
+// HumanRoster is the entitlement projection: which login principals hold human
+// membership right now. It composes two question-shaped Controller reads — the
+// membership roster and the per-identity facts — inside the business membrane,
+// which is where composition belongs. An actor that ends between the two reads
+// simply drops out of the roster; this is a level-reconciled sweep input, not a
+// linearizable transaction.
+func (v View) HumanRoster(ctx context.Context) ([]channel.HumanRosterEntry, error) {
+	identities, err := v.authority.ActiveIdentities()
 	if err != nil {
 		return nil, err
 	}
-	out := make([]storespec.ActorRecord, 0)
-	for _, row := range rows {
-		if row.SourceDeclID == source {
-			out = append(out, row)
+	out := make([]channel.HumanRosterEntry, 0, len(identities))
+	for _, identity := range identities {
+		if identity.Kind != actor.KindHuman {
+			continue
 		}
+		facts, found, err := v.authority.ActorFacts(ctx, identity.ID)
+		if err != nil {
+			return nil, err
+		}
+		if !found || facts.Principal == "" {
+			continue
+		}
+		out = append(out, channel.HumanRosterEntry{
+			ActorID: identity.ID, Principal: facts.Principal,
+		})
 	}
 	return out, nil
 }
 
-func (v View) DeclaredBySourceOne(ctx context.Context, source string) (storespec.ActorRecord, bool, error) {
-	rows, err := v.authority.ListActive(ctx)
-	if err != nil {
-		return storespec.ActorRecord{}, false, err
-	}
-	for _, row := range rows {
-		if row.SourceDeclID == source {
-			return row, true, nil
-		}
-	}
-	return storespec.ActorRecord{}, false, nil
+// DeclaredInstances answers which actor ids one declaration currently has.
+func (v View) DeclaredInstances(_ context.Context, declID string) ([]actor.ActorID, error) {
+	return v.authority.DeclaredInstances(declID)
+}
+
+// HasDeclaredInstance is the availability question (realm-tool and routing
+// fallback): does this declaration have a live instance at all.
+func (v View) HasDeclaredInstance(ctx context.Context, declID string) (bool, error) {
+	ids, err := v.DeclaredInstances(ctx, declID)
+	return len(ids) > 0, err
 }
 
 func (v View) IsBound(ctx context.Context, daemonID string) (bool, error) {

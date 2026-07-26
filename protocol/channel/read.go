@@ -41,6 +41,15 @@ type ActorFacts struct {
 	Active    bool       `json:"active"`
 }
 
+// HumanRosterEntry is one row of the channel's human membership roster — the
+// entitlement projection's whole vocabulary. It is a business-membrane value:
+// no kind axis (every entry is human by construction), no definition, no
+// placement, no storage home.
+type HumanRosterEntry struct {
+	ActorID   actor.ActorID `json:"actor_id"`
+	Principal string        `json:"principal"`
+}
+
 type ResourceListQuery struct {
 	Prefix string `json:"prefix,omitempty"`
 	Limit  int    `json:"limit,omitempty"`

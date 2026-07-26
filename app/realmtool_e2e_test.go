@@ -312,21 +312,15 @@ func TestForkWithEmptyPrincipalDrivesRealmOperationAndResourceFamilies(t *testin
 		if got.err != nil || got.child == "" || got.introduced == "" || got.statusRef == "" || !got.listed || got.fetched == "" {
 			t.Fatalf("fork realm combination=%+v err=%v", got, got.err)
 		}
-		actors, err := env.app.ActorsForTest(channel.ID(setup.chID))
+		facts, foundFork, err := env.app.ActorFactsForTest(channel.ID(setup.chID), got.child)
 		if err != nil {
 			t.Fatal(err)
 		}
-		foundFork := false
-		for _, row := range actors {
-			if row.ID == got.child {
-				foundFork = true
-				if row.Principal != "" {
-					t.Fatalf("fork principal=%q, want empty", row.Principal)
-				}
-			}
-		}
 		if !foundFork {
 			t.Fatalf("fork %q absent from active view", got.child)
+		}
+		if facts.Principal != "" {
+			t.Fatalf("fork principal=%q, want empty", facts.Principal)
 		}
 		var ownerPrincipal, ownerActor string
 		if err := env.db.QueryRow(`SELECT COALESCE(requested_by_principal,''),COALESCE(requested_by_actor_id,'') FROM channel_admission_operations WHERE operation_id=?`, got.statusRef).Scan(&ownerPrincipal, &ownerActor); err != nil {

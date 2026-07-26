@@ -278,20 +278,14 @@ type testAccessAuthority struct {
 	owner    *actor.ActorID
 }
 
-func (a testAccessAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
-	rec, ok, err := a.declared.LookupActive(ctx, id)
-	if err != nil || !ok {
-		return storespec.ActorRecord{}, false, err
-	}
-	return rec, true, nil
-}
-
-func (a testAccessAuthority) ListActive(context.Context) ([]storespec.ActorRecord, error) {
-	return nil, nil
+// record is the fixture's own durable read; the Controller's public face is
+// narrow question-shaped projections, and each of them is derived below.
+func (a testAccessAuthority) record(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
+	return a.declared.LookupActive(ctx, id)
 }
 
 func (a testAccessAuthority) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
-	_, ok, err := a.LookupActive(ctx, id)
+	_, ok, err := a.record(ctx, id)
 	return ok, err
 }
 
@@ -299,7 +293,7 @@ func (a testAccessAuthority) AdmitIdentity(
 	ctx context.Context,
 	id actor.ActorID,
 ) (storespec.IdentityAdmission, bool, error) {
-	row, ok, err := a.LookupActive(ctx, id)
+	row, ok, err := a.record(ctx, id)
 	if err != nil || !ok {
 		return storespec.IdentityAdmission{}, false, err
 	}
@@ -310,7 +304,7 @@ func (a testAccessAuthority) ResourceActorFacts(
 	ctx context.Context,
 	id actor.ActorID,
 ) (storespec.ResourceActorFacts, error) {
-	row, ok, err := a.LookupActive(ctx, id)
+	row, ok, err := a.record(ctx, id)
 	if err != nil || !ok {
 		return storespec.ResourceActorFacts{}, err
 	}

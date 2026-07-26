@@ -31,7 +31,7 @@ func (h *Home) resolveIntroduction(
 			Code: channel.ErrCodeAuthorityUnavailable, Detail: "introduction resolver unavailable", Retryable: true,
 		}
 	}
-	initiatorRecord, active, err := h.actors.LookupActive(ctx, initiator)
+	initiatorFacts, active, err := h.actors.ActorFacts(ctx, initiator)
 	if err != nil {
 		return actorctl.IntroduceRequest{}, err
 	}
@@ -58,7 +58,7 @@ func (h *Home) resolveIntroduction(
 			Code: channel.ErrCodeForbidden, Detail: "member introduction is limited to public declarations",
 		}
 	}
-	if facts.Visibility != "public" && initiatorRecord.Principal != facts.OwnerPrincipal {
+	if facts.Visibility != "public" && initiatorFacts.Principal != facts.OwnerPrincipal {
 		return actorctl.IntroduceRequest{}, &channel.OperationError{
 			Code: channel.ErrCodeForbidden, Detail: "declaration is private",
 		}

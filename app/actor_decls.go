@@ -146,14 +146,14 @@ func (a *App) handleListDecls(c *gin.Context) {
 		declID := decl["id"].(string)
 		instances := make([]gin.H, 0)
 		for chID, bundle := range bundles {
-			declared, err := bundle.View().DeclaredBySource(c.Request.Context(), declID)
+			declared, err := bundle.View().DeclaredInstances(c.Request.Context(), declID)
 			if err != nil {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "declaration instances unavailable"})
 				return
 			}
-			for _, row := range declared {
+			for _, instanceID := range declared {
 				instances = append(instances, gin.H{
-					"channel_id": string(chID), "instance_id": string(row.ID),
+					"channel_id": string(chID), "instance_id": string(instanceID),
 				})
 			}
 		}

@@ -21,12 +21,6 @@ type DeclareRequest struct {
 	CreatedAt    int64
 }
 
-type DeclareResult struct {
-	Record        storespec.ActorRecord
-	Created       bool
-	ConfigUpdated bool
-}
-
 func validateDeclareRequest(in DeclareRequest) error {
 	if in.SourceDeclID == "" || in.Class == "" || in.CreatedAt <= 0 ||
 		in.Placement.Validate() != nil {

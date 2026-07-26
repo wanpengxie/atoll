@@ -21,6 +21,7 @@ type fakeRecordStore struct {
 	entries  map[actor.ActorID]storespec.ActorRecord
 	nextID   int
 	insertN  int
+	updateN  int
 }
 
 func newFakeRecordStore(restored ...storespec.ActorRecord) *fakeRecordStore {
@@ -77,6 +78,7 @@ func (s *fakeRecordStore) UpdateDefinition(
 ) (storespec.ActorRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.updateN++
 	record, ok := s.durable[id]
 	if !ok {
 		return storespec.ActorRecord{}, storespec.ErrActorNotFound
@@ -129,9 +131,11 @@ func seedParent(t *testing.T) (*Controller, *fakeRecordStore, actor.ActorID) {
 
 func currentAttempt(t *testing.T, c *Controller, id actor.ActorID) string {
 	t.Helper()
-	value, ok, err := c.lookup(id)
-	if err != nil || !ok {
-		t.Fatalf("lookup %q: ok=%v err=%v", id, ok, err)
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	value, ok := c.actors[id]
+	if !ok {
+		t.Fatalf("actor %q is not in the ledger", id)
 	}
 	return string(value.Attempt)
 }
@@ -258,22 +262,106 @@ func TestRestartIsEdgeTriggeredAndTouchesNoRecord(t *testing.T) {
 	}
 }
 
+// The equal-value short circuit is the ONE home of equality: two consecutive
+// reconcile rounds over an unchanged declaration write no row and mint no term,
+// so the 30-second pull loop can never produce a term storm.
 func TestApplyDeclarationEqualValueIsANoOp(t *testing.T) {
 	ctx := context.Background()
-	controller, _, parent := seedParent(t)
+	controller, store, parent := seedParent(t)
 	attempt := currentAttempt(t, controller, parent)
 
-	if err := mustApply(controller, ctx, parent, "agent", nil); err != nil {
-		t.Fatal(err)
+	for round := range 2 {
+		if err := mustApply(controller, ctx, parent, "agent", nil); err != nil {
+			t.Fatal(err)
+		}
+		if currentAttempt(t, controller, parent) != attempt {
+			t.Fatalf("round %d: an equal definition minted a new term", round)
+		}
 	}
-	if currentAttempt(t, controller, parent) != attempt {
-		t.Fatal("an equal definition must not mint a new term")
+	store.mu.Lock()
+	updates := store.updateN
+	store.mu.Unlock()
+	if updates != 0 {
+		t.Fatalf("equal definition wrote the row %d times, want 0", updates)
 	}
+
 	if err := mustApply(controller, ctx, parent, "agent-v2", nil); err != nil {
 		t.Fatal(err)
 	}
 	if currentAttempt(t, controller, parent) == attempt {
 		t.Fatal("a changed definition must mint a new term")
+	}
+	store.mu.Lock()
+	updates = store.updateN
+	store.mu.Unlock()
+	if updates != 1 {
+		t.Fatalf("changed definition wrote the row %d times, want 1", updates)
+	}
+}
+
+// --- narrow projections ------------------------------------------------------
+
+// Every public projection is question-shaped: identity roster, declaration
+// instances, identity facts. None of them hands out a record, and none carries
+// a field the asking question does not need.
+func TestNarrowProjectionsAnswerOneQuestionEach(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeRecordStore(
+		storespec.ActorRecord{
+			ID: "agent:a", Kind: actor.KindAgent, SourceDeclID: "decl:x",
+			Definition: storespec.ActorDefinition{Class: "agent"},
+			Placement:  storespec.NewServerPlacement(),
+		},
+		storespec.ActorRecord{
+			ID: "agent:b", Kind: actor.KindAgent, SourceDeclID: "decl:x",
+			Definition: storespec.ActorDefinition{Class: "agent"},
+			Placement:  storespec.NewServerPlacement(),
+		},
+		storespec.ActorRecord{
+			ID: "human:c", Kind: actor.KindHuman, Principal: "carol",
+			Definition: storespec.ActorDefinition{Class: "human"},
+			Placement:  storespec.NewServerPlacement(),
+		},
+	)
+	controller := newTestController(t, store)
+
+	identities, err := controller.ActiveIdentities()
+	if err != nil || len(identities) != 3 {
+		t.Fatalf("active identities=%+v err=%v", identities, err)
+	}
+	if identities[0].ID != "agent:a" || identities[2].ID != "human:c" {
+		t.Fatalf("active identities are not in canonical id order: %+v", identities)
+	}
+
+	instances, err := controller.DeclaredInstances("decl:x")
+	if err != nil || len(instances) != 2 ||
+		instances[0] != "agent:a" || instances[1] != "agent:b" {
+		t.Fatalf("declared instances=%v err=%v", instances, err)
+	}
+	// A human carries no declaration source, so no declaration owns it.
+	if instances, err := controller.DeclaredInstances(""); err != nil || len(instances) != 0 {
+		t.Fatalf("empty decl id matched %v err=%v", instances, err)
+	}
+	if instances, err := controller.DeclaredInstances("decl:absent"); err != nil || len(instances) != 0 {
+		t.Fatalf("absent decl id matched %v err=%v", instances, err)
+	}
+
+	facts, found, err := controller.ActorFacts(ctx, "human:c")
+	if err != nil || !found || facts.Kind != actor.KindHuman || facts.Principal != "carol" {
+		t.Fatalf("actor facts=%+v found=%v err=%v", facts, found, err)
+	}
+	if _, found, err := controller.ActorFacts(ctx, actor.SystemActorID); err != nil || found {
+		t.Fatalf("kernel answered identity facts: found=%v err=%v", found, err)
+	}
+
+	// The declaration reconcile list is the pull loop's own comparison input:
+	// it carries the definition, the roster deliberately does not.
+	declared, err := controller.DeclaredReconcileList()
+	if err != nil || len(declared) != 2 {
+		t.Fatalf("declared reconcile list=%+v err=%v", declared, err)
+	}
+	if declared[0].Definition.Class != "agent" || declared[0].SourceDeclID != "decl:x" {
+		t.Fatalf("declared reconcile entry=%+v", declared[0])
 	}
 }
 
@@ -345,7 +433,6 @@ func TestKernelIsNeverAMember(t *testing.T) {
 // --- deep copy ---------------------------------------------------------------
 
 func TestRecordHandoffCopiesConfig(t *testing.T) {
-	ctx := context.Background()
 	store := newFakeRecordStore(storespec.ActorRecord{
 		ID: "agent:a", Kind: actor.KindAgent, SourceDeclID: "decl:a",
 		Definition: storespec.ActorDefinition{Class: "agent", Config: []byte(`{"n":1}`)},
@@ -353,14 +440,33 @@ func TestRecordHandoffCopiesConfig(t *testing.T) {
 	})
 	controller := newTestController(t, store)
 
-	record, ok, err := controller.LookupActive(ctx, "agent:a")
-	if err != nil || !ok {
-		t.Fatal(err)
+	// The only projections that hand out a Config alias are the declaration
+	// reconcile list and the execution-domain desired level; both must copy.
+	instances, err := controller.DeclaredReconcileList()
+	if err != nil || len(instances) != 1 {
+		t.Fatalf("declared reconcile list: n=%d err=%v", len(instances), err)
 	}
-	record.Definition.Config[2] = 'X'
-	again, _, _ := controller.LookupActive(ctx, "agent:a")
-	if string(again.Definition.Config) != `{"n":1}` {
-		t.Fatalf("mutating a handed-out record reached the ledger: %s", again.Definition.Config)
+	instances[0].Definition.Config[2] = 'X'
+
+	desired, err := controller.DesiredFor("server", "server")
+	if err != nil || len(desired) != 1 {
+		t.Fatalf("desired: n=%d err=%v", len(desired), err)
+	}
+	body, ok := desired[0].(actorhost.BodyDesired)
+	if !ok {
+		t.Fatalf("desired[0] is %T, want BodyDesired", desired[0])
+	}
+	if string(body.ExecutionSpec.Config) != `{"n":1}` {
+		t.Fatalf("mutating a handed-out projection reached the ledger: %s", body.ExecutionSpec.Config)
+	}
+	body.ExecutionSpec.Config[2] = 'Y'
+
+	again, err := controller.DeclaredReconcileList()
+	if err != nil || len(again) != 1 {
+		t.Fatalf("declared reconcile list: n=%d err=%v", len(again), err)
+	}
+	if string(again[0].Definition.Config) != `{"n":1}` {
+		t.Fatalf("mutating a handed-out projection reached the ledger: %s", again[0].Definition.Config)
 	}
 }
 

@@ -204,9 +204,9 @@ func endedBy(caller actor.ActorID) actor.ActorID {
 func (a *actorSystem) principalsOf(ids []actor.ActorID) []string {
 	out := make([]string, 0, len(ids))
 	for _, id := range ids {
-		record, active, err := a.home.controller.LookupActive(context.Background(), id)
-		if err == nil && active && record.Principal != "" {
-			out = append(out, record.Principal)
+		facts, active, err := a.home.controller.ActorFacts(context.Background(), id)
+		if err == nil && active && facts.Principal != "" {
+			out = append(out, facts.Principal)
 		}
 	}
 	return out
@@ -323,12 +323,19 @@ func (a *actorSystem) HostedIDs() []actor.ActorID {
 // projections
 // ---------------------------------------------------------------------------
 
-func (a *actorSystem) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
-	return a.home.controller.LookupActive(ctx, id)
+func (a *actorSystem) ActorFacts(
+	ctx context.Context,
+	id actor.ActorID,
+) (storespec.ActorFacts, bool, error) {
+	return a.home.controller.ActorFacts(ctx, id)
 }
 
-func (a *actorSystem) ListActive(ctx context.Context) ([]storespec.ActorRecord, error) {
-	return a.home.controller.ListActive(ctx)
+func (a *actorSystem) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
+	return a.home.controller.ActiveIdentities()
+}
+
+func (a *actorSystem) DeclaredInstances(declID string) ([]actor.ActorID, error) {
+	return a.home.controller.DeclaredInstances(declID)
 }
 
 func (a *actorSystem) AdmitIdentity(
@@ -360,11 +367,11 @@ func (a *actorSystem) ResourceActorFacts(
 	if err != nil || !facts.Active {
 		return facts, err
 	}
-	record, active, err := a.home.controller.LookupActive(ctx, id)
+	identity, active, err := a.home.controller.ActorFacts(ctx, id)
 	if err != nil || !active {
 		return facts, err
 	}
-	facts.Owner = a.home.isOwner(record)
+	facts.Owner = a.home.isOwner(identity)
 	return facts, nil
 }
 

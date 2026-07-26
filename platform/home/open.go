@@ -360,20 +360,22 @@ func seedBootstrap(
 		}
 	}
 	for _, declaration := range cfg.BootstrapDeclarations {
-		if _, err := admitBootstrapDeclaration(ctx, cs, declaration); err != nil {
+		if err := admitBootstrapDeclaration(ctx, cs, declaration); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
+// admitBootstrapDeclaration is the bootstrap-only seed write, before any
+// Controller exists. It returns no record: nothing above it may hold one.
 func admitBootstrapDeclaration(
 	ctx context.Context,
 	cs *runtime.ChannelStores,
 	in DeclareRequest,
-) (storespec.ActorRecord, error) {
+) error {
 	if err := validateDeclareRequest(in); err != nil {
-		return storespec.ActorRecord{}, err
+		return err
 	}
 	var config []byte
 	if in.Config != nil {
@@ -387,14 +389,12 @@ func admitBootstrapDeclaration(
 		Placement:    in.Placement,
 	})
 	if err != nil {
-		return storespec.ActorRecord{}, err
+		return err
 	}
 	if in.MakeDefault {
-		if err := cs.Routing.SetDefaultAgent(ctx, record.ID); err != nil {
-			return storespec.ActorRecord{}, err
-		}
+		return cs.Routing.SetDefaultAgent(ctx, record.ID)
 	}
-	return record, nil
+	return nil
 }
 
 // readOwnerPrincipal reads the channel's one owner pointer from genesis. Owner

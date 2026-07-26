@@ -47,7 +47,7 @@ func (e *opEntry) Admit(ctx context.Context, req channel.AdmitRequest) (channel.
 	result, err := e.home.actors.Admit(ctx, actorctl.AdmitRequest{Principal: req.Principal})
 	if err == nil && result.ActorID != "" {
 		e.home.ensureSubjectSlot(result.ActorID)
-		e.home.narrateBirth(ctx, result.ActorID, result.Created)
+		e.home.narrateBirth(ctx, result.ActorID, actor.KindHuman, result.Created)
 	}
 	return result, err
 }
@@ -74,7 +74,7 @@ func (e *opEntry) introduce(
 	}
 	result, err := e.home.actors.Introduce(ctx, command)
 	if err == nil && result.ActorID != "" {
-		e.home.narrateBirth(ctx, result.ActorID, result.Created)
+		e.home.narrateBirth(ctx, result.ActorID, command.Kind, result.Created)
 	}
 	return result, err
 }
@@ -251,16 +251,13 @@ func executionDomain(daemonID string) actorhost.ExecutionDomain {
 }
 
 // narrateBirth writes the "joined the channel" narration for a freshly created
-// record. A replayed birth (created=false) narrates nothing.
-func (h *Home) narrateBirth(ctx context.Context, id actor.ActorID, created bool) {
+// record. A replayed birth (created=false) narrates nothing. The narration is
+// composed from the command's own inputs — the tail never reads truth back.
+func (h *Home) narrateBirth(ctx context.Context, id actor.ActorID, kind actor.Kind, created bool) {
 	if !created {
 		return
 	}
-	record, active, err := h.actors.LookupActive(ctx, id)
-	if err != nil || !active {
-		return
-	}
-	h.announceRegistered(ctx, record)
+	h.announceRegistered(ctx, id, kind)
 }
 
 func asOperateError(err error) error {

@@ -22,7 +22,6 @@ import (
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type gatewayTestCompositionResolver struct{}
@@ -331,11 +330,11 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	var id actor.ActorID
 	var found bool
 	if memberKind == actor.KindAgent {
-		var rows []storespec.ActorRecord
-		rows, err = bundle.View().DeclaredBySource(context.Background(), source)
-		found = len(rows) != 0
+		var ids []actor.ActorID
+		ids, err = bundle.View().DeclaredInstances(context.Background(), source)
+		found = len(ids) != 0
 		if found {
-			id = rows[0].ID
+			id = ids[0]
 		}
 	} else {
 		id, found, err = bundle.View().ResolvePrincipal(context.Background(), memberKind, member)

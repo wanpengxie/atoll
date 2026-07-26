@@ -2,6 +2,7 @@ package actorctl
 
 import (
 	"errors"
+	"slices"
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -37,11 +38,6 @@ const (
 type managedActor struct {
 	Record  storespec.ActorRecord
 	Attempt actorhost.AttemptKey
-}
-
-func (m managedActor) clone() managedActor {
-	m.Record = m.Record.Clone()
-	return m
 }
 
 // AdmitRequest is the pre-resolved human admission. Policy (who may admit, who
@@ -125,7 +121,10 @@ type ForkResult struct {
 }
 
 // ReconcileHints is derived from an already committed transition. It carries no
-// definition, promises no delivery, and a duplicate poke is legal.
+// definition, promises no delivery, and a duplicate poke is legal. Peers is a
+// canonically ordered deduplicated set: the same committed change always
+// projects the same hint value, whatever order the change enumerated its
+// records in.
 type ReconcileHints struct {
 	Server bool
 	Peers  []actorhost.ExecutionDomain
@@ -143,6 +142,7 @@ func (h *ReconcileHints) add(placement storespec.Placement) {
 		}
 	}
 	h.Peers = append(h.Peers, peer)
+	slices.Sort(h.Peers)
 }
 
 // Transition is the committed change set of one Controller command. Platform
@@ -161,11 +161,4 @@ type DeclaredInstance struct {
 	Kind         actor.Kind
 	SourceDeclID string
 	Definition   storespec.ActorDefinition
-}
-
-// ActiveIdentity is the "who is here right now" question shape, consumed by the
-// presence / connection-slot sweeps. It deliberately carries no definition.
-type ActiveIdentity struct {
-	ID   actor.ActorID
-	Kind actor.Kind
 }

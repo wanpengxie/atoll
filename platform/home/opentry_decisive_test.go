@@ -36,14 +36,14 @@ func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 	ctx := context.Background()
 
-	declared, found, err := h.View().DeclaredBySourceOne(ctx, "decl:probe")
+	declared, err := h.View().DeclaredInstances(ctx, "decl:probe")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !found {
-		t.Fatal("bootstrap actor missing")
+	if len(declared) != 1 {
+		t.Fatalf("bootstrap actor missing: instances=%v", declared)
 	}
-	sender := declared.ID
+	sender := declared[0]
 
 	before, err := h.cs.Query.MaxSeq(ctx)
 	if err != nil {

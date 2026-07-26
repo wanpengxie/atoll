@@ -18,7 +18,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/registry"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type e2eLinkPlan struct {
@@ -177,19 +176,12 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	if len(planBeforeRestart) != 1 || planBeforeRestart[0].ActorID != actor.ActorID(instID) {
 		t.Fatalf("initial applied plan = %#v, want exactly %s", planBeforeRestart, instID)
 	}
-	actorsBeforeRestart, err := env.app.ActorsForTest(channel.ID(chID))
+	factsBeforeRestart, member, err := env.app.ActorFactsForTest(channel.ID(chID), actor.ActorID(instID))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var memberBeforeRestart storespec.ActorRecord
-	for _, rec := range actorsBeforeRestart {
-		if rec.ID == actor.ActorID(instID) {
-			memberBeforeRestart = rec
-			break
-		}
-	}
-	if memberBeforeRestart.ID == "" {
-		t.Fatalf("built daemon actor %s has no canonical membership row", instID)
+	if !member {
+		t.Fatalf("built daemon actor %s has no canonical membership", instID)
 	}
 	// Placement is actor-control authority, not legacy registry metadata. The
 	// accepted daemon-scoped Plan above is the observable projection of that
@@ -215,22 +207,13 @@ func TestDaemonComposition_E2E(t *testing.T) {
 		return len(rows) == 1 && rows[0].ActorID == planBeforeRestart[0].ActorID &&
 			rows[0].AttemptKey != planBeforeRestart[0].AttemptKey && buildCount(actor.ActorID(instID)) == 2
 	}, "version restart did not replace the daemon body")
-	actorsAfterRestart, err := env.app.ActorsForTest(channel.ID(chID))
+	factsAfterRestart, member, err := env.app.ActorFactsForTest(channel.ID(chID), actor.ActorID(instID))
 	if err != nil {
 		t.Fatal(err)
 	}
-	var memberAfterRestart storespec.ActorRecord
-	for _, rec := range actorsAfterRestart {
-		if rec.ID == actor.ActorID(instID) {
-			memberAfterRestart = rec
-			break
-		}
-	}
-	if memberAfterRestart.ID != memberBeforeRestart.ID ||
-		memberAfterRestart.Kind != memberBeforeRestart.Kind ||
-		memberAfterRestart.Principal != memberBeforeRestart.Principal ||
-		memberAfterRestart.CreatedAt != memberBeforeRestart.CreatedAt {
-		t.Fatalf("version restart changed membership identity:\n before: %#v\n  after: %#v", memberBeforeRestart, memberAfterRestart)
+	if !member || factsAfterRestart != factsBeforeRestart {
+		t.Fatalf("version restart changed membership identity:\n before: %#v\n  after: %#v (member=%v)",
+			factsBeforeRestart, factsAfterRestart, member)
 	}
 
 	removed := env.do(t, "DELETE", "/api/actor-decls/"+agentID, nil, cookies)

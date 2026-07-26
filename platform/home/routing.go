@@ -45,17 +45,18 @@ func (h *Home) resolveAudience(ctx context.Context, env *message.Envelope) error
 			return ErrRoutingUnavailable
 		}
 	}
-	boost, hasBoost, err := h.View().DeclaredBySourceOne(ctx, defaultRoutingAgentSource)
+	boosts, err := h.View().DeclaredInstances(ctx, defaultRoutingAgentSource)
 	if err != nil {
 		return err
 	}
-	if !hasBoost {
+	if len(boosts) == 0 {
 		return ErrBoostMissing
 	}
-	if _, live := h.View().Stat(boost.ID); !live {
+	boostID := boosts[0]
+	if _, live := h.View().Stat(boostID); !live {
 		return ErrRoutingUnavailable
 	}
-	env.Audience = message.Audience{boost.ID}
+	env.Audience = message.Audience{boostID}
 	env.Kind = message.KindRequest
 	return nil
 }

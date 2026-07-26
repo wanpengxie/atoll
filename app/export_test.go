@@ -19,20 +19,51 @@ import (
 // errTestChannelNotLoaded stands in for a torn-down home in the test seams below.
 var errTestChannelNotLoaded = errors.New("app: channel not loaded")
 
-func declaredBySourceOneForTest(ctx context.Context, view channelhost.View, source string) (storespec.ActorRecord, bool, error) {
-	rows, err := view.DeclaredBySource(ctx, source)
-	if err != nil || len(rows) == 0 {
-		return storespec.ActorRecord{}, false, err
+func declaredInstanceOneForTest(ctx context.Context, view channelhost.View, source string) (actor.ActorID, bool, error) {
+	ids, err := view.DeclaredInstances(ctx, source)
+	if err != nil || len(ids) == 0 {
+		return "", false, err
 	}
-	return rows[0], true, nil
+	return ids[0], true, nil
 }
 
-func (a *App) ActorsForTest(chID channel.ID) ([]storespec.ActorRecord, error) {
+// DeclaredInstancesForTest asks the membrane's declaration-instance question.
+func (a *App) DeclaredInstancesForTest(chID channel.ID, declID string) ([]actor.ActorID, error) {
 	bundle, ok := a.host.Acquire(chID)
 	if !ok {
 		return nil, errTestChannelNotLoaded
 	}
-	return bundle.View().ActiveActors(context.Background())
+	return bundle.View().DeclaredInstances(context.Background(), declID)
+}
+
+// ActorFactsForTest asks the membrane's identity-fact question.
+func (a *App) ActorFactsForTest(chID channel.ID, id actor.ActorID) (channel.ActorFacts, bool, error) {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return channel.ActorFacts{}, false, errTestChannelNotLoaded
+	}
+	return bundle.View().ActorFacts(context.Background(), id)
+}
+
+// HumanRosterForTest asks the membrane's entitlement projection.
+func (a *App) HumanRosterForTest(chID channel.ID) ([]channel.HumanRosterEntry, error) {
+	bundle, ok := a.host.Acquire(chID)
+	if !ok {
+		return nil, errTestChannelNotLoaded
+	}
+	return bundle.View().HumanRoster(context.Background())
+}
+
+// ResolvedDeclarationForTest is the app-side half of declaration convergence:
+// exactly what the runtime declaration pull loop reads for this channel and
+// declaration. The runtime-side half (apply / equal-value no-op) is proven in
+// platform/home, where the Controller projection lives.
+func (a *App) ResolvedDeclarationForTest(
+	ctx context.Context,
+	chID channel.ID,
+	declID string,
+) (channel.DeclarationFacts, error) {
+	return compositionResolver{app: a}.ResolveDeclaration(ctx, chID, declID)
 }
 
 func (a *App) MessagesForTest(chID channel.ID) ([]storespec.StoredRow, error) {
@@ -40,21 +71,15 @@ func (a *App) MessagesForTest(chID channel.ID) ([]storespec.StoredRow, error) {
 	if !ok {
 		return nil, errTestChannelNotLoaded
 	}
-	actors, err := bundle.View().ActiveActors(context.Background())
+	roster, err := bundle.View().HumanRoster(context.Background())
 	if err != nil {
 		return nil, err
 	}
-	for _, row := range actors {
-		facts, found, err := bundle.View().ActorFacts(context.Background(), row.ID)
-		if err != nil {
-			return nil, err
-		}
-		if found && facts.Kind == actor.KindHuman {
-			rows, _, err := bundle.View().ReadVisibleAfterSeq(context.Background(), channel.Reader{
-				ActorID: row.ID, Mode: channel.ReaderMember,
-			}, 0, 1000)
-			return rows, err
-		}
+	for _, entry := range roster {
+		rows, _, err := bundle.View().ReadVisibleAfterSeq(context.Background(), channel.Reader{
+			ActorID: entry.ActorID, Mode: channel.ReaderMember,
+		}, 0, 1000)
+		return rows, err
 	}
 	return nil, errors.New("app: test channel has no active human reader")
 }
@@ -146,12 +171,12 @@ func (a *App) ResolveSourceForTest(chID, source string) (actor.ActorID, error) {
 	if !ok {
 		return "", errTestChannelNotLoaded
 	}
-	row, found, err := declaredBySourceOneForTest(context.Background(), bundle.View(), source)
+	id, found, err := declaredInstanceOneForTest(context.Background(), bundle.View(), source)
 	if err != nil {
 		return "", err
 	}
 	if found {
-		return row.ID, nil
+		return id, nil
 	}
 	return "", fmt.Errorf("declaration source not found")
 }
@@ -170,7 +195,7 @@ func (a *App) RemoveRealmToolForTest(chID channel.ID) error {
 	if !ok {
 		return errTestChannelNotLoaded
 	}
-	row, found, err := declaredBySourceOneForTest(context.Background(), bundle.View(), realmToolDeclID)
+	target, found, err := declaredInstanceOneForTest(context.Background(), bundle.View(), realmToolDeclID)
 	if err != nil || !found {
 		return err
 	}
@@ -183,7 +208,7 @@ func (a *App) RemoveRealmToolForTest(chID channel.ID) error {
 		return err
 	}
 	_, err = bundle.SysOp().Remove(context.Background(), channel.RemoveRequest{
-		Ref: "test-remove-realm-tool:" + uuid.NewString(), Target: row.ID, InitiatorActorID: initiator,
+		Ref: "test-remove-realm-tool:" + uuid.NewString(), Target: target, InitiatorActorID: initiator,
 	})
 	return err
 }

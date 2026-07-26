@@ -50,36 +50,17 @@ type decayMembership struct {
 	registry storespec.ActorRegistryStore
 }
 
-func (m decayMembership) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
-	_, ok, err := m.registry.LookupActive(ctx, id)
-	if err != nil {
-		return storespec.ActorRecord{}, false, err
-	}
-	if !ok {
-		return storespec.ActorRecord{}, false, nil
-	}
-	p := storespec.NewServerPlacement()
-	return storespec.ActorRecord{ID: id, Placement: p}, true, nil
-}
-
-func (m decayMembership) ListActive(context.Context) ([]storespec.ActorRecord, error) {
-	return nil, nil
-}
-
 func (m decayMembership) ResourceActorFacts(
 	ctx context.Context,
 	id actor.ActorID,
 ) (storespec.ResourceActorFacts, error) {
-	row, ok, err := m.LookupActive(ctx, id)
-	if err != nil {
+	_, ok, err := m.registry.LookupActive(ctx, id)
+	if err != nil || !ok {
 		return storespec.ResourceActorFacts{}, err
-	}
-	if !ok {
-		return storespec.ResourceActorFacts{}, nil
 	}
 	// Owner is a genesis-pointer judgement made at the Platform door; this
 	// runtime-level fixture never fabricates one.
-	return storespec.ResourceActorFacts{Active: row.ID != ""}, nil
+	return storespec.ResourceActorFacts{Active: true}, nil
 }
 
 // newDecayDoor builds a bare door directly over a real store (past-the-Minter,

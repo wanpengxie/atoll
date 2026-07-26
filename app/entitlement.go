@@ -85,16 +85,14 @@ func (a *App) sweepChannelMembership(ctx context.Context, chID channel.ID) {
 	if !ok {
 		return
 	}
-	actors, err := bundle.View().ActiveActors(ctx)
+	roster, err := bundle.View().HumanRoster(ctx)
 	if err != nil {
 		a.logger.Warn("membership sweep roster read failed", "channel", chID, "err", err)
 		return
 	}
 	truth := make(map[string]string)
-	for _, row := range actors {
-		if row.Kind == actor.KindHuman && row.Principal != "" {
-			truth[row.Principal] = string(row.ID)
-		}
+	for _, entry := range roster {
+		truth[entry.Principal] = string(entry.ActorID)
 	}
 	projRows, err := a.db.QueryContext(ctx, `SELECT principal,actor_id FROM principal_channels WHERE channel_id=?`, string(chID))
 	if err != nil {

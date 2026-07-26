@@ -20,6 +20,6 @@ func (h *Home) admitChannelOwner(ctx context.Context, principal string) (actor.A
 		return "", fmt.Errorf("platform: admit channel owner: %w", err)
 	}
 	h.ensureSubjectSlot(result.ActorID)
-	h.narrateBirth(ctx, result.ActorID, result.Created)
+	h.narrateBirth(ctx, result.ActorID, actor.KindHuman, result.Created)
 	return result.ActorID, nil
 }

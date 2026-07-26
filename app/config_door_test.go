@@ -1,6 +1,7 @@
 package app_test
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"sync"
@@ -114,28 +115,35 @@ func TestConfigDoor_ProcEndToEnd(t *testing.T) {
 	assertStatus(t, introducedResp, http.StatusCreated)
 	introduced := respJSON(t, introducedResp)
 	instanceID := actor.ActorID(introduced["actor_id"].(string))
-	waitActorConfig(t, env, channel.ID(s.chID), daemonID, instanceID, "v1")
+	_ = daemonID
+	waitDeclaredConfig(t, env, channel.ID(s.chID), declID, instanceID, "v1")
 
 	updated := env.do(t, "PATCH", "/api/actor-decls/"+declID, map[string]any{"config": map[string]any{"model": "v2"}}, s.cookies)
 	assertStatus(t, updated, http.StatusOK)
-	waitActorConfig(t, env, channel.ID(s.chID), daemonID, instanceID, "v2")
+	waitDeclaredConfig(t, env, channel.ID(s.chID), declID, instanceID, "v2")
 }
 
-func waitActorConfig(t *testing.T, env *testEnv, chID channel.ID, daemonID string, instanceID actor.ActorID, want string) {
+// waitDeclaredConfig is the app-level half of declaration convergence: the
+// resolved declaration the runtime pull loop reads reaches `want`, and the
+// declaration still has exactly the one instance (a config change is a new term
+// on the SAME record, never a second instance). What the Controller then does
+// with that definition — mint a new term on change, no-op on an equal value —
+// is proven in platform/home, where the projection lives; the business membrane
+// deliberately exposes no definition.
+func waitDeclaredConfig(t *testing.T, env *testEnv, chID channel.ID, declID string, instanceID actor.ActorID, want string) {
 	t.Helper()
 	deadline := time.Now().Add(3 * time.Second)
 	for time.Now().Before(deadline) {
-		rows, err := env.app.ActorsForTest(chID)
-		if err == nil {
-			for _, row := range rows {
-				if row.ID != instanceID || row.Placement.Host != daemonID {
-					continue
-				}
-				var config map[string]any
-				if json.Unmarshal(row.Definition.Config, &config) == nil && config["model"] == want {
-					return
-				}
+		facts, err := env.app.ResolvedDeclarationForTest(context.Background(), chID, declID)
+		if err == nil && configModel(facts.Config) == want {
+			ids, instErr := env.app.DeclaredInstancesForTest(chID, declID)
+			if instErr != nil {
+				t.Fatalf("declared instances: %v", instErr)
 			}
+			if len(ids) != 1 || ids[0] != instanceID {
+				t.Fatalf("declaration instances=%v, want exactly [%s]", ids, instanceID)
+			}
+			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

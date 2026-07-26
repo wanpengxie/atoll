@@ -51,32 +51,11 @@ type testAuthority struct {
 	durableRows storespec.ActorRegistryStore
 }
 
-func (a testAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
-	if a.durableRows == nil {
-		return storespec.ActorRecord{ID: id, Kind: actor.KindAgent, Placement: storespec.NewServerPlacement()}, true, nil
-	}
-	rec, ok, err := a.durableRows.LookupActive(ctx, id)
-	if err != nil || !ok {
-		return storespec.ActorRecord{}, false, err
-	}
-	return storespec.ActorRecord{ID: rec.ID, Kind: rec.Kind, Placement: storespec.NewServerPlacement()}, true, nil
-}
-func (a testAuthority) ListActive(ctx context.Context) ([]storespec.ActorRecord, error) {
-	if a.durableRows == nil {
-		return nil, nil
-	}
-	rows, err := a.durableRows.ListActive(ctx)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]storespec.ActorRecord, 0, len(rows))
-	for _, row := range rows {
-		out = append(out, storespec.ActorRecord{ID: row.ID, Kind: row.Kind, Placement: storespec.NewServerPlacement()})
-	}
-	return out, nil
-}
 func (a testAuthority) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
-	_, ok, err := a.LookupActive(ctx, id)
+	if a.durableRows == nil {
+		return true, nil
+	}
+	_, ok, err := a.durableRows.LookupActive(ctx, id)
 	return ok, err
 }
 

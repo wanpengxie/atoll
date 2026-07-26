@@ -26,7 +26,8 @@ func TestActorDeclListProjectsInstancesWithoutChannelLocalVersions(t *testing.T)
 	assertStatus(t, introduced, http.StatusCreated)
 	updated := env.do(t, http.MethodPut, "/api/channels/"+s.chID+"/decls/"+declID+"/config", map[string]any{"config": map[string]any{"model": "v2"}}, s.cookies)
 	assertStatus(t, updated, http.StatusOK)
-	waitActorConfig(t, env, channel.ID(s.chID), firstDaemon, firstActor, "v2")
+	_ = firstDaemon
+	waitDeclaredConfig(t, env, channel.ID(s.chID), declID, firstActor, "v2")
 
 	w = env.do(t, "GET", "/api/actor-decls", nil, s.cookies)
 	assertStatus(t, w, http.StatusOK)

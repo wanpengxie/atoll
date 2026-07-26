@@ -8,7 +8,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // homeActorEffects is the composition-root tail of committed Controller
@@ -79,16 +78,16 @@ func (h *Home) notifyMembership(principals ...string) {
 // channel" narration into the conversation stream with the system pen. They are
 // best effort: a crash window may drop one, and nothing ever back-fills or
 // reconciles them. No machine ever derives actor truth from message history.
-func (h *Home) announceRegistered(ctx context.Context, record storespec.ActorRecord) {
-	if h == nil || h.systemPen == nil || record.ID == "" {
+func (h *Home) announceRegistered(ctx context.Context, id actor.ActorID, kind actor.Kind) {
+	if h == nil || h.systemPen == nil || id == "" {
 		return
 	}
 	h.writeNarration(ctx, &message.Envelope{
-		ID:   message.ID("actor-registered:" + string(record.ID)),
+		ID:   message.ID("actor-registered:" + string(id)),
 		Kind: message.KindEvent, Type: actor.ReservedSystemActorRegistered,
 		Payload: jsonPayload(map[string]any{
-			"actor_id": record.ID, "actor_kind": record.Kind,
-			"registered_at": record.CreatedAt,
+			"actor_id": id, "actor_kind": kind,
+			"registered_at": h.nowMs(),
 		}),
 		Visibility: message.VisibilitySystem,
 		Audience:   message.Audience{actor.SystemActorID},

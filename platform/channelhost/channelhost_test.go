@@ -59,9 +59,9 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	if !ok {
 		t.Fatal("provisioned channel not serving")
 	}
-	initialRows, err := initial.View().DeclaredBySource(ctx, "decl-a")
-	if err != nil || len(initialRows) != 1 || string(initialRows[0].Definition.Config) != `{"value":"a"}` {
-		t.Fatalf("equal first sweep double-wrote genesis: rows=%+v err=%v", initialRows, err)
+	initialRows, err := initial.View().DeclaredInstances(ctx, "decl-a")
+	if err != nil || len(initialRows) != 1 {
+		t.Fatalf("equal first sweep double-wrote genesis: instances=%+v err=%v", initialRows, err)
 	}
 	if err := host.Close(); err != nil {
 		t.Fatal(err)
@@ -80,8 +80,12 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 	if !ok {
 		t.Fatal("reopened channel not serving")
 	}
-	rows, err := bundle.View().DeclaredBySource(ctx, "decl-a")
-	if err != nil || len(rows) != 1 || string(rows[0].Definition.Config) != `{"value":"b"}` {
+	// The reopened channel keeps exactly one instance of the declaration: the
+	// first sweep re-applies the latest definition onto the same record instead
+	// of introducing a second one. What the definition now says is the
+	// Controller's own reconcile projection, not a business-membrane fact.
+	rows, err := bundle.View().DeclaredInstances(ctx, "decl-a")
+	if err != nil || len(rows) != 1 || rows[0] != initialRows[0] {
 		t.Fatalf("first-sweep declaration=(%+v,%v)", rows, err)
 	}
 }
@@ -147,8 +151,8 @@ func TestOpenFirstSweepDetachesPersistedTombstonedDaemon(t *testing.T) {
 	// Detach is a wiring-domain action: it removes the binding row and kills no
 	// actor. The daemon-placed actor stays a member with a dangling desired —
 	// re-attaching the same daemon id reconciles it back.
-	if rows, err := bundle.View().DeclaredBySource(ctx, "decl-a"); err != nil || len(rows) != 1 {
-		t.Fatalf("detach must not end the daemon-placed actor: rows=%v err=%v", rows, err)
+	if rows, err := bundle.View().DeclaredInstances(ctx, "decl-a"); err != nil || len(rows) != 1 {
+		t.Fatalf("detach must not end the daemon-placed actor: instances=%v err=%v", rows, err)
 	}
 }
 

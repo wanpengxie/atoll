@@ -279,8 +279,8 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 		}
 	}()
 	for _, declaration := range spec.GenesisDeclarations {
-		rows, err := homeInstance.View().DeclaredBySource(ctx, declaration.DeclID)
-		if err != nil || len(rows) != 1 || rows[0].Definition.Class != declaration.Rendered.Class {
+		ids, err := homeInstance.View().DeclaredInstances(ctx, declaration.DeclID)
+		if err != nil || len(ids) != 1 {
 			return ProvisionReceipt{}, fmt.Errorf("channelhost: genesis declaration %q failed readback", declaration.DeclID)
 		}
 	}

@@ -37,10 +37,14 @@ type SysOp interface {
 	DetachDaemon(context.Context, channel.DaemonRequest) (channel.BindingResult, error)
 }
 
+// View is the business membrane's read face. Every actor-truth method is
+// question-shaped: App never receives a runtime record and never imports a
+// runtime storage or control DTO.
 type View interface {
 	DefaultAgent(context.Context) (actor.ActorID, bool, error)
-	DeclaredBySource(context.Context, string) ([]storespec.ActorRecord, error)
-	ActiveActors(context.Context) ([]storespec.ActorRecord, error)
+	HumanRoster(context.Context) ([]channel.HumanRosterEntry, error)
+	DeclaredInstances(context.Context, string) ([]actor.ActorID, error)
+	HasDeclaredInstance(context.Context, string) (bool, error)
 	ResolvePrincipal(context.Context, actor.Kind, string) (actor.ActorID, bool, error)
 	OwnerPrincipal(context.Context) (string, bool, error)
 	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]storespec.StoredRow, int64, error)
@@ -86,11 +90,14 @@ type viewAdapter struct{ home *home.Home }
 func (a viewAdapter) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
 	return a.home.View().DefaultAgent(ctx)
 }
-func (a viewAdapter) DeclaredBySource(ctx context.Context, d string) ([]storespec.ActorRecord, error) {
-	return a.home.View().DeclaredBySource(ctx, d)
+func (a viewAdapter) HumanRoster(ctx context.Context) ([]channel.HumanRosterEntry, error) {
+	return a.home.View().HumanRoster(ctx)
 }
-func (a viewAdapter) ActiveActors(ctx context.Context) ([]storespec.ActorRecord, error) {
-	return a.home.View().ActiveActors(ctx)
+func (a viewAdapter) DeclaredInstances(ctx context.Context, d string) ([]actor.ActorID, error) {
+	return a.home.View().DeclaredInstances(ctx, d)
+}
+func (a viewAdapter) HasDeclaredInstance(ctx context.Context, d string) (bool, error) {
+	return a.home.View().HasDeclaredInstance(ctx, d)
 }
 func (a viewAdapter) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {
 	return a.home.View().ResolvePrincipal(ctx, kind, principal)

@@ -32,19 +32,6 @@ func (a *accessRunAuthority) Admit() error {
 
 type accessBackingAuthority struct{}
 
-func (*accessBackingAuthority) LookupActive(
-	_ context.Context,
-	id actor.ActorID,
-) (storespec.ActorRecord, bool, error) {
-	return storespec.ActorRecord{
-		ID: id, Kind: actor.KindAgent, Placement: storespec.NewServerPlacement(),
-	}, true, nil
-}
-
-func (*accessBackingAuthority) ListActive(context.Context) ([]storespec.ActorRecord, error) {
-	return nil, nil
-}
-
 func (*accessBackingAuthority) ResourceActorFacts(
 	context.Context,
 	actor.ActorID,

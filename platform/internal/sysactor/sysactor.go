@@ -20,6 +20,15 @@ type PresenceStat interface {
 	Snapshot(ctx context.Context, id actor.ActorID) (presence.Snapshot, error)
 }
 
+// Directory is the narrow actor-truth surface the system actor consults: the
+// membership roster it composes actor.list from, and the one membership boolean
+// its operate gate asks. It never receives an actor record — the directory row
+// carries identity and liveness only.
+type Directory interface {
+	storespec.IdentityRoster
+	storespec.IdentityPresence
+}
+
 // SystemActor holds one incarnation's process state: it answers channel-wide
 // directory queries (actor.list) by composing the unified active-identity
 // authority with volatile liveness (the injected seam). It is channel-agnostic
@@ -32,7 +41,7 @@ type PresenceStat interface {
 // actorbase.New seam every other actor does). Def mints a fresh SystemActor per
 // incarnation; run(sys) is the process body.
 type SystemActor struct {
-	authority storespec.ActorDirectory
+	authority Directory
 	clock     func() time.Time
 	presence  PresenceStat
 	operate   OperateExecutor
@@ -41,7 +50,7 @@ type SystemActor struct {
 
 // Deps bundles the channel services the system actor needs.
 type Deps struct {
-	Authority storespec.ActorDirectory
+	Authority Directory
 	Clock     func() time.Time
 	Presence  PresenceStat
 	Logger    *slog.Logger
@@ -133,19 +142,19 @@ func (s *SystemActor) handle(sys actorbase.Sys, msg actorbase.Msg) {
 // Readiness is deliberately absent: it is not a substrate axis — whether an actor can service a request
 // is the OUTCOME of send→terminal, never a stored field here.
 func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
-	rows, err := s.authority.ListActive(msg.Ctx())
+	identities, err := s.authority.ActiveIdentities()
 	if err != nil {
 		return
 	}
-	catalog := introspect.Catalog{Actors: make([]introspect.CatalogEntry, 0, len(rows))}
-	for _, r := range rows {
-		snapshot, err := s.snapshot(msg.Ctx(), r.ID)
+	catalog := introspect.Catalog{Actors: make([]introspect.CatalogEntry, 0, len(identities))}
+	for _, identity := range identities {
+		snapshot, err := s.snapshot(msg.Ctx(), identity.ID)
 		if err != nil {
-			s.logger.Warn("sysactor.presence_snapshot_failed", "actor", string(r.ID), "error", err)
+			s.logger.Warn("sysactor.presence_snapshot_failed", "actor", string(identity.ID), "error", err)
 		}
 		present, uptimeMs := s.liveness(snapshot)
 		catalog.Actors = append(catalog.Actors, introspect.CatalogEntry{
-			ID: string(r.ID), Kind: string(r.Kind),
+			ID: string(identity.ID), Kind: string(identity.Kind),
 			Present:  present,
 			UptimeMs: uptimeMs,
 			Device:   deviceTestimony(snapshot),

@@ -15,28 +15,25 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// fakeRegistry serves a fixed membership set (the durable axis).
+// fakeRegistry serves a fixed membership set (the roster axis).
 type fakeRegistry struct{ rows []storespec.Record }
 
-func (f fakeRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
+func (f fakeRegistry) IsActive(_ context.Context, id actor.ActorID) (bool, error) {
 	for _, row := range f.rows {
 		if row.ID == id && row.IsActive() {
-			return controlRow(row), true, nil
+			return true, nil
 		}
 	}
-	return storespec.ActorRecord{}, false, nil
+	return false, nil
 }
-func (f fakeRegistry) ListActive(context.Context) ([]storespec.ActorRecord, error) {
-	rows := make([]storespec.ActorRecord, 0, len(f.rows))
+func (f fakeRegistry) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
+	rows := make([]storespec.ActiveIdentity, 0, len(f.rows))
 	for _, row := range f.rows {
 		if row.IsActive() {
-			rows = append(rows, controlRow(row))
+			rows = append(rows, storespec.ActiveIdentity{ID: row.ID, Kind: row.Kind})
 		}
 	}
 	return rows, nil
-}
-func controlRow(row storespec.Record) storespec.ActorRecord {
-	return storespec.ActorRecord{ID: row.ID, Kind: row.Kind, Principal: row.Principal, CreatedAt: row.CreatedAt}
 }
 
 // fakeStat is the injected obs-read seam (substrate pull-stat stand-in); it reports the
@@ -203,25 +200,25 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	}
 }
 
-type recordAuthority struct{ rows []storespec.ActorRecord }
+type recordAuthority struct{ rows []storespec.ActiveIdentity }
 
-func (a recordAuthority) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
+func (a recordAuthority) IsActive(_ context.Context, id actor.ActorID) (bool, error) {
 	for _, row := range a.rows {
 		if row.ID == id {
-			return row, true, nil
+			return true, nil
 		}
 	}
-	return storespec.ActorRecord{}, false, nil
+	return false, nil
 }
-func (a recordAuthority) ListActive(context.Context) ([]storespec.ActorRecord, error) {
-	return append([]storespec.ActorRecord(nil), a.rows...), nil
+func (a recordAuthority) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
+	return append([]storespec.ActiveIdentity(nil), a.rows...), nil
 }
 
 // The kernel is not a member, so it has no record to list. Its directory entry
 // is synthesized from the identity constant by the projection layer.
 func TestActorListSynthesizesKernelEntryFromConstant(t *testing.T) {
 	member := actor.ActorID("agent:master")
-	s := New(Deps{Authority: recordAuthority{rows: []storespec.ActorRecord{
+	s := New(Deps{Authority: recordAuthority{rows: []storespec.ActiveIdentity{
 		{ID: member, Kind: actor.KindAgent},
 	}}})
 	sys := &fakeSys{}

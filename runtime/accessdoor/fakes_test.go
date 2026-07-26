@@ -237,28 +237,6 @@ type fakeMembership struct {
 	lookupCalls []actor.ActorID
 }
 
-func (m *fakeMembership) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
-	m.calls++
-	m.lookupCalls = append(m.lookupCalls, id)
-	if m.err != nil {
-		return storespec.ActorRecord{}, false, m.err
-	}
-	if m.lookupErr != nil {
-		return storespec.ActorRecord{}, false, m.lookupErr
-	}
-	if !m.isMember && !m.lookupFound {
-		return storespec.ActorRecord{}, false, nil
-	}
-	p := storespec.NewServerPlacement()
-	if m.lookupHost != "" {
-		p, _ = storespec.NewDaemonPlacement(m.lookupHost)
-	}
-	return storespec.ActorRecord{ID: id, Placement: p}, true, nil
-}
-
-func (m *fakeMembership) ListActive(context.Context) ([]storespec.ActorRecord, error) {
-	return nil, nil
-}
 func (m *fakeMembership) ResourceActorFacts(
 	_ context.Context,
 	id actor.ActorID,

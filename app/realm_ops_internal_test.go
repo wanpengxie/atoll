@@ -74,12 +74,12 @@ func TestRealmOpsAgentCannotWriteDeclarationRegistry(t *testing.T) {
 	bundle := openTestChannelForTest(t, a, "agent-realm-ops", []channelhost.GenesisDeclaration{{
 		DeclID: "requester-decl", Kind: actor.KindAgent, Rendered: snapshot,
 	}})
-	agent, found, err := declaredBySourceOneForTest(context.Background(), bundle.View(), "requester-decl")
+	agent, found, err := declaredInstanceOneForTest(context.Background(), bundle.View(), "requester-decl")
 	if err != nil || !found {
-		t.Fatalf("resolve requester=(%s,%v,%v)", agent.ID, found, err)
+		t.Fatalf("resolve requester=(%s,%v,%v)", agent, found, err)
 	}
 	_, err = (realmOps{app: a}).CreateDeclaration(context.Background(), channel.Requester{
-		ActorID: agent.ID, ChannelID: "agent-realm-ops", RequestID: "agent-create-request",
+		ActorID: agent, ChannelID: "agent-realm-ops", RequestID: "agent-create-request",
 	}, channel.DeclSpec{Name: "must not persist", Class: "go-kimi", Visibility: "public", Config: json.RawMessage(`{}`)})
 	var realmErr *channel.RealmError
 	if !errors.As(err, &realmErr) || realmErr.Code != channel.RealmForbidden {
@@ -108,9 +108,13 @@ func TestRealmOpsAgentWithEmptyPrincipalOwnsIntroduceByActorCoordinate(t *testin
 	bundle := openTestChannelForTest(t, a, "agent-owned-operation", []channelhost.GenesisDeclaration{{
 		DeclID: "requester-decl", Kind: actor.KindAgent, Rendered: requesterSnapshot,
 	}})
-	requester, found, err := declaredBySourceOneForTest(context.Background(), bundle.View(), "requester-decl")
-	if err != nil || !found || requester.Principal != "" {
+	requester, found, err := declaredInstanceOneForTest(context.Background(), bundle.View(), "requester-decl")
+	if err != nil || !found {
 		t.Fatalf("requester=%+v found=%v err=%v", requester, found, err)
+	}
+	if facts, ok, factsErr := bundle.View().ActorFacts(context.Background(), requester); factsErr != nil ||
+		!ok || facts.Principal != "" {
+		t.Fatalf("requester facts=%+v ok=%v err=%v", facts, ok, factsErr)
 	}
 	if _, err := bundle.SysOp().AttachDaemon(context.Background(), channel.DaemonRequest{Ref: "attach-agent-owner", DaemonID: "daemon-a"}); err != nil {
 		t.Fatal(err)
@@ -123,7 +127,7 @@ func TestRealmOpsAgentWithEmptyPrincipalOwnsIntroduceByActorCoordinate(t *testin
 		t.Fatal(err)
 	}
 	result, err := (realmOps{app: a}).Introduce(context.Background(), channel.Requester{
-		ActorID: requester.ID, ChannelID: "agent-owned-operation", RequestID: "agent-introduce",
+		ActorID: requester, ChannelID: "agent-owned-operation", RequestID: "agent-introduce",
 	}, "public-target", channel.IntroduceOpts{})
 	if err != nil || !result.Created || result.ActorID == "" {
 		t.Fatalf("agent introduce=(%+v,%v)", result, err)
@@ -133,11 +137,11 @@ func TestRealmOpsAgentWithEmptyPrincipalOwnsIntroduceByActorCoordinate(t *testin
 		channel.DerivedRealmToolRef("agent-owned-operation", "agent-introduce")).Scan(&principal, &actorOwner); err != nil {
 		t.Fatal(err)
 	}
-	if principal != "" || actorOwner != string(requester.ID) {
-		t.Fatalf("owner=(%q,%q), want actor %q", principal, actorOwner, requester.ID)
+	if principal != "" || actorOwner != string(requester) {
+		t.Fatalf("owner=(%q,%q), want actor %q", principal, actorOwner, requester)
 	}
 	view, err := (realmOps{app: a}).OperationStatus(context.Background(), channel.Requester{
-		ActorID: requester.ID, ChannelID: "agent-owned-operation", RequestID: "status",
+		ActorID: requester, ChannelID: "agent-owned-operation", RequestID: "status",
 	}, channel.DerivedRealmToolRef("agent-owned-operation", "agent-introduce"))
 	if err != nil || view.Status != "done" {
 		t.Fatalf("agent operation status=(%+v,%v)", view, err)
@@ -190,7 +194,7 @@ func TestObserverResourceStreamStopsAtChunkBoundaryAfterRealmToolRemoval(t *test
 	if err != nil || n != 32*1024 {
 		t.Fatalf("first chunk n=%d err=%v", n, err)
 	}
-	target, found, err := declaredBySourceOneForTest(context.Background(), bundle.View(), realmToolDeclID)
+	target, found, err := declaredInstanceOneForTest(context.Background(), bundle.View(), realmToolDeclID)
 	if err != nil || !found {
 		t.Fatalf("resolve realm tool target=(%+v,%v,%v)", target, found, err)
 	}
@@ -199,7 +203,7 @@ func TestObserverResourceStreamStopsAtChunkBoundaryAfterRealmToolRemoval(t *test
 		t.Fatalf("resolve owner=(%s,%v,%v)", initiator, found, err)
 	}
 	if _, err := bundle.SysOp().Remove(context.Background(), channel.RemoveRequest{
-		Ref: "stream-remove", Target: target.ID, InitiatorActorID: initiator,
+		Ref: "stream-remove", Target: target, InitiatorActorID: initiator,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -249,12 +253,12 @@ func TestRealmOpsFetchAllowsAgentWithZeroSourceMembership(t *testing.T) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	requesterRow, found, err := declaredBySourceOneForTest(context.Background(), source.View(), "fetch-requester")
+	requesterRow, found, err := declaredInstanceOneForTest(context.Background(), source.View(), "fetch-requester")
 	if err != nil || !found {
-		t.Fatalf("source requester=(%s,%v,%v)", requesterRow.ID, found, err)
+		t.Fatalf("source requester=(%s,%v,%v)", requesterRow, found, err)
 	}
 	fetched, err := (realmOps{app: a}).FetchResource(context.Background(), channel.Requester{
-		ActorID: requesterRow.ID, ChannelID: "agent-fetch-source", RequestID: "fetch-as-agent",
+		ActorID: requesterRow, ChannelID: "agent-fetch-source", RequestID: "fetch-as-agent",
 	}, "agent-fetch-source", resource.ResourceID("kv:agent-source"))
 	if err != nil {
 		t.Fatal(err)

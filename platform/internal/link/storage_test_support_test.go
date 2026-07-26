@@ -115,12 +115,6 @@ func (testScheduleMinter) MintAdmitted(storespec.IdentityAdmission) schedule.Sch
 
 type testAuthority struct{}
 
-func (testAuthority) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
-	return storespec.ActorRecord{ID: id, Kind: actor.KindAgent}, true, nil
-}
-func (testAuthority) ListActive(context.Context) ([]storespec.ActorRecord, error) {
-	return nil, nil
-}
 func (testAuthority) AdmitIdentity(
 	_ context.Context,
 	id actor.ActorID,

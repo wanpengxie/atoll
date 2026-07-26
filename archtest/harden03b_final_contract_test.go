@@ -711,7 +711,7 @@ func TestHarden03BSubjectSlotDeleteOwnerIsLevelReconcile(t *testing.T) {
 	source := string(body)
 	for _, required := range []string{
 		"keys := slots.Keys()",
-		"authority.LookupActive(ctx, id)",
+		"authority.ActorFacts(ctx, id)",
 		"slots.Remove(id)",
 	} {
 		if !strings.Contains(source, required) {

@@ -6,18 +6,10 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type gateAuthority struct{ rows map[actor.ActorID]int64 }
 
-func (a gateAuthority) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
-	_, ok := a.rows[id]
-	return storespec.ActorRecord{ID: id}, ok, nil
-}
-func (a gateAuthority) ListActive(context.Context) ([]storespec.ActorRecord, error) {
-	return nil, nil
-}
 func (a gateAuthority) IsActive(_ context.Context, id actor.ActorID) (bool, error) {
 	_, ok := a.rows[id]
 	return ok, nil

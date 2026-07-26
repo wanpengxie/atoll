@@ -1,6 +1,7 @@
 package app_test
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"net/http/httptest"
@@ -95,17 +96,18 @@ func TestDeclarationOverlayMasksGlobalThenDeleteFallsBack(t *testing.T) {
 	introduced := env.do(t, http.MethodPost, "/api/channels/"+s.chID+"/actors", map[string]any{"decl_id": declID}, s.cookies)
 	assertStatus(t, introduced, http.StatusCreated)
 	actorID := actor.ActorID(respJSON(t, introduced)["actor_id"].(string))
-	waitActorConfig(t, env, channel.ID(s.chID), daemonID, actorID, "global-v1")
+	_ = daemonID
+	waitDeclaredConfig(t, env, channel.ID(s.chID), declID, actorID, "global-v1")
 
 	put := env.do(t, http.MethodPut, "/api/channels/"+s.chID+"/decls/"+declID+"/config", map[string]any{"config": map[string]any{"model": "overlay-v2"}}, s.cookies)
 	assertStatus(t, put, http.StatusOK)
-	waitActorConfig(t, env, channel.ID(s.chID), daemonID, actorID, "overlay-v2")
+	waitDeclaredConfig(t, env, channel.ID(s.chID), declID, actorID, "overlay-v2")
 	global := env.do(t, http.MethodPatch, "/api/actor-decls/"+declID, map[string]any{"config": map[string]any{"model": "global-v3"}}, s.cookies)
 	assertStatus(t, global, http.StatusOK)
-	assertActorConfigStays(t, env, channel.ID(s.chID), daemonID, actorID, "overlay-v2", 250*time.Millisecond)
+	assertDeclaredConfigStays(t, env, channel.ID(s.chID), declID, actorID, "overlay-v2", 250*time.Millisecond)
 	clear := env.do(t, http.MethodDelete, "/api/channels/"+s.chID+"/decls/"+declID+"/config", nil, s.cookies)
 	assertStatus(t, clear, http.StatusOK)
-	waitActorConfig(t, env, channel.ID(s.chID), daemonID, actorID, "global-v3")
+	waitDeclaredConfig(t, env, channel.ID(s.chID), declID, actorID, "global-v3")
 
 	legacy := env.do(t, http.MethodPut, "/api/channels/"+s.chID+"/actors/"+string(actorID)+"/config", map[string]any{"config": map[string]any{}}, s.cookies)
 	assertStatus(t, legacy, http.StatusNotFound)
@@ -125,26 +127,23 @@ func TestDeclarationClassCannotCrossKind(t *testing.T) {
 	}
 }
 
-func assertActorConfigStays(t *testing.T, env *testEnv, chID channel.ID, daemonID string, instanceID actor.ActorID, want string, duration time.Duration) {
+func assertDeclaredConfigStays(t *testing.T, env *testEnv, chID channel.ID, declID string, instanceID actor.ActorID, want string, duration time.Duration) {
 	t.Helper()
 	deadline := time.Now().Add(duration)
 	for time.Now().Before(deadline) {
-		rows, err := env.app.ActorsForTest(chID)
+		facts, err := env.app.ResolvedDeclarationForTest(context.Background(), chID, declID)
 		if err != nil {
 			t.Fatal(err)
 		}
-		found := false
-		for _, row := range rows {
-			if row.ID != instanceID || row.Placement.Host != daemonID {
-				continue
-			}
-			found = true
-			if got := configModel(row.Definition.Config); got != want {
-				t.Fatalf("overlay lost precedence: got %q want %q", got, want)
-			}
+		if got := configModel(facts.Config); got != want {
+			t.Fatalf("overlay lost precedence: got %q want %q", got, want)
 		}
-		if !found {
-			t.Fatalf("instance %s absent from active actor projection", instanceID)
+		ids, err := env.app.DeclaredInstancesForTest(chID, declID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(ids) != 1 || ids[0] != instanceID {
+			t.Fatalf("declaration instances=%v, want exactly [%s]", ids, instanceID)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}

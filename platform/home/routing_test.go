@@ -46,16 +46,16 @@ func openRoutingHome(t *testing.T, name string, declarations ...DeclareRequest) 
 	return h
 }
 
-func routingAgent(t *testing.T, h *Home, source, principal, class string, makeDefault bool) storespec.ActorRecord {
+func routingAgent(t *testing.T, h *Home, source, principal, class string, makeDefault bool) actor.ActorID {
 	t.Helper()
-	result, ok, err := h.View().DeclaredBySourceOne(context.Background(), source)
+	ids, err := h.View().DeclaredInstances(context.Background(), source)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok {
-		t.Fatalf("bootstrap declaration %q missing", source)
+	if len(ids) != 1 {
+		t.Fatalf("bootstrap declaration %q missing: instances=%v", source, ids)
 	}
-	return result
+	return ids[0]
 }
 
 func routingDeclaration(source, class string, makeDefault bool) DeclareRequest {
@@ -90,11 +90,11 @@ func waitRoutingLive(t *testing.T, h *Home, id actor.ActorID) {
 	}
 }
 
-func writeUnaddressed(t *testing.T, h *Home, source storespec.ActorRecord, id string) (*message.Envelope, harness.WriteResult, error) {
+func writeUnaddressed(t *testing.T, h *Home, source actor.ActorID, id string) (*message.Envelope, harness.WriteResult, error) {
 	t.Helper()
 	env := &message.Envelope{ID: message.ID(id), TS: time.Now().UnixMilli(), Kind: message.KindRequest, Type: "routing.probe", Visibility: message.VisibilityPublic}
 	result, err := h.minter.MintAdmitted(
-		storespec.IdentityAdmission{ID: source.ID, Kind: source.Kind},
+		storespec.IdentityAdmission{ID: source, Kind: actor.KindAgent},
 		h.channelID,
 	).Write(context.Background(), env)
 	return env, result, err
@@ -108,9 +108,9 @@ func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 		)
 		source := routingAgent(t, h, "source", "source", "missing", false)
 		target := routingAgent(t, h, "default", "default", "routing-live", true)
-		waitRoutingLive(t, h, target.ID)
+		waitRoutingLive(t, h, target)
 		env, result, err := writeUnaddressed(t, h, source, "route-default")
-		if err != nil || !result.Accepted() || env.Kind != message.KindRequest || len(env.Audience) != 1 || env.Audience[0] != target.ID {
+		if err != nil || !result.Accepted() || env.Kind != message.KindRequest || len(env.Audience) != 1 || env.Audience[0] != target {
 			t.Fatalf("default route env=%+v result=%+v err=%v", env, result, err)
 		}
 	})
@@ -122,9 +122,9 @@ func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 		)
 		source := routingAgent(t, h, "source", "source", "missing", false)
 		boost := routingAgent(t, h, defaultRoutingAgentSource, "boost", "routing-live", false)
-		waitRoutingLive(t, h, boost.ID)
+		waitRoutingLive(t, h, boost)
 		env, result, err := writeUnaddressed(t, h, source, "route-boost")
-		if err != nil || !result.Accepted() || env.Kind != message.KindRequest || len(env.Audience) != 1 || env.Audience[0] != boost.ID {
+		if err != nil || !result.Accepted() || env.Kind != message.KindRequest || len(env.Audience) != 1 || env.Audience[0] != boost {
 			t.Fatalf("boost route env=%+v result=%+v err=%v", env, result, err)
 		}
 	})
@@ -166,20 +166,20 @@ func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 		source := routingAgent(t, h, "source", "source", "missing", false)
 		target := routingAgent(t, h, "default", "default", "routing-live", true)
 		boost := routingAgent(t, h, defaultRoutingAgentSource, "boost", "routing-live", false)
-		waitRoutingLive(t, h, target.ID)
-		waitRoutingLive(t, h, boost.ID)
-		if err := removeThroughSysOp(h, context.Background(), target.ID); err != nil {
+		waitRoutingLive(t, h, target)
+		waitRoutingLive(t, h, boost)
+		if err := removeThroughSysOp(h, context.Background(), target); err != nil {
 			t.Fatal(err)
 		}
 		// The pointer row still names the dead actor; nothing cleaned it up.
 		pointed, hasPointer, err := h.View().DefaultAgent(context.Background())
-		if err != nil || !hasPointer || pointed != target.ID {
+		if err != nil || !hasPointer || pointed != target {
 			t.Fatalf("default pointer=%q has=%v err=%v, want the dangling %q",
-				pointed, hasPointer, err, target.ID)
+				pointed, hasPointer, err, target)
 		}
 		env, result, err := writeUnaddressed(t, h, source, "route-dangling")
 		if err != nil || !result.Accepted() || env.Kind != message.KindRequest ||
-			len(env.Audience) != 1 || env.Audience[0] != boost.ID {
+			len(env.Audience) != 1 || env.Audience[0] != boost {
 			t.Fatalf("dangling default env=%+v result=%+v err=%v", env, result, err)
 		}
 	})
@@ -194,7 +194,7 @@ func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 		_ = routingAgent(t, h, "default", "default", "missing", true)
 		// Even a live boost must not override an explicitly configured default.
 		boost := routingAgent(t, h, defaultRoutingAgentSource, "boost", "routing-live", false)
-		waitRoutingLive(t, h, boost.ID)
+		waitRoutingLive(t, h, boost)
 		before := visibleWatermark(t, h)
 		_, result, writeErr := writeUnaddressed(t, h, source, "route-unavailable")
 		if !errors.Is(writeErr, ErrRoutingUnavailable) || result.MessageID != "" || result.Seq != 0 {

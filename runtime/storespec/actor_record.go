@@ -128,10 +128,38 @@ func (a IdentityAdmission) Valid() bool {
 	return a.ID != "" && validKind
 }
 
-// ActorDirectory is the Platform-facing active record projection.
-type ActorDirectory interface {
-	LookupActive(context.Context, actor.ActorID) (ActorRecord, bool, error)
-	ListActive(context.Context) ([]ActorRecord, error)
+// ActorFacts is the narrow identity-fact projection: who is behind one actor
+// and what kind it is. It is the question-shaped answer used by request-side
+// authorization and by door policy (owner derivation) — never a whole record,
+// never a general authority.
+type ActorFacts struct {
+	Kind      actor.Kind
+	Principal string
+}
+
+// ActiveIdentity answers "who is a member right now". It deliberately carries
+// no definition, no principal and no placement: presence and connection-slot
+// sweeps ask membership, nothing else.
+type ActiveIdentity struct {
+	ID   actor.ActorID
+	Kind actor.Kind
+}
+
+// ActorFactsAuthority answers the narrow identity-fact question for one id.
+type ActorFactsAuthority interface {
+	ActorFacts(context.Context, actor.ActorID) (ActorFacts, bool, error)
+}
+
+// IdentityRoster answers "who is here right now" as identities only.
+type IdentityRoster interface {
+	ActiveIdentities() ([]ActiveIdentity, error)
+}
+
+// DeclaredInstanceReader answers "which actors did this declaration produce".
+// It returns ids alone: the definition axis belongs to the declaration pull
+// loop's own projection and never leaks into the business membrane.
+type DeclaredInstanceReader interface {
+	DeclaredInstances(string) ([]actor.ActorID, error)
 }
 
 // IdentityPresence answers only irreversible collaboration membership.
@@ -160,7 +188,9 @@ type ResourceActorAuthority interface {
 // ChannelAuthority is the Platform composition face. Individual Runtime
 // organs receive only the narrow interface they actually consume.
 type ChannelAuthority interface {
-	ActorDirectory
+	ActorFactsAuthority
+	IdentityRoster
+	DeclaredInstanceReader
 	IdentityPresence
 	CollaborationAuthority
 	ResourceActorAuthority

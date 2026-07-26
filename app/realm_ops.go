@@ -360,11 +360,11 @@ func (o realmOps) crossReader(ctx context.Context, req channel.Requester, source
 	if err != nil {
 		return nil, channel.Reader{}, &channel.RealmError{Code: channel.RealmChannelUnavailable}
 	}
-	toolRows, err := bundle.View().DeclaredBySource(ctx, realmToolDeclID)
+	hasTool, err := bundle.View().HasDeclaredInstance(ctx, realmToolDeclID)
 	if err != nil {
 		return nil, channel.Reader{}, err
 	}
-	if len(toolRows) == 0 {
+	if !hasTool {
 		return nil, channel.Reader{}, &channel.RealmError{Code: channel.RealmCapabilityUnavailable, Detail: "source realm tool absent"}
 	}
 	if source == req.ChannelID {

@@ -13,11 +13,11 @@ import (
 // pointer written at creation. "Is this actor the owner" is therefore always a
 // derived judgement — a human whose login principal equals genesis.OwnerPrincipal
 // — never a stored bit on the record.
-func (h *Home) isOwner(record storespec.ActorRecord) bool {
+func (h *Home) isOwner(facts storespec.ActorFacts) bool {
 	if h == nil || h.ownerPrincipal == "" {
 		return false
 	}
-	return record.Kind == actor.KindHuman && record.Principal == h.ownerPrincipal
+	return facts.Kind == actor.KindHuman && facts.Principal == h.ownerPrincipal
 }
 
 // guardOwnerTerminal is the command-front owner protection for the management
@@ -27,11 +27,11 @@ func (h *Home) guardOwnerTerminal(ctx context.Context, target actor.ActorID) err
 	if h == nil || target == "" || h.ownerPrincipal == "" {
 		return nil
 	}
-	record, active, err := h.actors.LookupActive(ctx, target)
+	facts, active, err := h.actors.ActorFacts(ctx, target)
 	if err != nil || !active {
 		return err
 	}
-	if h.isOwner(record) {
+	if h.isOwner(facts) {
 		return &channel.OperationError{
 			Code: channel.ErrCodeProtectedActor, Detail: "channel owner is protected",
 		}

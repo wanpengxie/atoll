@@ -140,7 +140,7 @@ func (h *Home) reconcileClosure(ctx context.Context) {
 		h.systemPen,
 		h.cs.Query,
 		func(ctx context.Context, id actor.ActorID) (bool, error) {
-			_, active, err := h.actors.LookupActive(ctx, id)
+			active, err := h.actors.IsActive(ctx, id)
 			return !active, err
 		},
 		func() time.Time { return time.UnixMilli(h.nowMs()) },
@@ -162,9 +162,11 @@ func (h *Home) sweepSubjectSlots(ctx context.Context) {
 	sweepSubjectSlots(ctx, h.logger, h.actors, h.subjectgate)
 }
 
+// subjectSlotAuthority is the connection-slot sweep's whole question: who is a
+// member right now, and (at the delete edge) is this one still a human member.
 type subjectSlotAuthority interface {
-	ListActive(context.Context) ([]storespec.ActorRecord, error)
-	LookupActive(context.Context, actor.ActorID) (storespec.ActorRecord, bool, error)
+	storespec.IdentityRoster
+	storespec.ActorFactsAuthority
 }
 
 func sweepSubjectSlots(
@@ -173,16 +175,16 @@ func sweepSubjectSlots(
 	authority subjectSlotAuthority,
 	slots *subjectgate.Registry,
 ) {
-	rows, err := authority.ListActive(ctx)
+	identities, err := authority.ActiveIdentities()
 	if err != nil {
 		logger.Warn("platform.subject_slot.list_failed", "error", err)
 		return
 	}
 	desired := make(map[actor.ActorID]struct{})
-	for _, row := range rows {
-		if row.Kind == actor.KindHuman {
-			desired[row.ID] = struct{}{}
-			slots.EnsureSlot(row.ID)
+	for _, identity := range identities {
+		if identity.Kind == actor.KindHuman {
+			desired[identity.ID] = struct{}{}
+			slots.EnsureSlot(identity.ID)
 		}
 	}
 	keys := slots.Keys()
@@ -191,12 +193,12 @@ func sweepSubjectSlots(
 		if _, keep := desired[id]; keep {
 			continue
 		}
-		row, active, lookupErr := authority.LookupActive(ctx, id)
+		facts, active, lookupErr := authority.ActorFacts(ctx, id)
 		if lookupErr != nil {
 			logger.Warn("platform.subject_slot.lookup_failed", "actor", id, "error", lookupErr)
 			continue
 		}
-		if active && row.Kind == actor.KindHuman {
+		if active && facts.Kind == actor.KindHuman {
 			continue
 		}
 		slots.Remove(id)
@@ -211,13 +213,13 @@ func (h *Home) sweepPresence(ctx context.Context) {
 	if h.presenceFold == nil || h.actors == nil {
 		return
 	}
-	rows, err := h.actors.ListActive(ctx)
+	identities, err := h.actors.ActiveIdentities()
 	if err != nil {
 		return
 	}
-	keep := make(map[actor.ActorID]struct{}, len(rows))
-	for _, row := range rows {
-		keep[row.ID] = struct{}{}
+	keep := make(map[actor.ActorID]struct{}, len(identities))
+	for _, identity := range identities {
+		keep[identity.ID] = struct{}{}
 	}
 	for _, id := range h.actors.HostedIDs() {
 		keep[id] = struct{}{}

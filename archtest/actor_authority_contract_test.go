@@ -294,6 +294,7 @@ func TestActorIdentityStorageHomeIsPhysicallyConfined(t *testing.T) {
 				"ActorWorld",
 				"WorldRun",
 				"WorldDurable",
+				"WorldOf",
 				"GrantOverlay",
 				"BirthChannelOwned",
 				"BirthCreatorIdentity",
@@ -301,6 +302,14 @@ func TestActorIdentityStorageHomeIsPhysicallyConfined(t *testing.T) {
 				"HomeOf",
 				"identitystore",
 				"ActorControlRow",
+				// Spec §9.2: names that must never come back. Absence is
+				// verified here, not assumed — a same-meaning wrapper or a
+				// test double reintroducing one of them is the failure mode.
+				"CheckAuthor",
+				"AuthorStamp",
+				"firepen",
+				"currentPen",
+				"ChannelActors",
 			} {
 				if strings.Contains(string(body), forbidden) {
 					t.Errorf(

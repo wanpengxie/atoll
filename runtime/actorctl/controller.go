@@ -145,21 +145,6 @@ func (c *Controller) runnableLocked() error {
 	return nil
 }
 
-// lookup is an internal complete-snapshot read. It is deliberately unexported:
-// no consumer receives a whole record as a general authority.
-func (c *Controller) lookup(id actor.ActorID) (managedActor, bool, error) {
-	c.ledger.RLock()
-	defer c.ledger.RUnlock()
-	if err := c.runnableLocked(); err != nil {
-		return managedActor{}, false, err
-	}
-	value, ok := c.actors[id]
-	if !ok {
-		return managedActor{}, false, nil
-	}
-	return value.clone(), true, nil
-}
-
 // checkCurrentSnapshot is the A/G verdict: acting as the CURRENT term.
 func (c *Controller) checkCurrentSnapshot(id actor.ActorID, key actorhost.AttemptKey) error {
 	c.ledger.RLock()
@@ -240,47 +225,59 @@ func (c *Controller) AdmitIdentity(
 	return storespec.IdentityAdmission{ID: id, Kind: value.Record.Kind}, true, nil
 }
 
-// LookupActive is the transitional whole-record read. Narrow question-shaped
-// projections replace it consumer by consumer; nothing new may take it.
-func (c *Controller) LookupActive(
+// ActorFacts is the narrow identity-fact question: who is behind this actor and
+// what kind is it. Owner-ness is deliberately absent — that verdict is derived
+// from the genesis pointer at the Platform door, never from the value ledger.
+func (c *Controller) ActorFacts(
 	_ context.Context,
 	id actor.ActorID,
-) (storespec.ActorRecord, bool, error) {
-	value, ok, err := c.lookup(id)
-	if err != nil || !ok {
-		return storespec.ActorRecord{}, ok, err
-	}
-	return value.Record, true, nil
-}
-
-// ListActive is the transitional whole-record listing, in canonical id order.
-func (c *Controller) ListActive(context.Context) ([]storespec.ActorRecord, error) {
+) (storespec.ActorFacts, bool, error) {
 	c.ledger.RLock()
 	defer c.ledger.RUnlock()
 	if err := c.runnableLocked(); err != nil {
-		return nil, err
+		return storespec.ActorFacts{}, false, err
 	}
-	out := make([]storespec.ActorRecord, 0, len(c.actors))
-	for _, value := range c.actors {
-		out = append(out, value.Record.Clone())
+	value, ok := c.actors[id]
+	if !ok {
+		return storespec.ActorFacts{}, false, nil
 	}
-	sortByActorID(out, func(v storespec.ActorRecord) actor.ActorID { return v.ID })
-	return out, nil
+	return storespec.ActorFacts{
+		Kind: value.Record.Kind, Principal: value.Record.Principal,
+	}, true, nil
 }
 
 // ActiveIdentities answers "who is here right now" for the presence and
 // connection-slot sweeps. It carries no definition.
-func (c *Controller) ActiveIdentities() ([]ActiveIdentity, error) {
+func (c *Controller) ActiveIdentities() ([]storespec.ActiveIdentity, error) {
 	c.ledger.RLock()
 	defer c.ledger.RUnlock()
 	if err := c.runnableLocked(); err != nil {
 		return nil, err
 	}
-	out := make([]ActiveIdentity, 0, len(c.actors))
+	out := make([]storespec.ActiveIdentity, 0, len(c.actors))
 	for id, value := range c.actors {
-		out = append(out, ActiveIdentity{ID: id, Kind: value.Record.Kind})
+		out = append(out, storespec.ActiveIdentity{ID: id, Kind: value.Record.Kind})
 	}
-	sortByActorID(out, func(v ActiveIdentity) actor.ActorID { return v.ID })
+	sortByActorID(out, func(v storespec.ActiveIdentity) actor.ActorID { return v.ID })
+	return out, nil
+}
+
+// DeclaredInstances answers "which actors did this declaration produce", in
+// canonical id order. It returns ids alone — the business membrane asks for
+// instances, never for rows.
+func (c *Controller) DeclaredInstances(declID string) ([]actor.ActorID, error) {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
+		return nil, err
+	}
+	out := make([]actor.ActorID, 0, 1)
+	for id, value := range c.actors {
+		if declID != "" && value.Record.SourceDeclID == declID {
+			out = append(out, id)
+		}
+	}
+	slices.Sort(out)
 	return out, nil
 }
 
@@ -416,7 +413,9 @@ func sortByActorID[T any](values []T, key func(T) actor.ActorID) {
 
 func cloneRaw(raw []byte) []byte { return append([]byte(nil), raw...) }
 
-var _ storespec.ActorDirectory = (*Controller)(nil)
+var _ storespec.ActorFactsAuthority = (*Controller)(nil)
+var _ storespec.IdentityRoster = (*Controller)(nil)
+var _ storespec.DeclaredInstanceReader = (*Controller)(nil)
 var _ storespec.IdentityPresence = (*Controller)(nil)
 var _ storespec.CollaborationAuthority = (*Controller)(nil)
 var _ storespec.ResourceActorAuthority = (*Controller)(nil)

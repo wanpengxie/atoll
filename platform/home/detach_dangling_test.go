@@ -42,11 +42,11 @@ func TestDetachLeavesActorsDanglingButFullyMembers(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = h.closeInternal("test") })
 
-	record, ok, err := h.View().DeclaredBySourceOne(ctx, "remote")
-	if err != nil || !ok {
-		t.Fatalf("declared instance: ok=%v err=%v", ok, err)
+	declared, err := h.View().DeclaredInstances(ctx, "remote")
+	if err != nil || len(declared) != 1 {
+		t.Fatalf("declared instance: instances=%v err=%v", declared, err)
 	}
-	target := record.ID
+	target := declared[0]
 	sender, err := admitThroughSysOp(h, ctx, actor.KindHuman, "alice")
 	if err != nil {
 		t.Fatal(err)
@@ -71,9 +71,10 @@ func TestDetachLeavesActorsDanglingButFullyMembers(t *testing.T) {
 	if active, err := h.actors.IsActive(ctx, target); err != nil || !active {
 		t.Fatalf("detach killed the actor: active=%v err=%v", active, err)
 	}
-	after, ok, err := h.actors.LookupActive(ctx, target)
-	if err != nil || !ok || after.Placement != record.Placement {
-		t.Fatalf("detach rewrote the record: %+v ok=%v err=%v", after, ok, err)
+	// The record is untouched: the actor is still placed on the detached
+	// daemon, which is exactly why the desired below still dangles.
+	if plan, planErr := h.planForDaemon(ctx, daemonID); planErr != nil || len(plan) != 1 {
+		t.Fatalf("detach rewrote the record: plan=%+v err=%v", plan, planErr)
 	}
 
 	// The desired dangles rather than disappearing: the plan still names the

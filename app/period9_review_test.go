@@ -109,7 +109,7 @@ func TestHalfBuiltChannel_OpenClearError(t *testing.T) {
 		t.Fatalf("GET half-built channel: want 503, got %d (%s)", g.Code, g.Body.String())
 	}
 	// The absent local image is reported honestly rather than fabricated.
-	if _, err := env.app.ActorsForTest(channel.ID(chID)); err == nil {
+	if _, err := env.app.HumanRosterForTest(channel.ID(chID)); err == nil {
 		t.Fatal("half-built channel unexpectedly exposed a local registry")
 	}
 
