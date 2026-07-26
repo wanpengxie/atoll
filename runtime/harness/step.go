@@ -3,8 +3,9 @@ package harness
 import (
 	"context"
 
-	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -73,7 +74,7 @@ func (r WriteResult) Accepted() bool { return r.RejectReason == "" }
 
 // Pen is the substrate's opaque write capability — the ONLY thing an actor (or
 // any writer) ever holds. A Pen is welded to one identity at mint time: every
-// Write it commits carries that (actorID, chID), and the holder cannot change
+// Write it commits carries that identity, and the holder cannot change
 // it. This is the substrate's first syscall (write truth); identity rides each
 // write the way a UID rides each Linux syscall. boundPen satisfies it; so does
 // the relay-only proxy pen a remote (out-of-process) cell uses to emit over the
@@ -90,11 +91,17 @@ type Pen interface {
 // type references to the platform tree.
 type Minter interface {
 	AdmittedMinter
+
+	// MintAuthority welds a live authority onto the chain. The returned Pen
+	// re-runs that authority's one complete verdict on every Write, so the
+	// same shell serves a local body for its whole term and a remote ingress
+	// for one operation.
+	MintAuthority(capauth.Authority, actor.Kind) Pen
 }
 
 // AdmittedMinter consumes one already-completed ActorID collaboration
-// admission. It is used only at source boundaries such as daemon ingress and
-// timer fire; the returned Pen consumes the already-admitted identity snapshot.
+// admission. Its one remaining source boundary is timer fire, where the author
+// verdict is the fire gate itself; the returned Pen consumes that snapshot.
 type AdmittedMinter interface {
-	MintAdmitted(storespec.IdentityAdmission, channel.ID) Pen
+	MintAdmitted(storespec.IdentityAdmission) Pen
 }

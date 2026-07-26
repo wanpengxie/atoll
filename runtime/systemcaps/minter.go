@@ -7,10 +7,8 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
-	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
@@ -21,14 +19,6 @@ type rootAuthority struct{}
 
 func (rootAuthority) ActorID() actor.ActorID { return actor.SystemActorID }
 func (rootAuthority) Admit() error           { return nil }
-
-type penMinter interface {
-	MintAuthority(capauth.Authority, actor.Kind, channel.ID) harness.Pen
-}
-
-type accessMinter interface {
-	MintAuthority(capauth.Authority) accessdoor.ResourceAccessHandle
-}
 
 // unsupportedState is the kernel's State arm. The kernel has never consumed a
 // State handle (it is a constant, not a member: it has no record and therefore
@@ -46,31 +36,23 @@ func (unsupportedState) Invoke(
 	return accessdoor.Outcome{}, ErrStateUnsupported
 }
 
-type scheduleMinter interface {
-	MintAuthority(capauth.Authority) schedule.ScheduleHandle
-}
-
-// Minter owns the construction capabilities needed for one root bundle.
+// Minter owns the construction capabilities needed for one root bundle. Like
+// the managed minter it holds no channel id — the harness stamps its own.
 type Minter struct {
-	channelID channel.ID
-	pen       penMinter
-	access    accessMinter
-	schedule  scheduleMinter
+	pen      harness.Minter
+	access   accessdoor.AccessMinter
+	schedule schedule.Minter
 }
 
 func New(
-	channelID channel.ID,
 	pen harness.Minter,
 	access accessdoor.AccessMinter,
 	scheduler schedule.Minter,
 ) (*Minter, error) {
-	p, pok := pen.(penMinter)
-	a, aok := access.(accessMinter)
-	t, tok := scheduler.(scheduleMinter)
-	if channelID == "" || !pok || !aok || !tok {
+	if pen == nil || access == nil || scheduler == nil {
 		return nil, ErrInvalidInput
 	}
-	return &Minter{channelID: channelID, pen: p, access: a, schedule: t}, nil
+	return &Minter{pen: pen, access: access, schedule: scheduler}, nil
 }
 
 // Mint mints the SystemActor's whole kernel bundle once.
@@ -80,7 +62,7 @@ func (m *Minter) Mint(context.Context) (actorcaps.Caps, error) {
 	}
 	authority := rootAuthority{}
 	return actorcaps.Caps{
-		Pen:       m.pen.MintAuthority(authority, actor.KindSystem, m.channelID),
+		Pen:       m.pen.MintAuthority(authority, actor.KindSystem),
 		Access:    m.access.MintAuthority(authority),
 		State:     unsupportedState{},
 		Schedule:  m.schedule.MintAuthority(authority),

@@ -18,6 +18,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/managedcaps"
+	"github.com/wanpengxie/atoll/runtime/remoteingress"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -64,6 +65,9 @@ type Home struct {
 	systemKernel *systemkernel.Kernel
 	managedCaps  *managedcaps.Minter
 	systemCaps   *systemcaps.Minter
+	// remoteIngress is this channel's one remote-entry organ. Home holds it
+	// only to hand it to the link acceptor whole.
+	remoteIngress remoteingress.RemoteIngress
 
 	cs           *runtime.ChannelStores
 	minter       harness.Minter

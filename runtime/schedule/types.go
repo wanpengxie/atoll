@@ -7,7 +7,7 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
@@ -84,18 +84,17 @@ type ScheduleHandle interface {
 
 // Minter is the engine's caps-injection mint surface (same pattern as
 // accessdoor/harness): the platform assembly root draws a per-author
-// ScheduleHandle from here when it wires caps. Mint is deterministic and
-// cheap (no per-handle state beyond the welded author), so admission points
-// may Mint per-caller freely.
+// ScheduleHandle from here when it wires caps. Mint is deterministic and cheap
+// (no per-handle state beyond the welded author), so admission points may Mint
+// per-caller freely.
+//
+// The engine mints against a LIVE identity authority and nothing else: the
+// returned handle runs that authority's one complete verdict at the door on
+// every call — the same shell a local body keeps for its whole term and a
+// remote ingress builds for one operation. TimerHome remains a Scheduler
+// storage choice and never a caller-visible distinction.
 type Minter interface {
-	AdmittedMinter
-}
-
-// AdmittedMinter consumes one completed ActorID collaboration admission.
-// It is used by remote ingress; TimerHome remains only a Scheduler storage
-// choice.
-type AdmittedMinter interface {
-	MintAdmitted(storespec.IdentityAdmission) ScheduleHandle
+	MintAuthority(capauth.Authority) ScheduleHandle
 }
 
 // FireSink is the injection-point contract for fire's single action: append

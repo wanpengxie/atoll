@@ -9,6 +9,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/ipc"
+	"github.com/wanpengxie/atoll/runtime/remoteingress"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
 
@@ -141,6 +142,108 @@ type accessListRespFields struct {
 	Reject  accessdoor.QueryReject `json:"reject,omitempty"`
 }
 
+// decode turns one decoded access frame into the ingress's operand. It is pure
+// translation — shape checks only, no judgment: a request that names no legal
+// arm is malformed (a Go error), never a denial. The Invocation arm's Caller
+// field MUST arrive empty; a non-empty one is a caller trying to self-report
+// identity, rejected the same way the pen rejects a pre-filled Sender.
+func (r accessRequest) decode() (remoteingress.AccessRequest, error) {
+	switch r.Kind {
+	case accessKindInvocation:
+		if r.Inv == nil || r.Inv.Caller != "" {
+			return remoteingress.AccessRequest{}, errors.New("link: invalid access invocation")
+		}
+		scope := remoteingress.ScopeChannel
+		switch r.Scope {
+		case accessScopeChannel:
+		case accessScopeState:
+			scope = remoteingress.ScopeState
+		default:
+			return remoteingress.AccessRequest{}, errors.New("link: invalid access scope")
+		}
+		return remoteingress.AccessRequest{
+			Kind: remoteingress.AccessInvoke, Scope: scope,
+			Operation: r.Inv.Operation, Resource: r.Inv.Resource,
+			Args: r.Inv.Args, Grant: r.Inv.Grant,
+		}, nil
+	case accessKindCreate:
+		if r.Create == nil {
+			return remoteingress.AccessRequest{}, errors.New("link: missing access create")
+		}
+		return remoteingress.AccessRequest{
+			Kind: remoteingress.AccessCreate, Resource: r.Create.Resource,
+			Spec: r.Create.Spec, Initial: r.Create.Initial,
+		}, nil
+	case accessKindQuery:
+		if r.Query == nil {
+			return remoteingress.AccessRequest{}, errors.New("link: missing access query")
+		}
+		switch r.Query.QueryKind {
+		case accessQueryStat:
+			return remoteingress.AccessRequest{
+				Kind: remoteingress.AccessStat, Resource: r.Query.Resource,
+			}, nil
+		case accessQueryList:
+			if r.Query.List == nil {
+				return remoteingress.AccessRequest{}, errors.New("link: missing access list")
+			}
+			return remoteingress.AccessRequest{
+				Kind: remoteingress.AccessList,
+				List: accessdoor.ListQuery{
+					Prefix: r.Query.List.Prefix,
+					Limit:  r.Query.List.Limit,
+					Cursor: r.Query.List.Cursor,
+				},
+			}, nil
+		default:
+			return remoteingress.AccessRequest{}, errors.New("link: invalid access query")
+		}
+	default:
+		return remoteingress.AccessRequest{}, errors.New("link: invalid access request")
+	}
+}
+
+// accessResponseOf encodes the ingress's product back onto the wire shape the
+// requesting arm expects — one field family per driven verb, exactly as the
+// daemon-side proxy reads it.
+func accessResponseOf(
+	kind remoteingress.AccessKind,
+	response remoteingress.AccessResponse,
+) accessResponse {
+	switch kind {
+	case remoteingress.AccessStat:
+		return accessResponse{
+			Kind: accessKindQuery,
+			Stat: &accessStatRespFields{
+				Meta:   response.Stat.Meta,
+				Ops:    response.Stat.Ops,
+				Reject: response.Stat.Reject,
+			},
+		}
+	case remoteingress.AccessList:
+		return accessResponse{
+			Kind: accessKindQuery,
+			List: &accessListRespFields{
+				Entries: response.List.Entries,
+				Next:    response.List.Next,
+				Reject:  response.List.Reject,
+			},
+		}
+	case remoteingress.AccessCreate:
+		return accessResponse{
+			Kind: accessKindCreate, Value: response.Outcome.Value,
+			Found: response.Outcome.Found, RejectReason: response.Outcome.RejectReason,
+			Route: response.Outcome.Route,
+		}
+	default:
+		return accessResponse{
+			Kind: accessKindInvocation, Value: response.Outcome.Value,
+			Found: response.Outcome.Found, RejectReason: response.Outcome.RejectReason,
+			Route: response.Outcome.Route,
+		}
+	}
+}
+
 // scheduleMethod names which ScheduleHandle call the frame carries.
 type scheduleMethod string
 
@@ -165,6 +268,28 @@ type scheduleRequest struct {
 // the schedule path; empty on cancel). Errors ride coded ack fields.
 type scheduleResponse struct {
 	ID schedule.TimerID `json:"id,omitempty"`
+}
+
+// decode turns one decoded schedule frame into the ingress's operand. It
+// carries no author and no attempt key: a timer belongs to the identity, and
+// the identity is the endpoint's, not the frame's.
+func (r scheduleRequest) decode() (remoteingress.ScheduleRequest, error) {
+	switch r.Method {
+	case scheduleMethodSchedule:
+		return remoteingress.ScheduleRequest{
+			Method: remoteingress.ScheduleSet, Req: r.Req,
+		}, nil
+	case scheduleMethodCancel:
+		return remoteingress.ScheduleRequest{
+			Method: remoteingress.ScheduleCancel, ID: r.ID,
+		}, nil
+	case scheduleMethodAck:
+		return remoteingress.ScheduleRequest{
+			Method: remoteingress.ScheduleAck, ID: r.ID,
+		}, nil
+	default:
+		return remoteingress.ScheduleRequest{}, errors.New("link: invalid schedule method")
+	}
 }
 
 // ---------------------------------------------------------------------------

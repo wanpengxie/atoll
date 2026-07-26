@@ -84,7 +84,7 @@ func TestNew_FillsDefaults(t *testing.T) {
 // ---------------------------------------------------------------------
 
 func TestHarnessRejectReason_String(t *testing.T) {
-	if got := HarnessChannelMismatch.String(); got != "harness_channel_mismatch" {
+	if got := HarnessEngineACLDenied.String(); got != "harness_engine_acl_denied" {
 		t.Fatalf("String() = %q", got)
 	}
 }

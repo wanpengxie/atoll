@@ -75,7 +75,7 @@ func TestScheduleValidationDoesNotCoupleTimerHomeToActorKind(t *testing.T) {
 	}
 	engine.Start()
 	t.Cleanup(engine.Close)
-	handle := minter.MintAdmitted(testAdmission("agent:a"))
+	handle := minter.MintAuthority(testAuthority{id: "agent:a"})
 	for _, request := range []ScheduleReq{
 		{},
 		{Home: "unknown", FireAt: 2_000, Type: "ok"},
@@ -98,7 +98,7 @@ func TestIdentityTimerCommitsOneDeterministicFire(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000))
 	minter, _ := newTestEngine(t, store, sink, clock)
-	handle := minter.MintAdmitted(testAdmission("agent:a"))
+	handle := minter.MintAuthority(testAuthority{id: "agent:a"})
 	id, err := handle.Schedule(context.Background(), ScheduleReq{
 		Home: TimerHomeDurable, FireAt: 2_000, Type: "timer.tick", Payload: []byte(`{"x":1}`),
 	})
@@ -123,7 +123,7 @@ func TestMemoryTimerBelongsToSchedulerHomeNotActorIncarnation(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000))
 	minter, _ := newTestEngine(t, store, sink, clock)
-	handle := minter.MintAdmitted(testAdmission("agent:a"))
+	handle := minter.MintAuthority(testAuthority{id: "agent:a"})
 	if _, err := handle.Schedule(context.Background(), ScheduleReq{
 		Home: TimerHomeMemory, FireAt: 2_000, Type: "local.tick",
 	}); err != nil {
@@ -155,7 +155,7 @@ func TestFireFailureClasses(t *testing.T) {
 			}}
 			clock := newFakeClock(time.UnixMilli(1_000))
 			minter, _ := newTestEngine(t, store, sink, clock)
-			id, err := minter.MintAdmitted(testAdmission("agent:a")).Schedule(context.Background(), ScheduleReq{
+			id, err := minter.MintAuthority(testAuthority{id: "agent:a"}).Schedule(context.Background(), ScheduleReq{
 				Home: TimerHomeDurable, FireAt: 2_000, Type: "timer.tick",
 			})
 			if err != nil {
@@ -175,7 +175,7 @@ func TestCancelAndQuota(t *testing.T) {
 	sink := &fakeFireSink{}
 	clock := newFakeClock(time.UnixMilli(1_000))
 	minter, engine := newTestEngine(t, store, sink, clock)
-	handle := minter.MintAdmitted(testAdmission("agent:a"))
+	handle := minter.MintAuthority(testAuthority{id: "agent:a"})
 	id, err := handle.Schedule(context.Background(), ScheduleReq{
 		Home: TimerHomeMemory, FireAt: 2_000, Type: "timer.tick",
 	})
@@ -239,8 +239,8 @@ func TestForgetActorsReleasesMemoryTimersOnly(t *testing.T) {
 	clock := newFakeClock(time.UnixMilli(1_000))
 	minter, engine := newTestEngine(t, store, sink, clock)
 
-	dead := minter.MintAdmitted(testAdmission("agent:dead"))
-	alive := minter.MintAdmitted(testAdmission("agent:alive"))
+	dead := minter.MintAuthority(testAuthority{id: "agent:dead"})
+	alive := minter.MintAuthority(testAuthority{id: "agent:alive"})
 	if _, err := dead.Schedule(ctx, ScheduleReq{
 		Home: TimerHomeMemory, FireAt: 9_000, Type: "mem.dead",
 	}); err != nil {

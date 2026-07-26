@@ -9,13 +9,14 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
-func testAdmission(id actor.ActorID) storespec.IdentityAdmission {
-	return storespec.IdentityAdmission{ID: id, Kind: actor.KindAgent}
-}
+// testAuthority is the live A-level authority the engine mints against.
+type testAuthority struct{ id actor.ActorID }
+
+func (a testAuthority) ActorID() actor.ActorID { return a.id }
+func (a testAuthority) Admit() error           { return nil }
 
 // ---------------------------------------------------------------------
 // fakeStore: an in-memory timerspec.TimerStore stub. Every method may be

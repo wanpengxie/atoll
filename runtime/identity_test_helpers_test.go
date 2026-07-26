@@ -33,3 +33,10 @@ func endDeclaredTest(ctx context.Context, cs *ChannelStores, id actor.ActorID, a
 func identityAdmission(id actor.ActorID) storespec.IdentityAdmission {
 	return storespec.IdentityAdmission{ID: id, Kind: actor.KindAgent}
 }
+
+// identityAuthority is the live A-level authority the door mints against: the
+// verdict happens at the door, on every call, never as a snapshot handed in.
+type identityAuthority struct{ id actor.ActorID }
+
+func (a identityAuthority) ActorID() actor.ActorID { return a.id }
+func (a identityAuthority) Admit() error           { return nil }

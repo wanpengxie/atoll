@@ -40,6 +40,57 @@ func (a RunAuthority) Admit() error {
 func (a RunAuthority) ActorID() actor.ActorID           { return a.id }
 func (a RunAuthority) AttemptKey() actorhost.AttemptKey { return a.attempt }
 
+// IdentityAuthorityFor and RunAuthorityFor curry one authenticated coordinate
+// into an opaque Controller-minted authority. Minting is NOT a grant and NOT a
+// verdict: the returned value carries no snapshot, only the coordinate plus a
+// live Controller reference, so the single complete verdict still happens where
+// doctrine puts it — inside the organ door, on every operation
+// (authority.Admit()). They exist for the remote ingress, whose caller has no
+// PreparedRun to draw an authority from; the coordinate itself is authenticated
+// by the endpoint, never chosen by the caller.
+func (c *Controller) IdentityAuthorityFor(id actor.ActorID) IdentityAuthority {
+	return IdentityAuthority{controller: c, id: id}
+}
+
+func (c *Controller) RunAuthorityFor(
+	id actor.ActorID,
+	key actorhost.AttemptKey,
+) RunAuthority {
+	return RunAuthority{controller: c, id: id, attempt: key}
+}
+
+// RunAdmission is one coherent A/G snapshot taken at a remote entry point: the
+// verdict has passed, Kind is the message-protocol field the pen needs, and Run
+// is the live authority the organ chain re-admits on. It exists so the pen path
+// never stitches "checkCurrent then look up Kind" out of two snapshots — the
+// race between them is exactly what one ledger read lock removes.
+type RunAdmission struct {
+	ID   actor.ActorID
+	Kind actor.Kind
+	Run  RunAuthority
+}
+
+// AdmitRun is the A/G narrow face of the value ledger: one read lock, one
+// complete verdict, one Kind.
+func (c *Controller) AdmitRun(
+	id actor.ActorID,
+	key actorhost.AttemptKey,
+) (RunAdmission, error) {
+	if c == nil {
+		return RunAdmission{}, ErrClosed
+	}
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.checkCurrentLocked(id, key); err != nil {
+		return RunAdmission{}, err
+	}
+	return RunAdmission{
+		ID:   id,
+		Kind: c.actors[id].Record.Kind,
+		Run:  RunAuthority{controller: c, id: id, attempt: key},
+	}, nil
+}
+
 // PreparedRun is the coherent immutable input for exactly one managed Unit
 // capability mint. Only Controller can construct one. It carries no definition:
 // the body builder already holds Host's exact desired input.

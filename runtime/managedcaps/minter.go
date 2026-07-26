@@ -6,12 +6,10 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
-	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 )
@@ -25,57 +23,33 @@ type LifecycleOperations interface {
 	End(context.Context, actorctl.EndRequest) (actorctl.EndResult, error)
 }
 
-// Minter mints all kernel handles for one PreparedRun in one call.
+// Minter mints all kernel handles for one PreparedRun in one call. It holds no
+// channel id: the channel is the harness's own binding constant, stamped where
+// it is known, never carried around the assembly.
 type Minter struct {
-	channelID channel.ID
-	pen       authorityPenMinter
-	access    authorityAccessMinter
-	state     authorityStateResolver
-	schedule  authorityScheduleMinter
+	pen       harness.Minter
+	access    accessdoor.AccessMinter
+	state     accessdoor.StateHandleResolver
+	schedule  schedule.Minter
 	lifecycle LifecycleOperations
 }
 
-type authorityPenMinter interface {
-	MintAuthority(capauth.Authority, actor.Kind, channel.ID) harness.Pen
-}
-
-type authorityAccessMinter interface {
-	MintAuthority(capauth.Authority) accessdoor.ResourceAccessHandle
-}
-
-type authorityStateResolver interface {
-	ResolveAuthority(context.Context, capauth.Authority) (accessdoor.AccessHandle, error)
-}
-
-type authorityScheduleMinter interface {
-	MintAuthority(capauth.Authority) schedule.ScheduleHandle
-}
-
 func New(
-	channelID channel.ID,
 	pen harness.Minter,
 	access accessdoor.AccessMinter,
 	state accessdoor.StateHandleResolver,
 	scheduleMinter schedule.Minter,
 	lifecycle LifecycleOperations,
 ) (*Minter, error) {
-	if channelID == "" || pen == nil || access == nil || state == nil ||
+	if pen == nil || access == nil || state == nil ||
 		scheduleMinter == nil || lifecycle == nil {
 		return nil, ErrInvalidInput
 	}
-	authorityPen, penOK := pen.(authorityPenMinter)
-	authorityAccess, accessOK := access.(authorityAccessMinter)
-	authorityState, stateOK := state.(authorityStateResolver)
-	authoritySchedule, scheduleOK := scheduleMinter.(authorityScheduleMinter)
-	if !penOK || !accessOK || !stateOK || !scheduleOK {
-		return nil, ErrInvalidInput
-	}
 	return &Minter{
-		channelID: channelID,
-		pen:       authorityPen,
-		access:    authorityAccess,
-		state:     authorityState,
-		schedule:  authoritySchedule,
+		pen:       pen,
+		access:    access,
+		state:     state,
+		schedule:  scheduleMinter,
 		lifecycle: lifecycle,
 	}, nil
 }
@@ -93,7 +67,7 @@ func (m *Minter) Mint(
 		return actorcaps.Caps{}, err
 	}
 	return actorcaps.Caps{
-		Pen:      m.pen.MintAuthority(prepared.Run(), prepared.Kind(), m.channelID),
+		Pen:      m.pen.MintAuthority(prepared.Run(), prepared.Kind()),
 		Access:   m.access.MintAuthority(prepared.Run()),
 		State:    state,
 		Schedule: m.schedule.MintAuthority(prepared.Identity()),

@@ -26,10 +26,11 @@ import (
 // caller carries the principal + transport metadata the harness needs to
 // verify a write. It is plumbed through context.Context (see ctxWithCaller /
 // callerFromCtx) so step implementations do not need a per-step parameter; the
-// boundPen populates it once from the welded (actorID, chID) before driving the
-// chain. It is harness-internal (unexported): the substrate's pen-minting surface is Mint,
-// which takes the raw (actorID, chID) — there is no caller-constructible
-// identity context outside the package.
+// boundPen populates it once from the welded principal before driving the
+// chain. It is harness-internal (unexported): the substrate's pen-minting
+// surface is Mint, which takes an identity alone — the channel is the
+// harness's own binding constant, never a mint parameter — so there is no
+// caller-constructible identity context outside the package.
 type caller struct {
 	// actorID is the authenticated principal that issued the write.
 	// step 1 / step 3 compare it against envelope.sender.id.
@@ -40,20 +41,17 @@ type caller struct {
 	// callerFromCtx) instead of querying the registry: kind is welded truth,
 	// not a name-list lookup.
 	kind actor.Kind
-	// chID is the channel binding the caller is authenticated for.
-	// Step 0/1 rejects (harness_engine_acl_denied) when it differs from the
-	// harness-bound channel.
-	chID channel.ID
 }
 
 // Deps bundles every collaborator the runtime write engine needs. One
 // Deps instance is shared across all step implementations.
 type Deps struct {
-	// ChannelID identifies which channel this harness is bound to. The
-	// chain enforces envelope.channel_id matches. Caller-context channel
-	// mismatches reject as harness_engine_acl_denied at the entry gate;
-	// envelope.channel_id mismatches reject as harness_channel_mismatch in
-	// the envelope-shape step.
+	// ChannelID identifies which channel this harness is bound to. It is this
+	// harness's OWN binding constant and its only use is the stamp: the pen
+	// writes it onto every envelope (pen.go), and a caller-supplied value is
+	// rejected outright as not-caller-settable. No step compares it against
+	// anything — the producer of the field and the authority on it are the
+	// same object, so there is no second account to reconcile.
 	ChannelID channel.ID
 
 	// (There is NO ActorRegistry dep: the sender door trusts the pen weld —

@@ -8,7 +8,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // TestNewFailFast: assembly-time validation rejects an incomplete Deps and a
@@ -75,7 +74,7 @@ func TestAccessRejectsInvalidAdmission(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := m.MintAdmitted(storespec.IdentityAdmission{}).Invoke(context.Background(), access.OpRead, "r", nil, nil)
+	out, err := m.MintAuthority(nil).Invoke(context.Background(), access.OpRead, "r", nil, nil)
 	if !errors.Is(err, ErrAuthorInactive) {
 		t.Fatalf("inactive author outcome=(%+v,%v)", out, err)
 	}
@@ -91,7 +90,7 @@ func TestMintedHandleRunsFullPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	h := m.MintAdmitted(accessAdmission("a"))
+	h := m.MintAuthority(accessAuthority("a"))
 
 	// malformed (set without grant) → Go error, tree never reached.
 	if _, err := h.Invoke(t.Context(), access.OpSet, "r1", nil, nil); err == nil {

@@ -8,6 +8,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/resource"
+	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -260,8 +261,10 @@ func (m *fakeMembership) ResourceActorFacts(
 	}, nil
 }
 
-func accessAdmission(id actor.ActorID) storespec.IdentityAdmission {
-	return storespec.IdentityAdmission{ID: id, Kind: actor.KindAgent}
+// accessAuthority is the live A-level authority a door mints against. Tests
+// weld one per caller exactly as the assembly does.
+func accessAuthority(id actor.ActorID) capauth.Authority {
+	return liveAuthority{id: id}
 }
 
 func (m *fakeMembership) IsMember(ctx context.Context, id actor.ActorID) (bool, error) {

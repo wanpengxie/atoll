@@ -190,11 +190,11 @@ func mintTimerID() TimerID { return TimerID(uuid.NewString()) }
 // Unexported: author is a free parameter here, so this is the UN-WELDED face
 // — the schedule-package twin of harness's bare chain, and it stays inside
 // the package for the same reason the chain does. Every consumption path
-// (caps-injected cell handle, host-side per-call mint at the port arm, the
-// platform's own system timers) closes over Minter.MintAdmitted(author), which is
-// the one seam future per-author enforcement (liveSchedule membrane, storm
-// quotas, principal checks) attaches to — an exported free-author method
-// would be a standing structural bypass of that seam.
+// (the caps-injected cell handle and the remote ingress's per-call shell alike)
+// closes over Minter.MintAuthority(authority), which is the one seam the author
+// verdict — and any future per-author enforcement (storm quotas, principal
+// checks) — attaches to; an exported free-author method would be a standing
+// structural bypass of that seam.
 func (e *Engine) schedule(
 	ctx context.Context,
 	author actor.ActorID,

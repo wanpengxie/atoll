@@ -35,7 +35,6 @@ type boundStateHandle struct {
 	door      *door
 	owner     actor.ActorID
 	authority capauth.Authority
-	admitted  bool
 }
 
 // Invoke runs the actor-scoped ingress (structure → ErrMalformed / set →
@@ -43,13 +42,10 @@ type boundStateHandle struct {
 // There is no day1OpsOverreach step: that narrows an op=set grant, and set does
 // not exist in this locus (ingressState rejects it before the tree).
 func (h boundStateHandle) Invoke(ctx context.Context, op access.Operation, id resource.ResourceID, args []byte, grant *access.Grant) (Outcome, error) {
-	if h.admitted {
-		// The source boundary already completed the ActorID admission.
-	} else if h.authority != nil {
-		if err := h.authority.Admit(); err != nil {
-			return Outcome{RejectReason: access.OwnerInactive}, nil
-		}
-	} else {
+	if h.authority == nil {
+		return Outcome{RejectReason: access.OwnerInactive}, nil
+	}
+	if err := h.authority.Admit(); err != nil {
 		return Outcome{RejectReason: access.OwnerInactive}, nil
 	}
 	if err := ingressState(op, id, args, grant); err != nil {

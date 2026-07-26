@@ -84,12 +84,6 @@ func TestChain_WriteShortCircuitsOnFirstReject(t *testing.T) {
 			reason: HarnessEngineACLDenied,
 		},
 		{
-			name:   "step1 channel mismatch",
-			ctx:    ctxCaller("agent:p"),
-			mutate: func(e *message.Envelope) { e.ChannelID = "foreign" },
-			reason: HarnessChannelMismatch,
-		},
-		{
 			name:   "step4 sender mismatch",
 			ctx:    ctxCaller("agent:p"),
 			mutate: func(e *message.Envelope) { e.Sender = message.Sender{ID: "agent:other"} },

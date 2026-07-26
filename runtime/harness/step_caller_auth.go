@@ -11,14 +11,11 @@ import (
 // principal before driving the chain). When no caller is attached we reject
 // harness_engine_acl_denied (defensive — the boundPen always wires it).
 //
-// Channel mismatch detection is split:
-//
-//   - caller.ChannelID vs the harness-bound channel is a *caller* identity
-//     mismatch (caller bound to the wrong channel) → harness_engine_acl_denied.
-//   - envelope.channel_id vs the harness-bound channel is an *envelope*
-//     shape error → harness_channel_mismatch, emitted by step_envelope_shape
-//     (Step 2). step 0+1 leaves the envelope.channel_id alone so Step 2 can
-//     surface the dedicated reason.
+// There is no channel comparison here: a caller cannot be bound to another
+// channel, because nobody hands a channel id to the mint any more. The pen
+// stamps the harness's own binding constant (deps.ChannelID) on every write,
+// so "caller's channel" and "this harness's channel" are one value by
+// construction, not two accounts to reconcile.
 type stepCallerAuth struct {
 	deps Deps
 }
@@ -33,12 +30,6 @@ func (s *stepCallerAuth) Run(ctx context.Context, env *message.Envelope) (outcom
 		return outcome{
 			RejectReason: HarnessEngineACLDenied,
 			Detail:       "harness: missing caller context",
-		}, nil
-	}
-	if c.chID != "" && c.chID != s.deps.ChannelID {
-		return outcome{
-			RejectReason: HarnessEngineACLDenied,
-			Detail:       "harness: caller bound to a different channel",
 		}, nil
 	}
 	return outcome{}, nil

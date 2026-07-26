@@ -78,7 +78,7 @@ func TestAuthorityPenAdmitsOnceAndLetsAcceptedWriteFinish(t *testing.T) {
 	}
 	authority := &testRunAuthority{id: "agent:authority"}
 	authority.allowed.Store(true)
-	pen := mint.(*minter).MintAuthority(authority, actor.KindAgent, testChannelID)
+	pen := mint.(*minter).MintAuthority(authority, actor.KindAgent)
 
 	done := make(chan error, 1)
 	go func() {

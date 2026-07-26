@@ -24,6 +24,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/managedcaps"
+	"github.com/wanpengxie/atoll/runtime/remoteingress"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -161,10 +162,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 	h.schedMinter, h.engine, err = schedule.New(schedule.Deps{
 		Store: cs.Assembly.Timers,
-		Fire: fireSink{
-			minter: h.minter, authority: h.actors,
-			chID: cfg.ChannelID,
-		},
+		Fire:  fireSink{minter: h.minter, authority: h.actors},
 		Clock: schedulerClock, Logger: logger,
 	})
 	if err != nil {
@@ -172,7 +170,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 
 	h.managedCaps, err = managedcaps.New(
-		cfg.ChannelID,
 		h.minter,
 		h.access,
 		h.stateHandles,
@@ -183,13 +180,26 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, fmt.Errorf("platform: construct managed caps minter: %w", err)
 	}
 	h.systemCaps, err = systemcaps.New(
-		cfg.ChannelID,
 		h.minter,
 		h.access,
 		h.schedMinter,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct system caps minter: %w", err)
+	}
+	// The remote ingress is this channel's standard part, built beside the
+	// managed minter from the same Controller and the same four organ doors:
+	// one instance, no channel id, no actor, no state. It is the only thing the
+	// link is given.
+	h.remoteIngress, err = remoteingress.New(
+		h.actors,
+		h.minter,
+		h.access,
+		h.stateHandles,
+		h.schedMinter,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("platform: construct remote ingress: %w", err)
 	}
 	h.serverHost, err = actorhost.New(actorhost.Config{
 		Domain: actorhost.ExecutionDomain("server"),
@@ -255,14 +265,12 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.sweepSubjectSlots(ctx)
 
 	links, err := link.NewAcceptor(link.Config{
-		Minter: h.minter, Access: h.access, StateHandles: stateHandles,
-		Schedule: h.schedMinter, Authority: h.actors,
-		ChannelID: cfg.ChannelID, Logger: logger,
+		Ingress:         h.remoteIngress,
+		ChannelID:       cfg.ChannelID,
+		Logger:          logger,
 		AuthorizeAttach: h.actors.AuthorizeAttach,
 		AttachBinding:   h.actors.AttachBinding,
 		BindingDown:     h.actors.BindingDown,
-		Fork:            h.actors.RemoteFork,
-		EndSelf:         h.actors.RemoteEndSelf,
 		Observe: func(
 			id actor.ActorID,
 			key actorhost.AttemptKey,

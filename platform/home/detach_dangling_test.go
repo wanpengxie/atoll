@@ -87,7 +87,6 @@ func TestDetachLeavesActorsDanglingButFullyMembers(t *testing.T) {
 	// Collaboration is untouched: a message to a dangling member is accepted.
 	result, err := h.minter.MintAdmitted(
 		storespec.IdentityAdmission{ID: sender, Kind: actor.KindHuman},
-		h.channelID,
 	).Write(ctx, &message.Envelope{
 		ID: "detach-probe", TS: time.Now().UnixMilli(), Kind: message.KindRequest,
 		Type: "detach.probe", Visibility: message.VisibilityPublic,

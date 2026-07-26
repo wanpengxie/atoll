@@ -41,7 +41,6 @@ const (
 	// Step 1 — Envelope Shape Validate
 	HarnessEnvelopeFieldMissing      HarnessRejectReason = "harness_envelope_field_missing"
 	HarnessPayloadInvalid            HarnessRejectReason = "harness_payload_invalid"
-	HarnessChannelMismatch           HarnessRejectReason = "harness_channel_mismatch"
 	HarnessKindInvalid               HarnessRejectReason = "harness_kind_invalid"
 	HarnessVisibilityInvalid         HarnessRejectReason = "harness_visibility_invalid"
 	HarnessAudienceWildcardForbidden HarnessRejectReason = "harness_audience_wildcard_forbidden"

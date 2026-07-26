@@ -43,12 +43,12 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	B = seedMember(t, cs, B)
 	C = seedMember(t, cs, C)
 
-	hA := cs.Access.MintAdmitted(identityAdmission(A))
-	hB := cs.Access.MintAdmitted(identityAdmission(B))
-	hC := cs.Access.MintAdmitted(identityAdmission(C))
+	hA := cs.Access.MintAuthority(identityAuthority{id: A})
+	hB := cs.Access.MintAuthority(identityAuthority{id: B})
+	hC := cs.Access.MintAuthority(identityAuthority{id: C})
 	// Platform cannot obtain an admission for a non-member; model that failed
 	// source-boundary admission with the zero value.
-	hX := cs.Access.MintAdmitted(storespec.IdentityAdmission{})
+	hX := cs.Access.MintAuthority(nil)
 
 	const rid = resource.ResourceID("kv:doc")
 	const ridX = resource.ResourceID("kv:docX")
@@ -148,7 +148,7 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 	expectReason(t, "C read after deregister (exit loses grant)", out, err, access.AccessDenied)
 
 	E = seedMember(t, cs, E)
-	hE := cs.Access.MintAdmitted(identityAdmission(E))
+	hE := cs.Access.MintAuthority(identityAuthority{id: E})
 	out, err = hE.Invoke(ctx, access.OpRead, rid, nil, nil)
 	expectAccepted(t, "E read after joining (late join gains access)", out, err)
 	expectBytes(t, "E read value", out, v1)
@@ -168,7 +168,7 @@ func TestChannelOwnerRecoversStrandedDaemonResource(t *testing.T) {
 	// Owner-ness is a door judgement over the genesis pointer, so the fixture
 	// names the owner explicitly rather than reading a bit off the record.
 	cs.markOwner(record.ID)
-	owner := cs.Access.MintAdmitted(identityAdmission(record.ID))
+	owner := cs.Access.MintAuthority(identityAuthority{id: record.ID})
 	const rid resource.ResourceID = "file:stranded"
 	if err := csResourcesCreateForTest(cs, rid, "retired-daemon", "orphan-coord"); err != nil {
 		t.Fatal(err)

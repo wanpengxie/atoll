@@ -7,7 +7,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
@@ -231,18 +230,25 @@ func (a *actorSystem) BindingDown(id actor.ActorID, binding actorhost.Binding) {
 	a.home.serverHost.BindingDown(id, binding)
 }
 
-func (a *actorSystem) RemoteFork(ctx context.Context, id actor.ActorID, key actorhost.AttemptKey, requestID message.ID, spec actorcaps.ForkSpec) (actor.ActorID, error) {
-	result, err := a.Fork(ctx, actorctl.ForkRequest{
-		CallerActorID: id, CallerAttempt: key, RequestID: requestID, Spec: spec,
-	})
-	return result.ChildActorID, err
+// The three narrow ledger questions the remote ingress asks. They are plain
+// pass-throughs to the Controller: minting an authority is a coordinate curry,
+// and AdmitRun is one read lock — this facade adds nothing to either.
+func (a *actorSystem) AdmitRun(
+	id actor.ActorID,
+	key actorhost.AttemptKey,
+) (actorctl.RunAdmission, error) {
+	return a.home.controller.AdmitRun(id, key)
 }
 
-func (a *actorSystem) RemoteEndSelf(ctx context.Context, id actor.ActorID, key actorhost.AttemptKey, request actorcaps.EndSelfRequest) error {
-	_, err := a.End(ctx, actorctl.EndRequest{
-		CallerActorID: id, CallerAttempt: key, Target: id, Reason: request.Reason,
-	})
-	return err
+func (a *actorSystem) RunAuthorityFor(
+	id actor.ActorID,
+	key actorhost.AttemptKey,
+) actorctl.RunAuthority {
+	return a.home.controller.RunAuthorityFor(id, key)
+}
+
+func (a *actorSystem) IdentityAuthorityFor(id actor.ActorID) actorctl.IdentityAuthority {
+	return a.home.controller.IdentityAuthorityFor(id)
 }
 
 // ---------------------------------------------------------------------------

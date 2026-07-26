@@ -95,7 +95,6 @@ func writeUnaddressed(t *testing.T, h *Home, source actor.ActorID, id string) (*
 	env := &message.Envelope{ID: message.ID(id), TS: time.Now().UnixMilli(), Kind: message.KindRequest, Type: "routing.probe", Visibility: message.VisibilityPublic}
 	result, err := h.minter.MintAdmitted(
 		storespec.IdentityAdmission{ID: source, Kind: actor.KindAgent},
-		h.channelID,
 	).Write(context.Background(), env)
 	return env, result, err
 }

@@ -116,8 +116,13 @@ func TestActorAuthorityManagedBodyUsesOneBundleMint(t *testing.T) {
 				}
 			}
 			if selector.Sel.Name == "MintAuthority" || selector.Sel.Name == "ResolveAuthority" {
+				// The authority-shaped mints have exactly three homes: the two
+				// capability bundles (one body, one mint) and the remote
+				// ingress (one operation, one mint). Anywhere else is a fourth
+				// place deciding when a capability comes into being.
 				if path != "../runtime/managedcaps/minter.go" &&
-					path != "../runtime/systemcaps/minter.go" {
+					path != "../runtime/systemcaps/minter.go" &&
+					path != "../runtime/remoteingress/ingress.go" {
 					escapedArmMints = append(escapedArmMints, at)
 				}
 			}
@@ -379,33 +384,131 @@ func TestForkPublicationHasNoPostCommitFailureTail(t *testing.T) {
 	}
 }
 
-func TestActorAuthorityCollaborationIngressUsesOneAdmittedSnapshot(t *testing.T) {
-	cases := []struct {
-		path     string
-		required []string
-	}{
-		{
-			path: "../platform/internal/link/accept.go",
-			required: []string{
-				"ResolvePhysical(ctx, id)",
-				"AdmitIdentity(ctx, id)",
-				"MintAdmitted(admission",
-			},
-		},
-		{
-			path: "../platform/home/scheduler.go",
-			required: []string{
-				"AdmitIdentity(ctx, author)",
-				"MintAdmitted(admission",
-			},
-		},
+// A remote operation is frame → door → one verdict + execution. The link
+// decodes and calls the ingress with its endpoint's own coordinate; it holds no
+// Controller, no minter and no resolver, so it has no parts to assemble a
+// verdict out of. The timer fire path is the one remaining admitted-snapshot
+// source boundary and stays as it is (its author gate IS the verdict).
+func TestActorAuthorityRemoteIngressIsTheOnlyRemoteDoor(t *testing.T) {
+	link := readAuthorityContractFile(t, "../platform/internal/link/accept.go")
+	for _, required := range []string{
+		"Ingress   remoteingress.RemoteIngress",
+		"a.ingress.Emit(ctx, id, key, env)",
+		"a.ingress.Access(ctx, id, key, call)",
+		"a.ingress.Schedule(ctx, id, call)",
+		"fork:          a.ingress.Fork",
+		"endSelf:       a.ingress.EndSelf",
+	} {
+		if !strings.Contains(link, required) {
+			t.Errorf("link accept.go lacks remote ingress seam %q", required)
+		}
 	}
-	for _, tc := range cases {
-		source := readAuthorityContractFile(t, tc.path)
-		for _, required := range tc.required {
-			if !strings.Contains(source, required) {
-				t.Errorf("%s lacks admitted collaboration seam %q", tc.path, required)
+	for _, forbidden := range []string{
+		"admitIdentity", "AdmitIdentity", "MintAdmitted", "MintAuthority",
+		"ResolvePhysical", "StateHandles", "actorctl.",
+	} {
+		if strings.Contains(link, forbidden) {
+			t.Errorf("link accept.go assembles capability work itself: %q", forbidden)
+		}
+	}
+	// Package-wide: the link may speak contract vocabulary (harness.Pen,
+	// accessdoor.Outcome — a daemon-side proxy IS one of those), but it may
+	// name no minter, no resolver and no Controller. Those are the parts a
+	// verdict could be assembled from.
+	for _, path := range phaseAProductionFiles(t, "../platform/internal/link") {
+		body := readAuthorityContractFile(t, path)
+		for _, forbidden := range []string{
+			"harness.Minter", "harness.AdmittedMinter",
+			"accessdoor.AccessMinter", "accessdoor.AdmittedMinter",
+			"accessdoor.StateHandleResolver",
+			"schedule.Minter", "schedule.AdmittedMinter",
+			"storespec.CollaborationAuthority",
+			"/runtime/actorctl",
+		} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("%s names a judgment owner %q — link holds one ingress interface", path, forbidden)
 			}
+		}
+	}
+
+	// Each ingress arm judges at its own precision and then enters the real
+	// organ: A/G for the pen and channel resources, A for state and schedule.
+	ingress := readAuthorityContractFile(t, "../runtime/remoteingress/ingress.go")
+	for _, required := range []string{
+		"admission, err := i.controller.AdmitRun(id, attempt)",
+		"i.pen.MintAuthority(admission.Run, admission.Kind)",
+		"i.access.MintAuthority(i.controller.RunAuthorityFor(id, attempt))",
+		"i.state.StateIngress(",
+		"i.schedule.MintAuthority(i.controller.IdentityAuthorityFor(id))",
+		"i.controller.Fork(ctx, actorctl.ForkRequest{",
+		"i.controller.End(ctx, actorctl.EndRequest{",
+	} {
+		if !strings.Contains(ingress, required) {
+			t.Errorf("remote ingress lacks organ entry %q", required)
+		}
+	}
+	if strings.Contains(ingress, "ChannelID") || strings.Contains(ingress, "channel.ID") {
+		t.Error("remote ingress handles a channel id")
+	}
+
+	scheduler := readAuthorityContractFile(t, "../platform/home/scheduler.go")
+	for _, required := range []string{
+		"AdmitIdentity(ctx, author)",
+		"MintAdmitted(admission)",
+	} {
+		if !strings.Contains(scheduler, required) {
+			t.Errorf("timer fire lacks admitted collaboration seam %q", required)
+		}
+	}
+}
+
+// Channel identity has ONE knower: the harness, whose Deps.ChannelID is its own
+// binding constant and whose only use for it is stamping the row it writes. It
+// used to travel — assembly point → minter field → mint parameter → two equality
+// self-checks — so that the value could be compared against the place it came
+// from. Nothing in the mint / control / remote-entry chain carries it now.
+func TestChannelIdentityIsOnlyTheHarnessOwnBinding(t *testing.T) {
+	for _, pkg := range []string{
+		"../runtime/managedcaps",
+		"../runtime/systemcaps",
+		"../runtime/remoteingress",
+		"../runtime/actorctl",
+		"../runtime/schedule",
+	} {
+		// Code only — a comment may still explain who welds the stamp.
+		for path, file := range parseProductionPackage(t, pkg) {
+			ast.Inspect(file, func(node ast.Node) bool {
+				ident, ok := node.(*ast.Ident)
+				if !ok {
+					return true
+				}
+				switch ident.Name {
+				case "channelID", "ChannelID", "chID":
+					t.Errorf("%s handles channel identity (%s) — only the harness knows it",
+						path, ident.Name)
+				}
+				return true
+			})
+		}
+	}
+
+	pen := readAuthorityContractFile(t, "../runtime/harness/pen.go")
+	for _, required := range []string{
+		"func (m *minter) MintAdmitted(admission storespec.IdentityAdmission) Pen {",
+		"func (m *minter) MintAuthority(authority capauth.Authority, kind actor.Kind) Pen {",
+		"env.ChannelID = p.chain.deps.ChannelID",
+	} {
+		if !strings.Contains(pen, required) {
+			t.Errorf("harness pen lacks channel-stamp shape %q", required)
+		}
+	}
+	for _, path := range []string{
+		"../runtime/harness/step_caller_auth.go",
+		"../runtime/harness/step_envelope_shape.go",
+	} {
+		body := readAuthorityContractFile(t, path)
+		if strings.Contains(body, "!= s.deps.ChannelID") {
+			t.Errorf("%s still compares the channel stamp against its own source", path)
 		}
 	}
 }

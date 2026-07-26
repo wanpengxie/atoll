@@ -4,7 +4,6 @@ import (
 	"context"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/schedule"
@@ -18,7 +17,6 @@ import (
 type fireSink struct {
 	minter    harness.AdmittedMinter
 	authority storespec.CollaborationAuthority
-	chID      channelpkg.ID
 }
 
 func (s fireSink) Append(ctx context.Context, author actor.ActorID, env *message.Envelope) error {
@@ -29,7 +27,7 @@ func (s fireSink) Append(ctx context.Context, author actor.ActorID, env *message
 	if !ok || !admission.Valid() {
 		return schedule.FireRejected{Reason: "author_not_member", Detail: string(author)}
 	}
-	result, err := s.minter.MintAdmitted(admission, s.chID).Write(ctx, env)
+	result, err := s.minter.MintAdmitted(admission).Write(ctx, env)
 	if err != nil {
 		return err
 	}

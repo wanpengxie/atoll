@@ -85,10 +85,7 @@ func registerActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID, kind
 // Tests drive the internal chain directly (step-isolation), so they set the
 // caller via the package-internal ctxWithCaller rather than minting a pen.
 func ctxCaller(id actor.ActorID) context.Context {
-	return ctxWithCaller(context.Background(), caller{
-		actorID: id,
-		chID:    testChannelID,
-	})
+	return ctxWithCaller(context.Background(), caller{actorID: id})
 }
 
 // ctxCallerKind returns a context carrying a caller bound to the test channel
@@ -97,11 +94,7 @@ func ctxCaller(id actor.ActorID) context.Context {
 // registry lookup (stepSenderConsistent reads kind from the weld, not the
 // registry).
 func ctxCallerKind(id actor.ActorID, kind actor.Kind) context.Context {
-	return ctxWithCaller(context.Background(), caller{
-		actorID: id,
-		kind:    kind,
-		chID:    testChannelID,
-	})
+	return ctxWithCaller(context.Background(), caller{actorID: id, kind: kind})
 }
 
 // validEvent builds a minimally-valid kind=event envelope authored by sender.

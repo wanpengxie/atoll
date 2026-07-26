@@ -5,7 +5,6 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -18,11 +17,8 @@ type minter struct {
 	chain *chain
 }
 
-func (m *minter) MintAdmitted(
-	admission storespec.IdentityAdmission,
-	chID channel.ID,
-) Pen {
-	if !admission.Valid() || chID == "" {
+func (m *minter) MintAdmitted(admission storespec.IdentityAdmission) Pen {
+	if !admission.Valid() {
 		return rejectedPen{}
 	}
 	return &boundPen{
@@ -30,16 +26,11 @@ func (m *minter) MintAdmitted(
 		principal: caller{
 			actorID: admission.ID,
 			kind:    admission.Kind,
-			chID:    chID,
 		},
 	}
 }
 
-func (m *minter) MintAuthority(
-	authority capauth.Authority,
-	kind actor.Kind,
-	chID channel.ID,
-) Pen {
+func (m *minter) MintAuthority(authority capauth.Authority, kind actor.Kind) Pen {
 	if authority == nil || authority.ActorID() == "" {
 		return rejectedPen{}
 	}
@@ -48,7 +39,6 @@ func (m *minter) MintAuthority(
 		principal: caller{
 			actorID: authority.ActorID(),
 			kind:    kind,
-			chID:    chID,
 		},
 		authority: authority,
 	}
@@ -97,7 +87,12 @@ func (p *boundPen) Write(ctx context.Context, env *message.Envelope) (WriteResul
 		}, nil
 	}
 	env.Sender.ID = p.principal.actorID
-	env.ChannelID = p.principal.chID
+	// The channel stamp comes from the harness's own binding constant: this
+	// harness IS the single writer of that channel's log, so the producer of
+	// the field and the authority on it are the same object. No caller — local
+	// or remote — hands a channel id in, so no equality self-check is needed
+	// downstream.
+	env.ChannelID = p.chain.deps.ChannelID
 	ctx = ctxWithCaller(ctx, p.principal)
 	return p.chain.write(ctx, env)
 }

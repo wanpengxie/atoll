@@ -35,7 +35,7 @@ func TestPublicSetArmDayOneMatrix(t *testing.T) {
 
 	// alice creates r1 — day-1 reachable birth: creator's full-rights grant is
 	// what every day-1 set/revoke below rides.
-	alice := m.MintAdmitted(accessAdmission(aliceID))
+	alice := m.MintAuthority(accessAuthority(aliceID))
 	out, err := alice.Create(context.Background(), "r1", resourcespec.CreateSpec{Kind: resourcespec.KindKV}, []byte("v"))
 	mustAccept(t, out, err)
 
@@ -66,7 +66,7 @@ func TestPublicSetArmDayOneMatrix(t *testing.T) {
 		// read. She can invoke set (she holds set-right) but the escalation
 		// check must deny granting an op she does not herself hold.
 		seedActorGrant(t, cs, "r1", carolID, access.OpWrite, access.OpSet)
-		carolH := m.MintAdmitted(accessAdmission(carolID))
+		carolH := m.MintAuthority(accessAuthority(carolID))
 
 		g := &access.Grant{GranteeKind: access.GranteeActor, Grantee: daveID, Ops: []access.Operation{access.OpRead}}
 		out, err := carolH.Invoke(context.Background(), access.OpSet, "r1", nil, g)

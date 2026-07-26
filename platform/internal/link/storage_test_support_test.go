@@ -10,125 +10,63 @@ import (
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/internal/link"
-	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/protocol/resource"
-	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/harness"
-	"github.com/wanpengxie/atoll/runtime/schedule"
-	"github.com/wanpengxie/atoll/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/remoteingress"
 )
 
 const testChannelID = channel.ID("test-channel")
 
-type testPen struct{}
+// stubIngress is the whole substrate side of these transport tests: the link
+// under test is supposed to decode a frame and call exactly one of these arms,
+// so an accept-everything ingress is all the capability plane it needs.
+type stubIngress struct{}
 
-func (testPen) Write(context.Context, *message.Envelope) (harness.WriteResult, error) {
+func (stubIngress) Emit(
+	context.Context,
+	actor.ActorID,
+	actorhost.AttemptKey,
+	*message.Envelope,
+) (harness.WriteResult, error) {
 	return harness.WriteResult{}, nil
 }
 
-type stubMinter struct{}
-
-func (*stubMinter) MintAdmitted(storespec.IdentityAdmission, channel.ID) harness.Pen {
-	return testPen{}
-}
-
-type testStateHandle struct{}
-
-func (testStateHandle) Invoke(
-	context.Context,
-	access.Operation,
-	resource.ResourceID,
-	[]byte,
-	*access.Grant,
-) (accessdoor.Outcome, error) {
-	return accessdoor.Outcome{}, nil
-}
-
-type testResourceHandle struct{ testStateHandle }
-
-func (testResourceHandle) Create(
-	context.Context,
-	resource.ResourceID,
-	accessdoor.CreateSpec,
-	[]byte,
-) (accessdoor.Outcome, error) {
-	return accessdoor.Outcome{}, nil
-}
-func (testResourceHandle) Stat(context.Context, resource.ResourceID) (accessdoor.StatResult, error) {
-	return accessdoor.StatResult{}, nil
-}
-func (testResourceHandle) List(context.Context, accessdoor.ListQuery) (accessdoor.ListPage, error) {
-	return accessdoor.ListPage{}, nil
-}
-func (testResourceHandle) Open(
-	context.Context,
-	resource.ResourceID,
-	access.Operation,
-) (accessdoor.FileAccess, accessdoor.Outcome, error) {
-	return accessdoor.FileAccess{}, accessdoor.Outcome{}, accessdoor.ErrFileCapabilityUnavailable
-}
-func (testResourceHandle) Redeem(context.Context, accessdoor.FileRoute) (accessdoor.FileAccess, error) {
-	return accessdoor.FileAccess{}, accessdoor.ErrFileCapabilityUnavailable
-}
-
-type testAccessMinter struct{}
-
-func (testAccessMinter) MintAdmitted(storespec.IdentityAdmission) accessdoor.ResourceAccessHandle {
-	return testResourceHandle{}
-}
-func (testAccessMinter) MintStateAdmitted(storespec.IdentityAdmission) accessdoor.AccessHandle {
-	return testStateHandle{}
-}
-
-type testStateResolver struct{}
-
-type testStateBinding struct{}
-
-func (testStateBinding) MintAdmitted(storespec.IdentityAdmission) accessdoor.AccessHandle {
-	return testStateHandle{}
-}
-
-func (testStateResolver) ResolvePhysical(
+func (stubIngress) Access(
 	context.Context,
 	actor.ActorID,
-) (accessdoor.AdmittedStateBinding, error) {
-	return testStateBinding{}, nil
+	actorhost.AttemptKey,
+	remoteingress.AccessRequest,
+) (remoteingress.AccessResponse, error) {
+	return remoteingress.AccessResponse{}, nil
 }
 
-type testScheduleHandle struct{}
-
-func (testScheduleHandle) Schedule(context.Context, schedule.ScheduleReq) (schedule.TimerID, error) {
-	return "test-timer", nil
-}
-func (testScheduleHandle) Cancel(context.Context, schedule.TimerID) error { return nil }
-func (testScheduleHandle) Ack(context.Context, schedule.TimerID) error    { return nil }
-
-type testScheduleMinter struct{}
-
-func (testScheduleMinter) MintAdmitted(storespec.IdentityAdmission) schedule.ScheduleHandle {
-	return testScheduleHandle{}
-}
-
-type testAuthority struct{}
-
-func (testAuthority) AdmitIdentity(
-	_ context.Context,
-	id actor.ActorID,
-) (storespec.IdentityAdmission, bool, error) {
-	return storespec.IdentityAdmission{ID: id, Kind: actor.KindAgent}, true, nil
-}
-func (testAuthority) IsActive(context.Context, actor.ActorID) (bool, error) {
-	return true, nil
-}
-func (testAuthority) ResourceActorFacts(
+func (stubIngress) Schedule(
 	context.Context,
 	actor.ActorID,
-) (storespec.ResourceActorFacts, error) {
-	return storespec.ResourceActorFacts{Active: true}, nil
+	remoteingress.ScheduleRequest,
+) (remoteingress.ScheduleResponse, error) {
+	return remoteingress.ScheduleResponse{ID: "test-timer"}, nil
+}
+
+func (stubIngress) Fork(
+	context.Context,
+	actor.ActorID,
+	actorhost.AttemptKey,
+	remoteingress.ForkRequest,
+) (actor.ActorID, error) {
+	return "agent:child", nil
+}
+
+func (stubIngress) EndSelf(
+	context.Context,
+	actor.ActorID,
+	actorhost.AttemptKey,
+	actorcaps.EndSelfRequest,
+) error {
+	return nil
 }
 
 type fakeStorageHostControl struct {
@@ -173,29 +111,15 @@ func newStorageRig(t *testing.T) *storageRig {
 	t.Helper()
 	shc := &fakeStorageHostControl{}
 	acc, err := link.NewAcceptor(link.Config{
-		Minter:       &stubMinter{},
-		Access:       testAccessMinter{},
-		StateHandles: testStateResolver{},
-		Schedule:     testScheduleMinter{},
-		Authority:    testAuthority{},
-		ChannelID:    testChannelID,
+		Ingress:   stubIngress{},
+		ChannelID: testChannelID,
 		AuthorizeAttach: func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain) error {
 			return nil
 		},
 		AttachBinding: func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain, actorhost.Binding) error {
 			return nil
 		},
-		BindingDown: func(actor.ActorID, actorhost.Binding) {},
-		Fork: func(
-			context.Context,
-			actor.ActorID,
-			actorhost.AttemptKey,
-			message.ID,
-			actorcaps.ForkSpec,
-		) (actor.ActorID, error) {
-			return "agent:child", nil
-		},
-		EndSelf:            func(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error { return nil },
+		BindingDown:        func(actor.ActorID, actorhost.Binding) {},
 		StorageHostControl: shc,
 		Plan:               func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
 		CanAttach:          func(context.Context, string) error { return nil },

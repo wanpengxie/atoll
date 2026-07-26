@@ -6,7 +6,6 @@ import (
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/capauth"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // boundScheduleHandle is a ScheduleHandle welded to one author (the caps-
@@ -17,17 +16,15 @@ type boundScheduleHandle struct {
 	engine    *Engine
 	author    actor.ActorID
 	authority capauth.Authority
-	admitted  bool
 }
 
+// authorize is the door's one complete verdict, run on every call. A handle
+// without an authority is not a trusted handle — it is a broken one.
 func (h boundScheduleHandle) authorize(ctx context.Context) error {
-	if h.admitted {
-		return nil
+	if h.authority == nil {
+		return errors.New("schedule: incomplete author authority")
 	}
-	if h.authority != nil {
-		return h.authority.Admit()
-	}
-	return errors.New("schedule: incomplete author authority")
+	return h.authority.Admit()
 }
 
 func (h boundScheduleHandle) Schedule(ctx context.Context, req ScheduleReq) (TimerID, error) {
@@ -57,17 +54,6 @@ func (h boundScheduleHandle) Ack(ctx context.Context, id TimerID) error {
 // harness.minter / accessdoor.minter).
 type minter struct {
 	engine *Engine
-}
-
-func (m *minter) MintAdmitted(
-	admission storespec.IdentityAdmission,
-) ScheduleHandle {
-	if !admission.Valid() {
-		return rejectedScheduleHandle{err: errors.New("schedule: invalid identity admission")}
-	}
-	return boundScheduleHandle{
-		engine: m.engine, author: admission.ID, admitted: true,
-	}
 }
 
 func (m *minter) MintAuthority(authority capauth.Authority) ScheduleHandle {

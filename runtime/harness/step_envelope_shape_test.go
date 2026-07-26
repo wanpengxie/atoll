@@ -7,6 +7,7 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // StepEnvelopeShape contract — wire-level structural guards.
@@ -42,23 +43,45 @@ func TestStepEnvelopeShape_FieldMissing(t *testing.T) {
 	}
 }
 
-// The hardened, UNCONDITIONAL channel_mismatch: env.channel_id != deps.ChannelID
-// must reject regardless of caller context — even with NO caller attached. This
-// is the substrate-truth-integrity guard, not an ACL concern.
-func TestStepEnvelopeShape_ChannelMismatchUnconditional(t *testing.T) {
+// The channel stamp has ONE source: this harness's own binding constant. The
+// pen writes it, so nothing downstream compares it against anything — the guard
+// that used to do so was the harness checking its own output. What remains is
+// the property that made the guard unnecessary: a caller cannot supply a
+// channel at all, and what lands on the row is deps.ChannelID.
+func TestChannelStampComesFromTheHarnessBindingAlone(t *testing.T) {
 	cs := newTestStore(t)
-	deps := testDeps(t, cs)
-
-	e := validEvent("m1", "a")
-	e.ChannelID = channel.ID("foreign-channel")
-
-	// No caller in context — the guard must still fire.
-	out, err := runStep(t, newStepEnvelopeShape, deps, context.Background(), e)
+	mint, err := New(testDeps(t, cs))
 	if err != nil {
-		t.Fatalf("err: %v", err)
+		t.Fatal(err)
 	}
-	if out.RejectReason != HarnessChannelMismatch {
-		t.Fatalf("reason = %q, want channel_mismatch (must fire without caller context)", out.RejectReason)
+	pen := mint.MintAdmitted(storespec.IdentityAdmission{
+		ID: "agent:a", Kind: actor.KindAgent,
+	})
+
+	stamped := &message.Envelope{
+		ID: "stamped", TS: fixedNowMs - 1000, Kind: message.KindEvent,
+		Type: "agent.text", Audience: message.Audience{"agent:b"},
+	}
+	result, err := pen.Write(context.Background(), stamped)
+	if err != nil || !result.Accepted() {
+		t.Fatalf("write: result=%+v err=%v", result, err)
+	}
+	if stamped.ChannelID != testChannelID {
+		t.Fatalf("channel stamp = %q, want the harness binding %q", stamped.ChannelID, testChannelID)
+	}
+
+	// A caller-supplied channel is refused outright, loudly — it is never
+	// quietly corrected and never reaches a shape comparison.
+	forged := &message.Envelope{
+		ID: "forged", TS: fixedNowMs - 1000, ChannelID: channel.ID("foreign-channel"),
+		Kind: message.KindEvent, Type: "agent.text", Audience: message.Audience{"agent:b"},
+	}
+	result, err = pen.Write(context.Background(), forged)
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if result.RejectReason != HarnessIdentityNotCallerSettable {
+		t.Fatalf("reason = %q, want identity_not_caller_settable", result.RejectReason)
 	}
 }
 

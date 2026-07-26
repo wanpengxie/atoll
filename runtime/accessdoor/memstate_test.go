@@ -164,3 +164,120 @@ func TestForgetActorsReleasesTheProcessLocusOnly(t *testing.T) {
 		t.Fatalf("released process locus still holds data: %+v", out)
 	}
 }
+
+// deadAuthority refuses. It is the A-level verdict a dead or unknown identity
+// gets at the door.
+type deadAuthority struct{ id actor.ActorID }
+
+func (a deadAuthority) ActorID() actor.ActorID { return a.id }
+func (a deadAuthority) Admit() error           { return errors.New("author inactive") }
+
+// endingAuthority admits once and, in the act of admitting, ends the actor:
+// the classification it would route by afterwards is the OTHER one. It is the
+// End-lands-mid-call race, made deterministic.
+type endingAuthority struct {
+	id      actor.ActorID
+	entries *fakeEntries
+}
+
+func (a endingAuthority) ActorID() actor.ActorID { return a.id }
+
+func (a endingAuthority) Admit() error {
+	a.entries.entry[a.id] = false
+	return nil
+}
+
+// The remote body has no welded backing — it holds no classification and the
+// classification never crosses the wire — so its state calls route inside the
+// organ, once per call, through the SAME function the local mint uses.
+func TestStateIngressRoutesInsideTheOrganOnEveryCall(t *testing.T) {
+	ctx := context.Background()
+	entries := &fakeEntries{entry: map[actor.ActorID]bool{
+		"agent:parent/worker-1": true,
+		"agent:declared":        false,
+	}}
+	resolver, durable := newStateResolver(t, entries)
+
+	for i := 0; i < 3; i++ {
+		before := entries.calls
+		if _, err := resolver.StateIngress(
+			ctx,
+			liveAuthority{id: "agent:parent/worker-1"},
+			StateOp{Operation: access.OpCreate, Resource: "k", Args: []byte("v")},
+		); err != nil {
+			t.Fatal(err)
+		}
+		if entries.calls != before+1 {
+			t.Fatalf("call %d routed %d times, want exactly one", i, entries.calls-before)
+		}
+	}
+	if len(durable.createCalls) != 0 {
+		t.Fatalf("entry record's state reached the durable store: %+v", durable.createCalls)
+	}
+
+	if _, err := resolver.StateIngress(
+		ctx,
+		liveAuthority{id: "agent:declared"},
+		StateOp{Operation: access.OpCreate, Resource: "k", Args: []byte("v")},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(durable.createCalls) != 1 || durable.createCalls[0].owner != "agent:declared" {
+		t.Fatalf("durable store saw %+v, want exactly the declared record", durable.createCalls)
+	}
+
+	// A record that exists nowhere has no backing to select — the ingress
+	// cannot invent a default one.
+	if _, err := resolver.StateIngress(
+		ctx, liveAuthority{id: "agent:nobody"},
+		StateOp{Operation: access.OpRead, Resource: "k"},
+	); !errors.Is(err, ErrStateHandleUnavailable) {
+		t.Fatalf("unknown id err=%v, want ErrStateHandleUnavailable", err)
+	}
+}
+
+// The three steps are pinned in one order: select the backing, admit the
+// ActorID, execute on the backing already selected. A refused identity never
+// reaches the store; an End that lands after the admission neither redirects
+// the accepted call nor overturns it.
+func TestStateIngressSelectsThenAdmitsThenExecutesOnTheSelectedBacking(t *testing.T) {
+	ctx := context.Background()
+	entries := &fakeEntries{entry: map[actor.ActorID]bool{
+		"agent:parent/worker-1": true,
+		"agent:declared":        false,
+	}}
+	resolver, durable := newStateResolver(t, entries)
+
+	// Refused identity: routing happened (step 1), execution did not.
+	before := entries.calls
+	out, err := resolver.StateIngress(
+		ctx, deadAuthority{id: "agent:declared"},
+		StateOp{Operation: access.OpCreate, Resource: "k", Args: []byte("v")},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.RejectReason != access.OwnerInactive {
+		t.Fatalf("dead author outcome = %+v, want owner_inactive", out)
+	}
+	if entries.calls != before+1 {
+		t.Fatal("the door was reached without selecting a backing first")
+	}
+	if len(durable.createCalls) != 0 {
+		t.Fatalf("a refused call still wrote: %+v", durable.createCalls)
+	}
+
+	// An End landing inside the admission flips the classification. The call is
+	// already accepted, so it completes on the backing chosen before — it is
+	// not redirected to the durable store and not judged a second time.
+	if _, err := resolver.StateIngress(
+		ctx,
+		endingAuthority{id: "agent:parent/worker-1", entries: entries},
+		StateOp{Operation: access.OpCreate, Resource: "k", Args: []byte("v")},
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(durable.createCalls) != 0 {
+		t.Fatalf("an accepted call was redirected mid-flight: %+v", durable.createCalls)
+	}
+}

@@ -14,18 +14,14 @@ import (
 
 	"github.com/gorilla/websocket"
 
-	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
-	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
-	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/ipc"
-	"github.com/wanpengxie/atoll/runtime/schedule"
-	"github.com/wanpengxie/atoll/runtime/storespec"
+	"github.com/wanpengxie/atoll/runtime/remoteingress"
 )
 
 var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
@@ -33,22 +29,21 @@ var upgrader = websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return
 const attachHandshakeTimeout = 10 * time.Second
 
 // Config supplies the Server composition seams. The Acceptor owns physical
-// sessions and exact Bindings only; logical actor truth and lifecycle commands
-// stay in actorctl behind these callbacks.
+// sessions and exact Bindings only.
+//
+// Substrate capability work enters through ONE seam: Ingress. The link holds no
+// Controller, no minter and no resolver — it cannot admit, mint or route, and
+// therefore cannot assemble a judgment out of parts. It decodes a frame, calls
+// the ingress with the coordinate its own authenticated endpoint carries, and
+// encodes the answer.
 type Config struct {
-	Minter       harness.AdmittedMinter
-	Access       accessdoor.AdmittedMinter
-	StateHandles accessdoor.AdmittedStateHandleResolver
-	Schedule     schedule.AdmittedMinter
-	Authority    storespec.CollaborationAuthority
-	ChannelID    channel.ID
-	Logger       *slog.Logger
+	Ingress   remoteingress.RemoteIngress
+	ChannelID channel.ID
+	Logger    *slog.Logger
 
 	AuthorizeAttach func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain) error
 	AttachBinding   func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain, actorhost.Binding) error
 	BindingDown     func(actor.ActorID, actorhost.Binding)
-	Fork            func(context.Context, actor.ActorID, actorhost.AttemptKey, message.ID, actorcaps.ForkSpec) (actor.ActorID, error)
-	EndSelf         func(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error
 	Observe         func(actor.ActorID, actorhost.AttemptKey, actorhost.Binding, actorrt.ObsKind, actorrt.ObsValue)
 	ObserveDown     func(actor.ActorID, actorhost.AttemptKey, actorhost.Binding)
 	CancelRequest   func(actor.ActorID, message.ID)
@@ -62,19 +57,13 @@ type Config struct {
 // attachment/presence and exact Binding only; it never mutates actor desired
 // lifecycle or replaces an incarnation.
 type Acceptor struct {
-	minter       harness.AdmittedMinter
-	access       accessdoor.AdmittedMinter
-	stateHandles accessdoor.AdmittedStateHandleResolver
-	sched        schedule.AdmittedMinter
-	authority    storespec.CollaborationAuthority
-	channelID    channel.ID
-	logger       *slog.Logger
+	ingress   remoteingress.RemoteIngress
+	channelID channel.ID
+	logger    *slog.Logger
 
 	authorizeAttach func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain) error
 	attachBinding   func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain, actorhost.Binding) error
 	bindingDown     func(actor.ActorID, actorhost.Binding)
-	fork            func(context.Context, actor.ActorID, actorhost.AttemptKey, message.ID, actorcaps.ForkSpec) (actor.ActorID, error)
-	endSelf         func(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error
 	observe         func(actor.ActorID, actorhost.AttemptKey, actorhost.Binding, actorrt.ObsKind, actorrt.ObsValue)
 	observeDown     func(actor.ActorID, actorhost.AttemptKey, actorhost.Binding)
 	cancelReq       func(actor.ActorID, message.ID)
@@ -130,14 +119,10 @@ func (h *linkHandle) sendControl(raw []byte) error {
 
 func NewAcceptor(cfg Config) (*Acceptor, error) {
 	switch {
-	case cfg.Minter == nil || cfg.Access == nil || cfg.StateHandles == nil || cfg.Schedule == nil:
-		return nil, errors.New("link: capability minters are required")
-	case cfg.Authority == nil:
-		return nil, errors.New("link: actor authority is required")
+	case cfg.Ingress == nil:
+		return nil, errors.New("link: remote ingress is required")
 	case cfg.AuthorizeAttach == nil || cfg.AttachBinding == nil || cfg.BindingDown == nil:
 		return nil, errors.New("link: exact binding callbacks are required")
-	case cfg.Fork == nil || cfg.EndSelf == nil:
-		return nil, errors.New("link: lifecycle callbacks are required")
 	case cfg.Plan == nil || cfg.CanAttach == nil:
 		return nil, errors.New("link: daemon plan/admission callbacks are required")
 	}
@@ -147,13 +132,12 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Acceptor{
-		minter: cfg.Minter, access: cfg.Access, stateHandles: cfg.StateHandles,
-		sched: cfg.Schedule, authority: cfg.Authority, channelID: cfg.ChannelID,
+		ingress:         cfg.Ingress,
+		channelID:       cfg.ChannelID,
 		logger:          logger,
 		authorizeAttach: cfg.AuthorizeAttach, attachBinding: cfg.AttachBinding,
-		bindingDown: cfg.BindingDown, fork: cfg.Fork,
-		endSelf: cfg.EndSelf,
-		observe: cfg.Observe, observeDown: cfg.ObserveDown, cancelReq: cfg.CancelRequest,
+		bindingDown: cfg.BindingDown,
+		observe:     cfg.Observe, observeDown: cfg.ObserveDown, cancelReq: cfg.CancelRequest,
 		storageControl: cfg.StorageHostControl, plan: cfg.Plan, canAttach: cfg.CanAttach,
 		ctx: ctx, cancel: cancel, closeDone: make(chan struct{}),
 		attached:       make(map[string]int),
@@ -205,8 +189,8 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		emit:          a.emit,
 		access:        a.relayAccess,
 		schedule:      a.relaySchedule,
-		fork:          a.fork,
-		endSelf:       a.endSelf,
+		fork:          a.ingress.Fork,
+		endSelf:       a.ingress.EndSelf,
 		cancelRequest: a.cancelReq,
 		deliverResult: func(id actor.ActorID, request message.ID, outcome, detail string) {
 			a.logger.Warn("platform.delivery.remote_outcome",
@@ -501,30 +485,19 @@ func (a *Acceptor) AttachedDaemonIDs() []string {
 	return out
 }
 
-func (a *Acceptor) admitIdentity(
-	ctx context.Context,
-	id actor.ActorID,
-) (storespec.IdentityAdmission, error) {
-	admission, ok, err := a.authority.AdmitIdentity(ctx, id)
-	if err != nil {
-		return storespec.IdentityAdmission{}, err
-	}
-	if !ok || !admission.Valid() {
-		return storespec.IdentityAdmission{}, errors.New("link: actor inactive")
-	}
-	return admission, nil
-}
+// The three capability arms below are the whole server-side story of a remote
+// operation: decode the frame, hand the ingress the endpoint's own coordinate
+// plus the decoded payload, encode what comes back. There is no admission, no
+// mint and no routing here — the verdict and the execution happen together
+// inside the organ, exactly once, exactly as they do for a local body.
 
 func (a *Acceptor) emit(
 	ctx context.Context,
 	id actor.ActorID,
+	key actorhost.AttemptKey,
 	env *message.Envelope,
 ) (ipc.EmitResult, error) {
-	admission, err := a.admitIdentity(ctx, id)
-	if err != nil {
-		return ipc.EmitResult{}, err
-	}
-	result, err := a.minter.MintAdmitted(admission, a.channelID).Write(ctx, env)
+	result, err := a.ingress.Emit(ctx, id, key, env)
 	return ipc.EmitResult{
 		MessageID: result.MessageID, Seq: result.Seq,
 		RejectReason: string(result.RejectReason), RejectDetail: result.RejectDetail,
@@ -534,111 +507,22 @@ func (a *Acceptor) emit(
 func (a *Acceptor) relayAccess(
 	ctx context.Context,
 	id actor.ActorID,
+	key actorhost.AttemptKey,
 	payload []byte,
 ) ([]byte, error) {
 	var request accessRequest
 	if err := json.Unmarshal(payload, &request); err != nil {
 		return nil, fmt.Errorf("link: access payload decode: %w", err)
 	}
-	var stateBinding accessdoor.AdmittedStateBinding
-	if request.Kind == accessKindInvocation &&
-		request.Scope == accessScopeState {
-		if request.Inv == nil || request.Inv.Caller != "" {
-			return nil, errors.New("link: invalid access invocation")
-		}
-		var err error
-		stateBinding, err = a.stateHandles.ResolvePhysical(ctx, id)
-		if err != nil {
-			return nil, err
-		}
-	}
-	admission, err := a.admitIdentity(ctx, id)
+	call, err := request.decode()
 	if err != nil {
 		return nil, err
 	}
-	switch request.Kind {
-	case accessKindInvocation:
-		if request.Inv == nil || request.Inv.Caller != "" {
-			return nil, errors.New("link: invalid access invocation")
-		}
-		var handle accessdoor.AccessHandle
-		switch request.Scope {
-		case accessScopeChannel:
-			handle = a.access.MintAdmitted(admission)
-		case accessScopeState:
-			if stateBinding == nil {
-				return nil, errors.New("link: state backing unavailable")
-			}
-			handle = stateBinding.MintAdmitted(admission)
-		default:
-			return nil, errors.New("link: invalid access scope")
-		}
-		outcome, err := handle.Invoke(
-			ctx, request.Inv.Operation, request.Inv.Resource,
-			request.Inv.Args, request.Inv.Grant,
-		)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(accessResponse{
-			Kind: accessKindInvocation, Value: outcome.Value, Found: outcome.Found,
-			RejectReason: outcome.RejectReason, Route: outcome.Route,
-		})
-	case accessKindCreate:
-		if request.Create == nil {
-			return nil, errors.New("link: missing access create")
-		}
-		outcome, err := a.access.MintAdmitted(admission).Create(
-			ctx, request.Create.Resource, request.Create.Spec, request.Create.Initial,
-		)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(accessResponse{
-			Kind: accessKindCreate, Value: outcome.Value, Found: outcome.Found,
-			RejectReason: outcome.RejectReason, Route: outcome.Route,
-		})
-	case accessKindQuery:
-		if request.Query == nil {
-			return nil, errors.New("link: missing access query")
-		}
-		handle := a.access.MintAdmitted(admission)
-		switch request.Query.QueryKind {
-		case accessQueryStat:
-			result, err := handle.Stat(ctx, request.Query.Resource)
-			if err != nil {
-				return nil, err
-			}
-			return json.Marshal(accessResponse{
-				Kind: accessKindQuery,
-				Stat: &accessStatRespFields{
-					Meta: result.Meta, Ops: result.Ops, Reject: result.Reject,
-				},
-			})
-		case accessQueryList:
-			if request.Query.List == nil {
-				return nil, errors.New("link: missing access list")
-			}
-			result, err := handle.List(ctx, accessdoor.ListQuery{
-				Prefix: request.Query.List.Prefix,
-				Limit:  request.Query.List.Limit,
-				Cursor: request.Query.List.Cursor,
-			})
-			if err != nil {
-				return nil, err
-			}
-			return json.Marshal(accessResponse{
-				Kind: accessKindQuery,
-				List: &accessListRespFields{
-					Entries: result.Entries, Next: result.Next, Reject: result.Reject,
-				},
-			})
-		default:
-			return nil, errors.New("link: invalid access query")
-		}
-	default:
-		return nil, errors.New("link: invalid access request")
+	response, err := a.ingress.Access(ctx, id, key, call)
+	if err != nil {
+		return nil, err
 	}
+	return json.Marshal(accessResponseOf(call.Kind, response))
 }
 
 func (a *Acceptor) relaySchedule(
@@ -646,29 +530,19 @@ func (a *Acceptor) relaySchedule(
 	id actor.ActorID,
 	payload []byte,
 ) ([]byte, error) {
-	admission, err := a.admitIdentity(ctx, id)
-	if err != nil {
-		return nil, err
-	}
 	var request scheduleRequest
 	if err := json.Unmarshal(payload, &request); err != nil {
 		return nil, fmt.Errorf("link: schedule payload decode: %w", err)
 	}
-	handle := a.sched.MintAdmitted(admission)
-	switch request.Method {
-	case scheduleMethodSchedule:
-		timer, err := handle.Schedule(ctx, request.Req)
-		if err != nil {
-			return nil, err
-		}
-		return json.Marshal(scheduleResponse{ID: timer})
-	case scheduleMethodCancel:
-		return nil, handle.Cancel(ctx, request.ID)
-	case scheduleMethodAck:
-		return nil, handle.Ack(ctx, request.ID)
-	default:
-		return nil, errors.New("link: invalid schedule method")
+	call, err := request.decode()
+	if err != nil {
+		return nil, err
 	}
+	response, err := a.ingress.Schedule(ctx, id, call)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(scheduleResponse{ID: response.ID})
 }
 
 func (a *Acceptor) sendStorageControl(lc *linkSession, frame storageControlFrame) {

@@ -15,15 +15,24 @@ import (
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/ipc"
+	"github.com/wanpengxie/atoll/runtime/remoteingress"
 )
 
 const serverStreamQueue = 64
 
+// serverActorHandlers is the endpoint's outward call table. The identity
+// coordinate is NOT in it: (id, key) are fixed on the endpoint at handshake
+// time and passed down on every call, so a frame can carry an operation but
+// never a claim about who is issuing it.
+//
+// Which arms carry the attempt key is the permission matrix itself: the pen and
+// resource access act AS THE CURRENT TERM (A/G), schedule acts as an IDENTITY
+// across terms (A), so its signature has no key to compare.
 type serverActorHandlers struct {
-	emit          func(context.Context, actor.ActorID, *message.Envelope) (ipc.EmitResult, error)
-	access        func(context.Context, actor.ActorID, []byte) ([]byte, error)
+	emit          func(context.Context, actor.ActorID, actorhost.AttemptKey, *message.Envelope) (ipc.EmitResult, error)
+	access        func(context.Context, actor.ActorID, actorhost.AttemptKey, []byte) ([]byte, error)
 	schedule      func(context.Context, actor.ActorID, []byte) ([]byte, error)
-	fork          func(context.Context, actor.ActorID, actorhost.AttemptKey, message.ID, actorcaps.ForkSpec) (actor.ActorID, error)
+	fork          func(context.Context, actor.ActorID, actorhost.AttemptKey, remoteingress.ForkRequest) (actor.ActorID, error)
 	endSelf       func(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error
 	obs           func(actor.ActorID, actorhost.AttemptKey, actorrt.ObsKind, actorrt.ObsValue)
 	cancelRequest func(actor.ActorID, message.ID)
@@ -155,11 +164,25 @@ func (s *serverActorEndpoint) readLoop() error {
 				return err
 			}
 		case ipc.KindAccess:
-			if err := s.handleRelay(ipc.KindAccessAck, s.handlers.access, frame.Payload); err != nil {
+			if err := s.handleRelay(ipc.KindAccessAck, frame.Payload, func(
+				ctx context.Context, payload []byte,
+			) ([]byte, error) {
+				if s.handlers.access == nil {
+					return nil, errRelayUnavailable
+				}
+				return s.handlers.access(ctx, s.id, s.key, payload)
+			}); err != nil {
 				return err
 			}
 		case ipc.KindSchedule:
-			if err := s.handleRelay(ipc.KindScheduleAck, s.handlers.schedule, frame.Payload); err != nil {
+			if err := s.handleRelay(ipc.KindScheduleAck, frame.Payload, func(
+				ctx context.Context, payload []byte,
+			) ([]byte, error) {
+				if s.handlers.schedule == nil {
+					return nil, errRelayUnavailable
+				}
+				return s.handlers.schedule(ctx, s.id, payload)
+			}); err != nil {
 				return err
 			}
 		case ipc.KindSpawn:
@@ -212,7 +235,7 @@ func (s *serverActorEndpoint) handleEmit(payload []byte) error {
 	if err := json.Unmarshal(payload, &request); err != nil {
 		return err
 	}
-	result, callErr := s.handlers.emit(s.ctx, s.id, &request.Envelope)
+	result, callErr := s.handlers.emit(s.ctx, s.id, s.key, &request.Envelope)
 	ack := ipc.EmitAckPayload{EmitResult: result}
 	if callErr != nil {
 		ack.ErrorCode, ack.ErrorMessage = ipc.EncodeError(callErr)
@@ -224,15 +247,14 @@ func (s *serverActorEndpoint) handleEmit(payload []byte) error {
 	return s.codec.Write(ipc.Frame{Kind: ipc.KindEmitAck, Payload: raw})
 }
 
+var errRelayUnavailable = errors.New("link: relay handler unavailable")
+
 func (s *serverActorEndpoint) handleRelay(
 	ackKind ipc.Kind,
-	handler func(context.Context, actor.ActorID, []byte) ([]byte, error),
 	payload []byte,
+	call func(context.Context, []byte) ([]byte, error),
 ) error {
-	if handler == nil {
-		return errors.New("link: relay handler unavailable")
-	}
-	result, callErr := handler(s.ctx, s.id, payload)
+	result, callErr := call(s.ctx, payload)
 	ack := ipc.RelayAckPayload{Payload: result}
 	if callErr != nil {
 		ack.ErrorCode, ack.ErrorMessage = ipc.EncodeError(callErr)
@@ -260,9 +282,12 @@ func (s *serverActorEndpoint) handleFork(payload []byte) error {
 				DesiredHost: request.PlacementHost,
 			}
 		}
-		child, err := s.handlers.fork(s.ctx, s.id, s.key, request.RequestID, actorcaps.ForkSpec{
-			Kind: request.Kind, Class: request.Class, NameHint: request.NameHint,
-			Config: append([]byte(nil), request.Config...), Placement: placement,
+		child, err := s.handlers.fork(s.ctx, s.id, s.key, remoteingress.ForkRequest{
+			RequestID: request.RequestID,
+			Spec: actorcaps.ForkSpec{
+				Kind: request.Kind, Class: request.Class, NameHint: request.NameHint,
+				Config: append([]byte(nil), request.Config...), Placement: placement,
+			},
 		})
 		if err != nil {
 			ack.ErrorCode, ack.ErrorMessage = ipc.EncodeError(err)

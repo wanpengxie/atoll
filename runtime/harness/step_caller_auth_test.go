@@ -5,13 +5,14 @@ import (
 	"testing"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 )
 
 // StepCallerAuth contract (addressing / ACL entry gate):
-//   - missing caller context     → harness_engine_acl_denied
-//   - caller bound to a different channel → harness_engine_acl_denied
-//   - caller authenticated for this channel (or channel-agnostic) → accept
+//   - missing caller context → harness_engine_acl_denied
+//   - a welded caller        → accept
+//
+// There is no channel comparison left to test: the mint takes no channel, so a
+// caller welded to "another channel" is not a constructible state.
 func TestStepCallerAuth(t *testing.T) {
 	cs := newTestStore(t)
 	deps := testDeps(t, cs)
@@ -27,23 +28,8 @@ func TestStepCallerAuth(t *testing.T) {
 			reason: HarnessEngineACLDenied,
 		},
 		{
-			name: "caller bound to a different channel rejects acl_denied",
-			ctx: ctxWithCaller(context.Background(), caller{
-				actorID: actor.ActorID("a"),
-				chID:    channel.ID("other-channel"),
-			}),
-			reason: HarnessEngineACLDenied,
-		},
-		{
-			name:   "caller bound to this channel accepts",
+			name:   "welded caller accepts",
 			ctx:    ctxCaller(actor.ActorID("a")),
-			reason: "",
-		},
-		{
-			name: "caller with empty channel (channel-agnostic edge) accepts",
-			ctx: ctxWithCaller(context.Background(), caller{
-				actorID: actor.ActorID("a"),
-			}),
 			reason: "",
 		},
 	}

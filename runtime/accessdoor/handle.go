@@ -10,7 +10,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // CreateSpec is a type alias re-exporting resourcespec.CreateSpec at the
@@ -113,19 +112,17 @@ type boundHandle struct {
 	door      *door
 	caller    actor.ActorID
 	authority capauth.Authority
-	admitted  bool
 }
 
 var ErrAuthorInactive = errors.New("accessdoor: author inactive or stale")
 
+// authorize is the door's one complete verdict, run on every call. A handle
+// without an authority is not a trusted handle — it is a broken one.
 func (h boundHandle) authorize(ctx context.Context) error {
-	if h.admitted {
-		return nil
+	if h.authority == nil {
+		return ErrAuthorInactive
 	}
-	if h.authority != nil {
-		return h.authority.Admit()
-	}
-	return ErrAuthorInactive
+	return h.authority.Admit()
 }
 
 // ErrCreateViaInvoke is the resource face's "create 单入口" enforcement
@@ -192,57 +189,32 @@ func (h boundHandle) List(ctx context.Context, q ListQuery) (ListPage, error) {
 }
 
 // AccessMinter is the door's ONE outward face (mirroring harness.Minter's
-// discipline: New hands out only a Minter, the bare door stays sealed). It has two
-// mint faces, one per scope:
-//   - Mint welds a caller for the channel-scoped tree — the door is already bound
-//     to its channel/Registry via Deps, and R authorization needs no kind, so one
-//     parameter suffices. Its return type is the WIDE resource face
-//     (ResourceAccessHandle, §3.1) — the channel-scoped locus is where
+// discipline: New hands out only a Minter, the bare door stays sealed). It has
+// two mint faces, one per scope:
+//   - MintAuthority welds a caller for the channel-scoped tree — the door is
+//     already bound to its channel/Registry via Deps, and R authorization needs
+//     no kind, so one parameter suffices. Its return type is the WIDE resource
+//     face (ResourceAccessHandle, §3.1) — the channel-scoped locus is where
 //     Create/Stat/List live;
-//   - MintState welds an owner for the actor-scoped (collapsed) branch. It is the
-//     injection-point contract handed to the downstream: platform draws an
-//     owner-welded handle from here when it wires caps — runtime defines the
-//     contract, WHEN/HOW the downstream wraps it (liveAccess) is the downstream's
-//     concern. Its return type stays the NARROW AccessHandle (Invoke only) — the
+//   - MintStateAuthority welds an owner for the actor-scoped (collapsed)
+//     branch. Its return type stays the NARROW AccessHandle (Invoke only) — the
 //     scope law itself: there is no kind/R/membership at this locus for
 //     Create/Stat/List to mean anything, so the interface does not offer them
-//     (§3.2's "不实现空方法" red line).
+//     (§3.2's "不实现空方法" red line). The state ORGAN (memstate.go) is its
+//     one caller: backing selection happens there, never at an injection point.
+//
+// The door mints against a LIVE authority and nothing else. The returned handle
+// runs that authority's one complete verdict at the door on every call, which
+// is what lets one shell serve a local body for its whole term and a remote
+// ingress for one operation. There is no admitted-snapshot mint here: the door
+// is the only place with a right to judge access, so it never accepts someone
+// else's verdict as input.
 type AccessMinter interface {
-	AdmittedMinter
-}
-
-// AdmittedMinter consumes a one-shot ActorID collaboration admission.
-// Resource/grant/business checks remain inside the door.
-type AdmittedMinter interface {
-	MintAdmitted(storespec.IdentityAdmission) ResourceAccessHandle
-	MintStateAdmitted(storespec.IdentityAdmission) AccessHandle
+	MintAuthority(capauth.Authority) ResourceAccessHandle
+	MintStateAuthority(capauth.Authority) AccessHandle
 }
 
 type minter struct{ door *door }
-
-func (m *minter) MintAdmitted(
-	admission storespec.IdentityAdmission,
-) ResourceAccessHandle {
-	if !admission.Valid() {
-		return rejectedResourceHandle{err: ErrAuthorInactive}
-	}
-	return boundHandle{
-		door: m.door, caller: admission.ID,
-		admitted: true,
-	}
-}
-
-func (m *minter) MintStateAdmitted(
-	admission storespec.IdentityAdmission,
-) AccessHandle {
-	if !admission.Valid() {
-		return rejectedStateHandle{err: ErrAuthorInactive}
-	}
-	return boundStateHandle{
-		door: m.door, owner: admission.ID,
-		admitted: true,
-	}
-}
 
 func (m *minter) MintAuthority(authority capauth.Authority) ResourceAccessHandle {
 	if authority == nil || authority.ActorID() == "" {

@@ -5,11 +5,11 @@ import (
 	"errors"
 	"sync"
 
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 func newMemoryStateHandle(owner actor.ActorID) AccessHandle {
@@ -18,27 +18,44 @@ func newMemoryStateHandle(owner actor.ActorID) AccessHandle {
 
 var ErrStateHandleUnavailable = errors.New("accessdoor: state handle unavailable")
 
-// StateHandleResolver is the sole physical State-backing resolution seam.
-// Identity storage home never enters actor authority or the returned handle.
+// StateOp is one actor-scoped state call's operand — the state face's only
+// verb (Invoke), carried as a value so the per-call ingress below can take the
+// whole operation in one parameter instead of handing a handle outward.
+type StateOp struct {
+	Operation access.Operation
+	Resource  resource.ResourceID
+	Args      []byte
+	Grant     *access.Grant
+}
+
+// StateHandleResolver is the state organ's own face. Backing selection lives
+// entirely behind it: the classification fact never leaves this organ, never
+// enters an authority, a projection or a handle, and never crosses the wire.
+//
+// There are exactly two entries, one per body locus, and they share ONE
+// routing function:
+//
+//   - ResolveAuthority — the local body's birth mint: route once, weld the
+//     chosen backing into a handle the body keeps for its whole term;
+//   - StateIngress — the remote body's per-call entry: route on every call
+//     (a daemon body holds no backing and the classification never travels),
+//     then admit, then execute on the backing already chosen.
 type StateHandleResolver interface {
-	AdmittedStateHandleResolver
 	ResolveAuthority(context.Context, capauth.Authority) (AccessHandle, error)
+
+	// StateIngress is the ONE per-call state entry point. The three steps are
+	// pinned inside the organ, in this order: select backing → ActorID
+	// admission → execute on the selected backing. Selection never rises to
+	// the ingress or the link, and the order never inverts: an End landing
+	// after admission cannot redirect an accepted call to another backing
+	// (the sliding-window semantics every arm already has).
+	StateIngress(context.Context, capauth.Authority, StateOp) (Outcome, error)
 
 	// ForgetActors is the narrow process-memory release port (§5.5). It drops
 	// this store's own in-memory rows for dead ids and NOTHING else: durable
 	// state rows belonging to the dead are inert data whose correctness is
 	// carried by the admission gate, never by deleting them.
 	ForgetActors([]actor.ActorID)
-}
-
-type AdmittedStateHandleResolver interface {
-	ResolvePhysical(context.Context, actor.ActorID) (AdmittedStateBinding, error)
-}
-
-// AdmittedStateBinding is a stable physical handle selected before the one
-// identity admission. End after admission cannot redirect it to another home.
-type AdmittedStateBinding interface {
-	MintAdmitted(storespec.IdentityAdmission) AccessHandle
 }
 
 // EntryReader is the closed classification seam: "does this record live in the
@@ -70,38 +87,20 @@ func NewStateHandleResolver(
 	}, nil
 }
 
-type resolvedStateBinding struct {
-	id      actor.ActorID
-	durable AdmittedMinter
-	memory  *boundStateHandle
-}
-
-func (b resolvedStateBinding) MintAdmitted(
-	admission storespec.IdentityAdmission,
-) AccessHandle {
-	if !admission.Valid() || admission.ID != b.id {
-		return rejectedStateHandle{err: ErrAuthorInactive}
-	}
-	if b.memory != nil {
-		state := *b.memory
-		state.owner = b.id
-		state.authority = nil
-		state.admitted = true
-		return state
-	}
-	if b.durable != nil {
-		return b.durable.MintStateAdmitted(admission)
-	}
-	return rejectedStateHandle{err: ErrStateHandleUnavailable}
-}
-
-func (h *actorStateHandles) ResolvePhysical(
+// route is the ONE backing-selection function of the whole system. Both loci
+// call it — the local mint once at birth, the remote ingress once per call —
+// so a routing difference between them is structurally impossible.
+//
+// The returned handle carries the authority, never a snapshot: the verdict is
+// the door's own first step on every use.
+func (h *actorStateHandles) route(
 	ctx context.Context,
-	id actor.ActorID,
-) (AdmittedStateBinding, error) {
-	if id == "" {
+	authority capauth.Authority,
+) (AccessHandle, error) {
+	if authority == nil || authority.ActorID() == "" {
 		return nil, ErrStateHandleUnavailable
 	}
+	id := authority.ActorID()
 	entry, found, err := h.entries.IsEntry(ctx, id)
 	if err != nil {
 		return nil, err
@@ -110,11 +109,7 @@ func (h *actorStateHandles) ResolvePhysical(
 		return nil, ErrStateHandleUnavailable
 	}
 	if !entry {
-		minter, ok := h.durable.(AdmittedMinter)
-		if !ok {
-			return nil, ErrStateHandleUnavailable
-		}
-		return resolvedStateBinding{id: id, durable: minter}, nil
+		return h.durable.MintStateAuthority(authority), nil
 	}
 	h.mu.Lock()
 	state, ok := h.memory[id]
@@ -128,36 +123,31 @@ func (h *actorStateHandles) ResolvePhysical(
 		h.memory[id] = state
 	}
 	h.mu.Unlock()
-	return resolvedStateBinding{id: id, memory: &state}, nil
+	state.authority = authority
+	return state, nil
 }
 
+// ResolveAuthority is the local body's birth mint: one route, one welded
+// backing for the whole term.
 func (h *actorStateHandles) ResolveAuthority(
 	ctx context.Context,
 	authority capauth.Authority,
 ) (AccessHandle, error) {
-	if authority == nil || authority.ActorID() == "" {
-		return nil, ErrStateHandleUnavailable
-	}
-	binding, err := h.ResolvePhysical(ctx, authority.ActorID())
+	return h.route(ctx, authority)
+}
+
+// StateIngress is the remote body's per-call entry: route → admit → execute,
+// in that order, inside the organ.
+func (h *actorStateHandles) StateIngress(
+	ctx context.Context,
+	authority capauth.Authority,
+	op StateOp,
+) (Outcome, error) {
+	handle, err := h.route(ctx, authority)
 	if err != nil {
-		return nil, err
+		return Outcome{}, err
 	}
-	resolved, ok := binding.(resolvedStateBinding)
-	if !ok {
-		return nil, ErrStateHandleUnavailable
-	}
-	if resolved.memory != nil {
-		state := *resolved.memory
-		state.authority = authority
-		return state, nil
-	}
-	minter, ok := h.durable.(interface {
-		MintStateAuthority(capauth.Authority) AccessHandle
-	})
-	if !ok {
-		return nil, ErrStateHandleUnavailable
-	}
-	return minter.MintStateAuthority(authority), nil
+	return handle.Invoke(ctx, op.Operation, op.Resource, op.Args, op.Grant)
 }
 
 // ForgetActors releases the in-memory state rows of dead ids. It is plain

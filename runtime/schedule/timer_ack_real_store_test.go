@@ -107,7 +107,7 @@ func TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt(t *testing.T) {
 	engine.Start()
 	defer engine.Close()
 
-	handle := minter.MintAdmitted(testAdmission(author))
+	handle := minter.MintAuthority(testAuthority{id: author})
 	id, err := handle.Schedule(context.Background(), ScheduleReq{
 		Home: TimerHomeDurable, FireAt: clock.Now().UnixMilli() - 1, Type: "demo.ack-real-store",
 	})

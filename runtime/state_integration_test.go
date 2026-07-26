@@ -41,8 +41,8 @@ func TestStateSlice1_PrivacyByStructure(t *testing.T) {
 
 	A := seedMember(t, cs, actor.ActorID("A"))
 	B := seedMember(t, cs, actor.ActorID("B"))
-	hA := cs.Access.MintStateAdmitted(identityAdmission(A))
-	hB := cs.Access.MintStateAdmitted(identityAdmission(B))
+	hA := cs.Access.MintStateAuthority(identityAuthority{id: A})
+	hB := cs.Access.MintStateAuthority(identityAuthority{id: B})
 
 	const id = resource.ResourceID("cursor")
 	v := []byte("A's private bytes")
@@ -79,7 +79,7 @@ func TestStateSlice2_FourStepOrderAndOpDistinctions(t *testing.T) {
 	cs := openAccessChannel(t)
 
 	A := seedMember(t, cs, actor.ActorID("A"))
-	hA := cs.Access.MintStateAdmitted(identityAdmission(A))
+	hA := cs.Access.MintStateAuthority(identityAuthority{id: A})
 	const id = resource.ResourceID("k")
 
 	// set never exists on this locus, regardless of grant shape → ErrOpNotInScope
@@ -139,7 +139,7 @@ func TestStateSlice2b_EmptyBytes(t *testing.T) {
 	cs := openAccessChannel(t)
 
 	A := seedMember(t, cs, actor.ActorID("A"))
-	hA := cs.Access.MintStateAdmitted(identityAdmission(A))
+	hA := cs.Access.MintStateAuthority(identityAuthority{id: A})
 
 	// create(nil) → existing row, NULL bytes → read: accepted, Found:false, Value:nil.
 	const nullID = resource.ResourceID("null-bytes")
@@ -197,12 +197,12 @@ func TestStateSlice3_WhichDataIsIdentity(t *testing.T) {
 	const id = resource.ResourceID("checkpoint")
 	v := []byte("continuity across incarnations")
 
-	h1 := cs.Access.MintStateAdmitted(identityAdmission(A))
+	h1 := cs.Access.MintStateAuthority(identityAuthority{id: A})
 	acc(t, "gen-1 create checkpoint")(h1.Invoke(ctx, access.OpCreate, id, v, nil))
 
 	// A fresh MintState for the same owner (a later "incarnation"'s handle) reads
 	// back the earlier handle's bytes: DATA is welded to identity.
-	h2 := cs.Access.MintStateAdmitted(identityAdmission(A))
+	h2 := cs.Access.MintStateAuthority(identityAuthority{id: A})
 	out, err := h2.Invoke(ctx, access.OpRead, id, nil, nil)
 	expectAccepted(t, "gen-2 read checkpoint", out, err)
 	expectBytes(t, "gen-2 checkpoint value", out, v)
@@ -222,8 +222,8 @@ func TestStateSlice4_DeregisterTouchesRecordsOnly(t *testing.T) {
 	cs := openAccessChannel(t)
 	A := seedMember(t, cs, actor.ActorID("A"))
 
-	hState := cs.Access.MintStateAdmitted(identityAdmission(A))
-	hChan := cs.Access.MintAdmitted(identityAdmission(A))
+	hState := cs.Access.MintStateAuthority(identityAuthority{id: A})
+	hChan := cs.Access.MintAuthority(identityAuthority{id: A})
 
 	const stateID = resource.ResourceID("s")
 	const kvID = resource.ResourceID("kv:doc")
@@ -268,8 +268,8 @@ func TestStateSlice5_TwoLociMutuallyInvisible(t *testing.T) {
 
 	A := seedMember(t, cs, actor.ActorID("A")) // member: needed to create a channel-scoped resource
 
-	hChan := cs.Access.MintAdmitted(identityAdmission(A))
-	hState := cs.Access.MintStateAdmitted(identityAdmission(A))
+	hChan := cs.Access.MintAuthority(identityAuthority{id: A})
+	hState := cs.Access.MintStateAuthority(identityAuthority{id: A})
 
 	const stateOnly = resource.ResourceID("state-only")
 	const chanOnly = resource.ResourceID("chan-only")
