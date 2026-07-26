@@ -313,6 +313,7 @@ func TestActorIdentityStorageHomeIsPhysicallyConfined(t *testing.T) {
 				"CheckAuthor",
 				"AuthorStamp",
 				"firepen",
+				"managedInvocation",
 				"currentPen",
 				"ChannelActors",
 			} {
