@@ -226,3 +226,51 @@ func TestErrorStringsStayActionable(t *testing.T) {
 		t.Fatal("rejection error lost reason")
 	}
 }
+
+// ForgetActors is the narrow process-memory release port: it drops the dead
+// authors' memory-home timers and touches nothing else. It is blind — it never
+// asks what kind of record an id was — and the durable rows of the same dead
+// author stay put as inert data (the fire path's author admission is what makes
+// them harmless, not a cleanup sweep).
+func TestForgetActorsReleasesMemoryTimersOnly(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeStore()
+	sink := &fakeFireSink{}
+	clock := newFakeClock(time.UnixMilli(1_000))
+	minter, engine := newTestEngine(t, store, sink, clock)
+
+	dead := minter.MintAdmitted(testAdmission("agent:dead"))
+	alive := minter.MintAdmitted(testAdmission("agent:alive"))
+	if _, err := dead.Schedule(ctx, ScheduleReq{
+		Home: TimerHomeMemory, FireAt: 9_000, Type: "mem.dead",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dead.Schedule(ctx, ScheduleReq{
+		Home: TimerHomeDurable, FireAt: 9_000, Type: "durable.dead",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := alive.Schedule(ctx, ScheduleReq{
+		Home: TimerHomeMemory, FireAt: 9_000, Type: "mem.alive",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// An id owning no memory timer is a plain no-op, and the call is idempotent.
+	engine.ForgetActors([]actor.ActorID{"agent:dead", "agent:ghost"})
+	engine.ForgetActors([]actor.ActorID{"agent:dead"})
+
+	engine.mu.Lock()
+	remaining := make([]actor.ActorID, 0, len(engine.mem))
+	for _, timer := range engine.mem {
+		remaining = append(remaining, timer.author)
+	}
+	engine.mu.Unlock()
+	if len(remaining) != 1 || remaining[0] != actor.ActorID("agent:alive") {
+		t.Fatalf("memory timers after release=%v, want only agent:alive", remaining)
+	}
+	if store.rowCount() != 1 {
+		t.Fatalf("durable rows=%d, want the dead author's row left inert", store.rowCount())
+	}
+}

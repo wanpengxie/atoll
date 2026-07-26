@@ -1,9 +1,9 @@
 package store
 
 // White-box tests for the identity-level pending-timer locus: timerStore (the
-// timers table realizer, timerspec.TimerStore) and the deregister cascade
-// (clearTimersTx hung on both Deregister and applyMemberRemoveTx, parallel to
-// clearActorScopedTx). timerStore is unexported and reachable only from
+// timers table realizer, timerspec.TimerStore). There is no deregister cascade
+// to test — terminal touches actor_registry alone, and a dead author's rows die
+// at the fire path's admission gate. timerStore is unexported and reachable only from
 // inside the package — the same confinement the rest of the store relies on
 // (a raw TimerStore reachable downstream is a delayed forged-author write
 // path around the pen). They run over a real channel sqlite
@@ -29,8 +29,8 @@ import (
 const timersTestChannelID channel.ID = "C-test"
 
 // timersFixture bundles the timer store with the actor registry (for the
-// dereg-cascade tests) and the channel-scoped resource registry (the
-// non-cascade contrast) over one shared channel sqlite.
+// author-admission tests) and the channel-scoped resource registry over one
+// shared channel sqlite.
 type timersFixture struct {
 	timers *timerStore
 	reg    *actorRegistry
@@ -533,16 +533,12 @@ func TestTimer_DeregisterLeavesAuthorTimersInert(t *testing.T) {
 	}
 }
 
-// --- attach-reconcile host guard (期7 review P1a) -----------------------------
+// --- registry schema shape ---------------------------------------------------
 
-// TestMemberRemove_ExpectedHostGuard_MigrationWindowNoOp pins the host-flip
-// TOCTOU closure on the attach-reconcile remove arm: daemon A snapshots its
-// owned rows, the actor re-homes to daemon B (host-only UPDATE), and A's stale
-// remove lands AFTER the flip. With ExpectedHost set the UPDATE carries
-// `AND host=?`, so the flipped row is a 0-rows-affected no-op — B's active row
-// AND its cascaded loci (state, identity timers) survive intact. The unguarded
-// (product-level) remove semantics are untouched: a remove guarded on the
-// CURRENT host — or carrying no guard at all — still deregisters and cascades.
+// TestActorRegistrySchemaHasNoHostColumn pins the absence of a `host` column on
+// actor_registry: where a body runs is a physical fact owned by actorhost, and
+// the record never carries it. With no host column there is no host-guarded
+// remove arm and no host-flip TOCTOU window to close in this table at all.
 func TestActorRegistrySchemaHasNoHostColumn(t *testing.T) {
 	ctx := context.Background()
 	db, err := openSqlite(ctx, filepath.Join(t.TempDir(), "nohost.sqlite"), OpenOptions{}, ChannelLocalDDL)

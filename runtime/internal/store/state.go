@@ -119,9 +119,11 @@ func (s *stateStore) Write(ctx context.Context, owner actor.ActorID, id resource
 }
 
 // Delete removes the row; exists=false when no row was hit (door →
-// resource_not_found; repeated delete is honestly not-found). This is the
-// non-lossy "explicit delete" half; the OTHER death is scope-expiry (owner
-// deregister → clearActorScopedTx, store-internal, not an op).
+// resource_not_found; repeated delete is honestly not-found). It is the ONLY
+// death a state row has. Deregistering the owner deletes nothing: an ActorID is
+// never reused and state is keyed by ActorID, so a dead owner's rows are
+// unreachable inert data whose correctness is carried by the admission gate.
+// Reclaiming the disk is a garbage-collection concern, never lifecycle logic.
 func (s *stateStore) Delete(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (exists bool, err error) {
 	res, err := s.db.ExecContext(ctx,
 		`DELETE FROM actor_state WHERE owner_id=? AND resource_id=?`,

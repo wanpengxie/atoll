@@ -129,29 +129,58 @@ func TestRoutingResolverCoversAllMembraneCases(t *testing.T) {
 		}
 	})
 
-	t.Run("human broadcast", func(t *testing.T) {
-		h := openRoutingHome(t, "routing-broadcast",
+	// boost carries no protection gate, so it can simply be absent. With the
+	// fallback terminus gone routing fails FAST with one fixed error — it never
+	// silently swallows the message and never invents another destination.
+	t.Run("boost missing refuses with the fixed error", func(t *testing.T) {
+		h := openRoutingHome(t, "routing-no-boost",
 			routingDeclaration("source", "missing", false),
 		)
 		source := routingAgent(t, h, "source", "source", "missing", false)
-		alice, err := admitThroughSysOp(h, context.Background(), actor.KindHuman, "alice")
-		if err != nil {
+		if _, err := admitThroughSysOp(h, context.Background(), actor.KindHuman, "alice"); err != nil {
 			t.Fatal(err)
 		}
-		bob, err := admitThroughSysOp(h, context.Background(), actor.KindHuman, "bob")
-		if err != nil {
+		before := visibleWatermark(t, h)
+		env, result, err := writeUnaddressed(t, h, source, "route-no-boost")
+		if !errors.Is(err, ErrBoostMissing) {
+			t.Fatalf("boost-missing err=%v, want ErrBoostMissing", err)
+		}
+		if result.MessageID != "" || result.Seq != 0 || len(env.Audience) != 0 {
+			t.Fatalf("boost-missing swallowed the message: env=%+v result=%+v", env, result)
+		}
+		if after := visibleWatermark(t, h); after != before {
+			t.Fatalf("boost-missing appended: before=%d after=%d", before, after)
+		}
+	})
+
+	// Terminal never clears the default pointer — it is channel configuration,
+	// not a dead actor's belonging. A pointer at a deregistered actor reads as
+	// UNCONFIGURED, so routing falls back to boost with no cleanup action of any
+	// kind having run.
+	t.Run("dangling default pointer falls back to boost", func(t *testing.T) {
+		h := openRoutingHome(t, "routing-dangling",
+			routingDeclaration("source", "missing", false),
+			routingDeclaration("default", "routing-live", true),
+			routingDeclaration(defaultRoutingAgentSource, "routing-live", false),
+		)
+		source := routingAgent(t, h, "source", "source", "missing", false)
+		target := routingAgent(t, h, "default", "default", "routing-live", true)
+		boost := routingAgent(t, h, defaultRoutingAgentSource, "boost", "routing-live", false)
+		waitRoutingLive(t, h, target.ID)
+		waitRoutingLive(t, h, boost.ID)
+		if err := removeThroughSysOp(h, context.Background(), target.ID); err != nil {
 			t.Fatal(err)
 		}
-		env, result, err := writeUnaddressed(t, h, source, "route-broadcast")
-		if err != nil || !result.Accepted() || env.Kind != message.KindEvent || len(env.Audience) != 2 {
-			t.Fatalf("broadcast env=%+v result=%+v err=%v", env, result, err)
+		// The pointer row still names the dead actor; nothing cleaned it up.
+		pointed, hasPointer, err := h.View().DefaultAgent(context.Background())
+		if err != nil || !hasPointer || pointed != target.ID {
+			t.Fatalf("default pointer=%q has=%v err=%v, want the dangling %q",
+				pointed, hasPointer, err, target.ID)
 		}
-		seen := map[actor.ActorID]bool{}
-		for _, id := range env.Audience {
-			seen[id] = true
-		}
-		if !seen[alice] || !seen[bob] {
-			t.Fatalf("broadcast audience=%v, want %s and %s", env.Audience, alice, bob)
+		env, result, err := writeUnaddressed(t, h, source, "route-dangling")
+		if err != nil || !result.Accepted() || env.Kind != message.KindRequest ||
+			len(env.Audience) != 1 || env.Audience[0] != boost.ID {
+			t.Fatalf("dangling default env=%+v result=%+v err=%v", env, result, err)
 		}
 	})
 

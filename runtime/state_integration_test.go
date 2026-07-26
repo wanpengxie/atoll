@@ -19,7 +19,8 @@ import (
 // with injected fakes; these drive the ACTOR-SCOPED branch of the whole plane-2
 // door assembled by OpenChannel over a real per-channel sqlite — MintState welds
 // the owner, the real stateStore realizes bytes, and the real actor_registry
-// dereg path cascades the clear.
+// dereg path touches the registry row ALONE (a dead owner's state rows stay put
+// as inert, unreachable data — §5.5).
 //
 // State handles are actor-scoped: the reachable set is structurally ≡ {owner}.
 // Birth nevertheless requires that owner to be active, so every slice that creates

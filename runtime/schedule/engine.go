@@ -284,6 +284,32 @@ func (e *Engine) cancel(ctx context.Context, author actor.ActorID, id TimerID) e
 	return err
 }
 
+// ForgetActors is the narrow process-memory release port (§5.5). It drops the
+// memory-home timers of dead ids and NOTHING else — the durable rows of a dead
+// author stay put as inert data: the fire path's author admission gate already
+// refuses them (and deletes the row there), so correctness never depends on a
+// cleanup sweep.
+//
+// It is deliberately blind: idempotent, unclassified (it never asks whether an
+// id was a durable record or an entry), never retried, no tombstone. An id that
+// owns no memory timer is a plain no-op.
+func (e *Engine) ForgetActors(ids []actor.ActorID) {
+	if e == nil || len(ids) == 0 {
+		return
+	}
+	dead := make(map[actor.ActorID]struct{}, len(ids))
+	for _, id := range ids {
+		dead[id] = struct{}{}
+	}
+	e.mu.Lock()
+	for id, timer := range e.mem {
+		if _, ok := dead[timer.author]; ok {
+			delete(e.mem, id)
+		}
+	}
+	e.mu.Unlock()
+}
+
 // wakeUp posts a coalesced wake — non-blocking send into the capacity-1
 // channel (tap.Signal.Notify structural twin). A pending wake already
 // buffered absorbs this one; the run loop always recomputes the full due set

@@ -1,8 +1,9 @@
 package store
 
 // White-box tests for the actor-scoped state locus: stateStore (byte realizer
-// over actor_state) and the deregister cascade (clearActorScopedTx hung on both
-// Deregister and applyMemberRemoveTx). Both stateStore and the registry are
+// over actor_state). There is no deregister cascade to test — terminal touches
+// actor_registry alone and leaves a dead owner's rows as inert, unreachable
+// data. Both stateStore and the registry are
 // unexported and reachable only from inside the package — the same
 // package-private confinement the rest of the store relies on. They run over
 // a real channel sqlite (ChannelLocalDDL), no fakes.
@@ -25,8 +26,8 @@ import (
 const stateTestChannelID channel.ID = "C-test"
 
 // stateFixture bundles the three plane collaborators over one shared channel
-// sqlite so a test can exercise state CRUD, the deregister cascade, and the
-// channel-scoped-resources non-cascade contrast against the same db.
+// sqlite so a test can exercise state CRUD, owner deregistration (which touches
+// the registry row alone) and channel-scoped resources against the same db.
 type stateFixture struct {
 	state *stateStore
 	reg   *actorRegistry

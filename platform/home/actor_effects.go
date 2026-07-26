@@ -24,16 +24,22 @@ func (e homeActorEffects) PlanPoke(domain actorhost.ExecutionDomain) {
 	}
 }
 
-// ActorsEnded releases process memory held for dead ids. It is plain resource
-// hygiene: idempotent, unclassified, never retried, no tombstone. Durable rows
-// belonging to the dead are inert data and are deliberately left alone.
+// ActorsEnded is the Transition.Ended tail: Platform blind-calls each store's
+// narrow ForgetActors release port. It is plain process resource hygiene —
+// idempotent, unclassified (no store is ever asked which kind of record an id
+// was), never retried, no tombstone. Durable rows belonging to the dead are
+// inert data and are deliberately left alone; the fork replay table is NOT
+// released here (it is Controller ledger state and is never pruned, §5.2).
 func (e homeActorEffects) ActorsEnded(ids []actor.ActorID) {
 	h := e.home
 	if h == nil {
 		return
 	}
 	if h.stateHandles != nil {
-		h.stateHandles.EndBatch(ids)
+		h.stateHandles.ForgetActors(ids)
+	}
+	if h.engine != nil {
+		h.engine.ForgetActors(ids)
 	}
 	for _, id := range ids {
 		if h.presenceFold != nil {

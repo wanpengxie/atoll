@@ -2,6 +2,7 @@ package actorstore_test
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -147,6 +148,55 @@ func TestDeregisterIsIdempotentAndEntryScoped(t *testing.T) {
 	// Repeating the whole thing is a no-op.
 	if err := store.Deregister(ctx, []actor.ActorID{durable.ID, entry.ID}); err != nil {
 		t.Fatalf("repeat deregister: %v", err)
+	}
+}
+
+// failingRegistry is a durable half whose termination transaction always fails.
+// It exists to pin the ONE ordering rule of the two-step terminal: the entry
+// deletions run only after the durable transaction has committed.
+type failingRegistry struct {
+	storespec.ActorRegistryStore
+	err error
+}
+
+func (r failingRegistry) Deregister(context.Context, []actor.ActorID, int64) error {
+	return r.err
+}
+
+// The durable transaction goes first and the entry table follows it: when the
+// transaction fails, NOTHING moves — the entries are still installed, and the
+// error is returned as-is.
+func TestDurableTerminalFailureLeavesEntriesUntouched(t *testing.T) {
+	ctx := context.Background()
+	_, cs := openStore(t)
+
+	boom := errors.New("durable terminal refused")
+	store, err := actorstore.New(
+		failingRegistry{ActorRegistryStore: cs.Actors, err: boom},
+		func() int64 { return 1000 })
+	if err != nil {
+		t.Fatal(err)
+	}
+	durable, err := store.Insert(ctx, declaredDraft("decl:a"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry := storespec.ActorRecord{
+		ID: "agent:parent/worker-1", Kind: actor.KindAgent, CreatedAt: 1,
+		Definition: storespec.ActorDefinition{Class: "worker"},
+		Placement:  storespec.NewServerPlacement(),
+	}
+	store.InstallEntry(entry)
+
+	if err := store.Deregister(ctx, []actor.ActorID{durable.ID, entry.ID}); !errors.Is(err, boom) {
+		t.Fatalf("Deregister err=%v, want the durable failure verbatim", err)
+	}
+	if isEntry, found, err := store.IsEntry(ctx, entry.ID); err != nil || !found || !isEntry {
+		t.Fatalf("entry moved on a failed durable transaction: entry=%v found=%v err=%v",
+			isEntry, found, err)
+	}
+	if _, ok, err := cs.Actors.LookupActive(ctx, durable.ID); err != nil || !ok {
+		t.Fatalf("durable row moved on a failed terminal: ok=%v err=%v", ok, err)
 	}
 }
 

@@ -52,8 +52,9 @@ type StateStore interface {
 	Write(ctx context.Context, owner actor.ActorID, id resource.ResourceID, value []byte) (exists bool, err error)
 
 	// Delete removes the row; exists=false when no row was hit (door →
-	// resource_not_found; repeated delete is honestly not-found). The OTHER
-	// death is scope-expiry (owner deregister → clearActorScopedTx,
-	// store-internal, not an op).
+	// resource_not_found; repeated delete is honestly not-found). It is the
+	// ONLY death a state row has: deregistering the owner deletes nothing,
+	// because an ActorID is never reused and state is keyed by ActorID, so a
+	// dead owner's rows are unreachable inert data.
 	Delete(ctx context.Context, owner actor.ActorID, id resource.ResourceID) (exists bool, err error)
 }

@@ -23,7 +23,12 @@ var ErrStateHandleUnavailable = errors.New("accessdoor: state handle unavailable
 type StateHandleResolver interface {
 	AdmittedStateHandleResolver
 	ResolveAuthority(context.Context, capauth.Authority) (AccessHandle, error)
-	EndBatch([]actor.ActorID)
+
+	// ForgetActors is the narrow process-memory release port (§5.5). It drops
+	// this store's own in-memory rows for dead ids and NOTHING else: durable
+	// state rows belonging to the dead are inert data whose correctness is
+	// carried by the admission gate, never by deleting them.
+	ForgetActors([]actor.ActorID)
 }
 
 type AdmittedStateHandleResolver interface {
@@ -155,7 +160,10 @@ func (h *actorStateHandles) ResolveAuthority(
 	return minter.MintStateAuthority(authority), nil
 }
 
-func (h *actorStateHandles) EndBatch(ids []actor.ActorID) {
+// ForgetActors releases the in-memory state rows of dead ids. It is plain
+// resource hygiene: idempotent, unclassified (an id with no memory row is a
+// no-op), never retried, and it leaves no tombstone.
+func (h *actorStateHandles) ForgetActors(ids []actor.ActorID) {
 	h.mu.Lock()
 	for _, id := range ids {
 		delete(h.memory, id)

@@ -4,13 +4,21 @@ import (
 	"context"
 	"errors"
 
-	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 const defaultRoutingAgentSource = "sys:boost"
 
 var ErrRoutingUnavailable = errors.New("channel routing unavailable")
+
+// ErrBoostMissing is the fixed error routing returns when the fallback terminus
+// itself is gone. boost carries NO protection gate: it can be ended like any
+// other actor (including by its own EndSelf), and nothing resurrects it. When
+// it is absent the channel has no fallback destination left, so the message is
+// refused loudly rather than silently swallowed or fanned out somewhere else.
+// Recovery is an explicit management action.
+var ErrBoostMissing = errors.New(
+	"channel routing unavailable: boost has been terminated — re-declare boost or restart the channel")
 
 func (h *Home) resolveAudience(ctx context.Context, env *message.Envelope) error {
 	defaultID, hasDefault, err := h.View().DefaultAgent(ctx)
@@ -41,26 +49,13 @@ func (h *Home) resolveAudience(ctx context.Context, env *message.Envelope) error
 	if err != nil {
 		return err
 	}
-	if hasBoost {
-		if _, live := h.View().Stat(boost.ID); live {
-			env.Audience = message.Audience{boost.ID}
-			env.Kind = message.KindRequest
-			return nil
-		}
+	if !hasBoost {
+		return ErrBoostMissing
+	}
+	if _, live := h.View().Stat(boost.ID); !live {
 		return ErrRoutingUnavailable
 	}
-	rows, err := h.View().ActiveActors(ctx)
-	if err != nil {
-		return err
-	}
-	for _, row := range rows {
-		if row.Kind == actor.KindHuman {
-			env.Audience = append(env.Audience, row.ID)
-		}
-	}
-	if len(env.Audience) == 0 {
-		return ErrRoutingUnavailable
-	}
-	env.Kind = message.KindEvent
+	env.Audience = message.Audience{boost.ID}
+	env.Kind = message.KindRequest
 	return nil
 }
