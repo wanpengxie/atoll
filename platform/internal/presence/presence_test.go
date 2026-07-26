@@ -63,21 +63,21 @@ type fakeRegistry struct {
 	err  error
 }
 
-func (r *fakeRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+func (r *fakeRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
 	if r.err != nil {
-		return storespec.ActorControlRow{}, false, r.err
+		return storespec.ActorRecord{}, false, r.err
 	}
 	row, ok := r.rows[id]
-	return storespec.ActorControlRow{ID: row.ID, Kind: row.Kind, Principal: row.Principal, Binding: row.Binding, CreatedAt: row.CreatedAt, CurrentDeclVersion: 1}, ok && row.IsActive(), nil
+	return storespec.ActorRecord{ID: row.ID, Kind: row.Kind, Principal: row.Principal, CreatedAt: row.CreatedAt}, ok && row.IsActive(), nil
 }
-func (r *fakeRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+func (r *fakeRegistry) ListActive(context.Context) ([]storespec.ActorRecord, error) {
 	if r.err != nil {
 		return nil, r.err
 	}
-	rows := make([]storespec.ActorControlRow, 0, len(r.rows))
+	rows := make([]storespec.ActorRecord, 0, len(r.rows))
 	for _, row := range r.rows {
 		if row.IsActive() {
-			rows = append(rows, storespec.ActorControlRow{ID: row.ID, Kind: row.Kind, CurrentDeclVersion: 1})
+			rows = append(rows, storespec.ActorRecord{ID: row.ID, Kind: row.Kind})
 		}
 	}
 	return rows, nil

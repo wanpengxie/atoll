@@ -73,14 +73,15 @@ func openRealTimerFixture(t *testing.T) (timerspec.TimerStore, actor.ActorID) {
 		t.Fatalf("store.OpenChannel: %v", err)
 	}
 	t.Cleanup(func() { _ = cs.Close() })
-	result, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		Kind: actor.KindAgent, SourceDeclID: "timer-ack-author", Class: "timer-ack-author",
-		Placement: storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
+	record, err := cs.Actors.Insert(ctx, storespec.ActorDraft{
+		Kind: actor.KindAgent, SourceDeclID: "timer-ack-author",
+		Definition: storespec.ActorDefinition{Class: "timer-ack-author"},
+		Placement:  storespec.NewServerPlacement(), CreatedAt: time.Now().UnixMilli(),
 	})
 	if err != nil {
-		t.Fatalf("AdmitDeclared: %v", err)
+		t.Fatalf("Insert: %v", err)
 	}
-	return cs.Timers(), result.ID
+	return cs.Timers(), record.ID
 }
 
 // TestAckOwnedRealStoreFailureLeavesFiredRowForNextAttempt is the real-sqlite

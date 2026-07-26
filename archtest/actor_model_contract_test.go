@@ -66,15 +66,10 @@ func enclosingFunc(f *ast.File, pos token.Pos) string {
 }
 
 func TestActorModelBundleCallsitesAreClosed(t *testing.T) {
-	allowedAdmit := map[string]bool{
-		"../platform/home/actor_store.go:Admit":              true,
-		"../platform/home/open.go:Open":                      true,
-		"../platform/home/open.go:seedBootstrap":             true,
-		"../platform/home/open.go:admitBootstrapDeclaration": true,
-	}
-	allowedCascade := map[string]bool{
-		"../platform/home/actor_store.go:CommitTerminal": true,
-	}
+	// The durable record verbs replaced AdmitDeclared/EndCascade outright; both
+	// names must stay absent from the whole tree.
+	allowedAdmit := map[string]bool{}
+	allowedCascade := map[string]bool{}
 	var admit, endCascade, rawCommit []string
 	walkProductionGo(t, func(path string, file *ast.File, fset *token.FileSet) {
 		for _, declaration := range file.Decls {
@@ -125,8 +120,11 @@ func TestActorModelBundleCallsitesAreClosed(t *testing.T) {
 	}
 }
 
-func TestChannelOwnerProductionChokepointsAreClosed(t *testing.T) {
-	var roleAssignments, protectedReturns, bootstrapAssignments []string
+// Owner has ONE home: the immutable genesis pointer. There is no Role field on
+// any record, no owner column, and every owner judgement is derived at the
+// Platform door from that pointer — never from a second account.
+func TestChannelOwnerHasOnlyTheGenesisPointer(t *testing.T) {
+	var roleAssignments, ownerDerivations, bootstrapAssignments []string
 	walkProductionGo(t, func(path string, file *ast.File, _ *token.FileSet) {
 		for _, declaration := range file.Decls {
 			fn, ok := declaration.(*ast.FuncDecl)
@@ -134,58 +132,48 @@ func TestChannelOwnerProductionChokepointsAreClosed(t *testing.T) {
 				continue
 			}
 			ast.Inspect(fn.Body, func(node ast.Node) bool {
-				switch value := node.(type) {
-				case *ast.CompositeLit:
-					for _, element := range value.Elts {
-						field, ok := element.(*ast.KeyValueExpr)
-						if !ok {
-							continue
-						}
-						name, ok := field.Key.(*ast.Ident)
-						if !ok {
-							continue
-						}
-						switch name.Name {
-						case "Role":
-							roleAssignments = append(roleAssignments, path+":"+fn.Name.Name)
-						case "Bootstrap":
-							bootstrapAssignments = append(bootstrapAssignments, path+":"+fn.Name.Name)
-						}
+				value, ok := node.(*ast.CompositeLit)
+				if !ok {
+					return true
+				}
+				for _, element := range value.Elts {
+					field, ok := element.(*ast.KeyValueExpr)
+					if !ok {
+						continue
 					}
-				case *ast.ReturnStmt:
-					for _, result := range value.Results {
-						selector, ok := result.(*ast.SelectorExpr)
-						if ok && selector.Sel.Name == "ErrChannelOwnerProtected" {
-							protectedReturns = append(protectedReturns, path+":"+fn.Name.Name)
-						}
+					name, ok := field.Key.(*ast.Ident)
+					if !ok {
+						continue
+					}
+					switch name.Name {
+					case "Role":
+						roleAssignments = append(roleAssignments, path+":"+fn.Name.Name)
+					case "Bootstrap":
+						bootstrapAssignments = append(bootstrapAssignments, path+":"+fn.Name.Name)
 					}
 				}
 				return true
 			})
+			if strings.Contains(fn.Name.Name, "isOwner") ||
+				strings.Contains(fn.Name.Name, "guardOwnerTerminal") {
+				ownerDerivations = append(ownerDerivations, path+":"+fn.Name.Name)
+			}
 		}
 	})
-	wantRole := []string{
-		"../platform/home/actor_store.go:Admit",
-		"../platform/home/census.go:admitChannelOwner",
-		"../platform/home/open.go:seedBootstrap",
-		"../runtime/actorctl/types.go:definitionFromStored",
-		"../runtime/actorctl/types.go:rowFromActive",
-	}
-	wantProtected := []string{
-		"../platform/home/actor_store.go:ResolveTerminal",
-		"../runtime/internal/store/cascade.go:EndCascade",
+	wantOwner := []string{
+		"../platform/home/owner.go:guardOwnerTerminal",
+		"../platform/home/owner.go:isOwner",
 	}
 	wantBootstrap := []string{"../platform/channelhost/channelhost.go:openHome"}
-	sort.Strings(roleAssignments)
-	sort.Strings(protectedReturns)
+	sort.Strings(ownerDerivations)
 	sort.Strings(bootstrapAssignments)
-	sort.Strings(wantRole)
-	sort.Strings(wantProtected)
-	if !reflect.DeepEqual(roleAssignments, wantRole) ||
-		!reflect.DeepEqual(protectedReturns, wantProtected) ||
+	if len(roleAssignments) != 0 {
+		t.Fatalf("a Role field reappeared on the actor record: %v", roleAssignments)
+	}
+	if !reflect.DeepEqual(ownerDerivations, wantOwner) ||
 		!reflect.DeepEqual(bootstrapAssignments, wantBootstrap) {
-		t.Fatalf("channel-owner chokepoint drift: Role=%v want %v; protected=%v want %v; Bootstrap=%v want %v",
-			roleAssignments, wantRole, protectedReturns, wantProtected, bootstrapAssignments, wantBootstrap)
+		t.Fatalf("channel-owner chokepoint drift: owner=%v want %v; Bootstrap=%v want %v",
+			ownerDerivations, wantOwner, bootstrapAssignments, wantBootstrap)
 	}
 }
 

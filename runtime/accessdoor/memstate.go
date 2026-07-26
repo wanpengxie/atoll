@@ -8,7 +8,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/capauth"
-	"github.com/wanpengxie/atoll/runtime/identitystore"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
@@ -37,22 +36,30 @@ type AdmittedStateBinding interface {
 	MintAdmitted(storespec.IdentityAdmission) AccessHandle
 }
 
+// EntryReader is the closed classification seam: "does this record live in the
+// process entry table". It is wired in at assembly and consumed ONLY by state
+// backing selection below. It must never be used for anything else — no
+// capability, no projection, no protocol field, never across the wire.
+type EntryReader interface {
+	IsEntry(ctx context.Context, id actor.ActorID) (entry bool, found bool, err error)
+}
+
 type actorStateHandles struct {
 	mu      sync.RWMutex
-	homes   identitystore.HomeReader
+	entries EntryReader
 	durable AccessMinter
 	memory  map[actor.ActorID]boundStateHandle
 }
 
 func NewStateHandleResolver(
-	homes identitystore.HomeReader,
+	entries EntryReader,
 	durable AccessMinter,
 ) (StateHandleResolver, error) {
-	if homes == nil || durable == nil {
+	if entries == nil || durable == nil {
 		return nil, errors.New("accessdoor: state handle resolver dependencies incomplete")
 	}
 	return &actorStateHandles{
-		homes:   homes,
+		entries: entries,
 		durable: durable,
 		memory:  make(map[actor.ActorID]boundStateHandle),
 	}, nil
@@ -90,39 +97,33 @@ func (h *actorStateHandles) ResolvePhysical(
 	if id == "" {
 		return nil, ErrStateHandleUnavailable
 	}
-	home, found, err := h.homes.HomeOf(ctx, id)
+	entry, found, err := h.entries.IsEntry(ctx, id)
 	if err != nil {
 		return nil, err
 	}
 	if !found {
 		return nil, ErrStateHandleUnavailable
 	}
-	switch home {
-	case identitystore.HomeDurable:
+	if !entry {
 		minter, ok := h.durable.(AdmittedMinter)
 		if !ok {
 			return nil, ErrStateHandleUnavailable
 		}
 		return resolvedStateBinding{id: id, durable: minter}, nil
-	case identitystore.HomeMemory:
-		h.mu.Lock()
-		state, ok := h.memory[id]
-		if !ok {
-			handle, valid := newMemoryStateHandle(
-				id,
-			).(boundStateHandle)
-			if !valid {
-				h.mu.Unlock()
-				return nil, ErrStateHandleUnavailable
-			}
-			state = handle
-			h.memory[id] = state
-		}
-		h.mu.Unlock()
-		return resolvedStateBinding{id: id, memory: &state}, nil
-	default:
-		return nil, ErrStateHandleUnavailable
 	}
+	h.mu.Lock()
+	state, ok := h.memory[id]
+	if !ok {
+		handle, valid := newMemoryStateHandle(id).(boundStateHandle)
+		if !valid {
+			h.mu.Unlock()
+			return nil, ErrStateHandleUnavailable
+		}
+		state = handle
+		h.memory[id] = state
+	}
+	h.mu.Unlock()
+	return resolvedStateBinding{id: id, memory: &state}, nil
 }
 
 func (h *actorStateHandles) ResolveAuthority(

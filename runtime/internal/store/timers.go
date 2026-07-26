@@ -219,23 +219,10 @@ func (s *timerStore) AckOwned(ctx context.Context, id timerspec.TimerID, author 
 	return n == 1, nil
 }
 
-// clearTimersTx cascades the identity-level pending-timer locus: it deletes
-// every timers row owned by author, inside the same transaction that
-// deregisters the actor (both dereg entry points in actors.go hang it
-// there). It is a parallel sibling of clearActorScopedTx (state.go), never
-// merged into it — one locus, one function — so a future third scoped locus
-// finds its own cascade in its own file. Idempotent: a re-run over an
-// already-cleared author deletes zero rows.
-//
-// Memory-home timers need no SQL hook here because they are not rows; they
-// live in the current Scheduler instance. Deregister makes subsequent fire
-// admission fail by ActorID, so those entries are reaped lazily at fire time.
-// This storage distinction is unrelated to actor Incarnation.
-func clearTimersTx(ctx context.Context, tx *sql.Tx, author actor.ActorID) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM timers WHERE author_id=?`, string(author)); err != nil {
-		return fmt.Errorf("store: timers cascade clear %q: %w", author, err)
-	}
-	return nil
-}
+// No deregistration cascade clears this table. A dead author's timer rows are
+// inert data — ActorIDs are never reused and every belonging is keyed by
+// ActorID, so those rows are unreachable to anyone but the dead. Correctness is
+// carried by the fire-time author admission gate (which refuses and reaps),
+// never by a delete.
 
 var _ timerspec.TimerStore = (*timerStore)(nil)

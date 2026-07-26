@@ -14,20 +14,18 @@ import (
 // storespec interfaces. The raw *sql.DB is confined inside runtime/internal/store;
 // this public type re-exports only the interface handles.
 type ChannelStores struct {
-	Log             storespec.MessageLog
-	Query           storespec.MessageQuery
-	Visible         storespec.VisibleMessageQuery
-	Expiry          storespec.ExpiryQuery
-	Requests        storespec.RequestLookup
-	Declared        storespec.DeclaredControlReader
-	DeclAdmission   storespec.DeclAdmissionStore
-	Cascade         storespec.CascadeStore
-	Routing         storespec.ChannelRouting
-	Genesis         storespec.GenesisStore
-	SysOps          storespec.SysOpAdmission
-	DeclarationSync storespec.DeclarationSyncStore
-	Bindings        storespec.DaemonBindingReader
-	ResourceRead    storespec.ResourceReadStore
+	Log      storespec.MessageLog
+	Query    storespec.MessageQuery
+	Visible  storespec.VisibleMessageQuery
+	Expiry   storespec.ExpiryQuery
+	Requests storespec.RequestLookup
+	// Actors is the durable actor-record face handed to runtime/actorstore at
+	// assembly. Platform never holds it: the actor store is runtime-internal.
+	Actors       storespec.ActorRegistryStore
+	Routing      storespec.ChannelRouting
+	Genesis      storespec.GenesisStore
+	Bindings     storespec.DaemonBindingStore
+	ResourceRead storespec.ResourceReadStore
 
 	// Principals is the principal-axis read face (LookupActivePrincipal — the
 	// admission path's "which active instance embodies this subject" query),
@@ -96,21 +94,17 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 	}
 
 	return &ChannelStores{
-		Log:             cs.Log,
-		Query:           cs.Query,
-		Visible:         cs.Visible,
-		Expiry:          cs.Expiry,
-		Requests:        cs.Requests,
-		Declared:        cs.Declared,
-		DeclAdmission:   cs.DeclAdmission,
-		Cascade:         cs.Cascade,
-		Routing:         cs.Routing,
-		Genesis:         cs.Genesis,
-		SysOps:          cs.SysOps,
-		DeclarationSync: cs.DeclarationSync,
-		Bindings:        cs.Bindings,
-		ResourceRead:    cs.ResourceRead,
-		Principals:      cs.Principals,
+		Log:          cs.Log,
+		Query:        cs.Query,
+		Visible:      cs.Visible,
+		Expiry:       cs.Expiry,
+		Requests:     cs.Requests,
+		Actors:       cs.Actors,
+		Routing:      cs.Routing,
+		Genesis:      cs.Genesis,
+		Bindings:     cs.Bindings,
+		ResourceRead: cs.ResourceRead,
+		Principals:   cs.Principals,
 		Assembly: AssemblyPorts{
 			Resources: cs.Resources,
 			KV:        cs.KVDriver,

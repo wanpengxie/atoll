@@ -5,382 +5,363 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-type fakeStore struct {
-	mu         sync.Mutex
-	rows       map[actor.ActorID]StoredActor
-	restorable map[actor.ActorID]bool
-	system     storespec.ActorControlRow
-	forks      map[string]actor.ActorID
-
-	restartEntered chan struct{}
-	restartResume  chan struct{}
-	forkEntered    chan struct{}
-	forkResume     chan struct{}
+// fakeRecordStore is the record port a Controller drives. It speaks only record
+// language — there is no authorization coordinate anywhere in it.
+type fakeRecordStore struct {
+	mu       sync.Mutex
+	restored []storespec.ActorRecord
+	durable  map[actor.ActorID]storespec.ActorRecord
+	entries  map[actor.ActorID]storespec.ActorRecord
+	nextID   int
+	insertN  int
 }
 
-func newFakeStore(ids ...actor.ActorID) *fakeStore {
-	f := &fakeStore{
-		rows:       make(map[actor.ActorID]StoredActor),
-		restorable: make(map[actor.ActorID]bool),
-		forks:      make(map[string]actor.ActorID),
-		system: storespec.ActorControlRow{
-			ID:                 actor.SystemActorID,
-			Kind:               actor.KindSystem,
-			Class:              "system",
-			CurrentDeclVersion: 1,
-			Placement:          storespec.NewServerPlacement(),
-		},
+func newFakeRecordStore(restored ...storespec.ActorRecord) *fakeRecordStore {
+	return &fakeRecordStore{
+		restored: restored,
+		durable:  make(map[actor.ActorID]storespec.ActorRecord),
+		entries:  make(map[actor.ActorID]storespec.ActorRecord),
 	}
-	for _, id := range ids {
-		f.rows[id] = StoredActor{
-			Row: storespec.ActorControlRow{
-				ID:                 id,
-				Kind:               actor.KindAgent,
-				Class:              "test",
-				CurrentDeclVersion: 1,
-				Placement:          storespec.NewServerPlacement(),
-			},
-		}
-		f.restorable[id] = true
-	}
-	return f
 }
 
-func (f *fakeStore) RestoreActive(context.Context) ([]storespec.ActorControlRow, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	out := []storespec.ActorControlRow{f.system}
-	for id, value := range f.rows {
-		if f.restorable[id] {
-			out = append(out, value.Row)
-		}
+func (s *fakeRecordStore) RestoreActive(context.Context) ([]storespec.ActorRecord, error) {
+	out := make([]storespec.ActorRecord, len(s.restored))
+	for i, record := range s.restored {
+		out[i] = record.Clone()
+		s.durable[record.ID] = record.Clone()
 	}
 	return out, nil
 }
 
-func (f *fakeStore) LookupActive(_ context.Context, id actor.ActorID) (StoredActor, bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	value, ok := f.rows[id]
-	return value, ok, nil
-}
-
-func (*fakeStore) Admit(context.Context, AdmitRequest) (ActorCommit[AdmitResult], error) {
-	return ActorCommit[AdmitResult]{}, errors.New("unused")
-}
-
-func (*fakeStore) Introduce(context.Context, IntroduceRequest) (ActorCommit[channel.IntroduceResult], error) {
-	return ActorCommit[channel.IntroduceResult]{}, errors.New("unused")
-}
-
-func forkKey(caller actor.ActorID, request message.ID) string {
-	return string(caller) + "\x00" + string(request)
-}
-
-func (f *fakeStore) LookupFork(_ context.Context, caller actor.ActorID, request message.ID) (actor.ActorID, bool, error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	child, ok := f.forks[forkKey(caller, request)]
-	return child, ok, nil
-}
-
-func (f *fakeStore) CommitFork(ctx context.Context, request ForkCommitRequest) (ForkCommitResult, error) {
-	if f.forkEntered != nil {
-		f.forkEntered <- struct{}{}
-		select {
-		case <-f.forkResume:
-		case <-ctx.Done():
-			return ForkCommitResult{}, ctx.Err()
+func (s *fakeRecordStore) Insert(
+	_ context.Context,
+	draft storespec.ActorDraft,
+) (storespec.ActorRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.insertN++
+	// Semantic-key replay: an existing active record wins.
+	for _, record := range s.durable {
+		if draft.SourceDeclID != "" && record.SourceDeclID == draft.SourceDeclID {
+			return record.Clone(), nil
+		}
+		if draft.Principal != "" && record.Principal == draft.Principal && record.Kind == draft.Kind {
+			return record.Clone(), nil
 		}
 	}
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	key := forkKey(request.CallerActorID, request.RequestID)
-	child := f.forks[key]
-	if child == "" {
-		child = request.ChildActorID
-		f.forks[key] = child
-		f.rows[child] = StoredActor{
-			Row: storespec.ActorControlRow{
-				ID:                 child,
-				Kind:               request.Spec.Kind,
-				Class:              request.Spec.Class,
-				Config:             append([]byte(nil), request.Spec.Config...),
-				CurrentDeclVersion: 1,
-				Placement:          request.Placement,
-			},
-		}
+	s.nextID++
+	id := draft.ID
+	if id == "" {
+		id = actor.ActorID(string(draft.Kind) + ":minted:" + string(rune('a'+s.nextID)))
 	}
-	return ForkCommitResult{ChildActorID: child, Actor: f.rows[child]}, nil
+	record := storespec.ActorRecord{
+		ID: id, Kind: draft.Kind, Principal: draft.Principal,
+		SourceDeclID: draft.SourceDeclID, CreatedAt: draft.CreatedAt,
+		Definition: draft.Definition.Clone(), Placement: draft.Placement,
+	}
+	s.durable[id] = record.Clone()
+	return record.Clone(), nil
 }
 
-func (f *fakeStore) Restart(ctx context.Context, request RestartRequest) (ActorCommit[struct{}], error) {
-	f.mu.Lock()
-	value, ok := f.rows[request.ActorID]
-	f.mu.Unlock()
+func (s *fakeRecordStore) UpdateDefinition(
+	_ context.Context,
+	id actor.ActorID,
+	def storespec.ActorDefinition,
+) (storespec.ActorRecord, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	record, ok := s.durable[id]
 	if !ok {
-		return ActorCommit[struct{}]{}, ErrInactive
+		return storespec.ActorRecord{}, storespec.ErrActorNotFound
 	}
-	if f.restartEntered != nil {
-		f.restartEntered <- struct{}{}
-		select {
-		case <-f.restartResume:
-		case <-ctx.Done():
-			return ActorCommit[struct{}]{}, ctx.Err()
-		}
+	record.Definition = def.Clone()
+	s.durable[id] = record.Clone()
+	return record.Clone(), nil
+}
+
+func (s *fakeRecordStore) Deregister(_ context.Context, ids []actor.ActorID) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, id := range ids {
+		delete(s.durable, id)
+		delete(s.entries, id)
 	}
-	return ActorCommit[struct{}]{Actor: value}, nil
+	return nil
 }
 
-func (*fakeStore) ApplyDeclaration(context.Context, DeclarationChange) (ActorCommit[struct{}], error) {
-	return ActorCommit[struct{}]{}, errors.New("unused")
-}
-
-func (*fakeStore) AttachDaemon(context.Context, channel.DaemonRequest) (ValueCommit[channel.BindingResult], error) {
-	return ValueCommit[channel.BindingResult]{}, errors.New("unused")
-}
-
-func (*fakeStore) ResolveTerminal(_ context.Context, command TerminalCommand, _ []storespec.ActorControlRow) (TerminalPlan, error) {
-	if command.Kind == TerminalEnd {
-		return TerminalPlan{IDs: []actor.ActorID{command.End.Target}}, nil
+func (s *fakeRecordStore) InstallEntry(record storespec.ActorRecord) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.entries[record.ID]; exists {
+		panic("entry already installed")
 	}
-	return TerminalPlan{}, nil
+	s.entries[record.ID] = record.Clone()
 }
 
-func (f *fakeStore) CommitTerminal(_ context.Context, _ TerminalCommand, plan TerminalPlan) (ValueCommit[TerminalResult], error) {
-	f.mu.Lock()
-	defer f.mu.Unlock()
-	for _, id := range plan.IDs {
-		delete(f.rows, id)
-	}
-	return ValueCommit[TerminalResult]{
-		Result: TerminalResult{Ended: append([]actor.ActorID(nil), plan.IDs...)},
-	}, nil
-}
-
-func startController(t *testing.T, store *fakeStore) *Controller {
+func newTestController(t *testing.T, store Store) *Controller {
 	t.Helper()
-	controller, err := New(store)
+	controller, err := New(store, func() int64 { return 1 })
 	if err != nil {
 		t.Fatal(err)
 	}
-	boot, err := controller.Start(t.Context())
-	if err != nil {
+	if err := controller.Start(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if boot.System.ID != actor.SystemActorID {
-		t.Fatalf("system bootstrap = %q", boot.System.ID)
-	}
-	t.Cleanup(controller.Close)
 	return controller
 }
 
-func TestControllerDoesNotRetainSystemInManagedSnapshot(t *testing.T) {
-	controller := startController(t, newFakeStore("agent:a"))
-	rows, err := controller.ActiveRows()
+func seedParent(t *testing.T) (*Controller, *fakeRecordStore, actor.ActorID) {
+	t.Helper()
+	store := newFakeRecordStore(storespec.ActorRecord{
+		ID: "agent:parent", Kind: actor.KindAgent, SourceDeclID: "decl:parent",
+		Definition: storespec.ActorDefinition{Class: "agent"},
+		Placement:  storespec.NewServerPlacement(),
+	})
+	return newTestController(t, store), store, "agent:parent"
+}
+
+func currentAttempt(t *testing.T, c *Controller, id actor.ActorID) string {
+	t.Helper()
+	value, ok, err := c.lookup(id)
+	if err != nil || !ok {
+		t.Fatalf("lookup %q: ok=%v err=%v", id, ok, err)
+	}
+	return string(value.Attempt)
+}
+
+// --- fork replay table -------------------------------------------------------
+
+func TestForkReplayReturnsTheFirstChildForever(t *testing.T) {
+	ctx := context.Background()
+	controller, store, parent := seedParent(t)
+	attempt := currentAttempt(t, controller, parent)
+
+	request := ForkRequest{
+		CallerActorID: parent,
+		CallerAttempt: attemptKeyOf(attempt),
+		RequestID:     "req-1",
+		Spec:          actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
+	}
+	first, err := controller.Fork(ctx, request)
+	if err != nil {
+		t.Fatalf("first fork: %v", err)
+	}
+	child := first.Result.ChildActorID
+	if child == "" {
+		t.Fatal("fork produced no child")
+	}
+
+	// A retry inside the same process returns the first result, never a second
+	// child.
+	second, err := controller.Fork(ctx, request)
+	if err != nil {
+		t.Fatalf("retry fork: %v", err)
+	}
+	if second.Result.ChildActorID != child {
+		t.Fatalf("retry child=%q want %q", second.Result.ChildActorID, child)
+	}
+
+	// Even after the child is terminated, the same RequestID still answers with
+	// the original id: one request can never produce two live children.
+	if _, err := controller.End(ctx, EndRequest{Target: child, CallerActorID: child}); err != nil {
+		t.Fatalf("end child: %v", err)
+	}
+	third, err := controller.Fork(ctx, request)
+	if err != nil {
+		t.Fatalf("post-terminal fork: %v", err)
+	}
+	if third.Result.ChildActorID != child {
+		t.Fatalf("post-terminal child=%q want %q", third.Result.ChildActorID, child)
+	}
+	if active, _ := controller.IsActive(ctx, child); active {
+		t.Fatal("the replayed id must not resurrect the dead child")
+	}
+
+	// The replay table is never pruned.
+	controller.ledger.RLock()
+	rows := len(controller.forks)
+	controller.ledger.RUnlock()
+	if rows != 1 {
+		t.Fatalf("fork replay rows=%d want 1 (never pruned)", rows)
+	}
+	if len(store.entries) != 0 {
+		t.Fatalf("terminated entry survived: %v", store.entries)
+	}
+}
+
+func TestForkReplayRejectsADifferentPayload(t *testing.T) {
+	ctx := context.Background()
+	controller, _, parent := seedParent(t)
+	attempt := attemptKeyOf(currentAttempt(t, controller, parent))
+
+	if _, err := controller.Fork(ctx, ForkRequest{
+		CallerActorID: parent, CallerAttempt: attempt, RequestID: "req-1",
+		Spec: actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
+	}); err != nil {
+		t.Fatalf("first fork: %v", err)
+	}
+	if _, err := controller.Fork(ctx, ForkRequest{
+		CallerActorID: parent, CallerAttempt: attempt, RequestID: "req-1",
+		Spec: actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "other"},
+	}); !errors.Is(err, ErrForkConflict) {
+		t.Fatalf("conflicting replay err=%v want ErrForkConflict", err)
+	}
+}
+
+func TestForkLeavesNoDurableFootprint(t *testing.T) {
+	ctx := context.Background()
+	controller, store, parent := seedParent(t)
+	attempt := attemptKeyOf(currentAttempt(t, controller, parent))
+	before := store.insertN
+
+	result, err := controller.Fork(ctx, ForkRequest{
+		CallerActorID: parent, CallerAttempt: attempt, RequestID: "req-1",
+		Spec: actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(rows) != 1 || rows[0].ID != "agent:a" {
-		t.Fatalf("managed rows = %+v", rows)
+	if store.insertN != before {
+		t.Fatal("fork wrote a durable row")
 	}
-	if _, ok, err := controller.Lookup(actor.SystemActorID); ok || !errors.Is(err, ErrReservedSystem) {
-		t.Fatalf("system lookup ok=%v err=%v", ok, err)
-	}
-}
-
-func TestPreparedRunWeldsIdentityAndRunAuthorityAtDifferentLifetimes(t *testing.T) {
-	store := newFakeStore("agent:a")
-	controller := startController(t, store)
-	current, _, _ := controller.Lookup("agent:a")
-	prepared, err := controller.PrepareRun(
-		"agent:a",
-		current.Desired.AttemptKey,
-		current.Definition.Execution,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := prepared.Identity().Admit(); err != nil {
-		t.Fatal(err)
-	}
-	if err := prepared.Run().Admit(); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := controller.Restart(t.Context(), RestartRequest{ActorID: "agent:a"}); err != nil {
-		t.Fatal(err)
-	}
-	if err := prepared.Identity().Admit(); err != nil {
-		t.Fatalf("identity authority died on replacement: %v", err)
-	}
-	if err := prepared.Run().Admit(); !errors.Is(err, ErrStaleAttempt) {
-		t.Fatalf("old run authority err=%v", err)
+	if _, ok := store.entries[result.Result.ChildActorID]; !ok {
+		t.Fatal("fork child was not installed into the entry table")
 	}
 }
 
-func TestIdentityAdmissionIsOneCoherentActorIDOnlySnapshot(t *testing.T) {
-	store := newFakeStore("agent:a")
-	controller := startController(t, store)
-	before, ok, err := controller.AdmitIdentity(t.Context(), "agent:a")
-	if err != nil || !ok || !before.Valid() {
-		t.Fatalf("initial admission=(%+v,%v,%v)", before, ok, err)
-	}
-	if before.ID != "agent:a" {
-		t.Fatalf("initial admission=%+v", before)
-	}
+// --- restart / declaration ---------------------------------------------------
 
-	if _, err := controller.Restart(t.Context(), RestartRequest{ActorID: "agent:a"}); err != nil {
-		t.Fatal(err)
-	}
-	after, ok, err := controller.AdmitIdentity(t.Context(), "agent:a")
-	if err != nil || !ok || !after.Valid() {
-		t.Fatalf("post-restart admission=(%+v,%v,%v)", after, ok, err)
-	}
-	if after.ID != before.ID {
-		t.Fatalf("ActorID admission changed across G replacement: before=%+v after=%+v", before, after)
-	}
+func TestRestartIsEdgeTriggeredAndTouchesNoRecord(t *testing.T) {
+	ctx := context.Background()
+	controller, store, parent := seedParent(t)
+	first := currentAttempt(t, controller, parent)
+	before := store.durable[parent]
 
-	if _, err := controller.End(t.Context(), EndRequest{Target: "agent:a"}); err != nil {
-		t.Fatal(err)
-	}
-	if admission, ok, err := controller.AdmitIdentity(t.Context(), "agent:a"); err != nil || ok || admission.Valid() {
-		t.Fatalf("ended admission=(%+v,%v,%v)", admission, ok, err)
-	}
-}
-
-func TestEndSelfAdmissionLinearizesInsideControllerGate(t *testing.T) {
-	store := newFakeStore("agent:a")
-	store.restartEntered = make(chan struct{}, 1)
-	store.restartResume = make(chan struct{})
-	controller := startController(t, store)
-	g1, _, _ := controller.Lookup("agent:a")
-
-	restartDone := make(chan error, 1)
-	go func() {
-		_, err := controller.Restart(context.Background(), RestartRequest{ActorID: "agent:a"})
-		restartDone <- err
-	}()
-	<-store.restartEntered
-
-	endDone := make(chan error, 1)
-	go func() {
-		_, err := controller.End(context.Background(), EndRequest{
-			CallerActorID: "agent:a",
-			CallerAttempt: g1.Desired.AttemptKey,
-			Target:        "agent:a",
-		})
-		endDone <- err
-	}()
-	select {
-	case err := <-endDone:
-		t.Fatalf("End crossed the Controller gate while Restart was publishing: %v", err)
-	case <-time.After(20 * time.Millisecond):
-	}
-	close(store.restartResume)
-	if err := <-restartDone; err != nil {
-		t.Fatal(err)
-	}
-	if err := <-endDone; !errors.Is(err, ErrStaleAttempt) {
-		t.Fatalf("stale G1 End err=%v", err)
-	}
-	if _, ok, err := controller.Lookup("agent:a"); err != nil || !ok {
-		t.Fatalf("successor was removed ok=%v err=%v", ok, err)
-	}
-}
-
-func TestForkReleasesCallerGateAfterAdmission(t *testing.T) {
-	store := newFakeStore("agent:a")
-	store.forkEntered = make(chan struct{}, 1)
-	store.forkResume = make(chan struct{})
-	controller := startController(t, store)
-	g1, _, _ := controller.Lookup("agent:a")
-
-	forkDone := make(chan error, 1)
-	go func() {
-		_, err := controller.Fork(context.Background(), ForkRequest{
-			CallerActorID: "agent:a",
-			CallerAttempt: g1.Desired.AttemptKey,
-			RequestID:     "fork-1",
-			Spec:          actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "child"},
-		})
-		forkDone <- err
-	}()
-	<-store.forkEntered
-
-	restartDone := make(chan error, 1)
-	go func() {
-		_, err := controller.Restart(context.Background(), RestartRequest{ActorID: "agent:a"})
-		restartDone <- err
-	}()
-	select {
-	case err := <-restartDone:
-		if err != nil {
-			t.Fatal(err)
+	for range 2 {
+		if _, err := controller.Restart(ctx, RestartRequest{ActorID: parent}); err != nil {
+			t.Fatalf("restart: %v", err)
 		}
-	case <-time.After(time.Second):
-		t.Fatal("Restart was blocked by an already-admitted Fork")
 	}
-	close(store.forkResume)
-	if err := <-forkDone; err != nil {
+	second := currentAttempt(t, controller, parent)
+	if second == first {
+		t.Fatal("restart must mint a new term every call")
+	}
+	if store.durable[parent].Definition.Class != before.Definition.Class {
+		t.Fatal("restart changed the record")
+	}
+}
+
+func TestApplyDeclarationEqualValueIsANoOp(t *testing.T) {
+	ctx := context.Background()
+	controller, _, parent := seedParent(t)
+	attempt := currentAttempt(t, controller, parent)
+
+	if err := mustApply(controller, ctx, parent, "agent", nil); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func TestControllerDifferentActorMutationsAreRaceSafe(t *testing.T) {
-	store := newFakeStore("agent:a", "agent:b")
-	controller := startController(t, store)
-	var wg sync.WaitGroup
-	for _, id := range []actor.ActorID{"agent:a", "agent:b"} {
-		id := id
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			for range 100 {
-				if _, err := controller.Restart(context.Background(), RestartRequest{ActorID: id}); err != nil {
-					t.Errorf("restart %s: %v", id, err)
-					return
-				}
-			}
-		}()
+	if currentAttempt(t, controller, parent) != attempt {
+		t.Fatal("an equal definition must not mint a new term")
 	}
-	wg.Wait()
-}
-
-func TestQuiesceJoinsAdmittedCommand(t *testing.T) {
-	store := newFakeStore("agent:a")
-	store.restartEntered = make(chan struct{}, 1)
-	store.restartResume = make(chan struct{})
-	controller := startController(t, store)
-	go func() {
-		_, _ = controller.Restart(context.Background(), RestartRequest{ActorID: "agent:a"})
-	}()
-	<-store.restartEntered
-
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
-	defer cancel()
-	if err := controller.Quiesce(ctx); !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("Quiesce err=%v", err)
-	}
-	close(store.restartResume)
-	if err := controller.Quiesce(context.Background()); err != nil {
+	if err := mustApply(controller, ctx, parent, "agent-v2", nil); err != nil {
 		t.Fatal(err)
 	}
-}
-
-func TestAttemptKeysAreOpaqueUUIDv7Values(t *testing.T) {
-	controller := startController(t, newFakeStore("agent:a"))
-	value, _, _ := controller.Lookup("agent:a")
-	if _, err := actorhost.ParseAttemptKey(string(value.Desired.AttemptKey)); err != nil {
-		t.Fatal(err)
+	if currentAttempt(t, controller, parent) == attempt {
+		t.Fatal("a changed definition must mint a new term")
 	}
 }
+
+func mustApply(c *Controller, ctx context.Context, id actor.ActorID, class string, config []byte) error {
+	_, err := c.ApplyDeclaration(ctx, DeclarationChange{
+		ActorID:    id,
+		Definition: storespec.ActorDefinition{Class: class, Config: config},
+	})
+	return err
+}
+
+// --- terminal ----------------------------------------------------------------
+
+func TestTerminalSetIsExactlyTheExplicitTarget(t *testing.T) {
+	ctx := context.Background()
+	controller, _, parent := seedParent(t)
+	attempt := attemptKeyOf(currentAttempt(t, controller, parent))
+	child, err := controller.Fork(ctx, ForkRequest{
+		CallerActorID: parent, CallerAttempt: attempt, RequestID: "req-1",
+		Spec: actorcaps.ForkSpec{Kind: actor.KindAgent, Class: "worker"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Ending the parent must NOT spread to its fork: there is no lineage.
+	transition, err := controller.End(ctx, EndRequest{Target: parent, CallerActorID: parent})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(transition.Result.Ended) != 1 || transition.Result.Ended[0] != parent {
+		t.Fatalf("terminal set=%v want exactly the target", transition.Result.Ended)
+	}
+	if active, _ := controller.IsActive(ctx, child.Result.ChildActorID); !active {
+		t.Fatal("the fork child was cascaded away with its parent")
+	}
+}
+
+func TestEndOnlyAcceptsTheTargetOrTheSystemFace(t *testing.T) {
+	ctx := context.Background()
+	controller, _, parent := seedParent(t)
+	if _, err := controller.End(ctx, EndRequest{
+		Target: parent, CallerActorID: "agent:stranger",
+	}); !errors.Is(err, ErrEndForbidden) {
+		t.Fatalf("stranger End err=%v want ErrEndForbidden", err)
+	}
+	if _, err := controller.End(ctx, EndRequest{
+		Target: parent, CallerActorID: actor.SystemActorID,
+	}); err != nil {
+		t.Fatalf("system face End: %v", err)
+	}
+}
+
+// --- kernel is not a member --------------------------------------------------
+
+func TestKernelIsNeverAMember(t *testing.T) {
+	ctx := context.Background()
+	controller, _, _ := seedParent(t)
+	if active, err := controller.IsActive(ctx, actor.SystemActorID); err != nil || active {
+		t.Fatalf("kernel active=%v err=%v; it has no record", active, err)
+	}
+	// A lifecycle command aimed at the kernel finds no member and takes the
+	// ordinary verdict — there is no reserved-system branch to hit.
+	if _, err := controller.Restart(ctx, RestartRequest{ActorID: actor.SystemActorID}); !errors.Is(err, ErrInactive) {
+		t.Fatalf("kernel restart err=%v want the ordinary inactive verdict", err)
+	}
+}
+
+// --- deep copy ---------------------------------------------------------------
+
+func TestRecordHandoffCopiesConfig(t *testing.T) {
+	ctx := context.Background()
+	store := newFakeRecordStore(storespec.ActorRecord{
+		ID: "agent:a", Kind: actor.KindAgent, SourceDeclID: "decl:a",
+		Definition: storespec.ActorDefinition{Class: "agent", Config: []byte(`{"n":1}`)},
+		Placement:  storespec.NewServerPlacement(),
+	})
+	controller := newTestController(t, store)
+
+	record, ok, err := controller.LookupActive(ctx, "agent:a")
+	if err != nil || !ok {
+		t.Fatal(err)
+	}
+	record.Definition.Config[2] = 'X'
+	again, _, _ := controller.LookupActive(ctx, "agent:a")
+	if string(again.Definition.Config) != `{"n":1}` {
+		t.Fatalf("mutating a handed-out record reached the ledger: %s", again.Definition.Config)
+	}
+}
+
+func attemptKeyOf(raw string) actorhost.AttemptKey { return actorhost.AttemptKey(raw) }

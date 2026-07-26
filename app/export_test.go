@@ -19,15 +19,15 @@ import (
 // errTestChannelNotLoaded stands in for a torn-down home in the test seams below.
 var errTestChannelNotLoaded = errors.New("app: channel not loaded")
 
-func declaredBySourceOneForTest(ctx context.Context, view channelhost.View, source string) (storespec.ActorControlRow, bool, error) {
+func declaredBySourceOneForTest(ctx context.Context, view channelhost.View, source string) (storespec.ActorRecord, bool, error) {
 	rows, err := view.DeclaredBySource(ctx, source)
 	if err != nil || len(rows) == 0 {
-		return storespec.ActorControlRow{}, false, err
+		return storespec.ActorRecord{}, false, err
 	}
 	return rows[0], true, nil
 }
 
-func (a *App) ActorsForTest(chID channel.ID) ([]storespec.ActorControlRow, error) {
+func (a *App) ActorsForTest(chID channel.ID) ([]storespec.ActorRecord, error) {
 	bundle, ok := a.host.Acquire(chID)
 	if !ok {
 		return nil, errTestChannelNotLoaded

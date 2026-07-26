@@ -39,8 +39,8 @@ type SysOp interface {
 
 type View interface {
 	DefaultAgent(context.Context) (actor.ActorID, bool, error)
-	DeclaredBySource(context.Context, string) ([]storespec.ActorControlRow, error)
-	ActiveActors(context.Context) ([]storespec.ActorControlRow, error)
+	DeclaredBySource(context.Context, string) ([]storespec.ActorRecord, error)
+	ActiveActors(context.Context) ([]storespec.ActorRecord, error)
 	ResolvePrincipal(context.Context, actor.Kind, string) (actor.ActorID, bool, error)
 	OwnerPrincipal(context.Context) (string, bool, error)
 	ReadVisibleAfterSeq(context.Context, channel.Reader, int64, int) ([]storespec.StoredRow, int64, error)
@@ -86,10 +86,10 @@ type viewAdapter struct{ home *home.Home }
 func (a viewAdapter) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
 	return a.home.View().DefaultAgent(ctx)
 }
-func (a viewAdapter) DeclaredBySource(ctx context.Context, d string) ([]storespec.ActorControlRow, error) {
+func (a viewAdapter) DeclaredBySource(ctx context.Context, d string) ([]storespec.ActorRecord, error) {
 	return a.home.View().DeclaredBySource(ctx, d)
 }
-func (a viewAdapter) ActiveActors(ctx context.Context) ([]storespec.ActorControlRow, error) {
+func (a viewAdapter) ActiveActors(ctx context.Context) ([]storespec.ActorRecord, error) {
 	return a.home.View().ActiveActors(ctx)
 }
 func (a viewAdapter) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {

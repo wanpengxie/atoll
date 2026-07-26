@@ -19,16 +19,16 @@ type memberRegistry struct {
 	lookupErr error
 }
 
-func (m memberRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+func (m memberRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
 	if m.lookupErr != nil {
-		return storespec.ActorControlRow{}, false, m.lookupErr
+		return storespec.ActorRecord{}, false, m.lookupErr
 	}
 	if !m.active[id] {
-		return storespec.ActorControlRow{}, false, nil
+		return storespec.ActorRecord{}, false, nil
 	}
-	return storespec.ActorControlRow{ID: id, Kind: actor.KindAgent, CurrentDeclVersion: 1}, true, nil
+	return storespec.ActorRecord{ID: id, Kind: actor.KindAgent}, true, nil
 }
-func (m memberRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+func (m memberRegistry) ListActive(context.Context) ([]storespec.ActorRecord, error) {
 	return nil, nil
 }
 

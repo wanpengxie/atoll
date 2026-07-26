@@ -18,16 +18,16 @@ import (
 // fakeRegistry serves a fixed membership set (the durable axis).
 type fakeRegistry struct{ rows []storespec.Record }
 
-func (f fakeRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+func (f fakeRegistry) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
 	for _, row := range f.rows {
 		if row.ID == id && row.IsActive() {
 			return controlRow(row), true, nil
 		}
 	}
-	return storespec.ActorControlRow{}, false, nil
+	return storespec.ActorRecord{}, false, nil
 }
-func (f fakeRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
-	rows := make([]storespec.ActorControlRow, 0, len(f.rows))
+func (f fakeRegistry) ListActive(context.Context) ([]storespec.ActorRecord, error) {
+	rows := make([]storespec.ActorRecord, 0, len(f.rows))
 	for _, row := range f.rows {
 		if row.IsActive() {
 			rows = append(rows, controlRow(row))
@@ -35,8 +35,8 @@ func (f fakeRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, 
 	}
 	return rows, nil
 }
-func controlRow(row storespec.Record) storespec.ActorControlRow {
-	return storespec.ActorControlRow{ID: row.ID, Kind: row.Kind, Principal: row.Principal, Binding: row.Binding, CreatedAt: row.CreatedAt, CurrentDeclVersion: 1}
+func controlRow(row storespec.Record) storespec.ActorRecord {
+	return storespec.ActorRecord{ID: row.ID, Kind: row.Kind, Principal: row.Principal, CreatedAt: row.CreatedAt}
 }
 
 // fakeStat is the injected obs-read seam (substrate pull-stat stand-in); it reports the
@@ -156,8 +156,8 @@ func requestMsg(id message.ID, typ string, payload []byte) actorbase.Msg {
 // the OUTCOME of send→terminal, never projected into this channel-wide view.
 func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	reg := fakeRegistry{rows: []storespec.Record{
-		{ID: "actor:a", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
-		{ID: "actor:b", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
+		{ID: "actor:a", Kind: actor.KindAgent},
+		{ID: "actor:b", Kind: actor.KindAgent},
 	}}
 	sys := &fakeSys{}
 	listReq := requestMsg("q1", introspect.QueryList, nil)
@@ -183,8 +183,9 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	if err := json.Unmarshal(raw, &body); err != nil {
 		t.Fatalf("unmarshal reply: %v", err)
 	}
-	if len(body.Actors) != 2 {
-		t.Fatalf("catalog has %d actors, want 2 (membership)", len(body.Actors))
+	// Two members plus the synthesized kernel entry.
+	if len(body.Actors) != 3 {
+		t.Fatalf("catalog has %d actors, want 2 members + kernel", len(body.Actors))
 	}
 	byID := map[string]map[string]any{}
 	for _, a := range body.Actors {
@@ -202,36 +203,43 @@ func TestActorList_TwoAxisNoReadiness(t *testing.T) {
 	}
 }
 
-type sponsorAuthority struct{ rows []storespec.ActorControlRow }
+type recordAuthority struct{ rows []storespec.ActorRecord }
 
-func (a sponsorAuthority) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+func (a recordAuthority) LookupActive(_ context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
 	for _, row := range a.rows {
 		if row.ID == id {
 			return row, true, nil
 		}
 	}
-	return storespec.ActorControlRow{}, false, nil
+	return storespec.ActorRecord{}, false, nil
 }
-func (a sponsorAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
-	return append([]storespec.ActorControlRow(nil), a.rows...), nil
+func (a recordAuthority) ListActive(context.Context) ([]storespec.ActorRecord, error) {
+	return append([]storespec.ActorRecord(nil), a.rows...), nil
 }
-func TestActorListProjectsSponsorForParentRecovery(t *testing.T) {
-	parent := actor.ActorID("agent:master")
-	child := actor.ActorID("agent:master/worker-1")
-	s := New(Deps{Authority: sponsorAuthority{rows: []storespec.ActorControlRow{
-		{ID: parent, Kind: actor.KindAgent, CurrentDeclVersion: 1},
-		{ID: child, Kind: actor.KindAgent, Sponsor: parent, CurrentDeclVersion: 1},
+
+// The kernel is not a member, so it has no record to list. Its directory entry
+// is synthesized from the identity constant by the projection layer.
+func TestActorListSynthesizesKernelEntryFromConstant(t *testing.T) {
+	member := actor.ActorID("agent:master")
+	s := New(Deps{Authority: recordAuthority{rows: []storespec.ActorRecord{
+		{ID: member, Kind: actor.KindAgent},
 	}}})
 	sys := &fakeSys{}
-	s.handle(sys, requestMsg("sponsors", introspect.QueryList, nil))
+	s.handle(sys, requestMsg("kernel", introspect.QueryList, nil))
 	catalog := sys.replies[0].v.(introspect.Catalog)
+	if len(catalog.Actors) != 2 {
+		t.Fatalf("catalog=%+v want member + synthesized kernel", catalog)
+	}
+	var sawKernel bool
 	for _, row := range catalog.Actors {
-		if row.ID == string(child) {
-			if row.Sponsor != string(parent) {
-				t.Fatalf("child sponsor=%q", row.Sponsor)
+		if row.ID == string(actor.SystemActorID) {
+			sawKernel = true
+			if row.Kind != string(actor.KindSystem) {
+				t.Fatalf("kernel entry kind=%q", row.Kind)
 			}
-			return
 		}
 	}
-	t.Fatalf("child absent from catalog: %+v", catalog)
+	if !sawKernel {
+		t.Fatalf("kernel entry absent from catalog: %+v", catalog)
+	}
 }

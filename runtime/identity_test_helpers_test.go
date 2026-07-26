@@ -12,22 +12,22 @@ func admitDeclaredTest(ctx context.Context, cs *ChannelStores, kind actor.Kind, 
 	if at <= 0 {
 		at = time.Now().UnixMilli()
 	}
-	bundle := storespec.AdmitBundle{
-		Kind: kind, Class: string(kind),
-		Placement: storespec.NewServerPlacement(), CreatedAt: at,
+	draft := storespec.ActorDraft{
+		Kind:       kind,
+		Definition: storespec.ActorDefinition{Class: string(kind)},
+		Placement:  storespec.NewServerPlacement(), CreatedAt: at,
 	}
 	if kind == actor.KindHuman {
-		bundle.Principal = principal
+		draft.Principal = principal
 	} else if kind == actor.KindAgent || kind == actor.KindTool {
-		bundle.SourceDeclID = principal
+		draft.SourceDeclID = principal
 	}
-	result, err := cs.DeclAdmission.AdmitDeclared(ctx, bundle)
-	return result.ID, err
+	record, err := cs.Actors.Insert(ctx, draft)
+	return record.ID, err
 }
 
 func endDeclaredTest(ctx context.Context, cs *ChannelStores, id actor.ActorID, at int64) error {
-	_, err := cs.Cascade.EndCascade(ctx, storespec.CascadeBundle{IDs: []actor.ActorID{id}, EndedAt: at})
-	return err
+	return cs.Actors.Deregister(ctx, []actor.ActorID{id}, at)
 }
 
 func identityAdmission(id actor.ActorID) storespec.IdentityAdmission {

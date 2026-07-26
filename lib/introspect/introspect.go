@@ -155,8 +155,6 @@ func ParseDescribeRequest(payload []byte) (DescribeRequest, error) {
 type CatalogEntry struct {
 	ID      string `json:"id"`
 	Kind    string `json:"kind"`
-	Binding string `json:"binding,omitempty"`
-	Sponsor string `json:"sponsor,omitempty"`
 	Present bool   `json:"present"`
 	// UptimeMs is the elapsed time since the substrate bound the live instance
 	// (now - StartedAt), derived by the system actor from the substrate's

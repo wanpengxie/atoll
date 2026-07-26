@@ -20,7 +20,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/timerspec"
 )
 
@@ -492,22 +491,20 @@ func TestTimer_Insert_DurableQuota(t *testing.T) {
 	}
 }
 
-// --- deregister cascade: entry point #1 (Deregister) -------------------------
+// --- deregister touches records ONLY ----------------------------------------
 
-func TestTimer_CascadeClearedOnDeregister(t *testing.T) {
+// A dead author's durable timers are inert data: nothing clears them, and the
+// fire-time author admission gate is what keeps them harmless. Deregister
+// touches actor_registry alone.
+func TestTimer_DeregisterLeavesAuthorTimersInert(t *testing.T) {
 	ctx := context.Background()
 	f := openTimersFixture(t)
 
 	mustInsertActor(t, f.reg, "actor:a")
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t2", AuthorID: "actor:a", FireAt: 2000, Type: "wake", CreatedAt: 1})
-
-	// A second owner's timer is a control: the cascade must be scoped to a.
 	mustInsertActor(t, f.reg, "actor:b")
 	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t3", AuthorID: "actor:b", FireAt: 1000, Type: "wake", CreatedAt: 1})
-
-	// A channel-scoped resource owned by a is a control for the OTHER locus:
-	// resources are non-lossy and must survive the creator's deregister.
 	if err := f.res.Create(ctx, "kv:doc", "kv", "actor:a", "", "", []byte("resource"), resourcespec.ResourceBirthPlan{}); err != nil {
 		t.Fatalf("Create resource: %v", err)
 	}
@@ -520,63 +517,19 @@ func TestTimer_CascadeClearedOnDeregister(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Due: %v", err)
 	}
-	if len(due) != 1 || due[0].ID != "t3" {
-		t.Fatalf("after deregister(a) timers=%+v want only t3 (owner b)", due)
+	if len(due) != 3 {
+		t.Fatalf("after deregister(a) timers=%+v want all three rows left inert", due)
 	}
 	if _, ok, _ := f.res.Resolve(ctx, "kv:doc"); !ok {
 		t.Error("channel-scoped resource must SURVIVE the creator's deregister (non-lossy, different locus)")
 	}
-}
 
-// A no-op Deregister (missing / already deregistered) must NOT touch timers —
-// the cascade only fires when the row actually transitions.
-func TestTimer_NoCascadeOnNoOpDeregister(t *testing.T) {
-	ctx := context.Background()
-	f := openTimersFixture(t)
-
-	mustInsertActor(t, f.reg, "actor:a")
-	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
-
-	if err := endActorForTest(ctx, f.reg, "actor:ghost", 1); err != nil {
-		t.Fatalf("Deregister ghost must be no-op: %v", err)
-	}
-	if due, _ := f.timers.Due(ctx, 999999); len(due) != 1 {
-		t.Errorf("no-op deregister must not clear another actor's timers, got %+v", due)
-	}
-
-	if err := endActorForTest(ctx, f.reg, "actor:a", 2); err != nil {
-		t.Fatalf("Deregister a: %v", err)
-	}
-	if due, _ := f.timers.Due(ctx, 999999); len(due) != 0 {
-		t.Errorf("real deregister must clear timers, got %+v", due)
-	}
-	// A repeat is a no-op and must not error.
-	if err := endActorForTest(ctx, f.reg, "actor:a", 3); err != nil {
+	// The latch is idempotent, and an id with no row is a plain no-op.
+	if err := endActorForTest(ctx, f.reg, "actor:a", 1001); err != nil {
 		t.Fatalf("repeat Deregister must be a no-op, got: %v", err)
 	}
-}
-
-// --- deregister cascade: entry point #2 (applyMemberRemoveTx) ----------------
-
-func TestTimer_CascadeClearedOnMemberRemove(t *testing.T) {
-	ctx := context.Background()
-	f := openTimersFixture(t)
-
-	if err := f.reg.insertFixedID(ctx, storespec.Record{ID: "actor:a", Kind: actor.KindTool, CreatedAt: 100}); err != nil {
-		t.Fatalf("add member: %v", err)
-	}
-	mustInsertTimer(t, f.timers, timerspec.TimerRow{ID: "t1", AuthorID: "actor:a", FireAt: 1000, Type: "wake", CreatedAt: 1})
-
-	if err := endActorForTest(ctx, f.reg, "actor:a", 200); err != nil {
-		t.Fatalf("remove member: %v", err)
-	}
-	if due, _ := f.timers.Due(ctx, 999999); len(due) != 0 {
-		t.Errorf("member state must be cascade-cleared on member remove, got %+v", due)
-	}
-
-	// A repeated remove (already-deregistered) is a no-op and must not error.
-	if err := endActorForTest(ctx, f.reg, "actor:a", 300); err != nil {
-		t.Fatalf("repeat remove must be no-op: %v", err)
+	if err := endActorForTest(ctx, f.reg, "actor:ghost", 1); err != nil {
+		t.Fatalf("Deregister of a missing id must be a no-op: %v", err)
 	}
 }
 

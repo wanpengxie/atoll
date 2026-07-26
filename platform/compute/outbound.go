@@ -196,9 +196,8 @@ func (d *DaemonOutbound) Prepare(
 	if d == nil || id == "" {
 		return PreparedOutbound{}, ErrOutboundClosed
 	}
-	if id == actor.SystemActorID {
-		return PreparedOutbound{}, actorhost.ErrReservedSystem
-	}
+	// No system guard: a plan never carries a system coordinate (the kernel has
+	// no record), so re-screening for it here would be redundant buckshot.
 	if _, err := actorhost.ParseAttemptKey(string(key)); err != nil {
 		return PreparedOutbound{}, err
 	}

@@ -19,10 +19,10 @@ import (
 // synthesize" posture as an unrouted type, never a bogus empty directory).
 type errRegistry struct{ err error }
 
-func (e errRegistry) LookupActive(context.Context, actor.ActorID) (storespec.ActorControlRow, bool, error) {
-	return storespec.ActorControlRow{}, false, nil
+func (e errRegistry) LookupActive(context.Context, actor.ActorID) (storespec.ActorRecord, bool, error) {
+	return storespec.ActorRecord{}, false, nil
 }
-func (e errRegistry) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+func (e errRegistry) ListActive(context.Context) ([]storespec.ActorRecord, error) {
 	return nil, e.err
 }
 func newDescribeReq() actorbase.Msg {
@@ -135,7 +135,7 @@ func TestRespondList_RegistryError(t *testing.T) {
 // actor.list composes everyone absent with zero uptime (advisory, never a gate).
 func TestObs_NilStat(t *testing.T) {
 	reg := fakeRegistry{rows: []storespec.Record{
-		{ID: "actor:a", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
+		{ID: "actor:a", Kind: actor.KindAgent},
 	}}
 	listReq := requestMsg("q1", introspect.QueryList, nil)
 	sys := &fakeSys{}
@@ -151,11 +151,15 @@ func TestObs_NilStat(t *testing.T) {
 	if err := json.Unmarshal(raw, &cat); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if len(cat.Actors) != 1 {
-		t.Fatalf("catalog has %d actors, want 1", len(cat.Actors))
+	// One member plus the kernel entry the projection layer synthesizes from the
+	// identity constant (the kernel has no record to list).
+	if len(cat.Actors) != 2 {
+		t.Fatalf("catalog has %d actors, want member + kernel", len(cat.Actors))
 	}
-	if cat.Actors[0].Present || cat.Actors[0].UptimeMs != 0 {
-		t.Fatalf("nil stat row=%+v, want absent/zero uptime", cat.Actors[0])
+	for _, row := range cat.Actors {
+		if row.Present || row.UptimeMs != 0 {
+			t.Fatalf("nil stat row=%+v, want absent/zero uptime", row)
+		}
 	}
 }
 
@@ -164,7 +168,7 @@ func TestObs_NilStat(t *testing.T) {
 // !startedAt.IsZero() guard) while present is still true.
 func TestObs_PresentZeroStartedAt(t *testing.T) {
 	reg := fakeRegistry{rows: []storespec.Record{
-		{ID: "actor:a", Kind: actor.KindAgent, Binding: actor.BindingEmbedded},
+		{ID: "actor:a", Kind: actor.KindAgent},
 	}}
 	listReq := requestMsg("q1", introspect.QueryList, nil)
 	sys := &fakeSys{}

@@ -331,7 +331,7 @@ func openTestChannel(t *testing.T, chID channel.ID, owner, member string, member
 	var id actor.ActorID
 	var found bool
 	if memberKind == actor.KindAgent {
-		var rows []storespec.ActorControlRow
+		var rows []storespec.ActorRecord
 		rows, err = bundle.View().DeclaredBySource(context.Background(), source)
 		found = len(rows) != 0
 		if found {

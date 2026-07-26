@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"slices"
 	"sync"
 	"time"
 
@@ -20,10 +19,13 @@ import (
 
 // actorSystem is a Platform workflow facade. It owns no runtime invariant:
 // Controller, Host and SystemKernel remain independent fields on Home.
+//
+// The system kernel appears here only in its native roles — physical routing
+// (its body lives in the kernel) and addressability (is the kernel running).
+// It is never a member: it has no record, no admission and no lifecycle.
 type actorSystem struct {
 	home         *Home
 	serverDomain actorhost.ExecutionDomain
-	systemRow    storespec.ActorControlRow
 	logger       *slog.Logger
 
 	desiredCtx    context.Context
@@ -47,11 +49,9 @@ func newActorSystem(h *Home, logger *slog.Logger) *actorSystem {
 }
 
 func (a *actorSystem) start(ctx context.Context, systemUnit *actorrt.Unit) error {
-	boot, err := a.home.controller.Start(ctx)
-	if err != nil {
+	if err := a.home.controller.Start(ctx); err != nil {
 		return err
 	}
-	a.systemRow = cloneSystemRow(boot.System)
 	if err := a.home.systemKernel.Start(systemUnit); err != nil {
 		a.home.controller.Close()
 		return err
@@ -64,11 +64,6 @@ func (a *actorSystem) start(ctx context.Context, systemUnit *actorrt.Unit) error
 	go a.runServerDesired()
 	go a.watchSystemFailure()
 	return nil
-}
-
-func cloneSystemRow(row storespec.ActorControlRow) storespec.ActorControlRow {
-	row.Config = append([]byte(nil), row.Config...)
-	return row
 }
 
 func (a *actorSystem) watchSystemFailure() {
@@ -117,12 +112,8 @@ func (a *actorSystem) pokeServerDesired() {
 	}
 }
 
-func (a *actorSystem) wakeDefinition(def actorctl.ActorDefinition) {
-	if def.Placement.Kind == storespec.PlacementDaemon {
-		homeActorEffects{home: a.home}.PlanPoke(actorhost.ExecutionDomain(def.Placement.Host))
-	}
-}
-
+// finishTransition is the composition-root tail of one committed command. It
+// consumes facts only: ended ids and reconcile hints.
 func finishTransition[T any](
 	a *actorSystem,
 	transition actorctl.Transition[T],
@@ -133,21 +124,28 @@ func finishTransition[T any](
 	}
 	effects := homeActorEffects{home: a.home}
 	if len(transition.Ended) != 0 {
-		effects.RunActorsEnded(transition.Ended)
+		effects.ActorsEnded(transition.Ended)
 	}
-	if len(transition.Wake) != 0 {
+	if transition.Reconcile.Server {
 		a.pokeServerDesired()
-		for _, def := range transition.Wake {
-			a.wakeDefinition(def)
-		}
 	}
-	effects.ApplyPostCommit(transition.Effects)
+	for _, peer := range transition.Reconcile.Peers {
+		a.pokeServerDesired()
+		effects.PlanPoke(peer)
+	}
+	if transition.Reconcile.Server || len(transition.Reconcile.Peers) != 0 {
+		a.home.pokeReconcile()
+	}
 	return transition.Result, nil
 }
 
 func (a *actorSystem) Admit(ctx context.Context, request actorctl.AdmitRequest) (actorctl.AdmitResult, error) {
 	t, err := a.home.controller.Admit(ctx, request)
-	return finishTransition(a, t, err)
+	result, err := finishTransition(a, t, err)
+	if err == nil && request.Principal != "" {
+		a.home.notifyMembership(request.Principal)
+	}
+	return result, err
 }
 
 func (a *actorSystem) Introduce(ctx context.Context, request actorctl.IntroduceRequest) (channel.IntroduceResult, error) {
@@ -172,32 +170,46 @@ func (a *actorSystem) ApplyDeclaration(ctx context.Context, change actorctl.Decl
 	return err
 }
 
-func (a *actorSystem) AttachDaemon(ctx context.Context, request channel.DaemonRequest) (channel.BindingResult, error) {
-	t, err := a.home.controller.AttachDaemon(ctx, request)
+func (a *actorSystem) End(ctx context.Context, request actorctl.EndRequest) (actorctl.EndResult, error) {
+	principals := a.principalsOf([]actor.ActorID{request.Target})
+	t, err := a.home.controller.End(ctx, request)
 	result, err := finishTransition(a, t, err)
 	if err == nil {
-		homeActorEffects{home: a.home}.PlanPoke(actorhost.ExecutionDomain(request.DaemonID))
+		a.home.announceEnded(ctx, t.Ended, request.Reason, endedBy(request.CallerActorID))
+		a.home.notifyMembership(principals...)
 	}
 	return result, err
-}
-
-func (a *actorSystem) End(ctx context.Context, request actorctl.EndRequest) (actorctl.EndResult, error) {
-	t, err := a.home.controller.End(ctx, request)
-	return finishTransition(a, t, err)
 }
 
 func (a *actorSystem) Remove(ctx context.Context, request actorctl.RemoveRequest) (channel.RemoveResult, error) {
+	principals := a.principalsOf([]actor.ActorID{request.Target})
 	t, err := a.home.controller.Remove(ctx, request)
-	return finishTransition(a, t, err)
-}
-
-func (a *actorSystem) DetachDaemon(ctx context.Context, request channel.DaemonRequest) (channel.BindingResult, error) {
-	t, err := a.home.controller.DetachDaemon(ctx, request)
 	result, err := finishTransition(a, t, err)
 	if err == nil {
-		homeActorEffects{home: a.home}.PlanPoke(actorhost.ExecutionDomain(request.DaemonID))
+		a.home.announceEnded(ctx, t.Ended, "system_remove", actor.SystemActorID)
+		a.home.notifyMembership(principals...)
 	}
 	return result, err
+}
+
+func endedBy(caller actor.ActorID) actor.ActorID {
+	if caller == "" {
+		return actor.SystemActorID
+	}
+	return caller
+}
+
+// principalsOf reads the login principals of ids before they are ended, so the
+// membership-change tail can name them afterwards.
+func (a *actorSystem) principalsOf(ids []actor.ActorID) []string {
+	out := make([]string, 0, len(ids))
+	for _, id := range ids {
+		record, active, err := a.home.controller.LookupActive(context.Background(), id)
+		if err == nil && active && record.Principal != "" {
+			out = append(out, record.Principal)
+		}
+	}
+	return out
 }
 
 func (a *actorSystem) PlanFor(domain actorhost.ExecutionDomain) ([]actorhost.Desired, error) {
@@ -233,6 +245,10 @@ func (a *actorSystem) RemoteEndSelf(ctx context.Context, id actor.ActorID, key a
 	return err
 }
 
+// ---------------------------------------------------------------------------
+// physical routing: the kernel's body lives in the kernel (§2.6 retained C)
+// ---------------------------------------------------------------------------
+
 func (a *actorSystem) Deliver(id actor.ActorID, env *message.Envelope) error {
 	if id == actor.SystemActorID {
 		return a.home.systemKernel.Deliver(env)
@@ -260,9 +276,8 @@ func (a *actorSystem) Stat(id actor.ActorID) (actorrt.UnitStat, bool) {
 		return snapshot.Unit.Stat(), true
 	}
 	if snapshot.Actual == actorhost.ActualRoute && snapshot.Binding.Valid() {
-		value, found, err := a.home.controller.Lookup(id)
-		if err == nil && found {
-			return actorrt.UnitStat{StartedAt: snapshot.StartedAt, Kind: value.Definition.Kind}, true
+		if kind, found := a.home.controller.ActiveKind(id); found {
+			return actorrt.UnitStat{StartedAt: snapshot.StartedAt, Kind: kind}, true
 		}
 	}
 	return actorrt.UnitStat{}, false
@@ -291,83 +306,65 @@ func (a *actorSystem) Attempt(id actor.ActorID) (actorhost.AttemptKey, bool) {
 }
 
 func (a *actorSystem) HostedIDs() []actor.ActorID {
-	rows, err := a.ListActive(context.Background())
+	identities, err := a.home.controller.ActiveIdentities()
 	if err != nil {
 		return nil
 	}
-	out := make([]actor.ActorID, 0, len(rows))
-	for _, row := range rows {
-		if _, live := a.Stat(row.ID); live {
-			out = append(out, row.ID)
+	out := make([]actor.ActorID, 0, len(identities))
+	for _, identity := range identities {
+		if _, live := a.Stat(identity.ID); live {
+			out = append(out, identity.ID)
 		}
 	}
 	return out
 }
 
-func (a *actorSystem) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
-	if id == actor.SystemActorID {
-		if a.home.controller.Phase() != actorctl.Running {
-			return storespec.ActorControlRow{}, false, actorctl.ErrClosed
-		}
-		return cloneSystemRow(a.systemRow), true, nil
-	}
+// ---------------------------------------------------------------------------
+// projections
+// ---------------------------------------------------------------------------
+
+func (a *actorSystem) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
 	return a.home.controller.LookupActive(ctx, id)
+}
+
+func (a *actorSystem) ListActive(ctx context.Context) ([]storespec.ActorRecord, error) {
+	return a.home.controller.ListActive(ctx)
 }
 
 func (a *actorSystem) AdmitIdentity(
 	ctx context.Context,
 	id actor.ActorID,
 ) (storespec.IdentityAdmission, bool, error) {
-	if id == actor.SystemActorID {
-		if a.home.controller.Phase() != actorctl.Running {
-			return storespec.IdentityAdmission{}, false, actorctl.ErrClosed
-		}
-		return storespec.IdentityAdmission{
-			ID: actor.SystemActorID, Kind: actor.KindSystem,
-		}, true, nil
-	}
 	return a.home.controller.AdmitIdentity(ctx, id)
 }
 
-func (a *actorSystem) ListActive(ctx context.Context) ([]storespec.ActorControlRow, error) {
-	rows, err := a.home.controller.ListActive(ctx)
-	if err != nil {
-		return nil, err
-	}
-	rows = append(rows, cloneSystemRow(a.systemRow))
-	slices.SortFunc(rows, func(left, right storespec.ActorControlRow) int {
-		switch {
-		case left.ID < right.ID:
-			return -1
-		case left.ID > right.ID:
-			return 1
-		default:
-			return 0
-		}
-	})
-	return rows, nil
-}
-
+// IsActive is the addressability verdict of the routing organ, not a registry
+// query: for the kernel it asks "is the kernel running", for a member it asks
+// the Controller's roster.
 func (a *actorSystem) IsActive(ctx context.Context, id actor.ActorID) (bool, error) {
-	_, ok, err := a.LookupActive(ctx, id)
-	return ok, err
+	if id == actor.SystemActorID {
+		return a.home.systemKernel.IsRunning(), nil
+	}
+	return a.home.controller.IsActive(ctx, id)
 }
 
+// ResourceActorFacts adds the channel-owner bit to the Controller's native
+// facts. Owner is derived from the immutable genesis pointer (a human whose
+// principal equals genesis.OwnerPrincipal) — the value ledger keeps no second
+// owner account.
 func (a *actorSystem) ResourceActorFacts(
 	ctx context.Context,
 	id actor.ActorID,
 ) (storespec.ResourceActorFacts, error) {
-	row, active, err := a.LookupActive(ctx, id)
+	facts, err := a.home.controller.ResourceActorFacts(ctx, id)
+	if err != nil || !facts.Active {
+		return facts, err
+	}
+	record, active, err := a.home.controller.LookupActive(ctx, id)
 	if err != nil || !active {
-		return storespec.ResourceActorFacts{Active: active}, err
+		return facts, err
 	}
-	facts := storespec.ResourceActorFacts{
-		Active: true,
-		Owner:  row.Role == storespec.RoleOwner,
-	}
-	if row.Placement.Kind == storespec.PlacementDaemon {
-		facts.PreferredStorageHost = row.Placement.Host
-	}
+	facts.Owner = a.home.isOwner(record)
 	return facts, nil
 }
 

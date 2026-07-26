@@ -21,7 +21,6 @@ var (
 	ErrInvalidDomain     = errors.New("actorhost: invalid execution domain")
 	ErrInvalidDesired    = errors.New("actorhost: invalid desired")
 	ErrSameAttemptDrift  = errors.New("actorhost: same attempt changed immutable desired")
-	ErrReservedSystem    = errors.New("actorhost: system actor is not managed")
 	ErrHostClosed        = errors.New("actorhost: host closed")
 	ErrAttachRejected    = errors.New("actorhost: attach rejected")
 
@@ -205,11 +204,11 @@ func normalizeCarrier(d CarrierDesired) (desiredValue, error) {
 }
 
 func validateCoordinate(id actor.ActorID, key AttemptKey) error {
+	// No system guard: the value ledger upstream never produces a system
+	// coordinate (the kernel has no record), so re-screening for it here would
+	// be redundant buckshot.
 	if id == "" {
 		return ErrInvalidDesired
-	}
-	if id == actor.SystemActorID {
-		return ErrReservedSystem
 	}
 	if !key.valid() {
 		return ErrInvalidAttemptKey

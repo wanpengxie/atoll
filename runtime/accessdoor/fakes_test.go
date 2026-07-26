@@ -224,7 +224,7 @@ func (d *fakeDriver) Delete(ctx context.Context, id resource.ResourceID) error {
 // branch checks no membership") asserts it stays zero.
 type fakeMembership struct {
 	isMember bool
-	role     storespec.ActorRole
+	isOwner  bool
 	err      error
 	calls    int
 
@@ -237,26 +237,26 @@ type fakeMembership struct {
 	lookupCalls []actor.ActorID
 }
 
-func (m *fakeMembership) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+func (m *fakeMembership) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
 	m.calls++
 	m.lookupCalls = append(m.lookupCalls, id)
 	if m.err != nil {
-		return storespec.ActorControlRow{}, false, m.err
+		return storespec.ActorRecord{}, false, m.err
 	}
 	if m.lookupErr != nil {
-		return storespec.ActorControlRow{}, false, m.lookupErr
+		return storespec.ActorRecord{}, false, m.lookupErr
 	}
 	if !m.isMember && !m.lookupFound {
-		return storespec.ActorControlRow{}, false, nil
+		return storespec.ActorRecord{}, false, nil
 	}
 	p := storespec.NewServerPlacement()
 	if m.lookupHost != "" {
 		p, _ = storespec.NewDaemonPlacement(m.lookupHost)
 	}
-	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1, Placement: p, Role: m.role}, true, nil
+	return storespec.ActorRecord{ID: id, Placement: p}, true, nil
 }
 
-func (m *fakeMembership) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+func (m *fakeMembership) ListActive(context.Context) ([]storespec.ActorRecord, error) {
 	return nil, nil
 }
 func (m *fakeMembership) ResourceActorFacts(
@@ -277,7 +277,7 @@ func (m *fakeMembership) ResourceActorFacts(
 	}
 	return storespec.ResourceActorFacts{
 		Active:               m.isMember || m.lookupFound,
-		Owner:                m.role == storespec.RoleOwner,
+		Owner:                m.isOwner,
 		PreferredStorageHost: host,
 	}, nil
 }

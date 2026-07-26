@@ -174,6 +174,17 @@ func (k *Kernel) Stat() (actorrt.UnitStat, bool) {
 	return unit.Stat(), true
 }
 
+// IsRunning is the kernel's addressability answer: the routing organ asks it
+// when a message is addressed to the system. It is not a membership query —
+// the kernel has no record to look up.
+func (k *Kernel) IsRunning() bool {
+	k.mu.Lock()
+	unit := k.unit
+	closing := k.closing
+	k.mu.Unlock()
+	return !closing && unit != nil && unit.IsAlive()
+}
+
 func (k *Kernel) Incarnation() (actorrt.Incarnation, bool) {
 	k.mu.Lock()
 	unit := k.unit

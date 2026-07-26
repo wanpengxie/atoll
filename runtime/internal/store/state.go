@@ -42,21 +42,15 @@ func (s *stateStore) Create(ctx context.Context, owner actor.ActorID, id resourc
 	// No empty-owner/id guards: owner is a COORDINATE the door welds at mint
 	// (store-not-validate, per the struct doc), and an empty id is rejected by
 	// the door's ingress (checkResourceID) before the store is reached.
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("store: actor_state create begin %q/%q: %w", owner, id, err)
-	}
-	defer func() { _ = tx.Rollback() }()
-
-	res, err := tx.ExecContext(ctx,
+	// No membership re-judgement here: the verdict belongs at the door
+	// (organs judge once at their real entrance), and the transaction is purely
+	// mechanical. A second EXISTS check would be a second authority AND would
+	// let an End racing an already-admitted call veto it a second time.
+	res, err := s.db.ExecContext(ctx,
 		`INSERT INTO actor_state (owner_id, resource_id, bytes, created_at)
-		 SELECT ?, ?, ?, ?
-		  WHERE EXISTS (
-		        SELECT 1 FROM actor_registry
-		         WHERE actor_id=? AND deregistered_at IS NULL
-		  )
+		 VALUES (?, ?, ?, ?)
 		 ON CONFLICT(owner_id, resource_id) DO NOTHING`,
-		string(owner), string(id), initial, s.nowMs(), string(owner),
+		string(owner), string(id), initial, s.nowMs(),
 	)
 	if err != nil {
 		return fmt.Errorf("store: actor_state create %q/%q: %w", owner, id, err)
@@ -70,22 +64,7 @@ func (s *stateStore) Create(ctx context.Context, owner actor.ActorID, id resourc
 		return fmt.Errorf("store: actor_state create rows-affected %q/%q: %w", owner, id, err)
 	}
 	if n == 0 {
-		// Classification is deliberately in this transaction and inactive wins
-		// over collision. That order makes an old state row under a subsequently
-		// deregistered owner report the scope failure, never "already exists".
-		var active int
-		if err := tx.QueryRowContext(ctx,
-			`SELECT EXISTS(SELECT 1 FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL)`,
-			string(owner)).Scan(&active); err != nil {
-			return fmt.Errorf("store: actor_state create classify owner %q/%q: %w", owner, id, err)
-		}
-		if active == 0 {
-			return resourcespec.ErrOwnerInactive
-		}
 		return resourcespec.ErrAlreadyExists
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("store: actor_state create commit %q/%q: %w", owner, id, err)
 	}
 	return nil
 }
@@ -158,23 +137,10 @@ func (s *stateStore) Delete(ctx context.Context, owner actor.ActorID, id resourc
 	return n > 0, nil
 }
 
-// clearActorScopedTx cascades the actor-scoped state locus: it deletes every
-// actor_state row owned by owner, inside the SAME transaction that deregisters
-// the actor (both dereg entry points in actors.go hang it there). This is the
-// scope law: an actor's private persistent state dies with the actor (like
-// Erlang ETS private tables dying with their owner). Idempotent: a re-run
-// over an already-cleared owner deletes zero rows. The channel-scoped resources
-// table is deliberately NOT touched — those objects are non-lossy, outliving
-// their creator and dying only on explicit delete / channel destroy.
-// Store-internal substrate mechanism, never exposed as a plane-2 door verb
-// (exposing it would be a bypass path around the door). It lives HERE beside the
-// locus's other SQL so actor_state has exactly ONE author file — a future second
-// actor-scoped mechanical shape edits this file and finds the cascade in it.
-func clearActorScopedTx(ctx context.Context, tx *sql.Tx, owner actor.ActorID) error {
-	if _, err := tx.ExecContext(ctx, `DELETE FROM actor_state WHERE owner_id=?`, string(owner)); err != nil {
-		return fmt.Errorf("store: actor_state cascade clear %q: %w", owner, err)
-	}
-	return nil
-}
+// No deregistration cascade clears this table. A dead owner's rows are inert
+// data: ActorIDs are never reused and every belonging is keyed by ActorID, so
+// nobody but the dead can ever address them. Correctness lives at the admission
+// gate, never in a delete; reclaiming the disk is an explicit batch management
+// action, not lifecycle logic.
 
 var _ resourcespec.StateStore = (*stateStore)(nil)

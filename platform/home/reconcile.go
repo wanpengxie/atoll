@@ -43,56 +43,65 @@ func (h *Home) reconcileSweep(ctx context.Context) {
 	h.sweepSubjectSlots(ctx)
 }
 
+// reconcileDeclarations pulls the current declaration for every declared
+// instance. It eats the Controller's DeclaredReconcileList question-shaped
+// projection — the comparison inputs, not a whole-record face.
 func (h *Home) reconcileDeclarations(ctx context.Context) {
-	if h.actorStore == nil || h.actorStore.resolver == nil || h.actors == nil {
+	if h.resolver == nil || h.actors == nil {
 		return
 	}
-	rows, err := h.actors.ListActive(ctx)
+	instances, err := h.controller.DeclaredReconcileList()
 	if err != nil {
 		h.logger.Warn("platform.declaration_pull.list_failed", "error", err)
 		return
 	}
-	for _, row := range rows {
+	for _, instance := range instances {
 		if ctx.Err() != nil {
 			return
 		}
-		if row.SourceDeclID == "" || (row.Kind != actor.KindAgent && row.Kind != actor.KindTool) {
+		if instance.Kind != actor.KindAgent && instance.Kind != actor.KindTool {
 			continue
 		}
 		resolveCtx, cancel := context.WithTimeout(ctx, introductionResolveTimeout)
-		facts, resolveErr := h.actorStore.resolver.ResolveDeclaration(
-			resolveCtx, h.channelID, row.SourceDeclID,
+		facts, resolveErr := h.resolver.ResolveDeclaration(
+			resolveCtx, h.channelID, instance.SourceDeclID,
 		)
 		cancel()
 		if resolveErr != nil {
 			if !errors.Is(resolveErr, channel.ErrDeclarationNotFound) {
 				h.logger.Warn("platform.declaration_pull.resolve_failed",
-					"actor", row.ID, "declaration", row.SourceDeclID, "error", resolveErr)
+					"actor", instance.ID, "declaration", instance.SourceDeclID, "error", resolveErr)
 			}
 			continue
 		}
 		kindCtx, kindCancel := context.WithTimeout(ctx, introductionResolveTimeout)
-		kind, found, kindErr := h.actorStore.resolver.ClassKind(kindCtx, facts.Class)
+		kind, found, kindErr := h.resolver.ClassKind(kindCtx, facts.Class)
 		kindCancel()
-		if kindErr != nil || !found || kind != row.Kind {
+		if kindErr != nil || !found || kind != instance.Kind {
 			continue
 		}
-		if string(row.Config) == string(facts.Config) && row.Class == facts.Class {
+		candidate := storespec.ActorDefinition{
+			Class: facts.Class, Config: append([]byte(nil), facts.Config...),
+		}
+		// Skipping an equal definition saves one call; correctness rests on the
+		// verb's own equal-value no-op, never on this comparison.
+		if instance.Definition.Equal(candidate) {
 			continue
 		}
 		if err := h.actors.ApplyDeclaration(ctx, actorctl.DeclarationChange{
-			ActorID: row.ID, Class: facts.Class,
-			Config:    append([]byte(nil), facts.Config...),
-			RequestID: message.ID("declaration-pull:v1:" + uuid.NewString()),
+			ActorID: instance.ID, Definition: candidate,
 		}); err != nil {
 			h.logger.Warn("platform.declaration_pull.apply_failed",
-				"actor", row.ID, "declaration", row.SourceDeclID, "error", err)
+				"actor", instance.ID, "declaration", instance.SourceDeclID, "error", err)
 		}
 	}
 }
 
+// reconcileDaemonTombstones detaches daemons the realm has deleted. Detach is a
+// wiring-domain action: it removes the binding row and kills no actor. Actors
+// left placed on the gone daemon dangle legally.
 func (h *Home) reconcileDaemonTombstones(ctx context.Context) {
-	if h.actorStore == nil || h.actorStore.resolver == nil || h.actors == nil {
+	if h.resolver == nil || h.actors == nil || h.opEntry == nil {
 		return
 	}
 	ids, err := h.cs.Bindings.ListBoundDaemons(ctx)
@@ -105,15 +114,14 @@ func (h *Home) reconcileDaemonTombstones(ctx context.Context) {
 			return
 		}
 		resolveCtx, cancel := context.WithTimeout(ctx, introductionResolveTimeout)
-		facts, resolveErr := h.actorStore.resolver.DaemonFacts(resolveCtx, string(id))
+		facts, resolveErr := h.resolver.DaemonFacts(resolveCtx, string(id))
 		cancel()
 		if resolveErr != nil || !facts.Deleted {
 			continue
 		}
-		_, err := h.actors.DetachDaemon(ctx, channel.DaemonRequest{
+		if _, err := h.opEntry.DetachDaemon(ctx, channel.DaemonRequest{
 			Ref: "daemon-pull:v1:" + uuid.NewString(), DaemonID: string(id),
-		})
-		if err != nil {
+		}); err != nil {
 			h.logger.Warn("platform.daemon_pull.detach_failed", "daemon", id, "error", err)
 		}
 	}
@@ -155,8 +163,8 @@ func (h *Home) sweepSubjectSlots(ctx context.Context) {
 }
 
 type subjectSlotAuthority interface {
-	ListActive(context.Context) ([]storespec.ActorControlRow, error)
-	LookupActive(context.Context, actor.ActorID) (storespec.ActorControlRow, bool, error)
+	ListActive(context.Context) ([]storespec.ActorRecord, error)
+	LookupActive(context.Context, actor.ActorID) (storespec.ActorRecord, bool, error)
 }
 
 func sweepSubjectSlots(

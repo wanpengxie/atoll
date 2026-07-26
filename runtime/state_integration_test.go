@@ -207,59 +207,51 @@ func TestStateSlice3_WhichDataIsIdentity(t *testing.T) {
 	expectBytes(t, "gen-2 checkpoint value", out, v)
 }
 
-// ---- slice 4: cascade clear vs non-lossy -----------------------------------
+// ---- slice 4: deregister touches records only -------------------------------
 
-// TestStateSlice4_CascadeClearVsNonLossy: owner deregister cascades the
-// actor-scoped locus (state dies with its owner) in the SAME tx that flips
-// the registry, while the channel-scoped plane is NON-LOSSY — a resource the actor
-// created (its row AND its R grant) survives the end. Both single and batch
-// cascade entry shapes run the same clearActorScopedTx, so both are asserted.
-func TestStateSlice4_CascadeClearVsNonLossy(t *testing.T) {
+// TestStateSlice4_DeregisterTouchesRecordsOnly: deregistering an owner flips
+// exactly one thing — its registry row. Its actor-scoped state rows stay as
+// inert data (ActorIDs are never reused and every belonging is keyed by
+// ActorID, so nobody can reach them), and correctness is carried by the
+// admission gate, which now refuses the dead owner at the door. The
+// channel-scoped plane is non-lossy for the opposite reason: its output is
+// shared collaboration truth.
+func TestStateSlice4_DeregisterTouchesRecordsOnly(t *testing.T) {
 	ctx := context.Background()
+	cs := openAccessChannel(t)
+	A := seedMember(t, cs, actor.ActorID("A"))
 
-	// The owner must be a channel MEMBER to create a channel-scoped resource (the
-	// non-lossy witness); the actor-scoped create needs no membership.
-	assertClears := func(t *testing.T, dereg func(t *testing.T, cs *testAccessChannel, id actor.ActorID)) {
-		cs := openAccessChannel(t)
-		A := seedMember(t, cs, actor.ActorID("A"))
+	hState := cs.Access.MintStateAdmitted(identityAdmission(A))
+	hChan := cs.Access.MintAdmitted(identityAdmission(A))
 
-		hState := cs.Access.MintStateAdmitted(identityAdmission(A))
-		hChan := cs.Access.MintAdmitted(identityAdmission(A))
+	const stateID = resource.ResourceID("s")
+	const kvID = resource.ResourceID("kv:doc")
+	kvBytes := []byte("channel-scoped, survives dereg")
 
-		const stateID = resource.ResourceID("s")
-		const kvID = resource.ResourceID("kv:doc")
-		kvBytes := []byte("channel-scoped, survives dereg")
+	acc(t, "A create actor-scoped state")(hState.Invoke(ctx, access.OpCreate, stateID, []byte("cursor"), nil))
+	acc(t, "A create channel-scoped kv")(hChan.Create(ctx, kvID, kvSpec, kvBytes))
 
-		acc(t, "A create actor-scoped state")(hState.Invoke(ctx, access.OpCreate, stateID, []byte("cursor"), nil))
-		acc(t, "A create channel-scoped kv")(hChan.Create(ctx, kvID, kvSpec, kvBytes))
-
-		dereg(t, cs, A)
-
-		// Cascade: the actor_state row is gone (same tx as the registry flip).
-		out, err := hState.Invoke(ctx, access.OpRead, stateID, nil, nil)
-		expectReason(t, "state read after dereg (cascaded)", out, err, access.ResourceNotFound)
-
-		// The channel-scoped resource survives, while the removed actor's direct
-		// grant is cascaded on the grantee axis.
-		out, err = hChan.Invoke(ctx, access.OpRead, kvID, nil, nil)
-		expectReason(t, "channel-scoped kv read after dereg", out, err, access.AccessDenied)
+	if err := endDeclaredTest(ctx, cs.ChannelStores, A, 100); err != nil {
+		t.Fatalf("Deregister: %v", err)
 	}
 
-	t.Run("Deregister path", func(t *testing.T) {
-		assertClears(t, func(t *testing.T, cs *testAccessChannel, id actor.ActorID) {
-			if err := endDeclaredTest(ctx, cs.ChannelStores, id, 100); err != nil {
-				t.Fatalf("Deregister: %v", err)
-			}
-		})
-	})
+	// The row survives untouched — a raw store read still finds it.
+	value, exists, err := cs.Assembly.State.Read(ctx, A, stateID)
+	if err != nil || !exists || string(value) != "cursor" {
+		t.Fatalf("dead owner's state row must remain inert data: value=%q exists=%v err=%v",
+			value, exists, err)
+	}
 
-	t.Run("batch EndCascade path", func(t *testing.T) {
-		assertClears(t, func(t *testing.T, cs *testAccessChannel, id actor.ActorID) {
-			if err := endDeclaredTest(ctx, cs.ChannelStores, id, 100); err != nil {
-				t.Fatalf("EndCascade: %v", err)
-			}
-		})
-	})
+	// The channel-scoped resource survives: it is collaboration output handed to
+	// the channel, not a belonging of its creator. The dead actor's grant row is
+	// likewise inert — nothing deletes it, and a live caller can never present
+	// that identity again because the admission gate refuses it.
+	if _, ok, err := cs.Assembly.Resources.Resolve(ctx, kvID); err != nil || !ok {
+		t.Fatalf("channel-scoped resource must survive its creator: ok=%v err=%v", ok, err)
+	}
+	if _, ok, err := cs.Actors.LookupActive(ctx, A); err != nil || ok {
+		t.Fatalf("owner must be inactive after deregister: ok=%v err=%v", ok, err)
+	}
 }
 
 // ---- slice 5: two loci mutually invisible ----------------------------------

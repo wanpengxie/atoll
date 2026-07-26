@@ -5,6 +5,9 @@ import (
 	"sync"
 )
 
+// commandOwner seals command admission at Quiesce and joins the commands
+// already admitted. It is not the ledger lock: it decides admission, never
+// ordering.
 type commandOwner struct {
 	mu      sync.Mutex
 	sealed  bool

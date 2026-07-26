@@ -46,7 +46,7 @@ func openRoutingHome(t *testing.T, name string, declarations ...DeclareRequest) 
 	return h
 }
 
-func routingAgent(t *testing.T, h *Home, source, principal, class string, makeDefault bool) storespec.ActorControlRow {
+func routingAgent(t *testing.T, h *Home, source, principal, class string, makeDefault bool) storespec.ActorRecord {
 	t.Helper()
 	result, ok, err := h.View().DeclaredBySourceOne(context.Background(), source)
 	if err != nil {
@@ -90,7 +90,7 @@ func waitRoutingLive(t *testing.T, h *Home, id actor.ActorID) {
 	}
 }
 
-func writeUnaddressed(t *testing.T, h *Home, source storespec.ActorControlRow, id string) (*message.Envelope, harness.WriteResult, error) {
+func writeUnaddressed(t *testing.T, h *Home, source storespec.ActorRecord, id string) (*message.Envelope, harness.WriteResult, error) {
 	t.Helper()
 	env := &message.Envelope{ID: message.ID(id), TS: time.Now().UnixMilli(), Kind: message.KindRequest, Type: "routing.probe", Visibility: message.VisibilityPublic}
 	result, err := h.minter.MintAdmitted(

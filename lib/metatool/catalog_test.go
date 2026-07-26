@@ -44,7 +44,7 @@ func TestFormatCatalogSortedByID(t *testing.T) {
 func TestFormatCatalogFieldsMapped(t *testing.T) {
 	catalog := introspect.Catalog{
 		Actors: []introspect.CatalogEntry{
-			{ID: "tool:xhs", Kind: "tool", Present: true, Binding: "", UptimeMs: 0},
+			{ID: "tool:xhs", Kind: "tool", Present: true, UptimeMs: 0},
 		},
 	}
 	result := metatool.FormatCatalog(catalog)
@@ -59,27 +59,25 @@ func TestFormatCatalogFieldsMapped(t *testing.T) {
 	if a["present"] != true {
 		t.Fatalf("expected present=true, got %v", a["present"])
 	}
-	// Binding and UptimeMs should be absent when zero-valued.
+	// UptimeMs is absent when zero-valued. There is no binding field: transport
+	// binding is a physical connection projection and left the value domain.
 	if _, ok := a["binding"]; ok {
-		t.Fatal("expected binding to be absent when empty")
+		t.Fatal("catalog must not carry a binding field")
 	}
 	if _, ok := a["uptime_ms"]; ok {
 		t.Fatal("expected uptime_ms to be absent when zero")
 	}
 }
 
-func TestFormatCatalogBindingAndUptimeIncluded(t *testing.T) {
+func TestFormatCatalogUptimeIncluded(t *testing.T) {
 	catalog := introspect.Catalog{
 		Actors: []introspect.CatalogEntry{
-			{ID: "tool:xhs", Kind: "tool", Present: true, Binding: "daemon:abc", UptimeMs: 12345},
+			{ID: "tool:xhs", Kind: "tool", Present: true, UptimeMs: 12345},
 		},
 	}
 	result := metatool.FormatCatalog(catalog)
 	actors := result["actors"].([]map[string]any)
 	a := actors[0]
-	if a["binding"] != "daemon:abc" {
-		t.Fatalf("expected binding=daemon:abc, got %v", a["binding"])
-	}
 	if a["uptime_ms"] != int64(12345) {
 		t.Fatalf("expected uptime_ms=12345, got %v (%T)", a["uptime_ms"], a["uptime_ms"])
 	}

@@ -117,7 +117,7 @@ func TestWireFieldNames(t *testing.T) {
 
 func TestCatalogRoundTrip(t *testing.T) {
 	c := Catalog{Actors: []CatalogEntry{
-		{ID: "a1", Kind: "agent", Binding: "b", Present: true, UptimeMs: 1500},
+		{ID: "a1", Kind: "agent", Present: true, UptimeMs: 1500},
 	}}
 	b, err := json.Marshal(c)
 	if err != nil {

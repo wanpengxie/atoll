@@ -169,12 +169,15 @@ func TestFanoutLiteLegacyMechanismsCannotReturn(t *testing.T) {
 			t.Errorf("realm declaration API leaks channel-local fence %s", localOnly)
 		}
 	}
-	actorStore, err := os.ReadFile("../platform/home/actor_store.go")
+	// Declaration sync no longer mints an operation ref at all: the receipt
+	// dedup axis is gone and the change is content-triggered (equal definition
+	// = no-op), so the reconcile loop needs no request identity.
+	reconcile, err := os.ReadFile("../platform/home/reconcile.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(actorStore), `ref = "ifin:v1:" + fmt.Sprint(s.now().UnixNano())`) {
-		t.Error("declaration sync no longer mints a fresh operation ref at the Store entry")
+	if strings.Contains(string(reconcile), "RequestID") {
+		t.Error("declaration reconcile reintroduced a request identity")
 	}
 }
 
@@ -212,10 +215,10 @@ func TestFanoutLiteReadInterfacesStayClosed(t *testing.T) {
 			}
 		}
 	}
-	assertInterfaceMethods("../runtime/storespec/actor_control.go", "DeclaredControlReader", []string{
-		"LookupDeclaredActive", "ListDeclaredActive",
+	assertInterfaceMethods("../runtime/storespec/actor_record.go", "ActorRegistryStore", []string{
+		"LookupActive", "ListActive", "Insert", "UpdateDefinition", "Deregister",
 	})
-	assertInterfaceMethods("../runtime/storespec/sysop.go", "DaemonBindingReader", []string{
+	assertInterfaceMethods("../runtime/storespec/bindings.go", "DaemonBindingReader", []string{
 		"IsBound", "ListBoundDaemons",
 	})
 	assertInterfaceMethods("../platform/channelhost/bundle.go", "View", []string{

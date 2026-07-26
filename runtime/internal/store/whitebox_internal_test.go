@@ -156,8 +156,8 @@ func TestListActive_PoisonKindOnRowsPath(t *testing.T) {
 	ctx := context.Background()
 	db := openRelaxed(t)
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES ('x', 'wizard', NULL, 1, NULL)`); err != nil {
+		`INSERT INTO actor_registry (actor_id, actor_kind, created_at, deregistered_at)
+		 VALUES ('x', 'wizard', 1, NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	reg := newActorRegistry(db, "C", nil)
@@ -166,56 +166,19 @@ func TestListActive_PoisonKindOnRowsPath(t *testing.T) {
 	}
 }
 
-// Binding read path is symmetric with kind: a non-empty out-of-closed-set
-// actor_binding column is a poisoned row and must fail loudly (ParseBinding),
-// not silently raw-cast into the Record. Both read paths (ListActive rows /
-// Lookup single-row) enforce it.
-func TestListActive_PoisonBindingOnRowsPath(t *testing.T) {
+// A poison placement column is the second closed-set on the record read path
+// and must fail loudly rather than raw-cast into the ActorRecord.
+func TestLookupActive_PoisonPlacement(t *testing.T) {
 	ctx := context.Background()
 	db := openRelaxed(t)
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES ('x', 'agent', 'teleport', 1, NULL)`); err != nil {
+		`INSERT INTO actor_registry (actor_id, actor_kind, class, placement, created_at, deregistered_at)
+		 VALUES ('x', 'agent', 'agent', 'teleport', 1, NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	reg := newActorRegistry(db, "C", nil)
-	if _, err := reg.ListActive(ctx); err == nil {
-		t.Error("ListActive must error on out-of-closed-set binding (rows path)")
-	}
-}
-
-func TestLookup_PoisonBinding(t *testing.T) {
-	ctx := context.Background()
-	db := openRelaxed(t)
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES ('x', 'agent', 'teleport', 1, NULL)`); err != nil {
-		t.Fatalf("inject: %v", err)
-	}
-	reg := newActorRegistry(db, "C", nil)
-	if _, _, err := reg.Lookup(ctx, "x"); err == nil {
-		t.Error("Lookup must error on out-of-closed-set binding (single-row path)")
-	}
-}
-
-// Empty binding is a legitimate state (a cell-less member — e.g. a human —
-// carries no binding), so a NULL/empty actor_binding must read back cleanly as
-// "" — the validation rejects only NON-empty out-of-set values.
-func TestLookup_EmptyBindingAccepted(t *testing.T) {
-	ctx := context.Background()
-	db := openRelaxed(t)
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES ('h', 'human', NULL, 1, NULL)`); err != nil {
-		t.Fatalf("inject: %v", err)
-	}
-	reg := newActorRegistry(db, "C", nil)
-	rec, ok, err := reg.Lookup(ctx, "h")
-	if err != nil || !ok {
-		t.Fatalf("Lookup empty-binding member: ok=%v err=%v", ok, err)
-	}
-	if rec.Binding != "" {
-		t.Errorf("empty binding must read back as \"\", got %q", rec.Binding)
+	if _, _, err := reg.LookupActive(ctx, "x"); err == nil {
+		t.Error("LookupActive must error on out-of-closed-set placement")
 	}
 }
 
@@ -234,13 +197,15 @@ func TestListActive_RawScanError(t *testing.T) {
 	// created_at typed TEXT so a non-numeric value survives insert, then fails
 	// the int64 scan in ListActive.
 	if _, err := db.ExecContext(ctx, `CREATE TABLE actor_registry (
-	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, actor_binding TEXT,
-	   created_at TEXT, deregistered_at INTEGER, host TEXT)`); err != nil {
+	   actor_id TEXT PRIMARY KEY, actor_kind TEXT, principal TEXT DEFAULT '',
+	   source_decl_id TEXT DEFAULT '', class TEXT DEFAULT '', config_json TEXT,
+	   placement TEXT DEFAULT 'server', desired_host TEXT DEFAULT '',
+	   created_at TEXT, deregistered_at INTEGER)`); err != nil {
 		t.Fatalf("DDL: %v", err)
 	}
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, actor_binding, created_at, deregistered_at)
-		 VALUES ('a', 'agent', NULL, 'not-a-number', NULL)`); err != nil {
+		`INSERT INTO actor_registry (actor_id, actor_kind, created_at, deregistered_at)
+		 VALUES ('a', 'agent', 'not-a-number', NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	reg := newActorRegistry(db, "C", nil)
@@ -302,23 +267,6 @@ func TestReadAfterSeq_NonPositiveLimitDefaults(t *testing.T) {
 // share one discipline, and THIS one feeds the admission path
 // (census.ResolvePrincipal)). ---------------------------------------------
 
-// The reachable poison surface on this path is the binding column: the query
-// filters actor_kind by the caller's (already-parsed) kind, but actor_binding
-// is read unfiltered off the row.
-func TestLookupActivePrincipal_PoisonBinding(t *testing.T) {
-	ctx := context.Background()
-	db := openRelaxed(t)
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, principal, actor_binding, created_at, deregistered_at)
-		 VALUES ('x', 'agent', 'p', 'teleport', 1, NULL)`); err != nil {
-		t.Fatalf("inject: %v", err)
-	}
-	reg := newActorRegistry(db, "C", nil)
-	if _, _, err := reg.LookupActivePrincipal(ctx, actor.KindAgent, "p"); err == nil {
-		t.Error("LookupActivePrincipal must error on out-of-closed-set binding, not return a silently blank record")
-	}
-}
-
 // Kind poison is unreachable through parsed callers (the WHERE clause echoes
 // the caller's kind back), but the guard is kept symmetric with the other two
 // machines — this whitebox probe passes the poison kind straight through.
@@ -326,32 +274,12 @@ func TestLookupActivePrincipal_PoisonKind(t *testing.T) {
 	ctx := context.Background()
 	db := openRelaxed(t)
 	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, principal, actor_binding, created_at, deregistered_at)
-		 VALUES ('x', 'wizard', 'p', NULL, 1, NULL)`); err != nil {
+		`INSERT INTO actor_registry (actor_id, actor_kind, principal, created_at, deregistered_at)
+		 VALUES ('x', 'wizard', 'p', 1, NULL)`); err != nil {
 		t.Fatalf("inject: %v", err)
 	}
 	reg := newActorRegistry(db, "C", nil)
 	if _, _, err := reg.LookupActivePrincipal(ctx, actor.Kind("wizard"), "p"); err == nil {
 		t.Error("LookupActivePrincipal must error on out-of-closed-set kind")
-	}
-}
-
-// Empty binding stays a legitimate state on this path too (a human member
-// carries no binding) — the guard rejects only NON-empty out-of-set values.
-func TestLookupActivePrincipal_EmptyBindingAccepted(t *testing.T) {
-	ctx := context.Background()
-	db := openRelaxed(t)
-	if _, err := db.ExecContext(ctx,
-		`INSERT INTO actor_registry (actor_id, actor_kind, principal, actor_binding, created_at, deregistered_at)
-		 VALUES ('h', 'human', 'p', NULL, 1, NULL)`); err != nil {
-		t.Fatalf("inject: %v", err)
-	}
-	reg := newActorRegistry(db, "C", nil)
-	rec, ok, err := reg.LookupActivePrincipal(ctx, actor.KindHuman, "p")
-	if err != nil || !ok {
-		t.Fatalf("LookupActivePrincipal empty-binding member: ok=%v err=%v", ok, err)
-	}
-	if rec.Binding != "" {
-		t.Errorf("empty binding must read back as \"\", got %q", rec.Binding)
 	}
 }

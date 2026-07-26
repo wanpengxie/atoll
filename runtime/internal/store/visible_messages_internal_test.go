@@ -20,7 +20,7 @@ func openVisibleMessages(t *testing.T) (*messages, func(string, string)) {
 	t.Cleanup(func() { _ = db.Close() })
 	register := func(id, principal string) {
 		t.Helper()
-		if _, err := db.Exec(`INSERT INTO actor_registry(actor_id,actor_kind,principal,actor_binding,created_at) VALUES (?,?,?,?,1)`, id, "human", principal, ""); err != nil {
+		if _, err := db.Exec(`INSERT INTO actor_registry(actor_id,actor_kind,principal,class,placement,created_at) VALUES (?,?,?,?,?,1)`, id, "human", principal, "human", "server"); err != nil {
 			t.Fatal(err)
 		}
 	}

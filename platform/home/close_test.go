@@ -8,7 +8,6 @@ import (
 	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
@@ -21,76 +20,44 @@ type closeTestActor struct{}
 
 func (closeTestActor) Receive(context.Context, *message.Envelope) error { return nil }
 
+// closeTestStore is a record port whose UpdateDefinition blocks until released,
+// so one admitted command can be held inside the Controller while Close runs.
 type closeTestStore struct {
-	system  storespec.ActorControlRow
-	agent   actorctl.StoredActor
+	agent   storespec.ActorRecord
 	entered chan struct{}
 	release chan struct{}
 }
 
 func newCloseTestStore() *closeTestStore {
 	return &closeTestStore{
-		system: storespec.ActorControlRow{
-			ID: actor.SystemActorID, Kind: actor.KindSystem, Class: "system",
-			CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement(),
-		},
-		agent: actorctl.StoredActor{
-			Row: storespec.ActorControlRow{
-				ID: "agent", Kind: actor.KindAgent, Class: "test",
-				CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement(),
-			},
+		agent: storespec.ActorRecord{
+			ID: "agent", Kind: actor.KindAgent,
+			Definition: storespec.ActorDefinition{Class: "test"},
+			Placement:  storespec.NewServerPlacement(),
 		},
 		entered: make(chan struct{}, 1),
 		release: make(chan struct{}),
 	}
 }
 
-func (s *closeTestStore) RestoreActive(context.Context) ([]storespec.ActorControlRow, error) {
-	return []storespec.ActorControlRow{s.system, s.agent.Row}, nil
+func (s *closeTestStore) RestoreActive(context.Context) ([]storespec.ActorRecord, error) {
+	return []storespec.ActorRecord{s.agent}, nil
 }
 
-func (s *closeTestStore) LookupActive(
-	_ context.Context,
-	id actor.ActorID,
-) (actorctl.StoredActor, bool, error) {
-	return s.agent, id == s.agent.Row.ID, nil
-}
-
-func (*closeTestStore) Admit(
+func (*closeTestStore) Insert(
 	context.Context,
-	actorctl.AdmitRequest,
-) (actorctl.ActorCommit[actorctl.AdmitResult], error) {
-	return actorctl.ActorCommit[actorctl.AdmitResult]{}, errors.New("unused")
+	storespec.ActorDraft,
+) (storespec.ActorRecord, error) {
+	return storespec.ActorRecord{}, errors.New("unused")
 }
 
-func (*closeTestStore) Introduce(
-	context.Context,
-	actorctl.IntroduceRequest,
-) (actorctl.ActorCommit[channel.IntroduceResult], error) {
-	return actorctl.ActorCommit[channel.IntroduceResult]{}, errors.New("unused")
-}
-
-func (*closeTestStore) LookupFork(
-	context.Context,
-	actor.ActorID,
-	message.ID,
-) (actor.ActorID, bool, error) {
-	return "", false, errors.New("unused")
-}
-
-func (*closeTestStore) CommitFork(
-	context.Context,
-	actorctl.ForkCommitRequest,
-) (actorctl.ForkCommitResult, error) {
-	return actorctl.ForkCommitResult{}, errors.New("unused")
-}
-
-func (s *closeTestStore) Restart(
+func (s *closeTestStore) UpdateDefinition(
 	ctx context.Context,
-	request actorctl.RestartRequest,
-) (actorctl.ActorCommit[struct{}], error) {
-	if request.ActorID != s.agent.Row.ID {
-		return actorctl.ActorCommit[struct{}]{}, actorctl.ErrInactive
+	id actor.ActorID,
+	def storespec.ActorDefinition,
+) (storespec.ActorRecord, error) {
+	if id != s.agent.ID {
+		return storespec.ActorRecord{}, actorctl.ErrInactive
 	}
 	select {
 	case s.entered <- struct{}{}:
@@ -98,49 +65,27 @@ func (s *closeTestStore) Restart(
 	}
 	select {
 	case <-s.release:
-		return actorctl.ActorCommit[struct{}]{Actor: s.agent}, nil
+		updated := s.agent.Clone()
+		updated.Definition = def
+		return updated, nil
 	case <-ctx.Done():
-		return actorctl.ActorCommit[struct{}]{}, ctx.Err()
+		return storespec.ActorRecord{}, ctx.Err()
 	}
 }
 
-func (*closeTestStore) ApplyDeclaration(
-	context.Context,
-	actorctl.DeclarationChange,
-) (actorctl.ActorCommit[struct{}], error) {
-	return actorctl.ActorCommit[struct{}]{}, errors.New("unused")
+func (*closeTestStore) Deregister(context.Context, []actor.ActorID) error {
+	return errors.New("unused")
 }
 
-func (*closeTestStore) AttachDaemon(
-	context.Context,
-	channel.DaemonRequest,
-) (actorctl.ValueCommit[channel.BindingResult], error) {
-	return actorctl.ValueCommit[channel.BindingResult]{}, errors.New("unused")
-}
-
-func (*closeTestStore) ResolveTerminal(
-	context.Context,
-	actorctl.TerminalCommand,
-	[]storespec.ActorControlRow,
-) (actorctl.TerminalPlan, error) {
-	return actorctl.TerminalPlan{}, errors.New("unused")
-}
-
-func (*closeTestStore) CommitTerminal(
-	context.Context,
-	actorctl.TerminalCommand,
-	actorctl.TerminalPlan,
-) (actorctl.ValueCommit[actorctl.TerminalResult], error) {
-	return actorctl.ValueCommit[actorctl.TerminalResult]{}, errors.New("unused")
-}
+func (*closeTestStore) InstallEntry(storespec.ActorRecord) {}
 
 func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T) {
 	store := newCloseTestStore()
-	controller, err := actorctl.New(store)
+	controller, err := actorctl.New(store, func() int64 { return 1 })
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := controller.Start(t.Context()); err != nil {
+	if err := controller.Start(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	host, err := actorhost.New(actorhost.Config{
@@ -157,14 +102,18 @@ func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T)
 		systemKernel: systemkernel.New(),
 		closeDone:    make(chan struct{}),
 		logger:       slog.New(slog.DiscardHandler),
+		nowMs:        func() int64 { return 1 },
 	}
 	home.actors = newActorSystem(home, home.logger)
 
-	restarted := make(chan error, 1)
+	applied := make(chan error, 1)
 	go func() {
-		restarted <- home.actors.Restart(
+		applied <- home.actors.ApplyDeclaration(
 			context.Background(),
-			actorctl.RestartRequest{ActorID: "agent"},
+			actorctl.DeclarationChange{
+				ActorID:    "agent",
+				Definition: storespec.ActorDefinition{Class: "test-v2"},
+			},
 		)
 	}()
 	<-store.entered
@@ -177,13 +126,14 @@ func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T)
 		t.Fatal("Home consumed runtime teardown while command owner was not drained")
 	default:
 	}
-	if _, active, err := controller.Lookup("agent"); err != nil || !active {
-		t.Fatalf("Controller was torn down across failed Quiesce: active=%v err=%v", active, err)
-	}
-
+	// The ledger lock covers the whole change (commit and publication), so the
+	// in-flight command owns it until it finishes; reads join afterwards.
 	close(store.release)
-	if err := <-restarted; err != nil {
+	if err := <-applied; err != nil {
 		t.Fatal(err)
+	}
+	if _, active, err := controller.LookupActive(context.Background(), "agent"); err != nil || !active {
+		t.Fatalf("Controller was torn down across failed Quiesce: active=%v err=%v", active, err)
 	}
 	if err := home.closeInternalWithin("retry-test", time.Second); err != nil {
 		t.Fatalf("retry Close: %v", err)
@@ -193,7 +143,7 @@ func TestHomeCloseTimeoutDoesNotCrossCommandOwnerAndRetryCompletes(t *testing.T)
 	default:
 		t.Fatal("retry Close did not complete runtime teardown")
 	}
-	if _, _, err := controller.Lookup("agent"); !errors.Is(err, actorctl.ErrClosed) {
+	if _, _, err := controller.LookupActive(context.Background(), "agent"); !errors.Is(err, actorctl.ErrClosed) {
 		t.Fatalf("Controller remains live after retry Close: %v", err)
 	}
 }

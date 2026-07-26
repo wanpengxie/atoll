@@ -613,7 +613,7 @@ func (h *HostSupervisor) CancelRequest(id actor.ActorID, requestID message.ID) {
 }
 
 func (h *HostSupervisor) endpoint(id actor.ActorID) (ActorEndpoint, bool) {
-	if h == nil || id == "" || id == actor.SystemActorID {
+	if h == nil || id == "" {
 		return nil, false
 	}
 	unlock := h.spans.lock(id)
@@ -659,7 +659,7 @@ func (h *HostSupervisor) AttemptProbe(id actor.ActorID, key AttemptKey) AttemptC
 }
 
 func (h *HostSupervisor) identityCurrent(id actor.ActorID) bool {
-	if h == nil || id == "" || id == actor.SystemActorID {
+	if h == nil || id == "" {
 		return false
 	}
 	unlock := h.spans.lock(id)
@@ -672,7 +672,7 @@ func (h *HostSupervisor) identityCurrent(id actor.ActorID) bool {
 }
 
 func (h *HostSupervisor) attemptCurrent(id actor.ActorID, key AttemptKey) bool {
-	if h == nil || id == "" || id == actor.SystemActorID || !key.valid() {
+	if h == nil || id == "" || !key.valid() {
 		return false
 	}
 	unlock := h.spans.lock(id)

@@ -181,7 +181,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var memberBeforeRestart storespec.ActorControlRow
+	var memberBeforeRestart storespec.ActorRecord
 	for _, rec := range actorsBeforeRestart {
 		if rec.ID == actor.ActorID(instID) {
 			memberBeforeRestart = rec
@@ -219,7 +219,7 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var memberAfterRestart storespec.ActorControlRow
+	var memberAfterRestart storespec.ActorRecord
 	for _, rec := range actorsAfterRestart {
 		if rec.ID == actor.ActorID(instID) {
 			memberAfterRestart = rec
@@ -229,7 +229,6 @@ func TestDaemonComposition_E2E(t *testing.T) {
 	if memberAfterRestart.ID != memberBeforeRestart.ID ||
 		memberAfterRestart.Kind != memberBeforeRestart.Kind ||
 		memberAfterRestart.Principal != memberBeforeRestart.Principal ||
-		memberAfterRestart.Binding != memberBeforeRestart.Binding ||
 		memberAfterRestart.CreatedAt != memberBeforeRestart.CreatedAt {
 		t.Fatalf("version restart changed membership identity:\n before: %#v\n  after: %#v", memberBeforeRestart, memberAfterRestart)
 	}

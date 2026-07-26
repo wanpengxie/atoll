@@ -88,13 +88,12 @@ func (m *Minter) Mint(
 	if m == nil || prepared.ActorID() == "" || prepared.AttemptKey() == "" {
 		return actorcaps.Caps{}, ErrInvalidInput
 	}
-	def := prepared.Definition()
 	state, err := m.state.ResolveAuthority(ctx, prepared.Identity())
 	if err != nil {
 		return actorcaps.Caps{}, err
 	}
 	return actorcaps.Caps{
-		Pen:      m.pen.MintAuthority(prepared.Run(), def.Kind, m.channelID),
+		Pen:      m.pen.MintAuthority(prepared.Run(), prepared.Kind(), m.channelID),
 		Access:   m.access.MintAuthority(prepared.Run()),
 		State:    state,
 		Schedule: m.schedule.MintAuthority(prepared.Identity()),

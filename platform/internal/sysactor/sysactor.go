@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"log/slog"
+	"slices"
 	"time"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -144,14 +145,40 @@ func (s *SystemActor) respondList(sys actorbase.Sys, msg actorbase.Msg) {
 		}
 		present, uptimeMs := s.liveness(snapshot)
 		catalog.Actors = append(catalog.Actors, introspect.CatalogEntry{
-			ID: string(r.ID), Kind: string(r.Kind), Binding: string(r.Binding),
-			Sponsor:  string(r.Sponsor),
+			ID: string(r.ID), Kind: string(r.Kind),
 			Present:  present,
 			UptimeMs: uptimeMs,
 			Device:   deviceTestimony(snapshot),
 		})
 	}
+	// The kernel is a constant, not a member: it has no record to list. The
+	// directory entry is SYNTHESIZED here from the identity constant, never read
+	// from any row.
+	catalog.Actors = append(catalog.Actors, s.kernelEntry(msg))
+	slices.SortFunc(catalog.Actors, func(l, r introspect.CatalogEntry) int {
+		switch {
+		case l.ID < r.ID:
+			return -1
+		case l.ID > r.ID:
+			return 1
+		default:
+			return 0
+		}
+	})
 	_, _ = sys.Reply(msg, catalog)
+}
+
+func (s *SystemActor) kernelEntry(msg actorbase.Msg) introspect.CatalogEntry {
+	snapshot, err := s.snapshot(msg.Ctx(), actor.SystemActorID)
+	if err != nil {
+		s.logger.Warn("sysactor.presence_snapshot_failed",
+			"actor", string(actor.SystemActorID), "error", err)
+	}
+	present, uptimeMs := s.liveness(snapshot)
+	return introspect.CatalogEntry{
+		ID: string(actor.SystemActorID), Kind: string(actor.KindSystem),
+		Present: present, UptimeMs: uptimeMs,
+	}
 }
 
 // systemDescribe is the system actor's self-answer in the introspect contract

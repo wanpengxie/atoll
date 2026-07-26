@@ -42,36 +42,36 @@ func testDeps(t *testing.T, cs *store.ChannelStores) Deps {
 	return Deps{
 		ChannelID: testChannelID,
 		Log:       cs.Log,
-		Presence:  testAuthority{durableRows: cs.Declared},
+		Presence:  testAuthority{durableRows: cs.Actors},
 		NowMs:     func() int64 { return fixedNowMs },
 	}
 }
 
 type testAuthority struct {
-	durableRows storespec.DeclaredControlReader
+	durableRows storespec.ActorRegistryStore
 }
 
-func (a testAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
+func (a testAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
 	if a.durableRows == nil {
-		return storespec.ActorControlRow{ID: id, Kind: actor.KindAgent, CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement()}, true, nil
+		return storespec.ActorRecord{ID: id, Kind: actor.KindAgent, Placement: storespec.NewServerPlacement()}, true, nil
 	}
-	rec, ok, err := a.durableRows.LookupDeclaredActive(ctx, id)
+	rec, ok, err := a.durableRows.LookupActive(ctx, id)
 	if err != nil || !ok {
-		return storespec.ActorControlRow{}, false, err
+		return storespec.ActorRecord{}, false, err
 	}
-	return storespec.ActorControlRow{ID: rec.ID, Kind: rec.Kind, CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement()}, true, nil
+	return storespec.ActorRecord{ID: rec.ID, Kind: rec.Kind, Placement: storespec.NewServerPlacement()}, true, nil
 }
-func (a testAuthority) ListActive(ctx context.Context) ([]storespec.ActorControlRow, error) {
+func (a testAuthority) ListActive(ctx context.Context) ([]storespec.ActorRecord, error) {
 	if a.durableRows == nil {
 		return nil, nil
 	}
-	rows, err := a.durableRows.ListDeclaredActive(ctx)
+	rows, err := a.durableRows.ListActive(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]storespec.ActorControlRow, 0, len(rows))
+	out := make([]storespec.ActorRecord, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, storespec.ActorControlRow{ID: row.ID, Kind: row.Kind, CurrentDeclVersion: 1, Placement: storespec.NewServerPlacement()})
+		out = append(out, storespec.ActorRecord{ID: row.ID, Kind: row.Kind, Placement: storespec.NewServerPlacement()})
 	}
 	return out, nil
 }
@@ -84,21 +84,22 @@ func (a testAuthority) IsActive(ctx context.Context, id actor.ActorID) (bool, er
 // checks resolve it.
 func registerActor(t *testing.T, cs *store.ChannelStores, id actor.ActorID, kind actor.Kind) actor.ActorID {
 	t.Helper()
-	bundle := storespec.AdmitBundle{
-		Kind: kind, Class: string(kind),
-		Placement: storespec.NewServerPlacement(), CreatedAt: fixedNowMs,
+	draft := storespec.ActorDraft{
+		Kind:       kind,
+		Definition: storespec.ActorDefinition{Class: string(kind)},
+		Placement:  storespec.NewServerPlacement(), CreatedAt: fixedNowMs,
 	}
 	identity := strings.ReplaceAll(string(id), ":", "-")
 	if kind == actor.KindHuman {
-		bundle.Principal = identity
+		draft.Principal = identity
 	} else if kind == actor.KindAgent || kind == actor.KindTool {
-		bundle.SourceDeclID = identity
+		draft.SourceDeclID = identity
 	}
-	result, err := cs.DeclAdmission.AdmitDeclared(context.Background(), bundle)
+	record, err := cs.Actors.Insert(context.Background(), draft)
 	if err != nil {
 		t.Fatalf("register actor %q: %v", id, err)
 	}
-	return result.ID
+	return record.ID
 }
 
 // ctxCaller returns a context carrying a caller bound to the test channel.

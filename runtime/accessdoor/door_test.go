@@ -9,7 +9,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 type blockingReadDriver struct {
@@ -128,7 +127,7 @@ func TestDoorCreate(t *testing.T) {
 }
 
 func TestChannelOwnerRootAuthorizesEveryObjectOperation(t *testing.T) {
-	owner := &fakeMembership{isMember: true, role: storespec.RoleOwner}
+	owner := &fakeMembership{isMember: true, isOwner: true}
 	for _, op := range []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete} {
 		t.Run(string(op), func(t *testing.T) {
 			reg := &fakeRegistry{resolveExists: true, resolveMeta: metaKV()}

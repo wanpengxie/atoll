@@ -139,7 +139,7 @@ func assertActorConfigStays(t *testing.T, env *testEnv, chID channel.ID, daemonI
 				continue
 			}
 			found = true
-			if got := configModel(row.Config); got != want {
+			if got := configModel(row.Definition.Config); got != want {
 				t.Fatalf("overlay lost precedence: got %q want %q", got, want)
 			}
 		}

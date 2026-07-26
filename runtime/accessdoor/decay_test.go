@@ -47,22 +47,22 @@ func newDecayStore(t *testing.T) *store.ChannelStores {
 // imported because that type lives unexported in package runtime (assembly
 // stays confined to the root package).
 type decayMembership struct {
-	registry storespec.DeclaredControlReader
+	registry storespec.ActorRegistryStore
 }
 
-func (m decayMembership) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
-	_, ok, err := m.registry.LookupDeclaredActive(ctx, id)
+func (m decayMembership) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
+	_, ok, err := m.registry.LookupActive(ctx, id)
 	if err != nil {
-		return storespec.ActorControlRow{}, false, err
+		return storespec.ActorRecord{}, false, err
 	}
 	if !ok {
-		return storespec.ActorControlRow{}, false, nil
+		return storespec.ActorRecord{}, false, nil
 	}
 	p := storespec.NewServerPlacement()
-	return storespec.ActorControlRow{ID: id, CurrentDeclVersion: 1, Placement: p}, true, nil
+	return storespec.ActorRecord{ID: id, Placement: p}, true, nil
 }
 
-func (m decayMembership) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+func (m decayMembership) ListActive(context.Context) ([]storespec.ActorRecord, error) {
 	return nil, nil
 }
 
@@ -77,10 +77,9 @@ func (m decayMembership) ResourceActorFacts(
 	if !ok {
 		return storespec.ResourceActorFacts{}, nil
 	}
-	return storespec.ResourceActorFacts{
-		Active: row.ID != "",
-		Owner:  row.Role == storespec.RoleOwner,
-	}, nil
+	// Owner is a genesis-pointer judgement made at the Platform door; this
+	// runtime-level fixture never fabricates one.
+	return storespec.ResourceActorFacts{Active: row.ID != ""}, nil
 }
 
 // newDecayDoor builds a bare door directly over a real store (past-the-Minter,
@@ -89,7 +88,7 @@ func newDecayDoor(cs *store.ChannelStores) *door {
 	return &door{deps: Deps{
 		Registry:  cs.Resources,
 		Drivers:   DriverTable{resourcespec.KindKV: cs.KVDriver},
-		Authority: decayMembership{registry: cs.Declared},
+		Authority: decayMembership{registry: cs.Actors},
 		State:     cs.State,
 	}}
 }
@@ -124,14 +123,15 @@ func seedMembersGrant(t *testing.T, cs *store.ChannelStores, id resource.Resourc
 // seedMember registers id as an active channel member.
 func seedMember(t *testing.T, cs *store.ChannelStores, id actor.ActorID) actor.ActorID {
 	t.Helper()
-	result, err := cs.DeclAdmission.AdmitDeclared(context.Background(), storespec.AdmitBundle{
-		Kind: actor.KindAgent, SourceDeclID: string(id), Class: "agent",
-		Placement: storespec.NewServerPlacement(), CreatedAt: 1,
+	record, err := cs.Actors.Insert(context.Background(), storespec.ActorDraft{
+		Kind: actor.KindAgent, SourceDeclID: string(id),
+		Definition: storespec.ActorDefinition{Class: "agent"},
+		Placement:  storespec.NewServerPlacement(), CreatedAt: 1,
 	})
 	if err != nil {
 		t.Fatalf("seed member %q: %v", id, err)
 	}
-	return result.ID
+	return record.ID
 }
 
 var fullObjectOps = []access.Operation{access.OpRead, access.OpWrite, access.OpSet, access.OpDelete}
@@ -292,7 +292,7 @@ func TestEffectiveOpsDropsDeregisteredMembersRights(t *testing.T) {
 		t.Fatalf("active member should hold the members row's ops, got %v", eff)
 	}
 
-	if _, err := cs.Cascade.EndCascade(context.Background(), storespec.CascadeBundle{IDs: []actor.ActorID{alice}, EndedAt: 2}); err != nil {
+	if err := cs.Actors.Deregister(context.Background(), []actor.ActorID{alice}, 2); err != nil {
 		t.Fatalf("deregister: %v", err)
 	}
 
@@ -324,7 +324,7 @@ func TestStatDropsDeregisteredMembersRights(t *testing.T) {
 		t.Fatalf("active member should see the members row's ops via Stat, got %+v", res)
 	}
 
-	if _, err := cs.Cascade.EndCascade(context.Background(), storespec.CascadeBundle{IDs: []actor.ActorID{alice}, EndedAt: 2}); err != nil {
+	if err := cs.Actors.Deregister(context.Background(), []actor.ActorID{alice}, 2); err != nil {
 		t.Fatalf("deregister: %v", err)
 	}
 
@@ -355,7 +355,7 @@ func TestListDropsDeregisteredMembersRights(t *testing.T) {
 		t.Fatalf("active member should see r1 via List, got %+v", page.Entries)
 	}
 
-	if _, err := cs.Cascade.EndCascade(context.Background(), storespec.CascadeBundle{IDs: []actor.ActorID{alice}, EndedAt: 2}); err != nil {
+	if err := cs.Actors.Deregister(context.Background(), []actor.ActorID{alice}, 2); err != nil {
 		t.Fatalf("deregister: %v", err)
 	}
 
@@ -379,7 +379,7 @@ func TestSetArmDropsDeregisteredMembersRights(t *testing.T) {
 	out, err := d.invoke(context.Background(), alice, access.OpSet, "r1", nil, g1)
 	mustAccept(t, out, err) // active member: members row still counts
 
-	if _, err := cs.Cascade.EndCascade(context.Background(), storespec.CascadeBundle{IDs: []actor.ActorID{alice}, EndedAt: 2}); err != nil {
+	if err := cs.Actors.Deregister(context.Background(), []actor.ActorID{alice}, 2); err != nil {
 		t.Fatalf("deregister: %v", err)
 	}
 

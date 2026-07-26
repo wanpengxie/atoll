@@ -20,7 +20,6 @@ type Record struct {
 	ID             actor.ActorID
 	Kind           actor.Kind
 	Principal      string
-	Binding        actor.Binding // empty for human / system
 	CreatedAt      int64
 	DeregisteredAt int64 // 0 = active
 }

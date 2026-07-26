@@ -34,15 +34,9 @@ type resourceRegistry struct {
 	nowMs func() int64
 }
 
-// clearActorGrantsTx removes only grants whose grantee axis names the actor.
-// Resource ownership and members-scoped grants are orthogonal and survive.
-func clearActorGrantsTx(ctx context.Context, tx *sql.Tx, id actor.ActorID) error {
-	_, err := tx.ExecContext(ctx, `DELETE FROM resource_grants WHERE grantee_kind='actor' AND grantee=?`, string(id))
-	if err != nil {
-		return fmt.Errorf("store: actor grants cascade clear %q: %w", id, err)
-	}
-	return nil
-}
+// No deregistration cascade clears actor-grantee grants. A dead grantee's rows
+// are inert: the ActorID is never reused, so the grant is unreachable, and the
+// access door's admission is what carries correctness.
 
 func newResourceRegistry(db *sql.DB) *resourceRegistry {
 	return &resourceRegistry{db: db, nowMs: func() int64 { return time.Now().UnixMilli() }}

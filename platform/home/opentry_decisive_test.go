@@ -9,14 +9,13 @@ import (
 
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
 	"github.com/wanpengxie/atoll/protocol/actor"
-	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// Member-source rejections are noise: they terminate as the request's failed
-// reply and leave ZERO rows in the operation ledger — repeating the same
-// garbage grows nothing (no rejection-DDOS through the kernel serial section).
-// Only operations that mutate values commit anchored event pairs.
+// Rejected member words leave nothing behind. With the receipt ledger gone
+// there is no anchor, no digest and no started/completed pair — a rejection
+// simply returns its typed error, so repeating the same garbage grows neither
+// the value ledger nor the message log.
 func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 	h, err := Open(Config{
 		ChannelID:            "member-noise",
@@ -46,20 +45,12 @@ func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 	}
 	sender := declared.ID
 
-	// A single-transaction rollback leaves neither half of the pair; absence of
-	// the completed terminal (the replay key) proves zero ledger footprint.
-	assertNoTerminal := func(anchor, digest string) {
-		t.Helper()
-		_, found, err := h.cs.SysOps.LookupCompleted(ctx, channel.MessageCorrelation(anchor), digest)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if found {
-			t.Fatalf("rejection for %q left a completed terminal", anchor)
-		}
+	before, err := h.cs.Query.MaxSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
 
-	// Malformed payload: rejected in the entrance, zero ledger rows, repeats grow nothing.
+	// Malformed payload: rejected at the entrance.
 	raw := json.RawMessage(`{"instance_id":""}`)
 	for range 3 {
 		if _, err := h.opEntry.Execute(ctx, sysactor.TypeRestartActor,
@@ -67,24 +58,21 @@ func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 			t.Fatal("malformed restart unexpectedly succeeded")
 		}
 	}
-	rawDigest, err := channel.Digest(string(raw))
-	if err != nil {
-		t.Fatal(err)
-	}
-	assertNoTerminal("op-msg-bad", rawDigest)
 
-	// Decisive in-store rejection (absent target): transaction rolls back whole.
-	payload := map[string]string{"instance_id": "agent:absent:1"}
-	encoded, _ := json.Marshal(payload)
+	// Absent target: rejected by the ledger verdict.
+	encoded, _ := json.Marshal(map[string]string{"instance_id": "agent:absent:1"})
 	for range 3 {
 		if _, err := h.opEntry.Execute(ctx, sysactor.TypeRestartActor,
 			sysactor.OperateRequest{ChannelID: h.channelID, Sender: sender, Anchor: "op-msg-absent", Payload: encoded}); err == nil {
 			t.Fatal("absent-target restart unexpectedly succeeded")
 		}
 	}
-	parsedDigest, err := channel.Digest(payload)
+
+	after, err := h.cs.Query.MaxSeq(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertNoTerminal("op-msg-absent", parsedDigest)
+	if after != before {
+		t.Fatalf("rejections appended %d message rows; a rejection must leave nothing", after-before)
+	}
 }

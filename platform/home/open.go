@@ -20,7 +20,6 @@ import (
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
-	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/harness"
@@ -96,40 +95,32 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		return nil, err
 	}
 
-	systemAdmission, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		ID: actor.SystemActorID, Kind: actor.KindSystem, Class: "system",
-		Placement: storespec.NewServerPlacement(), CreatedAt: h.nowMs(),
-	})
-	if err != nil {
-		return nil, fmt.Errorf("platform: admit system actor: %w", err)
-	}
+	// The system kernel is an internal constant, not a member: it gets no
+	// registry row, no admission and no record. Its identity reaches the kernel
+	// as a construction constant.
 	if cfg.Bootstrap {
 		if err := seedBootstrap(ctx, cs, cfg, h.nowMs); err != nil {
 			return nil, err
 		}
 	}
-	if err := validateOwnerInvariant(ctx, cs, cfg); err != nil {
+	owner, err := readOwnerPrincipal(ctx, cs)
+	if err != nil {
 		return nil, err
 	}
+	h.ownerPrincipal = owner
 
 	h.presenceFold = presence.New(logger, clock,
 		[]actorrt.ObsKind{actorrt.ObsKind(introspect.ObsDevicePresence)}, sweepEvery)
 
-	actorStore, err := newHomeActorStore(
-		cfg.ChannelID, cs, cfg.IntroductionResolver, time.Now,
-	)
-	if err != nil {
-		return nil, fmt.Errorf("platform: construct actor identity store: %w", err)
-	}
-	h.actorStore = actorStore
+	h.resolver = cfg.IntroductionResolver
 	h.factories = &compositionView{h: h, resolver: cfg.CompositionResolver}
-	h.controller, err = actorctl.New(actorStore)
+	organ, err := newActorOrgan(cs, h.nowMs)
 	if err != nil {
-		return nil, fmt.Errorf("platform: construct actor controller: %w", err)
+		return nil, fmt.Errorf("platform: construct actor organ: %w", err)
 	}
+	h.controller = organ.controller
 	h.systemKernel = systemkernel.New()
 	h.actors = newActorSystem(h, logger)
-	actorStore.bindAuthority(h.actors)
 
 	var completion accessdoor.ResourceCompletion
 	h.access, completion, err = accessdoor.NewAssembly(accessdoor.Deps{
@@ -156,7 +147,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("platform: build harness: %w", err)
 	}
-	stateHandles, err := accessdoor.NewStateHandleResolver(actorStore.identities, h.access)
+	stateHandles, err := accessdoor.NewStateHandleResolver(organ.entries, h.access)
 	if err != nil {
 		return nil, fmt.Errorf("platform: build state handle resolver: %w", err)
 	}
@@ -195,7 +186,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		cfg.ChannelID,
 		h.minter,
 		h.access,
-		h.stateHandles,
 		h.schedMinter,
 	)
 	if err != nil {
@@ -332,9 +322,6 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		}
 	}()
 
-	if systemAdmission.Created {
-		logger.Info("platform.system.admitted", "channel", cfg.ChannelID)
-	}
 	logger.Info("platform.home.ready", "channel", cfg.ChannelID)
 	return h, nil
 }
@@ -353,6 +340,10 @@ func validateGenesis(ctx context.Context, cs *runtime.ChannelStores, cfg Config)
 	return nil
 }
 
+// seedBootstrap commits the bootstrap records before Controller.Start so the
+// Controller publishes one complete durable image. The owner's human record is
+// an ordinary human admission: no marker is seeded at the door, because owner
+// lives on the genesis pointer alone.
 func seedBootstrap(
 	ctx context.Context,
 	cs *runtime.ChannelStores,
@@ -360,10 +351,10 @@ func seedBootstrap(
 	nowMs func() int64,
 ) error {
 	if cfg.BootstrapOwnerPrincipal != "" {
-		if _, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
+		if _, err := cs.Actors.Insert(ctx, storespec.ActorDraft{
 			Kind: actor.KindHuman, Principal: cfg.BootstrapOwnerPrincipal,
-			Class: "human", Role: storespec.RoleOwner,
-			Placement: storespec.NewServerPlacement(), CreatedAt: nowMs(),
+			Definition: storespec.ActorDefinition{Class: "human"},
+			Placement:  storespec.NewServerPlacement(), CreatedAt: nowMs(),
 		}); err != nil {
 			return fmt.Errorf("platform: seed owner: %w", err)
 		}
@@ -380,81 +371,48 @@ func admitBootstrapDeclaration(
 	ctx context.Context,
 	cs *runtime.ChannelStores,
 	in DeclareRequest,
-) (storespec.ActorControlRow, error) {
+) (storespec.ActorRecord, error) {
 	if err := validateDeclareRequest(in); err != nil {
-		return storespec.ActorControlRow{}, err
+		return storespec.ActorRecord{}, err
 	}
 	var config []byte
 	if in.Config != nil {
 		config = append(config, (*in.Config)...)
 	}
-	binding := actor.Binding("")
-	if in.Placement.Kind == storespec.PlacementDaemon {
-		binding = actor.BindingRuntimeInboundViaRelay
-	}
-	admitted, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		Kind: in.Kind, Binding: binding, Class: in.Class, Config: config,
+	record, err := cs.Actors.Insert(ctx, storespec.ActorDraft{
+		Kind:         in.Kind,
+		SourceDeclID: in.SourceDeclID,
+		CreatedAt:    in.CreatedAt,
+		Definition:   storespec.ActorDefinition{Class: in.Class, Config: config},
 		Placement:    in.Placement,
-		SourceDeclID: in.SourceDeclID, CreatedAt: in.CreatedAt,
 	})
 	if err != nil {
-		return storespec.ActorControlRow{}, err
-	}
-	row, ok, err := cs.Declared.LookupDeclaredActive(ctx, admitted.ID)
-	if err != nil {
-		return storespec.ActorControlRow{}, err
-	}
-	if !ok {
-		return storespec.ActorControlRow{}, errors.New("platform: bootstrap declaration missing")
+		return storespec.ActorRecord{}, err
 	}
 	if in.MakeDefault {
-		if err := cs.Routing.SetDefaultAgent(ctx, row.ID); err != nil {
-			return storespec.ActorControlRow{}, err
+		if err := cs.Routing.SetDefaultAgent(ctx, record.ID); err != nil {
+			return storespec.ActorRecord{}, err
 		}
 	}
-	return row, nil
+	return record, nil
 }
 
-func validateOwnerInvariant(
-	ctx context.Context,
-	cs *runtime.ChannelStores,
-	cfg Config,
-) error {
-	if cfg.Bootstrap {
-		return nil
-	}
-	rows, err := cs.Declared.ListDeclaredActive(ctx)
+// readOwnerPrincipal reads the channel's one owner pointer from genesis. Owner
+// is immutable channel self-truth, so one read at open is the whole story —
+// there is no second account to cross-check it against, and the open check
+// degenerates to "if this channel has a genesis, its owner is non-empty".
+func readOwnerPrincipal(ctx context.Context, cs *runtime.ChannelStores) (string, error) {
+	genesis, found, err := cs.Genesis.ReadGenesis(ctx)
 	if err != nil {
-		return err
+		return "", fmt.Errorf("platform: read channel genesis: %w", err)
 	}
-	owners := 0
-	ownerPrincipal := ""
-	for _, row := range rows {
-		if row.Role == storespec.RoleOwner {
-			owners++
-			ownerPrincipal = row.Principal
-		}
+	if !found {
+		return "", nil
 	}
-	if owners != 1 {
-		return fmt.Errorf("platform: normal open requires exactly one active channel owner (got %d)", owners)
+	if genesis.OwnerPrincipal == "" {
+		return "", errors.New("platform: channel genesis carries no owner principal")
 	}
-	if cfg.ExpectedGenesis != nil {
-		expectedOwner := cfg.ExpectedGenesis.OwnerPrincipal
-		if expectedOwner == "" {
-			genesis, found, err := cs.Genesis.ReadGenesis(ctx)
-			if err != nil {
-				return err
-			}
-			if !found {
-				return errors.New("platform: owner invariant: channel genesis missing")
-			}
-			expectedOwner = genesis.OwnerPrincipal
-		}
-		if ownerPrincipal != expectedOwner {
-			return errors.New("platform: owner invariant: registry owner does not match genesis")
-		}
-	}
-	return nil
+	return genesis.OwnerPrincipal, nil
 }
 
 func deliveryHandle(

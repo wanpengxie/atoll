@@ -5,8 +5,10 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
+	"github.com/wanpengxie/atoll/protocol/access"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/resource"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/capauth"
 	"github.com/wanpengxie/atoll/runtime/harness"
@@ -28,8 +30,20 @@ type accessMinter interface {
 	MintAuthority(capauth.Authority) accessdoor.ResourceAccessHandle
 }
 
-type stateResolver interface {
-	ResolveAuthority(context.Context, capauth.Authority) (accessdoor.AccessHandle, error)
+// unsupportedState is the kernel's State arm. The kernel has never consumed a
+// State handle (it is a constant, not a member: it has no record and therefore
+// no backing to route to), so the arm is an empty implementation that refuses
+// every call rather than a second, kernel-shaped state authority. The Caps
+// shape is unchanged; a real implementation lands the day a real use case
+// demands it.
+type unsupportedState struct{}
+
+var ErrStateUnsupported = errors.New("systemcaps: the kernel has no state backing")
+
+func (unsupportedState) Invoke(
+	context.Context, access.Operation, resource.ResourceID, []byte, *access.Grant,
+) (accessdoor.Outcome, error) {
+	return accessdoor.Outcome{}, ErrStateUnsupported
 }
 
 type scheduleMinter interface {
@@ -41,7 +55,6 @@ type Minter struct {
 	channelID channel.ID
 	pen       penMinter
 	access    accessMinter
-	state     stateResolver
 	schedule  scheduleMinter
 }
 
@@ -49,33 +62,27 @@ func New(
 	channelID channel.ID,
 	pen harness.Minter,
 	access accessdoor.AccessMinter,
-	state accessdoor.StateHandleResolver,
 	scheduler schedule.Minter,
 ) (*Minter, error) {
 	p, pok := pen.(penMinter)
 	a, aok := access.(accessMinter)
-	s, sok := state.(stateResolver)
 	t, tok := scheduler.(scheduleMinter)
-	if channelID == "" || !pok || !aok || !sok || !tok {
+	if channelID == "" || !pok || !aok || !tok {
 		return nil, ErrInvalidInput
 	}
-	return &Minter{channelID: channelID, pen: p, access: a, state: s, schedule: t}, nil
+	return &Minter{channelID: channelID, pen: p, access: a, schedule: t}, nil
 }
 
 // Mint mints the SystemActor's whole kernel bundle once.
-func (m *Minter) Mint(ctx context.Context) (actorcaps.Caps, error) {
+func (m *Minter) Mint(context.Context) (actorcaps.Caps, error) {
 	if m == nil {
 		return actorcaps.Caps{}, ErrInvalidInput
 	}
 	authority := rootAuthority{}
-	state, err := m.state.ResolveAuthority(ctx, authority)
-	if err != nil {
-		return actorcaps.Caps{}, err
-	}
 	return actorcaps.Caps{
 		Pen:       m.pen.MintAuthority(authority, actor.KindSystem, m.channelID),
 		Access:    m.access.MintAuthority(authority),
-		State:     state,
+		State:     unsupportedState{},
 		Schedule:  m.schedule.MintAuthority(authority),
 		Lifecycle: nil,
 	}, nil

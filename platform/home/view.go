@@ -34,6 +34,8 @@ type View struct {
 	routing    storespec.ChannelRouting
 	principals storespec.PrincipalRegistry
 	bindings   storespec.DaemonBindingReader
+
+	ownerPrincipal string
 }
 
 // View returns the full substrate observation set. It carries no write
@@ -42,16 +44,17 @@ type View struct {
 // the channel interaction model.
 func (h *Home) View() View {
 	return View{
-		visible:    h.cs.Visible,
-		authority:  h.actors,
-		links:      h.links,
-		presence:   presence.NewView(h.presenceFold, h.actors, h.actors),
-		actors:     h.actors,
-		nowMs:      h.nowMs,
-		resources:  h.cs.ResourceRead,
-		routing:    h.cs.Routing,
-		principals: h.cs.Principals,
-		bindings:   h.cs.Bindings,
+		visible:        h.cs.Visible,
+		authority:      h.actors,
+		links:          h.links,
+		presence:       presence.NewView(h.presenceFold, h.actors, h.actors),
+		actors:         h.actors,
+		nowMs:          h.nowMs,
+		resources:      h.cs.ResourceRead,
+		routing:        h.cs.Routing,
+		principals:     h.cs.Principals,
+		bindings:       h.cs.Bindings,
+		ownerPrincipal: h.ownerPrincipal,
 	}
 }
 
@@ -183,16 +186,16 @@ func (v View) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal s
 	return record.ID, found, err
 }
 
-func (v View) ActiveActors(ctx context.Context) ([]storespec.ActorControlRow, error) {
+func (v View) ActiveActors(ctx context.Context) ([]storespec.ActorRecord, error) {
 	return v.authority.ListActive(ctx)
 }
 
-func (v View) DeclaredBySource(ctx context.Context, source string) ([]storespec.ActorControlRow, error) {
+func (v View) DeclaredBySource(ctx context.Context, source string) ([]storespec.ActorRecord, error) {
 	rows, err := v.authority.ListActive(ctx)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]storespec.ActorControlRow, 0)
+	out := make([]storespec.ActorRecord, 0)
 	for _, row := range rows {
 		if row.SourceDeclID == source {
 			out = append(out, row)
@@ -201,34 +204,29 @@ func (v View) DeclaredBySource(ctx context.Context, source string) ([]storespec.
 	return out, nil
 }
 
-func (v View) DeclaredBySourceOne(ctx context.Context, source string) (storespec.ActorControlRow, bool, error) {
+func (v View) DeclaredBySourceOne(ctx context.Context, source string) (storespec.ActorRecord, bool, error) {
 	rows, err := v.authority.ListActive(ctx)
 	if err != nil {
-		return storespec.ActorControlRow{}, false, err
+		return storespec.ActorRecord{}, false, err
 	}
 	for _, row := range rows {
 		if row.SourceDeclID == source {
 			return row, true, nil
 		}
 	}
-	return storespec.ActorControlRow{}, false, nil
+	return storespec.ActorRecord{}, false, nil
 }
 
 func (v View) IsBound(ctx context.Context, daemonID string) (bool, error) {
 	return v.bindings.IsBound(ctx, storespec.DaemonID(daemonID))
 }
 
-// OwnerPrincipal returns the unique active channel owner from the channel-local
-// authority. It is the owner-only realm delete policy's trusted read source.
-func (v View) OwnerPrincipal(ctx context.Context) (string, bool, error) {
-	rows, err := v.authority.ListActive(ctx)
-	if err != nil {
-		return "", false, err
+// OwnerPrincipal returns the channel owner straight from the immutable genesis
+// pointer — its one and only home. It never scans the registry: owner is a
+// property of the channel, not a bit on a member row.
+func (v View) OwnerPrincipal(context.Context) (string, bool, error) {
+	if v.ownerPrincipal == "" {
+		return "", false, nil
 	}
-	for _, row := range rows {
-		if row.Role == storespec.RoleOwner {
-			return row.Principal, true, nil
-		}
-	}
-	return "", false, nil
+	return v.ownerPrincipal, true, nil
 }

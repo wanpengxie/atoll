@@ -22,7 +22,7 @@ type DeclareRequest struct {
 }
 
 type DeclareResult struct {
-	Row           storespec.ActorControlRow
+	Record        storespec.ActorRecord
 	Created       bool
 	ConfigUpdated bool
 }

@@ -132,7 +132,7 @@ func waitActorConfig(t *testing.T, env *testEnv, chID channel.ID, daemonID strin
 					continue
 				}
 				var config map[string]any
-				if json.Unmarshal(row.Config, &config) == nil && config["model"] == want {
+				if json.Unmarshal(row.Definition.Config, &config) == nil && config["model"] == want {
 					return
 				}
 			}

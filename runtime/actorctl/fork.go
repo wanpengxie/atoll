@@ -7,53 +7,121 @@ import (
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/lib/actorcaps"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-type forkAdmission struct {
-	child     actor.ActorID
-	found     bool
-	spec      actorcaps.ForkSpec
-	placement storespec.Placement
+// forkKey/forkEntry are the whole in-process idempotency mechanism. Fork is the
+// only command that needs one: its child id is freshly minted, so the ledger
+// itself cannot answer "did I already do this". Every other command's
+// idempotency is carried by truth (semantic key, deregistration latch, equal
+// value no-op).
+//
+// The table is NEVER pruned. Its upper bound is the number of forks this
+// process performs, and a hit returns the first result for the whole process
+// lifetime — including after the child has died, so one request can never
+// produce a second child. A process restart empties it, which is correct: the
+// crash killed every entry record, so a retry legitimately births a new child.
+type forkKey struct {
+	caller  actor.ActorID
+	request message.ID
 }
 
-// admitFork confines the caller gate to the one logical admission verdict.
-// Accepted work leaves this function without any caller gate held; Store commit
-// and child publication are trusted continuations under their own owners.
-func (c *Controller) admitFork(
+type forkEntry struct {
+	child  actor.ActorID
+	digest string
+}
+
+// Fork births one entry-table record. The whole command is a straight line
+// inside the ledger lock with zero durable footprint.
+func (c *Controller) Fork(
 	ctx context.Context,
 	request ForkRequest,
-) (forkAdmission, error) {
-	unlock := c.gates.lock(request.CallerActorID)
-	defer unlock()
+) (Transition[ForkResult], error) {
+	done, err := c.beginCommand()
+	if err != nil {
+		return Transition[ForkResult]{}, err
+	}
+	defer done()
+	_ = ctx
 
-	if child, found, err := c.store.LookupFork(
-		ctx,
-		request.CallerActorID,
-		request.RequestID,
-	); err != nil {
-		return forkAdmission{}, err
-	} else if found {
-		return forkAdmission{child: child, found: true}, nil
+	if request.CallerActorID == "" || request.RequestID == "" {
+		return Transition[ForkResult]{}, ErrForkInvalid
 	}
-	if err := c.checkCurrentSnapshot(
-		request.CallerActorID,
-		request.CallerAttempt,
-	); err != nil {
-		return forkAdmission{}, err
-	}
-	parent, ok, err := c.Lookup(request.CallerActorID)
+	digest, err := channel.Digest(forkDigestInput{
+		Caller:    request.CallerActorID,
+		Kind:      request.Spec.Kind,
+		Class:     request.Spec.Class,
+		NameHint:  request.Spec.NameHint,
+		Config:    request.Spec.Config,
+		Placement: request.Spec.Placement,
+	})
 	if err != nil {
-		return forkAdmission{}, err
+		return Transition[ForkResult]{}, ErrForkInvalid
 	}
-	if !ok {
-		return forkAdmission{}, ErrInactive
+
+	c.ledger.Lock()
+	defer c.ledger.Unlock()
+	if err := c.runnableLocked(); err != nil {
+		return Transition[ForkResult]{}, err
 	}
-	spec, placement, err := normalizeFork(request.Spec, parent.Definition)
+
+	key := forkKey{caller: request.CallerActorID, request: request.RequestID}
+	if entry, found := c.forks[key]; found {
+		if entry.digest != digest {
+			return Transition[ForkResult]{}, ErrForkConflict
+		}
+		return Transition[ForkResult]{Result: ForkResult{ChildActorID: entry.child}}, nil
+	}
+	if err := c.checkCurrentLocked(request.CallerActorID, request.CallerAttempt); err != nil {
+		return Transition[ForkResult]{}, err
+	}
+	parent := c.actors[request.CallerActorID]
+	spec, placement, err := normalizeFork(request.Spec, parent.Record)
 	if err != nil {
-		return forkAdmission{}, err
+		return Transition[ForkResult]{}, err
 	}
-	return forkAdmission{spec: spec, placement: placement}, nil
+	child := freshChildID(request.CallerActorID, spec.NameHint)
+	// Reserved-name check at the mint point: a minted id may never collide with
+	// the identity vocabulary's reserved constants.
+	if child == actor.SystemActorID {
+		return Transition[ForkResult]{}, ErrForkInvalid
+	}
+	attempt, err := mintAttempt()
+	if err != nil {
+		return Transition[ForkResult]{}, err
+	}
+	record := storespec.ActorRecord{
+		ID:        child,
+		Kind:      spec.Kind,
+		CreatedAt: c.nowMs(),
+		Definition: storespec.ActorDefinition{
+			Class:  spec.Class,
+			Config: cloneRaw(spec.Config),
+		},
+		Placement: placement,
+	}
+
+	// Settled: nothing below can fail.
+	c.store.InstallEntry(record)
+	c.actors[child] = managedActor{Record: record, Attempt: attempt}
+	c.forks[key] = forkEntry{child: child, digest: digest}
+
+	transition := Transition[ForkResult]{Result: ForkResult{ChildActorID: child}}
+	transition.Reconcile.add(placement)
+	return transition, nil
+}
+
+// forkDigestInput mirrors only the actor-facing Fork operation value. The child
+// id and AttemptKey are physical choices and cannot affect the digest.
+type forkDigestInput struct {
+	Caller    actor.ActorID      `json:"caller"`
+	Kind      actor.Kind         `json:"kind"`
+	Class     string             `json:"class"`
+	NameHint  string             `json:"name_hint,omitempty"`
+	Config    []byte             `json:"config,omitempty"`
+	Placement *channel.Placement `json:"placement,omitempty"`
 }
 
 func freshChildID(parent actor.ActorID, hint string) actor.ActorID {
@@ -65,7 +133,7 @@ func freshChildID(parent actor.ActorID, hint string) actor.ActorID {
 
 func normalizeFork(
 	spec actorcaps.ForkSpec,
-	parent ActorDefinition,
+	parent storespec.ActorRecord,
 ) (actorcaps.ForkSpec, storespec.Placement, error) {
 	if _, ok := actor.ParseKind(string(spec.Kind)); !ok ||
 		spec.Kind == actor.KindSystem ||

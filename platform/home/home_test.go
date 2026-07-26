@@ -69,27 +69,26 @@ func openTestHome(t *testing.T) *home.Home {
 	return h
 }
 
-// TestView_ActiveActors_IncludesSystem verifies the intrinsic system actor is
-// registered by Open (genesis).
-func TestView_ActiveActors_IncludesSystem(t *testing.T) {
+// The kernel is a constant, not a member: Open registers no system row, so the
+// membership projection never contains it. Its addressability is answered by
+// the routing organ instead.
+func TestView_ActiveActors_ExcludesKernel(t *testing.T) {
 	h := openTestHome(t)
 	actors, err := h.View().ActiveActors(context.Background())
 	if err != nil {
 		t.Fatalf("ActiveActors: %v", err)
 	}
-	found := false
 	for _, a := range actors {
-		if a.ID == actor.SystemActorID && a.Kind == actor.KindSystem {
-			found = true
+		if a.ID == actor.SystemActorID {
+			t.Errorf("kernel appeared as a member row: %+v", a)
 		}
-	}
-	if !found {
-		t.Errorf("system actor not in actors list: %+v", actors)
 	}
 }
 
-// TestAdmit_CellLessMember admits a human member (the pure-membership primitive,
-// no cell) and confirms it surfaces in the actor roster with no cell binding.
+// TestAdmit_CellLessMember admits a human member (the pure-membership
+// primitive, no cell) and confirms it surfaces in the actor roster. The record
+// carries no transport binding at all — binding is a physical connection
+// projection and left the value domain.
 func TestAdmit_CellLessMember(t *testing.T) {
 	h := openTestHome(t)
 	ctx := context.Background()
@@ -104,25 +103,22 @@ func TestAdmit_CellLessMember(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListActors: %v", err)
 	}
-	var got *actor.Binding
+	var found bool
 	for _, a := range actors {
 		if a.ID == id {
-			b := a.Binding
-			got = &b
+			found = true
+			if a.Kind != actor.KindHuman || a.Principal != "alice" {
+				t.Errorf("admitted member = %+v", a)
+			}
 		}
 	}
-	if got == nil {
+	if !found {
 		t.Fatalf("cell-less member %s not in roster", id)
-	}
-	if *got != "" {
-		t.Errorf("cell-less member binding = %q, want empty (no cell)", *got)
 	}
 }
 
-// TestOpen_RestartOverPersistentDB verifies the genesis seed is idempotent: a
-// second Open over the SAME db file (a home restart) must succeed, not PK-conflict
-// on re-seeding the intrinsic system actor. Before the Exists-guard this failed
-// at bootstrap, taking down the whole restart-recovery path.
+// TestOpen_RestartOverPersistentDB verifies a second Open over the SAME db file
+// (a home restart) succeeds and restores the durable membership image.
 func TestOpen_RestartOverPersistentDB(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "home.sqlite")
 	h1, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: emptyIntroductionResolver{}, ChannelID: testChannelID, DBPath: dbPath, Bootstrap: true})
@@ -135,9 +131,6 @@ func TestOpen_RestartOverPersistentDB(t *testing.T) {
 	if err := home.Shutdown(h1); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	// A normal reopen is legal only after bootstrap has published its owner.
-	// Restart: re-open the same persistent channel DB — the system actor row
-	// already exists, so the seed must no-op instead of failing.
 	h2, err := home.Open(home.Config{CompositionResolver: emptyCompositionResolver{}, IntroductionResolver: emptyIntroductionResolver{}, ChannelID: testChannelID, DBPath: dbPath, MustExistDB: true})
 	if err != nil {
 		t.Fatalf("restart Open over existing DB: %v", err)
@@ -149,12 +142,15 @@ func TestOpen_RestartOverPersistentDB(t *testing.T) {
 	}
 	found := false
 	for _, a := range actors {
-		if a.ID == actor.SystemActorID {
+		if a.Principal == "restart-owner" {
 			found = true
+		}
+		if a.ID == actor.SystemActorID {
+			t.Errorf("kernel restored as a member row: %+v", a)
 		}
 	}
 	if !found {
-		t.Errorf("system actor missing after restart: %+v", actors)
+		t.Errorf("durable member missing after restart: %+v", actors)
 	}
 }
 

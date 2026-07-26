@@ -62,9 +62,9 @@ func TestOpenChannel_InstallsExactlyChannelLocalTables(t *testing.T) {
 // actor_cursors are deleted).
 func TestChannelLocalTables_Set(t *testing.T) {
 	want := map[string]bool{
-		"messages":                true,
-		"actor_registry":          true,
-		"actor_decl_versions":     true,
+		"messages":       true,
+		"actor_registry": true,
+
 		"channel_genesis":         true,
 		"channel_daemon_bindings": true,
 		"channel_routing":         true,
@@ -109,8 +109,8 @@ func TestOpenChannel_FreshSchemaReopensWithoutMutation(t *testing.T) {
 	}
 	defer raw.Close()
 	var rows int
-	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_decl_versions`).Scan(&rows); err != nil {
-		t.Fatalf("declaration count: %v", err)
+	if err := raw.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry`).Scan(&rows); err != nil {
+		t.Fatalf("registry count: %v", err)
 	}
 }
 
@@ -246,6 +246,17 @@ func TestOpenChannel_MustExistRejectsEverySchemaMismatchWithoutMutation(t *testi
 		{"missing-message-unique-constraint", replaceOne("  id                   TEXT NOT NULL UNIQUE,\n", "  id                   TEXT NOT NULL,\n")},
 		{"missing-partial-index", replaceOne("CREATE INDEX IF NOT EXISTS ix_messages_expires        ON messages(expires_at) WHERE expires_at IS NOT NULL AND kind='request';\n", "")},
 		{"extra-table", func(ddl string) string { return ddl + `CREATE TABLE retired_shadow (x INTEGER);` }},
+		// The definition-version sequence was removed outright and there is no
+		// migration: a database still carrying it must be rejected, not repaired.
+		{"retired-decl-versions-table", func(ddl string) string {
+			return ddl + `CREATE TABLE actor_decl_versions (actor_id TEXT NOT NULL, version INTEGER NOT NULL, PRIMARY KEY (actor_id, version));`
+		}},
+		{"retired-role-column", replaceOne(
+			"  principal          TEXT NOT NULL DEFAULT '', -- login identity only; declaration-backed actors normally leave it empty\n",
+			"  principal          TEXT NOT NULL DEFAULT '',\n  role               TEXT NOT NULL DEFAULT '',\n")},
+		{"retired-binding-column", replaceOne(
+			"  class              TEXT NOT NULL,\n",
+			"  class              TEXT NOT NULL,\n  actor_binding      TEXT,\n")},
 		{"extra-index", func(ddl string) string { return ddl + `CREATE INDEX retired_index ON messages(type);` }},
 		{"extra-view", func(ddl string) string { return ddl + `CREATE VIEW retired_view AS SELECT id FROM messages;` }},
 		{"extra-trigger", func(ddl string) string {

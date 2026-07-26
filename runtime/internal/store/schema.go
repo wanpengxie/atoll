@@ -6,22 +6,20 @@ package store
 // The DDL string is split into multiple CREATE statements; the
 // modernc.org/sqlite driver accepts multi-statement input via Exec.
 //
-// Vocabulary closed sets (sender_kind / kind / visibility / actor_kind /
-// actor_binding) carry NO value-set `CHECK (... IN (...))` clause. Those sets
+// Vocabulary closed sets (sender_kind / kind / visibility / actor_kind)
+// carry NO value-set `CHECK (... IN (...))` clause. Those sets
 // are authoritatively enforced in Go — write path: harness stepEnvelopeShape
 // (kind, visibility) + stepSenderConsistent (sender.kind force-overwritten
 // from the pen-WELDED caller kind — the registry lookup was retired by the
-// incarnation rework, Mint is the single truth source) + the membership
-// control plane's validateMemberIdentity (actor_kind / actor_binding gated by
-// ParseKind / ParseBinding before insert); read path: store scan via ParseKind /
-// ParseVisibility / ParseBinding (out-of-set values fail loud). A DB CHECK
+// incarnation rework, Mint is the single truth source) + the actor record
+// store's validateDraft (actor_kind gated by ParseKind before insert); read
+// path: store scan via ParseKind / ParseVisibility (out-of-set values fail
+// loud). A DB CHECK
 // would be a redundant SECOND enforcer that also welds an append-only DB to a
 // frozen vocabulary: extending a pre-launch closed set (e.g. a new sender_kind)
 // would make every existing channel sqlite reject inserts AND forbid recreation
 // against the old file. The set is closed by the Go ADT; the DDL must not
-// foreclose its evolution. actor_registry.role is the deliberate exception:
-// it is a structural authority bit whose closed set and owner=>human relation
-// must survive every writer, including direct SQL. is_terminal KEEPS its CHECK (0,1) — that is a
+// foreclose its evolution. is_terminal KEEPS its CHECK (0,1) — that is a
 // structural boolean integrity constraint, not an evolving vocabulary.
 const ChannelLocalDDL = `
 -- =============================================================
@@ -68,14 +66,19 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_sysop_completed_correlation
 -- =============================================================
 -- 3) actor_registry
 -- =============================================================
+-- One row per managed actor record. The record answers "who is it / what is
+-- it"; the definition columns hold the CURRENT value only. There is no version
+-- history table and no current-version pointer: the registry stores what is,
+-- the audit narration stores what happened.
 CREATE TABLE IF NOT EXISTS actor_registry (
   actor_id           TEXT PRIMARY KEY,
   actor_kind         TEXT NOT NULL,
   principal          TEXT NOT NULL DEFAULT '', -- login identity only; declaration-backed actors normally leave it empty
   source_decl_id     TEXT NOT NULL DEFAULT '', -- immutable declaration provenance; never an operation identity
-  role               TEXT NOT NULL DEFAULT '' CHECK (role IN ('', 'owner')) CHECK (role='' OR actor_kind='human'),
-  actor_binding      TEXT,
-	current_decl_version INTEGER NOT NULL DEFAULT 1,
+  class              TEXT NOT NULL,
+  config_json        TEXT,
+  placement          TEXT NOT NULL CHECK(placement IN ('server','daemon')),
+  desired_host       TEXT NOT NULL DEFAULT '' CHECK(placement='daemon' OR desired_host=''),
   created_at         INTEGER NOT NULL,
   deregistered_at    INTEGER
 );
@@ -89,22 +92,6 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_principal
 CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_source_decl
   ON actor_registry(source_decl_id)
   WHERE deregistered_at IS NULL AND source_decl_id <> '';
-CREATE UNIQUE INDEX IF NOT EXISTS ux_actor_registry_active_owner
-  ON actor_registry(role)
-  WHERE role='owner' AND deregistered_at IS NULL;
-
--- Versioned desired declaration for durable actors. Forked actors never land
--- here; their complete control row lives only in Home's session authority.
-CREATE TABLE IF NOT EXISTS actor_decl_versions (
-  actor_id       TEXT NOT NULL,
-  version        INTEGER NOT NULL,
-  class          TEXT NOT NULL,
-  config_json    TEXT,
-  placement      TEXT NOT NULL CHECK(placement IN ('server','daemon')),
-  desired_host   TEXT NOT NULL DEFAULT '' CHECK(placement='daemon' OR desired_host=''),
-  created_at     INTEGER NOT NULL,
-  PRIMARY KEY (actor_id, version)
-);
 
 -- Immutable self-truth written exactly once during ChannelHost provisioning.
 CREATE TABLE IF NOT EXISTS channel_genesis (
@@ -230,9 +217,11 @@ CREATE INDEX IF NOT EXISTS ix_resource_tombstones_daemon ON resource_tombstones(
 -- namespace). The collapsed authorization (reachable set ≡ {owner}) means there
 -- is no R here — no resource_grants sibling: the byte row IS the whole object.
 -- Keyed (owner_id, resource_id) — the door welds owner at handle mint, so owner
--- is a coordinate, not a per-call arg. Cascade-cleared with actor_registry on
--- deregister (the scope law: owner dies ⟹ its state dies, Erlang ETS
--- private).
+-- is a coordinate, not a per-call arg. Rows of a dead owner are NOT cleared on
+-- deregister: ActorIDs are never reused and every belonging is keyed by
+-- ActorID, so a dead owner's rows are unreachable inert data. Correctness lives
+-- at the admission gate, never in a delete; reclaiming disk is an explicit
+-- batch management action, not lifecycle logic.
 CREATE TABLE IF NOT EXISTS actor_state (
   owner_id    TEXT NOT NULL,             -- identity level (ActorID); incarnation NEVER persisted
   resource_id TEXT NOT NULL,
@@ -299,7 +288,6 @@ CREATE TABLE IF NOT EXISTS timer_dead (
 var ChannelLocalTables = []string{
 	"messages",
 	"actor_registry",
-	"actor_decl_versions",
 	"channel_genesis",
 	"channel_daemon_bindings",
 	"channel_routing",

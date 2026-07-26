@@ -15,12 +15,21 @@ import (
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// TestDeclaredAdmissionIsTheOnlyDurableBirthVerb pins the narrowed public
-// durable birth contract after the generic membership writer was removed.
-func TestDeclaredAdmissionIsTheOnlyDurableBirthVerb(t *testing.T) {
-	typ := reflect.TypeOf((*storespec.DeclAdmissionStore)(nil)).Elem()
-	if typ.NumMethod() != 1 || typ.Method(0).Name != "AdmitDeclared" {
-		t.Fatalf("DeclAdmissionStore methods changed: %v", typ)
+// TestActorRegistryStoreSpeaksRecordLanguageOnly pins the durable actor-record
+// contract: two reads and three record verbs, and no business operation name.
+func TestActorRegistryStoreSpeaksRecordLanguageOnly(t *testing.T) {
+	typ := reflect.TypeOf((*storespec.ActorRegistryStore)(nil)).Elem()
+	want := map[string]bool{
+		"LookupActive": true, "ListActive": true,
+		"Insert": true, "UpdateDefinition": true, "Deregister": true,
+	}
+	if typ.NumMethod() != len(want) {
+		t.Fatalf("ActorRegistryStore methods changed: %v", typ)
+	}
+	for i := range typ.NumMethod() {
+		if !want[typ.Method(i).Name] {
+			t.Fatalf("unexpected actor record verb %q", typ.Method(i).Name)
+		}
 	}
 }
 

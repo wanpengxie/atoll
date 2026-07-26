@@ -256,9 +256,10 @@ func TestSchedulerDoesNotOwnIdentityHomeOrRegistryAuthority(t *testing.T) {
 }
 
 func TestActorIdentityStorageHomeIsPhysicallyConfined(t *testing.T) {
+	// The actor record store is a runtime organ: only its own assembly point
+	// names it, and nothing else in the tree may import it.
 	allowedImports := map[string]bool{
-		"../platform/home/actor_store.go":   true,
-		"../runtime/accessdoor/memstate.go": true,
+		"../platform/home/actor_organ.go": true,
 	}
 	var escapedImports []string
 	walkProductionGo(t, func(path string, file *ast.File, fset *token.FileSet) {
@@ -267,7 +268,7 @@ func TestActorIdentityStorageHomeIsPhysicallyConfined(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if strings.HasSuffix(importPath, "/runtime/identitystore") &&
+			if strings.HasSuffix(importPath, "/runtime/actorstore") &&
 				!allowedImports[path] {
 				escapedImports = append(
 					escapedImports, fset.Position(spec.Pos()).String(),
@@ -276,7 +277,7 @@ func TestActorIdentityStorageHomeIsPhysicallyConfined(t *testing.T) {
 		}
 	})
 	if len(escapedImports) != 0 {
-		t.Fatalf("identity storage home escaped physical owners: %v", escapedImports)
+		t.Fatalf("actor record store escaped its assembly point: %v", escapedImports)
 	}
 
 	for _, root := range []string{"../app", "../lib", "../platform", "../runtime"} {
@@ -296,6 +297,10 @@ func TestActorIdentityStorageHomeIsPhysicallyConfined(t *testing.T) {
 				"GrantOverlay",
 				"BirthChannelOwned",
 				"BirthCreatorIdentity",
+				"HomeReader",
+				"HomeOf",
+				"identitystore",
+				"ActorControlRow",
 			} {
 				if strings.Contains(string(body), forbidden) {
 					t.Errorf(
@@ -308,40 +313,60 @@ func TestActorIdentityStorageHomeIsPhysicallyConfined(t *testing.T) {
 	}
 }
 
-func TestForkMemoryPublicationHasNoPostCommitFailureTail(t *testing.T) {
-	store := readAuthorityContractFile(t, "../platform/home/actor_store.go")
-	start := strings.Index(store, "func (s *homeActorStore) CommitFork(")
-	if start < 0 {
-		t.Fatal("homeActorStore.CommitFork missing")
+// Fork settles inside the ledger lock and has ZERO durable footprint: every
+// fallible step (digest, admission, key mint) precedes the settle, and the
+// three settled writes — entry install, ledger publish, replay-table row —
+// cannot fail.
+func TestForkPublicationHasNoPostCommitFailureTail(t *testing.T) {
+	source := readAuthorityContractFile(t, "../runtime/actorctl/fork.go")
+	settle := strings.Index(source, "// Settled: nothing below can fail.")
+	if settle < 0 {
+		t.Fatal("fork settle marker missing")
 	}
-	body := store[start:]
-	prepare := strings.Index(body, "identitystore.PrepareMemory(row)")
-	commit := strings.Index(body, "s.cs.SysOps.ForkActor(")
-	publish := strings.Index(body, "s.identities.PublishMemory(prepared)")
-	if prepare < 0 || commit < 0 || publish < 0 ||
-		!(prepare < commit && commit < publish) {
-		t.Fatalf(
-			"Fork memory publication order invalid: prepare=%d commit=%d publish=%d",
-			prepare, commit, publish,
-		)
+	before, after := source[:settle], source[settle:]
+	if end := strings.Index(after, "\n}\n"); end >= 0 {
+		after = after[:end]
+	}
+	for _, required := range []string{
+		"channel.Digest(",
+		"c.checkCurrentLocked(",
+		"mintAttempt()",
+	} {
+		if !strings.Contains(before, required) {
+			t.Errorf("fallible fork step %q must precede the settle", required)
+		}
+	}
+	for _, required := range []string{
+		"c.store.InstallEntry(record)",
+		"c.actors[child] = managedActor{",
+		"c.forks[key] = forkEntry{",
+	} {
+		if !strings.Contains(after, required) {
+			t.Errorf("settled fork step %q missing", required)
+		}
+	}
+	if strings.Contains(after, "err") {
+		t.Error("fork carries a failure tail after the change settled")
 	}
 
-	identityStore := readAuthorityContractFile(t, "../runtime/identitystore/store.go")
-	publishStart := strings.Index(
-		identityStore,
-		"func (s *Store) PublishMemory(prepared PreparedMemory) {",
-	)
-	if publishStart < 0 {
-		t.Fatal("IdentityStore.PublishMemory must be an infallible operation")
+	// The entry install itself is birth semantics: no context, no error, and a
+	// colliding id fails the process rather than last-wins.
+	store := readAuthorityContractFile(t, "../runtime/actorstore/store.go")
+	installStart := strings.Index(store, "func (s *Store) InstallEntry(record storespec.ActorRecord) {")
+	if installStart < 0 {
+		t.Fatal("actorstore.InstallEntry must be an infallible operation")
 	}
-	publishBody := identityStore[publishStart:]
-	if end := strings.Index(publishBody, "\n}"); end >= 0 {
-		publishBody = publishBody[:end]
+	installBody := store[installStart:]
+	if end := strings.Index(installBody, "\n}"); end >= 0 {
+		installBody = installBody[:end]
 	}
-	for _, forbidden := range []string{"context.Context", "error", "s.durable."} {
-		if strings.Contains(publishBody, forbidden) {
-			t.Errorf("IdentityStore.PublishMemory contains failure tail %q", forbidden)
+	for _, forbidden := range []string{"context.Context", "error", "s.registry."} {
+		if strings.Contains(installBody, forbidden) {
+			t.Errorf("actorstore.InstallEntry contains failure tail %q", forbidden)
 		}
+	}
+	if !strings.Contains(installBody, "panic(") {
+		t.Error("actorstore.InstallEntry must fail-stop on a colliding entry")
 	}
 }
 

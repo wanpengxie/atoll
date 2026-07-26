@@ -17,19 +17,25 @@ func (h *Home) resolveAudience(ctx context.Context, env *message.Envelope) error
 	if err != nil {
 		return err
 	}
-	if defaultID != "" {
-		if _, live := h.View().Stat(defaultID); live {
-			env.Audience = message.Audience{defaultID}
-			env.Kind = message.KindRequest
-			return nil
+	if hasDefault && defaultID != "" {
+		// The pointer is channel configuration, never a dead actor's belonging,
+		// so terminal leaves it dangling on purpose. A pointer at a
+		// deregistered actor reads as UNCONFIGURED and falls back to boost; a
+		// pointer at a member who is merely absent right now keeps refusing, so
+		// "a configured default never silently changes destination" still holds
+		// for the case it actually protects.
+		member, memberErr := h.actors.IsActive(ctx, defaultID)
+		if memberErr != nil {
+			return memberErr
 		}
-	}
-	// A configured default is an explicit routing decision. If its current
-	// actor endpoint is unavailable, fail this request without silently changing
-	// the destination to boost (or a human broadcast). Boost is only the
-	// fallback for channels that have no configured default.
-	if hasDefault {
-		return ErrRoutingUnavailable
+		if member {
+			if _, live := h.View().Stat(defaultID); live {
+				env.Audience = message.Audience{defaultID}
+				env.Kind = message.KindRequest
+				return nil
+			}
+			return ErrRoutingUnavailable
+		}
 	}
 	boost, hasBoost, err := h.View().DeclaredBySourceOne(ctx, defaultRoutingAgentSource)
 	if err != nil {

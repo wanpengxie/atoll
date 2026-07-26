@@ -157,14 +157,18 @@ func TestAccessDoorVerticalSlice(t *testing.T) {
 func TestChannelOwnerRecoversStrandedDaemonResource(t *testing.T) {
 	ctx := context.Background()
 	cs := openAccessChannel(t)
-	admitted, err := cs.DeclAdmission.AdmitDeclared(ctx, storespec.AdmitBundle{
-		Kind: actor.KindHuman, Principal: "channel-owner", Role: storespec.RoleOwner,
-		Class: "human", Placement: storespec.NewServerPlacement(), CreatedAt: 1,
+	record, err := cs.Actors.Insert(ctx, storespec.ActorDraft{
+		Kind: actor.KindHuman, Principal: "channel-owner",
+		Definition: storespec.ActorDefinition{Class: "human"},
+		Placement:  storespec.NewServerPlacement(), CreatedAt: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	owner := cs.Access.MintAdmitted(identityAdmission(admitted.ID))
+	// Owner-ness is a door judgement over the genesis pointer, so the fixture
+	// names the owner explicitly rather than reading a bit off the record.
+	cs.markOwner(record.ID)
+	owner := cs.Access.MintAdmitted(identityAdmission(record.ID))
 	const rid resource.ResourceID = "file:stranded"
 	if err := csResourcesCreateForTest(cs, rid, "retired-daemon", "orphan-coord"); err != nil {
 		t.Fatal(err)
@@ -220,7 +224,10 @@ type testAccessChannel struct {
 	*ChannelStores
 	Access accessdoor.AccessMinter
 	Outbox resourcespec.ResourceOutbox
+	owner  *actor.ActorID
 }
+
+func (c *testAccessChannel) markOwner(id actor.ActorID) { *c.owner = id }
 
 type testResourceOutbox struct {
 	resourcespec.ResourceOutbox
@@ -242,7 +249,8 @@ func openAccessChannel(t *testing.T) *testAccessChannel {
 	if err != nil {
 		t.Fatalf("OpenChannel: %v", err)
 	}
-	authority := testAccessAuthority{declared: cs.Declared}
+	owner := new(actor.ActorID)
+	authority := testAccessAuthority{declared: cs.Actors, owner: owner}
 	access, completion, err := accessdoor.NewAssembly(accessdoor.Deps{
 		Registry:  cs.Assembly.Resources,
 		Drivers:   accessdoor.DriverTable{resourcespec.KindKV: cs.Assembly.KV},
@@ -261,22 +269,24 @@ func openAccessChannel(t *testing.T) *testAccessChannel {
 			ResourceOutbox: cs.Assembly.Resources,
 			completion:     completion,
 		},
+		owner: owner,
 	}
 }
 
 type testAccessAuthority struct {
-	declared storespec.DeclaredControlReader
+	declared storespec.ActorRegistryStore
+	owner    *actor.ActorID
 }
 
-func (a testAccessAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorControlRow, bool, error) {
-	rec, ok, err := a.declared.LookupDeclaredActive(ctx, id)
+func (a testAccessAuthority) LookupActive(ctx context.Context, id actor.ActorID) (storespec.ActorRecord, bool, error) {
+	rec, ok, err := a.declared.LookupActive(ctx, id)
 	if err != nil || !ok {
-		return storespec.ActorControlRow{}, false, err
+		return storespec.ActorRecord{}, false, err
 	}
 	return rec, true, nil
 }
 
-func (a testAccessAuthority) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
+func (a testAccessAuthority) ListActive(context.Context) ([]storespec.ActorRecord, error) {
 	return nil, nil
 }
 
@@ -310,7 +320,7 @@ func (a testAccessAuthority) ResourceActorFacts(
 	}
 	return storespec.ResourceActorFacts{
 		Active:               true,
-		Owner:                row.Role == storespec.RoleOwner,
+		Owner:                a.owner != nil && *a.owner == row.ID,
 		PreferredStorageHost: host,
 	}, nil
 }

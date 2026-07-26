@@ -1,7 +1,11 @@
 package home
 
 import (
+	"context"
+
+	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
 	"github.com/wanpengxie/atoll/runtime/storespec"
@@ -20,25 +24,10 @@ func (e homeActorEffects) PlanPoke(domain actorhost.ExecutionDomain) {
 	}
 }
 
-func (e homeActorEffects) ApplyPostCommit(effects storespec.PostCommitEffects) {
-	h := e.home
-	if h == nil {
-		return
-	}
-	if effects.KickDaemon != nil && h.links != nil {
-		h.links.KickDaemon(string(*effects.KickDaemon))
-	}
-	for _, principal := range effects.Principals {
-		if principal != "" && h.onMembershipChange != nil {
-			h.onMembershipChange(principal)
-		}
-	}
-	if effects.Poke {
-		h.pokeReconcile()
-	}
-}
-
-func (e homeActorEffects) RunActorsEnded(ids []actor.ActorID) {
+// ActorsEnded releases process memory held for dead ids. It is plain resource
+// hygiene: idempotent, unclassified, never retried, no tombstone. Durable rows
+// belonging to the dead are inert data and are deliberately left alone.
+func (e homeActorEffects) ActorsEnded(ids []actor.ActorID) {
 	h := e.home
 	if h == nil {
 		return
@@ -61,6 +50,97 @@ func (e homeActorEffects) Fatal(err error) {
 	}
 	h.logger.Error("platform.home.system_kernel_failed", "err", err)
 	go func() { _ = h.closeInternal("system_kernel_failed") }()
+}
+
+// notifyMembership is the membership-change tail. The command layer carries its
+// own principals; nothing is echoed back from the store.
+func (h *Home) notifyMembership(principals ...string) {
+	if h == nil || h.onMembershipChange == nil {
+		return
+	}
+	for _, principal := range principals {
+		if principal != "" {
+			h.onMembershipChange(principal)
+		}
+	}
+}
+
+// ---------------------------------------------------------------------------
+// lifecycle narration (best effort, never machine truth)
+// ---------------------------------------------------------------------------
+
+// announceRegistered and announceEnded write the "so-and-so joined / left the
+// channel" narration into the conversation stream with the system pen. They are
+// best effort: a crash window may drop one, and nothing ever back-fills or
+// reconciles them. No machine ever derives actor truth from message history.
+func (h *Home) announceRegistered(ctx context.Context, record storespec.ActorRecord) {
+	if h == nil || h.systemPen == nil || record.ID == "" {
+		return
+	}
+	h.writeNarration(ctx, &message.Envelope{
+		ID:   message.ID("actor-registered:" + string(record.ID)),
+		Kind: message.KindEvent, Type: actor.ReservedSystemActorRegistered,
+		Payload: jsonPayload(map[string]any{
+			"actor_id": record.ID, "actor_kind": record.Kind,
+			"registered_at": record.CreatedAt,
+		}),
+		Visibility: message.VisibilitySystem,
+		Audience:   message.Audience{actor.SystemActorID},
+	})
+}
+
+func (h *Home) announceEnded(
+	ctx context.Context,
+	ids []actor.ActorID,
+	reason string,
+	endedBy actor.ActorID,
+) {
+	if h == nil || h.systemPen == nil || len(ids) == 0 {
+		return
+	}
+	if reason == "" {
+		reason = "ended"
+	}
+	at := h.nowMs()
+	for _, id := range ids {
+		h.writeNarration(ctx, &message.Envelope{
+			ID:   message.ID("actor-ended:" + string(id)),
+			Kind: message.KindEvent, Type: actor.ReservedSystemActorEnded,
+			Payload: jsonPayload(map[string]any{
+				"target_id": id, "reason": reason,
+				"ended_at": at, "ended_by": endedBy,
+			}),
+			Visibility: message.VisibilitySystem,
+			Audience:   message.Audience{actor.SystemActorID},
+		})
+	}
+}
+
+// announceAudit narrates one completed management operation. Same discipline:
+// narration, never a ledger a machine reads.
+func (h *Home) announceAudit(ctx context.Context, operation string, detail map[string]any) {
+	if h == nil || h.systemPen == nil {
+		return
+	}
+	payload := map[string]any{"operation": operation}
+	for k, v := range detail {
+		payload[k] = v
+	}
+	h.writeNarration(ctx, &message.Envelope{
+		ID:   message.ID("sysop:" + operation + ":" + uuid.NewString()),
+		Kind: message.KindEvent, Type: sysOpAuditType, Payload: jsonPayload(payload),
+		Visibility: message.VisibilitySystem,
+		Audience:   message.Audience{actor.SystemActorID},
+	})
+}
+
+const sysOpAuditType = "sysop_completed"
+
+func (h *Home) writeNarration(ctx context.Context, env *message.Envelope) {
+	if _, err := h.systemPen.Write(ctx, env); err != nil {
+		h.logger.Debug("platform.narration.dropped",
+			"channel", h.channelID, "envelope", env.ID, "err", err)
+	}
 }
 
 // homeHostEvents projects current local Body observations into presence. Host

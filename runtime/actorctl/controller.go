@@ -2,101 +2,97 @@ package actorctl
 
 import (
 	"context"
-	"maps"
 	"slices"
 	"sync"
+	"time"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
+// Store is the record port the Controller drives. It is defined here purely so
+// unit tests can substitute a fake; runtime assembly always hands in the real
+// *actorstore.Store. It speaks record language only — no authorization
+// coordinate ever crosses it, which is how "the actor store does not own
+// AttemptKey" becomes a compiler guarantee.
+type Store interface {
+	RestoreActive(context.Context) ([]storespec.ActorRecord, error)
+	Insert(context.Context, storespec.ActorDraft) (storespec.ActorRecord, error)
+	UpdateDefinition(context.Context, actor.ActorID, storespec.ActorDefinition) (storespec.ActorRecord, error)
+	Deregister(context.Context, []actor.ActorID) error
+	InstallEntry(storespec.ActorRecord)
+}
+
 // Controller is the sole owner of the managed actor value ledger.
 //
-// It deliberately owns no Host, System kernel, capability minter, actor
-// factory, desired loop, routing surface, or Platform callback. Every mutation
-// enters through a typed method below; the control gate, Store commit and
-// in-memory publication stay inside this organ.
+// Every lifecycle command serializes on ONE ledger lock and performs exactly
+// one complete ledger change inside it: outside the lock only the before-state
+// or the after-state is ever visible, never an intermediate. Fallible steps
+// (validation, AttemptKey pre-mint, the durable transaction) all happen before
+// the change settles; after it settles nothing can fail — publication is plain
+// memory assignment, and the Controller never reads a record back.
 type Controller struct {
 	store Store
+	nowMs func() int64
 	owner commandOwner
 
-	stateMu sync.RWMutex
-	phase   ControllerPhase
-	actors  map[actor.ActorID]ActiveActor
-
-	gates         controlGates
-	placementGate sync.Mutex
+	// ledger guards the entire ledger state: phase, the member ledger and the
+	// fork replay table. Readers take the read end; nothing bypasses it.
+	ledger sync.RWMutex
+	phase  ControllerPhase
+	actors map[actor.ActorID]managedActor
+	forks  map[forkKey]forkEntry
 }
 
 // New constructs a bootstrapping managed actor Controller.
-func New(store Store) (*Controller, error) {
+func New(store Store, nowMs func() int64) (*Controller, error) {
 	if store == nil {
 		return nil, ErrInvalidMutation
 	}
+	if nowMs == nil {
+		nowMs = func() int64 { return time.Now().UnixMilli() }
+	}
 	return &Controller{
 		store:  store,
+		nowMs:  nowMs,
 		phase:  Bootstrapping,
-		actors: make(map[actor.ActorID]ActiveActor),
+		actors: make(map[actor.ActorID]managedActor),
+		forks:  make(map[forkKey]forkEntry),
 	}, nil
 }
 
-// Bootstrap is the immutable non-managed value discovered while booting the
-// Controller Store. The Controller validates it but does not retain it: the
-// System kernel is a separate lifecycle root owned by the Platform.
-type Bootstrap struct {
-	System storespec.ActorControlRow
-}
-
-// Start publishes the complete managed value-ledger image exactly once.
-func (c *Controller) Start(ctx context.Context) (Bootstrap, error) {
+// Start publishes the complete managed value-ledger image exactly once. Every
+// restored record is a member: the kernel has no record, so there is nothing to
+// sift out and no bootstrap value to hand back.
+func (c *Controller) Start(ctx context.Context) error {
 	if c == nil {
-		return Bootstrap{}, ErrClosed
+		return ErrClosed
 	}
-	rows, err := c.store.RestoreActive(ctx)
+	records, err := c.store.RestoreActive(ctx)
 	if err != nil {
-		return Bootstrap{}, err
+		return err
 	}
-	var system storespec.ActorControlRow
-	systemCount := 0
-	managed := make(map[actor.ActorID]ActiveActor)
-	for _, row := range rows {
-		if row.ID == actor.SystemActorID {
-			if row.Kind != actor.KindSystem {
-				return Bootstrap{}, ErrInvalidKernel
-			}
-			system = cloneControlRow(row)
-			systemCount++
-			continue
-		}
-		def, err := definitionFromStored(StoredActor{Row: row})
-		if err != nil {
-			return Bootstrap{}, err
-		}
+	managed := make(map[actor.ActorID]managedActor, len(records))
+	for _, record := range records {
 		key, err := mintAttempt()
 		if err != nil {
-			return Bootstrap{}, err
+			return err
 		}
-		managed[row.ID] = ActiveActor{
-			Definition: def,
-			Desired:    DesiredState{AttemptKey: key},
-		}
-	}
-	if systemCount != 1 {
-		return Bootstrap{}, ErrInvalidKernel
+		managed[record.ID] = managedActor{Record: record.Clone(), Attempt: key}
 	}
 
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
+	c.ledger.Lock()
+	defer c.ledger.Unlock()
 	if c.phase != Bootstrapping {
 		if c.phase == Closed {
-			return Bootstrap{}, ErrClosed
+			return ErrClosed
 		}
-		return Bootstrap{}, ErrAlreadyStarted
+		return ErrAlreadyStarted
 	}
-	c.actors = maps.Clone(managed)
+	c.actors = managed
 	c.phase = Running
-	return Bootstrap{System: system}, nil
+	return nil
 }
 
 // Quiesce seals command admission and joins all commands already admitted.
@@ -113,10 +109,10 @@ func (c *Controller) Close() {
 	if c == nil {
 		return
 	}
-	c.stateMu.Lock()
+	c.ledger.Lock()
 	c.phase = Closed
-	c.actors = make(map[actor.ActorID]ActiveActor)
-	c.stateMu.Unlock()
+	c.actors = make(map[actor.ActorID]managedActor)
+	c.ledger.Unlock()
 }
 
 func (c *Controller) beginCommand() (func(), error) {
@@ -131,87 +127,65 @@ func (c *Controller) Phase() ControllerPhase {
 	if c == nil {
 		return Closed
 	}
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
 	return c.phase
 }
 
-func cloneControlRow(row storespec.ActorControlRow) storespec.ActorControlRow {
-	row.Config = append([]byte(nil), row.Config...)
-	return row
-}
+func mintAttempt() (actorhost.AttemptKey, error) { return actorhost.NewAttemptKey() }
 
-func cloneActive(value ActiveActor) ActiveActor {
-	value.Definition.Execution.Config = append([]byte(nil), value.Definition.Execution.Config...)
-	return value
-}
-
-// Lookup returns one coherent managed value-ledger entry.
-func (c *Controller) Lookup(id actor.ActorID) (ActiveActor, bool, error) {
-	if id == actor.SystemActorID {
-		return ActiveActor{}, false, ErrReservedSystem
-	}
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	switch c.phase {
-	case Bootstrapping:
-		return ActiveActor{}, false, ErrBootstrapping
-	case Closed:
-		return ActiveActor{}, false, ErrClosed
-	}
-	value, ok := c.actors[id]
-	return cloneActive(value), ok, nil
-}
-
-// Snapshot returns the coherent managed value-ledger level.
-func (c *Controller) Snapshot() (map[actor.ActorID]ActiveActor, error) {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	switch c.phase {
-	case Bootstrapping:
-		return nil, ErrBootstrapping
-	case Closed:
-		return nil, ErrClosed
-	}
-	out := make(map[actor.ActorID]ActiveActor, len(c.actors))
-	for id, value := range c.actors {
-		out[id] = cloneActive(value)
-	}
-	return out, nil
-}
-
-// checkCurrentSnapshot is a read-only sliding-window verdict. Lifecycle
-// mutations never use it outside their Controller-owned control gate.
-func (c *Controller) checkCurrentSnapshot(id actor.ActorID, key actorhost.AttemptKey) error {
-	if id == actor.SystemActorID {
-		return ErrReservedSystem
-	}
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
+// runnableLocked is the phase guard shared by every ledger read and write.
+func (c *Controller) runnableLocked() error {
 	switch c.phase {
 	case Bootstrapping:
 		return ErrBootstrapping
 	case Closed:
 		return ErrClosed
 	}
+	return nil
+}
+
+// lookup is an internal complete-snapshot read. It is deliberately unexported:
+// no consumer receives a whole record as a general authority.
+func (c *Controller) lookup(id actor.ActorID) (managedActor, bool, error) {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
+		return managedActor{}, false, err
+	}
+	value, ok := c.actors[id]
+	if !ok {
+		return managedActor{}, false, nil
+	}
+	return value.clone(), true, nil
+}
+
+// checkCurrentSnapshot is the A/G verdict: acting as the CURRENT term.
+func (c *Controller) checkCurrentSnapshot(id actor.ActorID, key actorhost.AttemptKey) error {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	return c.checkCurrentLocked(id, key)
+}
+
+func (c *Controller) checkCurrentLocked(id actor.ActorID, key actorhost.AttemptKey) error {
+	if err := c.runnableLocked(); err != nil {
+		return err
+	}
 	value, ok := c.actors[id]
 	if !ok {
 		return ErrInactive
 	}
-	if value.Desired.AttemptKey != key {
+	if value.Attempt != key {
 		return ErrStaleAttempt
 	}
 	return nil
 }
 
-// AuthorActive is the collaboration/identity verdict. It does not compare
-// AttemptKey or declaration version.
+// AuthorActive is the A verdict: the identity is a member right now. It spans
+// terms and never compares AttemptKey.
 func (c *Controller) AuthorActive(id actor.ActorID) error {
-	if id == actor.SystemActorID {
-		return ErrReservedSystem
-	}
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
 	if c.phase != Running {
 		if c.phase == Bootstrapping {
 			return ErrBootstrapping
@@ -224,58 +198,172 @@ func (c *Controller) AuthorActive(id actor.ActorID) error {
 	return nil
 }
 
-func mintAttempt() (actorhost.AttemptKey, error) { return actorhost.NewAttemptKey() }
-
-func (c *Controller) delete(ids []actor.ActorID) {
-	c.stateMu.Lock()
-	for _, id := range ids {
-		delete(c.actors, id)
+// IsActive is the one "is this legal right now" boolean question.
+func (c *Controller) IsActive(_ context.Context, id actor.ActorID) (bool, error) {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
+		return false, err
 	}
-	c.stateMu.Unlock()
+	_, ok := c.actors[id]
+	return ok, nil
+}
+
+// ActiveKind is the remote Stat narrow query. It never needs a whole record.
+func (c *Controller) ActiveKind(id actor.ActorID) (actor.Kind, bool) {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if c.phase != Running {
+		return "", false
+	}
+	value, ok := c.actors[id]
+	if !ok {
+		return "", false
+	}
+	return value.Record.Kind, true
+}
+
+// AdmitIdentity returns one coherent ActorID-level collaboration snapshot.
+func (c *Controller) AdmitIdentity(
+	_ context.Context,
+	id actor.ActorID,
+) (storespec.IdentityAdmission, bool, error) {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
+		return storespec.IdentityAdmission{}, false, err
+	}
+	value, ok := c.actors[id]
+	if !ok {
+		return storespec.IdentityAdmission{}, false, nil
+	}
+	return storespec.IdentityAdmission{ID: id, Kind: value.Record.Kind}, true, nil
+}
+
+// LookupActive is the transitional whole-record read. Narrow question-shaped
+// projections replace it consumer by consumer; nothing new may take it.
+func (c *Controller) LookupActive(
+	_ context.Context,
+	id actor.ActorID,
+) (storespec.ActorRecord, bool, error) {
+	value, ok, err := c.lookup(id)
+	if err != nil || !ok {
+		return storespec.ActorRecord{}, ok, err
+	}
+	return value.Record, true, nil
+}
+
+// ListActive is the transitional whole-record listing, in canonical id order.
+func (c *Controller) ListActive(context.Context) ([]storespec.ActorRecord, error) {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
+		return nil, err
+	}
+	out := make([]storespec.ActorRecord, 0, len(c.actors))
+	for _, value := range c.actors {
+		out = append(out, value.Record.Clone())
+	}
+	sortByActorID(out, func(v storespec.ActorRecord) actor.ActorID { return v.ID })
+	return out, nil
+}
+
+// ActiveIdentities answers "who is here right now" for the presence and
+// connection-slot sweeps. It carries no definition.
+func (c *Controller) ActiveIdentities() ([]ActiveIdentity, error) {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
+		return nil, err
+	}
+	out := make([]ActiveIdentity, 0, len(c.actors))
+	for id, value := range c.actors {
+		out = append(out, ActiveIdentity{ID: id, Kind: value.Record.Kind})
+	}
+	sortByActorID(out, func(v ActiveIdentity) actor.ActorID { return v.ID })
+	return out, nil
+}
+
+// DeclaredReconcileList answers "what does declaration reconcile compare
+// against". Its only consumer is the Platform declaration pull loop.
+func (c *Controller) DeclaredReconcileList() ([]DeclaredInstance, error) {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
+		return nil, err
+	}
+	out := make([]DeclaredInstance, 0, len(c.actors))
+	for id, value := range c.actors {
+		if value.Record.SourceDeclID == "" {
+			continue
+		}
+		out = append(out, DeclaredInstance{
+			ID: id, Kind: value.Record.Kind,
+			SourceDeclID: value.Record.SourceDeclID,
+			Definition:   value.Record.Definition.Clone(),
+		})
+	}
+	sortByActorID(out, func(v DeclaredInstance) actor.ActorID { return v.ID })
+	return out, nil
+}
+
+// ResourceActorFacts is the resource domain's native fact projection. It does
+// not answer channel-owner questions: owner lives on the genesis pointer at the
+// Platform door, never in the value ledger.
+func (c *Controller) ResourceActorFacts(
+	_ context.Context,
+	id actor.ActorID,
+) (storespec.ResourceActorFacts, error) {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
+		return storespec.ResourceActorFacts{}, err
+	}
+	value, ok := c.actors[id]
+	if !ok {
+		return storespec.ResourceActorFacts{}, nil
+	}
+	facts := storespec.ResourceActorFacts{Active: true}
+	if value.Record.Placement.Kind == storespec.PlacementDaemon {
+		facts.PreferredStorageHost = value.Record.Placement.Host
+	}
+	return facts, nil
 }
 
 // DesiredFor projects a complete execution-domain level from managed truth.
 func (c *Controller) DesiredFor(
 	domain, server actorhost.ExecutionDomain,
 ) ([]actorhost.Desired, error) {
-	actors, err := c.Snapshot()
-	if err != nil {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
 		return nil, err
 	}
-	ids := make([]actor.ActorID, 0, len(actors))
-	for id := range actors {
+	ids := make([]actor.ActorID, 0, len(c.actors))
+	for id := range c.actors {
 		ids = append(ids, id)
 	}
-	slices.SortFunc(ids, func(a, b actor.ActorID) int {
-		switch {
-		case a < b:
-			return -1
-		case a > b:
-			return 1
-		default:
-			return 0
-		}
-	})
+	slices.Sort(ids)
 	out := make([]actorhost.Desired, 0, len(ids))
 	for _, id := range ids {
-		value := actors[id]
-		def := value.Definition
-		switch def.Placement.Kind {
+		value := c.actors[id]
+		spec := executionSpec(value.Record)
+		switch value.Record.Placement.Kind {
 		case storespec.PlacementServer:
 			if domain == server {
 				out = append(out, actorhost.BodyDesired{
-					ActorID: id, AttemptKey: value.Desired.AttemptKey, ExecutionSpec: def.Execution,
+					ActorID: id, AttemptKey: value.Attempt, ExecutionSpec: spec,
 				})
 			}
 		case storespec.PlacementDaemon:
-			peer := actorhost.ExecutionDomain(def.Placement.Host)
+			peer := actorhost.ExecutionDomain(value.Record.Placement.Host)
 			if domain == server {
 				out = append(out, actorhost.CarrierDesired{
-					ActorID: id, AttemptKey: value.Desired.AttemptKey, PeerDomain: peer,
+					ActorID: id, AttemptKey: value.Attempt, PeerDomain: peer,
 				})
 			} else if domain == peer {
 				out = append(out, actorhost.BodyDesired{
-					ActorID: id, AttemptKey: value.Desired.AttemptKey, ExecutionSpec: def.Execution,
+					ActorID: id, AttemptKey: value.Attempt, ExecutionSpec: spec,
 				})
 			}
 		default:
@@ -285,27 +373,12 @@ func (c *Controller) DesiredFor(
 	return out, nil
 }
 
-// ActiveRows returns the managed collaboration projection in canonical order.
-func (c *Controller) ActiveRows() ([]storespec.ActorControlRow, error) {
-	values, err := c.Snapshot()
-	if err != nil {
-		return nil, err
+func executionSpec(record storespec.ActorRecord) actorhost.ExecutionSpec {
+	return actorhost.ExecutionSpec{
+		Kind:   record.Kind,
+		Class:  record.Definition.Class,
+		Config: cloneRaw(record.Definition.Config),
 	}
-	out := make([]storespec.ActorControlRow, 0, len(values))
-	for id, value := range values {
-		out = append(out, rowFromActive(id, value))
-	}
-	slices.SortFunc(out, func(left, right storespec.ActorControlRow) int {
-		switch {
-		case left.ID < right.ID:
-			return -1
-		case left.ID > right.ID:
-			return 1
-		default:
-			return 0
-		}
-	})
-	return out, nil
 }
 
 // AuthorizeAttach is the logical A/G + placement admission for one daemon
@@ -315,19 +388,35 @@ func (c *Controller) AuthorizeAttach(
 	key actorhost.AttemptKey,
 	peer actorhost.ExecutionDomain,
 ) error {
-	if err := c.checkCurrentSnapshot(id, key); err != nil {
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.checkCurrentLocked(id, key); err != nil {
 		return err
 	}
-	value, ok, err := c.Lookup(id)
-	if err != nil {
-		return err
-	}
-	if !ok {
-		return ErrInactive
-	}
-	if value.Definition.Placement.Kind != storespec.PlacementDaemon ||
-		actorhost.ExecutionDomain(value.Definition.Placement.Host) != peer {
+	value := c.actors[id]
+	if value.Record.Placement.Kind != storespec.PlacementDaemon ||
+		actorhost.ExecutionDomain(value.Record.Placement.Host) != peer {
 		return ErrInvalidMutation
 	}
 	return nil
 }
+
+func sortByActorID[T any](values []T, key func(T) actor.ActorID) {
+	slices.SortFunc(values, func(left, right T) int {
+		switch a, b := key(left), key(right); {
+		case a < b:
+			return -1
+		case a > b:
+			return 1
+		default:
+			return 0
+		}
+	})
+}
+
+func cloneRaw(raw []byte) []byte { return append([]byte(nil), raw...) }
+
+var _ storespec.ActorDirectory = (*Controller)(nil)
+var _ storespec.IdentityPresence = (*Controller)(nil)
+var _ storespec.CollaborationAuthority = (*Controller)(nil)
+var _ storespec.ResourceActorAuthority = (*Controller)(nil)

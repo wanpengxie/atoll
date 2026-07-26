@@ -857,7 +857,10 @@ func TestHostCoreConformanceOnServerAndDaemonDomains(t *testing.T) {
 	}
 }
 
-func TestSystemActorRejectedAtHostBoundaries(t *testing.T) {
+// The kernel needs no special rejection branch here: it is never a member, so
+// the value ledger never emits a system coordinate and an unhosted id simply
+// answers "not hosted" through the ordinary path.
+func TestSystemActorIsSimplyNotHosted(t *testing.T) {
 	t.Parallel()
 	host, err := New(Config{
 		Domain:      "server",
@@ -867,17 +870,6 @@ func TestSystemActorRejectedAtHostBoundaries(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer closeHost(t, host)
-	key := testAttempt(t)
-	if err := host.AcceptFullDesired([]Desired{
-		bodyDesiredFor(t, actor.SystemActorID, key),
-	}); !errors.Is(err, ErrReservedSystem) {
-		t.Fatalf("desired error = %v", err)
-	}
-	binding := newTestBinding()
-	if err := host.Attach(actor.SystemActorID, key, exactTestBinding(t, binding)); !errors.Is(err, ErrReservedSystem) {
-		t.Fatalf("attach error = %v", err)
-	}
-	binding.finish()
 	if err := host.Deliver(actor.SystemActorID, &message.Envelope{ID: "x"}); !errors.Is(err, ErrNotHosted) {
 		t.Fatalf("deliver error = %v", err)
 	}

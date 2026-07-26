@@ -280,7 +280,7 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 	}()
 	for _, declaration := range spec.GenesisDeclarations {
 		rows, err := homeInstance.View().DeclaredBySource(ctx, declaration.DeclID)
-		if err != nil || len(rows) != 1 || rows[0].Class != declaration.Rendered.Class {
+		if err != nil || len(rows) != 1 || rows[0].Definition.Class != declaration.Rendered.Class {
 			return ProvisionReceipt{}, fmt.Errorf("channelhost: genesis declaration %q failed readback", declaration.DeclID)
 		}
 	}
@@ -332,12 +332,12 @@ func (h *ChannelHost) Open(ctx context.Context, spec OpenSpec) error {
 		return ErrChannelNotFound
 	}
 	genesis := storespec.ChannelGenesis{ChannelID: string(spec.ChannelID), Type: spec.ExpectedType}
-	// Read the owner from genesis first through a narrow store-only pass would
-	// duplicate assembly. Home validates ID/type, then ChannelHost reads the
-	// trusted owner from the resulting View and compares it to stored genesis.
+	// Owner has exactly one home — the immutable genesis pointer — so opening
+	// checks only that the pointer is present. There is no second account to
+	// cross-check it against.
 	homeInstance, err := h.openHome(spec.ChannelID, main, false, &genesis, "", nil)
 	if err != nil {
-		if strings.Contains(err.Error(), "owner invariant") {
+		if strings.Contains(err.Error(), "owner principal") {
 			return errors.Join(ErrOwnerInvariant, err)
 		}
 		if strings.Contains(err.Error(), "schema incompatible") {

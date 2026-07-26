@@ -1,11 +1,8 @@
 package actorctl
 
 import (
-	"context"
-
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
-	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // IdentityAuthority is an opaque Controller-minted identity capability.
@@ -44,112 +41,45 @@ func (a RunAuthority) ActorID() actor.ActorID           { return a.id }
 func (a RunAuthority) AttemptKey() actorhost.AttemptKey { return a.attempt }
 
 // PreparedRun is the coherent immutable input for exactly one managed Unit
-// capability mint. Only Controller can construct one.
+// capability mint. Only Controller can construct one. It carries no definition:
+// the body builder already holds Host's exact desired input.
 type PreparedRun struct {
-	id         actor.ActorID
-	attempt    actorhost.AttemptKey
-	definition ActorDefinition
-	identity   IdentityAuthority
-	run        RunAuthority
+	id       actor.ActorID
+	attempt  actorhost.AttemptKey
+	kind     actor.Kind
+	identity IdentityAuthority
+	run      RunAuthority
 }
 
 func (p PreparedRun) ActorID() actor.ActorID           { return p.id }
 func (p PreparedRun) AttemptKey() actorhost.AttemptKey { return p.attempt }
-func (p PreparedRun) Definition() ActorDefinition      { return cloneDefinition(p.definition) }
+func (p PreparedRun) Kind() actor.Kind                 { return p.kind }
 func (p PreparedRun) Identity() IdentityAuthority      { return p.identity }
 func (p PreparedRun) Run() RunAuthority                { return p.run }
-func cloneDefinition(def ActorDefinition) ActorDefinition {
-	def.Execution.Config = append([]byte(nil), def.Execution.Config...)
-	return def
-}
 
-// PrepareRun returns one coherent A/G/Definition snapshot. It does not inspect
-// Host physical current and does not mint individual capability arms.
+// PrepareRun returns one coherent A/G snapshot for one body assembly. It does
+// not inspect Host physical current and does not mint individual capability
+// arms.
 func (c *Controller) PrepareRun(
 	id actor.ActorID,
 	key actorhost.AttemptKey,
 	spec actorhost.ExecutionSpec,
 ) (PreparedRun, error) {
-	if id == actor.SystemActorID {
-		return PreparedRun{}, ErrReservedSystem
-	}
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	switch c.phase {
-	case Bootstrapping:
-		return PreparedRun{}, ErrBootstrapping
-	case Closed:
-		return PreparedRun{}, ErrClosed
+	c.ledger.RLock()
+	defer c.ledger.RUnlock()
+	if err := c.runnableLocked(); err != nil {
+		return PreparedRun{}, err
 	}
 	value, ok := c.actors[id]
 	if !ok {
 		return PreparedRun{}, ErrInactive
 	}
-	if value.Desired.AttemptKey != key || !value.Definition.Execution.Equal(spec) {
+	if value.Attempt != key || !executionSpec(value.Record).Equal(spec) {
 		return PreparedRun{}, ErrStaleAttempt
 	}
-	def := cloneActive(value).Definition
 	return PreparedRun{
-		id: id, attempt: key, definition: def,
+		id: id, attempt: key, kind: value.Record.Kind,
 		identity: IdentityAuthority{controller: c, id: id},
 		run:      RunAuthority{controller: c, id: id, attempt: key},
 	}, nil
 }
-
-func (c *Controller) LookupActive(
-	_ context.Context,
-	id actor.ActorID,
-) (storespec.ActorControlRow, bool, error) {
-	value, ok, err := c.Lookup(id)
-	if err != nil || !ok {
-		return storespec.ActorControlRow{}, ok, err
-	}
-	return rowFromActive(id, value), true, nil
-}
-
-// AdmitIdentity returns one coherent ActorID-level collaboration snapshot.
-// It is intentionally independent of AttemptKey/Incarnation.
-func (c *Controller) AdmitIdentity(
-	_ context.Context,
-	id actor.ActorID,
-) (storespec.IdentityAdmission, bool, error) {
-	if id == actor.SystemActorID {
-		return storespec.IdentityAdmission{}, false, ErrReservedSystem
-	}
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	switch c.phase {
-	case Bootstrapping:
-		return storespec.IdentityAdmission{}, false, ErrBootstrapping
-	case Closed:
-		return storespec.IdentityAdmission{}, false, ErrClosed
-	}
-	value, ok := c.actors[id]
-	if !ok {
-		return storespec.IdentityAdmission{}, false, nil
-	}
-	return storespec.IdentityAdmission{
-		ID: id, Kind: value.Definition.Kind,
-	}, true, nil
-}
-
-func (c *Controller) ListActive(context.Context) ([]storespec.ActorControlRow, error) {
-	return c.ActiveRows()
-}
-
-func (c *Controller) IsActive(_ context.Context, id actor.ActorID) (bool, error) {
-	c.stateMu.RLock()
-	defer c.stateMu.RUnlock()
-	if c.phase == Bootstrapping {
-		return false, ErrBootstrapping
-	}
-	if c.phase == Closed {
-		return false, ErrClosed
-	}
-	_, ok := c.actors[id]
-	return ok, nil
-}
-
-var _ storespec.ActorDirectory = (*Controller)(nil)
-var _ storespec.IdentityPresence = (*Controller)(nil)
-var _ storespec.CollaborationAuthority = (*Controller)(nil)

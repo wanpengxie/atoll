@@ -174,75 +174,75 @@ func TestHarden03BControllerContainerAndGateOrderAreSingular(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// ONE ledger lock guards the entire ledger state (phase, member ledger, fork
+	// replay table). The per-actor gate shards and the compensating lock family
+	// they existed to coordinate are gone.
 	for _, required := range []string{
-		"stateMu sync.RWMutex",
-		"actors  map[actor.ActorID]ActiveActor",
+		"ledger sync.RWMutex",
+		"actors map[actor.ActorID]managedActor",
+		"forks  map[forkKey]forkEntry",
 		"store Store",
-		"c.actors = maps.Clone(managed)",
-		"return cloneActive(value), ok, nil",
 	} {
 		if !strings.Contains(string(controller), required) {
-			t.Errorf("Controller coherent-container wall missing %q", required)
+			t.Errorf("Controller single-ledger-lock wall missing %q", required)
 		}
 	}
-	gates, err := os.ReadFile("../runtime/actorctl/gates.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, required := range []string{
-		"func (g *controlGates) lockActorSet(",
-		"bytes.Compare([]byte(out[i]), []byte(out[j])) < 0",
+	for _, forbidden := range []string{
+		"placementGate", "controlGates", "lockActorSet", "gates ",
 	} {
-		if !strings.Contains(string(gates), required) {
-			t.Errorf("canonical multi-gate wall missing %q", required)
+		if strings.Contains(string(controller), forbidden) {
+			t.Errorf("Controller retains compensating lock %q", forbidden)
 		}
+	}
+	if _, err := os.Stat("../runtime/actorctl/gates.go"); err == nil {
+		t.Error("per-actor control gate shards returned")
 	}
 
-	count := 0
 	files := parseProductionPackage(t, "../runtime/actorctl")
 	for _, file := range files {
 		ast.Inspect(file, func(node ast.Node) bool {
-			fn, ok := node.(*ast.FuncDecl)
-			if ok && fn.Name.Name == "lockActorSet" {
-				count++
+			if fn, ok := node.(*ast.FuncDecl); ok && fn.Name.Name == "lockActorSet" {
+				t.Error("multi-gate acquisition returned")
 			}
-			spec, ok := node.(*ast.TypeSpec)
-			if ok && spec.Name.Name == "ChannelActors" {
+			if spec, ok := node.(*ast.TypeSpec); ok && spec.Name.Name == "ChannelActors" {
 				t.Error("runtime/actorctl retained a Channel composition root")
 			}
 			return true
 		})
 	}
-	if count != 1 {
-		t.Fatalf("multi-control-gate acquisition implementations=%d, want 1", count)
-	}
 
+	// Every lifecycle command takes the one ledger lock and performs exactly one
+	// complete change under it.
 	commands, err := os.ReadFile("../runtime/actorctl/commands.go")
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, forbidden := range []string{
-		"a.store.",
-		"a.controller.gates",
-		"a.controller.placementGate",
-		"a.controller.stateMu",
-		"a.controller.actors",
-	} {
-		if strings.Contains(string(commands), forbidden) {
-			t.Errorf("command facade bypasses Controller transition owner with %q", forbidden)
-		}
+	fork, err := os.ReadFile("../runtime/actorctl/fork.go")
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, required := range []string{
-		"return c.admit(ctx, request)",
-		"return c.introduce(ctx, request)",
-		"return c.fork(ctx, request)",
-		"return c.restart(ctx, request)",
-		"return c.applyDefinitionChange(ctx, change)",
-		"return c.attachDaemon(ctx, request)",
-		"return c.terminal(ctx, command)",
+	source := string(commands) + string(fork)
+	for _, name := range []string{
+		"func (c *Controller) Admit(",
+		"func (c *Controller) Introduce(",
+		"func (c *Controller) Fork(",
+		"func (c *Controller) Restart(",
+		"func (c *Controller) ApplyDeclaration(",
+		"func (c *Controller) Terminal(",
 	} {
-		if !strings.Contains(string(commands), required) {
-			t.Errorf("command facade does not delegate complete transition %q", required)
+		start := strings.Index(source, name)
+		if start < 0 {
+			t.Errorf("lifecycle command %q missing", name)
+			continue
+		}
+		end := strings.Index(source[start:], "\n}\n")
+		if end < 0 {
+			t.Fatalf("command %q is unterminated", name)
+		}
+		body := source[start : start+end]
+		if !strings.Contains(body, "c.ledger.Lock()") ||
+			!strings.Contains(body, "defer c.ledger.Unlock()") {
+			t.Errorf("command %q does not run under the one ledger lock", name)
 		}
 	}
 }
@@ -325,17 +325,22 @@ func TestHarden03BP2OwnershipAndRetryWalls(t *testing.T) {
 		return string(body)
 	}
 
-	store := read("../platform/home/actor_store.go")
-	lookupStart := strings.Index(store, "func (s *homeActorStore) LookupFork(")
-	if lookupStart < 0 {
-		t.Fatal("LookupFork implementation not found")
+	// Fork replay is answered by an in-process table, never by a durable
+	// receipt: the restore path knows only the durable registry.
+	store := read("../runtime/actorstore/store.go")
+	if strings.Contains(store, "LookupFork") || strings.Contains(store, "LookupCompleted") {
+		t.Fatal("durable fork receipt lookup returned")
 	}
-	lookupEnd := strings.Index(store[lookupStart:], "\n}\n")
-	if lookupEnd < 0 {
-		t.Fatal("LookupFork implementation is unterminated")
+	restoreStart := strings.Index(store, "func (s *Store) RestoreActive(")
+	if restoreStart < 0 {
+		t.Fatal("RestoreActive implementation not found")
 	}
-	if strings.Contains(store[lookupStart:lookupStart+lookupEnd], "runRows") {
-		t.Fatal("Fork receipt read-back restores run-world state")
+	restoreEnd := strings.Index(store[restoreStart:], "\n}\n")
+	if restoreEnd < 0 {
+		t.Fatal("RestoreActive implementation is unterminated")
+	}
+	if strings.Contains(store[restoreStart:restoreStart+restoreEnd], "s.entries") {
+		t.Fatal("restore reconstructs the process entry table")
 	}
 
 	types := read("../runtime/actorhost/types.go")
@@ -535,7 +540,7 @@ func TestHarden03BBodyConstructionUsesOnlyExactSnapshot(t *testing.T) {
 		},
 		{
 			path:      "../runtime/actorctl/authority.go",
-			required:  []string{"func (c *Controller) PrepareRun(", "value.Desired.AttemptKey != key", "!value.Definition.Execution.Equal(spec)"},
+			required:  []string{"func (c *Controller) PrepareRun(", "value.Attempt != key", "!executionSpec(value.Record).Equal(spec)"},
 			forbidden: []string{"ActualCurrent"},
 		},
 		{
@@ -562,20 +567,25 @@ func TestHarden03BBodyConstructionUsesOnlyExactSnapshot(t *testing.T) {
 	}
 }
 
-func TestHarden03BForkDoesNotCreateSponsorEdge(t *testing.T) {
-	home, err := os.ReadFile("../platform/home/actor_store.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	store, err := os.ReadFile("../runtime/internal/store/sysop.go")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if strings.Contains(string(home), "Sponsor:            request.CallerActorID") {
-		t.Fatal("Fork still writes CallerActorID into child Sponsor")
-	}
-	if strings.Contains(string(store), "row.Sponsor != in.Sender") {
-		t.Fatal("Fork sysop still requires caller→child sponsorship")
+// Sponsor is gone entirely: there is no lineage field, no cascade closure and
+// no sponsor-based End authority anywhere in the tree.
+func TestHarden03BSponsorIsFullyRipped(t *testing.T) {
+	for _, root := range []string{"../runtime", "../platform", "../app", "../lib"} {
+		paths, err := productionFiles(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, path := range paths {
+			body, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, forbidden := range []string{"Sponsor", "ErrEndNotSponsor"} {
+				if strings.Contains(string(body), forbidden) {
+					t.Errorf("%s retains sponsor vocabulary %q", path, forbidden)
+				}
+			}
+		}
 	}
 }
 
@@ -584,10 +594,13 @@ func TestHarden03BTerminalCommandSetIsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, required := range []string{"TerminalEnd", "TerminalRemove", "TerminalDetachDaemon"} {
+	for _, required := range []string{"TerminalEnd", "TerminalRemove"} {
 		if !strings.Contains(string(body), required) {
 			t.Errorf("terminal command set missing %s", required)
 		}
+	}
+	if strings.Contains(string(body), "TerminalDetachDaemon") {
+		t.Error("detach returned as a terminal word; it is a wiring-domain action")
 	}
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, "../runtime/actorctl/types.go", nil, 0)
@@ -607,8 +620,8 @@ func TestHarden03BTerminalCommandSetIsClosed(t *testing.T) {
 		}
 		return true
 	})
-	if count != 3 {
-		t.Fatalf("TerminalKind constants=%d, want 3", count)
+	if count != 2 {
+		t.Fatalf("TerminalKind constants=%d, want 2", count)
 	}
 }
 

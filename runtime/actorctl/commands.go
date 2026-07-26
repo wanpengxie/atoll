@@ -3,55 +3,17 @@ package actorctl
 import (
 	"context"
 	"errors"
-	"slices"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
+	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
-// Transition is the committed change set returned by one Controller
-// operation. Platform owns every cross-organ tail represented by these facts.
-type Transition[T any] struct {
-	Result  T
-	Wake    []ActorDefinition
-	Ended   []actor.ActorID
-	Effects storespec.PostCommitEffects
-}
+var ErrEndForbidden = errors.New("actorctl: only the target itself or the system face may end an actor")
 
-func (c *Controller) publishNew(ctx context.Context, id actor.ActorID) (ActorDefinition, bool, error) {
-	unlock := c.gates.lock(id)
-	defer unlock()
-	stored, active, err := c.store.LookupActive(ctx, id)
-	if err != nil || !active {
-		return ActorDefinition{}, false, err
-	}
-	definition, err := definitionFromStored(stored)
-	if err != nil {
-		return ActorDefinition{}, false, err
-	}
-	key, err := mintAttempt()
-	if err != nil {
-		return ActorDefinition{}, false, err
-	}
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	if c.phase != Running {
-		if c.phase == Bootstrapping {
-			return ActorDefinition{}, false, ErrBootstrapping
-		}
-		return ActorDefinition{}, false, ErrClosed
-	}
-	if _, exists := c.actors[id]; exists {
-		return definition, false, nil
-	}
-	c.actors[id] = ActiveActor{
-		Definition: definition,
-		Desired:    DesiredState{AttemptKey: key},
-	}
-	return definition, true, nil
-}
-
+// Admit is the human birth command. Its whole ledger change happens inside the
+// ledger lock: durable insert first (fallible), publication after (infallible).
 func (c *Controller) Admit(
 	ctx context.Context,
 	request AdmitRequest,
@@ -61,33 +23,47 @@ func (c *Controller) Admit(
 		return Transition[AdmitResult]{}, err
 	}
 	defer done()
-	return c.admit(ctx, request)
-}
 
-func (c *Controller) admit(
-	ctx context.Context,
-	request AdmitRequest,
-) (Transition[AdmitResult], error) {
-	commit, err := c.store.Admit(ctx, request)
+	c.ledger.Lock()
+	defer c.ledger.Unlock()
+	if err := c.runnableLocked(); err != nil {
+		return Transition[AdmitResult]{}, err
+	}
+	if request.Principal == "" {
+		return Transition[AdmitResult]{}, ErrInvalidMutation
+	}
+	// Every fallible step happens before the change settles: the AttemptKey is
+	// pre-minted so publication after the commit cannot fail.
+	key, err := mintAttempt()
 	if err != nil {
 		return Transition[AdmitResult]{}, err
 	}
-	stored, result := commit.Actor, commit.Result
-	id := result.ActorID
-	if id == "" {
-		id = stored.Row.ID
-	}
-	definition, changed, err := c.publishNew(ctx, id)
+	record, err := c.store.Insert(ctx, storespec.ActorDraft{
+		Kind:       actor.KindHuman,
+		Principal:  request.Principal,
+		CreatedAt:  c.nowMs(),
+		Definition: storespec.ActorDefinition{Class: humanClass},
+		Placement:  storespec.NewServerPlacement(),
+	})
 	if err != nil {
-		return Transition[AdmitResult]{Result: result}, err
+		return Transition[AdmitResult]{}, err
 	}
-	transition := Transition[AdmitResult]{Result: result, Effects: commit.Effects}
-	if changed {
-		transition.Wake = []ActorDefinition{definition}
+	created := c.publishLocked(record, key)
+	transition := Transition[AdmitResult]{
+		Result: channel.AdmitResult{ActorID: record.ID, Created: created},
+	}
+	if created {
+		transition.Reconcile.add(record.Placement)
 	}
 	return transition, nil
 }
 
+// humanClass is the built-in class every admitted human runs.
+const humanClass = "human"
+
+// Introduce is the declaration birth command. Every business decision
+// (declaration resolution, visibility, placement host) already happened at the
+// Platform door; this command is mechanical.
 func (c *Controller) Introduce(
 	ctx context.Context,
 	request IntroduceRequest,
@@ -97,106 +73,43 @@ func (c *Controller) Introduce(
 		return Transition[channel.IntroduceResult]{}, err
 	}
 	defer done()
-	return c.introduce(ctx, request)
-}
 
-func (c *Controller) introduce(
-	ctx context.Context,
-	request IntroduceRequest,
-) (Transition[channel.IntroduceResult], error) {
-	c.placementGate.Lock()
-	defer c.placementGate.Unlock()
-	commit, err := c.store.Introduce(ctx, request)
+	c.ledger.Lock()
+	defer c.ledger.Unlock()
+	if err := c.runnableLocked(); err != nil {
+		return Transition[channel.IntroduceResult]{}, err
+	}
+	if request.DeclID == "" || request.Definition.Class == "" {
+		return Transition[channel.IntroduceResult]{}, ErrInvalidMutation
+	}
+	key, err := mintAttempt()
 	if err != nil {
 		return Transition[channel.IntroduceResult]{}, err
 	}
-	stored, result := commit.Actor, commit.Result
-	id := result.ActorID
-	if id == "" {
-		id = stored.Row.ID
-	}
-	definition, changed, err := c.publishNew(ctx, id)
-	if err != nil {
-		return Transition[channel.IntroduceResult]{Result: result}, err
-	}
-	transition := Transition[channel.IntroduceResult]{Result: result, Effects: commit.Effects}
-	if changed {
-		transition.Wake = []ActorDefinition{definition}
-	}
-	return transition, nil
-}
-
-func (c *Controller) Fork(
-	ctx context.Context,
-	request ForkRequest,
-) (Transition[ForkResult], error) {
-	done, err := c.beginCommand()
-	if err != nil {
-		return Transition[ForkResult]{}, err
-	}
-	defer done()
-	return c.fork(ctx, request)
-}
-
-func (c *Controller) fork(
-	ctx context.Context,
-	request ForkRequest,
-) (Transition[ForkResult], error) {
-	if request.CallerActorID == "" || request.CallerActorID == actor.SystemActorID || request.RequestID == "" {
-		return Transition[ForkResult]{}, ErrForkInvalid
-	}
-	if child, found, lookupErr := c.store.LookupFork(ctx, request.CallerActorID, request.RequestID); lookupErr != nil {
-		return Transition[ForkResult]{}, lookupErr
-	} else if found {
-		return Transition[ForkResult]{Result: ForkResult{ChildActorID: child}}, nil
-	}
-
-	c.placementGate.Lock()
-	defer c.placementGate.Unlock()
-
-	admission, err := c.admitFork(ctx, request)
-	if err != nil {
-		return Transition[ForkResult]{}, err
-	}
-	if admission.found {
-		return Transition[ForkResult]{
-			Result: ForkResult{ChildActorID: admission.child},
-		}, nil
-	}
-	spec, placement := admission.spec, admission.placement
-	candidate := freshChildID(request.CallerActorID, spec.NameHint)
-	committed, err := c.store.CommitFork(ctx, ForkCommitRequest{
-		CallerActorID: request.CallerActorID,
-		RequestID:     request.RequestID,
-		ChildActorID:  candidate,
-		Spec:          spec,
-		Placement:     placement,
+	record, err := c.store.Insert(ctx, storespec.ActorDraft{
+		Kind:         request.Kind,
+		SourceDeclID: request.DeclID,
+		CreatedAt:    c.nowMs(),
+		Definition:   request.Definition,
+		Placement:    request.Placement,
 	})
 	if err != nil {
-		return Transition[ForkResult]{}, err
+		return Transition[channel.IntroduceResult]{}, err
 	}
-	child := committed.ChildActorID
-	if child == "" {
-		child = committed.Actor.Row.ID
+	created := c.publishLocked(record, key)
+	transition := Transition[channel.IntroduceResult]{
+		Result: channel.IntroduceResult{ActorID: record.ID, Created: created},
 	}
-	if child == "" {
-		return Transition[ForkResult]{}, ErrForkInvalid
-	}
-	definition, changed, err := c.publishNew(ctx, child)
-	if err != nil {
-		return Transition[ForkResult]{Result: ForkResult{ChildActorID: child}}, err
-	}
-	transition := Transition[ForkResult]{
-		Result: ForkResult{ChildActorID: child}, Effects: committed.Effects,
-	}
-	if changed {
-		transition.Wake = []ActorDefinition{definition}
+	if created {
+		transition.Reconcile.add(record.Placement)
 	}
 	return transition, nil
 }
 
+// Restart is a pure value command: it changes no record, so it has no store
+// verb. It is edge-triggered — every successful call is one new term.
 func (c *Controller) Restart(
-	ctx context.Context,
+	_ context.Context,
 	request RestartRequest,
 ) (Transition[struct{}], error) {
 	done, err := c.beginCommand()
@@ -204,31 +117,30 @@ func (c *Controller) Restart(
 		return Transition[struct{}]{}, err
 	}
 	defer done()
-	return c.restart(ctx, request)
-}
 
-func (c *Controller) restart(
-	ctx context.Context,
-	request RestartRequest,
-) (Transition[struct{}], error) {
-	if request.ActorID == actor.SystemActorID {
-		return Transition[struct{}]{}, ErrReservedSystem
+	c.ledger.Lock()
+	defer c.ledger.Unlock()
+	if err := c.runnableLocked(); err != nil {
+		return Transition[struct{}]{}, err
 	}
-	unlock := c.gates.lock(request.ActorID)
-	commit, err := c.store.Restart(ctx, request)
-	if err == nil {
-		err = c.publishReplacementLocked(ctx, request.ActorID)
+	value, ok := c.actors[request.ActorID]
+	if !ok {
+		return Transition[struct{}]{}, ErrInactive
 	}
-	unlock()
+	key, err := mintAttempt()
 	if err != nil {
 		return Transition[struct{}]{}, err
 	}
-	value, _, _ := c.Lookup(request.ActorID)
-	return Transition[struct{}]{
-		Wake: []ActorDefinition{value.Definition}, Effects: commit.Effects,
-	}, nil
+	value.Attempt = key
+	c.actors[request.ActorID] = value
+	transition := Transition[struct{}]{}
+	transition.Reconcile.add(value.Record.Placement)
+	return transition, nil
 }
 
+// ApplyDeclaration overwrites one record's definition and mints a new term
+// (changing the config IS a new term). An equal definition is the one and only
+// home of the equality short-circuit: no row write, no new term.
 func (c *Controller) ApplyDeclaration(
 	ctx context.Context,
 	change DeclarationChange,
@@ -238,94 +150,31 @@ func (c *Controller) ApplyDeclaration(
 		return Transition[struct{}]{}, err
 	}
 	defer done()
-	return c.applyDefinitionChange(ctx, change)
-}
 
-func (c *Controller) applyDefinitionChange(
-	ctx context.Context,
-	change DeclarationChange,
-) (Transition[struct{}], error) {
-	if change.ActorID == actor.SystemActorID {
-		return Transition[struct{}]{}, ErrReservedSystem
+	c.ledger.Lock()
+	defer c.ledger.Unlock()
+	if err := c.runnableLocked(); err != nil {
+		return Transition[struct{}]{}, err
 	}
-	c.placementGate.Lock()
-	defer c.placementGate.Unlock()
-	unlock := c.gates.lock(change.ActorID)
-	commit, err := c.store.ApplyDeclaration(ctx, change)
-	if err == nil {
-		err = c.publishReplacementLocked(ctx, change.ActorID)
+	value, ok := c.actors[change.ActorID]
+	if !ok {
+		return Transition[struct{}]{}, ErrInactive
 	}
-	unlock()
+	if value.Record.Definition.Equal(change.Definition) {
+		return Transition[struct{}]{}, nil
+	}
+	key, err := mintAttempt()
 	if err != nil {
 		return Transition[struct{}]{}, err
 	}
-	value, _, _ := c.Lookup(change.ActorID)
-	return Transition[struct{}]{
-		Wake: []ActorDefinition{value.Definition}, Effects: commit.Effects,
-	}, nil
-}
-
-// publishReplacementLocked requires the corresponding control gate.
-func (c *Controller) publishReplacementLocked(
-	ctx context.Context,
-	id actor.ActorID,
-) error {
-	stored, active, err := c.store.LookupActive(ctx, id)
+	record, err := c.store.UpdateDefinition(ctx, change.ActorID, change.Definition)
 	if err != nil {
-		return err
+		return Transition[struct{}]{}, err
 	}
-	if !active {
-		return ErrInactive
-	}
-	definition, err := definitionFromStored(stored)
-	if err != nil {
-		return err
-	}
-	c.stateMu.Lock()
-	defer c.stateMu.Unlock()
-	if c.phase != Running {
-		if c.phase == Bootstrapping {
-			return ErrBootstrapping
-		}
-		return ErrClosed
-	}
-	_, exists := c.actors[id]
-	if !exists {
-		return ErrInactive
-	}
-	key, keyErr := mintAttempt()
-	if keyErr != nil {
-		return keyErr
-	}
-	c.actors[id] = ActiveActor{
-		Definition: definition,
-		Desired:    DesiredState{AttemptKey: key},
-	}
-	return nil
-}
-
-func (c *Controller) AttachDaemon(
-	ctx context.Context,
-	request channel.DaemonRequest,
-) (Transition[channel.BindingResult], error) {
-	done, err := c.beginCommand()
-	if err != nil {
-		return Transition[channel.BindingResult]{}, err
-	}
-	defer done()
-	return c.attachDaemon(ctx, request)
-}
-
-func (c *Controller) attachDaemon(
-	ctx context.Context,
-	request channel.DaemonRequest,
-) (Transition[channel.BindingResult], error) {
-	c.placementGate.Lock()
-	defer c.placementGate.Unlock()
-	commit, err := c.store.AttachDaemon(ctx, request)
-	return Transition[channel.BindingResult]{
-		Result: commit.Result, Effects: commit.Effects,
-	}, err
+	c.actors[change.ActorID] = managedActor{Record: record, Attempt: key}
+	transition := Transition[struct{}]{}
+	transition.Reconcile.add(record.Placement)
+	return transition, nil
 }
 
 func (c *Controller) End(
@@ -334,10 +183,9 @@ func (c *Controller) End(
 ) (Transition[EndResult], error) {
 	transition, err := c.Terminal(ctx, TerminalCommand{Kind: TerminalEnd, End: request})
 	return Transition[EndResult]{
-		Result:  EndResult{Ended: transition.Result.Ended},
-		Wake:    transition.Wake,
-		Ended:   transition.Ended,
-		Effects: transition.Effects,
+		Result:    EndResult{Ended: transition.Result.Ended},
+		Ended:     transition.Ended,
+		Reconcile: transition.Reconcile,
 	}, err
 }
 
@@ -347,29 +195,15 @@ func (c *Controller) Remove(
 ) (Transition[channel.RemoveResult], error) {
 	transition, err := c.Terminal(ctx, TerminalCommand{Kind: TerminalRemove, Remove: request})
 	return Transition[channel.RemoveResult]{
-		Result:  transition.Result.Remove,
-		Wake:    transition.Wake,
-		Ended:   transition.Ended,
-		Effects: transition.Effects,
+		Result:    transition.Result.Remove,
+		Ended:     transition.Ended,
+		Reconcile: transition.Reconcile,
 	}, err
 }
 
-func (c *Controller) DetachDaemon(
-	ctx context.Context,
-	request channel.DaemonRequest,
-) (Transition[channel.BindingResult], error) {
-	transition, err := c.Terminal(
-		ctx,
-		TerminalCommand{Kind: TerminalDetachDaemon, Detach: request},
-	)
-	return Transition[channel.BindingResult]{
-		Result:  transition.Result.Detach,
-		Wake:    transition.Wake,
-		Ended:   transition.Ended,
-		Effects: transition.Effects,
-	}, err
-}
-
+// Terminal is the whole termination command. The terminal set is exactly the
+// explicit target — there is no lineage cascade, no plan, no pre-classification
+// and no third beat.
 func (c *Controller) Terminal(
 	ctx context.Context,
 	command TerminalCommand,
@@ -379,78 +213,80 @@ func (c *Controller) Terminal(
 		return Transition[TerminalResult]{}, err
 	}
 	defer done()
-	return c.terminal(ctx, command)
-}
 
-func (c *Controller) terminal(
-	ctx context.Context,
-	command TerminalCommand,
-) (Transition[TerminalResult], error) {
-	if command.Kind == TerminalDetachDaemon {
-		c.placementGate.Lock()
-		defer c.placementGate.Unlock()
+	c.ledger.Lock()
+	defer c.ledger.Unlock()
+	if err := c.runnableLocked(); err != nil {
+		return Transition[TerminalResult]{}, err
 	}
-	for {
-		beforeRows, rowsErr := c.ActiveRows()
-		if rowsErr != nil {
-			return Transition[TerminalResult]{}, rowsErr
-		}
-		before, err := c.store.ResolveTerminal(ctx, command, beforeRows)
-		if err != nil {
-			return Transition[TerminalResult]{}, err
-		}
-		before.IDs = canonicalActorIDs(before.IDs)
-		lockIDs := append([]actor.ActorID(nil), before.IDs...)
-		if command.Kind == TerminalEnd && command.End.CallerAttempt != "" {
-			lockIDs = append(lockIDs, command.End.CallerActorID)
-		}
-		unlock := c.gates.lockActorSet(lockIDs)
-		afterRows, rowsErr := c.ActiveRows()
-		if rowsErr != nil {
-			unlock()
-			return Transition[TerminalResult]{}, rowsErr
-		}
-		after, err := c.store.ResolveTerminal(ctx, command, afterRows)
-		if err != nil {
-			unlock()
-			return Transition[TerminalResult]{}, err
-		}
-		after.IDs = canonicalActorIDs(after.IDs)
-		if !slices.Equal(before.IDs, after.IDs) {
-			unlock()
-			continue
-		}
-		if command.Kind == TerminalEnd && command.End.CallerAttempt != "" {
-			if err := c.checkCurrentSnapshot(
-				command.End.CallerActorID,
-				command.End.CallerAttempt,
-			); err != nil {
-				unlock()
+
+	var targets []actor.ActorID
+	var result TerminalResult
+	switch command.Kind {
+	case TerminalEnd:
+		request := command.End
+		if request.CallerAttempt != "" {
+			if err := c.checkCurrentLocked(request.CallerActorID, request.CallerAttempt); err != nil {
 				return Transition[TerminalResult]{}, err
 			}
 		}
-		commit, err := c.store.CommitTerminal(ctx, command, after)
-		if err != nil {
-			unlock()
-			return Transition[TerminalResult]{}, err
+		caller := request.CallerActorID
+		if caller != "" && caller != actor.SystemActorID && caller != request.Target {
+			return Transition[TerminalResult]{}, ErrEndForbidden
 		}
-		definitions := make([]ActorDefinition, 0, len(after.IDs))
-		for _, id := range after.IDs {
-			if value, exists, lookupErr := c.Lookup(id); lookupErr == nil && exists {
-				definitions = append(definitions, value.Definition)
-			}
+		if _, active := c.actors[request.Target]; active {
+			targets = []actor.ActorID{request.Target}
 		}
-		c.delete(after.IDs)
-		unlock()
-		return Transition[TerminalResult]{
-			Result: commit.Result, Wake: definitions, Ended: after.IDs, Effects: commit.Effects,
-		}, nil
+	case TerminalRemove:
+		request := command.Remove
+		if request.InitiatorActorID == "" {
+			return Transition[TerminalResult]{}, ErrInvalidMutation
+		}
+		if _, member := c.actors[request.InitiatorActorID]; !member {
+			return Transition[TerminalResult]{}, ErrInactive
+		}
+		if _, active := c.actors[request.Target]; active {
+			targets = []actor.ActorID{request.Target}
+		}
+	default:
+		return Transition[TerminalResult]{}, ErrInvalidMutation
 	}
+
+	if len(targets) == 0 {
+		if command.Kind == TerminalEnd {
+			return Transition[TerminalResult]{}, nil
+		}
+		return Transition[TerminalResult]{}, nil
+	}
+	if err := c.store.Deregister(ctx, targets); err != nil {
+		return Transition[TerminalResult]{}, err
+	}
+	transition := Transition[TerminalResult]{}
+	for _, id := range targets {
+		transition.Reconcile.add(c.actors[id].Record.Placement)
+		delete(c.actors, id)
+	}
+	switch command.Kind {
+	case TerminalEnd:
+		result.Ended = append([]actor.ActorID(nil), targets...)
+	case TerminalRemove:
+		result.Remove = channel.RemoveResult{Removed: append([]actor.ActorID(nil), targets...)}
+	}
+	transition.Result = result
+	transition.Ended = append([]actor.ActorID(nil), targets...)
+	return transition, nil
 }
 
-// Keep errors.Is useful when adapters translate a closed command surface.
-func isUnavailable(err error) bool {
-	return errors.Is(err, ErrClosed) || errors.Is(err, ErrChannelClosing)
+// publishLocked is the infallible publication half of a birth command: plain
+// memory assignment with a pre-minted key. A record already in the ledger (a
+// replayed birth resolved by semantic key) publishes nothing.
+func (c *Controller) publishLocked(
+	record storespec.ActorRecord,
+	key actorhost.AttemptKey,
+) bool {
+	if _, exists := c.actors[record.ID]; exists {
+		return false
+	}
+	c.actors[record.ID] = managedActor{Record: record, Attempt: key}
+	return true
 }
-
-var _ = storespec.ErrActorNotFound

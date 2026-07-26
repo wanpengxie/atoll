@@ -1,8 +1,6 @@
 package actorctl
 
 import (
-	"context"
-	"encoding/json"
 	"errors"
 
 	"github.com/wanpengxie/atoll/lib/actorcaps"
@@ -19,11 +17,10 @@ var (
 	ErrChannelClosing  = errors.New("actorctl: channel closing")
 	ErrInactive        = errors.New("actorctl: actor inactive")
 	ErrStaleAttempt    = errors.New("actorctl: stale attempt")
-	ErrReservedSystem  = errors.New("actorctl: system actor has a separate lifecycle")
-	ErrInvalidKernel   = errors.New("actorctl: invalid system kernel")
 	ErrAlreadyStarted  = errors.New("actorctl: already started")
 	ErrInvalidMutation = errors.New("actorctl: invalid mutation")
 	ErrForkInvalid     = errors.New("actorctl: invalid fork")
+	ErrForkConflict    = errors.New("actorctl: fork request replayed with a different payload")
 )
 
 type ControllerPhase uint8
@@ -34,153 +31,55 @@ const (
 	Closed
 )
 
-// ActorDefinition is the immutable managed identity/config projection.
-type ActorDefinition struct {
-	Kind         actor.Kind
-	Principal    string
-	Role         storespec.ActorRole
-	Sponsor      actor.ActorID
-	SourceDeclID string
-	CreatedAt    int64
-	// DefinitionVersion is durable declaration metadata. It is not an
-	// incarnation fence: collaboration authority remains ActorID-active.
-	DefinitionVersion int64
-	Placement         storespec.Placement
-	Execution         actorhost.ExecutionSpec
+// managedActor is the whole Controller value: one record plus its current
+// logical run authorization. Nothing else — no storage home, no definition
+// version, no incarnation, no presence.
+type managedActor struct {
+	Record  storespec.ActorRecord
+	Attempt actorhost.AttemptKey
 }
 
-type DesiredState struct {
-	AttemptKey actorhost.AttemptKey
+func (m managedActor) clone() managedActor {
+	m.Record = m.Record.Clone()
+	return m
 }
 
-type ActiveActor struct {
-	Definition ActorDefinition
-	Desired    DesiredState
-}
-
-// StoredActor is the authoritative value a typed Store operation returns for
-// Controller publication.
-type StoredActor struct {
-	Row storespec.ActorControlRow
-}
-
-type ActorCommit[T any] struct {
-	Actor   StoredActor
-	Result  T
-	Effects storespec.PostCommitEffects
-}
-
-type ValueCommit[T any] struct {
-	Result  T
-	Effects storespec.PostCommitEffects
-}
-
-func definitionFromStored(stored StoredActor) (ActorDefinition, error) {
-	row := stored.Row
-	if row.ID == "" || row.ID == actor.SystemActorID {
-		return ActorDefinition{}, ErrInvalidMutation
-	}
-	if _, ok := actor.ParseKind(string(row.Kind)); !ok || row.Kind == actor.KindSystem {
-		return ActorDefinition{}, ErrInvalidMutation
-	}
-	if err := row.Placement.Validate(); err != nil {
-		return ActorDefinition{}, err
-	}
-	return ActorDefinition{
-		Kind:              row.Kind,
-		Principal:         row.Principal,
-		Role:              row.Role,
-		Sponsor:           row.Sponsor,
-		SourceDeclID:      row.SourceDeclID,
-		CreatedAt:         row.CreatedAt,
-		DefinitionVersion: row.CurrentDeclVersion,
-		Placement:         row.Placement,
-		Execution: actorhost.ExecutionSpec{
-			Kind:   row.Kind,
-			Class:  row.Class,
-			Config: append(json.RawMessage(nil), row.Config...),
-		},
-	}, nil
-}
-
-func rowFromActive(id actor.ActorID, value ActiveActor) storespec.ActorControlRow {
-	def := value.Definition
-	binding := actor.Binding("")
-	if def.Placement.Kind == storespec.PlacementDaemon {
-		binding = actor.BindingRuntimeInboundViaRelay
-	}
-	return storespec.ActorControlRow{
-		ID:                 id,
-		Kind:               def.Kind,
-		Principal:          def.Principal,
-		Role:               def.Role,
-		Sponsor:            def.Sponsor,
-		Binding:            binding,
-		CreatedAt:          def.CreatedAt,
-		CurrentDeclVersion: def.DefinitionVersion,
-		Class:              def.Execution.Class,
-		Config:             append(json.RawMessage(nil), def.Execution.Config...),
-		Placement:          def.Placement,
-		SourceDeclID:       def.SourceDeclID,
-	}
-}
-
-type ForkCommitRequest struct {
-	CallerActorID actor.ActorID
-	RequestID     message.ID
-	ChildActorID  actor.ActorID
-	Spec          actorcaps.ForkSpec
-	Placement     storespec.Placement
-}
-
-type ForkCommitResult struct {
-	ChildActorID actor.ActorID
-	Actor        StoredActor
-	Effects      storespec.PostCommitEffects
-}
-
-type RestartRequest struct {
-	ActorID       actor.ActorID
-	CallerActorID actor.ActorID
-	RequestID     message.ID
-}
-
-type DeclarationChange struct {
-	ActorID   actor.ActorID
-	Class     string
-	Config    json.RawMessage
-	RequestID message.ID
-}
-
-// MemberOperation identifies a command that entered through the collaboration
-// plane. It carries the existing RequestID and request payload only; lifecycle
-// execution identity never enters this value.
-type MemberOperation struct {
-	RequestID message.ID
-	Sender    actor.ActorID
-	Payload   json.RawMessage
-}
-
+// AdmitRequest is the pre-resolved human admission. Policy (who may admit, who
+// counts as channel owner) settles at the Platform door before the command is
+// issued; the command carries facts only.
 type AdmitRequest struct {
-	Ref       string
 	Principal string
-	Role      storespec.ActorRole
 }
 
 type AdmitResult = channel.AdmitResult
 
+// IntroduceRequest is the pre-resolved declaration admission. The declaration
+// was fetched, its visibility judged and its placement host chosen at the
+// Platform door; the command carries only mechanical facts.
 type IntroduceRequest struct {
-	Ref              string
-	DeclID           string
-	InitiatorActorID actor.ActorID
-	Member           *MemberOperation
+	DeclID     string
+	Kind       actor.Kind
+	Definition storespec.ActorDefinition
+	Placement  storespec.Placement
+}
+
+// DeclarationChange is content-triggered: an equal definition is a no-op. It
+// carries no RequestID — the receipt dedup axis is gone.
+type DeclarationChange struct {
+	ActorID    actor.ActorID
+	Definition storespec.ActorDefinition
+}
+
+// RestartRequest is a pure value command (mint a new AttemptKey, republish). It
+// has no store verb and no RequestID: restart is edge-triggered, never
+// idempotent — each successful call is one new term.
+type RestartRequest struct {
+	ActorID actor.ActorID
 }
 
 type RemoveRequest struct {
-	Ref              string
 	Target           actor.ActorID
 	InitiatorActorID actor.ActorID
-	Member           *MemberOperation
 }
 
 type EndRequest struct {
@@ -199,45 +98,21 @@ type TerminalKind uint8
 const (
 	TerminalEnd TerminalKind = iota + 1
 	TerminalRemove
-	TerminalDetachDaemon
 )
 
 type TerminalCommand struct {
 	Kind   TerminalKind
 	End    EndRequest
 	Remove RemoveRequest
-	Detach channel.DaemonRequest
-}
-
-type TerminalPlan struct {
-	IDs    []actor.ActorID
-	Opaque any
 }
 
 type TerminalResult struct {
 	Ended  []actor.ActorID
 	Remove channel.RemoveResult
-	Detach channel.BindingResult
 }
 
-// Store is the typed persistence port. Each mutation returns authoritative
-// committed values; Controller never accepts a callback transaction escape.
-type Store interface {
-	// RestoreActive supplies identities selected by the Store's physical
-	// restore policy. Controller does not know which storage homes exist.
-	RestoreActive(context.Context) ([]storespec.ActorControlRow, error)
-	LookupActive(context.Context, actor.ActorID) (StoredActor, bool, error)
-	Admit(context.Context, AdmitRequest) (ActorCommit[AdmitResult], error)
-	Introduce(context.Context, IntroduceRequest) (ActorCommit[channel.IntroduceResult], error)
-	LookupFork(context.Context, actor.ActorID, message.ID) (actor.ActorID, bool, error)
-	CommitFork(context.Context, ForkCommitRequest) (ForkCommitResult, error)
-	Restart(context.Context, RestartRequest) (ActorCommit[struct{}], error)
-	ApplyDeclaration(context.Context, DeclarationChange) (ActorCommit[struct{}], error)
-	AttachDaemon(context.Context, channel.DaemonRequest) (ValueCommit[channel.BindingResult], error)
-	ResolveTerminal(context.Context, TerminalCommand, []storespec.ActorControlRow) (TerminalPlan, error)
-	CommitTerminal(context.Context, TerminalCommand, TerminalPlan) (ValueCommit[TerminalResult], error)
-}
-
+// ForkRequest is the only command carrying a RequestID: a child id is freshly
+// minted, so the ledger itself cannot answer "did I already do this".
 type ForkRequest struct {
 	CallerActorID actor.ActorID
 	CallerAttempt actorhost.AttemptKey
@@ -247,4 +122,50 @@ type ForkRequest struct {
 
 type ForkResult struct {
 	ChildActorID actor.ActorID
+}
+
+// ReconcileHints is derived from an already committed transition. It carries no
+// definition, promises no delivery, and a duplicate poke is legal.
+type ReconcileHints struct {
+	Server bool
+	Peers  []actorhost.ExecutionDomain
+}
+
+func (h *ReconcileHints) add(placement storespec.Placement) {
+	if placement.Kind != storespec.PlacementDaemon {
+		h.Server = true
+		return
+	}
+	peer := actorhost.ExecutionDomain(placement.Host)
+	for _, existing := range h.Peers {
+		if existing == peer {
+			return
+		}
+	}
+	h.Peers = append(h.Peers, peer)
+}
+
+// Transition is the committed change set of one Controller command. Platform
+// owns every cross-organ tail these facts imply.
+type Transition[T any] struct {
+	Result    T
+	Ended     []actor.ActorID
+	Reconcile ReconcileHints
+}
+
+// DeclaredInstance is the declaration reconcile loop's question shape: "what
+// does the pull loop compare against". Its only consumer is the Platform
+// declaration pull loop; it is not a whole-record face resurrected.
+type DeclaredInstance struct {
+	ID           actor.ActorID
+	Kind         actor.Kind
+	SourceDeclID string
+	Definition   storespec.ActorDefinition
+}
+
+// ActiveIdentity is the "who is here right now" question shape, consumed by the
+// presence / connection-slot sweeps. It deliberately carries no definition.
+type ActiveIdentity struct {
+	ID   actor.ActorID
+	Kind actor.Kind
 }

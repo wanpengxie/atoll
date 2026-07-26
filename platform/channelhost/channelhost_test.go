@@ -60,7 +60,7 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 		t.Fatal("provisioned channel not serving")
 	}
 	initialRows, err := initial.View().DeclaredBySource(ctx, "decl-a")
-	if err != nil || len(initialRows) != 1 || initialRows[0].CurrentDeclVersion != 1 {
+	if err != nil || len(initialRows) != 1 || string(initialRows[0].Definition.Config) != `{"value":"a"}` {
 		t.Fatalf("equal first sweep double-wrote genesis: rows=%+v err=%v", initialRows, err)
 	}
 	if err := host.Close(); err != nil {
@@ -81,7 +81,7 @@ func TestOpenFirstSweepPullsLatestDeclaration(t *testing.T) {
 		t.Fatal("reopened channel not serving")
 	}
 	rows, err := bundle.View().DeclaredBySource(ctx, "decl-a")
-	if err != nil || len(rows) != 1 || rows[0].CurrentDeclVersion != 2 || string(rows[0].Config) != `{"value":"b"}` {
+	if err != nil || len(rows) != 1 || string(rows[0].Definition.Config) != `{"value":"b"}` {
 		t.Fatalf("first-sweep declaration=(%+v,%v)", rows, err)
 	}
 }
@@ -144,8 +144,11 @@ func TestOpenFirstSweepDetachesPersistedTombstonedDaemon(t *testing.T) {
 	if bound, err := bundle.View().IsBound(ctx, "daemon-a"); err != nil || bound {
 		t.Fatalf("first sweep binding=(%v,%v), want detached", bound, err)
 	}
-	if rows, err := bundle.View().DeclaredBySource(ctx, "decl-a"); err != nil || len(rows) != 0 {
-		t.Fatalf("daemon-placed actor survived first sweep: rows=%v err=%v", rows, err)
+	// Detach is a wiring-domain action: it removes the binding row and kills no
+	// actor. The daemon-placed actor stays a member with a dangling desired —
+	// re-attaching the same daemon id reconciles it back.
+	if rows, err := bundle.View().DeclaredBySource(ctx, "decl-a"); err != nil || len(rows) != 1 {
+		t.Fatalf("detach must not end the daemon-placed actor: rows=%v err=%v", rows, err)
 	}
 }
 
@@ -225,12 +228,14 @@ func TestOpenRejectsTypeOwnerAndCopiedIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`UPDATE channel_genesis SET owner_principal='forged'`); err != nil {
+	// Owner lives only on the genesis pointer, so the open check degenerates to
+	// "the pointer is present". Emptying it is the one failure left.
+	if _, err := db.Exec(`UPDATE channel_genesis SET owner_principal=''`); err != nil {
 		t.Fatal(err)
 	}
 	_ = db.Close()
 	if err := host.Open(ctx, OpenSpec{ChannelID: id, ExpectedType: "group"}); !errors.Is(err, ErrOwnerInvariant) {
-		t.Fatalf("owner mismatch err=%v", err)
+		t.Fatalf("missing owner err=%v", err)
 	}
 
 	copyID := channel.ID("copy")
