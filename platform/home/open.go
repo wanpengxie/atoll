@@ -476,9 +476,22 @@ func deliveryHandle(
 			}
 			err := h.actors.Deliver(id, &env)
 			if err != nil {
+				// Two very different findings share this line, so name which
+				// one it was: "not_hosted" is a wrong audience (this host has
+				// no state for the actor), "no_endpoint_yet" is a timing window
+				// (the host knows the actor but it has no body or attached
+				// route at this instant — starting, link down, or in backoff).
+				// Either way the row is observed and skipped, never retried.
+				outcome := "not_delivered"
+				switch {
+				case errors.Is(err, actorhost.ErrNotHosted):
+					outcome = "not_hosted"
+				case errors.Is(err, actorhost.ErrNoEndpointYet):
+					outcome = "no_endpoint_yet"
+				}
 				logger.Warn("platform.delivery.outcome",
 					"channel", chID, "seq", row.Seq, "envelope", env.ID,
-					"audience", id, "outcome", "not_delivered", "err", err)
+					"audience", id, "outcome", outcome, "err", err)
 			}
 		}
 		return nil

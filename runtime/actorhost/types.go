@@ -24,7 +24,20 @@ var (
 	ErrHostClosed        = errors.New("actorhost: host closed")
 	ErrAttachRejected    = errors.New("actorhost: attach rejected")
 
-	ErrNotHosted = errors.New("actorhost: actor not hosted")
+	// ErrNotHosted and ErrNoEndpointYet are the two ways a delivery finds no
+	// endpoint, and they mean opposite things to whoever reads the log.
+	// ErrNotHosted is "wrong address": this host has no state for the actor at
+	// all — it was never desired here, or it is fully retired. ErrNoEndpointYet
+	// is "too early": the host knows this actor and is working on it, but right
+	// now there is neither a local body nor an attached route — it is starting,
+	// its daemon link is down, or a build is in backoff.
+	//
+	// Delivery treats both the same (push-mailbox: observed, skipped, never
+	// retried). The distinction is for the human reading why a message was not
+	// delivered — a permanently wrong audience and a few-millisecond startup
+	// window are not the same finding.
+	ErrNotHosted     = errors.New("actorhost: actor not hosted")
+	ErrNoEndpointYet = errors.New("actorhost: actor has no endpoint yet")
 )
 
 // AttemptKey identifies one process-local logical Run. It is opaque outside

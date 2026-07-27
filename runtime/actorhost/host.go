@@ -596,25 +596,29 @@ func (h *HostSupervisor) BindingDown(id actor.ActorID, binding Binding) {
 
 // Deliver snapshots the current endpoint and performs I/O outside host locks.
 func (h *HostSupervisor) Deliver(id actor.ActorID, env *message.Envelope) error {
-	endpoint, ok := h.endpoint(id)
-	if !ok {
-		return ErrNotHosted
+	endpoint, err := h.endpoint(id)
+	if err != nil {
+		return err
 	}
 	return endpoint.Deliver(env)
 }
 
 // CancelRequest is a best-effort signal to the current endpoint.
 func (h *HostSupervisor) CancelRequest(id actor.ActorID, requestID message.ID) {
-	endpoint, ok := h.endpoint(id)
-	if !ok {
+	endpoint, err := h.endpoint(id)
+	if err != nil {
 		return
 	}
 	endpoint.CancelRequest(requestID)
 }
 
-func (h *HostSupervisor) endpoint(id actor.ActorID) (ActorEndpoint, bool) {
+// endpoint reports the current delivery endpoint, or WHY there is none: no
+// state here at all (ErrNotHosted) versus state without a reachable body or
+// route yet (ErrNoEndpointYet). Callers that only need "is there one" check
+// err != nil.
+func (h *HostSupervisor) endpoint(id actor.ActorID) (ActorEndpoint, error) {
 	if h == nil || id == "" {
-		return nil, false
+		return nil, ErrNotHosted
 	}
 	unlock := h.spans.lock(id)
 	h.mu.RLock()
@@ -629,7 +633,14 @@ func (h *HostSupervisor) endpoint(id actor.ActorID) (ActorEndpoint, bool) {
 	}
 	h.mu.RUnlock()
 	unlock()
-	return endpoint, endpoint != nil
+	switch {
+	case endpoint != nil:
+		return endpoint, nil
+	case state == nil:
+		return nil, ErrNotHosted
+	default:
+		return nil, ErrNoEndpointYet
+	}
 }
 
 func (h *HostSupervisor) isCurrent(id actor.ActorID, key AttemptKey, self actorrt.Incarnation) bool {

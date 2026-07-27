@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/wanpengxie/atoll/drivers/tools/xhs"
+	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/platform"
 	"github.com/wanpengxie/atoll/platform/compute"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -145,9 +146,27 @@ func TestXHSLiveEndToEnd(t *testing.T) {
 		}
 	}()
 
-	// --- STAGE 3+4: send xhs.search → completed response with results -------
+	// --- STAGE 2: wait until the cell can actually RECEIVE ------------------
+	// A reachable device port only proves the body started: the adapter binds
+	// its port during Start, before the daemon has opened this body's actor
+	// stream and before the server has attached the route. Delivery is
+	// push-mailbox — a message whose audience has no endpoint yet is observed
+	// and skipped, never retried — so a request sent inside that window is lost
+	// for good and this test would wait out its full timeout.
+	//
+	// Present is the state that answers "can this be delivered to": the server
+	// host holds either a local body or an attached remote route. Device
+	// presence alone is not enough — an observation can arrive over the stream
+	// slightly before the binding is attached.
 	wsc := dialWS(t, srv, s.cookies, s.chID, 0)
 	defer wsc.close()
+	waitActorStatus(t, env, s, wsc, xhsID, 5*time.Second, func(status introspect.Status) bool {
+		testimony, known := status.L3[introspect.ObsDevicePresence]
+		return status.Present &&
+			known && testimony.Device != nil && testimony.Device.Online
+	})
+
+	// --- STAGE 3+4: send xhs.search → completed response with results -------
 	ack := wsc.sendMessage(map[string]any{
 		"msg_type": "xhs.search",
 		"kind":     "request",
