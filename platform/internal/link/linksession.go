@@ -704,9 +704,3 @@ func (ls *linkSession) closed() <-chan struct{} {
 	return ls.ys.CloseChan()
 }
 
-func (ls *linkSession) openCounts() (inFlight, lateClosed int64) {
-	if ls == nil {
-		return 0, 0
-	}
-	return ls.openInFlight.Load(), ls.lateClosed.Load()
-}

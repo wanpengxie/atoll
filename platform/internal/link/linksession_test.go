@@ -289,13 +289,13 @@ func TestLateOpenIsReapedAndAccounted(t *testing.T) {
 	}()
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if _, late := ls.openCounts(); late == 1 {
+		if ls.lateClosed.Load() == 1 {
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	inFlight, late := ls.openCounts()
-	t.Fatalf("late close not accounted: in_flight=%d late=%d", inFlight, late)
+	t.Fatalf("late close not accounted: in_flight=%d late=%d",
+		ls.openInFlight.Load(), ls.lateClosed.Load())
 }
 
 // The transport-contract write budget: a stream whose peer stops reading is

@@ -15,6 +15,6 @@
 // (the raw WS connection adapted to a byte stream), and every substream opens
 // with a self-describing streamHeader{Kind} so the accept loop can dispatch it
 // to its plane (control / actor / lane) without relying on stream ordering. It
-// is pure mechanism. It recognizes only the tiny probe pair needed to answer
-// directly from the control read loop; actor and lane bytes remain opaque.
+// is pure mechanism: every control frame (probes included) goes through the
+// one control dispatch table; actor and lane bytes remain opaque.
 package link

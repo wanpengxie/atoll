@@ -15,9 +15,10 @@ import (
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 )
 
-// laneTransferTTL bounds how long a minted ticket pair lingers. It expires an
-// unused pair and also retires the retryable resolve ticket after a successful
-// redeem; opportunistic mint-time sweeping is backed by enforcement at use.
+// laneTransferTTL bounds how long a minted ticket pair lingers. A successful
+// redeem consumes ONLY the redeem ticket; the resolve ticket stays readable
+// for retries until this TTL — the TTL (never the redeem) is what finally
+// retires it. Opportunistic mint-time sweeping is backed by enforcement at use.
 const laneTransferTTL = 10 * time.Minute
 
 // lanecontrol.go is the HOME half of §5's resource lane: target selection reads
