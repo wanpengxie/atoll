@@ -27,6 +27,7 @@ import (
 	"github.com/wanpengxie/atoll/runtime/remoteingress"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
+	"github.com/wanpengxie/atoll/runtime/timerfire"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/systemcaps"
 	"github.com/wanpengxie/atoll/runtime/systemkernel"
@@ -160,9 +161,16 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if schedulerClock == nil {
 		schedulerClock = schedule.NewSystemClock()
 	}
+	// The fire sink is substrate glue (schedule exit → ledger admission →
+	// harness write) defined in runtime; assembly here only constructs it.
+	// The authority rides the Controller directly — no facade forwarding.
+	fire, err := timerfire.New(h.controller, h.minter)
+	if err != nil {
+		return nil, fmt.Errorf("platform: construct fire sink: %w", err)
+	}
 	h.schedMinter, h.engine, err = schedule.New(schedule.Deps{
 		Store: cs.Assembly.Timers,
-		Fire:  fireSink{minter: h.minter, authority: h.actors},
+		Fire:  fire,
 		Clock: schedulerClock, Logger: logger,
 	})
 	if err != nil {

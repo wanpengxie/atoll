@@ -464,15 +464,15 @@ func TestActorAuthorityRemoteIngressIsTheOnlyRemoteDoor(t *testing.T) {
 		body := readAuthorityContractFile(t, path)
 		for _, forbidden := range []string{
 			"PenBasis", "RunAuthorityFor", "IdentityAuthorityFor",
-			".MintAuthority(",
+			".MintAuthority(", ".MintAdmitted(",
 		} {
 			if strings.Contains(body, forbidden) {
-				t.Errorf("%s touches capability-coordinate face %q — only managedcaps and remoteingress may", path, forbidden)
+				t.Errorf("%s touches capability-coordinate face %q — only managedcaps, remoteingress and timerfire may", path, forbidden)
 			}
 		}
 	})
 
-	scheduler := readAuthorityContractFile(t, "../platform/home/scheduler.go")
+	scheduler := readAuthorityContractFile(t, "../runtime/timerfire/fire.go")
 	for _, required := range []string{
 		"AdmitIdentity(ctx, author)",
 		"MintAdmitted(admission)",
