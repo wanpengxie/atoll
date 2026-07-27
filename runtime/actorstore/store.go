@@ -132,8 +132,10 @@ func (s *Store) UpdateDefinition(
 	_, isEntry := s.entries[id]
 	s.mu.RUnlock()
 	if isEntry {
+		// The same verdict the registry gives a declaration-less durable row:
+		// the error type must not reveal which table the record lives in.
 		return storespec.ActorRecord{}, fmt.Errorf(
-			"%w: %q has no declaration to change", ErrInvalidRecord, id)
+			"%w: %q", storespec.ErrNoDeclaration, id)
 	}
 	record, err := s.registry.UpdateDefinition(ctx, id, def.Clone())
 	if err != nil {

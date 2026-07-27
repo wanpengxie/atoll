@@ -219,7 +219,9 @@ func TestDurableTerminalFailureLeavesEntriesUntouched(t *testing.T) {
 }
 
 // A record with no durable declaration cannot take a definition change; that is
-// an operation verdict, not a species branch.
+// an operation verdict, not a species branch — the SAME typed error as the
+// durable declaration-less case, so the error face never reveals which table
+// the record lives in.
 func TestUpdateDefinitionRefusesAnEntryRecord(t *testing.T) {
 	ctx := context.Background()
 	store, _ := openStore(t)
@@ -231,8 +233,8 @@ func TestUpdateDefinitionRefusesAnEntryRecord(t *testing.T) {
 	}
 	store.InstallEntry(entry)
 	if _, err := store.UpdateDefinition(ctx, entry.ID,
-		storespec.ActorDefinition{Class: "other"}); err == nil {
-		t.Fatal("an entry record has no declaration to change")
+		storespec.ActorDefinition{Class: "other"}); !errors.Is(err, storespec.ErrNoDeclaration) {
+		t.Fatalf("entry record: err=%v, want ErrNoDeclaration", err)
 	}
 
 	durable, err := store.Insert(ctx, declaredDraft("decl:a"))
