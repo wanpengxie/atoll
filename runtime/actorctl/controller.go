@@ -304,31 +304,40 @@ func (c *Controller) DeclaredReconcileList() ([]DeclaredInstance, error) {
 	return out, nil
 }
 
-// ResourceActorFacts is the resource domain's native fact projection. It does
-// not answer channel-owner questions: owner lives on the genesis pointer at the
-// Platform door, never in the value ledger.
-func (c *Controller) ResourceActorFacts(
+// ResourceActorBasis is the Controller's native single-snapshot answer for the
+// resource domain: liveness plus the owner-derivation basis (Kind, Principal),
+// all read under one ledger lock. It is a basis, not a verdict — the Platform
+// door derives storespec.ResourceActorFacts from it (owner lives on the genesis
+// pointer, never in the value ledger), and the basis travels no further.
+type ResourceActorBasis struct {
+	Active               bool
+	Kind                 actor.Kind
+	Principal            string
+	PreferredStorageHost string
+}
+
+func (c *Controller) ResourceActorBasis(
 	_ context.Context,
 	id actor.ActorID,
-) (storespec.ResourceActorFacts, error) {
+) (ResourceActorBasis, error) {
 	c.ledger.RLock()
 	defer c.ledger.RUnlock()
 	if err := c.runnableLocked(); err != nil {
-		return storespec.ResourceActorFacts{}, err
+		return ResourceActorBasis{}, err
 	}
 	value, ok := c.actors[id]
 	if !ok {
-		return storespec.ResourceActorFacts{}, nil
+		return ResourceActorBasis{}, nil
 	}
-	facts := storespec.ResourceActorFacts{
+	basis := ResourceActorBasis{
 		Active:    true,
 		Kind:      value.Record.Kind,
 		Principal: value.Record.Principal,
 	}
 	if value.Record.Placement.Kind == storespec.PlacementDaemon {
-		facts.PreferredStorageHost = value.Record.Placement.Host
+		basis.PreferredStorageHost = value.Record.Placement.Host
 	}
-	return facts, nil
+	return basis, nil
 }
 
 // DesiredFor projects a complete execution-domain level from managed truth.
@@ -422,4 +431,3 @@ var _ storespec.IdentityRoster = (*Controller)(nil)
 var _ storespec.DeclaredInstanceReader = (*Controller)(nil)
 var _ storespec.IdentityPresence = (*Controller)(nil)
 var _ storespec.CollaborationAuthority = (*Controller)(nil)
-var _ storespec.ResourceActorAuthority = (*Controller)(nil)

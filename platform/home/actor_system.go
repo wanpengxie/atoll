@@ -340,23 +340,27 @@ func (a *actorSystem) IsActive(ctx context.Context, id actor.ActorID) (bool, err
 	return a.home.controller.IsActive(ctx, id)
 }
 
-// ResourceActorFacts adds the channel-owner bit to the Controller's native
-// facts. Owner is derived from the immutable genesis pointer (a human whose
-// principal equals genesis.OwnerPrincipal) — the value ledger keeps no second
-// owner account, and the derivation basis (Kind, Principal) rides the SAME
-// ledger snapshot as Active: one Controller read, no stitched projection.
+// ResourceActorFacts is the ONE translation point between the Controller's
+// basis and the resource door's final facts. Owner is derived from the
+// immutable genesis pointer (a human whose principal equals
+// genesis.OwnerPrincipal) — the value ledger keeps no second owner account, and
+// the derivation basis rides the SAME ledger snapshot as Active: one Controller
+// read, no stitched projection. The basis stops here; accessdoor never sees it.
 func (a *actorSystem) ResourceActorFacts(
 	ctx context.Context,
 	id actor.ActorID,
 ) (storespec.ResourceActorFacts, error) {
-	facts, err := a.home.controller.ResourceActorFacts(ctx, id)
-	if err != nil || !facts.Active {
-		return facts, err
+	basis, err := a.home.controller.ResourceActorBasis(ctx, id)
+	if err != nil || !basis.Active {
+		return storespec.ResourceActorFacts{}, err
 	}
-	facts.Owner = a.home.isOwner(storespec.ActorFacts{
-		Kind: facts.Kind, Principal: facts.Principal,
-	})
-	return facts, nil
+	return storespec.ResourceActorFacts{
+		Active: true,
+		Owner: a.home.isOwner(storespec.ActorFacts{
+			Kind: basis.Kind, Principal: basis.Principal,
+		}),
+		PreferredStorageHost: basis.PreferredStorageHost,
+	}, nil
 }
 
 func (a *actorSystem) Quiesce(ctx context.Context) error {
