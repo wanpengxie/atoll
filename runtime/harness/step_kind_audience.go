@@ -19,6 +19,7 @@ const defaultRequestTTLMs int64 = 24 * 60 * 60 * 1000
 // substrate-essential STRUCTURE checks, with NO business-type vocabulary:
 //
 //   - reserved-namespace types: kind must match their kernel-defined rule
+//   - every audience entry names a non-empty actor id
 //   - kind=request / kind=response: audience cardinality exactly-one
 //   - a request without expires_at gets the global fallback closure deadline
 //
@@ -58,9 +59,18 @@ func (s *stepKindAndAudience) Run(ctx context.Context, env *message.Envelope) (o
 	// an upper-layer convention, not a substrate gate.)
 
 	// (2) audience emptiness — single closure validation centre. The substrate
-	//     does not author routing; a named audience must arrive from the caller.
+	//     does not author routing; every audience entry must name a concrete
+	//     actor id supplied by the caller.
 	if len(env.Audience) == 0 {
 		return outcome{RejectReason: HarnessAudienceEmpty, Detail: "envelope.audience empty"}, nil
+	}
+	for _, receiver := range env.Audience {
+		if receiver == "" {
+			return outcome{
+				RejectReason: HarnessAudienceEmpty,
+				Detail:       "envelope.audience contains an empty actor id",
+			}, nil
+		}
 	}
 
 	// (3) response — exactly-one concrete receiver.

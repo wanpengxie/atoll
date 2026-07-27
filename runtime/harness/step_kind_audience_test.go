@@ -29,6 +29,20 @@ func TestStepKindAndAudience_AudienceCardinality(t *testing.T) {
 			reason:   HarnessAudienceEmpty,
 		},
 		{
+			name:     "event with empty actor id rejected",
+			kind:     message.KindEvent,
+			typ:      "agent.text",
+			audience: message.Audience{""},
+			reason:   HarnessAudienceEmpty,
+		},
+		{
+			name:     "event with one empty actor id among concrete ids rejected",
+			kind:     message.KindEvent,
+			typ:      "agent.text",
+			audience: message.Audience{"x", ""},
+			reason:   HarnessAudienceEmpty,
+		},
+		{
 			name:     "event with multiple audience members ok (no cardinality)",
 			kind:     message.KindEvent,
 			typ:      "agent.text",
