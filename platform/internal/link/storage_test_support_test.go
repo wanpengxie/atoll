@@ -146,6 +146,9 @@ func dialStorageDaemon(t *testing.T, r *storageRig, configs ...link.DialConfig) 
 	if len(configs) > 0 {
 		cfg = configs[0]
 	}
+	if cfg.SessionLedger == nil {
+		cfg.SessionLedger = link.NewRemoteSessionLedger(nil)
+	}
 	d, err := link.Dial(context.Background(), r.wsURL(), cfg, nil)
 	if err != nil {
 		t.Fatalf("Dial: %v", err)

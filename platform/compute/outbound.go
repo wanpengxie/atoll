@@ -242,7 +242,7 @@ func (d *DaemonOutbound) Prepare(
 // SetSession publishes an already-Plan-accepted exact physical session for
 // future stream convergence. It never closes the predecessor session.
 func (d *DaemonOutbound) SetSession(session *link.AuthenticatedLinkSession) error {
-	if d == nil || session == nil {
+	if d == nil || session == nil || !session.IsCurrent() {
 		return ErrOutboundDisconnected
 	}
 	d.mu.Lock()
@@ -343,7 +343,7 @@ func (d *DaemonOutbound) convergeSlot(slot *OutboundSlot) {
 	}
 	bundle := slot.arms.Load()
 	session = d.session
-	if !isCurrent || session == nil {
+	if !isCurrent || session == nil || !session.IsCurrent() {
 		if bundle != disconnectedOutboundBundle {
 			slot.arms.Store(disconnectedOutboundBundle)
 			if bundle != nil {
@@ -386,6 +386,14 @@ func (d *DaemonOutbound) convergeSlot(slot *OutboundSlot) {
 
 func (d *DaemonOutbound) openSlot(slot *OutboundSlot, session *link.AuthenticatedLinkSession) {
 	defer d.workerWG.Done()
+	if !session.IsCurrent() {
+		d.mu.Lock()
+		slot.opening = false
+		slot.retryAt = time.Now().Add(d.retry)
+		d.mu.Unlock()
+		d.Wake()
+		return
+	}
 	stream, err := session.OpenActorStream(d.ctx, slot.id, slot.key)
 	stillCurrent := slot.current.IsCurrent()
 	var loser *link.ActorStream
@@ -396,7 +404,7 @@ func (d *DaemonOutbound) openSlot(slot *OutboundSlot, session *link.Authenticate
 	slot.opening = false
 	_, registered := d.slots[slot]
 	if err == nil && !d.sealed && registered && !slot.closed.Load() &&
-		d.session == session && stillCurrent {
+		d.session == session && stillCurrent && session.IsCurrent() {
 		raw := stream.Arms()
 		next := &OutboundArmsBundle{
 			Session:   session,
@@ -425,6 +433,16 @@ func (d *DaemonOutbound) openSlot(slot *OutboundSlot, session *link.Authenticate
 		}
 	}
 	d.mu.Unlock()
+	if published && !session.IsCurrent() {
+		// The current pointer moved during the runtime publication call. Remove
+		// only the exact bundle just installed; a successor is never touched.
+		current := slot.arms.Load()
+		if current != nil && current.Session == session && current.Stream == stream &&
+			slot.arms.CompareAndSwap(current, disconnectedOutboundBundle) {
+			loser = stream
+			published = false
+		}
+	}
 	if predecessor != nil {
 		_ = predecessor.Close()
 	}

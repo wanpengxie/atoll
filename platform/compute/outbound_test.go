@@ -199,9 +199,32 @@ func (f *outboundStreamFactory) finish(index int) {
 
 func newOutboundSession(t *testing.T, peer string, factory *outboundStreamFactory) *link.AuthenticatedLinkSession {
 	t.Helper()
+	return newOutboundSessionWithOpener(t, peer, factory.open)
+}
+
+func newOutboundSessionWithOpener(
+	t *testing.T,
+	peer string,
+	opener link.ActorStreamOpener,
+) *link.AuthenticatedLinkSession {
+	t.Helper()
+	_, server := newSessionTestServer(t)
+	dialer, err := link.Dial(
+		context.Background(),
+		"ws"+server.URL[4:],
+		link.DialConfig{SessionLedger: link.NewRemoteSessionLedger(nil)},
+		nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = dialer.Close() })
 	session, err := link.NewAuthenticatedLinkSession(link.AuthenticatedLinkSessionConfig{
 		Peer:            actorhost.ExecutionDomain(peer),
-		OpenActorStream: factory.open,
+		Authority:       dialer.Authority(),
+		OpenActorStream: opener,
+		CloseTransport:  dialer.Close,
+		TransportDone:   dialer.Done(),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -750,20 +773,14 @@ func TestOutboundOpenFailureUsesBoundedRetryBackoff(t *testing.T) {
 	builds := make(chan outboundBuild)
 	host := newOutboundHost(t, outbound, builds, false)
 	var opens atomic.Int64
-	session, err := link.NewAuthenticatedLinkSession(link.AuthenticatedLinkSessionConfig{
-		Peer: "server",
-		OpenActorStream: func(
-			context.Context,
-			actor.ActorID,
-			actorhost.AttemptKey,
-		) (link.ActorStreamResource, error) {
-			opens.Add(1)
-			return link.ActorStreamResource{}, errors.New("open failed")
-		},
+	session := newOutboundSessionWithOpener(t, "server", func(
+		context.Context,
+		actor.ActorID,
+		actorhost.AttemptKey,
+	) (link.ActorStreamResource, error) {
+		opens.Add(1)
+		return link.ActorStreamResource{}, errors.New("open failed")
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer closeOutboundFixture(t, host, outbound, session)
 
 	id := actor.ActorID("agent:open-backoff")

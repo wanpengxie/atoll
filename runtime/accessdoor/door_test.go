@@ -549,7 +549,7 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 	t.Run("same-daemon caller gets a Local route, no bytes on Value", func(t *testing.T) {
 		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
 		mem := &fakeMembership{lookupHost: "daemon-1", lookupFound: true}
-		lane := &fakeLaneControl{}
+		lane := &fakeLaneControl{tickets: LaneTickets{Redeem: "redeem-local-unused", Resolve: "resolve-local"}}
 		d := newDoor(reg, &fakeDriver{}, mem)
 		d.deps.LaneControl = lane
 		for _, op := range []access.Operation{access.OpRead, access.OpWrite} {
@@ -569,6 +569,9 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 			if out.Route.Mode != op {
 				t.Fatalf("op %q: route Mode = %q, want %q", op, out.Route.Mode, op)
 			}
+			if out.Route.Token != "resolve-local" {
+				t.Fatalf("op %q: local route ticket = %q, want resolve ticket", op, out.Route.Token)
+			}
 		}
 		if len(lane.calls) != 2 {
 			t.Fatalf("OpenTransfer calls = %d, want 2 (one per op — a Token still mints for the Local branch's ResolveCoord step)", len(lane.calls))
@@ -578,7 +581,7 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 	t.Run("cross-host caller gets a Stream route (minted Token)", func(t *testing.T) {
 		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
 		mem := &fakeMembership{lookupHost: "daemon-2", lookupFound: true}
-		lane := &fakeLaneControl{token: "tok-xyz"}
+		lane := &fakeLaneControl{tickets: LaneTickets{Redeem: "redeem-xyz", Resolve: "resolve-not-carried"}}
 		d := newDoor(reg, &fakeDriver{}, mem)
 		d.deps.LaneControl = lane
 
@@ -589,8 +592,8 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 		if out.Route == nil || out.Route.Local {
 			t.Fatalf("want a non-Local route, got %+v", out.Route)
 		}
-		if out.Route.Token != "tok-xyz" {
-			t.Fatalf("Token = %q, want %q", out.Route.Token, "tok-xyz")
+		if out.Route.Token != "redeem-xyz" {
+			t.Fatalf("Token = %q, want redeem ticket", out.Route.Token)
 		}
 		if len(lane.calls) != 1 || lane.calls[0].targetDaemonID != "daemon-1" || lane.calls[0].requesterDaemonID != "daemon-2" || lane.calls[0].coord != "coord-1" {
 			t.Fatalf("OpenTransfer call = %+v, want target=daemon-1 requester=daemon-2 coord=coord-1", lane.calls)
@@ -600,7 +603,9 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 	t.Run("server placement (home-hosted caller) is honestly non-Local", func(t *testing.T) {
 		reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
 		mem := &fakeMembership{} // lookupFound: false
-		lane := &fakeLaneControl{}
+		lane := &fakeLaneControl{tickets: LaneTickets{
+			Redeem: "redeem-server", Resolve: "resolve-server",
+		}}
 		d := newDoor(reg, &fakeDriver{}, mem)
 		d.deps.LaneControl = lane
 
@@ -610,6 +615,28 @@ func TestInvokeFileReadWriteProducesRoute(t *testing.T) {
 		}
 		if out.Route == nil || out.Route.Local {
 			t.Fatalf("want a non-Local route for an unfound/home-hosted caller, got %+v", out.Route)
+		}
+	})
+
+	t.Run("malformed ticket pairs fail closed", func(t *testing.T) {
+		tests := []struct {
+			name    string
+			tickets LaneTickets
+		}{
+			{name: "missing redeem", tickets: LaneTickets{Resolve: "resolve-only"}},
+			{name: "missing resolve", tickets: LaneTickets{Redeem: "redeem-only"}},
+			{name: "same ticket", tickets: LaneTickets{Redeem: "one", Resolve: "one"}},
+		}
+		for _, test := range tests {
+			t.Run(test.name, func(t *testing.T) {
+				reg := &fakeRegistry{resolveExists: true, resolveMeta: meta, actorAllows: true}
+				mem := &fakeMembership{lookupHost: "daemon-1", lookupFound: true}
+				d := newDoor(reg, &fakeDriver{}, mem)
+				d.deps.LaneControl = &fakeLaneControl{tickets: test.tickets}
+				if _, err := d.invoke(context.Background(), "a", access.OpRead, "r1", nil, nil); err == nil {
+					t.Fatal("malformed ticket pair was accepted")
+				}
+			})
 		}
 	})
 

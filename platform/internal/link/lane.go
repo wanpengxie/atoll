@@ -12,9 +12,9 @@ import (
 // laneHeaderReadTimeout bounds the ONE header/ack read at the head of every
 // lane substream (期11 review #F). Without it, a peer that opens a lane
 // substream and then never writes its header (a half-open connection, a peer
-// bug) wedges the dispatch goroutine reading it forever — the Lease pings only
-// watch the control stream, so a stuck lane substream leaks undetected.
-// Generous relative to leasePing/leaseTTL (10s/30s): a header is tens of bytes,
+// bug) wedges the dispatch goroutine reading it forever. Session probes prove
+// only the control spine, so a stuck lane child still needs its own admission
+// bound. A header is tens of bytes,
 // so any healthy peer sends it near-instantly; this only ever fires on a
 // genuinely stuck/half-open stream. The deadline is CLEARED the moment the
 // header is read (readLaneJSON's defer), so it never bounds the raw byte pump
@@ -65,6 +65,10 @@ type laneAck struct {
 // is sufficient because every message here is sent by exactly one side at a
 // fixed protocol step — no interleaving, no need for a byte-exact framer.
 func writeLaneJSON(w io.Writer, v any) error {
+	if dl, ok := w.(interface{ SetWriteDeadline(t time.Time) error }); ok {
+		_ = dl.SetWriteDeadline(time.Now().Add(streamWriteBudget))
+		defer func() { _ = dl.SetWriteDeadline(time.Time{}) }()
+	}
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err

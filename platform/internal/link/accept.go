@@ -75,39 +75,24 @@ type Acceptor struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
-	admissionMu sync.Mutex
-	closed      bool
-	wg          sync.WaitGroup
-	closeOnce   sync.Once
-	closeDone   chan struct{}
-	leaked      atomic.Int64
-
-	attachedMu sync.Mutex
-	attached   map[string]int
-
-	linksMu sync.Mutex
-	links   map[string]map[*linkHandle]struct{}
+	admissionMu  sync.Mutex
+	closed       bool
+	wg           sync.WaitGroup
+	closeOnce    sync.Once
+	closeDone    chan struct{}
+	leaked       atomic.Int64
+	compensated  atomic.Int64
+	lateRejected atomic.Int64
 
 	pendingAlloc   *pendingReplies[AllocReply]
 	pendingReclaim *pendingReplies[ReclaimReply]
+	sessions       *sessionRegistry
 	lane           *laneState
 }
 
 type linkHandle struct {
-	closeOnce sync.Once
-	close     func() error
-	send      func([]byte) error
-}
-
-func (h *linkHandle) closeQuietly() {
-	if h == nil {
-		return
-	}
-	h.closeOnce.Do(func() {
-		if h.close != nil {
-			_ = h.close()
-		}
-	})
+	send     func([]byte) error
+	openLane func(context.Context) (net.Conn, error)
 }
 
 func (h *linkHandle) sendControl(raw []byte) error {
@@ -131,7 +116,7 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 		logger = slog.New(slog.DiscardHandler)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
-	return &Acceptor{
+	acceptor := &Acceptor{
 		ingress:         cfg.Ingress,
 		channelID:       cfg.ChannelID,
 		logger:          logger,
@@ -140,12 +125,12 @@ func NewAcceptor(cfg Config) (*Acceptor, error) {
 		observe:     cfg.Observe, observeDown: cfg.ObserveDown, cancelReq: cfg.CancelRequest,
 		storageControl: cfg.StorageHostControl, plan: cfg.Plan, canAttach: cfg.CanAttach,
 		ctx: ctx, cancel: cancel, closeDone: make(chan struct{}),
-		attached:       make(map[string]int),
-		links:          make(map[string]map[*linkHandle]struct{}),
 		pendingAlloc:   newPendingReplies[AllocReply](),
 		pendingReclaim: newPendingReplies[ReclaimReply](),
 		lane:           newLaneState(),
-	}, nil
+	}
+	acceptor.sessions = newSessionRegistry(logger)
+	return acceptor, nil
 }
 
 func (a *Acceptor) Serve(w http.ResponseWriter, r *http.Request, daemonID string) {
@@ -178,12 +163,15 @@ func (a *Acceptor) beginServe() bool {
 func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID string) {
 	defer ws.Close()
 	peer := actorhost.ExecutionDomain(daemonID)
-	var (
-		boundMu sync.RWMutex
-		bound   bool
-	)
+	record, err := a.sessions.mint(daemonID)
+	if err != nil {
+		a.logger.Error("link.session_mint_failed", "key", daemonID, "error", err)
+		return
+	}
+
 	var physical *AuthenticatedLinkSession
 	var lc *linkSession
+	authority := authorityPair(a.sessions, record)
 
 	handlers := serverActorHandlers{
 		emit:          a.emit,
@@ -199,290 +187,292 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	}
 
 	onActor := func(conn net.Conn) {
-		go func() {
-			_ = conn.SetReadDeadline(time.Now().Add(attachHandshakeTimeout))
-			codec := ipc.NewCodec(conn, conn)
-			frame, err := codec.Read()
-			if err != nil || frame.Kind != ipc.KindHandshake {
-				_ = conn.Close()
-				return
+		_ = conn.SetReadDeadline(time.Now().Add(attachHandshakeTimeout))
+		codec := ipc.NewCodec(conn, conn)
+		frame, err := codec.Read()
+		if err != nil || frame.Kind != ipc.KindHandshake {
+			_ = conn.Close()
+			return
+		}
+		var handshake ipc.HandshakePayload
+		if err := json.Unmarshal(frame.Payload, &handshake); err != nil {
+			_ = conn.Close()
+			return
+		}
+		id := actor.ActorID(handshake.LeaseID)
+		key, err := actorhost.ParseAttemptKey(handshake.AttemptKey)
+		if err != nil {
+			_ = conn.Close()
+			return
+		}
+		if !authority.admits() || a.authorizeAttach(id, key, peer) != nil {
+			_ = conn.Close()
+			a.logLateReject(record, "actor_admission")
+			return
+		}
+		_ = conn.SetReadDeadline(time.Time{})
+		routeHandlers := handlers
+		var hostBinding actorhost.Binding
+		routeHandlers.obs = func(
+			obsID actor.ActorID,
+			obsKey actorhost.AttemptKey,
+			kind actorrt.ObsKind,
+			value actorrt.ObsValue,
+		) {
+			if a.observe != nil {
+				a.observe(obsID, obsKey, hostBinding, kind, value)
 			}
-			var handshake ipc.HandshakePayload
-			if err := json.Unmarshal(frame.Payload, &handshake); err != nil {
-				_ = conn.Close()
-				return
-			}
-			id := actor.ActorID(handshake.LeaseID)
-			key, err := actorhost.ParseAttemptKey(handshake.AttemptKey)
-			if err != nil {
-				_ = conn.Close()
-				return
-			}
-			boundMu.RLock()
-			isBound := bound
-			boundMu.RUnlock()
-			if !isBound || a.authorizeAttach(id, key, peer) != nil {
-				_ = conn.Close()
-				return
-			}
-			_ = conn.SetReadDeadline(time.Time{})
-			routeHandlers := handlers
-			var hostBinding actorhost.Binding
-			routeHandlers.obs = func(
-				obsID actor.ActorID,
-				obsKey actorhost.AttemptKey,
-				kind actorrt.ObsKind,
-				value actorrt.ObsValue,
-			) {
-				if a.observe != nil {
-					a.observe(obsID, obsKey, hostBinding, kind, value)
+		}
+		endpoint := newServerActorEndpoint(reqCtx, id, key, conn, codec, routeHandlers)
+		var binding *Binding
+		binding, err = physical.NewBinding(BindingConfig{
+			Endpoint: endpoint,
+			Run:      endpoint.Run,
+			Close:    endpoint.Close,
+			BeforeStart: func(exact *Binding) {
+				hostBinding = exact.HostBinding()
+			},
+			OnDown: func(exact *Binding, runErr error) {
+				a.bindingDown(id, exact.HostBinding())
+				if a.observeDown != nil {
+					a.observeDown(id, key, exact.HostBinding())
 				}
-			}
-			endpoint := newServerActorEndpoint(reqCtx, id, key, conn, codec, routeHandlers)
-			var binding *Binding
-			binding, err = physical.NewBinding(BindingConfig{
-				Endpoint: endpoint,
-				Run:      endpoint.Run,
-				Close:    endpoint.Close,
-				BeforeStart: func(exact *Binding) {
-					hostBinding = exact.HostBinding()
-				},
-				OnDown: func(exact *Binding, runErr error) {
-					a.bindingDown(id, exact.HostBinding())
-					if a.observeDown != nil {
-						a.observeDown(id, key, exact.HostBinding())
-					}
-					if runErr != nil && !errors.Is(runErr, context.Canceled) {
-						a.logger.Debug("link.actor_binding_down", "actor", id, "err", runErr)
-					}
-				},
-			})
-			if err != nil {
-				_ = endpoint.Close()
-				return
-			}
-			// Fresh Controller authorization immediately precedes publication;
-			// a G1 stream paused after its first check cannot replace G2.
-			if err := a.attachBinding(id, key, peer, binding.HostBinding()); err != nil {
-				_ = binding.Close()
-			}
-		}()
+				if runErr != nil && !errors.Is(runErr, context.Canceled) {
+					a.logger.Debug("link.actor_binding_down", "actor", id, "err", runErr)
+				}
+			},
+		})
+		if err != nil {
+			_ = endpoint.Close()
+			return
+		}
+		// Route publication is convergent: Current precheck, runtime commit,
+		// Current postcheck, exact compensation.
+		if !authority.isCurrent() {
+			a.logLateReject(record, "route_publish_precheck")
+			_ = binding.Close()
+			return
+		}
+		if err := a.attachBinding(id, key, peer, binding.HostBinding()); err != nil {
+			_ = binding.Close()
+			return
+		}
+		if !authority.isCurrent() {
+			a.compensated.Add(1)
+			a.logger.Warn("link.route_publish_compensated",
+				"generation", record.generation, "key", record.key,
+				"actor", id, "compensated", a.compensated.Load())
+			_ = binding.Close()
+		}
 	}
 
 	onLane := func(conn net.Conn) {
-		boundMu.RLock()
-		ok := bound
-		boundMu.RUnlock()
-		if !ok {
+		if !authority.admits() {
 			_ = conn.Close()
+			a.logLateReject(record, "lane_admission")
 			return
 		}
 		a.handleLaneRedeem(daemonID, conn)
 	}
 
+	router, err := buildHomeControlRouter(a, reqCtx, record, authority.admits)
+	if err != nil {
+		record.report(SessionLocalFault, "control_table_invalid", err)
+		a.sessions.completeSeal(record, 0)
+		return
+	}
 	onControl := func(payload []byte) {
-		switch peekControlKind(payload) {
-		case ctrlAttach:
-			frame, err := decodeControl(payload)
-			if err != nil || frame.Attach == nil {
-				return
-			}
-			reply := AttachReply{ChannelID: a.channelID, DaemonID: daemonID}
-			if err := a.canAttach(reqCtx, daemonID); err != nil {
-				reply.Reason = err.Error()
-			} else {
-				reply.Accepted = true
-			}
-			raw, _ := encodeControl(controlFrame{
-				RequestID: frame.RequestID, Kind: ctrlAttachReply, AttachReply: &reply,
-			})
-			if err := lc.sendControl(raw); err != nil || !reply.Accepted {
-				lc.kill("attach_rejected", err)
-				return
-			}
-			boundMu.Lock()
-			first := !bound
-			bound = true
-			boundMu.Unlock()
-			if first {
-				a.markAttached(daemonID)
-				a.registerLaneLink(daemonID, lc)
-			}
-		case ctrlPlanPull:
-			frame, err := decodeControl(payload)
-			if err != nil || frame.PlanPull == nil {
-				return
-			}
-			boundMu.RLock()
-			ok := bound
-			boundMu.RUnlock()
-			reply := PlanReply{}
-			if !ok {
-				reply.Error = "link: plan pull before attach"
-			} else {
-				reply.Actors, err = a.plan(reqCtx, daemonID)
-				if err != nil {
-					reply.Error = err.Error()
-				}
-			}
-			raw, _ := encodeControl(controlFrame{
-				RequestID: frame.RequestID, Kind: ctrlPlanReply, PlanReply: &reply,
-			})
-			_ = lc.sendControl(raw)
-		case ctrlAllocReply:
-			frame, err := decodeStorageControl(payload)
-			if err == nil && frame.AllocReply != nil {
-				a.pendingAlloc.deliver(frame.AllocReply.RequestID, *frame.AllocReply)
-			}
-		case ctrlReclaimReply:
-			frame, err := decodeStorageControl(payload)
-			if err == nil && frame.ReclaimReply != nil {
-				a.pendingReclaim.deliver(frame.ReclaimReply.RequestID, *frame.ReclaimReply)
-			}
-		case ctrlCommitted:
-			frame, err := decodeStorageControl(payload)
-			if err == nil && frame.Committed != nil {
-				a.handleCommitted(reqCtx, lc, daemonID, frame.Committed)
-			}
-		case ctrlReclaimAck:
-			frame, err := decodeStorageControl(payload)
-			if err == nil && frame.ReclaimAck != nil {
-				a.handleReclaimAck(reqCtx, lc, daemonID, frame.ReclaimAck)
-			}
-		case ctrlReconcilePull:
-			frame, err := decodeStorageControl(payload)
-			if err == nil && frame.ReconcilePull != nil {
-				a.handleReconcilePull(reqCtx, lc, daemonID, frame.ReconcilePull)
-			}
-		case ctrlResolveCoord:
-			frame, err := decodeLaneControl(payload)
-			if err == nil && frame.ResolveCoord != nil {
-				reply := a.handleResolveCoord(daemonID, frame.ResolveCoord)
-				raw, _ := encodeLaneControl(laneControlFrame{
-					Kind: ctrlResolveCoordReply, ResolveCoordReply: &reply,
-				})
-				_ = lc.sendControl(raw)
-			}
-		}
+		router.dispatch(controlDispatchInput{
+			peerID: daemonID, session: record, link: lc,
+		}, payload)
 	}
 
-	var err error
-	lc, err = acceptLinkSession(ws, onControl, onActor, onLane, nil, a.logger)
+	sessionLogger := a.logger.With(
+		"generation", record.generation,
+		"key", record.key,
+	)
+	lc, err = acceptLinkSession(
+		ws, onControl, onActor, onLane,
+		func() { a.sessions.touch(record, time.Now()) },
+		func(reason SessionEndReason, detail string, evidenceErr error) {
+			record.report(reason, detail, evidenceErr)
+		},
+		sessionLogger,
+	)
 	if err != nil {
+		a.sessions.beginSeal(record, sessionEvidence{
+			reason: SessionCarrierLost, detail: "carrier_accept_setup_failed", err: err,
+		})
+		a.sessions.completeSeal(record, 0)
 		return
 	}
 	physical, err = NewAuthenticatedLinkSession(AuthenticatedLinkSessionConfig{
-		Peer: peer, CloseTransport: lc.Close, TransportDone: lc.closed(),
+		Peer: peer, Authority: authority, CloseTransport: lc.closeCarrier,
 	})
 	if err != nil {
-		_ = lc.Close()
+		record.report(SessionLocalFault, "physical_owner_setup_failed", err)
+		_ = lc.closeCarrier()
+		a.sessions.completeSeal(record, 0)
 		return
 	}
-	handle := &linkHandle{close: physical.Close, send: lc.sendControl}
-	a.registerLink(daemonID, handle)
-	defer a.deregisterLink(daemonID, handle)
+	handle := &linkHandle{
+		send: lc.sendControl, openLane: lc.openLane,
+	}
+	record.setHandle(handle)
 	lc.start()
+
+	// report performs the locked decision write itself, so a verdict written by
+	// any evidence source (probe watchdog, control reader, kick, task pool) is
+	// already in the ledger when sealed closes; this loop only supplies the
+	// physical observations and then collects. When a precise reason and its
+	// physical consequence race, whichever verdict committed first is kept —
+	// beginSeal refuses the loser as already decided.
 	select {
 	case <-a.ctx.Done():
-		_ = physical.Close()
+		record.report(SessionRevoked, "acceptor_shutdown", nil)
 	case <-lc.closed():
-		_ = physical.Close()
+		record.report(SessionCarrierLost, "carrier_closed", nil)
+	case <-record.sealed:
 	}
-	<-physical.Done()
-	boundMu.RLock()
-	wasBound := bound
-	boundMu.RUnlock()
-	if wasBound {
-		a.markDetached(daemonID)
-		a.deregisterLaneLink(daemonID, lc)
-	}
+	a.collectSession(record, physical, lc)
 }
 
-func (a *Acceptor) registerLink(id string, handle *linkHandle) {
-	a.linksMu.Lock()
-	set := a.links[id]
-	if set == nil {
-		set = make(map[*linkHandle]struct{})
-		a.links[id] = set
-	}
-	set[handle] = struct{}{}
-	a.linksMu.Unlock()
+func (a *Acceptor) logLateReject(record *sessionRecord, gate string) {
+	count := a.lateRejected.Add(1)
+	a.logger.Info("link.session_late_rejected",
+		"generation", record.generation, "key", record.key,
+		"gate", gate, "rejected", count)
 }
 
-func (a *Acceptor) deregisterLink(id string, handle *linkHandle) {
-	a.linksMu.Lock()
-	if set := a.links[id]; set != nil {
-		delete(set, handle)
-		if len(set) == 0 {
-			delete(a.links, id)
+// collectSession runs after the verdict is already in the ledger: it performs
+// the bounded physical teardown and the closing→closed completion write.
+func (a *Acceptor) collectSession(
+	record *sessionRecord,
+	physical *AuthenticatedLinkSession,
+	lc *linkSession,
+) {
+	start := time.Now()
+	joinedTasks, abandoned := lc.drainControlTasks(a.sessions.settlementWindow)
+	a.logger.Info("link.session_seal_step",
+		"generation", record.generation, "key", record.key,
+		"step", "settlement", "joined", joinedTasks, "elapsed", time.Since(start))
+	_ = physical.Close()
+	a.logger.Info("link.session_seal_step",
+		"generation", record.generation, "key", record.key,
+		"step", "carrier_closed", "elapsed", time.Since(start))
+	if !lc.waitWorkers(a.sessions.sessionJoinWindow) {
+		abandoned++
+		a.logger.Warn("link.session_mechanism_abandoned",
+			"generation", record.generation, "key", record.key)
+	}
+	select {
+	case <-physical.Done():
+	case <-time.After(a.sessions.sessionJoinWindow):
+		abandoned++
+		a.logger.Warn("link.session_children_abandoned",
+			"generation", record.generation, "key", record.key)
+	}
+	a.sessions.completeSeal(record, abandoned)
+}
+
+func (a *Acceptor) probeSession(record *sessionRecord, lc *linkSession) {
+	ticker := time.NewTicker(a.sessions.probeInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-record.done:
+			return
+		case <-ticker.C:
+			lastSeen, active := a.sessions.lastSeen(record)
+			if !active {
+				return
+			}
+			if time.Since(lastSeen) >= a.sessions.livenessTTL {
+				record.report(SessionLivenessExpired, "control_probe_ttl_expired", nil)
+				return
+			}
+			a.logger.Debug("link.session_liveness",
+				"generation", record.generation, "key", record.key,
+				"since_last_seen", time.Since(lastSeen),
+				"ttl_remaining", a.sessions.livenessTTL-time.Since(lastSeen))
+			nonce, err := mintSessionGeneration()
+			if err != nil {
+				record.report(SessionLocalFault, "probe_nonce_mint_failed", err)
+				return
+			}
+			if err := lc.sendProbe(string(nonce)); err != nil {
+				record.report(SessionCarrierLost, "control_probe_write_failed", err)
+				return
+			}
 		}
 	}
-	a.linksMu.Unlock()
 }
 
+// Sessions lists candidates, active/closing sessions, and closed diagnostics
+// retained within the configured TTL.
+func (a *Acceptor) Sessions() []SessionSnapshot {
+	if a == nil {
+		return nil
+	}
+	return a.sessions.snapshots()
+}
+
+// KickSession revokes one exact generation and cannot touch a successor.
+func (a *Acceptor) KickSession(generation SessionGeneration) bool {
+	if a == nil {
+		return false
+	}
+	record := a.sessions.record(generation)
+	if record == nil {
+		return false
+	}
+	record.report(SessionRevoked, "management_exact_kick", nil)
+	return true
+}
+
+// KickDaemon is the explicit bulk-revocation operation used by daemon removal,
+// not a current-session alias. Every extant generation for the key is revoked.
 func (a *Acceptor) KickDaemon(id string) int {
-	a.linksMu.Lock()
-	var handles []*linkHandle
-	for handle := range a.links[id] {
-		handles = append(handles, handle)
+	if a == nil || id == "" {
+		return 0
 	}
-	a.linksMu.Unlock()
-	for _, handle := range handles {
-		handle.closeQuietly()
+	count := 0
+	for _, snapshot := range a.sessions.snapshots() {
+		if snapshot.Key != id || snapshot.State == SessionClosed {
+			continue
+		}
+		if a.KickSession(snapshot.Generation) {
+			count++
+		}
 	}
-	a.logger.Info("link.kick_daemon", "compute", id, "closed", len(handles))
-	return len(handles)
+	return count
 }
 
 // PokePlan sends an empty, coalescible level wake to every current physical
 // session for one authenticated daemon. The daemon always pulls a fresh full
 // Plan; this frame carries no actor or lifecycle state.
 func (a *Acceptor) PokePlan(id string) int {
-	a.linksMu.Lock()
-	var handles []*linkHandle
-	for handle := range a.links[id] {
-		handles = append(handles, handle)
+	record := a.sessions.currentRecord(id)
+	if record == nil {
+		return 0
 	}
-	a.linksMu.Unlock()
+	handle := record.linkHandle()
 	raw := encodePlanPoke()
-	sent := 0
-	for _, handle := range handles {
-		if err := handle.sendControl(raw); err == nil {
-			sent++
-		}
+	if handle != nil && handle.sendControl(raw) == nil {
+		return 1
 	}
-	return sent
-}
-
-func (a *Acceptor) markAttached(id string) {
-	a.attachedMu.Lock()
-	a.attached[id]++
-	a.attachedMu.Unlock()
-}
-
-func (a *Acceptor) markDetached(id string) {
-	a.attachedMu.Lock()
-	a.attached[id]--
-	if a.attached[id] <= 0 {
-		delete(a.attached, id)
-	}
-	a.attachedMu.Unlock()
+	return 0
 }
 
 func (a *Acceptor) IsAttached(id string) bool {
-	a.attachedMu.Lock()
-	defer a.attachedMu.Unlock()
-	return a.attached[id] > 0
+	return a != nil && a.sessions.currentRecord(id) != nil
 }
 
 func (a *Acceptor) AttachedDaemonIDs() []string {
-	a.attachedMu.Lock()
-	defer a.attachedMu.Unlock()
-	out := make([]string, 0, len(a.attached))
-	for id := range a.attached {
-		out = append(out, id)
+	if a == nil {
+		return nil
 	}
-	return out
+	return a.sessions.currentKeys()
 }
 
 // The three capability arms below are the whole server-side story of a remote
@@ -552,12 +542,39 @@ func (a *Acceptor) sendStorageControl(lc *linkSession, frame storageControlFrame
 	}
 }
 
+func (a *Acceptor) sendCommittedBusy(lc *linkSession, requestID string) {
+	a.sendStorageControl(lc, storageControlFrame{
+		Kind: ctrlCommittedReply,
+		CommittedReply: &CommittedReply{
+			RequestID: requestID, Reason: "link: control task pool busy",
+		},
+	})
+}
+
+func (a *Acceptor) sendReclaimAckBusy(lc *linkSession, requestID string) {
+	a.sendStorageControl(lc, storageControlFrame{
+		Kind: ctrlReclaimAckReply,
+		ReclaimAckReply: &ReclaimAckReply{
+			RequestID: requestID, Reason: "link: control task pool busy",
+		},
+	})
+}
+
+func (a *Acceptor) sendReconcileBusy(lc *linkSession, requestID string) {
+	a.sendStorageControl(lc, storageControlFrame{
+		Kind: ctrlReconcilePullReply,
+		ReconcilePullReply: &ReconcilePullReply{
+			RequestID: requestID, Reason: "link: control task pool busy",
+		},
+	})
+}
+
 func (a *Acceptor) SendAllocRequest(
 	ctx context.Context,
 	daemonID string,
 	request AllocRequest,
 ) error {
-	handle := a.latestLink(daemonID)
+	handle := a.currentHandle(daemonID)
 	if handle == nil {
 		return fmt.Errorf("link: no live connection for daemon %q", daemonID)
 	}
@@ -587,7 +604,7 @@ func (a *Acceptor) SendAllocRequest(
 }
 
 func (a *Acceptor) SendReclaimRequest(ctx context.Context, daemonID, coord string) error {
-	handle := a.latestLink(daemonID)
+	handle := a.currentHandle(daemonID)
 	if handle == nil {
 		return fmt.Errorf("link: no live connection for daemon %q", daemonID)
 	}
@@ -614,13 +631,15 @@ func (a *Acceptor) SendReclaimRequest(ctx context.Context, daemonID, coord strin
 	return nil
 }
 
-func (a *Acceptor) latestLink(id string) *linkHandle {
-	a.linksMu.Lock()
-	defer a.linksMu.Unlock()
-	for handle := range a.links[id] {
-		return handle
+func (a *Acceptor) currentHandle(id string) *linkHandle {
+	if a == nil {
+		return nil
 	}
-	return nil
+	record := a.sessions.currentRecord(id)
+	if record == nil {
+		return nil
+	}
+	return record.linkHandle()
 }
 
 func (a *Acceptor) handleCommitted(
@@ -702,16 +721,10 @@ func (a *Acceptor) Close() error {
 		a.closed = true
 		a.admissionMu.Unlock()
 		a.cancel()
-		a.linksMu.Lock()
-		var handles []*linkHandle
-		for _, set := range a.links {
-			for handle := range set {
-				handles = append(handles, handle)
+		for _, snapshot := range a.sessions.snapshots() {
+			if snapshot.State != SessionClosed {
+				a.KickSession(snapshot.Generation)
 			}
-		}
-		a.linksMu.Unlock()
-		for _, handle := range handles {
-			handle.closeQuietly()
 		}
 		if !waitGroupWithin(&a.wg, 30*time.Second) {
 			a.leaked.Add(1)

@@ -174,6 +174,105 @@ type ReconcilePullReply struct {
 	Reason              string                 `json:"reason,omitempty"`
 }
 
+func (m AllocRequest) validate() error {
+	if err := requiredControlField("alloc_request.request_id", m.RequestID); err != nil {
+		return err
+	}
+	if err := requiredControlField("alloc_request.channel_id", m.ChannelID); err != nil {
+		return err
+	}
+	return requiredControlField("alloc_request.coord", m.Coord)
+}
+
+func (m AllocReply) validate() error {
+	if err := requiredControlField("alloc_reply.request_id", m.RequestID); err != nil {
+		return err
+	}
+	if !m.OK {
+		return requiredControlField("alloc_reply.reason", m.Reason)
+	}
+	return nil
+}
+
+func (m Committed) validate() error {
+	if err := requiredControlField("committed.request_id", m.RequestID); err != nil {
+		return err
+	}
+	return requiredControlField("committed.reservation_id", m.ReservationID)
+}
+
+func (m CommittedReply) validate() error {
+	if err := requiredControlField("committed_reply.request_id", m.RequestID); err != nil {
+		return err
+	}
+	if m.Lost && !m.Found {
+		return errors.New("link: committed_reply.lost requires found")
+	}
+	return nil
+}
+
+func (m ReclaimAck) validate() error {
+	if err := requiredControlField("reclaim_ack.request_id", m.RequestID); err != nil {
+		return err
+	}
+	return requiredControlField("reclaim_ack.tombstone_id", m.TombstoneID)
+}
+
+func (m ReclaimAckReply) validate() error {
+	return requiredControlField("reclaim_ack_reply.request_id", m.RequestID)
+}
+
+func (m ReconcilePull) validate() error {
+	if err := requiredControlField("reconcile_pull.request_id", m.RequestID); err != nil {
+		return err
+	}
+	for i, coord := range m.ActiveCoords {
+		if coord == "" {
+			return fmt.Errorf("link: reconcile_pull.active_coords[%d] is required", i)
+		}
+	}
+	return nil
+}
+
+func (m ReclaimRequest) validate() error {
+	if err := requiredControlField("reclaim_request.request_id", m.RequestID); err != nil {
+		return err
+	}
+	return requiredControlField("reclaim_request.coord", m.Coord)
+}
+
+func (m ReclaimReply) validate() error {
+	if err := requiredControlField("reclaim_reply.request_id", m.RequestID); err != nil {
+		return err
+	}
+	if !m.OK {
+		return requiredControlField("reclaim_reply.reason", m.Reason)
+	}
+	return nil
+}
+
+func (m ReconcilePullReply) validate() error {
+	if err := requiredControlField("reconcile_pull_reply.request_id", m.RequestID); err != nil {
+		return err
+	}
+	for i, row := range m.Resources {
+		if row.Coord == "" {
+			return fmt.Errorf("link: reconcile_pull_reply.resources[%d].coord is required", i)
+		}
+	}
+	for i, row := range m.PendingReservations {
+		if row.ReservationID == "" || row.Coord == "" {
+			return fmt.Errorf("link: reconcile_pull_reply.pending_reservations[%d] is incomplete", i)
+		}
+	}
+	for i, row := range m.PendingTombstones {
+		if row.TombstoneID == "" || row.Coord == "" {
+			return fmt.Errorf("link: reconcile_pull_reply.pending_tombstones[%d] is incomplete", i)
+		}
+	}
+	return nil
+}
+
 // controlKind additions (additive to control.go's closed set — attach/
 // attach_reply are untouched, this is a widening not a redefinition).
 const (
@@ -228,22 +327,22 @@ func (p *pendingReplies[T]) register(id string) chan T {
 	return ch
 }
 
-// deliver hands v to id's waiter, if one is still registered. A delivery
-// with no live waiter (already timed out / cancelled, or a stray/duplicate
-// reply) is silently dropped — best-effort, matching every other advisory
-// arm in this package (obs/cancel-forward).
-func (p *pendingReplies[T]) deliver(id string, v T) {
+// deliver hands v to id's waiter and reports whether correlation succeeded.
+// Business replies may ignore false after their caller timed out; attach_reply
+// treats false as a protocol violation because one link has exactly one attach.
+func (p *pendingReplies[T]) deliver(id string, v T) bool {
 	p.mu.Lock()
 	ch := p.waiters[id]
 	delete(p.waiters, id)
 	p.mu.Unlock()
 	if ch == nil {
-		return
+		return false
 	}
 	select {
 	case ch <- v:
 	default:
 	}
+	return true
 }
 
 // cancel drops id's waiter without delivering — used by the caller's own
@@ -258,9 +357,9 @@ func (p *pendingReplies[T]) cancel(id string) {
 // controlRPCTimeout bounds every storage control-RPC round trip on both
 // sides (AllocRequest waiting for AllocReply; the daemon's Committed/
 // ReclaimAck/ReconcilePull waiting for their replies) — a wedged peer must
-// not hang the caller forever. Generous relative to leasePing/leaseTTL
-// (10s/30s) since a real Allocator mkdir or Scrubber reconcile pull may
-// legitimately take longer than a bare control-frame round trip.
+// not hang the caller forever. A real Allocator mkdir or Scrubber reconcile
+// pull may legitimately take longer than a bare control-frame round trip; this
+// operation timeout is independent of the session probe verdict.
 var controlRPCTimeout = 20 * time.Second
 
 // wait blocks for id's reply on ch, honoring ctx, the link's done channel,
@@ -314,6 +413,56 @@ func decodeStorageControl(b []byte) (storageControlFrame, error) {
 	var f storageControlFrame
 	if err := json.Unmarshal(b, &f); err != nil {
 		return storageControlFrame{}, fmt.Errorf("link: decode storage control: %w", err)
+	}
+	if f.AllocRequest != nil {
+		if err := f.AllocRequest.validate(); err != nil {
+			return storageControlFrame{}, err
+		}
+	}
+	if f.AllocReply != nil {
+		if err := f.AllocReply.validate(); err != nil {
+			return storageControlFrame{}, err
+		}
+	}
+	if f.Committed != nil {
+		if err := f.Committed.validate(); err != nil {
+			return storageControlFrame{}, err
+		}
+	}
+	if f.CommittedReply != nil {
+		if err := f.CommittedReply.validate(); err != nil {
+			return storageControlFrame{}, err
+		}
+	}
+	if f.ReclaimAck != nil {
+		if err := f.ReclaimAck.validate(); err != nil {
+			return storageControlFrame{}, err
+		}
+	}
+	if f.ReclaimAckReply != nil {
+		if err := f.ReclaimAckReply.validate(); err != nil {
+			return storageControlFrame{}, err
+		}
+	}
+	if f.ReconcilePull != nil {
+		if err := f.ReconcilePull.validate(); err != nil {
+			return storageControlFrame{}, err
+		}
+	}
+	if f.ReconcilePullReply != nil {
+		if err := f.ReconcilePullReply.validate(); err != nil {
+			return storageControlFrame{}, err
+		}
+	}
+	if f.ReclaimRequest != nil {
+		if err := f.ReclaimRequest.validate(); err != nil {
+			return storageControlFrame{}, err
+		}
+	}
+	if f.ReclaimReply != nil {
+		if err := f.ReclaimReply.validate(); err != nil {
+			return storageControlFrame{}, err
+		}
 	}
 	return f, nil
 }

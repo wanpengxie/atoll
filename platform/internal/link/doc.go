@@ -3,9 +3,9 @@
 // (channel, actor) stream running the native actor wire protocol (runtime/ipc)
 // with a real handshake — stream-on-link is the SAME contract as a local pipe
 // (Erlang-distribution zero-translation discipline). The link control plane
-// (attach) rides its own dedicated substream. The home side (accept.go) judges
-// liveness via a per-link lease (Lease is a judgement role, not a package); the
-// daemon side (dial.go) opens one stream per attached actor. Beyond message
+// (attach plus session probes) rides its own dedicated spine. The home side
+// owns the single-lock session ledger and judges liveness only from round trips
+// on that spine; the daemon side opens one stream per attached actor. Beyond message
 // relay, each per-actor stream also carries that actor's access (+ state) and
 // schedule capability arms (KindAccess/KindSchedule FIFO round-trips) — a
 // daemon-hosted cell's off-log and time-axis capability travels the SAME
@@ -15,6 +15,6 @@
 // (the raw WS connection adapted to a byte stream), and every substream opens
 // with a self-describing streamHeader{Kind} so the accept loop can dispatch it
 // to its plane (control / actor / lane) without relying on stream ordering. It
-// is pure mechanism — it never decodes the ipc/JSON payload a substream
-// carries (zero-translation: a stream's bytes pass through as opaque data).
+// is pure mechanism: every control frame (probes included) goes through the
+// one control dispatch table; actor and lane bytes remain opaque.
 package link

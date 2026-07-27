@@ -160,7 +160,10 @@ func readAckLine(t *testing.T, r io.Reader) laneAckT {
 func dialWithLogger(t *testing.T, r *storageRig, opener link.LocalFileOpener) (*link.Dialer, *logCapture) {
 	t.Helper()
 	cap := &logCapture{}
-	d, err := link.Dial(context.Background(), r.wsURL(), link.DialConfig{LocalFileOpener: opener}, slog.New(cap))
+	d, err := link.Dial(context.Background(), r.wsURL(), link.DialConfig{
+		LocalFileOpener: opener,
+		SessionLedger:   link.NewRemoteSessionLedger(nil),
+	}, slog.New(cap))
 	if err != nil {
 		t.Fatalf("Dial: %v", err)
 	}
@@ -211,11 +214,11 @@ func TestLaneCommit_LostReclaimsAndWarns(t *testing.T) {
 	opener := &recordingLaneOpener{}
 	d, logs := dialWithLogger(t, r, opener)
 
-	tok, err := r.acc.OpenLaneTransfer(context.Background(), "daemon-1", "daemon-1", "coord-lost", access.OpWrite, "res-lost")
+	tickets, err := r.acc.OpenLaneTransfer(context.Background(), "daemon-1", "daemon-1", "coord-lost", access.OpWrite, "res-lost")
 	if err != nil {
 		t.Fatalf("OpenLaneTransfer: %v", err)
 	}
-	ack := driveLaneWrite(t, d, tok, []byte("bytes"))
+	ack := driveLaneWrite(t, d, tickets.Resolve, []byte("bytes"))
 	if !ack.OK {
 		t.Fatalf("lane write ack = %+v, want OK", ack)
 	}
@@ -237,11 +240,11 @@ func TestLaneCommit_NakWarnsNoReclaim(t *testing.T) {
 	opener := &recordingLaneOpener{}
 	d, logs := dialWithLogger(t, r, opener)
 
-	tok, err := r.acc.OpenLaneTransfer(context.Background(), "daemon-1", "daemon-1", "coord-nak", access.OpWrite, "res-nak")
+	tickets, err := r.acc.OpenLaneTransfer(context.Background(), "daemon-1", "daemon-1", "coord-nak", access.OpWrite, "res-nak")
 	if err != nil {
 		t.Fatalf("OpenLaneTransfer: %v", err)
 	}
-	driveLaneWrite(t, d, tok, []byte("bytes"))
+	driveLaneWrite(t, d, tickets.Resolve, []byte("bytes"))
 
 	if got := opener.reclaimedCoords(); len(got) != 0 {
 		t.Fatalf("NAK falsely reclaimed %v, want none", got)
@@ -281,11 +284,11 @@ func TestLaneCommit_NoReservationPlainCommit(t *testing.T) {
 	opener := &recordingLaneOpener{}
 	d, _ := dialWithLogger(t, r, opener)
 
-	tok, err := r.acc.OpenLaneTransfer(context.Background(), "daemon-1", "daemon-1", "coord-plain", access.OpWrite, "")
+	tickets, err := r.acc.OpenLaneTransfer(context.Background(), "daemon-1", "daemon-1", "coord-plain", access.OpWrite, "")
 	if err != nil {
 		t.Fatalf("OpenLaneTransfer: %v", err)
 	}
-	ack := driveLaneWrite(t, d, tok, []byte("plain-bytes"))
+	ack := driveLaneWrite(t, d, tickets.Resolve, []byte("plain-bytes"))
 	if !ack.OK {
 		t.Fatalf("lane write ack = %+v, want OK", ack)
 	}

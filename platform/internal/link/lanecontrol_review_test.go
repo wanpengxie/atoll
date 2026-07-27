@@ -19,28 +19,28 @@ import (
 
 func TestHandleResolveCoord_AuthorizeBeforeMutate_AndIdempotent(t *testing.T) {
 	a := &Acceptor{lane: newLaneState()}
-	tok, err := a.OpenLaneTransfer(context.Background(), "target-d", "req-d", "coord-x", access.OpRead, "res-1")
+	tickets, err := a.OpenLaneTransfer(context.Background(), "target-d", "req-d", "coord-x", access.OpRead, "res-1")
 	if err != nil {
 		t.Fatalf("OpenLaneTransfer: %v", err)
 	}
 
 	// A WRONG sender must not burn the token (the pre-review delete-then-check
 	// form destroyed a valid transfer on an unauthorized probe).
-	bad := a.handleResolveCoord("wrong-d", &ResolveCoordRequest{RequestID: "r1", Token: tok})
+	bad := a.handleResolveCoord("wrong-d", &ResolveCoordRequest{RequestID: "r1", Token: tickets.Resolve})
 	if bad.OK {
 		t.Fatal("wrong sender resolved the token")
 	}
 
 	// The legitimate target can STILL resolve it — proof the token was not
 	// burned by the unauthorized probe above.
-	ok1 := a.handleResolveCoord("target-d", &ResolveCoordRequest{RequestID: "r2", Token: tok})
+	ok1 := a.handleResolveCoord("target-d", &ResolveCoordRequest{RequestID: "r2", Token: tickets.Resolve})
 	if !ok1.OK || ok1.Coord != "coord-x" || ok1.Mode != access.OpRead || ok1.ReservationID != "res-1" {
 		t.Fatalf("target resolve = %+v, want OK coord-x/read/res-1", ok1)
 	}
 
 	// A retry by the same authorized target succeeds AGAIN (replay-safe: a
 	// dropped reply / re-dialed handle re-resolves the same route.Token).
-	ok2 := a.handleResolveCoord("target-d", &ResolveCoordRequest{RequestID: "r3", Token: tok})
+	ok2 := a.handleResolveCoord("target-d", &ResolveCoordRequest{RequestID: "r3", Token: tickets.Resolve})
 	if !ok2.OK || ok2.Coord != "coord-x" {
 		t.Fatalf("retry resolve = %+v, want the same OK result (idempotent)", ok2)
 	}
@@ -57,23 +57,24 @@ func TestHandleResolveCoord_AuthorizeBeforeMutate_AndIdempotent(t *testing.T) {
 // happened to mint again after would still resolve successfully forever.
 func TestHandleResolveCoord_ExpiredTransferRejected(t *testing.T) {
 	a := &Acceptor{lane: newLaneState()}
-	tok, err := a.OpenLaneTransfer(context.Background(), "target-d", "req-d", "coord-x", access.OpRead, "res-1")
+	tickets, err := a.OpenLaneTransfer(context.Background(), "target-d", "req-d", "coord-x", access.OpRead, "res-1")
 	if err != nil {
 		t.Fatalf("OpenLaneTransfer: %v", err)
 	}
 	a.lane.mu.Lock()
-	tr := a.lane.transfers[tok]
+	tr := a.lane.resolutions[tickets.Resolve]
 	tr.mintedAt = time.Now().Add(-2 * laneTransferTTL)
-	a.lane.transfers[tok] = tr
+	a.lane.resolutions[tickets.Resolve] = tr
+	a.lane.redeems[tickets.Redeem] = tr
 	a.lane.mu.Unlock()
 
-	reply := a.handleResolveCoord("target-d", &ResolveCoordRequest{RequestID: "r1", Token: tok})
+	reply := a.handleResolveCoord("target-d", &ResolveCoordRequest{RequestID: "r1", Token: tickets.Resolve})
 	if reply.OK {
 		t.Fatal("an expired transfer must not resolve, even for the legitimate target")
 	}
 
 	a.lane.mu.Lock()
-	_, stillThere := a.lane.transfers[tok]
+	_, stillThere := a.lane.resolutions[tickets.Resolve]
 	a.lane.mu.Unlock()
 	if stillThere {
 		t.Fatal("an expired transfer must be deleted AT USE (handleResolveCoord), not merely rejected")
@@ -85,18 +86,19 @@ func TestHandleResolveCoord_ExpiredTransferRejected(t *testing.T) {
 // redeem attempt too (a laneAck{OK:false}), and be deleted right there.
 func TestHandleLaneRedeem_ExpiredTransferRejected(t *testing.T) {
 	a := &Acceptor{lane: newLaneState()}
-	tok, err := a.OpenLaneTransfer(context.Background(), "target-d", "req-d", "coord-x", access.OpRead, "res-1")
+	tickets, err := a.OpenLaneTransfer(context.Background(), "target-d", "req-d", "coord-x", access.OpRead, "res-1")
 	if err != nil {
 		t.Fatalf("OpenLaneTransfer: %v", err)
 	}
 	a.lane.mu.Lock()
-	tr := a.lane.transfers[tok]
+	tr := a.lane.redeems[tickets.Redeem]
 	tr.mintedAt = time.Now().Add(-2 * laneTransferTTL)
-	a.lane.transfers[tok] = tr
+	a.lane.redeems[tickets.Redeem] = tr
+	a.lane.resolutions[tickets.Resolve] = tr
 	a.lane.mu.Unlock()
 
 	client, server := net.Pipe()
-	go func() { _ = writeLaneJSON(client, laneRedeemHeader{Token: tok}) }()
+	go func() { _ = writeLaneJSON(client, laneRedeemHeader{Token: tickets.Redeem}) }()
 
 	done := make(chan struct{})
 	go func() {
@@ -115,7 +117,7 @@ func TestHandleLaneRedeem_ExpiredTransferRejected(t *testing.T) {
 		t.Fatal("an expired transfer must not redeem, even for the legitimate requester")
 	}
 	a.lane.mu.Lock()
-	_, stillThere := a.lane.transfers[tok]
+	_, stillThere := a.lane.redeems[tickets.Redeem]
 	a.lane.mu.Unlock()
 	if stillThere {
 		t.Fatal("an expired transfer must be deleted AT USE (handleLaneRedeem), not merely rejected")
@@ -132,9 +134,10 @@ func TestOpenLaneTransfer_TTLReclaimsAbandonedTokens(t *testing.T) {
 	}
 	// Age the minted-but-never-redeemed token past the TTL.
 	a.lane.mu.Lock()
-	tr := a.lane.transfers[old]
+	tr := a.lane.resolutions[old.Resolve]
 	tr.mintedAt = time.Now().Add(-2 * laneTransferTTL)
-	a.lane.transfers[old] = tr
+	a.lane.resolutions[old.Resolve] = tr
+	a.lane.redeems[old.Redeem] = tr
 	a.lane.mu.Unlock()
 
 	// A fresh mint triggers the opportunistic sweep.
@@ -143,8 +146,8 @@ func TestOpenLaneTransfer_TTLReclaimsAbandonedTokens(t *testing.T) {
 	}
 
 	a.lane.mu.Lock()
-	_, stillThere := a.lane.transfers[old]
-	n := len(a.lane.transfers)
+	_, stillThere := a.lane.resolutions[old.Resolve]
+	n := len(a.lane.resolutions)
 	a.lane.mu.Unlock()
 	if stillThere {
 		t.Fatal("abandoned (open-no-redeem) token was not GC'd past its TTL")
