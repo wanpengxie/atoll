@@ -14,6 +14,7 @@ import (
 
 	"github.com/wanpengxie/atoll/lib/introspect"
 	"github.com/wanpengxie/atoll/protocol/actor"
+	"github.com/wanpengxie/atoll/protocol/message"
 )
 
 // ---------------------------------------------------------------------------
@@ -228,6 +229,33 @@ func (c *wsClient) waitTail(pred func(env map[string]any) bool, timeout time.Dur
 
 func (c *wsClient) close() { _ = c.conn.Close() }
 
+// setBoostDefault performs the backend half of the client creation
+// orchestration through only public wire surfaces.
+func setBoostDefault(t *testing.T, env *testEnv, s setupResult, c *wsClient) actor.ActorID {
+	t.Helper()
+	ack := c.sendMessage(map[string]any{
+		"msg_type":   "channel.set_default_agent",
+		"kind":       "request",
+		"audience":   []string{string(actor.SystemActorID)},
+		"visibility": "private",
+		"payload":    map[string]any{"source_decl_id": "sys:boost"},
+	})
+	if ack["type"] != "ack" {
+		t.Fatalf("set default submit: want ack, got %v", ack)
+	}
+	raw := waitForResponse(t, env, s, ack["message_id"].(string), 3*time.Second)
+	var response struct {
+		Status       string        `json:"status"`
+		DefaultAgent actor.ActorID `json:"default_agent"`
+	}
+	err := json.Unmarshal(raw, &response)
+	if err != nil || response.Status != string(message.StatusCompleted) ||
+		response.DefaultAgent == "" {
+		t.Fatalf("set default response=%s decoded=%+v err=%v", raw, response, err)
+	}
+	return response.DefaultAgent
+}
+
 // addSecondMember registers a fresh user, admits it to the channel as a human
 // member, and waits for its cell to embody — a second live
 // subject the cross-sender door assertions need.
@@ -306,6 +334,7 @@ func TestWS_MessageFrameEndToEnd(t *testing.T) {
 
 	c := dialWS(t, srv, s.cookies, s.chID, 0)
 	defer c.close()
+	setBoostDefault(t, env, s, c)
 
 	ack := c.sendMessage(map[string]any{
 		"msg_type": "chat.text",

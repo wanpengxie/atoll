@@ -2,11 +2,16 @@ package channel
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/resource"
 )
+
+// ErrDefaultAgentUnavailable distinguishes a corrupt/unreadable authoritative
+// routing fold from the ordinary Unset state returned as found=false.
+var ErrDefaultAgentUnavailable = errors.New("channel: default agent unavailable")
 
 type ReaderMode string
 

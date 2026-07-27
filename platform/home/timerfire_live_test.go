@@ -64,17 +64,15 @@ func TestDeadAuthorTimerFireIsRefusedByTheLiveGate(t *testing.T) {
 	if err := sink.Append(ctx, author, fireEnv("timer:live-1")); err != nil {
 		t.Fatalf("live author fire: %v", err)
 	}
-	afterLive, err := h.query.MaxSeq(ctx)
-	if err != nil {
-		t.Fatal(err)
-	}
-
 	// End the author; the identical fire is now refused by the gate and the
-	// message log does not move.
 	if _, err := h.actors.End(ctx, actorctl.EndRequest{
 		Target: author, CallerActorID: actor.SystemActorID, Reason: "test",
 	}); err != nil {
 		t.Fatalf("end author: %v", err)
+	}
+	beforeDead, err := h.query.MaxSeq(ctx)
+	if err != nil {
+		t.Fatal(err)
 	}
 	err = sink.Append(ctx, author, fireEnv("timer:dead-1"))
 	var rejected schedule.FireRejected
@@ -85,7 +83,7 @@ func TestDeadAuthorTimerFireIsRefusedByTheLiveGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if afterDead != afterLive {
-		t.Fatalf("a dead author's fire appended %d message rows", afterDead-afterLive)
+	if afterDead != beforeDead {
+		t.Fatalf("a dead author's fire appended %d message rows", afterDead-beforeDead)
 	}
 }

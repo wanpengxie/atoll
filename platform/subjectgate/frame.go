@@ -94,6 +94,7 @@ const (
 	CodeRequestNotFound    = "request_not_found"
 	CodeInvalidDecision    = "invalid_decision"
 	CodeUnavailable        = "unavailable"
+	CodeRoutingUnavailable = "routing_unavailable"
 	CodeForbidden          = "forbidden"
 	CodeClosed             = "closed"
 	// (CodeNotMember / CodeStaleBinding retired with the client-visible binding

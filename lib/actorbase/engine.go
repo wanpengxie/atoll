@@ -402,7 +402,7 @@ func (e *engine) closureFault(id message.ID, err error) {
 // no hand-copied field table in either direction since the purity 手动档
 // rework), so this is just a value copy of the embedded field: no composite
 // literal, so archtest's envelope-construction contract (which confines a
-// POPULATED message.Envelope{...} to lib/behavior alone) is not even
+// populated Envelope composite to the approved builder mouths) is not even
 // brushed. The copy keeps the old no-retention property: builders never
 // alias the delivered Msg's own envelope.
 func envelopeFromMsg(m Msg) *message.Envelope {

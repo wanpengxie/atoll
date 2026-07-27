@@ -18,8 +18,8 @@ import (
 type stepID int
 
 // Step 2 (StepDedupe) was retired along with the message-dedupe machinery;
-// step 6 (StepAudienceResolve) was retired when routing policy was judged a
-// substrate leak and moved out of the write chain. Both ordinals are
+// step 6 was retired when routing policy was judged a substrate leak and moved
+// into the human membrane. Both ordinals are
 // intentionally left as gaps so the remaining step numbers stay stable.
 const (
 	StepCallerAuth       stepID = 0
@@ -27,7 +27,6 @@ const (
 	StepNormalize        stepID = 3
 	StepSenderConsistent stepID = 4
 	StepTypeRegistered   stepID = 5
-	StepAudienceResolve  stepID = 6
 	StepKindAndAudience  stepID = 7
 	StepResponsePairing  stepID = 8
 	StepReceiverGate     stepID = 9

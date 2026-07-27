@@ -192,6 +192,36 @@ func (m *messages) MaxSeq(ctx context.Context) (int64, error) {
 	return seq, nil
 }
 
+// LatestBySenderAndType returns exactly the latest matching row. The query has
+// no cursor because authority folds must inspect the latest row and fail closed
+// on it; skipping a malformed latest row would silently resurrect stale truth.
+func (m *messages) LatestBySenderAndType(
+	ctx context.Context,
+	sender actor.ActorID,
+	typ string,
+) (storespec.StoredRow, bool, error) {
+	const q = `SELECT id, ts, ts_received, channel_id,
+	                  sender_kind, sender_id,
+	                  kind, type, payload,
+	                  COALESCE(parent_id,''), COALESCE(correlation_id,''),
+	                  visibility, audience,
+	                  expires_at,
+	                  is_terminal, seq
+	             FROM messages
+	            WHERE sender_id = ? AND type = ?
+	            ORDER BY seq DESC
+	            LIMIT 1`
+	row := m.db.QueryRowContext(ctx, q, string(sender), typ)
+	stored, err := scanEnvelope(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return storespec.StoredRow{}, false, nil
+	}
+	if err != nil {
+		return storespec.StoredRow{}, false, fmt.Errorf("store: latest by sender and type: %w", err)
+	}
+	return stored, true, nil
+}
+
 // ReadAfterSeq returns up to `limit` envelopes with seq > afterSeq for the
 // channel, in ascending seq order. seq is the monotonic ordering guarantee:
 // reading forward from a cursor never skips a committed row.

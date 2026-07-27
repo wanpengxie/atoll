@@ -17,6 +17,9 @@ type pumpQuery struct {
 }
 
 func (q pumpQuery) MaxSeq(context.Context) (int64, error) { return 0, nil }
+func (q pumpQuery) LatestBySenderAndType(context.Context, actor.ActorID, string) (storespec.StoredRow, bool, error) {
+	return storespec.StoredRow{}, false, nil
+}
 func (q pumpQuery) ReadAfterSeq(ctx context.Context, seq int64, limit int) ([]storespec.StoredRow, error) {
 	return q.read(ctx, seq, limit)
 }

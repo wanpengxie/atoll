@@ -2,8 +2,6 @@ package storespec
 
 import (
 	"context"
-
-	"github.com/wanpengxie/atoll/protocol/actor"
 )
 
 // DaemonID names one channel↔daemon wiring row. The binding row belongs to the
@@ -24,12 +22,4 @@ type DaemonBindingStore interface {
 type DaemonBindingReader interface {
 	IsBound(context.Context, DaemonID) (bool, error)
 	ListBoundDaemons(context.Context) ([]DaemonID, error)
-}
-
-// ChannelRouting owns the channel default-agent pointer. The pointer is channel
-// configuration, not a dead actor's belonging: terminal never clears it, and a
-// pointer at a deregistered actor simply reads as unconfigured.
-type ChannelRouting interface {
-	DefaultAgent(context.Context) (actor.ActorID, bool, error)
-	SetDefaultAgent(context.Context, actor.ActorID) error
 }

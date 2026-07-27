@@ -111,6 +111,9 @@ type MessageLog interface {
 type MessageQuery interface {
 	// MaxSeq is the channel's highest committed seq.
 	MaxSeq(ctx context.Context) (int64, error)
+	// LatestBySenderAndType returns the latest row, ordered by the store's
+	// monotonic seq, for one welded sender and message type.
+	LatestBySenderAndType(ctx context.Context, sender actor.ActorID, typ string) (StoredRow, bool, error)
 	// ReadAfterSeq returns envelopes with seq > afterSeq, in ascending seq order.
 	ReadAfterSeq(ctx context.Context, afterSeq int64, limit int) ([]StoredRow, error)
 	// OpenRequestsForActor returns ALL open requests addressed to actorID.

@@ -2,7 +2,6 @@ package home
 
 import (
 	"context"
-	"encoding/json"
 
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
@@ -37,12 +36,4 @@ func (h *Home) guardOwnerTerminal(ctx context.Context, target actor.ActorID) err
 		}
 	}
 	return nil
-}
-
-func jsonPayload(value map[string]any) json.RawMessage {
-	raw, err := json.Marshal(value)
-	if err != nil {
-		return json.RawMessage(`{}`)
-	}
-	return raw
 }

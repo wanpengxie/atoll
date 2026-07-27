@@ -2,12 +2,16 @@ package home
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
 
 	"github.com/google/uuid"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/message"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/actorrt"
+	"github.com/wanpengxie/atoll/runtime/harness"
 )
 
 // homeActorEffects is the composition-root tail of committed Controller
@@ -82,15 +86,8 @@ func (h *Home) announceRegistered(ctx context.Context, id actor.ActorID, kind ac
 	if h == nil || h.systemPen == nil || id == "" {
 		return
 	}
-	h.writeNarration(ctx, &message.Envelope{
-		ID:   message.ID("actor-registered:" + string(id)),
-		Kind: message.KindEvent, Type: actor.ReservedSystemActorRegistered,
-		Payload: jsonPayload(map[string]any{
-			"actor_id": id, "actor_kind": kind,
-			"registered_at": h.nowMs(),
-		}),
-		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{actor.SystemActorID},
+	h.writeNarration(ctx, actor.ReservedSystemActorRegistered, map[string]any{
+		"actor_id": id, "actor_kind": kind, "registered_at": h.nowMs(),
 	})
 }
 
@@ -108,15 +105,9 @@ func (h *Home) announceEnded(
 	}
 	at := h.nowMs()
 	for _, id := range ids {
-		h.writeNarration(ctx, &message.Envelope{
-			ID:   message.ID("actor-ended:" + string(id)),
-			Kind: message.KindEvent, Type: actor.ReservedSystemActorEnded,
-			Payload: jsonPayload(map[string]any{
-				"target_id": id, "reason": reason,
-				"ended_at": at, "ended_by": endedBy,
-			}),
-			Visibility: message.VisibilitySystem,
-			Audience:   message.Audience{actor.SystemActorID},
+		h.writeNarration(ctx, actor.ReservedSystemActorEnded, map[string]any{
+			"target_id": id, "reason": reason,
+			"ended_at": at, "ended_by": endedBy,
 		})
 	}
 }
@@ -131,21 +122,65 @@ func (h *Home) announceAudit(ctx context.Context, operation string, detail map[s
 	for k, v := range detail {
 		payload[k] = v
 	}
-	h.writeNarration(ctx, &message.Envelope{
-		ID:   message.ID("sysop:" + operation + ":" + uuid.NewString()),
-		Kind: message.KindEvent, Type: sysOpAuditType, Payload: jsonPayload(payload),
-		Visibility: message.VisibilitySystem,
-		Audience:   message.Audience{actor.SystemActorID},
-	})
+	h.writeNarration(ctx, sysOpAuditType, payload)
 }
 
 const sysOpAuditType = "sysop_completed"
 
-func (h *Home) writeNarration(ctx context.Context, env *message.Envelope) {
-	if _, err := h.systemPen.Write(ctx, env); err != nil {
-		h.logger.Debug("platform.narration.dropped",
-			"channel", h.channelID, "envelope", env.ID, "err", err)
+func (h *Home) writeNarration(ctx context.Context, typ string, payload map[string]any) {
+	if err := h.emitSystemEvent(ctx, typ, payload); err != nil {
+		h.logger.Warn("platform.narration.dropped",
+			"channel", h.channelID, "type", typ, "err", err)
 	}
+}
+
+type systemEventWriteError struct {
+	Reason harness.HarnessRejectReason
+	Detail string
+}
+
+func (e *systemEventWriteError) Error() string {
+	return fmt.Sprintf("system event rejected: %s: %s", e.Reason, e.Detail)
+}
+
+// emitSystemEvent is the one system-event construction and write mouth. The
+// caller supplies only the business type and payload; identity, addressing,
+// visibility, id, time, and serialization are sealed here.
+func (h *Home) emitSystemEvent(
+	ctx context.Context,
+	typ string,
+	payload map[string]any,
+) error {
+	if h == nil || h.systemPen == nil {
+		return errors.New("platform: system event pen unavailable")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return fmt.Errorf("platform: marshal system event %q: %w", typ, err)
+	}
+	env := &message.Envelope{
+		ID:         message.ID(uuid.NewString()),
+		TS:         h.nowMs(),
+		Kind:       message.KindEvent,
+		Type:       typ,
+		Payload:    raw,
+		Visibility: message.VisibilitySystem,
+		Audience:   message.Audience{actor.SystemActorID},
+	}
+	result, err := h.systemPen.Write(ctx, env)
+	if err != nil {
+		return fmt.Errorf("platform: write system event %q: %w", typ, err)
+	}
+	if !result.Accepted() {
+		rejected := &systemEventWriteError{
+			Reason: result.RejectReason, Detail: result.RejectDetail,
+		}
+		h.logger.Error("platform.system_event.rejected",
+			"channel", h.channelID, "type", typ, "message_id", env.ID,
+			"reason", result.RejectReason, "detail", result.RejectDetail)
+		return rejected
+	}
+	return nil
 }
 
 // homeHostEvents projects current local Body observations into presence. Host

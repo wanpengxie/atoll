@@ -25,7 +25,6 @@ type ChannelStores struct {
 	// TestAssemblyBundleNeverOutlivesItsFunction), so after assembly the actor
 	// store is reachable only through the Controller's commands.
 	Actors       storespec.ActorRegistryStore
-	Routing      storespec.ChannelRouting
 	Genesis      storespec.GenesisStore
 	Bindings     storespec.DaemonBindingStore
 	ResourceRead storespec.ResourceReadStore
@@ -103,7 +102,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Expiry:       cs.Expiry,
 		Requests:     cs.Requests,
 		Actors:       cs.Actors,
-		Routing:      cs.Routing,
 		Genesis:      cs.Genesis,
 		Bindings:     cs.Bindings,
 		ResourceRead: cs.ResourceRead,

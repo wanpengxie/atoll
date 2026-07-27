@@ -3,6 +3,7 @@ package humancell
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"testing"
 
 	"github.com/wanpengxie/atoll/lib/actorbase"
@@ -123,6 +124,78 @@ func TestInterpretSubmitExpiresAt(t *testing.T) {
 	if fs2.submitSpec.ExpiresAt != nil {
 		t.Fatalf("absent expires_at must be nil, got %v", *fs2.submitSpec.ExpiresAt)
 	}
+}
+
+func TestInterpretSubmitDefaultAudienceAtHumanMembrane(t *testing.T) {
+	frame := func(kind string) subjectgate.Frame {
+		f, _ := subjectgate.NewFrame(subjectgate.FrameSubmit, "routing", subjectgate.SubmitPayload{
+			ChannelID: "c1", MsgType: "chat.text", Kind: kind,
+			Payload: json.RawMessage(`{"text":"hi"}`),
+		})
+		return f
+	}
+	base := func(snapshot RoutingSnapshot) (*fakeSys, Deps) {
+		fs := &fakeSys{self: "human:alice", submitID: "m1", submitSeq: 1}
+		deps := newDeps("human:alice", nil, false)
+		deps.Routing = func() RoutingSnapshot { return snapshot }
+		deps.IsActive = func(context.Context, actor.ActorID) (bool, error) { return true, nil }
+		deps.Present = func(actor.ActorID) bool { return true }
+		return fs, deps
+	}
+
+	t.Run("configured preserves event kind", func(t *testing.T) {
+		fs, deps := base(RoutingSnapshot{State: RoutingConfigured, Target: "agent:default"})
+		got := interpretFrame(fs, deps, frame("event"))
+		if got.Type != subjectgate.FrameReceipt {
+			t.Fatalf("got error: %+v", decodeErr(t, got))
+		}
+		if fs.submitSpec.Kind != message.KindEvent ||
+			len(fs.submitSpec.Audience) != 1 || fs.submitSpec.Audience[0] != "agent:default" {
+			t.Fatalf("submit=%+v", fs.submitSpec)
+		}
+	})
+
+	t.Run("unset", func(t *testing.T) {
+		fs, deps := base(RoutingSnapshot{State: RoutingUnset})
+		err := decodeErr(t, interpretFrame(fs, deps, frame("request")))
+		if err.Code != subjectgate.CodeRoutingUnavailable ||
+			err.Detail != "未设置默认应答者，请设置或指名收件人" {
+			t.Fatalf("error=%+v", err)
+		}
+	})
+
+	for _, tc := range []struct {
+		name     string
+		snapshot RoutingSnapshot
+		active   bool
+		present  bool
+	}{
+		{"fold unavailable", RoutingSnapshot{State: RoutingUnavailable}, true, true},
+		{"inactive", RoutingSnapshot{State: RoutingConfigured, Target: "agent:default"}, false, true},
+		{"not present", RoutingSnapshot{State: RoutingConfigured, Target: "agent:default"}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs, deps := base(tc.snapshot)
+			deps.IsActive = func(context.Context, actor.ActorID) (bool, error) { return tc.active, nil }
+			deps.Present = func(actor.ActorID) bool { return tc.present }
+			err := decodeErr(t, interpretFrame(fs, deps, frame("request")))
+			if err.Code != subjectgate.CodeRoutingUnavailable ||
+				err.Detail != "默认应答者当前不可用，请重新设置一次" {
+				t.Fatalf("error=%+v", err)
+			}
+		})
+	}
+
+	t.Run("active read failure", func(t *testing.T) {
+		fs, deps := base(RoutingSnapshot{State: RoutingConfigured, Target: "agent:default"})
+		deps.IsActive = func(context.Context, actor.ActorID) (bool, error) {
+			return false, errors.New("ledger down")
+		}
+		err := decodeErr(t, interpretFrame(fs, deps, frame("request")))
+		if err.Code != subjectgate.CodeUnavailable {
+			t.Fatalf("error=%+v", err)
+		}
+	})
 }
 
 func TestInterpretResolveFiveStep(t *testing.T) {

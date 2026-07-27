@@ -39,7 +39,6 @@ type ChannelStores struct {
 	// downstream may type-assert one face back into another.
 	Principals   storespec.PrincipalRegistry // principal-axis read (LookupActivePrincipal, admission path)
 	Actors       storespec.ActorRegistryStore
-	Routing      storespec.ChannelRouting
 	Genesis      storespec.GenesisStore
 	Bindings     storespec.DaemonBindingStore
 	ResourceRead storespec.ResourceReadStore
@@ -105,7 +104,6 @@ func OpenChannel(ctx context.Context, channelID channel.ID, dbPath string, opts 
 		Requests:   newRequestLookup(msgs),
 		Principals: reg,
 		Actors:     reg,
-		Routing:    reg,
 		Genesis:    genesisStore{db: db},
 		Bindings:   newDaemonBindings(db, onCommit),
 		Resources:  newResourceRegistry(db),

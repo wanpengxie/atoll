@@ -434,6 +434,7 @@ func TestE2E_SendMessageAndReadBack(t *testing.T) {
 	// Send a message through the gateway ws frame (the write path; POST is废).
 	c := dialWS(t, srv, s.cookies, s.chID, 0)
 	defer c.close()
+	setBoostDefault(t, env, s, c)
 	ack := c.sendMessage(map[string]any{
 		"msg_type": "chat.text",
 		"kind":     "event",
@@ -575,6 +576,7 @@ func TestE2E_DaemonAttachAndMessageFlow(t *testing.T) {
 	// we use kind=event which has no cardinality constraint.
 	c := dialWS(t, srv, s.cookies, s.chID, 0)
 	defer c.close()
+	setBoostDefault(t, env, s, c)
 	ack := c.sendMessage(map[string]any{
 		"msg_type": "echo.ping",
 		"kind":     "event",
@@ -629,6 +631,7 @@ func TestE2E_SendMessageNoAudienceDefaultFill(t *testing.T) {
 
 	c := dialWS(t, srv, s.cookies, s.chID, 0)
 	defer c.close()
+	setBoostDefault(t, env, s, c)
 
 	// Send a message with NO audience field at all.
 	ack := c.sendMessage(map[string]any{

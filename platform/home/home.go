@@ -66,8 +66,8 @@ type Home struct {
 	// below), not the mint that produced it.
 	managedCaps *managedcaps.Minter
 
-	// The store faces the channel keeps AFTER assembly: reads, plus the two
-	// management writes (daemon binding, default-agent pointer) the spec
+	// The store faces the channel keeps AFTER assembly: reads, plus the
+	// daemon-binding management write the spec
 	// assigns to their own domains. The assembly surface is absent — raw Log,
 	// the actor record store, genesis and the leaf ports live only inside Open,
 	// where they are handed to the organs that own them and then go out of
@@ -78,7 +78,7 @@ type Home struct {
 	expiry       storespec.ExpiryQuery
 	requests     storespec.RequestLookup
 	bindings     storespec.DaemonBindingStore
-	routing      storespec.ChannelRouting
+	defaultAgent *defaultAgentFold
 	resourceRead storespec.ResourceReadStore
 	principals   storespec.PrincipalRegistry
 	closeStore   func() error

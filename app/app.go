@@ -304,11 +304,13 @@ func (a *App) snapshotBundles(ctx context.Context) (map[channel.ID]channelhost.B
 }
 
 const (
-	// defaultBoostClass is the engine CLASS the always-there boost floor runs.
+	// defaultBoostClass is the engine class used by the ordinary boost agent
+	// declaration. A client may choose that member as the channel default via
+	// the normal set-default operation after joining.
 	// An agent's engine IS its actor class — claude/go-kimi are flat registry
 	// classes (kind=agent), there is NO umbrella "agent" class. boost has no
 	// actor_decls declaration row, so it can't carry a default_class; it runs
-	// this fixed fallback engine.
+	// this fixed engine.
 	defaultBoostClass = "go-kimi"
 	// placementServer marks a composition instance the SERVER hosts (embedded
 	// cell). The reconcile ring only embodies these; daemon-placed rows are pulled

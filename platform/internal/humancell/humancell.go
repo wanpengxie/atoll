@@ -124,15 +124,31 @@ func humanDescribe(id string) introspect.Describe {
 	}
 }
 
-// Deps is the frame interpreter's injected read-only face (五步核查经
-// Deps 注入, sysactor Deps 形): the from-log request lookup + open check + the
-// cancel-hint reach (Hooks.Canceller = Home.CancelRequest, factory-captured).
-// No capability of its own — every write goes through the cell's own Sys verbs.
+// Deps is the frame interpreter's injected read-only face: request lookup/open
+// checks, cancellation hint, and the default-routing fold plus its active and
+// present predicates. No capability of its own — every write goes through the
+// cell's own Sys verbs.
 type Deps struct {
 	Self       actor.ActorID
 	Requests   RequestLookup
 	OpenCheck  func(ctx context.Context, receiver actor.ActorID, reqID message.ID) (bool, error)
 	CancelHint func(target actor.ActorID, requestID message.ID)
+	Routing    func() RoutingSnapshot
+	IsActive   func(context.Context, actor.ActorID) (bool, error)
+	Present    func(actor.ActorID) bool
+}
+
+type RoutingState uint8
+
+const (
+	RoutingUnset RoutingState = iota
+	RoutingConfigured
+	RoutingUnavailable
+)
+
+type RoutingSnapshot struct {
+	State  RoutingState
+	Target actor.ActorID
 }
 
 // RequestLookup is the from-log recovery seam (cs.Requests satisfies it).
@@ -170,7 +186,7 @@ func InterpretFrames(sys actorbase.Sys, slot *subjectgate.Slot, deps Deps, frame
 func interpretFrame(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectgate.Frame {
 	switch f.Type {
 	case subjectgate.FrameSubmit:
-		return interpretSubmit(sys, f)
+		return interpretSubmit(sys, deps, f)
 	case subjectgate.FrameResolve:
 		return interpretResolve(sys, deps, f)
 	case subjectgate.FrameCancel:
@@ -206,7 +222,7 @@ func mapVerbErrFrame(err error, f subjectgate.Frame) subjectgate.Frame {
 type frameBuild func(load any) subjectgate.Frame
 type frameErr func(code, detail string) subjectgate.Frame
 
-func interpretSubmit(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame {
+func interpretSubmit(sys actorbase.Sys, deps Deps, f subjectgate.Frame) subjectgate.Frame {
 	var p subjectgate.SubmitPayload
 	if err := f.DecodePayload(&p); err != nil {
 		return errFrame(f, subjectgate.CodeBadPayload, err.Error())
@@ -222,6 +238,27 @@ func interpretSubmit(sys actorbase.Sys, f subjectgate.Frame) subjectgate.Frame {
 	aud := make(message.Audience, 0, len(p.Audience))
 	for _, a := range p.Audience {
 		aud = append(aud, actor.ActorID(a))
+	}
+	if len(aud) == 0 && (kind == message.KindRequest || kind == message.KindEvent) {
+		if deps.Routing == nil {
+			return errFrame(f, subjectgate.CodeRoutingUnavailable, "默认应答者当前不可用，请重新设置一次")
+		}
+		snapshot := deps.Routing()
+		if snapshot.State == RoutingUnset {
+			return errFrame(f, subjectgate.CodeRoutingUnavailable, "未设置默认应答者，请设置或指名收件人")
+		}
+		if snapshot.State != RoutingConfigured || snapshot.Target == "" ||
+			deps.IsActive == nil || deps.Present == nil {
+			return errFrame(f, subjectgate.CodeRoutingUnavailable, "默认应答者当前不可用，请重新设置一次")
+		}
+		active, err := deps.IsActive(context.Background(), snapshot.Target)
+		if err != nil {
+			return errFrame(f, subjectgate.CodeUnavailable, err.Error())
+		}
+		if !active || !deps.Present(snapshot.Target) {
+			return errFrame(f, subjectgate.CodeRoutingUnavailable, "默认应答者当前不可用，请重新设置一次")
+		}
+		aud = append(aud, snapshot.Target)
 	}
 	spec := behavior.SubjectWriteSpec{
 		ID:         id,

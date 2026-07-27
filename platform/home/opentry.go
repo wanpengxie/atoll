@@ -6,6 +6,7 @@ import (
 	"errors"
 
 	"github.com/wanpengxie/atoll/platform/internal/sysactor"
+	"github.com/wanpengxie/atoll/platform/subjectgate"
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
@@ -217,41 +218,105 @@ func (e *opEntry) Execute(
 		return map[string]any{"restarted": payload.InstanceID}, nil
 
 	case sysactor.TypeSetDefaultAgent:
-		var payload struct {
-			InstanceID actor.ActorID `json:"instance_id"`
-		}
-		if err := json.Unmarshal(req.Payload, &payload); err != nil {
+		var payload map[string]json.RawMessage
+		if err := json.Unmarshal(req.Payload, &payload); err != nil || payload == nil {
 			return nil, &sysactor.OperateError{
-				Code: string(channel.ErrCodeBadPayload), Detail: err.Error(),
+				Code: string(channel.ErrCodeBadPayload), Detail: "payload must be an object",
 			}
 		}
-		// A setting: last write wins, no dedup ceremony. The member verdict is
-		// door policy (§0.4) asked of the value ledger — the ONE membership
-		// authority, so entry-table members (fork children) qualify too; the
-		// store write below is purely mechanical and never asks who is a
-		// member.
-		if payload.InstanceID != "" {
-			member, err := e.home.controller.IsActive(ctx, payload.InstanceID)
+		_, hasInstance := payload["instance_id"]
+		_, hasSource := payload["source_decl_id"]
+		if hasInstance == hasSource {
+			return nil, &sysactor.OperateError{
+				Code:   string(channel.ErrCodeBadPayload),
+				Detail: "exactly one of instance_id or source_decl_id is required",
+			}
+		}
+		var target actor.ActorID
+		if hasInstance {
+			value, err := requiredJSONString(payload, "instance_id")
 			if err != nil {
-				return nil, asOperateError(err)
+				return nil, &sysactor.OperateError{
+					Code: string(channel.ErrCodeBadPayload), Detail: err.Error(),
+				}
+			}
+			target = actor.ActorID(value)
+		} else {
+			source, err := requiredJSONString(payload, "source_decl_id")
+			if err != nil || source == "" {
+				detail := "source_decl_id must be a non-empty JSON string"
+				if err != nil {
+					detail = err.Error()
+				}
+				return nil, &sysactor.OperateError{
+					Code: string(channel.ErrCodeBadPayload), Detail: detail,
+				}
+			}
+			view := e.home.View()
+			resolved, resolveErr := resolveDefaultSource(ctx, source, view.DeclaredInstances, func(count int) {
+				e.home.logger.Error("platform.routing.declaration_cardinality_broken",
+					"source_decl_id", source, "count", count)
+			})
+			if resolveErr != nil {
+				return nil, resolveErr
+			}
+			target = resolved
+		}
+		if target != "" {
+			member, err := e.home.controller.IsActive(ctx, target)
+			if err != nil {
+				return nil, &sysactor.OperateError{
+					Code: subjectgate.CodeUnavailable, Detail: err.Error(),
+				}
 			}
 			if !member {
 				return nil, &sysactor.OperateError{
-					Code: string(channel.ErrCodeMemberInactive), Detail: "target is not an active member",
+					Code:   string(channel.ErrCodeMemberInactive),
+					Detail: "target is not an active member",
 				}
 			}
 		}
-		if err := e.home.routing.SetDefaultAgent(ctx, payload.InstanceID); err != nil {
-			return nil, asOperateError(err)
+		if err := e.home.defaultAgent.set(ctx, target, req.Sender); err != nil {
+			return nil, &sysactor.OperateError{
+				Code: subjectgate.CodeUnavailable, Detail: err.Error(),
+			}
 		}
-		e.home.announceAudit(ctx, "set_default_agent", map[string]any{
-			"default_agent": payload.InstanceID,
-		})
-		return map[string]any{"default_agent": payload.InstanceID}, nil
+		return map[string]any{"default_agent": target}, nil
 
 	default:
 		return nil, &sysactor.OperateError{
 			Code: string(channel.ErrCodeNotAcceptedSource), Detail: "operation is not accepted",
+		}
+	}
+}
+
+func resolveDefaultSource(
+	ctx context.Context,
+	source string,
+	declared func(context.Context, string) ([]actor.ActorID, error),
+	cardinalityBroken func(int),
+) (actor.ActorID, *sysactor.OperateError) {
+	instances, err := declared(ctx, source)
+	if err != nil {
+		return "", &sysactor.OperateError{
+			Code: subjectgate.CodeUnavailable, Detail: err.Error(),
+		}
+	}
+	switch len(instances) {
+	case 0:
+		return "", &sysactor.OperateError{
+			Code:   string(channel.ErrCodeMemberInactive),
+			Detail: "declaration has no active instance",
+		}
+	case 1:
+		return instances[0], nil
+	default:
+		if cardinalityBroken != nil {
+			cardinalityBroken(len(instances))
+		}
+		return "", &sysactor.OperateError{
+			Code:   subjectgate.CodeUnavailable,
+			Detail: "declaration resolved to multiple active instances",
 		}
 	}
 }

@@ -27,10 +27,10 @@ import (
 	"github.com/wanpengxie/atoll/runtime/remoteingress"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
-	"github.com/wanpengxie/atoll/runtime/timerfire"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 	"github.com/wanpengxie/atoll/runtime/systemcaps"
 	"github.com/wanpengxie/atoll/runtime/systemkernel"
+	"github.com/wanpengxie/atoll/runtime/timerfire"
 )
 
 const reconcileInterval = 30 * time.Second
@@ -99,9 +99,9 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.expiry = cs.Expiry
 	h.requests = cs.Requests
 	h.bindings = cs.Bindings
-	h.routing = cs.Routing
 	h.resourceRead = cs.ResourceRead
 	h.principals = cs.Principals
+	h.defaultAgent = openDefaultAgentFold(ctx, h, cs.Query, logger)
 
 	if cfg.Bootstrap && cfg.Genesis != nil {
 		if err := cs.Genesis.CreateGenesis(ctx, *cfg.Genesis); err != nil {
@@ -116,7 +116,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// registry row, no admission and no record. Its identity reaches the kernel
 	// as a construction constant.
 	if cfg.Bootstrap {
-		if err := seedBootstrap(ctx, cs.Actors, cs.Routing, cfg, h.nowMs); err != nil {
+		if err := seedBootstrap(ctx, cs.Actors, cfg, h.nowMs); err != nil {
 			return nil, err
 		}
 	}
@@ -162,7 +162,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 	h.minter, err = harness.New(harness.Deps{
 		ChannelID: cfg.ChannelID, Log: cs.Log, Presence: h.actors,
-		ResolveAudience: h.resolveAudience, Logger: logger,
+		Logger: logger,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("platform: build harness: %w", err)
@@ -393,7 +393,6 @@ func validateGenesis(ctx context.Context, genesis storespec.GenesisStore, cfg Co
 func seedBootstrap(
 	ctx context.Context,
 	actors storespec.ActorRegistryStore,
-	routing storespec.ChannelRouting,
 	cfg Config,
 	nowMs func() int64,
 ) error {
@@ -407,7 +406,7 @@ func seedBootstrap(
 		}
 	}
 	for _, declaration := range cfg.BootstrapDeclarations {
-		if err := admitBootstrapDeclaration(ctx, actors, routing, declaration); err != nil {
+		if err := admitBootstrapDeclaration(ctx, actors, declaration); err != nil {
 			return err
 		}
 	}
@@ -419,7 +418,6 @@ func seedBootstrap(
 func admitBootstrapDeclaration(
 	ctx context.Context,
 	actors storespec.ActorRegistryStore,
-	routing storespec.ChannelRouting,
 	in DeclareRequest,
 ) error {
 	if err := validateDeclareRequest(in); err != nil {
@@ -429,7 +427,7 @@ func admitBootstrapDeclaration(
 	if in.Config != nil {
 		config = append(config, (*in.Config)...)
 	}
-	record, err := actors.Insert(ctx, storespec.ActorDraft{
+	_, err := actors.Insert(ctx, storespec.ActorDraft{
 		Kind:         in.Kind,
 		SourceDeclID: in.SourceDeclID,
 		CreatedAt:    in.CreatedAt,
@@ -438,9 +436,6 @@ func admitBootstrapDeclaration(
 	})
 	if err != nil {
 		return err
-	}
-	if in.MakeDefault {
-		return routing.SetDefaultAgent(ctx, record.ID)
 	}
 	return nil
 }

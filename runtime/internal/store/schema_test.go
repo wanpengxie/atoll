@@ -67,7 +67,6 @@ func TestChannelLocalTables_Set(t *testing.T) {
 
 		"channel_genesis":         true,
 		"channel_daemon_bindings": true,
-		"channel_routing":         true,
 		"resources":               true,
 		"resource_grants":         true,
 		"resource_reservations":   true,

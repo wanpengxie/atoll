@@ -88,6 +88,12 @@ func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
 			Requests:   h.requests,
 			OpenCheck:  h.isRequestOpen,
 			CancelHint: h.cancelRequest,
+			Routing:    h.defaultAgent.snapshot,
+			IsActive:   h.controller.IsActive,
+			Present: func(target actor.ActorID) bool {
+				_, live := h.View().Stat(target)
+				return live
+			},
 		}
 		token := humancell.WirePresenceSelfReport(sys, slot)
 		frames, incarnation, release := slot.AttachInterpreter()

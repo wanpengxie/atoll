@@ -7,6 +7,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/wanpengxie/atoll/platform/internal/humancell"
 	"github.com/wanpengxie/atoll/platform/internal/link"
 	"github.com/wanpengxie/atoll/platform/internal/presence"
 	"github.com/wanpengxie/atoll/protocol/actor"
@@ -33,24 +34,17 @@ type viewAuthority interface {
 	storespec.DeclaredInstanceReader
 }
 
-// defaultAgentReader is the routing question a View may ask. The other half of
-// storespec.ChannelRouting — SetDefaultAgent — is a management command that
-// belongs to the operation entry, so it never rides in on a read projection.
-type defaultAgentReader interface {
-	DefaultAgent(ctx context.Context) (actor.ActorID, bool, error)
-}
-
 type View struct {
-	visible    storespec.VisibleMessageQuery
-	authority  viewAuthority
-	links      *link.Acceptor
-	presence   presence.View
-	actors     *actorSystem
-	nowMs      func() int64
-	resources  storespec.ResourceReadStore
-	routing    defaultAgentReader
-	principals storespec.PrincipalRegistry
-	bindings   storespec.DaemonBindingReader
+	visible      storespec.VisibleMessageQuery
+	authority    viewAuthority
+	links        *link.Acceptor
+	presence     presence.View
+	actors       *actorSystem
+	nowMs        func() int64
+	resources    storespec.ResourceReadStore
+	defaultAgent *defaultAgentFold
+	principals   storespec.PrincipalRegistry
+	bindings     storespec.DaemonBindingReader
 
 	ownerPrincipal string
 }
@@ -68,7 +62,7 @@ func (h *Home) View() View {
 		actors:         h.actors,
 		nowMs:          h.nowMs,
 		resources:      h.resourceRead,
-		routing:        h.routing,
+		defaultAgent:   h.defaultAgent,
 		principals:     h.principals,
 		bindings:       h.bindings,
 		ownerPrincipal: h.ownerPrincipal,
@@ -201,7 +195,15 @@ func (v View) ActorFacts(ctx context.Context, id actor.ActorID) (channel.ActorFa
 }
 
 func (v View) DefaultAgent(ctx context.Context) (actor.ActorID, bool, error) {
-	return v.routing.DefaultAgent(ctx)
+	_ = ctx
+	switch snapshot := v.defaultAgent.snapshot(); snapshot.State {
+	case humancell.RoutingConfigured:
+		return snapshot.Target, true, nil
+	case humancell.RoutingUnset:
+		return "", false, nil
+	default:
+		return "", false, channel.ErrDefaultAgentUnavailable
+	}
 }
 
 func (v View) ResolvePrincipal(ctx context.Context, kind actor.Kind, principal string) (actor.ActorID, bool, error) {

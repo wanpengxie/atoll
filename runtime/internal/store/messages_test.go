@@ -33,6 +33,36 @@ func TestAppend_AllocatesMonotonicSeq(t *testing.T) {
 	}
 }
 
+func TestLatestBySenderAndTypeUsesStoreSeqAndExactSender(t *testing.T) {
+	ctx := context.Background()
+	cs := openTestChannel(t)
+	appendRow := func(id, sender, typ, payload string) {
+		t.Helper()
+		env := newEnv(id, message.KindEvent, message.Audience{actor.SystemActorID},
+			withSender(actor.KindSystem, actor.ActorID(sender)),
+			withType(typ),
+			withPayload(payload),
+			withVisibility(message.VisibilitySystem),
+		)
+		if _, err := cs.Log.Append(ctx, env, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	appendRow("old", string(actor.SystemActorID), "channel.routing.default_set", `{"n":1}`)
+	appendRow("other-type", string(actor.SystemActorID), "other", `{"n":2}`)
+	appendRow("forged", "agent:forger", "channel.routing.default_set", `{"n":3}`)
+	appendRow("new", string(actor.SystemActorID), "channel.routing.default_set", `{"n":4}`)
+
+	row, found, err := cs.Query.LatestBySenderAndType(
+		ctx, actor.SystemActorID, "channel.routing.default_set")
+	if err != nil || !found || row.Envelope.ID != "new" {
+		t.Fatalf("latest=%+v found=%v err=%v", row, found, err)
+	}
+	if _, found, err := cs.Query.LatestBySenderAndType(ctx, actor.SystemActorID, "missing"); err != nil || found {
+		t.Fatalf("missing found=%v err=%v", found, err)
+	}
+}
+
 // A row written through Append must read back through FindByID with every
 // envelope field preserved exactly (A3: store does not silently mutate truth).
 func TestAppend_FindByID_RoundTrip(t *testing.T) {

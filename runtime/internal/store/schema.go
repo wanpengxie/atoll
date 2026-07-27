@@ -46,6 +46,7 @@ CREATE TABLE IF NOT EXISTS messages (
 
 CREATE INDEX IF NOT EXISTS ix_messages_parent         ON messages(parent_id);
 CREATE INDEX IF NOT EXISTS ix_messages_expires        ON messages(expires_at) WHERE expires_at IS NOT NULL AND kind='request';
+CREATE INDEX IF NOT EXISTS ix_messages_type_sender_seq ON messages(type, sender_id, seq);
 
 CREATE UNIQUE INDEX IF NOT EXISTS ux_terminal_response_per_request
   ON messages(parent_id)
@@ -108,11 +109,6 @@ CREATE TABLE IF NOT EXISTS channel_genesis (
 CREATE TABLE IF NOT EXISTS channel_daemon_bindings (
   daemon_id   TEXT PRIMARY KEY,
   attached_at INTEGER NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS channel_routing (
-  id            INTEGER PRIMARY KEY CHECK (id = 1),
-  default_agent TEXT
 );
 
 -- (v2: worker_locks table removed. channel-sqlite is append-only truth;
@@ -290,7 +286,6 @@ var ChannelLocalTables = []string{
 	"actor_registry",
 	"channel_genesis",
 	"channel_daemon_bindings",
-	"channel_routing",
 	"resources",
 	"resource_grants",
 	"resource_reservations",

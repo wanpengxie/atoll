@@ -70,7 +70,6 @@ type ProvisionSpec struct {
 	Type                string               `json:"type"`
 	OwnerPrincipal      string               `json:"owner_principal"`
 	GenesisDeclarations []GenesisDeclaration `json:"genesis_declarations"`
-	DefaultSourceDeclID string               `json:"default_source_decl_id"`
 	CreatedAt           int64                `json:"created_at"`
 	Origin              *Origin              `json:"origin,omitempty"`
 }
@@ -261,8 +260,7 @@ func (h *ChannelHost) Provision(ctx context.Context, spec ProvisionSpec) (Provis
 		bootstrapDeclarations = append(bootstrapDeclarations, home.DeclareRequest{
 			SourceDeclID: declaration.DeclID, Kind: declaration.Kind,
 			Class: declaration.Rendered.Class, Config: &config, Placement: placement,
-			MakeDefault: declaration.DeclID == spec.DefaultSourceDeclID,
-			CreatedAt:   spec.CreatedAt,
+			CreatedAt: spec.CreatedAt,
 		})
 	}
 	homeInstance, err := h.openHome(
