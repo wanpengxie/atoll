@@ -85,7 +85,7 @@ func (h *Home) runHumanCell(id actor.ActorID, sys actorbase.Sys) error {
 	if slot, ok := h.subjectgateSlot(id); ok {
 		deps := humancell.Deps{
 			Self:       id,
-			Requests:   h.cs.Requests,
+			Requests:   h.requests,
 			OpenCheck:  h.isRequestOpen,
 			CancelHint: h.cancelRequest,
 		}
@@ -127,7 +127,7 @@ func (h *Home) isRequestOpen(ctx context.Context, receiver actor.ActorID, reqID 
 	if receiver == "" {
 		return false, nil
 	}
-	rows, err := h.cs.Query.OpenRequestsForActor(ctx, receiver)
+	rows, err := h.query.OpenRequestsForActor(ctx, receiver)
 	if err != nil {
 		return false, err
 	}

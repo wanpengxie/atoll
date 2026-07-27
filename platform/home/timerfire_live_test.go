@@ -64,7 +64,7 @@ func TestDeadAuthorTimerFireIsRefusedByTheLiveGate(t *testing.T) {
 	if err := sink.Append(ctx, author, fireEnv("timer:live-1")); err != nil {
 		t.Fatalf("live author fire: %v", err)
 	}
-	afterLive, err := h.cs.Query.MaxSeq(ctx)
+	afterLive, err := h.query.MaxSeq(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestDeadAuthorTimerFireIsRefusedByTheLiveGate(t *testing.T) {
 	if !errors.As(err, &rejected) || rejected.Reason != "author_not_member" {
 		t.Fatalf("dead author fire: err=%v, want FireRejected{author_not_member}", err)
 	}
-	afterDead, err := h.cs.Query.MaxSeq(ctx)
+	afterDead, err := h.query.MaxSeq(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

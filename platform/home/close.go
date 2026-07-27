@@ -67,11 +67,11 @@ func (h *Home) closeInternalWithin(reason string, timeout time.Duration) error {
 	<-h.closeDone
 
 	// Store close remains retryable after the one-shot runtime teardown.
-	if h.cs != nil && !h.storeCloseDone.Load() {
+	if h.closeStore != nil && !h.storeCloseDone.Load() {
 		h.storeCloseMu.Lock()
 		defer h.storeCloseMu.Unlock()
 		if !h.storeCloseDone.Load() {
-			if err := h.cs.Close(); err != nil {
+			if err := h.closeStore(); err != nil {
 				return errors.Join(h.closeErr, fmt.Errorf("platform: close stores: %w", err))
 			}
 			h.storeCloseDone.Store(true)

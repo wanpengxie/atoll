@@ -13,6 +13,8 @@ import (
 	"github.com/wanpengxie/atoll/protocol/actor"
 	"github.com/wanpengxie/atoll/protocol/channel"
 	"github.com/wanpengxie/atoll/protocol/message"
+	"github.com/wanpengxie/atoll/runtime"
+	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
@@ -20,6 +22,26 @@ const (
 	twinParentClass = "twin-parent"
 	twinChildClass  = "twin-child"
 )
+
+// openDurableStateReader opens a second handle on an already-open channel db to
+// read a physical state row. A test asserting WHERE a row landed has to look at
+// the locus itself; it cannot ask Home, which holds no leaf port after Open.
+func openDurableStateReader(
+	t *testing.T,
+	channelID channel.ID,
+	dbPath string,
+) resourcespec.StateStore {
+	t.Helper()
+	cs, err := runtime.OpenChannel(
+		context.Background(), channelID, dbPath,
+		runtime.OpenChannelOptions{MustExist: true},
+	)
+	if err != nil {
+		t.Fatalf("open durable state reader: %v", err)
+	}
+	t.Cleanup(func() { _ = cs.Close() })
+	return cs.Assembly.State
+}
 
 // twinReport is what one twin body reports about the capabilities it exercised.
 // The two twins run the SAME body code; only their record's storage home
@@ -102,9 +124,10 @@ func (r twinResolver) BuildClass(
 func TestEntryAndDurableActorsAreBehaviourallyIdentical(t *testing.T) {
 	ctx := context.Background()
 	reports := make(chan twinReport, 4)
+	dbPath := filepath.Join(t.TempDir(), "channel.sqlite")
 	h, err := Open(Config{
 		ChannelID:            "twin-home",
-		DBPath:               filepath.Join(t.TempDir(), "channel.sqlite"),
+		DBPath:               dbPath,
 		CompositionResolver:  twinResolver{reports: reports},
 		IntroductionResolver: inertIntroductionResolver{},
 		ReconcileInterval:    10 * time.Millisecond,
@@ -160,10 +183,14 @@ func TestEntryAndDurableActorsAreBehaviourallyIdentical(t *testing.T) {
 
 	// The one asymmetry, and it is invisible from inside: the declared record's
 	// private state lives in the durable locus, the entry record's does not.
-	if _, exists, err := h.cs.Assembly.State.Read(ctx, parent.id, "k"); err != nil || !exists {
+	// This is a PHYSICAL claim, so it is read from the durable locus directly —
+	// through a second handle the test opens itself. Home cannot lend one: the
+	// leaf ports are assembly-only and die when Open returns.
+	durableState := openDurableStateReader(t, "twin-home", dbPath)
+	if _, exists, err := durableState.Read(ctx, parent.id, "k"); err != nil || !exists {
 		t.Fatalf("durable twin state row: exists=%v err=%v", exists, err)
 	}
-	if _, exists, err := h.cs.Assembly.State.Read(ctx, child.id, "k"); err != nil || exists {
+	if _, exists, err := durableState.Read(ctx, child.id, "k"); err != nil || exists {
 		t.Fatalf("entry twin state leaked into the durable locus: exists=%v err=%v", exists, err)
 	}
 

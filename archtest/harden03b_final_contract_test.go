@@ -255,7 +255,7 @@ func TestHarden03BHomeCloseCannotCrossCommandOwnerBarrier(t *testing.T) {
 	source := string(body)
 	barrier := strings.Index(source, "if err := h.actors.Quiesce(joinCtx); err != nil {")
 	teardown := strings.Index(source, "h.closeOnce.Do(func()")
-	storeClose := strings.Index(source, "if h.cs != nil && !h.storeCloseDone.Load()")
+	storeClose := strings.Index(source, "if h.closeStore != nil && !h.storeCloseDone.Load()")
 	if barrier < 0 || teardown < 0 || storeClose < 0 ||
 		!(barrier < teardown && teardown < storeClose) {
 		t.Fatalf(

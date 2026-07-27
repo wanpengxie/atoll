@@ -12,17 +12,14 @@ import (
 	"github.com/wanpengxie/atoll/platform/internal/tap"
 	"github.com/wanpengxie/atoll/platform/subjectgate"
 	channelpkg "github.com/wanpengxie/atoll/protocol/channel"
-	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorhost"
 	"github.com/wanpengxie/atoll/runtime/harness"
 	"github.com/wanpengxie/atoll/runtime/managedcaps"
-	"github.com/wanpengxie/atoll/runtime/remoteingress"
 	"github.com/wanpengxie/atoll/runtime/resourcespec"
 	"github.com/wanpengxie/atoll/runtime/schedule"
 	"github.com/wanpengxie/atoll/runtime/storespec"
-	"github.com/wanpengxie/atoll/runtime/systemcaps"
 	"github.com/wanpengxie/atoll/runtime/systemkernel"
 )
 
@@ -63,18 +60,32 @@ type Home struct {
 	controller   *actorctl.Controller
 	serverHost   *actorhost.HostSupervisor
 	systemKernel *systemkernel.Kernel
-	managedCaps  *managedcaps.Minter
-	systemCaps   *systemcaps.Minter
-	// remoteIngress is this channel's one remote-entry organ. Home holds it
-	// only to hand it to the link acceptor whole.
-	remoteIngress remoteingress.RemoteIngress
+	// managedCaps IS kept: the Host's BodyBuilder mints one bundle per body, so
+	// it is a running-period capability. Its system twin is not — that one mints
+	// once, inside Open, and what survives is the pen it produced (systemPen
+	// below), not the mint that produced it.
+	managedCaps *managedcaps.Minter
 
-	cs           *runtime.ChannelStores
+	// The store faces the channel keeps AFTER assembly: reads, plus the two
+	// management writes (daemon binding, default-agent pointer) the spec
+	// assigns to their own domains. The assembly surface is absent — raw Log,
+	// the actor record store, genesis and the leaf ports live only inside Open,
+	// where they are handed to the organs that own them and then go out of
+	// scope. Home cannot reach a write path around the harness pen, the
+	// Controller ledger or an organ door because it does not hold one.
+	query        storespec.MessageQuery
+	visible      storespec.VisibleMessageQuery
+	expiry       storespec.ExpiryQuery
+	requests     storespec.RequestLookup
+	bindings     storespec.DaemonBindingStore
+	routing      storespec.ChannelRouting
+	resourceRead storespec.ResourceReadStore
+	principals   storespec.PrincipalRegistry
+	closeStore   func() error
+
 	minter       harness.Minter
-	access       accessdoor.AccessMinter
 	outbox       resourcespec.ResourceOutbox
 	stateHandles accessdoor.StateHandleResolver
-	schedMinter  schedule.Minter
 	engine       *schedule.Engine
 
 	signal       *tap.Signal

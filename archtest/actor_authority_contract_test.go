@@ -11,6 +11,18 @@ import (
 	"testing"
 )
 
+// mintReceiverName names whatever a .Mint call is invoked on: the field name for
+// h.managedCaps, the identifier itself for a bare local. Anything else is "".
+func mintReceiverName(receiver ast.Expr) string {
+	switch expr := receiver.(type) {
+	case *ast.SelectorExpr:
+		return expr.Sel.Name
+	case *ast.Ident:
+		return expr.Name
+	}
+	return ""
+}
+
 func readAuthorityContractFile(t *testing.T, path string) string {
 	t.Helper()
 	body, err := os.ReadFile(path)
@@ -35,16 +47,56 @@ func TestActorAuthorityHasNoRuntimeCompositionRoot(t *testing.T) {
 		t.Fatalf("Runtime Channel composition root returned: %v", retired)
 	}
 
+	// The organs Home DRIVES during the channel's life are held as peers, one
+	// field each, no aggregate between them. That is what killing ChannelActors
+	// bought (03B revision V5.1): the composition root reaches each organ
+	// directly.
 	home := readAuthorityContractFile(t, "../platform/home/home.go")
 	for _, peer := range []string{
 		"controller   *actorctl.Controller",
 		"serverHost   *actorhost.HostSupervisor",
 		"systemKernel *systemkernel.Kernel",
-		"managedCaps  *managedcaps.Minter",
-		"systemCaps   *systemcaps.Minter",
+		"managedCaps *managedcaps.Minter",
 	} {
 		if !strings.Contains(home, peer) {
 			t.Errorf("Home does not hold Runtime peer %q directly", peer)
+		}
+	}
+
+	// The capability mints are checked at their CONSTRUCTION instead, because
+	// that — not a kept field — is what "no middle aggregate" means. V5.1's
+	// ruling is that the composition root builds and wires each part itself;
+	// whether a part is still reachable from Home afterwards is a separate
+	// question, answered by what Home actually does with it. managedcaps mints
+	// per body (a field), systemcaps mints once inside Open (a local, so the
+	// no-precondition root mint does not outlive assembly). Both are still
+	// built here, by the root, out of an aggregate's reach.
+	for _, mint := range []string{"managedcaps.New(", "systemcaps.New("} {
+		var sites []string
+		walkProductionGo(t, func(path string, file *ast.File, fset *token.FileSet) {
+			ast.Inspect(file, func(node ast.Node) bool {
+				call, ok := node.(*ast.CallExpr)
+				if !ok {
+					return true
+				}
+				selector, ok := call.Fun.(*ast.SelectorExpr)
+				if !ok {
+					return true
+				}
+				pkg, ok := selector.X.(*ast.Ident)
+				if !ok || pkg.Name+"."+selector.Sel.Name+"(" != mint {
+					return true
+				}
+				sites = append(sites, fset.Position(call.Pos()).String())
+				return true
+			})
+		})
+		if len(sites) != 1 {
+			t.Errorf("%s must be constructed exactly once, by the composition root; found %v", mint, sites)
+			continue
+		}
+		if !strings.HasPrefix(sites[0], "../platform/home/open.go:") {
+			t.Errorf("%s constructed at %s — the channel composition root builds it, not a runtime aggregate", mint, sites[0])
 		}
 	}
 
@@ -106,13 +158,16 @@ func TestActorAuthorityManagedBodyUsesOneBundleMint(t *testing.T) {
 			}
 			at := fset.Position(call.Pos()).String()
 			if selector.Sel.Name == "Mint" {
-				if receiver, ok := selector.X.(*ast.SelectorExpr); ok {
-					switch receiver.Sel.Name {
-					case "managedCaps":
-						managedCalls = append(managedCalls, at)
-					case "systemCaps":
-						systemCalls = append(systemCalls, at)
-					}
+				// The receiver may be a field (h.managedCaps) or a plain local
+				// (systemCapsMinter, which dies with Open). The invariant being
+				// held is "one outward bundle mint per Unit kind", and that is
+				// about how many times a bundle is minted, not about where the
+				// minter is parked — so both shapes count.
+				switch mintReceiverName(selector.X) {
+				case "managedCaps":
+					managedCalls = append(managedCalls, at)
+				case "systemCaps", "systemCapsMinter":
+					systemCalls = append(systemCalls, at)
 				}
 			}
 			if selector.Sel.Name == "MintAuthority" || selector.Sel.Name == "ResolveAuthority" {

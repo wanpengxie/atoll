@@ -46,7 +46,7 @@ func (h *Home) cancelRequest(target actor.ActorID, requestID message.ID) {
 // path it fires the home cancellation hook — the exact same reach a
 // local cell's Hooks.Canceller takes.
 func (h *Home) handleCancelUpstream(boundID actor.ActorID, requestID message.ID) {
-	req, ok, err := h.cs.Requests.FindByID(context.Background(), requestID)
+	req, ok, err := h.requests.FindByID(context.Background(), requestID)
 	if err != nil || !ok {
 		h.logger.Info("platform.home.cancel_upstream.not_found", "request", string(requestID), "sender", string(boundID), "err", err)
 		return

@@ -20,7 +20,10 @@ type ChannelStores struct {
 	Expiry   storespec.ExpiryQuery
 	Requests storespec.RequestLookup
 	// Actors is the durable actor-record face handed to runtime/actorstore at
-	// assembly. Platform never holds it: the actor store is runtime-internal.
+	// assembly. Platform threads it there and keeps nothing: this bundle lives
+	// in one function body and is never stored (archtest
+	// TestAssemblyBundleNeverOutlivesItsFunction), so after assembly the actor
+	// store is reachable only through the Controller's commands.
 	Actors       storespec.ActorRegistryStore
 	Routing      storespec.ChannelRouting
 	Genesis      storespec.GenesisStore

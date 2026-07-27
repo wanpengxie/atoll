@@ -65,7 +65,7 @@ func TestDetachLeavesActorsDanglingButFullyMembers(t *testing.T) {
 	}
 
 	// Only the binding row moved.
-	if bound, err := h.cs.Bindings.IsBound(ctx, storespec.DaemonID(daemonID)); err != nil || bound {
+	if bound, err := h.bindings.IsBound(ctx, storespec.DaemonID(daemonID)); err != nil || bound {
 		t.Fatalf("binding survived detach: bound=%v err=%v", bound, err)
 	}
 	if active, err := h.actors.IsActive(ctx, target); err != nil || !active {

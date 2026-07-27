@@ -104,7 +104,7 @@ func (h *Home) reconcileDaemonTombstones(ctx context.Context) {
 	if h.resolver == nil || h.actors == nil || h.opEntry == nil {
 		return
 	}
-	ids, err := h.cs.Bindings.ListBoundDaemons(ctx)
+	ids, err := h.bindings.ListBoundDaemons(ctx)
 	if err != nil {
 		h.logger.Warn("platform.daemon_pull.list_failed", "error", err)
 		return
@@ -128,7 +128,7 @@ func (h *Home) reconcileDaemonTombstones(ctx context.Context) {
 }
 
 func (h *Home) reconcileClosure(ctx context.Context) {
-	if h.systemPen == nil || h.cs == nil || h.actors == nil {
+	if h.systemPen == nil || h.query == nil || h.actors == nil {
 		return
 	}
 	onFault := func(requestID message.ID, err error) {
@@ -138,7 +138,7 @@ func (h *Home) reconcileClosure(ctx context.Context) {
 	err := behavior.ReconcileReceiverUnavailable(
 		ctx,
 		h.systemPen,
-		h.cs.Query,
+		h.query,
 		func(ctx context.Context, id actor.ActorID) (bool, error) {
 			active, err := h.actors.IsActive(ctx, id)
 			return !active, err

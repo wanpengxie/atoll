@@ -46,10 +46,10 @@ var expiredClosedBy = json.RawMessage(`{"closed_by":"system"}`)
 // on the terminal-uniqueness index (behavior.Respond treats a terminal
 // duplicate as success).
 func (h *Home) sweepExpired(ctx context.Context) {
-	if h == nil || h.cs == nil || h.cs.Expiry == nil {
+	if h == nil || h.expiry == nil {
 		return
 	}
-	rows, next, err := h.cs.Expiry.ExpiredOpenRequests(ctx, h.nowMs(), h.expiryCursor, expirySweepBatch)
+	rows, next, err := h.expiry.ExpiredOpenRequests(ctx, h.nowMs(), h.expiryCursor, expirySweepBatch)
 	if err != nil {
 		h.logger.Error("expiry sweep: query", "channel", string(h.channelID), "err", err)
 		return

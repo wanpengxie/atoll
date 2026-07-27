@@ -1,10 +1,10 @@
 package home
 
 import (
-	"github.com/wanpengxie/atoll/runtime"
 	"github.com/wanpengxie/atoll/runtime/accessdoor"
 	"github.com/wanpengxie/atoll/runtime/actorctl"
 	"github.com/wanpengxie/atoll/runtime/actorstore"
+	"github.com/wanpengxie/atoll/runtime/storespec"
 )
 
 // actorOrgan is the assembled actor-record organ of one channel: the record
@@ -22,9 +22,12 @@ type actorOrgan struct {
 	entries accessdoor.EntryReader
 }
 
-// newActorOrgan builds the actor record store and Controller of one channel.
-func newActorOrgan(cs *runtime.ChannelStores, nowMs func() int64) (actorOrgan, error) {
-	store, err := actorstore.New(cs.Actors, nowMs)
+// newActorOrgan builds the actor record store and Controller of one channel. It
+// takes the durable registry face alone — the one thing it needs. Taking the
+// whole assembly bundle would hand this organ a nominal claim on the raw log
+// and the leaf ports, which is exactly what its doc comment above disclaims.
+func newActorOrgan(registry storespec.ActorRegistryStore, nowMs func() int64) (actorOrgan, error) {
+	store, err := actorstore.New(registry, nowMs)
 	if err != nil {
 		return actorOrgan{}, err
 	}

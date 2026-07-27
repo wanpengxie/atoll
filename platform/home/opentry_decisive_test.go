@@ -45,7 +45,7 @@ func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 	}
 	sender := declared[0]
 
-	before, err := h.cs.Query.MaxSeq(ctx)
+	before, err := h.query.MaxSeq(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -68,7 +68,7 @@ func TestMemberWordRejectionsLeaveNoLedger(t *testing.T) {
 		}
 	}
 
-	after, err := h.cs.Query.MaxSeq(ctx)
+	after, err := h.query.MaxSeq(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}

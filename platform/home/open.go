@@ -87,13 +87,28 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("platform: open channel store: %w", err)
 	}
-	h.cs = cs
+	// cs is a LOCAL: the assembly surface lives for the length of this function
+	// and no longer. Home keeps only the faces below — every raw write face
+	// (Log, Actors, Genesis, the Assembly leaf ports) is handed to the organ
+	// that owns it further down and then goes out of scope with cs. closeStore
+	// is taken immediately so the rollback defer above can release the store
+	// from any later failure point.
+	h.closeStore = cs.Close
+	h.query = cs.Query
+	h.visible = cs.Visible
+	h.expiry = cs.Expiry
+	h.requests = cs.Requests
+	h.bindings = cs.Bindings
+	h.routing = cs.Routing
+	h.resourceRead = cs.ResourceRead
+	h.principals = cs.Principals
+
 	if cfg.Bootstrap && cfg.Genesis != nil {
 		if err := cs.Genesis.CreateGenesis(ctx, *cfg.Genesis); err != nil {
 			return nil, fmt.Errorf("platform: write channel genesis: %w", err)
 		}
 	}
-	if err := validateGenesis(ctx, cs, cfg); err != nil {
+	if err := validateGenesis(ctx, cs.Genesis, cfg); err != nil {
 		return nil, err
 	}
 
@@ -101,11 +116,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// registry row, no admission and no record. Its identity reaches the kernel
 	// as a construction constant.
 	if cfg.Bootstrap {
-		if err := seedBootstrap(ctx, cs, cfg, h.nowMs); err != nil {
+		if err := seedBootstrap(ctx, cs.Actors, cs.Routing, cfg, h.nowMs); err != nil {
 			return nil, err
 		}
 	}
-	owner, err := readOwnerPrincipal(ctx, cs)
+	owner, err := readOwnerPrincipal(ctx, cs.Genesis)
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +131,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 
 	h.resolver = cfg.IntroductionResolver
 	h.factories = &compositionView{h: h, resolver: cfg.CompositionResolver}
-	organ, err := newActorOrgan(cs, h.nowMs)
+	organ, err := newActorOrgan(cs.Actors, h.nowMs)
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct actor organ: %w", err)
 	}
@@ -124,8 +139,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.systemKernel = systemkernel.New()
 	h.actors = newActorSystem(h, logger)
 
-	var completion accessdoor.ResourceCompletion
-	h.access, completion, err = accessdoor.NewAssembly(accessdoor.Deps{
+	// access and schedMinter below are the organ doors: assembly ingredients for
+	// the capability bundles and the remote ingress, and nothing else. They are
+	// locals for the same reason cs is — a door kept on Home is a door every
+	// method in this package can knock on.
+	access, completion, err := accessdoor.NewAssembly(accessdoor.Deps{
 		Registry:       cs.Assembly.Resources,
 		Drivers:        accessdoor.DriverTable{resourcespec.KindKV: cs.Assembly.KV},
 		Authority:      h.actors,
@@ -149,7 +167,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("platform: build harness: %w", err)
 	}
-	stateHandles, err := accessdoor.NewStateHandleResolver(organ.entries, h.access)
+	stateHandles, err := accessdoor.NewStateHandleResolver(organ.entries, access)
 	if err != nil {
 		return nil, fmt.Errorf("platform: build state handle resolver: %w", err)
 	}
@@ -168,7 +186,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct fire sink: %w", err)
 	}
-	h.schedMinter, h.engine, err = schedule.New(schedule.Deps{
+	schedMinter, engine, err := schedule.New(schedule.Deps{
 		Store: cs.Assembly.Timers,
 		Fire:  fire,
 		Clock: schedulerClock, Logger: logger,
@@ -176,21 +194,28 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	if err != nil {
 		return nil, fmt.Errorf("platform: open scheduler: %w", err)
 	}
+	// The engine IS kept: Home starts it, closes it, and hands it forgotten ids.
+	// The minter beside it is not — that one is assembly ingredient only.
+	h.engine = engine
 
 	h.managedCaps, err = managedcaps.New(
 		h.minter,
-		h.access,
+		access,
 		h.stateHandles,
-		h.schedMinter,
+		schedMinter,
 		h.actors,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct managed caps minter: %w", err)
 	}
-	h.systemCaps, err = systemcaps.New(
+	// A local, unlike its managed twin above: this mint fires once, below, and
+	// Home's running-period need is the pen it yields (h.systemPen), never the
+	// power to mint another root bundle — Mint takes no argument and checks no
+	// precondition, so a kept field would be a standing mint-system-root door.
+	systemCapsMinter, err := systemcaps.New(
 		h.minter,
-		h.access,
-		h.schedMinter,
+		access,
+		schedMinter,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct system caps minter: %w", err)
@@ -201,13 +226,15 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// link is given. Authority ingredients come straight from the Controller —
 	// Platform keeps zero capability-coordinate surface; only the completed
 	// lifecycle command face (tails included) rides the actorSystem.
-	h.remoteIngress, err = remoteingress.New(
+	// It is handed to the link acceptor whole and never touched again, so it is
+	// a local: the acceptor is its owner, Home was only the courier.
+	remoteIngress, err := remoteingress.New(
 		h.controller,
 		h.actors,
 		h.minter,
-		h.access,
+		access,
 		h.stateHandles,
-		h.schedMinter,
+		schedMinter,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("platform: construct remote ingress: %w", err)
@@ -253,7 +280,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	}
 	h.opEntry = &opEntry{home: h}
 
-	systemCaps, err := h.systemCaps.Mint(ctx)
+	systemCaps, err := systemCapsMinter.Mint(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("platform: mint system caps: %w", err)
 	}
@@ -276,7 +303,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.sweepSubjectSlots(ctx)
 
 	links, err := link.NewAcceptor(link.Config{
-		Ingress:         h.remoteIngress,
+		Ingress:         remoteIngress,
 		ChannelID:       cfg.ChannelID,
 		Logger:          logger,
 		AuthorizeAttach: h.actors.AuthorizeAttach,
@@ -298,7 +325,7 @@ func Open(cfg Config) (_ *Home, retErr error) {
 		},
 		Plan: h.planForDaemon,
 		CanAttach: func(ctx context.Context, daemonID string) error {
-			bound, err := cs.Bindings.IsBound(ctx, storespec.DaemonID(daemonID))
+			bound, err := h.bindings.IsBound(ctx, storespec.DaemonID(daemonID))
 			if err != nil {
 				return err
 			}
@@ -314,12 +341,12 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	h.links = links
 	lateAcc.bind(links)
 
-	from, err := cs.Query.MaxSeq(ctx)
+	from, err := h.query.MaxSeq(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("platform: read max seq: %w", err)
 	}
 	h.engine.Start()
-	h.delivery = tap.OpenPump(h.signal, cs.Query, from, deliveryHandle(h, cfg.ChannelID, logger), logger)
+	h.delivery = tap.OpenPump(h.signal, h.query, from, deliveryHandle(h, cfg.ChannelID, logger), logger)
 
 	h.reconcileSweep(ctx)
 	reconcileCtx, stop := context.WithCancel(context.Background())
@@ -345,11 +372,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	return h, nil
 }
 
-func validateGenesis(ctx context.Context, cs *runtime.ChannelStores, cfg Config) error {
+func validateGenesis(ctx context.Context, genesis storespec.GenesisStore, cfg Config) error {
 	if cfg.ExpectedGenesis == nil {
 		return nil
 	}
-	got, found, err := cs.Genesis.ReadGenesis(ctx)
+	got, found, err := genesis.ReadGenesis(ctx)
 	if err != nil {
 		return fmt.Errorf("platform: read channel genesis: %w", err)
 	}
@@ -365,12 +392,13 @@ func validateGenesis(ctx context.Context, cs *runtime.ChannelStores, cfg Config)
 // lives on the genesis pointer alone.
 func seedBootstrap(
 	ctx context.Context,
-	cs *runtime.ChannelStores,
+	actors storespec.ActorRegistryStore,
+	routing storespec.ChannelRouting,
 	cfg Config,
 	nowMs func() int64,
 ) error {
 	if cfg.BootstrapOwnerPrincipal != "" {
-		if _, err := cs.Actors.Insert(ctx, storespec.ActorDraft{
+		if _, err := actors.Insert(ctx, storespec.ActorDraft{
 			Kind: actor.KindHuman, Principal: cfg.BootstrapOwnerPrincipal,
 			Definition: storespec.ActorDefinition{Class: "human"},
 			Placement:  storespec.NewServerPlacement(), CreatedAt: nowMs(),
@@ -379,7 +407,7 @@ func seedBootstrap(
 		}
 	}
 	for _, declaration := range cfg.BootstrapDeclarations {
-		if err := admitBootstrapDeclaration(ctx, cs, declaration); err != nil {
+		if err := admitBootstrapDeclaration(ctx, actors, routing, declaration); err != nil {
 			return err
 		}
 	}
@@ -390,7 +418,8 @@ func seedBootstrap(
 // Controller exists. It returns no record: nothing above it may hold one.
 func admitBootstrapDeclaration(
 	ctx context.Context,
-	cs *runtime.ChannelStores,
+	actors storespec.ActorRegistryStore,
+	routing storespec.ChannelRouting,
 	in DeclareRequest,
 ) error {
 	if err := validateDeclareRequest(in); err != nil {
@@ -400,7 +429,7 @@ func admitBootstrapDeclaration(
 	if in.Config != nil {
 		config = append(config, (*in.Config)...)
 	}
-	record, err := cs.Actors.Insert(ctx, storespec.ActorDraft{
+	record, err := actors.Insert(ctx, storespec.ActorDraft{
 		Kind:         in.Kind,
 		SourceDeclID: in.SourceDeclID,
 		CreatedAt:    in.CreatedAt,
@@ -411,7 +440,7 @@ func admitBootstrapDeclaration(
 		return err
 	}
 	if in.MakeDefault {
-		return cs.Routing.SetDefaultAgent(ctx, record.ID)
+		return routing.SetDefaultAgent(ctx, record.ID)
 	}
 	return nil
 }
@@ -420,8 +449,8 @@ func admitBootstrapDeclaration(
 // is immutable channel self-truth, so one read at open is the whole story —
 // there is no second account to cross-check it against, and the open check
 // degenerates to "if this channel has a genesis, its owner is non-empty".
-func readOwnerPrincipal(ctx context.Context, cs *runtime.ChannelStores) (string, error) {
-	genesis, found, err := cs.Genesis.ReadGenesis(ctx)
+func readOwnerPrincipal(ctx context.Context, store storespec.GenesisStore) (string, error) {
+	genesis, found, err := store.ReadGenesis(ctx)
 	if err != nil {
 		return "", fmt.Errorf("platform: read channel genesis: %w", err)
 	}

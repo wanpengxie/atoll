@@ -98,7 +98,7 @@ func (h *Home) resolveDaemonPlacement(
 	desiredHost string,
 ) (storespec.Placement, error) {
 	if desiredHost != "" {
-		bound, err := h.cs.Bindings.IsBound(ctx, storespec.DaemonID(desiredHost))
+		bound, err := h.bindings.IsBound(ctx, storespec.DaemonID(desiredHost))
 		if err != nil {
 			return storespec.Placement{}, err
 		}
@@ -109,7 +109,7 @@ func (h *Home) resolveDaemonPlacement(
 		}
 		return storespec.NewDaemonPlacement(desiredHost)
 	}
-	bound, err := h.cs.Bindings.ListBoundDaemons(ctx)
+	bound, err := h.bindings.ListBoundDaemons(ctx)
 	if err != nil {
 		return storespec.Placement{}, err
 	}

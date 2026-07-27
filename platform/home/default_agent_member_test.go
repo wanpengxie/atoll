@@ -84,7 +84,7 @@ func TestSetDefaultAgentAsksTheValueLedger(t *testing.T) {
 	if err := setDefault(child); err != nil {
 		t.Fatalf("fork child refused as default agent: %v", err)
 	}
-	id, configured, err := h.cs.Routing.DefaultAgent(ctx)
+	id, configured, err := h.routing.DefaultAgent(ctx)
 	if err != nil || !configured || id != child {
 		t.Fatalf("pointer=%q configured=%v err=%v, want %q", id, configured, err, child)
 	}

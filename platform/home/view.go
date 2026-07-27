@@ -33,6 +33,13 @@ type viewAuthority interface {
 	storespec.DeclaredInstanceReader
 }
 
+// defaultAgentReader is the routing question a View may ask. The other half of
+// storespec.ChannelRouting — SetDefaultAgent — is a management command that
+// belongs to the operation entry, so it never rides in on a read projection.
+type defaultAgentReader interface {
+	DefaultAgent(ctx context.Context) (actor.ActorID, bool, error)
+}
+
 type View struct {
 	visible    storespec.VisibleMessageQuery
 	authority  viewAuthority
@@ -41,7 +48,7 @@ type View struct {
 	actors     *actorSystem
 	nowMs      func() int64
 	resources  storespec.ResourceReadStore
-	routing    storespec.ChannelRouting
+	routing    defaultAgentReader
 	principals storespec.PrincipalRegistry
 	bindings   storespec.DaemonBindingReader
 
@@ -54,16 +61,16 @@ type View struct {
 // the channel interaction model.
 func (h *Home) View() View {
 	return View{
-		visible:        h.cs.Visible,
+		visible:        h.visible,
 		authority:      h.actors,
 		links:          h.links,
 		presence:       presence.NewView(h.presenceFold, h.actors, h.actors),
 		actors:         h.actors,
 		nowMs:          h.nowMs,
-		resources:      h.cs.ResourceRead,
-		routing:        h.cs.Routing,
-		principals:     h.cs.Principals,
-		bindings:       h.cs.Bindings,
+		resources:      h.resourceRead,
+		routing:        h.routing,
+		principals:     h.principals,
+		bindings:       h.bindings,
 		ownerPrincipal: h.ownerPrincipal,
 	}
 }

@@ -114,7 +114,7 @@ func (e *opEntry) AttachDaemon(
 			Code: channel.ErrCodeBadPayload, Detail: "daemon_id required",
 		}
 	}
-	created, err := e.home.cs.Bindings.AttachDaemon(
+	created, err := e.home.bindings.AttachDaemon(
 		ctx, storespec.DaemonID(req.DaemonID), e.home.nowMs())
 	if err != nil {
 		return channel.BindingResult{}, err
@@ -144,7 +144,7 @@ func (e *opEntry) DetachDaemon(
 			Code: channel.ErrCodeBadPayload, Detail: "daemon_id required",
 		}
 	}
-	if _, err := e.home.cs.Bindings.DetachDaemon(
+	if _, err := e.home.bindings.DetachDaemon(
 		ctx, storespec.DaemonID(req.DaemonID)); err != nil {
 		return channel.BindingResult{}, err
 	}
@@ -241,7 +241,7 @@ func (e *opEntry) Execute(
 				}
 			}
 		}
-		if err := e.home.cs.Routing.SetDefaultAgent(ctx, payload.InstanceID); err != nil {
+		if err := e.home.routing.SetDefaultAgent(ctx, payload.InstanceID); err != nil {
 			return nil, asOperateError(err)
 		}
 		e.home.announceAudit(ctx, "set_default_agent", map[string]any{
