@@ -347,3 +347,100 @@ func TestSamePeerSessionsAndBindingsRemainExactObjects(t *testing.T) {
 	_ = s2.Close()
 	<-s2.Done()
 }
+
+// Physical close gates late child registration in the same critical section
+// as the shutdown snapshot: a binding arriving after Close is rejected even
+// while the ledger still admits.
+func TestPhysicalCloseGatesLateChildRegistration(t *testing.T) {
+	registry := newSessionRegistry(nil)
+	record := activeRecord(t, registry, "daemon-a")
+	session, err := NewAuthenticatedLinkSession(AuthenticatedLinkSessionConfig{
+		Peer:      "daemon-a",
+		Authority: authorityPair(registry, record),
+		OpenActorStream: func(context.Context, actor.ActorID, actorhost.AttemptKey) (ActorStreamResource, error) {
+			return ActorStreamResource{Arms: physicalArms(), Close: func() error { return nil }}, nil
+		},
+		CloseTransport: func() error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = session.Close()
+
+	if _, err := session.NewBinding(BindingConfig{
+		Endpoint: newPhysicalEndpoint(),
+		Close:    func() error { return nil },
+	}); !errors.Is(err, ErrPhysicalSessionClosed) {
+		t.Fatalf("late binding registration err=%v want closed", err)
+	}
+	if _, err := session.OpenActorStream(
+		context.Background(), "agent:late", physicalKey(t),
+	); !errors.Is(err, ErrPhysicalSessionClosed) {
+		t.Fatalf("late stream open err=%v want closed", err)
+	}
+	if !registry.admit(record).allows() {
+		t.Fatal("ledger admission changed; the local closed gate was not what rejected")
+	}
+	select {
+	case <-session.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("session did not collect after close")
+	}
+}
+
+// Verdict-once: an open that passed the admission gate is in-flight work and
+// is never revoked by a second reading when a seal lands mid-open; the
+// closed-gate handoff and shutdown own its collection instead.
+func TestInFlightOpenSurvivesSealVerdict(t *testing.T) {
+	registry := newSessionRegistry(nil)
+	record := activeRecord(t, registry, "daemon-a")
+	key := physicalKey(t)
+	gate := make(chan struct{})
+	entered := make(chan struct{})
+	session, err := NewAuthenticatedLinkSession(AuthenticatedLinkSessionConfig{
+		Peer:      "daemon-a",
+		Authority: authorityPair(registry, record),
+		OpenActorStream: func(context.Context, actor.ActorID, actorhost.AttemptKey) (ActorStreamResource, error) {
+			close(entered)
+			<-gate
+			done := make(chan struct{})
+			var once sync.Once
+			return ActorStreamResource{
+				Arms: physicalArms(),
+				Close: func() error {
+					once.Do(func() { close(done) })
+					return nil
+				},
+				Done: done,
+			}, nil
+		},
+		CloseTransport: func() error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	type opened struct {
+		stream *ActorStream
+		err    error
+	}
+	result := make(chan opened, 1)
+	go func() {
+		stream, openErr := session.OpenActorStream(context.Background(), "agent:a", key)
+		result <- opened{stream: stream, err: openErr}
+	}()
+	<-entered
+	if registry.beginSeal(record, sessionEvidence{reason: SessionRevoked}) != sealCommitted {
+		t.Fatal("seal did not commit")
+	}
+	close(gate)
+	got := <-result
+	if got.err != nil {
+		t.Fatalf("in-flight open was revoked by a second verdict: %v", got.err)
+	}
+	_ = session.Close()
+	select {
+	case <-got.stream.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("shutdown did not collect the in-flight stream")
+	}
+}
