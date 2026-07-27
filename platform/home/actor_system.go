@@ -232,12 +232,13 @@ func (a *actorSystem) BindingDown(id actor.ActorID, binding actorhost.Binding) {
 
 // The three narrow ledger questions the remote ingress asks. They are plain
 // pass-throughs to the Controller: minting an authority is a coordinate curry,
-// and AdmitRun is one read lock — this facade adds nothing to either.
-func (a *actorSystem) AdmitRun(
+// and PenBasis is one read lock of mint ingredients (no verdict — the pen's
+// Write holds the only A/G gate) — this facade adds nothing to either.
+func (a *actorSystem) PenBasis(
 	id actor.ActorID,
 	key actorhost.AttemptKey,
-) (actorctl.RunAdmission, error) {
-	return a.home.controller.AdmitRun(id, key)
+) (actorctl.PenBasis, error) {
+	return a.home.controller.PenBasis(id, key)
 }
 
 func (a *actorSystem) RunAuthorityFor(

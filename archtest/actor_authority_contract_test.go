@@ -436,8 +436,8 @@ func TestActorAuthorityRemoteIngressIsTheOnlyRemoteDoor(t *testing.T) {
 	// organ: A/G for the pen and channel resources, A for state and schedule.
 	ingress := readAuthorityContractFile(t, "../runtime/remoteingress/ingress.go")
 	for _, required := range []string{
-		"admission, err := i.controller.AdmitRun(id, attempt)",
-		"i.pen.MintAuthority(admission.Run, admission.Kind)",
+		"basis, err := i.controller.PenBasis(id, attempt)",
+		"i.pen.MintAuthority(basis.Run, basis.Kind)",
 		"i.access.MintAuthority(i.controller.RunAuthorityFor(id, attempt))",
 		"i.state.StateIngress(",
 		"i.schedule.MintAuthority(i.controller.IdentityAuthorityFor(id))",

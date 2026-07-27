@@ -489,11 +489,13 @@ func TestOneIngressPerChannelCannotBeCrossed(t *testing.T) {
 
 // --- ⑥ a restart window is never half-visible --------------------------------
 //
-// Restart settles inside the ledger lock, so a concurrent AdmitRun sees either
-// the whole old term or the whole new one. A partial answer — a verdict that
-// passed against a term the ledger no longer holds, or an admission missing its
-// Kind — is what a two-snapshot ingress would produce.
-func TestAdmitRunNeverSeesAHalfPublishedRestart(t *testing.T) {
+// Restart settles inside the ledger lock. The basis read carries no verdict —
+// the only A/G gate is the pen's Write — so "whole" here means two things:
+// the basis is always complete (Kind welded, coordinates echoing the asked
+// key), and the write outcome is always a complete answer against one term
+// (accepted under the current key, or refused as stale — never a write that
+// half-passed against a term the ledger no longer holds).
+func TestRestartWindowIsNeverHalfVisibleAtThePen(t *testing.T) {
 	r := newRig(t)
 	ctx := context.Background()
 
@@ -527,19 +529,28 @@ func TestAdmitRunNeverSeesAHalfPublishedRestart(t *testing.T) {
 				t.Error("the actor left the ledger during restart")
 				return
 			}
-			admission, err := r.controller.AdmitRun(remoteActor, key)
+			basis, err := r.controller.PenBasis(remoteActor, key)
 			if err != nil {
-				// The term moved on between the read and the question: a whole
-				// refusal, which is one of the two legal complete answers.
+				t.Errorf("basis err=%v", err)
+				return
+			}
+			if basis.Kind != actor.KindAgent ||
+				basis.Run.ActorID() != remoteActor || basis.Run.AttemptKey() != key {
+				t.Errorf("half-read basis: %+v", basis)
+				return
+			}
+			// The single gate: the write either lands under a still-current
+			// key or refuses whole as stale. Both are complete answers.
+			result, err := r.ingress.Emit(ctx, remoteActor, key, envelope())
+			if err != nil {
 				if !errors.Is(err, actorctl.ErrStaleAttempt) {
-					t.Errorf("admit err=%v", err)
+					t.Errorf("emit err=%v", err)
 					return
 				}
 				continue
 			}
-			if admission.ID != remoteActor || admission.Kind != actor.KindAgent ||
-				admission.Run.ActorID() != remoteActor || admission.Run.AttemptKey() != key {
-				t.Errorf("half-published admission: %+v", admission)
+			if result.MessageID == "" && result.RejectReason == "" {
+				t.Errorf("half answer from the pen: %+v", result)
 				return
 			}
 		}

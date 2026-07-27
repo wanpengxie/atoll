@@ -59,34 +59,43 @@ func (c *Controller) RunAuthorityFor(
 	return RunAuthority{controller: c, id: id, attempt: key}
 }
 
-// RunAdmission is one coherent A/G snapshot taken at a remote entry point: the
-// verdict has passed, Kind is the message-protocol field the pen needs, and Run
-// is the live authority the organ chain re-admits on. It exists so the pen path
-// never stitches "checkCurrent then look up Kind" out of two snapshots — the
-// race between them is exactly what one ledger read lock removes.
-type RunAdmission struct {
-	ID   actor.ActorID
+// PenBasis is what minting a pen for one remote write needs: Kind (the
+// message-protocol field, immutable for the actor's lifetime) and the live Run
+// authority (pure coordinates — it carries no verdict). The basis deliberately
+// does NOT admit: the one complete A/G verdict happens exactly once, inside the
+// pen's Write — same code, same moment as a local body's pen. A gate here would
+// be a second verdict that can never change an outcome (pass-then-pass is a
+// wasted read, pass-then-reject equals the frame arriving a beat later,
+// reject-here means the pen would reject too); it can only duplicate the read.
+type PenBasis struct {
 	Kind actor.Kind
 	Run  RunAuthority
 }
 
-// AdmitRun is the A/G narrow face of the value ledger: one read lock, one
-// complete verdict, one Kind.
-func (c *Controller) AdmitRun(
+// PenBasis reads the pen-mint basis under one ledger read lock. Absence is the
+// only refusal — no row means no Kind to weld; the term verdict stays with the
+// pen.
+func (c *Controller) PenBasis(
 	id actor.ActorID,
 	key actorhost.AttemptKey,
-) (RunAdmission, error) {
+) (PenBasis, error) {
 	if c == nil {
-		return RunAdmission{}, ErrClosed
+		return PenBasis{}, ErrClosed
 	}
 	c.ledger.RLock()
 	defer c.ledger.RUnlock()
-	if err := c.checkCurrentLocked(id, key); err != nil {
-		return RunAdmission{}, err
+	switch c.phase {
+	case Bootstrapping:
+		return PenBasis{}, ErrBootstrapping
+	case Closed:
+		return PenBasis{}, ErrClosed
 	}
-	return RunAdmission{
-		ID:   id,
-		Kind: c.actors[id].Record.Kind,
+	value, ok := c.actors[id]
+	if !ok {
+		return PenBasis{}, ErrInactive
+	}
+	return PenBasis{
+		Kind: value.Record.Kind,
 		Run:  RunAuthority{controller: c, id: id, attempt: key},
 	}, nil
 }

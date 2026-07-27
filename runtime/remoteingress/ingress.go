@@ -51,7 +51,7 @@ type RemoteIngress interface {
 // completed command face the local Lifecycle arm uses, so a remote self-command
 // settles exactly like a local one, tail included.
 type Controller interface {
-	AdmitRun(actor.ActorID, actorhost.AttemptKey) (actorctl.RunAdmission, error)
+	PenBasis(actor.ActorID, actorhost.AttemptKey) (actorctl.PenBasis, error)
 	RunAuthorityFor(actor.ActorID, actorhost.AttemptKey) actorctl.RunAuthority
 	IdentityAuthorityFor(actor.ActorID) actorctl.IdentityAuthority
 	Fork(context.Context, actorctl.ForkRequest) (actorctl.ForkResult, error)
@@ -177,22 +177,23 @@ func New(
 	}, nil
 }
 
-// Emit is the pen arm (A/G). AdmitRun is one ledger read lock: it settles the
-// verdict AND yields Kind — the message-protocol field the pen welds — from a
-// single snapshot, because stitching "current?" and "which kind?" out of two
-// snapshots is a race by construction. The welded shell then drives the very
-// same chain a local body's pen drives, re-admitting on the write.
+// Emit is the pen arm (A/G). PenBasis is one ledger read lock yielding the
+// mint ingredients only — Kind (immutable protocol field) and the live Run
+// coordinates. It does NOT admit: the one complete A/G verdict happens inside
+// the pen's Write, the very same chain and the very same gate a local body's
+// pen drives. There is deliberately no verdict before the mint — a pre-gate
+// can never change an outcome, only duplicate the read.
 func (i *ingress) Emit(
 	ctx context.Context,
 	id actor.ActorID,
 	attempt actorhost.AttemptKey,
 	env *message.Envelope,
 ) (harness.WriteResult, error) {
-	admission, err := i.controller.AdmitRun(id, attempt)
+	basis, err := i.controller.PenBasis(id, attempt)
 	if err != nil {
 		return harness.WriteResult{}, err
 	}
-	return i.pen.MintAuthority(admission.Run, admission.Kind).Write(ctx, env)
+	return i.pen.MintAuthority(basis.Run, basis.Kind).Write(ctx, env)
 }
 
 // Access is the resource arm. Channel-scoped work is A/G — acting as the
