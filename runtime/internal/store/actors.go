@@ -245,8 +245,15 @@ func (r *actorRegistry) Insert(
 	}, nil
 }
 
-// UpdateDefinition overwrites the current definition of one active row and
-// returns the committed record. Placement is immutable and stays untouched.
+// UpdateDefinition overwrites the current definition of one declaration-backed
+// active row and returns the committed record. Placement is immutable and stays
+// untouched. ONE transaction bed: the row is read and rewritten under the same
+// tx, and the return value is composed from that in-tx read plus the new
+// definition — every fallible step sits before the commit, nothing is read
+// back after it (the ledger law: settled means nothing below can fail). A row
+// with no declaration source (a human admission) has no declaration to change
+// and is refused with a typed error — an operation verdict, not a species
+// branch.
 func (r *actorRegistry) UpdateDefinition(
 	ctx context.Context,
 	id actor.ActorID,
@@ -255,34 +262,42 @@ func (r *actorRegistry) UpdateDefinition(
 	if id == "" || def.Class == "" {
 		return storespec.ActorRecord{}, storespec.ErrActorNotFound
 	}
+	tx, err := r.db.BeginTx(ctx, nil)
+	if err != nil {
+		return storespec.ActorRecord{}, fmt.Errorf("store: update definition begin: %w", err)
+	}
+	defer tx.Rollback()
+
+	record, err := scanActorRecord(tx.QueryRowContext(ctx,
+		`SELECT `+actorRecordColumns+` FROM actor_registry
+		 WHERE actor_id=? AND deregistered_at IS NULL`, string(id)))
+	if errors.Is(err, sql.ErrNoRows) {
+		return storespec.ActorRecord{}, storespec.ErrActorNotFound
+	}
+	if err != nil {
+		return storespec.ActorRecord{}, fmt.Errorf("store: update definition read %q: %w", id, err)
+	}
+	if record.SourceDeclID == "" {
+		return storespec.ActorRecord{}, fmt.Errorf(
+			"%w: %q", storespec.ErrNoDeclaration, id)
+	}
 	var config any
 	if def.Config != nil {
 		config = string(def.Config)
 	}
-	res, err := r.db.ExecContext(ctx,
+	if _, err := tx.ExecContext(ctx,
 		`UPDATE actor_registry SET class=?, config_json=?
 		 WHERE actor_id=? AND deregistered_at IS NULL`,
-		def.Class, config, string(id))
-	if err != nil {
+		def.Class, config, string(id)); err != nil {
 		return storespec.ActorRecord{}, fmt.Errorf("store: update definition %q: %w", id, err)
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return storespec.ActorRecord{}, err
-	}
-	if n != 1 {
-		return storespec.ActorRecord{}, storespec.ErrActorNotFound
+	if err := tx.Commit(); err != nil {
+		return storespec.ActorRecord{}, fmt.Errorf("store: update definition commit: %w", err)
 	}
 	if r.onCommit != nil {
 		r.onCommit()
 	}
-	record, found, err := r.LookupActive(ctx, id)
-	if err != nil {
-		return storespec.ActorRecord{}, err
-	}
-	if !found {
-		return storespec.ActorRecord{}, storespec.ErrActorNotFound
-	}
+	record.Definition = def.Clone()
 	return record, nil
 }
 

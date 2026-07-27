@@ -11,6 +11,10 @@ import (
 var (
 	ErrActorNotFound  = errors.New("storespec: actor not found")
 	ErrMemberInactive = errors.New("storespec: member missing or ended")
+	// ErrNoDeclaration refuses a definition change aimed at a record that has
+	// no declaration source (a human admission): there is no declaration to
+	// change. An operation verdict, not a species branch.
+	ErrNoDeclaration = errors.New("storespec: record has no declaration to change")
 )
 
 // PlacementKind is the closed placement vocabulary. Placement itself is a

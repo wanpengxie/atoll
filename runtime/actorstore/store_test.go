@@ -235,6 +235,33 @@ func TestUpdateDefinitionRefusesAnEntryRecord(t *testing.T) {
 	if err != nil || !ok || !stored.Definition.Equal(updated.Definition) {
 		t.Fatalf("stored=%+v updated=%+v ok=%v err=%v", stored, updated, ok, err)
 	}
+	// The composed return preserves the untouched row fields — it is the in-tx
+	// read plus the new definition, not a partial value.
+	if updated.SourceDeclID != durable.SourceDeclID ||
+		updated.CreatedAt != durable.CreatedAt ||
+		updated.Placement != durable.Placement {
+		t.Fatalf("composed return lost row fields: %+v", updated)
+	}
+}
+
+// A durable human admission has no declaration either: the registry verb
+// guards its own contract, not just the entry table.
+func TestUpdateDefinitionRefusesAHumanRecord(t *testing.T) {
+	ctx := context.Background()
+	store, _ := openStore(t)
+
+	human, err := store.Insert(ctx, storespec.ActorDraft{
+		Kind: actor.KindHuman, Principal: "alice@example.com", CreatedAt: 1,
+		Definition: storespec.ActorDefinition{Class: "human"},
+		Placement:  storespec.NewServerPlacement(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.UpdateDefinition(ctx, human.ID,
+		storespec.ActorDefinition{Class: "human-v2"}); !errors.Is(err, storespec.ErrNoDeclaration) {
+		t.Fatalf("err=%v, want ErrNoDeclaration", err)
+	}
 }
 
 // The kernel is a constant, not a member: the registry refuses to give it a
