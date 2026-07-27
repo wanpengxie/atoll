@@ -250,7 +250,7 @@ func TestLedgerSealThenPhysicalCloseJoinsChildrenOutsideRegistryLock(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !registry.beginSeal(record, sessionEvidence{reason: SessionRevoked}) {
+	if registry.beginSeal(record, sessionEvidence{reason: SessionRevoked}) != sealCommitted {
 		t.Fatal("ledger seal did not commit")
 	}
 	if err := session.Close(); err != nil {

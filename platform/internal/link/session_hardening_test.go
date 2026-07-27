@@ -37,7 +37,7 @@ func TestSessionRegistryOneTruthAndNoFallback(t *testing.T) {
 	if !registry.authority(second).allows() {
 		t.Fatal("successor is not current")
 	}
-	if !registry.beginSeal(second, sessionEvidence{reason: SessionCarrierLost}) {
+	if registry.beginSeal(second, sessionEvidence{reason: SessionCarrierLost}) != sealCommitted {
 		t.Fatal("successor seal did not commit")
 	}
 	if registry.currentRecord("daemon-a") != nil {
@@ -59,7 +59,7 @@ func TestSessionAuthoritiesZeroRejectAndSealCutsBothAnswers(t *testing.T) {
 	if !admit.allows() || !current.allows() {
 		t.Fatal("active current session was rejected")
 	}
-	if !registry.beginSeal(record, sessionEvidence{reason: SessionRevoked}) {
+	if registry.beginSeal(record, sessionEvidence{reason: SessionRevoked}) != sealCommitted {
 		t.Fatal("seal did not commit")
 	}
 	if admit.allows() || current.allows() {
@@ -73,7 +73,7 @@ func TestSessionGenerationIsCanonicalUUIDv7AndClosedReasonIsRetained(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !registry.beginSeal(record, sessionEvidence{reason: SessionHandshakeTimeout}) {
+	if registry.beginSeal(record, sessionEvidence{reason: SessionHandshakeTimeout}) != sealCommitted {
 		t.Fatal("candidate close did not commit")
 	}
 	registry.completeSeal(record, 2)

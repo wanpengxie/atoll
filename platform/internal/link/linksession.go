@@ -391,13 +391,16 @@ func (ls *linkSession) dispatch(conn net.Conn) {
 			_ = conn.Close()
 			return
 		}
-		ls.onActor(conn)
+		// Non-control substreams carry the same per-write budget, but a write
+		// failure only closes this one stream: substream failure is local and
+		// never session evidence.
+		ls.onActor(ls.wrap(conn, nil))
 	case streamLane:
 		if ls.onLane == nil {
 			_ = conn.Close()
 			return
 		}
-		ls.onLane(conn)
+		ls.onLane(ls.wrap(conn, nil))
 	default:
 		if ls.logger != nil {
 			ls.logger.Warn("link.unknown_stream_kind", "kind", string(header.Kind))
@@ -577,6 +580,8 @@ func (ls *linkSession) openTagged(ctx context.Context, kind streamKind) (net.Con
 			} else {
 				if kind == streamControl {
 					conn = ls.wrap(conn, ls.controlWriteFailed)
+				} else {
+					conn = ls.wrap(conn, nil)
 				}
 			}
 		}

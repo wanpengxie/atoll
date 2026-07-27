@@ -88,6 +88,7 @@ type AuthenticatedLinkSession struct {
 	transportDone  <-chan struct{}
 
 	mu       sync.Mutex
+	closed   bool
 	bindings map[*Binding]struct{}
 	streams  map[*ActorStream]struct{}
 	openWG   sync.WaitGroup
@@ -198,6 +199,10 @@ func (s *AuthenticatedLinkSession) OpenActorStream(
 		return nil, ErrPhysicalSessionClosed
 	}
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		return nil, ErrPhysicalSessionClosed
+	}
 	s.openWG.Add(1)
 	s.mu.Unlock()
 	defer s.openWG.Done()
@@ -244,7 +249,9 @@ type BindingConfig struct {
 	BeforeStart func(*Binding)
 }
 
-// NewBinding registers an exact route before its reader starts.
+// NewBinding registers an exact route before its reader starts. The closed
+// check and the registration commit under one lock hold: a binding can never
+// slip in after the shutdown snapshot and outlive Done.
 func (s *AuthenticatedLinkSession) NewBinding(cfg BindingConfig) (*Binding, error) {
 	if s == nil || nilInterface(cfg.Endpoint) || cfg.Close == nil {
 		return nil, ErrInvalidPhysicalChild
@@ -255,6 +262,11 @@ func (s *AuthenticatedLinkSession) NewBinding(cfg BindingConfig) (*Binding, erro
 		return nil, ErrPhysicalSessionClosed
 	}
 	s.mu.Lock()
+	if s.closed {
+		s.mu.Unlock()
+		_ = binding.Close()
+		return nil, ErrPhysicalSessionClosed
+	}
 	s.bindings[binding] = struct{}{}
 	s.mu.Unlock()
 	if cfg.BeforeStart != nil {
@@ -271,6 +283,9 @@ func (s *AuthenticatedLinkSession) Close() error {
 		return nil
 	}
 	s.closeOnce.Do(func() {
+		s.mu.Lock()
+		s.closed = true
+		s.mu.Unlock()
 		if s.closeTransport != nil {
 			closeErr := s.closeTransport()
 			s.errMu.Lock()

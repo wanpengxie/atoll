@@ -39,6 +39,11 @@ type Dialer struct {
 	daemonID string
 
 	mu sync.Mutex
+	// closed is set under mu by the one evidence decision (onSessionEvidence).
+	// The attach-reply adopt path checks it in the same critical section, so a
+	// reply racing local close can never install an unsealable record into the
+	// shared ledger.
+	closed bool
 	// pendingAttach correlates the one initial attach round-trip.
 	pendingAttach *pendingReplies[AttachReply]
 	pendingPlan   *pendingReplies[PlanReply]
@@ -143,13 +148,16 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 	onControl := func(payload []byte) {
 		switch peekControlKind(payload) {
 		case ctrlPlanPoke:
-			if validPlanPoke(payload) {
-				d.signalPlanChanged()
+			if !validPlanPoke(payload) {
+				d.onSessionEvidence(SessionProtocolViolation, "malformed_plan_poke", nil)
+				return
 			}
+			d.signalPlanChanged()
 			return
 		case ctrlAllocRequest:
 			sf, err := decodeStorageControl(payload)
 			if err != nil || sf.AllocRequest == nil {
+				d.onSessionEvidence(SessionProtocolViolation, "malformed_alloc_request", err)
 				return
 			}
 			req := *sf.AllocRequest
@@ -161,6 +169,7 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 		case ctrlReclaimRequest:
 			sf, err := decodeStorageControl(payload)
 			if err != nil || sf.ReclaimRequest == nil {
+				d.onSessionEvidence(SessionProtocolViolation, "malformed_reclaim_request", err)
 				return
 			}
 			req := *sf.ReclaimRequest
@@ -172,6 +181,7 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 		case ctrlCommittedReply:
 			sf, err := decodeStorageControl(payload)
 			if err != nil || sf.CommittedReply == nil {
+				d.onSessionEvidence(SessionProtocolViolation, "malformed_committed_reply", err)
 				return
 			}
 			d.pendingCommitted.deliver(sf.CommittedReply.RequestID, *sf.CommittedReply)
@@ -179,6 +189,7 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 		case ctrlReclaimAckReply:
 			sf, err := decodeStorageControl(payload)
 			if err != nil || sf.ReclaimAckReply == nil {
+				d.onSessionEvidence(SessionProtocolViolation, "malformed_reclaim_ack_reply", err)
 				return
 			}
 			d.pendingReclaim.deliver(sf.ReclaimAckReply.RequestID, *sf.ReclaimAckReply)
@@ -186,6 +197,7 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 		case ctrlReconcilePullReply:
 			sf, err := decodeStorageControl(payload)
 			if err != nil || sf.ReconcilePullReply == nil {
+				d.onSessionEvidence(SessionProtocolViolation, "malformed_reconcile_pull_reply", err)
 				return
 			}
 			d.pendingReconcile.deliver(sf.ReconcilePullReply.RequestID, *sf.ReconcilePullReply)
@@ -193,22 +205,37 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 		case ctrlResolveCoordReply:
 			lf, err := decodeLaneControl(payload)
 			if err != nil || lf.ResolveCoordReply == nil {
+				d.onSessionEvidence(SessionProtocolViolation, "malformed_resolve_coord_reply", err)
 				return
 			}
 			d.pendingResolveCoord.deliver(lf.ResolveCoordReply.RequestID, *lf.ResolveCoordReply)
 			return
 		case ctrlPlanReply:
 			cf, err := decodeControl(payload)
-			if err == nil && cf.PlanReply != nil {
-				d.pendingPlan.deliver(cf.RequestID, *cf.PlanReply)
+			if err != nil || cf.PlanReply == nil {
+				d.onSessionEvidence(SessionProtocolViolation, "malformed_plan_reply", err)
+				return
 			}
+			d.pendingPlan.deliver(cf.RequestID, *cf.PlanReply)
+			return
+		case ctrlAttachReply:
+		default:
+			// Unknown kinds stay ignored for forward compatibility; only a
+			// known kind with a malformed payload is a protocol violation.
 			return
 		}
 		cf, derr := decodeControl(payload)
-		if derr != nil || cf.Kind != ctrlAttachReply || cf.AttachReply == nil {
+		if derr != nil || cf.AttachReply == nil {
+			d.onSessionEvidence(SessionProtocolViolation, "malformed_attach_reply", derr)
 			return
 		}
 		d.mu.Lock()
+		if d.closed {
+			// The local evidence decision already ran; adopting now would
+			// install a record no one can ever seal. Drop the late reply.
+			d.mu.Unlock()
+			return
+		}
 		// The attach reply publishes the home-confirmed daemon id — the
 		// authoritative value AttachReply.
 		// DaemonID's doc names (§4.7). An accepted reply always carries a
@@ -973,6 +1000,7 @@ func (d *Dialer) onSessionEvidence(reason SessionEndReason, detail string, err e
 	}
 	d.closeOnce.Do(func() {
 		d.mu.Lock()
+		d.closed = true
 		record := d.session
 		d.mu.Unlock()
 		evidence := sessionEvidence{reason: reason, detail: detail, err: err}

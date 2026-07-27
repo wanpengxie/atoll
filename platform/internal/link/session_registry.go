@@ -80,7 +80,6 @@ type sessionRecord struct {
 	generation SessionGeneration
 	key        string
 
-	deathOnce      sync.Once
 	death          chan sessionEvidence
 	doneOnce       sync.Once
 	done           chan struct{}
@@ -97,13 +96,17 @@ type sessionEvidence struct {
 	err    error
 }
 
+// report offers evidence to the supervising loop. The one-slot buffer holds
+// the first undelivered evidence; a consumer that refuses stale evidence can
+// keep supervising and still receive later reports.
 func (r *sessionRecord) report(reason SessionEndReason, detail string, err error) {
 	if r == nil {
 		return
 	}
-	r.deathOnce.Do(func() {
-		r.death <- sessionEvidence{reason: reason, detail: detail, err: err}
-	})
+	select {
+	case r.death <- sessionEvidence{reason: reason, detail: detail, err: err}:
+	default:
+	}
 }
 
 func (r *sessionRecord) setHandle(handle *linkHandle) {
@@ -144,6 +147,8 @@ type sessionRegistry struct {
 
 	candidateTTL  time.Duration
 	diagnosticTTL time.Duration
+	probeInterval time.Duration
+	livenessTTL   time.Duration
 }
 
 func newSessionRegistry(logger *slog.Logger) *sessionRegistry {
@@ -158,6 +163,8 @@ func newSessionRegistry(logger *slog.Logger) *sessionRegistry {
 		logger:        logger,
 		candidateTTL:  defaultCandidateTTL,
 		diagnosticTTL: defaultDiagnosticTTL,
+		probeInterval: defaultProbeInterval,
+		livenessTTL:   defaultLivenessTTL,
 	}
 }
 
@@ -182,9 +189,26 @@ func (r *sessionRegistry) mint(key string) (*sessionRecord, error) {
 		return nil, err
 	}
 	record.candidateTimer = time.AfterFunc(r.candidateTTL, func() {
-		record.report(SessionHandshakeTimeout, "attach_not_received_before_ttl", nil)
+		r.reportIfCandidate(record, SessionHandshakeTimeout, "attach_not_received_before_ttl")
 	})
 	return record, nil
+}
+
+// reportIfCandidate offers candidate-only evidence. The state check narrows
+// the race with activate; the authoritative conditional write is beginSeal's
+// candidate guard, which refuses stale candidate-only reasons.
+func (r *sessionRegistry) reportIfCandidate(
+	record *sessionRecord,
+	reason SessionEndReason,
+	detail string,
+) {
+	r.mu.Lock()
+	value := r.live[record.generation]
+	isCandidate := value != nil && value.state == SessionCandidate
+	r.mu.Unlock()
+	if isCandidate {
+		record.report(reason, detail, nil)
+	}
 }
 
 // adopt installs the generation minted by the home into the daemon's local
@@ -203,7 +227,7 @@ func (r *sessionRegistry) adopt(generation SessionGeneration, key string) (*sess
 		return nil, err
 	}
 	record.candidateTimer = time.AfterFunc(r.candidateTTL, func() {
-		record.report(SessionHandshakeTimeout, "adopted_session_not_activated_before_ttl", nil)
+		r.reportIfCandidate(record, SessionHandshakeTimeout, "adopted_session_not_activated_before_ttl")
 	})
 	if _, err := r.activate(record); err != nil {
 		return nil, err
@@ -274,13 +298,27 @@ func (r *sessionRegistry) activate(record *sessionRecord) (*sessionRecord, error
 	return displaced, nil
 }
 
+// sealVerdict is beginSeal's locked outcome. Only sealCommitted transfers
+// teardown obligation to the caller; sealStaleEvidence means the session is
+// still healthy and supervision must continue.
+type sealVerdict int
+
+const (
+	sealCommitted sealVerdict = iota
+	sealAlreadyDecided
+	sealStaleEvidence
+)
+
 // beginSeal is the decision write. Every authority reads the same locked
 // value, so returning from this method means every admission/current gate sees
 // the cut. Candidate sessions move directly to closed as required by the
-// canonical four-state model.
-func (r *sessionRegistry) beginSeal(record *sessionRecord, evidence sessionEvidence) bool {
+// canonical four-state model. Candidate-only reasons (handshake timeout,
+// admission rejection) are refused as stale once the session is no longer a
+// candidate: the verdict a reason presupposes is confirmed under the same lock
+// that writes it.
+func (r *sessionRegistry) beginSeal(record *sessionRecord, evidence sessionEvidence) sealVerdict {
 	if r == nil || record == nil || record.registry != r {
-		return false
+		return sealAlreadyDecided
 	}
 	now := time.Now()
 	if record.candidateTimer != nil {
@@ -294,7 +332,14 @@ func (r *sessionRegistry) beginSeal(record *sessionRecord, evidence sessionEvide
 	value := r.live[record.generation]
 	if value == nil || value.state == SessionClosing || value.state == SessionClosed {
 		r.mu.Unlock()
-		return false
+		return sealAlreadyDecided
+	}
+	if candidateOnlyReason(evidence.reason) && value.state != SessionCandidate {
+		r.mu.Unlock()
+		r.logger.Info("link.session_stale_candidate_evidence",
+			"generation", record.generation, "key", record.key,
+			"reason", evidence.reason, "detail", evidence.detail)
+		return sealStaleEvidence
 	}
 	value.reason = evidence.reason
 	value.detail = evidence.detail
@@ -313,7 +358,11 @@ func (r *sessionRegistry) beginSeal(record *sessionRecord, evidence sessionEvide
 		"generation", record.generation, "key", record.key,
 		"state", state, "reason", evidence.reason,
 		"detail", evidence.detail, "error", evidence.err, "at", now)
-	return true
+	return sealCommitted
+}
+
+func candidateOnlyReason(reason SessionEndReason) bool {
+	return reason == SessionHandshakeTimeout || reason == SessionAdmissionRejected
 }
 
 func validSessionEndReason(reason SessionEndReason) bool {

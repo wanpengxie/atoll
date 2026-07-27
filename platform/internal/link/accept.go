@@ -326,6 +326,7 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 		case ctrlPlanPull:
 			frame, err := decodeControl(payload)
 			if err != nil || frame.PlanPull == nil {
+				record.report(SessionProtocolViolation, "malformed_plan_pull", err)
 				return
 			}
 			requestID := frame.RequestID
@@ -353,50 +354,62 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 			})
 		case ctrlAllocReply:
 			frame, err := decodeStorageControl(payload)
-			if err == nil && frame.AllocReply != nil {
-				a.pendingAlloc.deliver(frame.AllocReply.RequestID, *frame.AllocReply)
+			if err != nil || frame.AllocReply == nil {
+				record.report(SessionProtocolViolation, "malformed_alloc_reply", err)
+				return
 			}
+			a.pendingAlloc.deliver(frame.AllocReply.RequestID, *frame.AllocReply)
 		case ctrlReclaimReply:
 			frame, err := decodeStorageControl(payload)
-			if err == nil && frame.ReclaimReply != nil {
-				a.pendingReclaim.deliver(frame.ReclaimReply.RequestID, *frame.ReclaimReply)
+			if err != nil || frame.ReclaimReply == nil {
+				record.report(SessionProtocolViolation, "malformed_reclaim_reply", err)
+				return
 			}
+			a.pendingReclaim.deliver(frame.ReclaimReply.RequestID, *frame.ReclaimReply)
 		case ctrlCommitted:
 			frame, err := decodeStorageControl(payload)
-			if err == nil && frame.Committed != nil {
-				request := *frame.Committed
-				lc.submitControlTask(
-					func() { a.handleCommitted(reqCtx, lc, daemonID, &request) },
-					func() { a.sendCommittedBusy(lc, request.RequestID) },
-				)
+			if err != nil || frame.Committed == nil {
+				record.report(SessionProtocolViolation, "malformed_committed", err)
+				return
 			}
+			request := *frame.Committed
+			lc.submitControlTask(
+				func() { a.handleCommitted(reqCtx, lc, daemonID, &request) },
+				func() { a.sendCommittedBusy(lc, request.RequestID) },
+			)
 		case ctrlReclaimAck:
 			frame, err := decodeStorageControl(payload)
-			if err == nil && frame.ReclaimAck != nil {
-				request := *frame.ReclaimAck
-				lc.submitControlTask(
-					func() { a.handleReclaimAck(reqCtx, lc, daemonID, &request) },
-					func() { a.sendReclaimAckBusy(lc, request.RequestID) },
-				)
+			if err != nil || frame.ReclaimAck == nil {
+				record.report(SessionProtocolViolation, "malformed_reclaim_ack", err)
+				return
 			}
+			request := *frame.ReclaimAck
+			lc.submitControlTask(
+				func() { a.handleReclaimAck(reqCtx, lc, daemonID, &request) },
+				func() { a.sendReclaimAckBusy(lc, request.RequestID) },
+			)
 		case ctrlReconcilePull:
 			frame, err := decodeStorageControl(payload)
-			if err == nil && frame.ReconcilePull != nil {
-				request := *frame.ReconcilePull
-				lc.submitControlTask(
-					func() { a.handleReconcilePull(reqCtx, lc, daemonID, &request) },
-					func() { a.sendReconcileBusy(lc, request.RequestID) },
-				)
+			if err != nil || frame.ReconcilePull == nil {
+				record.report(SessionProtocolViolation, "malformed_reconcile_pull", err)
+				return
 			}
+			request := *frame.ReconcilePull
+			lc.submitControlTask(
+				func() { a.handleReconcilePull(reqCtx, lc, daemonID, &request) },
+				func() { a.sendReconcileBusy(lc, request.RequestID) },
+			)
 		case ctrlResolveCoord:
 			frame, err := decodeLaneControl(payload)
-			if err == nil && frame.ResolveCoord != nil {
-				reply := a.handleResolveCoord(daemonID, frame.ResolveCoord)
-				raw, _ := encodeLaneControl(laneControlFrame{
-					Kind: ctrlResolveCoordReply, ResolveCoordReply: &reply,
-				})
-				_ = lc.sendControl(raw)
+			if err != nil || frame.ResolveCoord == nil {
+				record.report(SessionProtocolViolation, "malformed_resolve_coord", err)
+				return
 			}
+			reply := a.handleResolveCoord(daemonID, frame.ResolveCoord)
+			raw, _ := encodeLaneControl(laneControlFrame{
+				Kind: ctrlResolveCoordReply, ResolveCoordReply: &reply,
+			})
+			_ = lc.sendControl(raw)
 		}
 	}
 
@@ -433,15 +446,37 @@ func (a *Acceptor) runLink(reqCtx context.Context, ws *websocket.Conn, daemonID 
 	record.setHandle(handle)
 	lc.start()
 
-	var evidence sessionEvidence
-	select {
-	case <-a.ctx.Done():
-		evidence = sessionEvidence{reason: SessionRevoked, detail: "acceptor_shutdown"}
-	case evidence = <-record.death:
-	case <-lc.closed():
-		evidence = sessionEvidence{reason: SessionCarrierLost, detail: "carrier_closed"}
+	for {
+		var evidence sessionEvidence
+		select {
+		case <-a.ctx.Done():
+			evidence = preferReported(record, sessionEvidence{
+				reason: SessionRevoked, detail: "acceptor_shutdown",
+			})
+		case evidence = <-record.death:
+		case <-lc.closed():
+			evidence = preferReported(record, sessionEvidence{
+				reason: SessionCarrierLost, detail: "carrier_closed",
+			})
+		}
+		if a.sealSession(record, physical, lc, evidence) {
+			return
+		}
+		// Stale candidate-only evidence was refused by the locked decision
+		// write; the session is still healthy, keep supervising.
 	}
-	a.sealSession(record, physical, lc, evidence)
+}
+
+// preferReported drains a pending reported evidence ahead of the generic
+// fallback: when a precise reason and its physical consequence (carrier
+// close) race into the select, the precise reason must win.
+func preferReported(record *sessionRecord, fallback sessionEvidence) sessionEvidence {
+	select {
+	case evidence := <-record.death:
+		return evidence
+	default:
+		return fallback
+	}
 }
 
 func (a *Acceptor) logLateReject(record *sessionRecord, gate string) {
@@ -451,14 +486,19 @@ func (a *Acceptor) logLateReject(record *sessionRecord, gate string) {
 		"gate", gate, "rejected", count)
 }
 
+// sealSession returns false only when the decision write refused the evidence
+// as stale, meaning the session stays alive and supervision must continue.
 func (a *Acceptor) sealSession(
 	record *sessionRecord,
 	physical *AuthenticatedLinkSession,
 	lc *linkSession,
 	evidence sessionEvidence,
-) {
-	if !a.sessions.beginSeal(record, evidence) {
-		return
+) bool {
+	switch a.sessions.beginSeal(record, evidence) {
+	case sealStaleEvidence:
+		return false
+	case sealAlreadyDecided:
+		return true
 	}
 	start := time.Now()
 	joinedTasks, abandoned := lc.drainControlTasks(defaultSettlementWindow)
@@ -482,10 +522,11 @@ func (a *Acceptor) sealSession(
 			"generation", record.generation, "key", record.key)
 	}
 	a.sessions.completeSeal(record, abandoned)
+	return true
 }
 
 func (a *Acceptor) probeSession(record *sessionRecord, lc *linkSession) {
-	ticker := time.NewTicker(defaultProbeInterval)
+	ticker := time.NewTicker(a.sessions.probeInterval)
 	defer ticker.Stop()
 	for {
 		select {
@@ -496,14 +537,14 @@ func (a *Acceptor) probeSession(record *sessionRecord, lc *linkSession) {
 			if !active {
 				return
 			}
-			if time.Since(lastSeen) >= defaultLivenessTTL {
+			if time.Since(lastSeen) >= a.sessions.livenessTTL {
 				record.report(SessionLivenessExpired, "control_probe_ttl_expired", nil)
 				return
 			}
 			a.logger.Debug("link.session_liveness",
 				"generation", record.generation, "key", record.key,
 				"since_last_seen", time.Since(lastSeen),
-				"ttl_remaining", defaultLivenessTTL-time.Since(lastSeen))
+				"ttl_remaining", a.sessions.livenessTTL-time.Since(lastSeen))
 			nonce, err := mintSessionGeneration()
 			if err != nil {
 				record.report(SessionLocalFault, "probe_nonce_mint_failed", err)
