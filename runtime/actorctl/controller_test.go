@@ -142,6 +142,24 @@ func currentAttempt(t *testing.T, c *Controller, id actor.ActorID) string {
 
 // --- fork replay table -------------------------------------------------------
 
+// Humans are born by admission alone: a fork has no principal source, so a
+// human child would be a member the human roster cannot recognize — refused
+// at the mint point, mirroring the durable side's "human ⇔ principal" weld.
+func TestForkRefusesAHumanChild(t *testing.T) {
+	ctx := context.Background()
+	controller, _, parent := seedParent(t)
+
+	_, err := controller.Fork(ctx, ForkRequest{
+		CallerActorID: parent,
+		CallerAttempt: attemptKeyOf(currentAttempt(t, controller, parent)),
+		RequestID:     "req-human",
+		Spec:          actorcaps.ForkSpec{Kind: actor.KindHuman, Class: "whatever"},
+	})
+	if !errors.Is(err, ErrForkInvalid) {
+		t.Fatalf("err=%v, want ErrForkInvalid", err)
+	}
+}
+
 // The verdict is the door's first step: a stale term is refused before the
 // replay table is consulted, while the current term retrying the same
 // RequestID still lands on the replay row.

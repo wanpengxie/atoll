@@ -228,7 +228,10 @@ func TestActorAuthoritySchedulerHomeIsNotActorIncarnation(t *testing.T) {
 		"current" + "ResourceAccess",
 		"current" + "Schedule",
 	}
-	for _, root := range []string{"../app", "../lib", "../platform", "../runtime"} {
+	for _, root := range []string{
+		"../app", "../cmd", "../drivers", "../lib",
+		"../platform", "../registry", "../runtime",
+	} {
 		paths, err := productionFiles(root)
 		if err != nil {
 			t.Fatal(err)
@@ -285,7 +288,10 @@ func TestActorIdentityStorageHomeIsPhysicallyConfined(t *testing.T) {
 		t.Fatalf("actor record store escaped its assembly point: %v", escapedImports)
 	}
 
-	for _, root := range []string{"../app", "../lib", "../platform", "../runtime"} {
+	for _, root := range []string{
+		"../app", "../cmd", "../drivers", "../lib",
+		"../platform", "../registry", "../runtime",
+	} {
 		paths, err := productionFiles(root)
 		if err != nil {
 			t.Fatal(err)
@@ -476,6 +482,7 @@ func TestActorAuthorityRemoteIngressIsTheOnlyRemoteDoor(t *testing.T) {
 	for _, required := range []string{
 		"AdmitIdentity(ctx, author)",
 		"MintAdmitted(admission)",
+		`FireRejected{Reason: "author_not_member"`,
 	} {
 		if !strings.Contains(scheduler, required) {
 			t.Errorf("timer fire lacks admitted collaboration seam %q", required)

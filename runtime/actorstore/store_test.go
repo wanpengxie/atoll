@@ -56,22 +56,40 @@ func TestInsertReplaysBySemanticKey(t *testing.T) {
 }
 
 // Records handed out are always deep copies: a caller cannot reach into the
-// store through a retained Config slice.
+// store through a retained Config slice. The probe runs on the ENTRY path —
+// the durable path re-deserializes from SQLite on every read and would pass
+// even without any Clone, so only the in-memory table can tell a real copy
+// from an alias (removing the store's Clone calls must turn this test red).
 func TestRecordHandoffIsAlwaysACopy(t *testing.T) {
 	ctx := context.Background()
 	store, _ := openStore(t)
 
-	record, err := store.Insert(ctx, declaredDraft("decl:a"))
-	if err != nil {
+	config := []byte(`{"n":1}`)
+	installed := storespec.ActorRecord{
+		ID: "agent:parent/copy-probe", Kind: actor.KindAgent, CreatedAt: 1,
+		Definition: storespec.ActorDefinition{Class: "worker", Config: config},
+		Placement:  storespec.NewServerPlacement(),
+	}
+	store.InstallEntry(installed)
+
+	// Mutating the caller's retained slice must not reach the table.
+	config[2] = 'X'
+	got, ok, err := store.Lookup(ctx, installed.ID)
+	if err != nil || !ok {
 		t.Fatal(err)
 	}
-	record.Definition.Config[2] = 'X'
-	again, ok, err := store.Lookup(ctx, record.ID)
+	if string(got.Definition.Config) != `{"n":1}` {
+		t.Fatalf("entry table aliased the installer's slice: %s", got.Definition.Config)
+	}
+
+	// Mutating a handed-out record must not reach the table either.
+	got.Definition.Config[2] = 'Y'
+	again, ok, err := store.Lookup(ctx, installed.ID)
 	if err != nil || !ok {
 		t.Fatal(err)
 	}
 	if string(again.Definition.Config) != `{"n":1}` {
-		t.Fatalf("store config was mutated through a handed-out slice: %s", again.Definition.Config)
+		t.Fatalf("lookup handed out an alias of the entry table: %s", again.Definition.Config)
 	}
 }
 

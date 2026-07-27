@@ -225,13 +225,23 @@ func (e *opEntry) Execute(
 				Code: string(channel.ErrCodeBadPayload), Detail: err.Error(),
 			}
 		}
-		// A setting: last write wins, no dedup ceremony.
-		if err := e.home.cs.Routing.SetDefaultAgent(ctx, payload.InstanceID); err != nil {
-			if errors.Is(err, storespec.ErrMemberInactive) {
+		// A setting: last write wins, no dedup ceremony. The member verdict is
+		// door policy (§0.4) asked of the value ledger — the ONE membership
+		// authority, so entry-table members (fork children) qualify too; the
+		// store write below is purely mechanical and never asks who is a
+		// member.
+		if payload.InstanceID != "" {
+			member, err := e.home.controller.IsActive(ctx, payload.InstanceID)
+			if err != nil {
+				return nil, asOperateError(err)
+			}
+			if !member {
 				return nil, &sysactor.OperateError{
 					Code: string(channel.ErrCodeMemberInactive), Detail: "target is not an active member",
 				}
 			}
+		}
+		if err := e.home.cs.Routing.SetDefaultAgent(ctx, payload.InstanceID); err != nil {
 			return nil, asOperateError(err)
 		}
 		e.home.announceAudit(ctx, "set_default_agent", map[string]any{

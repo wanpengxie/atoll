@@ -139,8 +139,13 @@ func normalizeFork(
 	spec actorcaps.ForkSpec,
 	parent storespec.ActorRecord,
 ) (actorcaps.ForkSpec, storespec.Placement, error) {
+	// KindHuman is refused at the mint point for the same reason the durable
+	// side's validateDraft welds "human ⇔ principal": a fork has no principal
+	// source, so a human child would be a member the human roster cannot
+	// recognize. Humans are born by admission alone.
 	if _, ok := actor.ParseKind(string(spec.Kind)); !ok ||
 		spec.Kind == actor.KindSystem ||
+		spec.Kind == actor.KindHuman ||
 		spec.Class == "" {
 		return actorcaps.ForkSpec{}, storespec.Placement{}, ErrForkInvalid
 	}

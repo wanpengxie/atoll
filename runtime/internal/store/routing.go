@@ -21,29 +21,18 @@ func (r *actorRegistry) DefaultAgent(ctx context.Context) (actor.ActorID, bool, 
 	return actor.ActorID(id.String), true, nil
 }
 
+// SetDefaultAgent is a purely mechanical setting write: last write wins,
+// dangling pointers are legal lazy configuration (§5.7). The member verdict is
+// door policy asked of the value ledger — the store never asks who is a
+// member (asking actor_registry here would make the durable table a second
+// membership authority and refuse entry-table members).
 func (r *actorRegistry) SetDefaultAgent(ctx context.Context, id actor.ActorID) error {
-	tx, err := r.db.BeginTx(ctx, nil)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	if id != "" {
-		var active int
-		if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM actor_registry WHERE actor_id=? AND deregistered_at IS NULL`, string(id)).Scan(&active); err != nil {
-			return err
-		}
-		if active != 1 {
-			return storespec.ErrMemberInactive
-		}
-	}
 	var value any
 	if id != "" {
 		value = string(id)
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO channel_routing(id,default_agent) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET default_agent=excluded.default_agent`, value); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err := r.db.ExecContext(ctx, `INSERT INTO channel_routing(id,default_agent) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET default_agent=excluded.default_agent`, value)
+	return err
 }
 
 var _ storespec.ChannelRouting = (*actorRegistry)(nil)
