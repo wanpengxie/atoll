@@ -71,6 +71,7 @@ type ActorStreamOpener func(context.Context, actor.ActorID, actorhost.AttemptKey
 // not part of Binding identity.
 type AuthenticatedLinkSessionConfig struct {
 	Peer            actorhost.ExecutionDomain
+	Authority       SessionAuthority
 	OpenActorStream ActorStreamOpener
 	CloseTransport  func() error
 	TransportDone   <-chan struct{}
@@ -79,14 +80,14 @@ type AuthenticatedLinkSessionConfig struct {
 // AuthenticatedLinkSession owns one physical connection and every exact child
 // Binding/ActorStream it creates.
 type AuthenticatedLinkSession struct {
-	peer   actorhost.ExecutionDomain
-	opener ActorStreamOpener
+	peer      actorhost.ExecutionDomain
+	authority SessionAuthority
+	opener    ActorStreamOpener
 
 	closeTransport func() error
 	transportDone  <-chan struct{}
 
 	mu       sync.Mutex
-	sealed   bool
 	bindings map[*Binding]struct{}
 	streams  map[*ActorStream]struct{}
 	openWG   sync.WaitGroup
@@ -101,11 +102,12 @@ type AuthenticatedLinkSession struct {
 // NewAuthenticatedLinkSession constructs a physical owner. It does not imply
 // that any actor route is present.
 func NewAuthenticatedLinkSession(cfg AuthenticatedLinkSessionConfig) (*AuthenticatedLinkSession, error) {
-	if cfg.Peer == "" {
+	if cfg.Peer == "" || cfg.Authority.generation == "" || cfg.Authority.key == "" {
 		return nil, ErrInvalidPhysicalChild
 	}
 	session := &AuthenticatedLinkSession{
 		peer:           cfg.Peer,
+		authority:      cfg.Authority,
 		opener:         cfg.OpenActorStream,
 		closeTransport: cfg.CloseTransport,
 		transportDone:  cfg.TransportDone,
@@ -122,6 +124,7 @@ func NewAuthenticatedLinkSession(cfg AuthenticatedLinkSessionConfig) (*Authentic
 			}
 		}()
 	}
+	cfg.Authority.registerPhysicalDone(session.done)
 	return session, nil
 }
 
@@ -131,6 +134,24 @@ func (s *AuthenticatedLinkSession) Peer() actorhost.ExecutionDomain {
 		return ""
 	}
 	return s.peer
+}
+
+func (s *AuthenticatedLinkSession) Generation() SessionGeneration {
+	if s == nil {
+		return ""
+	}
+	return s.authority.generation
+}
+
+func (s *AuthenticatedLinkSession) Key() string {
+	if s == nil {
+		return ""
+	}
+	return s.authority.key
+}
+
+func (s *AuthenticatedLinkSession) IsCurrent() bool {
+	return s != nil && s.authority.isCurrent()
 }
 
 // Done closes after admission is sealed, all in-flight opens have resolved,
@@ -173,11 +194,10 @@ func (s *AuthenticatedLinkSession) OpenActorStream(
 	if _, err := actorhost.ParseAttemptKey(string(key)); err != nil {
 		return nil, err
 	}
-	s.mu.Lock()
-	if s.sealed {
-		s.mu.Unlock()
+	if !s.authority.admits() {
 		return nil, ErrPhysicalSessionClosed
 	}
+	s.mu.Lock()
 	s.openWG.Add(1)
 	s.mu.Unlock()
 	defer s.openWG.Done()
@@ -199,14 +219,13 @@ func (s *AuthenticatedLinkSession) OpenActorStream(
 		return nil, ErrInvalidPhysicalChild
 	}
 	stream := newActorStream(s, resource)
-	s.mu.Lock()
-	if s.sealed {
-		s.mu.Unlock()
+	if !s.authority.admits() {
 		stream.start()
 		_ = stream.Close()
 		<-stream.Done()
 		return nil, ErrPhysicalSessionClosed
 	}
+	s.mu.Lock()
 	s.streams[stream] = struct{}{}
 	s.mu.Unlock()
 	stream.start()
@@ -231,12 +250,11 @@ func (s *AuthenticatedLinkSession) NewBinding(cfg BindingConfig) (*Binding, erro
 		return nil, ErrInvalidPhysicalChild
 	}
 	binding := newBinding(s, cfg)
-	s.mu.Lock()
-	if s.sealed {
-		s.mu.Unlock()
+	if !s.authority.admits() {
 		_ = binding.Close()
 		return nil, ErrPhysicalSessionClosed
 	}
+	s.mu.Lock()
 	s.bindings[binding] = struct{}{}
 	s.mu.Unlock()
 	if cfg.BeforeStart != nil {
@@ -246,16 +264,13 @@ func (s *AuthenticatedLinkSession) NewBinding(cfg BindingConfig) (*Binding, erro
 	return binding, nil
 }
 
-// Close seals child admission, signals the transport, then joins exact
-// children on a session-owned goroutine. It never waits inline.
+// Close collects the carrier and exact children after the owning ledger has
+// sealed admission. It never owns or duplicates the lifecycle decision.
 func (s *AuthenticatedLinkSession) Close() error {
 	if s == nil {
 		return nil
 	}
 	s.closeOnce.Do(func() {
-		s.mu.Lock()
-		s.sealed = true
-		s.mu.Unlock()
 		if s.closeTransport != nil {
 			closeErr := s.closeTransport()
 			s.errMu.Lock()

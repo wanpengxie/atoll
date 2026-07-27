@@ -24,9 +24,8 @@ import (
 // so no ticker/goroutine is added.
 const laneTransferTTL = 10 * time.Minute
 
-// lanecontrol.go is the HOME half of §5's resource lane: the per-daemon
-// live-link table (boundID → linkSession, for opening a lane substream toward a
-// relay target), the Token-keyed transfer registry (accessdoor.LaneControl's
+// lanecontrol.go is the HOME half of §5's resource lane: target selection reads
+// the session ledger's current index, while the Token-keyed transfer registry (accessdoor.LaneControl's
 // platform-side implementor reaches this via Acceptor.OpenLaneTransfer), the
 // ResolveCoord control-RPC frame pair (daemon-initiated, riding the SAME control
 // substream storagecontrol.go already extends — §4.7's own "fallback 触发时才落
@@ -106,62 +105,16 @@ type laneTransfer struct {
 	mintedAt time.Time
 }
 
-// laneState is the Acceptor's lane bookkeeping, split into its own struct
-// (embedded, not inlined into Acceptor's already-large field list) purely
-// for readability — same lifetime and locking granularity as the rest of
-// Acceptor's per-link tables.
-//
-// links maps each attached daemon's confirmed id (boundID) to its live link
-// session, so a redeem arriving on the REQUESTER's link (handleLaneRedeem) can
-// open a fresh lane substream toward the TARGET daemon's link (the relay). It
-// is keyed by the authenticated bound daemon id because transfer target and
-// requester ids use that same authority. One
-// entry per daemon (most-recent link wins an overlapping reconnect); registered
-// at attach success, deregistered pointer-guarded on link teardown.
+// laneState contains transfer capabilities only. Target-session routing reads
+// the session ledger's current index directly; there is deliberately no lane
+// link table.
 type laneState struct {
 	mu        sync.Mutex
-	links     map[string]*linkSession // boundID -> live link, for opening lane substreams toward a target
 	transfers map[string]laneTransfer // token -> pending transfer
 }
 
 func newLaneState() *laneState {
-	return &laneState{links: map[string]*linkSession{}, transfers: map[string]laneTransfer{}}
-}
-
-// registerLaneLink records daemonID's live link for lane relay (called at
-// attach success, once boundID is known). A reconnect overwrites the entry with
-// the newer link — the most recent connection is the right relay target.
-func (a *Acceptor) registerLaneLink(daemonID string, lc *linkSession) {
-	if daemonID == "" {
-		return
-	}
-	a.lane.mu.Lock()
-	a.lane.links[daemonID] = lc
-	a.lane.mu.Unlock()
-}
-
-// deregisterLaneLink drops daemonID's link IF it is still this exact one
-// (pointer-guarded: an overlapping reconnect already replaced it with a newer
-// link, whose teardown alone should evict it — a stale link's exit must not rip
-// out its successor's registration).
-func (a *Acceptor) deregisterLaneLink(daemonID string, lc *linkSession) {
-	if daemonID == "" {
-		return
-	}
-	a.lane.mu.Lock()
-	if a.lane.links[daemonID] == lc {
-		delete(a.lane.links, daemonID)
-	}
-	a.lane.mu.Unlock()
-}
-
-// laneLink returns daemonID's most-recent live link, or nil if that daemon is
-// not currently attached (a redeem toward it then fails honestly, never a
-// fabricated stream).
-func (a *Acceptor) laneLink(daemonID string) *linkSession {
-	a.lane.mu.Lock()
-	defer a.lane.mu.Unlock()
-	return a.lane.links[daemonID]
+	return &laneState{transfers: map[string]laneTransfer{}}
 }
 
 // handleLaneRedeem answers one redeem stream — dispatched by the accept loop
@@ -195,8 +148,13 @@ func (a *Acceptor) handleLaneRedeem(daemonID string, conn net.Conn) {
 		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "unknown or mismatched transfer token"})
 		return
 	}
-	targetLC := a.laneLink(tr.targetDaemonID)
-	if targetLC == nil {
+	targetRecord := a.sessions.currentRecord(tr.targetDaemonID)
+	if targetRecord == nil {
+		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: fmt.Sprintf("target daemon %q has no live link", tr.targetDaemonID)})
+		return
+	}
+	handle := targetRecord.linkHandle()
+	if handle == nil || handle.openLane == nil {
 		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: fmt.Sprintf("target daemon %q has no live link", tr.targetDaemonID)})
 		return
 	}
@@ -204,7 +162,7 @@ func (a *Acceptor) handleLaneRedeem(daemonID string, conn net.Conn) {
 	// laneRedeemHeader below rides right after it, exactly as the requester's own
 	// redeem substream carried its header after its streamHeader.
 	openCtx, cancel := context.WithTimeout(a.ctx, streamWriteBudget)
-	targetConn, err := targetLC.openLane(openCtx)
+	targetConn, err := handle.openLane(openCtx)
 	cancel()
 	if err != nil {
 		_ = writeLaneJSON(conn, laneAck{OK: false, Reason: "open target lane stream: " + err.Error()})

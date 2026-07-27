@@ -55,11 +55,9 @@ type wsByteStream struct {
 
 // newWSByteStream wraps ws as a byte-stream io.ReadWriteCloser. This is the
 // RAW carrier yamux itself reads/writes — it carries yamux's own internal
-// keepalive ping/pong alongside every substream's bytes, indistinguishably,
-// so it carries NO liveness hook: the Lease (lease.go) refreshes from
-// application-frame receipt at linksession.go's dispatch (per-substream), one
-// layer above this adapter, specifically so yamux's keepalive traffic through
-// here never counts as liveness on its own.
+// keepalive ping/pong alongside every substream's bytes, indistinguishably.
+// It intentionally carries no session-liveness hook: only a matched probe reply
+// read from the control spine refreshes the session ledger.
 func newWSByteStream(ws *websocket.Conn) *wsByteStream {
 	return &wsByteStream{ws: ws}
 }

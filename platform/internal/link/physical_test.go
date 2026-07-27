@@ -119,8 +119,17 @@ func physicalSession(t *testing.T, opener ActorStreamOpener) *AuthenticatedLinkS
 			}, nil
 		}
 	}
+	registry := newSessionRegistry(nil)
+	record, err := registry.mint("peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.activate(record); err != nil {
+		t.Fatal(err)
+	}
 	session, err := NewAuthenticatedLinkSession(AuthenticatedLinkSessionConfig{
 		Peer:            "peer",
+		Authority:       authorityPair(registry, record),
 		OpenActorStream: opener,
 	})
 	if err != nil {
@@ -195,7 +204,7 @@ func TestBindingReaderSelfDownNeverJoinsItself(t *testing.T) {
 	<-session.Done()
 }
 
-func TestSessionCloseSealsSnapshotsAndJoinsChildrenOutsideRegistryLock(t *testing.T) {
+func TestLedgerSealThenPhysicalCloseJoinsChildrenOutsideRegistryLock(t *testing.T) {
 	t.Parallel()
 	var session *AuthenticatedLinkSession
 	streamClosed := make(chan struct{})
@@ -213,7 +222,20 @@ func TestSessionCloseSealsSnapshotsAndJoinsChildrenOutsideRegistryLock(t *testin
 			Done: streamClosed,
 		}, nil
 	}
-	session = physicalSession(t, opener)
+	registry := newSessionRegistry(nil)
+	record, err := registry.mint("peer")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := registry.activate(record); err != nil {
+		t.Fatal(err)
+	}
+	session, err = NewAuthenticatedLinkSession(AuthenticatedLinkSessionConfig{
+		Peer: "peer", Authority: authorityPair(registry, record), OpenActorStream: opener,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	stream, err := session.OpenActorStream(t.Context(), "agent:stream", physicalKey(t))
 	if err != nil {
 		t.Fatal(err)
@@ -227,6 +249,9 @@ func TestSessionCloseSealsSnapshotsAndJoinsChildrenOutsideRegistryLock(t *testin
 	})
 	if err != nil {
 		t.Fatal(err)
+	}
+	if !registry.beginSeal(record, sessionEvidence{reason: SessionRevoked}) {
+		t.Fatal("ledger seal did not commit")
 	}
 	if err := session.Close(); err != nil {
 		t.Fatal(err)

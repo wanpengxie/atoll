@@ -258,9 +258,9 @@ func (p *pendingReplies[T]) cancel(id string) {
 // controlRPCTimeout bounds every storage control-RPC round trip on both
 // sides (AllocRequest waiting for AllocReply; the daemon's Committed/
 // ReclaimAck/ReconcilePull waiting for their replies) — a wedged peer must
-// not hang the caller forever. Generous relative to leasePing/leaseTTL
-// (10s/30s) since a real Allocator mkdir or Scrubber reconcile pull may
-// legitimately take longer than a bare control-frame round trip.
+// not hang the caller forever. A real Allocator mkdir or Scrubber reconcile
+// pull may legitimately take longer than a bare control-frame round trip; this
+// operation timeout is independent of the session probe verdict.
 var controlRPCTimeout = 20 * time.Second
 
 // wait blocks for id's reply on ch, honoring ctx, the link's done channel,

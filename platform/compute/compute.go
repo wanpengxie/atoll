@@ -199,9 +199,11 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 	defer closeRuntime()
 
 	planWake := make(chan struct{}, 1)
+	sessionLedger := link.NewRemoteSessionLedger(logger)
 	backoff := redialInitialBackoff
 	for {
 		dialCfg := link.DialConfig{
+			SessionLedger: sessionLedger,
 			PlanChanged: func() {
 				select {
 				case planWake <- struct{}{}:
@@ -242,7 +244,8 @@ func runCompute(ctx context.Context, cfg Config, hooks *computeLifecycleHooks) (
 		}
 
 		session, err := link.NewAuthenticatedLinkSession(link.AuthenticatedLinkSessionConfig{
-			Peer: actorhost.ExecutionDomain("server"),
+			Peer:      actorhost.ExecutionDomain("server"),
+			Authority: dialer.Authority(),
 			OpenActorStream: func(
 				openCtx context.Context,
 				id actor.ActorID,

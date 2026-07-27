@@ -26,14 +26,15 @@ type AttachRequest struct {
 // AttachReply is the home's stream-0 response: the assigned channel and the
 // accept verdict.
 type AttachReply struct {
-	ChannelID channel.ID `json:"channel_id"`
-	Accepted  bool       `json:"accepted"`
-	Reason    string     `json:"reason,omitempty"`
+	ChannelID  channel.ID        `json:"channel_id"`
+	Generation SessionGeneration `json:"generation"`
+	Accepted   bool              `json:"accepted"`
+	Reason     string            `json:"reason,omitempty"`
 	// DaemonID is the authenticated compute id the app bound to this link before
 	// handing it to Home. The peer never supplies an identity claim on the link
 	// protocol; this reply lets it key local resource ownership by the server's
 	// authoritative identity.
-	DaemonID string `json:"daemon_id,omitempty"`
+	DaemonID string `json:"daemon_id"`
 }
 
 // controlKind tags one stream-0 control payload (the link control plane is
@@ -47,9 +48,19 @@ const (
 	ctrlPlanPull    controlKind = "plan_pull"
 	ctrlPlanReply   controlKind = "plan_reply"
 	ctrlPlanPoke    controlKind = "plan_poke"
+	ctrlProbe       controlKind = "session_probe"
+	ctrlProbeReply  controlKind = "session_probe_reply"
 )
 
 type PlanPull struct{}
+
+type Probe struct {
+	Nonce string `json:"nonce"`
+}
+
+type ProbeReply struct {
+	Nonce string `json:"nonce"`
+}
 
 type PlanReply struct {
 	Actors []platform.PlanActor `json:"actors"`
@@ -80,6 +91,8 @@ type controlFrame struct {
 	AttachReply *AttachReply   `json:"attach_reply,omitempty"`
 	PlanPull    *PlanPull      `json:"plan_pull,omitempty"`
 	PlanReply   *PlanReply     `json:"plan_reply,omitempty"`
+	Probe       *Probe         `json:"probe,omitempty"`
+	ProbeReply  *ProbeReply    `json:"probe_reply,omitempty"`
 }
 
 func encodeControl(f controlFrame) ([]byte, error) { return json.Marshal(f) }

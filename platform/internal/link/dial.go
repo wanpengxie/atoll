@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -28,6 +29,8 @@ type Dialer struct {
 	lc        *linkSession
 	channelID string
 	logger    *slog.Logger
+	sessions  *sessionRegistry
+	session   *sessionRecord
 
 	// daemonID is the home-confirmed compute id (AttachReply.DaemonID), updated
 	// under mu on every accepted attach reply. This is the one value per-channel resource root paths,
@@ -95,6 +98,16 @@ type DialConfig struct {
 	PlanChanged     func()
 	AllocHandler    func(AllocRequest) AllocReply
 	LocalFileOpener LocalFileOpener
+	SessionLedger   *RemoteSessionLedger
+}
+
+// RemoteSessionLedger is one daemon process's in-memory session truth. It is
+// shared across reconnect attempts; Dial is the only operation that can adopt
+// a home-minted generation into it.
+type RemoteSessionLedger struct{ registry *sessionRegistry }
+
+func NewRemoteSessionLedger(logger *slog.Logger) *RemoteSessionLedger {
+	return &RemoteSessionLedger{registry: newSessionRegistry(logger)}
 }
 
 // Dial dials the home, sends the stream-0 attach, and waits for attach_reply.
@@ -107,9 +120,14 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 	if err != nil {
 		return nil, err
 	}
+	sessions := newSessionRegistry(logger)
+	if cfg.SessionLedger != nil && cfg.SessionLedger.registry != nil {
+		sessions = cfg.SessionLedger.registry
+	}
 	d := &Dialer{
 		channelID:           "",
 		logger:              logger,
+		sessions:            sessions,
 		pendingCommitted:    newPendingReplies[CommittedReply](),
 		pendingReclaim:      newPendingReplies[ReclaimAckReply](),
 		pendingReconcile:    newPendingReplies[ReconcilePullReply](),
@@ -134,14 +152,22 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 			if err != nil || sf.AllocRequest == nil {
 				return
 			}
-			d.handleAllocRequest(*sf.AllocRequest)
+			req := *sf.AllocRequest
+			d.lc.submitControlTask(
+				func() { d.handleAllocRequest(req) },
+				func() { d.sendAllocBusy(req.RequestID) },
+			)
 			return
 		case ctrlReclaimRequest:
 			sf, err := decodeStorageControl(payload)
 			if err != nil || sf.ReclaimRequest == nil {
 				return
 			}
-			d.handleReclaimRequest(*sf.ReclaimRequest)
+			req := *sf.ReclaimRequest
+			d.lc.submitControlTask(
+				func() { d.handleReclaimRequest(req) },
+				func() { d.sendReclaimBusy(req.RequestID) },
+			)
 			return
 		case ctrlCommittedReply:
 			sf, err := decodeStorageControl(payload)
@@ -189,8 +215,25 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 		// non-empty DaemonID (Acceptor.handleAttach stamps the authenticated id
 		// unconditionally); a rejected one may not, so only update on Accepted
 		// to avoid clobbering a previously-confirmed id with an empty string.
-		if cf.AttachReply.Accepted && cf.AttachReply.DaemonID != "" {
+		if cf.AttachReply.Accepted {
+			if cf.AttachReply.DaemonID == "" {
+				d.mu.Unlock()
+				d.onSessionEvidence(SessionProtocolViolation, "accepted_attach_missing_daemon_id", nil)
+				return
+			}
+			if d.session != nil {
+				d.mu.Unlock()
+				d.onSessionEvidence(SessionProtocolViolation, "duplicate_accepted_attach_reply", nil)
+				return
+			}
 			d.daemonID = cf.AttachReply.DaemonID
+			record, err := d.sessions.adopt(cf.AttachReply.Generation, cf.AttachReply.DaemonID)
+			if err != nil {
+				d.mu.Unlock()
+				d.onSessionEvidence(SessionProtocolViolation, "invalid_attach_generation", err)
+				return
+			}
+			d.session = record
 		}
 		d.mu.Unlock()
 		if cf.RequestID == "" {
@@ -213,7 +256,10 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 	// session's own accept + control read loops run for the link's whole life;
 	// the per-actor ipc READ loops (which invoke dispatch) start at Start(),
 	// after every cell is installed, so a buffered deliver just waits for Start.
-	ls, err := dialLinkSession(ctx, ws, onControl, onLane, logger)
+	ls, err := dialLinkSession(
+		ctx, ws, onControl, onLane, nil,
+		d.onSessionEvidence, logger,
+	)
 	if err != nil {
 		_ = ws.Close()
 		return nil, err
@@ -223,8 +269,8 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 	// onControl (which reaches back through d.lc) can never fire against a nil lc.
 	d.lc.start()
 
-	// Fold session death into d.done — the single link-death signal every waiter
-	// (pending RPCs, pingLoop, the attach wait below) selects on.
+	// Fold carrier collection into d.done, the single physical signal selected
+	// by pending RPCs and the attach wait below.
 	go func() {
 		<-d.lc.closed()
 		close(d.done)
@@ -238,32 +284,31 @@ func Dial(ctx context.Context, serverURL string, cfg DialConfig, logger *slog.Lo
 	})
 	if err != nil {
 		d.pendingAttach.cancel(attachID)
-		_ = d.lc.Close()
+		_ = d.Close()
 		return nil, err
 	}
 	if err := d.lc.sendControl(raw); err != nil {
 		d.pendingAttach.cancel(attachID)
-		_ = d.lc.Close()
+		_ = d.Close()
 		return nil, err
 	}
 
-	// Wait on the correlation channel — ctx and link-death exits unchanged from
-	// the retired bespoke wait (no controlRPCTimeout: the initial attach has no
-	// wall-clock bound by design, matching the prior semantics).
+	// Wait on the correlation channel. The home ledger's candidate TTL is the
+	// authoritative handshake bound; this side also honors caller cancellation.
 	var reply AttachReply
 	select {
 	case reply = <-ch:
 	case <-ctx.Done():
 		d.pendingAttach.cancel(attachID)
-		_ = d.lc.Close()
+		_ = d.Close()
 		return nil, ctx.Err()
 	case <-d.done:
 		d.pendingAttach.cancel(attachID)
-		_ = d.lc.Close()
+		_ = d.Close()
 		return nil, errors.New("link: dial closed before attach reply")
 	}
 	if !reply.Accepted {
-		_ = d.lc.Close()
+		_ = d.Close()
 		reason := "link: attach rejected"
 		if reply.Reason != "" {
 			reason = "link: " + reply.Reason
@@ -312,13 +357,24 @@ func (d *Dialer) DaemonID() string {
 	return d.daemonID
 }
 
+// Authority returns the opaque live credentials installed from the accepted
+// attach reply. The generation is never minted on this side.
+func (d *Dialer) Authority() SessionAuthority {
+	if d == nil {
+		return SessionAuthority{}
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return authorityPair(d.sessions, d.session)
+}
+
 // OpenExactActorStream opens one fresh session-owned stream for an exact
 // daemon Body. It starts the reader immediately: actorhost has already
 // published the Unit before DaemonOutbound is allowed to converge a slot, so
 // inbound delivery cannot race a half-built actor.
 //
-// The stream is deliberately not entered in the legacy by-ActorID table.
-// Object identity is its ownership coordinate; predecessor and successor
+// There is no by-ActorID stream table. Object identity is its ownership
+// coordinate; predecessor and successor
 // streams may overlap until their owning session joins them.
 func (d *Dialer) OpenExactActorStream(
 	ctx context.Context,
@@ -332,11 +388,10 @@ func (d *Dialer) OpenExactActorStream(
 	if _, err := actorhost.ParseAttemptKey(string(key)); err != nil {
 		return ActorStreamResource{}, err
 	}
-	s, finish, err := d.lc.openStream(ctx)
+	s, err := d.lc.openStream(ctx)
 	if err != nil {
 		return ActorStreamResource{}, err
 	}
-	defer finish()
 	codec := ipc.NewCodec(s, s)
 	raw, err := json.Marshal(ipc.HandshakePayload{
 		LeaseID:    string(id),
@@ -532,6 +587,18 @@ func (d *Dialer) handleAllocRequest(req AllocRequest) {
 	_ = d.lc.sendControl(raw)
 }
 
+func (d *Dialer) sendAllocBusy(requestID string) {
+	raw, err := encodeStorageControl(storageControlFrame{
+		Kind: ctrlAllocReply,
+		AllocReply: &AllocReply{
+			RequestID: requestID, OK: false, Reason: "link: control task pool busy",
+		},
+	})
+	if err == nil {
+		_ = d.lc.sendControl(raw)
+	}
+}
+
 // handleReclaimRequest answers one inbound ReclaimRequest (期11 review §2.5
 // #B, the content-less create loser's synchronous coord reclaim) on the same
 // synchronous onControl goroutine handleAllocRequest uses — a local
@@ -559,6 +626,18 @@ func (d *Dialer) handleReclaimRequest(req ReclaimRequest) {
 		return
 	}
 	_ = d.lc.sendControl(raw)
+}
+
+func (d *Dialer) sendReclaimBusy(requestID string) {
+	raw, err := encodeStorageControl(storageControlFrame{
+		Kind: ctrlReclaimReply,
+		ReclaimReply: &ReclaimReply{
+			RequestID: requestID, OK: false, Reason: "link: control task pool busy",
+		},
+	})
+	if err == nil {
+		_ = d.lc.sendControl(raw)
+	}
 }
 
 // SendCommitted is the daemon's send-half of §4.7's second frame (create-
@@ -776,7 +855,9 @@ func (d *Dialer) redeemFileRoute(ctx context.Context, route accessdoor.FileRoute
 	// this link's own session (openLane writes the streamHeader{lane}); the
 	// home's accept loop dispatches it to handleLaneRedeem. No nested yamux
 	// session to guard — d.lc is live for any live Dialer.
-	conn, err := d.lc.openLane(ctx)
+	openCtx, cancelOpen := context.WithTimeout(context.Background(), streamWriteBudget)
+	conn, err := d.lc.openLane(openCtx)
+	cancelOpen()
 	if err != nil {
 		return accessdoor.FileAccess{}, fmt.Errorf("link: open lane redeem stream: %w", err)
 	}
@@ -883,16 +964,47 @@ func (d *Dialer) signalPlanChanged() {
 	}
 }
 
-// Done returns a channel closed when the link tears down (peer gone, lease
-// expiry on the home side, or Close).
+// Done returns a channel closed when the carrier is collected.
 func (d *Dialer) Done() <-chan struct{} { return d.done }
 
-// Close signals only the transport. Exact actor children are owned and joined
-// by AuthenticatedLinkSession; no by-ActorID sweep or semantic detach protocol
-// exists here.
-func (d *Dialer) Close() error {
+func (d *Dialer) onSessionEvidence(reason SessionEndReason, detail string, err error) {
+	if d == nil {
+		return
+	}
 	d.closeOnce.Do(func() {
-		_ = d.lc.Close()
+		d.mu.Lock()
+		record := d.session
+		d.mu.Unlock()
+		evidence := sessionEvidence{reason: reason, detail: detail, err: err}
+		if record != nil {
+			d.sessions.beginSeal(record, evidence)
+		}
+		go func() {
+			var abandoned int64
+			if d.lc != nil {
+				_, abandoned = d.lc.drainControlTasks(defaultSettlementWindow)
+				_ = d.lc.closeCarrier()
+				if !d.lc.waitWorkers(defaultSessionJoinWindow) {
+					abandoned++
+				}
+			}
+			if record != nil {
+				if physicalDone := record.physicalJoin(); physicalDone != nil {
+					select {
+					case <-physicalDone:
+					case <-time.After(defaultSessionJoinWindow):
+						abandoned++
+					}
+				}
+				d.sessions.completeSeal(record, abandoned)
+			}
+		}()
 	})
+}
+
+// Close is an explicit local revocation decision. Exact actor children remain
+// owned and joined by AuthenticatedLinkSession.
+func (d *Dialer) Close() error {
+	d.onSessionEvidence(SessionRevoked, "local_close", nil)
 	return nil
 }

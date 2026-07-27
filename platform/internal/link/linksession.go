@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -16,45 +17,6 @@ import (
 	"github.com/hashicorp/yamux"
 )
 
-// linksession.go is 期11 片②'s "换底": one top-level yamux.Session rides directly
-// on a wsByteStream (the raw WS connection as a byte stream) and REPLACES the
-// retired self-rolled mux that used to live in frame.go (now deleted). yamux
-// gives us reliable, windowed, bidirectional substreams for free; we no longer
-// hand-roll the frame codec, the per-stream buffers, or the demux loop.
-//
-// yamux's Open/Accept carry NO metadata, so a substream cannot say "I am the
-// control plane / an actor stream / a lane carrier" out of band. Each substream
-// therefore opens with a self-describing streamHeader{Kind} as its FIRST bytes
-// (written with lane.go's writeLaneJSON / read with readLaneJSON — the SAME
-// newline-JSON, zero-over-read framing the lane redeem header already uses, so
-// the raw byte flow that follows the header is never swallowed). The accept loop
-// reads that header and dispatches by Kind — never by "which stream number"
-// (a positional convention would race the lane, which opens at arbitrary times).
-//
-// Three logical planes share the ONE session:
-//   - control : a single long-lived substream carrying the stream-0 control JSON
-//     the old ControlStream did (attach/attach_reply + the §4.7 storage frames +
-//     §5's ResolveCoord + the idle ping). Opened by the daemon (client), accepted
-//     by the home (server); used bidirectionally.
-//   - actor   : one substream per hosted actor, running native ipc (zero
-//     translation — ipc.Codec rides the substream exactly as it rode a *stream).
-//   - lane    : §5's resource-lane redeem stream. 片③ FLATTENED the lane: each
-//     redeem is its OWN top-level substream tagged lane (no nested yamux-in-
-//     yamux any more). The requester daemon opens one toward the home (a redeem
-//     attempt), and the home opens one toward the transfer's TARGET daemon (the
-//     relay). Both ends dispatch tag=lane through onLane, ASYMMETRICALLY by
-//     role: a daemon-opened lane stream reaching the home is a redeem attempt
-//     (→ handleLaneRedeem); a home-opened lane stream reaching a daemon is an
-//     inbound transfer that daemon is the target of (→ handleLaneInbound). The
-//     laneRedeemHeader still rides the substream right after this streamHeader
-//     (two newline-JSON reads back to back — streamHeader in dispatch, then the
-//     lane header in the handler — readLaneJSON's zero-over-read makes that safe).
-//
-// linkSession is the unexported wrapper both ends build (Acceptor/Dialer hold a
-// *linkSession, never a *yamux.Session directly) — this is also what keeps the
-// archtest red line green: no yamux type appears in any exported signature.
-
-// streamKind tags a substream's plane in its opening streamHeader.
 type streamKind string
 
 const (
@@ -63,158 +25,623 @@ const (
 	streamLane    streamKind = "lane"
 )
 
-const streamWriteBudget = 10 * time.Second
-const controlQueueDepth = 64
+const (
+	streamWriteBudget       = 10 * time.Second
+	controlTaskCapacity     = 16
+	controlTaskAbandonAfter = 45 * time.Second
+	openAttemptCapacity     = 32
+)
+
+var (
+	errLinkClosed = errors.New("link: closed")
+	ErrOpenBusy   = errors.New("link: open capacity busy")
+)
+
+type streamHeader struct {
+	Kind streamKind `json:"kind"`
+}
+
+func writeStreamHeader(w io.Writer, kind streamKind) error {
+	return writeLaneJSON(w, streamHeader{Kind: kind})
+}
 
 type boundedConn struct {
 	net.Conn
-	logger *slog.Logger
+	logger      *slog.Logger
+	onWriteFail func(error)
 }
 
-func (c *boundedConn) Write(p []byte) (int, error) {
+func (c *boundedConn) Write(payload []byte) (int, error) {
 	_ = c.Conn.SetWriteDeadline(time.Now().Add(streamWriteBudget))
-	n, err := c.Conn.Write(p)
+	n, err := c.Conn.Write(payload)
 	if err != nil {
 		if c.logger != nil {
 			c.logger.Warn("link.stream_write_failed", "error", err)
+		}
+		if c.onWriteFail != nil {
+			c.onWriteFail(err)
 		}
 		_ = c.Conn.Close()
 	}
 	return n, err
 }
 
-// streamHeader is the first newline-JSON value written on every substream, read
-// by the accept loop to dispatch the substream to its plane.
-type streamHeader struct {
-	Kind streamKind `json:"kind"`
+type yamuxLogWriter struct{ logger *slog.Logger }
+
+func (w yamuxLogWriter) Write(payload []byte) (int, error) {
+	if w.logger != nil {
+		w.logger.Warn("link.carrier_library", "message", strings.TrimSpace(string(payload)))
+	}
+	return len(payload), nil
 }
 
-func writeStreamHeader(w io.Writer, k streamKind) error {
-	return writeLaneJSON(w, streamHeader{Kind: k})
-}
-
-// errLinkClosed is returned by a control send once the underlying session is
-// gone (its control substream never established, or already torn down).
-var errLinkClosed = errors.New("link: closed")
-
-// linkYamuxConfig is the top-level session's config. EnableKeepAlive stays at
-// DefaultConfig's true.
-//
-// TWO HEARTBEATS, DELIBERATELY NOT MERGED (期11 片② hard constraint):
-//   - yamux keepalive (this config, 30s ping) probes the underlying CONNECTION —
-//     "is the TCP/WS pipe and the peer's yamux stack still there". yamux answers
-//     it entirely inside its own session loop — the ping/pong never surfaces to
-//     a substream's Read, so it can never reach onFrame below.
-//   - the Lease (lease.go, 10s ping / 30s TTL, refreshed via dispatch's per-
-//     substream onFrame hook below — never the raw wsByteStream carrier) probes
-//     the peer's APPLICATION response — the daemon's own pingLoop (dial.go) on
-//     the control substream, or any actor ipc frame. A frozen-app-but-live-
-//     socket daemon keeps answering yamux pings yet stops producing app frames,
-//     so the Lease is the STRICTLY STRONGER liveness judgment. Do NOT delete the
-//     Lease in favour of yamux keepalive, and do NOT refresh it from raw carrier
-//     bytes — either merges the two heartbeats and defeats the Lease's one job
-//     (a bug this file once had: onRead fired on every wsByteStream.Read, which
-//     included yamux's own keepalive bytes, so a frozen app was kept "alive" by
-//     keepalive alone).
-func linkYamuxConfig() *yamux.Config {
+func linkYamuxConfig(loggers ...*slog.Logger) *yamux.Config {
 	cfg := yamux.DefaultConfig()
-	cfg.LogOutput = io.Discard // route yamux's own logging away from stderr
+	var logger *slog.Logger
+	if len(loggers) != 0 {
+		logger = loggers[0]
+	}
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	cfg.LogOutput = yamuxLogWriter{logger: logger}
 	return cfg
 }
 
-// linkSession is the yamux-backed link mux. It preserves the exact seams the
-// retired self-rolled mux exposed: sendControl (framed control JSON on the
-// single control substream), openStream (a fresh tag=actor substream, daemon
-// side), openLane (the tag=lane redeem substream), a closed() channel that
-// fires on session death, and Close.
-type linkSession struct {
-	ys *yamux.Session
-
-	// openGate is the single context-aware admission gate for every locally
-	// initiated yamux Session.Open (control, actor, and lane).  A canceled
-	// waiter never issues an Open; cancellation after admission kills the whole
-	// session so an already-issued yamux open cannot survive its caller.
-	openGateOnce sync.Once
-	openGate     chan struct{}
-
-	// ctrl is the single bidirectional control substream (opened by the daemon,
-	// accepted by the home). ctrlMu serialises writes to it (sendControl may be
-	// called from many goroutines — pingLoop, the storage/lane RPC senders, the
-	// reply paths) and guards the home-side lazy assignment (the home learns ctrl
-	// only when the accept loop dispatches the control-tagged substream).
-	ctrlMu sync.Mutex
-	ctrl   net.Conn
-
-	onControl func([]byte)   // inbound control JSON (both ends)
-	onActor   func(net.Conn) // peer-opened actor substream (home only; nil daemon side)
-	onLane    func(net.Conn) // peer-opened lane redeem substream (BOTH ends: home → redeem relay, daemon → inbound-target handler)
-
-	// onFrame, when non-nil, is the Lease's liveness refresh (lease.go). dispatch
-	// wraps every peer-opened substream so onFrame fires on that substream's OWN
-	// Read calls — i.e. only when a real application frame is delivered (control-
-	// plane JSON, including the daemon's app-level idle ping; an actor's ipc
-	// frame; or a lane redeem's header/bytes). yamux's own keepalive ping/pong
-	// never reaches a substream's Read (yamux consumes it inside the session
-	// loop), so it can never fire this. nil on the daemon side (holds no Lease).
-	onFrame func()
-
+type controlTaskPool struct {
+	mu       sync.Mutex
+	draining bool
+	seats    chan struct{}
+	wg       sync.WaitGroup
 	logger   *slog.Logger
-	killOnce sync.Once
+	evidence func(SessionEndReason, string, error)
 
-	controlLifeMu sync.Mutex
-	controlStop   chan struct{}
-	controlClosed bool
-	controlWG     sync.WaitGroup
+	active    atomic.Int64
+	abandoned atomic.Int64
+	zombies   atomic.Int64
+	busy      atomic.Int64
 }
 
-func (ls *linkSession) beginControlWorker() bool {
-	ls.controlLifeMu.Lock()
-	defer ls.controlLifeMu.Unlock()
-	if ls.controlClosed {
+func newControlTaskPool(logger *slog.Logger, evidence func(SessionEndReason, string, error)) *controlTaskPool {
+	return &controlTaskPool{
+		seats: make(chan struct{}, controlTaskCapacity), logger: logger, evidence: evidence,
+	}
+}
+
+// submit admits without waiting. A seat is held until the real goroutine
+// returns, even after the caller has accounted it as abandoned.
+func (p *controlTaskPool) submit(task func(), busy func()) bool {
+	if p == nil || task == nil {
 		return false
 	}
-	if ls.controlStop == nil {
-		ls.controlStop = make(chan struct{})
+	p.mu.Lock()
+	if p.draining {
+		p.mu.Unlock()
+		if busy != nil {
+			busy()
+		}
+		return false
 	}
-	ls.controlWG.Add(1)
+	select {
+	case p.seats <- struct{}{}:
+		p.wg.Add(1)
+		p.active.Add(1)
+		p.mu.Unlock()
+	default:
+		p.busy.Add(1)
+		active := p.active.Load()
+		zombies := p.zombies.Load()
+		p.mu.Unlock()
+		if p.logger != nil {
+			p.logger.Warn("link.control_task_busy",
+				"active", active, "zombie_seats", zombies, "busy", p.busy.Load())
+		}
+		if busy != nil {
+			busy()
+		}
+		return false
+	}
+	go func() {
+		done := make(chan struct{})
+		timer := time.AfterFunc(controlTaskAbandonAfter, func() {
+			p.abandoned.Add(1)
+			p.zombies.Add(1)
+			if p.logger != nil {
+				p.logger.Warn("link.control_task_abandoned",
+					"active", p.active.Load(), "zombie_seats", p.zombies.Load())
+			}
+			if busy != nil {
+				busy()
+			}
+			close(done)
+		})
+		defer func() {
+			wasZombie := !timer.Stop()
+			if wasZombie {
+				<-done
+				p.zombies.Add(-1)
+			}
+			if recovered := recover(); recovered != nil && p.evidence != nil {
+				p.evidence(SessionLocalFault, "control_task_panic", fmt.Errorf("panic: %v", recovered))
+			}
+			p.active.Add(-1)
+			<-p.seats
+			p.wg.Done()
+		}()
+		task()
+	}()
 	return true
 }
 
-func (ls *linkSession) stopControlWorkers() {
-	ls.controlLifeMu.Lock()
-	if !ls.controlClosed {
-		ls.controlClosed = true
-		if ls.controlStop == nil {
-			ls.controlStop = make(chan struct{})
-		}
-		close(ls.controlStop)
+func (p *controlTaskPool) drain(timeout time.Duration) (joined bool, abandoned int64) {
+	if p == nil {
+		return true, 0
 	}
-	ls.controlLifeMu.Unlock()
-}
-
-// waitControlWorkers stops the control worker(s) and joins them, BOUNDED by
-// timeout. Returns true if the join completed within the bound (the normal
-// path — every already-queued control frame's handler drained before teardown,
-// preserving the "die with a clean drain" total order), false if the bound
-// elapsed first.
-//
-// The bound exists because a control worker can be wedged inside a long-lived
-// STORAGE call, not just an out-network write: handleAttach runs
-// declaration coordinator on the
-// attach reqCtx, and that ctx carries NO deadline of its own — a stalled store
-// (disk-hung db) pins the handler indefinitely. An unbounded join would then
-// propagate that stall straight through this teardown and, via Serve's
-// WaitGroup, into Home shutdown — a jammed store would make the whole station
-// un-closeable. So the join is bounded: normal case keeps the full ordering;
-// pathological (store hung) case degrades to "abandon the join, leave a loud
-// trace, let teardown proceed" — never coupling a stuck store into a station
-// that cannot close. The caller owns the timeout-path logging (it holds the
-// daemon/channel attribution this linkSession does not).
-func (ls *linkSession) waitControlWorkers(timeout time.Duration) bool {
-	ls.stopControlWorkers()
+	p.mu.Lock()
+	p.draining = true
+	p.mu.Unlock()
 	done := make(chan struct{})
 	go func() {
-		ls.controlWG.Wait()
+		p.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return true, p.abandoned.Load()
+	case <-time.After(timeout):
+		return false, p.abandoned.Load() + p.active.Load()
+	}
+}
+
+type openResult struct {
+	conn net.Conn
+	err  error
+}
+
+// linkSession is only the yamux mechanism. It reports evidence and closes only
+// when its owner performs the ledger decision and asks it to collect the
+// carrier.
+type linkSession struct {
+	ys *yamux.Session
+
+	ctrlMu sync.Mutex
+	ctrl   net.Conn
+
+	onControl func([]byte)
+	onActor   func(net.Conn)
+	onLane    func(net.Conn)
+	onProbe   func()
+	evidence  func(SessionEndReason, string, error)
+	logger    *slog.Logger
+
+	controlTasks *controlTaskPool
+	openSeats    chan struct{}
+	openInFlight atomic.Int64
+	lateClosed   atomic.Int64
+
+	startOnce sync.Once
+	closeOnce sync.Once
+	closing   atomic.Bool
+	workerMu  sync.Mutex
+	workerWG  sync.WaitGroup
+	probeMu   sync.Mutex
+	probe     string
+	probeAt   time.Time
+}
+
+func newLinkSession(
+	ys *yamux.Session,
+	onControl func([]byte),
+	onActor func(net.Conn),
+	onLane func(net.Conn),
+	onProbe func(),
+	evidence func(SessionEndReason, string, error),
+	logger *slog.Logger,
+) *linkSession {
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
+	}
+	ls := &linkSession{
+		ys: ys, onControl: onControl, onActor: onActor, onLane: onLane,
+		onProbe: onProbe, evidence: evidence, logger: logger,
+		openSeats: make(chan struct{}, openAttemptCapacity),
+	}
+	ls.controlTasks = newControlTaskPool(logger, ls.reportEvidence)
+	return ls
+}
+
+func dialLinkSession(
+	ctx context.Context,
+	ws *websocket.Conn,
+	onControl func([]byte),
+	onLane func(net.Conn),
+	onProbe func(),
+	evidence func(SessionEndReason, string, error),
+	logger *slog.Logger,
+) (*linkSession, error) {
+	ys, err := yamux.Client(newWSByteStream(ws), linkYamuxConfig(logger))
+	if err != nil {
+		return nil, err
+	}
+	ls := newLinkSession(ys, onControl, nil, onLane, onProbe, evidence, logger)
+	ctrl, err := ls.openTagged(ctx, streamControl)
+	if err != nil {
+		_ = ys.Close()
+		return nil, err
+	}
+	ls.ctrlMu.Lock()
+	ls.ctrl = ctrl
+	ls.ctrlMu.Unlock()
+	return ls, nil
+}
+
+func acceptLinkSession(
+	ws *websocket.Conn,
+	onControl func([]byte),
+	onActor func(net.Conn),
+	onLane func(net.Conn),
+	onProbe func(),
+	evidence func(SessionEndReason, string, error),
+	logger *slog.Logger,
+) (*linkSession, error) {
+	ys, err := yamux.Server(newWSByteStream(ws), linkYamuxConfig(logger))
+	if err != nil {
+		return nil, err
+	}
+	return newLinkSession(ys, onControl, onActor, onLane, onProbe, evidence, logger), nil
+}
+
+func (ls *linkSession) reportEvidence(reason SessionEndReason, detail string, err error) {
+	if ls == nil || ls.closing.Load() || ls.evidence == nil {
+		return
+	}
+	ls.evidence(reason, detail, err)
+}
+
+func (ls *linkSession) beginWorker() bool {
+	ls.workerMu.Lock()
+	defer ls.workerMu.Unlock()
+	if ls.closing.Load() {
+		return false
+	}
+	ls.workerWG.Add(1)
+	return true
+}
+
+func (ls *linkSession) start() {
+	if ls == nil {
+		return
+	}
+	ls.startOnce.Do(func() {
+		ls.ctrlMu.Lock()
+		ctrl := ls.ctrl
+		ls.ctrlMu.Unlock()
+		if ctrl != nil {
+			if !ls.beginWorker() {
+				return
+			}
+			go func() {
+				defer ls.workerWG.Done()
+				ls.readControl(ctrl)
+			}()
+		}
+		if !ls.beginWorker() {
+			return
+		}
+		go func() {
+			defer ls.workerWG.Done()
+			ls.acceptLoop()
+		}()
+	})
+}
+
+func (ls *linkSession) acceptLoop() {
+	for {
+		conn, err := ls.ys.Accept()
+		if err != nil {
+			if !ls.closing.Load() {
+				ls.reportEvidence(SessionCarrierLost, "carrier_accept_failed", err)
+			}
+			return
+		}
+		if !ls.beginWorker() {
+			_ = conn.Close()
+			return
+		}
+		go func() {
+			defer ls.workerWG.Done()
+			ls.dispatch(conn)
+		}()
+	}
+}
+
+func (ls *linkSession) wrap(conn net.Conn, onWriteFail func(error)) net.Conn {
+	return &boundedConn{Conn: conn, logger: ls.logger, onWriteFail: onWriteFail}
+}
+
+func (ls *linkSession) controlWriteFailed(err error) {
+	if isConnectionWriteTimeout(err) {
+		ls.reportEvidence(SessionCarrierLost, "control_connection_write_timeout", err)
+		return
+	}
+	ls.reportEvidence(SessionSpineLost, "control_spine_write_failed", err)
+}
+
+func (ls *linkSession) dispatch(conn net.Conn) {
+	var header streamHeader
+	if err := readLaneJSON(conn, &header); err != nil {
+		_ = conn.Close()
+		return
+	}
+	switch header.Kind {
+	case streamControl:
+		conn = ls.wrap(conn, ls.controlWriteFailed)
+		ls.ctrlMu.Lock()
+		if ls.ctrl != nil {
+			ls.ctrlMu.Unlock()
+			_ = conn.Close()
+			ls.reportEvidence(SessionProtocolViolation, "duplicate_control_spine", errors.New("duplicate control stream"))
+			return
+		}
+		ls.ctrl = conn
+		ls.ctrlMu.Unlock()
+		ls.readControl(conn)
+	case streamActor:
+		if ls.onActor == nil {
+			_ = conn.Close()
+			return
+		}
+		ls.onActor(conn)
+	case streamLane:
+		if ls.onLane == nil {
+			_ = conn.Close()
+			return
+		}
+		ls.onLane(conn)
+	default:
+		if ls.logger != nil {
+			ls.logger.Warn("link.unknown_stream_kind", "kind", string(header.Kind))
+		}
+		_ = conn.Close()
+	}
+}
+
+func (ls *linkSession) readControl(conn net.Conn) {
+	decoder := json.NewDecoder(conn)
+	for {
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			if ls.closing.Load() {
+				return
+			}
+			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
+				errors.Is(err, net.ErrClosed) || errors.Is(err, yamux.ErrSessionShutdown) {
+				ls.reportEvidence(SessionSpineLost, "control_spine_read_failed", err)
+			} else {
+				ls.reportEvidence(SessionProtocolViolation, "control_spine_decode_failed", err)
+			}
+			return
+		}
+		switch peekControlKind(raw) {
+		case ctrlProbe:
+			frame, err := decodeControl(raw)
+			if err != nil || frame.Probe == nil {
+				ls.reportEvidence(SessionProtocolViolation, "malformed_liveness_probe", err)
+				return
+			}
+			reply, _ := encodeControl(controlFrame{
+				Kind:       ctrlProbeReply,
+				ProbeReply: &ProbeReply{Nonce: frame.Probe.Nonce},
+			})
+			if err := ls.sendControl(reply); err != nil {
+				return
+			}
+			continue
+		case ctrlProbeReply:
+			frame, err := decodeControl(raw)
+			if err != nil || frame.ProbeReply == nil {
+				ls.reportEvidence(SessionProtocolViolation, "malformed_liveness_reply", err)
+				return
+			}
+			ls.probeMu.Lock()
+			matched := frame.ProbeReply.Nonce != "" && frame.ProbeReply.Nonce == ls.probe
+			sentAt := ls.probeAt
+			if matched {
+				ls.probe = ""
+				ls.probeAt = time.Time{}
+			}
+			ls.probeMu.Unlock()
+			if matched && ls.onProbe != nil {
+				if ls.logger != nil {
+					ls.logger.Debug("link.session_probe_reply", "round_trip", time.Since(sentAt))
+				}
+				ls.onProbe()
+			}
+			continue
+		}
+		if ls.onControl == nil {
+			continue
+		}
+		func() {
+			defer func() {
+				if recovered := recover(); recovered != nil {
+					ls.reportEvidence(SessionLocalFault, "control_router_panic", fmt.Errorf("panic: %v", recovered))
+				}
+			}()
+			ls.onControl(append([]byte(nil), raw...))
+		}()
+	}
+}
+
+func (ls *linkSession) submitControlTask(task func(), busy func()) bool {
+	if ls == nil {
+		if busy != nil {
+			busy()
+		}
+		return false
+	}
+	return ls.controlTasks.submit(task, busy)
+}
+
+func (ls *linkSession) sendControl(payload []byte) error {
+	if ls == nil {
+		return errLinkClosed
+	}
+	ls.ctrlMu.Lock()
+	defer ls.ctrlMu.Unlock()
+	if ls.ctrl == nil || ls.closing.Load() {
+		return errLinkClosed
+	}
+	buf := make([]byte, 0, len(payload)+1)
+	buf = append(buf, payload...)
+	buf = append(buf, '\n')
+	_, err := ls.ctrl.Write(buf)
+	return err
+}
+
+func (ls *linkSession) sendProbe(nonce string) error {
+	if nonce == "" {
+		return errors.New("link: empty probe nonce")
+	}
+	raw, err := encodeControl(controlFrame{Kind: ctrlProbe, Probe: &Probe{Nonce: nonce}})
+	if err != nil {
+		return err
+	}
+	ls.probeMu.Lock()
+	if ls.probe != "" {
+		ls.probeMu.Unlock()
+		return nil
+	}
+	ls.probe = nonce
+	ls.probeAt = time.Now()
+	ls.probeMu.Unlock()
+	if err := ls.sendControl(raw); err != nil {
+		ls.probeMu.Lock()
+		if ls.probe == nonce {
+			ls.probe = ""
+			ls.probeAt = time.Time{}
+		}
+		ls.probeMu.Unlock()
+		return err
+	}
+	return nil
+}
+
+func (ls *linkSession) openStream(ctx context.Context) (net.Conn, error) {
+	return ls.openTagged(ctx, streamActor)
+}
+
+func (ls *linkSession) openLane(ctx context.Context) (net.Conn, error) {
+	return ls.openTagged(ctx, streamLane)
+}
+
+// openTagged gives the whole non-cancellable yamux open attempt to one
+// background owner. Caller cancellation only abandons the wait; the worker
+// still reaches one of delivery, late-close, or error while retaining its seat.
+func (ls *linkSession) openTagged(ctx context.Context, kind streamKind) (net.Conn, error) {
+	if ls == nil || ls.closing.Load() {
+		return nil, errLinkClosed
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case ls.openSeats <- struct{}{}:
+		ls.openInFlight.Add(1)
+	default:
+		if ls.logger != nil {
+			ls.logger.Warn("link.open_capacity_busy",
+				"kind", kind, "in_flight", ls.openInFlight.Load())
+		}
+		return nil, ErrOpenBusy
+	}
+	if !ls.beginWorker() {
+		<-ls.openSeats
+		ls.openInFlight.Add(-1)
+		return nil, errLinkClosed
+	}
+	result := make(chan openResult)
+	callerGone := make(chan struct{})
+	go func() {
+		defer func() {
+			<-ls.openSeats
+			ls.openInFlight.Add(-1)
+			ls.workerWG.Done()
+		}()
+		conn, err := ls.ys.Open()
+		if err == nil {
+			err = writeStreamHeader(conn, kind)
+			if err != nil {
+				_ = conn.Close()
+				conn = nil
+			} else {
+				if kind == streamControl {
+					conn = ls.wrap(conn, ls.controlWriteFailed)
+				}
+			}
+		}
+		if err != nil && isConnectionWriteTimeout(err) {
+			ls.reportEvidence(SessionCarrierLost, "open_stream_connection_write_timeout", err)
+		}
+		opened := openResult{conn: conn, err: err}
+		select {
+		case result <- opened:
+		case <-callerGone:
+			if opened.conn != nil {
+				_ = opened.conn.Close()
+				ls.lateClosed.Add(1)
+				if ls.logger != nil {
+					ls.logger.Info("link.open_late_closed",
+						"kind", kind, "late_closed", ls.lateClosed.Load())
+				}
+			}
+		}
+	}()
+	select {
+	case opened := <-result:
+		return opened.conn, opened.err
+	case <-ctx.Done():
+		close(callerGone)
+		return nil, ctx.Err()
+	}
+}
+
+func isConnectionWriteTimeout(err error) bool {
+	if errors.Is(err, yamux.ErrConnectionWriteTimeout) {
+		return true
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr) && netErr.Timeout()
+}
+
+func (ls *linkSession) drainControlTasks(timeout time.Duration) (bool, int64) {
+	if ls == nil {
+		return true, 0
+	}
+	return ls.controlTasks.drain(timeout)
+}
+
+func (ls *linkSession) closeCarrier() error {
+	if ls == nil || ls.ys == nil {
+		return nil
+	}
+	var closeErr error
+	ls.closeOnce.Do(func() {
+		ls.workerMu.Lock()
+		ls.closing.Store(true)
+		ls.workerMu.Unlock()
+		closeErr = ls.ys.Close()
+	})
+	return closeErr
+}
+
+func (ls *linkSession) waitWorkers(timeout time.Duration) bool {
+	if ls == nil {
+		return true
+	}
+	done := make(chan struct{})
+	go func() {
+		ls.workerWG.Wait()
 		close(done)
 	}()
 	select {
@@ -225,355 +652,18 @@ func (ls *linkSession) waitControlWorkers(timeout time.Duration) bool {
 	}
 }
 
-// dialLinkSession builds the daemon (client) end: a yamux client over the raw WS
-// byte stream, then the control substream opened + tagged FIRST (the attach JSON
-// rides it right after). The daemon holds no Lease, so its onFrame stays nil
-// (dispatch's wrap is a no-op when onFrame is nil). onLane routes a HOME-opened
-// lane substream (the daemon is that transfer's target) to the daemon's inbound-
-// target handler — the daemon opens no actor/control substreams for the home to
-// accept, so it needs no onActor.
-func dialLinkSession(ctx context.Context, ws *websocket.Conn, onControl func([]byte), onLane func(net.Conn), logger *slog.Logger) (*linkSession, error) {
-	ys, err := yamux.Client(newWSByteStream(ws), linkYamuxConfig())
-	if err != nil {
-		return nil, err
+func (ls *linkSession) closed() <-chan struct{} {
+	if ls == nil || ls.ys == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
 	}
-	ls := &linkSession{ys: ys, onControl: onControl, onLane: onLane, logger: logger}
-	ctrl, finish, err := ls.openTagged(ctx, streamControl)
-	if err != nil {
-		_ = ys.Close()
-		return nil, err
-	}
-	finish()
-	ls.ctrlMu.Lock()
-	ls.ctrl = ctrl
-	ls.ctrlMu.Unlock()
-	return ls, nil
+	return ls.ys.CloseChan()
 }
 
-// acceptLinkSession builds the home (server) end: a yamux server over the raw WS
-// byte stream, then the accept loop that discovers and dispatches every
-// substream the daemon opens. onFrame is the Lease refresh — dispatch fires it
-// per application frame on whichever substream carries it, never on the raw
-// carrier (see linkSession.onFrame's doc). The control substream arrives via
-// that loop (tag=control), never opened here.
-func acceptLinkSession(ws *websocket.Conn, onControl func([]byte), onActor, onLane func(net.Conn), onFrame func(), logger *slog.Logger) (*linkSession, error) {
-	ys, err := yamux.Server(newWSByteStream(ws), linkYamuxConfig())
-	if err != nil {
-		return nil, err
+func (ls *linkSession) openCounts() (inFlight, lateClosed int64) {
+	if ls == nil {
+		return 0, 0
 	}
-	ls := &linkSession{ys: ys, onControl: onControl, onActor: onActor, onLane: onLane, onFrame: onFrame, logger: logger}
-	return ls, nil
-}
-
-// frameHookConn wraps one yamux substream so onFrame fires on every Read that
-// actually yielded bytes FROM THAT SUBSTREAM — i.e. an application frame, never
-// yamux's own keepalive ping/pong (which yamux answers inside its session loop,
-// below any substream, so it never reaches here). dispatch wraps every peer-
-// opened substream with this before routing it to control/actor/lane — this is
-// the Lease's ONLY refresh source (lease.go), deliberately one layer above the
-// raw wsByteStream carrier.
-type frameHookConn struct {
-	net.Conn
-	onFrame func()
-}
-
-func (c *frameHookConn) Read(p []byte) (int, error) {
-	n, err := c.Conn.Read(p)
-	if n > 0 {
-		c.onFrame()
-	}
-	return n, err
-}
-
-// start launches the session's read/accept loops. It is called by the owner
-// ONLY after the *linkSession is assigned into the Dialer/Acceptor's lc field —
-// so onControl (which reaches back through lc, e.g. to sendControl a reply) can
-// never fire against a not-yet-assigned lc. The daemon opened its own control
-// substream (readControl it directly); the home discovers the control substream
-// via the accept loop (dispatch starts its readControl there), so only the
-// daemon has a non-nil ls.ctrl at start.
-func (ls *linkSession) start() {
-	if ls.ctrl != nil {
-		if ls.beginControlWorker() {
-			go ls.readControl(ls.ctrl)
-		}
-	}
-	go ls.acceptLoop()
-}
-
-// acceptLoop accepts every peer-opened substream and dispatches it OFF the loop
-// (one goroutine per substream): the header read blocks, so a substream that
-// opens but never sends its header must not stall the loop for the others.
-func (ls *linkSession) acceptLoop() {
-	for {
-		conn, err := ls.ys.Accept()
-		if err != nil {
-			return // session dead — closed() has fired for waiters
-		}
-		go ls.dispatch(conn)
-	}
-}
-
-// dispatch reads a freshly-accepted substream's streamHeader and routes it to its
-// plane. An unreadable header or an out-of-set Kind closes the substream (never a
-// silent hang).
-//
-// Every peer-opened substream funnels through here exactly once, so this is
-// also the single point that wraps the substream with the Lease's onFrame hook
-// (frameHookConn, below) BEFORE the header read — the header itself is a real
-// frame the peer sent, and every kind this switch dispatches to (control JSON
-// including the daemon's app-level idle ping, an actor's ipc frames, a lane
-// redeem's header/bytes) is exactly the "application frame" set onFrame's doc
-// promises. The wrap is a no-op when ls.onFrame is nil (daemon side).
-func (ls *linkSession) dispatch(conn net.Conn) {
-	conn = &boundedConn{Conn: conn, logger: ls.logger}
-	if ls.onFrame != nil {
-		conn = &frameHookConn{Conn: conn, onFrame: ls.onFrame}
-	}
-	// The header read is bounded by readLaneJSON's own laneHeaderReadTimeout (30s,
-	// lane.go) — the single admission bound for every substream header/ack on this
-	// session — set on its entry and cleared on its return, so the raw byte pump
-	// that follows on the same substream inherits no deadline. No separate
-	// admission deadline is set here: an earlier one was dead code (readLaneJSON
-	// unconditionally overwrote it). Under single-tenancy that 30s header bound
-	// plus the per-link lease TTL backstop is sufficient — no shorter admission
-	// gate is warranted (owner 拍定, H-2).
-	var hdr streamHeader
-	if err := readLaneJSON(conn, &hdr); err != nil {
-		_ = conn.Close()
-		return
-	}
-	switch hdr.Kind {
-	case streamControl:
-		// A session has exactly one control spine. A second one would create two
-		// independently ordered workers and route replies onto the wrong stream.
-		ls.ctrlMu.Lock()
-		if ls.ctrl != nil {
-			ls.ctrlMu.Unlock()
-			_ = conn.Close()
-			ls.kill("control_stream_duplicate", errors.New("duplicate control stream"))
-			return
-		}
-		ls.ctrl = conn
-		ls.ctrlMu.Unlock()
-		if !ls.beginControlWorker() {
-			_ = conn.Close()
-			return
-		}
-		ls.readControl(conn)
-	case streamActor:
-		if ls.onActor != nil {
-			ls.onActor(conn)
-		} else {
-			_ = conn.Close()
-		}
-	case streamLane:
-		if ls.onLane != nil {
-			ls.onLane(conn)
-		} else {
-			_ = conn.Close()
-		}
-	default:
-		if ls.logger != nil {
-			ls.logger.Warn("link.unknown_stream_kind", "kind", string(hdr.Kind))
-		}
-		_ = conn.Close()
-	}
-}
-
-// readControl drives one control substream's inbound JSON values into onControl.
-// The substream carries ONLY newline-delimited control JSON (never raw bytes), so
-// a json.Decoder — which may read ahead past a value into its own buffer — is safe
-// here (unlike a lane data stream, where readLaneJSON's zero-over-read is required).
-// Any decode error is the substream dying; return so the enclosing session death
-// funnel (closed()) takes over.
-func (ls *linkSession) readControl(conn net.Conn) {
-	dec := json.NewDecoder(conn)
-	queue := make(chan []byte, controlQueueDepth)
-	workerDone := make(chan struct{})
-	ls.controlLifeMu.Lock()
-	stop := ls.controlStop
-	ls.controlLifeMu.Unlock()
-	go func() {
-		defer close(workerDone)
-		defer func() {
-			if v := recover(); v != nil {
-				ls.kill("control_worker_panic", fmt.Errorf("panic: %v", v))
-			}
-		}()
-		for {
-			select {
-			case <-stop:
-				return
-			case raw, ok := <-queue:
-				if !ok {
-					return
-				}
-				// Prefer death over a simultaneously-ready queued frame.
-				select {
-				case <-stop:
-					return
-				default:
-				}
-				if ls.onControl != nil {
-					ls.onControl(raw)
-				}
-			}
-		}
-	}()
-	defer func() {
-		close(queue)
-		<-workerDone
-		ls.controlWG.Done()
-	}()
-	for {
-		var raw json.RawMessage
-		if err := dec.Decode(&raw); err != nil {
-			// A vanished peer (EOF / closed carrier / dead yamux session) is not a
-			// decode failure — folding both under "control_decode" buries real
-			// malformed-frame bugs beneath every ordinary daemon death. Classify by
-			// cause so the session_killed reason names what actually happened.
-			reason := "control_decode"
-			if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) ||
-				errors.Is(err, net.ErrClosed) || errors.Is(err, yamux.ErrSessionShutdown) {
-				reason = "peer_closed"
-			}
-			ls.kill(reason, err)
-			return
-		}
-		copyRaw := append([]byte(nil), raw...)
-		select {
-		case <-stop:
-			return
-		case queue <- copyRaw:
-		default:
-			ls.kill("control_queue_full", errors.New("control dispatch queue full"))
-			return
-		}
-	}
-}
-
-// sendControl writes one control-plane payload (already-marshalled JSON) on the
-// control substream, newline-terminated, serialised against concurrent senders.
-func (ls *linkSession) sendControl(payload []byte) error {
-	ls.ctrlMu.Lock()
-	defer ls.ctrlMu.Unlock()
-	if ls.ctrl == nil {
-		return errLinkClosed
-	}
-	buf := make([]byte, 0, len(payload)+1)
-	buf = append(buf, payload...)
-	buf = append(buf, '\n')
-	_, err := ls.ctrl.Write(buf)
-	if err != nil {
-		ls.kill("control_write", err)
-	}
-	return err
-}
-
-// openStream opens one fresh actor substream (daemon side), tagging it so the
-// home's accept loop routes it through runtime port preparation and commit. yamux assigns the substream id
-// itself — the retired mux's nextID hand-numbering is gone.
-func (ls *linkSession) openStream(ctx context.Context) (net.Conn, func(), error) {
-	return ls.openTagged(ctx, streamActor)
-}
-
-// openLane opens a fresh top-level tag=lane substream (daemon side): §5's
-// resource-lane redeem rides directly on it (片③ flattened the lane — no
-// nested yamux session, see lane.go).
-func (ls *linkSession) openLane(ctx context.Context) (net.Conn, error) {
-	conn, finish, err := ls.openTagged(ctx, streamLane)
-	if err != nil {
-		return nil, err
-	}
-	finish()
-	return conn, nil
-}
-
-// openTagged owns one complete open attempt: context-aware gate admission,
-// yamux Open, and the mandatory stream header. The returned finish keeps the
-// cancellation watcher alive for callers (notably OpenStream) that extend the
-// same attempt through an application handshake. Once admitted, cancellation
-// is link-fatal by contract: yamux has no per-Open context and abandoning an
-// issued SYN could otherwise leave an unowned stream behind.
-func (ls *linkSession) openTagged(ctx context.Context, kind streamKind) (net.Conn, func(), error) {
-	if ctx == nil {
-		ctx = context.Background()
-	}
-	ls.openGateOnce.Do(func() { ls.openGate = make(chan struct{}, 1) })
-	select {
-	case ls.openGate <- struct{}{}:
-	case <-ctx.Done():
-		return nil, nil, ctx.Err()
-	case <-ls.closed():
-		return nil, nil, errLinkClosed
-	}
-
-	attemptDone := make(chan struct{})
-	var complete atomic.Bool
-	var finishOnce sync.Once
-	finish := func() {
-		finishOnce.Do(func() {
-			complete.Store(true)
-			close(attemptDone)
-			<-ls.openGate
-		})
-	}
-	go func() {
-		select {
-		case <-ctx.Done():
-			if !complete.Load() {
-				ls.kill("open_canceled", ctx.Err())
-			}
-		case <-attemptDone:
-		case <-ls.closed():
-		}
-	}()
-
-	conn, err := ls.ys.Open()
-	if err != nil {
-		finish()
-		if ctx.Err() != nil {
-			return nil, nil, ctx.Err()
-		}
-		return nil, nil, err
-	}
-	conn = &boundedConn{Conn: conn, logger: ls.logger}
-	if err := writeStreamHeader(conn, kind); err != nil {
-		_ = conn.Close()
-		finish()
-		if ctx.Err() != nil {
-			return nil, nil, ctx.Err()
-		}
-		return nil, nil, err
-	}
-	return conn, finish, nil
-}
-
-// closed returns a channel closed when the session dies (peer gone, carrier
-// error, or Close). It replaces the retired demux loop's return-then-teardown as
-// the single link-death signal: yamux errors every open substream on session
-// death, so each actor substream's ipc read loop fails and publishes its down
-// edge — the SAME death funnel the old teardown() drove, now yamux's job.
-func (ls *linkSession) closed() <-chan struct{} { return ls.ys.CloseChan() }
-
-// Close tears the session (and thus every substream) down.
-func (ls *linkSession) Close() error {
-	if ls.ys == nil {
-		return nil
-	}
-	ls.kill("explicit_close", nil)
-	return nil
-}
-
-func (ls *linkSession) kill(reason string, err error) {
-	ls.killOnce.Do(func() {
-		ls.stopControlWorkers()
-		if ls.logger != nil {
-			ls.logger.Warn("link.session_killed", "reason", reason, "error", err)
-		}
-		if ls.ys != nil {
-			_ = ls.ys.Close()
-		}
-	})
+	return ls.openInFlight.Load(), ls.lateClosed.Load()
 }
