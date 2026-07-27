@@ -33,6 +33,27 @@ type outboundProbe struct {
 	penRelease chan struct{}
 	penErr     error
 	startOnce  sync.Once
+
+	obsMu   sync.Mutex
+	obsSeen []probeObs
+}
+
+type probeObs struct {
+	kind  string
+	value string
+}
+
+func (p *outboundProbe) recordObs(kind string, value []byte) error {
+	p.obsMu.Lock()
+	defer p.obsMu.Unlock()
+	p.obsSeen = append(p.obsSeen, probeObs{kind: kind, value: string(value)})
+	return nil
+}
+
+func (p *outboundProbe) observations() []probeObs {
+	p.obsMu.Lock()
+	defer p.obsMu.Unlock()
+	return append([]probeObs(nil), p.obsSeen...)
 }
 
 type outboundProbePen struct{ probe *outboundProbe }
@@ -162,9 +183,10 @@ func (f *outboundStreamFactory) open(
 	f.resources = append(f.resources, resource)
 	f.mu.Unlock()
 	return link.ActorStreamResource{
-		Arms:  probe.arms(),
-		Close: resource.close,
-		Done:  resource.done,
+		Arms:       probe.arms(),
+		Close:      resource.close,
+		Done:       resource.done,
+		PublishObs: probe.recordObs,
 	}, nil
 }
 
@@ -369,6 +391,59 @@ func TestOutboundSlotStartsFailClosedThenPublishesFiveArmsAtomically(t *testing.
 			probe.scheduleCalls.Load(),
 			probe.lifecycleCalls.Load(),
 		)
+	}
+}
+
+// TestOutboundLevelObsPublishedBeforeConnectReachesTheChannel pins the slot's
+// half of the level contract. A level observation (device presence) answers
+// "what is true right now", so a subscriber must end up seeing the current
+// value — unlike an edge, which only reports that something happened.
+//
+// The body starts and its device connects the moment its port is up, which is
+// BEFORE the daemon has finished opening this body's actor stream. The slot's
+// whole reason to exist is that a body holds one stable arm across a
+// replaceable stream, so a level published into that gap is the slot's to
+// carry, not the body's to lose: nothing regenerates it (the device stays
+// connected, so there is no second edge) and nothing re-reads it (obs is push
+// only). Dropped here, the channel's presence view is wrong until the device
+// disconnects and reconnects — which for a healthy device is never.
+func TestOutboundLevelObsPublishedBeforeConnectReachesTheChannel(t *testing.T) {
+	t.Parallel()
+	outbound := NewDaemonOutbound(DaemonOutboundConfig{PollInterval: 5 * time.Millisecond})
+	builds := make(chan outboundBuild)
+	host := newOutboundHost(t, outbound, builds, false)
+	factory := &outboundStreamFactory{probes: []*outboundProbe{{}}}
+	session := newOutboundSession(t, "server", factory)
+	defer closeOutboundFixture(t, host, outbound, session)
+
+	id := actor.ActorID("tool:device-holder")
+	key := outboundAttempt(t)
+	if err := host.AcceptFullDesired([]actorhost.Desired{outboundDesired(t, id, key)}); err != nil {
+		t.Fatal(err)
+	}
+	build := <-builds
+	close(build.release)
+	eventuallyOutbound(t, build.input.Current.IsCurrent)
+
+	// The device connects here — body up, stream not yet open. This is the gap.
+	outbound.publishObs(id, key, actorrt.ObsKind("device_presence"), actorrt.ObsValue(`{"online":true}`))
+
+	if err := outbound.SetSession(session); err != nil {
+		t.Fatal(err)
+	}
+	probe := factory.probes[0]
+	eventuallyOutbound(t, func() bool {
+		bundle := build.prepared.Slot.arms.Load()
+		return bundle != nil && bundle.Session == session && bundle.Stream != nil
+	})
+
+	eventuallyOutbound(t, func() bool { return len(probe.observations()) > 0 })
+	seen := probe.observations()
+	if len(seen) != 1 {
+		t.Fatalf("observations on connect = %+v, want exactly the one pending level", seen)
+	}
+	if seen[0].kind != "device_presence" || seen[0].value != `{"online":true}` {
+		t.Fatalf("delivered observation = %+v, want the device_presence value published into the gap", seen[0])
 	}
 }
 

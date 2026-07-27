@@ -94,6 +94,16 @@ type OutboundSlot struct {
 	closeOnce sync.Once
 	opening   bool // owner.mu
 	retryAt   time.Time
+
+	// pendingObs holds observations this slot could not put on the wire,
+	// newest per kind. The slot is the body's one stable arm across a
+	// replaceable stream, so carrying a value across the gap where no stream
+	// exists is its job — a body publishes once and has no way to learn that a
+	// stream later opened. Only FAILED publishes are held, so an edge that
+	// already landed is never sent twice, while a level (device presence) still
+	// converges to its current value once the stream is up.
+	obsMu      sync.Mutex
+	pendingObs map[actorrt.ObsKind]actorrt.ObsValue
 }
 
 // PreparedOutbound is the private Phase-B composition seam. It deliberately is
@@ -180,6 +190,9 @@ func (d *DaemonOutbound) publishObs(
 	}
 	d.mu.Unlock()
 	if target != nil {
+		// The error is the slot's business: a failed publish is held there and
+		// flushed when a stream opens. No slot at all means this body has no
+		// outbound arm (never prepared, or already gone) — nothing to carry it.
 		_ = target.PublishObs(kind, value)
 	}
 }
@@ -418,6 +431,11 @@ func (d *DaemonOutbound) openSlot(slot *OutboundSlot, session *link.Authenticate
 	if loser != nil {
 		_ = loser.Close()
 	}
+	if published {
+		// The stream is live: hand it whatever could not go out while there was
+		// none. Outside the lock — this puts frames on the wire.
+		slot.flushPendingObs()
+	}
 	if !published {
 		d.Wake()
 	}
@@ -465,6 +483,11 @@ func (s *OutboundSlot) Close() error {
 	}
 	s.closeOnce.Do(func() {
 		s.closed.Store(true)
+		// A closed slot has no future stream to flush onto, and this body's
+		// observations die with it — a successor mints its own.
+		s.obsMu.Lock()
+		s.pendingObs = nil
+		s.obsMu.Unlock()
 		owner := s.owner
 		var stream *link.ActorStream
 		owner.mu.Lock()
@@ -502,11 +525,65 @@ func (s *OutboundSlot) CancelRequest(id message.ID) error {
 }
 
 func (s *OutboundSlot) PublishObs(kind actorrt.ObsKind, value actorrt.ObsValue) error {
+	err := s.publishObsNow(kind, value)
+	if err != nil && !s.closed.Load() {
+		s.holdObs(kind, value)
+	}
+	return err
+}
+
+// publishObsNow is the one wire attempt, with no holding.
+func (s *OutboundSlot) publishObsNow(kind actorrt.ObsKind, value actorrt.ObsValue) error {
 	bundle, err := s.loadPhysical()
 	if err != nil {
 		return err
 	}
 	return bundle.Stream.PublishObs(string(kind), value)
+}
+
+// holdObs keeps the newest unsent value of one kind for the next flush.
+func (s *OutboundSlot) holdObs(kind actorrt.ObsKind, value actorrt.ObsValue) {
+	s.hold(kind, value, true)
+}
+
+// holdStaleObs puts a failed flush attempt back WITHOUT overwriting a newer
+// value the body published while the flush was in flight. Re-arming an older
+// value there would move the level backwards, which is the one thing a level
+// must never do.
+func (s *OutboundSlot) holdStaleObs(kind actorrt.ObsKind, value actorrt.ObsValue) {
+	s.hold(kind, value, false)
+}
+
+func (s *OutboundSlot) hold(kind actorrt.ObsKind, value actorrt.ObsValue, overwrite bool) {
+	s.obsMu.Lock()
+	defer s.obsMu.Unlock()
+	if s.pendingObs == nil {
+		s.pendingObs = map[actorrt.ObsKind]actorrt.ObsValue{}
+	}
+	if _, newer := s.pendingObs[kind]; newer && !overwrite {
+		return
+	}
+	s.pendingObs[kind] = value
+}
+
+// flushPendingObs drains the held observations onto a stream that just opened.
+// Anything that fails again is put back, so the next connect retries it; a
+// value superseded meanwhile is not resurrected, because holdObs only ever
+// writes the newest per kind.
+func (s *OutboundSlot) flushPendingObs() {
+	s.obsMu.Lock()
+	held := s.pendingObs
+	s.pendingObs = nil
+	s.obsMu.Unlock()
+
+	for kind, value := range held {
+		if s.closed.Load() {
+			return
+		}
+		if err := s.publishObsNow(kind, value); err != nil {
+			s.holdStaleObs(kind, value)
+		}
+	}
 }
 
 // Seal stops future slot/session admission and joins DaemonOutbound workers
