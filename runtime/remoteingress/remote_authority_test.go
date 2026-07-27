@@ -297,7 +297,7 @@ func newRig(t *testing.T) *rig {
 	log := &doorLog{}
 	pen := &penDoor{log: log}
 	ingress, err := remoteingress.New(
-		ledger{controller}, pen, &resourceDoor{log: log},
+		controller, ledger{controller}, pen, &resourceDoor{log: log},
 		&stateDoor{log: log}, &scheduleDoor{log: log},
 	)
 	if err != nil {

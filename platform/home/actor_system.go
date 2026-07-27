@@ -230,28 +230,6 @@ func (a *actorSystem) BindingDown(id actor.ActorID, binding actorhost.Binding) {
 	a.home.serverHost.BindingDown(id, binding)
 }
 
-// The three narrow ledger questions the remote ingress asks. They are plain
-// pass-throughs to the Controller: minting an authority is a coordinate curry,
-// and PenBasis is one read lock of mint ingredients (no verdict — the pen's
-// Write holds the only A/G gate) — this facade adds nothing to either.
-func (a *actorSystem) PenBasis(
-	id actor.ActorID,
-	key actorhost.AttemptKey,
-) (actorctl.PenBasis, error) {
-	return a.home.controller.PenBasis(id, key)
-}
-
-func (a *actorSystem) RunAuthorityFor(
-	id actor.ActorID,
-	key actorhost.AttemptKey,
-) actorctl.RunAuthority {
-	return a.home.controller.RunAuthorityFor(id, key)
-}
-
-func (a *actorSystem) IdentityAuthorityFor(id actor.ActorID) actorctl.IdentityAuthority {
-	return a.home.controller.IdentityAuthorityFor(id)
-}
-
 // ---------------------------------------------------------------------------
 // physical routing: the kernel's body lives in the kernel (§2.6 retained C)
 // ---------------------------------------------------------------------------

@@ -190,8 +190,11 @@ func Open(cfg Config) (_ *Home, retErr error) {
 	// The remote ingress is this channel's standard part, built beside the
 	// managed minter from the same Controller and the same four organ doors:
 	// one instance, no channel id, no actor, no state. It is the only thing the
-	// link is given.
+	// link is given. Authority ingredients come straight from the Controller —
+	// Platform keeps zero capability-coordinate surface; only the completed
+	// lifecycle command face (tails included) rides the actorSystem.
 	h.remoteIngress, err = remoteingress.New(
+		h.controller,
 		h.actors,
 		h.minter,
 		h.access,

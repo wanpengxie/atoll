@@ -436,13 +436,13 @@ func TestActorAuthorityRemoteIngressIsTheOnlyRemoteDoor(t *testing.T) {
 	// organ: A/G for the pen and channel resources, A for state and schedule.
 	ingress := readAuthorityContractFile(t, "../runtime/remoteingress/ingress.go")
 	for _, required := range []string{
-		"basis, err := i.controller.PenBasis(id, attempt)",
+		"basis, err := i.authorities.PenBasis(id, attempt)",
 		"i.pen.MintAuthority(basis.Run, basis.Kind)",
-		"i.access.MintAuthority(i.controller.RunAuthorityFor(id, attempt))",
+		"i.access.MintAuthority(i.authorities.RunAuthorityFor(id, attempt))",
 		"i.state.StateIngress(",
-		"i.schedule.MintAuthority(i.controller.IdentityAuthorityFor(id))",
-		"i.controller.Fork(ctx, actorctl.ForkRequest{",
-		"i.controller.End(ctx, actorctl.EndRequest{",
+		"i.schedule.MintAuthority(i.authorities.IdentityAuthorityFor(id))",
+		"i.lifecycle.Fork(ctx, actorctl.ForkRequest{",
+		"i.lifecycle.End(ctx, actorctl.EndRequest{",
 	} {
 		if !strings.Contains(ingress, required) {
 			t.Errorf("remote ingress lacks organ entry %q", required)
@@ -451,6 +451,26 @@ func TestActorAuthorityRemoteIngressIsTheOnlyRemoteDoor(t *testing.T) {
 	if strings.Contains(ingress, "ChannelID") || strings.Contains(ingress, "channel.ID") {
 		t.Error("remote ingress handles a channel id")
 	}
+
+	// The capability-coordinate faces (authority curries and pen basis) are
+	// impersonation-capable: whoever holds them can act as any actor. Their
+	// only legal consumers are body construction (managedcaps) and the remote
+	// ingress — both runtime. Platform, App and lib hold ZERO of them: the
+	// completed command and projection faces are all Platform ever touches.
+	walkProductionGo(t, func(path string, _ *ast.File, _ *token.FileSet) {
+		if strings.HasPrefix(path, "../runtime/") {
+			return
+		}
+		body := readAuthorityContractFile(t, path)
+		for _, forbidden := range []string{
+			"PenBasis", "RunAuthorityFor", "IdentityAuthorityFor",
+			".MintAuthority(",
+		} {
+			if strings.Contains(body, forbidden) {
+				t.Errorf("%s touches capability-coordinate face %q — only managedcaps and remoteingress may", path, forbidden)
+			}
+		}
+	})
 
 	scheduler := readAuthorityContractFile(t, "../platform/home/scheduler.go")
 	for _, required := range []string{

@@ -46,14 +46,23 @@ type RemoteIngress interface {
 	EndSelf(context.Context, actor.ActorID, actorhost.AttemptKey, actorcaps.EndSelfRequest) error
 }
 
-// Controller is the value ledger's face: the narrow remote admission questions
-// and the two typed self-lifecycle commands. Fork/EndSelf go through the same
-// completed command face the local Lifecycle arm uses, so a remote self-command
-// settles exactly like a local one, tail included.
-type Controller interface {
+// Authorities is the value ledger's coordinate face: mint ingredients only,
+// never verdicts (§0.7 — the verdict lives on each organ's gate). It is
+// satisfied directly by *actorctl.Controller — the ingress holds the ledger's
+// own authority face, not a Platform forwarding layer, so Platform keeps ZERO
+// capability-coordinate surface (archtest-fenced: these faces' only consumers
+// are body construction and this ingress).
+type Authorities interface {
 	PenBasis(actor.ActorID, actorhost.AttemptKey) (actorctl.PenBasis, error)
 	RunAuthorityFor(actor.ActorID, actorhost.AttemptKey) actorctl.RunAuthority
 	IdentityAuthorityFor(actor.ActorID) actorctl.IdentityAuthority
+}
+
+// SelfLifecycle is the completed Platform command face for the two typed
+// self-lifecycle commands. Fork/EndSelf go through the same face the local
+// Lifecycle arm uses, so a remote self-command settles exactly like a local
+// one, tail included (transition consumption, announcements, membership).
+type SelfLifecycle interface {
 	Fork(context.Context, actorctl.ForkRequest) (actorctl.ForkResult, error)
 	End(context.Context, actorctl.EndRequest) (actorctl.EndResult, error)
 }
@@ -149,31 +158,34 @@ type ForkRequest struct {
 }
 
 type ingress struct {
-	controller Controller
-	pen        PenDoor
-	access     ResourceDoor
-	state      StateDoor
-	schedule   ScheduleDoor
+	authorities Authorities
+	lifecycle   SelfLifecycle
+	pen         PenDoor
+	access      ResourceDoor
+	state       StateDoor
+	schedule    ScheduleDoor
 }
 
-// New builds one Channel's ingress. Its parameters are the Controller and the
-// four organ doors — nothing else: no channel id, no actor, no state of its
-// own. One instance serves every remote body of that Channel and, holding its
-// Channel's own doors, cannot be used across Channels.
+// New builds one Channel's ingress. Its parameters are the ledger's authority
+// face, the completed lifecycle command face, and the four organ doors —
+// nothing else: no channel id, no actor, no state of its own. One instance
+// serves every remote body of that Channel and, holding its Channel's own
+// doors, cannot be used across Channels.
 func New(
-	controller Controller,
+	authorities Authorities,
+	lifecycle SelfLifecycle,
 	pen PenDoor,
 	access ResourceDoor,
 	state StateDoor,
 	scheduleDoor ScheduleDoor,
 ) (RemoteIngress, error) {
-	if controller == nil || pen == nil || access == nil ||
+	if authorities == nil || lifecycle == nil || pen == nil || access == nil ||
 		state == nil || scheduleDoor == nil {
 		return nil, ErrInvalidInput
 	}
 	return &ingress{
-		controller: controller, pen: pen, access: access,
-		state: state, schedule: scheduleDoor,
+		authorities: authorities, lifecycle: lifecycle, pen: pen,
+		access: access, state: state, schedule: scheduleDoor,
 	}, nil
 }
 
@@ -189,7 +201,7 @@ func (i *ingress) Emit(
 	attempt actorhost.AttemptKey,
 	env *message.Envelope,
 ) (harness.WriteResult, error) {
-	basis, err := i.controller.PenBasis(id, attempt)
+	basis, err := i.authorities.PenBasis(id, attempt)
 	if err != nil {
 		return harness.WriteResult{}, err
 	}
@@ -209,7 +221,7 @@ func (i *ingress) Access(
 	if request.Kind == AccessInvoke && request.Scope == ScopeState {
 		outcome, err := i.state.StateIngress(
 			ctx,
-			i.controller.IdentityAuthorityFor(id),
+			i.authorities.IdentityAuthorityFor(id),
 			accessdoor.StateOp{
 				Operation: request.Operation, Resource: request.Resource,
 				Args: request.Args, Grant: request.Grant,
@@ -218,7 +230,7 @@ func (i *ingress) Access(
 		return AccessResponse{Outcome: outcome}, err
 	}
 
-	handle := i.access.MintAuthority(i.controller.RunAuthorityFor(id, attempt))
+	handle := i.access.MintAuthority(i.authorities.RunAuthorityFor(id, attempt))
 	switch request.Kind {
 	case AccessInvoke:
 		if request.Scope != "" && request.Scope != ScopeChannel {
@@ -252,7 +264,7 @@ func (i *ingress) Schedule(
 	id actor.ActorID,
 	request ScheduleRequest,
 ) (ScheduleResponse, error) {
-	handle := i.schedule.MintAuthority(i.controller.IdentityAuthorityFor(id))
+	handle := i.schedule.MintAuthority(i.authorities.IdentityAuthorityFor(id))
 	switch request.Method {
 	case ScheduleSet:
 		timer, err := handle.Schedule(ctx, request.Req)
@@ -275,7 +287,7 @@ func (i *ingress) Fork(
 	attempt actorhost.AttemptKey,
 	request ForkRequest,
 ) (actor.ActorID, error) {
-	result, err := i.controller.Fork(ctx, actorctl.ForkRequest{
+	result, err := i.lifecycle.Fork(ctx, actorctl.ForkRequest{
 		CallerActorID: id,
 		CallerAttempt: attempt,
 		RequestID:     request.RequestID,
@@ -290,7 +302,7 @@ func (i *ingress) EndSelf(
 	attempt actorhost.AttemptKey,
 	request actorcaps.EndSelfRequest,
 ) error {
-	_, err := i.controller.End(ctx, actorctl.EndRequest{
+	_, err := i.lifecycle.End(ctx, actorctl.EndRequest{
 		CallerActorID: id,
 		CallerAttempt: attempt,
 		Target:        id,
