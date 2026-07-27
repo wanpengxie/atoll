@@ -282,3 +282,47 @@ func TestConcurrentRedeemOpensOnlyOneTargetChannel(t *testing.T) {
 		t.Fatalf("target channels opened = %d, want exactly 1", opened.Load())
 	}
 }
+
+// The two ticket namespaces are not interchangeable: a resolve ticket cannot
+// redeem and a redeem ticket cannot resolve — a future table merge that
+// confuses the keyspaces must trip this, not silently cross-honor tickets.
+func TestLaneTicketNamespacesAreNotInterchangeable(t *testing.T) {
+	acc := &Acceptor{lane: newLaneState(), sessions: newSessionRegistry(nil)}
+	tickets, err := acc.OpenLaneTransfer(
+		t.Context(), "target-daemon", "req-daemon", "coord-x", access.OpRead, "",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Resolve ticket presented for redemption: must be unknown.
+	home, daemon := net.Pipe()
+	go acc.handleLaneRedeem("req-daemon", home)
+	if err := writeLaneJSON(daemon, laneRedeemHeader{Token: tickets.Resolve}); err != nil {
+		t.Fatal(err)
+	}
+	var ack laneAck
+	if err := readLaneJSON(daemon, &ack); err != nil {
+		t.Fatal(err)
+	}
+	_ = daemon.Close()
+	if ack.OK || !strings.Contains(ack.Reason, "unknown or mismatched") {
+		t.Fatalf("resolve ticket was honored for redemption: %+v", ack)
+	}
+
+	// Redeem ticket presented for resolution: must be unknown.
+	reply := acc.handleResolveCoord("target-daemon", &ResolveCoordRequest{
+		RequestID: "cross-use", Token: tickets.Redeem,
+	})
+	if reply.OK || !strings.Contains(reply.Reason, "unknown or expired") {
+		t.Fatalf("redeem ticket was honored for resolution: %+v", reply)
+	}
+
+	// The legitimate tickets are unharmed by the cross-use attempts.
+	legit := acc.handleResolveCoord("target-daemon", &ResolveCoordRequest{
+		RequestID: "still-good", Token: tickets.Resolve,
+	})
+	if !legit.OK {
+		t.Fatalf("cross-use attempts damaged the legitimate resolve ticket: %+v", legit)
+	}
+}

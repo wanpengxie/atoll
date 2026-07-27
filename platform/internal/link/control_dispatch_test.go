@@ -431,3 +431,68 @@ func TestEndpointTablesDeclareExecutionGateAndDedicatedState(t *testing.T) {
 		t.Fatal("daemon table lost probe-state declarations")
 	}
 }
+
+// The completeness constructor's session-gate contract: a gated row must be
+// worker-positioned, carry a gateReject, and have a live sessionGate — each
+// omission alone must fail construction.
+func TestGatedRowCompletenessRejectsEachMissingRequirement(t *testing.T) {
+	makeRows := func(mutate func(*controlRoute)) map[controlKind]controlRoute {
+		row := controlRoute{
+			parse:      func([]byte) (controlMessage, error) { return controlMessage{}, nil },
+			handle:     func(controlDispatchInput, controlMessage) {},
+			execution:  controlExecutionWorker,
+			gate:       controlGateSession,
+			state:      controlStateNone,
+			busy:       func(controlDispatchInput, controlMessage) {},
+			gateReject: func(controlDispatchInput, controlMessage) {},
+		}
+		mutate(&row)
+		return map[controlKind]controlRoute{"gated": row}
+	}
+	gate := func() bool { return true }
+	if _, err := newControlRouter(
+		[]controlKind{"gated"}, makeRows(func(*controlRoute) {}), gate, nil, nil,
+	); err != nil {
+		t.Fatalf("complete gated row rejected: %v", err)
+	}
+	if _, err := newControlRouter(
+		[]controlKind{"gated"},
+		makeRows(func(r *controlRoute) { r.gateReject = nil }), gate, nil, nil,
+	); err == nil {
+		t.Fatal("gated row without gateReject accepted")
+	}
+	if _, err := newControlRouter(
+		[]controlKind{"gated"},
+		makeRows(func(r *controlRoute) { r.execution = controlExecutionInline; r.busy = nil }),
+		gate, nil, nil,
+	); err == nil {
+		t.Fatal("inline gated row accepted")
+	}
+	if _, err := newControlRouter(
+		[]controlKind{"gated"}, makeRows(func(*controlRoute) {}), nil, nil, nil,
+	); err == nil {
+		t.Fatal("gated row without a sessionGate accepted")
+	}
+}
+
+// The daemon table has no session-gated row today; a future accidental gate
+// addition must trip this regression, not slip in silently.
+func TestDaemonTableHasNoSessionGatedRow(t *testing.T) {
+	daemon, err := buildDaemonControlRouter(&Dialer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for kind, row := range daemon.rows {
+		if row.gate != controlGateNone {
+			t.Errorf("daemon %s gate=%v want none", kind, row.gate)
+		}
+	}
+}
+
+// plan_poke's sole-key rule: a single-key frame whose key is not "kind" is
+// rejected by the dedicated validator branch.
+func TestPlanPokeMissingKindKeyIsInvalid(t *testing.T) {
+	if validPlanPoke([]byte(`{"other":"x"}`)) {
+		t.Fatal("single-key frame without kind accepted as plan_poke")
+	}
+}

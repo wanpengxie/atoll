@@ -237,8 +237,8 @@ func (a *Acceptor) handleLaneRedeem(daemonID string, conn net.Conn) {
 
 // OpenLaneTransfer implements accessdoor.LaneControl (via a thin platform-
 // layer wrapper, mirroring lateStorageControl's own indirection — see
-// platform/storagehost.go): mints one consume-on-valid-use redeem ticket and
-// one read-only-until-expiry resolve ticket.
+// platform/home/storagehost.go): mints one consume-on-valid-use redeem ticket
+// and one read-only-until-expiry resolve ticket.
 func (a *Acceptor) OpenLaneTransfer(ctx context.Context, targetDaemonID, requesterDaemonID, coord string, mode access.Operation, reservationID string) (accessdoor.LaneTickets, error) {
 	tickets := accessdoor.LaneTickets{Redeem: uuid.NewString(), Resolve: uuid.NewString()}
 	now := time.Now()

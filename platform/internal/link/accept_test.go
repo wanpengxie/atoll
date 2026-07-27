@@ -75,23 +75,43 @@ func (fakeIngress) EndSelf(
 	return nil
 }
 
-type fakeStorageControl struct{ committedDelay time.Duration }
+type fakeStorageControl struct {
+	committedDelay time.Duration
+	reclaimFound   bool
+	resources      []ReconcileResource
+	reservations   []ReconcileReservation
+	tombstones     []ReconcileTombstone
 
-func (c *fakeStorageControl) Committed(context.Context, string, string) (bool, bool, error) {
+	mu             sync.Mutex
+	committedCalls [][2]string // {senderDaemonID, reservationID}
+	reclaimAcks    [][2]string // {senderDaemonID, tombstoneID}
+	reconcilePulls [][]string  // activeCoords per pull
+}
+
+func (c *fakeStorageControl) Committed(_ context.Context, sender, reservationID string) (bool, bool, error) {
 	if c.committedDelay > 0 {
 		time.Sleep(c.committedDelay)
 	}
+	c.mu.Lock()
+	c.committedCalls = append(c.committedCalls, [2]string{sender, reservationID})
+	c.mu.Unlock()
 	return true, false, nil
 }
-func (*fakeStorageControl) ReclaimAck(context.Context, string, string) (bool, error) {
-	return false, nil
+func (c *fakeStorageControl) ReclaimAck(_ context.Context, sender, tombstoneID string) (bool, error) {
+	c.mu.Lock()
+	c.reclaimAcks = append(c.reclaimAcks, [2]string{sender, tombstoneID})
+	c.mu.Unlock()
+	return c.reclaimFound, nil
 }
-func (*fakeStorageControl) ReconcilePull(
-	context.Context,
-	string,
-	[]string,
+func (c *fakeStorageControl) ReconcilePull(
+	_ context.Context,
+	_ string,
+	activeCoords []string,
 ) ([]ReconcileResource, []ReconcileReservation, []ReconcileTombstone, error) {
-	return nil, nil, nil, nil
+	c.mu.Lock()
+	c.reconcilePulls = append(c.reconcilePulls, append([]string(nil), activeCoords...))
+	c.mu.Unlock()
+	return c.resources, c.reservations, c.tombstones, nil
 }
 
 type acceptorRig struct {
@@ -107,6 +127,7 @@ type acceptorRigConfig struct {
 	attachBinding    func(actor.ActorID, actorhost.AttemptKey, actorhost.ExecutionDomain, actorhost.Binding) error
 	storage          StorageHostControl
 	daemonID         func(*http.Request) string
+	plan             func(context.Context, string) ([]platform.PlanActor, error)
 }
 
 func newAcceptorRig(t *testing.T, cfg acceptorRigConfig) *acceptorRig {
@@ -121,6 +142,10 @@ func newAcceptorRig(t *testing.T, cfg acceptorRigConfig) *acceptorRig {
 	if storage == nil {
 		storage = &fakeStorageControl{}
 	}
+	plan := cfg.plan
+	if plan == nil {
+		plan = func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil }
+	}
 	acc, err := NewAcceptor(Config{
 		Ingress:   fakeIngress{},
 		ChannelID: "acceptor-test-channel",
@@ -130,7 +155,7 @@ func newAcceptorRig(t *testing.T, cfg acceptorRigConfig) *acceptorRig {
 		AttachBinding:      attach,
 		BindingDown:        func(actor.ActorID, actorhost.Binding) {},
 		StorageHostControl: storage,
-		Plan:               func(context.Context, string) ([]platform.PlanActor, error) { return nil, nil },
+		Plan:               plan,
 		CanAttach:          func(context.Context, string) error { return nil },
 	})
 	if err != nil {
