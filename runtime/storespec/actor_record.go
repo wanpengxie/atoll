@@ -178,9 +178,15 @@ type CollaborationAuthority interface {
 }
 
 // ResourceActorFacts is the narrow resource-policy projection. It deliberately
-// exposes neither ActorRecord nor raw Placement.
+// exposes neither ActorRecord nor raw Placement. Kind and Principal are the
+// owner-derivation basis, read in the SAME ledger snapshot as Active: the
+// Platform door combines them with the immutable genesis pointer to fill
+// Owner — deriving from an immutable value adds no second snapshot, whereas a
+// second ledger read would (Active from one moment, identity from another).
 type ResourceActorFacts struct {
 	Active               bool
+	Kind                 actor.Kind
+	Principal            string
 	Owner                bool
 	PreferredStorageHost string
 }

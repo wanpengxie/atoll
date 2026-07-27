@@ -320,7 +320,11 @@ func (c *Controller) ResourceActorFacts(
 	if !ok {
 		return storespec.ResourceActorFacts{}, nil
 	}
-	facts := storespec.ResourceActorFacts{Active: true}
+	facts := storespec.ResourceActorFacts{
+		Active:    true,
+		Kind:      value.Record.Kind,
+		Principal: value.Record.Principal,
+	}
 	if value.Record.Placement.Kind == storespec.PlacementDaemon {
 		facts.PreferredStorageHost = value.Record.Placement.Host
 	}

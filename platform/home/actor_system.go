@@ -365,7 +365,8 @@ func (a *actorSystem) IsActive(ctx context.Context, id actor.ActorID) (bool, err
 // ResourceActorFacts adds the channel-owner bit to the Controller's native
 // facts. Owner is derived from the immutable genesis pointer (a human whose
 // principal equals genesis.OwnerPrincipal) — the value ledger keeps no second
-// owner account.
+// owner account, and the derivation basis (Kind, Principal) rides the SAME
+// ledger snapshot as Active: one Controller read, no stitched projection.
 func (a *actorSystem) ResourceActorFacts(
 	ctx context.Context,
 	id actor.ActorID,
@@ -374,11 +375,9 @@ func (a *actorSystem) ResourceActorFacts(
 	if err != nil || !facts.Active {
 		return facts, err
 	}
-	identity, active, err := a.home.controller.ActorFacts(ctx, id)
-	if err != nil || !active {
-		return facts, err
-	}
-	facts.Owner = a.home.isOwner(identity)
+	facts.Owner = a.home.isOwner(storespec.ActorFacts{
+		Kind: facts.Kind, Principal: facts.Principal,
+	})
 	return facts, nil
 }
 
